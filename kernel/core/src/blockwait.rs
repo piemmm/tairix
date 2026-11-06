@@ -305,7 +305,11 @@ impl IrqWaiter for IrqParkWaiter {
         // never lost (see the module docs), then re-test: if the line
         // already fired, skip the park and let the loop's next poll
         // consume the flag.
-        IRQ_WAITQ.register(task, deadline_ns);
+        // A wait the heap has no room to register could not be woken, so it
+        // takes the bounded CPU park instead.
+        if IRQ_WAITQ.register(task, deadline_ns).is_err() {
+            return self.fall_back();
+        }
         if self.table.ready_for(self.handle) {
             IRQ_WAITQ.deregister(task);
             return Ok(());

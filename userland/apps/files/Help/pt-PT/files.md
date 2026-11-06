@@ -24,19 +24,24 @@ ilegível é recusado, nunca adivinhado.
 O ambiente de trabalho inicia o gestor de ficheiros com a sessão e mantém-no
 na barra de ícones, e este nunca termina: o menu do seu lugar lista os seus
 próprios locais e tudo o que estiver montado, e escolher um abre lá uma
-janela; *Rede* e *Definições…* são as últimas linhas. Um volume que pode
+janela; *Rede* vem a seguir, e *Lixo* vem por último:
+abre o seu Lixo e, quando não há uma pasta pessoal onde o guardar, fica a
+cinzento e diz porquê. Um volume que pode
 ejetar — uma pen USB, um cartão de memória ou outro disco amovível, ou uma
 imagem de disco ou partilha que montou — abre um submenu com *Ejetar*, e o
-de uma imagem de disco sua que tenha título contém também *Título*: esta
-linha abre um campo com o título do disco, pronto a alterar, e premir
-`Return` escreve o novo no disco. Um clique no lugar abre uma na pasta que
+de um volume cujo título pode alterar — uma imagem de disco sua, ou um disco
+cujo formato guarda um título — contém *Título*: esta linha abre um campo
+com o título, pronto a alterar, e premir `Return` escreve o novo no disco;
+um título vazio apaga-o. Quando não pode alterar por si próprio o título de
+um disco, o ambiente de trabalho pede o nome e a palavra-passe de um
+administrador, e altera-o com o seu consentimento. Um clique no lugar abre uma na pasta que
 as definições escolherem. Pedir uma pasta que já tem uma
 janela traz essa janela para a frente, em vez de abrir outra. O menu não tem
 a linha *Sair* — o gestor de ficheiros faz parte do ambiente de trabalho,
 fechar as suas janelas apenas o arruma e, se alguma vez parar, o ambiente de
 trabalho volta a iniciá-lo.
 
-*Rede*, no menu do lugar logo acima de *Definições…*, abre uma janela com os
+*Rede*, no menu do lugar logo acima de *Lixo*, abre uma janela com os
 computadores da rede local que partilham ficheiros. Cada um é listado com o
 seu nome, o endereço em que é alcançado, o seu grupo de trabalho ou domínio
 e aquilo que é, e a lista vai-se preenchendo à medida que os computadores
@@ -57,17 +62,21 @@ fluxo de erro padrão. Precisa de uma sessão gráfica em curso: sem ela, o
 canal de janelas fica inalcançável, e comunica a recusa no fluxo de erro
 padrão e termina.
 
-A janela é conduzida pelo teclado: `Baixo` e `Cima` movem a seleção, `Enter`
-abre o diretório selecionado e `Backspace` sobe ao diretório superior. `F5`
-volta a ler tanto a listagem como a coluna de locais; um volume acabado de
-ligar aparece nela por si. `Ctrl+Shift+N` cria uma pasta nova.
+A janela é conduzida pelo teclado: as setas `Down` e `Up` movem a seleção,
+`Enter` abre o diretório selecionado e `Backspace` sobe ao diretório
+superior. `F5` volta a ler tanto a listagem como a coluna de locais; um
+volume acabado de ligar aparece nela por si. `Ctrl+Shift+N` cria uma pasta
+nova.
 
 Uma listagem abre sem nada selecionado. Um clique seleciona um item, um
 clique com `Ctrl` acrescenta ou retira um, e um clique com `Shift` seleciona
 a sequência a partir do último item escolhido; um clique num espaço vazio
-limpa a seleção. Um duplo clique abre um item; mantendo `Shift` premido,
-lista o conteúdo de uma aplicação em vez de a iniciar, e deixa
-desselecionado tudo o que abre noutro lugar. Arrastar sobre um espaço vazio
+limpa a seleção. Um duplo clique abre um item, e o que se abre noutro
+lugar — um documento na sua aplicação, uma aplicação, uma imagem de disco
+como volume — fica desselecionado depois de aberto, enquanto o que não
+pôde ser aberto continua selecionado. Mantendo `Shift` premido, lista o
+conteúdo de uma aplicação em vez de a iniciar. `Enter` abre a seleção e
+mantém-na. Arrastar sobre um espaço vazio
 desenha uma caixa que seleciona tudo o que toca à medida que cresce; mantida
 no topo ou no fundo da listagem, esta desloca-se, e `Escape` desfaz o que a
 caixa selecionou.
@@ -82,6 +91,10 @@ precisa; um nome demasiado longo mesmo para elas mantém o início e o fim,
 com `…` no meio, para que a extensão esteja sempre à vista. Uma aplicação
 é mostrada sem a sua extensão `.app`, e as definições podem mostrá-la, ou
 ocultar também as extensões dos tipos de ficheiro que o sistema conhece.
+Uma extensão continua à vista sempre que ocultá-la deixaria um nome que se
+lê como outro tipo de ficheiro ou outra aplicação — `invoice.pdf.app` é
+mostrado por inteiro — e uma janela ordena os seus itens pelos
+nomes tal como são mostrados.
 Os itens cujo nome começa por um ponto só são listados quando as
 definições o pedem.
 
@@ -99,10 +112,29 @@ para uma pasta nela ou para o ambiente de trabalho copia-os para lá;
 mantendo `Shift` premido, move-os em vez disso. O ponteiro mostra um sinal
 de mais enquanto largar copiaria e uma seta enquanto moveria, e a pasta onde
 o largar iria parar fica realçada. Um único ficheiro arrastado para o lugar
-de uma aplicação na barra de ícones é aberto lá.
+de uma aplicação na barra de ícones é aberto lá. Uma unidade arrastada para
+fora de `/Storage` nunca é copiada nem movida: deixa um atalho onde é
+largada, e o ponteiro mostra uma seta curva. O atalho abre a unidade
+enquanto estiver ligada; quando não estiver, abri-lo diz isso, e no ambiente
+de trabalho é desenhado esbatido.
 Copiar ou mover mantém os buracos de cada ficheiro e os seus atributos
 estendidos, como um tipo de ficheiro RISC OS; qualquer atributo que o
 destino não consiga guardar é indicado num aviso no fim da operação.
+
+Se já houver lá um item com o mesmo nome, a própria janela da operação
+pergunta o que fazer com ele: *Substituir* põe o novo no seu lugar, *Ignorar*
+deixa o que já lá está e *Parar* termina a operação, mantendo o que já fez.
+Uma pasta que encontra outra pasta com o mesmo nome oferece *Juntar* em vez de
+*Substituir*: o que contém vai para a pasta que já lá está, e pergunta-se, um
+a um, por cada ficheiro dentro dela que já lá esteja. Assinalar *Fazer o mesmo
+para cada ficheiro que já exista* dá a mesma resposta a todas as perguntas
+seguintes sobre um ficheiro. Quando uma pasta encontra uma pasta, a caixa diz
+*Fazer o mesmo para cada pasta que já exista* e só responde às pastas
+seguintes, pelo que se continua a perguntar por cada ficheiro dentro de uma
+pasta juntada. `Escape` é *Parar*, e `Enter` dá a escolha em que o teclado
+repousa — de início *Ignorar*; `Tab` passa da caixa às escolhas, e `Space`
+assinala a caixa. No ambiente de trabalho, um item substituído fica onde foi
+largado, enquanto um ignorado ou juntado fica onde estava.
 
 O menu de contexto começa por *Visualização*. Por baixo, um submenu nomeia
 aquilo sobre que o menu atua — *Ficheiro «notes.txt»*, um nome longo
@@ -110,8 +142,10 @@ encurtado ao meio para que a extensão continue visível, ou *Seleção* quando
 há vários itens selecionados — e contém *Abrir*, *Abrir com…*, *Montar só de
 leitura*, *Ejetar*, *Obter informações…*, *Mudar o nome*, *Cortar*, *Copiar*
 e *Eliminar*; uma linha que ali não pode atuar fica a cinzento e diz porquê.
-Seguem-se *Novo*, depois *Selecionar tudo* e *Limpar seleção*, e por fim
-*Colar*. Um clique com o botão direito num espaço vazio limpa a seleção,
+Seguem-se *Novo*, depois *Selecionar tudo* e *Limpar seleção*, e *Colar*.
+No Lixo, *Esvaziar o Lixo* vem por último: assim que o confirmar, remove
+definitivamente tudo o que está no Lixo. Um clique com o botão direito
+num espaço vazio limpa a seleção,
 pelo que o submenu do item fica a cinzento.
 
 Abrir uma imagem de disco ou um arquivo — um ficheiro `.iso`, `.adf`,
@@ -154,7 +188,7 @@ também ordena a lista por ela, e um segundo clique inverte a ordem. As
 pastas ficam no topo seja qual for a ordem escolhida, a menos que as
 definições as coloquem entre os ficheiros.
 
-*Definições…* no menu do lugar na barra de ícones, ou `Ctrl+,`, abre as
+`Ctrl+,` abre as
 definições do explorador na aplicação Definições, em *Ficheiros*: onde se
 abre uma janela nova, como as janelas mostram e ordenam os seus itens e se
 uma nova mostra a coluna de locais e a barra de ferramentas; se as pastas
@@ -175,10 +209,13 @@ e atributos podem ser alterados lá, cada um como uma escrita normal, sujeita
 a permissões, com a sua própria identidade — uma recusa diz porquê e não
 altera nada. Reatribuir um proprietário exige a capacidade `CAP_FS_CHOWN`;
 uma sessão sem ela vê o proprietário e o grupo marcados com um cadeado e uma
-linha que diz porquê.
+linha que diz porquê. A janela de *informações* de uma unidade abre na sua
+secção *Unidade*, cujo campo *Título* altera o título do volume da mesma
+forma: clique nele ou prima `Tab`, escreva o novo título e prima `Return`;
+`Escape` repõe-no.
 
-`Esquerda` e `Direita` passam de uma secção da janela para outra. Em
-*Permissões*, `Baixo` ou `Tab` entra nos seus controlos: as setas passam de
+As setas `Left` e `Right` passam de uma secção da janela para outra. Em
+*Permissões*, `Down` ou `Tab` entra nos seus controlos: as setas passam de
 um para outro, `Space` ativa ou desativa uma permissão ou abre o
 proprietário ou o grupo para edição, e `Tab` ou `Escape` regressa às
 secções.

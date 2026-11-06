@@ -22,9 +22,16 @@ identifies a volume or which tree of a disc is mounted.
   bounds-checked, every field validated, and no match is `None`, never a
   guess.
 - `ProbedVolume` — the matched `VolumeFsType`, the volume's identity exactly as
-  its driver publishes it, its label (trimmed; empty where the format records
-  none or holds a "no label" placeholder), the span it covers, and the form it
-  was laid out for (`form`: a disc's, a floppy's, or neither).
+  its driver publishes it, its label (trimmed; empty where none is set or the
+  field holds a "no label" placeholder; an ARXFS title, read from the
+  superblock ring's newest slot, kept exactly), the span it covers, and the
+  form it was laid out for (`form`: a disc's, a floppy's, or neither).
+- `arxfs_title` / `arxfs_title_field` — the one definition of an ARXFS
+  superblock slot's title field, shared with `drivers/filesystem/arxfs`, with
+  the field's offset (`ARXFS_TITLE_AT`) and the header's generation offset
+  (`ARXFS_GENERATION_AT`); and the ext4 superblock's volume-name field
+  (`EXT4_VOLUME_NAME_AT`, `EXT4_VOLUME_NAME_LEN`), shared with
+  `drivers/filesystem/ext4`.
 - `iso9660` — descriptor-set reading (ECMA-119 and High Sierra), the choice of
   tree (primary with Rock Ridge or RISC OS records, Joliet, the ISO 9660:1999
   enhanced tree), and the directory record the ISO 9660 driver walks.
@@ -43,11 +50,15 @@ identifies a volume or which tree of a disc is mounted.
   `drivers/filesystem/fat32`.
 - `fingerprint(identity)` — the lowercase Crockford-base32 display
   fingerprint of an identity; callers take the prefix they need.
+- `twin_identity(identity, attachment)` — the key a twin, a volume attached
+  beside another of its identity, is published under: derived from both, so
+  attachments numbered apart are keyed apart.
 - `name` — the catalog-naming policy a volume is published in `/Storage`
   under: its label in kebab case, else its transport and fingerprint, a name
-  in use or reserved taking ever more of its own fingerprint. The volume
-  manager names a recognised volume by it and the kernel a network or image
-  volume.
+  in use or reserved taking ever more of its own fingerprint, and a twin the
+  name a volume of its identity holds with `_<n>` (`twin`). The volume
+  manager names a recognised volume by it, and the kernel a network or image
+  volume and a twin beside the volume holding its name.
 
 ## Stability
 

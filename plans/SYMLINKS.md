@@ -109,6 +109,18 @@ S4/S6 recorded.
    otherwise have been signature-checked against bytes from outside the
    bundle.
 
+10. **A target spelled from another root is never walked.**
+    `parse_link_target` classifies a target through
+    `tairix_path::names_another_root`: one beginning with a resolver or an
+    alias (`id::…/`, `Storage:/…`) is `Anchor::Elsewhere`, and resolving
+    through it is `VfsError::CrossVolume` under `FinalLink::Follow` or in an
+    interior position, while `Keep` and `readlink` answer the link and its
+    target as written. It never reads as a relative name, so no sibling of
+    that literal name is reached. A caller that wants what such a link names
+    resolves the spelling itself, under its own authority: a volume shortcut
+    through `tairix_browse::volume::locate`, an application shortcut (S5) by
+    its alias spelling, which the caller's own path grammar takes.
+
 ---
 
 ## Bounds (fixed security bounds, never capacities — §24.4)
@@ -399,9 +411,13 @@ stand between the user and the icon just asked for.
 never launch one bundle and link another — and answers a `DesktopAction`:
 
 - The link takes the entry's **display name**, the target is its
-  `BundlePath` verbatim. That is what exercises S4's classifier: bundle-ness
-  reads off the *target's* leaf, so `Chess` → `/System/Applications/chess.app` is an
-  application while the link's own name is just a name.
+  `BundlePath` spelled from the root it names (`tairix_path::alias_spelling`,
+  `System:/Applications/chess.app`): the `Desktop` folder is on the root
+  volume, where `/System` is a projection a link's own name may not cross
+  (decision 5), so a view spelling would read as broken (decision 10). That is
+  what exercises S4's classifier: bundle-ness reads off the *target's* leaf,
+  so `Chess` → `System:/Applications/chess.app` is an application while the
+  link's own name is just a name.
 - A display name is not automatically a file name (the library permits `/`
   and `:` in one), so it is validated through the one shared
   `tairix_path::validate_file_name` and a refusal carries that rule's own
@@ -436,7 +452,7 @@ order, and each reports its own response with the popup closed. In the session
 suite, a secondary press on a library row and a click on the shortcut row
 deliver `CreateDesktopShortcut` for that entry with the popup shut. In
 `desktop_tests`: the link is the entry's name inside the desktop folder with
-the bundle path stored verbatim; an entry that left the catalog is refused;
+the bundle path spelled from the root it names; an entry that left the catalog is refused;
 each display name the shared rule rejects is refused with that rule's reason;
 a name already taken is still asked for; and the activation matrix — a
 shortcut to a bundle launches the **resolved** `Run`, one to a folder or a
@@ -753,6 +769,9 @@ covered by the tests its stage lists.
   cannot escape the volume that stores it (decision 5), and a hard link's two
   names must resolve under one mounted volume — the same `CrossVolume` a
   rename gives, through the same check.
+- **A target spelled from another root is the caller's to resolve.**
+  Following it is `CrossVolume`, never a name looked up beside the link, and
+  `readlink` returns it as written (decision 10).
 - **Docs land with the code:** this plan, the §15.18 jump-sheet row,
   `docs/src/filesystem/{overview,arxfs-spec}.md` for the VFS and ARXFS
   spellings, `docs/src/desktop/{apps,taskbar,session}.md` for the userland

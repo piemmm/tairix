@@ -35,6 +35,15 @@ imprime como `*` y un puerto no ligado como `*`; una dirección IPv6 va
 entre corchetes para que el separador `:port` quede sin ambigüedad — un
 nombre resuelto no necesita corchetes.
 
+`-s` informa de algo distinto de la tabla: los totales de defensa de
+conexiones TCP de toda la pila de red — la cola de SYN pendientes, el
+freno sin estado de las SYN cookies, la cola de aceptación y los
+reinicios enviados. Cada uno es monótono a lo largo del arranque (un
+socket de escucha que se cierra suma sus totales a los de la pila), así
+que una inundación de SYN sigue siendo visible después de que haya
+desaparecido el socket al que apuntaba. Las mismas cifras se resuelven
+una a una como `stats:net/stack/syn-cookies` y sus referencias hermanas.
+
 `ss` solo acepta opciones. La gramática de expresiones de filtro de
 iproute2 (filtros de estado y de dirección) no está implementada, así
 que un operando suelto es un error de uso y no un argumento ignorado en
@@ -69,14 +78,16 @@ silencio.
 - `ss -l` — solo los sockets en escucha.
 - `ss -tlp` — los sockets TCP en escucha, con el proceso propietario.
 - `ss -u4` — los sockets UDP sobre IPv4.
+- `ss -s` — los totales de defensa de conexiones de toda la pila.
 - `ss -r` — el mismo listado con las direcciones resueltas a nombres.
 
 ## EXIT STATUS
 
-- `0` — se produjo el listado (o se escribió la ayuda breve).
-- `1` — la consulta de sockets fue rechazada o falló, o no se pudo
-  escribir la salida. Una línea de órdenes no entendida también termina
-  con `1`.
+- `0` — se produjo el listado o el resumen (o se escribió la ayuda
+  breve).
+- `1` — la consulta de sockets o de defensa fue rechazada o falló, o no se
+  pudo escribir la salida. Una línea de órdenes no entendida también
+  termina con `1`.
 
 ## ENVIRONMENT
 

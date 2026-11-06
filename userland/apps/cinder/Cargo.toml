@@ -30,7 +30,8 @@ path = "src/run.rs"
 # from, the coordinate and scale types, the desktop input vocabulary, the
 # software raster surface the fur is composited into, the first-party
 # generator every decision is drawn from, the allocation-free containers the
-# outline buffers are, and the maths the projection needs.
+# outline buffers are, the maths the projection needs, and the window channel
+# whose icon-bar convention his declaration is built by.
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
@@ -43,14 +44,14 @@ tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 
-# The freestanding `Run` binary additionally drives the window channel's client
-# half, the deferral desk the saved-mood write is handed to, and the pure-Rust
-# userland runtime (`_start`, the allocator, the syscall wrappers). Bare-metal
-# only; on the host the binary is an inert stub.
+# The freestanding `Run` binary additionally drives the deferral desk the
+# saved-mood write is handed to and the pure-Rust userland runtime (`_start`,
+# the allocator, the syscall wrappers). Bare-metal only; on the host the binary
+# is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
-tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The app-data client's runtime transport, so the saved mood reaches the real
 # service; the base dependency stays host-neutral for the tests below.
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }

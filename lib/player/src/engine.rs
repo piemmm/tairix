@@ -57,8 +57,8 @@ use tairix_sandbox::audiodecode::{
     session_bounds, AudioDecodeClient, AudioDecodeError, AudioRefusal, DecodeEvent,
     MAX_BLOCK_FRAMES,
 };
-use tairix_sandbox::session::{SessionDescriptors, SessionError};
-use tairix_sandbox::supervise::{SessionLauncher, SupervisedSession};
+use tairix_sandbox::session::SessionDescriptors;
+use tairix_sandbox::supervise::{send_waiting, Sent, SessionLauncher, SupervisedSession};
 use tairix_sound::{Link, Metadata, SoundInfo};
 
 use crate::loudness;
@@ -1061,22 +1061,27 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
 
     /// Read what the decoder asked for, off the file it holds.
     fn serve_need(&mut self, offset: u64, len: usize) {
-        if self.reading.len() < len {
-            if self.reading.try_reserve(len - self.reading.len()).is_err() {
+        let Self {
+            files,
+            reading,
+            decoder,
+            current,
+            ..
+        } = self;
+        let mut read = |at, buf: &mut [u8]| files.read(at, buf);
+        let outcome = match fetch(reading, &mut read, offset, len) {
+            Ok(held) => decoder.supply(held),
+            Err(Unfetched::NoMemory) => {
                 self.fail(Failure::OutOfMemory);
                 return;
             }
-            self.reading.resize(len, 0);
-        }
-        let outcome = match self.files.read(offset, &mut self.reading[..len]) {
-            Ok(read) if read == len => self.decoder.supply(&self.reading[..len]),
-            Ok(_) => self.decoder.unreadable(),
-            Err(errno) => {
-                if let Some(current) = &mut self.current {
+            Err(Unfetched::Refused(errno)) => {
+                if let Some(current) = current {
                     current.unreadable = Some(errno);
                 }
-                self.decoder.unreadable()
+                decoder.unreadable()
             }
+            Err(Unfetched::Short) => decoder.unreadable(),
         };
         if outcome == Err(AudioDecodeError::OutOfMemory) {
             self.fail(Failure::OutOfMemory);
@@ -1329,25 +1334,11 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
 
     /// Queue the decoder's waiting frame to its worker.
     fn send_outgoing(&mut self, now: u64) -> bool {
-        let Some(frame) = self.decoder.outgoing() else {
-            return false;
-        };
-        match self.session.send(frame) {
-            Ok(()) => {
-                self.decoder.sent();
-                if self.session.on_writable(now).is_err() {
-                    self.worker_lost();
-                }
-                true
-            }
-            Err(SessionError::OutboundFull) => false,
-            Err(SessionError::WorkerFailed) => {
+        match send_waiting(&mut self.decoder, &mut self.session, now) {
+            Sent::Queued => true,
+            Sent::Nothing => false,
+            Sent::Lost => {
                 self.worker_lost();
-                false
-            }
-            Err(_) => {
-                self.session
-                    .condemn(now, "a request to the decoder could not be framed");
                 false
             }
         }
@@ -1470,17 +1461,20 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
         Ok(())
     }
 
-    /// Go where the waiting jump says, once the decoder is free.
+    /// Go where the waiting jump says, once the decoder takes a request: on in
+    /// the file it holds where the jump stays in that file, else from the
+    /// jump's entry opened afresh.
     fn apply_jump(&mut self) -> bool {
         let Some(jump) = self.jump else {
             return false;
         };
-        if !self.decoder.is_idle() {
+        if !self.decoder.takes_request() {
             return false;
         }
         self.jump = None;
         if let Some(current) = &mut self.current {
-            let here = current.entry == jump.entry && current.part == jump.part;
+            let here =
+                current.entry == jump.entry && current.part == jump.part && self.decoder.is_idle();
             if let (true, Some(info)) = (here, current.info) {
                 let hz = info.rate.hz();
                 let frame = jump.point.frame_at(hz);
@@ -2353,6 +2347,40 @@ impl Answer {
             DecodeEvent::Resumed { .. } => Self::Resumed,
             DecodeEvent::Resuming => Self::Resuming,
         }
+    }
+}
+
+/// Why a decoder's need for bytes could not be read whole.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Unfetched {
+    /// No buffer could be had to hold it.
+    NoMemory,
+    /// The read was refused.
+    Refused(Errno),
+    /// The file held fewer bytes than were asked for.
+    Short,
+}
+
+/// The `len` bytes at `offset`, read through `read` into `buffer`, which
+/// grows to hold them and is kept from one need to the next: how every owner
+/// of a sandboxed decode, a sound's or a movie's, serves a need.
+pub fn fetch<'b>(
+    buffer: &'b mut Vec<u8>,
+    read: &mut impl FnMut(u64, &mut [u8]) -> Result<usize, Errno>,
+    offset: u64,
+    len: usize,
+) -> Result<&'b [u8], Unfetched> {
+    if buffer.len() < len {
+        buffer
+            .try_reserve(len - buffer.len())
+            .map_err(|_| Unfetched::NoMemory)?;
+        buffer.resize(len, 0);
+    }
+    let wanted = &mut buffer[..len];
+    match read(offset, wanted) {
+        Ok(got) if got == len => Ok(&*wanted),
+        Ok(_) => Err(Unfetched::Short),
+        Err(errno) => Err(Unfetched::Refused(errno)),
     }
 }
 

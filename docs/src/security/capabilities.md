@@ -89,28 +89,41 @@ general process — the graphical login screen holds it and nothing else
 does, because `CAP_PROC_SPAWN` already subsumes it
 ([The parser sandbox](./sandbox.md)).
 
-The one **object-grained** delegation a holder mints explicitly is the file
-hand-off (`fd_grant`/`fd_redeem`, `plans/CAPABILITY_USE.md` CU6,
+One **object-grained** delegation a holder mints explicitly is the
+descriptor hand-off (`fd_grant`/`fd_redeem`, `plans/CAPABILITY_USE.md` CU6,
 `plans/APPWIN.md` AW5, `plans/APPDATA.md` §3.8): a holder of `CAP_FS_ACCESS` — the desktop
 session's trusted picker, or the app-data service handing over a blob —
-delegates one of its **own** plain file descriptors, one-shot, to a
-recipient named by the attested `ProcId` the grantor read from an `Origin`
-— never by a task id, which is redrawn once its task is gone. The kernel
-captures the grantor's uid and effective set with the path and re-authorises
-every operation on the delegated descriptor under *that* identity; it
-records the recipient's instance with the delegation, and the handle redeems
-exactly once through the unprivileged `fd_redeem`, for that instance alone.
+delegates one of its **own** plain file descriptors or pipe ends, one-shot, to
+a recipient named by the attested `ProcId` the grantor read from an `Origin`
+— never by a task id, which is redrawn once its task is gone. For a file the
+kernel captures the grantor's uid and effective set with the path and
+re-authorises every operation on the delegated descriptor under *that*
+identity; it records the recipient's instance with the delegation, and the
+handle redeems exactly once through the unprivileged `fd_redeem`, for that
+instance alone.
 
 The delegation **attenuates and never widens**. It carries the grantor
 descriptor's own read/write access and nothing more, with the open-time flags
-dropped; it can never chain (a pipe, resource, pty, directory, or
-already-delegated descriptor is refused at mint); a writable delegation must
+dropped; a delegation handed on is the record its holder was given, never
+re-captured, so a relay widens nothing (a pty end, resource or directory is
+refused at mint); a writable delegation must
 name a byte-extent ceiling, so an unbounded one cannot be minted at all; and
 the audited grant dies unredeemed with its recipient. This is how an app with
 **no** filesystem capability reads exactly the one file the user chose (the
 `view.app` consumer), and how one reaches its own bulk data at full VFS
 speed inside a store bounded by what the service granted — in both cases
 without any new capability entering the vocabulary.
+
+**A pipe end conveys itself.** Its delegation holds another reference to the
+end, so one in flight holds its side open as a descriptor does, and one let go
+unredeemed — with either process — is released as a close is: its peer wakes
+to end-of-stream or `BrokenPipe`. A pipe's reads and writes check only the
+descriptor's direction, so there is no identity to capture and no extent to
+bound; the redeemed descriptor carries the grantor's direction and no more.
+The gate is still `CAP_FS_ACCESS`, which the dispatcher checks before the
+descriptor is read, and a grantor's pipe ends in flight are bounded by its own
+`open-files` soft bound. A pty end is refused: its reads and job control answer
+to the terminal's foreground, which a hand-off cannot carry.
 
 **Spawn confers the same kind of authority, on a descriptor the parent already
 holds.** A path-backed descriptor wired into a child's standard slot
@@ -134,10 +147,22 @@ recipient reads the path through `fd_redeem_location`, which needs
 `CAP_FS_ACCESS` and refuses a reader of another user, so a path reaches only a
 principal that could have named it, and nothing is opened. A location shares the
 delegations' handles, bound and duplicate suppression; `fd_redeem` refuses one
-and `fd_redeem_location` refuses a file delegation. The redemption is audited,
+and `fd_redeem_location` refuses a delegated descriptor. The redemption is audited,
 as the disclosure. This is how an editor knowing its document by name only
 has the desktop show the user where it lives
 ([session](../desktop/session.md#showing-where-a-document-lives)).
+
+**A shared region is delegated by name too.** A holder of `CAP_SHM` passes on a
+region only while it holds a grant for it itself: to the server of an endpoint
+it may post to (`shm_grant`), to the caller whose call it is serving
+(`shm_grant_peer`), or to a process it names by the attested `ProcId` read from
+an `Origin` (`shm_grant_to`), resolved as the grant is minted, so an ended
+process receives nothing. Each grant records the instance that delegated it,
+and the recipient maps it only by naming that instance (`shm_map_from`). A
+recipient named outright never asked for what it holds, so one grantor keeps
+at most `SHM_GRANT_TO_MAX` live regions with it; a region every holder has
+released stops counting, and its grants are swept from the tables that hold
+them.
 
 ## Exercise, release, revoke
 
@@ -281,6 +306,18 @@ it on the wake its exit produces; the requester never can, so no launch
 leaves a zombie. The desktop's use of it is the clock menu's *Set Date &
 Time…* row, which needs an account holding `CAP_TIME_SET` that a session
 itself must never hold.
+
+A fourth form, `ElevateRequest::LaunchWired`, is a launch whose program the
+requester speaks to: the broker starts it over two pipes and hands the
+requester its ends with `fd_grant`, replying the two delegation handles and
+the program's kernel-attested instance. It starts the screen recorder alone,
+for a recording whose sound the signed-in account may not record: the kernel
+never widens a live process's set, so the recorder runs as an administrator
+who allowed it, for that one recording, in the requester's own session —
+whose seat the desktop's sound is checked against. It grants nothing a launch
+does not: the same re-authentication and the same `manifest ∩ ceiling` for
+the child, audited as `WIRED_GRANTED` / `WIRED_REFUSED`, and the child's every
+end as `WIRED_ENDED`.
 
 The two sets are policy with one definition: `lib/users` (the `grants`
 module) defines `SESSION_BASELINE`, `ADMINISTRATIVE_SET`, and the

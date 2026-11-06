@@ -210,7 +210,7 @@ mod tests {
     fn caller(sink: &NullSink) -> TaskCapabilities {
         let mut caps = CapabilitySet::empty();
         caps.insert(CapabilityId::MEM_DMA);
-        TaskCapabilities::derive(ProcessId(7), UserId(0), caps, caps, sink)
+        TaskCapabilities::derive(ProcessId(7), UserId(0), caps, caps, sink).expect("derived")
     }
 
     fn pool<'a>(frames: &'a FrameAllocator, ram: &'a SimPhysMap) -> DmaPool<'a, HostPageTable> {

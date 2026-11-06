@@ -78,6 +78,11 @@ Stability tier: **experimental**.
   `SessionTransport`. Either way a consumer's host tests drive the full
   parent-side path (framing, containment, typed decode) under plain
   `cargo test`, exactly as the `Fs`/`Tty` seams take fakes.
+  `PipeSessionLauncher` puts each duplex worker behind a model of the kernel's
+  pipe pair: a write takes at most `PIPE_ROOM` bytes, and its `PipeGauge` says
+  what a wait-set would report and counts every read of an empty pipe — which
+  on a machine parks its reader — so an owner is tested under the readiness it
+  will be woken by.
 - **`decode`** — the first consumers behind the seam: executable-container
   summaries and file reports through [`tairix-binfmt`](./binfmt.md) and
   per-window instruction disassembly through [`tairix-disasm`](./disasm.md).
@@ -196,7 +201,50 @@ Stability tier: **experimental**.
   returns the replacement to the stream's position by seeking or, for a stream
   that cannot seek, by decoding up to it; a stream that fails its worker at the same position twice is
   given up (`CannotResume`). `session_bounds` is the session an owner admits
-  it under: one largest frame each way.
+  it under: one largest frame each way. `takes_request` says whether the
+  client is free for a request — none outstanding or waiting to be sent, with
+  a file open or none, which is all an open needs — and
+  `supervise::send_waiting` is the one step every owner, of a sound or a
+  movie, hands a request to its worker through: it queues the waiting frame
+  and writes what the pipe takes, a write that cannot park, since a request
+  goes only once the last is answered. The file is read through `paged`, the
+  one page cache both decode workers share.
+- **The spawn share** (`Share`, `ShareWrite` in `session`) — a region an
+  owner hands its session worker at spawn (`SpawnAttach::with_share`), so the
+  worker's output reaches the owner with no copy through the pipes. The owner
+  reads it only by copying out of it (`Share::copy_out`), since the worker may
+  be writing it. `rt::RtSessionLauncher::sharing` makes a fresh region for each
+  worker it starts, kept by the transport and let go with it, so a
+  replacement never writes where its predecessor's output is still read;
+  `rt::spawn_share` maps it in the worker, whole. `loopback::HeapShare` and
+  `LoopbackShareLauncher` stand in for both sides in host tests.
+- **`moviedecode`** — a `WebM` recording decoded through `tairix-video` and
+  [`tairix-sound`](./sound.md) by the same kind of long-lived worker, its
+  file read through `paged` as a sound's is. One request at a time — open,
+  next, sound or seek — then need and supply exchanges, then its answer. The
+  pictures and the sound are walked through the file apart, each from its own
+  place, so the sound runs far ahead of the pictures. The worker is handed a
+  ring at spawn: `RING_SLOTS` slots, each the RGBA8 picture of the box the open
+  states (`RingLayout`, the owner's screen). `next` draws the pictures' next
+  unit into a slot the owner does not hold — at the stream's own size, scaled
+  down only where it is larger than a slot — and answers a head of slot, size,
+  time and keyframe; or it answers a picture decoded and not drawn because it
+  was due before the instant asked, or the end. Each `next` states the slots
+  the owner holds, which is how a slot is handed back: no frame of its own,
+  nothing to cross the request it governs. `sound` answers a block of Opus
+  sound as `F32` past the codec delay and short of the padding, or the end;
+  `seek` moves both walks to the latest keyframe at or before a target, from
+  the file's index or by walking it. The open states the worker's ceiling, and
+  the worker weighs `movie_bytes` — the decoder at its peak, the ring, a
+  picture too large for a slot at its own size, each walk's payload, the page
+  cache, the sound's buffers — against it before reserving anything, refusing
+  a stream too large (`MovieRefusal::TooLarge`) and an open with no ring its
+  size (`NoRing`). `MovieDecodeClient` believes a head only where it names a
+  slot of the ring the request left free and a size a slot holds, before a
+  pixel is read, and `restart` brings a replacement, in a ring of its own,
+  back to the latest keyframe passed, giving up where it fails twice there.
+  `is_movie` knows a recording by its signature; the `fixture` feature muxes
+  recordings in memory for the tests of the crates that play one.
 - **`rt`** (feature `program`, freestanding targets only) — the
   production transport. `RtLauncher` spawns the program's **own binary**
   in a worker role: two fresh pipes wired to the child's fd 0/1 through
@@ -223,13 +271,16 @@ Stability tier: **experimental**.
   asked for a service its binary does not serve exits `WorkerExit::Unserved`,
   which the host reads as its parent breaking the protocol. `RtSessionChannel` is the
   duplex transport over that same spawn (one shared pipe-pair-and-attach
-  path, `--sandbox-session-worker`), reporting its two descriptor numbers
+  path, `tairix_rt::spawn_piped`, which the login broker's wired launch
+  shares; `--sandbox-session-worker`), reporting its two descriptor numbers
   so the owner can register them, and `session_worker_role` +
   `serve_session_stdio` are its worker half. Ending a session kills its
   worker and reaps it at once if it has gone; one still running is handed to
   the channel's `Reaper` where the owner gave it one (`reaped_by`), so a loop
   that answers a person never waits for a worker's teardown, and is waited
-  for otherwise (`let_go`).
+  for otherwise (`let_go`). A channel taken up from pipe ends another
+  process handed over (`RtSessionChannel::redeemed`) only closes them as it
+  ends: its peer is that process's to end and reap.
 
 ## Security posture
 
@@ -261,4 +312,8 @@ malformed inputs, real-process crash containment with a surviving caller,
 the syscall wall probed from inside a live sandbox, and a duplex session
 driven entirely from a wait-set that pushes twice a pipe's worth of frames
 at a worker answering none of them — which completes only if the
-`StreamRoom` wake fires.
+`StreamRoom` wake fires. The audio decode client's turns are tested in every
+state it can be in, the send step for a frame queued, none waiting and no
+worker to take it, and the pipe model for a pipe's room a write and a read of
+an empty pipe counted; the engine, the tag reader and the cue authority each
+run over it.

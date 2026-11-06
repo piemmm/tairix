@@ -7,7 +7,7 @@ use core::cmp::Ordering;
 use core::hash::{Hash, Hasher};
 use core::mem::{size_of, size_of_val};
 
-use tairix_geometry::Rect;
+use tairix_geometry::{fit_within, Rect};
 use tairix_raster::{Affine, Color, Region, Surface};
 
 use crate::artwork::glyph_mask;
@@ -377,22 +377,6 @@ pub(crate) fn print_card(picture: &Surface, frame: Rect, side: u32) -> Option<Su
     let inset = |at: u32| i32::try_from(at + edge + border).unwrap_or(0);
     card.blit(inset(left), inset(top), &scaled);
     Some(card)
-}
-
-/// The largest `width` × `height` with the aspect of `(width, height)` that
-/// fits a `room` pixels square, each side at least one pixel.
-fn fit_within(width: u32, height: u32, room: u32) -> Option<(u32, u32)> {
-    if width == 0 || height == 0 || room == 0 {
-        return None;
-    }
-    let (wide, high) = (u64::from(width), u64::from(height));
-    let room64 = u64::from(room);
-    let (fit_w, fit_h) = if wide >= high {
-        (room64, (high * room64 / wide).max(1))
-    } else {
-        ((wide * room64 / high).max(1), room64)
-    };
-    Some((u32::try_from(fit_w).ok()?, u32::try_from(fit_h).ok()?))
 }
 
 #[cfg(test)]

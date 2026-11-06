@@ -21,19 +21,25 @@
 //! over `usize` indices, bounds-checked by the browser against the live listing
 //! before every mutation.
 
-use alloc::collections::BTreeSet;
+use core::fmt;
+
+use tairix_collections::BitVec;
 
 /// The set of entries selected in the current listing, plus the *anchor* a
 /// range extension (`Shift`-click) grows from.
 ///
-/// Indices are positions in the browser's current [`entries`](crate::Browser::entries);
-/// the browser validates every index against the live listing before calling a
-/// mutator here, so a [`Selection`] never holds an out-of-range member. It is
-/// ordered (a [`BTreeSet`]), so [`iter`](Self::iter) always yields members
-/// low-to-high regardless of the order they were added.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+/// Indices are positions in the browser's current [`entries`](crate::Browser::entries),
+/// held one bit per entry, so a member is tested, added and removed in constant
+/// time and the walk visits only the members, low-to-high. The bits grow to the
+/// listing they are fitted to; nothing a mutation names past what they could
+/// grow to is selected, so a selection with no memory to grow selects less and
+/// never aborts its holder.
+#[derive(Default)]
 pub struct Selection {
-    indices: BTreeSet<usize>,
+    marks: BitVec,
+    /// What a remap builds the next marks in, kept so remapping a listing no
+    /// larger than an earlier one allocates nothing.
+    spare: BitVec,
     anchor: Option<usize>,
 }
 
@@ -42,32 +48,33 @@ impl Selection {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            indices: BTreeSet::new(),
+            marks: BitVec::new(),
+            spare: BitVec::new(),
             anchor: None,
         }
     }
 
     /// The number of selected entries.
     #[must_use]
-    pub fn len(&self) -> usize {
-        self.indices.len()
+    pub const fn len(&self) -> usize {
+        self.marks.count_ones()
     }
 
     /// `true` when no entry is selected.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.indices.is_empty()
+    pub const fn is_empty(&self) -> bool {
+        self.marks.count_ones() == 0
     }
 
     /// Whether `index` is currently selected.
     #[must_use]
     pub fn contains(&self, index: usize) -> bool {
-        self.indices.contains(&index)
+        self.marks.get(index) == Some(true)
     }
 
     /// The selected indices, low-to-high.
     pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
-        self.indices.iter().copied()
+        self.marks.iter_ones()
     }
 
     /// The anchor a [`range_to`](Self::range_to) extension grows from — the
@@ -81,17 +88,21 @@ impl Selection {
     /// Select exactly `index`, dropping any previous selection — a plain click
     /// or an unmodified keyboard move. `index` becomes the anchor.
     pub fn single(&mut self, index: usize) {
-        self.indices.clear();
-        self.indices.insert(index);
-        self.anchor = Some(index);
+        self.clear();
+        if self.mark(index) {
+            self.anchor = Some(index);
+        }
     }
 
     /// Add `index` to the selection if absent, or remove it if present — a
     /// `Ctrl`-click. `index` becomes the new anchor either way (the next
     /// range extension grows from the entry the user just acted on).
     pub fn toggle(&mut self, index: usize) {
-        if !self.indices.remove(&index) {
-            self.indices.insert(index);
+        let held = self.contains(index);
+        if held {
+            self.marks.set(index, false);
+        } else if !self.mark(index) {
+            return;
         }
         self.anchor = Some(index);
     }
@@ -99,16 +110,19 @@ impl Selection {
     /// Add `index`, answering whether it was absent. Into a selection with no
     /// anchor it becomes the anchor.
     pub fn insert(&mut self, index: usize) -> bool {
+        if self.contains(index) || !self.mark(index) {
+            return false;
+        }
         self.anchor.get_or_insert(index);
-        self.indices.insert(index)
+        true
     }
 
     /// Take `index` out, answering whether it was present. An anchor taken out
     /// passes to the first member still selected.
     pub fn remove(&mut self, index: usize) -> bool {
-        let removed = self.indices.remove(&index);
+        let removed = self.marks.set(index, false) == Some(true);
         if self.anchor == Some(index) {
-            self.anchor = self.indices.first().copied();
+            self.anchor = self.marks.next_one(0);
         }
         removed
     }
@@ -122,14 +136,10 @@ impl Selection {
             self.single(index);
             return;
         };
-        let (lo, hi) = if anchor <= index {
-            (anchor, index)
-        } else {
-            (index, anchor)
-        };
-        self.indices.clear();
-        for i in lo..=hi {
-            self.indices.insert(i);
+        let (lo, hi) = (anchor.min(index), anchor.max(index));
+        self.clear();
+        if self.fits(hi) {
+            self.marks.set_range(lo..hi + 1, true);
         }
         self.anchor = Some(anchor);
     }
@@ -137,29 +147,99 @@ impl Selection {
     /// Select every entry `0..count` — Select All. The first entry becomes the
     /// anchor; an empty listing (`count == 0`) leaves the selection empty.
     pub fn select_all(&mut self, count: usize) {
-        self.indices.clear();
-        for i in 0..count {
-            self.indices.insert(i);
-        }
-        self.anchor = if count == 0 { None } else { Some(0) };
+        self.clear();
+        let Some(last) = count.checked_sub(1).filter(|&last| self.fits(last)) else {
+            return;
+        };
+        self.marks.set_range(0..last + 1, true);
+        self.anchor = Some(0);
     }
 
     /// Drop the whole selection and the anchor.
     pub fn clear(&mut self) {
-        self.indices.clear();
+        let mut at = 0;
+        while let Some(index) = self.marks.next_one(at) {
+            self.marks.set(index, false);
+            at = index + 1;
+        }
         self.anchor = None;
     }
 
-    /// Carry the selection and anchor across a listing change, through `moved`
-    /// — an entry's index before it to its index after, [`None`] for one the
-    /// change removed, which leaves the selection rather than passing to
-    /// whatever now sits where it was.
+    /// Empty the selection over a listing of `count` entries.
+    pub fn reset(&mut self, count: usize) {
+        self.clear();
+        if self.marks.try_resize(count, false).is_err() {
+            // What it held goes back to a heap short of memory; a choice
+            // grows it again, or is refused.
+            self.marks = BitVec::new();
+        }
+    }
+
+    /// Carry the selection and anchor across a listing change to `count`
+    /// entries, through `moved` — an entry's index before it to its index
+    /// after, [`None`] for one the change removed, which leaves the selection
+    /// rather than passing to whatever now sits where it was.
     /// An anchor whose entry went passes to the first member still selected.
-    pub fn remap(&mut self, moved: impl Fn(usize) -> Option<usize>) {
-        self.indices = self.indices.iter().filter_map(|&i| moved(i)).collect();
+    /// Without the memory to span the listing the selection is emptied rather
+    /// than guessed at.
+    pub fn remap(&mut self, count: usize, moved: impl Fn(usize) -> Option<usize>) {
+        if self.spare.try_resize(count, false).is_err() {
+            self.reset(count);
+            return;
+        }
+        self.spare.fill(false);
+        for index in self.marks.iter_ones() {
+            if let Some(after) = moved(index) {
+                self.spare.set(after, true);
+            }
+        }
+        core::mem::swap(&mut self.marks, &mut self.spare);
         self.anchor = self
             .anchor
             .and_then(&moved)
-            .or_else(|| self.indices.first().copied());
+            .or_else(|| self.marks.next_one(0));
+    }
+
+    /// A copy of the selection, or `None` without the memory for one.
+    #[must_use]
+    pub fn try_clone(&self) -> Option<Self> {
+        Some(Self {
+            marks: self.marks.try_clone().ok()?,
+            spare: BitVec::new(),
+            anchor: self.anchor,
+        })
+    }
+
+    /// Mark `index`, growing the bits to hold it; `false` where they cannot.
+    fn mark(&mut self, index: usize) -> bool {
+        self.fits(index) && self.marks.set(index, true).is_some()
+    }
+
+    /// Whether the bits reach `index`, growing them to it where they do not.
+    fn fits(&mut self, index: usize) -> bool {
+        index < self.marks.len()
+            || index
+                .checked_add(1)
+                .is_some_and(|len| self.marks.try_resize(len, false).is_ok())
+    }
+}
+
+impl PartialEq for Selection {
+    fn eq(&self, other: &Self) -> bool {
+        self.anchor == other.anchor && self.iter().eq(other.iter())
+    }
+}
+
+impl Eq for Selection {}
+
+impl fmt::Debug for Selection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Selection")
+            .field(
+                "members",
+                &fmt::from_fn(|f| f.debug_set().entries(self.iter()).finish()),
+            )
+            .field("anchor", &self.anchor)
+            .finish_non_exhaustive()
     }
 }

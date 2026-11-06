@@ -61,13 +61,14 @@ which the drift guard enforces.
 | FM18 | The browser window can be made one row of its listing tall, a drag follows the range as it is restated, and the listing's bar stands beside the "Listing…" cue | done |
 | FM19 | A window follows every change any program makes to the folder it shows, through the directory watch, repainting only the rows that moved | done |
 | FM21 | A `/Storage` volume is drawn as its drive, and the rail keeps a degraded or recovering volume | done |
-| FM22 | A drive's Properties: kind, filesystem, options, capacity as a ring, activity as a live trace, health, read off the loop | done |
+| FM22 | A drive's Properties: its *Title* field, kind, filesystem, options, capacity as a ring, activity as a live trace, health, read off the loop | done |
 | FM20 | Nothing touches a disk on the window's loop: long operations on operations workers, every one-shot write on a reader by ticket, the opening ladder and the mount list on the readers, and every refusal stated in the window | done |
 | FM23 | The file manager's settings, kept in the desktop's document and edited in the Settings application's *Files* pane | done |
 | FM24 | Disk images: activating one mounts it and opens its volume, *Mount Read-Only* and *Eject* in the context menu, *Eject* on the rail's own menu (`plans/DISK-IMAGES.md` DI5) | done |
 | FM25 | A slow or failing device holds up only its own work: every read, write and operation on its volume's lane, one worker to a lane, with a spare whenever every worker is busy | done |
 | FM26 | A disk image or archive the user opened is unmounted once no window shows it and nothing else uses it, as the settings choose (`plans/DISK-IMAGES.md` DI21) | done |
-| FM27 | The icon-bar slot's volume plates: *Eject* on every volume the user may eject — a removable device's at the seat, an image or share they attached — with an administrator asked through the desktop's prompt for a removable one the kernel refuses them, and *Title* on a titled image of theirs (`plans/DISK-IMAGES.md` DI23) | done |
+| FM28 | A paste or a drop onto a name already taken asks in the operation's own window — Replace (Merge for a folder), Skip or Stop, for one item or the rest — and the desktop is told what became of each | done |
+| FM27 | The icon-bar slot's volume plates: *Eject* on every volume the user may eject — a removable device's at the seat, an image or share they attached — with an administrator asked through the desktop's prompt for a removable one the kernel refuses them, and *Title* on every volume they may retitle, an administrator asked through the same prompt for a device's volume the kernel refuses them (`plans/DISK-IMAGES.md` DI23) | done |
 
 `plans/OPEN-DEFECTS.md` D98 is the one open block: the QEMU harness cannot
 order a typed key after a pointer click, so two guest click-throughs cannot be
@@ -75,12 +76,12 @@ driven. Both product halves are landed and host-tested; only the guest witness
 is missing.
 
 **FM15** — a press on a selected entry that travels past `DRAG_SLOP` hands the
-session the drag (`BeginDrag`: the first item's name, the count, and whether it
-is one openable file); dropped on a slot that claims the file, the manager
-takes the chosen application (`TakeDropTarget`) and opens the file for it
-exactly as its "Open With" does, so no path and no authority crosses to the
-desktop. Drops onto its own windows and the desktop are
-`plans/FILES-INTERACTION.md` FI9. Every document open — activation, "Open With", a drop —
+session the drag (`BeginDrag`: the first item's name, the count, whether it is
+one openable file, and how each item shown is pictured,
+`plans/FILES-INTERACTION.md` FI42); dropped on a slot that claims the file, the
+manager takes the chosen application (`TakeDropTarget`) and opens the file for
+it exactly as its "Open With" does, so no authority crosses to the desktop.
+Drops onto its own windows and the desktop are `plans/FILES-INTERACTION.md` FI9. Every document open — activation, "Open With", a drop —
 runs on the reader of the document's volume (`Reads`), FIFO: resolving the application waits
 for the bundle scan when it has not landed, and the `fs_open` of the document
 never runs on the loop that owes the window a frame. A document is opened
@@ -204,10 +205,10 @@ picture is its content and a folder shows what it holds, whether a move to the
 Trash asks first, and whether an image the user opened is unmounted once
 closed (FM26). The Settings application's *Files* pane edits them and asks the
 session to adopt a change (`PinboardRequest::ApplyFiles`, merged over what the
-document holds as the desktop's own apply is); *Settings…* on the icon-bar
-menu and `Ctrl+,` hand that pane to the running Settings
-(`HandOverTarget::Pane` naming `tairix_browse::SETTINGS_PANE`) or start it on
-it. The file manager reads the document once before its first window and again,
+document holds as the desktop's own apply is); `Ctrl+,` in a window hands that
+pane to the running Settings (`HandOverTarget::Pane` naming
+`tairix_browse::SETTINGS_PANE`) or starts it on it, and the icon-bar menu
+offers no way there, since the settings are that application's. The file manager reads the document once before its first window and again,
 on a reader, whenever the desktop's `DesktopInfo::settings_generation` moves;
 one read is asked per publication and a refused one is stated, the settings in
 force standing. A change applies to every window at once: a window takes the
@@ -215,16 +216,21 @@ view and the order unless the user chose one in that window
 (`Chosen`, noted wherever an input changed it), and where folders stand
 always. A change arriving while a window's listing is held by a menu, a rename
 or a drag waits for the hold to end, and one landing while a window is still
-opening is taken by it. A name's shown form is display only: a rename edits it
-and restores the ending it hid, and the desktop and the trusted picker keep the
-exact names.
+opening is taken by it. A name's shown form is display only, hides no ending
+whose loss would leave another type's or application's name, and is what a
+listing is ordered by, the exact name breaking a tie: a rename edits it
+and restores the ending it hid. The desktop hides the same endings; the
+trusted picker keeps the exact names.
 
 **FM27 — the slot's volume plates.** A volume's row on the icon-bar slot's
 menu opens a plate holding *Eject* wherever the viewer may eject it
 (`VolumeFacts::ejector`: the owner of an image or share, the user at the seat
-for a removable device's), and *Title* on a titled image of the viewer's own,
-its field opening on the title with the caret at its end and opened by choosing
-the row (`AppMenuEntry::opened_by_choosing`). A row's id carries its verb and
+for a removable device's), and *Title* wherever the one rule lets the viewer
+retitle it (`VolumeFacts::retitling_by`: an image of theirs, or any device's
+volume, whose format takes a title), greyed saying why for one of theirs not
+to be retitled as it is mounted, its field opening on the title with the caret
+at its end and opened by choosing the row (`AppMenuEntry::opened_by_choosing`).
+A row's id carries its verb and
 the place's index (`appbar::BarRow`), and each declaration is made under a
 fresh revision (`AppBar::revision`) that its menu's answers name back:
 `appbar::Declarations` keeps what the rows of the last few the session
@@ -239,10 +245,19 @@ authority asks an administrator through the desktop's prompt, for the slot
 rather than a window (`SystemTask::Eject`), naming the volume by its durable
 root (`id::<volume-id>/`, `mount::volume_root`) so a device put in its place
 under the same catalog name is never the one ejected, and by that catalog name
-for the prompt to show. A commit retitles on the
-mount worker (`MountAct::Retitle`) once checked against the disk as it stands:
-still a titled image of the viewer's, the title changed, not empty, and no
-longer than a disk records.
+for the prompt to show. A commit is checked against the volume as it stands
+by the one check (`MountAct::retitle`) — still the viewer's to retitle, the
+title changed, no longer than a disk records and holding no control character,
+an empty one clearing the label — and retitled on the mount worker; one the
+kernel refuses a device's volume for want of the authority asks an
+administrator the same way (`SystemTask::Retitle`, which runs
+`label -- ROOT TITLE`). The closing rows are a rule and *Network*, then a
+rule and *Trash* (`appbar::BarRow::Trash`,
+`AppMenuSymbol::Trash`), greyed with the reason Go to Trash states when there
+is no home. Choosing it raises a window already showing the Trash, spending
+the slot's activation before any disk is touched, or has the reader ensure the
+Trash — the slot's one such ask in flight — and opens it once that lands,
+stating why it cannot be shown otherwise.
 
 **FM-dialogs — the two popup surfaces.** Three defects, one of them shared
 with every other surface on the desktop.
@@ -647,13 +662,15 @@ user pick any. See FM6b below.
   (which no frame depends on). Nothing starves: each request set is finite and
   refilled only by the user asking again.
   - **FM25 — one worker to a volume.** Each read, one-shot write and long
-    operation runs on the lane of the volume it touches (`lanes::Lane`),
+    operation runs on the lane of the volume it touches (`lib/browse`'s
+    `lanes::Lane`, the policy the desktop session's readers share),
     routed through the namespace's view list (`lanes::Routes` over
     `tairix_procinfo::covering`) re-read with the places, so routing touches no
     device; work on no listed place has a lane of its own, and a place no
     published volume answers for another. One reader serves a lane at a time,
-    so an eject waits for the read under way on its own volume alone; whenever
-    every reader is busy a spare is started, and one finding two waiting leaves
+    so an eject waits for the read under way on its own volume alone, the
+    follows of the bundles shown there ended first; whenever every reader is
+    busy a spare is started, and one finding two waiting leaves
     (`lanes::Crew`), so the readers follow the volumes the windows show. A
     reader takes its own lane's next job of each kind first but an earlier kind
     on another volume before it (`deferred::first_in_order`), and a window's
@@ -893,7 +910,9 @@ drawn through it (`render::manager_art` walks every picture a window draws, as
 the paint draws it), reporting the rest as still shown so the thumbnail sweep
 keeps what any window shows. While a paste writes an item the desk holds every
 decode pictured from inside it, so a half-copied bundle is never pictured or
-refused; a listed bundle is keyed by its listing's stamp, so a replaced one is
+refused; a listed bundle is keyed by the files its picture was read from and
+followed while a window shows it (`plans/ICONS.md` I22), so one a copy was
+still writing shows its own icon once its files are whole and a replaced one is
 decoded afresh, and nothing invalidates the cache. Every window shares the one
 cache, its ceiling the machine's share of its memory, never below a screenful.
 The lock
@@ -1443,9 +1462,9 @@ item of a paste, and each move to Trash is one operation of the shared engine
 while the name holds the node the listing showed, reaches every entry by name
 from a directory it holds, holds its place between units, and removes a
 directory's entries before the directory, each only while it is the node its
-listing read. The plan chose every paste destination free, so the file manager
-runs its operations under `Taken::Refuse`, a name taken since refusing the
-item.
+listing read. A paste runs its operations under `Taken::Ask`, a name already
+taken asked about in the operation's own window (FM28); a move to Trash, whose
+names were chosen free, under `Taken::Refuse`.
 
 **The app-side Delete verb.** The `files.app` `Run` binary binds `Delete` to a
 question before any removal. `begin_delete` captures the selection with
@@ -1482,11 +1501,10 @@ holds no unbounded buffer and never spins (§2.23, §26.6). It is bounded and fa
 the first refused operation stops the paste, states the reason in the window
 naming the item (fail loud, §2.24), and leaves what already landed in place
 (§5.4); the view is re-listed so a partial paste is shown honestly. A completed
-`Cut` clears the clipboard; a `Copy` keeps it. A destination is created
-*exclusively*, so a pre-existing name is refused rather than clobbered, and a
-`Copy` back into an item's own directory is refused rather than duplicated onto
-itself — overwrite/merge confirmation is a deliberate v1 scope boundary, not a
-silent overwrite. Only the write-capable file manager builds and drives this;
+`Cut` clears the clipboard; a `Copy` keeps it. A name already taken is asked
+about rather than clobbered (FM28), and a `Copy` back into an item's own
+directory is refused rather than duplicated onto itself. Only the
+write-capable file manager builds and drives this;
 the read-only picker never pastes. The engine models are host-tested in
 `lib/browse` (FM7a + the `execute` model above); the app wiring rides the FM9
 autoload vertical. Docs: `docs/src/desktop/apps.md`, `files.app` README +
@@ -2005,13 +2023,16 @@ wiring, exactly as FM6/FM7/FM8/FM10 were.
   picker), each carrying a new `lib/icon` built-in glyph (`IconKind::Trash` /
   `IconKind::EmptyTrash`, host-tested as the FM3 file-type glyphs were):
   - **Go to Trash** (`ManagerTool::Trash`) — the navigable Trash view. The
-    `files.app` `Run` binary resolves the user's home from `HOME`, ensures the
-    fixed `Library/Trash` subtree (shared `trash::trash_dir`, §16.3), and
-    navigates there with the new `Browser::navigate_to(components)` — the
-    jump-to-an-arbitrary-location primitive (neither an ancestor nor a listed
-    child), transactional and fail closed like every other navigation, so the
-    Trash's contents show like any directory. Always offered; an absent home or
-    unreachable Trash is stated in the window, not hidden (§2.24).
+    `files.app` `Run` binary spells the Trash once (`trash_location`: the
+    fixed `Library/Trash` subtree of the home `HOME` names, shared
+    `trash::trash_dir`, §16.3, or why a session with no home has none), has
+    the reader ensure it, and navigates there with
+    `Browser::navigate_to(components)` — the jump-to-an-arbitrary-location
+    primitive (neither an ancestor nor a listed child), transactional and
+    fail closed like every other navigation, so the Trash's contents show
+    like any directory. Always offered; an absent home or unreachable Trash
+    is stated in the window, not hidden (§2.24). The icon bar's slot reaches
+    it from its last row too (FM27).
   - **Empty Trash** (`ManagerTool::EmptyTrash`) — enabled only when the current
     directory *is* the user's Trash and it is non-empty (a new
     `chrome::ManagerToolModel` the app computes from `HOME`, since the engine
@@ -2022,7 +2043,10 @@ wiring, exactly as FM6/FM7/FM8/FM10 were.
     confirms with the `DeleteDisposition::Permanent` alert, and hands the
     plan to the operations worker a delete uses (`ProgressOp::Delete`), under
     the user's own identity (no new capability). An already-empty Trash is a silent no-op; a refusal is stated
-    in the window.
+    in the window. The Trash's own window offers it on its background menu
+    too (`ContextCommand::EmptyTrash`, declared only where the model is told
+    the window shows the Trash, `ContextMenuModel::showing_trash`, and greyed
+    with its reason in an empty one), carried out by the same verb.
 
   Host-tested in `lib/browse` (`navigate_to` off-spine/no-op/fail-closed; the
   Empty Trash tool disabled-vs-enabled hit-test gating) and the freestanding
@@ -2042,8 +2066,8 @@ keyboard `Enter` uses, so pointer and keyboard can never open different things
 
 | gesture | what it does |
 |---|---|
-| double-click / `Enter` | activate: descend, run a bundle, or open a file |
-| shift-double-click / `Shift+Enter` | list a bundle's contents instead of running it; a shift-double-click leaves what it opened deselected (`plans/FILES-INTERACTION.md` FI32) |
+| double-click / `Enter` | activate: descend, run a bundle, or open a file; a double-click leaves what it handed elsewhere deselected once that went ahead (`plans/FILES-INTERACTION.md` FI32) |
+| shift-double-click / `Shift+Enter` | list a bundle's contents instead of running it |
 | right-click | ask the desktop for the context menu on the item |
 
 There is no right-*double*-click. The menu the first press opens is the
@@ -2165,7 +2189,11 @@ which still serves data, rather than hiding it.
 
 ### FM22 — a drive's Properties
 
-Properties on a `/Storage` entry adds a *Drive* tab to the window: the volume's
+Properties on a `/Storage` entry adds a *Drive* tab to the window: a *Title*
+field holding the volume's title (`Drive::title`), editable where the one rule
+lets the reader retitle it and saying why not otherwise, which a press or
+`Down`/`Tab` from the strip gives the keyboard and whose commit retitles on
+the mount worker as the slot's field does; the volume's
 kind and medium, filesystem, mount point and options, block size and identity;
 capacity as a ring of used and free with the figures beside it
 (`lib/controls`' `CompositionRing`, the `CompositionBar`'s parts drawn as a
@@ -2176,6 +2204,55 @@ health from the mount table's availability, toning the facts it qualifies.
 Every read rides the window's reader desk (`WindowReads`); a machine that
 grants no reader reads on the asking thread rather than leaving the window
 reading for ever. A sample repaints only the parts it changed.
+
+### FM28 — replace, skip or stop
+
+A paste or a drop — into a folder window or onto the desktop, a copy or a move
+— meeting a name already taken asks in the operation's own progress window,
+never a second one: *Replace* (*Merge* where a folder meets a folder), *Skip*
+or *Stop*, and *Do the same for every file that already exists* (*…every
+folder…* where a folder meets a folder). The controls
+are `lib/controls`' buttons and checkbox (`render::ClashPanel`), answered by
+pointer and keyboard — the keyboard rests first on *Skip*, the default, and
+`Escape` is *Stop* — and the window grows to show them and shrinks back once
+answered. A question brings its window forward where the app holds the front,
+and otherwise waits in place without taking the keyboard.
+
+- **The engine asks.** Every paste runs its items under `Taken::Ask`
+  (`userland/apps/files/src/paste.rs`). The item's own folder meeting a folder
+  is asked about; merged into, a folder beneath meeting one merges as its
+  parent did, and each taken file inside is asked about in turn. A move merges
+  too: on one volume by renaming each entry into place, across volumes by the
+  copy whose originals then go (`docs/src/lib/fscopy.md`).
+- **No worker waits on the user.** A unit that pauses answers `Step::Asks`,
+  and the worker parks the job on the operation desk with the entry it holds:
+  it keeps its volume lanes, so nothing overtakes it there, and holds no
+  worker. The answer is given to the parked job under the desk's lock, in
+  memory alone, and it resumes before anything waiting. A cancel, a closed
+  window or the app's teardown hands a parked job to a worker to stop, which
+  settles what it made. A job carried out on the loop, where no worker was
+  granted, is not stepped while it asks, so the loop parks.
+- **For the rest.** An answer given for the rest answers every later question
+  of its own kind unasked: a folder's every later folder, a file's every later
+  file (`turns::Rest`). A merge for the rest therefore never replaces a file
+  inside unasked.
+- **What became of each item.** `Report::root` records what a transfer left
+  under its target's name — `Created`, `Replaced`, `Merged` or `Skipped` — and
+  feeds the drop landing's `Made` (`landing::outcome_of`): the desktop stands a
+  replaced item at the drop point and moves nothing for a skipped or merged
+  one; an item that stopped is `Failed`.
+- **Tests.** `paste_tests.rs`: a paste or a move onto a taken name asks
+  instead of stopping; an answer for the rest asks no more of its own kind,
+  and a merge for the rest still asks about each taken file inside; a folder
+  merges, asking about each taken file inside; the desktop is told what became
+  of each item; a paste stopped while it asks ends its drop, and one stopped
+  part-way through a replacement keeps what it replaces. `operations_tests.rs`:
+  an asking job holds no worker but keeps its lanes and resumes first once
+  answered; a cancel, a close and a stop while it asks hand it to a worker to
+  stop. `operation_tests.rs` and `lib/browse`'s render tests: the question is
+  answered by keyboard and pointer. `lib/fscopy`'s `op` tests: the folder
+  question, merging moves on one volume and across two, the report's root, and
+  the link-swap sweeps over merging copies and moves.
 
 ## 2. Sequencing and dependencies
 

@@ -91,11 +91,21 @@ impl Engine {
         }
     }
 
-    /// Release the history to memory pressure `band`.
-    pub fn adopt_pressure(&mut self, band: tairix_reclaim::PressureBand) {
-        match self {
-            Self::Picture(view) => view.adopt_pressure(band),
-            Self::Area(view) => view.adopt_pressure(band),
+    /// Release the history, and a picture's preview, to memory pressure
+    /// `band`, reporting what that repaints as laid out at `layout`.
+    pub fn adopt_pressure(
+        &mut self,
+        band: tairix_reclaim::PressureBand,
+        layout: &EngineLayout,
+        damage: &mut Region,
+    ) {
+        match (self, layout) {
+            (Self::Picture(view), EngineLayout::Picture(layout)) => {
+                view.adopt_pressure(band, layout, damage);
+            }
+            (Self::Area(view), _) => view.adopt_pressure(band),
+            // A view is only ever laid out by its own kind of layout.
+            (Self::Picture(_), EngineLayout::Area(_)) => {}
         }
     }
 }

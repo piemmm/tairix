@@ -23,6 +23,7 @@ Stability tier: **experimental**.
 | `flex_bg`, `meta_bg`, `sparse_super`, `sparse_super2`   | yes  | yes   |
 | Lazily initialised groups (`BLOCK_UNINIT`, `INODE_UNINIT`) | yes | yes |
 | `metadata_csum`, `metadata_csum_seed`, `gdt_csum`       | yes  | yes   |
+| The volume name (`s_volume_name`), its title            | yes  | yes   |
 | Internal journal (`has_journal`), replay of a crashed one | yes | yes |
 | The orphan chain and the orphan file (`orphan_file`)    | yes  | yes   |
 | POSIX access ACLs                                       | yes  | mode changes |
@@ -35,6 +36,13 @@ unjournaled volume) opens all the same and serves reads.
 `Ext4::write_refusal` names why it refuses writes, and the volume service
 mounts such a volume read-only and audits that reason, so a refused write
 reads as "read-only file system".
+
+The title (`FilesystemLabel`) is the superblock's volume name: up to sixteen
+bytes, NUL-padded, never closing with a space. A longer one is refused
+`LengthOutOfRange` and one closing with a space `OutOfRange`, writing
+nothing; the empty title clears it. A retitle joins the open transaction and
+is published with the superblock's checksum restamped; a volume the driver
+does not write refuses it (`ReadOnly`).
 
 `Ext4::generation` names the generation a volume's features make it, which
 the volume service reports as the mount's type. Writing never moves a volume

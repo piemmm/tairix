@@ -68,6 +68,9 @@ pub enum MmioError {
     /// The mapper was constructed with an invalid request (zero
     /// capacity, or a virtual base that is not page aligned).
     InvalidMapConfig,
+    /// The record of a window's run could not be allocated (deterministic
+    /// OOM); nothing is mapped.
+    OutOfMemory,
 }
 
 impl From<PageTableError> for MmioError {
@@ -85,6 +88,7 @@ impl fmt::Display for MmioError {
             Self::UnknownRegion => f.write_str("mmio region not from this mapper"),
             Self::DirectMap => f.write_str("mmio region outside the direct physical map"),
             Self::InvalidMapConfig => f.write_str("mmio mapper config invalid"),
+            Self::OutOfMemory => f.write_str("mmio window record could not be allocated"),
         }
     }
 }
@@ -170,8 +174,8 @@ impl SharedMemory {
 /// the address space it maps into**.
 ///
 /// This owns only the per-task bookkeeping a sequence of MMIO mappings needs
-/// — the virtual window the mappings live in, the slot occupancy bitmap, and
-/// the per-region guard/data accounting — and never an [`AddressSpace`]. Every
+/// — the virtual window the mappings live in and one record per run of slots
+/// it handed out, guards included — and never an [`AddressSpace`]. Every
 /// page-table mutation is performed against a **borrowed** `&mut
 /// AddressSpace<P>` the caller passes in, so the same guarded mapping logic
 /// serves two consumers without duplication:
@@ -266,6 +270,7 @@ impl MmioWindowMap {
     ///   `phys_base + page_offset + len` overflows.
     /// * [`MmioError::NoVirtualSpace`] — no run of free slots large
     ///   enough exists.
+    /// * [`MmioError::OutOfMemory`] — the run's record cannot be allocated.
     /// * [`MmioError::PageTable`] — propagated from the
     ///   [`AddressSpace`] when a mapping operation fails.
     pub fn map_into<P: PageTable>(
@@ -442,6 +447,7 @@ impl MmioWindowMap {
     ///   zero-length or not page-aligned, or the total or a chunk's extent
     ///   overflows.
     /// * [`MmioError::NoVirtualSpace`] — no free run of the required length.
+    /// * [`MmioError::OutOfMemory`] — the run's record cannot be allocated.
     /// * [`MmioError::PageTable`] — propagated from [`AddressSpace::map`]
     ///   (a partial map is rolled back before the error returns).
     pub fn map_chunks_into<P: PageTable>(
@@ -540,6 +546,7 @@ impl MmioWindowMap {
         let count = run_slots(data_pages).ok_or(MmioError::NoVirtualSpace)?;
         self.regions
             .place(0..self.capacity_pages, count, span)
+            .map_err(|_| MmioError::OutOfMemory)?
             .map(|run| run.start)
             .ok_or(MmioError::NoVirtualSpace)
     }
@@ -728,10 +735,15 @@ impl MmioWindowMap {
     /// zeroed and freed).
     #[must_use]
     pub fn contains(&self, va: VirtAddr) -> bool {
+        self.span().contains(&va.as_u64())
+    }
+
+    /// The window's virtual byte range, guard slots included.
+    #[must_use]
+    pub fn span(&self) -> core::ops::Range<u64> {
         let base = self.base.as_u64();
         // The constructor proved `capacity_pages * PAGE_SIZE` fits.
-        let len = (self.capacity_pages * PAGE_SIZE) as u64;
-        va.as_u64() >= base && va.as_u64() - base < len
+        base..base + (self.capacity_pages * PAGE_SIZE) as u64
     }
 
     /// Number of live mappings.
@@ -844,6 +856,7 @@ impl<'a, P: PageTable> MmioMap<'a, P> {
     ///   `phys_base + page_offset + len` overflows.
     /// * [`MmioError::NoVirtualSpace`] — no run of free slots large
     ///   enough exists.
+    /// * [`MmioError::OutOfMemory`] — the run's record cannot be allocated.
     /// * [`MmioError::PageTable`] — propagated from the
     ///   [`AddressSpace`] when a mapping operation fails.
     pub fn map(&mut self, phys_base: u64, len: usize) -> Result<MmioRegion, MmioError> {

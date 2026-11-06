@@ -1305,6 +1305,7 @@ fn a_pickers_menu_goes_with_the_window_its_pick_is_for() {
     let g = geom(&theme);
     let mut chain = MenuChain::new();
     let picker = ChainOwner::Picker {
+        pick: crate::picker::PickId::numbered(1),
         for_window: Some(7),
     };
     open(&mut chain, picker, flat_model(), Point::new(40, 40), &g);
@@ -1312,7 +1313,10 @@ fn a_pickers_menu_goes_with_the_window_its_pick_is_for() {
     assert!(chain.dismiss_owner(7));
     assert!(!chain.is_open());
 
-    let own = ChainOwner::Picker { for_window: None };
+    let own = ChainOwner::Picker {
+        pick: crate::picker::PickId::numbered(2),
+        for_window: None,
+    };
     open(&mut chain, own, flat_model(), Point::new(40, 40), &g);
     assert!(!chain.dismiss_owner(7));
     assert!(chain.is_open());

@@ -98,6 +98,7 @@ use tairix_proglib::{Edit, EntryId};
 use crate::layout::Hit;
 use crate::library::{PopupOutcome, Routing};
 use crate::menu::MenuRequest;
+use crate::notifications::SCREEN_RECORDING_SIGNAL;
 use crate::picker::{
     slot_has_picker, PickerEntry, WindowPicker, PICKER_CLOSE_GRACE_NS, PICKER_OPEN_DELAY_NS,
 };
@@ -253,6 +254,9 @@ pub enum TaskbarResponse {
     /// states what the system is — its version, processors and memory — in a
     /// window of its own; the bar reads nothing itself.
     AboutSystem,
+    /// The screen-recording indicator was pressed. The embedder finishes the
+    /// recording the desktop is making; the bar stops nothing itself.
+    StopScreenRecording,
 
     /// A gesture on the Switchboard capsule (or the readout's "Open
     /// Switchboard" safe action) asked to open the Switchboard window at a
@@ -653,22 +657,27 @@ impl TaskbarInput {
                 TaskbarResponse::OpenLibrary
             }
             Hit::App(index) => Self::activate_app(taskbar, index),
-            // The volume signal opens its panel. Every other status signal
-            // and the clock are live readouts, not action targets: the press
-            // is claimed so it never falls through to the window beneath,
-            // but it does nothing. The clock's menu is a secondary press's
-            // to ask for (`press_secondary`) — a left click that pops a menu
-            // up is a menu nobody asked for.
+            // The volume signal opens its panel and the screen-recording
+            // indicator stops the recording. Every other status signal and
+            // the clock are live readouts, not action targets: the press is
+            // claimed so it never falls through to the window beneath, but it
+            // does nothing. The clock's menu is a secondary press's to ask
+            // for (`press_secondary`) — a left click that pops a menu up is a
+            // menu nobody asked for.
             Hit::Notification(slot) => {
-                let volume = taskbar
+                let signal = taskbar
                     .notifications()
                     .signals()
                     .get(slot)
-                    .is_some_and(|signal| signal.id == VOLUME_SIGNAL);
-                if volume {
+                    .map(|signal| signal.id);
+                if signal == Some(VOLUME_SIGNAL) {
                     taskbar.open_sound();
                 }
-                TaskbarResponse::Ignored
+                if signal == Some(SCREEN_RECORDING_SIGNAL) {
+                    TaskbarResponse::StopScreenRecording
+                } else {
+                    TaskbarResponse::Ignored
+                }
             }
             Hit::Clock => TaskbarResponse::Ignored,
             Hit::Switchboard => {

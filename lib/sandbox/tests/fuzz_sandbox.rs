@@ -22,6 +22,11 @@
 //!   outcome must be a typed result, no frame may escape the session's own
 //!   inbound ceiling, and a contained session must stay contained.
 //!
+//! * **Movies** — fixture recordings, mutated, cut short, or noise, walked
+//!   through an honest movie worker, which must always be believed; nearly
+//!   right answers and noise fed to an opening client; noise fed to the
+//!   worker as requests.
+//!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` drives
 //! the mutations through the shared `tairix_fuzzseed` seam. A plain
 //! `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
@@ -50,11 +55,11 @@ use tairix_sandbox::imagerender::{
     render_page, render_thumbnail, select_page, send_document, ImageRenderService, ViewFormat,
     WallpaperRenderFailure, MAX_DESTINATION_WIDTH, MAX_ICON_SIDE,
 };
-use tairix_sandbox::loopback::{LoopbackLauncher, LoopbackSession};
+use tairix_sandbox::loopback::{HeapShare, LoopbackLauncher, LoopbackSession};
 use tairix_sandbox::proto::Channel;
 use tairix_sandbox::session::{
     FrameOut, SandboxSession, SessionBounds, SessionDescriptors, SessionService, SessionStep,
-    SessionTransport, MIN_QUEUE_BYTES,
+    SessionTransport, Share, MIN_QUEUE_BYTES,
 };
 use tairix_sandbox::textsyntax::{detect, lex_lines, validate_document, TextSyntaxService};
 use tairix_sandbox::timesync::{evaluate_datagram, TimeSyncService};
@@ -552,8 +557,8 @@ fn fuzz_thumbnail_iteration(honest: &mut HonestIconSandbox, noise: &[u8], rng: &
 struct Held<'a>(&'a [u8]);
 
 impl tairix_icon::ArtworkDocument for Held<'_> {
-    fn stamp(&self) -> tairix_icon::DocumentStamp {
-        tairix_icon::DocumentStamp {
+    fn stamp(&self) -> tairix_abi::fs::DocumentStamp {
+        tairix_abi::fs::DocumentStamp {
             size: self.0.len() as u64,
             modified: tairix_abi::time::Time64::UNIX_EPOCH,
             id: tairix_abi::FileId::NONE,
@@ -1558,6 +1563,196 @@ fn hostile_audio_clients(file: &[u8]) -> Vec<tairix_sandbox::audiodecode::AudioD
         }
     }
     clients
+}
+
+const MOVIE_SEED: tairix_hash::HashSeed = tairix_hash::HashSeed::from_words(13, 17);
+
+/// A ceiling no fixture recording comes near.
+const MOVIE_CEILING: u64 = 1 << 30;
+
+/// The largest picture a movie iteration's ring holds: the recordings' own.
+const MOVIE_SIDES: (u32, u32) = tairix_sandbox::moviedecode::fixture::SIZE;
+
+/// Most answers an iteration keeps to mutate.
+const MOVIE_ANSWERS: usize = 16;
+
+/// What a movie request came to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum MovieOutcome {
+    Opened,
+    Picture(u64),
+    Skipped(u64),
+    Sound(u64),
+    Ended,
+    Sought,
+    Refused,
+    Unbelieved,
+}
+
+/// Carry the movie client's waiting request through `worker` to its answer,
+/// supplying every need from `file`, copying each picture out of its slot of
+/// `ring` and handing the slot back, and keep the first frames the worker
+/// sends in `answers`.
+fn movie_ask(
+    (worker, ring): (
+        &mut tairix_sandbox::moviedecode::MovieDecodeService<HeapShare>,
+        &HeapShare,
+    ),
+    client: &mut tairix_sandbox::moviedecode::MovieDecodeClient,
+    file: &[u8],
+    answers: &mut Vec<Vec<u8>>,
+) -> MovieOutcome {
+    use tairix_sandbox::moviedecode::{MovieEvent, RingLayout};
+    let layout = RingLayout::new(MOVIE_SIDES.0, MOVIE_SIDES.1).expect("a box");
+    loop {
+        let Some(request) = client.outgoing().map(<[u8]>::to_vec) else {
+            return MovieOutcome::Unbelieved;
+        };
+        client.sent();
+        let mut out = Answers(Vec::new());
+        let _ = worker.handle(&request, &mut out);
+        for frame in out.0 {
+            let outcome = match client.on_frame(&frame) {
+                Ok(MovieEvent::Need { offset, len }) => {
+                    let start = usize::try_from(offset).unwrap_or(usize::MAX);
+                    let answered = match file.get(start..start.saturating_add(len)) {
+                        Some(bytes) => client.supply(bytes),
+                        None => client.unreadable(),
+                    };
+                    assert_eq!(answered, Ok(()), "a need is answered");
+                    None
+                }
+                Ok(MovieEvent::Picture(head)) => {
+                    let mut pixels = vec![0u8; head.pixel_len()];
+                    let at = layout.slot_at(head.slot);
+                    assert!(
+                        ring.copy_out(at, &mut pixels),
+                        "a believed slot lies in the ring"
+                    );
+                    assert_eq!(client.release(head.slot), Ok(()), "the slot is held");
+                    Some(MovieOutcome::Picture(head.at_ns))
+                }
+                Ok(MovieEvent::Resumed | MovieEvent::Resuming) => None,
+                Ok(MovieEvent::Opened) => Some(MovieOutcome::Opened),
+                Ok(MovieEvent::Skipped { at_ns }) => Some(MovieOutcome::Skipped(at_ns)),
+                Ok(MovieEvent::Sound { at_ns, .. }) => Some(MovieOutcome::Sound(at_ns)),
+                Ok(MovieEvent::Ended(_)) => Some(MovieOutcome::Ended),
+                Ok(MovieEvent::Sought) => Some(MovieOutcome::Sought),
+                Ok(MovieEvent::Refused(_)) => Some(MovieOutcome::Refused),
+                Err(_) => Some(MovieOutcome::Unbelieved),
+            };
+            if answers.len() < MOVIE_ANSWERS {
+                answers.push(frame);
+            }
+            if let Some(outcome) = outcome {
+                return outcome;
+            }
+        }
+    }
+}
+
+/// One movie iteration: a recording — mutated, cut short, or noise — walked
+/// through an honest worker, which must always be believed; then nearly right
+/// answers and noise fed to an opening client, and noise fed to the worker as
+/// requests.
+fn fuzz_movie_iteration(templates: &[Vec<u8>], noise: &[u8], rng: &mut Prng) {
+    use tairix_sandbox::moviedecode::{MovieDecodeClient, MovieDecodeService, RingLayout};
+    let pick = rng.below(templates.len() + 1);
+    let mut file = templates
+        .get(pick)
+        .map_or_else(|| noise.to_vec(), Clone::clone);
+    for _ in 0..rng.at_most(4) {
+        if !file.is_empty() {
+            let at = rng.below(file.len());
+            file[at] ^= rng.next_u8();
+        }
+    }
+    file.truncate(file.len() - rng.at_most(file.len() / 4));
+    // Half the recordings' size, so some pictures are scaled into the ring.
+    let sides = if rng.below(2) == 0 {
+        MOVIE_SIDES
+    } else {
+        (MOVIE_SIDES.0 / 2, MOVIE_SIDES.1 / 2)
+    };
+    let layout = RingLayout::new(sides.0, sides.1).expect("a box");
+    let slots = HeapShare::new(layout.ring_bytes()).expect("a ring");
+    let mut worker = MovieDecodeService::new(Some(slots.clone()));
+    let mut client = MovieDecodeClient::new();
+    let mut answers = Vec::new();
+    let length = file.len() as u64;
+    client
+        .open(length, MOVIE_CEILING, layout, MOVIE_SEED)
+        .expect("idle");
+    let mut outcome = movie_ask((&mut worker, &slots), &mut client, &file, &mut answers);
+    for _ in 0..64 {
+        if matches!(outcome, MovieOutcome::Refused | MovieOutcome::Unbelieved) {
+            break;
+        }
+        let sounded = client.info().is_some_and(|info| info.sound.is_some());
+        let asked = match rng.below(8) {
+            0 => client.seek(rng.next_u64() % 1_000_000_000),
+            1..=3 if sounded => client.sound(),
+            _ => client.next(0),
+        };
+        asked.expect("idle once answered");
+        outcome = movie_ask((&mut worker, &slots), &mut client, &file, &mut answers);
+    }
+    assert_ne!(
+        outcome,
+        MovieOutcome::Unbelieved,
+        "an honest worker is always believed"
+    );
+
+    for answer in answers.iter().take(8) {
+        let mut nearly = answer.clone();
+        let at = rng.below(nearly.len());
+        nearly[at] ^= rng.next_u8() | 1;
+        let mut opening = MovieDecodeClient::new();
+        opening
+            .open(length, MOVIE_CEILING, layout, MOVIE_SEED)
+            .expect("idle");
+        opening.sent();
+        let _ = opening.on_frame(&nearly);
+        let _ = opening.on_frame(noise);
+        let _ = client.on_frame(&nearly);
+    }
+
+    let mut worker = MovieDecodeService::new(HeapShare::new(layout.ring_bytes()));
+    let mut out = Answers(Vec::new());
+    let mut offset = 0;
+    while offset < noise.len() {
+        let len = rng.at_most(noise.len() - offset).max(1);
+        let _ = worker.handle(&noise[offset..offset + len], &mut out);
+        offset += len;
+    }
+}
+
+#[test]
+fn movie_decode_is_believed_when_honest_and_never_panics() {
+    use tairix_sandbox::moviedecode::fixture::recording;
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "movie_decode_is_believed_when_honest_and_never_panics",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    // Muxed once: the encoders are the costly part, the mutations are not.
+    let templates = [
+        recording(6, 3, true, true),
+        recording(5, 2, false, true),
+        recording(7, 4, true, false),
+        recording(2, 1, true, true),
+    ]
+    .map(|movie| movie.file);
+    let mut iteration: u64 = 0;
+    loop {
+        let mut noise = vec![0u8; rng.at_most(MAX_NOISE)];
+        rng.fill(&mut noise);
+        fuzz_movie_iteration(&templates, &noise, &mut rng);
+        iteration += 1;
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS / 8 {
+            break;
+        }
+    }
 }
 
 #[test]

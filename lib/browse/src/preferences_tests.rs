@@ -8,6 +8,7 @@ use crate::chrome::ToolbarBand;
 use crate::layout::ViewMode;
 use crate::render::ListColumns;
 use crate::sort::{Folders, SortDirection, SortKey, SortMode};
+use crate::volume::{DesktopDrives, DriveClass};
 
 /// Every setting moved off its default.
 fn moved() -> FilerPreferences {
@@ -23,6 +24,11 @@ fn moved() -> FilerPreferences {
         toolbar: ToolbarBand::Shown,
         confirm_trash: false,
         unmount_when_closed: false,
+        desktop: DriveClass::ALL
+            .into_iter()
+            .fold(DesktopDrives::NONE, |drives, class| {
+                drives.with(class, class != DriveClass::Removable)
+            }),
         ..FilerPreferences::default()
     };
     moved.presentation.endings.applications = false;
@@ -46,6 +52,11 @@ fn a_new_window_opens_on_large_icons_and_an_opened_image_is_unmounted_when_close
     assert!(!defaults.presentation.hidden_items);
     assert!(defaults.confirm_trash);
     assert!(defaults.unmount_when_closed);
+    assert_eq!(
+        defaults.desktop,
+        DesktopDrives::NONE.with(DriveClass::Removable, true),
+        "removable drives alone are shown on the desktop"
+    );
 }
 
 #[test]
@@ -58,6 +69,8 @@ fn every_setting_survives_its_spelling() {
     assert_eq!(document.get("files.sort_by"), Some("modified"));
     assert_eq!(document.get("files.folders_first"), Some("false"));
     assert_eq!(document.get("files.unmount_when_closed"), Some("false"));
+    assert_eq!(document.get("files.desktop.system"), Some("true"));
+    assert_eq!(document.get("files.desktop.removable"), Some("false"));
     assert_eq!(
         FilerPreferences::load(&FilerPreferences::default().document_of(FilerPreferences::KEYS)),
         (FilerPreferences::default(), Vec::new())

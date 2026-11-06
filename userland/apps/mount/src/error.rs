@@ -4,9 +4,10 @@ use alloc::string::String;
 use core::fmt;
 
 use tairix_abi::imageattach::ImageRefusal;
+use tairix_abi::volume::ReplayAnswer;
 use tairix_abi::Errno;
 use tairix_help::MISUSE;
-use tairix_procinfo::{CallError, ListError};
+use tairix_procinfo::{CallError, ListError, Unnamed};
 use tairix_util::getopt::Refusal;
 use tairix_util::quote::{quote, quote_if_needed, quote_subject};
 
@@ -66,6 +67,25 @@ pub enum MountError {
         /// Its refusal.
         errno: Errno,
     },
+    /// No volume, or no one volume, is the one the name an answer was asked
+    /// for names.
+    Unresolved {
+        /// The name, as given.
+        name: String,
+        /// Why it names none.
+        why: Unnamed,
+    },
+    /// The volume named holds no writes awaiting an answer.
+    NotHeld(String),
+    /// The kernel refused or failed an answer for a volume's held writes.
+    Answer {
+        /// The volume, as named.
+        name: String,
+        /// What was asked of its writes.
+        answer: ReplayAnswer,
+        /// Its refusal.
+        errno: Errno,
+    },
     /// Listing the mount table failed: the transport errored or the reply
     /// did not decode against `sysinfo-v1`.
     Service(Errno),
@@ -75,27 +95,41 @@ pub enum MountError {
 
 impl MountError {
     /// The exit status util-linux's `mount` gives the failure: `1` for a
-    /// command line it did not understand, `2` for a service or terminal
-    /// that failed it, `32` for a mount that failed.
+    /// command line it did not understand or an answer the caller may not
+    /// give, `2` for a service or terminal that failed it, `32` for a mount or
+    /// an answer that failed.
     #[must_use]
     pub const fn status(&self) -> i32 {
         match self {
-            Self::Option(_) | Self::Usage | Self::BadOption | Self::BadName(_) => MISUSE,
+            Self::Option(_)
+            | Self::Usage
+            | Self::BadOption
+            | Self::BadName(_)
+            | Self::Answer {
+                errno: Errno::PermissionDenied,
+                ..
+            } => MISUSE,
             Self::Service(_) | Self::Output(_) => 2,
             Self::UnknownType { .. }
             | Self::WriteProtected { .. }
             | Self::Refused { .. }
             | Self::AlreadyMounted { .. }
             | Self::Mount { .. }
-            | Self::Target { .. } => 32,
+            | Self::Target { .. }
+            | Self::Unresolved { .. }
+            | Self::NotHeld(_)
+            | Self::Answer { .. } => 32,
         }
     }
 
     /// Whether it is a command line not understood, which the hint to
-    /// `--help` follows; a mount that failed is a sentence alone.
+    /// `--help` follows; a mount or an answer that failed is a sentence alone.
     #[must_use]
     pub const fn misused(&self) -> bool {
-        self.status() == MISUSE
+        matches!(
+            self,
+            Self::Option(_) | Self::Usage | Self::BadOption | Self::BadName(_)
+        )
     }
 }
 
@@ -151,6 +185,37 @@ impl fmt::Display for MountError {
             ),
             Self::Mount { image, errno } => write!(f, "{}: {errno}.", quote_subject(image)),
             Self::Target { target, errno } => write!(f, "{}: {errno}.", quote_subject(target)),
+            Self::Unresolved { name, why } => write!(f, "{}: {why}.", quote_subject(name)),
+            Self::NotHeld(name) => write!(
+                f,
+                "{}: holds no writes awaiting an answer.",
+                quote_subject(name)
+            ),
+            Self::Answer {
+                name,
+                answer: ReplayAnswer::Write,
+                errno: Errno::ReadOnly,
+            } => write!(
+                f,
+                "{}: the disk no longer matches the one the writes were made on; they are \
+                 kept, and the volume is read-only.",
+                quote_subject(name)
+            ),
+            Self::Answer {
+                name,
+                answer,
+                errno,
+            } => {
+                let undone = match answer {
+                    ReplayAnswer::Write => "written",
+                    ReplayAnswer::Discard => "discarded",
+                };
+                write!(
+                    f,
+                    "{}: held writes not {undone}: {errno}.",
+                    quote_subject(name)
+                )
+            }
             Self::Service(errno) => write!(f, "system information service error: {errno}"),
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
         }

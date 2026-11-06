@@ -12,6 +12,12 @@
 //! list threaded through them. Only opening a lane allocates, and fallibly;
 //! serving a turn, retiring a lane and teardown never do, so the receive and
 //! reply paths cannot fail for memory.
+//!
+//! A thread waiting for room in its sender's lane waits in that sender's line
+//! ([`RoomWaiters`]). A slot that frees goes to the first thread in the line,
+//! which holds it until it uses it or leaves, when it passes to the next: one
+//! wake per slot, never the whole line, and never a slot free while a thread
+//! waits for it.
 
 extern crate alloc;
 
@@ -46,11 +52,113 @@ pub(crate) const SPARE_LANES: usize = 4;
 /// that a burst cannot leave a deep lane retained.
 pub(crate) const SPARE_LANE_ITEMS: usize = 4;
 
-/// A sender's neighbours in the turn order.
+/// A member's neighbours in an [`Order`].
 #[derive(Copy, Clone, Debug)]
-struct Link<K> {
+pub(crate) struct Link<K> {
     prev: Option<K>,
     next: Option<K>,
+}
+
+/// A value holding its own place in an [`Order`] threaded through its map.
+pub(crate) trait Linked<K> {
+    /// Its place, while it is in the order.
+    fn link(&mut self) -> &mut Option<Link<K>>;
+}
+
+/// The maps lanes and waits are kept in. Their keys are numbers the kernel
+/// assigns, never chosen by a sender, so the fast unkeyed hash is safe.
+type Map<K, V> = HashMap<K, V, BuildFastHash>;
+
+const fn map<K, V>() -> Map<K, V> {
+    HashMap::with_hasher(BuildFastHash::new())
+}
+
+/// A first-in, first-out order threaded through the values of a map, each
+/// holding its neighbours: joining at the back, leaving from anywhere and
+/// finding the front cost the same however many are in it.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Order<K> {
+    /// The first and the last member.
+    ends: Option<(K, K)>,
+    len: usize,
+}
+
+impl<K: Copy + Eq + Hash> Order<K> {
+    /// Nobody in order.
+    pub(crate) const fn new() -> Self {
+        Self { ends: None, len: 0 }
+    }
+
+    /// The member at the front.
+    pub(crate) fn first(&self) -> Option<K> {
+        self.ends.map(|(first, _)| first)
+    }
+
+    /// How many are in order.
+    pub(crate) const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether nobody is in order.
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.ends.is_none()
+    }
+
+    /// Put `member` at the back, unless it is in order already or `map` holds
+    /// no value for it.
+    pub(crate) fn join<V: Linked<K>>(&mut self, map: &mut Map<K, V>, member: K) {
+        let last = self.ends.map(|(_, last)| last);
+        let Some(link) = map.get_mut(&member).map(Linked::link) else {
+            return;
+        };
+        if link.is_some() {
+            return;
+        }
+        *link = Some(Link {
+            prev: last,
+            next: None,
+        });
+        if let Some(back) = last.and_then(|last| link_of(map, last)) {
+            back.next = Some(member);
+        }
+        self.ends = Some((self.first().unwrap_or(member), member));
+        self.len += 1;
+    }
+
+    /// Take `member` out of the order wherever it stands.
+    pub(crate) fn leave<V: Linked<K>>(&mut self, map: &mut Map<K, V>, member: K) {
+        let Some(link) = map.get_mut(&member).and_then(|value| value.link().take()) else {
+            return;
+        };
+        if let Some(prev) = link.prev.and_then(|prev| link_of(map, prev)) {
+            prev.next = link.next;
+        }
+        if let Some(next) = link.next.and_then(|next| link_of(map, next)) {
+            next.prev = link.prev;
+        }
+        self.ends = self.ends.and_then(|(first, last)| {
+            let first = if first == member {
+                link.next
+            } else {
+                Some(first)
+            };
+            let last = if last == member {
+                link.prev
+            } else {
+                Some(last)
+            };
+            first.zip(last)
+        });
+        self.len -= 1;
+    }
+}
+
+/// The place `member`'s value holds in an [`Order`] threaded through `map`.
+fn link_of<K: Copy + Eq + Hash, V: Linked<K>>(
+    map: &mut Map<K, V>,
+    member: K,
+) -> Option<&mut Link<K>> {
+    map.get_mut(&member)?.link().as_mut()
 }
 
 struct Entry<K, L> {
@@ -59,24 +167,24 @@ struct Entry<K, L> {
     turn: Option<Link<K>>,
 }
 
+impl<K, L> Linked<K> for Entry<K, L> {
+    fn link(&mut self) -> &mut Option<Link<K>> {
+        &mut self.turn
+    }
+}
+
 /// What a lane costs the endpoint beyond the items in it: its index slot.
 pub(crate) const fn lane_cost<K, L>() -> usize {
     size_of::<(K, Entry<K, L>)>() + 1
 }
 
-type Index<K, L> = HashMap<K, Entry<K, L>, BuildFastHash>;
-
-/// Senders are numbers the kernel assigns, never chosen by a sender, so the
-/// fast unkeyed hash is safe here.
-const fn index<K, L>() -> Index<K, L> {
-    HashMap::with_hasher(BuildFastHash::new())
-}
+type Index<K, L> = Map<K, Entry<K, L>>;
 
 /// Every sender's lane at one endpoint, and the order they are served in.
 pub(crate) struct Lanes<K, L> {
     entries: Index<K, L>,
-    /// The first and the last sender in the turn order.
-    turn: Option<(K, K)>,
+    /// The senders with traffic waiting, in the order they are served.
+    turn: Order<K>,
     spare: Vec<L>,
 }
 
@@ -104,6 +212,15 @@ impl<K: Copy, L> Retired<K, L> {
         self.entries
             .iter()
             .map(|(sender, entry)| (*sender, &entry.lane))
+    }
+
+    /// Drop each retired lane, telling `released` its sender once what the
+    /// lane held is given back.
+    pub(crate) fn release_each(self, mut released: impl FnMut(K)) {
+        for (sender, entry) in self.entries {
+            drop(entry);
+            released(sender);
+        }
     }
 }
 
@@ -135,7 +252,7 @@ impl<K: Copy + Eq + Hash, L> KeepRoom<K, L> {
     ///
     /// [`Errno::OutOfMemory`] when the room cannot be allocated.
     pub(crate) fn new() -> Result<Self, Errno> {
-        let mut entries = index();
+        let mut entries = map();
         entries.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
         Ok(Self(entries))
     }
@@ -145,8 +262,8 @@ impl<K: Copy + Eq + Hash, L: Lane> Lanes<K, L> {
     /// No lanes.
     pub(crate) const fn new() -> Self {
         Self {
-            entries: index(),
-            turn: None,
+            entries: map(),
+            turn: Order::new(),
             spare: Vec::new(),
         }
     }
@@ -196,96 +313,41 @@ impl<K: Copy + Eq + Hash, L: Lane> Lanes<K, L> {
         Ok(Opened::Made)
     }
 
-    fn link_mut(&mut self, sender: K) -> Option<&mut Link<K>> {
-        self.entries
-            .get_mut(&sender)
-            .and_then(|entry| entry.turn.as_mut())
-    }
-
     /// Put `sender` at the back of the turn order, unless it is already in it.
     /// A sender with no lane has nothing to wait for and is left out.
     pub(crate) fn join_turn(&mut self, sender: K) {
-        let last = self.turn.map(|(_, last)| last);
-        let Some(entry) = self.entries.get_mut(&sender) else {
-            return;
-        };
-        if entry.turn.is_some() {
-            return;
-        }
-        entry.turn = Some(Link {
-            prev: last,
-            next: None,
-        });
-        self.turn = match self.turn {
-            Some((first, last)) => {
-                if let Some(link) = self.link_mut(last) {
-                    link.next = Some(sender);
-                }
-                Some((first, sender))
-            }
-            None => Some((sender, sender)),
-        };
-    }
-
-    /// Take `sender` out of the turn order wherever it stands.
-    fn unlink(&mut self, sender: K) {
-        let Some(link) = self
-            .entries
-            .get_mut(&sender)
-            .and_then(|entry| entry.turn.take())
-        else {
-            return;
-        };
-        if let Some(prev) = link.prev.and_then(|prev| self.link_mut(prev)) {
-            prev.next = link.next;
-        }
-        if let Some(next) = link.next.and_then(|next| self.link_mut(next)) {
-            next.prev = link.prev;
-        }
-        self.turn = self.turn.and_then(|(first, last)| {
-            let first = if first == sender {
-                link.next
-            } else {
-                Some(first)
-            };
-            let last = if last == sender {
-                link.prev
-            } else {
-                Some(last)
-            };
-            first.zip(last)
-        });
+        self.turn.join(&mut self.entries, sender);
     }
 
     /// The sender served next.
     pub(crate) fn next_turn(&self) -> Option<K> {
-        self.turn.map(|(first, _)| first)
+        self.turn.first()
     }
 
     /// End the turn [`Self::next_turn`] named: a sender with more waiting goes
     /// to the back, one with nothing left leaves the order.
     pub(crate) fn end_turn(&mut self, still_waiting: bool) {
-        let Some((first, last)) = self.turn else {
+        let Some(first) = self.turn.first() else {
             return;
         };
-        if still_waiting && first == last {
+        if still_waiting && self.turn.len() == 1 {
             return;
         }
-        self.unlink(first);
+        self.turn.leave(&mut self.entries, first);
         if still_waiting {
-            self.join_turn(first);
+            self.turn.join(&mut self.entries, first);
         }
     }
 
     /// Take `sender` out of the turn order wherever it stands: its last
     /// waiting item went some other way than being served.
     pub(crate) fn leave_turn(&mut self, sender: K) {
-        self.unlink(sender);
+        self.turn.leave(&mut self.entries, sender);
     }
 
     /// Whether any sender has traffic waiting.
     pub(crate) fn has_turn(&self) -> bool {
-        self.turn.is_some()
+        !self.turn.is_empty()
     }
 
     /// Retire `sender`'s lane if it holds nothing: kept as a spare while there
@@ -299,7 +361,7 @@ impl<K: Copy + Eq + Hash, L: Lane> Lanes<K, L> {
         {
             return Retiring::Nothing;
         }
-        self.unlink(sender);
+        self.turn.leave(&mut self.entries, sender);
         let Some(Entry { mut lane, .. }) = self.entries.remove(&sender) else {
             return Retiring::Nothing;
         };
@@ -315,7 +377,7 @@ impl<K: Copy + Eq + Hash, L: Lane> Lanes<K, L> {
     /// Remove `sender`'s lane whatever it holds, for the caller to drop
     /// outside its lock.
     pub(crate) fn remove(&mut self, sender: K) -> Option<L> {
-        self.unlink(sender);
+        self.turn.leave(&mut self.entries, sender);
         self.entries.remove(&sender).map(|entry| entry.lane)
     }
 
@@ -324,18 +386,16 @@ impl<K: Copy + Eq + Hash, L: Lane> Lanes<K, L> {
     /// lock. Allocates nothing: `room` was made beforehand.
     pub(crate) fn keep_only(&mut self, keep: K, room: KeepRoom<K, L>) -> Retired<K, L> {
         let mut others = core::mem::replace(&mut self.entries, room.0);
-        let kept = others.remove(&keep);
-        let in_turn = kept.as_ref().is_some_and(|entry| entry.turn.is_some());
-        if let Some(mut entry) = kept {
-            entry.turn = in_turn.then_some(Link {
-                prev: None,
-                next: None,
-            });
+        self.turn = Order::new();
+        if let Some(mut entry) = others.remove(&keep) {
+            let in_turn = entry.turn.take().is_some();
             // The room was reserved, so this cannot allocate; a refusal drops
             // the lane rather than leave it half kept.
             let _ = self.entries.try_insert(keep, entry);
+            if in_turn {
+                self.turn.join(&mut self.entries, keep);
+            }
         }
-        self.turn = (in_turn && self.entries.contains_key(&keep)).then_some((keep, keep));
         Retired {
             entries: others,
             _spare: Vec::new(),
@@ -344,9 +404,9 @@ impl<K: Copy + Eq + Hash, L: Lane> Lanes<K, L> {
 
     /// Take every lane, spares included, for teardown.
     pub(crate) fn take_all(&mut self) -> Retired<K, L> {
-        self.turn = None;
+        self.turn = Order::new();
         Retired {
-            entries: core::mem::replace(&mut self.entries, index()),
+            entries: core::mem::replace(&mut self.entries, map()),
             _spare: core::mem::take(&mut self.spare),
         }
     }
@@ -370,8 +430,9 @@ impl<K: Copy + Eq + Hash, L: Lane> Lanes<K, L> {
     }
 }
 
-/// Who to wake once a sender's lane has room: the threads waiting as that
-/// sender, or, when an endpoint ends, every thread waiting at it.
+/// Who an endpoint's change leaves to be woken once its lock is released: the
+/// thread a freed slot was handed to, a sender's watchers, or, when an
+/// endpoint ends, every thread waiting at it.
 #[derive(Debug)]
 pub struct RoomWake<K> {
     waiting: Waiting<K>,
@@ -380,8 +441,15 @@ pub struct RoomWake<K> {
 #[derive(Debug)]
 enum Waiting<K> {
     Nobody,
+    /// The thread a freed slot was handed to.
+    One(u64),
+    /// A sender's watchers.
     Sender(Vec<u64>),
-    Everyone(HashMap<K, Vec<u64>, BuildFastHash>),
+    /// Every watcher at an endpoint that went.
+    Everyone(Map<K, Vec<u64>>),
+    /// Every thread waiting for room at an endpoint that went, or whose every
+    /// lane changed at once.
+    All(RoomWaiters<K>),
 }
 
 impl<K> RoomWake<K> {
@@ -401,60 +469,361 @@ impl<K> RoomWake<K> {
 
     /// Every scheduler task to wake.
     pub fn tasks(&self) -> impl Iterator<Item = u64> + '_ {
+        let one = match self.waiting {
+            Waiting::One(task) => Some(task),
+            _ => None,
+        };
         let sender = match &self.waiting {
             Waiting::Sender(tasks) => tasks.as_slice(),
-            Waiting::Nobody | Waiting::Everyone(_) => &[],
+            _ => &[],
         };
         let everyone = match &self.waiting {
             Waiting::Everyone(groups) => Some(groups.values().flatten()),
-            Waiting::Nobody | Waiting::Sender(_) => None,
+            _ => None,
         };
-        sender.iter().chain(everyone.into_iter().flatten()).copied()
+        let all = match &self.waiting {
+            Waiting::All(waiters) => Some(waiters.records.keys()),
+            _ => None,
+        };
+        one.into_iter()
+            .chain(sender.iter().copied())
+            .chain(everyone.into_iter().flatten().copied())
+            .chain(all.into_iter().flatten().copied())
     }
 }
 
-/// Tasks parked until a sender's lane has room, grouped by the sender they
-/// wait as, so waking one sender's waiters never touches another's.
+/// How a thread waiting for room in its sender's lane stands.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Standing {
+    /// In its sender's line for the next slot to free.
+    Waiting,
+    /// A freed slot was handed to it, and it holds that slot until it uses or
+    /// leaves it.
+    Designated,
+    /// Its wait reported the room ready, and it holds the slot until its next
+    /// call that is neither a send nor a wait watching the port, or its end.
+    /// Ports only.
+    Owing,
+}
+
+/// One thread's wait for room.
+#[derive(Debug)]
+struct Record<K> {
+    sender: K,
+    standing: Standing,
+    /// Its place in its sender's line, or among the threads holding a slot.
+    place: Option<Link<u64>>,
+}
+
+impl<K> Linked<u64> for Record<K> {
+    fn link(&mut self) -> &mut Option<Link<u64>> {
+        &mut self.place
+    }
+}
+
+/// One sender's threads waiting for room, and those holding a slot.
+#[derive(Debug)]
+struct Line {
+    waiting: Order<u64>,
+    holding: Order<u64>,
+}
+
+/// The threads waiting for room in their senders' lanes, one line a sender,
+/// kept under the lock that guards the lanes.
+///
+/// A slot that frees is handed to the first thread in its sender's line, which
+/// holds it — no sibling's send takes it — until it uses or leaves it, when it
+/// passes to the next. So each freed slot wakes one thread, and at every
+/// release of the lock each free slot is held by one thread or has no thread
+/// waiting for it: a thread parks only after looking and finding none it may
+/// take. Every operation costs the same however many wait.
+#[derive(Debug)]
 pub(crate) struct RoomWaiters<K> {
-    groups: HashMap<K, Vec<u64>, BuildFastHash>,
+    /// Each waiting thread's record, by scheduler task.
+    records: Map<u64, Record<K>>,
+    lines: Map<K, Line>,
 }
 
 impl<K: Copy + Eq + Hash> RoomWaiters<K> {
     /// Nobody waiting.
     pub(crate) const fn new() -> Self {
         Self {
-            groups: HashMap::with_hasher(BuildFastHash::new()),
+            records: map(),
+            lines: map(),
         }
     }
 
-    /// Record `task` as parked for room in `sender`'s lane. Idempotent.
+    /// The slots `sender`'s threads hold.
+    fn held(&self, sender: K) -> usize {
+        self.lines.get(&sender).map_or(0, |of| of.holding.len())
+    }
+
+    /// The first thread in `sender`'s line.
+    fn first_waiting(&self, sender: K) -> Option<u64> {
+        self.lines.get(&sender)?.waiting.first()
+    }
+
+    /// The sender `task` waits as.
+    pub(crate) fn sender_of(&self, task: u64) -> Option<K> {
+        self.records.get(&task).map(|record| record.sender)
+    }
+
+    /// Whether `task` holds a slot.
+    pub(crate) fn holds(&self, task: u64) -> bool {
+        self.records
+            .get(&task)
+            .is_some_and(|record| record.standing != Standing::Waiting)
+    }
+
+    /// Whether a send by `task` as `sender`, with `free` slots free in its
+    /// lane, finds one: its own, or one no thread of `sender` holds.
+    pub(crate) fn has_room(&self, task: u64, sender: K, free: usize) -> bool {
+        self.holds(task) || free > self.held(sender)
+    }
+
+    /// Look for room as `task`, a thread of `sender`, with `free` slots free in
+    /// its lane, answering whether it holds one now: a slot no thread holds is
+    /// handed to it. Otherwise it waits in `sender`'s line, keeping its place
+    /// there if it waited before.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when its record cannot be kept: it must then not
+    /// park, since nothing would wake it.
+    pub(crate) fn look(&mut self, task: u64, sender: K, free: usize) -> Result<bool, Errno> {
+        if !self.records.contains_key(&task) {
+            self.wait(task, sender)?;
+        }
+        let Some(record) = self.records.get(&task) else {
+            return Ok(false);
+        };
+        let (waits_as, standing) = (record.sender, record.standing);
+        if standing != Standing::Waiting {
+            return Ok(true);
+        }
+        if free > self.held(waits_as) {
+            self.designate(task);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Put `task` at the back of `sender`'s line.
+    fn wait(&mut self, task: u64, sender: K) -> Result<(), Errno> {
+        self.records
+            .try_reserve(1)
+            .map_err(|_| Errno::OutOfMemory)?;
+        if !self.lines.contains_key(&sender) {
+            let line = Line {
+                waiting: Order::new(),
+                holding: Order::new(),
+            };
+            self.lines
+                .try_insert(sender, line)
+                .map_err(|_| Errno::OutOfMemory)?;
+        }
+        let record = Record {
+            sender,
+            standing: Standing::Waiting,
+            place: None,
+        };
+        // Reserved above, so this cannot allocate.
+        let _ = self.records.try_insert(task, record);
+        if let Some(line) = self.lines.get_mut(&sender) {
+            line.waiting.join(&mut self.records, task);
+        }
+        Ok(())
+    }
+
+    /// Hand `task`, waiting, the slot it waits for.
+    fn designate(&mut self, task: u64) {
+        let Some(sender) = self.sender_of(task) else {
+            return;
+        };
+        let Some(line) = self.lines.get_mut(&sender) else {
+            return;
+        };
+        line.waiting.leave(&mut self.records, task);
+        line.holding.join(&mut self.records, task);
+        if let Some(record) = self.records.get_mut(&task) {
+            record.standing = Standing::Designated;
+        }
+    }
+
+    /// A slot freed in `sender`'s lane, which now has `free`: hand one no
+    /// thread holds to the first thread in its line, answering whom to wake.
+    /// With nobody waiting this is one look at an empty map.
+    pub(crate) fn hand_out(&mut self, sender: K, free: usize) -> RoomWake<K> {
+        if self.records.is_empty() || free <= self.held(sender) {
+            return RoomWake::none();
+        }
+        let Some(first) = self.first_waiting(sender) else {
+            return RoomWake::none();
+        };
+        self.designate(first);
+        RoomWake {
+            waiting: Waiting::One(first),
+        }
+    }
+
+    /// `task` sent into the slot it holds, which ends its wait. Answers
+    /// whether it held one.
+    pub(crate) fn consume(&mut self, task: u64) -> bool {
+        self.holds(task) && self.remove(task).is_some()
+    }
+
+    /// End `task`'s wait, answering its sender when a slot it held is let go
+    /// of, for the caller to hand on ([`Self::hand_out`]).
+    pub(crate) fn leave(&mut self, task: u64) -> Option<K> {
+        match self.remove(task)? {
+            (sender, Standing::Designated | Standing::Owing) => Some(sender),
+            (_, Standing::Waiting) => None,
+        }
+    }
+
+    /// Keep the slot `task` holds now its wait reported the room ready, until
+    /// its next call that is neither a send nor a wait watching the port, or
+    /// its end; a thread holding none takes one of the `free` no thread holds.
+    /// Answers whether it holds a slot; one that does not ends its wait.
+    pub(crate) fn own(&mut self, task: u64, free: usize) -> bool {
+        let Some(record) = self.records.get(&task) else {
+            return false;
+        };
+        let (sender, standing) = (record.sender, record.standing);
+        if standing == Standing::Waiting {
+            if free <= self.held(sender) {
+                let _ = self.remove(task);
+                return false;
+            }
+            self.designate(task);
+        }
+        if let Some(record) = self.records.get_mut(&task) {
+            record.standing = Standing::Owing;
+        }
+        true
+    }
+
+    /// Forget every record of `sender`, which has ended: its threads are gone.
+    pub(crate) fn take_sender(&mut self, sender: K) {
+        let Some(line) = self.lines.remove(&sender) else {
+            return;
+        };
+        for first in [line.waiting.first(), line.holding.first()] {
+            let mut next = first;
+            while let Some(task) = next {
+                next = self
+                    .records
+                    .remove(&task)
+                    .and_then(|record| record.place)
+                    .and_then(|link| link.next);
+            }
+        }
+    }
+
+    /// Every record, for a change that touches every lane at once.
+    pub(crate) fn take_everyone(&mut self) -> RoomWake<K> {
+        if self.records.is_empty() {
+            return RoomWake::none();
+        }
+        RoomWake {
+            waiting: Waiting::All(core::mem::replace(self, Self::new())),
+        }
+    }
+
+    /// Drop `task`'s record from its line, answering its sender and standing.
+    fn remove(&mut self, task: u64) -> Option<(K, Standing)> {
+        let record = self.records.get(&task)?;
+        let (sender, standing) = (record.sender, record.standing);
+        let emptied = self.lines.get_mut(&sender).is_some_and(|line| {
+            match standing {
+                Standing::Waiting => line.waiting.leave(&mut self.records, task),
+                Standing::Designated | Standing::Owing => {
+                    line.holding.leave(&mut self.records, task);
+                }
+            }
+            line.waiting.is_empty() && line.holding.is_empty()
+        });
+        if emptied {
+            self.lines.remove(&sender);
+        }
+        self.records.remove(&task);
+        Some((sender, standing))
+    }
+}
+
+/// Tasks watching for the answers their sender is owed, grouped by that
+/// sender, so an answer wakes its own sender's watchers and no other's. A
+/// watch is found by its task, so recording and forgetting one cost the same
+/// however many watch.
+pub(crate) struct Watchers<K> {
+    /// Each watching task's sender, and its place in that sender's group.
+    records: Map<u64, (K, usize)>,
+    groups: Map<K, Vec<u64>>,
+}
+
+impl<K: Copy + Eq + Hash> Watchers<K> {
+    /// Nobody watching.
+    pub(crate) const fn new() -> Self {
+        Self {
+            records: map(),
+            groups: map(),
+        }
+    }
+
+    /// Record `task` as watching for `sender`'s answers. Idempotent.
     ///
     /// # Errors
     ///
     /// [`Errno::OutOfMemory`] when the record cannot be kept; the task must
     /// then not park on a wake that would never come.
     pub(crate) fn watch(&mut self, task: u64, sender: K) -> Result<(), Errno> {
-        if let Some(group) = self.groups.get_mut(&sender) {
-            if !group.contains(&task) {
-                group.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
-                group.push(task);
-            }
+        if self.records.contains_key(&task) {
             return Ok(());
         }
-        let mut group = Vec::new();
-        group.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+        self.records
+            .try_reserve(1)
+            .map_err(|_| Errno::OutOfMemory)?;
+        if let Some(group) = self.groups.get_mut(&sender) {
+            group.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+        } else {
+            let mut group = Vec::new();
+            group.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+            self.groups
+                .try_insert(sender, group)
+                .map_err(|_| Errno::OutOfMemory)?;
+        }
+        let Some(group) = self.groups.get_mut(&sender) else {
+            return Err(Errno::OutOfMemory);
+        };
+        let at = group.len();
         group.push(task);
-        self.groups
-            .try_insert(sender, group)
-            .map(drop)
-            .map_err(|_| Errno::OutOfMemory)
+        // Reserved above, so this cannot allocate.
+        let _ = self.records.try_insert(task, (sender, at));
+        Ok(())
     }
 
-    /// Forget `task`'s wait as `sender`, returning an emptied group for the
+    /// Whether `task` watches for `sender`'s answers.
+    fn watches(&self, task: u64, sender: K) -> bool {
+        self.records
+            .get(&task)
+            .is_some_and(|&(watching, _)| watching == sender)
+    }
+
+    /// Forget `task`'s watch as `sender`, returning an emptied group for the
     /// caller to drop outside its lock.
     pub(crate) fn unwatch(&mut self, task: u64, sender: K) -> Option<Vec<u64>> {
+        if !self.watches(task, sender) {
+            return None;
+        }
+        let (_, at) = self.records.remove(&task)?;
         let group = self.groups.get_mut(&sender)?;
-        group.retain(|&waiting| waiting != task);
+        if at < group.len() {
+            let _ = group.swap_remove(at);
+        }
+        let moved = group.get(at).copied();
+        if let Some(record) = moved.and_then(|moved| self.records.get_mut(&moved)) {
+            record.1 = at;
+        }
         if group.is_empty() {
             self.groups.remove(&sender)
         } else {
@@ -462,28 +831,49 @@ impl<K: Copy + Eq + Hash> RoomWaiters<K> {
         }
     }
 
-    /// The tasks waiting as `sender`, whose lane just gained room. Taken, so
-    /// each wait is woken once; one that still finds no room records itself
-    /// again.
-    pub(crate) fn take_waiting_as(&mut self, sender: K) -> RoomWake<K> {
+    /// The watchers an answer to a call of `sender`'s wakes, taken so each is
+    /// woken once: none when one of `named`, the threads the call names and
+    /// its answer wakes already, watches for it, and else every watcher of
+    /// `sender`, since a thread other than its poster may collect it. One that
+    /// still finds nothing records itself again.
+    pub(crate) fn take_answered(
+        &mut self,
+        sender: K,
+        mut named: impl Iterator<Item = u64>,
+    ) -> RoomWake<K> {
+        if self.groups.is_empty() || named.any(|task| self.watches(task, sender)) {
+            return RoomWake::none();
+        }
+        self.take_watching_as(sender)
+    }
+
+    /// The tasks watching for `sender`'s answers, taken, so each watch is
+    /// woken once: for an answer no thread its call names watches for, and
+    /// for a sender that has ended.
+    pub(crate) fn take_watching_as(&mut self, sender: K) -> RoomWake<K> {
+        if self.groups.is_empty() {
+            return RoomWake::none();
+        }
+        let Some(group) = self.groups.remove(&sender) else {
+            return RoomWake::none();
+        };
+        for task in &group {
+            self.records.remove(task);
+        }
         RoomWake {
-            waiting: self
-                .groups
-                .remove(&sender)
-                .map_or(Waiting::Nobody, Waiting::Sender),
+            waiting: Waiting::Sender(group),
         }
     }
 
-    /// Every waiting task, for a change that touches every lane at once.
+    /// Every watching task, for an endpoint that went.
     pub(crate) fn take_everyone(&mut self) -> RoomWake<K> {
         if self.groups.is_empty() {
             return RoomWake::none();
         }
+        // Keeps its table, so nothing is freed under the endpoint's lock.
+        self.records.clear();
         RoomWake {
-            waiting: Waiting::Everyone(core::mem::replace(
-                &mut self.groups,
-                HashMap::with_hasher(BuildFastHash::new()),
-            )),
+            waiting: Waiting::Everyone(core::mem::replace(&mut self.groups, map())),
         }
     }
 }
@@ -789,41 +1179,223 @@ mod tests {
     }
 
     #[test]
-    fn room_waiters_wake_only_the_tasks_waiting_as_a_sender_and_each_once() {
-        let mut waiters = RoomWaiters::new();
-        waiters.watch(1, 7).expect("recorded");
-        waiters.watch(2, 9).expect("recorded");
-        waiters.watch(3, 9).expect("recorded");
-        waiters
+    fn watchers_wake_only_the_tasks_watching_as_a_sender_and_each_once() {
+        let mut watchers = Watchers::new();
+        watchers.watch(1, 7).expect("recorded");
+        watchers.watch(2, 9).expect("recorded");
+        watchers.watch(3, 9).expect("recorded");
+        watchers
             .watch(3, 9)
             .expect("recording twice changes nothing");
-        assert!(waiters.take_waiting_as(5).is_empty());
-        assert_eq!(tasks(&waiters.take_waiting_as(9)), [2, 3]);
-        assert!(waiters.take_waiting_as(9).is_empty(), "woken once");
-        assert_eq!(tasks(&waiters.take_waiting_as(7)), [1]);
+        assert!(watchers.take_watching_as(5).is_empty());
+        assert_eq!(tasks(&watchers.take_watching_as(9)), [2, 3]);
+        assert!(watchers.take_watching_as(9).is_empty(), "woken once");
+        assert_eq!(tasks(&watchers.take_watching_as(7)), [1]);
     }
 
     #[test]
-    fn however_many_wait_as_one_sender_each_is_named() {
-        let mut waiters = RoomWaiters::new();
+    fn however_many_watch_as_one_sender_each_is_named() {
+        let mut watchers = Watchers::new();
         for task in 0..100 {
-            waiters.watch(task, 4).expect("recorded");
+            watchers.watch(task, 4).expect("recorded");
         }
-        waiters.watch(500, 8).expect("recorded");
-        let woken = waiters.take_waiting_as(4);
+        watchers.watch(500, 8).expect("recorded");
+        let woken = watchers.take_watching_as(4);
         assert_eq!(tasks(&woken), (0..100).collect::<Vec<u64>>());
-        assert_eq!(tasks(&waiters.take_everyone()), [500]);
+        assert_eq!(tasks(&watchers.take_everyone()), [500]);
     }
 
     #[test]
-    fn a_forgotten_wait_is_not_woken_and_an_emptied_group_goes() {
-        let mut waiters = RoomWaiters::new();
-        waiters.watch(1, 7).expect("recorded");
-        waiters.watch(2, 7).expect("recorded");
-        assert!(waiters.unwatch(1, 7).is_none(), "the group still waits");
-        assert!(waiters.unwatch(9, 7).is_none());
-        assert!(waiters.unwatch(2, 7).is_some(), "the emptied group goes");
-        assert!(waiters.take_everyone().is_empty());
+    fn a_forgotten_watch_is_not_woken_and_an_emptied_group_goes() {
+        let mut watchers = Watchers::new();
+        watchers.watch(1, 7).expect("recorded");
+        watchers.watch(2, 7).expect("recorded");
+        assert!(watchers.unwatch(1, 7).is_none(), "the group still waits");
+        assert!(watchers.unwatch(9, 7).is_none());
+        assert!(watchers.unwatch(2, 7).is_some(), "the emptied group goes");
+        assert!(watchers.take_everyone().is_empty());
         assert!(RoomWake::<u64>::none().is_empty());
+    }
+
+    /// Forgetting watches in any order leaves every other where a later look
+    /// finds it, however its group was reordered.
+    #[test]
+    fn forgetting_watches_in_any_order_keeps_the_rest_found() {
+        let mut watchers = Watchers::new();
+        for task in 0..8 {
+            watchers.watch(task, 7).expect("recorded");
+        }
+        for task in [0, 7, 3, 4] {
+            assert!(watchers.unwatch(task, 7).is_none(), "{task}");
+        }
+        for task in [1, 2, 5, 6] {
+            assert!(watchers.watches(task, 7), "{task}");
+        }
+        assert!(watchers.unwatch(6, 7).is_none());
+        assert_eq!(tasks(&watchers.take_watching_as(7)), [1, 2, 5]);
+    }
+
+    /// An answer whose call names a watching thread wakes no other watcher of
+    /// its sender and leaves their watches standing; one whose call names
+    /// none of them wakes them all, once.
+    #[test]
+    fn an_answer_wakes_its_senders_watchers_only_when_its_call_names_none() {
+        let mut watchers = Watchers::new();
+        for task in [1, 2, 3] {
+            watchers.watch(task, 7).expect("recorded");
+        }
+        watchers.watch(4, 9).expect("recorded");
+        assert!(
+            watchers.take_answered(7, [2, 8].into_iter()).is_empty(),
+            "its poster watches"
+        );
+        assert_eq!(
+            tasks(&watchers.take_answered(7, [8].into_iter())),
+            [1, 2, 3]
+        );
+        assert!(
+            watchers.take_answered(7, [8].into_iter()).is_empty(),
+            "taken once"
+        );
+        assert_eq!(
+            tasks(&watchers.take_everyone()),
+            [4],
+            "another sender's stand"
+        );
+    }
+
+    /// Each of `tasks` looks for room as `sender` with nothing free, in turn.
+    fn waiting(waiters: &mut RoomWaiters<u64>, sender: u64, tasks: &[u64]) {
+        for &task in tasks {
+            assert_eq!(waiters.look(task, sender, 0), Ok(false), "{task}");
+        }
+    }
+
+    #[test]
+    fn a_freed_slot_wakes_the_first_in_line_and_no_other() {
+        let mut waiters = RoomWaiters::new();
+        waiting(&mut waiters, 7, &[1, 2, 3]);
+        waiting(&mut waiters, 9, &[4]);
+        assert_eq!(tasks(&waiters.hand_out(7, 1)), [1], "one slot, one wake");
+        assert!(waiters.hand_out(7, 1).is_empty(), "the slot is held");
+        assert!(waiters.has_room(1, 7, 1), "by the thread it was handed to");
+        assert!(!waiters.has_room(2, 7, 1), "and by no sibling");
+        assert_eq!(tasks(&waiters.hand_out(7, 2)), [2], "a second, the next");
+        assert!(
+            waiters.hand_out(9, 0).is_empty(),
+            "nothing free, none woken"
+        );
+    }
+
+    #[test]
+    fn a_slot_left_unused_passes_to_the_next_in_line() {
+        let mut waiters = RoomWaiters::new();
+        waiting(&mut waiters, 7, &[1, 2, 3]);
+        assert_eq!(tasks(&waiters.hand_out(7, 1)), [1]);
+        assert_eq!(waiters.leave(2), None, "a waiting thread held nothing");
+        assert_eq!(waiters.leave(1), Some(7), "the holder let it go");
+        assert_eq!(tasks(&waiters.hand_out(7, 1)), [3]);
+        assert_eq!(waiters.leave(5), None, "a thread never waiting holds none");
+    }
+
+    #[test]
+    fn a_rewatch_keeps_its_place_in_line() {
+        let mut waiters = RoomWaiters::new();
+        waiting(&mut waiters, 7, &[1, 2, 1, 2]);
+        assert_eq!(tasks(&waiters.hand_out(7, 1)), [1]);
+        assert_eq!(tasks(&waiters.hand_out(7, 2)), [2]);
+    }
+
+    #[test]
+    fn a_used_slot_ends_the_wait_and_a_free_one_is_taken_by_a_look() {
+        let mut waiters = RoomWaiters::new();
+        assert_eq!(waiters.look(1, 7, 1), Ok(true), "a slot nobody holds");
+        assert_eq!(waiters.look(2, 7, 1), Ok(false), "held, so the next waits");
+        assert!(waiters.consume(1));
+        assert!(!waiters.consume(2), "a waiting thread holds none to use");
+        assert_eq!(tasks(&waiters.hand_out(7, 1)), [2]);
+        assert!(!waiters.has_room(1, 7, 1), "its wait ended with its send");
+    }
+
+    #[test]
+    fn an_owed_slot_is_held_until_its_holder_sends_or_leaves() {
+        let mut waiters = RoomWaiters::new();
+        waiting(&mut waiters, 7, &[1, 2]);
+        let _ = waiters.hand_out(7, 1);
+        assert!(waiters.own(1, 1), "the handed slot is kept");
+        assert!(!waiters.has_room(2, 7, 1), "from its siblings");
+        assert!(waiters.consume(1), "until it sends");
+        assert!(
+            !waiters.own(2, 0),
+            "a thread with nothing free owes nothing"
+        );
+        assert!(waiters.hand_out(7, 1).is_empty(), "and its wait ended");
+        waiting(&mut waiters, 7, &[3, 4]);
+        let _ = waiters.hand_out(7, 1);
+        assert!(waiters.own(3, 1));
+        assert_eq!(waiters.leave(3), Some(7), "or until it leaves");
+        assert_eq!(tasks(&waiters.hand_out(7, 1)), [4]);
+    }
+
+    #[test]
+    fn an_ended_sender_leaves_no_record_and_a_teardown_takes_every_one() {
+        let mut waiters = RoomWaiters::new();
+        waiting(&mut waiters, 7, &[1, 2]);
+        waiting(&mut waiters, 9, &[3]);
+        let _ = waiters.hand_out(7, 1);
+        waiters.take_sender(7);
+        assert_eq!(waiters.sender_of(1), None);
+        assert_eq!(waiters.sender_of(2), None);
+        assert!(waiters.hand_out(7, 2).is_empty());
+        assert_eq!(tasks(&waiters.take_everyone()), [3]);
+        assert!(waiters.take_everyone().is_empty());
+    }
+
+    /// At every step each free slot is held by one thread or waited for by
+    /// none, however looks, sends, departures, owes and frees interleave.
+    #[test]
+    fn every_free_slot_is_held_or_unwaited_for_under_any_mix_of_operations() {
+        const DEPTH: usize = 2;
+        let mut rng = tairix_fuzzseed::Prng::new(0x900d_5107_0bde_7a11);
+        for _ in 0..200 {
+            let mut waiters = RoomWaiters::new();
+            let mut free = 0usize;
+            for _ in 0..64 {
+                let draw = rng.next_u64();
+                let task = draw % 4 + 1;
+                match (draw >> 8) % 5 {
+                    0 => {
+                        let _ = waiters.look(task, 7, free).expect("recorded");
+                    }
+                    1 if free > 0 && waiters.has_room(task, 7, free) => {
+                        let _ = waiters.consume(task);
+                        free -= 1;
+                    }
+                    2 => {
+                        if let Some(sender) = waiters.leave(task) {
+                            let _ = waiters.hand_out(sender, free);
+                        }
+                    }
+                    3 if free < DEPTH => {
+                        free += 1;
+                        let _ = waiters.hand_out(7, free);
+                    }
+                    4 => {
+                        let _ = waiters.own(task, free);
+                    }
+                    _ => {}
+                }
+                let held = waiters.held(7);
+                assert!(held <= free, "{held} held of {free} free");
+                let waiting = waiters
+                    .lines
+                    .get(&7)
+                    .is_some_and(|line| !line.waiting.is_empty());
+                assert!(
+                    free == held || !waiting,
+                    "a free slot unheld while one waits"
+                );
+            }
+        }
     }
 }

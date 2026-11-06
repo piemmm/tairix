@@ -161,7 +161,7 @@ impl GroupsDbSource for LateGroupsDb {
     fn text(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
         let held = self.held.read();
         let text = held.as_deref().ok_or(Errno::NotFound)?;
-        tairix_util::fallible::collected(text.len(), text.iter().copied()).ok_or(Errno::OutOfMemory)
+        tairix_util::fallible::copied(text).ok_or(Errno::OutOfMemory)
     }
 
     fn with_text(&self, read: &mut dyn FnMut(&[u8])) -> Result<(), Errno> {

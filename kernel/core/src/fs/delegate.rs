@@ -43,7 +43,9 @@ use zeroize::Zeroize;
 use super::listing::{DirPosition, ListEnd};
 use super::mount::Projection;
 use super::node::{NodeRef, VolumeNodes};
-use super::path::{owned_name, parse_link_target, Path, Step, TargetStep, MAX_PATH_COMPONENTS};
+use super::path::{
+    owned_name, parse_link_target, Anchor, Path, Step, TargetStep, MAX_PATH_COMPONENTS,
+};
 use super::perm::{Access, CreateMode, Credentials, Metadata, Mode};
 use super::{BoundedReadError, VfsError};
 
@@ -968,14 +970,19 @@ impl<R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'_, R> {
                         let target = self.read_link_target(child, walked.info.size)?;
                         let parsed = parse_link_target(&target)?;
                         // A relative target continues from the link's own
-                        // directory, where the stack already stands.
-                        if parsed.is_absolute() {
-                            let floor_node = self.floor_node(cred, &mut floor)?;
-                            let floor_walked = self.walked(floor_node, None)?;
-                            stack.clear();
-                            stack.push(floor_walked);
-                            floor.bottom = Some(true);
-                            road.stand_at(edge.path)?;
+                        // directory, where the stack already stands, and one
+                        // naming another root is its caller's to resolve.
+                        match parsed.anchor() {
+                            Anchor::Elsewhere => return Err(VfsError::CrossVolume),
+                            Anchor::Floor => {
+                                let floor_node = self.floor_node(cred, &mut floor)?;
+                                let floor_walked = self.walked(floor_node, None)?;
+                                stack.clear();
+                                stack.push(floor_walked);
+                                floor.bottom = Some(true);
+                                road.stand_at(edge.path)?;
+                            }
+                            Anchor::Here => {}
                         }
                         road.splice(parsed.into_steps())?;
                         continue;

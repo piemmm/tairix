@@ -18,13 +18,14 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::fs::{FileId, FileKind};
+use tairix_abi::appinfo::is_bundle_name;
+use tairix_abi::fs::{is_riscos_application_name, DocumentStamp, FileId, FileKind};
 use tairix_abi::time::Time64;
-use tairix_abi::BUNDLE_SUFFIX;
 use tairix_fsmeta::preset::acorn::Filetype;
-use tairix_icon::{DocumentStamp, FolderSample, IconKind};
+use tairix_icon::{disk_icon, FolderSample, IconKind};
 
 use crate::places::VolumeFacts;
+use crate::vfs::LinkInfo;
 
 /// What a listed symbolic link's target resolves to.
 ///
@@ -42,10 +43,42 @@ pub enum LinkTarget {
     /// A `<Name>.app` application bundle — what a desktop shortcut to an
     /// application names.
     Bundle,
+    /// A volume's root, named by its identity: what a shortcut to a drive
+    /// stores. No walk follows it, so whether the volume is there is what the
+    /// mount table says ([`crate::volume::locate`]).
+    Volume,
     /// Nothing reachable: the link dangles, or its target could not be
     /// described. Every verb that would act on the target refuses; the link
     /// itself is still shown, renamed, and removed like any other name.
     Dangling,
+}
+
+impl LinkTarget {
+    /// What the link `link` describes resolves to.
+    ///
+    /// A volume's root is a [`Volume`](Self::Volume) whatever a walk made of
+    /// it. Otherwise the kind its target reports decides, and bundle-ness is
+    /// read off the leaf of the path the link stores: a desktop shortcut is
+    /// named for the application (`Editor`) while its target is the bundle
+    /// (`System:/Applications/Editor.app`), so classifying on the link's own
+    /// name would show a shortcut to an application as a plain folder.
+    fn of(link: &LinkInfo) -> Self {
+        if crate::volume::reference(&link.target).is_some() {
+            return Self::Volume;
+        }
+        match link.kind {
+            Some(FileKind::Directory) => {
+                match EntryKind::directory_or_bundle(tairix_path::leaf_name(&link.target)) {
+                    EntryKind::Bundle => Self::Bundle,
+                    _ => Self::Directory,
+                }
+            }
+            Some(FileKind::Regular) => Self::File,
+            // Resolution follows every hop, so a target that is itself a link
+            // is a backing this classifier will not trust to name anything.
+            Some(FileKind::Symlink) | None => Self::Dangling,
+        }
+    }
 }
 
 /// What an [`Entry`] is, from the browser's point of view.
@@ -76,57 +109,28 @@ pub enum EntryKind {
     Link(LinkTarget),
 }
 
-/// A listed symbolic link's resolution: what its final target is, and the
-/// leaf name of the path the link *stores*.
-///
-/// The leaf name is what decides bundle-ness, and it has to be the target's:
-/// a desktop shortcut is named for the application (`Editor`) while its
-/// target is the bundle (`/System/Applications/Editor.app`), so classifying on the link's own
-/// name would show a shortcut to an application as a plain folder.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct LinkResolution<'a> {
-    /// The kind the target reports.
-    pub kind: FileKind,
-    /// The leaf name of the target the link stores.
-    pub target_name: &'a str,
-}
-
 impl EntryKind {
     /// The kind the browser shows for a listed child, given the kind the VFS
-    /// reported for it, its name, and — for a link — the resolution of its
-    /// final target.
+    /// reported for it, its name, and — for a link — what could be read of it.
     ///
     /// A directory whose name is a `<Name>.app` bundle ([`is_bundle_name`])
     /// is a [`Bundle`](Self::Bundle); any other directory is a
     /// [`Directory`](Self::Directory); a regular file is a
     /// [`File`](Self::File); and a link is a [`Link`](Self::Link) carrying
-    /// the same judgement applied to its *target*. This is the one classifier
-    /// both the file manager and the trusted picker share, so the two can
-    /// never disagree about what a listed name *is*.
+    /// the same judgement applied to its *target*, or naming a
+    /// [`Volume`](LinkTarget::Volume) where it stores a volume's root. This is
+    /// the one classifier both the file manager and the trusted picker share,
+    /// so the two can never disagree about what a listed name *is*.
     ///
-    /// A link with no `resolution` — because it dangles, or because the
-    /// caller could not describe its target — is
-    /// [`LinkTarget::Dangling`]: the honest answer, never a guess at the
+    /// A link whose target could not be read, or which resolves to nothing,
+    /// is [`LinkTarget::Dangling`]: the honest answer, never a guess at the
     /// target's kind.
     #[must_use]
-    pub fn for_listing(kind: FileKind, name: &str, resolution: Option<LinkResolution<'_>>) -> Self {
+    pub fn for_listing(kind: FileKind, name: &str, link: Option<&LinkInfo>) -> Self {
         match kind {
             FileKind::Directory => Self::directory_or_bundle(name),
             FileKind::Regular => Self::File,
-            FileKind::Symlink => Self::Link(match resolution {
-                None => LinkTarget::Dangling,
-                Some(resolved) => match resolved.kind {
-                    FileKind::Directory => match Self::directory_or_bundle(resolved.target_name) {
-                        Self::Bundle => LinkTarget::Bundle,
-                        _ => LinkTarget::Directory,
-                    },
-                    FileKind::Regular => LinkTarget::File,
-                    // Resolution follows every hop, so a target that is
-                    // itself a link is a backing this classifier will not
-                    // trust to name anything.
-                    FileKind::Symlink => LinkTarget::Dangling,
-                },
-            }),
+            FileKind::Symlink => Self::Link(link.map_or(LinkTarget::Dangling, LinkTarget::of)),
         }
     }
 
@@ -201,7 +205,9 @@ impl EntryKind {
     /// which application opens it, where it sorts — as against
     /// [`is_directory_backed`](Self::is_directory_backed), which is the
     /// *structural* reading a management verb wants. A dangling link behaves
-    /// as nothing, so this reports [`None`] rather than a guess.
+    /// as nothing, and a shortcut to a volume as what the mount table says of
+    /// it, which no kind states, so either reports [`None`] rather than a
+    /// guess.
     #[must_use]
     pub const fn resolved(self) -> Option<Self> {
         match self {
@@ -209,56 +215,38 @@ impl EntryKind {
             Self::Link(LinkTarget::Directory) => Some(Self::Directory),
             Self::Link(LinkTarget::File) => Some(Self::File),
             Self::Link(LinkTarget::Bundle) => Some(Self::Bundle),
-            Self::Link(LinkTarget::Dangling) => None,
+            Self::Link(LinkTarget::Dangling | LinkTarget::Volume) => None,
         }
     }
 }
 
-/// The absolute path a link's stored `target` names, given the directory the
-/// link itself sits in.
+/// The path a link's stored `target` names, given the directory the link
+/// itself sits in.
 ///
-/// An absolute target names itself; a relative one is *appended* to the link's
-/// own directory. Nothing is normalised or collapsed: a `..` in the result is
-/// left for the kernel to resolve **physically**, against the nodes the walk
-/// really passes through, because collapsing it here would name a different
-/// object the moment another link were involved (`plans/SYMLINKS.md`
-/// decision 4).
+/// An absolute target names itself; one rooted at another root names that
+/// root's path in the view where the root is a machine alias, and is left as
+/// written for the caller's own call to resolve otherwise; a relative one is
+/// *appended* to the link's own directory. Nothing is normalised or collapsed:
+/// a `..` in the result is left for the kernel to resolve **physically**,
+/// against the nodes the walk really passes through, because collapsing it
+/// here would name a different object the moment another link were involved
+/// (`plans/SYMLINKS.md` decision 4).
 #[must_use]
 pub fn resolve_target(link_directory: &str, target: &str) -> String {
     if target.starts_with('/') {
         return String::from(target);
     }
+    if tairix_path::names_another_root(target) == Ok(true) {
+        return reached_elsewhere(target);
+    }
     tairix_path::join(link_directory, target)
 }
 
-/// Whether `name` is an application bundle name — a non-empty base name
-/// followed by the `.app` suffix (`Example.app`, but not the bare `.app`).
-///
-/// The suffix match is ASCII-case-insensitive so a bundle reads as one
-/// however the volume cased its extension.
-#[must_use]
-pub fn is_bundle_name(name: &str) -> bool {
-    bundle_stem(name).is_some()
-}
-
-/// Whether `name` is a RISC OS application's: a `!` and at least one more
-/// character, as RISC OS's Filer takes a directory so named to be one.
-#[must_use]
-pub fn is_riscos_application_name(name: &str) -> bool {
-    name.len() > 1 && name.starts_with('!')
-}
-
-/// `name` without its bundle suffix, or `None` when it is no bundle name
-/// ([`is_bundle_name`]).
-#[must_use]
-pub fn bundle_stem(name: &str) -> Option<&str> {
-    let at = name
-        .len()
-        .checked_sub(BUNDLE_SUFFIX.len())
-        .filter(|&at| at > 0)?;
-    name.get(at..)
-        .filter(|tail| tail.eq_ignore_ascii_case(BUNDLE_SUFFIX))?;
-    name.get(..at)
+/// Where a link whose stored `target` names another root is reached: that
+/// root's path in the view where the root is a machine alias, and the target
+/// as written, for the caller's own call to resolve, otherwise.
+fn reached_elsewhere(target: &str) -> String {
+    tairix_path::view_spelling(target).unwrap_or_else(|| String::from(target))
 }
 
 /// Whether a listed directory holds anything, and what, as far as the
@@ -316,6 +304,12 @@ pub struct Entry {
     name: String,
     kind: EntryKind,
     target: Option<String>,
+    /// Where a link whose target names another root is reached, which no walk
+    /// through the link follows.
+    reached: Option<String>,
+    /// The name it is shown by where that is not its own: a drive the desktop
+    /// draws for a volume.
+    label: Option<String>,
     size: u64,
     modified: Time64,
     id: FileId,
@@ -351,6 +345,8 @@ impl Entry {
             name: name.into(),
             kind,
             target: None,
+            reached: None,
+            label: None,
             size,
             modified,
             id: FileId::NONE,
@@ -391,10 +387,25 @@ impl Entry {
     /// relative and may name nothing, so it is display and launch input, never
     /// something this engine resolves. It rides beside the kind rather than
     /// inside [`EntryKind`] so that kind stays a small `Copy` value every
-    /// surface passes around; only the entry itself owns the string.
+    /// surface passes around; only the entry itself owns the string. One
+    /// naming another root, which no walk through the link follows, is spelled
+    /// here once as the path it is reached at ([`reached_by`](Self::reached_by)),
+    /// so a frame drawing it spells nothing.
     #[must_use]
     pub fn with_target(mut self, target: impl Into<String>) -> Self {
-        self.target = Some(target.into());
+        let target = target.into();
+        self.reached = (tairix_path::names_another_root(&target) == Ok(true))
+            .then(|| reached_elsewhere(&target));
+        self.target = Some(target);
+        self
+    }
+
+    /// This entry shown as `label` rather than by its name: a drive the
+    /// desktop draws for a volume, named by its root and shown by the volume's
+    /// own title.
+    #[must_use]
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
         self
     }
 
@@ -435,6 +446,37 @@ impl Entry {
     #[must_use]
     pub fn target(&self) -> Option<&str> {
         self.target.as_deref()
+    }
+
+    /// The name this entry is shown by where it is not its own, or [`None`]
+    /// for an entry shown by its name.
+    #[must_use]
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    /// The path a verb acting on what this entry names reaches it by, listed
+    /// in the directory spelled `directory`: its own path there, through a
+    /// link the kernel follows, and the target of one naming another root,
+    /// which no walk follows.
+    #[must_use]
+    pub fn reached_by(&self, directory: &str) -> String {
+        let mut path = String::new();
+        self.spell_reached(directory, &mut path);
+        path
+    }
+
+    /// [`reached_by`](Self::reached_by) spelled into `into`, cleared first, so
+    /// a caller spelling the entries of one directory a frame — a grid of
+    /// tiles — reuses one buffer rather than allocating a path each.
+    pub fn spell_reached(&self, directory: &str, into: &mut String) {
+        into.clear();
+        if let Some(reached) = &self.reached {
+            into.push_str(reached);
+        } else {
+            into.push_str(directory);
+            tairix_path::push_name(into, &self.name);
+        }
     }
 
     /// The entry's apparent size in bytes; `0` for a directory or bundle.
@@ -536,15 +578,20 @@ impl Entry {
         self.stale = false;
     }
 
-    /// The drive this entry is drawn as, when it is the root of a mounted
-    /// volume.
+    /// The drive this entry is drawn as: the one its volume is on, for the
+    /// root of a mounted volume or a shortcut to one known to be attached, and
+    /// the generic drive for a shortcut to one that is not.
     #[must_use]
     pub fn drive(&self) -> Option<IconKind> {
-        self.drive.as_ref().map(|mark| mark.icon)
+        match &self.drive {
+            Some(mark) => Some(mark.icon),
+            None if self.kind == EntryKind::Link(LinkTarget::Volume) => Some(disk_icon(None)),
+            None => None,
+        }
     }
 
-    /// What the volume this entry is the root of is and how it is doing, when
-    /// it is one.
+    /// What the volume this entry is the root of, or a shortcut to an attached
+    /// one names, is and how it is doing.
     #[must_use]
     pub fn volume(&self) -> Option<&VolumeFacts> {
         self.drive.as_ref().map(|mark| &mark.facts)
@@ -552,7 +599,7 @@ impl Entry {
 
     /// Draw this entry as `drive`, or as what it is when `None`, answering
     /// whether its picture or what it states changed.
-    pub(crate) fn set_drive(&mut self, drive: Option<&DriveMark>) -> bool {
+    pub fn set_drive(&mut self, drive: Option<&DriveMark>) -> bool {
         if self.drive.as_deref() == drive {
             return false;
         }
@@ -567,6 +614,7 @@ impl Entry {
         self.name == other.name
             && self.kind == other.kind
             && self.target == other.target
+            && self.label == other.label
             && self.size == other.size
             && self.modified == other.modified
             && self.id == other.id

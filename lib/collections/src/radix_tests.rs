@@ -176,7 +176,7 @@ fn an_insertion_reserved_for_allocates_nothing() {
         tree.try_reserve_key(key).unwrap();
         let capacity = (tree.inner.nodes.capacity(), tree.leaves.nodes.capacity());
         let (inner, leaves) = tree.missing(key);
-        let free = (tree.inner.free_count, tree.leaves.free_count);
+        let free = (tree.inner.free_count(), tree.leaves.free_count());
         let lengths = (tree.inner.nodes.len(), tree.leaves.nodes.len());
         assert!(capacity.0 - lengths.0 + free.0 >= inner, "{key:#x}");
         assert!(capacity.1 - lengths.1 + free.1 >= leaves, "{key:#x}");
@@ -359,8 +359,7 @@ fn shrinking_holds_only_the_live_paths_and_keeps_every_entry() {
         (tree.inner.nodes.len(), tree.leaves.nodes.len()),
         (inner, leaves)
     );
-    assert_eq!(tree.inner.nodes.capacity(), inner);
-    assert_eq!(tree.leaves.nodes.capacity(), leaves);
+    assert!(tree.inner.nodes.fitted() && tree.leaves.nodes.fitted());
     assert!(
         tree.allocated_bytes() < peak / 4,
         "{} of {peak}",

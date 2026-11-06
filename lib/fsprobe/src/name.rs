@@ -15,7 +15,10 @@
 //! 3. a label already in use, or one spelling a name the storage namespace
 //!    or the resource grammar already defines, takes `_<fingerprint>` of the
 //!    volume's own identity (`backup_k3x9`), and a generated name still in
-//!    use is lengthened to more of the fingerprint.
+//!    use is lengthened to more of the fingerprint;
+//! 4. a twin, a volume carrying the identity of one shown already, asking
+//!    the name that volume holds is shown under it with `_<n>` (`backup_2`),
+//!    the kernel taking the lowest `n` free ([`twin`]).
 //!
 //! A label never yields `_`, so no label can spell a name generated for
 //! another volume. Every candidate satisfies the kernel's volume-name grammar
@@ -25,7 +28,7 @@
 use crate::{fingerprint, FINGERPRINT_CHARS};
 use tairix_abi::blkio::BlkTransport;
 use tairix_abi::fs::ROOT_VIEW;
-use tairix_abi::volume::VOLUME_NAME_MAX;
+use tairix_abi::volume::{validate_volume_name, VOLUME_NAME_MAX};
 use tairix_path::RESOLVER_NAMES;
 use tairix_resref::KnownNamespace;
 
@@ -115,6 +118,28 @@ pub fn chosen(name: &[u8]) -> bool {
     kebab(name).is_some_and(|label| label.as_bytes() == name) && !reserved(name)
 }
 
+/// The name a twin of the volume shown as `name` is shown under: `name`, cut
+/// to leave room, then `_` and `ordinal` in decimal (`backup_2`). A label
+/// never yields `_` and a fingerprint suffix runs to four characters or more,
+/// so no label or fingerprint suffix spells it. `None` for a `name` outside
+/// the kernel's volume-name grammar.
+#[must_use]
+pub fn twin(name: &[u8], ordinal: u8) -> Option<VolumeName> {
+    validate_volume_name(name).ok()?;
+    let mut digits = [0u8; 3];
+    let mut start = digits.len();
+    let mut left = ordinal;
+    loop {
+        start -= 1;
+        digits[start] = b'0' + left % 10;
+        left /= 10;
+        if left == 0 {
+            break;
+        }
+    }
+    Some(suffixed(word(name), &digits[start..]))
+}
+
 /// `label` in kebab case, or `None` when no ASCII letter or digit survives.
 fn kebab(label: &[u8]) -> Option<VolumeName> {
     let mut name = VolumeName::EMPTY;
@@ -182,8 +207,6 @@ fn reserved(name: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use alloc::vec::Vec;
-
-    use tairix_abi::volume::validate_volume_name;
 
     use super::*;
 
@@ -329,5 +352,62 @@ mod tests {
         for name in [&b"my--disk"[..], b"-disk", b"Disk", b"disk_", b""] {
             assert!(!chosen(name), "{name:?} is no label's spelling");
         }
+    }
+
+    #[test]
+    fn a_twin_is_named_beside_the_volume_holding_its_name() {
+        let named = |name: &[u8], n| twin(name, n).map(|shown| shown.as_bytes().to_vec());
+        assert_eq!(named(b"backup", 2), Some(b"backup_2".to_vec()));
+        assert_eq!(named(b"usb_25cm", 16), Some(b"usb_25cm_16".to_vec()));
+        assert_eq!(named(b"disk_2", 2), Some(b"disk_2_2".to_vec()));
+        assert_eq!(named(b"x", u8::MAX), Some(b"x_255".to_vec()));
+        let long = [b'a'; VOLUME_NAME_MAX];
+        let mut cut = long[..VOLUME_NAME_MAX - 2].to_vec();
+        cut.extend_from_slice(b"_2");
+        assert_eq!(named(&long, 2), Some(cut), "cut to the bound");
+        let mut separated = long;
+        separated[VOLUME_NAME_MAX - 3] = b'-';
+        let mut kept = long[..VOLUME_NAME_MAX - 3].to_vec();
+        kept.extend_from_slice(b"_2");
+        assert_eq!(
+            named(&separated, 2),
+            Some(kept),
+            "never cut to end in a separator"
+        );
+        for refused in [&b""[..], b"-a", b"a-", b"Disk", b"a/b"] {
+            assert_eq!(named(refused, 2), None, "{refused:?}");
+        }
+        assert_eq!(named("caf\u{e9}".as_bytes(), 2), None, "not ASCII");
+    }
+
+    #[test]
+    fn a_twin_name_is_spelt_by_no_label_or_fingerprint_suffix() {
+        let hostile: [&[u8]; 5] = [
+            "\u{dc}n\u{ef}c\u{f8}d\u{e9} Disk".as_bytes(),
+            b"Disk_2",
+            b"photos 2024",
+            &[b'x'; 100],
+            "\u{3b4}\u{3b9}\u{3b1}\u{3ba}\u{3bf}\u{3c0}\u{3ad}\u{3c2} 2".as_bytes(),
+        ];
+        for text in hostile {
+            for name in names(label(text), [0x42; 16]) {
+                for ordinal in 2..=u8::MAX {
+                    let shown = twin(&name, ordinal).expect("every candidate has twin names");
+                    let spelt = shown.as_bytes();
+                    assert!(validate_volume_name(spelt).is_ok(), "{spelt:?}");
+                    assert_ne!(spelt, name.as_slice());
+                    assert!(
+                        names(label(spelt), [0x42; 16])
+                            .iter()
+                            .all(|other| other.as_slice() != spelt),
+                        "{spelt:?} is no label's"
+                    );
+                }
+            }
+        }
+        assert!(
+            SUFFIX_LENGTHS.iter().all(|&take| take > 3),
+            "a fingerprint suffix runs longer than any ordinal"
+        );
     }
 }

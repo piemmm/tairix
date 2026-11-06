@@ -18,12 +18,13 @@ use tairix_colour::Rgba;
 use tairix_controls::{
     ColourModel, ColourPicker, ControlRole, IconButton, Keystroke, PickerView, ScrollAction,
     ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, SwatchGrid, SwatchMark, TitleBar,
-    Toolbar,
+    Toolbar, WellSpacing,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_image::{desktop_palette, IndexDepth, Rgba8};
 use tairix_input::{InputEvent, Modifiers, PointerButton};
+use tairix_parallel::JobRunner;
 use tairix_raster::Color;
 use tairix_reclaim::PressureBand;
 use tairix_theme::Theme;
@@ -32,17 +33,18 @@ use tairix_window::docapp::{
 };
 use tairix_window::document::{Access, SavedDocument};
 
-use crate::adjust::AdjustPane;
 use crate::brush::Spray;
 use crate::canvas::{Canvas, CanvasError, Kind, OutOfMemory, Tile};
 use crate::colour::{Ink, BLACK, WHITE};
 use crate::dialog::{Form, Purpose};
 use crate::document::{Document, EntryId, Layer, NewPicture, Picture, Snapshot};
 use crate::fill;
-use crate::filter::{Filter, FilterError};
 use crate::gradient::Gradient;
+use crate::layers_pane::LayersPane;
 use crate::layout::{Faces, Floor, Layout, Needs};
 use crate::mask::{Combine, Mask, Recipe};
+use crate::op::{Family, Halted, Op};
+use crate::op_pane::OpPane;
 use crate::pane::{Arrangement, PaneKind, Side};
 use crate::preferences::{CanvasStyle, Grid, OpenAt, Preferences};
 use crate::save::{format_for, natural, save_formats, survey, Loss, SaveFormat, SaveRefusal};
@@ -66,6 +68,9 @@ pub(crate) const SPRITE_SIZE: (u32, u32) = (32, 32);
 /// The most wells the palette strip holds: a 256-colour palette and the
 /// clear ink of its mask.
 pub const MOST_WELLS: usize = IndexDepth::Eight.colours() + 1;
+
+/// How far a step of a bar scrolls the picture or a pane's body, in pixels.
+pub(crate) const SCROLL_LINE: u64 = 16;
 
 /// The Wimp's sixteen colours, as a colour picture's wells offer them, and
 /// nothing after.
@@ -122,21 +127,19 @@ pub enum Compute {
         /// The selection the fill is held to, if one is.
         clip: Option<Mask>,
     },
-    /// Run `filter` over `canvas`.
-    Filter {
-        /// The picture, as it stood.
+    /// Every tile `op` writes over `canvas` held to `clip`: those of `done`,
+    /// which the preview worked out over the very same layer, kept, and the
+    /// rest worked out — what an Apply lands when the preview it would adopt
+    /// is incomplete.
+    Op {
+        /// The layer painted on, as it stood.
         canvas: Canvas,
-        /// What is run.
-        filter: Filter,
+        /// What is applied.
+        op: Op,
         /// The selection it is held to, if one is.
         clip: Option<Mask>,
-    },
-    /// Count `canvas`'s levels for a histogram.
-    Histogram {
-        /// The picture, as it stood.
-        canvas: Canvas,
-        /// The selection it is held to, if one is.
-        clip: Option<Mask>,
+        /// What the preview had worked out of it.
+        done: Vec<(usize, Arc<Tile>)>,
     },
     /// Lay `gradient` over `canvas`.
     Gradient {
@@ -200,10 +203,8 @@ pub enum Computed {
     Tiles(Result<Vec<(usize, Arc<Tile>)>, OutOfMemory>),
     /// The selection made, `None` where it chooses nothing.
     Selection(Result<Option<Mask>, OutOfMemory>),
-    /// A filter's tiles, each the tile as it now stands.
-    Filtered(Result<Vec<(usize, Arc<Tile>)>, FilterError>),
-    /// A histogram.
-    Histogram(Result<crate::histogram::Histogram, OutOfMemory>),
+    /// An operation's tiles, each the tile as it now stands.
+    Op(Result<Vec<(usize, Arc<Tile>)>, Halted>),
     /// Thumbnails, each `side` pixels square of straight-alpha RGBA8 where
     /// one could be drawn.
     Thumbnails {
@@ -215,12 +216,13 @@ pub enum Computed {
     },
 }
 
-/// Carry out `work`: what the worker runs.
+/// Carry out `work`, an operation's blocks and a merge's or a flatten's tiles
+/// spread across `runner`: what the worker runs.
 #[must_use]
-pub fn compute(work: Compute) -> Computed {
+pub fn compute(work: Compute, runner: &dyn JobRunner) -> Computed {
     match work {
         Compute::Transform { layers } => Computed::Picture(transformed(&layers)),
-        Compute::Compose { layers } => Computed::Composed(crate::compose::flatten(&layers)),
+        Compute::Compose { layers } => Computed::Composed(crate::compose::flatten(&layers, runner)),
         Compute::Survey { snapshot } => {
             Computed::Survey(survey(&snapshot.entries, snapshot.current, snapshot.origin))
         }
@@ -241,14 +243,18 @@ pub fn compute(work: Compute) -> Computed {
             gradient,
             clip,
         } => Computed::Tiles(crate::gradient::lay(&mut canvas, &gradient, clip.as_ref())),
-        Compute::Filter {
-            mut canvas,
-            filter,
+        Compute::Op {
+            canvas,
+            op,
             clip,
-        } => Computed::Filtered(crate::filter::apply(&mut canvas, &filter, clip.as_ref())),
-        Compute::Histogram { canvas, clip } => {
-            Computed::Histogram(crate::histogram::Histogram::of(&canvas, clip.as_ref()))
-        }
+            done,
+        } => Computed::Op(crate::tiled::complete(
+            &canvas,
+            &op,
+            clip.as_ref(),
+            done,
+            runner,
+        )),
         Compute::PutDown {
             mut canvas,
             floating,
@@ -383,6 +389,16 @@ pub enum Own {
         /// What.
         work: Compute,
     },
+    /// Have the preview worker work `work` out, answering job `job`: the
+    /// window's newer work takes its place while it waits.
+    Preview {
+        /// Which job.
+        job: u64,
+        /// The window's preview ticket as the job was asked.
+        stamp: crate::preview::Stamp,
+        /// What.
+        work: crate::preview::PreviewWork,
+    },
     /// Open each of these sprites in a window of its own, or bring forward
     /// the one it has.
     OpenSprites(Vec<EntryId>),
@@ -513,13 +529,11 @@ pub enum Action {
     Flatten,
     /// Show the layer painted on, or hide it.
     ShowLayer,
-    /// Name the layer painted on, and say how much of it shows.
-    LayerProperties,
     /// Choose a tool.
     Tool(Tool),
     /// Magnify to a rung of the ladder.
     Zoom(usize),
-    /// Adjust or filter the picture: an entry of [`Filter::ALL`].
+    /// Open an operation in its pane: an entry of [`Op::every`].
     Adjust(usize),
     /// Show a pane of the chrome, or hide it.
     Pane(PaneKind),
@@ -607,7 +621,7 @@ impl Action {
 
 /// The actions with no argument, by id: an action's position here is its
 /// menu id, less one.
-const PLAIN_ACTIONS: [Action; 62] = [
+const PLAIN_ACTIONS: [Action; 61] = [
     Action::NewPicture,
     Action::Open,
     Action::Save,
@@ -663,7 +677,6 @@ const PLAIN_ACTIONS: [Action; 62] = [
     Action::MergeDown,
     Action::Flatten,
     Action::ShowLayer,
-    Action::LayerProperties,
     Action::ResetPanes,
     Action::ResetColours,
     Action::PickColour,
@@ -680,7 +693,7 @@ const RENAME_ID: u16 = 300;
 const GO_TO_ENTRY: u16 = 301;
 pub(crate) const RENAME_ENTRY: u16 = 302;
 const GO_TO_LAYER: u16 = 303;
-const FILTER_IDS: u16 = 400;
+const OPERATION_IDS: u16 = 400;
 const PANE_IDS: u16 = 500;
 
 impl Action {
@@ -692,7 +705,7 @@ impl Action {
         match self {
             Self::Tool(tool) => at(TOOL_IDS, Some(tool_index(tool))),
             Self::Zoom(rung) => at(ZOOM_IDS, Some(rung)),
-            Self::Adjust(index) => at(FILTER_IDS, Some(index)),
+            Self::Adjust(index) => at(OPERATION_IDS, Some(index)),
             Self::Pane(kind) => at(PANE_IDS, Some(kind.index())),
             Self::Rename => RENAME_ID,
             plain => at(1, PLAIN_ACTIONS.iter().position(|&a| a == plain)),
@@ -713,9 +726,9 @@ impl Action {
                 (rung < ZOOMS.len()).then_some(Self::Zoom(rung))
             }
             RENAME_ID => Some(Self::Rename),
-            FILTER_IDS..PANE_IDS => {
-                let index = usize::from(id - FILTER_IDS);
-                (index < Filter::ALL.len()).then_some(Self::Adjust(index))
+            OPERATION_IDS..PANE_IDS => {
+                let index = usize::from(id - OPERATION_IDS);
+                (index < Op::COUNT).then_some(Self::Adjust(index))
             }
             PANE_IDS.. => PaneKind::ALL
                 .get(usize::from(id - PANE_IDS))
@@ -842,16 +855,23 @@ enum Settles {
     PutDown(Then),
     /// What floated, or was selected, is cleared away.
     Cleared,
-    /// The open adjustment is applied and closed, and `Then` follows.
-    Adjusted(Then),
+    /// An operation is applied, the pane `closes` names goes back to its
+    /// operation's starting settings, and `then` follows.
+    Adjusted {
+        /// The pane whose open operation it was.
+        closes: Option<PaneKind>,
+        /// What follows.
+        then: Then,
+    },
 }
 
-/// What follows a floating selection's putting down once it has landed.
+/// What follows once a worker's answer has landed: a floating selection put
+/// down, or an operation applied.
 #[derive(Debug)]
 enum Then {
     /// Nothing more.
     Rest,
-    /// The action that needed it down.
+    /// The action that waited for it.
     Act(Action),
     /// A pasted layer, floated in its place.
     Float(Floating),
@@ -861,6 +881,35 @@ enum Then {
     Enter(u16, String),
     /// A sprite window closing: its sprite is its file's, so nothing is asked.
     Close,
+    /// Apply pressed in this pane while the other pane's operation was open.
+    Apply(PaneKind),
+    /// Operation `usize` of this pane's family chosen in place of its own.
+    Choose(PaneKind, usize),
+    /// This layer picked in the Layers pane to paint on.
+    PaintOn(usize),
+}
+
+/// What a refusal leaves undone of the save that waited on it.
+const SAVE_UNDONE: &str = "the picture was not saved";
+
+/// What a refusal leaves undone of the save before the window closes that
+/// waited on it.
+const SAVE_CLOSE_UNDONE: &str = "the picture was not saved, and the window stays open";
+
+/// What a refusal leaves undone of the close that waited on it.
+const CLOSE_UNDONE: &str = "the window stays open";
+
+impl Then {
+    /// What follows and so is not done where the work it waits on is
+    /// refused, named where the user would look for it: a save, a close.
+    const fn undone(&self) -> Option<&'static str> {
+        match self {
+            Self::Act(Action::Save | Action::SaveAs) => Some(SAVE_UNDONE),
+            Self::SaveThenClose => Some(SAVE_CLOSE_UNDONE),
+            Self::Act(Action::Close) | Self::Close => Some(CLOSE_UNDONE),
+            _ => None,
+        }
+    }
 }
 
 /// A form of settings the window asks in a dialog of its own.
@@ -883,6 +932,27 @@ struct Pending {
     lands: Lands,
     /// What to say if it cannot be done.
     what: &'static str,
+    /// Whether the user chose to save before the window closes while it was
+    /// out: once it, and what it was to be followed by, has landed, the
+    /// window is saved and closed.
+    closing: bool,
+}
+
+impl Pending {
+    /// Whether a save that closes the window waits on it, as a quit then
+    /// does.
+    const fn closes(&self) -> bool {
+        self.closing || self.lands.closes()
+    }
+
+    /// What waited on it and is not done where it is refused.
+    const fn undone(&self) -> Option<&'static str> {
+        if self.closing {
+            Some(SAVE_CLOSE_UNDONE)
+        } else {
+            self.lands.undone()
+        }
+    }
 }
 
 /// What a worker's answer becomes once it lands.
@@ -905,10 +975,18 @@ enum Lands {
 }
 
 impl Lands {
+    /// The pane whose operation the answer applies, where it applies one.
+    const fn operation(&self) -> Option<PaneKind> {
+        match self {
+            Self::Tiles(Settles::Adjusted { closes, .. }) => *closes,
+            _ => None,
+        }
+    }
+
     /// Whether a save that closes the window follows the answer.
     const fn closes(&self) -> bool {
         match self {
-            Self::Tiles(Settles::PutDown(then) | Settles::Adjusted(then)) => {
+            Self::Tiles(Settles::PutDown(then) | Settles::Adjusted { then, .. }) => {
                 matches!(then, Then::SaveThenClose)
             }
             Self::Sheet { then_close } => *then_close,
@@ -916,6 +994,25 @@ impl Lands {
             | Self::Selection
             | Self::Transform(_)
             | Self::Merged(_) => false,
+        }
+    }
+
+    /// Whether the answer changes the document once it lands, which a close
+    /// asks about: a selection made, or the Save As sheet's survey, does not.
+    const fn changes(&self) -> bool {
+        matches!(self, Self::Tiles(_) | Self::Transform(_) | Self::Merged(_))
+    }
+
+    /// What waited on the answer and is not done where it is refused.
+    const fn undone(&self) -> Option<&'static str> {
+        match self {
+            Self::Tiles(Settles::PutDown(then) | Settles::Adjusted { then, .. }) => then.undone(),
+            Self::Sheet { then_close: true } => Some(CLOSE_UNDONE),
+            Self::Tiles(Settles::Nothing | Settles::Cleared)
+            | Self::Selection
+            | Self::Transform(_)
+            | Self::Merged(_)
+            | Self::Sheet { then_close: false } => None,
         }
     }
 }
@@ -976,6 +1073,9 @@ pub struct View {
     /// Where each floating pane opens when nothing tore it out: under the top
     /// band, at the edge of its home side.
     float_homes: [(i32, i32); PaneKind::ALL.len()],
+    /// The client size, in logical pixels, each floating pane's tool window
+    /// was resized to: window state, forgotten when the pane docks.
+    chosen: [Option<(u32, u32)>; PaneKind::ALL.len()],
     /// The view strip: the view's own commands.
     commands: Toolbar,
     bar: ToolControls,
@@ -994,7 +1094,8 @@ pub struct View {
     palette_edit: Option<PaletteEdit>,
     vertical: ScrollBar,
     horizontal: ScrollBar,
-    /// The palette strip's own bar, which scrolls its row of wells.
+    /// The palette's own bar, which scrolls its wells along the strip or down
+    /// a floating palette.
     palette_bar: ScrollBar,
     /// The control at the strip's right end that floats the palette.
     pop_out: IconButton,
@@ -1021,12 +1122,23 @@ pub struct View {
     clone_offset: Option<(i64, i64)>,
     /// Whether Space is held, which drags the view whatever the tool.
     space: bool,
-    /// The Adjustment pane: the open adjustment's settings, or the list to
-    /// open one from.
-    adjustment: AdjustPane,
-    /// What the picture shows of the open adjustment, and the histogram it
-    /// reads.
-    looks: adjust::Looks,
+    /// The Adjustments and the Effects panes, in [`PaneKind::OPERATIONS`]
+    /// order: one at most has its operation open.
+    operations: [OpPane; 2],
+    /// What the picture shows of the open operation, and the histogram the
+    /// panes read.
+    looks: operations::Looks,
+    /// The window's share of the preview worker: its ticket and its one job
+    /// out.
+    previews: previews::Previews,
+    /// The Layers pane.
+    layers: LayersPane,
+    /// What the Layers pane shows beyond itself: the thumbnails, an opacity
+    /// changed live and the composite beneath it.
+    layer_looks: layers::LayerLooks,
+    /// The bar each pane's body is scrolled by where its dock scrolls it, by
+    /// [`PaneKind::index`].
+    body_bars: [ScrollBar; PaneKind::ALL.len()],
     held: Option<Floating>,
     /// The grids shown.
     grids: Grids,
@@ -1057,6 +1169,28 @@ pub struct View {
     hover: Option<(u32, u32)>,
 }
 
+impl View {
+    /// Whether the window holds a change no step records yet — an opacity or
+    /// a palette entry changed live away from where it began, an operation
+    /// open with its settings moved, or work out that changes the picture
+    /// once it lands — which a close or a quit asks about as it asks about
+    /// any other rather than closing over it.
+    fn unrecorded(&self) -> bool {
+        let palette = self
+            .palette_edit
+            .as_ref()
+            .is_some_and(|edit| self.kind().palette() != Some(edit.before.as_slice()));
+        let operation = self
+            .open_operation()
+            .is_some_and(|kind| self.operation_pane(kind).applying().is_some());
+        let working = self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.lands.changes());
+        palette || operation || working || self.opacity_changing()
+    }
+}
+
 impl SavedDocument for View {
     type Snapshot = Snapshot;
 
@@ -1065,7 +1199,7 @@ impl SavedDocument for View {
     }
 
     fn is_modified(&self) -> bool {
-        self.document.is_modified() || self.held.is_some()
+        self.document.is_modified() || self.held.is_some() || self.unrecorded()
     }
 
     fn is_empty(&self) -> bool {
@@ -1141,11 +1275,7 @@ impl DocumentView for View {
             &self.modal,
             Some(Modal::Form(form)) if form.purpose() == Purpose::SaveAs { then_close: true }
         );
-        sheet
-            || self
-                .pending
-                .as_ref()
-                .is_some_and(|pending| pending.lands.closes())
+        sheet || self.pending.as_ref().is_some_and(Pending::closes)
     }
 
     /// Busy while a worker has the picture; the arrow while a question or an
@@ -1264,13 +1394,14 @@ impl DocumentView for View {
     }
 
     /// Each floating pane, in the rectangle of the drawing laid out for it,
-    /// titled as its band is.
+    /// titled as its band is and sized as its layout allows.
     fn tool_window(&self, layout: &Layout, index: usize) -> Option<ToolWindow<'_>> {
         let slot = layout.floating().get(index)?;
         Some(ToolWindow {
             id: tool_id(slot.kind),
             title: self.headers[slot.kind.index()].title(),
             rect: slot.frame,
+            sizing: slot.sizing,
         })
     }
 
@@ -1287,6 +1418,17 @@ impl DocumentView for View {
         damage: &mut Region,
     ) -> Outcome {
         View::tool_moved(self, moved, layout, scale, theme, damage)
+    }
+
+    fn tool_resized(
+        &mut self,
+        id: u32,
+        size: (u32, u32),
+        layout: &Layout,
+        scale: Scale,
+        damage: &mut Region,
+    ) -> Outcome {
+        View::tool_resized(self, id, size, layout, scale, damage)
     }
 
     fn tool_gone(
@@ -1344,6 +1486,12 @@ fn tool_pane(id: u32) -> Option<PaneKind> {
     PaneKind::ALL.into_iter().find(|&kind| tool_id(kind) == id)
 }
 
+/// A size kept in logical pixels, in physical ones at `scale`.
+fn physical(size: Option<(u32, u32)>, scale: Scale) -> Option<(u32, u32)> {
+    let (width, height) = size?;
+    Some((scale.scale_length(width), scale.scale_length(height)))
+}
+
 impl View {
     /// A window on `document`, called `name` and recorded by its volume as of
     /// `recorded`, which it may write as `access` says.
@@ -1380,10 +1528,11 @@ impl View {
             tool_landing: None,
             openings: [None; PaneKind::ALL.len()],
             float_homes: [(0, 0); PaneKind::ALL.len()],
+            chosen: [None; PaneKind::ALL.len()],
             commands: view_strip(true),
             bar: ToolControls::new(tool, options, smooth),
             wells: Vec::new(),
-            swatches: SwatchGrid::new(1, Vec::new()),
+            swatches: SwatchGrid::new(1, Vec::new()).with_spacing(WellSpacing::Packed),
             picker: ColourPicker::new(Rgba::from_array(BLACK)),
             colour_controls: colour::colour_panel(PickerView::Square, ColourModel::Rgb),
             recents: Vec::new(),
@@ -1406,8 +1555,15 @@ impl View {
             clone_from: None,
             clone_offset: None,
             space: false,
-            adjustment: AdjustPane::choosing(),
-            looks: adjust::Looks::default(),
+            operations: [
+                OpPane::new(Family::Adjustments),
+                OpPane::new(Family::Effects),
+            ],
+            looks: operations::Looks::default(),
+            previews: previews::Previews::default(),
+            layers: LayersPane::new(),
+            layer_looks: layers::LayerLooks::default(),
+            body_bars: [ScrollBar::new(ScrollOrientation::Vertical, flat()); PaneKind::ALL.len()],
             held: None,
             grids: Grids {
                 spaced: false,
@@ -1821,6 +1977,12 @@ impl View {
         let dock = Layout::dock_inner_width(theme, scale);
         let view_strip = self.commands.natural_length(scale, theme);
         let controls = Layout::controls_width(width, view_strip, theme, scale);
+        let count = self
+            .document
+            .picture()
+            .map_or(0, |picture| picture.layers().len());
+        let operation =
+            |kind: PaneKind| self.operation_pane(kind).heights(dock, faces, scale, theme);
         let needs = Needs {
             wells: self.wells.len(),
             clear: self.wells.last() == Some(&Ink::Clear),
@@ -1831,11 +1993,14 @@ impl View {
             recents: dock / u32::try_from(colour::RECENT_COLUMNS).unwrap_or(1) * 2,
             tool_box: self.tool_box.breadth(scale, theme),
             tool_box_length: self.tool_box.natural_length(scale, theme),
-            adjustment: self.adjustment.measured_height(dock, faces, scale, theme),
+            tool_box_least: self.tool_box.min_length(scale, theme),
+            layers: self.layers.measures(count, dock, faces, scale, theme),
+            operations: PaneKind::OPERATIONS.map(operation),
             view_strip,
             // As many rows as any tool's bar takes, so the canvas stays put
             // whichever tool is chosen.
             bar_rows: ToolControls::most_rows(controls, faces, scale, theme),
+            chosen: self.chosen.map(|size| physical(size, scale)),
         };
         let mut layout =
             Layout::for_window(width, height, theme, scale, faces, (needs, &self.panes));
@@ -1900,8 +2065,10 @@ impl View {
         self.document.picture().map_or(0, Picture::active)
     }
 
-    /// Bring the scroll, the bars and the palette's columns into line with the
-    /// layout.
+    /// Bring the scroll, the bars and the palette's columns and numbers into
+    /// line with the layout, forgetting the size of a pane no longer floating;
+    /// a preview held back for want of memory is asked again, as what it asks
+    /// of the window laid out anew may fit.
     pub fn settle(&mut self, layout: &Layout, damage: &mut Region) {
         if core::mem::take(&mut self.open_fitted) {
             let rung = self
@@ -1920,6 +2087,16 @@ impl View {
             self.swatches.set_columns(layout.columns());
             damage.add(layout.palette());
         }
+        let clear = usize::from(self.wells.last() == Some(&Ink::Clear));
+        let numbered = self.wells.len().saturating_sub(clear);
+        if self.swatches.number_wells(numbered, layout.number_face()) {
+            damage.add(layout.palette());
+        }
+        for kind in PaneKind::ALL {
+            if !self.panes.floats(kind) {
+                self.chosen[kind.index()] = None;
+            }
+        }
         self.settle_palette_bar(layout, damage);
         let size = self.picture_size();
         let area = layout.canvas();
@@ -1931,7 +2108,7 @@ impl View {
         let model = |content: u64, room: u32, offset: u64| {
             ScrollModel::in_pixels(
                 ScrollRange::new(content.max(u64::from(room)), u64::from(room), offset),
-                16,
+                SCROLL_LINE,
             )
         };
         let vertical = model(height, area.height, y);
@@ -1947,6 +2124,12 @@ impl View {
         // The picture may have moved, or changed, under a pointer that did not.
         self.hovered(layout, damage);
         self.settle_float_homes(layout);
+        self.settle_body_bars(layout, damage);
+        if self.layers.settle(layout.layers()) {
+            damage.add(layout.layers().rows);
+        }
+        self.sync_layers(layout, damage);
+        self.lift_short_hold();
     }
 
     /// The kind the picture showing has, or the inks' own for a kept sprite.
@@ -2165,21 +2348,31 @@ impl View {
         }
     }
 
-    /// The window gained or lost the keyboard; losing it ends any drag, and
-    /// the Space held with it.
+    /// The window gained or lost the keyboard; losing it ends any drag, lets
+    /// the Space held go, and lands an opacity changing or a name being typed.
     pub fn focus_changed(&mut self, focused: bool, layout: &Layout, damage: &mut Region) {
         self.headers_follow_focus(focused, layout, damage);
         if !focused {
             self.space = false;
             self.end_gesture(layout, damage);
+            self.settle_opacity(layout, damage);
+            self.settle_rename(layout, damage);
             self.pane_drag = None;
             self.band_grab = None;
         }
     }
 
-    /// Size the history for memory pressure `band`.
-    pub fn adopt_pressure(&mut self, band: PressureBand) {
+    /// Size the history for memory pressure `band`, ask again for a preview
+    /// held back for want of memory once the pressure falls, and from severe
+    /// pressure on let the preview's overlay and the composite beneath an
+    /// opacity changing go.
+    pub fn adopt_pressure(&mut self, band: PressureBand, layout: &Layout, damage: &mut Region) {
         self.document.adopt_pressure(band);
+        self.previews_pressured(band);
+        if band >= PressureBand::Severe {
+            self.drop_overlay(layout, damage);
+            self.drop_under();
+        }
     }
 
     /// When the window next needs waking, if it does.
@@ -2202,6 +2395,11 @@ impl View {
     /// Arm the deadlines the state calls for, now it is `now_ns`, with the
     /// held controls laid out at `layout`.
     pub fn arm_deadline(&mut self, now_ns: u64, layout: &Layout, scale: Scale, theme: &Theme) {
+        let bodies = self
+            .body_bars
+            .iter_mut()
+            .filter_map(|bar| bar.repeat_deadline(now_ns))
+            .min();
         self.repeat_due = [
             self.tool_box
                 .repeat_deadline(now_ns, layout.tools(), scale, theme),
@@ -2210,6 +2408,8 @@ impl View {
             self.vertical.repeat_deadline(now_ns),
             self.horizontal.repeat_deadline(now_ns),
             self.palette_bar.repeat_deadline(now_ns),
+            self.layers.repeat_deadline(now_ns),
+            bodies,
         ]
         .into_iter()
         .flatten()
@@ -2251,6 +2451,9 @@ impl View {
         {
             self.scroll_palette(offset, layout, damage);
         }
+        self.layers
+            .repeat(now_ns, layout.layers(), scale, theme, damage);
+        self.repeat_body_bars(now_ns, layout, scale, theme, damage);
     }
 
     fn scroll_to(&mut self, x: Option<u64>, y: Option<u64>, layout: &Layout, damage: &mut Region) {
@@ -2390,8 +2593,11 @@ mod layers;
 #[path = "view_panes.rs"]
 mod panes;
 
-#[path = "view_adjust.rs"]
-mod adjust;
+#[path = "view_operations.rs"]
+mod operations;
+
+#[path = "view_previews.rs"]
+mod previews;
 
 #[path = "view_colour.rs"]
 mod colour;

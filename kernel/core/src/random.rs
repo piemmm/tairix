@@ -28,6 +28,7 @@
 //! initialised a non-blocking request fails closed rather than returning
 //! weak randomness). A draw never substitutes predictable bytes.
 
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use tairix_abi::Errno;
@@ -37,7 +38,7 @@ use tairix_rng::{
     BootSeedSource, EntropyError, EntropySource, InterruptEntropyPool, InterruptPoolSource,
     JitterSource, MixedPair, OutputReserve, ReserveError, TimeSource, MAX_BOOT_SEED_LEN,
 };
-use tairix_sync::SpinLock;
+use tairix_sync::{RwLock, SpinLock};
 use zeroize::Zeroize;
 
 /// Object-safe view of the kernel's CSPRNG output reserve.
@@ -326,6 +327,63 @@ pub(crate) fn take_boot_seed_source() -> BootSeedSource {
 /// share the one `Box<dyn RandomReserve>` field type.
 pub type SeededReserve<A> = OutputReserve<KernelEntropy<A>>;
 
+/// A reserve seeded as the kernel's is, from `arch`'s platform source, its
+/// counter's timing jitter, interrupt-arrival timing and the loader's
+/// one-shot seed, mixed so none is trusted alone: the reserve and the sources
+/// that contributed, or why it could not be seeded (`no_source`,
+/// `draw_failed`).
+///
+/// # Errors
+///
+/// The stable cause the boot records when no source could contribute or every
+/// bounded draw failed.
+pub fn seeded_reserve<A: crate::KernelArch + 'static>(
+    arch: &Arc<A>,
+) -> Result<(SeededReserve<A>, &'static str), &'static str> {
+    let hardware = ArchEntropy::new(arch.platform_entropy());
+    let mut jitter = JitterSource::new(ArchTicks::new(Arc::clone(arch)));
+    // Probed once so the record says whether jitter contributes: an emulated
+    // counter fails its health tests.
+    let jitter_healthy = {
+        let mut probe = [0u8; 8];
+        jitter.fill(&mut probe).is_ok()
+    };
+    // The interrupt pool contributes nothing until interrupts have flowed,
+    // but folds fresh timing into every reseed.
+    let interrupt = InterruptPoolSource::new(&IRQ_ENTROPY_POOL);
+    let boot_seed = take_boot_seed_source();
+    let sources = seed_sources(hardware.is_present(), jitter_healthy, boot_seed.has_seed());
+    let mixed = MixedPair::new(
+        MixedPair::new(MixedPair::new(hardware, jitter), interrupt),
+        boot_seed,
+    );
+    let mut reserve: SeededReserve<A> = SeededReserve::new();
+    match reserve.seed(mixed) {
+        Ok(()) => Ok((reserve, sources.unwrap_or("unattributed"))),
+        Err(_) if sources.is_some() => Err("draw_failed"),
+        Err(_) => Err("no_source"),
+    }
+}
+
+/// An unseeded reserve for a host test that builds spawn services it never
+/// draws a canary through.
+#[cfg(test)]
+pub(crate) fn leaked_unseeded_reserve() -> &'static RwLock<Box<dyn RandomReserve + Send + Sync>> {
+    crate::forever(Box::new(RwLock::new(
+        Box::new(BootReserve::new()) as Box<dyn RandomReserve + Send + Sync>
+    )))
+}
+
+/// A stack-canary seed for one process: eight bytes of the reserve's output,
+/// drawn without waiting, or `None` while it cannot serve — a spawn refuses
+/// then rather than run under a value anyone could know.
+#[must_use]
+pub fn draw_canary(rng: &RwLock<Box<dyn RandomReserve + Send + Sync>>) -> Option<u64> {
+    let mut bytes = [0u8; 8];
+    rng.write().draw(&mut bytes, true).ok()?;
+    Some(u64::from_le_bytes(bytes))
+}
+
 /// Map a reserve failure onto the stable random ABI errno.
 ///
 /// Both the pre-seed [`ReserveError::NotReady`] and a reseed-time
@@ -347,11 +405,30 @@ pub fn reserve_errno(_err: ReserveError) -> Errno {
 
 #[cfg(test)]
 mod tests {
-    use super::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
+    use super::{draw_canary, reserve_errno, BootReserve, NullEntropy, RandomReserve};
     use crate::test_entropy::SeededEntropy;
+    use alloc::boxed::Box;
     use tairix_abi::Errno;
     use tairix_fuzzseed::Prng;
     use tairix_rng::{EntropyError, EntropySource, OutputReserve, ReserveError};
+    use tairix_sync::RwLock;
+
+    /// A process's canary is the seeded reserve's own output, fresh at every
+    /// draw, and there is none while the reserve is unseeded. Regression:
+    /// every process ran under one compiled-in canary anyone could read.
+    #[test]
+    fn a_canary_is_drawn_fresh_from_a_seeded_reserve_and_never_without_one() {
+        let mut reserve = OutputReserve::<SeededEntropy>::new();
+        reserve
+            .seed(SeededEntropy::new(11))
+            .expect("the deterministic source seeds");
+        let seeded = RwLock::new(Box::new(reserve) as Box<dyn RandomReserve + Send + Sync>);
+        let (first, second) = (draw_canary(&seeded), draw_canary(&seeded));
+        assert!(first.is_some() && first != second, "{first:?} {second:?}");
+        let unseeded =
+            RwLock::new(Box::new(BootReserve::new()) as Box<dyn RandomReserve + Send + Sync>);
+        assert_eq!(draw_canary(&unseeded), None);
+    }
 
     #[test]
     fn boot_reserve_is_unseeded_and_draws_not_ready() {

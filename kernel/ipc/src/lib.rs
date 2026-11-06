@@ -19,6 +19,9 @@
 //!    every live mapping atomically.
 //! 4. [`notify`] — asynchronous, signal-like notifications with the
 //!    same capability gates as ports.
+//! 5. [`senders`] — the index of the endpoints each sender uses, which a
+//!    registry shares with every endpoint it holds, so a sender's end visits
+//!    those endpoints and no other.
 //!
 //! Every refused operation emits exactly one structured audit event
 //! through [`audit`] before returning a stable [`tairix_abi::Errno`]
@@ -59,12 +62,13 @@ pub mod notify;
 mod payload_wipe_tests;
 pub mod port;
 pub mod registry;
+pub mod senders;
 pub mod shmem;
 
 pub use audit::AuditEvent;
 pub use call::{
-    CallEndpoint, CallEndpointLimits, CallTicket, ReceivedCall, RecvCall, ReplyOutcome, SettleMark,
-    Woken,
+    CallEndpoint, CallEndpointLimits, CallPayload, CallTicket, Destroyed, ReceivedCall, RecvCall,
+    ReplyOutcome, Woken,
 };
 pub use lanes::RoomWake;
 pub use notify::{NotificationChannel, NotificationFlags};

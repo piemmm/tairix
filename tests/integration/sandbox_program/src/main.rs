@@ -287,14 +287,17 @@ mod program {
     fn session_leg() -> i32 {
         // A session has no launcher of its own, so its owner logs a failed
         // transport construction through the seam's one emitter of that id.
-        let transport =
-            match RtSessionChannel::launch(SESSION_PATH, tairix_sandbox::WorkerMemory::Messages) {
-                Ok(transport) => transport,
-                Err(errno) => {
-                    log_unavailable(&CountingSink::default(), errno);
-                    return 40;
-                }
-            };
+        let transport = match RtSessionChannel::launch(
+            SESSION_PATH,
+            tairix_sandbox::WorkerMemory::Messages,
+            None,
+        ) {
+            Ok(transport) => transport,
+            Err(errno) => {
+                log_unavailable(&CountingSink::default(), errno);
+                return 40;
+            }
+        };
         let Ok(bounds) = SessionBounds::new(SESSION_QUEUE, SESSION_QUEUE) else {
             return 41;
         };

@@ -141,7 +141,8 @@ impl Fixture {
 /// `/` backed by [`root_volume`], and the network volume ann attached shown
 /// at `/Storage/share`.
 fn fixture() -> Fixture {
-    let vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
+    let vfs =
+        Vfs::with_default_layout(UserId(0), GroupId(0)).expect("the default layout fits in memory");
     {
         let mut mounts = vfs.mounts_write();
         mounts

@@ -589,6 +589,16 @@ pub fn is_retired(id: u64) -> bool {
         .is_some_and(|region| region.retired)
 }
 
+/// Whether region `id` still exists: some mapping or hold keeps it. A released
+/// region's id is not issued again, so once this answers `false` it always will.
+#[must_use]
+pub fn exists(id: u64) -> bool {
+    REGIONS
+        .lock()
+        .as_ref()
+        .is_some_and(|state| state.regions.contains_key(&id))
+}
+
 /// Drop one reference to region `id`, releasing its frames if this was the
 /// last one: to the allocator, or to its node's custody for a DMA region its
 /// device may still reach. The shared release step behind [`Unmapped`],
@@ -968,6 +978,24 @@ mod tests {
         assert_eq!(fac.frees.lock().unwrap().len(), 1, "freed at last ref");
         // The id is unforgeable to a later map once the region is gone.
         assert_eq!(map(&fac, owner, id), Err(Errno::NotFound));
+    }
+
+    /// A region exists while any mapping keeps it, and once its last goes it
+    /// is gone for good: its id is not issued again.
+    #[test]
+    fn a_region_exists_until_its_last_mapping_goes() {
+        let fac = FakeFacility::new();
+        let (owner, grantee) = (ProcessId(0x5_0301), ProcessId(0x5_0302));
+        let (owner_va, id) = create(&fac, owner, 1).expect("create");
+        let (grantee_va, _) = map(&fac, grantee, id).expect("grantee maps");
+        drop(unmap(&fac, owner, owner_va).expect("owner unmap"));
+        assert!(exists(id), "a grantee's mapping keeps it");
+        drop(unmap(&fac, grantee, grantee_va).expect("grantee unmap"));
+        assert!(!exists(id));
+        let (va, next) = create(&fac, owner, 1).expect("create");
+        assert_ne!(next, id, "a released id is not issued again");
+        assert!(exists(next));
+        drop(unmap(&fac, owner, va).expect("unmap"));
     }
 
     #[test]

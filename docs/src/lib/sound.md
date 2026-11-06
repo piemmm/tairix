@@ -212,6 +212,12 @@ refused by name.
   within a hundredth of full scale over the first 20 ms and half that past
   100 ms on libopus's streams. A target close enough ahead is decoded on to,
   and that is exact. An error stays with the stream as Vorbis's does.
+
+  Outside Ogg, `OpusPackets` decodes the stream a WebM track carries a packet
+  at a time: its identification header, the track's codec private data, is
+  read and refused exactly as the Ogg mapping reads it, and the output gain is
+  applied. The container's timestamps place each packet, and its codec delay
+  trims the decoder's pre-skip.
 - **MPEG audio** (ISO/IEC 11172-3, ISO/IEC 13818-3, and MPEG-2.5 for 8 to
   12 kHz): Layers I, II and III, mono, stereo, dual channel and joint stereo
   — Layers I and II's intensity bound, Layer III's mid/side and intensity
@@ -254,8 +260,8 @@ Every constant is worked in double precision and rounded once.
 
 ## The FLAC encoder
 
-Behind the off-by-default `encode` feature, so no binary that runs on the
-machine carries it. `flac_encode::Writer` is a core that emits exactly the
+Behind the off-by-default `encode-flac` feature, so no binary that runs on
+the machine carries it. `flac_encode::Writer` is a core that emits exactly the
 constructs it is given — a frame's stereo coding, each subframe's predictor,
 wasted bits and residual partitioning, the header's codes — so tests and the
 fuzz generator can make constructs a chooser would never pick;
@@ -266,6 +272,36 @@ encoder quantises them, and the cheapest stereo coding. `finish` writes the
 native stream, `finish_ogg` the Ogg mapping. Both halves share one format
 model — the predictors, the residual fold, the header code tables, the CRCs
 and the digest — so they cannot drift apart by construction.
+
+## The Opus encoder
+
+Behind the off-by-default `encode-opus` feature, for the screen recorder.
+`opus_encode::Encoder` writes packets of one fullband CELT frame of 20 ms,
+mono or stereo, at a constant bitrate from 6 to 510 kb/s, each into a buffer
+the caller owns; `head` is the identification header Ogg and WebM carry
+before the packets, and `PRE_SKIP` the 120 samples the decode lags the input
+by. SILK and hybrid frames are never written: every Opus decoder plays a
+CELT-only packet. The frame is coded by the decoder's own routines, generic
+over the range coder's two ends, each symbol handed the value the encoder
+chose — the energies, the bit allocation, the bands' splits and folding, the
+pyramid vector quantiser's enumeration — so the two halves cannot drift
+apart. The encoder's own part is its analysis: a transform that is the exact
+inverse of the decoder's, eight short blocks where a 2.5 ms block's energy
+rises tenfold over those before it, each energy to the nearest step but let
+down no faster than the frame's bytes allow and held to a step of one where
+the bands after it would run out of bits, each shape's codeword by projection
+onto the pyramid and then a pulse at a time, and mid and side, intensity or
+dual stereo by the bitrate and the channels' shapes, a band whose angle
+leaves the side nothing coded as the channels' downmix. It spreads the
+pulses less the more peaked the audible bands' shapes are, averaged and held
+across frames; boosts a band by a bit a coefficient for each 6 dB it stands
+over its neighbours' envelope, to two thirds of the frame, so a tone is coded
+with the bits its level asks for; and tilts the allocation toward the end
+the spectrum's slope and the channels' correlation favour. It runs no pitch
+pre-filter, and its arithmetic is basic float operations and
+`tairix_util::mathf`, so every target writes the same packets. A frame it
+refuses — samples it cannot code, a buffer too small, or a coding that outran
+its bytes — leaves it as it was.
 
 ## Testing
 
@@ -312,6 +348,20 @@ breadth check — every width, channel count, subframe kind, partition shape,
 header code and stereo coding, seeking with and without a seek table, and a
 decode through an input that answers "not yet" — and proves only that the two
 halves agree, which a shared misreading of the format would satisfy too.
+
+The Opus encoder's oracle is the decoder above: every packet ends in the
+encoder's own range state, which proves each symbol was read as written;
+tones, noise held below the 20 kHz the format codes, and stereo come back
+within signal-to-noise floors at each bitrate tested, an onset's pre-echo
+stays at least 15 dB under it, silence decodes to silence, an Ogg stream of
+the packets plays in time with its input, every bound is refused without
+changing the encoder, and the packets after a frame refused as an overrun are
+those of an encoder that never saw it. Its transform is held to the decoder's
+inverse at both
+block sizes; a held tone is boosted and spread less than noise, the tilt
+leans toward the louder end, and the lowest bitrate's frame still moves
+every band's energy; and the range coder's two ends are held to each other,
+a frame filled to its last bit among them.
 
 The ADPCM codecs are checked
 against oracles outside the tree: the G.72x decoders bit-exactly against

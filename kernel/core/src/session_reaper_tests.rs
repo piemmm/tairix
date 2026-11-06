@@ -192,7 +192,7 @@ fn a_session_end_wakes_one_notifier_task_not_every_one() {
     let notifier = Notifier::over(table());
     let parked: [_; super::NOTIFIER_TASKS] = core::array::from_fn(|_| claim_peer_task());
     for task in parked {
-        notifier.parked.register(task, NO_DEADLINE);
+        notifier.parked.register(task, NO_DEADLINE).expect("filed");
     }
     let _ = take_unparked();
     assert!(!notifier.tell_ended(arch), "not serving yet");

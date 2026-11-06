@@ -1,0 +1,12 @@
+# Signed-AppInfo manifest source for the `twins` fixture of the twin-volume
+# QEMU vertical (docs/src/filesystem/drives.md). Composed and planted only on that
+# vertical's disk image by tools/xtask: the crate lives outside the userland
+# discovery walk, so no production image ships it. CAP_CONSOLE_WRITE for its
+# report, CAP_FS_ACCESS to read and write the sticks' volumes, and
+# CAP_FS_MOUNT to detach them, which a device's volume asks; each is
+# intersected with the launching user's grants.
+id = "os.tairix.test.twins"
+name = "twins"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_FS_MOUNT"]

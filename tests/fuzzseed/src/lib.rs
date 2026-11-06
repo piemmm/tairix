@@ -392,6 +392,60 @@ impl Prng {
             chunk.copy_from_slice(&self.next_u64().to_le_bytes()[..chunk.len()]);
         }
     }
+
+    /// `len` pseudo-random bytes.
+    pub fn noise(&mut self, len: usize) -> Vec<u8> {
+        let mut bytes = vec![0; len];
+        self.fill(&mut bytes);
+        bytes
+    }
+
+    /// `pristine` with one to five byte-level mutations: a bit flipped, a
+    /// byte set to an edge value, a truncation, noise inserted, a run
+    /// deleted, or a run overwritten with the all-ones bytes the largest
+    /// length field reads as.
+    pub fn mutated(&mut self, pristine: &[u8]) -> Vec<u8> {
+        let mut bytes = pristine.to_vec();
+        for _ in 0..=self.below(4) {
+            if bytes.is_empty() {
+                break;
+            }
+            let at = self.below(bytes.len());
+            match self.below(6) {
+                0 => bytes[at] ^= 1 << self.below(8),
+                1 => bytes[at] = self.edge_biased_u8(),
+                2 => bytes.truncate(at),
+                3 => {
+                    let tail = bytes.split_off(at);
+                    let inserted = 1 + self.below(16);
+                    bytes.extend_from_slice(&self.noise(inserted));
+                    bytes.extend_from_slice(&tail);
+                }
+                4 => {
+                    let end = at.saturating_add(1 + self.below(32)).min(bytes.len());
+                    bytes.copy_within(end.., at);
+                    bytes.truncate(bytes.len() - (end - at));
+                }
+                _ => {
+                    let ones = [0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+                    let end = (at + ones.len()).min(bytes.len());
+                    bytes[at..end].copy_from_slice(&ones[..end - at]);
+                }
+            }
+        }
+        bytes
+    }
+}
+
+/// The first index at which `a` and `b` differ, a length included: what a
+/// test of a large buffer asserts is `None`, so a failure names one place
+/// rather than printing both buffers.
+#[must_use]
+pub fn first_difference<T: PartialEq>(a: &[T], b: &[T]) -> Option<usize> {
+    a.iter()
+        .zip(b)
+        .position(|(x, y)| x != y)
+        .or_else(|| (a.len() != b.len()).then(|| a.len().min(b.len())))
 }
 
 pub mod asm;

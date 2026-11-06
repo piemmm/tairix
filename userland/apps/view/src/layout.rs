@@ -13,9 +13,14 @@
 //! +------------------------------------------------------+     ||
 //! |======================================================|     ||
 //! +--------------------------------------------------------------+
+//! | ------o-------------------------------------  0:12 / 3:45    |
+//! +--------------------------------------------------------------+
 //! | photo.jpg — JPEG 4032x3024 — page 1 of 1 — 2.4 MB      100%  |
 //! +--------------------------------------------------------------+
 //! ```
+//!
+//! The band above the status line is a movie's transport — its seek bar and
+//! its clock — and a picture has none.
 //!
 //! Every extent is derived from the active theme's metrics at the desktop UI
 //! scale and from the text face's own line height — never a pixel constant a
@@ -50,6 +55,18 @@ const MIN_SLIDER_WIDTH: u32 = 64;
 /// How many tools the toolbar carries, so the layout reserves the strip they
 /// need rather than measuring a toolbar it does not own.
 pub const TOOL_COUNT: usize = 11;
+
+/// The widest reading a movie's clock shows, which its place is measured for.
+const CLOCK_TEMPLATE: &str = "00:00:00 / 00:00:00";
+
+/// Which of the optional bands a window shows.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Bands {
+    /// The information panel down the trailing edge.
+    pub info: bool,
+    /// A movie's transport above the status line: its seek bar and its clock.
+    pub transport: bool,
+}
 
 /// The extents every band of the window is claimed in, resolved once from the
 /// theme's metrics at the desktop scale and the text face's own line height.
@@ -111,6 +128,9 @@ pub struct Layout {
     horizontal_bar: Rect,
     info: Rect,
     status: Rect,
+    transport: Rect,
+    seek_bar: Rect,
+    clock: Rect,
 }
 
 impl Layout {
@@ -120,9 +140,9 @@ impl Layout {
     ///
     /// `tools_width` is what the toolbar's own tools need across; it is
     /// reserved before the zoom slider, so a narrow window costs the slider
-    /// rather than the tools. `info` says whether the user has the
-    /// information panel open; closed, its rectangle is empty and the canvas
-    /// takes the room.
+    /// rather than the tools. `bands` names the optional bands shown: a closed
+    /// information panel's rectangle is empty and the canvas takes the room,
+    /// and a picture has no transport.
     #[must_use]
     pub fn for_window(
         width: u32,
@@ -131,12 +151,13 @@ impl Layout {
         scale: Scale,
         font: BitmapFont,
         tools_width: u32,
-        info: bool,
+        bands: Bands,
     ) -> Self {
         let m = Metrics::resolve(theme, scale, font);
 
         // The toolbar takes the top edge and the status line the bottom, each
-        // claimed before the body so neither can be squeezed out.
+        // claimed before the body so neither can be squeezed out; a movie's
+        // transport is claimed above the status line for the same reason.
         let toolbar_h = m.toolbar().min(height);
         let toolbar = Rect::new(0, 0, width, toolbar_h);
         let status_h = m.status().min(height.saturating_sub(toolbar_h));
@@ -146,9 +167,25 @@ impl Layout {
             width,
             status_h,
         );
+        let transport_h = if bands.transport {
+            m.toolbar()
+                .min(height.saturating_sub(toolbar_h).saturating_sub(status_h))
+        } else {
+            0
+        };
+        let transport = band(
+            0,
+            height.saturating_sub(status_h).saturating_sub(transport_h),
+            width,
+            transport_h,
+        );
+        let (seek_bar, clock) = transport_strip(transport, m, font, scale);
 
         let body_top = toolbar_h;
-        let body_h = height.saturating_sub(toolbar_h).saturating_sub(status_h);
+        let body_h = height
+            .saturating_sub(toolbar_h)
+            .saturating_sub(status_h)
+            .saturating_sub(transport_h);
 
         // The tools are the toolbar's primary surface and the zoom slider the
         // incidental one, so the tools' strip is reserved first and the slider
@@ -169,7 +206,12 @@ impl Layout {
             )
         };
 
-        let info_w = panel_width(info, width, INFO_SHARE, scale.scale_length(MIN_INFO_WIDTH));
+        let info_w = panel_width(
+            bands.info,
+            width,
+            INFO_SHARE,
+            scale.scale_length(MIN_INFO_WIDTH),
+        );
         let info = band(width.saturating_sub(info_w), body_top, info_w, body_h);
 
         // What is left beside the panel is the canvas and its two bars. The
@@ -202,6 +244,9 @@ impl Layout {
             horizontal_bar,
             info,
             status,
+            transport,
+            seek_bar,
+            clock,
         }
     }
 
@@ -219,13 +264,13 @@ impl Layout {
         theme: &Theme,
         scale: Scale,
         font: BitmapFont,
-        info: bool,
+        bands: Bands,
     ) -> (u32, u32) {
         let m = Metrics::resolve(theme, scale, font);
         let beside = canvas.0.saturating_add(m.bar);
         // The panel's share is of the *window*, so widening for it is the
         // share taken the other way round rather than the share itself.
-        let width = if info {
+        let width = if bands.info {
             let least = scale.scale_length(MIN_INFO_WIDTH);
             let widened =
                 u32::try_from(u64::from(beside) * 24 / u64::from(24 - INFO_SHARE.min(23)))
@@ -239,13 +284,15 @@ impl Layout {
         } else {
             beside
         };
+        let transport = if bands.transport { m.toolbar() } else { 0 };
         (
             width,
             canvas
                 .1
                 .saturating_add(m.bar)
                 .saturating_add(m.toolbar())
-                .saturating_add(m.status()),
+                .saturating_add(m.status())
+                .saturating_add(transport),
         )
     }
 
@@ -336,6 +383,25 @@ impl Layout {
     pub const fn status(&self) -> Rect {
         self.status
     }
+
+    /// A movie's transport band above the status line, empty for a picture.
+    #[must_use]
+    pub const fn transport(&self) -> Rect {
+        self.transport
+    }
+
+    /// The seek bar across the transport band.
+    #[must_use]
+    pub const fn seek_bar(&self) -> Rect {
+        self.seek_bar
+    }
+
+    /// The movie's clock at the transport band's trailing edge, empty where
+    /// the band is too narrow for it beside the seek bar.
+    #[must_use]
+    pub const fn clock(&self) -> Rect {
+        self.clock
+    }
 }
 
 /// The width a side panel takes: its share of the window, never below what
@@ -352,6 +418,30 @@ fn panel_width(open: bool, width: u32, share: u32, least: u32) -> u32 {
         return 0;
     }
     allowed
+}
+
+/// The seek bar and the clock across a movie's `transport` band: the clock
+/// takes what its widest reading needs at the trailing edge, and gives way
+/// where the band is too narrow for a seek bar beside it.
+fn transport_strip(transport: Rect, m: Metrics, font: BitmapFont, scale: Scale) -> (Rect, Rect) {
+    if transport.height <= m.inset {
+        return (Rect::EMPTY, Rect::EMPTY);
+    }
+    let top = u32::try_from(transport.top())
+        .unwrap_or(0)
+        .saturating_add(m.gap);
+    let height = transport.height - m.inset;
+    let room = transport.width.saturating_sub(m.gap.saturating_mul(2));
+    let clock_w = font.text_width(CLOCK_TEMPLATE).saturating_add(m.gap);
+    if room.saturating_sub(clock_w) < scale.scale_length(MIN_SLIDER_WIDTH) {
+        return (band(m.gap, top, room, height), Rect::EMPTY);
+    }
+    let seek_w = room - clock_w;
+    let clock_x = m.gap.saturating_add(seek_w).saturating_add(m.gap);
+    (
+        band(m.gap, top, seek_w, height),
+        band(clock_x, top, clock_w - m.gap, height),
+    )
 }
 
 /// A band of the body, empty when it has no room.

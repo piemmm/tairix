@@ -38,6 +38,7 @@ fn task_with(caps: &[CapabilityId], sink: &RecordingSink) -> TaskCapabilities {
         manifest_request,
         sink,
     )
+    .expect("derived")
 }
 
 fn small_map(usable_pages: usize) -> BootMemoryMap {

@@ -162,6 +162,53 @@ impl BlkDeviceName {
     }
 }
 
+/// Byte length of a [`BlkDeviceIdentity`]: what [`BlkOp::Identity`] leaves at
+/// the start of the data window.
+pub const BLK_DEVICE_IDENTITY_LEN: usize = 16;
+
+/// What tells one block unit from every other of its kind, as the driver that
+/// binds the hardware read it from the device itself
+/// ([`Block::device_identity`]).
+///
+/// A unit states one only where it proves the medium: a USB storage unit's is
+/// a digest of its device's vendor, product and serial number and its unit
+/// number, stated only while its medium cannot leave it, since a card reader's
+/// would prove only the reader; a RAID array's is a digest of its own
+/// identifier and its members' identities, stated only while every member
+/// states one. A consumer compares it and nothing more: a
+/// re-inserted volume's held writes are replayed onto its medium unasked only
+/// when the device states the identity the volume's device stated. It grants
+/// no authority, and a device that copies another's serial is that device to
+/// every host.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct BlkDeviceIdentity([u8; BLK_DEVICE_IDENTITY_LEN]);
+
+impl BlkDeviceIdentity {
+    /// The identity `bytes` spell, or `None` for all zero: the window's word
+    /// for a device that states none.
+    #[must_use]
+    pub const fn new(bytes: [u8; BLK_DEVICE_IDENTITY_LEN]) -> Option<Self> {
+        let mut i = 0;
+        while i < BLK_DEVICE_IDENTITY_LEN {
+            if bytes[i] != 0 {
+                return Some(Self(bytes));
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// The bytes [`BlkOp::Identity`] leaves in the window for `identity`, all
+    /// zero for none.
+    #[must_use]
+    pub const fn encode(identity: Option<Self>) -> [u8; BLK_DEVICE_IDENTITY_LEN] {
+        match identity {
+            Some(Self(bytes)) => bytes,
+            None => [0; BLK_DEVICE_IDENTITY_LEN],
+        }
+    }
+}
+
 /// One block-service operation.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -179,6 +226,11 @@ pub enum BlkOp {
     /// `SYNCHRONIZE CACHE` / virtio flush equivalent). Carries no data and
     /// names no blocks.
     Flush = 3,
+    /// Leave the device's identity ([`Block::device_identity`]) at the start
+    /// of the shared data window: [`BLK_DEVICE_IDENTITY_LEN`] bytes, all zero
+    /// for a device that states none. Carries no data in and names no blocks.
+    /// Asked once, after the geometry, so it costs the data path nothing.
+    Identity = 4,
 }
 
 impl BlkOp {
@@ -200,6 +252,7 @@ impl BlkOp {
             1 => Ok(Self::Read),
             2 => Ok(Self::Write),
             3 => Ok(Self::Flush),
+            4 => Ok(Self::Identity),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -271,9 +324,9 @@ impl BlkRequest {
     ///   [`BLK_REQUEST_LEN`] — a truncated request is never read past its
     ///   bytes.
     /// * [`Errno::OutOfRange`] if the opcode byte is unknown, or a
-    ///   data-less operation ([`BlkOp::Geometry`] / [`BlkOp::Flush`])
-    ///   carries a non-zero `lba` or `blocks` (fail closed on a frame that
-    ///   cannot mean what it says).
+    ///   data-less operation ([`BlkOp::Geometry`] / [`BlkOp::Flush`] /
+    ///   [`BlkOp::Identity`]) carries a non-zero `lba` or `blocks` (fail
+    ///   closed on a frame that cannot mean what it says).
     pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < BLK_REQUEST_LEN {
             return Err(Errno::LengthOutOfRange);
@@ -281,7 +334,9 @@ impl BlkRequest {
         let op = BlkOp::from_u8(bytes[0])?;
         let blocks = read_u32(bytes, 4);
         let lba = read_u64(bytes, 8);
-        if matches!(op, BlkOp::Geometry | BlkOp::Flush) && (lba != 0 || blocks != 0) {
+        if matches!(op, BlkOp::Geometry | BlkOp::Flush | BlkOp::Identity)
+            && (lba != 0 || blocks != 0)
+        {
             return Err(Errno::OutOfRange);
         }
         Ok(Self {
@@ -1673,8 +1728,8 @@ pub struct BlkIoDirection {
 /// * `read_bytes`/`write_bytes` count the bytes a completion actually moved,
 ///   so a failed transfer contributes an op and a wait but no bytes.
 ///
-/// A data-less operation ([`BlkOp::Geometry`], [`BlkOp::Flush`]) belongs to
-/// neither direction: it moves no bytes and is counted in neither `ops`
+/// A data-less operation ([`BlkOp::Geometry`], [`BlkOp::Flush`],
+/// [`BlkOp::Identity`]) belongs to neither direction: it moves no bytes and is counted in neither `ops`
 /// tally, though the device is busy for it. Every tally saturates rather than
 /// wrapping: a counter is operational observability, never a security or
 /// format bound, so an implausibly-long-lived device pins a tally at
@@ -1731,7 +1786,7 @@ impl BlkIoCounters {
                 ops: Self::WRITE_OPS,
                 wait_ns: Self::WRITE_WAIT_NS,
             }),
-            BlkOp::Geometry | BlkOp::Flush => None,
+            BlkOp::Geometry | BlkOp::Flush | BlkOp::Identity => None,
         }
     }
 
@@ -2891,6 +2946,16 @@ fn classify<B: Block>(
             }
         }
         BlkOp::Flush => Served::Device(device.flush().map(|()| BlkCompletion::default())),
+        // A window too small for the identity is refused before anything is
+        // said, and one the device states none for is cleared, so no earlier
+        // transfer's bytes are read as an identity.
+        BlkOp::Identity => match window.get_mut(..BLK_DEVICE_IDENTITY_LEN) {
+            Some(out) => {
+                out.copy_from_slice(&BlkDeviceIdentity::encode(device.device_identity()));
+                Served::Device(Ok(BlkCompletion::default()))
+            }
+            None => Served::Refused(Errno::LengthOutOfRange),
+        },
     }
 }
 
@@ -2923,6 +2988,41 @@ mod tests {
             panic!("the engine held a request its device never made it hold");
         };
         len
+    }
+
+    #[test]
+    fn a_device_identity_is_none_only_when_all_zero_and_round_trips() {
+        assert_eq!(BlkDeviceIdentity::new([0; BLK_DEVICE_IDENTITY_LEN]), None);
+        assert_eq!(
+            BlkDeviceIdentity::encode(None),
+            [0; BLK_DEVICE_IDENTITY_LEN]
+        );
+        let mut bytes = [0; BLK_DEVICE_IDENTITY_LEN];
+        bytes[BLK_DEVICE_IDENTITY_LEN - 1] = 1;
+        let identity = BlkDeviceIdentity::new(bytes).expect("one set byte is an identity");
+        assert_eq!(BlkDeviceIdentity::encode(Some(identity)), bytes);
+        assert_eq!(
+            BlkDeviceIdentity::new(BlkDeviceIdentity::encode(Some(identity))),
+            Some(identity)
+        );
+        let mut other = bytes;
+        other[0] = 1;
+        assert_ne!(BlkDeviceIdentity::new(other), Some(identity));
+    }
+
+    #[test]
+    fn the_identity_op_round_trips() {
+        let req = BlkRequest {
+            op: BlkOp::Identity,
+            lba: 0,
+            blocks: 0,
+            binding: 7,
+        };
+        let mut buf = [0u8; BLK_REQUEST_LEN];
+        let n = req.encode(&mut buf).expect("encodes");
+        assert_eq!(BlkRequest::decode(&buf[..n]), Ok(req));
+        assert_eq!(BlkOp::from_u8(BlkOp::Identity.as_u8()), Ok(BlkOp::Identity));
+        assert!(BlkIoCounters::direction(BlkOp::Identity).is_none());
     }
 
     #[test]
@@ -3463,13 +3563,13 @@ mod tests {
     #[test]
     fn request_decode_rejects_unknown_op() {
         let mut buf = [0u8; BLK_REQUEST_LEN];
-        buf[0] = 4;
+        buf[0] = BlkOp::Identity.as_u8() + 1;
         assert_eq!(BlkRequest::decode(&buf), Err(Errno::OutOfRange));
     }
 
     #[test]
     fn request_decode_rejects_dataless_op_naming_blocks() {
-        for op in [BlkOp::Geometry, BlkOp::Flush] {
+        for op in [BlkOp::Geometry, BlkOp::Flush, BlkOp::Identity] {
             let req = BlkRequest {
                 op,
                 lba: 0,
@@ -4871,10 +4971,12 @@ mod tests {
     /// falling back.
     const MEM_BLOCK_MEDIUM: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata);
 
-    /// An in-memory 512-byte-block device with a flush counter.
+    /// An in-memory 512-byte-block device with a flush counter, stating
+    /// `identity`.
     struct MemBlock {
         data: Vec<u8>,
         flushes: usize,
+        identity: Option<BlkDeviceIdentity>,
     }
 
     impl MemBlock {
@@ -4882,6 +4984,7 @@ mod tests {
             Self {
                 data: vec![0u8; BLOCK_SIZE * usize::try_from(BLOCK_COUNT).expect("64 fits usize")],
                 flushes: 0,
+                identity: None,
             }
         }
     }
@@ -4896,6 +4999,10 @@ mod tests {
 
         fn medium(&self) -> Option<BlkMedium> {
             Some(MEM_BLOCK_MEDIUM)
+        }
+
+        fn device_identity(&self) -> Option<BlkDeviceIdentity> {
+            self.identity
         }
 
         fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
@@ -5023,6 +5130,39 @@ mod tests {
         assert_eq!(
             BlkDeviceClass::of(completion.medium).budget(),
             MEM_BLOCK_MEDIUM.class().budget()
+        );
+    }
+
+    /// The identity request leaves what the device states at the start of
+    /// the window, clears it for one that states none, and is refused a
+    /// window that cannot hold it.
+    #[test]
+    fn serve_identity_leaves_what_the_device_states_in_the_window() {
+        let identity = BlkDeviceIdentity::new([0x5A; BLK_DEVICE_IDENTITY_LEN]);
+        let request = BlkRequest {
+            op: BlkOp::Identity,
+            lba: 0,
+            blocks: 0,
+            binding: 0,
+        };
+        let mut device = MemBlock::new();
+        device.identity = identity;
+        let mut window = vec![0xEEu8; BLK_DATA_LEN];
+        assert_eq!(
+            serve(&mut device, false, &request, &mut window),
+            Ok(BlkCompletion::default())
+        );
+        let mut stated = [0u8; BLK_DEVICE_IDENTITY_LEN];
+        stated.copy_from_slice(&window[..BLK_DEVICE_IDENTITY_LEN]);
+        assert_eq!(BlkDeviceIdentity::new(stated), identity);
+        assert_eq!(window[BLK_DEVICE_IDENTITY_LEN], 0xEE, "nothing past it");
+        device.identity = None;
+        serve(&mut device, false, &request, &mut window).expect("answered");
+        assert!(window[..BLK_DEVICE_IDENTITY_LEN].iter().all(|&b| b == 0));
+        let mut cramped = [0u8; BLK_DEVICE_IDENTITY_LEN - 1];
+        assert_eq!(
+            serve(&mut device, false, &request, &mut cramped),
+            Err(Errno::LengthOutOfRange)
         );
     }
 

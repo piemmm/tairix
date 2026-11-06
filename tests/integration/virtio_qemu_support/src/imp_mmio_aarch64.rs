@@ -480,7 +480,9 @@ where
     grants.insert(CapabilityId::MMIO_MAP);
     grants.insert(CapabilityId::MEM_DMA);
     grants.insert(CapabilityId::DRV_LOAD);
-    let caller = TaskCapabilities::derive(TASK, UserId(0), grants, grants, &SERIAL_SINK);
+    let Ok(caller) = TaskCapabilities::derive(TASK, UserId(0), grants, grants, &SERIAL_SINK) else {
+        env.fail("caller capability record");
+    };
 
     // 4. Build the `virt`-board MMIO bus and provision the transport.
     // SAFETY: the virtio-MMIO aperture the device tree describes is

@@ -5,17 +5,22 @@
 //! wall, and furniture; the companion has nothing at all, because the desktop
 //! shows through everywhere the creature is not.
 
-use tairix_controls::fill_area;
+use tairix_controls::{fill_area, paint_run};
+use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_raster::shape::{self, Scratch, Shape};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::cinder::{palette, parts, Pose, BODY_RADIUS};
 use crate::fur::{self, falloff_table, Blob, FALLOFF_STEPS};
 use crate::layout::{PenLayout, COMPANION_FEET};
 use crate::pen::{Pen, Whereabouts};
 use crate::project::contact_shadow;
+
+/// How far the pen's readout stands in from the wall's edges, in logical
+/// pixels.
+const READOUT_INSET: u32 = 8;
 
 /// The shared falloff table and anything else a paint needs more than once.
 ///
@@ -100,9 +105,30 @@ impl Painter {
         } else {
             Self::draw_empty_bed(surface, layout);
         }
+        if let Some(refusal) = pen.refusal() {
+            Self::draw_readout(surface, layout.wall, refusal.reason(), theme, scale);
+        }
         // The strip is chrome, so it is drawn over the room rather than in it.
         fill_area(surface, layout.strip, Color::from(palette_ref.surface));
         pen.button().render(surface, layout.button, scale, theme);
+    }
+
+    /// State `text` on the wall, the pen's readout, wrapped to fit it.
+    fn draw_readout(surface: &mut Surface, wall: Rect, text: &str, theme: &Theme, scale: Scale) {
+        let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+        let inset = scale.scale_length(READOUT_INSET);
+        let line = font.line_height().max(1);
+        let lines = wall.height.saturating_sub(inset.saturating_mul(2)) / line;
+        let width = wall.width.saturating_sub(inset.saturating_mul(2));
+        let ink = Color::from(theme.palette().on_surface);
+        let x = wall
+            .left()
+            .saturating_add(i32::try_from(inset).unwrap_or(0));
+        let mut y = wall.top().saturating_add(i32::try_from(inset).unwrap_or(0));
+        for run in font.wrap_to_width(text, width, lines as usize) {
+            paint_run(surface, font, (run.text, run.elided), (x, y), ink, None);
+            y = y.saturating_add(i32::try_from(line).unwrap_or(i32::MAX));
+        }
     }
 
     /// Draw the bed, the bowl, and the toy where it has rolled to.

@@ -28,13 +28,15 @@
 //! it derived from the previous worker, sends the new one whatever state it
 //! needs, and re-registers the descriptors, which belong to a new pipe pair.
 
+use alloc::sync::Arc;
+
 use tairix_abi::Errno;
 use tairix_log::Sink;
 use tairix_util::retry::RestartPacer;
 
 use crate::host::{log_unavailable, log_worker_crashed};
 use crate::session::{
-    SandboxSession, SessionBounds, SessionDescriptors, SessionError, SessionTransport,
+    SandboxSession, SessionBounds, SessionDescriptors, SessionError, SessionTransport, Share,
 };
 
 /// The delay before a failed worker's first replacement.
@@ -150,6 +152,13 @@ impl<L: SessionLauncher, S: Sink + Clone> SupervisedSession<L, S> {
         self.live.as_ref()?.descriptors()
     }
 
+    /// The region the live worker was handed, or `None` when none is live or
+    /// it was handed none. A replacement is handed a region of its own.
+    #[must_use]
+    pub fn share(&self) -> Option<&Arc<dyn Share>> {
+        self.live.as_ref()?.share()
+    }
+
     /// Whether the owner should arm write-room readiness.
     #[must_use]
     pub fn wants_write(&self) -> bool {
@@ -251,6 +260,62 @@ impl<L: SessionLauncher, S: Sink + Clone> SupervisedSession<L, S> {
             self.start_at = self.pacer.failed(now).at;
         }
         outcome
+    }
+}
+
+/// A client whose requests wait, one at a time, for [`send_waiting`] to queue
+/// them to its worker.
+pub trait Requests {
+    /// The frame waiting to be sent, until [`Self::sent`].
+    fn outgoing(&self) -> Option<&[u8]>;
+
+    /// The waiting frame has been queued to the worker.
+    fn sent(&mut self);
+}
+
+/// What [`send_waiting`] came to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Sent {
+    /// Nothing went: no frame waits, or the session's queue has no room for
+    /// it until the pipe takes what the queue holds.
+    Nothing,
+    /// The waiting frame is queued, and as much of it written as the pipe
+    /// took.
+    Queued,
+    /// No worker is live to take it, or the one live failed taking it and has
+    /// been contained.
+    Lost,
+}
+
+/// Queue `client`'s waiting frame to `session`'s worker and write as much of
+/// it as the pipe takes: the one step every owner sends a request through.
+///
+/// The write cannot park: a request goes only once the worker has answered
+/// the last, which it does only having read all of it, so the pipe is empty.
+/// What does not fit waits for the pipe's room.
+#[must_use]
+pub fn send_waiting<C: Requests + ?Sized, L: SessionLauncher, S: Sink + Clone>(
+    client: &mut C,
+    session: &mut SupervisedSession<L, S>,
+    now: u64,
+) -> Sent {
+    let Some(frame) = client.outgoing() else {
+        return Sent::Nothing;
+    };
+    match session.send(frame) {
+        Ok(()) => {
+            client.sent();
+            match session.on_writable(now) {
+                Ok(()) => Sent::Queued,
+                Err(_) => Sent::Lost,
+            }
+        }
+        Err(SessionError::OutboundFull) => Sent::Nothing,
+        Err(SessionError::WorkerFailed) => Sent::Lost,
+        Err(_) => {
+            session.condemn(now, "a request to the decoder could not be framed");
+            Sent::Lost
+        }
     }
 }
 

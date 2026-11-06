@@ -24,7 +24,19 @@ llythyren unigol yn lluosi â phwerau 1024; gyda `B` â phwerau 1000; gyda
 Derbynnir y ffurf hanesyddol yn arg gyntaf `tail -num` / `tail +num`
 (gyda llythyren derfynol `b`/`c`/`l` ddewisol), fel yn yr offeryn GNU.
 
-Mae'r modd dilyn yn cadw pob ffeil ar agor ac yn argraffu data newydd wrth iddi dyfu; mae'n blocio nes i'r ffeil newid — byth aros prysur. Mae `-f` yn dilyn y disgrifydd; mae `-F` yn dilyn yr enw ac yn ailagor ffeil a gylchdrowyd, ac mae `--retry` yn aros i enw ymddangos. Mae `--pid=PID` yn gorffen y dilyn pan fydd y broses yn gorffen (gwirir bob `--sleep-interval` eiliad, rhagosodiad 1; `--max-unchanged-stats` rhagosodiad 5). Adroddir am dorri byr a dilynir y ffeil o'i dechrau newydd.
+Mae'r modd dilyn yn cadw pob ffeil ar agor ac yn argraffu data newydd
+wrth i'r ffeil dyfu. Mae `-f` yn dilyn y ffeil agored yn ôl y
+disgrifydd — mae ailenwi neu symud yn dal i ddilyn yr un ffeil. Mae `-F`
+yn dilyn yr *enw*: pan gylchdroir y ffeil (ei hailenwi o'r ffordd a
+rhoi ffeil newydd yn ei lle) mae'n ailagor y ffeil newydd, ac mae
+`--retry` yn dal ati i roi cynnig ar enw nad yw yno eto. Mae dilyn yn
+blocio nes i'r ffeil newid go iawn — nid yw byth yn troelli'r CPU. Mae
+`--pid=PID` yn gorffen y dilyn unwaith y daw proses `PID` i ben, wedi'i
+wirio bob `--sleep-interval` (eiliadau, rhagosodiad 1). Mae
+`--max-unchanged-stats=N` yn rheoli faint o gylchoedd tawel sy'n mynd
+heibio cyn i `-F` ail-wirio'r enw am gylchdro (rhagosodiad 5). Adroddir
+am dorri byr (y ffeil yn crebachu) a dilynir y ffeil eto o'i dechrau
+newydd.
 
 Pan na ddangosir cynnwys blaen, ysgrifennir cofnod cynghori i'r ffrwd
 gwybodaeth safonol (fd 3); nid yw byth yn newid yr allbwn na'r statws
@@ -48,13 +60,18 @@ ffeil yn derbyn yr enw beit am feit.
 - `-v, --verbose` — argraffu'r penawdau `==> file <==` bob amser.
 - `-z, --zero-terminated` — mae llinellau wedi'u hamffinio gan NUL yn
   lle toriad llinell.
-- `-f, --follow[=descriptor]` — dilyn yn ôl y disgrifydd, gan argraffu data a atodwyd.
-- `-F` — dilyn yn ôl yr enw (`--follow=name --retry`); ailagor ffeil a gylchdrowyd.
+- `-f, --follow[=descriptor]` — cadw'r ffeil ar agor ac argraffu data
+  wrth iddo gael ei atodi, gan ei dilyn yn ôl y disgrifydd.
+- `-F` — dilyn yn ôl yr enw (`--follow=name --retry`): ailagor y ffeil
+  pan gaiff ei chylchdroi.
 - `--follow=name` — dilyn yr enw yn hytrach na'r disgrifydd.
-- `--retry` — dal ati i geisio agor ffeil nad yw'n bresennol eto.
-- `--pid <PID>` — atal y dilyn pan fydd y broses `PID` yn marw.
-- `--sleep-interval <N>` — eiliadau rhwng y gwiriadau (rhagosodiad 1).
-- `--max-unchanged-stats <N>` — cylchoedd tawel cyn i `-F` ail-wirio'r enw (rhagosodiad 5).
+- `--retry` — dal ati i geisio agor ffeil nad oes modd ei chyrchu eto.
+- `--pid <PID>` — wrth ddilyn, stopio unwaith y bydd proses `PID` yn
+  marw.
+- `--sleep-interval <N>` — eiliadau rhwng ail-wiriadau `--pid`/cylchdro
+  (caniateir ffracsiynau; rhagosodiad 1).
+- `--max-unchanged-stats <N>` — cylchoedd tawel cyn i `-F` ail-wirio'r
+  enw am gylchdro (rhagosodiad 5).
 - `-h, -?` — dangos cymorth byr y gorchymyn hwn.
 
 ## EXAMPLES
@@ -64,6 +81,11 @@ ffeil yn derbyn yr enw beit am feit.
   bennawd.
 - `tail -c 1K image` — argraffu 1024 beit olaf `image`.
 - `tail -n +5 notes` — argraffu `notes` o'i 5ed llinell.
+- `tail -f log.txt` — argraffu'r 10 llinell olaf, yna llinellau newydd
+  wrth iddynt gael eu hysgrifennu.
+- `tail -F /System/Logs/system` — dilyn log y system ar draws
+  cylchdroadau.
+- `tail -f --pid 1234 out` — dilyn `out` nes i broses 1234 orffen.
 
 ## EXIT STATUS
 

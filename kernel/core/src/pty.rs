@@ -168,9 +168,12 @@ impl Pty {
     /// Create a pty of the given terminal geometry and hand back its two end
     /// handles (`(master, slave)`), each counting one live end. The initial
     /// discipline is the interactive [`InputMode::Cooked`] default.
-    #[must_use]
-    pub fn create(size: TerminalSize) -> (PtyMasterEnd, PtySlaveEnd) {
-        let pty = Arc::new(Pty {
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the pty cannot be allocated.
+    pub fn create(size: TerminalSize) -> Result<(PtyMasterEnd, PtySlaveEnd), Errno> {
+        let pty = Arc::try_new(Pty {
             state: SpinLock::new(PtyState {
                 input: VecDeque::new(),
                 output: VecDeque::new(),
@@ -183,13 +186,14 @@ impl Pty {
             input_waits: RingWaits::mint(),
             output_waits: RingWaits::mint(),
             fg: ForegroundOwnership::new(),
-        });
-        (
+        })
+        .map_err(|_| Errno::OutOfMemory)?;
+        Ok((
             PtyMasterEnd {
                 pty: Arc::clone(&pty),
             },
             PtySlaveEnd { pty },
-        )
+        ))
     }
 
     /// Select the slave read line discipline (`stream_input_mode`), resetting
@@ -712,7 +716,20 @@ mod tests {
     use tairix_kernel_sec::ProcessId;
 
     fn pty() -> (PtyMasterEnd, PtySlaveEnd) {
-        Pty::create(TerminalSize::new(24, 80).unwrap())
+        Pty::create(TerminalSize::new(24, 80).unwrap()).unwrap()
+    }
+
+    /// A pty the heap cannot hold is refused as a value.
+    ///
+    /// Regression: the pty was allocated infallibly, so an exhausted heap
+    /// aborted the kernel from `pty_create`.
+    #[test]
+    fn a_pty_the_heap_cannot_hold_is_refused() {
+        let size = TerminalSize::new(24, 80).unwrap();
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let made = Pty::create(size);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(made.err(), Some(Errno::OutOfMemory));
     }
 
     /// A foreground owner at a distinguishable process instance.

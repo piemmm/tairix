@@ -8,11 +8,14 @@
 //! the `lib/rt` `malloc`/`free` layer foreshadowed by the SP5 design note
 //! (`plans/SPAWN.md`).
 //!
-//! # Design — a free-span allocator over a growable, fixed-base arena
+//! # Design — a free-span allocator over a growable arena
 //!
-//! The heap owns one contiguous virtual arena that starts at a fixed base
-//! ([`ARENA_BASE`]) and grows upward, one or more whole pages at a time, by
-//! `mem_map`ping with [`MapFlags::FIXED`] at the arena's current top. Freed
+//! The heap owns one contiguous virtual arena that starts at the base of the
+//! heap region the kernel names in the startup vector ([`HeapRegion`]) and
+//! grows upward, one or more whole pages at a time, by `mem_map`ping with
+//! [`MapFlags::FIXED`] at the arena's current top, never past the region's
+//! end. The region is in none of the process's placement windows, which a
+//! `FIXED` map may not claim. Freed
 //! regions are tracked as a coalesced, address-sorted list of free **spans**
 //! held *in the allocator itself* (not as intrusive links inside the freed
 //! memory), so the bookkeeping never dereferences user memory and every
@@ -80,32 +83,39 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 
+use core::ops::Range;
+
 // The one system page granule: the arena grows in whole pages, and `mem_map`
 // rounds its length up to this.
-use tairix_abi::{Errno, PAGE_SIZE};
+use tairix_abi::{Errno, HeapRegion, PAGE_SIZE};
 
 use tairix_reclaim::{shrink_target, CacheBudget, PressureBand, ReclaimClass};
 
 use crate::sync::Mutex;
 
-/// Fixed virtual base of the heap arena.
-///
-/// Chosen well above both the kernel's low identity window and the program
-/// image / stack / startup block at the 64 GiB spawn bias, so the arena grows
-/// onto freshly-walked page tables and never collides with the spawn-time
-/// layout (mirrors the `mem_map` fixture's region choice, `plans/SPAWN.md`
-/// SP5b-2). 96 GiB.
-const ARENA_BASE: u64 = 96 << 30;
+/// The share of the heap region the free-span table may grow into, the rest
+/// being the arena: a sixteenth holds a span for every 256 bytes of arena,
+/// far past any heap's fragmentation, and costs only address space.
+const META_SHARE: u64 = 16;
 
-/// Fixed virtual base of the free-span **metadata** region, distinct from the
-/// data arena.
-///
-/// The growable span table ([`SpanStore`]) lives in its own mapped window so
-/// the allocator never stores its bookkeeping inside the user-data arena it
-/// hands out. Placed below [`ARENA_BASE`] and above the 64 GiB spawn bias; the
-/// metadata is at most a handful of pages even for a heavily-fragmented heap,
-/// so it never approaches the data arena. 80 GiB.
-const META_BASE: u64 = 80 << 30;
+/// The free-span table's room and the arena's that `region` splits into, the
+/// table first so the bookkeeping is never inside the memory handed out;
+/// `None` for a region not whole pages in the address space, or too small to
+/// hold a page of each.
+fn split_region(region: HeapRegion) -> Option<(Range<u64>, Range<usize>)> {
+    if !region.is_well_formed() {
+        return None;
+    }
+    let page = PAGE_SIZE as u64;
+    let meta_len = (region.len / META_SHARE / page * page).max(page);
+    let arena_start = region.base.checked_add(meta_len)?;
+    let end = region.base.checked_add(region.len)?;
+    if arena_start >= end {
+        return None;
+    }
+    let arena = usize::try_from(arena_start).ok()?..usize::try_from(end).ok()?;
+    Some((region.base..arena_start, arena))
+}
 
 /// Bytes of one stored [`Span`] (two `usize`s on every 64-bit Tier-1 target).
 const SPAN_SIZE: usize = core::mem::size_of::<Span>();
@@ -136,7 +146,7 @@ impl Span {
 /// the production pager issues `mem_map`/`mem_unmap` syscalls
 /// ([`SyscallPager`]), while the unit tests back the arena with ordinary host
 /// memory. The base address and page count the heap passes are always
-/// page-aligned and within the fixed arena window.
+/// page-aligned and within the arena's room.
 trait Pager {
     /// Map `pages` fresh, zeroed `RW` pages at exactly `base`
     /// (`MapFlags::FIXED`).
@@ -326,8 +336,12 @@ struct HeapState<S: SpanStore> {
     store: S,
     /// Number of live entries in `store.slots()`.
     count: usize,
+    /// The room the arena may grow into, `[arena_base, arena_end)`: empty
+    /// until [`Self::place`], so an allocation before then is refused.
+    arena_base: usize,
+    arena_end: usize,
     /// One-past-the-last byte currently mapped: the arena covers
-    /// `[ARENA_BASE, mapped_end)`. Grows by whole pages.
+    /// `[arena_base, mapped_end)`. Grows by whole pages.
     mapped_end: usize,
     /// The `mapped_end` a release was last refused at, if one was.
     ///
@@ -347,17 +361,29 @@ struct HeapState<S: SpanStore> {
 }
 
 impl<S: SpanStore> HeapState<S> {
-    /// An empty heap over `store`: no mapped pages, no free spans.
+    /// An empty heap over `store`: no room, no mapped pages, no free spans.
     const fn new(store: S) -> Self {
-        #[allow(clippy::cast_possible_truncation)] // ARENA_BASE fits usize on every 64-bit target.
         Self {
             store,
             count: 0,
-            mapped_end: ARENA_BASE as usize,
+            arena_base: 0,
+            arena_end: 0,
+            mapped_end: 0,
             release_refused_at: None,
             refusal: None,
-            untouched: ARENA_BASE as usize,
+            untouched: 0,
         }
+    }
+
+    /// Give the arena `room` to grow into, once: the process has one heap
+    /// region. Answers whether it was taken.
+    fn place(&mut self, room: Range<usize>) -> bool {
+        if self.arena_end != 0 || room.is_empty() {
+            return false;
+        }
+        (self.arena_base, self.arena_end) = (room.start, room.end);
+        (self.mapped_end, self.untouched) = (room.start, room.start);
+        true
     }
 
     /// Number of span slots the store can currently hold without growing.
@@ -552,8 +578,13 @@ impl<S: SpanStore> HeapState<S> {
             size
         };
         let needed = round_up_to_page(want)?;
-        let padded = needed.max(round_down_to_page(policy.retain));
         let base = self.mapped_end;
+        let room = self.arena_end.saturating_sub(base);
+        if needed > room {
+            self.refusal = Some(Errno::OutOfMemory);
+            return None;
+        }
+        let padded = needed.max(round_down_to_page(policy.retain)).min(room);
         // The pad is an optimisation, so it must never turn a satisfiable
         // allocation into a refusal: a padded map the kernel declines — for the
         // address-space limit, or for want of frames — is retried at exactly
@@ -592,8 +623,7 @@ impl<S: SpanStore> HeapState<S> {
     /// Bytes of arena currently mapped — the backing the retention is a
     /// fraction of.
     fn mapped_bytes(&self) -> usize {
-        #[allow(clippy::cast_possible_truncation)] // ARENA_BASE fits usize on every 64-bit target.
-        self.mapped_end.saturating_sub(ARENA_BASE as usize)
+        self.mapped_end - self.arena_base
     }
 
     /// Index of the free span that begins exactly at `start`, if any. The
@@ -793,6 +823,12 @@ impl<P: Pager, S: SpanStore> Heap<P, S> {
         ArenaPolicy::new(state.mapped_bytes(), crate::pressure::gauge().band())
     }
 
+    /// Whether the last failed allocation was refused by the process's own
+    /// memory bound rather than for want of memory.
+    fn refused_by_own_bound(&self) -> bool {
+        self.state.lock().refusal == Some(Errno::OutOfRange)
+    }
+
     /// Release every retained top page the current band no longer permits, on
     /// the spot.
     ///
@@ -805,12 +841,6 @@ impl<P: Pager, S: SpanStore> Heap<P, S> {
     /// granule because it is about to want those pages back, while this is the
     /// machine asking for them — so it hands back everything the band no longer
     /// permits, leaving no granule behind at critical pressure.
-    /// Whether the last failed allocation was refused by the process's own
-    /// memory bound rather than for want of memory.
-    fn refused_by_own_bound(&self) -> bool {
-        self.state.lock().refusal == Some(Errno::OutOfRange)
-    }
-
     fn trim(&self) {
         let mut state = self.state.lock();
         let retain = retain_bytes(state.mapped_bytes(), crate::pressure::gauge().band());
@@ -939,58 +969,74 @@ fn mapped_at(base: u64, ret: i64) -> Result<(), Errno> {
     }
 }
 
-/// Virtual base of one freshly-mapped metadata page when growing from `cap`
-/// span slots, and the slot count that page adds.
+/// The page that grows a table of `cap` span slots held from `room`'s start,
+/// and the slot count it adds; `None` past `room`.
 ///
 /// Pure address arithmetic (no dereference), host-tested, and shared by the
 /// production [`MappedSpanStore::grow`] so its only non-trivial computation is
 /// covered on the host even though the store itself is target-only.
-const fn metadata_growth(cap: usize) -> (u64, usize) {
-    (META_BASE + (cap * SPAN_SIZE) as u64, SPANS_PER_PAGE)
+fn metadata_growth(room: &Range<u64>, cap: usize) -> Option<(u64, usize)> {
+    let page = room
+        .start
+        .checked_add(u64::try_from(cap * SPAN_SIZE).ok()?)?;
+    let end = page.checked_add(PAGE_SIZE as u64)?;
+    (end <= room.end).then_some((page, SPANS_PER_PAGE))
 }
 
 /// The production [`SpanStore`]: the free-span table lives in metadata pages
-/// mapped on demand at [`META_BASE`] through `mem_map` (`MapFlags::FIXED`), so
-/// the table is a capacity that grows page by page rather
-/// than a fixed `const` array.
+/// mapped on demand at the start of the heap region through `mem_map`
+/// (`MapFlags::FIXED`), so the table is a capacity that grows page by page
+/// rather than a fixed `const` array.
 #[cfg(rt_native)]
 struct MappedSpanStore {
-    /// Number of `Span` slots currently mapped at [`META_BASE`].
+    /// The room the table may grow into: empty until the heap is placed.
+    room: Range<u64>,
+    /// Number of `Span` slots currently mapped from `room`'s start.
     cap: usize,
 }
 
 #[cfg(rt_native)]
 impl MappedSpanStore {
-    /// An empty store: no metadata page mapped yet (the first span insert maps
-    /// the first page).
+    /// An empty store with no room: nothing can be mapped until it is placed.
     const fn new() -> Self {
-        Self { cap: 0 }
+        Self { room: 0..0, cap: 0 }
+    }
+
+    /// The table's first slot. The kernel mapped it outside the abstract
+    /// machine, so its provenance is exposed by definition.
+    fn first(&self) -> *mut Span {
+        core::ptr::with_exposed_provenance_mut(usize::try_from(self.room.start).unwrap_or(0))
     }
 }
 
 #[cfg(rt_native)]
 impl SpanStore for MappedSpanStore {
     fn slots(&self) -> &[Span] {
-        // SAFETY: `grow` has mapped exactly `cap` contiguous, page-aligned
-        // `Span` slots at `META_BASE` (`MapFlags::FIXED`, RW, zeroed by the
-        // kernel — `Span`'s all-zero bit pattern is the valid empty slot), and
-        // `META_BASE` is a multiple of the page size and thus of `align_of::<
-        // Span>()`. The heap only ever reads the first `count <= cap` slots,
-        // and all access is serialised by the `Heap` `Mutex`, so this is the
-        // sole live reference. When `cap == 0` the pointer is unused because
-        // the slice is empty.
-        unsafe { core::slice::from_raw_parts(META_BASE as *const Span, self.cap) }
+        if self.cap == 0 {
+            return &[];
+        }
+        // SAFETY: `grow` has mapped exactly `cap` contiguous `Span` slots from
+        // `room.start` (`MapFlags::FIXED`, RW, zeroed by the kernel — `Span`'s
+        // all-zero bit pattern is the valid empty slot), and `room.start` is a
+        // page multiple, as the region was checked whole pages, so it is
+        // aligned for `Span`. The heap only ever reads the first
+        // `count <= cap` slots, and all access is serialised by the `Heap`
+        // `Mutex`, so this is the sole live reference.
+        unsafe { core::slice::from_raw_parts(self.first(), self.cap) }
     }
 
     fn slots_mut(&mut self) -> &mut [Span] {
+        if self.cap == 0 {
+            return &mut [];
+        }
         // SAFETY: as for `slots`; `&mut self` and the `Heap` `Mutex`
         // guarantee this is the only reference to the mapped metadata region.
-        unsafe { core::slice::from_raw_parts_mut(META_BASE as *mut Span, self.cap) }
+        unsafe { core::slice::from_raw_parts_mut(self.first(), self.cap) }
     }
 
     fn grow(&mut self) -> Result<(), Errno> {
-        let (base, added) = metadata_growth(self.cap);
-        // FIXED placement: the store owns the metadata window, so the kernel
+        let (base, added) = metadata_growth(&self.room, self.cap).ok_or(Errno::OutOfMemory)?;
+        // FIXED placement: the store owns the metadata room, so the kernel
         // must map at exactly `base` (immediately above the slots already
         // mapped) or fail; it never relocates the region.
         mapped_at(
@@ -1002,6 +1048,20 @@ impl SpanStore for MappedSpanStore {
     }
 }
 
+#[cfg(rt_native)]
+impl Heap<SyscallPager, MappedSpanStore> {
+    /// Grow the heap in `region`, once, before the program's first allocation.
+    fn place(&self, region: HeapRegion) {
+        let Some((meta, arena)) = split_region(region) else {
+            return;
+        };
+        let mut state = self.state.lock();
+        if state.store.room.is_empty() && state.place(arena) {
+            state.store.room = meta;
+        }
+    }
+}
+
 /// The process-wide heap. Registering it as the `#[global_allocator]` is what
 /// gives a first-party Rust program `alloc` (`Box`, `Vec`, `String`, …) over
 /// `abi-v1` memory. Declared only for the native targets that have the trap and
@@ -1010,6 +1070,14 @@ impl SpanStore for MappedSpanStore {
 #[global_allocator]
 static GLOBAL: Heap<SyscallPager, MappedSpanStore> =
     Heap::new(SyscallPager, MappedSpanStore::new());
+
+/// Grow the process heap in `region`, the address space the kernel set aside
+/// for it in the startup vector. Called once by `_start`, before `main`; a
+/// region that cannot hold a heap leaves every allocation refused.
+#[cfg(rt_native)]
+pub(crate) fn place(region: HeapRegion) {
+    GLOBAL.place(region);
+}
 
 /// Whether the allocation that just failed was refused by the process's own
 /// memory bound — its `address-space-bytes` limit, or its pinned budget —
@@ -1215,14 +1283,30 @@ mod tests {
         Layout::from_size_align(size, align).expect("valid layout")
     }
 
-    /// The arena base as a `usize`, for asserting returned addresses.
+    /// The room the tests' arenas grow into: 64 GiB of address space.
+    const TEST_ROOM: Range<usize> = (96 << 30)..(160 << 30);
+
+    /// The arena base, for asserting returned addresses.
     fn base() -> usize {
-        usize::try_from(ARENA_BASE).expect("ARENA_BASE fits usize on a 64-bit host")
+        TEST_ROOM.start
+    }
+
+    /// `state` given the tests' room.
+    fn placed<S: SpanStore>(mut state: HeapState<S>) -> HeapState<S> {
+        assert!(state.place(TEST_ROOM));
+        state
     }
 
     /// An empty heap over an unbounded growable span store.
     fn heap_state() -> HeapState<VecSpanStore> {
-        HeapState::new(VecSpanStore::unbounded())
+        placed(HeapState::new(VecSpanStore::unbounded()))
+    }
+
+    /// A wrapper over `pager` and `store`, given the tests' room.
+    fn wrapper<P: Pager>(pager: P, store: VecSpanStore) -> Heap<P, VecSpanStore> {
+        let heap = Heap::new(pager, store);
+        assert!(heap.state.lock().place(TEST_ROOM));
+        heap
     }
 
     /// A zeroed block clears only what an earlier block may have left: the
@@ -1273,7 +1357,7 @@ mod tests {
     /// the pager's pointers are unbacked, so a single write would fault.
     #[test]
     fn a_zeroed_allocation_of_fresh_pages_writes_none_of_them() {
-        let heap = Heap::new(FakePager::new(), VecSpanStore::unbounded());
+        let heap = wrapper(FakePager::new(), VecSpanStore::unbounded());
         let l = layout(64 * PAGE_SIZE, 16);
         // SAFETY: `l` is a valid non-zero layout; the wrapper is freshly built.
         let p = unsafe { heap.alloc_zeroed(l) };
@@ -1873,7 +1957,7 @@ mod tests {
         // With a store that refuses to grow past one slot, a second
         // non-adjacent free is dropped (a bounded leak) rather than corrupting
         // state or panicking — the only non-coalescing outcome.
-        let mut heap = HeapState::new(VecSpanStore::capped(1));
+        let mut heap = placed(HeapState::new(VecSpanStore::capped(1)));
         heap.insert_free(Span {
             start: base(),
             len: 8,
@@ -1898,7 +1982,7 @@ mod tests {
         // Cap at one slot: the single free span from the first grow fits, but
         // carving a sub-range that leaves both a head and a tail needs a second
         // slot the store cannot supply.
-        let mut heap = HeapState::new(VecSpanStore::capped(1));
+        let mut heap = placed(HeapState::new(VecSpanStore::capped(1)));
         // Map a page (one span, fills the only slot), then request an allocation
         // that, once aligned, leaves both a head and a tail — needing a split.
         heap.insert_free(Span {
@@ -1918,17 +2002,90 @@ mod tests {
         // The production `MappedSpanStore` grows by mapping one page directly
         // above the slots already mapped; this pins that pure arithmetic
         // (covering the only non-trivial computation in the target-only store).
-        assert_eq!(metadata_growth(0), (META_BASE, SPANS_PER_PAGE));
-        let (base1, added) = metadata_growth(SPANS_PER_PAGE);
+        let page = PAGE_SIZE as u64;
+        let room = (80 << 30)..((80 << 30) + 2 * page);
+        assert_eq!(
+            metadata_growth(&room, 0),
+            Some((room.start, SPANS_PER_PAGE))
+        );
+        let (base1, added) = metadata_growth(&room, SPANS_PER_PAGE).expect("a second page");
         assert_eq!(added, SPANS_PER_PAGE);
-        assert_eq!(base1, META_BASE + PAGE_SIZE as u64);
+        assert_eq!(base1, room.start + page);
         // One page holds a whole number of spans, so the window stays packed.
         assert_eq!(SPANS_PER_PAGE * SPAN_SIZE, PAGE_SIZE);
+        // A page past the room is refused, as is any growth of a store with none.
+        assert_eq!(metadata_growth(&room, 2 * SPANS_PER_PAGE), None);
+        assert_eq!(metadata_growth(&(0..0), 0), None);
+    }
+
+    #[test]
+    fn a_region_is_split_into_the_tables_sixteenth_and_the_arena() {
+        let page = PAGE_SIZE as u64;
+        let region = HeapRegion {
+            base: 68 << 30,
+            len: 64 << 20,
+        };
+        let (meta, arena) = split_region(region).expect("a heap");
+        assert_eq!(meta, region.base..region.base + (4 << 20));
+        assert_eq!(
+            arena,
+            usize::try_from(meta.end).expect("fits")..(68 << 30) + (64 << 20)
+        );
+        // The table always has a page, and the arena must have one too.
+        let small = HeapRegion {
+            base: 68 << 30,
+            len: 2 * page,
+        };
+        let (meta, arena) = split_region(small).expect("a page each");
+        assert_eq!((meta.end - meta.start, arena.len()), (page, PAGE_SIZE));
+        for refused in [
+            HeapRegion { len: page, ..small },
+            HeapRegion::NONE,
+            HeapRegion {
+                base: (68 << 30) + 8,
+                len: 64 << 20,
+            },
+            HeapRegion {
+                base: u64::MAX - page + 1,
+                len: 4 * page,
+            },
+        ] {
+            assert_eq!(split_region(refused), None, "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn an_unplaced_heap_maps_nothing_and_is_placed_once() {
+        let pager = FakePager::new();
+        let mut heap = HeapState::new(VecSpanStore::unbounded());
+        assert_eq!(heap.alloc(layout(8, 8), &pager, NO_RETENTION), None);
+        assert_eq!((pager.maps(), heap.refusal), (0, Some(Errno::OutOfMemory)));
+        assert!(!heap.place(TEST_ROOM.start..TEST_ROOM.start));
+        assert!(heap.place(TEST_ROOM));
+        assert!(!heap.place((200 << 30)..(201 << 30)), "a second region");
+        assert_eq!(heap.alloc(layout(8, 8), &pager, NO_RETENTION), Some(base()));
+    }
+
+    #[test]
+    fn the_arena_grows_no_further_than_its_room() {
+        let pager = FakePager::new();
+        let room = base()..base() + 4 * PAGE_SIZE;
+        let mut heap = HeapState::new(VecSpanStore::unbounded());
+        assert!(heap.place(room.clone()));
+        let padded = ArenaPolicy::exact(64 * PAGE_SIZE);
+        let first = heap.alloc(layout(PAGE_SIZE, 8), &pager, padded);
+        assert_eq!(first, Some(room.start));
+        assert_eq!(heap.mapped_end, room.end, "a pad is held to the room");
+        assert_eq!(
+            heap.alloc(layout(4 * PAGE_SIZE, 8), &pager, NO_RETENTION),
+            None
+        );
+        assert_eq!(pager.maps(), 1, "an allocation past the room maps nothing");
     }
 
     #[test]
     fn global_alloc_wrapper_hands_out_and_reclaims() {
-        let heap = Heap::new(FakePager::new(), VecSpanStore::unbounded());
+        let heap = wrapper(FakePager::new(), VecSpanStore::unbounded());
         let l = layout(128, 16);
         // SAFETY: `l` is a valid non-zero layout; the wrapper is freshly built.
         let p = unsafe { heap.alloc(l) };
@@ -1954,11 +2111,11 @@ mod tests {
     /// the pages is told apart from memory running short.
     #[test]
     fn the_wrapper_tells_a_bound_refusal_from_a_shortage() {
-        let bounded = Heap::new(StingyPager::new(1), VecSpanStore::unbounded());
+        let bounded = wrapper(StingyPager::new(1), VecSpanStore::unbounded());
         // SAFETY: a valid non-zero layout over a freshly built wrapper.
         assert!(unsafe { bounded.alloc(layout(4 * PAGE_SIZE, 8)) }.is_null());
         assert!(bounded.refused_by_own_bound());
-        let short = Heap::new(DeadPager, VecSpanStore::unbounded());
+        let short = wrapper(DeadPager, VecSpanStore::unbounded());
         // SAFETY: as above.
         assert!(unsafe { short.alloc(layout(64, 8)) }.is_null());
         assert!(!short.refused_by_own_bound());
@@ -1975,7 +2132,7 @@ mod tests {
     /// machine asks.
     #[test]
     fn the_pressure_trim_releases_what_the_band_refuses_and_repeats_harmlessly() {
-        let heap = Heap::new(FakePager::new(), VecSpanStore::unbounded());
+        let heap = wrapper(FakePager::new(), VecSpanStore::unbounded());
         let l = layout(3 * PAGE_SIZE, 8);
         // SAFETY: `l` is a valid non-zero layout; the wrapper is freshly built.
         let p = unsafe { heap.alloc(l) };
@@ -2099,7 +2256,7 @@ mod tests {
 
     #[test]
     fn realloc_wrapper_keeps_the_pointer_when_it_resizes_in_place() {
-        let heap = Heap::new(FakePager::new(), VecSpanStore::unbounded());
+        let heap = wrapper(FakePager::new(), VecSpanStore::unbounded());
         let l = layout(128, 16);
         // SAFETY: `l` is a valid non-zero layout; the wrapper is freshly built.
         let p = unsafe { heap.alloc(l) };

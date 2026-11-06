@@ -24,6 +24,15 @@ Läuft kein Anzeigedienst, oder hält bereits eine andere Sitzung den
 Arbeitsplatz, schlägt der Befehl fehl und schreibt seinen Grund auf die
 Standard-Fehlerausgabe — er verdrängt niemals eine laufende Sitzung.
 
+Während die Arbeitsoberfläche läuft, speichert `Meta+Shift+3` ein Bild des
+Bildschirms und `Meta+Shift+4` eines Bereichs, den Sie aufziehen — oder,
+nach `Space`, eines Fensters, das Sie anklicken. `Meta+Shift+5` öffnet die
+Aufnahmeleiste, die den Bildschirm auch aufzeichnet. Mit zusätzlichem
+`Ctrl` kommt das Bild in die Zwischenablage, und ein Aufnahmekürzel während
+einer Aufzeichnung beendet sie. Eine Aufzeichnung mit Ton fragt nach dem
+Passwort eines Administrators, wenn Ihr Konto selbst keinen Ton aufzeichnen
+darf.
+
 ## OPTIONS
 
 - `-h, -?` — die Kurzhilfe dieses Befehls anzeigen.

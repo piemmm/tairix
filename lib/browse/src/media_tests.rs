@@ -10,15 +10,16 @@ use alloc::vec::Vec;
 
 use tairix_abi::fs::FileId;
 use tairix_abi::time::Time64;
-use tairix_abi::{SYSTEM_COMPONENT_STORE, SYSTEM_SERVICE_STORE};
+use tairix_abi::window_ipc::{DragOwnIcon, DragOwnSource, ICON_PATH_MAX};
+use tairix_abi::{SYSTEM_COMMAND_STORE, SYSTEM_COMPONENT_STORE, SYSTEM_SERVICE_STORE};
 use tairix_fsmeta::preset::acorn;
 use tairix_fsmeta::preset::acorn::Filetype;
 use tairix_icon::{FolderSample, IconKind, IconRequest, SampleCard};
 
 use super::{
-    ancestry, entry_icon, folder_sample, media_for_document, media_for_entry, media_for_filetype,
-    media_for_name, media_for_named, name_endings, BlankDocument, Ending, Family, MediaType, Site,
-    ALL, EXTENSION_TABLE, FILETYPE_TABLE,
+    ancestry, drag_picture, entry_icon, folder_sample, media_for_document, media_for_entry,
+    media_for_filetype, media_for_name, media_for_named, name_endings, BlankDocument, Ending,
+    Family, MediaType, Site, ALL, EXTENSION_TABLE, FILETYPE_TABLE,
 };
 use crate::entry::{Entry, EntryKind, LinkTarget, Occupancy};
 use crate::presentation::Pictures;
@@ -975,7 +976,9 @@ fn a_volume_root_is_pictured_as_its_drive() {
             availability: tairix_abi::sysinfo::MountAvailability::Available,
             owner: None,
             volume_id: [0; 16],
+            identity: [0; 16],
             read_only: false,
+            titled: false,
         },
     }));
     let mut scratch = String::new();
@@ -1029,6 +1032,46 @@ fn a_listed_bundle_asks_for_its_icon_at_the_version_listed() {
             entry.kind()
         );
     }
+}
+
+/// A shortcut is pictured where its activation reaches what it names: at its
+/// target where that names another root, which no walk through the shortcut
+/// follows — an application shortcut's alias spelling, a RISC OS application
+/// on a volume by its alias — and through itself where a walk follows it.
+#[test]
+fn a_shortcut_naming_another_root_is_pictured_at_its_target() {
+    const DESK: &str = "/Users/ann/Desktop";
+    let mut scratch = String::new();
+    let written = Time64::from_secs(1_700_000_000);
+    let at = components(DESK);
+
+    let app = Entry::new("Editor", EntryKind::Link(LinkTarget::Bundle), 16, written)
+        .with_id(LISTED)
+        .with_target("System:/Applications/Editor.app");
+    let (kind, request) = entry_icon(DESK, &at, &app, Pictures::ALL, &mut scratch);
+    assert_eq!(
+        request,
+        IconRequest::bundle(kind, "/System/Applications/Editor.app")
+    );
+
+    let sprite = Entry::new("Edit", EntryKind::Link(LinkTarget::Directory), 16, written)
+        .with_id(LISTED)
+        .with_target("Disc:/Apps/!Edit");
+    let (kind, request) = entry_icon(DESK, &at, &sprite, Pictures::ALL, &mut scratch);
+    assert_eq!(
+        request,
+        IconRequest::riscos_application(kind, "Disc:/Apps/!Edit", None)
+    );
+
+    let followed = Entry::new("Tools", EntryKind::Link(LinkTarget::Bundle), 16, written)
+        .with_id(LISTED)
+        .with_target("/System/Applications/Tools.app");
+    let (kind, request) = entry_icon(DESK, &at, &followed, Pictures::ALL, &mut scratch);
+    assert_eq!(
+        request,
+        IconRequest::bundle(kind, "/Users/ann/Desktop/Tools"),
+        "a walk through the shortcut follows its target"
+    );
 }
 
 /// Each layout that names what a file is, found by where a folder stands.
@@ -1398,4 +1441,113 @@ fn a_risc_os_application_asks_for_its_own_sprite_then_the_folder_it_is() {
     }
     let boot = Entry::new("!Boot", EntryKind::File, 0, written);
     assert!(!boot.is_riscos_application(), "a file is no application");
+}
+
+/// A dragged bundle carries its own picture — an application's, a command's —
+/// by its path and the version listed, beside its class picture; one whose
+/// path a drag cannot carry crosses as its class picture alone.
+#[test]
+fn a_dragged_bundle_carries_its_own_picture() {
+    const APPS: &str = "/Users/ann/Applications";
+    let mut scratch = String::new();
+    let from = Some((3, -4));
+    for (dir, name) in [(APPS, "Editor.app"), (SYSTEM_COMMAND_STORE, "ls.app")] {
+        let entry = bundle(name).with_id(LISTED);
+        let picture =
+            drag_picture((dir, &components(dir)), &entry, from, &mut scratch).expect("a picture");
+        let path = alloc::format!("{dir}/{name}");
+        let own = DragOwnIcon::new(DragOwnSource::Bundle, &path, Some(entry.stamp()))
+            .expect("an own picture");
+        assert_eq!(
+            picture.icon.as_str(),
+            IconKind::AppBundle.asset_id(),
+            "{name}"
+        );
+        assert_eq!((picture.from, picture.own), (from, Some(own)), "{name}");
+    }
+
+    let deep = alloc::format!("/Storage/{}", "d".repeat(ICON_PATH_MAX));
+    let entry = bundle("Editor.app").with_id(LISTED);
+    let picture =
+        drag_picture((&deep, &components(&deep)), &entry, None, &mut scratch).expect("a picture");
+    assert_eq!(picture.icon.as_str(), IconKind::AppBundle.asset_id());
+    assert_eq!(
+        picture.own, None,
+        "a path past the bound carries no own picture"
+    );
+}
+
+/// A dragged RISC OS application carries its own sprite by its path and the
+/// version listed, its class picture the folder it is — the filled folder
+/// where it holds something, never the folder's picture of what it holds.
+#[test]
+fn a_dragged_risc_os_application_carries_its_sprite() {
+    const DISC: &str = "/Storage/disc/Apps";
+    let mut scratch = String::new();
+    let written = Time64::from_secs(1_700_000_000);
+    let mut app = Entry::new("!Edit", EntryKind::Directory, 0, written).with_id(LISTED);
+    let own = DragOwnIcon::new(
+        DragOwnSource::RiscOsApplication,
+        "/Storage/disc/Apps/!Edit",
+        Some(app.stamp()),
+    )
+    .expect("an own picture");
+    let picture =
+        drag_picture((DISC, &components(DISC)), &app, None, &mut scratch).expect("a picture");
+    assert_eq!(picture.icon.as_str(), IconKind::Folder.asset_id());
+    assert_eq!(picture.own, Some(own));
+
+    let sample = FolderSample::new([SampleCard::Kind(IconKind::Text)]);
+    app.set_occupancy(Occupancy::NonEmpty(sample));
+    let picture =
+        drag_picture((DISC, &components(DISC)), &app, None, &mut scratch).expect("a picture");
+    assert_eq!(picture.icon.as_str(), IconKind::FolderFilled.asset_id());
+    assert_eq!(picture.own, Some(own), "still its sprite, never its fan");
+}
+
+/// A shortcut is named for itself, so what it shows is carried by the path it
+/// resolves to, as its activation reaches it — an application's by its alias
+/// spelling, a RISC OS application's by its relative one — at no version, a
+/// link's listed stamp being its own.
+#[test]
+fn a_dragged_shortcut_carries_what_it_resolves_to() {
+    const DESK: &str = "/Users/ann/Desktop";
+    let mut scratch = String::new();
+    let written = Time64::from_secs(1_700_000_000);
+    let (bundle_icon, sprite_icon) = (DragOwnSource::Bundle, DragOwnSource::RiscOsApplication);
+    let app = Entry::new("Editor", EntryKind::Link(LinkTarget::Bundle), 16, written)
+        .with_id(LISTED)
+        .with_target("System:/Applications/Editor.app");
+    let sprite = Entry::new("Edit", EntryKind::Link(LinkTarget::Directory), 16, written)
+        .with_id(LISTED)
+        .with_target("../Tools/!Edit");
+    for (entry, source, path) in [
+        (app, bundle_icon, "/System/Applications/Editor.app"),
+        (sprite, sprite_icon, "/Users/ann/Desktop/../Tools/!Edit"),
+    ] {
+        let picture =
+            drag_picture((DESK, &components(DESK)), &entry, None, &mut scratch).expect("a picture");
+        let own = DragOwnIcon::new(source, path, None).expect("an own picture");
+        assert_eq!(picture.own, Some(own), "{}", entry.name());
+    }
+}
+
+/// A file, a picture file and an occupied folder cross a drag as their class
+/// picture alone: neither a thumbnail nor a folder's fan is carried.
+#[test]
+fn a_dragged_file_or_folder_carries_its_class_picture_alone() {
+    let at = components(PICTURES);
+    let mut scratch = String::new();
+    let notes = Entry::new("notes.txt", EntryKind::File, 12, Time64::UNIX_EPOCH).with_id(LISTED);
+    let photo = Entry::new("cat.jpg", EntryKind::File, 4096, Time64::UNIX_EPOCH).with_id(LISTED);
+    let mut folder = Entry::directory("Trips");
+    let sample = FolderSample::new([SampleCard::Kind(IconKind::Text)]);
+    folder.set_occupancy(Occupancy::NonEmpty(sample));
+    for entry in [notes, photo, folder] {
+        let picture =
+            drag_picture((PICTURES, &at), &entry, Some((0, 0)), &mut scratch).expect("a picture");
+        let (kind, _) = entry_icon(PICTURES, &at, &entry, Pictures::ALL, &mut scratch);
+        assert_eq!(picture.icon.as_str(), kind.asset_id(), "{}", entry.name());
+        assert_eq!(picture.own, None, "{}", entry.name());
+    }
 }

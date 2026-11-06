@@ -46,7 +46,10 @@ use crate::library::{
 };
 use crate::menu::{self, MenuRequest, MenuSubject};
 use crate::network::{NetworkStatus, NETWORK_SIGNAL};
-use crate::notifications::{NotificationArea, Raised, StatusSignal, TransientNotification};
+use crate::notifications::{
+    NotificationArea, Raised, StatusKind, StatusSignal, TransientNotification,
+    SCREEN_RECORDING_SIGNAL,
+};
 use crate::picker::{PickerEntry, PickerLayout, WindowPicker};
 use crate::repaint::TaskbarRepaint;
 use crate::sound::{SoundPanel, SoundPanelLayout, SoundState, RECORDING_SIGNAL, VOLUME_SIGNAL};
@@ -526,6 +529,32 @@ impl Taskbar {
         }
         self.repaint |= TaskbarRepaint::NETWORK;
         true
+    }
+
+    /// Show the screen-recording indicator while the desktop records the
+    /// screen, and take it down after, answering whether the bar moved.
+    ///
+    /// It follows the network signal and leads the sound signals, so neither
+    /// feed's change moves its slot.
+    pub fn set_screen_recording(&mut self, recording: bool, scale: Scale) -> bool {
+        let mut signals: Vec<StatusSignal> = self
+            .notifications
+            .signals()
+            .iter()
+            .filter(|signal| signal.id != SCREEN_RECORDING_SIGNAL)
+            .cloned()
+            .collect();
+        if recording {
+            let at = signals
+                .iter()
+                .position(|signal| signal.id != NETWORK_SIGNAL)
+                .unwrap_or(signals.len());
+            signals.insert(
+                at,
+                StatusSignal::new(SCREEN_RECORDING_SIGNAL, StatusKind::ScreenRecording),
+            );
+        }
+        self.replace_signals(signals, scale)
     }
 
     /// Show `signals` in the notification area, answering whether they

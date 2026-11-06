@@ -23,8 +23,8 @@ use tairix_window::docapp::{AppRequest, AppView, Outcome};
 
 use crate::canvas::MAX_SIDE;
 use crate::document::colours_for;
-use crate::filter::Parameter;
 use crate::layout::Faces;
+use crate::op::Parameter;
 use crate::pane::{Arrangement, PaneKind, Side};
 use crate::panel::{switch, Cell, Panel, PanelEvent, PanelOutcome, Part, Plain};
 use crate::preferences::{

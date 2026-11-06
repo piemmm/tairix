@@ -57,9 +57,11 @@ use tairix_syshelp::DiskLayoutError;
 use tairix_test_arxfs_image as root_image;
 
 pub use tairix_syshelp::{BOOT_PART_LBA, BOOT_PART_SECTORS, SECTOR_BYTES, SYSTEM_PART_LBA};
+pub use tairix_test_arxfs_image::{PlantOwner, RootFile};
 
-/// Sectors in the `ARXFS` root partition — the shared
-/// [`tairix_test_arxfs_image`] users-root volume's footprint.
+/// Sectors in the `ARXFS` root partition of a vertical whose root holds a
+/// few small documents — the shared [`tairix_test_arxfs_image`] users-root
+/// volume's footprint.
 pub const ROOT_SECTORS: u64 = root_image::TOTAL_SECTORS;
 
 /// How the fixture's root volume is protected.
@@ -121,20 +123,57 @@ impl MemDisk {
     }
 
     fn span(&self, lba: u64, len: usize) -> Result<(usize, usize), DriverError> {
-        if len == 0 || !len.is_multiple_of(SECTOR_BYTES) {
-            return Err(DriverError::BufferTooSmall);
-        }
-        let start = usize::try_from(lba)
-            .ok()
-            .and_then(|l| l.checked_mul(SECTOR_BYTES))
-            .ok_or(DriverError::LengthOutOfRange)?;
-        let end = start
-            .checked_add(len)
-            .ok_or(DriverError::LengthOutOfRange)?;
-        if end > self.store.len() {
-            return Err(DriverError::LengthOutOfRange);
-        }
-        Ok((start, end))
+        sector_span(self.store.len(), lba, len)
+    }
+}
+
+/// The byte range of the `len` bytes from sector `lba` of a store
+/// `store_len` bytes long, refused where it is not whole sectors or falls
+/// past the store.
+fn sector_span(store_len: usize, lba: u64, len: usize) -> Result<(usize, usize), DriverError> {
+    if len == 0 || !len.is_multiple_of(SECTOR_BYTES) {
+        return Err(DriverError::BufferTooSmall);
+    }
+    let start = usize::try_from(lba)
+        .ok()
+        .and_then(|l| l.checked_mul(SECTOR_BYTES))
+        .ok_or(DriverError::LengthOutOfRange)?;
+    let end = start
+        .checked_add(len)
+        .ok_or(DriverError::LengthOutOfRange)?;
+    if end > store_len {
+        return Err(DriverError::LengthOutOfRange);
+    }
+    Ok((start, end))
+}
+
+/// The sectors of an image read in place, refusing every write: what a read
+/// back of the partition table and the boot partition goes through, so no
+/// copy of a whole disk is made to read a few sectors of it.
+struct SliceDisk<'a> {
+    bytes: &'a [u8],
+}
+
+impl Block for SliceDisk<'_> {
+    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+        Ok(BlockGeometry {
+            block_size: u32::try_from(SECTOR_BYTES).unwrap_or(0),
+            block_count: u64::try_from(self.bytes.len() / SECTOR_BYTES).unwrap_or(0),
+        })
+    }
+
+    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        let (start, end) = sector_span(self.bytes.len(), lba, buf.len())?;
+        buf.copy_from_slice(&self.bytes[start..end]);
+        Ok(())
+    }
+
+    fn write_blocks(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), DriverError> {
+        Err(DriverError::ReadOnly)
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
     }
 }
 
@@ -276,7 +315,13 @@ impl tairix_syshelp::SystemVolume for SystemVolume {
 /// authoring, or the disk assembly: a fixture defect, surfaced rather than
 /// panicked because the fixture also links into the freestanding guest.
 pub fn build_image() -> Result<Vec<u8>, DriverError> {
-    build_image_with_contents(&[], &[], &[], RootProtection::Passphrase(PASSPHRASE))
+    build_image_with_contents(
+        &[],
+        &[],
+        &[],
+        ROOT_SECTORS,
+        RootProtection::Passphrase(PASSPHRASE),
+    )
 }
 
 /// Build the whole-disk image with a plaintext root, as a shipped image is:
@@ -289,17 +334,18 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
 /// Propagates any [`DriverError`] from FAT/`ARXFS` authoring or the disk
 /// assembly (surfaced rather than panicked).
 pub fn build_plaintext_image() -> Result<Vec<u8>, DriverError> {
-    build_image_with_contents(&[], &[], &[], RootProtection::Plaintext)
+    build_image_with_contents(&[], &[], &[], ROOT_SECTORS, RootProtection::Plaintext)
 }
 
 /// Build the whole-disk image, planting `drivers` and the application-bundle
 /// files `apps` into the read-only `/System` stores — each
 /// `(path_components, bytes)` a volume-relative bundle file (e.g.
 /// `&[b"Commands", b"ls.app", b"AppInfo"]`), composed and signed by the caller
-/// (`plans/APPS.md` deliverable 8) — and `root_files` onto the root volume
-/// (volume-relative: the home of state the writable `/System/Settings` child
-/// mount rebases onto, e.g. the seeded program-library catalog), protecting
-/// the root as `protection` says.
+/// (`plans/APPS.md` deliverable 8) — and `root_files` onto the root volume,
+/// each owned as it says (volume-relative: the home of state the writable
+/// `/System/Settings` child mount rebases onto, e.g. the seeded
+/// program-library catalog), the root volume `root_sectors` long and
+/// protected as `protection` says.
 ///
 /// The single authoring path behind [`build_image`] and
 /// [`build_plaintext_image`].
@@ -311,20 +357,25 @@ pub fn build_plaintext_image() -> Result<Vec<u8>, DriverError> {
 pub fn build_image_with_contents(
     drivers: &[(&[&[u8]], &[u8])],
     apps: &[(&[&[u8]], &[u8])],
-    root_files: &[(&[&[u8]], &[u8])],
+    root_files: &[RootFile<'_>],
+    root_sectors: u64,
     protection: RootProtection<'_>,
 ) -> Result<Vec<u8>, DriverError> {
     let system = build_system_partition(drivers, apps)?;
     let (boot, root) = match protection {
         RootProtection::Plaintext => (
             build_boot_partition(None)?,
-            root_image::build_users_root_image_keyed(Keying::Plaintext, root_files)?,
+            root_image::build_users_root_image_keyed(Keying::Plaintext, root_files, root_sectors)?,
         ),
         RootProtection::Passphrase(passphrase) => {
             let (descriptor, key) = provision(passphrase)?;
             (
                 build_boot_partition(Some(&descriptor))?,
-                root_image::build_users_root_image_keyed(Keying::Key(&key), root_files)?,
+                root_image::build_users_root_image_keyed(
+                    Keying::Key(&key),
+                    root_files,
+                    root_sectors,
+                )?,
             )
         }
     };
@@ -336,12 +387,127 @@ pub fn build_image_with_contents(
     })
 }
 
+/// The root volume of a whole-disk `image` [`build_image_with_contents`]
+/// built under `protection`, opened as the guest's unlock opens it: the key
+/// derived from the descriptor the image's own boot partition carries. How a
+/// host harness reads back what a guest left on its disk.
+///
+/// # Errors
+///
+/// [`DriverError::NotFound`] where the table names no root, or the boot
+/// partition carries no descriptor; [`DriverError::DeviceFault`] for a table
+/// that does not parse; otherwise the refusal of a read, the derivation or
+/// the mount.
+pub fn open_root(
+    image: &[u8],
+    protection: RootProtection<'_>,
+) -> Result<ARXFS<impl Block>, DriverError> {
+    let table = tairix_partition::parse_partition_table(&mut SliceDisk { bytes: image })
+        .map_err(|_| DriverError::DeviceFault)?;
+    let partition = |kind| -> Result<&[u8], DriverError> {
+        let found = table.first_of_type(kind).ok_or(DriverError::NotFound)?;
+        let len = usize::try_from(found.block_count)
+            .ok()
+            .and_then(|count| count.checked_mul(SECTOR_BYTES))
+            .ok_or(DriverError::LengthOutOfRange)?;
+        let (start, end) = sector_span(image.len(), found.start_lba, len)?;
+        Ok(&image[start..end])
+    };
+    let root = partition(tairix_partition::PartitionType::ARXFSRoot)?;
+    let key;
+    let keying = match protection {
+        RootProtection::Plaintext => Keying::Plaintext,
+        RootProtection::Passphrase(passphrase) => {
+            let bytes = partition(tairix_partition::PartitionType::FatBoot)?;
+            let mut boot = Fat32::open(SliceDisk { bytes })?;
+            let node = boot.lookup(boot.root(), ROOT_UNLOCK_NAME.as_bytes())?;
+            let mut descriptor = [0u8; UNLOCK_DESCRIPTOR_LEN];
+            if boot.read_at(node, 0, &mut descriptor)? != UNLOCK_DESCRIPTOR_LEN {
+                return Err(DriverError::NotFound);
+            }
+            key = *UnlockDescriptor::decode(&descriptor)?.derive_volume_key(passphrase)?;
+            Keying::Key(&key)
+        }
+    };
+    ARXFS::open(
+        MemDisk {
+            store: root.to_vec(),
+        },
+        keying,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
 
     use super::*;
     use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
+
+    /// A root is read back as the guest unlocks it — its key from the
+    /// descriptor on the image's own boot partition — and refused under the
+    /// wrong passphrase; a plaintext root opens with no key.
+    #[test]
+    fn a_root_is_read_back_as_the_guest_unlocks_it() {
+        use tairix_abi::driver::filesystem::FilesystemRead;
+
+        let planted: &[&[u8]] = &[b"Users", b"root", b"Desktop", b"left.png"];
+        let files = [RootFile {
+            components: planted,
+            bytes: b"a capture",
+            owner: PlantOwner::Account,
+        }];
+        let read_back = |image: &[u8], protection| {
+            let mut fs = open_root(image, protection).expect("the root opens");
+            let mut node = fs.root();
+            for part in planted {
+                node = fs.lookup(node, part).expect("planted");
+            }
+            let mut buf = [0u8; 16];
+            let n = fs.read_at(node, 0, &mut buf).expect("read back");
+            buf[..n].to_vec()
+        };
+        let encrypted = RootProtection::Passphrase(PASSPHRASE);
+        let image =
+            build_image_with_contents(&[], &[], &files, ROOT_SECTORS, encrypted).expect("builds");
+        assert_eq!(read_back(&image, encrypted), b"a capture");
+        assert!(open_root(&image, RootProtection::Passphrase(b"not the passphrase")).is_err());
+        let plain =
+            build_image_with_contents(&[], &[], &files, ROOT_SECTORS, RootProtection::Plaintext)
+                .expect("builds");
+        assert_eq!(read_back(&plain, RootProtection::Plaintext), b"a capture");
+    }
+
+    /// A root asked to be larger holds a file the standard root has no room
+    /// for, as a vertical keeping screen-sized pictures needs.
+    #[test]
+    fn a_larger_root_holds_what_the_standard_root_cannot() {
+        use tairix_abi::driver::filesystem::FilesystemRead;
+
+        let planted: &[&[u8]] = &[b"Users", b"root", b"Desktop", b"screen.png"];
+        let picture = std::vec![0x5A; 3 << 20];
+        let files = [RootFile {
+            components: planted,
+            bytes: &picture,
+            owner: PlantOwner::Account,
+        }];
+        let plain = RootProtection::Plaintext;
+        assert_eq!(
+            build_image_with_contents(&[], &[], &files, ROOT_SECTORS, plain).err(),
+            Some(DriverError::LengthOutOfRange)
+        );
+        let image = build_image_with_contents(&[], &[], &files, 16 * ROOT_SECTORS, plain)
+            .expect("room for it");
+        let mut fs = open_root(&image, plain).expect("the root opens");
+        let mut node = fs.root();
+        for part in planted {
+            node = fs.lookup(node, part).expect("planted");
+        }
+        assert_eq!(
+            fs.node_info(node).map(|info| info.size),
+            Ok(picture.len() as u64)
+        );
+    }
 
     /// The assembled image carries exactly the three design-B partitions, of
     /// the right types, packed back to back from the documented 1 MiB-aligned
@@ -420,14 +586,16 @@ mod tests {
             (&[b"Services", b"login.app", b"AppInfo"], APPINFO),
             (&[b"Services", b"login.app", b"Run"], RUN),
         ];
-        let root_files: [(&[&[u8]], &[u8]); 1] = [(
-            &[b"System", b"Settings", b"ProgramLibrary", b"library.conf"],
-            CATALOG,
-        )];
+        let root_files = [RootFile {
+            components: &[b"System", b"Settings", b"ProgramLibrary", b"library.conf"],
+            bytes: CATALOG,
+            owner: PlantOwner::System,
+        }];
         let bytes = build_image_with_contents(
             &[],
             &apps,
             &root_files,
+            ROOT_SECTORS,
             RootProtection::Passphrase(PASSPHRASE),
         )
         .expect("the whole-disk image assembles");
@@ -473,7 +641,7 @@ mod tests {
         let mut rootvol = tairix_drv_fs_arxfs::ARXFS::open(window, Keying::Key(&key))
             .expect("the root mounts under the descriptor-derived key");
         let mut node = rootvol.root();
-        for component in root_files[0].0 {
+        for component in root_files[0].components {
             node = rootvol
                 .lookup(node, component)
                 .expect("root-volume path component");

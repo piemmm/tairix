@@ -149,9 +149,12 @@ kind — the newest clock pair, drain, connector change and fault each supersede
 the one held, and a held loss absorbs the next, its frames summed at the later
 position — so the store is bounded by the protocol's own endpoint ceiling, and
 what is held goes in the order it happened, each to wherever its endpoint
-reports when it is offered. A refusal for good is given up and recorded (event
-29013) each time the running total doubles; a port gone with its mixer loses
-nobody anything.
+reports when it is offered. What is held for an attachment is forgotten as that
+attachment is detached, reconfigured away or replaced, so an old
+configuration's clock pair, drain, loss or fault never reaches the next; a
+connector's change goes to the watch and stays. A refusal for good is given up
+and recorded (event 29013) each time the running total doubles; a port gone
+with its mixer loses nobody anything.
 
 ## Nothing spins
 

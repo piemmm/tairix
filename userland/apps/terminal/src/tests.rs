@@ -15,7 +15,7 @@ use tairix_geometry::{Point, Rect};
 use tairix_input::{Key, Modifiers, NamedKey};
 use tairix_raster::Color;
 use tairix_reclaim::PressureBand;
-use tairix_theme::Theme;
+use tairix_theme::Palette;
 
 use tairix_vt::{encode_all_into, BasicColor, Color as VtColor, Op, Sgr};
 
@@ -543,11 +543,10 @@ fn send_propagates_a_write_error() {
 
 /// The colours a terminal on the system scheme paints with, fully opaque —
 /// what a test that is not about the profile expects to see.
-fn system_colors(theme: &Theme) -> crate::scheme::Painted {
+fn system_colors() -> crate::scheme::Painted {
     crate::scheme::Painted::resolve(
         crate::scheme::Scheme::System,
-        &crate::scheme::ColorScheme::from_theme(theme),
-        theme,
+        &crate::profile::Profile::default().custom,
         u8::MAX,
     )
 }
@@ -595,8 +594,7 @@ fn render_produces_a_surface_of_the_viewport_size() {
     let shell = QueueShell::with_output(&[b"hi"]);
     let mut term = Terminal::new(20, 3, shell, ROOM).expect("valid size");
     term.pump().expect("read succeeds");
-    let theme = Theme::dark();
-    let screen = painted_screen(term.grid(), &system_colors(&theme), 120, 40);
+    let screen = painted_screen(term.grid(), &system_colors(), 120, 40);
     assert_eq!(screen.surface().width(), 120);
     assert_eq!(screen.surface().height(), 40);
 }
@@ -615,8 +613,7 @@ fn hebrew_glyphs_occupy_distinct_single_cells() {
 fn render_keeps_hebrew_ink_inside_each_coloured_cell() {
     let mut term = terminal(4, 1);
     term.feed("\u{1B}[?25l\u{1B}[48;2;10;20;30mאבם".as_bytes());
-    let theme = Theme::dark();
-    let screen = painted_screen(term.grid(), &system_colors(&theme), 60, 28);
+    let screen = painted_screen(term.grid(), &system_colors(), 60, 28);
     let surface = screen.surface();
     let background = Color::rgb(10, 20, 30);
     for column in 0..3 {
@@ -636,8 +633,7 @@ fn render_keeps_hebrew_ink_inside_each_coloured_cell() {
 fn render_keeps_wide_japanese_ink_over_a_coloured_background() {
     let mut term = terminal(3, 1);
     term.feed("\u{1B}[?25l\u{1B}[48;2;10;20;30m日".as_bytes());
-    let theme = Theme::dark();
-    let screen = painted_screen(term.grid(), &system_colors(&theme), 45, 28);
+    let screen = painted_screen(term.grid(), &system_colors(), 45, 28);
     let surface = screen.surface();
     let background = Color::rgb(10, 20, 30);
     assert!(
@@ -654,11 +650,10 @@ fn render_keeps_wide_japanese_ink_over_a_coloured_background() {
 fn render_highlights_the_cursor_cell() {
     let mut term = terminal(20, 3);
     term.feed(b"\x1b[H");
-    let theme = Theme::dark();
-    let screen = painted_screen(term.grid(), &system_colors(&theme), 120, 40);
+    let screen = painted_screen(term.grid(), &system_colors(), 120, 40);
     let surface = screen.surface();
-    let accent: Color = theme.palette().accent.into();
-    let surface_bg: Color = theme.palette().surface.into();
+    let accent: Color = Palette::DARK.accent.into();
+    let surface_bg: Color = Palette::DARK.surface.into();
     // The top-left pixel sits under the home cursor, so it carries the accent
     // fill rather than the plain surface colour.
     let top_left = surface.get(0, 0).map(tairix_raster::Pixel::unpremultiply);
@@ -669,18 +664,16 @@ fn render_highlights_the_cursor_cell() {
 #[test]
 fn render_handles_a_zero_sized_viewport_without_panicking() {
     let term = terminal(20, 3);
-    let theme = Theme::dark();
     // A zero-width viewport is degenerate but allocatable: it paints nothing.
-    let screen = painted_screen(term.grid(), &system_colors(&theme), 0, 40);
+    let screen = painted_screen(term.grid(), &system_colors(), 0, 40);
     assert_eq!(screen.surface().width(), 0);
     assert!(screen.surface().pixels().is_empty());
 }
 
 #[test]
 fn a_first_paint_damages_the_whole_window() {
-    let theme = Theme::dark();
     let (term, mut screen) = grid_and_screen(20, 3);
-    let damage = screen.paint(term.grid(), &system_colors(&theme), test_font());
+    let damage = screen.paint(term.grid(), &system_colors(), test_font());
     assert_eq!(damage, cell_rect(0, 0, 20, 3));
 }
 
@@ -688,8 +681,7 @@ fn a_first_paint_damages_the_whole_window() {
 /// the two the cursor moved between — never the whole window.
 #[test]
 fn typing_one_character_damages_only_the_cells_it_touched() {
-    let theme = Theme::dark();
-    let painted = system_colors(&theme);
+    let painted = system_colors();
     let (mut term, mut screen) = grid_and_screen(80, 24);
     let _ = screen.paint(term.grid(), &painted, test_font());
 
@@ -704,8 +696,7 @@ fn typing_one_character_damages_only_the_cells_it_touched() {
 
 #[test]
 fn a_repaint_of_an_unchanged_grid_damages_nothing() {
-    let theme = Theme::dark();
-    let painted = system_colors(&theme);
+    let painted = system_colors();
     let (mut term, mut screen) = grid_and_screen(20, 3);
     term.feed(b"steady");
     let _ = screen.paint(term.grid(), &painted, test_font());
@@ -715,8 +706,7 @@ fn a_repaint_of_an_unchanged_grid_damages_nothing() {
 
 #[test]
 fn a_hidden_cursor_reappearing_damages_only_its_own_cell() {
-    let theme = Theme::dark();
-    let painted = system_colors(&theme);
+    let painted = system_colors();
     let (mut term, mut screen) = grid_and_screen(20, 3);
     term.feed(b"\x1b[2;3H\x1b[?25l");
     let _ = screen.paint(term.grid(), &painted, test_font());
@@ -733,8 +723,7 @@ fn a_hidden_cursor_reappearing_damages_only_its_own_cell() {
 /// cell too, or the orphaned left half of the old glyph would survive.
 #[test]
 fn clobbering_a_continuation_cell_damages_its_lead_cell() {
-    let theme = Theme::dark();
-    let painted = system_colors(&theme);
+    let painted = system_colors();
     let (mut term, mut screen) = grid_and_screen(10, 1);
     term.feed("\u{1B}[?25l日本".as_bytes());
     let _ = screen.paint(term.grid(), &painted, test_font());
@@ -764,8 +753,7 @@ fn an_incremental_repaint_matches_a_whole_one_pixel_for_pixel() {
         ("filled text here", "\u{1B}[2J"),
         ("abc", "\u{1B}[1;1H\u{1B}[1;33mA"),
     ];
-    let theme = Theme::dark();
-    let painted = system_colors(&theme);
+    let painted = system_colors();
     let font = test_font();
     for (setup, change) in CASES {
         let (mut term, mut incremental) = grid_and_screen(12, 4);
@@ -808,8 +796,7 @@ fn every_pixel_a_repaint_changes_lies_inside_the_rect_it_reported() {
         "\u{1B}[H\u{1B}[1;33mA",
         "\u{1B}[2J",
     ];
-    let theme = Theme::dark();
-    let painted = system_colors(&theme);
+    let painted = system_colors();
     let font = test_font();
     let (mut term, mut screen) = grid_and_screen(12, 4);
     let _ = screen.paint(term.grid(), &painted, font);
@@ -850,8 +837,7 @@ fn every_pixel_a_repaint_changes_lies_inside_the_rect_it_reported() {
 
 #[test]
 fn invalidating_forces_the_next_paint_to_cover_the_window() {
-    let theme = Theme::dark();
-    let painted = system_colors(&theme);
+    let painted = system_colors();
     let (mut term, mut screen) = grid_and_screen(20, 3);
     term.feed(b"text");
     let _ = screen.paint(term.grid(), &painted, test_font());
@@ -866,8 +852,7 @@ fn invalidating_forces_the_next_paint_to_cover_the_window() {
 
 #[test]
 fn a_resize_repaints_the_whole_new_surface() {
-    let theme = Theme::dark();
-    let painted = system_colors(&theme);
+    let painted = system_colors();
     let font = test_font();
     let (mut term, mut screen) = grid_and_screen(20, 3);
     term.feed(b"text");
@@ -887,8 +872,7 @@ fn a_resize_repaints_the_whole_new_surface() {
 /// whole: the cell snapshot no longer describes the new shape.
 #[test]
 fn a_reshaped_grid_repaints_the_whole_window() {
-    let theme = Theme::dark();
-    let painted = system_colors(&theme);
+    let painted = system_colors();
     let (mut term, mut screen) = grid_and_screen(20, 3);
     let _ = screen.paint(term.grid(), &painted, test_font());
 
@@ -994,10 +978,9 @@ fn cursor_visibility_follows_the_show_hide_sequences() {
 fn hidden_cursor_is_not_painted() {
     let mut term = terminal(20, 3);
     term.feed(b"\x1b[H\x1b[?25l");
-    let theme = Theme::dark();
-    let screen = painted_screen(term.grid(), &system_colors(&theme), 120, 40);
+    let screen = painted_screen(term.grid(), &system_colors(), 120, 40);
     let surface = screen.surface();
-    let page: Color = theme.palette().document.into();
+    let page: Color = Palette::DARK.document.into();
     // With the cursor hidden the home cell shows the plain page, not accent.
     let top_left = surface.get(0, 0).map(tairix_raster::Pixel::unpremultiply);
     assert_eq!(top_left, Some(page));
@@ -1513,8 +1496,7 @@ fn the_clear_command_hands_what_it_cleared_to_the_scrollback() {
 
 #[test]
 fn a_view_scrolled_back_paints_as_a_whole_paint_of_it_would() {
-    let theme = Theme::dark();
-    let painted = system_colors(&theme);
+    let painted = system_colors();
     let font = test_font();
     let (mut term, mut screen) = grid_and_screen(12, 4);
     term.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven");
@@ -1538,9 +1520,8 @@ fn a_view_scrolled_back_paints_as_a_whole_paint_of_it_would() {
 
 #[test]
 fn a_view_scrolled_past_the_cursors_row_draws_no_cursor() {
-    let theme = Theme::dark();
-    let painted = system_colors(&theme);
-    let accent: Color = theme.palette().accent.into();
+    let painted = system_colors();
+    let accent: Color = Palette::DARK.accent.into();
     let mut term = terminal(20, 3);
     term.feed(b"\r\n\r\n\r\n\r\n\r\n\x1b[H");
     let top_left = |term: &Terminal<QueueShell>| {

@@ -37,7 +37,7 @@ use crate::places::{PlaceKind, Places};
 use crate::presentation::{HiddenEndings, Presentation};
 use crate::rename::{renamed, validate_new_name, RenameError};
 use crate::select::Selection;
-use crate::sort::{sort_entries, SortMode};
+use crate::sort::{sort_entries, Order, SortMode};
 use crate::source::{DirectorySource, Listing};
 use crate::watch::{merge_changes, EntryChange, Placement};
 
@@ -167,7 +167,7 @@ impl Shown {
 ///
 /// `S` is the injected [`DirectorySource`]; on a running system it is backed
 /// by the VFS, and in tests by an in-memory tree.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Browser<S: DirectorySource> {
     source: S,
     shown: Shown,
@@ -283,7 +283,7 @@ impl<S: DirectorySource> Browser<S> {
             Listing::Ready(entries) => entries,
             Listing::Pending => Vec::new(),
         };
-        sort_entries(&mut entries, sort_mode);
+        sort_entries(&mut entries, sort_mode.into());
         Ok(Self::opened(
             source,
             Shown::Folder {
@@ -410,11 +410,16 @@ impl<S: DirectorySource> Browser<S> {
             return;
         }
         self.sort_mode = mode;
+        self.reorder();
+    }
+
+    /// Put what is listed into the order in force, keeping the focus and
+    /// selection on the items they named, answering whether any item moved.
+    fn reorder(&mut self) -> bool {
         self.drop_mark = None;
+        let (mode, order) = (self.sort_mode, self.order());
         let place = match &mut self.shown {
-            Shown::Folder { entries, .. } => {
-                sort_tracking(entries, |a, b| crate::sort::entry_cmp(a, b, mode))
-            }
+            Shown::Folder { entries, .. } => crate::sort::sort_tracked(entries, order),
             Shown::Network { items, .. } => {
                 sort_tracking(items, |a, b| network::item_cmp(a, b, mode))
             }
@@ -422,15 +427,21 @@ impl<S: DirectorySource> Browser<S> {
         let Some(place) = place else {
             // Without the memory to follow each item nothing is carried.
             match &mut self.shown {
-                Shown::Folder { entries, .. } => sort_entries(entries, mode),
+                Shown::Folder { entries, .. } => sort_entries(entries, order),
                 Shown::Network { items, .. } => network::order(items, mode),
             }
             self.selection.clear();
             self.clamp_selection();
-            return;
+            return true;
         };
         self.selected = place.get(self.selected).copied().unwrap_or(0);
-        self.selection.remap(|before| place.get(before).copied());
+        let count = self.item_count();
+        self.selection
+            .remap(count, |before| place.get(before).copied());
+        place
+            .iter()
+            .enumerate()
+            .any(|(before, &after)| before != after)
     }
 
     /// How the listing is presented.
@@ -439,26 +450,39 @@ impl<S: DirectorySource> Browser<S> {
         &self.presentation
     }
 
+    /// The order the listing is shown in: the sort mode, its names compared
+    /// as the presentation shows them.
+    const fn order(&self) -> Order {
+        Order {
+            mode: self.sort_mode,
+            endings: self.presentation.endings,
+        }
+    }
+
     /// Present the listing as `presentation` says, answering whether what it
-    /// lists changes.
+    /// lists, or the order it lists them in, changes.
     ///
-    /// Leaving hidden items out takes them from the listing in place, keeping
-    /// the focus and selection on the entries still shown. Listing them again
-    /// needs the directory read afresh, which is asked for unless a listing is
-    /// already on its way, since every listing is adopted as the presentation
-    /// then in force says.
+    /// A change of the endings names are shown without re-sorts the listing by
+    /// the names as now shown, and leaving hidden items out takes them from
+    /// the listing in place, each keeping the focus and selection on their
+    /// entries. Listing hidden items again needs the directory read afresh,
+    /// which is asked for unless a listing is already on its way, since every
+    /// listing is adopted as the presentation then in force says.
     ///
     /// # Errors
     ///
     /// [`BrowseError::Source`] when the fresh read is refused at once; the
     /// presentation is taken all the same.
     pub fn set_presentation(&mut self, presentation: Presentation) -> Result<bool, BrowseError> {
-        // Hidden items are a folder's: nothing a peer names is hidden.
-        let relisted = presentation.hidden_items != self.presentation.hidden_items
-            && matches!(self.shown, Shown::Folder { .. });
+        // Hidden items and hidden endings are a folder's: nothing a peer names
+        // is either.
+        let folder = matches!(self.shown, Shown::Folder { .. });
+        let relisted = folder && presentation.hidden_items != self.presentation.hidden_items;
+        let renamed = folder && presentation.endings != self.presentation.endings;
         self.presentation = presentation;
+        let reordered = renamed && self.reorder();
         if !relisted {
-            return Ok(false);
+            return Ok(reordered);
         }
         if !presentation.hidden_items {
             self.leave_out_hidden();
@@ -831,6 +855,36 @@ impl<S: DirectorySource> Browser<S> {
         self.selection.clear();
     }
 
+    /// Clear the selection a hand-off of `handed` to something outside the
+    /// browser left, answering whether it did: only while that entry, by its
+    /// path and the node the listing showed, is still the one chosen, so a
+    /// selection changed or grown since, or one in a folder moved to since,
+    /// is kept.
+    pub fn deselect_handed(&mut self, handed: &Listed) -> bool {
+        let Some(index) = self.chosen_index() else {
+            return false;
+        };
+        let Shown::Folder {
+            components,
+            entries,
+        } = &self.shown
+        else {
+            return false;
+        };
+        let Some((name, folder)) = handed.path.split_last() else {
+            return false;
+        };
+        let still = entries.get(index).is_some_and(|entry| {
+            entry.id() == handed.id
+                && entry.name() == name.as_str()
+                && folder == components.as_slice()
+        });
+        if still {
+            self.clear_selection();
+        }
+        still
+    }
+
     /// Move a band's mark from the entries `from` selects to those `to`
     /// selects: an entry only `to` selects is selected, and one only `from`
     /// selected leaves the selection unless `base` holds it. Answers whether
@@ -924,7 +978,7 @@ impl<S: DirectorySource> Browser<S> {
             .selection
             .iter()
             .filter_map(|index| entries.get(index))
-            .map(|entry| DeleteTarget::new(listed(components, entry), entry.is_directory_backed()))
+            .map(|entry| DeleteTarget::new(listed(components, entry), entry.kind()))
             .collect();
         DeletePlan::new(targets)
     }
@@ -1144,7 +1198,7 @@ impl<S: DirectorySource> Browser<S> {
         changes: Vec<EntryChange>,
     ) -> Result<Option<Placement>, BrowseError> {
         let mut changes = changes;
-        let presentation = self.presentation;
+        let (presentation, order) = (self.presentation, self.order());
         changes.retain(|change| match change {
             EntryChange::Upsert(entry) => presentation.lists(entry.name()),
             EntryChange::Remove(_) => true,
@@ -1157,7 +1211,7 @@ impl<S: DirectorySource> Browser<S> {
             return Ok(None);
         }
         let (placement, moved) =
-            merge_changes(entries, changes, self.sort_mode).ok_or(BrowseError::OutOfMemory)?;
+            merge_changes(entries, changes, order).ok_or(BrowseError::OutOfMemory)?;
         self.carry_selection(&placement);
         Ok(moved.then_some(placement))
     }
@@ -1168,12 +1222,12 @@ impl<S: DirectorySource> Browser<S> {
     /// is probed again — a format that stamps no directory when its contents
     /// change (FAT) leaves an unchanged record proving nothing.
     fn relist(&mut self, mut fresh: Vec<Entry>) {
-        let presentation = self.presentation;
+        let (presentation, order) = (self.presentation, self.order());
         let Shown::Folder { entries, .. } = &mut self.shown else {
             return;
         };
         fresh.retain(|entry| presentation.lists(entry.name()));
-        sort_entries(&mut fresh, self.sort_mode);
+        sort_entries(&mut fresh, order);
         let old = mem::replace(entries, fresh);
         // Without the memory to match the two listings nothing is carried
         // across: the selection goes, and each folder is probed afresh.
@@ -1205,7 +1259,9 @@ impl<S: DirectorySource> Browser<S> {
     fn carry_selection(&mut self, placement: &Placement) {
         self.drop_mark = None;
         let focus = placement.place(self.selected);
-        self.selection.remap(|before| placement.place(before));
+        let count = self.item_count();
+        self.selection
+            .remap(count, |before| placement.place(before));
         match focus {
             Some(index) => self.selected = index,
             None => self.clamp_selection(),
@@ -1335,12 +1391,27 @@ impl<S: DirectorySource> Browser<S> {
         // open), but a bundle must be launched by its **resolved** path —
         // the spawn gate parses an entry point as `…/<Name>.app/Run`, and a
         // link named after the program is not that shape.
-        let launch = entry
-            .target()
-            .map(|target| resolve_target(&crate::vfs::spell_absolute_path(components), target));
+        let directory = crate::vfs::spell_absolute_path(components);
+        let stored = entry.target().map(String::from);
+        let launch = stored
+            .as_deref()
+            .map(|target| resolve_target(&directory, target));
+        // A link naming another root is never followed: what it names is
+        // reached at its target instead.
+        let crosses = stored
+            .as_deref()
+            .is_some_and(|target| tairix_path::names_another_root(target) == Ok(true));
+        let elsewhere = launch.clone().filter(|_| crosses);
         match kind {
             EntryKind::Directory | EntryKind::Link(LinkTarget::Directory) => {
-                self.open_index(index)?;
+                match elsewhere {
+                    Some(path) => {
+                        let reached = crate::vfs::components_from_absolute_path(&path)
+                            .map_err(BrowseError::Source)?;
+                        self.navigate_to(reached)?;
+                    }
+                    None => self.open_index(index)?,
+                }
                 Ok(Activation::Descended)
             }
             EntryKind::Bundle => Ok(Activation::LaunchBundle {
@@ -1349,8 +1420,16 @@ impl<S: DirectorySource> Browser<S> {
             EntryKind::Link(LinkTarget::Bundle) => Ok(Activation::LaunchBundle {
                 path: launch.ok_or(BrowseError::Source(Errno::NotFound))?,
             }),
+            // Where the volume is now is the caller's mount table to say.
+            EntryKind::Link(LinkTarget::Volume) => Ok(Activation::OpenVolume {
+                name,
+                target: stored.ok_or(BrowseError::Source(Errno::NotFound))?,
+            }),
             EntryKind::File | EntryKind::Link(LinkTarget::File) => {
-                let path = self.child_target_path(&name)?;
+                let path = match elsewhere {
+                    Some(path) => path,
+                    None => self.child_target_path(&name)?,
+                };
                 let recorded = entry.filetype();
                 let media = crate::media::media_for_named(
                     &name,
@@ -1857,14 +1936,15 @@ impl<S: DirectorySource> Browser<S> {
     /// mode, the network's already ordered — with nothing selected and the
     /// focus at the top, since the old indices name nothing here.
     fn adopt_shown(&mut self) {
+        let (presentation, order) = (self.presentation, self.order());
         if let Shown::Folder { entries, .. } = &mut self.shown {
-            let presentation = self.presentation;
             entries.retain(|entry| presentation.lists(entry.name()));
-            sort_entries(entries, self.sort_mode);
+            sort_entries(entries, order);
         }
         self.drives_shown = false;
         self.selected = 0;
-        self.selection.clear();
+        let count = self.item_count();
+        self.selection.reset(count);
         self.drop_mark = None;
         self.scroll.set_offset(0);
     }

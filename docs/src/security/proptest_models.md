@@ -40,11 +40,15 @@ Each lives in a `tests/proptest_model.rs` next to the code it checks:
   (ABI version → epoch → subject → signature → subset), including tokens
   addressed to a different subject.
 * **`kernel/sec`** — drives a `CapTable` of `TaskCapabilities` through
-  `derive` / `delegate` / `revoke` / `remove` commands. It asserts that a
-  derived effective set is exactly `user_grant ∩ manifest_request` (no
+  `derive` / `insert` / `delegate` / `revoke` / `remove` commands, an
+  insertion sometimes under a heap that refuses it partway. It asserts that
+  a derived effective set is exactly `user_grant ∩ manifest_request` (no
   ambient authority), that delegation never widens and a refused
-  delegation is a no-op, that revoke only shrinks, and that the registry's
-  contents match the model.
+  delegation is a no-op, that revoke only shrinks, that a refused insertion
+  changes nothing, and that the registry's contents match the model. A
+  second model drives admissions, departures and anchor exits through the
+  session tree against a naive reference, an admission sometimes refused its
+  room, which must leave both as they were.
 * **`kernel/ipc`** — drives a capability-checked `Port` through `send` /
   `recv` / `admit` / `destroy` commands from several sending instances
   against a reference of per-sender lanes, checking the fail-closed send

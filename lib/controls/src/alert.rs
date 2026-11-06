@@ -746,6 +746,7 @@ impl Alert {
         }
         let layout = self.layout(bounds, scale, theme);
         if layout.scroll_room == 0 {
+            self.bar.let_go();
             return;
         }
         let rect = Self::scrollbar_rect(&layout, scale, theme);

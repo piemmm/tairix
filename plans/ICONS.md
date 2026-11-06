@@ -41,6 +41,8 @@ bounds), and `plans/GUI-CONTROLS-DESIGN.md`.
 | I18 | A file typed by the filetype its volume records is pictured and opened as that type | done |
 | I19 | The file-type masters are drawn by code and held to their drawings | done |
 | I20 | More RISC OS file types pictured in the family's style: Data, Command, Desktop, Squash, the archive formats, sound, video, pictures, tables and makefiles | done |
+| I21 | A dragged bundle or RISC OS application is carried as its own picture, by the one tier order | done |
+| I22 | A listed bundle is pictured from its own files, read per volume and read again when they change | done |
 
 Each item's section below records what it guarantees or what remains.
 
@@ -124,9 +126,10 @@ Each item's section below records what it guarantees or what remains.
   A screenful is the floor because a *fraction* of one frame cannot hold what it
   draws — a 480×480 file-manager window draws some 117 KiB of icon where a
   sixteenth of its frame is 57 KiB. A changed source is a new key instead: a
-  listed bundle is keyed by the version its listing reports, as a picture file
-  is, and a tree a copy is still writing is held (`ArtworkDesk::hold_under`), so
-  no answer is ever read from a half-written bundle.
+  picture file is keyed by the version its listing reports and a listed bundle
+  by the stamps of the manifest and icon file it is drawn from (I22), and a
+  tree a copy is still writing is held (`ArtworkDesk::hold_under`), so no
+  answer read from a half-written bundle stands.
 - **Rendered exactly, at the size it is drawn.** A vector asset is rasterised
   straight onto the requested `side`×`side` surface — never at a nominal size
   and rescaled — and every pixel takes the *exact* fraction of its own area
@@ -711,7 +714,76 @@ video and pictures without a master of their own draw a waveform, a film frame
 and a photograph; CSV draws a table and a makefile its text with a badge. A
 new kind falls back to its family's glyph, and joins `ALL_KINDS` at its end.
 
-## 22. What this plan deliberately does not cover
+## 22. I21 — a dragged item is carried as its own picture
+
+A drag carries each item shown as its class picture and, where a path names
+one the desktop reads, its own: an application bundle's icon or a RISC OS
+application's sprite, a shortcut's by the path it resolves to
+(`DragPicture.own`, a `DragOwnIcon`). The request crosses as itself —
+`IconRequest::carried` at the source, `IconRequest::from_carried` in the
+session — so the session resolves it by the one tier order, under its own
+identity, drawing only what a signed manifest declares and returning nothing
+to the source. The path is an `IconPath`, the menu row's bound, absolute and
+named as its source says; one past the bound crosses as the class picture.
+Thumbnails and folder fans are not carried: a whole file's decode for a
+picture shown a second, and one no path names. The carried stack's cards are
+asked for before every thumbnail sweep, so a sprite still being produced is
+kept. A shortcut's tile is asked for where its activation reaches what it
+names (`Entry::reached_by`), so one whose target names another root — an
+application shortcut's `System:/Applications/X.app` — draws its target's
+picture on every surface, spelled into the caller's scratch.
+
+## 23. I22 — a listed bundle is pictured from its own files
+
+A bundle's picture is read from its manifest and the icon the manifest names,
+so once its producer has read them a listed bundle's picture is keyed by
+those two files' stamps (`BundleFiles`, `BundleVersion::Files`); until then
+by the version listed. A bundle whose files change is a new key and is
+decoded again; one whose files stand is read again with no decode. The
+resolver answers the version (`ArtworkResolver::bundle_version`), so the
+cache keeps the one tier order; a resolver reading no files keeps the version
+listed.
+
+- **Read for the bundles in view.** Each surface's desk — the desktop
+  session's and the file manager's — remembers, per bundle and version listed,
+  the files last read (`ArtworkDesk::version_of`, at most
+  `MAX_LISTED_BUNDLE_DIRS` directories, the least recent forgotten first with
+  every version of it through an `LruMap` keyed under the process's key), and
+  follows those of the bundles asked about since
+  the last sweep (at most `MAX_FOLLOWED_BUNDLES`, all a sweep walks); a bundle
+  let go while off screen or past the bound is followed again once shown with
+  room, its files read anew. A reader arms change waits
+  on the manifest, `Resources/` and the icon before it reads them, a thread of
+  the readers' own parks on them, and a change has the bundle read again
+  (`ArtworkDesk::moved`), decoded only where its files differ
+  (`ArtworkJob::produce`). The waits and that thread are one definition,
+  `tairix_browse::follow`. A plain `cp` of a bundle onto the desktop or into a
+  folder a window shows therefore shows its own icon once its files are
+  complete, and a refusal read while it was half-written never stands.
+- **Every surface asks before a sweep.** A sweep lets go of the follows and
+  withdraws the thumbnails nothing asked about since the last, so every surface
+  showing either asks for what it shows first: in the session the desktop, a
+  carried drag and every open pick (`SessionPicker::want_shown_artwork`,
+  through the listing's own `render::manager_art` walk), in the file manager
+  each window.
+- **Per volume.** The session's artwork readers take their work by volume
+  through `tairix_browse::lanes`, so a stuck volume stalls only its own
+  pictures: a carried own picture or a menu row's bundle may name any volume.
+- **A follow stands only while it is wanted.** One armed while its bundle
+  stopped being followed — swept, forgotten, or through a wait since lost — is
+  let go as it is kept (`BundleFollows::keep`), and an eject lets go of every
+  follow on its volume, ended on the volume's lane before the eject
+  (`BundleFollows::release_within`): the file manager's let go on its loop,
+  the desktop's by the reader carrying its eject out, which first lets go of
+  each listing's watch there.
+- **Once a turn.** Each surface asks a listed bundle's version of its readers
+  once a turn of its loop (`ByTurn`), however many tiles draw it.
+- **Drops.** A tree a drop writes is held until its item is made, a bundle
+  under it read before is read again on release, and the item is drawn
+  meanwhile by its drag's own picture (`IconRequest::standing_in`), never by
+  a stand-in where its own icon was refused.
+
+## 24. What this plan deliberately does not cover
 
 - **Cursors and window chrome stay vector.** They are tintable silhouettes
   resolved from the theme; a raster master would be the wrong source format

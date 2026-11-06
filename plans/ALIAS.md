@@ -903,7 +903,12 @@ first, in lowercase Crockford base32: `0-9` and `a-z` without the look-alikes
 `i`, `l`, `o` and `u` (`tairix_fsprobe::fingerprint`). Nothing is hashed, so
 the full rendering — 26 characters for a 128-bit identity — encodes every bit,
 and two resources of one kind never share a full fingerprint; the namespace
-already says which kind a fingerprint belongs to.
+already says which kind a fingerprint belongs to. A volume's canonical
+identity is the key it is published under, so twins — media whose content
+carries one identity (`docs/src/filesystem/drives.md` §8) — differ in it
+too, though the catalog names the volume manager derives from that content
+identity are the same for both: the kernel catalogues the twin as such a name
+with `_<n>` (§7 there).
 
 ### 10.2 Length
 

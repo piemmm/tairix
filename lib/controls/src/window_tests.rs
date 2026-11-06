@@ -880,7 +880,7 @@ fn a_tool_frame_is_a_window_frame_on_the_mini_band() {
     let double = Scale::from_percent(200).expect("scale");
     for theme in [Theme::dark(), Theme::light()] {
         for scale in [Scale::ONE, double] {
-            let tool = WindowFrame::tool();
+            let tool = WindowFrame::tool(false);
             let window = WindowFrame::new(furniture());
             let mini = TitleBar::height_of(TitleBarCommands::Tool, scale, &theme);
             assert!(mini < TitleBar::band_height(scale, &theme));
@@ -939,6 +939,48 @@ fn a_tool_frame_is_a_window_frame_on_the_mini_band() {
             assert!(tool.grab_region(outer, scale, &theme).is_none());
         }
     }
+}
+
+/// A tool frame that asks to be resizable grabs its edges as a window's
+/// does and keeps Close alone on its band; no tool frame is maximized, and a
+/// resizable window's is.
+#[test]
+fn a_resizable_tool_frame_is_resized_by_its_edges_and_never_maximized() {
+    let theme = Theme::dark();
+    let (fixed, resizable) = (WindowFrame::tool(false), WindowFrame::tool(true));
+    let client = Rect::new(40, 60, 180, 120);
+    let outer = resizable.outer_for_client(client, Scale::ONE, &theme);
+    assert_eq!(
+        outer,
+        fixed.outer_for_client(client, Scale::ONE, &theme),
+        "the same band and rim"
+    );
+    let corner = Point::new(outer.right() - 1, outer.bottom() - 1);
+    assert_eq!(
+        resizable.hit(outer, Scale::ONE, &theme, corner),
+        FurniturePart::ResizeEdge(ResizeEdge::BottomRight)
+    );
+    assert_eq!(
+        fixed.hit(outer, Scale::ONE, &theme, corner),
+        FurniturePart::Frame
+    );
+    assert!(resizable.grab_region(outer, Scale::ONE, &theme).is_some());
+    assert!(fixed.grab_region(outer, Scale::ONE, &theme).is_none());
+    assert_eq!(
+        resizable.title_bar().commands(),
+        TitleBarCommands::Tool,
+        "Close alone"
+    );
+    assert!(resizable.title_bar().furniture().resizable);
+    assert!(!resizable.maximizes() && !fixed.maximizes());
+    assert!(
+        WindowFrame::new(furniture()).maximizes(),
+        "a resizable window is"
+    );
+    assert!(
+        !WindowFrame::new(fixed_size_furniture()).maximizes(),
+        "a fixed one is not"
+    );
 }
 
 /// A bar carrying `hue`, rendered into a `width`-wide band over the theme's

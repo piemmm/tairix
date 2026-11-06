@@ -23,7 +23,6 @@
 //! **decompose** the cluster back into per-block raw records (bounded work),
 //! then proceed through the ordinary per-block copy-on-write path.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::DriverError;
@@ -60,7 +59,7 @@ impl<B: Block> ARXFS<B> {
             None => self.find_ordinary_run(run, start, cursor)?,
         };
         let block = found.ok_or(DriverError::NoSpace)?;
-        self.claim_run(block, run);
+        self.claim_run(block, run)?;
         self.allocator_mut()?.alloc_cursor = block + run;
         Ok(block)
     }
@@ -87,7 +86,9 @@ impl<B: Block> ARXFS<B> {
     ) -> Result<Option<(u64, u64)>, DriverError> {
         let capu = as_usize(self.data_capacity());
         let len_blocks = (plaintext.len() / capu) as u64;
-        let mut frame = vec![0u8; plaintext.len()];
+        let Some(mut frame) = tairix_util::fallible::zeroed(plaintext.len()) else {
+            return Err(DriverError::OutOfMemory);
+        };
         let Ok(frame_len) = tairix_compress::compress(plaintext, &mut frame) else {
             // The frame would not even fit the plaintext-sized scratch:
             // incompressible, store per-block raw.
@@ -134,24 +135,32 @@ impl<B: Block> ARXFS<B> {
     ///
     /// # Errors
     ///
+    /// [`DriverError::OutOfMemory`] when a buffer the read needs is refused,
     /// [`DriverError::DeviceFault`] on any read, integrity, shape, or
     /// decompression failure (fail closed, never a panic).
     pub(crate) fn read_data_cluster(&mut self, ext: &Extent) -> Result<Vec<u8>, DriverError> {
         self.read_data_cluster_classified(ext)
-            .map_err(|_| DriverError::DeviceFault)
+            .map_err(DriverError::from)
     }
 
     /// As [`read_data_cluster`](Self::read_data_cluster), but reports *which*
     /// integrity layer rejected the cluster (the scrub seam). A shape
     /// mismatch — wrong stored form or position, a frame length that
     /// disagrees with the extent, or a wrong decompressed size — classifies
-    /// as a logical fault.
+    /// as a logical fault; a buffer refused is no layer's verdict.
     pub(crate) fn read_data_cluster_classified(
         &mut self,
         ext: &Extent,
     ) -> Result<Vec<u8>, DataFault> {
         let capu = as_usize(self.data_capacity());
-        let mut frame = vec![0u8; as_usize(ext.stored) * capu];
+        // Both buffers are had before anything is read, so a refusal leaves
+        // nothing decrypted behind.
+        let Some(mut frame) = tairix_util::fallible::zeroed(as_usize(ext.stored) * capu) else {
+            return Err(DataFault::OutOfMemory);
+        };
+        let Some(mut plain) = tairix_util::fallible::zeroed(as_usize(ext.len) * capu) else {
+            return Err(DataFault::OutOfMemory);
+        };
         let frame_len = match self.read_cluster_frame(ext, capu, &mut frame) {
             Ok(frame_len) => frame_len,
             Err(fault) => {
@@ -159,7 +168,6 @@ impl<B: Block> ARXFS<B> {
                 return Err(fault);
             }
         };
-        let mut plain = vec![0u8; as_usize(ext.len) * capu];
         let produced = tairix_compress::decompress(&frame[..frame_len], &mut plain);
         // The frame holds the decrypted (compressed) content: wipe the
         // scratch before it returns to the heap, success or failure.
@@ -194,7 +202,7 @@ impl<B: Block> ARXFS<B> {
         while done < stored {
             let run = stage.blocks().min(stored - done);
             self.read_block_run(ext.phys + done as u64, run, stage.buf())
-                .map_err(|_| DataFault::Physical)?;
+                .map_err(DataFault::of_read)?;
             for slot in 0..run {
                 let at = done + slot;
                 let block = &mut stage.buf()[slot * block_size..(slot + 1) * block_size];
@@ -229,8 +237,7 @@ impl<B: Block> ARXFS<B> {
         start_bi: u64,
     ) -> Result<(), DriverError> {
         let Some(record) = self.chunk_get(ext.phys)? else {
-            self.free_run(ext.phys, ext.stored);
-            return Ok(());
+            return self.free_run(ext.phys, ext.stored);
         };
         self.release_shared_ref(ext.phys, &record, ino, start_bi)
     }

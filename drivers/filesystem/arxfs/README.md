@@ -28,6 +28,14 @@ copy-on-write inode-tree nodes, the per-file extent-tree nodes, the
 pending-delete set, directory blocks, and raw file-data blocks — is allocated
 copy-on-write from the pool that follows.
 
+Each slot also carries the volume's **title** (`FilesystemLabel`): up to
+252 bytes of UTF-8, plaintext beside the protection word and covered by the
+slot's authenticator, published with the transaction a retitle joins, so
+the volume probe names the medium by it before anything is unlocked. An
+encrypted volume therefore keeps none and refuses one (`Unsupported`); a
+read-only handle refuses one (`ReadOnly`). The title changes nothing the
+volume's identity is made of.
+
 Every **metadata** block is self-identifying (`AGENTS.md` §8 block
 identity): its first 128 bytes carry a magic, block type, format version,
 the volume UUID, an owner object, a generation, its logical and physical
@@ -378,8 +386,9 @@ in-memory **pending-discard queue** as a committed transaction reclaims them
 (`finish_txn`), reusing the deferred-free machinery rather than a second
 free-tracking mechanism (`AGENTS.md` §2.2); the queue holds coalesced runs, so
 one large free is one entry. `ARXFS::trim`, **capability-gated** on
-`CAP_FS_MOUNT`, splits each queued run against the live map and discards only
-the parts **still free** at trim time (a reallocated or still-shared block —
+`CAP_FS_MOUNT`, splits each queued run against the live map — rebuilt from the
+trees first when a device fault left it in doubt — and discards only the parts
+**still free** at trim time (a reallocated or still-shared block —
 refcount ≥ 1 — is marked used by the free-space rebuild and is skipped, never
 discarded), aligns each part **inward** to the device granularity, and
 rate-limits to `TRIM_BATCH_RANGES` runs per call (the remainder stays queued).
@@ -496,7 +505,27 @@ A **failed commit** is the wider undo: it abandons the whole transaction back to
 the last published root, and a handle that had reported operations into it
 forces itself read-only rather than serving writes it can no longer honour. A
 device fault that leaves the map's image genuinely ambiguous does the same and
-demands the rebuild; nothing else does.
+demands the rebuild; nothing else does. A commit **refused memory** abandons
+nothing: refused before any block it staged reaches the device, it is undone
+with the operation whose close asked for it, and the transaction stays open with
+every reported operation for the next commit — the next close, a sync, an
+unmount, or the host's timer, given a fresh window once the old one has run
+out. The operation that would carry it past its ceiling is the one refused, so
+it cannot grow while it cannot be published.
+
+**Memory refused** is an answer like any other. Every step that records runs
+first makes room for its own and for every run the undo, an abandoned
+transaction or a publication could then record, so a step refused that room
+changes nothing and fails its operation with `DriverError::OutOfMemory`, and
+those paths never ask the heap for anything. The room is made for several steps
+at once and spent down; the write-back ceiling counts each set at what it
+holds, that room included, and a set left holding well beyond its runs once
+the transaction is published gives the rest back. One that met a refusal would mean
+the room was miscounted; the handle then freezes read-only rather than guess
+what the map holds. A deferred mark leaves the deferred set only once a fold
+has applied it, and an eviction refused the memory to stage its page has
+written nothing, so neither a fold cut short nor a refused eviction loses a
+mark or demands a rebuild.
 
 The blocks and allocation-map pages use the one dirty layer beneath the
 driver's device-write seam, the write-back core's `DirtySet` (`lib/writeback`):
@@ -537,8 +566,8 @@ growing. The ceiling counts the transaction's run bookkeeping with its staged
 blocks, because a free holds almost all of its memory in the runs and dirties a
 spine's worth of blocks whatever the file's extent count: over the blocks alone
 it would not bound a delete at all. Measured, deleting a maximally fragmented
-file holds 88 600 bytes at 1 200 extents and 110 368 at 4 800, where freeing it
-inside one transaction holds 448 448 and grows with the file
+file holds 110 992 bytes at 1 200 extents and 113 736 at 4 800, where freeing
+it inside one transaction holds 448 448 and grows with the file
 (`tests/bounded_iteration.rs`).
 
 The ceiling is the **machine's**, and the mounted volumes share it
@@ -833,6 +862,21 @@ removed held directory takes no entries, `release_pins` frees every nameless
 held node, the drain and `check` pass held nodes over, a crash leaves a held
 unlinked node to the next mount's drain, a node neither named nor held answers
 `NotFound` to every call, and `create` stores the whole record it is given.
+
+The **memory-refusal tests** run under a heap that refuses on cue: a claim, a
+draw on the reserve, a deferred free and the release of an earlier operation's
+pair, each refused at every allocation it makes, change nothing; undoing an
+operation and abandoning a transaction ask the heap for nothing at all; a
+rewrite and a remove refused for memory leave the volume its free space, its
+bytes and a map the trees agree with; a scratch buffer or cluster frame refused
+answers `OutOfMemory`, never a full volume or an abort; a commit refused at
+each allocation it makes keeps its batch open and the handle writable, and the
+next commit publishes every reported write; an operation whose close is refused
+goes alone; a fold cut short keeps the marks it has yet to apply, and an
+eviction refused its staging needs no rebuild; a cluster read, a scrub and a
+rescue refused a buffer answer the refusal rather than record or skip a block;
+and `trim` rebuilds a map a device fault left in doubt before it trusts a block
+to be free.
 
 The 1 GiB filesystem soak (`cargo xtask fssoak --target arxfs`) drives the
 shared cross-filesystem exerciser, and `cargo xtask fuzz` harnesses fuzz the

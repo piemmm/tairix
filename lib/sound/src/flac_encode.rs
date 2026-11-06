@@ -5,8 +5,9 @@
 //! subframe, an escaped partition or wasted bits that a chooser would never
 //! pick; the chooser is what an asset build drives. Both share the decoder's
 //! format model — its predictors, its residual fold, its CRCs and digest —
-//! so the two halves cannot drift apart by construction. Off by default: no
-//! binary that runs on the machine carries it.
+//! so the two halves cannot drift apart by construction. Behind the
+//! off-by-default `encode-flac` feature: no binary that runs on the machine
+//! carries it.
 
 use alloc::string::String;
 use alloc::vec;

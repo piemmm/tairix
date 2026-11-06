@@ -23,7 +23,7 @@ because a program that lays itself out for 80 columns must still get
 them.
 
 The terminal is launched from the desktop's Program Library (the
-taskbar's Library button) or by name from a shell. It requires a running
+taskbar's `Library` button) or by name from a shell. It requires a running
 graphical session: without one, the window channel is unreachable and the
 terminal reports the refusal on the standard error stream and exits.
 
@@ -66,8 +66,9 @@ two tabs; turn the wheel over them to scroll. *Done*, `Escape` or the
 window's close button closes it. **Appearance**
 chooses the colour scheme, sets the text size and how many lines of
 scrollback are kept (none to 10,000, 500 at first), and edits the user's
-own scheme. The shipped schemes are *System* (which follows the desktop's
-dark or light appearance), *Midnight*, *Phosphor*, *Amber*, *Ember*,
+own scheme. The shipped schemes are *System* (the desktop's dark
+appearance, whether the desktop itself is dark or light), *Midnight*,
+*Phosphor*, *Amber*, *Ember*,
 *Contrast*, *Paper*, and *Custom*. Choosing *Custom* uses the colours
 edited below the chooser: a grid of the twenty colours a screen is drawn
 from — the background, foreground, cursor, cursor text, and the sixteen
@@ -110,11 +111,6 @@ region, or the event mailbox was refused (the reason is stated on the
 standard error stream).
 
 ## ENVIRONMENT
-
-`HOME`
-: The account's home directory, where the terminal reads and writes its
-profile. Without it the terminal runs on the default profile and saves
-nothing.
 
 `TERM`
 : Exported to the hosted shell as `xterm-256color`, naming the emulator

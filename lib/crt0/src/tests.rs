@@ -40,6 +40,8 @@ fn build_block(args: &[&[u8]], env: &[&[u8]], canary: u64) -> Vec<u8> {
         total_len: u64::try_from(total_len).expect("total fits"),
         canary,
         cpu_features: 0,
+        heap_base: 0,
+        heap_len: 0,
     };
 
     let mut block = Vec::new();

@@ -3,7 +3,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
+use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PhysicalKey, PointerButtonCode};
 use tairix_abi::window_ipc::{DragAt, PointerAction, ToolOver, WindowEvent, WindowSizeState};
 use tairix_abi::Errno;
 
@@ -84,6 +84,7 @@ fn typed(window_id: u64) -> WindowEvent {
         key: KeyInput::Pressed {
             key: KeyValue::Char('a'),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::UNKNOWN,
         },
     }
 }
@@ -968,8 +969,8 @@ fn a_save_offers_end_withdraws_the_offers_held_before_it() {
     hold(&mut held, left(5));
     assert_eq!(
         drain_events(&mut held),
-        [left(5)],
-        "a later end supersedes every one before it: the pick they ended is over"
+        [ended, left(5)],
+        "an end that only left never takes a drop another pick still waits on"
     );
     let dropped = |serial| WindowEvent::SaveOfferEnded {
         window_id: WINDOW,
@@ -981,6 +982,6 @@ fn a_save_offers_end_withdraws_the_offers_held_before_it() {
     assert_eq!(
         drain_events(&mut held),
         [dropped(8)],
-        "a drop held for a pick given up on is never answered"
+        "a second drop is held only for a window answering an offer it was never shown"
     );
 }

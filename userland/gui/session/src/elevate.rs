@@ -45,6 +45,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::display::RefreshRate;
+use tairix_abi::elevate::WiredLaunch;
 use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::AuthorisedOutcome;
 use tairix_abi::Errno;
@@ -85,6 +86,9 @@ pub enum Elevation {
     Run(Vec<String>),
     /// Run with these arguments, waited for, its output handed back.
     Capture(Vec<String>),
+    /// Started and left running wired to the session: its pipes and its
+    /// process are handed back for the session to speak its protocol over.
+    Wired,
 }
 
 /// One request for authority: what runs, how, on whose behalf, and why.
@@ -102,10 +106,21 @@ pub struct Request {
     pub bundle: Option<String>,
     /// What the request does, in words, after the requester's name.
     pub purpose: String,
-    /// The application that asked — through a window of its own or its
-    /// icon-bar slot — which is told how it ended; `None` for the desktop's
-    /// own.
-    pub asker: Option<AuthoriseFor>,
+    /// Who is told how it ended; `None` for a launch the desktop makes for
+    /// itself, whose end nobody waits on.
+    pub asker: Option<Asker>,
+}
+
+/// Who a request's end is told to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Asker {
+    /// The application that asked, through a window of its own or its
+    /// icon-bar slot.
+    App(AuthoriseFor),
+    /// The desktop, for an act on one of the drives it shows.
+    Desktop,
+    /// The desktop, for a recording whose sound its account may not record.
+    Recording,
 }
 
 /// What the broker did with an allowed request.
@@ -134,6 +149,9 @@ pub enum Done {
         /// Its exit status.
         exit_code: i32,
     },
+    /// The program was started wired to the session and is running: what the
+    /// session takes it up by.
+    Wired(WiredLaunch),
 }
 
 /// Why an offered password did nothing.
@@ -174,6 +192,17 @@ impl Answer {
     pub const fn ticket(&self) -> Ticket {
         match self {
             Self::Listing(ticket, _) | Self::Offer(ticket, _) => *ticket,
+        }
+    }
+
+    /// The program an administrator's answer started wired to the session,
+    /// when this answer carries one: one no question waits on any more still
+    /// holds its pipes, which are to be let go.
+    #[must_use]
+    pub fn wired(&self) -> Option<WiredLaunch> {
+        match self {
+            Self::Offer(_, Ok(Done::Wired(launch))) => Some(*launch),
+            Self::Listing(..) | Self::Offer(..) => None,
         }
     }
 }
@@ -293,12 +322,15 @@ pub enum PromptOutcome {
 /// What a request an application asked for owes it once the prompt ends.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Concluded {
-    /// The window or slot that asked.
-    pub asker: AuthoriseFor,
+    /// Who asked.
+    pub asker: Asker,
     /// What became of its task.
     pub outcome: AuthorisedOutcome,
     /// What a captured task printed, and nothing for any other outcome.
     pub output: Vec<u8>,
+    /// The program started wired to the session, and nothing for any other
+    /// outcome.
+    pub wired: Option<WiredLaunch>,
 }
 
 /// The prompt and the broker it asks, as a window bridge that serves requests
@@ -360,6 +392,7 @@ impl AuthorisePrompt {
     /// The window or slot `asker` has gone: a question it asked comes down
     /// unanswered, and nothing is owed to one no longer there to tell.
     pub fn abort_for(&mut self, asker: AuthoriseFor, compositor: &mut Compositor) {
+        let asker = Asker::App(asker);
         self.concluded.retain(|owed| owed.asker != asker);
         if self.pending().and_then(|request| request.asker) != Some(asker) {
             return;
@@ -810,11 +843,16 @@ impl AuthorisePrompt {
             PromptOutcome::Pending => (None, None),
         };
         if let Some(asker) = asker {
+            let wired = match &done {
+                Some(Done::Wired(launch)) => Some(*launch),
+                _ => None,
+            };
             let (owed, output) = crate::systask::outcome_of(done);
             self.concluded.push(Concluded {
                 asker,
                 outcome: owed,
                 output,
+                wired,
             });
         }
         outcome

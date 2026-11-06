@@ -14,6 +14,7 @@ use super::{
     WARM_RADIUS,
 };
 use crate::frame::MemoryClass;
+use crate::ramzip::LedgerError;
 use crate::retire::Retire;
 use crate::vmm::MapFlags;
 use core::ops::Bound;
@@ -122,7 +123,9 @@ impl Ramzip {
     /// sibling thread can change one after it is sealed; only then is each
     /// sealed and charged, and its frame scrubbed (zero-on-free) and
     /// returned. A seal the tier refuses puts its page back exactly as it
-    /// was, in the page table and in `retire`.
+    /// was, in the page table and in `retire`; the room to record it again is
+    /// made before any page leaves, and pages it cannot be made for are
+    /// refused untouched as [`CompressRefusal::OutOfMemory`].
     ///
     /// `reclaimable_residue` is the clean + transform cache bytes still
     /// resident, from the caller's reclaim accounting: compression
@@ -143,6 +146,14 @@ impl Ramzip {
             let Some(&filler) = pages.first() else {
                 continue;
             };
+            // A page the tier refuses goes back where it was, so the room to
+            // record it again is made before any page leaves.
+            if ctx.space.reserve_records(pages.len()).is_err() {
+                for &page in pages {
+                    outcome(page, Err(CompressRefusal::OutOfMemory));
+                }
+                continue;
+            }
             let mut held = [(filler, crate::frame::Frame(0), MapFlags::empty()); COMPRESS_BATCH];
             let mut count = 0;
             for &page in pages {
@@ -252,26 +263,38 @@ impl Ramzip {
 
         let compressed = blob.ciphertext.len();
         let stored = blob.stored_len();
-        if self
+        match self
             .ledger
             .charge(task, PAGE_SIZE, compressed, stored, ENTRY_METADATA_BYTES)
-            .is_err()
         {
-            self.poisoned = true;
-            return Err(CompressRefusal::Poisoned);
+            Ok(()) => {}
+            Err(LedgerError::OutOfMemory) => return Err(CompressRefusal::OutOfMemory),
+            Err(_) => {
+                self.poisoned = true;
+                return Err(CompressRefusal::Poisoned);
+            }
         }
         let sealed_at = self.tick();
-        self.entries.insert(
-            key,
-            Entry {
-                task,
-                flags,
-                sealed_at,
-                charged_compressed: compressed,
-                charged_stored: stored,
-                blob,
-            },
-        );
+        let entry = Entry {
+            task,
+            flags,
+            sealed_at,
+            charged_compressed: compressed,
+            charged_stored: stored,
+            blob,
+        };
+        if self.entries.try_insert(key, entry).is_err() {
+            // The charge just made is given back exactly, so the books stand
+            // as they were.
+            if self
+                .ledger
+                .release(task, PAGE_SIZE, compressed, stored, ENTRY_METADATA_BYTES)
+                .is_err()
+            {
+                self.poisoned = true;
+            }
+            return Err(CompressRefusal::OutOfMemory);
+        }
         Ok(())
     }
 
@@ -643,7 +666,9 @@ impl Ramzip {
         match kind {
             RestoreKind::DemandFault => {
                 bump(&mut self.ledger.counters_mut().fault_ins);
-                if self.thrash.on_restore(task, sealed_at, now) {
+                // A churn the detector has no memory to score goes uncounted;
+                // the restore it describes stands.
+                if self.thrash.on_restore(task, sealed_at, now) == Ok(true) {
                     bump(&mut self.ledger.counters_mut().thrash_detected);
                 }
                 self.recent_faults[self.next_fault_slot] = Some(RecentFault {
@@ -675,36 +700,44 @@ impl Ramzip {
     /// ciphertext, already scrubbed of plaintext at seal time), so no
     /// separate zeroisation is needed here.
     pub fn purge_space(&mut self, space_id: u64) -> usize {
-        // Collect the doomed keys first (a range over the space's id),
-        // then remove and un-charge each — the two-phase walk avoids
-        // mutating the map while iterating it.
-        let doomed: alloc::vec::Vec<u64> = self
-            .entries
-            .range((space_id, u64::MIN)..=(space_id, u64::MAX))
-            .map(|((_, page), _)| *page)
-            .collect();
+        self.purge_range(space_id, 0, u64::MAX)
+    }
+
+    /// Drop `space_id`'s entries for the `count` pages from page number
+    /// `first`, releasing their charges, and return the number purged.
+    ///
+    /// Called as an anonymous range is released: an entry left behind would
+    /// be restored into whatever is mapped there next. One entry at a time,
+    /// so the purge takes nothing from the heap.
+    pub fn purge_range(&mut self, space_id: u64, first: u64, count: u64) -> usize {
+        let end = first.saturating_add(count);
         let mut purged = 0;
-        for page in doomed {
-            if let Some(entry) = self.entries.remove(&(space_id, page)) {
-                if self
-                    .ledger
-                    .release(
-                        entry.task,
-                        PAGE_SIZE,
-                        entry.charged_compressed,
-                        entry.charged_stored,
-                        ENTRY_METADATA_BYTES,
-                    )
-                    .is_err()
-                {
-                    // The books no longer balance; poison admission but
-                    // keep purging (the memory is still being freed).
-                    self.poisoned = true;
-                }
-                purged += 1;
+        loop {
+            let lowest = self
+                .entries
+                .range((space_id, first)..(space_id, end))
+                .next()
+                .map(|(&key, _)| key);
+            let Some(entry) = lowest.and_then(|key| self.entries.remove(&key)) else {
+                return purged;
+            };
+            if self
+                .ledger
+                .release(
+                    entry.task,
+                    PAGE_SIZE,
+                    entry.charged_compressed,
+                    entry.charged_stored,
+                    ENTRY_METADATA_BYTES,
+                )
+                .is_err()
+            {
+                // The books no longer balance; poison admission but
+                // keep purging (the memory is still being freed).
+                self.poisoned = true;
             }
+            purged += 1;
         }
-        purged
     }
 }
 

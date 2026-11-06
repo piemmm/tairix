@@ -132,6 +132,9 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # The audio service's live transport the Sound pane's round trips use.
 tairix-audio = { path = "../../../lib/audio", version = "=0.0.0", features = ["rt"] }
+# The cue authority's live transport the Sound pane posts the volume's
+# feedback over.
+tairix-soundtheme = { path = "../../../lib/soundtheme", version = "=0.0.0", features = ["rt"] }
 # On the real target the mount walk goes over the runtime `ipc_call`
 # transport; the base dependency stays host-neutral so host tests build the
 # readings from records directly.

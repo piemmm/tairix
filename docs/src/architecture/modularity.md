@@ -589,7 +589,9 @@ riscv64 packs it into the `sifive_test` high half, so a zero-coded
 failure exits QEMU with status 0 and the runner reads the failing run as
 a pass. `qemu_exit::exit_failure` therefore takes a `NonZeroU16` rather
 than checking one, `fail_point!` rejects a zero literal at compile time,
-and `fail_code` cannot compose one.
+and `fail_code` cannot compose one. The host keeps only eight bits of an
+exit status, so each board carries a code past them as `255` rather than
+let `256` exit as a pass.
 
 The composition is there because it must be total and cannot be tested
 where it was written. The observed value comes from the program under

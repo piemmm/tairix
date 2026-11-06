@@ -5,10 +5,12 @@
 //! would, and the session keeps serving while they do, so an application can
 //! finish what it was doing through the window server it still has. The
 //! session leaves once no application window is open or
-//! [`SESSION_CLOSE_GRACE`] has passed; the kernel then ends whatever is still
-//! running in the session (`docs/src/architecture/sessions.md`). A window
-//! opened while the session is leaving is asked in turn, so nothing started
-//! late is left to hold the exit open.
+//! [`SESSION_CLOSE_GRACE`] has passed, and no screen recording is still being
+//! finished — which the recording's own deadlines bound, so its recorder is
+//! never ended midway through writing its file; the kernel then ends whatever
+//! is still running in the session (`docs/src/architecture/sessions.md`). A
+//! window opened while the session is leaving is asked in turn, so nothing
+//! started late is left to hold the exit open.
 
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
@@ -43,11 +45,11 @@ impl Departure {
             .collect()
     }
 
-    /// Whether the session may leave now: no application window is open, or
-    /// the grace has run out.
+    /// Whether the session may leave now: no application window is open or
+    /// the grace has run out, and no recording is still being finished.
     #[must_use]
-    pub fn is_complete(&self, now_ns: u64, windows_open: bool) -> bool {
-        !windows_open || now_ns >= self.deadline_ns
+    pub fn is_complete(&self, now_ns: u64, windows_open: bool, recording: bool) -> bool {
+        !recording && (!windows_open || now_ns >= self.deadline_ns)
     }
 
     /// Tighten the relative `park_ns` so the grace's end, seen from `now_ns`,
@@ -65,18 +67,20 @@ impl Departure {
 }
 
 /// The serve loop's park: `foreground_ns` as `switch` leaves it, tightened to
-/// the grace of a session that is `leaving`.
+/// `always_ns` — what wakes a session in the background too, a recording
+/// being finished there — and to the grace of a session that is `leaving`.
 ///
-/// The grace folds after the background override, which parks indefinitely:
-/// a background session told to end would otherwise never wake to leave.
+/// Both fold after the background override, which parks indefinitely: a
+/// background session told to end, or finishing a recording, would otherwise
+/// never wake to do it.
 #[must_use]
 pub fn serve_park_ns(
     switch: &SwitchUser,
     leaving: Option<&Departure>,
     now_ns: u64,
-    foreground_ns: u64,
+    (foreground_ns, always_ns): (u64, u64),
 ) -> u64 {
-    let park_ns = switch.park_deadline_ns(foreground_ns);
+    let park_ns = park_within(switch.park_deadline_ns(foreground_ns), Some(always_ns));
     leaving.map_or(park_ns, |departure| {
         departure.park_deadline_ns(now_ns, park_ns)
     })

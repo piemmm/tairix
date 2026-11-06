@@ -4,7 +4,7 @@ sysmon — gwylio cof, storfeydd a llwyth y cnewyllyn yn fyw
 
 ## SYNOPSIS
 
-`sysmon [-d eil.degfedau] [-h | -?]`
+`sysmon [-d secs.tenths] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -12,12 +12,13 @@ Mae `sysmon` yn olygfa fyw, sgrin lawn, o'r hyn y mae'r cnewyllyn yn ei
 wneud â chof a'r CPU, wedi'i darllen yn gyfan gwbl trwy'r API Gwybodaeth
 System — nid oes `/proc` i'w grafu. Mae'n dangos y cof ffisegol a'i
 gyfansoddiad, pentwr y cnewyllyn, y band pwysedd cof a'i hanes diweddar,
-cyfriflyfr y storfeydd adenilladwy â **chymarebau taro** fesul dosbarth,
-haen gywasgedig `ramzip`, cyfanswm y cof pinnwyd, defnydd storfa'r cyfrolau
-sydd wedi'u mowntio, y llwyth fesul CPU, tabl ymyriadau'r cnewyllyn, a
-chyfrifiad o brosesau. Mae'n aros yn ddefnyddiadwy tra bo'r system dan
-lwyth bwriadol, ac yn gorffwys rhwng adnewyddiadau pan fo'n segur (mae'r
-darlleniad yn parcio; nid yw byth yn troelli'n ofer).
+cyfriflyfr y storfeydd adenilladwy â **chymarebau taro** fesul dosbarth a
+dadansoddiad fesul storfa, haen gywasgedig `ramzip`, cyfanswm y cof
+pinnwyd, defnydd storfa'r cyfrolau sydd wedi'u mowntio, y llwyth fesul
+CPU, tabl ymyriadau'r cnewyllyn, a chyfrifiad o brosesau. Mae'n aros yn
+ddefnyddiadwy tra bo'r system dan lwyth bwriadol, ac yn gorffwys rhwng
+adnewyddiadau pan fo'n segur (mae'r darlleniad yn parcio; nid yw byth yn
+troelli'n ofer).
 
 Wrth gychwyn, mae'r monitor yn pinio ei gof ei hun (`mem_pin`, sy'n mynnu
 `CAP_MEM_PIN`) fel na fydd byth yn glynu ar ei ffaeleddau tudalen ei hun
@@ -46,15 +47,15 @@ Mae bloc crynodeb sefydlog yn rhagflaenu'r panel manylion. Mae pob rhes
 wedi'i labelu ar y chwith fel y darllenir hi heb liw; atgyfnerthu yn unig
 yw lliw.
 
-- **Llinell deitl** — enw'r offeryn, amser i fyny'r system (`up D days,
-  H:MM`), y tair cyfartaledd llwyth (1/5/15 munud), a'r cyflwr pinio
-  (`[pinned]`, neu `[unpinned: <reason>]` pan wrthodwyd y piniad).
+- **Llinell deitl** — enw'r offeryn, amser i fyny'r system
+  (`up D days, H:MM`), y tair cyfartaledd llwyth (1/5/15 munud), a'r
+  cyflwr pinio (`[pinned]`, neu `[unpinned: <reason>]` pan wrthodwyd y
+  piniad).
 - **`Mem`** — y bar cof (gweler allwedd y bariau), yna'r ffigurau a
-  ddefnyddiwyd / cyfanswm (unedau cryno `K`/`M`/`G`), y ganran a
-  ddefnyddiwyd, maint pentwr y cnewyllyn, a — phan na fo'n sero —
-  ffigurau'r storfa gywasgedig `ramzip` a'r cof pinnwyd `pinned`. Mae'r bar
-  yn crebachu i gadw pob ffigur ar linell 80 colofn, felly ni thorrir
-  ffigur byth.
+  ddefnyddiwyd / cyfanswm (unedau beit cryno), y ganran a ddefnyddiwyd,
+  maint pentwr y cnewyllyn, a — phan na fo'n sero — ffigurau'r storfa
+  gywasgedig `ramzip` a'r cof pinnwyd `pinned`. Mae'r bar yn crebachu i
+  gadw pob ffigur ar linell 80 colofn, felly ni thorrir ffigur byth.
 - **`Pres`** — y bar pwysedd cof: mesurydd o bum band, pob band a
   gyrhaeddwyd wedi'i lenwi yn ei liw difrifoldeb ei hun, yna enw'r band
   cyfredol, y ffigurau rhydd / wrth gefn, a chyfanswm y mynediadau i fand.
@@ -115,10 +116,13 @@ ar wahân uwchben y corff.
 
 Dyma'r storfeydd y gall y cnewyllyn eu dychwelyd i leddfu pwysedd cof **heb
 golli data**: mae pob cofnod yn ailadeiladadwy o'i ffynhonnell ganonaidd,
-felly mae'r cnewyllyn yn ei ollwng yn hytrach na'i dudalennu allan. Y panel
-yw'r ateb uniongyrchol i "a yw'r storfeydd yn gwneud eu gwaith?": mae pob
-rhes yn un dosbarth adennill, wedi'i gyfanredu ar draws pob storfa
-gofrestredig, ac yn cario ei **gymhareb taro** ei hun.
+felly mae'r cnewyllyn yn ei ollwng yn hytrach na'i dudalennu allan. Y
+dudalen yw'r ateb uniongyrchol i “a yw'r storfeydd yn gwneud eu gwaith?”,
+mewn dau dabl: y cyfriflyfr fesul dosbarth, yna'r dadansoddiad fesul
+storfa sydd y tu ôl iddo.
+
+Mae pob rhes o'r tabl cyntaf yn un dosbarth adennill, wedi'i gyfanredu ar
+draws pob storfa gofrestredig, ac yn cario ei **gymhareb taro** ei hun.
 
 Colofnau:
 
@@ -126,6 +130,14 @@ Colofnau:
 - `entries` — cofnodion byw a ddelir ar hyn o bryd i'r dosbarth.
 - `cached` — ôl troed preswyl y dosbarth: llwyth defnyddiol y cofnodion
   ynghyd â metadata cyfrifyddu fesul cofnod, gyda'i gilydd.
+- `self%` — y gyfran o `cached` a gafodd ei **hunan-adrodd** yn hytrach
+  na'i mesur gan y cnewyllyn: faint o gyfanswm y dosbarth a dderbynnir ar
+  air. Dim ond y storfeydd a gofrestrwyd ynddo y mae'r cnewyllyn yn eu
+  mesur, felly cyfrifir storfa a ddelir gan broses gofod defnyddiwr —
+  atlasau glyffiau, gwaith celf eiconau, cyrchwyr — o'r hyn y mae'r broses
+  honno'n ei adrodd amdani ei hun. Mae `0%` yn golygu bod cyfanswm cyfan y
+  dosbarth wedi'i ardystio; mae `100%` yn golygu nad oes dim ohono. Mae'n
+  darllen `-`, byth `0%`, ar gyfer dosbarth nad yw'n dal dim o gwbl.
 - `hits` — chwiliadau'r dosbarth a wasanaethwyd o'r storfa ers cychwyn
   (osgôdd y storfa'r ffynhonnell ganonaidd).
 - `misses` — chwiliadau'r dosbarth a syrthiodd trwodd i'r ffynhonnell
@@ -144,6 +156,14 @@ Colofnau:
 
 Byrheir cyfrifon uwchlaw 99 999 fel `k`/`M`/`G`/`T` (miloedd degol, nid KiB)
 fel na fydd colofn byth yn lledu.
+
+Byrheir ffigurau beit mewn unedau deuaidd: yr union gyfrif o dan
+gibibeit, yna un lle degol ag ôl-ddodiad `K`, `M`, `G`, `T`, `P` neu `E`
+(`1.5K`, `986.2M`, `200.0T`). Mae'r ysgol yn cyrraedd ecsbibeitiau,
+felly saith nod yw'r ffigur lletaf y gall unrhyw gyfrif beit 64-did ei
+gynhyrchu, ac nid yw unrhyw ffigur byth yn tyfu'n rhy fawr i'w golofn —
+ni ellir byrhau maint fel y gellir byrhau enw, oherwydd rhif anghywir
+yw rhif wedi'i fyrhau.
 
 Y dosbarthiadau adennill, yn nhrefn adennill y cnewyllyn dan bwysedd (mae'r
 cyntaf a restrir yn cael ei ollwng gyntaf, felly mae storfa isel yn y
@@ -176,6 +196,49 @@ rhestr yn goroesi hwyaf):
   gwirio, crynodebau iechyd): cyfiawnhawyd gan hwyrni adfer, felly cedwir
   hwyaf.
 
+### caches — y dadansoddiad fesul storfa
+
+O dan y tabl dosbarthiadau, un rhes fesul cyfriflyfr storfa cofrestredig:
+yr ateb i “mae'r dosbarth `disposable-ui` yn dal 12 MiB — *pa* storfeydd
+sy'n ei ddal?”. Daw'r cyfriflyfrau a fesurir gan y cnewyllyn yn gyntaf,
+yna'r rhai a adroddodd prosesau amdanynt eu hunain; mae adio rhesi
+dosbarth yn atgynhyrchu rhes y dosbarth hwnnw uchod yn union.
+
+Colofnau:
+
+- `cache` — label y storfa. Mae label sy'n rhy hir i'r golofn yn colli ei
+  *ganol*, byth un pen: mae `font.client.glyphs` yn darllen
+  `font.cli~.glyphs`. Mae'r enwau hyn wedi'u rhannu â dotiau, a'r gydran
+  olaf fel arfer sy'n gwahaniaethu dwy storfa yn yr un gofod enwau, felly
+  mae'r golofn yn cadw'r ddau ben ac mae `~` yn nodi'r hyn a hepgorwyd.
+- `owner` — yr endid y codir y cof arno: `kernel` ar gyfer is-system
+  cnewyllyn, `vol:<id>` ar gyfer cyfrol system ffeiliau, `task:<id>` ar
+  gyfer tasg, `seat:<id>` ar gyfer sesiwn bwrdd gwaith, `proc` ar gyfer
+  proses gofod defnyddiwr. Mae rhes a adroddwyd yn atodi `@<pid>`, y broses
+  a adroddodd. Mae perchennog sy'n rhy hir i'r golofn yn cael ei hepgor yn
+  y canol fel label (`task:1~551615`), fel bod id wedi'i fyrhau yn amlwg yn
+  anghyflawn — lle byddai un wedi'i dorri'n dawel yn darllen fel perchennog
+  gwahanol.
+- `origin` — o ble y daeth y ffigurau: `kernel` ar gyfer cyfriflyfr y mae'r
+  cnewyllyn yn ei fesur, `self` ar gyfer un a adroddodd y broses sy'n ei dal
+  amdani ei hun, `?` ar gyfer rhes a adawodd y gwasanaeth heb ei phriodoli.
+- `class` — y dosbarth adennill y mae pob cofnod o'r storfa hon yn perthyn
+  iddo.
+- `entries`, `cached`, `hit%` — fel yn y tabl dosbarthiadau, ar gyfer y
+  storfa unigol hon.
+
+Mae rhes `self` yn **ddiagnostig**, nid yn fesuriad ardystiedig: ni all dim
+y tu allan i'r broses sy'n ei dal weld i mewn i'w storfa, a gall proses
+wedi'i chyfaddawdu adrodd beth bynnag a fynno. Mae'r gair yn y rhes ei hun,
+felly mae'n darllen ar gonsol cyfresol unlliw; dim ond atgyfnerthu y mae
+lliw'r hysbysiad. Darllenwch resi `self` fel honiadau a rhesi `kernel` fel
+mesuriadau.
+
+Mae peiriant heb storfa gofrestredig yn dweud hynny mewn un llinell yn
+hytrach na gadael y tabl yn wag — ac mae ymholiad a *wrthodwyd* yn dweud
+hynny yn lle hynny, fel na ellir byth gamgymryd tabl gwag am “nid oes
+storfeydd”.
+
 ### ramzip — yr haen gof gywasgedig
 
 Mae `ramzip` yn cywasgu tudalennau anhysbys oer i mewn i storfa lai yn y RAM
@@ -205,11 +268,18 @@ yn hytrach na'u tudalennu allan. Ei adrannau:
 
 Un rhes arddull `df` fesul cyfrol wedi'i mowntio: pwynt mowntio, math system
 ffeiliau, maint cyfan, a ddefnyddiwyd, ar gael, canran defnydd, a bar
-defnydd ASCII. Mae cyfrol nad yw ei gyrrwr yn adrodd unrhyw gapasiti yn
-dangos `capacity unknown` yn hytrach na maint ffug; tynnir cyfrol a
-dynnwyd yn annisgwyl neu mewn gwrthdaro adfer yn y cyflwyniad rhybudd ac fe'i
-nodir (`[unavailable-dirty]`, `[unavailable-lost]`, `[recovery-conflict]`).
-Nid oes cyfrifyddion trwybwn mewnbwn-allbwn fesul dyfais yn yr API, felly
+defnydd ASCII.
+
+Mae pwynt mowntio sy'n rhy hir i'w golofn yn colli ei *ganol*, byth un
+pen, yn union fel label storfa: mae `/Storage/backup-2024-vol1` yn darllen
+`/Storage/b~2024-vol1`, felly gellir gwahaniaethu o hyd rhwng dwy gyfrol a
+ffeiliwyd ochr yn ochr wrth y gydran olaf sy'n eu gwahaniaethu.
+
+Mae cyfrol nad yw ei gyrrwr yn adrodd unrhyw gapasiti yn dangos
+`capacity unknown` yn hytrach na maint ffug; tynnir cyfrol a dynnwyd yn
+annisgwyl neu mewn gwrthdaro adfer yn y cyflwyniad rhybudd ac fe'i nodir
+(`[unavailable-dirty]`, `[unavailable-lost]`, `[recovery-conflict]`). Nid
+oes cyfrifyddion trwybwn mewnbwn-allbwn fesul dyfais yn yr API, felly
 capasiti a defnydd gonest yw hyn, nid cyfraddau trosglwyddo ffug.
 
 ### cpu — llwyth fesul CPU
@@ -235,8 +305,9 @@ brosesau ryngweithiol lawn; dim ond crynodeb y cyfrifiad yw hwn.
 ### Galluoedd
 
 Mae pob ffigwr yn teithio trwy'r API Gwybodaeth System. Mae ymholiadau
-ystadegau led-cnewyllyn (cof, pwysedd, storfeydd, `ramzip`, llwyth fesul
-CPU) yn mynnu `CAP_SYSINFO_KERNEL`; mae panel y llinellau ymyriad yn mynnu
+ystadegau led-cnewyllyn (cof, pwysedd, y dosbarthiadau storfa a'r
+dadansoddiad fesul storfa, `ramzip`, llwyth fesul CPU) yn mynnu
+`CAP_SYSINFO_KERNEL`; mae panel y llinellau ymyriad yn mynnu
 `CAP_SYSINFO_HW`; mae cyfrifiad pob proses yn mynnu `CAP_SYSINFO_GLOBAL`.
 Mae galwr heb un yn gweld gwrthodiad y panel hwnnw wedi'i egluro — byth
 ffigwr ffug — tra bo gweddill y sesiwn yn parhau (methu ar gau, dirywio'n

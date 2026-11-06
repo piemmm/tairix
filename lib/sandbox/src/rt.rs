@@ -25,17 +25,18 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::num::{NonZeroU64, NonZeroUsize};
 
-use tairix_abi::{
-    Errno, FdWire, Signal, SpawnAttach, WaitSetOp, WaitSourceKind, STDIN, STDOUT, STD_STREAM_COUNT,
-};
+use tairix_abi::{Errno, Origin, Signal, SpawnAttach, WaitSetOp, WaitSourceKind};
 use tairix_rt::io::{Error as IoError, Read, Stdin, Stdout, Stream, Write};
+use tairix_rt::shm::{SharedRegion, SpawnPart, SpawnShare};
 
 use crate::host::Launcher;
 use crate::memory::WorkerMemory;
 use crate::proto::Channel;
 use crate::session::{
-    let_go, serve_session, Reaper, SessionDescriptors, SessionService, SessionTransport,
+    let_go, serve_session, Reaper, SessionDescriptors, SessionService, SessionTransport, Share,
+    ShareWrite,
 };
 use crate::supervise::SessionLauncher;
 use crate::worker::{serve, ServeEnd, Service};
@@ -198,7 +199,9 @@ impl RtLauncher {
 
 /// The memory ceiling a `memory` worker launched now is held to: a document
 /// worker's is a share of the machine's installed RAM, read when it starts.
-fn ceiling_of(memory: WorkerMemory) -> u64 {
+/// What an owner states to a worker that weighs its own work against it.
+#[must_use]
+pub fn worker_ceiling(memory: WorkerMemory) -> u64 {
     let ram = match memory {
         WorkerMemory::Messages | WorkerMemory::HeldDocument | WorkerMemory::Artwork => 0,
         WorkerMemory::Documents => {
@@ -210,57 +213,22 @@ fn ceiling_of(memory: WorkerMemory) -> u64 {
 
 /// Spawn `path` as a sandboxed worker in `role`, serving `service` where one
 /// is named, over a fresh pipe pair, held to `ceiling` bytes of mapped
-/// memory, returning the parent's `(pid, request write end, reply read end)`.
+/// memory and handed the region `share` names where one does, returning the
+/// parent's `(pid, request write end, reply read end)`.
 fn spawn_sandboxed_worker(
     path: &[u8],
     (role, service): (&[u8], Option<&[u8]>),
     ceiling: u64,
+    share: Option<u64>,
 ) -> Result<(i64, u32, u32), Errno> {
-    let attach = |wires| SpawnAttach::sandbox(wires, ceiling);
-    match service {
-        Some(service) => spawn_wired(path, &[path, role, service], attach),
-        None => spawn_wired(path, &[path, role], attach),
-    }
-}
-
-/// Spawn `path` with `args` over a fresh pipe pair, its attach block built by
-/// `attach` from the wiring of fd 0 to the request pipe and fd 1 to the reply
-/// pipe, returning the parent's `(pid, request write end, reply read end)`.
-///
-/// The one place the pipe pair, the wiring and the unwind are written, for
-/// every worker shape — one-shot, session and drawing.
-fn spawn_wired(
-    path: &[u8],
-    args: &[&[u8]],
-    attach: impl FnOnce([FdWire; STD_STREAM_COUNT]) -> SpawnAttach,
-) -> Result<(i64, u32, u32), Errno> {
-    // Request pipe: parent writes, worker fd 0 reads.
-    let (request_read, request_write) = tairix_rt::pipe_create().map_err(Errno::from_syscall)?;
-    // Reply pipe: worker fd 1 writes, parent reads.
-    let (reply_read, reply_write) = match tairix_rt::pipe_create() {
-        Ok(pair) => pair,
-        Err(ret) => {
-            let _ = tairix_rt::fs_close(request_read);
-            let _ = tairix_rt::fs_close(request_write);
-            return Err(Errno::from_syscall(ret));
-        }
+    let attach = |wires| {
+        let attach = SpawnAttach::sandbox(wires, ceiling);
+        share.map_or(attach, |region| attach.with_share(region))
     };
-    let mut wires = [FdWire::Closed; STD_STREAM_COUNT];
-    wires[STDIN as usize] = FdWire::Handle(request_read);
-    wires[STDOUT as usize] = FdWire::Handle(reply_write);
-    let pid = tairix_rt::spawn_attached(path, &attach(wires), args, &[]);
-    // The child holds counted clones of its two wired ends; the parent's
-    // own copies are closed regardless of the spawn outcome, so a dead
-    // worker's reply pipe reports end-of-stream instead of idling on the
-    // parent's dangling write end.
-    let _ = tairix_rt::fs_close(request_read);
-    let _ = tairix_rt::fs_close(reply_write);
-    if pid < 0 {
-        let _ = tairix_rt::fs_close(request_write);
-        let _ = tairix_rt::fs_close(reply_read);
-        return Err(Errno::from_syscall(pid));
+    match service {
+        Some(service) => tairix_rt::spawn_piped(path, &[path, role, service], attach),
+        None => tairix_rt::spawn_piped(path, &[path, role], attach),
     }
-    Ok((pid, request_write, reply_read))
 }
 
 impl Launcher for RtLauncher {
@@ -270,7 +238,8 @@ impl Launcher for RtLauncher {
         let (pid, write_fd, read_fd) = spawn_sandboxed_worker(
             &self.path,
             (WORKER_ROLE_ARG, self.service),
-            ceiling_of(self.memory),
+            worker_ceiling(self.memory),
+            None,
         )?;
         Ok(RtChannel {
             pid,
@@ -360,16 +329,24 @@ impl Drop for RtChannel {
 /// owner's readiness said it would complete, so the owner's serve loop
 /// never parks on one session while others wait.
 pub struct RtSessionChannel {
-    pid: i64,
+    /// Its worker, when this process started it; a peer another process
+    /// started and handed the pipes of is that process's to end and reap.
+    pid: Option<i64>,
     write_fd: u32,
     read_fd: u32,
     /// Where its worker is reaped should it still be running at the end.
     reaper: Option<Arc<dyn Reaper + Send + Sync>>,
+    /// The region this process made and handed its worker, which the worker
+    /// writes its output into.
+    share: Option<Arc<dyn Share>>,
 }
 
 impl RtSessionChannel {
     /// Spawn `path` as this session's sandboxed worker, parsing what `memory`
-    /// names.
+    /// names, and handed a fresh region of `share` bytes where one is asked
+    /// for: the region the worker writes its output into and this process
+    /// reads ([`SessionTransport::share`]), mapped in both, and let go with
+    /// the channel.
     ///
     /// Pass [`tairix_abi::SPAWN_SELF`] to run the caller's **own** binary:
     /// the kernel substitutes the exact path it admitted the caller from
@@ -378,16 +355,30 @@ impl RtSessionChannel {
     ///
     /// # Errors
     ///
-    /// The typed reason the worker could not be started; the caller logs it
-    /// through [`crate::host::log_unavailable`].
-    pub fn launch(path: &[u8], memory: WorkerMemory) -> Result<Self, Errno> {
-        let (pid, write_fd, read_fd) =
-            spawn_sandboxed_worker(path, (SESSION_ROLE_ARG, None), ceiling_of(memory))?;
+    /// The typed reason the worker could not be started, or
+    /// [`Errno::OutOfMemory`] for a region that could not be made; the caller
+    /// logs it through [`crate::host::log_unavailable`].
+    pub fn launch(
+        path: &[u8],
+        memory: WorkerMemory,
+        share: Option<NonZeroUsize>,
+    ) -> Result<Self, Errno> {
+        let region = match share {
+            Some(len) => Some(SharedRegion::create(len.get()).ok_or(Errno::OutOfMemory)?),
+            None => None,
+        };
+        let (pid, write_fd, read_fd) = spawn_sandboxed_worker(
+            path,
+            (SESSION_ROLE_ARG, None),
+            worker_ceiling(memory),
+            region.as_ref().map(SharedRegion::id),
+        )?;
         Ok(Self {
-            pid,
+            pid: Some(pid),
             write_fd,
             read_fd,
             reaper: None,
+            share: region.map(|region| Arc::new(OwnShare(region)) as Arc<dyn Share>),
         })
     }
 
@@ -404,15 +395,59 @@ impl RtSessionChannel {
         threads: u64,
         share: u64,
     ) -> Result<Self, Errno> {
-        let (pid, write_fd, read_fd) = spawn_wired(path, &[path], |wires| {
+        let (pid, write_fd, read_fd) = tairix_rt::spawn_piped(path, &[path], |wires| {
             SpawnAttach::drawing(wires, memory, threads, share)
         })?;
         Ok(Self {
-            pid,
+            pid: Some(pid),
             write_fd,
             read_fd,
             reaper: None,
+            share: None,
         })
+    }
+
+    /// Spawn the system component `path` over the pipe pair, under the
+    /// caller's credential and session and the authority its own signed
+    /// manifest requests: a peer the caller speaks a protocol with, not a
+    /// sandboxed parser. One still running when its session ends is reaped by
+    /// `reaper`, never waited for.
+    ///
+    /// Answers the channel with the component's process as the kernel attests
+    /// it, read as it starts: the caller's own child, not yet reaped, so no
+    /// reused pid can stand in for it. A grant to the component names that
+    /// process, never one the component says it is.
+    ///
+    /// The component's command line is `argv`, `argv[0]` its path as
+    /// convention has it.
+    ///
+    /// # Errors
+    ///
+    /// The typed reason the component could not be started or attested; one
+    /// started but not attested is ended.
+    pub fn launch_component(
+        path: &[u8],
+        argv: &[&[u8]],
+        reaper: Arc<dyn Reaper + Send + Sync>,
+    ) -> Result<(Self, Origin), Errno> {
+        let (pid, write_fd, read_fd) = tairix_rt::spawn_piped(path, argv, |wires| SpawnAttach {
+            wires,
+            ..SpawnAttach::INHERIT
+        })?;
+        let channel = Self {
+            pid: Some(pid),
+            write_fd,
+            read_fd,
+            reaper: Some(reaper),
+            share: None,
+        };
+        match tairix_rt::child_origin(pid) {
+            Ok(origin) => Ok((channel, origin)),
+            Err(errno) => {
+                let _ = channel.dispose();
+                Err(errno)
+            }
+        }
     }
 
     /// This channel, its worker reaped by `reaper` if it is still running when
@@ -422,6 +457,82 @@ impl RtSessionChannel {
         self.reaper = Some(reaper);
         self
     }
+
+    /// The channel to a peer another process started over a pipe pair and
+    /// handed this one its ends of: the write end the delegation `input`
+    /// conveys, and the read end `output` does.
+    ///
+    /// That process ends and reaps the peer, and closing these ends is what
+    /// tells the peer its session is over, so disposing of the channel closes
+    /// them and signals nothing.
+    ///
+    /// # Errors
+    ///
+    /// The redemption's typed refusal; an end already redeemed is closed.
+    pub fn redeemed(input: NonZeroU64, output: NonZeroU64) -> Result<Self, Errno> {
+        let write_fd = redeem_end(input)?;
+        let read_fd = match redeem_end(output) {
+            Ok(fd) => fd,
+            Err(errno) => {
+                let _ = tairix_rt::fs_close(write_fd);
+                return Err(errno);
+            }
+        };
+        Ok(Self {
+            pid: None,
+            write_fd,
+            read_fd,
+            reaper: None,
+            share: None,
+        })
+    }
+}
+
+/// A region this process made to hand the worker it spawns.
+struct OwnShare(SharedRegion);
+
+impl Share for OwnShare {
+    fn byte_len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn copy_out(&self, at: usize, out: &mut [u8]) -> bool {
+        let bytes = self.0.bytes();
+        let Some(source) = at.checked_add(out.len()).and_then(|end| bytes.get(at..end)) else {
+            return false;
+        };
+        out.copy_from_slice(source);
+        true
+    }
+}
+
+impl ShareWrite for SpawnPart {
+    fn byte_len(&self) -> usize {
+        self.len()
+    }
+
+    fn write_with(&mut self, write: &mut dyn FnMut(&mut [u8]) -> bool) -> bool {
+        write(self.bytes_mut())
+    }
+}
+
+/// This worker's spawn share, mapped whole for it to write its output into:
+/// the part before a cut at its end.
+///
+/// # Errors
+///
+/// As [`SpawnShare::map`]: [`Errno::NotFound`] for a worker handed none.
+pub fn spawn_share() -> Result<SpawnPart, Errno> {
+    let share = SpawnShare::map(1)?;
+    let len = share.len();
+    share.split(len).map(|(whole, _)| whole)
+}
+
+/// Redeem the delegated pipe end `handle` names into a descriptor of this
+/// process's own.
+fn redeem_end(handle: NonZeroU64) -> Result<u32, Errno> {
+    let fd = Errno::syscall_result(tairix_rt::fd_redeem(handle.get()))?;
+    u32::try_from(fd).map_err(|_| Errno::OutOfRange)
 }
 
 impl SessionTransport for RtSessionChannel {
@@ -441,9 +552,15 @@ impl SessionTransport for RtSessionChannel {
         })
     }
 
+    fn share(&self) -> Option<&Arc<dyn Share>> {
+        self.share.as_ref()
+    }
+
     fn dispose(self) -> Option<i32> {
         let (pid, reaper) = (self.pid, self.reaper.clone());
         drop(self);
+        // Closing the pipes is all a peer this process did not start is owed.
+        let pid = pid?;
         let _ = tairix_rt::signal(pid, Signal::Kill);
         let reaper = reaper.as_deref().map(|reaper| reaper as &dyn Reaper);
         let_go(pid, tairix_rt::try_reap(pid), reaper, wait_worker)
@@ -462,6 +579,7 @@ impl Drop for RtSessionChannel {
 pub struct RtSessionLauncher {
     path: Vec<u8>,
     memory: WorkerMemory,
+    share: Option<NonZeroUsize>,
 }
 
 impl RtSessionLauncher {
@@ -472,7 +590,17 @@ impl RtSessionLauncher {
         Self {
             path: path.to_vec(),
             memory,
+            share: None,
         }
+    }
+
+    /// The same launcher, each worker handed a fresh region of `len` bytes to
+    /// write its output into, so a replacement never writes where its
+    /// predecessor's output may still be read.
+    #[must_use]
+    pub const fn sharing(mut self, len: NonZeroUsize) -> Self {
+        self.share = Some(len);
+        self
     }
 
     /// Launch this program's own binary through [`tairix_abi::SPAWN_SELF`],
@@ -487,7 +615,7 @@ impl SessionLauncher for RtSessionLauncher {
     type Transport = RtSessionChannel;
 
     fn launch(&mut self) -> Result<RtSessionChannel, Errno> {
-        RtSessionChannel::launch(&self.path, self.memory)
+        RtSessionChannel::launch(&self.path, self.memory, self.share)
     }
 }
 

@@ -33,8 +33,16 @@ nom, une opacité et l'indication s'il est visible ; on peint sur un calque à
 la fois, et la fenêtre les montre superposés. OpenRaster garde les calques ;
 tout autre format les reçoit superposés. Le menu Calques ajoute, copie,
 supprime, monte et descend des calques, fusionne un calque avec celui du
-dessous et aplatit l'image, et ses Propriétés du calque renomment un calque
-et règlent la part qui en est visible. Les réglages, remplissages et traits
+dessous et aplatit l'image. Le volet Calques, qu'affiche Affichage ▸ Volets,
+réunit l'opacité du calque peint et les boutons Nouveau, Dupliquer, Supprimer
+et Fusionner vers le bas, et en dessous une ligne par calque, le plus haut
+d'abord, avec un œil, une petite image du calque, son nom et son opacité.
+Appuyez sur une ligne pour peindre sur son calque, sur son œil pour afficher
+ou masquer le calque, ou sur le nom du calque peint pour le renommer, et faites
+glisser une ligne pour monter ou descendre son calque ; chacune de ces actions
+sauf le choix d'une ligne, et un changement d'opacité si longtemps qu'on le
+fasse glisser, est un seul changement à annuler. Flottant, la fenêtre du volet
+se redimensionne de deux lignes à toutes. Les réglages, remplissages et traits
 changent le calque peint ; les rotations, symétries, redimensionnements et
 recadrages changent tous les calques. Une image à palette n'a qu'un calque.
 
@@ -82,8 +90,13 @@ tant qu'il est tenu immobile. En tenant Maj, on trace un carré, un cercle ou
 une ligne à un multiple de 45 degrés.
 
 Des volets longent les deux côtés de la fenêtre : par défaut le volet Outils
-à gauche et le volet Couleur à droite, avec le volet Réglage en dessous dès
-qu'un réglage est ouvert. Chacun est coiffé d'une fine bande qui le nomme,
+à gauche et le volet Couleur à droite, que rejoignent en dessous les volets
+Calques, Réglages et Effets quand ils sont affichés ou qu'un réglage ou un
+effet est ouvert. Les volets d'un côté s'empilent en une seule colonne :
+chacun reçoit au moins la place qu'il lui faut, puis le dernier ouvert grandit
+le premier vers tout ce qu'il contient, et un volet qui en reçoit moins défile
+en lui-même, tandis que la colonne ne défile jamais. Chacun est coiffé d'une
+fine bande qui le nomme,
 avec une commande qui l'enroule sur sa bande et une marque qui le ferme ;
 Affichage ▸ Volets montre de nouveau un volet fermé, et Réinitialiser les
 volets remet chaque volet comme une nouvelle fenêtre les a. Faire glisser une
@@ -93,8 +106,12 @@ fenêtre, le volet flotte dans une petite fenêtre à lui, déplacée par sa
 bande, gardée au-dessus de l'image et fermée par sa marque ; ramené au-dessus
 d'un côté, il s'y ancre de nouveau. La palette flotte aussi : le bouton au
 bout droit de sa bande, ou Affichage ▸ Volets ▸ Détacher la palette, la place
-dans une petite fenêtre à elle, ses couleurs disposées en grille ; fermer
-cette fenêtre, ou la ramener au bas de la fenêtre, la remet dans la bande.
+dans une petite fenêtre à elle, ses couleurs disposées en grille.
+Redimensionner cette fenêtre redispose les couleurs selon sa largeur, et elles
+défilent vers le haut et vers le bas quand elles ne tiennent pas toutes ; la
+fermer, ou la ramener au bas de la fenêtre, la remet dans la bande. Dans la
+bande comme dans sa fenêtre, les couleurs principale et secondaire portent
+leur numéro de couleur RISC OS.
 
 L'outil de sélection délimite un rectangle, une ellipse, un lasso à main
 levée, un polygone cliqué coin par coin, ou avec la baguette magique les
@@ -119,25 +136,47 @@ l'image dans la fenêtre, comme Espace avec n'importe quel outil ; la loupe
 agrandit à un clic, ou avec Alt réduit, et un cadre tracé remplit la
 fenêtre.
 
-Le menu Réglages ouvre un réglage dans le volet Réglage, où chaque autre
-outil, volet et menu reste à portée de main : luminosité et contraste, teinte
-et saturation, balance des couleurs, niveaux, courbes, balance des blancs,
-postérisation, seuil, flou, netteté, pixelisation et ajout de bruit ;
-désaturer et trouver les contours, qui n'ont pas de réglages, s'appliquent
-aussitôt. L'image montre le réglage à mesure que ses réglages bougent, Aperçu
-l'éteint et le rallume pour comparer, Réinitialiser remet ses réglages et
-Appliquer le garde comme une seule modification à annuler ; peindre, remplir
-ou choisir un autre réglage l'applique d'abord. Les niveaux placent les points
-noir, gris et blanc sur un histogramme du calque, pour tous les canaux ensemble
-ou chacun seul, avec des pipettes qui les prennent dans l'image et Auto ; les
-courbes plient les tons d'un canal par des points tirés sur son histogramme ;
-la balance des blancs règle la température et la teinte de la lumière, d'après
-un pixel neutre choisi ou par Auto ; teinte et saturation tournent, renforcent
-et éclaircissent toutes les couleurs ou une gamme d'entre elles ; la balance
-des couleurs pousse les ombres, les tons moyens et les hautes lumières vers le
-rouge, le vert ou le bleu, en gardant leur luminosité si on le demande. Tout
-reste limité à la sélection. Sur une image à palette, un réglage change sa
-palette, et ceux qui ont besoin des couleurs voisines ne sont pas proposés.
+Deux volets réunissent les opérations de l'image, chacun coiffé d'une liste
+qui en choisit une : le volet Réglages réunit luminosité et contraste,
+niveaux, courbes, teinte et saturation, balance des couleurs, balance des
+blancs, désaturer, inverser, postérisation, seuil et le mélangeur de couches,
+et le volet Effets réunit flou gaussien, masque flou, médiane, ajout de bruit,
+trouver les contours, estampage et pixelisation. Chaque ligne du menu Réglages
+ouvre son opération dans son volet. Sous la liste se trouvent les réglages de
+l'opération choisie, puis Aperçu, Réinitialiser et Appliquer ; chaque autre
+outil, volet et menu reste à portée de main. L'image montre l'opération à
+mesure que ses réglages bougent, la partie visible d'abord ; Aperçu l'éteint
+et le rallume pour comparer, Réinitialiser remet ses réglages et Appliquer la
+garde comme une seule modification à annuler. Un seul aperçu vaut pour les
+deux volets : choisir une autre opération dans une liste, ou bouger les
+réglages de l'autre volet, applique l'opération quittée comme une seule
+modification si ses réglages ont bougé et qu'elle change l'image, et
+l'abandonne sinon, si bien que parcourir une liste ne change rien. Peindre,
+remplir, une transformation ou un enregistrement applique ou abandonne
+d'abord l'opération ouverte de la même façon ; marquer une sélection, la vue,
+les couleurs et l'annulation la laissent ouverte.
+
+Les niveaux placent les points noir, gris et blanc sur un histogramme du
+calque, pour tous les canaux ensemble ou chacun seul, avec des pipettes qui
+les prennent dans l'image et Auto ; les courbes plient les tons d'un canal par
+des points tirés sur son histogramme ; la balance des blancs règle la
+température et la teinte de la lumière, d'après un pixel neutre choisi ou par
+Auto ; teinte et saturation tournent, renforcent et éclaircissent toutes les
+couleurs ou une gamme d'entre elles ; la balance des couleurs pousse les
+ombres, les tons moyens et les hautes lumières vers le rouge, le vert ou le
+bleu, en gardant leur luminosité si on le demande ; le mélangeur de couches
+pondère chaque couche à partir du rouge, du vert, du bleu et d'une constante,
+ou en fait un seul gris. Le flou gaussien adoucit l'image selon son rayon ; le
+masque flou la rend plus nette en écartant chaque couleur de son flou d'une
+quantité là où les deux diffèrent d'au moins un seuil ; la médiane donne à
+chaque pixel la valeur du milieu de ceux qui l'entourent, lissant les
+mouchetures et gardant les contours ; l'ajout de bruit pose des mouchetures
+uniformes ou gaussiennes, en couleur ou en gris ; trouver les contours éclaire
+les contours entre les couleurs ; l'estampage fait de l'image un relief gris
+éclairé sous un angle ; et la pixelisation pose des carrés, chacun de la
+couleur moyenne de ce qu'il couvre. Tout reste limité à la sélection. Sur une
+image à palette, un réglage change sa palette, et les effets, qui ont besoin
+des couleurs voisines, ne sont pas proposés.
 
 Le volet Couleur contient les couleurs principale et secondaire et un
 sélecteur de couleur pour celle des deux qui est choisie : un clic sur une

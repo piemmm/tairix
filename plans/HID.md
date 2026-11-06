@@ -73,7 +73,9 @@ one the seat has no channel for is set aside.
 
 - **Keyboard.** Edge-detects the key set between reports; a report naming
   `ErrorRollOver` (`0x01`) in its array is a phantom state and changes nothing.
-  A bitmap (NKRO) layout is the same key set read from bits.
+  A bitmap (NKRO) layout is the same key set read from bits. Each edge's usage
+  is its record's `PhysicalKey`, the position a system chord matches whatever
+  the layout types (`plans/CAPTURE.md` CP4).
 - **Mouse.** Relative axes only: an absolute X/Y under a pointer collection is
   not a mouse and is set aside, as no seat channel places a pointer absolutely
   from a pointing device. Wheel counts are converted to scroll units at the

@@ -202,7 +202,12 @@ and the volumes remain reachable by `id::` (and by generated disambiguated
 display aliases only if policy permits). Their `/Storage` catalog entries
 (§10) are not aliases and are never ambiguous: the volume already holding the
 label's name keeps it, and the other is catalogued as `<label>_<fingerprint>`
-of its own identity, the same at every attach.
+of its own identity, the same at every attach. Twins (§8) share a fingerprint
+as well as a label, so the volume manager asks the same names for both: a
+twin asking a name a volume of its identity holds is catalogued by the kernel
+as that name with `_<n>`, the lowest `n` from 2 that is free — a spelling no
+label or fingerprint suffix produces — so a twin's name, unlike any other
+volume's, depends on what is attached.
 
 ## 8. Volume IDs and durable references
 
@@ -214,6 +219,84 @@ volume keeps its ID. `id::<volume-id>/path`
 is the durable form for machine records, boot-critical references, recovery
 logs, and anywhere a mutable alias is not stable enough. Time-bearing volume
 metadata uses `Time64` (`AGENTS.md` §21), never a 32-bit second count.
+
+**Twins.** Media formatted alike — FAT32 volumes made under one serial, ADFS
+discs, a copied ext4 or ARXFS volume — carry one identity, so each attachment
+is published under a **key**: the identity itself when no attached volume
+holds it, else a key derived from the identity and the attachment
+(`tairix_fsprobe::twin_identity`), which no other attachment of the boot
+shares. `id::<key>` names exactly one attachment. The volume attached first
+keeps `id::<identity>`, so a clone can neither capture nor block it; a twin's
+key lasts only while it is attached and no live volume is re-keyed, so once
+the first leaves `id::<identity>` is `NotFound` until another medium of the
+identity attaches first. The forest, the change tables, every `FileId`, the
+mount and binding records and the detach and retitle frames name a volume by
+its key, and the mount record carries the identity beside it
+(`MountRecord::identity`), which a durable reference to the medium itself
+records. An extent meeting one a volume still on its device is served over
+is refused `Busy`: it is the same medium attached again, or a window onto
+another volume's blocks, which no volume may read raw — so a hybrid disc image
+is attached over its own span, beside the partitions appended after it. An identity
+`VOLUME_TWINS_MAX` (16) attached volumes carry already is refused
+`LimitExceeded`. The twin-volume QEMU vertical
+(`tairix-test-twins-qemu-aarch64`) holds a running machine to this: two USB
+sticks holding copies of one FAT32 image attach as `twins` and `twins_2`, one
+identity under two keys with `id::<identity>` naming the first, a file's id
+distinct on each, and each read, written and detached by its key.
+
+**Re-inserts.** A medium is recovered onto an unavailable volume of its
+identity only where it is known to be that volume's. Its device's own
+identity — the block service's `Identity` request, which the USB mass-storage
+driver answers from the serial number of a unit whose medium cannot leave it,
+and the RAID composer from the array's own identifier and what each slot's
+device states, slot by slot, while every one states something — narrows the
+candidates to the one whose device stated the same, and otherwise exactly one
+must carry the identity. An array whose composer restarts while a volume on it
+holds writes therefore returns proven when the same devices fill the same
+slots, and unproven when any slot holds another or none. Of two or more,
+none is proven the medium
+it left on: it attaches afresh and read-only, so a write of its own cannot
+strand theirs, and the read-only attach is audited with the cause
+`lookalikes_hold_writes`. One its device does not prove — it states no identity, or
+another's — is checked against its evidence as any re-insert is, then served
+read-only with the writes kept (`replay-unconfirmed`) until it is answered
+for. `volume_replay` carries the answer, taken only for a volume awaiting one
+and only on an authority that reaches it, decided under the volume's claim:
+the mount authority (`CAP_FS_MOUNT`) answers for any volume from wherever it
+runs, as `mount --replay-held` and `--discard-held` do, so a machine with no
+seat is never left to a forced detach; the process holding the seat answers
+for the user at it, with the seat's own capability (`CAP_DISPLAY`), for a
+removable device's volume alone, so no desktop user without the mount
+authority writes or gives up the writes other principals made on a fixed
+disk. The desktop asks that user about a removable disk and leaves any other
+to the mount authority. *Write* checks the evidence again and replays the
+writes, or keeps them and serves the volume read-only in conflict, answering
+`ReadOnly`, where the medium no longer proves unmutated; *Discard* gives them
+up and takes the medium as it stands. Either serves the volume afresh under
+its key, and every answer and refusal is audited, an answer naming the
+authority it rested on (§23). With no answer it stays read-only with its
+writes kept, and a plain detach is refused as a conflicted volume's is.
+
+**Titles.** A volume's title is the label its format records
+(`FilesystemLabel`, [driver traits](../abi/driver_traits.md)), and its mount
+record carries it beside whether the format takes one (`MountRecord::titled`).
+`volume_retitle` names the volume by its key and rewrites the label in place:
+the key, the identity and every `FileId` stay as they were, and so does the
+catalog name until the volume next attaches and is named from the new label,
+so no path held to it breaks. Who may retitle is decided under the volume's
+claim, which holds it against every other operation while its driver writes
+the title and flushes it: a disk image's owner alone; any device's volume, a
+holder of `CAP_FS_MOUNT`; and a removable device's volume, the user at the
+seat too, where that user may write its root as its own records and its
+mount's posture judge any write there. A network share's title is its
+server's and a boot volume's the system's, so both are refused
+`NotSupported`, as is a format that keeps no title; a title the format cannot
+store is refused, never shortened, and an empty title clears the label. Every
+decision is audited (§23). The file manager and the desktop offer a title by
+one rule (`tairix_browse::VolumeFacts::retitler`, `retitling_by` for a
+viewer): a disk image to its owner, and a device's volume to anyone, the kernel
+deciding; where it refuses the authority, the file manager asks an
+administrator, who retitles it with `label`.
 
 ## 9. Synthetic root view `/`
 
@@ -457,7 +540,10 @@ appears owned by the system user and the well-known `storage` group
 registry at root unlock), directories `rwxrwxr-x` and files `rw-rw-r--`, so
 any logged-in member reads and writes the medium while security-record
 stores stay refused (the format cannot hold one). A registry without the
-group leaves such a volume restrictively system-owned.
+group leaves such a volume restrictively system-owned. The group is read as
+each node is presented, above the volume's cache, so a volume attached
+before the root unlock publishes it is the system's until then and the
+group's from then on.
 
 **A format that records ownership is served with it** — ext2/3/4 and ARXFS,
 removable or not. Every node presents the uid, gid, mode and ACL it stores;
@@ -496,9 +582,10 @@ definition, `tairix_abi::ROOT_VIEW`, so the view and the alias namespace
 cannot drift). **Durable `id::`
 resolution is wired at the same entry point** (`plans/DEVICES.md` D3a): the
 kernel volume forest (`kernel/core::fs::volumes::VolumeForest`, installed via
-`BootInfo::with_volumes`) maps each mounted volume's stable identity — the
-ARXFS per-volume UUID, published by the boot mount/unlock paths with the
-audited `fs.root.publish.{allow,deny}` events — to the `/`-view location its
+`BootInfo::with_volumes`) maps each mounted volume's key — its stable
+identity, or a twin's own (§8); for the boot volumes the ARXFS per-volume
+UUID, published by the boot mount/unlock paths with the audited
+`fs.root.publish.{allow,deny}` events — to the `/`-view location its
 root backs, so `id::<volume-id>/path` opens the same object under the same
 permissions, never a policy bypass, and an unpublished identity fails closed
 `NotFound`. **Runtime attach and unpublish are landed** (`plans/DEVICES.md`
@@ -515,10 +602,11 @@ detach: the ordinary account whose login session holds the primary seat, with
 a plain detach only, decided on the volume the detach claims, and recorded
 (`VOLUME_EJECTED_AT_SEAT`, 4213). A volume still in use is refused it as to
 anyone. A
-catalog name another volume holds is answered `AlreadyExists` before the
-volume is judged, so the volume manager's next candidate name costs nothing; a
-volume already attached under another name is `Busy`, which no other name
-answers.
+catalog name a volume of another identity holds is answered `AlreadyExists`
+before the volume is judged, so the volume manager's next candidate name
+costs nothing, and a twin asking one a volume of its identity holds is
+catalogued beside it (§7); the same medium attached again is `Busy`, which no
+other name answers (§8).
 **Automount
 policy, catalog enumeration, and the mount-policy identity map are landed**
 (`plans/DEVICES.md` D3c/D3d): the `volmgr` policy driver probes and attaches
@@ -582,7 +670,10 @@ detach; a volume held unavailable keeps its journal, never the device.
 
 Security-relevant namespace decisions are logged through `lib/log` with stable
 event IDs (`AGENTS.md` §5.4, §19.4): `fs.root.{discovered,attached}`,
-`fs.root.publish.{allow,deny}`, `fs.alias.create.{allow,deny}`,
+`fs.root.publish.{allow,deny}`, `fs.root.twin_attached` (a volume carrying
+the identity of one attached already, attached beside it under a key and a
+catalog name of its own — carries the name it asked),
+`fs.alias.create.{allow,deny}`,
 `fs.alias.remove.{allow,deny}`, `fs.alias.resolve.deny`,
 `fs.view.bind.{allow,deny}`, `fs.view.unbind.{allow,deny}`,
 `fs.flags.relax.{allow,deny}`,
@@ -597,6 +688,13 @@ retained writes replayed and committed — carries the replayed byte count),
 `fs.hotplug.reinsert_conflict` (a re-inserted volume whose non-mutation could
 not be proven, mounted fresh and read-only with the retained set kept —
 carries the refusing cause and the retained byte count),
+`fs.hotplug.reinsert_unconfirmed` (a re-inserted volume proven unmutated on a
+device that does not prove it the volume's own, mounted read-only for an
+answer — carries the retained byte count),
+`fs.hotplug.replay_answered` (an answer carried out — carries `written` or
+`discarded`, the byte count, and the authority it rested on,
+`mount_authority` or `seat`), `fs.hotplug.replay_refused` (an
+answer refused with nothing written or given up — carries why),
 `fs.serve.{awaiting,resumed,refused,lost}` (a removable volume's user-space
 driver awaited, serving again, refused, or gone — see
 [Volumes served from user space](./served.md); `fs.hotplug.root_added` is then
@@ -604,10 +702,11 @@ recorded when its driver first serves it),
 `fs.network.{offered,attached,attach_refused,detached,detach_refused,retired}`
 (a network volume offered, attached by its principal, detached, or retired by
 its server),
-`fs.image.{awaiting,attached,attach_refused,detached,detach_refused,retired,retitled,retitle_refused}`
+`fs.image.{awaiting,attached,attach_refused,detached,detach_refused,retired}`
 (an image volume published for its driver, served and mounted, refused,
-detached, retired with its file's volume or its driver, or retitled by its
-owner or refused that), and
+detached, or retired with its file's volume or its driver),
+`fs.volume.{retitled,retitled_refused}` (any volume retitled, carrying the
+authority it was retitled on, or a retitle refused, carrying why — §8), and
 `fs.conflict.alias_ambiguous`. No secret, key,
 capability-token value, or private path content beyond the audit subsystem's
 policy set is logged.
@@ -632,6 +731,18 @@ policy set is logged.
 - **Installer / hotplug** (resolver + installer stages): default install creates
   the aliases and exactly the three view entries; expert mode refuses legacy
   names; insertion publishes an `id::` root; removal invalidates only that root.
+- **Twins** (the volume service, §8): identical FAT32 sticks and ADFS discs
+  attach together under distinct keys and file ids, each watched and detached
+  by its key; the first keeps its identity and a twin its key; the same medium
+  twice is `Busy`; an identity's attachments are bounded; twin names hold
+  against hostile labels. A cloned stick — another device's identity, or none
+  — returns read-only and is never written unasked; two look-alikes left
+  unavailable are replayed onto neither; a device proving which look-alike a
+  medium is replays onto it alone; the seat's *Write* and *Discard* go through
+  the real request path; only an authority that reaches a volume answers for
+  it, the seat never for a fixed one; and a medium changed since the question
+  is not written. The twin-volume QEMU vertical holds a running machine to
+  the attachment rules (§8).
 
 ## 25. Rejected designs
 

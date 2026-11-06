@@ -261,6 +261,10 @@ fn build_space(
         args,
         env: &[],
         canary: CANARY,
+        heap: tairix_abi::HeapRegion {
+            base: USER_HEAP_BASE,
+            len: USER_HEAP_LEN,
+        },
     };
 
     // SAFETY: building the image is safe; the returned `UserEntry` is only

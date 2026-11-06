@@ -196,8 +196,9 @@ different ways:
   through `Surface::blit_transformed` — and the `FolderFront` over them,
   composed once per (sample, side) and cached under `ArtworkKey::Folder`. A
   `SampleCard::Picture` is a member's thumbnail, decoded at the folder's own
-  side (so it shares the member's own tile thumbnail, and its persistent copy)
-  and printed on a white card with a fixed-ink edge; a `SampleCard::Kind` is its
+  side through the embedder's `ArtworkRasteriser::thumbnail` (the file
+  manager's, backed by its thumbnail store, shares the member's own tile
+  thumbnail and its persistent copy) and printed on a white card with a fixed-ink edge; a `SampleCard::Kind` is its
   kind's artwork, or its glyph on a fixed-ink paper card, so the picture does
   not change with the theme. A picture that will not decode draws its kind's
   card, and a member past `FolderSample::MAX_CARD_BYTES` — a third of
@@ -210,6 +211,18 @@ different ways:
   as the tier below, drawn until the pictures land. An empty sample, a side
   under `MIN_COMPOSITE_SIDE`, or a back or front that will not draw resolves
   the plain `FolderFilled` picture instead.
+
+A drag carries a request across to the desktop as itself:
+`IconRequest::carried` gives the `DragOwnIcon` a bundle's or a RISC OS
+application's request names — `None` for any other request, or for a path past
+`ICON_PATH_MAX` — and `IconRequest::from_carried(kind, own)` rebuilds that very
+request in the session, so a dragged item's own picture resolves by this one
+order. The version a listing names is `tairix_abi::fs::DocumentStamp`, the one
+type the cache key and the drag's wire share. A request may name a
+**stand-in** (`IconRequest::standing_in`): an own picture drawn while its own
+is still produced — what a dropped bundle is drawn by while it is written and
+read, the picture its drag carried — and never in place of an own icon that
+was refused.
 
 A bundle's manifest is authored by whoever built the bundle, so it is treated
 as untrusted input at that boundary: it is read under the ABI's own wire
@@ -257,12 +270,14 @@ A bundle is keyed by its *directory*, not by the asset its manifest names, so
 the manifest read is paid once per bundle and a bundle that declares no icon
 (or names one that will not decode) remembers that refusal too rather than
 re-reading it every frame. A bundle drawn from a directory listing is also
-keyed by the version the listing named (`IconRequest::listed_bundle`, the
-directory's `DocumentStamp`), as a picture file's thumbnail is: a bundle
-replaced at its path, or changed where its folder sees it, is a new key, and the
-old answer ages out of the cache by least-recent use. Nothing invalidates an
-entry. A bundle found in a program store has no listing and is named with no
-version (`IconRequest::bundle`). A kind's shipped masters are keyed by the kind
+keyed by its version (`IconRequest::listed_bundle`, `BundleVersion`): the
+directory's `DocumentStamp` as the listing named it until its producer reads
+the files it is pictured from, then the stamps of its manifest and icon file
+(`BundleFiles`), which the resolver answers (`ArtworkResolver::bundle_version`).
+A bundle replaced at its path, or one whose files changed, is a new key, one
+whose files stand keeps its picture, and an old answer ages out of the cache by
+least-recent use. Nothing invalidates an entry. A bundle found in a program
+store has no listing and is named with no version (`IconRequest::bundle`). A kind's shipped masters are keyed by the kind
 (`ArtworkKey::Raster`, `ArtworkKey::Vector`), not by a formatted path.
 
 A lookup compares the slot it wants in a borrowed form taken from the request,
@@ -398,15 +413,46 @@ a draw needs* and *producing it*:
   `tree` — an asset, a bundle, a picture file, named by its path — and records
   none of it, so it draws the tier below and holding a tree costs one path
   however much of it is shown; `release_under(tree)` names the tree in the next
-  `Landed`, and each item drawn from inside it asks again against the finished
-  tree.
+  `Landed`, each item drawn from inside it asks again against the finished
+  tree, and each bundle under it whose files were read before is read again.
+- **A listed bundle is read again when its files move.** The desk remembers,
+  per bundle and version listed, the files its producer last read it from
+  (`ArtworkDesk::version_of`, at most `MAX_LISTED_BUNDLE_DIRS` directories of at
+  most `MAX_LISTED_VERSIONS` versions each, the directory asked about least
+  recently forgotten first with every version of it, through an `LruMap` keyed
+  under the embedder's key, `ArtworkDesk::new`, since a user names the paths), keys
+  its picture by them once read (`deliver_listed`), and follows those of the
+  bundles asked about since the last sweep (`sweep_follows`, which walks the
+  followed alone, at most `MAX_FOLLOWED_BUNDLES`) where its embedder follows
+  bundles (`follow_bundles`). One let go while off screen or past the bound is
+  followed again once asked about with room, its files read anew, and the
+  embedder learns a reader is owed the read through `recorded`; one whose wait
+  was refused is not followed again until its listing moves. The embedder arms a
+  change wait on each file before reading it and reports a change (`moved`);
+  a read finding the files as they were decodes nothing (`unchanged`), and one
+  under way when they moved is made again after it. Every producer makes a
+  decode the one way: `ArtworkJob::produce` reads a listed bundle's files
+  through the embedder's seam first and decodes only where they differ from
+  those its picture was last read from, and `ArtworkDesk::deliver_produced`
+  records what it made (`Produced`). The waits, the read they guard and the
+  thread that parks on them are `tairix_browse::follow`'s, which the desktop
+  session and the file manager share.
+- **An exhausted heap answers rather than aborts.** Nothing an ask, a collect
+  or a delivery records grows infallibly: what the heap refuses goes unrecorded
+  and is asked for again by the next paint, and a landing it has no room to
+  name lands as everything (`Landed::resolves` answers every request), so no
+  item waits on it unrepainted.
+- **A turn asks each bundle's version once.** `ByTurn` wraps an embedder's
+  resolver and answers every ask for a listed bundle's version after the
+  turn's first, so a tile's paint, prefetch and still-shown note take the
+  readers' lock once. The file manager's pipeline and the desktop shell each
+  begin a turn at the head of their loop's turn.
 
 The desk holds no lock, thread, or syscall, so its whole policy is host-tested.
 Two embedders drive it over the same rules, and both do it the same way: each
 parks a worker thread on the desk behind the runtime's futex mutex and is woken
-back through the wait-set it already parks in — the desktop session on its own
-icon-decoder thread, the file manager on the reader serving the volume each
-decode reads from
+back through the wait-set it already parks in — the desktop session and the
+file manager each on the reader serving the volume each decode reads from
 (`plans/FIX-DESKTOP.md` DESK-8/DESK-11/DESK-12, `plans/NEW-FILEMANAGER.md`).
 The lock carries only the desk: the decode cache stays on the paint side,
 because a picture is handed out as a borrow into it and a borrow cannot outlive

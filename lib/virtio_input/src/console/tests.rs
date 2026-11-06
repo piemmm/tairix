@@ -1,7 +1,11 @@
 //! Unit tests for the virtio-input keyboard console producer.
 
 use super::*;
+use tairix_abi::driver::input::InputEventKind;
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
+
+/// The highest `evdev` keycode (`KEY_MAX`).
+const KEY_MAX: u16 = 0x2FF;
 
 /// Build one keyboard [`InputEvent`] for `keycode` with the given `value`
 /// (`1` = press, `0` = release, `2` = repeat).
@@ -192,4 +196,149 @@ fn a_modifier_edge_reports_only_an_observable_change() {
         modifier_set(kbd.feed(key(42, 0))),
         Some(AbiModifiers::default())
     );
+}
+
+#[test]
+fn a_key_record_names_the_key_pressed_whatever_it_typed() {
+    let mut kbd = VirtioKeyboardConsole::new();
+    for (keycode, physical) in [
+        (30u16, PhysicalKey::A),
+        (4, PhysicalKey::DIGIT_3),
+        (5, PhysicalKey::DIGIT_4),
+        (6, PhysicalKey::DIGIT_5),
+        (57, PhysicalKey::SPACE),
+        (1, PhysicalKey::ESCAPE),
+    ] {
+        let record = kbd.feed(key(keycode, 1)).expect("a key record");
+        assert_eq!(record.physical(), Some(physical), "keycode {keycode}");
+    }
+    // Under Meta, Shift, Ctrl and Alt the 3 key types `#` and is still the
+    // 3 key.
+    for modifier in [125u16, 42, 29, 56] {
+        assert!(modifier_set(kbd.feed(key(modifier, 1))).is_some());
+    }
+    let record = kbd.feed(key(4, 1)).expect("a key record");
+    assert_eq!(record.key(), Some(KeyValue::Char('#')));
+    assert_eq!(record.physical(), Some(PhysicalKey::DIGIT_3));
+    let held = record.modifiers();
+    assert!(held.meta && held.shift && held.ctrl && held.alt);
+}
+
+#[test]
+fn the_keycode_table_ascends_so_a_keycode_is_found_by_halving() {
+    assert!(KEYCODES.windows(2).all(|pair| pair[0].0 < pair[1].0));
+}
+
+#[test]
+fn the_modifier_and_lock_keycodes_name_their_physical_keys() {
+    for (keycode, physical) in [
+        (42u16, PhysicalKey::LEFT_SHIFT),
+        (54, PhysicalKey::RIGHT_SHIFT),
+        (29, PhysicalKey::LEFT_CTRL),
+        (97, PhysicalKey::RIGHT_CTRL),
+        (56, PhysicalKey::LEFT_ALT),
+        (100, PhysicalKey::RIGHT_ALT),
+        (125, PhysicalKey::LEFT_GUI),
+        (126, PhysicalKey::RIGHT_GUI),
+        (58, PhysicalKey::CAPS_LOCK),
+        (69, PhysicalKey::NUM_LOCK),
+    ] {
+        assert_eq!(physical_key(keycode), physical, "keycode {keycode}");
+    }
+}
+
+#[test]
+fn the_keycode_table_names_exactly_the_keys_the_console_reads() {
+    for keycode in 0..=KEY_MAX {
+        let physical = physical_key(keycode);
+        let mut read = physical == PhysicalKey::CAPS_LOCK || physical == PhysicalKey::NUM_LOCK;
+        for num_lock in [false, true] {
+            let mut kbd = VirtioKeyboardConsole::new();
+            if num_lock {
+                let _ = kbd.feed(key(69, 1));
+            }
+            if let Some(record) = kbd.feed(key(keycode, 1)) {
+                read = true;
+                assert!(record.physical().is_none_or(|named| named == physical));
+            }
+        }
+        assert_eq!(physical != PhysicalKey::UNKNOWN, read, "keycode {keycode}");
+    }
+}
+
+/// Type `keycodes` on a fresh keyboard, with Num Lock on when `num_lock`,
+/// checking each types the next character of `expected`.
+fn assert_types(keycodes: &[u16], num_lock: bool, expected: &str) {
+    let mut kbd = VirtioKeyboardConsole::new();
+    if num_lock {
+        let _ = kbd.feed(key(69, 1));
+    }
+    assert_eq!(keycodes.len(), expected.chars().count());
+    for (&keycode, want) in keycodes.iter().zip(expected.chars()) {
+        assert_eq!(
+            pressed_value(kbd.feed(key(keycode, 1))),
+            KeyValue::Char(want),
+            "keycode {keycode}"
+        );
+    }
+}
+
+#[test]
+fn every_printable_keycode_types_its_us_character() {
+    assert_types(
+        &[16, 17, 18, 19, 20, 21, 22, 23, 24, 25],
+        false,
+        "qwertyuiop",
+    );
+    assert_types(&[30, 31, 32, 33, 34, 35, 36, 37, 38], false, "asdfghjkl");
+    assert_types(&[44, 45, 46, 47, 48, 49, 50], false, "zxcvbnm");
+    assert_types(&[2, 3, 4, 5, 6, 7, 8, 9, 10, 11], false, "1234567890");
+    assert_types(
+        &[12, 13, 26, 27, 39, 40, 41, 43, 51, 52, 53, 57],
+        false,
+        "-=[];'`\\,./ ",
+    );
+    assert_types(
+        &[98, 55, 74, 78, 71, 72, 73, 75, 76, 77, 79, 80, 81, 82, 83],
+        true,
+        "/*-+7894561230.",
+    );
+}
+
+#[test]
+fn every_navigation_and_function_keycode_names_its_key() {
+    let mut kbd = VirtioKeyboardConsole::new();
+    for (keycode, named) in [
+        (102u16, NamedKeyCode::Home),
+        (104, NamedKeyCode::PageUp),
+        (106, NamedKeyCode::Right),
+        (107, NamedKeyCode::End),
+        (108, NamedKeyCode::Down),
+        (109, NamedKeyCode::PageDown),
+        (110, NamedKeyCode::Insert),
+        (60, NamedKeyCode::F2),
+        (61, NamedKeyCode::F3),
+        (62, NamedKeyCode::F4),
+        (63, NamedKeyCode::F5),
+        (64, NamedKeyCode::F6),
+        (65, NamedKeyCode::F7),
+        (66, NamedKeyCode::F8),
+        (67, NamedKeyCode::F9),
+        // The keypad with Num Lock off.
+        (72, NamedKeyCode::Up),
+        (73, NamedKeyCode::PageUp),
+        (75, NamedKeyCode::Left),
+        (77, NamedKeyCode::Right),
+        (79, NamedKeyCode::End),
+        (80, NamedKeyCode::Down),
+        (81, NamedKeyCode::PageDown),
+        (82, NamedKeyCode::Insert),
+        (83, NamedKeyCode::Delete),
+    ] {
+        assert_eq!(
+            pressed_value(kbd.feed(key(keycode, 1))),
+            KeyValue::Named(named),
+            "keycode {keycode}"
+        );
+    }
 }

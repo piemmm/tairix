@@ -34,3 +34,14 @@ condition in the kernel. It does not fork the crypto computation (the audited
 crate owns that); it owns the availability decision, the self-test, and the
 audit record. See the module rustdoc for the audited-crate boundary, including
 why hardware SHA-256 on `aarch64` awaits a vetted driveable backend.
+
+## Identity fingerprints (`fingerprint`)
+
+`Fingerprint` names a thing by the facts it is told apart by: the leading 16
+bytes of a SHA-256 over a domain tag and the fields that follow it, framed by
+the caller (a fixed-width field as itself, a variable-length one after its
+length). It is the one definition the block layer's device identities are
+taken from — a USB mass-storage unit's, from its device's serial number, and a
+RAID array's, from its own identifier and its members' — which are compared as
+proof that a re-inserted medium is the one its held writes were made on, so
+they are a cryptographic digest rather than a fast mixer.

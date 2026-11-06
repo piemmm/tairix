@@ -415,6 +415,9 @@ calls `move_to`.
 - A per-layer damage field with no engine to consume it.
 - A second blend path, a GPU-only path with no software equivalent, or a
   partial hardware frame.
+- Reading scan-out back: a screen capture is composed afresh by the
+  compositor (`plans/CAPTURE.md` CP5), so no request returns a frame's or a
+  layer's pixels.
 
 ## Definition of done
 

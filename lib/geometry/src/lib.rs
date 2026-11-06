@@ -30,7 +30,10 @@
 //! [`desktop_modes`] is the one list of sizes a desktop may take on an output.
 //!
 //! [`Tiles`] marks a change in whole tiles at a cost per tile, and covers it
-//! with the few tile rectangles a compositor merges cheaply.
+//! with the few tile rectangles a compositor merges cheaply; [`DAMAGE_TILE`]
+//! is the side every change bound for a compositor is marked in.
+//!
+//! [`fit_within`] is the one undistorted fit of a picture to a square.
 //!
 //! [`StaleFrames`] is what each frame of a presentation ring lacks of the
 //! picture, so the display client and the window client both keep every frame
@@ -54,7 +57,7 @@ pub use modes::{desktop_modes, DESKTOP_MIN, STANDARD_SIZES};
 pub use region::Region;
 pub use scale::{Scale, REFERENCE_DPI};
 pub use stale::StaleFrames;
-pub use tiles::Tiles;
+pub use tiles::{Tiles, DAMAGE_TILE};
 
 /// A point in screen space.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -107,6 +110,20 @@ impl Rect {
             width,
             height,
         }
+    }
+
+    /// The smallest rectangle holding both `a` and `b`, the pixels of both
+    /// corners included.
+    #[must_use]
+    pub fn spanning(a: Point, b: Point) -> Self {
+        let span = |p: i32, q: i32| {
+            let (low, high) = (p.min(q), p.max(q));
+            let len = u32::try_from(i64::from(high) - i64::from(low) + 1).unwrap_or(u32::MAX);
+            (low, len)
+        };
+        let (x, width) = span(a.x, b.x);
+        let (y, height) = span(a.y, b.y);
+        Self::new(x, y, width, height)
     }
 
     /// `true` when the rectangle covers no pixels.
@@ -328,6 +345,25 @@ pub fn to_i32(v: u32) -> i32 {
 #[must_use]
 pub fn saturate_i32(v: i64) -> i32 {
     i32::try_from(v).unwrap_or(if v < 0 { i32::MIN } else { i32::MAX })
+}
+
+/// A `width` × `height` picture fitted to a `room` pixels square without
+/// distortion: its longer side `room`, its shorter the nearest whole pixel to
+/// its aspect and at least one; `None` for a picture or a room of nought.
+#[must_use]
+pub fn fit_within(width: u32, height: u32, room: u32) -> Option<(u32, u32)> {
+    if width == 0 || height == 0 || room == 0 {
+        return None;
+    }
+    let shorter = |short: u32, long: u32| {
+        let scaled = (u64::from(short) * u64::from(room) + u64::from(long) / 2) / u64::from(long);
+        u32::try_from(scaled).map_or(room, |side| side.clamp(1, room))
+    };
+    Some(if width >= height {
+        (room, shorter(height, width))
+    } else {
+        (shorter(width, height), room)
+    })
 }
 
 #[cfg(test)]

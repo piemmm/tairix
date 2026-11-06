@@ -16,12 +16,11 @@
 //!   `0` — which the host runner treats as success (the same zero-is-pass
 //!   convention as riscv64's `SiFive` Test finisher, and the inverse of
 //!   x86_64's non-zero `isa-debug-exit`).
-//! * `exit_failure` passes `subcode == code`, exiting with that code.
+//! * `exit_failure` passes [`fail_subcode`]`(code)`, exiting with that.
 //!
-//! The subcode *is* the host exit status, so the
-//! [`NonZeroU16`](core::num::NonZeroU16) `exit_failure` takes is the whole
-//! guard against a failure being reported as a pass: this board has no
-//! encoding step in which a zero could be caught.
+//! The subcode *is* the host exit status, of which the host keeps eight
+//! bits, so `fail_subcode` saturates a code above them: passed through,
+//! code 256 would exit with the zero status the runner reads as a pass.
 //!
 //! The operation/reason constants must stay in step with
 //! `tools/qemu/src/aarch64.rs` (which decodes the exit status); the
@@ -55,13 +54,20 @@ pub fn exit_success() -> ! {
     unsafe { semihosting_exit(0) }
 }
 
+/// The `SYS_EXIT` subcode reporting failure `code`: the code itself while
+/// the host's eight-bit exit status can carry it, else that status's top.
+#[must_use]
+pub fn fail_subcode(code: core::num::NonZeroU16) -> u64 {
+    u64::from(code.get().min(u16::from(u8::MAX)))
+}
+
 /// Tell QEMU the test failed with `code` and **never return**.
 ///
 /// See [`exit_success`]; this differs only in the non-zero subcode.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn exit_failure(code: core::num::NonZeroU16) -> ! {
     // SAFETY: identical to `exit_success`; see that function.
-    unsafe { semihosting_exit(u64::from(code.get())) }
+    unsafe { semihosting_exit(fail_subcode(code)) }
 }
 
 /// Issue the `SYS_EXIT` semihosting call with `subcode`, then park.
@@ -106,5 +112,24 @@ mod tests {
         assert_eq!(SYS_EXIT, 0x18);
         assert_eq!(ADP_STOPPED_APPLICATION_EXIT, 0x2_0026);
         assert_eq!(SUCCESS_EXIT_STATUS, 0);
+    }
+
+    /// The host keeps the low eight bits of the subcode, so no failure may
+    /// leave them zero. Regression: code 256 exited with the pass status.
+    #[test]
+    fn no_failure_code_exits_with_the_pass_status() {
+        for raw in 1..=u16::MAX {
+            let subcode = fail_subcode(core::num::NonZeroU16::new(raw).unwrap());
+            assert_ne!(
+                subcode & 0xFF,
+                0,
+                "code {raw} would exit QEMU with status 0"
+            );
+            let carried = u64::from(raw).min(0xFF);
+            assert_eq!(
+                subcode, carried,
+                "an in-band code passes through, others saturate"
+            );
+        }
     }
 }

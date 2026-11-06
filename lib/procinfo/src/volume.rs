@@ -132,6 +132,7 @@ pub const fn availability_marker(availability: MountAvailability) -> Option<&'st
         MountAvailability::RecoveryConflict => Some("recovery-conflict"),
         MountAvailability::Degraded => Some("degraded"),
         MountAvailability::Recovering => Some("recovering"),
+        MountAvailability::ReplayUnconfirmed => Some("replay-unconfirmed"),
     }
 }
 
@@ -145,6 +146,7 @@ pub const fn availability_name(availability: MountAvailability) -> &'static str 
         MountAvailability::RecoveryConflict => "recovery conflict",
         MountAvailability::Degraded => "degraded",
         MountAvailability::Recovering => "recovering",
+        MountAvailability::ReplayUnconfirmed => "replay unconfirmed",
     }
 }
 
@@ -382,13 +384,14 @@ mod tests {
 
     #[test]
     fn every_availability_has_both_spellings_and_only_available_has_no_marker() {
-        const ALL: [MountAvailability; 6] = [
+        const ALL: [MountAvailability; 7] = [
             MountAvailability::Available,
             MountAvailability::UnavailableDirty,
             MountAvailability::UnavailableLost,
             MountAvailability::RecoveryConflict,
             MountAvailability::Degraded,
             MountAvailability::Recovering,
+            MountAvailability::ReplayUnconfirmed,
         ];
         for state in ALL {
             let marker = availability_marker(state);

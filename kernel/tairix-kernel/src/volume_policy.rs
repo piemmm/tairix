@@ -13,9 +13,10 @@
 //!   trusted root-unlock step publishes the well-known
 //!   [`tairix_users::STORAGE_GROUP`] group's gid into, resolved **by
 //!   name** from the loaded `/System/Security/Groups` registry. Until it
-//!   is installed (or when the registry has no such group) the identity
-//!   map is simply absent and a foreign volume stays system-owned — fail
-//!   closed, never an invented gid.
+//!   is installed (or when the registry has no such group) a removable
+//!   foreign volume is presented system-owned — fail closed, never an
+//!   invented gid — and once it is, every such volume is presented under
+//!   it, those attached before the unlock included.
 //! * [`PresentedFs`] — the adapter an attach wraps such a driver in, over a
 //!   [`Presented`] template. A node whose ownership the format does not
 //!   record ([`FilesystemSecurity::records_ownership`]) appears with the
@@ -65,6 +66,16 @@ impl Presented {
     #[must_use]
     pub const fn removable(gid: GroupId) -> Self {
         Self::explicit(0, gid, 0o775, 0o664)
+    }
+
+    /// A removable volume as it stands: under the storage group `group`
+    /// holds once the unlock publishes it, and restrictively the system's
+    /// until then, or on a system whose registry has no such group.
+    #[must_use]
+    pub fn removable_now(group: &LateStorageGid) -> Self {
+        group
+            .get()
+            .map_or(Self::explicit(0, GroupId(0), 0o755, 0o644), Self::removable)
     }
 
     /// A volume private to `uid` and its primary group `gid`: directories
@@ -153,10 +164,10 @@ pub const fn presentation_word(presentation: Presentation) -> &'static str {
 /// The set-once storage-group gid cell.
 ///
 /// Installed exactly once by the trusted unlock step that loads the group
-/// registry; read by the runtime volume attach path on every
-/// ownerless-filesystem mount. Before the install — or on a system whose
-/// registry defines no storage group — [`get`](Self::get) is `None` and
-/// the attach path applies no identity map.
+/// registry; read each time a removable ownerless volume presents a node.
+/// Before the install — or on a system whose registry defines no storage
+/// group — [`get`](Self::get) is `None` and such a volume is presented
+/// system-owned.
 pub struct LateStorageGid {
     cell: OnceCell<GroupId>,
 }
@@ -195,8 +206,8 @@ impl Default for LateStorageGid {
     }
 }
 
-/// The one production cell: the root unlock installs into it and the
-/// runtime volume attach reads it.
+/// The one production cell: the root unlock installs into it and removable
+/// volumes are presented through it.
 pub static LATE_STORAGE_GID: LateStorageGid = LateStorageGid::new();
 
 /// A filesystem driver whose ownerless nodes are presented as a template
@@ -208,9 +219,20 @@ pub static LATE_STORAGE_GID: LateStorageGid = LateStorageGid::new();
 /// ownership is its server's to claim.
 pub struct PresentedFs<F> {
     inner: F,
-    presented: Presented,
+    presented: PresentedAs,
     /// Whether a node the format records an owner for keeps it.
     keeps_recorded: bool,
+}
+
+/// What a [`PresentedFs`] presents its ownerless nodes as.
+#[derive(Copy, Clone)]
+enum PresentedAs {
+    /// The template its attach chose.
+    Fixed(Presented),
+    /// A removable volume's as it stands at each query
+    /// ([`Presented::removable_now`]), so one attached before the unlock is
+    /// open to the storage group once the unlock publishes it.
+    Removable(&'static LateStorageGid),
 }
 
 impl<F> PresentedFs<F> {
@@ -220,7 +242,21 @@ impl<F> PresentedFs<F> {
     pub fn new(inner: F, presented: Presented) -> Self {
         Self {
             inner,
-            presented,
+            presented: PresentedAs::Fixed(presented),
+            keeps_recorded: true,
+        }
+    }
+
+    /// Wrap `inner`, a removable volume, so every node whose ownership it
+    /// does not record is presented as the storage group `group` holds
+    /// stands at the time it is asked about. Nothing above it may keep a
+    /// presented record, or a volume attached before the unlock would stay
+    /// closed to the group.
+    #[must_use]
+    pub fn removable(inner: F, group: &'static LateStorageGid) -> Self {
+        Self {
+            inner,
+            presented: PresentedAs::Removable(group),
             keeps_recorded: true,
         }
     }
@@ -232,8 +268,16 @@ impl<F> PresentedFs<F> {
     pub fn whole(inner: F, presented: Presented) -> Self {
         Self {
             inner,
-            presented,
+            presented: PresentedAs::Fixed(presented),
             keeps_recorded: false,
+        }
+    }
+
+    /// The template its ownerless nodes are presented as now.
+    fn presented(&self) -> Presented {
+        match self.presented {
+            PresentedAs::Fixed(presented) => presented,
+            PresentedAs::Removable(group) => Presented::removable_now(group),
         }
     }
 
@@ -390,7 +434,7 @@ impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for PresentedFs<
         // The presented record replaces the stand-in an ownerless node
         // reports; only its kind, and whether it may be written, are kept.
         let info = self.inner.node_info(node)?;
-        let presented = &self.presented;
+        let presented = self.presented();
         let mode = match info.kind {
             NodeKind::Directory => presented.dir_mode,
             // A link gets the file mode, never a wider one. Traversal

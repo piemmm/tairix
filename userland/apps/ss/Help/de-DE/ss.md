@@ -35,6 +35,16 @@ erscheint als `*` und ein ungebundener Port als `*`; eine IPv6-Adresse
 wird in Klammern gesetzt, damit der `:port`-Trenner eindeutig bleibt —
 ein aufgelöster Name braucht keine Klammern.
 
+`-s` meldet etwas anderes als die Tabelle: die stackweiten
+TCP-Verbindungsabwehr-Summen des Netzwerkstapels — den SYN-Backlog, die
+zustandslose SYN-Cookie-Bremse, die Annahmewarteschlange und die
+gesendeten Resets. Jede Summe wächst seit dem Start monoton (ein
+lauschender Socket, der geschlossen wird, schlägt seine Summen denen des
+Stapels zu), sodass eine SYN-Flut sichtbar bleibt, nachdem der
+angegriffene Socket verschwunden ist. Dieselben Werte lassen sich einzeln
+als `stats:net/stack/syn-cookies` und die gleichrangigen Referenzen
+auflösen.
+
 `ss` nimmt nur Optionen entgegen. Die Filterausdruck-Grammatik von
 iproute2 (Zustands- und Adressfilter) ist nicht implementiert, daher ist
 ein nackter Operand ein Nutzungsfehler statt eines stillschweigend
@@ -67,14 +77,16 @@ ignorierten Arguments.
 - `ss -l` — nur die lauschenden Sockets.
 - `ss -tlp` — lauschende TCP-Sockets, mit dem besitzenden Prozess.
 - `ss -u4` — die UDP-Sockets über IPv4.
+- `ss -s` — die stackweiten Verbindungsabwehr-Summen.
 - `ss -r` — dieselbe Liste mit zu Hostnamen aufgelösten Adressen.
 
 ## EXIT STATUS
 
-- `0` — die Liste wurde erzeugt (oder die Kurzhilfe wurde geschrieben).
-- `1` — die Socket-Abfrage wurde verweigert oder schlug fehl, oder die
-  Ausgabe konnte nicht geschrieben werden. Eine nicht verstandene
-  Befehlszeile endet ebenfalls mit `1`.
+- `0` — die Liste oder Zusammenfassung wurde erzeugt (oder die Kurzhilfe
+  wurde geschrieben).
+- `1` — die Socket- oder Abwehrabfrage wurde verweigert oder schlug fehl,
+  oder die Ausgabe konnte nicht geschrieben werden. Eine nicht
+  verstandene Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

@@ -15,12 +15,15 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::BlkIoCounters;
-use tairix_abi::driver::filesystem::VolumeStats;
+use tairix_abi::driver::filesystem::{VolumeStats, VolumeTitle, VOLUME_TITLE_MAX};
 use tairix_abi::sysinfo::{
     MountAvailability, MountRecord, VolumeHealth, VolumeIoStatsRecord, VOLUME_ID_LEN,
     VOLUME_ID_UNPUBLISHED,
 };
+use tairix_controls::text::{TextAction, TextField};
 use tairix_controls::{DuplexRates, RateTrace};
+use tairix_geometry::{Rect, Region};
+use tairix_input::{Key, Modifiers, NamedKey};
 use tairix_path::VolumeId;
 use tairix_procinfo::display::format_bytes;
 use tairix_procinfo::list::field_lossy;
@@ -28,6 +31,9 @@ use tairix_procinfo::rate::rate_per_sec;
 use tairix_procinfo::{
     availability_name, medium_name, render_options, volume_health_name, VolumeBytes,
 };
+
+use crate::mount::MountAct;
+use crate::places::{Retitling, Volume};
 
 /// One reading of a drive: what is mounted at its mount point now, and the
 /// serving device's cumulative counters, taken at one moment.
@@ -86,8 +92,8 @@ impl DriveChange {
     }
 }
 
-/// What the drive's section shows.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+/// What the drive's section shows, its *Title* field among it.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Drive {
     mount: Mount,
     device: Option<String>,
@@ -99,6 +105,53 @@ pub struct Drive {
     /// What the section lists, derived when a reading moves it rather than on
     /// every paint.
     facts: Vec<(&'static str, String)>,
+    /// The volume as the reading states it, which a committed title is
+    /// checked against.
+    volume: Option<Volume>,
+    /// The *Title* field: the title as last read, until it holds the
+    /// keyboard.
+    title: TextField,
+    /// The user reading the drive, on whose authority its title is offered.
+    viewer: Option<u32>,
+}
+
+impl Default for Drive {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// What a key on a drive's *Title* field asks of its window.
+#[derive(Debug, Eq, PartialEq)]
+pub enum TitleKeyed {
+    /// The field does not hold the keyboard: the key is not its own.
+    Ignored,
+    /// The field took it, reporting what it repainted.
+    Typed,
+    /// The field gave the keyboard back: the section is repainted.
+    Ended,
+    /// The field committed this retitle, for the window to carry out off its
+    /// loop, and gave the keyboard back.
+    Retitle(MountAct),
+    /// The commit was refused: the field says why, and keeps the keyboard.
+    Refused,
+}
+
+/// What the *Title* field shows while it holds no title.
+const NO_TITLE: &str = "No title";
+
+/// The *Title* field holding `title`, editable where `titling` allows its
+/// viewer and otherwise saying why not.
+fn title_field(title: &str, titling: Option<Retitling>) -> TextField {
+    let field = TextField::new()
+        .with_text(title)
+        .with_max_len(VOLUME_TITLE_MAX)
+        .with_placeholder(NO_TITLE)
+        .read_only(!matches!(titling, Some(Retitling::Allowed(_))));
+    match titling.and_then(Retitling::refusal) {
+        Some(why) => field.with_message(why),
+        None => field,
+    }
 }
 
 /// Whether the volume has been read, and what the reading found.
@@ -112,9 +165,9 @@ enum Mount {
 }
 
 impl Drive {
-    /// A drive nothing has been read about yet.
+    /// A drive nothing has been read about yet, read for no one.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             mount: Mount::Reading,
             device: None,
@@ -122,7 +175,18 @@ impl Drive {
             rates: DuplexRates::new(),
             latest: (None, None),
             facts: Vec::new(),
+            volume: None,
+            title: title_field("", None),
+            viewer: None,
         }
+    }
+
+    /// This drive read for `viewer`, the user its *Title* field is offered
+    /// to.
+    #[must_use]
+    pub fn acting_for(mut self, viewer: Option<u32>) -> Self {
+        self.viewer = viewer;
+        self
     }
 
     /// Take `sample` in, answering what it changed.
@@ -173,15 +237,128 @@ impl Drive {
         if facts || figures {
             self.facts = self.stated_facts();
         }
-        if facts {
-            DriveChange::Layout
-        } else {
-            DriveChange::of(DrivePanels {
-                capacity,
-                activity,
-                figures,
-            })
+        if facts || self.title_stale() {
+            self.refresh_title();
+            return DriveChange::Layout;
         }
+        DriveChange::of(DrivePanels {
+            capacity,
+            activity,
+            figures,
+        })
+    }
+
+    /// The *Title* field the section draws.
+    #[must_use]
+    pub const fn title(&self) -> &TextField {
+        &self.title
+    }
+
+    /// Whether the *Title* field holds the keyboard.
+    #[must_use]
+    pub fn is_titling(&self) -> bool {
+        self.title.state().focus.focused
+    }
+
+    /// Give the *Title* field the keyboard, answering whether it took it: one
+    /// its viewer may not edit never does.
+    pub fn begin_title(&mut self) -> bool {
+        if self.title.is_read_only() || self.is_titling() {
+            return false;
+        }
+        self.title.set_focused(true);
+        true
+    }
+
+    /// Take the keyboard back from the *Title* field, the title as read put
+    /// back in it, answering whether it held it.
+    pub fn end_title(&mut self) -> bool {
+        if !self.is_titling() {
+            return false;
+        }
+        self.title.set_focused(false);
+        self.refresh_title();
+        true
+    }
+
+    /// Feed `key` to the *Title* field drawn at `bounds`, reporting what it
+    /// repainted into `damage`, and answering what it asks of the window:
+    /// `Return` commits the title through the one check every surface
+    /// offering a title makes ([`MountAct::retitle`]), and `Escape` or `Tab`
+    /// hands the keyboard back.
+    pub fn title_key(
+        &mut self,
+        (key, modifiers): (Key, Modifiers),
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> TitleKeyed {
+        if !self.is_titling() {
+            return TitleKeyed::Ignored;
+        }
+        if key == Key::Named(NamedKey::Tab) {
+            self.end_title();
+            return TitleKeyed::Ended;
+        }
+        match self.title.on_key(key, modifiers, bounds, damage) {
+            Some(TextAction::Submitted) => self.commit_title(),
+            Some(TextAction::Cancelled) => {
+                self.end_title();
+                TitleKeyed::Ended
+            }
+            Some(TextAction::Edited) => {
+                self.title.set_message(None);
+                TitleKeyed::Typed
+            }
+            None => TitleKeyed::Typed,
+        }
+    }
+
+    /// Commit what the *Title* field holds: the retitle it asks for, the field
+    /// keeping the title until a reading says what the volume records; or,
+    /// refused, the field saying why and keeping the keyboard.
+    fn commit_title(&mut self) -> TitleKeyed {
+        let Some(volume) = &self.volume else {
+            self.end_title();
+            return TitleKeyed::Ended;
+        };
+        match MountAct::retitle(&volume.facts, &volume.label, self.viewer, self.title.text()) {
+            Ok(act) => {
+                self.title.set_focused(false);
+                act.map_or(TitleKeyed::Ended, TitleKeyed::Retitle)
+            }
+            Err(refusal) => {
+                self.title.set_message(Some(String::from(refusal.reason)));
+                TitleKeyed::Refused
+            }
+        }
+    }
+
+    /// Bring the *Title* field to the reading: the title as read, editable
+    /// where the viewer may retitle the volume and otherwise saying why not.
+    /// A field holding the keyboard keeps what was typed while the volume is
+    /// still theirs to retitle.
+    fn refresh_title(&mut self) {
+        self.volume = self.record().and_then(Volume::from_mount);
+        let titling = self
+            .volume
+            .as_ref()
+            .map(|volume| volume.facts.retitling_by(self.viewer));
+        if self.is_titling() && matches!(titling, Some(Retitling::Allowed(_))) {
+            return;
+        }
+        let title = self
+            .volume
+            .as_ref()
+            .map_or("", |volume| volume.facts.title.as_str());
+        self.title = title_field(title, titling);
+    }
+
+    /// Whether the *Title* field, not holding the keyboard, shows other than
+    /// the title as read: a commit the kernel refused, or one made and now
+    /// read.
+    fn title_stale(&self) -> bool {
+        let read = self.record().map_or(VolumeTitle::EMPTY, MountRecord::title);
+        !self.is_titling() && self.title.text() != read.as_str()
     }
 
     /// Forget the trace: the window has stopped reading the drive, so the
@@ -271,6 +448,7 @@ impl Drive {
         self.device = None;
         self.pause();
         self.facts.clear();
+        self.refresh_title();
         if facts {
             DriveChange::Layout
         } else {
@@ -376,6 +554,8 @@ fn same_facts(a: &Mount, b: &Mount) -> bool {
                 && a.usage().block_size == b.usage().block_size
                 && a.usage().files == b.usage().files
                 && a.usage().in_reserve == b.usage().in_reserve
+                && a.title() == b.title()
+                && a.titled() == b.titled()
         }
         (Mount::Reading, Mount::Reading)
         | (Mount::Unreadable, Mount::Unreadable)

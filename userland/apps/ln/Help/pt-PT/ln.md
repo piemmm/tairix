@@ -8,19 +8,28 @@ ln — criar ligações entre ficheiros
 
 ## DESCRIPTION
 
-Cria uma ligação simbólica que nomeia cada alvo. Com um só operando a
+Cria uma ligação que nomeia cada alvo. Com um só operando a
 ligação é criada no directório de trabalho com o próprio nome do alvo.
 Com dois, o segundo operando é um directório a preencher se o for — ou
 uma ligação para um, salvo com `-n` — e o nome da ligação caso
 contrário. Com três ou mais, o último tem de ser já um directório.
 
-O alvo é guardado **literalmente** e nunca é resolvido: pode ser
-relativo, conter `..` e não nomear nada, pelo que uma ligação pode
-legitimamente ficar pendente. A sua gramática é ainda assim verificada
-antes de ser guardada, pelo que um alvo que nenhum resolvedor poderia
-percorrer é recusado. Criar uma ligação não concede autoridade alguma
-sobre o que ela nomeia — cada uso posterior é autorizado componente a
-componente sob a sua própria identidade.
+Sem `-s` a ligação é **forte**: uma segunda entrada de directório para o
+próprio inode do alvo. Ambos os nomes alcançam um só ficheiro, uma
+escrita por um é visível pelo outro, e o armazenamento do ficheiro
+subsiste até se remover o último nome. Ambos os nomes têm de estar num
+só volume, e a um directório nunca se dá um segundo nome — é por a
+árvore de ficheiros continuar a ser uma árvore que `..` designa o
+directório por onde realmente se passou.
+
+Com `-s` a ligação é **simbólica**, e o seu alvo é guardado
+**literalmente** e nunca é resolvido: pode ser relativo, conter `..` e
+não nomear nada, pelo que uma tal ligação pode legitimamente ficar
+pendente. A sua gramática é ainda assim verificada antes de ser
+guardada, pelo que um alvo que nenhum resolvedor poderia percorrer é
+recusado. Criar uma ligação de qualquer dos dois tipos não concede
+autoridade alguma sobre o que ela nomeia — cada uso posterior é
+autorizado componente a componente sob a sua própria identidade.
 
 Um nome de ligação já ocupado é recusado a menos que `-f` ou `-i` mande
 substituí-lo. A nova ligação toma então o lugar desse nome num só passo,
@@ -38,14 +47,6 @@ uma ligação para si próprio.
 Uma ligação que não possa ser criada é comunicada, e a seguinte é criada
 na mesma. `--` termina a análise de opções: todo o argumento posterior é
 um operando.
-
-Sem `-s` a ligação é **fixa**: uma segunda entrada de directório para o
-próprio inode do alvo. Ambos os nomes alcançam um só ficheiro, uma
-escrita por um é visível pelo outro, e o armazenamento do ficheiro
-subsiste até se remover o último nome. Ambos os nomes têm de estar num
-só volume, e a um directório nunca se dá um segundo nome — é por a
-árvore de ficheiros continuar a ser uma árvore que `..` designa o
-directório por onde realmente se passou.
 
 `-r` guarda o alvo de uma ligação simbólica relativo ao directório da
 própria ligação. O sistema de ficheiros canoniza primeiro ambas as
@@ -92,6 +93,8 @@ segurança.
 
 ## EXAMPLES
 
+- `ln notes.txt notes.bak` — dar um segundo nome a um ficheiro; remover
+  qualquer um deles deixa o outro, e o seu conteúdo, intacto.
 - `ln -s /System/Commands/ls.app tools/ls` — ligar um nome a um pacote.
 - `ln -s ../shared/notes.txt` — ligar `notes.txt` aqui a um alvo
   relativo.

@@ -235,6 +235,7 @@ plan's ledger. A `blocked` row names its blocker.
 | WAFFLE | The comment-discipline sweep (`plans/WAFFLE.md`) | planned |
 | RUST | The Rust toolchain on TAIRiX, and TAIRiX building itself (`plans/RUST.md`) | planned |
 | TEMPORARY | The open decisions and work the Raspberry Pi 4 investigation left, and the owned-dialog and content-sized-alert work; deleted when done (`plans/TEMPORARY.md`) | planned |
+| CAPTURE | Screen capture: stills and recordings taken by the desktop alone, VP8/WebM and Opus, the recorder component and playback (`plans/CAPTURE.md`) | done |
 
 ## Stage 0 — Repository foundation
 
@@ -299,6 +300,9 @@ software device implementing it on every target, `plans/GPU.md`),
 `lib/spirv` (the one reading of a SPIR-V shader module: the checked model, its
 total and bounded decoder over the generated Khronos grammar, its validator,
 and its encoder, `plans/SHADER.md`),
+`lib/video` (the one VP8 codec, which a lossy WebP picture and a screen
+recording are made of, and the WebM container a recording is kept in,
+`plans/CAPTURE.md`),
 and `lib/util`.
 
 `lib/util` admits only an item with two or more independent callers, and its
@@ -312,8 +316,8 @@ README requires this file to name them:
 | `cnum` | `seq`, `printf`, `sleep`, `tail`, `lib/svg`, `lib/image` |
 | `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/proglib`, `lib/syntax`, `userland/system/init`, `tools/signkeys` (`setting_line`); `configure`, Settings (`ValueShape`) |
 | `count`, `tailwindow` | `head`, `tail`; `count` also the QEMU verticals reading a figure from a guest's log |
-| `defer` | `lib/rt` (`work::Worker`, over either desk, so every worker a program runs), `lib/browse` (the mount worker), `lib/window` (the document host's queue), the desktop session, the file manager, Settings, Date & Time, Music, Paint, `netmap`, `smbfs`, WinterSun's client |
-| `fallible` | `lib/audio`, `lib/browse`, `lib/bytedev`, `lib/countryside`, `lib/discovery`, `lib/font`, `lib/fscopy`, `lib/fsprobe`, `lib/fsserve`, `lib/glob`, `lib/gpu`, `lib/icon`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/sound`, `lib/spirv`, `lib/terrain`, `lib/users`, `lib/writeback`, the kernel, the AmigaDOS, ARXFS, ext4, ISO 9660 and UDF drivers, the USB Audio driver, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, `netstack`, `settingsd`, `smbfs`, `sysinfod`, `thermald`, `devmgr`, `elsh`, `blendcheck`, `cp`, `mv`, the file manager, TextEdit, `view`, Paint, WinterSun, the Life, ray tracer, Retro Games and Starfield screensavers |
+| `defer` | `lib/rt` (`work::Worker`, over either desk, so every worker a program runs), `lib/browse` (the mount worker), `lib/window` (the document host's queue), the desktop session, the screen recorder, the file manager, Settings, Date & Time, Music, Paint, `netmap`, `smbfs`, WinterSun's client |
+| `fallible` | `lib/audio`, `lib/browse`, `lib/bytedev`, `lib/countryside`, `lib/discovery`, `lib/font`, `lib/fscopy`, `lib/fsprobe`, `lib/fsserve`, `lib/glob`, `lib/gpu`, `lib/icon`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/sound`, `lib/spirv`, `lib/terrain`, `lib/users`, `lib/video`, `lib/writeback`, the kernel, the AmigaDOS, ARXFS, ext4, ISO 9660 and UDF drivers, the USB Audio driver, `userland/gui/wm`, the desktop session, the screen recorder, the greeter, `audiod`, `discoveryd`, `netstack`, `settingsd`, `smbfs`, `sysinfod`, `thermald`, `devmgr`, `elsh`, `blendcheck`, `cp`, `mv`, the file manager, TextEdit, `view`, Paint, WinterSun, the Life, ray tracer, Retro Games and Starfield screensavers |
 | `flags` | `lib/gpu`, `lib/smb`, `lib/spirv` |
 | `getopt` | every command app that takes options (`cat`, `cp`, `df`, `du`, `head`, `ls`, `mount`, `ps`, `seq`, `tail`, `useradd`, `servicectl`, `sysinfo`, …), the desktop session's command line (`applib`), the file manager's |
 | `fmt` | `kernel/sec`, `kernel/ipc`, `kernel/syscall`, `kernel/core`, the kernel binary, the xHCI, USB HID, USB mass-storage, RAID and volume-manager drivers, `lib/controls`, `lib/dmaengine`, `lib/sysconfig`, `devmgr`, `xtask`, the QEMU verticals |
@@ -1000,6 +1004,15 @@ plan's own text is corrected when it is next touched, or sooner.
 
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
+
+- **2026-11-05 — §25: the userland heap grows in the heap region the
+  startup vector names.** Its fixed bases lay inside the file-mapping window,
+  so its trims were refused, and the refusal of `FIXED` maps over windows
+  then refused its first allocation; the layout is the kernel's to give.
+
+- **2026-11-05 — §3: `lib/video`.** A lossy WebP picture is one VP8
+  keyframe and a screen recording is a VP8 stream in WebM, so the codec lives
+  once beside neither the image decoders nor the recorder.
 
 - **2026-10-31 — §7, §19.6, §19.7: `ci` runs the fuzz and proptest gates
   `--once`; the nightly soak is a seven-hour window.** The charter still named

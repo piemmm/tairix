@@ -194,7 +194,7 @@ pub(crate) fn decode_reverse_ref(value: &[u8]) -> Option<Vec<Referrer>> {
 
 /// The in-memory dedupe-index key: `(domain, length, logical hash)`. It is the
 /// rebuildable map's key (the index is never authoritative), packed into
-/// a fixed array so it orders deterministically in a `BTreeMap`.
+/// one fixed array.
 pub(crate) type DedupeKey = [u8; 8 + 4 + LOGICAL_HASH_LEN];
 
 /// Build the dedupe-index key for a chunk in `domain` of plaintext `length`

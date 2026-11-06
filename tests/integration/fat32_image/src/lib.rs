@@ -14,9 +14,10 @@
 //! mirrored FATs, one-sector clusters — laid out so the real
 //! `Fat32::open` validator (a zero 16-bit FAT size and zero root-entry
 //! count, a power-of-two sector and cluster size, a root cluster inside
-//! the data region) accepts it. It
-//! is `no_std` + `alloc` so it links into both the host build tool and
-//! the freestanding guest test.
+//! the data region) accepts it, and the volume probe recognises it by the
+//! type its boot sector names. [`build_labelled_image`] labels it, as the
+//! twin-volume vertical's USB sticks need. It is `no_std` + `alloc` so it
+//! links into both the host build tool and the freestanding guest test.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -83,6 +84,8 @@ const FAT_MEDIA: u32 = 0x0FFF_FFF8;
 const DIR_ENTRY_LEN: usize = 32;
 /// Attribute byte for an ordinary (archive) file.
 const ATTR_ARCHIVE: u8 = 0x20;
+/// Attribute byte of the volume-label entry.
+const ATTR_VOLUME_ID: u8 = 0x08;
 
 fn set_le16(img: &mut [u8], offset: usize, value: u16) {
     img[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
@@ -142,14 +145,30 @@ fn write_short_entry(
 }
 
 /// Construct the FAT32 image described in the module docs.
+#[must_use]
+pub fn build_image() -> Vec<u8> {
+    build(None)
+}
+
+/// [`build_image`]'s volume, labelled `label`, a FAT label field, space
+/// padded: its root directory opens with the volume-label entry, where
+/// formatters write it and the volume probe reads it, ahead of
+/// [`PLANTED_FILE_NAME`]. Every copy carries one identity, as volumes
+/// formatted alike do.
+#[must_use]
+pub fn build_labelled_image(label: &[u8; 11]) -> Vec<u8> {
+    build(Some(label))
+}
+
+/// The image, its root directory opening with a volume-label entry recording
+/// `label` where there is one.
 ///
 /// # Panics
 ///
 /// Never in practice: the layout constants are sized so every write
 /// stays in bounds and [`PLANTED_FILE_CONTENT`] fits one cluster. The
 /// debug assertions document those invariants for a future edit.
-#[must_use]
-pub fn build_image() -> Vec<u8> {
+fn build(label: Option<&[u8; 11]>) -> Vec<u8> {
     debug_assert!(
         PLANTED_FILE_CONTENT.len() <= SECTOR_BYTES * usize::from(SECTORS_PER_CLUSTER),
         "planted file must fit one cluster"
@@ -167,6 +186,7 @@ pub fn build_image() -> Vec<u8> {
     set_le32(&mut img, 32, TOTAL_SECTORS_U32); // total sectors (32-bit)
     set_le32(&mut img, 36, FAT_SECTORS); // 32-bit FAT size (sectors)
     set_le32(&mut img, 44, ROOT_CLUSTER); // root cluster
+    img[82..90].copy_from_slice(b"FAT32   "); // filesystem type
     img[510] = 0x55;
     img[511] = 0xAA;
 
@@ -176,11 +196,16 @@ pub fn build_image() -> Vec<u8> {
     set_fat(&mut img, ROOT_CLUSTER, FAT_EOC);
     set_fat(&mut img, HELLO_CLUSTER, FAT_EOC);
 
-    // Root directory (cluster 2): one entry for HELLO.TXT.
+    // Root directory (cluster 2): the label entry, if any, then HELLO.TXT.
     let hello_size = u32::try_from(PLANTED_FILE_CONTENT.len()).unwrap_or(0);
+    let mut entry = cluster_byte_offset(ROOT_CLUSTER);
+    if let Some(label) = label {
+        write_short_entry(&mut img, entry, label, ATTR_VOLUME_ID, 0, 0);
+        entry += DIR_ENTRY_LEN;
+    }
     write_short_entry(
         &mut img,
-        cluster_byte_offset(ROOT_CLUSTER),
+        entry,
         &short_name(b"HELLO", b"TXT"),
         ATTR_ARCHIVE,
         HELLO_CLUSTER,
@@ -191,7 +216,6 @@ pub fn build_image() -> Vec<u8> {
     let hello = cluster_byte_offset(HELLO_CLUSTER);
     img[hello..hello + PLANTED_FILE_CONTENT.len()].copy_from_slice(PLANTED_FILE_CONTENT);
 
-    debug_assert_eq!(DIR_ENTRY_LEN, 32);
     img
 }
 
@@ -329,5 +353,27 @@ mod tests {
         let expected =
             usize::try_from(TOTAL_SECTORS).expect("sector count fits usize") * SECTOR_BYTES;
         assert_eq!(build_image().len(), expected);
+    }
+
+    #[test]
+    fn the_boot_sector_names_its_filesystem_type() {
+        assert_eq!(&build_image()[82..90], b"FAT32   ");
+    }
+
+    #[test]
+    fn a_labelled_image_opens_its_root_with_the_label_and_still_serves_its_file() {
+        const LABEL: &[u8; 11] = b"LABELLED   ";
+        let image = build_labelled_image(LABEL);
+        let entry = cluster_byte_offset(ROOT_CLUSTER);
+        assert_eq!(&image[entry..entry + 11], LABEL);
+        assert_eq!(image[entry + 11], ATTR_VOLUME_ID);
+        let mut fs = Fat32::open(VecBlock { store: image }).expect("a valid FAT32 volume");
+        let root = fs.root();
+        let node = fs
+            .lookup(root, PLANTED_FILE_NAME)
+            .expect("HELLO.TXT beside the label");
+        let mut buf = [0u8; 128];
+        let n = fs.read_at(node, 0, &mut buf).expect("read HELLO.TXT");
+        assert_eq!(&buf[..n], PLANTED_FILE_CONTENT);
     }
 }

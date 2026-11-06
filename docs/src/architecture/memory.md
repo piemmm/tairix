@@ -383,7 +383,7 @@ The façade bridges its own `Page` / `Frame` / `MapFlags` currency to the
 HAL's `u64` / `PageFlags` at the boundary. Each arch crate's `paging`
 `AddressSpace` implements the HAL traits directly. To keep `kernel/mem`
 fully host-testable the crate ships a `HostPageTable` test double behind
-`#[cfg(test)]`: a `BTreeMap`-backed implementation of the same HAL
+`#[cfg(test)]`: an ordered-map-backed implementation of the same HAL
 traits that, additionally, enforces W^X (rejects `WRITE | EXEC`
 mappings) so the security default is exercised in tests.
 
@@ -415,8 +415,8 @@ ordinary reclaimable RAM rather than a fixed `.bss` pool
 `frames::conformance` suite over `FrameTableSource` and assert each
 table is drawn from the allocator, zeroed, and distinct.
 
-The runtime `spawn` producers (aarch64 and x86_64) are the first
-production consumers: each builds a spawned child's page tables over a
+The runtime `spawn` producers are the first production consumers: each
+builds a spawned child's page tables over a
 boot-cached `FrameTableSource` rather than a fixed `.bss` `PageTablePool`
 reserve, so the number of processes that can be spawned scales with
 discovered RAM and grows on demand instead of being a hard `const`
@@ -553,9 +553,11 @@ per-architecture page-fault fix-up above all build on it (see
 `copy_in` / `copy_out` take a `&dyn UserAddressSpace` (so the call site
 names no concrete page-table backend), but a syscall handler only knows
 the caller's `TaskId`. The bridge is the **address-space
-registry** (`kernel/core`, `aspace` module): a
-`BTreeMap<TaskId, (address space, PhysMap)>` that the syscall path reads
-to resolve the calling task to the pair the copy walk consumes. It is
+registry** (`kernel/core`, `aspace` module): a hash map from each
+process to the pair the copy walk consumes (address space, `PhysMap`),
+which the syscall path reads to resolve the caller. Every record the
+registry keeps is inserted fallibly: one the heap cannot hold is refused
+as `OutOfMemory` and leaves the registry as it was. It is
 composed into `KernelState` next to the capability and IPC registries,
 wrapped in the same reader-preferring `RwLock`, so the hot path takes
 only a shared lock (`AGENTS.md` §2.1).
@@ -576,7 +578,8 @@ non-generic type.
 Lifecycle is fail-closed: an entry is registered when a task's image is
 mapped and withdrawn when it exits. Registering an id that is already
 present is **refused** (`AspaceError::AlreadyPresent`) rather than
-silently replacing a live mapping, withdrawal is idempotent, and
+silently replacing a live mapping, one the heap has no room for is refused
+(`AspaceError::OutOfMemory`), withdrawal is idempotent, and
 resolving an unknown id yields `None`. The registry is a pure data
 structure with no audit sink of its own — the spawner and the `exit`
 handler that drive the lifecycle own the security-relevant logging,
@@ -615,6 +618,12 @@ named drop equivalent provided for documentation symmetry.
 existing bytes — the one place a borrowed slice becomes an owned sensitive
 region, used by every kernel IPC payload
 ([IPC payload confidentiality](./ipc.md#payload-confidentiality)).
+`SensitiveRoom::with_capacity(n)` reserves `n` bytes written in place — a
+call's room, which holds its request and then its answer. Only the bytes
+written are initialised: a fill touches them, `wipe_to(len)` clears the first
+`len` of them before the room holds the next secret, and its drop wipes up to
+the high-water mark, so a room costs writes in proportion to what it carried,
+never to its capacity.
 
 Both constructors accept a zero length, yielding an empty buffer that
 allocates nothing. A caller whose length is *data* — an IPC payload, a read
@@ -626,9 +635,10 @@ a non-empty region rejects zero itself with its own diagnostic, as
 `SensitiveBuffer` is fixed-size (`Box<[u8]>`, not `Vec<u8>`) to avoid
 silent reallocations that would leak a secret into the old
 allocation, and the copy constructor reserves exactly `src.len()` for the
-same reason. Its `Debug` impl deliberately redacts the contents, and it is
-deliberately not `Clone`, `PartialEq`, or `Eq` — a secret is read, never
-duplicated implicitly or compared with `==`.
+same reason; a `SensitiveRoom` reserves its storage whole and never moves it.
+Their `Debug` impls deliberately redact the contents, and neither is `Clone`,
+`PartialEq`, or `Eq` — a secret is read, never duplicated implicitly or
+compared with `==`.
 
 `AllocError::as_errno()` is the one mapping from an allocation failure to
 the stable `Errno` a syscall returns, so two subsystems cannot report
@@ -828,14 +838,17 @@ subject of Stage 4.D Item 0.
 Device drivers also need their *register block* mapped — a PCI memory
 BAR or a virtio-MMIO transport slot. The guarded-mapping mechanism is
 `kernel/mem::mmio::MmioWindowMap`: the per-task bookkeeping (a bounded
-virtual window, a slot bitmap, and the per-region guard/data accounting)
-that maps a device window into a **borrowed** `&mut AddressSpace<P>`.
+virtual window, one record per mapped run of slots — the gaps between runs
+are the free slots — and the per-region guard/data accounting) that maps a
+device window into a **borrowed** `&mut AddressSpace<P>`.
 Unlike [`DmaPool`][DmaPool] it allocates **no** frames — the physical
 address is fixed by the hardware, so it maps the *device's own* frames
 with caching disabled (`MapFlags::NO_CACHE`), never executable (W^X,
 `AGENTS.md` §19.2), and the same unmapped guard-page bracketing the DMA
 pool uses; a part-way page-table failure unwinds every page it added
-(all-or-nothing, `AGENTS.md` §2.9). `MmioWindowMap::map_into(space,
+(all-or-nothing, `AGENTS.md` §2.9), and a run whose record the heap cannot
+hold is refused as `MmioError::OutOfMemory` before any page is mapped.
+`MmioWindowMap::map_into(space,
 phys_base, len)` returns an `MmioRegion`; `region_base(region, phys)`
 resolves the region's device physical base through the direct physical
 map (`PhysMap`) into a base pointer. It is the device-window analogue of
@@ -1024,7 +1037,9 @@ reserved region — read or write, offered *after* stack growth and *before*
 the write-fatal file rule (§7o) — is resolved by
 `resolve_anon_fault`, which backs the single covering page with one fresh
 zeroed `RW|USER` frame through the `mem_map` producer's single-page commit
-and publishes that one page into the registry snapshot as an in-place
+— asking the registry whether a region still holds the page while it holds
+the live space's lock (`MemMap::map_held`), so a sibling's `mem_unmap` cannot
+take the page between the check and the mapping — and publishes that one page into the registry snapshot as an in-place
 delta (`AddressSpaceRegistry::note_faulted_page`). Per-fault kernel work is
 therefore **one page**, so a task touching a large mapping is preemptible
 between faults; this is what replaced the earlier eager commit, whose single
@@ -1037,10 +1052,9 @@ serial console stuttered and the machine appeared to lock up).
 address space.** The registry holds a frozen, `Send + Sync` snapshot of the
 task's mappings for the user-copy path to walk, so every change to the live
 space must reach it. Rebuilding it wholesale (`AddressSpace::freeze`) walks
-the page table *and* allocates a fresh node for **every resident page of the
-task**, and the kernel heap places a node by scanning its free list — so a
-task with a large resident set paid its page count times that list's length,
-inside one non-preemptible syscall. That is tens of seconds under emulation,
+the page table *and* rebuilds a node arena holding **every resident page of
+the task** — a page-table walk and a whole-map build inside one
+non-preemptible syscall. That is tens of seconds under emulation,
 during which the CPU's dispatch loop makes no progress at all and the session
 appears frozen (observed as a ten-second in-kernel stall inside `mem_unmap`
 while the desktop was live).
@@ -1075,7 +1089,17 @@ CPU, which would leave freed pages still translating in the snapshot the copy
 path walks. A snapshot that cannot absorb a mapping's delta falls back to the
 wholesale re-freeze, and one that cannot absorb a release's is suspended until
 it is re-frozen, so the delta is a cost reduction, never a correctness
-dependency.
+dependency. A suspended snapshot answers every later delta as unabsorbed, so
+each publisher re-freezes it until one succeeds, and a copy that finds its
+caller's snapshot suspended re-freezes it once before it gives up — with
+`OutOfMemory`, never a `BadAddress` that would blame the caller's buffer.
+
+**A re-freeze publishes before it lets the live space go.**
+`AddressSpaceRegistry::refreeze_held` freezes the live space and publishes the
+result while its caller still holds that space's lock, so a sibling's unmap
+that takes the space next is published after the snapshot, never undone by a
+view frozen before it. The snapshot it replaces is dropped once both locks are
+released.
 
 **Reservation is commit-accounted — TAIRiX does not overcommit anonymous
 memory.** `mem_map` reserves *physical headroom* for every page of the
@@ -1097,12 +1121,16 @@ only as a fault-time task kill mislabelled a "wild" fault. Stack growth takes
 the same commitment one page at a time (`resolve_stack_fault` commits before
 it backs each growth page), and a reservation's still-unbacked pages are
 returned to the budget on `mem_unmap` and on task teardown, so a task that
-dies holding untouched reservations leaks no headroom. `mem_unmap` confirms
-every page of the caller-named `(base, page_count)` is one the caller holds
-(fail closed with `NotFound` otherwise), then **sparsely** tears down the
-range — reclaiming and zeroing only the pages that actually faulted in and
-skipping the untouched reservation pages — and drops those pages from the
-record, splitting it where the range cut through. Containment, not a match
+dies holding untouched reservations leaks no headroom. `mem_unmap` takes
+every page of the caller-named `(base, page_count)` out of what the caller
+holds before it releases any (fail closed with `NotFound` when one is not
+held, and with `OutOfMemory`, releasing nothing, when the cut through a held
+range cannot be recorded), then **sparsely** tears down the range —
+reclaiming and zeroing only the pages that actually faulted in and skipping
+the untouched reservation pages. A teardown that fails puts the pages back;
+until the release ends, a fault on one of them waits for it — backed once the
+release fails, refused as wild once it succeeds — and no second release
+takes one. Containment, not a match
 against one `mem_map`: the release unit is the page, so a growable arena
 mapped a piece at a time hands back whatever came free at its top. Demanding
 a whole reservation left the userland heap unable to shrink at all, and —
@@ -1202,10 +1230,15 @@ so a first-party Rust program (the shell, `init`) can use `alloc`. It is a
 userland allocator — outside `kernel/mem` — but is documented here because it
 is the consumer the `mem_map` ABI exists for (§7c).
 
-- **Free-span allocator over a growable, fixed-base arena.** The heap owns one
-  contiguous virtual arena that starts at a fixed base and grows upward, one or
-  more whole pages at a time, by `mem_map`ping with `MapFlags::FIXED` at the
-  arena's current top. Freed regions are tracked as a coalesced,
+- **Free-span allocator over a growable arena in the heap region.** The heap
+  owns one contiguous virtual arena that grows upward, one or more whole pages
+  at a time, by `mem_map`ping with `MapFlags::FIXED` at the arena's current
+  top, inside the heap region the kernel names in the program's startup vector
+  (`ProcessStart::heap`, laid out by `user_windows`, §7f). The region is in no
+  window, which a `FIXED` map may not claim; `_start` places the heap there
+  before `main`, the free-span table taking its first sixteenth and the arena
+  the rest, and an allocation before then, or past the region, is refused.
+  Freed regions are tracked as a coalesced,
   address-sorted free list held *inside the allocator* (a grow-on-demand span
   table), not as intrusive links in user memory, so the bookkeeping never
   dereferences freed memory and every returned pointer is range-checked before
@@ -1333,16 +1366,31 @@ process's threads (`plans/PI.md` 5d-0-ii (b′); `plans/THREADS.md` decision 4).
   virtual window); anonymous `mem_map` is fully served for both `FIXED`
   placement (the caller names `addr_hint`) and **non-`FIXED`** placement
   (the kernel chooses the base out of the per-task heap window via
-  `LiveSpace::map_anonymous_placed`, §7f) — never a guessed base.
+  `LiveSpace::map_anonymous_placed`, §7f) — never a guessed base. A `FIXED`
+  reservation claims only address space nothing else holds — no mapped
+  page, no window, no other reservation, refused with `AlreadyExists` — and
+  the live space records it, so a release outside the heap window tears down
+  only a recorded reservation held whole: it can never reach a frame a shared
+  region, a device window, a DMA buffer or the image owns. The registry
+  refuses one over the first thread's stack span as well (`AlreadyExists`):
+  the spawn layout leaves that span's growth room unmapped, so the live space
+  knows nothing of it.
 
 Every bare-metal port wires the retention (`plans/PI.md` 5d-0-ii (b′)-2): the
 handle threads through the `admit_init` / `BuiltImage` seam as
 `Option<Arc<ProcessSpace>>`, each port's `init_spawn` / `spawn_producer`
 freezes a snapshot for the copy path **and** wraps a `LiveSpace` built from
-the same arch space, admitting through
-`spawn_user_kthread_with_stack_live`, and `kernel_main` installs `LiveMemMap` /
-`LiveMmioMap` for every port (a port that retains no live space simply fails
-those syscalls closed). A device window a user-space driver maps through
+the same arch space, admitting through `spawn_user_kthread_with_stack_live`,
+and `kernel_main` installs `LiveMemMap` / `LiveMmioMap` for every port. Every
+refusal a spawn can take before its space exists — the `rxe` parse, the
+layout, the space's CPU set, PID 1's kernel stack — is taken first, and from
+the moment the space exists it reaches its live space on every path
+(`spawn::build_retained`): a refused build, live space, snapshot, switch-in
+hook or process handle returns the image's frames and page tables, is
+audited (`ProcessSpawnFailed` with its `cause` and the allocator's free
+frames), and refuses the spawn, so no process is admitted without its live
+space. `LiveSpace::new` tears down the space it is handed when it refuses a
+window. A device window a user-space driver maps through
 `mmio_map` is given the EL0-accessible device leaf
 (`kernel/arch/aarch64::el0_device_leaf_attrs`, `AP_RW_EL0`) so the driver can
 read its own register without a permission fault (§5.2). The aarch64
@@ -1382,13 +1430,15 @@ allocator over one configured heap window, driven against a borrowed live
   the actual mapping is the audited `map_anonymous` (§7c) — one mapping path
   (`AGENTS.md` §2.2). `LiveSpace::map_anonymous_placed` reserves a base, maps
   it, and releases the reservation on a mapping failure (so a failed call
-  consumes no address space); `unmap_anonymous` validates the placement
-  record and releases its range, failing closed on a wrong base/extent before
-  any teardown (§5.4).
-- **Bump cursor + free-list, §24.1-scalable.** A bump cursor serves fresh
-  ranges and a free-list of released holes (first-fit, split on a partial
-  match) serves reuse, so the allocator's own memory is bounded by the
-  live-plus-freed region count, never the page count of the window. The
+  consumes no address space); `unmap_anonymous` checks the pages it names are
+  placed and makes room to cut them out before any teardown, so a wrong
+  base/extent fails closed (§5.4) and the release that follows needs no memory.
+- **Gaps are the free space, §24.1-scalable.** The live placements are one
+  range map and the gaps between them are the free space, so a released range
+  is available again at once and placement is first-fit; the allocator's own
+  memory is bounded by the live region count, never the page count of the
+  window, and a placement whose record the heap cannot hold is refused as
+  `AnonError::OutOfMemory` with nothing placed. The
   window is *address space*, not a physical resource, and its size is
   **derived from discovered RAM, never a hard-wired constant** (`AGENTS.md`
   §24.1): each port places it as the topmost *fixed-anchor* user region
@@ -1396,10 +1446,14 @@ allocator over one configured heap window, driven against a borrowed live
   device, DMA, and shared-memory windows) and splits the address space above
   it through `user_windows::user_windows(total_frames, base, USER_VA_TOP)` —
   the heap window tracks physical RAM (the true upper bound on backable
-  pages), clamped to half the addressable user VA above the base and floored
-  at `ANON_WINDOW_MIN_PAGES` (16 MiB) for a tiny machine, while the
+  pages), clamped to a quarter of the addressable user VA above the base and
+  floored at `ANON_WINDOW_MIN_PAGES` (16 MiB) for a tiny machine; the **heap
+  region** the runtime's heap grows in sits directly above it at the same
+  size, outside every window, and is named in the startup vector; and the
   demand-paged **file-mapping window** (§7o) takes every remaining page up
-  to the per-port user-VA ceiling. A 1 GiB machine gets the same 1 GiB heap
+  to the per-port user-VA ceiling. One split per spawn
+  (`spawn_layout::dynamic_windows`) feeds both the live space and the
+  startup vector, so the two cannot disagree. A 1 GiB machine gets the same 1 GiB heap
   window the former fixed constant gave; a large server scales up instead of
   being capped at 1 GiB. The window costs no RAM until the frame allocator
   backs a mapping — and that backing fails closed as a deterministic OOM
@@ -1474,8 +1528,10 @@ ladder, and the frame allocator's `FreeMemorySource` binding.
   overflow/underflow, never wrapping), split into the entry *payloads*
   and the per-entry bookkeeping *metadata* charged on top of them
   (`class_payload_bytes` / `class_metadata_bytes`; the budget and
-  shrink targets bound their sum), plus saturating hit/miss/insertion/
-  invalidation/eviction/refusal counters and the SMART9 event counters:
+  shrink targets bound their sum, and `resize_room` charges an index's
+  own room to the metadata apart from any entry), plus saturating
+  hit/miss/insertion/invalidation/eviction/refusal counters and the SMART9
+  event counters:
   pressure-forced shrink passes, whole-cache teardown drains, and
   detected internal failures (§7k).
 
@@ -1517,9 +1573,15 @@ properties:
   target purges the whole cache; a detected ledger imbalance poisons
   the cache (purge + admit nothing) while the driver keeps serving.
 - **Bounded and zeroing.** Payload copies are fallibly allocated
-  (`try_reserve`); oversized names are refused; and every cached buffer
-  (file bytes, names) is zeroed on invalidation, eviction, purge, and
-  teardown — cached bytes are user data, decrypted when the volume is
+  (`try_reserve`), and every index an entry is filed in makes its room
+  before anything is evicted for the entry or it is charged, so an
+  exhausted heap is a miss served from the driver with the cache exactly
+  as it was. A directory's name index is charged the room it holds; the
+  room the other indexes keep beyond their entries goes back to the heap
+  at the first operation above normal pressure, and a forced shrink fits
+  them all. Oversized names are refused; and every cached buffer (file
+  bytes, names) erases itself as it is let go, on whichever path lets it
+  go — cached bytes are user data, decrypted when the volume is
   encrypted, that must not linger in reusable heap memory.
 - **Read size is a cost, never an admission rule.** Every read is
   cached whatever its length: a read's size decides how its miss is
@@ -1674,7 +1736,12 @@ with it, once per *cluster*.
   obeys `growth_permitted`, and every operation first applies the
   band's `shrink_target`: the class is preserved at mild pressure and
   drained to zero from moderate on, before `ramzip` is handed anything
-  (§7h).
+  (§7h). A cluster the heap cannot index is not retained — its copy and
+  index room are had before anything is evicted for it or charged — and
+  room the indexes keep beyond their entries goes back to the heap at the
+  first operation above normal pressure. A cache the heap cannot build at
+  all — its ledger, or the cell two mounts share it through — refuses the
+  mount it was for rather than aborting the kernel.
 - **Coherent by construction.** Entries are keyed by the cluster's
   first stored physical block and carry the run length. Every block
   free in the driver funnels through one choke point, which invalidates
@@ -1764,7 +1831,9 @@ arch-neutral memory-statistics registry
 (`kernel/core::memstats::MEM_STATS`): the boot path publishes the single
 system pressure gauge through it, every production cache registers its
 `CacheLedger` at construction (observation-only, lock-free reads of
-saturating diagnostics), and the process-global `ramzip` tier's stats
+saturating diagnostics) and is refused construction when the registry
+cannot list it, so no cache spends memory the reclaim decision cannot see,
+and the process-global `ramzip` tier's stats
 feed is installed there by the boot path
 (`memstats::install_global_ramzip_stats`, reading
 `ramzip::global_stats`, §7p) — reporting a truthful idle all-zero tier
@@ -1934,7 +2003,10 @@ calling task across a completion interrupt.
   at mild pressure and drained to zero from moderate on, before any
   `ramzip` handoff; growth only at normal pressure and never into the
   reserve. Inserts over the hard limit evict least-recently-used
-  blocks down to the low watermark (hysteresis).
+  blocks down to the low watermark (hysteresis). A block the heap cannot
+  index is not retained — the read is served all the same, and nothing is
+  evicted for it — and room the indexes keep beyond their entries goes
+  back to the heap at the first operation above normal pressure.
 - **Coherence.** The cache sits on the device side of the sharing
   lock, so it observes every operation any window issues, serialised:
   a successful write refreshes the cached copies of the written blocks
@@ -1995,8 +2067,9 @@ bypass-resets-the-run, a window clamped to what the budget retains,
 coalesced-fault fallback, and a bad block read once ahead of a stream
 rather than once per request), LRU eviction with
 hysteresis, per-band growth/shrink/drain enforcement with recovery,
-zero-backing refusal, uncacheable-geometry poisoning with the device
-still serving, the closed audit field shape, and wipe-in-place.
+zero-backing refusal, a block the heap cannot index served from the device
+and not kept, uncacheable-geometry poisoning with the device still
+serving, the closed audit field shape, and wipe-in-place.
 
 ## 7n. The encrypted compressed anonymous-memory tier (`ramzip`)
 
@@ -2159,8 +2232,9 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   user task's own bad instruction never parks the core.
 - **Fail closed, kill the task not the machine.** An address outside every
   region, a page wholly at/past end-of-file (the `SIGBUS` analogue), a
-  filesystem error, or frame exhaustion terminates the *faulting task*: the
-  hook records exit code 139 (`128 + SIGSEGV`), reclaims exactly what
+  filesystem error, a page the heap has no room to stage, or frame
+  exhaustion terminates the *faulting task*: the hook records exit code 139
+  (`128 + SIGSEGV`), reclaims exactly what
   `exit`/signal-kill reclaim, and the port suspends it with an `Exit`
   action. The kill is audited with the stable `TaskFaultKilled` event
   (kernel/core id 4034): task id plus a coarse `fault_class`
@@ -2344,9 +2418,11 @@ are a fairness bound rather than the safety bound.
   audited, no plaintext) and `ramzip_reclaim` (candidate set = resident
   *placed-anonymous* pages the heap-window allocator proves anonymous;
   `ColdPageScanner` decides cold, failing closed on a non-`Supported`
-  backend; the tier's own gates admit). `LiveSpace::drop` purges the
-  global tier of the dead space's entries (no leak of RAM or ledger
-  charge).
+  backend; the tier's own gates admit). Releasing an anonymous range purges
+  the tier's copies of its pages (`Ramzip::purge_range`), so none is restored
+  into whatever is mapped there next and none keeps its charge, and
+  `LiveSpace::drop` purges the global tier of the dead space's entries (no
+  leak of RAM or ledger charge).
 - **Fault path.** `kernel/core::resolve_user_fault` offers
   `resolve_ramzip_fault` **before** the anonymous handler — a compressed
   page is reserved anonymous memory the anon handler would otherwise

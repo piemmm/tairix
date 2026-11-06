@@ -55,16 +55,17 @@ waits on a disk), `plans/NEW-MENUS.md` (session-owned menus and submenus),
 | FI29 | List: one row per entry under a header — name, size, modified, type; a drive states its free space, filesystem and health | done |
 | FI30 | No activate-then-close command: the context menu's Open and Close row and its hand-off rule are deleted | done |
 | FI31 | The context menu names what it acts on: Display ▸, then the selection's own submenu holding the item verbs, New ▸, Select All, Clear Selection and Paste; Properties is Get Info… | done |
-| FI32 | A shift-double-click leaves what it opened elsewhere deselected, and an activation the engine refuses is stated over the window | done |
+| FI32 | A double-click that hands its item elsewhere — a document to its application, an application started or reached, a disk image mounted — leaves it deselected once that went ahead, and an activation the engine refuses is stated over the window | done |
 | FI33 | A path naming a file is shown selected in the folder holding it, in a window already showing that folder where there is one | done |
 | FI34 | An icon landing repaints only the tiles drawn through it, in the windows that show them; a copied tree is pictured once it is whole; every window shares one cache that keeps what it decoded | done |
 | FI35 | Display ▸ also orders the window: by every key its columns show, ascending or descending; where folders stand is a setting | done |
 | FI36 | The List view pictures each entry as the icon views do: an application's own icon, a folder's contents, a picture's thumbnail | done |
 | FI37 | The Home place is the full-colour Home folder wherever a place is pictured, the icon-bar menu included | done |
-| FI38 | A name may be shown without the ending the settings hide — an application's `.app` by default — and renames with it restored; items whose names begin with a dot are listed only when asked | done |
+| FI38 | A name may be shown without the ending the settings hide — an application's `.app` by default, never one whose hiding leaves another type's or application's name — orders as shown, and renames with it restored; items whose names begin with a dot are listed only when asked | done |
 | FI39 | An untyped file typed by its content, read lazily for entries in view (a sprite area by the length its header states, as `tairix_image::recognise` does), so it shows its type's icon, opens in, and drops onto the application that claims that type | planned |
 | FI40 | A volume that leaves takes its windows to the place above it at once; one disconnected without being ejected is stated in one alert for every volume that went together, by the kernel's word; a re-read its device refused is decided by the mount table, stated once a volume; windows that come to one place leave one window there | done |
 | FI41 | A carried drag shows what it carries as the listing does: one item as its large tile held where it was pressed, several as a gathering stack of smaller pictures wearing their count, the pressed entry in front | done |
+| FI42 | A dragged application, command or RISC OS application shows its own picture, alone or in a mixed selection; thumbnails and folder fans stay class pictures | done |
 
 ## FI1 — item names one point smaller
 
@@ -246,24 +247,30 @@ source, are new.
   the count, and whether the drag is one openable file (`DragItems`); an
   icon-bar slot is offered only to that last kind. A drag of a selected entry
   carries the selection, the entry pressed leading (`gesture::drag_order`).
-- **The drag shows what it carries as the listing does** (FI41). Each of the
-  first `DRAG_SHOWN_MAX` items crosses as its class picture and where that
-  picture stood from the press, the lead with the ending the window hides: the
-  session shows one item as its large tile, held where it was pressed, and
+- **The drag shows what it carries as the listing does** (FI41, FI42). Each
+  of the first `DRAG_SHOWN_MAX` items crosses as its class picture and where
+  that picture stood from the press, the lead with the ending the window hides:
+  the session shows one item as its large tile, held where it was pressed, and
   several as a stack of smaller pictures gathering from where they stood, the
-  front card wearing the count (`docs/src/desktop/session.md`). Bundle icons,
-  thumbnails, folder content cards and sprites do not cross — they would need
-  a path or the window's pixels to — so the class picture stands in.
+  front card wearing the count (`docs/src/desktop/session.md`). A bundle or a
+  RISC OS application also crosses its own picture by its path, a shortcut to
+  one by the path it resolves to (`tairix_browse::media::drag_picture`,
+  `DragOwnIcon`), which the session draws under its own identity. Thumbnails
+  and folder content cards do not cross — a whole file's decode for a picture
+  shown a second, or one no path names — so the class picture stands in.
 - **The source decides every folder drop.** While the pointer is over one of
   the source client's own windows (the engine's attested ownership decides),
   or over the desktop, the session reports where — once per input batch,
   numbered, with `Shift` (`WindowEvent::DragOver`) — and the source answers
   (`WindowRequest::DragVerdict`: refuse, copy, or move). Over the desktop the
   session holds the folder the pointer is on — the Desktop folder, or a folder
-  icon on it — for the report that named it (`QueryDragSpot`), so the source
+  icon on it — for every report of that place (`QueryDragSpot`), so the source
   can refuse a drop into the folder the items came from or into one of the
-  items themselves. One policy decides the operation: copy, or move with
-  Shift (`tairix_browse::drop_operation`).
+  items themselves, and never answers a report whose folder it cannot read.
+  Tested by the engine holding a desktop folder for every report of its place,
+  and by the desktop that Settings laid out again mid-drag asking its source
+  once (`lib/window`, `userland/gui/session`). One policy decides the
+  operation: copy, or move with Shift (`tairix_browse::drop_operation`).
 - **The pointer shows the verdict.** `CursorKind::DragCopy` and `DragMove` are
   the arrow with a copy or move badge, in the built-in set and every shipped
   set; the session holds the pointer in the shape the latest current answer
@@ -279,7 +286,11 @@ source, are new.
   interleaved, cancellable transfer Paste uses, under its own authority, after
   asking the policy again. No path of the source's and no authority crosses to
   the session; the only path that crosses is the session's own Desktop folder,
-  which confers nothing.
+  which confers nothing. A drop on the desktop is stepped around each item,
+  in drag order from the lead — the name announced before its first write,
+  then what became of it — and ended on every way the paste or the shortcuts
+  end (`WindowRequest::DropLanding`, `landing::DropLanding`), so each lands
+  where it was let go.
 - **Where it would land is lit.** The target window lights the folder under
   the pointer (`Browser::set_drop_mark`, `render::drop_folder_at`) and the
   desktop its folder icon, while the answer accepts it, in the one drop-target
@@ -812,18 +823,23 @@ carries one) and holds no row. Properties is renamed Get Info… and its window
 is titled `name — Info`, spelled the same way, so no name can refuse it a
 title.
 
-## FI32 — a shift-double-click deselects
+## FI32 — a double-click that opens elsewhere deselects
 
-A double-click activates its item (`gesture::PrimaryPress::Activate`), and its
-intent and what it leaves selected are the gesture's: shift lists a bundle's
-contents, and leaves an item that opened somewhere else — a file in its
-application — deselected. A plain double-click keeps the item selected, and
-`Shift+Enter` keeps the selection the keyboard moves from. The repaint is the
-selection marks that changed from before the pair's second press
-(`listing::ViewMark`), since its first may have selected more than the item. A
-refused activation — a link naming nothing, a folder that cannot be listed — is
-stated in an alert over the window (`notice::not_opened`), and nothing chosen is
-no refusal.
+A double-click activates its item (`gesture::PrimaryPress::Activate`), shift
+asking a bundle for its contents. One whose activation hands the item to
+something outside the window — a document to its application, an application
+started or reached, a disk image mounted — carries a `handoff::Handoff` (the
+window, and the entry as it listed it) with the open, and the answer that it
+went ahead brings it back (`handoff::Handoffs`: once, never for a refusal, an
+image's mount paired by the number its attach carries, so no other ask of the
+image settles it). The loop then deselects the item
+(`Browser::deselect_handed`) while it is still, by
+its path and node, the one item chosen and nothing holds the listing,
+repainting only its mark (`listing::ViewMark`). Descending, browsing a bundle
+and every refusal leave the selection alone, as do `Enter`, `Shift+Enter` and
+the menu's Open. A refused activation — a link naming nothing, a folder that
+cannot be listed — is stated in an alert over the window, naming the item as
+the window shows it, and nothing chosen is no refusal.
 
 ## FI33 — a file is shown in its folder
 
@@ -900,12 +916,22 @@ symbol stays the monochrome house every command is drawn with.
 without, `hidden_items` (names beginning with a dot, `tairix_path::is_hidden_name`
 — the rule `ls` and filename completion share), and `Pictures` (a picture as
 its content, a folder as what it holds). The file manager sets it from its
-settings (`plans/NEW-FILEMANAGER.md` FM23); the desktop and the trusted picker
-keep `Presentation::EXACT`. A hidden ending is display only: the tile, the row,
+settings (`plans/NEW-FILEMANAGER.md` FM23), and the desktop shows the same
+endings hidden and leaves out the same hidden items; the trusted picker keeps
+`Presentation::EXACT`. A hidden ending is display only: the tile, the row,
 the selection label and the marquee's cached parts read the shown name, the
 rename field holds it and `renamed` restores what it hid, and every operation
-acts on the exact name. A hidden item is left out as a listing is adopted,
-merged or reloaded, so nothing reaches it from the window.
+acts on the exact name. An ending is hidden only where what is left is neither
+a typed name nor a bundle's (`invoice.pdf.app` and `archive.tar.gz` show
+whole), so no name is shown as one it is not. A listing orders by the names
+shown (`sort::Order`, the exact name breaking a tie) in the full sort, a
+re-sort and a watch's merge alike, and a change of the endings re-sorts it,
+the selection kept. The window's own sentences name an item as it shows it —
+the delete question, a removal's progress, an activation refused — while
+Info's Name field, every path, a refusal naming a node an operation reached,
+and an alert holding no window keep the exact name. A hidden item is left out
+as a listing is adopted, merged or reloaded, so nothing reaches it from the
+window.
 
 ## Sequencing
 

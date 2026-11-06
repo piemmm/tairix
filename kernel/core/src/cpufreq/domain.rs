@@ -345,8 +345,10 @@ pub(crate) trait TargetWaiter {
     /// The kernel monotonic clock, in nanoseconds.
     fn now_ns(&self) -> u64;
     /// Park the calling task until woken or until `deadline_ns`
-    /// ([`crate::waitq::NO_DEADLINE`] for no timed wake).
-    fn park(&self, deadline_ns: u64);
+    /// ([`crate::waitq::NO_DEADLINE`] for no timed wake), reporting whether it
+    /// parked.
+    #[must_use]
+    fn park(&self, deadline_ns: u64) -> bool;
     /// Whether a termination is pending against the calling task, which
     /// unwinds the wait so the kill lands at the syscall boundary.
     fn kill_pending(&self) -> bool;
@@ -418,6 +420,8 @@ fn review(process: ProcessId, handle: u64, now_ns: u64) -> Result<(u64, u64, u64
 /// * [`Errno::NotFound`] — `handle` is not `process`'s live binding,
 ///   including after the binding was released underneath the waiter.
 /// * [`Errno::Interrupted`] — a termination unwound the wait.
+/// * [`Errno::NotImplemented`] — the caller cannot be parked, so the wait
+///   ends rather than spin.
 pub(crate) fn wait(
     process: ProcessId,
     handle: u64,
@@ -430,7 +434,9 @@ pub(crate) fn wait(
         if seq != last_seq {
             return Ok(CpuFreqTarget { seq, target_hz });
         }
-        waiter.park(review_at);
+        if !waiter.park(review_at) {
+            return Err(Errno::NotImplemented);
+        }
         if waiter.kill_pending() {
             return Err(Errno::Interrupted);
         }

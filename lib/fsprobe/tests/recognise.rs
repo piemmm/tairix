@@ -15,8 +15,8 @@ use tairix_abi::volume::VolumeFsType;
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
 use tairix_fsprobe::{
-    adfs, affs, fingerprint, iso9660, recognise, udf, Evidence, ProbedVolume, Recognised,
-    ARXFS_RING_BLOCKS, FAT_ATTR_LONG_NAME, FAT_ATTR_VOLUME_ID, FAT_DELETED_ENTRY,
+    adfs, affs, fingerprint, iso9660, recognise, twin_identity, udf, Evidence, ProbedVolume,
+    Recognised, ARXFS_RING_BLOCKS, FAT_ATTR_LONG_NAME, FAT_ATTR_VOLUME_ID, FAT_DELETED_ENTRY,
     FAT_DIR_ENTRY_LEN,
 };
 use tairix_test_amiga_image::rdb_disk;
@@ -273,6 +273,85 @@ fn recognises_arxfs_and_refuses_a_nil_uuid() {
     assert_eq!(fstype(&wrong_type), None);
 }
 
+/// An `ARXFS` title field holds a title exactly and nothing else: a length
+/// past the field, a byte past the length, or text that is no title is no
+/// field a writer leaves.
+#[test]
+fn an_arxfs_title_field_holds_a_title_exactly() {
+    use tairix_abi::driver::filesystem::VolumeTitle;
+    use tairix_fsprobe::{arxfs_title, arxfs_title_field, ARXFS_TITLE_LEN};
+    let title = VolumeTitle::new("Café ").expect("a title");
+    let field = arxfs_title_field(&title);
+    assert_eq!(arxfs_title(&field), Some(title));
+    assert_eq!(
+        arxfs_title(&[0u8; ARXFS_TITLE_LEN]),
+        Some(VolumeTitle::EMPTY)
+    );
+    let mut long = field;
+    long[0] = 253;
+    assert_eq!(arxfs_title(&long), None, "a length past the field");
+    let mut trailing = field;
+    trailing[ARXFS_TITLE_LEN - 1] = 1;
+    assert_eq!(arxfs_title(&trailing), None, "a byte past the length");
+    let mut control = field;
+    control[1] = b'\n';
+    assert_eq!(arxfs_title(&control), None, "a control character");
+    let mut broken = field;
+    broken[1] = 0xFF;
+    assert_eq!(arxfs_title(&broken), None, "no text");
+}
+
+/// An `ARXFS` volume is titled from its ring's newest slot, kept exactly: a
+/// slot naming another volume, or whose title field no writer leaves, is
+/// passed over, and a block size the format does not allow places no slot.
+#[test]
+fn an_arxfs_volume_is_titled_from_its_newest_slot() {
+    use tairix_abi::driver::filesystem::VolumeTitle;
+    use tairix_fsprobe::{
+        arxfs_title_field, ARXFS_GENERATION_AT, ARXFS_HEADER_MAGIC, ARXFS_TITLE_AT, ARXFS_TITLE_LEN,
+    };
+    const BS: usize = 512;
+    let uuid = [9u8; 16];
+    let other = [7u8; 16];
+    let mut bytes = vec![0u8; 8 * BS];
+    let slots: [(u64, &[u8; 16], &str); 4] = [
+        (1, &uuid, "Old"),
+        (3, &uuid, "Newest "),
+        (2, &uuid, "Middle"),
+        (9, &other, "Foreign"),
+    ];
+    for (at, (generation, owner, title)) in slots.into_iter().enumerate() {
+        let slot = &mut bytes[at * 2 * BS..][..BS];
+        slot[..8].copy_from_slice(&ARXFS_HEADER_MAGIC.to_le_bytes());
+        slot[8..12].copy_from_slice(&1u32.to_le_bytes());
+        slot[16..32].copy_from_slice(owner);
+        slot[ARXFS_GENERATION_AT..ARXFS_GENERATION_AT + 8]
+            .copy_from_slice(&generation.to_le_bytes());
+        slot[128..132].copy_from_slice(&(BS as u32).to_le_bytes());
+        let field = arxfs_title_field(&VolumeTitle::new(title).expect("a title"));
+        slot[ARXFS_TITLE_AT..ARXFS_TITLE_AT + ARXFS_TITLE_LEN].copy_from_slice(&field);
+    }
+    assert_eq!(
+        recognised(&bytes).expect("matches").label(),
+        b"Newest ",
+        "kept exactly, its field having no padding"
+    );
+    let mut torn = bytes.clone();
+    torn[2 * BS + ARXFS_TITLE_AT + 8] = b'x';
+    assert_eq!(
+        recognised(&torn).expect("matches").label(),
+        b"Middle",
+        "a field no writer leaves is passed over"
+    );
+    let mut lying = bytes;
+    lying[128..132].copy_from_slice(&768u32.to_le_bytes());
+    assert_eq!(
+        recognised(&lying).expect("still the volume").label(),
+        b"",
+        "a block size the format forbids places no slot"
+    );
+}
+
 #[test]
 fn the_arxfs_ring_is_sized_by_its_block_size() {
     for bs in [512u32, 4096] {
@@ -324,6 +403,21 @@ fn fingerprint_is_deterministic_lowercase_and_distinct() {
     assert_eq!(fingerprint(&[0xFF; 16]), b);
     for c in *b"ilou" {
         assert!(!b.contains(&c));
+    }
+}
+
+#[test]
+fn a_twin_is_keyed_by_its_attachment_and_never_by_its_identity() {
+    let identity = [0x5C; 16];
+    let key = twin_identity(&identity, 1);
+    assert_eq!(key, twin_identity(&identity, 1), "one attachment, one key");
+    for other in [
+        identity,
+        twin_identity(&identity, 2),
+        twin_identity(&[0x5D; 16], 1),
+        [0; 16],
+    ] {
+        assert_ne!(key, other, "{other:?}");
     }
 }
 

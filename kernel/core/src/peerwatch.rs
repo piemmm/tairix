@@ -39,7 +39,7 @@ use tairix_kernel_sched_api::TaskId;
 use tairix_kernel_sec::{CapTable, ProcessId, Removed};
 use tairix_sync::{RwLock, SpinLock};
 
-use crate::waitq::{wait_arch, WaitQueue, NO_DEADLINE};
+use crate::waitq::{wait_arch, WaitQueue, WaitRefused, NO_DEADLINE};
 
 /// One watching thread's watches and the exits it has not taken.
 struct Watcher {
@@ -228,8 +228,12 @@ impl PeerWatch {
 
     /// Park `watcher` for its next exit, alongside its wait-set's other
     /// sources. Idempotent.
-    pub fn join(&self, watcher: TaskId) {
-        self.parked.register(watcher, NO_DEADLINE);
+    ///
+    /// # Errors
+    ///
+    /// [`WaitRefused`] when there is no room to register; nothing is.
+    pub fn join(&self, watcher: TaskId) -> Result<(), WaitRefused> {
+        self.parked.register(watcher, NO_DEADLINE)
     }
 
     /// Stop parking `watcher` for an exit.

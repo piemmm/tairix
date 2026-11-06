@@ -97,9 +97,18 @@ granted, the deadline passes (`TimedOut`), a signal unwinds it
 
 `LockFlags::NONBLOCK` reports `WouldBlock` instead of waiting.
 
+A request the kernel cannot find the memory for is refused `OutOfMemory`
+with nothing recorded: an acquisition, a place in the queue, the wait that
+parks on it, or an unlock that cuts a record. An unlock of whole records needs none, and neither does
+a description's release, so a caller can always let go; a release that
+cannot list whom it frees wakes every waiter on the file instead, each
+re-testing its own request.
+
 Waking is targeted: a release wakes only the waiters whose blocked ranges
 the freed bytes overlap, so releasing one range never disturbs a waiter
-queued on a disjoint one.
+queued on a disjoint one. A waiter that leaves without its lock — timed out,
+signalled, or refused — wakes those queued on ranges it overlaps, whose wait
+its place in the queue may have been all that held up.
 
 ### Fairness
 
@@ -122,10 +131,16 @@ Two deliberate exemptions:
 ### Deadlock
 
 A blocking request whose grant would close a cycle is refused with
-`Deadlock` rather than joining a wait none of the participants could leave.
+`Deadlock` rather than joining a wait none of the participants could leave,
+whether a holder is in its way or only an earlier-queued waiter, which may
+itself be waiting on a record the requester holds.
 The search is an iterative breadth-first walk of the wait-for graph,
 bounded by the owners it has already visited, so it neither recurses on a
-depth a hostile process chooses nor expands an owner twice.
+depth a hostile process chooses nor expands an owner twice. Its edges are
+the conflicts acquisition itself decides — a waiter waits for the holders in
+its way and the waiters queued ahead of it, never one behind it, and a
+conversion for holders alone — so any number of waiters queued behind one
+holder is an ordinary wait, not a cycle.
 
 Because owners are descriptions, the graph sees a cycle whenever each
 participant blocks and holds through the same description — which is what a
@@ -173,7 +188,10 @@ Consequently a descriptor whose backing has no file to lock fails closed:
 
 Per file the authoritative state is one non-overlapping ordered record set
 *per owner*. Conflict detection reads two projections of it: an ordered map
-of every exclusive record on the file, and a count of the shared ones.
+of every exclusive record on the file, and a count of the shared ones. Both
+change with each record an operation adds or removes rather than being
+rebuilt, so an operation costs the records it touches, not the records the
+file holds.
 
 Exclusive records cannot overlap each other — that is what exclusivity
 means — so that map is non-overlapping and an interval query over it is an
@@ -184,6 +202,11 @@ exclusive. Only an exclusive request on a file that *does* hold shared
 records walks owners, and it stops at the first conflict — a walk over
 participants rather than records, bounded by the resource limit that
 charges for them.
+
+The registry's other indexes — by owner, by charged process, by waiting
+task — are ordered maps too. Which of those stay is up to what users keep
+locking, so no lookup's cost depends on how the ids fall, and the deadlock
+search's walk of the waiters costs the waiters still queued.
 
 Closing a file pays one relaxed atomic load while nothing in the system is
 locked, so the common case is untouched.

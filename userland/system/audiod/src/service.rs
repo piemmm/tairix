@@ -14,9 +14,11 @@
 //! one routing policy from the kernel-attested origin — at open, and again for
 //! every live stream each time the seat's lease moves. Opening a *source*
 //! additionally demands `CAP_AUDIO_CAPTURE`, read from the caller's attested
-//! capability summary and never from anything the caller said. A stream id is
-//! a service-issued token checked against the attested pid, so a guessed id
-//! reaches nothing.
+//! capability summary and never from anything the caller said. A sink's
+//! monitor demands that and the caller's session holding the room the sink
+//! serves — never an unclaimed room, which anybody may play into — and is
+//! held whenever its session does not. A stream id is a service-issued token
+//! checked against the attested pid, so a guessed id reaches nothing.
 //!
 //! A notification may be played for the machine, or for a session other than
 //! the caller's, only by the cue authority, which the kernel attests by its
@@ -38,20 +40,20 @@ use tairix_abi::appinfo::BundleId;
 use tairix_abi::audio::{
     encode_clock_reply, encode_enumerate_reply, encode_open_reply, encode_state_reply,
     encode_streams_reply, notify_endpoint_for, AudioBaseline, AudioDeviceDescriptor, AudioGain,
-    AudioNotify, AudioRequest, ControlAccess, DefaultChoice, OpenParams, StreamDescriptor,
-    StreamGrant, StreamReport, StreamRole, StreamState, Tenancy, AUDIO_MAX_REPLY,
+    AudioNotify, AudioRequest, CaptureSource, ControlAccess, DefaultChoice, OpenParams,
+    StreamDescriptor, StreamGrant, StreamReport, StreamRole, StreamState, Tenancy, AUDIO_MAX_REPLY,
     MAX_CLIENT_STREAM_SLOTS,
 };
 use tairix_abi::driver::audio::{
-    ring_bounds, Frames, JackState, StreamDirection, MAX_DEVICE_ENDPOINTS,
+    ring_bounds, AudioEndpointFacts, Frames, JackState, Rate, StreamDirection, MAX_DEVICE_ENDPOINTS,
 };
-use tairix_abi::driver::audio_channel::AudioChannelNotify;
+use tairix_abi::driver::audio_channel::{AudioChannelNotify, ConfigureParams};
 use tairix_abi::driver::audio_ring::PcmGeometry;
 use tairix_abi::origin::Origin;
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::seat::DisplayLease;
 use tairix_abi::sound_cue::from_cue_authority;
-use tairix_abi::time::MonotonicClock;
+use tairix_abi::time::{MonotonicClock, Time64};
 use tairix_abi::{CapabilityId, Errno};
 use tairix_audio::route::{
     self, Admission, Principal, Roles, Room, Routing, SinkState, StreamRequest,
@@ -174,7 +176,8 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         );
     }
 
-    /// Capture streams moving frames: what the recording indicator shows.
+    /// Capture streams moving frames, a sink's monitors among them: what the
+    /// recording indicator shows.
     #[must_use]
     pub fn live_captures(&self) -> u32 {
         let live = self
@@ -188,7 +191,13 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
     /// What the room does with the `index`th stream.
     fn admission(&self, index: usize, room: Room) -> Admission {
         let stream = &self.streams[index];
-        route::admit(stream.direction, stream.role, stream.principal, room)
+        admission_of(
+            stream.monitor,
+            stream.direction,
+            stream.role,
+            stream.principal,
+            room,
+        )
     }
 
     /// Hold or release the `index`th stream for the room, which was
@@ -939,7 +948,13 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                 let Some(slot) = self.endpoint_slot(device, endpoint) else {
                     return;
                 };
-                if let Some(active) = self.active_mut(device, slot) {
+                // A pair reported while the endpoint is not clocking, or sampled
+                // before its configuration was attached, is a configuration's it
+                // no longer runs, and would poison this one's.
+                if let Some(active) = self
+                    .active_mut(device, slot)
+                    .filter(|active| active.running && sampled_at >= active.attached_at)
+                {
                     active.position = position;
                     let _ = active.clock.observe(position, sampled_at);
                 }
@@ -1006,8 +1021,9 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         }
     }
 
-    /// Move whatever frames the endpoint can take or give, and pass a
-    /// completed drain down to the device.
+    /// Move whatever frames the endpoint can take or give, settle it where a
+    /// stream reached its stop, played out a drain beside a monitor or was
+    /// faulted, and pass any other completed drain down to the device.
     ///
     /// A pump that faults marks the device lost: retrying into a device that
     /// just faulted would storm it, and the streams' positions are intact.
@@ -1040,7 +1056,9 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                 return;
             }
         };
-        if self.settle_stops(device_index, slot) {
+        let stopped = self.settle_stops(device_index, slot);
+        let played_out = self.settle_played_out(device_index, slot);
+        if stopped || played_out || pumped.faulted {
             self.quiesce_endpoint(device_index, slot, sink);
         }
         if pumped.drained {
@@ -1058,12 +1076,35 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         {
             return;
         }
+        self.release_configuration(device_index, slot);
+    }
+
+    /// Give endpoint `slot` of the `device_index`th device back to its
+    /// driver, with every share its streams held of the configuration's phase
+    /// banks, so a stream left on it holds nothing of the next.
+    fn release_configuration(&mut self, device_index: usize, slot: usize) {
         let Self {
-            devices, regions, ..
+            devices,
+            regions,
+            streams,
+            ..
         } = self;
-        if let Some(device) = devices.get_mut(device_index).and_then(Option::as_mut) {
-            device::release_endpoint(device, slot, regions);
+        let Some(device) = devices.get_mut(device_index).and_then(Option::as_mut) else {
+            return;
+        };
+        if let Some(active) = device
+            .endpoints
+            .get_mut(slot)
+            .and_then(|endpoint| endpoint.active.as_mut())
+        {
+            for stream in streams
+                .iter_mut()
+                .filter(|stream| stream.on(device_index, slot))
+            {
+                device::release_stream_bank(active, stream);
+            }
         }
+        device::release_endpoint(device, slot, regions);
     }
 
     /// Read endpoint `slot`'s facts again, as a changed connector asks. Its
@@ -1099,41 +1140,50 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         endpoint.control = facts.gain;
         endpoint.facts = facts;
         if !admitted {
-            self.lose_endpoint(device_index, slot, sink);
+            self.lose_endpoint(
+                device_index,
+                slot,
+                "an endpoint's facts changed under its streams; they hold their positions",
+                sink,
+            );
         }
         self.apply_level(device_index, slot, sink);
         self.refresh_defaults(sink);
         self.changed();
     }
 
-    /// Endpoint `slot`'s facts no longer admit its streams' configuration:
-    /// they hold their positions as lost, and the endpoint is released.
-    fn lose_endpoint(&mut self, device_index: usize, slot: usize, sink: &dyn Sink) {
-        let Self {
-            notifier,
-            devices,
-            streams,
-            regions,
-            ..
-        } = self;
-        let Some(device) = devices.get_mut(device_index).and_then(Option::as_mut) else {
+    /// Endpoint `slot` can no longer run the configuration its streams run
+    /// under, for `why`: they hold their positions as lost, and the endpoint
+    /// is released.
+    fn lose_endpoint(
+        &mut self,
+        device_index: usize,
+        slot: usize,
+        why: &'static str,
+        sink: &dyn Sink,
+    ) {
+        let Some(device) = self.devices.get(device_index).and_then(Option::as_ref) else {
             return;
         };
+        let channel = device.channel_endpoint;
+        let index = device.endpoints.get(slot).map_or(0, |e| e.index);
+        let Self {
+            notifier, streams, ..
+        } = self;
         for stream in streams.iter_mut().filter(|s| s.on(device_index, slot)) {
             let at = stream.position;
             stream.set_state(StreamState::DeviceLost, at, notifier);
         }
-        let index = device.endpoints.get(slot).map_or(0, |e| e.index);
-        device::release_endpoint(device, slot, regions);
+        self.release_configuration(device_index, slot);
         audit(
             sink,
             events::ENDPOINT_CHANGED,
             Level::Warn,
-            "an endpoint's facts changed under its streams; they hold their positions",
+            why,
             &[
                 Field {
                     key: "channel",
-                    value: FieldValue::UnsignedInt(device.channel_endpoint),
+                    value: FieldValue::UnsignedInt(channel),
                 },
                 Field {
                     key: "endpoint",
@@ -1207,8 +1257,43 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         settled
     }
 
-    /// Every draining stream on the endpoint has given up its last frame:
-    /// pass the drain down and settle the streams.
+    /// Move every draining stream on the endpoint whose last frame the device
+    /// has reached to `Idle`, while a monitor keeps it clocking — a sink is
+    /// never drained beneath a monitor, so its position is what says a sound
+    /// was played out — answering whether any was.
+    fn settle_played_out(&mut self, device_index: usize, slot: usize) -> bool {
+        let Some(reached) = self
+            .endpoint(device_index, slot)
+            .and_then(|endpoint| endpoint.active.as_ref())
+            .map(|active| active.position)
+        else {
+            return false;
+        };
+        if !self
+            .streams
+            .iter()
+            .any(|stream| stream.hears(device_index, slot))
+        {
+            return false;
+        }
+        let Self {
+            notifier, streams, ..
+        } = self;
+        let mut settled = false;
+        for stream in streams.iter_mut() {
+            let ended = stream.drain_end.is_some_and(|end| reached >= end);
+            if ended && stream.on(device_index, slot) && stream.is_draining() && !stream.held {
+                let at = stream.position;
+                stream.set_state(StreamState::Idle, at, notifier);
+                settled = true;
+            }
+        }
+        settled
+    }
+
+    /// Every draining stream on the endpoint has given up its last frame and
+    /// no monitor keeps it clocking: pass the drain down and settle the
+    /// streams.
     fn finish_drain(&mut self, device_index: usize, slot: usize) {
         let Self {
             devices,
@@ -1345,6 +1430,11 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             );
             return Err(Errno::PermissionDenied);
         };
+        if let (StreamDirection::Capture, CaptureSource::Monitor(monitored)) =
+            (params.direction, CaptureSource::of(params.device_id))
+        {
+            return self.open_monitor(caller, principal, params, monitored, sink);
+        }
         let capture = params.direction == StreamDirection::Capture;
         if capture && !caller.capabilities().holds_cap(CapabilityId::AUDIO_CAPTURE) {
             Self::audit_capture(
@@ -1366,7 +1456,12 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                 return Err(err);
             }
         };
-        let opened = self.build_stream(caller, principal, params, device_index, slot);
+        let landing = Landing {
+            device: device_index,
+            slot,
+            monitor: false,
+        };
+        let opened = self.build_stream(caller, principal, params, landing, sink);
         match opened {
             Ok(grant) => {
                 if capture {
@@ -1392,6 +1487,68 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                 Err(err)
             }
         }
+    }
+
+    /// Open a monitor of the sink `monitored` names — zero for the default
+    /// sink — for a caller holding the capture capability whose own session
+    /// holds the room the sink serves, recording each decision against who
+    /// took it.
+    fn open_monitor(
+        &mut self,
+        caller: &Origin,
+        principal: Principal,
+        params: &OpenParams,
+        monitored: u32,
+        sink: &dyn Sink,
+    ) -> Result<StreamGrant, Errno> {
+        if !caller.capabilities().holds_cap(CapabilityId::AUDIO_CAPTURE) {
+            Self::audit_capture(
+                sink,
+                caller,
+                events::MONITOR_REFUSED,
+                "no capture capability",
+            );
+            return Err(Errno::PermissionDenied);
+        }
+        if monitor_admission(principal, self.room) != Admission::Mix {
+            Self::audit_capture(
+                sink,
+                caller,
+                events::MONITOR_REFUSED,
+                "the room is not the caller's",
+            );
+            return Err(Errno::SeatNotOwner);
+        }
+        let opened = self.monitored_sink(monitored).and_then(|(device, slot)| {
+            let landing = Landing {
+                device,
+                slot,
+                monitor: true,
+            };
+            self.build_stream(caller, principal, params, landing, sink)
+        });
+        match opened {
+            Ok(grant) => {
+                Self::audit_capture(sink, caller, events::MONITOR_OPENED, "monitor stream open");
+                Ok(grant)
+            }
+            Err(err) => {
+                Self::audit_capture(sink, caller, events::MONITOR_REFUSED, "sink unavailable");
+                Self::audit_refusal(sink, params, "the sink could not be monitored", err);
+                Err(err)
+            }
+        }
+    }
+
+    /// The sink a monitor of `monitored` hears: the one it names, or the
+    /// default sink for zero.
+    fn monitored_sink(&self, monitored: u32) -> Result<(usize, usize), Errno> {
+        let device_id = match monitored {
+            0 => self.defaults[direction_slot(StreamDirection::Playback)]
+                .ok_or(Errno::DeviceOffline)?,
+            named => named,
+        };
+        self.locate(device_id, StreamDirection::Playback)
     }
 
     /// Record a device that could not be primed, naming what refused it.
@@ -1503,20 +1660,120 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         }
     }
 
-    /// Program the endpoint if it is not already, size the client's ring, and
-    /// record the stream. An endpoint programmed for a stream that then could
-    /// not be recorded is released again.
+    /// Program the endpoint for the stream, ready its tap for a monitor, size
+    /// the client's ring, and record the stream.
+    ///
+    /// Everything the record would refuse but an allocation is refused before
+    /// the endpoint is touched. A refusal only the device's grant or an
+    /// allocation reveals leaves the endpoint as it was: configured again as
+    /// it ran where monitors ride it, given back where nothing does, and its
+    /// tap given back with its last monitor.
     fn build_stream(
         &mut self,
         caller: &Origin,
         principal: Principal,
         params: &OpenParams,
-        device_index: usize,
-        slot: usize,
+        landing: Landing,
+        sink: &dyn Sink,
     ) -> Result<StreamGrant, Errno> {
         let pid = caller.pid();
         let stream_slot = self.free_slot(pid).ok_or(Errno::LimitExceeded)?;
         let seed = self.clock.now_ns();
+        let readying = self.readying(landing, (!landing.monitor).then_some(params))?;
+        self.admissible(params, landing, readying)?;
+        self.ready_endpoint(landing, readying, seed, sink)?;
+        let recorded = self
+            .tap_for(landing, seed)
+            .and_then(|()| self.record_stream(caller, principal, params, landing, stream_slot));
+        if recorded.is_err() {
+            if let Readying::Configured {
+                wanted,
+                running: Some(running),
+            } = readying
+            {
+                let _ = self.reconfigure(landing.device, landing.slot, running, wanted, seed, sink);
+            }
+            self.settle_tap(landing.device, landing.slot);
+            self.release_idle_endpoint(landing.device, landing.slot);
+        }
+        recorded
+    }
+
+    /// How the endpoint `landing` names is to run a stream asking `asked`, a
+    /// monitor asking nothing. A stream joins a configuration another holds;
+    /// one opening where only monitors ride has the sink configured afresh
+    /// unless it asks what the sink already runs, so how a sink runs is never
+    /// a monitor's choice.
+    fn readying(&self, landing: Landing, asked: Option<&OpenParams>) -> Result<Readying, Errno> {
+        let (device_index, slot) = (landing.device, landing.slot);
+        let endpoint = self.endpoint(device_index, slot).ok_or(Errno::NotFound)?;
+        let running = endpoint.active.as_ref().map(|active| active.asked);
+        let held = self
+            .streams
+            .iter()
+            .any(|s| s.on(device_index, slot) && s.holds_configuration());
+        if running.is_some() && (held || asked.is_none()) {
+            return Ok(Readying::Joined);
+        }
+        let wanted = device::configuration(&endpoint.facts, endpoint.index, asked)?;
+        Ok(if running == Some(wanted) {
+            Readying::Joined
+        } else {
+            Readying::Configured { wanted, running }
+        })
+    }
+
+    /// Refuse what [`Self::record_stream`] would refuse a stream opened with
+    /// `params` on the configuration `readying` leaves its endpoint running —
+    /// a ring no period it would be mixed in fits, a layout with nowhere to
+    /// go, no room to hold its record — so the refusal touches nothing.
+    fn admissible(
+        &mut self,
+        params: &OpenParams,
+        landing: Landing,
+        readying: Readying,
+    ) -> Result<(), Errno> {
+        let endpoint = self
+            .endpoint(landing.device, landing.slot)
+            .ok_or(Errno::NotFound)?;
+        let (period_frames, rate, channel_map) = match readying {
+            Readying::Configured { wanted, .. } => {
+                (wanted.period_frames, wanted.rate, wanted.channel_map)
+            }
+            Readying::Joined => {
+                let grant = endpoint.active.as_ref().ok_or(Errno::NotConnected)?.grant;
+                (grant.period_frames, grant.rate, grant.channel_map)
+            }
+        };
+        client_ring(
+            params,
+            landing.monitor,
+            &endpoint.facts,
+            period_frames,
+            rate,
+        )?;
+        device::matrix_for(params.direction, &params.channel_map, &channel_map)?;
+        self.make_room_for_stream()
+    }
+
+    /// Program the endpoint `landing` names as `readying` decided.
+    fn ready_endpoint(
+        &mut self,
+        landing: Landing,
+        readying: Readying,
+        seed: u64,
+        sink: &dyn Sink,
+    ) -> Result<(), Errno> {
+        let (device_index, slot) = (landing.device, landing.slot);
+        let Readying::Configured { wanted, running } = readying else {
+            return Ok(());
+        };
+        if let Some(running) = running {
+            return self.reconfigure(device_index, slot, wanted, running, seed, sink);
+        }
+        // Read with no earlier configuration left, so every report one made
+        // was sampled before.
+        let attached_at = self.now();
         let Self {
             devices, regions, ..
         } = self;
@@ -1524,21 +1781,120 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             .get_mut(device_index)
             .and_then(Option::as_mut)
             .ok_or(Errno::NotFound)?;
-        device::configure_endpoint(
-            device,
-            slot,
-            regions,
-            params.rate,
-            params.format,
-            params.latency_target_frames,
-            seed,
-        )?;
-        let recorded =
-            self.record_stream(caller, principal, params, device_index, slot, stream_slot);
-        if recorded.is_err() {
-            self.release_idle_endpoint(device_index, slot);
+        device::configure_endpoint(device, slot, regions, wanted, seed, attached_at)
+    }
+
+    /// Configure the sink in `(device_index, slot)` afresh as `wanted` beneath
+    /// the monitors riding it on `running`, which move onto it where they
+    /// stand. A device refusing it has `running` put back; one refusing that
+    /// too loses the endpoint to them, as a changed connector does.
+    fn reconfigure(
+        &mut self,
+        device_index: usize,
+        slot: usize,
+        wanted: ConfigureParams,
+        running: ConfigureParams,
+        seed: u64,
+        sink: &dyn Sink,
+    ) -> Result<(), Errno> {
+        let moved = self.configure_beneath(device_index, slot, wanted, seed);
+        if moved.is_err()
+            && self
+                .configure_beneath(device_index, slot, running, seed)
+                .is_err()
+        {
+            self.lose_endpoint(
+                device_index,
+                slot,
+                "a sink could not be configured afresh beneath its monitors",
+                sink,
+            );
+            return moved;
         }
-        recorded
+        if self.any_live(device_index, slot) {
+            self.keep_running(device_index, slot, sink);
+        }
+        moved
+    }
+
+    /// Give endpoint `slot` of the `device_index`th device back and program it
+    /// as `params` ask, its tap and every stream on it that may move again
+    /// built anew against that configuration.
+    fn configure_beneath(
+        &mut self,
+        device_index: usize,
+        slot: usize,
+        params: ConfigureParams,
+        seed: u64,
+    ) -> Result<(), Errno> {
+        self.release_configuration(device_index, slot);
+        // Read once the old configuration is gone, so every report it made was
+        // sampled before.
+        let attached_at = self.now();
+        let Self {
+            devices,
+            regions,
+            streams,
+            ..
+        } = self;
+        let device = devices
+            .get_mut(device_index)
+            .and_then(Option::as_mut)
+            .ok_or(Errno::NotFound)?;
+        device::configure_endpoint(device, slot, regions, params, seed, attached_at)?;
+        let active = device
+            .endpoints
+            .get_mut(slot)
+            .and_then(|endpoint| endpoint.active.as_mut())
+            .ok_or(Errno::NotConnected)?;
+        if streams
+            .iter()
+            .any(|s| s.monitor && s.on(device_index, slot))
+        {
+            active.add_tap(seed)?;
+        }
+        for stream in streams.iter_mut() {
+            if stream.on(device_index, slot) && stream.may_move() {
+                stream.rebind(active)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Ready the endpoint's tap when `landing` is a monitor's.
+    fn tap_for(&mut self, landing: Landing, seed: u64) -> Result<(), Errno> {
+        if !landing.monitor {
+            return Ok(());
+        }
+        self.active_mut(landing.device, landing.slot)
+            .ok_or(Errno::NotConnected)?
+            .add_tap(seed)
+    }
+
+    /// Give the endpoint's tap back once no monitor rides it.
+    fn settle_tap(&mut self, device_index: usize, slot: usize) {
+        if self
+            .streams
+            .iter()
+            .any(|stream| stream.monitor && stream.on(device_index, slot))
+        {
+            return;
+        }
+        if let Some(active) = self.active_mut(device_index, slot) {
+            active.remove_tap();
+        }
+    }
+
+    /// Take the tap from beneath the sink `device_id` names, so its monitors'
+    /// mix cannot be made.
+    #[cfg(test)]
+    pub(crate) fn drop_tap_for_test(&mut self, device_id: u32) {
+        let Ok((device, slot)) = self.find_endpoint(device_id) else {
+            return;
+        };
+        if let Some(active) = self.active_mut(device, slot) {
+            active.remove_tap();
+        }
     }
 
     /// Size the client's ring on the programmed endpoint and record the
@@ -1548,34 +1904,36 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         caller: &Origin,
         principal: Principal,
         params: &OpenParams,
-        device_index: usize,
-        slot: usize,
+        landing: Landing,
         stream_slot: u64,
     ) -> Result<StreamGrant, Errno> {
+        // Made before the stream holds a share of anything on its endpoint,
+        // so a refusal leaves nothing to give back.
+        self.make_room_for_stream()?;
         let pid = caller.pid();
         let device = self
             .devices
-            .get_mut(device_index)
+            .get_mut(landing.device)
             .and_then(Option::as_mut)
             .ok_or(Errno::NotFound)?;
-        let clock_domain = device
+        let endpoint = device
             .endpoints
-            .get(slot)
-            .map_or(0, |endpoint| endpoint.device_id);
-        let active = device
-            .endpoints
-            .get_mut(slot)
-            .and_then(|endpoint| endpoint.active.as_mut())
+            .get_mut(landing.slot)
             .ok_or(Errno::NotConnected)?;
-        let period_at_client =
-            device::scale_frames(active.period_frames(), active.grant.rate, params.rate);
-        let ring_frames = client_ring_frames(params.latency_target_frames, period_at_client)?;
+        let (clock_domain, facts) = (endpoint.device_id, endpoint.facts);
+        let active = endpoint.active.as_mut().ok_or(Errno::NotConnected)?;
+        let geometry = client_ring(
+            params,
+            landing.monitor,
+            &facts,
+            active.period_frames(),
+            active.grant.rate,
+        )?;
         // The granted latency *is* the ring: one device period of it is the
         // mixer's own contribution and the rest is what the client may have
         // queued, so the figure a client reasons about is the whole of what
         // it can have in flight.
-        let latency_frames = ring_frames;
-        let geometry = PcmGeometry::new(ring_frames, params.format, params.channel_map.channels())?;
+        let ring_frames = geometry.frames();
         let stream_id = self.next_stream_id;
         let grant = StreamGrant {
             stream_id,
@@ -1584,12 +1942,17 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             format: params.format,
             channel_map: params.channel_map,
             ring_frames,
-            granted_latency_frames: latency_frames,
-            granted_latency: Frames::new(u64::from(latency_frames)).duration(params.rate),
+            granted_latency_frames: ring_frames,
+            granted_latency: Frames::new(u64::from(ring_frames)).duration(params.rate),
             clock_domain,
         };
-        let held =
-            route::admit(params.direction, params.role, principal, self.room) != Admission::Mix;
+        let admission = admission_of(
+            landing.monitor,
+            params.direction,
+            params.role,
+            principal,
+            self.room,
+        );
         let stream = Stream::open(
             active,
             &StreamOpen {
@@ -1599,27 +1962,38 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                 owner_app: caller
                     .app()
                     .and_then(|app| BundleId::new(app.bundle_id()).ok()),
-                device: device_index,
-                endpoint: slot,
+                device: landing.device,
+                endpoint: landing.slot,
                 direction: params.direction,
+                monitor: landing.monitor,
                 role: params.role,
                 principal,
-                held,
+                held: admission != Admission::Mix,
                 grant,
                 geometry,
             },
         )?;
-        // Holding what its client may be owed must not allocate on the period
-        // path either.
-        if !fallible::reserve(&mut self.streams, 1)
-            || !self.notifier.make_room(self.streams.len() + 1)
-        {
-            return Err(Errno::OutOfMemory);
-        }
         self.streams.push(stream);
         self.next_stream_id = self.next_stream_id.saturating_add(1);
-        self.resolve_gains(device_index, slot);
+        self.resolve_gains(landing.device, landing.slot);
         Ok(grant)
+    }
+
+    /// Room for one more stream's record and for what its client may be
+    /// owed, so holding either allocates nothing on the period path.
+    fn make_room_for_stream(&mut self) -> Result<(), Errno> {
+        if fallible::reserve(&mut self.streams, 1)
+            && self.notifier.make_room(self.streams.len() + 1)
+        {
+            Ok(())
+        } else {
+            Err(Errno::OutOfMemory)
+        }
+    }
+
+    /// The monotonic clock the devices stamp their reports with, read now.
+    fn now(&self) -> Time64 {
+        Time64::from_nanos(self.clock.now_ns())
     }
 
     /// The lowest per-process stream slot `pid` is not already using.
@@ -1855,7 +2229,8 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         }
     }
 
-    /// Play out everything queued, then stop.
+    /// Play out everything queued, then stop. A monitor's drain is over at
+    /// once: nothing it is owed lies beyond what its ring already holds.
     fn drain(&mut self, caller: &Origin, stream_id: u64, sink: &dyn Sink) -> Result<(), Errno> {
         let index = self.owned(caller, stream_id)?;
         if self.streams[index].state != StreamState::Running {
@@ -1863,13 +2238,22 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         }
         let (device_index, slot) = (self.streams[index].device, self.streams[index].endpoint);
         let at = self.streams[index].position;
+        let state = if self.streams[index].monitor {
+            StreamState::Idle
+        } else {
+            StreamState::Draining
+        };
         {
             let Self {
                 streams, notifier, ..
             } = self;
-            streams[index].set_state(StreamState::Draining, at, notifier);
+            streams[index].set_state(state, at, notifier);
         }
-        self.pump(device_index, slot, sink);
+        if state == StreamState::Idle {
+            self.quiesce_endpoint(device_index, slot, sink);
+        } else {
+            self.pump(device_index, slot, sink);
+        }
         Ok(())
     }
 
@@ -1936,10 +2320,10 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
     }
 
     /// Close the stream and release its region; the endpoint follows when it
-    /// was the last one on it.
+    /// was the last one on it, and a sink's tap with its last monitor.
     fn close(&mut self, caller: &Origin, stream_id: u64, sink: &dyn Sink) -> Result<(), Errno> {
         let index = self.owned(caller, stream_id)?;
-        let stream = self.streams.remove(index);
+        let mut stream = self.streams.remove(index);
         self.notifier
             .forget(stream.grant.notify_endpoint, stream.id);
         if let Some(region) = stream.region {
@@ -1947,9 +2331,17 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         }
         let (device_index, slot) = (stream.device, stream.endpoint);
         if let Some(active) = self.active_mut(device_index, slot) {
-            device::release_stream_bank(active, &stream);
+            device::release_stream_bank(active, &mut stream);
         }
-        if stream.direction == StreamDirection::Capture {
+        if stream.monitor {
+            Self::audit_capture(
+                sink,
+                caller,
+                events::MONITOR_CLOSED,
+                "monitor stream closed",
+            );
+            self.settle_tap(device_index, slot);
+        } else if stream.direction == StreamDirection::Capture {
             Self::audit_capture(
                 sink,
                 caller,
@@ -1965,8 +2357,9 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
     }
 
     /// Re-resolve every stream's one multiply on the endpoint, because the
-    /// ducking rule reads the roles of the streams live beside it and the
-    /// endpoint's own level lies beneath them all.
+    /// ducking rule reads the roles of the playback streams live beside it
+    /// and the endpoint's own level lies beneath them all — all but a
+    /// monitor, which hears the mix before that level.
     fn resolve_gains(&mut self, device_index: usize, slot: usize) {
         let endpoint = self
             .endpoint(device_index, slot)
@@ -1974,19 +2367,31 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         let live: Roles = self
             .streams
             .iter()
-            .filter(|stream| stream.on(device_index, slot) && stream.is_live())
+            .filter(|stream| stream.feeds(device_index, slot))
             .map(|stream| stream.role)
             .collect();
         for stream in &mut self.streams {
             if !stream.on(device_index, slot) {
                 continue;
             }
+            // Media steps aside for speech on a sink, and nothing ducks a
+            // capture.
+            let duck_millibel = match stream.direction {
+                StreamDirection::Playback => route::duck_millibel(stream.role, live),
+                StreamDirection::Capture => 0,
+            };
             let request = VolumeRequest {
                 stream_millibel: stream.gain.millibel(),
-                duck_millibel: route::duck_millibel(stream.role, live),
+                duck_millibel,
                 muted: stream.muted,
             };
-            stream.software_gain = stream_multiply(&request, endpoint);
+            let level = if stream.monitor {
+                EndpointLevel::UNITY
+            } else {
+                endpoint
+            };
+            stream.software_gain = stream_multiply(&request, level);
+            stream.monitor_gain = stream_multiply(&request, EndpointLevel::UNITY);
         }
     }
 
@@ -2051,14 +2456,15 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             .as_mut()
     }
 
-    /// Record a capture decision against the principal that took it.
+    /// Record a capture or monitor decision against the principal that took
+    /// it.
     fn audit_capture(
         sink: &dyn Sink,
         caller: &Origin,
         id: tairix_log::EventId,
         message: &'static str,
     ) {
-        let level = if id == events::CAPTURE_REFUSED {
+        let level = if id == events::CAPTURE_REFUSED || id == events::MONITOR_REFUSED {
             Level::Warn
         } else {
             Level::Info
@@ -2100,6 +2506,77 @@ fn principal_for(caller: &Origin, params: &OpenParams) -> Option<Principal> {
     }
 }
 
+/// Where a stream lands: an endpoint, and whether the stream is a monitor
+/// hearing that sink's mix rather than moving frames of its own.
+#[derive(Copy, Clone)]
+struct Landing {
+    device: usize,
+    slot: usize,
+    monitor: bool,
+}
+
+/// How the endpoint a stream lands on is readied for it.
+#[derive(Copy, Clone)]
+enum Readying {
+    /// The stream joins the configuration the endpoint already runs.
+    Joined,
+    /// The endpoint is programmed as `wanted`: afresh beneath the monitors
+    /// riding it on `running`, where it already runs.
+    Configured {
+        wanted: ConfigureParams,
+        running: Option<ConfigureParams>,
+    },
+}
+
+/// What `room` does with a monitor opened for `principal`.
+///
+/// Stricter than a source's rule: a sink's mix is heard only through the
+/// session whose room it is, because an unclaimed room is anybody's to play
+/// into, and a monitor there would hear every principal's sound.
+pub(crate) fn monitor_admission(principal: Principal, room: Room) -> Admission {
+    match (principal, room) {
+        (Principal::Session(Some(mine)), Room::Session(holder)) if mine == holder => Admission::Mix,
+        _ => Admission::Hold,
+    }
+}
+
+/// What `room` does with a stream for `principal`: a monitor by its own
+/// rule, any other by the routing policy's.
+fn admission_of(
+    monitor: bool,
+    direction: StreamDirection,
+    role: StreamRole,
+    principal: Principal,
+    room: Room,
+) -> Admission {
+    if monitor {
+        monitor_admission(principal, room)
+    } else {
+        route::admit(direction, role, principal, room)
+    }
+}
+
+/// The ring a stream opened with `params` is given on an endpoint offering
+/// `facts` and running periods of `period_frames` at `rate`: deep enough for
+/// its latency target and for two of the periods it is mixed in. A monitor's
+/// sink may be configured afresh beneath it, so its ring holds two of any
+/// period the sink could be given.
+fn client_ring(
+    params: &OpenParams,
+    monitor: bool,
+    facts: &AudioEndpointFacts,
+    period_frames: u32,
+    rate: Rate,
+) -> Result<PcmGeometry, Errno> {
+    let period_at_client = if monitor {
+        device::longest_period(facts, params.rate)
+    } else {
+        device::scale_frames(period_frames, rate, params.rate)
+    };
+    let ring_frames = client_ring_frames(params.latency_target_frames, period_at_client)?;
+    PcmGeometry::new(ring_frames, params.format, params.channel_map.channels())
+}
+
 /// The client ring a latency target of `target` frames earns, at least two
 /// device periods deep and inside the ring vocabulary's fixed bounds.
 ///
@@ -2134,7 +2611,6 @@ fn put(reply: &mut [u8; AUDIO_MAX_REPLY], body: &[u8]) -> usize {
     len
 }
 
-/// The direction's name for an audit field.
 /// How likely an endpoint's connector is to reach a listener, likeliest
 /// first: something plugged in, then a connector that cannot tell, then one
 /// known empty.
@@ -2146,6 +2622,7 @@ const fn reach_rank(jack: JackState) -> u8 {
     }
 }
 
+/// The direction's name for an audit field.
 const fn direction_name(direction: StreamDirection) -> &'static str {
     match direction {
         StreamDirection::Playback => "sink",

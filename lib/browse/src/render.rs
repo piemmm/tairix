@@ -36,6 +36,7 @@ use core::cell::Cell;
 
 use tairix_controls::button::{Button, ButtonContent, ContentAlign};
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange, ScrollView};
+use tairix_controls::selector::SelectorAction;
 use tairix_controls::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, PointerState, ProgressValue,
     SelectionState,
@@ -74,7 +75,7 @@ use crate::media::{
 use crate::network::NetworkItem;
 use crate::open_with::{OpenWithCandidate, OpenWithChooser};
 use crate::places::{self, Place, Places, VolumeFacts};
-use crate::progress::ProgressModel;
+use crate::progress::{Clash, ProgressModel};
 use crate::properties::{Attributes, Properties};
 use crate::sort::{SortDirection, SortKey, SortMode};
 use crate::source::DirectorySource;
@@ -2035,7 +2036,7 @@ fn item_parts<S: DirectorySource>(
 /// The part every `tiles` tile holds whatever its name — its picture with its
 /// margin — relative to the tile's own top-left.
 #[must_use]
-pub(crate) fn tile_core(tiles: Tiles, scale: Scale, theme: &Theme) -> Rect {
+pub fn tile_core(tiles: Tiles, scale: Scale, theme: &Theme) -> Rect {
     let metrics = tiles.metrics(scale, theme);
     let cell = Rect::new(0, 0, metrics.cell_width, metrics.cell_height);
     tiles
@@ -2867,6 +2868,8 @@ pub enum PropertiesTarget {
     Editor,
     /// One of the attribute actions beneath the list.
     Action(AttrAction),
+    /// A drive's *Title* field, where its viewer may retitle the volume.
+    Title,
 }
 
 /// What a press on the attributes action band asks for.
@@ -3753,7 +3756,7 @@ fn draw_drive_body(
     surface: &mut Surface,
     (layout, body): (&PropertiesLayout, Rect),
     view: PropertiesView,
-    controls: PropertiesControls<'_>,
+    controls: &PropertiesControls<'_>,
     (scale, theme, font): (Scale, &Theme, BitmapFont),
 ) {
     match controls.drive.filter(|drive| drive.is_read()) {
@@ -3792,7 +3795,7 @@ pub fn draw_properties_window(
     surface: &mut Surface,
     frame: PropertiesFrame<'_>,
     view: PropertiesView,
-    controls: PropertiesControls<'_>,
+    controls: &PropertiesControls<'_>,
     scale: Scale,
     theme: &Theme,
     window: Rect,
@@ -3985,12 +3988,14 @@ fn fact_rows_height(facts: usize, scale: Scale, theme: &Theme) -> u32 {
         .saturating_add(pad.saturating_mul(2))
 }
 
-/// Where the Drive section's three panels sit down its column, from the
+/// Where the Drive section's four panels sit down its column, from the
 /// column's top, and the height they take together.
 ///
 /// The one layout the paint, the scroll and the damage a sample owes all read,
 /// so a repaint scoped to a panel covers exactly the pixels that panel drew.
 struct DriveLayout {
+    /// The *Title* caption and field, the field's message beneath it.
+    title: Rect,
     /// The capacity ring, its key, and the line stating the whole.
     capacity: Rect,
     /// The activity caption and its trace.
@@ -4012,6 +4017,11 @@ impl DriveLayout {
         let line = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale).line_height();
         let header =
             BitmapFont::for_role(theme.fonts(), TextRole::SectionHeader, scale).line_height();
+        let title_h = header
+            .saturating_add(pad)
+            .saturating_add(TextField::height(scale, theme))
+            .saturating_add(pad)
+            .saturating_add(line);
         let ring = match drive.map(Drive::capacity) {
             Some(None) => None,
             Some(Some(bytes)) => capacity_ring(&bytes),
@@ -4038,20 +4048,49 @@ impl DriveLayout {
             y = y.saturating_add(to_i32(height)).saturating_add(to_i32(gap));
             rect
         };
+        let title = next(title_h);
         let capacity = next(capacity_h);
         let activity = next(activity_h);
         let facts = next(facts_h);
         Self {
+            title,
             capacity,
             activity,
             facts,
             extent: pad
                 .saturating_mul(2)
+                .saturating_add(title_h)
                 .saturating_add(capacity_h)
                 .saturating_add(activity_h)
                 .saturating_add(facts_h)
-                .saturating_add(gap.saturating_mul(2)),
+                .saturating_add(gap.saturating_mul(3)),
         }
+    }
+
+    /// Where the *Title* field is drawn, its message row beneath its plate:
+    /// the title panel below its caption.
+    fn title_field(&self, scale: Scale, theme: &Theme) -> Rect {
+        let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
+        let header =
+            BitmapFont::for_role(theme.fonts(), TextRole::SectionHeader, scale).line_height();
+        let above = header.saturating_add(pad);
+        Rect::new(
+            self.title.left(),
+            self.title.top().saturating_add(to_i32(above)),
+            self.title.width,
+            self.title.height.saturating_sub(above),
+        )
+    }
+
+    /// The *Title* field's plate, which a press edits.
+    fn title_plate(&self, scale: Scale, theme: &Theme) -> Rect {
+        let field = self.title_field(scale, theme);
+        Rect::new(
+            field.left(),
+            field.top(),
+            field.width,
+            TextField::height(scale, theme).min(field.height),
+        )
     }
 }
 
@@ -4081,9 +4120,9 @@ fn drive_column(
     )
 }
 
-/// Paint the Drive section into its laid-out `frame`: capacity as a ring of
-/// used and free, activity as a duplex read and write trace, then the facts,
-/// the health first and toned by it.
+/// Paint the Drive section into its laid-out `frame`: its *Title* field,
+/// capacity as a ring of used and free, activity as a duplex read and write
+/// trace, then the facts, the health first and toned by it.
 fn draw_drive_section(
     surface: &mut Surface,
     drive: &Drive,
@@ -4094,6 +4133,16 @@ fn draw_drive_section(
     let layout = DriveLayout::resolve(Some(drive), frame, scale, theme);
     let body = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
     let muted = theme.palette().on_surface_muted.into();
+    BitmapFont::for_role(theme.fonts(), TextRole::SectionHeader, scale).draw_text(
+        surface,
+        layout.title.left(),
+        layout.title.top(),
+        DRIVE_TITLE,
+        theme.palette().on_surface.into(),
+    );
+    drive
+        .title()
+        .render(surface, layout.title_field(scale, theme), scale, theme);
     match drive.capacity() {
         Some(bytes) => {
             if let Some(ring) = capacity_ring(&bytes) {
@@ -4223,6 +4272,9 @@ fn draw_drive_activity(
 /// What the activity panel's caption reads.
 const DRIVE_ACTIVITY: &str = "Activity";
 
+/// What the title panel's caption reads.
+const DRIVE_TITLE: &str = "Title";
+
 /// What the activity panel says until two readings have measured a rate.
 const DRIVE_MEASURING: &str = "Measuring…";
 
@@ -4317,7 +4369,7 @@ fn draw_attributes_section(
     props: &Properties,
     body: Rect,
     view: PropertiesView,
-    controls: PropertiesControls<'_>,
+    controls: &PropertiesControls<'_>,
     scale: Scale,
     theme: &Theme,
     font: BitmapFont,
@@ -4389,7 +4441,7 @@ fn draw_attributes_section(
 pub fn properties_hit(
     props: &Properties,
     view: PropertiesView,
-    controls: PropertiesControls<'_>,
+    controls: &PropertiesControls<'_>,
     window: Rect,
     scale: Scale,
     theme: &Theme,
@@ -4397,14 +4449,13 @@ pub fn properties_hit(
 ) -> Option<PropertiesTarget> {
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
     let layout = PropertiesLayout::resolve(window, scale, theme);
-    if let Some(index) =
-        properties_tabs(view.strip, view.tab).tab_at(layout.tabs, scale, theme, point)
-    {
-        return view.strip.at(index).map(PropertiesTarget::Tab);
+    if let Some(tab) = strip_target(view, &layout, (scale, theme), point) {
+        return Some(tab);
     }
     let body = layout.body.filter(|body| body.contains(point))?;
     match view.tab {
-        PropertiesTab::Drive | PropertiesTab::General => None,
+        PropertiesTab::Drive => drive_title_at(body, view, controls.drive, (scale, theme), point),
+        PropertiesTab::General => None,
         PropertiesTab::Permissions => controls.sections().with(props, view.perms, |section| {
             let (scrolled, placed) = section.laid_out(body, view.scroll, scale, theme);
             let at = scrolled.view.to_content(point)?;
@@ -4426,6 +4477,77 @@ pub fn properties_hit(
                 .map(PropertiesTarget::Attribute)
         }
     }
+}
+
+/// The tab of `layout`'s strip a press at `point` lands on, if any.
+fn strip_target(
+    view: PropertiesView,
+    layout: &PropertiesLayout,
+    (scale, theme): (Scale, &Theme),
+    point: Point,
+) -> Option<PropertiesTarget> {
+    let index = properties_tabs(view.strip, view.tab).tab_at(layout.tabs, scale, theme, point)?;
+    view.strip.at(index).map(PropertiesTarget::Tab)
+}
+
+/// What a press at `point` within `body` resolves to on the Drive section of
+/// `drive`: its *Title* field where its viewer may edit it, and nothing else.
+fn drive_title_at(
+    body: Rect,
+    view: PropertiesView,
+    drive: Option<&Drive>,
+    (scale, theme): (Scale, &Theme),
+    point: Point,
+) -> Option<PropertiesTarget> {
+    let drive = drive.filter(|drive| drive.record().is_some() && !drive.title().is_read_only())?;
+    let (scrolled, frame) = drive_column(drive, body, view.scroll, scale, theme);
+    let at = scrolled.view.to_content(point)?;
+    let plate = DriveLayout::resolve(Some(drive), frame, scale, theme).title_plate(scale, theme);
+    contains(plate, at).then_some(PropertiesTarget::Title)
+}
+
+/// What a press at window-local `point` on a drive's window resolves to
+/// whatever became of its node's own read, which only the node's sections
+/// wait for: a tab of the strip, and on the Drive section, which the mount
+/// table alone describes, its *Title* field where its viewer may edit it.
+/// `None` on anything else, and on a window offering no Drive section.
+#[must_use]
+pub fn properties_drive_hit(
+    view: PropertiesView,
+    drive: Option<&Drive>,
+    window: Rect,
+    (scale, theme): (Scale, &Theme),
+    point: Point,
+) -> Option<PropertiesTarget> {
+    if view.strip != PropertiesStrip::Drive {
+        return None;
+    }
+    let layout = PropertiesLayout::resolve(window, scale, theme);
+    if let Some(tab) = strip_target(view, &layout, (scale, theme), point) {
+        return Some(tab);
+    }
+    let body = layout.body.filter(|body| body.contains(point))?;
+    if view.tab != PropertiesTab::Drive {
+        return None;
+    }
+    drive_title_at(body, view, drive, (scale, theme), point)
+}
+
+/// Where a drive's *Title* field shows at `view`'s scroll, window-local, or
+/// `None` where the window shows no drive or scrolls the field out of view:
+/// the one placement [`draw_properties_window`] draws it at, published so the
+/// host feeding the field keys reports the rectangle it repaints.
+#[must_use]
+pub fn properties_title_rect(
+    view: PropertiesView,
+    drive: Option<&Drive>,
+    (window, scale, theme): (Rect, Scale, &Theme),
+) -> Option<Rect> {
+    let body = PropertiesLayout::resolve(window, scale, theme).body?;
+    let drive = drive.filter(|drive| drive.record().is_some())?;
+    let (scrolled, frame) = drive_column(drive, body, view.scroll, scale, theme);
+    let field = DriveLayout::resolve(Some(drive), frame, scale, theme).title_field(scale, theme);
+    scrolled.view.to_window(field)
 }
 
 /// Whether `point` lies inside `rect`, on the same half-open convention every
@@ -4650,7 +4772,7 @@ pub struct PermsKeyed {
 pub fn properties_permissions_key(
     props: &Properties,
     view: PropertiesView,
-    controls: PropertiesControls<'_>,
+    controls: &PropertiesControls<'_>,
     window: Rect,
     scale: Scale,
     theme: &Theme,
@@ -4704,15 +4826,19 @@ pub const DELETE_CONFIRM_INDEX: usize = 1;
 /// destroys and so is never the answer `Enter` gives.
 ///
 /// The count and the folder warning come from the captured plan, so the
-/// question states the true scope of the removal. It performs nothing
-/// itself; the caller removes in its own capability-checked tail once the
-/// user answers. `None` only if the compiled-in button labels were not ones
-/// an alert can carry.
+/// question states the true scope of the removal, and one item is named as a
+/// window hiding `endings` shows it. It performs nothing itself; the caller
+/// removes in its own capability-checked tail once the user answers. `None`
+/// only if the compiled-in button labels were not ones an alert can carry.
 #[must_use]
-pub fn delete_alert(plan: &DeletePlan, disposition: DeleteDisposition) -> Option<AlertSpec> {
+pub fn delete_alert(
+    plan: &DeletePlan,
+    disposition: DeleteDisposition,
+    endings: HiddenEndings,
+) -> Option<AlertSpec> {
     let named = |verb: &str, after: &str| {
-        if plan.len() == 1 {
-            let name = shown(plan.targets()[0].name());
+        if let [only] = plan.targets() {
+            let name = shown(endings.shown_name(only.name(), only.kind()));
             alloc::format!("{verb} \u{201c}{name}\u{201d}{after}")
         } else {
             alloc::format!("{verb} {} items{after}", plan.len())
@@ -4834,14 +4960,19 @@ fn progress_layout(client: Rect, scale: Scale, theme: &Theme) -> ProgressLayout 
 }
 
 /// The client extent of an operation's progress window at `scale` in `theme`:
-/// as tall as its lines, the bar and the Cancel button need, with a pad about
-/// them. The window's own band names the operation.
+/// as tall as its lines, the bar and the Cancel button need — or, while it
+/// asks about a name already taken, the question, its box and its choices —
+/// with a pad about them. The window's own band names the operation.
 #[must_use]
-pub fn progress_window_extent(scale: Scale, theme: &Theme) -> (u32, u32) {
+pub fn progress_window_extent(scale: Scale, theme: &Theme, asking: bool) -> (u32, u32) {
     let width = scale.scale_length(PROGRESS_WIDTH);
-    let layout = progress_layout(Rect::new(0, 0, width, u32::MAX / 2), scale, theme);
-    let bottom = layout
-        .cancel
+    let client = Rect::new(0, 0, width, u32::MAX / 2);
+    let foot = if asking {
+        clash_rows(client, scale, theme)[2]
+    } else {
+        progress_layout(client, scale, theme).cancel
+    };
+    let bottom = foot
         .bottom()
         .saturating_add(to_i32(progress_pad(scale, theme)));
     (width, u32::try_from(bottom).unwrap_or(0))
@@ -4856,7 +4987,7 @@ pub fn progress_bar_rect(client: Rect, scale: Scale, theme: &Theme) -> Rect {
 
 /// The state a file operation's trace shows for `model`: a share of its whole
 /// once counted, busy while it prepares or where it could not count it, and
-/// still while it waits its turn.
+/// still while it waits its turn or its user's answer.
 #[must_use]
 pub fn progress_state(model: &ProgressModel) -> ControlState {
     let activity = if model.is_waiting() {
@@ -4864,6 +4995,7 @@ pub fn progress_state(model: &ProgressModel) -> ControlState {
     } else {
         match model.fraction() {
             Some(permille) => ActivityState::Progress(ProgressValue::new(permille)),
+            None if model.asking().is_some() => ActivityState::Idle,
             None => ActivityState::Working,
         }
     };
@@ -4887,7 +5019,8 @@ pub fn build_progress_cancel(model: &ProgressModel) -> Button {
 
 /// Draw `model`'s progress across its own window's `client`: what is moving
 /// where, the item in hand, `trace` — the window's own bar, clocked by its
-/// owner — the figures, and Cancel.
+/// owner — and the figures and Cancel, or, while it asks about a name already
+/// taken, the question and the controls `asking` holds.
 ///
 /// Every blit clips, so a window the desktop fitted smaller than its extent
 /// shows what fits rather than panicking. It reads only the passed-in model
@@ -4896,7 +5029,7 @@ pub fn build_progress_cancel(model: &ProgressModel) -> Button {
 /// the read-only picker never does.
 pub fn draw_progress_window(
     surface: &mut Surface,
-    (model, trace): (&ProgressModel, &Progress),
+    (model, trace, asking): (&ProgressModel, &Progress, Option<&ClashPanel>),
     scale: Scale,
     theme: &Theme,
     client: Rect,
@@ -4920,6 +5053,14 @@ pub fn draw_progress_window(
         muted,
     );
     trace.render(surface, layout.bar, scale, theme);
+    if let Some(panel) = asking {
+        let asked = clash_layout((client, scale, theme), panel);
+        let body = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+        let question = model.question().unwrap_or_default();
+        line(surface, body, asked.question, &question, ink);
+        panel.render(surface, &asked, scale, theme);
+        return;
+    }
     let figures_at = Rect::new(
         layout.figures.left(),
         layout.figures.top().saturating_add(to_i32(
@@ -4946,6 +5087,266 @@ pub fn progress_cancel_at(client: Rect, scale: Scale, theme: &Theme, point: Poin
         && cancel.height != 0
         && cancel.intersection(&client) == cancel
         && cancel.contains(point)
+}
+
+/// What the question an operation's window asks about a name already taken
+/// is answered with.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ClashChoice {
+    /// Put the item in place of what holds its name; a folder merges into
+    /// the folder there instead.
+    Replace,
+    /// Leave what holds the name, and go on.
+    Skip,
+    /// Stop the operation.
+    Stop,
+}
+
+/// An answer to the question an operation's window asks.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ClashAnswer {
+    /// What was chosen.
+    pub choice: ClashChoice,
+    /// Whether every later name already taken of its kind — a folder's, or a
+    /// file's — is met the same way.
+    pub for_the_rest: bool,
+}
+
+/// The question's choices in the order they stand: Skip, the default, at
+/// the trailing edge.
+const CLASH_CHOICES: [ClashChoice; 3] =
+    [ClashChoice::Stop, ClashChoice::Replace, ClashChoice::Skip];
+
+/// Where the keyboard rests first among the question's controls, the box
+/// counted first: on Skip.
+const CLASH_DEFAULT: usize = CLASH_CHOICES.len();
+
+/// The box that answers every later question of its kind the same way: a
+/// folder's answer never stands for a file's, nor a file's for a folder's.
+const fn rest_label(folders: bool) -> &'static str {
+    if folders {
+        "Do the same for every folder that already exists"
+    } else {
+        "Do the same for every file that already exists"
+    }
+}
+
+/// What the question's first choice is called: a folder meeting a folder
+/// merges into it rather than replacing it.
+const fn replace_word(folders: bool) -> &'static str {
+    if folders {
+        "Merge"
+    } else {
+        "Replace"
+    }
+}
+
+/// The controls of the question an operation's window asks about a name
+/// already taken: the box answering every later one of its kind the same way,
+/// then Stop,
+/// Replace (Merge for a folder) and Skip. The keyboard rests first on Skip,
+/// the default: `Tab` moves it, `Enter` takes the choice it rests on — Skip
+/// from the box — `Space` ticks the box, and `Escape` is Stop.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClashPanel {
+    rest: Checkbox,
+    choices: [Button; 3],
+    /// The control the keyboard rests on: the box, then each choice.
+    focus: usize,
+}
+
+impl ClashPanel {
+    /// The controls asking about `clash`.
+    #[must_use]
+    pub fn new(clash: &Clash) -> Self {
+        let replaces = if clash.folders {
+            ControlRole::Neutral
+        } else {
+            ControlRole::Destructive
+        };
+        let choice =
+            |label: &str, role| Button::new(ButtonContent::Label(String::from(label)), role);
+        let mut panel = Self {
+            rest: Checkbox::new(rest_label(clash.folders), SelectionState::Unselected),
+            choices: [
+                choice("Stop", ControlRole::Neutral),
+                choice(replace_word(clash.folders), replaces),
+                choice("Skip", ControlRole::Recommended),
+            ],
+            focus: CLASH_DEFAULT,
+        };
+        panel.show_focus();
+        panel
+    }
+
+    /// Whether every later name already taken of its kind is to be met the
+    /// same way.
+    #[must_use]
+    pub fn for_the_rest(&self) -> bool {
+        self.rest.selection() == SelectionState::Selected
+    }
+
+    /// Feed `input`, a pointer event over the window whose client, scale and
+    /// theme `frame` gives, reporting into `damage` what it redraws: a click
+    /// completed over a choice answers with it, one over the box ticks it.
+    pub fn on_pointer(
+        &mut self,
+        frame: (Rect, Scale, &Theme),
+        input: &InputEvent,
+        damage: &mut Region,
+    ) -> Option<ClashAnswer> {
+        let layout = clash_layout(frame, self);
+        if let Some(SelectorAction::Set { on }) = self.rest.on_pointer(input, layout.rest, damage) {
+            self.rest.set_selection(SelectionState::of(on));
+            damage.add(layout.rest);
+        }
+        let mut chosen = None;
+        for (index, (choice, at)) in self.choices.iter_mut().zip(layout.choices).enumerate() {
+            if choice.on_pointer(input, at, damage).is_some() {
+                chosen = Some(index);
+            }
+        }
+        chosen.and_then(|index| self.answer(index))
+    }
+
+    /// Feed `key`, `Shift` held where `shift` says, over the window `frame`
+    /// gives, reporting into `damage` what it redraws.
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        shift: bool,
+        frame: (Rect, Scale, &Theme),
+        damage: &mut Region,
+    ) -> Option<ClashAnswer> {
+        let layout = clash_layout(frame, self);
+        match key {
+            Key::Named(NamedKey::Escape) => return self.answer(0),
+            Key::Named(NamedKey::Tab) => {
+                let controls = CLASH_CHOICES.len() + 1;
+                damage.add(layout.control(self.focus));
+                self.focus = if shift {
+                    (self.focus + controls - 1) % controls
+                } else {
+                    (self.focus + 1) % controls
+                };
+                self.show_focus();
+                damage.add(layout.control(self.focus));
+                return None;
+            }
+            _ => {}
+        }
+        let Some(index) = self.focus.checked_sub(1) else {
+            if key == Key::Named(NamedKey::Enter) {
+                return self.answer(CLASH_DEFAULT - 1);
+            }
+            if let Some(SelectorAction::Set { on }) = self.rest.on_key(key) {
+                self.rest.set_selection(SelectionState::of(on));
+                damage.add(layout.rest);
+            }
+            return None;
+        };
+        let activated = self
+            .choices
+            .get_mut(index)
+            .and_then(|choice| choice.on_key(key))
+            .is_some();
+        if activated {
+            self.answer(index)
+        } else {
+            None
+        }
+    }
+
+    /// The answer the choice at `index` gives.
+    fn answer(&self, index: usize) -> Option<ClashAnswer> {
+        CLASH_CHOICES.get(index).map(|&choice| ClashAnswer {
+            choice,
+            for_the_rest: self.for_the_rest(),
+        })
+    }
+
+    /// Give the keyboard's ring to the control it rests on, and to no other.
+    fn show_focus(&mut self) {
+        self.rest.set_focused(self.focus == 0);
+        for (index, choice) in self.choices.iter_mut().enumerate() {
+            choice.set_focused(self.focus == index + 1);
+        }
+    }
+
+    /// Paint the controls where `layout` places them.
+    fn render(&self, surface: &mut Surface, layout: &ClashLayout, scale: Scale, theme: &Theme) {
+        self.rest.render(surface, layout.rest, scale, theme);
+        for (choice, at) in self.choices.iter().zip(layout.choices) {
+            choice.render(surface, at, scale, theme);
+        }
+    }
+}
+
+/// Where a progress window asking about a name already taken draws, beneath
+/// its bar, the question, the box and the choices: the one layout
+/// [`draw_progress_window`] paints and [`ClashPanel`] hit-tests.
+struct ClashLayout {
+    question: Rect,
+    rest: Rect,
+    choices: [Rect; 3],
+}
+
+impl ClashLayout {
+    /// Where the control the keyboard may rest on at `focus` stands, the box
+    /// first.
+    fn control(&self, focus: usize) -> Rect {
+        match focus.checked_sub(1) {
+            None => self.rest,
+            Some(index) => self.choices.get(index).copied().unwrap_or_default(),
+        }
+    }
+}
+
+/// Where a progress window whose client is `client`, asking about a name
+/// already taken, sets beneath its bar the question's line, the box's row and
+/// the choices' row: the choices raised to the client's foot in a window
+/// fitted shorter than its extent, so they stay on show.
+fn clash_rows(client: Rect, scale: Scale, theme: &Theme) -> [Rect; 3] {
+    let pad = to_i32(progress_pad(scale, theme));
+    let ([_, _, bar], below) = progress_head(client, scale, theme);
+    let line = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale).line_height();
+    let row = Button::height(scale, theme);
+    let question = Rect::new(bar.left(), below, bar.width, line);
+    let rest_top = question.bottom().saturating_add(pad / 2);
+    let rest = Rect::new(bar.left(), rest_top, bar.width, row);
+    let foot = client
+        .bottom()
+        .saturating_sub(pad)
+        .saturating_sub(to_i32(row));
+    let choices_top = rest.bottom().saturating_add(pad).min(foot);
+    [
+        question,
+        rest,
+        Rect::new(bar.left(), choices_top, bar.width, row),
+    ]
+}
+
+/// Where everything the question draws stands in the window `frame` gives,
+/// each choice as wide as its label needs and no narrower than an alert's,
+/// set from the trailing edge.
+fn clash_layout((client, scale, theme): (Rect, Scale, &Theme), panel: &ClashPanel) -> ClashLayout {
+    let [question, rest, row] = clash_rows(client, scale, theme);
+    let gap = to_i32(scale.scale_length(theme.metrics().control_gap).max(1));
+    let least = scale.scale_length(tairix_controls::ALERT_BUTTON_MIN_WIDTH);
+    let mut choices = [Rect::default(); 3];
+    let mut right = row.right();
+    for (at, choice) in choices.iter_mut().zip(&panel.choices).rev() {
+        let width = choice.measured_width(scale, theme).max(least);
+        right = right.saturating_sub(to_i32(width));
+        *at = Rect::new(right, row.top(), width, row.height);
+        right = right.saturating_sub(gap);
+    }
+    let width = panel.rest.measured_width(scale, theme).min(rest.width);
+    ClashLayout {
+        question,
+        rest: Rect::new(rest.left(), rest.top(), width, rest.height),
+        choices,
+    }
 }
 
 /// Most candidate rows the "Open With…" chooser's popup is sized to show at

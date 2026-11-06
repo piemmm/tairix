@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Screen Recorder</title>
+  <!-- A screen on its stand, showing the dot a recording shows. -->
+
+  <!-- The bezel and the glass -->
+  <rect x="20" y="36" width="216" height="148" rx="16" fill="#3A434B"/>
+  <rect x="34" y="50" width="188" height="120" rx="6" fill="#4C7FC4"/>
+  <rect x="34" y="50" width="188" height="40" rx="6" fill="#6595D6"/>
+
+  <!-- The stand and its foot -->
+  <rect x="112" y="184" width="32" height="20" fill="#56616B"/>
+  <rect x="72" y="204" width="112" height="16" rx="8" fill="#76828D"/>
+
+  <!-- The record dot, ringed -->
+  <circle cx="128" cy="110" r="38" fill="#FFFFFF"/>
+  <circle cx="128" cy="110" r="29" fill="#E0443A"/>
+</svg>

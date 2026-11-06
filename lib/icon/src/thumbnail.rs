@@ -9,8 +9,7 @@
 
 use alloc::string::String;
 
-use tairix_abi::fs::FileId;
-use tairix_abi::time::Time64;
+use tairix_abi::fs::DocumentStamp;
 use tairix_raster::Surface;
 
 use crate::artwork::{ArtworkRasteriser, ArtworkReader};
@@ -35,20 +34,6 @@ pub struct Thumbnail {
     pub path: String,
     /// The version of the file the listing named.
     pub stamp: DocumentStamp,
-}
-
-/// Which version of which file: what a listing reports of a file, and what an
-/// open of it must report for a byte of it to be read.
-#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, PartialOrd, Ord)]
-pub struct DocumentStamp {
-    /// Its length.
-    pub size: u64,
-    /// Its modification time.
-    pub modified: Time64,
-    /// The file it is.
-    pub id: FileId,
-    /// The version of its data, `0` where the volume keeps none.
-    pub content_gen: u64,
 }
 
 /// A file opened to stream a thumbnail from.
@@ -148,19 +133,8 @@ impl RtDocument {
         let stat = file.stat().ok()?;
         (stat.kind == tairix_abi::fs::FileKind::Regular).then_some(Self {
             file,
-            stamp: stamp_of(&stat),
+            stamp: DocumentStamp::of(&stat),
         })
-    }
-}
-
-/// The version of the file `stat` describes.
-#[cfg(feature = "rt")]
-fn stamp_of(stat: &tairix_abi::fs::FileStat) -> DocumentStamp {
-    DocumentStamp {
-        size: stat.size,
-        modified: stat.times.modified,
-        id: stat.id,
-        content_gen: stat.content_gen,
     }
 }
 
@@ -171,7 +145,7 @@ impl ArtworkDocument for RtDocument {
     }
 
     fn restamp(&mut self) -> Option<DocumentStamp> {
-        self.file.stat().ok().map(|stat| stamp_of(&stat))
+        self.file.stat().ok().map(|stat| DocumentStamp::of(&stat))
     }
 
     fn read_at(&mut self, offset: u64, into: &mut [u8]) -> Option<usize> {

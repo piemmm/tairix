@@ -230,6 +230,14 @@ pub const ISO9660_DRIVER: ServedFsDriver = ServedFsDriver {
     store_path: &[b"Drivers", b"filesystem", b"iso9660", b"Run"],
 };
 
+/// The FAT32 driver: each of the twin-volume vertical's USB sticks holds a
+/// volume of its format.
+pub const FAT32_DRIVER: ServedFsDriver = ServedFsDriver {
+    package: "tairix-drv-fs-fat32",
+    bind_keys: tairix_drv_fs_fat32::BIND_KEYS,
+    store_path: &[b"Drivers", b"filesystem", b"fat32", b"Run"],
+};
+
 /// The ADFS driver: the disk-image vertical's Acorn floppy is one.
 pub const ADFS_DRIVER: ServedFsDriver = ServedFsDriver {
     package: "tairix-drv-fs-adfs",
@@ -265,11 +273,7 @@ pub const SERVED_FS_DRIVERS: &[ServedFsDriver] = &[
         bind_keys: tairix_drv_fs_ext4::BIND_KEYS,
         store_path: &[b"Drivers", b"filesystem", b"ext4", b"Run"],
     },
-    ServedFsDriver {
-        package: "tairix-drv-fs-fat32",
-        bind_keys: tairix_drv_fs_fat32::BIND_KEYS,
-        store_path: &[b"Drivers", b"filesystem", b"fat32", b"Run"],
-    },
+    FAT32_DRIVER,
     ISO9660_DRIVER,
     ServedFsDriver {
         package: "tairix-drv-fs-udf",
@@ -1671,13 +1675,36 @@ pub fn served_fs_store_file(
     ))
 }
 
-/// The signed **USB optical set** — the xHCI host-controller driver, the USB
-/// mass-storage driver, the volume manager and the ISO 9660 driver that serves
-/// a disc's volume — each paired with its store path: the `/System/Drivers/`
-/// set the USB optical vertical plants, from the controller down to the
-/// mounted disc. No display or input
-/// driver rides with them, so the console stays the text console the serial
-/// script drives. Built once per xtask process and memoised.
+/// The signed USB mass-storage chain down to a volume `served` serves — the
+/// xHCI host-controller driver, the USB mass-storage driver, the volume
+/// manager and that format's driver — each paired with its store path. No
+/// display or input driver rides with them, so the console stays the text
+/// console the serial script drives.
+///
+/// # Errors
+///
+/// As [`build_volmgr_bundle`].
+fn usb_storage_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+    served: &ServedFsDriver,
+) -> Result<Vec<AppStoreFile>, String> {
+    Ok(vec![
+        store_file(USB_XHCI_STORE_PATH, build_xhci_bundle(ctx, arch, profile)?),
+        store_file(
+            USB_MSD_STORE_PATH,
+            build_usb_msd_bundle(ctx, arch, profile)?,
+        ),
+        store_file(VOLMGR_STORE_PATH, build_volmgr_bundle(ctx, arch, profile)?),
+        served_fs_store_file(ctx, arch, served, profile)?,
+    ])
+}
+
+/// The signed **USB optical set**: the USB mass-storage chain with the ISO
+/// 9660 driver that serves a disc's volume, from the controller down to the
+/// mounted disc — the `/System/Drivers/` set the USB optical vertical plants.
+/// Built once per xtask process and memoised.
 ///
 /// # Errors
 ///
@@ -1690,17 +1717,28 @@ pub fn optical_driver_store_files(
     static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
         [const { OnceLock::new() }; MEMO_SLOTS];
     FILES[memo_slot(arch, profile)]
-        .get_or_init(|| {
-            Ok(vec![
-                store_file(USB_XHCI_STORE_PATH, build_xhci_bundle(ctx, arch, profile)?),
-                store_file(
-                    USB_MSD_STORE_PATH,
-                    build_usb_msd_bundle(ctx, arch, profile)?,
-                ),
-                store_file(VOLMGR_STORE_PATH, build_volmgr_bundle(ctx, arch, profile)?),
-                served_fs_store_file(ctx, arch, &ISO9660_DRIVER, profile)?,
-            ])
-        })
+        .get_or_init(|| usb_storage_store_files(ctx, arch, profile, &ISO9660_DRIVER))
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
+/// The signed **USB stick set**: the USB mass-storage chain with the FAT32
+/// driver that serves a stick's volume — the `/System/Drivers/` set the
+/// twin-volume vertical plants. Built once per xtask process and memoised.
+///
+/// # Errors
+///
+/// As [`build_volmgr_bundle`].
+pub fn twins_driver_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
+        .get_or_init(|| usb_storage_store_files(ctx, arch, profile, &FAT32_DRIVER))
         .as_ref()
         .map(Vec::as_slice)
         .map_err(Clone::clone)

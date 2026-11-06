@@ -218,8 +218,10 @@ pub const TARGETS: &[Target] = &[
     },
     Target {
         package: "tairix-collections",
-        description: "the indexed heap's two-table reservation failing part-way, under a \
-                      global allocator that refuses chosen requests on one thread",
+        description: "every heap-backed container's refusals — the indexed heap's \
+                      two-table reservation, the ordered tier's splits, the range map and \
+                      set — failing part-way, under a global allocator that refuses chosen \
+                      requests on one thread",
         features: &[],
         scope: Scope::Test {
             name: "heap_allocation_failure",
@@ -342,7 +344,9 @@ pub const TARGETS: &[Target] = &[
                       passes, the client's frame — reaches undefined behaviour through this \
                       one block if the pieces are not disjoint, and the shared `Threaded` \
                       runner makes that claim under real threads where the interpreter's \
-                      data-race detector can read it",
+                      data-race detector can read it; and the `Published` slot's write-once \
+                      storage, its one write and every read ordered by its state word, which \
+                      the encoder's wavefront rows hand each other their edges through",
         features: &[],
         scope: Scope::AllTargets,
         spread: Spread::OneProcess,

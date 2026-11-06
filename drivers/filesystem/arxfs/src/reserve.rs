@@ -18,9 +18,9 @@ use core::ops::Range;
 
 use tairix_abi::driver::filesystem::AllocationClass;
 use tairix_abi::DriverError;
-use tairix_collections::RangeSet;
+use tairix_collections::TryReserveError;
 
-use crate::allocator::Allocator;
+use crate::allocator::{out_of_memory, overlapping_runs, shift, Allocator};
 use crate::btree::{internal_cap_of, leaf_cap_of};
 use crate::superblock::RING_BLOCKS;
 use crate::{data_capacity_of, extent_spec, Block, ARXFS};
@@ -88,34 +88,6 @@ const fn whole_pairs(blocks: u64) -> u64 {
     blocks & !1
 }
 
-/// Move `run` into `record`, except for the part `cancel` holds: that part
-/// was the running operation's own opposite step, and the two cancel out.
-fn shift(cancel: &mut RangeSet<u64>, record: &mut RangeSet<u64>, run: Range<u64>) {
-    let mut pos = run.start;
-    while pos < run.end {
-        let Some(part) = cancel.first_overlap(pos..run.end) else {
-            record.insert(pos..run.end);
-            return;
-        };
-        if part.start > pos {
-            record.insert(pos..part.start);
-        }
-        pos = part.end;
-        cancel.remove(part);
-    }
-}
-
-/// Blocks of `run` that `set` holds.
-fn held_within(set: &RangeSet<u64>, run: Range<u64>) -> u64 {
-    let mut held = 0;
-    let mut pos = run.start;
-    while let Some(part) = set.first_overlap(pos..run.end) {
-        held += part.end - part.start;
-        pos = part.end;
-    }
-    held
-}
-
 impl Allocator {
     /// Where `len` reserved blocks are taken: a data block from the low end
     /// and a metadata pair from the high end, as the ordinary allocator draws
@@ -140,27 +112,64 @@ impl Allocator {
     }
 
     /// Hand back everything the open transaction took, as it is abandoned.
-    pub(crate) fn abandon_reserve_draws(&mut self) {
-        let taken = core::mem::take(&mut self.txn_reserve);
-        for run in &taken {
-            self.reserve.insert(run);
-        }
+    pub(crate) fn abandon_reserve_draws(&mut self) -> Result<(), TryReserveError> {
         self.op_reserve_taken.clear();
         self.op_reserve_returned.clear();
+        let taken = core::mem::take(&mut self.txn_reserve);
+        taken.iter().try_for_each(|run| self.reserve.insert(run))
     }
 
     /// Undo the running operation's draws and returns, as it is rolled back.
-    pub(crate) fn undo_reserve_operation(&mut self) {
+    pub(crate) fn undo_reserve_operation(&mut self) -> Result<(), TryReserveError> {
         let taken = core::mem::take(&mut self.op_reserve_taken);
         for run in &taken {
-            self.txn_reserve.remove(run.clone());
-            self.reserve.insert(run);
+            self.txn_reserve.remove(run.clone())?;
+            self.reserve.insert(run)?;
         }
         let returned = core::mem::take(&mut self.op_reserve_returned);
         for run in &returned {
-            self.reserve.remove(run.clone());
-            self.txn_reserve.insert(run);
+            self.reserve.remove(run.clone())?;
+            self.txn_reserve.insert(run)?;
         }
+        Ok(())
+    }
+
+    /// Move `run` from the reserve into the transaction's draws, recorded as
+    /// the running operation's.
+    fn take_run(&mut self, run: Range<u64>) -> Result<(), TryReserveError> {
+        self.reserve.remove(run.clone())?;
+        self.txn_reserve.insert(run.clone())?;
+        shift(
+            &mut self.op_reserve_returned,
+            &mut self.op_reserve_taken,
+            run,
+        )
+    }
+
+    /// Return to the reserve the part of `run` this transaction took from it,
+    /// now free again.
+    pub(crate) fn return_reserved(&mut self, run: &Range<u64>) -> Result<(), TryReserveError> {
+        let mut pos = run.start;
+        while let Some(part) = self.txn_reserve.first_overlap(pos..run.end) {
+            pos = part.end;
+            self.txn_reserve.remove(part.clone())?;
+            self.reserve.insert(part.clone())?;
+            shift(
+                &mut self.op_reserve_taken,
+                &mut self.op_reserve_returned,
+                part,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Top the reserve up from `run`, which has just become free.
+    pub(crate) fn refill_reserve(&mut self, run: &Range<u64>) -> Result<(), TryReserveError> {
+        let wanted = self.reserve_deficit().min(run.end - run.start);
+        if wanted == 0 {
+            return Ok(());
+        }
+        self.reserve.insert(run.end - wanted..run.end)
     }
 
     /// Whether a transaction below the reserve has allocated `threshold`
@@ -300,7 +309,10 @@ impl<B: Block> ARXFS<B> {
             let start = self
                 .map_scan_used_down(top, lowest)?
                 .map_or(lowest, |used| used + 1);
-            self.allocator_mut()?.reserve.insert(start..top + 1);
+            let alloc = self.allocator_mut()?;
+            alloc.keep_room(1).map_err(out_of_memory)?;
+            let filled = alloc.reserve.insert(start..top + 1);
+            self.kept(filled)?;
             if start <= floor {
                 return Ok(());
             }
@@ -314,7 +326,9 @@ impl<B: Block> ARXFS<B> {
     /// # Errors
     ///
     /// [`DriverError::NoSpace`] when the running operation may not draw on the
-    /// reserve, or no reserve run holds `len` blocks.
+    /// reserve, or no reserve run holds `len` blocks;
+    /// [`DriverError::OutOfMemory`] when the move's records cannot be had,
+    /// which leaves the reserve and the transaction as they were.
     pub(crate) fn take_reserved(&mut self, len: u64) -> Result<u64, DriverError> {
         if self.draw == Draw::Ordinary {
             return Err(DriverError::NoSpace);
@@ -325,46 +339,18 @@ impl<B: Block> ARXFS<B> {
             .ok_or(DriverError::NoSpace)?;
         let run = start..start + len;
         let alloc = self.allocator_mut()?;
-        alloc.reserve.remove(run.clone());
-        alloc.txn_reserve.insert(run.clone());
-        shift(
-            &mut alloc.op_reserve_returned,
-            &mut alloc.op_reserve_taken,
-            run,
-        );
-        self.claim_run(start, len);
+        // Room for the move out of the reserve and for the claim, both made
+        // before either set changes.
+        let adds = 2
+            + overlapping_runs(&alloc.op_reserve_returned, &run)
+            + overlapping_runs(&alloc.op_released, &run);
+        alloc.keep_room(adds).map_err(out_of_memory)?;
+        let mut taken = alloc.take_run(run.clone());
+        if taken.is_ok() {
+            taken = self.claim_kept(run);
+        }
+        self.kept(taken)?;
         Ok(start)
-    }
-
-    /// Return to the reserve the part of `start..start + len` this transaction
-    /// took from it, now free again.
-    pub(crate) fn return_reserved(&mut self, start: u64, len: u64) {
-        let Ok(alloc) = self.allocator_mut() else {
-            return;
-        };
-        let end = start.saturating_add(len);
-        let mut pos = start;
-        while let Some(part) = alloc.txn_reserve.first_overlap(pos..end) {
-            pos = part.end;
-            alloc.txn_reserve.remove(part.clone());
-            alloc.reserve.insert(part.clone());
-            shift(
-                &mut alloc.op_reserve_taken,
-                &mut alloc.op_reserve_returned,
-                part,
-            );
-        }
-    }
-
-    /// Top the reserve up from `run`, which has just become free.
-    pub(crate) fn refill_reserve(&mut self, run: Range<u64>) {
-        let Ok(alloc) = self.allocator_mut() else {
-            return;
-        };
-        let wanted = alloc.reserve_deficit().min(run.end - run.start);
-        if wanted > 0 {
-            alloc.reserve.insert(run.end - wanted..run.end);
-        }
     }
 
     /// Refuse an operation that freed space only in name: one that drew on the
@@ -388,12 +374,7 @@ impl<B: Block> ARXFS<B> {
             .op_deferred
             .covered()
             .saturating_add(alloc.op_released.covered());
-        let held: u64 = alloc
-            .op_claimed
-            .iter()
-            .map(|run| held_within(&alloc.txn_private, run))
-            .sum();
-        if freed >= held {
+        if freed >= alloc.op_claimed.covered() {
             Ok(())
         } else {
             Err(DriverError::NoSpace)

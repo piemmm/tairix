@@ -22,6 +22,14 @@ When no display service is running, or another session already holds
 the seat, the command fails with its reason on standard error — it
 never displaces a running session.
 
+While the desktop runs, `Meta+Shift+3` saves a picture of the screen and
+`Meta+Shift+4` one of an area you drag out — or, after `Space`, of a
+window you click. `Meta+Shift+5` opens the capture bar, which also records
+the screen. Adding `Ctrl` puts the picture on the clipboard, and a capture
+shortcut pressed during a recording stops it. A recording with sound asks
+for an administrator's password when your account may not record sound
+itself.
+
 ## OPTIONS
 
 - `-h, -?` — show this command's own short help.

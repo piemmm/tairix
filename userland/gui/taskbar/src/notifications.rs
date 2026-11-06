@@ -86,6 +86,9 @@ pub struct Producer {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct IconId(pub u64);
 
+/// The notification-area id the screen-recording indicator goes by.
+pub const SCREEN_RECORDING_SIGNAL: IconId = IconId(0x6361_7074_0001);
+
 /// The kind of a persistent status signal, selecting the glyph it draws.
 ///
 /// A closed set: a status signal names *what it is*, so the renderer resolves
@@ -105,6 +108,8 @@ pub enum StatusKind {
     Recording,
     /// Battery charge.
     Battery,
+    /// The screen being recorded by the desktop; a press stops it.
+    ScreenRecording,
 }
 
 impl StatusKind {
@@ -118,6 +123,7 @@ impl StatusKind {
             Self::Muted => IconKind::VolumeMuted,
             Self::Recording => IconKind::Microphone,
             Self::Battery => IconKind::Battery,
+            Self::ScreenRecording => IconKind::StopRecording,
         }
     }
 }

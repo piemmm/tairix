@@ -10,9 +10,13 @@
 //!
 //! The editor is the host-tested engine ([`tairix_paint`]), run in the shared
 //! document host (`tairix_window::docapp`). What is the painter's own is here:
-//! a decode worker reads documents and pastes through the sandbox, and the
-//! host's queue encodes saves and copies and carries out fills and transforms
-//! beside them, so nothing that grows with the picture waits on the loop.
+//! a decode worker reads documents and pastes through the sandbox, the host's
+//! queue encodes saves and copies and carries out fills and transforms beside
+//! them, so nothing that grows with the picture waits on the loop, and a
+//! preview worker of its own works out previews, histograms, the Layers pane's
+//! thumbnails and the composite beneath an opacity being changed across every
+//! core, which an Apply's completion, a merge or a flatten on the queue takes
+//! first, so no save waits behind them.
 //!
 //! On the host it is an inert stub so the workspace build, clippy and fmt
 //! still cover the file.
@@ -29,6 +33,7 @@ mod program {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
     use core::fmt;
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     use tairix_abi::fs::Filetype;
     use tairix_abi::seat::SEAT_PRIMARY;
@@ -51,6 +56,7 @@ mod program {
     use tairix_paint::layout::{Faces, WINDOW_SIZE};
     use tairix_paint::load::{Assembly, Refusal};
     use tairix_paint::preferences::Preferences;
+    use tairix_paint::preview::{self, PreviewAnswer, PreviewJob};
     use tairix_paint::render::render_into;
     use tairix_paint::save::{
         encode, format_for, format_named, lost_in, write_back, SaveFormat, SaveRefusal,
@@ -58,8 +64,9 @@ mod program {
     use tairix_paint::selection::adapt_pasted;
     use tairix_paint::settings::{Category, SettingsLayout, SettingsRequest, SettingsWindow};
     use tairix_paint::view::{compute, Clip, Compute, Computed, Own, View};
+    use tairix_parallel::{Pool, SERIAL};
     use tairix_raster::Surface;
-    use tairix_rt::sync::WorkerWake;
+    use tairix_rt::sync::{Condvar, Mutex, WorkerWake};
     use tairix_rt::work::{Worker, WorkerGuard};
     use tairix_sandbox::imageedit::{
         close_edit, open_edit, read_kept, read_rows, select_entry, EditDocument, EditEntry,
@@ -319,6 +326,91 @@ mod program {
     /// Room the decode queue holds for each window: a load and a paste.
     const DECODES_PER_WINDOW: usize = 2;
 
+    /// A preview job, with the document that asked.
+    type StampedJob = Option<(Stamp, PreviewJob)>;
+    /// A preview's answer, with the document that asked.
+    type StampedAnswer = Option<(Stamp, PreviewAnswer)>;
+    type PreviewDesk = JobQueue<StampedJob, StampedAnswer>;
+
+    /// Each job's blocks are spread across the cores the worker shares with the
+    /// queue's work, which takes them first; a window's newer job takes the
+    /// place of the one it has waiting.
+    type PreviewWorker = Worker<Arc<Cores>, StampedJob, StampedAnswer, PreviewDesk>;
+
+    fn serve_preview(cores: &mut Arc<Cores>, job: &mut StampedJob) -> StampedAnswer {
+        let (stamp, job) = job.take()?;
+        Some((stamp, cores.preview(job)))
+    }
+
+    /// The cores an operation is spread across, shared by the preview worker
+    /// and the queue's work spread across them — an Apply's completion, a
+    /// merge, a flatten — the queue's first: no preview starts while that is
+    /// due, and one under way gives way at its next block, so neither finds
+    /// the pool taken and works its blocks out on one core.
+    struct Cores {
+        pool: Pool,
+        /// The queue's work due or under way that wants the cores, which each
+        /// block of a preview reads.
+        completing: AtomicUsize,
+        /// Whether a preview holds the pool, which the queue's work waits out.
+        previewing: Mutex<bool>,
+        changed: Condvar,
+    }
+
+    impl Cores {
+        fn new(pool: Pool) -> Self {
+            Self {
+                pool,
+                completing: AtomicUsize::new(0),
+                previewing: Mutex::new(false),
+                changed: Condvar::new(),
+            }
+        }
+
+        /// Whether the queue's work wants the cores, so a preview asked now
+        /// would only give way.
+        fn due(&self) -> bool {
+            self.completing.load(Ordering::Relaxed) > 0
+        }
+
+        /// Carry out `work` on the ordered queue: an operation's completion, a
+        /// merge or a flatten, spread across the cores, takes them ahead of
+        /// the preview worker once a preview under way has given way.
+        fn work_out(&self, work: Compute) -> Computed {
+            if !matches!(work, Compute::Op { .. } | Compute::Compose { .. }) {
+                return compute(work, &self.pool);
+            }
+            self.completing.fetch_add(1, Ordering::Relaxed);
+            let mut previewing = self.previewing.lock();
+            while *previewing {
+                previewing = self.changed.wait(previewing);
+            }
+            drop(previewing);
+            let computed = compute(work, &self.pool);
+            self.completing.fetch_sub(1, Ordering::Relaxed);
+            computed
+        }
+
+        /// Work `job` out on the preview worker, giving way at its next block
+        /// to the queue's work falling due. One asked while that is due is
+        /// answered as given way at once, never waited on: this may be the
+        /// event loop itself, for want of a preview worker, and the loop asks
+        /// again once that work has landed.
+        fn preview(&self, job: PreviewJob) -> PreviewAnswer {
+            let mut previewing = self.previewing.lock();
+            if self.due() {
+                drop(previewing);
+                return preview::serve(job, &SERIAL, &|| true);
+            }
+            *previewing = true;
+            drop(previewing);
+            let answer = preview::serve(job, &self.pool, &|| self.due());
+            *self.previewing.lock() = false;
+            self.changed.notify_all();
+            answer
+        }
+    }
+
     /// Why a save did not reach its file.
     #[derive(Clone, Debug)]
     enum SaveFailure {
@@ -361,8 +453,14 @@ mod program {
     enum Work {
         /// Cut out and encode a copy for the clipboard.
         Copy(Clip),
-        /// A fill, a transform, or a selection put down or cleared.
-        Compute { job: u64, work: Compute },
+        /// A fill, a transform, an operation completed, a merge, a flatten, or
+        /// a selection put down or cleared, an operation's blocks and a
+        /// merge's tiles spread across `cores`.
+        Compute {
+            job: u64,
+            work: Compute,
+            cores: Arc<Cores>,
+        },
     }
 
     enum Answer {
@@ -377,6 +475,9 @@ mod program {
     /// The wait-set token the settings writer's answer wake arrives under.
     const SETTINGS_TOKEN: u64 = APP_TOKEN + 1;
 
+    /// The wait-set token the preview worker's answer wake arrives under.
+    const PREVIEW_TOKEN: u64 = APP_TOKEN + 2;
+
     /// What the painter keeps beside the host's own.
     struct Paint {
         decoder: Arc<DecodeWorker>,
@@ -387,6 +488,12 @@ mod program {
         preferences: Publication<Preferences>,
         writer: Arc<PublishWorker<Preferences>>,
         _writer_guard: WorkerGuard<Opening, PublishJob<Preferences>, PublishAnswer<Preferences>>,
+        /// The worker the windows' speculative work runs on.
+        previews: Arc<PreviewWorker>,
+        _previews_guard: WorkerGuard<Arc<Cores>, StampedJob, StampedAnswer, PreviewDesk>,
+        /// The cores the preview worker and the queue's work spread their
+        /// blocks across, the queue's first.
+        cores: Arc<Cores>,
     }
 
     impl DocumentApp for Paint {
@@ -401,11 +508,12 @@ mod program {
         const NAME: &'static str = APP_NAME;
         const WINDOW_SIZE: (u32, u32) = WINDOW_SIZE;
         /// A copy in flight with the newer one that replaces it waiting, one
-        /// of the picture's own jobs — a fill, a transform, a selection put
-        /// down or cleared, one at a time, the picture taking no edit while
-        /// it is out — the save in flight, and the open adjustment's one job,
-        /// its preview or its histogram.
-        const JOBS_PER_WINDOW: usize = 5;
+        /// of the picture's own jobs — a fill, a transform, an operation
+        /// completed, a selection put down or cleared, one at a time, the
+        /// picture taking no edit while it is out — and the save in flight;
+        /// previews, histograms and the Layers pane's thumbnails and
+        /// composite run on the preview worker.
+        const JOBS_PER_WINDOW: usize = 4;
         const BAR_ROWS: &'static [(AppMenuSymbol, &'static str)] =
             &[(AppMenuSymbol::Settings, "Settings\u{2026}")];
 
@@ -439,6 +547,22 @@ mod program {
             let writer = Arc::new(tairix_appdata::publish_worker(Opening::Bare));
             app::start_worker(APP_NAME, &writer, set, SETTINGS_TOKEN, "settings");
             let writer_guard = WorkerGuard::new(&writer);
+            let online = tairix_procinfo::online_cpus(&tairix_procinfo::IpcTransport);
+            let pool = app::pool_across(APP_NAME, online, "working out previews");
+            let cores = Arc::new(Cores::new(pool));
+            // The preview queue's room grows with each window opened.
+            let Ok(previews) =
+                PreviewWorker::queued(serve_preview, Arc::clone(&cores), WorkerWake::create(), 0)
+            else {
+                return Err(app::fail(
+                    APP_NAME,
+                    app::EXIT_NO_EVENTS,
+                    "no room for the preview queue",
+                ));
+            };
+            let previews = Arc::new(previews);
+            app::start_worker(APP_NAME, &previews, set, PREVIEW_TOKEN, "preview");
+            let previews_guard = WorkerGuard::new(&previews);
             Ok(Self {
                 decoder,
                 _decoder_guard: guard,
@@ -446,13 +570,21 @@ mod program {
                 preferences: Publication::new(preferences),
                 writer,
                 _writer_guard: writer_guard,
+                previews,
+                _previews_guard: previews_guard,
+                cores,
             })
         }
 
         fn wakes(&self) -> Vec<(u64, Arc<dyn AnswerWake>)> {
             let decoder: Arc<dyn AnswerWake> = self.decoder.clone();
             let writer: Arc<dyn AnswerWake> = self.writer.clone();
-            alloc::vec![(APP_TOKEN, decoder), (SETTINGS_TOKEN, writer)]
+            let previews: Arc<dyn AnswerWake> = self.previews.clone();
+            alloc::vec![
+                (APP_TOKEN, decoder),
+                (SETTINGS_TOKEN, writer),
+                (PREVIEW_TOKEN, previews)
+            ]
         }
 
         fn faces(theme: &Theme, scale: Scale) -> Faces {
@@ -479,9 +611,9 @@ mod program {
                             encode_png(&pixels).map_err(|err| alloc::format!("{err}"))
                         }),
                 ),
-                Work::Compute { job, work } => Answer::Computed {
+                Work::Compute { job, work, cores } => Answer::Computed {
                     job,
-                    answer: compute(work),
+                    answer: cores.work_out(work),
                 },
             }
         }
@@ -501,16 +633,28 @@ mod program {
         fn reserve_window(&mut self) -> Result<(), &'static str> {
             self.decoder
                 .grow(DECODES_PER_WINDOW)
-                .map_err(|_| "no room for another window's decoding")
+                .map_err(|_| "no room for another window's decoding")?;
+            if self.previews.grow(preview::PREVIEW_ROOM).is_err() {
+                self.decoder.shrink(DECODES_PER_WINDOW);
+                return Err("no room for another window's previews");
+            }
+            Ok(())
         }
 
         fn release_window(&mut self) {
             self.decoder.shrink(DECODES_PER_WINDOW);
+            self.previews.shrink(preview::PREVIEW_ROOM);
         }
 
+        /// The window's waiting decodes and previews go with it; a preview
+        /// already running is abandoned by the window's ticket.
         fn withdraw(&mut self, window: u64) {
             self.decoder
                 .retain_waiting(|job| job.as_ref().is_none_or(|job| job.stamp.window() != window));
+            self.previews.retain_waiting(|job| {
+                job.as_ref()
+                    .is_none_or(|(stamp, _)| stamp.window() != window)
+            });
         }
 
         fn untitled(host: &Host<Self>) -> Result<Engine, String> {
@@ -557,6 +701,12 @@ mod program {
             decoder.collect_landed(|answer| {
                 if let Some(reply) = answer {
                     adopt_decode(host, reply);
+                }
+            });
+            let previews = Arc::clone(&host.app.previews);
+            previews.collect_landed(|answer| {
+                if let Some((stamp, answer)) = answer {
+                    adopt_preview(host, stamp, answer);
                 }
             });
             collect_settings(host);
@@ -672,6 +822,26 @@ mod program {
                 }
                 at = host.index_of(id).map_or(at, |now| now + 1);
             }
+            // A picture window asks the preview worker for what it wants
+            // next, whatever moved it: an input, an answer, a resize. None is
+            // asked while the queue's work wants the cores, which a preview
+            // would only give way to; that work's landing wakes the loop.
+            if host.app.cores.due() {
+                return false;
+            }
+            for at in 0..host.windows.len() {
+                let wanted = host.windows.get_mut(at).and_then(|window| {
+                    match (&mut window.view, &window.layout) {
+                        (Engine::Picture(view), EngineLayout::Picture(layout)) => {
+                            view.wanted_preview(layout, scale)
+                        }
+                        _ => None,
+                    }
+                });
+                if let Some(request) = wanted {
+                    host.apply(at, Outcome::asking(request));
+                }
+            }
             false
         }
 
@@ -696,7 +866,10 @@ mod program {
             tairix_font::trim_glyph_cache();
             let band = tairix_rt::pressure::gauge().band();
             for window in &mut host.windows {
-                window.view.adopt_pressure(band);
+                window
+                    .view
+                    .adopt_pressure(band, &window.layout, &mut window.damage);
+                window.owe_reported();
             }
         }
 
@@ -881,11 +1054,9 @@ mod program {
     fn put_copy(host: &mut Host<Paint>, index: usize, copied: Result<Vec<u8>, String>) {
         let window = &mut host.windows[index];
         let refused = match copied {
-            Ok(bytes) => {
-                clipboard::put(&mut host.client, window.id(), ClipboardKind::Octets, &bytes)
-                    .err()
-                    .map(|err| alloc::format!("Could not copy: {err}"))
-            }
+            Ok(bytes) => clipboard::put(&mut host.client, window.id(), ClipboardKind::Png, &bytes)
+                .err()
+                .map(|err| alloc::format!("Could not copy: {err}")),
             Err(err) => Some(alloc::format!("Could not copy: {err}")),
         };
         if let Some(message) = refused {
@@ -1171,7 +1342,7 @@ mod program {
                 }
             }
             Own::Paste(kind) => match clipboard::take(&mut host.client, id) {
-                Ok(Some((ClipboardKind::Octets, bytes))) => {
+                Ok(Some((ClipboardKind::Png | ClipboardKind::Octets, bytes))) => {
                     match host.app.decoder.submit(Some(DecodeJob {
                         stamp: host.windows[index].stamp(),
                         work: DecodeWork::Paste { bytes, kind },
@@ -1185,10 +1356,59 @@ mod program {
                 Err(err) => window.state(alloc::format!("Could not paste: {err}")),
             },
             Own::Compute { job, work } => {
-                if !host.queue(index, Work::Compute { job, work }) {
+                let cores = Arc::clone(&host.app.cores);
+                if !host.queue(index, Work::Compute { job, work, cores }) {
                     refuse_compute(host, index, job);
                 }
             }
+            Own::Preview { job, stamp, work } => ask_preview(host, index, job, (stamp, work)),
+        }
+    }
+
+    /// Hand window `index`'s preview job `job` to the preview worker in place
+    /// of the one the window has waiting; one it has no room for is refused
+    /// to the window, which asks again after its next input.
+    fn ask_preview(
+        host: &mut Host<Paint>,
+        index: usize,
+        job: u64,
+        (stamp, work): (preview::Stamp, preview::PreviewWork),
+    ) {
+        let window = &host.windows[index];
+        let asked = PreviewJob {
+            window: window.id(),
+            job,
+            stamp,
+            work,
+        };
+        let document = window.stamp();
+        host.app.previews.retain_waiting(|waiting| {
+            waiting
+                .as_ref()
+                .is_none_or(|(_, waiting)| !preview::supersedes(&asked, waiting))
+        });
+        match host.app.previews.submit(Some((document, asked))) {
+            Ok(answered) => host.note_answered(answered),
+            Err(_) => {
+                if let Some(view) = host.windows[index].view.picture_mut() {
+                    view.preview_refused(job);
+                }
+            }
+        }
+    }
+
+    /// Land what the preview worker answered on the document that asked for
+    /// it: one answered for a document since gone is let go.
+    fn adopt_preview(host: &mut Host<Paint>, stamp: Stamp, answer: PreviewAnswer) {
+        let Some(index) = host.showing(stamp) else {
+            return;
+        };
+        let window = &mut host.windows[index];
+        if let (Engine::Picture(view), EngineLayout::Picture(layout)) =
+            (&mut window.view, &window.layout)
+        {
+            view.previewed(answer, layout, &mut window.damage);
+            window.owe_reported();
         }
     }
 

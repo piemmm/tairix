@@ -41,6 +41,7 @@
 use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
 
+use crate::allocator::out_of_memory;
 use crate::allocmap::{bit_get, bit_set};
 use crate::header::{BlockHeader, BlockType, ReservedOwner, HEADER_LEN};
 use crate::pagecache::{page_payload_len, BlockCache};
@@ -445,8 +446,10 @@ impl<B: Block> ARXFS<B> {
         if header.owner != array.role.sentinel() || header.logical_addr != page {
             return Err(DriverError::DeviceFault);
         }
-        array.cache.insert_clean(page, &buf[HEADER_LEN..bs]);
-        Ok(())
+        array
+            .cache
+            .insert_clean(page, &buf[HEADER_LEN..bs])
+            .map_err(out_of_memory)
     }
 
     /// Write one resident page back to its run.

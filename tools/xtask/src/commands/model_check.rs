@@ -21,10 +21,14 @@
 //!   / `destroy` (mirroring `kernel/ipc::Port`): two senders, each bounded by
 //!   its own depth and served in turn.
 //!
+//! A second model, the *room* model, checks that a slot freed in a sender's
+//! lane wakes one of the sender's threads waiting for it and is handed on when
+//! that thread leaves it unused (mirroring `kernel/ipc`'s `RoomWaiters`).
+//!
 //! The formal narrative — the state, the transition relation, and the
 //! invariants, in TLA+-style pseudocode — lives in
-//! `docs/src/security/model/capability_ipc.md` and is kept in sync with this
-//! executable model and with the production code it abstracts.
+//! `docs/src/security/model/capability_ipc.md` and is kept in sync with these
+//! executable models and with the production code they abstract.
 //!
 //! Adding a model means adding a [`NamedModel`] to [`MODELS`], never teaching
 //! `ci` about it directly.
@@ -447,6 +451,259 @@ impl Model for CapIpcModel {
 }
 
 // ---------------------------------------------------------------------------
+// The room model: one wake per freed slot.
+// ---------------------------------------------------------------------------
+
+/// The threads of one sender the room model drives: three are the fewest at
+/// which a slot can be handed past a thread that leaves it to one behind.
+const ROOM_THREADS: usize = 3;
+/// The sender's lane depth in the room model.
+const ROOM_DEPTH: u8 = 1;
+
+/// Where a thread of the room model's sender is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+enum Step {
+    /// Doing anything but waiting for room.
+    Idle,
+    /// About to look for room under the endpoint's lock.
+    Looking,
+    /// Parked until a wake.
+    Parked,
+    /// Holding a slot, about to send.
+    Ready,
+    /// Holding a slot back in user space, its wait having reported the room
+    /// ready (a port's owing thread).
+    Owes,
+}
+
+/// A thread's record of its wait for room, mirroring `kernel/ipc`'s
+/// `Standing`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+enum Record {
+    Waiting,
+    Designated,
+    Owing,
+}
+
+/// The room model's state: the lane, each thread's step and record, the line
+/// of waiting threads, and the wakes delivered and not yet taken.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct RoomState {
+    /// Messages in the lane.
+    queued: u8,
+    steps: [Step; ROOM_THREADS],
+    records: [Option<Record>; ROOM_THREADS],
+    /// The threads waiting, first in line first.
+    line: Vec<usize>,
+    woken: [bool; ROOM_THREADS],
+}
+
+impl RoomState {
+    /// Whether thread `t` holds a slot.
+    fn holds(&self, t: usize) -> bool {
+        matches!(self.records[t], Some(Record::Designated | Record::Owing))
+    }
+
+    /// Whether a free slot is held by no thread.
+    fn unheld(&self) -> bool {
+        let held = (0..ROOM_THREADS).filter(|&t| self.holds(t)).count();
+        usize::from(ROOM_DEPTH - self.queued) > held
+    }
+
+    /// Hand thread `t`, waiting, the slot it waits for.
+    fn designate(&mut self, t: usize) {
+        self.line.retain(|&waiting| waiting != t);
+        self.records[t] = Some(Record::Designated);
+    }
+
+    /// Hand a slot no thread holds to the first in line, waking it.
+    fn hand_out(&mut self) {
+        if self.unheld() && !self.line.is_empty() {
+            let first = self.line.remove(0);
+            self.designate(first);
+            self.woken[first] = true;
+        }
+    }
+}
+
+/// The room model: a sender's threads waiting for room in its lane, a receiver
+/// freeing slots, and threads leaving their waits as a kill or a refusal ends
+/// them. The production instance has every fault switch off; the tests flip
+/// one at a time to prove the checker rejects it.
+pub struct RoomModel {
+    /// Fault injection: a receive wakes every thread waiting, the herd the
+    /// one-wake design removed. Off in production.
+    wake_all: bool,
+    /// Fault injection: a thread leaving a slot it holds unused hands it to
+    /// nobody. Off in production.
+    no_hand_on: bool,
+}
+
+impl RoomModel {
+    /// The faithful model: every fault switch off.
+    #[must_use]
+    pub fn production() -> Self {
+        Self {
+            wake_all: false,
+            no_hand_on: false,
+        }
+    }
+
+    /// End thread `t`'s wait in `next`, a slot it held going to the next in
+    /// line.
+    fn leave(&self, next: &mut RoomState, t: usize) {
+        let held = next.holds(t);
+        next.records[t] = None;
+        next.line.retain(|&waiting| waiting != t);
+        next.woken[t] = false;
+        next.steps[t] = Step::Idle;
+        if held && !self.no_hand_on {
+            next.hand_out();
+        }
+    }
+
+    /// Everything thread `t` can do from `s`.
+    fn thread_steps(&self, s: &RoomState, t: usize, out: &mut Vec<(String, RoomState)>) {
+        let mut next = s.clone();
+        match s.steps[t] {
+            Step::Idle => {
+                next.steps[t] = Step::Looking;
+                out.push((format!("begin(t{t})"), next));
+            }
+            Step::Looking => {
+                if next.records[t].is_none() {
+                    next.records[t] = Some(Record::Waiting);
+                    next.line.push(t);
+                }
+                if !next.holds(t) && next.unheld() {
+                    next.designate(t);
+                }
+                next.steps[t] = if next.holds(t) {
+                    Step::Ready
+                } else {
+                    Step::Parked
+                };
+                out.push((format!("look(t{t})"), next));
+            }
+            Step::Parked if s.woken[t] => {
+                next.woken[t] = false;
+                next.steps[t] = Step::Looking;
+                out.push((format!("resume(t{t})"), next));
+            }
+            Step::Parked => {
+                next.woken[t] = true;
+                out.push((format!("spurious(t{t})"), next));
+            }
+            Step::Ready | Step::Owes => {
+                if s.queued < ROOM_DEPTH && (s.holds(t) || s.unheld()) {
+                    next.queued += 1;
+                    next.records[t] = None;
+                    next.steps[t] = Step::Idle;
+                    out.push((format!("send(t{t})"), next));
+                }
+                let mut kept = s.clone();
+                if s.steps[t] == Step::Ready && s.holds(t) {
+                    kept.records[t] = Some(Record::Owing);
+                    kept.steps[t] = Step::Owes;
+                    out.push((format!("own(t{t})"), kept));
+                } else if s.steps[t] == Step::Owes {
+                    kept.steps[t] = Step::Looking;
+                    out.push((format!("rewait(t{t})"), kept));
+                }
+            }
+        }
+        if s.steps[t] != Step::Idle {
+            let mut left = s.clone();
+            self.leave(&mut left, t);
+            out.push((format!("leave(t{t})"), left));
+        }
+    }
+}
+
+impl Model for RoomModel {
+    type State = RoomState;
+
+    fn initial(&self) -> Vec<Self::State> {
+        vec![RoomState {
+            queued: ROOM_DEPTH,
+            steps: [Step::Idle; ROOM_THREADS],
+            records: [None; ROOM_THREADS],
+            line: Vec::new(),
+            woken: [false; ROOM_THREADS],
+        }]
+    }
+
+    fn successors(&self, state: &Self::State) -> Vec<(String, Self::State)> {
+        let mut out = Vec::new();
+        for t in 0..ROOM_THREADS {
+            self.thread_steps(state, t, &mut out);
+        }
+        // recv: the receiver takes a message, and the slot it frees goes to the
+        // first in line (mirrors `Port::recv` and an answer at a call
+        // endpoint).
+        if state.queued > 0 {
+            let mut next = state.clone();
+            next.queued -= 1;
+            next.hand_out();
+            if self.wake_all {
+                for &waiting in &state.line {
+                    next.woken[waiting] = true;
+                }
+            }
+            out.push(("recv".to_string(), next));
+        }
+        out
+    }
+
+    fn state_invariant(&self, s: &Self::State) -> Result<(), String> {
+        let held = (0..ROOM_THREADS).filter(|&t| s.holds(t)).count();
+        if held > usize::from(ROOM_DEPTH - s.queued) {
+            return Err("room-held: more slots held than are free".to_string());
+        }
+        if s.unheld() && !s.line.is_empty() {
+            return Err(
+                "no-slot-unheld-while-waiting: a free slot nobody holds while a thread waits"
+                    .to_string(),
+            );
+        }
+        let waiting: Vec<usize> = (0..ROOM_THREADS)
+            .filter(|&t| s.records[t] == Some(Record::Waiting))
+            .collect();
+        let mut line = s.line.clone();
+        line.sort_unstable();
+        if line != waiting {
+            return Err("line-exact: the line and the waiting threads disagree".to_string());
+        }
+        for t in 0..ROOM_THREADS {
+            if s.steps[t] == Step::Parked && s.records[t].is_none() {
+                return Err("parked-recorded: a thread parked with nothing to wake it".to_string());
+            }
+            if s.steps[t] == Step::Parked && s.holds(t) && !s.woken[t] {
+                return Err("no-lost-wake: a thread handed a slot sleeps unwoken".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    fn transition_invariant(
+        &self,
+        pre: &Self::State,
+        action: &str,
+        post: &Self::State,
+    ) -> Result<(), String> {
+        let woken = (0..ROOM_THREADS)
+            .filter(|&t| post.woken[t] && !pre.woken[t])
+            .count();
+        if woken > 1 {
+            return Err(format!(
+                "one-wake-per-slot: `{action}` woke {woken} threads"
+            ));
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Command registry and entry point.
 // ---------------------------------------------------------------------------
 
@@ -465,12 +722,25 @@ fn check_cap_ipc() -> Result<Report, Counterexample> {
     check(&CapIpcModel::production())
 }
 
+fn check_room() -> Result<Report, Counterexample> {
+    check(&RoomModel::production())
+}
+
 /// The closed set of Silver models, in run order.
-pub const MODELS: &[NamedModel] = &[NamedModel {
-    name: "cap-ipc",
-    description: "capability + IPC state machine (derive/delegate/revoke + port send/recv/destroy)",
-    run: check_cap_ipc,
-}];
+pub const MODELS: &[NamedModel] = &[
+    NamedModel {
+        name: "cap-ipc",
+        description:
+            "capability + IPC state machine (derive/delegate/revoke + port send/recv/destroy)",
+        run: check_cap_ipc,
+    },
+    NamedModel {
+        name: "room",
+        description:
+            "one wake per freed slot: three threads of a sender waiting for room, handed on",
+        run: check_room,
+    },
+];
 
 /// Parsed `model-check` invocation.
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
@@ -628,6 +898,45 @@ mod tests {
             cx.invariant
         );
         assert!(!cx.trace.is_empty());
+    }
+
+    #[test]
+    fn the_room_model_holds_every_invariant() {
+        let report = check(&RoomModel::production()).expect("no counterexample");
+        assert!(report.states > 50, "explored only {} states", report.states);
+        assert!(report.transitions > report.states);
+    }
+
+    /// A receive waking every thread waiting is the herd one wake per freed
+    /// slot removed.
+    #[test]
+    fn checker_catches_a_receive_that_wakes_every_waiting_thread() {
+        let broken = RoomModel {
+            wake_all: true,
+            ..RoomModel::production()
+        };
+        let cx = check(&broken).expect_err("a herd must be rejected");
+        assert!(
+            cx.invariant.starts_with("one-wake-per-slot"),
+            "unexpected invariant: {}",
+            cx.invariant
+        );
+    }
+
+    /// A slot its holder leaves unused and hands to nobody strands the threads
+    /// still waiting for it.
+    #[test]
+    fn checker_catches_a_slot_left_unused_and_not_handed_on() {
+        let broken = RoomModel {
+            no_hand_on: true,
+            ..RoomModel::production()
+        };
+        let cx = check(&broken).expect_err("a stranded slot must be rejected");
+        assert!(
+            cx.invariant.starts_with("no-slot-unheld-while-waiting"),
+            "unexpected invariant: {}",
+            cx.invariant
+        );
     }
 
     #[test]

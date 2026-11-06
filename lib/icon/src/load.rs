@@ -317,6 +317,16 @@ pub const ICON_KINDS: [IconKind; core::mem::variant_count::<IconKind>()] = [
     IconKind::TextMakefile,
     IconKind::FileManager,
     IconKind::PopOut,
+    IconKind::CaptureScreen,
+    IconKind::CaptureWindow,
+    IconKind::CaptureArea,
+    IconKind::RecordScreen,
+    IconKind::RecordWindow,
+    IconKind::RecordArea,
+    IconKind::StopRecording,
+    IconKind::ChannelMixer,
+    IconKind::Median,
+    IconKind::Emboss,
 ];
 
 /// A source of on-disk SVG icon assets, one per [`IconKind`].

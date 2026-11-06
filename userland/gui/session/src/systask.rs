@@ -12,15 +12,16 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use tairix_abi::driver::filesystem::VolumeTitle;
 use tairix_abi::elevate::{ElevateWords, ELEVATE_MAX_OUTPUT};
 use tairix_abi::volume::validate_volume_name;
 use tairix_abi::window_ipc::{AuthorisedOutcome, SystemTask};
 use tairix_abi::{Errno, DATETIME_RUN_PATH, FILES_RUN_PATH, SETTINGS_RUN_PATH};
 use tairix_taskbar::system::SETTINGS_BUNDLE;
-use tairix_window::AuthoriseFor;
+use tairix_visible::Shown;
 
 use crate::config::{FILES_LABEL, SETTINGS_LABEL};
-use crate::elevate::{Done, Elevation, Request};
+use crate::elevate::{Asker, Done, Elevation, Request};
 
 /// The command that reads and changes the machine's configuration.
 const CONFIGURE_RUN_PATH: &str = "/System/Commands/configure.app/Run";
@@ -32,6 +33,8 @@ const USERMOD_RUN_PATH: &str = "/System/Commands/usermod.app/Run";
 const PASSWD_RUN_PATH: &str = "/System/Commands/passwd.app/Run";
 /// The command that detaches a volume.
 const UNMOUNT_RUN_PATH: &str = "/System/Commands/unmount.app/Run";
+/// The command that sets a volume's title.
+const LABEL_RUN_PATH: &str = "/System/Commands/label.app/Run";
 
 /// The file manager's signed identifier: the identity the desktop trusts it
 /// by.
@@ -43,7 +46,7 @@ pub const FILES_BUNDLE: &str = "os.tairix.files";
 pub enum Component {
     /// Settings: the machine's configuration, its accounts and its clock.
     Settings,
-    /// The file manager: ejecting a volume.
+    /// The file manager: ejecting and retitling a volume.
     Files,
 }
 
@@ -52,7 +55,7 @@ impl Component {
     #[must_use]
     pub const fn of(task: &SystemTask) -> Self {
         match task {
-            SystemTask::Eject(_) => Self::Files,
+            SystemTask::Eject(_) | SystemTask::Retitle(_) => Self::Files,
             SystemTask::Configure(_)
             | SystemTask::ChangeAccount(_)
             | SystemTask::SetPassword(_)
@@ -111,7 +114,7 @@ const SHOW_ACCOUNTS_PURPOSE: &str = "wants to read the accounts and groups on th
 ///
 /// [`Errno::OutOfRange`] for words not in the form the task's program
 /// takes them.
-pub fn request_for(task: &SystemTask, asker: AuthoriseFor) -> Result<Request, Errno> {
+pub fn request_for(task: &SystemTask, asker: Asker) -> Result<Request, Errno> {
     let (program, elevation, purpose) = match task {
         SystemTask::Configure(words) => {
             let words = owned(words);
@@ -179,6 +182,29 @@ pub fn request_for(task: &SystemTask, asker: AuthoriseFor) -> Result<Request, Er
             let run = alloc::vec![String::from("--"), root.clone()];
             (UNMOUNT_RUN_PATH, Elevation::Run(run), purpose)
         }
+        // As an eject: `label` is handed the durable root, and the name only
+        // tells the prompt's reader which volume it is. The title is a
+        // stranger's text, so the prompt shows it as such.
+        SystemTask::Retitle(words) => {
+            let words = owned(words);
+            let [root, title, name] = words.as_slice() else {
+                return Err(Errno::OutOfRange);
+            };
+            if !is_volume_root(root)
+                || VolumeTitle::new(title).is_err()
+                || validate_volume_name(name.as_bytes()).is_err()
+            {
+                return Err(Errno::OutOfRange);
+            }
+            let purpose = if title.is_empty() {
+                format!("wants to clear the title of \u{201c}{name}\u{201d}.")
+            } else {
+                let title = Shown(title);
+                format!("wants to rename \u{201c}{name}\u{201d} to \u{201c}{title}\u{201d}.")
+            };
+            let run = alloc::vec![String::from("--"), root.clone(), title.clone()];
+            (LABEL_RUN_PATH, Elevation::Run(run), purpose)
+        }
     };
     let component = Component::of(task);
     Ok(Request {
@@ -198,7 +224,7 @@ pub fn outcome_of(done: Option<Done>) -> (AuthorisedOutcome, Vec<u8>) {
     match done {
         None => (AuthorisedOutcome::Declined, Vec::new()),
         Some(Done::Ran { exit_code }) => (AuthorisedOutcome::Ran { exit_code }, Vec::new()),
-        Some(Done::Launched { .. }) => (AuthorisedOutcome::Launched, Vec::new()),
+        Some(Done::Launched { .. } | Done::Wired(_)) => (AuthorisedOutcome::Launched, Vec::new()),
         Some(Done::Captured { exit_code, output }) => match u32::try_from(output.len()) {
             Ok(len) if output.len() <= ELEVATE_MAX_OUTPUT => {
                 (AuthorisedOutcome::Captured { exit_code, len }, output)
@@ -248,12 +274,13 @@ fn changes_only_network(pairs: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tairix_window::AuthoriseFor;
 
     fn words(args: &[&str]) -> ElevateWords {
         ElevateWords::new(args).expect("within bounds")
     }
 
-    const ASKER: AuthoriseFor = AuthoriseFor::Window(9);
+    const ASKER: Asker = Asker::App(AuthoriseFor::Window(9));
 
     /// A volume's durable root, spelled canonically.
     const ROOT: &str = "id::07070707-0707-0707-0707-070707070707/";
@@ -277,6 +304,10 @@ mod tests {
             (SystemTask::ShowAccounts, USERS_RUN_PATH),
             (SystemTask::SetClock, DATETIME_RUN_PATH),
             (SystemTask::Eject(words(&[ROOT, "usb1"])), UNMOUNT_RUN_PATH),
+            (
+                SystemTask::Retitle(words(&[ROOT, "Photos", "usb1"])),
+                LABEL_RUN_PATH,
+            ),
         ];
         for (task, program) in cases {
             let request = request_for(&task, ASKER).expect("a well-formed task");
@@ -306,13 +337,70 @@ mod tests {
             SETTINGS_BUNDLE
         );
         let slot = AuthoriseFor::Slot(tairix_abi::ProcId::from_raw([3; 16]));
-        let request = request_for(&eject, slot).expect("well formed");
-        assert_eq!(request.asker, Some(slot));
+        let request = request_for(&eject, Asker::App(slot)).expect("well formed");
+        assert_eq!(request.asker, Some(Asker::App(slot)));
         assert_eq!(request.purpose, "wants to eject \u{201c}usb1\u{201d}.");
         assert_eq!(
             request.elevation,
             Elevation::Run(alloc::vec![String::from("--"), String::from(ROOT)])
         );
+    }
+
+    /// A retitle is the file manager's, hands `label` the durable root and the
+    /// title, and names the volume and the title in the prompt, the title shown
+    /// as a stranger's text; an empty title clears it.
+    #[test]
+    fn a_retitle_is_the_file_managers_and_names_its_volume_and_title() {
+        let retitle = SystemTask::Retitle(words(&[ROOT, "Holiday", "usb1"]));
+        assert_eq!(Component::of(&retitle), Component::Files);
+        let request = request_for(&retitle, ASKER).expect("well formed");
+        assert_eq!(
+            request.purpose,
+            "wants to rename \u{201c}usb1\u{201d} to \u{201c}Holiday\u{201d}."
+        );
+        let run = |title: &str| {
+            Elevation::Run(alloc::vec![
+                String::from("--"),
+                String::from(ROOT),
+                String::from(title)
+            ])
+        };
+        assert_eq!(request.elevation, run("Holiday"));
+        let cleared = SystemTask::Retitle(words(&[ROOT, "", "usb1"]));
+        let request = request_for(&cleared, ASKER).expect("well formed");
+        assert_eq!(
+            request.purpose,
+            "wants to clear the title of \u{201c}usb1\u{201d}."
+        );
+        assert_eq!(request.elevation, run(""));
+        let disguised = SystemTask::Retitle(words(&[ROOT, "a\u{202e}gpj.exe", "usb1"]));
+        let request = request_for(&disguised, ASKER).expect("well formed");
+        assert!(
+            !request.purpose.contains('\u{202e}'),
+            "a title's hidden characters are never shown as themselves"
+        );
+    }
+
+    /// A retitle naming anything but one volume root, a title no volume could
+    /// keep, or a malformed catalog name is refused before any prompt.
+    #[test]
+    fn a_malformed_retitle_is_refused() {
+        let long = "t".repeat(tairix_abi::driver::filesystem::VOLUME_TITLE_MAX + 1);
+        for args in [
+            &[ROOT, "Title"][..],
+            &[ROOT, "Title", "usb1", "extra"],
+            &["/Storage/usb1", "Title", "usb1"],
+            &[ROOT, "line\nbreak", "usb1"],
+            &[ROOT, &long, "usb1"],
+            &[ROOT, "Title", "not a name"],
+        ] {
+            let task = SystemTask::Retitle(words(args));
+            assert_eq!(
+                request_for(&task, ASKER).err(),
+                Some(Errno::OutOfRange),
+                "{args:?}"
+            );
+        }
     }
 
     /// The root the file manager names a volume by is one an eject takes.
@@ -448,6 +536,15 @@ mod tests {
         );
         assert_eq!(
             outcome_of(Some(Done::Launched { pid: 40 })),
+            (AuthorisedOutcome::Launched, Vec::new())
+        );
+        let wired = tairix_abi::elevate::WiredLaunch {
+            instance: tairix_abi::ProcId::from_raw([7; 16]),
+            input: core::num::NonZeroU64::MIN,
+            output: core::num::NonZeroU64::MAX,
+        };
+        assert_eq!(
+            outcome_of(Some(Done::Wired(wired))),
             (AuthorisedOutcome::Launched, Vec::new())
         );
         assert_eq!(

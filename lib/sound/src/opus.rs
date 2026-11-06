@@ -1,15 +1,20 @@
 //! Opus (RFC 6716, with the RFC 8251 corrections): packets of one to
 //! forty-eight frames, each coded by SILK, CELT or both, decoded at 48 kHz.
 //!
-//! The codec knows packets and nothing of the container they arrive in.
+//! The codec knows packets and nothing of the container they arrive in; its
+//! CELT layer is also written, behind `encode-opus`.
 
 mod celt;
 mod decoder;
 mod multistream;
+mod packets;
 mod range;
 mod silk;
 
+#[cfg(any(test, feature = "encode-opus"))]
+pub(crate) use self::celt::CeltEncoder;
 pub(crate) use self::multistream::{Layout, Multistream, SILENT};
+pub use self::packets::OpusPackets;
 
 use crate::DecodeError;
 
@@ -24,6 +29,9 @@ const MAX_FRAME_BYTES: usize = 1275;
 
 /// The most frames one packet may hold: 120 ms of 2.5 ms frames.
 const MAX_FRAMES: usize = 48;
+
+/// The table-of-contents bit of a stereo packet (RFC 6716, section 3.1).
+pub(crate) const TOC_STEREO: u8 = 0x04;
 
 /// Which layers code a frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -109,7 +117,7 @@ impl Toc {
             mode,
             bandwidth,
             frame_size,
-            stereo: byte & 0x04 != 0,
+            stereo: byte & TOC_STEREO != 0,
         }
     }
 }

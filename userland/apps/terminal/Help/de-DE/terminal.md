@@ -77,8 +77,9 @@ Schließen-Schaltfläche des Fensters schließt es. **Erscheinungsbild**
 wählt das Farbschema aus, legt die Textgröße und die Anzahl der im
 Verlaufspuffer aufbewahrten Zeilen (keine bis 10.000, anfangs 500) fest
 und bearbeitet das eigene Schema des Benutzers. Die
-mitgelieferten Schemata sind *System* (das dem dunklen oder hellen
-Erscheinungsbild des Desktops folgt), *Midnight*, *Phosphor*, *Amber*,
+mitgelieferten Schemata sind *System* (das dunkle Erscheinungsbild des
+Desktops, gleich ob der Desktop selbst dunkel oder hell ist), *Midnight*,
+*Phosphor*, *Amber*,
 *Ember*, *Contrast*, *Paper* und *Custom*. Die Wahl von *Custom*
 verwendet die unter der Auswahl bearbeiteten Farben: ein Raster der
 zwanzig Farben, aus denen ein Bildschirm gezeichnet wird — Hintergrund,
@@ -124,11 +125,6 @@ Fensterkanal, die gemeinsame Frame-Region oder das Ereignispostfach
 abgelehnt wurde (der Grund wird auf dem Standardfehlerstrom genannt).
 
 ## ENVIRONMENT
-
-`HOME`
-: Das Heimatverzeichnis des Kontos, in dem das Terminal sein Profil
-liest und schreibt. Ohne es läuft das Terminal mit dem Standardprofil
-und speichert nichts.
 
 `TERM`
 : Wird der beherbergten Shell als `xterm-256color` exportiert und

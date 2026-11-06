@@ -17,12 +17,14 @@ use crate::member::{MemberDevice, MemberWindow};
 use crate::service::{assemble_array, read_maintenance_record, Assembled, ServiceError};
 use crate::testkit::{
     candidates, identity_of, request, stamped, superblock, MemberDisk, BLOCK_SIZE, DATA_BLOCKS,
-    NOW, UUID_A,
+    NOW, UUID_A, UUID_B,
 };
 
 use tairix_abi::blkio::{
-    decode_completion, decode_outcome, BlkHealthState, BlkOp, BlkStatus, BLK_COMPLETION_LEN,
+    decode_completion, decode_outcome, BlkDeviceIdentity, BlkHealthState, BlkOp, BlkStatus,
+    BLK_COMPLETION_LEN, BLK_DEVICE_IDENTITY_LEN,
 };
+use tairix_abi::driver::block::Block;
 use tairix_abi::raid::{ArrayHealth, MemberState, RaidLevel};
 use tairix_abi::sysinfo::{BlkHealthTransition, MountAvailability};
 use tairix_abi::DriverError;
@@ -80,7 +82,7 @@ fn live_mirror(members: &[ArraySuperblock], disks: &[MemberDisk]) -> ArrayRuntim
 fn assemble_mirror(members: &[ArraySuperblock], disks: &[MemberDisk]) -> Assembled<MemberDisk> {
     let mut supply: Vec<Option<MemberDisk>> = disks.iter().cloned().map(Some).collect();
     assemble_array(
-        identity_of(UUID_A, members),
+        identity_of(members[0].array_uuid, members),
         &candidates(members),
         NOW,
         |tag| supply[tag].take(),
@@ -301,7 +303,8 @@ fn a_refused_publication_leaves_no_runtime_and_nothing_to_withdraw() {
 }
 
 /// A live array over `disks`, each member device holding the loan of its own
-/// window from `windows`, as the composer composes them.
+/// window from `windows` and stating what its disk states, as the composer
+/// composes them.
 fn leased_runtime(
     members: &[ArraySuperblock],
     disks: &[MemberDisk],
@@ -314,6 +317,7 @@ fn leased_runtime(
             Some(MemberDevice::new(
                 disk.clone(),
                 window.lend().expect("a fresh window is free"),
+                disk.device_identity(),
             ))
         })
         .collect();
@@ -349,6 +353,7 @@ fn a_departed_member_is_taken_out_so_its_returning_disk_can_be_placed() {
         MemberDevice::new(
             stamped(&members[1]),
             MemberWindow::new().lend().expect("a fresh window is free"),
+            None,
         )
     };
     assert_eq!(
@@ -734,4 +739,130 @@ fn an_array_that_regains_a_copy_reports_rebuilding_then_whole() {
         Some(ArrayHealthEvent::Health(BlkHealthTransition::Recovered)),
         "and finishing it makes the array whole again"
     );
+}
+
+/// What the member doubles of the identity tests state: the two devices an
+/// array is composed of, and a device that takes the place of one.
+const UNIT_A: Option<BlkDeviceIdentity> = BlkDeviceIdentity::new([0x0A; BLK_DEVICE_IDENTITY_LEN]);
+const UNIT_B: Option<BlkDeviceIdentity> = BlkDeviceIdentity::new([0x0B; BLK_DEVICE_IDENTITY_LEN]);
+const UNIT_C: Option<BlkDeviceIdentity> = BlkDeviceIdentity::new([0x0C; BLK_DEVICE_IDENTITY_LEN]);
+
+/// What an array that proves nothing leaves in the window.
+const PROVES_NOTHING: [u8; BLK_DEVICE_IDENTITY_LEN] = [0; BLK_DEVICE_IDENTITY_LEN];
+
+/// What `array` leaves in the window answering the block service's identity
+/// request.
+fn stated<B: Block>(array: &mut ArrayRuntime<B>) -> [u8; BLK_DEVICE_IDENTITY_LEN] {
+    let mut window = vec![0xEEu8; BLOCK_SIZE as usize];
+    let mut reply = [0u8; BLK_COMPLETION_LEN];
+    let len = array.serve(&request(BlkOp::Identity, 0, 0), &mut window, &mut reply, 0);
+    assert_eq!(
+        decode_completion(&reply[..len]).map(|_| ()),
+        Ok(()),
+        "the identity request is answered"
+    );
+    let mut identity = [0u8; BLK_DEVICE_IDENTITY_LEN];
+    identity.copy_from_slice(&window[..BLK_DEVICE_IDENTITY_LEN]);
+    identity
+}
+
+/// The two copies of the mirror `members` describe, stating `identities` in
+/// slot order.
+fn mirror_disks(
+    members: &[ArraySuperblock; 2],
+    identities: [Option<BlkDeviceIdentity>; 2],
+) -> [MemberDisk; 2] {
+    [
+        stamped(&members[0]).stating(identities[0]),
+        stamped(&members[1]).stating(identities[1]),
+    ]
+}
+
+#[test]
+fn an_array_states_what_it_stated_when_its_composer_restarts_over_the_same_members() {
+    // A volume's writes held across a composer restart are replayed onto the
+    // array only if it proves itself the medium they were made on, so the same
+    // devices in the same slots must state what they stated before.
+    let members = mirror_pair(0);
+    let disks = mirror_disks(&members, [UNIT_A, UNIT_B]);
+    let before = stated(&mut live_mirror(&members, &disks));
+    assert_ne!(
+        before, PROVES_NOTHING,
+        "an array all of whose members state one states one"
+    );
+    assert_eq!(stated(&mut live(reassemble_from_disks(&disks))), before);
+}
+
+#[test]
+fn an_array_with_another_member_or_in_another_array_states_another_identity() {
+    let members = mirror_pair(0);
+    let disks = mirror_disks(&members, [UNIT_A, UNIT_B]);
+    let composed = stated(&mut live_mirror(&members, &disks));
+    for (identities, why) in [
+        ([UNIT_A, UNIT_C], "a member replaced by another device"),
+        ([UNIT_B, UNIT_A], "the same devices in each other's slots"),
+    ] {
+        let disks = mirror_disks(&members, identities);
+        assert_ne!(
+            stated(&mut live_mirror(&members, &disks)),
+            composed,
+            "{why}"
+        );
+    }
+    let elsewhere = [
+        superblock(RaidLevel::Mirror, UUID_B, 2, 0, 9),
+        superblock(RaidLevel::Mirror, UUID_B, 2, 1, 9),
+    ];
+    let disks = mirror_disks(&elsewhere, [UNIT_A, UNIT_B]);
+    assert_ne!(
+        stated(&mut live_mirror(&elsewhere, &disks)),
+        composed,
+        "the same devices in another array"
+    );
+}
+
+#[test]
+fn an_array_states_nothing_while_any_slot_proves_nothing() {
+    // No proof is better than a guessed one: a member that states nothing, or a
+    // slot holding no device, leaves the array proving nothing until the slot
+    // holds a device that proves itself again.
+    let members = mirror_pair(0);
+    let unproven = mirror_disks(&members, [UNIT_A, None]);
+    assert_eq!(
+        stated(&mut live_mirror(&members, &unproven)),
+        PROVES_NOTHING
+    );
+
+    let disks = mirror_disks(&members, [UNIT_A, UNIT_B]);
+    let whole = stated(&mut live_mirror(&members, &disks));
+    let mut supply = [Some(disks[0].clone())];
+    let assembled = assemble_array(
+        identity_of(UUID_A, &[members[0]]),
+        &candidates(&[members[0]]),
+        NOW,
+        |tag| supply[tag].take(),
+    )
+    .expect("one copy of a two-copy mirror still serves");
+    let mut array = live(assembled);
+    assert_eq!(stated(&mut array), PROVES_NOTHING, "a slot holds no device");
+    array
+        .place_member(1, disks[1].clone())
+        .expect("the copy returns");
+    assert_eq!(stated(&mut array), whole, "the copy proves it again");
+}
+
+#[test]
+fn a_member_taken_out_of_its_array_leaves_it_proving_nothing() {
+    let members = mirror_pair(0);
+    let disks = mirror_disks(&members, [UNIT_A, UNIT_B]);
+    let windows = [MemberWindow::new(), MemberWindow::new()];
+    let mut array = leased_runtime(&members, &disks, &windows);
+    assert_ne!(
+        stated(&mut array),
+        PROVES_NOTHING,
+        "each member device states what its disk stated when it was connected"
+    );
+    windows[1].depart();
+    array.retire_departed(NOW, |device| device.departed());
+    assert_eq!(stated(&mut array), PROVES_NOTHING);
 }

@@ -257,7 +257,8 @@ device that failed while served), `crashed` (killed, or a status outside the
 driver exit vocabulary) or `unloaded` — and clears it as the next driver is
 admitted, with the fault-domain health the last one reported. Each mark is
 keyed by the admission it was made for, so the late release of a driver that
-ended frees no successor admitted since.
+ended frees no successor admitted since, and is held with the node itself, so
+recording an admission takes no memory.
 
 A node whose driver ended `failed` or `crashed` is reloaded once its restart
 falls due (`13030` `NODE_DRIVER_RESTARTING`): 500 ms after the ending,

@@ -83,6 +83,10 @@ nothing — it never reports a success it did not get.
   question is not drawn in this window at all (below). The window asks the compositor for `Theme::backdrop_blur` as it
   opens and on every desktop change; the window manager's frame and title bar
   stay opaque.
+- **A burst of input costs one frame.** Each turn of the window's loop drains
+  what is queued, folding what each event concluded into one `Round` and the
+  rectangles it reported, then presents the window once and the zone chooser
+  once.
 - **The sidebar is one plate.** The search field and the strip stand on a
   settings group's own plate (`FieldGroup::paint_plate`), a gap in from the
   window's edges and one gap from the plates beside it, so the navigation
@@ -359,9 +363,12 @@ registry of `files.*` keys), which the desktop session keeps in its own
 document beside its others: where a new window opens and whether it shows the
 places rail and the toolbar, the display and order every window shows its
 items in unless the user chose one in that window, where folders stand, the
-hidden endings and items, the picture and folder previews, whether a move to
-the Trash asks, and whether a disk image or archive the user opened is
-unmounted once its windows close. The rows (`files.rs`, `FilesSetting`) are
+hidden endings (never one whose hiding would leave another type's or
+application's name) and items, the picture and folder previews, whether a move to
+the Trash asks, whether a disk image or archive the user opened is unmounted
+once its windows close, and which kinds of drive the desktop shows — a box
+each under *Show on the desktop*, removable drives alone ticked at first and
+`/` counted as the system drive. The rows (`files.rs`, `FilesSetting`) are
 immediate, as the desktop's own are, and post only the `files.*` keys through
 the file manager's own apply (`PinboardRequest::ApplyFiles`, sent by
 `tairix_wallpaper::apply(ApplyTo::Files, ..)`), on a desk of their own so
@@ -819,7 +826,14 @@ confirms or corrects either. A level moves the device live as its slider is
 dragged, its figure following the drag, and settles where it rests. The round
 trips run on a worker over `tairix_audio::stream::ControlQueue`,
 one in flight and the latest control of each kind for each device winning
-meanwhile, so a drag costs one request at a time. A reading that lands
+meanwhile, so a drag costs one request at a time. A change that settles on the
+output — where a drag rests, a key step, an unmute — is asked with
+`ControlQueue::ask_confirmed`, and once the trip that carried it lists the
+default output sounding at that level the window cues `VolumeFeedback`
+through its own `PostedCues`, collecting the answer on its loop's wait-set, so
+the reader hears the new level and nothing waits for the sound; a refused
+change, a mute, an input and a change made anywhere else are not heard. A
+reading that lands
 mid-drag, or while a list is open, is held until the reader lets go rather
 than rebuilding the row under the pointer. The `AudioDevices` and `AudioCapture` notices re-read the
 pane whenever anything moves, whoever moved it. Settings remembers nothing:
@@ -829,12 +843,15 @@ the desktop session follows the same notices and keeps the user's choices.
 
 The effects pane is the user's own sound choices, which their desktop session
 keeps and hands the cue authority while it holds the seat (`plans/SOUND.md`
-SND23), on two plates. **Sound Effects** holds what applies to every sound: the
-switch, the theme — the installed themes, and the one in effect though no store
-holds it — and one *Volume*; its footnote says the start-up, sign-in and
+SND23), on two plates. **Sound Effects** holds what applies to every sound
+effect — the switch, the theme (the installed themes, and the one in effect
+though no store holds it) and one *Volume* — and then *Play feedback when the
+volume changes*, the switch of the volume's own feedback, which is no effect
+(`tairix_soundtheme::is_effect`); its footnote says the start-up, sign-in and
 sign-out sounds are the machine's, since they sound while no one's choices are
-in force. While the switch is off every other row is disabled. **Event
-Sounds** is one row per sound a user decides, each a single chooser of what it
+in force. While the effects' switch is off every row but the two switches is
+disabled. **Event Sounds** is one row per sound effect a user decides, each a
+single chooser of what it
 plays: *Theme sound*, the file chosen for it by its name alone while there is
 one, *None*, or *Choose File…*. Choosing the theme's sound or a file is asking
 to hear the event, so it turns the event on. *Choose File…* opens the session's
@@ -851,7 +868,8 @@ meanwhile waits with its newest value and goes in the next request together,
 so a volume stepped faster than the session answers costs one store a round
 trip and the value asked last is the one that lands, while picks and returns
 to the theme's sound keep their order. A change shows at once, as the session
-will hold it, in the rows it touches — every row, for the switch — and once it
+will hold it, in the rows it touches — every row but the feedback's, for the
+effects' switch — and once it
 is answered the pane reads the choices again, so it shows what the session
 holds rather than what was asked; a reading that lands mid-drag or while a list
 is open waits for the reader to let go, as the devices pane's does.

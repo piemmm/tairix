@@ -232,6 +232,10 @@ pub extern "C" fn kernel_main(_hartid: u64, _dtb: u64) -> ! {
         args: &[b"prog"],
         env: &[],
         canary: CANARY,
+        heap: tairix_abi::HeapRegion {
+            base: USER_HEAP_BASE,
+            len: USER_HEAP_LEN,
+        },
     };
 
     note(TEST_START, "dropping into the spawned C program");

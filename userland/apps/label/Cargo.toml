@@ -1,0 +1,55 @@
+[package]
+name = "tairix-label"
+description = "TAIRiX `label` CLI: show or change a volume's title, the label its filesystem records."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, as for `tairix-unmount`: host tooling
+# builds only the pure library, so the host test build never pulls the
+# runtime's `_start` / `#[global_allocator]` / panic handler.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt"]
+
+# The package is both the `tairix-label` library (the parser and engine) and
+# the `Run` entry-point binary of the `label` tool, a freestanding pure-Rust
+# program on the native Tier-1 targets and an inert host stub elsewhere.
+[[bin]]
+name = "tairix-label-run"
+path = "src/run.rs"
+
+[dependencies]
+# The audited ABI vocabulary: `Errno`, the `MountRecord` title and key the
+# engine reads, and the `VolumeRetitleRequest` frame the seam encodes.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The `Output` stream, the option scanner and the quoting a title from a
+# volume is written in.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The one help engine and the shared own-bundle short-help render.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The shared System Information API client: the namespace read and the one
+# resolution of a name for a volume, which `unmount` shares.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+
+# For the freestanding `Run` binary only: the userland runtime (`_start`, the
+# allocator, the standard streams and the `volume_retitle` wrapper), the help
+# engine's own-bundle source, and the production `IpcTransport`.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
+
+[dev-dependencies]
+# The one path grammar the tests spell a volume's durable root with.
+tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

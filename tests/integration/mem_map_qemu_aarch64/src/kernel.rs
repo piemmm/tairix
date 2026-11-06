@@ -32,13 +32,14 @@ use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_code;
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kernel_core::live_producer::anon_errno;
 use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
     spawn_image, spawn_user_kthread, MemMap, SpawnMode, SpawnRequest, Yielder,
 };
 use tairix_kernel_mem::{
-    map_anonymous, page_count_for, unmap_anonymous, AddressSpace, AnonError, DirectPhysMap, Frame,
-    PhysAddr, Retire, Unpublished, UserStack,
+    map_anonymous, page_count_for, unmap_anonymous, AddressSpace, DirectPhysMap, Frame, PhysAddr,
+    Retire, Unpublished, UserStack,
 };
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
@@ -225,22 +226,6 @@ impl AnonProducer {
 /// The single installed producer.
 static PRODUCER: AnonProducer = AnonProducer::new();
 
-/// Map an [`AnonError`] onto a stable [`Errno`] for the syscall result, folding
-/// allocator exhaustion onto [`Errno::OutOfMemory`] and a
-/// not-mapped range onto [`Errno::NotFound`] (fail closed).
-fn anon_to_errno(err: AnonError) -> Errno {
-    match err {
-        AnonError::ZeroLength => Errno::LengthOutOfRange,
-        AnonError::Unaligned | AnonError::Overflow => Errno::OutOfRange,
-        AnonError::OutOfMemory => Errno::OutOfMemory,
-        AnonError::NotMapped => Errno::NotFound,
-        AnonError::PhysUnmapped | AnonError::Map(_) => Errno::BadAddress,
-        // `AnonError` is `#[non_exhaustive]`; a future variant maps to the
-        // generic bad-address error rather than being silently dropped.
-        _ => Errno::BadAddress,
-    }
-}
-
 impl MemMap for AnonProducer {
     fn reserve(&self, len: usize, flags: MapFlags, addr_hint: u64) -> Result<u64, Errno> {
         // This harness is an arch-mechanism proving ground that drives
@@ -258,7 +243,7 @@ impl MemMap for AnonProducer {
     }
 
     fn map(&self, len: usize, flags: MapFlags, addr_hint: u64) -> Result<u64, Errno> {
-        let page_count = page_count_for(len).map_err(anon_to_errno)?;
+        let page_count = page_count_for(len).map_err(anon_errno)?;
         // The fixture maps with FIXED placement so the kernel's fault check
         // knows the exact base; this producer maps only there (a placement
         // allocator is the production concern, not this proving ground).
@@ -274,12 +259,22 @@ impl MemMap for AnonProducer {
             next_frame,
             |_frame| {},
         )
-        .map_err(anon_to_errno)?;
+        .map_err(anon_errno)?;
         Ok(addr_hint)
     }
 
+    fn map_held(&self, page_va: u64, holds: &dyn Fn() -> bool) -> Result<(), Errno> {
+        // One CPU and one task: nothing can release the page between the
+        // answer and the mapping.
+        if !holds() {
+            return Err(Errno::NotFound);
+        }
+        self.map(tairix_kernel_mem::PAGE_SIZE, MapFlags::FIXED, page_va)
+            .map(drop)
+    }
+
     fn unmap(&self, base: u64, len: usize, retire: &mut dyn Retire) -> Result<(), Errno> {
-        let page_count = page_count_for(len).map_err(anon_to_errno)?;
+        let page_count = page_count_for(len).map_err(anon_errno)?;
         let live = self.live()?;
         unmap_anonymous(
             &mut live.space,
@@ -289,7 +284,7 @@ impl MemMap for AnonProducer {
             retire,
             &mut |_frame| {},
         )
-        .map_err(anon_to_errno)
+        .map_err(anon_errno)
     }
 }
 
@@ -444,6 +439,10 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         args: &[b"mem-map"],
         env: &[],
         canary: CANARY,
+        heap: tairix_abi::HeapRegion {
+            base: USER_HEAP_BASE,
+            len: USER_HEAP_LEN,
+        },
     };
 
     // SAFETY: building the image is itself safe; the returned `UserEntry` is

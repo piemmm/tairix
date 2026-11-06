@@ -48,11 +48,12 @@
 //! shippable image carries none of this state and answers every arming call
 //! with zero.
 
-use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 
 use tairix_abi::latency::{clamp_budget_ns, StallSample, MIN_REPORT_INTERVAL_NS};
+use tairix_abi::Errno;
 use tairix_arch_api::backtrace::FrameLayout;
+use tairix_collections::OrderedMap;
 use tairix_kernel_sched_api::TaskId;
 use tairix_sync::once::OnceCell;
 use tairix_sync::{RwLock, SpinLock};
@@ -260,8 +261,9 @@ impl Watch {
 /// every CPU the moment any surface armed a budget — a machine-wide
 /// serialisation point in the one image a developer profiles in, added by
 /// the tool meant to measure responsiveness. A syscall reads the per-CPU
-/// publication ([`Published`]) instead.
-static WATCHES: RwLock<BTreeMap<TaskId, Arc<SpinLock<Watch>>>> = RwLock::new(BTreeMap::new());
+/// publication ([`Published`]) instead. Ordered, so a lookup costs the same
+/// however the watched ids fall.
+static WATCHES: RwLock<OrderedMap<TaskId, Arc<SpinLock<Watch>>>> = RwLock::new(OrderedMap::new());
 
 /// The watch published for the thread currently running on a CPU.
 ///
@@ -391,24 +393,33 @@ pub fn unpublish(cpu: u32) {
 /// floor rather than refused. Re-arming an existing watch replaces its
 /// budget and abandons the open span, so a surface that changes its mind
 /// mid-loop is measured against the budget it now declares.
-pub fn arm(cpu: u32, task: TaskId, budget_ns: u64) -> u64 {
+///
+/// # Errors
+///
+/// [`Errno::OutOfMemory`] when a thread with no watch cannot be given one;
+/// nothing is armed.
+pub fn arm(cpu: u32, task: TaskId, budget_ns: u64) -> Result<u64, Errno> {
     let Some(budget) = clamp_budget_ns(budget_ns) else {
         forget(cpu, task);
-        return 0;
+        return Ok(0);
     };
     {
         let mut watches = WATCHES.write();
         if let Some(existing) = watches.get(&task) {
             *existing.lock() = Watch::new(budget);
         } else {
-            watches.insert(task, Arc::new(SpinLock::new(Watch::new(budget))));
+            let watch =
+                Arc::try_new(SpinLock::new(Watch::new(budget))).map_err(|_| Errno::OutOfMemory)?;
+            watches
+                .try_insert(task, watch)
+                .map_err(|_| Errno::OutOfMemory)?;
         }
     }
     // The arming thread is the one running on `cpu`, and its switch-in
     // published whatever it held before, so the slot is refreshed here
     // rather than at a switch that has already happened.
     publish(cpu, task);
-    budget
+    Ok(budget)
 }
 
 /// Drop `task`'s watch.
@@ -552,18 +563,39 @@ mod tests {
     /// publishes to `c` itself, as it does for a thread arming while it
     /// runs.
     fn armed(c: u32, t: TaskId) -> u64 {
-        let budget = arm(c, t, DEFAULT_FRAME_BUDGET_NS);
+        let budget = arm(c, t, DEFAULT_FRAME_BUDGET_NS).expect("armed");
         open_span(c, t, 0);
         budget
+    }
+
+    /// A thread the heap cannot give a watch arms nothing and is told so.
+    #[test]
+    fn a_watch_the_heap_cannot_hold_is_refused_and_arms_nothing() {
+        let t = task(24);
+        let c = cpu(24);
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let refused = arm(c, t, DEFAULT_FRAME_BUDGET_NS);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(refused, Err(Errno::OutOfMemory));
+        assert!(with_watch(c, t, |w| *w).is_none(), "nothing is published");
+        assert!(WATCHES.read().get(&t).is_none(), "nothing is filed");
+        assert_eq!(
+            arm(c, t, DEFAULT_FRAME_BUDGET_NS),
+            Ok(DEFAULT_FRAME_BUDGET_NS)
+        );
+        forget(c, t);
     }
 
     #[test]
     fn arming_answers_the_clamped_budget_and_disarming_answers_zero() {
         let t = task(1);
         let c = cpu(1);
-        assert_eq!(arm(c, t, DEFAULT_FRAME_BUDGET_NS), DEFAULT_FRAME_BUDGET_NS);
-        assert_eq!(arm(c, t, 1), MIN_FRAME_BUDGET_NS);
-        assert_eq!(arm(c, t, 0), 0);
+        assert_eq!(
+            arm(c, t, DEFAULT_FRAME_BUDGET_NS),
+            Ok(DEFAULT_FRAME_BUDGET_NS)
+        );
+        assert_eq!(arm(c, t, 1), Ok(MIN_FRAME_BUDGET_NS));
+        assert_eq!(arm(c, t, 0), Ok(0));
         // Disarmed means gone, not zero-budgeted: a later boundary must not
         // find a watch at all.
         assert!(with_watch(c, t, |w| *w).is_none());
@@ -693,7 +725,7 @@ mod tests {
     fn a_watch_armed_but_never_opened_reports_nothing() {
         let t = task(11);
         let c = cpu(11);
-        arm(c, t, DEFAULT_FRAME_BUDGET_NS);
+        arm(c, t, DEFAULT_FRAME_BUDGET_NS).expect("armed");
         // The budget takes effect from the first event the surface answers,
         // so bring-up work between arming and the first wait is not a
         // missed frame.
@@ -707,7 +739,7 @@ mod tests {
         let c = cpu(12);
         armed(c, t);
         assert!(on_syscall_entry(c, t, 81, || 0).is_none());
-        let tighter = arm(c, t, MIN_FRAME_BUDGET_NS);
+        let tighter = arm(c, t, MIN_FRAME_BUDGET_NS).expect("re-armed");
         assert_eq!(tighter, MIN_FRAME_BUDGET_NS);
         // No span is open against the new budget yet, so nothing is owed.
         assert!(on_syscall_exit(c, t, || u64::MAX / 2).is_none());
@@ -804,7 +836,7 @@ mod tests {
         let c = cpu(22);
         let budget = armed(c, t);
         let sibling = task(23);
-        arm(cpu(23), sibling, DEFAULT_FRAME_BUDGET_NS);
+        arm(cpu(23), sibling, DEFAULT_FRAME_BUDGET_NS).expect("armed");
         forget(c, sibling);
         assert!(on_syscall_entry(c, t, 161, || 0).is_none());
         assert!(

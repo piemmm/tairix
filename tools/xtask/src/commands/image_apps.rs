@@ -467,6 +467,30 @@ pub fn optical_store_files(
     )
 }
 
+/// The composed store files the twin-volume vertical's disk plants: the shared
+/// [`app_store_files`] set plus the test-only `twins` fixture bundle
+/// (`docs/src/filesystem/drives.md`), memoised per arch.
+///
+/// # Errors
+///
+/// As [`fixture_store_files`].
+pub fn twins_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    fixture_store_files(
+        ctx,
+        arch,
+        profile,
+        "tests/integration/twins_program",
+        tairix_test_twins::COMMAND,
+        &FILES,
+    )
+}
+
 /// The composed store files the disk-image vertical's disk plants: the
 /// shared [`app_store_files`] set, which carries `mount` and `unmount`, plus
 /// the test-only `images` fixture bundle (`plans/DISK-IMAGES.md` DI7),

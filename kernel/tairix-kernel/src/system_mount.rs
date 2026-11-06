@@ -159,14 +159,11 @@ where
         None => cache,
     };
     let cache = Box::try_new(cache).map_err(|_| Errno::OutOfMemory)?;
-    // Every production volume cache registers both of its classified pools
-    // — clean file data and metadata — with the System Information
-    // memory-statistics registry (observation-only). A `None` means
-    // classification refused the cache at birth (it is then poisoned and
-    // admits nothing), so there is nothing to register — the refusal is
-    // already in the audit log.
+    // Both pools are listed, or the cache is refused: an unlisted one would
+    // spend memory reclaim cannot see. `None` is a pool classification refused
+    // at birth, which admits nothing and is already audited.
     for ledger in cache.ledgers().into_iter().flatten() {
-        tairix_kernel_core::memstats::MEM_STATS.register_ledger(ledger);
+        tairix_kernel_core::memstats::MEM_STATS.register_ledger(ledger)?;
     }
     Ok((cache, reference))
 }
@@ -243,7 +240,8 @@ const SYSTEM_FS_UNAVAILABLE: EventId = EventId(4144);
 const VOLUME_ID_PUBLISHED: EventId = EventId(4170);
 
 /// Audit event: a mounted volume's identity could not be published
-/// (drives.md `fs.root.publish.deny`) — a nil identity or a duplicate.
+/// (drives.md `fs.root.publish.deny`) — a nil identity, a duplicate, or a
+/// heap that cannot hold the publication.
 /// `id::` access to the volume stays fail-closed; the `/` view is
 /// unaffected. Never fatal to boot.
 const VOLUME_ID_PUBLISH_REFUSED: EventId = EventId(4171);
@@ -281,6 +279,7 @@ pub(crate) fn publish_volume_identity(
             let cause = match refusal {
                 tairix_kernel_core::VolumePublishError::NilIdentity => "nil_identity",
                 tairix_kernel_core::VolumePublishError::AlreadyPublished => "already_published",
+                tairix_kernel_core::VolumePublishError::OutOfMemory => "identity_unallocated",
             };
             log(
                 audit,
@@ -337,7 +336,7 @@ pub(crate) fn publish_volume_identity(
 /// (a default-layout mount unexpectedly absent, or a refused double-backing)
 /// — all wiring defects, surfaced (fail closed) rather than panicked.
 fn system_vfs() -> Result<Vfs, VfsError> {
-    let vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
+    let vfs = Vfs::with_default_layout(UserId(0), GroupId(0))?;
     let system_handle = DriverHandle::from_raw(SYSTEM_MOUNT_HANDLE).map_err(|_| VfsError::Io)?;
     let root_handle = DriverHandle::from_raw(ROOT_VOLUME_HANDLE).map_err(|_| VfsError::Io)?;
     {
@@ -354,7 +353,7 @@ fn system_vfs() -> Result<Vfs, VfsError> {
         mounts.set_backing(&Path::parse("/System")?, system_handle, Vec::new())?;
         for sub in ["/System/Logs", "/System/Settings"] {
             let path = Path::parse(sub)?;
-            let subtree = path.components().to_vec();
+            let subtree = path.owned_components()?;
             mounts.set_backing(&path, root_handle, subtree)?;
         }
     }
@@ -427,12 +426,17 @@ pub fn install_system_mount<B: Block + 'static>(
         unavailable(audit, "system_mount_failed");
         return None;
     };
-    let cache = SharedClusterCache::new(TransformClusterCache::for_volume(
-        SYSTEM_MOUNT_HANDLE,
-        pressure,
-        audit,
-    ));
-    let fs = fs.with_cluster_cache(Box::new(cache.clone()));
+    let Ok(cache) = TransformClusterCache::for_volume(SYSTEM_MOUNT_HANDLE, pressure, audit)
+        .and_then(SharedClusterCache::new)
+    else {
+        unavailable(audit, "transform_cache_unbuilt");
+        return None;
+    };
+    let Ok(installed) = Box::try_new(cache.clone()) else {
+        unavailable(audit, "transform_cache_unbuilt");
+        return None;
+    };
+    let fs = fs.with_cluster_cache(installed);
     let volume_uuid = fs.volume_uuid();
     let Ok(vfs) = system_vfs() else {
         unavailable(audit, "system_vfs_build_failed");

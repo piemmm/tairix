@@ -70,8 +70,8 @@ deslocar. *Concluído*, `Escape` ou o botão de fechar da janela fecha-a.
 **Aparência** escolhe o esquema de cores, define o tamanho do texto e
 quantas linhas o histórico guarda (de nenhuma a 10 000, 500 de início),
 e edita o esquema próprio do utilizador. Os esquemas incluídos são
-*System* (que segue a aparência escura ou clara do ambiente de
-trabalho), *Midnight*, *Phosphor*, *Amber*, *Ember*, *Contrast*,
+*System* (a aparência escura do ambiente de trabalho, quer o próprio
+ambiente de trabalho seja escuro, quer seja claro), *Midnight*, *Phosphor*, *Amber*, *Ember*, *Contrast*,
 *Paper* e *Custom*. Escolher *Custom* utiliza as cores editadas por
 baixo do seletor: uma grelha das vinte cores de que um ecrã é composto —
 o fundo, o primeiro plano, o cursor, o texto do cursor e as dezasseis
@@ -116,10 +116,6 @@ a região de quadros partilhada ou a caixa de eventos foi recusada (a
 razão é indicada no fluxo de erro padrão).
 
 ## ENVIRONMENT
-
-`HOME`
-: A pasta pessoal da conta, onde o terminal lê e escreve o seu perfil.
-Sem ela, o terminal funciona com o perfil predefinido e não guarda nada.
 
 `TERM`
 : Exportada para a shell alojada como `xterm-256color`, nomeando o

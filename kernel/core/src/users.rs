@@ -36,7 +36,7 @@ use tairix_abi::Errno;
 use tairix_log::{Field, Level, Sink};
 use tairix_sync::RwLock;
 use tairix_users::{LocatedError, UsersDb, MAX_DB_LEN};
-use tairix_util::fallible::collected;
+use tairix_util::fallible::copied;
 use tairix_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
@@ -233,7 +233,7 @@ impl UsersDbSource for HeldUsersDbSource {
         // A holder only exists for a successfully loaded database, so the
         // text is always present — unlike [`NullUsersDbSource`], which
         // marks the inert "no database" interface.
-        collected(self.text.len(), self.text.iter().copied())
+        copied(&self.text)
             .map(UsersDbText)
             .ok_or(Errno::OutOfMemory)
     }

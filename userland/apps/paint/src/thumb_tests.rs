@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 
 use tairix_image::{SpriteMode, SpriteName, SpritePalette};
 
-use super::thumbnail;
+use super::{of_canvas, thumbnail};
 use crate::canvas::{CanvasBuilder, Kind, Sample};
 use crate::document::{Picture, SpriteInfo};
 
@@ -75,4 +75,16 @@ fn a_large_picture_is_reduced_to_fit_its_square() {
 #[test]
 fn no_square_draws_nothing() {
     assert!(thumbnail(&sprite(2, 2, (0, 0), (1, 1)), 0).is_none());
+}
+
+/// A layer's thumbnail is drawn from its own pixels at its picture's pixel
+/// shape, as a picture of that one layer is.
+#[test]
+fn a_layer_is_drawn_as_a_picture_of_it_alone_is() {
+    let picture = sprite(6, 3, (2, 1), (1, 2));
+    assert_eq!(
+        of_canvas(picture.canvas(), picture.pixel_aspect(), 16),
+        thumbnail(&picture, 16)
+    );
+    assert!(of_canvas(picture.canvas(), (1, 1), 0).is_none());
 }

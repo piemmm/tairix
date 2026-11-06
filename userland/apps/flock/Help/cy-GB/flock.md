@@ -4,20 +4,20 @@ flock — rhedeg gorchymyn wrth ddal clo ffeil cynghorol
 
 ## SYNOPSIS
 
-`flock [options] ffeil gorchymyn [ymresymiad...]`
+`flock [options] file command [argument...]`
 
 ## DESCRIPTION
 
-Yn cymryd clo cynghorol sy'n cwmpasu'r `ffeil` gyfan, yn rhedeg y
-`gorchymyn` wrth ei ddal, ac yn gorffen â statws y gorchymyn ei hun. Nid
-yw dau rediad sy'n enwi'r un `ffeil` byth yn gorgyffwrdd, sef yr hyn sydd
-angen ar sgript i gadw un copi ohoni ei hun yn rhedeg ar y tro.
+Yn cymryd clo cynghorol sy'n cwmpasu'r ffeil `file` gyfan, yn rhedeg y
+gorchymyn `command` wrth ei ddal, ac yn gorffen â statws y gorchymyn ei
+hun. Nid yw dau rediad sy'n enwi'r un `file` byth yn gorgyffwrdd, sef yr
+hyn sydd angen ar sgript i gadw un copi ohoni ei hun yn rhedeg ar y tro.
 
 Mae'r clo yn perthyn i'r ffeil agored y mae'r rhediad hwn yn ei dal, felly
 mae'r system yn ei ryddhau pan ddaw'r rhediad i ben — trwy orffen, trwy
-gael ei ymyrryd, neu trwy chwalu. Nid ysgrifennir dim i'r `ffeil` ac nid
-oes dim i'w lanhau wedyn, felly nid oes clo hen yn aros i'r rhediad nesaf
-ei ddisgwyl. Crëir y `ffeil` os nad yw'n bod.
+gael ei ymyrryd, neu trwy chwalu. Nid ysgrifennir dim i `file` ac nid oes
+dim i'w lanhau wedyn, felly nid oes clo hen yn aros i'r rhediad nesaf ei
+ddisgwyl. Crëir `file` os nad yw'n bod.
 
 Mae cloeon yn **gynghorol**: maent yn cydlynu rhaglenni sy'n cytuno i'w
 defnyddio. Nid ydynt yn caniatáu nac yn gwrthod mynediad, felly nid yw
@@ -36,19 +36,31 @@ Mae tri opsiwn o `flock` systemau eraill yn fwriadol absennol yn lle cael
 eu derbyn a'u hanwybyddu. Mae `-u` a `-o` yn gweithredu ar ddisgrifydd
 ffeil a agorwyd ymlaen llaw gan gragen, ffurf nad yw'r gorchymyn hwn yn ei
 chynnig; mae `-c` yn trosglwyddo ei ymresymiad i gragen, sy'n cael ei
-sillafu yma'n benodol fel `flock ffeil elsh -c '...'` fel bod yn eglur pa
+sillafu yma'n benodol fel `flock file elsh -c '...'` fel bod yn eglur pa
 gragen sy'n rhedeg. Mae gofyn am unrhyw un ohonynt yn wall defnydd: rhoddir
 gwybod i'r sgript yn lle ei rhedeg heb y clo y gofynnodd amdano.
 
 ## OPTIONS
 
-- `-s, --shared` — cymryd clo a rennir. Gall sawl rhediad ei ddal ar yr un pryd, ac mae pob un yn eithrio rhediad sy'n gofyn am un unigryw. Dyma glo'r darllenwyr.
-- `-x, --exclusive` — cymryd clo unigryw, sy'n eithrio pob deiliad arall. Y rhagosodiad, a chlo'r ysgrifenwyr.
-- `-n, --nonblock` — peidio ag aros: os yw'r clo wedi'i ddal, gorffen ar unwaith â'r cod gwrthdaro.
-- `-w, --timeout <seconds>` — aros am hyd at y nifer hwn o eiliadau cyfan, wedyn gorffen â'r cod gwrthdaro.
-- `-E, --conflict-code <n>` — y statws i orffen â hi pan fydd `-n` neu `-w` yn ildio. `1` yn rhagosodedig. Defnyddiwch werth nad yw'r gorchymyn ei hun byth yn ei ddychwelyd os oes rhaid i sgript wahaniaethu rhyngddynt.
+- `-s, --shared` — cymryd clo a rennir. Gall sawl rhediad ei ddal ar yr un
+  pryd, ac mae pob un yn eithrio rhediad sy'n gofyn am un unigryw. Dyma
+  glo'r darllenwyr.
+- `-x, --exclusive` — cymryd clo unigryw, sy'n eithrio pob deiliad arall.
+  Y rhagosodiad, a chlo'r ysgrifenwyr.
+- `-n, --nonblock` — peidio ag aros: os yw'r clo wedi'i ddal, gorffen ar
+  unwaith â'r cod gwrthdaro.
+- `-w, --timeout <seconds>` — aros am hyd at y nifer hwn o eiliadau cyfan,
+  wedyn gorffen â'r cod gwrthdaro.
+- `-E, --conflict-code <n>` — y statws i orffen â hi pan fydd `-n` neu `-w`
+  yn ildio. `1` yn rhagosodedig. Defnyddiwch werth nad yw'r gorchymyn ei
+  hun byth yn ei ddychwelyd os oes rhaid i sgript wahaniaethu rhyngddynt.
 - `-v, --verbose` — adrodd ar y llif gwallau safonol a gymerwyd y clo.
 - `-?, --help` — dangos help byr y gorchymyn hwn.
+
+Rhaid i'r opsiynau ddod cyn `file`: mae popeth o `file` ymlaen yn perthyn
+i'r gorchymyn, felly mae `flock lock ls -l` yn trosglwyddo `-l` i `ls`.
+Mae `--` yn terfynu dadansoddi opsiynau, fel bod modd cyrraedd ffeil neu
+orchymyn sy'n dechrau â chysylltnod.
 
 ## EXAMPLES
 

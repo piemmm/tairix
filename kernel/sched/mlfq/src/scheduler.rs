@@ -5,21 +5,21 @@
 //! doc page is the source of truth for behaviour.
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_kernel_sched_api::park::{self, Settled, Taken};
+use tairix_kernel_sched_api::park::{self, Settled, Taken, TaskTable};
+use tairix_kernel_sched_api::queue::Overflow;
 use tairix_kernel_sched_api::{ParkableTask, StealScan};
-use tairix_sync::{RwLock, SpinLock};
+use tairix_sync::RwLock;
 
 use crate::loom_compat::{AtomicU64, Ordering};
 use crate::runqueue::{RunDeque, Steal};
 use crate::task::{TaskBody, TaskInner};
 use crate::{
-    choose_task_id, CoreClass, CpuId, ExitDisposition, Priority, SchedClass, SchedError,
-    SchedResult, SchedulerArch, SchedulerConfig, SchedulerPolicy, StepOutcome, TaskAction,
-    TaskContext, TaskId, TaskState,
+    CoreClass, CpuId, ExitDisposition, Priority, SchedClass, SchedError, SchedResult,
+    SchedulerArch, SchedulerConfig, SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId,
+    TaskState,
 };
 
 /// Per-CPU scheduler state.
@@ -164,7 +164,7 @@ impl CpuState {
 pub struct Scheduler<A: SchedulerArch> {
     arch: Arc<A>,
     cpus: Box<[CpuState]>,
-    tasks: RwLock<BTreeMap<TaskId, Arc<TaskInner>>>,
+    tasks: RwLock<TaskTable<TaskInner>>,
     config: SchedulerConfig,
     last_boost_tick: AtomicU64,
     /// Where each CPU begins its work-stealing scan. The shared per-CPU
@@ -174,7 +174,7 @@ pub struct Scheduler<A: SchedulerArch> {
     /// The scheduler drains this on every step before checking the local
     /// queues; this is the back-pressure path described in
     /// `docs/src/architecture/scheduler.md` §"Overflow".
-    overflow: SpinLock<Vec<Arc<TaskInner>>>,
+    overflow: Overflow<Arc<TaskInner>>,
     /// Per-CPU count of timer-driven preemptions ever observed.
     ///
     /// Incremented exactly once per [`Self::on_timer_tick`] call. The
@@ -260,11 +260,11 @@ impl<A: SchedulerArch> Scheduler<A> {
         Ok(Self {
             arch,
             cpus: cpus.into_boxed_slice(),
-            tasks: RwLock::new(BTreeMap::new()),
+            tasks: RwLock::new(park::task_table()),
             config,
             last_boost_tick: AtomicU64::new(0),
             victim_scan: StealScan::new(config.cpus),
-            overflow: SpinLock::new(Vec::new()),
+            overflow: Overflow::new(),
             preemptions: preemptions.into_boxed_slice(),
             current: current.into_boxed_slice(),
             core_classes: core_classes.into_boxed_slice(),
@@ -361,30 +361,24 @@ impl<A: SchedulerArch> Scheduler<A> {
     ///
     /// # Errors
     /// * [`SchedError::NoSuchCpu`] if `home_cpu` is out of range.
+    /// * [`SchedError::OutOfMemory`] if the task cannot be held; nothing is
+    ///   admitted.
     pub fn spawn<F>(&self, home_cpu: CpuId, priority: Priority, body: F) -> SchedResult<TaskId>
     where
         F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static,
     {
         self.cpu_state(home_cpu)?;
         let placed = self.preferred_home(priority, home_cpu);
-        let boxed: Box<TaskBody> = Box::new(body);
-        // The id is chosen and registered under one write lock, so a
-        // concurrent admission cannot take it in between; the enqueue below
-        // then runs with the lock released, preserving the
+        let target = self.cpu_state(placed)?;
+        // Registered under the registry's write lock and queued after it, the
         // tasks-before-queue order every other path takes.
-        let inner = {
-            let mut tasks = self.tasks.write();
-            let id = choose_task_id(None, |c| tasks.contains_key(&c))?;
-            let inner = Arc::new(TaskInner::new(id, placed, priority, boxed));
-            tasks.insert(id, Arc::clone(&inner));
-            inner
-        };
+        let inner = self.register(None, placed, priority, TaskState::Ready, body)?;
         let id = inner.id;
-        // Try to enqueue on the placed CPU; on overflow, push to the
-        // global overflow list. Both paths preserve cancellation safety
-        // because state is updated only after enqueue confirms.
-        if let Err(task) = self.cpu_state(placed)?.push_priority(priority, inner) {
-            self.overflow.lock().push(task);
+        // On a full queue the entry waits in the overflow list, in room its
+        // admission took. Both paths preserve cancellation safety because
+        // state is updated only after enqueue confirms.
+        if let Err(task) = target.push_priority(priority, inner) {
+            self.overflow.push(task);
         }
         // Wake the placed CPU. Spawning at higher priority than what is
         // running there should preempt — but at this layer we have no
@@ -407,6 +401,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     ///
     /// # Errors
     /// * [`SchedError::NoSuchCpu`] if `home_cpu` is out of range.
+    /// * [`SchedError::OutOfMemory`] if the task cannot be held.
     pub fn spawn_parked<F>(
         &self,
         home_cpu: CpuId,
@@ -426,6 +421,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// * [`SchedError::NoSuchCpu`] if `home_cpu` is out of range.
     /// * [`SchedError::TaskIdInUse`] if a live task already holds `id`.
     /// * [`SchedError::NoTaskIdAvailable`] if `id` names no task.
+    /// * [`SchedError::OutOfMemory`] if the task cannot be held.
     pub fn spawn_parked_as<F>(
         &self,
         id: TaskId,
@@ -454,16 +450,43 @@ impl<A: SchedulerArch> Scheduler<A> {
         self.cpu_state(home_cpu)?;
         let placed = self.preferred_home(priority, home_cpu);
         self.cpu_state(placed)?;
-        let boxed: Box<TaskBody> = Box::new(body);
-        let mut tasks = self.tasks.write();
-        let id = choose_task_id(requested, |c| tasks.contains_key(&c))?;
-        let inner = Arc::new(TaskInner::new(id, placed, priority, boxed));
         // Born parked: no queue entry is pushed and no IPI is raised, so
         // no CPU can pick the task up. The later `unpark` performs the
         // placement, enqueue, and IPI.
-        inner.store_state(TaskState::Parked);
-        tasks.insert(id, inner);
-        Ok(id)
+        let inner = self.register(requested, placed, priority, TaskState::Parked, body)?;
+        Ok(inner.id)
+    }
+
+    /// Register a task homed on `placed` under a drawn id (`requested` is
+    /// `None`) or the caller's reserved one, born `state`, taking every
+    /// allocation — its body, its record, its registry slot and its room in
+    /// the overflow list — before anything is filed.
+    ///
+    /// # Errors
+    /// * [`SchedError::OutOfMemory`] if any of them cannot be had.
+    /// * The id refusals of [`park::admit_record`].
+    fn register<F>(
+        &self,
+        requested: Option<TaskId>,
+        placed: CpuId,
+        priority: Priority,
+        state: TaskState,
+        body: F,
+    ) -> SchedResult<Arc<TaskInner>>
+    where
+        F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static,
+    {
+        let body: Box<TaskBody> = Box::try_new(body).map_err(|_| SchedError::OutOfMemory)?;
+        park::admit_record(
+            &self.tasks,
+            requested,
+            |records| self.overflow.reserve(records),
+            |id| {
+                let inner = TaskInner::new(id, placed, priority, body);
+                inner.store_state(state);
+                inner
+            },
+        )
     }
 
     /// Stop a task for job control until [`Self::resume`] — see
@@ -540,7 +563,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             None => Some(Arc::clone(task)),
         };
         if let Some(task) = refused {
-            self.overflow.lock().push(task);
+            self.overflow.push(task);
         }
         self.arch.send_ipi(target);
     }
@@ -657,7 +680,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// # Why this entry point does *not* call [`Self::step`]
     ///
     /// `step` takes a reader lock on the task registry
-    /// (`RwLock<BTreeMap<TaskId, _>>`) and a `SpinLock` on the
+    /// (`RwLock<TaskTable<_>>`) and a `SpinLock` on the
     /// overflow list. Both are forbidden from interrupt context by
     /// `lib/sync` (see `rwlock.rs` module docs: "Process /
     /// kernel-thread context only. Never from an interrupt handler.").
@@ -763,14 +786,18 @@ impl<A: SchedulerArch> Scheduler<A> {
         Ok(StepOutcome::Idle)
     }
 
+    /// Drain the overflow list onto `me`'s queues, oldest first, until an
+    /// entry does not fit: that one waits again for a later step.
     fn drain_overflow_to(&self, me: &CpuState) {
-        let mut g = self.overflow.lock();
-        while let Some(task) = g.pop() {
+        for _ in 0..self.overflow.len() {
+            let Some(task) = self.overflow.pop() else {
+                return;
+            };
             let (class, prio) = (task.load_sched_class(), task.load_priority());
             if let Err(task) = me.push_class(class, prio, task) {
                 // Local queue full too — put it back and stop draining.
-                g.push(task);
-                break;
+                self.overflow.push(task);
+                return;
             }
         }
     }
@@ -982,7 +1009,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             None => Some(Arc::clone(task)),
         };
         if let Some(task) = refused {
-            self.overflow.lock().push(task);
+            self.overflow.push(task);
         }
         // Signal after publishing: an idle `dest` sleeps in its idle wait, and
         // the queue alone cannot make its dispatcher run.
@@ -1116,7 +1143,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             .get(cpu as usize)
             .map(|state| state.bands.iter().any(|band| band.len_approx() != 0))
             .ok_or(SchedError::NoSuchCpu)?;
-        Ok(local_ready || !self.overflow.lock().is_empty())
+        Ok(local_ready || !self.overflow.is_empty())
     }
 
     /// Returns the most recent state of `id`. Convenience for tests.
@@ -1467,7 +1494,7 @@ mod tests {
         let Steal::Stolen(entry) = sched.cpus[queued as usize].steal_any() else {
             panic!("requeued");
         };
-        sched.overflow.lock().push(entry);
+        sched.overflow.push(entry);
         arch.set_current_cpu(home);
         assert_eq!(sched.step(home), Ok(StepOutcome::Ran(id)), "drained");
         drop(registry);

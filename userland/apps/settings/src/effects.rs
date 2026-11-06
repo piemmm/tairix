@@ -1,7 +1,8 @@
-//! The Sound Effects pane (`plans/SOUND.md`): whether the desktop makes
-//! sounds, the theme they come from, how loud they are, and what each event
-//! plays — the user's own choices, which their desktop session keeps and
-//! hands the cue authority while it holds the seat.
+//! The Sound Effects pane (`plans/SOUND.md`): whether the desktop makes sound
+//! effects, the theme they come from, how loud they are and what each event
+//! plays, and whether a change of volume is heard — the user's own choices,
+//! which their desktop session keeps and hands the cue authority while it
+//! holds the seat.
 //!
 //! This application holds no authority over them and keeps no store of its
 //! own: it asks the session, which decides, stores and answers. A file is
@@ -21,11 +22,11 @@ use tairix_audio::volume::{level_at_permille, permille_of_level};
 use tairix_controls::{
     ComboBox, ControlState, FieldAction, FieldControl, FieldGroup, FieldRow, Slider, Toggle,
 };
-use tairix_soundtheme::{layered, merge_pushed, SoundKey, SoundSettings};
+use tairix_soundtheme::{is_effect, layered, merge_pushed, SoundKey, SoundSettings};
 use tairix_util::utf8::shown;
 
 /// What a reader may search for to reach the pane.
-pub(crate) const EFFECTS_FACTS: [&str; 7] = [
+pub(crate) const EFFECTS_FACTS: [&str; 8] = [
     "Sound effects",
     "Desktop sounds",
     "Sound theme",
@@ -33,7 +34,11 @@ pub(crate) const EFFECTS_FACTS: [&str; 7] = [
     "Alert volume",
     "Bell",
     "Notification sound",
+    "Volume feedback",
 ];
+
+/// The setting the volume feedback's switch changes.
+const FEEDBACK: SoundKey = SoundKey::EventEnabled(SoundEvent::VolumeFeedback);
 
 /// What plays for an event.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -95,12 +100,15 @@ impl EffectsReading {
 /// Which setting of which event a row changes.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum EffectsRow {
-    /// Whether the desktop makes any sound.
+    /// Whether the desktop makes sound effects.
     Enabled,
     /// The theme sounds come from.
     Theme,
-    /// How far every sound is turned down.
+    /// How far every sound effect is turned down.
     Gain,
+    /// Whether the volume's own feedback plays, which the effects' switch and
+    /// volume do not reach.
+    Feedback,
     /// What the event plays.
     Event(SoundEvent),
 }
@@ -232,6 +240,7 @@ const fn label(event: SoundEvent) -> &'static str {
         SoundEvent::Startup => "Start-up",
         SoundEvent::Login => "Sign in",
         SoundEvent::Logout => "Sign out",
+        SoundEvent::VolumeFeedback => "Volume feedback",
     }
 }
 
@@ -295,13 +304,18 @@ pub(crate) fn groups(reading: Option<&EffectsReading>) -> (Vec<FieldGroup>, Vec<
     };
     let (effects, general) = plate(
         "SOUND EFFECTS",
-        alloc::vec![EffectsRow::Enabled, EffectsRow::Theme, EffectsRow::Gain],
+        alloc::vec![
+            EffectsRow::Enabled,
+            EffectsRow::Theme,
+            EffectsRow::Gain,
+            EffectsRow::Feedback,
+        ],
     );
     let (events, each) = plate(
         "EVENT SOUNDS",
         SoundEvent::ALL
             .into_iter()
-            .filter(|event| layered(*event))
+            .filter(|event| layered(*event) && is_effect(*event))
             .map(EffectsRow::Event)
             .collect(),
     );
@@ -320,8 +334,9 @@ pub(crate) fn groups(reading: Option<&EffectsReading>) -> (Vec<FieldGroup>, Vec<
 /// The row `owner` changes, as `reading` has it.
 ///
 /// The one definition of each row, so a plate built afresh and a row brought
-/// in line in place cannot disagree. While the desktop makes no sound every
-/// row but its switch is disabled: none of them applies.
+/// in line in place cannot disagree. While the desktop makes no sound effects
+/// every row but the two switches is disabled: none of them applies, and the
+/// volume's feedback is no effect.
 pub(crate) fn row(owner: EffectsRow, reading: &EffectsReading) -> FieldRow {
     let settings = &reading.settings;
     let applies = ControlState::idle().with_enabled(settings.enabled());
@@ -330,6 +345,13 @@ pub(crate) fn row(owner: EffectsRow, reading: &EffectsReading) -> FieldRow {
             "Play sound effects",
             FieldControl::Toggle(Toggle::new("", settings.enabled())),
         ),
+        EffectsRow::Feedback => {
+            let on = settings.event(SoundEvent::VolumeFeedback).enabled;
+            FieldRow::new(
+                "Play feedback when the volume changes",
+                FieldControl::Toggle(Toggle::new("", on)),
+            )
+        }
         EffectsRow::Theme => {
             let themes = reading.offered_themes();
             let at = themes
@@ -376,9 +398,10 @@ pub(crate) fn row(owner: EffectsRow, reading: &EffectsReading) -> FieldRow {
 }
 
 /// Whether `row` shows what a change to `changed`'s control moves: the
-/// desktop's switch decides whether every other row applies.
+/// effects' switch decides whether every other row applies but the volume
+/// feedback's, which is no effect.
 pub(crate) fn touches(changed: EffectsRow, row: EffectsRow) -> bool {
-    changed == EffectsRow::Enabled || changed == row
+    (changed == EffectsRow::Enabled && row != EffectsRow::Feedback) || changed == row
 }
 
 /// Show `ask` in `reading` as the session will hold it once made, answering
@@ -429,6 +452,7 @@ pub(crate) fn effects_ask(
         (EffectsRow::Enabled, FieldAction::Set { on }) => {
             changed(SoundKey::Enabled, bool_text(*on))
         }
+        (EffectsRow::Feedback, FieldAction::Set { on }) => changed(FEEDBACK, bool_text(*on)),
         (EffectsRow::Theme, FieldAction::Selected { index }) => {
             let theme = reading.offered_themes().into_iter().nth(*index)?;
             changed(SoundKey::Theme, &theme)

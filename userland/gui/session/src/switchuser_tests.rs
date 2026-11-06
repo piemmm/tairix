@@ -223,7 +223,8 @@ fn an_accepted_background_releases_the_seat_after_the_reply() {
 }
 
 /// A background session parks indefinitely, but one told to end must still
-/// wake when its grace runs out: login's end reaches every session backgrounded.
+/// wake when its grace runs out — login's end reaches every session
+/// backgrounded — and one finishing a recording when its deadline does.
 #[test]
 fn a_background_session_that_is_leaving_wakes_for_its_grace() {
     const NOW: u64 = 600_000_000_000;
@@ -233,12 +234,17 @@ fn a_background_session_that_is_leaving_wakes_for_its_grace() {
     assert_eq!(switch.step_aside(&mut authority, &mut screen), Ok(()));
 
     assert_eq!(
-        serve_park_ns(&switch, None, NOW, 1_000),
+        serve_park_ns(&switch, None, NOW, (1_000, WAITSET_TIMEOUT_NONE)),
         WAITSET_TIMEOUT_NONE
+    );
+    assert_eq!(
+        serve_park_ns(&switch, None, NOW, (1_000, 2_000)),
+        2_000,
+        "a recording being finished in the background still wakes it"
     );
     let leaving = Departure::begin(NOW, 0);
     assert_eq!(
-        serve_park_ns(&switch, Some(&leaving), NOW, 1_000),
+        serve_park_ns(&switch, Some(&leaving), NOW, (1_000, WAITSET_TIMEOUT_NONE)),
         tairix_abi::session_ipc::SESSION_CLOSE_GRACE.saturating_total_nanos()
     );
 }

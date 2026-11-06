@@ -866,10 +866,15 @@ impl DmaWindowMap {
     /// Whether `addr` lies inside this allocator's virtual window.
     #[must_use]
     pub fn contains(&self, addr: VirtAddr) -> bool {
+        self.span().contains(&addr.as_u64())
+    }
+
+    /// The window's virtual byte range.
+    #[must_use]
+    pub fn span(&self) -> core::ops::Range<u64> {
         let start = self.base.as_u64();
         // `new` proved the window's byte span representable.
-        let span = (self.capacity_pages * PAGE_SIZE) as u64;
-        addr.as_u64() >= start && addr.as_u64() - start < span
+        start..start + (self.capacity_pages * PAGE_SIZE) as u64
     }
 
     /// Release **every** live DMA buffer as its owner ends: each block's pages

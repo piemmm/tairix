@@ -51,7 +51,13 @@ bureau, règle leur thème et leur volume et, pour chaque événement — une
 notification, une erreur, la cloche du terminal —, indique s'il joue le son de
 son thème, un fichier que vous choisissez ou rien. Les sons de démarrage,
 d'ouverture et de fermeture de session appartiennent à la machine et sont
-fixés par son administrateur.
+fixés par son administrateur. Changer le volume du périphérique par lequel le
+son est joué, ici ou depuis la barre d'icônes, joue un son bref au nouveau
+volume — là où un glissement s'arrête, à chaque pas des touches fléchées et au
+retrait de la sourdine — pour que vous entendiez à quel point il est fort
+désormais. Dans *Sound Effects*, *Play feedback when the volume changes* le
+coupe. Il ne suit pas les autres sons du bureau : il est joué au volume propre
+du périphérique, qu'ils soient activés ou non.
 
 **Raspberry Pi** n'apparaît que si la machine en est un. On y règle le
 ventilateur du processeur, commuté par une ligne du connecteur à 40 broches :
@@ -83,11 +89,18 @@ dossiers restent en tête, quels suffixes de nom et quelles entrées sont
 masqués, si une image montre son propre contenu et un dossier ce qu'il
 contient, si le déplacement d'entrées vers la Corbeille demande d'abord
 confirmation et si une image disque ou une archive que vous avez ouverte est
-démontée une fois ses fenêtres fermées. Une ligne prend effet dès qu'elle est
+démontée une fois ses fenêtres fermées. Les suffixes de nom qu'il masque le
+sont aussi sur le bureau. *Show on the desktop* a une case pour chaque sorte de
+lecteur — *The system drive*, *Fixed drives*, *Removable drives*,
+*Network shares* et *Disk images and archives* — et le bureau montre une icône
+pour chaque lecteur branché d'une sorte cochée, qui l'ouvre comme le fait le
+gestionnaire de fichiers ; seuls les lecteurs amovibles sont cochés au départ.
+Une ligne prend effet dès qu'elle est
 choisie : l'endroit où s'ouvre une nouvelle fenêtre et le fait qu'elle montre ou
 non la colonne des lieux et la barre d'outils s'appliquent à la prochaine
-fenêtre que vous ouvrirez, et tout le reste atteint toutes les fenêtres du
-gestionnaire de fichiers à la fois, même si une fenêtre garde un affichage ou un
+fenêtre que vous ouvrirez, et tout le reste atteint le bureau et toutes les
+fenêtres du gestionnaire de fichiers à la fois, même si une fenêtre garde un
+affichage ou un
 ordre que vous y avez choisi vous-même. *Settings…* dans le menu du gestionnaire
 de fichiers lui-même ouvre ce panneau.
 

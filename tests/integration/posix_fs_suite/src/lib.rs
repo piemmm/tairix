@@ -292,6 +292,7 @@ pub fn cred(uid: u32, gid: u32, caps: &CapabilitySet) -> Credentials<'_> {
 #[must_use]
 pub fn default_layout_vfs() -> Vfs {
     Vfs::with_default_layout(UserId(ROOT_UID), GroupId(ROOT_GID))
+        .expect("the default layout fits in memory")
 }
 
 /// Each entry's kind and name, as a listing reports them.
@@ -364,7 +365,8 @@ pub struct Volume {
 /// runtime condition.
 #[must_use]
 pub fn arxfs_volume(read_only: bool) -> Volume {
-    let vfs = Vfs::with_default_layout(UserId(ROOT_UID), GroupId(ROOT_GID));
+    let vfs = Vfs::with_default_layout(UserId(ROOT_UID), GroupId(ROOT_GID))
+        .expect("the default layout fits in memory");
     let handle = DriverHandle::from_raw(0x5f5f).expect("non-zero driver handle");
     let flags = if read_only {
         MountFlags::READ_ONLY

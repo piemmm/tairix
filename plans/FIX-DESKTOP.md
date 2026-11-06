@@ -26,9 +26,9 @@
 | DESK-20 | Settings asks for its pictures off its loop | done |
 | DESK-21 | Window-channel requests are posted, never awaited | done |
 | DESK-22 | Every caller's IPC in a lane of its own: no application can refuse another the desktop | done |
-| DESK-23 | Settings and the viewer paint once per burst of input, not once per event | planned |
+| DESK-23 | Settings and the viewer paint once per burst of input, not once per event | done |
 | DESK-24 | The process holding a seat's display runs in the high band while it holds it | done |
-| DESK-25 | A present that replaces an unshown frame is answered once that frame is shown | planned |
+| DESK-25 | A present that replaces an unshown frame is answered once that frame is shown | done |
 
 Binding under `AGENTS.md`. This plan removes the desktop freeze that
 occurs while an application is loaded and started, fixes it as a
@@ -1095,8 +1095,9 @@ Each stage is independently reviewable and must leave the whole-project
 - **Posted, one in flight.** `WindowClient::present` posts once the window's
   previous present is answered (`await_present`, on the `call_await` syscall,
   which that call's answer alone ends, reaping nothing else), so a client waits
-  only when it outruns the session serving it, never on a conversion or a
-  composite. A present refused for room goes as a call. A refused present
+  only for that answer — the desktop's next frame once it outruns the desktop
+  (DESK-25) — never on a conversion or a composite. A present refused for room
+  goes as a call. A refused present
   reaches the app as `EventError::Refused` and the next present declares the
   whole window; a `NotAttached` refusal marks the window released instead. The
   library's redraw answer is held behind a present in flight, never awaited,
@@ -1112,8 +1113,8 @@ Each stage is independently reviewable and must leave the whole-project
   or, never sized, a `RedrawRequested`.
 - **The per-client bound.** `CLIENT_FRAME_RAM_DIVISOR` is 2: each window holds
   two frames, so half of RAM keeps the measured capacity.
-- **What it does not fix.** The session's own composite cost, and a client
-  presenting faster than the desktop shows frames is not held back (DESK-25).
+- **What it does not fix.** The session's own composite cost; holding a client
+  that presents faster than the desktop shows frames to its pace is DESK-25.
 - **Proven by** `a_present_is_posted_and_the_next_waits_only_for_its_answer`,
   `presents_between_frames_are_shown_once_with_every_change`,
   `a_resize_or_a_release_drops_the_pending_frame`,
@@ -1206,21 +1207,25 @@ Each stage is independently reviewable and must leave the whole-project
   D1648–D1653, D1657).
 
 ### DESK-23 — Settings and the viewer paint once per burst
-- **The defect.** The charter's interactive-surface rule wants input drained
-  before a paint, so a burst of pointer samples costs one frame. The Settings
-  window and the viewer each take one event per turn of their loop and present
-  for it, so a pointer moving across either presents once per sample. Sapper
-  had the same shape and now drains its burst first.
-- **Why it is staged.** Neither loop folds a round: Settings runs a chooser
-  route, an action and a readings request per event with early returns, and
-  the viewer presents each of its windows from its router. Draining first means
-  giving each a per-window `Owed` folded across the burst (the file manager's
-  and Date & Time's shape) and acting on each event's conclusion before one
-  present — a rework of two program loops with no host harness, kept apart from
-  DESK-19, which left their per-event cost no higher than it was.
-- **Remains.** Both loops drain with `WindowEvents::try_wait` after the event
-  that ended the park, fold each window's damage into its own `Owed`, and
-  present each owed window once.
+- **What it fixed.** The Settings window and the viewer took one event per turn
+  of their loop and presented for it, so a pointer moving across either
+  presented once per sample — and, with DESK-25 holding a present that replaces
+  an unshown frame, would have waited a desktop frame per sample.
+- **One turn, one present.** Each loop drains what is queued — the event the
+  last park ended on first, then `WindowEvents::try_wait` up to the mailbox's
+  capacity, carrying on without parking when that is cut short — and an event
+  only records what it changed. Settings folds each event's conclusion into one
+  `Round` (`Round::and`) with the turn's damage; what ended the park — a desk's
+  answer, a password marker or a held bar falling due, the cooling period, a
+  desktop change — is caught up at the turn's start into the same account, and
+  the pictures and readings the panes on show want are asked for once the drain
+  has moved what is on show. Its zone chooser owes into its own `Owed`, the
+  minute's turn included. The viewer keeps an `Owed` per window: a worker's
+  answer, an event and an animation step each fold into the window they name.
+  Each window then presents once.
+- **Proven by** `rounds_drained_in_one_turn_owe_whatever_any_owed` and the
+  `Round` tests beside it, and `a_streaming_client_is_held_to_the_desktops_frames`
+  for the pace a loop that presents per event would be held to.
 
 ### DESK-24 — The display owner runs in the high band
 - **What it fixed.** The session composites in a fair share no larger than any
@@ -1246,19 +1251,53 @@ Each stage is independently reviewable and must leave the whole-project
   tests.
 
 ### DESK-25 — A present replacing an unshown frame waits for it to be shown
-- **The defect.** `WindowServer::present` answers every present as it records
-  it, so nothing holds back a client presenting faster than the desktop shows
-  frames: the terminal presents after every shell read, and streaming output
-  encodes hundreds of whole frames a second that nobody sees.
-- **The design.** The engine withholds the answer to a present that replaces a
-  frame not yet shown and gives it once that frame is shown or refused, or a
-  resize, a release or a close supersedes it. The session's serve loop sends no
-  reply for a withheld present, sends the engine's answers after each latch, and
-  has every withheld present answered on a turn the latch does not run — the
-  saver dark, the lock uncovered — so no client stalls behind a screensaver.
-- **Remains.** All of it. The three hooks are the serve loop's, and the
-  `lib/window` loopback attests every call of a client by one ticket, so it
-  must mint one per call before a withheld answer can be told from the next.
+- **What it fixed.** `WindowServer::present` answered every present as it
+  recorded it, so nothing held back a client presenting faster than the desktop
+  shows frames: the terminal presented after every shell read, and streaming
+  output encoded hundreds of whole frames a second that nobody saw.
+- **Held, not refused.** A valid present whose window holds a frame not yet
+  shown — due or refused — is recorded and its ticket held (`Pending.withheld`,
+  `Served::Withheld`); one to a window with nothing pending is answered at once.
+  A window holds at most one: a present replacing a held one answers the older
+  at once. Every ticket is answered exactly once, `Ok` meaning "recorded; the
+  other frame is yours". Answers fall due at the latch, shown or refused, at an
+  accepted resize, at `release_frames`, and at a close or a transient's
+  teardown; a refused resize keeps the hold, and `client_exited` drops an
+  exited client's answers unsent.
+- **An outbox that never allocates.** Answers queue in the engine's `Outbox`,
+  which every window create reserves room in — an answer a window and one more
+  — so a latch never allocates; a present finding no room kept is answered at
+  once rather than held. The session drains it with `send_answers` after each
+  latch (before the composite), after each served request and before every
+  park. An answer refused for kernel memory stays, with those behind it, for
+  the hold-back's timed flush, which a background session wakes for too.
+- **The screen dark.** While no frame can reach the screen — the saver dark or
+  on the display, the lock not covering, no display held — the pacer's dark
+  half (`FramePacer::answers_due`) has the engine answer what is held once an
+  output period (`release_answers`), the frames left pending for the screen's
+  return; its one shot is armed only while something is held and is folded past
+  the background override, so clients are paced alike with the screen on or
+  off.
+- **Clients.** `WindowClient::present_in_flight` says whether a window's last
+  present is unanswered. The terminal never waits: a pty wake is parsed, a
+  window whose last frame is unanswered — its Settings window too — is owed its
+  paint, and owed windows are painted before the park once answered, so the pty
+  drains at parse speed. Every other application presents once a burst
+  (DESK-23).
+- **The loopback** mints a ticket per call, so a held answer is told from the
+  next; waiting on a held ticket runs one latch, or fails the test as a stall.
+- **Proven by** `a_present_replacing_an_unshown_frame_is_answered_once_it_is_shown`,
+  `a_streaming_client_is_held_to_the_desktops_frames` (two draws and one
+  conversion a desktop frame, where a 64-present loop drew 64),
+  `a_resize_a_release_or_a_close_answers_the_present_it_supersedes`,
+  `a_refused_frame_still_answers_the_present_held_behind_it`,
+  `a_present_superseding_a_held_one_answers_the_older_at_once`,
+  `an_exited_clients_answers_are_dropped`, `every_call_is_answered_exactly_once`,
+  `held_answers_are_released_with_their_frames_left_to_show`, and the pacer's
+  `a_dark_screen_answers_held_presents_once_a_period`,
+  `a_dark_screen_holding_nothing_arms_no_timer`,
+  `a_stream_in_the_dark_is_answered_at_the_screens_rate` and
+  `a_clock_that_jumped_backwards_answers_held_presents_at_once`.
 
 ### DESK-11 — The file manager's reads off its loop
 - Every unbounded read the file manager makes now runs off its loop, on the
@@ -1529,6 +1568,11 @@ Each stage is independently reviewable and must leave the whole-project
   busy-spin in the file manager.
 - **DESK-20.** Settings' picture requests run on a worker; the pane
   never waits on the session's serve loop.
+- **DESK-23.** Settings and the viewer drain each burst of input and present
+  each window once.
+- **DESK-25.** A client is held to the desktop's frames: a present replacing an
+  unshown frame is answered once that frame is shown, paced alike with the
+  screen dark, and the terminal never waits for it.
 
 ---
 

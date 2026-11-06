@@ -767,10 +767,11 @@ impl WindowPane {
         Ok(Self::adopt(window, frames, mode))
     }
 
-    /// Open a tool window of client `mode` titled `title`, hung from
-    /// `parent` at `offset` from its client origin or carried by the press
-    /// it holds at `carry` along the band, refusing a create reply that did
-    /// not come from `server` exactly as [`Self::open_popup`] does.
+    /// Open a tool window of client `mode` titled `title`, sized as `sizing`
+    /// allows, hung from `parent` at `offset` from its client origin or
+    /// carried by the press it holds at `carry` along the band, refusing a
+    /// create reply that did not come from `server` exactly as
+    /// [`Self::open_popup`] does.
     ///
     /// # Errors
     ///
@@ -781,7 +782,7 @@ impl WindowPane {
         client: &mut WindowClient<T>,
         (parent, server): (u64, ProcId),
         event_endpoint: u64,
-        mode: &DisplayMode,
+        (mode, sizing): (&DisplayMode, WindowSizing),
         offset: (i32, i32),
         carry: Option<u32>,
         title: &str,
@@ -803,6 +804,7 @@ impl WindowPane {
                 offset_y: offset.1,
                 carry,
                 title,
+                sizing,
             })
             .map_err(|err| {
                 ShellError::new(

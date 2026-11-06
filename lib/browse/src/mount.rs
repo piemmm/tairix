@@ -1,5 +1,5 @@
 //! Mounting a disk image for the user who opens it, ejecting what they
-//! mounted, and titling it.
+//! mounted, and titling a volume.
 //!
 //! One rule for every launcher — the file manager, the desktop — as for a
 //! document: the image is opened read-write where the user may write it,
@@ -22,6 +22,7 @@ use alloc::{format, vec};
 use core::ops::Bound;
 
 use tairix_abi::driver::filesystem::VolumeTitle;
+use tairix_abi::elevate::ElevateWords;
 #[cfg(any(feature = "rt", test))]
 use tairix_abi::imageattach::ImageAttach;
 use tairix_abi::imageattach::{ImageAccess, ImageAttachReply};
@@ -35,14 +36,17 @@ use tairix_abi::volume::DetachMode;
 use tairix_abi::volume::VolumeDetachRequest;
 #[cfg(feature = "rt")]
 use tairix_abi::volume::{VolumeRetitleRequest, VOLUME_DETACH_LEN, VOLUME_RETITLE_MAX_LEN};
-use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertSeverity, AlertSpec};
+use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertSeverity, AlertSpec, SystemTask};
 use tairix_abi::{Errno, STORAGE_CATALOG};
 
 use crate::activate::{Activation, BundleIntent};
 use crate::browser::{Browser, Location};
 use crate::chrome::{ContextCommand, ContextMenuModel};
 use crate::error::BrowseError;
-use crate::places::{Place, Places, VolumeFacts};
+use crate::places::{
+    Place, Places, Retitler, Retitling, VolumeFacts, REASON_NOT_YOURS, REASON_TITLE_READ_ONLY,
+    REASON_UNTITLED_FORMAT,
+};
 use crate::source::DirectorySource;
 use crate::vfs::components_from_absolute_path;
 
@@ -57,6 +61,25 @@ const TITLES_CROWDED: &str = "too many disks are being titled, mounted or ejecte
 
 /// Why a title was refused: there was no memory for the worker it runs on.
 const TITLES_UNSERVED: &str = "there was not enough memory to title disks";
+
+/// What a refused retitle's headline says was not done.
+const RETITLED: &str = "retitled";
+
+/// Why a title was refused before the kernel was asked: no disk records one
+/// that long.
+pub const TITLE_TOO_LONG: &str = "the title is longer than any disk records";
+
+/// Why a title was refused before the kernel was asked: no disk records a
+/// control character.
+pub const TITLE_CONTROL: &str = "a title cannot hold a control character";
+
+/// Why a removable device's volume was not retitled for want of the
+/// authority.
+const SEAT_OR_ADMINISTRATOR_TITLES: &str =
+    "only someone at the computer who may write to it, or an administrator, titles it";
+
+/// Why a fixed device's volume was not retitled for want of the authority.
+const ADMINISTRATOR_TITLES: &str = "only an administrator titles it";
 
 /// Why a read-only mount was refused: the user has the image mounted
 /// writable already, and the one volume a file holds cannot be both.
@@ -185,6 +208,10 @@ pub enum MountAct {
         path: String,
         /// Whether to mount it read-only however its file may be written.
         read_only: bool,
+        /// The double-click it answers, by the number its surface gave that
+        /// hand-off, so its refusal or its answer settles that hand-off and
+        /// no other ask of the image; none for an ask no double-click made.
+        handoff: Option<u64>,
     },
     /// Eject the volume published as `volume_id`, shown as `name`.
     Eject {
@@ -196,17 +223,27 @@ pub enum MountAct {
         /// once the user is asked.
         asked: EjectAsked,
     },
-    /// Write `title` as the label of the disk image published as
-    /// `volume_id`, shown as `name`.
+    /// Write a title as the label of the volume published as `volume_id`,
+    /// shown as `name`.
     Retitle {
         /// The identity a retitle names it by.
         volume_id: [u8; VOLUME_ID_LEN],
         /// What the user calls it.
         name: String,
-        /// The title its filesystem is to record, held apart so the rarest
-        /// act does not widen every queued one.
-        title: Box<VolumeTitle>,
+        /// The title and who may record it, held apart so the rarest act does
+        /// not widen every queued one.
+        titling: Box<Titling>,
     },
+}
+
+/// A title a volume's filesystem is to record, and who may record it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Titling {
+    /// The title: an empty one clears the label.
+    pub title: VolumeTitle,
+    /// Who may record it, which decides what a refusal says and whether an
+    /// administrator is asked in its place.
+    pub retitler: Retitler,
 }
 
 impl MountAct {
@@ -254,6 +291,7 @@ impl MountAct {
             Ok(Activation::MountImage { path }) => Ok(Some(Self::Attach {
                 path,
                 read_only: true,
+                handoff: None,
             })),
             Ok(_) | Err(BrowseError::NoSuchEntry) => Ok(None),
             Err(err) => Err(err),
@@ -286,6 +324,46 @@ impl MountAct {
         }
     }
 
+    /// What committing `text` as the title of the volume `facts` describe,
+    /// shown as `name`, asks of `viewer`: nothing for the title it records
+    /// already, else its retitle, an empty title clearing it — the one check
+    /// every surface offering a title makes before the kernel is asked.
+    ///
+    /// # Errors
+    ///
+    /// Why it is refused, as the user is told it: what
+    /// [`VolumeFacts::retitling_by`] refuses `viewer`, or a title no disk
+    /// records, one too long or holding a control character.
+    pub fn retitle(
+        facts: &VolumeFacts,
+        name: &str,
+        viewer: Option<u32>,
+        text: &str,
+    ) -> Result<Option<Self>, MountRefusal> {
+        let retitler = match facts.retitling_by(viewer) {
+            Retitling::Allowed(retitler) => retitler,
+            Retitling::Unavailable(why) | Retitling::Refused(why) => {
+                return Err(title_refusal(name, why));
+            }
+        };
+        if text == facts.title {
+            return Ok(None);
+        }
+        let title = VolumeTitle::new(text).map_err(|err| {
+            let why = if err == Errno::OutOfRange {
+                TITLE_CONTROL
+            } else {
+                TITLE_TOO_LONG
+            };
+            title_refusal(name, why)
+        })?;
+        Ok(Some(Self::Retitle {
+            volume_id: facts.volume_id,
+            name: String::from(name),
+            titling: Box::new(Titling { title, retitler }),
+        }))
+    }
+
     /// What the user calls what the act is about: the image's file name, or
     /// the volume's.
     #[must_use]
@@ -302,7 +380,7 @@ impl MountAct {
         let undone = match self {
             Self::Attach { .. } => "mounted",
             Self::Eject { .. } => "ejected",
-            Self::Retitle { .. } => "retitled",
+            Self::Retitle { .. } => RETITLED,
         };
         MountRefusal {
             headline: tairix_util::utf8::refusal_headline(self.name(), undone),
@@ -338,6 +416,7 @@ impl MountAct {
             Self::Attach {
                 path: String::new(),
                 read_only: false,
+                handoff: None,
             },
         )
     }
@@ -351,6 +430,19 @@ pub struct MountDone {
     /// What carrying it out answered.
     pub answer: Result<Mounted, Errno>,
 }
+
+/// Why an act an administrator was to be asked for was refused: the desktop
+/// is asking another question.
+pub const ADMINISTRATOR_BUSY: &str =
+    "only an administrator may do that, and another question is being answered";
+
+/// Why an act an administrator was to be asked for was refused: the desktop
+/// would not ask.
+pub const ADMINISTRATOR_UNASKED: &str =
+    "only an administrator may do that, and none could be asked";
+
+/// Why an administrator's act failed: the command they allowed refused.
+pub const ADMINISTRATOR_FAILED: &str = "it is in use, or the system refused it";
 
 impl MountDone {
     /// The volume this attach made — its identity and its name in the storage
@@ -367,38 +459,51 @@ impl MountDone {
         }
     }
 
-    /// The volume an administrator is to be asked to eject in place of this
-    /// eject's refusal — a removable device's, which the kernel refused the
-    /// user asking, one not at the machine, and an administrator may eject
-    /// while nothing holds it open — as `unmount` is to name it, by its
+    /// What an administrator is to be asked to do in place of this act's
+    /// refusal: eject a removable device's volume, or retitle a device's
+    /// volume, either refused the user for want of the authority. The task
+    /// names the volume as `unmount` and `label` are to know it, by its
     /// [`volume_root`], so a device put in its place under the same catalog
-    /// name is never the one ejected, and as the user knows it, by that
-    /// catalog name. `None` for any other answer, and for an eject the user
-    /// did not ask for or one letting unsaved writes go, which only the
-    /// user's own confirmation may.
+    /// name is never the one acted on, and as the user knows it, by that
+    /// catalog name, for the prompt to state. `None` for any other answer, for
+    /// an eject the user did not ask for or one letting unsaved writes go,
+    /// which only the user's own confirmation may, for a disk image, which its
+    /// owner alone retitles, and for a volume `volumes` — each one's facts and
+    /// the name it is shown by — no longer lists.
     #[must_use]
-    pub fn for_an_administrator<'a>(&self, places: &'a Places) -> Option<(String, &'a str)> {
-        let MountAct::Eject {
-            volume_id,
-            asked: EjectAsked::ByUser,
-            ..
-        } = &self.act
-        else {
-            return None;
-        };
+    pub fn for_an_administrator<'a>(
+        &self,
+        volumes: impl IntoIterator<Item = (&'a VolumeFacts, &'a str)>,
+    ) -> Option<SystemTask> {
         if !matches!(self.answer, Err(Errno::PermissionDenied)) {
             return None;
         }
-        places
-            .rows()
-            .iter()
-            .chain(places.unoffered())
-            .find(|place| {
-                place.facts().is_some_and(|facts| {
-                    facts.volume_id == *volume_id && facts.class == VolumeClass::Removable
-                })
-            })
-            .map(|place| (volume_root(*volume_id), place.label()))
+        let (volume_id, title) = match &self.act {
+            MountAct::Eject {
+                volume_id,
+                asked: EjectAsked::ByUser,
+                ..
+            } => (*volume_id, None),
+            MountAct::Retitle {
+                volume_id, titling, ..
+            } => (*volume_id, Some(titling.title.as_str())),
+            MountAct::Attach { .. } | MountAct::Eject { .. } => return None,
+        };
+        let administered = |facts: &VolumeFacts| match title {
+            None => facts.class == VolumeClass::Removable,
+            Some(_) => facts.retitler().is_ok_and(Retitler::administered),
+        };
+        let (_, name) = volumes
+            .into_iter()
+            .find(|(facts, _)| facts.volume_id == volume_id && administered(facts))?;
+        let root = volume_root(volume_id);
+        let words = match title {
+            None => ElevateWords::new(&[root.as_str(), name]).map(SystemTask::Eject),
+            Some(title) => {
+                ElevateWords::new(&[root.as_str(), title, name]).map(SystemTask::Retitle)
+            }
+        };
+        words.ok()
     }
 
     /// Where the volume to show the user is, root-first — the one the image
@@ -446,10 +551,10 @@ impl MountDone {
             Ok(Mounted::Image(
                 ImageAttachReply::TargetRefused(errno) | ImageAttachReply::NameRefused(errno),
             )) => attach_refusal(errno),
-            Err(err) => match self.act {
+            Err(err) => match &self.act {
                 MountAct::Attach { .. } => attach_refusal(err),
                 MountAct::Eject { .. } => eject_refusal(err),
-                MountAct::Retitle { .. } => retitle_refusal(err),
+                MountAct::Retitle { titling, .. } => retitle_refusal(err, titling.retitler),
             },
         };
         Err(self.act.refused(reason))
@@ -481,6 +586,16 @@ pub struct MountRefusal {
     pub headline: String,
     /// Why, in the clause a notice states it in.
     pub reason: &'static str,
+}
+
+/// The retitle of the volume shown as `name` refused for `reason`, as the
+/// user is told it.
+#[must_use]
+pub fn title_refusal(name: &str, reason: &'static str) -> MountRefusal {
+    MountRefusal {
+        headline: tairix_util::utf8::refusal_headline(name, RETITLED),
+        reason,
+    }
 }
 
 /// The worker an interactive surface carries its mounts out on, each
@@ -559,6 +674,18 @@ pub fn within(roots: &[&[String]], at: &[String]) -> bool {
     roots.iter().any(|root| at.starts_with(root))
 }
 
+/// Whether the absolute `path` lies within one of `roots`, by whole
+/// components as [`within`] answers for a place, read without copying it.
+#[must_use]
+pub fn path_within<R: AsRef<[String]>>(roots: &[R], path: &str) -> bool {
+    roots.iter().any(|root| {
+        let mut parts = path.split('/').filter(|part| !part.is_empty());
+        root.as_ref()
+            .iter()
+            .all(|component| parts.next() == Some(component.as_str()))
+    })
+}
+
 /// Whether any of the places `reached` lies within one of `roots`, as
 /// [`within`] answers for one, at one range query a root however many places
 /// there are: those beginning with a root sort together from the root itself.
@@ -602,21 +729,22 @@ pub fn mount_worker() -> Result<MountWorker, TryReserveError> {
 #[must_use]
 pub fn carry_out(act: MountAct) -> MountDone {
     let answer = match &act {
-        MountAct::Attach { path, read_only } => {
+        MountAct::Attach {
+            path, read_only, ..
+        } => {
             tairix_rt::image_attach_path(path.as_bytes(), &private(*read_only)).map(Mounted::Image)
         }
         MountAct::Eject {
             volume_id, asked, ..
         } => eject(*volume_id, *asked).map(|()| Mounted::Ejected),
         MountAct::Retitle {
-            volume_id, title, ..
-        } => retitle(*volume_id, **title).map(|()| Mounted::Retitled),
+            volume_id, titling, ..
+        } => retitle(*volume_id, titling.title).map(|()| Mounted::Retitled),
     };
     MountDone { act, answer }
 }
 
-/// Write `title` as the label of the volume published as `volume_id`, which
-/// the caller attached.
+/// Write `title` as the label of the volume published as `volume_id`.
 ///
 /// # Errors
 ///
@@ -652,13 +780,19 @@ const fn attach_refusal(err: Errno) -> &'static str {
     }
 }
 
-/// Why titling a volume was refused, given the kernel's `err`.
-const fn retitle_refusal(err: Errno) -> &'static str {
+/// Why titling a volume `retitler` may title was refused, given the kernel's
+/// `err`.
+const fn retitle_refusal(err: Errno, retitler: Retitler) -> &'static str {
     match err {
-        Errno::PermissionDenied => "only whoever mounted it titles it",
+        Errno::PermissionDenied => match retitler {
+            Retitler::Owner(_) => REASON_NOT_YOURS,
+            Retitler::AtTheSeat => SEAT_OR_ADMINISTRATOR_TITLES,
+            Retitler::Administrator => ADMINISTRATOR_TITLES,
+        },
         Errno::NotFound => "it is not mounted",
-        Errno::NotSupported => "its format records no title",
-        Errno::ReadOnly => "it is mounted read-only",
+        Errno::NotSupported => REASON_UNTITLED_FORMAT,
+        Errno::ReadOnly => REASON_TITLE_READ_ONLY,
+        Errno::NoSpace => "its format has no room for that title",
         Errno::OutOfRange | Errno::LengthOutOfRange => {
             "its format cannot record that title: it is too long, or holds a character the \
              format does not"
@@ -686,30 +820,36 @@ const fn eject_refusal(err: Errno) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_refusal, detach_request, eject_refusal, holds_within, lost_eject_question, private,
-        shown_at, volume_root, within, EjectAsked, MountAct, MountDone, MountRefusal, Mounted,
-        Projection, CROWDED, LOST_EJECT_INDEX, MOUNTED_WRITABLE, TITLES_CROWDED, TITLES_UNSERVED,
-        UNSERVED,
+        attach_refusal, detach_request, eject_refusal, holds_within, lost_eject_question,
+        path_within, private, shown_at, volume_root, within, EjectAsked, MountAct, MountDone,
+        MountRefusal, Mounted, Projection, Titling, ADMINISTRATOR_TITLES, CROWDED,
+        LOST_EJECT_INDEX, MOUNTED_WRITABLE, SEAT_OR_ADMINISTRATOR_TITLES, TITLES_CROWDED,
+        TITLES_UNSERVED, TITLE_CONTROL, TITLE_TOO_LONG, UNSERVED,
     };
     use crate::browser::Browser;
     use crate::entry::Entry;
-    use crate::places::{Places, Volume, VolumeFacts};
+    use crate::places::{
+        Places, Retitler, Volume, VolumeFacts, REASON_NOT_YOURS, REASON_TITLE_READ_ONLY,
+        REASON_UNTITLED_FORMAT,
+    };
     use crate::source::{DirectorySource, Listing};
     use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
-    use tairix_abi::driver::filesystem::{MountFlags, VolumeTitle};
+    use tairix_abi::driver::filesystem::{MountFlags, VolumeTitle, VOLUME_TITLE_MAX};
+    use tairix_abi::elevate::ElevateWords;
     use tairix_abi::imageattach::{ImageAccess, ImageAttachReply, ImageRefusal};
     use tairix_abi::netattach::{AttachReply, Presentation};
     use tairix_abi::sysinfo::{MountAvailability, ViewBindingRecord};
     use tairix_abi::volume::DetachMode;
-    use tairix_abi::window_ipc::{AlertButtonRole, AlertSeverity};
+    use tairix_abi::window_ipc::{AlertButtonRole, AlertSeverity, SystemTask};
     use tairix_abi::Errno;
 
     fn attach(path: &str) -> MountAct {
         MountAct::Attach {
             path: String::from(path),
             read_only: false,
+            handoff: None,
         }
     }
 
@@ -725,11 +865,14 @@ mod tests {
         MountDone { act, answer }
     }
 
-    fn retitle(name: &str) -> MountAct {
+    fn retitle(name: &str, retitler: Retitler) -> MountAct {
         MountAct::Retitle {
             volume_id: [7; 16],
             name: String::from(name),
-            title: alloc::boxed::Box::new(VolumeTitle::new("Games").expect("a title")),
+            titling: alloc::boxed::Box::new(Titling {
+                title: VolumeTitle::new("Games").expect("a title"),
+                retitler,
+            }),
         }
     }
 
@@ -779,6 +922,7 @@ mod tests {
         let read_only = MountAct::Attach {
             path: String::from("/Users/ada/Home/Lemmings.adf"),
             read_only: true,
+            handoff: None,
         };
         let writable = ImageAttachReply::AlreadyAttached(volume("lemmings"));
         assert_eq!(
@@ -850,33 +994,50 @@ mod tests {
 
     /// A retitle is told as one: done, it shows nothing to open; refused, it
     /// names the disk and says why in a title's own words, never a mount's
-    /// or an eject's.
+    /// or an eject's — a refusal of the authority naming who may.
     #[test]
     fn a_retitle_is_told_in_its_own_words() {
+        let image = Retitler::Owner(1000);
         assert_eq!(
-            done(retitle("floppy"), Ok(Mounted::Retitled)).shown(),
+            done(retitle("floppy", image), Ok(Mounted::Retitled)).shown(),
             Ok(None)
         );
-        for (err, reason) in [
-            (Errno::PermissionDenied, "only whoever mounted it titles it"),
-            (Errno::NotSupported, "its format records no title"),
-            (Errno::ReadOnly, "it is mounted read-only"),
+        for (retitler, err, reason) in [
+            (image, Errno::PermissionDenied, REASON_NOT_YOURS),
             (
+                Retitler::AtTheSeat,
+                Errno::PermissionDenied,
+                SEAT_OR_ADMINISTRATOR_TITLES,
+            ),
+            (
+                Retitler::Administrator,
+                Errno::PermissionDenied,
+                ADMINISTRATOR_TITLES,
+            ),
+            (image, Errno::NotSupported, REASON_UNTITLED_FORMAT),
+            (image, Errno::ReadOnly, REASON_TITLE_READ_ONLY),
+            (
+                image,
                 Errno::Busy,
                 "it is being mounted, ejected or titled already",
             ),
-            (Errno::Stale, "it could not be titled"),
+            (
+                image,
+                Errno::NoSpace,
+                "its format has no room for that title",
+            ),
+            (image, Errno::Stale, "it could not be titled"),
         ] {
             assert_eq!(
-                done(retitle("floppy"), Err(err)).shown(),
+                done(retitle("floppy", retitler), Err(err)).shown(),
                 Err(MountRefusal {
                     headline: String::from("\u{201c}floppy\u{201d} could not be retitled"),
                     reason,
                 }),
-                "{err:?}"
+                "{retitler:?} {err:?}"
             );
         }
-        let titling = retitle("floppy");
+        let titling = retitle("floppy", image);
         assert_eq!(
             (titling.crowded(), titling.unserved()),
             (TITLES_CROWDED, TITLES_UNSERVED)
@@ -913,7 +1074,9 @@ mod tests {
             availability,
             owner: Some(uid),
             volume_id: [5; 16],
+            identity: [5; 16],
             read_only: false,
+            titled: false,
         }
     }
 
@@ -948,6 +1111,22 @@ mod tests {
         assert!(!within(&[], &disk), "nothing is within no roots");
     }
 
+    /// A path is within a root as the place its components name is.
+    #[test]
+    fn a_path_is_within_a_root_by_whole_components() {
+        let disk = components(&["Storage", "disk"]);
+        let roots = [disk.as_slice()];
+        assert!(path_within(&roots, "/Storage/disk"), "the root itself");
+        assert!(path_within(&roots, "/Storage/disk/Pictures/sea.png"));
+        assert!(path_within(&roots, "//Storage//disk/"), "empty components");
+        assert!(
+            !path_within(&roots, "/Storage/disk2/sea.png"),
+            "a sibling whose name begins with the root's"
+        );
+        assert!(!path_within(&roots, "/Storage"), "the catalog above");
+        assert!(!path_within::<&[String]>(&[], "/Storage/disk"), "no roots");
+    }
+
     /// Only the user's own eject of a removable device's volume, refused for
     /// want of the authority, is one to ask an administrator for: by its
     /// durable root, which no device put in its place carries, and its
@@ -972,14 +1151,15 @@ mod tests {
             &[stick(tairix_abi::sysinfo::VolumeClass::Removable, true)],
         );
         let refused = done(eject("usb1"), Err(Errno::PermissionDenied));
-        let asked = Some((volume_root([7; 16]), "usb1"));
-        assert_eq!(refused.for_an_administrator(&removable), asked);
+        let words = ElevateWords::new(&[volume_root([7; 16]).as_str(), "usb1"]).expect("words");
+        let asked = Some(SystemTask::Eject(words));
+        assert_eq!(refused.for_an_administrator(removable.volumes()), asked);
         let unoffered = Places::new(
             &home,
             &[stick(tairix_abi::sysinfo::VolumeClass::Removable, false)],
         );
         assert_eq!(
-            refused.for_an_administrator(&unoffered),
+            refused.for_an_administrator(unoffered.volumes()),
             asked,
             "wherever the rail lists it"
         );
@@ -987,10 +1167,14 @@ mod tests {
             &home,
             &[stick(tairix_abi::sysinfo::VolumeClass::Local, true)],
         );
-        assert_eq!(refused.for_an_administrator(&fixed), None, "a fixed disk");
+        assert_eq!(
+            refused.for_an_administrator(fixed.volumes()),
+            None,
+            "a fixed disk"
+        );
         for answer in [Err(Errno::Busy), Ok(Mounted::Ejected)] {
             assert_eq!(
-                done(eject("usb1"), answer).for_an_administrator(&removable),
+                done(eject("usb1"), answer).for_an_administrator(removable.volumes()),
                 None
             );
         }
@@ -1001,11 +1185,124 @@ mod tests {
                 asked,
             };
             assert_eq!(
-                done(unasked, Err(Errno::PermissionDenied)).for_an_administrator(&removable),
+                done(unasked, Err(Errno::PermissionDenied))
+                    .for_an_administrator(removable.volumes()),
                 None,
                 "{asked:?}"
             );
         }
+    }
+
+    /// A retitle of a device's volume refused for want of the authority is an
+    /// administrator's: `label` is handed its durable root and the title, the
+    /// prompt its catalog name. A disk image's is its owner's alone, and any
+    /// other answer, or a volume gone since, asks no one.
+    #[test]
+    fn a_refused_retitle_of_a_devices_volume_is_an_administrators() {
+        use tairix_abi::sysinfo::VolumeClass;
+        let disk = |class, owner| Volume {
+            label: String::from("usb1"),
+            target: String::from("/Storage/usb1"),
+            medium: None,
+            facts: VolumeFacts {
+                class,
+                owner,
+                volume_id: [7; 16],
+                titled: true,
+                ..image_facts(1000, MountAvailability::Available)
+            },
+            offered: true,
+        };
+        let home = components(&["Users", "ada"]);
+        let root = volume_root([7; 16]);
+        let words = ElevateWords::new(&[root.as_str(), "Games", "usb1"]).expect("words");
+        for (class, retitler) in [
+            (VolumeClass::Removable, Retitler::AtTheSeat),
+            (VolumeClass::Local, Retitler::Administrator),
+        ] {
+            let places = Places::new(&home, &[disk(class, None)]);
+            let answered = |answer| done(retitle("usb1", retitler), answer);
+            assert_eq!(
+                answered(Err(Errno::PermissionDenied)).for_an_administrator(places.volumes()),
+                Some(SystemTask::Retitle(words)),
+                "{class:?}"
+            );
+            for answer in [Err(Errno::Busy), Ok(Mounted::Retitled)] {
+                assert_eq!(
+                    answered(answer).for_an_administrator(places.volumes()),
+                    None
+                );
+            }
+            assert_eq!(
+                answered(Err(Errno::PermissionDenied))
+                    .for_an_administrator(Places::new(&home, &[]).volumes()),
+                None,
+                "a volume gone since"
+            );
+        }
+        let image = Places::new(&home, &[disk(VolumeClass::Image, Some(1000))]);
+        assert_eq!(
+            done(
+                retitle("usb1", Retitler::Owner(1000)),
+                Err(Errno::PermissionDenied)
+            )
+            .for_an_administrator(image.volumes()),
+            None,
+            "an image is its owner's alone"
+        );
+    }
+
+    /// A committed title is checked by the one rule before the kernel is
+    /// asked: the title the volume records asks nothing, an empty one clears
+    /// it, one too long or holding a control character is refused saying
+    /// which, and a volume the rule refuses the viewer is refused saying why.
+    #[test]
+    fn a_committed_title_is_checked_by_the_one_rule() {
+        let facts = VolumeFacts {
+            title: String::from("Workbench"),
+            titled: true,
+            ..image_facts(1000, MountAvailability::Available)
+        };
+        let commit = |facts: &VolumeFacts, viewer, text: &str| {
+            MountAct::retitle(facts, "floppy", Some(viewer), text)
+        };
+        let act = |title: &str| MountAct::Retitle {
+            volume_id: [5; 16],
+            name: String::from("floppy"),
+            titling: alloc::boxed::Box::new(Titling {
+                title: VolumeTitle::new(title).expect("a title"),
+                retitler: Retitler::Owner(1000),
+            }),
+        };
+        assert_eq!(
+            commit(&facts, 1000, "Workbench"),
+            Ok(None),
+            "the title it records"
+        );
+        assert_eq!(commit(&facts, 1000, "Games"), Ok(Some(act("Games"))));
+        assert_eq!(
+            commit(&facts, 1000, ""),
+            Ok(Some(act(""))),
+            "an empty title clears it"
+        );
+        let reason = |facts: &VolumeFacts, viewer, text: &str| {
+            commit(facts, viewer, text).map_err(|r| r.reason)
+        };
+        let long = "t".repeat(VOLUME_TITLE_MAX + 1);
+        assert_eq!(reason(&facts, 1000, &long), Err(TITLE_TOO_LONG));
+        assert_eq!(reason(&facts, 1000, "a\u{7}b"), Err(TITLE_CONTROL));
+        assert_eq!(reason(&facts, 1001, "Games"), Err(REASON_NOT_YOURS));
+        let locked = VolumeFacts {
+            read_only: true,
+            ..facts.clone()
+        };
+        assert_eq!(
+            commit(&locked, 1000, "Games"),
+            Err(MountRefusal {
+                headline: String::from("\u{201c}floppy\u{201d} could not be retitled"),
+                reason: REASON_TITLE_READ_ONLY,
+            })
+        );
     }
 
     /// A volume's durable root, as an administrator's eject names it, reads

@@ -32,8 +32,13 @@ that is released once it has been read.
 The engine (`src/lib.rs` and its modules) is host-tested and does no I/O. The
 `Run` binary keeps everything that waits, or grows with the picture rather
 than with the brush, off the window's loop: a decode worker reads documents
-and pastes through the sandbox, and a work queue encodes and writes saves,
-encodes copies for the clipboard, and carries out fills and transforms.
+and pastes through the sandbox, a work queue encodes and writes saves,
+encodes copies for the clipboard, and carries out fills, transforms, merges,
+flattens and what an Apply still has to work out, the last three taking every
+core ahead of the previews, and a
+preview worker works out previews, histograms, the Layers pane's thumbnails
+and the composite beneath an opacity being changed across every core, so a
+save never waits behind them.
 
 ## Limits
 

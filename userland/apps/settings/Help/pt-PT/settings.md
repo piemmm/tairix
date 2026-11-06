@@ -43,7 +43,13 @@ seu silêncio, e o que está a gravar: as suas próprias gravações pelo nome e
 quantas fazem os outros. Os controlos mudam o dispositivo de imediato, e só
 enquanto a sua sessão ocupa a sala que ele serve; um dispositivo da sala de
 outra sessão é mostrado mas não pode ser alterado aqui. O seu ambiente de
-trabalho recorda o que define.
+trabalho recorda o que define. Mudar o volume do dispositivo pelo qual o som
+toca, aqui ou a partir da barra de ícones, toca um som breve ao novo volume —
+onde um arrastamento para, a cada passo das setas e ao retirar o silêncio —
+para que oiça quão alto está agora. Em *Sound Effects*,
+*Play feedback when the volume changes* desliga-o. Não segue os outros sons do
+ambiente de trabalho: toca ao volume do próprio dispositivo, estejam eles
+ligados ou não.
 
 **Raspberry Pi** só aparece quando a máquina é um. Define a ventoinha do
 processador, comutada através de uma linha do conector de 40 pinos: *Off*, *On*
@@ -72,9 +78,16 @@ a barra de ferramentas, se as pastas ficam no topo, que extensões de nomes e
 que itens ficam ocultos, se uma imagem mostra o seu próprio conteúdo e uma
 pasta o que contém, se mover itens para o Lixo pergunta primeiro e se uma
 imagem de disco ou um arquivo que abriu é desmontado depois de fechadas as suas
-janelas. Uma linha surte efeito assim que é escolhida: onde se abre uma janela
+janelas. As extensões de nomes que oculta ficam ocultas também no ambiente de
+trabalho. *Show on the desktop* tem uma caixa para cada tipo de unidade —
+*The system drive*, *Fixed drives*, *Removable drives*, *Network shares* e
+*Disk images and archives* — e o ambiente de trabalho mostra um ícone para cada
+unidade ligada de um tipo assinalado, que a abre como o gestor de ficheiros faz;
+de início só as unidades amovíveis estão assinaladas. Uma linha surte efeito
+assim que é escolhida: onde se abre uma janela
 nova e se mostra a coluna de locais e a barra de ferramentas aplicam-se à
-próxima janela que abrir, e tudo o resto chega a todas as janelas do gestor de
+próxima janela que abrir, e tudo o resto chega ao ambiente de trabalho e a todas
+as janelas do gestor de
 ficheiros de uma vez, embora uma janela mantenha uma visualização ou uma ordem
 que tenha escolhido nela pessoalmente. *Settings…* no menu do próprio gestor de
 ficheiros abre este painel.

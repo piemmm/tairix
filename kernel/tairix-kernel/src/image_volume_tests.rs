@@ -5,7 +5,7 @@
 
 use tairix_abi::blkio::{BlkForm, BlkTransport};
 use tairix_abi::imageattach::ImageRefusal;
-use tairix_abi::{DriverError, Errno, FileId};
+use tairix_abi::{CapabilityId, CapabilityQuery, DriverError, Errno, FileId};
 
 use tairix_abi::fsserve::SERVED_IDLE_NS;
 
@@ -14,12 +14,9 @@ use alloc::sync::Arc;
 use tairix_kernel_core::fs::VolumeNodes;
 
 use super::{
-    driver_refusal, first_settleable, identity, image_medium, last_component, probed_title,
-    reaches, refusal_of, stem, write_title, Custody, DriverWait, Holder, ImageVolumes, Owed,
-    Refusal, RuntimeVolumeService, Step, Waited, IMAGE_DRIVER_START_NS, SETTLERS,
-};
-use tairix_abi::driver::filesystem::{
-    FilesystemLabel, FilesystemWrite, NodeId, NodeKind, NodeSecurity, VolumeTitle, VOLUME_TITLE_MAX,
+    first_settleable, identity, image_medium, last_component, lock_whole, reaches, refusal_of,
+    stem, Custody, DriverWait, Holder, ImageVolumes, Owed, Refusal, RuntimeVolumeService,
+    ShortOfMount, Step, Waited, IMAGE_DRIVER_START_NS, SETTLERS,
 };
 
 fn file(volume: u8, node: u64) -> FileId {
@@ -27,6 +24,21 @@ fn file(volume: u8, node: u64) -> FileId {
         volume: [volume; 16],
         node,
     }
+}
+
+/// An image's target is bound as its attacher short of the mount authority:
+/// every other capability the attacher holds still holds.
+#[test]
+fn an_images_target_is_bound_without_the_mount_authority() {
+    struct Every;
+    impl CapabilityQuery for Every {
+        fn holds(&self, _cap: CapabilityId) -> bool {
+            true
+        }
+    }
+    let bound = ShortOfMount(&Every);
+    assert!(!bound.holds(CapabilityId::FS_MOUNT));
+    assert!(bound.holds(CapabilityId::FS_ACCESS));
 }
 
 #[test]
@@ -305,157 +317,21 @@ fn a_file_is_reached_only_through_its_own_registration_with_no_stand_in() {
     assert!(!reaches(None, &nodes), "unregistered");
 }
 
+/// An image's whole-file lock the kernel has no memory to record is refused
+/// as want of memory, not as a holder in the way, and records nothing.
 #[test]
-fn a_probed_label_is_titled_as_much_of_it_as_a_title_holds() {
-    assert_eq!(probed_title(b"Workbench").as_str(), "Workbench");
-    assert!(probed_title(b"").is_empty());
-    assert!(
-        probed_title(&[0xFF, 0xFE]).is_empty(),
-        "a label that is no text is no title"
-    );
-    assert!(
-        probed_title(b"tab\there").is_empty(),
-        "nor one carrying a control character"
-    );
-    let label = alloc::format!("x{}", "é".repeat(VOLUME_TITLE_MAX));
-    let cut = probed_title(label.as_bytes());
-    assert_eq!(
-        cut.as_str().len(),
-        VOLUME_TITLE_MAX - 1,
-        "cut between characters"
-    );
-    assert!(label.starts_with(cut.as_str()));
-}
-
-/// A driver keeping the title it is given, or refusing it, whose label reads
-/// as no title at all, and whose flush answers `flushed`.
-struct Titling {
-    set: Result<(), DriverError>,
-    flushed: Result<(), DriverError>,
-    flushes: usize,
-}
-
-impl Titling {
-    fn new(set: Result<(), DriverError>, flushed: Result<(), DriverError>) -> Self {
-        Self {
-            set,
-            flushed,
-            flushes: 0,
-        }
-    }
-}
-
-impl FilesystemLabel for Titling {
-    fn label(&mut self) -> Result<VolumeTitle, DriverError> {
-        Err(DriverError::OutOfRange)
-    }
-
-    fn set_label(&mut self, _title: &VolumeTitle) -> Result<(), DriverError> {
-        self.set
-    }
-}
-
-impl FilesystemWrite for Titling {
-    fn create(
-        &mut self,
-        _dir: NodeId,
-        _name: &[u8],
-        _kind: NodeKind,
-        _record: &NodeSecurity,
-    ) -> Result<NodeId, DriverError> {
-        Err(DriverError::Unsupported)
-    }
-
-    fn write_at(
-        &mut self,
-        _file: NodeId,
-        _offset: u64,
-        _data: &[u8],
-    ) -> Result<usize, DriverError> {
-        Err(DriverError::Unsupported)
-    }
-
-    fn truncate(&mut self, _file: NodeId, _size: u64) -> Result<(), DriverError> {
-        Err(DriverError::Unsupported)
-    }
-
-    fn remove(&mut self, _dir: NodeId, _name: &[u8]) -> Result<(), DriverError> {
-        Err(DriverError::Unsupported)
-    }
-
-    fn rename(
-        &mut self,
-        _src_dir: NodeId,
-        _src_name: &[u8],
-        _dst_dir: NodeId,
-        _dst_name: &[u8],
-    ) -> Result<(), DriverError> {
-        Err(DriverError::Unsupported)
-    }
-
-    fn flush(&mut self) -> Result<(), DriverError> {
-        self.flushes += 1;
-        self.flushed
-    }
-}
-
-/// A title is written without the one it replaces being read: a label no
-/// title spells stands in the way of nothing.
-#[test]
-fn a_title_is_written_without_reading_the_one_it_replaces() {
-    let title = VolumeTitle::new("Work").expect("a title");
-    let mut fs = Titling::new(Ok(()), Ok(()));
-    let mut listed = false;
-    assert_eq!(write_title(&mut fs, &title, || listed = true), Ok(()));
-    assert!(listed);
-    assert_eq!(fs.flushes, 1);
-}
-
-/// A title its driver holds is listed though the flush fails: the driver's
-/// writeback publishes it.
-#[test]
-fn a_title_its_driver_holds_is_listed_though_the_flush_fails() {
-    let title = VolumeTitle::new("Work").expect("a title");
-    let mut fs = Titling::new(Ok(()), Err(DriverError::MediumError));
-    let mut listed = false;
-    assert_eq!(
-        write_title(&mut fs, &title, || listed = true),
-        Err(("flush_failed", Errno::MediumError))
-    );
-    assert!(listed);
-}
-
-/// A title the driver refuses is neither listed nor flushed.
-#[test]
-fn a_refused_title_is_neither_listed_nor_flushed() {
-    let title = VolumeTitle::new("Work").expect("a title");
-    let mut fs = Titling::new(Err(DriverError::ReadOnly), Ok(()));
-    let mut listed = false;
-    assert_eq!(
-        write_title(&mut fs, &title, || listed = true),
-        Err(("read_only", Errno::ReadOnly))
-    );
-    assert!(!listed);
-    assert_eq!(fs.flushes, 0);
-}
-
-#[test]
-fn a_drivers_refusal_of_a_title_reads_as_what_it_refused() {
-    assert_eq!(
-        driver_refusal(DriverError::Unsupported),
-        ("untitled_format", Errno::NotSupported),
-        "a format keeping none, not a service missing"
-    );
-    assert_eq!(
-        driver_refusal(DriverError::ReadOnly),
-        ("read_only", Errno::ReadOnly)
-    );
-    for (why, errno) in [
-        (DriverError::LengthOutOfRange, Errno::LengthOutOfRange),
-        (DriverError::OutOfRange, Errno::OutOfRange),
-        (DriverError::NoSpace, Errno::NoSpace),
-        (DriverError::MediumError, Errno::MediumError),
-    ] {
-        assert_eq!(driver_refusal(why), ("title_refused", errno), "{why:?}");
+fn a_lock_with_no_room_to_record_is_out_of_memory() {
+    use tairix_kernel_core::filelock::{self, Held, LockedNode};
+    let file = LockedNode {
+        instance: 0x1A6E,
+        pinned: 7,
+    };
+    let owner = filelock::mint_owner();
+    let refused =
+        tairix_fuzzseed::meter::refusing_after(0, || lock_whole(file, owner, Held::Exclusive, 1));
+    assert_eq!(refused, Err(Errno::OutOfMemory));
+    assert_eq!(lock_whole(file, owner, Held::Exclusive, 1), Ok(()));
+    for wakes in filelock::release_owner(owner) {
+        wakes.wake();
     }
 }

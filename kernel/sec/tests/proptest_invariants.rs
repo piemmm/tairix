@@ -72,7 +72,8 @@ proptest! {
             user_grant,
             manifest_request,
             &NullSink,
-        );
+        )
+        .expect("derived");
         prop_assert!(t.effective().is_subset_of(&user_grant));
         prop_assert!(t.effective().is_subset_of(&manifest_request));
     }
@@ -91,7 +92,8 @@ proptest! {
             user_grant,
             manifest_request,
             &NullSink,
-        );
+        )
+        .expect("derived");
         let before = *t.effective();
         match t.delegate(&requested, &NullSink) {
             Ok(()) => {

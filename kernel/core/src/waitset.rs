@@ -22,7 +22,10 @@
 //! test its readiness — that needs the call-endpoint registry and the IRQ
 //! table, which the syscall handler in [`crate::syscalls`] holds. The handler
 //! owner-checks the *resource* before adding a member and re-checks it while
-//! scanning for readiness; this registry only owner-checks the *set*.
+//! scanning for readiness; this registry only owner-checks the *set*. It also
+//! defines what a wait leaves its thread owing (`RoomDebt`), which each
+//! thread keeps on its own gate: a port's slot and the budget release that
+//! wait kept, which its next call other than that send, or its end, lets go.
 //!
 //! # Why a global
 //!
@@ -36,6 +39,7 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_abi::{Errno, WaitSourceKind};
 use tairix_kernel_sec::Charge;
@@ -126,6 +130,76 @@ struct Inner {
     sets: tairix_collections::RadixTree<WaitSet>,
 }
 
+/// What a thread owes since its wait reported a port's room ready.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct OwedRoom {
+    /// The port whose slot it holds until it sends there.
+    pub port: u64,
+    /// The budget release that wait kept, passed on should it not send.
+    pub budget: Option<crate::waitq::Chosen>,
+}
+
+/// What a thread owes since its wait reported a port's room ready, kept on the
+/// thread's own gate, so a call it makes owing nothing learns so in one load.
+pub(crate) struct RoomDebt {
+    /// Whether `owed` holds a debt. Only the thread records one, and another
+    /// party takes one only once the thread has stopped.
+    owing: AtomicBool,
+    owed: SpinLock<Option<OwedRoom>>,
+}
+
+/// A wait asked its thread to owe a second debt while one was recorded, which
+/// a wait settles before its thread can owe again.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AlreadyOwing;
+
+impl RoomDebt {
+    /// Nothing owed.
+    pub(crate) const fn new() -> Self {
+        Self {
+            owing: AtomicBool::new(false),
+            owed: SpinLock::new(None),
+        }
+    }
+
+    /// Record `owed`: the thread's wait reported that port's room ready, and
+    /// the slot it holds there waits for its send, its next call that is
+    /// neither a send nor a wait watching the port, or its end.
+    ///
+    /// # Errors
+    ///
+    /// [`AlreadyOwing`] when a debt is recorded already, which is kept: the
+    /// caller lets `owed` go.
+    pub(crate) fn owe(&self, owed: OwedRoom) -> Result<(), AlreadyOwing> {
+        let mut held = self.owed.lock();
+        if held.is_some() {
+            return Err(AlreadyOwing);
+        }
+        *held = Some(owed);
+        self.owing.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// The port owed a send, if any.
+    #[must_use]
+    pub(crate) fn port(&self) -> Option<u64> {
+        if !self.owing.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.owed.lock().as_ref().map(|owed| owed.port)
+    }
+
+    /// Take what is owed, if anything.
+    pub(crate) fn take(&self) -> Option<OwedRoom> {
+        if !self.owing.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut held = self.owed.lock();
+        self.owing.store(false, Ordering::Relaxed);
+        held.take()
+    }
+}
+
 /// The global wait-set registry. Pure data behind a [`SpinLock`]; see the
 /// module docs for why it is global.
 static WAIT_SETS: SpinLock<Inner> = SpinLock::new(Inner {
@@ -200,6 +274,8 @@ fn with_owned<R>(owner: u64, handle: u64, f: impl FnOnce(&mut WaitSet) -> R) -> 
 ///   already-registered source — fail closed rather than silently double-add).
 /// * [`Errno::LimitExceeded`] if one more member would carry the owner past
 ///   `member_limit`, its `wait-set-members` limit.
+/// * [`Errno::OutOfMemory`] if the set cannot grow to hold it; nothing is
+///   added or charged.
 pub fn add(owner: u64, handle: u64, member: Member, member_limit: u64) -> Result<(), Errno> {
     with_owned(owner, handle, |set| {
         if set
@@ -209,6 +285,7 @@ pub fn add(owner: u64, handle: u64, member: Member, member_limit: u64) -> Result
         {
             return Err(Errno::AlreadyExists);
         }
+        set.members.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
         set.member_charge.grow(1, member_limit)?;
         set.members.push(member);
         Ok(())
@@ -321,7 +398,8 @@ fn find(set: &mut WaitSet, kind: WaitSourceKind, id: u64) -> Option<&mut Member>
 ///
 /// # Errors
 ///
-/// [`Errno::NotFound`] if `handle` is not a wait-set owned by `owner`.
+/// [`Errno::NotFound`] if `handle` is not a wait-set owned by `owner`;
+/// [`Errno::OutOfMemory`] if the snapshot cannot be had.
 pub fn members(owner: u64, handle: u64) -> Result<Vec<Member>, Errno> {
     with_owned(owner, handle, |set| {
         let resume = set
@@ -332,11 +410,13 @@ pub fn members(owner: u64, handle: u64) -> Result<Vec<Member>, Errno> {
                     .position(|m| m.kind == kind && m.id == id)
             })
             .map_or(0, |at| at + 1);
-        let mut scan = Vec::with_capacity(set.members.len());
+        let mut scan = Vec::new();
+        scan.try_reserve_exact(set.members.len())
+            .map_err(|_| Errno::OutOfMemory)?;
         scan.extend_from_slice(&set.members[resume..]);
         scan.extend_from_slice(&set.members[..resume]);
-        scan
-    })
+        Ok(scan)
+    })?
 }
 
 /// Record `(kind, id)` as the member the wait just reported, so the next
@@ -444,6 +524,75 @@ mod tests {
             .charge(LimitKind::WaitSets, 1, RLIMIT_INFINITY)
             .expect("unlimited");
         create(owner, set, charges.empty(LimitKind::WaitSetMembers)).expect("room")
+    }
+
+    /// A thread owes one debt at a time: a second is refused as the breach it
+    /// is and the first kept, and what is owed is taken once.
+    ///
+    /// Regression: a second record replaced the first, stranding the slot the
+    /// first named and losing the budget release it kept.
+    #[test]
+    fn a_thread_owes_one_debt_at_a_time_and_a_second_is_refused() {
+        let debt = RoomDebt::new();
+        let at = |port| OwedRoom { port, budget: None };
+        assert_eq!(debt.port(), None, "nothing owed");
+        assert_eq!(debt.owe(at(0x10)), Ok(()));
+        assert_eq!(debt.owe(at(0x11)), Err(AlreadyOwing));
+        assert_eq!(debt.port(), Some(0x10), "the first is kept");
+        assert_eq!(debt.take(), Some(at(0x10)));
+        assert_eq!(debt.take(), None, "taken once");
+        assert_eq!(debt.owe(at(0x12)), Ok(()), "settled, it may owe again");
+        assert_eq!(debt.take(), Some(at(0x12)));
+    }
+
+    /// A member the heap has no room for is refused for memory, neither added
+    /// nor charged; given room, it is added.
+    #[test]
+    fn a_member_the_heap_refuses_is_neither_added_nor_charged() {
+        let charges = Arc::new(ResourceCharges::new());
+        let h = set_charged_to(0xD472, &charges);
+        let refused = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    crate::test_alloc::refuse_allocations_on_current_thread(true);
+                    let added = put(0xD472, h, ep(7, 70));
+                    crate::test_alloc::refuse_allocations_on_current_thread(false);
+                    added
+                })
+                .join()
+                .expect("the adding thread ends")
+        });
+        assert_eq!(refused, Err(Errno::OutOfMemory));
+        assert_eq!(
+            charges.held(LimitKind::WaitSetMembers),
+            0,
+            "nothing charged"
+        );
+        assert_eq!(members(0xD472, h).map(|m| m.len()), Ok(0));
+        assert_eq!(put(0xD472, h, ep(7, 70)), Ok(()));
+        assert_eq!(release_owned_by(0xD472), 1);
+    }
+
+    /// A membership snapshot the heap has no room for is refused for memory
+    /// rather than aborting the kernel.
+    #[test]
+    fn a_snapshot_the_heap_refuses_is_refused_for_memory() {
+        let h = new_set(0xD473);
+        assert_eq!(put(0xD473, h, ep(7, 70)), Ok(()));
+        let refused = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    crate::test_alloc::refuse_allocations_on_current_thread(true);
+                    let snapshot = members(0xD473, h).map(|m| m.len());
+                    crate::test_alloc::refuse_allocations_on_current_thread(false);
+                    snapshot
+                })
+                .join()
+                .expect("the waiting thread ends")
+        });
+        assert_eq!(refused, Err(Errno::OutOfMemory));
+        assert_eq!(members(0xD473, h).map(|m| m.len()), Ok(1));
+        assert_eq!(release_owned_by(0xD473), 1);
     }
 
     /// A registry the heap refuses room in fails the create closed, the

@@ -297,15 +297,23 @@ mod kernel {
         //    returns `Ok(1)`.
         let mut grant = CapabilitySet::empty();
         grant.insert(CapabilityId::TIME_SET);
-        let task_caps =
-            TaskCapabilities::derive(ProcessId(task_id), UserId(1000), grant, grant, &INNER_SINK);
+        let Ok(task_caps) =
+            TaskCapabilities::derive(ProcessId(task_id), UserId(1000), grant, grant, &INNER_SINK)
+        else {
+            qemu_exit::exit_failure();
+        };
         let cap_table = RwLock::new(CapTable::new());
         // Insert a record using the same grant so `KernelSyscallHandlers::exit`
         // — which calls `CapTable::remove(task_id)` before
         // `Scheduler::exit` — sees a real entry to evict.
-        let table_record =
-            TaskCapabilities::derive(ProcessId(task_id), UserId(1000), grant, grant, &INNER_SINK);
-        let _ = cap_table.write().insert(table_record);
+        let Ok(table_record) =
+            TaskCapabilities::derive(ProcessId(task_id), UserId(1000), grant, grant, &INNER_SINK)
+        else {
+            qemu_exit::exit_failure();
+        };
+        if cap_table.write().insert(table_record).is_err() {
+            qemu_exit::exit_failure();
+        }
 
         // 5. Synthesised handlers + dispatcher. The dispatcher and the
         //    handlers share the same inner audit sink so the

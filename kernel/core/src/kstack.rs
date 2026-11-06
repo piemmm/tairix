@@ -243,10 +243,14 @@ fn stack_window_pages(window_pages: usize, usable_frames: usize) -> usize {
 pub fn alloc_kernel_stack() -> Option<Box<dyn KernelStack + Send>> {
     if let Ok(Some(tier)) = STACKS.get() {
         if let Some((guard, base)) = tier.alloc() {
-            return Some(Box::new(WindowStack { tier, guard, base }));
+            // A refused box drops the stack, which hands its run back.
+            let stack: Box<dyn KernelStack + Send> =
+                Box::try_new(WindowStack { tier, guard, base }).ok()?;
+            return Some(stack);
         }
     }
-    Some(Box::new(crate::kthread::BoxStack::new()?))
+    let stack: Box<dyn KernelStack + Send> = Box::try_new(crate::kthread::BoxStack::new()?).ok()?;
+    Some(stack)
 }
 
 #[cfg(test)]
@@ -284,6 +288,17 @@ mod tests {
         let usable_base = top - KTHREAD_STACK_BYTES as u64;
         assert_eq!(usable_base, guard + PAGE_SIZE as u64);
         assert_eq!(usable_base - PAGE_SIZE as u64, guard);
+    }
+
+    /// Each allocation a stack takes, refused in turn, leaves its caller no
+    /// stack rather than aborting the kernel.
+    ///
+    /// Regression: the stack was boxed with `Box::new`.
+    #[test]
+    fn a_stack_the_heap_refuses_is_none() {
+        assert!(crate::test_alloc::past_each_refusal(&false, || {
+            alloc_kernel_stack().is_some()
+        }));
     }
 
     #[test]

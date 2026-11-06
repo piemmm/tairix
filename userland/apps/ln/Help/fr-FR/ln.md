@@ -8,19 +8,28 @@ ln — créer des liens entre fichiers
 
 ## DESCRIPTION
 
-Crée un lien symbolique nommant chaque cible. Avec un seul opérande le
+Crée un lien nommant chaque cible. Avec un seul opérande le
 lien est créé dans le répertoire courant sous le nom de la cible. Avec
 deux, le second opérande est un répertoire à remplir s'il en est un —
 ou un lien vers un répertoire, sauf avec `-n` — et le nom du lien
 sinon. Avec trois ou plus, le dernier doit déjà être un répertoire.
 
-La cible est stockée **telle quelle** et n'est jamais résolue : elle
-peut être relative, contenir `..`, et ne nommer rien du tout, si bien
-qu'un lien peut légitimement pendre. Sa grammaire est tout de même
-vérifiée avant l'écriture, donc une cible qu'aucun résolveur ne pourrait
-parcourir est refusée. Créer un lien ne donne aucun droit sur ce qu'il
-nomme — chaque usage ultérieur est autorisé composant par composant
-sous votre propre identité.
+Sans `-s` le lien est **physique** : une seconde entrée de répertoire
+pour l'inode de la cible elle-même. Les deux noms atteignent un seul
+fichier, une écriture par l'un est visible par l'autre, et le stockage
+du fichier subsiste jusqu'au retrait du dernier nom. Les deux noms
+doivent être sur un même volume, et un répertoire ne reçoit jamais de
+second nom — c'est parce que l'arborescence reste un arbre que `..`
+désigne le répertoire par lequel on est réellement passé.
+
+Avec `-s` le lien est **symbolique**, et sa cible est stockée
+**telle quelle** et n'est jamais résolue : elle peut être relative,
+contenir `..`, et ne nommer rien du tout, si bien qu'un tel lien peut
+légitimement pendre. Sa grammaire est tout de même vérifiée avant
+l'écriture, donc une cible qu'aucun résolveur ne pourrait parcourir est
+refusée. Créer un lien de l'une ou l'autre sorte ne donne aucun droit
+sur ce qu'il nomme — chaque usage ultérieur est autorisé composant par
+composant sous votre propre identité.
 
 Un nom de lien déjà pris est refusé sauf si `-f` ou `-i` demande de le
 remplacer. Le nouveau lien prend alors la place de ce nom en une seule
@@ -38,14 +47,6 @@ fichier par un lien vers lui-même.
 Un lien qui ne peut pas être créé est signalé, et le suivant est tout de
 même créé. `--` termine l'analyse des options : tout argument ultérieur
 est un opérande.
-
-Sans `-s` le lien est **physique** : une seconde entrée de répertoire
-pour l'inode de la cible elle-même. Les deux noms atteignent un seul
-fichier, une écriture par l'un est visible par l'autre, et le stockage
-du fichier subsiste jusqu'au retrait du dernier nom. Les deux noms
-doivent être sur un même volume, et un répertoire ne reçoit jamais de
-second nom — c'est parce que l'arborescence reste un arbre que `..`
-désigne le répertoire par lequel on est réellement passé.
 
 `-r` stocke la cible d'un lien symbolique relativement au répertoire du
 lien lui-même. Le système de fichiers canonise d'abord les deux moitiés,
@@ -91,6 +92,8 @@ invoquer.
 
 ## EXAMPLES
 
+- `ln notes.txt notes.bak` — donner un second nom à un fichier ;
+  supprimer l'un ou l'autre laisse l'autre, et son contenu, intact.
 - `ln -s /System/Commands/ls.app tools/ls` — lier un nom à un paquet.
 - `ln -s ../shared/notes.txt` — lier `notes.txt` ici vers une cible
   relative.

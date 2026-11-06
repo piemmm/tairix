@@ -22,7 +22,7 @@ before touching either.
 | CD9 | The desktop route planner: over, under, around, and the depth flip | done |
 | CD10 | The playpen, the painters, the saved mood | done |
 | CD11 | The `cinder.app` bundle: manifest, icon, help in every required locale, the `Run` binary | done |
-| CD12 | QEMU vertical: composite at both depths, silhouette-vs-margin click, feeds stopping under the lock screen | planned |
+| CD12 | QEMU vertical: a let-out companion drawn on the desktop (`cinder_qemu_aarch64`, `OPEN-DEFECTS` D1807's regression test), the pen button's label ink, composite at both depths, silhouette-vs-margin click, feeds stopping under the lock screen | in progress |
 | CD13 | A second holder of the authority — a notification perch, a dock widget | planned |
 
 ## Part A — the desktop-layer authority
@@ -297,7 +297,19 @@ working, and the app does not die over a denied optional action.
 
 ## CD12 — the QEMU vertical, and what it must assert
 
-Not landed. Every piece of *logic* is covered by host tests — the projection and
+`cinder_qemu_aarch64` covers step 1 and the first half of step 3. The revealed
+desktop is photographed; Cinder is opened from the program library, his pen is
+photographed and closed, and his slot's menu lets him out. The frame the
+session announces his surface's first frame in must differ from the bare
+desktop by at least a sixteenth of his surface, all within one surface's
+extent, after the session's record that the surface opened. Letting him out
+with the pen closed leaves no window for him to walk behind, and the pen's
+dump stands in for the desktop under the cursor it was revealed with, so no
+pixel he can stand on goes uncompared. Where he stands is not asserted: he
+walks from his first frame, so a tolerance on his position would be one on how
+long the dump took. The remaining steps are still to land.
+
+Every piece of *logic* is covered by host tests — the projection and
 its turnaround, the shapes and their build-time vertex bounds, the gait, the
 roaming rules of §B3a, the mind under a seeded generator, the route planner's
 over/under/around choice and its depth-flip instant, the pen interaction and

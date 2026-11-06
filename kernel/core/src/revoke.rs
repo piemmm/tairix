@@ -23,7 +23,6 @@
 //! there. A holder that maps or binds between the revocation and its
 //! teardown re-checks its grant after the operation and undoes its own.
 
-use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
@@ -300,21 +299,22 @@ impl Revoker<'_> {
         same && self.signal.signal_task(holder, Signal::Kill).is_ok()
     }
 
-    /// Drop the unmapped pages `[base, base + pages)` from `holder`'s
-    /// snapshot, returning whether it took the removal as a delta.
+    /// Retire the unmapped pages `[base, base + pages)` from `holder`'s
+    /// snapshot, returning whether it took the removal as a delta; one it
+    /// could not take is suspended, so a re-freeze the heap refuses leaves no
+    /// view of the revoked pages.
     fn forget_snapshot(&self, holder: ProcessId, base: u64, pages: u64) -> bool {
         self.aspaces
             .write()
-            .forget_region_pages(holder, base, pages)
+            .retire_region_pages(holder, base, pages)
     }
 
     /// Rebuild `holder`'s snapshot from its own live space, never the
     /// caller's.
     fn refreeze(&self, holder: ProcessId, space: &ProcessSpace) {
-        let frozen = space.with(|live| live.freeze());
-        self.aspaces
-            .write()
-            .reregister_space(holder, Box::new(frozen));
+        let replaced =
+            space.with(|live| AddressSpaceRegistry::refreeze_held(self.aspaces, holder, live));
+        drop(replaced);
     }
 }
 
@@ -324,6 +324,7 @@ mod tests {
 
     use super::*;
 
+    use alloc::boxed::Box;
     use alloc::sync::Arc;
     use alloc::vec::Vec;
     use core::cell::RefCell;
@@ -471,14 +472,14 @@ mod tests {
         fn register(&self, task: ProcessId, space: &Arc<ProcessSpace>) {
             let physmap: Box<dyn PhysMap + Send + Sync> =
                 Box::new(SimPhysMap::new(PhysAddr::new(0), PAGE_SIZE));
-            let frozen = Box::new(space.with(|live| live.freeze()));
+            let frozen = Box::new(space.with(|live| live.freeze()).expect("frozen"));
             let mut aspaces = self.aspaces.write();
             aspaces.register(task, frozen, physmap).expect("registers");
-            aspaces.set_live_space(task, space);
+            aspaces.set_live_space(task, space).expect("recorded");
         }
 
         fn refreeze(&self, task: ProcessId, space: &ProcessSpace) {
-            let frozen = Box::new(space.with(|live| live.freeze()));
+            let frozen = Box::new(space.with(|live| live.freeze()).expect("frozen"));
             self.aspaces.write().reregister_space(task, frozen);
         }
 
@@ -518,7 +519,9 @@ mod tests {
         {
             let mut aspaces = fx.aspaces.write();
             for resource in kinds {
-                aspaces.mint_node_grant(driver, resource, 7);
+                aspaces
+                    .mint_node_grant(driver, resource, 7)
+                    .expect("recorded");
             }
             aspaces
                 .delegate_grant(
@@ -528,7 +531,9 @@ mod tests {
                     HwResource::shared(0x77),
                 )
                 .expect("delegates");
-            aspaces.mint_node_grant(other, unrelated, 8);
+            aspaces
+                .mint_node_grant(other, unrelated, 8)
+                .expect("recorded");
         }
 
         let revoked = fx.revoker(&shared).revoke(&[7]);
@@ -563,7 +568,8 @@ mod tests {
         let shared = crate::devres::NULL_SHARED_MEM_FACILITY;
         fx.aspaces
             .write()
-            .mint_node_grant(task(0x7_0010), HwResource::irq(3, 1), 8);
+            .mint_node_grant(task(0x7_0010), HwResource::irq(3, 1), 8)
+            .expect("recorded");
         assert_eq!(fx.revoker(&shared).revoke(&[7]), Revoked::default());
         assert!(events().is_empty());
     }
@@ -581,8 +587,12 @@ mod tests {
         );
         {
             let mut aspaces = fx.aspaces.write();
-            aspaces.mint_node_grant(driver, revoked_window, 7);
-            aspaces.mint_node_grant(driver, kept_window, 8);
+            aspaces
+                .mint_node_grant(driver, revoked_window, 7)
+                .expect("recorded");
+            aspaces
+                .mint_node_grant(driver, kept_window, 8)
+                .expect("recorded");
         }
         let revoked_va = space
             .with(|live| live.map_device_window(0xFE00_0040, 0x40))
@@ -628,7 +638,8 @@ mod tests {
         let (holder_va, _) = crate::sharedreg::map(&holder_fac, holder, region).expect("mapped");
         fx.aspaces
             .write()
-            .mint_node_grant(holder, HwResource::shared(region), 7);
+            .mint_node_grant(holder, HwResource::shared(region), 7)
+            .expect("recorded");
         fx.refreeze(holder, &holder_space);
         Mapped {
             owner,
@@ -685,7 +696,8 @@ mod tests {
         let parent_driver = task(0x7_0030);
         fx.aspaces
             .write()
-            .mint_node_grant(parent_driver, HwResource::shared(m.region), 8);
+            .mint_node_grant(parent_driver, HwResource::shared(m.region), 8)
+            .expect("recorded");
         drop(crate::sharedreg::unmap(&m.owner_fac, m.owner, m.owner_va).expect("owner lets go"));
         assert!(events().is_empty(), "the holder's reference keeps it");
 
@@ -723,9 +735,13 @@ mod tests {
         let m = map_through_node_7(&fx);
         {
             let mut aspaces = fx.aspaces.write();
-            aspaces.mint_node_grant(task(0x7_0031), HwResource::shared(m.region), 8);
+            aspaces
+                .mint_node_grant(task(0x7_0031), HwResource::shared(m.region), 8)
+                .expect("recorded");
             aspaces.revoke_node_grants(&[7]);
-            aspaces.mint_grant(m.holder, HwResource::shared(m.region));
+            aspaces
+                .mint_grant(m.holder, HwResource::shared(m.region))
+                .expect("recorded");
         }
 
         assert_eq!(
@@ -770,8 +786,12 @@ mod tests {
         let driver = task(0x7_0040);
         {
             let mut aspaces = fx.aspaces.write();
-            aspaces.mint_node_grant(driver, HwResource::irq(40, 1), 7);
-            aspaces.mint_node_grant(driver, HwResource::irq(41, 1), 8);
+            aspaces
+                .mint_node_grant(driver, HwResource::irq(40, 1), 7)
+                .expect("recorded");
+            aspaces
+                .mint_node_grant(driver, HwResource::irq(41, 1), 8)
+                .expect("recorded");
         }
         let revoked_line = fx.irq.bind(40, driver).expect("binds").handle;
         let kept_line = fx.irq.bind(41, driver).expect("binds").handle;
@@ -797,7 +817,8 @@ mod tests {
         let driver = task(0x7_0042);
         fx.aspaces
             .write()
-            .mint_node_grant(driver, HwResource::irq(42, 1), 7);
+            .mint_node_grant(driver, HwResource::irq(42, 1), 7)
+            .expect("recorded");
         let kept = fx.irq.bind(42, driver).expect("binds").handle;
         assert_eq!(fx.revoker(&shared).keep_binding(driver, 42, kept), Ok(kept));
 
@@ -822,7 +843,8 @@ mod tests {
         let _space = fx.with_space(driver, Box::new(wedged));
         fx.aspaces
             .write()
-            .mint_node_grant(driver, HwResource::mmio(0xFE00_0000, 0x1000), 7);
+            .mint_node_grant(driver, HwResource::mmio(0xFE00_0000, 0x1000), 7)
+            .expect("recorded");
 
         let revoked = fx.revoker(&shared).revoke(&[7]);
         assert_eq!(
@@ -839,5 +861,40 @@ mod tests {
             None,
             "its revoked grants are retired all the same"
         );
+    }
+
+    /// A re-freeze publishes its snapshot before it lets the live space go:
+    /// one that published after would undo a sibling's unmap that took the
+    /// space in between, leaving a freed frame mapped in the copy path's view.
+    #[test]
+    fn a_refreeze_publishes_before_it_releases_the_live_space() {
+        let fx = Fixture::new();
+        let holder = task(0x7_0041);
+        let space = fx.with_space(holder, crate::procspace::host_test_space!(Some(&REMOTE)));
+        let registry = fx.aspaces.read();
+        std::thread::scope(|scope| {
+            let refreezing = scope.spawn(|| {
+                let shared = crate::devres::NULL_SHARED_MEM_FACILITY;
+                fx.revoker(&shared).refreeze(holder, &space);
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !space.is_held() && !refreezing.is_finished() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the re-freeze never began"
+                );
+                std::thread::yield_now();
+            }
+            // The freeze of a near-empty space takes microseconds: by now the
+            // re-freeze waits on the registry this thread holds.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            assert!(
+                space.is_held(),
+                "the re-freeze let the live space go before publishing"
+            );
+            drop(registry);
+            refreezing.join().expect("the re-freeze finishes");
+        });
+        assert!(!space.is_held());
     }
 }

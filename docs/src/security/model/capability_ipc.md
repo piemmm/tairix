@@ -15,7 +15,7 @@ workspace instead. The verifier — not the model — is the only oracle
 (§19.7): a reachable state or transition that breaks an invariant fails the
 build, fail-closed.
 
-The model and checker are in `tools/xtask/src/commands/model_check.rs`; the
+The models and checker are in `tools/xtask/src/commands/model_check.rs`; the
 command is `cargo xtask model-check` (run unconditionally inside `cargo xtask
 ci` because the search is exhaustive and finishes in milliseconds). This page
 is the formal narrative kept in sync with that code.
@@ -158,6 +158,52 @@ Transition invariants, checked on every reachable step:
 - **`served-in-turn`**: on an open port a message leaves only the lane whose
   turn it was, one per receive, and a sender with more waiting goes to the
   back of the order.
+
+## The room model
+
+A second model checks that a slot freed in a sender's lane wakes one thread
+waiting for it, never the line, and that nothing is lost when that thread
+leaves its slot unused — `kernel/ipc`'s `RoomWaiters`, shared by ports and
+call endpoints ([per-sender lanes](../../architecture/ipc.md#per-sender-lanes)).
+Three threads of one sender contend for a lane of one slot:
+
+```
+Step   == {Idle, Looking, Parked, Ready, Owes}
+Record == {Waiting, Designated, Owing}
+
+State == [
+  queued  : 0 .. DEPTH,
+  steps   : [Threads -> Step],
+  records : [Threads -> Record \cup {None}],
+  line    : Seq(Threads),            \* Waiting threads, first in line first
+  woken   : [Threads -> BOOLEAN]     \* wakes delivered, not yet taken
+]
+
+HandOut ==                           \* a slot no thread holds goes to the first
+  IF Unheld /\ line # << >>
+    THEN /\ records' = [records EXCEPT ![Head(line)] = Designated]
+         /\ woken'   = [woken EXCEPT ![Head(line)] = TRUE]
+         /\ line'    = Tail(line)
+    ELSE UNCHANGED << records, woken, line >>
+```
+
+A thread begins a wait, looks under the lock (recording itself `Waiting` at
+the back of the line unless it has a record, and taking a slot no thread holds
+as `Designated`), parks, resumes on a wake — a spurious one too — sends into
+its slot, keeps it as `Owing` when its wait reported the room ready, waits
+again keeping that record, or leaves from any step, a slot it held handed out.
+In the kernel a thread leaves an `Owing` slot at its next call that is neither
+a send nor a wait watching the port again, since any other may block, and at
+its end. A receive frees a slot and hands it out.
+
+State invariants: **`room-held`** (no more slots held than free),
+**`no-slot-unheld-while-waiting`** (a free slot nobody holds never coexists
+with a waiting thread), **`line-exact`**, **`parked-recorded`** (no thread
+parks with no record to wake it by) and **`no-lost-wake`** (a parked thread
+handed a slot has its wake pending). Transition invariant:
+**`one-wake-per-slot`** (no step wakes more than one thread). Fault
+injections — a receive waking every waiter, a slot let go of and handed to
+nobody — prove the checker rejects each.
 
 ## Keeping the model in sync
 

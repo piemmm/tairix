@@ -14,6 +14,7 @@ event vocabulary itself is wire vocabulary, so it lives in `lib/abi` with the
 cue protocol and is re-exported here.
 
 The shipped theme is `assets/TAIRiX/`: one 48 kHz stereo 16-bit FLAC per
-asset, encoded by `cargo xtask sound-encode` and checked at build time by
-`tools/syshelp`. The design is `plans/SOUND.md` §Default desktop sounds; the
+asset, encoded by `cargo xtask sound-encode` (`volume` by its `--synthesised`
+form, from a kept synthesiser a host test holds the file to) and checked at
+build time by `tools/syshelp`. The design is `plans/SOUND.md` §Default desktop sounds; the
 reference is `docs/src/lib/soundtheme.md`.

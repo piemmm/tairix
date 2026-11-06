@@ -23,12 +23,12 @@ impl Surface {
         let Some((x0, y0, x1, y1)) = reach(src, transform) else {
             return;
         };
-        let (x1, y1) = (x1.min(self.width()), y1.min(self.height()));
-        if x1 <= x0 {
+        let Some((columns, rows)) = self.admitted(x0, y0, x1 - x0, y1 - y0) else {
             return;
-        }
-        for y in y0..y1 {
-            let Some((first, span)) = self.row_span_mut(y, x0, x1 - x0) else {
+        };
+        for y in rows {
+            let width = columns.end - columns.start;
+            let Some((first, span)) = self.row_span_mut(y, columns.start, width) else {
                 continue;
             };
             for (x, dst) in (first..).zip(span.iter_mut()) {

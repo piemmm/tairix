@@ -1,6 +1,21 @@
 //! Unit tests for the integer geometry primitives.
 
-use super::{saturate_i32, to_i32, Point, Rect, Scale, REFERENCE_DPI};
+use super::{fit_within, saturate_i32, to_i32, Point, Rect, Scale, REFERENCE_DPI};
+
+/// A band from either corner to the other is the same rectangle, both corner
+/// pixels in it, and one point spans a single pixel.
+#[test]
+fn rect_spanning_holds_both_corners_in_either_order() {
+    let a = Point::new(10, -4);
+    let b = Point::new(3, 7);
+    let band = Rect::spanning(a, b);
+    assert_eq!(band, Rect::new(3, -4, 8, 12));
+    assert_eq!(Rect::spanning(b, a), band);
+    assert!(band.contains(a) && band.contains(b));
+    assert_eq!(Rect::spanning(a, a), Rect::new(10, -4, 1, 1));
+    let far = Rect::spanning(Point::new(i32::MIN, 0), Point::new(i32::MAX, 0));
+    assert_eq!(far.width, u32::MAX);
+}
 
 #[test]
 fn rect_intersection_overlap() {
@@ -116,6 +131,39 @@ fn scale_length_scales_logical_to_physical() {
 fn scale_length_saturates_rather_than_wrapping() {
     let big = Scale::from_percent(800).expect("800% is in range");
     assert_eq!(big.scale_length(u32::MAX), u32::MAX);
+}
+
+#[test]
+fn logical_length_is_the_least_that_scales_to_at_least_the_physical_one() {
+    for percent in [25, 50, 100, 125, 150, 175, 200, 300, 800] {
+        let scale = Scale::from_percent(percent).expect("in range");
+        for physical in 0..2_000 {
+            let logical = scale.logical_length(physical);
+            assert!(
+                scale.scale_length(logical) >= physical,
+                "{percent}% {physical}"
+            );
+            assert!(
+                logical == 0 || scale.scale_length(logical - 1) < physical,
+                "{percent}% {physical}: the least"
+            );
+            assert_eq!(
+                scale.logical_length(scale.scale_length(logical)),
+                logical,
+                "{percent}% {physical}: a round trip changes nothing"
+            );
+        }
+    }
+}
+
+#[test]
+fn logical_length_inverts_scale_length_and_saturates() {
+    let double = Scale::from_percent(200).expect("200% is in range");
+    assert_eq!(double.logical_length(80), 40);
+    assert_eq!(double.logical_length(81), 41, "rounded up");
+    assert_eq!(Scale::ONE.logical_length(37), 37);
+    let quarter = Scale::from_percent(Scale::MIN_PERCENT).expect("in range");
+    assert_eq!(quarter.logical_length(u32::MAX), u32::MAX);
 }
 
 #[test]
@@ -241,4 +289,23 @@ fn surface_origin_refuses_what_a_surface_cannot_address() {
     assert_eq!(Rect::new(-1, 4, 5, 6).surface_origin(), None);
     assert_eq!(Rect::new(3, -4, 5, 6).surface_origin(), None);
     assert_eq!(Rect::new(3, 4, 0, 6).surface_origin(), None);
+}
+
+/// A picture fitted to a room keeps its shape: its longer side the room's,
+/// its shorter rounded to the nearest pixel and never under one; nothing fits
+/// a picture or a room of nought.
+#[test]
+fn a_fit_keeps_the_pictures_shape_within_its_room() {
+    assert_eq!(fit_within(1920, 1080, 200), Some((200, 113)));
+    assert_eq!(fit_within(1080, 1920, 200), Some((113, 200)));
+    assert_eq!(fit_within(3, 2, 100), Some((100, 67)));
+    assert_eq!(fit_within(5000, 2, 200), Some((200, 1)));
+    assert_eq!(fit_within(300, 300, 200), Some((200, 200)));
+    assert_eq!(
+        fit_within(u32::MAX, u32::MAX - 1, u32::MAX),
+        Some((u32::MAX, u32::MAX - 1))
+    );
+    assert_eq!(fit_within(0, 300, 200), None);
+    assert_eq!(fit_within(300, 0, 200), None);
+    assert_eq!(fit_within(300, 300, 0), None);
 }

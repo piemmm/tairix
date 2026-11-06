@@ -12,7 +12,7 @@ use tairix_colour::legibility::contrast_hundredths;
 use tairix_colour::Rgba;
 
 use crate::motion::{ease_out, smoothstep, MotionInteraction};
-use crate::theme::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA, SELECTION_TINT_ALPHA};
+use crate::palette::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA, SELECTION_TINT_ALPHA};
 use crate::{
     edge_weight, lifted, line_box_px, points_of, Accessibility, Appearance, Contrast, CursorKind,
     CursorSet, CursorSetId, Density, DesktopText, Fade, FamilyKey, FontWeight, Fonts, Glide,
@@ -29,6 +29,14 @@ fn builtins_have_their_reserved_ids_and_appearance() {
     assert_eq!(dark.appearance(), Appearance::Dark);
     assert_eq!(light.appearance(), Appearance::Light);
     assert_ne!(dark.name(), light.name());
+}
+
+/// The built-in palettes are defined once, so a surface keeping one
+/// appearance whatever the desktop shows reads what the theme wears.
+#[test]
+fn the_built_in_themes_wear_the_built_in_palettes() {
+    assert_eq!(Theme::dark().palette(), &Palette::DARK);
+    assert_eq!(Theme::light().palette(), &Palette::LIGHT);
 }
 
 #[test]
@@ -1715,6 +1723,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             crosshair: String::from("c.crosshair"),
             drag_copy: String::from("c.drag-copy"),
             drag_move: String::from("c.drag-move"),
+            drag_link: String::from("c.drag-link"),
         },
         MotionTheme::new([
             90, 80, 60, 90, 180, 120, 120, 120, 180, 90, 160, 70, 90, 200, 380, 900, 500, 140, 320,

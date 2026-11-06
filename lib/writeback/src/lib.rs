@@ -7,11 +7,13 @@
 //!
 //! * [`DirtySet`] — the transaction's blocks keyed by address, with a
 //!   per-operation savepoint so a failed operation undoes alone, drained in
-//!   ascending coalesced runs.
+//!   ascending coalesced runs. A change the heap refuses changes nothing, and
+//!   the undo asks the heap for nothing.
 //! * [`WritebackBound`] — the RAM-derived, pressure-governed, machine-shared
 //!   ceiling on what a volume's transaction may pin.
 //! * [`CommitScheduler`] — the dirty-age window by command cost, reported to
-//!   the host's write-back timer so a quiet volume is still published.
+//!   the host's write-back timer so a quiet volume, or one whose publication
+//!   was refused, is still published.
 //! * [`RunWindow`] — the fallible staging buffer one coalesced device
 //!   transfer of at most [`RUN_BYTES`] moves through.
 //!

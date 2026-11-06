@@ -71,6 +71,15 @@ pub fn collected<T>(count: usize, items: impl Iterator<Item = T>) -> Option<Vec<
     Some(buffer)
 }
 
+/// A copy of `items`, or `None` when the allocator refuses room for it.
+#[must_use]
+pub fn copied<T: Copy>(items: &[T]) -> Option<Vec<T>> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(items.len()).ok()?;
+    copy.extend_from_slice(items);
+    Some(copy)
+}
+
 /// Lengthen a reused `scratch` to `count` copies, padding with `value`,
 /// reporting whether it now holds them. A scratch already that long keeps
 /// its capacity.

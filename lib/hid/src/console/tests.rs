@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::usages::MODIFIER_FIRST as MODIFIER_USAGE_BASE;
+use tairix_abi::driver::input::InputEventKind;
 use tairix_abi::input::{KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
 
 /// HID usage of the `A` key (page `0x07`); letters run `0x04`..`0x1D`.
@@ -155,6 +156,7 @@ fn a_release_of_a_printable_key_is_a_released_record() {
         KeyInput::Released {
             key: KeyValue::Char('a'),
             modifiers: AbiModifiers::default(),
+            physical: PhysicalKey::A,
         }
     );
 }
@@ -175,4 +177,44 @@ fn a_non_key_event_produces_no_record() {
 fn unknown_usage_fails_closed() {
     let mut console = KeyboardConsole::new();
     assert_eq!(console.feed(key_event(0xFF, 1)), None);
+}
+
+#[test]
+fn a_key_record_names_its_usage_as_the_physical_key() {
+    let mut console = KeyboardConsole::new();
+    for (usage, physical) in [
+        (USAGE_A, PhysicalKey::A),
+        (0x20, PhysicalKey::DIGIT_3),
+        (0x21, PhysicalKey::DIGIT_4),
+        (0x22, PhysicalKey::DIGIT_5),
+        (0x2C, PhysicalKey::SPACE),
+        (0x29, PhysicalKey::ESCAPE),
+    ] {
+        assert_eq!(press(&mut console, usage).physical(), Some(physical));
+    }
+}
+
+#[test]
+fn a_chord_keeps_the_key_it_was_typed_on_whatever_the_layout_types() {
+    let mut console = KeyboardConsole::new();
+    // Meta (Left GUI), Shift, Ctrl and Alt: each usage its physical modifier
+    // key, and each edge a modifier change naming no key of its own.
+    for (offset, physical) in [
+        (3, PhysicalKey::LEFT_GUI),
+        (1, PhysicalKey::LEFT_SHIFT),
+        (0, PhysicalKey::LEFT_CTRL),
+        (2, PhysicalKey::LEFT_ALT),
+    ] {
+        let usage = MODIFIER_USAGE_BASE + offset;
+        assert_eq!(PhysicalKey::from_usage(usage), physical);
+        let edge = console
+            .feed(key_event(usage, 1))
+            .expect("the held set changed");
+        assert_eq!(edge.physical(), None);
+    }
+    let record = press(&mut console, 0x20);
+    assert_eq!(record.key(), Some(KeyValue::Char('#')));
+    assert_eq!(record.physical(), Some(PhysicalKey::DIGIT_3));
+    let held = record.modifiers();
+    assert!(held.meta && held.shift && held.ctrl && held.alt);
 }

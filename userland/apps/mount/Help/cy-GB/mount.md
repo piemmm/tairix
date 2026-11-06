@@ -8,6 +8,12 @@ mount — rhestru'r systemau ffeiliau wedi'u gosod, neu osod delwedd ddisg neu a
 
 `mount [option...] image [target]`
 
+`mount --list-held`
+
+`mount --replay-held name`
+
+`mount --discard-held name`
+
 ## DESCRIPTION
 
 Heb operandau, mae'n rhestru'r systemau ffeiliau wedi'u gosod, un
@@ -53,6 +59,19 @@ RAID, neu system ffeiliau y caiff ei pherchnogion a gofnodwyd eu
 parchu bob amser (ext2, ext3, ext4, ARXFS), ac mae `mount` yn dweud
 pam.
 
+Mae disg a roddwyd yn ôl tra oedd yn dal i gadw newidiadau nad oeddent
+wedi'u hysgrifennu iddi eto yn cael ei gosod i'w darllen yn unig, a'r
+newidiadau'n cael eu cadw, pan na all ei dyfais ddangos mai'r un ddisg
+ydyw ac nid copi; mae'r rhestr yn ei marcio â `[replay-unconfirmed]`,
+ac mae `--list-held` yn rhestru cyfrolau o'r fath yn unig. Mae
+`--replay-held` yn ysgrifennu'r newidiadau iddi, os yw ei chynnwys yn
+dangos nad yw wedi newid ers hynny; mae `--discard-held` yn eu hepgor
+ac yn cymryd y ddisg fel y mae. Y naill ffordd neu'r llall, caiff y
+gyfrol ei gosod eto, i'w darllen a'i hysgrifennu lle bo modd. Mae ateb
+yn gofyn am yr awdurdod gosod (`CAP_FS_MOUNT`); ar gyfer disg
+symudadwy, mae'r bwrdd gwaith hefyd yn gofyn i'r defnyddiwr wrth y
+cyfrifiadur.
+
 ## OPTIONS
 
 - `-r, --read-only` — gosod y gyfrol i'w darllen yn unig (fel `-o ro`).
@@ -80,6 +99,14 @@ pam.
 - `-v, --verbose` — dweud ble y gosodwyd y gyfrol.
 - `-l, --show-labels` — derbynnir ar gyfer y rhestr, nad oes ganddi
   labeli i'w hychwanegu.
+- `--list-held` — rhestru dim ond y cyfrolau sy'n dal newidiadau sy'n
+  aros am `--replay-held` neu `--discard-held`.
+- `--replay-held <name>` — ysgrifennu'r newidiadau y mae cyfrol yn eu
+  dal i'w disg, os yw ei chynnwys yn dal i'w dangos heb newid; `name`
+  yw enw'r gyfrol yn `/Storage`, cyfeiriadur y'i dangosir ynddo, neu ei
+  gwreiddyn `id::`.
+- `--discard-held <name>` — hepgor y newidiadau y mae cyfrol yn eu dal,
+  gan gymryd ei disg fel y mae.
 - `-h, -?, --help` — dangos cymorth byr y gorchymyn hwn ei hun.
 
 ## EXAMPLES
@@ -95,15 +122,21 @@ pam.
   cewch ysgrifennu iddi ac i'w ffolder.
 - `mount -r backup.tar.gz /Storage/backup` — gosod archif tar wedi'i
   chywasgu i'w darllen yn unig fel `backup`.
+- `mount --list-held` — rhestru'r cyfrolau y mae eu newidiadau'n aros
+  am ateb.
+- `mount --replay-held backup` — ysgrifennu'r newidiadau y mae
+  `/Storage/backup` yn eu dal i'w disg.
 
 ## EXIT STATUS
 
-- `0` — ysgrifennwyd y rhestr, neu gosodwyd y gyfrol (neu ysgrifennwyd
-  y cymorth byr).
-- `1` — ni ddeallwyd y llinell orchymyn.
+- `0` — ysgrifennwyd y rhestr, gosodwyd y gyfrol, neu ysgrifennwyd neu
+  hepgorwyd ei newidiadau a ddaliwyd (neu ysgrifennwyd y cymorth byr).
+- `1` — ni ddeallwyd y llinell orchymyn, neu ni chewch ateb dros
+  newidiadau'r gyfrol.
 - `2` — ni ellid darllen y rhestr osodiadau, neu ni ellid ysgrifennu
   i'r derfynell.
-- `32` — ni osodwyd y ddelwedd.
+- `32` — ni osodwyd y ddelwedd, neu ni ysgrifennwyd ac ni hepgorwyd
+  newidiadau'r gyfrol.
 
 ## ENVIRONMENT
 

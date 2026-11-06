@@ -8,19 +8,29 @@ ln — crear enlaces entre archivos
 
 ## DESCRIPTION
 
-Crea un enlace simbólico que nombra cada destino. Con un solo operando
+Crea un enlace que nombra cada destino. Con un solo operando
 el enlace se crea en el directorio de trabajo con el nombre propio del
 destino. Con dos, el segundo operando es un directorio que se rellena
 si lo es — o un enlace a uno, salvo con `-n` — y el nombre del enlace en
 caso contrario. Con tres o más, el último debe ser ya un directorio.
 
-El destino se guarda **literalmente** y nunca se resuelve: puede ser
-relativo, contener `..` y no nombrar nada en absoluto, de modo que un
-enlace puede quedar legítimamente colgado. Su gramática sí se comprueba
-antes de guardarlo, así que se rechaza un destino que ningún resolutor
-podría recorrer. Crear un enlace no otorga ninguna autoridad sobre lo
-que nombra: cada uso posterior se autoriza componente a componente bajo
-su propia identidad.
+Sin `-s` el enlace es **duro**: una segunda entrada de directorio para
+el propio inodo del destino. Ambos nombres alcanzan un solo archivo,
+una escritura por cualquiera de ellos se ve por el otro, y el
+almacenamiento del archivo subsiste hasta que se retira el último
+nombre. Ambos nombres deben estar en un mismo volumen, y un directorio
+nunca recibe un segundo nombre — que el árbol de archivos siga siendo
+un árbol es lo que hace que `..` signifique el directorio por el que
+realmente se llegó.
+
+Con `-s` el enlace es **simbólico**, y su destino se guarda
+**literalmente** y nunca se resuelve: puede ser relativo, contener `..`
+y no nombrar nada en absoluto, de modo que un enlace así puede quedar
+legítimamente colgado. Su gramática sí se comprueba antes de guardarlo,
+así que se rechaza un destino que ningún resolutor podría recorrer.
+Crear un enlace de cualquiera de los dos tipos no otorga ninguna
+autoridad sobre lo que nombra: cada uso posterior se autoriza componente
+a componente bajo su propia identidad.
 
 Un nombre de enlace ya ocupado se rechaza salvo que `-f` o `-i` indique
 reemplazarlo. El nuevo enlace ocupa entonces el lugar de ese nombre en
@@ -38,14 +48,6 @@ reemplaza un archivo por un enlace a sí mismo.
 Un enlace que no puede crearse se notifica, y el siguiente se crea de
 todos modos. `--` termina el análisis de opciones: todo argumento
 posterior es un operando.
-
-Sin `-s` el enlace es **duro**: una segunda entrada de directorio para
-el propio inodo del destino. Ambos nombres alcanzan un solo archivo,
-una escritura por cualquiera de ellos se ve por el otro, y el
-almacenamiento del archivo subsiste hasta que se retira el último
-nombre. Ambos nombres deben estar en un mismo volumen, y un directorio
-nunca recibe un segundo nombre — que el árbol de archivos siga siendo
-un árbol es lo que da sentido a `..`.
 
 `-r` almacena el destino de un enlace simbólico relativo al directorio
 del propio enlace. El sistema de archivos canoniza antes ambas mitades,
@@ -92,6 +94,8 @@ seguridad.
 
 ## EXAMPLES
 
+- `ln notes.txt notes.bak` — dar a un archivo un segundo nombre;
+  eliminar cualquiera de los dos deja intactos el otro y su contenido.
 - `ln -s /System/Commands/ls.app tools/ls` — enlazar un nombre a un
   paquete.
 - `ln -s ../shared/notes.txt` — enlazar `notes.txt` aquí a un destino

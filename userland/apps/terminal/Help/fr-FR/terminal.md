@@ -74,8 +74,8 @@ onglets ; tournez la molette au-dessus d'eux pour faire défiler.
 **Apparence** choisit la palette de couleurs, définit la taille du texte
 et le nombre de lignes conservées dans l'historique (d'aucune à 10 000,
 500 au départ), et modifie la palette propre de l'utilisateur. Les palettes
-fournies sont *System* (qui suit l'apparence sombre ou claire du
-bureau), *Midnight*, *Phosphor*, *Amber*, *Ember*, *Contrast*, *Paper*
+fournies sont *System* (l'apparence sombre du bureau, que le
+bureau lui-même soit sombre ou clair), *Midnight*, *Phosphor*, *Amber*, *Ember*, *Contrast*, *Paper*
 et *Custom*. Choisir *Custom* utilise les couleurs modifiées sous le
 sélecteur : une grille des vingt couleurs dont un écran est composé — le
 fond, le premier plan, le curseur, le texte du curseur et les seize
@@ -121,11 +121,6 @@ région de trame partagée ou la boîte d'événements a été refusé (la
 raison est indiquée sur le flux d'erreur standard).
 
 ## ENVIRONMENT
-
-`HOME`
-: Le répertoire personnel du compte, où le terminal lit et écrit son
-profil. Sans lui, le terminal fonctionne sur le profil par défaut et
-n'enregistre rien.
 
 `TERM`
 : Exporté vers le shell hébergé sous la valeur `xterm-256color`, qui

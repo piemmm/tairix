@@ -4,7 +4,7 @@ files — grafischer Dateisystem-Browser
 
 ## SYNOPSIS
 
-`files --desktop [--mount] [pfad] [-h | -?]`
+`files --desktop [--mount] [path] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -24,21 +24,26 @@ Benutzers: ein nicht lesbares Verzeichnis wird abgelehnt, niemals erraten.
 Der Desktop startet den Dateimanager mit der Sitzung und hält ihn auf der
 Symbolleiste, und dieser beendet sich nie: das Menü seines Platzes listet
 Ihre eigenen Orte und alles Eingebundene, und die Wahl eines Eintrags öffnet
-dort ein Fenster; *Netzwerk* und *Einstellungen…* stehen zuletzt. Ein
+dort ein Fenster; *Netzwerk* folgt, und *Papierkorb*
+steht zuletzt: er öffnet Ihren Papierkorb; gibt es kein Heimatverzeichnis,
+das einen aufnehmen könnte, ist er ausgegraut und nennt den Grund. Ein
 Datenträger, den Sie auswerfen können — ein USB-Stick, eine Speicherkarte
 oder ein anderer Wechseldatenträger sowie ein Datenträgerabbild oder eine
 Freigabe, die Sie eingehängt haben —, öffnet ein Untermenü mit *Auswerfen*,
-und bei einem eigenen Datenträgerabbild, das einen Titel hat, enthält es
-auch *Titel*: dieser Eintrag öffnet ein Feld, das den Titel des Datenträgers
-zum Ändern bereithält, und ein Druck auf `Return` schreibt den neuen auf den
-Datenträger. Ein Klick auf den Platz öffnet eines dort, wo die Einstellungen
+und bei einem Datenträger, dessen Titel Sie ändern können — einem eigenen
+Datenträgerabbild oder einem Datenträger, dessen Format einen Titel führt —,
+enthält es *Titel*: dieser Eintrag öffnet ein Feld, das den Titel zum Ändern
+bereithält, und ein Druck auf `Return` schreibt den neuen auf den
+Datenträger; ein leerer Titel löscht ihn. Dürfen Sie den Titel eines
+Datenträgers nicht selbst ändern, fragt der Desktop nach dem Namen und dem
+Kennwort eines Administrators und ändert ihn mit dessen Zustimmung. Ein Klick auf den Platz öffnet eines dort, wo die Einstellungen
 es bestimmen. Wer einen
 Ordner verlangt, für den schon ein Fenster offen ist, holt dieses Fenster
 nach vorn, statt ein weiteres zu öffnen. Das Menü hat keine Zeile *Beenden* —
 der Dateimanager ist Teil des Desktops, das Schließen seiner Fenster räumt
 ihn einfach weg, und hört er je auf zu laufen, startet ihn der Desktop neu.
 
-*Netzwerk* im Menü des Platzes, direkt über *Einstellungen…*, öffnet ein
+*Netzwerk* im Menü des Platzes, direkt über *Papierkorb*, öffnet ein
 Fenster mit den Computern im lokalen Netzwerk, die Dateien freigeben. Jeder
 wird mit seinem Namen, der Adresse, unter der er erreichbar ist, seiner
 Arbeitsgruppe oder Domäne und seiner Art aufgeführt, und die Liste füllt
@@ -59,19 +64,23 @@ den Start ab und nennt den Grund auf dem Standardfehlerstrom. Er benötigt
 eine laufende grafische Sitzung: ohne sie ist der Fensterkanal unerreichbar,
 und er meldet die Ablehnung auf dem Standardfehlerstrom und beendet sich.
 
-Das Fenster wird mit der Tastatur bedient: `Runter` und `Hoch` bewegen die
-Auswahl, `Eingabe` öffnet das ausgewählte Verzeichnis, und `Rücktaste`
-wechselt in das übergeordnete Verzeichnis. `F5` liest die Auflistung und die
-Orte-Leiste neu ein; ein neu angeschlossener Datenträger erscheint von
-selbst in der Leiste. `Ctrl+Shift+N` legt einen neuen Ordner an.
+Das Fenster wird mit der Tastatur bedient: Die Pfeiltasten `Down` und `Up`
+bewegen die Auswahl, `Enter` öffnet das ausgewählte Verzeichnis, und
+`Backspace` wechselt in das übergeordnete Verzeichnis. `F5` liest die
+Auflistung und die Orte-Leiste neu ein; ein neu angeschlossener
+Datenträger erscheint von selbst in der Leiste. `Ctrl+Shift+N` legt einen
+neuen Ordner an.
 
 Eine Auflistung öffnet sich ohne Auswahl. Ein Klick wählt einen Eintrag aus,
 ein Klick mit `Ctrl` fügt einen hinzu oder nimmt ihn heraus, und ein Klick
 mit `Shift` wählt die Folge ab dem zuletzt gewählten Eintrag; ein Klick auf
 eine leere Fläche hebt die Auswahl auf. Ein Doppelklick öffnet einen
-Eintrag; mit gehaltener `Shift`-Taste listet er den Inhalt einer Anwendung
-auf, statt sie zu starten, und was er anderswo öffnet, bleibt nicht
-ausgewählt. Ziehen über eine leere Fläche zieht einen Rahmen auf, der beim
+Eintrag, und einer, den er anderswo öffnet — ein Dokument in seiner
+Anwendung, eine Anwendung, ein Datenträgerabbild als Datenträger —, bleibt
+nach dem Öffnen nicht ausgewählt, während einer, der sich nicht öffnen ließ,
+ausgewählt bleibt. Mit gehaltener `Shift`-Taste listet er den Inhalt einer
+Anwendung auf, statt sie zu starten. `Enter` öffnet die Auswahl und behält
+sie bei. Ziehen über eine leere Fläche zieht einen Rahmen auf, der beim
 Wachsen alles auswählt, was er berührt; am oberen oder unteren Rand der
 Auflistung gehalten, rollt sie weiter, und `Escape` nimmt zurück, was er
 ausgewählt hat.
@@ -86,15 +95,19 @@ Zeilen; ein Name, der selbst dafür zu lang ist, behält seinen Anfang und
 sein Ende mit `…` in der Mitte, sodass seine Endung immer sichtbar bleibt.
 Eine Anwendung erscheint ohne ihre Endung `.app`; die Einstellungen können
 diese zeigen oder auch die Endungen der Dateitypen ausblenden, die das
-System kennt. Einträge, deren Namen mit einem Punkt beginnen, werden nur
-aufgeführt, wenn die Einstellungen es verlangen.
+System kennt. Eine Endung bleibt überall dort sichtbar, wo ihr Ausblenden
+einen Namen hinterließe, der sich wie ein anderer Dateityp oder eine andere
+Anwendung liest — `invoice.pdf.app` wird vollständig gezeigt —, und ein
+Fenster ordnet seine Einträge nach ihren Namen, wie sie gezeigt werden.
+Einträge, deren Namen mit einem Punkt beginnen, werden nur aufgeführt, wenn
+die Einstellungen es verlangen.
 
 `F2` benennt den ausgewählten Eintrag an Ort und Stelle um, ebenso ein Klick
 auf den Namen des einzigen ausgewählten Eintrags mit einer kurzen Pause
 danach: Der Name öffnet sich zum Bearbeiten, sobald der Klick kein
 Doppelklick mehr werden kann. Der Teil vor der Endung ist ausgewählt, sodass
 Tippen den Namen ersetzt und die Endung behält; eine Endung, die das Fenster
-nicht zeigt, bleibt ebenfalls erhalten. `Eingabe` oder ein Klick außerhalb
+nicht zeigt, bleibt ebenfalls erhalten. `Enter` oder ein Klick außerhalb
 des Namens übernimmt den neuen Namen — lehnt der Datenträger ihn ab, bleibt
 das Feld mit dem Grund geöffnet —, und `Escape` verwirft ihn. Ein Klick, der
 den Eintrag umbenannt hat, bewirkt sonst nichts, da sich der Ordner unter
@@ -102,15 +115,37 @@ dem Zeiger neu sortiert haben kann.
 
 Ausgewählte Einträge, die auf ein anderes Dateimanager-Fenster, einen Ordner
 darin oder den Desktop gezogen werden, werden dorthin kopiert; mit
-gehaltener Umschalttaste werden sie stattdessen verschoben. Der Zeiger zeigt
+gehaltener `Shift`-Taste werden sie stattdessen verschoben. Der Zeiger zeigt
 ein Plus, solange ein Ablegen kopieren würde, und einen Pfeil, solange es
 verschieben würde, und der Ordner, in dem ein Ablegen landen würde, ist
 hervorgehoben. Eine einzelne Datei, die auf den Platz einer Anwendung auf
-der Symbolleiste gezogen wird, wird dort geöffnet.
+der Symbolleiste gezogen wird, wird dort geöffnet. Ein Laufwerk, das aus
+`/Storage` gezogen wird, wird nie kopiert oder verschoben: Es hinterlässt
+eine Verknüpfung dort, wo es abgelegt wird, und der Zeiger zeigt einen
+gebogenen Pfeil. Die Verknüpfung öffnet das Laufwerk, solange es
+angeschlossen ist; ist es das nicht, sagt das Öffnen dies, und auf dem
+Desktop wird sie blass gezeichnet.
 Kopieren oder Verschieben behält die Lücken jeder Datei und ihre
 erweiterten Attribute, etwa einen RISC-OS-Dateityp; ein Attribut, das das
 Ziel nicht aufnehmen kann, wird nach Abschluss des Vorgangs in einer
 Warnung genannt.
+
+Liegt dort schon ein Eintrag gleichen Namens, fragt das eigene Fenster des
+Vorgangs, was mit ihm geschehen soll: *Ersetzen* setzt den neuen an seine
+Stelle, *Überspringen* lässt den vorhandenen stehen, und *Anhalten* beendet
+den Vorgang, wobei erhalten bleibt, was er schon getan hat. Trifft ein Ordner
+auf einen gleichnamigen Ordner, bietet er *Zusammenführen* statt *Ersetzen*
+an: Sein Inhalt kommt in den vorhandenen Ordner, und nach jeder Datei darin,
+die es dort schon gibt, wird eigens gefragt. Ein Häkchen bei *Dasselbe für
+jede schon vorhandene Datei tun* gibt jeder weiteren Frage nach einer Datei
+dieselbe Antwort. Trifft ein Ordner auf einen Ordner, steht am Kästchen
+*Dasselbe für jeden schon vorhandenen Ordner tun*, und es beantwortet nur
+weitere Ordner, sodass nach jeder Datei in einem zusammengeführten Ordner
+weiterhin gefragt wird. `Escape` ist *Anhalten*, und `Enter` gibt die Wahl,
+auf der die Tastatur steht — zuerst *Überspringen*; `Tab` wechselt zwischen
+dem Kästchen und den Wahlmöglichkeiten, und `Space` setzt das Häkchen. Auf dem
+Desktop steht ein ersetzter Eintrag dort, wo er abgelegt wurde, während ein
+übersprungener oder zusammengeführter bleibt, wo er war.
 
 Das Rechtsklickmenü beginnt mit *Anzeige*. Darunter nennt ein Untermenü,
 worauf das Menü wirkt — *Datei ‚notes.txt‘*, ein langer Name in der Mitte
@@ -119,7 +154,9 @@ Einträge ausgewählt sind — und enthält *Öffnen*, *Öffnen mit…*,
 *Schreibgeschützt einhängen*, *Auswerfen*, *Informationen…*, *Umbenennen*,
 *Ausschneiden*, *Kopieren* und *Löschen*; eine Zeile, die dort nicht wirken
 kann, ist ausgegraut und nennt den Grund. Danach folgen *Neu*, dann *Alles
-auswählen* und *Auswahl aufheben* und zuletzt *Einfügen*. Ein Rechtsklick
+auswählen* und *Auswahl aufheben* und dann *Einfügen*. Im Papierkorb steht
+*Papierkorb leeren* zuletzt: sobald Sie bestätigen, entfernt dieser Eintrag
+alles im Papierkorb endgültig. Ein Rechtsklick
 auf eine freie Stelle hebt die Auswahl auf, sodass das Untermenü des
 Eintrags ausgegraut ist.
 
@@ -167,8 +204,7 @@ einer Spalte ordnet die Liste ebenfalls danach, ein zweiter Klick kehrt die
 Reihenfolge um. Ordner bleiben bei jeder gewählten Reihenfolge oben, sofern
 die Einstellungen sie nicht zwischen die Dateien stellen.
 
-*Einstellungen…* im Menü des Platzes auf der Symbolleiste oder `Ctrl+,`
-öffnet die Einstellungen des Browsers in der Anwendung Einstellungen, unter
+`Ctrl+,` öffnet die Einstellungen des Browsers in der Anwendung Einstellungen, unter
 *Dateien*: wo sich ein neues Fenster öffnet, wie Fenster ihre Einträge zeigen
 und ordnen und ob ein neues die Orte-Leiste und die Werkzeugleiste zeigt;
 ob Ordner oben bleiben; welche Namensendungen und welche Einträge
@@ -190,15 +226,19 @@ jeweils als gewöhnlicher, berechtigungsgeprüfter Schreibvorgang unter Ihrer
 eigenen Identität — eine Ablehnung nennt den Grund und ändert nichts. Einen
 Eigentümer neu zuzuweisen erfordert die Berechtigung `CAP_FS_CHOWN`; eine
 Sitzung ohne sie sieht Eigentümer und Gruppe mit einem Schloss markiert und
-eine Zeile, die den Grund nennt.
+eine Zeile, die den Grund nennt. Das Fenster *Informationen* eines Laufwerks
+öffnet sich auf seinem Abschnitt *Laufwerk*, dessen Feld *Titel* den Titel des
+Datenträgers auf dieselbe Weise ändert: Klicken Sie darauf oder drücken Sie
+`Tab`, geben Sie den neuen Titel ein und drücken Sie `Return`; `Escape` stellt
+ihn wieder her.
 
-`Links` und `Rechts` wechseln zwischen den Abschnitten des Fensters. Unter
-*Berechtigungen* führt `Runter` oder `Tab` in die Bedienelemente: die
-Pfeiltasten wechseln zwischen ihnen, `Space` schaltet eine Berechtigung um
-oder öffnet Eigentümer oder Gruppe zum Bearbeiten, und `Tab` oder `Escape`
-kehrt zu den Abschnitten zurück.
+Die Pfeiltasten `Left` und `Right` wechseln zwischen den Abschnitten des
+Fensters. Unter *Berechtigungen* führt `Down` oder `Tab` in die
+Bedienelemente: die Pfeiltasten wechseln zwischen ihnen, `Space` schaltet
+eine Berechtigung um oder öffnet Eigentümer oder Gruppe zum Bearbeiten,
+und `Tab` oder `Escape` kehrt zu den Abschnitten zurück.
 
-Der Operand `pfad` wird als nicht vertrauenswürdige Eingabe behandelt:
+Der Operand `path` wird als nicht vertrauenswürdige Eingabe behandelt:
 er muss ein absoluter Pfad innerhalb der Pfadlängengrenze des Systems
 sein, und jeder seiner Bestandteile muss ein echter Name sein — `.` und
 `..` sind das nicht, sodass eine Schreibweise nie etwas anderes bedeuten
@@ -214,12 +254,12 @@ Fenster lässt. Ein zweiter Operand wird rundweg abgelehnt statt ignoriert.
   Platz auf der Symbolleiste, der Ihre Orte und die eingebundenen Datenträger
   anbietet, und keine Möglichkeit zu beenden. Die Desktop-Sitzung übergibt
   dies immer, wenn sie den Dateimanager startet, der nur damit läuft; ein
-  zusätzlich genannter `pfad` öffnet dort ein Fenster.
-- `--mount` — `pfad` als Datenträgerabbild oder Archiv öffnen, wie beim
+  zusätzlich genannter `path` öffnet dort ein Fenster.
+- `--mount` — `path` als Datenträgerabbild oder Archiv öffnen, wie beim
   Öffnen in einem Fenster: es wird für Sie eingehängt und sein Fenster
   öffnet sich, und es wird wieder ausgehängt, sobald seine Fenster
   geschlossen sind, wie es die Einstellungen vorsehen. Die Option benötigt
-  einen `pfad`.
+  einen `path`.
 - `-h, -?` — die kurze Hilfe dieses Befehls anzeigen und beenden.
 
 ## EXIT STATUS

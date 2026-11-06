@@ -14,7 +14,6 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::fs::{FS_NAME_MAX, FS_SYMLINK_MAX};
-use tairix_abi::ROOT_VIEW;
 
 use super::VfsError;
 
@@ -30,23 +29,6 @@ pub const MAX_COMPONENT_LEN: usize = FS_NAME_MAX;
 /// Bounds resolution work and stack depth. Raising it is a reviewed change
 /// here, not a per-call override.
 pub const MAX_PATH_COMPONENTS: usize = 64;
-
-/// Resolve a machine-alias name to the top-level view component it roots at.
-///
-/// TAIRiX storage is a forest of named roots (`docs/src/filesystem/drives.md`):
-/// a path names its root explicitly, and `System:` is a canonical first-class
-/// root of which `/System` is merely the synthetic-view *projection*. The
-/// **machine aliases** are therefore exactly [`ROOT_VIEW`] — one definition,
-/// so the view and the alias namespace can never drift apart.
-/// `System:/Kernel/x` and `/System/Kernel/x` name the same object.
-///
-/// Session and volume aliases are published by their owning services when
-/// those land, never invented ahead of a live publisher, so an unknown name
-/// resolves to `None` and the caller fails closed.
-#[must_use]
-pub fn resolve_machine_alias(name: &str) -> Option<&'static str> {
-    ROOT_VIEW.iter().copied().find(|root| *root == name)
-}
 
 /// An absolute, normalised filesystem path.
 ///
@@ -332,6 +314,18 @@ pub fn spell(components: &[String]) -> Result<String, VfsError> {
     Ok(out)
 }
 
+/// Where a symbolic link's target starts.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Anchor {
+    /// The directory holding the link.
+    Here,
+    /// The floor of the link's own projection.
+    Floor,
+    /// Another root — an alias, or a volume by its identity — which no walk
+    /// follows: a caller resolves such a target itself.
+    Elsewhere,
+}
+
 /// A parsed symbolic-link target.
 ///
 /// Unlike a [`Path`], a target is *not* required to be absolute and *may*
@@ -348,19 +342,19 @@ pub fn spell(components: &[String]) -> Result<String, VfsError> {
 /// every consumer must handle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinkTarget {
-    absolute: bool,
+    anchor: Anchor,
     steps: Vec<TargetStep>,
 }
 
 impl LinkTarget {
-    /// Whether the target restarts from the floor of the link's own
-    /// projection.
+    /// Where the target starts.
     #[must_use]
-    pub fn is_absolute(&self) -> bool {
-        self.absolute
+    pub const fn anchor(&self) -> Anchor {
+        self.anchor
     }
 
-    /// The target's steps, in order, owned.
+    /// The target's steps, in order, owned: none for one rooted
+    /// [`Elsewhere`](Anchor::Elsewhere), which is never walked.
     #[must_use]
     pub fn into_steps(self) -> Vec<TargetStep> {
         self.steps
@@ -371,20 +365,34 @@ impl LinkTarget {
 ///
 /// The bytes are untrusted on-disk data, so every step is bounds- and
 /// shape-checked and the whole target is refused on any failure — a
-/// partially-parsed target is never resolved.
+/// partially-parsed target is never resolved. A target the path grammar roots
+/// at an alias or a volume's identity ([`tairix_path::names_another_root`]) is
+/// [`Anchor::Elsewhere`], judged by that grammar alone, since only a caller
+/// ever resolves it.
 ///
 /// # Errors
 ///
 /// Returns [`VfsError::InvalidPath`] if `text` is empty, longer than
 /// [`tairix_abi::fs::FS_SYMLINK_MAX`], carries an over-long name, a NUL, or
-/// more than [`MAX_PATH_COMPONENTS`] steps.
+/// more than [`MAX_PATH_COMPONENTS`] steps, or is rooted at an alias or a
+/// resolver the path grammar refuses.
 pub fn parse_link_target(text: &str) -> Result<LinkTarget, VfsError> {
     if text.is_empty() || text.len() > FS_SYMLINK_MAX {
         return Err(VfsError::InvalidPath);
     }
-    let (absolute, rest) = match text.strip_prefix('/') {
-        Some(rest) => (true, rest),
-        None => (false, text),
+    match tairix_path::names_another_root(text) {
+        Ok(false) => {}
+        Ok(true) => {
+            return Ok(LinkTarget {
+                anchor: Anchor::Elsewhere,
+                steps: Vec::new(),
+            });
+        }
+        Err(_) => return Err(VfsError::InvalidPath),
+    }
+    let (anchor, rest) = match text.strip_prefix('/') {
+        Some(rest) => (Anchor::Floor, rest),
+        None => (Anchor::Here, text),
     };
     let mut steps = Vec::new();
     for raw in rest.split('/') {
@@ -404,10 +412,10 @@ pub fn parse_link_target(text: &str) -> Result<LinkTarget, VfsError> {
     }
     // `/` alone is a legal target (the root); a bare empty relative target
     // is not, and was rejected above.
-    if steps.is_empty() && !absolute {
+    if steps.is_empty() && anchor == Anchor::Here {
         return Err(VfsError::InvalidPath);
     }
-    Ok(LinkTarget { absolute, steps })
+    Ok(LinkTarget { anchor, steps })
 }
 
 #[cfg(test)]
@@ -473,9 +481,6 @@ mod tests {
     }
 
     /// A path the heap cannot hold is refused, never an abort.
-    ///
-    /// Regression: parsing a path, spelling one and taking its parent
-    /// allocated infallibly.
     #[test]
     fn a_path_the_heap_cannot_hold_is_refused() {
         use crate::test_alloc::past_each_refusal;
@@ -504,7 +509,7 @@ mod tests {
     #[test]
     fn link_target_keeps_dot_dot_and_drops_dot() {
         let t = parse_link_target("a/./b/../c").expect("legal target");
-        assert!(!t.is_absolute());
+        assert_eq!(t.anchor(), Anchor::Here);
         assert_eq!(
             t.into_steps(),
             [
@@ -518,11 +523,12 @@ mod tests {
 
     #[test]
     fn link_target_records_absoluteness() {
-        assert!(parse_link_target("/System/x").expect("legal").is_absolute());
-        assert!(!parse_link_target("System/x").expect("legal").is_absolute());
+        let anchor = |text: &str| parse_link_target(text).expect("legal").anchor();
+        assert_eq!(anchor("/System/x"), Anchor::Floor);
+        assert_eq!(anchor("System/x"), Anchor::Here);
         // `/` alone is the root and is legal; a bare relative nothing is not.
         let root = parse_link_target("/").expect("root is a legal target");
-        assert!(root.is_absolute() && root.into_steps().is_empty());
+        assert!(root.anchor() == Anchor::Floor && root.into_steps().is_empty());
         assert_eq!(parse_link_target(""), Err(VfsError::InvalidPath));
         assert_eq!(parse_link_target("."), Err(VfsError::InvalidPath));
     }
@@ -603,19 +609,44 @@ mod tests {
         assert!(!sys.is_prefix_of(&syslike));
     }
 
+    /// A target rooted at an alias or a volume's identity is never walked
+    /// here; one the path grammar reads as such a root but refuses names
+    /// nothing, and a resource reference's shape stays a name in the link's
+    /// own directory.
     #[test]
-    fn every_machine_alias_roots_at_its_own_top_level_component() {
-        for name in ROOT_VIEW {
-            assert_eq!(resolve_machine_alias(name), Some(name));
+    fn a_target_naming_another_root_is_never_walked() {
+        for elsewhere in [
+            "id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/",
+            "id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/Documents/../x",
+            "Home:/Documents",
+            "System:/Applications/Editor.app",
+            "alias::Home/Documents",
+        ] {
+            let target = parse_link_target(elsewhere).expect("a legal target");
+            assert_eq!(target.anchor(), Anchor::Elsewhere, "{elsewhere}");
+            assert!(target.into_steps().is_empty(), "{elsewhere}");
         }
-    }
-
-    #[test]
-    fn unknown_machine_alias_fails_closed() {
-        assert_eq!(resolve_machine_alias("Apps"), None, "there is no /Apps");
-        assert_eq!(resolve_machine_alias("Home"), None);
-        assert_eq!(resolve_machine_alias("system"), None);
-        assert_eq!(resolve_machine_alias(""), None);
-        assert_eq!(resolve_machine_alias("Storage2"), None);
+        for refused in [
+            "id::B7F2/",
+            "fs::arxfs/x",
+            "::x",
+            "Home:/a//b",
+            "Home:/a/\u{7}",
+        ] {
+            assert_eq!(
+                parse_link_target(refused),
+                Err(VfsError::InvalidPath),
+                "{refused:?}"
+            );
+        }
+        let named = parse_link_target("SYS:C/Dir").expect("a foreign body");
+        assert_eq!(named.anchor(), Anchor::Here);
+        assert_eq!(
+            named.into_steps(),
+            [
+                TargetStep::Name("SYS:C".into()),
+                TargetStep::Name("Dir".into()),
+            ]
+        );
     }
 }

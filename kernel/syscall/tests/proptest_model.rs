@@ -534,6 +534,16 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn shm_grant_to(
+        &self,
+        _c: &CallerContext<'_>,
+        _region: u64,
+        _recipient: u64,
+        _recipient_len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn call_peer_holds(
         &self,
         _c: &CallerContext<'_>,
@@ -711,6 +721,16 @@ impl SyscallHandlers for CountingHandlers {
         Ok(0)
     }
     fn self_origin(&self, _c: &CallerContext<'_>, _out: u64, _out_cap: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn child_origin(
+        &self,
+        _c: &CallerContext<'_>,
+        _pid: i64,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
         self.bump();
         Ok(0)
     }
@@ -1193,6 +1213,15 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn volume_replay(
+        &self,
+        _c: &CallerContext<'_>,
+        _request: u64,
+        _request_len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn volume_read(
         &self,
         _c: &CallerContext<'_>,
@@ -1467,7 +1496,8 @@ fn dispatch_capability_gate_tracks_oracle() {
                     }
                 }
                 let caps =
-                    TaskCapabilities::derive(ProcessId(7), UserId(1), cap_set, cap_set, &sink);
+                    TaskCapabilities::derive(ProcessId(7), UserId(1), cap_set, cap_set, &sink)
+                        .expect("derived");
                 let ctx = CallerContext {
                     task_id: TaskId(7),
                     caps: &caps,

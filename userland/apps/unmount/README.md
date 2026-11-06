@@ -32,7 +32,10 @@ private volume lists neither its file name nor its bindings, so a miss beside
 one says to name it by where it is mounted in `/Storage`. On a healthy volume `--force` still commits cleanly —
 nothing is discarded when a clean flush is possible.
 
-The crate is both the pure `no_std` engine library (parser, resolver,
+A name is resolved by the one resolution `label` shares,
+`tairix_procinfo::named_volume`.
+
+The crate is both the pure `no_std` engine library (parser, engine,
 seams — host-tested against in-memory fixtures) and the freestanding
 `Run` program (`src/run.rs`), which wires the shared
 `tairix_procinfo::IpcTransport`, the `volume_detach` syscall wrapper,

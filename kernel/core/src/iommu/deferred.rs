@@ -252,7 +252,10 @@ impl Translation {
             audit_unbatched(self.audit, "cannot_park");
             return;
         };
-        parker.register(&DEFERRED_FREE_WAITQ, None);
+        if parker.register(&DEFERRED_FREE_WAITQ, None).is_err() {
+            audit_unbatched(self.audit, "cannot_park");
+            return;
+        }
         self.batch.lock().serving = true;
         loop {
             yielder.park();

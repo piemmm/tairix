@@ -1,7 +1,10 @@
+use tairix_abi::window_ipc::WindowSizing;
+use tairix_controls::{ScrollBar, ScrollOrientation};
 use tairix_geometry::Scale;
 use tairix_theme::{Theme, ThemeRegistry};
 
-use super::{Faces, Floor, Layout, Needs, LEAST_WELL, MIN_CANVAS, MOST_WELL};
+use super::{Faces, Floor, Layout, Needs, LEAST_WELL, MIN_CANVAS, MOST_WELL, WELLS_HEIGHT};
+use crate::layers_pane::LayerMeasures;
 use crate::pane::{Arrangement, PaneKind, Side};
 use crate::view::MOST_WELLS;
 
@@ -16,9 +19,16 @@ fn needs(wells: usize) -> Needs {
         recents: 0,
         tool_box: SLOT,
         tool_box_length: 9 * (SLOT + 8),
-        adjustment: 0,
+        tool_box_least: 3 * SLOT + 8,
+        layers: LayerMeasures {
+            panel: 80,
+            row: 34,
+            count: 3,
+        },
+        operations: [super::BodyHeights::default(); 2],
         view_strip: 188,
         bar_rows: 1,
+        chosen: [None; PaneKind::ALL.len()],
     }
 }
 
@@ -197,10 +207,16 @@ fn the_least_window_seats_its_bars_and_the_largest_palette_round_a_canvas() {
     assert!(least.canvas().width >= MIN_CANVAS);
     assert!(least.canvas().height >= MIN_CANVAS);
     assert!(least.tools().height >= floor.tool_box.1, "a tool showing");
+    assert!(
+        !slot(&least, PaneKind::Colour).bar.is_empty(),
+        "held to its least, the colour pane scrolls"
+    );
     assert_eq!(
         least.dock_on(Side::Right).rect.width,
-        Layout::dock_inner_width(theme, Scale::ONE) + 2 * theme.metrics().control_gap,
-        "the dock at its width"
+        Layout::dock_inner_width(theme, Scale::ONE)
+            + 2 * metrics.control_gap
+            + metrics.scrollbar_breadth,
+        "the dock at its width beside the bar"
     );
 }
 
@@ -225,11 +241,15 @@ fn a_tiny_window_gives_up_its_canvas_first() {
     }
 }
 
+/// A body asking for more than its dock holds stays within the dock and is
+/// laid out whole beside a bar that scrolls it, the dock widened by the bar
+/// so its content keeps its width.
 #[test]
-fn a_dock_asking_for_more_than_there_is_is_cut_to_the_dock() {
+fn a_body_asking_for_more_than_its_dock_holds_scrolls_within_it() {
     let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
     let layout = layout(
-        registry.active(),
+        theme,
         900,
         640,
         Needs {
@@ -237,7 +257,30 @@ fn a_dock_asking_for_more_than_there_is_is_cut_to_the_dock() {
             ..needs(17)
         },
     );
-    assert!(layout.picker().bottom() <= layout.dock().bottom());
+    let colour = slot(&layout, PaneKind::Colour);
+    let dock = layout.dock_on(Side::Right).rect;
+    assert!(
+        colour.body.bottom() <= dock.bottom(),
+        "the body stays in its dock"
+    );
+    assert!(!colour.bar.is_empty(), "and scrolls by a bar");
+    assert_eq!(
+        (colour.bar.right(), colour.bar.height),
+        (colour.body.right(), colour.body.height),
+        "down its right"
+    );
+    assert_eq!(colour.viewport().right(), colour.bar.left());
+    assert_eq!(colour.content.top(), colour.body.top());
+    assert!(colour.content.height > colour.body.height, "laid out whole");
+    assert_eq!(layout.picker().height, 10_000, "the picker kept whole");
+    let metrics = theme.metrics();
+    assert_eq!(
+        dock.width,
+        Layout::dock_inner_width(theme, Scale::ONE)
+            + 2 * metrics.control_gap
+            + metrics.scrollbar_breadth,
+        "the dock widened by the bar"
+    );
 }
 
 #[test]
@@ -274,6 +317,31 @@ fn slot(layout: &Layout, kind: PaneKind) -> super::PaneSlot {
     *layout.pane(kind).expect("the pane is shown")
 }
 
+/// An operation pane given less than shows it whole has its settings laid out
+/// whole from its body's top beside the bar, as the Colour pane's are, rather
+/// than squeezed into what shows.
+#[test]
+fn an_operation_pane_given_less_lays_its_settings_out_whole() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let mut needs = needs(17);
+    needs.operations[0] = super::BodyHeights {
+        least: 40,
+        natural: 5_000,
+        fit: super::Fit::Scrolled,
+    };
+    let mut panes = Arrangement::default();
+    panes.show(PaneKind::Adjustments);
+    let layout = arranged(theme, 900, 640, needs, &panes);
+    let adjustments = slot(&layout, PaneKind::Adjustments);
+    assert!(!adjustments.bar.is_empty(), "scrolled by a bar");
+    let gap = Scale::ONE.scale_length(theme.metrics().control_gap).max(1);
+    let settings = layout.operation_settings(PaneKind::Adjustments);
+    assert_eq!(settings, adjustments.content.inset(gap / 2));
+    assert!(settings.height > adjustments.body.height, "laid out whole");
+    assert!(settings.right() <= adjustments.bar.left(), "beside the bar");
+}
+
 #[test]
 fn a_pane_is_its_mini_band_over_its_body() {
     let registry = ThemeRegistry::with_builtins();
@@ -291,8 +359,9 @@ fn a_pane_is_its_mini_band_over_its_body() {
         assert_eq!(pane.body.top(), pane.header.bottom(), "{kind:?}");
         assert_eq!(pane.body.bottom(), pane.frame.bottom(), "{kind:?}");
     }
-    assert_eq!(layout.pane(PaneKind::Adjustment), None);
-    assert!(layout.adjustment().is_empty());
+    assert_eq!(layout.pane(PaneKind::Adjustments), None);
+    assert!(layout.operation(PaneKind::Adjustments).is_empty());
+    assert!(layout.layers().rows.is_empty(), "the Layers pane hidden");
     assert_eq!(
         slot(&layout, PaneKind::Colour)
             .body
@@ -373,11 +442,12 @@ fn the_colour_pane_stacks_its_wells_controls_picker_and_recent_colours() {
     assert!(layout.picker().bottom() < layout.recents().top());
     assert_eq!(layout.recents().height, 54);
     let short = layout_short(registry.active(), tall);
+    assert_eq!(short.recents().height, 54, "every part kept whole");
+    assert!(short.picker().bottom() < short.recents().top());
     assert!(
-        short.recents().is_empty(),
-        "the recent colours give way first, whole"
+        !slot(&short, PaneKind::Colour).bar.is_empty(),
+        "scrolled into view by the pane's bar"
     );
-    assert!(!short.picker().is_empty());
 }
 
 fn layout_short(theme: &Theme, needs: Needs) -> Layout {
@@ -426,7 +496,7 @@ fn a_floating_palette_is_a_near_square_grid_beside_the_window() {
         (4 * MOST_WELL, 5 * MOST_WELL),
         "the clear ink on a row of its own"
     );
-    assert_eq!(floating.wells_view(), wells, "it never scrolls");
+    assert_eq!(floating.wells_view(), wells, "it opens showing every well");
     assert!(floating.palette_bar().is_empty() && floating.pop_out().is_empty());
     let frame = floating.pane(PaneKind::Palette).expect("floating").frame;
     assert_eq!(floating.palette(), frame);
@@ -491,5 +561,329 @@ fn the_least_window_lays_out_the_strip_it_was_floored_on() {
         least.canvas().height,
         MIN_CANVAS,
         "the strip is exactly as tall as the floor allowed it"
+    );
+}
+
+/// The layout of a palette of `wells` wells, the last the clear ink, floating
+/// in a tool window resized to `size`.
+fn floating_at(theme: &Theme, wells: usize, size: (u32, u32)) -> Layout {
+    let mut panes = Arrangement::default();
+    panes.float(PaneKind::Palette);
+    let mut chosen = [None; PaneKind::ALL.len()];
+    chosen[PaneKind::Palette.index()] = Some(size);
+    let colours = Needs {
+        clear: true,
+        chosen,
+        ..needs(wells)
+    };
+    arranged(theme, 900, 640, colours, &panes)
+}
+
+/// The client length `count` wells span floating, with the gap either side.
+fn wells_of(theme: &Theme, count: u32) -> u32 {
+    count * MOST_WELL + 2 * theme.metrics().control_gap
+}
+
+/// A floating palette keeps its wells' size and sets as many to a row as the
+/// width it is given holds, from one up to every well.
+#[test]
+fn a_floating_palette_reflows_to_the_width_it_is_given() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    for (across, columns) in [(0, 1), (1, 1), (3, 3), (6, 6), (17, 17), (40, 17)] {
+        let palette = floating_at(theme, 17, (wells_of(theme, across), wells_of(theme, 17)));
+        assert_eq!(palette.columns(), columns, "{across} wells across");
+        assert_eq!(palette.palette_well(), MOST_WELL, "{across} wells across");
+        assert_eq!(
+            palette.swatches().width,
+            MOST_WELL * u32::try_from(columns).expect("fits"),
+            "{across} wells across"
+        );
+    }
+}
+
+/// A floating palette scrolls down, by a bar down its right, only where the
+/// rows its width sets out are more than its height holds; the strip scrolls
+/// along.
+#[test]
+fn a_floating_palette_scrolls_down_only_where_its_wells_overflow() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let metrics = theme.metrics();
+    let (gap, bar) = (metrics.control_gap, metrics.scrollbar_breadth);
+    let fits = floating_at(theme, 17, (wells_of(theme, 6), wells_of(theme, 3)));
+    assert_eq!(fits.columns(), 6);
+    assert!(
+        fits.palette_bar().is_empty(),
+        "three rows of six hold seventeen"
+    );
+    assert_eq!(fits.wells_view(), fits.swatches());
+    let short = floating_at(theme, 17, (wells_of(theme, 6), wells_of(theme, 2) + 8));
+    assert_eq!(short.columns(), 5, "the bar takes a column's room");
+    assert_eq!(short.palette_axis(), ScrollOrientation::Vertical);
+    let (room, scroll) = (short.palette().inset(gap), short.palette_bar());
+    assert_eq!(
+        (scroll.right(), scroll.top(), scroll.width, scroll.height),
+        (room.right(), room.top(), bar, room.height),
+        "down the room's right"
+    );
+    assert_eq!(
+        short.swatches().height,
+        4 * MOST_WELL,
+        "seventeen in rows of five"
+    );
+    assert_eq!(short.wells_view().height, room.height);
+    assert!(
+        short.wells_view().right() <= scroll.left(),
+        "clear of the bar"
+    );
+    let strip = layout(theme, 900, 640, needs(17));
+    assert_eq!(strip.palette_axis(), ScrollOrientation::Horizontal);
+}
+
+/// A floating palette may be resized between one column of its wells, with
+/// its bar where it may need one, and one row of them; it opens inside that
+/// range and never shows a bar shorter than the least one is drawn at.
+#[test]
+fn a_floating_palette_is_held_between_one_column_and_one_row() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let metrics = theme.metrics();
+    let (gap, bar) = (metrics.control_gap, metrics.scrollbar_breadth);
+    let least = ScrollBar::least_length(bar, Scale::ONE, theme);
+    for (wells, inner) in [
+        (2, (2 * MOST_WELL, MOST_WELL)),
+        (5, (3 * MOST_WELL, 2 * MOST_WELL)),
+        (17, (MOST_WELL + bar, least)),
+        (257, (MOST_WELL + bar, least)),
+    ] {
+        let mut panes = Arrangement::default();
+        panes.float(PaneKind::Palette);
+        let colours = Needs {
+            clear: true,
+            ..needs(wells)
+        };
+        let opened = arranged(theme, 900, 640, colours, &panes);
+        let palette = opened.pane(PaneKind::Palette).expect("floating");
+        let (least_w, least_h) = (inner.0 + 2 * gap, inner.1 + 2 * gap);
+        let line = u32::try_from(wells).expect("fits") * MOST_WELL + 2 * gap;
+        assert_eq!(
+            palette.sizing,
+            WindowSizing::Resizable {
+                min_width_px: least_w,
+                min_height_px: least_h,
+                max_width_px: line,
+                max_height_px: line,
+            },
+            "{wells} wells"
+        );
+        assert!(
+            (least_w..=line).contains(&palette.frame.width)
+                && (least_h..=line).contains(&palette.frame.height),
+            "{wells} wells open inside their range"
+        );
+        let held = floating_at(theme, wells, (u32::MAX, 1));
+        let frame = held.pane(PaneKind::Palette).expect("floating").frame;
+        assert_eq!(
+            (frame.width, frame.height),
+            (line, least_h),
+            "{wells} wells held to their range"
+        );
+        let shown = floating_at(theme, wells, (0, 0)).palette_bar();
+        assert!(
+            shown.is_empty() || shown.height >= least,
+            "{wells} wells: no bar shorter than its least"
+        );
+    }
+}
+
+/// Only the floating palette and the floating Layers pane may be resized;
+/// every other floating pane, and every docked one, keeps its own size.
+#[test]
+fn only_the_floating_palette_and_layers_are_resizable() {
+    let registry = ThemeRegistry::with_builtins();
+    let mut panes = Arrangement::default();
+    for kind in [PaneKind::Palette, PaneKind::Tools, PaneKind::Layers] {
+        panes.float(kind);
+    }
+    let floating = arranged(registry.active(), 900, 640, needs(17), &panes);
+    assert_eq!(floating.floating().len(), 3);
+    for slot in floating.floating() {
+        assert_eq!(
+            slot.sizing.resizable(),
+            slot.kind != PaneKind::Tools,
+            "{:?}",
+            slot.kind
+        );
+    }
+    let docked = layout(registry.active(), 900, 640, needs(17));
+    for slot in docked.panes() {
+        assert_eq!(slot.sizing, WindowSizing::Fixed, "{:?}", slot.kind);
+    }
+}
+
+/// A palette of fewer wells than four opens in one row of them, no broader
+/// than its wells.
+#[test]
+fn a_palette_of_fewer_wells_than_four_floats_in_one_row_of_them() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let mut panes = Arrangement::default();
+    panes.float(PaneKind::Palette);
+    let colours = Needs {
+        clear: true,
+        ..needs(3)
+    };
+    let tiny = arranged(theme, 900, 640, colours, &panes);
+    assert_eq!(tiny.columns(), 3);
+    let frame = tiny.pane(PaneKind::Palette).expect("floating").frame;
+    let gap = theme.metrics().control_gap;
+    assert_eq!(
+        (frame.width, frame.height),
+        (3 * MOST_WELL + 2 * gap, MOST_WELL + 2 * gap)
+    );
+}
+
+/// What the Colour and Layers panes ask for in the two tests below: a
+/// colour picker far taller than any dock, and forty rows of layers.
+fn crowded() -> Needs {
+    Needs {
+        picker: 2000,
+        colour_controls: 60,
+        layers: LayerMeasures {
+            panel: 80,
+            row: 34,
+            count: 40,
+        },
+        ..needs(17)
+    }
+}
+
+/// A dock seats every band first, then each body its least, then grows the
+/// bodies towards what shows them whole, the pane opened last first.
+#[test]
+fn a_dock_seats_every_band_then_each_least_then_grows_the_pane_opened_last() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let gap = theme.metrics().control_gap;
+    let band = tairix_controls::TitleBar::height_of(
+        tairix_controls::TitleBarCommands::Pane,
+        Scale::ONE,
+        theme,
+    );
+    let colour_least = WELLS_HEIGHT + 60 + 2 * gap;
+    let layers_least = 80 + gap + 2 * 34 + gap;
+    let mut panes = Arrangement::default();
+    panes.show(PaneKind::Layers);
+    let opened_layers_last = arranged(theme, 900, 700, crowded(), &panes);
+    let dock = opened_layers_last.dock_on(Side::Right).rect;
+    let (colour, layers) = (
+        slot(&opened_layers_last, PaneKind::Colour),
+        slot(&opened_layers_last, PaneKind::Layers),
+    );
+    assert_eq!((colour.header.height, layers.header.height), (band, band));
+    assert_eq!(
+        colour.body.height, colour_least,
+        "the colour pane at its least"
+    );
+    assert_eq!(
+        layers.frame.bottom(),
+        dock.bottom() - tairix_geometry::to_i32(gap / 2),
+        "the Layers pane, opened last, given the rest"
+    );
+    panes.toggle_collapsed(PaneKind::Colour);
+    panes.toggle_collapsed(PaneKind::Colour);
+    let opened_colour_last = arranged(theme, 900, 700, crowded(), &panes);
+    assert_eq!(
+        slot(&opened_colour_last, PaneKind::Layers).body.height,
+        layers_least,
+        "now the Layers pane keeps its least"
+    );
+    assert!(
+        slot(&opened_colour_last, PaneKind::Colour).body.height > colour_least,
+        "and the colour pane, opened last, grows"
+    );
+    let tiny = arranged(theme, 900, 140, crowded(), &panes);
+    for kind in [PaneKind::Colour, PaneKind::Layers] {
+        assert_eq!(
+            slot(&tiny, kind).header.height,
+            band,
+            "{kind:?}: its band seated"
+        );
+    }
+}
+
+/// The Layers pane scrolls its own rows: given less than every row, it is
+/// laid out in what it is given, the bar its own.
+#[test]
+fn the_layers_pane_scrolls_its_own_rows_beneath_its_controls() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let mut panes = Arrangement::default();
+    panes.show(PaneKind::Layers);
+    let short = arranged(theme, 900, 700, crowded(), &panes);
+    let layers = slot(&short, PaneKind::Layers);
+    assert!(layers.bar.is_empty(), "no bar of the dock's");
+    assert_eq!(layers.content, layers.body);
+    let placed = short.layers();
+    assert_eq!(placed.panel.height, 80, "the controls stay put");
+    assert!(placed.rows.top() > placed.panel.bottom());
+    assert!(!placed.bar.is_empty(), "forty rows overflow");
+    assert_eq!(
+        placed.bar.right(),
+        placed.rows.right() + tairix_geometry::to_i32(placed.bar.width)
+    );
+    assert_eq!(placed.count, 40);
+}
+
+/// The Layers pane floats in a window resized between its least and the
+/// height that shows every row, and from its breadth to twice it.
+#[test]
+fn a_floating_layers_pane_is_resized_between_its_least_and_every_row() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let gap = theme.metrics().control_gap;
+    let mut panes = Arrangement::default();
+    panes.float(PaneKind::Layers);
+    let opened = arranged(theme, 900, 640, needs(17), &panes);
+    let width = Layout::dock_inner_width(theme, Scale::ONE) + 2 * gap;
+    let (least, natural) = (80 + gap + 2 * 34 + gap, 80 + gap + 3 * 34 + gap);
+    let layers = slot(&opened, PaneKind::Layers);
+    assert_eq!(
+        layers.sizing,
+        WindowSizing::Resizable {
+            min_width_px: width,
+            min_height_px: least,
+            max_width_px: 2 * width,
+            max_height_px: natural,
+        }
+    );
+    assert_eq!(
+        (layers.frame.width, layers.frame.height),
+        (width, natural),
+        "it opens showing every row"
+    );
+    let mut chosen = [None; PaneKind::ALL.len()];
+    chosen[PaneKind::Layers.index()] = Some((width + 40, least + 10));
+    let resized = arranged(
+        theme,
+        900,
+        640,
+        Needs {
+            chosen,
+            ..needs(17)
+        },
+        &panes,
+    );
+    let frame = slot(&resized, PaneKind::Layers).frame;
+    assert_eq!((frame.width, frame.height), (width + 40, least + 10));
+    assert_eq!(
+        resized.layers().bounds,
+        frame.inset(gap / 2),
+        "laid out within it"
+    );
+    assert!(
+        !resized.layers().bar.is_empty(),
+        "its rows scrolling where they overflow"
     );
 }

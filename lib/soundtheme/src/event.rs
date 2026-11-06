@@ -33,6 +33,8 @@ pub enum SoundAsset {
     Warning,
     /// Something worth knowing.
     Info,
+    /// The output's new level, heard.
+    Volume,
 }
 
 /// The extension every asset is stored under.
@@ -40,7 +42,7 @@ pub const SOUND_FILE_EXTENSION: &str = ".flac";
 
 impl SoundAsset {
     /// Every asset.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Startup,
         Self::Shutdown,
         Self::Login,
@@ -53,6 +55,7 @@ impl SoundAsset {
         Self::Error,
         Self::Warning,
         Self::Info,
+        Self::Volume,
     ];
 
     /// The asset `event` plays.
@@ -71,6 +74,7 @@ impl SoundAsset {
             SoundEvent::Error => Self::Error,
             SoundEvent::Warning => Self::Warning,
             SoundEvent::Info => Self::Info,
+            SoundEvent::VolumeFeedback => Self::Volume,
         }
     }
 
@@ -91,6 +95,7 @@ impl SoundAsset {
             Self::Error => "error",
             Self::Warning => "warning",
             Self::Info => "info",
+            Self::Volume => "volume",
         }
     }
 

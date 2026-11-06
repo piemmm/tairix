@@ -245,7 +245,13 @@ This crate owns:
   pixel's four channels, for a soft shape drawn in one colour; it is proved to
   be exactly the alpha the pixel blur computes. `soften_coverage` is the one
   soft-shadow recipe over it — `SOFTEN_PASSES` passes, near-Gaussian — shared
-  by a text run's shadow and a pointer's. The blur is a horizontal
+  by a text run's shadow and a pointer's. `box_blur16` is the same window over
+  `Pixel16`, a premultiplied pixel at sixteen bits a channel that an eight-bit
+  colour goes into (`Color::premultiply16`) and comes back out of exactly, so a
+  Gaussian of several passes — Paint's blur and unsharp mask — rounds each at
+  sixteen bits rather than eight and a translucent pixel keeps its colour; its
+  mean is the same exact reciprocal, worked out for sixteen-bit sums
+  (`DeepDivisor`). The blur is a horizontal
   pass then a vertical one carrying running sums, so the cost is the region's
   area whatever the radius. Every channel including alpha is averaged, which
   on premultiplied data is the convex combination compositing would give, so

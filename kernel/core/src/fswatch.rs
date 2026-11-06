@@ -1093,10 +1093,10 @@ impl WatchRegistry {
     /// feed it, retiring any table an earlier registration of the volume left
     /// behind: its nodes' pinned ids name nothing in this one.
     ///
-    /// [`None`] while a live wrapper already feeds a volume of the same
-    /// identity — a second device carrying the same volume id must not report
-    /// its changes to the first one's watchers — or if the registry cannot
-    /// grow.
+    /// [`None`] while a live wrapper already feeds a volume published under
+    /// the same key — a second device must never report its changes to the
+    /// first one's watchers, and a twin is published under a key of its own —
+    /// or if the registry cannot grow.
     #[must_use]
     pub fn claim(
         &'static self,

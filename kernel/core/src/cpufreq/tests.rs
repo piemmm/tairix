@@ -71,12 +71,13 @@ impl TargetWaiter for ScriptedWaiter {
         self.now_ns.load(Ordering::Relaxed)
     }
 
-    fn park(&self, deadline_ns: u64) {
+    fn park(&self, deadline_ns: u64) -> bool {
         if deadline_ns == crate::waitq::NO_DEADLINE {
             self.settled.store(true, Ordering::Relaxed);
         } else {
             self.now_ns.store(deadline_ns, Ordering::Relaxed);
         }
+        true
     }
 
     fn kill_pending(&self) -> bool {
@@ -91,9 +92,26 @@ impl TargetWaiter for DoomedWaiter {
     fn now_ns(&self) -> u64 {
         0
     }
-    fn park(&self, _deadline_ns: u64) {}
+    fn park(&self, _deadline_ns: u64) -> bool {
+        true
+    }
     fn kill_pending(&self) -> bool {
         true
+    }
+}
+
+/// A [`TargetWaiter`] no scheduler can park.
+struct UnparkableWaiter;
+
+impl TargetWaiter for UnparkableWaiter {
+    fn now_ns(&self) -> u64 {
+        1_000
+    }
+    fn park(&self, _deadline_ns: u64) -> bool {
+        false
+    }
+    fn kill_pending(&self) -> bool {
+        false
     }
 }
 
@@ -181,6 +199,19 @@ fn a_terminated_mechanism_unwinds_its_wait() {
         assert_eq!(
             domain::wait(DRIVER, handle, first.seq, &DoomedWaiter),
             Err(Errno::Interrupted)
+        );
+    });
+}
+
+/// A wait its scheduler cannot park ends rather than spins.
+#[test]
+fn a_wait_no_scheduler_can_park_fails_closed() {
+    with_mechanism(stepped_range(), 1_000, |handle| {
+        let waiter = ScriptedWaiter::at(1_000);
+        let first = domain::wait(DRIVER, handle, 0, &waiter).expect("the bind boost");
+        assert_eq!(
+            domain::wait(DRIVER, handle, first.seq, &UnparkableWaiter),
+            Err(Errno::NotImplemented)
         );
     });
 }

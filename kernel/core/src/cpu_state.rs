@@ -18,6 +18,7 @@ use tairix_sync::{OnceCell, SpinLock};
 
 use crate::procsignal::ThreadGate;
 use crate::procspace::ProcessSpace;
+use crate::sleeplock::LineRow;
 
 /// Type-erased continuation handle for the task currently running on a CPU.
 ///
@@ -35,6 +36,8 @@ use crate::procspace::ProcessSpace;
 pub(crate) struct ResumeHandle {
     ctl: NonNull<()>,
     thunk: unsafe fn(NonNull<()>, TaskAction),
+    /// Recovers the task's line row from the same block, where it has one.
+    row: Option<unsafe fn(NonNull<()>) -> Arc<LineRow>>,
 }
 
 impl ResumeHandle {
@@ -53,7 +56,34 @@ impl ResumeHandle {
         Self {
             ctl: ctl.cast(),
             thunk,
+            row: None,
         }
+    }
+
+    /// Pair the handle with the thunk that recovers its task's line row too.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::new`]: `row` must be monomorphised over the type `new`
+    /// erased.
+    #[must_use]
+    pub(crate) unsafe fn with_row(self, row: unsafe fn(NonNull<()>) -> Arc<LineRow>) -> Self {
+        Self {
+            row: Some(row),
+            ..self
+        }
+    }
+
+    /// The published task's line row, where its handle carries one.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::suspend`].
+    #[must_use]
+    pub(crate) unsafe fn line_row(self) -> Option<Arc<LineRow>> {
+        // SAFETY: the caller's contract is the thunk's, and `with_row` paired
+        // the thunk with the type this pointer addresses.
+        self.row.map(|row| unsafe { row(self.ctl) })
     }
 
     /// Suspend the published task with `action`, returning when it is next

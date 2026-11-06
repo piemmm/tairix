@@ -12,7 +12,7 @@ use core::fmt;
 
 use tairix_abi::{CapabilityId, UNASSIGNABLE_ID};
 use tairix_caps::CapabilitySet;
-use tairix_util::fallible::{collected, concatenated, written};
+use tairix_util::fallible::{concatenated, copied, written};
 
 use crate::password::{PasswordRecord, Salt, StoredPassword};
 use crate::ParseError;
@@ -280,8 +280,7 @@ impl UserRecord {
             username: copy(identity.username)?,
             uid: identity.uid,
             primary_gid: identity.primary_gid,
-            supplementary_gids: collected(gids.len(), gids.iter().copied())
-                .ok_or(ParseError::OutOfMemory)?,
+            supplementary_gids: copied(gids).ok_or(ParseError::OutOfMemory)?,
             display_name: copy(identity.display_name)?,
             home: identity.home.map(copy).transpose()?,
             shell: identity.shell.map(copy).transpose()?,

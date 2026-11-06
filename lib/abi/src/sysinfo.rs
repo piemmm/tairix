@@ -3014,9 +3014,9 @@ pub const MOUNT_TARGET_MAX: usize = 64;
 /// keeps a hostile reply from claiming an unbounded type string.
 pub const MOUNT_FSTYPE_MAX: usize = 16;
 
-/// The stable volume identity a [`MountRecord`] carries is the one the
-/// volume forest publishes and a `volume_detach` names; all-zero when the
-/// mount has none (the in-RAM layout mounts).
+/// The volume key a [`MountRecord`] carries is the one the volume forest
+/// publishes and a `volume_detach` names, and its identity is as wide; both
+/// are all-zero when the mount has none (the in-RAM layout mounts).
 pub use crate::volume::VOLUME_ID_LEN;
 
 /// The volume identity of a mount or binding that published none: all zero,
@@ -3063,6 +3063,13 @@ pub enum MountAvailability {
     /// recovery or, if the device never comes back, to a vanish state via
     /// the surprise-removal path.
     Recovering = 5,
+    /// The volume was re-inserted and its content proved unmutated, but its
+    /// device could not prove the medium the one its held writes were made
+    /// on: it is mounted read-only with the writes held until an answer — the
+    /// mount authority's, or the seat's for a removable device's volume — says
+    /// whether to write them to it or discard them
+    /// (`docs/src/filesystem/drives.md` §8). They are never written unasked.
+    ReplayUnconfirmed = 6,
 }
 
 /// What a volume's uncommitted writes have to do with a plain detach it was
@@ -3091,7 +3098,9 @@ impl MountAvailability {
         match self {
             Self::UnavailableDirty => Some((Errno::DeviceFault, Retention::Held)),
             Self::UnavailableLost => Some((Errno::DeviceFault, Retention::Lost)),
-            Self::RecoveryConflict => Some((Errno::NotEmpty, Retention::Held)),
+            Self::RecoveryConflict | Self::ReplayUnconfirmed => {
+                Some((Errno::NotEmpty, Retention::Held))
+            }
             Self::Available | Self::Degraded | Self::Recovering => None,
         }
     }
@@ -3110,6 +3119,7 @@ impl MountAvailability {
             3 => Ok(Self::RecoveryConflict),
             4 => Ok(Self::Degraded),
             5 => Ok(Self::Recovering),
+            6 => Ok(Self::ReplayUnconfirmed),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -3161,19 +3171,22 @@ impl MountAvailability {
     /// How far from fully available this state is, as a rank two states can be
     /// ordered by: the higher the rank, the less the volume can be relied on.
     /// The order is available → serving-but-unwell → riding-out-a-blip →
-    /// serving-read-only-in-conflict → vanished-with-writes-held → vanished:
+    /// serving-read-only-awaiting-an-answer → serving-read-only-in-conflict →
+    /// vanished-with-writes-held → vanished:
     /// [`Available`](Self::Available) < [`Degraded`](Self::Degraded) <
     /// [`Recovering`](Self::Recovering) <
+    /// [`ReplayUnconfirmed`](Self::ReplayUnconfirmed) <
     /// [`RecoveryConflict`](Self::RecoveryConflict) <
     /// [`UnavailableDirty`](Self::UnavailableDirty) <
     /// [`UnavailableLost`](Self::UnavailableLost).
     ///
     /// The three live states rank in the order [`crate::raid::ArrayHealth`]
     /// already documents (optimal, degraded, recovering); a state that still
-    /// serves reads outranks one that fails every operation closed, so
-    /// `RecoveryConflict` — a read-only mount whose retained write set is
-    /// still held — sits below the vanish states, and `UnavailableLost`, the
-    /// one state that admits data is gone, is last.
+    /// serves reads outranks one that fails every operation closed, so the two
+    /// read-only mounts whose retained write set is still held sit below the
+    /// vanish states — the one an answer resolves below the one only a force
+    /// does — and `UnavailableLost`, the one state that admits data is gone,
+    /// is last.
     ///
     /// This is the single, explicit definition of "which availability wins"
     /// when a stack of storage layers each report their own
@@ -3188,9 +3201,10 @@ impl MountAvailability {
             Self::Available => 0,
             Self::Degraded => 1,
             Self::Recovering => 2,
-            Self::RecoveryConflict => 3,
-            Self::UnavailableDirty => 4,
-            Self::UnavailableLost => 5,
+            Self::ReplayUnconfirmed => 3,
+            Self::RecoveryConflict => 4,
+            Self::UnavailableDirty => 5,
+            Self::UnavailableLost => 6,
         }
     }
 
@@ -3228,7 +3242,8 @@ impl MountAvailability {
     /// take part. Any transition into or out of a vanish state
     /// ([`UnavailableDirty`](Self::UnavailableDirty) /
     /// [`UnavailableLost`](Self::UnavailableLost) /
-    /// [`RecoveryConflict`](Self::RecoveryConflict)) yields [`None`]: those
+    /// [`RecoveryConflict`](Self::RecoveryConflict) /
+    /// [`ReplayUnconfirmed`](Self::ReplayUnconfirmed)) yields [`None`]: those
     /// are owned by the D4 surprise-removal path (`plans/DEVICES.md`), which
     /// logs its own events, and letting them produce a health event here
     /// would double-count a removal or fabricate a "recovery" for a
@@ -3252,15 +3267,15 @@ impl MountAvailability {
     /// The three-band [`VolumeHealth`] this state falls in: the summary a
     /// surface badges a volume with.
     ///
-    /// [`severity`](Self::severity) ranks all six states so a stack can fold
-    /// them; this bands the ranking into the three answers a reader acts on —
-    /// nothing to do, watch it, it is not serving. One definition, so a
+    /// [`severity`](Self::severity) ranks all seven states so a stack can
+    /// fold them; this bands the ranking into the three answers a reader acts
+    /// on — nothing to do, watch it, it is not serving. One definition, so a
     /// volume cannot read healthy on one surface and at-risk on another.
     #[must_use]
     pub const fn health(self) -> VolumeHealth {
         match self {
             Self::Available => VolumeHealth::Healthy,
-            Self::Degraded | Self::Recovering => VolumeHealth::Degraded,
+            Self::Degraded | Self::Recovering | Self::ReplayUnconfirmed => VolumeHealth::Degraded,
             Self::UnavailableDirty | Self::UnavailableLost | Self::RecoveryConflict => {
                 VolumeHealth::Failing
             }
@@ -3276,7 +3291,7 @@ impl MountAvailability {
 /// process, and borrowing a type whose other states can never arise here
 /// would leave unreachable cases for a reader to puzzle over.
 ///
-/// Derived, never transmitted: the wire carries the six-state
+/// Derived, never transmitted: the wire carries the seven-state
 /// [`MountAvailability`], and every surface bands it the same way through
 /// [`MountAvailability::health`].
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
@@ -3284,7 +3299,8 @@ pub enum VolumeHealth {
     /// The volume is available and reports no fault.
     #[default]
     Healthy,
-    /// The volume is serving, but degraded or recovering.
+    /// The volume is serving, but degraded, recovering, or read-only until
+    /// the user answers for the writes it holds.
     Degraded,
     /// The volume is unavailable: dirty, lost, or in recovery conflict.
     Failing,
@@ -3491,11 +3507,12 @@ impl NetInterfaceRatesRequest {
 /// answer a consumer skips, never a guess.
 ///
 /// Each record also reports the volume's [`MountAvailability`] — so a
-/// surprise-removed volume never masquerades as healthy — and its stable
-/// 16-byte volume identity (all-zero when none is published), the same
-/// identity a `volume_detach` request names, so the unmount tooling can
-/// resolve a catalog name to the volume it detaches without a second query
-/// surface.
+/// surprise-removed volume never masquerades as healthy — the 16-byte key it
+/// is published under (all-zero when none is), the one a `volume_detach`
+/// request names, so the unmount tooling can resolve a catalog name to the
+/// volume it detaches without a second query surface, and the
+/// [`identity`](MountRecord::identity) its content carries, which a twin
+/// shares with the volume published under it.
 ///
 /// The record also carries the backing block device's storage
 /// [`medium`](MountRecord::medium) ([`BlkMedium`]) with the evidence for each
@@ -3504,9 +3521,10 @@ impl NetInterfaceRatesRequest {
 /// with no declared medium and a record the decoder does not define both
 /// report `None`: the record never fabricates a medium.
 ///
-/// Last comes the volume's [`title`](MountRecord::title): the label its
-/// filesystem records, as a disk image's volume attaches and as its owner
-/// retitles it, empty for every other volume and on a
+/// Last come the volume's [`title`](MountRecord::title), the label its
+/// filesystem records — as the probe read it when the volume attached, and as
+/// a retitle set it since — and whether it is [`titled`](MountRecord::titled),
+/// its format taking a title; neither is shown on a
 /// [`withheld`](MountRecord::withheld) record.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -3519,6 +3537,7 @@ pub struct MountRecord {
     medium: [u8; BLK_MEDIUM_LEN],
     usage: VolumeStats,
     volume_id: [u8; VOLUME_ID_LEN],
+    identity: [u8; VOLUME_ID_LEN],
     owner: u32,
     class: VolumeClass,
     private: bool,
@@ -3529,6 +3548,7 @@ pub struct MountRecord {
     fstype: [u8; MOUNT_FSTYPE_MAX],
     title_len: u8,
     title: [u8; VOLUME_TITLE_MAX],
+    titled: bool,
 }
 
 /// The live state of the volume behind a mount: how much of it is in use,
@@ -3555,11 +3575,12 @@ impl MountRecord {
     ///
     /// `4` bytes of flags, three length bytes plus the availability byte,
     /// the storage-medium record, the usage block (`block_size(4)` + reserved
-    /// pad `(4)` + five `u64` counts), the 16-byte volume identity, the
-    /// owner (4), the volume class (1), whether it is private (1), whether it
-    /// is withheld (1) and whether its source was cut (1), the three
-    /// fixed-capacity string buffers, then the title's length (1), its buffer
-    /// and the zero pad closing the record on its eight-byte alignment.
+    /// pad `(4)` + five `u64` counts), the 16-byte volume key and the 16-byte
+    /// identity, the owner (4), the volume class (1), whether it is private
+    /// (1), whether it is withheld (1) and whether its source was cut (1), the
+    /// three fixed-capacity string buffers, then the title's length (1), its
+    /// buffer, whether the volume is titled (1) and the zero pad closing the
+    /// record on its eight-byte alignment.
     pub const WIRE_LEN: usize = Self::PAD_OFFSET.next_multiple_of(8);
 
     /// The storage-medium record ([`BlkMedium::encode`]), which ends where the
@@ -3567,19 +3588,23 @@ impl MountRecord {
     const MEDIUM_OFFSET: usize = 8;
     const USAGE_OFFSET: usize = Self::MEDIUM_OFFSET + BLK_MEDIUM_LEN;
     const VOLUME_ID_OFFSET: usize = Self::USAGE_OFFSET + 48;
-    const OWNER_OFFSET: usize = Self::VOLUME_ID_OFFSET + VOLUME_ID_LEN;
+    const IDENTITY_OFFSET: usize = Self::VOLUME_ID_OFFSET + VOLUME_ID_LEN;
+    const OWNER_OFFSET: usize = Self::IDENTITY_OFFSET + VOLUME_ID_LEN;
     const SOURCE_OFFSET: usize = Self::OWNER_OFFSET + 8;
     const TARGET_OFFSET: usize = Self::SOURCE_OFFSET + MOUNT_SOURCE_MAX;
     const FSTYPE_OFFSET: usize = Self::TARGET_OFFSET + MOUNT_TARGET_MAX;
     const TITLE_OFFSET: usize = Self::FSTYPE_OFFSET + MOUNT_FSTYPE_MAX;
-    const PAD_OFFSET: usize = Self::TITLE_OFFSET + 1 + VOLUME_TITLE_MAX;
+    const TITLED_OFFSET: usize = Self::TITLE_OFFSET + 1 + VOLUME_TITLE_MAX;
+    const PAD_OFFSET: usize = Self::TITLED_OFFSET + 1;
 
     /// Build a record from its parts.
     ///
     /// `state` is the backing volume's live state — its usage, availability,
-    /// and storage medium. `volume_id` is the volume's stable published
-    /// identity, or all-zero when the mount has none (the in-RAM layout
-    /// mounts). A `source` longer than [`MOUNT_SOURCE_MAX`] is cut to fit,
+    /// and storage medium. `volume_id` is the key the volume is published
+    /// under, or all-zero when the mount has none (the in-RAM layout mounts);
+    /// the record's [`identity`](Self::identity) is the same until
+    /// [`with_identity`](Self::with_identity) says otherwise. A `source`
+    /// longer than [`MOUNT_SOURCE_MAX`] is cut to fit,
     /// never inside a UTF-8 character, and the record says so
     /// ([`source_cut`](Self::source_cut)).
     ///
@@ -3626,6 +3651,7 @@ impl MountRecord {
             medium: BlkMedium::encode(state.medium),
             usage,
             volume_id,
+            identity: volume_id,
             owner: MOUNT_NO_OWNER,
             class: VolumeClass::Local,
             private: false,
@@ -3636,6 +3662,7 @@ impl MountRecord {
             fstype: [0u8; MOUNT_FSTYPE_MAX],
             title_len: 0,
             title: [0u8; VOLUME_TITLE_MAX],
+            titled: false,
         };
         record.source[..source.len()].copy_from_slice(source);
         record.target[..target.len()].copy_from_slice(target);
@@ -3669,9 +3696,22 @@ impl MountRecord {
         }
     }
 
+    /// This record, of a volume whose format takes a title where `titled`.
+    #[must_use]
+    pub const fn with_titled(self, titled: bool) -> Self {
+        Self { titled, ..self }
+    }
+
+    /// This record, of a volume whose content carries `identity`: its key
+    /// but for a twin's, published under a key of its own.
+    #[must_use]
+    pub const fn with_identity(self, identity: [u8; VOLUME_ID_LEN]) -> Self {
+        Self { identity, ..self }
+    }
+
     /// This record as a principal other than its owner is shown it: without
-    /// the source its owner attached it from, the usage of what it holds, or
-    /// its title.
+    /// the source its owner attached it from, the usage of what it holds, its
+    /// title, or whether it takes one.
     #[must_use]
     pub fn withheld(self) -> Self {
         Self {
@@ -3681,6 +3721,7 @@ impl MountRecord {
             usage: VolumeStats::default(),
             title_len: 0,
             title: [0; VOLUME_TITLE_MAX],
+            titled: false,
             withheld: true,
             ..self
         }
@@ -3744,11 +3785,21 @@ impl MountRecord {
         BlkMedium::decode(&self.medium)
     }
 
-    /// The volume's stable published identity, or all-zero when the mount
-    /// has none.
+    /// The key the volume is published under — its stable identity, or a
+    /// twin's own — or all-zero when the mount has none: what an `id::` path
+    /// and a `volume_detach` name it by.
     #[must_use]
     pub fn volume_id(&self) -> [u8; VOLUME_ID_LEN] {
         self.volume_id
+    }
+
+    /// The identity the volume's content carries: its
+    /// [`volume_id`](Self::volume_id) but for a twin, which shares it with the
+    /// volume published under it; all-zero exactly when the key is. What a
+    /// durable reference to the medium itself names.
+    #[must_use]
+    pub const fn identity(&self) -> [u8; VOLUME_ID_LEN] {
+        self.identity
     }
 
     /// The volume's space accounting (all-zero when no backing volume
@@ -3785,6 +3836,15 @@ impl MountRecord {
         VolumeTitle::from_wire(self.title_len, &self.title).unwrap_or(VolumeTitle::EMPTY)
     }
 
+    /// Whether the volume's format takes a title a retitle can set, where the
+    /// volume takes writes and the caller may: false for a disc, whose title
+    /// is fixed when it is mastered, for an archive or a share, and on a
+    /// [`withheld`](Self::withheld) record.
+    #[must_use]
+    pub const fn titled(&self) -> bool {
+        self.titled
+    }
+
     /// Encode `self` into its little-endian wire representation.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -3802,8 +3862,8 @@ impl MountRecord {
         put_u64(&mut out, Self::USAGE_OFFSET + 24, self.usage.avail_blocks);
         put_u64(&mut out, Self::USAGE_OFFSET + 32, self.usage.files);
         put_u64(&mut out, Self::USAGE_OFFSET + 40, self.usage.files_free);
-        out[Self::VOLUME_ID_OFFSET..Self::VOLUME_ID_OFFSET + VOLUME_ID_LEN]
-            .copy_from_slice(&self.volume_id);
+        out[Self::VOLUME_ID_OFFSET..Self::IDENTITY_OFFSET].copy_from_slice(&self.volume_id);
+        out[Self::IDENTITY_OFFSET..Self::OWNER_OFFSET].copy_from_slice(&self.identity);
         put_u32(&mut out, Self::OWNER_OFFSET, self.owner);
         out[Self::OWNER_OFFSET + 4] = self.class as u8;
         out[Self::OWNER_OFFSET + 5] = u8::from(self.private);
@@ -3816,7 +3876,8 @@ impl MountRecord {
         out[Self::FSTYPE_OFFSET..Self::FSTYPE_OFFSET + MOUNT_FSTYPE_MAX]
             .copy_from_slice(&self.fstype);
         out[Self::TITLE_OFFSET] = self.title_len;
-        out[Self::TITLE_OFFSET + 1..Self::PAD_OFFSET].copy_from_slice(&self.title);
+        out[Self::TITLE_OFFSET + 1..Self::TITLED_OFFSET].copy_from_slice(&self.title);
+        out[Self::TITLED_OFFSET] = u8::from(self.titled);
         out
     }
 
@@ -3831,10 +3892,12 @@ impl MountRecord {
     ///   known [`MountFlags`] mask, the availability byte or the volume class
     ///   names no known state, a reserved pad is non-zero, the usage block is
     ///   internally inconsistent (available exceeding free, or free exceeding
-    ///   total — a hostile reply, refused whole), a withheld record carries
-    ///   a source, usage or title, a source marked cut is shorter than a cut
-    ///   leaves one, or the title is not text with no control character and
-    ///   nothing past its length.
+    ///   total — a hostile reply, refused whole), an identity is carried
+    ///   without a key or a key without one, a withheld record carries a
+    ///   source, usage, title or titled flag, a source marked cut is shorter
+    ///   than a cut leaves one, a flag byte is neither `0` nor `1`, or the
+    ///   title is not text with no control character and nothing past its
+    ///   length.
     /// * [`Errno::LengthOutOfRange`] if any length byte exceeds its buffer.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
@@ -3886,7 +3949,7 @@ impl MountRecord {
             return Err(Errno::OutOfRange);
         }
         let mut title_image = [0u8; VOLUME_TITLE_MAX];
-        title_image.copy_from_slice(&bytes[Self::TITLE_OFFSET + 1..Self::PAD_OFFSET]);
+        title_image.copy_from_slice(&bytes[Self::TITLE_OFFSET + 1..Self::TITLED_OFFSET]);
         let title =
             VolumeTitle::from_wire(bytes[Self::TITLE_OFFSET], &title_image).map_err(|errno| {
                 match errno {
@@ -3894,19 +3957,25 @@ impl MountRecord {
                     _ => Errno::OutOfRange,
                 }
             })?;
-        if withheld && (source_len != 0 || usage != VolumeStats::default() || !title.is_empty()) {
+        let titled = decode_bool(bytes[Self::TITLED_OFFSET])?;
+        if withheld
+            && (source_len != 0 || usage != VolumeStats::default() || !title.is_empty() || titled)
+        {
             return Err(Errno::OutOfRange);
         }
         if source_cut && usize::from(source_len) + CUT_BACKOFF_MAX < MOUNT_SOURCE_MAX {
             return Err(Errno::OutOfRange);
         }
         let mut volume_id = [0u8; VOLUME_ID_LEN];
+        let mut identity = [0u8; VOLUME_ID_LEN];
+        volume_id.copy_from_slice(&bytes[Self::VOLUME_ID_OFFSET..Self::IDENTITY_OFFSET]);
+        identity.copy_from_slice(&bytes[Self::IDENTITY_OFFSET..Self::OWNER_OFFSET]);
+        if (volume_id == VOLUME_ID_UNPUBLISHED) != (identity == VOLUME_ID_UNPUBLISHED) {
+            return Err(Errno::OutOfRange);
+        }
         let mut source = [0u8; MOUNT_SOURCE_MAX];
         let mut target = [0u8; MOUNT_TARGET_MAX];
         let mut fstype = [0u8; MOUNT_FSTYPE_MAX];
-        volume_id.copy_from_slice(
-            &bytes[Self::VOLUME_ID_OFFSET..Self::VOLUME_ID_OFFSET + VOLUME_ID_LEN],
-        );
         source.copy_from_slice(&bytes[Self::SOURCE_OFFSET..Self::SOURCE_OFFSET + MOUNT_SOURCE_MAX]);
         target.copy_from_slice(&bytes[Self::TARGET_OFFSET..Self::TARGET_OFFSET + MOUNT_TARGET_MAX]);
         fstype.copy_from_slice(&bytes[Self::FSTYPE_OFFSET..Self::FSTYPE_OFFSET + MOUNT_FSTYPE_MAX]);
@@ -3919,6 +3988,7 @@ impl MountRecord {
             medium,
             usage,
             volume_id,
+            identity,
             owner: read_u32(bytes, Self::OWNER_OFFSET),
             class,
             private,
@@ -3929,6 +3999,7 @@ impl MountRecord {
             fstype,
             title_len: title.len_byte(),
             title: *title.raw_bytes(),
+            titled,
         })
     }
 }
@@ -7657,10 +7728,12 @@ mod tests {
     #[test]
     fn a_plain_detach_is_refused_only_for_held_or_lost_writes() {
         use MountAvailability::{
-            Available, Degraded, Recovering, RecoveryConflict, UnavailableDirty, UnavailableLost,
+            Available, Degraded, Recovering, RecoveryConflict, ReplayUnconfirmed, UnavailableDirty,
+            UnavailableLost,
         };
         for (state, refusal) in [
             (Available, None),
+            (ReplayUnconfirmed, Some((Errno::NotEmpty, Retention::Held))),
             (
                 UnavailableDirty,
                 Some((Errno::DeviceFault, Retention::Held)),
@@ -9175,7 +9248,7 @@ mod tests {
             volume_id,
         )
         .unwrap();
-        assert_eq!(MountRecord::WIRE_LEN, 488);
+        assert_eq!(MountRecord::WIRE_LEN, 504);
         // The record's in-memory image is its wire image: the generated C
         // view mirrors one layout, not two.
         assert_eq!(core::mem::size_of::<MountRecord>(), MountRecord::WIRE_LEN);
@@ -9223,11 +9296,56 @@ mod tests {
         assert_eq!(rec.availability(), MountAvailability::UnavailableDirty);
         assert_eq!(rec.volume_id(), volume_id);
         assert_eq!(
+            rec.identity(),
+            volume_id,
+            "published under its own identity"
+        );
+        assert_eq!(
             rec.medium(),
             Some(BlkMedium::of_transport(BlkTransport::Nvme))
         );
         let decoded = MountRecord::from_bytes(&rec.to_le_bytes()).unwrap();
         assert_eq!(decoded, rec);
+    }
+
+    #[test]
+    fn a_twins_mount_record_carries_its_identity_beside_its_key() {
+        let record = |volume_id| {
+            MountRecord::new(
+                b"backup_2",
+                b"/Storage/backup_2",
+                b"fat32",
+                MountFlags::NOEXEC,
+                MountVolumeState {
+                    usage: VolumeStats::default(),
+                    availability: MountAvailability::Available,
+                    medium: None,
+                },
+                volume_id,
+            )
+            .unwrap()
+        };
+        let (key, identity) = ([0xA5; 16], [0x5A; 16]);
+        let twin = record(key).with_identity(identity);
+        assert_eq!((twin.volume_id(), twin.identity()), (key, identity));
+        assert_eq!(MountRecord::from_bytes(&twin.to_le_bytes()), Ok(twin));
+        assert_eq!(twin.withheld().identity(), identity);
+        let unpublished = record(super::VOLUME_ID_UNPUBLISHED);
+        assert_eq!(unpublished.identity(), super::VOLUME_ID_UNPUBLISHED);
+        assert_eq!(
+            MountRecord::from_bytes(&unpublished.to_le_bytes()),
+            Ok(unpublished)
+        );
+        for half in [
+            unpublished.with_identity(identity),
+            record(key).with_identity(super::VOLUME_ID_UNPUBLISHED),
+        ] {
+            assert_eq!(
+                MountRecord::from_bytes(&half.to_le_bytes()),
+                Err(Errno::OutOfRange),
+                "an identity is carried exactly when a key is"
+            );
+        }
     }
 
     #[test]
@@ -9395,6 +9513,41 @@ mod tests {
         );
     }
 
+    /// Whether a volume takes a title crosses the wire as a flag byte of its
+    /// own, withheld with the title, and nothing but `0` or `1` is a flag.
+    #[test]
+    fn a_mount_record_says_whether_its_volume_takes_a_title() {
+        let record = MountRecord::new(
+            b"stick",
+            b"/Storage/stick",
+            b"fat32",
+            MountFlags::NOEXEC,
+            MountVolumeState {
+                usage: VolumeStats::default(),
+                availability: MountAvailability::Available,
+                medium: None,
+            },
+            [7; 16],
+        )
+        .unwrap();
+        assert!(!record.titled(), "untitled until said otherwise");
+        let titled = record.with_titled(true);
+        let bytes = titled.to_le_bytes();
+        assert_eq!(MountRecord::from_bytes(&bytes), Ok(titled));
+        assert!(MountRecord::from_bytes(&bytes).unwrap().titled());
+        assert!(!titled.withheld().titled(), "withheld with the title");
+        let mut bad = bytes;
+        bad[MountRecord::TITLED_OFFSET] = 2;
+        assert_eq!(MountRecord::from_bytes(&bad), Err(Errno::OutOfRange));
+        let mut withheld = titled.withheld().to_le_bytes();
+        withheld[MountRecord::TITLED_OFFSET] = 1;
+        assert_eq!(
+            MountRecord::from_bytes(&withheld),
+            Err(Errno::OutOfRange),
+            "a withheld record says nothing of its title"
+        );
+    }
+
     #[test]
     fn a_withheld_binding_keeps_where_the_volume_is_but_not_what_of_it_is_shown() {
         let binding =
@@ -9505,10 +9658,11 @@ mod tests {
             MountAvailability::RecoveryConflict,
             MountAvailability::Degraded,
             MountAvailability::Recovering,
+            MountAvailability::ReplayUnconfirmed,
         ] {
             assert_eq!(MountAvailability::from_u8(state.as_u8()), Ok(state));
         }
-        assert_eq!(MountAvailability::from_u8(6), Err(Errno::OutOfRange));
+        assert_eq!(MountAvailability::from_u8(7), Err(Errno::OutOfRange));
     }
 
     #[test]
@@ -9550,10 +9704,11 @@ mod tests {
 
     #[test]
     fn availability_ranks_from_available_to_gone_and_folds_to_the_worst() {
-        const ORDER: [MountAvailability; 6] = [
+        const ORDER: [MountAvailability; 7] = [
             MountAvailability::Available,
             MountAvailability::Degraded,
             MountAvailability::Recovering,
+            MountAvailability::ReplayUnconfirmed,
             MountAvailability::RecoveryConflict,
             MountAvailability::UnavailableDirty,
             MountAvailability::UnavailableLost,
@@ -9593,16 +9748,21 @@ mod tests {
 
     #[test]
     fn health_bands_the_availability_ranking_monotonically() {
-        const ORDER: [MountAvailability; 6] = [
+        const ORDER: [MountAvailability; 7] = [
             MountAvailability::Available,
             MountAvailability::Degraded,
             MountAvailability::Recovering,
+            MountAvailability::ReplayUnconfirmed,
             MountAvailability::RecoveryConflict,
             MountAvailability::UnavailableDirty,
             MountAvailability::UnavailableLost,
         ];
         assert_eq!(MountAvailability::Available.health(), VolumeHealth::Healthy);
-        for state in [MountAvailability::Degraded, MountAvailability::Recovering] {
+        for state in [
+            MountAvailability::Degraded,
+            MountAvailability::Recovering,
+            MountAvailability::ReplayUnconfirmed,
+        ] {
             assert_eq!(state.health(), VolumeHealth::Degraded);
         }
         for state in [
@@ -9662,12 +9822,18 @@ mod tests {
     #[test]
     fn health_transition_ignores_the_surprise_removal_vanish_states() {
         use MountAvailability::{
-            Available, Degraded, Recovering, RecoveryConflict, UnavailableDirty, UnavailableLost,
+            Available, Degraded, Recovering, RecoveryConflict, ReplayUnconfirmed, UnavailableDirty,
+            UnavailableLost,
         };
         // Every transition touching a vanish state carries no health edge:
         // the D4 surprise-removal path owns those, so a removal is never
         // double-counted and a re-insert never fabricates a recovery here.
-        let vanish = [UnavailableDirty, UnavailableLost, RecoveryConflict];
+        let vanish = [
+            UnavailableDirty,
+            UnavailableLost,
+            RecoveryConflict,
+            ReplayUnconfirmed,
+        ];
         let live = [Available, Degraded, Recovering];
         for &v in &vanish {
             for &other in live.iter().chain(vanish.iter()) {
@@ -10010,10 +10176,9 @@ mod tests {
         let mut bytes = rec.to_le_bytes();
         bytes[0] = 0xFF;
         assert_eq!(MountRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
-        // An availability byte naming no known state (past the last state,
-        // `Recovering` = 5).
+        // An availability byte naming no known state, past the last.
         let mut bytes = rec.to_le_bytes();
-        bytes[7] = 6;
+        bytes[7] = MountAvailability::ReplayUnconfirmed.as_u8() + 1;
         assert_eq!(MountRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
         // A length byte beyond its buffer.
         let mut bytes = rec.to_le_bytes();

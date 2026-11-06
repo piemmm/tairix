@@ -44,7 +44,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
+use tairix_abi::driver::input::{Input, InputEvent};
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, PortIo8};
 
 #[cfg(test)]
@@ -153,12 +153,7 @@ impl<P: PortIo8> Ps2Keyboard<P> {
         } else {
             u16::from(make)
         };
-        Some(InputEvent {
-            kind: InputEventKind::Key,
-            reserved0: 0,
-            code,
-            value: i32::from(!released),
-        })
+        Some(InputEvent::key(code, !released))
     }
 }
 

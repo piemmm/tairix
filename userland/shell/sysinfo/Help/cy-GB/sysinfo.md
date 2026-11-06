@@ -35,23 +35,52 @@ Yr ymholiadau:
   `CAP_SYSINFO_KERNEL`).
 - `cpu` — dyfnder ciw rhedeg, newidiadau cyd-destun a rhagachubion fesul
   CPU (angen `CAP_SYSINFO_KERNEL`).
-- `irq`, `irqs` — tabl IRQ y cnewyllyn: un rhes fesul llinell ymyrraeth
-  rwymedig — ei rhif, y dasg gyrrwr sy'n berchen arni, nifer yr
-  ymyriadau ers cychwyn, ac a yw'r llinell dan gwarantîn (angen
-  `CAP_SYSINFO_HW`).
 - `cpuinfo` — yr adroddiad prosesydd fesul CPU (uwchset o
   `/proc/cpuinfo`): model a gwneuthurwr, dosbarth perfformiad, baneri
   estyniadau ISA, y gofrestr hunaniaeth grai, cyflymder cloc y craidd a
   fesurwyd yn fyw (mewn MHz — neu «unknown» gonest lle nad oes cownter
   cloc craidd) a'r amledd cyfeirio neu sail amser sefydlog. Ffeithiau
   caledwedd cyhoeddus, nid oes angen unrhyw allu.
-- `storage`, `io` — iechyd M/A storio fesul cyfrol: un rhes fesul cyfrol
-  bloc sy'n ymwybodol o namau — rhagddodiad ei dynodydd parhaol, pen
-  gwasanaeth blociau sy'n ei gwasanaethu, ei argaeledd cyfredol
+- `irq`, `irqs` — tabl IRQ y cnewyllyn: un rhes fesul llinell ymyrraeth
+  rwymedig — ei rhif, y dasg gyrrwr sy'n berchen arni, nifer yr
+  ymyriadau ers cychwyn, ac a yw'r llinell dan gwarantîn (angen
+  `CAP_SYSINFO_HW`).
+- `frames` — yr hyn a gostiodd fframiau cyfansawdd pob sesiwn bwrdd
+  gwaith: un rhes fesul sesiwn sy'n cyhoeddi — y picseli a ailgyfansoddodd
+  ei fframiau a'r cymedr fesul ffrâm, y lluosrif gorddarlunio (cyfraniadau
+  haenau fesul picsel a ddifrodwyd), y gyfran a ddatryswyd drwy gopïo
+  rhediad afloyw, y picseli a ail-niwlwyd gan gefndir gwydr barugog a
+  ailgyfrifwyd, y picseli a drosiwyd ar gyfer sganio allan, y ffrâm unigol
+  waethaf a'i chyfran o'r sgrin, y galwadau gyrrwr a'u cyhoeddodd, a
+  thrawiadau a methiannau storfa dodrefn y ffenestri. Ffigurau'r bwrdd
+  gwaith ei hun yw'r rhain — dim ond proses sy'n dal cyfansoddwr all
+  gyfrif picseli — felly mae pob rhes yn enwi'r cyhoeddwr fel y'i
+  hardystiwyd gan y gwasanaeth, ac nid yw sesiwn nad yw wedi cyhoeddi dim
+  yn argraffu rhes (angen `CAP_SYSINFO_GLOBAL`).
+- `storage`, `io` — tri thabl fesul cyfrol, gydag un rhes ym mhob un
+  fesul cyfrol bloc sy'n ymwybodol o namau, wedi'i hadnabod wrth
+  ragddodiad o ddynodydd parhaol y gyfrol ac yn enwi'r ddyfais sy'n ei
+  gwasanaethu. Yr hunaniaeth honno yw'r pen gwasanaeth blociau sy'n ei
+  gwasanaethu lle mae gyrrwr yng ngofod y defnyddiwr yn gwasanaethu'r
+  ddyfais, a hunaniaeth gadwedig a yrrir gan y cnewyllyn lle mae'r
+  cnewyllyn ei hun yn ei gyrru — y ddisg y cychwynnodd y peiriant ohoni,
+  nad oes ganddi ben gwasanaeth o gwbl. Mae **Gwasanaeth** hefyd yn enwi'r
+  ddyfais: yr enw byr y mae ei gyrrwr ei hun yn ei ddatgan (`virtio-blk`,
+  `emmc2`, `usb-msd`), neu `-` lle nad yw'n datgan un. Mae'n cario'r
+  beitiau cronnol, y ceisiadau a gwblhawyd ac amser prysur y ddyfais y mae
+  darllenydd yn eu troi, drwy wahaniaethau, yn drwybwn, IOPS, defnydd ac
+  amser aros — nid oes dim wedi'i ddeillio ymlaen llaw, felly nid yw dau
+  ddarllenydd byth yn etifeddu'r un ffenestr gyfartalu (nid oes angen
+  gallu). Mae **Ciw** yn cario'r hyn sydd ar y gweill nawr, y cronaduron y
+  mae dyfnder cymedrig yn deillio o'u gwahaniaethau, a'r dyfnder a'r
+  terfyn amser y mae dosbarth y ddyfais ei hun yn eu caniatáu. Mae
+  **Iechyd** yn cario argaeledd cyfredol y gyfrol
   (available/degraded/recovering/lost) a'r cownteri canlyniad cronnol
   (cwblhau, ailosodiadau, terfynau amser, gwallau cyfrwng, ailgyhoeddiadau)
-  y daw disg sy'n methu neu'n ansefydlog i'r golwg arnynt (angen
-  `CAP_SYSINFO_KERNEL`).
+  y daw disg sy'n methu neu'n ansefydlog i'r golwg arnynt. Mae angen
+  `CAP_SYSINFO_KERNEL` ar y ddau olaf; argraffir y tabl gwasanaeth yn
+  gyntaf, felly mae galwr hebddi'n dal i ddarllen y ffigurau defnydd cyn
+  i'r gwrthodiad gael ei adrodd.
 - `raid`, `arrays` — yr araeau RAID cyfansawdd a'r dyfeisiau y mae'r
   cyfansoddwr araeau yn eu dal: un rhes fesul arae — rhagddodiad ei
   hunaniaeth, ei lefel, ei iechyd (optimal/degraded/recovering/failed),
@@ -102,6 +131,8 @@ Heb ymholiad, dangosir y cymorth byr.
 - `sysinfo identity` — argraffu hunaniaeth y peiriant a fersiwn yr
   OS.
 - `sysinfo ps --all` — rhestru pob proses ar y system.
+- `sysinfo frames` — dangos beth y mae fframiau'r bwrdd gwaith yn ei
+  gostio.
 
 ## EXIT STATUS
 

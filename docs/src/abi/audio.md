@@ -67,6 +67,19 @@ the race of the default changing between that enumeration and the open. A
 machine with no default adopted refuses the open rather than substituting a
 device the caller never asked for.
 
+## A sink's monitor
+
+`CaptureSource` is what a capture stream's `device_id` names: `Input`, a
+microphone or line input, or `Monitor`, the mix a sink plays before its own
+level and mute — zero naming the default in either. The kind travels in the id
+(`MONITOR_FLAG`, which no endpoint's id carries), so a monitor opens through
+the same `Open` with the same stream ABI and is gated, counted and audited as
+a capture. Every sink advertises its own (`AudioDeviceDescriptor::monitor`),
+derived as its `audio:` reference is; none is listed among the sources, where
+a list of inputs would offer a speaker's mix as a microphone, and a monitor
+has no controls of its own. In `ListStreams` a capture stream riding a sink is
+that sink's monitor.
+
 ## A stream's level is attenuation
 
 `Gain` carries a `AudioGain`: hundredths of a decibel at or below unity, and
@@ -167,10 +180,12 @@ the tenancy is a session's, and a session's is never the zero no session is.
 
 Opening a *source* additionally demands the capture capability, and every live
 capture stream is machine state the session draws a recording indicator from —
-a recording program cannot suppress it. Monitoring a sink's own mix is
-authorised by holding that seat's lease, so a session may monitor its own
-output and nothing may monitor another principal's; no third capability is
-needed because the lease already expresses exactly the right boundary.
+a recording program cannot suppress it. A sink's monitor is a source too: it
+demands the capture capability **and** that the caller's login session holds
+the room the sink serves, so a session may monitor its own output and nothing
+may monitor another principal's — not even in an unclaimed room, which
+anybody may play into. No third capability is needed: the two boundaries
+together are exactly the right one.
 
 ## Device controls
 
@@ -190,6 +205,6 @@ the `AudioDevices` system notice.
 
 Every decode is total: an unknown magic, version, operation or role, a dirty
 reserved field, an out-of-range rate or latency, a channel map with a repeated
-position, a zero stream id, or a grant naming a reserved rendezvous refuses
-with one typed `Errno`. `lib/abi/tests/fuzz_audio.rs` drives every decoder on
+position, a zero stream id, a device descriptor whose id carries the monitor
+flag, or a grant naming a reserved rendezvous refuses with one typed `Errno`. `lib/abi/tests/fuzz_audio.rs` drives every decoder on
 this page with mutated and pure-noise frames.

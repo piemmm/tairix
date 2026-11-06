@@ -166,6 +166,10 @@ change moves, as every other bar surface does (C.7).
     not be told about the frame in which it drew itself, whereas the retained
     accounting is a truthful count of every frame composed, the monitor's own
     included.
+  - **A capture is not a frame.** `Compositor::compose_capture`
+    (`plans/CAPTURE.md` CP5) counts nothing in `FrameStats` or
+    `DesktopFrameTotals`, so recording the screen never reads as the desktop
+    repainting it.
 
 **A.4's observation channel.** The counters are published where a guest
 can read them: `Compositor::frame_totals` folds each composited frame into a
@@ -1032,11 +1036,12 @@ belongs with E.2's rect-list present.
 ### D.11 The desktop layer repaints the icons that changed, not the screen
 The desktop layer is the **bottom** of the stack, so marking all of it
 recomposites every window above it and drops every frosted backdrop over it.
-`DesktopOutcome::redraw` is **deleted**: `set_focused`, `pointer_moved`,
-`pointer_left`, `press`, `context_press` and `key` each take a
-`tairix_geometry::Region` sink and add the *rectangle* of every icon whose
-appearance changed — hover left and hover taken, old selection and new, the
-selected icon whose focus ring appeared or disappeared. One private
+`set_focused`, `press`, `context_press` and `key` each take a
+`tairix_geometry::Region` sink rather than answering a redraw flag, and add the
+*rectangle* of every icon whose appearance changed — old selection and new, the
+selected icon whose focus ring appeared or disappeared. A pointer over an icon
+changes nothing about it (`plans/PINBOARD.md` §4), so motion adds nothing. One
+private
 `Desktop::mark_icon` spells that rule once, and `IconTile::render` draws strictly
 inside the icon's rectangle, so it is the whole of repainting the icon. A gesture that
 changes nothing visible adds nothing and composes **no frame**.

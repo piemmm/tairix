@@ -20,7 +20,7 @@ This spec defers to its companions and MUST stay consistent with them:
   desktop layer (`Compositor::set_desktop`). The pinboard paints into that
   one layer; it never becomes a window and never gains a second layer. It is
   repainted **per changed icon cell** (`repaint_desktop(area, …)`), never
-  wholesale for a hover, a selection, or a focus change: the desktop is the
+  wholesale for a selection or a focus change: the desktop is the
   bottom layer, so marking all of it recomposites every window above it and
   re-blurs every frosted backdrop over it
   (`plans/FIX-DESKTOP-SPEEDUP.md` D.11).
@@ -74,13 +74,18 @@ requirements.
 | P9 | the Wallpaper pane in `userland/apps/settings`, over the session's two served requests | done, except the picked-directory listing (§8) |
 | P10 | docs, `AGENTS.md` §3, the `plans/` jump-sheet | done |
 | P11 | a `Desktop` folder no watch can follow: said once, read again after a save the desktop makes there and as the mount table moves | done |
-| P12 | a drop onto a `Desktop` folder no watch follows, shown when the dragging application's copy ends | blocked (§8): no event tells the session the copy ended; a completion signal from the dropping application is an open ABI decision |
+| P12 | a drop lands as its source steps it (`WindowRequest::DropLanding`): each name it announces stands where it was let go, and a `Desktop` folder no watch follows is read when the drop ends (§4) | done |
 | P13 | resting desktop names legible on every ground: near-white over a dark halo on a picture, the luminance-picked ink on a flat backdrop | done |
 | P14 | free placement: an icon stands where it is put — carried across the desktop, dropped or saved onto it — its place kept per user in the session's private scope (§4) | done |
 | P15 | *Align to grid*: the `grid` key and the Wallpaper pane's row (§2, §4) | done |
 | P16 | the backdrop menu's *Tidy Up ▸ By Name / By Date / By Size* (§7) | done |
+| P17 | names as a file-manager window shows them: less the endings the file manager's settings hide, ordered by the names shown, hidden items left out unless its settings list them (§4) | done |
+| P18 | a pointer over an icon changes nothing about it (§4) | done |
+| P19 | volume shortcuts: a `/Storage` volume dropped on the desktop is a link to its identity, opened as Storage opens it and drawn faded while absent (§4) | done |
+| P20 | drive icons for the classes the `files.desktop.*` settings tick, `/` as the system drive, each kept under its volume, with *Eject*, *Title* and a refused *Move to Trash* (§4, §7) | done |
+| P21 | selecting several icons as a file-manager window does: a band dragged over the backdrop, Control and Shift presses, the selection carried together, and the one-icon verbs saying several are selected (§4) | done |
 
-§8 records the two capabilities that are absent.
+§8 records the capability that is absent.
 
 ---
 
@@ -271,21 +276,52 @@ engine. What it decides is where each icon stands.
   longer holds whole — a narrower screen, a larger scale — is shown on the
   free cell nearest it, so none piles onto another at the edge, and kept as it
   was.
-- **A drop or a save lands where it is let go.** A drag over the bare desktop
+- **A drop or a save lands where it is let go.** A drag over the desktop
   offers what it carries; let go there, once the dragging application has been
-  told the drop landed there, the files that arrive within `LANDING_WAIT_NS`
-  stand as far from the drop as each picture was held from the press — the
-  pressed file, under its name or one its copy told apart from a name already
-  taken, at its own, and the others in the order they arrive, no more of them
-  than the drag carried — and a save dropped there stands under the pointer.
-  Every offset a drag states is held to the field before it is used. A file
-  that arrives later, or one a drop of one file did not name, takes the next
-  free cell.
+  told the drop landed there, the drop lands as that application steps it
+  (`WindowRequest::DropLanding`): `Making` names each item before its first
+  write, `Made` says what became of it, and `Ended` closes the drop on every
+  way out. An item stands where it was let go from the moment it is listed —
+  each the drag showed as far from the drop as its picture was held from the
+  press, every other on the free cell nearest the drop — one that replaced
+  what had its name moves there, and one skipped, merged into a folder or
+  failed moves nothing. A name the application did not announce is none of
+  the drop's, however like one it is, and takes the next free cell. Every
+  offset a drag states is held to the field before it is used. There is no
+  deadline: a landing waits for its steps, and ends with its application's
+  end, a fifth drop from one window displacing its oldest, or that window
+  going. While an item is written the artwork pictured from inside it is held
+  (`ArtworkDesk::hold_under`), so a half-copied bundle is never decoded and
+  kept refused, and the item is drawn meanwhile by the picture its drag carried
+  (`IconRequest::standing_in`) until its own is read. A save dropped there
+  stands under the pointer under the exact name the session's own open made.
 - **Carrying an icon is the desktop's own drag.** A press on an icon that
   travels past the shared drag slop carries it, in memory alone, for as long
   as the primary button is held (`SessionInputRouter::holds_primary`); the
   release puts it down where it was let go, following first any motion routed
   with it (`Desktop::follow_press`). Nothing under a carried icon lights.
+- **Several icons are selected as a file-manager window selects them.** A
+  press on the backdrop drags out a band (`tairix_browse::marquee`'s look),
+  live once past the drag slop: every icon whose picture or name it touches is
+  selected as it grows, beside what a press with Control or Shift kept, and one
+  it leaves is released unless the press kept it. Escape takes back what it
+  selected; letting go keeps it. Control toggles a pressed icon and Shift adds
+  one, since a placed desktop has no order to run a range along. A press inside
+  a selection of several keeps it, so a carry moves them all by one distance,
+  each settling on its own free cell where icons keep to the grid, and a
+  release that did not travel collapses it to the icon pressed; a secondary
+  press inside it keeps it. *Open* and the keyboard's `Enter`, which act on one
+  icon, say several are selected. The selection is a `tairix_browse::Selection`,
+  the file manager's own, kept by name across a reorder. The band costs its
+  edges: icons whose picture it covers are taken by arithmetic over the grid
+  (`GridView::band_cells_within`), only those along its edges are tested part
+  by part, and a step repaints the icons whose mark changed and the band's own
+  edges (`marquee::report_band`), the band drawn confined to the area repainted.
+- **A pointer over an icon changes nothing about it.** An icon shows its
+  selection plate and tint, the keyboard focus ring, the lit drop target while
+  an accepted drag is over it, and the lift of those carried; there is no
+  hover look and no tooltip, and the cursor stays the arrow. Motion over the
+  desktop follows a carry and does nothing else, so it repaints no cell.
 - **Align to grid** (`grid = true`) settles an icon put down — carried,
   dropped or saved — onto the free cell nearest where it was let go, and onto
   the nearest cell of all when none is free.
@@ -298,6 +334,49 @@ engine. What it decides is where each icon stands.
 - **Sort is a setting** drawn from the shared `SortMode`, so the desktop and
   the file manager still agree on what "by name" means; it orders the icons
   no one placed.
+- **Names are the file manager's.** An icon is named less the endings the file
+  manager's settings hide (`files.hide_app_endings`, on by default, and
+  `files.hide_known_endings`), and the icons are ordered by the names shown,
+  the exact name breaking a tie, as a file-manager window orders them. Each
+  landing of those settings hands the desktop their endings
+  (`Desktop::hide_endings`); a change of them flows again every icon no one
+  placed and repaints the layer whole, since any name may read differently.
+  The trusted picker alone keeps exact names, since it is where an application
+  is granted a file.
+- **Hidden items are the file manager's too.** An item whose name marks it
+  hidden (`tairix_path::is_hidden_name`) has an icon only while
+  `files.hidden_items` lists them, off by default, so a capture's `.keeping`
+  scratch file is never drawn while it is written
+  (`Desktop::show_hidden_items`). What is left out is set aside rather than
+  dropped: its place is followed through a rename and forgotten when its file
+  goes, exactly as an icon's, and showing hidden items puts each back where it
+  was put without reading the folder again.
+- **A volume shortcut is a link to an identity.** A `/Storage` volume dragged
+  onto the desktop or into a folder is never copied or moved: the drop
+  answers `DropOperation::Link`, and files.app makes one link per volume whose
+  target is `id::<identity>/`, the volume's content identity, so it reaches the
+  volume under whatever name it is next attached, and a twin's own key is
+  never recorded. The kernel never walks such a target (`plans/SYMLINKS.md`
+  decision 10); every surface resolves it through
+  `tairix_browse::volume::locate`, which answers Present, Absent or Withheld
+  over the mount table it was handed (`LinkTarget::Volume`). A present volume
+  opens a window on it, as its `/Storage` icon does; an absent one is drawn
+  faded (`IconTile::with_faded`) and opening it states "“X” is not present";
+  one attached for someone else is "not available".
+- **Drives are drawn, never written.** Each attached volume of a class the
+  file manager's `files.desktop.{system,fixed,removable,network,images}` keys
+  tick — removable alone by default, the view's root `/` as the system drive —
+  is an icon of the desktop's own, named by its volume root so no listed name
+  can collide with it, labelled by the volume's title else its catalog name,
+  and kept under `PlaceKey::of_volume` (`pinboard.volume.<identity>`), a key a
+  listing never forgets, so a drive stands where it was put each time it
+  returns. A volume a shortcut already shows is not drawn again, and of twins
+  the one `locate` would open is drawn.
+- **Presence follows the mount table.** The session reads the mount list
+  behind the loop on each mount-table notice, with one read in flight and one
+  owed; a read refused before it ran is asked again after the next answer,
+  and one that failed waits for the next notice. Only icons whose presence or
+  drive changed repaint.
 - **The arrows move on the screen**: an arrow selects the nearest icon that
   way, one off to the side counting its sideways distance twice, and meets
   icons stacked exactly on one another in the order they are drawn; with
@@ -313,17 +392,15 @@ actually lays down, so the ink changes when the picture arrives rather than
 when the setting does. A name on a state's plate keeps the theme's ink, and the
 halo is clipped to the icon's cell, so a cell's repaint still covers
 everything it drew. Each resting name's halo is blurred once and kept until
-the name, the scale or the theme changes, so a repaint — every frame of a
+the name shown, the scale or the theme changes, so a repaint — every frame of a
 crossfade — lays it down again rather than blurring it.
 
 A folder on a volume that records no changes — a network share, the stand-in
 of a volume that has gone away — is listed without a watch (P11). The desktop
 says so once until a watch joins again, on `stderr` and as
 `PINBOARD_UNFOLLOWED` (20036) on the system log, and reads the folder again
-after a save it made there and whenever the mount table moves, which arms a
-watch once the volume records changes again. A copy a dragging application
-makes into such a folder shows on the next of those reads, because no event
-tells the session when that copy ends (P12, §8).
+after a save it made there, when a drop onto it ends (P12) and whenever the
+mount table moves, which arms a watch once the volume records changes again.
 
 ## 5. Decoding, in the sandbox
 
@@ -439,6 +516,9 @@ application's. Its item set is closed:
 | item | effect |
 |------|--------|
 | `Open` | activate the icon under the pointer — offered only over one |
+| `Eject` | eject the drive under the pointer — offered only over a drive, and disabled with its reason where this user may not eject it |
+| `Title` | retitle the drive under the pointer — offered only over a drive, its field opening on the volume's title, and disabled with its reason where this user may not retitle it (`VolumeFacts::retitling_by`) |
+| `Move to Trash` | offered only over a drive and always disabled: a drive stands for its volume and stores no file, so the row says why |
 | `New Folder` | create a uniquely-named folder in `Desktop/` and re-list |
 | `Sort by …` | set `sort` (four marked items) |
 | `Arrange …` | set `icons` (two marked items) |
@@ -452,7 +532,15 @@ so the two can never disagree. Managing an entry — rename, copy, delete,
 properties — is deliberately absent: those verbs live in the file manager,
 which owns them whole, and `Open Desktop Folder` is one row away. Offering a
 half-implemented copy of them here would be the duplication the charter
-forbids.
+forbids. A drive is no file, so none of those verbs reaches it: *Eject* and
+*Title* are its own, carried out on the session's file worker through the
+file manager's one mount act (`MountAct::eject`, `MountAct::retitle`), and
+*Move to Trash* is drawn only to say why it does not apply. An eject first
+holds the volume off every session worker that reads it — the icon readers'
+lane (`lanes::hold`) and the wallpaper preparers
+(`WallpaperDesk::hold_within`) — once the read under way there ends, then
+lets go of the watches and follows the session holds there, so nothing of the
+desktop's own refuses it as busy.
 
 A press on empty backdrop with button 2 does not disturb the selection; a
 press over an icon selects it first, so the menu always acts on what the
@@ -554,17 +642,6 @@ both blockers are decisions for the ABI owners:
 `WallpaperPath` itself already accepts any absolute session-view path, so
 nothing in the settings model needs to change.
 
-**Outstanding — a drop into a `Desktop` folder no watch follows (P12).** A
-copy a dragging application makes into a folder whose volume records no
-changes shows only at the next read of it (§4): the mount table moving, a save
-the desktop makes there, or *Refresh*. By then `LANDING_WAIT_NS` has usually
-passed, so the files take free cells rather than standing where they were let
-go. No event tells the session when the copy ends, and the drag names only the
-item pressed, so a drop's other files are told only by arriving within the
-wait. Both want the dropping application to report what its drop made — a
-completion naming the files — which is an ABI decision for its owners and has
-not been taken.
-
 ## 9. Tests
 
 - **`lib/image`** — hand-built baseline and progressive streams, every
@@ -615,10 +692,24 @@ not been taken.
   their own, a trailing arrangement's places kept against its edge, a tidy
   laying every icon out in order in one change and one of more icons than
   cells standing none on another, a new order flowing only the icons no one
-  placed, a save and a drop landing where they were let go — under a name its
-  copy told apart, and with offsets at the ends of the coordinate space — a
-  late file taking a free cell and a file a one-file drop did not name not
-  taken for it, a record read late moving only what it places, an icon put
+  placed, a save landing where it was let go under the exact name its open
+  made, a band selecting what it touches and nothing short of the drag slop,
+  adding to what Control kept and giving up only what it took, Escape taking
+  it back and a step repainting only what it changed, Control toggling and
+  Shift adding, a still press collapsing several to one, one of several
+  carrying them all, *Open* over several saying why, the band drawn only in
+  the area repainted, and a drop landing as its source steps it — an announced name standing
+  where it was let go from the moment it is listed, one listed long after its
+  drop still standing there, a name it did not announce not taken for it, a
+  replaced item moving and a skipped, merged or failed one not, an item past
+  those shown on the free cell nearest the drop, offsets at the ends of the
+  coordinate space held to the field, the artwork of what is written held
+  until it is done, an unfollowed folder read as the drop ends, and nothing
+  taken after the end, the window engine taking a step only from the drag
+  window's owner, for its serial and in turn, ending a window's oldest landing
+  past the bound and every one with the window or its owner, and the file
+  manager stepping each item around its transfer and ending once — a record
+  read late moving only what it places, an icon put
   down as the record arrives staying where it was put, a place kept for a
   file renamed or gone while away followed or forgotten only once the store is
   read, a place past the record's bound refused and the icon put back, the
@@ -637,6 +728,10 @@ not been taken.
   arrival, and reduced motion arrives before it draws.
 - **The icons** — a resting name light over a halo on a picture and in the ink
   its luminance favours on a flat backdrop, a selected one in the theme's ink;
+  a pointer over an icon drawing the same pixels and owing no repaint; the
+  names shown and pressed following the endings a files apply hides, each over
+  a halo blurred for it, and a change of them flowing again the icons no one
+  placed;
   a name the session made shown by reading an unfollowed folder again, and
   nothing read for one made elsewhere or in a followed folder
   (`userland/gui/session`); a label ink taking the theme foreground's place,
@@ -645,6 +740,21 @@ not been taken.
   `lib/font`); a
   folder no volume records changes for reported unwatched like any other
   refused watch (`lib/browse`).
+- **Drives and volume shortcuts** — `locate` across present, absent and
+  withheld, a twin preferring the attachment keyed by the identity, and a drop
+  of `/Storage` volumes linking each by identity and never copying or moving
+  it (`lib/browse`); a link spelled from another root never walked and read
+  back verbatim (`kernel/core`); a shortcut opening its present volume and
+  refused absent or withheld, only the icons whose presence moved repainting,
+  the drives each class shows with `/` opening the root, a volume drawn once
+  whether by shortcut or twin, *Eject* and *Title* offered where their rules
+  allow, a title's field opening on the volume's title and its commit checked
+  by the one check, *Move to Trash* refused with the reason, a drive's place
+  kept while it is
+  away, and the mount read owed rather than polled (`userland/gui/session`); a
+  faded tile drawing its picture at part strength and its name whole
+  (`lib/controls`); each class a box of its own in Settings ▸ Files, posting
+  the `files.desktop.*` keys (`userland/apps/settings`).
 - **`userland/apps/settings`** — the gallery on the host: the candidate
   model (the "no picture" entry, a picture in effect from outside the
   catalog, which is offered but never asked for), one picture asked for at a

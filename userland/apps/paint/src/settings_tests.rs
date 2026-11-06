@@ -303,11 +303,13 @@ fn the_panes_are_described_where_each_stands() {
     let mut panes = Arrangement::default();
     assert_eq!(
         super::described(&panes),
-        "Tools on the left; Colour on the right; Palette beneath the picture; Adjustment hidden"
+        "Tools on the left; Colour on the right; Palette beneath the picture; \
+         Layers, Adjustments, Effects hidden"
     );
     panes.float(PaneKind::Palette);
     assert_eq!(
         super::described(&panes),
-        "Tools on the left; Colour on the right; Palette floating; Adjustment hidden"
+        "Tools on the left; Colour on the right; Palette floating; \
+         Layers, Adjustments, Effects hidden"
     );
 }

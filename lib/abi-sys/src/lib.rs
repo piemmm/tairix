@@ -89,6 +89,7 @@ const NUM_FILE_UNMAP: u64 = SyscallNumber::FILE_UNMAP.as_u16() as u64;
 const NUM_VOLUME_ATTACH: u64 = SyscallNumber::VOLUME_ATTACH.as_u16() as u64;
 const NUM_VOLUME_DETACH: u64 = SyscallNumber::VOLUME_DETACH.as_u16() as u64;
 const NUM_VOLUME_RETITLE: u64 = SyscallNumber::VOLUME_RETITLE.as_u16() as u64;
+const NUM_VOLUME_REPLAY: u64 = SyscallNumber::VOLUME_REPLAY.as_u16() as u64;
 const NUM_VOLUME_READ: u64 = SyscallNumber::VOLUME_READ.as_u16() as u64;
 const NUM_VOLUME_WRITE: u64 = SyscallNumber::VOLUME_WRITE.as_u16() as u64;
 const NUM_VOLUME_CTL: u64 = SyscallNumber::VOLUME_CTL.as_u16() as u64;
@@ -162,6 +163,9 @@ const NUM_SHM_CREATE_DMA: u64 = SyscallNumber::SHM_CREATE_DMA.as_u16() as u64;
 
 /// `shm_grant_peer` syscall number (as above).
 const NUM_SHM_GRANT_PEER: u64 = SyscallNumber::SHM_GRANT_PEER.as_u16() as u64;
+
+/// `shm_grant_to` syscall number (as above).
+const NUM_SHM_GRANT_TO: u64 = SyscallNumber::SHM_GRANT_TO.as_u16() as u64;
 
 /// `call_peer_holds` syscall number (as above).
 const NUM_CALL_PEER_HOLDS: u64 = SyscallNumber::CALL_PEER_HOLDS.as_u16() as u64;
@@ -246,6 +250,7 @@ const NUM_FS_CHDIR: u64 = SyscallNumber::FS_CHDIR.as_u16() as u64;
 const NUM_FS_GETCWD: u64 = SyscallNumber::FS_GETCWD.as_u16() as u64;
 const NUM_RESOURCE_OPEN: u64 = SyscallNumber::RESOURCE_OPEN.as_u16() as u64;
 const NUM_SELF_ORIGIN: u64 = SyscallNumber::SELF_ORIGIN.as_u16() as u64;
+const NUM_CHILD_ORIGIN: u64 = SyscallNumber::CHILD_ORIGIN.as_u16() as u64;
 const NUM_PIPE_CREATE: u64 = SyscallNumber::PIPE_CREATE.as_u16() as u64;
 const NUM_PTY_CREATE: u64 = SyscallNumber::PTY_CREATE.as_u16() as u64;
 const NUM_PTY_SET_SIZE: u64 = SyscallNumber::PTY_SET_SIZE.as_u16() as u64;
@@ -1737,6 +1742,26 @@ pub extern "C" fn sys_volume_retitle(request: *const u8, request_len: usize) -> 
     }
 }
 
+/// `volume_replay`: answer for the writes held for a re-inserted volume whose
+/// device could not prove its medium (`SyscallNumber::VOLUME_REPLAY`).
+/// `request`/`request_len` name an encoded answer frame: the volume's 16-byte
+/// key, then one `TAIRIX_VOLUME_REPLAY_*` byte. `TAIRIX_CAP_FS_MOUNT` answers
+/// for any such volume, and the process holding the seat, with
+/// `TAIRIX_CAP_DISPLAY`, for a removable one. Returns a `TAIRIX_E_*` code.
+#[must_use]
+#[export_name = "tairix_sys_volume_replay"]
+pub extern "C" fn sys_volume_replay(request: *const u8, request_len: usize) -> i32 {
+    // SAFETY: see `sys_yield`. The kernel validates the `(request,
+    // request_len)` pair against the caller's address space before reading
+    // it; a bad pointer is refused, never dereferenced here.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_VOLUME_REPLAY,
+            [request as u64, request_len as u64, 0, 0, 0, 0],
+        ))
+    }
+}
+
 /// `volume_read`: read `len` bytes of whole blocks from block `lba` of served
 /// volume `volume` into `buf` (`SyscallNumber::VOLUME_READ`). Returns a
 /// `TAIRIX_E_*` code; needs `TAIRIX_CAP_FS_SERVE` and a grant on the volume.
@@ -2548,6 +2573,25 @@ pub extern "C" fn sys_self_origin(out: *mut c_void, out_cap: usize) -> u64 {
     unsafe { raw_syscall(NUM_SELF_ORIGIN, [ptr_arg(out), out_cap as u64, 0, 0, 0, 0]) }
 }
 
+/// `child_origin`: read the kernel-attested `tairix_abi::Origin` of the live
+/// child the caller spawned as `pid` (`SyscallNumber::CHILD_ORIGIN`). The wire
+/// image is written to the `out_cap`-byte buffer at `out` and its byte count
+/// returned (or a `TAIRIX_E_*` code reinterpreted into the result). Every other
+/// `pid` — another's process, an exited or reaped child, one never drawn —
+/// answers `TAIRIX_E_NOT_FOUND` alike, and an undersized buffer
+/// `TAIRIX_E_BUFFER_TOO_SMALL`. Unprivileged, like `tairix_sys_self_origin`.
+#[must_use]
+#[export_name = "tairix_sys_child_origin"]
+pub extern "C" fn sys_child_origin(pid: i64, out: *mut c_void, out_cap: usize) -> u64 {
+    // SAFETY: see `sys_self_origin`; `pid` is a scalar the kernel authorises.
+    unsafe {
+        raw_syscall(
+            NUM_CHILD_ORIGIN,
+            [i64_arg(pid), ptr_arg(out), out_cap as u64, 0, 0, 0],
+        )
+    }
+}
+
 /// `sysinfo_introspect`: read the unfiltered, global kernel introspection
 /// view (`SyscallNumber::SYSINFO_INTROSPECT`). `domain` is a
 /// `tairix_abi::IntrospectDomain` discriminant, `arg` is the domain-specific
@@ -3075,6 +3119,35 @@ pub extern "C" fn sys_shm_grant_peer(region: u64, endpoint: u64, ticket: u64) ->
     // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
     // checks the region grant and the endpoint's ownership before minting.
     unsafe { raw_syscall(NUM_SHM_GRANT_PEER, [region, endpoint, ticket, 0, 0, 0]) }
+}
+
+/// `shm_grant_to`: grant the live process instance at `(recipient,
+/// recipient_len)` — the attested `tairix_proc_id_t` the caller read from an
+/// origin record — the right to map shared region `region`
+/// (`SyscallNumber::SHM_GRANT_TO`). Returns the minted handle, or a
+/// `TAIRIX_E_*` code reinterpreted into the result: `TAIRIX_E_NOT_FOUND` for a
+/// region the caller does not hold or an instance no live process holds,
+/// `TAIRIX_E_BUFFER_TOO_SMALL` for a short buffer, and
+/// `TAIRIX_E_LIMIT_EXCEEDED` once the caller has its bound of regions with
+/// that recipient. The handle maps only through the recipient's
+/// `tairix_sys_shm_map_from` naming the caller. Gated kernel-side on
+/// `TAIRIX_CAP_SHM`; audited.
+#[must_use]
+#[export_name = "tairix_sys_shm_grant_to"]
+pub extern "C" fn sys_shm_grant_to(
+    region: u64,
+    recipient: *mut c_void,
+    recipient_len: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(recipient,
+    // recipient_len)` against the caller's address space, along with the
+    // capability and the caller's own region grant, before minting anything.
+    unsafe {
+        raw_syscall(
+            NUM_SHM_GRANT_TO,
+            [region, ptr_arg(recipient), recipient_len as u64, 0, 0, 0],
+        )
+    }
 }
 
 /// `call_peer_holds`: whether the task whose call `ticket` on `endpoint` the
@@ -4080,22 +4153,22 @@ pub extern "C" fn sys_resource_open(
     }
 }
 
-/// `fd_grant`: delegate the caller's own filesystem descriptor `fd` to the
-/// process instance at `recipient` as a one-shot grant, bounded above by
-/// `write_ceiling` bytes (`SyscallNumber::FD_GRANT`). Returns the minted,
-/// unforgeable grant handle (>= 1), or a `TAIRIX_E_*` code reinterpreted
-/// into the result.
+/// `fd_grant`: delegate the caller's own descriptor `fd` — a filesystem file
+/// or a pipe end — to the process instance at `recipient` as a one-shot
+/// grant, a file's bounded above by `write_ceiling` bytes
+/// (`SyscallNumber::FD_GRANT`). Returns the minted, unforgeable grant handle
+/// (>= 1), or a `TAIRIX_E_*` code reinterpreted into the result.
 ///
 /// The kernel requires `TAIRIX_CAP_FS_ACCESS`, confirms the caller itself
-/// holds `fd` as a filesystem file (a pipe, pty, resource or directory is
-/// refused, and one the caller was itself delegated is passed on under its
-/// first grantor's authority), and mints the descriptor's *own* read/write
-/// access and nothing more, so a delegation never widens. `write_ceiling` is
-/// the highest file length the recipient may write or truncate to: zero for a
-/// read-only descriptor, which has no extent to bound, and for a writable one
-/// a stated bound or `TAIRIX_GRANT_EXTENT_INHERIT`, the caller's own reach,
-/// which a handed-on delegation can only narrow; zero is refused for a
-/// writable descriptor.
+/// holds `fd` as a filesystem file or a pipe end (a pty, resource or
+/// directory is refused, and one the caller was itself delegated is passed
+/// on under its first grantor's authority), and mints the descriptor's *own*
+/// read/write access and nothing more, so a delegation never widens.
+/// `write_ceiling` is the highest file length the recipient may write or
+/// truncate to: zero for a read-only file and for a pipe end, which have no
+/// extent to bound, and for a writable file a stated bound or
+/// `TAIRIX_GRANT_EXTENT_INHERIT`, the caller's own reach, which a handed-on
+/// delegation can only narrow; zero is refused for a writable file.
 ///
 /// `(recipient, recipient_len)` is the attested `tairix_proc_id_t` the
 /// grantor read from an origin record — never a task id, which is redrawn
@@ -4103,14 +4176,15 @@ pub extern "C" fn sys_resource_open(
 /// grant is minted. The kernel validates the pair against the caller's
 /// address space, refuses an instance no live process holds
 /// (`TAIRIX_E_NOT_FOUND`), a short buffer (`TAIRIX_E_BUFFER_TOO_SMALL`), and
-/// a fresh delegation past the caller's pending bound to that recipient
-/// (`TAIRIX_E_LIMIT_EXCEEDED`), and records the instance so only that process
-/// can redeem.
+/// a fresh delegation past the caller's pending bound to that recipient, or a
+/// pipe end past those it may have in flight (`TAIRIX_E_LIMIT_EXCEEDED`), and
+/// records the instance so only that process can redeem.
 ///
-/// The caller's identity and effective capability set are captured with the
-/// descriptor's path. The caller forwards the handle in-band; it resolves
-/// only through the recipient's own [`sys_fd_redeem`], so the number is
-/// useless to a bystander. Audited.
+/// The caller's identity and effective capability set are captured with a
+/// file's path; a pipe end is handed on as itself, holding its side open until
+/// it is redeemed or let go. The caller forwards the handle in-band; it
+/// resolves only through the recipient's own [`sys_fd_redeem`], so the number
+/// is useless to a bystander. Audited.
 #[must_use]
 #[export_name = "tairix_sys_fd_grant"]
 pub extern "C" fn sys_fd_grant(
@@ -4139,14 +4213,14 @@ pub extern "C" fn sys_fd_grant(
 }
 
 /// `fd_redeem`: redeem an `fd_grant` handle minted to the calling task,
-/// installing the delegated file into the caller's own open table
+/// installing the delegated file or pipe end into the caller's own open table
 /// (`SyscallNumber::FD_REDEEM`). Returns the fresh per-process descriptor
 /// (at or above `TAIRIX_STD_STREAM_COUNT`), or a `TAIRIX_E_*` code
 /// reinterpreted into the result.
 ///
 /// Needs no capability: receiving user-mediated, already-checked
-/// authority is the point of the delegation, and every later read of the
-/// descriptor is still authorised kernel-side under the grantor's
+/// authority is the point of the delegation, and every later read of a
+/// delegated file is still authorised kernel-side under the grantor's
 /// captured identity. One-shot: the grant is consumed only when the
 /// descriptor allocation succeeds, so a refused redemption leaves it
 /// intact and a redeemed handle can never be redeemed twice. A handle
@@ -4291,6 +4365,7 @@ mod tests {
         (NUM_VOLUME_ATTACH, "volume_attach", 2),
         (NUM_VOLUME_DETACH, "volume_detach", 2),
         (NUM_VOLUME_RETITLE, "volume_retitle", 2),
+        (NUM_VOLUME_REPLAY, "volume_replay", 2),
         (NUM_VOLUME_READ, "volume_read", 4),
         (NUM_VOLUME_WRITE, "volume_write", 4),
         (NUM_VOLUME_CTL, "volume_ctl", 5),
@@ -4328,6 +4403,7 @@ mod tests {
         (NUM_DMA_QUIESCED, "dma_quiesced", 0),
         (NUM_SHM_CREATE_DMA, "shm_create_dma", 5),
         (NUM_SHM_GRANT_PEER, "shm_grant_peer", 3),
+        (NUM_SHM_GRANT_TO, "shm_grant_to", 3),
         (NUM_CALL_PEER_HOLDS, "call_peer_holds", 3),
         (NUM_CALL_PEER_NODE, "call_peer_node", 4),
         (NUM_RESOURCE_GRANTS, "resource_grants", 2),
@@ -4388,6 +4464,7 @@ mod tests {
         (NUM_FS_GETCWD, "fs_getcwd", 2),
         (NUM_RESOURCE_OPEN, "resource_open", 3),
         (NUM_SELF_ORIGIN, "self_origin", 2),
+        (NUM_CHILD_ORIGIN, "child_origin", 3),
         (NUM_PIPE_CREATE, "pipe_create", 1),
         (NUM_PTY_CREATE, "pty_create", 3),
         (NUM_PTY_SET_SIZE, "pty_set_size", 3),
@@ -5608,6 +5685,20 @@ mod tests {
     }
 
     #[test]
+    fn shm_grant_to_marshals_the_region_and_the_recipient_instance() {
+        let mut instance = [0x5Fu8; tairix_abi::PROC_ID_LEN];
+        let ptr = instance.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(4, || {
+            assert_eq!(sys_shm_grant_to(42, ptr, instance.len()), 4);
+        });
+        assert_eq!(number, NUM_SHM_GRANT_TO);
+        assert_eq!(args[0], 42);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], tairix_abi::PROC_ID_LEN as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
     fn call_peer_holds_marshals_the_record_and_narrows_the_status() {
         let mut record = [0u8; 32];
         let ptr = record.as_mut_ptr().cast::<c_void>();
@@ -5729,14 +5820,27 @@ mod tests {
 
     #[test]
     fn signal_sign_extends_a_negative_pid() {
-        // A negative PID sign-extends in the argument register per the I32
-        // convention; the kernel rejects it (no child), but the marshalling
-        // must be faithful.
+        // A negative PID fills the whole register; the kernel rejects it (no
+        // child), but the marshalling must be faithful.
         let (number, args) = capture(0, || {
             let _ = sys_signal(-1, tairix_abi::Signal::Kill.as_u32());
         });
         assert_eq!(number, NUM_SIGNAL);
         assert_eq!(args[0], u64::MAX);
+    }
+
+    #[test]
+    fn child_origin_marshals_the_whole_pid_and_the_buffer() {
+        let mut origin = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
+        let ptr = origin.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0, || {
+            let _ = sys_child_origin(-2, ptr, tairix_abi::ORIGIN_WIRE_LEN);
+        });
+        assert_eq!(number, NUM_CHILD_ORIGIN);
+        assert_eq!(args[0], (-2i64).cast_unsigned());
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], tairix_abi::ORIGIN_WIRE_LEN as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]

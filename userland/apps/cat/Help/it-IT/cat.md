@@ -12,15 +12,18 @@ Legge ogni operando di file in ordine e scrive i suoi byte sullo
 standard output. L'operando `-` designa lo standard input, e senza
 operandi lo standard input è l'unica sorgente.
 
-Un operando può anche essere un riferimento a risorsa tipizzato come
-`sys:random`: viene aperto tramite il risolutore di risorse del sistema
-(verificato dalle capability) anziché dal filesystem — `cat sys:random`
-emette byte casuali. Un riferimento `info:`, `state:` o `stats:` nomina
-un valore di sistema tipizzato anziché un flusso; viene letto tramite il
-servizio di informazioni di sistema, quindi `cat info:mem/physical`
-stampa quel valore, e una lettura non autorizzata è rifiutata nominando
-la capability richiesta. Un riferimento malformato in uno spazio dei
-nomi registrato è un errore, mai un ripiego su un nome di file.
+Un operando può anche essere un riferimento a risorsa tipizzato: un
+operando relativo il cui primo componente di percorso è uno spazio dei
+nomi registrato, come `sys:random`, viene aperto tramite il risolutore
+di risorse del sistema (verificato dalle capability) anziché dal
+filesystem, quindi `cat sys:random` emette byte casuali. Un riferimento
+`info:`, `state:` o `stats:` nomina un valore di sistema tipizzato
+anziché un flusso; viene letto tramite il servizio di informazioni di
+sistema, quindi `cat info:mem/physical` stampa quel valore, e una
+lettura non autorizzata è rifiutata nominando la capability richiesta.
+Un riferimento malformato in uno spazio dei nomi registrato è un errore,
+mai un ripiego su un nome di file; un file su disco il cui nome contiene
+`:` resta raggiungibile come `./name` o tra virgolette.
 
 Con `-n` le righe di output sono numerate in modo continuo attraverso
 tutte le sorgenti, cosicché una riga a cavallo di due sorgenti è
@@ -59,6 +62,8 @@ viene letta comunque.
 ## EXAMPLES
 
 - `cat notes.txt` — scrivere `notes.txt` sullo standard output.
+- `cat sys:random` — emettere byte dalla sorgente casuale del sistema
+  (senza fine; interrompere il comando per fermarlo).
 - `cat a.txt - b.txt` — scrivere `a.txt`, poi lo standard input, poi
   `b.txt`.
 - `cat -n log.txt` — numerare ogni riga di output.

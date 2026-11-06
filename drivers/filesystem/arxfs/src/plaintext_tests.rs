@@ -58,6 +58,43 @@ fn a_plaintext_volume_keeps_its_files_across_a_remount_with_no_key() {
     assert_eq!(read, payload);
 }
 
+/// A plaintext volume's title is published with the next flush, mounts again
+/// with it, and clears; a read-only handle refuses one, and an encrypted
+/// volume, whose superblock is plaintext, keeps none.
+#[test]
+fn a_plaintext_volume_keeps_its_title_and_an_encrypted_one_none() {
+    let title = VolumeTitle::new("Café Archive").expect("a title");
+    let mut fs = fmt_plain(512, 256);
+    assert_eq!(fs.label(), Ok(VolumeTitle::EMPTY));
+    fs.set_label(&title).expect("titled");
+    assert_eq!(fs.label(), Ok(title));
+    fs.flush().expect("published");
+    let bytes = fs.into_block().expect("the volume closes").bytes();
+    let reopen = |bytes: &alloc::vec::Vec<u8>| {
+        ARXFS::open(
+            MemBlock::from_bytes(bytes.clone(), 512, 256),
+            Keying::Plaintext,
+        )
+        .expect("a plaintext volume mounts")
+    };
+    let mut back = reopen(&bytes);
+    assert_eq!(back.label(), Ok(title), "the title is the superblock's");
+    back.set_label(&VolumeTitle::EMPTY).expect("cleared");
+    back.flush().expect("published");
+    let cleared = back.into_block().expect("the volume closes").bytes();
+    assert_eq!(reopen(&cleared).label(), Ok(VolumeTitle::EMPTY));
+    let mut ro = ARXFS::open_read_only(MemBlock::from_bytes(bytes, 512, 256), Keying::Plaintext)
+        .expect("and mounts read-only");
+    assert_eq!(ro.label(), Ok(title));
+    assert_eq!(
+        ro.set_label(&VolumeTitle::EMPTY),
+        Err(DriverError::ReadOnly)
+    );
+    let mut sealed = fmt(512, 256, 32);
+    assert_eq!(sealed.label(), Err(DriverError::Unsupported));
+    assert_eq!(sealed.set_label(&title), Err(DriverError::Unsupported));
+}
+
 #[test]
 fn a_plaintext_volume_stores_names_and_content_as_written_and_an_encrypted_one_never() {
     let name: &[u8] = b"ZxQvBnMkLpVisible";

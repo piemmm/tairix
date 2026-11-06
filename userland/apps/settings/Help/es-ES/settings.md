@@ -49,7 +49,13 @@ Effects* activa o desactiva los sonidos propios del escritorio, fija su tema y
 su volumen y, para cada evento —una notificación, un error, la campana del
 terminal—, si reproduce el sonido de su tema, un archivo que usted elija o
 nada. Los sonidos de arranque, inicio y cierre de sesión son del equipo y los
-fija su administrador.
+fija su administrador. Cambiar el volumen del dispositivo por el que suena el
+sonido, aquí o desde la barra de iconos, reproduce un sonido breve con el nuevo
+volumen —donde se detiene un arrastre, en cada paso de las flechas y al quitar
+el silencio— para que oiga lo fuerte que suena ahora. En *Sound Effects*,
+*Play feedback when the volume changes* lo desactiva. No sigue a los demás
+sonidos del escritorio: suena con el volumen propio del dispositivo, estén
+activados o no.
 
 **Raspberry Pi** solo aparece cuando la máquina lo es. Ajusta el ventilador del
 procesador, conmutado a través de una línea del conector de 40 pines: *Off*,
@@ -79,10 +85,17 @@ lugares y la barra de herramientas, si las carpetas quedan arriba, qué sufijos
 de nombre y qué elementos se ocultan, si una imagen muestra su propio contenido
 y una carpeta lo que contiene, si mover elementos a la Papelera pide
 confirmación antes y si una imagen de disco o un archivo comprimido que usted
-abrió se desmonta una vez cerradas sus ventanas. Una fila surte efecto en cuanto
+abrió se desmonta una vez cerradas sus ventanas. Los sufijos de nombre que
+oculta se ocultan también en el escritorio. *Show on the desktop* tiene una
+casilla para cada tipo de unidad — *The system drive*, *Fixed drives*,
+*Removable drives*, *Network shares* y *Disk images and archives* — y el
+escritorio muestra un icono para cada unidad conectada de un tipo marcado, que
+la abre como lo hace el gestor de archivos; al principio solo están marcadas
+las unidades extraíbles. Una fila surte efecto en cuanto
 se elige: dónde se abre una ventana nueva y si muestra la columna de lugares y
 la barra de herramientas se aplican a la próxima ventana que usted abra, y todo
-lo demás llega a todas las ventanas del gestor de archivos a la vez, aunque una
+lo demás llega al escritorio y a todas las ventanas del gestor de archivos a la
+vez, aunque una
 ventana conserva una vista o un orden que usted mismo haya elegido en ella.
 *Settings…* en el propio menú del gestor de archivos abre este panel.
 

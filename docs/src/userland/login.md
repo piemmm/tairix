@@ -413,9 +413,11 @@ The operations that touch the outside world are injected, mirroring
   one re-authenticated elevated command as the target account and returns its
   exit code; `handle_elevate_request` drives it from the elevation broker
   (`plans/CAPABILITY_USE.md` CU5). Its siblings are `launch_as`, which starts
-  the program and answers its pid without waiting, and `capture_as`, which
+  the program and answers its pid without waiting, `capture_as`, which
   runs it with its standard output bound to a pipe the launcher owns and
-  answers what it printed.
+  answers what it printed, and `launch_wired_as`, which starts it over two
+  pipes whose other ends it hands the requester and answers what the
+  requester takes them up by.
 
 On a running kernel these are syscall- and `kernel/sec`-backed; in tests
 they are in-memory fixtures. Splitting the seams from the state machine
@@ -593,11 +595,27 @@ program PID 1 `init`'s `session` directive launches and supervises
   The broker drains the pipe to end of stream *before* it reaps, because a
   child that fills the pipe blocks until it is emptied and a reaper that
   waited first would never empty it.
+  A caller that must speak a protocol to the program posts the
+  `LaunchWired` form, which starts the screen recorder
+  (`tairix_abi::recorder_ipc::RECORDER_RUN_PATH`) and refuses every other
+  program before an attempt is spent. After the same meter,
+  re-authentication and authority check, the broker spawns it over two fresh
+  pipes (`tairix_rt::spawn_piped`, its standard error closed) as the account
+  that allowed it, in the requester's own login session — so the seat the
+  audio service checks the desktop's sound against is the requester's —
+  reads the child's instance with `child_origin`, and hands the requester its
+  ends of the pipes with `fd_grant`, naming the requester's attested
+  instance; login's `CAP_FS_ACCESS` is that call's gate, and login closes its
+  own copies once the delegations hold them. The reply carries the two
+  handles and the instance, and the requester redeems the ends. The child is
+  login's, reaped as a launched one is; it ends when its pipes close, and its
+  end, however it came, is recorded (`WIRED_ENDED`). A child whose hand-over
+  failed, or whose reply never reached the requester, is ended at once.
   **Who may allow a program.** An account may allow one only when every
   capability the program's signed manifest requests lies within the
   account's ceiling; the broker reads the manifest itself (bounded, under
   login's own identity) through the same request reader the load gate
-  uses. A `Run`, `Capture` or `Launch` for an account that may not is
+  uses. A `Run`, `Capture`, `Launch` or `LaunchWired` for an account that may not is
   refused exactly as a wrong password is — the same `PermissionDenied`, and
   the same charge to the budget — so the reply never says the password was
   right; the audit records the true cause. A program with no readable
@@ -627,7 +645,8 @@ on fd 2 until a userland audit transport exists.
 
 `login` owns the reserved `EventId` range `10000..11000`. The numeric
 values are stable: once shipped they are never re-used or renumbered,
-because external audit-log consumers key off them.
+because external audit-log consumers key off them. 10010 and 10011, once
+the font service's, are retired.
 
 | Id    | Constant                | Level | Meaning                                          |
 |-------|-------------------------|-------|--------------------------------------------------|
@@ -640,8 +659,6 @@ because external audit-log consumers key off them.
 | 10007 | `ELEVATE_GRANTED`       | Info  | an elevation re-authenticated and its command ran to completion |
 | 10008 | `ELEVATE_REFUSED`       | Warn  | an elevation was refused (cause audited, never disclosed) |
 | 10009 | `ELEVATE_UNAVAILABLE`   | Warn  | no elevation rendezvous could be bound; sessions run broker-less |
-| 10010 | `FONTD_STARTED`         | Info  | the sandboxed font service was started for a display-capable machine |
-| 10011 | `FONTD_UNAVAILABLE`     | Warn  | the font service would not start; the session launches without it |
 | 10012 | `VERIFY_GRANTED`        | Info  | a `Verify` request re-authenticated its own attested account; nothing ran |
 | 10013 | `VERIFY_REFUSED`        | Warn  | a `Verify` request was refused (cause audited, never disclosed) |
 | 10014 | `SESSION_AUTH_GRANTED`  | Info  | a `session-v1` authentication succeeded; nothing started yet |
@@ -667,6 +684,9 @@ because external audit-log consumers key off them.
 | 10034 | `AUTHORISERS_REFUSED`   | Warn  | a listing of who may allow a program was withheld: another caller, a program outside the system stores, or an unreadable manifest |
 | 10035 | `AUTH_COOLING`          | Warn  | a text-prompt name was still cooling down; its password was neither asked for nor checked |
 | 10036 | `SESSION_HOME_REFUSED`  | Warn  | a session's home could not be entered as its account, so the session started at the root; the refusal is recorded |
+| 10037 | `WIRED_GRANTED`         | Info  | a `LaunchWired` request re-authenticated and the recorder was started as the account, its pipes handed to the requester |
+| 10038 | `WIRED_REFUSED`         | Warn  | a `LaunchWired` request was refused: another program, a failed re-authentication or authority check (cause audited, never disclosed), or a hand-over that failed |
+| 10039 | `WIRED_ENDED`           | Info/Warn | a program started for a `LaunchWired` request ended, however it ended (`Warn` when not cleanly); a reserved load-failure status is named in words |
 
 A refusal record names the account offered and the attested uid, never the
 offered secret, and never *which* credential fault it was: refusals stay

@@ -12,16 +12,18 @@ Lê cada operando de ficheiro por ordem e escreve os seus bytes na saída
 padrão. O operando `-` designa a entrada padrão e, sem operando, a
 entrada padrão é a única fonte.
 
-Um operando também pode ser uma referência de recurso tipada como
-`sys:random`: é aberta através do resolvedor de recursos do sistema
-(verificado por capacidades) em vez do sistema de ficheiros — `cat
-sys:random` emite bytes aleatórios. Uma referência `info:`, `state:` ou
-`stats:` nomeia um valor de sistema tipado em vez de um fluxo; é lida
-através do serviço de informação do sistema, pelo que
-`cat info:mem/physical` imprime esse valor, e uma leitura sem
-autorização é recusada nomeando a capacidade necessária. Uma referência
-malformada num espaço de nomes registado é um erro, nunca um nome de
-ficheiro.
+Um operando também pode ser uma referência de recurso tipada: um
+operando relativo cujo primeiro componente de caminho é um espaço de
+nomes registado, como `sys:random`, é aberto através do resolvedor de
+recursos do sistema (verificado por capacidades) em vez do sistema de
+ficheiros, pelo que `cat sys:random` emite bytes aleatórios. Uma
+referência `info:`, `state:` ou `stats:` nomeia um valor de sistema
+tipado em vez de um fluxo; é lida através do serviço de informação do
+sistema, pelo que `cat info:mem/physical` imprime esse valor, e uma
+leitura sem autorização é recusada nomeando a capacidade necessária.
+Uma referência malformada num espaço de nomes registado é um erro, nunca
+um nome de ficheiro; um ficheiro em disco cujo nome contenha `:`
+continua acessível como `./name` ou entre aspas.
 
 Com `-n`, as linhas de saída são numeradas continuamente através de
 todas as fontes, pelo que uma linha que atravessa duas fontes é
@@ -60,6 +62,8 @@ assim.
 ## EXAMPLES
 
 - `cat notes.txt` — escrever `notes.txt` na saída padrão.
+- `cat sys:random` — emitir bytes da fonte aleatória do sistema (sem
+  fim; interrompa o comando para parar).
 - `cat a.txt - b.txt` — escrever `a.txt`, depois a entrada padrão,
   depois `b.txt`.
 - `cat -n log.txt` — numerar todas as linhas de saída.

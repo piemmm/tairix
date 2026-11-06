@@ -53,6 +53,11 @@ The crate provides:
   `source on target type fstype (options)` row. `for_each_volume_service`
   pages each block-backed volume's cumulative service counters, joined to its
   mount by volume id.
+- `named_volume` / `Caller` / `Unnamed` — which attached volume a command
+  line's name means: a durable root, a path spelled or resolved, a catalog
+  word, or the file a volume was attached from, the caller's own over
+  another's, and why a name names none. The one resolution `unmount` and
+  `label` share.
 - `rate_per_sec` — a per-second rate from two readings of one cumulative
   counter and the interval between them, the one division every throughput
   surface samples through; a counter read going backwards gives `0`, never a

@@ -12,7 +12,6 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use tairix_abi::syscall::SYSCALL_TABLE_HASH_LEN;
 
@@ -144,19 +143,10 @@ impl GuestBuild<'_> {
         }
         pie::wipe_target_dir_on_stamp_change(&target_dir, self.stamp(recipe).as_deref());
 
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut cmd = Command::new(cargo);
-        cmd.current_dir(self.manifest_dir)
-            // The outer build exports `CARGO_ENCODED_RUSTFLAGS` / `RUSTFLAGS`
-            // into this build script's environment and both outrank the
-            // target-scoped variable, so a nested cargo would inherit the
-            // outer kernel's flags and drop the link recipe. Clearing them
-            // leaves the target-scoped flags winning, and applying only to
-            // the guest's freestanding crates — never its own host build
-            // script.
-            .env_remove("CARGO_ENCODED_RUSTFLAGS")
-            .env_remove("RUSTFLAGS")
-            .env(self.arch.rustflags_env_var(), rustflags)
+        let mut cmd = pie::nested_cargo(self.manifest_dir);
+        // Target-scoped, so the flags reach only the guest's freestanding
+        // crates — never its own host build script.
+        cmd.env(self.arch.rustflags_env_var(), rustflags)
             // `--locked` so a build script can never rewrite the committed
             // lockfile behind the outer build's back.
             .args(["build", "--locked", "-p", self.package, "--target"])
@@ -301,6 +291,12 @@ pub fn format_grouped_hex(value: u64, out: &mut [u8; GROUPED_HEX_LEN]) -> &str {
     core::str::from_utf8(&out[..len]).unwrap_or("")
 }
 
+/// The heap region [`push_heap_region`] emits: 64 GiB from 80 GiB, clear of
+/// the image at [`USER_IMAGE_BIAS`] and inside every port's user address
+/// space.
+const USER_HEAP_BASE: u64 = 0x14_0000_0000;
+const USER_HEAP_LEN: u64 = 0x10_0000_0000;
+
 /// Open a fixture source: the generated-file banner and the shared
 /// [`USER_IMAGE_BIAS`] the images' relocations were baked for, emitted as
 /// `USER_BIAS`.
@@ -325,6 +321,23 @@ pub fn fixture_header() -> String {
         format_grouped_hex(USER_IMAGE_BIAS, &mut bias)
     );
     out
+}
+
+/// Append the heap region a fixture that builds its own spawn request hands
+/// its program, as `USER_HEAP_BASE` and `USER_HEAP_LEN`.
+pub fn push_heap_region(out: &mut String) {
+    let mut hex = [0u8; GROUPED_HEX_LEN];
+    out.push_str("/// The address space the program's heap grows in.\n");
+    let _ = writeln!(
+        out,
+        "pub const USER_HEAP_BASE: u64 = {};",
+        format_grouped_hex(USER_HEAP_BASE, &mut hex)
+    );
+    let _ = writeln!(
+        out,
+        "pub const USER_HEAP_LEN: u64 = {};",
+        format_grouped_hex(USER_HEAP_LEN, &mut hex)
+    );
 }
 
 /// Append one converted `rxe` image to a fixture source as
@@ -489,6 +502,13 @@ mod tests {
             src.contains("pub const USER_BIAS: u64 = 0x0010_0000_0000;"),
             "{src}"
         );
+        push_heap_region(&mut src);
+        for line in [
+            "pub const USER_HEAP_BASE: u64 = 0x0014_0000_0000;",
+            "pub const USER_HEAP_LEN: u64 = 0x0010_0000_0000;",
+        ] {
+            assert!(src.contains(line), "{src}");
+        }
         src.push_str("pub const ROUNDS: u64 = 3;\n");
         push_rxe_blob(
             &mut src,

@@ -152,6 +152,25 @@ impl<'a> Reader<'a> {
         self.input.len() - self.at
     }
 
+    /// Read the rest of a payload with `fields`, refusing one with bytes left
+    /// over.
+    ///
+    /// # Errors
+    ///
+    /// What `fields` refuses, or [`WireError::Malformed`] for a payload
+    /// longer than its fields.
+    pub fn whole<T>(
+        &mut self,
+        fields: impl FnOnce(&mut Self) -> Result<T, WireError>,
+    ) -> Result<T, WireError> {
+        let value = fields(self)?;
+        if self.is_exhausted() {
+            Ok(value)
+        } else {
+            Err(WireError::Malformed)
+        }
+    }
+
     /// Consume `len` raw bytes.
     ///
     /// # Errors

@@ -1,4 +1,5 @@
 use super::*;
+use tairix_fuzzseed::meter::{metered, refusing_above, refusing_after};
 
 const BS: usize = 512;
 const BLOCK: core::num::NonZeroUsize = core::num::NonZeroUsize::new(BS).unwrap();
@@ -269,7 +270,7 @@ fn undoing_an_operation_restores_what_an_earlier_one_staged() {
         .expect("second operation rewrites it");
     set.stage(WritePhase::BeforeBarrier, 9, &block(0xCC))
         .expect("and stages one of its own");
-    set.undo_operation();
+    set.undo_operation().expect("undo");
 
     assert_eq!(
         requests(&mut set, WritePhase::BeforeBarrier, WIDE),
@@ -287,10 +288,10 @@ fn undoing_an_operation_restores_a_block_it_discarded_and_took_again() {
     set.end_operation();
 
     set.begin_operation();
-    set.discard_run(4, 1);
+    set.discard_run(4, 1).expect("discard");
     set.stage(WritePhase::BeforeBarrier, 4, &block(0xBB))
         .expect("reuse the freed block");
-    set.undo_operation();
+    set.undo_operation().expect("undo");
 
     assert_eq!(
         requests(&mut set, WritePhase::BeforeBarrier, WIDE),
@@ -309,7 +310,7 @@ fn ending_an_operation_keeps_its_changes() {
     set.stage(WritePhase::BeforeBarrier, 7, &block(0xBB))
         .expect("restage");
     set.end_operation();
-    set.undo_operation();
+    set.undo_operation().expect("undo");
     assert_eq!(
         requests(&mut set, WritePhase::BeforeBarrier, WIDE),
         alloc::vec![(7, 1, alloc::vec![0xBB])],
@@ -333,7 +334,7 @@ fn undoing_a_whole_restage_brings_back_the_phase_it_replaced() {
         2,
         "the version it replaced is kept for the undo"
     );
-    set.undo_operation();
+    set.undo_operation().expect("undo");
 
     assert_eq!(set.held(), 1);
     assert!(requests(&mut set, WritePhase::AfterBarrier, WIDE).is_empty());
@@ -349,7 +350,7 @@ fn undoing_an_operation_leaves_an_after_barrier_block_staged() {
     set.begin_operation();
     set.stage(WritePhase::AfterBarrier, 12, &block(0xDD))
         .expect("stage a rebuildable block");
-    set.undo_operation();
+    set.undo_operation().expect("undo");
     assert_eq!(
         requests(&mut set, WritePhase::AfterBarrier, WIDE),
         alloc::vec![(12, 1, alloc::vec![0xDD])]
@@ -367,7 +368,7 @@ fn a_savepoint_records_a_block_once_however_often_it_is_rewritten() {
         set.stage(WritePhase::BeforeBarrier, 7, &block(fill))
             .expect("rewrite");
     }
-    set.undo_operation();
+    set.undo_operation().expect("undo");
     assert_eq!(set.len(), 0);
 }
 
@@ -378,8 +379,8 @@ fn discarding_a_reclaimed_block_drops_it_from_the_drain() {
         .expect("stage");
     set.stage(WritePhase::BeforeBarrier, 5, &block(2))
         .expect("stage");
-    set.discard_run(4, 1);
-    set.discard_run(99, 1);
+    set.discard_run(4, 1).expect("discard");
+    set.discard_run(99, 1).expect("discard nothing");
     assert_eq!(
         requests(&mut set, WritePhase::BeforeBarrier, WIDE),
         alloc::vec![(5, 1, alloc::vec![2])],
@@ -437,7 +438,7 @@ fn undoing_an_in_place_edit_restores_the_earlier_operations_bytes() {
     set.begin_operation();
     set.stage_with(WritePhase::BeforeBarrier, 8, |_| Ok(()))
         .expect("edit")[0] = 0x99;
-    set.undo_operation();
+    set.undo_operation().expect("undo");
     assert_eq!(set.staged(8).map(|bytes| bytes[0]), Some(0x10));
 }
 
@@ -457,4 +458,175 @@ fn the_block_walk_is_ascending_and_leaves_the_set_intact() {
     assert_eq!(walked, alloc::vec![(10, 10), (20, 20), (30, 30)]);
     assert_eq!(set.count(WritePhase::BeforeBarrier), 3);
     assert_eq!(set.len(), 4, "walking drains nothing");
+}
+
+/// Every block the set stages, in both phases, and the buffers it pins.
+fn contents(set: &DirtySet) -> (Vec<(WritePhase, u64, Vec<u8>)>, usize) {
+    let mut staged = Vec::new();
+    for phase in WritePhase::ALL {
+        staged.extend(
+            set.blocks(phase)
+                .map(|(phys, bytes)| (phase, phys, bytes.to_vec())),
+        );
+    }
+    (staged, set.held())
+}
+
+/// The blocks `phase` holds, with their bytes.
+fn staged_blocks(set: &DirtySet, phase: WritePhase) -> Vec<(u64, Vec<u8>)> {
+    set.blocks(phase)
+        .map(|(phys, bytes)| (phys, bytes.to_vec()))
+        .collect()
+}
+
+/// `0..count` staged by an operation that ended, each block naming its
+/// address, with a later operation opened over them.
+fn earlier_blocks(count: u64) -> DirtySet {
+    let mut set = DirtySet::new(BLOCK);
+    set.begin_operation();
+    for phys in 0..count {
+        set.stage(WritePhase::BeforeBarrier, phys, &tagged(phys))
+            .expect("stage");
+    }
+    set.end_operation();
+    set.begin_operation();
+    set
+}
+
+/// Run `change` with no allocation granted, then one more each time until it
+/// goes through, holding each refusal to an `OutOfMemory` that left the set
+/// as it was.
+fn refused_until_done(
+    set: &mut DirtySet,
+    mut change: impl FnMut(&mut DirtySet) -> Result<(), DriverError>,
+) {
+    for granted in 0..32 {
+        let before = contents(set);
+        match refusing_after(granted, || change(set)) {
+            Ok(()) => return,
+            Err(err) => {
+                assert_eq!(
+                    err,
+                    DriverError::OutOfMemory,
+                    "refused after {granted} grants"
+                );
+                assert_eq!(contents(set), before, "refused after {granted} grants");
+            }
+        }
+    }
+    panic!("the change never went through");
+}
+
+#[test]
+fn a_block_refused_its_buffer_is_out_of_memory_not_a_full_volume() {
+    let mut set = DirtySet::new(BLOCK);
+    let refused = refusing_above(0, || set.stage(WritePhase::BeforeBarrier, 1, &block(1)));
+    assert_eq!(refused, Err(DriverError::OutOfMemory));
+    assert!(set.is_empty());
+}
+
+#[test]
+fn a_change_the_heap_refuses_leaves_the_set_as_it_was() {
+    let mut set = earlier_blocks(24);
+    // A fresh block, one an earlier operation staged, an edit in place, a move
+    // across the barrier, and a discard the savepoint must take.
+    refused_until_done(&mut set, |set| {
+        set.stage(WritePhase::BeforeBarrier, 40, &block(1))
+    });
+    refused_until_done(&mut set, |set| {
+        set.stage(WritePhase::BeforeBarrier, 3, &block(2))
+    });
+    refused_until_done(&mut set, |set| {
+        set.stage_with(WritePhase::BeforeBarrier, 5, |_| Ok(()))
+            .map(drop)
+    });
+    refused_until_done(&mut set, |set| {
+        set.stage(WritePhase::AfterBarrier, 7, &block(3))
+    });
+    refused_until_done(&mut set, |set| set.discard_run(10, 6));
+    set.undo_operation().expect("undo");
+    let earlier: Vec<(u64, Vec<u8>)> = (0..24_u64)
+        .map(|phys| (phys, tagged(phys).to_vec()))
+        .collect();
+    assert_eq!(staged_blocks(&set, WritePhase::BeforeBarrier), earlier);
+    assert!(!set.has(WritePhase::AfterBarrier));
+}
+
+#[test]
+fn undoing_an_operation_asks_the_heap_for_nothing() {
+    let mut set = earlier_blocks(64);
+    // Rewrites, a move across the barrier, a discard and fresh blocks: an undo
+    // that must put back, move back and take out.
+    for phys in 0..16_u64 {
+        set.stage(WritePhase::BeforeBarrier, phys, &block(0xEE))
+            .expect("rewrite");
+    }
+    set.stage(WritePhase::AfterBarrier, 20, &block(0xDD))
+        .expect("move across the barrier");
+    set.discard_run(30, 30).expect("discard");
+    for phys in 100..140_u64 {
+        set.stage(WritePhase::BeforeBarrier, phys, &block(0xCC))
+            .expect("stage a fresh block");
+    }
+    let (undone, metering) = metered(|| refusing_above(0, || set.undo_operation()));
+    assert_eq!(undone, Ok(()));
+    assert_eq!(metering.allocations, 0, "{metering:?}");
+    let earlier: Vec<(u64, Vec<u8>)> = (0..64_u64)
+        .map(|phys| (phys, tagged(phys).to_vec()))
+        .collect();
+    assert_eq!(staged_blocks(&set, WritePhase::BeforeBarrier), earlier);
+    assert!(!set.has(WritePhase::AfterBarrier));
+}
+
+#[test]
+fn a_set_drained_empty_holds_nothing_back() {
+    let mut set = DirtySet::new(BLOCK);
+    let ((), metering) = metered(|| {
+        for phys in 0..200_u64 {
+            set.stage(WritePhase::BeforeBarrier, phys, &block(1))
+                .expect("stage");
+        }
+        drop(requests(&mut set, WritePhase::BeforeBarrier, WIDE));
+    });
+    assert_eq!(metering.retained, 0, "{metering:?}");
+}
+
+/// A block staged for the other phase moves its buffer across when no
+/// savepoint keeps the version it stands as, rather than being copied and the
+/// original dropped.
+#[test]
+fn an_unsaved_move_across_the_barrier_takes_its_buffer_with_it() {
+    let mut set = DirtySet::new(BLOCK);
+    set.stage(WritePhase::AfterBarrier, 7, &block(0x5A))
+        .expect("stage");
+    let (edited, metering) = metered(|| {
+        set.stage_with(WritePhase::BeforeBarrier, 7, |_| {
+            Err(DriverError::DeviceFault)
+        })
+        .map(|held| held[0])
+    });
+    assert_eq!(edited, Ok(0x5A), "the staged bytes are the ones edited");
+    assert_eq!(metering.allocations, 0, "{metering:?}");
+    assert!(!set.has(WritePhase::AfterBarrier));
+    assert_eq!(set.len(), 1);
+}
+
+/// The move with an operation running that recorded the block already: its
+/// undo still leaves the set as the operation found it.
+#[test]
+fn undoing_an_unsaved_move_across_the_barrier_restores_the_set() {
+    let mut set = DirtySet::new(BLOCK);
+    set.begin_operation();
+    set.stage(WritePhase::BeforeBarrier, 7, &block(1))
+        .expect("stage");
+    set.stage(WritePhase::AfterBarrier, 7, &block(2))
+        .expect("move across");
+    set.stage_with(WritePhase::BeforeBarrier, 7, |_| Ok(()))
+        .expect("and back")[0] = 3;
+    assert_eq!(set.staged(7).map(|bytes| bytes[0]), Some(3));
+    set.undo_operation().expect("undo");
+    assert!(
+        set.is_empty(),
+        "the operation staged the block, so its undo takes it out"
+    );
 }

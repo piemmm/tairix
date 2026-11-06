@@ -27,9 +27,21 @@ pub fn thumbnail(picture: &Picture, side: u32) -> Option<(Vec<u8>, Placed)> {
     if side == 0 {
         return None;
     }
-    let canvas = picture.flattened().ok()?;
+    of_canvas(&picture.flattened().ok()?, picture.pixel_aspect(), side)
+}
+
+/// `canvas`, its pixels `across` to `down` in shape, drawn as [`thumbnail`]
+/// draws a picture: what the Layers pane shows of one layer's own pixels.
+#[must_use]
+pub fn of_canvas(
+    canvas: &crate::canvas::Canvas,
+    (across, down): (u32, u32),
+    side: u32,
+) -> Option<(Vec<u8>, Placed)> {
+    if side == 0 {
+        return None;
+    }
     let (width, height) = (canvas.width(), canvas.height());
-    let (across, down) = picture.pixel_aspect();
     let (shown_w, shown_h) = (
         u64::from(width) * u64::from(across),
         u64::from(height) * u64::from(down),
@@ -52,11 +64,11 @@ pub fn thumbnail(picture: &Picture, side: u32) -> Option<(Vec<u8>, Placed)> {
         u32::try_from(fit_h.min(side64)).ok()?,
     );
     let drawn = if growth >= 1 {
-        grown(&canvas_rows(&canvas, 1)?, (width, height), (fit_w, fit_h))?
+        grown(&canvas_rows(canvas, 1)?, (width, height), (fit_w, fit_h))?
     } else {
         let step = decimation(width, height);
         let (source_w, source_h) = (width.div_ceil(step), height.div_ceil(step));
-        let source = canvas_rows(&canvas, step)?;
+        let source = canvas_rows(canvas, step)?;
         let image = Rgba8Image::new(source_w, source_h, &source).ok()?;
         resample(&image, image.whole(), fit_w, fit_h).ok()?
     };

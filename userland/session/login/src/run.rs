@@ -40,7 +40,9 @@
 //!   endpoint also answers a caller's own `Verify`-only request — no
 //!   program runs, and the account checked is the caller's kernel-attested
 //!   uid (read off the same `call_peer_origin` result as the console),
-//!   never a name the request supplies. Binding the reserved id requires
+//!   never a name the request supplies — and starts the screen recorder for
+//!   a `LaunchWired` one, in the requester's session, handing the requester
+//!   its control pipes with `fd_grant`. Binding the reserved id requires
 //!   login's `CAP_IPC_BIND_PRIVILEGED`; when no rendezvous can be bound the
 //!   failure is audited and sessions simply run without a broker (requests
 //!   fail closed at the missing endpoint).
@@ -82,7 +84,8 @@ mod program {
     use tairix_abi::display_ipc::{DisplayRequest, DISPLAY_ENDPOINT, DISPLAY_MODE_REPLY_LEN};
     use tairix_abi::driver_store::SystemConfigFile;
     use tairix_abi::elevate::{
-        elevate_endpoint, ElevateArgv, ELEVATE_MAX_OUTPUT, ELEVATE_MAX_REPLY, ELEVATE_MAX_REQUEST,
+        elevate_endpoint, ElevateArgv, WiredLaunch, ELEVATE_MAX_OUTPUT, ELEVATE_MAX_REPLY,
+        ELEVATE_MAX_REQUEST,
     };
     use tairix_abi::notice::NoticeTopic;
     use tairix_abi::seat::SEAT_PRIMARY;
@@ -94,8 +97,8 @@ mod program {
     use tairix_abi::sysinfo::{KernelMemoryStats, LoadAverage, SysinfoQueryId, SystemIdentity};
     use tairix_abi::time::Duration64;
     use tairix_abi::{
-        AppIdentity, Errno, FdWire, InputMode, OpenFlags, ProcId, Reap, SpawnAttach, Time64,
-        WaitSetOp, WaitSourceKind, ORIGIN_CONSOLE_NONE,
+        AppIdentity, Errno, FdWire, InputMode, OpenFlags, ProcId, Reap, Signal, SpawnAttach,
+        Time64, WaitSetOp, WaitSourceKind, ORIGIN_CONSOLE_NONE,
     };
     use tairix_caps::CapabilitySet;
     use tairix_curses::{Screen, Size, StreamTty};
@@ -105,7 +108,7 @@ mod program {
     use tairix_abi::GREETER_RUN_PATH;
     use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
     use tairix_login::{
-        audit_launch_ended_abnormally, configured_session_kind, drain_bounded,
+        audit_launch_ended_abnormally, audit_wired_ended, configured_session_kind, drain_bounded,
         effective_session_kind, elevated_attach, end_live_sessions, events, forget_ended_sessions,
         handle_elevate_request, handle_session_request, home_refusal, session_attach,
         session_environment, session_program, supervise, AttemptBudget, AuthenticatedUser,
@@ -113,7 +116,7 @@ mod program {
         CursesView, DbAccounts, DbLoad, ElevateDirectory, GuessMeter, InputWait, InputWake,
         LiveSessions, Login, LoginConfig, LoginError, LoginStatus, LoginView, ProgramRequests,
         SessionDirectory, SessionKind, SessionLauncher, SessionOutcome, SessionWaker, StatusSource,
-        ZoneStoreGrant, SESSION_FALLBACK_DIRECTORY,
+        Wired, ZoneStoreGrant, SESSION_FALLBACK_DIRECTORY,
     };
     use tairix_procinfo::{call, IpcTransport};
     use tairix_rt::io::write_stderr_line;
@@ -424,14 +427,14 @@ mod program {
         elevate: Option<u64>,
         /// The reserved `session-v1` endpoint, when it could be bound.
         session: Option<u64>,
-        /// Children started by a non-blocking elevated launch and not yet
-        /// reaped.
+        /// Children started by a non-blocking or wired elevated launch and
+        /// not yet reaped.
         ///
         /// Their requester cannot wait on them (they are login's children,
         /// not its), so login owns collecting them. Each is joined to the
         /// wait-set under [`TOKEN_LAUNCHED`], so an exit wakes whichever
         /// supervision is parked and the sweep reaps it.
-        launched: RefCell<Vec<i64>>,
+        launched: RefCell<Vec<Launched>>,
         /// The login and logout sounds asked for and not yet answered, whose
         /// answers wake the set under [`TOKEN_CUE`].
         cues: RefCell<PostedCues>,
@@ -534,7 +537,8 @@ mod program {
         /// before this returns on every path. A recv failure is dropped
         /// (the poster's `ipc_call` observes its error); a reply failure is
         /// dropped likewise — the decision and its audit record already
-        /// stand.
+        /// stand — save that a child started wired to the requester is ended,
+        /// since nothing else could ever reach it.
         fn serve_elevate(
             &self,
             endpoint: u64,
@@ -554,6 +558,7 @@ mod program {
             let launcher = RtElevateLauncher {
                 server: self,
                 requester: peer.instance,
+                wired: Cell::new(None),
             };
             let reply = handle_elevate_request(
                 &request[..len],
@@ -577,8 +582,13 @@ mod program {
             );
             wipe(&mut request);
             let mut reply_buf = [0u8; ELEVATE_MAX_REPLY];
-            if let Ok(total) = reply.encode(&mut reply_buf) {
-                let _ = tairix_rt::call_reply(endpoint, ticket, &reply_buf[..total]);
+            let delivered = reply.encode(&mut reply_buf).is_ok_and(|total| {
+                tairix_rt::call_reply(endpoint, ticket, &reply_buf[..total]) == 0
+            });
+            // A recorder whose pipes the requester never heard of would run on
+            // where nothing can reach it: it is ended, and reaped as any is.
+            if let (false, Some(pid)) = (delivered, launcher.wired.get()) {
+                let _ = tairix_rt::signal(pid, Signal::Kill);
             }
         }
 
@@ -657,23 +667,23 @@ mod program {
             }
         }
 
-        /// Record a child a non-blocking elevated launch just started, so
-        /// login collects it when it exits.
+        /// Record a child a non-blocking or wired elevated launch just
+        /// started, so login collects it when it exits.
         ///
         /// Joining it to the wait-set makes its exit a wake source of the
         /// same supervision that is already parked, so the sweep costs a
         /// wake rather than a poll. A child the kernel refuses to add is
         /// still tracked: the sweep also runs whenever supervision starts,
         /// so it is collected then instead of never.
-        fn track_launched(&self, pid: i64) {
+        fn track_launched(&self, child: Launched) {
             let _ = tairix_rt::waitset_ctl(
                 self.waitset,
                 WaitSetOp::Add,
                 WaitSourceKind::Child,
-                pid.unsigned_abs(),
+                child.pid.unsigned_abs(),
                 TOKEN_LAUNCHED,
             );
-            self.launched.borrow_mut().push(pid);
+            self.launched.borrow_mut().push(child);
         }
 
         /// Reap every tracked launch that has already exited, dropping its
@@ -687,15 +697,15 @@ mod program {
             // than threading a zero-sized parameter through every caller.
             let sink = LogSink;
             let mut launched = self.launched.borrow_mut();
-            launched.retain(|pid| {
-                if !launch_collected(*pid, sink) {
+            launched.retain(|child| {
+                if !launch_collected(*child, sink) {
                     return true;
                 }
                 let _ = tairix_rt::waitset_ctl(
                     self.waitset,
                     WaitSetOp::Del,
                     WaitSourceKind::Child,
-                    pid.unsigned_abs(),
+                    child.pid.unsigned_abs(),
                     TOKEN_LAUNCHED,
                 );
                 false
@@ -899,19 +909,33 @@ mod program {
         Ok(status)
     }
 
-    /// Whether `pid` needs tracking no longer: it was reaped, or it is no
+    /// A child an elevated launch started, which login reaps.
+    #[derive(Copy, Clone)]
+    struct Launched {
+        pid: i64,
+        /// Whether it was started wired to its requester: then its end is
+        /// recorded however it came, closing the run an administrator allowed.
+        wired: bool,
+    }
+
+    /// Whether `child` needs tracking no longer: it was reaped, or it is no
     /// longer login's child to reap at all. Keeping an untrackable entry
     /// would re-wake supervision for ever.
     ///
-    /// A collected exit that was not clean is audited on the way through:
-    /// this reap is the only place login learns how one of these children
-    /// ended, and their `stderr` is login's own console — invisible behind a
-    /// desktop — so nothing else can state the reason. One that is no longer
-    /// login's child has no status to state.
-    fn launch_collected(pid: i64, sink: LogSink) -> bool {
-        match tairix_rt::try_reap(pid) {
+    /// A collected exit is audited on the way through: this reap is the only
+    /// place login learns how one of these children ended, and their `stderr`
+    /// is login's own console — invisible behind a desktop — or, for a wired
+    /// one, closed, so nothing else can state the reason. A plain launch's
+    /// clean end records nothing. One that is no longer login's child has no
+    /// status to state.
+    fn launch_collected(child: Launched, sink: LogSink) -> bool {
+        match tairix_rt::try_reap(child.pid) {
+            Reap::Exited(status) if child.wired => {
+                audit_wired_ended(&sink, child.pid, status);
+                true
+            }
             Reap::Exited(status) => {
-                audit_launch_ended_abnormally(&sink, pid, status);
+                audit_launch_ended_abnormally(&sink, child.pid, status);
                 true
             }
             Reap::Gone => true,
@@ -1028,12 +1052,16 @@ mod program {
     /// A non-blocking launch instead hands the started child to the
     /// server's tracking table, which reaps it on a later wake — the
     /// requester keeps running and can never wait on a child that is not
-    /// its own.
+    /// its own. A wired launch does the same, after handing the requester its
+    /// ends of the child's two pipes.
     struct RtElevateLauncher<'a> {
         server: &'a ConsoleServer,
         /// The caller the elevated program is run for; it lives in the
         /// caller's session and ends with it.
         requester: ProcId,
+        /// The child a wired launch started for this request, ended should
+        /// the reply naming its pipes not reach the requester.
+        wired: Cell<Option<i64>>,
     }
 
     impl ElevateLauncher for RtElevateLauncher<'_> {
@@ -1049,8 +1077,35 @@ mod program {
 
         fn launch_as(&self, program: &str, uid: u32) -> Result<i64, Errno> {
             let pid = spawn_elevated(program, ElevateArgv::NONE, uid, self.requester)?;
-            self.server.track_launched(pid);
+            self.server.track_launched(Launched { pid, wired: false });
             Ok(pid)
+        }
+
+        fn launch_wired_as(&self, program: &str, uid: u32) -> Result<Wired, Errno> {
+            let path = program.as_bytes();
+            let mut hex = [0u8; tairix_abi::PROC_ID_HEX_LEN];
+            let requester = self.requester.write_hex(&mut hex).as_bytes();
+            let argv: [&[u8]; 2] = [path, requester];
+            let (pid, input, output) = tairix_rt::spawn_piped(path, &argv, |wires| SpawnAttach {
+                wires,
+                ..elevated_attach(uid, self.requester)
+            })?;
+            self.server.track_launched(Launched { pid, wired: true });
+            let handed = hand_over(pid, (input, output), self.requester);
+            // A pending delegation holds its end open, so login's own copies
+            // go whichever way the hand-over went.
+            let _ = tairix_rt::fs_close(input);
+            let _ = tairix_rt::fs_close(output);
+            match handed {
+                Ok(launch) => {
+                    self.wired.set(Some(pid));
+                    Ok(Wired { pid, launch })
+                }
+                Err(err) => {
+                    let _ = tairix_rt::signal(pid, Signal::Kill);
+                    Err(err)
+                }
+            }
         }
 
         fn capture_as(
@@ -1094,6 +1149,27 @@ mod program {
                 None => Ok(Captured::Overran { exit_code: status }),
             }
         }
+    }
+
+    /// Hand `requester` the ends `input` and `output` of the pipes wired to
+    /// login's child `pid`: delegations naming the requester's attested
+    /// instance, beside the child's own as the kernel attests it.
+    fn hand_over(
+        pid: i64,
+        (input, output): (u32, u32),
+        requester: ProcId,
+    ) -> Result<WiredLaunch, Errno> {
+        let instance = tairix_rt::child_origin(pid)?.proc_id();
+        let grant = |fd| {
+            let handle = Errno::syscall_result(tairix_rt::fd_grant(fd, 0, requester))?;
+            // The kernel mints handles from one: zero is no delegation.
+            core::num::NonZeroU64::new(handle).ok_or(Errno::OutOfRange)
+        };
+        Ok(WiredLaunch {
+            instance,
+            input: grant(input)?,
+            output: grant(output)?,
+        })
     }
 
     /// Spawn one elevated `program` as `uid` with its standard output wired

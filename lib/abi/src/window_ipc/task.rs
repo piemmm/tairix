@@ -34,6 +34,10 @@ pub enum SystemTask {
     /// which `unmount` is handed, and the catalog name the prompt names it
     /// by.
     Eject(ElevateWords),
+    /// Retitle a volume: these words are its durable root,
+    /// `id::<volume-id>/`, and the title, which `label` is handed, then the
+    /// catalog name the prompt names it by. An empty title clears it.
+    Retitle(ElevateWords),
 }
 
 impl SystemTask {
@@ -44,7 +48,8 @@ impl SystemTask {
             Self::Configure(words)
             | Self::ChangeAccount(words)
             | Self::SetPassword(words)
-            | Self::Eject(words) => Some(words),
+            | Self::Eject(words)
+            | Self::Retitle(words) => Some(words),
             Self::ShowAddressing | Self::ShowAccounts | Self::SetClock => None,
         }
     }
@@ -68,6 +73,7 @@ impl SystemTask {
             Self::ShowAccounts => KIND_SHOW_ACCOUNTS,
             Self::SetClock => KIND_SET_CLOCK,
             Self::Eject(_) => KIND_EJECT,
+            Self::Retitle(_) => KIND_RETITLE,
         }
     }
 }
@@ -86,6 +92,8 @@ const KIND_SHOW_ACCOUNTS: u8 = 5;
 const KIND_SET_CLOCK: u8 = 6;
 /// Wire kind of [`SystemTask::Eject`].
 const KIND_EJECT: u8 = 7;
+/// Wire kind of [`SystemTask::Retitle`].
+const KIND_RETITLE: u8 = 8;
 
 /// Byte offset of a task's kind within its operand block.
 const KIND_AT: usize = 0;
@@ -145,6 +153,7 @@ pub(super) fn read(block: &[u8]) -> Result<SystemTask, Errno> {
         KIND_CHANGE_ACCOUNT => SystemTask::ChangeAccount(words),
         KIND_SET_PASSWORD => SystemTask::SetPassword(words),
         KIND_EJECT => SystemTask::Eject(words),
+        KIND_RETITLE => SystemTask::Retitle(words),
         KIND_SHOW_ADDRESSING | KIND_SHOW_ACCOUNTS | KIND_SET_CLOCK if !words.is_empty() => {
             return Err(Errno::OutOfRange);
         }

@@ -1101,11 +1101,12 @@ non-zero `isa-debug-exit`), so the host-side decode is per-arch
 
 `exit_failure` takes a `NonZeroU16`. The `SYS_EXIT` subcode *is* the host
 exit status, so a zero-coded failure would exit QEMU with status 0 and
-the runner would read the failing run as a pass; unlike riscv64's
-`fail_word` this board has no encoding step in which a zero could be
-caught, so the type is the whole guard. Fixtures mint their codes with
-`tairix_itest_finisher::fail_point!`, which rejects a zero literal at
-compile time.
+the runner would read the failing run as a pass. The host keeps eight
+bits of that status, so the pure `qemu_exit::fail_subcode(code)` carries
+a code past them as `255` rather than let `256` wrap onto the pass
+status; its unit test walks the whole `1..=0xFFFF` domain. Fixtures mint
+their codes with `tairix_itest_finisher::fail_point!`, which rejects a
+zero literal at compile time.
 
 ## Stage 3 architecture primitives
 

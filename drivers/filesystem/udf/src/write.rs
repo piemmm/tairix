@@ -2001,8 +2001,7 @@ fn push<T>(out: &mut Vec<T>, item: T) -> Result<(), DriverError> {
 
 /// `extents`, copied fallibly.
 fn copied(extents: &[Extent]) -> Result<Vec<Extent>, DriverError> {
-    tairix_util::fallible::collected(extents.len(), extents.iter().copied())
-        .ok_or(DriverError::OutOfMemory)
+    tairix_util::fallible::copied(extents).ok_or(DriverError::OutOfMemory)
 }
 
 /// Append a hole of `blocks` blocks to `out`, in descriptors no longer than

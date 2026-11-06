@@ -685,10 +685,10 @@ impl<B: Block> Ext4<B> {
         }
         self.check_allocated(start, end)?;
         self.freed.reserve()?;
+        self.forget_meta(start, len)?;
         self.freed_cost = self
             .freed_cost
             .saturating_add(self.release_cost(start, end));
-        self.forget_meta(start, len);
         self.freed.push(start, len);
         Ok(())
     }

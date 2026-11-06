@@ -38,6 +38,16 @@
 //! what wakes the session, and the next frame is admitted on that wake. Such
 //! a display presents at most one frame per refresh by construction, so the
 //! period no longer applies to it.
+//!
+//! # A dark screen still paces the applications
+//!
+//! A present replacing a frame not yet shown is answered once the latch shows
+//! it. While no frame can reach the screen — the saver dark or drawing on the
+//! display itself, the lock not yet covering, no display held — no latch runs,
+//! so the pacer's dark half answers what is held once a period instead
+//! ([`FramePacer::answers_due`]), its one shot armed only while something is
+//! held: an application is held to the same pace with the screen off as on,
+//! and never stalls behind it.
 
 use tairix_abi::driver::display::RefreshRate;
 
@@ -64,6 +74,9 @@ pub struct FramePacer {
     /// Whether the display took the last frame at its next flip, and so
     /// paces frames by its flips.
     flips: bool,
+    /// When the presents held behind a frame no screen could show were last
+    /// answered.
+    answered_ns: Option<u64>,
 }
 
 impl FramePacer {
@@ -75,6 +88,7 @@ impl FramePacer {
             held: false,
             for_flip: false,
             flips: false,
+            answered_ns: None,
         }
     }
 
@@ -167,16 +181,52 @@ impl FramePacer {
         )
     }
 
+    /// Whether the presents held behind a frame are answered now, while no
+    /// frame can reach the screen to answer them: once a period at `refresh`,
+    /// the pace the screen would have set. A clock that has jumped behind the
+    /// last answer answers rather than stalling.
+    pub fn answers_due(&mut self, now_ns: u64, refresh: RefreshRate) -> bool {
+        let due = period_left(self.answered_ns, now_ns, refresh) == 0;
+        if due {
+            self.answered_ns = Some(now_ns);
+        }
+        due
+    }
+
+    /// `park_ns` shortened to the next [`answers_due`](Self::answers_due)
+    /// while presents are `held` in the dark — the one shot that answers them
+    /// — and left exactly as it is otherwise.
+    #[must_use]
+    pub fn answers_deadline_ns(
+        &self,
+        now_ns: u64,
+        park_ns: u64,
+        refresh: RefreshRate,
+        held: bool,
+    ) -> u64 {
+        park_within(
+            park_ns,
+            held.then(|| period_left(self.answered_ns, now_ns, refresh)),
+        )
+    }
+
     /// Nanoseconds left of the current frame period at `refresh`: `0` once
     /// the next frame is due, before the first frame, and on a clock that
     /// jumped backwards.
     fn remaining_ns(&self, now_ns: u64, refresh: RefreshRate) -> u64 {
-        self.last_ns.map_or(0, |last| {
-            now_ns
-                .checked_sub(last)
-                .map_or(0, |elapsed| refresh.frame_ns().saturating_sub(elapsed))
-        })
+        period_left(self.last_ns, now_ns, refresh)
     }
+}
+
+/// Nanoseconds left at `now_ns` of the period at `refresh` that began at
+/// `since`: `0` once it has run, when none began, and on a clock that jumped
+/// backwards.
+fn period_left(since: Option<u64>, now_ns: u64, refresh: RefreshRate) -> u64 {
+    since.map_or(0, |last| {
+        now_ns
+            .checked_sub(last)
+            .map_or(0, |elapsed| refresh.frame_ns().saturating_sub(elapsed))
+    })
 }
 
 #[cfg(test)]

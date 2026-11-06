@@ -345,11 +345,10 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             Err(err) => return encode(Err(err)),
         };
         match op {
-            SignalIntakeOp::Enable => {
-                intake_enable(cur);
+            SignalIntakeOp::Enable => encode(intake_enable(cur).map(|()| {
                 INTAKE_ENABLED.store(true, Ordering::SeqCst);
                 0
-            }
+            })),
             SignalIntakeOp::Disable => encode(tairix_kernel_core::intake_disable(cur).map(|()| 0)),
             SignalIntakeOp::Take => match intake_take(cur) {
                 Ok(signal) => {
@@ -458,6 +457,10 @@ fn build_el0_space(
         args,
         env: &[],
         canary: CANARY,
+        heap: tairix_abi::HeapRegion {
+            base: USER_HEAP_BASE,
+            len: USER_HEAP_LEN,
+        },
     };
 
     // SAFETY: building the image is itself safe; the returned `UserEntry` is
@@ -482,7 +485,10 @@ fn build_el0_space(
     // reaped child's status out to the parent's `status` pointer. Only the
     // parent calls `wait`, so only its space is kept.
     if core::ptr::eq(pool, &PAGE_TABLES_PARENT) {
-        let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
+        let Ok(frozen) = space.freeze() else {
+            qemu_exit::exit_failure(FAIL_BUILD);
+        };
+        let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(frozen);
         let pm: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
         *PARENT_SPACE.lock() = Some((frozen, pm));
     }

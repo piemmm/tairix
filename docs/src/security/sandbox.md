@@ -104,8 +104,8 @@ Three layers, each fail-closed, each with its own tests:
    These are exactly the self-scoped and descriptor-scoped operations a
    worker needs: run, block on and talk over the wired descriptors,
    manage its own heap, run threads in its own address space under its own
-   empty record and block them on words of its own, map the one region a
-   drawing sandbox was handed, and read the monotonic clock to pace its own
+   empty record and block them on words of its own, map the one region its
+   spawner handed it, and read the monotonic clock to pace its own
    work, coarsened because no sandbox holds `CAP_TIME_HIRES`. Everything
    that names an object outside the task — a path (`fs_open`), an IPC
    endpoint, a resource reference, a process (`spawn`/`signal`/`wait`), a
@@ -132,16 +132,23 @@ hosting program's own job control, say — never takes it or becomes ready
 for it. The sandbox host is library code inside someone else's program,
 and it can only explain a worker's end if nothing else reaped it first.
 
-## The drawing sandbox
+## A spawn share, and the drawing sandbox
 
-A *drawing sandbox* is the sandbox above with one thing more: its spawner
-hands it one shared-memory region at spawn (`SpawnAttach::drawing`), which
-the child maps once with `share_map` — the only memory beyond its own it can
-ever reach. The same spawn holds the child to the address space and the
-threads the spawner grants. It is what a screensaver runs in
+A sandbox's spawner may hand it one shared-memory region at spawn
+(`SpawnAttach::with_share`), a region the spawner itself holds a grant for,
+delegated and never widened. The child maps it once with `share_map` — the
+only memory beyond its own it can ever reach. A parser sandbox is handed one
+to write its output into, so what it decodes reaches its spawner with no copy
+through the pipes: a movie's frames, which only their slot and their header
+cross the pipes to name (`lib/sandbox::moviedecode`).
+
+A *drawing sandbox* is a sandbox handed a share and marked as one
+(`SPAWN_FLAG_DRAWING`, `SpawnAttach::drawing`), which the same spawn also
+holds to the threads the spawner grants. It is what a screensaver runs in
 (`plans/SCREENSAVERS.md`): the region carries the frames it presents and,
 for a saver given a feed, one screen-sized picture the two sides hand back
-and forth.
+and forth. A drawing block without a share, or outside a sandbox, is refused
+at parse.
 
 - `share_map` maps the spawn share once: a task handed none is refused
   `NotFound`, and any later call `AlreadyExists`, even after a first call
@@ -149,7 +156,8 @@ and forth.
   twice.
 - The load gate (`lib/appload`) admits a bundle of the `screensaver` kind
   only into a drawing spawn, so a saver never runs with authority
-  (`APP_DRAWING_ONLY`), and no other kind is admitted into one.
+  (`APP_DRAWING_ONLY`), and no other kind is admitted into one. A parser
+  sandbox handed a share is no drawing spawn, so no screensaver loads into it.
 - A saver in the user's own store, `/Users/<name>/Library/Screensavers`, at a
   plain path whose only bundle is the saver itself (`is_user_saver_bundle`),
   is admitted self-signed: its signature proves the bundle is whole and grants
@@ -483,6 +491,17 @@ sandboxes a parse imports it:
   working set outgrows the cache is refused rather than looping. The owner's
   `AudioDecodeClient` checks every answer against the request it answers,
   and brings a replacement back only to the same stream, once per position.
+- **Movie decoding** (`moviedecode`): the same paged worker for a `WebM`
+  recording, handed one region at spawn: a ring of three slots, each sized for
+  its owner's screen before any stream is read. It draws each picture into a
+  slot its owner does not hold and names it over the pipe by its head alone —
+  slot, size, time — and the owner believes the head only where the slot is
+  one its request left free and the size one a slot holds, then copies the
+  pixels out before anything reads them, branching on none of them. A slot is
+  the owner's until its next request says otherwise. The worker's ceiling is
+  weighed with the ring in it, and the owner's own address space maps the ring
+  too. A replacement is handed a ring of its own; the old one is let go once
+  the last picture drawn into it has been copied out.
 
 Host tests inject the in-process `loopback` fake exactly as the
 `Fs`/`Tty` seams take fakes, so a consumer's full parent-side path runs

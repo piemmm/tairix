@@ -13,7 +13,9 @@ use core::cell::RefCell;
 
 use crate::service::write_superblock;
 
-use tairix_abi::blkio::{BlkMedium, BlkOp, BlkRequest, BlkTransport, BLK_REQUEST_LEN};
+use tairix_abi::blkio::{
+    BlkDeviceIdentity, BlkMedium, BlkOp, BlkRequest, BlkTransport, BLK_REQUEST_LEN,
+};
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
 use tairix_abi::raid::RaidLevel;
@@ -58,6 +60,8 @@ struct DiskState {
     geometry_fails: bool,
     /// Reject every write: a disk that cannot be re-stamped.
     write_fails: bool,
+    /// What the disk states it is, as a driver proving its medium states one.
+    identity: Option<BlkDeviceIdentity>,
 }
 
 /// A handle to a member device double.
@@ -80,6 +84,7 @@ impl MemberDisk {
             block_size: BLOCK_SIZE,
             geometry_fails: false,
             write_fails: false,
+            identity: None,
         })))
     }
 
@@ -98,6 +103,13 @@ impl MemberDisk {
     /// Fail every write from here on.
     pub(crate) fn refusing_writes(self) -> Self {
         self.0.borrow_mut().write_fails = true;
+        self
+    }
+
+    /// State `identity` as the disk's own, as the driver of a device that
+    /// proves its medium does.
+    pub(crate) fn stating(self, identity: Option<BlkDeviceIdentity>) -> Self {
+        self.0.borrow_mut().identity = identity;
         self
     }
 
@@ -145,6 +157,10 @@ impl MemberDisk {
 impl Block for MemberDisk {
     fn medium(&self) -> Option<BlkMedium> {
         Some(MEMBER_MEDIUM)
+    }
+
+    fn device_identity(&self) -> Option<BlkDeviceIdentity> {
+        self.0.borrow().identity
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

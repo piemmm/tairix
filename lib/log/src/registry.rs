@@ -150,6 +150,8 @@ pub const NETMAP: EventRange = EventRange::new(33_000, 34_000);
 pub const SETTINGSD: EventRange = EventRange::new(34_000, 35_000);
 /// The network-share service.
 pub const SMBFS: EventRange = EventRange::new(35_000, 36_000);
+/// The screen recorder.
+pub const RECORDER: EventRange = EventRange::new(36_000, 37_000);
 
 /// Every range and the crates that take identifiers from it.
 pub const OWNERS: &[Owner] = &[
@@ -365,6 +367,10 @@ pub const OWNERS: &[Owner] = &[
         range: SMBFS,
         crates: &["userland/net/smbfs"],
     },
+    Owner {
+        range: RECORDER,
+        crates: &["userland/gui/recorder"],
+    },
 ];
 
 /// Identifiers a removed or renumbered event carried, each never defined
@@ -375,8 +381,8 @@ pub const RETIRED: &[u32] = &[
     4124, 4125, 4126, 4127, 4128, 4129, 4149, 4160, 4161, 4162, 4163, 4164, 4165, 4166, 4167, 4168,
     4169, 4184, 4196, 4197, 4198, 4199, 4200, 4201, 4202, 4203, 4204, 4205, 4206, 4207, 4208, 4210,
     4211, 4212, 4214, 4215, 4216, 4228, 4229, 4230, 4231, 4232, 4233, 4234, 4235, 4236, 4244, 4245,
-    4246, 4247, 4248, 4249, 4251, 7000, 9003, 10_010, 10_011, 21_000, 24_101, 24_201, 24_301,
-    24_601, 24_701, 24_804, 24_910,
+    4246, 4247, 4248, 4249, 4251, 4327, 4328, 7000, 9003, 10_010, 10_011, 21_000, 24_101, 24_201,
+    24_301, 24_601, 24_701, 24_804, 24_910,
 ];
 
 #[cfg(test)]

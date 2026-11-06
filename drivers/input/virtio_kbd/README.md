@@ -4,7 +4,7 @@ The autoloaded **user-space virtio-input keyboard driver process** — the `Run`
 binary `devmgr` spawns when a virtio-input device is discovered (`AGENTS.md`
 §18, `plans/PI.md` P10 chunk 5d-2-ii). This is the "drivers in user space"
 steady state (`AGENTS.md` §4) on the hardware QEMU `-M virt` actually presents;
-a USB keyboard is `drivers/input/usb_kbd`'s.
+a USB keyboard is `drivers/input/usb_hid`'s.
 
 ## What it does
 
@@ -14,18 +14,23 @@ a USB keyboard is `drivers/input/usb_kbd`'s.
    device-resource grants the kernel minted for this process (coherency `None` —
    the kernel carves coherent DMA and the QEMU `virt` virtio interconnect snoops
    the CPU caches, so the binary stays platform-neutral, `AGENTS.md` §2.20).
-2. Resolves its single granted register window with
-   `tairix_abi::driver::sole_register_window` over `RtDriverHost::resources()` —
-   the one definition of "which window did the kernel grant me", shared with the
-   USB keyboard driver (`AGENTS.md` §2.2 / §2.16) — no build-time board constant.
-3. Maps the window through the host's `mmio_map`, builds the bus-agnostic
-   `tairix_virtio::MmioTransport` over it, and brings the device online with
-   `tairix_virtio_input::VirtioInput::open` (the host is the `VirtioHost` the
-   device carves its event buffers from).
-4. Loops `VirtioInput::poll`, resolving each decoded `evdev` key edge into a
-   `KeyInput` record with `tairix_virtio_input::VirtioKeyboardConsole` and
-   injecting it into the kernel input-focus arbiter through the `key_inject`
-   syscall, yielding between polls (`AGENTS.md` §2.1).
+2. Selects its transport by the grant shape: the four role-tagged
+   configuration windows of a virtio-PCI device
+   (`tairix_abi::driver::virtio_pci::virtio_pci_windows`), or else the single
+   register window of a virtio-MMIO one
+   (`tairix_abi::driver::sole_register_window`), each read from
+   `RtDriverHost::resources()` — no build-time board constant, and no read of
+   PCI configuration space.
+3. Builds the bus-agnostic `tairix_virtio::PciTransport` or `MmioTransport`
+   over the mapped windows and brings the device online with
+   `tairix_virtio_input::VirtioInput::open_armed`, binding the device interrupt
+   only once the event queue is live (the host is the `VirtioHost` the device
+   carves its event buffers from).
+4. Pumps `VirtioInput::poll_reports`, parking on the device's interrupt between
+   reports: a key edge becomes a `KeyInput` record, carrying its physical key,
+   through `tairix_virtio_input::VirtioKeyboardConsole` and is injected through
+   the `key_inject` syscall; pointer and touch reports go through
+   `pointer_inject` and `touch_inject`.
 
 Every capability and bound is re-checked kernel-side (`AGENTS.md` §5.4); the
 host adds no authority. A bring-up failure exits with a reserved fail-closed
@@ -47,17 +52,17 @@ layering holds (no `drivers/*`→`drivers/*` edge — the `lib/usb` ↔
 ## Supported hardware / limitations
 
 Any virtio-input device (virtio 1.1 §5.8) whose register window and DMA
-constraint the kernel granted this process. The keyboard `evdev`-keycode
-resolver is the US QWERTY layout; pointer/scroll events are decoded by
-`lib/virtio_input` but this binary injects only keyboard edges. The match key
+constraint the kernel granted this process. Each `evdev` keycode is named as
+its physical key and typed through the shared US QWERTY layout. The match key
 carries no transport detail, so the same driver binds a virtio-input device
 attached over PCI or MMIO (`AGENTS.md` §2.2).
 
 ## Capabilities
 
 Granted at spawn from its matched node's requested resources: `CAP_MMIO_MAP`
-(the register window), `CAP_MEM_DMA` (the event-buffer DMA region), and
-`CAP_INPUT_INJECT` (`key_inject`).
+(the register windows), `CAP_MEM_DMA` (the event-buffer DMA region),
+`CAP_IRQ_BIND` (the device interrupt it parks on), `CAP_INPUT_INJECT`
+(`key_inject`, `pointer_inject`, `touch_inject`) and `CAP_LOG_EMIT`.
 
 ## Tests
 

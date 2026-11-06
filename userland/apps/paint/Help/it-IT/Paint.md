@@ -33,8 +33,17 @@ con un nome, un'opacità e se è visibile; si dipinge su un livello alla
 volta, e la finestra li mostra sovrapposti. OpenRaster conserva i livelli;
 ogni altro formato li riceve sovrapposti. Il menu Livelli aggiunge, copia,
 elimina, alza e abbassa livelli, unisce un livello a quello sottostante e
-appiattisce l'immagine, e le sue Proprietà del livello rinominano un livello
-e fissano quanto se ne vede. Regolazioni, riempimenti e tratti cambiano il
+appiattisce l'immagine. Il pannello Livelli, mostrato da Vista ▸ Pannelli,
+riunisce l'opacità del livello su cui si dipinge e i pulsanti Nuovo, Duplica,
+Elimina e Unisci in basso, e sotto una riga per livello, il più alto per
+primo, con un occhio, una piccola immagine del livello, il suo nome e la sua
+opacità. Premere una riga per dipingere sul suo livello, il suo occhio per
+mostrare o nascondere il livello, o il nome del livello su cui si dipinge per
+rinominarlo, e trascinare una riga per alzare o abbassare il suo livello;
+ognuna di queste azioni tranne la scelta di una riga, e un cambio di opacità
+per quanto a lungo lo si trascini, è un solo cambiamento da annullare.
+Fluttuante, la finestra del pannello si ridimensiona da due righe a tutte.
+Regolazioni, riempimenti e tratti cambiano il
 livello su cui si dipinge; rotazioni, ribaltamenti, ridimensionamenti e
 ritagli cambiano ogni livello. Un'immagine con tavolozza ha un solo livello.
 
@@ -81,8 +90,12 @@ premuto Maiusc si disegna un quadrato, un cerchio o una linea a un multiplo
 di 45 gradi.
 
 Lungo i due lati della finestra corrono dei pannelli: di norma il pannello
-Strumenti a sinistra e il pannello Colore a destra, con il pannello
-Regolazione sotto di esso non appena si apre una regolazione. Ognuno ha in
+Strumenti a sinistra e il pannello Colore a destra, a cui si aggiungono sotto
+i pannelli Livelli, Regolazioni ed Effetti quando sono mostrati o si apre una
+regolazione o un effetto. I pannelli di un lato si impilano in una sola
+colonna: ciascuno riceve almeno lo spazio che gli serve, poi l'ultimo aperto
+cresce per primo verso tutto ciò che contiene, e un pannello che ne riceve
+meno scorre al proprio interno, mentre la colonna non scorre mai. Ognuno ha in
 cima una sottile fascia col suo nome, con un comando che lo arrotola sulla
 fascia e un segno che lo chiude; Vista ▸ Pannelli mostra di nuovo un pannello
 chiuso, e Ripristina pannelli rimette ogni pannello come lo ha una finestra
@@ -93,8 +106,11 @@ sua, spostata dalla sua fascia, tenuta sopra l'immagine e chiusa dal suo
 segno; riportato sopra un lato, vi si aggancia di nuovo. Anche la tavolozza
 fluttua: il pulsante all'estremità destra della sua striscia, o Vista ▸
 Pannelli ▸ Stacca la tavolozza, la porta in una piccola finestra sua, con i
-colori disposti in una griglia; chiudere quella finestra, o riportarla in
-fondo alla finestra, la rimette nella striscia.
+colori disposti in una griglia. Ridimensionare quella finestra ridispone i
+colori secondo la sua larghezza, e scorrono in su e in giù quando non ci stanno
+tutti; chiuderla, o riportarla in fondo alla finestra, la rimette nella
+striscia. Nella striscia come nella sua finestra, i colori principale e
+secondario portano i loro numeri di colore di RISC OS.
 
 Lo strumento di selezione delimita un rettangolo, un'ellisse, un lazo a mano
 libera, un poligono cliccato angolo per angolo o, con la bacchetta magica, i
@@ -117,26 +133,47 @@ maniglie ne spostano i bordi, e Invio ritaglia. La mano trascina l'immagine
 nella finestra, come Spazio con qualsiasi strumento; lo zoom ingrandisce con
 un clic, o con Alt riduce, e un riquadro trascinato riempie la finestra.
 
-Il menu Regolazioni apre una regolazione nel pannello Regolazione, dove ogni
-altro strumento, pannello e menu resta a portata di mano: luminosità e
-contrasto, tonalità e saturazione, bilanciamento colore, livelli, curve,
-bilanciamento del bianco, posterizza, soglia, sfoca, nitidezza, pixel e
-aggiungi rumore; desatura e trova bordi, che non hanno impostazioni, si
-applicano subito. L'immagine mostra la regolazione man mano che le sue
-impostazioni si muovono, Anteprima la spegne e la riaccende per confrontare,
-Ripristina rimette le sue impostazioni e Applica la conserva come un'unica
-modifica da annullare; dipingere, riempire o scegliere un'altra regolazione la
-applica prima. I livelli fissano i punti di nero, grigio e bianco su un
-istogramma del livello, per tutti i canali insieme o ciascuno da solo, con
-contagocce che li prendono dall'immagine e Auto; le curve piegano i toni di un
-canale con punti trascinati sul suo istogramma; il bilanciamento del bianco
-fissa la temperatura e la tinta della luce, da un pixel neutro scelto o con
-Auto; tonalità e saturazione ruotano, rafforzano e schiariscono tutti i colori
-o una gamma di essi; il bilanciamento colore sposta ombre, toni medi e luci
-verso il rosso, il verde o il blu, conservandone la luminosità se richiesto.
-Tutto resta limitato alla selezione. Su un'immagine con tavolozza una
-regolazione cambia la sua tavolozza, e quelle che hanno bisogno dei colori
-vicini non sono offerte.
+Due pannelli contengono le operazioni dell'immagine, ciascuno guidato da un
+elenco che ne sceglie una: il pannello Regolazioni contiene luminosità e
+contrasto, livelli, curve, tonalità e saturazione, bilanciamento colore,
+bilanciamento del bianco, desatura, inverti, posterizza, soglia e il
+miscelatore canali, e il pannello Effetti contiene sfocatura gaussiana,
+maschera di contrasto, mediana, aggiungi rumore, trova bordi, rilievo e pixel.
+Ogni riga del menu Regolazioni apre la sua operazione nel suo pannello. Sotto
+l'elenco stanno le impostazioni dell'operazione scelta, poi Anteprima,
+Ripristina e Applica; ogni altro strumento, pannello e menu resta a portata di
+mano. L'immagine mostra l'operazione man mano che le sue impostazioni si
+muovono, prima la parte in vista; Anteprima la spegne e la riaccende per
+confrontare, Ripristina rimette le sue impostazioni e Applica la conserva come
+un'unica modifica da annullare. Un'unica anteprima vale per entrambi i
+pannelli: scegliere un'altra operazione in un elenco, o muovere le
+impostazioni dell'altro pannello, applica l'operazione lasciata come un'unica
+modifica se le sue impostazioni sono state mosse e cambia l'immagine, e la
+scarta altrimenti, così scorrere un elenco non cambia nulla. Dipingere,
+riempire, una trasformazione o un salvataggio applica o scarta prima
+l'operazione aperta nello stesso modo; segnare una selezione, la vista, i
+colori e l'annullamento la lasciano aperta.
+
+I livelli fissano i punti di nero, grigio e bianco su un istogramma del
+livello, per tutti i canali insieme o ciascuno da solo, con contagocce che li
+prendono dall'immagine e Auto; le curve piegano i toni di un canale con punti
+trascinati sul suo istogramma; il bilanciamento del bianco fissa la
+temperatura e la tinta della luce, da un pixel neutro scelto o con Auto;
+tonalità e saturazione ruotano, rafforzano e schiariscono tutti i colori o una
+gamma di essi; il bilanciamento colore sposta ombre, toni medi e luci verso il
+rosso, il verde o il blu, conservandone la luminosità se richiesto; il
+miscelatore canali pesa ciascun canale da rosso, verde, blu e una costante, o
+ne fa un unico grigio. La sfocatura gaussiana ammorbidisce l'immagine secondo
+il suo raggio; la maschera di contrasto la rende più nitida, allontanando ogni
+colore dalla sua sfocatura di una quantità dove i due differiscono almeno di
+una soglia; la mediana dà a ogni pixel il valore di mezzo di quelli intorno,
+levigando le macchioline e conservando i bordi; aggiungi rumore stende
+macchioline uniformi o gaussiane, a colori o in grigio; trova bordi illumina i
+bordi tra i colori; rilievo trasforma l'immagine in un rilievo grigio
+illuminato da un angolo; e pixel stende quadrati, ciascuno del colore medio di
+ciò che copre. Tutto resta limitato alla selezione. Su un'immagine con
+tavolozza una regolazione cambia la sua tavolozza, e gli effetti, che hanno
+bisogno dei colori vicini, non sono offerti.
 
 Il pannello Colore contiene i colori principale e secondario e un selettore
 di colore per quello dei due che è scelto: un clic su un colore lo sceglie,

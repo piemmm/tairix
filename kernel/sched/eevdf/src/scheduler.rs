@@ -5,23 +5,23 @@
 //! is the implementation; the doc page is the source of truth.
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use tairix_kernel_sched_api::park::{self, Settled, Taken};
+use tairix_kernel_sched_api::park::{self, Settled, Taken, TaskTable};
+use tairix_kernel_sched_api::queue::Overflow;
 use tairix_kernel_sched_api::share::{vslice, Competition, Counted};
 use tairix_kernel_sched_api::{ParkableTask, StealScan};
-use tairix_sync::{RwLock, SpinLock};
+use tairix_sync::RwLock;
 
 use crate::runqueue::{Entry, RunQueue};
 use crate::task::{TaskBody, TaskInner};
 use crate::{
-    choose_task_id, CoreClass, CpuId, ExitDisposition, Priority, SchedClass, SchedError,
-    SchedResult, SchedulerArch, SchedulerConfig, SchedulerPolicy, StepOutcome, TaskAction,
-    TaskContext, TaskId, TaskState,
+    CoreClass, CpuId, ExitDisposition, Priority, SchedClass, SchedError, SchedResult,
+    SchedulerArch, SchedulerConfig, SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId,
+    TaskState,
 };
 
 /// Per-CPU scheduler state: the virtual-time run queue plus the timer
@@ -67,12 +67,12 @@ impl Competition for Cpus<'_> {
 pub struct Scheduler<A: SchedulerArch> {
     arch: Arc<A>,
     cpus: Box<[CpuState]>,
-    tasks: RwLock<BTreeMap<TaskId, Arc<TaskInner>>>,
+    tasks: RwLock<TaskTable<TaskInner>>,
     config: SchedulerConfig,
     /// Where each CPU begins its work-stealing scan. The shared per-CPU
     /// generator, not a private one: a scan rotation is not policy.
     victim_scan: StealScan,
-    overflow: SpinLock<Vec<Arc<TaskInner>>>,
+    overflow: Overflow<Arc<TaskInner>>,
     preemptions: Box<[AtomicU64]>,
     current: Box<[AtomicU64]>,
     /// Static [`CoreClass`] of each CPU, snapshotted once at construction
@@ -128,10 +128,10 @@ impl<A: SchedulerArch> Scheduler<A> {
         Ok(Self {
             arch,
             cpus: cpus.into_boxed_slice(),
-            tasks: RwLock::new(BTreeMap::new()),
+            tasks: RwLock::new(park::task_table()),
             config,
             victim_scan: StealScan::new(config.cpus),
-            overflow: SpinLock::new(Vec::new()),
+            overflow: Overflow::new(),
             preemptions: preemptions.into_boxed_slice(),
             current: current.into_boxed_slice(),
             core_classes: core_classes.into_boxed_slice(),
@@ -356,7 +356,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             None => Some(Arc::clone(task)),
         };
         if let Some(task) = refused {
-            self.overflow.lock().push(task);
+            self.overflow.push(task);
         }
     }
 
@@ -383,7 +383,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             None => Some(Arc::clone(task)),
         };
         if let Some(task) = refused {
-            self.overflow.lock().push(task);
+            self.overflow.push(task);
         }
     }
 
@@ -398,6 +398,8 @@ impl<A: SchedulerArch> Scheduler<A> {
     ///
     /// # Errors
     /// * [`SchedError::NoSuchCpu`] if `home_cpu` is out of range.
+    /// * [`SchedError::OutOfMemory`] if the task cannot be held; nothing is
+    ///   admitted.
     pub fn spawn<F>(&self, home_cpu: CpuId, priority: Priority, body: F) -> SchedResult<TaskId>
     where
         F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static,
@@ -405,22 +407,12 @@ impl<A: SchedulerArch> Scheduler<A> {
         self.cpu_state(home_cpu)?;
         let placed = self.placement_for(priority, home_cpu);
         self.cpu_state(placed)?;
-        let boxed: Box<TaskBody> = Box::new(body);
-        // The id is chosen and registered under one write lock, so a
-        // concurrent admission cannot take it in between; the queue work
-        // below then runs with the lock released, preserving the
+        // Registered under the registry's write lock and queued after it, the
         // tasks-before-queue order every other path takes.
-        let inner = {
-            let mut tasks = self.tasks.write();
-            let id = choose_task_id(None, |c| tasks.contains_key(&c))?;
-            let inner = Arc::new(TaskInner::new(id, placed, priority, boxed));
-            tasks.insert(id, Arc::clone(&inner));
-            inner
-        };
-        let id = inner.id;
+        let inner = self.register(None, placed, priority, TaskState::Ready, body)?;
         self.admit_fresh_on(&inner, placed);
         self.arch.send_ipi(placed);
-        Ok(id)
+        Ok(inner.id)
     }
 
     /// Admit a new task at `priority` but leave it [`TaskState::Parked`]
@@ -436,6 +428,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     ///
     /// # Errors
     /// * [`SchedError::NoSuchCpu`] if `home_cpu` is out of range.
+    /// * [`SchedError::OutOfMemory`] if the task cannot be held.
     pub fn spawn_parked<F>(
         &self,
         home_cpu: CpuId,
@@ -455,6 +448,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// * [`SchedError::NoSuchCpu`] if `home_cpu` is out of range.
     /// * [`SchedError::TaskIdInUse`] if a live task already holds `id`.
     /// * [`SchedError::NoTaskIdAvailable`] if `id` names no task.
+    /// * [`SchedError::OutOfMemory`] if the task cannot be held.
     pub fn spawn_parked_as<F>(
         &self,
         id: TaskId,
@@ -483,16 +477,43 @@ impl<A: SchedulerArch> Scheduler<A> {
         self.cpu_state(home_cpu)?;
         let placed = self.placement_for(priority, home_cpu);
         self.cpu_state(placed)?;
-        let boxed: Box<TaskBody> = Box::new(body);
-        let mut tasks = self.tasks.write();
-        let id = choose_task_id(requested, |c| tasks.contains_key(&c))?;
-        let inner = Arc::new(TaskInner::new(id, placed, priority, boxed));
         // Born parked: no queue entry and no competing weight are admitted
         // now, so no CPU can pick the task up. The later `unpark` performs
         // the placement, weight admission, enqueue, and IPI.
-        inner.store_state(TaskState::Parked);
-        tasks.insert(id, inner);
-        Ok(id)
+        let inner = self.register(requested, placed, priority, TaskState::Parked, body)?;
+        Ok(inner.id)
+    }
+
+    /// Register a task homed on `placed` under a drawn id (`requested` is
+    /// `None`) or the caller's reserved one, born `state`, taking every
+    /// allocation — its body, its record, its registry slot and its room in
+    /// the overflow list — before anything is filed.
+    ///
+    /// # Errors
+    /// * [`SchedError::OutOfMemory`] if any of them cannot be had.
+    /// * The id refusals of [`park::admit_record`].
+    fn register<F>(
+        &self,
+        requested: Option<TaskId>,
+        placed: CpuId,
+        priority: Priority,
+        state: TaskState,
+        body: F,
+    ) -> SchedResult<Arc<TaskInner>>
+    where
+        F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static,
+    {
+        let body: Box<TaskBody> = Box::try_new(body).map_err(|_| SchedError::OutOfMemory)?;
+        park::admit_record(
+            &self.tasks,
+            requested,
+            |records| self.overflow.reserve(records),
+            |id| {
+                let inner = TaskInner::new(id, placed, priority, body);
+                inner.store_state(state);
+                inner
+            },
+        )
     }
 
     /// Stop a task for job control until [`Self::resume`] — see
@@ -701,10 +722,13 @@ impl<A: SchedulerArch> Scheduler<A> {
     }
 
     /// Best-effort drain of the overflow list back onto each task's home
-    /// CPU. A task that still does not fit is left for a later step.
+    /// CPU. A task that still does not fit is left for a later step: the
+    /// drain visits only the entries waiting when it began.
     fn drain_overflow(&self, current_cpu: CpuId) {
-        let pending = core::mem::take(&mut *self.overflow.lock());
-        for task in pending {
+        for _ in 0..self.overflow.len() {
+            let Some(task) = self.overflow.pop() else {
+                return;
+            };
             if self.take_entry(&task, || true) != Taken::Ready {
                 continue;
             }
@@ -722,7 +746,7 @@ impl<A: SchedulerArch> Scheduler<A> {
                 None => Some(task),
             };
             match refused {
-                Some(task) => self.overflow.lock().push(task),
+                Some(task) => self.overflow.push(task),
                 // `home` may be idle, and a queue entry alone cannot wake it.
                 None if home != current_cpu => self.arch.send_ipi(home),
                 None => {}
@@ -1008,7 +1032,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             .get(cpu as usize)
             .map(|state| state.queue.ready_len() != 0)
             .ok_or(SchedError::NoSuchCpu)?;
-        Ok(local_ready || !self.overflow.lock().is_empty())
+        Ok(local_ready || !self.overflow.is_empty())
     }
 
     /// Most recent state of `id` ([`TaskState::Exited`] once drained).
@@ -1695,7 +1719,7 @@ mod tests {
 
         let queued = task.home_cpu.load(Ordering::Acquire);
         let (entry, _) = sched.cpus[queued as usize].queue.pick().expect("requeued");
-        sched.overflow.lock().push(entry);
+        sched.overflow.push(entry);
         arch.set_current_cpu(home);
         assert_eq!(sched.step(home), Ok(StepOutcome::Ran(id)), "drained");
         drop(registry);
@@ -1713,7 +1737,7 @@ mod tests {
         task.home_cpu.store(0, Ordering::Release);
         task.store_state(TaskState::Ready);
         assert!(sched.count_on(&task, 0));
-        sched.overflow.lock().push(task);
+        sched.overflow.push(task);
         let before = arch.ipi_count(0);
         sched.drain_overflow(1);
         assert_eq!(arch.ipi_count(0), before + 1);

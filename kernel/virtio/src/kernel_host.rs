@@ -23,7 +23,10 @@
 //! 3. The host records the live `(slot, DmaBuffer)` pair in an
 //!    internal table so the drop-path shim — which receives only
 //!    `(*const(), slot, len)` — can recover the originating
-//!    [`DmaBuffer`] without further state in the slab.
+//!    [`DmaBuffer`] without further state in the slab. A buffer the
+//!    table has no room to record goes back through
+//!    `kernel_sec::free_dma` and the request is refused for memory, so
+//!    no slab is minted untracked.
 //!
 //! [`KernelVirtioHost::notify_wait`] blocks the calling driver task until
 //! the device raises its interrupt line, through the kernel's [`LineWait`]
@@ -48,12 +51,13 @@
 //!   inverse of the cast performed at construction and therefore
 //!   sound.
 
-use alloc::collections::BTreeMap;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use tairix_abi::driver::CompletionSignal;
 use tairix_abi::DriverError;
+use tairix_collections::HashMap;
+use tairix_hash::BuildFastHash;
 use tairix_kernel_irq::LineWait;
 use tairix_kernel_mem::{DmaBuffer, DmaPool, PageTable};
 use tairix_kernel_sec::captable::TaskCapabilities;
@@ -100,8 +104,9 @@ pub struct KernelVirtioHost<'a, P: PageTable, S: Sink + Sync + ?Sized> {
     /// Live `(slot → DmaBuffer)` table. The drop-path shim receives
     /// only `(*const(), slot, len)`; it recovers the originating
     /// [`DmaBuffer`] by removing the entry under `slot`. Behind a
-    /// [`SpinLock`] for the same [`Sync`] reason as `pool`.
-    live: SpinLock<BTreeMap<usize, DmaBuffer>>,
+    /// [`SpinLock`] for the same [`Sync`] reason as `pool`. Keyed on the
+    /// host's own slot stamps, so they are hashed unkeyed.
+    live: SpinLock<HashMap<usize, DmaBuffer, BuildFastHash>>,
     /// The wait on the device's bound line, and the clock it is timed on.
     /// `Sync`, because a shared `&'static` host is reached from more than
     /// one task.
@@ -139,7 +144,7 @@ impl<'a, P: PageTable, S: Sink + Sync + ?Sized> KernelVirtioHost<'a, P, S> {
             audit,
             id,
             next_slot: AtomicUsize::new(0),
-            live: SpinLock::new(BTreeMap::new()),
+            live: SpinLock::new(HashMap::with_hasher(BuildFastHash::new())),
             line,
         }
     }
@@ -244,7 +249,12 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for KernelVirtioHost<'_, P, 
         // serialises device ops, so there is no cross-slab ordering to
         // establish here).
         let slot = self.next_slot.fetch_add(1, Ordering::Relaxed);
-        self.live.lock().insert(slot, buf);
+        // A slab the table cannot record could never be freed by its drop,
+        // so the buffer goes back to the pool and the request is refused.
+        if self.live.lock().try_insert(slot, buf).is_err() {
+            let _ = free_dma(&mut *self.pool.lock(), self.caller, buf, self.audit);
+            return Err(DriverError::OutOfMemory);
+        }
         let device_addr = buf.device_addr();
         let len = buf.len();
         let pool_ptr: *const () = core::ptr::from_ref::<Self>(self).cast::<()>();
@@ -440,9 +450,11 @@ mod tests {
     }
 
     impl Recorder {
+        /// A recorder with room for every event a test records, so a test
+        /// refusing the heap never refuses its audit.
         fn new() -> Self {
             Self {
-                events: SpinLock::new(Vec::new()),
+                events: SpinLock::new(Vec::with_capacity(64)),
             }
         }
         fn ids(&self) -> Vec<u32> {
@@ -492,7 +504,7 @@ mod tests {
         for c in caps {
             set.insert(*c);
         }
-        TaskCapabilities::derive(ProcessId(99), UserId(1000), set, set, sink)
+        TaskCapabilities::derive(ProcessId(99), UserId(1000), set, set, sink).expect("derived")
     }
 
     /// Event ID emitted by `kernel/sec::dma::alloc_dma` on a
@@ -879,6 +891,47 @@ mod tests {
         // The pool's frames hold sixteen pages.
         let err = host.alloc_dma_zeroed(PAGE_SIZE * 64).unwrap_err();
         assert_eq!(err, DriverError::OutOfMemory);
+        assert_eq!(host.outstanding(), 0);
+    }
+
+    /// A buffer the live table has no room to record is handed back to the
+    /// pool and the request refused for memory: no slab is minted untracked,
+    /// and nothing stays carved.
+    #[test]
+    fn a_slab_the_live_table_cannot_record_is_handed_back() {
+        let frames = FrameAllocator::new(&small_map(16)).unwrap();
+        let sim = fresh_sim();
+        let mut pool = fresh_pool(&frames, &sim);
+        let sink = Recorder::new();
+        let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
+        // A carve and its release give the pool its bookkeeping room, so the
+        // refused carve below asks the heap for the table's room alone.
+        let warm = alloc_dma(&mut pool, &caller, PAGE_SIZE, 0, &sink).expect("granted");
+        free_dma(&mut pool, &caller, warm, &sink).expect("released");
+        let ((), rewarmed) = tairix_fuzzseed::meter::metered(|| {
+            let again = alloc_dma(&mut pool, &caller, PAGE_SIZE, 0, &sink).expect("granted");
+            free_dma(&mut pool, &caller, again, &sink).expect("released");
+        });
+        assert_eq!(
+            rewarmed.allocations, 0,
+            "a warmed pool carves without the heap"
+        );
+        let (irq, handle) = irq_binding(4);
+        let waiter = TestWaiter::idle(&irq, handle);
+        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        let refused = tairix_fuzzseed::meter::refusing_above(0, || {
+            host.alloc_dma_zeroed(PAGE_SIZE).map(drop)
+        });
+        assert_eq!(refused, Err(DriverError::OutOfMemory));
+        assert_eq!(host.outstanding(), 0);
+        assert_eq!(
+            host.pool.lock().live(),
+            0,
+            "the refused carve was handed back"
+        );
+        let slab = host.alloc_dma_zeroed(PAGE_SIZE).expect("granted");
+        assert_eq!(host.outstanding(), 1);
+        drop(slab);
         assert_eq!(host.outstanding(), 0);
     }
 }

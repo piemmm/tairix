@@ -20,7 +20,6 @@
 //! UNPREDICTABLE on the MMU-off Device memory the boot CPU first runs on, so
 //! callers must not touch the store before the MMU is on.
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::{BlkStatus, FaultDomainState};
@@ -55,12 +54,21 @@ enum IssuedFor {
     Principal,
 }
 
+/// A live node and the admission generation of the driver holding it: the
+/// record a release is checked against, held with the node so recording an
+/// admission takes no memory.
+struct Held {
+    node: HwNode,
+    /// `None` while no driver holds the node.
+    driver: Option<u64>,
+}
+
 /// The lock-guarded inventory and its change counter, mutated together so
 /// a snapshot and the generation it was taken at are always consistent.
 struct Inner {
     /// The live nodes in ascending id order: the seed is sorted, a published
     /// node carries the highest id yet, and a removal keeps the order.
-    nodes: Vec<HwNode>,
+    nodes: Vec<Held>,
     /// Monotonic count of mutations. Starts at `0` on an empty store and only
     /// ever increases, so a `hw_tree_wait` caller comparing against a
     /// previously observed value detects every change without a lost wake-up.
@@ -70,26 +78,30 @@ struct Inner {
     next_id: u32,
     /// [`requested_ceiling`] of the ids left once the store was seeded.
     requested_ceiling: u32,
-    /// The admission generation of the driver each driven node is held by,
-    /// so a release that lands after a successor's admission frees nothing.
-    driven: BTreeMap<u32, u64>,
 }
 
 impl Inner {
     /// Where the live node `id` sits in [`Self::nodes`].
     fn position(&self, id: u32) -> Option<usize> {
-        self.nodes.binary_search_by_key(&id, HwNode::id).ok()
+        self.nodes
+            .binary_search_by_key(&id, |held| held.node.id())
+            .ok()
     }
 
     /// The live node `id`.
     fn node(&self, id: u32) -> Option<&HwNode> {
-        self.nodes.get(self.position(id)?)
+        self.nodes.get(self.position(id)?).map(|held| &held.node)
+    }
+
+    /// The live node `id` and its driver's admission, mutably.
+    fn held_mut(&mut self, id: u32) -> Option<&mut Held> {
+        let at = self.position(id)?;
+        self.nodes.get_mut(at)
     }
 
     /// The live node `id`, mutably.
     fn node_mut(&mut self, id: u32) -> Option<&mut HwNode> {
-        let at = self.position(id)?;
-        self.nodes.get_mut(at)
+        self.held_mut(id).map(|held| &mut held.node)
     }
 
     /// The store has never held a node, so seeding it can neither drop one
@@ -116,7 +128,6 @@ impl HwTreeStore {
                 generation: 0,
                 next_id: FIRST_ISSUED_ID,
                 requested_ceiling: requested_ceiling(FIRST_ISSUED_ID),
-                driven: BTreeMap::new(),
             }),
         }
     }
@@ -136,8 +147,9 @@ impl HwTreeStore {
     ///
     /// [`Errno::AlreadyExists`] once the store has held a node, or when
     /// `tree` names one id twice; [`Errno::OutOfRange`] for a node whose id
-    /// is the root sentinel ([`HW_NODE_ROOT`]) or not above its parent's. A
-    /// refusal changes nothing.
+    /// is the root sentinel ([`HW_NODE_ROOT`]) or not above its parent's;
+    /// [`Errno::OutOfMemory`] when the inventory cannot be held. A refusal
+    /// changes nothing.
     pub fn seed(&self, mut tree: Vec<HwNode>) -> Result<(), Errno> {
         tree.sort_unstable_by_key(HwNode::id);
         if tree.windows(2).any(|pair| pair[0].id() == pair[1].id()) {
@@ -154,12 +166,16 @@ impl HwTreeStore {
             Some(highest) => highest + 1,
             None => FIRST_ISSUED_ID,
         };
+        let mut held = Vec::new();
+        held.try_reserve_exact(tree.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        held.extend(tree.into_iter().map(|node| Held { node, driver: None }));
         {
             let mut inner = self.inner.lock();
             if !inner.is_fresh() {
                 return Err(Errno::AlreadyExists);
             }
-            inner.nodes = tree;
+            inner.nodes = held;
             inner.next_id = next_id;
             inner.requested_ceiling = requested_ceiling(next_id);
             inner.generation += 1;
@@ -242,7 +258,7 @@ impl HwTreeStore {
             inner.nodes.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
             inner.next_id = id + 1;
             node.set_identity(id, parent_id);
-            inner.nodes.push(node);
+            inner.nodes.push(Held { node, driver: None });
             inner.generation += 1;
             id
         };
@@ -283,7 +299,9 @@ impl HwTreeStore {
     /// Visit every live node in id order with the store held: the visitor
     /// must not call back into it.
     pub fn for_each_node(&self, visit: &mut dyn FnMut(&HwNode)) {
-        self.inner.lock().nodes.iter().for_each(visit);
+        for held in &self.inner.lock().nodes {
+            visit(&held.node);
+        }
     }
 
     /// Remove the child `node_id` — and its whole subtree — from the
@@ -326,10 +344,10 @@ impl HwTreeStore {
             let mut inner = self.inner.lock();
             let at = inner
                 .position(node_id)
-                .filter(|&at| inner.nodes[at].parent() == parent_id)
+                .filter(|&at| inner.nodes[at].node.parent() == parent_id)
                 .ok_or(Errno::NotFound)?;
             let mut doomed: Vec<u32> = Vec::new();
-            for node in &inner.nodes[at..] {
+            for Held { node, .. } in &inner.nodes[at..] {
                 if node.id() == node_id || doomed.binary_search(&node.parent()).is_ok() {
                     doomed.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
                     doomed.push(node.id());
@@ -337,7 +355,7 @@ impl HwTreeStore {
             }
             inner
                 .nodes
-                .retain(|node| doomed.binary_search(&node.id()).is_err());
+                .retain(|held| doomed.binary_search(&held.node.id()).is_err());
             inner.generation += 1;
             doomed
         };
@@ -500,7 +518,7 @@ impl HwTreeStore {
         nodes
             .try_reserve_exact(inner.nodes.len())
             .map_err(|_| Errno::OutOfMemory)?;
-        nodes.extend_from_slice(&inner.nodes);
+        nodes.extend(inner.nodes.iter().map(|held| held.node));
         Ok(nodes)
     }
 
@@ -619,8 +637,8 @@ impl HwTreeStore {
             u64::try_from(count).map_err(|_| Errno::OutOfRange)?,
         );
         blob.extend_from_slice(&header.to_le_bytes());
-        for node in &inner.nodes {
-            blob.extend_from_slice(&node.to_le_bytes());
+        for held in &inner.nodes {
+            blob.extend_from_slice(&held.node.to_le_bytes());
         }
         Ok(blob)
     }
@@ -670,9 +688,10 @@ impl HwDriverTree for HwTreeStore {
         // A node a removal has just taken has nothing left to record.
         let changed = {
             let mut inner = self.inner.lock();
-            let Some(node) = inner.node_mut(node_id).filter(|node| !node.is_root()) else {
+            let Some(held) = inner.held_mut(node_id).filter(|held| !held.node.is_root()) else {
                 return;
             };
+            let node = &mut held.node;
             let changed = !node.is_driven()
                 || node.is_settled() == publishes
                 || node.is_key_source()
@@ -683,7 +702,7 @@ impl HwDriverTree for HwTreeStore {
             node.set_key_source(false);
             node.set_driver_ending(DriverEnding::None);
             node.set_fault_health(FaultDomainState::Healthy);
-            inner.driven.insert(node_id, generation);
+            held.driver = Some(generation);
             if changed {
                 inner.generation += 1;
             }
@@ -697,13 +716,14 @@ impl HwDriverTree for HwTreeStore {
     fn driver_released(&self, node_id: u32, generation: u64, ending: DriverEnding) {
         let changed = {
             let mut inner = self.inner.lock();
-            if inner.driven.get(&node_id) != Some(&generation) {
-                return;
-            }
-            inner.driven.remove(&node_id);
-            let Some(node) = inner.node_mut(node_id) else {
+            let Some(held) = inner
+                .held_mut(node_id)
+                .filter(|held| held.driver == Some(generation))
+            else {
                 return;
             };
+            held.driver = None;
+            let node = &mut held.node;
             node.set_driven(false);
             node.set_settled(false);
             node.set_key_source(false);
@@ -1583,6 +1603,45 @@ mod tests {
         }
         assert_eq!(off, blob.len(), "no trailing bytes");
         assert_eq!(decoded, snapshot(&store), "nodes round-trip exactly");
+    }
+
+    /// Recording a driver's admission and its release takes no memory: the
+    /// record is the node's own, made with it.
+    #[test]
+    fn a_drivers_admission_and_release_allocate_nothing() {
+        let store = HwTreeStore::new();
+        store.seed(seed_tree()).expect("a fresh store seeds");
+        let ((), metering) = tairix_fuzzseed::meter::metered(|| {
+            store.driver_admitted(2, 1, true);
+            store.driver_released(2, 1, DriverEnding::Failed);
+        });
+        assert_eq!(metering.allocations, 0, "{metering:?}");
+        let node = store.node(2).expect("live");
+        assert!(!node.is_driven());
+        assert_eq!(node.driver_ending(), DriverEnding::Failed);
+    }
+
+    /// A store the heap cannot seed or grow refuses for memory and changes
+    /// nothing: no node, no generation, no id spent.
+    #[test]
+    fn a_seed_or_a_publish_the_heap_refuses_changes_nothing() {
+        let store = HwTreeStore::new();
+        let tree = seed_tree();
+        let refused = tairix_fuzzseed::meter::refusing_above(0, || store.seed(tree));
+        assert_eq!(refused, Err(Errno::OutOfMemory));
+        assert_eq!(store.generation(), 0);
+        store.seed(seed_tree()).expect("a store left fresh seeds");
+        let generation = store.generation();
+        let child = HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Input);
+        let refused = tairix_fuzzseed::meter::refusing_above(0, || store.publish_child(2, child));
+        assert_eq!(refused, Err(Errno::OutOfMemory));
+        assert_eq!(store.generation(), generation);
+        assert_eq!(ids(&store), [1, 2]);
+        assert_eq!(
+            publish(&store, 2, HwDeviceClass::Input),
+            3,
+            "the refusal spent no id"
+        );
     }
 
     #[test]

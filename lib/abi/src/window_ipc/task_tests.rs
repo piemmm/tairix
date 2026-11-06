@@ -32,6 +32,16 @@ fn every_task_round_trips_and_costs_what_it_carries() {
             "id::07070707-0707-0707-0707-070707070707/",
             "usb1",
         ])),
+        SystemTask::Retitle(words(&[
+            "id::07070707-0707-0707-0707-070707070707/",
+            "HOLIDAY",
+            "usb1",
+        ])),
+        SystemTask::Retitle(words(&[
+            "id::07070707-0707-0707-0707-070707070707/",
+            "",
+            "usb1",
+        ])),
     ] {
         let request = authorise(&task);
         let (frame, len) = encoded(&request);
@@ -48,6 +58,7 @@ fn a_task_that_takes_words_is_refused_without_one_either_way() {
         SystemTask::ChangeAccount(ElevateWords::NONE),
         SystemTask::SetPassword(ElevateWords::NONE),
         SystemTask::Eject(ElevateWords::NONE),
+        SystemTask::Retitle(ElevateWords::NONE),
     ] {
         let mut frame = [0u8; WindowRequest::MAX_WIRE_LEN];
         assert_eq!(authorise(&task).encode(&mut frame), Err(Errno::OutOfRange));
@@ -83,7 +94,7 @@ fn a_malformed_task_is_refused_whole() {
         WindowRequest::from_bytes(&unknown[..len]),
         Err(Errno::OutOfRange)
     );
-    unknown[block + KIND_AT] = KIND_EJECT + 1;
+    unknown[block + KIND_AT] = KIND_RETITLE + 1;
     assert_eq!(
         WindowRequest::from_bytes(&unknown[..len]),
         Err(Errno::OutOfRange)

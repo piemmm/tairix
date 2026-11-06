@@ -11,7 +11,7 @@
 use alloc::rc::Rc;
 use core::cell::Cell;
 
-use tairix_abi::blkio::{BlkDeviceName, BlkMedium};
+use tairix_abi::blkio::{BlkDeviceIdentity, BlkDeviceName, BlkMedium};
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
 use tairix_abi::sysinfo::MountAvailability;
@@ -77,19 +77,27 @@ impl Drop for WindowLease {
     }
 }
 
-/// A member's block client and the loan of the window it stages through.
+/// A member's block client, the loan of the window it stages through, and the
+/// identity its device stated when the client was connected.
 pub struct MemberDevice<B> {
     // Declared first so it drops first: the window is returned only once no
     // client over it remains.
     device: B,
     lease: WindowLease,
+    identity: Option<BlkDeviceIdentity>,
 }
 
 impl<B> MemberDevice<B> {
-    /// Pair `device` with the loan of the window it was built over.
+    /// Pair `device` with the loan of the window it was built over and the
+    /// identity its device stated when asked
+    /// ([`BlkOp::Identity`](tairix_abi::blkio::BlkOp::Identity)).
     #[must_use]
-    pub fn new(device: B, lease: WindowLease) -> Self {
-        Self { device, lease }
+    pub fn new(device: B, lease: WindowLease, identity: Option<BlkDeviceIdentity>) -> Self {
+        Self {
+            device,
+            lease,
+            identity,
+        }
     }
 
     /// Whether the membership this device belongs to has ended.
@@ -132,6 +140,12 @@ impl<B: Block> Block for MemberDevice<B> {
 
     fn device_name(&self) -> BlkDeviceName {
         self.device.device_name()
+    }
+
+    /// What the member's device stated when its client was connected, which
+    /// the array it is composed into states an identity of its own from.
+    fn device_identity(&self) -> Option<BlkDeviceIdentity> {
+        self.identity
     }
 
     fn backing_availability(&self) -> MountAvailability {

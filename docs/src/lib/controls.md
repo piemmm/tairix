@@ -62,9 +62,9 @@ under the floor and are unchanged.
 | `collection` | `ListRow`, `TableRow`, `TableCell`, `TableHeader`, `Card`, `Panel` |
 | `form`, `stack` | `FieldRow`, `FieldGroup`, `FlagSet`, and the plate column groups stack down |
 | `picture` | `PictureChoice`, `PictureSection`, `PictureItem`, `Swatch`, `Aspect` |
-| `swatch_grid` | `SwatchGrid`: a grid of colour wells, a primary mark on at most one and an optional secondary one, chosen by pointer or by arrows while it has the keyboard, laid out as many to a row as its owner fits to the room (`set_columns`), a translucent well shown over a checker; each mark is black or white by the well's colour as it shows over the surface, focus rings the marked well in its margin, and a disabled grid is veiled and a denied one carries the authority bead |
+| `swatch_grid` | `SwatchGrid`: a grid of colour wells, a primary mark on at most one and an optional secondary one, chosen by pointer or by arrows while it has the keyboard, laid out as many to a row as its owner fits to the room (`set_columns`), a translucent well shown over a checker; each mark is black or white by the well's colour as it shows over the surface, focus rings the marked well in its margin, and a disabled grid is veiled and a denied one carries the authority bead; wells stand half a gap apart or, packed for a palette (`WellSpacing::Packed`), a pixel apart, and an owner may number its first wells (`number_wells`, in a `NumberFace`), a marked well then showing its number in place of its mark — inside it where the digits fit, else on a count-badge pill kept within the grid — and a mark's move reporting the well with its badge (`mark_rect`) |
 | `checker` | `Checker`: the one checkerboard transparency is shown over, in the theme's surface and that colour lifted, square side scaled |
-| `scroll`, `scrollbar` | the geometry engine and the one `ScrollBar` over it |
+| `scroll`, `scrollbar` | the geometry engine and the one `ScrollBar` over it, and the least length that seats its buttons and a whole thumb (`ScrollBar::least_length`) |
 | `window` | `WindowFrame`, `TitleBar`, `WindowControl`, `ResizeGrabber` |
 | `shell` | `Notification`, `TaskbarItem`, `WindowPreview`, `TraySignal` |
 | `decision` | `Dialog`, `Tooltip`, `HelpTip`; a `Dialog` is a form a window draws over itself for an answer typed in it, or, `in_window`, a dialog window's whole client: no plate and no title of its own, since the window's frame carries it, its bands set in from the window's edges and its ground the one an alert stands on. `set_reason` restates the inline reason in place |
@@ -418,7 +418,10 @@ something, so a track press stops when the thumb arrives under the pointer and
 nothing is armed at a bound — and with nothing held the deadline is `None`, so
 an idle owner arms no timer. A bar holds its press to the end: an owner routes
 every event to a bar that `is_pressing`, wherever the pointer has gone, and a
-release or a cancel ends the press even once the bar itself has gone.
+release or a cancel ends the press even once the bar itself has gone. An owner
+whose step falls due on a bar it no longer draws, or that has no room left to
+step, ends the press with `let_go` rather than leave a step due that it can
+never take, which its loop would otherwise wake for at once.
 
 ### Where a drop-down's list goes
 

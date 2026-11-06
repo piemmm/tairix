@@ -27,8 +27,7 @@
 //! page out of every view before reading it, and a restore fills a frame
 //! nothing reaches until it is mapped.
 
-use alloc::collections::BTreeMap;
-
+use tairix_collections::OrderedMap;
 use tairix_log::Sink;
 use tairix_reclaim::{FreeMemorySource, MemoryPressure, PressureBand};
 
@@ -229,7 +228,7 @@ pub struct Ramzip {
     caps: RamzipCaps,
     key: SealKey,
     nonces: NonceSequence,
-    entries: BTreeMap<(u64, u64), Entry>,
+    entries: OrderedMap<(u64, u64), Entry>,
     ledger: RamzipLedger,
     thrash: ThrashDetector,
     recent_faults: [Option<RecentFault>; RECENT_FAULTS],
@@ -253,7 +252,7 @@ impl Ramzip {
             caps,
             key,
             nonces,
-            entries: BTreeMap::new(),
+            entries: OrderedMap::new(),
             ledger: RamzipLedger::new(),
             thrash: ThrashDetector::new(),
             recent_faults: [None; RECENT_FAULTS],

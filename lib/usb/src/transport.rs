@@ -41,7 +41,11 @@ use tairix_abi::{DriverError, Errno};
 use tairix_inline::BitSet256;
 
 use crate::descriptor::{address_dci, ConfigurationHeader, Malformed, CONFIGURATION_HEADER_LEN};
-use crate::device::{setup_get_configuration_descriptor, BULK_BUF_LEN, CTRL_DATA_LEN};
+use crate::device::{
+    first_langid, setup_get_configuration_descriptor, setup_get_device_descriptor,
+    setup_get_string_descriptor, DeviceDescriptor, SerialNumber, StringHeader, BULK_BUF_LEN,
+    CTRL_DATA_LEN, STRING_DESCRIPTOR_MAX_LEN,
+};
 
 /// The controller-side operations the URB transport server drives.
 ///
@@ -924,6 +928,86 @@ pub fn read_configuration(control_in: &mut ControlIn<'_>) -> Result<Vec<u8>, Con
         return Err(ConfigurationError::Malformed);
     }
     Ok(config)
+}
+
+/// What tells a device from every other of its model: its vendor and product
+/// and the serial number its string descriptor spells.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DeviceSerial {
+    /// `idVendor`.
+    pub vendor_id: u16,
+    /// `idProduct`.
+    pub product_id: u16,
+    /// The serial number.
+    pub serial: SerialNumber,
+}
+
+/// Read the device's serial number as its host read it at enumeration
+/// ([`DeviceIdentity::serial_number`](crate::device::DeviceIdentity::serial_number)):
+/// its device descriptor for the string's index, the LANGID table for the
+/// first language listed, then that string, each string read as its header
+/// and then exactly the length the header claims. `control_in` runs one
+/// control-IN transfer and answers the bytes delivered.
+///
+/// `None` for a device naming no serial, or one answering malformed: the
+/// serial is optional identity, so a device whose string babbles is still
+/// served.
+///
+/// # Errors
+///
+/// A control transfer's refusal.
+pub fn read_serial_number(control_in: &mut ControlIn<'_>) -> Result<Option<DeviceSerial>, Errno> {
+    let mut device = [0u8; DeviceDescriptor::LEN];
+    let len = u16::try_from(device.len()).map_err(|_| Errno::LengthOutOfRange)?;
+    if control_in(setup_get_device_descriptor(len), &mut device)? != device.len() {
+        return Ok(None);
+    }
+    let Ok(descriptor) = DeviceDescriptor::decode(&device) else {
+        return Ok(None);
+    };
+    if descriptor.serial_number_index == 0 {
+        return Ok(None);
+    }
+    let mut buf = [0u8; STRING_DESCRIPTOR_MAX_LEN];
+    let Some(langid) = read_string(control_in, (0, 0), &mut buf)?.and_then(first_langid) else {
+        return Ok(None);
+    };
+    let index = descriptor.serial_number_index;
+    let serial = read_string(control_in, (index, langid), &mut buf)?.and_then(SerialNumber::decode);
+    Ok(serial.map(|serial| DeviceSerial {
+        vendor_id: descriptor.vendor_id,
+        product_id: descriptor.product_id,
+        serial,
+    }))
+}
+
+/// Read string descriptor `index` in language `langid` into `buf`: its header,
+/// then exactly the length that header claims. What follows the header, or
+/// `None` for an answer [`StringHeader`] refuses.
+///
+/// # Errors
+///
+/// A control transfer's refusal.
+fn read_string<'b>(
+    control_in: &mut ControlIn<'_>,
+    (index, langid): (u8, u16),
+    buf: &'b mut [u8; STRING_DESCRIPTOR_MAX_LEN],
+) -> Result<Option<&'b [u8]>, Errno> {
+    let mut head = [0u8; StringHeader::LEN];
+    let head_len = u8::try_from(head.len()).map_err(|_| Errno::LengthOutOfRange)?;
+    let read = control_in(
+        setup_get_string_descriptor(index, langid, head_len),
+        &mut head,
+    )?;
+    let Some(header) = head.get(..read).and_then(StringHeader::decode) else {
+        return Ok(None);
+    };
+    let whole = buf
+        .get_mut(..header.descriptor_len())
+        .ok_or(Errno::LengthOutOfRange)?;
+    let whole_len = u8::try_from(whole.len()).map_err(|_| Errno::LengthOutOfRange)?;
+    let read = control_in(setup_get_string_descriptor(index, langid, whole_len), whole)?;
+    Ok(buf.get(..read).and_then(|answer| header.payload(answer)))
 }
 
 /// A class driver's link to its interface: the URB client and the driver's

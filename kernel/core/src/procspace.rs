@@ -116,10 +116,15 @@ impl ProcessSpace {
         f(&mut **guard)
     }
 
+    /// Whether some thread holds the space's lock now.
+    #[cfg(test)]
+    pub(crate) fn is_held(&self) -> bool {
+        self.space.is_locked()
+    }
+
     /// The per-thread switch-in hook for a thread of this process whose
     /// thread pointer is `tls_base`.
-    #[must_use]
-    pub fn thread_pre_resume(&self, tls_base: u64) -> Box<dyn FnMut(u64, AddressTag) + Send> {
+    pub fn thread_pre_resume(&self, tls_base: u64) -> impl FnMut(u64, AddressTag) + Send + 'static {
         thread_pre_resume(&self.resume, tls_base)
     }
 

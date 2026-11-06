@@ -1,6 +1,6 @@
 # FIX-SLEEPLOCK — A wake decision applies to the park it was taken about
 
-Status: **done** (S1–S6 landed; gate status in the change that lands them).
+Status: **done** (S1–S7 landed; gate status in the change that lands them).
 
 Binding under `AGENTS.md`. Two defects, one root cause: a wait-queue row is
 identified by task id alone, so a decision taken about one park is applied to
@@ -99,6 +99,9 @@ it is empty, so the corpse also pins its bucket entry alive.
 6. **D112 stays closed.** A genuinely retired row is still reaped rather than
    left at the head of the queue, and a handoff is never published to a task
    that cannot claim it.
+7. **Waiting for the lock never needs the heap.** A contender stands in line
+   through the row its thread was made with, so an acquire on an exhausted
+   heap still parks and is handed the lock (S7).
 
 ## S3 — registration identity in `WaitQueue`
 
@@ -108,17 +111,19 @@ row keeps its `seq` (so a re-arming handler keeps its FIFO place), and a
 `deregister` followed by a `register` mints a fresh one. So `seq` *is* the
 registration identity; only the API is missing.
 
-- `Registration { key, task, seq }` — opaque, `pub(crate)`, with a `task()`
-  accessor for the handoff publication.
-- `oldest_registration() -> Option<Registration>` **replaces** `oldest_task()`,
-  whose only caller is the sleeplock (delete it).
-- `wake_registration(arch, &reg) -> bool`: under the lock, require the present
-  row's `seq` to equal `reg.seq` — a mismatch or an absent row returns `false`
+- `Registration { key, task, seq }` — private to the queue. The sleeping
+  lock's line names a stand the same way, by its row and the row's join count
+  (S7).
+- `oldest_registration() -> Option<Registration>` reads the line's head
+  without removing it.
+- `wake_registration(arch, &reg) -> bool`: require the present stand or row
+  to be the one `reg` names — a mismatch or an absent one returns `false`
   having touched nothing, because the designated waiter has resumed and is
-  either about to claim or about to re-park. Otherwise drop the lock, `unpark`,
-  and on a refusal re-take the lock, re-check the `seq`, and reap the row.
-- Factor the three-index removal into `WaitSet::remove(id) -> Option<Waiter>`
-  so `deregister_keyed` and the reap share one definition.
+  either about to claim or about to stand again. Otherwise `unpark` with no
+  lock held, and on a refusal re-take the lock, re-check the identity, and
+  reap.
+- One removal, `WaitSet::remove(id) -> Option<Waiter>`, serves
+  `deregister_keyed` and the reap.
 
 `hand_off_oldest` becomes a scan over rounds, and one round — `offer_to` —
 publishes ownership, wakes, and withdraws on a miss. It removes nothing:
@@ -174,7 +179,7 @@ already clears the signal intake and the kill gate there. Dropping the thread's
 wait-queue registrations belongs beside them, before the scheduler releases the
 id.
 
-- `WaitSet` gains `by_task: BTreeSet<(TaskId, WakeKey)>`, so one task's rows
+- `WaitSet` gains `by_task: OrderedSet<(TaskId, WakeKey)>`, so one task's rows
   are a contiguous range and `WaitQueue::deregister_task(task)` is
   O(log n + rows) rather than a scan of `by_waiter`. It is the fourth
   cross-index, maintained with the other three and for the same reason.
@@ -191,7 +196,7 @@ id.
 - Every wake path reaps a row whose `unpark` reports the task can never run —
   `wake_in_arrival_order`, `wake_key`, `wake_waiter`, `sweep`, and
   `wake_registration`. This is what covers a queue retirement cannot name: a
-  `SleepLock`'s private queue is embedded in the mount or device that owns it,
+  `SleepLock`'s line is embedded in the mount or device that owns it,
   reachable from no registry, and is dropped with its owner.
 - `wake_in_arrival_order` and `wake_key` count a waiter only once its `unpark`
   has landed, and continue past one that did not, so a counted wake cannot be
@@ -224,6 +229,39 @@ cannot be confused with D15.
 The budget needs no headroom for the extra vCPUs: `timeout` is the
 inactivity window, not a runtime deadline, and a strand shows up as silence.
 
+## S7 — a contender waits without the heap (`OPEN-DEFECTS` D1682)
+
+`SleepLock::lock` cannot fail, and a lock is contended where memory is short
+— a filesystem writing back to make room — so filing a contender in a
+`WaitQueue`'s indices, which allocate, aborted the kernel on an exhausted
+heap. The lock keeps a line of its own instead:
+
+- **`LineRow`**, one per thread: allocated with its `ThreadControl` by
+  `kthread::spawn_control`, which already refuses `OutOfMemory`, and dropped
+  with it. A thread waits on one lock at a time, so one row serves every lock.
+  The running task's row is reached through its published resume handle
+  (`ResumeHandle::line_row`, behind `WaitQueueArch::line_row`).
+- **The line**: an intrusive FIFO threaded through the rows, `Arc` forward and
+  `Weak` back, so joining and leaving allocate nothing. The line holds a share
+  of each row in it: a thread that dies waiting leaves its row until a release
+  reaps it, and a dropped lock splices its rows out one at a time.
+- **Identity**: a stand is the row and its join count, which every join
+  raises, so S3's guarantee holds for the line — a decision about one stand is
+  never applied to a later one, and the reap removes a row only under that
+  identity after `unpark` refuses. The scan terminates: while it holds the
+  lock no waiter can own it and leave, so the head changes only by the scan's
+  own reaps or by a waiter claiming the handoff, which ends the scan.
+- **SMP**: every link changes under the line's spin lock; a row's own lock is
+  taken only inside it, one row at a time, by the one line the row stands in,
+  so no lock order inverts and no two lines touch one row. The handoff word and
+  `CONTENDED` are unchanged, and the uncontended acquire and release are one
+  compare-exchange each.
+
+A task with no row has no resume handle published either, so it cannot park:
+it takes the unscheduled spin, as a caller before the boot installs a hook
+does. A waiter parks through `waitq::park_calling_task`, the one park every
+kernel wait takes, so a host test's boot blocks it as it blocks the rest.
+
 ## Tests
 
 - **`sleeplock.rs`** — `a_designation_the_waiter_outran_deletes_nothing`
@@ -234,6 +272,11 @@ inactivity window, not a runtime deadline, and a strand shows up as silence.
   covers the reap's identity check against a wake that reports "did not land"
   for a live task. The D112 tests still pass — a genuinely unwakeable row is
   still reaped and a live successor still reached.
+- **S7** — `a_contended_acquire_on_an_exhausted_heap_parks_and_is_handed_the_lock`
+  refuses the heap for a whole contended acquire, which parks and is handed
+  the lock; `a_line_stays_whole_under_a_reap_racing_a_rejoin` races joins and
+  leaves against a reaping release on two threads; `kthread`'s
+  `a_published_kthread_answers_the_row_it_was_made_with` pins the row's reach.
 - **`waitq.rs`** — `a_counted_wake_never_spends_itself_on_a_row_it_could_not_wake`
   (the S2 lost wake-up) and `a_retiring_task_leaves_no_row_on_any_key`.
   `an_addressed_wake_reports_the_landing_not_the_registration` additionally
@@ -255,10 +298,12 @@ bookkeeping, not the defect. The bucket half is covered by that function's own
 
 ## The oracles
 
-- **miri.** No `unsafe` is added or changed: the sleeplock's `unsafe` is its
-  `Send`/`Sync` impls and the guard's `Deref`, and every edit here is safe
-  code over `BTreeMap`/`BTreeSet` and atomics. `kernel/core` is enrolled
-  (`OPEN-DEFECTS` D123), so the stage interprets the sleeplock's tests.
+- **miri.** The sleeplock's `unsafe` is its `Send`/`Sync` impls and the
+  guard's `Deref`; its line is safe code over `Arc`, `Weak` and spin locks.
+  The one `unsafe` S7 adds is the resume handle's row thunk
+  (`kthread::line_row_thunk`, `ResumeHandle::line_row`), under the handle's
+  raw-pointer protocol. `kernel/core` is enrolled (`OPEN-DEFECTS` D123), so the
+  stage interprets the sleeplock's tests and the thunk's.
 - **loom cannot reach this crate yet.** `--cfg loom` does not compile
   `kernel/core`: loom's atomics and cell have no `const` constructor, and
   `WaitQueue::new` / `SleepLock::new` are `const fn`, so the twenty-three global
@@ -283,6 +328,9 @@ bookkeeping, not the defect. The bucket half is covered by that function's own
   `SleepLock`'s embedded queue would have to outlive a mount it cannot; the
   `by_task` index plus the one `ALL_QUEUES` walk covers every queue the kernel
   can name, and the wake-path reap covers the rest.
-- **`Registration` is `pub(crate)`.** It is the sleeplock's ownership-transfer
-  contract with the queue, not ABI, and nothing outside the crate designates a
-  waiter.
+- **A stand is private to the line.** It is the sleeplock's ownership-transfer
+  contract with its own line, not ABI, and nothing outside the module
+  designates a waiter.
+- **A row per thread, not a pool.** A pool the locks shared would need
+  retirement to know whether a dying thread's row still stands in a line; a
+  row its thread owns and the line shares needs no such account.

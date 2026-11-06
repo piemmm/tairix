@@ -221,6 +221,16 @@ impl Filetype {
     }
 }
 
+/// Whether `name` is a RISC OS application's: a `!` and at least one more
+/// character, as RISC OS's Filer takes a directory so named to be one.
+///
+/// The one test a listing pictures a directory by and a dragged item's own
+/// picture is checked against.
+#[must_use]
+pub fn is_riscos_application_name(name: &str) -> bool {
+    name.len() > 1 && name.starts_with('!')
+}
+
 /// What an inode is, as reported by [`FileStat`] and each [`DirEntry`].
 ///
 /// Deliberately closed, and an unknown discriminant on decode fails closed
@@ -1340,6 +1350,75 @@ impl FileStat {
                 changed: Time64::from_bytes(&bytes[100..112])?,
             },
             content_gen: read_u64(bytes, 112),
+        })
+    }
+}
+
+/// Which version of which file: what a listing reports of a file, and what an
+/// open of it must report for a byte of it to be read as that version.
+///
+/// The one definition a picture's cache key and a dragged item's own picture
+/// both carry.
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, PartialOrd, Ord)]
+pub struct DocumentStamp {
+    /// Its length.
+    pub size: u64,
+    /// Its modification time.
+    pub modified: Time64,
+    /// The file it is.
+    pub id: FileId,
+    /// The version of its data, `0` where the volume keeps none.
+    pub content_gen: u64,
+}
+
+impl DocumentStamp {
+    /// Encoded size of a [`DocumentStamp`] on the wire: `size(8)` +
+    /// `modified(12)` + `id.volume(16)` + `id.node(8)` + `content_gen(8)`.
+    pub(crate) const WIRE_LEN: usize = 52;
+
+    /// The version of the node `stat` describes.
+    #[must_use]
+    pub const fn of(stat: &FileStat) -> Self {
+        Self {
+            size: stat.size,
+            modified: stat.times.modified,
+            id: stat.id,
+            content_gen: stat.content_gen,
+        }
+    }
+
+    /// `self`, little-endian.
+    #[must_use]
+    pub(crate) fn to_le_bytes(self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u64(&mut out, 0, self.size);
+        out[8..20].copy_from_slice(&self.modified.to_le_bytes());
+        out[20..36].copy_from_slice(&self.id.volume);
+        put_u64(&mut out, 36, self.id.node);
+        put_u64(&mut out, 44, self.content_gen);
+        out
+    }
+
+    /// Decode a [`DocumentStamp`] from the first [`DocumentStamp::WIRE_LEN`]
+    /// bytes of `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if `bytes` is shorter, and
+    /// [`Errno::TimestampOutOfRange`] for a time that is not a canonical
+    /// [`Time64`].
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        let bytes = bytes.get(..Self::WIRE_LEN).ok_or(Errno::BufferTooSmall)?;
+        let mut volume = [0u8; 16];
+        volume.copy_from_slice(&bytes[20..36]);
+        Ok(Self {
+            size: read_u64(bytes, 0),
+            modified: Time64::from_bytes(&bytes[8..20])?,
+            id: FileId {
+                volume,
+                node: read_u64(bytes, 36),
+            },
+            content_gen: read_u64(bytes, 44),
         })
     }
 }
@@ -2890,5 +2969,81 @@ mod tests {
             DirChange::Absent(b"abc").encode_into(&mut buf[..5]),
             Err(Errno::BufferTooSmall)
         );
+    }
+
+    /// A stamp crosses the wire field for field, and one too short or holding
+    /// a time that is not canonical is refused.
+    #[test]
+    fn a_document_stamp_round_trips_and_refuses_a_time_out_of_range() {
+        use super::DocumentStamp;
+        let stamp = DocumentStamp {
+            size: u64::MAX,
+            modified: Time64::new(-7, 999_999_999).expect("canonical"),
+            id: FileId {
+                volume: [0xA5; 16],
+                node: 3,
+            },
+            content_gen: 1 << 40,
+        };
+        let bytes = stamp.to_le_bytes();
+        assert_eq!(DocumentStamp::from_bytes(&bytes), Ok(stamp));
+        assert_eq!(
+            DocumentStamp::from_bytes(&bytes[..DocumentStamp::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut late = bytes;
+        late[16..20].copy_from_slice(&1_000_000_000u32.to_le_bytes());
+        assert_eq!(
+            DocumentStamp::from_bytes(&late),
+            Err(Errno::TimestampOutOfRange)
+        );
+    }
+
+    /// A stat's version is its length, its contents' modification time, the
+    /// node and its content generation, and none of its other times.
+    #[test]
+    fn a_document_stamp_is_the_version_a_stat_reports() {
+        use super::DocumentStamp;
+        let modified = Time64::from_secs(1_700_000_000);
+        let id = FileId {
+            volume: [3; 16],
+            node: 9,
+        };
+        let stat = FileStat {
+            kind: FileKind::Regular,
+            nlink: 1,
+            size: 640,
+            allocated: 4096,
+            mode: 0o644,
+            uid: 1000,
+            gid: 1000,
+            id,
+            times: NodeTimes {
+                created: Time64::from_secs(1),
+                modified,
+                accessed: Time64::from_secs(2),
+                changed: Time64::from_secs(3),
+            },
+            content_gen: 5,
+        };
+        assert_eq!(
+            DocumentStamp::of(&stat),
+            DocumentStamp {
+                size: 640,
+                modified,
+                id,
+                content_gen: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn a_riscos_application_is_a_bang_and_a_name() {
+        use super::is_riscos_application_name;
+        assert!(is_riscos_application_name("!Edit"));
+        assert!(is_riscos_application_name("!a"));
+        for name in ["!", "", "Edit", "Edit!", " !Edit"] {
+            assert!(!is_riscos_application_name(name), "{name:?}");
+        }
     }
 }

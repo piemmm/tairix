@@ -4,13 +4,13 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_abi::fs::FileId;
+use tairix_abi::fs::{DocumentStamp, FileId};
 use tairix_abi::time::Time64;
 use tairix_geometry::Rect;
 
 use super::{serve_thumbnail, StoreAccess, StoreFile, StoreKey, ThumbnailStore, HEADER_LEN, WAYS};
 use crate::picture::Fitted;
-use crate::thumbnail::{ArtworkDocument, DocumentStamp};
+use crate::thumbnail::ArtworkDocument;
 
 const SIDE: u32 = 4;
 const REVISION: u32 = 7;

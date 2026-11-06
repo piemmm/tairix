@@ -35,7 +35,7 @@ pub use event::SoundAsset;
 #[cfg(feature = "settings")]
 pub use resolve::{resolve, CueSource, Resolution};
 #[cfg(feature = "settings")]
-pub use settings::{EventSettings, SoundKey, SoundSettings};
+pub use settings::{is_effect, EventSettings, SoundKey, SoundSettings};
 pub use tairix_abi::sound_cue::{Answer, CueAuthority, CueOutcome, Silence, SoundEvent};
 #[cfg(feature = "settings")]
 pub use user::{layered, merge_pushed, pushable, UserChoices, PUSHABLE};

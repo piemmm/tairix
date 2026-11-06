@@ -202,6 +202,16 @@ array rides the same recovery grace window a disk does, a member blip inside
 that window is answered reissuably, and there is no second serve path to keep
 in step.
 
+It also states what it is. An array answers the block service's `Identity`
+request with `OwnedRaidArray::composed_identity`, served through
+`StatingArray`: a fingerprint of the array's identifier and of what each
+slot's device stated, in slot order, and none while any slot holds no device
+or one that states none. Arrival order, member state and generation do not
+enter it, and the runtime recomposes it whenever a slot gains or loses a
+device, so a volume's writes held across a composer restart are replayed onto
+the array only when the same devices fill the same slots again
+([drives](../filesystem/drives.md)).
+
 The published node carries the `tairix,raid-array` compatible key plus the
 array's endpoint and window as resources. The volume manager binds it exactly
 as it binds a disk's per-LUN node, so an array's filesystems are probed and

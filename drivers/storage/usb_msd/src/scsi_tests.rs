@@ -9,7 +9,9 @@ use super::*;
 use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
-use tairix_abi::blkio::{BlkDeviceClass, BlkReissue, BlkRemovabilityEvidence, BlkStatus};
+use tairix_abi::blkio::{
+    BlkDeviceClass, BlkReissue, BlkRemovabilityEvidence, BlkStatus, BLK_DEVICE_IDENTITY_LEN,
+};
 
 /// One scripted answer to an executed command.
 struct Step {
@@ -730,6 +732,79 @@ fn unreported() -> UnitReport {
         medium: BlkMedium::of_transport(BlkTransport::Usb),
         max_transfer_blocks: None,
     }
+}
+
+/// A storage device's serial number, spelled `units`.
+fn device_serial(units: &[u16]) -> DeviceSerial {
+    DeviceSerial {
+        vendor_id: 0x0781,
+        product_id: 0x5581,
+        serial: tairix_usb::device::SerialNumber::new(units).expect("a serial"),
+    }
+}
+
+/// A unit whose medium cannot leave it states an identity taken from its
+/// device's serial number and its own number; one whose medium can leave it,
+/// one whose removability is unknown, and one whose device names no serial
+/// state none.
+#[test]
+fn only_a_fixed_unit_of_a_serial_device_states_an_identity() {
+    let medium =
+        |removability| BlkMedium::of_transport(BlkTransport::Usb).with_removability(removability);
+    let fixed = LunState {
+        report: UnitReport {
+            medium: medium(BlkRemovability::Fixed(BlkRemovabilityEvidence::Inquiry)),
+            max_transfer_blocks: None,
+        },
+        ..small_lun_state(false)
+    };
+    let removable = LunState {
+        report: UnitReport {
+            medium: medium(BlkRemovability::Removable(BlkRemovabilityEvidence::Inquiry)),
+            max_transfer_blocks: None,
+        },
+        ..fixed
+    };
+    let mut scsi = transparent(ScriptedExecutor::new());
+    assert_eq!(LunBlock::new(&mut scsi, 0, fixed).device_identity(), None);
+    scsi.set_serial(Some(device_serial(&[0x41, 0x42])));
+    let first = LunBlock::new(&mut scsi, 0, fixed).device_identity();
+    assert!(first.is_some());
+    assert_eq!(first, unit_identity(&device_serial(&[0x41, 0x42]), 0));
+    assert_ne!(LunBlock::new(&mut scsi, 1, fixed).device_identity(), first);
+    assert_ne!(unit_identity(&device_serial(&[0x41, 0x43]), 0), first);
+    assert_eq!(
+        LunBlock::new(&mut scsi, 0, removable).device_identity(),
+        None,
+        "a slot a card leaves proves only the reader"
+    );
+    assert_eq!(
+        LunBlock::new(&mut scsi, 0, small_lun_state(false)).device_identity(),
+        None
+    );
+}
+
+/// A unit's identity is the leading bytes of a SHA-256 over its domain, its
+/// device's vendor and product ids, its serial's length and units, and its own
+/// number, each little-endian: the identity a volume recorded for a stick stays
+/// the one its device states.
+#[test]
+fn a_units_identity_is_pinned_to_the_message_it_fingerprints() {
+    let mut message = Vec::new();
+    message.extend_from_slice(b"tairix.usb-msd.unit");
+    message.extend_from_slice(&0x0781u16.to_le_bytes());
+    message.extend_from_slice(&0x5581u16.to_le_bytes());
+    message.extend_from_slice(&2u32.to_le_bytes());
+    for unit in [0x41u16, 0x42] {
+        message.extend_from_slice(&unit.to_le_bytes());
+    }
+    message.push(3);
+    let mut expected = [0u8; BLK_DEVICE_IDENTITY_LEN];
+    expected.copy_from_slice(&tairix_crypto::sha256(&message)[..BLK_DEVICE_IDENTITY_LEN]);
+    assert_eq!(
+        unit_identity(&device_serial(&[0x41, 0x42]), 3),
+        BlkDeviceIdentity::new(expected)
+    );
 }
 
 /// Geometry + state used by the `LunBlock` tests.

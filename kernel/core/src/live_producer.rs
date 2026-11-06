@@ -40,14 +40,17 @@ use crate::memmap::MemMap;
 
 /// Fold an [`AnonError`] onto a stable [`Errno`]:
 /// allocator exhaustion is [`Errno::OutOfMemory`], a not-mapped range
-/// is [`Errno::NotFound`] (fail closed), and a misalignment/overflow
-/// is [`Errno::OutOfRange`].
-fn anon_errno(err: AnonError) -> Errno {
+/// is [`Errno::NotFound`] (fail closed), a misalignment/overflow
+/// is [`Errno::OutOfRange`], and a caller-placed range over held memory is
+/// [`Errno::AlreadyExists`].
+#[must_use]
+pub fn anon_errno(err: AnonError) -> Errno {
     match err {
         AnonError::ZeroLength => Errno::LengthOutOfRange,
         AnonError::Unaligned | AnonError::Overflow => Errno::OutOfRange,
         AnonError::OutOfMemory => Errno::OutOfMemory,
         AnonError::NotMapped => Errno::NotFound,
+        AnonError::Overlap => Errno::AlreadyExists,
         // `PhysUnmapped`, `Map(_)`, and any future (`#[non_exhaustive]`)
         // variant fold to the generic bad-address error, failing closed
         // rather than being silently dropped.
@@ -55,13 +58,14 @@ fn anon_errno(err: AnonError) -> Errno {
     }
 }
 
-/// Fold an [`MmioError`] onto a stable [`Errno`]: no free virtual slot is
-/// [`Errno::OutOfMemory`] (deterministic exhaustion), a malformed
+/// Fold an [`MmioError`] onto a stable [`Errno`]: no free virtual slot, or
+/// no memory to record the window, is [`Errno::OutOfMemory`]
+/// (deterministic exhaustion), a malformed
 /// region or mapper config is [`Errno::OutOfRange`], and a page-table or
 /// direct-map failure is [`Errno::BadAddress`].
 fn mmio_errno(err: MmioError) -> Errno {
     match err {
-        MmioError::NoVirtualSpace => Errno::OutOfMemory,
+        MmioError::NoVirtualSpace | MmioError::OutOfMemory => Errno::OutOfMemory,
         MmioError::InvalidRegion | MmioError::InvalidMapConfig => Errno::OutOfRange,
         MmioError::UnknownRegion => Errno::NotFound,
         // A port that cannot keep memory a non-snooping master shares out of
@@ -187,6 +191,20 @@ where
         }
         .ok_or(Errno::NotImplemented)?
         .map_err(live_errno)
+    }
+
+    fn map_held(&self, page_va: u64, holds: &dyn Fn() -> bool) -> Result<(), Errno> {
+        let cpu = self.arch.current_cpu();
+        with_current_live_space(cpu, |space| {
+            if !holds() {
+                return Err(Errno::NotFound);
+            }
+            space
+                .map_anonymous(page_va, 1)
+                .map(drop)
+                .map_err(live_errno)
+        })
+        .ok_or(Errno::NotImplemented)?
     }
 
     fn unmap(&self, base: u64, len: usize, retire: &mut dyn Retire) -> Result<(), Errno> {
@@ -589,6 +607,15 @@ mod tests {
     use crate::procspace::ProcessSpace;
     use crate::test_arch::TestArch;
     use crate::test_live::{FakeLive, DMA_PHYS, FILE_BASE, FILE_RESIDENT, PLACED_BASE};
+
+    /// A window the mapper had no memory to record is reported as want of
+    /// memory, not as a bad address.
+    #[test]
+    fn a_window_with_no_room_to_record_is_out_of_memory() {
+        assert_eq!(mmio_errno(MmioError::OutOfMemory), Errno::OutOfMemory);
+        assert_eq!(mmio_errno(MmioError::NoVirtualSpace), Errno::OutOfMemory);
+        assert_eq!(mmio_errno(MmioError::DirectMap), Errno::BadAddress);
+    }
 
     /// A port that cannot map memory for a device that does not snoop says
     /// so, rather than reporting the carve's address bad.

@@ -12,14 +12,16 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-# Stage 2.4 dependency rules (issue brief): kernel/sec may depend only on
-# lib/sync, kernel/mem, and the shared lib/* crates `abi`, `caps`,
-# `crypto`, `log`, and `util`. `kernel/mem` is pulled in at Stage 4.D
+# kernel/sec depends only on lib/sync, kernel/mem, and the shared lib/*
+# crates `abi`, `caps`, `collections`, `crypto`, `log`, and `util`.
+# `kernel/mem` is pulled in at Stage 4.D
 # (DMA capability gate) to wrap the per-process DMA pool
 # in a `CapabilityId::MEM_DMA` check that emits a structured audit
 # record on every grant or denial.
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 tairix-caps = { path = "../../lib/caps", version = "=0.0.0" }
+# The capability table's indices, every insertion into which can refuse.
+tairix-collections = { path = "../../lib/collections", version = "=0.0.0" }
 tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0" }
 tairix-log = { path = "../../lib/log", version = "=0.0.0" }

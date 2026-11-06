@@ -8,18 +8,26 @@ ln — creu cysylltiadau rhwng ffeiliau
 
 ## DESCRIPTION
 
-Yn creu cysylltiad symbolaidd sy'n enwi pob targed. Gydag un operand
+Yn creu cysylltiad sy'n enwi pob targed. Gydag un operand
 crëir y cysylltiad yn y cyfeiriadur gwaith dan enw'r targed ei hun.
 Gyda dau, mae'r ail operand yn gyfeiriadur i'w lenwi os yw'n un — neu'n
 gysylltiad ag un, ac eithrio gyda `-n` — ac yn enw'r cysylltiad fel
 arall. Gyda thri neu fwy, rhaid i'r olaf fod yn gyfeiriadur eisoes.
 
-Cedwir y targed **fel y mae** ac ni chaiff ei ddatrys byth: gall fod yn
-gymharol, gall gynnwys `..`, a gall enwi dim o gwbl, felly caiff
-cysylltiad hongian yn ddilys. Gwirir ei ramadeg cyn ei gadw serch hynny,
-felly gwrthodir targed na allai unrhyw ddatrysydd ei gerdded. Nid yw
-creu cysylltiad yn rhoi unrhyw awdurdod dros yr hyn a enwir gan
-hynny — awdurdodir pob defnydd diweddarach gydran wrth gydran dan eich
+Heb `-s` mae'r cysylltiad yn un **caled**: ail gofnod cyfeiriadur ar
+gyfer inode y targed ei hun. Mae'r ddau enw'n cyrraedd un ffeil, mae
+ysgrifen trwy'r naill i'w gweld trwy'r llall, ac erys storfa'r ffeil
+nes tynnu'r enw olaf. Rhaid i'r ddau enw fod ar un gyfrol, ac ni roddir
+ail enw i gyfeiriadur byth — am fod y goeden ffeiliau'n aros yn goeden
+y mae `..` yn golygu'r cyfeiriadur y daethpwyd trwyddo mewn gwirionedd.
+
+Gyda `-s` mae'r cysylltiad yn un **symbolaidd**, a chedwir ei darged
+**fel y mae** ac ni chaiff ei ddatrys byth: gall fod yn gymharol, gall
+gynnwys `..`, a gall enwi dim o gwbl, felly caiff cysylltiad o'r fath
+hongian yn ddilys. Gwirir ei ramadeg cyn ei gadw serch hynny, felly
+gwrthodir targed na allai unrhyw ddatrysydd ei gerdded. Nid yw creu'r
+naill fath na'r llall yn rhoi unrhyw awdurdod dros yr hyn a enwir —
+awdurdodir pob defnydd diweddarach gydran wrth gydran dan eich
 hunaniaeth eich hun.
 
 Gwrthodir enw cysylltiad a gymerwyd eisoes oni bai bod `-f` neu `-i` yn
@@ -38,13 +46,6 @@ ati hi ei hun.
 Adroddir am gysylltiad na ellir ei wneud, a gwneir y nesaf serch hynny.
 Mae `--` yn terfynu dadansoddi dewisiadau: mae pob dadl ddiweddarach yn
 operand.
-
-Heb `-s` mae'r cysylltiad yn un **caled**: ail gofnod cyfeiriadur ar
-gyfer inode y targed ei hun. Mae'r ddau enw'n cyrraedd un ffeil, mae
-ysgrifen trwy'r naill i'w gweld trwy'r llall, ac erys storfa'r ffeil
-nes tynnu'r enw olaf. Rhaid i'r ddau enw fod ar un gyfrol, ac ni roddir
-ail enw i gyfeiriadur byth — am fod y goeden ffeiliau'n aros yn goeden
-y mae `..` yn golygu'r cyfeiriadur y daethpwyd trwyddo mewn gwirionedd.
 
 Mae `-r` yn storio targed cyswllt symbolaidd yn gymharol i gyfeiriadur y
 cyswllt ei hun. Mae'r system ffeiliau'n canoneiddio'r ddwy hanner yn
@@ -90,6 +91,8 @@ Gwrthodir `-b`/`-S` am nad oes peiriannwaith wrth gefn i'w alw.
 
 ## EXAMPLES
 
+- `ln notes.txt notes.bak` — rhoi ail enw i un ffeil; mae tynnu'r naill
+  yn gadael y llall, a'i chynnwys, yn gyfan.
 - `ln -s /System/Commands/ls.app tools/ls` — cysylltu enw â bwndel.
 - `ln -s ../shared/notes.txt` — cysylltu `notes.txt` yma â tharged
   cymharol.

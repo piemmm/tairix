@@ -75,7 +75,8 @@ la ventana la cierran.
 texto y cuántas líneas conserva el historial (de ninguna a 10.000,
 500 al principio), y edita el esquema propio del usuario. Los esquemas
 incluidos son
-*System* (que sigue la apariencia oscura o clara del escritorio),
+*System* (la apariencia oscura del escritorio, tanto si el propio
+escritorio es oscuro como si es claro),
 *Midnight*, *Phosphor*, *Amber*, *Ember*, *Contrast*, *Paper* y
 *Custom*. Elegir *Custom* utiliza los colores editados debajo del
 selector: una cuadrícula de los veinte colores de los que se dibuja una
@@ -122,11 +123,6 @@ región de fotogramas compartida o el buzón de eventos fue rechazado
 (la razón se indica en el flujo de error estándar).
 
 ## ENVIRONMENT
-
-`HOME`
-: El directorio personal de la cuenta, donde el terminal lee y escribe
-su perfil. Sin él, el terminal funciona con el perfil predeterminado y
-no guarda nada.
 
 `TERM`
 : Se exporta al shell alojado con el valor `xterm-256color`, que nombra

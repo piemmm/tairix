@@ -52,7 +52,14 @@ aus, legt ihr Thema und ihre Lautstärke fest und bestimmt für jedes Ereignis �
 eine Benachrichtigung, einen Fehler, die Terminalglocke —, ob es den Klang
 seines Themas, eine von Ihnen gewählte Datei oder nichts abspielt. Die Klänge
 beim Starten, An- und Abmelden gehören dem Rechner und werden von seinem
-Administrator festgelegt.
+Administrator festgelegt. Ändern Sie die Lautstärke des Geräts, über das der
+Ton spielt — hier oder über die Symbolleiste —, erklingt ein kurzer Ton in der
+neuen Lautstärke: wo ein Ziehen zur Ruhe kommt, bei jedem Schritt mit den
+Pfeiltasten und beim Aufheben der Stummschaltung, damit Sie hören, wie laut es
+jetzt ist. In *Sound Effects* schaltet
+*Play feedback when the volume changes* ihn aus. Er folgt nicht den übrigen
+Klängen des Desktops: Er spielt in der eigenen Lautstärke des Geräts, ob diese
+ein- oder ausgeschaltet sind.
 
 **Raspberry Pi** erscheint nur, wenn der Rechner einer ist. Dort wird der Lüfter
 des Prozessors eingestellt, der über eine Leitung der 40-poligen Stiftleiste
@@ -83,11 +90,18 @@ und die Werkzeugleiste zeigt, ob Ordner oben bleiben, welche Namensendungen und
 welche Einträge ausgeblendet sind, ob ein Bild seinen eigenen Inhalt zeigt und
 ein Ordner, was er enthält, ob vor dem Verschieben von Einträgen in den
 Papierkorb nachgefragt wird und ob ein Datenträgerabbild oder Archiv, das Sie
-geöffnet haben, ausgehängt wird, sobald seine Fenster geschlossen sind. Eine
+geöffnet haben, ausgehängt wird, sobald seine Fenster geschlossen sind. Die
+Namensendungen, die er ausblendet, sind auch auf dem Desktop ausgeblendet.
+*Show on the desktop* hat für jede Art von Laufwerk ein Kästchen —
+*The system drive*, *Fixed drives*, *Removable drives*, *Network shares* und
+*Disk images and archives* —, und der Desktop zeigt für jedes angeschlossene
+Laufwerk einer angekreuzten Art ein Symbol, das es öffnet, wie der Dateimanager
+es tut; anfangs sind nur Wechseldatenträger angekreuzt. Eine
 Zeile wirkt sofort, wenn Sie sie wählen: Wo sich ein neues Fenster öffnet und ob
 es die Orte-Leiste und die Werkzeugleiste zeigt, gilt für das nächste Fenster,
-das Sie öffnen, und alles andere erreicht alle Dateimanager-Fenster zugleich;
-ein Fenster behält jedoch eine Anzeige oder eine Reihenfolge, die Sie selbst
+das Sie öffnen, und alles andere erreicht den Desktop und alle
+Dateimanager-Fenster zugleich; ein Fenster behält jedoch eine Anzeige oder eine
+Reihenfolge, die Sie selbst
 darin gewählt haben. *Settings…* im eigenen Menü des Dateimanagers öffnet diesen
 Bereich.
 

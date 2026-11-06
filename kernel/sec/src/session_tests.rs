@@ -5,10 +5,26 @@ use alloc::vec::Vec;
 use tairix_abi::ProcId;
 
 use super::{HeldExit, Placement, PlacementError, SessionTree, ROOT_SESSION, SESSION_DEPTH_MAX};
-use crate::captable::ProcessId;
+use crate::captable::{AdmitError, ProcessId};
 
 fn instance(byte: u8) -> ProcId {
     ProcId::from_raw([byte; 16])
+}
+
+impl SessionTree {
+    /// Place `member` as an admission does: its room first, then the place.
+    fn place(
+        &mut self,
+        member: ProcessId,
+        instance: ProcId,
+        placement: Placement,
+    ) -> Result<ProcId, PlacementError> {
+        match self.try_reserve_place(instance, placement) {
+            Ok(reserved) => Ok(self.place_reserved(member, reserved)),
+            Err(AdmitError::Placement(refusal)) => Err(refusal),
+            Err(AdmitError::OutOfMemory) => panic!("the host heap refused a session its room"),
+        }
+    }
 }
 
 /// A new session asked for by the anchor of `within`, which it nests in.
@@ -432,4 +448,82 @@ fn a_process_lies_within_the_innermost_login_session_founded_around_it() {
         .expect("founded");
     assert_ne!(tree.login_session(greeter), tree.login_session(desktop));
     assert_eq!(tree.login_session(authority), authority);
+}
+
+/// What the tree answers about the sessions anchored at instances 1 to 4.
+fn answers(tree: &SessionTree) -> Vec<(Vec<u64>, bool, bool)> {
+    (1..=4)
+        .map(|byte| {
+            let session = instance(byte);
+            (
+                members(tree, session),
+                tree.is_ending(session),
+                tree.closed(session),
+            )
+        })
+        .collect()
+}
+
+/// A placement takes all of its room before it changes anything: a heap that
+/// refuses any of it leaves the tree as it was, and a placement whose room is
+/// made allocates nothing more. Whether a placement must take room at all
+/// depends on how full the tree's containers already are, so trees of every
+/// size up to several growths are swept.
+#[test]
+fn a_placement_refused_its_room_changes_nothing() {
+    let fixture = |siblings: u8| {
+        let mut tree = SessionTree::new();
+        let login = found(&mut tree, 10, 1, ROOT_SESSION);
+        let desktop = found(&mut tree, 20, 2, login);
+        tree.place(ProcessId(30), instance(3), Placement::join(desktop))
+            .expect("joined");
+        for sibling in 0..siblings {
+            found(&mut tree, 100 + u64::from(sibling), 100 + sibling, login);
+        }
+        (tree, Placement::found(instance(3), desktop, false))
+    };
+    let mut refusals = 0;
+    for siblings in 0..48 {
+        for granted in 0.. {
+            let (mut tree, around) = fixture(siblings);
+            let before = answers(&tree);
+            let reserved = tairix_fuzzseed::meter::refusing_after(granted, || {
+                tree.try_reserve_place(instance(4), around)
+            });
+            match reserved {
+                Err(AdmitError::OutOfMemory) => {
+                    assert_eq!(answers(&tree), before, "refused at allocation {granted}");
+                    refusals += 1;
+                }
+                Err(AdmitError::Placement(refusal)) => panic!("placement refused: {refusal:?}"),
+                Ok(reserved) => {
+                    let (session, metering) = tairix_fuzzseed::meter::metered(|| {
+                        tree.place_reserved(ProcessId(40), reserved)
+                    });
+                    assert_eq!(session, instance(4));
+                    assert_eq!(
+                        metering.allocations, 0,
+                        "a reserved place allocates nothing"
+                    );
+                    assert_eq!(members(&tree, instance(3)), [40]);
+                    assert!(members(&tree, instance(1)).contains(&40));
+                    break;
+                }
+            }
+        }
+    }
+    assert!(refusals > 0, "no tree swept made the placement take room");
+}
+
+/// Redeeming a reservation consumes it, so one room is never placed twice.
+/// Were the reservation copyable, both probes below would apply and this
+/// would not compile.
+#[test]
+fn a_reserved_place_is_redeemed_once() {
+    trait Probe<Marker> {
+        fn redeemable_once() {}
+    }
+    impl<T> Probe<()> for T {}
+    impl<T: Copy> Probe<u8> for T {}
+    <super::ReservedPlace as Probe<_>>::redeemable_once();
 }

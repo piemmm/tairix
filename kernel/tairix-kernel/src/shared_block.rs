@@ -155,6 +155,12 @@ impl<B: Block> SharedBlock<B> {
         }
     }
 
+    /// Run `work` on the device once no window is using it.
+    pub fn with_device<T>(&self, work: impl FnOnce(&mut B) -> T) -> T {
+        let mut device = self.device.lock();
+        work(&mut device)
+    }
+
     /// Run `work` on the device only if no window is using it this instant,
     /// answering whether it ran: for a caller that must not wait, as the
     /// surprise-removal path must not.

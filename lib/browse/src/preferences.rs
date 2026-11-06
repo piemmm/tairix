@@ -1,7 +1,8 @@
 //! The file manager's settings: where a new window opens and what it shows,
 //! how every window orders, names and pictures what it lists, whether moving
-//! items to the Trash asks first, and whether a disk image or archive the user
-//! opened is unmounted once the last window showing it closes.
+//! items to the Trash asks first, whether a disk image or archive the user
+//! opened is unmounted once the last window showing it closes, and which
+//! drives the desktop shows.
 //!
 //! They are the user's desktop settings: the desktop session keeps them in its
 //! own document beside its other settings, the Settings application edits them
@@ -19,6 +20,7 @@ use crate::layout::ViewMode;
 use crate::presentation::Presentation;
 use crate::render::ListColumns;
 use crate::sort::{Folders, SortDirection, SortKey, SortMode};
+use crate::volume::{DesktopDrives, DriveClass};
 use crate::{MANAGER_PRESENTATION, MANAGER_TOOLBAR_BAND, MANAGER_VIEW_MODE};
 
 /// Where a window asked to open on no folder in particular opens.
@@ -108,6 +110,8 @@ pub struct FilerPreferences {
     /// Whether a disk image or archive the user opened is unmounted once the
     /// last window showing it closes, where nothing else is using it.
     pub unmount_when_closed: bool,
+    /// Which drives the desktop shows an icon for while each is attached.
+    pub desktop: DesktopDrives,
 }
 
 impl Default for FilerPreferences {
@@ -121,6 +125,7 @@ impl Default for FilerPreferences {
             presentation: MANAGER_PRESENTATION,
             confirm_trash: true,
             unmount_when_closed: true,
+            desktop: DesktopDrives::default(),
         }
     }
 }
@@ -168,11 +173,13 @@ pub enum FilerKey {
     ConfirmTrash,
     /// `files.unmount_when_closed`.
     UnmountWhenClosed,
+    /// `files.desktop.<class>`: whether the desktop shows drives of a class.
+    Desktop(DriveClass),
 }
 
 impl FilerKey {
     /// Every key, in the order a document lists them.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 19] = [
         Self::Start,
         Self::View,
         Self::SortBy,
@@ -187,6 +194,11 @@ impl FilerKey {
         Self::FolderContents,
         Self::ConfirmTrash,
         Self::UnmountWhenClosed,
+        Self::Desktop(DriveClass::System),
+        Self::Desktop(DriveClass::Fixed),
+        Self::Desktop(DriveClass::Removable),
+        Self::Desktop(DriveClass::Network),
+        Self::Desktop(DriveClass::Images),
     ];
 
     /// The key's spelling in the document.
@@ -207,7 +219,19 @@ impl FilerKey {
             Self::FolderContents => "files.folder_contents",
             Self::ConfirmTrash => "files.confirm_trash",
             Self::UnmountWhenClosed => "files.unmount_when_closed",
+            Self::Desktop(class) => desktop_key(class),
         }
+    }
+}
+
+/// The key the setting for drives of `class` on the desktop is spelled as.
+const fn desktop_key(class: DriveClass) -> &'static str {
+    match class {
+        DriveClass::System => "files.desktop.system",
+        DriveClass::Fixed => "files.desktop.fixed",
+        DriveClass::Removable => "files.desktop.removable",
+        DriveClass::Network => "files.desktop.network",
+        DriveClass::Images => "files.desktop.images",
     }
 }
 
@@ -254,6 +278,7 @@ impl Registry for FilerPreferences {
             FilerKey::FolderContents => flag(&mut self.presentation.pictures.folder_contents),
             FilerKey::ConfirmTrash => flag(&mut self.confirm_trash),
             FilerKey::UnmountWhenClosed => flag(&mut self.unmount_when_closed),
+            FilerKey::Desktop(class) => flag(self.desktop.setting_mut(class)),
         }
     }
 
@@ -273,6 +298,7 @@ impl Registry for FilerPreferences {
             FilerKey::FolderContents => bool_text(self.presentation.pictures.folder_contents),
             FilerKey::ConfirmTrash => bool_text(self.confirm_trash),
             FilerKey::UnmountWhenClosed => bool_text(self.unmount_when_closed),
+            FilerKey::Desktop(class) => bool_text(self.desktop.shows(class)),
         };
         out.push_str(text);
         true

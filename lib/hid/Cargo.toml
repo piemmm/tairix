@@ -11,8 +11,8 @@ publish.workspace = true
 [dependencies]
 # The seat records the decoders produce and the errors they fail closed with.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
-# The decoded keyboard `Key` vocabulary the console producer resolves HID
-# usages into (a `lib/*` crate).
+# The keyboard state and US layout the console producer resolves each HID
+# usage through (a `lib/*` crate).
 tairix-input = { path = "../input", version = "=0.0.0" }
 # The shared terminal key map that turns each resolved key press into the
 # `KeyInput` record a driver injects through `key_inject` — the one definition

@@ -9,7 +9,9 @@
 //! [`DisplayMode`]. [`Compositor::present`] hands that frame to a
 //! [`Presenter`], or where the display composites layers in hardware, the
 //! windows at the top of the stack on layers of their own and the pointer on
-//! its cursor plane (see `layers`).
+//! its cursor plane (see `layers`). A screen capture composes the scene afresh
+//! ([`Compositor::compose_capture`], see `capture`), since nothing reads
+//! scan-out back.
 //!
 //! All compositing policy is here, in user space; the kernel only ships
 //! framebuffer access through a capability. The software path is the
@@ -64,6 +66,10 @@ use crate::window::{
 #[path = "layers.rs"]
 mod layers;
 
+#[path = "capture.rs"]
+mod capture;
+
+pub use capture::{CaptureError, CaptureTap};
 use layers::{Change, Depth};
 
 /// The furniture a composite pass built for itself because the cache would
@@ -324,6 +330,8 @@ pub struct Compositor {
     /// What of a damaged rectangle lies outside every composite zone, held
     /// for reuse.
     zone_rest: Region,
+    /// The screen capture the session has armed, while it has one.
+    capture: Option<capture::Armed>,
     /// Which of the composite's specialisations may serve this compositor.
     /// Only a test turns one off, to compose the same scene the general way
     /// and hold the two to each other; production has no reason to and no way
@@ -541,6 +549,7 @@ impl Compositor {
             plane: None,
             plane_bytes: Vec::new(),
             zone_rest: Region::new(),
+            capture: None,
             #[cfg(test)]
             fast_paths: FastPaths::ALL,
             next_id: 1,
@@ -565,7 +574,9 @@ impl Compositor {
     ///
     /// Served windows survive: they keep their positions and are clipped to
     /// whatever screen the new mode describes, so a session resumed onto a
-    /// different monitor keeps its apps rather than losing them.
+    /// different monitor keeps its apps rather than losing them. An armed
+    /// capture is disarmed where the desktop's size changes with the mode:
+    /// its area names the old desktop's pixels.
     ///
     /// The screen reveal ([`set_reveal`](Self::set_reveal)) carries over
     /// untouched: a session fading in that changes mode mid-fade keeps
@@ -595,6 +606,9 @@ impl Compositor {
         let Some((frost_plane, blur_scratch)) = frost_reserve(screen, self.runner) else {
             return false;
         };
+        if screen != self.screen {
+            self.capture = None;
+        }
         self.mode = mode;
         self.screen = screen;
         self.scaled = None;
@@ -629,7 +643,8 @@ impl Compositor {
     /// size whose buffers cannot be allocated, and a refusal leaves the
     /// compositor exactly as it was. Windows keep their positions and are
     /// clipped to the new screen, as across a mode change: refitting what
-    /// must fit is the embedder's.
+    /// must fit is the embedder's. An armed capture is disarmed, since its
+    /// area names the old desktop's pixels.
     pub fn set_desktop_size(&mut self, width: u32, height: u32) -> bool {
         if (width, height) == self.screen {
             return true;
@@ -656,6 +671,7 @@ impl Compositor {
         };
         self.screen = (width, height);
         self.scaled = scaled;
+        self.capture = None;
         self.back = back;
         self.frost_plane = frost_plane;
         self.blur_scratch = blur_scratch;
@@ -754,10 +770,11 @@ impl Compositor {
     ///
     /// It does not alter the back buffer beneath a frosted window, so a
     /// pointer sample keeps every retained frost. It is still a *composite*:
-    /// the overlay is blended into the back buffer like any other layer.
+    /// the overlay is blended into the back buffer like any other layer. A
+    /// capture follows the overlay itself, whatever carries it, so this owes
+    /// it nothing.
     fn mark_overlay(&mut self, rect: Rect) {
-        let above_every_window = self.windows.len();
-        self.mark_from(rect, above_every_window);
+        self.damage.add(rect);
     }
 
     /// Mark `rect` for re-encoding: the composed pixels there are current, and
@@ -779,18 +796,20 @@ impl Compositor {
     }
 
     /// Mark `rect`, and the frost of every window from z-index `from` upwards
-    /// that a change there reaches.
+    /// that a change there reaches, owing both to an armed capture.
     ///
     /// Windows below `from` are not consulted at all: a frost reads only the
     /// windows beneath it.
     fn mark_from(&mut self, rect: Rect, from: usize) {
         self.damage.add(rect);
+        self.tap_changed(rect);
         self.stale_frosts_from(rect, from);
     }
 
     /// [`mark_from`](Self::mark_from) for every pixel of `region`.
     fn mark_region_from(&mut self, region: &Region, from: usize) {
         self.damage.add_region(region);
+        self.tap_changed_region(region);
         for &rect in region.rects() {
             self.stale_frosts_from(rect, from);
         }
@@ -802,8 +821,9 @@ impl Compositor {
     }
 
     /// Record that the windows beneath every blurred window from z-index
-    /// `from` upwards changed within `rect`: its frost on screen is marked,
-    /// and its retained blur staled, within the frost's reach of the change.
+    /// `from` upwards changed within `rect`: its frost on screen is marked and
+    /// owed to an armed capture, and its retained blur staled, within the
+    /// frost's reach of the change.
     ///
     /// A frost reads the windows beneath it as though none were frosted, so
     /// one frost recomputed changes no other: nothing here spreads further.
@@ -828,6 +848,7 @@ impl Compositor {
             let (id, visible) = (window.id(), window.is_visible());
             if visible {
                 self.damage.add(reached.intersection(&screen));
+                self.tap_changed(reached);
             }
             let _ = self.frost.renew(&epoch, &id, |field| {
                 field.stale(reach);
@@ -2203,6 +2224,26 @@ impl Compositor {
             .and_then(|index| self.windows.get(index))
             .and_then(Window::content)
             .is_some_and(|held| (held.width(), held.height()) == size)
+    }
+
+    /// Give back the pixels of hidden window `id`, one the embedder paints
+    /// itself, answering the bytes freed: none for a visible window, one a
+    /// client presents — whose release is the pressure ladder's — or an
+    /// unknown `id`. Nothing shows them meanwhile, and once it is shown again
+    /// [`keeps_content`](Self::keeps_content) answers `false`, so the
+    /// embedder's next [`repaint_window`](Self::repaint_window) paints it
+    /// whole.
+    pub fn release_hidden_content(&mut self, id: WindowId) -> usize {
+        let Some(window) = self
+            .index_of(id)
+            .and_then(|index| self.windows.get_mut(index))
+        else {
+            return 0;
+        };
+        if window.is_visible() || window.is_app_presented() {
+            return 0;
+        }
+        window.release_content()
     }
 
     /// Repaint part of a window the **embedder** paints itself — a menu
@@ -3632,7 +3673,7 @@ impl Compositor {
         // made resident first, once for the whole composite. A frost reads its
         // backdrop past the damage's edge, and a stale field past the window's,
         // so the furniture of whatever lies within that reach is wanted too.
-        let frost_reach = self.frost_reach();
+        let frost_reach = self.frost_reach(Window::is_frosted);
         let backdrops = core::mem::take(&mut self.backdrop_reach);
         let fallback = self.ensure_chrome(|window| {
             plan.iter()
@@ -3853,19 +3894,34 @@ impl Compositor {
             Depth::Below(below) => below,
             Depth::Frost(index) => index.saturating_add(1),
         };
-        let reach = self.shadow.reach();
-        // Only a window whose footprint overlaps this rectangle can
-        // contribute a pixel inside it; every other window's sample is
-        // unconditionally `None` here, so skipping it is exact (bit-for-bit
-        // identical output) and turns the per-pixel window scan from "all
-        // windows" into "the few that overlap".
-        hits.clear();
-        for (index, window) in self.windows.iter().enumerate().take(below) {
-            if casts_into(window, piece, reach) {
-                hits.push(index);
-            }
-        }
+        self.gather_hits(piece, below, |_| true, hits);
         self.recompose_rect(piece, planned, hits, shown_by, scanout);
+    }
+
+    /// Fill `hits` with the z-index of every window beneath z-index `below`
+    /// that `keep` admits and that can contribute a pixel inside `area`, its
+    /// shadow included.
+    ///
+    /// Every other window's sample there is `None`, so leaving it out is exact
+    /// and turns a per-pixel scan of every window into one of the few that
+    /// overlap.
+    fn gather_hits(
+        &self,
+        area: Rect,
+        below: usize,
+        keep: impl Fn(&Window) -> bool,
+        hits: &mut Vec<usize>,
+    ) {
+        let reach = self.shadow.reach();
+        hits.clear();
+        hits.extend(
+            self.windows
+                .iter()
+                .enumerate()
+                .take(below)
+                .filter(|(_, window)| casts_into(window, area, reach) && keep(window))
+                .map(|(index, _)| index),
+        );
     }
 
     /// Set aside the re-encode of everything
@@ -3994,12 +4050,13 @@ impl Compositor {
         }
     }
 
-    /// How far past the damage a frame may compose a frost's backdrop, in
-    /// physical pixels: the farthest any frosted window reads.
-    fn frost_reach(&self) -> u32 {
+    /// How far past a rectangle the frosts of the windows `frosts` selects
+    /// compose their backdrops, in physical pixels: the farthest any of them
+    /// reads.
+    fn frost_reach(&self, frosts: impl Fn(&Window) -> bool) -> u32 {
         self.windows
             .iter()
-            .filter(|window| window.is_frosted())
+            .filter(|window| frosts(window))
             .map(|window| self.frost_reach_px(window))
             .max()
             .unwrap_or(0)
@@ -4070,21 +4127,34 @@ impl Compositor {
                 fallback.push((id, built));
             }
         }
-        for window in windows.iter().filter(|w| w.is_decorated() && wanted(w)) {
-            let id = window.id();
-            if chrome.peek(&epoch, &id).is_some() || fallback.iter().any(|(key, _)| *key == id) {
-                continue;
-            }
-            if let Some(built) = window.render_chrome(scale, theme) {
-                fallback.push((id, built));
-            }
-        }
         let after = (chrome.accounting().hits(), chrome.accounting().misses());
         stats.add_chrome(
             frame_share(before.0, after.0),
             frame_share(before.1, after.1),
         );
+        self.render_unresident(&wanted, &mut fallback);
         fallback
+    }
+
+    /// Render into `fallback` the furniture of every decorated window `wanted`
+    /// selects that neither the cache nor `fallback` holds: one a later window
+    /// evicted, or one a capture reads the cache for without filling it.
+    fn render_unresident(&self, wanted: &impl Fn(&Window) -> bool, fallback: &mut ChromeFallback) {
+        let epoch = self.chrome_epoch();
+        for window in self
+            .windows
+            .iter()
+            .filter(|w| w.is_decorated() && wanted(w))
+        {
+            let id = window.id();
+            if self.chrome.peek(&epoch, &id).is_some() || fallback.iter().any(|(key, _)| *key == id)
+            {
+                continue;
+            }
+            if let Some(built) = window.render_chrome(self.scale, &self.theme) {
+                fallback.push((id, built));
+            }
+        }
     }
 
     /// What the most recent frame cost: pixels damaged, blended, copied,
@@ -4722,18 +4792,9 @@ impl Compositor {
         fallback: &ChromeFallback,
         mut target: Target<'_, '_>,
     ) {
-        let reach = self.shadow.reach();
         let mut hits = core::mem::take(&mut self.backdrop_hits);
         for &area in region.rects() {
-            hits.clear();
-            hits.extend(
-                self.windows
-                    .iter()
-                    .take(index)
-                    .enumerate()
-                    .filter(|(_, window)| casts_into(window, area, reach))
-                    .map(|(below, _)| below),
-            );
+            self.gather_hits(area, index, |_| true, &mut hits);
             self.compose_span(
                 area,
                 Some(base),
@@ -4762,8 +4823,9 @@ impl Compositor {
     /// how a later segment of the same rectangle continues over an earlier
     /// one's (possibly blurred) result. `span` is a sub-slice of the
     /// rectangle's covering-window indices, or `None` for a range that does
-    /// not exist, which composes no window at all. The cursor is drawn only
-    /// by the encoding segment, so it always lands on top.
+    /// not exist, which composes no window at all. The pointer overlay is
+    /// drawn only by the segment that finishes a rectangle, so it always lands
+    /// on top.
     ///
     /// The front-most window of the segment is asked for its **opaque runs**
     /// first ([`WindowRow::opaque_run`]): a run of fully opaque client pixels
@@ -4788,6 +4850,9 @@ impl Compositor {
     /// arithmetic it actually needed. The one allocation is the row-view
     /// list, made once per damaged rectangle and refilled per row, never
     /// per pixel.
+    ///
+    /// Answers whether every row was composed: a span or a band the heap
+    /// cannot hold composes nothing, which a capture reports as a failure.
     fn compose_span(
         &mut self,
         area: Rect,
@@ -4796,7 +4861,7 @@ impl Compositor {
         fallback: &ChromeFallback,
         pass: Pass,
         target: Target<'_, '_>,
-    ) {
+    ) -> bool {
         let epoch = self.chrome_epoch();
         #[cfg(test)]
         let opaque_runs = self.fast_paths.opaque_runs;
@@ -4818,13 +4883,10 @@ impl Compositor {
         let (onto, scanout) = match target {
             Target::Back(scanout) => (back, scanout),
             Target::Plane => (frost_plane, None),
+            Target::Capture(picture) => (picture, None),
         };
         let shadow: &ShadowKit = shadow;
-        let sprites = if pass == Pass::Finish {
-            pointer.frame_sprites_over(area)
-        } else {
-            ArrayVec::new()
-        };
+        let sprites = pass.sprites_over(pointer, area);
         let (stride, origin_x, reveal) = scanout.as_ref().map_or((0, 0, u8::MAX), |scanout| {
             (scanout.stride, scanout.origin.x, scanout.reveal)
         });
@@ -4839,16 +4901,16 @@ impl Compositor {
             usize::try_from(area.left().saturating_sub(origin_x)),
             usize::try_from(area.width),
         ) else {
-            return;
+            return false;
         };
         let (Some(first_byte), Some(row_bytes)) = (first_col.checked_mul(4), cols.checked_mul(4))
         else {
-            return;
+            return false;
         };
         // A span the heap cannot hold composes nothing this frame, as a
         // rectangle that cannot reach its scan-out bytes does.
         let Some(sources) = covering_sources(windows, span, chrome, &epoch, fallback) else {
-            return;
+            return false;
         };
         let shared = SpanShared {
             area,
@@ -4869,11 +4931,11 @@ impl Compositor {
         // exactly the back buffer's and the conversion cannot lose one.
         let (Ok(top), Ok(bottom)) = (u32::try_from(area.top()), u32::try_from(area.bottom()))
         else {
-            return;
+            return false;
         };
         let rows = usize::try_from(bottom.saturating_sub(top)).unwrap_or(0);
         if rows == 0 {
-            return;
+            return true;
         }
         // A band is worth handing off only once it carries enough pixels to
         // dwarf the dispatch, so the grain is a pixel budget expressed in this
@@ -4892,7 +4954,7 @@ impl Compositor {
             None => Some(FrameChunks::Absent),
         };
         let Some(frames) = frames else {
-            return;
+            return false;
         };
         // Both splits step the same number of rows over the same row span, so
         // band *i* owns the scan-out bytes of exactly the rows it composes.
@@ -4915,6 +4977,7 @@ impl Compositor {
             &BandWork::join,
         );
         work.record(stats, pass);
+        !work.refused
     }
 
     /// Spread each composite's per-pixel work across `runner`'s participants.
@@ -5068,6 +5131,30 @@ enum Pass {
     /// having missed it while another was shown or fallen behind: the frame's
     /// upkeep rather than the composite's work, so it counts nothing.
     Refresh,
+    /// Compose the layers for a capture, which nothing encodes and no frame
+    /// counts.
+    Capture {
+        /// Whether the whole pointer overlay is drawn over them: only by the
+        /// segment that finishes a rectangle of a capture showing it.
+        pointer: bool,
+    },
+}
+
+impl Pass {
+    /// What of the pointer overlay this pass draws over `area`, above every
+    /// layer: what the frame carries of it on a pass that finishes the frame,
+    /// all of it on a capture's pass that shows it, and nothing otherwise.
+    fn sprites_over(
+        self,
+        overlay: &PointerOverlay,
+        area: Rect,
+    ) -> ArrayVec<Sprite<'_>, MAX_SPRITES> {
+        match self {
+            Self::Finish => overlay.frame_sprites_over(area),
+            Self::Capture { pointer: true } => overlay.sprites_over(area),
+            _ => ArrayVec::new(),
+        }
+    }
 }
 
 /// One band of a segment: the rows it owns of the surface it writes, the
@@ -5146,6 +5233,8 @@ enum Target<'s, 'a> {
     Back(Option<&'s mut Scanout<'a>>),
     /// The frost plane: a backdrop a frost reads, never encoded.
     Plane,
+    /// A capture's picture, addressed in desktop pixels, never encoded.
+    Capture(&'s mut Surface),
 }
 
 impl<'a> Target<'_, 'a> {
@@ -5154,6 +5243,7 @@ impl<'a> Target<'_, 'a> {
         match self {
             Self::Back(scanout) => Target::Back(scanout.as_deref_mut()),
             Self::Plane => Target::Plane,
+            Self::Capture(picture) => Target::Capture(picture),
         }
     }
 }
@@ -5177,6 +5267,9 @@ struct BandWork {
     blended: u64,
     copied: u64,
     encoded: u64,
+    /// Whether the heap refused a band the room for its layers, leaving its
+    /// rows uncomposed.
+    refused: bool,
 }
 
 impl BandWork {
@@ -5186,12 +5279,16 @@ impl BandWork {
             blended: self.blended.saturating_add(other.blended),
             copied: self.copied.saturating_add(other.copied),
             encoded: self.encoded.saturating_add(other.encoded),
+            refused: self.refused || other.refused,
         }
     }
 
     /// Fold the cost of `pass` into the frame's counters: a refresh's encodes
-    /// are upkeep, not the frame's work.
+    /// are upkeep, not the frame's work, and a capture is no frame's work.
     fn record(&self, stats: &mut FrameCounters, pass: Pass) {
+        if matches!(pass, Pass::Capture { .. }) {
+            return;
+        }
         stats.add_blended(self.blended);
         stats.add_opaque(self.copied);
         if pass != Pass::Refresh {
@@ -5368,15 +5465,16 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
         first_byte,
         row_bytes,
     } = *shared;
-    let encode = pass != Pass::Compose;
     let Ok(left) = u32::try_from(area.left()) else {
         return;
     };
     let rows = band.back.rows();
     let base = rows.start;
     // A caster lays two layers on a row: its shadow, then itself. A band the
-    // heap cannot lay them for composes nothing, as a span it cannot hold does.
+    // heap cannot lay them for composes nothing and says so, as a span it
+    // cannot hold does.
     let Ok(mut window_rows) = RowStack::try_with_capacity(sources.len().saturating_mul(2)) else {
+        band.work.refused = true;
         return;
     };
     for py in rows {
@@ -5429,7 +5527,7 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
         // serve; the pointer overlay is resolved per row, so only the few rows
         // it draws on lose the fast path. A desktop drawn smaller than its
         // output has no frame row here: its scale stage encodes the frame.
-        let frame = frame_row.filter(|_| encode);
+        let frame = frame_row.filter(|_| pass != Pass::Compose);
         let encodes = frame.is_some();
         let front = window_rows
             .iter()

@@ -19,6 +19,11 @@ use tairix_fsmeta::preset;
 use tairix_reclaim::{PressureBand, ReportedPressure};
 use tairix_writeback::TestVolumeHost;
 
+/// Every request this binary makes, metered per thread, so a test can have the
+/// heap refuse a step as an exhausted one would.
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
+
 // The records nodes are created with where a test does not examine the record.
 const FILE_RECORD: Security = Security::new(0o644, 0, 0);
 const DIR_RECORD: Security = Security::new(0o755, 0, 0);
@@ -403,7 +408,14 @@ impl Block for SparseBlock {
             return Err(DriverError::LengthOutOfRange);
         }
         for (i, chunk) in buf.chunks(bs).enumerate() {
-            self.blocks.insert(lba + i as u64, chunk.to_vec());
+            // A block written before is rewritten where it is, so a test can
+            // hold a write to the allocations the driver alone makes.
+            match self.blocks.get_mut(&(lba + i as u64)) {
+                Some(stored) => stored.copy_from_slice(chunk),
+                None => {
+                    self.blocks.insert(lba + i as u64, chunk.to_vec());
+                }
+            }
         }
         Ok(())
     }
@@ -2296,7 +2308,7 @@ fn alloc_data_run_claims_contiguous_blocks_and_fails_closed_when_fragmented() {
         if fs.is_used(block) {
             block += 1;
         } else {
-            fs.claim_run(block, 1);
+            fs.claim_run(block, 1).expect("claim");
             block += 2;
         }
     }
@@ -4293,7 +4305,7 @@ fn check_rebuilds_a_corrupt_free_space_derivation() {
     // Wreck the derived state: release a block the trees say is live, and
     // report a free count no allocation could satisfy.
     let live = *good_used.iter().next_back().expect("a used block");
-    fs.mark_run_free(live, 1);
+    fs.mark_run_free(live, 1).expect("mark");
     fs.free_count = 0;
 
     let report = check_full(&mut fs);
@@ -4713,7 +4725,7 @@ fn trim_skips_a_block_that_was_reallocated() {
     let mut fs = fmt_discard(512, 1, 0);
     assert!(!fs.is_used(100));
     fs.enqueue_discard_run(100, 1);
-    fs.mark_run_used(100, 1); // the block is handed back out before trim runs.
+    fs.mark_run_used(100, 1).expect("mark"); // the block is handed back out before trim runs.
     let sink = RecordingSink::new();
     let report = fs.trim(&GrantAll, &sink).expect("trim");
     assert_eq!(report.blocks_skipped_in_use, 1);
@@ -9161,6 +9173,7 @@ fn an_unknown_declared_feature_refuses_the_mount_with_its_reason() {
         root_phys,
         incompat: superblock::INCOMPAT_SUPPORTED | (1 << 63),
         protection: VolumeProtection::Encrypted,
+        title: VolumeTitle::EMPTY,
     };
     for slot in 0..RING_SLOTS {
         for phys in [slot_block(slot), slot_block(slot) + 1] {
@@ -9175,6 +9188,43 @@ fn an_unknown_declared_feature_refuses_the_mount_with_its_reason() {
     assert_eq!(
         ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), TEST_KEYING).err(),
         Some(DriverError::Unsupported)
+    );
+}
+
+/// An encrypted volume's superblock is plaintext, so no writer leaves a title
+/// in one: a slot carrying one is damaged and skipped, and a ring of none
+/// left opens nothing.
+#[test]
+fn an_encrypted_slot_carrying_a_title_is_skipped() {
+    let fs = fmt(512, 256, 32);
+    let seal = fs.protection.meta.clone();
+    let uuid = fs.fs_uuid;
+    let generation = fs.generation;
+    let root_phys = fs.root_phys;
+    let crypto_header = fs.crypto_header;
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
+    let sb = Superblock {
+        block_size: 512,
+        total_blocks: 256,
+        inode_count: 32,
+        generation,
+        root_phys,
+        incompat: 0,
+        protection: VolumeProtection::Encrypted,
+        title: VolumeTitle::new("Secret Plans").expect("a title"),
+    };
+    for slot in 0..RING_SLOTS {
+        for phys in [slot_block(slot), slot_block(slot) + 1] {
+            let mut block = [0u8; 512];
+            sb.seal(&mut block, uuid, slot_block(slot), &seal, &crypto_header)
+                .expect("seal the slot");
+            let start = as_usize(phys) * 512;
+            bytes[start..start + 512].copy_from_slice(&block);
+        }
+    }
+    assert_eq!(
+        ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), TEST_KEYING).err(),
+        Some(DriverError::BadMagic)
     );
 }
 
@@ -10851,12 +10901,12 @@ fn a_failed_operation_undoes_only_the_deferred_runs_it_added() {
     let base = RING_BLOCKS + 8;
 
     fs.begin().expect("first operation");
-    fs.defer_free(base, 10);
+    fs.defer_free(base, 10).expect("defer");
     assert_eq!(deferred(&fs), (1, 10));
     fs.end_operation().expect("the first operation succeeds");
 
     fs.begin().expect("second operation");
-    fs.defer_free(base + 5, 15);
+    fs.defer_free(base + 5, 15).expect("defer");
     assert_eq!(deferred(&fs), (1, 20), "the two runs coalesce");
     assert_eq!(
         fs.allocator().expect("writable").op_deferred.covered(),
@@ -10990,7 +11040,7 @@ fn trim_splits_a_queued_run_around_a_reallocated_block() {
     let mut fs = fmt_discard(512, 1, 0);
     let start = RING_BLOCKS + 16;
     fs.enqueue_discard_run(start, 12);
-    fs.mark_run_used(start + 5, 2);
+    fs.mark_run_used(start + 5, 2).expect("mark");
 
     let report = fs.trim(&GrantAll, &NullSink).expect("trim");
     assert!(report.supported);
@@ -11014,6 +11064,33 @@ fn trim_splits_a_queued_run_around_a_reallocated_block() {
 }
 
 #[test]
+fn trim_rebuilds_a_map_a_fault_left_in_doubt_before_trusting_it() {
+    // Commits leave the map in RAM, so the device's pages predate the file; a
+    // fault that drops RAM's copy leaves only them, and they name its blocks
+    // free.
+    let mut fs = fmt_discard(1 << 12, 1, 0);
+    let root = fs.root();
+    let file = fs
+        .create(root, b"live", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    let body = incompressible(4096);
+    assert_eq!(fs.write_at(file, 0, &body), Ok(body.len()));
+    let (_, data) = extent_of(&mut fs, b"live", 0);
+    // Only the live run is queued, so anything trim discards is a live block.
+    fs.allocator_mut()
+        .expect("writable")
+        .pending_discard
+        .clear();
+    fs.enqueue_discard_run(data.phys, data.len);
+    fs.require_map_rebuild();
+    let report = fs.trim(&GrantAll, &NullSink).expect("trim");
+    assert_eq!(report.blocks_discarded, 0, "{report:?}");
+    assert_eq!(report.blocks_skipped_in_use, data.len, "{report:?}");
+    assert!(fs.block.discarded.is_empty(), "no live block is discarded");
+    assert_eq!(read_all(&mut fs, file, body.len()), body);
+}
+
+#[test]
 fn a_deferred_mark_over_a_long_run_costs_one_pending_entry() {
     // The map's deferred marks are runs too: a free whose bitmap pages are not
     // resident used to record one entry per block, which is the other half of
@@ -11022,7 +11099,7 @@ fn a_deferred_mark_over_a_long_run_costs_one_pending_entry() {
     // Drop every resident page, so the marks below can only be deferred.
     fs.allocator_mut().expect("writable").cache.clear();
     let start = RING_BLOCKS + 64;
-    fs.mark_run_free(start, 1 << 20);
+    fs.mark_run_free(start, 1 << 20).expect("mark");
     let alloc = fs.allocator().expect("writable");
     assert_eq!(alloc.pending_free.len(), 1);
     assert_eq!(alloc.pending_free.covered(), 1 << 20);
@@ -11030,7 +11107,7 @@ fn a_deferred_mark_over_a_long_run_costs_one_pending_entry() {
 
     // The opposite mark over part of the run displaces it rather than being
     // held alongside it, so the latest mark over a block is the only one.
-    fs.mark_run_used(start + 16, 32);
+    fs.mark_run_used(start + 16, 32).expect("mark");
     let alloc = fs.allocator().expect("writable");
     assert_eq!(alloc.pending_used.covered(), 32);
     assert_eq!(alloc.pending_free.covered(), (1 << 20) - 32);
@@ -12081,6 +12158,9 @@ mod reserve;
 
 #[path = "region_tests.rs"]
 mod region;
+
+#[path = "room_tests.rs"]
+mod room;
 
 #[test]
 fn register_needs_the_load_capability() {

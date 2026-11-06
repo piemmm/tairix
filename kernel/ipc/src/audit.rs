@@ -16,10 +16,10 @@
 //! | 3001 | Error | `PORT_CREATE_DENIED`          | A port-creation request was refused (creator lacks bind authority). |
 //! | 3002 | Info  | `PORT_DESTROYED`              | A port was destroyed (any subsequent send fails closed). `drained` counts the messages discarded with it, `refused` the sends refused over its life because its owner admitted another sender. |
 //! | 3003 | Info  | `PORT_REGISTERED`             | A port was bound into the named-port registry under its `EndpointId`. |
-//! | 3004 | Error | `PORT_REGISTER_DENIED`        | A registration was refused: the `EndpointId` was already bound, or the first registration could not make the registry's index of the ports each sender uses. |
+//! | 3004 | Error | `PORT_REGISTER_DENIED`        | A registration was refused: the `EndpointId` was already bound, or the registry could not hold the binding or note the port in its indexes. |
 //! | 3005 | Info  | `PORT_UNREGISTERED`           | A port was removed from the registry and destroyed. |
 //! | 3006 | Info  | `PORT_NAME_PUBLISHED`         | A well-known name was bound to an endpoint in the registry. |
-//! | 3007 | Error | `PORT_NAME_PUBLISH_DENIED`    | A name binding was refused (name already bound, or its endpoint is not registered). |
+//! | 3007 | Error | `PORT_NAME_PUBLISH_DENIED`    | A name binding was refused (name already bound, its endpoint not registered, or no room in the name index). |
 //! | 3008 | Info  | `PORT_NAME_WITHDRAWN`         | A well-known name binding was removed (explicitly, or because its endpoint was unregistered). |
 //! | 3009 | Info  | `PORT_SENDER_ADMITTED`        | A port's owner admitted the one sender its port takes; `discarded` counts the queued messages of other senders dropped with it. |
 //! | 3010 | Debug | `MESSAGE_DELIVERED`           | A message was enqueued for delivery. Recorded at `Debug` for the same reason as `CALL_POSTED` (3043): routine high-throughput transport. |
@@ -74,14 +74,14 @@ pub enum AuditEvent {
     /// A port was bound into the named-port registry.
     PortRegistered,
     /// A registration was refused: the `EndpointId` was already bound, or the
-    /// registry could not make its index of the ports each sender uses.
+    /// registry could not hold the binding or note the port in its indexes.
     PortRegisterDenied,
     /// A port was removed from the registry and destroyed.
     PortUnregistered,
     /// A well-known name was bound to an endpoint in the registry.
     PortNamePublished,
-    /// A name binding was refused: the name was already bound, or the
-    /// endpoint it would resolve to is not registered.
+    /// A name binding was refused: the name was already bound, the endpoint
+    /// it would resolve to is not registered, or the name index had no room.
     PortNamePublishDenied,
     /// A well-known name binding was removed (explicitly, or because the
     /// endpoint it resolved to was unregistered).
@@ -155,7 +155,8 @@ pub enum AuditEvent {
     CallReplied,
     /// A reply was refused (unknown ticket, or reply exceeded `max_reply`).
     CallReplyDenied,
-    /// A registry bind was refused because the id was already bound.
+    /// A registry bind was refused: the id was already bound, or the registry
+    /// could not keep the binding.
     CallEndpointRegisterDenied,
     /// A caller exited with calls still in flight; the kernel cancelled them.
     CallPosterVanished,

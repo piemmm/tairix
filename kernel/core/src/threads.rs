@@ -31,11 +31,11 @@
 //! returned id, and only then is it unparked — so no CPU can dispatch a thread
 //! before the kernel knows what it is.
 
-use alloc::boxed::Box;
 use alloc::sync::Arc;
 
-use tairix_abi::{Errno, RLIMIT_INFINITY};
+use tairix_abi::{Errno, ProcId, RLIMIT_INFINITY};
 use tairix_arch_api::UserEntry;
+use tairix_inline::ArrayVec;
 use tairix_kernel_mem::PAGE_SIZE;
 use tairix_kernel_sched_api::{ExitDisposition, Priority, SchedulerArch, SchedulerPolicy};
 use tairix_kernel_sec::{CapTable, ProcessId, TaskId as SecTaskId, ThreadRegisterError};
@@ -162,9 +162,10 @@ pub fn thread_reserve_pages(stack_bytes: u64) -> u64 {
 ///   page would pass its `address-space-bytes` bound.
 /// * [`Errno::BadAddress`] — `entry`, `tls_base`, or `clear_on_exit` does not
 ///   name readable memory of the caller's own address space.
-/// * [`Errno::OutOfMemory`] — the anonymous window, the frame allocator, or the
-///   scheduler's run queue cannot admit the thread (deterministic exhaustion,
-///   never a panic).
+/// * [`Errno::OutOfMemory`] — the anonymous window, the frame allocator, the
+///   scheduler, or the capability table cannot hold the thread
+///   (deterministic exhaustion, never a panic).
+/// * [`Errno::NoSpace`] — the scheduler had no task id to give it.
 /// * [`Errno::Interrupted`] — the caller's group is being killed; the kill
 ///   lands at this call's boundary, so the errno never reaches user space.
 pub fn create<A>(
@@ -265,43 +266,27 @@ where
         work,
         crate::kthread::Admission::Parked,
     );
-    let Ok(task_id) = admitted else {
-        release_reservation(handlers, &space, process, reserve_base, reserve_pages);
-        return Err(Errno::NoSpace);
+    let task_id = match admitted {
+        Ok(task_id) => task_id,
+        Err(refused) => {
+            release_reservation(handlers, &space, process, reserve_base, reserve_pages);
+            return Err(match refused {
+                tairix_kernel_sched_api::SchedError::OutOfMemory => Errno::OutOfMemory,
+                _ => Errno::NoSpace,
+            });
+        }
     };
-    let thread = SecTaskId(task_id);
-    if tairix_kernel_sched_api::reserve_task_id(task_id).is_err() {
-        let _ = handlers.sched.exit(task_id);
-        release_reservation(handlers, &space, process, reserve_base, reserve_pages);
-        return Err(Errno::OutOfMemory);
-    }
-    // Before the thread joins a group a kill could claim, and before it runs.
-    if crate::procsignal::install_gate(task_id, process).is_err() {
-        let _ = handlers.sched.exit(task_id);
-        tairix_kernel_sched_api::release_task_id(task_id);
-        release_reservation(handlers, &space, process, reserve_base, reserve_pages);
-        return Err(Errno::OutOfMemory);
-    }
-
-    // Alias the new thread onto the process's one capability record, so it acts
-    // under exactly the same authority and a revocation binds it too. A refusal
-    // (an unknown process, or an id already registered) is a kernel invariant
-    // violation: retire the task and fail closed rather than run a thread whose
-    // authority the dispatcher cannot resolve.
-    if let Err(errno) = register_unless_dying(
-        handlers.caps,
-        handlers.sched,
-        caller.task_id,
-        thread,
-        process,
-    ) {
-        let _ = handlers.sched.exit(task_id);
-        crate::procsignal::clear_kill_gate(task_id);
-        tairix_kernel_sched_api::release_task_id(task_id);
-        release_reservation(handlers, &space, process, reserve_base, reserve_pages);
-        return Err(errno);
-    }
-    handlers.aspaces.write().set_owned_thread_stack(
+    let thread = match enrol(handlers, caller.task_id, task_id, process) {
+        Ok(thread) => thread,
+        Err(errno) => {
+            release_reservation(handlers, &space, process, reserve_base, reserve_pages);
+            return Err(errno);
+        }
+    };
+    let land_down = || {
+        let _ = handlers.land_thread_down(process, thread, None);
+    };
+    let recorded = handlers.aspaces.write().set_owned_thread_stack(
         process,
         thread,
         span,
@@ -311,15 +296,17 @@ where
             clear_on_exit: request.clear_on_exit,
         },
     );
+    if let Err(errno) = recorded {
+        retire_unstarted(handlers.sched, task_id, land_down);
+        release_reservation(handlers, &space, process, reserve_base, reserve_pages);
+        return Err(errno);
+    }
     charge.held_by_record();
 
     // Every piece of the thread's state now exists, so it is safe to run. A
     // thread that can no longer run fails closed, retired through the one
     // shared rule; its creator is still registered, so the group survives.
-    let started = start_parked(handlers.sched, task_id, || {
-        let _ = handlers.land_thread_down(process, thread, None);
-    });
-    if !started {
+    if !start_parked(handlers.sched, task_id, land_down) {
         release_reservation(handlers, &space, process, reserve_base, reserve_pages);
         return Err(Errno::NoSpace);
     }
@@ -380,29 +367,79 @@ where
     if sched.unpark(task).is_ok() {
         return true;
     }
-    if let Ok(ExitDisposition::Quiesced) = sched.exit(task) {
-        retire();
-    }
+    retire_unstarted(sched, task, retire);
     false
 }
 
+/// Enrol the parked `task_id` as one of `process`'s threads: its id held
+/// for the teardown, its kill gate, and its alias on the process's one
+/// capability record, so it acts under exactly that authority and a
+/// revocation binds it too. A refusal — want of memory, a creator owing a
+/// death, or a kernel invariant violation — retires the task and undoes what
+/// enrolment took, rather than run a thread whose authority the dispatcher
+/// cannot resolve.
+fn enrol<A>(
+    handlers: &KernelSyscallHandlers<'_, A>,
+    creator: SecTaskId,
+    task_id: u64,
+    process: ProcessId,
+) -> Result<SecTaskId, Errno>
+where
+    A: KernelArch + 'static,
+{
+    let thread = SecTaskId(task_id);
+    if tairix_kernel_sched_api::reserve_task_id(task_id).is_err() {
+        let _ = handlers.sched.exit(task_id);
+        return Err(Errno::OutOfMemory);
+    }
+    // Before the thread joins a group a kill could claim, and before it runs.
+    if crate::procsignal::install_gate(task_id, process).is_err() {
+        let _ = handlers.sched.exit(task_id);
+        tairix_kernel_sched_api::release_task_id(task_id);
+        return Err(Errno::OutOfMemory);
+    }
+    if let Err(errno) =
+        register_unless_dying(handlers.caps, handlers.sched, creator, thread, process)
+    {
+        let _ = handlers.sched.exit(task_id);
+        crate::procsignal::clear_kill_gate(task_id);
+        tairix_kernel_sched_api::release_task_id(task_id);
+        return Err(errno);
+    }
+    Ok(thread)
+}
+
+/// Retire `task`, a thread that never ran, through `retire` once the
+/// scheduler has let it go.
+fn retire_unstarted<A, P>(sched: &P, task: u64, retire: impl FnOnce())
+where
+    A: SchedulerArch,
+    P: SchedulerPolicy<A>,
+{
+    if let Ok(ExitDisposition::Quiesced) = sched.exit(task) {
+        retire();
+    }
+}
+
 /// Register the parked `thread` as a member of `process`, refused while its
-/// `creator` owes a death, and stopped if the process is.
+/// `creator` owes a death or a kill has sealed the group, and stopped if the
+/// process is.
 ///
-/// A group death is claimed, and a group's job-control generation advanced
-/// and its members collected, under the table's read lock, and this runs
-/// under the write lock. So a thread either joins before the claim and is
-/// claimed with the rest, or finds its creator dying and is never born: it
-/// cannot outlive the group it would have belonged to. Likewise it joins
-/// before a stop or continue collects the group and is driven with it, or
-/// joins after holding the generation that decided it, so it never runs while
-/// the rest of the group is held.
+/// A group death seals the group, and a stop or continue advances its
+/// job-control generation, under the table's read lock before any member is
+/// collected, and this runs under the write lock. So a thread either joins
+/// before the seal and is claimed with the rest, or is never born: it cannot
+/// outlive the group it would have belonged to. Likewise it joins before the
+/// generation is advanced and is driven with the group, or joins holding the
+/// generation that decided it, so it never runs while the rest of the group
+/// is held.
 ///
 /// # Errors
 ///
-/// [`Errno::Interrupted`] when `creator` owes a death; [`Errno::AlreadyExists`]
-/// for an id already registered; [`Errno::NotFound`] when `process` has no
-/// record.
+/// [`Errno::Interrupted`] when `creator` owes a death or the group is sealed;
+/// [`Errno::AlreadyExists`] for an id already registered; [`Errno::NotFound`]
+/// when `process` has no record; [`Errno::OutOfMemory`] when the table has no
+/// room for the thread.
 fn register_unless_dying<A, P>(
     caps: &RwLock<CapTable>,
     sched: &P,
@@ -421,6 +458,8 @@ where
     caps.register_thread(thread, process)
         .map_err(|error| match error {
             ThreadRegisterError::AlreadyPresent => Errno::AlreadyExists,
+            ThreadRegisterError::Dying => Errno::Interrupted,
+            ThreadRegisterError::OutOfMemory => Errno::OutOfMemory,
             // `UnknownProcess` and any future variant: the caller's own record
             // vanished under us.
             _ => Errno::NotFound,
@@ -525,6 +564,7 @@ pub fn retire(
     // `deregister`, and a row left at a queue's FIFO head makes the next
     // counted wake report a wake it never delivered.
     crate::waitq::retire_task(thread.0);
+    crate::aspace::ANON_RELEASE_WAITQ.deregister_task(thread.0);
     aspaces.write().withdraw_thread(thread);
     let Some((process, remaining)) = retired else {
         return 0;
@@ -593,11 +633,57 @@ fn release_reservation<A>(
     let mut retire = SnapshotRetire::new(handlers.aspaces, process);
     let _ = space.with(|live| live.unmap_anonymous(reserve_base, reserve_pages, &mut retire));
     if retire.suspended() {
-        let frozen = space.with(|live| live.freeze());
-        handlers
-            .aspaces
-            .write()
-            .reregister_space(process, Box::new(frozen));
+        let replaced =
+            space.with(|live| AddressSpaceRegistry::refreeze_held(handlers.aspaces, process, live));
+        drop(replaced);
+    }
+}
+
+/// Threads a walk of one group takes per hold of the thread table's read
+/// lock: the granule that keeps the walk allocation-free, not a bound on the
+/// threads it reaches.
+pub(crate) const THREAD_WALK_BATCH: usize = 32;
+
+/// Walk `process`'s threads in ascending order a batch at a time, `take`
+/// choosing under the thread table's read lock what each yields and `act`
+/// handling a batch once it is released, so a walk of any group allocates
+/// nothing. Every batch first checks that the number still names `holder`: a
+/// group whose threads all left between two batches can have its number drawn
+/// again, and nothing is taken from the newcomer.
+pub(crate) fn walk_thread_batches<T>(
+    caps: &RwLock<CapTable>,
+    process: ProcessId,
+    holder: ProcId,
+    mut take: impl FnMut(SecTaskId) -> Option<T>,
+    mut act: impl FnMut(T),
+) {
+    let mut after = None;
+    loop {
+        let mut batch: ArrayVec<T, THREAD_WALK_BATCH> = ArrayVec::new();
+        let mut more = false;
+        {
+            let table = caps.read();
+            if table.instance_of(process) != holder {
+                return;
+            }
+            for thread in table.threads_of_after(process, after) {
+                if batch.is_full() {
+                    more = true;
+                    break;
+                }
+                after = Some(thread);
+                if let Some(taken) = take(thread) {
+                    let kept = batch.try_push(taken);
+                    debug_assert!(kept.is_ok(), "a batch took past its room");
+                }
+            }
+        }
+        for taken in batch {
+            act(taken);
+        }
+        if !more {
+            return;
+        }
     }
 }
 
@@ -614,7 +700,8 @@ mod tests {
         let bound = ResourceLimit::new(one, one).expect("well-formed");
         aspaces
             .write()
-            .set_limit(process, LimitKind::AddressSpaceBytes, bound);
+            .set_limit(process, LimitKind::AddressSpaceBytes, bound)
+            .expect("recorded");
         drop(StackCharge::take(&aspaces, process).expect("fits"));
         assert_eq!(
             aspaces.read().mapped_aspace_bytes(process),
@@ -649,9 +736,10 @@ mod tests {
             tairix_caps::CapabilitySet::empty(),
             tairix_caps::CapabilitySet::empty(),
             &sink,
-        );
+        )
+        .expect("derived");
         let caps = RwLock::new(CapTable::new());
-        caps.write().insert(record);
+        caps.write().insert(record).expect("inserted");
         caps.write()
             .register_thread(SecTaskId(sibling), process)
             .expect("sibling registers");
@@ -704,7 +792,7 @@ mod tests {
         caps: &RwLock<CapTable>,
         process: u64,
     ) -> alloc::vec::Vec<crate::procsignal::ClaimedKill> {
-        crate::procsignal::claim_group_kill(
+        crate::procsignal::claimed_kills(
             Some(caps),
             crate::procsignal::DeferredTeardown::Exit {
                 process: ProcessId(process),
@@ -736,6 +824,48 @@ mod tests {
             Err(Errno::Interrupted)
         );
         assert_eq!(caps.read().process_of(SecTaskId(newborn)), None);
+
+        for thread in [leader, creator] {
+            crate::procsignal::clear_kill_gate(thread);
+            tairix_kernel_sched_api::release_task_id(thread);
+        }
+    }
+
+    /// A table with no room for another thread refuses it whole: its creator
+    /// is answered `OutOfMemory`, the thread resolves to no process, and with
+    /// the heap's room back the same thread joins.
+    #[test]
+    fn a_thread_the_table_has_no_room_for_is_refused_with_out_of_memory() {
+        let (leader, creator) = (LEADER + 9, LEADER + 10);
+        let (caps, _aspaces) = group_with_a_sibling(leader, creator);
+        let sched = scheduler();
+        let register = |thread: u64| {
+            register_unless_dying(
+                &caps,
+                &sched,
+                SecTaskId(creator),
+                SecTaskId(thread),
+                ProcessId(leader),
+            )
+        };
+        let refused = (LEADER + 11..LEADER + 300)
+            .find(|&thread| {
+                crate::test_alloc::refuse_allocations_on_current_thread(true);
+                let registered = register(thread);
+                crate::test_alloc::refuse_allocations_on_current_thread(false);
+                assert!(
+                    matches!(registered, Ok(()) | Err(Errno::OutOfMemory)),
+                    "refused for {registered:?}"
+                );
+                registered.is_err()
+            })
+            .expect("the table had to grow");
+        assert_eq!(caps.read().process_of(SecTaskId(refused)), None);
+        assert_eq!(register(refused), Ok(()));
+        assert_eq!(
+            caps.read().process_of(SecTaskId(refused)),
+            Some(ProcessId(leader))
+        );
 
         for thread in [leader, creator] {
             crate::procsignal::clear_kill_gate(thread);

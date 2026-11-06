@@ -137,12 +137,15 @@ struct DriverEntry<F: 'static> {
     source: String,
     /// The driver's filesystem-type name (`arxfs`, …).
     fstype: String,
-    /// The volume's stable published identity (the same 16 bytes the volume
+    /// The key the volume is published under (the same 16 bytes the volume
     /// forest publishes for `id::` paths), or all-zero when the registrar
     /// published none. A registration-time fact like `source`, reported by
     /// the mount snapshot so the unmount tooling can name the volume it
     /// detaches.
     volume_id: [u8; 16],
+    /// The identity the volume's content carries: `volume_id` but for a
+    /// twin's. A registration-time fact a driver replaced in place keeps.
+    identity: [u8; 16],
     /// Whether the backing volume is live. Flipped by
     /// [`LateFilesystem::set_availability`] when a surprise removal parks
     /// the volume behind its fail-closed stand-in, so the mount snapshot
@@ -189,6 +192,8 @@ struct DriverEntry<F: 'static> {
     class: VolumeClass,
     /// The title the mount listing gives it: its filesystem's label.
     title: VolumeTitle,
+    /// Whether its format takes a title a retitle can set.
+    titled: bool,
     /// The fail-closed stand-in answers for it while the volume is away.
     stand_in: bool,
 }
@@ -212,11 +217,13 @@ struct SnapshotEntry<F: 'static> {
     fstype: String,
     driver: Arc<DriverLock<F>>,
     volume_id: [u8; 16],
+    identity: [u8; 16],
     availability: MountAvailability,
     usage: Arc<SpinLock<VolumeStats>>,
     owner: Option<MountOwner>,
     class: VolumeClass,
     title: VolumeTitle,
+    titled: bool,
 }
 
 /// What a registration names its volume by.
@@ -226,8 +233,12 @@ pub struct VolumeNames<'a> {
     pub source: &'a str,
     /// Its format's name.
     pub fstype: &'a str,
-    /// Its published identity.
+    /// The key it is published under: what `id::` paths, its nodes' file ids
+    /// and a detach name it by.
     pub volume_id: [u8; 16],
+    /// The identity its content carries: `volume_id` but for a twin's. A
+    /// driver replaced in place keeps its registration's.
+    pub identity: [u8; 16],
 }
 
 /// The availability the mount snapshot reports for one registered volume:
@@ -432,8 +443,9 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// or whose server was lost, takes over the registration `handle` serves,
     /// so the descriptors opened through it answer the stand-in while the
     /// volume is away. With `handle` registered under `nodes`, its driver is
-    /// replaced in place, keeping who attached the volume and its class, so
-    /// no operation finds the handle unregistered in between.
+    /// replaced in place, keeping who attached the volume, its class, the
+    /// identity its content carries and its title, so no operation finds the
+    /// handle unregistered in between.
     ///
     /// # Errors
     ///
@@ -456,6 +468,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             source,
             fstype,
             volume_id,
+            identity: volume_id,
         };
         let filing = Filing {
             watch,
@@ -557,6 +570,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             source,
             fstype,
             volume_id,
+            identity: volume_id,
         };
         let filing = Filing {
             watch: None,
@@ -585,6 +599,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             source,
             fstype,
             volume_id,
+            identity,
         } = names;
         let nodes = Arc::clone(shared.nodes());
         let raw = handle.as_u64();
@@ -599,6 +614,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             source: copy(source)?,
             fstype: copy(fstype)?,
             volume_id,
+            identity,
             availability: stand_in.unwrap_or(MountAvailability::Available),
             io: None,
             writeback: WritebackDue::empty(),
@@ -609,6 +625,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             owner,
             class,
             title: VolumeTitle::EMPTY,
+            titled: false,
             stand_in: stand_in.is_some(),
         };
         // Taken before the entry is visible, so the fast path takes them and
@@ -624,12 +641,15 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
                 return Err(RegisterError::AlreadyRegistered);
             }
             if let Some(at) = at {
-                // Who attached the volume, what kind it is and its title are
-                // the registration's, so a driver replaced in place keeps them.
+                // Who attached the volume, what kind it is, the identity its
+                // content carries and its title are the registration's, so a
+                // driver replaced in place keeps them.
                 let entry = DriverEntry {
                     owner: drivers[at].owner,
                     class: drivers[at].class,
+                    identity: drivers[at].identity,
                     title: drivers[at].title,
+                    titled: drivers[at].titled,
                     ..entry
                 };
                 Some(core::mem::replace(&mut drivers[at], entry))
@@ -918,22 +938,29 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         Ok(())
     }
 
-    /// Record the title the volume registered for `handle` is listed under:
-    /// its filesystem's label.
+    /// Record the title the volume registered for `handle` is listed under,
+    /// its filesystem's label, and whether its format takes one a retitle can
+    /// set: a change is announced as the mount table's.
     ///
     /// # Errors
     ///
     /// [`Errno::NotImplemented`] when `handle` names no registered volume
     /// (fail closed — nothing is titled).
-    pub fn set_title(&self, handle: DriverHandle, title: VolumeTitle) -> Result<(), Errno> {
+    pub fn set_title(
+        &self,
+        handle: DriverHandle,
+        title: VolumeTitle,
+        titled: bool,
+    ) -> Result<(), Errno> {
         let handle = handle.as_u64();
         let mut drivers = self.drivers.lock();
         let entry = drivers
             .iter_mut()
             .find(|e| e.handle == handle)
             .ok_or(Errno::NotImplemented)?;
-        if entry.title != title {
+        if (entry.title, entry.titled) != (title, titled) {
             entry.title = title;
+            entry.titled = titled;
             crate::notice::mounts_changed();
         }
         Ok(())
@@ -1191,6 +1218,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
                     fstype: copy(&e.fstype)?,
                     driver: Arc::clone(&e.driver),
                     volume_id: e.volume_id,
+                    identity: e.identity,
                     availability: overlaid_availability(
                         e.availability,
                         e.io.as_ref(),
@@ -1200,6 +1228,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
                     owner: e.owner,
                     class: e.class,
                     title: e.title,
+                    titled: e.titled,
                 });
             }
         }
@@ -3372,7 +3401,11 @@ where
             ) else {
                 continue;
             };
-            let record = record.with_class(entry.class).with_title(entry.title);
+            let record = record
+                .with_class(entry.class)
+                .with_title(entry.title)
+                .with_titled(entry.titled)
+                .with_identity(entry.identity);
             records.push(match entry.owner {
                 Some(owner) => record.with_owner(owner),
                 None => record,

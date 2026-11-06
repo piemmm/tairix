@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::Errno;
 
-use super::{Conflict, Decision, Named, OpError, Operation, Progress, Taken, Verb};
+use super::{Conflict, Decision, Named, OpError, Operation, Progress, Root, Taken, Verb};
 use crate::fixture::{staged, Handle, Tree, USER};
 use crate::tree::Kind;
 
@@ -62,6 +62,26 @@ fn run_over(op: &mut Operation<Handle>) -> Progress {
     loop {
         match run(op) {
             Progress::Paused => op.resolve(Decision::Overwrite),
+            progress => return progress,
+        }
+    }
+}
+
+/// Advance `op` to its end, merging its directory into the one of its name
+/// and skipping every leaf it asks about.
+fn run_merging_out(op: &mut Operation<Handle>) -> Progress {
+    loop {
+        match run(op) {
+            Progress::Paused => {
+                let folder = op
+                    .conflict()
+                    .is_some_and(|conflict| conflict.occupant == Kind::Directory);
+                op.resolve(if folder {
+                    Decision::Overwrite
+                } else {
+                    Decision::Skip
+                });
+            }
             progress => return progress,
         }
     }
@@ -195,12 +215,26 @@ fn a_copied_directory_keeps_an_inherited_setgid_and_its_sources_sticky_bit() {
 }
 
 #[test]
-fn a_merging_copy_asks_about_each_taken_leaf_alone() {
+fn a_merging_copy_asks_about_its_folder_then_each_taken_leaf_alone() {
     let tree = Tree::new()
         .file("/src/one", b"new")
         .file("/src/two", b"2")
         .file("/dst/src/one", b"old");
     let mut op = copying(&tree, "/src", "/dst/src", Taken::Ask);
+    assert_eq!(run(&mut op), Progress::Paused);
+    assert_eq!(
+        op.conflict(),
+        Some(&Conflict {
+            source: String::from("/src"),
+            target: String::from("/dst/src"),
+            occupant: Kind::Directory,
+        })
+    );
+    assert!(
+        !tree.exists("/dst/src/two"),
+        "nothing is written while it asks"
+    );
+    op.resolve(Decision::Overwrite);
     assert_eq!(run(&mut op), Progress::Paused);
     assert_eq!(
         op.conflict(),
@@ -220,6 +254,65 @@ fn a_merging_copy_asks_about_each_taken_leaf_alone() {
         1,
         "a directory merged into is no entry made"
     );
+    assert_eq!(op.report().root, Some(Root::Merged));
+}
+
+/// Skipped, a folder meeting a folder of its name leaves both as they were,
+/// for a copy and a move alike.
+#[test]
+fn a_skipped_folder_leaves_both_folders_as_they_were() {
+    for verb in [Verb::Copy, Verb::Move] {
+        let tree = Tree::new()
+            .file("/src/one", b"new")
+            .file("/dst/src/kept", b"k");
+        let mut op = Operation::transfer(
+            verb,
+            named(&tree, "/src"),
+            named(&tree, "/dst/src"),
+            Taken::Ask,
+            staged,
+        );
+        assert_eq!(run(&mut op), Progress::Paused, "{verb:?}");
+        op.resolve(Decision::Skip);
+        assert_eq!(run(&mut op), Progress::Done, "{verb:?}");
+        assert_eq!(tree.bytes("/src/one").as_deref(), Some(&b"new"[..]));
+        assert!(!tree.exists("/dst/src/one"), "{verb:?}");
+        assert_eq!(tree.bytes("/dst/src/kept").as_deref(), Some(&b"k"[..]));
+        assert_eq!(
+            (op.report().skipped, op.report().root),
+            (1, Some(Root::Skipped)),
+            "{verb:?}"
+        );
+    }
+}
+
+/// The report says what a transfer left under its target's name, and a
+/// removal, or a transfer stopped before it settled the name, says nothing.
+#[test]
+fn the_report_says_what_a_transfer_left_under_its_name() {
+    let tree = Tree::new()
+        .file("/a", b"a")
+        .file("/b", b"new")
+        .file("/dst/b", b"old")
+        .dir("/d");
+    let mut op = copying(&tree, "/a", "/dst/a", Taken::Ask);
+    assert_eq!(run(&mut op), Progress::Done);
+    assert_eq!(op.report().root, Some(Root::Created));
+    let mut op = copying(&tree, "/b", "/dst/b", Taken::Ask);
+    assert_eq!(run_over(&mut op), Progress::Done);
+    assert_eq!(op.report().root, Some(Root::Replaced));
+    let mut op = moving(&tree, "/d", "/dst/d", Taken::Ask);
+    assert_eq!(run(&mut op), Progress::Done);
+    assert_eq!(op.report().root, Some(Root::Created));
+    let mut op = moving(&tree, "/dst/a", "/dst/b", Taken::Ask);
+    assert_eq!(run_over(&mut op), Progress::Done);
+    assert_eq!(op.report().root, Some(Root::Replaced));
+    let mut op = removing(&tree, "/a");
+    assert_eq!(run(&mut op), Progress::Done);
+    assert_eq!(op.report().root, None);
+    let mut op = copying(&tree, "/missing", "/dst/x", Taken::Ask);
+    assert!(matches!(run(&mut op), Progress::Failed(_)));
+    assert_eq!(op.report().root, None);
 }
 
 /// An overwrite removes the node the question was about and no other: one
@@ -608,35 +701,93 @@ fn a_copy_goes_on_into_a_volume_attached_inside_its_source() {
     assert_eq!(tree.bytes("/dst/src/mnt/f").as_deref(), Some(&b"f"[..]));
 }
 
+/// A move meeting a directory of its name asks, and merges into it on any
+/// volume: the directory there keeps its own mode and what it held, and the
+/// source goes once everything in it went. On one volume it copies nothing.
 #[test]
-fn a_move_replaces_a_directory_only_while_it_is_empty_on_any_volume() {
-    let tree = Tree::new()
-        .file("/src/data", b"7")
-        .with_mode("/src", 0o750)
-        .dir("/vol/src")
-        .with_mode("/vol/src", 0o700)
-        .volume("/vol");
+fn a_move_merges_into_a_directory_of_its_name_on_any_volume() {
+    let build = || {
+        Tree::new()
+            .file("/src/data", b"7")
+            .file("/src/sub/deep", b"d")
+            .file("/vol/src/kept", b"k")
+            .with_mode("/vol/src", 0o700)
+    };
+    for tree in [build(), build().volume("/vol")] {
+        let mut op = moving(&tree, "/src", "/vol/src", Taken::Ask);
+        assert_eq!(run(&mut op), Progress::Paused);
+        assert_eq!(
+            op.conflict().map(|conflict| conflict.occupant),
+            Some(Kind::Directory)
+        );
+        op.resolve(Decision::Overwrite);
+        assert_eq!(run(&mut op), Progress::Done);
+        assert_eq!(tree.bytes("/vol/src/data").as_deref(), Some(&b"7"[..]));
+        assert_eq!(tree.bytes("/vol/src/sub/deep").as_deref(), Some(&b"d"[..]));
+        assert_eq!(tree.bytes("/vol/src/kept").as_deref(), Some(&b"k"[..]));
+        assert_eq!(
+            tree.mode("/vol/src"),
+            Some(0o700),
+            "the folder there keeps its own"
+        );
+        assert!(!tree.exists("/src"));
+        assert_eq!(op.report().root, Some(Root::Merged));
+    }
+    let tree = build();
     let mut op = moving(&tree, "/src", "/vol/src", Taken::Ask);
+    assert_eq!(run_over(&mut op), Progress::Done);
+    assert!(
+        tree.calls()
+            .iter()
+            .all(|call| !call.starts_with("create_file") && !call.starts_with("make_dir")),
+        "{:?}",
+        tree.calls()
+    );
+}
+
+/// Merging on one volume, a move asks about each taken leaf inside alone and
+/// keeps the source directory for what it skipped; overwriting, the source
+/// goes whole.
+#[test]
+fn a_merging_move_asks_about_each_taken_leaf_and_keeps_what_it_skipped() {
+    let build = || {
+        Tree::new()
+            .file("/src/one", b"new")
+            .file("/src/two", b"2")
+            .file("/dst/src/one", b"old")
+    };
+    let tree = build();
+    let mut op = moving(&tree, "/src", "/dst/src", Taken::Ask);
+    assert_eq!(run(&mut op), Progress::Paused);
+    op.resolve(Decision::Overwrite);
+    assert_eq!(run(&mut op), Progress::Paused);
+    assert_eq!(
+        op.conflict(),
+        Some(&Conflict {
+            source: String::from("/src/one"),
+            target: String::from("/dst/src/one"),
+            occupant: Kind::File,
+        })
+    );
+    op.resolve(Decision::Skip);
     assert_eq!(run(&mut op), Progress::Done);
-    assert_eq!(tree.bytes("/vol/src/data").as_deref(), Some(&b"7"[..]));
+    assert_eq!(tree.bytes("/dst/src/one").as_deref(), Some(&b"old"[..]));
+    assert_eq!(tree.bytes("/src/one").as_deref(), Some(&b"new"[..]));
+    assert_eq!(tree.bytes("/dst/src/two").as_deref(), Some(&b"2"[..]));
+    assert!(!tree.exists("/src/two"));
     assert_eq!(
-        tree.mode("/vol/src"),
-        Some(0o750),
-        "the source's, not the empty one's"
+        tree.kind("/src"),
+        Some(Kind::Directory),
+        "kept for what it holds"
     );
+    assert_eq!(op.report().skipped, 1);
+    assert!(op.report().kept.is_empty(), "a skip is no change to report");
+
+    let tree = build();
+    let mut op = moving(&tree, "/src", "/dst/src", Taken::Ask);
+    assert_eq!(run_over(&mut op), Progress::Done);
+    assert_eq!(tree.bytes("/dst/src/one").as_deref(), Some(&b"new"[..]));
     assert!(!tree.exists("/src"));
-    let tree = Tree::new()
-        .file("/src/data", b"7")
-        .file("/vol/src/kept", b"k")
-        .volume("/vol");
-    let mut op = moving(&tree, "/src", "/vol/src", Taken::Ask);
-    assert_eq!(
-        run(&mut op),
-        Progress::Failed(OpError::Rename(String::from("/vol/src"), Errno::NotEmpty))
-    );
-    assert_eq!(tree.bytes("/src/data").as_deref(), Some(&b"7"[..]));
-    assert_eq!(tree.bytes("/vol/src/kept").as_deref(), Some(&b"k"[..]));
-    assert!(!tree.exists("/vol/src/data"));
 }
 
 #[test]
@@ -1024,17 +1175,31 @@ fn a_directory_swapped_for_a_link_at_any_point_never_leads_a_removal_to_its_targ
 
 #[test]
 fn a_target_directory_swapped_for_a_link_at_any_point_never_leads_a_merge_to_its_target() {
-    let merge: fn(&Tree) -> Operation<Handle> =
-        |tree| copying(tree, "/src", "/dst/src", Taken::Ask);
+    let copy: fn(&Tree) -> Operation<Handle> = |tree| copying(tree, "/src", "/dst/src", Taken::Ask);
+    let shift: fn(&Tree) -> Operation<Handle> = |tree| moving(tree, "/src", "/dst/src", Taken::Ask);
+    for (merge, skipping, overwriting) in [
+        (
+            copy,
+            "a copy's merge, skipping",
+            "a copy's merge, overwriting",
+        ),
+        (
+            shift,
+            "a move's merge, skipping",
+            "a move's merge, overwriting",
+        ),
+    ] {
+        sweep_with(
+            (target_bait, swap_target),
+            (merge, run_merging_out),
+            skipping,
+        );
+        sweep_with((target_bait, swap_target), (merge, run_over), overwriting);
+    }
     sweep_with(
-        (target_bait, swap_target),
-        (merge, run_out),
-        "merge, skipping",
-    );
-    sweep_with(
-        (target_bait, swap_target),
-        (merge, run_over),
-        "merge, overwriting",
+        (|| target_bait().volume("/dst"), swap_target),
+        (shift, run_merging_out),
+        "a move's merge across volumes",
     );
 }
 

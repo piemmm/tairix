@@ -14,20 +14,35 @@
 //! behind a [`crate::session::SessionTransport`], so a consumer's host
 //! tests drive `send` / `on_writable` / `on_readable` / `recv` exactly as
 //! its production owner will. [`LoopbackSessionLauncher`] starts one per
-//! launch for a supervised session ([`crate::supervise`]).
+//! launch for a supervised session ([`crate::supervise`]), and
+//! [`PipeSessionLauncher`] starts each behind a model of the kernel's pipe
+//! pair ([`PipeSession`]), for a test that reports readiness only as a
+//! wait-set would: a write takes at most [`PIPE_ROOM`] bytes, and a read of an
+//! empty pipe is counted on the [`PipeGauge`] rather than answered.
 //!
-//! Both fakes model a *healthy* worker. Containment paths are exercised by
+//! [`LoopbackShareLauncher`] hands each worker it starts a fresh
+//! [`HeapShare`], the stand-in for a region shared with a worker, which the
+//! worker writes and its owner reads through a lock as two processes reach
+//! one region.
+//!
+//! The fakes model a *healthy* worker. Containment paths are exercised by
 //! scripting a failing [`crate::proto::Channel`] or
 //! [`crate::session::SessionTransport`] directly (see `crate::host`'s and
 //! `crate::session`'s tests); keeping failure injection out of these types
 //! keeps their behaviour identical to a correct production worker.
 
+use alloc::rc::Rc;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use tairix_abi::Errno;
+use tairix_sync::SpinLock;
 
 use crate::host::Launcher;
 use crate::proto::{head_frame, send_frame, Channel, ProtoError, FRAME_HEADER_LEN, MAX_FRAME};
-use crate::session::{FrameOut, SessionDescriptors, SessionService, SessionStep, SessionTransport};
+use crate::session::{
+    FrameOut, SessionDescriptors, SessionService, SessionStep, SessionTransport, Share, ShareWrite,
+};
 use crate::supervise::SessionLauncher;
 use crate::worker::Service;
 
@@ -161,6 +176,7 @@ pub struct LoopbackSession<S: SessionService> {
     /// end-of-stream and writes broken-pipe, exactly as a real worker's
     /// exit does.
     finished: bool,
+    share: Option<Arc<dyn Share>>,
 }
 
 impl<S: SessionService> LoopbackSession<S> {
@@ -172,7 +188,15 @@ impl<S: SessionService> LoopbackSession<S> {
             reply: Vec::new(),
             reply_at: 0,
             finished: false,
+            share: None,
         }
+    }
+
+    /// The same session, its worker handed `share`.
+    #[must_use]
+    pub fn sharing(mut self, share: Arc<dyn Share>) -> Self {
+        self.share = Some(share);
+        self
     }
 
     /// Run the service over every complete frame the parent has written.
@@ -232,8 +256,80 @@ impl<S: SessionService> SessionTransport for LoopbackSession<S> {
         None
     }
 
+    fn share(&self) -> Option<&Arc<dyn Share>> {
+        self.share.as_ref()
+    }
+
     fn dispose(self) -> Option<i32> {
         None
+    }
+}
+
+/// A region on the heap standing in for one an owner shares with its worker:
+/// the owner reads it as a [`Share`] and the worker writes it as a
+/// [`ShareWrite`], each through a lock.
+#[derive(Clone)]
+pub struct HeapShare(Arc<SpinLock<Vec<u8>>>);
+
+impl HeapShare {
+    /// A zeroed region of `len` bytes, or `None` where the heap will not give
+    /// it.
+    #[must_use]
+    pub fn new(len: usize) -> Option<Self> {
+        let bytes = tairix_util::fallible::filled(len, 0u8)?;
+        Some(Self(Arc::new(SpinLock::new(bytes))))
+    }
+}
+
+impl Share for HeapShare {
+    fn byte_len(&self) -> usize {
+        self.0.lock().len()
+    }
+
+    fn copy_out(&self, at: usize, out: &mut [u8]) -> bool {
+        let held = self.0.lock();
+        let Some(source) = at.checked_add(out.len()).and_then(|end| held.get(at..end)) else {
+            return false;
+        };
+        out.copy_from_slice(source);
+        true
+    }
+}
+
+impl ShareWrite for HeapShare {
+    fn byte_len(&self) -> usize {
+        self.0.lock().len()
+    }
+
+    fn write_with(&mut self, write: &mut dyn FnMut(&mut [u8]) -> bool) -> bool {
+        let mut held = self.0.lock();
+        write(held.as_mut_slice())
+    }
+}
+
+/// [`SessionLauncher`] whose workers are [`LoopbackSession`]s each handed a
+/// fresh [`HeapShare`] of `len` bytes, as the production launcher hands each
+/// worker a region of its own.
+pub struct LoopbackShareLauncher<F> {
+    len: usize,
+    factory: F,
+}
+
+impl<F> LoopbackShareLauncher<F> {
+    /// Build the launcher over the service factory, which is handed the
+    /// worker's side of each launch's share.
+    pub const fn new(len: usize, factory: F) -> Self {
+        Self { len, factory }
+    }
+}
+
+impl<S: SessionService, F: FnMut(HeapShare) -> S> SessionLauncher for LoopbackShareLauncher<F> {
+    type Transport = LoopbackSession<S>;
+
+    fn launch(&mut self) -> Result<LoopbackSession<S>, Errno> {
+        let share = HeapShare::new(self.len).ok_or(Errno::OutOfMemory)?;
+        let service = (self.factory)(share.clone());
+        Ok(LoopbackSession::new(service).sharing(Arc::new(share)))
     }
 }
 
@@ -255,6 +351,166 @@ impl<S: SessionService, F: FnMut() -> S> SessionLauncher for LoopbackSessionLaun
 
     fn launch(&mut self) -> Result<LoopbackSession<S>, Errno> {
         Ok(LoopbackSession::new((self.factory)()))
+    }
+}
+
+/// Bytes a [`PipeSession`]'s request pipe takes in one write: less than a
+/// supply of the audio decoder's largest read and its header, as on a
+/// machine.
+pub const PIPE_ROOM: usize = tairix_sound::MAX_READ;
+
+/// What the pipes of one [`PipeSessionLauncher`]'s workers hold and have been
+/// through.
+#[derive(Debug, Default)]
+struct PipeState {
+    /// Bytes the live worker has written that its owner has not read.
+    unread: usize,
+    /// The live worker has closed its reply pipe.
+    closed: bool,
+    parked: usize,
+    launched: usize,
+    ended: usize,
+}
+
+/// A test's view of the pipes of every worker one [`PipeSessionLauncher`]
+/// starts, read as a wait-set reads them.
+#[derive(Clone, Debug, Default)]
+pub struct PipeGauge(Rc<RefCell<PipeState>>);
+
+impl PipeGauge {
+    /// Whether a wait-set would report the live worker's reply pipe readable:
+    /// it holds bytes, or the worker has closed it.
+    #[must_use]
+    pub fn readable(&self) -> bool {
+        let state = self.0.borrow();
+        state.unread > 0 || state.closed
+    }
+
+    /// Reads of an empty pipe its worker had not closed. On a machine each
+    /// parks its reader, so an owner that makes one has read ahead of an
+    /// answer.
+    #[must_use]
+    pub fn parked(&self) -> usize {
+        self.0.borrow().parked
+    }
+
+    /// Workers launched.
+    #[must_use]
+    pub fn launched(&self) -> usize {
+        self.0.borrow().launched
+    }
+
+    /// Workers their owner ended: disposed of, or contained.
+    #[must_use]
+    pub fn ended(&self) -> usize {
+        self.0.borrow().ended
+    }
+}
+
+/// A [`LoopbackSession`] behind a model of the kernel's pipe pair, for a test
+/// that reports readiness only as a wait-set would: a write takes at most
+/// [`PIPE_ROOM`] bytes, and a read of an empty pipe, which on a machine parks
+/// its reader, is counted on the [`PipeGauge`] instead of answered.
+pub struct PipeSession<S: SessionService> {
+    worker: LoopbackSession<S>,
+    /// What the worker has written that the owner has not read.
+    answers: Vec<u8>,
+    gauge: PipeGauge,
+}
+
+impl<S: SessionService> PipeSession<S> {
+    /// Move what the worker has written into the reply pipe.
+    fn collect(&mut self) {
+        let mut chunk = [0u8; 4096];
+        let closed = loop {
+            match self.worker.read(&mut chunk) {
+                Ok(0) => break true,
+                Ok(read) => self.answers.extend_from_slice(&chunk[..read]),
+                Err(_) => break false,
+            }
+        };
+        let mut state = self.gauge.0.borrow_mut();
+        state.unread = self.answers.len();
+        state.closed = closed;
+    }
+}
+
+impl<S: SessionService> SessionTransport for PipeSession<S> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        let mut state = self.gauge.0.borrow_mut();
+        if self.answers.is_empty() {
+            if state.closed {
+                return Ok(0);
+            }
+            state.parked += 1;
+            return Err(Errno::WouldBlock);
+        }
+        let take = buf.len().min(self.answers.len());
+        buf[..take].copy_from_slice(&self.answers[..take]);
+        self.answers.drain(..take);
+        state.unread = self.answers.len();
+        Ok(take)
+    }
+
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Errno> {
+        let taken = buf.len().min(PIPE_ROOM);
+        self.worker.write(&buf[..taken])?;
+        self.collect();
+        Ok(taken)
+    }
+
+    fn descriptors(&self) -> Option<SessionDescriptors> {
+        None
+    }
+
+    fn dispose(self) -> Option<i32> {
+        let mut state = self.gauge.0.borrow_mut();
+        state.unread = 0;
+        state.closed = false;
+        state.ended += 1;
+        None
+    }
+}
+
+/// [`SessionLauncher`] whose workers are [`PipeSession`]s over services the
+/// factory builds, a fresh one per launch, all read through one
+/// [`PipeGauge`].
+pub struct PipeSessionLauncher<F> {
+    factory: F,
+    gauge: PipeGauge,
+}
+
+impl<F> PipeSessionLauncher<F> {
+    /// Build the launcher over the service factory.
+    pub fn new(factory: F) -> Self {
+        Self {
+            factory,
+            gauge: PipeGauge::default(),
+        }
+    }
+
+    /// The gauge every worker this launches is read through.
+    #[must_use]
+    pub fn gauge(&self) -> PipeGauge {
+        self.gauge.clone()
+    }
+}
+
+impl<S: SessionService, F: FnMut() -> S> SessionLauncher for PipeSessionLauncher<F> {
+    type Transport = PipeSession<S>;
+
+    fn launch(&mut self) -> Result<PipeSession<S>, Errno> {
+        {
+            let mut state = self.gauge.0.borrow_mut();
+            state.launched += 1;
+            state.unread = 0;
+            state.closed = false;
+        }
+        Ok(PipeSession {
+            worker: LoopbackSession::new((self.factory)()),
+            answers: Vec::new(),
+            gauge: self.gauge.clone(),
+        })
     }
 }
 
@@ -335,5 +591,47 @@ mod tests {
                 channel.reply.len(),
             );
         }
+    }
+
+    /// A write takes at most a pipe's room, half a frame is not answered, a
+    /// read of an empty pipe is counted, and an ended worker leaves nothing to
+    /// read.
+    #[test]
+    fn a_model_pipe_takes_a_pipes_room_a_write_and_counts_reads_of_an_empty_one() {
+        use super::{PipeSessionLauncher, PIPE_ROOM};
+        use crate::proto::FRAME_HEADER_LEN;
+        use crate::session::{FrameOut, SessionService, SessionStep, SessionTransport};
+        use crate::supervise::SessionLauncher;
+        use tairix_abi::Errno;
+
+        /// Answers each frame with itself.
+        struct Echo;
+
+        impl SessionService for Echo {
+            fn handle(&mut self, request: &[u8], out: &mut dyn FrameOut) -> SessionStep {
+                let _ = out.frame(request);
+                SessionStep::Continue
+            }
+        }
+
+        let mut launcher = PipeSessionLauncher::new(|| Echo);
+        let gauge = launcher.gauge();
+        let mut pipe = launcher.launch().expect("a model pipe launches");
+        let declared = u32::try_from(PIPE_ROOM).expect("small");
+        let mut frame = declared.to_le_bytes().to_vec();
+        frame.resize(FRAME_HEADER_LEN + PIPE_ROOM, 7);
+        assert_eq!(pipe.write(&frame), Ok(PIPE_ROOM), "one pipe's room");
+        let mut reply = [0u8; 64];
+        assert_eq!(pipe.read(&mut reply), Err(Errno::WouldBlock));
+        assert!(!gauge.readable(), "half a frame is not answered");
+        assert_eq!(gauge.parked(), 1, "the read of an empty pipe is counted");
+        assert_eq!(pipe.write(&frame[PIPE_ROOM..]), Ok(FRAME_HEADER_LEN));
+        assert!(gauge.readable(), "the answer waits");
+        assert_eq!(pipe.read(&mut reply), Ok(reply.len()));
+        assert_eq!(reply[..FRAME_HEADER_LEN], frame[..FRAME_HEADER_LEN]);
+        assert_eq!((gauge.launched(), gauge.ended()), (1, 0));
+        assert_eq!(pipe.dispose(), None);
+        assert_eq!(gauge.ended(), 1);
+        assert!(!gauge.readable(), "an ended worker leaves nothing to read");
     }
 }

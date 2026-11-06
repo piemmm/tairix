@@ -12,8 +12,9 @@
 //! - the volume-manager policy driver, which only ever inspects a device's
 //!   layout (partition table, filesystem signatures) and never commits
 //!   anything to it, and
-//! - the RAID array composer, which both reads a member's superblock and
-//!   durably writes to the array it assembles.
+//! - the RAID array composer, which reads a member's superblock, asks the
+//!   identity its device states ([`RemoteBlock::identify`]), and durably
+//!   writes to the array it assembles.
 //!
 //! A copy of this client per consumer would let the wire discipline, the
 //! geometry validation, and the bounded-reissue policy silently drift

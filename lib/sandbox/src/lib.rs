@@ -40,7 +40,10 @@
 //!   run the full parent path without processes (the `Fs`/`Tty` seam
 //!   pattern) — [`loopback::LoopbackLauncher`] for the one-shot seam,
 //!   [`loopback::LoopbackSession`] and
-//!   [`loopback::LoopbackSessionLauncher`] for the duplex ones.
+//!   [`loopback::LoopbackSessionLauncher`] for the duplex ones, and
+//!   [`loopback::PipeSessionLauncher`] for a duplex worker behind a model of
+//!   the kernel's pipe pair, whose readiness a test reports as a wait-set
+//!   would.
 //! * [`decode`] — the first consumers behind the seam: executable-container
 //!   summaries (`tairix-binfmt`) and instruction windows (`tairix-disasm`),
 //!   with fail-closed reply validation (the worker is hostile once it has
@@ -74,11 +77,23 @@
 //!   caller-side [`timesync::evaluate_datagram`] gates the nonce echo itself
 //!   before the worker is involved and re-validates any returned sample
 //!   against the plausibility, round-trip, and stratum bounds.
+//! * [`paged`] — the page cache a long-lived decode worker reads its owner's
+//!   file through, a bounded ask at a time, so it never holds the file.
 //! * [`audiodecode`] — a sound file decoded (`tairix-sound`) by a long-lived
 //!   worker that asks its owner for the pages it reads, over a
 //!   [`supervise::SupervisedSession`]; the caller-side
 //!   [`audiodecode::AudioDecodeClient`] checks every answer against the
-//!   request it answers and brings a replacement back to the stream.
+//!   request it answers and brings a replacement back to the stream, and
+//!   every owner hands its requests over through
+//!   [`supervise::send_waiting`].
+//! * [`moviedecode`] — a `WebM` recording decoded (`tairix-video`,
+//!   `tairix-sound`) by the same kind of long-lived paged worker: VP8 pictures
+//!   drawn into a ring of slots its owner shares with it, Opus sound
+//!   as blocks of `F32`, a seek to the latest keyframe at or before its
+//!   target, and a stream too large for the worker's ceiling refused before
+//!   anything is reserved for it; the caller-side
+//!   [`moviedecode::MovieDecodeClient`] holds every answer to the request it
+//!   answers.
 //! * `rt` (feature `program`, freestanding only; not compiled on hosted
 //!   targets) — the production transport: the parent spawns its own binary
 //!   in the worker role over a pipe pair wired through
@@ -99,6 +114,8 @@ pub mod imagerender;
 pub mod listing;
 pub mod loopback;
 pub mod memory;
+pub mod moviedecode;
+pub mod paged;
 pub mod proto;
 mod report;
 #[cfg(all(freestanding, feature = "program"))]

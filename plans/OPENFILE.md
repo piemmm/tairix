@@ -12,6 +12,7 @@
 | OF8 | Descriptor-relative calls, a node-bound working directory, one resolver, and the access query a program asks whether it may read, write or run a node through (D1420) | done |
 | OF9 | The command tools walk by descriptor — `cp`, `mv`, `rm`, `chmod`, `chown`, `getcap`, `setcap` — as `replace_file` stages, so no entry can be swapped for a link between reading and changing it, and every tree copy gives what it makes its source's mode (D1365, D1367, D1378, D1422, D1425, D1485) | done |
 | OF10 | `fstree` and the file manager walk by descriptor too, through the shared resumable copy, move and removal engine, which holds the walk as a cursor between a paused or time-sliced operation's units | done |
+| OF11 | `fd_grant` conveys a pipe end: its reference counted while in flight, released as a close is, a grantor's ends in flight bounded by its `open-files` | done |
 
 ## The model
 
@@ -163,6 +164,14 @@ finds nothing at its path.
   `opened_as` label, which a rename can make stale. Spawn wiring shares the
   description and gives the child's descriptor the same pin, frozen to the
   parent's identity at the spawn. Directories are refused both ways.
+- `fd_grant` conveys a pipe end as itself: the pending delegation holds another
+  counted reference to the end, so one in flight holds its side open, and one
+  let go unredeemed, with either process, is released as a close is, outside
+  the registry's lock — a grantor's exit hands its delegations back chained
+  through their own records, allocating nothing. The redeemed descriptor is
+  that end with the grantor's access. A pipe takes no ceiling, and a grantor's
+  ends in flight are bounded by its `open-files` soft bound. A pty end, a
+  resource and a catalog are refused.
 - A `file_map` region holds a `NodeHandle`, so the node outlives an unlink and
   a close; each fault applies the byte-operation checks.
 - File locks key on `(registration, pinned)`: a rename moves nothing and a FAT

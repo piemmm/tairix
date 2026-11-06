@@ -34,7 +34,7 @@ const SCROLL_ZONE: u32 = 24;
 const SCROLL_SPEED: u32 = 1200;
 
 /// A band being dragged across the listing.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Marquee {
     anchor: Point,
     head: Point,
@@ -81,7 +81,7 @@ pub fn begin<S: DirectorySource>(
     Some(Marquee {
         anchor,
         head: point,
-        base: browser.selection().clone(),
+        base: browser.selection().try_clone()?,
         touched: BandMarks::default(),
         next: BandMarks::default(),
         edges: Vec::new(),
@@ -333,19 +333,7 @@ fn band_in_layout(view: &ScrollView, marquee: &Marquee) -> Rect {
         marquee.head.y.clamp(area.top(), area.bottom() - 1),
     );
     view.to_content(held)
-        .map_or(Rect::EMPTY, |head| spanning(marquee.anchor, head))
-}
-
-/// The smallest rectangle holding both `a` and `b`.
-fn spanning(a: Point, b: Point) -> Rect {
-    let span = |p: i32, q: i32| {
-        let (low, high) = (p.min(q), p.max(q));
-        let len = u32::try_from(i64::from(high) - i64::from(low) + 1).unwrap_or(u32::MAX);
-        (low, len)
-    };
-    let (x, width) = span(a.x, b.x);
-    let (y, height) = span(a.y, b.y);
-    Rect::new(x, y, width, height)
+        .map_or(Rect::EMPTY, |head| Rect::spanning(marquee.anchor, head))
 }
 
 #[cfg(test)]

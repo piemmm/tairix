@@ -80,6 +80,34 @@ fn a_key_is_the_same_in_every_session_and_inside_the_key_grammar() {
     assert_eq!(tairix_appconf::validate_key(&key.spelled()), Ok(()));
 }
 
+/// A drive keeps its place under the identity its volume's content carries:
+/// the key its root names, spelled within the key grammar and read back
+/// exactly.
+#[test]
+fn a_drive_keeps_its_place_under_its_volume() {
+    let identity = [0xab; 16];
+    let root = tairix_browse::mount::volume_root(identity);
+    let key = PlaceKey::of(&root);
+    assert_eq!(key, PlaceKey::of_volume(identity));
+    assert!(key.is_volume() && !PlaceKey::of("USB").is_volume());
+    let spelled = key.spelled();
+    assert_eq!(spelled, "pinboard.volume.abababababababababababababababab");
+    assert_eq!(tairix_appconf::validate_key(&spelled), Ok(()));
+    let mut arrangement = Arrangement::default();
+    assert_eq!(
+        arrangement.make(&put(&root, placed(4096, 0, 0))),
+        Ok(vec![spelled.clone()])
+    );
+    let value = arrangement.kept(&spelled).expect("kept");
+    let (read, refused) = Arrangement::read([(spelled.as_str(), value.as_str())].into_iter());
+    assert!(refused.is_empty());
+    assert_eq!(read.place_of(&root), Some(placed(4096, 0, 0)));
+    assert_eq!(
+        PlaceKey::read("pinboard.volume.ABABABABABABABABABABABABABABABAB"),
+        None
+    );
+}
+
 #[test]
 fn a_place_it_cannot_read_is_left_out_and_named() {
     let good = PlaceKey::of("a").spelled();

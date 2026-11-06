@@ -4,12 +4,12 @@ top — observer la liste des processus en direct
 
 ## SYNOPSIS
 
-`top [-d secs.dixièmes] [-h | -?]`
+`top [-d secs.tenths] [-h | -?]`
 
 ## DESCRIPTION
 
 Affiche une vue plein écran, en direct, de la liste des processus via
-l'API d'information système, dans l'esprit du `top` classique. Il
+l'API d'information système, dans l'esprit du `top` GNU. Il
 démarre sur les processus de l'appelant ; la vue système n'est accordée
 par le service qu'à un appelant détenant `CAP_SYSINFO_GLOBAL`.
 
@@ -52,7 +52,10 @@ portent :
   comptes du système ; l'uid numérique le remplace quand le nom ne peut
   pas être résolu.
 - `SIZE` — la mémoire mappée dans l'espace d'adressage du processus
-  (image, pile et tas confondus).
+  (image, pile et tas confondus), en unités binaires : le compte exact
+  sous un kibioctet, puis une décimale avec un suffixe `K`, `M`, `G`,
+  `T`, `P` ou `E` (`4.0K`, `986.2M`, `2.0G`). L'échelle va jusqu'aux
+  exbioctets, si bien que le chiffre tient toujours dans sa colonne.
 - `S` — la lettre d'état : `R` en exécution (vert), `r` prêt, en
   attente d'un CPU (cyan), `S` endormi, `T` arrêté (jaune), `Z` zombie
   (magenta). Les couleurs n'apparaissent que sur un terminal couleur ;
@@ -62,7 +65,7 @@ portent :
 - `WCPU` — la part de CPU pondérée (lissée exponentiellement) entre les
   rafraîchissements, plus stable que la colonne instantanée.
 - `TIME+` — le temps CPU cumulé, sous la forme
-  `minutes:secondes.centièmes`.
+  `minutes:seconds.hundredths` (minutes, secondes et centièmes).
 - `COMMAND` — le nom du processus.
 
 ## OPTIONS

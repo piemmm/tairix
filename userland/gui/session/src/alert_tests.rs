@@ -3,7 +3,7 @@
 //! taking the keyboard only when earned, armed against a click meant for what
 //! was there, and answered once.
 
-use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
+use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PhysicalKey};
 use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertSeverity, AlertSpec};
 use tairix_wm::{Compositor, InputEvent, Point, PointerButton, Rect, Surface, WindowId};
 
@@ -63,6 +63,7 @@ fn pressed(key: NamedKeyCode) -> KeyInput {
     KeyInput::Pressed {
         key: KeyValue::Named(key),
         modifiers: Modifiers::default(),
+        physical: PhysicalKey::UNKNOWN,
     }
 }
 
@@ -910,4 +911,136 @@ fn no_run_of_notices_takes_the_about_window_down() {
         ));
     }
     assert!(alerts.owns(about), "it is not a notice to give way");
+}
+
+/// The volume the questions for held writes here are asked about.
+const HELD: [u8; 16] = [0x48; 16];
+
+fn held_question() -> AlertSpec {
+    crate::held::question("Backup").expect("a question")
+}
+
+#[test]
+fn a_question_for_held_writes_is_asked_once_beneath_the_work_and_keeps_its_answer() {
+    let (mut shell, mut comp) = headless_desktop();
+    let work = work(&mut shell, &mut comp);
+    let mut alerts = Alerts::default();
+    let mut holds = Holds::new();
+    for _ in 0..2 {
+        assert!(alerts.ask_held(HELD, &held_question(), &mut shell, &mut comp));
+    }
+    assert_eq!(alerts.held_questions(), 1, "one question for one volume");
+    assert!(alerts.asks_held(&HELD));
+    let wm = alerts.up[0].window.wm();
+    assert_eq!(shell.router().focused(), Some(work), "it takes no keyboard");
+    let bounds = comp.window(wm).expect("up").bounds();
+    assert_eq!(comp.window_at(bounds.origin), Some(work), "nor the front");
+
+    alerts.stamp(0);
+    let discard = first_button(&alerts, wm, &shell, &comp);
+    assert_eq!(
+        click(
+            &mut alerts,
+            (wm, discard),
+            ALERT_ARM_NS,
+            &mut holds,
+            &mut shell,
+            &mut comp
+        ),
+        None,
+        "owed to no application"
+    );
+    assert!(comp.window(wm).is_none(), "an answered question is down");
+    assert!(alerts.held_answered());
+    let mut relayed = alloc::vec::Vec::new();
+    alerts.relay_held(|answered| {
+        relayed.push(answered);
+        true
+    });
+    assert_eq!(relayed, [(HELD, 0)], "the volume, and the button chosen");
+    assert!(!alerts.held_answered(), "an answer is relayed once");
+}
+
+#[test]
+fn an_answer_turned_down_waits_with_those_after_it() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut alerts = Alerts::default();
+    let mut holds = Holds::new();
+    let volumes = [[0x51; 16], [0x52; 16]];
+    for volume in volumes {
+        assert!(alerts.ask_held(volume, &held_question(), &mut shell, &mut comp));
+    }
+    alerts.stamp(0);
+    for _ in volumes {
+        let wm = alerts.up[0].window.wm();
+        let at = first_button(&alerts, wm, &shell, &comp);
+        let _ = click(
+            &mut alerts,
+            (wm, at),
+            ALERT_ARM_NS,
+            &mut holds,
+            &mut shell,
+            &mut comp,
+        );
+    }
+    alerts.relay_held(|_| false);
+    assert!(alerts.held_answered(), "kept for the next pass");
+    let mut offered = alloc::vec::Vec::new();
+    alerts.relay_held(|(volume, _)| {
+        offered.push(volume);
+        offered.len() == 1
+    });
+    assert_eq!(offered, volumes, "oldest first, until one is turned down");
+    let mut rest = alloc::vec::Vec::new();
+    alerts.relay_held(|(volume, _)| {
+        rest.push(volume);
+        true
+    });
+    assert_eq!(rest, [volumes[1]], "the one turned down waited");
+    assert!(!alerts.held_answered());
+}
+
+#[test]
+fn questions_for_held_writes_are_bounded_and_come_down_once_their_volume_no_longer_awaits() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut alerts = Alerts::default();
+    let mut holds = Holds::new();
+    let most = u8::try_from(super::HELD_QUESTIONS_MAX).expect("small");
+    for n in 1..=most {
+        assert!(alerts.ask_held([n; 16], &held_question(), &mut shell, &mut comp));
+    }
+    assert!(
+        !alerts.ask_held([0x7F; 16], &held_question(), &mut shell, &mut comp),
+        "none past the bound"
+    );
+    alerts.withdraw_held(
+        |volume| *volume == [1; 16],
+        &mut holds,
+        &mut shell,
+        &mut comp,
+    );
+    assert_eq!(alerts.held_questions(), 1);
+    assert!(alerts.asks_held(&[1; 16]));
+    assert!(
+        !alerts.held_answered(),
+        "a withdrawn question gave no answer"
+    );
+}
+
+#[test]
+fn no_run_of_notices_takes_a_question_for_held_writes_down() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut alerts = Alerts::default();
+    let mut holds = Holds::new();
+    assert!(alerts.ask_held(HELD, &held_question(), &mut shell, &mut comp));
+    for _ in 0..=super::DESKTOP_NOTICES_MAX {
+        assert!(alerts.notify(
+            &ok(),
+            "Error from Desktop",
+            &mut holds,
+            &mut shell,
+            &mut comp
+        ));
+    }
+    assert!(alerts.asks_held(&HELD), "it is not a notice to give way");
 }

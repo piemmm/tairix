@@ -4,6 +4,9 @@
 //! A read past either end of the frame yields zeros, as the specification
 //! requires, so a short frame decodes to defined values and the caller
 //! judges it by [`RangeDecoder::tell`].
+//!
+//! CELT reaches either end of a frame through `Coder`, so one routine both
+//! reads a frame and writes one.
 
 #![allow(
     clippy::cast_possible_wrap,
@@ -27,6 +30,76 @@ const WINDOW_BITS: u32 = 32;
 /// The bit length of `value`: `0` for zero.
 pub(super) const fn ilog(value: u32) -> u32 {
     u32::BITS - value.leading_zeros()
+}
+
+/// The bits a coder that has accounted `total_bits` and holds the range
+/// `rng` has used, in eighths: the count both ends keep alike.
+fn eighths(total_bits: i32, rng: u32) -> i32 {
+    const CORRECTION: [u32; 8] = [35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535];
+    let bits = total_bits << BITRES;
+    let width = ilog(rng);
+    let r = rng >> (width - 16);
+    let mut fraction = (r >> 12) - 8;
+    fraction += u32::from(r > CORRECTION[fraction as usize]);
+    bits - ((width << 3) + fraction) as i32
+}
+
+/// The whole bits a coder that has accounted `total_bits` and holds the
+/// range `rng` has used, rounded up.
+const fn whole_bits(total_bits: i32, rng: u32) -> i32 {
+    total_bits - ilog(rng) as i32
+}
+
+/// What a coder that has accounted `total_bits` and holds the range `rng`
+/// accounts once a frame's bits up to `bits` count as coded.
+const fn skipped_to(total_bits: i32, rng: u32, bits: i32) -> i32 {
+    total_bits + bits - whole_bits(total_bits, rng)
+}
+
+/// One end of a range-coded frame, so that one routine both reads a frame
+/// and writes one: each symbol is handed the value an encoder writes, which
+/// a decoder ignores, and returns the value the frame carries.
+pub(super) trait Coder {
+    /// Whether this end writes: an encoder's analysis of what it is about
+    /// to code runs only where it does.
+    const WRITES: bool;
+
+    /// The frame's bytes.
+    fn storage(&self) -> usize;
+
+    /// The whole bits the symbols so far take, rounded up.
+    fn tell(&self) -> i32;
+
+    /// [`tell`](Self::tell) in eighths of a bit.
+    fn tell_frac(&self) -> i32;
+
+    /// The point of `0..total` the frame states for the next symbol, which
+    /// [`take`](Self::take) then consumes; `None` at an encoder, which knows
+    /// the symbol it writes.
+    fn point(&mut self, total: u32) -> Option<u32>;
+
+    /// [`point`](Self::point) for a total of `2^bits`.
+    fn point_bin(&mut self, bits: u32) -> Option<u32>;
+
+    /// Code the symbol spanning `[low, high)` of `total`.
+    fn take(&mut self, low: u32, high: u32, total: u32);
+
+    /// A bit that is set with probability `2^-logp`.
+    fn bit_logp(&mut self, value: bool, logp: u32) -> bool;
+
+    /// A symbol of an inverse cumulative distribution of total `2^bits`,
+    /// which ends in zero.
+    fn icdf(&mut self, value: usize, icdf: &[u8], bits: u32) -> usize;
+
+    /// A value uniform over `0..total`, `total` above one.
+    fn uint(&mut self, value: u32, total: u32) -> u32;
+
+    /// `count` raw bits, at most 24, at the frame's far end.
+    fn bits(&mut self, value: u32, count: u32) -> u32;
+
+    /// Account the frame's bits up to `bits` as coded, as a frame coded as
+    /// silence does.
+    fn skip_to(&mut self, bits: i32);
 }
 
 /// The decoder's state over one frame's bytes.
@@ -204,24 +277,18 @@ impl<'f> RangeDecoder<'f> {
 
     /// The whole bits the symbols decoded so far take, rounded up.
     pub(super) fn tell(&self) -> i32 {
-        self.total_bits - ilog(self.rng) as i32
+        whole_bits(self.total_bits, self.rng)
     }
 
     /// [`tell`](Self::tell) in eighths of a bit.
     pub(super) fn tell_frac(&self) -> i32 {
-        const CORRECTION: [u32; 8] = [35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535];
-        let bits = self.total_bits << BITRES;
-        let width = ilog(self.rng);
-        let r = self.rng >> (width - 16);
-        let mut eighths = (r >> 12) - 8;
-        eighths += u32::from(r > CORRECTION[eighths as usize]);
-        bits - ((width << 3) + eighths) as i32
+        eighths(self.total_bits, self.rng)
     }
 
     /// Account the frame's remaining bits as read, as a frame coded as
     /// silence does.
     pub(super) fn skip_to(&mut self, bits: i32) {
-        self.total_bits += bits - self.tell();
+        self.total_bits = skipped_to(self.total_bits, self.rng, bits);
     }
 
     /// The frame's bytes the decoder reads.
@@ -241,7 +308,55 @@ impl<'f> RangeDecoder<'f> {
     }
 }
 
-#[cfg(test)]
+impl Coder for RangeDecoder<'_> {
+    const WRITES: bool = false;
+
+    fn storage(&self) -> usize {
+        self.storage
+    }
+
+    fn tell(&self) -> i32 {
+        RangeDecoder::tell(self)
+    }
+
+    fn tell_frac(&self) -> i32 {
+        RangeDecoder::tell_frac(self)
+    }
+
+    fn point(&mut self, total: u32) -> Option<u32> {
+        Some(self.decode(total))
+    }
+
+    fn point_bin(&mut self, bits: u32) -> Option<u32> {
+        Some(self.decode_bin(bits))
+    }
+
+    fn take(&mut self, low: u32, high: u32, total: u32) {
+        self.update(low, high, total);
+    }
+
+    fn bit_logp(&mut self, _: bool, logp: u32) -> bool {
+        RangeDecoder::bit_logp(self, logp)
+    }
+
+    fn icdf(&mut self, _: usize, icdf: &[u8], bits: u32) -> usize {
+        RangeDecoder::icdf(self, icdf, bits)
+    }
+
+    fn uint(&mut self, _: u32, total: u32) -> u32 {
+        RangeDecoder::uint(self, total)
+    }
+
+    fn bits(&mut self, _: u32, count: u32) -> u32 {
+        RangeDecoder::bits(self, count)
+    }
+
+    fn skip_to(&mut self, bits: i32) {
+        RangeDecoder::skip_to(self, bits);
+    }
+}
+
+#[cfg(any(test, feature = "encode-opus"))]
 pub(super) mod writer;
 
 #[cfg(test)]

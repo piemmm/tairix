@@ -35,10 +35,6 @@ Las consultas:
   `CAP_SYSINFO_KERNEL`).
 - `cpu` — profundidad de cola, cambios de contexto y expropiaciones por
   CPU (necesita `CAP_SYSINFO_KERNEL`).
-- `irq`, `irqs` — la tabla de IRQ del núcleo: una fila por cada línea de
-  interrupción vinculada — su identificador, la tarea del controlador
-  propietaria, el número de interrupciones desde el arranque y si la
-  línea está en cuarentena (necesita `CAP_SYSINFO_HW`).
 - `cpuinfo` — el informe del procesador por CPU (un superconjunto de
   `/proc/cpuinfo`): modelo/fabricante, clase de rendimiento, indicadores
   de extensiones ISA, el registro de identidad en bruto, la frecuencia de
@@ -46,14 +42,48 @@ Las consultas:
   no existe contador de reloj de núcleo) y la frecuencia fija de
   referencia o base de tiempo. Datos públicos del hardware, no requiere
   ninguna capacidad.
-- `storage`, `io` — la salud de E/S de almacenamiento por volumen: una
-  fila por cada volumen respaldado por bloques y consciente de fallos —
-  un prefijo de su identificador duradero, el punto final del servicio de
-  bloques que lo sirve, su disponibilidad actual
-  (available/degraded/recovering/lost) y los contadores acumulados de
-  resultados (finalizaciones, reinicios, expiraciones, errores de medio,
-  reintentos) en los que se hace visible un disco defectuoso o
-  inestable (necesita `CAP_SYSINFO_KERNEL`).
+- `irq`, `irqs` — la tabla de IRQ del núcleo: una fila por cada línea de
+  interrupción vinculada — su identificador, la tarea del controlador
+  propietaria, el número de interrupciones desde el arranque y si la
+  línea está en cuarentena (necesita `CAP_SYSINFO_HW`).
+- `frames` — lo que han costado los fotogramas compuestos de cada sesión
+  de escritorio: una fila por cada sesión que publica — los píxeles que
+  sus fotogramas recompusieron y la media por fotograma, el múltiplo de
+  sobredibujado (aportaciones de capas por píxel dañado), la parte
+  resuelta copiando un tramo opaco, los píxeles que un fondo de cristal
+  esmerilado recalculado volvió a desenfocar, los píxeles convertidos al
+  formato de barrido de pantalla, el peor fotograma individual y su parte
+  de la pantalla, las llamadas al controlador que los presentaron, y los
+  aciertos y fallos de la caché de la decoración de ventanas. Son las
+  cifras propias del escritorio — solo un proceso que posea un compositor
+  puede contar píxeles —, así que cada fila nombra al publicador tal como
+  lo certificó el servicio, y una sesión que no ha publicado nada no
+  imprime ninguna fila (necesita `CAP_SYSINFO_GLOBAL`).
+- `storage`, `io` — tres tablas por volumen, con una fila en cada una por
+  cada volumen respaldado por bloques y consciente de fallos, identificada
+  por un prefijo del identificador duradero del volumen y con el nombre
+  del dispositivo que lo sirve. Esa identidad es el punto final del
+  servicio de bloques que lo sirve cuando un controlador en espacio de
+  usuario sirve el dispositivo, y una identidad reservada gestionada por
+  el núcleo cuando es el núcleo quien lo gestiona — el disco desde el que
+  arrancó la máquina, que no tiene ningún punto final de servicio.
+  **Servicio** nombra además el dispositivo: el nombre corto que declara
+  su propio controlador (`virtio-blk`, `emmc2`, `usb-msd`), o `-` si no
+  declara ninguno. Lleva los bytes acumulados, las peticiones completadas
+  y el tiempo de ocupación del dispositivo que un lector convierte, por
+  diferencias, en rendimiento, IOPS, utilización y espera — nada viene
+  precalculado, así que dos lectores nunca heredan una misma ventana de
+  promediado (no necesita ninguna capacidad). **Cola** lleva lo que está
+  pendiente ahora, los acumuladores de cuyas diferencias sale una
+  profundidad media, y la profundidad y el plazo que permite la propia
+  clase del dispositivo. **Salud** lleva la disponibilidad actual del
+  volumen (available/degraded/recovering/lost) y los contadores
+  acumulados de resultados (finalizaciones, reinicios, expiraciones,
+  errores de medio, reintentos) en los que se hace visible un disco
+  defectuoso o inestable. Las dos últimas necesitan `CAP_SYSINFO_KERNEL`;
+  la tabla de servicio se imprime primero, así que un llamante sin esa
+  capacidad sigue leyendo las cifras de utilización antes de que se
+  notifique la negativa.
 - `raid`, `arrays` — los conjuntos RAID compuestos y los dispositivos que
   mantiene el compositor de conjuntos: una fila por conjunto — un prefijo
   de su identidad, su nivel, su salud
@@ -107,6 +137,8 @@ Sin consulta, se muestra la ayuda corta.
 - `sysinfo identity` — imprimir la identidad de la máquina y la versión
   del SO.
 - `sysinfo ps --all` — listar todos los procesos del sistema.
+- `sysinfo frames` — mostrar lo que cuestan los fotogramas del
+  escritorio.
 
 ## EXIT STATUS
 

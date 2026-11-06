@@ -25,6 +25,8 @@ use core::fmt::{self, Write as _};
 
 use tairix_appconf::{overwrite, Live, Registry};
 use tairix_colour::Rgb;
+use tairix_font::BitmapFont;
+use tairix_geometry::Scale;
 
 use crate::effects::{Effects, FULL, MIN_OPACITY};
 use crate::scheme::{ColorScheme, Scheme, ANSI_COLORS};
@@ -149,7 +151,7 @@ impl ProfileKey {
 /// The user's terminal profile.
 ///
 /// [`Profile::default`] is what an absent document implies: the system colour
-/// scheme, the default text size, and every screen effect off.
+/// scheme, the default text size and scrollback, and the default effects.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Profile {
     /// The colour scheme in force.
@@ -405,8 +407,8 @@ fn spell_ansi(ansi: &[Rgb; ANSI_COLORS], out: &mut String) -> fmt::Result {
     Ok(())
 }
 
-/// What replacing one [`Profile`] with another makes stale — the whole of it,
-/// and no more.
+/// What a change to a terminal's look makes stale — a replaced [`Profile`], or
+/// a face refitted to a changed desktop — the whole of it, and no more.
 ///
 /// A drag delivers one profile change per pointer-motion sample, so a surface
 /// that re-derived everything on each would make one slider cost a screenful
@@ -468,6 +470,14 @@ impl Invalidation {
             stale |= Self::SCROLLBACK;
         }
         Self(stale)
+    }
+
+    /// What drawing a screen in the face and at the scale `now`, rather than
+    /// `was`, makes stale: the cell geometry if either moved, and nothing
+    /// else.
+    #[must_use]
+    pub(crate) fn refitted(was: (BitmapFont, Scale), now: (BitmapFont, Scale)) -> Self {
+        Self(if was == now { 0 } else { Self::METRICS })
     }
 
     /// Whether anything at all is stale.

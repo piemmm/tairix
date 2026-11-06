@@ -13,7 +13,8 @@
 //!   refused delegation leaves it untouched,
 //! * [`TaskCapabilities::revoke`] only ever shrinks the effective set,
 //! * the registry's contents (membership, cardinality, per-task effective
-//!   set) match the model, and
+//!   set) match the model,
+//! * an insertion under a heap that refuses it partway changes nothing, and
 //! * a record a holder keeps is current exactly while the table still holds
 //!   that same record, so a thread's cached authority is never stale.
 //!
@@ -22,8 +23,9 @@
 //! naive reference that recomputes membership from each process's chain,
 //! asserting after every command that no emptied session is kept, every
 //! member is indexed under its session and each ancestor and nothing else,
-//! nothing is admitted into an ending session or past the depth bound, and
-//! every exit is retired exactly once.
+//! nothing is admitted into an ending session or past the depth bound, an
+//! admission the heap refuses its room changes nothing, and every exit is
+//! retired exactly once.
 //!
 //! Unlike the fuzz harnesses this generates structured command
 //! sequences and lets proptest **shrink** any counterexample.
@@ -45,8 +47,13 @@ use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
-use tairix_kernel_sec::{CapTable, ProcessId, TaskCapabilities, TaskId, UserId};
+use tairix_fuzzseed::meter::{refusing_after, Metered};
+use tairix_kernel_sec::{AdmitError, CapTable, ProcessId, TaskCapabilities, TaskId, UserId};
 use tairix_log::{Event, Sink};
+
+/// Metered, so a command can refuse the heap partway through a table change.
+#[global_allocator]
+static ALLOC: Metered = Metered;
 
 /// Sequences run by a plain `cargo test` (no budget set).
 const SMOKE_CASES: u32 = 256;
@@ -83,11 +90,13 @@ fn to_model(set: &CapabilitySet) -> BTreeSet<u16> {
 /// One operation on the registry under test.
 #[derive(Clone, Debug)]
 enum Cmd {
-    /// Derive a fresh task and insert it (replacing any prior record).
+    /// Derive a fresh task and insert it (replacing any prior record), with
+    /// every allocation past the first `granted` refused when that is set.
     Insert {
         task: u64,
         user_grant: Vec<u16>,
         manifest: Vec<u16>,
+        granted: Option<usize>,
     },
     Delegate {
         task: u64,
@@ -123,11 +132,18 @@ fn task_id() -> impl Strategy<Value = u64> {
 
 fn command() -> impl Strategy<Value = Cmd> {
     prop_oneof![
-        (task_id(), id_vec(), id_vec()).prop_map(|(task, user_grant, manifest)| Cmd::Insert {
-            task,
-            user_grant,
-            manifest,
-        }),
+        (
+            task_id(),
+            id_vec(),
+            id_vec(),
+            prop::option::weighted(0.5, 0usize..6)
+        )
+            .prop_map(|(task, user_grant, manifest, granted)| Cmd::Insert {
+                task,
+                user_grant,
+                manifest,
+                granted,
+            }),
         (task_id(), id_vec()).prop_map(|(task, requested)| Cmd::Delegate { task, requested }),
         (task_id(), 0u16..=CAP_MAX).prop_map(|(task, cap)| Cmd::Revoke { task, cap }),
         task_id().prop_map(|task| Cmd::Remove { task }),
@@ -177,26 +193,11 @@ fn check_captable(cmds: &[Cmd]) -> Result<(), TestCaseError> {
                 task,
                 user_grant,
                 manifest,
+                granted,
             } => {
-                let ug = build(user_grant);
-                let mf = build(manifest);
-                let caps = TaskCapabilities::derive(ProcessId(*task), UserId(1), ug, mf, &sink);
-                // Derive must intersect: effective ⊆ both inputs.
-                prop_assert!(caps.effective().is_subset_of(&ug));
-                prop_assert!(caps.effective().is_subset_of(&mf));
-                table.insert(caps);
-
-                let ug_m: BTreeSet<u16> = user_grant.iter().copied().collect();
-                let mf_m: BTreeSet<u16> = manifest.iter().copied().collect();
-                let eff_m: BTreeSet<u16> = ug_m.intersection(&mf_m).copied().collect();
-                model.insert(
-                    *task,
-                    TaskModel {
-                        user_grant: ug_m,
-                        manifest: mf_m,
-                        effective: eff_m,
-                    },
-                );
+                insert_into_both(
+                    &mut table, &mut model, *task, user_grant, manifest, *granted,
+                )?;
             }
             Cmd::Delegate { task, requested } => {
                 let req = build(requested);
@@ -275,6 +276,47 @@ fn check_captable(cmds: &[Cmd]) -> Result<(), TestCaseError> {
     Ok(())
 }
 
+/// Derive task `task` and insert it into the table and the model alike — or,
+/// when the heap refuses the table its room partway, into neither.
+fn insert_into_both(
+    table: &mut CapTable,
+    model: &mut BTreeMap<u64, TaskModel>,
+    task: u64,
+    user_grant: &[u16],
+    manifest: &[u16],
+    granted: Option<usize>,
+) -> Result<(), TestCaseError> {
+    let ug = build(user_grant);
+    let mf = build(manifest);
+    let caps = TaskCapabilities::derive(ProcessId(task), UserId(1), ug, mf, &NullSink)
+        .map_err(|error| TestCaseError::fail(format!("derive refused: {error:?}")))?;
+    // Derive must intersect: effective ⊆ both inputs.
+    prop_assert!(caps.effective().is_subset_of(&ug));
+    prop_assert!(caps.effective().is_subset_of(&mf));
+    let inserted = match granted {
+        Some(granted) => refusing_after(granted, || table.insert(caps)),
+        None => table.insert(caps),
+    };
+    match inserted {
+        Ok(_) => {}
+        // The checks after every command find the table as the model is.
+        Err(AdmitError::OutOfMemory) if granted.is_some() => return Ok(()),
+        Err(error) => return Err(TestCaseError::fail(format!("insert refused: {error:?}"))),
+    }
+    let ug_m: BTreeSet<u16> = user_grant.iter().copied().collect();
+    let mf_m: BTreeSet<u16> = manifest.iter().copied().collect();
+    let eff_m: BTreeSet<u16> = ug_m.intersection(&mf_m).copied().collect();
+    model.insert(
+        task,
+        TaskModel {
+            user_grant: ug_m,
+            manifest: mf_m,
+            effective: eff_m,
+        },
+    );
+    Ok(())
+}
+
 use tairix_abi::{ProcId, SpawnSession};
 use tairix_kernel_sec::{HeldExit, PlacementError, ROOT_SESSION};
 
@@ -293,11 +335,14 @@ enum Selector {
 /// One operation on the session bookkeeping under test.
 #[derive(Clone, Debug)]
 enum SessionCmd {
-    /// `spawner` (the kernel when `None`) admits `pid` as `selector` asks.
+    /// `spawner` (the kernel when `None`) admits `pid` as `selector` asks,
+    /// with every allocation past the first `granted` refused when that is
+    /// set.
     Admit {
         spawner: Option<u64>,
         pid: u64,
         selector: Selector,
+        granted: Option<usize>,
     },
     /// `pid` dies: its record goes, and its exit is held while it anchors a
     /// session with members.
@@ -319,13 +364,18 @@ fn selector() -> impl Strategy<Value = Selector> {
 
 fn session_command() -> impl Strategy<Value = SessionCmd> {
     prop_oneof![
-        3 => (prop::option::weighted(0.8, session_pid()), session_pid(), selector()).prop_map(
-            |(spawner, pid, selector)| SessionCmd::Admit {
+        3 => (
+            prop::option::weighted(0.8, session_pid()),
+            session_pid(),
+            selector(),
+            prop::option::weighted(0.25, 0usize..12),
+        )
+            .prop_map(|(spawner, pid, selector, granted)| SessionCmd::Admit {
                 spawner,
                 pid,
                 selector,
-            }
-        ),
+                granted,
+            }),
         1 => session_pid().prop_map(|pid| SessionCmd::Remove { pid }),
     ]
 }
@@ -352,7 +402,7 @@ struct SessionModel {
 
 /// Reference image of the whole bookkeeping, deliberately naive: membership
 /// is recomputed from each process's chain rather than indexed.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct World {
     /// Live process → (instance, session).
     procs: BTreeMap<u64, (ProcId, ProcId)>,
@@ -577,11 +627,12 @@ fn check_sessions(cmds: &[SessionCmd]) -> Result<(), TestCaseError> {
                 spawner,
                 pid,
                 selector,
+                granted,
             } => admit_in_both(
                 &mut table,
                 &mut world,
                 &mut ledger,
-                (spawner, pid, selector),
+                (spawner, pid, selector, granted),
             )?,
             SessionCmd::Remove { pid } => {
                 remove_from_both(&mut table, &mut world, &mut ledger, pid)?;
@@ -593,12 +644,13 @@ fn check_sessions(cmds: &[SessionCmd]) -> Result<(), TestCaseError> {
 }
 
 /// Admit `pid` for `spawner` into the table and the model alike, requiring
-/// the same answer from both.
+/// the same answer from both — save that a heap refusing the table its room
+/// partway leaves both as they were.
 fn admit_in_both(
     table: &mut CapTable,
     world: &mut World,
     ledger: &mut Ledger,
-    (spawner, pid, selector): (Option<u64>, u64, Selector),
+    (spawner, pid, selector, granted): (Option<u64>, u64, Selector, Option<usize>),
 ) -> Result<(), TestCaseError> {
     if ledger.held.contains(&pid) {
         return Ok(());
@@ -615,8 +667,9 @@ fn admit_in_both(
         ),
     };
     let spawner_id = spawner.map_or(ProcessId::KERNEL, ProcessId);
-    let expected = world.admit(spawner, pid, selector);
-    let instance = expected.unwrap_or_else(|_| instance_of(world.serial + 1));
+    let mut trial = world.clone();
+    let expected = trial.admit(spawner, pid, selector);
+    let instance = expected.unwrap_or_else(|_| instance_of(trial.serial + 1));
     let record = TaskCapabilities::derive(
         ProcessId(pid),
         UserId(1),
@@ -624,18 +677,36 @@ fn admit_in_both(
         CapabilitySet::empty(),
         &NullSink,
     )
+    .map_err(|error| TestCaseError::fail(format!("derive refused: {error:?}")))?
     .with_proc_id(instance);
     let placed = table
         .resolve_placement(spawner_id, request, false)
-        .and_then(|placement| table.admit(record, placement));
+        .map_err(AdmitError::Placement)
+        .and_then(|placement| match granted {
+            Some(granted) => refusing_after(granted, || table.admit(record, placement)),
+            None => table.admit(record, placement),
+        });
+    if granted.is_some() && placed == Err(AdmitError::OutOfMemory) {
+        // Placement is decided before anything is allocated, so only an
+        // admission the model makes can be refused its room.
+        prop_assert!(
+            expected.is_ok(),
+            "{:?} refused room for {} as {:?}",
+            spawner,
+            pid,
+            selector
+        );
+        return Ok(());
+    }
     prop_assert_eq!(
         placed,
-        expected.map(|_| ()),
+        expected.map(|_| ()).map_err(AdmitError::Placement),
         "{:?} admitting {} as {:?}",
         spawner,
         pid,
         selector
     );
+    *world = trial;
     if expected.is_ok() {
         ledger.issued.push(instance);
     }

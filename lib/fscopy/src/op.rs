@@ -8,7 +8,8 @@
 //! an operation carries are spellings for its reports. A copy gives what it
 //! makes the modes `cp` gives, a move keeps its source's mode and owner as
 //! `mv` does, and a move across volumes removes, once its copy is whole and on
-//! the medium, only what it copied while unchanged.
+//! the medium, only what it copied while unchanged. A directory meeting one of
+//! its name merges into it, a move on one volume by renaming what it holds.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -29,6 +30,12 @@ use crate::CHUNK_LEN;
 /// replace: a fresh name in the same directory (`tairix_rt::staging_name`).
 pub type Stager = fn(&str) -> Result<String, Errno>;
 
+/// A rename onto a free name, only of the node read.
+const FRESH: RenameFlags = RenameFlags::NO_REPLACE.union(RenameFlags::EXPECT_NODE);
+
+/// The removal of a directory everything in it left, only of the node read.
+const EMPTIED: UnlinkFlags = UnlinkFlags::DIRECTORY.union(UnlinkFlags::EXPECT_NODE);
+
 /// What a transfer does with its source.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Verb {
@@ -39,11 +46,12 @@ pub enum Verb {
     Move,
 }
 
-/// What a transfer does where the name a leaf takes is already taken.
+/// What a transfer does where a name it takes is already taken.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Taken {
-    /// Pause on a [`Conflict`]; a copy's directory meeting a directory merges
-    /// into it, a move's replaces it only while it is empty.
+    /// Pause on a [`Conflict`]: a leaf meeting a leaf, and the operation's own
+    /// directory meeting a directory, which [`Decision::Overwrite`] merges it
+    /// into; beneath that, a directory meeting one merges as its parent did.
     Ask,
     /// Fail and keep the name, whatever holds it: for a caller that chose
     /// free names.
@@ -84,14 +92,15 @@ impl<D: Dir> Named<D> {
     }
 }
 
-/// A leaf whose target name is taken, awaiting a [`Decision`].
+/// An entry whose target name is taken, awaiting a [`Decision`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Conflict {
-    /// The leaf being carried.
+    /// The entry being carried.
     pub source: String,
     /// The name it would take.
     pub target: String,
-    /// What that name holds: a file or a link.
+    /// What that name holds: a file or a link, or a directory the
+    /// operation's own directory meets.
     pub occupant: Kind,
 }
 
@@ -99,9 +108,9 @@ pub struct Conflict {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Decision {
     /// Remove what the name holds, only while it is what was asked about,
-    /// and go on.
+    /// and go on; a directory is merged into instead.
     Overwrite,
-    /// Leave the name and the leaf as they are, and go on.
+    /// Leave the name and the entry as they are, and go on.
     Skip,
     /// Stop, the directories made given their modes first.
     Cancel,
@@ -176,7 +185,7 @@ pub struct Report {
     /// the source renamed, each entry a removal took. A move's removal of what
     /// it copied counts nothing: its entries were counted as they were made.
     pub done: usize,
-    /// Leaves left as they were on a [`Decision::Skip`].
+    /// Entries left as they were on a [`Decision::Skip`].
     pub skipped: usize,
     /// Bytes of files accounted for: copied, or holes passed over.
     pub bytes: u64,
@@ -185,6 +194,21 @@ pub struct Report {
     /// What a removal kept: an entry put in its place since it was listed,
     /// or, after a move, one added or changed since it was copied.
     pub kept: Vec<String>,
+    /// What a transfer left under its target's name, once it settled it.
+    pub root: Option<Root>,
+}
+
+/// What a transfer left under its target's name.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Root {
+    /// It made what the name holds.
+    Created,
+    /// It replaced what the name held.
+    Replaced,
+    /// Its directory merged into the one the name held.
+    Merged,
+    /// It left the name as it was.
+    Skipped,
 }
 
 /// A copy, move or removal under way.
@@ -215,6 +239,8 @@ enum Stage<D: Dir> {
     Look(Plan<D>),
     /// A move's rename onto its target is next.
     Rename(Box<Moving<D>>),
+    /// A move on one volume merging into the directory holding its name.
+    Merge(Box<Merging<D>>),
     Copy(Box<Copying<D>>),
     /// The operation's own removal, or a move's of what it copied.
     Remove(Box<Removal<D>>),
@@ -347,6 +373,11 @@ impl<D: Dir> Operation<D> {
             }
             Stage::Look(plan) => look(source, plan),
             Stage::Rename(moving) => rename(source, moving, log),
+            Stage::Merge(mut merging) => match merging.unit(source, log) {
+                Ok(true) => Stage::Merge(merging),
+                Ok(false) => Stage::Ended(None),
+                Err(error) => Stage::Ended(Some(error)),
+            },
             Stage::Copy(mut copy) => match copy.unit(source, log, buf) {
                 Ok(Flow::More) => Stage::Copy(copy),
                 Ok(Flow::Whole) => (*copy).whole(),
@@ -407,18 +438,22 @@ fn replaced(listed: FileId, found: FileId) -> bool {
 }
 
 /// What one try of a move's rename came to.
-enum Renamed {
-    Done,
+enum Renamed<D> {
+    /// It is in place, as this says.
+    Done(Root),
     /// The volumes differ: the source is copied across instead.
     Across,
+    /// Its directory merges into this one, the name's, on its own volume.
+    Merge(D),
     Asked,
     Withheld,
 }
 
 fn rename<D: Dir>(source: &Named<D>, moving: Box<Moving<D>>, log: &mut Log) -> Stage<D> {
     match try_rename(source, &moving, log) {
-        Ok(Renamed::Done) => {
+        Ok(Renamed::Done(root)) => {
             log.report.done += 1;
+            log.report.root = Some(root);
             Stage::Ended(None)
         }
         Ok(Renamed::Across) => {
@@ -434,6 +469,16 @@ fn rename<D: Dir>(source: &Named<D>, moving: Box<Moving<D>>, log: &mut Log) -> S
                 found,
             )))
         }
+        Ok(Renamed::Merge(into)) => {
+            let Moving { target, found, .. } = *moving;
+            match Merging::new(source, found.id, (target.path, into)) {
+                Ok(merging) => {
+                    log.report.root = Some(Root::Merged);
+                    Stage::Merge(Box::new(merging))
+                }
+                Err(error) => Stage::Ended(Some(error)),
+            }
+        }
         Ok(Renamed::Asked) => Stage::Rename(moving),
         Ok(Renamed::Withheld) => Stage::Ended(None),
         Err(error) => Stage::Ended(Some(error)),
@@ -444,13 +489,23 @@ fn try_rename<D: Dir>(
     source: &Named<D>,
     moving: &Moving<D>,
     log: &mut Log,
-) -> Result<Renamed, OpError> {
+) -> Result<Renamed<D>, OpError> {
     let target = &moving.target;
     if let Some(question) = log.question.take() {
         match question.answer {
             Some(Decision::Skip) => {
                 log.report.skipped += 1;
+                log.report.root = Some(Root::Skipped);
                 return Ok(Renamed::Withheld);
+            }
+            Some(Decision::Overwrite) if question.conflict.occupant == Kind::Directory => {
+                match target.dir.open_dir(&target.name) {
+                    Ok(into) => return merge_into(into, question, (source, moving, log)),
+                    // Gone since it was asked about: the rename below takes the name.
+                    Err(Errno::NotFound) => {}
+                    Err(Errno::NotADirectory) => return taken_target(source, moving, log),
+                    Err(errno) => return Err(read(&target.path, errno)),
+                }
             }
             Some(Decision::Overwrite) => {
                 // One replacing rename: the name holds the occupant or the
@@ -468,7 +523,7 @@ fn try_rename<D: Dir>(
                             RenameFlags::EXPECT_NODE,
                             Some(&NodeExpect::of_node(moving.found.id)),
                         );
-                        return renamed_as(renamed, source, &target.dir);
+                        return renamed_as(renamed, source, &target.dir, Root::Replaced);
                     }
                     Ok(_) => return taken_target(source, moving, log),
                     Err(Errno::NotFound) => {}
@@ -486,23 +541,47 @@ fn try_rename<D: Dir>(
         &source.name,
         &target.dir,
         &target.name,
-        RenameFlags::NO_REPLACE.union(RenameFlags::EXPECT_NODE),
+        FRESH,
         Some(&expect),
     );
     if renamed == Err(Errno::AlreadyExists) {
         return taken_target(source, moving, log);
     }
-    renamed_as(renamed, source, &target.dir)
+    renamed_as(renamed, source, &target.dir, Root::Created)
 }
 
-/// What a move's rename answering `renamed` means.
+/// Merge the source's directory into `into`, the directory its name holds, as
+/// `question` was answered: by renames on its own volume, across volumes by
+/// the copy, the answer handed on to it; asked again where the name has come
+/// to hold another directory.
+fn merge_into<D: Dir>(
+    into: D,
+    question: Question,
+    (source, moving, log): (&Named<D>, &Moving<D>, &mut Log),
+) -> Result<Renamed<D>, OpError> {
+    let now = into
+        .stat()
+        .map_err(|errno| read(&moving.target.path, errno))?;
+    if now.id != question.occupant {
+        return taken_target(source, moving, log);
+    }
+    if now.id.volume == moving.found.id.volume {
+        return Ok(Renamed::Merge(into));
+    }
+    log.question = Some(question);
+    Ok(Renamed::Across)
+}
+
+/// What a move's rename answering `renamed` means, `root` what it leaves
+/// under the name once it is in place.
 fn renamed_as<D: Dir>(
     renamed: Result<(), Errno>,
     source: &Named<D>,
     into: &D,
-) -> Result<Renamed, OpError> {
+    root: Root,
+) -> Result<Renamed<D>, OpError> {
     match renamed {
-        Ok(()) => Ok(Renamed::Done),
+        Ok(()) => Ok(Renamed::Done(root)),
         Err(Errno::CrossVolume) => Ok(Renamed::Across),
         Err(Errno::Stale) => Err(OpError::Changed(source.path.clone())),
         // A rename's only range refusal: a directory into its own subtree.
@@ -513,14 +592,13 @@ fn renamed_as<D: Dir>(
     }
 }
 
-/// A move's target is taken: a leaf over a leaf is asked about, a directory
-/// over a directory left to the rename's own rule, which replaces only an
-/// empty one.
+/// A move's target is taken: a leaf meeting a leaf, or a directory meeting a
+/// directory, is asked about; one kind meeting the other is refused.
 fn taken_target<D: Dir>(
     source: &Named<D>,
     moving: &Moving<D>,
     log: &mut Log,
-) -> Result<Renamed, OpError> {
+) -> Result<Renamed<D>, OpError> {
     let target = &moving.target;
     if moving.taken == Taken::Refuse {
         return Err(OpError::Rename(source.path.clone(), Errno::AlreadyExists));
@@ -536,33 +614,20 @@ fn taken_target<D: Dir>(
         }
         Err(errno) => return Err(read(&target.path, errno)),
     };
-    let directory = moving.found.kind == FileKind::Directory;
-    match (directory, occupant.kind == FileKind::Directory) {
-        (false, false) => {
-            log.question = Some(Question {
-                conflict: Conflict {
-                    source: source.path.clone(),
-                    target: target.path.clone(),
-                    occupant: Kind::of(occupant.kind),
-                },
-                occupant: occupant.id,
-                answer: None,
-            });
-            Ok(Renamed::Asked)
-        }
-        (true, true) => {
-            let expect = NodeExpect::of_node(moving.found.id);
-            let renamed = source.dir.rename(
-                &source.name,
-                &target.dir,
-                &target.name,
-                RenameFlags::EXPECT_NODE,
-                Some(&expect),
-            );
-            renamed_as(renamed, source, &target.dir)
-        }
-        _ => Err(OpError::KindMismatch(target.path.clone())),
+    let kind = Kind::of(occupant.kind);
+    if (moving.found.kind == FileKind::Directory) != (kind == Kind::Directory) {
+        return Err(OpError::KindMismatch(target.path.clone()));
     }
+    log.question = Some(Question {
+        conflict: Conflict {
+            source: source.path.clone(),
+            target: target.path.clone(),
+            occupant: kind,
+        },
+        occupant: occupant.id,
+        answer: None,
+    });
+    Ok(Renamed::Asked)
 }
 
 /// Whether a unit left more of a stage to do.
@@ -609,6 +674,13 @@ struct Level<D> {
     volume: [u8; 16],
     /// What a move copied into it.
     copied: Vec<Copied>,
+}
+
+impl<D> Level<D> {
+    /// Whether it was there before the operation, so may hold names already.
+    fn existed(&self) -> bool {
+        matches!(self.leave, Leave::Merged)
+    }
 }
 
 /// What a target directory is given once its entries are in.
@@ -724,7 +796,6 @@ impl<D: Dir> Copying<D> {
         buf: &mut Vec<u8>,
     ) -> Result<Flow, OpError> {
         if !self.begun {
-            self.begun = true;
             return self.begin(source, log);
         }
         if self.leaf.is_some() {
@@ -736,9 +807,13 @@ impl<D: Dir> Copying<D> {
         Ok(Flow::Whole)
     }
 
+    /// Its first unit: the leaf opened, or the directory the source's lands
+    /// in made — or, where the name holds a directory already, asked about
+    /// and, on an overwrite, merged into, the walk held across the question.
     fn begin(&mut self, source: &Named<D>, log: &mut Log) -> Result<Flow, OpError> {
         let kind = Kind::of(self.found.kind);
         if kind != Kind::Directory {
+            self.begun = true;
             self.leaf = Some(open_leaf(
                 &source.dir,
                 (source.name.as_str(), source.path.as_str()),
@@ -747,32 +822,35 @@ impl<D: Dir> Copying<D> {
             )?);
             return Ok(Flow::More);
         }
-        let held = source
-            .dir
-            .open_dir(&source.name)
-            .map_err(|errno| opened(errno, &source.path))?;
-        if held.stat().map_err(|errno| read(&source.path, errno))?.id != self.found.id {
-            return Err(OpError::Changed(source.path.clone()));
+        let question = log.question.take();
+        if question
+            .as_ref()
+            .is_some_and(|asked| asked.answer == Some(Decision::Skip))
+        {
+            log.report.skipped += 1;
+            log.report.root = Some(Root::Skipped);
+            self.begun = true;
+            self.cursor = None;
+            return Ok(Flow::Whole);
         }
-        let cursor =
-            Cursor::<D, D>::new(held, &source.path).map_err(|errno| read(&source.path, errno))?;
+        let cursor = match self.cursor.take() {
+            Some(cursor) => cursor,
+            None => walk_of(source, self.found.id)?,
+        };
         let target = &self.target;
         let path = || target.path.clone();
-        let mut existing = probe_dir(&target.dir, &target.name, self.taken, &path)?;
-        match landing(cursor.root(), existing.as_ref().unwrap_or(&target.dir)) {
-            Ok(Landing::Apart) => {}
-            Ok(Landing::Same | Landing::Within) => return Err(OpError::IntoItself),
-            Err(Unresolved::Source(errno)) => return Err(read(&source.path, errno)),
-            Err(Unresolved::Target(errno)) => return Err(read(&target.path, errno)),
-        }
-        if self.verb == Verb::Move {
-            if let Some(empty) = existing.take() {
-                vacate(&target.dir, &target.name, &empty, &path)?;
-            }
-        }
+        let existing = probe_dir(&target.dir, &target.name, self.taken, &path)?
+            .map(|dir| merged(dir, &path))
+            .transpose()?;
+        let into = existing.as_ref().map_or(&target.dir, |level| &level.dir);
+        apart(
+            cursor.root(),
+            into,
+            (source.path.as_str(), target.path.as_str()),
+        )?;
         reserve(&mut self.levels)?;
         let (level, made) = match existing {
-            Some(dir) => (merged(dir, &path)?, false),
+            Some(level) => (level, false),
             None => make_dir(
                 &target.dir,
                 &target.name,
@@ -781,6 +859,24 @@ impl<D: Dir> Copying<D> {
                 &path,
             )?,
         };
+        let merging = question.is_some_and(|asked| {
+            asked.answer == Some(Decision::Overwrite) && asked.occupant == level.id
+        });
+        if !made && !merging {
+            log.question = Some(Question {
+                conflict: Conflict {
+                    source: source.path.clone(),
+                    target: path(),
+                    occupant: Kind::Directory,
+                },
+                occupant: level.id,
+                answer: None,
+            });
+            self.cursor = Some(cursor);
+            return Ok(Flow::More);
+        }
+        self.begun = true;
+        log.report.root = Some(if made { Root::Created } else { Root::Merged });
         let id = level.id;
         self.levels.push(level);
         if made {
@@ -893,19 +989,33 @@ impl<D: Dir> Copying<D> {
                 match make_leaf(&spot, current, (*verb, *taken, *stage), log)? {
                     Made::Filling | Made::Asked => None,
                     Made::Link => {
-                        Some((Kind::Link, finish_link(&spot, current, *verb, whole, log)?))
+                        let root = placed(current);
+                        let expect = finish_link(&spot, current, *verb, whole, log)?;
+                        Some((Kind::Link, expect, root))
                     }
-                    Made::Withheld => Some((current.from.kind(), None)),
+                    Made::Withheld => Some((current.from.kind(), None, Root::Skipped)),
                 }
             } else if fill_leaf(&spot, current, log, buf)? {
-                Some((Kind::File, finish_file(&spot, current, *verb, whole, log)?))
+                let root = placed(current);
+                Some((
+                    Kind::File,
+                    finish_file(&spot, current, *verb, whole, log)?,
+                    root,
+                ))
             } else {
                 None
             };
             match done {
                 None => LeafEnd::More,
-                Some(_) if *verb == Verb::Copy => LeafEnd::Done(None),
-                Some((kind, expect)) => LeafEnd::Done(Some(copied(spot.name, kind, expect)?)),
+                Some((kind, expect, root)) => {
+                    if whole {
+                        log.report.root = Some(root);
+                    }
+                    match *verb {
+                        Verb::Copy => LeafEnd::Done(None),
+                        Verb::Move => LeafEnd::Done(Some(copied(spot.name, kind, expect)?)),
+                    }
+                }
             }
         };
         let LeafEnd::Done(entry) = ended else {
@@ -1280,6 +1390,15 @@ fn finish_link<D: Dir>(
     Ok(stat.as_ref().map(NodeExpect::of))
 }
 
+/// What putting the leaf in hand in place leaves under its name.
+const fn placed<F>(leaf: &Leaf<F>) -> Root {
+    if leaf.placing.is_some() {
+        Root::Replaced
+    } else {
+        Root::Created
+    }
+}
+
 fn copied(name: &str, kind: Kind, expect: Option<NodeExpect>) -> Result<Copied, OpError> {
     Ok(Copied {
         name: concatenated(&[name]).ok_or_else(out_of_memory)?,
@@ -1312,18 +1431,16 @@ fn enter<D: Dir>(
     let target = || target_of(roots, path);
     reserve(levels)?;
     let (level, made) = {
-        let into = &levels
-            .last()
-            .ok_or_else(|| read(path, Errno::OutOfRange))?
-            .dir;
-        // A move's own directories are fresh: only a copy merges.
-        let existing = match verb {
-            Verb::Copy => probe_dir(into, &entry.name, taken, &target)?,
-            Verb::Move => None,
+        let parent = levels.last().ok_or_else(|| read(path, Errno::OutOfRange))?;
+        // A directory the operation made holds only what it put there.
+        let existing = if parent.existed() {
+            probe_dir(&parent.dir, &entry.name, taken, &target)?
+        } else {
+            None
         };
         match existing {
             Some(existing) => (merged(existing, &target)?, false),
-            None => make_dir(into, &entry.name, (verb, taken), &stat, &target)?,
+            None => make_dir(&parent.dir, &entry.name, (verb, taken), &stat, &target)?,
         }
     };
     let id = level.id;
@@ -1380,35 +1497,6 @@ fn leave<D: Dir>(
     Ok(())
 }
 
-/// Remove the empty directory `existing`, named `name` in `into`, a move's
-/// target, as a rename replaces one; one holding anything is refused.
-fn vacate<D: Dir>(
-    into: &D,
-    name: &str,
-    existing: &D,
-    target: &dyn Fn() -> String,
-) -> Result<(), OpError> {
-    let entries = existing
-        .entries()
-        .map_err(|errno| OpError::Read(target(), errno))?;
-    if !entries.is_empty() {
-        return Err(OpError::Rename(target(), Errno::NotEmpty));
-    }
-    let id = existing
-        .stat()
-        .map_err(|errno| OpError::Read(target(), errno))?
-        .id;
-    into.unlink(
-        name,
-        UnlinkFlags::DIRECTORY.union(UnlinkFlags::EXPECT_NODE),
-        Some(&NodeExpect::of_node(id)),
-    )
-    .map_err(|errno| match errno {
-        Errno::NotEmpty | Errno::Stale => OpError::Changed(target()),
-        errno => OpError::Remove(target(), errno),
-    })
-}
-
 /// The directory already at the target name a directory takes, merged into
 /// where `taken` asks; a leaf there is refused.
 fn probe_dir<D: Dir>(
@@ -1445,7 +1533,7 @@ fn make_dir<D: Dir>(
     let write = |errno| OpError::Write(target(), errno);
     let made = match into.make_dir(name, modes.asked()) {
         Ok(made) => made,
-        Err(Errno::AlreadyExists) if taken == Taken::Ask && verb == Verb::Copy => {
+        Err(Errno::AlreadyExists) if taken == Taken::Ask => {
             return match probe_dir(into, name, taken, target)? {
                 Some(existing) => Ok((merged(existing, target)?, false)),
                 None => Err(write(Errno::AlreadyExists)),
@@ -1586,11 +1674,10 @@ impl<D: Dir> Removal<D> {
             return Ok(false);
         };
         let levels = &mut self.levels;
-        let emptied = UnlinkFlags::DIRECTORY.union(UnlinkFlags::EXPECT_NODE);
         let (held, record) = match walk.reach() {
             None => {
                 if levels.pop().is_some_and(|root| root.whole) {
-                    let unlinked = source.dir.unlink(&source.name, emptied, Some(&expect));
+                    let unlinked = source.dir.unlink(&source.name, EMPTIED, Some(&expect));
                     gone(unlinked, &source.path, moved, levels, log)?;
                 }
                 return Ok(false);
@@ -1600,7 +1687,7 @@ impl<D: Dir> Removal<D> {
             }) => {
                 if levels.pop().is_some_and(|level| level.whole) {
                     let expect = NodeExpect::of_node(entry.id);
-                    let unlinked = dir.unlink(&entry.name, emptied, Some(&expect));
+                    let unlinked = dir.unlink(&entry.name, EMPTIED, Some(&expect));
                     gone(unlinked, path, moved, levels, log)?;
                 } else {
                     withhold(levels);
@@ -1756,6 +1843,259 @@ fn keep(path: &str, levels: &mut [Gone], log: &mut Log) -> Result<(), OpError> {
 fn withhold(levels: &mut [Gone]) {
     if let Some(level) = levels.last_mut() {
         level.whole = false;
+    }
+}
+
+/// A move on one volume into the directory holding its name: each entry
+/// renamed into place, a directory meeting a directory merged into in turn, a
+/// taken leaf asked about, and each source directory removed once everything
+/// in it went.
+struct Merging<D: Dir> {
+    /// The target's spelling, for reports.
+    target: String,
+    cursor: Cursor<D, D>,
+    /// The directory each level of the walk merges into, the root's first.
+    into: Vec<D>,
+    /// Whether everything in each level's source went.
+    levels: Vec<Gone>,
+    /// What the source's own removal expects.
+    expect: NodeExpect,
+}
+
+/// What meeting the entry the walk is at came to.
+enum Entered<D> {
+    /// It went, stays, or is asked about: the walk goes on past it.
+    Past,
+    /// A directory meeting a directory: the walk goes into both, the
+    /// source's first.
+    Into(D, D),
+}
+
+impl<D: Dir> Merging<D> {
+    /// Merge the source, the node `id`, into `into`, the directory the target
+    /// spelled `target` names.
+    fn new(source: &Named<D>, id: FileId, (target, into): (String, D)) -> Result<Self, OpError> {
+        let cursor = walk_of(source, id)?;
+        apart(
+            cursor.root(),
+            &into,
+            (source.path.as_str(), target.as_str()),
+        )?;
+        let mut held = Vec::new();
+        let mut levels = Vec::new();
+        reserve(&mut held)?;
+        reserve(&mut levels)?;
+        held.push(into);
+        levels.push(Gone {
+            whole: true,
+            record: None,
+        });
+        Ok(Self {
+            target,
+            cursor,
+            into: held,
+            levels,
+            expect: NodeExpect::of_node(id),
+        })
+    }
+
+    /// One unit, answering whether more remains.
+    fn unit(&mut self, source: &Named<D>, log: &mut Log) -> Result<bool, OpError> {
+        let Self {
+            target,
+            cursor,
+            into,
+            levels,
+            expect,
+        } = self;
+        let roots = (source.path.as_str(), target.as_str());
+        if let Some(question) = log.question.take() {
+            let walk = (&*cursor, into.as_slice(), levels.as_mut_slice());
+            answer_leaf(question, walk, roots, log)?;
+            return Ok(true);
+        }
+        let entered = match cursor.reach() {
+            None => {
+                if levels.pop().is_some_and(|root| root.whole) {
+                    let unlinked = source.dir.unlink(&source.name, EMPTIED, Some(&*expect));
+                    gone(unlinked, &source.path, true, levels, log)?;
+                }
+                return Ok(false);
+            }
+            Some(Reached::Left {
+                dir, entry, path, ..
+            }) => {
+                into.pop();
+                if levels.pop().is_some_and(|level| level.whole) {
+                    let emptied = NodeExpect::of_node(entry.id);
+                    let unlinked = dir.unlink(&entry.name, EMPTIED, Some(&emptied));
+                    gone(unlinked, path, true, levels, log)?;
+                } else {
+                    withhold(levels);
+                }
+                return Ok(true);
+            }
+            Some(Reached::Entry { dir, entry, path }) => {
+                let dest = into.last().ok_or_else(|| read(path, Errno::OutOfRange))?;
+                met(
+                    dir,
+                    entry,
+                    (path, roots),
+                    dest,
+                    (levels.as_mut_slice(), &mut *log),
+                )?
+            }
+        };
+        if let Entered::Into(held, merged_into) = entered {
+            reserve(into)?;
+            reserve(levels)?;
+            if let Err(errno) = cursor.descend_into(held) {
+                let path = cursor.entry().map_or("", |(_, _, path)| path);
+                return Err(read(path, errno));
+            }
+            into.push(merged_into);
+            levels.push(Gone {
+                whole: true,
+                record: None,
+            });
+        }
+        Ok(true)
+    }
+}
+
+/// Meet the entry `entry` of `dir`, at `path`, in `dest`: renamed in under
+/// its own name, or, the name taken, a leaf asked about and a directory
+/// meeting a directory gone into; one kind meeting the other is refused.
+fn met<D: Dir>(
+    dir: &D,
+    entry: &Entry,
+    (path, roots): (&str, (&str, &str)),
+    dest: &D,
+    (levels, log): (&mut [Gone], &mut Log),
+) -> Result<Entered<D>, OpError> {
+    let expect = NodeExpect::of_node(entry.id);
+    match dir.rename(&entry.name, dest, &entry.name, FRESH, Some(&expect)) {
+        Ok(()) => {
+            log.report.done += 1;
+            return Ok(Entered::Past);
+        }
+        Err(Errno::AlreadyExists) => {}
+        // Gone since it was listed: nothing of it is left to move.
+        Err(Errno::NotFound) => return Ok(Entered::Past),
+        Err(Errno::Stale) => return keep(path, levels, log).map(|()| Entered::Past),
+        // A rename's only range refusal: a directory into its own subtree.
+        Err(Errno::OutOfRange) => return Err(OpError::IntoItself),
+        Err(errno) => return Err(OpError::Rename(String::from(path), errno)),
+    }
+    let target = target_of(roots, path);
+    let occupant = match dest.open_node(&entry.name).and_then(|node| node.stat()) {
+        Ok(occupant) => occupant,
+        Err(Errno::NotFound) => {
+            return Err(OpError::Rename(String::from(path), Errno::AlreadyExists))
+        }
+        Err(errno) => return Err(OpError::Read(target, errno)),
+    };
+    let kind = Kind::of(occupant.kind);
+    match (entry.kind == Kind::Directory, kind == Kind::Directory) {
+        (true, true) => {
+            let held = dir
+                .open_dir(&entry.name)
+                .map_err(|errno| opened(errno, path))?;
+            if held.stat().map_err(|errno| read(path, errno))?.id != entry.id {
+                return keep(path, levels, log).map(|()| Entered::Past);
+            }
+            let into = dest
+                .open_dir(&entry.name)
+                .map_err(|errno| OpError::Read(target, errno))?;
+            Ok(Entered::Into(held, into))
+        }
+        (false, false) => {
+            log.question = Some(Question {
+                conflict: Conflict {
+                    source: String::from(path),
+                    target,
+                    occupant: kind,
+                },
+                occupant: occupant.id,
+                answer: None,
+            });
+            Ok(Entered::Past)
+        }
+        _ => Err(OpError::KindMismatch(target)),
+    }
+}
+
+/// Act on the answer to the question about the leaf the walk is at: renamed
+/// over the occupant only while it is the node asked about, met afresh where
+/// the name has come to hold another or none, or left on a skip.
+fn answer_leaf<D: Dir>(
+    question: Question,
+    (cursor, into, levels): (&Cursor<D, D>, &[D], &mut [Gone]),
+    roots: (&str, &str),
+    log: &mut Log,
+) -> Result<(), OpError> {
+    let (Some((dir, entry, path)), Some(dest)) = (cursor.entry(), into.last()) else {
+        return Err(read(&question.conflict.source, Errno::OutOfRange));
+    };
+    match question.answer {
+        Some(Decision::Skip) => {
+            log.report.skipped += 1;
+            withhold(levels);
+            Ok(())
+        }
+        Some(Decision::Overwrite) => {
+            match dest.open_node(&entry.name).and_then(|node| node.stat()) {
+                Ok(now) if now.id == question.occupant => {
+                    let expect = NodeExpect::of_node(entry.id);
+                    let renamed = dir.rename(
+                        &entry.name,
+                        dest,
+                        &entry.name,
+                        RenameFlags::EXPECT_NODE,
+                        Some(&expect),
+                    );
+                    match renamed {
+                        Ok(()) => {
+                            log.report.done += 1;
+                            Ok(())
+                        }
+                        Err(Errno::Stale) => keep(path, levels, log),
+                        Err(errno) => Err(OpError::Rename(String::from(path), errno)),
+                    }
+                }
+                Ok(_) | Err(Errno::NotFound) => {
+                    met(dir, entry, (path, roots), dest, (levels, log)).map(drop)
+                }
+                Err(errno) => Err(OpError::Read(question.conflict.target, errno)),
+            }
+        }
+        _ => {
+            log.question = Some(question);
+            Ok(())
+        }
+    }
+}
+
+/// The walk beneath the source's directory, held while it is the node `id`.
+fn walk_of<D: Dir>(source: &Named<D>, id: FileId) -> Result<Cursor<D, D>, OpError> {
+    let held = source
+        .dir
+        .open_dir(&source.name)
+        .map_err(|errno| opened(errno, &source.path))?;
+    if held.stat().map_err(|errno| read(&source.path, errno))?.id != id {
+        return Err(OpError::Changed(source.path.clone()));
+    }
+    Cursor::<D, D>::new(held, &source.path).map_err(|errno| read(&source.path, errno))
+}
+
+/// Refuse a directory landing in `into` that is the directory `from` or lies
+/// inside it, the two spelled as `paths` says for reports.
+fn apart<D: Dir>(from: &D, into: &D, (source, target): (&str, &str)) -> Result<(), OpError> {
+    match landing(from, into) {
+        Ok(Landing::Apart) => Ok(()),
+        Ok(Landing::Same | Landing::Within) => Err(OpError::IntoItself),
+        Err(Unresolved::Source(errno)) => Err(read(source, errno)),
+        Err(Unresolved::Target(errno)) => Err(read(target, errno)),
     }
 }
 

@@ -6,13 +6,16 @@ ext4 — so none carries its own copy (`plans/ARXFS-WRITEBACK.md`):
 - `DirtySet` — the open transaction's changed blocks keyed by address,
   with a per-operation savepoint so a failed operation undoes alone, and a
   drain in ascending coalesced runs. A block discarded mid-operation moves
-  into the savepoint rather than being copied.
+  into the savepoint rather than being copied. A change the heap refuses
+  answers `OutOfMemory` and changes nothing, and the undo asks the heap for
+  nothing.
 - `WritebackBound` — the RAM-derived, pressure-governed, machine-shared
   ceiling on what one volume's transaction may pin, published as a pinned
   ledger.
 - `CommitScheduler` — the dirty-age window by device class, reported to the
-  host's write-back timer so a quiet volume is still published, and whether
-  a deferred transaction will be.
+  host's write-back timer so a quiet volume is still published, whether a
+  deferred transaction will be, and a window run again after a refused
+  publication.
 - `RunWindow` — the fallible, zeroised staging buffer one coalesced device
   transfer of at most `RUN_BYTES` moves through, sized at once or grown to
   each run's need.

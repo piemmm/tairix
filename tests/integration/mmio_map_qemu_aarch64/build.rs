@@ -98,6 +98,7 @@ fn main() {
 /// source the test includes.
 fn write_program_fixture(path: &std::path::Path, rxe: &[u8]) {
     let mut out = tairix_itest_harness::program_fixture::fixture_header();
+    tairix_itest_harness::program_fixture::push_heap_region(&mut out);
     let _ = writeln!(
         out,
         "/// Grant handle the kernel mints and the program maps (build.rs)."

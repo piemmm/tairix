@@ -987,8 +987,7 @@ impl CommandBuffer {
         if regions.len() > MAX_COPY_REGIONS {
             return Err(Error::TooMany);
         }
-        let regions = tairix_util::fallible::collected(regions.len(), regions.iter().copied())
-            .ok_or(Error::OutOfMemory)?;
+        let regions = tairix_util::fallible::copied(regions).ok_or(Error::OutOfMemory)?;
         self.record(Command::Copy { src, dst, regions })
     }
 
@@ -1031,8 +1030,7 @@ impl CommandBuffer {
         if data.len() > MAX_UPDATE_BYTES {
             return Err(Error::TooMany);
         }
-        let bytes = tairix_util::fallible::collected(data.len(), data.iter().copied())
-            .ok_or(Error::OutOfMemory)?;
+        let bytes = tairix_util::fallible::copied(data).ok_or(Error::OutOfMemory)?;
         let charge = self
             .shared
             .model

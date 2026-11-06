@@ -1179,8 +1179,7 @@ fn read_picture(r: &mut Reader<'_>) -> Result<EditPicture, EditFailure> {
         if !rest.is_empty() {
             return Err(EditFailure::ReplyMalformed);
         }
-        let palette = tairix_util::fallible::collected(entries.len(), entries.iter().copied())
-            .ok_or(OUT_OF_MEMORY)?;
+        let palette = tairix_util::fallible::copied(entries).ok_or(OUT_OF_MEMORY)?;
         EditPixels::Indexed {
             depth,
             palette,
@@ -1202,10 +1201,7 @@ fn read_picture(r: &mut Reader<'_>) -> Result<EditPicture, EditFailure> {
                 if !SpritePalette::stores(raw) {
                     return Err(EditFailure::ReplyMalformed);
                 }
-                SpritePalette::Stored(
-                    tairix_util::fallible::collected(raw.len(), raw.iter().copied())
-                        .ok_or(OUT_OF_MEMORY)?,
-                )
+                SpritePalette::Stored(tairix_util::fallible::copied(raw).ok_or(OUT_OF_MEMORY)?)
             }
             2 => SpritePalette::Full,
             _ => return Err(EditFailure::ReplyMalformed),

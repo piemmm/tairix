@@ -117,7 +117,9 @@ into the thread.
 The thread is then admitted **parked**, its capability alias, stack span, and
 owned-stack record are installed under the returned id, and only then is it
 unparked — the discipline `spawn` established, so no CPU can dispatch a thread
-before the kernel knows what it is. Every failure path releases the reservation.
+before the kernel knows what it is. Every failure path releases the reservation;
+a capability table with no room for the alias refuses the thread with
+`OutOfMemory`.
 
 ### The per-thread thread pointer
 
@@ -174,6 +176,12 @@ instead of spinning.
   *then* reads the word; a wake landing in that window finds the waiter already
   registered. A word that no longer holds `expected` returns `WouldBlock` — the
   lost-wake-up race closing, not a failure — and the caller re-tests and retries.
+* **A wait the kernel cannot record is refused.** A key nobody waits on yet
+  needs a queue of its own; a heap that cannot give it one answers
+  `OutOfMemory` with nothing registered, so the caller never parks on a queue
+  no waker could find. The timed sweep and the nearest-deadline arming walk
+  the table without allocating, a bounded batch of queues per hold of a
+  bucket's lock.
 * **A wake is advisory.** One park returns `Ok(0)` and the caller re-tests its
   own condition, which is the contract `futex_wait` publishes; looping inside the
   kernel would hide a genuine wake from the userland lock that has to see it.
@@ -222,13 +230,15 @@ the first dying thread declared, and whichever thread lands last performs the
 teardown. Carrying the status through the deferral is what stops a sibling's
 synthesised `128 + n` from overwriting a real `exit` code.
 
-A group death is claimed against the threads the group table holds, under that
-table's read lock, and `thread_create` registers a new thread under its write
-lock only while its creator owes no death. So a thread created as its group is
-killed is either among the threads the kill claims, or finds its creator dying
-and is refused (`Errno::Interrupted`, which the kill landing at the call's
-boundary keeps from ever reaching user space) — never a thread that outlives
-the kill of the group it joined.
+A group death seals the group under the group table's read lock, then claims
+its threads a batch at a time under that lock, so a kill allocates nothing
+however large the group; `thread_create` registers a new thread under the
+write lock only while its group is unsealed and its creator owes no death. So
+a thread created as its group is killed is either among the threads the kill
+claims, or is refused (`Errno::Interrupted`) — never a thread that outlives
+the kill of the group it joined. A stop or a continue walks the group the
+same way, and every batch of either walk first checks that the number still
+names the process it began on.
 
 A thread's id outlives its task too. A kill removes a parked victim from the
 scheduler before any of this runs, and the leader's id is the process's number

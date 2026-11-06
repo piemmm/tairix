@@ -197,7 +197,7 @@ pub fn is_refresh_request<S: DirectorySource>(
 ) -> bool {
     match event {
         WindowEvent::Key {
-            key: KeyInput::Pressed { key, modifiers },
+            key: KeyInput::Pressed { key, modifiers, .. },
             ..
         } => {
             Accelerator::of(*key, *modifiers) == Some(Accelerator::Command(ToolbarCommand::Refresh))
@@ -368,7 +368,7 @@ pub fn apply_event<S: DirectorySource>(
     let frame = (window, scale, theme);
     match event {
         WindowEvent::Key {
-            key: KeyInput::Pressed { key, modifiers },
+            key: KeyInput::Pressed { key, modifiers, .. },
             ..
         } => {
             if matches!(key, KeyValue::Named(NamedKeyCode::Tab))

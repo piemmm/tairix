@@ -285,6 +285,7 @@ mod tests {
                 ctrl: true,
                 ..AbiModifiers::default()
             },
+            physical: tairix_abi::input::PhysicalKey::UNKNOWN,
         };
         channel.reader_mut().push(record.to_le_bytes().to_vec());
         let mut source = KeyboardInputSource::new(

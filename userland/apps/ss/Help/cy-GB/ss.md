@@ -33,6 +33,15 @@ Argreffir cyfeiriad heb ei bennu fel `*` a phorth heb ei rwymo fel `*`;
 rhoddir cyfeiriad IPv6 mewn cromfachau sgwâr fel bod y gwahanydd `:port`
 yn aros yn ddiamwys — nid oes angen cromfachau ar enw a ddatryswyd.
 
+Mae `-s` yn adrodd rhywbeth gwahanol i'r tabl: cyfansymiau amddiffyn
+cysylltiadau TCP y pentwr rhwydwaith ar draws y pentwr cyfan — ôl-groniad
+SYN, brêc di-gyflwr y cwcis SYN, y ciw derbyn, a'r ailosodiadau a
+anfonwyd. Mae pob un yn cynyddu'n undonog drwy gydol y cychwyn (mae soced
+sy'n gwrando ac sy'n cau yn plygu ei chyfansymiau i rai'r pentwr), felly
+mae llif SYN yn aros yn weladwy ar ôl i'r soced a dargedwyd ddiflannu.
+Mae'r un ffigurau i'w cael yn unigol fel `stats:net/stack/syn-cookies`
+a'i gymheiriaid.
+
 Dim ond opsiynau y mae `ss` yn eu derbyn. Nid yw gramadeg mynegiadau
 hidlo iproute2 (hidlau cyflwr a chyfeiriad) wedi'i weithredu, felly mae
 operand noeth yn wall defnydd yn hytrach nag ymresymiad a anwybyddir yn
@@ -65,13 +74,15 @@ dawel.
 - `ss -l` — y socedau sy'n gwrando yn unig.
 - `ss -tlp` — socedau TCP sy'n gwrando, gyda'r broses berchennog.
 - `ss -u4` — y socedau UDP dros IPv4.
+- `ss -s` — cyfansymiau amddiffyn cysylltiadau'r pentwr cyfan.
 - `ss -r` — yr un rhestr gyda'r cyfeiriadau wedi'u datrys yn enwau.
 
 ## EXIT STATUS
 
-- `0` — cynhyrchwyd y rhestr (neu ysgrifennwyd y cymorth byr).
-- `1` — gwrthodwyd yr ymholiad socedau neu methodd, neu ni ellid
-  ysgrifennu'r allbwn. Mae llinell orchymyn na ddeallwyd hefyd yn
+- `0` — cynhyrchwyd y rhestr neu'r crynodeb (neu ysgrifennwyd y cymorth
+  byr).
+- `1` — gwrthodwyd yr ymholiad socedau neu amddiffyn neu methodd, neu ni
+  ellid ysgrifennu'r allbwn. Mae llinell orchymyn na ddeallwyd hefyd yn
   gorffen â `1`.
 
 ## ENVIRONMENT

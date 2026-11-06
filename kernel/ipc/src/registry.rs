@@ -30,9 +30,11 @@
 //! kernel's `KernelState`, which composes the registry with the scheduler and
 //! the capability table under one lock-ordering policy (no global mutable
 //! static). Lookups borrow `&self` (so concurrent senders share a read
-//! guard); registration and unregistration take `&mut self`. The one lock it
-//! owns guards its index of the ports each sender uses, which a port updates
-//! under the read guard the first time a sender uses it.
+//! guard); registration and unregistration take `&mut self`, keeping the
+//! index of the ports each process bound. The one lock it owns guards its
+//! index of the ports each sender uses ([`SenderIndex`]), which a port
+//! updates under the read guard the first time a sender uses it; nothing but
+//! the heap is taken under it.
 //!
 //! # Fail closed
 //!
@@ -59,24 +61,21 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use core::ops::Bound;
 
 use tairix_abi::ipc::PortName;
 use tairix_abi::{Errno, ProcId};
-use tairix_collections::{HashMap, HashSet};
-use tairix_hash::{BuildFastHash, BuildSipHash13};
+use tairix_collections::OrderedMap;
 use tairix_log::{Field, Sink};
 use tairix_util::fmt::format_hex_u64;
 
 use crate::audit::{record, AuditEvent};
-use crate::lanes::RoomWake;
 use crate::port::{EndpointId, Port};
+use crate::senders::{EndpointSets, Endpoints, SenderIndex};
 
 /// A map from [`EndpointId`] to the kernel-owned [`Port`] bound to it,
-/// plus an optional well-known-name index over those endpoints and an index
-/// of the ports each sender uses.
+/// plus an optional well-known-name index over those endpoints and indexes
+/// of the ports each process bound and each sender uses.
 ///
 /// Construct with [`PortRegistry::new`]. The registry owns each
 /// registered [`Port`] for the lifetime of the binding; dropping the
@@ -96,73 +95,13 @@ use crate::port::{EndpointId, Port};
 /// [`Port::send`] is unchanged.
 #[derive(Default)]
 pub struct PortRegistry {
-    ports: BTreeMap<EndpointId, Port>,
-    names: BTreeMap<PortName, EndpointId>,
+    /// Fallible to grow, so a refused heap refuses the registration.
+    ports: OrderedMap<EndpointId, Port>,
+    names: OrderedMap<PortName, EndpointId>,
+    /// The ports each process bound, so its exit visits those and no other.
+    owners: EndpointSets<u64>,
     /// Shared with every port it holds; made with the first registration.
-    senders: Option<Arc<SenderIndex>>,
-}
-
-/// The ports each sending process instance has used, sent to or waited for
-/// room at, so its end visits those ports and no other.
-///
-/// A port notes an instance once, at its first use, and the note goes when the
-/// instance ends or the port does, so the index holds only pairs that both
-/// live. Each instance's ports are a set, so a port going forgets each of its
-/// senders at once, however many ports that sender uses. Instances are numbers
-/// the kernel mints, never chosen by a sender, so they hash fast and unkeyed;
-/// ports are numbers their binders choose, so the sets hash keyed.
-pub(crate) struct SenderIndex {
-    used: tairix_sync::SpinLock<HashMap<ProcId, Used, BuildFastHash>>,
-    /// What every instance's set of ports hashes under.
-    keyed: BuildSipHash13,
-}
-
-/// The ports one sending instance has used.
-type Used = HashSet<EndpointId, BuildSipHash13>;
-
-impl SenderIndex {
-    /// Under the published key; a boot that never got one hashes unkeyed, as
-    /// the futex table does.
-    fn new() -> Self {
-        Self {
-            used: tairix_sync::SpinLock::new(HashMap::with_hasher(BuildFastHash::new())),
-            keyed: BuildSipHash13::keyed().unwrap_or(BuildSipHash13::UNKEYED),
-        }
-    }
-
-    /// Note that `sender` has used `port`.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::OutOfMemory`] when the note cannot be kept; nothing is noted.
-    pub(crate) fn note(&self, sender: ProcId, port: EndpointId) -> Result<(), Errno> {
-        let mut used = self.used.lock();
-        let noted = if let Some(ports) = used.get_mut(&sender) {
-            ports.try_insert(port).is_ok()
-        } else {
-            let mut ports = Used::with_hasher(self.keyed);
-            ports.try_insert(port).is_ok() && used.try_insert(sender, ports).is_ok()
-        };
-        noted.then_some(()).ok_or(Errno::OutOfMemory)
-    }
-
-    /// Forget `sender`'s use of `port`, which is going, handing back an
-    /// emptied set for the caller to drop outside the lock.
-    pub(crate) fn forget(&self, sender: ProcId, port: EndpointId) -> Option<Used> {
-        let mut used = self.used.lock();
-        let ports = used.get_mut(&sender)?;
-        ports.remove(&port);
-        if ports.is_empty() {
-            used.remove(&sender)
-        } else {
-            None
-        }
-    }
-
-    /// Every port `sender`, which has ended, used.
-    fn take(&self, sender: ProcId) -> Option<Used> {
-        self.used.lock().remove(&sender)
-    }
+    senders: Option<Arc<SenderIndex<ProcId>>>,
 }
 
 impl PortRegistry {
@@ -170,13 +109,15 @@ impl PortRegistry {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            ports: BTreeMap::new(),
-            names: BTreeMap::new(),
+            ports: OrderedMap::new(),
+            names: OrderedMap::new(),
+            owners: EndpointSets::new(),
             senders: None,
         }
     }
 
-    /// Bind `port` into the registry under its own [`Port::id`].
+    /// Bind `port` into the registry under its own [`Port::id`], noting it as
+    /// its owner's.
     ///
     /// # Errors
     ///
@@ -185,8 +126,9 @@ impl PortRegistry {
     /// untouched and the *supplied* `port` is handed back whole, for the
     /// caller to drop once it has released the registry; the kernel never
     /// silently overwrites a live endpoint. [`Errno::OutOfMemory`], the port
-    /// handed back the same way, when the first registration cannot make the
-    /// index of the ports each sender uses.
+    /// handed back the same way, when the registry cannot hold the binding or
+    /// note the port in its indexes: of the ports each sender uses, made with
+    /// the first registration, and of the ports each process bound.
     ///
     /// On refusal exactly one [`AuditEvent::PortRegisterDenied`] is
     /// emitted; on success exactly one [`AuditEvent::PortRegistered`].
@@ -212,16 +154,20 @@ impl PortRegistry {
             record(audit, AuditEvent::PortRegisterDenied, &[id_field]);
             return Err((port, Errno::OutOfMemory));
         };
+        if self.ports.try_reserve(1).is_err() || self.owners.insert(port.owner(), id).is_err() {
+            record(audit, AuditEvent::PortRegisterDenied, &[id_field]);
+            return Err((port, Errno::OutOfMemory));
+        }
         port.note_senders_in(senders);
-
-        self.ports.insert(id, port);
+        // Reserved above, so this cannot fail.
+        let _ = self.ports.try_insert(id, port);
         record(audit, AuditEvent::PortRegistered, &[id_field]);
         Ok(id)
     }
 
     /// The index every registered port notes its senders in, made with the
     /// first registration.
-    fn sender_index(&mut self) -> Option<Arc<SenderIndex>> {
+    fn sender_index(&mut self) -> Option<Arc<SenderIndex<ProcId>>> {
         if self.senders.is_none() {
             self.senders = Arc::try_new(SenderIndex::new()).ok();
         }
@@ -255,17 +201,23 @@ impl PortRegistry {
     /// each emitting one [`AuditEvent::PortNameWithdrawn`] — so no name
     /// can outlive the endpoint it pointed at; one
     /// [`AuditEvent::PortUnregistered`] then records the binding's
-    /// removal.
+    /// removal. The set of its owner's ports the unbinding emptied is handed
+    /// back, for the caller to drop once it has released the registry.
     ///
     /// # Errors
     ///
     /// Returns [`Errno::NotFound`] if `id` is not bound; nothing is
     /// changed and no event is emitted (an unregister miss is not a
     /// security decision, mirroring [`Self::lookup`]).
-    pub fn unregister<S: Sink + ?Sized>(&mut self, id: EndpointId, audit: &S) -> Result<(), Errno> {
+    pub fn unregister<S: Sink + ?Sized>(
+        &mut self,
+        id: EndpointId,
+        audit: &S,
+    ) -> Result<Option<Endpoints>, Errno> {
         let Some(port) = self.ports.remove(&id) else {
             return Err(Errno::NotFound);
         };
+        let emptied = self.owners.remove(port.owner(), id);
 
         // Every name that resolved to this endpoint goes before the port
         // does, so a resolution can never dangle; withdrawn in place, so a
@@ -299,37 +251,19 @@ impl PortRegistry {
                 value: tairix_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
             }],
         );
-        Ok(())
+        Ok(emptied)
     }
 
-    /// Tear down the port with the smallest id past `after` that `owner`
-    /// owns — the task-exit reclamation path, a port a call — handing back
-    /// its id and the senders parked for room at it, or [`None`] once `owner`
-    /// owns no port past `after`.
-    ///
-    /// The port is [`unregistered`](Self::unregister) exactly as an explicit
-    /// unregister would be: its names are withdrawn first, the port is
-    /// destroyed (racing senders fail closed), and the audit trail records
-    /// every step, so a task that exits, faults, or is killed never leaves a
-    /// mailbox behind for a later task to squat on or drain. Its senders are
-    /// handed back rather than woken because waking takes scheduler locks,
-    /// which never nest inside the registry: the caller wakes them once it has
-    /// released the registry, then passes the id back for the next port.
-    pub fn teardown_next_owned_by<S: Sink + ?Sized>(
-        &mut self,
-        owner: u64,
-        after: Option<EndpointId>,
-        audit: &S,
-    ) -> Option<(EndpointId, RoomWake<ProcId>)> {
-        let lower = after.map_or(Bound::Unbounded, Bound::Excluded);
-        let (id, woken) = self
-            .ports
-            .range((lower, Bound::Unbounded))
-            .find(|(_, port)| port.owner() == owner)
-            .map(|(&id, port)| (id, port.room_wake_everyone()))?;
-        // Found in the map just now, so the unregister cannot miss.
-        let _ = self.unregister(id, audit);
-        Some((id, woken))
+    /// Take out the ports `owner` bound — the task-exit reclamation path — for
+    /// the caller to [`unregister`](Self::unregister) one at a time, so a task
+    /// that exits, faults, or is killed never leaves a mailbox behind for a
+    /// later task to squat on or drain. Each port's senders parked for room
+    /// ([`Port::room_wake_everyone`]) are woken once the registry is released,
+    /// since waking takes scheduler locks, which never nest inside it. A port
+    /// `owner` never bound is not visited.
+    #[must_use]
+    pub fn take_owned_by(&mut self, owner: u64) -> Option<Endpoints> {
+        self.owners.take(owner)
     }
 
     /// Note at every port the process instance `sender` used that it has
@@ -360,6 +294,7 @@ impl PortRegistry {
     ///   re-points a live name.
     /// * [`Errno::NotFound`] if `id` is not a currently-registered
     ///   endpoint, so a name can never resolve to a non-existent port.
+    /// * [`Errno::OutOfMemory`] if the name index cannot hold the binding.
     ///
     /// On refusal exactly one [`AuditEvent::PortNamePublishDenied`] is
     /// emitted; on success exactly one [`AuditEvent::PortNamePublished`].
@@ -390,7 +325,10 @@ impl PortRegistry {
             return Err(Errno::NotFound);
         }
 
-        self.names.insert(name, id);
+        if self.names.try_insert(name, id).is_err() {
+            record(audit, AuditEvent::PortNamePublishDenied, &fields);
+            return Err(Errno::OutOfMemory);
+        }
         record(audit, AuditEvent::PortNamePublished, &fields);
         Ok(())
     }
@@ -485,7 +423,7 @@ mod tests {
     fn task_with(task_id: u64, caps: &[CapabilityId]) -> TaskCapabilities {
         let sink = RecordingSink::new();
         let set = caps_of(caps);
-        TaskCapabilities::derive(ProcessId(task_id), UserId(1), set, set, &sink)
+        TaskCapabilities::derive(ProcessId(task_id), UserId(1), set, set, &sink).expect("derived")
     }
 
     fn open_port(id: u64, sink: &RecordingSink) -> Port {
@@ -503,6 +441,41 @@ mod tests {
         .expect("unrestricted port creation succeeds")
     }
 
+    /// A port `owner` binds at `id`.
+    fn owned_port(id: u64, owner: u64, sink: &RecordingSink) -> Port {
+        Port::create(
+            EndpointId(id),
+            &task_with(owner, &[]),
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            64,
+            4,
+            tairix_abi::RLIMIT_INFINITY,
+            sink,
+        )
+        .expect("bound")
+    }
+
+    /// An exit takes the ports its process bound and no other, however many
+    /// are bound.
+    #[test]
+    fn an_exit_visits_only_the_ports_its_process_bound() {
+        let sink = RecordingSink::new();
+        let mut reg = PortRegistry::new();
+        for id in 0x100..0x140 {
+            let owner = if id % 32 == 5 { 5 } else { 6 };
+            reg.register(owned_port(id, owner, &sink), &sink)
+                .map_err(|(_, e)| e)
+                .expect("registered");
+        }
+        let taken = reg.take_owned_by(5).expect("owner 5 bound ports");
+        let mut torn: Vec<EndpointId> = taken.iter().copied().collect();
+        torn.sort_unstable();
+        assert_eq!(torn, [EndpointId(0x105), EndpointId(0x125)], "two of 64");
+        assert!(reg.take_owned_by(5).is_none(), "taken once");
+        assert_eq!(reg.len(), 64, "taking unbinds nothing");
+    }
+
     /// Tearing an owner's ports down wakes exactly the senders waiting at
     /// those ports, never one waiting anywhere else: an exit is not a
     /// broadcast.
@@ -511,18 +484,7 @@ mod tests {
         let sink = RecordingSink::new();
         let mut reg = PortRegistry::new();
         for (id, owner) in [(0x10, 5), (0x11, 6)] {
-            let port = Port::create(
-                EndpointId(id),
-                &task_with(owner, &[]),
-                CapabilitySet::empty(),
-                CapabilitySet::empty(),
-                64,
-                4,
-                tairix_abi::RLIMIT_INFINITY,
-                &sink,
-            )
-            .expect("bound");
-            reg.register(port, &sink)
+            reg.register(owned_port(id, owner, &sink), &sink)
                 .map_err(|(_, e)| e)
                 .expect("registered");
         }
@@ -533,67 +495,40 @@ mod tests {
                 .watch_room(task, sender)
                 .expect("recorded");
         }
-        let (torn, woken) = reg
-            .teardown_next_owned_by(5, None, &sink)
-            .expect("owner 5 owns a port");
-        assert_eq!(torn, EndpointId(0x10));
+        let taken = reg.take_owned_by(5).expect("owner 5 bound a port");
+        let torn: Vec<EndpointId> = taken.iter().copied().collect();
+        assert_eq!(torn, [EndpointId(0x10)]);
+        let woken = reg
+            .lookup(EndpointId(0x10))
+            .expect("registered")
+            .room_wake_everyone();
+        reg.unregister(EndpointId(0x10), &sink).expect("unbound");
         assert_eq!(woken.tasks().collect::<Vec<u64>>(), [0xA]);
-        assert!(reg.teardown_next_owned_by(5, Some(torn), &sink).is_none());
-        assert!(!reg.contains(EndpointId(0x10)));
         let kept: Vec<u64> = reg
             .lookup(EndpointId(0x11))
             .expect("still registered")
-            .room_wake_for(sender)
+            .room_wake_everyone()
             .tasks()
             .collect();
         assert_eq!(kept, [0xB], "the other port's waiter is untouched");
     }
 
-    /// An owner's ports are torn down a port a call, each handing back its
-    /// waiting senders once the port is gone, so its caller can wake them
-    /// with the registry's lock released.
+    /// A port leaves its owner's set as it is unregistered, so an exit takes
+    /// only the ports still bound.
     #[test]
-    fn teardown_hands_back_each_ports_waiters_once_the_port_is_gone() {
+    fn an_unregistered_port_leaves_its_owners_set() {
         let sink = RecordingSink::new();
         let mut reg = PortRegistry::new();
         for (id, owner) in [(0x20, 5), (0x21, 6), (0x22, 5)] {
-            let port = Port::create(
-                EndpointId(id),
-                &task_with(owner, &[]),
-                CapabilitySet::empty(),
-                CapabilitySet::empty(),
-                64,
-                4,
-                tairix_abi::RLIMIT_INFINITY,
-                &sink,
-            )
-            .expect("bound");
-            reg.register(port, &sink)
+            reg.register(owned_port(id, owner, &sink), &sink)
                 .map_err(|(_, e)| e)
                 .expect("registered");
         }
-        let sender = ProcId::from_raw([9; tairix_abi::PROC_ID_LEN]);
-        for (id, task) in [(0x20, 0xA), (0x21, 0xB), (0x22, 0xC)] {
-            reg.lookup(EndpointId(id))
-                .expect("registered")
-                .watch_room(task, sender)
-                .expect("recorded");
-        }
-        let mut torn = Vec::new();
-        let mut after = None;
-        while let Some((id, woken)) = reg.teardown_next_owned_by(5, after, &sink) {
-            assert!(!reg.contains(id), "handed back once its port is gone");
-            torn.push((id, woken.tasks().collect::<Vec<u64>>()));
-            after = Some(id);
-        }
-        assert_eq!(
-            torn,
-            [
-                (EndpointId(0x20), alloc::vec![0xA]),
-                (EndpointId(0x22), alloc::vec![0xC]),
-            ]
-        );
-        assert!(reg.contains(EndpointId(0x21)), "another owner's port stays");
+        reg.unregister(EndpointId(0x20), &sink).expect("unbound");
+        let left: Vec<EndpointId> = reg.take_owned_by(5).into_iter().flatten().collect();
+        assert_eq!(left, [EndpointId(0x22)]);
+        reg.unregister(EndpointId(0x21), &sink).expect("unbound");
+        assert!(reg.take_owned_by(6).is_none(), "its set went");
     }
 
     /// A sender's end visits the ports it used and no other: a port notes a
@@ -613,7 +548,7 @@ mod tests {
         for id in [0x30, 0x32, 0x32] {
             reg.lookup(EndpointId(id))
                 .expect("registered")
-                .send(&sender, b"m", tairix_abi::RLIMIT_INFINITY, &sink)
+                .send(&sender, 0, b"m", tairix_abi::RLIMIT_INFINITY, &sink)
                 .expect("sent");
         }
         reg.lookup(EndpointId(0x33))
@@ -621,12 +556,9 @@ mod tests {
             .watch_room(0xA, instance)
             .expect("recorded");
         let used = |reg: &PortRegistry| {
-            let mut ports: Vec<EndpointId> = Vec::new();
-            if let Some(index) = &reg.senders {
-                ports.extend(index.used.lock().get(&instance).into_iter().flatten());
-            }
-            ports.sort_unstable();
-            ports
+            reg.senders
+                .as_ref()
+                .map_or_else(Vec::new, |index| index.uses(instance))
         };
         assert_eq!(
             used(&reg),
@@ -649,7 +581,7 @@ mod tests {
         assert!(reg
             .lookup(EndpointId(0x33))
             .expect("registered")
-            .room_wake_for(instance)
+            .room_wake_everyone()
             .is_empty());
     }
 
@@ -711,10 +643,10 @@ mod tests {
         let sender = task_with(2, &[]);
 
         let port = reg.lookup(EndpointId(5)).expect("bound port is found");
-        port.send(&sender, b"ping", tairix_abi::RLIMIT_INFINITY, &sink)
+        port.send(&sender, 0, b"ping", tairix_abi::RLIMIT_INFINITY, &sink)
             .expect("send succeeds");
 
-        let msg = reg
+        let (msg, _woken) = reg
             .lookup(EndpointId(5))
             .and_then(Port::recv)
             .expect("the delivered message is reachable through the registry");

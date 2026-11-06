@@ -749,7 +749,8 @@ mod tests {
         });
         frame[super::HEADER_LEN] = 0;
         assert_eq!(PinboardRequest::from_bytes(&frame), Err(Errno::OutOfRange));
-        frame[super::HEADER_LEN] = 14;
+        // The codes run from one, so the first past the vocabulary is unknown.
+        frame[super::HEADER_LEN] = u8::try_from(SoundEvent::ALL.len() + 1).expect("small");
         assert_eq!(PinboardRequest::from_bytes(&frame), Err(Errno::OutOfRange));
     }
 

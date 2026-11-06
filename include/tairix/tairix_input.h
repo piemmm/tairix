@@ -39,13 +39,14 @@
 #define TAIRIX_TOUCH_CONTACT_TOUCHING ((uint8_t)1u)
 #define TAIRIX_TOUCH_CONTACT_PALM ((uint8_t)2u)
 
-/* Record `kind` codes: pointer moves/clicks/scroll then key down/up (uint16_t). */
+/* Record `kind` codes: pointer moves/clicks/scroll, key down/up, modifier change (uint16_t). */
 #define TAIRIX_INPUT_KIND_MOVED_BY ((uint16_t)0u)
 #define TAIRIX_INPUT_KIND_PRESSED ((uint16_t)1u)
 #define TAIRIX_INPUT_KIND_RELEASED ((uint16_t)2u)
 #define TAIRIX_INPUT_KIND_SCROLLED ((uint16_t)3u)
 #define TAIRIX_INPUT_KIND_KEY_PRESSED ((uint16_t)1u)
 #define TAIRIX_INPUT_KIND_KEY_RELEASED ((uint16_t)2u)
+#define TAIRIX_INPUT_KIND_MODIFIERS_CHANGED ((uint16_t)3u)
 
 /* `button` (motion=none, else a button) and keyboard `key_class` codes (uint16_t). */
 #define TAIRIX_INPUT_BUTTON_NONE ((uint16_t)0u)
@@ -89,5 +90,24 @@
 #define TAIRIX_KEY_F10 ((uint16_t)24u)
 #define TAIRIX_KEY_F11 ((uint16_t)25u)
 #define TAIRIX_KEY_F12 ((uint16_t)26u)
+
+/* Physical keys: a key record's `physical` field (bytes 18..20) is its HID Keyboard/Keypad-page usage; these are the ones the ABI names (uint16_t). */
+#define TAIRIX_PHYSICAL_KEY_UNKNOWN ((uint16_t)0x0u)
+#define TAIRIX_PHYSICAL_KEY_A ((uint16_t)0x4u)
+#define TAIRIX_PHYSICAL_KEY_DIGIT_3 ((uint16_t)0x20u)
+#define TAIRIX_PHYSICAL_KEY_DIGIT_4 ((uint16_t)0x21u)
+#define TAIRIX_PHYSICAL_KEY_DIGIT_5 ((uint16_t)0x22u)
+#define TAIRIX_PHYSICAL_KEY_ESCAPE ((uint16_t)0x29u)
+#define TAIRIX_PHYSICAL_KEY_SPACE ((uint16_t)0x2cu)
+#define TAIRIX_PHYSICAL_KEY_CAPS_LOCK ((uint16_t)0x39u)
+#define TAIRIX_PHYSICAL_KEY_NUM_LOCK ((uint16_t)0x53u)
+#define TAIRIX_PHYSICAL_KEY_LEFT_CTRL ((uint16_t)0xe0u)
+#define TAIRIX_PHYSICAL_KEY_LEFT_SHIFT ((uint16_t)0xe1u)
+#define TAIRIX_PHYSICAL_KEY_LEFT_ALT ((uint16_t)0xe2u)
+#define TAIRIX_PHYSICAL_KEY_LEFT_GUI ((uint16_t)0xe3u)
+#define TAIRIX_PHYSICAL_KEY_RIGHT_CTRL ((uint16_t)0xe4u)
+#define TAIRIX_PHYSICAL_KEY_RIGHT_SHIFT ((uint16_t)0xe5u)
+#define TAIRIX_PHYSICAL_KEY_RIGHT_ALT ((uint16_t)0xe6u)
+#define TAIRIX_PHYSICAL_KEY_RIGHT_GUI ((uint16_t)0xe7u)
 
 #endif /* TAIRIX_INPUT_H */

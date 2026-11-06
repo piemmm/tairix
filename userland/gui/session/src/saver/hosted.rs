@@ -30,8 +30,8 @@ use tairix_sandbox::{SandboxSession, SessionBounds, SessionDescriptors, SessionT
 use tairix_wallpaper::TaskNames;
 use tairix_wm::{Compositor, WindowId};
 
-use super::keep::Picture;
 use super::talk::{Fault, FeedHolder, Said, Shown, Talk};
+use crate::keep::Picture;
 
 /// The memory a saver's region is held in.
 pub trait SaverMemory {

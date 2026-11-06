@@ -43,10 +43,10 @@
 //!
 //! Everything a user can change about their terminal — the colour scheme
 //! (including one of their own), the text size, translucency, backdrop blur,
-//! and the scan-line / fuzz / phosphor / wobble effects — is one
-//! [`Profile`], stored as a plain text document under their own home and
-//! edited through the window menu and the [`Settings`] sheet. The staged
-//! design is `plans/GUI-TERMINAL.md`.
+//! and the scan-line / glow / fuzz / phosphor / wobble effects — is one
+//! [`Profile`], kept in the app-data store where no other application can
+//! reach it, and edited through the window menu and the [`Settings`] sheet.
+//! The staged design is `plans/GUI-TERMINAL.md`.
 //!
 //! # The shell seam
 //!
@@ -81,6 +81,8 @@
 //! * [`scheme`] — the colour schemes a screen is painted with.
 //! * [`profile`] — the per-user settings document and its store.
 //! * [`layout`] — the screen grid, the text size that fits it, and the window.
+//! * [`look`] — the [`Look`] each window is drawn with, and what a profile or
+//!   desktop change makes of it.
 //! * [`effects`] — the screen-effect strengths and the passes they resolve to.
 //! * [`pipeline`] — the [`Pipeline`] that draws the passes, retained and
 //!   brought up to date over what changed.
@@ -109,6 +111,7 @@ pub mod appbar;
 pub mod effects;
 pub mod grid;
 pub mod layout;
+pub mod look;
 pub mod menu;
 pub mod parser;
 pub mod pipeline;
@@ -126,6 +129,7 @@ pub use appbar::BarCommand;
 pub use effects::{EffectKey, Effects, Phase};
 pub use grid::Grid;
 pub use layout::{COLS, ROWS};
+pub use look::Look;
 pub use menu::Command;
 pub use parser::Parser;
 pub use pipeline::Pipeline;

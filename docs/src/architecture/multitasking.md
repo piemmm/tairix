@@ -201,9 +201,8 @@ A stack that cannot be *allocated* fails the spawn closed the same way:
 nor the `BoxStack` fallback can supply one, and admission reports
 `SchedError::OutOfMemory` (`AdmitError::OutOfMemory` / `Errno::OutOfMemory`
 at the syscall boundary) rather than letting the allocator abort the
-kernel. The tens-of-kilobytes stack is the admission allocation that
-actually fails under pressure; the smaller ones around it still abort
-through the global allocator's handler, tracked as D122.
+kernel. The box each kind of stack is handed out in is allocated fallibly
+too, and a refused one gives its window run back as it drops.
 
 ## Bringing EL0 into the model
 

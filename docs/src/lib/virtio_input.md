@@ -72,22 +72,24 @@ in [`tairix-hid`](./hid.md) rather than the USB HID class drivers. The thin
   `BIND_KEYS` match key is built from — the single source of truth the device
   logic and the bind table both depend on (`AGENTS.md` §2.2 / §18.3).
 - **`VirtioKeyboardConsole`** (`console` module): the keyboard producer half.
-  `feed` turns each decoded `evdev`-keycode `Key` edge into the
-  `tairix_abi::input::KeyInput` record a driver injects through `key_inject`,
-  tracking the held modifiers (each of the eight modifier keys independently,
-  collapsing left/right pairs) and the caps-/num-lock toggles and resolving the
-  US layout. The `evdev`-keycode→`Key` table is `evdev`-specific, but the
-  `Key`→record map is the shared `tairix_keymap::key_input` — the one definition
-  the `lib/hid` USB console producer reaches too (`AGENTS.md` §2.2). An unknown
-  keycode or non-key event produces no record (fail closed, `AGENTS.md` §2.9).
+  `feed` names each decoded `evdev`-keycode `Key` edge's physical key through
+  one table — the HID usage a USB keyboard reports for the same key — and
+  feeds it to `tairix_input::KeyboardState`, which holds the modifiers (each of
+  the eight modifier keys independently, collapsing left/right pairs) and the
+  caps and num locks and resolves the US layout: the one definition the
+  `lib/hid` console producer runs too (`AGENTS.md` §2.2). The
+  `tairix_abi::input::KeyInput` record a driver injects through `key_inject`
+  is built by the shared `tairix_keymap::key_record`, carrying the physical key.
+  An unknown keycode or non-key event produces no record (fail closed,
+  `AGENTS.md` §2.9).
 
 ## Layering and platform-neutrality
 
 `lib/virtio_input` depends only on other `lib/*` crates — `lib/abi` (the
 `Input`/`InputEvent`/`BufferClass`/`KeyInput` surface), `lib/virtio` (the
 bus-agnostic `Transport`, `SplitQueue`, DMA slabs, and `VirtioHost`), and
-`lib/input` + `lib/keymap` (the `Key` vocabulary and the shared `Key`→record
-map the console producer uses) — so it satisfies §17.4
+`lib/input` + `lib/keymap` (the keyboard state and US layout, and the shared
+`Key`→record map the console producer uses) — so it satisfies §17.4
 and names no board, PCI, or SoC detail (`AGENTS.md` §2.20). It allocates every
 device-visible buffer through the `VirtioHost` DMA seam and reaches the device
 only through the `Transport` seam, holding no ambient authority (`AGENTS.md`
@@ -116,9 +118,11 @@ only through the `Transport` seam, holding no ambient authority (`AGENTS.md`
   cannot be made;
 - teardown: a drop resets the device before its memory goes, and withholds it
   from a device whose reset does not confirm;
-- `console`: `evdev`-keycode resolution (letters, shifted digits, named and
-  keypad keys, function keys), caps/num-lock toggling, left/right modifier
-  collapsing, and the fail-closed unknown-keycode / non-key / key-repeat cases.
+- `console`: every keycode the table names typing its US character or naming
+  its key, the physical key each record carries under any modifiers, a table
+  naming exactly the keys the console reads, caps/num-lock toggling,
+  left/right modifier collapsing, and the fail-closed unknown-keycode /
+  non-key / key-repeat cases.
 
 `tests/fuzz_virtio_input.rs` (`cargo xtask fuzz`) plays a hostile device —
 configuration answers of full bitmaps, random ranges and noise at any stated

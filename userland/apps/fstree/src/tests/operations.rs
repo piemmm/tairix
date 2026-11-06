@@ -391,6 +391,31 @@ fn a_merging_directory_copy_asks_per_conflicting_file() {
     assert_eq!(fs.bytes("/dst/src/two.txt"), Some(vec![b'x'; 4]));
 }
 
+/// A directory moved onto one of its name merges into it, asking only about
+/// the taken files inside; a skipped one stays where it was.
+#[test]
+fn a_merging_directory_move_asks_per_conflicting_file() {
+    let mut fs = TreeFs::new(
+        Tree::new()
+            .file("/src/one.txt", &[b'x'; 3])
+            .file("/src/two.txt", &[b'x'; 4])
+            .file("/dst/src/one.txt", &[b'x'; 9]),
+    );
+    let mut m = session(&mut fs);
+    key(&mut m, &mut fs, &Event::Down); // onto dst
+    key(&mut m, &mut fs, &Event::Down); // onto src
+    key(&mut m, &mut fs, &Event::Char('m'));
+    type_text(&mut m, &mut fs, "/dst");
+    key(&mut m, &mut fs, &Event::Enter);
+    assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
+    key(&mut m, &mut fs, &Event::Char('s'));
+    assert!(m.prompt.is_none());
+    assert_eq!(fs.bytes("/dst/src/one.txt"), Some(vec![b'x'; 9]));
+    assert_eq!(fs.bytes("/dst/src/two.txt"), Some(vec![b'x'; 4]));
+    assert_eq!(fs.bytes("/src/one.txt"), Some(vec![b'x'; 3]));
+    assert_eq!(fs.bytes("/src/two.txt"), None);
+}
+
 #[test]
 fn the_overwrite_question_appears_on_the_message_line() {
     let mut fs = TreeFs::new(tree());

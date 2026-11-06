@@ -6,6 +6,8 @@ use alloc::vec::Vec;
 use tairix_abi::Errno;
 use tairix_appdata::fake::FakeService;
 use tairix_appdata::Settings;
+use tairix_font::BitmapFont;
+use tairix_geometry::Scale;
 
 use crate::effects::{Effects, FULL, MIN_OPACITY};
 use crate::scheme::{Scheme, ANSI_COLORS};
@@ -652,6 +654,22 @@ fn custom_colours_stale_the_paint_only_while_the_custom_scheme_is_in_force() {
 fn an_unchanged_profile_stales_nothing() {
     let profile = Profile::default();
     assert!(!Invalidation::between(&profile, &profile).any());
+}
+
+/// A desktop change owes a screen its geometry only when it moved the face or
+/// the scale, and nothing else at all.
+#[test]
+fn a_refit_stales_only_the_geometry_and_only_when_it_moved() {
+    let face = BitmapFont::monospace(14);
+    let was = (face, Scale::ONE);
+    assert!(!Invalidation::refitted(was, was).any());
+    let dense = Scale::from_percent(200).expect("a valid scale");
+    for now in [(BitmapFont::monospace(16), Scale::ONE), (face, dense)] {
+        let changed = Invalidation::refitted(was, now);
+        assert!(changed.metrics() && changed.repaints());
+        assert!(!changed.painted() && !changed.passes());
+        assert!(!changed.blur() && !changed.scrollback());
+    }
 }
 
 // --- One profile's settings taken into another -------------------------------

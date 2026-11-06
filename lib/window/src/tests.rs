@@ -16,7 +16,7 @@ use tairix_abi::desktop::{Appearance, DesktopInfo};
 use tairix_abi::driver::display::{
     DamageList, DamageRect, DisplayFormat, DisplayMode, RefreshRate,
 };
-use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
+use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PhysicalKey, PointerButtonCode};
 use tairix_abi::origin::{AppIdentity, ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
@@ -34,6 +34,8 @@ use tairix_abi::{BundleId, CapabilityId, Errno, PublisherId};
 use tairix_display::{FrameRegion, ShmMapper};
 use tairix_geometry::{Point, Rect, Region, Scale};
 
+use tairix_abi::window_ipc::{LandingName, LandingOutcome, LandingStep, DROP_LANDINGS_MAX};
+
 use crate::client::{
     pointer_point, present_damage, present_damage_list, presented_damage, retained_damage,
     DeclaredTip, EventDrain, EventError, EventSource, Owed, Parked, PostedRequest, Refused,
@@ -44,7 +46,7 @@ use crate::desktop::Desktop;
 use crate::server::{
     client_frame_budget_bytes, Activation, AlertOpen, AuthoriseFor, CallerIdentity, ClientRegion,
     CursorSetName, DialogSpec, DragConclusion, DragReport, EventSink, FrameHost, HandOverDesk,
-    LayerSpec, OpenEntry, PickedFile, PopupSpec, PreviewSize, ToolSpec, TransientSpec,
+    LayerSpec, OpenEntry, PickedFile, PopupSpec, PreviewSize, Served, ToolSpec, TransientSpec,
     WallpaperName, WindowHost, WindowServer, WindowSizeState, WindowSizing, WINDOW_REPLY_MAX,
 };
 
@@ -105,6 +107,9 @@ const TICKET_B: u64 = 2;
 const TICKET_KERNEL: u64 = 8;
 /// A ticket whose attestation fails.
 const TICKET_UNATTESTED: u64 = 9;
+/// Where the tickets the loopback mints, one per call, begin: clear of every
+/// fixed ticket above.
+const MINTED_TICKETS: u64 = 0x1_0000;
 
 /// The event endpoint client A names in its creates.
 const EVENTS_A: u64 = 0xA000;
@@ -185,6 +190,9 @@ struct MockIdentity {
     /// The application each ticket is attested as running; absent means it
     /// runs no verified bundle.
     apps: Vec<(u64, AppIdentity)>,
+    /// The call being served: the ticket minted for it, and the fixed ticket
+    /// naming the identity it is attested as.
+    minted: Option<(u64, u64)>,
 }
 
 fn proc_id(fill: u8) -> ProcId {
@@ -198,13 +206,23 @@ impl MockIdentity {
             layer_holders: tickets.to_vec(),
             attest_error: None,
             apps: Vec::new(),
+            minted: None,
+        }
+    }
+
+    /// The fixed ticket `ticket` attests: the identity a minted ticket was
+    /// served under, or the ticket itself.
+    fn attested(&self, ticket: u64) -> u64 {
+        match self.minted {
+            Some((minted, identity)) if minted == ticket => identity,
+            _ => ticket,
         }
     }
 }
 
 impl CallerIdentity for MockIdentity {
     fn caller(&mut self, ticket: u64) -> Result<ProcId, Errno> {
-        match ticket {
+        match self.attested(ticket) {
             TICKET_A => Ok(proc_id(0xA1)),
             TICKET_B => Ok(proc_id(0xB2)),
             TICKET_KERNEL => Ok(ProcId::KERNEL),
@@ -213,7 +231,7 @@ impl CallerIdentity for MockIdentity {
     }
 
     fn caller_mailbox(&mut self, ticket: u64) -> Result<u64, Errno> {
-        match ticket {
+        match self.attested(ticket) {
             TICKET_A => Ok(EVENTS_A),
             TICKET_B => Ok(EVENTS_B),
             TICKET_KERNEL => Err(Errno::PermissionDenied),
@@ -225,6 +243,7 @@ impl CallerIdentity for MockIdentity {
         if let Some(err) = self.attest_error {
             return Err(err);
         }
+        let ticket = self.attested(ticket);
         Ok(cap == CapabilityId::DESKTOP_LAYER && self.layer_holders.contains(&ticket))
     }
 
@@ -232,6 +251,7 @@ impl CallerIdentity for MockIdentity {
         if let Some(err) = self.attest_error {
             return Err(err);
         }
+        let ticket = self.attested(ticket);
         Ok(self
             .apps
             .iter()
@@ -245,8 +265,8 @@ impl CallerIdentity for MockIdentity {
 struct RecordingHost {
     opened: Vec<(ProcId, u64, DisplayMode, String, WindowSizing)>,
     popups: Vec<(u64, u64, i32, i32, DisplayMode)>,
-    /// Every tool window opened: its id, parent, carry and title.
-    tools: Vec<(u64, u64, Option<u32>, String)>,
+    /// Every tool window opened: its id, parent, carry, title and sizing.
+    tools: Vec<(u64, u64, Option<u32>, String, WindowSizing)>,
     /// Every dialog opened: its id, owner, whether it earned the keyboard,
     /// how it holds its owner, and its title.
     dialogs: Vec<(u64, u64, bool, DialogModality, String)>,
@@ -264,6 +284,10 @@ struct RecordingHost {
     resized: Vec<(u64, DisplayMode)>,
     closed: Vec<u64>,
     picks: Vec<(u64, PickPurpose)>,
+    /// Whether each pick the host was asked for earned the keyboard, and
+    /// every pick the engine refused past a bound, as `(caller, window)`.
+    pick_focus: Vec<bool>,
+    picks_refused: Vec<(ProcId, u64)>,
     menu_opens: Vec<(u64, u64, WindowRegion, AppMenu)>,
     tooltips: Vec<(u64, WindowRegion, String)>,
     refuse_tooltip: Option<Errno>,
@@ -293,6 +317,8 @@ struct RecordingHost {
     drags: Vec<(u64, String)>,
     refuse_drag: Option<Errno>,
     verdicts: Vec<(u64, u32, Option<DropOperation>)>,
+    /// Every step of a drop onto the desktop the engine passed on.
+    landings: Vec<(u64, u32, LandingStep)>,
     /// Every save offer answered, and every folder a dropped save was given,
     /// with the attested caller that gave it.
     save_answers: Vec<(u64, u32, bool)>,
@@ -361,6 +387,8 @@ impl Default for RecordingHost {
             resized: Vec::new(),
             closed: Vec::new(),
             picks: Vec::new(),
+            pick_focus: Vec::new(),
+            picks_refused: Vec::new(),
             wallpapers: Vec::new(),
             renders: Vec::new(),
             render_callers: Vec::new(),
@@ -398,6 +426,7 @@ impl Default for RecordingHost {
             drags: Vec::new(),
             refuse_drag: None,
             verdicts: Vec::new(),
+            landings: Vec::new(),
             save_answers: Vec::new(),
             save_folders: Vec::new(),
             refuse_menu_open: None,
@@ -526,6 +555,7 @@ impl WindowHost for RecordingHost {
             spec.transient.parent_window_id,
             spec.carry,
             String::from(spec.title.as_str()),
+            spec.sizing,
         ));
         Ok(())
     }
@@ -589,12 +619,22 @@ impl WindowHost for RecordingHost {
         self.closed.push(window_id);
     }
 
-    fn pick_requested(&mut self, window_id: u64, purpose: &PickPurpose) -> Result<(), Errno> {
+    fn pick_requested(
+        &mut self,
+        window_id: u64,
+        purpose: &PickPurpose,
+        focus: bool,
+    ) -> Result<(), Errno> {
         if let Some(err) = self.refuse_pick {
             return Err(err);
         }
         self.picks.push((window_id, *purpose));
+        self.pick_focus.push(focus);
         Ok(())
+    }
+
+    fn pick_refused(&mut self, caller: ProcId, window_id: u64, _reason: &'static str) {
+        self.picks_refused.push((caller, window_id));
     }
 
     fn drag_requested(&mut self, window_id: u64, items: &DragItems) -> Result<(), Errno> {
@@ -614,6 +654,10 @@ impl WindowHost for RecordingHost {
     ) -> Result<(), Errno> {
         self.verdicts.push((window_id, serial, verdict));
         Ok(())
+    }
+
+    fn drop_landing(&mut self, window_id: u64, serial: u32, step: &LandingStep) {
+        self.landings.push((window_id, serial, *step));
     }
 
     fn save_offer_answered(
@@ -899,7 +943,12 @@ impl WindowHost for MinimalHost {
 
     fn window_closed(&mut self, _window_id: u64) {}
 
-    fn pick_requested(&mut self, _window_id: u64, _purpose: &PickPurpose) -> Result<(), Errno> {
+    fn pick_requested(
+        &mut self,
+        _window_id: u64,
+        _purpose: &PickPurpose,
+        _focus: bool,
+    ) -> Result<(), Errno> {
         Ok(())
     }
 
@@ -946,8 +995,12 @@ struct Loopback {
     /// Where an event the engine sends while serving a request lands — the
     /// hand-over's wake is the one that does.
     sink: QueueSink,
-    /// The ticket the "kernel" attaches to the next in-flight call.
+    /// The fixed ticket naming who the "kernel" attests the next call as
+    /// coming from.
     ticket: u64,
+    /// The ticket the next call is served under: minted per call, as the
+    /// kernel's are, so a held answer can be told from the next.
+    next_call: u64,
     /// Every frame the client put on the wire, in order.
     sent: alloc::vec::Vec<alloc::vec::Vec<u8>>,
     /// Whether a posted request waits to be served until
@@ -960,7 +1013,8 @@ struct Loopback {
     /// The ticket the next post is given.
     next_post: u64,
     /// The depth this client's place at the endpoint holds, counting what is
-    /// posted and what is answered and not yet reaped, as the kernel does.
+    /// posted, what the session holds unanswered, and what is answered and not
+    /// yet reaped.
     lane: Option<usize>,
     /// Whether presented frames wait to be shown until [`Loopback::latch`],
     /// as they do between the desktop's frames, rather than being shown as
@@ -970,6 +1024,14 @@ struct Loopback {
     awaited: alloc::vec::Vec<u64>,
     /// How many times a client asked after a posted request's reply.
     reaps: usize,
+    /// Posts whose answer the engine withheld: the ticket each was served
+    /// under, and its post ticket.
+    withheld: alloc::vec::Vec<(u64, u64)>,
+    /// Answers the engine sent that no post was waiting on, by the ticket the
+    /// call was served under.
+    called: alloc::vec::Vec<(u64, alloc::vec::Vec<u8>)>,
+    /// How many desktop frames have been latched.
+    latches: usize,
 }
 
 impl Loopback {
@@ -984,6 +1046,7 @@ impl Loopback {
             identity: MockIdentity::holding_layer(&[TICKET_A, TICKET_B]),
             sink: QueueSink::default(),
             ticket: TICKET_A,
+            next_call: MINTED_TICKETS,
             sent: alloc::vec::Vec::new(),
             holds_posts: false,
             unserved: VecDeque::new(),
@@ -993,30 +1056,87 @@ impl Loopback {
             holds_frames: false,
             awaited: alloc::vec::Vec::new(),
             reaps: 0,
+            withheld: alloc::vec::Vec::new(),
+            called: alloc::vec::Vec::new(),
+            latches: 0,
         }))
     }
 
     /// Show every frame presented since the last, as the desktop's next frame
-    /// does.
+    /// does, and send the answers that released.
     fn latch(&mut self) {
+        self.latches += 1;
         self.server.latch(&mut self.host);
+        self.collect_answers();
     }
 
-    /// Serve one request frame, answering the reply.
-    fn serve_frame(&mut self, request: &[u8]) -> alloc::vec::Vec<u8> {
+    /// Serve one request frame under a ticket minted for it, as the kernel
+    /// mints one per call: the ticket, and the reply unless the engine
+    /// withheld it.
+    fn serve_request(&mut self, request: &[u8]) -> (u64, Option<alloc::vec::Vec<u8>>) {
+        let ticket = self.next_call;
+        self.next_call += 1;
+        self.identity.minted = Some((ticket, self.ticket));
         let mut frame = [0u8; WINDOW_REPLY_MAX];
-        let len = self.server.serve(
+        let served = self.server.serve(
             &mut self.host,
             &mut self.sink,
             &mut self.identity,
-            self.ticket,
+            ticket,
             request,
             &mut frame,
         );
-        if !self.holds_frames {
+        self.identity.minted = None;
+        let reply = match served {
+            Served::Reply(len) => Some(frame[..len].to_vec()),
+            Served::Withheld => None,
+        };
+        (ticket, reply)
+    }
+
+    /// What the session does once a request is served: show what it presented
+    /// unless frames wait for the desktop's next, and send every answer due.
+    fn after_serve(&mut self) {
+        if self.holds_frames {
+            self.collect_answers();
+        } else {
             self.latch();
         }
-        frame[..len].to_vec()
+    }
+
+    /// Take every answer the engine has due, each to the post it answers or,
+    /// for a call, kept by the ticket it was served under.
+    fn collect_answers(&mut self) {
+        let mut sent = alloc::vec::Vec::new();
+        self.server.send_answers(|ticket, reply| {
+            sent.push((ticket, reply.to_vec()));
+        });
+        for (ticket, reply) in sent {
+            match self
+                .withheld
+                .iter()
+                .position(|&(served, _)| served == ticket)
+            {
+                Some(index) => {
+                    let (_, post) = self.withheld.swap_remove(index);
+                    self.answered.push((post, reply));
+                }
+                None => self.called.push((ticket, reply)),
+            }
+        }
+    }
+
+    /// The answer to the call served as `ticket`, which the engine withheld:
+    /// the desktop's next frame releases it, so one latch runs, and an answer
+    /// even that leaves held is a stall.
+    fn held_answer(&mut self, ticket: u64) -> alloc::vec::Vec<u8> {
+        if !self.called.iter().any(|(at, _)| *at == ticket) {
+            self.latch();
+        }
+        let Some(index) = self.called.iter().position(|(at, _)| *at == ticket) else {
+            panic!("a call stalled: the desktop's frame did not answer it");
+        };
+        self.called.swap_remove(index).1
     }
 
     /// Serve every posted request still waiting, oldest first, as the session
@@ -1031,12 +1151,16 @@ impl Loopback {
         while self.serve_next().is_some_and(|served| served != ticket) {}
     }
 
-    /// Serve the oldest posted request waiting, answering its ticket.
+    /// Serve the oldest posted request waiting, answering its post ticket.
     fn serve_next(&mut self) -> Option<u64> {
-        let (ticket, request) = self.unserved.pop_front()?;
-        let reply = self.serve_frame(&request);
-        self.answered.push((ticket, reply));
-        Some(ticket)
+        let (post, request) = self.unserved.pop_front()?;
+        let (ticket, reply) = self.serve_request(&request);
+        match reply {
+            Some(reply) => self.answered.push((post, reply)),
+            None => self.withheld.push((ticket, post)),
+        }
+        self.after_serve();
+        Some(post)
     }
 }
 
@@ -1090,6 +1214,24 @@ fn request_frame(request: &WindowRequest) -> alloc::vec::Vec<u8> {
     out
 }
 
+/// The length of the reply `served` answered at once.
+fn replied(served: Served) -> usize {
+    match served {
+        Served::Reply(len) => len,
+        Served::Withheld => panic!("only a present replacing an unshown frame is withheld"),
+    }
+}
+
+/// A present of frame `frame_index` of `window_id` declaring the whole
+/// surface, as the wire carries it.
+fn present_frame(window_id: u64, frame_index: u32) -> alloc::vec::Vec<u8> {
+    request_frame(&WindowRequest::Present {
+        window_id,
+        frame_index,
+        damage: full_damage(),
+    })
+}
+
 impl WindowTransport for Rc<RefCell<Loopback>> {
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
         let inner = &mut *self.borrow_mut();
@@ -1097,7 +1239,9 @@ impl WindowTransport for Rc<RefCell<Loopback>> {
         // The endpoint serves a client's requests in order, so whatever it
         // posted earlier is served before this call.
         inner.serve_posted();
-        let frame = inner.serve_frame(request);
+        let (ticket, served) = inner.serve_request(request);
+        inner.after_serve();
+        let frame = served.unwrap_or_else(|| inner.held_answer(ticket));
         let out = reply.get_mut(..frame.len()).ok_or(Errno::BufferTooSmall)?;
         out.copy_from_slice(&frame);
         Ok(frame.len())
@@ -1105,10 +1249,8 @@ impl WindowTransport for Rc<RefCell<Loopback>> {
 
     fn post(&mut self, request: &[u8]) -> Result<u64, Errno> {
         let inner = &mut *self.borrow_mut();
-        if inner
-            .lane
-            .is_some_and(|depth| inner.unserved.len() + inner.answered.len() >= depth)
-        {
+        let held = inner.unserved.len() + inner.answered.len() + inner.withheld.len();
+        if inner.lane.is_some_and(|depth| held >= depth) {
             return Err(Errno::WouldBlock);
         }
         inner.sent.push(request.to_vec());
@@ -1125,7 +1267,9 @@ impl WindowTransport for Rc<RefCell<Loopback>> {
         let inner = &mut *self.borrow_mut();
         inner.reaps += 1;
         let Some(index) = inner.answered.iter().position(|(at, _)| *at == ticket) else {
-            return if inner.unserved.iter().any(|(at, _)| *at == ticket) {
+            return if inner.unserved.iter().any(|(at, _)| *at == ticket)
+                || inner.withheld.iter().any(|&(_, post)| post == ticket)
+            {
                 Ok(None)
             } else {
                 Err(Errno::NotFound)
@@ -1144,6 +1288,15 @@ impl WindowTransport for Rc<RefCell<Loopback>> {
             // A waited-on post is reached however busy the session is, after
             // those posted before it and before any posted since.
             inner.serve_through(ticket);
+            // A held answer comes with the desktop's next frame; one that even
+            // that leaves held is a stall.
+            if inner.withheld.iter().any(|&(_, post)| post == ticket) {
+                inner.latch();
+                assert!(
+                    inner.withheld.iter().all(|&(_, post)| post != ticket),
+                    "a present stalled: the desktop's frame did not answer it"
+                );
+            }
         }
         self.reap(ticket, reply)?.ok_or(Errno::NotFound)
     }
@@ -2296,7 +2449,7 @@ fn a_dead_clients_parent_and_popups_are_all_torn_down() {
     assert!(inner.host.closed.contains(&popup));
 }
 
-/// A tool window of `parent` granted as `shm`, carried at `carry`.
+/// A fixed tool window of `parent` granted as `shm`, carried at `carry`.
 fn tool_spec(parent_window_id: u64, shm: u64, carry: Option<u32>) -> ToolSpec {
     ToolSpec {
         transient: transient_spec(parent_window_id, shm, EVENTS_A),
@@ -2304,8 +2457,17 @@ fn tool_spec(parent_window_id: u64, shm: u64, carry: Option<u32>) -> ToolSpec {
         offset_y: 9,
         carry,
         title: tairix_abi::window_ipc::WindowTitle::new("Tools").expect("a title"),
+        sizing: WindowSizing::Fixed,
     }
 }
+
+/// The range a resizable tool window of these tests may be resized within.
+const TOOL_RANGE: WindowSizing = WindowSizing::Resizable {
+    min_width_px: 2,
+    min_height_px: 2,
+    max_width_px: 8,
+    max_height_px: 6,
+};
 
 #[test]
 fn a_tool_window_opens_through_its_own_path_and_closes_alone() {
@@ -2320,7 +2482,13 @@ fn a_tool_window_opens_through_its_own_path_and_closes_alone() {
         let inner = loopback.borrow();
         assert_eq!(
             inner.host.tools,
-            alloc::vec![(tool, parent, Some(2), String::from("Tools"))]
+            alloc::vec![(
+                tool,
+                parent,
+                Some(2),
+                String::from("Tools"),
+                WindowSizing::Fixed
+            )]
         );
         assert!(inner.host.popups.is_empty(), "never the popup path");
         assert_eq!(inner.host.opened.len(), 1, "nor the top-level one");
@@ -2541,12 +2709,98 @@ fn a_tool_window_shares_the_budget_and_goes_with_its_parent() {
     assert!(inner.host.closed.contains(&parent) && inner.host.closed.contains(&tool));
 }
 
+/// A tool window says at its create how it may be sized, and a resizable
+/// one is told each size on its own id.
+#[test]
+fn a_resizable_tool_window_states_its_range_and_is_told_each_size_on_its_own_id() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let parent = create_id(&mut client, 7, EVENTS_A, 1, "Paint").expect("parent");
+    let (palette, _) = client
+        .create_tool(&ToolSpec {
+            sizing: TOOL_RANGE,
+            ..tool_spec(parent, 8, None)
+        })
+        .expect("a resizable palette");
+    let (tools, _) = client
+        .create_tool(&tool_spec(parent, 9, None))
+        .expect("a fixed tool box");
+    let resized = WindowEvent::Resized {
+        window_id: palette,
+        width_px: 6,
+        height_px: 4,
+        state: WindowSizeState::Restored,
+    };
+    let mut sink = QueueSink::default();
+    {
+        let inner = &mut *loopback.borrow_mut();
+        let sizings: Vec<(u64, WindowSizing)> = inner
+            .host
+            .tools
+            .iter()
+            .map(|tool| (tool.0, tool.4))
+            .collect();
+        assert_eq!(
+            sizings,
+            [(palette, TOOL_RANGE), (tools, WindowSizing::Fixed)],
+            "each says how it may be sized"
+        );
+        inner
+            .server
+            .deliver_event(&mut sink, &resized)
+            .expect("routed");
+    }
+    let delivered: Vec<(u64, Result<WindowEvent, Errno>)> = sink
+        .delivered
+        .iter()
+        .map(|(endpoint, frame)| (*endpoint, WindowEvent::from_bytes(frame)))
+        .collect();
+    assert_eq!(
+        delivered,
+        [(EVENTS_A, Ok(resized))],
+        "its owner is told on the palette's own id"
+    );
+}
+
+/// A tool window's range is restated as a window's is, and what the host
+/// refuses — a change of kind — reaches the client and changes nothing.
+#[test]
+fn a_tool_window_s_range_is_restated_and_a_refused_kind_changes_nothing() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let parent = create_id(&mut client, 7, EVENTS_A, 1, "Paint").expect("parent");
+    let (palette, _) = client
+        .create_tool(&ToolSpec {
+            sizing: TOOL_RANGE,
+            ..tool_spec(parent, 8, None)
+        })
+        .expect("a resizable palette");
+    let (tools, _) = client
+        .create_tool(&tool_spec(parent, 9, None))
+        .expect("a fixed tool box");
+    let narrower = WindowSizing::Resizable {
+        min_width_px: 2,
+        min_height_px: 2,
+        max_width_px: 6,
+        max_height_px: 4,
+    };
+    client.set_sizing(palette, narrower).expect("posted");
+    assert_eq!(loopback.borrow().host.resized_range, [(palette, narrower)]);
+    loopback.borrow_mut().host.refuse_sizing = Some(Errno::NotSupported);
+    client.set_sizing(tools, TOOL_RANGE).expect("posted");
+    assert_eq!(
+        refusal(&mut client),
+        Some(refused(tools, PostedRequest::Sizing, Errno::NotSupported))
+    );
+    assert_eq!(loopback.borrow().host.resized_range.len(), 1);
+}
+
 #[test]
 fn a_malformed_request_answers_a_typed_status_refusal() {
     let loopback = Loopback::with_regions(&[]);
     let mut reply = [0u8; WINDOW_REPLY_MAX];
     let inner = &mut *loopback.borrow_mut();
-    let len = inner.server.serve(
+    let served = inner.server.serve(
         &mut inner.host,
         &mut inner.sink,
         &mut inner.identity,
@@ -2554,11 +2808,12 @@ fn a_malformed_request_answers_a_typed_status_refusal() {
         &[0u8; 4],
         &mut reply,
     );
+    let len = replied(served);
     assert_eq!(
         decode_status_reply(&reply[..len]),
         Err(Errno::BufferTooSmall)
     );
-    let len = inner.server.serve(
+    let served = inner.server.serve(
         &mut inner.host,
         &mut inner.sink,
         &mut inner.identity,
@@ -2566,6 +2821,7 @@ fn a_malformed_request_answers_a_typed_status_refusal() {
         &[0xFFu8; WindowRequest::MAX_WIRE_LEN],
         &mut reply,
     );
+    let len = replied(served);
     assert_eq!(decode_status_reply(&reply[..len]), Err(Errno::BadMagic));
 }
 
@@ -2580,6 +2836,7 @@ fn events_reach_the_owning_endpoint_and_decode_through_the_client() {
     let key = KeyInput::Pressed {
         key: KeyValue::Char('x'),
         modifiers: Modifiers::default(),
+        physical: PhysicalKey::from_usage(0x1B),
     };
     let events = [
         WindowEvent::Focus {
@@ -2835,7 +3092,8 @@ fn a_run_of_resizes_folds_to_the_newest_extent() {
 }
 
 /// A present is posted, and the next waits only for its answer — the frame
-/// the first named is the session's until then — never for a desktop frame.
+/// the first named is the session's until then — which comes at once when
+/// nothing waited to be shown.
 #[test]
 fn a_present_is_posted_and_the_next_waits_only_for_its_answer() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
@@ -3158,6 +3416,278 @@ fn a_closed_windows_frame_asks_for_no_desktop_frame() {
     assert!(loopback.borrow().server.has_pending_frames());
     client.close(window).expect("closed");
     assert!(!loopback.borrow().server.has_pending_frames());
+}
+
+/// Present twice to `window`, the second held behind the frame the first
+/// named, which the desktop has yet to show.
+fn hold_a_present(client: &mut WindowClient<Rc<RefCell<Loopback>>>, window: u64) {
+    client.present(window, 0, full_damage()).expect("posted");
+    client.present(window, 1, full_damage()).expect("posted");
+    assert!(
+        client.present_in_flight(window),
+        "held behind an unshown frame"
+    );
+}
+
+/// The tickets the engine answered through `send_answers` that no post was
+/// waiting on, each `Ok`: the presents they answer were recorded.
+fn called_tickets(loopback: &Loopback) -> Vec<u64> {
+    loopback
+        .called
+        .iter()
+        .map(|(ticket, reply)| {
+            assert_eq!(
+                decode_status_reply(reply),
+                Ok(()),
+                "recorded, so answered Ok"
+            );
+            *ticket
+        })
+        .collect()
+}
+
+/// A present replacing a frame the desktop has yet to show is answered once
+/// that frame is shown; one after a shown frame is answered at once.
+#[test]
+fn a_present_replacing_an_unshown_frame_is_answered_once_it_is_shown() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    loopback.borrow_mut().holds_frames = true;
+
+    client.present(window, 0, full_damage()).expect("posted");
+    assert!(
+        !client.present_in_flight(window),
+        "nothing waited to be shown"
+    );
+    client.present(window, 1, full_damage()).expect("posted");
+    assert!(
+        client.present_in_flight(window),
+        "its answer waits for the frame it replaced"
+    );
+    loopback.borrow_mut().latch();
+    assert!(!client.present_in_flight(window), "shown, it is answered");
+    client.present(window, 0, full_damage()).expect("posted");
+    assert!(
+        !client.present_in_flight(window),
+        "after a shown frame it is answered at once"
+    );
+}
+
+/// A client presenting as fast as it can draw is held to the desktop's frames:
+/// for each one it draws at most two, and the desktop converts one. Answered as
+/// each was recorded, a loop of sixty-four presents drew all sixty-four for the
+/// one frame the desktop showed.
+#[test]
+fn a_streaming_client_is_held_to_the_desktops_frames() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    let latched = {
+        let inner = &mut *loopback.borrow_mut();
+        inner.holds_frames = true;
+        inner.latches
+    };
+    for frame_index in 0..64u32 {
+        client
+            .present(window, frame_index % 2, full_damage())
+            .expect("presented");
+    }
+    let inner = loopback.borrow();
+    let frames = inner.latches - latched;
+    assert_eq!(
+        frames, 31,
+        "every second present waited for a desktop frame"
+    );
+    assert_eq!(inner.host.presented.len(), frames, "one conversion a frame");
+}
+
+/// A resize, a release and a close each answer the present held behind the
+/// frame they drop.
+#[test]
+fn a_resize_a_release_or_a_close_answers_the_present_it_supersedes() {
+    let regions = [(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN), (9, 2 * FRAME_LEN)];
+    let loopback = Loopback::with_regions(&regions);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    let other = create_id(&mut client, 9, EVENTS_A, 2, "b").expect("b");
+    loopback.borrow_mut().holds_frames = true;
+
+    hold_a_present(&mut client, window);
+    client.resize(window, 8, 2, &SURFACE).expect("posted");
+    assert!(!client.present_in_flight(window), "the re-map answered it");
+
+    hold_a_present(&mut client, window);
+    {
+        let inner = &mut *loopback.borrow_mut();
+        inner.server.release_frames(window);
+        inner.collect_answers();
+    }
+    assert!(!client.present_in_flight(window), "the release answered it");
+
+    hold_a_present(&mut client, other);
+    client.close(other).expect("closed");
+    assert!(
+        loopback.borrow().withheld.is_empty(),
+        "the close answered it"
+    );
+}
+
+/// A frame the desktop cannot show still answers the present held behind it,
+/// which was recorded all the same.
+#[test]
+fn a_refused_frame_still_answers_the_present_held_behind_it() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    {
+        let inner = &mut *loopback.borrow_mut();
+        inner.holds_frames = true;
+        inner.host.refuse_frames = Some(Errno::OutOfMemory);
+    }
+    hold_a_present(&mut client, window);
+    loopback.borrow_mut().latch();
+    assert!(!client.present_in_flight(window), "refused yet answered");
+    assert_eq!(
+        loopback.borrow().host.frames_refused,
+        [(window, Errno::OutOfMemory)]
+    );
+}
+
+/// A present replacing a frame whose answer is held answers the older at once
+/// and is held in its place, so a window never holds two.
+#[test]
+fn a_present_superseding_a_held_one_answers_the_older_at_once() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    let inner = &mut *loopback.borrow_mut();
+    inner.holds_frames = true;
+    let (_, first) = inner.serve_request(&present_frame(window, 0));
+    assert!(first.is_some(), "nothing waited to be shown");
+    let (older, held) = inner.serve_request(&present_frame(window, 1));
+    assert!(held.is_none(), "held behind the unshown frame");
+    let (newer, held) = inner.serve_request(&present_frame(window, 0));
+    assert!(held.is_none(), "held in the older's place");
+    inner.collect_answers();
+    assert_eq!(
+        called_tickets(inner),
+        [older],
+        "the older is answered at once"
+    );
+    inner.latch();
+    assert_eq!(called_tickets(inner), [older, newer]);
+}
+
+/// A client that exits is owed nothing more: its calls ended with it, so what
+/// it was owed, held or due, is dropped unsent.
+#[test]
+fn an_exited_clients_answers_are_dropped() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    let inner = &mut *loopback.borrow_mut();
+    inner.holds_frames = true;
+    for frame_index in [0, 1, 0] {
+        let _ = inner.serve_request(&present_frame(window, frame_index));
+    }
+    inner.server.client_exited(&mut inner.host, proc_id(0xA1));
+    assert!(!inner.server.holds_answers());
+    inner.collect_answers();
+    assert!(
+        inner.called.is_empty(),
+        "nothing is sent to a client that has gone"
+    );
+}
+
+/// Every call the engine is handed is answered exactly once, however its
+/// answer falls due: as it is served, superseded, at a latch, a resize or a
+/// close.
+#[test]
+fn every_call_is_answered_exactly_once() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    let inner = &mut *loopback.borrow_mut();
+    inner.holds_frames = true;
+    let resize = request_frame(&WindowRequest::Resize {
+        window_id: window,
+        shm_handle: 8,
+        frame_count: 2,
+        width_px: SURFACE.width_px,
+        height_px: SURFACE.height_px,
+        stride_bytes: SURFACE.stride_bytes,
+        format: SURFACE.format,
+    });
+    let close = request_frame(&WindowRequest::Close { window_id: window });
+    // `None` is a desktop frame.
+    let script = [
+        Some(present_frame(window, 0)),
+        Some(present_frame(window, 1)),
+        Some(present_frame(window, 0)),
+        None,
+        Some(present_frame(window, 1)),
+        Some(present_frame(window, 0)),
+        Some(resize),
+        Some(present_frame(window, 0)),
+        Some(present_frame(window, 1)),
+        Some(present_frame(window, 0)),
+        Some(close),
+    ];
+    let mut served = Vec::new();
+    let mut answered = Vec::new();
+    for step in script {
+        match step {
+            Some(request) => {
+                let (ticket, reply) = inner.serve_request(&request);
+                served.push(ticket);
+                answered.extend(reply.map(|_| ticket));
+            }
+            None => inner.latch(),
+        }
+        inner.collect_answers();
+    }
+    answered.extend(called_tickets(inner));
+    answered.sort_unstable();
+    assert_eq!(answered, served, "each call answered, and only once");
+}
+
+/// While no frame reaches the screen the session answers what is held without
+/// showing it, so no client stalls behind a dark screen or an uncovered lock;
+/// the newest frame waits for a screen that can show it.
+#[test]
+fn held_answers_are_released_with_their_frames_left_to_show() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    loopback.borrow_mut().holds_frames = true;
+    hold_a_present(&mut client, window);
+    {
+        let inner = &mut *loopback.borrow_mut();
+        assert!(inner.server.holds_answers());
+        inner.server.release_answers();
+        inner.collect_answers();
+        assert!(!inner.server.holds_answers());
+        assert!(
+            inner.server.has_pending_frames(),
+            "the frame waits for a screen"
+        );
+    }
+    assert!(
+        !client.present_in_flight(window),
+        "answered with nothing shown"
+    );
+    client.present(window, 0, full_damage()).expect("posted");
+    assert!(
+        client.present_in_flight(window),
+        "the next is held to the desktop's pace"
+    );
+    loopback.borrow_mut().latch();
+    assert_eq!(
+        loopback.borrow().host.presented.len(),
+        1,
+        "one frame shown, the newest"
+    );
 }
 
 /// A resize drops the presents not yet sent for the region it replaces: the
@@ -3851,7 +4381,7 @@ fn a_host_with_no_zone_store_refuses_it_whole() {
     let mut identity = MockIdentity::holding_layer(&[]);
     let mut reply = [0u8; WINDOW_REPLY_MAX];
     let request = request_frame(&WindowRequest::TakeZoneStore);
-    let len = server.serve(
+    let outcome = server.serve(
         &mut host,
         &mut QueueSink::default(),
         &mut identity,
@@ -3859,6 +4389,7 @@ fn a_host_with_no_zone_store_refuses_it_whole() {
         &request,
         &mut reply,
     );
+    let len = replied(outcome);
     assert_eq!(
         tairix_abi::window_ipc::decode_minted_id_reply(&reply[..len]),
         Err(Errno::NotSupported)
@@ -4699,6 +5230,132 @@ fn a_folder_conclusion_is_refused_unless_a_folder_was_asked_for_and_is_honest() 
     );
 }
 
+/// An application has at most `PICK_MAX_OPEN` picks open: one past it is
+/// refused before the host hears of it, the refusal is the host's to audit,
+/// and a pick concluding makes room again.
+#[test]
+fn an_application_has_at_most_its_bound_of_picks_open() {
+    let bound = tairix_abi::window_ipc::PICK_MAX_OPEN;
+    let handles: Vec<u64> = (7..).take(bound + 1).collect();
+    let regions: Vec<(u64, usize)> = handles.iter().map(|&handle| (handle, FRAME_LEN)).collect();
+    let loopback = Loopback::with_regions(&regions);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let windows: Vec<u64> = handles
+        .iter()
+        .map(|&handle| create_id(&mut client, handle, EVENTS_A, 1, "a").expect("a window"))
+        .collect();
+    for &window in &windows[..bound] {
+        client.pick_file(window, OPEN).expect("within the bound");
+    }
+    let past = windows[bound];
+    assert_eq!(client.pick_file(past, OPEN), Err(Errno::LimitExceeded));
+    assert_eq!(
+        loopback.borrow().host.picks.len(),
+        bound,
+        "the host never heard of the refused pick"
+    );
+    assert_eq!(
+        loopback.borrow().host.picks_refused,
+        [(proc_id(0xA1), past)]
+    );
+    assert_eq!(
+        client.pick_file(windows[0], OPEN),
+        Err(Errno::AlreadyExists),
+        "one pick per window"
+    );
+    let mut sink = QueueSink::default();
+    conclude(&loopback, &mut sink, windows[0], None).expect("cancelled");
+    client
+        .pick_file(past, OPEN)
+        .expect("a pick concluded makes room");
+}
+
+/// One of an application's picks may choose a folder, until the files it
+/// delegated are taken; a file pick beside it is not held back.
+#[test]
+fn an_application_has_one_folder_pick_open_until_its_files_are_taken() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let first = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let second = create_id(&mut client, 8, EVENTS_A, 1, "b").expect("b");
+    client
+        .pick_file(first, PickPurpose::Folder)
+        .expect("accepted");
+    assert_eq!(
+        client.pick_file(second, PickPurpose::Folder),
+        Err(Errno::LimitExceeded)
+    );
+    client
+        .pick_file(second, OPEN)
+        .expect("a file pick beside it is accepted");
+    let mut sink = QueueSink::default();
+    loopback
+        .borrow_mut()
+        .server
+        .conclude_folder_pick(&mut sink, first, folder(&[(3, "01.flac")]), 0)
+        .expect("concluded");
+    conclude(&loopback, &mut sink, second, None).expect("cancelled");
+    assert_eq!(
+        client.pick_file(second, PickPurpose::Folder),
+        Err(Errno::LimitExceeded),
+        "the files it delegated are not taken yet"
+    );
+    client.take_picked_file(first).expect("taken");
+    client
+        .pick_file(second, PickPurpose::Folder)
+        .expect("taken, another folder may be chosen");
+    assert_eq!(
+        loopback.borrow().host.picks_refused,
+        [(proc_id(0xA1), second), (proc_id(0xA1), second)]
+    );
+}
+
+/// A pick takes the keyboard only where its application holds the front, as
+/// an alert does: the user is working in one of its windows, or made a
+/// gesture at it, which the pick spends.
+#[test]
+fn a_pick_takes_the_keyboard_only_when_its_application_holds_the_front() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mine = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let other = create_id(&mut client, 9, EVENTS_A, 1, "c").expect("c");
+    loopback.borrow_mut().ticket = TICKET_B;
+    let theirs = create_id(&mut client, 8, EVENTS_B, 1, "b").expect("b");
+    loopback.borrow_mut().ticket = TICKET_A;
+
+    loopback.borrow_mut().host.focused = Some(mine);
+    client.pick_file(mine, OPEN).expect("accepted");
+    loopback.borrow_mut().host.focused = Some(theirs);
+    client.pick_file(other, OPEN).expect("accepted");
+    assert_eq!(loopback.borrow().host.pick_focus, [true, false]);
+
+    let mut sink = QueueSink::default();
+    conclude(&loopback, &mut sink, mine, None).expect("cancelled");
+    conclude(&loopback, &mut sink, other, None).expect("cancelled");
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("declared");
+    loopback
+        .borrow_mut()
+        .server
+        .deliver_app_event(
+            &mut sink,
+            proc_id(0xA1),
+            &WindowEvent::AppBarDefault,
+            Activation::Granted {
+                focus: Some(theirs),
+            },
+        )
+        .expect("delivered");
+    client.pick_file(mine, OPEN).expect("accepted");
+    client.pick_file(other, OPEN).expect("accepted");
+    assert_eq!(
+        loopback.borrow().host.pick_focus,
+        [true, false, true, false],
+        "the activation is spent by the pick it earned"
+    );
+}
+
 /// One openable file named `notes.txt`.
 fn one_file() -> DragItems {
     DragItems::new(
@@ -4708,6 +5365,7 @@ fn one_file() -> DragItems {
         [tairix_abi::window_ipc::DragPicture {
             icon: tairix_abi::window_ipc::IconAsset::new("text").expect("a valid asset id"),
             from: None,
+            own: None,
         }],
     )
     .expect("one openable file")
@@ -4923,6 +5581,254 @@ fn a_drag_is_reported_to_its_owner_about_its_own_windows_alone() {
         client.drag_spot(source, 3),
         Err(Errno::NotFound),
         "only the owner reads it"
+    );
+}
+
+/// Every report a pointer resting on one desktop folder makes names that
+/// folder, so a report a later one superseded there is still read; a report
+/// anywhere else ends the place.
+#[test]
+fn a_desktop_folder_is_held_for_every_report_of_its_place() {
+    let (loopback, mut client, [source, sibling, _]) = carried_drag();
+    let mut sink = QueueSink::default();
+    let mut report = |serial, report| {
+        loopback
+            .borrow_mut()
+            .server
+            .report_drag(&mut sink, source, serial, report, false)
+            .expect("reported");
+    };
+    let desktop = DragReport::Desktop { folder: "/D" };
+    report(3, desktop);
+    report(4, desktop);
+    assert_eq!(
+        client.drag_spot(source, 3).as_deref(),
+        Ok("/D"),
+        "a report superseded where the pointer rests"
+    );
+    assert_eq!(client.drag_spot(source, 4).as_deref(), Ok("/D"));
+    report(
+        5,
+        DragReport::Window {
+            window_id: sibling,
+            x: 0,
+            y: 0,
+        },
+    );
+    report(6, desktop);
+    assert_eq!(
+        client.drag_spot(source, 4),
+        Err(Errno::NotFound),
+        "the pointer left that place"
+    );
+    assert_eq!(client.drag_spot(source, 6).as_deref(), Ok("/D"));
+    report(7, DragReport::Desktop { folder: "/D/Inbox" });
+    assert_eq!(
+        client.drag_spot(source, 6),
+        Err(Errno::NotFound),
+        "another folder is another place"
+    );
+    assert_eq!(client.drag_spot(source, 7).as_deref(), Ok("/D/Inbox"));
+}
+
+/// A drag of three items led by `notes.txt`.
+fn three_items() -> DragItems {
+    let picture = tairix_abi::window_ipc::DragPicture {
+        icon: tairix_abi::window_ipc::IconAsset::new("text").expect("a valid asset id"),
+        from: None,
+        own: None,
+    };
+    DragItems::new(
+        DocumentName::new("notes.txt").expect("a valid name"),
+        3,
+        false,
+        [picture; 3],
+    )
+    .expect("three items")
+}
+
+/// Item `item` about to be written under `name`.
+fn making(item: u32, name: &str) -> LandingStep {
+    LandingStep::Making {
+        item,
+        name: LandingName::new(name).expect("a valid name"),
+    }
+}
+
+/// Item `item` made.
+const fn made(item: u32) -> LandingStep {
+    LandingStep::Made {
+        item,
+        outcome: LandingOutcome::Created,
+    }
+}
+
+/// Drop window `window`'s carried drag on the desktop folder `/D` at report
+/// `serial`, answering the landing that displaced.
+fn drop_on_desktop(loopback: &Rc<RefCell<Loopback>>, window: u64, serial: u32) -> Option<u32> {
+    let mut sink = QueueSink::default();
+    let mut held = loopback.borrow_mut();
+    let desktop = DragReport::Desktop { folder: "/D" };
+    held.server
+        .report_drag(&mut sink, window, serial, desktop, false)
+        .expect("the desktop");
+    let ended = DragConclusion::Desktop {
+        serial,
+        operation: DropOperation::Copy,
+    };
+    held.server
+        .conclude_drag(&mut sink, window, ended)
+        .expect("dropped")
+}
+
+/// A drop onto the desktop lands as its owner steps it, in drag order, an item
+/// at a time, until the step that ends it; every other step is refused, and
+/// none reaches the host.
+#[test]
+fn a_landing_is_stepped_by_its_owner_in_turn_until_it_ends() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    client.begin_drag(window, three_items()).expect("accepted");
+    assert_eq!(drop_on_desktop(&loopback, window, 3), None);
+    let mut transport = Rc::clone(&loopback);
+    let mut step = |serial, step| crate::client::step_landing(&mut transport, window, serial, step);
+    assert_eq!(
+        step(4, LandingStep::Ended),
+        Err(Errno::NotFound),
+        "no drop landed at that report"
+    );
+    assert_eq!(
+        step(3, made(0)),
+        Err(Errno::OutOfRange),
+        "nothing is being made"
+    );
+    assert_eq!(
+        step(3, making(3, "d.txt")),
+        Err(Errno::OutOfRange),
+        "past the items dragged"
+    );
+    for refused in ["a/b", "..", "."] {
+        assert_eq!(
+            step(3, making(0, refused)),
+            Err(Errno::OutOfRange),
+            "no file name: {refused}"
+        );
+    }
+    step(3, making(1, "b.txt")).expect("the second item");
+    assert_eq!(
+        step(3, making(2, "c.txt")),
+        Err(Errno::OutOfRange),
+        "one item at a time"
+    );
+    assert_eq!(
+        step(3, made(2)),
+        Err(Errno::OutOfRange),
+        "only the item being made"
+    );
+    step(3, made(1)).expect("made");
+    assert_eq!(
+        step(3, making(0, "a.txt")),
+        Err(Errno::OutOfRange),
+        "in drag order"
+    );
+    step(3, making(2, "c.txt")).expect("the third item");
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        step(3, LandingStep::Ended),
+        Err(Errno::NotFound),
+        "only the owner steps it"
+    );
+    loopback.borrow_mut().ticket = TICKET_A;
+    step(3, LandingStep::Ended).expect("ended");
+    assert_eq!(
+        step(3, LandingStep::Ended),
+        Err(Errno::NotFound),
+        "nothing is taken after its end"
+    );
+    assert_eq!(
+        loopback.borrow().host.landings,
+        [
+            (window, 3, making(1, "b.txt")),
+            (window, 3, made(1)),
+            (window, 3, making(2, "c.txt")),
+            (window, 3, LandingStep::Ended),
+        ]
+    );
+}
+
+/// A window lands at most `DROP_LANDINGS_MAX` drops, a fifth ending the
+/// oldest; closing the window, or its owner going, ends every drop it was
+/// landing.
+#[test]
+fn a_landing_ends_at_the_bound_and_with_its_window_or_owner() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let mut displaced = Vec::new();
+    for serial in 1..=5 {
+        client.begin_drag(window, one_file()).expect("accepted");
+        displaced.push(drop_on_desktop(&loopback, window, serial));
+    }
+    assert_eq!(DROP_LANDINGS_MAX, 4);
+    assert_eq!(displaced, [None, None, None, None, Some(1)]);
+    let mut transport = Rc::clone(&loopback);
+    assert_eq!(
+        crate::client::step_landing(&mut transport, window, 1, LandingStep::Ended),
+        Err(Errno::NotFound),
+        "the fifth ended it"
+    );
+    client.close(window).expect("closed");
+    let ended = |window, serial| (window, serial, LandingStep::Ended);
+    assert_eq!(
+        loopback.borrow().host.landings,
+        [
+            ended(window, 2),
+            ended(window, 3),
+            ended(window, 4),
+            ended(window, 5)
+        ]
+    );
+
+    let other = create_id(&mut client, 8, EVENTS_A, 1, "b").expect("b");
+    client.begin_drag(other, one_file()).expect("accepted");
+    assert_eq!(drop_on_desktop(&loopback, other, 6), None);
+    {
+        let inner = &mut *loopback.borrow_mut();
+        inner.host.landings.clear();
+        inner.server.client_exited(&mut inner.host, proc_id(0xA1));
+        assert_eq!(inner.host.landings, [ended(other, 6)], "its owner went");
+    }
+}
+
+/// A drop's end is posted, and each is its own: two asked back to back both
+/// reach the desktop, and one it already ended is not reported as refused.
+#[test]
+fn each_drops_end_is_posted_on_its_own() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    for serial in [1, 2] {
+        client.begin_drag(window, one_file()).expect("accepted");
+        assert_eq!(drop_on_desktop(&loopback, window, serial), None);
+    }
+    loopback.borrow_mut().holds_posts = true;
+    client.end_landing(window, 1).expect("posted");
+    client.end_landing(window, 2).expect("posted");
+    client.end_landing(window, 7).expect("posted");
+    loopback.borrow_mut().serve_posted();
+    client.reap_posted();
+    assert_eq!(
+        loopback.borrow().host.landings,
+        [
+            (window, 1, LandingStep::Ended),
+            (window, 2, LandingStep::Ended)
+        ]
+    );
+    assert_eq!(
+        refusal(&mut client),
+        None,
+        "an end the desktop had made already"
     );
 }
 
@@ -5215,7 +6121,7 @@ fn backdrop_blur_defaults_to_an_accepted_no_op() {
         title: tairix_abi::window_ipc::WindowTitle::new("a").expect("valid title"),
         sizing: WindowSizing::Fixed,
     });
-    let len = server.serve(
+    let outcome = server.serve(
         &mut host,
         &mut QueueSink::default(),
         &mut identity,
@@ -5223,6 +6129,7 @@ fn backdrop_blur_defaults_to_an_accepted_no_op() {
         &create,
         &mut reply,
     );
+    let len = replied(outcome);
     let (window, _) = tairix_abi::window_ipc::decode_create_reply(&reply[..len]).expect("created");
 
     // Setting the backdrop blur is infallible for an owned window: the
@@ -5231,7 +6138,7 @@ fn backdrop_blur_defaults_to_an_accepted_no_op() {
         window_id: window,
         radius_px: 8,
     });
-    let len = server.serve(
+    let outcome = server.serve(
         &mut host,
         &mut QueueSink::default(),
         &mut identity,
@@ -5239,6 +6146,7 @@ fn backdrop_blur_defaults_to_an_accepted_no_op() {
         &blur,
         &mut reply,
     );
+    let len = replied(outcome);
     assert_eq!(decode_status_reply(&reply[..len]), Ok(()));
 }
 
@@ -5660,7 +6568,7 @@ fn a_host_with_no_menu_service_refuses_an_open() {
         title: tairix_abi::window_ipc::WindowTitle::new("a").expect("valid title"),
         sizing: WindowSizing::Fixed,
     });
-    let len = server.serve(
+    let outcome = server.serve(
         &mut host,
         &mut QueueSink::default(),
         &mut identity,
@@ -5668,6 +6576,7 @@ fn a_host_with_no_menu_service_refuses_an_open() {
         &create,
         &mut reply,
     );
+    let len = replied(outcome);
     let (window, _) = tairix_abi::window_ipc::decode_create_reply(&reply[..len]).expect("created");
 
     let open = request_frame(&WindowRequest::OpenMenu {
@@ -5675,7 +6584,7 @@ fn a_host_with_no_menu_service_refuses_an_open() {
         anchor: sample_menu_anchor(),
         menu: sample_open_menu(),
     });
-    let len = server.serve(
+    let outcome = server.serve(
         &mut host,
         &mut QueueSink::default(),
         &mut identity,
@@ -5683,6 +6592,7 @@ fn a_host_with_no_menu_service_refuses_an_open() {
         &open,
         &mut reply,
     );
+    let len = replied(outcome);
     assert_eq!(
         tairix_abi::window_ipc::decode_minted_id_reply(&reply[..len]),
         Err(Errno::NotSupported)
@@ -6160,6 +7070,7 @@ fn a_wire_key_event_translates_to_the_shared_key_vocabulary() {
         key_input_event(KeyInput::Pressed {
             key: KeyValue::Named(NamedKeyCode::Tab),
             modifiers: held,
+            physical: PhysicalKey::UNKNOWN,
         }),
         InputEvent::KeyPressed {
             key: Key::Named(NamedKey::Tab),
@@ -6176,6 +7087,7 @@ fn a_wire_key_event_translates_to_the_shared_key_vocabulary() {
         key_input_event(KeyInput::Released {
             key: KeyValue::Char('q'),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::UNKNOWN,
         }),
         InputEvent::KeyReleased {
             key: Key::Char('q'),
@@ -6187,6 +7099,7 @@ fn a_wire_key_event_translates_to_the_shared_key_vocabulary() {
         key_input_event(KeyInput::Pressed {
             key: KeyValue::Named(NamedKeyCode::F7),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::UNKNOWN,
         }),
         InputEvent::KeyPressed {
             key: Key::Named(NamedKey::Function { number: 7 }),
@@ -6990,7 +7903,7 @@ fn an_instance_the_desk_cannot_reach_is_answered_not_running() {
             .expect("a valid bundle path"),
         target: HandOverTarget::Bare,
     });
-    let len = server.serve(
+    let outcome = server.serve(
         &mut host,
         &mut QueueSink::default(),
         &mut MockIdentity::holding_layer(&[]),
@@ -6998,6 +7911,7 @@ fn an_instance_the_desk_cannot_reach_is_answered_not_running() {
         &frame,
         &mut reply,
     );
+    let len = replied(outcome);
     assert_eq!(
         tairix_abi::window_ipc::decode_hand_over_reply(&reply[..len]),
         Ok(HandOverOutcome::NotRunning),
@@ -7745,7 +8659,12 @@ fn a_host_that_has_not_implemented_the_layer_refuses_it() {
             Ok(())
         }
 
-        fn pick_requested(&mut self, _window_id: u64, _purpose: &PickPurpose) -> Result<(), Errno> {
+        fn pick_requested(
+            &mut self,
+            _window_id: u64,
+            _purpose: &PickPurpose,
+            _focus: bool,
+        ) -> Result<(), Errno> {
             Ok(())
         }
 
@@ -7776,7 +8695,7 @@ fn a_host_that_has_not_implemented_the_layer_refuses_it() {
     };
     let mut frame = [0u8; 128];
     let len = request.encode(&mut frame).expect("encodes");
-    let written = server.serve(
+    let outcome = server.serve(
         &mut BareHost,
         &mut QueueSink::default(),
         &mut MockIdentity::holding_layer(&[TICKET_A]),
@@ -7784,6 +8703,7 @@ fn a_host_that_has_not_implemented_the_layer_refuses_it() {
         &frame[..len],
         &mut reply,
     );
+    let written = replied(outcome);
     assert_eq!(
         decode_status_reply(&reply[..written.min(4)]),
         Err(Errno::NotSupported)

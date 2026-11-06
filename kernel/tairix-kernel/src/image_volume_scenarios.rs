@@ -17,6 +17,7 @@ use tairix_abi::{DriverError, ProcId};
 use tairix_kernel_core::fs::{ImageDirectory, ImageSource};
 use tairix_kernel_core::procsignal::{self, DeferredTeardown};
 use tairix_kernel_core::session_reaper::SessionObserver as _;
+use tairix_kernel_core::test_boot::HostTask;
 use tairix_kernel_sec::ProcessId;
 use tairix_test_amiga_image::{ffs_volume, rdb_disk, FLOPPY_BLOCKS};
 
@@ -28,8 +29,6 @@ const IMAGE_ATTACH_REFUSED: u32 = 4322;
 const IMAGE_VOLUME_DETACHED: u32 = 4323;
 const IMAGE_DETACH_REFUSED: u32 = 4324;
 const IMAGE_VOLUME_RETIRED: u32 = 4325;
-const IMAGE_VOLUME_RETITLED: u32 = 4327;
-const IMAGE_RETITLE_REFUSED: u32 = 4328;
 
 /// Every image scenario, in turn.
 pub(super) fn run(window_ptr: *mut u8, facility: &'static TestFacility) {
@@ -79,6 +78,7 @@ pub(super) fn run(window_ptr: *mut u8, facility: &'static TestFacility) {
     an_archives_lost_driver_leaves_no_work_files_scenario(window_ptr, facility);
     an_archive_reached_through_a_read_only_view_attaches_read_only_scenario(window_ptr, facility);
     an_image_is_retitled_by_its_owner_alone_scenario(window_ptr, facility);
+    an_administrators_image_target_keeps_an_owners_rules_scenario(window_ptr, facility);
 }
 
 /// A served FAT32 volume shown as `/Storage/<name>`, the `n`th these
@@ -139,8 +139,9 @@ fn read_write() -> OpenFlags {
 }
 
 /// What an attach of `path`, opened as `uid` under `flags`, hands the
-/// service: the caller's own open, frozen, closed once handed over.
-fn source(uid: u32, path: &str, flags: OpenFlags, session: ProcId, task: u64) -> ImageSource {
+/// service: the caller's own open, frozen, closed once handed over, made on
+/// the calling boot task, whose wait for its driver it is.
+fn source(uid: u32, path: &str, flags: OpenFlags, session: ProcId) -> ImageSource {
     let opened = Descriptor::open(uid, path, flags)
         .unwrap_or_else(|err| std::panic!("open {path}: {err:?}"));
     ImageSource {
@@ -155,7 +156,7 @@ fn source(uid: u32, path: &str, flags: OpenFlags, session: ProcId, task: u64) ->
         writable: flags.is_write(),
         directory: None,
         session,
-        task,
+        task: HostBoot::current().task(),
     }
 }
 
@@ -181,27 +182,26 @@ fn session() -> ProcId {
     ProcId::from_raw([0x51; 16])
 }
 
-/// Run `attach` while a stand-in for `devmgr` hands each image volume node
-/// published meanwhile to `start`, as it loads the format's driver.
+/// Run `attach` while a stand-in for `devmgr`, parked on the tree's changes,
+/// hands each image volume node published meanwhile to `start`, as it loads
+/// the format's driver.
 fn with_devmgr<T>(
     start: impl Fn(u32, u64, VolumeFsType) + Send + 'static,
     attach: impl FnOnce() -> T,
 ) -> T {
-    let done = StdArc::new(AtomicBool::new(false));
-    let devmgr = {
-        let done = StdArc::clone(&done);
-        thread::spawn(move || {
-            while !done.load(Ordering::Acquire) {
-                for (node, volume, fstype) in undriven_volume_nodes(IMAGE_VOLUMES_NODE_ID) {
-                    start(node, volume, fstype);
-                }
-                thread::yield_now();
+    let devmgr = HostBoot::current().spawn_until_stopped(move |stopped| {
+        on_tree_changes(|| {
+            if stopped() {
+                return Some(());
             }
-        })
-    };
+            for (node, volume, fstype) in undriven_volume_nodes(IMAGE_VOLUMES_NODE_ID) {
+                start(node, volume, fstype);
+            }
+            None
+        });
+    });
     let answer = attach();
-    done.store(true, Ordering::Release);
-    devmgr.join().expect("the devmgr stand-in");
+    devmgr.stop();
     answer
 }
 
@@ -261,18 +261,14 @@ fn attached_together(
     with_devmgr(driving(facility), || {
         let attaches: Vec<_> = paths
             .into_iter()
-            .zip(0x1A00_0100u64..)
-            .map(|(path, task)| {
-                thread::spawn(move || {
-                    let from = source(uid, &path, OpenFlags::READ, session(), task);
+            .map(|path| {
+                HostBoot::current().spawn(move || {
+                    let from = source(uid, &path, OpenFlags::READ, session());
                     answered(&plain(uid, gid), from, &private(true))
                 })
             })
             .collect();
-        attaches
-            .into_iter()
-            .map(|attach| attach.join().expect("an attach"))
-            .collect()
+        attaches.into_iter().map(HostTask::join).collect()
     })
 }
 
@@ -315,7 +311,7 @@ fn an_amiga_image_attaches_for_its_owner_alone_scenario(
     let path = "/Storage/imgs0/Lemmings.adf";
     put(0, path, &amiga_floppy(b"Lemmings", b"amiga payload"));
     let owner = plain(MEMBER_UID, STORAGE_GID);
-    let open = |flags| source(MEMBER_UID, path, flags, session(), 0x1A00_0001);
+    let open = |flags| source(MEMBER_UID, path, flags, session());
     let volume = mounted(attached(
         facility,
         &owner,
@@ -428,7 +424,7 @@ fn an_image_is_refused_with_its_reason_scenario(
         ("dvd.iso", expecting_another, ImageRefusal::NotExpected),
     ] {
         let path = std::format!("/Storage/imgs1/{file}");
-        let from = source(MEMBER_UID, &path, OpenFlags::READ, session(), 0x1A00_0002);
+        let from = source(MEMBER_UID, &path, OpenFlags::READ, session());
         assert_eq!(
             attached(facility, &caller, from, &attach),
             Ok(ImageAttachReply::Refused(why)),
@@ -456,7 +452,7 @@ fn a_writable_image_has_one_writer_scenario(window_ptr: *mut u8, facility: &'sta
     let first = mounted(attached(
         facility,
         &member,
-        source(MEMBER_UID, path, read_write(), session(), 0x1A00_0003),
+        source(MEMBER_UID, path, read_write(), session()),
         &private(false),
     ));
     let system = plain(0, 0);
@@ -465,7 +461,7 @@ fn a_writable_image_has_one_writer_scenario(window_ptr: *mut u8, facility: &'sta
             attached(
                 facility,
                 &system,
-                source(0, path, flags, session(), 0x1A00_0004),
+                source(0, path, flags, session()),
                 &private(false),
             ),
             Err(Errno::Busy),
@@ -483,7 +479,7 @@ fn a_writable_image_has_one_writer_scenario(window_ptr: *mut u8, facility: &'sta
     let second = mounted(attached(
         facility,
         &system,
-        source(0, path, read_write(), session(), 0x1A00_0004),
+        source(0, path, read_write(), session()),
         &private(false),
     ));
     assert_ne!(
@@ -512,7 +508,7 @@ fn a_disc_image_is_read_only_and_shared_scenario(
     let first = mounted(attached(
         facility,
         &member,
-        source(MEMBER_UID, path, read_write(), session(), 0x1A00_0005),
+        source(MEMBER_UID, path, read_write(), session()),
         &either_face,
     ));
     let target = std::format!("/Storage/{}/README.TXT", first.name());
@@ -527,7 +523,7 @@ fn a_disc_image_is_read_only_and_shared_scenario(
     let second = mounted(attached(
         facility,
         &outsider,
-        source(OUTSIDER_UID, path, OpenFlags::READ, session(), 0x1A00_0006),
+        source(OUTSIDER_UID, path, OpenFlags::READ, session()),
         &private(true),
     ));
     assert_ne!(second.name(), first.name(), "two volumes of one label");
@@ -559,7 +555,7 @@ fn an_acorn_floppy_image_attaches_as_adfs_scenario(
     let volume = mounted(attached(
         facility,
         &member,
-        source(MEMBER_UID, path, read_write(), session(), 0x1A00_0007),
+        source(MEMBER_UID, path, read_write(), session()),
         &private(false),
     ));
     assert_eq!(mount_record(b"Elite.adf").fstype_bytes(), b"adfs");
@@ -582,7 +578,7 @@ fn an_image_leaves_with_its_session_scenario(window_ptr: *mut u8, facility: &'st
     let volume = mounted(attached(
         facility,
         &plain(MEMBER_UID, STORAGE_GID),
-        source(MEMBER_UID, path, read_write(), login, 0x1A00_0008),
+        source(MEMBER_UID, path, read_write(), login),
         &private(false),
     ));
     VOLUME_SERVICE.session_ended(&|ended| ended == session());
@@ -613,7 +609,7 @@ fn an_image_is_settled_before_its_backing_volume_detaches_scenario(
     let volume = mounted(attached(
         facility,
         &plain(MEMBER_UID, STORAGE_GID),
-        source(MEMBER_UID, path, read_write(), session(), 0x1A00_0009),
+        source(MEMBER_UID, path, read_write(), session()),
         &private(false),
     ));
     let detach = |mode| {
@@ -637,8 +633,7 @@ fn an_image_is_settled_before_its_backing_volume_detaches_scenario(
         audited(IMAGE_VOLUME_DETACHED, volume.name()),
         [Some(String::from("backing_detached"))]
     );
-    round.stop.store(true, Ordering::Relaxed);
-    round.server.join().expect("server thread");
+    round.server.stop();
 }
 
 /// The volume an image's file lies on being pulled retires the image with it.
@@ -652,12 +647,11 @@ fn an_image_leaves_with_its_pulled_backing_volume_scenario(
     let volume = mounted(attached(
         facility,
         &plain(MEMBER_UID, STORAGE_GID),
-        source(MEMBER_UID, path, OpenFlags::READ, session(), 0x1A00_000A),
+        source(MEMBER_UID, path, OpenFlags::READ, session()),
         &private(true),
     ));
     tairix_kernel_core::callreg::teardown_owned_by(host_owner(7), &ASPACES, &SINK);
-    round.stop.store(true, Ordering::Relaxed);
-    round.server.join().expect("server thread");
+    round.server.stop();
     assert!(!shown(volume.name()), "retired with its backing");
     assert_eq!(
         audited(IMAGE_VOLUME_RETIRED, volume.name()),
@@ -693,7 +687,6 @@ fn an_image_within_an_image_is_held_and_settled_scenario(
             "/Storage/imgs8/outer.udf",
             read_write(),
             session(),
-            0x1A00_000B,
         ),
         &private(false),
     ));
@@ -706,13 +699,7 @@ fn an_image_within_an_image_is_held_and_settled_scenario(
     let inner = mounted(attached(
         facility,
         &member,
-        source(
-            MEMBER_UID,
-            &inner_path,
-            read_write(),
-            session(),
-            0x1A00_000C,
-        ),
+        source(MEMBER_UID, &inner_path, read_write(), session()),
         &private(false),
     ));
     let mut buf = [0u8; 32];
@@ -745,7 +732,7 @@ fn an_image_whose_driver_is_lost_is_served_again_scenario(
     let volume = mounted(attached(
         facility,
         &member,
-        source(MEMBER_UID, path, read_write(), session(), 0x1A00_000D),
+        source(MEMBER_UID, path, read_write(), session()),
         &private(false),
     ));
     let (node, driver) = *DRIVEN.lock().unwrap().last().expect("a driver serves it");
@@ -789,7 +776,7 @@ fn an_image_whose_driver_is_lost_ejects_without_a_force_scenario(
     let volume = mounted(attached(
         facility,
         &member,
-        source(MEMBER_UID, path, read_write(), session(), 0x1A00_0170),
+        source(MEMBER_UID, path, read_write(), session()),
         &private(false),
     ));
     let (_, driver) = *DRIVEN.lock().unwrap().last().expect("a driver serves it");
@@ -826,7 +813,7 @@ fn a_detach_taking_the_lost_forces_no_healthy_volume_scenario(
     let volume = mounted(attached(
         facility,
         &member,
-        source(MEMBER_UID, path, read_write(), session(), 0x1A00_0180),
+        source(MEMBER_UID, path, read_write(), session()),
         &private(false),
     ));
     let file = std::format!("/Storage/{}/ReadMe", volume.name());
@@ -866,7 +853,7 @@ fn an_idle_eject_leaves_an_image_still_in_use_scenario(
     let volume = mounted(attached(
         facility,
         &member,
-        source(MEMBER_UID, path, read_write(), session(), 0x1A00_0196),
+        source(MEMBER_UID, path, read_write(), session()),
         &private(false),
     ));
     let file = std::format!("/Storage/{}/ReadMe", volume.name());
@@ -915,15 +902,7 @@ fn an_image_count_is_bounded_per_principal_scenario(
         );
     }
     let member = plain(MEMBER_UID, STORAGE_GID);
-    let open = |at| {
-        source(
-            MEMBER_UID,
-            &file(at),
-            OpenFlags::READ,
-            session(),
-            0x1A00_0010,
-        )
-    };
+    let open = |at| source(MEMBER_UID, &file(at), OpenFlags::READ, session());
     let last = IMAGE_VOLUMES_PER_PRINCIPAL - 1;
     let mut held: Vec<AttachReply> = (0..last)
         .map(|at| mounted(attached(facility, &member, open(at), &private(true))))
@@ -959,7 +938,7 @@ fn an_image_count_is_bounded_per_principal_scenario(
     let theirs = mounted(attached(
         facility,
         &system,
-        source(0, &file(over), OpenFlags::READ, session(), 0x1A00_0011),
+        source(0, &file(over), OpenFlags::READ, session()),
         &private(true),
     ));
     eject(&theirs, DetachMode::Plain, &system).expect("ejects");
@@ -994,11 +973,10 @@ fn an_image_nesting_is_bounded_scenario(window_ptr: *mut u8, facility: &'static 
             &path,
             &amiga_volume(blocks, std::format!("Nest{depth}").as_bytes(), b"x"),
         );
-        let task = 0x1A00_0020 + u64::from(depth);
         let volume = mounted(attached(
             facility,
             &member,
-            source(MEMBER_UID, &path, read_write(), session(), task),
+            source(MEMBER_UID, &path, read_write(), session()),
             &private(false),
         ));
         dir = std::format!("/Storage/{}", volume.name());
@@ -1010,7 +988,7 @@ fn an_image_nesting_is_bounded_scenario(window_ptr: *mut u8, facility: &'static 
         attached(
             facility,
             &member,
-            source(MEMBER_UID, &deepest, read_write(), session(), 0x1A00_002F),
+            source(MEMBER_UID, &deepest, read_write(), session()),
             &private(false),
         ),
         Err(Errno::LimitExceeded)
@@ -1044,7 +1022,7 @@ fn a_drivers_refusal_reaches_the_attach_scenario(
             || {
                 answered(
                     &plain(MEMBER_UID, STORAGE_GID),
-                    source(MEMBER_UID, path, read_write(), session(), 0x1A00_0030),
+                    source(MEMBER_UID, path, read_write(), session()),
                     &private(false),
                 )
             },
@@ -1067,7 +1045,7 @@ fn a_drivers_refusal_reaches_the_attach_scenario(
     let volume = mounted(attached(
         facility,
         &member,
-        source(MEMBER_UID, path, read_write(), session(), 0x1A00_0030),
+        source(MEMBER_UID, path, read_write(), session()),
         &private(false),
     ));
     eject(&volume, DetachMode::Plain, &member).expect("ejects");
@@ -1143,7 +1121,6 @@ fn an_image_takes_the_name_and_target_asked_scenario(
             &std::format!("/Storage/imgs13/{file}"),
             flags,
             session(),
-            0x1A00_0040,
         )
     };
     let named = |name| ImageAttach {
@@ -1213,15 +1190,10 @@ fn an_image_held_by_two_sessions_leaves_with_the_last_scenario(
     put(0, path, &amiga_floppy(b"Both", b"x"));
     let member = plain(MEMBER_UID, STORAGE_GID);
     let (desk, shell) = (ProcId::from_raw([0xA1; 16]), ProcId::from_raw([0xB2; 16]));
-    let open = |session, task| source(MEMBER_UID, path, OpenFlags::READ, session, task);
-    let volume = mounted(attached(
-        facility,
-        &member,
-        open(desk, 0x1A00_0050),
-        &private(true),
-    ));
+    let open = |session| source(MEMBER_UID, path, OpenFlags::READ, session);
+    let volume = mounted(attached(facility, &member, open(desk), &private(true)));
     assert_eq!(
-        attached(facility, &member, open(shell, 0x1A00_0051), &private(true)),
+        attached(facility, &member, open(shell), &private(true)),
         Ok(ImageAttachReply::AlreadyAttached(volume))
     );
     VOLUME_SERVICE.session_ended(&|ended| ended == desk);
@@ -1251,7 +1223,7 @@ fn an_image_holding_unpublished_writes_stays_lost_until_ejected_scenario(
     let volume = mounted(attached(
         facility,
         &member,
-        source(MEMBER_UID, path, read_write(), session(), 0x1A00_0060),
+        source(MEMBER_UID, path, read_write(), session()),
         &private(false),
     ));
     let (node, _) = *DRIVEN.lock().unwrap().last().expect("a driver serves it");
@@ -1260,8 +1232,7 @@ fn an_image_holding_unpublished_writes_stays_lost_until_ejected_scenario(
     let mut buf = [0u8; 8];
     read_as(MEMBER_UID, &file, 0, &mut buf).expect("the reply carries the held writes");
     tairix_kernel_core::callreg::teardown_owned_by(host_owner(15), &ASPACES, &SINK);
-    round.stop.store(true, Ordering::Relaxed);
-    round.server.join().expect("server thread");
+    round.server.stop();
     assert!(
         shown(volume.name()),
         "a volume that lost writes stays visible"
@@ -1307,7 +1278,7 @@ fn an_image_whose_restarted_driver_refuses_it_leaves_scenario(
     let volume = mounted(attached(
         facility,
         &member,
-        source(MEMBER_UID, path, read_write(), session(), 0x1A00_0070),
+        source(MEMBER_UID, path, read_write(), session()),
         &private(false),
     ));
     let (node, driver) = *DRIVEN.lock().unwrap().last().expect("a driver serves it");
@@ -1316,13 +1287,7 @@ fn an_image_whose_restarted_driver_refuses_it_leaves_scenario(
     let inner = mounted(attached(
         facility,
         &member,
-        source(
-            MEMBER_UID,
-            &inner_path,
-            OpenFlags::READ,
-            session(),
-            0x1A00_0071,
-        ),
+        source(MEMBER_UID, &inner_path, OpenFlags::READ, session()),
         &private(true),
     ));
     tairix_kernel_core::callreg::teardown_owned_by(driver, &ASPACES, &SINK);
@@ -1380,7 +1345,7 @@ fn an_image_on_a_withdrawn_share_leaves_with_it_scenario(facility: &'static Test
     let volume = mounted(attached(
         facility,
         &member(),
-        source(MEMBER_UID, path, OpenFlags::READ, session(), 0x1A00_0080),
+        source(MEMBER_UID, path, OpenFlags::READ, session()),
         &private(true),
     ));
     assert_eq!(
@@ -1418,7 +1383,7 @@ fn an_image_is_settled_before_its_backing_share_detaches_scenario(facility: &'st
     let image = mounted(attached(
         facility,
         &member(),
-        source(MEMBER_UID, path, OpenFlags::READ, session(), 0x1A00_0150),
+        source(MEMBER_UID, path, OpenFlags::READ, session()),
         &private(true),
     ));
     let still_there = || {
@@ -1485,7 +1450,7 @@ fn an_image_on_a_share_withdrawn_while_held_leaves_with_it_scenario(
     let image = mounted(attached(
         facility,
         &member(),
-        source(MEMBER_UID, path, OpenFlags::READ, session(), 0x1A00_0151),
+        source(MEMBER_UID, path, OpenFlags::READ, session()),
         &private(true),
     ));
     VOLUME_SERVICE.while_share_held(&share.volume_id, || {
@@ -1560,7 +1525,7 @@ fn an_image_on_a_share_whose_target_is_refused_leaves_with_it_scenario(
     );
     gate.shut();
     let offer = server.offer;
-    let binding = thread::spawn(move || {
+    let binding = HostBoot::current().spawn(move || {
         let answer = VOLUME_SERVICE.attach_offered(
             &member(),
             offer,
@@ -1577,14 +1542,14 @@ fn an_image_on_a_share_whose_target_is_refused_leaves_with_it_scenario(
     let image = mounted(attached(
         facility,
         &member(),
-        source(MEMBER_UID, path, OpenFlags::READ, session(), 0x1A00_0152),
+        source(MEMBER_UID, path, OpenFlags::READ, session()),
         &private(true),
     ));
     gate.open();
     let Ok(Arrived::Returned(answer)) = arrivals.recv() else {
         std::panic!("the attach returned");
     };
-    binding.join().expect("the attaching thread");
+    binding.join();
     assert_eq!(answer.err(), Some(Errno::NotEmpty));
     assert_eq!(
         audited(NETWORK_ATTACH_REFUSED, "gated"),
@@ -1615,23 +1580,24 @@ fn a_killed_attach_takes_its_volume_out_scenario(
     let (host_id, round) = host(window_ptr, facility, 17, b"imgs17");
     let path = "/Storage/imgs17/Killed.adf";
     put(0, path, &amiga_floppy(b"Killed", b"x"));
-    let task = 0x1A00_0090;
+    let task = HostBoot::current().task();
     procsignal::install_gate(task, ProcessId(task)).expect("the attacher's gate");
     let answer = with_devmgr(
         move |node, volume, fstype| {
-            let _ = procsignal::claim_group_kill(
+            procsignal::claim_group_kill(
                 None,
                 DeferredTeardown::Plain {
                     process: ProcessId(task),
                 },
                 None,
+                |_| {},
             );
             start_driver(facility, node, volume, fstype);
         },
         || {
             answered(
                 &plain(MEMBER_UID, STORAGE_GID),
-                source(MEMBER_UID, path, read_write(), session(), task),
+                source(MEMBER_UID, path, read_write(), session()),
                 &private(false),
             )
         },
@@ -1648,7 +1614,7 @@ fn a_killed_attach_takes_its_volume_out_scenario(
     let again = mounted(attached(
         facility,
         &member,
-        source(MEMBER_UID, path, read_write(), session(), 0x1A00_0091),
+        source(MEMBER_UID, path, read_write(), session()),
         &private(false),
     ));
     eject(&again, DetachMode::Plain, &member).expect("ejects");
@@ -1683,7 +1649,6 @@ fn an_image_asked_writable_is_writable_or_refused_scenario(
             &std::format!("/Storage/imgs18/{file}"),
             flags,
             session(),
-            0x1A00_00A0,
         )
     };
     assert_eq!(
@@ -1744,7 +1709,7 @@ fn an_undelivered_answer_leaves_nothing_behind_scenario(
     put(0, path, &amiga_floppy(b"Undelivered", b"x"));
     let member = plain(MEMBER_UID, STORAGE_GID);
     let (desk, shell) = (ProcId::from_raw([0xC3; 16]), ProcId::from_raw([0xD4; 16]));
-    let open = |session, task| source(MEMBER_UID, path, OpenFlags::READ, session, task);
+    let open = |session| source(MEMBER_UID, path, OpenFlags::READ, session);
     let undelivered = |from| {
         with_devmgr(driving(facility), || {
             VOLUME_SERVICE.attach_image(&member, from, &private(true), &mut |_| {
@@ -1752,7 +1717,7 @@ fn an_undelivered_answer_leaves_nothing_behind_scenario(
             })
         })
     };
-    assert_eq!(undelivered(open(desk, 0x1A00_00B0)), Err(Errno::BadAddress));
+    assert_eq!(undelivered(open(desk)), Err(Errno::BadAddress));
     assert!(
         !shown("undelivered") && !VOLUME_SERVICE.owes(),
         "a volume no one was told of is taken out before the call returns"
@@ -1762,17 +1727,9 @@ fn an_undelivered_answer_leaves_nothing_behind_scenario(
         [Some(String::from("abandoned"))]
     );
 
-    let volume = mounted(attached(
-        facility,
-        &member,
-        open(desk, 0x1A00_00B1),
-        &private(true),
-    ));
-    assert_eq!(
-        undelivered(open(shell, 0x1A00_00B2)),
-        Err(Errno::BadAddress)
-    );
-    assert_eq!(undelivered(open(desk, 0x1A00_00B3)), Err(Errno::BadAddress));
+    let volume = mounted(attached(facility, &member, open(desk), &private(true)));
+    assert_eq!(undelivered(open(shell)), Err(Errno::BadAddress));
+    assert_eq!(undelivered(open(desk)), Err(Errno::BadAddress));
     settled();
     assert!(shown(volume.name()), "the hold its first answer gave stays");
     assert_eq!(
@@ -1800,17 +1757,12 @@ fn an_owed_image_taken_up_again_lives_on_scenario(
     put(0, path, &amiga_floppy(b"Again", b"x"));
     let member = plain(MEMBER_UID, STORAGE_GID);
     let (first, second) = (ProcId::from_raw([0xE5; 16]), ProcId::from_raw([0xF6; 16]));
-    let open = |session, task| source(MEMBER_UID, path, OpenFlags::READ, session, task);
-    let volume = mounted(attached(
-        facility,
-        &member,
-        open(first, 0x1A00_00C0),
-        &private(true),
-    ));
+    let open = |session| source(MEMBER_UID, path, OpenFlags::READ, session);
+    let volume = mounted(attached(facility, &member, open(first), &private(true)));
     VOLUME_SERVICE.session_ended(&|ended| ended == first);
     assert!(VOLUME_SERVICE.owes(), "its session ended");
     assert_eq!(
-        attached(facility, &member, open(second, 0x1A00_00C1), &private(true)),
+        attached(facility, &member, open(second), &private(true)),
         Ok(ImageAttachReply::AlreadyAttached(volume))
     );
     settled();
@@ -1844,7 +1796,7 @@ fn a_name_the_naming_policy_keeps_is_never_taken_scenario(
             attached(
                 facility,
                 &member,
-                source(MEMBER_UID, path, OpenFlags::READ, session(), 0x1A00_00D0),
+                source(MEMBER_UID, path, OpenFlags::READ, session()),
                 &named
             ),
             Ok(ImageAttachReply::NameRefused(Errno::OutOfRange)),
@@ -1883,7 +1835,6 @@ fn an_image_within_an_image_leaves_with_their_pulled_volume_scenario(
             "/Storage/imgs22/carrier.udf",
             read_write(),
             session(),
-            0x1A00_00E0,
         ),
         &private(false),
     ));
@@ -1892,18 +1843,11 @@ fn an_image_within_an_image_leaves_with_their_pulled_volume_scenario(
     let inner = mounted(attached(
         facility,
         &member,
-        source(
-            MEMBER_UID,
-            &inner_path,
-            OpenFlags::READ,
-            session(),
-            0x1A00_00E1,
-        ),
+        source(MEMBER_UID, &inner_path, OpenFlags::READ, session()),
         &private(true),
     ));
     tairix_kernel_core::callreg::teardown_owned_by(host_owner(22), &ASPACES, &SINK);
-    round.stop.store(true, Ordering::Relaxed);
-    round.server.join().expect("server thread");
+    round.server.stop();
     for volume in [&outer, &inner] {
         assert!(!shown(volume.name()), "{} retired", volume.name());
         assert_eq!(
@@ -1924,24 +1868,19 @@ fn an_attach_that_does_not_adopt_leaves_its_volume_as_it_is_scenario(
     put(0, path, &amiga_floppy(b"Kept", b"x"));
     let member = plain(MEMBER_UID, STORAGE_GID);
     let (desk, shell) = (ProcId::from_raw([0xA7; 16]), ProcId::from_raw([0xB8; 16]));
-    let open = |session, task| source(MEMBER_UID, path, OpenFlags::READ, session, task);
-    let volume = mounted(attached(
-        facility,
-        &member,
-        open(desk, 0x1A00_00F0),
-        &private(true),
-    ));
+    let open = |session| source(MEMBER_UID, path, OpenFlags::READ, session);
+    let volume = mounted(attached(facility, &member, open(desk), &private(true)));
     let asked = ImageAttach {
         adopt: false,
         ..private(true)
     };
     assert_eq!(
-        attached(facility, &member, open(shell, 0x1A00_00F1), &asked),
+        attached(facility, &member, open(shell), &asked),
         Ok(ImageAttachReply::AlreadyAttached(volume))
     );
     VOLUME_SERVICE.session_ended(&|ended| ended == desk);
     assert_eq!(
-        attached(facility, &member, open(shell, 0x1A00_00F2), &asked),
+        attached(facility, &member, open(shell), &asked),
         Err(Errno::Busy),
         "one owing its teardown is leaving, never answered as there"
     );
@@ -1968,7 +1907,7 @@ fn a_read_only_attach_takes_up_no_writable_volume_scenario(
     let (host_id, round) = host(window_ptr, facility, 33, b"imgs33");
     let member = plain(MEMBER_UID, STORAGE_GID);
     let session = |byte| ProcId::from_raw([byte; 16]);
-    let open = |path: &str, flags, at, task| source(MEMBER_UID, path, flags, session(at), task);
+    let open = |path: &str, flags, at| source(MEMBER_UID, path, flags, session(at));
     let ends = |at| VOLUME_SERVICE.session_ended(&|ended| ended == session(at));
 
     let path = "/Storage/imgs33/Writable.adf";
@@ -1976,7 +1915,7 @@ fn a_read_only_attach_takes_up_no_writable_volume_scenario(
     let writable = mounted(attached(
         facility,
         &member,
-        open(path, read_write(), 0xC1, 0x1A00_0190),
+        open(path, read_write(), 0xC1),
         &private(false),
     ));
     assert!(!writable.read_only());
@@ -1984,7 +1923,7 @@ fn a_read_only_attach_takes_up_no_writable_volume_scenario(
         attached(
             facility,
             &member,
-            open(path, OpenFlags::READ, 0xC2, 0x1A00_0191),
+            open(path, OpenFlags::READ, 0xC2),
             &private(true)
         ),
         Ok(ImageAttachReply::AlreadyAttached(writable))
@@ -2001,7 +1940,7 @@ fn a_read_only_attach_takes_up_no_writable_volume_scenario(
     let owing = mounted(attached(
         facility,
         &member,
-        open(path, read_write(), 0xC3, 0x1A00_0192),
+        open(path, read_write(), 0xC3),
         &private(false),
     ));
     ends(0xC3);
@@ -2009,7 +1948,7 @@ fn a_read_only_attach_takes_up_no_writable_volume_scenario(
         attached(
             facility,
             &member,
-            open(path, OpenFlags::READ, 0xC4, 0x1A00_0193),
+            open(path, OpenFlags::READ, 0xC4),
             &private(true)
         ),
         Err(Errno::Busy),
@@ -2027,14 +1966,14 @@ fn a_read_only_attach_takes_up_no_writable_volume_scenario(
     let locked = mounted(attached(
         facility,
         &member,
-        open(path, OpenFlags::READ, 0xC5, 0x1A00_0194),
+        open(path, OpenFlags::READ, 0xC5),
         &private(true),
     ));
     assert_eq!(
         attached(
             facility,
             &member,
-            open(path, read_write(), 0xC6, 0x1A00_0195),
+            open(path, read_write(), 0xC6),
             &private(false)
         ),
         Ok(ImageAttachReply::AlreadyAttached(locked)),
@@ -2061,7 +2000,7 @@ fn an_image_named_past_the_record_is_listed_cut_scenario(
     let path = std::format!("/Storage/imgs24/{file}");
     put(0, &path, &amiga_floppy(b"WB13", b"x"));
     let member = plain(MEMBER_UID, STORAGE_GID);
-    let open = source(MEMBER_UID, &path, OpenFlags::READ, session(), 0x1A00_0100);
+    let open = source(MEMBER_UID, &path, OpenFlags::READ, session());
     let volume = mounted(attached(facility, &member, open, &private(true)));
     let listed = FS_SERVICE
         .mount_snapshot()
@@ -2105,13 +2044,7 @@ fn a_teardown_failing_beneath_its_volume_waits_for_the_holder_scenario(
         let volume = mounted(attached(
             facility,
             &member,
-            source(
-                MEMBER_UID,
-                &path,
-                read_write(),
-                held_in,
-                0x1A00_0120 + u64::from(depth),
-            ),
+            source(MEMBER_UID, &path, read_write(), held_in),
             &private(false),
         ));
         dir = std::format!("/Storage/{}", volume.name());
@@ -2166,7 +2099,7 @@ fn an_image_held_as_its_volume_is_pulled_leaves_with_what_lies_on_it_scenario(
     let outer = mounted(attached(
         facility,
         &member,
-        source(MEMBER_UID, outer_path, read_write(), session(), 0x1A00_0130),
+        source(MEMBER_UID, outer_path, read_write(), session()),
         &private(false),
     ));
     let inner_path = std::format!("/Storage/{}/held.hdf", outer.name());
@@ -2174,19 +2107,12 @@ fn an_image_held_as_its_volume_is_pulled_leaves_with_what_lies_on_it_scenario(
     let inner = mounted(attached(
         facility,
         &member,
-        source(
-            MEMBER_UID,
-            &inner_path,
-            OpenFlags::READ,
-            session(),
-            0x1A00_0131,
-        ),
+        source(MEMBER_UID, &inner_path, OpenFlags::READ, session()),
         &private(true),
     ));
     VOLUME_SERVICE.while_image_held(&outer.volume_id, || {
         tairix_kernel_core::callreg::teardown_owned_by(host_owner(26), &ASPACES, &SINK);
-        round.stop.store(true, Ordering::Relaxed);
-        round.server.join().expect("server thread");
+        round.server.stop();
         assert!(
             shown(outer.name()) && shown(inner.name()),
             "its holder retires it as it lets go"
@@ -2210,25 +2136,21 @@ fn a_name_an_image_awaits_its_driver_under_is_held_for_it_scenario(
     let (host_id, round) = host(window_ptr, facility, 27, b"imgs27");
     let path = "/Storage/imgs27/Late.adf";
     put(0, path, &amiga_floppy(b"Late", b"x"));
-    let attach = thread::spawn(move || {
+    let attach = HostBoot::current().spawn(move || {
         let asked = ImageAttach {
             name: Some("held27"),
             ..private(true)
         };
         answered(
             &plain(MEMBER_UID, STORAGE_GID),
-            source(MEMBER_UID, path, OpenFlags::READ, session(), 0x1A00_0140),
+            source(MEMBER_UID, path, OpenFlags::READ, session()),
             &asked,
         )
     });
     // Published once its name is judged free; a device asks for that name
     // before the image's driver is started.
-    let (node, volume, fstype) = loop {
-        if let Some(published) = undriven_volume_nodes(IMAGE_VOLUMES_NODE_ID).pop() {
-            break published;
-        }
-        thread::yield_now();
-    };
+    let (node, volume, fstype) =
+        on_tree_changes(|| undriven_volume_nodes(IMAGE_VOLUMES_NODE_ID).pop());
     let (device, _) = fat32_image(0x1A6E_0000 + 28, b"device");
     let refused = insert(
         window_ptr,
@@ -2247,10 +2169,9 @@ fn a_name_an_image_awaits_its_driver_under_is_held_for_it_scenario(
         Err(Errno::AlreadyExists),
         "held for the image"
     );
-    refused.stop.store(true, Ordering::Relaxed);
-    refused.server.join().expect("server thread");
+    refused.server.stop();
     start_driver(facility, node, volume, fstype);
-    let image = mounted(attach.join().expect("the attach"));
+    let image = mounted(attach.join());
     assert_eq!(image.name(), "held27");
     eject(&image, DetachMode::Plain, &plain(MEMBER_UID, STORAGE_GID)).expect("ejects");
     retire(host_id, DetachMode::Plain, round);
@@ -2266,7 +2187,6 @@ fn an_image_through_a_bind(
     facility: &'static TestFacility,
     host_at: (u32, &'static [u8]),
     labels: [&'static [u8]; 3],
-    task: u64,
 ) -> (([u8; 16], Inserted), [AttachReply; 3], String) {
     let (n, host_name) = host_at;
     let hosted = host(window_ptr, facility, n, host_name);
@@ -2286,11 +2206,11 @@ fn an_image_through_a_bind(
         &amiga_volume(4096, carry_label, b"x"),
     );
     let member = member();
-    let open = |path: &str, task| source(MEMBER_UID, path, read_write(), session(), task);
+    let open = |path: &str| source(MEMBER_UID, path, read_write(), session());
     let stand = mounted(attached(
         facility,
         &member,
-        open(&std::format!("{host_dir}/stand.hdf"), task),
+        open(&std::format!("{host_dir}/stand.hdf")),
         &private(false),
     ));
     let over = std::format!("/Storage/{}/mnt", stand.name());
@@ -2300,7 +2220,7 @@ fn an_image_through_a_bind(
     let carry = mounted(attached(
         facility,
         &member,
-        open(&std::format!("{host_dir}/carry.hdf"), task + 1),
+        open(&std::format!("{host_dir}/carry.hdf")),
         &ImageAttach {
             target: Some(over.as_str()),
             ..private(false)
@@ -2308,24 +2228,19 @@ fn an_image_through_a_bind(
     ));
     let through = std::format!("{over}/inner.hdf");
     put(MEMBER_UID, &through, &amiga_volume(64, inner_label, b"x"));
-    let inner = mounted(attached(
-        facility,
-        &member,
-        open(&through, task + 2),
-        &private(false),
-    ));
+    let inner = mounted(attached(facility, &member, open(&through), &private(false)));
     (hosted, [stand, carry, inner], over)
 }
 
 /// What `inner.hdf` on `carry` holds in its `ReadMe`, read through a fresh
 /// read-only attach.
-fn carried_text(facility: &'static TestFacility, carry: &AttachReply, task: u64) -> Vec<u8> {
+fn carried_text(facility: &'static TestFacility, carry: &AttachReply) -> Vec<u8> {
     let path = std::format!("/Storage/{}/inner.hdf", carry.name());
     let member = member();
     let again = mounted(attached(
         facility,
         &member,
-        source(MEMBER_UID, &path, OpenFlags::READ, session(), task),
+        source(MEMBER_UID, &path, OpenFlags::READ, session()),
         &private(true),
     ));
     let mut buf = [0u8; 16];
@@ -2352,7 +2267,6 @@ fn an_image_opened_through_a_bind_outlives_its_unbind_scenario(
         facility,
         (29, b"imgs29"),
         [b"Ramp", b"Barrow", b"Parcel"],
-        0x1A00_0160,
     );
     let member = member();
     FS_SERVICE
@@ -2361,7 +2275,7 @@ fn an_image_opened_through_a_bind_outlives_its_unbind_scenario(
     let readme = std::format!("/Storage/{}/ReadMe", inner.name());
     assert_eq!(write_as(MEMBER_UID, &readme, 0, b"unbound"), Ok(7));
     eject(&inner, DetachMode::Plain, &member).expect("ejects, flushed");
-    assert_eq!(carried_text(facility, &carry, 0x1A00_0163), b"unbound");
+    assert_eq!(carried_text(facility, &carry), b"unbound");
     eject(&carry, DetachMode::Plain, &member).expect("ejects");
     eject(&stand, DetachMode::Plain, &member).expect("ejects");
     retire(host_id, DetachMode::Plain, round);
@@ -2378,14 +2292,13 @@ fn an_image_opened_through_a_bind_outlives_the_volume_it_stood_in_scenario(
         facility,
         (30, b"imgs30"),
         [b"Plinth", b"Satchel", b"Packet"],
-        0x1A00_0168,
     );
     let member = member();
     eject(&stand, DetachMode::Force, &member).expect("forced out, its bind withdrawn with it");
     let readme = std::format!("/Storage/{}/ReadMe", inner.name());
     assert_eq!(write_as(MEMBER_UID, &readme, 0, b"ejected"), Ok(7));
     eject(&inner, DetachMode::Plain, &member).expect("ejects, flushed");
-    assert_eq!(carried_text(facility, &carry, 0x1A00_016B), b"ejected");
+    assert_eq!(carried_text(facility, &carry), b"ejected");
     eject(&carry, DetachMode::Plain, &member).expect("ejects");
     retire(host_id, DetachMode::Plain, round);
 }
@@ -2451,7 +2364,7 @@ fn an_archive_without_its_directory_attaches_read_only_scenario(
     let volume = mounted(attached(
         facility,
         &member,
-        source(MEMBER_UID, path, read_write(), session(), 0x1A00_0100),
+        source(MEMBER_UID, path, read_write(), session()),
         &private(false),
     ));
     assert_eq!(mount_record(b"notes.tar").fstype_bytes(), b"tar");
@@ -2476,7 +2389,7 @@ fn an_archive_is_written_by_replacing_its_file_scenario(
     let path = "/Storage/imgs35/notes.tar";
     put(MEMBER_UID, path, &tar(&[(b"ReadMe", b"before")]));
     let member = plain(MEMBER_UID, STORAGE_GID);
-    let mut from = source(MEMBER_UID, path, read_write(), session(), 0x1A00_0101);
+    let mut from = source(MEMBER_UID, path, read_write(), session());
     from.directory = Some(directory(MEMBER_UID, "/Storage/imgs35", "notes.tar"));
     let attach = ImageAttach {
         file_name: Some("notes.tar"),
@@ -2524,7 +2437,7 @@ fn an_archives_work_files_grow_only_by_what_is_written_scenario(
     let path = "/Storage/imgs36/notes.tar";
     put(MEMBER_UID, path, &tar(&[(b"ReadMe", b"before")]));
     let member = plain(MEMBER_UID, STORAGE_GID);
-    let mut from = source(MEMBER_UID, path, read_write(), session(), 0x1A00_0102);
+    let mut from = source(MEMBER_UID, path, read_write(), session());
     from.directory = Some(directory(MEMBER_UID, "/Storage/imgs36", "notes.tar"));
     let attach = ImageAttach {
         file_name: Some("notes.tar"),
@@ -2577,7 +2490,7 @@ fn an_archives_lost_driver_leaves_no_work_files_scenario(
     let path = "/Storage/imgs38/notes.tar";
     put(MEMBER_UID, path, &tar(&[(b"ReadMe", b"before")]));
     let member = plain(MEMBER_UID, STORAGE_GID);
-    let mut from = source(MEMBER_UID, path, read_write(), session(), 0x1A00_0104);
+    let mut from = source(MEMBER_UID, path, read_write(), session());
     from.directory = Some(directory(MEMBER_UID, "/Storage/imgs38", "notes.tar"));
     let attach = ImageAttach {
         file_name: Some("notes.tar"),
@@ -2654,7 +2567,7 @@ fn an_archive_reached_through_a_read_only_view_attaches_read_only_scenario(
         )
         .expect("a read-only view of the shelf");
     let member = plain(MEMBER_UID, STORAGE_GID);
-    let mut from = source(MEMBER_UID, path, read_write(), session(), 0x1A00_0103);
+    let mut from = source(MEMBER_UID, path, read_write(), session());
     from.directory = Some(directory(MEMBER_UID, "/Storage/shelf37", "notes.tar"));
     let attach = ImageAttach {
         file_name: Some("notes.tar"),
@@ -2674,7 +2587,8 @@ fn an_archive_reached_through_a_read_only_view_attaches_read_only_scenario(
 /// written through its driver, listed at once and carried in its file to the
 /// next attach, while its catalog name and its identity stay, so its file
 /// attached again is the volume attached already; a held volume, a read-only
-/// one, a format keeping no title and a device's volume are refused.
+/// one and a format keeping no title are refused, and the image's owner holds
+/// no authority over the device its file lies on.
 fn an_image_is_retitled_by_its_owner_alone_scenario(
     window_ptr: *mut u8,
     facility: &'static TestFacility,
@@ -2683,7 +2597,7 @@ fn an_image_is_retitled_by_its_owner_alone_scenario(
     let path = "/Storage/imgs40/Retitled.adf";
     put(0, path, &amiga_floppy(b"Before", b"titled"));
     let owner = plain(MEMBER_UID, STORAGE_GID);
-    let open = |flags| source(MEMBER_UID, path, flags, session(), 0x1A00_01A0);
+    let open = |flags| source(MEMBER_UID, path, flags, session());
     let retitle = |caller: &Principal<'_>, id: &[u8; 16], title: &str| {
         VOLUME_SERVICE.retitle(caller, id, &VolumeTitle::new(title).expect("a title"))
     };
@@ -2725,7 +2639,7 @@ fn an_image_is_retitled_by_its_owner_alone_scenario(
         "its catalog name stays while it is attached"
     );
     assert_eq!(
-        audited(IMAGE_RETITLE_REFUSED, "before"),
+        audited(VOLUME_RETITLE_REFUSED, "before"),
         [
             Some(String::from("not_owner")),
             Some(String::from("not_owner")),
@@ -2733,7 +2647,7 @@ fn an_image_is_retitled_by_its_owner_alone_scenario(
         ]
     );
     assert_eq!(
-        audited(IMAGE_VOLUME_RETITLED, "before"),
+        audited(VOLUME_RETITLED, "before"),
         [Some(String::from("owner"))]
     );
     eject(&volume, DetachMode::Plain, &owner).expect("its owner ejects it");
@@ -2756,7 +2670,7 @@ fn an_image_is_retitled_by_its_owner_alone_scenario(
     let iso = mounted(attached(
         facility,
         &owner,
-        source(MEMBER_UID, disc, OpenFlags::READ, session(), 0x1A00_01A1),
+        source(MEMBER_UID, disc, OpenFlags::READ, session()),
         &private(true),
     ));
     assert_eq!(
@@ -2766,9 +2680,84 @@ fn an_image_is_retitled_by_its_owner_alone_scenario(
     );
     eject(&iso, DetachMode::Plain, &owner).expect("its owner ejects it");
     assert_eq!(
-        retitle(&admin(), &host_id, "Host"),
-        Err(Errno::NotSupported),
-        "a device's volume is no one's to retitle"
+        retitle(&owner, &host_id, "HOST"),
+        Err(Errno::PermissionDenied),
+        "an image's owner holds no authority over the device its file lies on"
     );
+    retire(host_id, DetachMode::Plain, round);
+}
+
+/// The mount authority widens no image's target: an administrator's attach
+/// keeps an owner's rules, so it shows its volume neither over another user's
+/// folder holding files nor in the catalog, and is taken back before it
+/// answers.
+fn an_administrators_image_target_keeps_an_owners_rules_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (host_id, round) = host(window_ptr, facility, 41, b"imgs41");
+    put(
+        0,
+        "/Storage/imgs41/commons.adf",
+        &amiga_floppy(b"Commons", b"commons"),
+    );
+    put(
+        0,
+        "/Storage/imgs41/visitor.adf",
+        &amiga_floppy(b"Visitor", b"visitor"),
+    );
+    let administrator = admin();
+    // Shown as the member's, so the member's folder there is one the
+    // administrator reaches and does not own.
+    let commons = mounted(attached(
+        facility,
+        &administrator,
+        source(0, "/Storage/imgs41/commons.adf", read_write(), session()),
+        &ImageAttach {
+            presentation: Presentation::Explicit {
+                uid: MEMBER_UID,
+                gid: STORAGE_GID,
+                dir_mode: 0o755,
+                file_mode: 0o644,
+            },
+            ..private(false)
+        },
+    ));
+    let folder = std::format!("/Storage/{}/kept", commons.name());
+    FS_SERVICE
+        .mkdir(MEMBER_UID, &NoCaps, root(&folder), new_dir())
+        .expect("the member's own folder");
+    let notes = std::format!("{folder}/notes");
+    put(MEMBER_UID, &notes, b"notes");
+    for target in [folder.as_str(), "/Storage/visitors41"] {
+        assert_eq!(
+            attached(
+                facility,
+                &administrator,
+                source(0, "/Storage/imgs41/visitor.adf", OpenFlags::READ, session()),
+                &ImageAttach {
+                    target: Some(target),
+                    ..private(true)
+                },
+            ),
+            Ok(ImageAttachReply::TargetRefused(Errno::PermissionDenied)),
+            "{target}"
+        );
+    }
+    assert_eq!(
+        audited(IMAGE_ATTACH_REFUSED, "visitor.adf"),
+        [
+            Some(String::from("target_refused")),
+            Some(String::from("target_refused"))
+        ]
+    );
+    assert!(
+        !shown("visitors41") && !shown("visitor") && !VOLUME_SERVICE.owes(),
+        "a refused target takes the attach back before it answers"
+    );
+    let mut buf = [0u8; 16];
+    let read = read_as(MEMBER_UID, &notes, 0, &mut buf).expect("the member's file stands");
+    assert_eq!(&buf[..read], b"notes");
+    eject(&commons, DetachMode::Plain, &administrator).expect("ejects");
     retire(host_id, DetachMode::Plain, round);
 }

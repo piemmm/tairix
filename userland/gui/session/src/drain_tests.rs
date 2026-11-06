@@ -6,7 +6,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
+use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PhysicalKey};
 use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::{
     AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuSymbol,
@@ -19,6 +19,7 @@ use tairix_taskbar::TaskbarResponse;
 use tairix_window::DragConclusion;
 use tairix_wm::{Compositor, InputEvent, InputResponse, Point};
 
+use crate::capture::{BarPart, CaptureController, CaptureWork};
 use crate::clipboard::SessionClipboard;
 use crate::drag::{DragEnd, DragPlace, DragSurface, ItemsEnd, OwedReport, SlotAnswer};
 use crate::drain::{
@@ -133,6 +134,10 @@ impl SeatRouter for Program {
             .present_menu_chain(seat.compositor, seat.menu, None);
         let scale = seat.compositor.scale();
         for (owner, outcome) in seat.menu.take_answers() {
+            if owner == ChainOwner::Capture {
+                seat.capture.menu_answered(&outcome);
+                continue;
+            }
             if let (ChainOwner::Bar(subject), ChainOutcome::Chosen(item)) = (owner, outcome) {
                 if let Some(response) = seat
                     .shell
@@ -223,6 +228,7 @@ fn char_key(c: char) -> KeyInput {
     KeyInput::Pressed {
         key: KeyValue::Char(c),
         modifiers: AbiModifiers::default(),
+        physical: PhysicalKey::UNKNOWN,
     }
 }
 
@@ -230,6 +236,7 @@ fn named_key(named: NamedKeyCode) -> KeyInput {
     KeyInput::Pressed {
         key: KeyValue::Named(named),
         modifiers: AbiModifiers::default(),
+        physical: PhysicalKey::UNKNOWN,
     }
 }
 
@@ -249,6 +256,7 @@ struct Desk {
     menu: MenuChain,
     lock: ScreenLock,
     clipboard: SessionClipboard<()>,
+    capture: CaptureController,
 }
 
 impl Desk {
@@ -259,6 +267,7 @@ impl Desk {
             menu: MenuChain::new(),
             lock: ScreenLock::new(),
             clipboard: SessionClipboard::new(()),
+            capture: CaptureController::new(tairix_wallpaper::CaptureSettings::default()),
         }
     }
 
@@ -269,6 +278,7 @@ impl Desk {
             menu: &mut self.menu,
             lock: &mut self.lock,
             clipboard: &mut self.clipboard,
+            capture: &mut self.capture,
         }
     }
 
@@ -400,6 +410,7 @@ fn notes() -> DragItems {
         [tairix_abi::window_ipc::DragPicture {
             icon: tairix_abi::window_ipc::IconAsset::new("text").expect("a valid asset id"),
             from: None,
+            own: None,
         }],
     )
     .expect("one file")
@@ -815,6 +826,7 @@ fn a_clipboard_chord_reaches_a_chains_open_entry_field() {
             ctrl: true,
             ..AbiModifiers::default()
         },
+        physical: PhysicalKey::UNKNOWN,
     };
     let mut program = Program::new();
     desk.wake(
@@ -1172,6 +1184,7 @@ fn secure_attention() -> KeyInput {
             alt: true,
             ..AbiModifiers::default()
         },
+        physical: PhysicalKey::UNKNOWN,
     }
 }
 
@@ -1247,4 +1260,109 @@ fn while_the_prompt_is_up_every_key_is_its_and_the_attention_key_answers_on_it()
         "nothing is offered before the listing lands"
     );
     assert!(prompt.is_up());
+}
+
+fn capture_chord(physical: PhysicalKey) -> KeyInput {
+    KeyInput::Pressed {
+        key: KeyValue::Char('#'),
+        modifiers: AbiModifiers {
+            shift: true,
+            meta: true,
+            ..AbiModifiers::default()
+        },
+        physical,
+    }
+}
+
+#[test]
+fn a_capture_chord_reaches_the_capture_before_the_shell_and_escape_ends_it() {
+    let mut desk = Desk::new((shell(), compositor()));
+    let mut program = Program::new();
+    let mut keys = keyboard(&[capture_chord(PhysicalKey::DIGIT_5)]);
+    desk.wake(&mut MemoryInput::new(&[]), &mut keys, &mut program)
+        .expect("in-memory sources do not fault");
+    assert_eq!(desk.capture.holding_name(), "bar");
+    assert!(program.routed.is_empty(), "the shell never saw the chord");
+    let mut keys = keyboard(&[named_key(NamedKeyCode::Escape), char_key('x')]);
+    desk.wake(&mut MemoryInput::new(&[]), &mut keys, &mut program)
+        .expect("in-memory sources do not fault");
+    assert_eq!(desk.capture.holding_name(), "idle");
+    assert_eq!(queued_keys(&keys), 0);
+    assert_eq!(
+        program.routed.len(),
+        1,
+        "what follows reaches the shell, as after a chain it closes"
+    );
+    assert_eq!(program.routed[0].1, Some(char_key('x')));
+}
+
+#[test]
+fn a_chord_while_the_capture_menu_is_open_ends_the_menu_and_the_bar() {
+    let mut desk = Desk::new((shell(), compositor()));
+    let mut program = Program::new();
+    let mut keys = keyboard(&[capture_chord(PhysicalKey::DIGIT_5)]);
+    desk.wake(&mut MemoryInput::new(&[]), &mut keys, &mut program)
+        .expect("in-memory sources do not fault");
+    let at = desk
+        .capture
+        .bar_part_centre(BarPart::Options, &desk.comp)
+        .expect("the bar is up");
+    let mut pointer = MemoryInput::new(&[moved(at.x, at.y), PRIMARY_PRESS, PRIMARY_RELEASE]);
+    desk.wake(&mut pointer, &mut keyboard(&[]), &mut program)
+        .expect("in-memory sources do not fault");
+    assert!(desk.menu.is_open(), "the Options menu is the seat's chain");
+    let mut keys = keyboard(&[capture_chord(PhysicalKey::DIGIT_3)]);
+    desk.wake(&mut MemoryInput::new(&[]), &mut keys, &mut program)
+        .expect("in-memory sources do not fault");
+    assert!(!desk.menu.is_open());
+    assert_eq!(
+        desk.capture.holding_name(),
+        "idle",
+        "the chord cancelled the bar"
+    );
+    assert!(desk.capture.take_work().is_empty());
+}
+
+#[test]
+fn no_capture_chord_is_taken_while_the_screen_is_locked() {
+    let mut desk = Desk::new((shell(), compositor()));
+    assert!(desk
+        .lock
+        .engage(("ann", "ann"), &desk.shell, &mut desk.comp));
+    let mut program = Program::new();
+    let mut keys = keyboard(&[capture_chord(PhysicalKey::DIGIT_3)]);
+    desk.wake(&mut MemoryInput::new(&[]), &mut keys, &mut program)
+        .expect("in-memory sources do not fault");
+    assert!(desk.capture.take_work().is_empty());
+    assert_eq!(queued_keys(&keys), 1, "the key stays the lock's");
+}
+
+#[test]
+fn a_screen_chord_is_a_still_and_a_press_rings_only_while_clicks_are_shown() {
+    use tairix_abi::driver::display::RefreshRate;
+
+    let mut desk = Desk::new((shell(), compositor()));
+    let mut program = Program::new();
+    let mut keys = keyboard(&[capture_chord(PhysicalKey::DIGIT_3)]);
+    desk.wake(&mut MemoryInput::new(&[]), &mut keys, &mut program)
+        .expect("in-memory sources do not fault");
+    assert!(desk
+        .capture
+        .take_work()
+        .iter()
+        .any(|work| matches!(work, CaptureWork::Still(_))));
+    let rung = |desk: &Desk| {
+        desk.shell
+            .pointer_aids_park_deadline_ns(0, u64::MAX, RefreshRate::ASSUMED)
+            < u64::MAX
+    };
+    let mut press = MemoryInput::new(&[moved(5, 5), PRIMARY_PRESS, PRIMARY_RELEASE]);
+    desk.wake(&mut press, &mut keyboard(&[]), &mut program)
+        .expect("in-memory sources do not fault");
+    assert!(!rung(&desk), "no recording shows clicks");
+    desk.capture.ring_clicks(true);
+    let mut press = MemoryInput::new(&[PRIMARY_PRESS, PRIMARY_RELEASE]);
+    desk.wake(&mut press, &mut keyboard(&[]), &mut program)
+        .expect("in-memory sources do not fault");
+    assert!(rung(&desk), "the press rings the pointer");
 }

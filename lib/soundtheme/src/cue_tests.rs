@@ -11,11 +11,20 @@ use super::{
 };
 use crate::{Answer, CueOutcome, Silence, SoundEvent};
 
+/// A policy's file slots: one an event.
+const EVENTS: usize = SoundEvent::ALL.len();
+
 /// What a request asked, owned past the frame it was decoded from.
 #[derive(Debug, Eq, PartialEq)]
 enum Asked {
-    Cue { event: SoundEvent, answer: Answer },
-    Policy { document: String, files: [u64; 13] },
+    Cue {
+        event: SoundEvent,
+        answer: Answer,
+    },
+    Policy {
+        document: String,
+        files: [u64; EVENTS],
+    },
 }
 
 fn asked(request: &[u8]) -> Result<Asked, Errno> {
@@ -293,7 +302,7 @@ fn a_caller_with_every_slot_out_is_refused_and_a_refused_post_holds_none() {
 /// one at a time, and its status is what it comes to.
 #[test]
 fn a_posted_push_carries_its_document_and_files_and_reads_the_status() {
-    let mut files = [0u64; 13];
+    let mut files = [0u64; EVENTS];
     files[SoundEvent::Error.index()] = 9;
     for status in [Ok(()), Err(Errno::SeatNotOwner), Err(Errno::OutOfRange)] {
         let mut posts = Posts::default();
@@ -317,7 +326,7 @@ fn a_posted_push_carries_its_document_and_files_and_reads_the_status() {
             )]
         );
         assert_eq!(
-            cues.push(&mut posts, "", [0; 13], POLICY_ANSWER_DEADLINE_NS),
+            cues.push(&mut posts, "", [0; EVENTS], POLICY_ANSWER_DEADLINE_NS),
             Err(Errno::Busy),
             "one push at a time"
         );
@@ -346,7 +355,7 @@ fn a_push_and_a_cue_share_one_wake_and_are_given_up_together() {
         CUE_ANSWER_DEADLINE_NS,
     )
     .expect("posted");
-    cues.push(&mut posts, "", [0; 13], POLICY_ANSWER_DEADLINE_NS)
+    cues.push(&mut posts, "", [0; EVENTS], POLICY_ANSWER_DEADLINE_NS)
         .expect("posted");
     assert_eq!(posts.watches, [true]);
     posts.answers.push((100, Ok(CueOutcome::Played)));
@@ -366,7 +375,7 @@ fn a_push_no_request_can_carry_is_never_posted() {
         cues.push(
             &mut posts,
             "sound.theme = a\tb\n",
-            [0; 13],
+            [0; EVENTS],
             POLICY_ANSWER_DEADLINE_NS
         ),
         Err(Errno::OutOfRange)

@@ -18,7 +18,7 @@ session, `Shutdown` outlives them, and a headless machine has none.
 | Event class | Played for | Admitted when |
 |---|---|---|
 | Lifecycle (`Startup`, `Shutdown`, `Login`, `Logout`, `DeviceAttached`, `DeviceDetached`) | the machine (`Tenancy::Machine`) | the caller owns the transition (`SoundEvent::owned_by`); otherwise `PermissionDenied`, recorded as `CUE_REFUSED` |
-| Application (`Notification`, `NotificationMessage`, `NotificationReminder`, `Error`, `Warning`, `Info`, `Bell`) | the caller's login session (`Tenancy::Session`), or none for a daemon | `audiod` admits the stream: only while that session holds the room, so its `SeatNotOwner` is the caller's answer |
+| Application (`Notification`, `NotificationMessage`, `NotificationReminder`, `Error`, `Warning`, `Info`, `Bell`, `VolumeFeedback`) | the caller's login session (`Tenancy::Session`), or none for a daemon | `audiod` admits the stream: only while that session holds the room, so its `SeatNotOwner` is the caller's answer |
 
 No new capability: the check is the caller's attested pid, uid or capability
 summary, and the room is `audiod`'s to judge.
@@ -86,13 +86,14 @@ nothing that makes a sound waits for one (`plans/SOUND.md` SND22).
 | `DeviceAttached`, `DeviceDetached` | the device manager | a removable device arriving on, or leaving, a running machine ([hardware detection](../drivers/hardware-detection.md)) |
 | `Notification`, `Warning`, `Error` | the desktop session | a notification newly shown in the icon bar's area, by severity: information and success, a warning, a critical one; replacing one already shown is silent |
 | `Bell` | `terminal.app` | the hosted program rings the bell (`^G`), once per batch of output |
+| `VolumeFeedback` | Settings and the desktop session | a change to the default output's volume settles — a drag released, a key step, an unmute — and the audio service lists it applied |
 
 A cue that cannot be posted is given up on at once; a cue site never retries.
 
 ## What a cue resolves to
 
-`tairix_soundtheme::resolve`, in one order: nothing if the event or every sound
-is off; the file chosen for the event — the session's own, else the
+`tairix_soundtheme::resolve`, in one order: nothing if the event is off, or if
+it is a sound effect and every effect is; the file chosen for the event — the session's own, else the
 replacement the machine's document names, which this service reads itself; the
 active theme's asset; the shipped theme's; otherwise silence. A chosen file
 that cannot be read is `Undecodable`, never covered by the theme's. A cue that
@@ -138,7 +139,8 @@ A cue opens its stream on the default sink at the asset's own format and rate,
 with a ring of the whole sound up to the ring bound; a longer sound is refilled
 as the device frees room and drained once queued. A shipped sound is 48 kHz at
 unity gain, so it reaches the device bit-exact; the settings' one gain is the
-stream's. A stream that is told the room moved, the device went, or its ring
+stream's, but for the volume's feedback, which sounds at unity so the output's
+own level is what is heard. A stream that is told the room moved, the device went, or its ring
 broke ends the cue; one that has not played out by its length plus a second is
 stopped (`CUE_CUT`). What a cue's mailbox holds is always read before its
 deadline is kept, so a cue that played out while the authority was busy is

@@ -995,9 +995,10 @@ reserved Switchboard slot. What now stands:
   is inert (a live readout, not an action target) except the volume signal's,
   which opens the modal `SoundPanel` (`plans/SOUND.md` §Desktop integration):
   the default sink's level slider and mute toggle, live while dragged and
-  settled where released (`TaskbarResponse::Sound`), drawn under an Authority
-  Mark when another session's room holds the sink. A card is click-to-dismiss
-  → `TaskbarResponse::DismissNotification`.
+  settled where released (`TaskbarResponse::Sound`) — a settled change heard
+  at its new level once applied (`plans/SOUND.md` SND25) — drawn under an
+  Authority Mark when another session's room holds the sink. A card is
+  click-to-dismiss → `TaskbarResponse::DismissNotification`.
 - **The session (`userland/gui/session`)** — binds and serves `NOTIFY_ENDPOINT`
   in the desktop run loop, attests each producer via kernel `call_peer_origin`
   (never the wire), relays raise/clear through `DesktopShell::apply_notify`,

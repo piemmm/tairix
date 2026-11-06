@@ -169,8 +169,8 @@ fn placement_walks_only_what_the_window_has_handed_out() {
     }
     assert_eq!(map.overlapping(window.clone()).count(), 3);
     assert_eq!(map.len(), 3, "one entry per run, none per slot");
-    assert_eq!(map.place(window.clone(), 90, ()), Some(10..100));
-    assert_eq!(map.place(window.clone(), 91, ()), Some(210..301));
+    assert_eq!(map.place(window.clone(), 90, ()), Ok(Some(10..100)));
+    assert_eq!(map.place(window.clone(), 91, ()), Ok(Some(210..301)));
     assert_eq!(map.overlapping(window).count(), 5);
 }
 
@@ -178,19 +178,19 @@ fn placement_walks_only_what_the_window_has_handed_out() {
 fn place_hands_out_a_run_and_reuses_what_is_released() {
     let mut map: RangeMap<usize, u32> = RangeMap::new();
     let window = 0..64;
-    assert_eq!(map.place(window.clone(), 4, 1), Some(0..4));
-    assert_eq!(map.place(window.clone(), 4, 2), Some(4..8));
+    assert_eq!(map.place(window.clone(), 4, 1), Ok(Some(0..4)));
+    assert_eq!(map.place(window.clone(), 4, 2), Ok(Some(4..8)));
     assert_eq!(map.remove(0), Some((0..4, 1)));
     assert_eq!(
         map.place(window.clone(), 4, 3),
-        Some(0..4),
+        Ok(Some(0..4)),
         "the released run is reused"
     );
     // A request the window cannot hold places nothing and leaves the map
     // exactly as it was.
-    assert_eq!(map.place(window.clone(), 57, 4), None);
+    assert_eq!(map.place(window.clone(), 57, 4), Ok(None));
     assert_eq!(map.len(), 2);
-    assert_eq!(map.place(window, 56, 4), Some(8..64));
+    assert_eq!(map.place(window, 56, 4), Ok(Some(8..64)));
 }
 
 #[test]
@@ -244,6 +244,10 @@ fn an_error_states_which_refusal_it_was() {
         RangeError::Overlap.to_string(),
         "the range overlaps one already held"
     );
+    assert_eq!(
+        RangeError::Alloc(TryReserveError::AllocFailed).to_string(),
+        "no memory to record the range"
+    );
 }
 
 #[test]
@@ -273,16 +277,55 @@ fn remove_range_splits_the_identities_it_cuts_and_reports_what_it_dropped() {
     map.insert(10..20, ()).expect("fits");
 
     // A cut through the middle of one range leaves both ends.
-    assert_eq!(map.remove_range(2..5), 3);
+    assert_eq!(map.remove_range(2..5), Ok(3));
     assert_eq!(ranges(&map), [(0, 2), (5, 10), (10, 20)]);
 
     // A cut spanning two abutting ranges takes part of each.
-    assert_eq!(map.remove_range(8..12), 4);
+    assert_eq!(map.remove_range(8..12), Ok(4));
     assert_eq!(ranges(&map), [(0, 2), (5, 8), (12, 20)]);
 
     // Elements the map does not hold are not counted as dropped, and an
     // empty cut drops nothing.
-    assert_eq!(map.remove_range(2..6), 1);
-    assert_eq!(map.remove_range(3..3), 0);
+    assert_eq!(map.remove_range(2..6), Ok(1));
+    assert_eq!(map.remove_range(3..3), Ok(0));
     assert_eq!(ranges(&map), [(0, 2), (6, 8), (12, 20)]);
+}
+
+#[test]
+fn a_cut_across_several_ranges_trims_takes_and_refiles() {
+    let mut map: RangeMap<u64, ()> = RangeMap::new();
+    for start in [0, 10, 20, 30] {
+        map.insert(start..start + 8, ()).expect("disjoint");
+    }
+    // The first keeps its head, the two inside go whole, and the last keeps
+    // its tail filed under the cut's end.
+    assert_eq!(map.remove_range(5..33), Ok(3 + 8 + 8 + 3));
+    assert_eq!(ranges(&map), [(0, 5), (33, 38)]);
+    assert_eq!(map.get(33).map(|(held, ())| held), Some(33..38));
+    assert!(
+        map.get(30).is_none(),
+        "the tail is filed under its new start"
+    );
+}
+
+/// What a map holds is counted with the room reserved, and a shrink gives
+/// back what its ranges do not need, every range and value where it was.
+#[test]
+fn reserved_room_is_counted_until_a_shrink_gives_it_back() {
+    let mut map: RangeMap<u64, u32> = RangeMap::new();
+    assert_eq!(map.allocated_bytes(), 0, "an empty map holds nothing");
+    for slot in 0..64u32 {
+        let start = u64::from(slot) * 4;
+        map.insert(start..start + 2, slot).expect("disjoint");
+    }
+    map.try_shrink_to_fit().expect("fits");
+    let fitted = map.allocated_bytes();
+    map.try_reserve(256).expect("room");
+    assert!(map.allocated_bytes() > fitted, "reserved room is held");
+    map.try_shrink_to_fit().expect("fits");
+    assert_eq!(map.allocated_bytes(), fitted, "and given back");
+    assert_eq!(
+        map.covering(41).map(|(held, &slot)| (held, slot)),
+        Some((40..42, 10))
+    );
 }

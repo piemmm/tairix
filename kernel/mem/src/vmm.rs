@@ -21,16 +21,16 @@
 //!
 //! # Host-testability
 //!
-//! A `HostPageTable` test double — a `BTreeMap<Page, (Frame, MapFlags)>` —
+//! A `HostPageTable` test double — an ordered map of leaves by address —
 //! is provided under `#[cfg(test)]`. It exercises every public path of
 //! [`AddressSpace`] on a developer workstation without ever touching a
 //! real CPU page table.
 
-use alloc::collections::BTreeMap;
 use core::fmt;
 
 use tairix_arch_api::mmu::{AccessTracking, AddressSpace as HalAddressSpace, MapError, PageFlags};
 use tairix_arch_api::tlb::TlbShootdown;
+use tairix_collections::OrderedMap;
 
 use crate::error::AllocError;
 use crate::frame::{Frame, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
@@ -342,7 +342,7 @@ pub struct AddressSpace<P: PageTable> {
     /// Mirrors the trait's state for accounting / leak-detection and to
     /// give `AddressSpace` a useful `Drop`. Kept page-keyed
     /// independently of the underlying table for cheap iteration.
-    live: BTreeMap<Page, MapFlags>,
+    live: OrderedMap<Page, MapFlags>,
     /// The other CPUs a cleared entry must be discarded on; [`None`] for a
     /// space no dispatcher makes active.
     tlb: Option<SpaceTlb>,
@@ -358,7 +358,7 @@ impl<P: PageTable> AddressSpace<P> {
     pub fn new(table: P) -> Self {
         Self {
             table,
-            live: BTreeMap::new(),
+            live: OrderedMap::new(),
             tlb: None,
         }
     }
@@ -390,19 +390,43 @@ impl<P: PageTable> AddressSpace<P> {
     /// # Errors
     ///
     /// [`PageTableError::AlreadyMapped`] if this layer already records a
-    /// mapping for `page`; otherwise propagates the bridged HAL
-    /// [`MapError`] from [`tairix_arch_api::mmu::AddressSpace::map_page`].
+    /// mapping for `page`, [`PageTableError::AllocFailed`] if it has no memory
+    /// to record one; otherwise propagates the bridged HAL [`MapError`] from
+    /// [`tairix_arch_api::mmu::AddressSpace::map_page`]. Nothing is mapped on
+    /// a refusal.
     pub fn map(&mut self, page: Page, frame: Frame, flags: MapFlags) -> Result<(), PageTableError> {
         if self.live.contains_key(&page) {
             return Err(PageTableError::AlreadyMapped);
         }
+        // Recorded before the entry is made, so a refused record leaves no
+        // entry behind.
+        self.live
+            .try_insert(page, flags)
+            .map_err(|_| PageTableError::AllocFailed(AllocError::OutOfMemory))?;
         let vaddr = page.start().as_u64();
-        self.table
+        if let Err(err) = self
+            .table
             .map_page(vaddr, frame.start().as_u64(), to_page_flags(flags))
-            .map_err(from_map_error)?;
-        self.live.insert(page, flags);
+        {
+            self.live.remove(&page);
+            return Err(from_map_error(err));
+        }
         self.table.flush_page(vaddr);
         Ok(())
+    }
+
+    /// Make room to record `count` more mappings, so that many [`Self::map`]s
+    /// are not refused for want of a record: what a caller that takes pages
+    /// out and may have to put them back makes before it takes any.
+    ///
+    /// # Errors
+    ///
+    /// [`PageTableError::AllocFailed`] when the room cannot be had; nothing
+    /// changes.
+    pub fn reserve_records(&mut self, count: usize) -> Result<(), PageTableError> {
+        self.live
+            .try_reserve(count)
+            .map_err(|_| PageTableError::AllocFailed(AllocError::OutOfMemory))
     }
 
     /// Map `page_count` consecutive virtual pages to consecutive physical
@@ -418,7 +442,8 @@ impl<P: PageTable> AddressSpace<P> {
     ///
     /// Returns [`PageTableError::AddressOverflow`] when either range cannot be
     /// represented, [`PageTableError::AlreadyMapped`] when any destination
-    /// page is live, or the bridged backend error from
+    /// page is live, [`PageTableError::AllocFailed`] when a page's record
+    /// cannot be allocated, or the bridged backend error from
     /// [`HalAddressSpace::map_page`].
     pub fn map_contiguous(
         &mut self,
@@ -458,11 +483,15 @@ impl<P: PageTable> AddressSpace<P> {
             let vaddr = start_vaddr + offset as u64 * PAGE_SIZE as u64;
             let page = Page(VirtAddr::new(vaddr));
             let frame = Frame(start_frame.0 + offset);
-            if let Err(err) = self
-                .table
-                .map_page(vaddr, frame.start().as_u64(), to_page_flags(flags))
-                .map_err(from_map_error)
-            {
+            let mapped = match self.live.try_insert(page, flags) {
+                Ok(_) => self
+                    .table
+                    .map_page(vaddr, frame.start().as_u64(), to_page_flags(flags))
+                    .map_err(from_map_error),
+                Err(_) => Err(PageTableError::AllocFailed(AllocError::OutOfMemory)),
+            };
+            if let Err(err) = mapped {
+                self.live.remove(&page);
                 for rollback in 0..offset {
                     let rollback_vaddr = start_vaddr + rollback as u64 * PAGE_SIZE as u64;
                     let rollback_page = Page(VirtAddr::new(rollback_vaddr));
@@ -472,7 +501,6 @@ impl<P: PageTable> AddressSpace<P> {
                 self.table.flush_range(start_vaddr, offset);
                 return Err(err);
             }
-            self.live.insert(page, flags);
         }
         self.table.flush_range(start_vaddr, page_count);
         Ok(())
@@ -648,15 +676,21 @@ impl<P: PageTable> AddressSpace<P> {
     /// backend resolves rather than the bookkept flags alone — and yields a
     /// plain, POD snapshot that answers the copy path's permission checks
     /// identically to the source space.
-    #[must_use]
-    pub fn freeze(&self) -> FrozenAddressSpace {
-        let mut mappings = BTreeMap::new();
+    ///
+    /// # Errors
+    ///
+    /// [`AllocError::OutOfMemory`] when the snapshot cannot be allocated.
+    pub fn freeze(&self) -> Result<FrozenAddressSpace, AllocError> {
+        let mut mappings =
+            OrderedMap::try_with_capacity(self.live.len()).map_err(|_| AllocError::OutOfMemory)?;
         for &page in self.live.keys() {
-            if let Some((frame, flags)) = self.translate(page) {
-                mappings.insert(page, (frame, flags));
+            if let Some(mapping) = self.translate(page) {
+                mappings
+                    .try_insert(page, mapping)
+                    .map_err(|_| AllocError::OutOfMemory)?;
             }
         }
-        FrozenAddressSpace { mappings }
+        Ok(FrozenAddressSpace { mappings })
     }
 }
 
@@ -675,7 +709,7 @@ impl<P: PageTable> AddressSpace<P> {
 /// re-registers. Either way the registry's view describes the current
 /// mappings — and it is never widened to a live mutable view.
 pub struct FrozenAddressSpace {
-    mappings: BTreeMap<Page, (Frame, MapFlags)>,
+    mappings: OrderedMap<Page, (Frame, MapFlags)>,
 }
 
 impl UserAddressSpace for FrozenAddressSpace {
@@ -688,15 +722,12 @@ impl UserAddressSpace for FrozenAddressSpace {
     }
 
     fn apply_page_delta(&mut self, page: Page, mapping: Option<(Frame, MapFlags)>) -> bool {
-        match mapping {
-            Some(entry) => {
-                self.mappings.insert(page, entry);
-            }
-            None => {
-                self.mappings.remove(&page);
-            }
+        if let Some(entry) = mapping {
+            self.mappings.try_insert(page, entry).is_ok()
+        } else {
+            self.mappings.remove(&page);
+            true
         }
-        true
     }
 }
 
@@ -750,9 +781,10 @@ pub trait UserAddressSpace {
     /// without this the resolver would re-freeze the *entire* address space
     /// per fault, turning an N-page touch into O(N²) work (a multi-megabyte
     /// buffer then costs tens of seconds under emulation). A snapshot that
-    /// cannot absorb an in-place delta returns `false` (the default), and the
-    /// resolver falls back to a full re-freeze — so the fast path is an
-    /// optimisation, never a correctness dependency.
+    /// cannot absorb an in-place delta — the default, or a frozen one with no
+    /// memory to record a page — returns `false`, and the resolver falls back
+    /// to a full re-freeze, so the fast path is an optimisation, never a
+    /// correctness dependency.
     fn apply_page_delta(&mut self, page: Page, mapping: Option<(Frame, MapFlags)>) -> bool {
         let _ = (page, mapping);
         false
@@ -775,8 +807,8 @@ impl<P: PageTable> UserAddressSpace for AddressSpace<P> {
 
 /// A pure-software page table used only in unit and integration tests.
 ///
-/// It tracks `vaddr → (paddr, `[`PageFlags`]`)` entries in a
-/// [`BTreeMap`], implementing the Arch HAL
+/// It tracks `vaddr → (paddr, `[`PageFlags`]`)` entries in an
+/// [`OrderedMap`], implementing the Arch HAL
 /// [`tairix_arch_api::mmu::AddressSpace`] + [`TlbShootdown`] surface in
 /// pure software. No CPU page-table writes happen. The point is to
 /// exercise every code path in [`AddressSpace`] on host hardware
@@ -788,14 +820,14 @@ impl<P: PageTable> UserAddressSpace for AddressSpace<P> {
 #[cfg(any(test, feature = "host-tests"))]
 #[derive(Debug, Default)]
 pub struct HostPageTable {
-    entries: BTreeMap<u64, (u64, PageFlags)>,
+    entries: OrderedMap<u64, (u64, PageFlags)>,
     /// The referenced (accessed) bit each live leaf carries, modelling a
     /// hardware access flag in pure software so the cold-page scanner
     /// (`crate::coldscan`) is host-testable. `true` = touched since the
     /// last [`HalAddressSpace::test_and_clear_accessed`]. A fresh mapping
     /// starts untouched; a test simulates a CPU access with
     /// [`Self::mark_accessed`].
-    accessed: BTreeMap<u64, bool>,
+    accessed: OrderedMap<u64, bool>,
     /// Counts how many times [`TlbShootdown::flush_page`] has been
     /// called, so tests can assert the TLB-flush discipline is correct.
     pub(crate) flush_count: usize,
@@ -807,8 +839,8 @@ impl HostPageTable {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            entries: BTreeMap::new(),
-            accessed: BTreeMap::new(),
+            entries: OrderedMap::new(),
+            accessed: OrderedMap::new(),
             flush_count: 0,
         }
     }
@@ -839,10 +871,15 @@ impl HalAddressSpace for HostPageTable {
         if self.entries.contains_key(&vaddr) {
             return Err(MapError::AlreadyMapped);
         }
-        self.entries.insert(vaddr, (paddr, flags));
+        self.entries
+            .try_insert(vaddr, (paddr, flags))
+            .map_err(|_| MapError::PoolExhausted)?;
         // A fresh mapping has not been referenced yet; a test drives the
         // referenced bit explicitly through `mark_accessed`.
-        self.accessed.insert(vaddr, false);
+        if self.accessed.try_insert(vaddr, false).is_err() {
+            self.entries.remove(&vaddr);
+            return Err(MapError::PoolExhausted);
+        }
         Ok(())
     }
 
@@ -1071,7 +1108,7 @@ mod tests {
             MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
         )
         .unwrap();
-        let frozen = s.freeze();
+        let frozen = s.freeze().unwrap();
 
         // Every mapped page resolves through the snapshot exactly as it
         // does through the source space.
@@ -1094,7 +1131,7 @@ mod tests {
         let mut s = AddressSpace::new(HostPageTable::new());
         s.map(p(1), Frame(9), MapFlags::READ | MapFlags::USER)
             .unwrap();
-        let frozen = s.freeze();
+        let frozen = s.freeze().unwrap();
         // Mutating the source after freezing does not change the snapshot.
         s.unmap(p(1)).unwrap();
         s.map(p(7), Frame(70), MapFlags::READ | MapFlags::USER)
@@ -1106,7 +1143,7 @@ mod tests {
     #[test]
     fn freeze_of_empty_space_resolves_nothing() {
         let s = AddressSpace::new(HostPageTable::new());
-        let frozen = s.freeze();
+        let frozen = s.freeze().unwrap();
         assert!(frozen.translate(p(0)).is_none());
     }
 
@@ -1119,7 +1156,7 @@ mod tests {
         let mut s = AddressSpace::new(HostPageTable::new());
         s.map(p(1), Frame(9), MapFlags::READ | MapFlags::USER)
             .unwrap();
-        let mut frozen = s.freeze();
+        let mut frozen = s.freeze().unwrap();
         assert!(frozen.translate(p(4)).is_none());
 
         // Back a new page in the source, then apply just its delta.
@@ -1134,7 +1171,7 @@ mod tests {
         assert_eq!(frame, Frame(12));
         assert!(flags.contains(MapFlags::WRITE));
         // The incremental snapshot equals a full re-freeze of the source.
-        let full = s.freeze();
+        let full = s.freeze().unwrap();
         assert_eq!(frozen.mapped_pages(), full.mapped_pages());
         assert_eq!(frozen.translate(p(1)), full.translate(p(1)));
 
@@ -1203,5 +1240,78 @@ mod tests {
         assert!(fl.contains(MapFlags::READ));
         assert!(fl.contains(MapFlags::USER));
         assert!(erased.translate(p(5)).is_none());
+    }
+
+    #[test]
+    fn a_mapping_refused_for_want_of_memory_maps_nothing() {
+        let mut s = AddressSpace::new(HostPageTable::new());
+        let flags = MapFlags::READ | MapFlags::USER;
+        assert_eq!(
+            tairix_fuzzseed::meter::refusing_above(0, || s.map(p(1), Frame(9), flags)),
+            Err(PageTableError::AllocFailed(AllocError::OutOfMemory))
+        );
+        assert_eq!(s.mapped_pages(), 0);
+        assert!(!s.is_mapped(p(1)));
+        assert!(s.translate(p(1)).is_none());
+        s.map(p(1), Frame(9), flags).expect("the retry maps it");
+        assert_eq!(s.translate(p(1)).map(|(frame, _)| frame), Some(Frame(9)));
+    }
+
+    /// A contiguous map refused at any of its allocations — a page's record or
+    /// the page table — removes every page it had installed.
+    #[test]
+    fn a_contiguous_map_refused_part_way_leaves_nothing_mapped() {
+        let mut s = AddressSpace::new(HostPageTable::new());
+        let flags = MapFlags::READ | MapFlags::USER;
+        for granted in 0..64 {
+            let mapped = tairix_fuzzseed::meter::refusing_after(granted, || {
+                s.map_contiguous(p(16), Frame(64), 40, flags)
+            });
+            if mapped.is_ok() {
+                assert!(granted > 0, "the map needed the allocator");
+                assert_eq!(s.mapped_pages(), 40);
+                return;
+            }
+            assert_eq!(
+                mapped,
+                Err(PageTableError::AllocFailed(AllocError::OutOfMemory))
+            );
+            assert_eq!(s.mapped_pages(), 0, "refused after {granted} grants");
+            assert!(s.translate(p(16)).is_none());
+        }
+        panic!("the map never went through");
+    }
+
+    #[test]
+    fn room_for_records_is_made_whole_or_not_at_all() {
+        let mut s = AddressSpace::new(HostPageTable::new());
+        assert_eq!(
+            tairix_fuzzseed::meter::refusing_above(0, || s.reserve_records(4)),
+            Err(PageTableError::AllocFailed(AllocError::OutOfMemory))
+        );
+        assert_eq!(s.mapped_pages(), 0);
+        assert_eq!(s.reserve_records(4), Ok(()));
+    }
+
+    #[test]
+    fn a_freeze_or_a_delta_with_no_memory_is_refused_and_a_removal_is_not() {
+        let mut s = AddressSpace::new(HostPageTable::new());
+        let flags = MapFlags::READ | MapFlags::USER;
+        s.map(p(1), Frame(9), flags).unwrap();
+        assert_eq!(
+            tairix_fuzzseed::meter::refusing_above(0, || s.freeze().err()),
+            Some(AllocError::OutOfMemory)
+        );
+        let mut frozen = AddressSpace::new(HostPageTable::new()).freeze().unwrap();
+        let mapping = Some((Frame(9), flags));
+        assert!(!tairix_fuzzseed::meter::refusing_above(0, || {
+            frozen.apply_page_delta(p(1), mapping)
+        }));
+        assert!(frozen.translate(p(1)).is_none());
+        assert!(frozen.apply_page_delta(p(1), mapping));
+        assert!(tairix_fuzzseed::meter::refusing_above(0, || {
+            frozen.apply_page_delta(p(1), None)
+        }));
+        assert!(frozen.translate(p(1)).is_none());
     }
 }

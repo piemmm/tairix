@@ -293,8 +293,7 @@ fn spelt_from_tree(key: &[u8]) -> bool {
 
 /// `bytes`, copied, or [`DriverError::OutOfMemory`].
 fn owned(bytes: &[u8]) -> Result<Vec<u8>, DriverError> {
-    tairix_util::fallible::collected(bytes.len(), bytes.iter().copied())
-        .ok_or(DriverError::OutOfMemory)
+    tairix_util::fallible::copied(bytes).ok_or(DriverError::OutOfMemory)
 }
 
 /// A decimal field.

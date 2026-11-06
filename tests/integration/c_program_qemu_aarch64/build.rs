@@ -133,6 +133,7 @@ fn build_c_program(
 /// Emit `PROGRAM_RXE` and `USER_BIAS` as a Rust source file the test includes.
 fn write_fixture(path: &Path, rxe: &[u8]) {
     let mut out = tairix_itest_harness::program_fixture::fixture_header();
+    tairix_itest_harness::program_fixture::push_heap_region(&mut out);
     tairix_itest_harness::program_fixture::push_rxe_blob(
         &mut out,
         "PROGRAM_RXE",

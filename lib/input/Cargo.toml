@@ -15,7 +15,9 @@ publish.workspace = true
 # so neither GUI crate depends on the other.
 tairix-geometry = { path = "../geometry", version = "=0.0.0" }
 # `Duration64`, the one in-memory form of a span: the double-click interval a
-# press is paired under is the one the desktop publishes in that form.
+# press is paired under is the one the desktop publishes in that form. And
+# `PhysicalKey`, the key a keyboard edge names, which the keyboard state and
+# its layout resolve.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 [lints]

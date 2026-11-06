@@ -822,12 +822,68 @@ fn normal_operation_emits_no_audit_records() {
     assert!(captured.snapshot().is_empty());
 }
 
+/// A retained block erases itself as it is let go, on whichever path lets it
+/// go — an index that would not take it included — because it is a wiping
+/// buffer: this stops compiling if it becomes a plain vector again.
 #[test]
-fn the_wipe_zeroes_the_payload_in_place() {
-    let mut data = block_of(0xEE);
-    BlockCache::<MemDisk>::wipe(&mut data);
-    assert_eq!(data.len(), BS as usize, "the wipe keeps the length");
-    assert!(data.iter().all(|&b| b == 0), "every byte is wiped");
+fn a_retained_block_erases_itself() {
+    fn erases<T>(_: fn(&T) -> &WipedBuf) {}
+    erases::<Entry>(|entry| &entry.data);
+}
+
+/// Room an invalidation freed in the indexes goes back to the heap once
+/// pressure rises, though the ledger it emptied is under the band's target
+/// and no shrink runs.
+#[test]
+fn room_an_invalidation_freed_is_given_back_once_pressure_rises() {
+    let (gauge_source, pressure) = pressured(free_for(PressureBand::Normal));
+    let (_store, disk) = MemDisk::new();
+    let mut cache = BlockCache::new(disk, BOOT_DISK_OWNER, budget(), pressure, sink()).unwrap();
+    // Spaced LBAs: fill the indexes without arming sequential readahead.
+    for lba in [0u64, 2, 4] {
+        let mut buf = block_of(0);
+        cache.read_blocks(lba, &mut buf).unwrap();
+    }
+    cache.discard(0, 8).unwrap();
+    assert_eq!(cache.accounting().total_bytes(), 0);
+    assert!(
+        cache.entries.allocated_bytes() > 0,
+        "the indexes kept their room"
+    );
+    // Mild pressure holds the class to its low watermark, which it is under.
+    gauge_source
+        .free
+        .store(free_for(PressureBand::Mild), Ordering::Relaxed);
+    cache.write_blocks(6, &block_of(1)).unwrap();
+    assert_eq!(
+        [cache.entries.allocated_bytes(), cache.lru.allocated_bytes()],
+        [0, 0],
+        "the heap has the room back"
+    );
+}
+
+/// A block the heap refuses room for is refused before anything is evicted
+/// for it, so the cache is left exactly as it was.
+#[test]
+fn a_block_refused_its_room_evicts_nothing_for_it() {
+    let (_store, mut cache) = cached();
+    // Six spaced blocks fill the cache, so a seventh has to evict.
+    for lba in [0u64, 2, 4, 6, 8, 10] {
+        let mut buf = block_of(0);
+        cache.read_blocks(lba, &mut buf).unwrap();
+    }
+    let held = cache.accounting().total_bytes();
+    let evictions = cache.accounting().evictions();
+    let mut seventh = block_of(0);
+    // The block's copy is refused; the read itself asks for nothing.
+    let read = tairix_fuzzseed::meter::refusing_above(256, || cache.read_blocks(12, &mut seventh));
+    assert_eq!(read, Ok(()));
+    assert_eq!(
+        cache.accounting().evictions(),
+        evictions,
+        "nothing was evicted for it"
+    );
+    assert_eq!(cache.accounting().total_bytes(), held);
 }
 
 /// Stream every block of a `block_count`-block disk of `block_size` one
@@ -1171,4 +1227,32 @@ fn flipping_the_block_switch_off_purges_the_held_blocks() {
     assert_eq!(cache.accounting().total_bytes(), 0, "the purge dropped it");
     assert_eq!(store.borrow().reads, reads_before + 1, "served from device");
     assert!(cache.accounting().teardowns() >= 1);
+}
+
+/// However far a block's admission gets before the heap refuses it, the read
+/// is served from the device and the cache holds only what it charged.
+#[test]
+fn a_block_the_heap_cannot_index_is_served_and_not_kept() {
+    let (store, mut cache) = cached();
+    let on_disk = store.borrow().data[3 * BS as usize..4 * BS as usize].to_vec();
+    let mut granted = 0;
+    loop {
+        cache.drop_all();
+        let mut block = block_of(0);
+        let read =
+            tairix_fuzzseed::meter::refusing_after(granted, || cache.read_blocks(3, &mut block));
+        assert_eq!(read, Ok(()), "served after {granted} grants");
+        assert_eq!(block, on_disk);
+        assert_eq!(cache.entries.len(), cache.lru.len());
+        assert_eq!(
+            cache.accounting().class_bytes(ReclaimClass::CleanFileData),
+            cache.entries.len() * COST
+        );
+        if !cache.entries.is_empty() {
+            break;
+        }
+        granted += 1;
+        assert!(granted < 8, "the block was never kept");
+    }
+    assert!(granted >= 2, "the copy and an index were each refused");
 }

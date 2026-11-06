@@ -1674,9 +1674,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         name: "signal",
         arg_count: 2,
         args: [
-            // The target PID to signal (an `I32`, sign-extended in the
-            // register per the ABI convention), then the `Signal`
-            // discriminant. The handler validates both.
+            // The target PID to signal, the whole register, then the
+            // `Signal` discriminant. The handler validates both.
             AbiType::I64,
             AbiType::U32,
             AbiType::Unit,
@@ -1878,8 +1877,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         arg_count: 2,
         args: [
             // The readable standard-stream descriptor naming the console,
-            // then the child PID to mark foreground (`I32`, sign-extended
-            // per the ABI convention; `0` clears the slot).
+            // then the child PID to mark foreground, the whole register
+            // (`0` clears the slot).
             AbiType::U32,
             AbiType::I64,
             AbiType::Unit,
@@ -2316,14 +2315,16 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         name: "fd_grant",
         arg_count: 4,
         args: [
-            // The caller's own path-backed descriptor, then the write-extent
-            // ceiling, then the recipient's attested process *instance*.
+            // The caller's own file or pipe-end descriptor, then the
+            // write-extent ceiling, then the recipient's attested process
+            // *instance*.
             AbiType::U32,
             // The highest file length the recipient may write or truncate
-            // the delegation to: zero for a read-only delegation, which has
-            // no extent to bound; for a writable one a stated bound, or
-            // `GRANT_EXTENT_INHERIT` for the caller's own reach, so that
-            // reach is always asked for and never implied by a zero.
+            // the delegation to: zero for a read-only file and for a pipe
+            // end, which have no extent to bound; for a writable file a
+            // stated bound, or `GRANT_EXTENT_INHERIT` for the caller's own
+            // reach, so that reach is always asked for and never implied by
+            // a zero.
             AbiType::U64,
             // The recipient's kernel-attested `ProcId`, as the grantor read
             // it from an `Origin`. A task id is redrawn once its task is
@@ -2341,10 +2342,12 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // useless to a bystander — the `shm_grant` shape.
         ret: AbiType::U64,
         // Delegating filesystem authority is gated exactly as acquiring it:
-        // the same `CAP_FS_ACCESS` the descriptor's `fs_open` required. The
-        // mint is audited — a security-relevant grant of authority to another
-        // process, and low-volume (once per picker choice or per blob open),
-        // so the record cannot drown the log.
+        // the same `CAP_FS_ACCESS` the descriptor's `fs_open` required. A
+        // pipe end carries no filesystem authority but takes the same gate,
+        // which is checked before the descriptor is read and so cannot vary
+        // with what it is. The mint is audited — a security-relevant grant of
+        // authority to another process, and low-volume (once per picker choice
+        // or per blob open), so the record cannot drown the log.
         required_capability: Some(CapabilityId::FS_ACCESS),
         audit: true,
     },
@@ -2366,7 +2369,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ret: AbiType::U64,
         // Ungated: receiving user-mediated, already-checked authority is the
         // point of the delegation — the recipient may hold no filesystem
-        // capability at all, and every later operation on the descriptor is
+        // capability at all, and every later operation on a delegated file is
         // still VFS-checked under the grantor's captured identity. The
         // redemption is audited so the grant's consumption is attributable
         // in the same trail as its mint; it is one-shot, so the volume is
@@ -2675,9 +2678,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         name: "sched_set_priority",
         arg_count: 2,
         args: [
-            // The target PID (an `I32`, sign-extended in the register per
-            // the ABI convention), then the `SchedPriority` discriminant.
-            // The handler validates both.
+            // The target PID, the whole register, then the `SchedPriority`
+            // discriminant. The handler validates both.
             AbiType::I64,
             AbiType::U32,
             AbiType::Unit,
@@ -3666,7 +3668,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ],
         // The mapped base address, or a negated errno.
         ret: AbiType::U64,
-        // The grant minted at the drawing spawn is the authority, so a
+        // The grant minted at the sandbox spawn is the authority, so a
         // capability-empty child can map the one region it was handed and no
         // other. Audited like `shm_map`: a window onto another process's
         // memory, granted once per spawn.
@@ -4036,10 +4038,78 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
-        // Only the principal a disk image's volume was attached for may
-        // retitle it, which the handler judges against the volume named; no
-        // capability widens that. Every decision is audited.
+        // Who may retitle turns on the volume named, which the handler judges:
+        // a disk image's owner, the mount authority over a device's volume, or
+        // the user at the seat over a removable one whose root they may
+        // write. Every decision is audited.
         required_capability: None,
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::VOLUME_REPLAY,
+        name: "volume_replay",
+        arg_count: 2,
+        args: [
+            // Non-null `UserPtr` to the encoded `VolumeReplayRequest`, then its
+            // exact length.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Who may answer turns on the volume named, which the service judges
+        // under the volume's claim: the mount authority over any volume, or
+        // the process holding the seat, with the seat's own capability, over
+        // a removable device's. Every decision is audited.
+        required_capability: None,
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CHILD_ORIGIN,
+        name: "child_origin",
+        arg_count: 3,
+        args: [
+            // The child's pid, the whole register as `wait` takes it, then the
+            // origin-out pointer and its capacity.
+            AbiType::I64,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `self_origin`'s bytes-written-or-`-errno` convention.
+        ret: AbiType::U64,
+        // Ungated: the parent/child relation the handler checks is the whole
+        // authority, as for `wait`, and learning who its own child is grants a
+        // parent none, as `self_origin` grants a task none. Unaudited like
+        // `self_origin` and `call_peer_origin`: it changes nothing.
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::SHM_GRANT_TO,
+        name: "shm_grant_to",
+        arg_count: 3,
+        args: [
+            // The region id, then the recipient's attested `ProcId` and its
+            // length: a process that binds no endpoint is reached only by
+            // naming it, and an instance names one process for all time.
+            AbiType::Handle,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // The minted grant handle, or `-errno`.
+        ret: AbiType::U64,
+        // Delegating a shared mapping, gated and audited exactly as
+        // `shm_grant`.
+        required_capability: Some(CapabilityId::SHM),
         audit: true,
     },
 ];
@@ -4589,6 +4659,48 @@ mod tests {
     }
 
     #[test]
+    fn child_origin_capability_requirements_are_frozen() {
+        // A parent learning who its own child is gains no authority and changes
+        // nothing, so the call is ungated and unaudited; the pid takes the
+        // whole register, as `wait`'s does.
+        let spec = spec_for(SyscallNumber::CHILD_ORIGIN).unwrap();
+        assert_eq!(spec.name, "child_origin");
+        assert_eq!(spec.required_capability, None);
+        assert!(!spec.audit, "child_origin must not audit per call");
+        assert_eq!(spec.arg_count, 3);
+        assert_eq!(
+            &spec.args[..3],
+            &[AbiType::I64, AbiType::UserPtr, AbiType::Len]
+        );
+    }
+
+    #[test]
+    fn shm_grant_to_capability_requirements_are_frozen() {
+        // Naming a recipient hands it a mapping right, so the call takes the
+        // gate and the audit every shared-region delegation takes.
+        for number in [
+            SyscallNumber::SHM_GRANT,
+            SyscallNumber::SHM_GRANT_PEER,
+            SyscallNumber::SHM_GRANT_TO,
+        ] {
+            let spec = spec_for(number).unwrap();
+            assert_eq!(
+                spec.required_capability,
+                Some(CapabilityId::SHM),
+                "{}",
+                spec.name
+            );
+            assert!(spec.audit, "{} must be audited", spec.name);
+        }
+        let spec = spec_for(SyscallNumber::SHM_GRANT_TO).unwrap();
+        assert_eq!(spec.name, "shm_grant_to");
+        assert_eq!(
+            &spec.args[..3],
+            &[AbiType::Handle, AbiType::UserPtr, AbiType::Len]
+        );
+    }
+
+    #[test]
     fn sysinfo_introspect_capability_requirements_are_frozen() {
         // The unfiltered global system view is privileged and held only by
         // the sysinfod broker; it is gated on CAP_SYSINFO_INTROSPECT and, like
@@ -4643,7 +4755,8 @@ mod tests {
         // every principal: it carries the mount authority. Detaching, an
         // attach of a network volume or a disk image and a view binding are
         // judged by their handlers against the volume and the caller, so they
-        // carry none at the dispatcher; serving carries the server's class
+        // carry none at the dispatcher, nor does answering for a volume's held
+        // writes, judged by its service; serving carries the server's class
         // capability. Every one is audited. Lock this down so a refactor
         // cannot loosen a gate or drop an audit.
         let gates = [
@@ -4655,6 +4768,7 @@ mod tests {
             (SyscallNumber::VIEW_UNBIND, None),
             (SyscallNumber::IMAGE_ATTACH, None),
             (SyscallNumber::VOLUME_RETITLE, None),
+            (SyscallNumber::VOLUME_REPLAY, None),
         ];
         for (number, gate) in gates {
             let spec = spec_for(number).unwrap();

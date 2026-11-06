@@ -177,6 +177,18 @@ verifies. A copy whose word names no protection is passed over for its mirror,
 and the volume is refused `Unsupported` only when no copy names one. A
 plaintext slot whose crypto header is not zero is damaged and skipped.
 
+The superblock carries the volume's **title** after the protection word: a
+length byte, then up to `VOLUME_TITLE_MAX` (252) bytes of UTF-8 with no
+control character, zero to the field's end (`lib/fsprobe`'s
+`ARXFS_TITLE_AT`). It is plaintext and covered by the block's authenticator,
+so only a plaintext volume keeps one: an encrypted volume's driver refuses a
+title `Unsupported`, and a copy whose field no writer leaves, or an encrypted
+copy carrying a title, is skipped. The volume probe reads the newest copy's
+title unverified, as it reads every format's label, because it only names the
+medium in the catalog. A retitle is a transaction like any other, published
+with the superblock at its commit, and the title changes nothing the volume's
+UUID is made of.
+
 An open pins the volume's UUID only from a copy that verifies under the
 protection it declares, so one damaged copy cannot misname the volume while
 its mirror is whole; only a rescue, which exists for a ring no copy of
@@ -372,6 +384,7 @@ physical checksum:           CRC-32C (Castagnoli, fast, first-party via lib/crc3
 critical metadata copies:    2 minimum, companion at primary + 1
 root history:                retained for rollback and safe discard
 symlink target maximum:      FS_SYMLINK_MAX (4096 bytes, the ABI path bound)
+volume title maximum:        VOLUME_TITLE_MAX (252 bytes; plaintext volumes)
 ```
 
 **Targets not yet met (stage 19).** A wider metadata block (16 KiB) and data
@@ -1853,6 +1866,18 @@ operation's own work leaves the handle writable, exactly as an unbatched commit
 failure always did. A map image discarded this way is re-derived from the
 committed trees.
 
+A commit **refused memory** is the one failure that abandons nothing. It is
+refused before any block it staged reaches the device, so it is undone as an
+operation is: the root it claimed, the old root it deferred and the blocks it
+staged go back, the deferred frees it marked free are reserved again, and the
+operation whose close asked for it — not yet reported — is undone with it. The
+transaction stays open, holding every operation already reported, and the next
+commit publishes it: the next operation's close, a sync, an unmount, or the
+host's timer, which is given a fresh window once the old one has run out. The
+bound still holds while memory stays short: the operation that would carry the
+transaction past its ceiling is the one whose close is refused, so a
+transaction that cannot be published cannot grow either.
+
 **The allocation map's clean stamp is invalidated durably.** The map is adopted
 only when it is stamped clean at the generation the mount selected. Its
 invalidation is staged in the dirty set's pre-barrier phase, so the ordinary
@@ -1969,7 +1994,9 @@ either — and because an operation that frees space holds almost all of its
 memory in the runs. Freeing a maximally fragmented file dirties a spine's worth
 of blocks however many extents it has, while the runs it releases grow one per
 extent, so a ceiling over the blocks alone would not bound a delete at all
-(§14).
+(§14). Each run set is counted at what it holds, the room kept for an undo
+included, and a set that outlives the transaction gives back what it holds well
+beyond its runs once the transaction is published.
 
 Rising memory pressure lowers that ceiling and shortens the dirty-age window,
 band by band, down to a **floor** of one coalesced device transfer and no

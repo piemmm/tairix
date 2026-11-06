@@ -246,8 +246,9 @@ few blocks, or one a kernel aborted, leaves the volume read-only.
 barrier, the blocks written home behind another, and the mark lifted; a
 crash part-way leaves the volume for a checker.
 
-**Failure.** A commit that fails before anything reaches the medium as the
-new state is taken back whole; operations already reported done lose their
+**Failure.** An operation refused the memory to stage a block fails with
+`OutOfMemory`, undone alone. A commit that fails before anything reaches the
+medium as the new state is taken back whole; operations already reported done lose their
 work with it, so then the handle stops writing. One that fails once the
 medium carries the new state stops the handle too, the staged state kept
 as its read view, for the journal's replay, a checker, or a later explicit
@@ -322,6 +323,19 @@ cryptographic primitive.
   `0xA001`), carried from all ones, for the legacy group-descriptor checksum.
 - **`64bit`** descriptors carry the high halves of the bitmap checksums
   and `bg_itable_unused`, which the allocator also maintains.
+
+## Volume title
+
+`FilesystemLabel` reads and sets the volume's title as the superblock's
+volume name, `s_volume_name`: up to sixteen bytes, NUL-padded, read as the
+volume probe reads it, padding trimmed. A title is refused rather than cut: a
+longer one is `LengthOutOfRange`, one closing with the space every reader
+takes for padding `OutOfRange`, and neither writes anything. The empty title
+clears the name. A retitle is an operation like any other: it joins the open
+transaction and is published with the primary superblock, its `s_checksum`
+restamped on a `metadata_csum` volume, and a volume the driver does not write
+refuses it (`ReadOnly`). The volume's identity is its `s_uuid`, which a
+retitle leaves as it was.
 
 ## Formatting (mkfs)
 

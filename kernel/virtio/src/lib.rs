@@ -28,6 +28,9 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+// Only the host tests' doubles allocate directly; the live table's map
+// brings its own.
+#[cfg(test)]
 extern crate alloc;
 
 // Host tests need `std` for the `kernel/mem` host-test doubles. The
@@ -35,6 +38,11 @@ extern crate alloc;
 // (no hacks).
 #[cfg(test)]
 extern crate std;
+
+// Metered, so a host test can refuse what an exhausted kernel heap would.
+#[cfg(test)]
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 
 pub mod kernel_host;
 pub mod kernel_mmio;

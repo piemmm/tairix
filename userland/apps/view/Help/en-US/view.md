@@ -27,6 +27,16 @@ Sprite. A file the decoder refuses states its reason in the window and on the
 standard error stream; the window is never left blank and no image is ever
 fabricated.
 
+It also plays WebM movies with their sound, such as the desktop's own screen
+recordings. A movie opens paused on its first picture; the play tool and
+`Space` play and pause it. Beneath the picture a seek bar shows how far
+through the movie it is, with the time played and the movie's length beside
+it: drag along it, or click it, to go to the nearest keyframe at or before
+that point. A recording that does not state its length — one whose recorder
+stopped unexpectedly — plays from its start but cannot be sought. A movie that
+is cut short, or that stops decoding, plays as far as it can and states why it
+stopped; a movie whose sound cannot be played goes on silent and says so.
+
 Several documents at once are separate windows of the one viewer, so
 comparing two pictures side by side is opening the second. Closing a window
 leaves the viewer on the icon bar, ready for the next document; the Quit row
@@ -57,7 +67,7 @@ as transparent rather than as the colour behind it.
 * `[` / `]` — rotate a quarter turn left or right
 * `M` — mirror left to right
 * `I` — show or hide the information panel
-* `Space` — play or pause an animation
+* `Space` — play or pause an animation or a movie
 * `O` — choose another document
 * `Page Up` / `Page Down` — the previous or next entry
 * `Home` / `End` — the first or last entry

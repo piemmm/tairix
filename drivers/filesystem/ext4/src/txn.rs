@@ -143,7 +143,7 @@ impl<B: Block> Ext4<B> {
     }
 
     fn undo(&mut self) {
-        self.dirty.undo_operation();
+        let undone = self.dirty.undo_operation();
         self.hints.forget_full();
         if let Some(mark) = self.op.take() {
             self.sb.copy_from_slice(&self.mark_sb);
@@ -151,6 +151,14 @@ impl<B: Block> Ext4<B> {
             self.freed_cost = mark.freed_cost;
             self.generation = mark.generation;
             self.rewind_orphans(mark.orphans);
+        }
+        if undone.is_err() {
+            // A block the set had kept room for could not be put back, so
+            // nothing it stages can be trusted: the transaction goes whole
+            // and the handle stops writing.
+            self.abandon();
+            self.layout.no_write = Some(NoWrite::Halted);
+            self.publish_footprint();
         }
     }
 
@@ -160,6 +168,17 @@ impl<B: Block> Ext4<B> {
         self.undo();
         self.dirty.begin_operation();
         self.op = Some(self.mark());
+    }
+
+    /// Lose the open transaction whole, back to what the medium holds.
+    fn abandon(&mut self) {
+        self.dirty.clear();
+        self.freed.clear();
+        self.freed_cost = 0;
+        self.hints.forget_full();
+        self.sb.copy_from_slice(&self.disk_sb);
+        self.rewind_orphans(0);
+        self.schedule.closed();
     }
 
     fn end(&mut self) -> Result<(), DriverError> {
@@ -278,13 +297,7 @@ impl<B: Block> Ext4<B> {
                     // Nothing reached the medium as the new state: the
                     // transaction is lost whole. Operations already told they
                     // succeeded lose their work, so the handle stops writing.
-                    self.dirty.clear();
-                    self.freed.clear();
-                    self.freed_cost = 0;
-                    self.hints.forget_full();
-                    self.sb.copy_from_slice(&self.disk_sb);
-                    self.rewind_orphans(0);
-                    self.schedule.closed();
+                    self.abandon();
                     if acknowledged > 0 {
                         self.layout.no_write = Some(NoWrite::Halted);
                     }

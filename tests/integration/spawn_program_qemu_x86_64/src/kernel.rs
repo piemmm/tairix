@@ -216,6 +216,10 @@ fn run_round_trip() -> ! {
         args: &[b"prog", ARG_VALUE],
         env: &[],
         canary: CANARY,
+        heap: tairix_abi::HeapRegion {
+            base: USER_HEAP_BASE,
+            len: USER_HEAP_LEN,
+        },
     };
 
     note(TEST_START, "dropping into the spawned program");

@@ -45,11 +45,11 @@ ricevuti, gli eventuali errori, la percentuale di perdita e i tempi di
 andata e ritorno minimo, medio e massimo con la loro deviazione media.
 `-q` mostra solo l'intestazione e il riepilogo.
 
-Ogni risposta nomina il pari come `nome (indirizzo)` quando l'indirizzo
-ha un record `PTR`, risolto una sola volta per esecuzione con lo stesso
-resolver; un indirizzo senza nome, e ogni esecuzione sotto `-n`, stampa
-l'indirizzo nudo. `-n` significa inoltre che nessuna query `PTR` viene
-messa sulla rete.
+Ogni risposta nomina il pari come `name (address)` (il nome e, tra
+parentesi, l'indirizzo) quando l'indirizzo ha un record `PTR`, risolto
+una sola volta per esecuzione con lo stesso resolver; un indirizzo senza
+nome, e ogni esecuzione sotto `-n`, stampa l'indirizzo nudo. `-n`
+significa inoltre che nessuna query `PTR` viene messa sulla rete.
 
 Ogni riga di risposta porta il TTL IPv4 (o il limite di hop IPv6) con cui
 la risposta è arrivata in un campo `ttl=`, come fa `iputils`.
@@ -75,9 +75,13 @@ la risposta è arrivata in un campo `ttl=`, come fa `iputils`.
 ## EXAMPLES
 
 - `ping 10.0.2.2` — pingare un host IPv4 fino all'interruzione.
+- `ping gateway.example` — pingare un host per nome.
 - `ping -c 4 fe80::1` — inviare quattro richieste a un host IPv6.
 - `ping -c 10 -i 0.2 10.0.0.1` — dieci richieste, una ogni 200 ms.
 - `ping -q -c 100 10.0.0.1` — esecuzione silenziosa, solo riepilogo.
+- `ping -s 1400 -c 20 host.example` — venti richieste grandi e
+  incomprimibili: la forma che misura onestamente un collegamento.
+- `ping -p ff00 -c 4 10.0.0.1` — invece, un motivo fisso alternato.
 
 ## EXIT STATUS
 

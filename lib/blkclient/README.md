@@ -14,8 +14,8 @@ device through this crate's `RemoteBlock`:
 - the volume-manager policy driver (`drivers/storage/volmgr`), which only
   ever inspects a device's layout (partition table, filesystem signatures)
   and commits nothing to it, and
-- the RAID array composer, which both reads a member's superblock and
-  durably writes to the array it assembles.
+- the RAID array composer, which reads a member's superblock, asks the
+  identity its device states, and durably writes to the array it assembles.
 
 A copy of this client per consumer would let the wire discipline, the
 geometry validation, and the bounded-reissue policy silently drift between
@@ -31,6 +31,11 @@ them, so it lives here once and both consumers link it.
   write-protect flag. Which stance a caller holds is therefore visible in
   the type of constructor it called, not an accident of which methods it
   happens not to invoke.
+- `RemoteBlock::identify()` — ask the device what tells it from every other of
+  its kind (`BlkOp::Identity`), as the kernel's own client asks it: the window
+  is cleared first, the request repeats the publication's binding, and the
+  reply is decoded fail-closed, so a device that states none, refuses the
+  question, or answers in a frame that does not decode states nothing.
 - `BlkCall` — the transport seam `RemoteBlock` is generic over, so the
   client is host-testable without a kernel: a host test double fills the
   shared window directly, playing the serving driver.

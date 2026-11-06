@@ -44,7 +44,7 @@
 //! the builder, then reads the user pages back through [`crate::uaccess`] and
 //! re-parses the startup block.
 
-use tairix_abi::process;
+use tairix_abi::process::{self, StartFacts};
 use tairix_abi::rxe::{LoadImage, RxeError};
 use tairix_abi::Errno;
 
@@ -198,6 +198,19 @@ pub enum SpawnError {
     /// Serialising the startup-vector block failed against the frozen
     /// `abi-v1` limits (see [`tairix_abi::process::write_into`]).
     StartBlock(Errno),
+    /// The kernel heap refused the startup-vector block's staging buffer.
+    OutOfMemory,
+}
+
+impl SpawnError {
+    /// The frame a refused mapping left the build's frame source to give back.
+    #[must_use]
+    pub const fn unmapped_frame(&self) -> Option<Frame> {
+        match self {
+            Self::Load(load) => load.unmapped_frame(),
+            _ => None,
+        }
+    }
 }
 
 impl From<LoadError> for SpawnError {
@@ -310,10 +323,9 @@ where
 ///
 /// Maps and fills every segment of `image` (relocated by `bias`), maps a
 /// zeroed user stack described by `stack`, and writes the
-/// [`tairix_abi::process`] startup-vector block for `args` / `env` (carrying
-/// the `canary` seed and the migration-safe common `cpu_features` set the
-/// process resolves its accelerated routines against) at `start_block_base`.
-/// `image_bytes` is the whole `rxe`
+/// [`tairix_abi::process`] startup-vector block for `args` / `env`, carrying
+/// the kernel's `facts`, at `start_block_base`. `image_bytes` is the whole
+/// `rxe`
 /// file the segments' `file_offset`s index into; `physmap` is the kernel's
 /// direct physical map (so the builder can reach freshly allocated frames);
 /// `alloc_frame` yields one frame per mapped page.
@@ -330,6 +342,8 @@ where
 ///   outside `image_bytes`.
 /// * [`SpawnError::StartBlock`] if the startup block exceeds the frozen
 ///   `abi-v1` limits.
+/// * [`SpawnError::OutOfMemory`] if the heap refuses the startup block's
+///   staging buffer.
 /// * [`SpawnError::Load`] / [`SpawnError::Layout`] / [`SpawnError::PhysUnmapped`]
 ///   from the mapping and fill steps.
 #[allow(clippy::too_many_arguments)]
@@ -343,8 +357,7 @@ pub fn build_process_image<P, A>(
     start_block_base: u64,
     args: &[&[u8]],
     env: &[&[u8]],
-    canary: u64,
-    cpu_features: u64,
+    facts: &StartFacts,
     mut alloc_frame: A,
 ) -> Result<ProcessImage, SpawnError>
 where
@@ -404,9 +417,12 @@ where
 
     // 3. Startup-vector block: serialise then map+write into U|R|W pages.
     let block_len = process::encoded_len(args, env).map_err(SpawnError::StartBlock)?;
-    let mut block = alloc::vec![0u8; block_len];
-    process::write_into(&mut block, args, env, canary, cpu_features)
-        .map_err(SpawnError::StartBlock)?;
+    let mut block: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    block
+        .try_reserve_exact(block_len)
+        .map_err(|_| SpawnError::OutOfMemory)?;
+    block.resize(block_len, 0);
+    process::write_into(&mut block, args, env, facts).map_err(SpawnError::StartBlock)?;
     let block_pages = (block_len as u64).div_ceil(page);
     let block_flags = MapFlags::READ | MapFlags::WRITE | MapFlags::USER;
     map_and_fill(
@@ -436,7 +452,7 @@ mod tests {
     use crate::uaccess::copy_in;
     use crate::vmm::{AddressSpace, HostPageTable, VirtAddr};
 
-    use tairix_abi::process;
+    use tairix_abi::process::{self, HeapRegion, StartFacts};
     use tairix_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
     use tairix_abi::{
         LoadImage, ProcessStart, ABI_VERSION_CURRENT, LOAD_MAGIC, SYSCALL_TABLE_HASH_LEN,
@@ -571,12 +587,56 @@ mod tests {
             0x20_0000,
             &[b"prog", b"--x"],
             &[b"K=v"],
-            0x0123_4567_89AB_CDEF,
-            0,
+            &StartFacts {
+                canary: 0x0123_4567_89AB_CDEF,
+                cpu_features: 0,
+                heap: HeapRegion::NONE,
+            },
             frame_source(),
         )
         .expect("build");
         (bytes, img, space, sim)
+    }
+
+    /// A startup block the heap refuses fails the build as a typed error.
+    ///
+    /// Regression: the block was allocated with `vec!`, so an exhausted heap
+    /// aborted the kernel at a spawn.
+    #[test]
+    fn a_startup_block_the_heap_refuses_fails_the_build() {
+        let specs = [SegSpec {
+            vaddr: 0x1000,
+            file_size: 1,
+            mem_size: 0x1000,
+            perm: RxePermission::ReadExecute,
+            content: vec![0u8; 1],
+        }];
+        let (bytes, _) = image_bytes(0x1000, &specs);
+        let image = LoadImage::parse(&bytes, &TAG).expect("valid image");
+        // Long enough that the block is the one request the refusal reaches.
+        let argument = vec![b'a'; 3 * 1024];
+        let mut space = AddressSpace::new(HostPageTable::new());
+        let sim = sim();
+        let stack = UserStack {
+            base: 0x10_0000,
+            page_count: 1,
+        };
+        let built = tairix_fuzzseed::meter::refusing_above(2 * 1024, || {
+            build_process_image(
+                &mut space,
+                &sim,
+                &image,
+                &bytes,
+                0,
+                &stack,
+                0x20_0000,
+                &[argument.as_slice()],
+                &[],
+                &StartFacts::UNSET,
+                frame_source(),
+            )
+        });
+        assert_eq!(built, Err(SpawnError::OutOfMemory));
     }
 
     #[test]
@@ -698,8 +758,7 @@ mod tests {
             0x20_0000,
             &[b"prog"],
             &[],
-            0,
-            0,
+            &StartFacts::UNSET,
             frame_source(),
         )
         .expect("build");
@@ -743,8 +802,11 @@ mod tests {
             0x90_0000,
             &[],
             &[],
-            7,
-            0,
+            &StartFacts {
+                canary: 7,
+                cpu_features: 0,
+                heap: HeapRegion::NONE,
+            },
             frame_source(),
         )
         .expect("build");
@@ -780,8 +842,7 @@ mod tests {
             0x20_0000,
             &[],
             &[],
-            0,
-            0,
+            &StartFacts::UNSET,
             frame_source(),
         )
         .unwrap_err();
@@ -815,8 +876,7 @@ mod tests {
             0x20_0001,
             &[],
             &[],
-            0,
-            0,
+            &StartFacts::UNSET,
             frame_source(),
         )
         .unwrap_err();
@@ -852,8 +912,7 @@ mod tests {
             0x20_0000,
             &[],
             &[],
-            0,
-            0,
+            &StartFacts::UNSET,
             frame_source(),
         )
         .unwrap_err();
@@ -887,8 +946,7 @@ mod tests {
             0x20_0000,
             &[],
             &[],
-            0,
-            0,
+            &StartFacts::UNSET,
             || None,
         )
         .unwrap_err();

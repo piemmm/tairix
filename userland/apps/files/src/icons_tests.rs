@@ -20,7 +20,8 @@ use core::cell::{Cell, RefCell};
 
 use tairix_icon::{
     artwork_cache, render_artwork, ArtworkCache, ArtworkDesk, ArtworkKey, ArtworkRasteriser,
-    ArtworkReader, ArtworkResolver, IconArtwork, IconKind, IconRequest, InlineArtwork, Resolved,
+    ArtworkReader, ArtworkResolver, BundleVersion, IconArtwork, IconKind, IconRequest,
+    InlineArtwork, Resolved,
 };
 use tairix_log::DiscardSink;
 use tairix_reclaim::{PressureBand, ReportedPressure};
@@ -29,6 +30,10 @@ use super::IconPipeline;
 
 /// The seat the caches under test are charged to.
 const TEST_SEAT: u64 = 1;
+
+/// The key the desks under test index their listed bundles under.
+const DESK_KEYS: tairix_hash::BuildSipHash13 =
+    tairix_hash::BuildSipHash13::with_seed(tairix_hash::HashSeed::from_words(7, 7));
 
 /// A 1080p 32-bit screen with no memory figure, so the budget is the
 /// screenful the shared policy never goes below.
@@ -168,6 +173,19 @@ impl ArtworkResolver for Deferring {
     fn declined(&mut self, key: &ArtworkKey, side: u32) {
         self.0.borrow_mut().decline(key, side);
     }
+
+    fn still_shown(&mut self, key: &ArtworkKey, side: u32) {
+        self.0.borrow_mut().keep(key, side);
+    }
+
+    fn bundle_version(
+        &mut self,
+        dir: &str,
+        listed: tairix_abi::fs::DocumentStamp,
+        side: u32,
+    ) -> BundleVersion {
+        self.0.borrow_mut().version_of(dir, listed, side)
+    }
 }
 
 /// The whole arrangement one tile is resolved through: the paint side, the
@@ -184,7 +202,7 @@ impl Arrangement {
     /// An arrangement over `cache` and a reader holding exactly `assets`.
     fn over(cache: ArtworkCache, assets: Vec<(String, Vec<u8>)>) -> Self {
         let calls = Rc::new(Calls::default());
-        let desk = Rc::new(RefCell::new(ArtworkDesk::new()));
+        let desk = Rc::new(RefCell::new(ArtworkDesk::new(DESK_KEYS)));
         Self {
             pipeline: IconPipeline::new(cache, Box::new(Deferring(Rc::clone(&desk)))),
             desk,
@@ -470,6 +488,69 @@ fn a_band_change_offers_a_declined_decode_again() {
     assert_eq!(grid.work(), (2, 2));
 }
 
+/// [`Deferring`], counting the asks for a listed bundle's version.
+struct CountingVersions {
+    inner: Deferring,
+    asked: Rc<Cell<usize>>,
+}
+
+impl ArtworkResolver for CountingVersions {
+    fn resolve(&mut self, key: &ArtworkKey, side: u32) -> Resolved {
+        self.inner.resolve(key, side)
+    }
+
+    fn still_shown(&mut self, key: &ArtworkKey, side: u32) {
+        self.inner.still_shown(key, side);
+    }
+
+    fn bundle_version(
+        &mut self,
+        dir: &str,
+        listed: tairix_abi::fs::DocumentStamp,
+        side: u32,
+    ) -> BundleVersion {
+        self.asked.set(self.asked.get() + 1);
+        self.inner.bundle_version(dir, listed, side)
+    }
+}
+
+/// A listed bundle's version is asked of the readers' desk once a turn,
+/// however often the turn walks its tile — its paint and its note that it is
+/// still shown — and asked again the next turn.
+#[test]
+fn a_bundles_version_is_asked_once_a_turn() {
+    let asked = Rc::new(Cell::new(0));
+    let desk = Rc::new(RefCell::new(ArtworkDesk::new(DESK_KEYS)));
+    let resolver = CountingVersions {
+        inner: Deferring(Rc::clone(&desk)),
+        asked: Rc::clone(&asked),
+    };
+    let mut pipeline = IconPipeline::new(cache(), Box::new(resolver));
+    let listed = tairix_abi::fs::DocumentStamp {
+        size: 1,
+        modified: tairix_abi::time::Time64::UNIX_EPOCH,
+        id: tairix_abi::fs::FileId {
+            volume: [1; 16],
+            node: 7,
+        },
+        content_gen: 1,
+    };
+    let request = IconRequest::listed_bundle(IconKind::AppBundle, "/Users/ann/One.app", listed);
+    let shown = tairix_browse::render::ShownArt {
+        request,
+        side: SIDE,
+        at: tairix_geometry::Rect::new(0, 0, SIDE, SIDE),
+    };
+    pipeline.begin_turn();
+    let _ = pipeline.source().artwork(request, SIDE);
+    let landed = desk.borrow_mut().take_landed();
+    assert!(!pipeline.moved_by(&landed, shown));
+    assert_eq!(asked.get(), 1, "a turn asked more than once");
+    pipeline.begin_turn();
+    let _ = pipeline.source().artwork(request, SIDE);
+    assert_eq!(asked.get(), 2, "a new turn did not ask again");
+}
+
 // ---------------------------------------------------------------------
 // A whole window's grid, over the real renderer
 // ---------------------------------------------------------------------
@@ -491,8 +572,9 @@ mod grid {
     use core::cell::{Cell, RefCell};
 
     use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
+    use tairix_abi::fs::DocumentStamp;
     use tairix_abi::{
-        AppInfoHeader, Errno, Time64, APPINFO_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
+        AppInfoHeader, Errno, FileId, Time64, APPINFO_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
         BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
     };
     use tairix_browse::render::{entry_rect, manager_art, scroll_wheel};
@@ -503,15 +585,15 @@ mod grid {
     };
     use tairix_geometry::{Rect, Scale};
     use tairix_icon::{
-        artwork_cache, render_artwork, ArtworkDesk, ArtworkRasteriser, ArtworkReader, IconArtwork,
-        IconArtworkSource, IconPicture, IconRequest, Landed,
+        artwork_cache, render_artwork, ArtworkDesk, ArtworkRasteriser, ArtworkReader, BundleFiles,
+        IconArtwork, IconArtworkSource, IconPicture, IconRequest, Landed, ListedBundle,
     };
     use tairix_log::DiscardSink;
     use tairix_raster::Surface;
     use tairix_reclaim::{PressureBand, ReportedPressure};
     use tairix_theme::Theme;
 
-    use super::{Calls, Deferring};
+    use super::{Calls, Deferring, DESK_KEYS};
     use crate::icons::IconPipeline;
 
     /// Bundles in the browsed directory: more than a window shows, so the view
@@ -681,7 +763,7 @@ mod grid {
             let mut browser = Browser::open_root(Bundles).expect("the fixture root lists");
             browser.set_view_mode(ViewMode::LargeIcons);
             let calls = Rc::new(Calls::default());
-            let desk = Rc::new(RefCell::new(ArtworkDesk::new()));
+            let desk = Rc::new(RefCell::new(ArtworkDesk::new(DESK_KEYS)));
             Self {
                 pipeline: IconPipeline::new(
                     artwork_cache(
@@ -781,15 +863,16 @@ mod grid {
         renaming: None,
     };
 
-    /// Paint `browser` whole into `surface` through `pipeline`, reporting
-    /// what each tile drew.
-    fn draw(
+    /// Paint `browser` whole into `surface` through `pipeline` as a turn of
+    /// the loop does, reporting what each tile drew.
+    fn draw<S: DirectorySource>(
         pipeline: &mut IconPipeline,
-        browser: &Browser<Bundles>,
+        browser: &Browser<S>,
         surface: &mut Surface,
         theme: &Theme,
         viewport: Rect,
     ) -> (usize, usize) {
+        pipeline.begin_turn();
         let drawn = Drawn::default();
         let mut tally = Tally {
             source: pipeline.source(),
@@ -955,5 +1038,164 @@ mod grid {
             decodes,
             "scrolling back re-decoded what was still retained"
         );
+    }
+
+    /// The bundle a plain `cp` is writing, as the folder it is copied into
+    /// lists it.
+    const COPIED: &str = "Tool.app";
+
+    /// Where its manifest names its icon.
+    const COPIED_ICON: &str = "/Tool.app/Resources/icon.png";
+
+    /// The folder a bundle is being copied into, listing it at the one version
+    /// its directory had when the copy made it.
+    struct CopyTarget;
+
+    impl DirectorySource for CopyTarget {
+        fn list(&mut self, _components: &[String]) -> Result<Listing, Errno> {
+            let bundle = Entry::new(COPIED, EntryKind::Bundle, 0, Time64::UNIX_EPOCH);
+            let id = FileId {
+                volume: [1; 16],
+                node: 7,
+            };
+            Ok(Listing::Ready(vec![bundle.with_id(id)]))
+        }
+    }
+
+    /// A bundle half-written by a copy: its manifest is whole, and its icon is
+    /// there only once `written` says the copy has reached it.
+    struct Copying {
+        written: Rc<Cell<bool>>,
+    }
+
+    impl Copying {
+        /// What the bundle's picture is read from now, as a reader stats it:
+        /// the manifest as written, and the icon once it is.
+        fn files(&self) -> BundleFiles {
+            let stamp = |node| DocumentStamp {
+                size: 16,
+                modified: Time64::UNIX_EPOCH,
+                id: FileId {
+                    volume: [1; 16],
+                    node,
+                },
+                content_gen: 1,
+            };
+            BundleFiles {
+                manifest: Some(stamp(8)),
+                icon: self.written.get().then(|| stamp(9)),
+            }
+        }
+    }
+
+    impl ArtworkReader for Copying {
+        fn read(&mut self, path: &str) -> Option<Vec<u8>> {
+            match path {
+                "/Tool.app/AppInfo" => Some(manifest()),
+                COPIED_ICON if self.written.get() => Some(vec![0u8; 16]),
+                _ => None,
+            }
+        }
+    }
+
+    /// Run every decode `desk` holds as the file manager's readers run one —
+    /// a listed bundle's files read first, its follow armed as they are, and
+    /// its picture decoded only where they moved — and deliver each. Answers
+    /// how many ran.
+    fn produce_all(
+        desk: &RefCell<ArtworkDesk>,
+        (reader, rasteriser): &mut (Copying, Decoder),
+    ) -> usize {
+        let mut ran = 0;
+        loop {
+            let Some(job) = desk.borrow_mut().next_job() else {
+                return ran;
+            };
+            let produced = job.produce(
+                (&mut *reader, &mut *rasteriser),
+                |bundle, reader| {
+                    desk.borrow_mut().follows(bundle);
+                    reader.files()
+                },
+                |bundle| desk.borrow().files_of(bundle),
+            );
+            desk.borrow_mut()
+                .deliver_produced(&job, produced, |_| (), &());
+            ran += 1;
+        }
+    }
+
+    /// The copy defect in a window: a bundle a plain `cp` was still writing
+    /// was read before its icon was there, and the refusal stood until its
+    /// folder's listing moved. Its picture is keyed by the files it was read
+    /// from, which are followed while it shows, so the window shows its own
+    /// icon once the copy writes it.
+    #[test]
+    fn a_bundle_whose_icon_arrives_after_a_refused_read_shows_its_own_icon() {
+        PRESSURE.report(PressureBand::Normal);
+        let (w, h) = (WIN_WIDTH, WIN_HEIGHT);
+        let mut browser = Browser::open_root(CopyTarget).expect("the fixture root lists");
+        browser.set_view_mode(ViewMode::LargeIcons);
+        let desk = Rc::new(RefCell::new(ArtworkDesk::new(DESK_KEYS)));
+        // The follower has made its wait, so the bundles shown are followed.
+        desk.borrow_mut().follow_bundles();
+        let mut pipeline = IconPipeline::new(
+            artwork_cache(
+                "files.test-copy",
+                1,
+                (SCREEN_BYTES, MACHINE_BYTES),
+                &PRESSURE,
+                &SINK,
+            ),
+            Box::new(Deferring(Rc::clone(&desk))),
+        );
+        let written = Rc::new(Cell::new(false));
+        let calls = Rc::new(Calls::default());
+        let mut seams = (
+            Copying {
+                written: Rc::clone(&written),
+            },
+            Decoder {
+                calls: Rc::clone(&calls),
+            },
+        );
+        let mut surface = Surface::new(w, h).expect("a window-sized surface");
+        let (theme, viewport) = (Theme::dark(), Rect::new(0, 0, w, h));
+        let mut settle = |pipeline: &mut IconPipeline, seams: &mut (Copying, Decoder)| {
+            for _ in 0..8 {
+                let drawn = draw(pipeline, &browser, &mut surface, &theme, viewport);
+                if produce_all(&desk, seams) == 0 {
+                    return drawn;
+                }
+            }
+            panic!("the window never settled");
+        };
+
+        let (artwork, glyphs) = settle(&mut pipeline, &mut seams);
+        assert!(
+            artwork == 0 && glyphs > 0,
+            "a half-written bundle draws its built-in picture"
+        );
+        let bundle = ListedBundle {
+            dir: format!("/{COPIED}"),
+            listed: browser.entries()[0].stamp(),
+        };
+        assert!(
+            desk.borrow_mut().follows(&bundle),
+            "a bundle a window shows is followed"
+        );
+
+        // The copy writes the icon, and the follower hears it.
+        written.set(true);
+        assert!(
+            desk.borrow_mut().moved(&bundle),
+            "a followed bundle's change has it read again"
+        );
+        let (artwork, glyphs) = settle(&mut pipeline, &mut seams);
+        assert!(
+            artwork > 0 && glyphs == 0,
+            "the bundle shows its own icon once its icon is written"
+        );
+        assert_eq!(calls.decodes.get(), 1, "only the whole icon was decoded");
     }
 }

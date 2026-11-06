@@ -5,15 +5,15 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_abi::fs::FileId;
+use tairix_abi::fs::{DocumentStamp, FileId};
 use tairix_abi::time::Time64;
 
-use super::{ArtworkDocument, DocumentStamp, Thumbnail, MAX_THUMBNAIL_BYTES};
+use super::{ArtworkDocument, Thumbnail, MAX_THUMBNAIL_BYTES};
 use crate::artwork::{
     render_artwork, ArtworkKey, ArtworkRasteriser, ArtworkReader, ArtworkResolver, InlineArtwork,
     Resolved,
 };
-use crate::desk::{ArtworkDesk, ArtworkJob};
+use crate::desk::{ArtworkDesk, ArtworkJob, TEST_KEYS};
 use crate::picture::Fitted;
 use tairix_geometry::Rect;
 
@@ -286,7 +286,7 @@ fn icon(path: &str) -> ArtworkKey {
 /// Every icon is handed out before any thumbnail, however they were asked.
 #[test]
 fn a_thumbnail_waits_behind_every_icon() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let thumbnail = key(7, WRITTEN);
     desk.want(&thumbnail, SIDE);
     desk.want(&icon("/a.png"), SIDE);
@@ -308,7 +308,7 @@ fn a_thumbnail_waits_behind_every_icon() {
 /// back, and each thumbnail is shown as it lands.
 #[test]
 fn an_icon_batch_is_not_held_back_by_waiting_thumbnails() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let (first, second) = (key(7, WRITTEN), key(8, WRITTEN));
     desk.want(&first, SIDE);
     desk.want(&second, SIDE);

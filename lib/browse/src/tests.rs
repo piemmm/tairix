@@ -9,6 +9,10 @@
 #[global_allocator]
 static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 
+/// The key the desks under test index their listed bundles under.
+pub(crate) const DESK_KEYS: tairix_hash::BuildSipHash13 =
+    tairix_hash::BuildSipHash13::with_seed(tairix_hash::HashSeed::from_words(7, 7));
+
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -127,7 +131,9 @@ fn volume(label: &str, target: &str, medium: Option<BlkMedium>) -> Volume {
             availability: tairix_abi::sysinfo::MountAvailability::Available,
             owner: None,
             volume_id: [0; 16],
+            identity: [0; 16],
             read_only: false,
+            titled: false,
         },
         offered: true,
     }
@@ -289,10 +295,11 @@ fn a_mount_is_offered_as_a_volume_while_it_serves() {
             Volume::from_mount(&mount("/Storage/Stick", gone, 1)).expect("a listed volume");
         assert!(!unavailable.offered, "its device is gone");
     }
+    let root = Volume::from_mount(&mount("/", MountAvailability::Available, 1))
+        .expect("the view's root is a volume");
     assert_eq!(
-        Volume::from_mount(&mount("/", MountAvailability::Available, 1)),
-        None,
-        "a mount point naming no leaf is no volume to label"
+        root.label, "/",
+        "it names no leaf, so it is labelled by itself"
     );
 }
 
@@ -362,6 +369,138 @@ fn a_volume_attached_for_a_principal_is_theirs_to_eject() {
         ..stick
     };
     assert_eq!(unnamed_stick.ejector(), None);
+}
+
+/// A volume's record says whether its format takes a title, and one withheld
+/// from its reader says it takes none.
+#[test]
+fn a_volume_carries_whether_its_format_takes_a_title() {
+    use tairix_abi::sysinfo::MountAvailability;
+    let record = mount("/Storage/Stick", MountAvailability::Available, 1);
+    let titled = |record| Volume::from_mount(&record).expect("a volume").facts.titled;
+    assert!(
+        !titled(record),
+        "until the kernel says its format takes one"
+    );
+    assert!(titled(record.with_titled(true)));
+    assert!(!titled(record.with_titled(true).withheld()), "withheld");
+}
+
+/// Who may retitle a volume follows its class and claim: a disk image's owner
+/// alone, anyone for a device's volume — the kernel deciding, and an
+/// administrator asked where it refuses the authority — and no one for a share,
+/// an image no one owns, or a volume no retitle could name.
+#[test]
+fn who_may_retitle_a_volume_follows_its_class_and_claim() {
+    use crate::places::{REASON_NOT_YOURS, REASON_SHARE_TITLE, REASON_UNNAMED_VOLUME};
+    use crate::{Retitler, Retitling};
+    use tairix_abi::sysinfo::{VolumeClass, VOLUME_ID_UNPUBLISHED};
+
+    let facts = |class, owner| VolumeFacts {
+        class,
+        owner,
+        volume_id: [7; 16],
+        titled: true,
+        ..volume("v", "/Storage/v", None).facts
+    };
+    let image = facts(VolumeClass::Image, Some(1000));
+    assert_eq!(image.retitler(), Ok(Retitler::Owner(1000)));
+    assert_eq!(
+        image.retitling_by(Some(1000)),
+        Retitling::Allowed(Retitler::Owner(1000))
+    );
+    assert_eq!(
+        image.retitling_by(Some(1001)),
+        Retitling::Refused(REASON_NOT_YOURS),
+        "someone else's"
+    );
+    assert!(
+        !Retitler::Owner(1000).administered(),
+        "an image is its owner's alone"
+    );
+    for (device, retitler) in [
+        (facts(VolumeClass::Removable, None), Retitler::AtTheSeat),
+        (facts(VolumeClass::Local, None), Retitler::Administrator),
+    ] {
+        assert_eq!(device.retitler(), Ok(retitler));
+        assert!(retitler.administered(), "an administrator may be asked");
+        for uid in [1000, 1001] {
+            assert_eq!(
+                device.retitling_by(Some(uid)),
+                Retitling::Allowed(retitler),
+                "anyone may ask, the kernel deciding"
+            );
+        }
+        let unnamed = VolumeFacts {
+            volume_id: VOLUME_ID_UNPUBLISHED,
+            ..device
+        };
+        assert_eq!(unnamed.retitler(), Err(REASON_UNNAMED_VOLUME));
+    }
+    assert_eq!(
+        facts(VolumeClass::Network, Some(1000)).retitler(),
+        Err(REASON_SHARE_TITLE)
+    );
+    assert_eq!(
+        facts(VolumeClass::Image, None).retitler(),
+        Err(REASON_NOT_YOURS),
+        "an image no one owns"
+    );
+}
+
+/// A viewer the rule admits is refused a format that keeps no title, and told
+/// a read-only or absent volume is not retitled as it is; one the kernel would
+/// not name retitles nothing.
+#[test]
+fn a_volume_is_retitled_only_where_its_format_and_mount_allow() {
+    use crate::places::{
+        REASON_NOT_YOURS, REASON_TITLE_ABSENT, REASON_TITLE_READ_ONLY, REASON_UNKNOWN_VIEWER,
+        REASON_UNTITLED_FORMAT,
+    };
+    use crate::Retitling;
+    use tairix_abi::sysinfo::{MountAvailability, VolumeClass};
+
+    let stick = VolumeFacts {
+        class: VolumeClass::Removable,
+        volume_id: [7; 16],
+        titled: true,
+        ..volume("v", "/Storage/v", None).facts
+    };
+    let changed = |change: fn(&mut VolumeFacts)| {
+        let mut facts = stick.clone();
+        change(&mut facts);
+        facts.retitling_by(Some(1000))
+    };
+    assert_eq!(stick.retitling_by(Some(1000)).refusal(), None);
+    assert_eq!(
+        stick.retitling_by(None),
+        Retitling::Refused(REASON_UNKNOWN_VIEWER)
+    );
+    assert_eq!(
+        changed(|facts| facts.titled = false),
+        Retitling::Refused(REASON_UNTITLED_FORMAT)
+    );
+    assert_eq!(
+        changed(|facts| {
+            facts.class = VolumeClass::Image;
+            facts.owner = Some(1001);
+            facts.titled = false;
+        }),
+        Retitling::Refused(REASON_NOT_YOURS),
+        "another's image is refused as theirs, whatever its record withholds"
+    );
+    assert_eq!(
+        changed(|facts| facts.read_only = true),
+        Retitling::Unavailable(REASON_TITLE_READ_ONLY)
+    );
+    assert_eq!(
+        changed(|facts| facts.availability = MountAvailability::RecoveryConflict),
+        Retitling::Unavailable(REASON_TITLE_READ_ONLY)
+    );
+    assert_eq!(
+        changed(|facts| facts.availability = MountAvailability::UnavailableLost),
+        Retitling::Unavailable(REASON_TITLE_ABSENT)
+    );
 }
 
 /// Another principal's private volume is withheld from this session, which
@@ -2010,7 +2149,7 @@ use tairix_abi::fs::{DirEntry, FileKind, FS_PATH_MAX};
 use tairix_abi::time::Time64;
 use tairix_fsmeta::preset::acorn::Filetype;
 
-use crate::entry::{LinkResolution, LinkTarget};
+use crate::entry::LinkTarget;
 use crate::vfs::{
     absolute_path, entries_from_dir_stream, EntryReader, LinkInfo, ListingOnly, VfsDirectorySource,
 };
@@ -2296,7 +2435,7 @@ fn a_listed_entry_names_the_file_and_version_its_record_named() {
     };
     assert_eq!(
         entry.stamp(),
-        tairix_icon::DocumentStamp {
+        tairix_abi::fs::DocumentStamp {
             size: 5,
             modified: Time64::UNIX_EPOCH,
             id,
@@ -2472,7 +2611,7 @@ fn a_missing_directory_surfaces_the_fetch_refusal() {
 
 // --- FM1: richer entries, bundle recognition, and the shared sort --------
 
-use crate::entry::{is_bundle_name, EntryKind};
+use crate::entry::EntryKind;
 use crate::sort::{sort_entries, SortDirection, SortKey, SortMode};
 
 /// Encode `(name, kind, size, modified)` children as one packed `DirEntry`
@@ -2532,20 +2671,6 @@ fn a_bad_record_still_refuses_the_whole_listing() {
 }
 
 #[test]
-fn is_bundle_name_matches_only_a_named_dot_app() {
-    assert!(is_bundle_name("Example.app"));
-    assert!(is_bundle_name("Text Editor.app"));
-    // Case-insensitive suffix so a volume's casing does not hide a bundle.
-    assert!(is_bundle_name("Thing.APP"));
-    // A base name is required: the bare suffix is not a bundle.
-    assert!(!is_bundle_name(".app"));
-    assert!(!is_bundle_name("app"));
-    assert!(!is_bundle_name("notes.txt"));
-    assert!(!is_bundle_name(""));
-    assert!(!is_bundle_name("Example.apple"));
-}
-
-#[test]
 fn a_dot_app_directory_is_a_bundle_not_a_folder_to_descend() {
     let stream = encoded_stream(&[
         (b"Editor.app", FileKind::Directory),
@@ -2593,7 +2718,7 @@ fn mixed_listing() -> Vec<Entry> {
 #[test]
 fn default_sort_is_directories_first_then_case_insensitive_name() {
     let mut entries = mixed_listing();
-    sort_entries(&mut entries, SortMode::default_order());
+    sort_entries(&mut entries, SortMode::default_order().into());
     let ordered: Vec<&str> = entries.iter().map(Entry::name).collect();
     // Directories first (apricot < Zebra, case-folded); then files and the
     // bundle together, case-insensitively by name.
@@ -2619,7 +2744,8 @@ fn sort_by_size_descending_keeps_directories_first() {
             key: SortKey::Size,
             direction: SortDirection::Descending,
             ..SortMode::default_order()
-        },
+        }
+        .into(),
     );
     let ordered: Vec<&str> = entries.iter().map(Entry::name).collect();
     // Directories still lead (grouping is fixed); among the rest, largest
@@ -2646,7 +2772,8 @@ fn sort_by_modified_orders_within_the_file_group() {
             key: SortKey::Modified,
             direction: SortDirection::Ascending,
             ..SortMode::default_order()
-        },
+        }
+        .into(),
     );
     let files: Vec<&str> = entries
         .iter()
@@ -2673,7 +2800,8 @@ fn sort_by_kind_clusters_a_typed_name_by_its_extension() {
             key: SortKey::Kind,
             direction: SortDirection::Ascending,
             ..SortMode::default_order()
-        },
+        }
+        .into(),
     );
     let ordered: Vec<&str> = entries.iter().map(Entry::name).collect();
     assert_eq!(ordered, ["c.txt", "a.zip,a91", "b.zip"]);
@@ -2688,7 +2816,8 @@ fn sort_by_kind_clusters_bundles_ahead_of_files_within_the_non_directory_group()
             key: SortKey::Kind,
             direction: SortDirection::Ascending,
             ..SortMode::default_order()
-        },
+        }
+        .into(),
     );
     let ordered: Vec<&str> = entries.iter().map(Entry::name).collect();
     // Directories still lead (grouping is fixed, and both are unaffected by
@@ -2711,7 +2840,7 @@ fn sort_by_kind_clusters_bundles_ahead_of_files_within_the_non_directory_group()
 #[test]
 fn sort_of_an_empty_listing_is_a_no_op() {
     let mut entries: Vec<Entry> = Vec::new();
-    sort_entries(&mut entries, SortMode::default_order());
+    sort_entries(&mut entries, SortMode::default_order().into());
     assert!(entries.is_empty());
 }
 
@@ -5039,6 +5168,66 @@ fn activation_source() -> VfsDirectorySource<impl FnMut(&str) -> Result<Vec<u8>,
     tree_source(dirs)
 }
 
+/// A hand-off deselects the entry it handed while that entry, by its path and
+/// node, is still the one chosen, and leaves any other selection alone.
+#[test]
+fn a_hand_off_deselects_only_the_entry_still_chosen_alone() {
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(2).expect("select notes.txt");
+    let handed = browser
+        .listed_selection()
+        .pop()
+        .expect("notes.txt as listed");
+    assert!(browser.deselect_handed(&handed));
+    assert!(browser.selection().is_empty());
+    assert!(
+        !browser.deselect_handed(&handed),
+        "nothing is chosen any more"
+    );
+
+    browser.select(0).expect("then Docs");
+    assert!(!browser.deselect_handed(&handed), "chosen again since");
+    assert_eq!(browser.chosen_index(), Some(0));
+
+    browser.select(2).expect("notes.txt again");
+    browser.toggle_selection(0).expect("and Docs");
+    assert!(
+        !browser.deselect_handed(&handed),
+        "grown into several since"
+    );
+    assert_eq!(browser.selection().len(), 2);
+
+    browser.select(2).expect("notes.txt alone");
+    let replaced = Listed {
+        id: node(9),
+        ..handed.clone()
+    };
+    assert!(
+        !browser.deselect_handed(&replaced),
+        "another node under the name"
+    );
+    assert_eq!(browser.chosen_index(), Some(2));
+}
+
+/// A hand-off made before the window moved elsewhere leaves the selection
+/// there alone.
+#[test]
+fn a_hand_off_leaves_a_folder_moved_to_alone() {
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(1).expect("select Editor.app");
+    let handed = browser
+        .listed_selection()
+        .pop()
+        .expect("Editor.app as listed");
+    assert_eq!(
+        browser.activate_selected(BundleIntent::Browse),
+        Ok(Activation::Descended)
+    );
+    browser.select(0).expect("select AppInfo");
+    assert!(!browser.deselect_handed(&handed));
+    assert_eq!(browser.chosen_name(), Some("AppInfo"));
+}
+
 #[test]
 fn activating_a_directory_descends_into_it() {
     let mut browser = Browser::open_root(activation_source()).expect("root");
@@ -5465,7 +5654,8 @@ fn new_offers_each_type_a_writing_application_declares_exactly() {
 
 #[test]
 fn a_drop_copies_by_default_moves_with_shift_and_refuses_what_moves_nothing() {
-    use crate::clipboard::{drop_operation, ClipboardOp};
+    use crate::clipboard::drop_operation;
+    use tairix_abi::window_ipc::DropOperation;
 
     let path = |parts: &[&str]| -> Vec<String> { parts.iter().map(ToString::to_string).collect() };
     let items = [
@@ -5475,11 +5665,11 @@ fn a_drop_copies_by_default_moves_with_shift_and_refuses_what_moves_nothing() {
     let elsewhere = path(&["Users", "ann", "Desktop"]);
     assert_eq!(
         drop_operation(&items, &elsewhere, false),
-        Some(ClipboardOp::Copy)
+        Some(DropOperation::Copy)
     );
     assert_eq!(
         drop_operation(&items, &elsewhere, true),
-        Some(ClipboardOp::Cut)
+        Some(DropOperation::Move)
     );
     // Back into the folder they came from moves nothing.
     assert_eq!(
@@ -5498,11 +5688,47 @@ fn a_drop_copies_by_default_moves_with_shift_and_refuses_what_moves_nothing() {
     // A sibling whose name only starts like an item's is not inside it.
     assert_eq!(
         drop_operation(&items, &path(&["Users", "ann", "Workshop"]), false),
-        Some(ClipboardOp::Copy)
+        Some(DropOperation::Copy)
     );
     // Nothing dragged, and the root, move nothing.
     assert_eq!(drop_operation(&[], &elsewhere, false), None);
     assert_eq!(drop_operation(&[listed(&[])], &elsewhere, false), None);
+}
+
+/// A volume dragged out of the storage catalog is linked wherever a file can
+/// be made, never copied or moved, and a drag mixing it with other items is
+/// refused.
+#[test]
+fn a_volume_dragged_from_storage_is_linked_never_copied_or_moved() {
+    use crate::clipboard::drop_operation;
+    use tairix_abi::window_ipc::DropOperation;
+
+    let path = |parts: &[&str]| -> Vec<String> { parts.iter().map(ToString::to_string).collect() };
+    let stick = [listed(&["Storage", "USB"])];
+    let desktop = path(&["Users", "ann", "Desktop"]);
+    for shift in [false, true] {
+        assert_eq!(
+            drop_operation(&stick, &desktop, shift),
+            Some(DropOperation::Link)
+        );
+    }
+    assert_eq!(
+        drop_operation(&stick, &path(&["Storage", "Backup", "Links"]), false),
+        Some(DropOperation::Link),
+        "onto another volume"
+    );
+    let mixed = [
+        listed(&["Storage", "USB"]),
+        listed(&["Users", "ann", "a.txt"]),
+    ];
+    assert_eq!(drop_operation(&mixed, &desktop, false), None);
+    for nowhere in [
+        path(&["Storage"]),
+        path(&[]),
+        path(&["Storage", "USB", "Photos"]),
+    ] {
+        assert_eq!(drop_operation(&stick, &nowhere, false), None, "{nowhere:?}");
+    }
 }
 
 #[test]
@@ -5796,9 +6022,15 @@ fn listed(parts: &[&str]) -> Listed {
     }
 }
 
-/// `parts` queued for removal, listed with no node of its own.
+/// `parts` queued for removal, listed with no node of its own, as a folder
+/// when `is_directory`.
 fn target(parts: &[&str], is_directory: bool) -> DeleteTarget {
-    DeleteTarget::new(listed(parts), is_directory)
+    let kind = if is_directory {
+        EntryKind::Directory
+    } else {
+        EntryKind::File
+    };
+    DeleteTarget::new(listed(parts), kind)
 }
 
 /// A node on a volume of its own, for the identities a listing names.
@@ -5884,6 +6116,42 @@ fn selection_select_all_selects_the_range_and_empty_stays_empty() {
     s.select_all(0);
     assert!(s.is_empty());
     assert_eq!(s.anchor(), None);
+}
+
+/// A listing change carries each member to where its entry went, drops one
+/// whose entry went, and spans the new count; the anchor follows its entry
+/// even when a toggle left it out.
+#[test]
+fn selection_remap_carries_members_and_the_anchor_to_a_new_count() {
+    let mut s = Selection::new();
+    s.single(1);
+    s.toggle(4);
+    s.toggle(6);
+    s.toggle(6);
+    assert_eq!(s.anchor(), Some(6), "a toggle off still moves the anchor");
+    let moved = |before: usize| match before {
+        1 => Some(9),
+        4 => None,
+        6 => Some(0),
+        other => Some(other),
+    };
+    s.remap(12, moved);
+    assert_eq!(selected(&s), [9]);
+    assert_eq!(s.anchor(), Some(0));
+    s.select_all(12);
+    assert_eq!(s.len(), 12);
+}
+
+/// A fresh listing starts empty over its own count.
+#[test]
+fn selection_reset_empties_it_over_the_new_listing() {
+    let mut s = Selection::new();
+    s.select_all(40);
+    s.reset(3);
+    assert!(s.is_empty());
+    assert_eq!(s.anchor(), None);
+    s.range_to(2);
+    assert_eq!(selected(&s), [2]);
 }
 
 #[test]
@@ -6541,6 +6809,7 @@ fn context_commands_list_covers_every_variant_once() {
             ContextCommand::SelectAll,
             ContextCommand::ClearSelection,
             ContextCommand::Paste,
+            ContextCommand::EmptyTrash,
         ]
     );
     for command in CONTEXT_COMMANDS {
@@ -6548,7 +6817,10 @@ fn context_commands_list_covers_every_variant_once() {
             command.acts_on_selection(),
             !matches!(
                 command,
-                ContextCommand::SelectAll | ContextCommand::ClearSelection | ContextCommand::Paste
+                ContextCommand::SelectAll
+                    | ContextCommand::ClearSelection
+                    | ContextCommand::Paste
+                    | ContextCommand::EmptyTrash
             ),
             "{command:?}"
         );
@@ -7130,7 +7402,8 @@ fn the_context_menu_declares_one_row_per_command_with_its_label_and_caption() {
     // with its id.
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(2).expect("select notes.txt");
-    let model = ContextMenuModel::for_browser(&browser, true);
+    // Shown the Trash, so every command is declared.
+    let model = ContextMenuModel::for_browser(&browser, true).showing_trash(true);
     let notes = Entry::file("notes.txt");
     let quick = ContextQuick {
         chosen: Some(&notes),
@@ -7328,6 +7601,7 @@ fn mount_read_only_of_an_unnamable_image_is_refused_not_dropped() {
         Ok(Some(MountAct::Attach {
             path: "/game.adf".to_string(),
             read_only: true,
+            handoff: None,
         }))
     );
     assert_eq!(chosen(&mut browser, "notes.txt"), Ok(None), "no disk image");
@@ -7368,7 +7642,9 @@ fn the_chosen_lost_volume_is_ejected_letting_its_loss_go() {
                 availability: MountAvailability::UnavailableLost,
                 owner: Some(1000),
                 volume_id: [5; 16],
+                identity: [5; 16],
                 read_only: false,
+                titled: false,
             },
             offered: false,
         }],
@@ -7430,7 +7706,9 @@ fn a_disk_image_mounts_read_only_and_only_its_attachers_volume_ejects() {
             availability: MountAvailability::Available,
             owner,
             volume_id: [5; 16],
+            identity: [5; 16],
             read_only: false,
+            titled: false,
         },
         offered: true,
     };
@@ -7602,12 +7880,12 @@ fn only_removal_declares_the_destructive_emphasis() {
     use tairix_abi::window_ipc::{AppMenuRole, AppMenuRowView};
 
     // Emphasis is a property of the command, not of whether it is actionable,
-    // so it is asserted over a fully-enabled menu: exactly the one row whose
-    // verb destroys something wears the destructive role.
+    // so it is asserted over a fully-enabled menu, shown the Trash: exactly the
+    // rows whose verbs destroy something wear the destructive role.
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(2).expect("select notes.txt");
     let menu = context_menu(
-        ContextMenuModel::for_browser(&browser, true),
+        ContextMenuModel::for_browser(&browser, true).showing_trash(true),
         "Files",
         ContextQuick::default(),
     )
@@ -7620,13 +7898,58 @@ fn only_removal_declares_the_destructive_emphasis() {
         })
         .collect();
     for (role, &command) in roles.iter().zip(CONTEXT_COMMANDS) {
-        let expected = if command == ContextCommand::Delete {
+        let expected = if matches!(command, ContextCommand::Delete | ContextCommand::EmptyTrash) {
             AppMenuRole::Destructive
         } else {
             AppMenuRole::Neutral
         };
         assert_eq!(*role, expected, "{command:?} emphasis");
     }
+}
+
+/// The Trash's own window offers Empty Trash last on its root plate, beneath
+/// a rule and with the destructive emphasis, greyed with its reason while the
+/// Trash lists nothing; no other window offers it at all.
+#[test]
+fn only_the_trashs_window_offers_empty_trash_last_on_its_root_plate() {
+    use crate::chrome::{context_menu, ContextCommand, ContextMenuModel, ContextQuick};
+    use tairix_abi::window_ipc::{AppMenuRole, AppMenuRowView};
+
+    let offered = |model: ContextMenuModel| {
+        let menu = context_menu(model, "Files", ContextQuick::default()).expect("the rows fit");
+        let root: alloc::vec::Vec<_> = menu
+            .rows()
+            .filter(|(_, parent)| parent.is_none())
+            .map(|(row, _)| row)
+            .collect();
+        match root.as_slice() {
+            [.., AppMenuRowView::Separator, AppMenuRowView::Item(item)]
+                if item.label == ContextCommand::EmptyTrash.label() =>
+            {
+                assert_eq!(item.role, AppMenuRole::Destructive);
+                Some(String::from(item.reason))
+            }
+            _ => None,
+        }
+    };
+    let browser = Browser::open_root(activation_source()).expect("root");
+    let model = ContextMenuModel::for_browser(&browser, false);
+    assert_eq!(offered(model), None, "a window elsewhere offers none");
+    assert_eq!(
+        offered(model.showing_trash(true)),
+        Some(String::new()),
+        "the Trash's own window, listing something, offers it"
+    );
+
+    let mut empty = Browser::open_root(MockFs::fixture()).expect("root");
+    empty.open_index(2).expect("enter System");
+    empty.open_index(0).expect("enter the empty Fonts");
+    let model = ContextMenuModel::for_browser(&empty, false).showing_trash(true);
+    assert_eq!(offered(model), Some(String::from("the Trash is empty")));
+    assert_eq!(
+        model.reason(ContextCommand::EmptyTrash),
+        "the Trash is empty"
+    );
 }
 
 #[test]
@@ -9122,6 +9445,9 @@ fn scan_every_section(props: &Properties, window: Rect, editor: Rect) -> Scanned
                     assert_eq!(tab, PropertiesTab::Attributes, "the editor off its own tab");
                     found.editor_points += 1;
                 }
+                PropertiesTarget::Title => {
+                    assert_eq!(tab, PropertiesTab::Drive, "the title off its own tab");
+                }
             }
         }
     }
@@ -9140,7 +9466,7 @@ fn scan(props: &Properties, view: PropertiesView, window: Rect) -> Vec<(Point, P
         for x in 0..i32::try_from(window.width).unwrap() {
             let at = Point::new(x, y);
             if let Some(target) =
-                properties_hit(props, view, controls, window, Scale::ONE, &theme, at)
+                properties_hit(props, view, &controls, window, Scale::ONE, &theme, at)
             {
                 found.push((at, target));
             }
@@ -9168,7 +9494,7 @@ fn a_nodes_strip_resolves_only_its_own_three_tabs() {
             if let Some(PropertiesTarget::Tab(tab)) = properties_hit(
                 &props,
                 PropertiesView::default(),
-                controls,
+                &controls,
                 window,
                 Scale::ONE,
                 &theme,
@@ -9258,7 +9584,7 @@ fn each_section_resolves_every_control_it_draws_and_nothing_else() {
         properties_hit(
             &props,
             PropertiesView::default(),
-            resting(&bar, &empty, &perms_panel),
+            &resting(&bar, &empty, &perms_panel),
             window,
             Scale::ONE,
             &theme,
@@ -9309,7 +9635,7 @@ fn an_ownership_value_resolves_only_for_a_session_that_may_reassign_it() {
         properties_hit(
             &props,
             view,
-            resting(&bar, &empty, &perms_panel),
+            &resting(&bar, &empty, &perms_panel),
             window,
             Scale::ONE,
             &theme,
@@ -9321,7 +9647,7 @@ fn an_ownership_value_resolves_only_for_a_session_that_may_reassign_it() {
         properties_hit(
             &props,
             view,
-            refused(&bar, &empty, &perms_panel),
+            &refused(&bar, &empty, &perms_panel),
             window,
             Scale::ONE,
             &theme,
@@ -9336,7 +9662,7 @@ fn an_ownership_value_resolves_only_for_a_session_that_may_reassign_it() {
         properties_hit(
             &props,
             view,
-            refused(&bar, &empty, &perms_panel),
+            &refused(&bar, &empty, &perms_panel),
             window,
             Scale::ONE,
             &theme,
@@ -9367,7 +9693,7 @@ fn a_press_on_the_open_id_editor_leaves_the_typing_alone() {
         properties_hit(
             &props,
             perms_view(),
-            controls,
+            &controls,
             window,
             Scale::ONE,
             &theme,
@@ -9425,7 +9751,7 @@ fn scan_first_permission(props: &Properties, view: PropertiesView, window: Rect)
         .map(|y| Point::new(column, y))
         .find(|at| {
             matches!(
-                properties_hit(props, view, controls, window, Scale::ONE, &theme, *at),
+                properties_hit(props, view, &controls, window, Scale::ONE, &theme, *at),
                 Some(PropertiesTarget::Permission(_))
             )
         })
@@ -9502,7 +9828,7 @@ fn attributes_seen(props: &Properties, window: Rect, scroll: u64) -> Vec<usize> 
         if let Some(PropertiesTarget::Attribute(index)) = properties_hit(
             props,
             view,
-            resting(&bar, &empty, &perms_panel),
+            &resting(&bar, &empty, &perms_panel),
             window,
             Scale::ONE,
             &theme,
@@ -9610,7 +9936,7 @@ fn a_window_too_small_for_a_band_resolves_and_draws_nothing_there() {
                     properties_hit(
                         &props,
                         view,
-                        resting(&bar, &empty, &perms_panel),
+                        &resting(&bar, &empty, &perms_panel),
                         tiny,
                         Scale::ONE,
                         &theme,
@@ -9763,7 +10089,7 @@ fn the_identity_band_shows_what_hides_in_a_name() {
             &mut surface,
             PropertiesFrame::Reading,
             PropertiesView::default(),
-            controls,
+            &controls,
             Scale::ONE,
             &theme,
             window,
@@ -9793,7 +10119,7 @@ fn a_window_paints_each_state_it_can_be_in_without_panicking() {
                 &mut surface,
                 frame,
                 view,
-                controls,
+                &controls,
                 Scale::ONE,
                 &theme,
                 window,
@@ -9867,7 +10193,7 @@ fn a_window_paints_each_state_it_can_be_in_without_panicking() {
         &mut tiny,
         PropertiesFrame::Ready(&props),
         general,
-        resting(&bar, &empty, &perms_panel),
+        &resting(&bar, &empty, &perms_panel),
         Scale::ONE,
         &theme,
         Rect::new(0, 0, 2, 2),
@@ -9900,7 +10226,7 @@ fn a_window_draws_its_live_controls_and_its_named_subject() {
             &mut surface,
             PropertiesFrame::Ready(&props),
             view,
-            controls,
+            &controls,
             Scale::ONE,
             &theme,
             window,
@@ -10110,7 +10436,7 @@ fn perms_view() -> PropertiesView {
 /// through `draw_properties_window`.
 fn painted_perms(
     props: &Properties,
-    controls: PropertiesControls<'_>,
+    controls: &PropertiesControls<'_>,
 ) -> Vec<tairix_raster::Pixel> {
     let window = props_window();
     let mut surface = Surface::new(window.width, window.height).expect("surface");
@@ -10174,7 +10500,7 @@ fn a_motion_or_press_over_a_kept_permissions_section_composes_nothing() {
             properties_hit(
                 &props,
                 perms_view(),
-                resting(&bar, &empty, panel),
+                &resting(&bar, &empty, panel),
                 window,
                 Scale::ONE,
                 &theme,
@@ -10207,26 +10533,26 @@ fn a_kept_permissions_section_draws_what_a_fresh_one_would() {
         crate::entry::EntryKind::File,
         &props_stat(FileKind::Regular, 0o600),
     );
-    let first = painted_perms(&readable, resting(&bar, &empty, &kept));
-    let moved = painted_perms(&private, resting(&bar, &empty, &kept));
+    let first = painted_perms(&readable, &resting(&bar, &empty, &kept));
+    let moved = painted_perms(&private, &resting(&bar, &empty, &kept));
     assert_ne!(first, moved, "a changed mode is drawn");
     assert_eq!(
         moved,
-        painted_perms(&private, resting(&bar, &empty, &PermsPanel::default()))
+        painted_perms(&private, &resting(&bar, &empty, &PermsPanel::default()))
     );
 
     let ten = TextField::new().with_text("10");
     let hundred = TextField::new().with_text("100");
     let at_ten = painted_perms(
         &private,
-        PropertiesControls {
+        &PropertiesControls {
             owner: Some((OwnerField::Uid, &ten)),
             ..resting(&bar, &empty, &kept)
         },
     );
     let at_hundred = painted_perms(
         &private,
-        PropertiesControls {
+        &PropertiesControls {
             owner: Some((OwnerField::Uid, &hundred)),
             ..resting(&bar, &empty, &kept)
         },
@@ -10236,14 +10562,14 @@ fn a_kept_permissions_section_draws_what_a_fresh_one_would() {
         at_hundred,
         painted_perms(
             &private,
-            PropertiesControls {
+            &PropertiesControls {
                 owner: Some((OwnerField::Uid, &hundred)),
                 ..resting(&bar, &empty, &PermsPanel::default())
             },
         )
     );
     assert_eq!(
-        painted_perms(&private, resting(&bar, &empty, &kept)),
+        painted_perms(&private, &resting(&bar, &empty, &kept)),
         moved,
         "and its closing"
     );
@@ -10263,7 +10589,7 @@ fn toggle_extents(
     let perms_panel = PermsPanel::default();
     let empty = TextField::new();
     let controls = resting(&bar, &empty, &perms_panel);
-    let hit = |at: Point| properties_hit(props, perms_view(), controls, window, scale, theme, at);
+    let hit = |at: Point| properties_hit(props, perms_view(), &controls, window, scale, theme, at);
     let column = properties_owner_editor_rect(
         props,
         PropertiesView::default(),
@@ -10383,7 +10709,7 @@ fn the_narrowest_window_still_seats_every_toggle_apart() {
 fn perms_press(
     props: &Properties,
     view: &mut PropertiesView,
-    controls: PropertiesControls<'_>,
+    controls: &PropertiesControls<'_>,
     key: Key,
 ) -> PermsKeyed {
     let keyed = properties_permissions_key(
@@ -10415,23 +10741,23 @@ fn the_keyboard_reaches_every_control_the_pointer_does() {
     let named = Key::Named;
 
     assert!(!view.perms.holds());
-    perms_press(&props, &mut view, controls, named(NamedKey::Down));
+    perms_press(&props, &mut view, &controls, named(NamedKey::Down));
     assert_eq!(view.perms.row, Some((0, 0)), "Down takes the keyboard in");
 
     let mut reached = Vec::new();
     for _ in 0..6 {
         for _ in 0..3 {
-            perms_press(&props, &mut view, controls, named(NamedKey::Left));
+            perms_press(&props, &mut view, &controls, named(NamedKey::Left));
         }
         for _ in 0..3 {
-            if let Some(target) = perms_press(&props, &mut view, controls, Key::Char(' ')).target {
+            if let Some(target) = perms_press(&props, &mut view, &controls, Key::Char(' ')).target {
                 if !reached.contains(&target) {
                     reached.push(target);
                 }
             }
-            perms_press(&props, &mut view, controls, named(NamedKey::Right));
+            perms_press(&props, &mut view, &controls, named(NamedKey::Right));
         }
-        perms_press(&props, &mut view, controls, named(NamedKey::Down));
+        perms_press(&props, &mut view, &controls, named(NamedKey::Down));
     }
     let pressable = PERMISSION_BITS
         .iter()
@@ -10455,7 +10781,7 @@ fn the_permissions_cursor_walks_carries_and_steps_back_out() {
     let empty = TextField::new();
     let controls = resting(&bar, &empty, &perms_panel);
     let mut view = perms_view();
-    let press = |view: &mut PropertiesView, key| perms_press(&props, view, controls, key);
+    let press = |view: &mut PropertiesView, key| perms_press(&props, view, &controls, key);
     let named = Key::Named;
 
     // Nothing but Down or Tab takes the keyboard in from the strip.
@@ -10530,7 +10856,7 @@ fn the_permissions_cursor_walks_carries_and_steps_back_out() {
         ..perms_view()
     };
     assert_eq!(
-        perms_press(&props, &mut view, locked, Key::Char(' ')).target,
+        perms_press(&props, &mut view, &locked, Key::Char(' ')).target,
         None
     );
 
@@ -10546,7 +10872,7 @@ fn the_permissions_cursor_walks_carries_and_steps_back_out() {
         named(NamedKey::Escape),
         Key::Char(' '),
     ] {
-        let keyed = perms_press(&props, &mut view, editing, key);
+        let keyed = perms_press(&props, &mut view, &editing, key);
         assert_eq!(keyed.cursor.row, Some((1, 0)), "{key:?} moved the cursor");
         assert_eq!(keyed.target, None);
     }
@@ -10568,7 +10894,7 @@ fn the_permissions_cursor_reports_what_it_repaints() {
         let keyed = properties_permissions_key(
             &props,
             view,
-            controls,
+            &controls,
             window,
             Scale::ONE,
             &theme,
@@ -10671,7 +10997,7 @@ fn a_press_on_the_gutter_scrolls_the_attribute_list_and_repaints_its_rows() {
         if let Some(PropertiesTarget::Attribute(_)) = properties_hit(
             &props,
             view,
-            resting(&bar, &empty, &perms_panel),
+            &resting(&bar, &empty, &perms_panel),
             window,
             Scale::ONE,
             &theme,
@@ -10705,7 +11031,7 @@ fn props_frame(props: &Properties, view: PropertiesView, window: Rect) -> Surfac
         &mut surface,
         PropertiesFrame::Ready(props),
         view,
-        resting(&bar, &empty, &perms_panel),
+        &resting(&bar, &empty, &perms_panel),
         Scale::ONE,
         &theme,
         window,
@@ -10790,7 +11116,7 @@ fn the_permissions_cursor_reveals_the_rows_it_walks_onto() {
         let keyed = properties_permissions_key(
             &props,
             *view,
-            controls,
+            &controls,
             window,
             Scale::ONE,
             &theme,
@@ -10833,7 +11159,7 @@ fn the_permissions_cursor_reveals_the_rows_it_walks_onto() {
         properties_hit(
             &props,
             view,
-            controls,
+            &controls,
             window,
             Scale::ONE,
             &theme,
@@ -10925,7 +11251,7 @@ fn the_attribute_cursor_is_revealed_and_the_gutter_is_not_a_row() {
                 properties_hit(
                     &props,
                     revealed,
-                    resting(&bar, &empty, &perms_panel),
+                    &resting(&bar, &empty, &perms_panel),
                     window,
                     Scale::ONE,
                     &theme,
@@ -10941,7 +11267,7 @@ fn the_attribute_cursor_is_revealed_and_the_gutter_is_not_a_row() {
         properties_hit(
             &props,
             revealed,
-            resting(&bar, &empty, &perms_panel),
+            &resting(&bar, &empty, &perms_panel),
             window,
             Scale::ONE,
             &theme,
@@ -10979,9 +11305,18 @@ fn roles(alert: &tairix_abi::window_ipc::AlertSpec) -> Vec<AlertButtonRole> {
         .collect()
 }
 
+/// The question [`delete_alert`] puts before removing `plan` as
+/// `disposition` says, in a window showing every name whole.
+fn delete_question(
+    plan: &DeletePlan,
+    disposition: DeleteDisposition,
+) -> tairix_abi::window_ipc::AlertSpec {
+    delete_alert(plan, disposition, HiddenEndings::NONE).expect("an alert")
+}
+
 #[test]
 fn a_delete_question_names_a_single_target() {
-    let alert = delete_alert(&one_file_plan(), DeleteDisposition::Permanent).expect("an alert");
+    let alert = delete_question(&one_file_plan(), DeleteDisposition::Permanent);
     assert!(alert.headline().contains("Kernel"));
     assert!(alert.detail().contains("cannot be undone"));
     assert!(!alert.detail().to_ascii_lowercase().contains("folder"));
@@ -10991,7 +11326,7 @@ fn a_delete_question_names_a_single_target() {
 #[test]
 fn a_delete_question_shows_what_would_hide_in_the_name() {
     let plan = DeletePlan::new(vec![target(&["Home", "a\u{200b}b"], false)]).expect("a plan");
-    let alert = delete_alert(&plan, DeleteDisposition::Permanent).expect("an alert");
+    let alert = delete_question(&plan, DeleteDisposition::Permanent);
     assert!(
         alert.headline().contains("a\u{fffd}b"),
         "{}",
@@ -10999,16 +11334,40 @@ fn a_delete_question_shows_what_would_hide_in_the_name() {
     );
 }
 
+/// One item is named as the window shows it: an application without the
+/// `.app` ending a window hides.
+#[test]
+fn a_delete_question_names_its_item_as_the_window_shows_it() {
+    let editor = DeleteTarget::new(listed(&["Users", "Editor.app"]), EntryKind::Bundle);
+    let plan = DeletePlan::new(vec![editor]).expect("a plan");
+    let hiding = HiddenEndings {
+        applications: true,
+        known_types: false,
+    };
+    let alert = delete_alert(&plan, DeleteDisposition::Trash, hiding).expect("an alert");
+    assert!(
+        alert.headline().contains("\u{201c}Editor\u{201d}"),
+        "{}",
+        alert.headline()
+    );
+    let exact = delete_question(&plan, DeleteDisposition::Trash);
+    assert!(
+        exact.headline().contains("\u{201c}Editor.app\u{201d}"),
+        "{}",
+        exact.headline()
+    );
+}
+
 #[test]
 fn a_delete_question_reports_the_honest_count_and_folder_warning() {
-    let alert = delete_alert(&folder_plan(), DeleteDisposition::Permanent).expect("an alert");
+    let alert = delete_question(&folder_plan(), DeleteDisposition::Permanent);
     assert!(alert.headline().contains('2'));
     assert!(alert.detail().to_ascii_lowercase().contains("folder"));
 }
 
 #[test]
 fn a_permanent_delete_is_destructive_and_warns() {
-    let alert = delete_alert(&one_file_plan(), DeleteDisposition::Permanent).expect("an alert");
+    let alert = delete_question(&one_file_plan(), DeleteDisposition::Permanent);
     assert_eq!(alert.severity(), AlertSeverity::Warning);
     assert!(alert
         .headline()
@@ -11025,7 +11384,7 @@ fn a_permanent_delete_is_destructive_and_warns() {
 
 #[test]
 fn a_move_to_trash_is_recoverable_and_the_default() {
-    let alert = delete_alert(&one_file_plan(), DeleteDisposition::Trash).expect("an alert");
+    let alert = delete_question(&one_file_plan(), DeleteDisposition::Trash);
     assert_eq!(alert.severity(), AlertSeverity::Question);
     assert!(alert.headline().contains("Kernel") && alert.headline().contains("Trash"));
     assert!(alert.detail().contains("restore"));
@@ -11042,7 +11401,7 @@ fn a_move_to_trash_is_recoverable_and_the_default() {
 fn a_delete_question_about_a_very_long_name_still_asks() {
     let long = "n".repeat(255);
     let plan = DeletePlan::new(vec![target(&["System", long.as_str()], false)]).expect("a plan");
-    let alert = delete_alert(&plan, DeleteDisposition::Trash).expect("an alert");
+    let alert = delete_question(&plan, DeleteDisposition::Trash);
     assert!(
         alert.headline().ends_with('\u{2026}'),
         "shortened, not refused"
@@ -11067,7 +11426,7 @@ fn trash_dir_is_the_library_trash_subtree_of_home() {
 
 // --- FM7b: the long-operation progress + cancel surface -------------------
 
-use crate::progress::{ProgressModel, ProgressOp, Reading, Subject, Tally};
+use crate::progress::{Clash, ProgressModel, ProgressOp, Reading, Subject, Tally};
 use crate::render::{
     build_progress_cancel, draw_progress_window, progress_cancel_at, progress_state,
     progress_window_extent,
@@ -11265,6 +11624,38 @@ fn a_waiting_operation_says_so_and_shows_a_still_track() {
     assert_eq!(progress_state(&model).activity, ActivityState::Working);
 }
 
+/// An operation asking about a name already taken names it and the folder it
+/// is taken in, a folder as a folder, and its bar holds still until it is
+/// answered.
+#[test]
+fn a_question_names_the_taken_name_and_holds_the_bar_still() {
+    let mut model = copying_to_backup();
+    model.observe(reading(tally(1, 0), None, true), "", 0);
+    assert_eq!(progress_state(&model).activity, ActivityState::Working);
+    model.set_asking(Some(Clash {
+        name: String::from("one.jpg"),
+        folder: String::from("Photos"),
+        folders: false,
+    }));
+    assert_eq!(
+        model.question().as_deref(),
+        Some("An item named \u{201c}one.jpg\u{201d} already exists in \u{201c}Photos\u{201d}.")
+    );
+    assert_eq!(progress_state(&model).activity, ActivityState::Idle);
+    model.set_asking(Some(Clash {
+        name: String::from("Photos"),
+        folder: String::new(),
+        folders: true,
+    }));
+    assert_eq!(
+        model.question().as_deref(),
+        Some("A folder named \u{201c}Photos\u{201d} already exists there.")
+    );
+    model.set_asking(None);
+    assert_eq!(model.question(), None);
+    assert_eq!(progress_state(&model).activity, ActivityState::Working);
+}
+
 #[test]
 fn progress_cancel_is_latched_and_shown() {
     let mut model = ProgressModel::new(ProgressOp::Delete, Subject::Many(2), None);
@@ -11290,10 +11681,10 @@ fn progress_cancel_is_latched_and_shown() {
 #[test]
 fn a_progress_window_is_sized_to_its_content_and_grows_with_the_density() {
     let theme = Theme::dark();
-    let (width, height) = progress_window_extent(Scale::ONE, &theme);
+    let (width, height) = progress_window_extent(Scale::ONE, &theme, false);
     assert!(width > 0 && height > 0);
     let dense = Scale::from_percent(200).expect("a scale");
-    let (wide, tall) = progress_window_extent(dense, &theme);
+    let (wide, tall) = progress_window_extent(dense, &theme, false);
     assert!(wide > width && tall > height);
 }
 
@@ -11303,7 +11694,7 @@ fn a_progress_window_paints_its_lines_and_bar_without_panicking() {
     use tairix_raster::Surface;
 
     let theme = Theme::dark();
-    let (width, height) = progress_window_extent(Scale::ONE, &theme);
+    let (width, height) = progress_window_extent(Scale::ONE, &theme, false);
     let client = Rect::new(0, 0, width, height);
     let mut model = copying_to_backup();
     model.observe(
@@ -11315,13 +11706,19 @@ fn a_progress_window_paints_its_lines_and_bar_without_panicking() {
     trace.set_state(progress_state(&model));
     let mut surface = Surface::new(width, height).expect("surface");
     let before = surface.pixels().to_vec();
-    draw_progress_window(&mut surface, (&model, &trace), Scale::ONE, &theme, client);
+    draw_progress_window(
+        &mut surface,
+        (&model, &trace, None),
+        Scale::ONE,
+        &theme,
+        client,
+    );
     assert_ne!(surface.pixels().to_vec(), before);
 
     let mut tiny = Surface::new(2, 2).expect("tiny surface");
     draw_progress_window(
         &mut tiny,
-        (&model, &trace),
+        (&model, &trace, None),
         Scale::ONE,
         &theme,
         Rect::new(0, 0, 2, 2),
@@ -11333,7 +11730,7 @@ fn a_progress_window_paints_its_lines_and_bar_without_panicking() {
 #[test]
 fn a_progress_window_fitted_shorter_keeps_its_cancel() {
     let theme = Theme::dark();
-    let (width, height) = progress_window_extent(Scale::ONE, &theme);
+    let (width, height) = progress_window_extent(Scale::ONE, &theme, false);
     let short = Rect::new(0, 0, width, height - height / 4);
     let reachable = (0..i32::try_from(short.height).unwrap()).any(|y| {
         (0..i32::try_from(width).unwrap())
@@ -11348,7 +11745,7 @@ fn a_progress_window_fitted_shorter_keeps_its_cancel() {
 #[test]
 fn progress_cancel_at_mirrors_the_cancel_button_and_fails_closed_off_it() {
     let theme = Theme::dark();
-    let (width, height) = progress_window_extent(Scale::ONE, &theme);
+    let (width, height) = progress_window_extent(Scale::ONE, &theme, false);
     let client = Rect::new(0, 0, width, height);
     let mut hits = 0u32;
     for y in 0..i32::try_from(height).unwrap() {
@@ -13293,14 +13690,11 @@ fn a_link_a_reader_cannot_describe_is_dangling_not_a_file() {
 fn the_classifier_refuses_to_trust_a_target_that_is_itself_a_link() {
     // Resolution follows every hop, so a backing reporting a link as a
     // resolved target is not trusted to name anything.
-    let kind = EntryKind::for_listing(
-        FileKind::Symlink,
-        "chain",
-        Some(LinkResolution {
-            kind: FileKind::Symlink,
-            target_name: "next",
-        }),
-    );
+    let link = LinkInfo {
+        target: "next".to_string(),
+        kind: Some(FileKind::Symlink),
+    };
+    let kind = EntryKind::for_listing(FileKind::Symlink, "chain", Some(&link));
     assert_eq!(kind, EntryKind::Link(LinkTarget::Dangling));
 }
 
@@ -13315,7 +13709,8 @@ fn a_link_sorts_and_classifies_as_what_it_names() {
             key: SortKey::Kind,
             direction: SortDirection::Ascending,
             ..SortMode::default_order()
-        },
+        }
+        .into(),
     );
     // Directories first, then bundles, then the leaves: a shortcut sorts
     // with what it names.
@@ -13374,6 +13769,56 @@ fn activating_a_link_acts_on_what_it_names() {
     assert_eq!(
         browser.activate_selected(BundleIntent::Launch),
         Err(crate::error::BrowseError::Source(Errno::NotFound))
+    );
+}
+
+/// A shortcut to a volume asks for the volume, which no walk reaches; one to
+/// a folder or a file under another root is reached at that root, never
+/// through the link.
+#[test]
+fn activating_a_shortcut_rooted_elsewhere_reaches_its_target() {
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        encoded_stream(&[
+            (b"USB", FileKind::Symlink),
+            (b"Apps", FileKind::Symlink),
+            (b"Notes", FileKind::Symlink),
+        ]),
+    );
+    dirs.insert("/System/Applications".to_string(), encoded_stream(&[]));
+    let stick = crate::mount::volume_root([7; 16]);
+    let links = FixtureLinks::default()
+        .with("/USB", &stick, None)
+        .with("/Apps", "System:/Applications", Some(FileKind::Directory))
+        .with("/Notes", "Users:/me/notes.txt", Some(FileKind::Regular));
+    let mut browser = Browser::open_root(tree_source_with_links(dirs, links)).expect("open");
+
+    select_named(&mut browser, "USB");
+    assert_eq!(
+        browser.activate_selected(BundleIntent::Launch),
+        Ok(Activation::OpenVolume {
+            name: "USB".to_string(),
+            target: stick,
+        })
+    );
+    select_named(&mut browser, "Notes");
+    assert_eq!(
+        browser.activate_selected(BundleIntent::Launch),
+        Ok(Activation::OpenFile {
+            path: "/Users/me/notes.txt".to_string(),
+            recorded: None,
+        })
+    );
+    select_named(&mut browser, "Apps");
+    assert_eq!(
+        browser.activate_selected(BundleIntent::Launch),
+        Ok(Activation::Descended)
+    );
+    assert_eq!(
+        browser.folder(),
+        Some(["System".to_string(), "Applications".to_string()].as_slice()),
+        "the folder the link names, never one through it"
     );
 }
 
@@ -13629,7 +14074,7 @@ fn drive_frame(drive: &Drive, view: PropertiesView, window: Rect) -> Surface {
         &mut surface,
         PropertiesFrame::Ready(&props),
         view,
-        controls,
+        &controls,
         Scale::ONE,
         &theme,
         window,
@@ -13830,7 +14275,7 @@ fn a_drive_whose_root_cannot_be_read_still_shows_its_drive_section() {
                 tab,
                 ..drive_view()
             },
-            controls,
+            &controls,
             Scale::ONE,
             &theme,
             window,
@@ -13842,6 +14287,91 @@ fn a_drive_whose_root_cannot_be_read_still_shows_its_drive_section() {
             "{tab:?}: the ring is drawn on the Drive tab alone"
         );
     }
+}
+
+/// A drive read for `viewer` at `/Storage/Backup`, titled "Backup" in a format
+/// that takes a title where `takes_title`.
+fn titled_drive(viewer: Option<u32>, takes_title: bool) -> Drive {
+    let record = MountRecord::new(
+        b"nvme0p2",
+        b"/Storage/Backup",
+        b"arxfs",
+        MountFlags::default(),
+        MountVolumeState {
+            usage: VolumeStats::default(),
+            availability: MountAvailability::Available,
+            medium: Some(NVME),
+        },
+        [0x5f; 16],
+    )
+    .expect("a valid record")
+    .with_title(tairix_abi::driver::filesystem::VolumeTitle::new("Backup").expect("a title"))
+    .with_titled(takes_title);
+    let mut drive = Drive::new().acting_for(viewer);
+    let _ = drive.adopt(&DriveSample {
+        mount: Some(record),
+        service: None,
+        at_ns: 0,
+    });
+    drive
+}
+
+/// A drive's *Title* field is pressed only where its viewer may retitle the
+/// volume, whatever became of the node's own read, at the rectangle the field
+/// is published at.
+#[test]
+fn a_drives_title_field_is_pressed_only_where_its_viewer_may_retitle() {
+    use crate::render::{properties_drive_hit, properties_title_rect};
+    let theme = Theme::dark();
+    let (w, h) = properties_window_extent(PropertiesStrip::Drive, Scale::ONE, &theme);
+    let window = Rect::new(0, 0, w, h);
+    let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
+    let editor = TextField::new();
+    let props = props_with(some_attributes(1));
+    for (viewer, takes_title, pressable) in [
+        (Some(1000), true, true),
+        (None, true, false),
+        (Some(1000), false, false),
+    ] {
+        let drive = titled_drive(viewer, takes_title);
+        let controls = PropertiesControls {
+            drive: Some(&drive),
+            ..resting(&bar, &editor, &perms_panel)
+        };
+        let field = properties_title_rect(drive_view(), Some(&drive), (window, Scale::ONE, &theme))
+            .expect("the field shows");
+        let at = Point::new(field.left() + 4, field.top() + 4);
+        let target = pressable.then_some(PropertiesTarget::Title);
+        assert_eq!(
+            properties_hit(
+                &props,
+                drive_view(),
+                &controls,
+                window,
+                Scale::ONE,
+                &theme,
+                at
+            ),
+            target,
+            "{viewer:?} {takes_title}"
+        );
+        assert_eq!(
+            properties_drive_hit(drive_view(), Some(&drive), window, (Scale::ONE, &theme), at),
+            target,
+            "whatever became of the node's read"
+        );
+        assert_eq!(drive.title().text(), "Backup");
+    }
+    let node = PropertiesView {
+        strip: PropertiesStrip::Node,
+        ..drive_view()
+    };
+    assert_eq!(
+        properties_drive_hit(node, None, window, (Scale::ONE, &theme), Point::new(4, 4)),
+        None,
+        "a node's window has no drive to press"
+    );
 }
 
 // --- Presentation ---------------------------------------------------------
@@ -13938,6 +14468,39 @@ fn a_presentation_listing_the_same_names_leaves_the_listing_alone() {
     assert_eq!(browser.chosen_name(), Some("a.txt"));
 }
 
+/// Hiding an ending re-sorts the listing by the names now shown, keeping the
+/// selection on its entry.
+#[test]
+fn hiding_an_ending_re_sorts_the_listing_keeping_the_selection() {
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        encoded_stream(&[
+            (b"Ab-2", FileKind::Regular),
+            (b"Ab.app", FileKind::Directory),
+        ]),
+    );
+    dirs.insert("/Ab.app".to_string(), encoded_stream(&[]));
+    let mut browser = Browser::open_root(tree_source(dirs)).expect("root");
+    assert_eq!(listed_names(&browser), ["Ab-2", "Ab.app"]);
+    browser.select(0).expect("select Ab-2");
+    let hiding = Presentation {
+        endings: HiddenEndings {
+            applications: true,
+            known_types: false,
+        },
+        ..Presentation::EXACT
+    };
+    assert_eq!(browser.set_presentation(hiding), Ok(true));
+    assert_eq!(listed_names(&browser), ["Ab.app", "Ab-2"]);
+    assert_eq!(browser.chosen_name(), Some("Ab-2"));
+    assert_eq!(
+        browser.set_presentation(hiding),
+        Ok(false),
+        "nothing moves twice"
+    );
+}
+
 #[test]
 fn a_rail_menu_ejects_only_a_volume_its_viewer_attached_or_one_that_can_be_pulled() {
     use crate::chrome::{context_choice_from_item, place_menu, ContextChoice, ContextCommand};
@@ -13958,7 +14521,9 @@ fn a_rail_menu_ejects_only_a_volume_its_viewer_attached_or_one_that_can_be_pulle
             availability: MountAvailability::Available,
             owner,
             volume_id: [3; 16],
+            identity: [3; 16],
             read_only: false,
+            titled: false,
         },
         offered: true,
     };

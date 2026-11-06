@@ -75,7 +75,7 @@ fn sink() -> &'static tairix_kernel_core::test_sink::TestSink {
 }
 
 fn cache() -> TransformClusterCache {
-    TransformClusterCache::new(budget(), owner(), unpressured(), sink())
+    TransformClusterCache::new(budget(), owner(), unpressured(), sink()).expect("a cache")
 }
 
 /// One kibibyte of recognisable plaintext.
@@ -222,7 +222,8 @@ fn purge_drops_everything_and_zeroes_the_ledger() {
 #[test]
 fn growth_follows_the_band_ceiling_and_moderate_drains_the_class() {
     let (source, pressure) = pressured(free_for(PressureBand::Normal));
-    let mut cache = TransformClusterCache::new(budget(), owner(), pressure, sink());
+    let mut cache =
+        TransformClusterCache::new(budget(), owner(), pressure, sink()).expect("a cache");
     cache.put(10, 1, &payload(1));
     assert!(cache.get(10).is_some());
 
@@ -253,8 +254,9 @@ fn growth_follows_the_band_ceiling_and_moderate_drains_the_class() {
 
 #[test]
 fn a_zero_backing_admits_nothing() {
+    let empty = CacheBudget::from_backing(0);
     let mut cache =
-        TransformClusterCache::new(CacheBudget::from_backing(0), owner(), unpressured(), sink());
+        TransformClusterCache::new(empty, owner(), unpressured(), sink()).expect("a cache");
     cache.put(10, 1, &payload(1));
     assert!(cache.get(10).is_none());
     assert!(cache.accounting().refusals() >= 1);
@@ -263,7 +265,8 @@ fn a_zero_backing_admits_nothing() {
 #[test]
 fn a_forced_pressure_shrink_is_counted() {
     let (source, pressure) = pressured(free_for(PressureBand::Normal));
-    let mut cache = TransformClusterCache::new(budget(), owner(), pressure, sink());
+    let mut cache =
+        TransformClusterCache::new(budget(), owner(), pressure, sink()).expect("a cache");
     cache.put(10, 1, &payload(1));
     assert_eq!(cache.accounting().pressure_shrinks(), 0);
     source
@@ -297,7 +300,8 @@ fn a_purge_counts_an_owner_teardown_drain() {
 #[test]
 fn a_detected_defect_is_counted_and_reported_once() {
     let captured = sink();
-    let mut cache = TransformClusterCache::new(budget(), owner(), unpressured(), captured);
+    let mut cache =
+        TransformClusterCache::new(budget(), owner(), unpressured(), captured).expect("a cache");
     cache.put(10, 1, &payload(1));
     cache.poison("ledger_imbalance");
     assert_eq!(cache.accounting().failures(), 1);
@@ -323,7 +327,8 @@ fn a_detected_defect_is_counted_and_reported_once() {
 #[test]
 fn normal_operation_emits_no_audit_records() {
     let captured = sink();
-    let mut cache = TransformClusterCache::new(budget(), owner(), unpressured(), captured);
+    let mut cache =
+        TransformClusterCache::new(budget(), owner(), unpressured(), captured).expect("a cache");
     cache.put(10, 1, &payload(1));
     assert!(cache.get(10).is_some());
     assert!(cache.get(99).is_none());
@@ -332,12 +337,64 @@ fn normal_operation_emits_no_audit_records() {
     assert!(captured.snapshot().is_empty());
 }
 
+/// A retained cluster's plaintext erases itself as it is let go, on whichever
+/// path lets it go — an index that would not take it included — because it is
+/// a wiping buffer: this stops compiling if it becomes a plain vector again.
 #[test]
-fn the_wipe_zeroes_the_plaintext_in_place() {
-    let mut plain = payload(0xEE);
-    TransformClusterCache::wipe(&mut plain);
-    assert_eq!(plain.len(), 1024, "the wipe keeps the length");
-    assert!(plain.iter().all(|&b| b == 0), "every byte is wiped");
+fn a_retained_plaintext_erases_itself() {
+    fn erases<T>(_: fn(&T) -> &WipedBuf) {}
+    erases::<Entry>(|entry| &entry.plain);
+}
+
+/// Room an invalidation freed in the indexes goes back to the heap once
+/// pressure rises, though the ledger it emptied is under the band's target
+/// and no shrink runs.
+#[test]
+fn room_an_invalidation_freed_is_given_back_once_pressure_rises() {
+    let (source, pressure) = pressured(free_for(PressureBand::Normal));
+    let mut cache =
+        TransformClusterCache::new(budget(), owner(), pressure, sink()).expect("a cache");
+    cache.put(10, 1, &payload(1));
+    cache.put(20, 1, &payload(2));
+    cache.invalidate_run(10, 20);
+    assert_eq!(cache.accounting().total_bytes(), 0);
+    assert!(
+        cache.entries.allocated_bytes() > 0,
+        "the indexes kept their room"
+    );
+    // Mild pressure preserves the class, so nothing here is over its target.
+    source
+        .free
+        .store(free_for(PressureBand::Mild), Ordering::Relaxed);
+    assert!(cache.get(10).is_none());
+    assert_eq!(
+        [cache.entries.allocated_bytes(), cache.lru.allocated_bytes()],
+        [0, 0],
+        "the heap has the room back"
+    );
+}
+
+/// An offer the heap refuses room for is refused before anything is evicted
+/// for it, so the cache is left exactly as it was.
+#[test]
+fn an_offer_refused_its_room_evicts_nothing_for_it() {
+    let mut cache = cache();
+    // Three entries fill the cache, so a fourth has to evict.
+    for (phys, fill) in [(10, 1), (20, 2), (30, 3)] {
+        cache.put(phys, 1, &payload(fill));
+    }
+    let held = cache.accounting().total_bytes();
+    let evictions = cache.accounting().evictions();
+    let fourth = payload(4);
+    // The plaintext's copy is refused; nothing else is asked for.
+    tairix_fuzzseed::meter::refusing_above(512, || cache.put(40, 1, &fourth));
+    assert_eq!(
+        cache.accounting().evictions(),
+        evictions,
+        "nothing was evicted for it"
+    );
+    assert_eq!(cache.accounting().total_bytes(), held);
+    assert!(cache.get(40).is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -487,7 +544,8 @@ fn cached_volume() -> (
             },
             pressure,
             sink(),
-        ),
+        )
+        .expect("a cache"),
         counts: Arc::clone(&counts),
     };
     let fs = ARXFS::format(
@@ -724,12 +782,14 @@ fn mounts_sharing_a_cache_decompress_a_cluster_once() {
         block_count: device.block_count,
     };
 
-    let shared = SharedClusterCache::new(TransformClusterCache::new(
+    let cache = TransformClusterCache::new(
         CacheBudget::from_backing(16 * 1024 * 1024),
         owner(),
         unpressured(),
         sink(),
-    ));
+    )
+    .expect("a cache");
+    let shared = SharedClusterCache::new(cache).expect("a shared cache");
     let read_all = |fs: &mut ARXFS<VecBlock>| {
         let node = fs.lookup(fs.root(), b"bundle").expect("lookup");
         let mut out = vec![0u8; payload.len()];
@@ -764,4 +824,43 @@ fn mounts_sharing_a_cache_decompress_a_cluster_once() {
         "the second mount decompressed nothing"
     );
     assert!(cache.accounting().hits() > hits);
+}
+
+/// However far an offer's admission gets before the heap refuses it, the
+/// cache holds only what it charged, and the offer is kept once granted.
+#[test]
+fn an_offer_the_heap_cannot_index_is_not_kept() {
+    let mut cache = cache();
+    let plain = payload(0xAB);
+    let mut granted = 0;
+    loop {
+        cache.purge();
+        tairix_fuzzseed::meter::refusing_after(granted, || cache.put(10, 3, &plain));
+        assert_eq!(cache.entries.len(), cache.lru.len());
+        assert_eq!(
+            cache.accounting().class_bytes(ReclaimClass::TransformCache),
+            cache.entries.len() * (plain.len() + MAP_ENTRY_OVERHEAD)
+        );
+        if !cache.entries.is_empty() {
+            break;
+        }
+        granted += 1;
+        assert!(granted < 8, "the offer was never kept");
+    }
+    assert!(granted >= 2, "the copy and an index were each refused");
+    assert_eq!(cache.get(10), Some(plain.as_slice()));
+}
+
+/// A cache, or the cell its mounts share it through, that the heap refuses is
+/// refused for memory rather than aborting the kernel.
+#[test]
+fn a_cache_the_heap_refuses_is_out_of_memory() {
+    let (pressure, captured) = (unpressured(), sink());
+    let refused = tairix_fuzzseed::meter::refusing_above(0, || {
+        TransformClusterCache::new(budget(), owner(), pressure, captured).err()
+    });
+    assert_eq!(refused, Some(DriverError::OutOfMemory));
+    let held = cache();
+    let shared = tairix_fuzzseed::meter::refusing_above(0, || SharedClusterCache::new(held).err());
+    assert_eq!(shared, Some(DriverError::OutOfMemory));
 }

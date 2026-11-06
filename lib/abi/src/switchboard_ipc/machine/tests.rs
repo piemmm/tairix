@@ -497,7 +497,7 @@ fn a_corrupt_device_is_refused() {
     let bytes = full().to_le_bytes();
     let first = STORAGE_OFFSET + 8;
     let mut availability = bytes;
-    availability[first + 65] = 6;
+    availability[first + 65] = MountAvailability::ReplayUnconfirmed.as_u8() + 1;
     assert_eq!(
         MachineReport::from_bytes(&availability),
         Err(Errno::OutOfRange)

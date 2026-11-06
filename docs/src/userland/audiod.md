@@ -25,8 +25,12 @@ provenance can never be mistaken for either.
 Frames move on the device's own period interrupt and nothing else. The driver
 services its ring from that interrupt and sends one notification carrying the
 `(frame position, monotonic time)` pair; `audiod` folds that pair into the
-endpoint's clock model and refills. There is no audio tick anywhere in the
-system, and nothing polls.
+endpoint's clock model and refills. A pair arriving while the endpoint is not
+clocking, or sampled before its configuration was attached — on the one
+monotonic clock the driver and `audiod` both read — belongs to a
+configuration it no longer runs and is not folded in, however late it
+arrives.
+There is no audio tick anywhere in the system, and nothing polls.
 
 A client's wake is never dropped because its mailbox refused it. One the
 mailbox had no room for, or that this service's own IPC budget refused, is held
@@ -42,10 +46,11 @@ held wakes go with it; a wake refused for good is given up and recorded (event
 
 The first stream on an endpoint programs its period: half that stream's
 latency target, so a ring two periods deep holds it, but never longer than
-20 ms (`MAX_PERIOD_MS`), clamped into what the device will do. The period is
-every stream's on the endpoint, so a client buffering deeply — a notification
-queueing its whole sound, a player saving power — never makes every later
-stream that late; its own ring still holds all it asked for.
+20 ms (`MAX_PERIOD_MS`), clamped into what the device will do. A sink's
+monitor asks for none, so a sink it alone rides runs at the longest. The
+period is every stream's on the endpoint, so a client buffering deeply — a
+notification queueing its whole sound, a player saving power — never makes
+every later stream that late; its own ring still holds all it asked for.
 
 ## What it composes
 
@@ -59,7 +64,7 @@ Every decision about *what samples come out* is `lib/audio`'s:
 | Source layout onto sink layout | `ChannelMatrix::derive`, once at open |
 | The one rate conversion | `Resampler` over a `FilterBank` shared per rate pair |
 | Summing and the one quantisation | `Mixer` |
-| Four gains into one multiply | `volume::resolve` |
+| Four gains into one multiply | `volume::endpoint_level`, then `volume::stream_multiply` |
 | What a device's rate actually is | `ClockModel` |
 
 ## Real-time discipline
@@ -78,21 +83,29 @@ A running stream with nothing queued contributes silence for exactly the
 frames it missed and takes the under-run — the device would otherwise run dry,
 which is strictly worse and is what its driver would report instead. A
 *draining* stream is different: the pump emits only the frames it genuinely
-has, so a drain's tail is a short chunk rather than a padded one. The position
+has, so a drain's tail is a short chunk rather than a padded one, unless a
+monitor keeps the sink clocking. The position
 never lies, so a client resynchronises exactly rather than drifting.
 
 A client that corrupts its own ring — positions no producer could publish —
 faults that stream alone: it is told `Faulted`, it moves no frame again, the
 stream and its owner are recorded (`STREAM_FAULTED`), and every other
-principal's sound, and the device, carry on. A *device* ring is the driver's
-and the mixer's, so a fault there is the device's, and loses it.
+principal's sound, and the device, carry on. The endpoint then settles as at
+any stream's stop: the gains of what is left live are rebalanced, and with
+nothing left live the device winds down. A *device* ring is the driver's and
+the mixer's, so a fault there is the device's, and loses it.
 
 ## An endpoint's configuration
 
 The first stream opened on an endpoint configures it, and the configuration
-stays while any stream is open on it. When nothing on it is live — every
-stream paused, drained, idle or held — its clock is stopped, so the device
-takes no interrupts. A sink first plays out what the device already holds:
+stays while any stream is open on it — a sink's monitor apart, which never
+chooses how its sink runs. An open is refused whatever its record would
+refuse — a ring no period the stream would be mixed in fits, a layout with
+nowhere to go, no room to hold it — before its endpoint is programmed, and
+one refused only once the device's grant is in hand leaves the endpoint as
+it was. When nothing on it is live — every stream paused,
+drained, idle or held — its clock is stopped, so the device takes no
+interrupts. A sink first plays out what the device already holds:
 those frames were mixed before the last stream stopped, so a resume is exact,
 and held in the device they would play into whatever starts next. A source
 stops at once and drops what it captured past its streams' positions. A paused
@@ -162,7 +175,50 @@ started, stopped, closed, held or released by the room, or lost with its
 device — `audiod` publishes it as the `AudioCapture` notice, which only the
 holder of its reserved rendezvous may publish and anyone may read. The session
 draws its recording indicator from it, so no program can hide its own
-recording.
+recording. A sink's monitor counts as a capture, so recording the desktop's
+sound raises the indicator as a microphone does.
+
+## A sink's monitor
+
+A capture stream may hear a sink's own mix — a screen recording's desktop
+sound (`plans/CAPTURE.md`). Its device id is the sink's with `MONITOR_FLAG`
+set (`CaptureSource::Monitor`, zero naming the default sink's), and it opens
+through the same capture path with the same stream ABI.
+
+* **The gate.** `CAP_AUDIO_CAPTURE`, and the caller's login session holding
+  the room the sink serves: `PermissionDenied` without the one, `SeatNotOwner`
+  without the other. An unclaimed room is anybody's to play into, so a
+  monitor there would hear every principal's sound: it is refused, and a live
+  monitor is held whenever the room is not its session's. Every open, refusal
+  and close is recorded (`MONITOR_OPENED`, `MONITOR_REFUSED`,
+  `MONITOR_CLOSED`).
+* **What it hears.** Each period the device is given, as it was before the
+  sink's own level and mute, so a recording does not follow the speaker's
+  volume: the device's period itself where the mixer took none of that level,
+  otherwise the period mixed again by a mixer of the tap's own, so the device
+  is given the same frames whether or not it is monitored. It reaches its
+  client as a source's period does, through the stream's own matrix and the
+  one resampler, and it ducks no media. A tap that cannot make that mix faults
+  the monitors alone (`STREAM_FAULTED`); the device plays on.
+* **How its sink runs.** Never as a monitor asks, or the device would be given
+  other frames for being monitored. One opened on an idle sink has it run as
+  no stream asked — at its rate nearest 48 kHz, in its widest encoding, with
+  its longest period — and the first stream to play where only monitors ride
+  has the sink configured afresh as that stream alone would, unless it asks
+  what the sink already runs; the monitors move onto it where they stand. A
+  monitor's ring holds two of the longest period any stream could have its
+  sink run at. An open refused there changes nothing: what its record would
+  refuse is refused before the sink is touched, and one refused only by the
+  device's grant or an allocation has the sink configured again as it ran,
+  its monitors moved back onto it.
+* **Back-pressure.** A reader that falls behind takes the over-run, counted as
+  a capture's is; the device never waits on it.
+* **Its clock.** A live monitor keeps its sink clocking, silent when nothing
+  plays, so it hears the sink's own timeline, and the sink is never drained
+  beneath it: a drain beside it has its tail padded with silence and is over,
+  `Idle`, once the device's position passes the frame its last one ends on,
+  the sink clocking on. The device is drained only when no monitor rides it.
+  A monitor's own drain is over at once.
 
 ## Device controls
 
@@ -201,6 +257,7 @@ first announcement always reaches its subscribers.
   would hold is not a boundary.
 * **Capture demands `CAP_AUDIO_CAPTURE`**, read from the caller's attested
   capability summary at stream open and never from anything the caller said.
+  A sink's monitor demands it too, and the room its sink serves.
 * **Playing for the machine or another session is the cue authority's
   alone.** A stream's tenancy (`audio-v1`) other than the caller's own is
   admitted only from `soundd`'s attested service account, and only for a
@@ -219,10 +276,11 @@ first announcement always reaches its subscribers.
   System Information service, which scopes the streams to their owners.
 
 A stream id is a service-issued token checked against the attested pid, so a
-guessed id reaches nothing. Every capture grant **and refusal**, every device
-bound or lost, every default-device change, every device control changed **or
-refused**, and every baseline adopted lands on the hash-chained audit log with
-a stable event id — "who tried" is the question an incident asks.
+guessed id reaches nothing. Every capture or monitor grant **and refusal**,
+every device bound or lost, every default-device change, every device control
+changed **or refused**, and every baseline adopted lands on the hash-chained
+audit log with a stable event id — "who tried" is the question an incident
+asks.
 
 ## Not yet
 

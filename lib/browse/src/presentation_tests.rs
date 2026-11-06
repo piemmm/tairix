@@ -48,7 +48,6 @@ fn a_link_is_shown_by_what_it_names() {
 #[test]
 fn a_file_is_shown_without_an_ending_the_registry_knows() {
     assert_split(KNOWN, &Entry::file("notes.txt"), "notes");
-    assert_split(KNOWN, &Entry::file("archive.tar.gz"), "archive.tar");
     assert_split(KNOWN, &Entry::file("picture,c85"), "picture");
     assert_split(
         KNOWN,
@@ -67,6 +66,32 @@ fn a_folder_or_a_name_that_would_be_left_empty_is_shown_whole() {
     assert_split(both, &Entry::directory("photos.png"), "photos.png");
     assert_split(both, &Entry::file(".txt"), ".txt");
     assert_split(both, &bundle(".app"), ".app");
+}
+
+/// An ending is hidden only where what is left names no type and no
+/// application of its own, so no name is ever shown as one it is not.
+#[test]
+fn an_ending_that_would_disguise_the_name_stays_on_show() {
+    let both = HiddenEndings {
+        applications: true,
+        known_types: true,
+    };
+    for endings in [APPS, both] {
+        assert_split(endings, &bundle("invoice.pdf.app"), "invoice.pdf.app");
+        assert_split(endings, &bundle("Old.app.app"), "Old.app.app");
+        assert_split(endings, &bundle("notes,fff.app"), "notes,fff.app");
+        assert_split(
+            endings,
+            &link("photo.jpg.app", LinkTarget::Bundle),
+            "photo.jpg.app",
+        );
+        assert_split(endings, &bundle("Paint.app"), "Paint");
+    }
+    for endings in [KNOWN, both] {
+        assert_split(endings, &Entry::file("archive.tar.gz"), "archive.tar.gz");
+        assert_split(endings, &Entry::file("Editor.app.txt"), "Editor.app.txt");
+        assert_split(endings, &Entry::file("notes.txt"), "notes");
+    }
 }
 
 #[test]

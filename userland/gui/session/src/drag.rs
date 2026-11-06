@@ -5,13 +5,15 @@
 //! application slot's declared types are matched against: the pressed item's
 //! name, the ending its listing hides of it and the filetype its volume
 //! records, the count, and the class picture of each item shown with where it
-//! stood (`DragItems`). Over one of the dragging application's own windows, or over the
-//! desktop, the session reports where the drag is and shows on the pointer
+//! stood, a bundle's or a RISC OS application's own picture with it by its path
+//! (`DragItems`). Over one of the dragging application's own windows, or over
+//! the desktop, the session reports where the drag is and shows on the pointer
 //! the verdict the application answers: copy, move, or nothing. The
-//! application keeps the items and performs every drop itself, so no path of
-//! its own and no authority crosses to the desktop; the only path that
-//! crosses is the desktop's own folder, which the session names and the
-//! application already reaches.
+//! application keeps the items and performs every drop itself, so no authority
+//! crosses to the desktop: an own picture is read under the session's own
+//! identity and nothing of it returns, and the only other path that crosses is
+//! the desktop's own folder, which the session names and the application
+//! already reaches.
 //!
 //! The same carrier takes the document a trusted save panel names to a folder
 //! (`plans/SAVE-DIALOG.md`): over the desktop the session resolves the folder
@@ -42,12 +44,13 @@ use tairix_browse::media::{name_endings, MediaType};
 use tairix_browse::render::Tiles;
 use tairix_controls::{ControlState, SelectionState};
 use tairix_geometry::{Point, Rect};
-use tairix_icon::{IconKind, Landed};
+use tairix_icon::{IconKind, IconRequest, Landed};
 use tairix_theme::CursorKind;
 use tairix_util::utf8::shown;
 use tairix_window::DragConclusion;
 use tairix_wm::{Compositor, InputEvent, Key, NamedKey, PointerButton, WindowId};
 
+use crate::picker::PickId;
 use crate::shell::DesktopShell;
 use crate::switchuser::park_within;
 
@@ -76,10 +79,12 @@ pub struct ItemsEnd {
     pub refused: Option<Box<DropRefusal>>,
 }
 
-/// How a carried save ended: where it was dropped, and the end the window it
-/// was last offered to is owed.
+/// How a carried save ended: the pick it was carried for, where it was
+/// dropped, and the end the window it was last offered to is owed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SaveEnd {
+    /// The pick whose panel it was carried out of.
+    pub pick: PickId,
     /// Where the document goes.
     pub dropped: SaveDrop,
     /// The window last offered the save, to be told the offer ended.
@@ -419,6 +424,16 @@ impl DragSurface {
         }
     }
 
+    /// Whether a report of `self` tells its application what one of `other`
+    /// told it: the place and the point on it, whatever of the desktop's own
+    /// listing the desktop folder there was resolved from.
+    fn reports_as(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Desktop { folder: a, .. }, Self::Desktop { folder: b, .. }) => a == b,
+            _ => self == other,
+        }
+    }
+
     /// Whether an application is told about the drag here.
     const fn reported(&self) -> bool {
         matches!(
@@ -490,8 +505,10 @@ enum Cargo {
     /// Items the application's window `source` began dragging, boxed so the
     /// carrier is no larger than a save.
     Items { source: u64, items: Box<DragItems> },
-    /// The document the trusted picker's save panel names.
+    /// The document a pick's save panel names.
     Save {
+        /// The pick whose panel it was carried out of.
+        pick: PickId,
         /// The window-channel window the save is for.
         requester: u64,
         document: SavedDocument,
@@ -538,7 +555,22 @@ impl Carried {
         match self.shown {
             Some(DropOperation::Copy) => CursorKind::DragCopy,
             Some(DropOperation::Move) => CursorKind::DragMove,
+            Some(DropOperation::Link) => CursorKind::DragLink,
             None => CursorKind::Arrow,
+        }
+    }
+}
+
+impl DragCarrier {
+    /// Hand `ask` the picture each card of the carried drag is drawn by and how
+    /// many pixels across; nothing while no drag is carried.
+    pub(crate) fn each_picture(
+        &self,
+        look: (tairix_geometry::Scale, &tairix_theme::Theme),
+        ask: impl FnMut(IconRequest<'_>, u32),
+    ) {
+        if let Some(carried) = &self.carried {
+            carried.stack.each_picture(look, ask);
         }
     }
 }
@@ -569,8 +601,8 @@ impl DesktopShell {
         self.carry(compositor, wm, Cargo::Items { source, items })
     }
 
-    /// Begin carrying the save the picker's panel, in its compositor window
-    /// `panel`, names for the window-channel window `requester`.
+    /// Begin carrying the save the panel of pick `pick`, in its compositor
+    /// window `panel`, names for the window-channel window `requester`.
     ///
     /// # Errors
     ///
@@ -578,10 +610,11 @@ impl DesktopShell {
     pub fn begin_save_drag(
         &mut self,
         compositor: &mut Compositor,
-        (panel, requester): (WindowId, u64),
+        (panel, pick, requester): (WindowId, PickId, u64),
         document: SavedDocument,
     ) -> Result<(), Errno> {
         let cargo = Cargo::Save {
+            pick,
             requester,
             document,
             offered: None,
@@ -687,13 +720,15 @@ impl DesktopShell {
     /// Take what the pointer is over now. Arriving somewhere new lights or
     /// darkens a slot, and shows no verdict until the application answers
     /// for the new place; the report it is owed waits for
-    /// [`take_drag_report`](Self::take_drag_report).
+    /// [`take_drag_report`](Self::take_drag_report). The desktop's folder
+    /// resolved again from its listing — re-sorted, or settled in a new
+    /// layout — owes no report: the application is told the same folder.
     pub fn drag_over(&mut self, compositor: &mut Compositor, next: DragSurface) {
         let Some(carried) = self.drag.carried.as_mut() else {
             return;
         };
         let arrived = !carried.over.same_place(&next);
-        let changed = next != carried.over;
+        let changed = !next.reports_as(&carried.over);
         let left_reported = arrived && carried.over.reported();
         let saving = matches!(carried.cargo, Cargo::Save { .. });
         // The desktop takes a save itself, so arriving there accepts it at
@@ -997,8 +1032,9 @@ impl DesktopShell {
         self.refresh_cursor(compositor);
         let source = match carried.cargo {
             Cargo::Items { source, .. } => source,
-            Cargo::Save { offered, .. } => {
+            Cargo::Save { pick, offered, .. } => {
                 return Some(DragEnd::Save(save_end(
+                    pick,
                     dropped,
                     &carried.over,
                     (carried.shown, carried.answered),
@@ -1054,12 +1090,13 @@ impl DesktopShell {
     }
 }
 
-/// How a carried save ended over `over`, showing `shown` and whether the
-/// place had answered, the offer `offered` standing: dropped on the desktop, it
-/// goes in the folder there; on a window whose application accepted the offer
-/// standing, in the folder it names; on one yet to answer, nowhere, for the
-/// panel to say so; and anywhere else, nowhere.
+/// How a save carried for `pick` ended over `over`, showing `shown` and
+/// whether the place had answered, the offer `offered` standing: dropped on the
+/// desktop, it goes in the folder there; on a window whose application accepted
+/// the offer standing, in the folder it names; on one yet to answer, nowhere,
+/// for the panel to say so; and anywhere else, nowhere.
 fn save_end(
+    pick: PickId,
     dropped: bool,
     over: &DragSurface,
     (shown, answered): (Option<DropOperation>, bool),
@@ -1082,7 +1119,11 @@ fn save_end(
         serial,
         dropped: at,
     });
-    SaveEnd { dropped, offer }
+    SaveEnd {
+        pick,
+        dropped,
+        offer,
+    }
 }
 
 /// The label the one item of an application's drag shows: its name less the
@@ -1118,6 +1159,7 @@ fn shown_as(
                 let look = Look {
                     label: one.then(|| item_label(items)),
                     icon: IconKind::for_asset(picture.icon.as_str()),
+                    own: picture.own,
                     state: if one { selected } else { ControlState::idle() },
                     count: (!one && index == 0).then_some(items.count()),
                 };
@@ -1140,6 +1182,7 @@ fn shown_as(
             let look = Look {
                 label: Some(shown(&document.name).into_owned()),
                 icon: document.icon,
+                own: None,
                 state: ControlState::idle(),
                 count: None,
             };

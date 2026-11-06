@@ -180,6 +180,7 @@ pub mod aids;
 pub mod alert;
 pub mod apps;
 pub mod assets;
+pub mod capture;
 mod choice;
 pub mod cli;
 pub mod clipboard;
@@ -195,10 +196,12 @@ pub mod effects;
 pub mod elevate;
 pub mod fade;
 pub mod frames;
+pub mod held;
 pub mod hold;
 pub mod holdback;
 pub mod idle;
 pub mod input;
+pub mod keep;
 pub mod keyboard;
 pub mod launch;
 pub mod launcher;
@@ -265,7 +268,8 @@ pub use confirm::{Answer, ConfirmPrompt};
 pub use depart::{serve_park_ns, Departure};
 pub use desktop::{
     AppearanceWork, BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
-    GestureRefusal, LaunchDocument, PinboardChange, SettingsEdit, DESKTOP_MARGIN,
+    GestureRefusal, LaunchDocument, PinboardChange, SettingsEdit, DESKTOP_MARGIN, PINBOARD_SETTLED,
+    PINBOARD_SETTLED_MESSAGE,
 };
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use drag::{
@@ -278,10 +282,10 @@ pub use drain::{
     SeatRouter, SeatWake,
 };
 pub use elevate::{
-    Answer as AuthoriseAnswer, AuthoriseDesk, AuthorisePrompt, Concluded as AuthoriseConcluded,
-    Done as AuthoriseDone, ElevateAsk, Elevation, Elevator, Listing, PromptOutcome,
-    Refusal as AuthoriseRefusal, Request as AuthoriseRequest, ELEVATE_PROMPT_SHOWN,
-    ELEVATE_PROMPT_SHOWN_MESSAGE,
+    Answer as AuthoriseAnswer, Asker as AuthoriseAsker, AuthoriseDesk, AuthorisePrompt,
+    Concluded as AuthoriseConcluded, Done as AuthoriseDone, ElevateAsk, Elevation, Elevator,
+    Listing, PromptOutcome, Refusal as AuthoriseRefusal, Request as AuthoriseRequest,
+    ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE,
 };
 pub use fade::{
     BackdropFade, ScreenFade, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE,
@@ -308,8 +312,9 @@ pub use lock::{LockOutcome, ScreenLock, UnlockAnswer, UnlockAsk};
 pub use notify::{is_own_component, producer_of, NotifySources};
 pub use pace::FramePacer;
 pub use picker::{
-    OwnPick, PickAccess, PickEnd, PickStep, PickerSlot, Requester, SessionPicker, Typing,
-    PICKER_ORIGIN, PICKER_SHOWN, PICKER_SHOWN_MESSAGE, PICKER_TITLE, PICKER_TOOLBAR, SAVE_TITLE,
+    picker_origin, OwnPick, PickAccess, PickAsk, PickEnd, PickId, PickSources, PickStep,
+    PickerSlot, Requester, SessionPicker, Typing, PICKER_ORIGIN, PICKER_SHOWN,
+    PICKER_SHOWN_MESSAGE, PICKER_TITLE, PICKER_TOOLBAR, PICKS_MAX, SAVE_TITLE,
 };
 pub use pinboard::PinboardCommand;
 pub use presenter::TaskbarPresenter;

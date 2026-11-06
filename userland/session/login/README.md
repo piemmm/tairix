@@ -59,8 +59,10 @@ design:
   starts it and returns its pid without waiting
   (`launch_as`), which is what a graphical caller needs: a desktop cannot
   wait for a program it must keep serving windows to
-  (`plans/CAPABILITY_USE.md` CU5). Both forms take one spawn, so they can
-  never start a program under different terms. The decision logic
+  (`plans/CAPABILITY_USE.md` CU5), **or** starts the screen recorder over
+  two pipes whose other ends it hands the requester (`launch_wired_as`).
+  Every form starts its program as the target account in the requester's
+  session (`elevated_attach`), so none can start one under other terms. The decision logic
   (`handle_elevate_request`) placement-checks the caller's attested
   console, decodes fail-closed, re-authenticates through the same
   `Authenticator` as the prompt, and audits every grant and refusal; the
@@ -181,20 +183,25 @@ time (`AGENTS.md` §5.2). There is no ambient authority (`AGENTS.md` §4).
 Login owns the reserved `EventId` range `10000..11000` (`AGENTS.md` §2.5,
 §19.4): `SESSION_STARTED`, `AUTH_FAILED`, `LOCKED_OUT`, `SESSION_ENDED`,
 `SESSION_LAUNCH_FAILED`, `CONSOLE_ERROR`, `ELEVATE_GRANTED`,
-`ELEVATE_REFUSED`, `ELEVATE_UNAVAILABLE`, `FONTD_STARTED`,
-`FONTD_UNAVAILABLE`, `VERIFY_GRANTED`, `VERIFY_REFUSED`,
+`ELEVATE_REFUSED`, `ELEVATE_UNAVAILABLE`, `VERIFY_GRANTED`, `VERIFY_REFUSED`,
 `SESSION_AUTH_GRANTED`, `SESSION_AUTH_REFUSED`, `SESSION_REQUEST_REFUSED`,
 `SESSION_ACCOUNTS_SENT`, `SESSION_ENDPOINT_UNAVAILABLE`,
 `GREETER_FAILED`, `GREETER_DEGRADED`, `SESSION_RESUMED`,
 `SESSION_BACKGROUNDED`, `SESSION_ENDED_ON_EXIT`, `LAUNCH_GRANTED`,
-`LAUNCH_REFUSED`, `LAUNCH_ENDED_ABNORMALLY`.
+`LAUNCH_REFUSED`, `LAUNCH_ENDED_ABNORMALLY`, `CAPTURE_GRANTED`,
+`CAPTURE_REFUSED`, `ROUND_CHOSEN`, `TEXT_ROUND_SUPERSEDED`,
+`TEXT_ROUND_UNWATCHED`, `ZONE_STORE_WITHHELD`, `AUTHORISERS_SENT`,
+`AUTHORISERS_REFUSED`, `AUTH_COOLING`, `SESSION_HOME_REFUSED`,
+`WIRED_GRANTED`, `WIRED_REFUSED`, `WIRED_ENDED`.
 
-The last of those is the reaper's: a program started by a non-blocking
-elevated launch writes its `stderr` to login's console, which behind a
-desktop is the framebuffer text console nobody sees, so login states an
-abnormal exit where a user can find it — naming a reserved load-failure
-status in words through the one shared map, and otherwise stating the code.
-A clean exit records nothing.
+`LAUNCH_ENDED_ABNORMALLY` and `WIRED_ENDED` are the reaper's: a program
+started by a non-blocking elevated launch writes its `stderr` to login's
+console, which behind a desktop is the framebuffer text console nobody sees,
+and a wired one's is closed, so login states how it ended where a user can
+find it — naming a reserved load-failure status in words through the one
+shared map, and otherwise stating the code. A plain launch's clean exit
+records nothing; every end of a wired one is recorded, closing the run an
+administrator allowed.
 
 ## Tests
 

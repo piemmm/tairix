@@ -36,6 +36,9 @@ loom = ["dep:loom"]
 [dev-dependencies]
 tairix-kernel-sched-api = { path = ".", version = "=0.0.0", features = ["conformance"] }
 tairix-kernel-sched-mlfq = { path = "../mlfq", version = "=0.0.0" }
+# The metered allocator the conformance suite's refusal properties refuse
+# through.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 
 [dependencies]
 # The scheduler-facing Arch HAL surface (`CpuId`, `SchedulerArch`) is the
@@ -57,9 +60,9 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # shared spinlock.
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
-# The set of ids held against the draw, and the unkeyed hasher it is built over:
-# every member is a kernel-drawn id, and a hold is taken on every admission, so
-# its insert must fail as a value rather than abort the kernel.
+# The task registry and the set of ids held against the draw, each changed on
+# every admission and so failing as a value rather than aborting the kernel,
+# and the per-boot key the held set hashes under.
 tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
 tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
 loom = { version = "0.7", optional = true }

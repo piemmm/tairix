@@ -16,20 +16,38 @@
 //!
 //! # Keeping the resident cost bounded
 //!
-//! Marking blocks used or free must never fail, because it happens on paths
-//! that cannot report an error — rolling a failed operation back, for one. So
+//! Marking blocks used or free reads nothing, because it happens on paths that
+//! cannot report an error — rolling a failed operation back, for one. So
 //! [`ARXFS::mark_run_used`] and [`ARXFS::mark_run_free`] apply the change
-//! directly to every bitmap page that is resident along with its summary block
-//! (the ordinary case, since allocation has just read them) and record the rest
-//! as pending. Pending changes are folded in — exactly, with the block reads
-//! that needs — at the next allocation and at commit, so they never accumulate
-//! beyond one transaction's worth and the free count is exact whenever the
-//! volume is at rest.
+//! directly when every bitmap page the run spans is resident along with its
+//! summary block (the ordinary case, since allocation has just read them) and
+//! otherwise record the whole run as pending. Pending changes are folded in —
+//! exactly, with the block reads that needs — at the next allocation and at
+//! commit, so they never accumulate beyond one transaction's worth and the free
+//! count is exact whenever the volume is at rest.
 //!
 //! Every set here is a set of **runs** ([`RangeSet`]), so a transaction's
 //! bookkeeping costs one entry per contiguous run it touches and never one per
 //! block: releasing a hundred-terabyte file releases its extents, each of which
 //! is contiguous by construction.
+//!
+//! # Room for the paths that cannot fail
+//!
+//! Recording a run can be refused for memory. A step refused that way changes
+//! nothing and fails with [`DriverError::OutOfMemory`], and its operation is
+//! undone. The undo, abandoning a transaction and publishing one have no error
+//! to answer with, yet they record runs too, so every step that can fail first
+//! makes room for its own runs and for every run those paths could then add
+//! ([`Allocator::keep_room`]). They never meet a refusal; one that did would
+//! mean the room was miscounted, and the handle freezes read-only rather than
+//! guess what the map holds.
+//!
+//! That room is memory like the runs, so the write-back ceiling counts each set
+//! at what it holds ([`Allocator::txn_pinned`]). The sets that outlive a
+//! transaction keep its room for the next one, up to a share of that ceiling
+//! and none once memory is short, and give back the rest once the transaction
+//! is published or, for one abandoned, as the next opens
+//! ([`Allocator::give_back_room`]).
 //!
 //! # When the map is trustworthy
 //!
@@ -41,12 +59,13 @@
 //! space, so the map never needs the copy-on-write and self-allocation
 //! machinery an authoritative structure would.
 
-use alloc::vec;
+use core::ops::Range;
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
-use tairix_collections::{RangeKey, RangeSet};
+use tairix_collections::{RangeKey, RangeSet, TryReserveError};
 use tairix_reclaim::MAP_ENTRY_OVERHEAD;
+use tairix_util::fallible;
 
 use crate::allocmap::{
     bit_get, clear_bit_range, find_free_bit, find_free_bit_rev, find_used_bit, find_used_bit_rev,
@@ -123,12 +142,13 @@ pub(crate) struct Allocator {
     /// Runs this transaction allocated and has not published, so it may
     /// reuse or reclaim them immediately.
     pub(crate) txn_private: RangeSet<u64>,
-    /// Runs the **running operation** claimed, so undoing that operation
-    /// alone releases exactly them and leaves the rest of the transaction it
-    /// joined intact.
+    /// Runs the **running operation** claimed and still holds, so undoing that
+    /// operation alone releases exactly them and leaves the rest of the
+    /// transaction it joined intact.
     pub(crate) op_claimed: RangeSet<u64>,
-    /// Private runs the running operation freed that an *earlier* operation
-    /// of the same transaction had claimed; undoing it reclaims them.
+    /// Private runs an *earlier* operation of the same transaction claimed
+    /// that the running operation freed and has not taken again; undoing it
+    /// reclaims them. Disjoint from [`Self::op_claimed`].
     pub(crate) op_released: RangeSet<u64>,
     /// The part of [`Self::txn_freed`] the running operation added.
     pub(crate) op_deferred: RangeSet<u64>,
@@ -186,15 +206,58 @@ fn move_bit_range(payload: &mut [u8], lo: u64, hi: u64, used: bool) -> u64 {
     }
 }
 
-/// Bytes one recorded run costs: its start and its end, plus the per-entry
-/// map bookkeeping every bounded pool in the tree charges on top of a
-/// payload.
-///
-/// This is what makes a set's entry count a *byte* figure the write-back
-/// ceiling can be compared against, so a transaction that dirties almost
-/// nothing while releasing millions of runs still meets the same bound as one
-/// that stages blocks.
+/// Bytes one recorded run is reckoned to need: its start and its end, plus the
+/// per-entry map bookkeeping every bounded pool in the tree charges on top of
+/// a payload. A set holding well beyond this a run has room to give back.
 const RUN_ENTRY_BYTES: usize = 2 * size_of::<u64>() + MAP_ENTRY_OVERHEAD;
+
+/// Whether `set` holds well beyond what its runs need: more than twice a
+/// [`RUN_ENTRY_BYTES`] record for each, and for one more.
+fn holds_spare_room(set: &RangeSet<u64>) -> bool {
+    let need = set
+        .len()
+        .saturating_add(1)
+        .saturating_mul(2 * RUN_ENTRY_BYTES);
+    set.allocated_bytes() > need
+}
+
+/// The driver's answer to a run set refused memory.
+pub(crate) fn out_of_memory(_: TryReserveError) -> DriverError {
+    DriverError::OutOfMemory
+}
+
+/// Held runs of `set` that `run` overlaps: how many parts a step over `run`
+/// can cut a set into, counted before the step adds any.
+pub(crate) fn overlapping_runs(set: &RangeSet<u64>, run: &Range<u64>) -> usize {
+    let mut count = 0;
+    let mut pos = run.start;
+    while let Some(part) = set.first_overlap(pos..run.end) {
+        count += 1;
+        pos = part.end;
+    }
+    count
+}
+
+/// Move `run` into `record`, except for the part `cancel` holds: that part
+/// was the running operation's own opposite step, and the two cancel out.
+pub(crate) fn shift(
+    cancel: &mut RangeSet<u64>,
+    record: &mut RangeSet<u64>,
+    run: Range<u64>,
+) -> Result<(), TryReserveError> {
+    let mut pos = run.start;
+    while pos < run.end {
+        let Some(part) = cancel.first_overlap(pos..run.end) else {
+            return record.insert(pos..run.end);
+        };
+        if part.start > pos {
+            record.insert(pos..part.start)?;
+        }
+        pos = part.end;
+        cancel.remove(part)?;
+    }
+    Ok(())
+}
 
 impl Allocator {
     /// Whether any deferred bit change is outstanding.
@@ -212,35 +275,55 @@ impl Allocator {
 
     /// Record `from..from + len` as a deferred mark, displacing any opposite
     /// mark over it so the latest mark is the only one held.
-    fn pending_defer(&mut self, from: u64, len: u64, used: bool) {
+    fn pending_defer(&mut self, from: u64, len: u64, used: bool) -> Result<(), TryReserveError> {
         let Some(run) = from.span(len) else {
-            return;
+            return Ok(());
         };
         let (set, cleared) = if used {
             (&mut self.pending_used, &mut self.pending_free)
         } else {
             (&mut self.pending_free, &mut self.pending_used)
         };
-        cleared.remove(run.clone());
-        set.insert(run);
+        cleared.remove(run.clone())?;
+        set.insert(run)
     }
 
     /// Forget every deferred mark over `from..from + len`.
-    fn pending_drop(&mut self, from: u64, len: u64) {
+    fn pending_drop(&mut self, from: u64, len: u64) -> Result<(), TryReserveError> {
         let Some(run) = from.span(len) else {
-            return;
+            return Ok(());
         };
-        self.pending_used.remove(run.clone());
-        self.pending_free.remove(run);
+        self.pending_used.remove(run.clone())?;
+        self.pending_free.remove(run)
     }
 
-    /// Take the lowest deferred mark, as `(start, len, used)`.
-    fn pending_pop(&mut self) -> Option<(u64, u64, bool)> {
-        if let Some(run) = self.pending_used.pop_first() {
+    /// Whether every bitmap page of `from..end` is resident along with the
+    /// summary block that counts it.
+    fn resident(&self, from: u64, end: u64) -> bool {
+        let geom = self.geom;
+        let mut block = from;
+        while block < end {
+            let page = geom.page_of(block);
+            let (summary_index, _) = geom.summary_slot_of(page);
+            if !self.cache.contains(geom.page_block(page))
+                || !self.cache.contains(geom.summary_block(summary_index))
+            {
+                return false;
+            }
+            block = geom.page_first_block(page) + geom.page_capacity(page);
+        }
+        true
+    }
+
+    /// The lowest deferred mark, as `(start, len, used)`, left in place until
+    /// it is applied.
+    fn pending_first(&self) -> Option<(u64, u64, bool)> {
+        if let Some(run) = self.pending_used.iter().next() {
             return Some((run.start, run.end - run.start, true));
         }
         self.pending_free
-            .pop_first()
+            .iter()
+            .next()
             .map(|run| (run.start, run.end - run.start, false))
     }
 
@@ -250,7 +333,115 @@ impl Allocator {
         self.pending_free.clear();
     }
 
-    /// Bytes and run entries the open transaction's run bookkeeping holds.
+    /// Make room for a step adding at most `adds` records to any one run set,
+    /// over what the paths that cannot fail are owed.
+    ///
+    /// Undoing the running operation adds up to a record per run of its undo
+    /// records to the sets it restores, and abandoning the transaction that
+    /// undo leaves adds up to one per run of the transaction's sets as the
+    /// undo restores them. Room for both is made with every set counted `adds`
+    /// runs larger, so it still holds once the step has run.
+    ///
+    /// # Errors
+    ///
+    /// [`TryReserveError`] when the room cannot be had; no set's runs changed.
+    pub(crate) fn keep_room(&mut self, adds: usize) -> Result<(), TryReserveError> {
+        self.keep_room_with(adds, 0, 0)
+    }
+
+    /// [`Self::keep_room`], with room for `marks` more deferred map marks and
+    /// `refills` more reserve records on top: what lifting the embargo adds
+    /// ahead of an undo that may follow it.
+    ///
+    /// # Errors
+    ///
+    /// [`TryReserveError`] when the room cannot be had; no set's runs changed.
+    pub(crate) fn keep_room_with(
+        &mut self,
+        adds: usize,
+        marks: usize,
+        refills: usize,
+    ) -> Result<(), TryReserveError> {
+        let runs = |set: &RangeSet<u64>| set.len() + adds;
+        let op_private = runs(&self.op_claimed) + runs(&self.op_released);
+        let op_reserve = runs(&self.op_reserve_taken) + runs(&self.op_reserve_returned);
+        let pending = runs(&self.txn_freed)
+            + runs(&self.txn_private)
+            + runs(&self.op_deferred)
+            + 2 * op_private
+            + marks
+            + adds;
+        let reserve = runs(&self.txn_reserve) + 2 * op_reserve + refills + adds;
+        self.pending_used.try_reserve(pending)?;
+        self.pending_free.try_reserve(pending)?;
+        self.txn_private.try_reserve(op_private + adds)?;
+        self.txn_freed.try_reserve(runs(&self.op_deferred) + adds)?;
+        self.txn_reserve.try_reserve(op_reserve + adds)?;
+        self.reserve.try_reserve(reserve)?;
+        for set in [
+            &mut self.op_claimed,
+            &mut self.op_released,
+            &mut self.op_deferred,
+            &mut self.op_reserve_taken,
+            &mut self.op_reserve_returned,
+        ] {
+            set.try_reserve(adds)?;
+        }
+        Ok(())
+    }
+
+    /// Make room for what publishing the transaction leaves to do: lifting the
+    /// last commit's embargo and embargoing this one's frees, or reserving
+    /// those frees again when the slot write fails.
+    ///
+    /// # Errors
+    ///
+    /// [`TryReserveError`] when the room cannot be had; no set's runs changed.
+    pub(crate) fn keep_commit_room(&mut self) -> Result<(), TryReserveError> {
+        let marks = self.embargo.len() + self.txn_freed.len();
+        self.pending_used.try_reserve(marks)?;
+        self.pending_free.try_reserve(marks)?;
+        self.reserve.try_reserve(self.embargo.len())
+    }
+
+    /// Add the part of `run` not yet deferred to the deferred-free set and to
+    /// the running operation's record of what it added.
+    pub(crate) fn defer_run(&mut self, run: &Range<u64>) -> Result<(), TryReserveError> {
+        let mut pos = run.start;
+        while let Some(gap) = self.txn_freed.first_gap(pos..run.end) {
+            pos = gap.end;
+            self.txn_freed.insert(gap.clone())?;
+            self.op_deferred.insert(gap)?;
+        }
+        Ok(())
+    }
+
+    /// Take the private run `run`, now free, out of the private set and back
+    /// into the reserve it was drawn from. A part an earlier operation claimed
+    /// is recorded released, so undoing this one gives it back; a part this one
+    /// claimed is simply no longer held.
+    pub(crate) fn release_private(&mut self, run: Range<u64>) -> Result<(), TryReserveError> {
+        self.return_reserved(&run)?;
+        self.txn_private.remove(run.clone())?;
+        shift(&mut self.op_claimed, &mut self.op_released, run)
+    }
+
+    /// Take `released` back into the embargo after the persist that lifted it
+    /// failed: out of the reserve again, and out of the discard queue where
+    /// that can be had.
+    pub(crate) fn reembargo(&mut self, released: RangeSet<u64>) -> Result<(), TryReserveError> {
+        for run in &released {
+            self.reserve.remove(run.clone())?;
+            // A run left queued is skipped by trim, which reads it used.
+            let _ = self.pending_discard.remove(run);
+        }
+        self.embargo = released;
+        Ok(())
+    }
+
+    /// Bytes and run entries the open transaction's run bookkeeping holds:
+    /// each set at its whole allocation, the room kept for the paths that
+    /// cannot fail included, so the ceiling bounds what keeping it costs.
     ///
     /// Pinned exactly as a staged block is: only publishing the transaction
     /// returns it, so it belongs inside the same write-back ceiling. Without
@@ -274,10 +465,37 @@ impl Allocator {
         .into_iter()
         .fold((0, 0), |(bytes, runs), set| {
             (
-                bytes.saturating_add(set.len().saturating_mul(RUN_ENTRY_BYTES)),
+                bytes.saturating_add(set.allocated_bytes()),
                 runs.saturating_add(set.len() as u64),
             )
         })
+    }
+
+    /// Give back the room the sets that outlive a transaction kept for its
+    /// undo, no longer owed, once the sets holding well beyond their runs hold
+    /// more than `retained` bytes between them. Room within it stays for the
+    /// next transaction, which would otherwise grow the sets afresh.
+    pub(crate) fn give_back_room(&mut self, retained: usize) {
+        let sets = [
+            &mut self.pending_used,
+            &mut self.pending_free,
+            &mut self.reserve,
+            &mut self.embargo,
+        ];
+        let spare: usize = sets
+            .iter()
+            .filter(|set| holds_spare_room(set))
+            .map(|set| set.allocated_bytes())
+            .sum();
+        if spare <= retained {
+            return;
+        }
+        for set in sets {
+            if holds_spare_room(set) {
+                // A refused fit keeps the room it had, every run in place.
+                let _ = set.try_shrink_to_fit();
+            }
+        }
     }
 
     /// A cold allocator over `geom`, with empty transaction bookkeeping.
@@ -328,6 +546,24 @@ impl<B: Block> ARXFS<B> {
         Ok(self.allocator()?.geom)
     }
 
+    /// Carry `done`, the outcome of changes whose room was kept.
+    ///
+    /// A refusal there can only mean that room was miscounted, after which
+    /// nothing says what the map holds: the handle freezes, so nothing more is
+    /// allocated or published and a remount rebuilds from the last published
+    /// root.
+    pub(crate) fn kept(&mut self, done: Result<(), TryReserveError>) -> Result<(), DriverError> {
+        self.freeze_on_refusal(done);
+        done.map_err(out_of_memory)
+    }
+
+    /// [`Self::kept`], on a path with no error to answer with.
+    pub(crate) fn freeze_on_refusal(&mut self, done: Result<(), TryReserveError>) {
+        if done.is_err() {
+            self.read_only = true;
+        }
+    }
+
     // --- region block I/O -------------------------------------------------
 
     /// Read region block `region_block` into the cache, verifying its seal.
@@ -349,8 +585,8 @@ impl<B: Block> ARXFS<B> {
         )?;
         self.allocator_mut()?
             .cache
-            .insert_clean(region_block, &buf[HEADER_LEN..bs]);
-        Ok(())
+            .insert_clean(region_block, &buf[HEADER_LEN..bs])
+            .map_err(out_of_memory)
     }
 
     /// Evict the least-recently-used region block when the cache is full,
@@ -360,24 +596,30 @@ impl<B: Block> ARXFS<B> {
             return Ok(());
         };
         if dirty {
-            // A page stopped part-way to the device leaves the map's device
-            // image ambiguous and its bytes in two places at once, so neither
-            // copy can be trusted and no per-block undo can mend it: demand
-            // the map be derived afresh from the committed trees.
-            if let Err(err) = self.evict_dirty_page(victim) {
-                self.require_map_rebuild();
-                return Err(err);
-            }
+            self.evict_dirty_page(victim)?;
         }
         self.allocator_mut()?.cache.remove(victim);
         Ok(())
     }
 
-    /// Stage the changed page, make the invalidation durable, and write it out.
+    /// Stage the changed page and the invalid stamp, make the stamp durable,
+    /// and write the page out.
+    ///
+    /// Staging writes nothing, so a refusal there leaves the page resident
+    /// with its changes. A page stopped part-way to the device leaves the
+    /// map's device image ambiguous and its bytes in two places at once, so
+    /// neither copy can be trusted and no per-block undo can mend it: a failed
+    /// write demands the map be derived afresh from the committed trees.
     fn evict_dirty_page(&mut self, victim: u64) -> Result<(), DriverError> {
         self.map_write(victim)?;
-        self.map_confirm_dirty()?;
-        self.drain_map_pages()
+        self.map_mark_dirty()?;
+        let written = self
+            .map_write_invalid()
+            .and_then(|()| self.drain_map_pages());
+        if written.is_err() {
+            self.require_map_rebuild();
+        }
+        written
     }
 
     /// Seal one cached region block into the shared post-barrier dirty set.
@@ -488,10 +730,16 @@ impl<B: Block> ARXFS<B> {
 
     /// Make the invalid stamp durable before draining a bounded cache eviction.
     pub(crate) fn map_confirm_dirty(&mut self) -> Result<(), DriverError> {
+        self.map_mark_dirty()?;
+        self.map_write_invalid()
+    }
+
+    /// Write the staged invalid stamp out behind a barrier, so map pages may
+    /// follow it. A stamp already durable needs nothing.
+    fn map_write_invalid(&mut self) -> Result<(), DriverError> {
         if self.allocator()?.stamp == MapStampState::Dirty {
             return Ok(());
         }
-        self.map_mark_dirty()?;
         let header = self.map_geometry()?.header_block();
         let bs = self.block_size;
         let dirty = &mut self.dirty;
@@ -589,9 +837,11 @@ impl<B: Block> ARXFS<B> {
         };
         if free >= geom.page_capacity(page) {
             self.map_make_room()?;
-            let bytes = vec![0u8; page_payload_len(self.block_size)];
-            self.allocator_mut()?.cache.insert_clean(page_block, &bytes);
-            return Ok(());
+            return self
+                .allocator_mut()?
+                .cache
+                .insert_clean(page_block, &[])
+                .map_err(out_of_memory);
         }
         self.map_read(page_block)
     }
@@ -646,9 +896,7 @@ impl<B: Block> ARXFS<B> {
         if from >= end {
             return Ok(());
         }
-        // A deferred mark inside the run would be folded in later and undo part
-        // of this one, so the run is made exact from an exact map.
-        self.allocator_mut()?.pending_drop(from, end - from);
+        self.allocator_mut()?.keep_room(1).map_err(out_of_memory)?;
         let mut block = from;
         while block < end {
             let page = geom.page_of(block);
@@ -690,41 +938,56 @@ impl<B: Block> ARXFS<B> {
             }
             block = page_end;
         }
-        Ok(())
+        // A deferred mark inside the run would be folded in later and undo
+        // part of this one, so none is left once the run is in; a run cut
+        // short keeps them, so the map still says exactly what was marked.
+        let dropped = self.allocator_mut()?.pending_drop(from, end - from);
+        self.kept(dropped)
     }
 
     /// Fold every deferred bit change into the map, making the free count and
-    /// the page summaries exact again.
+    /// the page summaries exact again. A mark leaves the deferred set only
+    /// once it is applied, so a fold cut short loses none.
     pub(crate) fn map_fold_pending(&mut self) -> Result<(), DriverError> {
-        loop {
-            let Some((start, len, used)) = self.allocator_mut()?.pending_pop() else {
-                return Ok(());
-            };
+        while let Some((start, len, used)) = self.allocator()?.pending_first() {
             self.apply_run(start, len, used)?;
         }
+        Ok(())
     }
 
-    /// Mark the run `from..from + len` used. Infallible: it applies the change
-    /// to every bitmap page already resident with its summary block and defers
-    /// the rest of the run.
-    pub(crate) fn mark_run_used(&mut self, from: u64, len: u64) {
-        self.map_mark_run(from, len, true);
+    /// Mark the run `from..from + len` used. It reads nothing: the change goes
+    /// to the bitmap pages when every one the run spans is resident with its
+    /// summary block, and the whole run is deferred otherwise, so the mark can
+    /// be refused only a deferred record's memory.
+    pub(crate) fn mark_run_used(&mut self, from: u64, len: u64) -> Result<(), TryReserveError> {
+        self.map_mark_run(from, len, true)
     }
 
     /// Mark the run `from..from + len` free, on the same terms as
     /// [`Self::mark_run_used`].
-    pub(crate) fn mark_run_free(&mut self, from: u64, len: u64) {
-        self.map_mark_run(from, len, false);
+    pub(crate) fn mark_run_free(&mut self, from: u64, len: u64) -> Result<(), TryReserveError> {
+        self.map_mark_run(from, len, false)
     }
 
-    fn map_mark_run(&mut self, from: u64, len: u64, used: bool) {
+    /// One mark, changing at most one record of each deferred set.
+    fn map_mark_run(&mut self, from: u64, len: u64, used: bool) -> Result<(), TryReserveError> {
         let Ok(geom) = self.map_geometry() else {
-            return;
+            return Ok(());
         };
         let end = from
             .saturating_add(len)
             .min(self.total_blocks)
             .min(geom.covered());
+        if from >= end {
+            return Ok(());
+        }
+        let Ok(alloc) = self.allocator_mut() else {
+            return Ok(());
+        };
+        if !alloc.resident(from, end) {
+            return alloc.pending_defer(from, end - from, used);
+        }
+        alloc.pending_drop(from, end - from)?;
         let mut block = from;
         while block < end {
             let page = geom.page_of(block);
@@ -734,14 +997,8 @@ impl<B: Block> ARXFS<B> {
             let (summary_index, offset) = geom.summary_slot_of(page);
             let summary_block = geom.summary_block(summary_index);
             let Ok(alloc) = self.allocator_mut() else {
-                return;
+                return Ok(());
             };
-            if !alloc.cache.contains(page_block) || !alloc.cache.contains(summary_block) {
-                alloc.pending_defer(block, page_end - block, used);
-                block = page_end;
-                continue;
-            }
-            alloc.pending_drop(block, page_end - block);
             let moved = alloc.cache.write(page_block).map_or(0, |payload| {
                 move_bit_range(payload, block - first, page_end - first, used)
             });
@@ -754,6 +1011,7 @@ impl<B: Block> ARXFS<B> {
             }
             block = page_end;
         }
+        Ok(())
     }
 
     /// Mark a metadata block and its companion mirror used, exactly, reading
@@ -1034,16 +1292,25 @@ impl<B: Block> ARXFS<B> {
 
     /// Mark the run `start..start + len` used, private to this transaction, and
     /// recorded so the running operation can be undone on its own.
-    pub(crate) fn claim_run(&mut self, start: u64, len: u64) {
-        self.mark_run_used(start, len);
-        let Ok(alloc) = self.allocator_mut() else {
-            return;
-        };
+    pub(crate) fn claim_run(&mut self, start: u64, len: u64) -> Result<(), DriverError> {
         let Some(run) = start.span(len) else {
-            return;
+            return Ok(());
         };
-        alloc.txn_private.insert(run.clone());
-        alloc.op_claimed.insert(run);
+        let alloc = self.allocator_mut()?;
+        let adds = 1 + overlapping_runs(&alloc.op_released, &run);
+        alloc.keep_room(adds).map_err(out_of_memory)?;
+        let claimed = self.claim_kept(run);
+        self.kept(claimed)
+    }
+
+    /// [`Self::claim_run`] once its room is kept.
+    pub(crate) fn claim_kept(&mut self, run: Range<u64>) -> Result<(), TryReserveError> {
+        self.mark_run_used(run.start, run.end - run.start)?;
+        let Ok(alloc) = self.allocator_mut() else {
+            return Ok(());
+        };
+        alloc.txn_private.insert(run.clone())?;
+        shift(&mut alloc.op_released, &mut alloc.op_claimed, run)
     }
 
     /// Allocate one data block, scanning **upward** from the low end.
@@ -1052,7 +1319,7 @@ impl<B: Block> ARXFS<B> {
         let Some(block) = self.find_ordinary_block()? else {
             return self.take_reserved(1);
         };
-        self.claim_run(block, 1);
+        self.claim_run(block, 1)?;
         self.allocator_mut()?.alloc_cursor = block + 1;
         Ok(block)
     }
@@ -1130,7 +1397,7 @@ impl<B: Block> ARXFS<B> {
         let Some(primary) = self.find_ordinary_pair(floor, total)? else {
             return self.take_reserved(2);
         };
-        self.claim_run(primary, 2);
+        self.claim_run(primary, 2)?;
         self.allocator_mut()?.meta_cursor = primary.saturating_sub(1).max(floor);
         Ok(primary)
     }
@@ -1213,7 +1480,9 @@ impl<B: Block> ARXFS<B> {
         let slots = payload_len / 2;
         for index in 0..geom.summary_blocks() {
             self.map_make_room()?;
-            let mut payload = vec![0u8; payload_len];
+            let Some(mut payload) = fallible::zeroed(payload_len) else {
+                return Err(DriverError::OutOfMemory);
+            };
             for slot in 0..slots {
                 let page = index * (slots as u64) + slot as u64;
                 if page >= geom.pages() {
@@ -1223,7 +1492,8 @@ impl<B: Block> ARXFS<B> {
             }
             self.allocator_mut()?
                 .cache
-                .insert_dirty(geom.summary_block(index), payload);
+                .insert_dirty(geom.summary_block(index), payload)
+                .map_err(out_of_memory)?;
         }
         self.free_count = covered;
         Ok(())

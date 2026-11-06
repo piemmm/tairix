@@ -29,8 +29,8 @@
 //!
 //! [`tairix_kernel_mem::AddressSpace`] is generic over its
 //! [`PageTable`](tairix_kernel_mem::PageTable) backend, so the
-//! kernel cannot hold a `BTreeMap<ProcessId, AddressSpace<P>>` for a
-//! single `P` — different tasks may run on different architecture page
+//! kernel cannot hold a map of `AddressSpace<P>` for a single `P` —
+//! different tasks may run on different architecture page
 //! tables, and the orchestrator that composes this registry into
 //! `KernelState` is architecture-neutral. Each entry is therefore
 //! stored behind the object-safe
@@ -58,8 +58,6 @@
 //! [`PortRegistry`]: tairix_kernel_ipc::PortRegistry
 
 use alloc::boxed::Box;
-use alloc::collections::btree_map::Entry;
-use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -72,9 +70,15 @@ use tairix_abi::{
     DescriptorTable, Errno, LimitKind, OpenFlags, ProcId, ResourceLimit, STD_STREAM_COUNT,
 };
 use tairix_caps::CapabilitySet;
-use tairix_collections::{RangeError, RangeKey, RangeMap, RangeSet};
+use tairix_collections::{
+    OrderedMap, OrderedSet, RangeError, RangeKey, RangeMap, RangeSet, TryReserveError,
+};
+use tairix_kernel_ipc::senders::Endpoints;
+use tairix_kernel_ipc::EndpointId;
+use tairix_kernel_mem::vmm::FrozenAddressSpace;
 use tairix_kernel_mem::{
-    Frame, MapFlags, Page, PhysMap, Retire, UserAddressSpace, VirtAddr, PAGE_SIZE,
+    AllocError, Frame, LiveUserSpace, MapFlags, Page, PhysMap, Retire, UserAddressSpace, VirtAddr,
+    PAGE_SIZE,
 };
 use tairix_kernel_sec::{ProcessId, TaskId};
 use tairix_sync::{OnceCell, RwLock};
@@ -87,7 +91,7 @@ use crate::pty::{PtyMasterEnd, PtySlaveEnd};
 use crate::resource::ResourceBacking;
 use crate::rlimit::LimitSet;
 use crate::sleeplock::SleepLock;
-use crate::waitq::WakeKey;
+use crate::waitq::{WaitQueue, WakeKey};
 
 /// One thread's reserved user-stack span, with the process that owns it.
 ///
@@ -134,6 +138,8 @@ pub enum AspaceError {
     /// must [`withdraw`](AddressSpaceRegistry::withdraw) the old task
     /// first (fail closed).
     AlreadyPresent,
+    /// The registry could not allocate the entry; nothing is registered.
+    OutOfMemory,
 }
 
 /// One task's stored user address space and the physical map backing it.
@@ -176,7 +182,7 @@ pub struct LoadedDriver {
 /// `KernelState`). It boots empty: entries appear only as tasks are
 /// spawned and disappear as they exit.
 pub struct AddressSpaceRegistry {
-    tasks: BTreeMap<ProcessId, TaskAddressSpace>,
+    tasks: ByProcess<TaskAddressSpace>,
     /// Each live task's standard-stream descriptor table. Co-located with the address space because it shares the
     /// exact per-process lifecycle — established at spawn, withdrawn at
     /// exit — and is keyed by the same [`ProcessId`]; a parallel registry +
@@ -184,7 +190,7 @@ pub struct AddressSpaceRegistry {
     /// A task with no entry resolves to the fail-closed
     /// [`DescriptorTable::closed`] default, so an unestablished process
     /// can reach no stream backing.
-    streams: BTreeMap<ProcessId, DescriptorTable>,
+    streams: ByProcess<DescriptorTable>,
     /// Each live task's effective resource limits. Held
     /// here for the same reason as [`Self::streams`]: it shares the exact
     /// per-process lifecycle (inherited at spawn, withdrawn at exit) and is
@@ -192,7 +198,7 @@ pub struct AddressSpaceRegistry {
     /// near-duplicate plumbing. A task with no
     /// entry resolves to the per-boot [`Self::default_limits`] policy via
     /// [`Self::limits`].
-    limits: BTreeMap<ProcessId, LimitSet>,
+    limits: ByProcess<LimitSet>,
     /// The per-boot default limit policy a task with no established set
     /// resolves to, and the default `LimitSet::inherit` intersects
     /// against. Starts at the compile-time [`LimitSet::DEFAULT`] floor;
@@ -210,7 +216,7 @@ pub struct AddressSpaceRegistry {
     /// eligibility classifier reads this through
     /// [`Self::is_pinned`] when a candidate's owner is judged, so there
     /// is exactly one pin decision.
-    pinned: BTreeSet<ProcessId>,
+    pinned: OrderedSet<ProcessId>,
     /// Each live task's device-resource grants (the unforgeable, kernel-issued handles a driver task may map with
     /// `mmio_map`). Co-located with the address space for the same reason
     /// as [`Self::streams`] and [`Self::limits`]: a grant shares the exact
@@ -219,13 +225,14 @@ pub struct AddressSpaceRegistry {
     /// parallel registry + lock would be near-duplicate plumbing. A task with no entry owns no grants, so
     /// [`Self::grant`] resolves to `None` — fail closed: a task can
     /// map only the windows it was actually granted.
-    grants: BTreeMap<ProcessId, TaskGrants>,
+    /// Ordered, as a revocation visits its holders by ascending id.
+    grants: OrderedMap<ProcessId, TaskGrants>,
     /// Each process's live address space, weakly: its threads own it. The
     /// one way to reach another process's mappings, which the revocation of
     /// a removed device's authority must tear down. Every lookup upgrades
     /// under this registry's lock and locks the space only after releasing
     /// it, keeping the live-space-before-registry lock order.
-    live_spaces: BTreeMap<ProcessId, Weak<ProcessSpace>>,
+    live_spaces: ByProcess<Weak<ProcessSpace>>,
     /// The discovered hardware-tree node each autoloaded **driver** task was
     /// loaded for. Recorded when a driver is spawned for
     /// a matched node, beside its grants, and keyed by the same kernel-trusted
@@ -239,14 +246,14 @@ pub struct AddressSpaceRegistry {
     /// no matched node) cannot emit a child at all (fail closed).
     /// Dropped at [`withdraw`](Self::withdraw) so a reused id never inherits a
     /// dead driver's node.
-    loaded_nodes: BTreeMap<ProcessId, LoadedDriver>,
+    loaded_nodes: ByProcess<LoadedDriver>,
     /// Each node's live driver: at most one, which is what lets the DMA
     /// quarantine trust a reset by it over memory any earlier instance
     /// carved. A driver holds its node from admission until its last thread
     /// is down ([`Self::release_node`]), which precedes the withdrawal of its
     /// load record, so a successor can be admitted the moment the exit is
     /// observable.
-    node_drivers: BTreeMap<u32, ProcessId>,
+    node_drivers: OrderedMap<u32, ProcessId>,
     /// The admission generation the next driver load is given.
     next_driver_generation: u64,
     /// Each live task's open file/directory handles (the descriptors
@@ -259,7 +266,7 @@ pub struct AddressSpaceRegistry {
     /// task can only operate on a descriptor it actually opened). Dropped at
     /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
     /// task's handles.
-    open_files: BTreeMap<ProcessId, OpenFileTable>,
+    open_files: ByProcess<OpenFileTable>,
     /// Each live task's running total of mapped address space, in bytes
     /// (whole pages): anonymous memory from `mem_map` plus demand-paged
     /// file regions from `file_map`. Co-located with the address space for
@@ -273,14 +280,14 @@ pub struct AddressSpaceRegistry {
     /// [`Self::mapped_aspace_bytes`] resolves to `0`. Dropped at
     /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
     /// task's accounting.
-    mapped_aspace_bytes: BTreeMap<ProcessId, u64>,
+    mapped_aspace_bytes: ByProcess<u64>,
     /// Each live task's working directory and file mode creation mask:
     /// inherited from the spawner at spawn, changed by `fs_chdir` and
     /// `fs_umask`, and dropped at [`withdraw`](Self::withdraw) so a reused id
     /// inherits neither. A task with no entry stands at the view root under
     /// [`FS_INITIAL_UMASK`], which is where PID 1 starts: the root is the
     /// least-privileged place to resolve a relative path from.
-    fs: BTreeMap<ProcessId, ProcessFs>,
+    fs: ByProcess<ProcessFs>,
     /// Each live task's demand-paged file mappings (the regions `file_map`
     /// reserves and the fault path backs), keyed by region base. Co-located
     /// with the address space for the same reason as [`Self::open_files`]:
@@ -291,7 +298,7 @@ pub struct AddressSpaceRegistry {
     /// to `None` and the task is terminated rather than silently backed
     /// (fail closed). Dropped at [`withdraw`](Self::withdraw) so a reused
     /// id never inherits a dead task's mappings.
-    file_regions: BTreeMap<ProcessId, RangeMap<u64, FileRegion>>,
+    file_regions: ByProcess<RangeMap<u64, FileRegion>>,
     /// The **pages** each live task holds anonymously (the regions `mem_map`
     /// reserves and the anonymous fault path backs one zeroed page at a
     /// time). Co-located with the address space for the same reason as
@@ -311,8 +318,9 @@ pub struct AddressSpaceRegistry {
     /// asks whether the task owns an address, and a release asks whether it
     /// owns a range. So abutting reservations coalesce, and a heap that grew
     /// one contiguous arena over ten thousand calls costs one entry and can
-    /// hand back any part of it.
-    anon_regions: BTreeMap<ProcessId, RangeSet<u64>>,
+    /// hand back any part of it. A release in flight holds its pages apart
+    /// ([`AnonHolding`]).
+    anon_regions: ByProcess<AnonHolding>,
     /// Each live task's reserved user-stack span (the region the spawn
     /// layout placed and the stack-growth fault path backs on demand).
     /// Keyed by **thread**, not by process: every thread of a process has a
@@ -323,7 +331,7 @@ pub struct AddressSpaceRegistry {
     /// has no growable stack, so a fault below its committed stack resolves
     /// to `None` and stays fatal (fail closed), and a reused id never
     /// inherits a dead thread's span.
-    stack_spans: BTreeMap<TaskId, ThreadStack>,
+    stack_spans: OrderedMap<TaskId, ThreadStack>,
     /// Running total of committed stack bytes per process, maintained by the
     /// three mutators that can change it (record, commit, withdraw).
     ///
@@ -333,7 +341,7 @@ pub struct AddressSpaceRegistry {
     /// machine to find one process's. This is what lets the total stay
     /// correct for a process with any number of threads without the registry
     /// having to know which threads those are.
-    stack_committed: BTreeMap<ProcessId, u64>,
+    stack_committed: ByProcess<u64>,
     /// The one-shot file delegations minted **to** each live task and not
     /// yet redeemed (`fd_grant`/`fd_redeem`, `plans/CAPABILITY_USE.md`
     /// CU6). Co-located with the address space for the same reason as
@@ -345,7 +353,12 @@ pub struct AddressSpaceRegistry {
     /// `NotFound` (fail closed: a task can redeem only what was actually
     /// minted to it). Dropped at [`withdraw`](Self::withdraw) so a reused
     /// id never inherits a dead task's pending delegations.
-    fd_delegations: BTreeMap<ProcessId, TaskFdDelegations>,
+    fd_delegations: ByProcess<TaskFdDelegations>,
+    /// What each live process has delegated that still waits in its
+    /// recipients' tables, kept exactly as each delegation is filed and
+    /// leaves, so a pipe end's bound is one lookup and an exit walks those
+    /// tables only for a process that has something there.
+    sent: ByProcess<Sent>,
     /// Each live task's PIE load base — the lowest user virtual address
     /// its relocated program image occupies. Recorded at admission by the
     /// spawn path (the lowest relocated segment vaddr) and used only by the
@@ -361,7 +374,71 @@ pub struct AddressSpaceRegistry {
     /// and its offsets degrade to absolute values only inside the
     /// capability-gated record. Dropped at [`withdraw`](Self::withdraw) so
     /// a reused id never inherits a dead task's base.
-    load_bases: BTreeMap<ProcessId, u64>,
+    load_bases: ByProcess<u64>,
+}
+
+/// A per-process record. Ordered rather than hashed: which process ids stay
+/// held is up to what users spawn and keep, and a hash they could aim would
+/// let them pile ids into one bucket of a table every fault and copy probes.
+type ByProcess<V> = OrderedMap<ProcessId, V>;
+
+/// File `item` into `map`'s value at `key` through `file`, or into a fresh
+/// default value filed there once `file` accepts it, so a refusal leaves no
+/// empty value behind; a held key costs one descent. Room for a fresh value is
+/// made before `item` is handed over, so a refused filing gives it to `no_room`
+/// rather than losing it.
+fn file_into<K, V, T, R, E>(
+    map: &mut OrderedMap<K, V>,
+    key: K,
+    item: T,
+    no_room: impl FnOnce(TryReserveError, T) -> E,
+    file: impl FnOnce(&mut V, T) -> Result<R, E>,
+) -> Result<R, E>
+where
+    K: Ord,
+    V: Default,
+{
+    if let Some(held) = map.get_mut(&key) {
+        return file(held, item);
+    }
+    if let Err(err) = map.try_reserve(1) {
+        return Err(no_room(err, item));
+    }
+    let mut fresh = V::default();
+    let filed = file(&mut fresh, item)?;
+    let recorded = map.try_insert(key, fresh);
+    debug_assert!(recorded.is_ok(), "a reserved value was refused");
+    Ok(filed)
+}
+
+/// Add `amount` to `key`'s total in `totals`, filing a first one. Saturating,
+/// so a miscount can never understate what is held.
+///
+/// # Errors
+///
+/// [`Errno::OutOfMemory`] when a first total cannot be filed.
+fn add_to_total<K: Ord>(totals: &mut OrderedMap<K, u64>, key: K, amount: u64) -> Result<(), Errno> {
+    match totals.get_mut(&key) {
+        Some(total) => *total = total.saturating_add(amount),
+        None => {
+            totals
+                .try_insert(key, amount)
+                .map_err(|_| Errno::OutOfMemory)?;
+        }
+    }
+    Ok(())
+}
+
+/// Take `amount` from `key`'s total in `totals`, saturating at zero, and drop
+/// a total that reaches it, so a holder that gives everything back leaves no
+/// record behind.
+fn take_from_total<K: Ord>(totals: &mut OrderedMap<K, u64>, key: &K, amount: u64) {
+    if let Some(total) = totals.get_mut(key) {
+        *total = total.saturating_sub(amount);
+        if *total == 0 {
+            totals.remove(key);
+        }
+    }
 }
 
 /// What one live demand-paged file mapping of a task reads: the node behind
@@ -689,6 +766,20 @@ pub struct Description {
     listing: OnceCell<Box<[SleepLock<Listing>]>>,
 }
 
+impl Description {
+    /// A fresh description: its stream cursor at the start, and a lock owner
+    /// of its own.
+    fn fresh() -> Result<Arc<Self>, Errno> {
+        Arc::try_new(Self {
+            cursor: AtomicU64::new(0),
+            lock_owner: crate::filelock::mint_owner(),
+            watch: OnceCell::new(),
+            listing: OnceCell::new(),
+        })
+        .map_err(|_| Errno::OutOfMemory)
+    }
+}
+
 /// Releasing the last descriptor on a description releases the locks it
 /// held — the guarantee that a process cannot leave a file locked by
 /// exiting, however it exits.
@@ -728,17 +819,18 @@ pub struct OpenFile {
 impl OpenFile {
     /// A fresh entry over `backing` with `flags`: a new open file
     /// description, its stream cursor at the start and its own lock owner.
-    #[must_use]
-    pub fn new(backing: OpenBacking, flags: OpenFlags) -> Self {
-        Self {
-            backing,
-            flags,
-            description: Arc::new(Description {
-                cursor: AtomicU64::new(0),
-                lock_owner: crate::filelock::mint_owner(),
-                watch: OnceCell::new(),
-                listing: OnceCell::new(),
+    ///
+    /// # Errors
+    ///
+    /// `backing`, handed back, when the description cannot be allocated.
+    pub fn new(backing: OpenBacking, flags: OpenFlags) -> Result<Self, OpenBacking> {
+        match Description::fresh() {
+            Ok(description) => Ok(Self {
+                backing,
+                flags,
+                description,
             }),
+            Err(_) => Err(backing),
         }
     }
 
@@ -766,17 +858,23 @@ impl OpenFile {
             .filter(|handle| matches!(handle.authority, Authority::Holder))
     }
 
-    /// The file this descriptor may be granted on as, acting as user `uid`
-    /// with `caps` when it is the holder's own, writable up to `ceiling`
-    /// bytes: a new handle on the same node, never a directory.
+    /// What this descriptor may be granted on as, acting as user `uid` with
+    /// `caps` when it is the holder's own file, writable up to `ceiling`
+    /// bytes: a new handle on the same node, never a directory, or another
+    /// reference to the same pipe end.
     ///
     /// A descriptor that was itself conferred or granted is passed on with the
     /// identity frozen into it, so a relay can never widen what it was handed
     /// and no chain forms for a later reader to follow; a grant it carries
-    /// keeps the smaller of the two ceilings. A pipe, pty, resource, catalog or
-    /// directory has an authority model of its own and is `None`.
+    /// keeps the smaller of the two ceilings. A pipe end has no identity to
+    /// freeze: its reads and writes check only the descriptor's own access. A
+    /// pty end answers to its terminal's foreground, and a resource, catalog or
+    /// directory has an authority model of its own, so each is `None`.
     #[must_use]
-    pub fn handed_on(&self, uid: u32, caps: CapabilitySet, ceiling: u64) -> Option<NodeHandle> {
+    pub fn handed_on(&self, uid: u32, caps: CapabilitySet, ceiling: u64) -> Option<HandedOn> {
+        if let OpenBacking::Pipe(end) = &self.backing {
+            return Some(HandedOn::Pipe(end.clone()));
+        }
         if self.flags.contains(OpenFlags::DIRECTORY) {
             return None;
         }
@@ -791,7 +889,7 @@ impl OpenFile {
         };
         let held = frozen.grant.as_ref().and_then(|grant| grant.write_ceiling);
         let write_ceiling = Some(held.map_or(ceiling, |held| held.min(ceiling)));
-        Some(NodeHandle {
+        Some(HandedOn::File(NodeHandle {
             node: handle.node.clone(),
             projection: Arc::clone(&handle.projection),
             authority: Authority::Frozen(FrozenAuthority {
@@ -800,7 +898,7 @@ impl OpenFile {
             }),
             opened_as: Arc::clone(&handle.opened_as),
             at_floor: handle.at_floor,
-        })
+        }))
     }
 
     /// This descriptor as a spawned child holds it: the same open file
@@ -981,6 +1079,43 @@ impl OpenFile {
     }
 }
 
+/// What a descriptor is handed on as to another process (`fd_grant`).
+#[derive(Clone, Debug)]
+pub enum HandedOn {
+    /// A new handle on the descriptor's node, acting as the identity frozen
+    /// into it.
+    File(NodeHandle),
+    /// Another reference to the descriptor's pipe end, counted as an open end
+    /// is, so one in flight holds its side open.
+    Pipe(PipeEnd),
+}
+
+impl HandedOn {
+    /// Whether `other` hands on the same right: the same node, by its
+    /// registration and pinned id, acting as the same identity under the same
+    /// ceiling — never compared by pointer or by the spelling it was opened
+    /// as — or the same end of the same pipe.
+    fn same_right(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::File(held), Self::File(wanted)) => {
+                held.node.instance() == wanted.node.instance()
+                    && held.node.pinned() == wanted.node.pinned()
+                    && same_authority(&held.authority, &wanted.authority)
+            }
+            (Self::Pipe(held), Self::Pipe(wanted)) => held == wanted,
+            (Self::File(_), Self::Pipe(_)) | (Self::Pipe(_), Self::File(_)) => false,
+        }
+    }
+
+    /// The backing a descriptor redeemed from this holds.
+    fn into_backing(self) -> OpenBacking {
+        match self {
+            Self::File(handle) => OpenBacking::Node(handle),
+            Self::Pipe(end) => OpenBacking::Pipe(end),
+        }
+    }
+}
+
 /// A descriptor promised to an open that changes the filesystem before it can
 /// record one, so a refusal at the `open-files` bound comes before the change
 /// rather than after it. [`keep`](Self::keep) records into it; dropped unkept,
@@ -998,7 +1133,8 @@ impl<'a> FdPromise<'a> {
     /// # Errors
     ///
     /// [`Errno::LimitExceeded`] at the task's `open-files` soft bound, its
-    /// promises in flight counted.
+    /// promises in flight counted, and [`Errno::OutOfMemory`] when a first
+    /// table cannot be allocated.
     pub fn new(registry: &'a RwLock<AddressSpaceRegistry>, task: ProcessId) -> Result<Self, Errno> {
         registry.write().promise_fd(task)?;
         Ok(Self {
@@ -1014,7 +1150,8 @@ impl<'a> FdPromise<'a> {
     /// # Errors
     ///
     /// A [`Refused`] holding the opened node, released once the registry's
-    /// lock is, when the number space has run out or the task is gone.
+    /// lock is, when the number space has run out, the descriptor cannot be
+    /// recorded, or the task is gone.
     pub fn keep(mut self, opened: Opened, flags: OpenFlags) -> Result<u32, Refused> {
         self.kept = true;
         self.registry.write().keep_fd(self.task, opened, flags)
@@ -1035,9 +1172,28 @@ impl Drop for FdPromise<'_> {
 pub struct Refused {
     errno: Errno,
     _backing: OpenBacking,
+    _description: Option<Arc<Description>>,
 }
 
 impl Refused {
+    /// `backing`, refused for `errno`.
+    fn backing(errno: Errno, backing: OpenBacking) -> Self {
+        Self {
+            errno,
+            _backing: backing,
+            _description: None,
+        }
+    }
+
+    /// `file`, refused for `errno`.
+    fn file(errno: Errno, file: OpenFile) -> Self {
+        Self {
+            errno,
+            _backing: file.backing,
+            _description: Some(file.description),
+        }
+    }
+
     /// Why the table refused it.
     #[must_use]
     pub const fn errno(&self) -> Errno {
@@ -1072,15 +1228,16 @@ impl ProcessFs {
 }
 
 /// What [`AddressSpaceRegistry::withdraw`] took from a process, released by
-/// the caller once the registry's lock is: closing a descriptor can wake
-/// another task, release a lock, or queue its node's pin for release.
+/// the caller once the registry's lock is: closing a descriptor, or letting a
+/// pipe end in flight go, can wake another task, release a lock, or queue its
+/// node's pin for release.
 #[must_use]
 pub struct Withdrawn {
     present: bool,
     _files: Option<OpenFileTable>,
     _regions: Option<RangeMap<u64, FileRegion>>,
     _delegations: Option<TaskFdDelegations>,
-    _granted: Vec<PendingFdDelegation>,
+    _granted: TakenBack,
     _fs: Option<ProcessFs>,
 }
 
@@ -1089,6 +1246,107 @@ impl Withdrawn {
     #[must_use]
     pub fn was_present(&self) -> bool {
         self.present
+    }
+}
+
+/// What one process holds anonymously, and what it is in the middle of
+/// giving back.
+///
+/// A release takes its extent out of `pages` before any of it is released,
+/// so no fault backs a page of it and no second release can take one, and
+/// files it in `releasing` until the release ends. `pages` keeps room to put
+/// back every release in flight, so one that fails never has to ask for
+/// memory to restore what it took.
+#[derive(Default)]
+struct AnonHolding {
+    pages: RangeSet<u64>,
+    releasing: RangeMap<u64, ()>,
+}
+
+impl AnonHolding {
+    /// Whether it holds nothing and is releasing nothing.
+    fn is_empty(&self) -> bool {
+        self.pages.is_empty() && self.releasing.is_empty()
+    }
+
+    /// Room in `pages` for `extra` insertions on top of putting back every
+    /// release in flight.
+    fn make_room(&mut self, extra: usize) -> Result<(), TryReserveError> {
+        self.pages
+            .try_reserve(self.releasing.len().saturating_add(extra))
+    }
+
+    /// Hold `extent` too, refusing one that meets a held page or one a
+    /// release is taking.
+    fn record(&mut self, extent: Range<u64>) -> Result<(), RangeError> {
+        let taken = self.pages.first_overlap(extent.clone()).is_some()
+            || self.releasing.overlapping(extent.clone()).next().is_some();
+        if taken {
+            return Err(RangeError::Overlap);
+        }
+        self.make_room(1).map_err(RangeError::Alloc)?;
+        self.pages.insert(extent).map_err(RangeError::Alloc)
+    }
+
+    /// Take `extent`, every page of which is held, out for a release.
+    fn begin_release(&mut self, extent: Range<u64>) -> Result<(), Errno> {
+        if self.pages.first_gap(extent.clone()).is_some() {
+            return Err(Errno::NotFound);
+        }
+        // The cut now, and the insertion that would put it back.
+        self.make_room(2).map_err(|_| Errno::OutOfMemory)?;
+        self.releasing
+            .insert(extent.clone(), ())
+            .map_err(|_| Errno::OutOfMemory)?;
+        if self.pages.remove(extent.clone()).is_err() {
+            self.releasing.remove(extent.start);
+            return Err(Errno::OutOfMemory);
+        }
+        Ok(())
+    }
+
+    /// End the release of `extent`: its pages are gone when `released`, and
+    /// are held again when not.
+    fn end_release(&mut self, extent: Range<u64>, released: bool) {
+        if self.releasing.remove(extent.start).is_none() || released {
+            return;
+        }
+        let restored = self.pages.insert(extent);
+        debug_assert!(restored.is_ok(), "a release in flight lost its room");
+    }
+}
+
+/// Where a page of a process's anonymous memory stands for a fault on it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnonPage {
+    /// Held: the fault backs it.
+    Held,
+    /// Taken by a release in flight, which holds it again if it fails.
+    Releasing,
+    /// Neither held nor being released.
+    Unheld,
+}
+
+/// The faults waiting for a release of their own process's anonymous pages to
+/// end, each under [`anon_release_key`].
+///
+/// A fault waits here only inside a kernel body, which a kill unparks, and
+/// with no deadline; a thread's retirement drops a row it left all the same.
+pub(crate) static ANON_RELEASE_WAITQ: WaitQueue = WaitQueue::new();
+
+/// The key a fault of `process` waits under on [`ANON_RELEASE_WAITQ`]. No
+/// process has the kernel's number, which spells the whole queue.
+#[must_use]
+pub(crate) const fn anon_release_key(process: ProcessId) -> WakeKey {
+    WakeKey::new(process.0)
+}
+
+/// Wake the faults of `process` a release of its anonymous pages held off, to
+/// find each page held again or gone. Called once the release has ended and
+/// the registry's lock is released; a no-op before the wait hook is installed.
+pub(crate) fn anon_release_wake(process: ProcessId) {
+    if let Some(arch) = crate::waitq::wait_arch() {
+        let _ = ANON_RELEASE_WAITQ.wake_key(arch, anon_release_key(process));
     }
 }
 
@@ -1104,7 +1362,7 @@ impl Withdrawn {
 /// starts from an empty descriptor set.
 #[derive(Default)]
 struct OpenFileTable {
-    by_fd: BTreeMap<u32, OpenFile>,
+    by_fd: OrderedMap<u32, OpenFile>,
     /// No number from [`STD_STREAM_COUNT`] up to this one is free, so the
     /// search for the lowest free number starts here: opening file after file
     /// costs a lookup each, not a walk over every descriptor already held.
@@ -1117,8 +1375,8 @@ struct OpenFileTable {
 impl OpenFileTable {
     /// The `N` lowest free descriptor numbers at or above
     /// [`STD_STREAM_COUNT`], for a table whose `open-files` soft bound is
-    /// `limit`. Nothing is recorded, so a refusal leaves the table holding
-    /// what it held.
+    /// `limit`, with room made to record them. Nothing is recorded, so a
+    /// refusal leaves the table holding what it held.
     ///
     /// # Errors
     ///
@@ -1127,13 +1385,15 @@ impl OpenFileTable {
     /// included, past `limit`; [`Errno::OutOfRange`] only when the numbers
     /// below [`FD_CWD`], which names the working directory and no
     /// descriptor, run out — a genuine exhaustion of the descriptor space,
-    /// not a hand-picked ceiling.
+    /// not a hand-picked ceiling; [`Errno::OutOfMemory`] when room for the
+    /// records cannot be made.
     fn alloc_fds<const N: usize>(&mut self, limit: u64) -> Result<[u32; N], Errno> {
         let wanted = u64::try_from(N).map_err(|_| Errno::OutOfRange)?;
         let held = u64::try_from(self.by_fd.len()).map_err(|_| Errno::OutOfRange)?;
         if held.saturating_add(self.promised).saturating_add(wanted) > limit {
             return Err(Errno::LimitExceeded);
         }
+        self.by_fd.try_reserve(N).map_err(|_| Errno::OutOfMemory)?;
         let first = u32::try_from(STD_STREAM_COUNT).map_err(|_| Errno::OutOfRange)?;
         let from = self.free_from.max(first);
         let mut taken = self.by_fd.range(from..).map(|(&fd, _)| fd).peekable();
@@ -1150,12 +1410,18 @@ impl OpenFileTable {
         Ok(numbers)
     }
 
-    /// Record `file` at `fd`, handing back what stood there.
+    /// Record `file` at `fd`, handing back what stood there; the room for it
+    /// is made first, by [`Self::alloc_fds`] or the caller.
     fn record(&mut self, fd: u32, file: OpenFile) -> Option<OpenFile> {
-        if fd == self.free_from {
-            self.free_from = fd.saturating_add(1);
+        if let Ok(replaced) = self.by_fd.try_insert(fd, file) {
+            if fd == self.free_from {
+                self.free_from = fd.saturating_add(1);
+            }
+            replaced
+        } else {
+            debug_assert!(false, "a descriptor was recorded with no room made for it");
+            None
         }
-        self.by_fd.insert(fd, file)
     }
 
     /// Remove the descriptor at `fd`, handing it back.
@@ -1184,9 +1450,56 @@ struct TaskGrants {
     /// so handles are unique for the task's whole lifetime.
     next_handle: u64,
     /// The grant behind each issued handle.
-    by_handle: BTreeMap<u64, Grant>,
+    by_handle: OrderedMap<u64, Grant>,
     /// The region a drawing sandbox was handed at spawn, if this task is one.
     spawn_share: Option<SpawnShare>,
+    /// How many grants the table held after it was last swept of released
+    /// regions.
+    swept: usize,
+}
+
+impl TaskGrants {
+    /// Drop every grant of a shared region `region_live` reports released,
+    /// returning how many went.
+    fn drop_released(&mut self, region_live: impl Fn(u64) -> bool) -> usize {
+        let before = self.by_handle.len();
+        self.by_handle
+            .retain(|_, grant| grant.region().is_none_or(&region_live));
+        self.swept = self.by_handle.len();
+        before - self.swept
+    }
+
+    /// Make room for one more region `grantor` delegates here, giving up those
+    /// it delegated that `region_live` reports released, or refuse it at
+    /// [`tairix_abi::SHM_GRANT_TO_MAX`]. A repeat of a grant held needs none.
+    fn make_room(
+        &mut self,
+        grantor: ProcId,
+        wanted: &HwResource,
+        region_live: impl Fn(u64) -> bool,
+    ) -> Result<(), Errno> {
+        let from = Some(grantor);
+        let repeat = existing_handle(&self.by_handle, |held| held.is_live_from(from, wanted));
+        if repeat.is_some() {
+            return Ok(());
+        }
+        let delegated = |by_handle: &OrderedMap<u64, Grant>| {
+            by_handle
+                .values()
+                .filter(|grant| grant.grantor == from && grant.region().is_some())
+                .count()
+        };
+        if delegated(&self.by_handle) < tairix_abi::SHM_GRANT_TO_MAX {
+            return Ok(());
+        }
+        self.by_handle
+            .retain(|_, grant| grant.grantor != from || grant.region().is_none_or(&region_live));
+        if delegated(&self.by_handle) < tairix_abi::SHM_GRANT_TO_MAX {
+            Ok(())
+        } else {
+            Err(Errno::LimitExceeded)
+        }
+    }
 }
 
 /// The grant a drawing sandbox was handed at spawn: what `share_map` maps,
@@ -1220,6 +1533,20 @@ impl Grant {
     fn live(&self) -> Option<&HwResource> {
         (!self.revoked).then_some(&self.resource)
     }
+
+    /// Whether this is `grantor`'s live grant of exactly `resource`: what a
+    /// repeated mint of it answers with.
+    fn is_live_from(&self, grantor: Option<ProcId>, resource: &HwResource) -> bool {
+        self.grantor == grantor && self.live() == Some(resource)
+    }
+
+    /// The shared region the grant names, if it names one.
+    fn region(&self) -> Option<u64> {
+        match self.resource.kind() {
+            Some(HwResourceKind::Shared) => Some(self.resource.base()),
+            _ => None,
+        }
+    }
 }
 
 /// What live grants covering a resource hand a grant delegated from them.
@@ -1230,8 +1557,8 @@ struct Covered {
     origin: Option<u32>,
 }
 
-/// The one-shot file delegations minted **to** one task and not yet
-/// redeemed (`fd_grant`/`fd_redeem`, `plans/CAPABILITY_USE.md` CU6).
+/// The one-shot delegations minted **to** one task and not yet redeemed
+/// (`fd_grant`/`fd_redeem`, `plans/CAPABILITY_USE.md` CU6).
 ///
 /// Handles follow the [`TaskGrants`] discipline: minted per recipient,
 /// monotonically from `1` (handle `0` is the reserved invalid value and is
@@ -1244,11 +1571,12 @@ struct Covered {
 struct TaskFdDelegations {
     /// The next handle value to issue. Starts at `1`; only ever increases.
     next_handle: u64,
-    /// The pending delegation behind each issued handle.
-    by_handle: BTreeMap<u64, PendingFdDelegation>,
+    /// The pending delegation behind each issued handle, boxed so its
+    /// grantor's exit can take it back without allocating.
+    by_handle: OrderedMap<u64, Box<PendingFdDelegation>>,
 }
 
-/// One minted, unredeemed file delegation.
+/// One minted, unredeemed delegation.
 ///
 /// `recipient` is the process *instance* the grantor named, and redemption
 /// re-checks it: the table is keyed by a task id, which is redrawn once its
@@ -1265,15 +1593,17 @@ struct PendingFdDelegation {
     grantor: ProcessId,
     /// That process's instance, which a deputy's redemption must name.
     grantor_instance: ProcId,
+    /// The next delegation its grantor's exit took back with it; `None` while
+    /// it is pending.
+    taken: Option<Box<PendingFdDelegation>>,
 }
 
 /// What a pending delegation hands its recipient.
 enum Conveyed {
-    /// A descriptor on the file.
-    File {
-        /// The node, acting as the grantor's frozen identity with the grant's
-        /// ceiling.
-        handle: NodeHandle,
+    /// A descriptor on what the grantor's own reached.
+    Descriptor {
+        /// The node or pipe end, as the grantor's descriptor hands it on.
+        what: HandedOn,
         /// The read/write access the grantor's own descriptor carried.
         flags: OpenFlags,
     },
@@ -1282,6 +1612,23 @@ enum Conveyed {
 }
 
 impl PendingFdDelegation {
+    /// `conveys`, minted by `grantor`, instance `grantor_instance`, to the
+    /// process instance `recipient`.
+    fn new(
+        conveys: Conveyed,
+        recipient: ProcId,
+        grantor: ProcessId,
+        grantor_instance: ProcId,
+    ) -> Self {
+        Self {
+            conveys,
+            recipient,
+            grantor,
+            grantor_instance,
+            taken: None,
+        }
+    }
+
     /// Whether this is pending to `recipient` from `grantor`, instance
     /// `grantor_instance`.
     fn between(&self, recipient: ProcId, grantor: ProcessId, grantor_instance: ProcId) -> bool {
@@ -1292,22 +1639,103 @@ impl PendingFdDelegation {
 }
 
 impl Conveyed {
-    /// Whether this delegates `file` with `flags`: the same node, by its
-    /// registration and pinned id, acting as the same identity under the same
-    /// ceiling, with the same access — never compared by pointer or by the
-    /// spelling it was opened as.
-    fn delegates(&self, file: &NodeHandle, flags: OpenFlags) -> bool {
+    /// Whether this delegates `what` with `flags`: the same right, with the
+    /// same access.
+    fn delegates(&self, what: &HandedOn, flags: OpenFlags) -> bool {
         match self {
-            Self::File {
-                handle,
-                flags: held,
-            } => {
-                *held == flags
-                    && handle.node.instance() == file.node.instance()
-                    && handle.node.pinned() == file.node.pinned()
-                    && same_authority(&handle.authority, &file.authority)
-            }
+            Self::Descriptor {
+                what: held,
+                flags: access,
+            } => *access == flags && held.same_right(what),
             Self::Location(_) => false,
+        }
+    }
+
+    /// Whether this holds a pipe end in flight.
+    fn is_pipe_end(&self) -> bool {
+        matches!(
+            self,
+            Self::Descriptor {
+                what: HandedOn::Pipe(_),
+                ..
+            }
+        )
+    }
+
+    /// The descriptor redeeming this installs, on `description`; `None` for
+    /// a location, which opens nothing.
+    fn into_open_file(self, description: Arc<Description>) -> Option<OpenFile> {
+        match self {
+            Self::Descriptor { what, flags } => Some(OpenFile {
+                backing: what.into_backing(),
+                flags,
+                description,
+            }),
+            Self::Location(_) => None,
+        }
+    }
+}
+
+/// The delegations a grantor's exit took back from their recipients' tables,
+/// chained through their own records, so taking them allocated nothing and
+/// none is let go under the registry's lock.
+#[derive(Default)]
+struct TakenBack(Option<Box<PendingFdDelegation>>);
+
+impl TakenBack {
+    /// Chain `pending` on.
+    fn push(&mut self, mut pending: Box<PendingFdDelegation>) {
+        pending.taken = self.0.take();
+        self.0 = Some(pending);
+    }
+}
+
+impl Drop for TakenBack {
+    // One link at a time: dropping the head whole would recurse once per
+    // delegation.
+    fn drop(&mut self) {
+        let mut next = self.0.take();
+        while let Some(mut pending) = next {
+            next = pending.taken.take();
+        }
+    }
+}
+
+/// What one process has delegated that still waits in its recipients' tables.
+#[derive(Default)]
+struct Sent {
+    /// Every such delegation.
+    delegations: u64,
+    /// The pipe ends among them, held against its `open-files` bound.
+    pipe_ends: u64,
+}
+
+impl Sent {
+    /// Count a delegation `grantor` just filed, a pipe end when `pipe_end`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the grantor's first record cannot be filed.
+    fn file(sent: &mut ByProcess<Self>, grantor: ProcessId, pipe_end: bool) -> Result<(), Errno> {
+        let count = |record: &mut Self, pipe: bool| {
+            record.delegations = record.delegations.saturating_add(1);
+            record.pipe_ends = record.pipe_ends.saturating_add(u64::from(pipe));
+            Ok(())
+        };
+        file_into(sent, grantor, pipe_end, |_, _| Errno::OutOfMemory, count)
+    }
+
+    /// Count `pending`, gone from its recipient's table, off its grantor,
+    /// dropping a record that empties.
+    fn leave(sent: &mut ByProcess<Self>, pending: &PendingFdDelegation) {
+        let pipe_end = u64::from(pending.conveys.is_pipe_end());
+        let Some(record) = sent.get_mut(&pending.grantor) else {
+            return;
+        };
+        record.delegations = record.delegations.saturating_sub(1);
+        record.pipe_ends = record.pipe_ends.saturating_sub(pipe_end);
+        if record.delegations == 0 {
+            sent.remove(&pending.grantor);
         }
     }
 }
@@ -1351,11 +1779,33 @@ pub struct FileLocation {
 /// Linear over a table whose length is, by virtue of this very check, the
 /// number of *distinct* authorities the task holds — a handful for a driver,
 /// and never grown by repetition.
-fn existing_handle<V>(by_handle: &BTreeMap<u64, V>, held: impl Fn(&V) -> bool) -> Option<u64> {
+fn existing_handle<V>(by_handle: &OrderedMap<u64, V>, held: impl Fn(&V) -> bool) -> Option<u64> {
     by_handle
         .iter()
         .find(|(_, value)| held(value))
         .map(|(&handle, _)| handle)
+}
+
+/// File `value` in `by_handle` under the handle after `next`, which then
+/// advances: the issue discipline both handle tables share, monotonic from
+/// `1` and never reused.
+///
+/// # Errors
+///
+/// [`Errno::OutOfMemory`] when the entry cannot be allocated, and
+/// [`Errno::OutOfRange`] once the handles are spent; nothing changes either
+/// way.
+fn mint_handle<V>(
+    next: &mut u64,
+    by_handle: &mut OrderedMap<u64, V>,
+    value: V,
+) -> Result<u64, Errno> {
+    let handle = next.checked_add(1).ok_or(Errno::OutOfRange)?;
+    by_handle
+        .try_insert(handle, value)
+        .map_err(|_| Errno::OutOfMemory)?;
+    *next = handle;
+    Ok(handle)
 }
 
 /// The whole pages spanning `bytes`.
@@ -1443,25 +1893,26 @@ impl AddressSpaceRegistry {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            tasks: BTreeMap::new(),
-            stack_committed: BTreeMap::new(),
-            streams: BTreeMap::new(),
-            limits: BTreeMap::new(),
-            grants: BTreeMap::new(),
-            live_spaces: BTreeMap::new(),
-            loaded_nodes: BTreeMap::new(),
-            node_drivers: BTreeMap::new(),
+            tasks: OrderedMap::new(),
+            stack_committed: OrderedMap::new(),
+            streams: OrderedMap::new(),
+            limits: OrderedMap::new(),
+            grants: OrderedMap::new(),
+            live_spaces: OrderedMap::new(),
+            loaded_nodes: OrderedMap::new(),
+            node_drivers: OrderedMap::new(),
             next_driver_generation: 1,
-            open_files: BTreeMap::new(),
-            mapped_aspace_bytes: BTreeMap::new(),
-            fs: BTreeMap::new(),
-            file_regions: BTreeMap::new(),
-            anon_regions: BTreeMap::new(),
-            stack_spans: BTreeMap::new(),
-            fd_delegations: BTreeMap::new(),
-            load_bases: BTreeMap::new(),
+            open_files: OrderedMap::new(),
+            mapped_aspace_bytes: OrderedMap::new(),
+            fs: OrderedMap::new(),
+            file_regions: OrderedMap::new(),
+            anon_regions: OrderedMap::new(),
+            stack_spans: OrderedMap::new(),
+            fd_delegations: OrderedMap::new(),
+            sent: OrderedMap::new(),
+            load_bases: OrderedMap::new(),
             default_limits: LimitSet::DEFAULT,
-            pinned: BTreeSet::new(),
+            pinned: OrderedSet::new(),
         }
     }
 
@@ -1471,7 +1922,8 @@ impl AddressSpaceRegistry {
     /// # Errors
     ///
     /// [`AspaceError::AlreadyPresent`] if an address space is already
-    /// registered for `task`; the existing entry is left untouched.
+    /// registered for `task`, leaving the existing entry untouched, and
+    /// [`AspaceError::OutOfMemory`] if the entry cannot be allocated.
     pub fn register(
         &mut self,
         task: ProcessId,
@@ -1481,14 +1933,14 @@ impl AddressSpaceRegistry {
         if self.tasks.contains_key(&task) {
             return Err(AspaceError::AlreadyPresent);
         }
-        self.tasks.insert(
-            task,
-            TaskAddressSpace {
-                space,
-                physmap,
-                suspended: false,
-            },
-        );
+        let entry = TaskAddressSpace {
+            space,
+            physmap,
+            suspended: false,
+        };
+        self.tasks
+            .try_insert(task, entry)
+            .map_err(|_| AspaceError::OutOfMemory)?;
         Ok(())
     }
 
@@ -1496,9 +1948,8 @@ impl AddressSpaceRegistry {
     /// keeping its existing physical map, and return `true` if an entry was
     /// present to update.
     ///
-    /// The registry stores a `Send + Sync`
-    /// [`FrozenAddressSpace`](tairix_kernel_mem::vmm::FrozenAddressSpace)
-    /// snapshot rather than the live, `!Sync` arch space (see
+    /// The registry stores a `Send + Sync` [`FrozenAddressSpace`] snapshot
+    /// rather than the live, `!Sync` arch space (see
     /// [`tairix_kernel_mem::LiveUserSpace`]). A snapshot frozen at spawn
     /// describes only the task's spawn-time image and stack; once the task
     /// maps its own heap (`mem_map`), unmaps it, or a driver maps a granted
@@ -1507,30 +1958,62 @@ impl AddressSpaceRegistry {
     /// (or freed) pages. The mutating syscall handler re-freezes the live
     /// space and calls this to publish the fresh snapshot, so the very next
     /// `copy_in` / `copy_out` reflects the current mappings (the copy path must see exactly the task's live memory; the
-    /// behaviour
-    /// [`FrozenAddressSpace`](tairix_kernel_mem::vmm::FrozenAddressSpace)'s
-    /// docs prescribe for a remap path).
+    /// behaviour [`FrozenAddressSpace`]'s docs prescribe for a remap path).
     ///
     /// The physical map is left untouched: it is the kernel direct map,
     /// identical across every snapshot of the same task, so re-freezing only
     /// the mappings is sufficient and avoids re-boxing it. A task with no
     /// registered entry is **not** created here — re-freezing concerns only
     /// a task that already has a space (a kernel task has none and reaches no
-    /// user copy path), so the call is a no-op returning `false` (fail
+    /// user copy path), so the call does nothing and answers `None` (fail
     /// closed).
+    ///
+    /// Answers the snapshot it replaced, for the caller to drop once this
+    /// registry's lock is released.
     pub fn reregister_space(
         &mut self,
         task: ProcessId,
         space: Box<dyn UserAddressSpace + Send + Sync>,
-    ) -> bool {
-        match self.tasks.get_mut(&task) {
-            Some(entry) => {
-                entry.space = space;
-                entry.suspended = false;
-                true
-            }
-            None => false,
-        }
+    ) -> Option<Box<dyn UserAddressSpace + Send + Sync>> {
+        let entry = self.tasks.get_mut(&task)?;
+        entry.suspended = false;
+        Some(core::mem::replace(&mut entry.space, space))
+    }
+
+    /// Re-freeze `task`'s snapshot from `live`, its own live space, and
+    /// publish it while the caller still holds that space: a change made to
+    /// it once its lock is released — a sibling's unmap — is then published
+    /// after this snapshot, never undone by it. Answers the snapshot replaced,
+    /// for the caller to drop once both locks are released; `None`, the
+    /// snapshot left as it stands, when the heap refused the freeze or the
+    /// task has no entry.
+    pub fn refreeze_held(
+        registry: &RwLock<Self>,
+        task: ProcessId,
+        live: &mut dyn LiveUserSpace,
+    ) -> Option<Box<dyn UserAddressSpace + Send + Sync>> {
+        let frozen = Self::refrozen(live.freeze())?;
+        registry.write().reregister_space(task, frozen)
+    }
+
+    /// Whether `task`'s snapshot is suspended: it took a change it could not
+    /// absorb in place, so no copy may read through it until a re-freeze.
+    #[must_use]
+    pub fn is_suspended(&self, task: ProcessId) -> bool {
+        self.tasks.get(&task).is_some_and(|entry| entry.suspended)
+    }
+
+    /// `frozen`, a fresh freeze of a task's own live space, boxed for
+    /// [`Self::reregister_space`]; `None` when the heap held neither. The
+    /// task's snapshot then stays as it stands — suspended wherever a change
+    /// it could not take made it so — and no copy reads through a stale view.
+    #[must_use]
+    pub fn refrozen(
+        frozen: Result<FrozenAddressSpace, AllocError>,
+    ) -> Option<Box<dyn UserAddressSpace + Send + Sync>> {
+        let frozen = frozen.ok()?;
+        let boxed = Box::try_new(frozen).ok()?;
+        Some(boxed)
     }
 
     /// Apply a single-page mapping delta to `task`'s stored snapshot in
@@ -1555,8 +2038,10 @@ impl AddressSpaceRegistry {
         page: Page,
         mapping: Option<(Frame, MapFlags)>,
     ) -> bool {
+        // A suspended snapshot still takes the delta, but answers `false` so
+        // its caller re-freezes it rather than leave it suspended.
         match self.tasks.get_mut(&task) {
-            Some(entry) => entry.space.apply_page_delta(page, mapping),
+            Some(entry) => entry.space.apply_page_delta(page, mapping) && !entry.suspended,
             None => false,
         }
     }
@@ -1630,6 +2115,11 @@ impl AddressSpaceRegistry {
         let had_anon_regions = self.anon_regions.remove(&task).is_some();
         let had_load_base = self.load_bases.remove(&task).is_some();
         let delegations = self.fd_delegations.remove(&task);
+        if let Some(table) = &delegations {
+            for pending in table.by_handle.values() {
+                Sent::leave(&mut self.sent, pending);
+            }
+        }
         let granted = self.withdraw_granted(task);
         let had_task = self.tasks.remove(&task).is_some();
         // Reclaim post-condition (debug-only tripwire): every per-process map
@@ -1670,41 +2160,38 @@ impl AddressSpaceRegistry {
         }
     }
 
-    /// Take every pending delegation `grantor` minted to another process.
+    /// Take back every pending delegation `grantor` minted to another process.
     ///
-    /// A cold pass rather than a reverse index, as for endpoint grants: an
-    /// index would be a second record to keep in step with this one. Where
-    /// the heap cannot hold them for the caller they are released here: a
-    /// pending grant holds no open description, so its release takes only
-    /// its node's release queue.
-    fn withdraw_granted(&mut self, grantor: ProcessId) -> Vec<PendingFdDelegation> {
-        let minted = self
-            .fd_delegations
-            .values()
-            .map(|pending| {
-                pending
-                    .by_handle
-                    .values()
-                    .filter(|held| held.grantor == grantor)
-                    .count()
-            })
-            .sum();
-        let mut granted = Vec::new();
-        if granted.try_reserve_exact(minted).is_err() {
-            for pending in self.fd_delegations.values_mut() {
-                pending.by_handle.retain(|_, held| held.grantor != grantor);
-            }
-            return granted;
-        }
+    /// Its [`Sent`] record says how many there are, so an exit that delegated
+    /// nothing walks no table and one that did stops at its last. Each is
+    /// chained through its own record, so taking them allocates nothing and
+    /// the caller lets them go once this registry's lock is, where a pipe
+    /// end's last release may wake its peer.
+    fn withdraw_granted(&mut self, grantor: ProcessId) -> TakenBack {
+        let mut taken = TakenBack::default();
+        let Some(mut left) = self.sent.remove(&grantor).map(|sent| sent.delegations) else {
+            return taken;
+        };
         for pending in self.fd_delegations.values_mut() {
-            granted.extend(
-                pending
+            let mut from = 0;
+            while left > 0 {
+                let next = pending
                     .by_handle
-                    .extract_if(.., |_, held| held.grantor == grantor)
-                    .map(|(_, held)| held),
-            );
+                    .range(from..)
+                    .find(|(_, held)| held.grantor == grantor)
+                    .map(|(&handle, _)| handle);
+                let Some(handle) = next else { break };
+                if let Some(held) = pending.by_handle.remove(&handle) {
+                    taken.push(held);
+                    left -= 1;
+                }
+                from = handle.saturating_add(1);
+            }
+            if left == 0 {
+                break;
+            }
         }
-        granted
+        taken
     }
 
     /// Drop every **per-thread** record `thread` held: today its user-stack
@@ -1796,6 +2283,9 @@ impl AddressSpaceRegistry {
         {
             return Some("fd_delegations (as grantor)");
         }
+        if self.sent.contains_key(&task) {
+            return Some("sent");
+        }
         None
     }
 
@@ -1819,8 +2309,10 @@ impl AddressSpaceRegistry {
     ///
     /// # Errors
     ///
-    /// [`Errno::Busy`] while another driver holds `node_id`, and
-    /// [`Errno::AlreadyExists`] if `task` is already a loaded driver.
+    /// [`Errno::Busy`] while another driver holds `node_id`,
+    /// [`Errno::AlreadyExists`] if `task` is already a loaded driver, and
+    /// [`Errno::OutOfMemory`] if the load cannot be recorded; a refusal
+    /// records nothing.
     pub fn admit_driver(
         &mut self,
         task: ProcessId,
@@ -1833,19 +2325,21 @@ impl AddressSpaceRegistry {
         if self.loaded_nodes.contains_key(&task) {
             return Err(Errno::AlreadyExists);
         }
+        let oom = |_| Errno::OutOfMemory;
+        self.node_drivers.try_reserve(1).map_err(oom)?;
+        self.loaded_nodes.try_reserve(1).map_err(oom)?;
         let generation = self.next_driver_generation;
+        let driver = LoadedDriver {
+            node: node_id,
+            generation,
+            dma_bytes: 0,
+            dma,
+            mastered: None,
+        };
+        // Both reserved above, so neither insertion is refused.
+        self.node_drivers.try_insert(node_id, task).map_err(oom)?;
+        self.loaded_nodes.try_insert(task, driver).map_err(oom)?;
         self.next_driver_generation = generation.saturating_add(1);
-        self.node_drivers.insert(node_id, task);
-        self.loaded_nodes.insert(
-            task,
-            LoadedDriver {
-                node: node_id,
-                generation,
-                dma_bytes: 0,
-                dma,
-                mastered: None,
-            },
-        );
         Ok(generation)
     }
 
@@ -1856,13 +2350,16 @@ impl AddressSpaceRegistry {
     ///
     /// # Errors
     ///
-    /// [`Errno::Busy`] while a process is the node's driver.
+    /// [`Errno::Busy`] while a process is the node's driver, and
+    /// [`Errno::OutOfMemory`] when the claim cannot be recorded.
     pub fn claim_for_kernel(&mut self, node: u32) -> Result<(), Errno> {
         match self.node_drivers.get(&node) {
             Some(&holder) if holder != ProcessId::KERNEL => Err(Errno::Busy),
             Some(_) => Ok(()),
             None => {
-                self.node_drivers.insert(node, ProcessId::KERNEL);
+                self.node_drivers
+                    .try_insert(node, ProcessId::KERNEL)
+                    .map_err(|_| Errno::OutOfMemory)?;
                 Ok(())
             }
         }
@@ -1940,7 +2437,13 @@ impl AddressSpaceRegistry {
     /// the handle it has; only a resource new to it mints a fresh one
     /// (monotonic from `1`, never reused), so repetition cannot grow a
     /// recipient's kernel-side table.
-    pub fn mint_grant(&mut self, task: ProcessId, resource: HwResource) -> u64 {
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when a fresh grant cannot be recorded, and
+    /// [`Errno::OutOfRange`] once `task`'s handles are spent; nothing is
+    /// minted either way.
+    pub fn mint_grant(&mut self, task: ProcessId, resource: HwResource) -> Result<u64, Errno> {
         self.mint_with_origin(task, resource, None, None)
     }
 
@@ -1948,7 +2451,16 @@ impl AddressSpaceRegistry {
     /// node `node`: a node's requested resources at driver admission, or a
     /// vector allocated for its device. It ends when the node leaves the
     /// tree ([`Self::revoke_node_grants`]).
-    pub fn mint_node_grant(&mut self, task: ProcessId, resource: HwResource, node: u32) -> u64 {
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::mint_grant`].
+    pub fn mint_node_grant(
+        &mut self,
+        task: ProcessId,
+        resource: HwResource,
+        node: u32,
+    ) -> Result<u64, Errno> {
         self.mint_with_origin(task, resource, Some(node), None)
     }
 
@@ -1961,57 +2473,128 @@ impl AddressSpaceRegistry {
         resource: HwResource,
         origin: Option<u32>,
         grantor: Option<ProcId>,
-    ) -> u64 {
-        let entry = self.grants.entry(task).or_default();
-        if let Some(handle) = existing_handle(&entry.by_handle, |grant| {
-            grant.grantor == grantor && grant.live() == Some(&resource)
-        }) {
-            // Held twice, it lasts as long as its longest-lived source; two
-            // node origins keep the first, over-revoking rather than under.
-            if origin.is_none() {
-                if let Some(grant) = entry.by_handle.get_mut(&handle) {
-                    grant.origin = None;
+    ) -> Result<u64, Errno> {
+        let grant = Grant {
+            resource,
+            origin,
+            grantor,
+            revoked: false,
+        };
+        let mint = |entry: &mut TaskGrants, grant| {
+            if let Some(handle) = existing_handle(&entry.by_handle, |held| {
+                held.is_live_from(grantor, &resource)
+            }) {
+                // Held twice, it lasts as long as its longest-lived source; two
+                // node origins keep the first, over-revoking rather than under.
+                if origin.is_none() {
+                    if let Some(held) = entry.by_handle.get_mut(&handle) {
+                        held.origin = None;
+                    }
                 }
+                return Ok(handle);
             }
-            return handle;
-        }
-        // Handle 0 is the reserved invalid value; the first minted handle is
-        // 1, and `next_handle` only ever increases.
-        entry.next_handle += 1;
-        let handle = entry.next_handle;
-        entry.by_handle.insert(
-            handle,
-            Grant {
-                resource,
-                origin,
-                grantor,
-                revoked: false,
-            },
-        );
-        handle
+            mint_handle(&mut entry.next_handle, &mut entry.by_handle, grant)
+        };
+        file_into(
+            &mut self.grants,
+            task,
+            grant,
+            |_, _| Errno::OutOfMemory,
+            mint,
+        )
     }
 
     /// Delegate `wanted` from `from`, which must hold a live grant covering
-    /// it, to `to`, returning `to`'s handle; `None` if `from` holds no such
-    /// grant or `to` has been withdrawn. `grantor` is `from`'s own process
+    /// it, to `to`, returning `to`'s handle. `grantor` is `from`'s own process
     /// instance, recorded so `to` maps the region by naming who delegated it.
     ///
     /// The delegated grant inherits the covering grant's origin, so it ends
     /// with the device the delegator's authority reached. The check and the
     /// mint are one step under this registry's lock, so a revocation cannot
     /// land between them and leave a copy it never saw.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] if `from` holds no such grant or `to` has been
+    /// withdrawn, and otherwise as [`Self::mint_grant`].
     pub fn delegate_grant(
         &mut self,
         from: ProcessId,
         grantor: ProcId,
         to: ProcessId,
         wanted: HwResource,
-    ) -> Option<u64> {
-        let Covered { origin } = self.covered(from, &wanted)?;
-        if !self.tasks.contains_key(&to) {
-            return None;
+    ) -> Result<u64, Errno> {
+        self.delegate_into(from, grantor, to, wanted, |_| Ok(()))
+    }
+
+    /// [`Self::delegate_grant`] of shared region `region` to `to`, a recipient
+    /// that never asked for it (`shm_grant_to`), within a bound per grantor.
+    ///
+    /// Repeating a delegation `to` still holds answers its handle. A fresh one
+    /// is refused once `to` holds [`tairix_abi::SHM_GRANT_TO_MAX`] regions
+    /// `grantor` delegated it, those `region_live` reports released given up
+    /// first, so no grantor fills a table it was never invited into and each
+    /// grantor's share is its own. `to`'s table is swept as
+    /// [`Self::sweep_released`] sweeps one.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LimitExceeded`] past the bound, [`Errno::NotFound`] for a
+    /// released region and as [`Self::delegate_grant`] answers it, and
+    /// otherwise as [`Self::mint_grant`].
+    pub fn delegate_bounded_region(
+        &mut self,
+        from: ProcessId,
+        grantor: ProcId,
+        to: ProcessId,
+        region: u64,
+        region_live: impl Fn(u64) -> bool,
+    ) -> Result<u64, Errno> {
+        if !region_live(region) {
+            return Err(Errno::NotFound);
         }
-        Some(self.mint_with_origin(to, wanted, origin, Some(grantor)))
+        self.sweep_released(to, &region_live);
+        let wanted = HwResource::shared(region);
+        self.delegate_into(from, grantor, to, wanted, |entry| {
+            entry.make_room(grantor, &wanted, &region_live)
+        })
+    }
+
+    /// Delegate `wanted` from `from` to `to` once `room` accepts `to`'s table:
+    /// the check and the mint are one step under this registry's lock.
+    fn delegate_into(
+        &mut self,
+        from: ProcessId,
+        grantor: ProcId,
+        to: ProcessId,
+        wanted: HwResource,
+        room: impl FnOnce(&mut TaskGrants) -> Result<(), Errno>,
+    ) -> Result<u64, Errno> {
+        let Covered { origin } = self.covered(from, &wanted).ok_or(Errno::NotFound)?;
+        if !self.tasks.contains_key(&to) {
+            return Err(Errno::NotFound);
+        }
+        if let Some(entry) = self.grants.get_mut(&to) {
+            room(entry)?;
+        }
+        self.mint_with_origin(to, wanted, origin, Some(grantor))
+    }
+
+    /// Drop `task`'s grants of shared regions `region_live` reports released,
+    /// once its table has doubled since it was last swept, returning how many
+    /// went.
+    ///
+    /// A released region's id is never issued again, so its grants can never
+    /// be mapped, yet they stayed: a server handed a region per client window
+    /// kept one per window it was ever handed. Sweeping on doubling keeps a
+    /// table within twice what it holds live, at a constant cost per grant.
+    pub fn sweep_released(&mut self, task: ProcessId, region_live: impl Fn(u64) -> bool) -> usize {
+        match self.grants.get_mut(&task) {
+            Some(entry) if entry.by_handle.len() > entry.swept.saturating_mul(2) => {
+                entry.drop_released(region_live)
+            }
+            _ => 0,
+        }
     }
 
     /// What `from`'s live grants covering `wanted` hand a grant delegated
@@ -2028,28 +2611,34 @@ impl AddressSpaceRegistry {
     }
 
     /// Hand `to`, a child being admitted, the shared region `region` from its
-    /// spawner `from` as its spawn share, returning `to`'s handle; `None` if
-    /// `from` holds no live grant covering it.
+    /// spawner `from` as its spawn share, returning `to`'s handle.
     ///
     /// Delegated as [`Self::delegate_grant`] delegates, but before the child's
     /// address space exists: admission owns the fresh id, so there is no
     /// withdrawn task to refuse.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] if `from` holds no live grant covering the region,
+    /// and otherwise as [`Self::mint_grant`].
     pub fn hand_spawn_share(
         &mut self,
         from: ProcessId,
         grantor: ProcId,
         to: ProcessId,
         region: u64,
-    ) -> Option<u64> {
+    ) -> Result<u64, Errno> {
         let wanted = HwResource::shared(region);
-        let Covered { origin } = self.covered(from, &wanted)?;
-        let handle = self.mint_with_origin(to, wanted, origin, Some(grantor));
-        self.grants.entry(to).or_default().spawn_share = Some(SpawnShare {
-            handle,
-            grantor,
-            claimed: false,
-        });
-        Some(handle)
+        let Covered { origin } = self.covered(from, &wanted).ok_or(Errno::NotFound)?;
+        let handle = self.mint_with_origin(to, wanted, origin, Some(grantor))?;
+        if let Some(grants) = self.grants.get_mut(&to) {
+            grants.spawn_share = Some(SpawnShare {
+                handle,
+                grantor,
+                claimed: false,
+            });
+        }
+        Ok(handle)
     }
 
     /// Claim `task`'s spawn share to map it: its grant handle and the spawner
@@ -2092,13 +2681,13 @@ impl AddressSpaceRegistry {
     /// An [`HwResourceKind::Endpoint`] grant names an endpoint by its
     /// re-creatable numeric id, so a grant that survived its endpoint would
     /// retarget onto whichever task binds that id next. The endpoint teardown
-    /// calls this in the step that destroys the endpoints, so a holder's next
-    /// call fails closed rather than reaching the new instance.
+    /// calls this before it unbinds the endpoints, so a holder's next call
+    /// fails closed rather than reaching the new instance.
     ///
     /// A single pass over the grant tables rather than a reverse index:
     /// teardown is a cold path, and an index would be a second source of truth
     /// whose drift would reopen exactly this hole.
-    pub fn revoke_endpoint_grants(&mut self, endpoints: &BTreeSet<u64>) -> usize {
+    pub fn revoke_endpoint_grants(&mut self, endpoints: &Endpoints) -> usize {
         if endpoints.is_empty() {
             return 0;
         }
@@ -2106,7 +2695,7 @@ impl AddressSpaceRegistry {
         for entry in self.grants.values_mut() {
             entry.by_handle.retain(|_, grant| {
                 let doomed = grant.resource.kind() == Some(HwResourceKind::Endpoint)
-                    && endpoints.contains(&grant.resource.base());
+                    && endpoints.contains(&EndpointId(grant.resource.base()));
                 revoked += usize::from(doomed);
                 !doomed
             });
@@ -2254,8 +2843,19 @@ impl AddressSpaceRegistry {
 
     /// Record `space` as `task`'s live address space, so a revocation can
     /// reach its mappings.
-    pub fn set_live_space(&mut self, task: ProcessId, space: &Arc<ProcessSpace>) {
-        self.live_spaces.insert(task, Arc::downgrade(space));
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the record cannot be allocated.
+    pub fn set_live_space(
+        &mut self,
+        task: ProcessId,
+        space: &Arc<ProcessSpace>,
+    ) -> Result<(), Errno> {
+        self.live_spaces
+            .try_insert(task, Arc::downgrade(space))
+            .map_err(|_| Errno::OutOfMemory)?;
+        Ok(())
     }
 
     /// `task`'s live address space while any of its threads still holds it.
@@ -2311,18 +2911,26 @@ impl AddressSpaceRegistry {
     /// Empty for a task with no grants, which is valid: an unbound node is
     /// normal. Bounded by construction, since only admission and a holder's
     /// own delegations mint.
-    #[must_use]
-    pub fn grants_to_le_bytes(&self, task: ProcessId) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the records cannot be held.
+    pub fn grants_to_le_bytes(&self, task: ProcessId) -> Result<Vec<u8>, Errno> {
         let mut out = Vec::new();
         if let Some(entry) = self.grants.get(&task) {
-            out.reserve(entry.by_handle.len() * GrantedResource::WIRE_LEN);
+            let wanted = entry
+                .by_handle
+                .len()
+                .saturating_mul(GrantedResource::WIRE_LEN);
+            out.try_reserve_exact(wanted)
+                .map_err(|_| Errno::OutOfMemory)?;
             for (&handle, grant) in &entry.by_handle {
                 if let Some(&resource) = grant.live() {
                     out.extend_from_slice(&GrantedResource::new(handle, resource).to_le_bytes());
                 }
             }
         }
-        out
+        Ok(out)
     }
 
     /// Whether a live grant of `task` covers `resource` for a child it
@@ -2367,8 +2975,15 @@ impl AddressSpaceRegistry {
     /// task is the spawner's prerogative, and unlike the address space
     /// there is no live mapping to protect. A task whose table is never
     /// set resolves to [`DescriptorTable::closed`] via [`Self::streams`].
-    pub fn set_streams(&mut self, task: ProcessId, table: DescriptorTable) {
-        self.streams.insert(task, table);
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the table cannot be recorded.
+    pub fn set_streams(&mut self, task: ProcessId, table: DescriptorTable) -> Result<(), Errno> {
+        self.streams
+            .try_insert(task, table)
+            .map_err(|_| Errno::OutOfMemory)?;
+        Ok(())
     }
 
     /// Resolve `task`'s standard-stream descriptor table, or the
@@ -2389,17 +3004,27 @@ impl AddressSpaceRegistry {
     /// Called by the `fs_chdir` handler once a target directory has been
     /// resolved, authorised and pinned. A task whose directory is never
     /// established stands at the view root via [`Self::cwd`].
-    pub fn set_cwd(&mut self, task: ProcessId, cwd: Cwd) -> Option<Cwd> {
-        match self.fs.entry(task) {
-            Entry::Occupied(mut held) => Some(core::mem::replace(&mut held.get_mut().cwd, cwd)),
-            Entry::Vacant(vacant) => {
-                vacant.insert(ProcessFs {
-                    cwd,
-                    umask: FS_INITIAL_UMASK,
-                });
-                None
-            }
+    ///
+    /// # Errors
+    ///
+    /// `cwd` handed back, for the caller to release likewise, when the task's
+    /// context cannot be allocated.
+    pub fn set_cwd(&mut self, task: ProcessId, cwd: Cwd) -> Result<Option<Cwd>, Cwd> {
+        if let Some(fs) = self.fs.get_mut(&task) {
+            return Ok(Some(core::mem::replace(&mut fs.cwd, cwd)));
         }
+        if self.fs.try_reserve(1).is_err() {
+            return Err(cwd);
+        }
+        let recorded = self.fs.try_insert(
+            task,
+            ProcessFs {
+                cwd,
+                umask: FS_INITIAL_UMASK,
+            },
+        );
+        debug_assert!(recorded.is_ok(), "a reserved context was refused");
+        Ok(None)
     }
 
     /// `task`'s file mode creation mask, or [`FS_INITIAL_UMASK`] when none is
@@ -2411,24 +3036,48 @@ impl AddressSpaceRegistry {
 
     /// Set `task`'s file mode creation mask to `mask`, which the caller has
     /// bounded to the permission bits, answering the mask it replaces.
-    pub fn set_umask(&mut self, task: ProcessId, mask: u32) -> u32 {
-        let fs = self.fs.entry(task).or_insert_with(ProcessFs::initial);
-        core::mem::replace(&mut fs.umask, mask)
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the task's context cannot be allocated.
+    pub fn set_umask(&mut self, task: ProcessId, mask: u32) -> Result<u32, Errno> {
+        if let Some(fs) = self.fs.get_mut(&task) {
+            return Ok(core::mem::replace(&mut fs.umask, mask));
+        }
+        let fs = ProcessFs {
+            umask: mask,
+            ..ProcessFs::initial()
+        };
+        self.fs
+            .try_insert(task, fs)
+            .map_err(|_| Errno::OutOfMemory)?;
+        Ok(FS_INITIAL_UMASK)
     }
 
     /// Give `child` the mask `parent` has, and the working directory `start`
     /// names or else `parent`'s, shared and pinning nothing new, as a spawn
     /// does; handing back what `child` held for the caller to release once
     /// this registry's lock is.
+    ///
+    /// # Errors
+    ///
+    /// The context `child` would have had, handed back for the caller to
+    /// release likewise, when it cannot be allocated.
     pub fn inherit_fs(
         &mut self,
         parent: ProcessId,
         child: ProcessId,
         start: Option<Cwd>,
-    ) -> Option<ProcessFs> {
+    ) -> Result<Option<ProcessFs>, ProcessFs> {
         let umask = self.umask(parent);
         let cwd = start.unwrap_or_else(|| self.cwd(parent));
-        self.fs.insert(child, ProcessFs { cwd, umask })
+        let fs = ProcessFs { cwd, umask };
+        if !self.fs.contains_key(&child) && self.fs.try_reserve(1).is_err() {
+            return Err(fs);
+        }
+        let inherited = self.fs.try_insert(child, fs);
+        debug_assert!(inherited.is_ok(), "a reserved context was refused");
+        Ok(inherited.unwrap_or_default())
     }
 
     /// `task`'s working directory, or the view root when none is
@@ -2452,8 +3101,15 @@ impl AddressSpaceRegistry {
     /// for [`Self::set_streams`]; a task whose set is never established
     /// resolves to the per-boot [`Self::default_limits`] policy via
     /// [`Self::limits`].
-    pub fn set_limits(&mut self, task: ProcessId, limits: LimitSet) {
-        self.limits.insert(task, limits);
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the set cannot be recorded.
+    pub fn set_limits(&mut self, task: ProcessId, limits: LimitSet) -> Result<(), Errno> {
+        self.limits
+            .try_insert(task, limits)
+            .map_err(|_| Errno::OutOfMemory)?;
+        Ok(())
     }
 
     /// Update `task`'s effective limit for a single [`LimitKind`],
@@ -2464,14 +3120,23 @@ impl AddressSpaceRegistry {
     /// set starts from the per-boot [`Self::default_limits`] policy, so
     /// the first imposed bound on any kind leaves every other kind at
     /// the default policy.
-    pub fn set_limit(&mut self, task: ProcessId, kind: LimitKind, limit: ResourceLimit) {
-        let mut set = self
-            .limits
-            .get(&task)
-            .copied()
-            .unwrap_or(self.default_limits);
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the set cannot be recorded; the limits
+    /// stand as they were.
+    pub fn set_limit(
+        &mut self,
+        task: ProcessId,
+        kind: LimitKind,
+        limit: ResourceLimit,
+    ) -> Result<(), Errno> {
+        let mut set = self.limits(task);
         set.set(kind, limit);
-        self.limits.insert(task, set);
+        self.limits
+            .try_insert(task, set)
+            .map_err(|_| Errno::OutOfMemory)?;
+        Ok(())
     }
 
     /// Resolve `task`'s effective resource-limit set, or the per-boot
@@ -2516,8 +3181,15 @@ impl AddressSpaceRegistry {
     /// The handler has already enforced the caller's
     /// `PinnedMemoryBytes` bound; this is the unconditional store. The
     /// `task` argument is the kernel-trusted caller id.
-    pub fn set_pinned(&mut self, task: ProcessId) {
-        self.pinned.insert(task);
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the mark cannot be recorded.
+    pub fn set_pinned(&mut self, task: ProcessId) -> Result<(), Errno> {
+        self.pinned
+            .try_insert(task)
+            .map_err(|_| Errno::OutOfMemory)?;
+        Ok(())
     }
 
     /// Clear `task`'s pin mark (`mem_unpin`). Idempotent: unpinning an
@@ -2573,7 +3245,9 @@ impl AddressSpaceRegistry {
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfRange`] when a bound would be passed; nothing is charged.
+    /// [`Errno::OutOfRange`] when a bound would be passed, and
+    /// [`Errno::OutOfMemory`] when the charge cannot be recorded; nothing is
+    /// charged either way.
     pub fn try_charge_aspace_bytes(&mut self, process: ProcessId, bytes: u64) -> Result<(), Errno> {
         let limits = self.limits(process);
         let projected = self
@@ -2586,17 +3260,7 @@ impl AddressSpaceRegistry {
         {
             return Err(Errno::OutOfRange);
         }
-        self.charge_aspace_bytes(process, bytes);
-        Ok(())
-    }
-
-    /// Accrue `bytes` against `task`'s mapped-address-space total, unchecked:
-    /// the first thread's initial stack, which the spawn layout placed before
-    /// the process could map anything. Saturating, so a miscount can never
-    /// silently understate usage.
-    fn charge_aspace_bytes(&mut self, task: ProcessId, bytes: u64) {
-        let entry = self.mapped_aspace_bytes.entry(task).or_insert(0);
-        *entry = entry.saturating_add(bytes);
+        add_to_total(&mut self.mapped_aspace_bytes, process, bytes)
     }
 
     /// Release `bytes` from `task`'s mapped-address-space total.
@@ -2610,12 +3274,7 @@ impl AddressSpaceRegistry {
     /// residual accounting. The `task` argument is the kernel-trusted
     /// caller id.
     pub fn credit_aspace_bytes(&mut self, task: ProcessId, bytes: u64) {
-        if let Some(entry) = self.mapped_aspace_bytes.get_mut(&task) {
-            *entry = entry.saturating_sub(bytes);
-            if *entry == 0 {
-                self.mapped_aspace_bytes.remove(&task);
-            }
-        }
+        take_from_total(&mut self.mapped_aspace_bytes, &task, bytes);
     }
 
     /// Record `task`'s reserved user-stack span.
@@ -2627,9 +3286,26 @@ impl AddressSpaceRegistry {
     /// growable stack and every fault below its committed stack stays
     /// fatal (fail closed). The `task` argument is the kernel-trusted id
     /// the admission path minted, never a caller-supplied value.
-    pub fn set_stack_span(&mut self, process: ProcessId, thread: TaskId, span: StackSpan) {
-        self.record_thread_stack(process, thread, span, None);
-        self.charge_aspace_bytes(process, span.committed_bytes());
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the span or its charge cannot be recorded;
+    /// nothing is recorded then.
+    pub fn set_stack_span(
+        &mut self,
+        process: ProcessId,
+        thread: TaskId,
+        span: StackSpan,
+    ) -> Result<(), Errno> {
+        // The charge goes in with the record or not at all.
+        self.mapped_aspace_bytes
+            .try_reserve(1)
+            .map_err(|_| Errno::OutOfMemory)?;
+        self.record_thread_stack(process, thread, span, None)?;
+        // The first thread's initial stack, which the spawn layout placed
+        // before the process could map anything, is charged unchecked.
+        let committed = span.committed_bytes();
+        add_to_total(&mut self.mapped_aspace_bytes, process, committed)
     }
 
     /// Record a runtime-created thread's stack span **and** the resources the
@@ -2642,38 +3318,51 @@ impl AddressSpaceRegistry {
     /// of step with it. The span's committed pages were charged by thread
     /// creation's [`Self::try_charge_aspace_bytes`]; from here the record owns
     /// that charge, and the thread's withdrawal credits it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::set_stack_span`].
     pub fn set_owned_thread_stack(
         &mut self,
         process: ProcessId,
         thread: TaskId,
         span: StackSpan,
         owned: OwnedThreadStack,
-    ) {
-        self.record_thread_stack(process, thread, span, Some(owned));
+    ) -> Result<(), Errno> {
+        self.record_thread_stack(process, thread, span, Some(owned))
     }
 
     /// The shared store behind [`Self::set_stack_span`] and
     /// [`Self::set_owned_thread_stack`], so the committed-stack accounting has
-    /// one definition.
+    /// one definition. Room for both records is made first, so a refusal
+    /// records nothing.
     fn record_thread_stack(
         &mut self,
         process: ProcessId,
         thread: TaskId,
         span: StackSpan,
         owned: Option<OwnedThreadStack>,
-    ) {
+    ) -> Result<(), Errno> {
+        self.stack_spans
+            .try_reserve(1)
+            .map_err(|_| Errno::OutOfMemory)?;
+        self.stack_committed
+            .try_reserve(1)
+            .map_err(|_| Errno::OutOfMemory)?;
         let committed = span.committed_bytes();
-        if let Some(previous) = self.stack_spans.insert(
-            thread,
-            ThreadStack {
-                process,
-                span,
-                owned,
-            },
-        ) {
+        let stack = ThreadStack {
+            process,
+            span,
+            owned,
+        };
+        let previous = self
+            .stack_spans
+            .try_insert(thread, stack)
+            .map_err(|_| Errno::OutOfMemory)?;
+        if let Some(previous) = previous {
             self.release_committed_stack(previous.process, previous.span.committed_bytes());
         }
-        *self.stack_committed.entry(process).or_default() += committed;
+        add_to_total(&mut self.stack_committed, process, committed)
     }
 
     /// The resources a runtime-created `thread` owns, or [`None`] for a
@@ -2687,12 +3376,7 @@ impl AddressSpaceRegistry {
     /// Subtract `bytes` from `process`'s committed-stack total, dropping the
     /// entry when it reaches zero so a dead process leaves nothing behind.
     fn release_committed_stack(&mut self, process: ProcessId, bytes: u64) {
-        if let Some(total) = self.stack_committed.get_mut(&process) {
-            *total = total.saturating_sub(bytes);
-            if *total == 0 {
-                self.stack_committed.remove(&process);
-            }
-        }
+        take_from_total(&mut self.stack_committed, &process, bytes);
         self.credit_aspace_bytes(process, bytes);
     }
 
@@ -2729,7 +3413,13 @@ impl AddressSpaceRegistry {
         let grown = held.span.committed_base - page_va;
         let process = held.process;
         held.span.committed_base = page_va;
-        *self.stack_committed.entry(process).or_default() += grown;
+        // A recorded span's process holds a committed total, its own part of
+        // which is never zero, so this records nothing new.
+        let total = self.stack_committed.get_mut(&process);
+        debug_assert!(total.is_some(), "a recorded span has no committed total");
+        if let Some(total) = total {
+            *total = total.saturating_add(grown);
+        }
         grown
     }
 
@@ -2754,8 +3444,15 @@ impl AddressSpaceRegistry {
     /// never recorded simply has crash offsets expressed absolute rather
     /// than load-relative (a diagnostics-quality degradation only, never a
     /// correctness or security one — an absent base leaks nothing).
-    pub fn set_load_base(&mut self, task: ProcessId, load_base: u64) {
-        self.load_bases.insert(task, load_base);
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the base cannot be recorded.
+    pub fn set_load_base(&mut self, task: ProcessId, load_base: u64) -> Result<(), Errno> {
+        self.load_bases
+            .try_insert(task, load_base)
+            .map_err(|_| Errno::OutOfMemory)?;
+        Ok(())
     }
 
     /// Resolve `task`'s recorded PIE load base, or `None` when none was
@@ -2782,11 +3479,12 @@ impl AddressSpaceRegistry {
     /// # Errors
     ///
     /// [`RangeError`] when the extent covers nothing, does not fit the
-    /// address space, or intersects a mapping the task already holds, with
-    /// the region handed back for the caller to release once this registry's
-    /// lock is. A reservation that overlaps a live one is refused rather than
-    /// recorded: two records over the same address would make a fault's
-    /// backing, and a release's extent, a choice between them.
+    /// address space, or intersects a mapping the task already holds, or its
+    /// record cannot be allocated, with the region handed back for the caller
+    /// to release once this registry's lock is. A reservation that overlaps a
+    /// live one is refused rather than recorded: two records over the same
+    /// address would make a fault's backing, and a release's extent, a choice
+    /// between them.
     pub fn record_file_region(
         &mut self,
         task: ProcessId,
@@ -2798,22 +3496,26 @@ impl AddressSpaceRegistry {
             Ok(extent) => extent,
             Err(err) => return Err((err, region)),
         };
-        if self
-            .file_regions
-            .get(&task)
-            .is_some_and(|regions| regions.overlapping(extent.clone()).next().is_some())
-        {
-            return Err((RangeError::Overlap, region));
-        }
-        // Neither refusal can follow: a page extent spans at least a page, and
-        // nothing held overlaps it.
-        let recorded = self
-            .file_regions
-            .entry(task)
-            .or_default()
-            .insert(extent, region);
-        debug_assert!(recorded.is_ok(), "a checked extent is recorded");
-        Ok(())
+        // Room is made before the region is handed over, so a refusal still
+        // has it to give back.
+        let place = |regions: &mut RangeMap<u64, FileRegion>, region| {
+            if regions.overlapping(extent.clone()).next().is_some() {
+                return Err((RangeError::Overlap, region));
+            }
+            if let Err(err) = regions.try_reserve(1) {
+                return Err((RangeError::Alloc(err), region));
+            }
+            let recorded = regions.insert(extent, region);
+            debug_assert!(recorded.is_ok(), "a checked, reserved extent is recorded");
+            Ok(())
+        };
+        file_into(
+            &mut self.file_regions,
+            task,
+            region,
+            |err, region| (RangeError::Alloc(err), region),
+            place,
+        )
     }
 
     /// Whether `task` holds a file mapping of exactly `(base, len)`.
@@ -2880,9 +3582,10 @@ impl AddressSpaceRegistry {
     ///
     /// [`RangeError`], on the same terms as
     /// [`record_file_region`](Self::record_file_region): an extent covering
-    /// nothing, one past the address space, or one overlapping pages this
-    /// task already holds is refused rather than recorded — a `FIXED`
-    /// placement must never silently take over live memory.
+    /// nothing, one past the address space, one overlapping pages this task
+    /// holds, a release of its is taking or its first thread's stack span, or
+    /// one whose record cannot be allocated, is refused rather than recorded —
+    /// a `FIXED` placement must never silently take over live memory.
     pub fn record_anon_region(
         &mut self,
         task: ProcessId,
@@ -2890,77 +3593,125 @@ impl AddressSpaceRegistry {
         pages: u64,
     ) -> Result<(), RangeError> {
         let extent = Self::page_extent(base, pages)?;
-        let regions = self.anon_regions.entry(task).or_default();
-        let refused = if regions.first_overlap(extent.clone()).is_some() {
-            Err(RangeError::Overlap)
-        } else {
-            regions.insert(extent);
-            Ok(())
-        };
-        self.drop_empty_regions(task);
-        refused
+        if self.over_first_stack(task, &extent) {
+            return Err(RangeError::Overlap);
+        }
+        file_into(
+            &mut self.anon_regions,
+            task,
+            extent,
+            |err, _| RangeError::Alloc(err),
+            AnonHolding::record,
+        )
+    }
+
+    /// Whether `extent` meets the stack span of `task`'s first thread. The
+    /// spawn layout leaves that span's growth room unmapped and reserved
+    /// nowhere the live space can see, so a `FIXED` range can be granted over
+    /// it; every later thread's span is a reservation of its own, which no
+    /// `FIXED` range is granted over.
+    fn over_first_stack(&self, task: ProcessId, extent: &Range<u64>) -> bool {
+        self.stack_span(task.leader_task())
+            .is_some_and(|span| span.reserve_base < extent.end && extent.start < span.top)
     }
 
     /// Whether every page of `[base, base + page_count · PAGE_SIZE)` is one
-    /// `task` holds anonymously.
-    ///
-    /// The `mem_unmap` handler tests the caller-named range against this
-    /// before any teardown, so a range holding one page the caller does not
-    /// own fails closed touching nothing — which is the whole security
-    /// property: a task can release its own pages and nothing else. It is
-    /// *containment*, not an exact match against one `mem_map` call, because
-    /// a caller that placed its own arena releases the part of it that has
-    /// come free rather than the extents it grew.
+    /// `task` holds anonymously: the containment
+    /// [`Self::begin_anon_release`] demands.
+    #[cfg(test)]
     #[must_use]
-    pub fn anon_region_holds(&self, task: ProcessId, base: u64, page_count: u64) -> bool {
+    pub(crate) fn anon_region_holds(&self, task: ProcessId, base: u64, page_count: u64) -> bool {
         let Ok(extent) = Self::page_extent(base, page_count) else {
             return false;
         };
         self.anon_regions
             .get(&task)
-            .is_some_and(|regions| regions.first_gap(extent).is_none())
+            .is_some_and(|holding| holding.pages.first_gap(extent).is_none())
     }
 
-    /// Drop `page_count` pages from `base` out of `task`'s anonymous
-    /// holding, splitting it where the range cuts through.
+    /// Take `page_count` pages from `base` out of `task`'s anonymous holding
+    /// for a `mem_unmap` about to release them, before any of them is.
     ///
-    /// Called by the `mem_unmap` handler *after* the producer released the
-    /// range, so record and reservation leave together.
-    pub fn remove_anon_range(&mut self, task: ProcessId, base: u64, page_count: u64) {
+    /// Every page must be one `task` holds, so a range holding one it does
+    /// not fails closed touching nothing: a task releases its own pages and
+    /// nothing else. That is containment, not a match against one `mem_map`
+    /// call, because a caller that placed its own arena releases the part of
+    /// it that has come free rather than the extents it grew.
+    ///
+    /// The cut, which can split a held range, is made here, and room is made
+    /// to put the pages back should the release fail, so no step after a page
+    /// is gone can be refused. Until [`Self::end_anon_release`], a fault on a
+    /// page of the range waits for it, no second release takes one, and no
+    /// record is placed over them.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when a page of the range is not one `task` holds,
+    /// and [`Errno::OutOfMemory`] when the room cannot be made; nothing
+    /// changes either way.
+    pub fn begin_anon_release(
+        &mut self,
+        task: ProcessId,
+        base: u64,
+        page_count: u64,
+    ) -> Result<(), Errno> {
+        let extent = Self::page_extent(base, page_count).map_err(|_| Errno::NotFound)?;
+        self.anon_regions
+            .get_mut(&task)
+            .ok_or(Errno::NotFound)?
+            .begin_release(extent)
+    }
+
+    /// End the release [`Self::begin_anon_release`] began: the pages are gone
+    /// when `released`, and `task` holds them again when not. Allocates
+    /// nothing, the room having been made when the release began. The caller
+    /// wakes the faults it held off (`anon_release_wake`) once this
+    /// registry's lock is released.
+    pub fn end_anon_release(
+        &mut self,
+        task: ProcessId,
+        base: u64,
+        page_count: u64,
+        released: bool,
+    ) {
         let Ok(extent) = Self::page_extent(base, page_count) else {
             return;
         };
-        let Some(regions) = self.anon_regions.get_mut(&task) else {
+        let Some(holding) = self.anon_regions.get_mut(&task) else {
             return;
         };
-        regions.remove(extent);
-        if regions.is_empty() {
+        holding.end_release(extent, released);
+        if holding.is_empty() {
             self.anon_regions.remove(&task);
         }
     }
 
     /// Whether the virtual address `va` lies inside one of `task`'s
-    /// reserved anonymous regions.
-    ///
-    /// The anonymous user-fault resolver calls this to decide whether a
-    /// faulting address is demand-paged anonymous backing (back one zeroed
-    /// page and resume) or a genuine wild access (terminate, fail closed).
+    /// reserved anonymous regions; a page a release in flight has taken is
+    /// not.
     #[must_use]
     pub fn anon_region_covers(&self, task: ProcessId, va: u64) -> bool {
-        self.anon_regions
-            .get(&task)
-            .is_some_and(|regions| regions.contains(va))
+        self.anon_page(task, va) == AnonPage::Held
     }
 
-    /// Drop either region map of `task`'s that a refused record left empty:
-    /// the residual check reads the presence of a map as leftover state, so a
-    /// refusal must leave the registry exactly as it found it.
-    fn drop_empty_regions(&mut self, task: ProcessId) {
-        if self.file_regions.get(&task).is_some_and(RangeMap::is_empty) {
-            self.file_regions.remove(&task);
-        }
-        if self.anon_regions.get(&task).is_some_and(RangeSet::is_empty) {
-            self.anon_regions.remove(&task);
+    /// Where the anonymous page at `va` stands for `task`: held, taken by a
+    /// release in flight, or neither.
+    ///
+    /// The anonymous user-fault resolver asks this to decide whether a fault
+    /// is demand-paged backing (back one zeroed page and resume), one to hold
+    /// off until the release ends, or a genuine wild access (terminate, fail
+    /// closed).
+    #[must_use]
+    pub fn anon_page(&self, task: ProcessId, va: u64) -> AnonPage {
+        let Some(holding) = self.anon_regions.get(&task) else {
+            return AnonPage::Unheld;
+        };
+        if holding.pages.contains(va) {
+            AnonPage::Held
+        } else if holding.releasing.covering(va).is_some() {
+            AnonPage::Releasing
+        } else {
+            AnonPage::Unheld
         }
     }
 
@@ -3069,7 +3820,7 @@ impl AddressSpaceRegistry {
         let anon_end = self
             .anon_regions
             .get(&task)
-            .and_then(|regions| regions.ending_at_or_below(va))
+            .and_then(|holding| holding.pages.ending_at_or_below(va))
             .map(|held| held.end);
         let stack_top = self
             .stack_span(thread)
@@ -3085,23 +3836,32 @@ impl AddressSpaceRegistry {
     /// # Errors
     ///
     /// [`Errno::LimitExceeded`] when the table, its promises included, is at
-    /// the bound.
+    /// the bound, and [`Errno::OutOfMemory`] when a first table cannot be
+    /// allocated.
     fn promise_fd(&mut self, task: ProcessId) -> Result<(), Errno> {
         let limit = self.open_files_limit(task);
-        let table = self.open_files.entry(task).or_default();
-        let held = u64::try_from(table.by_fd.len()).map_err(|_| Errno::OutOfRange)?;
-        if held.saturating_add(table.promised) >= limit {
-            return Err(Errno::LimitExceeded);
-        }
-        table.promised += 1;
-        Ok(())
+        let promise = |table: &mut OpenFileTable, ()| {
+            let held = u64::try_from(table.by_fd.len()).map_err(|_| Errno::OutOfRange)?;
+            if held.saturating_add(table.promised) >= limit {
+                return Err(Errno::LimitExceeded);
+            }
+            table.promised += 1;
+            Ok(())
+        };
+        file_into(
+            &mut self.open_files,
+            task,
+            (),
+            |_, ()| Errno::OutOfMemory,
+            promise,
+        )
     }
 
     /// Record what an `fs_open` reached, with the `flags` it was opened
     /// with, in the descriptor promised to `task`, answering its number (the
     /// lowest free, at or above [`STD_STREAM_COUNT`]). The promise already
-    /// stood against the bound, so only the number space running out refuses
-    /// it.
+    /// stood against the bound, so only the number space running out, or no
+    /// memory to record it, refuses it.
     ///
     /// Called after the secured VFS resolved, authorised and pinned the node
     /// under the caller's real credentials, so this records an already-checked
@@ -3110,7 +3870,8 @@ impl AddressSpaceRegistry {
     /// # Errors
     ///
     /// A [`Refused`] holding the opened node: [`Errno::OutOfRange`] when the
-    /// task holds every descriptor number below [`FD_CWD`], and
+    /// task holds every descriptor number below [`FD_CWD`],
+    /// [`Errno::OutOfMemory`] when the descriptor cannot be recorded, and
     /// [`Errno::NotFound`] for a task whose table is gone.
     fn keep_fd(
         &mut self,
@@ -3120,21 +3881,19 @@ impl AddressSpaceRegistry {
     ) -> Result<u32, Refused> {
         let backing = OpenBacking::opened(opened);
         let Some(table) = self.open_files.get_mut(&task) else {
-            return Err(Refused {
-                errno: Errno::NotFound,
-                _backing: backing,
-            });
+            return Err(Refused::backing(Errno::NotFound, backing));
         };
         table.promised -= 1;
+        let file = match OpenFile::new(backing, flags) {
+            Ok(file) => file,
+            Err(backing) => return Err(Refused::backing(Errno::OutOfMemory, backing)),
+        };
         match table.alloc_fds::<1>(u64::MAX) {
             Ok([fd]) => {
-                table.record(fd, OpenFile::new(backing, flags));
+                table.record(fd, file);
                 Ok(fd)
             }
-            Err(errno) => Err(Refused {
-                errno,
-                _backing: backing,
-            }),
+            Err(errno) => Err(Refused::file(errno, file)),
         }
     }
 
@@ -3159,27 +3918,34 @@ impl AddressSpaceRegistry {
     /// # Errors
     ///
     /// A [`Refused`] holding the backing: [`Errno::LimitExceeded`] at the
-    /// task's `open-files` soft bound, and [`Errno::OutOfRange`] when the
-    /// numbers below [`FD_CWD`] run out.
+    /// task's `open-files` soft bound, [`Errno::OutOfRange`] when the numbers
+    /// below [`FD_CWD`] run out, and [`Errno::OutOfMemory`] when the
+    /// descriptor cannot be recorded.
     pub fn open_resource(
         &mut self,
         task: ProcessId,
         backing: ResourceBacking,
         flags: OpenFlags,
     ) -> Result<u32, Refused> {
-        let backing = OpenBacking::Resource(backing);
+        let file = match OpenFile::new(OpenBacking::Resource(backing), flags) {
+            Ok(file) => file,
+            Err(backing) => return Err(Refused::backing(Errno::OutOfMemory, backing)),
+        };
         let limit = self.open_files_limit(task);
-        let table = self.open_files.entry(task).or_default();
-        match table.alloc_fds::<1>(limit) {
+        let keep = |table: &mut OpenFileTable, file| match table.alloc_fds::<1>(limit) {
             Ok([fd]) => {
-                table.record(fd, OpenFile::new(backing, flags));
+                table.record(fd, file);
                 Ok(fd)
             }
-            Err(errno) => Err(Refused {
-                errno,
-                _backing: backing,
-            }),
-        }
+            Err(errno) => Err(Refused::file(errno, file)),
+        };
+        file_into(
+            &mut self.open_files,
+            task,
+            file,
+            |_, file| Refused::file(Errno::OutOfMemory, file),
+            keep,
+        )
     }
 
     /// The `open-files` soft bound `task`'s table is held to.
@@ -3196,22 +3962,22 @@ impl AddressSpaceRegistry {
         })
     }
 
-    /// Mint a one-shot file delegation **to** `recipient`, returning the
+    /// Mint a one-shot delegation of `what` **to** `recipient`, returning the
     /// unforgeable handle the grantor forwards in-band
     /// (`fd_grant`, `plans/CAPABILITY_USE.md` CU6).
     ///
     /// Called by the `fd_grant` handler *after* it has resolved the
-    /// grantor's own descriptor and frozen the grantor's identity into
-    /// `file`, so this records an already-checked delegation; it grants no
-    /// authority of its own. The handle follows the [`Self::mint_grant`]
-    /// discipline — idempotent (re-granting a delegation still pending
-    /// returns the pending handle rather than appending a duplicate) and
-    /// meaningful only when presented by `recipient` itself
+    /// grantor's own descriptor and, for a file, frozen the grantor's
+    /// identity into `what`, so this records an already-checked delegation;
+    /// it grants no authority of its own. The handle follows the
+    /// [`Self::mint_grant`] discipline — idempotent (re-granting a delegation
+    /// still pending returns the pending handle rather than appending a
+    /// duplicate) and meaningful only when presented by `recipient` itself
     /// ([`Self::redeem_fd_delegation`] is keyed by the kernel-trusted
     /// caller id, so another task presenting the same numeric value
-    /// resolves to nothing). `file` is cloned only when a fresh delegation
-    /// is recorded, so nothing the caller hands in is released under this
-    /// registry's lock.
+    /// resolves to nothing). `what` is cloned, never consumed, and the
+    /// caller holds it throughout, so a refusal releases nothing under this
+    /// registry's lock — neither a node's pin nor a pipe end's last reference.
     ///
     /// `instance` is the process instance the grantor named, recorded so
     /// redemption admits that process and no later holder of `recipient`.
@@ -3222,35 +3988,53 @@ impl AddressSpaceRegistry {
     /// # Errors
     ///
     /// [`Errno::LimitExceeded`] for a fresh delegation once `grantor` has
-    /// [`tairix_abi::FD_GRANT_PENDING_MAX`] pending to `recipient`; those
-    /// stay redeemable.
+    /// [`tairix_abi::FD_GRANT_PENDING_MAX`] pending to `recipient`, or for a
+    /// fresh pipe end once it has its `open-files` soft bound of them in
+    /// flight; those stay redeemable. [`Errno::OutOfMemory`] when a fresh one
+    /// cannot be recorded, and [`Errno::OutOfRange`] once `recipient`'s
+    /// handles are spent; nothing is minted either way.
     pub fn mint_fd_delegation(
         &mut self,
         recipient: ProcessId,
         instance: ProcId,
         grantor: ProcessId,
         grantor_instance: ProcId,
-        file: &NodeHandle,
+        what: &HandedOn,
         flags: OpenFlags,
     ) -> Result<u64, Errno> {
-        let entry = self.fd_delegations.entry(recipient).or_default();
-        if let Some(handle) = existing_handle(&entry.by_handle, |held| {
-            held.between(instance, grantor, grantor_instance) && held.conveys.delegates(file, flags)
-        }) {
+        let pending = self.fd_delegations.get(&recipient).and_then(|entry| {
+            existing_handle(&entry.by_handle, |held| {
+                held.between(instance, grantor, grantor_instance)
+                    && held.conveys.delegates(what, flags)
+            })
+        });
+        if let Some(handle) = pending {
             return Ok(handle);
         }
-        Self::mint_pending(
-            entry,
-            PendingFdDelegation {
-                conveys: Conveyed::File {
-                    handle: file.clone(),
+        if matches!(what, HandedOn::Pipe(_)) && !self.may_send_pipe_end(grantor) {
+            return Err(Errno::LimitExceeded);
+        }
+        self.mint_pending(
+            recipient,
+            PendingFdDelegation::new(
+                Conveyed::Descriptor {
+                    what: what.clone(),
                     flags,
                 },
-                recipient: instance,
+                instance,
                 grantor,
                 grantor_instance,
-            },
+            ),
         )
+    }
+
+    /// Whether `grantor` may put another pipe end in flight: fewer than its
+    /// `open-files` soft bound wait in every recipient's table together, so a
+    /// pipe kept alive by a delegation alone is still charged to the process
+    /// that sent it.
+    fn may_send_pipe_end(&self, grantor: ProcessId) -> bool {
+        let in_flight = self.sent.get(&grantor).map_or(0, |sent| sent.pipe_ends);
+        in_flight < self.open_files_limit(grantor)
     }
 
     /// Mint `recipient` a one-shot handle telling `location`, where one of
@@ -3272,28 +4056,52 @@ impl AddressSpaceRegistry {
         grantor_instance: ProcId,
         location: FileLocation,
     ) -> Result<u64, Errno> {
-        let entry = self.fd_delegations.entry(recipient).or_default();
-        Self::mint_pending(
-            entry,
-            PendingFdDelegation {
-                conveys: Conveyed::Location(location),
-                recipient: instance,
+        self.mint_pending(
+            recipient,
+            PendingFdDelegation::new(
+                Conveyed::Location(location),
+                instance,
                 grantor,
                 grantor_instance,
-            },
+            ),
         )
     }
 
-    /// Record `pending` in a recipient's table, within the per-grantor bound
-    /// that keeps a grantor repeating one call from growing it without limit.
+    /// Record `pending` in `recipient`'s table, within the per-grantor bound
+    /// that keeps a grantor repeating one call from growing it without limit,
+    /// and count it against its grantor; a recipient with no table is given
+    /// one only with the delegation in it.
     ///
-    /// A file delegation still pending conveys exactly one right, "open this
-    /// node as this frozen identity", so its caller hands back an identical
-    /// pending one rather than mint another: descriptors here carry no
-    /// position (every read names its own offset), so a second would be
-    /// indistinguishable from the first. Once redeemed the entry is consumed,
-    /// so a later grant of the same file legitimately mints afresh.
+    /// A delegation still pending conveys exactly one right, "open this node
+    /// as this frozen identity" or "hold this end of this pipe", so its
+    /// caller hands back an identical pending one rather than mint another:
+    /// neither carries a position (every file read names its own offset, and a
+    /// pipe has none), so a second would be indistinguishable from the first.
+    /// Once redeemed the entry is consumed, so a later grant of the same
+    /// descriptor legitimately mints afresh.
     fn mint_pending(
+        &mut self,
+        recipient: ProcessId,
+        pending: PendingFdDelegation,
+    ) -> Result<u64, Errno> {
+        let (grantor, pipe_end) = (pending.grantor, pending.conveys.is_pipe_end());
+        // Room to count it is made first, so every delegation filed is counted.
+        self.sent.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+        let handle = file_into(
+            &mut self.fd_delegations,
+            recipient,
+            pending,
+            |_, _| Errno::OutOfMemory,
+            Self::record_pending,
+        )?;
+        let counted = Sent::file(&mut self.sent, grantor, pipe_end);
+        debug_assert!(counted.is_ok(), "a reserved count was refused");
+        Ok(handle)
+    }
+
+    /// File `pending` in `entry` under a fresh handle, refusing it once its
+    /// grantor holds the bound there.
+    fn record_pending(
         entry: &mut TaskFdDelegations,
         pending: PendingFdDelegation,
     ) -> Result<u64, Errno> {
@@ -3305,26 +4113,22 @@ impl AddressSpaceRegistry {
         if charged >= tairix_abi::FD_GRANT_PENDING_MAX {
             return Err(Errno::LimitExceeded);
         }
-        // Handle 0 is the reserved invalid value; the first minted handle
-        // is 1. `next_handle` only ever increases within a task's life.
-        entry.next_handle += 1;
-        let handle = entry.next_handle;
-        entry.by_handle.insert(handle, pending);
-        Ok(handle)
+        let boxed = Box::try_new(pending).map_err(|_| Errno::OutOfMemory)?;
+        mint_handle(&mut entry.next_handle, &mut entry.by_handle, boxed)
     }
 
-    /// Redeem the one-shot file delegation `handle` minted to `task`,
-    /// installing it into `task`'s open table and returning the fresh
-    /// descriptor number (`fd_redeem`).
+    /// Redeem the one-shot delegation `handle` minted to `task`, installing
+    /// the file or pipe end it conveys into `task`'s open table and returning
+    /// the fresh descriptor number (`fd_redeem`).
     ///
     /// One-shot with fail-closed atomicity: the delegation is consumed
     /// only when the descriptor allocation succeeds, so a refused
     /// redemption (the `open-files` bound, or descriptor-space exhaustion)
     /// leaves the grant intact for a retry after the holder closes
     /// descriptors, and a redeemed handle can never be redeemed twice. The
-    /// delegated node moves into the new descriptor, so nothing is released
-    /// under this registry's lock. `task` and `instance` are both the
-    /// kernel-trusted caller identity, never caller-supplied values.
+    /// delegated node or pipe end moves into the new descriptor, so nothing
+    /// is released under this registry's lock. `task` and `instance` are
+    /// both the kernel-trusted caller identity, never caller-supplied values.
     ///
     /// `instance` is what makes the delegation land on the process the
     /// grantor chose: a task id is redrawn once its task is gone, so a
@@ -3346,8 +4150,10 @@ impl AddressSpaceRegistry {
     /// * [`Errno::LimitExceeded`] — `task` holds its `open-files` soft bound
     ///   of descriptors; the grant stays pending.
     /// * [`Errno::OutOfRange`] — descriptor-space exhaustion, or a handle
-    ///   telling a location rather than delegating a file; the grant stays
-    ///   pending.
+    ///   telling a location rather than delegating a descriptor; the grant
+    ///   stays pending.
+    /// * [`Errno::OutOfMemory`] — the descriptor cannot be recorded; the
+    ///   grant stays pending.
     pub fn redeem_fd_delegation(
         &mut self,
         task: ProcessId,
@@ -3355,30 +4161,41 @@ impl AddressSpaceRegistry {
         handle: u64,
         from: Option<ProcId>,
     ) -> Result<u32, Errno> {
-        let Conveyed::File { flags, .. } = self.pending_for(task, instance, handle, from)?.conveys
-        else {
+        if matches!(
+            self.pending_for(task, instance, handle, from)?.conveys,
+            Conveyed::Location(_)
+        ) {
             return Err(Errno::OutOfRange);
-        };
+        }
+        // Had before anything is consumed, so a heap that refuses it leaves
+        // the delegation pending.
+        let description = Description::fresh()?;
         let limit = self.open_files_limit(task);
-        let [fd] = self
-            .open_files
-            .entry(task)
-            .or_default()
-            .alloc_fds::<1>(limit)?;
-        // The entry provably exists — it was read above under the same
-        // exclusive borrow — and conveys a file, so this cannot miss.
-        let Some(PendingFdDelegation {
-            conveys: Conveyed::File { handle: node, .. },
+        let Self {
+            open_files,
+            fd_delegations,
+            sent,
             ..
-        }) = self.consume_pending(task, handle)
-        else {
-            return Err(Errno::NotFound);
+        } = self;
+        let install = |table: &mut OpenFileTable, description| {
+            let [fd] = table.alloc_fds::<1>(limit)?;
+            // The entry provably exists — it was read above under the same
+            // exclusive borrow — and conveys a descriptor, so this cannot miss.
+            let Some(file) = Self::consume_pending(fd_delegations, sent, task, handle)
+                .and_then(|pending| pending.conveys.into_open_file(description))
+            else {
+                return Err(Errno::NotFound);
+            };
+            table.record(fd, file);
+            Ok(fd)
         };
-        self.open_files
-            .entry(task)
-            .or_default()
-            .record(fd, OpenFile::new(OpenBacking::Node(node), flags));
-        Ok(fd)
+        file_into(
+            open_files,
+            task,
+            description,
+            |_, _| Errno::OutOfMemory,
+            install,
+        )
     }
 
     /// Take the location `handle` tells, minted to `task` by `from`
@@ -3389,8 +4206,8 @@ impl AddressSpaceRegistry {
     ///
     /// * [`Errno::NotFound`] — as [`Self::redeem_fd_delegation`]; the
     ///   location stays pending.
-    /// * [`Errno::OutOfRange`] — a file delegation rather than a location;
-    ///   it stays pending.
+    /// * [`Errno::OutOfRange`] — a delegated descriptor rather than a
+    ///   location; it stays pending.
     /// * [`Errno::BufferTooSmall`] — `cap` is shorter than the path; it stays
     ///   pending.
     /// * [`Errno::PermissionDenied`] — the descriptor reaches its file as
@@ -3411,13 +4228,18 @@ impl AddressSpaceRegistry {
         };
         if location.uid != uid {
             // A location holds only its path, which is released at once.
-            drop(self.consume_pending(task, handle));
+            drop(Self::consume_pending(
+                &mut self.fd_delegations,
+                &mut self.sent,
+                task,
+                handle,
+            ));
             return Err(Errno::PermissionDenied);
         }
         if location.path.len() > cap {
             return Err(Errno::BufferTooSmall);
         }
-        match self.consume_pending(task, handle) {
+        match Self::consume_pending(&mut self.fd_delegations, &mut self.sent, task, handle) {
             Some(PendingFdDelegation {
                 conveys: Conveyed::Location(location),
                 ..
@@ -3439,6 +4261,7 @@ impl AddressSpaceRegistry {
         self.fd_delegations
             .get(&task)
             .and_then(|entry| entry.by_handle.get(&handle))
+            .map(Box::as_ref)
             .filter(|pending| {
                 pending.recipient == instance
                     && from.is_none_or(|grantor| pending.grantor_instance == grantor)
@@ -3446,12 +4269,18 @@ impl AddressSpaceRegistry {
             .ok_or(Errno::NotFound)
     }
 
-    /// Remove the delegation `handle` minted to `task`, handing it back.
-    fn consume_pending(&mut self, task: ProcessId, handle: u64) -> Option<PendingFdDelegation> {
-        self.fd_delegations
-            .get_mut(&task)?
-            .by_handle
-            .remove(&handle)
+    /// Remove the delegation `handle` minted to `task`, counted off its
+    /// grantor, handing it back; over those two records alone, so a caller
+    /// holding another of the registry's records can consume one.
+    fn consume_pending(
+        delegations: &mut ByProcess<TaskFdDelegations>,
+        sent: &mut ByProcess<Sent>,
+        task: ProcessId,
+        handle: u64,
+    ) -> Option<PendingFdDelegation> {
+        let pending = *delegations.get_mut(&task)?.by_handle.remove(&handle)?;
+        Sent::leave(sent, &pending);
+        Some(pending)
     }
 
     /// Create a pipe for `task`, allocating a read-end and a write-end
@@ -3459,29 +4288,24 @@ impl AddressSpaceRegistry {
     /// (`plans/SPAWN.md` SP10).
     ///
     /// Both descriptors draw from the same allocator and bound as
-    /// [`FdPromise`] / [`Self::open_resource`]. Both numbers are
-    /// found before the pipe is made, so a refusal makes nothing. The `task`
-    /// argument is the kernel-trusted caller id.
+    /// [`FdPromise`] / [`Self::open_resource`]. The pipe and both its
+    /// descriptions are made before either number is taken, so a refusal
+    /// records nothing. The `task` argument is the kernel-trusted caller id.
     ///
     /// # Errors
     ///
     /// [`Errno::LimitExceeded`] when two more descriptors would carry `task`
     /// past its `open-files` soft bound; [`Errno::OutOfRange`] on genuine
-    /// descriptor-space exhaustion (fail closed).
+    /// descriptor-space exhaustion (fail closed); [`Errno::OutOfMemory`] when
+    /// the pipe or its descriptors cannot be recorded.
     pub fn open_pipe(&mut self, task: ProcessId) -> Result<(u32, u32), Errno> {
-        let limit = self.open_files_limit(task);
-        let table = self.open_files.entry(task).or_default();
-        let [read_fd, write_fd] = table.alloc_fds::<2>(limit)?;
-        let (read_end, write_end) = crate::pipe::Pipe::create();
-        table.record(
-            read_fd,
-            OpenFile::new(OpenBacking::Pipe(read_end), OpenFlags::READ),
-        );
-        table.record(
-            write_fd,
-            OpenFile::new(OpenBacking::Pipe(write_end), OpenFlags::WRITE),
-        );
-        Ok((read_fd, write_fd))
+        let (read_end, write_end) = crate::pipe::Pipe::create()?;
+        let read = OpenFile::new(OpenBacking::Pipe(read_end), OpenFlags::READ);
+        let write = OpenFile::new(OpenBacking::Pipe(write_end), OpenFlags::WRITE);
+        let (Ok(read), Ok(write)) = (read, write) else {
+            return Err(Errno::OutOfMemory);
+        };
+        self.open_pair(task, [read, write])
     }
 
     /// Create a pseudo-terminal of geometry `size` for `task`, allocating a
@@ -3492,9 +4316,9 @@ impl AddressSpaceRegistry {
     /// keystrokes and reads the slave's output, and the slave both reads
     /// input and writes program output (so the one slave descriptor can be
     /// wired behind a child's fd 0, 1, and 2). Both draw from the allocator
-    /// and bound [`Self::open_pipe`] uses, and both numbers are found before
-    /// the pty is made, so a refusal makes nothing. The `task` argument is
-    /// the kernel-trusted caller id.
+    /// and bound [`Self::open_pipe`] uses, and the pty and both descriptions
+    /// are made before either number is taken, so a refusal records nothing.
+    /// The `task` argument is the kernel-trusted caller id.
     ///
     /// # Errors
     ///
@@ -3504,14 +4328,35 @@ impl AddressSpaceRegistry {
         task: ProcessId,
         size: tairix_abi::TerminalSize,
     ) -> Result<(u32, u32), Errno> {
-        let limit = self.open_files_limit(task);
-        let table = self.open_files.entry(task).or_default();
-        let [master_fd, slave_fd] = table.alloc_fds::<2>(limit)?;
-        let (master, slave) = crate::pty::Pty::create(size);
+        let (master, slave) = crate::pty::Pty::create(size)?;
         let rw = OpenFlags::READ.union(OpenFlags::WRITE);
-        table.record(master_fd, OpenFile::new(OpenBacking::PtyMaster(master), rw));
-        table.record(slave_fd, OpenFile::new(OpenBacking::PtySlave(slave), rw));
-        Ok((master_fd, slave_fd))
+        let master = OpenFile::new(OpenBacking::PtyMaster(master), rw);
+        let slave = OpenFile::new(OpenBacking::PtySlave(slave), rw);
+        let (Ok(master), Ok(slave)) = (master, slave) else {
+            return Err(Errno::OutOfMemory);
+        };
+        self.open_pair(task, [master, slave])
+    }
+
+    /// Record the fresh pair `files` in `task`'s table under its two lowest
+    /// free numbers, answered in order. Reachable by no one yet, they wake
+    /// nobody and release no lock when a refusal lets them go under this
+    /// registry's lock.
+    fn open_pair(&mut self, task: ProcessId, files: [OpenFile; 2]) -> Result<(u32, u32), Errno> {
+        let limit = self.open_files_limit(task);
+        let pair = |table: &mut OpenFileTable, [first, second]: [OpenFile; 2]| {
+            let [first_fd, second_fd] = table.alloc_fds::<2>(limit)?;
+            table.record(first_fd, first);
+            table.record(second_fd, second);
+            Ok((first_fd, second_fd))
+        };
+        file_into(
+            &mut self.open_files,
+            task,
+            files,
+            |_, _| Errno::OutOfMemory,
+            pair,
+        )
     }
 
     /// Install `file` as `task`'s **standard-stream** open entry at `fd`
@@ -3527,17 +4372,31 @@ impl AddressSpaceRegistry {
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfRange`] for an `fd` at or above [`STD_STREAM_COUNT`].
+    /// A [`Refused`] holding `file`, released once the registry's lock is:
+    /// [`Errno::OutOfRange`] for an `fd` at or above [`STD_STREAM_COUNT`], and
+    /// [`Errno::OutOfMemory`] when it cannot be recorded.
     pub fn install_std_entry(
         &mut self,
         task: ProcessId,
         fd: u32,
         file: OpenFile,
-    ) -> Result<Option<OpenFile>, Errno> {
+    ) -> Result<Option<OpenFile>, Refused> {
         if fd as usize >= STD_STREAM_COUNT {
-            return Err(Errno::OutOfRange);
+            return Err(Refused::file(Errno::OutOfRange, file));
         }
-        Ok(self.open_files.entry(task).or_default().record(fd, file))
+        let install = |table: &mut OpenFileTable, file| {
+            if table.by_fd.try_reserve(1).is_err() {
+                return Err(Refused::file(Errno::OutOfMemory, file));
+            }
+            Ok(table.record(fd, file))
+        };
+        file_into(
+            &mut self.open_files,
+            task,
+            file,
+            |_, file| Refused::file(Errno::OutOfMemory, file),
+            install,
+        )
     }
 
     /// Resolve `task`'s open descriptor `fd` to its recorded backing and
@@ -3836,7 +4695,7 @@ mod tests {
         space
             .map(page(n), Frame(frame), MapFlags::READ | MapFlags::USER)
             .expect("mapped");
-        Box::new(space.freeze())
+        Box::new(space.freeze().unwrap())
     }
 
     #[test]
@@ -3846,6 +4705,32 @@ mod tests {
         assert_eq!(reg.len(), 0);
         assert!(!reg.contains(ProcessId(1)));
         assert!(reg.resolve(ProcessId(1)).is_none());
+    }
+
+    /// Every record keyed by an id users shape — which processes and threads
+    /// stay alive, which nodes have drivers — is an ordered map, never a hash
+    /// they could aim collisions at.
+    #[test]
+    fn records_keyed_by_ids_users_shape_are_ordered() {
+        fn ordered<K: Ord, V>(_: &OrderedMap<K, V>) {}
+        let reg = AddressSpaceRegistry::new();
+        ordered(&reg.tasks);
+        ordered(&reg.streams);
+        ordered(&reg.limits);
+        ordered(&reg.grants);
+        ordered(&reg.live_spaces);
+        ordered(&reg.loaded_nodes);
+        ordered(&reg.node_drivers);
+        ordered(&reg.open_files);
+        ordered(&reg.mapped_aspace_bytes);
+        ordered(&reg.fs);
+        ordered(&reg.file_regions);
+        ordered(&reg.anon_regions);
+        ordered(&reg.stack_spans);
+        ordered(&reg.stack_committed);
+        ordered(&reg.fd_delegations);
+        ordered(&reg.sent);
+        ordered(&reg.load_bases);
     }
 
     #[test]
@@ -3894,7 +4779,9 @@ mod tests {
 
         // Re-freeze: a fresh snapshot that now also maps page 2 (the grown
         // heap). `reregister_space` reports the task was present.
-        assert!(reg.reregister_space(ProcessId(5), user_space(2, 200)));
+        assert!(reg
+            .reregister_space(ProcessId(5), user_space(2, 200))
+            .is_some());
 
         // The copy path now sees the newly-mapped page through the same task.
         let (space, physmap) = reg.resolve(ProcessId(5)).expect("still registered");
@@ -3997,7 +4884,9 @@ mod tests {
             reg.resolve(ProcessId(9)).is_none(),
             "no copy reaches a frame the snapshot still names"
         );
-        assert!(reg.reregister_space(ProcessId(9), frozen_space(2, 2)));
+        assert!(reg
+            .reregister_space(ProcessId(9), frozen_space(2, 2))
+            .is_some());
         assert!(
             reg.resolve(ProcessId(9)).is_some(),
             "a fresh snapshot resolves"
@@ -4009,12 +4898,34 @@ mod tests {
         );
     }
 
+    /// A suspended snapshot keeps taking deltas but reports none absorbed, so
+    /// every publisher re-freezes it until one succeeds, rather than leaving
+    /// it suspended once the first re-freeze is refused.
+    #[test]
+    fn a_suspended_snapshot_reports_every_delta_unabsorbed_until_replaced() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.register(ProcessId(9), frozen_space(2, 2), sim())
+            .expect("registration succeeds");
+        assert!(reg.note_faulted_page(ProcessId(9), page(3), Some((Frame(3), MapFlags::USER))));
+        assert!(reg.suspend(ProcessId(9)));
+        assert!(reg.is_suspended(ProcessId(9)));
+        assert!(!reg.note_faulted_page(ProcessId(9), page(4), Some((Frame(4), MapFlags::USER))));
+        assert!(!reg.retire_region_pages(ProcessId(9), page(3).start().as_u64(), 1));
+        assert!(reg
+            .reregister_space(ProcessId(9), frozen_space(2, 2))
+            .is_some());
+        assert!(!reg.is_suspended(ProcessId(9)));
+        assert!(reg.note_faulted_page(ProcessId(9), page(4), Some((Frame(4), MapFlags::USER))));
+    }
+
     #[test]
     fn reregister_space_of_an_unregistered_task_is_a_no_op() {
         let mut reg = AddressSpaceRegistry::new();
         // A task with no entry is never created by a re-freeze (a kernel task
         // reaches no user copy path); the call fails closed.
-        assert!(!reg.reregister_space(ProcessId(9), user_space(1, 1)));
+        assert!(reg
+            .reregister_space(ProcessId(9), user_space(1, 1))
+            .is_none());
         assert!(!reg.contains(ProcessId(9)));
         assert!(reg.resolve(ProcessId(9)).is_none());
     }
@@ -4200,7 +5111,8 @@ mod tests {
     #[test]
     fn set_streams_then_resolve_returns_the_table() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_streams(ProcessId(2), DescriptorTable::standard());
+        reg.set_streams(ProcessId(2), DescriptorTable::standard())
+            .unwrap();
         assert_eq!(reg.streams(ProcessId(2)), DescriptorTable::standard());
         // A different task is unaffected and stays fail-closed.
         assert_eq!(reg.streams(ProcessId(3)), DescriptorTable::closed());
@@ -4209,7 +5121,8 @@ mod tests {
     #[test]
     fn withdraw_clears_the_stream_table() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_streams(ProcessId(4), DescriptorTable::standard());
+        reg.set_streams(ProcessId(4), DescriptorTable::standard())
+            .unwrap();
         // Withdrawing a task with streams but no address space still
         // reports the slot was present and clears the table.
         assert!(reg.withdraw(ProcessId(4)).was_present());
@@ -4225,7 +5138,8 @@ mod tests {
     #[test]
     fn stale_task_entry_names_a_populated_map_then_withdraw_clears_it() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_streams(ProcessId(8), DescriptorTable::standard());
+        reg.set_streams(ProcessId(8), DescriptorTable::standard())
+            .unwrap();
         assert_eq!(reg.stale_task_entry(ProcessId(8)), Some("streams"));
         // Reclaim must leave nothing behind: this is exactly the
         // post-condition `withdraw` asserts, exercised explicitly.
@@ -4448,8 +5362,11 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         assert!(reg
             .set_cwd(ProcessId(2), dir_at(&volume, 1, "/Users"))
+            .unwrap()
             .is_none());
-        let replaced = reg.set_cwd(ProcessId(2), dir_at(&volume, 2, "/Users/bob"));
+        let replaced = reg
+            .set_cwd(ProcessId(2), dir_at(&volume, 2, "/Users/bob"))
+            .unwrap();
         assert_eq!(
             replaced.as_ref().map(label).as_deref(),
             Some("/Users"),
@@ -4464,7 +5381,8 @@ mod tests {
     fn withdraw_clears_the_working_directory() {
         let volume = crate::test_bundle::test_volume();
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_cwd(ProcessId(4), dir_at(&volume, 1, "/Storage/data"));
+        reg.set_cwd(ProcessId(4), dir_at(&volume, 1, "/Storage/data"))
+            .unwrap();
         // Withdrawing a task with a cwd but no address space still reports
         // the slot was present and resets it to the root.
         assert!(reg.withdraw(ProcessId(4)).was_present());
@@ -4475,11 +5393,15 @@ mod tests {
     fn a_working_directory_holds_its_node_through_its_pin_alone() {
         let volume = crate::test_bundle::test_volume();
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_cwd(ProcessId(2), dir_at(&volume, 7, "/Users/bob"));
+        reg.set_cwd(ProcessId(2), dir_at(&volume, 7, "/Users/bob"))
+            .unwrap();
         assert_eq!(volume.outstanding(), 1);
         // Reading it, and a child inheriting it, share the one pin.
         let read = reg.cwd(ProcessId(2));
-        assert!(reg.inherit_fs(ProcessId(2), ProcessId(5), None).is_none());
+        assert!(reg
+            .inherit_fs(ProcessId(2), ProcessId(5), None)
+            .unwrap()
+            .is_none());
         let inherited = reg.cwd(ProcessId(5));
         assert_eq!(volume.outstanding(), 1, "a clone pins nothing new");
         let (Cwd::Dir(parent), Cwd::Dir(child)) = (&read, &inherited) else {
@@ -4510,14 +5432,21 @@ mod tests {
     fn set_umask_answers_the_mask_it_replaces_and_keeps_the_directory() {
         let volume = crate::test_bundle::test_volume();
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_cwd(ProcessId(2), dir_at(&volume, 1, "/Users/bob"));
-        assert_eq!(reg.set_umask(ProcessId(2), 0o077), FS_INITIAL_UMASK);
-        assert_eq!(reg.set_umask(ProcessId(2), 0o027), 0o077);
+        reg.set_cwd(ProcessId(2), dir_at(&volume, 1, "/Users/bob"))
+            .unwrap();
+        assert_eq!(
+            reg.set_umask(ProcessId(2), 0o077).unwrap(),
+            FS_INITIAL_UMASK
+        );
+        assert_eq!(reg.set_umask(ProcessId(2), 0o027).unwrap(), 0o077);
         assert_eq!(reg.umask(ProcessId(2)), 0o027);
         assert_eq!(label(&reg.cwd(ProcessId(2))), "/Users/bob");
         // A mask set first leaves the directory at the root, and another
         // process keeps the initial mask.
-        assert_eq!(reg.set_umask(ProcessId(3), 0o007), FS_INITIAL_UMASK);
+        assert_eq!(
+            reg.set_umask(ProcessId(3), 0o007).unwrap(),
+            FS_INITIAL_UMASK
+        );
         assert!(matches!(reg.cwd(ProcessId(3)), Cwd::Root));
         assert_eq!(reg.umask(ProcessId(4)), FS_INITIAL_UMASK);
     }
@@ -4526,9 +5455,13 @@ mod tests {
     fn a_child_inherits_its_parents_directory_and_umask() {
         let volume = crate::test_bundle::test_volume();
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_cwd(ProcessId(2), dir_at(&volume, 1, "/Users/bob"));
-        reg.set_umask(ProcessId(2), 0o077);
-        assert!(reg.inherit_fs(ProcessId(2), ProcessId(5), None).is_none());
+        reg.set_cwd(ProcessId(2), dir_at(&volume, 1, "/Users/bob"))
+            .unwrap();
+        reg.set_umask(ProcessId(2), 0o077).unwrap();
+        assert!(reg
+            .inherit_fs(ProcessId(2), ProcessId(5), None)
+            .unwrap()
+            .is_none());
         assert_eq!(label(&reg.cwd(ProcessId(5))), "/Users/bob");
         assert_eq!(reg.umask(ProcessId(5)), 0o077);
         // A directory the spawn names replaces the parent's; the mask is
@@ -4536,12 +5469,16 @@ mod tests {
         let named = dir_at(&volume, 2, "/Users/ada");
         assert!(reg
             .inherit_fs(ProcessId(2), ProcessId(7), Some(named))
+            .unwrap()
             .is_none());
         assert_eq!(label(&reg.cwd(ProcessId(7))), "/Users/ada");
         assert_eq!(reg.umask(ProcessId(7)), 0o077);
         // A parent with nothing established hands down the root and the
         // initial mask.
-        assert!(reg.inherit_fs(ProcessId(8), ProcessId(6), None).is_none());
+        assert!(reg
+            .inherit_fs(ProcessId(8), ProcessId(6), None)
+            .unwrap()
+            .is_none());
         assert!(matches!(reg.cwd(ProcessId(6)), Cwd::Root));
         assert_eq!(reg.umask(ProcessId(6)), FS_INITIAL_UMASK);
     }
@@ -4549,7 +5486,7 @@ mod tests {
     #[test]
     fn withdraw_clears_the_umask() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_umask(ProcessId(4), 0o077);
+        reg.set_umask(ProcessId(4), 0o077).unwrap();
         assert_eq!(reg.stale_task_entry(ProcessId(4)), Some("fs"));
         assert!(reg.withdraw(ProcessId(4)).was_present());
         assert_eq!(reg.umask(ProcessId(4)), FS_INITIAL_UMASK);
@@ -4567,7 +5504,8 @@ mod tests {
     fn set_limit_updates_one_kind_and_leaves_the_rest_at_default() {
         let mut reg = AddressSpaceRegistry::new();
         let lo = ResourceLimit::new(4, 8).expect("well-formed");
-        reg.set_limit(ProcessId(2), LimitKind::Processes, lo);
+        reg.set_limit(ProcessId(2), LimitKind::Processes, lo)
+            .unwrap();
         let set = reg.limits(ProcessId(2));
         assert_eq!(set.get(LimitKind::Processes), lo);
         // Every other kind stays at the default policy.
@@ -4584,7 +5522,7 @@ mod tests {
             LimitKind::StackBytes,
             ResourceLimit::new(1024, 4096).expect("well-formed"),
         );
-        reg.set_limits(ProcessId(7), wanted);
+        reg.set_limits(ProcessId(7), wanted).unwrap();
         assert_eq!(reg.limits(ProcessId(7)), wanted);
     }
 
@@ -4600,7 +5538,8 @@ mod tests {
         // derived pinned bound rather than silently reverting to the
         // compile-time floor.
         let cap = ResourceLimit::new(4, 8).expect("well-formed");
-        reg.set_limit(ProcessId(9), LimitKind::Processes, cap);
+        reg.set_limit(ProcessId(9), LimitKind::Processes, cap)
+            .unwrap();
         assert_eq!(reg.limits(ProcessId(9)).get(LimitKind::Processes), cap);
         assert_eq!(
             reg.limits(ProcessId(9)).get(LimitKind::PinnedMemoryBytes),
@@ -4613,11 +5552,11 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         // Fresh tasks are unpinned — pinning is never inherited.
         assert!(!reg.is_pinned(ProcessId(1)));
-        reg.set_pinned(ProcessId(1));
+        reg.set_pinned(ProcessId(1)).unwrap();
         assert!(reg.is_pinned(ProcessId(1)));
         assert!(!reg.is_pinned(ProcessId(2)), "pin is per-task state");
         // Idempotent both ways.
-        reg.set_pinned(ProcessId(1));
+        reg.set_pinned(ProcessId(1)).unwrap();
         assert!(reg.is_pinned(ProcessId(1)));
         reg.clear_pinned(ProcessId(1));
         assert!(!reg.is_pinned(ProcessId(1)));
@@ -4625,7 +5564,7 @@ mod tests {
         assert!(!reg.is_pinned(ProcessId(1)));
         // Withdraw clears the mark, so a reused id starts unpinned and
         // the withdraw reports state was dropped.
-        reg.set_pinned(ProcessId(3));
+        reg.set_pinned(ProcessId(3)).unwrap();
         assert!(reg.withdraw(ProcessId(3)).was_present());
         assert!(!reg.is_pinned(ProcessId(3)));
     }
@@ -4641,7 +5580,7 @@ mod tests {
         // The first thread's initial commit joins the total with its span.
         let top = 0x8000_0000u64;
         let span = StackSpan::new(top - 16 * page, top - page, top).expect("well-formed span");
-        reg.set_stack_span(task, task.leader_task(), span);
+        reg.set_stack_span(task, task.leader_task(), span).unwrap();
         assert_eq!(reg.mapped_aspace_bytes(task), 4 * page);
         // A growth page is charged before it is committed, and committed once.
         reg.try_charge_aspace_bytes(task, page).expect("room");
@@ -4668,7 +5607,8 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         let task = ProcessId(4);
         let bound = ResourceLimit::new(4 * page, 4 * page).expect("well-formed");
-        reg.set_limit(task, LimitKind::AddressSpaceBytes, bound);
+        reg.set_limit(task, LimitKind::AddressSpaceBytes, bound)
+            .unwrap();
         reg.try_charge_aspace_bytes(task, 3 * page).expect("fits");
         assert_eq!(
             reg.try_charge_aspace_bytes(task, 2 * page),
@@ -4678,9 +5618,10 @@ mod tests {
         reg.try_charge_aspace_bytes(task, page)
             .expect("exactly at the bound");
         let pinned = ResourceLimit::new(page, page).expect("well-formed");
-        reg.set_limit(task, LimitKind::PinnedMemoryBytes, pinned);
+        reg.set_limit(task, LimitKind::PinnedMemoryBytes, pinned)
+            .unwrap();
         reg.credit_aspace_bytes(task, 4 * page);
-        reg.set_pinned(task);
+        reg.set_pinned(task).unwrap();
         reg.try_charge_aspace_bytes(task, page)
             .expect("within the pinned budget");
         assert_eq!(reg.try_charge_aspace_bytes(task, 1), Err(Errno::OutOfRange));
@@ -4689,12 +5630,14 @@ mod tests {
     #[test]
     fn pinned_total_aggregates_only_pinned_tasks() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.charge_aspace_bytes(ProcessId(1), 2 * PAGE_SIZE as u64);
-        reg.charge_aspace_bytes(ProcessId(2), 5 * PAGE_SIZE as u64);
+        reg.try_charge_aspace_bytes(ProcessId(1), 2 * PAGE_SIZE as u64)
+            .expect("recorded");
+        reg.try_charge_aspace_bytes(ProcessId(2), 5 * PAGE_SIZE as u64)
+            .expect("recorded");
         assert_eq!(reg.pinned_total_bytes(), 0, "nothing pinned yet");
-        reg.set_pinned(ProcessId(1));
+        reg.set_pinned(ProcessId(1)).unwrap();
         assert_eq!(reg.pinned_total_bytes(), 2 * PAGE_SIZE as u64);
-        reg.set_pinned(ProcessId(2));
+        reg.set_pinned(ProcessId(2)).unwrap();
         assert_eq!(reg.pinned_total_bytes(), 7 * PAGE_SIZE as u64);
         // Unpin and exit both drop out of the aggregate.
         reg.clear_pinned(ProcessId(2));
@@ -4710,7 +5653,8 @@ mod tests {
             ProcessId(4),
             LimitKind::Processes,
             ResourceLimit::new(1, 2).expect("well-formed"),
-        );
+        )
+        .unwrap();
         // Withdrawing a task with limits but no address space still reports
         // the slot was present and resets it to the default policy.
         assert!(reg.withdraw(ProcessId(4)).was_present());
@@ -4729,7 +5673,7 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         reg.register(ProcessId(11), user_space(1, 1), sim())
             .expect("registers");
-        reg.mint_grant(ProcessId(2), window());
+        reg.mint_grant(ProcessId(2), window()).unwrap();
         let handle = reg
             .delegate_grant(
                 ProcessId(2),
@@ -4746,7 +5690,7 @@ mod tests {
                 ProcessId(11),
                 window()
             ),
-            None,
+            Err(Errno::NotFound),
             "a donor holding nothing delegates nothing"
         );
         // Once withdrawn the task receives nothing, so no grant table is
@@ -4759,7 +5703,7 @@ mod tests {
                 ProcessId(11),
                 window()
             ),
-            None
+            Err(Errno::NotFound)
         );
         assert_eq!(reg.grant(ProcessId(11), 1), None);
         assert_eq!(
@@ -4769,7 +5713,7 @@ mod tests {
                 ProcessId(12),
                 window()
             ),
-            None
+            Err(Errno::NotFound)
         );
     }
 
@@ -4779,8 +5723,8 @@ mod tests {
     #[test]
     fn a_delegated_grant_resolves_only_for_its_own_grantor() {
         let mut reg = registry_with(&[11]);
-        let own = reg.mint_grant(ProcessId(2), window());
-        reg.mint_grant(ProcessId(3), window());
+        let own = reg.mint_grant(ProcessId(2), window()).unwrap();
+        reg.mint_grant(ProcessId(3), window()).unwrap();
         let from_two = reg
             .delegate_grant(
                 ProcessId(2),
@@ -4805,7 +5749,7 @@ mod tests {
                 ProcessId(11),
                 window()
             ),
-            Some(from_two),
+            Ok(from_two),
             "a repeated delegation is the one grant"
         );
 
@@ -4836,11 +5780,89 @@ mod tests {
         reg
     }
 
+    /// A grantor may keep only so many regions with a recipient that never
+    /// asked for them, refused as a value past the bound: a repeat is no new
+    /// delegation, another grantor's share is its own, a released region is
+    /// never delegated, and one released stops counting.
+    #[test]
+    fn a_grantor_is_refused_past_its_bound_of_regions_named_to_one_recipient() {
+        fn name(
+            reg: &mut AddressSpaceRegistry,
+            grantor: ProcessId,
+            region: u64,
+            region_live: impl Fn(u64) -> bool,
+        ) -> Result<u64, Errno> {
+            reg.delegate_bounded_region(
+                grantor,
+                instance_of(grantor),
+                ProcessId(11),
+                region,
+                region_live,
+            )
+        }
+        let mut reg = registry_with(&[11]);
+        let (flood, honest) = (ProcessId(3), ProcessId(4));
+        let past = 0x7000 + tairix_abi::SHM_GRANT_TO_MAX as u64;
+        for region in 0x7000..=past {
+            reg.mint_grant(flood, HwResource::shared(region)).unwrap();
+        }
+        reg.mint_grant(honest, HwResource::shared(0x7000)).unwrap();
+        let live = |_: u64| true;
+        let first = name(&mut reg, flood, 0x7000, live).unwrap();
+        for region in 0x7001..past {
+            assert!(name(&mut reg, flood, region, live).is_ok());
+        }
+        assert_eq!(name(&mut reg, flood, past, live), Err(Errno::LimitExceeded));
+        assert_eq!(name(&mut reg, flood, 0x7000, live), Ok(first), "a repeat");
+        assert!(name(&mut reg, honest, 0x7000, live).is_ok(), "its own");
+        assert_eq!(
+            name(&mut reg, flood, past, |region| region != past),
+            Err(Errno::NotFound),
+            "a released region is never delegated"
+        );
+        let fresh = name(&mut reg, flood, past, |region| region != 0x7000).expect("room made");
+        assert_eq!(
+            reg.grant(ProcessId(11), fresh),
+            Some(HwResource::shared(past))
+        );
+        assert_eq!(
+            reg.grant(ProcessId(11), first),
+            None,
+            "the released one gave way"
+        );
+    }
+
+    /// A table is swept of its released regions' grants once it has doubled
+    /// since its last sweep, and of nothing else.
+    #[test]
+    fn grants_of_released_regions_are_swept_once_the_table_has_doubled() {
+        let mut reg = AddressSpaceRegistry::new();
+        let task = ProcessId(5);
+        let window = window();
+        reg.mint_grant(task, window).unwrap();
+        let released = reg.mint_grant(task, HwResource::shared(0x81)).unwrap();
+        let kept = reg.mint_grant(task, HwResource::shared(0x82)).unwrap();
+        assert_eq!(reg.sweep_released(task, |region| region != 0x81), 1);
+        assert_eq!(reg.grant(task, released), None);
+        assert_eq!(reg.grant(task, kept), Some(HwResource::shared(0x82)));
+        // Two are left, so the next sweep waits for more than four.
+        reg.mint_grant(task, HwResource::shared(0x83)).unwrap();
+        reg.mint_grant(task, HwResource::shared(0x84)).unwrap();
+        assert_eq!(reg.sweep_released(task, |_| false), 0, "not yet doubled");
+        reg.mint_grant(task, HwResource::shared(0x85)).unwrap();
+        assert_eq!(reg.sweep_released(task, |_| false), 4);
+        assert!(
+            reg.grant_covers(task, &window),
+            "only a region's grant goes"
+        );
+        assert_eq!(reg.sweep_released(ProcessId(6), |_| false), 0);
+    }
+
     #[test]
     fn a_delegated_grant_ends_with_the_device_its_source_reached() {
         let region = HwResource::shared(0x51);
         let mut reg = registry_with(&[5, 6]);
-        let driver = reg.mint_node_grant(ProcessId(2), region, 7);
+        let driver = reg.mint_node_grant(ProcessId(2), region, 7).unwrap();
         let delegated = reg
             .delegate_grant(
                 ProcessId(2),
@@ -4857,7 +5879,7 @@ mod tests {
                 region,
             )
             .expect("delegates onward");
-        let made = reg.mint_grant(ProcessId(3), region);
+        let made = reg.mint_grant(ProcessId(3), region).unwrap();
 
         assert_eq!(reg.revoke_node_grants(&[7]), 3);
         assert_eq!(reg.grant(ProcessId(2), driver), None);
@@ -4874,9 +5896,9 @@ mod tests {
     fn a_grant_held_from_a_lasting_source_outlives_the_node() {
         let region = HwResource::shared(0x52);
         let mut reg = registry_with(&[5]);
-        let first = reg.mint_node_grant(ProcessId(2), region, 7);
+        let first = reg.mint_node_grant(ProcessId(2), region, 7).unwrap();
         assert_eq!(
-            reg.mint_grant(ProcessId(2), region),
+            reg.mint_grant(ProcessId(2), region).unwrap(),
             first,
             "held twice, still one grant"
         );
@@ -4897,7 +5919,7 @@ mod tests {
     fn a_child_is_covered_only_by_its_emitters_own_node_or_by_no_device() {
         let window = HwResource::mmio(0xFE00_0000, 0x1000);
         let mut reg = AddressSpaceRegistry::new();
-        reg.mint_node_grant(ProcessId(2), window, 17);
+        reg.mint_node_grant(ProcessId(2), window, 17).unwrap();
         assert!(
             !reg.grant_covers_for_child(ProcessId(2), &window, 9),
             "another device's"
@@ -4906,13 +5928,14 @@ mod tests {
             reg.grant_covers(ProcessId(2), &window),
             "yet the emitter holds it"
         );
-        reg.mint_node_grant(ProcessId(2), HwResource::mmio(0xFE00_0000, 0x2000), 9);
+        reg.mint_node_grant(ProcessId(2), HwResource::mmio(0xFE00_0000, 0x2000), 9)
+            .unwrap();
         assert!(
             reg.grant_covers_for_child(ProcessId(2), &window, 9),
             "its own node's"
         );
         let region = HwResource::shared(0x60);
-        reg.mint_grant(ProcessId(2), region);
+        reg.mint_grant(ProcessId(2), region).unwrap();
         assert!(
             reg.grant_covers_for_child(ProcessId(2), &region, 9),
             "no device's"
@@ -4930,9 +5953,9 @@ mod tests {
         let line = HwResource::irq(40, 1);
         let port = HwResource::port(0x70, 2);
         let mut reg = AddressSpaceRegistry::new();
-        let w = reg.mint_node_grant(ProcessId(2), window, 7);
-        let l = reg.mint_node_grant(ProcessId(2), line, 7);
-        let p = reg.mint_node_grant(ProcessId(2), port, 8);
+        let w = reg.mint_node_grant(ProcessId(2), window, 7).unwrap();
+        let l = reg.mint_node_grant(ProcessId(2), line, 7).unwrap();
+        let p = reg.mint_node_grant(ProcessId(2), port, 8).unwrap();
 
         assert_eq!(reg.revoke_node_grants(&[3, 7]), 2);
         assert_eq!(
@@ -4947,7 +5970,7 @@ mod tests {
             "another node's grant stands"
         );
         assert_eq!(
-            reg.grants_to_le_bytes(ProcessId(2)),
+            reg.grants_to_le_bytes(ProcessId(2)).unwrap(),
             GrantedResource::new(p, port).to_le_bytes(),
             "a revoked grant is never enumerated"
         );
@@ -4959,7 +5982,7 @@ mod tests {
                 ProcessId(2),
                 window
             ),
-            None,
+            Err(Errno::NotFound),
             "nor delegated"
         );
     }
@@ -4967,9 +5990,12 @@ mod tests {
     #[test]
     fn a_wired_line_names_the_node_that_granted_it() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.mint_node_grant(ProcessId(5), HwResource::irq(9, 1), 7);
-        reg.mint_node_grant(ProcessId(5), HwResource::message_irq(4100, 0), 8);
-        reg.mint_grant(ProcessId(5), HwResource::irq(11, 1));
+        reg.mint_node_grant(ProcessId(5), HwResource::irq(9, 1), 7)
+            .unwrap();
+        reg.mint_node_grant(ProcessId(5), HwResource::message_irq(4100, 0), 8)
+            .unwrap();
+        reg.mint_grant(ProcessId(5), HwResource::irq(11, 1))
+            .unwrap();
         assert_eq!(reg.wired_irq_origin(ProcessId(5), 9), Some(7));
         assert_eq!(reg.wired_irq_origin(ProcessId(5), 4100), None, "a message");
         assert_eq!(reg.wired_irq_origin(ProcessId(5), 11), None, "no node's");
@@ -4981,10 +6007,16 @@ mod tests {
     #[test]
     fn revoked_grants_are_visited_holder_by_holder_until_retired() {
         let mut reg = AddressSpaceRegistry::new();
-        let low = reg.mint_node_grant(ProcessId(2), HwResource::mmio(0x1000, 0x1000), 7);
-        reg.mint_node_grant(ProcessId(3), HwResource::mmio(0x9000, 0x1000), 8);
-        let high = reg.mint_node_grant(ProcessId(2), HwResource::shared(0x53), 7);
-        reg.mint_node_grant(ProcessId(5), HwResource::irq(9, 1), 7);
+        let low = reg
+            .mint_node_grant(ProcessId(2), HwResource::mmio(0x1000, 0x1000), 7)
+            .unwrap();
+        reg.mint_node_grant(ProcessId(3), HwResource::mmio(0x9000, 0x1000), 8)
+            .unwrap();
+        let high = reg
+            .mint_node_grant(ProcessId(2), HwResource::shared(0x53), 7)
+            .unwrap();
+        reg.mint_node_grant(ProcessId(5), HwResource::irq(9, 1), 7)
+            .unwrap();
         assert_eq!(reg.next_revoked_holder(None), None, "nothing revoked yet");
 
         assert_eq!(reg.revoke_node_grants(&[7]), 3);
@@ -5018,9 +6050,9 @@ mod tests {
     fn a_fresh_grant_is_not_absorbed_by_a_revoked_one() {
         let region = HwResource::shared(0x54);
         let mut reg = AddressSpaceRegistry::new();
-        let revoked = reg.mint_node_grant(ProcessId(2), region, 7);
+        let revoked = reg.mint_node_grant(ProcessId(2), region, 7).unwrap();
         reg.revoke_node_grants(&[7]);
-        let fresh = reg.mint_grant(ProcessId(2), region);
+        let fresh = reg.mint_grant(ProcessId(2), region).unwrap();
         assert_ne!(fresh, revoked);
         assert_eq!(reg.grant(ProcessId(2), fresh), Some(region));
         assert_eq!(reg.retire_revoked(ProcessId(2)), 1);
@@ -5034,17 +6066,20 @@ mod tests {
     #[test]
     fn a_window_is_authorised_only_while_a_live_window_grant_contains_it() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.mint_node_grant(ProcessId(2), HwResource::mmio(0x1000, 0x2000), 7);
+        reg.mint_node_grant(ProcessId(2), HwResource::mmio(0x1000, 0x2000), 7)
+            .unwrap();
         reg.mint_node_grant(
             ProcessId(2),
             HwResource::bus_window(0x6000_0000, 0x10_0000, 0xF800_0000),
             8,
-        );
+        )
+        .unwrap();
         reg.mint_node_grant(
             ProcessId(2),
             HwResource::dma(0x3FFF_FFFF, 0x1000, tairix_abi::DmaCoherence::Snooped),
             7,
-        );
+        )
+        .unwrap();
         assert!(reg.maps_window(ProcessId(2), 0x1800, 0x100));
         assert!(
             reg.maps_window(ProcessId(2), 0x6000_1000, 0x1000),
@@ -5070,8 +6105,10 @@ mod tests {
     #[test]
     fn an_interrupt_line_is_held_only_through_a_live_irq_grant() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.mint_node_grant(ProcessId(2), HwResource::irq(40, 4), 7);
-        reg.mint_node_grant(ProcessId(2), HwResource::port(50, 4), 7);
+        reg.mint_node_grant(ProcessId(2), HwResource::irq(40, 4), 7)
+            .unwrap();
+        reg.mint_node_grant(ProcessId(2), HwResource::port(50, 4), 7)
+            .unwrap();
         assert!(reg.holds_irq_line(ProcessId(2), 43));
         assert!(!reg.holds_irq_line(ProcessId(2), 44));
         assert!(
@@ -5087,7 +6124,7 @@ mod tests {
     fn a_live_space_is_reachable_until_its_threads_drop_it_or_the_task_goes() {
         let mut reg = AddressSpaceRegistry::new();
         let space = Arc::new(ProcessSpace::for_test(crate::procspace::host_test_space!()));
-        reg.set_live_space(ProcessId(2), &space);
+        reg.set_live_space(ProcessId(2), &space).unwrap();
         assert!(reg
             .live_space(ProcessId(2))
             .is_some_and(|found| Arc::ptr_eq(&found, &space)));
@@ -5096,7 +6133,7 @@ mod tests {
         assert!(reg.live_space(ProcessId(2)).is_none(), "held weakly");
 
         let space = Arc::new(ProcessSpace::for_test(crate::procspace::host_test_space!()));
-        reg.set_live_space(ProcessId(2), &space);
+        reg.set_live_space(ProcessId(2), &space).unwrap();
         assert!(reg.withdraw(ProcessId(2)).was_present());
         assert!(reg.live_space(ProcessId(2)).is_none());
         assert_eq!(reg.stale_task_entry(ProcessId(2)), None);
@@ -5109,10 +6146,13 @@ mod tests {
         let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(21);
         let mut reg = AddressSpaceRegistry::new();
         let duty = LinkDuty::new(endpoint, Some(0x7F5)).expect("valid");
-        reg.mint_grant(ProcessId(2), HwResource::duty(&duty));
+        reg.mint_grant(ProcessId(2), HwResource::duty(&duty))
+            .unwrap();
         let request = LinkRequest::new(endpoint, 0, &[2], b"tx").expect("valid");
-        reg.mint_grant(ProcessId(3), HwResource::request(&request));
-        reg.mint_grant(ProcessId(4), HwResource::endpoint(endpoint));
+        reg.mint_grant(ProcessId(3), HwResource::request(&request))
+            .unwrap();
+        reg.mint_grant(ProcessId(4), HwResource::endpoint(endpoint))
+            .unwrap();
         assert!(reg.holds_link_duty(ProcessId(2), endpoint));
         assert!(!reg.holds_link_duty(ProcessId(2), endpoint + 1));
         // A consumer's request line, and a plain endpoint grant, both name the
@@ -5134,7 +6174,7 @@ mod tests {
     #[test]
     fn mint_then_grant_returns_the_resource_for_its_owner() {
         let mut reg = AddressSpaceRegistry::new();
-        let handle = reg.mint_grant(ProcessId(2), window());
+        let handle = reg.mint_grant(ProcessId(2), window()).unwrap();
         // The first minted handle is 1 (handle 0 stays reserved-invalid).
         assert_eq!(handle, 1);
         assert_eq!(reg.grant(ProcessId(2), handle), Some(window()));
@@ -5147,8 +6187,8 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         let a = HwResource::mmio(0xFE98_0000, 0x4000);
         let b = HwResource::bus_window(0x6000_0000, 0x40_0000, 0xF800_0000);
-        let h_a = reg.mint_grant(ProcessId(2), a);
-        let h_b = reg.mint_grant(ProcessId(2), b);
+        let h_a = reg.mint_grant(ProcessId(2), a).unwrap();
+        let h_b = reg.mint_grant(ProcessId(2), b).unwrap();
         assert_ne!(h_a, h_b, "each grant gets its own handle");
         assert_eq!(reg.grant(ProcessId(2), h_a), Some(a));
         assert_eq!(reg.grant(ProcessId(2), h_b), Some(b));
@@ -5157,7 +6197,7 @@ mod tests {
     #[test]
     fn grant_is_owner_bound_against_handle_forgery() {
         let mut reg = AddressSpaceRegistry::new();
-        let handle = reg.mint_grant(ProcessId(2), window());
+        let handle = reg.mint_grant(ProcessId(2), window()).unwrap();
         // The owner resolves its grant; an unknown handle value does not.
         assert_eq!(reg.grant(ProcessId(2), handle), Some(window()));
         assert_eq!(reg.grant(ProcessId(2), handle + 1), None);
@@ -5170,7 +6210,7 @@ mod tests {
     #[test]
     fn withdraw_reclaims_every_grant() {
         let mut reg = AddressSpaceRegistry::new();
-        let handle = reg.mint_grant(ProcessId(4), window());
+        let handle = reg.mint_grant(ProcessId(4), window()).unwrap();
         assert_eq!(reg.grant(ProcessId(4), handle), Some(window()));
         // Withdrawing a task with grants but no address space still reports
         // the slot was present and clears the grants (reclaimed on
@@ -5190,22 +6230,22 @@ mod tests {
     #[test]
     fn granting_a_held_resource_again_returns_the_same_handle() {
         let mut reg = AddressSpaceRegistry::new();
-        let first = reg.mint_grant(ProcessId(2), window());
+        let first = reg.mint_grant(ProcessId(2), window()).unwrap();
         for _ in 0..1_000 {
             assert_eq!(
-                reg.mint_grant(ProcessId(2), window()),
+                reg.mint_grant(ProcessId(2), window()).unwrap(),
                 first,
                 "repetition must not append a second entry naming the same resource"
             );
         }
         assert_eq!(
-            reg.grants_to_le_bytes(ProcessId(2)).len(),
+            reg.grants_to_le_bytes(ProcessId(2)).unwrap().len(),
             GrantedResource::WIRE_LEN
         );
         // A *different* resource is still new authority and mints its own
         // handle: suppression is exact, never a collapse of distinct grants.
         let other = HwResource::mmio(0x3F20_0000, 0x1000);
-        assert_ne!(reg.mint_grant(ProcessId(2), other), first);
+        assert_ne!(reg.mint_grant(ProcessId(2), other).unwrap(), first);
     }
 
     /// A grant naming a *narrower* resource than one already held is still
@@ -5221,8 +6261,8 @@ mod tests {
         let wide = HwResource::mmio(0xFE98_0000, 0x4000);
         let narrow = HwResource::mmio(0xFE98_0000, 0x1000);
         assert!(wide.covers(&narrow), "the wider window covers the narrower");
-        let wide_handle = reg.mint_grant(ProcessId(2), wide);
-        let narrow_handle = reg.mint_grant(ProcessId(2), narrow);
+        let wide_handle = reg.mint_grant(ProcessId(2), wide).unwrap();
+        let narrow_handle = reg.mint_grant(ProcessId(2), narrow).unwrap();
         assert_ne!(wide_handle, narrow_handle);
         assert_eq!(reg.grant(ProcessId(2), narrow_handle), Some(narrow));
     }
@@ -5239,16 +6279,17 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         let doomed = HwResource::endpoint(0xCA11_0001);
         let survivor = HwResource::endpoint(0xCA11_0002);
-        let holder_a = reg.mint_grant(ProcessId(2), doomed);
-        let holder_b = reg.mint_grant(ProcessId(3), doomed);
-        let unrelated_endpoint = reg.mint_grant(ProcessId(3), survivor);
+        let holder_a = reg.mint_grant(ProcessId(2), doomed).unwrap();
+        let holder_b = reg.mint_grant(ProcessId(3), doomed).unwrap();
+        let unrelated_endpoint = reg.mint_grant(ProcessId(3), survivor).unwrap();
         // A same-numbered resource of a *different kind* must survive: the
         // revocation is scoped to endpoints, not to the number.
-        let same_number_region = reg.mint_grant(ProcessId(3), HwResource::shared(0xCA11_0001));
-        let mmio = reg.mint_grant(ProcessId(4), window());
+        let same_number_region = reg
+            .mint_grant(ProcessId(3), HwResource::shared(0xCA11_0001))
+            .unwrap();
+        let mmio = reg.mint_grant(ProcessId(4), window()).unwrap();
 
-        let mut destroyed = BTreeSet::new();
-        destroyed.insert(0xCA11_0001_u64);
+        let destroyed = endpoint_set(&[0xCA11_0001]);
         assert_eq!(reg.revoke_endpoint_grants(&destroyed), 2);
 
         // Every holder of the destroyed endpoint lost it, whichever task.
@@ -5264,7 +6305,16 @@ mod tests {
         assert_eq!(reg.grant(ProcessId(4), mmio), Some(window()));
         // Idempotent, and an empty set is a no-op.
         assert_eq!(reg.revoke_endpoint_grants(&destroyed), 0);
-        assert_eq!(reg.revoke_endpoint_grants(&BTreeSet::new()), 0);
+        assert_eq!(reg.revoke_endpoint_grants(&endpoint_set(&[])), 0);
+    }
+
+    /// The endpoint set naming `ids`.
+    fn endpoint_set(ids: &[u64]) -> Endpoints {
+        let mut set = Endpoints::with_hasher(tairix_hash::BuildSipHash13::UNKEYED);
+        for &id in ids {
+            set.try_insert(EndpointId(id)).expect("room");
+        }
+        set
     }
 
     /// A handle number freed by revocation is never re-issued: the next
@@ -5273,11 +6323,11 @@ mod tests {
     #[test]
     fn a_revoked_handle_number_is_not_reissued() {
         let mut reg = AddressSpaceRegistry::new();
-        let revoked = reg.mint_grant(ProcessId(2), HwResource::endpoint(0xCA11_0003));
-        let mut destroyed = BTreeSet::new();
-        destroyed.insert(0xCA11_0003_u64);
-        assert_eq!(reg.revoke_endpoint_grants(&destroyed), 1);
-        let fresh = reg.mint_grant(ProcessId(2), window());
+        let revoked = reg
+            .mint_grant(ProcessId(2), HwResource::endpoint(0xCA11_0003))
+            .unwrap();
+        assert_eq!(reg.revoke_endpoint_grants(&endpoint_set(&[0xCA11_0003])), 1);
+        let fresh = reg.mint_grant(ProcessId(2), window()).unwrap();
         assert_ne!(fresh, revoked);
         assert_eq!(reg.grant(ProcessId(2), revoked), None);
     }
@@ -5285,7 +6335,7 @@ mod tests {
     /// A writable descriptor its holder opened on node 1 of a volume of its
     /// own.
     fn node_file(path: &str) -> OpenFile {
-        OpenFile::new(OpenBacking::opened(opened(path)), OpenFlags::WRITE)
+        OpenFile::new(OpenBacking::opened(opened(path)), OpenFlags::WRITE).expect("a description")
     }
 
     /// What an `fs_open` of `path` answers, reaching node 1 of a volume of
@@ -5309,16 +6359,13 @@ mod tests {
     ) -> Result<u32, Refused> {
         match reg.promise_fd(task) {
             Ok(()) => reg.keep_fd(task, opened, flags),
-            Err(errno) => Err(Refused {
-                errno,
-                _backing: OpenBacking::opened(opened),
-            }),
+            Err(errno) => Err(Refused::backing(errno, OpenBacking::opened(opened))),
         }
     }
 
     /// A grant of the node `volume` pinned as `pinned`, opened as `path`,
     /// frozen as user 1000 holding nothing, read-only.
-    fn granted(volume: &Arc<crate::fs::VolumeNodes>, pinned: u64, path: &str) -> NodeHandle {
+    fn granted(volume: &Arc<crate::fs::VolumeNodes>, pinned: u64, path: &str) -> HandedOn {
         let mut handle = crate::test_bundle::node_handle(crate::test_bundle::opened_node(
             volume,
             pinned,
@@ -5332,7 +6379,7 @@ mod tests {
                 write_ceiling: Some(0),
             }),
         });
-        handle
+        HandedOn::File(handle)
     }
 
     /// A distinct instance for each process number, as a grantor's own.
@@ -5668,14 +6715,337 @@ mod tests {
         assert!(fresh > kept);
     }
 
+    /// A pipe end in flight is one more live end of its side: a write end
+    /// pending keeps its reader off end-of-stream, through its redemption,
+    /// until the descriptor it became is let go; one left pending goes with
+    /// its grantor once the withdrawn record is, never under the lock.
+    #[test]
+    fn a_pipe_end_in_flight_holds_its_side_open() {
+        use crate::pipe::ReadStep;
+        let mut reg = AddressSpaceRegistry::new();
+        let (recipient, grantor) = (ProcessId(30), ProcessId(31));
+        let (who, from) = (instance_of(recipient), instance_of(grantor));
+        let send = |reg: &mut AddressSpaceRegistry| {
+            let (read, write) = crate::pipe::Pipe::create().expect("a pipe");
+            let what = HandedOn::Pipe(write);
+            let handle = reg
+                .mint_fd_delegation(recipient, who, grantor, from, &what, OpenFlags::WRITE)
+                .expect("mints");
+            (read, handle)
+        };
+        let mut out = [0u8; 1];
+
+        let (read, handle) = send(&mut reg);
+        assert_eq!(
+            read.try_read(&mut out),
+            ReadStep::Empty,
+            "the end in flight writes"
+        );
+        let fd = reg
+            .redeem_fd_delegation(recipient, who, handle, None)
+            .expect("redeems");
+        assert_eq!(
+            read.try_read(&mut out),
+            ReadStep::Empty,
+            "as the descriptor it became does"
+        );
+        let closed = reg.close_file(recipient, fd);
+        assert_eq!(read.try_read(&mut out), ReadStep::Empty);
+        drop(closed);
+        assert_eq!(read.try_read(&mut out), ReadStep::Eof);
+
+        let (read, _) = send(&mut reg);
+        let withdrawn = reg.withdraw(grantor);
+        assert_eq!(reg.stale_task_entry(grantor), None);
+        assert_eq!(
+            read.try_read(&mut out),
+            ReadStep::Empty,
+            "the caller's to let go"
+        );
+        drop(withdrawn);
+        assert_eq!(read.try_read(&mut out), ReadStep::Eof);
+    }
+
+    /// Regression: a grantor withdrawn while the heap refuses every allocation
+    /// still hands each delegation it had pending back to the caller, so none
+    /// is let go under the registry's lock, where a pipe end's last release
+    /// would wake its peer.
+    ///
+    /// The hand-back reserved a list first and, refused it, released them in
+    /// place.
+    #[test]
+    fn a_grantors_delegations_are_handed_back_with_the_heap_exhausted() {
+        use crate::pipe::ReadStep;
+        let mut reg = AddressSpaceRegistry::new();
+        let volume = crate::test_bundle::test_volume();
+        let grantor = ProcessId(32);
+        let from = instance_of(grantor);
+        let (read, write) = crate::pipe::Pipe::create().expect("a pipe");
+        let writing = HandedOn::Pipe(write);
+        for (pinned, recipient) in [(1, ProcessId(33)), (2, ProcessId(34))] {
+            let who = instance_of(recipient);
+            let file = granted(&volume, pinned, "/doc");
+            for (what, flags) in [(&file, OpenFlags::READ), (&writing, OpenFlags::WRITE)] {
+                reg.mint_fd_delegation(recipient, who, grantor, from, what, flags)
+                    .expect("mints");
+            }
+        }
+        drop(writing);
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let withdrawn = reg.withdraw(grantor);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        let mut out = [0u8; 1];
+        assert_eq!(
+            volume.outstanding(),
+            2,
+            "the files are the caller's to let go"
+        );
+        assert_eq!(
+            read.try_read(&mut out),
+            ReadStep::Empty,
+            "and so are the pipe ends"
+        );
+        drop(withdrawn);
+        assert_eq!(volume.outstanding(), 0);
+        assert_eq!(read.try_read(&mut out), ReadStep::Eof);
+    }
+
+    /// A pipe end still pending is one right, as a file is: granting it again
+    /// answers the pending handle and holds no second reference, and the other
+    /// end is a right of its own.
+    #[test]
+    fn regranting_a_pending_pipe_end_returns_the_pending_handle() {
+        use crate::pipe::ReadStep;
+        let mut reg = AddressSpaceRegistry::new();
+        let (recipient, grantor) = (ProcessId(35), ProcessId(36));
+        let (who, from) = (instance_of(recipient), instance_of(grantor));
+        let (read, write) = crate::pipe::Pipe::create().expect("a pipe");
+        let (reading, writing) = (HandedOn::Pipe(read.clone()), HandedOn::Pipe(write));
+        let mut mint = |what: &HandedOn, flags| {
+            reg.mint_fd_delegation(recipient, who, grantor, from, what, flags)
+        };
+        let first = mint(&writing, OpenFlags::WRITE).expect("mints");
+        for _ in 0..8 {
+            assert_eq!(mint(&writing, OpenFlags::WRITE), Ok(first));
+        }
+        assert_ne!(
+            mint(&reading, OpenFlags::READ),
+            Ok(first),
+            "the other end is a right of its own"
+        );
+        drop((reading, writing));
+        let fd = reg
+            .redeem_fd_delegation(recipient, who, first, None)
+            .expect("redeems");
+        drop(reg.close_file(recipient, fd));
+        let mut out = [0u8; 1];
+        assert_eq!(
+            read.try_read(&mut out),
+            ReadStep::Eof,
+            "the one pending reference was the last writer"
+        );
+    }
+
+    /// The pipe ends a grantor has in flight are bounded by its own
+    /// `open-files` soft bound, whichever recipients they wait in, so a pipe
+    /// kept alive by a delegation alone is still charged to its sender; a
+    /// repeat is no new end, a file is no pipe end, and a redeemed end is in
+    /// flight no longer.
+    #[test]
+    fn a_grantors_pipe_ends_in_flight_are_bounded_by_its_open_files() {
+        let mut reg = AddressSpaceRegistry::new();
+        let grantor = ProcessId(37);
+        let from = instance_of(grantor);
+        reg.set_limit(
+            grantor,
+            LimitKind::OpenFiles,
+            ResourceLimit::new(2, 2).expect("well-formed"),
+        )
+        .unwrap();
+        let ends: Vec<HandedOn> = (0..3)
+            .map(|_| HandedOn::Pipe(crate::pipe::Pipe::create().expect("a pipe").1))
+            .collect();
+        let recipients = [ProcessId(38), ProcessId(39), ProcessId(40)];
+        let send = |reg: &mut AddressSpaceRegistry, n: usize| {
+            let to = recipients[n];
+            reg.mint_fd_delegation(
+                to,
+                instance_of(to),
+                grantor,
+                from,
+                &ends[n],
+                OpenFlags::WRITE,
+            )
+        };
+        let first = send(&mut reg, 0).expect("one in flight");
+        assert!(send(&mut reg, 1).is_ok(), "and a second, waiting elsewhere");
+        assert_eq!(send(&mut reg, 2), Err(Errno::LimitExceeded));
+        assert_eq!(
+            send(&mut reg, 0),
+            Ok(first),
+            "a repeat is no new end in flight"
+        );
+        let volume = crate::test_bundle::test_volume();
+        let file = granted(&volume, 1, "/doc");
+        let to = recipients[2];
+        assert!(
+            reg.mint_fd_delegation(to, instance_of(to), grantor, from, &file, OpenFlags::READ)
+                .is_ok(),
+            "a file is no pipe end"
+        );
+        let held = recipients[0];
+        assert!(reg
+            .redeem_fd_delegation(held, instance_of(held), first, None)
+            .is_ok());
+        assert!(
+            send(&mut reg, 2).is_ok(),
+            "a redeemed end is in flight no longer"
+        );
+    }
+
+    /// Over a seeded sweep of grants, redemptions, closes and exits, a pipe's
+    /// reader is at end-of-stream exactly when no write reference is left:
+    /// the sender's own end, a descriptor, or an end in flight — and its
+    /// sender's count of what it has in flight agrees with the tables.
+    #[test]
+    fn a_pipes_writers_are_its_descriptors_and_its_ends_in_flight() {
+        use crate::pipe::ReadStep;
+        use tairix_fuzzseed::Prng;
+        let grantor = ProcessId(41);
+        let from = instance_of(grantor);
+        let recipients = [ProcessId(42), ProcessId(43)];
+        for seed in 0..64 {
+            let mut prng = Prng::new(seed);
+            let mut reg = AddressSpaceRegistry::new();
+            let (read, write) = crate::pipe::Pipe::create().expect("a pipe");
+            let mut own = Some(HandedOn::Pipe(write));
+            let (mut pending, mut open) = (Vec::new(), Vec::new());
+            for step in 0..32 {
+                let to = *prng.pick(&recipients);
+                match prng.below(5) {
+                    0 => {
+                        if let Some(what) = &own {
+                            let handle = reg
+                                .mint_fd_delegation(
+                                    to,
+                                    instance_of(to),
+                                    grantor,
+                                    from,
+                                    what,
+                                    OpenFlags::WRITE,
+                                )
+                                .expect("mints");
+                            if !pending.contains(&(to, handle)) {
+                                pending.push((to, handle));
+                            }
+                        }
+                    }
+                    1 => {
+                        if !pending.is_empty() {
+                            let (holder, handle) = pending.swap_remove(prng.below(pending.len()));
+                            let fd = reg
+                                .redeem_fd_delegation(holder, instance_of(holder), handle, None)
+                                .expect("redeems");
+                            open.push((holder, fd));
+                        }
+                    }
+                    2 => {
+                        if !open.is_empty() {
+                            let (holder, fd) = open.swap_remove(prng.below(open.len()));
+                            drop(reg.close_file(holder, fd));
+                        }
+                    }
+                    3 => drop(own.take()),
+                    _ => {
+                        let gone = if prng.below(2) == 0 { grantor } else { to };
+                        drop(reg.withdraw(gone));
+                        pending.retain(|&(holder, _)| gone != grantor && holder != gone);
+                        open.retain(|&(holder, _)| holder != gone);
+                    }
+                }
+                let live = own.is_some() || !pending.is_empty() || !open.is_empty();
+                let expected = if live { ReadStep::Empty } else { ReadStep::Eof };
+                assert_eq!(
+                    read.try_read(&mut [0u8; 1]),
+                    expected,
+                    "seed {seed}, step {step}"
+                );
+                counted_sent(&reg, grantor);
+            }
+        }
+    }
+
+    /// `grantor`'s [`Sent`] record as `(delegations, pipe ends)`, asserted
+    /// to agree with what the recipients' tables hold from it.
+    fn counted_sent(reg: &AddressSpaceRegistry, grantor: ProcessId) -> Option<(u64, u64)> {
+        let (mut delegations, mut pipe_ends) = (0u64, 0u64);
+        for table in reg.fd_delegations.values() {
+            for held in table.by_handle.values() {
+                if held.grantor == grantor {
+                    delegations += 1;
+                    pipe_ends += u64::from(held.conveys.is_pipe_end());
+                }
+            }
+        }
+        let record = reg.sent.get(&grantor);
+        let sent = record.map(|sent| (sent.delegations, sent.pipe_ends));
+        let waiting = (delegations > 0).then_some((delegations, pipe_ends));
+        assert_eq!(sent, waiting, "the count agrees with the tables");
+        sent
+    }
+
+    /// A grantor's pipe ends in flight are counted as each is filed, and
+    /// counted out on every way one leaves: redeemed, let go with its
+    /// recipient, or taken back with its grantor; one refused, at its bound or
+    /// for want of memory, is never counted.
+    ///
+    /// Regression: the bound was checked by walking every recipient's table
+    /// on each grant, under the registry's lock.
+    #[test]
+    fn a_grantors_pipe_ends_in_flight_are_counted_out_on_every_exit() {
+        let grantor = ProcessId(46);
+        let from = instance_of(grantor);
+        let mut reg = AddressSpaceRegistry::new();
+        let (_read, write) = crate::pipe::Pipe::create().expect("a pipe");
+        let end = HandedOn::Pipe(write);
+        let send = |reg: &mut AddressSpaceRegistry, to: ProcessId| {
+            reg.mint_fd_delegation(to, instance_of(to), grantor, from, &end, OpenFlags::WRITE)
+        };
+        let redeemer = ProcessId(47);
+        let handle = send(&mut reg, redeemer).expect("mints");
+        assert_eq!(counted_sent(&reg, grantor), Some((1, 1)));
+        reg.redeem_fd_delegation(redeemer, instance_of(redeemer), handle, None)
+            .expect("redeems");
+        assert_eq!(counted_sent(&reg, grantor), None, "redeemed");
+        send(&mut reg, ProcessId(48)).expect("mints");
+        drop(reg.withdraw(ProcessId(48)));
+        assert_eq!(counted_sent(&reg, grantor), None, "with its recipient");
+        send(&mut reg, ProcessId(49)).expect("mints");
+        drop(reg.withdraw(grantor));
+        assert_eq!(counted_sent(&reg, grantor), None, "with its grantor");
+        let one = ResourceLimit::new(1, 1).expect("well-formed");
+        reg.set_limit(grantor, LimitKind::OpenFiles, one).unwrap();
+        send(&mut reg, ProcessId(50)).expect("mints");
+        assert_eq!(send(&mut reg, ProcessId(51)), Err(Errno::LimitExceeded));
+        assert_eq!(counted_sent(&reg, grantor), Some((1, 1)), "at its bound");
+        drop(reg.withdraw(ProcessId(50)));
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let refused = send(&mut reg, ProcessId(52));
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(refused, Err(Errno::OutOfMemory));
+        assert_eq!(counted_sent(&reg, grantor), None, "for want of memory");
+    }
+
     #[test]
     fn reused_task_id_starts_from_an_empty_grant_set() {
         let mut reg = AddressSpaceRegistry::new();
-        let old = reg.mint_grant(ProcessId(5), window());
+        let old = reg.mint_grant(ProcessId(5), window()).unwrap();
         assert!(reg.withdraw(ProcessId(5)).was_present());
         // A new task reusing the id mints from handle 1 again and never
         // inherits the dead task's grant.
-        let fresh = reg.mint_grant(ProcessId(5), HwResource::mmio(0x3F20_0000, 0x1000));
+        let fresh = reg
+            .mint_grant(ProcessId(5), HwResource::mmio(0x3F20_0000, 0x1000))
+            .unwrap();
         assert_eq!(fresh, 1);
         assert_eq!(old, 1);
         assert_eq!(
@@ -5943,7 +7313,7 @@ mod tests {
         // The reserved standard range is the only installable space.
         assert!(matches!(
             reg.install_std_entry(ProcessId(2), 4, entry),
-            Err(Errno::OutOfRange)
+            Err(refused) if refused.errno() == Errno::OutOfRange
         ));
     }
 
@@ -5958,7 +7328,8 @@ mod tests {
             task,
             LimitKind::OpenFiles,
             ResourceLimit::new(2, 2).expect("well-formed"),
-        );
+        )
+        .unwrap();
         for fd in 0..3 {
             assert!(reg.install_std_entry(task, fd, node_file("/tty")).is_ok());
         }
@@ -5977,7 +7348,8 @@ mod tests {
             task,
             LimitKind::OpenFiles,
             ResourceLimit::new(4, 4).expect("well-formed"),
-        );
+        )
+        .unwrap();
         assert_eq!(
             reg.open_pipe(task),
             Err(Errno::LimitExceeded),
@@ -6015,7 +7387,8 @@ mod tests {
             task,
             LimitKind::OpenFiles,
             ResourceLimit::new(1, 1).expect("well-formed"),
-        );
+        )
+        .unwrap();
         assert!(reg.install_std_entry(task, 0, node_file("/tty")).is_ok());
         assert_eq!(
             reg.redeem_fd_delegation(task, who, handle, None),
@@ -6036,7 +7409,7 @@ mod tests {
         dup.advance_cursor(5);
         assert_eq!(entry.cursor(), 15);
         // A fresh entry over the same node has its own description.
-        let fresh = OpenFile::new(entry.backing.clone(), OpenFlags::WRITE);
+        let fresh = OpenFile::new(entry.backing.clone(), OpenFlags::WRITE).expect("a description");
         assert_eq!(fresh.cursor(), 0);
     }
 
@@ -6050,7 +7423,7 @@ mod tests {
             "a duplicated or spawn-inherited handle shares the description's \
              locks rather than fighting them"
         );
-        let fresh = OpenFile::new(entry.backing.clone(), OpenFlags::WRITE);
+        let fresh = OpenFile::new(entry.backing.clone(), OpenFlags::WRITE).expect("a description");
         assert_ne!(
             entry.lock_owner(),
             fresh.lock_owner(),
@@ -6069,10 +7442,12 @@ mod tests {
     #[test]
     fn charge_then_credit_tracks_the_running_total() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.charge_aspace_bytes(ProcessId(2), 0x4000);
+        reg.try_charge_aspace_bytes(ProcessId(2), 0x4000)
+            .expect("recorded");
         assert_eq!(reg.mapped_aspace_bytes(ProcessId(2)), 0x4000);
         // A second map accrues onto the existing total.
-        reg.charge_aspace_bytes(ProcessId(2), 0x1000);
+        reg.try_charge_aspace_bytes(ProcessId(2), 0x1000)
+            .expect("recorded");
         assert_eq!(reg.mapped_aspace_bytes(ProcessId(2)), 0x5000);
         // Freeing one region credits it back.
         reg.credit_aspace_bytes(ProcessId(2), 0x1000);
@@ -6082,7 +7457,8 @@ mod tests {
     #[test]
     fn credit_saturates_at_zero_and_drops_the_entry() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.charge_aspace_bytes(ProcessId(2), 0x2000);
+        reg.try_charge_aspace_bytes(ProcessId(2), 0x2000)
+            .expect("recorded");
         // Crediting more than is charged can never underflow into a bogus
         // huge total that would wrongly deny later maps.
         reg.credit_aspace_bytes(ProcessId(2), 0x9000);
@@ -6095,7 +7471,8 @@ mod tests {
     #[test]
     fn withdraw_drops_anon_accounting_so_a_reused_id_starts_clean() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.charge_aspace_bytes(ProcessId(4), 0x8000);
+        reg.try_charge_aspace_bytes(ProcessId(4), 0x8000)
+            .expect("recorded");
         assert!(reg.withdraw(ProcessId(4)).was_present());
         // A reused id never inherits the dead task's mapped-memory total.
         assert_eq!(reg.mapped_aspace_bytes(ProcessId(4)), 0);
@@ -6314,25 +7691,61 @@ mod tests {
         assert!(reg.anon_region_holds(ProcessId(2), 0x20_3000, 2));
     }
 
+    /// An anonymous region over the first thread's stack span is refused:
+    /// the spawn layout leaves its growth room unmapped and reserved nowhere
+    /// the live space can see, so the registry alone keeps a `FIXED` mapping
+    /// off it.
     #[test]
-    fn removing_a_range_splits_the_holding_and_leaves_the_rest() {
+    fn an_anon_region_over_the_first_threads_stack_span_is_refused() {
+        let mut reg = AddressSpaceRegistry::new();
+        let task = ProcessId(2);
+        reg.set_stack_span(task, task.leader_task(), stack_span())
+            .unwrap();
+        // The growth room below the committed stack, the stack itself, and a
+        // range reaching into the span from below.
+        for (base, pages) in [(0x4000, 1), (0x9000, 1), (0x3000, 2)] {
+            assert_eq!(
+                reg.record_anon_region(task, base, pages),
+                Err(RangeError::Overlap)
+            );
+        }
+        // Abutting the span either side is clear, and another process's span
+        // is no bar.
+        record_anon(&mut reg, task, 0x3000, 1);
+        record_anon(&mut reg, task, 0xA000, 1);
+        record_anon(&mut reg, ProcessId(3), 0x5000, 1);
+    }
+
+    /// Release `pages` pages at `base` from `task`'s holding as `mem_unmap`
+    /// does: taken out before any page goes, then ended once they have.
+    fn release_anon(reg: &mut AddressSpaceRegistry, task: ProcessId, base: u64, pages: u64) {
+        reg.begin_anon_release(task, base, pages)
+            .expect("held pages are released");
+        reg.end_anon_release(task, base, pages, true);
+    }
+
+    #[test]
+    fn releasing_a_range_splits_the_holding_and_leaves_the_rest() {
         let mut reg = AddressSpaceRegistry::new();
         record_anon(&mut reg, ProcessId(2), 0x20_0000, 4);
 
         // A cut through the middle leaves the pages either side held, so a
         // fault in them is still a legitimate first touch.
-        reg.remove_anon_range(ProcessId(2), 0x20_1000, 2);
+        release_anon(&mut reg, ProcessId(2), 0x20_1000, 2);
         assert!(reg.anon_region_holds(ProcessId(2), 0x20_0000, 1));
         assert!(reg.anon_region_holds(ProcessId(2), 0x20_3000, 1));
         assert!(!reg.anon_region_holds(ProcessId(2), 0x20_1000, 1));
         assert!(reg.anon_region_covers(ProcessId(2), 0x20_3000));
         assert!(!reg.anon_region_covers(ProcessId(2), 0x20_2000));
 
-        // Releasing the remainder leaves nothing, and a second release of a
-        // range already gone is a no-op rather than an error.
-        reg.remove_anon_range(ProcessId(2), 0x20_0000, 1);
-        reg.remove_anon_range(ProcessId(2), 0x20_3000, 1);
-        reg.remove_anon_range(ProcessId(2), 0x20_3000, 1);
+        // Releasing the remainder leaves nothing, and a range already gone is
+        // not held, so releasing it again is refused touching nothing.
+        release_anon(&mut reg, ProcessId(2), 0x20_0000, 1);
+        release_anon(&mut reg, ProcessId(2), 0x20_3000, 1);
+        assert_eq!(
+            reg.begin_anon_release(ProcessId(2), 0x20_3000, 1),
+            Err(Errno::NotFound)
+        );
         assert!(!reg.anon_region_covers(ProcessId(2), 0x20_0000));
         assert_eq!(reg.stale_task_entry(ProcessId(2)), None);
     }
@@ -6343,6 +7756,82 @@ mod tests {
         record_anon(&mut reg, ProcessId(5), 0x20_0000, 4);
         assert!(reg.withdraw(ProcessId(5)).was_present());
         assert!(!reg.anon_region_covers(ProcessId(5), 0x20_0000));
+    }
+
+    #[test]
+    fn a_release_in_flight_keeps_its_pages_from_faults_records_and_a_second_release() {
+        let mut reg = AddressSpaceRegistry::new();
+        record_anon(&mut reg, ProcessId(2), 0x20_0000, 8);
+        reg.begin_anon_release(ProcessId(2), 0x20_2000, 2)
+            .expect("held pages are taken");
+        // No fault backs a page being released — one waits for the release
+        // to end — no second release takes it, and no record lands on it.
+        assert!(!reg.anon_region_covers(ProcessId(2), 0x20_2000));
+        assert_eq!(reg.anon_page(ProcessId(2), 0x20_2000), AnonPage::Releasing);
+        assert_eq!(
+            reg.begin_anon_release(ProcessId(2), 0x20_2000, 1),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            reg.record_anon_region(ProcessId(2), 0x20_3000, 1),
+            Err(RangeError::Overlap)
+        );
+        assert!(reg.anon_region_covers(ProcessId(2), 0x20_1000));
+        assert!(reg.anon_region_covers(ProcessId(2), 0x20_4000));
+        // A release that failed puts its pages back: the holding is whole.
+        reg.end_anon_release(ProcessId(2), 0x20_2000, 2, false);
+        assert!(reg.anon_region_holds(ProcessId(2), 0x20_0000, 8));
+        assert_eq!(reg.anon_page(ProcessId(2), 0x20_2000), AnonPage::Held);
+        // One that went through leaves them gone, and the rest held.
+        release_anon(&mut reg, ProcessId(2), 0x20_2000, 2);
+        assert!(!reg.anon_region_holds(ProcessId(2), 0x20_2000, 1));
+        assert_eq!(reg.anon_page(ProcessId(2), 0x20_2000), AnonPage::Unheld);
+        assert!(reg.anon_region_holds(ProcessId(2), 0x20_0000, 2));
+        assert!(reg.anon_region_holds(ProcessId(2), 0x20_4000, 4));
+    }
+
+    /// Everything a release can need from the heap it asks for before a page
+    /// goes: the cut through a held range, and the room to put it back, are
+    /// made when the release begins, so ending it with the heap exhausted
+    /// still settles the holding — here with two releases in flight and a
+    /// full node, which the range put back must split.
+    ///
+    /// Regression: the holding was cut only once `mem_unmap` had released the
+    /// pages, so a cut refused for want of memory left the registry holding
+    /// pages the task no longer had; and this test, holding one range, could
+    /// not tell the room being made from its not being needed.
+    #[test]
+    fn a_release_needs_nothing_from_the_heap_once_begun() {
+        let mut reg = AddressSpaceRegistry::new();
+        let task = ProcessId(2);
+        // Single pages a page apart, so none coalesce: eleven fill a node.
+        let at = |n: u64| 0x20_0000 + n * 2 * PAGE_SIZE as u64;
+        for n in 0..11 {
+            record_anon(&mut reg, task, at(n), 1);
+        }
+        // The first release also files the record of its cut, which the heap
+        // must supply; refused, it takes nothing.
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let refused = reg.begin_anon_release(task, at(4), 1);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(refused, Err(Errno::OutOfMemory));
+        assert!(reg.anon_region_holds(task, at(4), 1));
+
+        // Two releases in flight, then two records filling the node again.
+        for n in [4, 8] {
+            reg.begin_anon_release(task, at(n), 1)
+                .expect("held pages are taken");
+        }
+        record_anon(&mut reg, task, at(11), 1);
+        record_anon(&mut reg, task, at(12), 1);
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        reg.end_anon_release(task, at(4), 1, true);
+        reg.end_anon_release(task, at(8), 1, false);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert!(!reg.anon_region_holds(task, at(4), 1));
+        assert!(reg.anon_region_holds(task, at(8), 1), "put back");
+        assert!(reg.anon_region_holds(task, at(0), 1));
+        assert!(reg.anon_region_holds(task, at(12), 1));
     }
 
     // --- reserved user-stack spans (demand-grown stack) -------------------
@@ -6387,7 +7876,8 @@ mod tests {
     #[test]
     fn set_stack_span_then_resolve_returns_the_owners_record() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_stack_span(ProcessId(2), TaskId(2), stack_span());
+        reg.set_stack_span(ProcessId(2), TaskId(2), stack_span())
+            .unwrap();
         assert_eq!(reg.stack_span(TaskId(2)), Some(stack_span()));
         // Another task's lookup resolves nothing (fail closed).
         assert!(reg.stack_span(TaskId(3)).is_none());
@@ -6397,7 +7887,8 @@ mod tests {
     #[test]
     fn commit_stack_page_lowers_the_base_monotonically_within_the_span() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_stack_span(ProcessId(2), TaskId(2), stack_span());
+        reg.set_stack_span(ProcessId(2), TaskId(2), stack_span())
+            .unwrap();
         // A growth page lowers the committed base and grows the usage.
         reg.commit_stack_page(TaskId(2), 0x6000);
         assert_eq!(
@@ -6433,7 +7924,8 @@ mod tests {
     #[test]
     fn withdraw_drops_the_stack_span_so_a_reused_id_starts_clean() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_stack_span(ProcessId(6), TaskId(6), stack_span());
+        reg.set_stack_span(ProcessId(6), TaskId(6), stack_span())
+            .unwrap();
         assert!(reg.withdraw(ProcessId(6)).was_present());
         assert!(reg.stack_span(TaskId(6)).is_none());
         assert_eq!(reg.stack_committed_bytes(ProcessId(6)), 0);
@@ -6446,11 +7938,13 @@ mod tests {
     fn every_thread_has_its_own_stack_and_the_process_totals_them() {
         let mut reg = AddressSpaceRegistry::new();
         let process = ProcessId(6);
-        reg.set_stack_span(process, TaskId(6), stack_span());
+        reg.set_stack_span(process, TaskId(6), stack_span())
+            .unwrap();
         let one_thread = reg.stack_committed_bytes(process);
         assert!(one_thread > 0);
 
-        reg.set_stack_span(process, TaskId(70), stack_span());
+        reg.set_stack_span(process, TaskId(70), stack_span())
+            .unwrap();
         assert_eq!(
             reg.stack_committed_bytes(process),
             one_thread * 2,
@@ -6468,8 +7962,10 @@ mod tests {
     fn withdrawing_one_thread_leaves_its_siblings_stacks() {
         let mut reg = AddressSpaceRegistry::new();
         let process = ProcessId(6);
-        reg.set_stack_span(process, TaskId(6), stack_span());
-        reg.set_stack_span(process, TaskId(70), stack_span());
+        reg.set_stack_span(process, TaskId(6), stack_span())
+            .unwrap();
+        reg.set_stack_span(process, TaskId(70), stack_span())
+            .unwrap();
         let both = reg.stack_committed_bytes(process);
 
         assert!(reg.withdraw_thread(TaskId(70)));
@@ -6489,7 +7985,7 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         let process = ProcessId(6);
         let span = stack_span();
-        reg.set_stack_span(process, TaskId(6), span);
+        reg.set_stack_span(process, TaskId(6), span).unwrap();
         let before = reg.stack_committed_bytes(process);
 
         let grown_to = span.committed_base() - PAGE_SIZE as u64;
@@ -6515,9 +8011,11 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         let process = ProcessId(6);
         reg.register(process, user_space(1, 6), sim()).unwrap();
-        reg.set_load_base(process, 0x20_0000);
-        reg.set_stack_span(process, TaskId(6), stack_span());
-        reg.set_stack_span(process, TaskId(70), stack_span());
+        reg.set_load_base(process, 0x20_0000).unwrap();
+        reg.set_stack_span(process, TaskId(6), stack_span())
+            .unwrap();
+        reg.set_stack_span(process, TaskId(70), stack_span())
+            .unwrap();
 
         // A thread exits: its stack goes, the process's address space stays —
         // its sibling is still executing in it.
@@ -6545,19 +8043,19 @@ mod tests {
     #[test]
     fn set_load_base_then_resolve_returns_the_owners_base() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_load_base(ProcessId(2), 0x20_0000);
+        reg.set_load_base(ProcessId(2), 0x20_0000).unwrap();
         assert_eq!(reg.load_base(ProcessId(2)), Some(0x20_0000));
         // Keyed by the owning task; a different id has no base.
         assert!(reg.load_base(ProcessId(3)).is_none());
         // Replacing is permitted (a reused id re-admitted at a new base).
-        reg.set_load_base(ProcessId(2), 0x40_0000);
+        reg.set_load_base(ProcessId(2), 0x40_0000).unwrap();
         assert_eq!(reg.load_base(ProcessId(2)), Some(0x40_0000));
     }
 
     #[test]
     fn withdraw_drops_the_load_base_so_a_reused_id_starts_clean() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_load_base(ProcessId(6), 0x20_0000);
+        reg.set_load_base(ProcessId(6), 0x20_0000).unwrap();
         assert!(reg.withdraw(ProcessId(6)).was_present());
         assert!(reg.load_base(ProcessId(6)).is_none());
     }
@@ -6608,7 +8106,7 @@ mod tests {
         let reserve_base = 0x20_0000u64;
         let span = StackSpan::new(reserve_base, reserve_base + 0x4000, reserve_base + 0x8000)
             .expect("well-formed");
-        reg.set_stack_span(ProcessId(2), TaskId(2), span);
+        reg.set_stack_span(ProcessId(2), TaskId(2), span).unwrap();
         assert_eq!(
             reg.classify_fault_locality(ProcessId(2), TaskId(2), FaultAccess::Instruction),
             FaultLocality::NoDataAddress
@@ -6649,7 +8147,7 @@ mod tests {
         let reserve_base = 0x20_0000u64;
         let span = StackSpan::new(reserve_base, reserve_base + 0x4000, reserve_base + 0x8000)
             .expect("well-formed");
-        reg.set_stack_span(ProcessId(2), TaskId(2), span);
+        reg.set_stack_span(ProcessId(2), TaskId(2), span).unwrap();
         // A fault a little below the reserve base is an overflow that ran
         // past the guard page.
         assert_eq!(
@@ -6737,5 +8235,313 @@ mod tests {
             reg.classify_fault_locality(ProcessId(2), TaskId(2), data_at(0x9999_0000)),
             FaultLocality::Wild
         );
+    }
+
+    // --- refusals for want of memory -------------------------------------
+
+    /// `op`, refused at each of its allocations in turn, answers `refused`
+    /// with `left_alone` holding after every refusal, then goes through.
+    fn refused_at_each_allocation<T: PartialEq + core::fmt::Debug>(
+        reg: &mut AddressSpaceRegistry,
+        refused: &T,
+        mut op: impl FnMut(&mut AddressSpaceRegistry) -> T,
+        left_alone: impl Fn(&AddressSpaceRegistry) -> bool,
+    ) -> T {
+        crate::test_alloc::past_each_refusal(refused, || {
+            let answer = op(reg);
+            if answer == *refused {
+                assert!(left_alone(reg), "a refusal changed the registry");
+            }
+            answer
+        })
+    }
+
+    /// Whether nothing is recorded for `task` anywhere in the registry.
+    fn unrecorded(task: ProcessId) -> impl Fn(&AddressSpaceRegistry) -> bool {
+        move |reg| reg.stale_task_entry(task).is_none()
+    }
+
+    #[test]
+    fn a_process_record_refused_for_want_of_memory_records_nothing() {
+        type Record = fn(&mut AddressSpaceRegistry, ProcessId) -> Result<(), Errno>;
+        let records: [Record; 8] = [
+            |reg, t| reg.set_streams(t, DescriptorTable::standard()),
+            |reg, t| reg.set_limits(t, LimitSet::DEFAULT),
+            |reg, t| {
+                let limit = reg.limits(t).get(LimitKind::Processes);
+                reg.set_limit(t, LimitKind::Processes, limit)
+            },
+            |reg, t| reg.set_pinned(t),
+            |reg, t| reg.set_load_base(t, 0x20_0000),
+            |reg, t| reg.try_charge_aspace_bytes(t, PAGE_SIZE as u64),
+            |reg, t| reg.set_stack_span(t, t.leader_task(), stack_span()),
+            |reg, t| reg.set_umask(t, 0o077).map(drop),
+        ];
+        let t = ProcessId(20);
+        for record in records {
+            let answer = refused_at_each_allocation(
+                &mut AddressSpaceRegistry::new(),
+                &Err(Errno::OutOfMemory),
+                |reg| record(reg, t),
+                unrecorded(t),
+            );
+            assert_eq!(answer, Ok(()));
+        }
+    }
+
+    #[test]
+    fn a_grant_refused_for_want_of_memory_is_not_minted() {
+        let (t, oom) = (ProcessId(21), Err(Errno::OutOfMemory));
+        let minted = refused_at_each_allocation(
+            &mut AddressSpaceRegistry::new(),
+            &oom,
+            |reg| reg.mint_grant(t, window()),
+            unrecorded(t),
+        );
+        assert_eq!(minted, Ok(1));
+        let minted = refused_at_each_allocation(
+            &mut AddressSpaceRegistry::new(),
+            &oom,
+            |reg| reg.mint_node_grant(t, window(), 7),
+            unrecorded(t),
+        );
+        assert_eq!(minted, Ok(1));
+        // A delegation and a spawn share leave a refused recipient no table.
+        let region = HwResource::shared(0x51);
+        let mut reg = registry_with(&[11]);
+        reg.mint_grant(ProcessId(2), region).unwrap();
+        let delegated = refused_at_each_allocation(
+            &mut reg,
+            &oom,
+            |reg| {
+                reg.delegate_grant(
+                    ProcessId(2),
+                    instance_of(ProcessId(2)),
+                    ProcessId(11),
+                    region,
+                )
+            },
+            |reg| !reg.grants.contains_key(&ProcessId(11)),
+        );
+        assert_eq!(delegated, Ok(1));
+        let shared = refused_at_each_allocation(
+            &mut reg,
+            &oom,
+            |reg| {
+                reg.hand_spawn_share(ProcessId(2), instance_of(ProcessId(2)), ProcessId(12), 0x51)
+            },
+            |reg| !reg.grants.contains_key(&ProcessId(12)),
+        );
+        assert_eq!(shared, Ok(1));
+        assert_eq!(
+            reg.claim_spawn_share(ProcessId(12))
+                .map(|(handle, _)| handle),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn a_driver_load_refused_for_want_of_memory_records_nothing() {
+        let t = ProcessId(22);
+        let admitted = refused_at_each_allocation(
+            &mut AddressSpaceRegistry::new(),
+            &Err(Errno::OutOfMemory),
+            |reg| reg.admit_driver(t, 9, crate::iommu::DmaPath::Untranslated),
+            unrecorded(t),
+        );
+        assert_eq!(admitted, Ok(1));
+        let claimed = refused_at_each_allocation(
+            &mut AddressSpaceRegistry::new(),
+            &Err(Errno::OutOfMemory),
+            |reg| reg.claim_for_kernel(9),
+            unrecorded(ProcessId::KERNEL),
+        );
+        assert_eq!(claimed, Ok(()));
+    }
+
+    #[test]
+    fn a_region_refused_for_want_of_memory_is_not_recorded() {
+        let t = ProcessId(23);
+        let recorded = refused_at_each_allocation(
+            &mut AddressSpaceRegistry::new(),
+            &Err(RangeError::Alloc(TryReserveError::AllocFailed)),
+            |reg| reg.record_anon_region(t, 0x20_0000, 4),
+            unrecorded(t),
+        );
+        assert_eq!(recorded, Ok(()));
+        // A refused file region is handed back to be released.
+        let mut reg = AddressSpaceRegistry::new();
+        let region = file_region();
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let refused = reg.record_file_region(t, 0x10_0000, 4, region);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        let Err((RangeError::Alloc(_), region)) = refused else {
+            panic!("a region with no memory for its record is refused");
+        };
+        assert_eq!(reg.stale_task_entry(t), None);
+        reg.record_file_region(t, 0x10_0000, 4, region)
+            .expect("the retry records it");
+        assert!(reg.file_region_exact(t, 0x10_0000, 0x4000));
+    }
+
+    #[test]
+    fn a_descriptor_refused_for_want_of_memory_is_not_recorded() {
+        let t = ProcessId(24);
+        let mut reg = AddressSpaceRegistry::new();
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let opened = reg.open_resource(t, ResourceBacking::Random, OpenFlags::READ);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(
+            opened.map_err(|refused| refused.errno()),
+            Err(Errno::OutOfMemory)
+        );
+        assert_eq!(reg.stale_task_entry(t), None);
+        // A table with nothing in it yet still has to make room for each.
+        reg.promise_fd(t).expect("a first promise");
+        reg.withdraw_promise(t);
+        let size = tairix_abi::TerminalSize::new(24, 80).expect("valid grid");
+        let file = node_file("/tty");
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let pipe = reg.open_pipe(t);
+        let pty = reg.open_pty(t, size);
+        let installed = reg.install_std_entry(t, 0, file);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(pipe, Err(Errno::OutOfMemory));
+        assert_eq!(pty, Err(Errno::OutOfMemory));
+        assert!(matches!(installed, Err(refused) if refused.errno() == Errno::OutOfMemory));
+        assert_eq!(reg.open_file_count(t), 0);
+    }
+
+    /// With room in its table but none in the heap, every path that makes a
+    /// descriptor answers `OutOfMemory` and records nothing: the promise is
+    /// given back and the delegation it would redeem stays pending.
+    ///
+    /// Regression: the description, pipe and pty were allocated infallibly
+    /// once the table had room, so an exhausted heap aborted the kernel.
+    #[test]
+    fn a_descriptor_with_table_room_but_no_heap_is_refused_whole() {
+        let t = ProcessId(44);
+        let mut reg = AddressSpaceRegistry::new();
+        reg.open_pipe(t).expect("pair fits");
+        let volume = crate::test_bundle::test_volume();
+        let file = granted(&volume, 3, "/doc");
+        let (who, from) = (instance_of(t), ProcessId(45));
+        let handle = reg
+            .mint_fd_delegation(t, who, from, instance_of(from), &file, OpenFlags::READ)
+            .expect("mints");
+        reg.promise_fd(t).expect("a promise");
+        let size = tairix_abi::TerminalSize::new(24, 80).expect("valid grid");
+        let node = opened("/new");
+        let held = reg.open_file_count(t);
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let pipe = reg.open_pipe(t);
+        let pty = reg.open_pty(t, size);
+        let resource = reg.open_resource(t, ResourceBacking::Random, OpenFlags::READ);
+        let kept = reg.keep_fd(t, node, OpenFlags::READ);
+        let redeemed = reg.redeem_fd_delegation(t, who, handle, None);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(pipe, Err(Errno::OutOfMemory));
+        assert_eq!(pty, Err(Errno::OutOfMemory));
+        assert!(matches!(resource, Err(refused) if refused.errno() == Errno::OutOfMemory));
+        assert!(matches!(kept, Err(refused) if refused.errno() == Errno::OutOfMemory));
+        assert_eq!(redeemed, Err(Errno::OutOfMemory));
+        assert_eq!(reg.open_file_count(t), held, "nothing was recorded");
+        assert!(reg.pending_for(t, who, handle, None).is_ok());
+        assert_eq!(reg.open_files.get(&t).map(|table| table.promised), Some(0));
+    }
+
+    #[test]
+    fn a_delegation_refused_for_want_of_memory_is_not_minted() {
+        let volume = crate::test_bundle::test_volume();
+        let file = granted(&volume, 5, "/shared");
+        let (recipient, grantor) = (ProcessId(25), ProcessId(26));
+        let (instance, from) = (instance_of(recipient), instance_of(grantor));
+        let mut reg = AddressSpaceRegistry::new();
+        let minted = refused_at_each_allocation(
+            &mut reg,
+            &Err(Errno::OutOfMemory),
+            |reg| {
+                reg.mint_fd_delegation(recipient, instance, grantor, from, &file, OpenFlags::READ)
+            },
+            |reg| !reg.fd_delegations.contains_key(&recipient),
+        );
+        assert_eq!(minted, Ok(1));
+        // A redemption with no memory for its descriptor leaves the
+        // delegation pending.
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let redeemed = reg.redeem_fd_delegation(recipient, instance, 1, None);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(redeemed, Err(Errno::OutOfMemory));
+        assert!(reg.pending_for(recipient, instance, 1, None).is_ok());
+        assert_eq!(reg.open_file_count(recipient), 0);
+        assert_eq!(
+            reg.redeem_fd_delegation(recipient, instance, 1, None),
+            Ok(4)
+        );
+    }
+
+    #[test]
+    fn a_space_or_directory_refused_for_want_of_memory_is_handed_back() {
+        let t = ProcessId(27);
+        let mut reg = AddressSpaceRegistry::new();
+        let (space, physmap) = (user_space(1, 1), sim());
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let registered = reg.register(t, space, physmap);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(registered, Err(AspaceError::OutOfMemory));
+        assert!(!reg.contains(t));
+        let volume = crate::test_bundle::test_volume();
+        let cwd = dir_at(&volume, 1, "/Users");
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let refused = reg.set_cwd(t, cwd);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        let Err(cwd) = refused else {
+            panic!("a directory with no memory for its context is handed back");
+        };
+        assert_eq!(
+            volume.outstanding(),
+            1,
+            "the pin is the caller's to release"
+        );
+        assert_eq!(reg.stale_task_entry(t), None);
+        assert!(matches!(reg.set_cwd(t, cwd), Ok(None)));
+        assert_eq!(label(&reg.cwd(t)), "/Users");
+    }
+
+    #[test]
+    fn a_table_whose_handles_are_spent_mints_no_more() {
+        let t = ProcessId(28);
+        let mut reg = AddressSpaceRegistry::new();
+        reg.mint_grant(t, window()).unwrap();
+        if let Some(grants) = reg.grants.get_mut(&t) {
+            grants.next_handle = u64::MAX;
+        }
+        assert_eq!(
+            reg.mint_grant(t, HwResource::shared(0x60)),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            reg.mint_grant(t, window()),
+            Ok(1),
+            "a held grant is answered"
+        );
+        let volume = crate::test_bundle::test_volume();
+        let file = granted(&volume, 5, "/shared");
+        let from = ProcessId(29);
+        let (instance, from_instance) = (instance_of(t), instance_of(from));
+        reg.mint_fd_delegation(t, instance, from, from_instance, &file, OpenFlags::READ)
+            .unwrap();
+        if let Some(pending) = reg.fd_delegations.get_mut(&t) {
+            pending.next_handle = u64::MAX;
+        }
+        let location = FileLocation {
+            path: String::from("/Users"),
+            uid: 1000,
+        };
+        assert_eq!(
+            reg.mint_fd_location(t, instance, from, from_instance, location),
+            Err(Errno::OutOfRange)
+        );
+        assert!(reg.pending_for(t, instance, 1, None).is_ok());
     }
 }

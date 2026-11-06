@@ -2,7 +2,9 @@
 
 The **heap-backed** `no_std` containers TAIRiX runs on that `core` and `alloc`
 have no answer for. `alloc` already supplies `Vec`, `String`, `BTreeMap`,
-`BTreeSet`, `VecDeque`, and `BinaryHeap`; none of them is re-implemented here.
+`BTreeSet`, `VecDeque`, and `BinaryHeap`; the one re-implemented here is the
+ordered map, because `alloc`'s cannot refuse an insertion it has no memory
+for.
 
 The containers that allocate *nothing* live in
 [`tairix-inline`](../inline/README.md) — a crate that links neither this one
@@ -14,14 +16,17 @@ depends on it for the inline half of its `SmallVec`.
 | `HashMap<K, V, S>` | expected O(1) lookup / insert / remove, one control byte + one `(K, V)` slot per bucket, no per-entry node |
 | `HashSet<T, S>` | the same, over a zero-sized value |
 | `LruMap<K, V, S>` | the same table with a recency order through it: expected O(1) lookup, touch, and eviction of the coldest entry |
-| `RangeMap<K, V>` | disjoint half-open ranges, each an identity: O(log n) covering lookup, insertion refusing overlap, and first-fit placement over the gaps |
-| `RangeSet<K>` | the same storage canonicalised — insertion absorbs what it touches, removal splits what it cuts — so the entry count is one per contiguous run |
+| `OrderedMap<K, V>` | an ordered map: a B-tree over an arena of leaves, which carry no child links, and one of interior nodes, every lookup, insertion and removal a descent of its height comparing at most five keys a level; reads and removals allocate nothing, an insertion takes every node it needs before it changes anything, and room for a run of them is reserved up front |
+| `OrderedSet<T>` | the same, over a zero-sized value |
+| `RangeMap<K, V>` | disjoint half-open ranges, each an identity, over the ordered map: O(log n) covering lookup, insertion refusing overlap, and first-fit placement over the gaps; recording a range is fallible and all or nothing |
+| `RangeSet<K>` | the same storage canonicalised — insertion absorbs what it touches, removal splits what it cuts — so the entry count is one per contiguous run; an insertion that touches a held range reuses its record and never allocates |
 | `SmallVec<T, N>` | inline to `N`, then one spill to the heap |
 | `ByteQueue` | a bounded byte FIFO kept as one contiguous run, so a stream is parsed or transformed in place; storage committed up front or as bytes arrive, and wiped before it is given back |
 | `ChunkVec<T, CHUNK>` | a growable list held in chunks of `CHUNK` elements: an element never moves once pushed, so a push costs one write or one chunk's allocation however many it holds; indexing costs one load more than a slice |
 | `RadixTree<V, TAGS>` | a sparse `u64`-keyed index of 64-way nodes: every operation, and each step of an ordered or tagged walk, costs the tree's height; nodes are reserved before a change |
 | `IndexedHeap<P>` | a min-heap over a holder's own dense slot numbers: the least read in O(1), a slot's priority moved or withdrawn in O(log n), everything at or below a bound walked in O(k); room for a slot is reserved before a change and never given back |
 | `SlotMap<K, V>` | values filed under keys it issues: O(1) insertion, lookup and removal; each key carries its slot's generation, so it is refused once its value is gone, and a slot whose generation is spent is retired |
+| `BitVec` | a bitmap of run-time length whose summary levels find the next or previous set or clear bit in time proportional to their height; nothing allocates after a fallible resize |
 
 `plans/COLLECTIONS.md` is the ledger of what has landed across both container
 crates and what is still to come. `HashSet` and `SmallVec` are the two types
@@ -33,11 +38,9 @@ measured rather than assumed. Both arrive with a later tier.
 ## The rules every container here obeys
 
 1. **Nothing that can fail panics.** Every allocating operation has a fallible
-   form returning `TryReserveError`. No map has an `Index` implementation: a
-   subscript that panics on a missing key has no place in a kernel. The one
-   allocation this crate does not control is the ordered tier's: `RangeMap`
-   stores its entries in `alloc`'s `BTreeMap`, whose insertion cannot be made
-   fallible from outside `alloc`.
+   form returning `TryReserveError`, the ordered tier's insertions included.
+   No map has an `Index` implementation: a subscript that panics on a missing
+   key has no place in a kernel.
 2. **No allocation on a read path.** Lookup, iteration, and removal allocate
    nothing; growth is amortised.
 3. **No fixed capacity ceiling.** A container here grows on demand and fails
@@ -122,9 +125,20 @@ operation over 4096 slots stays within twice the height, and a bounded walk
 within one more than twice what it returns (each entry, and each child that
 stopped the walk).
 
+`OrderedMap` is held after every step of a seeded history to `alloc`'s ordered
+map and to its own invariants — keys ascending, every node but the root at
+least five full, one leaf depth, each child naming its parent — and to a
+comparison count rather than a clock: no lookup compares more than five keys a
+level. `tests/heap_allocation_failure.rs` refuses its allocations part-way —
+each in turn of an insertion splitting a leaf, an interior node or the root —
+and holds every refusal to changing nothing, the range containers' with it; it
+meters its reads, walks and removals at no allocation, and ten thousand
+insertions at the bytes the node layout allows.
+
 `tests/fuzz_collections.rs` drives the map against a plain association list
-over deliberately colliding key streams and `SmallVec` across its spill
-against a `Vec` model, under `cargo xtask fuzz`; `cargo xtask miri` interprets
+over deliberately colliding key streams, `SmallVec` across its spill against a
+`Vec` model, and the ordered map against `alloc`'s, under `cargo xtask fuzz`;
+`cargo xtask miri` interprets
 the suite under the undefined-behaviour oracle, which is what the table's
 `unsafe` core needs. A test suite says what the code computes; only an
 interpreter says whether a raw pointer stayed in bounds, whether a slot was

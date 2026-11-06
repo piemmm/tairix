@@ -35,6 +35,10 @@
 //! `tairix_abi`'s `KeyInput`, the same producer/consumer split as the pointer
 //! ([`PointerButton`] vs `tairix_abi`'s `PointerButtonCode`).
 //!
+//! [`keyboard`](mod@keyboard) is what every keyboard producer shares once it
+//! has named a key edge's physical key: the held modifiers, the locks and the
+//! US layout.
+//!
 //! # Gestures composed from those events
 //!
 //! [`click`](mod@click) holds the one double-click rule: two presses of the
@@ -52,9 +56,12 @@
 #![deny(missing_docs)]
 
 pub mod click;
+pub mod keyboard;
 pub mod wheel;
+pub mod wire;
 
 pub use click::{past_drag_slop, ClickKind, ClickRun, DoubleClickTracker, DRAG_SLOP};
+pub use keyboard::{KeyEdge, KeyboardState};
 pub use tairix_abi::touch::PinchPhase;
 
 use tairix_geometry::Point;
@@ -122,11 +129,10 @@ pub enum ModifierSide {
 
 /// The modifier keys a keyboard currently holds down.
 ///
-/// The one definition of "which modifiers are held", shared by every keyboard
-/// producer: each maps its own device's usage or keycode space to a
-/// [`ModifierKey`] + [`ModifierSide`] and feeds the edge here, so the
-/// left/right collapsing rule and the "did the visible set actually change?"
-/// test cannot differ between two drivers.
+/// The one definition of "which modifiers are held", which [`KeyboardState`]
+/// keeps for every keyboard producer, so the left/right collapsing rule and the
+/// "did the visible set actually change?" test cannot differ between two
+/// drivers.
 ///
 /// [`press`](Self::press) and [`release`](Self::release) report whether the
 /// collapsed [`Modifiers`] changed, which is what makes a producer able to

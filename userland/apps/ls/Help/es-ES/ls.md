@@ -18,34 +18,35 @@ cualquier otro operando se lista tal cual. Sin operandos se lista el
 directorio actual (`.`).
 
 Las entradas se ordenan por nombre (o por tamaño, la mayor primero,
-con `-S`; por marca de tiempo, la más reciente primero, con `-t`;
-invertidas con `-r`), un nombre por línea de forma
-predeterminada. Las entradas cuyo nombre empieza por `.` se ocultan
-salvo que se dé `-a` o `-A`; cuando se ocultan entradas, se emite una
-nota en el flujo de información estándar (fd 3), nunca en la lista
-misma.
+con `-S`; por marca de tiempo, la más reciente primero, con `-t`; por
+extensión con `-X`; en orden «versión» natural con `-v`; sin ordenar —
+en el orden del directorio — con `-U`; según una clave elegida por
+nombre con `--sort`; invertidas con `-r`). `--group-directories-first`
+sube los directorios al principio del orden. Cuando la salida es una
+terminal se disponen en columnas ajustadas al ancho de la terminal,
+rellenadas de arriba abajo (`-C`); cuando no lo es (una tubería o un
+archivo), se listan con un nombre por línea. `-x` rellena en cambio las
+columnas de izquierda a derecha, `-m` las lista separadas por comas,
+`-1` fuerza una por línea, y `-w` fija el ancho explícitamente. Las
+entradas cuyo nombre empieza por `.` se ocultan salvo que se dé `-a` o
+`-A`; cuando se ocultan entradas, se emite una nota en el flujo de
+información estándar (fd 3), nunca en la lista misma.
 
 El formato largo (`-l`) muestra los bits de tipo y permisos, el
-propietario y el grupo, el tamaño y luego el nombre. El propietario y
-el grupo son identificadores numéricos: resolver nombres de cuentas
-exige la base de datos de usuarios protegida por capacidad, que un
-listado no debe exigir; la salida coincide por tanto con el repliegue
-numérico de la herramienta GNU (`-n` produce lo mismo). La columna de
-marca de tiempo muestra la hora de modificación de forma
+propietario y el grupo, el tamaño, una marca de tiempo y luego el
+nombre. El propietario y el grupo son identificadores numéricos:
+resolver nombres de cuentas exige la base de datos de usuarios protegida
+por capacidad, que un listado no debe exigir; la salida coincide por
+tanto con el repliegue numérico de la herramienta GNU (`-n` produce lo
+mismo). La marca de tiempo es la hora de modificación de forma
 predeterminada; `-c`, `-u` y `--time` eligen cuál de las cuatro marcas
-se muestra (y por cuál se ordena), y `--time-style` — o `--full-time`
-— fija su formato. Aún no hay columna de número de enlaces porque el
-contrato del sistema de archivos todavía no lleva enlaces duros;
-aparecerá cuando lo haga.
-
-Cuando se dan varios operandos — y siempre bajo `-R` — la lista de cada
-directorio va precedida de un encabezado `ruta:`, y los bloques se
-separan con una línea en blanco. La ruta de un encabezado se
-entrecomilla en el estilo de la lista, y también cualquier `:` que
-contenga.
+se muestra (y por cuál se ordena), y `--time-style` — o `--full-time` —
+fija su formato. La columna de número de enlaces indica cuántas entradas
+de directorio nombran el archivo, tal como lo registra el propio sistema
+de archivos; un formato que no lleva la cuenta responde `1`.
 
 Un enlace simbólico se muestra con la letra de tipo `l` y, en el formato
-largo, como `nombre -> destino` — el destino exactamente como está
+largo, como `name -> target` — el destino exactamente como está
 guardado, sin resolver, que es lo que el enlace contiene. Un enlace
 colgado se lista por tanto con normalidad; solo una postura que lo
 resuelva (`-L`, o `-H` para un operando) informa de un destino
@@ -63,6 +64,20 @@ estilos de shell y ese carácter se escapa con `-Q` y `-b`, de modo que
 no puede pasar por un sufijo indicador. El `-F` de GNU deja un `*` sin
 marcar, así que allí un nombre que termine en uno parece un ejecutable.
 
+En una terminal en color, los nombres se colorean por tipo —
+directorios, ejecutables y archivos simples, cada uno en el papel del
+esquema estándar — bajo el control de `--color`. El color es solo
+presentación: se añade a la representación en la terminal y nunca a la
+salida canalizada o redirigida; salvo por las secuencias de escape, la
+salida es idéntica byte a byte al listado simple, así que el color nunca
+cambia las columnas, el orden ni lo que ve un script.
+
+Cuando se dan varios operandos — y siempre bajo `-R` — la lista de cada
+directorio va precedida de un encabezado `path:`, y los bloques se
+separan con una línea en blanco. La ruta de un encabezado se
+entrecomilla en el estilo de la lista, y también cualquier `:` que
+contenga.
+
 ## OPTIONS
 
 - `-t` — ordenar por la marca de tiempo mostrada, la más reciente
@@ -74,7 +89,8 @@ marcar, así que allí un nombre que termine en uno parece un ejecutable.
 - `-B, --ignore-backups` — no listar las entradas cuyo nombre termina
   en `~`, en todos los modos (las copias se ocultan incluso con `-a`).
 - `-I, --ignore=PATTERN` — no listar las entradas que coincidan con el
-  patrón glob `PATTERN` (repetible); se aplica en todos los modos.
+  patrón glob `PATTERN` (repetible); se aplica en todos los modos. Un
+  `.` inicial solo lo reconoce un `.` del patrón, nunca un comodín.
 - `--hide=PATTERN` — como `--ignore`, pero sin efecto cuando se indica
   `-a` o `-A`.
 - `--time=WORD` — qué marca mostrar y por cuál ordenar: `atime`
@@ -90,11 +106,12 @@ marcar, así que allí un nombre que termine en uno parece un ejecutable.
 - `-F, --classify` — añadir `/` a los directorios y `*` a los
   ejecutables.
 - `-g` — formato largo sin la columna de propietario; implica `-l`.
-- `-h, --human-readable` — con `-l`, mostrar tamaños como `1.1K`,
-  `23M` (potencias de 1024).
+- `-h, --human-readable` — mostrar tamaños como `1.1K`, `23M`
+  (potencias de 1024), tanto para los tamaños de archivo del formato
+  largo como para los bloques de `-s`.
 - `-l` — formato largo: bits de permisos, propietario, grupo, tamaño
   y luego nombre.
-- `-m` — nombres separados por comas, ajustados al ancho.
+- `-m` — nombres separados por comas, ajustados al ancho de salida.
 - `-n, --numeric-uid-gid` — formato largo con propietario y grupo
   numéricos; implica `-l`. El propietario y el grupo siempre son
   numéricos aquí (véase arriba), así que coincide con `-l`.
@@ -130,12 +147,13 @@ marcar, así que allí un nombre que termine en uno parece un ejecutable.
   omisión cuando ninguna opción de formato impone otro: un enlace de la
   línea de órdenes *a un directorio* se desreferencia, así que
   `ls linkdir` lista el directorio, mientras cualquier otro enlace se
-  muestra como enlace. `-l`, `-d` y `-F` muestran en cambio cada enlace.
+  muestra como enlace. `-l`, `-d` y `-F` pasan en cambio a mostrar por
+  omisión cada enlace como enlace.
 - `-s, --size` — mostrar el tamaño asignado de cada entrada en bloques
-  de 1024 bytes (escalado con `-h`), con una línea `total` por
-  directorio listado.
+  (escalado por `-h` / `--si` / `--block-size` / `-k`), con una línea
+  `total` por directorio listado.
 - `-C` — listar en columnas, rellenadas de arriba abajo
-  (predeterminado en un terminal).
+  (predeterminado cuando la salida es una terminal).
 - `-S` — ordenar por tamaño, el mayor primero.
 - `-U` — no ordenar; listar las entradas en el orden del directorio.
 - `-X` — ordenar por extensión del nombre (el texto desde el último
@@ -150,13 +168,14 @@ marcar, así que allí un nombre que termine en uno parece un ejecutable.
   o `name`.
 - `--group-directories-first` — listar los directorios antes que las
   demás entradas; los directorios primero incluso con `-r`.
-- `-w, --width <cols>` — fijar el ancho de salida en columnas;
-  `0` significa ilimitado.
+- `-w, --width <cols>` — fijar el ancho de salida en columnas; `0`
+  significa una longitud de línea ilimitada. Sin ella se usa el ancho de
+  la terminal, o 80 cuando no puede determinarse.
 - `-x` — listar en columnas, rellenadas de izquierda a derecha.
-- `-1` — un nombre por línea (el comportamiento predeterminado).
+- `-1` — un nombre por línea (el comportamiento predeterminado cuando la
+  salida no es una terminal).
 - `-?` — mostrar la ayuda corta de este comando (`--help` es la
   forma larga).
-
 - `--file-type` — añadir `/` a los directorios, pero nunca `*` a los
   ejecutables (`--indicator-style=file-type`).
 - `--indicator-style=WORD` — elegir el sufijo indicador por nombre:
@@ -165,15 +184,18 @@ marcar, así que allí un nombre que termine en uno parece un ejecutable.
 - `-G, --no-group` — omitir la columna de grupo del formato largo; a
   diferencia de `-o`, no selecciona el formato largo por sí solo.
 - `--author` — con `-l`, mostrar la columna de autor (el usuario
-  propietario) después del propietario y antes del grupo.
+  propietario, ya que no hay un autor aparte) después del propietario y
+  antes del grupo.
 - `--si` — como `-h` pero en potencias de 1000 (`1.1k`, `23M`).
 - `-k, --kibibytes` — usar bloques de 1024 bytes para las celdas `-s`
-  y la línea `total` (ya es el valor predeterminado; una opción de
-  tamaño tiene prioridad).
-- `--block-size=SIZE` — escalar los tamaños de archivo y los bloques
-  `-s` por SIZE: un entero (bytes), o una unidad `K`/`M`/`G`/`T`/`P`/
-  `E` (1024), una unidad `KiB` (1024) o una unidad `KB` (1000),
-  opcionalmente con un coeficiente entero.
+  y el `total`. Ya es el valor predeterminado, así que confirma la
+  salida en lugar de cambiarla; una opción de tamaño tiene prioridad.
+- `--block-size=SIZE` — escalar los tamaños de archivo del formato largo
+  y los bloques `-s` por SIZE: un entero simple (bytes), o una unidad
+  `K`/`M`/`G`/`T`/`P`/`E` (base 1024), una unidad al estilo `KiB` (base
+  1024) o una unidad al estilo `KB` (base 1000), opcionalmente con un
+  coeficiente entero delante. Una unidad sola imprime su sufijo; un
+  coeficiente lo suprime. Un SIZE mal formado es un error.
 - `--format=WORD` — elegir la disposición por nombre: `long` (`-l`) o
   `verbose`, `single-column` (`-1`), `vertical` (`-C`), `across` u
   `horizontal` (`-x`), o `commas` (`-m`).
@@ -181,8 +203,8 @@ marcar, así que allí un nombre que termine en uno parece un ejecutable.
   cuadrícula de columnas (8 por defecto); `0` rellena solo con
   espacios.
 - `--zero` — terminar cada línea con NUL en lugar de nueva línea;
-  también selecciona una sola columna, entrecomillado literal y
-  caracteres de control visibles.
+  también selecciona, salvo que se indique otra cosa, una sola columna,
+  entrecomillado literal y caracteres de control visibles.
 
 - `--color[=WHEN]` — colorear los nombres por tipo (directorios,
   ejecutables, archivos simples). `WHEN` es `auto` (el valor
@@ -197,6 +219,9 @@ marcar, así que allí un nombre que termine en uno parece un ejecutable.
 - `ls -al /System` — listado en formato largo de `/System`, entradas
   ocultas incluidas.
 - `ls -lhS` — formato largo, tamaños legibles, el mayor primero.
+- `ls -v` — orden natural, de modo que `f2` va antes de `f10`.
+- `ls --group-directories-first` — primero los directorios, luego los
+  archivos.
 - `ls -R Documents` — recorrer `Documents` recursivamente, un
   encabezado por directorio.
 - `ls -F` — marcar los directorios con `/` y los ejecutables con `*`.

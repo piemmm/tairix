@@ -49,8 +49,8 @@
 //! bounded caches use ([`CacheBudget`]) and gated per growth by the
 //! system pressure gauge
 //! ([`tairix_reclaim::PressureGauge::growth_permitted`]). When the
-//! budget or the gauge refuses growth the journal degrades honestly: it
-//! wipes and drops what it held and reports itself
+//! budget, the gauge or the heap refuses growth the journal degrades
+//! honestly: it wipes and drops what it held and reports itself
 //! [lost](RetainedWrites::is_lost) — the surprise-removal path then says
 //! "uncommitted data existed and was not retained" rather than quietly
 //! pretending. A subsequent *successful* device flush returns the journal
@@ -60,11 +60,10 @@
 //! # Secret hygiene
 //!
 //! Retained bytes are user data (they may include credential-bearing
-//! blocks a filesystem wrote); every retained buffer is volatilely wiped
-//! before its entry is released — on refresh-discharge, commit, loss, and
+//! blocks a filesystem wrote); every retained buffer wipes itself,
+//! volatilely, as its entry is released — on discard, commit, loss, and
 //! teardown — exactly as the block cache wipes its entries.
 
-use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -75,8 +74,10 @@ use tairix_abi::driver::block::{
 use tairix_abi::driver::BufferClass;
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::DriverError;
+use tairix_collections::OrderedMap;
 use tairix_reclaim::{CacheBudget, GrowthAllowance, MemoryPressure, MAP_ENTRY_OVERHEAD};
 use tairix_sync::SpinLock;
+use tairix_util::secret::WipedBuf;
 use zeroize::Zeroize;
 
 /// The commit watermark as a divisor of the budget's hard limit: once the
@@ -115,8 +116,9 @@ pub struct RetainedWrites {
     /// The byte ceiling (payload + per-entry overhead) retention may
     /// occupy.
     budget: CacheBudget,
-    /// Retained block payloads, keyed by device-absolute LBA.
-    blocks: BTreeMap<u64, Vec<u8>>,
+    /// Retained block payloads, keyed by device-absolute LBA, each wiped as
+    /// it is released.
+    blocks: OrderedMap<u64, WipedBuf>,
     /// Accounted bytes: payload plus [`MAP_ENTRY_OVERHEAD`] per entry.
     bytes: usize,
     /// Retention was abandoned since the last committed flush (budget or
@@ -138,7 +140,7 @@ impl RetainedWrites {
         Self {
             block_size: block_size as usize,
             budget,
-            blocks: BTreeMap::new(),
+            blocks: OrderedMap::new(),
             bytes: 0,
             lost: false,
             evidence: None,
@@ -172,7 +174,8 @@ impl RetainedWrites {
         self.bytes > self.budget.hard() / COMMIT_DIVISOR
     }
 
-    /// Volatilely wipe a retained buffer before its entry is released.
+    /// Volatilely wipe an evidence shadow's or a replay snapshot's copy
+    /// before it is released.
     fn wipe(data: &mut Vec<u8>) {
         data.as_mut_slice().zeroize();
     }
@@ -293,7 +296,7 @@ impl RetainedWrites {
 
     /// Record one successful device write of whole blocks starting at
     /// `lba`, coalescing per block. Growth past the budget, or growth the
-    /// pressure gauge refuses, abandons retention ([`Self::mark_lost`])
+    /// pressure gauge or the heap refuses, abandons retention ([`Self::mark_lost`])
     /// rather than evicting: the journal is the only copy, so partial
     /// retention would be a lie.
     ///
@@ -334,7 +337,10 @@ impl RetainedWrites {
                     return;
                 }
                 copy.extend_from_slice(bytes);
-                self.blocks.insert(block, copy);
+                if self.blocks.try_insert(block, WipedBuf::new(copy)).is_err() {
+                    self.mark_lost();
+                    return;
+                }
                 self.bytes += cost;
             }
             block += 1;
@@ -355,8 +361,7 @@ impl RetainedWrites {
             }
         }
         while let Some((&key, _)) = self.blocks.range(lba..end).next() {
-            if let Some(mut entry) = self.blocks.remove(&key) {
-                Self::wipe(&mut entry);
+            if self.blocks.remove(&key).is_some() {
                 self.bytes = self
                     .bytes
                     .saturating_sub(self.block_size + MAP_ENTRY_OVERHEAD);
@@ -369,9 +374,6 @@ impl RetainedWrites {
     /// the evidence window's latest content becomes its committed
     /// content.
     pub fn commit(&mut self) {
-        for entry in self.blocks.values_mut() {
-            Self::wipe(entry);
-        }
         self.blocks.clear();
         self.bytes = 0;
         self.lost = false;
@@ -386,9 +388,6 @@ impl RetainedWrites {
     /// reads [`Self::retained_bytes`] first to log what was given up —
     /// discarding is never silent.
     pub fn discard_all(&mut self) {
-        for entry in self.blocks.values_mut() {
-            Self::wipe(entry);
-        }
         self.blocks.clear();
         self.bytes = 0;
         self.lost = false;
@@ -399,9 +398,6 @@ impl RetainedWrites {
     /// evidence shadow goes with it — writes stop being folded into it
     /// while the journal is lost, so it could never again be truthful.
     fn mark_lost(&mut self) {
-        for entry in self.blocks.values_mut() {
-            Self::wipe(entry);
-        }
         self.blocks.clear();
         self.bytes = 0;
         self.lost = true;
@@ -433,13 +429,9 @@ impl Drop for ReplaySnapshot {
 }
 
 impl Drop for RetainedWrites {
-    /// Teardown wipes every retained buffer: retained blocks are user
-    /// data, which must not outlive their owner in reusable heap memory.
-    /// The evidence shadow is device content too and is wiped with them.
+    /// Teardown wipes the evidence shadow: it is device content, as the
+    /// retained blocks are, which wipe themselves as they go.
     fn drop(&mut self) {
-        for entry in self.blocks.values_mut() {
-            Self::wipe(entry);
-        }
         self.invalidate_evidence();
     }
 }
@@ -1098,6 +1090,22 @@ mod tests {
         assert!(blocks[0].1.iter().all(|&b| b == 2));
         assert_eq!(blocks[1].0, 5);
         assert!(blocks[1].1.iter().all(|&b| b == 5));
+    }
+
+    /// A block the heap cannot hold abandons retention as a refused budget
+    /// does: the write stands, and the journal says it holds none of it.
+    #[test]
+    fn a_block_the_heap_cannot_hold_is_reported_lost() {
+        let (mut device, journal) = journaled(64, CacheBudget::from_backing(1 << 30));
+        let block = [7u8; BLOCK_SIZE as usize];
+        let lost = crate::test_alloc::past_each_refusal(&true, || {
+            journal.lock().commit();
+            assert_eq!(device.write_blocks(0, &block), Ok(()));
+            journal.lock().is_lost()
+        });
+        assert!(!lost, "retained once the heap granted it");
+        assert_eq!(journal.lock().retained_bytes(), u64::from(BLOCK_SIZE));
+        assert_eq!(&device.device.data[..BLOCK_SIZE as usize], &block[..]);
     }
 
     #[test]

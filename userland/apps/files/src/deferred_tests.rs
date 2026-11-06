@@ -205,6 +205,20 @@ fn a_committed_write_goes_before_an_eject_and_an_eject_before_an_open() {
     }
 }
 
+/// A shown bundle's follow let go is ended on its volume's lane before the
+/// eject of that volume, so the app's own files never hold it as it goes.
+#[test]
+fn a_follow_let_go_is_ended_before_the_eject_of_its_volume() {
+    let queued = [(ReadKind::Settle, 'v'), (ReadKind::Unfollow, 'v')];
+    let next = first_in_order(Some('v'), |kind, only| {
+        queued
+            .iter()
+            .copied()
+            .find(|&(each, lane)| each == kind && only.is_none_or(|only| only == lane))
+    });
+    assert_eq!(next, Some((ReadKind::Unfollow, 'v')));
+}
+
 /// An eject given up once located frees its room, so a withdrawn one never
 /// keeps a later eject out.
 #[test]

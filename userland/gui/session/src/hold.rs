@@ -15,7 +15,8 @@ use tairix_wm::WindowId;
 /// Holders of one window are its family's transients that keep their order,
 /// so the last taken is the one in front. Bounded by what may hold — each
 /// application's alerts and its dialogs, both bounded by the window server, and
-/// the one trusted picker — so a scan is the right structure for so few.
+/// the picks, bounded by the session — so a scan is the right structure for so
+/// few.
 #[derive(Default)]
 pub struct Holds {
     up: Vec<Hold>,

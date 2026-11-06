@@ -5,8 +5,10 @@
 //! zeroed on free, and this module is the only blessed API for one:
 //! [`alloc_sensitive`] hands back a zeroed [`SensitiveBuffer`] of a given
 //! length and [`SensitiveBuffer::copy_from_slice`] one holding a copy of
-//! existing bytes; both wipe themselves on drop. Zeroing is delegated to the
-//! audited `zeroize` crate rather than hand-rolled.
+//! existing bytes; [`SensitiveRoom`] is reserved storage written in place,
+//! which costs only the bytes written to fill and to wipe. All wipe
+//! themselves on drop. Zeroing is delegated to the audited `zeroize` crate
+//! rather than hand-rolled.
 //!
 //! Sensitive buffers are deliberately *not* `Clone`: every copy of a
 //! secret would need its own zero-on-free dance, and accidentally
@@ -116,6 +118,100 @@ impl Drop for SensitiveBuffer {
     }
 }
 
+/// Reserved storage for secrets written in place, wiped on drop.
+///
+/// Its storage is reserved whole at construction and never moves, so no write
+/// leaves a copy behind in a block it outgrew. Only what is written is
+/// initialised: the high-water mark of the writes, which never falls, is what
+/// a fill touches and what the wipe on drop covers, so a room larger than what
+/// it carries costs nothing for the bytes it never held.
+pub struct SensitiveRoom {
+    /// Initialised up to the high-water mark.
+    buf: alloc::vec::Vec<u8>,
+    capacity: usize,
+}
+
+impl SensitiveRoom {
+    /// A room that holds nothing, which allocates nothing.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            buf: alloc::vec::Vec::new(),
+            capacity: 0,
+        }
+    }
+
+    /// A room for up to `capacity` bytes, none of them written yet.
+    ///
+    /// # Errors
+    ///
+    /// [`AllocError::OutOfMemory`] if the heap cannot reserve it.
+    pub fn with_capacity(capacity: usize) -> Result<Self, AllocError> {
+        let mut buf = alloc::vec::Vec::new();
+        buf.try_reserve_exact(capacity)
+            .map_err(|_| AllocError::OutOfMemory)?;
+        Ok(Self { buf, capacity })
+    }
+
+    /// The most bytes it can hold.
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Its high-water mark: the bytes ever written, which the wipe covers.
+    #[must_use]
+    pub fn written(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// The first `len` bytes, or [`None`] past the high-water mark.
+    #[must_use]
+    pub fn head(&self, len: usize) -> Option<&[u8]> {
+        self.buf.get(..len)
+    }
+
+    /// The first `len` bytes to write, zero past the high-water mark, or
+    /// [`None`] past its capacity.
+    pub fn head_mut(&mut self, len: usize) -> Option<&mut [u8]> {
+        if len > self.capacity {
+            return None;
+        }
+        if len > self.buf.len() {
+            // Within the storage reserved, so nothing written moves.
+            self.buf.resize(len, 0);
+        }
+        self.buf.get_mut(..len)
+    }
+
+    /// Zero the first `len` bytes written, or all of them, keeping the mark:
+    /// a room reused for a second secret wipes only what the first wrote.
+    pub fn wipe_to(&mut self, len: usize) {
+        let end = len.min(self.buf.len());
+        if let Some(head) = self.buf.get_mut(..end) {
+            head.zeroize();
+        }
+    }
+}
+
+impl fmt::Debug for SensitiveRoom {
+    /// Its sizes, never its bytes.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SensitiveRoom")
+            .field("capacity", &self.capacity)
+            .field("written", &self.buf.len())
+            .finish()
+    }
+}
+
+impl Drop for SensitiveRoom {
+    fn drop(&mut self) {
+        // Volatile writes the compiler may not elide, over every byte ever
+        // written; nothing past them was written through this room.
+        self.buf.as_mut_slice().zeroize();
+    }
+}
+
 /// Allocate a `len`-byte sensitive buffer, initialised to zero.
 ///
 /// `len == 0` yields an empty buffer rather than an error: a caller whose
@@ -197,6 +293,55 @@ mod tests {
         // Calling the same trait method drop will call:
         buf.as_bytes_mut().zeroize();
         assert!(buf.as_bytes().iter().all(|b| *b == 0));
+    }
+
+    /// A room reserves its storage but initialises, and so wipes, only what
+    /// is written.
+    #[test]
+    fn a_room_marks_only_what_is_written() {
+        let mut room = SensitiveRoom::with_capacity(64).unwrap();
+        assert_eq!((room.capacity(), room.written()), (64, 0));
+        room.head_mut(3).unwrap().copy_from_slice(b"key");
+        assert_eq!(room.written(), 3);
+        assert_eq!(room.head(3), Some(&b"key"[..]));
+        assert_eq!(room.head(4), None, "nothing past the mark is readable");
+        room.head_mut(2).unwrap().fill(0);
+        assert_eq!(room.written(), 3, "a shorter write keeps the mark");
+    }
+
+    /// A wipe clears what was written and keeps the mark, so the next secret
+    /// is written over zeroes.
+    #[test]
+    fn a_room_wipe_clears_what_was_written_and_keeps_the_mark() {
+        let mut room = SensitiveRoom::with_capacity(8).unwrap();
+        room.head_mut(5).unwrap().fill(0xAB);
+        room.wipe_to(2);
+        assert_eq!(room.head(5), Some(&[0, 0, 0xAB, 0xAB, 0xAB][..]));
+        room.wipe_to(usize::MAX);
+        assert_eq!(room.head(5), Some(&[0; 5][..]));
+        assert_eq!(room.written(), 5);
+    }
+
+    /// A write past the capacity is refused, and no write moves the storage,
+    /// so none leaves a copy behind.
+    #[test]
+    fn a_room_refuses_past_its_capacity_and_never_moves() {
+        let mut room = SensitiveRoom::with_capacity(16).unwrap();
+        let at = room.head_mut(1).unwrap().as_ptr();
+        assert!(room.head_mut(17).is_none());
+        assert_eq!(room.head_mut(16).unwrap().as_ptr(), at);
+        let mut empty = SensitiveRoom::empty();
+        assert!(empty.head_mut(1).is_none());
+        assert_eq!(empty.head_mut(0).map(|head| head.len()), Some(0));
+    }
+
+    #[test]
+    fn a_room_debug_does_not_leak_contents() {
+        let mut room = SensitiveRoom::with_capacity(8).unwrap();
+        room.head_mut(6).unwrap().copy_from_slice(b"S3CR3T");
+        let s = format!("{room:?}");
+        assert!(!s.contains("S3CR3T"));
+        assert!(s.contains("written: 6"));
     }
 
     /// Smoke test that `free_sensitive` is a drop-equivalent helper —

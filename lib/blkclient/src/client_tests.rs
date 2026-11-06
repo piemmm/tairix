@@ -16,6 +16,8 @@ struct MemDevice {
     flags: u32,
     medium: Option<BlkMedium>,
     disc_layout: Option<DiscLayout>,
+    /// What the device states tells it from every other of its kind.
+    identity: Option<BlkDeviceIdentity>,
     calls: Vec<BlkRequest>,
     /// The per-request deadline each exchange was given, so a test can
     /// prove the wait bound follows the device's own class rather than a
@@ -98,6 +100,11 @@ impl BlkCall for MemDevice {
                 BlkCompletion::default().encode(reply)
             }
             BlkOp::Flush => BlkCompletion::default().encode(reply),
+            BlkOp::Identity => {
+                window[..BLK_DEVICE_IDENTITY_LEN]
+                    .copy_from_slice(&BlkDeviceIdentity::encode(self.identity));
+                BlkCompletion::default().encode(reply)
+            }
         }
     }
 }
@@ -109,6 +116,7 @@ fn device(block_size: u32, block_count: u64, flags: u32) -> MemDevice {
         flags,
         medium: Some(DEVICE_MEDIUM),
         disc_layout: None,
+        identity: None,
         calls: Vec::new(),
         deadlines: Vec::new(),
         written: Vec::new(),
@@ -967,4 +975,120 @@ fn every_request_after_the_geometry_repeats_the_publications_binding() {
     assert_eq!(calls[0].binding, 0, "the geometry query names no binding");
     assert_eq!(calls.len(), 4);
     assert!(calls[1..].iter().all(|call| call.binding == DEVICE_BINDING));
+}
+
+#[test]
+fn identify_reads_what_the_device_states_and_none_for_none() {
+    for identity in [
+        BlkDeviceIdentity::new([0x5A; BLK_DEVICE_IDENTITY_LEN]),
+        None,
+    ] {
+        let mut window = vec![0u8; BLK_DATA_LEN];
+        let served = MemDevice {
+            identity,
+            ..device(512, 64, 0)
+        };
+        let mut client = RemoteBlock::connect_read_only(served, &mut window).expect("connects");
+        assert_eq!(client.identify(), identity);
+        let asked = client
+            .call
+            .calls
+            .last()
+            .copied()
+            .expect("the question was asked");
+        assert_eq!(asked.op, BlkOp::Identity);
+        assert_eq!(
+            (asked.lba, asked.blocks, asked.binding),
+            (0, 0, DEVICE_BINDING),
+            "it names no blocks and repeats the publication's binding"
+        );
+    }
+}
+
+/// A device that answers the identity request without writing the window
+/// states none, never the bytes an earlier transfer left there.
+#[test]
+fn an_identity_the_device_leaves_unwritten_is_none() {
+    /// Serves as [`MemDevice`] does, but answers the identity request without
+    /// touching the window.
+    struct Silent(MemDevice);
+    impl BlkCall for Silent {
+        fn pause(&mut self, _ns: u64) {}
+
+        fn call(
+            &mut self,
+            request: &[u8],
+            reply: &mut [u8],
+            window: &mut [u8],
+            deadline_ns: u64,
+        ) -> Result<usize, Errno> {
+            if BlkRequest::decode(request)?.op == BlkOp::Identity {
+                return BlkCompletion::default().encode(reply);
+            }
+            self.0.call(request, reply, window, deadline_ns)
+        }
+    }
+    let mut window = vec![0u8; BLK_DATA_LEN];
+    let mut client =
+        RemoteBlock::connect_read_only(Silent(device(512, 64, 0)), &mut window).expect("connects");
+    let mut buf = [0u8; 512];
+    client
+        .read_blocks(1, &mut buf)
+        .expect("a read leaves its bytes in the window");
+    assert!(
+        buf[..BLK_DEVICE_IDENTITY_LEN].iter().any(|&byte| byte != 0),
+        "the premise: the window holds an earlier transfer's bytes"
+    );
+    assert_eq!(client.identify(), None);
+}
+
+/// A device that refuses the identity request, fails it, or answers it in a
+/// frame that does not decode states none, whatever it left in the window.
+#[test]
+fn an_identity_the_device_refuses_or_garbles_is_none() {
+    use tairix_abi::blkio::{encode_error_completion, BlkStatus};
+
+    /// How the device answers the identity request, into its reply frame.
+    type Answer = fn(&mut [u8]) -> Result<usize, Errno>;
+
+    /// Writes an identity into the window, then answers the identity request
+    /// with `answer`.
+    struct Disowning {
+        inner: MemDevice,
+        answer: Answer,
+    }
+    impl BlkCall for Disowning {
+        fn pause(&mut self, _ns: u64) {}
+
+        fn call(
+            &mut self,
+            request: &[u8],
+            reply: &mut [u8],
+            window: &mut [u8],
+            deadline_ns: u64,
+        ) -> Result<usize, Errno> {
+            if BlkRequest::decode(request)?.op != BlkOp::Identity {
+                return self.inner.call(request, reply, window, deadline_ns);
+            }
+            window[..BLK_DEVICE_IDENTITY_LEN].fill(0x5A);
+            (self.answer)(reply)
+        }
+    }
+    let answers: [Answer; 3] = [
+        |reply| encode_error_completion(reply, Errno::PermissionDenied),
+        |reply| BlkCompletion::default().encode_status(BlkStatus::Fatal, reply),
+        |reply| {
+            reply[..4].copy_from_slice(&0i32.to_le_bytes());
+            Ok(4)
+        },
+    ];
+    for answer in answers {
+        let mut window = vec![0u8; BLK_DATA_LEN];
+        let served = Disowning {
+            inner: device(512, 64, 0),
+            answer,
+        };
+        let mut client = RemoteBlock::connect_read_only(served, &mut window).expect("connects");
+        assert_eq!(client.identify(), None);
+    }
 }

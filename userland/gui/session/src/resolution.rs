@@ -400,14 +400,14 @@ impl ResolutionPrompt {
 }
 
 /// Whole seconds left before `due_ns`, counting a part second as one.
-fn seconds_left(due_ns: u64, now_ns: u64) -> u64 {
+pub(crate) fn seconds_left(due_ns: u64, now_ns: u64) -> u64 {
     due_ns
         .saturating_sub(now_ns)
         .div_ceil(u64::from(NANOS_PER_SEC))
 }
 
 /// When the countdown shown at `now_ns` next drops a second.
-fn next_step(due_ns: u64, now_ns: u64) -> u64 {
+pub(crate) fn next_step(due_ns: u64, now_ns: u64) -> u64 {
     let left = seconds_left(due_ns, now_ns);
     due_ns.saturating_sub(left.saturating_sub(1) * u64::from(NANOS_PER_SEC))
 }

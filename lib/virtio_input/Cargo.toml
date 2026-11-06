@@ -18,8 +18,8 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # against, so it consumes the protocol without naming a concrete bus driver
 # (`lib/* → lib/*` only).
 tairix-virtio = { path = "../virtio", version = "=0.0.0" }
-# The decoded keyboard `Key` vocabulary the console producer resolves evdev
-# keycodes into (a `lib/*` crate).
+# The keyboard state and US layout the console producer resolves each evdev
+# keycode's physical key through (a `lib/*` crate).
 tairix-input = { path = "../input", version = "=0.0.0" }
 # The shared terminal key map that turns each resolved key press into the
 # `KeyInput` record a driver injects through `key_inject` — the one definition

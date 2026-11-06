@@ -32,8 +32,6 @@ use alloc::sync::Arc;
 use tairix_abi::ipc::{IPC_MESSAGE_MAX_PAYLOAD_LEN, IPC_SENDER_DEPTH_MAX};
 use tairix_abi::{Errno, LimitKind, Origin, ProcId};
 use tairix_caps::CapabilitySet;
-use tairix_collections::HashSet;
-use tairix_hash::BuildFastHash;
 use tairix_kernel_mem::SensitiveBuffer;
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::Charge;
@@ -45,7 +43,7 @@ use crate::lanes::{
     lane_cost, KeepRoom, Lane, Lanes, Opened, RoomWaiters, RoomWake, SPARE_LANES, SPARE_LANE_ITEMS,
 };
 use crate::loom_compat::{AtomicU32, Ordering};
-use crate::registry::SenderIndex;
+use crate::senders::{Noted, SenderIndex};
 
 /// Why a send was refused: the sender lacks the port's send capabilities.
 const SEND_DENIED_CAPABILITY: Field<'static> = Field {
@@ -80,6 +78,10 @@ mod state {
     /// `destroy()` has begun; senders must fail-closed.
     pub(super) const CLOSED: u32 = 1;
 }
+
+/// What a committed receive hands back: the receiver's answer, the message
+/// taken, and the thread of its sender the slot its taking freed was handed to.
+pub type Received<R> = (R, Message, RoomWake<ProcId>);
 
 /// A message in flight or queued for delivery on a [`Port`].
 ///
@@ -281,17 +283,13 @@ struct Mailbox {
     /// the first is, so a sender the port will never take cannot flood the
     /// audit trail through it; the rest are counted into its destruction.
     refusal_recorded: bool,
-    /// The senders noted in the registry's index as using the port, so only a
-    /// sender's first use takes the index's lock.
-    noted: Noted,
-}
-
-/// Sending instances, which the kernel mints and no sender chooses, so the
-/// fast unkeyed hash is safe.
-type Noted = HashSet<ProcId, BuildFastHash>;
-
-const fn noted() -> Noted {
-    HashSet::with_hasher(BuildFastHash::new())
+    /// Notes each sender in the registry's index once, so only its first use
+    /// of the port takes the index's lock.
+    noted: Noted<ProcId>,
+    /// Senders' threads waiting on a wait-set member for room in their own
+    /// lane, under the lock that frees it, so taking a message and handing
+    /// the slot it freed on are one critical section.
+    room: RoomWaiters<ProcId>,
 }
 
 /// One end of an IPC message channel.
@@ -320,15 +318,6 @@ pub struct Port {
     // Mailbox under a spinlock: IPC sends never block on I/O, and the lock
     // is held only for bounded lane bookkeeping.
     mailbox: tairix_sync::SpinLock<Mailbox>,
-    /// The tasks parked on a wait-set member observing this port's *room*,
-    /// each with the sender it waits as, so the receive that frees a slot in
-    /// one sender's lane wakes exactly that sender's waiters. Kept beside the
-    /// mailbox rather than in a registry keyed by endpoint so occupancy and
-    /// the parties waiting on it cannot drift apart.
-    room_waiters: tairix_sync::SpinLock<RoomWaiters<ProcId>>,
-    /// The registry's index of the ports each sender uses, once the port is
-    /// registered.
-    index: Option<Arc<SenderIndex>>,
     /// What the owner is charged for the port's bookkeeping, returned when the
     /// port is dropped.
     _queue_charge: Charge,
@@ -499,10 +488,9 @@ impl Port {
                 admitted: None,
                 refused: 0,
                 refusal_recorded: false,
-                noted: noted(),
+                noted: Noted::new(),
+                room: RoomWaiters::new(),
             }),
-            room_waiters: tairix_sync::SpinLock::new(RoomWaiters::new()),
-            index: None,
             _queue_charge: queue_charge,
         })
     }
@@ -528,19 +516,30 @@ impl Port {
         self.mailbox.lock().lanes.has_turn()
     }
 
-    /// Whether a send of the port's largest message from `sender` would be
-    /// admitted under `limit`, its `ipc-queue-bytes` limit: its lane here below
-    /// the per-sender depth, and all it holds anywhere, with that message and
-    /// any lane the send opens or grows, within the limit. A sender holding
-    /// nothing has room whatever it is short of: waiting could never end, so
-    /// its send answers. The non-consuming readiness peek a wait-set member
-    /// observing this port's room uses; the woken sender's own [`Self::send`]
-    /// takes the slot.
+    /// The slots a sender with `lane` has free here.
+    fn free_in(&self, lane: Option<&PortLane>) -> usize {
+        lane.map_or(self.per_sender, |lane| {
+            self.per_sender.saturating_sub(lane.messages.len())
+        })
+    }
+
+    /// Whether a send of the port's largest message from `task`, a thread of
+    /// `sender`, would be admitted under `limit`, its `ipc-queue-bytes` limit:
+    /// a slot in its lane here that it holds or no sibling holds, and all it
+    /// holds anywhere, with that message and any lane the send opens or grows,
+    /// within the limit. A sender holding nothing has room whatever it is
+    /// short of: waiting could never end, so its send answers. The
+    /// non-consuming readiness peek a wait-set member observing this port's
+    /// room uses; the woken sender's own [`Self::send`] takes the slot.
     #[must_use]
-    pub fn room_for(&self, sender: &TaskCapabilities, limit: u64) -> Room {
+    pub fn room_for(&self, sender: &TaskCapabilities, task: u64, limit: u64) -> Room {
         let q = self.mailbox.lock();
-        let lane = match q.lanes.get(sender.proc_id()) {
-            Some(lane) if lane.messages.len() >= self.per_sender => return Room::Full,
+        let instance = sender.proc_id();
+        let lane = q.lanes.get(instance);
+        if !q.room.has_room(task, instance, self.free_in(lane)) {
+            return Room::Full;
+        }
+        let lane = match lane {
             Some(lane) => lane.growth(self.per_sender).map_or(0, |(_, cost)| cost),
             None => self.opening_charge(),
         };
@@ -556,64 +555,72 @@ impl Port {
         }
     }
 
-    /// Record `task` as parked for room in `sender`'s lane, so the next
-    /// [`Self::recv`] that frees a slot there names it, and note `sender`'s
-    /// use of the port so its end forgets the wait. Idempotent: a task that
-    /// re-enters its wait registers once.
+    /// Look for room as `task`, a thread of `sender` waiting on a wait-set,
+    /// and note `sender`'s use of the port so its end forgets the wait: a slot
+    /// no sibling holds is handed to it, and otherwise it waits in its
+    /// sender's line for the next [`Self::recv`] to free one, keeping its
+    /// place there if it waited before.
     ///
     /// # Errors
     ///
     /// [`Errno::OutOfMemory`] when the record cannot be kept: the task must
     /// then not park, since nothing would wake it.
     pub fn watch_room(&self, task: u64, sender: ProcId) -> Result<(), Errno> {
-        self.note(&mut self.mailbox.lock(), sender)?;
-        self.room_waiters.lock().watch(task, sender)
+        let mut q = self.mailbox.lock();
+        q.noted.note(sender, self.id, self.is_closed())?;
+        let free = self.free_in(q.lanes.get(sender));
+        q.room.look(task, sender, free).map(drop)
     }
 
     /// Note each sender that uses the port in the registry's `index`.
-    pub(crate) fn note_senders_in(&mut self, index: Arc<SenderIndex>) {
-        self.index = Some(index);
+    pub(crate) fn note_senders_in(&mut self, index: Arc<SenderIndex<ProcId>>) {
+        self.mailbox.get_mut().noted.note_in(index);
     }
 
-    /// Note `sender`'s use of the port in the registry's index, once. A port
-    /// that is gone notes no one: its destruction already forgot its senders.
-    fn note(&self, q: &mut Mailbox, sender: ProcId) -> Result<(), Errno> {
-        let Some(index) = &self.index else {
-            return Ok(());
-        };
-        if self.is_closed() || q.noted.contains(&sender) {
-            return Ok(());
-        }
-        q.noted.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
-        index.note(sender, self.id)?;
-        // Reserved above, so this cannot fail.
-        let _ = q.noted.try_insert(sender);
-        Ok(())
-    }
-
-    /// Forget `task`'s room registration as `sender` — its wait ended, so a
-    /// later drain must not wake it for a port it is no longer watching.
-    pub fn unwatch_room(&self, task: u64, sender: ProcId) {
-        let emptied = self.room_waiters.lock().unwatch(task, sender);
-        drop(emptied);
-    }
-
-    /// The tasks parked for room in `sender`'s lane, for the caller to wake
-    /// outside the mailbox's lock (waking takes scheduler locks, so it must
-    /// never nest inside this one): a receive just took one of that sender's
-    /// messages, and no other lane changed.
+    /// End `task`'s wait for room here, answering whom to wake once the lock
+    /// is released: a slot it holds and did not send into passes to the next
+    /// thread waiting as its sender. Every exit of a wait ends it so but for
+    /// the member the wait reported ready ([`Self::own_room`]).
     #[must_use]
-    pub fn room_wake_for(&self, sender: ProcId) -> RoomWake<ProcId> {
-        self.room_waiters.lock().take_waiting_as(sender)
+    pub fn leave_room(&self, task: u64) -> RoomWake<ProcId> {
+        let mut q = self.mailbox.lock();
+        let Mailbox { lanes, room, .. } = &mut *q;
+        let Some(sender) = room.leave(task) else {
+            return RoomWake::none();
+        };
+        room.hand_out(sender, self.free_in(lanes.get(sender)))
     }
 
-    /// Every task parked for room, for a change that touches every lane at
+    /// Keep the slot `task` holds here now its wait reported this port's room
+    /// ready, until its next send here, its next call that is neither a send
+    /// nor a wait watching the port again, or its end ([`Self::leave_room`]):
+    /// the `EPOLLEXCLUSIVE` contract, under which a slot is held only from the
+    /// holder's own siblings, and only while it runs between its wait and its
+    /// send. Answers whether it holds one; a wait that holds none ends.
+    #[must_use]
+    pub fn own_room(&self, task: u64) -> bool {
+        let mut q = self.mailbox.lock();
+        let Mailbox { lanes, room, .. } = &mut *q;
+        let Some(sender) = room.sender_of(task) else {
+            return false;
+        };
+        room.own(task, self.free_in(lanes.get(sender)))
+    }
+
+    /// Whether `task` holds a slot here: one handed to it while it waited, or
+    /// kept as its wait reported the room ready, and not yet sent into.
+    #[must_use]
+    pub fn holds_room(&self, task: u64) -> bool {
+        self.mailbox.lock().room.holds(task)
+    }
+
+    /// Every task waiting for room, for a change that touches every lane at
     /// once — an admission discarding other senders' messages, or the port
     /// going away. Each woken sender re-checks its own lane, so waking one
     /// whose lane is still full costs it one re-park and loses nothing.
     #[must_use]
     pub fn room_wake_everyone(&self) -> RoomWake<ProcId> {
-        self.room_waiters.lock().take_everyone()
+        self.mailbox.lock().room.take_everyone()
     }
 
     /// Maximum payload (bytes) this port will accept.
@@ -659,18 +666,14 @@ impl Port {
         // sees `CLOSED`, and Acquire on the reverse to pair with the
         // load on the send fast path.
         self.state.store(state::CLOSED, Ordering::Release);
-        let (retired, drained, refused, users) = {
+        let (retired, drained, refused, noted) = {
             let mut q = self.mailbox.lock();
             let drained = core::mem::take(&mut q.queued);
-            let users = core::mem::replace(&mut q.noted, noted());
-            (q.lanes.take_all(), drained, q.refused, users)
+            let noted = q.noted.take();
+            (q.lanes.take_all(), drained, q.refused, noted)
         };
         drop(retired);
-        if let Some(index) = &self.index {
-            for &sender in &users {
-                drop(index.forget(sender, self.id));
-            }
-        }
+        noted.forget(self.id);
         let mut id_buf = [0u8; 16];
         let mut drained_buf = [0u8; 12];
         let mut refused_buf = [0u8; 20];
@@ -724,10 +727,13 @@ impl Port {
     ///    [`AuditEvent::MessageSendDenied`]; the rest are counted into the
     ///    port's [`AuditEvent::PortDestroyed`].
     /// 6. **Depth check.** If the sender's own lane holds the per-sender
-    ///    depth, [`Errno::WouldBlock`] + [`AuditEvent::MailboxFull`] — the
+    ///    depth, or each slot it has free is held by a sibling waiting for
+    ///    room, [`Errno::WouldBlock`] + [`AuditEvent::MailboxFull`] — the
     ///    receiver has not taken that sender's earlier messages yet, the
     ///    same retryable signal [`Self::recv`]'s empty-mailbox case would
-    ///    report in reverse.
+    ///    report in reverse. A slot `task` holds — handed to it while it
+    ///    waited, or kept as its wait reported the room ready — is its own,
+    ///    and this send uses it.
     ///
     /// The sender's lane grows with its messages, the growth charged under
     /// `sender_limit` like each message and refused past it the same way.
@@ -735,6 +741,10 @@ impl Port {
     /// On success the payload is copied into a kernel-owned
     /// [`SensitiveBuffer`] — wiped when the message is released, however the
     /// send ends — and one [`AuditEvent::MessageDelivered`] is emitted.
+    ///
+    /// `task` is the sending thread's kernel-attested scheduler id, never a
+    /// caller-supplied value; `0` names a sender with none, which holds no
+    /// slot.
     ///
     /// # Errors
     ///
@@ -744,6 +754,7 @@ impl Port {
     pub fn send<S: Sink + ?Sized>(
         &self,
         sender: &TaskCapabilities,
+        task: u64,
         payload: &[u8],
         sender_limit: u64,
         audit: &S,
@@ -836,6 +847,7 @@ impl Port {
 
         let delivered = self.enqueue(
             sender,
+            task,
             sender_limit,
             Message {
                 sender: sender.process().0,
@@ -899,6 +911,7 @@ impl Port {
     fn enqueue(
         &self,
         sender: &TaskCapabilities,
+        task: u64,
         sender_limit: u64,
         message: Message,
     ) -> Result<(), Refused> {
@@ -945,13 +958,27 @@ impl Port {
                     .map_err(|_| Refused::OverLimit),
                 Some(_) => Ok(()),
             }
+            .and_then(|()| {
+                // A lane at its depth takes nothing whatever the room records
+                // say, and a slot handed to a sibling waiting for room is that
+                // sibling's.
+                let free = self.free_in(q.lanes.get(instance));
+                if free > 0 && q.room.has_room(task, instance, free) {
+                    Ok(())
+                } else {
+                    Err(Refused::Full)
+                }
+            })
             .and_then(|()| match q.lanes.get_mut(instance) {
-                Some(lane) if lane.messages.len() >= per_sender => Err(Refused::Full),
                 Some(lane) => lane.reserve_one(per_sender, sender_limit),
                 None => Err(Refused::NoMemory),
             });
             let admitted = if made {
-                admitted.and_then(|()| self.note(&mut q, instance).map_err(|_| Refused::NoMemory))
+                admitted.and_then(|()| {
+                    q.noted
+                        .note(instance, self.id, self.is_closed())
+                        .map_err(|_| Refused::NoMemory)
+                })
             } else {
                 admitted
             };
@@ -969,6 +996,8 @@ impl Port {
             };
             lane.push(message);
             mailbox.queued += 1;
+            // A slot the sending thread held is used.
+            mailbox.room.consume(task);
             break Ok(());
         };
         drop(fresh);
@@ -992,18 +1021,20 @@ impl Port {
         Ok(lane)
     }
 
-    /// Take the next message in turn, if any: senders are taken in turn, each
-    /// sender's own messages oldest first.
+    /// Take the next message in turn, if any, with the thread of its sender
+    /// the slot its taking freed was handed to, for the receiver to wake once
+    /// the port's lock is released: senders are taken in turn, each sender's
+    /// own messages oldest first.
     ///
     /// Does *not* perform a capability check: the kernel decides whether a
     /// receiver may bind to a port at creation time, and the receiver does
     /// not re-check on every read. The message's
     /// [`origin`](Message::origin) names the sender whose lane now has room.
     /// Never allocates.
-    pub fn recv(&self) -> Option<Message> {
+    pub fn recv(&self) -> Option<(Message, RoomWake<ProcId>)> {
         self.recv_with(|_| Ok::<(), core::convert::Infallible>(()))
             .and_then(Result::ok)
-            .map(|((), message)| message)
+            .map(|((), message, freed)| (message, freed))
     }
 
     /// Deliver the next message in turn to `f`, dequeuing it only if `f`
@@ -1019,7 +1050,8 @@ impl Port {
     /// the duration of `f`, so the peek and the commit are atomic against a
     /// concurrent receive: two receivers can never observe the same message.
     /// The committed message is returned rather than dropped, so its payload
-    /// is wiped and freed outside the lock.
+    /// is wiped and freed outside the lock, with the thread of its sender the
+    /// slot its taking freed was handed to, for the receiver to wake.
     ///
     /// Returns `None` when the mailbox is empty (and `f` is not called),
     /// otherwise `Some` of whatever `f` returned. Like [`Self::recv`] it
@@ -1028,12 +1060,13 @@ impl Port {
     pub fn recv_with<R, E>(
         &self,
         f: impl FnOnce(&Message) -> Result<R, E>,
-    ) -> Option<Result<(R, Message), E>> {
+    ) -> Option<Result<Received<R>, E>> {
         let mut q = self.mailbox.lock();
         let Mailbox {
             lanes,
             queued,
             ended,
+            room,
             ..
         } = &mut *q;
         let sender = lanes.next_turn()?;
@@ -1051,12 +1084,16 @@ impl Port {
                 .saturating_add(if still_waiting { 0 } else { lane.storage() });
             *ended = ended.saturating_sub(freed);
         }
+        let free = self.free_in(Some(&*lane));
         *queued -= 1;
         lanes.end_turn(still_waiting);
+        // The slot it freed goes to the first thread of its sender waiting
+        // for one, named for the receiver to wake.
+        let freed = room.hand_out(sender, free);
         let idle = lanes.retire_if_idle(sender);
         drop(q);
         drop(idle);
-        Some(Ok((value, message)))
+        Some(Ok((value, message, freed)))
     }
 
     /// Admit `sender` as the only process instance whose messages the port
@@ -1128,9 +1165,13 @@ impl Port {
                 queued,
                 ended,
                 noted,
+                room,
                 ..
             } = &mut *q;
-            noted.remove(&sender);
+            noted.sender_ended(sender);
+            // Its threads have ended, so nothing it waited for room with is
+            // woken.
+            room.take_sender(sender);
             let held = lanes
                 .get(sender)
                 .filter(|lane| !lane.ended)
@@ -1151,8 +1192,6 @@ impl Port {
                 }
             }
         };
-        let forgotten = self.room_waiters.lock().take_waiting_as(sender);
-        drop(forgotten);
         let Some(lane) = discarded else {
             return;
         };
@@ -1224,7 +1263,7 @@ mod tests {
     fn task_with(task_id: u64, caps: &[CapabilityId]) -> TaskCapabilities {
         let sink = RecordingSink::new();
         let set = caps_of(caps);
-        TaskCapabilities::derive(ProcessId(task_id), UserId(1), set, set, &sink)
+        TaskCapabilities::derive(ProcessId(task_id), UserId(1), set, set, &sink).expect("derived")
     }
 
     fn instance(byte: u8) -> ProcId {
@@ -1242,7 +1281,7 @@ mod tests {
         payload: &[u8],
         sink: &RecordingSink,
     ) -> Result<(), Errno> {
-        port.send(from, payload, RLIMIT_INFINITY, sink)
+        port.send(from, 0, payload, RLIMIT_INFINITY, sink)
     }
 
     fn open_port() -> (RecordingSink, Port) {
@@ -1285,7 +1324,7 @@ mod tests {
 
     fn payloads(port: &Port) -> Vec<Vec<u8>> {
         core::iter::from_fn(|| port.recv())
-            .map(|message| message.payload.as_bytes().to_vec())
+            .map(|(message, _)| message.payload.as_bytes().to_vec())
             .collect()
     }
 
@@ -1387,9 +1426,9 @@ mod tests {
         let (sink, port) = open_port();
         let from = sender(7);
         let limit = lane_bytes(DEPTH.min(SPARE_LANE_ITEMS)) + Port::message_charge(4);
-        assert_eq!(port.send(&from, b"four", limit, &sink), Ok(()));
+        assert_eq!(port.send(&from, 0, b"four", limit, &sink), Ok(()));
         assert_eq!(
-            port.send(&from, b"more", limit, &sink),
+            port.send(&from, 0, b"more", limit, &sink),
             Err(Errno::LimitExceeded)
         );
         assert!(sink
@@ -1399,7 +1438,7 @@ mod tests {
         assert_eq!(from.charges().held(LimitKind::IpcQueueBytes), limit);
         let other = sender(9);
         assert_eq!(
-            port.send(&other, b"mine", limit, &sink),
+            port.send(&other, 0, b"mine", limit, &sink),
             Ok(()),
             "one sender's budget is never another's"
         );
@@ -1414,13 +1453,13 @@ mod tests {
         let from = sender(7);
         let affordable = lane_bytes(DEPTH.min(SPARE_LANE_ITEMS)) + Port::message_charge(4);
         assert_eq!(
-            port.send(&from, b"four", affordable - 1, &sink),
+            port.send(&from, 0, b"four", affordable - 1, &sink),
             Err(Errno::MessageTooLarge)
         );
         assert_eq!(from.charges().held(LimitKind::IpcQueueBytes), 0);
         assert_eq!(port.len(), 0);
         assert!(sink.ids().contains(&AuditEvent::MessageTooLarge.id().0));
-        assert_eq!(port.send(&from, b"four", affordable, &sink), Ok(()));
+        assert_eq!(port.send(&from, 0, b"four", affordable, &sink), Ok(()));
     }
 
     /// A sender at its limit is refused even an empty message, and its lane
@@ -1447,20 +1486,20 @@ mod tests {
         let exact = sender(7);
         let filled = lane + made * empty;
         for _ in 0..SPARE_LANE_ITEMS {
-            assert_eq!(port.send(&exact, b"", filled, &sink), Ok(()));
+            assert_eq!(port.send(&exact, 0, b"", filled, &sink), Ok(()));
         }
         assert_eq!(
-            port.send(&exact, b"", filled, &sink),
+            port.send(&exact, 0, b"", filled, &sink),
             Err(Errno::LimitExceeded),
             "at its limit, not even an empty message"
         );
         let roomy = sender(8);
         let limit = filled + empty;
         for _ in 0..SPARE_LANE_ITEMS {
-            assert_eq!(port.send(&roomy, b"", limit, &sink), Ok(()));
+            assert_eq!(port.send(&roomy, 0, b"", limit, &sink), Ok(()));
         }
         assert_eq!(
-            port.send(&roomy, b"", limit, &sink),
+            port.send(&roomy, 0, b"", limit, &sink),
             Err(Errno::LimitExceeded),
             "growing the lane would carry it past its limit"
         );
@@ -1494,7 +1533,7 @@ mod tests {
         let largest = Port::largest_charge(port.max_payload());
         let opening = lane_bytes(SPARE_LANE_ITEMS);
         assert_eq!(
-            port.room_for(&from, 0),
+            port.room_for(&from, 0, 0),
             Room::Free,
             "holding nothing, no release could make room, so the send answers"
         );
@@ -1502,17 +1541,17 @@ mod tests {
             .charges()
             .charge(LimitKind::IpcQueueBytes, 1, RLIMIT_INFINITY)
             .expect("held elsewhere");
-        assert_eq!(port.room_for(&from, 1 + opening + largest), Room::Free);
+        assert_eq!(port.room_for(&from, 0, 1 + opening + largest), Room::Free);
         assert_eq!(
-            port.room_for(&from, opening + largest),
+            port.room_for(&from, 0, opening + largest),
             Room::OverBudget,
             "with no lane here, the lane it would open is paid for too"
         );
         drop(other);
         send(&port, &from, b"x", &sink).expect("fits");
-        assert_eq!(port.room_for(&from, held() + largest), Room::Free);
+        assert_eq!(port.room_for(&from, 0, held() + largest), Room::Free);
         assert_eq!(
-            port.room_for(&from, held() + largest - 1),
+            port.room_for(&from, 0, held() + largest - 1),
             Room::OverBudget,
             "one byte short of the largest"
         );
@@ -1521,7 +1560,7 @@ mod tests {
             .charge(LimitKind::IpcQueueBytes, 1 << 20, RLIMIT_INFINITY)
             .expect("held elsewhere");
         assert_eq!(
-            port.room_for(&from, held() - elsewhere.units() + largest),
+            port.room_for(&from, 0, held() - elsewhere.units() + largest),
             Room::OverBudget,
             "what it holds elsewhere is counted"
         );
@@ -1531,16 +1570,19 @@ mod tests {
         }
         let grown = lane_bytes(2 * SPARE_LANE_ITEMS) - lane_bytes(SPARE_LANE_ITEMS);
         assert_eq!(
-            port.room_for(&from, held() + largest),
+            port.room_for(&from, 0, held() + largest),
             Room::OverBudget,
             "a full lane grows to take the next"
         );
-        assert_eq!(port.room_for(&from, held() + largest + grown), Room::Free);
+        assert_eq!(
+            port.room_for(&from, 0, held() + largest + grown),
+            Room::Free
+        );
         for _ in 0..SPARE_LANE_ITEMS {
             send(&port, &from, b"x", &sink).expect("fits");
         }
         assert_eq!(
-            port.room_for(&from, u64::MAX),
+            port.room_for(&from, 0, u64::MAX),
             Room::Full,
             "at its depth, whatever its budget"
         );
@@ -1666,7 +1708,7 @@ mod tests {
         let (sink, port) = open_port();
         let from = sender(7);
         assert_eq!(send(&port, &from, b"hello", &sink), Ok(()));
-        let msg = port.recv().expect("delivered");
+        let (msg, _) = port.recv().expect("delivered");
         assert_eq!(msg.sender, 7);
         assert_eq!(msg.origin.proc_id(), instance(7));
         assert_eq!(msg.payload.as_bytes(), b"hello");
@@ -1709,7 +1751,7 @@ mod tests {
             "a discarded message returns its charge"
         );
         assert_eq!(
-            port.recv().map(|message| message.origin.proc_id()),
+            port.recv().map(|(message, _)| message.origin.proc_id()),
             Some(instance(0x7A)),
             "only the admitted sender's message stays"
         );
@@ -1773,6 +1815,30 @@ mod tests {
         assert_eq!(port.len(), DEPTH);
     }
 
+    /// A lane at its depth takes no message, whatever slot its room records
+    /// claim a thread holds: the depth refuses on its own, failing closed
+    /// should the records and the lane ever disagree.
+    #[test]
+    fn a_full_lane_refuses_a_holder_whatever_the_room_records_say() {
+        let (sink, port) = open_port();
+        let from = sender(7);
+        for _ in 0..DEPTH {
+            send(&port, &from, b"x", &sink).expect("fits");
+        }
+        assert_eq!(
+            port.mailbox.lock().room.look(11, from.proc_id(), 1),
+            Ok(true),
+            "records that disagree with the lane"
+        );
+        assert!(port.holds_room(11));
+        assert_eq!(
+            port.send(&from, 11, b"x", RLIMIT_INFINITY, &sink),
+            Err(Errno::WouldBlock)
+        );
+        assert_eq!(port.len(), DEPTH, "the depth holds");
+        drop(port.leave_room(11));
+    }
+
     /// The lock-out a shared total allowed: one sender filling the port
     /// refused every other until the owner drained it.
     #[test]
@@ -1820,7 +1886,7 @@ mod tests {
         let full = sender(7);
         let idle = sender(9);
         assert_eq!(
-            port.room_for(&full, u64::MAX),
+            port.room_for(&full, 0, u64::MAX),
             Room::Free,
             "an empty lane has room"
         );
@@ -1828,21 +1894,21 @@ mod tests {
             send(&port, &full, b"x", &sink).expect("fits");
         }
         assert_eq!(
-            port.room_for(&full, u64::MAX),
+            port.room_for(&full, 0, u64::MAX),
             Room::Full,
             "a full lane has none"
         );
         assert_eq!(
-            port.room_for(&idle, u64::MAX),
+            port.room_for(&idle, 0, u64::MAX),
             Room::Free,
             "another sender's room is untouched"
         );
         assert_eq!(send(&port, &full, b"x", &sink), Err(Errno::WouldBlock));
         send(&port, &idle, b"y", &sink).expect("its own room");
-        let taken = port.recv().expect("drains one");
+        let (taken, _) = port.recv().expect("drains one");
         assert_eq!(taken.origin.proc_id(), instance(7));
         assert_eq!(
-            port.room_for(&full, u64::MAX),
+            port.room_for(&full, 0, u64::MAX),
             Room::Free,
             "one drain frees one slot"
         );
@@ -1855,42 +1921,115 @@ mod tests {
         tasks
     }
 
-    /// A sender parks once however often its wait re-enters, a wait that
-    /// ended is never woken, and a drain wakes only the senders waiting as
-    /// the one it took from.
-    #[test]
-    fn room_waiters_are_woken_by_the_sender_they_wait_as() {
-        let (_sink, port) = open_port();
-        assert!(port.room_wake_everyone().is_empty(), "nobody waits at rest");
-        port.watch_room(11, instance(7)).expect("recorded");
-        port.watch_room(11, instance(7)).expect("recorded once");
-        port.watch_room(22, instance(9)).expect("recorded");
-        port.watch_room(33, instance(7)).expect("recorded");
-        port.unwatch_room(11, instance(7));
-        // Forgetting a task that never parked changes nothing.
-        port.unwatch_room(44, instance(7));
-        assert_eq!(named(&port.room_wake_for(instance(7))), [33]);
-        assert!(port.room_wake_for(instance(7)).is_empty(), "woken once");
-        assert!(port.room_wake_for(instance(5)).is_empty());
-        port.watch_room(55, instance(7)).expect("recorded");
-        assert_eq!(named(&port.room_wake_everyone()), [22, 55]);
-        assert!(port.room_wake_everyone().is_empty());
+    /// Fill `from`'s lane, then leave `waiters` waiting for room as it.
+    fn full_lane_waited_on(
+        port: &Port,
+        from: &TaskCapabilities,
+        waiters: &[u64],
+        sink: &RecordingSink,
+    ) {
+        for _ in 0..DEPTH {
+            send(port, from, b"x", sink).expect("fits");
+        }
+        for &waiter in waiters {
+            port.watch_room(waiter, from.proc_id()).expect("recorded");
+        }
     }
 
-    /// However many wait as one sender, each is named and no other sender's
-    /// waiters are touched: there is no broadcast to fall back on.
+    /// Two threads of one sender wait for room in its full lane: a receive
+    /// frees one slot and wakes one of them, the first to wait, and no sibling
+    /// may take that slot from it.
     #[test]
-    fn every_waiter_of_a_sender_is_named_however_many_there_are() {
-        let (_sink, port) = open_port();
-        for task in 1..=32 {
-            port.watch_room(task, instance(7)).expect("recorded");
-        }
-        port.watch_room(99, instance(8)).expect("recorded");
+    fn one_receive_for_two_threads_waiting_as_one_sender_wakes_one() {
+        let (sink, port) = open_port();
+        let from = sender(7);
+        full_lane_waited_on(&port, &from, &[11, 22], &sink);
+        let (_, freed) = port.recv().expect("drains one");
+        assert_eq!(named(&freed), [11], "the first to wait, alone");
+        assert_eq!(port.room_for(&from, 22, u64::MAX), Room::Full);
         assert_eq!(
-            named(&port.room_wake_for(instance(7))),
-            (1..=32).collect::<Vec<u64>>()
+            port.send(&from, 22, b"x", RLIMIT_INFINITY, &sink),
+            Err(Errno::WouldBlock),
+            "the slot is not its sibling's"
         );
-        assert_eq!(named(&port.room_wake_everyone()), [99]);
+        assert_eq!(port.room_for(&from, 11, u64::MAX), Room::Free);
+        assert_eq!(port.send(&from, 11, b"x", RLIMIT_INFINITY, &sink), Ok(()));
+        assert!(port.leave_room(11).is_empty(), "a used slot is spent");
+        let (_, freed) = port.recv().expect("drains another");
+        assert_eq!(named(&freed), [22], "the next receive wakes the next");
+        drop(port.leave_room(22));
+    }
+
+    /// A thread a receive woke that ends its wait without sending passes the
+    /// slot to the next thread waiting as its sender.
+    #[test]
+    fn a_woken_sender_leaving_unsent_passes_the_wake_on() {
+        let (sink, port) = open_port();
+        let from = sender(7);
+        full_lane_waited_on(&port, &from, &[11, 22], &sink);
+        let (_, freed) = port.recv().expect("drains one");
+        assert_eq!(named(&freed), [11]);
+        assert_eq!(named(&port.leave_room(11)), [22]);
+        assert_eq!(port.send(&from, 22, b"x", RLIMIT_INFINITY, &sink), Ok(()));
+    }
+
+    /// A wait that reported the room ready keeps its slot, held from its
+    /// siblings until it sends, and handed to the next waiting sibling when it
+    /// leaves instead: waits elsewhere, or ends.
+    #[test]
+    fn an_owing_sender_holds_its_slot_until_it_sends_and_hands_it_on_when_it_leaves() {
+        let (sink, port) = open_port();
+        let from = sender(7);
+        full_lane_waited_on(&port, &from, &[11, 22], &sink);
+        drop(port.recv().expect("drains one"));
+        assert!(port.own_room(11), "the slot it was handed");
+        assert_eq!(
+            port.send(&from, 22, b"x", RLIMIT_INFINITY, &sink),
+            Err(Errno::WouldBlock),
+            "held from its siblings"
+        );
+        assert_eq!(
+            port.send(&from, 11, b"x", RLIMIT_INFINITY, &sink),
+            Ok(()),
+            "until it sends"
+        );
+        drop(port.recv().expect("drains one"));
+        assert!(port.own_room(22));
+        port.watch_room(33, from.proc_id()).expect("recorded");
+        assert_eq!(named(&port.leave_room(22)), [33], "or until it leaves");
+        assert!(
+            !port.own_room(44),
+            "a thread that never waited owes nothing"
+        );
+        drop(port.leave_room(33));
+    }
+
+    /// A thread waiting again keeps its place in its sender's line.
+    #[test]
+    fn a_rewatch_keeps_its_place_in_line() {
+        let (sink, port) = open_port();
+        let from = sender(7);
+        full_lane_waited_on(&port, &from, &[11, 22, 11, 22], &sink);
+        let (_, freed) = port.recv().expect("drains one");
+        assert_eq!(named(&freed), [11]);
+        for waiter in [11, 22] {
+            drop(port.leave_room(waiter));
+        }
+    }
+
+    /// A receive frees a slot in one sender's lane alone, so no other sender's
+    /// waiter is woken; a change to every lane at once wakes them all.
+    #[test]
+    fn a_receive_wakes_only_its_own_senders_waiter_and_a_teardown_every_one() {
+        let (sink, port) = open_port();
+        let (seven, nine) = (sender(7), sender(9));
+        full_lane_waited_on(&port, &seven, &[11], &sink);
+        full_lane_waited_on(&port, &nine, &[22], &sink);
+        let (taken, freed) = port.recv().expect("seven's, first in turn");
+        assert_eq!(taken.origin.proc_id(), instance(7));
+        assert_eq!(named(&freed), [11]);
+        assert_eq!(named(&port.room_wake_everyone()), [11, 22]);
+        assert!(port.room_wake_everyone().is_empty(), "taken once");
     }
 
     /// A message outlives its sender, held against the room the owner set
@@ -1905,7 +2044,7 @@ mod tests {
         port.watch_room(5, instance(0x31)).expect("recorded");
         port.sender_ended(instance(0x31), &sink);
         assert!(
-            port.room_wake_for(instance(0x31)).is_empty(),
+            port.room_wake_everyone().is_empty(),
             "its waits went with it"
         );
         assert!(port.mailbox.lock().ended > 0);
@@ -2037,7 +2176,7 @@ mod tests {
         let from = sender(7);
         send(&port, &from, b"payload", &sink).expect("delivered");
 
-        let (seen, message) = port
+        let (seen, message, _) = port
             .recv_with(|msg| -> Result<Vec<u8>, ()> { Ok(msg.payload.as_bytes().to_vec()) })
             .expect("a message was present")
             .expect("the closure succeeded");
@@ -2063,9 +2202,10 @@ mod tests {
 
         // The very next receive still sees the same message, its sender's
         // turn kept.
-        let head = port.recv().expect("head still present");
+        let (head, _) = port.recv().expect("head still present");
         assert_eq!(head.payload.as_bytes(), b"first");
-        assert_eq!(port.recv().expect("next").payload.as_bytes(), b"other");
+        let (next, _) = port.recv().expect("next");
+        assert_eq!(next.payload.as_bytes(), b"other");
     }
 
     #[test]
@@ -2086,5 +2226,20 @@ mod tests {
             1,
             "and its storage kept, so the next send allocates no lane"
         );
+    }
+
+    /// A queued message holds what it carries and nothing more, its own record
+    /// being the least any message is charged: the wake its taking produces
+    /// is handed back beside it.
+    ///
+    /// Regression: every queued message carried that wake, which raised every
+    /// message's least charge and every lane slot's storage.
+    #[test]
+    fn a_queued_message_is_no_larger_than_what_it_carries() {
+        let carried = size_of::<u64>()
+            + size_of::<Origin>()
+            + size_of::<SensitiveBuffer>()
+            + size_of::<Charge>();
+        assert!(size_of::<Message>() < carried + align_of::<Message>());
     }
 }

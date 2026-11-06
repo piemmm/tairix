@@ -17,10 +17,10 @@ and the caller keeps it.
   a stub: it is the correct runner wherever there is no second core, no thread to
   create (an in-kernel consumer), or no reason to hand work off. A pass written
   against `JobRunner` is complete with only this.
-- `for_each` — the one place an index becomes `&mut items[i]`, and the crate's
-  single `unsafe` block. A pass splits its output into disjoint pieces
-  (`split_at_mut` / `chunks_mut`), hands the slice here, and gets each piece
-  visited exactly once.
+- `for_each` — the one place an index becomes `&mut items[i]`, an `unsafe`
+  conversion kept here rather than in every pass. A pass splits its output
+  into disjoint pieces (`split_at_mut` / `chunks_mut`), hands the slice here,
+  and gets each piece visited exactly once.
 - `for_each_drawn` / `fold_drawn` — the same visit for pieces an iterator
   splits off one borrow at a time (row bands, parts of differing lengths): the
   dispatching thread draws them into a batch on its stack — a reserved one,
@@ -36,6 +36,13 @@ and the caller keeps it.
   threads. `Pool::for_cpus(online)` is the sizing policy: one participant per
   discovered online CPU, of which the dispatching thread is one, so a single-CPU
   machine creates no thread at all.
+
+- `for_each_ordered` / `Published` (feature `pool`) — pieces that depend on
+  the pieces before them, as a wavefront's rows depend on the row above. Each
+  lane takes the next piece as it finishes one, so the pieces are begun in
+  order, and a `Published` is a value one piece writes once and a later piece
+  parks on until it is written, its storage's one write and every read
+  ordered by its state word (miri interprets it; loom models the protocol).
 
 ## Design notes
 
@@ -71,6 +78,12 @@ and the caller keeps it.
 - **It cannot deadlock.** A dispatch that finds one already in flight — nested
   inside a piece of it, or issued from another thread — runs its work on the
   calling thread. There is no arrangement of callers that waits on the pool.
+- **Nor can an ordered dispatch.** A piece is taken only by a lane that then
+  works it, so every piece before one under way is under way or done, and the
+  earliest piece still running waits on nothing; a runner one thread wide works
+  every piece in order on one lane, where no wait ever blocks. A `Published`
+  parks on its own state word, announcing the sleep before taking it so the
+  write after the announcement wakes it — the protocol the loom models check.
 - **It degrades rather than fails.** A thread the kernel refuses (the `threads`
   rlimit, exhausted memory) is simply not created; the pool runs with what it
   got, and `worker_count` reports it so a caller can say so.

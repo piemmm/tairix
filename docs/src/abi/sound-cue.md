@@ -50,10 +50,10 @@ The desktop session at the seat hands over its user's sound choices.
 
 | Offset | Size | Field |
 |---|---|---|
-| 8 | 104 | each event's own file, in `SoundEvent::ALL` order: a read-only `FD_GRANT` handle minted to the authority's instance, or `0` |
-| 112 | 2 | document length, at most `POLICY_DOCUMENT_MAX` (2048) |
-| 114 | 2 | reserved, zero |
-| 116 | length | the settings document, UTF-8 with no control character but `\n` |
+| 8 | 112 | each event's own file, in `SoundEvent::ALL` order: a read-only `FD_GRANT` handle minted to the authority's instance, or `0` |
+| 120 | 2 | document length, at most `POLICY_DOCUMENT_MAX` (2048) |
+| 122 | 2 | reserved, zero |
+| 124 | length | the settings document, UTF-8 with no control character but `\n` |
 
 The frame is exactly as long as its document says, and `CUE_REQUEST_MAX` is
 the longest. The authority admits it only from the anchor of the login session

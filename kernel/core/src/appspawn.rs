@@ -173,7 +173,8 @@ impl AppStore {
     /// `kernel/mem::reclaim` admission gate (`plans/SMARTRAM.md`
     /// SMART4). Called once by the boot path that publishes the
     /// `/System` mount, before it resolves the readiness latch; only the
-    /// first installation wins. Until it runs, every launch is served
+    /// first installation wins. Until it runs, and when the memory-statistics
+    /// registry cannot list the cache's ledger, every launch is served
     /// uncached through the full load gate.
     pub fn install_reclaim(
         &self,
@@ -184,16 +185,18 @@ impl AppStore {
         let mut cache = self.cache.write();
         if cache.is_none() {
             let launch = LaunchCache::new(budget, pressure, sink);
-            // The installed launch cache registers its ledger with the
-            // System Information memory-statistics registry
-            // (observation-only); only the winning install registers. A
-            // `None` means classification refused the cache at birth (it is
-            // then poisoned and admits nothing), so there is nothing to
-            // register — the refusal is already in the audit log.
-            if let Some(ledger) = launch.ledger() {
-                crate::memstats::MEM_STATS.register_ledger(ledger);
+            // Only the winning install registers the cache's ledger, and a
+            // cache the registry cannot list is not installed: it would spend
+            // memory no reclaim decision sees, so launches stay served
+            // uncached. A `None` ledger means classification refused the cache
+            // at birth (it is then poisoned and admits nothing), so there is
+            // nothing to register — the refusal is already in the audit log.
+            let registered = launch.ledger().map_or(Ok(()), |ledger| {
+                crate::memstats::MEM_STATS.register_ledger(ledger)
+            });
+            if registered.is_ok() {
+                *cache = Some(launch);
             }
-            *cache = Some(launch);
         }
     }
 

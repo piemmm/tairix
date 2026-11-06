@@ -71,7 +71,8 @@ Mae *Gorffen*, `Escape` neu fotwm cau'r ffenestr yn ei chau.
 **Ymddangosiad** sy'n dewis y cynllun lliw, yn gosod maint y testun a
 faint o linellau ôl-sgrolio a gedwir (o ddim i 10,000, 500 i ddechrau), ac
 yn golygu cynllun y defnyddiwr ei hun. Y cynlluniau a gludir yw *System*
-(sy'n dilyn ymddangosiad tywyll neu olau'r bwrdd gwaith), *Midnight*,
+(ymddangosiad tywyll y bwrdd gwaith, p'un a yw'r bwrdd gwaith ei hun yn
+dywyll neu'n olau), *Midnight*,
 *Phosphor*, *Amber*, *Ember*, *Contrast*, *Paper*, a *Custom*. Mae dewis
 *Custom* yn defnyddio'r lliwiau a olygwyd o dan y dewisydd: grid o'r
 ugain lliw y tynnir sgrin ohonynt — y cefndir, y blaendir, y cyrchwr,
@@ -118,11 +119,6 @@ fframiau a rennir neu'r blwch digwyddiadau (nodir y rheswm ar y ffrwd
 gwall safonol).
 
 ## ENVIRONMENT
-
-`HOME`
-: Cyfeiriadur cartref y cyfrif, lle mae'r derfynell yn darllen ac yn
-ysgrifennu ei phroffil. Hebddo, mae'r derfynell yn rhedeg ar y proffil
-rhagosodedig ac nid yw'n cadw dim.
 
 `TERM`
 : Fe'i hallforir i'r gragen a gynhelir fel `xterm-256color`, gan enwi'r

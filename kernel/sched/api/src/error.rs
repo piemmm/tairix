@@ -49,13 +49,12 @@ pub enum SchedError {
     /// ([`crate::SchedulerPolicy::spawn_parked_as`]); a second admission at
     /// the same one is refused rather than displacing the first.
     TaskIdInUse,
-    /// The task's kernel stack, or the hold on its id, could not be
-    /// allocated.
+    /// An admission could not have the memory it needs: the task's record,
+    /// body, registry slot or overflow room, or — in the kernel's admission
+    /// around the policy — its kernel stack or the hold on its id.
     ///
-    /// Both are reported as values and the spawn is refused. Smaller
-    /// admission allocations still abort through the global allocator's own
-    /// handler; making the whole path fallible is tracked separately
-    /// (`plans/OPEN-DEFECTS.md` D122).
+    /// The admission is refused with nothing changed: a policy takes every
+    /// allocation before it files anything ([`crate::park::admit_record`]).
     OutOfMemory,
 }
 

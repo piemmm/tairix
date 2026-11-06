@@ -43,3 +43,20 @@ fn the_offer_is_what_the_driver_opened() {
     assert_eq!(offer.write_refusal, Some(WriteRefusal::FormatReadOnly));
     assert_eq!(offer.format, FormatName::Fat32);
 }
+
+/// A volume whose driver keeps no title — its format keeps none, or this
+/// volume cannot, as an encrypted ARXFS one cannot — is offered untitled, so
+/// nothing offers to retitle it only to be refused.
+#[test]
+fn the_offer_says_whether_the_volume_keeps_a_title() {
+    let mut opened = Opened {
+        fs: TestFs::new(),
+        format: FormatName::Fat32,
+        write_refusal: None,
+    };
+    opened.fs.label = None;
+    assert!(!opened.offer().title);
+    opened.fs.label =
+        Some(tairix_abi::driver::filesystem::VolumeTitle::new("Disk").expect("a title"));
+    assert!(opened.offer().title);
+}

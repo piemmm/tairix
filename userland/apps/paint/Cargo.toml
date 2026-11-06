@@ -41,9 +41,12 @@ tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
 # Shared software rasterisation: the window picture, and the one resampler a
 # smooth resize goes through.
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
-# The fast unkeyed hash the noise filter draws its speckle from, the same
-# wherever the picture is read.
-tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
+# The integer finalisers Add noise draws its speckle from: the same on every
+# target and however the picture is cut.
+tairix-mix = { path = "../../../lib/mix", version = "=0.0.0" }
+# The runner contract an operation's blocks are spread across; the pool itself
+# is the Run binary's.
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", default-features = false }
 # The memory-pressure band the undo history is sized for.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # The edit decode's vocabulary, so the document a load assembles is built
@@ -90,8 +93,12 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"
 # The sandbox's worker-role side: `serve_stdio`, `worker_role` and the
 # launcher that re-enters this binary as its capability-empty decoder.
 tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
-# The machine's memory, a share of which the decoded toolbar icons may keep.
+# The machine's memory, a share of which the decoded toolbar icons may keep,
+# and its online cores, which the preview worker's pool is sized from.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
+# The worker pool the preview worker and an Apply's completion spread an
+# operation's blocks across.
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", features = ["pool"] }
 
 [dev-dependencies]
 # The engine's host tests measure and draw text, so they use the shared solid
@@ -103,6 +110,11 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["test-util"] }
 # The sink a sandbox driven in the tests' own process logs nowhere through.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The order-reversing runner the operations prove their blocks independent of
+# one another with.
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", default-features = false, features = [
+    "test-util",
+] }
 
 [build-dependencies]
 tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

@@ -6,33 +6,36 @@ use alloc::string::String;
 
 use tairix_abi::imageattach::{ImageAccess, ImageAttach, ImageAttachReply};
 use tairix_abi::netattach::Presentation;
-use tairix_abi::sysinfo::{MountRecord, MOUNT_TARGET_MAX};
-use tairix_abi::volume::is_binding_path;
+use tairix_abi::sysinfo::{MountAvailability, MountRecord, MOUNT_TARGET_MAX};
+use tairix_abi::volume::{is_binding_path, ReplayAnswer, VolumeReplayRequest};
 use tairix_abi::{Errno, STORAGE_CATALOG};
 use tairix_help::{own_short_help, HelpSource};
-use tairix_procinfo::{render_binding, Namespace, Output, Transport};
+use tairix_procinfo::{named_volume, render_binding, Namespace, Output, Transport};
 use tairix_util::output::Output as Stream;
 use tairix_util::quote::{quote_if_needed, quote_subject};
 
-use crate::command::{Command, MountRequest, TypeFilter};
+use crate::command::{Command, HeldAnswer, Listing, MountRequest};
 use crate::error::MountError;
 use crate::io::Mounter;
 
 /// The usage line, the short help's fallback when the bundled help document
 /// is unavailable.
-pub const USAGE: &str = "usage: mount [-lrvw] [-t TYPE] [-o OPTIONS] [--] [IMAGE [TARGET]]";
+pub const USAGE: &str = "usage: mount [-lrvw] [-t TYPE] [-o OPTIONS] [--] [IMAGE [TARGET]]
+       mount [-v] --list-held | --replay-held NAME | --discard-held NAME";
 
 /// The command word this bundle is named by, for the own-help lookup.
 const OWN_WORD: &str = "mount";
 
 /// Run one [`Command`].
 ///
-/// A [`Command::List`] writes one line per view binding of a type its filter
-/// shows to `out`. A
-/// [`Command::Mount`] mounts the image privately for the caller through
-/// `mounter`, silently unless `-v` asked where it went; a volume mounted
-/// read-only that was not asked to be is warned of on `err`, as util-linux
-/// warns of a write-protected source, and `-w` makes that a failure.
+/// A [`Command::List`] writes one line per view binding its [`Listing`]
+/// shows to `out`. A [`Command::Mount`] mounts the image privately for the
+/// caller through `mounter`, silently unless `-v` asked where it went; a
+/// volume mounted read-only that was not asked to be is warned of on `err`, as
+/// util-linux warns of a write-protected source, and `-w` makes that a
+/// failure. A [`Command::Answer`] hands the kernel the key of the volume its
+/// name names, which must hold writes awaiting an answer, silently unless `-v`
+/// asked what became of them.
 ///
 /// # Errors
 ///
@@ -41,6 +44,8 @@ const OWN_WORD: &str = "mount";
 /// * [`MountError::WriteProtected`], [`MountError::Refused`],
 ///   [`MountError::AlreadyMounted`], [`MountError::Mount`],
 ///   [`MountError::Target`] — the mount failed.
+/// * [`MountError::Unresolved`], [`MountError::NotHeld`],
+///   [`MountError::Answer`] — the answer was not carried out.
 /// * [`MountError::Service`] — listing the mount table failed.
 /// * [`MountError::Output`] — writing the terminal failed.
 pub fn run(
@@ -58,22 +63,22 @@ pub fn run(
                 .unwrap_or_else(|| format!("{USAGE}\n").into_bytes());
             out.write_all(&bytes).map_err(MountError::Output)
         }
-        Command::List(filter) => list(transport, &filter, out),
+        Command::List(listing) => list(transport, &listing, out),
         Command::Mount(request) => mount(&request, mounter, out, err),
+        Command::Answer(asked) => answer_held(&asked, mounter, transport, out),
     }
 }
 
-/// Read the namespace and write one line per view binding `filter` shows,
+/// Read the namespace and write one line per view binding `listing` shows,
 /// from the volume each shows; one showing none is of type `none`.
-fn list(
-    transport: &dyn Transport,
-    filter: &TypeFilter,
-    out: &dyn Stream,
-) -> Result<(), MountError> {
+fn list(transport: &dyn Transport, listing: &Listing, out: &dyn Stream) -> Result<(), MountError> {
     let namespace = Namespace::read(transport)?;
     for view in namespace.views() {
         let volume = namespace.volume_of(view);
-        if filter.shows(volume.map_or(&b"none"[..], MountRecord::fstype_bytes)) {
+        let held = volume
+            .is_some_and(|record| record.availability() == MountAvailability::ReplayUnconfirmed);
+        let fstype = volume.map_or(&b"none"[..], MountRecord::fstype_bytes);
+        if (held || !listing.held) && listing.types.shows(fstype) {
             out.write_line(&render_binding(view, volume))
                 .map_err(MountError::Output)?;
         }
@@ -97,7 +102,7 @@ fn mount(
     let target = match &request.target {
         Some(asked) => {
             let resolved = mounter
-                .absolute(asked)
+                .canonical(asked)
                 .map_err(|errno| refused_target(asked, errno))?;
             if !is_binding_path(&resolved) {
                 let errno = if resolved.len() > MOUNT_TARGET_MAX {
@@ -189,6 +194,48 @@ fn mount(
     Ok(())
 }
 
+/// Answer for the writes the volume `asked` names holds — written to its
+/// medium, or given up — as the kernel decides who may, silently unless `-v`
+/// asked what became of them. The volume is named as `unmount` names one, and
+/// must be listed holding writes awaiting an answer.
+fn answer_held(
+    asked: &HeldAnswer,
+    mounter: &dyn Mounter,
+    transport: &dyn Transport,
+    out: &dyn Stream,
+) -> Result<(), MountError> {
+    let namespace = Namespace::read(transport)?;
+    let name = || asked.name.clone();
+    let volume = named_volume(&namespace, &asked.name, mounter)
+        .map_err(|why| MountError::Unresolved { name: name(), why })?;
+    if volume.availability() != MountAvailability::ReplayUnconfirmed {
+        return Err(MountError::NotHeld(name()));
+    }
+    let request = VolumeReplayRequest {
+        volume_id: volume.volume_id(),
+        answer: asked.answer,
+    };
+    mounter
+        .replay(request)
+        .map_err(|errno| MountError::Answer {
+            name: name(),
+            answer: asked.answer,
+            errno,
+        })?;
+    if asked.verbose {
+        let done = match asked.answer {
+            ReplayAnswer::Write => "written",
+            ReplayAnswer::Discard => "discarded",
+        };
+        let said = format!(
+            "mount: {}: held writes {done}.",
+            quote_if_needed(&asked.name)
+        );
+        out.write_line(&said).map_err(MountError::Output)?;
+    }
+    Ok(())
+}
+
 /// Where `volume` is in the catalog.
 fn catalog_path(name: &str) -> String {
     format!("/{STORAGE_CATALOG}/{name}")
@@ -197,7 +244,7 @@ fn catalog_path(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{run, USAGE};
-    use crate::command::{parse, Command, TypeFilter};
+    use crate::command::{parse, Command, Listing};
     use crate::error::MountError;
     use crate::io::Mounter;
     use alloc::string::{String, ToString};
@@ -210,10 +257,10 @@ mod tests {
         MountAvailability, MountRecord, MountVolumeState, PageRequest, SysinfoQueryId,
         SysinfoRequestHeader, ViewBindingRecord, MOUNT_TARGET_MAX,
     };
-    use tairix_abi::volume::{VolumeFsType, VolumeFsTypes};
+    use tairix_abi::volume::{ReplayAnswer, VolumeFsType, VolumeFsTypes, VolumeReplayRequest};
     use tairix_abi::Errno;
     use tairix_help::{HelpSource, SourceError};
-    use tairix_procinfo::Transport;
+    use tairix_procinfo::{Caller, Transport};
     use tairix_util::output::Output;
 
     /// An in-memory `sysinfod` answering the mount and view lists from a
@@ -330,10 +377,13 @@ mod tests {
         adopt: bool,
     }
 
-    /// Records every attach and answers it as `answer` says.
+    /// Records every attach and answer for held writes, answering each as
+    /// `answer` and `replay` say.
     struct MemMounter {
         answer: Result<ImageAttachReply, Errno>,
         asked: RefCell<Vec<Asked>>,
+        replay: Result<(), Errno>,
+        replayed: RefCell<Vec<VolumeReplayRequest>>,
     }
 
     impl MemMounter {
@@ -341,11 +391,44 @@ mod tests {
             Self {
                 answer,
                 asked: RefCell::new(Vec::new()),
+                replay: Ok(()),
+                replayed: RefCell::new(Vec::new()),
             }
         }
 
         fn attaching(name: &str) -> Self {
             Self::answering(Ok(ImageAttachReply::Attached(volume(name, false))))
+        }
+
+        /// One whose kernel answers every answer for held writes `replay`.
+        fn replaying(replay: Result<(), Errno>) -> Self {
+            Self {
+                replay,
+                ..Self::attaching("x")
+            }
+        }
+    }
+
+    impl Caller for MemMounter {
+        fn user(&self) -> Option<u32> {
+            Some(1000)
+        }
+
+        /// As `realpath` resolves in `/Users/ada/Home`, where nothing named
+        /// `missing` exists.
+        fn canonical(&self, path: &str) -> Result<String, Errno> {
+            if path.rsplit('/').next() == Some("missing") {
+                return Err(Errno::NotFound);
+            }
+            if path == "lnk" {
+                // A link whose stored target holds a tab.
+                return Ok(String::from("/Users/ada/Home/new\tdir"));
+            }
+            Ok(if path.starts_with('/') {
+                String::from(path)
+            } else {
+                alloc::format!("/Users/ada/Home/{path}")
+            })
         }
     }
 
@@ -367,21 +450,9 @@ mod tests {
             self.answer
         }
 
-        /// As `realpath` resolves in `/Users/ada/Home`, where nothing named
-        /// `missing` exists.
-        fn absolute(&self, path: &str) -> Result<String, Errno> {
-            if path.rsplit('/').next() == Some("missing") {
-                return Err(Errno::NotFound);
-            }
-            if path == "lnk" {
-                // A link whose stored target holds a tab.
-                return Ok(String::from("/Users/ada/Home/new\tdir"));
-            }
-            Ok(if path.starts_with('/') {
-                String::from(path)
-            } else {
-                alloc::format!("/Users/ada/Home/{path}")
-            })
+        fn replay(&self, request: VolumeReplayRequest) -> Result<(), Errno> {
+            self.replayed.borrow_mut().push(request);
+            self.replay
         }
     }
 
@@ -460,7 +531,7 @@ mod tests {
         let out = Recorder::default();
         assert_eq!(
             run(
-                Command::List(TypeFilter::default()),
+                Command::List(Listing::default()),
                 None,
                 &mounter,
                 &fixture,
@@ -517,7 +588,7 @@ mod tests {
         let out = Recorder::default();
         assert_eq!(
             run(
-                Command::List(TypeFilter::default()),
+                Command::List(Listing::default()),
                 None,
                 &mounter,
                 &fixture,
@@ -533,7 +604,7 @@ mod tests {
         );
         assert_eq!(
             run(
-                Command::List(TypeFilter::default()),
+                Command::List(Listing::default()),
                 None,
                 &mounter,
                 &listed,
@@ -806,6 +877,124 @@ mod tests {
         );
     }
 
+    /// A stick holding writes awaiting an answer, published as `[3; 16]` and
+    /// shown at `/Storage/usb1`, beside an image holding none.
+    fn held_fixture() -> Fixture {
+        let held = MountRecord::new(
+            b"usb1",
+            b"/Storage/usb1",
+            b"fat32",
+            MountFlags::READ_ONLY,
+            MountVolumeState {
+                usage: VolumeStats::default(),
+                availability: MountAvailability::ReplayUnconfirmed,
+                medium: None,
+            },
+            [3; 16],
+        )
+        .expect("record");
+        Fixture::new(
+            alloc::vec![
+                record(b"wb.adf", b"/Storage/workbench", MountFlags::NOEXEC, 2),
+                held,
+            ],
+            alloc::vec![
+                view(b"/Storage/workbench", b"/", MountFlags::NOEXEC, 2),
+                view(b"/Storage/usb1", b"/", MountFlags::READ_ONLY, 3),
+            ],
+        )
+    }
+
+    #[test]
+    fn the_held_listing_shows_only_the_volumes_holding_writes() {
+        let mounter = MemMounter::attaching("x");
+        let (outcome, out, _) = ran(&["--list-held"], &mounter, &held_fixture());
+        assert_eq!(outcome, Ok(()));
+        assert_eq!(
+            out,
+            "usb1 on /Storage/usb1 type fat32 (ro) [replay-unconfirmed]\n"
+        );
+        assert!(mounter.asked.borrow().is_empty(), "listing mounts nothing");
+    }
+
+    /// An answer hands the kernel the named volume's key and what becomes of
+    /// its writes, silently, the volume named as `unmount` names one.
+    #[test]
+    fn a_held_answer_hands_the_kernel_the_volumes_key() {
+        let mounter = MemMounter::replaying(Ok(()));
+        let fixture = held_fixture();
+        for (args, answer) in [
+            (&["--replay-held", "usb1"][..], ReplayAnswer::Write),
+            (&["--discard-held", "/Storage/usb1"], ReplayAnswer::Discard),
+        ] {
+            let (outcome, out, err) = ran(args, &mounter, &fixture);
+            assert_eq!(outcome, Ok(()), "{args:?}");
+            assert_eq!((out.as_str(), err.as_str()), ("", ""), "silent on success");
+            assert_eq!(
+                mounter.replayed.borrow().last(),
+                Some(&VolumeReplayRequest {
+                    volume_id: [3; 16],
+                    answer,
+                })
+            );
+        }
+        let (_, out, _) = ran(&["-v", "--replay-held", "usb1"], &mounter, &fixture);
+        assert_eq!(out, "mount: usb1: held writes written.\n");
+        assert!(mounter.asked.borrow().is_empty(), "nothing was mounted");
+    }
+
+    /// A name naming no volume, a volume holding no writes and the kernel's
+    /// refusal each say why, exiting as util-linux does: `1` for an answer the
+    /// caller may not give, `32` for one not carried out.
+    #[test]
+    fn a_held_answer_not_carried_out_says_why() {
+        let fixture = held_fixture();
+        let taking = MemMounter::replaying(Ok(()));
+        let unknown = ran(&["--replay-held", "usb9"], &taking, &fixture)
+            .0
+            .expect_err("refused");
+        assert_eq!(unknown.to_string(), "usb9: not mounted.");
+        assert_eq!(unknown.status(), 32);
+        let healthy = ran(&["--discard-held", "workbench"], &taking, &fixture)
+            .0
+            .expect_err("refused");
+        assert_eq!(
+            healthy.to_string(),
+            "workbench: holds no writes awaiting an answer."
+        );
+        assert_eq!(healthy.status(), 32);
+        assert!(
+            taking.replayed.borrow().is_empty(),
+            "the kernel is asked nothing"
+        );
+        let denied = MemMounter::replaying(Err(Errno::PermissionDenied));
+        let refused = ran(&["--discard-held", "usb1"], &denied, &fixture)
+            .0
+            .expect_err("refused");
+        assert_eq!(refused.status(), 1, "an answer the caller may not give");
+        assert!(
+            !refused.misused(),
+            "a sentence alone, with no hint to --help"
+        );
+        assert_eq!(
+            refused.to_string(),
+            alloc::format!(
+                "usb1: held writes not discarded: {}.",
+                Errno::PermissionDenied
+            )
+        );
+        let kept = MemMounter::replaying(Err(Errno::ReadOnly));
+        let changed = ran(&["--replay-held", "usb1"], &kept, &fixture)
+            .0
+            .expect_err("refused");
+        assert_eq!(changed.status(), 32);
+        assert_eq!(
+            changed.to_string(),
+            "usb1: the disk no longer matches the one the writes were made on; they are kept, \
+             and the volume is read-only."
+        );
+    }
+
     /// Every locale's `OPTIONS` documents exactly the switches this parser
     /// accepts, read from the bundle's own `Help/` tree — the one copy the
     /// image builder plants.
@@ -825,6 +1014,9 @@ mod tests {
                 "`-o, --options <list>`",
                 "`-v, --verbose`",
                 "`-l, --show-labels`",
+                "`--list-held`",
+                "`--replay-held <name>`",
+                "`--discard-held <name>`",
                 "`-h, -?, --help`",
             ] {
                 assert!(

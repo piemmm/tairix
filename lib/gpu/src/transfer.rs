@@ -51,8 +51,7 @@ fn bounded<T>(regions: &[T]) -> Result<(), Error> {
 }
 
 fn copied<T: Copy>(regions: &[T]) -> Result<Vec<T>, Error> {
-    tairix_util::fallible::collected(regions.len(), regions.iter().copied())
-        .ok_or(Error::OutOfMemory)
+    tairix_util::fallible::copied(regions).ok_or(Error::OutOfMemory)
 }
 
 /// Whether `[a, a + a_len)` and `[b, b + b_len)` share a byte.

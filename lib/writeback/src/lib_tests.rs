@@ -1,5 +1,10 @@
 use super::*;
 
+/// Every request this binary makes, metered per thread, so a test can have the
+/// heap refuse a change as an exhausted one would.
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
+
 #[test]
 fn a_reserved_window_grows_to_the_widest_run_and_answers_each_its_own_span() {
     let mut window = RunWindow::default();

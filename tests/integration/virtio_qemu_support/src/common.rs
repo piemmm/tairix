@@ -568,7 +568,7 @@ fn link_vfs_round_trip<B: Block>(env: &dyn QemuEnv, fs: ARXFS<B>) -> Result<(), 
     // volume's nodes are owned by uid/gid 0, so that is the principal.
     let owner = UserId(0);
     let group = GroupId(0);
-    let vfs = Vfs::with_default_layout(owner, group);
+    let vfs = Vfs::with_default_layout(owner, group).map_err(|_| "the default layout")?;
     let caps = CapabilitySet::empty();
     let cred = Credentials {
         uid: owner,
@@ -1125,8 +1125,9 @@ mod root_unlock {
             },
             env.audit_sink(),
             // The fixture passphrase is correct on the first try, so the
-            // wrong-passphrase delay is never invoked; a no-op stands in.
-            &|| {},
+            // wrong-passphrase delay is never taken; one that answers it had
+            // its pause stands in.
+            &|| true,
             &|| released.store(true, Ordering::Release),
             // No pre-boot Supervisor host: this vertical drives the unlock
             // *policy* over a scripted passphrase, not the ESC boot-screen

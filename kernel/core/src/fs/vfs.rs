@@ -9,13 +9,13 @@
 //! it ended on, so nothing between the walk's last step and the change can
 //! move the name it acts on.
 //!
-//! Each in-RAM [`Node`] owns its children directly (a directory is a
-//! `BTreeMap<String, Node>`), so its own operations are a borrow walk and
+//! Each in-RAM [`Node`] owns its children directly (a directory is an
+//! `OrderedMap<String, Node>`), so its own operations are a borrow walk and
 //! removal simply drops a subtree. It holds the boot layout's directories,
 //! whose records govern the projections no volume backs.
 
-use alloc::collections::{BTreeMap, VecDeque};
-use alloc::string::{String, ToString};
+use alloc::collections::VecDeque;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -26,6 +26,7 @@ use tairix_abi::driver::filesystem::{
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::fs::{RealpathMode, RenameFlags, FS_PATH_MAX};
 use tairix_abi::{CapabilityId, FileId, ROOT_VIEW, STORAGE_CATALOG};
+use tairix_collections::OrderedMap;
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -43,14 +44,14 @@ use super::perm::{Access, Credentials, Metadata, Mode};
 use super::{BoundedReadError, VfsError};
 
 /// A node's payload: a directory (name → child) or a file (bytes).
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 enum NodeKind {
-    Directory(BTreeMap<String, Node>),
+    Directory(OrderedMap<String, Node>),
     File(Vec<u8>),
 }
 
 /// A single inode: its access-control [`Metadata`] and its payload.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 struct Node {
     meta: Metadata,
     kind: NodeKind,
@@ -60,8 +61,19 @@ impl Node {
     fn directory(meta: Metadata) -> Self {
         Self {
             meta,
-            kind: NodeKind::Directory(BTreeMap::new()),
+            kind: NodeKind::Directory(OrderedMap::new()),
         }
+    }
+
+    /// File `child` under `name` in this directory.
+    fn adopt(&mut self, name: &str, child: Self) -> Result<(), VfsError> {
+        let NodeKind::Directory(entries) = &mut self.kind else {
+            return Err(VfsError::NotADirectory);
+        };
+        entries
+            .try_insert(owned_name(name)?, child)
+            .map(drop)
+            .map_err(|_| VfsError::OutOfMemory)
     }
 
     fn file(meta: Metadata, contents: Vec<u8>) -> Self {
@@ -708,12 +720,15 @@ pub struct Vfs {
 impl Vfs {
     /// Construct a VFS whose root directory carries `root_meta` and a
     /// single writable root mount. The root starts empty.
-    #[must_use]
-    pub fn new(root_meta: Metadata) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::OutOfMemory`] when the heap cannot hold its mount table.
+    pub fn new(root_meta: Metadata) -> Result<Self, VfsError> {
+        Ok(Self {
             root: Node::directory(root_meta),
-            mounts: RwLock::new(MountTable::new(MountFlags::default())),
-        }
+            mounts: RwLock::new(MountTable::new(MountFlags::default())?),
+        })
     }
 
     /// Construct a VFS pre-populated with the default layout: the root-view
@@ -727,32 +742,30 @@ impl Vfs {
     ///
     /// `owner`/`group` own the system directories. The layout is fixed and
     /// correct by construction.
-    #[must_use]
-    pub fn with_default_layout(owner: UserId, group: GroupId) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::OutOfMemory`] when the heap cannot hold the layout: it is
+    /// built whole or not at all, never short of a directory or a mount's
+    /// policy.
+    pub fn with_default_layout(owner: UserId, group: GroupId) -> Result<Self, VfsError> {
         let dir_meta = || Metadata::new(owner, group, Mode::from_bits(0o755));
 
-        let mut system = Node::directory(dir_meta());
-        if let NodeKind::Directory(entries) = &mut system.kind {
-            entries.insert("Logs".to_string(), Node::directory(dir_meta()));
-            entries.insert("Settings".to_string(), Node::directory(dir_meta()));
-        }
-
         let mut root = Node::directory(dir_meta());
-        if let NodeKind::Directory(entries) = &mut root.kind {
-            for name in ROOT_VIEW {
-                let node = if name == "System" {
-                    system.clone()
-                } else {
-                    Node::directory(dir_meta())
-                };
-                entries.insert(name.to_string(), node);
+        for name in ROOT_VIEW {
+            let mut node = Node::directory(dir_meta());
+            if name == "System" {
+                node.adopt("Logs", Node::directory(dir_meta()))?;
+                node.adopt("Settings", Node::directory(dir_meta()))?;
             }
+            root.adopt(name, node)?;
         }
 
-        let mut mounts = MountTable::new(MountFlags::default());
+        let mut mounts = MountTable::new(MountFlags::default())?;
         // The writable `/System/Logs` and `/System/Settings` projections sit
         // beneath the read-only `/System`'s floor.
-        let catalog = alloc::format!("/{STORAGE_CATALOG}");
+        let catalog = tairix_util::fallible::concatenated(&["/", STORAGE_CATALOG])
+            .ok_or(VfsError::OutOfMemory)?;
         // The two writable grafts take the system's own writes, so those may
         // draw on their volume's reserve once users have filled it.
         let policy = [
@@ -770,15 +783,13 @@ impl Vfs {
             ),
         ];
         for (path, flags, class) in policy {
-            if let Ok(p) = Path::parse(path) {
-                let _ = mounts.mount_classed(p, flags, None, class);
-            }
+            mounts.mount_classed(Path::parse(path)?, flags, None, class)?;
         }
 
-        Self {
+        Ok(Self {
             root,
             mounts: RwLock::new(mounts),
-        }
+        })
     }
 
     /// The mount table, read-locked for the duration of the returned guard.
@@ -1121,6 +1132,7 @@ impl Vfs {
     /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
     /// * [`VfsError::PermissionDenied`] if the caller lacks write
     ///   permission on the parent directory.
+    /// * [`VfsError::OutOfMemory`] when the directory cannot be held.
     /// * [`VfsError::AlreadyExists`], [`VfsError::NotFound`],
     ///   [`VfsError::NotADirectory`], or [`VfsError::InvalidPath`].
     pub fn mkdir(
@@ -1202,6 +1214,7 @@ impl Vfs {
     /// * [`VfsError::NotADirectory`] if `path` names a file.
     /// * [`VfsError::PermissionDenied`] if the caller lacks read
     ///   permission on the directory.
+    /// * [`VfsError::OutOfMemory`] when the names cannot be copied out.
     /// * [`VfsError::NotFound`] or [`VfsError::InvalidPath`].
     pub fn list(&self, cred: &Credentials<'_>, path: &Path) -> Result<Vec<String>, VfsError> {
         let node = self.resolve_in_ram(cred, path)?;
@@ -1209,7 +1222,14 @@ impl Vfs {
             return Err(VfsError::NotADirectory);
         };
         node.meta.authorize(cred, Access::Read)?;
-        Ok(entries.keys().cloned().collect())
+        let mut names = Vec::new();
+        names
+            .try_reserve_exact(entries.len())
+            .map_err(|_| VfsError::OutOfMemory)?;
+        for name in entries.keys() {
+            names.push(owned_name(name)?);
+        }
+        Ok(names)
     }
 
     /// Remove the (empty) directory or file at `path`.
@@ -1307,7 +1327,9 @@ impl Vfs {
         if entries.contains_key(&name) {
             return Err(VfsError::AlreadyExists);
         }
-        entries.insert(name, child);
+        entries
+            .try_insert(name, child)
+            .map_err(|_| VfsError::OutOfMemory)?;
         Ok(())
     }
 

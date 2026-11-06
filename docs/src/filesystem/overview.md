@@ -235,6 +235,12 @@ only summarises, is `plans/SYMLINKS.md`.
   either, and every node a walk reaches has a path under the mount point.
   That totality is what makes canonicalisation (below) able to name every
   result.
+- **A target spelled from another root is never walked.** One beginning with
+  a resolver or an alias (`id::…/`, `Storage:/…`) is classified by
+  `tairix_path::names_another_root`, and following it is
+  `VfsError::CrossVolume` rather than a name looked up beside the link;
+  `readlink` and a `Keep` resolution still answer the link and its target as
+  written, for the caller to resolve under its own authority.
 - **Following a link never bypasses a permission check.** A spliced
   target's components are authorised exactly as typed ones are: search
   permission is required on every directory the resolution traverses,

@@ -12,16 +12,18 @@ Lee cada operando de archivo en orden y escribe sus bytes en la
 salida estándar. El operando `-` designa la entrada estándar, y sin
 operando la entrada estándar es la única fuente.
 
-Un operando también puede ser una referencia de recurso tipada como
-`sys:random`: se abre a través del resolutor de recursos del sistema
-(verificado por capacidades) en lugar del sistema de archivos — `cat
-sys:random` emite bytes aleatorios. Una referencia `info:`, `state:` o
-`stats:` nombra un valor de sistema tipado en lugar de un flujo; se lee
-a través del servicio de información del sistema, así que
-`cat info:mem/physical` imprime ese valor, y una lectura no autorizada
-se rechaza nombrando la capacidad necesaria. Una referencia mal formada
-en un espacio de nombres registrado es un error, nunca un nombre de
-archivo.
+Un operando también puede ser una referencia de recurso tipada: un
+operando relativo cuyo primer componente de ruta es un espacio de
+nombres registrado, como `sys:random`, se abre a través del resolutor
+de recursos del sistema (verificado por capacidades) en lugar del
+sistema de archivos, así que `cat sys:random` emite bytes aleatorios.
+Una referencia `info:`, `state:` o `stats:` nombra un valor de sistema
+tipado en lugar de un flujo; se lee a través del servicio de información
+del sistema, así que `cat info:mem/physical` imprime ese valor, y una
+lectura no autorizada se rechaza nombrando la capacidad necesaria. Una
+referencia mal formada en un espacio de nombres registrado es un error,
+nunca un nombre de archivo; un archivo en disco cuyo nombre contiene
+`:` sigue siendo accesible como `./name` o entre comillas.
 
 Con `-n`, las líneas de salida se numeran de forma continua a través
 de todas las fuentes, de modo que una línea que abarca dos fuentes se
@@ -60,6 +62,8 @@ todos modos.
 ## EXAMPLES
 
 - `cat notes.txt` — escribir `notes.txt` en la salida estándar.
+- `cat sys:random` — emitir bytes de la fuente aleatoria del sistema
+  (sin fin; interrumpa el comando para detenerlo).
 - `cat a.txt - b.txt` — escribir `a.txt`, luego la entrada estándar,
   luego `b.txt`.
 - `cat -n log.txt` — numerar cada línea de salida.

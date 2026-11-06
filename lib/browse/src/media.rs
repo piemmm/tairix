@@ -48,14 +48,16 @@
 
 use alloc::string::String;
 
+use tairix_abi::appinfo::is_bundle_name;
 use tairix_abi::driver_store::DRIVER_STORE_PATH;
-use tairix_abi::fs::{DirEntry, FileKind};
+use tairix_abi::fs::{DirEntry, DocumentStamp, FileKind};
 use tairix_abi::home::USERS_DIR;
+use tairix_abi::window_ipc::{DragPicture, IconAsset};
 use tairix_abi::{BundleEntry, ProgramKind, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR};
 use tairix_fsmeta::preset::acorn::{self, Filetype};
-use tairix_icon::{DocumentStamp, FolderSample, IconKind, IconRequest, SampleCard, Thumbnail};
+use tairix_icon::{FolderSample, IconKind, IconRequest, SampleCard, Thumbnail};
 
-use crate::entry::{is_bundle_name, Entry, EntryKind};
+use crate::entry::{resolve_target, Entry, EntryKind};
 use crate::presentation::Pictures;
 
 /// A content type TAIRiX recognises, named by its media type.
@@ -1160,7 +1162,7 @@ pub fn folder_sample<'n>(
         cards[slot] = Some(if pictured {
             let dir = path.get_or_insert_with(|| crate::vfs::spell_absolute_path(folder));
             let mut member = dir.clone();
-            crate::vfs::push_child(&mut member, name);
+            tairix_path::push_name(&mut member, name);
             SampleCard::Picture(
                 kind,
                 Thumbnail {
@@ -1826,8 +1828,11 @@ fn icon_of(entry: &Entry, media: MediaType, site: Site) -> IconKind {
 /// asks for it: an application bundle's own icon, a RISC OS application's
 /// sprite, an occupied folder's picture of what it holds, a picture file's own
 /// content — a bundle, an application folder and a picture file each at the
-/// version the listing saw. Each falls back to the icon's class picture where it
-/// will not serve, a RISC OS application to the folder it is. `scratch` is a
+/// version the listing saw. A shortcut to a bundle or an application is asked
+/// for where its activation reaches what it names ([`Entry::reached_by`]), so
+/// one whose target names another root draws that target's picture. Each falls
+/// back to the icon's class picture where it will not serve, a RISC OS
+/// application to the folder it is. `scratch` is a
 /// buffer the caller reuses across the entries of one frame, so a grid spells
 /// its paths without allocating one per tile.
 ///
@@ -1857,9 +1862,7 @@ pub fn entry_icon<'a>(
         _ => None,
     };
     if entry.is_riscos_application() {
-        scratch.clear();
-        scratch.push_str(dir);
-        crate::vfs::push_child(scratch, entry.name());
+        entry.spell_reached(dir, scratch);
         // A link's listed stamp is its own, not its target's.
         let stamp =
             (entry.kind() == EntryKind::Directory && !entry.id().is_none()).then(|| entry.stamp());
@@ -1885,9 +1888,7 @@ pub fn entry_icon<'a>(
     if !thumbnail && !entry.is_bundle() {
         return (kind, IconRequest::kind(kind));
     }
-    scratch.clear();
-    scratch.push_str(dir);
-    crate::vfs::push_child(scratch, entry.name());
+    entry.spell_reached(dir, scratch);
     let request = match (thumbnail, entry.kind()) {
         (true, _) => IconRequest::thumbnail(kind, scratch, entry.stamp()),
         // A link to a bundle carries its own stamp, not its target's.
@@ -1897,6 +1898,46 @@ pub fn entry_icon<'a>(
         (false, _) => IconRequest::bundle(kind, scratch),
     };
     (kind, request)
+}
+
+/// What a drag carries of one entry listed out of the directory `dir`
+/// (root-first `parent`), its picture's centre standing `from` the press: the
+/// class picture it is drawn as, and its own where a path names one the
+/// desktop reads — an application bundle's icon, a RISC OS application's
+/// sprite ([`IconRequest::carried`]), a shortcut's by the path it resolves to,
+/// as its activation reaches it ([`resolve_target`]). A thumbnail and a
+/// folder's fan cross as the class picture: a whole file's decode for a
+/// picture shown a second, and one no path names. `scratch` is reused across
+/// the items, as by [`entry_icon`].
+///
+/// `None` where the class picture has no asset id a drag can carry.
+#[must_use]
+pub fn drag_picture(
+    (dir, parent): (&str, &[String]),
+    entry: &Entry,
+    from: Option<(i32, i32)>,
+    scratch: &mut String,
+) -> Option<DragPicture> {
+    let carried = Pictures {
+        thumbnails: false,
+        folder_contents: false,
+    };
+    let (kind, request) = entry_icon(dir, parent, entry, carried, scratch);
+    let own = match entry.target() {
+        // A shortcut is named for itself, not for what it shows.
+        Some(target) if entry.is_riscos_application() => {
+            IconRequest::riscos_application(kind, &resolve_target(dir, target), None).carried()
+        }
+        Some(target) if entry.is_bundle() => {
+            IconRequest::bundle(kind, &resolve_target(dir, target)).carried()
+        }
+        _ => request.carried(),
+    };
+    Some(DragPicture {
+        icon: IconAsset::new(kind.asset_id()).ok()?,
+        from,
+        own,
+    })
 }
 
 /// Where a listed folder stands, as far as what it holds is concerned: the

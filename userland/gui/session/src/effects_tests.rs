@@ -279,7 +279,7 @@ fn a_reading_shows_what_is_in_effect_and_names_files_by_their_names() {
     let mut stored = choices("sound.bell.enabled = false\n");
     assert!(stored.choose(SoundEvent::Error, &path("/Users/ada/klaxon.wav")));
     assert!(stored.choose(SoundEvent::Info, &path("/Users/ada/gone.flac")));
-    let mut unavailable = [false; 13];
+    let mut unavailable = [false; SoundEvent::ALL.len()];
     unavailable[SoundEvent::Info.index()] = true;
     let reading = ReadAsk {
         choices: stored,
@@ -392,9 +392,9 @@ fn a_push_posts_its_frame_once_its_files_are_delegated() {
     let mut effects = holding("sound.enabled = false\n");
     pushed_choices(effects.next_push(0));
     assert_eq!(effects.take_post(), None, "its files are not yet delegated");
-    let mut files = [0u64; 13];
+    let mut files = [0u64; SoundEvent::ALL.len()];
     files[SoundEvent::Error.index()] = 4;
-    let mut unavailable = [false; 13];
+    let mut unavailable = [false; SoundEvent::ALL.len()];
     unavailable[SoundEvent::Info.index()] = true;
     effects.handed_over("sound.enabled = false\n".into(), files, unavailable);
     assert_eq!(

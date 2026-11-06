@@ -1,0 +1,20 @@
+# Signed-AppInfo manifest source for the `label` command app. Discovered by
+# the build's app-bundle composer; the capability list is the bundle's
+# request, intersected with the launching user's grants.
+# CAP_CONSOLE_WRITE covers the inherited standard output/error streams;
+# CAP_FS_ACCESS reads the tool's own bundle's Help/ documents through the
+# secured VFS and resolves a path naming a volume; CAP_FS_MOUNT is the
+# authority the kernel's volume_retitle path asks of a device's volume,
+# unless the user at the seat retitles a removable one whose root they may
+# write, and re-checks on every call; a disk image's owner needs none. The
+# mount and view listings it resolves names against come from the ungated
+# sysinfo-v1 MOUNT_LIST and VIEW_LIST queries served by sysinfod. It reads
+# no standard input.
+id = "os.tairix.label"
+name = "label"
+title = "Label"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_FS_MOUNT"]
+# This bundle's own icon in its Resources/ (plans/ICONS.md).
+library-icon = "label.svg"

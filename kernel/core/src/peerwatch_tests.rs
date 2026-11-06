@@ -4,13 +4,6 @@ use super::*;
 use tairix_abi::CapabilityId;
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{TaskCapabilities, UserId};
-use tairix_log::Event;
-
-struct Quiet;
-
-impl tairix_log::Sink for Quiet {
-    fn write_event(&self, _event: &Event<'_>) {}
-}
 
 fn instance(tag: u8) -> ProcId {
     let mut raw = [0xC0u8; 16];
@@ -21,13 +14,21 @@ fn instance(tag: u8) -> ProcId {
 fn record(process: u64, id: ProcId) -> TaskCapabilities {
     let mut set = CapabilitySet::empty();
     set.insert(CapabilityId::NET);
-    TaskCapabilities::derive(ProcessId(process), UserId(1000), set, set, &Quiet).with_proc_id(id)
+    TaskCapabilities::derive(
+        ProcessId(process),
+        UserId(1000),
+        set,
+        set,
+        &tairix_log::DiscardSink,
+    )
+    .expect("derived")
+    .with_proc_id(id)
 }
 
 fn table_with(live: &[(u64, ProcId)]) -> RwLock<CapTable> {
     let table = RwLock::new(CapTable::new());
     for &(process, id) in live {
-        table.write().insert(record(process, id));
+        table.write().insert(record(process, id)).expect("inserted");
     }
     table
 }
@@ -177,12 +178,12 @@ fn a_consume_of_anything_but_the_oldest_exit_changes_nothing() {
 #[test]
 fn a_retired_watcher_leaves_the_queue_as_well_as_the_registry() {
     let peers = PeerWatch::new();
-    peers.join(70_011);
+    peers.join(70_011).expect("filed");
     assert!(!peers.parked.is_empty());
     peers.leave(70_011);
     assert!(peers.parked.is_empty());
     // A thread torn down while parked never unwinds to its own `leave`.
-    peers.join(70_012);
+    peers.join(70_012).expect("filed");
     peers.forget_watcher(70_012);
     assert!(
         peers.parked.is_empty(),

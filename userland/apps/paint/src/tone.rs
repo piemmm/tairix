@@ -1,13 +1,17 @@
-//! The tone and colour adjustments' settings, and the colour maps they make:
-//! levels, curves, white balance, colour balance and hue by range.
+//! The adjustments' settings and the colour maps they make: brightness and
+//! contrast, levels, curves, white balance, colour balance, hue by range,
+//! posterising, inverting, the channel mixer, a threshold and grey.
 //!
-//! Levels, curves and white balance map each channel alone, so each is three
-//! tables of 256 levels; colour balance and hue by range read the whole colour.
+//! Brightness and contrast, posterising, inverting, levels, curves and white
+//! balance map each channel alone, so each is three tables of 256 levels; the
+//! rest read the whole colour. [`ToneMap`] is what an adjustment maps colours
+//! through, made once for a run.
 
 use tairix_colour::{
     chromaticity_of, linear_of, linear_to_srgb, srgb_to_linear, uv_of, white_of, Fraction, Hsl,
     Hue, Illuminant, Rgb, Xyz,
 };
+use tairix_image::Rgba8;
 use tairix_raster::Color;
 use tairix_util::mathf;
 
@@ -31,6 +35,51 @@ pub const IDENTITY_TABLE: Table = {
 #[must_use]
 pub fn to_level(v: f64) -> u8 {
     u8::try_from(mathf::round_i32(mathf::clamp(v, 0.0, 255.0)).clamp(0, 255)).unwrap_or(u8::MAX)
+}
+
+/// Invert's table: each level its opposite.
+pub const INVERT_TABLE: Table = {
+    let mut table = [0u8; 256];
+    let mut level: u8 = 0;
+    loop {
+        table[level as usize] = u8::MAX - level;
+        if level == u8::MAX {
+            break table;
+        }
+        level += 1;
+    }
+};
+
+/// Brightness and contrast's table, each `-100..=100`: contrast stretches the
+/// levels away from mid grey or gathers them toward it, and brightness lifts
+/// them by its share of the range.
+#[must_use]
+pub fn brightness_table(brightness: i32, contrast: i32) -> Table {
+    let contrast = f64::from(contrast.clamp(-100, 99));
+    let factor = if contrast >= 0.0 {
+        100.0 / (100.0 - contrast)
+    } else {
+        (100.0 + contrast) / 100.0
+    };
+    let lift = f64::from(brightness.clamp(-100, 100)) * 2.55;
+    let mut table = [0u8; 256];
+    for (input, slot) in (0u8..=255).zip(table.iter_mut()) {
+        *slot = to_level((f64::from(input) - 127.5) * factor + 127.5 + lift);
+    }
+    table
+}
+
+/// Posterise's table: each channel held to `levels` levels, `2..=256`, spread
+/// evenly from black to white, each level the nearest of them.
+#[must_use]
+pub fn posterise_table(levels: i32) -> Table {
+    let steps = u32::try_from(levels.clamp(2, 256) - 1).unwrap_or(1);
+    let mut table = [0u8; 256];
+    for (input, slot) in (0u32..=255).zip(table.iter_mut()) {
+        let band = (input * steps + 127) / 255;
+        *slot = u8::try_from((band * 255 + steps / 2) / steps).unwrap_or(u8::MAX);
+    }
+    table
 }
 
 /// A channel a levels or curves adjustment is set for. The composite's map
@@ -704,32 +753,24 @@ impl ColourBalance {
 
     /// How far each colour channel moves at each lightness, in levels.
     ///
-    /// The bands' weights are GIMP's colour-balance masks: shadows fade out and
-    /// highlights fade in over ramps a quarter wide about a third and two
-    /// thirds of the way, midtones between, and the three always sum to the
-    /// same, so one move in every band is that move everywhere.
+    /// The bands weigh a lightness `l` by the quadratic Bernstein basis —
+    /// shadows `(1 − l)²`, midtones `2l(1 − l)`, highlights `l²` — which sums
+    /// to one everywhere, so one move in every band is that move everywhere,
+    /// and a slider at its end moves a channel half its range, 127.5 levels,
+    /// where its band weighs one.
     #[must_use]
     pub fn shifts(&self) -> [[i16; 256]; 3] {
-        const RAMP: f64 = 0.25;
-        const KNEE: f64 = 0.333;
-        const SCALE: f64 = 0.7;
         let mut shifts = [[0i16; 256]; 3];
-        for level in 0..256u16 {
-            let l = f64::from(level) / 255.0;
-            let shadows = mathf::clamp((l - KNEE) / -RAMP + 0.5, 0.0, 1.0) * SCALE;
-            let midtones = mathf::clamp((l - KNEE) / RAMP + 0.5, 0.0, 1.0)
-                * mathf::clamp((l + KNEE - 1.0) / -RAMP + 0.5, 0.0, 1.0)
-                * SCALE;
-            let highlights = mathf::clamp((l + KNEE - 1.0) / RAMP + 0.5, 0.0, 1.0) * SCALE;
-            let weights = [shadows, midtones, highlights];
+        for level in 0..=u8::MAX {
+            let weights = band_weights(level);
             for (axis, channel) in shifts.iter_mut().enumerate() {
-                let moved: f64 = weights
+                let moved: i32 = weights
                     .iter()
                     .zip(&self.tones)
-                    .map(|(weight, band)| weight * f64::from(band[axis]) / 100.0)
+                    .map(|(&weight, band)| weight * i32::from(band[axis]))
                     .sum();
                 channel[usize::from(level)] =
-                    i16::try_from(mathf::round_i32(moved * 255.0)).unwrap_or(0);
+                    i16::try_from(rounded_quotient(moved, SHIFT_DIVISOR)).unwrap_or(0);
             }
         }
         shifts
@@ -755,6 +796,29 @@ impl ColourBalance {
         let before = Hsl::from_rgb(colour, Hsl::default());
         let after = Hsl::from_rgb(balanced, Hsl::default());
         Hsl::new(after.hue, after.saturation, before.lightness).to_rgb()
+    }
+}
+
+/// What a band's weight times its slider is divided by to come to levels: the
+/// weights are in 255²ths and a slider's end is a hundred, so a band weighing
+/// one at its end moves half a channel's 255 levels.
+const SHIFT_DIVISOR: i32 = 255 * 2 * 100;
+
+/// The shadows', midtones' and highlights' weights of lightness `level`, in
+/// 255²ths: the quadratic Bernstein basis, which sums to 255² at every level.
+fn band_weights(level: u8) -> [i32; 3] {
+    let lit = i32::from(level);
+    let dark = 255 - lit;
+    [dark * dark, 2 * lit * dark, lit * lit]
+}
+
+/// `numerator / denominator` to the nearest whole, halves away from nought.
+const fn rounded_quotient(numerator: i32, denominator: i32) -> i32 {
+    let half = denominator / 2;
+    if numerator < 0 {
+        (numerator - half) / denominator
+    } else {
+        (numerator + half) / denominator
     }
 }
 
@@ -940,6 +1004,158 @@ impl HueRanges {
             Fraction::from_f64(lightness),
         )
         .to_rgb()
+    }
+}
+
+/// The channel mixer: each output channel weighed from the three inputs and a
+/// constant, or every channel one grey weighed so.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ChannelMixer {
+    /// Each output channel's weights, in percent, in [`INPUTS`](Self::INPUTS)'s
+    /// order: red, green and blue, then the constant, a share of white.
+    pub rows: [[i16; 4]; 3],
+    /// The one grey's weights, every channel's while `monochrome`.
+    pub grey: [i16; 4],
+    /// Whether every channel is the one grey.
+    pub monochrome: bool,
+}
+
+impl ChannelMixer {
+    /// The mixer that changes nothing; its grey is Rec. 601's weighing.
+    pub const IDENTITY: Self = Self {
+        rows: [[100, 0, 0, 0], [0, 100, 0, 0], [0, 0, 100, 0]],
+        grey: [30, 59, 11, 0],
+        monochrome: false,
+    };
+
+    /// What each weight is called, as its slider reads.
+    pub const INPUTS: [&'static str; 4] = ["Red", "Green", "Blue", "Constant"];
+
+    /// The output channels, as a list of them reads.
+    pub const OUTPUTS: [&'static str; 3] = ["Red", "Green", "Blue"];
+
+    /// The least and most a colour's weight is, in percent.
+    pub const WEIGHT: (i32, i32) = (-200, 200);
+
+    /// The least and most the constant is, in percent of white.
+    pub const CONSTANT: (i32, i32) = (-100, 100);
+
+    /// Whether it changes nothing.
+    #[must_use]
+    pub fn is_identity(&self) -> bool {
+        !self.monochrome && self.rows == Self::IDENTITY.rows
+    }
+
+    /// The weights output channel `output` is made by: the grey's while
+    /// `monochrome`, red's for a channel past blue.
+    #[must_use]
+    pub fn row(&self, output: usize) -> [i16; 4] {
+        if self.monochrome {
+            return self.grey;
+        }
+        self.rows.get(output).copied().unwrap_or(self.rows[0])
+    }
+
+    /// Set weight `input` of output channel `output` — the grey's while
+    /// `monochrome` — to `value`, held to its bounds.
+    pub fn set(&mut self, output: usize, input: usize, value: i32) {
+        let (least, most) = if input == 3 {
+            Self::CONSTANT
+        } else {
+            Self::WEIGHT
+        };
+        let weights = if self.monochrome {
+            Some(&mut self.grey)
+        } else {
+            self.rows.get_mut(output)
+        };
+        if let Some(slot) = weights.and_then(|weights| weights.get_mut(input)) {
+            *slot = i16::try_from(value.clamp(least, most)).unwrap_or(0);
+        }
+    }
+
+    /// What `colour` becomes: each channel its weights' sum over the inputs,
+    /// rounded to the nearest level and held to the range.
+    #[must_use]
+    pub fn map(&self, colour: Rgb) -> Rgb {
+        let inputs = [colour.r, colour.g, colour.b, u8::MAX].map(i32::from);
+        let mixed = |weights: [i16; 4]| {
+            let sum: i32 = weights
+                .iter()
+                .zip(inputs)
+                .map(|(&weight, input)| i32::from(weight) * input)
+                .sum();
+            u8::try_from((sum + 50).div_euclid(100).clamp(0, 255)).unwrap_or(0)
+        };
+        if self.monochrome {
+            let grey = mixed(self.grey);
+            return Rgb::new(grey, grey, grey);
+        }
+        Rgb::new(
+            mixed(self.rows[0]),
+            mixed(self.rows[1]),
+            mixed(self.rows[2]),
+        )
+    }
+}
+
+/// What an adjustment maps colours through, made once for a whole run and lent
+/// to every block of it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "made once for a run and lent to every block; boxing the tables would allocate for nothing"
+)]
+pub enum ToneMap {
+    /// Each channel through its own table.
+    Tables([Table; 3]),
+    /// Colour balance, with its moves at each lightness.
+    Balance {
+        /// The balance.
+        balance: ColourBalance,
+        /// Its moves, from [`ColourBalance::shifts`].
+        shifts: [[i16; 256]; 3],
+    },
+    /// Hue and saturation by range.
+    Hue(HueRanges),
+    /// Each colour its luma.
+    Grey,
+    /// Black below this luma, white from it.
+    Threshold(i32),
+    /// The channel mixer.
+    Mixer(ChannelMixer),
+}
+
+impl ToneMap {
+    /// Colour balance's map, its moves at each lightness worked out once.
+    #[must_use]
+    pub fn balance(balance: ColourBalance) -> Self {
+        Self::Balance {
+            shifts: balance.shifts(),
+            balance,
+        }
+    }
+
+    /// What `colour` becomes; its alpha is kept.
+    #[must_use]
+    pub fn map(&self, colour: Rgba8) -> Rgba8 {
+        let [r, g, b, a] = colour;
+        let mapped = match self {
+            Self::Tables(tables) => [
+                tables[0][usize::from(r)],
+                tables[1][usize::from(g)],
+                tables[2][usize::from(b)],
+            ],
+            Self::Balance { balance, shifts } => balance.map(Rgb::new(r, g, b), shifts).to_array(),
+            Self::Hue(ranges) => ranges.map(Rgb::new(r, g, b)).to_array(),
+            Self::Grey => [Color::rgb(r, g, b).luma(); 3],
+            Self::Threshold(level) => {
+                let lit = i32::from(Color::rgb(r, g, b).luma()) >= *level;
+                [if lit { u8::MAX } else { 0 }; 3]
+            }
+            Self::Mixer(mixer) => mixer.map(Rgb::new(r, g, b)).to_array(),
+        };
+        [mapped[0], mapped[1], mapped[2], a]
     }
 }
 

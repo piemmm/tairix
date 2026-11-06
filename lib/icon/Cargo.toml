@@ -46,9 +46,14 @@ tairix-svg = { path = "../svg", version = "=0.0.0" }
 # artwork through one pressure-governed, budgeted cache rather than each
 # process inventing its own (plans/SMARTRAM.md).
 tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
+# The hashers the artwork cache and the desk's listed-bundle index are built
+# over.
+tairix-hash = { path = "../hash", version = "=0.0.0" }
+# The recency map the desk remembers listed bundles in, and the ordered tier
+# its decodes and landings are filed in, both refusing an exhausted heap.
+tairix-collections = { path = "../collections", version = "=0.0.0" }
 # The audit sink the reclaimable-memory cache logs classification and
 # eviction through — supplied by the process that builds the cache.
-tairix-hash = { path = "../hash", version = "=0.0.0" }
 tairix-log = { path = "../log", version = "=0.0.0" }
 # The block-integrity checksum each stored thumbnail's slot carries, so a write
 # cut short reads as an empty slot rather than a picture of the wrong pixels.

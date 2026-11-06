@@ -1026,3 +1026,6 @@ What it guarantees:
   `userland/gui/*` (microkernel-leaning, §4; optional desktop, §17.3).
 - It does **not** introduce any capability beyond the single `CAP_SEAT_ADMIN`,
   and that only alongside its holder and enforcement point (§5.2).
+- It does **not** read scan-out back: a screen capture is composed afresh by
+  the session's compositor (`plans/CAPTURE.md` CP5), so no display request
+  returns pixels.

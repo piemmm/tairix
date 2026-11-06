@@ -46,14 +46,44 @@ Les requêtes :
   d'interruption associée — son identifiant, la tâche du pilote
   propriétaire, le nombre d'interruptions depuis le démarrage et si la
   ligne est en quarantaine (nécessite `CAP_SYSINFO_HW`).
-- `storage`, `io` — la santé des E/S de stockage par volume : une ligne
-  par volume sur blocs conscient des pannes — un préfixe de son
-  identifiant durable, le point d'accès du service de blocs qui le sert,
-  sa disponibilité actuelle (available/degraded/recovering/lost) et les
-  compteurs de résultats cumulés (achèvements, réinitialisations,
-  expirations, erreurs de support, réémissions) sur lesquels un disque
-  défaillant ou instable devient visible (nécessite
-  `CAP_SYSINFO_KERNEL`).
+- `frames` — ce qu'ont coûté les trames composées de chaque session de
+  bureau : une ligne par session qui publie — les pixels que ses trames
+  ont recomposés et la moyenne par trame, le multiple de surdessin
+  (contributions de calques par pixel endommagé), la part résolue par la
+  copie d'une plage opaque, les pixels qu'un fond en verre dépoli
+  recalculé a de nouveau floutés, les pixels convertis vers le format de
+  balayage, la pire trame isolée et sa part de l'écran, les appels au
+  pilote qui les ont présentées, ainsi que les succès et échecs du cache
+  des ornements de fenêtre. Ce sont les chiffres propres du bureau — seul
+  un processus détenant un compositeur peut compter des pixels —, si bien
+  que chaque ligne nomme l'éditeur tel que le service l'a attesté, et une
+  session qui n'a rien publié n'affiche aucune ligne (nécessite
+  `CAP_SYSINFO_GLOBAL`).
+- `storage`, `io` — trois tables par volume, avec dans chacune une ligne
+  par volume sur blocs conscient des pannes, repérée par un préfixe de
+  l'identifiant durable du volume et nommant le périphérique qui le sert.
+  Cette identité est le point d'accès du service de blocs qui le sert
+  lorsqu'un pilote en espace utilisateur sert le périphérique, et une
+  identité réservée pilotée par le noyau lorsque le noyau le pilote
+  lui-même — le disque sur lequel la machine a démarré, qui n'a aucun
+  point d'accès de service. **Service** nomme en outre le périphérique :
+  le nom court que déclare son propre pilote (`virtio-blk`, `emmc2`,
+  `usb-msd`), ou `-` s'il n'en déclare aucun. Cette table porte les octets
+  cumulés, les requêtes achevées et le temps d'occupation du périphérique,
+  qu'un lecteur convertit par différence en débit, IOPS, utilisation et
+  attente — rien n'est précalculé, si bien que deux lecteurs n'héritent
+  jamais d'une même fenêtre de moyenne (aucune capacité nécessaire).
+  **File d'attente** porte ce qui est en cours maintenant, les
+  accumulateurs dont on tire une profondeur moyenne par différence, ainsi
+  que la profondeur et l'échéance que permet la classe propre du
+  périphérique. **Santé** porte la disponibilité actuelle du volume
+  (available/degraded/recovering/lost) et les compteurs de résultats
+  cumulés (achèvements, réinitialisations, expirations, erreurs de
+  support, réémissions) sur lesquels un disque défaillant ou instable
+  devient visible. Les deux dernières nécessitent `CAP_SYSINFO_KERNEL` ;
+  la table de service est affichée en premier, si bien qu'un appelant qui
+  ne le détient pas lit encore les chiffres d'utilisation avant que le
+  refus ne soit signalé.
 - `raid`, `arrays` — les grappes RAID composées et les périphériques que
   détient le compositeur de grappes : une ligne par grappe — un préfixe
   de son identité, son niveau, sa santé
@@ -107,6 +137,7 @@ Sans requête, l'aide courte est affichée.
 - `sysinfo identity` — afficher l'identité de la machine et la version
   de l'OS.
 - `sysinfo ps --all` — lister tous les processus du système.
+- `sysinfo frames` — montrer ce que coûtent les trames du bureau.
 
 ## EXIT STATUS
 

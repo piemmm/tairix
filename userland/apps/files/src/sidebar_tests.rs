@@ -9,7 +9,9 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use tairix_abi::blkio::{BlkMedium, BlkRotation, BlkRotationEvidence, BlkTransport};
-use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode};
+use tairix_abi::input::{
+    KeyInput, KeyValue, Modifiers, NamedKeyCode, PhysicalKey, PointerButtonCode,
+};
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_browse::render::{sidebar_index_at, sidebar_view, toolbar_command_at};
 use tairix_browse::{Browser, Places, SidebarView, ToolbarBand, ToolbarCommand, Volume};
@@ -112,6 +114,7 @@ fn key(key: KeyValue) -> WindowEvent {
         key: KeyInput::Pressed {
             key,
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::UNKNOWN,
         },
     }
 }
@@ -125,7 +128,11 @@ fn named(code: NamedKeyCode) -> WindowEvent {
 fn chord(key: KeyValue, modifiers: Modifiers) -> WindowEvent {
     WindowEvent::Key {
         window_id: WINDOW_ID,
-        key: KeyInput::Pressed { key, modifiers },
+        key: KeyInput::Pressed {
+            key,
+            modifiers,
+            physical: PhysicalKey::UNKNOWN,
+        },
     }
 }
 
@@ -373,6 +380,7 @@ fn the_rail_takes_only_the_keys_it_owns_and_only_while_it_is_focused() {
         key: KeyInput::Released {
             key: KeyValue::Named(NamedKeyCode::Down),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::UNKNOWN,
         },
     };
     assert!(route(&mut browser, &mut places, &release).is_none());
@@ -385,6 +393,7 @@ fn the_rail_takes_only_the_keys_it_owns_and_only_while_it_is_focused() {
                 ctrl: true,
                 ..Modifiers::default()
             },
+            physical: PhysicalKey::UNKNOWN,
         },
     };
     assert_eq!(

@@ -718,3 +718,47 @@ fn retain_that_keeps_everything_touches_nothing() {
     .expect("nothing to unmap");
     assert_eq!((win.live(), space.mapped_pages()), (1, 1));
 }
+
+#[test]
+fn a_window_whose_record_is_refused_maps_nothing() {
+    let phys = sim();
+    let mut map = fresh(&phys, 16);
+    assert_eq!(
+        tairix_fuzzseed::meter::refusing_above(0, || map.map(SIM_BASE, 0x100)),
+        Err(MmioError::OutOfMemory)
+    );
+    assert_eq!((map.live(), map.mapped_pages()), (0, 0));
+    map.map(SIM_BASE, 0x100).expect("the retry maps it");
+    assert_eq!((map.live(), map.mapped_pages()), (1, 1));
+}
+
+/// A window refused at any of its allocations — its run's record, a page's
+/// record, the page table — unwinds whatever it had placed.
+#[test]
+fn a_window_refused_part_way_leaves_nothing_behind() {
+    let mut space = borrowed_space();
+    let mut win = window(16);
+    for granted in 0..32 {
+        let mapped = tairix_fuzzseed::meter::refusing_after(granted, || {
+            win.map_into(&mut space, 0xFEB0_0000, 3 * PAGE_SIZE)
+        });
+        match mapped {
+            Ok(_) => {
+                assert_eq!((win.live(), space.mapped_pages()), (1, 3));
+                return;
+            }
+            Err(err) => {
+                assert!(
+                    matches!(
+                        err,
+                        MmioError::OutOfMemory
+                            | MmioError::PageTable(PageTableError::AllocFailed(_))
+                    ),
+                    "refused after {granted} grants: {err:?}"
+                );
+                assert_eq!((win.live(), space.mapped_pages()), (0, 0));
+            }
+        }
+    }
+    panic!("the window never mapped");
+}

@@ -14,6 +14,7 @@ screen semantics, the pty seam — belongs to `plans/APPWIN.md` AW4,
 | T1 | The size the terminal opens at (§1) | done |
 | T2 | The user profile (§2) | done |
 | T3 | Colour schemes (§3) | done |
+| T3.1 | *System* is the dark theme's own look whatever the desktop's appearance, and a desktop change restyles a window only where it moved it (§3, §12) | done |
 | T4 | Screen effects: the strengths and the passes they resolve to (§4) | done |
 | T4.1 | The effect pipeline: retained stages redrawn only over what changed, the phosphor stepped by the clock and settling, a divide-free fuzz, rows spread across a pool started on first use (§4) | done |
 | T4.2 | Scan lines dim a row's colour and leave its coverage (§4) | done |
@@ -31,7 +32,7 @@ screen semantics, the pty seam — belongs to `plans/APPWIN.md` AW4,
 | T16 | The scrollback, its reflow on a resize, and the view back over it (§16) | done |
 | T16.1 | Reaching the scrollback: the wheel, `Shift PageUp` / `PageDown` / `Home` / `End`, typing returning to the screen, *Clear scrollback*, shedding under memory pressure (§16) | done |
 | T16.2 | A scroller over the screen showing where the view is (§16) | planned |
-| T16.3 | The user's scrollback line limit, 500 by default, in the profile and the Settings window (§16) | done |
+| T16.3 | The user's scrollback line limit, 500 by default and at most 10,000, in the profile and the Settings window (§16) | done |
 
 Read alongside: `plans/GUI-CONTROLS-DESIGN.md` (the Reactive Alloy control
 language every surface here is built from), `plans/APPWIN.md` (the window
@@ -82,8 +83,8 @@ text size, and the strength of every screen effect. It lives in the OS
 app-data store, reached through `lib/appdata`, so it is **private to this
 application**: the store is gated on the bundle identity the kernel attests
 and no other app the user launches can read or rewrite it
-(`plans/APPDATA.md`). It was a file this app wrote under the user's home until
-AD5 migrated it.
+(`plans/APPDATA.md`). The bundle ships no `DefaultSettings/`, so the terminal
+holds no filesystem authority at all.
 
 - Closed key registry (`ProfileKey`) of dotted keys in the store's shared
   `key = value` format. A save writes only what the store's layers do not
@@ -124,8 +125,8 @@ AD5 migrated it.
   write. With no worker granted, the write happens on the loop exactly as it
   used to — slower under load, never wrong, and stated once.
 
-Defaults: system scheme, 14 px text, 80% opacity, the backdrop blurred at half
-strength, and the four pass effects off. Translucency is free (it is the alpha
+Defaults: the *System* scheme, 14 px text, 80% opacity, the backdrop blurred at half
+strength, and the five pass effects off. Translucency is free (it is the alpha
 the background is filled at, and it is not a pass), so the shipped look keeps
 the cell-diff present; the blur is what makes the window read as frosted glass
 rather than as a hole. A screenful of frosted terminals is affordable because
@@ -145,14 +146,24 @@ from. A `ColorScheme` is the sixteen ANSI slots plus background, foreground,
 cursor, and cursor text. `Painted` resolves the scheme in force once per
 repaint (never per cell) and answers every cell's foreground/background.
 
-Shipped: **System** (follows the desktop theme, the default), **Midnight**,
-**Phosphor**, **Amber**, **Ember**, **Contrast**, **Paper**, and **Custom** —
-the user's own, editable in the settings sheet and persisted with the rest of
-the profile. Adding a scheme is a variant plus a palette; the compiler forces
-every consumer to state what it means.
+Shipped: **System** (the default), **Midnight**, **Phosphor**, **Amber**,
+**Ember**, **Contrast**, **Paper**, and **Custom** — the user's own, editable in
+the settings sheet and persisted with the rest of the profile. Every scheme but
+Custom is a fixed palette, all of them listed in `Scheme::BUILTINS`; adding one
+is a variant plus a palette, and the compiler forces every consumer to state
+what it means.
 
-The hard-coded xterm ANSI table that used to live in the renderer is now the
-default scheme's palette — one definition.
+- **System is the dark look whatever the desktop shows.** It is the dark
+  theme's own page, text, and accent — `Palette::DARK`, the one definition
+  `Theme::dark` wears — over the xterm ANSI colours, defined once. Its ground
+  is the *document* role, because a terminal's grid is a page. A profile
+  spells it `system`.
+- **No scheme reads the desktop theme.** `Painted::resolve` is handed none, so
+  a light/dark switch changes no terminal colour and costs a window nothing
+  (§12). The Settings window is drawn in the desktop's theme and follows it.
+- **Tests.** A System cell on a light desktop paints the dark page, every
+  fixed palette draws legible text on its own ground, and a light/dark switch
+  invalidates nothing on a terminal grid.
 
 ---
 
@@ -488,10 +499,16 @@ the work to the damage removes the cliff rather than hiding it by snapping
 the slider.
 
 **What the diff may assume, and what it may not.** Two equal cells paint
-identically *only* under the same colours and the same face, so a theme or
-scale change calls `Screen::invalidate`, and so does a session redraw request.
-A *profile* change invalidates only when it moved one of those two — new
-colours or a new size. A backdrop blur the compositor draws behind the window,
+identically *only* under the same colours and the same face, so a change that
+moves either calls `Screen::invalidate`, and so does a session redraw request.
+A profile change and a desktop change reach a window by one path
+(`TerminalWindow::restyle`), each as the `Invalidation` it implies. A desktop
+change (`Look::refresh`) can move only the face and the scale, since no colour
+is the desktop's: a new scale, or a screen the face no longer fits, re-derives
+the grid, and a light/dark switch costs a window nothing — no repaint, and the
+effect stages it had drawn are kept. A *profile* change invalidates only when
+it moved one of those two — new colours or a new size. A backdrop blur the
+compositor draws behind the window,
 or a post-processing pass over the finished frame, leaves every retained cell
 still true, and discarding them for it would make each sample of those sliders
 cost a whole screen (`plans/FIX-DESKTOP.md` DESK-13). A resize needs no such call: `present_frame` reconciles the
@@ -673,7 +690,9 @@ rather than cutting them at the new edge.
   allocates nothing once the rings have grown.
 - **Its bounds.** The user's limit in lines of output (the profile's
   `scrollback.lines`, 500 unless the Settings window's *Scrollback* slider sets
-  another from none to 10,000), a line wrapped across rows counting once; and,
+  another from none to 10,000 — a ceiling the user chose to keep, since it
+  bounds what one window may hold rather than sizing a capacity), a line
+  wrapped across rows counting once; and,
   so one endless line cannot take more, the cells the lines cover — each row
   charged a cell per column it covers, a wide glyph's two whether or not its
   continuation is held — held to a widest screen's worth for each line of the

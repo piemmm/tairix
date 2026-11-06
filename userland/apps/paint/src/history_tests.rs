@@ -344,10 +344,70 @@ fn a_stroke_undone_from_another_layer_lands_on_its_own() {
         Some([255; 4]),
         "the background holds none of it"
     );
+    let revisions = |doc: &Document| -> Vec<u64> {
+        let layers = doc.picture().expect("a picture").layers();
+        layers.iter().map(|layer| layer.revision).collect()
+    };
+    let before = revisions(&doc);
     let applied = doc.undo().expect("undone");
-    assert_eq!(applied.damage, Damage::Layers, "painting moved");
+    assert_eq!(applied.damage, Damage::OtherLayer, "painting moved");
     assert_eq!(doc.picture().map(crate::document::Picture::active), Some(1));
     assert_eq!(colour(&doc, 5, 5), Some([0; 4]), "taken off the ink layer");
+    let after = revisions(&doc);
+    assert_eq!(after[0], before[0], "the background's pixels kept");
+    assert_ne!(after[1], before[1], "the ink layer's put back");
+}
+
+/// Undoing or redoing how another layer shows keeps painting where it is, as
+/// showing it did.
+#[test]
+fn undoing_how_another_layer_shows_keeps_painting_where_it_is() {
+    use crate::document::Shown;
+    let mut doc = document(10, 10);
+    doc.insert_layer(1, layer([1; 4], "Sky")).expect("added");
+    let hidden = Shown {
+        name: alloc::string::String::from("Background"),
+        opacity: 255,
+        visible: false,
+    };
+    doc.show_layer(0, hidden).expect("hidden");
+    assert!(doc.select_layer(1), "painting back on the sky");
+    let painted = |doc: &Document| doc.picture().map(Picture::active);
+    doc.undo().expect("undone");
+    assert_eq!(painted(&doc), Some(1), "still the sky");
+    doc.redo().expect("redone");
+    assert_eq!(painted(&doc), Some(1), "and again");
+}
+
+/// Undoing or redoing how a layer shows, or where it stands, moves no layer's
+/// revision: no pixels changed.
+#[test]
+fn undoing_how_layers_show_or_stand_moves_no_revision() {
+    use crate::document::Shown;
+    let mut doc = document(10, 10);
+    doc.insert_layer(1, layer([1; 4], "Sky")).expect("added");
+    let faded = Shown {
+        name: alloc::string::String::from("Sky"),
+        opacity: 40,
+        visible: true,
+    };
+    doc.show_layer(1, faded).expect("faded");
+    doc.move_layer(1, 0).expect("moved");
+    let revisions = |doc: &Document| -> Vec<u64> {
+        let layers = doc.picture().expect("a picture").layers();
+        let mut held: Vec<u64> = layers.iter().map(|layer| layer.revision).collect();
+        held.sort_unstable();
+        held
+    };
+    let held = revisions(&doc);
+    for _ in 0..2 {
+        doc.undo().expect("undone");
+        assert_eq!(revisions(&doc), held, "no pixels moved");
+    }
+    for _ in 0..2 {
+        doc.redo().expect("redone");
+        assert_eq!(revisions(&doc), held, "nor putting them back");
+    }
 }
 
 #[test]

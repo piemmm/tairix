@@ -58,7 +58,10 @@ contributor must not re-litigate, and what is deliberately out of scope.
    remaining case exactly needs an AND-OR fixpoint over
    description→process→task reachability, which would couple the lock
    registry to the address-space registry and the thread table; that
-   coupling is the reason it was not done, not an oversight.
+   coupling is the reason it was not done, not an oversight. A waiter's
+   edges are exactly the conflicts acquisition decides — the holders in its
+   way and the waiters queued ahead of it, holders alone for a conversion —
+   so waiters queued behind one holder are an ordinary wait.
 
 7. **Release is the kernel's job.** The owner identity lives on the open
    file description (`kernel/core/src/aspace.rs`, `Description`), whose
@@ -71,10 +74,21 @@ contributor must not re-litigate, and what is deliberately out of scope.
    count of the shared ones. A full coverage partition carrying per-run
    owner sets was considered: it would make the exclusive-versus-many-
    shared-owners case `O(log n)` too, at the cost of a second accumulating
-   invariant that can drift from the records it describes. Both projections
-   here are *derived* from the records on every mutation, so drift is not
-   representable. Do not replace them with an incrementally-nudged index
-   without a property test that rebuilds and compares.
+   invariant that can drift from the records it describes. The two
+   projections change with each record an operation adds or removes, in the
+   same step, so an operation costs what it touches rather than what the
+   file holds; the two randomised runs rebuild them from the records after
+   every step and compare (`invariants_hold`), and that rebuild-and-compare
+   is what the incremental form rests on — never drop it.
+
+9. **Memory is taken before anything changes.** An acquisition, a queueing
+   and an unlock that cuts a record take every allocation they need first,
+   and one the heap cannot hold is refused `OutOfMemory` with the registry
+   as it was. An unlock of whole records and a description's release need
+   none — a caller can always let go — and a release that cannot list whom
+   it frees wakes every waiter on the file, or, closing a description with
+   no room even for that list, every lock waiter; each re-tests its own
+   request.
 
 ## Shape
 

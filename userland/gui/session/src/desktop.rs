@@ -5,8 +5,11 @@
 //! The desktop is a *directory view*, not a new kind of surface. It lists the
 //! user's `Desktop` folder through the same [`DirectorySource`] seam the
 //! trusted file picker uses, under the session's own identity; it orders the
-//! listing with the shared [`sort_entries`]; it classifies each child with the
-//! shared content-type registry; and its cells are the shared [`GridView`]'s,
+//! listing with the shared [`sort_entries`]; it names each child as a
+//! file-manager window does, less the endings the file manager's settings
+//! hide ([`Desktop::hide_endings`]), and leaves out a hidden item as such a
+//! window does ([`Desktop::show_hidden_items`]); it classifies each child with the shared
+//! content-type registry; and its cells are the shared [`GridView`]'s,
 //! differing from the file manager's grid only in its [`GridFlow`] and
 //! [`GridFill`] — they run down from the edge the user's arrangement names and
 //! keep a fixed pitch, so a cell does not drift when the work area changes
@@ -23,8 +26,8 @@
 //! arrangement flows them again, and nothing about them is stored. A place
 //! the field no longer holds whole is shown on the free cell nearest it and
 //! kept as it was. Each icon is a rectangle of its own, the one put down last
-//! on top, so a press, a hover and a repaint test them from the topmost down,
-//! and only the icons the field shows are ever walked.
+//! on top, so a press and a repaint test them from the topmost down, and only
+//! the icons the field shows are ever walked.
 //!
 //! # The pinboard settings live here
 //!
@@ -37,9 +40,10 @@
 //! changing the sort order does not decode a wallpaper and changing the
 //! wallpaper does not re-read the folder.
 //!
-//! What the desktop *owns* is the behaviour a folder-on-the-screen needs:
-//! hover feedback, a selection, keyboard navigation while it holds focus, and
-//! activation. Each of those reuses the pure engine that already decides it —
+//! What the desktop *owns* is the behaviour a folder-on-the-screen needs: a
+//! selection, keyboard navigation while it holds focus, and activation; a
+//! pointer merely over an icon changes nothing about it. Each of those reuses
+//! the pure engine that already decides it —
 //! [`DoubleClickTracker`] for "is this the second click?" — so the desktop can
 //! never disagree with the file manager about what a gesture means.
 //!
@@ -64,6 +68,20 @@
 //! rescan, after an action of the session's own, on the user's Refresh, and,
 //! where no watch follows it, as the mount table moves.
 //!
+//! # Drives
+//!
+//! A shortcut to a volume — a link storing the volume's root by its identity,
+//! which the file manager makes where a volume is dropped from `/Storage` — is
+//! drawn as the drive its volume is on while the mount table shows the volume
+//! attached, and faded while not; opening it opens the volume as the storage
+//! catalog does, or says it is not there. The desktop also draws a drive for
+//! each attached volume of a class the file manager's settings name
+//! ([`DesktopDrives`]), but for one a shortcut already stands for: drawn, never
+//! written, each named by its volume's root, which no listed name can be, and
+//! keeping its place under that volume ([`PlaceKey::of_volume`]). The mount
+//! table is read off the loop as its notices arrive, one read under way and one
+//! more owed at most ([`Desktop::take_mount_read`]).
+//!
 //! The model holds no authority: it *names* what should happen
 //! ([`DesktopAction`]) and the embedder — which holds the spawn and
 //! filesystem capabilities — carries it out.
@@ -76,19 +94,32 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::Cell;
 
-use tairix_abi::window_ipc::DragItems;
+use tairix_abi::driver::filesystem::VolumeTitle;
+use tairix_abi::sysinfo::VOLUME_ID_LEN;
+use tairix_abi::window_ipc::{
+    AuthorisedOutcome, DragItems, DragPicture, LandingOutcome, LandingStep, SystemTask,
+    DRAG_SHOWN_MAX, DROP_LANDINGS_MAX, PICK_MAX_OPEN,
+};
 use tairix_abi::{Errno, FileId};
-use tairix_browse::media::Ending;
-use tairix_browse::render::{entry_parts, Tiles};
+use tairix_browse::chrome::REASON_NOT_EJECTABLE;
+use tairix_browse::mount::{
+    title_refusal, MountAct, MountDone, ADMINISTRATOR_BUSY, ADMINISTRATOR_FAILED,
+    ADMINISTRATOR_UNASKED,
+};
+use tairix_browse::places::REASON_TITLE_ABSENT;
+use tairix_browse::render::{entry_parts, tile_core, Tiles};
+use tairix_browse::Selection;
 use tairix_browse::{
-    applications_for, entry_icon, merge_changes, resolve_occupancy, sort_entries, AppAssociation,
-    DirectorySource, Entry, EntryChange, EntryKind, GridFlow, GridView, HiddenEndings, LinkTarget,
-    Listing, NewEntry, Pictures, SortKey, SortMode,
+    applications_for, entry_icon, merge_changes, resolve_occupancy, sort_entries, volume,
+    AppAssociation, DesktopDrives, DirectorySource, Entry, EntryChange, EntryKind,
+    FilerPreferences, GridFlow, GridView, HiddenEndings, LinkTarget, Listing, NewEntry, Order,
+    Pictures, SortKey, SortMode, Volume,
 };
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
-use tairix_controls::{IconTile, LabelHalo};
+use tairix_controls::{ChainModel, IconTile, LabelHalo};
 use tairix_geometry::{to_i32, GridFill, GridRun, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest, Landed};
+use tairix_input::Modifiers;
 use tairix_proglib::{Catalog, EntryId};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -98,8 +129,8 @@ use tairix_wm::{past_drag_slop, ClickKind, DoubleClickTracker, Key, NamedKey, Po
 use crate::launcher::Kept;
 use crate::library::catalogued;
 use crate::pinboard::{
-    Arrangement, ArrangementEdit, ArrangementFull, ArrangementMemory, PinboardCommand, Place,
-    PlaceKey, Placed, TidyOrder, MAX_PLACED, PLACE_UNITS,
+    Arrangement, ArrangementEdit, ArrangementFull, ArrangementMemory, Over, PinboardCommand, Place,
+    PlaceKey, Placed, TidyOrder, MAX_PLACED, PLACE_UNITS, REASON_DRIVE_NOT_TRASHED, REASON_SEVERAL,
 };
 
 /// The inset, in logical pixels at the reference density, between the work
@@ -110,15 +141,15 @@ use crate::pinboard::{
 /// work area's top edge.
 pub const DESKTOP_MARGIN: u32 = 8;
 
-/// How long a drop or a save onto the desktop waits for its files once the
-/// program making them has been told where they go: long enough for it to
-/// make them. The file pressed is known by its name, a drop's others only by
-/// arriving meanwhile, so the wait is held to what making them takes.
-pub const LANDING_WAIT_NS: u64 = 10_000_000_000;
-
 /// Where the desktop's cells rest: their anchored edge, always. The desktop
 /// does not scroll.
 const DESKTOP_SCROLL: u64 = 0;
+
+/// The most icons drawn by the picture their drag carried while their own is
+/// produced: as many as the drops a window lands at once show. A containment
+/// bound, not a capacity: past it the oldest is drawn by its own picture
+/// alone, long since produced.
+const STAND_INS_MAX: usize = DROP_LANDINGS_MAX * DRAG_SHOWN_MAX;
 
 /// What activating a desktop icon means, resolved by the model and carried
 /// out by the embedder (which holds the spawn capability).
@@ -234,6 +265,9 @@ pub enum DesktopAction {
     /// which is an installed application the embedder resolves and launches
     /// (the model knows no bundle paths).
     ChangeBackground,
+    /// Eject or retitle the volume a drive the desktop draws stands for: the
+    /// embedder carries the act out off its loop and states what it came to.
+    Volume(MountAct),
     /// The gesture was refused, and why: a refused action always says so
     /// rather than failing silently.
     Refuse(GestureRefusal),
@@ -403,65 +437,83 @@ impl DesktopOutcome {
     }
 }
 
-/// What a drag or a save over the bare desktop would leave there if it were
-/// let go: the names the first file may arrive under, how many files there
-/// are, and where each one shown was held from the press.
+/// What a drag over the desktop would leave there if it were let go: the
+/// folder it lands in, the name it is led by, and, over the bare desktop,
+/// how each item shown was drawn and where it was held from the press.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LandingOffer {
-    first: Vec<String>,
-    count: u32,
-    /// Where each picture shown stood from the press, the first item's first.
-    offsets: Vec<(i32, i32)>,
+    folder: String,
+    lead: String,
+    /// The pictures shown, each with where it stood from the press, the
+    /// lead's first; `None` over a folder icon, whose contents the desktop
+    /// does not show.
+    shown: Option<Vec<DragPicture>>,
 }
 
 impl LandingOffer {
-    /// What a drag of `items` would leave.
+    /// What a drag of `items` would leave in `folder`: standing where it is
+    /// let go when that is the bare desktop, `bare`, and inside the folder
+    /// icon there otherwise.
     #[must_use]
-    pub fn of(items: &DragItems) -> Self {
+    pub fn of(items: &DragItems, folder: String, bare: bool) -> Self {
         Self {
-            first: alloc::vec![items.first().as_str().to_string()],
-            count: items.count(),
-            offsets: items
-                .pictures()
-                .map(|picture| picture.from.unwrap_or((0, 0)))
-                .collect(),
-        }
-    }
-
-    /// What a save of the one file asked for as `name` leaves, which a volume
-    /// that keeps no file type makes under `finished` instead.
-    #[must_use]
-    pub fn saved(name: &str, finished: Option<&str>) -> Self {
-        let mut first = alloc::vec![name.to_string()];
-        first.extend(
-            finished
-                .filter(|finished| *finished != name)
-                .map(String::from),
-        );
-        Self {
-            first,
-            count: 1,
-            offsets: alloc::vec![(0, 0)],
+            folder,
+            lead: items.first().as_str().to_string(),
+            shown: bare.then(|| items.pictures().copied().collect()),
         }
     }
 }
 
-/// Files a drop or a save onto the desktop is to leave where it was let go.
+/// What one step of a drop asks of the embedder, which holds the artwork.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LandingWork {
+    /// Produce nothing pictured from at or under this path until it is
+    /// released: an item is being written there.
+    pub hold: Option<String>,
+    /// Picture again what was held under this path: its item is done.
+    pub release: Option<String>,
+}
+
+/// A drop onto the desktop its source is carrying out, or a save the session
+/// made there, until the last name it owes arrives.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Landing {
-    /// The names the first file may arrive under, before its copy tells it
-    /// apart from a name already taken.
-    first: Vec<String>,
-    /// Where each lands, the first item's first; the others take the rest in
-    /// the order they arrive.
-    places: Vec<Place>,
-    /// Whether the first has arrived.
-    led: bool,
-    /// How many of the others are yet to arrive.
-    owed: u32,
-    /// How many of the others have arrived.
-    others: usize,
-    until_ns: u64,
+    /// The window its drag began in and the report it was dropped at; `None`
+    /// for a save, which no source steps.
+    source: Option<(u64, u32)>,
+    /// The absolute path of the folder it lands in.
+    folder: String,
+    /// Where it stands what it makes on the bare desktop; `None` inside a
+    /// folder icon.
+    places: Option<Places>,
+    /// How its drag drew each item it showed, the lead's first.
+    pictures: Vec<DragPicture>,
+    /// The item being written.
+    making: Option<Making>,
+    /// Items made whose names have yet to be listed, each with its item.
+    owed: Vec<(String, u32)>,
+    /// Whether its source has ended it, so nothing more is made.
+    ended: bool,
+}
+
+/// Where a drop onto the bare desktop stands what it makes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Places {
+    /// Where each item shown stands, in the arrangement it was carried in.
+    shown: Vec<Place>,
+    /// Where it was let go: each further item takes the free cell nearest.
+    dropped: Place,
+    /// The cell each further item was given, so one placed again keeps it.
+    further: Vec<(u32, Place)>,
+}
+
+/// The item a drop is writing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Making {
+    item: u32,
+    name: String,
+    /// Its icon arrived while it was written, and already stands.
+    stands: bool,
 }
 
 /// Where one icon stands.
@@ -478,14 +530,62 @@ enum Spot {
 /// The press on an icon, carried for as long as it is held.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct Carry {
+    /// The icon pressed, which leads the selection it carries.
     index: usize,
     /// Where the press began.
     from: Point,
     /// The press's offset from the tile's corner.
     grab: (i32, i32),
-    /// Where the tile stands, once the press has travelled far enough to be a
-    /// drag.
+    /// Where the pressed tile stood as the press began.
+    rest: Point,
+    /// Where the pressed tile stands, once the press has travelled far enough
+    /// to be a drag.
     at: Option<Point>,
+}
+
+impl Carry {
+    /// How far the carried icons stand from where they rest.
+    fn shift(&self) -> Option<(i32, i32)> {
+        let at = self.at?;
+        Some((
+            at.x.saturating_sub(self.rest.x),
+            at.y.saturating_sub(self.rest.y),
+        ))
+    }
+}
+
+/// The names a reorder keeps the selection, the focus and a carried press on.
+struct Held {
+    /// The selected icons' names, sorted.
+    selected: Vec<String>,
+    focus: Option<String>,
+    carried: Option<(String, Carry)>,
+}
+
+/// A band dragged out over the backdrop: every icon whose picture or name it
+/// touches is selected as it grows, beside what the press kept.
+#[derive(Debug)]
+struct Band {
+    /// Where the press began.
+    anchor: Point,
+    /// Where the pointer is.
+    head: Point,
+    /// Whether it has travelled past the drag slop, so it is drawn and selects.
+    live: bool,
+    /// The selection the press kept, which the band adds to.
+    base: Selection,
+    /// The icons the band touched when last swept.
+    touched: Selection,
+    /// What a sweep builds the next touch in, so a pointer sample allocates
+    /// nothing once the band has grown to the listing.
+    next: Selection,
+}
+
+impl Band {
+    /// The rectangle the band covers, once it is drawn.
+    fn rect(&self) -> Option<Rect> {
+        self.live.then(|| Rect::spanning(self.anchor, self.head))
+    }
 }
 
 /// An icon whose file left the listing, and where it stood.
@@ -503,6 +603,29 @@ struct Listed {
     read: bool,
     /// A source that reads elsewhere still owes the listing the last
     /// [`relist`](Desktop::relist) asked for.
+    owed: bool,
+}
+
+/// The desktop's own question to an administrator, for an act on a drive the
+/// user was refused for want of the authority: at most one, owed until the
+/// loop reaches the prompt and then awaited.
+#[derive(Default)]
+enum Administer {
+    #[default]
+    Idle,
+    /// To be asked: the act the user was refused.
+    Owed(MountAct),
+    /// Asked; the act, stated as refused should the task fail.
+    Asked(MountAct),
+}
+
+/// What the desktop knows of the mount table: the volumes it last listed, and
+/// whether a read of it is under way and another owed, so a burst of notices
+/// costs one read in flight and one more at most.
+#[derive(Default)]
+struct Mounts {
+    volumes: Vec<Volume>,
+    reading: bool,
     owed: bool,
 }
 
@@ -527,7 +650,8 @@ struct Standing {
 }
 
 /// The halo each resting name was last drawn over, blurred once and kept for
-/// as long as the scale, the tile size and the theme it was blurred for stand.
+/// as long as the name shown, the scale, the tile size and the theme it was
+/// blurred for stand.
 #[derive(Default)]
 struct Halos {
     look: Option<(Scale, (u32, u32), Theme)>,
@@ -575,7 +699,16 @@ pub struct Desktop<S: DirectorySource> {
     /// the session: the shell reads them from here rather than keeping a
     /// second copy that could drift.
     settings: DesktopSettings,
+    /// The endings names are shown without: those the file manager's settings
+    /// hide, so an icon reads as it does in a file-manager window.
+    endings: HiddenEndings,
+    /// Whether an item whose name marks it hidden has an icon, as the file
+    /// manager's settings say of its windows.
+    hidden_items: bool,
     entries: Vec<Entry>,
+    /// The folder's entries the settings leave out, as last read and since
+    /// merged, so their places are followed and forgotten as an icon's are.
+    left_out: Vec<Entry>,
     /// Where each entry's icon stands, by listing index.
     spots: Vec<Spot>,
     /// The icons the user put somewhere, by listing index, the one put down
@@ -599,12 +732,25 @@ pub struct Desktop<S: DirectorySource> {
     edits: Vec<ArrangementEdit>,
     /// A refusal no gesture was there to state.
     refused: Option<GestureRefusal>,
-    /// What a drag now over the bare desktop would leave there.
+    /// What a drag now over the desktop would leave there.
     offer: Option<LandingOffer>,
-    landing: Option<Landing>,
+    /// The drops landing here and the saves made here, the oldest first.
+    landings: Vec<Landing>,
+    /// The icons drawn, while their own picture is produced, by the one their
+    /// drag carried, the oldest first.
+    stand_ins: Vec<(String, DragPicture)>,
+    /// Where each save dropped on the bare desktop stands what it makes, by
+    /// the open attempt making it, the oldest first.
+    saves: Vec<((u64, u64), Places)>,
     carry: Option<Carry>,
-    selected: Option<usize>,
-    hovered: Option<usize>,
+    selection: Selection,
+    /// The icon the keyboard ring sits on and the arrows move from.
+    focus: Option<usize>,
+    /// The band a press on the backdrop drags out, selecting what it touches.
+    band: Option<Band>,
+    /// The icon a press inside a several-icon selection collapses it to, if
+    /// let go without travelling.
+    collapse: Option<usize>,
     /// The folder icon a carried drag would drop into, while its application
     /// accepts it there.
     drop_target: Option<usize>,
@@ -613,7 +759,29 @@ pub struct Desktop<S: DirectorySource> {
     revision: u64,
     focused: bool,
     clicks: DoubleClickTracker,
+    mounts: Mounts,
+    /// Which drives the desktop draws for attached volumes.
+    drives: DesktopDrives,
+    /// The user the desktop acts for, whose own volumes it offers to eject
+    /// and retitle.
+    viewer: Option<u32>,
+    administer: Administer,
+    /// The arrangement of icons whose settling was last reported.
+    settled_at: Option<u64>,
 }
+
+/// Stable event id: a revealed frame has carried the desktop's icons, every
+/// one drawn as it will stay — once for each arrangement of them.
+///
+/// The pinboard's sibling of [`APP_BAR_SETTLED`](crate::APP_BAR_SETTLED), for
+/// the same reason: an icon's picture is read and decoded off the serve loop,
+/// so a new icon is drawn as its built-in glyph a frame or more before its own
+/// picture lands, and a reader comparing a later frame's pixels with the
+/// desktop's has no honest earlier record to key on.
+pub const PINBOARD_SETTLED: tairix_log::EventId = tairix_log::EventId(20_043);
+
+/// The exact message [`PINBOARD_SETTLED`] is emitted with.
+pub const PINBOARD_SETTLED_MESSAGE: &str = "desktop icons drawn as they will stay";
 
 impl<S: DirectorySource> Desktop<S> {
     /// A desktop over `source` showing the folder named by the root-first
@@ -625,14 +793,18 @@ impl<S: DirectorySource> Desktop<S> {
     /// The settings an absent store document implies are the defaults, so a
     /// desktop is fully specified before the embedder has read anything; the
     /// user's own document arrives through
-    /// [`apply_settings`](Self::apply_settings).
+    /// [`apply_settings`](Self::apply_settings), and the endings the file
+    /// manager's settings hide through [`hide_endings`](Self::hide_endings).
     #[must_use]
     pub fn new(source: S, folder: Vec<String>) -> Self {
         Self {
             source,
             folder,
             settings: DesktopSettings::default(),
+            endings: FilerPreferences::default().presentation.endings,
+            hidden_items: FilerPreferences::default().presentation.hidden_items,
             entries: Vec::new(),
+            left_out: Vec::new(),
             spots: Vec::new(),
             stack: Vec::new(),
             flowed_in: None,
@@ -645,15 +817,32 @@ impl<S: DirectorySource> Desktop<S> {
             edits: Vec::new(),
             refused: None,
             offer: None,
-            landing: None,
+            landings: Vec::new(),
+            stand_ins: Vec::new(),
+            saves: Vec::new(),
             carry: None,
-            selected: None,
-            hovered: None,
+            selection: Selection::new(),
+            focus: None,
+            band: None,
+            collapse: None,
             drop_target: None,
             revision: 0,
             focused: false,
             clicks: DoubleClickTracker::new(),
+            mounts: Mounts::default(),
+            drives: FilerPreferences::default().desktop,
+            viewer: None,
+            administer: Administer::Idle,
+            settled_at: None,
         }
+    }
+
+    /// This desktop acting for the user `uid`: the one whose own volumes it
+    /// offers to eject and retitle.
+    #[must_use]
+    pub fn acting_for(mut self, uid: u32) -> Self {
+        self.viewer = Some(uid);
+        self
     }
 
     /// The folder's entries, in the shared listing order.
@@ -688,12 +877,15 @@ impl<S: DirectorySource> Desktop<S> {
     /// only makes it.
     ///
     /// The link takes the entry's **display name** and points at the bundle
-    /// *directory* it launches. That is what makes the shortcut read as an
+    /// *directory* it launches, spelled from the root it lies in: the desktop
+    /// is on another volume than the program stores, and a link never crosses
+    /// into a volume beneath its own, so it names that root and the desktop
+    /// reaches the bundle itself. That is what makes the shortcut read as an
     /// application on the desktop: bundle-ness is decided from the target's own
-    /// leaf name, never from the link's, so `Chess` → `/System/Applications/chess.app` is an
-    /// application while the link itself is just a name. The target is carried
-    /// verbatim and never resolved here, so a shortcut whose bundle is later
-    /// removed dangles honestly rather than being prevented at creation.
+    /// leaf name, never from the link's, so `Chess` → `System:/Applications/chess.app`
+    /// is an application while the link itself is just a name. The target is
+    /// never resolved here, so a shortcut whose bundle is later removed
+    /// dangles honestly rather than being prevented at creation.
     ///
     /// A display name is not automatically a file name: it must be one legal
     /// filesystem component under the same shared
@@ -727,10 +919,90 @@ impl<S: DirectorySource> Desktop<S> {
                 format!("A shortcut is a file, and {err}."),
             ));
         }
+        let bundle = chosen.bundle().to_string();
         DesktopAction::CreateShortcut {
             link: self.path_of(name),
-            target: chosen.bundle().to_string(),
+            target: tairix_path::alias_spelling(&bundle).unwrap_or(bundle),
         }
+    }
+
+    /// The mount table moved: a read of it is owed.
+    pub fn mounts_moved(&mut self) {
+        self.mounts.owed = true;
+    }
+
+    /// Whether a read of the mount table is to be asked for now — one is owed
+    /// and none is under way — which it is from here on.
+    pub fn take_mount_read(&mut self) -> bool {
+        let due = self.mounts.owed && !self.mounts.reading;
+        if due {
+            self.mounts.owed = false;
+            self.mounts.reading = true;
+        }
+        due
+    }
+
+    /// A read asked for was refused before it began: it is owed again.
+    pub fn mount_read_refused(&mut self) {
+        self.mounts.reading = false;
+        self.mounts.owed = true;
+    }
+
+    /// Adopt what a read of the mount table found — `None` for one that
+    /// failed, which keeps the volumes last listed — adding to `damage` each
+    /// icon it changed: a shortcut whose volume came or went, a drive shown or
+    /// gone, and the icons those moved. Answers whether any did.
+    pub fn adopt_mounts(
+        &mut self,
+        volumes: Option<Vec<Volume>>,
+        layout: impl Fn(&Self) -> GridView,
+        damage: &mut Region,
+    ) -> bool {
+        self.mounts.reading = false;
+        match volumes {
+            Some(volumes) if volumes != self.mounts.volumes => {
+                self.mounts.volumes = volumes;
+                self.marking(layout, damage, Self::follow_volumes)
+            }
+            _ => false,
+        }
+    }
+
+    /// Draw drives for the attached volumes of the classes `drives` names,
+    /// answering whether that changed the icons. A drive drawn or taken away
+    /// flows again every icon no one placed, so the caller repaints the layer
+    /// whole.
+    pub fn show_drives(&mut self, drives: DesktopDrives) -> bool {
+        if self.drives == drives {
+            return false;
+        }
+        self.drives = drives;
+        self.follow_volumes()
+    }
+
+    /// The backdrop menu a secondary press opens: over the icon
+    /// [`context_press`](Self::context_press) selected when `on_icon`, which
+    /// for a drive offers its eject and its title and refuses moving it to the
+    /// Trash, and over the bare backdrop otherwise.
+    #[must_use]
+    pub fn menu(&self, on_icon: bool) -> ChainModel {
+        let chosen = self.selected().and_then(|index| self.entries.get(index));
+        let over = match chosen {
+            None if on_icon && self.selection.len() > 1 => Over::Several,
+            Some(entry) if on_icon && is_drive(entry) => Over::Drive {
+                eject_refused: self.eject_of(entry).err(),
+                title: self.title_of(entry),
+            },
+            Some(_) if on_icon => Over::Icon,
+            _ => Over::Backdrop,
+        };
+        crate::pinboard::model(over, &self.settings)
+    }
+
+    /// Hold `refusal`, of something carried out for the desktop off its loop,
+    /// for the session to state as it states the desktop's own.
+    pub fn refuse(&mut self, refusal: GestureRefusal) {
+        self.refused = Some(refusal);
     }
 
     /// Adopt `settings`, reporting the work the edit implies.
@@ -778,9 +1050,7 @@ impl<S: DirectorySource> Desktop<S> {
         };
         self.settings = settings;
         if resorted {
-            let held = self.held();
-            sort_entries(&mut self.entries, sort_mode(self.settings.sort));
-            self.follow(held);
+            self.resort();
         }
         if relayout || resorted {
             self.reflow(relayout);
@@ -788,16 +1058,80 @@ impl<S: DirectorySource> Desktop<S> {
         Some(change)
     }
 
-    /// The selected icon's index, if any.
-    #[must_use]
-    pub const fn selected(&self) -> Option<usize> {
-        self.selected
+    /// Name the icons less `endings`, the endings the file manager's settings
+    /// hide, answering whether that changed them. Any name may then read
+    /// differently, so the caller repaints the layer whole, and the icons no
+    /// one placed flow again in the order the names shown give them.
+    pub fn hide_endings(&mut self, endings: HiddenEndings) -> bool {
+        if self.endings == endings {
+            return false;
+        }
+        self.endings = endings;
+        self.halos.set(Halos::default());
+        self.resort();
+        self.reflow(false);
+        true
     }
 
-    /// The icon the pointer is over, if any.
+    /// Order the listing as the settings in force say, the selection and a
+    /// carried press staying on the icons they were on.
+    fn resort(&mut self) {
+        let held = self.held();
+        let order = self.order(self.settings.sort);
+        sort_entries(&mut self.entries, order);
+        self.follow(held);
+    }
+
+    /// Give an item whose name marks it hidden an icon only where `shown`, as
+    /// the file manager's settings say, answering whether that changed the
+    /// icons. The folder is not read again: what is left out is set aside,
+    /// and each item shown again stands where it was put.
+    pub fn show_hidden_items(&mut self, shown: bool) -> bool {
+        if self.hidden_items == shown {
+            return false;
+        }
+        self.hidden_items = shown;
+        let (mut entries, left_out): (Vec<Entry>, Vec<Entry>) = self
+            .entries
+            .iter()
+            .chain(&self.left_out)
+            .cloned()
+            .partition(|entry| self.lists(entry.name()));
+        if entries.len() == self.entries.len() {
+            return false;
+        }
+        sort_entries(&mut entries, self.order(self.settings.sort));
+        self.replace(entries, left_out, false);
+        true
+    }
+
+    /// Whether an entry named `name` has an icon: every one but a hidden item
+    /// the settings leave out.
+    fn lists(&self, name: &str) -> bool {
+        self.hidden_items || !tairix_path::is_hidden_name(name)
+    }
+
+    /// The order `sort` sets, comparing the names the desktop shows.
+    const fn order(&self, sort: IconSort) -> Order {
+        Order {
+            mode: sort_mode(sort),
+            endings: self.endings,
+        }
+    }
+
+    /// The selected icon, when exactly one is: what the verbs that act on one
+    /// icon act on.
     #[must_use]
-    pub const fn hovered(&self) -> Option<usize> {
-        self.hovered
+    pub fn selected(&self) -> Option<usize> {
+        (self.selection.len() == 1)
+            .then(|| self.selection.iter().next())
+            .flatten()
+    }
+
+    /// The icons selected.
+    #[must_use]
+    pub const fn selection(&self) -> &Selection {
+        &self.selection
     }
 
     /// Whether the desktop holds the keyboard (no window is focused).
@@ -809,9 +1143,9 @@ impl<S: DirectorySource> Desktop<S> {
     /// Tell the desktop whether it holds the keyboard, adding what that
     /// changed to `damage`.
     ///
-    /// Only the selected icon wears the Focus Ring, so gaining or losing the
+    /// Only the focused icon wears the Focus Ring, so gaining or losing the
     /// keyboard changes that one icon and nothing else — and with nothing
-    /// selected it changes no pixel at all. This is the click that moves
+    /// focused it changes no pixel at all. This is the click that moves
     /// focus between the desktop and a window, which is exactly when the
     /// screen must *not* be repainted wholesale.
     pub fn set_focused(&mut self, focused: bool, layout: &GridView, damage: &mut Region) {
@@ -820,7 +1154,7 @@ impl<S: DirectorySource> Desktop<S> {
             return;
         }
         self.focused = focused;
-        self.mark_icon(layout, self.selected, damage);
+        self.mark_icon(layout, self.focus, damage);
     }
 
     /// Ask `want` for every shown icon's picture at the side it is drawn at,
@@ -897,13 +1231,6 @@ impl<S: DirectorySource> Desktop<S> {
         }
     }
 
-    /// Note that the pointer is somewhere other than the desktop (over a
-    /// window, the taskbar, or one of its popovers), clearing the hover.
-    pub fn pointer_left(&mut self, layout: &GridView, damage: &mut Region) {
-        let left = self.hovered.take();
-        self.mark_icon(layout, left, damage);
-    }
-
     /// Ask for a fresh listing of the folder now: the caller knows the folder
     /// must be read whole (bring-up, a rescan its watch asked for, or an
     /// action the session itself performed on it). Returns whether the shown
@@ -950,22 +1277,80 @@ impl<S: DirectorySource> Desktop<S> {
             Err(_) => (Vec::new(), false),
         };
         self.listed.read = read;
-        sort_entries(&mut entries, sort_mode(self.settings.sort));
-        if entries.len() == self.entries.len()
+        let left_out: Vec<Entry> = entries
+            .extract_if(.., |entry| !self.lists(entry.name()))
+            .collect();
+        self.with_volumes(&mut entries);
+        sort_entries(&mut entries, self.order(self.settings.sort));
+        let unchanged = entries.len() == self.entries.len()
             && entries
                 .iter()
                 .zip(&self.entries)
-                .all(|(a, b)| a.same_listing(b))
-        {
-            self.reconcile();
-            return false;
+                .all(|(a, b)| a.same_listing(b) && a.volume() == b.volume());
+        if unchanged {
+            self.set_aside(left_out, read);
+        } else {
+            self.replace(entries, left_out, read);
         }
+        self.reconcile();
+        if read {
+            self.settle_landings();
+        }
+        !unchanged
+    }
+
+    /// Take `left_out` as the folder's entries set aside where no icon
+    /// changed, following the places of those that went.
+    fn set_aside(&mut self, left_out: Vec<Entry>, forget: bool) {
+        let mut was: BTreeMap<&str, FileId> = self
+            .left_out
+            .iter()
+            .map(|entry| (entry.name(), entry.id()))
+            .collect();
+        let mut arrivals = Vec::new();
+        for entry in &left_out {
+            if was.remove(entry.name()).is_none() {
+                arrivals.push((entry.name().to_string(), entry.id()));
+            }
+        }
+        let leaving: Vec<Leaving> = was
+            .into_iter()
+            .map(|(name, id)| self.leaving_aside(name, id))
+            .collect();
+        self.left_out = left_out;
+        self.follow_leaving(&arrivals, leaving, forget, Vec::new(), Vec::new());
+    }
+
+    /// The entry named `name`, set aside, leaving: where the record keeps it,
+    /// if anywhere.
+    fn leaving_aside(&self, name: &str, id: FileId) -> Leaving {
+        Leaving {
+            name: name.to_string(),
+            id,
+            spot: self
+                .arrangement
+                .place_of(name)
+                .map_or(Spot::Owed, |placed| Spot::Placed(placed.at)),
+        }
+    }
+
+    /// Show `entries` in place of the icons shown, with `left_out` set aside:
+    /// one still listed stands where it stood, one set aside before keeps the
+    /// place the record holds for it, and one that arrived takes its place as
+    /// [`arrived`](Self::arrived) says, the place of one gone forgotten where
+    /// `forget` says its folder was read.
+    fn replace(&mut self, entries: Vec<Entry>, left_out: Vec<Entry>, forget: bool) {
         let held = self.held();
         let was = core::mem::replace(&mut self.entries, entries);
+        let was_aside = core::mem::replace(&mut self.left_out, left_out);
         let mut stood: BTreeMap<&str, (FileId, Spot)> = was
             .iter()
             .zip(&self.spots)
             .map(|(entry, spot)| (entry.name(), (entry.id(), *spot)))
+            .collect();
+        let mut aside: BTreeMap<&str, FileId> = was_aside
+            .iter()
+            .map(|entry| (entry.name(), entry.id()))
             .collect();
         let mut spots = Vec::with_capacity(self.entries.len());
         let mut arrivals = Vec::new();
@@ -974,10 +1359,18 @@ impl<S: DirectorySource> Desktop<S> {
                 spots.push(spot);
             } else {
                 spots.push(Spot::Owed);
-                arrivals.push(index);
+                if aside.remove(entry.name()).is_none() {
+                    arrivals.push(index);
+                }
             }
         }
-        let leaving = stood
+        let mut set_aside = Vec::new();
+        for entry in &self.left_out {
+            if stood.remove(entry.name()).is_none() && aside.remove(entry.name()).is_none() {
+                set_aside.push((entry.name().to_string(), entry.id()));
+            }
+        }
+        let mut leaving: Vec<Leaving> = stood
             .into_iter()
             .map(|(name, (id, spot))| Leaving {
                 name: name.to_string(),
@@ -985,43 +1378,124 @@ impl<S: DirectorySource> Desktop<S> {
                 spot,
             })
             .collect();
+        leaving.extend(
+            aside
+                .into_iter()
+                .map(|(name, id)| self.leaving_aside(name, id)),
+        );
         self.spots = spots;
         self.revision = self.revision.wrapping_add(1);
         self.follow(held);
-        self.arrived(&arrivals, leaving, read);
-        self.reconcile();
+        self.arrived(&arrivals, &set_aside, leaving, forget);
+    }
+
+    /// Mark each shortcut to a volume among `entries`, the folder's own, as
+    /// the drive its volume is on while the mount table shows it attached, and
+    /// add the drives the desktop draws for the attached volumes.
+    fn with_volumes(&self, entries: &mut Vec<Entry>) {
+        for entry in entries
+            .iter_mut()
+            .filter(|entry| entry.kind() == EntryKind::Link(LinkTarget::Volume))
+        {
+            let mark = entry
+                .target()
+                .and_then(|target| volume::locate(target, &self.mounts.volumes).present())
+                .map(volume::drive_mark);
+            entry.set_drive(mark.as_ref());
+        }
+        let drives = self.drives_for(entries);
+        entries.extend(drives);
+    }
+
+    /// The drives to draw for the attached volumes of the classes shown: one
+    /// for each identity, the attachment a shortcut to it would open, and none
+    /// for a volume a shortcut among `entries` already stands for.
+    fn drives_for(&self, entries: &[Entry]) -> Vec<Entry> {
+        let mut drawn: BTreeSet<[u8; VOLUME_ID_LEN]> = entries
+            .iter()
+            .filter(|entry| entry.kind() == EntryKind::Link(LinkTarget::Volume))
+            .filter_map(|entry| entry.target().and_then(volume::reference))
+            .collect();
+        let volumes = &self.mounts.volumes;
+        let mut drives = Vec::new();
+        for shown in volumes
+            .iter()
+            .filter(|shown| volume::shown_on_desktop(shown, self.drives))
+        {
+            let root = tairix_browse::mount::volume_root(shown.facts.identity);
+            let opens = volume::locate(&root, volumes).present() == Some(shown);
+            if opens && drawn.insert(shown.facts.identity) {
+                drives.extend(volume::drive_entry(shown));
+            }
+        }
+        drives
+    }
+
+    /// Follow the volumes the mount table shows and the drives the settings
+    /// draw, answering whether any icon changed. A drive that went keeps its
+    /// place for when its volume returns.
+    fn follow_volumes(&mut self) -> bool {
+        let mut entries: Vec<Entry> = self
+            .entries
+            .iter()
+            .filter(|entry| !is_drive(entry))
+            .cloned()
+            .collect();
+        self.with_volumes(&mut entries);
+        sort_entries(&mut entries, self.order(self.settings.sort));
+        if entries == self.entries {
+            return false;
+        }
+        let left_out = self.left_out.clone();
+        self.replace(entries, left_out, false);
         true
     }
 
-    /// The names of the icons the selection and a carried press are on, to
-    /// find them again once the listing is reordered or replaced.
-    fn held(&self) -> (Option<String>, Option<(String, Carry)>) {
+    /// The names of the icons the selection, the focus and a carried press
+    /// are on, to find them again once the listing is reordered or replaced.
+    fn held(&self) -> Held {
         let name = |index: usize| {
             self.entries
                 .get(index)
                 .map(|entry| entry.name().to_string())
         };
-        (
-            self.selected.and_then(name),
-            self.carry
+        let mut selected = Vec::new();
+        // Without the room to name them the selection is let go rather than
+        // aborting the session.
+        if selected.try_reserve_exact(self.selection.len()).is_ok() {
+            selected.extend(self.selection.iter().filter_map(name));
+            selected.sort_unstable();
+        }
+        Held {
+            selected,
+            focus: self.focus.and_then(name),
+            carried: self
+                .carry
                 .and_then(|carry| Some((name(carry.index)?, carry))),
-        )
+        }
     }
 
-    /// Put the selection and a carried press back on the icons `held` names,
-    /// so neither lands on a different icon under the user's pointer. The
-    /// hover, the lit drop folder and a half-made double-click go with the
+    /// Put the selection, the focus and a carried press back on the icons
+    /// `held` names, so none lands on a different icon under the user's
+    /// pointer. The lit drop folder and a half-made double-click go with the
     /// order, since what they were taken against has moved.
-    fn follow(&mut self, (chosen, carried): (Option<String>, Option<(String, Carry)>)) {
+    fn follow(&mut self, held: Held) {
         let find = |name: &str| self.entries.iter().position(|entry| entry.name() == name);
-        self.selected = chosen.and_then(|name| find(&name));
-        self.carry = carried.and_then(|(name, carry)| {
+        self.selection.reset(self.entries.len());
+        for (index, entry) in self.entries.iter().enumerate() {
+            let named = |name: &String| name.as_str().cmp(entry.name());
+            if held.selected.binary_search_by(named).is_ok() {
+                self.selection.insert(index);
+            }
+        }
+        self.focus = held.focus.and_then(|name| find(&name));
+        self.carry = held.carried.and_then(|(name, carry)| {
             Some(Carry {
                 index: find(&name)?,
                 ..carry
             })
         });
-        self.hovered = None;
+        self.collapse = None;
         self.drop_target = None;
         self.clicks.reset();
     }
@@ -1057,13 +1531,20 @@ impl<S: DirectorySource> Desktop<S> {
     /// Merge `changes` into the listing, each icon keeping where it stood and
     /// each arrival given its place, answering whether anything moved.
     fn merge(&mut self, changes: Vec<EntryChange>) -> bool {
-        let leaving = self.leaving(&changes);
-        let merged = merge_changes(&mut self.entries, changes, sort_mode(self.settings.sort));
+        let (changes, aside): (Vec<EntryChange>, Vec<EntryChange>) = changes
+            .into_iter()
+            .partition(|change| self.lists(changed_name(change)));
+        let mut leaving = self.leaving(&changes);
+        let order = self.order(self.settings.sort);
+        let merged = merge_changes(&mut self.entries, changes, order);
         // Without the memory to merge them, the folder is read again.
         let Some((placement, moved)) = merged else {
             return self.relist();
         };
+        let (set_aside, went_aside) = self.merge_aside(aside);
+        leaving.extend(went_aside);
         if !moved {
+            self.follow_leaving(&set_aside, leaving, true, Vec::new(), Vec::new());
             return false;
         }
         let mut spots = alloc::vec![Spot::Owed; self.entries.len()];
@@ -1082,9 +1563,11 @@ impl<S: DirectorySource> Desktop<S> {
             .collect();
         self.spots = spots;
         self.revision = self.revision.wrapping_add(1);
-        self.selected = self.selected.and_then(|index| placement.place(index));
+        let count = self.entries.len();
+        self.selection.remap(count, |index| placement.place(index));
+        self.focus = self.focus.and_then(|index| placement.place(index));
+        self.collapse = None;
         self.drop_target = self.drop_target.and_then(|index| placement.place(index));
-        self.hovered = self.hovered.and_then(|index| placement.place(index));
         self.carry = self.carry.and_then(|carry| {
             Some(Carry {
                 index: placement.place(carry.index)?,
@@ -1092,8 +1575,46 @@ impl<S: DirectorySource> Desktop<S> {
             })
         });
         self.clicks.follow(|at| placement.place_subject(at));
-        self.arrived(&arrivals, leaving, true);
+        self.arrived(&arrivals, &set_aside, leaving, true);
         true
+    }
+
+    /// Make `changes`, each to an entry the settings leave out, to those set
+    /// aside: answers the names newly set aside and what went from among them,
+    /// the latest change to a name its word.
+    fn merge_aside(&mut self, changes: Vec<EntryChange>) -> (Vec<(String, FileId)>, Vec<Leaving>) {
+        let mut arrivals: Vec<(String, FileId)> = Vec::new();
+        let mut leaving = Vec::new();
+        for change in changes {
+            let held = self
+                .left_out
+                .iter()
+                .position(|entry| entry.name() == changed_name(&change));
+            match (change, held) {
+                (EntryChange::Upsert(entry), Some(at)) => {
+                    if let Some(slot) = self.left_out.get_mut(at) {
+                        *slot = entry;
+                    }
+                }
+                (EntryChange::Upsert(entry), None) => {
+                    let name = entry.name().to_string();
+                    match leaving.iter().position(|gone: &Leaving| gone.name == name) {
+                        Some(back) => drop(leaving.swap_remove(back)),
+                        None => arrivals.push((name, entry.id())),
+                    }
+                    self.left_out.push(entry);
+                }
+                (EntryChange::Remove(name), Some(at)) => {
+                    let gone = self.left_out.swap_remove(at);
+                    match arrivals.iter().position(|(arrived, _)| *arrived == name) {
+                        Some(new) => drop(arrivals.swap_remove(new)),
+                        None => leaving.push(self.leaving_aside(&name, gone.id())),
+                    }
+                }
+                (EntryChange::Remove(_), None) => {}
+            }
+        }
+        (arrivals, leaving)
     }
 
     /// The icons whose files the latest word of `changes` takes out of the
@@ -1123,12 +1644,21 @@ impl<S: DirectorySource> Desktop<S> {
 
     /// Give each icon at `arrivals` its place: a file renamed keeps where it
     /// stood, one a drop or a save is waiting for stands where it was let go,
-    /// and one the record keeps a place for stands there. The place of a file
-    /// gone is forgotten where `forget` says the folder was read.
-    fn arrived(&mut self, arrivals: &[usize], mut leaving: Vec<Leaving>, forget: bool) {
+    /// and one the record keeps a place for stands there. A file renamed to
+    /// one of `set_aside`, the names newly set aside, keeps its place under
+    /// that name, and the place of a file gone is forgotten where `forget`
+    /// says the folder was read.
+    fn arrived(
+        &mut self,
+        arrivals: &[usize],
+        set_aside: &[(String, FileId)],
+        mut leaving: Vec<Leaving>,
+        forget: bool,
+    ) {
         let mut edits = Vec::new();
         let mut set = Vec::new();
         let mut order = self.arrangement.next_order();
+        let mut taken = None;
         for &index in arrivals {
             let Some(entry) = self.entries.get(index) else {
                 continue;
@@ -1147,9 +1677,42 @@ impl<S: DirectorySource> Desktop<S> {
                 } else if let Some(slot) = self.spots.get_mut(index) {
                     *slot = gone.spot;
                 }
-            } else if let Some(at) = self.landed(&name) {
+            } else if let Some(at) = self.landing_place(&name, &mut taken) {
                 set.push((name, Some(Placed { id, at, order })));
                 order = order.saturating_add(1);
+            }
+        }
+        self.stand_ins
+            .retain(|(name, _)| !leaving.iter().any(|gone| gone.name == *name));
+        self.follow_leaving(set_aside, leaving, forget, edits, set);
+        self.resolve_places();
+        self.retire_landings();
+    }
+
+    /// Keep `edits` and the places `set` with the places of `leaving`
+    /// followed: one renamed to a name of `set_aside` keeps its place under
+    /// that name, and the rest are forgotten where `forget` says the folder
+    /// was read.
+    fn follow_leaving(
+        &mut self,
+        set_aside: &[(String, FileId)],
+        mut leaving: Vec<Leaving>,
+        forget: bool,
+        mut edits: Vec<ArrangementEdit>,
+        mut set: Vec<(String, Option<Placed>)>,
+    ) {
+        for (name, id) in set_aside.iter().filter(|(_, id)| !id.is_none()) {
+            let Some(at) = leaving.iter().position(|gone| gone.id == *id) else {
+                continue;
+            };
+            let gone = leaving.swap_remove(at);
+            if let Spot::Placed(_) = gone.spot {
+                let from = PlaceKey::of(&gone.name);
+                edits.push(ArrangementEdit::Renamed {
+                    from,
+                    to: name.clone(),
+                    id: *id,
+                });
             }
         }
         if forget {
@@ -1163,7 +1726,6 @@ impl<S: DirectorySource> Desktop<S> {
             edits.push(ArrangementEdit::Set(set));
         }
         self.keep(edits);
-        self.resolve_places();
     }
 
     /// Make each of `edits` here, holding a refusal for the session to state,
@@ -1176,25 +1738,108 @@ impl<S: DirectorySource> Desktop<S> {
         }
     }
 
-    /// The place a drop or a save waiting on its files gives the arrived file
-    /// named `name`, if one is waiting and the file is one of its own: the
-    /// first by a name it was offered under or one its copy told apart, the
-    /// others by arriving while any are owed.
-    fn landed(&mut self, name: &str) -> Option<Place> {
-        let landing = self.landing.as_mut()?;
-        let at = if !landing.led && landing.first.iter().any(|offered| copied_as(name, offered)) {
-            landing.led = true;
-            0
-        } else {
-            landing.owed = landing.owed.checked_sub(1)?;
-            landing.others = landing.others.saturating_add(1);
-            landing.others
-        };
-        let place = landing.places.get(at).copied();
-        if landing.led && landing.owed == 0 {
-            self.landing = None;
+    /// Where a drop stands the file named `name` that just arrived: the item
+    /// it is writing under that name, or one it made that was still to be
+    /// listed. A file no drop named is none of its own.
+    fn landing_place(&mut self, name: &str, taken: &mut Option<Vec<bool>>) -> Option<Place> {
+        let (at, item) = self
+            .landings
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, landing)| landing.places.is_some())
+            .find_map(|(at, landing)| {
+                if let Some(making) = landing.making.as_mut().filter(|making| making.name == name) {
+                    making.stands = true;
+                    return Some((at, making.item));
+                }
+                let owed = landing.owed.iter().position(|(owed, _)| owed == name)?;
+                Some((at, landing.owed.swap_remove(owed).1))
+            })?;
+        self.item_place(at, item, taken)
+    }
+
+    /// Where item `item` of the landing at `at` stands: an item shown where it
+    /// was carried, any other on the free cell nearest where the drop was let
+    /// go — claimed from `taken`, the cells of the field, built at the first
+    /// claim — and kept for it.
+    fn item_place(&mut self, at: usize, item: u32, taken: &mut Option<Vec<bool>>) -> Option<Place> {
+        let grid = self.flowed_in?;
+        let from = self.settings.icons;
+        let places = self.landings.get(at)?.places.as_ref()?;
+        let shown = usize::try_from(item)
+            .ok()
+            .and_then(|item| places.shown.get(item));
+        let kept = places
+            .further
+            .iter()
+            .find(|(further, _)| *further == item)
+            .map(|(_, place)| place);
+        if let Some(place) = shown.or(kept) {
+            return Some(*place);
         }
-        place
+        let field = Field::of(&grid)?;
+        if taken.is_none() {
+            *taken = field.taken(&self.standing, |_| false);
+        }
+        let dropped = field.wanted(places.dropped).origin;
+        let corner = field.claim_nearest(dropped, taken.as_deref_mut()?)?;
+        let place = field.place_of(corner, from);
+        self.landings
+            .get_mut(at)?
+            .places
+            .as_mut()?
+            .further
+            .push((item, place));
+        Some(place)
+    }
+
+    /// Stand item `item` of the landing at `at`, made as `name`, where the
+    /// drop put it when it is listed — moving one that had the name before —
+    /// and owe it the place until it arrives when not. Answers whether an icon
+    /// moved.
+    fn stand_made(&mut self, at: usize, item: u32, name: &str) -> bool {
+        let Some(id) = self
+            .entries
+            .iter()
+            .find(|entry| entry.name() == name)
+            .map(Entry::id)
+        else {
+            if let Some(landing) = self.landings.get_mut(at) {
+                landing.owed.push((name.to_string(), item));
+            }
+            return false;
+        };
+        let mut taken = None;
+        let Some(place) = self.item_place(at, item, &mut taken) else {
+            return false;
+        };
+        let placed = Placed {
+            id,
+            at: place,
+            order: self.arrangement.next_order(),
+        };
+        self.keep(alloc::vec![ArrangementEdit::Set(alloc::vec![(
+            name.to_string(),
+            Some(placed)
+        )])]);
+        self.resolve_places();
+        true
+    }
+
+    /// Forget the landings with nothing left to land: ended, and owing no
+    /// name.
+    fn retire_landings(&mut self) {
+        self.landings
+            .retain(|landing| !landing.ended || !landing.owed.is_empty());
+    }
+
+    /// The folder was read whole: a name a drop made that it did not list is
+    /// not coming, so the place owed it goes, with every drop that ended.
+    fn settle_landings(&mut self) {
+        for landing in &mut self.landings {
+            landing.owed.clear();
+        }
+        self.retire_landings();
     }
 
     /// Make `edit` to the record here, for the session to keep.
@@ -1239,27 +1884,22 @@ impl<S: DirectorySource> Desktop<S> {
             return;
         }
         self.record = Record::Reconciled;
-        let listed: BTreeSet<PlaceKey> = self
-            .entries
-            .iter()
-            .map(|entry| PlaceKey::of(entry.name()))
-            .collect();
-        let by_file: BTreeMap<FileId, usize> = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| !entry.id().is_none())
-            .map(|(index, entry)| (entry.id(), index))
+        let folder = || self.entries.iter().chain(&self.left_out);
+        let listed: BTreeSet<PlaceKey> = folder().map(|entry| PlaceKey::of(entry.name())).collect();
+        let by_file: BTreeMap<FileId, &Entry> = folder()
+            .filter(|entry| !entry.id().is_none())
+            .map(|entry| (entry.id(), entry))
             .collect();
         let mut renamed = Vec::new();
         let mut gone = Vec::new();
         for (key, placed) in self.arrangement.places() {
-            if listed.contains(&key) {
+            // A drive's place is its volume's, kept whether or not it is
+            // attached: it names no file to follow or forget.
+            if key.is_volume() || listed.contains(&key) {
                 continue;
             }
             let moved = by_file
                 .get(&placed.id)
-                .and_then(|&index| self.entries.get(index))
                 .filter(|entry| self.arrangement.place_of(entry.name()).is_none());
             match moved {
                 Some(entry) => renamed.push(ArrangementEdit::Renamed {
@@ -1435,52 +2075,354 @@ impl<S: DirectorySource> Desktop<S> {
         full
     }
 
+    /// What became of an eject or a retitle carried out for a drive: one the
+    /// user was refused for want of an administrator's authority is owed to
+    /// the prompt, as the file manager's is, and any other refusal held for
+    /// the session to state.
+    pub fn volume_done(&mut self, done: MountDone) {
+        let listed = self
+            .mounts
+            .volumes
+            .iter()
+            .map(|volume| (&volume.facts, volume.label.as_str()));
+        if done.for_an_administrator(listed).is_some() {
+            if matches!(self.administer, Administer::Idle) {
+                self.administer = Administer::Owed(done.act);
+            } else {
+                self.refuse_act(&done.act, ADMINISTRATOR_BUSY);
+            }
+            return;
+        }
+        if let Err(refusal) = done.shown() {
+            self.refuse(GestureRefusal::new(refusal.headline, refusal.reason));
+        }
+    }
+
+    /// The task an administrator is owed a question about, once, named from
+    /// the mount table as it stands: the embedder asks its prompt for it now
+    /// and says how that went. A drive gone meanwhile is asked about nothing.
+    pub fn take_administrator_ask(&mut self) -> Option<SystemTask> {
+        if !matches!(self.administer, Administer::Owed(_)) {
+            return None;
+        }
+        let Administer::Owed(act) = core::mem::take(&mut self.administer) else {
+            return None;
+        };
+        let refused = MountDone {
+            act,
+            answer: Err(Errno::PermissionDenied),
+        };
+        let listed = self
+            .mounts
+            .volumes
+            .iter()
+            .map(|volume| (&volume.facts, volume.label.as_str()));
+        let task = refused.for_an_administrator(listed);
+        self.administer = Administer::Asked(refused.act);
+        if task.is_none() {
+            self.administrator_unasked(false);
+        }
+        task
+    }
+
+    /// The prompt could not be asked: `busy` with another question, or not
+    /// shown at all.
+    pub fn administrator_unasked(&mut self, busy: bool) {
+        if let Administer::Asked(act) = core::mem::take(&mut self.administer) {
+            let reason = if busy {
+                ADMINISTRATOR_BUSY
+            } else {
+                ADMINISTRATOR_UNASKED
+            };
+            self.refuse_act(&act, reason);
+        }
+    }
+
+    /// The administrator's act ended with `outcome`: one that ran and failed
+    /// is stated; one declined, or done, says nothing, the mount table showing
+    /// what happened.
+    pub fn administrator_answered(&mut self, outcome: AuthorisedOutcome) {
+        let Administer::Asked(act) = core::mem::take(&mut self.administer) else {
+            return;
+        };
+        if !matches!(
+            outcome,
+            AuthorisedOutcome::Ran { exit_code: 0 } | AuthorisedOutcome::Declined
+        ) {
+            self.refuse_act(&act, ADMINISTRATOR_FAILED);
+        }
+    }
+
+    /// Hold `act`'s refusal for `reason`.
+    fn refuse_act(&mut self, act: &MountAct, reason: &'static str) {
+        let refusal = act.refused(reason);
+        self.refuse(GestureRefusal::new(refusal.headline, refusal.reason));
+    }
+
     /// A refusal no gesture was there to state, since this was last asked.
     pub fn take_refusal(&mut self) -> Option<GestureRefusal> {
         self.refused.take()
     }
 
-    /// Note what a drag or a save now over the bare desktop would leave
-    /// there, or that it is over somewhere else.
+    /// Note what a drag now over the desktop would leave there, or that it is
+    /// over somewhere else.
     pub fn offer_landing(&mut self, offer: Option<LandingOffer>) {
         self.offer = offer;
     }
 
-    /// Wait until `until_ns` for the files the offer standing describes, let
-    /// go on the bare desktop at `at`: each picture's centre as far from `at`
-    /// as it was held from the press, on the nearest free cells where the
-    /// settings keep icons to the grid. Asked once the program making the
-    /// files has been told they land here, so a drop refused or concluded
-    /// elsewhere waits for nothing.
-    pub fn expect_offered(
+    /// Land what the offer standing describes as the drop `source` — the
+    /// window its drag began in and the report it was dropped at — let go at
+    /// `at`: on the bare desktop each item shown as far from `at` as its
+    /// picture was held from the press, on the nearest free cells where the
+    /// settings keep icons to the grid, and each further item on the free cell
+    /// nearest `at`, as its source makes it
+    /// ([`step_landing`](Self::step_landing)). Asked once the source has been
+    /// told the drop landed here, so a drop refused or concluded elsewhere
+    /// lands nothing.
+    pub fn expect_drop(
         &mut self,
+        source: (u64, u32),
         at: Point,
         layout: &GridView,
         scale: Scale,
         theme: &Theme,
-        until_ns: u64,
     ) {
         let Some(offer) = self.offer.take() else {
             return;
         };
         self.settle(layout);
-        let Some(field) = Field::of(layout) else {
+        let places = offer.shown.as_deref().and_then(|shown| {
+            let offsets: Vec<(i32, i32)> = shown
+                .iter()
+                .map(|picture| picture.from.unwrap_or((0, 0)))
+                .collect();
+            self.drop_places(&offer.lead, &offsets, at, (layout, scale, theme))
+        });
+        let pictures = offer.shown.unwrap_or_default();
+        // Drops that ended with names still to arrive are kept for them, at
+        // most as many as one window lands at once.
+        let settling = self.landings.iter().filter(|landing| landing.ended).count();
+        if settling >= DROP_LANDINGS_MAX {
+            if let Some(oldest) = self.landings.iter().position(|landing| landing.ended) {
+                self.landings.remove(oldest);
+            }
+        }
+        self.landings.push(Landing {
+            source: Some(source),
+            folder: offer.folder,
+            places,
+            pictures,
+            making: None,
+            owed: Vec::new(),
+            ended: false,
+        });
+    }
+
+    /// Hold where a save of the file asked for as `name` was let go on the
+    /// bare desktop at `at`, for the open attempt `attempt` that makes it: the
+    /// file it makes stands under the pointer ([`saved`](Self::saved)).
+    pub fn expect_save(
+        &mut self,
+        attempt: (u64, u64),
+        name: &str,
+        at: Point,
+        (layout, scale, theme): (&GridView, Scale, &Theme),
+    ) {
+        self.settle(layout);
+        let Some(places) = self.drop_places(name, &[(0, 0)], at, (layout, scale, theme)) else {
             return;
         };
+        // At most as many saves as one application may have picks open.
+        if self.saves.len() >= PICK_MAX_OPEN {
+            self.saves.remove(0);
+        }
+        self.saves.push((attempt, places));
+    }
+
+    /// The open `attempt` made its file at absolute `made`, or made none: a
+    /// file made in this folder stands where its save was let go, adding to
+    /// `damage` each icon that moved. Answers whether one did.
+    pub fn saved(
+        &mut self,
+        attempt: (u64, u64),
+        made: Option<&str>,
+        layout: impl Fn(&Self) -> GridView,
+        damage: &mut Region,
+    ) -> bool {
+        let Some(at) = self.saves.iter().position(|(held, _)| *held == attempt) else {
+            return false;
+        };
+        let (_, places) = self.saves.remove(at);
+        let folder = self.folder_path();
+        let Some(name) = made
+            .and_then(|made| made.strip_prefix(folder.as_str()))
+            .and_then(|rest| rest.strip_prefix('/'))
+            .filter(|name| !name.is_empty() && !name.contains('/'))
+            .map(String::from)
+        else {
+            return false;
+        };
+        self.landings.push(Landing {
+            source: None,
+            folder,
+            places: Some(places),
+            pictures: Vec::new(),
+            making: None,
+            owed: Vec::new(),
+            ended: true,
+        });
+        let at = self.landings.len() - 1;
+        let moved = self.marking(layout, damage, |desktop| desktop.stand_made(at, 0, &name));
+        self.retire_landings();
+        moved
+    }
+
+    /// Take `step` of the drop `source` landing here, adding to `damage` each
+    /// icon it moved, and answer what it asks of the embedder. An item made
+    /// under a name stands where the drop put it — at once where its icon
+    /// arrives while it is written, else once it was made or replaced what had
+    /// the name, as soon as it is listed — and a skipped, merged or failed one
+    /// moves nothing. The drop's end reads again a folder no watch follows.
+    pub fn step_landing(
+        &mut self,
+        source: (u64, u32),
+        step: &LandingStep,
+        layout: impl Fn(&Self) -> GridView,
+        damage: &mut Region,
+    ) -> LandingWork {
+        let Some(at) = self
+            .landings
+            .iter()
+            .position(|landing| landing.source == Some(source))
+        else {
+            return LandingWork::default();
+        };
+        match *step {
+            LandingStep::Making { item, name } => self.making(at, item, name.as_str()),
+            LandingStep::Made { outcome, .. } => self.made(at, outcome, layout, damage),
+            LandingStep::Ended => self.ended(at, layout, damage),
+        }
+    }
+
+    /// Item `item` of the landing at `at` is about to be written as `name`:
+    /// what is pictured from inside it is held until it is done, and its icon
+    /// is drawn meanwhile by the picture its drag carried, where that is one
+    /// of its own.
+    fn making(&mut self, at: usize, item: u32, name: &str) -> LandingWork {
+        let Some(landing) = self.landings.get_mut(at) else {
+            return LandingWork::default();
+        };
+        landing.making = Some(Making {
+            item,
+            name: name.to_string(),
+            stands: false,
+        });
+        let hold = Some(tairix_path::join(&landing.folder, name));
+        let carried = usize::try_from(item)
+            .ok()
+            .and_then(|item| landing.pictures.get(item))
+            .filter(|picture| picture.own.is_some())
+            .copied();
+        if let Some(picture) = carried.filter(|_| self.lists(name)) {
+            self.stand_in(name, &picture);
+        }
+        LandingWork {
+            hold,
+            release: None,
+        }
+    }
+
+    /// Draw the icon named `name` by `picture`, the one its drag carried,
+    /// while its own is produced, forgetting the oldest past the bound.
+    fn stand_in(&mut self, name: &str, picture: &DragPicture) {
+        self.stand_ins.retain(|(held, _)| held.as_str() != name);
+        if self.stand_ins.len() >= STAND_INS_MAX {
+            self.stand_ins.remove(0);
+        }
+        self.stand_ins.push((name.to_string(), *picture));
+    }
+
+    /// The picture the drag that made the icon named `name` carried for it,
+    /// which it is drawn by while its own is produced.
+    fn stand_in_for(&self, name: &str) -> Option<&DragPicture> {
+        self.stand_ins
+            .iter()
+            .find(|(held, _)| held.as_str() == name)
+            .map(|(_, picture)| picture)
+    }
+
+    /// The item the landing at `at` was writing is done, as `outcome` says.
+    fn made(
+        &mut self,
+        at: usize,
+        outcome: LandingOutcome,
+        layout: impl Fn(&Self) -> GridView,
+        damage: &mut Region,
+    ) -> LandingWork {
+        let Some(landing) = self.landings.get_mut(at) else {
+            return LandingWork::default();
+        };
+        let Some(made) = landing.making.take() else {
+            return LandingWork::default();
+        };
+        let release = Some(tairix_path::join(&landing.folder, &made.name));
+        let lands = matches!(outcome, LandingOutcome::Created | LandingOutcome::Replaced);
+        if lands && landing.places.is_some() && !made.stands {
+            self.marking(layout, damage, |desktop| {
+                desktop.stand_made(at, made.item, &made.name)
+            });
+        }
+        LandingWork {
+            hold: None,
+            release,
+        }
+    }
+
+    /// The landing at `at` has ended: what it held is released, and a folder
+    /// no watch follows is read for what it made.
+    fn ended(
+        &mut self,
+        at: usize,
+        layout: impl Fn(&Self) -> GridView,
+        damage: &mut Region,
+    ) -> LandingWork {
+        let Some(landing) = self.landings.get_mut(at) else {
+            return LandingWork::default();
+        };
+        let release = landing
+            .making
+            .take()
+            .map(|made| tairix_path::join(&landing.folder, &made.name));
+        landing.ended = true;
+        self.retire_landings();
+        self.relist_unfollowed(layout, damage);
+        LandingWork {
+            hold: None,
+            release,
+        }
+    }
+
+    /// Where a drop led by `lead` stands what it carries, let go at `at` in
+    /// the field `layout` lays out: each item shown as far from `at` as its
+    /// picture stood from the press by `offsets`, every offset held to the
+    /// field and each tile to the nearest free cell where the settings keep
+    /// icons to the grid; `None` for a field holding no cell.
+    fn drop_places(
+        &self,
+        lead: &str,
+        offsets: &[(i32, i32)],
+        at: Point,
+        (layout, scale, theme): (&GridView, Scale, &Theme),
+    ) -> Option<Places> {
+        let field = Field::of(layout)?;
         let tile = Rect::new(0, 0, field.cell.0, field.cell.1);
-        let measured = Entry::file(offer.first.first().cloned().unwrap_or_default());
-        let held = entry_parts(
-            Tiles::Large,
-            (&measured, HiddenEndings::NONE),
-            tile,
-            scale,
-            theme,
-        )
-        .and_then(|parts| parts.picture)
-        .unwrap_or(tile)
-        .center();
+        let measured = Entry::file(lead.to_string());
+        let held = entry_parts(Tiles::Large, (&measured, self.endings), tile, scale, theme)
+            .and_then(|parts| parts.picture)
+            .unwrap_or(tile)
+            .center();
         let mut taken = if self.settings.align_to_grid {
-            field.taken(&self.standing, None)
+            field.taken(&self.standing, |_| false)
         } else {
             None
         };
@@ -1488,16 +2430,19 @@ impl<S: DirectorySource> Desktop<S> {
         // farther from the drop than the field reaches.
         let reach = (to_i32(field.area.width), to_i32(field.area.height));
         let bounded = |offset: i32, most: i32| offset.max(-most).min(most);
+        let corner_of = |(dx, dy): (i32, i32)| {
+            field.shown_at(Point::new(
+                at.x.saturating_add(bounded(dx, reach.0))
+                    .saturating_sub(held.x),
+                at.y.saturating_add(bounded(dy, reach.1))
+                    .saturating_sub(held.y),
+            ))
+        };
         let from = self.settings.icons;
-        let places = offer
-            .offsets
+        let shown = offsets
             .iter()
-            .map(|&(dx, dy)| {
-                let (dx, dy) = (bounded(dx, reach.0), bounded(dy, reach.1));
-                let corner = field.shown_at(Point::new(
-                    at.x.saturating_add(dx).saturating_sub(held.x),
-                    at.y.saturating_add(dy).saturating_sub(held.y),
-                ));
+            .map(|&offset| {
+                let corner = corner_of(offset);
                 let corner = taken
                     .as_deref_mut()
                     .and_then(|taken| field.claim_nearest(corner, taken))
@@ -1505,26 +2450,11 @@ impl<S: DirectorySource> Desktop<S> {
                 field.place_of(corner, from)
             })
             .collect();
-        self.landing = Some(Landing {
-            first: offer.first,
-            places,
-            led: false,
-            owed: offer.count.saturating_sub(1),
-            others: 0,
-            until_ns,
-        });
-    }
-
-    /// Stop waiting for the files of a drop or a save past its wait at
-    /// `now_ns`: one that appears later takes the next free cell.
-    pub fn expire_landing(&mut self, now_ns: u64) {
-        if self
-            .landing
-            .as_ref()
-            .is_some_and(|landing| now_ns >= landing.until_ns)
-        {
-            self.landing = None;
-        }
+        Some(Places {
+            shown,
+            dropped: field.place_of(corner_of((0, 0)), from),
+            further: Vec::new(),
+        })
     }
 
     /// Stand the icons in `layout`'s field ([`Field::stand`]), each flowed
@@ -1594,14 +2524,20 @@ impl<S: DirectorySource> Desktop<S> {
                     .unwrap_or_default(),
             )
         };
-        let carried = self.carry.and_then(|carry| {
-            let (tile, at) = (layout.cell_rect(0)?, carry.at?);
-            Some((carry.index, Rect::new(at.x, at.y, tile.width, tile.height)))
+        let lift = self.carry.and_then(|carry| {
+            Some(Lift {
+                lead: carry.index,
+                with: self
+                    .selection
+                    .contains(carry.index)
+                    .then_some(&self.selection),
+                shift: carry.shift()?,
+            })
         });
         Shown {
             standing,
             grid: layout,
-            carried,
+            lift,
         }
     }
 
@@ -1734,8 +2670,8 @@ impl<S: DirectorySource> Desktop<S> {
     /// `ground` is the flat colour the icons stand on, or `None` over a
     /// picture: a resting name takes the ink that reads there, and a name on
     /// a state's plate keeps the theme's. A resting name's halo over a picture
-    /// is blurred once and kept until its name, the scale, the theme or the
-    /// tile size moves, so a repaint lays it down rather than blurring it.
+    /// is blurred once and kept until the name shown, the scale, the theme or
+    /// the tile size moves, so a repaint lays it down rather than blurring it.
     #[allow(clippy::too_many_arguments)] // The paint, the look it takes, and the ground under it.
     pub fn render(
         &self,
@@ -1763,7 +2699,9 @@ impl<S: DirectorySource> Desktop<S> {
             |bounds| !bounds.intersection(&area).is_empty(),
             |icon| {
                 let state = self.icon_state(icon.index);
-                let mut tile = Tiles::Large.tile(icon.entry, state, icon.kind, HiddenEndings::NONE);
+                let mut tile = Tiles::Large
+                    .tile(icon.entry, state, icon.kind, self.endings)
+                    .with_faded(is_absent(icon.entry));
                 if state == ControlState::idle() {
                     tile = tile.with_label_ink(ink);
                     if let Some(halo) = halo {
@@ -1778,6 +2716,18 @@ impl<S: DirectorySource> Desktop<S> {
             },
         );
         self.halos.set(halos);
+        // Confined to `area`: outside it the band is already drawn over
+        // pixels this paint did not lay down again.
+        if let Some(band) = self
+            .band()
+            .filter(|band| !band.intersection(&area).is_empty())
+        {
+            let left = u32::try_from(area.left()).unwrap_or(0);
+            let top = u32::try_from(area.top()).unwrap_or(0);
+            surface.with_clip(left, top, area.width, area.height, |surface| {
+                tairix_browse::marquee::draw(surface, band, scale, theme);
+            });
+        }
     }
 
     /// How a resting name is drawn on `ground`: near-white over a dark halo on
@@ -1827,6 +2777,13 @@ impl<S: DirectorySource> Desktop<S> {
             };
             let (kind, request) =
                 entry_icon(&dir, &self.folder, entry, Pictures::ALL, &mut scratch);
+            let request = match self.stand_in_for(entry.name()) {
+                Some(picture) => request.standing_in(IconRequest::from_carried(
+                    IconKind::for_asset(picture.icon.as_str()),
+                    picture.own.as_ref(),
+                )),
+                None => request,
+            };
             visit(ShownIcon {
                 index,
                 entry,
@@ -1849,32 +2806,23 @@ impl<S: DirectorySource> Desktop<S> {
                     return false;
                 };
                 rect.contains(at)
-                    && entry_parts(
-                        Tiles::Large,
-                        (entry, HiddenEndings::NONE),
-                        rect,
-                        scale,
-                        theme,
-                    )
-                    .is_some_and(|parts| parts.contains(at))
+                    && entry_parts(Tiles::Large, (entry, self.endings), rect, scale, theme)
+                        .is_some_and(|parts| parts.contains(at))
             })
             .map(|(index, _)| index);
         hit
     }
 
-    /// The composed control state of the icon at `index`: selected, hovered,
-    /// and — when the desktop holds the keyboard and this is the selection —
-    /// focused.
+    /// The composed control state of the icon at `index`: selected, focused too
+    /// while the desktop holds the keyboard, and lit as where a drag would
+    /// drop.
     fn icon_state(&self, index: usize) -> ControlState {
         let mut state = ControlState::idle();
-        if self.selected == Some(index) {
+        if self.selection.contains(index) {
             state.selection = SelectionState::Selected;
-            if self.focused {
+            if self.focused && self.focus == Some(index) {
                 state.focus = FocusState::FOCUSED;
             }
-        }
-        if self.hovered == Some(index) {
-            state.pointer = PointerState::Hover;
         }
         if self.drop_target == Some(index) {
             state.pointer = PointerState::DragTarget;
@@ -1911,6 +2859,25 @@ impl<S: DirectorySource> Desktop<S> {
         }
     }
 
+    /// Report, once for each arrangement of the icons, that a revealed frame
+    /// has carried the folder's every icon drawn as it will stay, which
+    /// `drawn_as_kept` answers of this desktop: asked only while a report is
+    /// owed, and never while the folder is unread or a listing is on its way.
+    pub fn report_settled(
+        &mut self,
+        revealed: bool,
+        drawn_as_kept: impl FnOnce(&Self) -> bool,
+        report: impl FnOnce(),
+    ) {
+        let owed = self.settled_at != Some(self.revision);
+        let listed = self.listed.read && !self.listed.owed;
+        if !revealed || !owed || !listed || !drawn_as_kept(self) {
+            return;
+        }
+        self.settled_at = Some(self.revision);
+        report();
+    }
+
     /// The revision of the icons' places [`drop_icon_at`](Self::drop_icon_at)
     /// indexes.
     #[must_use]
@@ -1935,40 +2902,24 @@ impl<S: DirectorySource> Desktop<S> {
         }
     }
 
-    /// Pointer motion to screen position `at`, which drives the hover
-    /// highlight. An icon being carried takes the pointer's attention, so
-    /// nothing under it lights.
-    pub fn pointer_moved(
-        &mut self,
-        at: Point,
-        layout: &GridView,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) {
-        self.settle(layout);
-        if self.carry.is_some_and(|carry| carry.at.is_some()) {
-            return;
-        }
-        let hovered = self.icon_at(layout, at, scale, theme);
-        if self.hovered != hovered {
-            self.mark_icon(layout, self.hovered, damage);
-            self.mark_icon(layout, hovered, damage);
-            self.hovered = hovered;
-        }
-    }
-
-    /// A primary press at screen position `at`, at monotonic time `now_ns`.
+    /// A primary press at screen position `at`, at monotonic time `now_ns`,
+    /// with `modifiers` held.
     ///
-    /// A press on an icon selects it and arms the double-click engine, so a
-    /// second press on the same icon within the shared window activates it;
-    /// one that is not the second of a pair may go on to carry the icon
-    /// ([`follow_press`](Self::follow_press)). A press on empty desktop — the ground
-    /// around an icon's picture and name included — clears the selection.
+    /// A press on an icon selects it alone and arms the double-click engine,
+    /// so a second press on the same icon within the shared window activates
+    /// it; one that is not the second of a pair may go on to carry it, and the
+    /// rest of the selection with it ([`follow_press`](Self::follow_press)).
+    /// Control toggles the icon in the selection and Shift adds it. A press
+    /// inside a selection of several keeps it, so a drag carries them all, and
+    /// collapses it to that icon on a release that did not travel. A press on
+    /// empty desktop — the ground around an icon's picture and name included —
+    /// clears the selection unless Control or Shift is held, and starts a band
+    /// that selects what it touches as it is dragged out.
     #[allow(clippy::too_many_arguments)] // The press, the field it lands on, and the round's report.
     pub fn press(
         &mut self,
         at: Point,
+        modifiers: Modifiers,
         layout: &GridView,
         scale: Scale,
         theme: &Theme,
@@ -1978,17 +2929,40 @@ impl<S: DirectorySource> Desktop<S> {
     ) -> DesktopOutcome {
         self.settle(layout);
         self.carry = None;
-        // Taking the keyboard puts the ring on whatever is selected, so the
-        // old selection is repainted whether the press moves the selection or
-        // merely claims focus.
+        self.collapse = None;
+        self.end_band(scale, damage);
+        // Taking the keyboard puts the ring on the focus, so it is repainted
+        // whether the press moves the selection or merely claims focus.
         self.focused = true;
-        self.mark_icon(layout, self.selected, damage);
+        self.mark_icon(layout, self.focus, damage);
+        let adding = modifiers.ctrl || modifiers.shift;
         let Some(index) = self.icon_at(layout, at, scale, theme) else {
-            self.selected = None;
+            if !adding {
+                self.clear_selection(layout, damage);
+            }
+            self.focus = None;
+            self.band = self.selection.try_clone().map(|base| Band {
+                anchor: at,
+                head: at,
+                live: false,
+                base,
+                touched: Selection::new(),
+                next: Selection::new(),
+            });
             return DesktopOutcome::ignored();
         };
-        self.selected = Some(index);
-        self.mark_icon(layout, self.selected, damage);
+        if modifiers.ctrl {
+            self.selection.toggle(index);
+        } else if modifiers.shift {
+            self.selection.insert(index);
+        } else if self.selection.contains(index) && self.selection.len() > 1 {
+            self.collapse = Some(index);
+        } else {
+            self.clear_selection(layout, damage);
+            self.selection.single(index);
+        }
+        self.focus = Some(index);
+        self.mark_icon(layout, self.focus, damage);
         let subject = u64::try_from(index).unwrap_or(u64::MAX);
         if self.clicks.register(
             now_ns,
@@ -1996,8 +2970,13 @@ impl<S: DirectorySource> Desktop<S> {
             PointerButton::Primary,
             self.settings.double_click,
         ) == ClickKind::Double
+            && !adding
         {
+            self.collapse = None;
             return self.activate(index, apps);
+        }
+        if !self.selection.contains(index) {
+            return DesktopOutcome::ignored();
         }
         let carry = self.shown(layout).rect(index).map(|rect| Carry {
             index,
@@ -2006,24 +2985,34 @@ impl<S: DirectorySource> Desktop<S> {
                 at.x.saturating_sub(rect.left()),
                 at.y.saturating_sub(rect.top()),
             ),
+            rest: Point::new(rect.left(), rect.top()),
             at: None,
         });
         self.carry = carry;
         DesktopOutcome::ignored()
     }
 
-    /// Follow the press on an icon to `at`, the primary button still `held`
-    /// or let go: carried there while it is held, and put down there once it
-    /// is not. The seat applies a whole batch of input before any of it is
-    /// routed, so the release may come with motion this has yet to follow.
+    /// Follow the press to `at`, the primary button still `held` or let go:
+    /// a band is dragged out there, or the icons pressed are carried there
+    /// while it is held and put down there once it is not. The seat applies a
+    /// whole batch of input before any of it is routed, so the release may
+    /// come with motion this has yet to follow.
     pub fn follow_press(
         &mut self,
         at: Point,
         held: bool,
         layout: &GridView,
         scale: Scale,
+        theme: &Theme,
         damage: &mut Region,
     ) -> DesktopOutcome {
+        if self.band.is_some() {
+            self.drag_band(at, layout, scale, theme, damage);
+            if !held {
+                self.end_band(scale, damage);
+            }
+            return DesktopOutcome::ignored();
+        }
         if self.carry.is_none() {
             return DesktopOutcome::ignored();
         }
@@ -2031,7 +3020,164 @@ impl<S: DirectorySource> Desktop<S> {
         if held {
             return DesktopOutcome::ignored();
         }
+        if let Some(index) = self
+            .collapse
+            .take()
+            .filter(|_| self.carry_shift().is_none())
+        {
+            self.clear_selection(layout, damage);
+            self.selection.single(index);
+            self.mark_icon(layout, Some(index), damage);
+        }
         self.put_down(layout, damage)
+    }
+
+    /// How far the press carries its icons, once it is a drag.
+    fn carry_shift(&self) -> Option<(i32, i32)> {
+        self.carry.as_ref().and_then(Carry::shift)
+    }
+
+    /// Repaint every selected icon and select none.
+    fn clear_selection(&mut self, layout: &GridView, damage: &mut Region) {
+        if self.selection.is_empty() {
+            return;
+        }
+        self.mark_selected(layout, damage);
+        self.selection.clear();
+    }
+
+    /// Add every selected icon's tile to `damage`, in one walk of the icons.
+    fn mark_selected(&self, layout: &GridView, damage: &mut Region) {
+        for (index, rect) in self.shown(layout).bottom_up() {
+            if self.selection.contains(index) {
+                damage.add(rect);
+            }
+        }
+    }
+
+    /// Drag the band's head to `at`: once past the drag slop it is drawn, and
+    /// every icon it touches is selected beside what its press kept.
+    fn drag_band(
+        &mut self,
+        at: Point,
+        layout: &GridView,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        let Some(band) = self.band.as_mut() else {
+            return;
+        };
+        let before = band.rect();
+        band.head = at;
+        band.live |= past_drag_slop(band.anchor, at, scale);
+        let after = band.rect();
+        tairix_browse::marquee::report_band(before, after, scale, damage);
+        if let Some(rect) = after.filter(|_| before != after) {
+            self.sweep_band(rect, layout, scale, theme, damage);
+        }
+    }
+
+    /// Mark every icon the band `rect` touches selected, beside what the
+    /// press kept, and release one it touches no longer unless the press kept
+    /// it, adding each icon whose mark changed to `damage`.
+    fn sweep_band(
+        &mut self,
+        rect: Rect,
+        layout: &GridView,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        let Some(mut band) = self.band.take() else {
+            return;
+        };
+        let mut next = core::mem::take(&mut band.next);
+        next.reset(self.entries.len());
+        self.touching(rect, layout, scale, theme, &mut next);
+        for index in next.iter() {
+            if !band.touched.contains(index) && !band.base.contains(index) {
+                self.selection.insert(index);
+            }
+        }
+        for index in band.touched.iter() {
+            if !next.contains(index) && !band.base.contains(index) {
+                self.selection.remove(index);
+            }
+        }
+        for (index, tile) in self.shown(layout).bottom_up() {
+            let moved = band.touched.contains(index) != next.contains(index);
+            if moved && !band.base.contains(index) {
+                damage.add(tile);
+            }
+        }
+        band.next = core::mem::replace(&mut band.touched, next);
+        self.band = Some(band);
+    }
+
+    /// Mark in `touched` every icon whose picture or name `band` touches.
+    ///
+    /// A flowed icon whose cell's picture the band covers is touched without
+    /// laying out its name; only those along the band's edges are tested
+    /// part by part, so a sweep costs the band's edges rather than its area.
+    fn touching(
+        &self,
+        band: Rect,
+        layout: &GridView,
+        scale: Scale,
+        theme: &Theme,
+        touched: &mut Selection,
+    ) {
+        let shown = self.shown(layout);
+        let core = tile_core(Tiles::Large, scale, theme);
+        let surely = layout.band_cells_within(band, core);
+        let meets = |index: usize, tile: Rect| {
+            self.entries.get(index).is_some_and(|entry| {
+                entry_parts(Tiles::Large, (entry, self.endings), tile, scale, theme)
+                    .is_some_and(|parts| parts.meets(&band))
+            })
+        };
+        for cell in layout.band_cells(band).iter() {
+            let Some(index) = shown.standing.cells.get(cell).copied().flatten() else {
+                continue;
+            };
+            let hit = surely.contains(cell)
+                || layout
+                    .cell_rect(cell)
+                    .is_some_and(|tile| meets(index, tile));
+            if hit && !shown.lifted(index) {
+                touched.insert(index);
+            }
+        }
+        for (index, tile) in shown.placed() {
+            if !tile.intersection(&band).is_empty() && meets(index, tile) {
+                touched.insert(index);
+            }
+        }
+    }
+
+    /// End the band, its press's selection kept as it stands.
+    fn end_band(&mut self, scale: Scale, damage: &mut Region) {
+        if let Some(band) = self.band.take() {
+            tairix_browse::marquee::report_band(band.rect(), None, scale, damage);
+        }
+    }
+
+    /// Take back what the band selected: the selection is its press's again.
+    fn cancel_band(&mut self, layout: &GridView, scale: Scale, damage: &mut Region) {
+        let Some(band) = self.band.take() else {
+            return;
+        };
+        tairix_browse::marquee::report_band(band.rect(), None, scale, damage);
+        self.mark_selected(layout, damage);
+        self.selection = band.base;
+        self.mark_selected(layout, damage);
+    }
+
+    /// The band, while it is drawn.
+    #[must_use]
+    pub fn band(&self) -> Option<Rect> {
+        self.band.as_ref().and_then(Band::rect)
     }
 
     /// The pointer moved to `at` while the press on an icon is held: once it
@@ -2055,13 +3201,25 @@ impl<S: DirectorySource> Desktop<S> {
         if carry.at == Some(corner) {
             return;
         }
-        self.mark_icon(layout, Some(carry.index), damage);
-        let left = self.hovered.take();
-        self.mark_icon(layout, left, damage);
+        self.mark_carried(layout, damage);
         carry.at = Some(corner);
         self.carry = Some(carry);
         self.clicks.reset();
-        self.mark_icon(layout, Some(carry.index), damage);
+        self.mark_carried(layout, damage);
+    }
+
+    /// Add the tiles of every icon the press carries, where they stand now,
+    /// to `damage`.
+    fn mark_carried(&self, layout: &GridView, damage: &mut Region) {
+        let Some(carry) = self.carry else {
+            return;
+        };
+        let with_selection = self.selection.contains(carry.index);
+        for (index, rect) in self.shown(layout).bottom_up() {
+            if index == carry.index || (with_selection && self.selection.contains(index)) {
+                damage.add(rect);
+            }
+        }
     }
 
     /// The press on an icon ended. One that never travelled was a click; one
@@ -2074,27 +3232,52 @@ impl<S: DirectorySource> Desktop<S> {
             return DesktopOutcome::ignored();
         };
         self.settle(layout);
-        let field = Field::of(layout);
-        let (Some(corner), Some(field), Some(entry)) =
-            (carry.at, field, self.entries.get(carry.index))
-        else {
+        let (Some(field), Some(_)) = (Field::of(layout), carry.shift()) else {
             self.carry = None;
             return DesktopOutcome::ignored();
         };
-        let settled = if self.settings.align_to_grid {
-            field
-                .taken(&self.standing, Some(carry.index))
-                .and_then(|mut taken| field.claim_nearest(corner, &mut taken))
-                .unwrap_or(corner)
-        } else {
-            corner
-        };
-        let placed = Placed {
-            id: entry.id(),
-            at: field.place_of(settled, self.settings.icons),
-            order: self.arrangement.next_order(),
-        };
-        let set = alloc::vec![(entry.name().to_string(), Some(placed))];
+        let shown = self.shown(layout);
+        let mut carried = Vec::new();
+        if carried
+            .try_reserve_exact(self.selection.len().max(1))
+            .is_err()
+        {
+            self.carry = None;
+            return DesktopOutcome::acting(DesktopAction::Refuse(full_refusal()));
+        }
+        carried.extend(
+            shown
+                .carried()
+                .map(|(index, rect)| (index, field.shown_at(Point::new(rect.left(), rect.top())))),
+        );
+        let lift = shown.lift;
+        let mut taken = self
+            .settings
+            .align_to_grid
+            .then(|| {
+                field.taken(&self.standing, |index| {
+                    lift.is_some_and(|l| l.carries(index))
+                })
+            })
+            .flatten();
+        let mut order = self.arrangement.next_order();
+        let mut set = Vec::new();
+        for (index, corner) in carried {
+            let Some(entry) = self.entries.get(index) else {
+                continue;
+            };
+            let settled = taken
+                .as_mut()
+                .and_then(|taken| field.claim_nearest(corner, taken))
+                .unwrap_or(corner);
+            let placed = Placed {
+                id: entry.id(),
+                at: field.place_of(settled, self.settings.icons),
+                order,
+            };
+            order = order.saturating_add(1);
+            set.push((entry.name().to_string(), Some(placed)));
+        }
         let mut refused = false;
         self.marking(
             |_| *layout,
@@ -2136,12 +3319,13 @@ impl<S: DirectorySource> Desktop<S> {
     ) -> bool {
         self.settle(layout);
         let on_icon = self.icon_at(layout, at, scale, theme);
-        if let Some(index) = on_icon {
-            if self.selected != Some(index) {
-                self.mark_icon(layout, self.selected, damage);
-                self.selected = Some(index);
-                self.mark_icon(layout, self.selected, damage);
-            }
+        // A press inside the selection keeps it, so the menu acts on all of it.
+        if let Some(index) = on_icon.filter(|&index| !self.selection.contains(index)) {
+            self.clear_selection(layout, damage);
+            self.selection.single(index);
+            self.mark_icon(layout, self.focus, damage);
+            self.focus = Some(index);
+            self.mark_icon(layout, self.focus, damage);
         }
         on_icon.is_some()
     }
@@ -2165,6 +3349,11 @@ impl<S: DirectorySource> Desktop<S> {
     ) -> DesktopOutcome {
         match command {
             PinboardCommand::Open => self.activate_selection(apps),
+            PinboardCommand::Eject => self.eject_selection(),
+            // Its row is a field, whose text commits through
+            // `retitle_selection`; chosen bare, it changes nothing.
+            PinboardCommand::Title => DesktopOutcome::ignored(),
+            PinboardCommand::MoveToTrash => self.trash_selection(),
             PinboardCommand::NewFolder => DesktopOutcome::acting(DesktopAction::CreateFolder {
                 path: self.path_of(&NewEntry::Folder.suggest_name(&self.entries)),
             }),
@@ -2197,7 +3386,7 @@ impl<S: DirectorySource> Desktop<S> {
             return DesktopOutcome::ignored();
         };
         let mut ordered = self.entries.clone();
-        sort_entries(&mut ordered, sort_mode(order.sort()));
+        sort_entries(&mut ordered, self.order(order.sort()));
         let room = field.cells.min(MAX_PLACED);
         let (from, first) = (self.settings.icons, self.arrangement.next_order());
         let set = ordered
@@ -2225,6 +3414,91 @@ impl<S: DirectorySource> Desktop<S> {
             rearranged: true,
             action: None,
         }
+    }
+
+    /// Eject the volume the selected drive stands for, or say why the user the
+    /// desktop acts for may not.
+    fn eject_selection(&self) -> DesktopOutcome {
+        let Some(entry) = self.selected().and_then(|index| self.entries.get(index)) else {
+            return DesktopOutcome::ignored();
+        };
+        DesktopOutcome::acting(match self.eject_of(entry) {
+            Ok(act) => DesktopAction::Volume(act),
+            Err(reason) => DesktopAction::Refuse(GestureRefusal::new(
+                tairix_util::utf8::refusal_headline(self.endings.shown(entry), "ejected"),
+                reason,
+            )),
+        })
+    }
+
+    /// Refuse to move the selected drive to the Trash, saying why: it is drawn
+    /// for its volume, and nothing of it is stored on the desktop.
+    fn trash_selection(&self) -> DesktopOutcome {
+        let Some(entry) = self
+            .selected()
+            .and_then(|index| self.entries.get(index))
+            .filter(|entry| is_drive(entry))
+        else {
+            return DesktopOutcome::ignored();
+        };
+        DesktopOutcome::acting(DesktopAction::Refuse(GestureRefusal::new(
+            tairix_util::utf8::refusal_headline(self.endings.shown(entry), "moved to the Trash"),
+            REASON_DRIVE_NOT_TRASHED,
+        )))
+    }
+
+    /// The eject of the volume the drive `entry` stands for, or why the user
+    /// the desktop acts for may not eject it.
+    fn eject_of(&self, entry: &Entry) -> Result<MountAct, &'static str> {
+        let facts = entry
+            .volume()
+            .filter(|_| is_drive(entry))
+            .filter(|facts| self.viewer.is_some_and(|uid| facts.ejectable_by(uid)))
+            .ok_or(REASON_NOT_EJECTABLE)?;
+        Ok(MountAct::eject(facts, self.endings.shown(entry)))
+    }
+
+    /// Retitle the volume the selected drive stands for `text`, as its menu's
+    /// field committed it, or say why the user the desktop acts for may not:
+    /// the one check every surface offering a title makes
+    /// ([`MountAct::retitle`]). The title the volume records asks nothing.
+    pub fn retitle_selection(&self, text: &str) -> DesktopOutcome {
+        let Some(entry) = self
+            .selected()
+            .and_then(|index| self.entries.get(index))
+            .filter(|entry| is_drive(entry))
+        else {
+            return DesktopOutcome::ignored();
+        };
+        let name = self.endings.shown(entry);
+        let retitled = entry.volume().map_or_else(
+            || Err(title_refusal(name, REASON_TITLE_ABSENT)),
+            |facts| MountAct::retitle(facts, name, self.viewer, text),
+        );
+        match retitled {
+            Ok(Some(act)) => DesktopOutcome::acting(DesktopAction::Volume(act)),
+            Ok(None) => DesktopOutcome::ignored(),
+            Err(refusal) => DesktopOutcome::acting(DesktopAction::Refuse(GestureRefusal::new(
+                refusal.headline,
+                refusal.reason,
+            ))),
+        }
+    }
+
+    /// The title of the volume the drive `entry` stands for, which its menu's
+    /// *Title* field opens on, or why the user the desktop acts for may not
+    /// retitle it.
+    fn title_of<'a>(&self, entry: &'a Entry) -> Result<&'a str, &'static str> {
+        let facts = entry.volume().ok_or(REASON_TITLE_ABSENT)?;
+        if let Some(why) = facts.retitling_by(self.viewer).refusal() {
+            return Err(why);
+        }
+        // A recorded title no field could hold opens the field empty.
+        Ok(if VolumeTitle::new(&facts.title).is_ok() {
+            facts.title.as_str()
+        } else {
+            ""
+        })
     }
 
     /// Name `edit` for the embedder to make, or change nothing when the
@@ -2256,9 +3530,15 @@ impl<S: DirectorySource> Desktop<S> {
         self.settle(layout);
         match key {
             Key::Named(NamedKey::Enter) => self.activate_selection(apps),
+            Key::Named(NamedKey::Escape) if self.band.is_some() => {
+                let scale = self.settings.scale;
+                self.cancel_band(layout, scale, damage);
+                DesktopOutcome::ignored()
+            }
             Key::Named(NamedKey::Escape) => {
-                let cleared = self.selected.take();
-                self.mark_icon(layout, cleared, damage);
+                self.clear_selection(layout, damage);
+                let focus = self.focus.take();
+                self.mark_icon(layout, focus, damage);
                 DesktopOutcome::ignored()
             }
             Key::Named(named) => match toward(named) {
@@ -2281,17 +3561,19 @@ impl<S: DirectorySource> Desktop<S> {
     ) -> DesktopOutcome {
         let next = {
             let shown = self.shown(layout);
-            match self.selected.and_then(|at| Some((at, shown.rect(at)?))) {
+            match self.focus.and_then(|at| Some((at, shown.rect(at)?))) {
                 None => shown.bottom_up().map(|(index, _)| index).min(),
                 Some(from) => nearest_toward(&shown, from, toward),
             }
         };
-        let Some(next) = next.filter(|&next| self.selected != Some(next)) else {
+        let Some(next) = next.filter(|&next| self.selected() != Some(next)) else {
             return DesktopOutcome::ignored();
         };
-        self.mark_icon(layout, self.selected, damage);
-        self.selected = Some(next);
-        self.mark_icon(layout, self.selected, damage);
+        self.clear_selection(layout, damage);
+        self.mark_icon(layout, self.focus, damage);
+        self.selection.single(next);
+        self.focus = Some(next);
+        self.mark_icon(layout, self.focus, damage);
         DesktopOutcome::ignored()
     }
 
@@ -2301,7 +3583,13 @@ impl<S: DirectorySource> Desktop<S> {
     /// the `Enter` key, and a double-click can never disagree about what
     /// opening an icon means.
     fn activate_selection(&self, apps: &[AppAssociation]) -> DesktopOutcome {
-        match self.selected {
+        if self.selection.len() > 1 {
+            return DesktopOutcome::acting(DesktopAction::Refuse(GestureRefusal::new(
+                String::from("Nothing was opened"),
+                REASON_SEVERAL,
+            )));
+        }
+        match self.selected() {
             Some(index) => self.activate(index, apps),
             None => DesktopOutcome::ignored(),
         }
@@ -2320,13 +3608,16 @@ impl<S: DirectorySource> Desktop<S> {
     /// resolves the final link), while a bundle is launched by its *resolved*
     /// path, because the spawn gate parses an entry point as
     /// `…/<Name>.app/Run` and a shortcut named after the program is not that
-    /// shape. A shortcut whose target has gone is refused with its reason,
-    /// never launched blind.
+    /// shape. A shortcut whose target names another root is reached at that
+    /// target, since no walk follows it. A shortcut whose target has gone is
+    /// refused with its reason, never launched blind. A drive, or a shortcut
+    /// to a volume, opens the volume where the storage catalog shows it while
+    /// it is attached, and says it is not there otherwise.
     fn activate(&self, index: usize, apps: &[AppAssociation]) -> DesktopOutcome {
         let Some(entry) = self.entries.get(index) else {
             return DesktopOutcome::ignored();
         };
-        let path = self.path_of(entry.name());
+        let path = entry.reached_by(&self.folder_path());
         let bundle_path = match entry.kind() {
             EntryKind::Link(_) => match entry.target() {
                 Some(target) => tairix_browse::resolve_target(&self.folder_path(), target),
@@ -2343,6 +3634,7 @@ impl<S: DirectorySource> Desktop<S> {
             _ => path.clone(),
         };
         match entry.kind() {
+            EntryKind::Link(LinkTarget::Volume) => self.open_volume(entry),
             EntryKind::Directory | EntryKind::Link(LinkTarget::Directory) => {
                 DesktopOutcome::acting(DesktopAction::Activate(DesktopActivation::OpenFolder {
                     path,
@@ -2395,10 +3687,30 @@ impl<S: DirectorySource> Desktop<S> {
         }
     }
 
+    /// What opening `entry`, a drive or a shortcut to a volume, asks for: the
+    /// volume shown where the storage catalog shows it, as a double-click on
+    /// its entry there shows it, or a refusal saying why it cannot be.
+    fn open_volume(&self, entry: &Entry) -> DesktopOutcome {
+        let located = volume::locate(entry.target().unwrap_or_default(), &self.mounts.volumes);
+        if let Some(present) = located.present() {
+            return DesktopOutcome::acting(DesktopAction::Activate(
+                DesktopActivation::OpenFolder {
+                    path: present.target.clone(),
+                },
+            ));
+        }
+        located.refusal(self.endings.shown(entry)).map_or_else(
+            DesktopOutcome::ignored,
+            |(headline, reason)| {
+                DesktopOutcome::acting(DesktopAction::Refuse(GestureRefusal::new(headline, reason)))
+            },
+        )
+    }
+
     /// The absolute path of the child called `name` inside the desktop folder.
     fn path_of(&self, name: &str) -> String {
         let mut path = tairix_browse::vfs::spell_absolute_path(&self.folder);
-        tairix_browse::vfs::push_child(&mut path, name);
+        tairix_path::push_name(&mut path, name);
         path
     }
 }
@@ -2514,19 +3826,25 @@ fn full_refusal() -> GestureRefusal {
     )
 }
 
-/// Whether a file arriving as `arrived` is the one offered as `offered`: the
-/// name itself, the name told apart from one already taken by what follows
-/// its stem (`Report 2.txt`, `Report (2).txt`), or the name finished with a
-/// file type by a volume that keeps none.
-fn copied_as(arrived: &str, offered: &str) -> bool {
-    let (made, asked) = (Ending::of(arrived), Ending::of(offered));
-    let from_stem = made
-        .stem
-        .strip_prefix(asked.stem)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '));
-    from_stem
-        && made.extension == asked.extension
-        && (made.filetype == asked.filetype || asked.filetype.is_none())
+/// Whether `entry` is a drive the desktop draws for a volume rather than a name
+/// its folder lists: one named by its volume's root, which no listed name can
+/// be.
+fn is_drive(entry: &Entry) -> bool {
+    volume::reference(entry.name()).is_some()
+}
+
+/// The name `change` is to.
+fn changed_name(change: &EntryChange) -> &str {
+    match change {
+        EntryChange::Upsert(entry) => entry.name(),
+        EntryChange::Remove(name) => name,
+    }
+}
+
+/// Whether `entry` is a shortcut to a volume the mount table does not show
+/// attached, which is drawn faded.
+fn is_absent(entry: &Entry) -> bool {
+    entry.kind() == EntryKind::Link(LinkTarget::Volume) && entry.volume().is_none()
 }
 
 /// `units` of a pitch `pitch` pixels long, in pixels, to the nearest.
@@ -2548,8 +3866,33 @@ fn units_of(pixels: i32, pitch: u32) -> u32 {
 struct Shown<'a> {
     standing: Cow<'a, Standing>,
     grid: &'a GridView,
-    /// The icon a press carries, and where its tile now stands.
-    carried: Option<(usize, Rect)>,
+    /// The icons a press carries, and how far from where they rest.
+    lift: Option<Lift<'a>>,
+}
+
+/// What a press carries: the icon pressed, with the selection when it is in
+/// it, each moved by one shift.
+#[derive(Clone, Copy)]
+struct Lift<'a> {
+    lead: usize,
+    with: Option<&'a Selection>,
+    shift: (i32, i32),
+}
+
+impl Lift<'_> {
+    fn carries(&self, index: usize) -> bool {
+        index == self.lead || self.with.is_some_and(|selection| selection.contains(index))
+    }
+}
+
+/// `rect` moved by `shift`.
+fn shifted(rect: Rect, (dx, dy): (i32, i32)) -> Rect {
+    Rect::new(
+        rect.left().saturating_add(dx),
+        rect.top().saturating_add(dy),
+        rect.width,
+        rect.height,
+    )
 }
 
 impl Shown<'_> {
@@ -2560,9 +3903,29 @@ impl Shown<'_> {
             .map(|(_, rect)| rect)
     }
 
-    /// Whether the icon at `index` is the one carried, which stands apart.
+    /// Whether the icon at `index` is carried, which stands apart.
     fn lifted(&self, index: usize) -> bool {
-        self.carried.is_some_and(|(carried, _)| carried == index)
+        self.lift.is_some_and(|lift| lift.carries(index))
+    }
+
+    /// Every icon where it rests, a carried one included.
+    fn resting(&self) -> impl DoubleEndedIterator<Item = (usize, Rect)> + '_ {
+        let flowed = self
+            .standing
+            .cells
+            .iter()
+            .enumerate()
+            .filter_map(|(cell, held)| Some(((*held)?, self.grid.cell_rect(cell)?)));
+        flowed.chain(self.standing.placed.iter().copied())
+    }
+
+    /// The carried icons where they are carried to.
+    fn carried(&self) -> impl DoubleEndedIterator<Item = (usize, Rect)> + '_ {
+        self.lift.into_iter().flat_map(move |lift| {
+            self.resting()
+                .filter(move |&(index, _)| lift.carries(index))
+                .map(move |(index, rect)| (index, shifted(rect, lift.shift)))
+        })
     }
 
     /// The icons the flow stood, cell by cell, the one carried aside.
@@ -2588,15 +3951,15 @@ impl Shown<'_> {
     }
 
     /// Every icon in the order it is drawn: those the flow stood, then those
-    /// the user put somewhere in the order they were put down, then the one
+    /// the user put somewhere in the order they were put down, then those
     /// carried.
     fn bottom_up(&self) -> impl DoubleEndedIterator<Item = (usize, Rect)> + '_ {
-        self.flowed().chain(self.placed()).chain(self.carried)
+        self.flowed().chain(self.placed()).chain(self.carried())
     }
 
-    /// The icons that may cover `at`, the topmost first: the one carried, those
+    /// The icons that may cover `at`, the topmost first: those carried, those
     /// the user put somewhere, and the one the flow stood on the cell there, so
-    /// a hit costs the icons placed and no more.
+    /// a hit costs the icons placed and carried and no more.
     fn under(&self, at: Point) -> impl Iterator<Item = (usize, Rect)> + '_ {
         let flowed = self.grid.index_at(DESKTOP_SCROLL, at).and_then(|cell| {
             let index = self
@@ -2606,8 +3969,8 @@ impl Shown<'_> {
                 .filter(|&index| !self.lifted(index))?;
             Some((index, self.grid.cell_rect(cell)?))
         });
-        self.carried
-            .into_iter()
+        self.carried()
+            .rev()
             .chain(self.placed().rev())
             .chain(flowed)
     }
@@ -2724,15 +4087,15 @@ impl<'a> Field<'a> {
     }
 
     /// Which cells `standing` already holds, by an icon the flow stood there
-    /// or by a placed tile reaching into one, the icon at `aside` apart;
+    /// or by a placed tile reaching into one, the icons `aside` names apart;
     /// `None` without the memory to say.
-    fn taken(&self, standing: &Standing, aside: Option<usize>) -> Option<Vec<bool>> {
+    fn taken(&self, standing: &Standing, aside: impl Fn(usize) -> bool) -> Option<Vec<bool>> {
         let mut taken = tairix_util::fallible::filled(self.cells, false)?;
         for (held, on) in taken.iter_mut().zip(&standing.cells) {
-            *held = on.is_some_and(|index| Some(index) != aside);
+            *held = on.is_some_and(|index| !aside(index));
         }
         for &(index, rect) in &standing.placed {
-            if Some(index) != aside {
+            if !aside(index) {
                 self.reach(rect, &mut taken);
             }
         }

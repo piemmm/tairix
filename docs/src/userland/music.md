@@ -11,7 +11,7 @@ from the session's trusted picker — a file, or a folder, whose files of a type
 the player's signed manifest associates the session delegates one by one
 (`PickPurpose::Folder`, at most `WINDOW_FOLDER_PICK_MAX` of them) — or handed
 over by the file manager through the desktop's single-instance funnel. Each
-descriptor is shared by the window, the worker and the playback thread until
+descriptor is shared by the window, the workers and the playback thread until
 the last lets it go.
 
 No byte of a file is parsed in the player. Its sound is decoded in the audio
@@ -19,7 +19,7 @@ sandbox (`lib/sandbox::audiodecode`) and its album art — the picture its
 `Metadata::cover` range names — in the image sandbox, each a capability-empty
 worker the player's own binary is re-entered as.
 
-## Three threads
+## Five threads
 
 * **The window** owns the player's state (`tairix_music::view::Player`) and
   never waits on anything but its own wait-set. Input changes state and reports
@@ -28,17 +28,26 @@ worker the player's own binary is re-entered as.
   pipes, the stream's mailbox and the window's orders. It posts its status and
   wakes the window, and with them what each further link of a chained file says
   of itself as it opens, so the panel names a recording's songs as each is
-  heard rather than its first throughout. A level the window posts displaces any not yet carried out,
-  so a dragged volume costs the stream one call however fast it moves.
-* **The worker** reads each track's tags, decodes its cover, lists the output
-  devices and saves the listener's settings. A job the worker has no room for
-  waits in order on the window's side; none is dropped.
+  heard rather than its first throughout. A level the window posts displaces
+  any not yet carried out, so a dragged volume costs the stream one call
+  however fast it moves. It begins with nothing to play and plays the first
+  file the window adds on the jump that follows.
+* **Three workers** take everything else that waits, each answering on a
+  token of its own: one reads each track's tags (`tairix-player`'s
+  `TagReader`, in a decoder of its own, at most ten seconds a file once a
+  decoder takes it), one decodes the cover heard, and one lists the output
+  devices and saves the
+  listener's settings. A track's tags and its cover are a stranger's bytes,
+  each read on a worker of its own, so a hostile file holds up neither the
+  other nor the player's own business. A job a worker has no room for waits in
+  order on the window's side; none is dropped.
 
 ## Continuous controls act where they settle
 
 The seek slider moves the position shown as it is dragged and seeks once, on
 release. The volume slider sets the stream's level as it moves and saves it, on
-release, through the worker. The meters repaint their own rectangle and
+release, through the worker that keeps the settings. The meters repaint their
+own rectangle and
 nothing else; a change that alters nothing reports no damage.
 
 ## The playlist
@@ -61,7 +70,7 @@ mastered at different levels play at one loudness without a library database.
 
 The volume, shuffle, repeat, loudness and chosen output are kept in the
 player's app-data settings: read once at start-up, before the window opens,
-and written by the worker. The output is kept by its location, its `audio:`
+and written by a worker. The output is kept by its location, its `audio:`
 reference across boots, never by the audio service's id for it, which is one
 boot's. An output that is no longer connected falls back to the default with
 that stated.
@@ -75,4 +84,5 @@ window shrinks), the player's state (adding to a stopped player starts it,
 one seek per drag, the volume saved once, keys, menus, settings), and the
 damage each change owes (the meters alone for a level change, nothing for a
 change that alters nothing, a paint scoped to one part changing no pixel
-outside it).
+outside it). The engine's start from an empty playlist and the reading of a
+track's tags are tested in [`tairix-player`](../lib/player.md).

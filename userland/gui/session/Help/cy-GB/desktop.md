@@ -23,6 +23,14 @@ Pan nad oes gwasanaeth arddangos yn rhedeg, neu pan fo sesiwn arall
 eisoes yn dal y sedd, mae'r gorchymyn yn methu gan ysgrifennu ei reswm
 i'r allbwn gwall safonol — nid yw byth yn disodli sesiwn sy'n rhedeg.
 
+Tra bo'r bwrdd gwaith yn rhedeg, mae `Meta+Shift+3` yn cadw llun o'r
+sgrin a `Meta+Shift+4` lun o ardal rydych yn ei llusgo — neu, ar ôl
+`Space`, o ffenestr rydych yn clicio arni. Mae `Meta+Shift+5` yn agor y
+bar cipio, sydd hefyd yn recordio'r sgrin. Mae ychwanegu `Ctrl` yn rhoi'r
+llun ar y clipfwrdd, ac mae llwybr byr cipio a wasgir yn ystod recordiad
+yn ei atal. Mae recordiad gyda sain yn gofyn am gyfrinair gweinyddwr pan
+na chaiff eich cyfrif recordio sain ei hun.
+
 ## OPTIONS
 
 - `-h, -?` — dangos cymorth byr y gorchymyn hwn.

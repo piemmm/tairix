@@ -26,7 +26,9 @@ resolver / open-a-path stage tracked in that spec.
 
 `Vfs::with_default_layout` provides exactly these three entries and,
 beneath `/System`, the two writable exceptions `Logs` and `Settings` (see
-below). Machine-wide applications live in `/System/Applications`; there is
+below), whole or not at all: a heap that cannot hold the layout is answered
+`VfsError::OutOfMemory`, never a layout short of a directory or a mount's
+policy. Machine-wide applications live in `/System/Applications`; there is
 no `/Apps`.
 
 ## Legacy POSIX names: the OS never authors them

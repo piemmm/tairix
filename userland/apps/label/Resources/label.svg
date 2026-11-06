@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Label</title>
+  <!-- A drive with a luggage tag tied to it: the title a volume carries. -->
+
+  <!-- Drive body, its lit top and its slot -->
+  <rect x="20" y="118" width="168" height="100" rx="14" fill="#56616B"/>
+  <rect x="20" y="118" width="168" height="44" rx="14" fill="#76828D"/>
+  <rect x="40" y="186" width="72" height="12" rx="6" fill="#333A40"/>
+  <circle cx="162" cy="192" r="9" fill="#72D672"/>
+
+  <!-- The tag's string -->
+  <polygon fill="#333A40" points="146,126 156,126 190,70 200,62 194,58 182,66"/>
+
+  <!-- The tag, its eyelet and its writing -->
+  <polygon fill="#F2B23E" points="178,34 230,34 240,46 240,138 230,150 178,150 168,138 168,46"/>
+  <circle cx="204" cy="56" r="9" fill="#FFFFFF"/>
+  <rect x="182" y="82" width="44" height="9" rx="4" fill="#A8731E"/>
+  <rect x="182" y="102" width="34" height="9" rx="4" fill="#A8731E"/>
+  <rect x="182" y="122" width="40" height="9" rx="4" fill="#A8731E"/>
+</svg>

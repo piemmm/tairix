@@ -4,13 +4,35 @@
 //! checks a property of it, so a change to the geometry moves the tests with
 //! it rather than quietly making them assert about empty space.
 
+use alloc::vec::Vec;
+
 use tairix_controls::{ControlRole, IconButton, Toolbar};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_theme::{TextRole, Theme, ThemeRegistry};
 
-use super::Layout;
+use super::{Bands, Layout};
+
+/// Every combination of the optional bands.
+const BAND_SETS: [Bands; 4] = [
+    Bands {
+        info: false,
+        transport: false,
+    },
+    Bands {
+        info: true,
+        transport: false,
+    },
+    Bands {
+        info: false,
+        transport: true,
+    },
+    Bands {
+        info: true,
+        transport: true,
+    },
+];
 
 /// The face every test resolves its geometry in.
 fn font(theme: &Theme, scale: Scale) -> BitmapFont {
@@ -27,9 +49,18 @@ fn tools() -> Toolbar {
     toolbar
 }
 
-/// The layout of a `width`x`height` window at `scale`, with the information
-/// panel in the state named.
+/// The layout of a picture's `width`x`height` window at `scale`, with the
+/// information panel in the state named.
 fn layout(width: u32, height: u32, scale: Scale, info: bool) -> Layout {
+    let bands = Bands {
+        info,
+        transport: false,
+    };
+    layout_with(width, height, scale, bands)
+}
+
+/// The layout of a `width`x`height` window at `scale` showing `bands`.
+fn layout_with(width: u32, height: u32, scale: Scale, bands: Bands) -> Layout {
     let registry = ThemeRegistry::with_builtins();
     let theme = registry.active();
     Layout::for_window(
@@ -39,8 +70,17 @@ fn layout(width: u32, height: u32, scale: Scale, info: bool) -> Layout {
         scale,
         font(theme, scale),
         tools().natural_length(scale, theme),
-        info,
+        bands,
     )
+}
+
+/// A movie's `width`x`height` window at `scale`, its panel closed.
+fn movie(width: u32, height: u32, scale: Scale) -> Layout {
+    let bands = Bands {
+        info: false,
+        transport: true,
+    };
+    layout_with(width, height, scale, bands)
 }
 
 /// An ordinary window with the panel closed.
@@ -55,7 +95,7 @@ fn overlaps(a: Rect, b: Rect) -> bool {
 
 /// Every band the layout resolves, so a property can be asserted over all of
 /// them without listing them at each call site.
-fn bands(layout: &Layout) -> [(&'static str, Rect); 7] {
+fn bands(layout: &Layout) -> [(&'static str, Rect); 10] {
     [
         ("toolbar", layout.toolbar()),
         ("zoom slider", layout.zoom_slider()),
@@ -64,6 +104,9 @@ fn bands(layout: &Layout) -> [(&'static str, Rect); 7] {
         ("horizontal bar", layout.horizontal_bar()),
         ("info", layout.info()),
         ("status", layout.status()),
+        ("transport", layout.transport()),
+        ("seek bar", layout.seek_bar()),
+        ("clock", layout.clock()),
     ]
 }
 
@@ -71,19 +114,21 @@ fn bands(layout: &Layout) -> [(&'static str, Rect); 7] {
 fn every_band_stays_inside_the_window() {
     for scale in [Scale::ONE, Scale::from_percent(150).expect("a legal scale")] {
         for (width, height) in [(900, 640), (420, 320), (1920, 1080), (3840, 2160)] {
-            let layout = layout(width, height, scale, true);
-            let window = layout.window();
-            assert_eq!(window, Rect::new(0, 0, width, height));
-            for (name, band) in bands(&layout) {
-                if band.is_empty() {
-                    continue;
+            for shown in BAND_SETS {
+                let layout = layout_with(width, height, scale, shown);
+                let window = layout.window();
+                assert_eq!(window, Rect::new(0, 0, width, height));
+                for (name, band) in bands(&layout) {
+                    if band.is_empty() {
+                        continue;
+                    }
+                    assert_eq!(
+                        band.intersection(&window),
+                        band,
+                        "{name} escapes a {width}x{height} window at {}% ({shown:?})",
+                        scale.percent()
+                    );
                 }
-                assert_eq!(
-                    band.intersection(&window),
-                    band,
-                    "{name} escapes a {width}x{height} window at {}%",
-                    scale.percent()
-                );
             }
         }
     }
@@ -91,7 +136,7 @@ fn every_band_stays_inside_the_window() {
 
 #[test]
 fn the_canvas_and_the_bands_around_it_do_not_overlap() {
-    let layout = layout(1_280, 800, Scale::ONE, true);
+    let layout = layout_with(1_280, 800, Scale::ONE, BAND_SETS[3]);
     let canvas = layout.canvas();
     assert!(!canvas.is_empty(), "an ordinary window has a canvas");
     for (name, band) in bands(&layout) {
@@ -204,6 +249,44 @@ fn a_zero_sized_window_yields_empty_bands_rather_than_an_error() {
     assert!(layout.window().is_empty());
 }
 
+#[test]
+fn a_movie_s_transport_sits_between_the_canvas_and_the_status_line() {
+    let layout = movie(900, 640, Scale::ONE);
+    let (transport, seek, clock) = (layout.transport(), layout.seek_bar(), layout.clock());
+    assert!(!transport.is_empty() && !seek.is_empty() && !clock.is_empty());
+    assert_eq!(transport.bottom(), layout.status().top());
+    assert!(layout.horizontal_bar().bottom() <= transport.top());
+    for part in [seek, clock] {
+        assert_eq!(
+            part.intersection(&transport),
+            part,
+            "{part:?} is the band's"
+        );
+    }
+    assert!(
+        seek.right() <= clock.left(),
+        "the clock trails the seek bar"
+    );
+    assert!(plain().transport().is_empty(), "a picture has no transport");
+    assert!(plain().seek_bar().is_empty() && plain().clock().is_empty());
+}
+
+#[test]
+fn a_narrow_movie_window_gives_up_the_clock_before_the_seek_bar() {
+    let laid: Vec<Layout> = (40..1_200)
+        .step_by(8)
+        .map(|width| movie(width, 640, Scale::ONE))
+        .collect();
+    assert!(laid.iter().any(|layout| layout.clock().is_empty()));
+    assert!(laid.iter().any(|layout| !layout.clock().is_empty()));
+    for layout in &laid {
+        assert!(
+            !layout.seek_bar().is_empty(),
+            "the seek bar is always there"
+        );
+    }
+}
+
 // ---- sizing the window to a picture -----------------------------------
 
 #[test]
@@ -211,7 +294,7 @@ fn client_for_canvas_round_trips_the_canvas_band() {
     let registry = ThemeRegistry::with_builtins();
     let theme = registry.active();
     for scale in [Scale::ONE, Scale::from_percent(200).expect("a legal scale")] {
-        for info in [false, true] {
+        for shown in BAND_SETS {
             // Swept rather than sampled: the panel's share is an integer
             // division, so its inverse is only exact if it is exact at every
             // width — one rounding step out and a picture shown at 100% would
@@ -221,12 +304,12 @@ fn client_for_canvas_round_trips_the_canvas_band() {
             let heights = (1u32..600).chain([800, 1_600, 3_000]).map(|h| (320, h));
             for canvas in widths.chain(heights) {
                 let (w, h) =
-                    Layout::client_for_canvas(canvas, theme, scale, font(theme, scale), info);
-                let back = layout(w, h, scale, info);
+                    Layout::client_for_canvas(canvas, theme, scale, font(theme, scale), shown);
+                let back = layout_with(w, h, scale, shown);
                 assert_eq!(
                     (back.canvas().width, back.canvas().height),
                     canvas,
-                    "the client for a {canvas:?} canvas at {}% (info {info}) laid out {:?}",
+                    "the client for a {canvas:?} canvas at {}% ({shown:?}) laid out {:?}",
                     scale.percent(),
                     (back.canvas().width, back.canvas().height),
                 );

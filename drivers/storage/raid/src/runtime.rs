@@ -12,6 +12,14 @@
 //! one of those decisions into real transfers. Both live here because both act
 //! on the one composed device and must not race each other for it.
 //!
+//! # It states what its members prove
+//!
+//! An array answers the block service's identity request with an identity
+//! composed of its own and its members' (`OwnedRaidArray::composed_identity`),
+//! recomposed whenever a slot gains or loses a device, so a volume whose writes
+//! were held across a composer restart is replayed onto it only when the same
+//! devices fill the same slots again.
+//!
 //! # A pass measured in days survives a restart
 //!
 //! A rebuild or a verification pass over a 100 TB+ array outlives the interval
@@ -38,8 +46,8 @@ use alloc::vec::Vec;
 use tairix_abi::driver::block::BlockClass;
 
 use tairix_abi::blkio::{
-    encode_error_completion, serve_request_recovering, Answer, BlkHealth, BlkHealthState,
-    BlkPublication, BLK_COMPLETION_LEN,
+    encode_error_completion, serve_request_recovering, Answer, BlkDeviceIdentity, BlkHealth,
+    BlkHealthState, BlkPublication, BLK_COMPLETION_LEN,
 };
 use tairix_abi::driver::block::Block;
 use tairix_abi::raid::{ArrayHealth, MemberState};
@@ -85,9 +93,9 @@ pub enum ArrayHealthEvent {
 }
 
 /// One live array the composer serves: its identity, its owning composed
-/// device, its fault-recovery health, its self-maintenance, and the ids of the
-/// block-service endpoint, shared data window, and hardware-tree node it is
-/// published through.
+/// device and what that device states it is, its fault-recovery health, its
+/// self-maintenance, and the ids of the block-service endpoint, shared data
+/// window, and hardware-tree node it is published through.
 ///
 /// It is generic over the *raw* member device `B` (a block client) and owns
 /// the composed [`OwnedRaidArray`] over each member's metadata-offset
@@ -96,6 +104,9 @@ pub enum ArrayHealthEvent {
 pub struct ArrayRuntime<B: Block> {
     identity: ArrayIdentity,
     array: OwnedRaidArray<PartitionBlock<B>>,
+    /// What the array states it is over the block-service seam, recomposed
+    /// whenever a slot gains or loses a device.
+    stated: Option<BlkDeviceIdentity>,
     health: BlkHealth,
     maintenance: ArrayMaintenance<Vec<MemberRetry>>,
     /// What the array could last promise its consumers, so a change is
@@ -157,10 +168,12 @@ impl<B: Block> ArrayRuntime<B> {
             })
             .map_err(|_| ServiceError::Maintenance)?;
         let availability = array.health().to_mount_availability();
+        let stated = stated_identity(&mut array, &identity);
         let node_id = publish().ok_or(ServiceError::Unpublished)?;
         Ok(Self {
             identity,
             array,
+            stated,
             health: BlkHealth::new(class),
             maintenance,
             availability,
@@ -179,7 +192,8 @@ impl<B: Block> ArrayRuntime<B> {
     /// array's own [`BlkHealth`]: a member blip inside the recovery grace
     /// window is answered reissuably and a valid answer recovers the array,
     /// while a malformed or out-of-range request is refused health-neutrally.
-    /// The array is served read/write.
+    /// The array is served read/write, stating the identity its members
+    /// compose.
     ///
     /// Every request also tells the scheduler the array is in demand, so
     /// maintenance holds to its share of a busy array instead of running flat
@@ -197,7 +211,7 @@ impl<B: Block> ArrayRuntime<B> {
     ) -> usize {
         self.maintenance.note_foreground(now_ns);
         match serve_request_recovering(
-            &mut self.array,
+            &mut self.array.stating(self.stated),
             BlkPublication::default(),
             request,
             window,
@@ -339,7 +353,9 @@ impl<B: Block> ArrayRuntime<B> {
         let view = wrap_member(raw)?;
         self.array
             .add_member(usize::from(slot), view)
-            .map_err(|_| ServiceError::Assembly)
+            .map_err(|_| ServiceError::Assembly)?;
+        self.restate();
+        Ok(())
     }
 
     /// Admit a fresh device into an absent slot of the array, begin rebuilding
@@ -396,6 +412,7 @@ impl<B: Block> ArrayRuntime<B> {
         self.array
             .remove_member(usize::from(slot))
             .map_err(|_| ServiceError::Assembly)?;
+        self.restate();
         self.identity = self.identity.bump_generation();
         self.record_members_current(now)
             .map_err(|_| ServiceError::Assembly)
@@ -469,6 +486,12 @@ impl<B: Block> ArrayRuntime<B> {
     #[must_use]
     pub fn member_state(&mut self, slot: u16) -> Option<MemberState> {
         self.array.member_state(usize::from(slot))
+    }
+
+    /// Recompose what the array states it is from the devices its slots hold
+    /// now.
+    fn restate(&mut self) {
+        self.stated = stated_identity(&mut self.array, &self.identity);
     }
 
     /// Carry out one maintenance decision against the array.
@@ -599,6 +622,18 @@ impl<B: Block> ArrayRuntime<B> {
         self.sequence = self.sequence.saturating_add(1);
         Ok(())
     }
+}
+
+/// What `array` states it is as the array `identity` names: composed from what
+/// each member's own device stated, reached past the window over its reserved
+/// metadata, which states nothing of its own.
+fn stated_identity<B: Block>(
+    array: &mut OwnedRaidArray<PartitionBlock<B>>,
+    identity: &ArrayIdentity,
+) -> Option<BlkDeviceIdentity> {
+    array.composed_identity(&identity.array_uuid, |member| {
+        member.device_mut().device_identity()
+    })
 }
 
 /// The device-level reason behind a refused metadata write.

@@ -330,6 +330,10 @@ fn build_el0_space(pool: &'static PageTablePool, rxe: &[u8]) -> (u64, tairix_arc
         args: &[b"wait"],
         env: &[],
         canary: CANARY,
+        heap: tairix_abi::HeapRegion {
+            base: USER_HEAP_BASE,
+            len: USER_HEAP_LEN,
+        },
     };
 
     // SAFETY: building the image is itself safe; the returned `UserEntry` is
@@ -354,7 +358,10 @@ fn build_el0_space(pool: &'static PageTablePool, rxe: &[u8]) -> (u64, tairix_arc
     // reaped child's exit code out to the parent's `status` pointer. Only the
     // parent calls `wait`, so only its space is kept.
     if core::ptr::eq(pool, &PAGE_TABLES_PARENT) {
-        let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
+        let Ok(frozen) = space.freeze() else {
+            qemu_exit::exit_failure(FAIL_BUILD);
+        };
+        let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(frozen);
         let pm: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
         *PARENT_SPACE.lock() = Some((frozen, pm));
     }

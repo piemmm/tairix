@@ -14,13 +14,15 @@ use tairix_controls::{fill_area, Checker, Fact, FactList};
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_icon::IconArtwork;
+use tairix_player::Span;
 use tairix_raster::{Color, Surface};
 use tairix_sandbox::imagerender::ViewFormat;
 use tairix_theme::Theme;
 use tairix_util::utf8::shown;
 
+use crate::movie::Transport;
 use crate::view::View;
-use crate::{Document, Layout};
+use crate::{Layout, Movie};
 
 /// Paint the whole viewer into the caller's retained window `surface`.
 ///
@@ -42,16 +44,20 @@ pub fn render_into(
     artwork: &mut dyn IconArtwork,
 ) {
     surface.fill(Color::from(theme.palette().surface));
-    // The two chrome strips stand off the body, so the canvas reads as the
+    // The chrome strips stand off the body, so the canvas reads as the
     // content it is rather than as more window.
     let chrome = Color::from(theme.palette().surface_raised);
     fill_area(surface, layout.toolbar(), chrome);
+    fill_area(surface, layout.transport(), chrome);
     fill_area(surface, layout.status(), chrome);
     canvas(surface, view, layout, theme, scale, font);
     view.toolbar_control()
         .render(surface, layout.tools(), scale, theme, artwork);
     view.zoom_control()
         .render(surface, layout.zoom_slider(), scale, theme);
+    view.seek_control()
+        .render(surface, layout.seek_bar(), scale, theme);
+    clock(surface, view, layout, theme, font);
     let (vertical, horizontal) = view.bars();
     vertical.render(surface, layout.vertical_bar(), scale, theme);
     horizontal.render(surface, layout.horizontal_bar(), scale, theme);
@@ -80,8 +86,7 @@ fn canvas(
     if bounds.is_empty() {
         return;
     }
-    let (Some(picture), Some(natural)) = (view.picture(), view.document().map(Document::natural))
-    else {
+    let (Some(picture), Some(natural)) = (view.picture(), view.natural()) else {
         reason(surface, view, bounds, theme, font);
         return;
     };
@@ -122,6 +127,9 @@ const OPENING: &str = "Opening…";
 /// Drawn from the container's own declaration, and from the *selected*
 /// entry's geometry where a page container's pages differ in size.
 pub(crate) fn facts(view: &View) -> Vec<Fact> {
+    if let Some(movie) = view.movie() {
+        return movie_facts(movie, view.viewport().zoom());
+    }
     let Some(document) = view.document() else {
         return alloc::vec![Fact::new("Document", "none open")];
     };
@@ -196,6 +204,9 @@ fn status(
 
 /// The status line's one-line summary of what is open.
 pub(crate) fn summary(view: &View) -> String {
+    if let Some(movie) = view.movie() {
+        return movie_summary(movie);
+    }
     let Some(document) = view.document() else {
         return view
             .refusal()
@@ -220,6 +231,102 @@ pub(crate) fn summary(view: &View) -> String {
     }
     let _ = write!(line, " — {}", bytes(document.bytes));
     line
+}
+
+/// The name the movie format is shown under.
+const MOVIE_FORMAT: &str = "WebM";
+
+/// What the information panel states about a movie.
+fn movie_facts(movie: &Movie, zoom: u32) -> Vec<Fact> {
+    let info = movie.info;
+    let length = info.duration_ns.map_or_else(
+        || "not stated".to_string(),
+        |length| Span::from_nanos(length).clock(),
+    );
+    let sound = info.sound.map_or_else(
+        || "none".to_string(),
+        |channels| channel_words(channels.channels()),
+    );
+    let seeks = if info.indexed {
+        "by the file's index"
+    } else {
+        "by reading the file"
+    };
+    let mut facts = alloc::vec![
+        Fact::new("Name", shown(&movie.name).into_owned()),
+        Fact::new("Format", MOVIE_FORMAT),
+        Fact::new("Pixels", format!("{} x {}", info.width, info.height)),
+        Fact::new("Length", length),
+        Fact::new("Sound", sound),
+        Fact::new("Seeks", seeks),
+        Fact::new("Size", bytes(movie.bytes)),
+    ];
+    match movie.replaced {
+        0 => {}
+        1 => facts.push(Fact::new("Decoder", "replaced once")),
+        count => facts.push(Fact::new("Decoder", format!("replaced {count} times"))),
+    }
+    facts.push(Fact::new("Zoom", percent(zoom)));
+    facts
+}
+
+/// A sound's channels as a listener names them.
+fn channel_words(count: u8) -> String {
+    match count {
+        1 => "mono".to_string(),
+        2 => "stereo".to_string(),
+        count => format!("{count} channels"),
+    }
+}
+
+/// The status line's summary of an open movie, and what became of it.
+fn movie_summary(movie: &Movie) -> String {
+    let mut line = format!(
+        "{} — {MOVIE_FORMAT} {} x {} — {}",
+        shown(&movie.name),
+        movie.info.width,
+        movie.info.height,
+        bytes(movie.bytes)
+    );
+    if let Transport::Stopped(stop) = movie.status.transport {
+        let _ = write!(line, " — {stop}");
+    }
+    if let Some(failure) = movie.silenced {
+        let _ = write!(line, " — no sound: {failure}");
+    }
+    if movie.replaced > 0 {
+        line.push_str(" — its decoder failed and was replaced");
+    }
+    line
+}
+
+/// Paint the movie's clock at the transport band's trailing edge.
+fn clock(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, font: BitmapFont) {
+    let bounds = layout.clock();
+    let Some(text) = clock_text(view).filter(|_| !bounds.is_empty()) else {
+        return;
+    };
+    let fitted = font.truncate_to_width(&text, bounds.width);
+    let indent = bounds.width.saturating_sub(font.text_width(fitted));
+    font.draw_text(
+        surface,
+        bounds.left().saturating_add(to_i32(indent)),
+        font.centred_top(bounds.top(), bounds.height),
+        fitted,
+        Color::from(theme.palette().on_surface_muted),
+    );
+}
+
+/// The movie's clock: where it is, or where a drag of the seek bar points,
+/// and how long it is where the file says.
+pub(crate) fn clock_text(view: &View) -> Option<String> {
+    let movie = view.movie()?;
+    let at = view.scrub_ns().unwrap_or(movie.status.position_ns);
+    let mut text = Span::from_nanos(at).clock();
+    if let Some(length) = movie.info.duration_ns {
+        let _ = write!(text, " / {}", Span::from_nanos(length).clock());
+    }
+    Some(text)
 }
 
 /// What a container's entries are called: a played animation has frames, a

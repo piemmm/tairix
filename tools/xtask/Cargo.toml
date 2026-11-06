@@ -75,7 +75,7 @@ tairix-help = { path = "../../lib/help", version = "=0.0.0", features = [
 tairix-syshelp = { path = "../syshelp", version = "=0.0.0", features = ["sound"] }
 # `sound-encode`: the first-party FLAC encoder that turns an authored master
 # into a theme's shipped asset, and the theme's own asset names and bounds.
-tairix-sound = { path = "../../lib/sound", version = "=0.0.0", features = ["encode"] }
+tairix-sound = { path = "../../lib/sound", version = "=0.0.0", features = ["encode-flac"] }
 tairix-soundtheme = { path = "../../lib/soundtheme", version = "=0.0.0" }
 # The sound registry the audio verticals' machine document is rendered by, and
 # the cue authority's record of a machine sound that played out, which the
@@ -151,6 +151,9 @@ tairix-test-optical = { path = "../../tests/integration/optical_program", versio
 # The disk-image vertical's fixture vocabulary — its command word, its pass,
 # and what each image it plants holds.
 tairix-test-images = { path = "../../tests/integration/images_program", version = "=0.0.0", default-features = false }
+# The twin-volume vertical's fixture vocabulary — its command word, its pass,
+# and the label of the image its USB sticks hold.
+tairix-test-twins = { path = "../../tests/integration/twins_program", version = "=0.0.0", default-features = false }
 # The archives the disk-image vertical plants: each format's least archive,
 # written back by the archive driver, and the RAR encoder's archive.
 tairix-test-archive-image = { path = "../../tests/integration/archive_image", version = "=0.0.0" }
@@ -402,6 +405,9 @@ tairix-icon = { path = "../../lib/icon", version = "=0.0.0" }
 # where the author can see it instead of degrading silently on screen. The
 # contact sheets are written by its encoder.
 tairix-image = { path = "../../lib/image", version = "=0.0.0" }
+# The capture vertical's recording is demuxed and its last frame decoded, as a
+# player would, to be held to the screen it shows.
+tairix-video = { path = "../../lib/video", version = "=0.0.0" }
 # The one shared resampler. The desktop screendump assertions recompute the
 # wallpaper the guest composites by running the very decode, placement, and
 # resampling code the session's own render path runs, so the expected pixels
@@ -449,6 +455,11 @@ tairix-test-filepick-qemu-aarch64 = { path = "../../tests/integration/filepick_q
 # the pointer script so the gestures it injects and the relays the guest counts
 # are one definition.
 tairix-test-handover-qemu-aarch64 = { path = "../../tests/integration/handover_qemu_aarch64", version = "=0.0.0" }
+# The concurrent-pickers vertical's shared contract: the viewer the library
+# launches and how many pickers the script holds up at once, read by the
+# pointer script so the gestures it injects and the picks the guest counts are
+# one definition.
+tairix-test-filepicks-qemu-aarch64 = { path = "../../tests/integration/filepicks_qemu_aarch64", version = "=0.0.0" }
 # The desktop-menu vertical's shared interaction contract (the application
 # whose window menu is opened), defined once beside that guest's PASS gate.
 tairix-test-menu-qemu-aarch64 = { path = "../../tests/integration/menu_qemu_aarch64", version = "=0.0.0" }
@@ -470,6 +481,9 @@ tairix-test-netmap-qemu-aarch64 = { path = "../../tests/integration/netmap_qemu_
 # and the bundles its guest latches, so the script and the PASS gate read one
 # definition.
 tairix-test-wintersun-client-qemu-aarch64 = { path = "../../tests/integration/wintersun_client_qemu_aarch64", version = "=0.0.0" }
+# The Cinder vertical's shared contract: the bundle its guest latches the
+# launch to, which the script opens from the program library.
+tairix-test-cinder-qemu-aarch64 = { path = "../../tests/integration/cinder_qemu_aarch64", version = "=0.0.0" }
 # The desktop-under-pressure vertical's shared contract: the count of windows
 # the pointer script opens, which is also the occurrence the last screendump
 # is gated on, so the script and the guest's PASS gate read one definition.
@@ -527,6 +541,9 @@ tairix-wintersun-figure = { path = "../../userland/games/wintersun/figure", vers
 # copy of it. Taken without its `run` feature: the host needs the library,
 # not the freestanding program.
 tairix-wintersun-app = { path = "../../userland/games/wintersun/app", version = "=0.0.0", default-features = false }
+# The Cinder vertical lays the pen out and sizes his surface by the app's own
+# rules, so the button it clicks is where the pen draws it.
+tairix-cinder = { path = "../../userland/apps/cinder", version = "=0.0.0" }
 # The world-determinism verticals are bounded by the steps of the fold their
 # guest performs, a count the world generator owns.
 tairix-wintersun-world = { path = "../../userland/games/wintersun/world", version = "=0.0.0" }

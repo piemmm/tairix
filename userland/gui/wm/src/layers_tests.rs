@@ -18,8 +18,8 @@ use crate::geometry::{Point, Rect, Region};
 use crate::pointer::{Ghost, Halo, HaloRing};
 use crate::surface::Surface;
 use crate::tests::{
-    decorated, mode, new_compositor, opaque, solid_cursor, unbudgeted_compositor, DrawnFrames,
-    MockDisplay, SETTLED_NS,
+    captured, decorated, mode, new_compositor, opaque, solid_cursor, unbudgeted_compositor,
+    whole_tap, DrawnFrames, MockDisplay, SETTLED_NS,
 };
 use crate::window::Window;
 use crate::{Compositor, Presentation, WindowFrame, WindowId, WindowSizeState};
@@ -463,11 +463,21 @@ fn software(
     background: Color,
     build: impl FnOnce(&mut Compositor),
 ) -> Vec<u8> {
+    composited(output, background, build).frame().to_vec()
+}
+
+/// The scene `build` makes, presented through the software path: its back
+/// buffer is what a capture of the scene holds.
+fn composited(
+    output: DisplayMode,
+    background: Color,
+    build: impl FnOnce(&mut Compositor),
+) -> Compositor {
     let mut c = new_compositor(output, background).expect("compositor");
     build(&mut c);
     let mut display = MockDisplay::new(output);
     c.present(&mut display).expect("presents");
-    c.frame().to_vec()
+    c
 }
 
 /// Every channel of `shown` within `slack` of `expected`: an engine blends
@@ -3130,4 +3140,159 @@ fn a_new_scale_leaves_both_buffers_of_a_free_layer_owing_a_whole_bake() {
     for held in &layer.held {
         assert_eq!(held.stale.rects(), [whole]);
     }
+}
+
+/// A window moving on its free layer composes nothing into the frame, and
+/// still owes a capture where it was and where it is.
+#[test]
+fn a_window_moving_on_its_layer_is_owed_to_a_capture() {
+    let output = mode(32, 24);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let [.., top] = three(&mut c);
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    let whole = whole_tap(&c, false);
+    let mut picture = captured(&mut c, whole);
+    let mut changed = Region::new();
+    assert!(c.take_capture_changes(&mut changed), "the tap is armed");
+
+    assert!(c.move_window(top, Point::new(20, 12)));
+    c.present(&mut engine).expect("presents");
+    assert_eq!(c.frame_stats().damaged_px, 0, "the frame composed nothing");
+    assert!(c.take_capture_changes(&mut changed));
+    let mut moved = Region::new();
+    moved.add(Rect::new(14, 8, 10, 10));
+    moved.add(Rect::new(20, 12, 10, 10));
+    assert_eq!(changed, moved, "where it was and where it is");
+    c.compose_capture(&mut picture, &changed).expect("composed");
+    let expected = composited(output, BLUE, |c| {
+        let [.., top] = three(c);
+        c.move_window(top, Point::new(20, 12));
+    });
+    assert_eq!(picture.pixels(), expected.back_buffer().pixels());
+}
+
+/// A pointer on the cursor plane damages no frame, and still owes a capture
+/// showing it where it was and where it is, drawn from its own image; a
+/// capture not showing it is owed none of its moves.
+#[test]
+fn a_pointer_on_the_cursor_plane_is_owed_to_a_capture_showing_it() {
+    let output = mode(32, 24);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    three(&mut c);
+    c.set_cursor(solid_cursor(4, RED), Point::new(28, 2));
+    let mut engine = MockEngine::new(output).with_cursor();
+    c.present(&mut engine).expect("presents");
+    assert!(engine.plane_up, "the plane carries the pointer");
+    let shown = whole_tap(&c, true);
+    let mut picture = captured(&mut c, shown);
+    let mut changed = Region::new();
+    assert!(c.take_capture_changes(&mut changed));
+    assert!(c.move_cursor(Point::new(10, 18)));
+    assert!(
+        !c.has_damage(),
+        "the frame owes the plane's pointer nothing"
+    );
+    assert!(c.take_capture_changes(&mut changed));
+    let mut moved = Region::new();
+    moved.add(Rect::new(28, 2, 4, 4));
+    moved.add(Rect::new(10, 18, 4, 4));
+    assert_eq!(changed, moved, "where it was and where it is");
+    c.compose_capture(&mut picture, &changed).expect("composed");
+    assert_eq!(
+        picture.get(11, 19),
+        Some(RED.premultiply()),
+        "drawn from its own image"
+    );
+    assert_eq!(
+        picture.get(29, 3),
+        Some(BLUE.premultiply()),
+        "and gone from where it was"
+    );
+
+    let hidden = whole_tap(&c, false);
+    captured(&mut c, hidden);
+    assert!(c.take_capture_changes(&mut changed));
+    assert!(c.move_cursor(Point::new(2, 20)));
+    assert!(c.take_capture_changes(&mut changed));
+    assert!(
+        changed.is_empty(),
+        "a capture without the pointer is owed none of its moves"
+    );
+}
+
+/// A capture of a layered scene, its pointer on the cursor plane, is the
+/// software composite of the same scene, kept current move by move from
+/// nothing but what its tap is owed.
+#[test]
+fn a_capture_of_a_layered_scene_is_its_software_composite() {
+    let output = mode(48, 28);
+    let build = |c: &mut Compositor| {
+        let glass = rounded_frost(c, Point::new(10, 6));
+        let veil = c.add_window(Point::new(30, 14), opaque(10, 8, RED));
+        assert!(c.set_opacity(veil, 160));
+        let top = c.add_window(Point::new(4, 18), opaque(6, 6, GREEN));
+        c.set_cursor(
+            solid_cursor(4, Color::rgb(250, 250, 250)),
+            Point::new(40, 2),
+        );
+        [glass, veil, top]
+    };
+    let mut layered = new_compositor(output, BLUE).expect("compositor");
+    let mut twin = new_compositor(output, BLUE).expect("compositor");
+    let [glass, veil, top] = build(&mut layered);
+    assert_eq!(build(&mut twin), [glass, veil, top]);
+    let mut engine = MockEngine::new(output).with_cursor();
+    let mut display = MockDisplay::new(output);
+    let whole = whole_tap(&layered, true);
+    layered.arm_capture(whole).expect("armed");
+    let mut picture = Surface::new(48, 28).expect("a picture");
+    let mut changed = Region::new();
+    let steps: [&dyn Fn(&mut Compositor) -> bool; 4] = [
+        &|_| true,
+        &|c| c.move_window(glass, Point::new(14, 9)),
+        &|c| c.move_window(veil, Point::new(26, 12)),
+        &|c| c.move_window(top, Point::new(20, 2)),
+    ];
+    for (at, step) in steps.iter().enumerate() {
+        assert!(step(&mut layered) && step(&mut twin));
+        layered.present(&mut engine).expect("layered");
+        twin.present(&mut display).expect("composited");
+        assert_eq!(
+            layered.presentation(),
+            Some(Presentation::Layered),
+            "step {at}"
+        );
+        assert!(layered.take_capture_changes(&mut changed));
+        layered
+            .compose_capture(&mut picture, &changed)
+            .expect("captured");
+        assert_eq!(picture.pixels(), twin.back_buffer().pixels(), "step {at}");
+    }
+}
+
+/// A capture of a promoted window, the scene's one layer, is the software
+/// composite of the same scene, its pointer on the cursor plane included.
+#[test]
+fn a_capture_of_a_promoted_window_is_its_software_composite() {
+    let output = mode(80, 60);
+    let (mut promoted, id) = fullscreenable(output);
+    let (mut twin, same) = fullscreenable(output);
+    assert_eq!(same, id);
+    let mut engine = MockEngine::new(output).with_cursor();
+    promoted.present(&mut engine).expect("presents");
+    for c in [&mut promoted, &mut twin] {
+        c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
+            .expect("fullscreen");
+        c.set_cursor(solid_cursor(4, GREEN), Point::new(40, 30));
+    }
+    promoted.present(&mut engine).expect("presents");
+    assert_eq!(promoted.presentation(), Some(Presentation::Promoted(id)));
+    twin.present(&mut MockDisplay::new(output))
+        .expect("presents");
+    let whole = whole_tap(&promoted, true);
+    assert_eq!(
+        captured(&mut promoted, whole).pixels(),
+        twin.back_buffer().pixels()
+    );
 }

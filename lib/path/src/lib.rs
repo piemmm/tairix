@@ -760,6 +760,79 @@ pub fn is_relative_spelling(input: &str) -> bool {
     !input.starts_with('/') && root_delimiter(input).is_none()
 }
 
+/// The top-level view entry the machine alias `name` is shown at, or `None`
+/// for any other name: the machine aliases are exactly the root view's entries
+/// ([`tairix_abi::ROOT_VIEW`]), so the two can never drift apart. Session and
+/// volume aliases are published by the services that own them, so a name no
+/// machine alias carries names nothing yet and its caller fails closed.
+#[must_use]
+pub fn machine_alias(name: &str) -> Option<&'static str> {
+    tairix_abi::ROOT_VIEW
+        .iter()
+        .copied()
+        .find(|root| *root == name)
+}
+
+/// `path` spelled in the `/` view when its root is a machine alias
+/// (`System:/Applications` is `/System/Applications`), the rest as written:
+/// what a call that names only a view path — a spawn — is handed for it.
+/// `None` for any other root.
+#[must_use]
+pub fn view_spelling(path: &str) -> Option<String> {
+    let (Root::Alias(name), _) = steps(path).ok()? else {
+        return None;
+    };
+    let view = machine_alias(&name)?;
+    let rest = path.get(root_len(path).ok()?..)?;
+    let mut spelled = String::with_capacity(view.len() + rest.len() + 2);
+    spelled.push('/');
+    spelled.push_str(view);
+    if !rest.is_empty() {
+        spelled.push('/');
+        spelled.push_str(rest);
+    }
+    Some(spelled)
+}
+
+/// The `/`-view path `path` spelled from the machine alias its first entry is
+/// shown from (`/System/Applications` is `System:/Applications`), or `None`
+/// where that entry is no machine alias's.
+#[must_use]
+pub fn alias_spelling(path: &str) -> Option<String> {
+    let inside = path.strip_prefix('/')?;
+    let (top, rest) = inside.split_once('/').unwrap_or((inside, ""));
+    let alias = machine_alias(top)?;
+    let mut spelled = String::with_capacity(alias.len() + rest.len() + 2);
+    spelled.push_str(alias);
+    spelled.push_str(":/");
+    spelled.push_str(rest);
+    Some(spelled)
+}
+
+/// Whether a symbolic link's stored `target` is rooted at another root — an
+/// alias, or a volume by its identity — which a link's walk never follows:
+/// the kernel refuses to follow such a link and a caller resolves it itself.
+///
+/// A `Name:selector` spelling is no root here: a link body may store names the
+/// path grammar refuses, and such a body reads as a relative one.
+///
+/// # Errors
+///
+/// The [`PathError`] for a target that is empty or over-long, or that the
+/// grammar reads as rooted at an alias or a resolver but refuses: a malformed
+/// alias or volume id, an unsupported resolver, or a step beneath the root
+/// that is not a name.
+pub fn names_another_root(target: &str) -> Result<bool, PathError> {
+    match steps(target) {
+        Ok((Root::Alias(_) | Root::VolumeId(_), mut spelled)) => {
+            spelled.try_for_each(|step| step.map(|_| ()))?;
+            Ok(true)
+        }
+        Ok((Root::View | Root::Relative, _)) | Err(PathError::NotAPath) => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
 /// Whether a directory entry named `name` is a *hidden item*, which a
 /// listing leaves out unless asked for everything: a name beginning with a
 /// dot, the convention every listing on the system follows.
@@ -1542,6 +1615,57 @@ mod tests {
         ] {
             assert_eq!(spelled(bad).map(|_| ()), Err(why), "{bad:?}");
             assert_eq!(parse(bad).map(|_| ()), Err(why), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_machine_alias_is_spelled_in_the_view_and_back() {
+        for name in tairix_abi::ROOT_VIEW {
+            assert_eq!(machine_alias(name), Some(name));
+        }
+        for unknown in ["Apps", "Home", "system", "", "Storage2"] {
+            assert_eq!(machine_alias(unknown), None, "{unknown:?}");
+        }
+        for (rooted, view) in [
+            (
+                "System:/Applications/Editor.app",
+                "/System/Applications/Editor.app",
+            ),
+            ("alias::Users/ada/Applications", "/Users/ada/Applications"),
+            ("Storage:/", "/Storage"),
+        ] {
+            assert_eq!(view_spelling(rooted).as_deref(), Some(view), "{rooted}");
+        }
+        assert_eq!(view_spelling("Home:/Documents"), None, "no machine alias");
+        assert_eq!(view_spelling("/System/Applications"), None, "a view path");
+        assert_eq!(
+            alias_spelling("/System/Applications/Editor.app").as_deref(),
+            Some("System:/Applications/Editor.app")
+        );
+        assert_eq!(alias_spelling("/Users").as_deref(), Some("Users:/"));
+        assert_eq!(alias_spelling("/Apps/x"), None);
+        assert_eq!(alias_spelling("System/x"), None, "not a view path");
+    }
+
+    #[test]
+    fn a_link_target_rooted_elsewhere_is_told_from_one_walked_here() {
+        for elsewhere in [
+            "id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/",
+            "Home:/Documents/../x",
+            "alias::Home/x",
+        ] {
+            assert_eq!(names_another_root(elsewhere), Ok(true), "{elsewhere}");
+        }
+        for walked in ["/System/x", "../x", "x", "SYS:C/Dir", "a/b:c"] {
+            assert_eq!(names_another_root(walked), Ok(false), "{walked}");
+        }
+        for (refused, why) in [
+            ("id::B7F2/", PathError::VolumeIdInvalid),
+            ("fs::arxfs/x", PathError::UnsupportedResolver),
+            ("Home:/a//b", PathError::EmptyComponent),
+            ("", PathError::Empty),
+        ] {
+            assert_eq!(names_another_root(refused), Err(why), "{refused:?}");
         }
     }
 }

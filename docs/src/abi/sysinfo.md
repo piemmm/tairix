@@ -97,7 +97,8 @@ the detected hardware tree (`AGENTS.md` §18.4). `MOUNT_LIST` and
 `/Storage` catalog shows its name to any. What a principal attached presented
 to itself alone — a private disk image or network share, which
 `MountRecord::private` marks — is listed to another principal without the
-source it was attached from, its title, or the usage of what it holds
+source it was attached from, its title and whether it takes one, or the
+usage of what it holds
 (`MountRecord::withheld`, which `MountRecord::is_withheld` marks, so the
 empty source and title and zero usage read as unknown rather than absent); one
 presented to others too is listed whole. A binding is listed as the volume it
@@ -109,10 +110,12 @@ applies this scope, as it scopes every per-principal answer. The privileged *act
 separately by `CAP_FS_MOUNT` (`AGENTS.md` §5.2) and is not part of this
 read-only API. `MOUNT_LIST`
 reports each attached volume once — its source, type, attach flags,
-capacity, availability, medium and identity, and the view path showing its
-root — and `VIEW_LIST` each view binding: its path, the subtree of the
-volume it shows, the flags it narrows that volume to, the volume's
-identity, and for a `view_bind` binding its binder, so a consumer resolving
+capacity, availability, medium, the key it is published under and the
+identity its content carries (a twin's differ,
+[drives](../filesystem/drives.md)), and the view path showing its root — and
+`VIEW_LIST` each view binding: its path, the subtree of the volume it shows,
+the flags it narrows that volume to, the volume's key, and for a `view_bind`
+binding its binder, so a consumer resolving
 a path takes the covering binding and
 joins it to its volume (`tairix_procinfo::Namespace`). A binding showing no
 volume, the `/Storage` catalog, carries the all-zero identity and so joins
@@ -120,7 +123,7 @@ to nothing. `VOLUME_REMOVALS` lists the device-backed volumes whose device
 went away while they were attached, rather than being detached first — the
 newest `VOLUME_REMOVALS_KEPT` (32), oldest first, one `VolumeRemovalRecord`
 each: the removal's number among those since boot, from 1, the volume's
-identity, and whether the writes it had not yet given its device were none,
+key, and whether the writes it had not yet given its device were none,
 are held for a verified re-insert, or were lost. An eject or unmount is never
 one, so a reader learns from the kernel, not by guessing from a volume gone
 from the mount table, which volumes left without being ejected, and from a
@@ -790,15 +793,18 @@ the request/render libraries stay testable against in-memory fixtures.
   lost redundancy reads as healthy — a degraded
   array's completions carry that state across the block-service seam,
   [block drivers](../drivers/block.md)), its stable 16-byte volume identity ([`VOLUME_ID_LEN`],
-  all-zero when the mount publishes none — the identity a `volume_detach`
-  request names), the principal that attached a network or disk-image
-  volume (`owner`, which may detach it without `CAP_FS_MOUNT`), its
+  all-zero when the mount publishes none — the identity a `volume_detach`,
+  `volume_retitle` or `volume_replay` request names), the principal that
+  attached a network or
+  disk-image volume (`owner`, which may detach it without `CAP_FS_MOUNT`), its
   [`VolumeClass`] (`0` local, `1` network, `2` one a disk-image file holds,
   `3` one on a removable device, which the user at the seat may eject),
   its `title` (the label its filesystem records, at most `VOLUME_TITLE_MAX`
-  bytes of text: set as a disk image's volume attaches and as its owner
-  retitles it, empty for every other volume, and closing the record on the
-  wire as a length byte, the buffer and a zero pad),
+  bytes of text: the probe's as the volume attaches, then the one it is
+  retitled to, empty where neither names one) and whether its format takes
+  one (`titled`, `0` or `1` and never `1` on a withheld record, any other
+  value refusing the record), closing the record on the wire as the title's
+  length byte, its buffer, the `titled` byte and a zero pad,
   the storage `medium` of the block device backing it, and
   the volume's space accounting as a `VolumeStats` usage block (block size,
   whether the volume is down to its reserve, and 64-bit
@@ -848,10 +854,10 @@ the request/render libraries stay testable against in-memory fixtures.
   numerators, but only the first counts it as part of the medium, so on a
   reserved format `df` reads the higher figure.
 
-  [`MountAvailability::health`] bands the six availability states into the
+  [`MountAvailability::health`] bands the seven availability states into the
   three [`VolumeHealth`] answers a reader acts on — nothing to do, watch it,
   it is not serving. It is derived, never transmitted: the wire carries the
-  six-state availability. The banding preserves the
+  seven-state availability. The banding preserves the
   [`MountAvailability::severity`] ranking, so folding a stack of layers with
   `worse_of` and banding the result agrees with banding each layer and taking
   the worst. `lib/theme`'s `SignalRole::for_volume_health` is the one binding

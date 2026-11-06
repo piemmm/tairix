@@ -23,6 +23,14 @@ tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
 # Staged blocks hold volume contents; a wipe a dying buffer cannot optimise
 # away routes through the audited crate the kernel caches use.
 zeroize = { version = "1.8.1", default-features = false }
+# The ordered map the dirty set keys its blocks in, whose insertion can
+# refuse where `alloc`'s would abort the write path.
+tairix-collections = { path = "../collections", version = "=0.0.0" }
+
+[dev-dependencies]
+# The metered allocator a test has refuse a change, as an exhausted heap
+# would.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 
 [lints]
 workspace = true

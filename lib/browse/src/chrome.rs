@@ -28,7 +28,9 @@
 //!   ([`Properties`](crate::properties::Properties)), Rename
 //!   ([`prepare_rename`](crate::Browser::prepare_rename)), Cut/Copy
 //!   ([`clipboard`](crate::Browser::clipboard)) and Delete
-//!   ([`plan_delete`](crate::Browser::plan_delete)).
+//!   ([`plan_delete`](crate::Browser::plan_delete)). A window showing the
+//!   user's Trash ([`ContextMenuModel::showing_trash`]) also offers Empty Trash
+//!   last on the root plate.
 //!
 //! The model decides *what is offered*; it performs no navigation or I/O
 //! itself, so composing it grants nothing (the read-only picker builds the
@@ -37,9 +39,9 @@
 use alloc::string::String;
 
 use tairix_abi::window_ipc::{
-    AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId,
-    AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut,
-    AppMenuSymbol, APP_MENU_LABEL_MAX,
+    AppMenu, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
+    AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut, AppMenuSymbol, IconPath,
+    APP_MENU_LABEL_MAX,
 };
 use tairix_abi::Errno;
 use tairix_icon::IconKind;
@@ -453,6 +455,11 @@ pub enum ContextCommand {
     /// through the shared engine (`lib/fscopy`). Acts on the selection, so it
     /// is offered only when one exists.
     Delete,
+    /// Empty the Trash the window shows, as the toolbar's
+    /// [`ManagerTool::EmptyTrash`] does: declared only where the model is told
+    /// the window shows the user's Trash
+    /// ([`showing_trash`](ContextMenuModel::showing_trash)).
+    EmptyTrash,
 }
 
 /// The complete set of context-menu commands: the selection's plate top to
@@ -474,6 +481,7 @@ pub const CONTEXT_COMMANDS: &[ContextCommand] = &[
     ContextCommand::SelectAll,
     ContextCommand::ClearSelection,
     ContextCommand::Paste,
+    ContextCommand::EmptyTrash,
 ];
 
 impl ContextCommand {
@@ -495,6 +503,7 @@ impl ContextCommand {
             Self::SelectAll => "Select All",
             Self::ClearSelection => "Clear Selection",
             Self::Delete => "Delete",
+            Self::EmptyTrash => "Empty Trash",
         }
     }
 
@@ -505,10 +514,10 @@ impl ContextCommand {
     pub const fn shortcut(self) -> &'static str {
         match self {
             Self::Open => "Enter",
-            // Open With…, Mount Read-Only and Eject bind no keyboard
-            // accelerator, so they advertise none; the menu's own traversal is
-            // how a keyboard reaches them.
-            Self::OpenWith | Self::MountReadOnly | Self::Eject => "",
+            // Open With…, Mount Read-Only, Eject and Empty Trash bind no
+            // keyboard accelerator, so they advertise none; the menu's own
+            // traversal is how a keyboard reaches them.
+            Self::OpenWith | Self::MountReadOnly | Self::Eject | Self::EmptyTrash => "",
             Self::GetInfo => "Alt+Enter",
             Self::Rename => "F2",
             Self::Cut => "Ctrl+X",
@@ -543,18 +552,24 @@ impl ContextCommand {
     ///
     /// On the selection's plate: the opening commands, then what the item
     /// *is*, then the editing verbs, then the removal on its own. On the root
-    /// plate, after the submenus: the selection as a whole, then the paste.
+    /// plate, after the submenus: the selection as a whole, then the paste,
+    /// then emptying the Trash.
     const fn opens_group(self) -> bool {
         matches!(
             self,
-            Self::GetInfo | Self::Rename | Self::Delete | Self::SelectAll | Self::Paste
+            Self::GetInfo
+                | Self::Rename
+                | Self::Delete
+                | Self::SelectAll
+                | Self::Paste
+                | Self::EmptyTrash
         )
     }
 
     /// Whether carrying this command out destroys something, so its row draws
     /// with the destructive emphasis rather than the neutral one.
     const fn is_destructive(self) -> bool {
-        matches!(self, Self::Delete)
+        matches!(self, Self::Delete | Self::EmptyTrash)
     }
 
     /// The function this command's row shows.
@@ -571,7 +586,7 @@ impl ContextCommand {
             Self::Paste => AppMenuSymbol::Paste,
             Self::SelectAll => AppMenuSymbol::SelectAll,
             Self::ClearSelection => AppMenuSymbol::SelectNone,
-            Self::Delete => AppMenuSymbol::Delete,
+            Self::Delete | Self::EmptyTrash => AppMenuSymbol::Delete,
         }
     }
 }
@@ -822,7 +837,8 @@ pub struct ContextQuick<'a> {
 /// Build the row model a secondary press asks the desktop to open, under the
 /// root `title`: Display ▸ (the views, then the listing's orders), then the
 /// selection's own submenu and New ▸, then
-/// Select All and Clear Selection, then Paste. The selection's submenu holds
+/// Select All and Clear Selection, then Paste — and, in a window showing the
+/// user's Trash, Empty Trash. The selection's submenu holds
 /// the verbs that act on it ([`ContextCommand::acts_on_selection`]) and is
 /// labelled with what it acts on — `File ‘notes.txt’`, the name shortened to
 /// fit with its extension kept, or `Selection` for several items.
@@ -888,6 +904,10 @@ pub fn context_menu(
     )?;
     let mut open_with_row = None;
     for (index, command) in CONTEXT_COMMANDS.iter().copied().enumerate() {
+        // Emptying the Trash is the Trash's own verb, offered nowhere else.
+        if command == ContextCommand::EmptyTrash && !model.trash {
+            continue;
+        }
         let plate = if command.acts_on_selection() {
             // A plate that never opens holds nothing.
             if !selected {
@@ -1276,7 +1296,7 @@ fn push_candidates(
         );
         let path = candidate.bundle_path();
         if menu.text_remaining() >= candidate.name().len() + path.len() {
-            if let Ok(bundle) = AppMenuBundle::new(path) {
+            if let Ok(bundle) = IconPath::new(path) {
                 item = item.with_icon_bundle(bundle);
             }
         }
@@ -1321,6 +1341,9 @@ pub struct ContextMenuModel {
     /// The principal the menu is shown to, the one a volume must have been
     /// attached for to eject.
     viewer: Option<u32>,
+    /// Whether the window shows the user's Trash, which only the file manager
+    /// knows.
+    trash: bool,
 }
 
 /// What the one entry a context menu acts on is to its mounting verbs.
@@ -1382,6 +1405,7 @@ impl ContextMenuModel {
                 _ => Mountable::Neither,
             },
             viewer: None,
+            trash: false,
         }
     }
 
@@ -1393,6 +1417,13 @@ impl ContextMenuModel {
             viewer: Some(uid),
             ..self
         }
+    }
+
+    /// The model, for a window that shows the user's Trash when `trash`: its
+    /// root plate then offers Empty Trash.
+    #[must_use]
+    pub const fn showing_trash(self, trash: bool) -> Self {
+        Self { trash, ..self }
     }
 
     /// Whether `command` is currently actionable and should render enabled.
@@ -1416,6 +1447,8 @@ impl ContextMenuModel {
     /// directory and needs only a held clipboard, not a selection.
     /// [`SelectAll`](ContextCommand::SelectAll) needs an entry left to select
     /// and [`ClearSelection`](ContextCommand::ClearSelection) a selection.
+    /// [`EmptyTrash`](ContextCommand::EmptyTrash) needs a window showing a
+    /// Trash that lists something.
     ///
     /// The text is display text a menu row states beside its label; it names
     /// what the user must do, never what they may not (an authority a
@@ -1476,6 +1509,15 @@ impl ContextMenuModel {
                     "the folder is empty"
                 } else if self.selected >= self.listed {
                     "everything is selected"
+                } else {
+                    ""
+                }
+            }
+            ContextCommand::EmptyTrash => {
+                if !self.trash {
+                    "only the Trash is emptied"
+                } else if self.listed == 0 {
+                    "the Trash is empty"
                 } else {
                     ""
                 }

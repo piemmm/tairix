@@ -16,7 +16,10 @@ The crate's `[lib]` is the whole model, host-tested without a screen:
 | `gait` | Locomotion: the leg cycle, the body bob, the tail, the ears, the jump arc, the burrow crouch. |
 | `mind` | Three needs and a closed set of intents, drawn from an injected generator so every decision is reproducible. |
 | `world` | The desktop as terrain, and the over/under/around route state machine. |
+| `roam` | Him loose on the desktop: where he is, where he is going, and one frame of getting there. |
+| `pace` | When the frame loop next wakes, and how far a wake advances him. |
 | `pen` | The playpen: whereabouts, petting, dragging, the toy. |
+| `appbar` | His icon-bar declaration: the slot's click, and the one row that lets him out or brings him home in the pen button's words. |
 | `layout` | The pen's geometry and the companion surface's, in logical pixels. |
 | `paint` | The two painters — the pen window, and the transparent companion surface. |
 | `state` | What survives a restart: the mood, and whether he was out. |

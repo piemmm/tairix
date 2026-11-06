@@ -32,9 +32,17 @@ Uma imagem pode ser feita de camadas, a de baixo primeiro, cada uma com um
 nome, uma opacidade e se está visível; pinta-se numa camada de cada vez, e a
 janela mostra-as sobrepostas. O OpenRaster guarda as camadas; qualquer outro
 formato recebe-as sobrepostas. O menu Camadas acrescenta, copia, elimina,
-sobe e desce camadas, junta uma à de baixo e achata a imagem, e as suas
-Propriedades da camada mudam o nome de uma camada e definem quanto dela se
-vê. Os ajustes, preenchimentos e traços mudam a camada em que se pinta; as
+sobe e desce camadas, junta uma à de baixo e achata a imagem. O painel
+Camadas, que Ver ▸ Painéis mostra, reúne a opacidade da camada em que se pinta
+e os botões Nova, Duplicar, Eliminar e Juntar para baixo, e por baixo uma
+linha por camada, a de cima primeiro, com um olho, uma pequena imagem da
+camada, o seu nome e a sua opacidade. Prima uma linha para pintar na sua
+camada, o seu olho para mostrar ou esconder a camada, ou o nome da camada em
+que se pinta para lhe mudar o nome, e arraste uma linha para subir ou descer a
+sua camada; cada uma destas ações, exceto escolher uma linha, e uma mudança de
+opacidade por muito que se arraste, é uma só alteração a anular. Flutuante, a
+janela do painel redimensiona-se de duas linhas até todas. Os ajustes,
+preenchimentos e traços mudam a camada em que se pinta; as
 rotações, inversões, redimensionamentos e recortes mudam todas as camadas.
 Uma imagem com paleta tem uma só camada.
 
@@ -79,8 +87,13 @@ mantido parado. Mantendo Shift premido desenha-se um quadrado, um círculo ou
 uma linha num múltiplo de 45 graus.
 
 Ao longo dos dois lados da janela correm painéis: por omissão o painel
-Ferramentas à esquerda e o painel Cor à direita, com o painel Ajuste por baixo
-logo que se abre um ajuste. Cada um tem no topo uma faixa fina que o nomeia,
+Ferramentas à esquerda e o painel Cor à direita, a que se juntam por baixo os
+painéis Camadas, Ajustes e Efeitos quando são mostrados ou se abre um ajuste
+ou um efeito. Os painéis de um lado empilham-se numa só coluna: cada um recebe
+pelo menos o espaço de que precisa, depois o último aberto cresce primeiro até
+tudo o que contém, e um painel que recebe menos desloca-se dentro de si,
+enquanto a coluna nunca se desloca. Cada um tem no topo uma faixa fina que o
+nomeia,
 com um controlo que o enrola na sua faixa e uma marca que o fecha; Ver ▸
 Painéis volta a mostrar um painel fechado, e Repor painéis põe cada painel
 como uma janela nova o tem. Arrastar uma faixa move o seu painel no seu lado
@@ -90,8 +103,11 @@ janela sua, movida pela sua faixa, mantida sobre a imagem e fechada pela sua
 marca; arrastado de novo sobre um lado, volta a acoplar-se ali. Também a
 paleta flutua: o botão na ponta direita da sua faixa, ou Ver ▸ Painéis ▸
 Destacar a paleta, leva-a para uma pequena janela sua, com as cores dispostas
-numa grelha; fechar essa janela, ou arrastá-la de volta para o fundo da
-janela, devolve-a à faixa.
+numa grelha. Redimensionar essa janela volta a dispor as cores à medida da sua
+largura, e elas deslocam-se para cima e para baixo quando não cabem todas;
+fechá-la, ou arrastá-la de volta para o fundo da janela, devolve-a à faixa. Na
+faixa como na sua janela, as cores principal e secundária levam marcados os
+seus números de cor do RISC OS.
 
 A ferramenta de seleção marca um retângulo, uma elipse, um laço à mão
 livre, um polígono clicado canto a canto ou, com a varinha mágica, os píxeis
@@ -114,25 +130,44 @@ as suas pegas movem as suas margens, e Enter recorta. A mão arrasta a imagem
 pela janela, tal como Espaço com qualquer ferramenta; o zoom amplia com um
 clique, ou com Alt reduz, e uma caixa arrastada enche a janela.
 
-O menu Ajustes abre um ajuste no painel Ajuste, onde todas as outras
-ferramentas, painéis e menus continuam à mão: brilho e contraste, tonalidade e
-saturação, equilíbrio de cor, níveis, curvas, equilíbrio de brancos,
-posterizar, limiar, desfocar, nitidez, pixelizar e adicionar ruído;
-dessaturar e encontrar contornos, que não têm definições, aplicam-se de
-imediato. A imagem mostra o ajuste à medida que as suas definições se movem,
-Pré-visualizar desliga-o e liga-o para comparar, Repor volta a pôr as suas
-definições e Aplicar guarda-o como uma só alteração a anular; pintar, preencher
-ou escolher outro ajuste aplica-o primeiro. Os níveis fixam os pontos preto,
-cinzento e branco sobre um histograma da camada, para todos os canais juntos
-ou cada um sozinho, com conta-gotas que os tiram da imagem e Auto; as curvas
-dobram os tons de um canal por pontos arrastados sobre o seu histograma; o
-equilíbrio de brancos fixa a temperatura e o matiz da luz, a partir de um
-píxel neutro escolhido ou por Auto; tonalidade e saturação rodam, reforçam e
-aclaram todas as cores ou uma gama delas; o equilíbrio de cor leva as sombras,
-os meios-tons e as altas luzes para o vermelho, o verde ou o azul, mantendo a
-sua luminosidade se pedido. Tudo fica limitado à seleção. Numa imagem com
-paleta, um ajuste muda a sua paleta, e os que precisam de cores vizinhas não
-são oferecidos.
+Dois painéis reúnem as operações da imagem, cada um encabeçado por uma lista
+que escolhe uma: o painel Ajustes reúne brilho e contraste, níveis, curvas,
+tonalidade e saturação, equilíbrio de cor, equilíbrio de brancos, dessaturar,
+inverter, posterizar, limiar e o misturador de canais, e o painel Efeitos
+reúne desfocagem gaussiana, máscara de nitidez, mediana, adicionar ruído,
+encontrar contornos, relevo e pixelizar. Cada linha do menu Ajustes abre a sua
+operação no seu painel. Sob a lista ficam as definições da operação escolhida
+e depois Pré-visualizar, Repor e Aplicar; todas as outras ferramentas, painéis
+e menus continuam à mão. A imagem mostra a operação à medida que as suas
+definições se movem, primeiro a parte à vista; Pré-visualizar desliga-a e
+liga-a para comparar, Repor volta a pôr as suas definições e Aplicar guarda-a
+como uma só alteração a anular. Uma só pré-visualização abrange os dois
+painéis: escolher outra operação numa lista, ou mover as definições do outro
+painel, aplica a operação deixada como uma só alteração se as suas definições
+foram movidas e ela muda a imagem, e descarta-a caso contrário, pelo que
+percorrer uma lista não muda nada. Pintar, preencher, uma transformação ou
+guardar aplica ou descarta primeiro a operação aberta da mesma forma; marcar
+uma seleção, a vista, as cores e anular deixam-na aberta.
+
+Os níveis fixam os pontos preto, cinzento e branco sobre um histograma da
+camada, para todos os canais juntos ou cada um sozinho, com conta-gotas que os
+tiram da imagem e Auto; as curvas dobram os tons de um canal por pontos
+arrastados sobre o seu histograma; o equilíbrio de brancos fixa a temperatura
+e o matiz da luz, a partir de um píxel neutro escolhido ou por Auto;
+tonalidade e saturação rodam, reforçam e aclaram todas as cores ou uma gama
+delas; o equilíbrio de cor leva as sombras, os meios-tons e as altas luzes
+para o vermelho, o verde ou o azul, mantendo a sua luminosidade se pedido; o
+misturador de canais pondera cada canal a partir do vermelho, do verde, do
+azul e de uma constante, ou faz deles um só cinzento. A desfocagem gaussiana
+suaviza a imagem segundo o seu raio; a máscara de nitidez torna-a mais nítida,
+afastando cada cor da sua desfocagem numa quantidade onde as duas diferem pelo
+menos num limiar; a mediana dá a cada píxel o valor do meio dos que o rodeiam,
+alisando o salpicado e mantendo os contornos; adicionar ruído põe salpicos
+uniformes ou gaussianos, a cores ou a cinzento; encontrar contornos ilumina os
+contornos entre as cores; relevo faz da imagem um relevo cinzento iluminado de
+um ângulo; e pixelizar põe quadrados, cada um da cor média do que cobre. Tudo
+fica limitado à seleção. Numa imagem com paleta, um ajuste muda a sua paleta,
+e os efeitos, que precisam de cores vizinhas, não são oferecidos.
 
 O painel Cor guarda as cores principal e secundária e um seletor de cor para
 a que estiver escolhida: um clique numa cor escolhe-a, e depois apanha-se num

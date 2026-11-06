@@ -289,8 +289,10 @@ Done. What now holds:
   `CAP_CONSOLE_WRITE` + `CAP_PROC_SPAWN` + `CAP_SHM`, 13-locale `Help/`):
   the 80×24 grid presented over the AW2 client, parked on one wait-set
   (window-event `Port`, shell-output `Stream`, shell `Child`), token
-  dispatch, `lib/keymap`-encoded key presses, pump-and-present on shell
-  output, clean teardown on end-of-stream / child exit / close. The
+  dispatch, `lib/keymap`-encoded key presses, shell output pumped at parse
+  speed and presented once the desktop has answered the window's last frame
+  (`plans/FIX-DESKTOP.md` DESK-25), clean teardown on end-of-stream / child
+  exit / close. The
   program-library popup's terminal entry spawns it
   (`plans/NEW-TASKBAR.md` T5); the app event-mailbox
   naming rule is `tairix_abi::window_ipc::event_endpoint_for` (one
@@ -348,8 +350,12 @@ Done (code + host coverage). What now holds:
   (kind 6), with the chosen name
   pulled once by `WindowRequest::TakePickedName` (op 6). The `lib/window`
   engine keys the pick to the attested owner, enforces one pending pick
-  per window (`AlreadyExists`), forwards acceptance through the
-  `WindowHost::pick_requested` bridge (a refusal records nothing), and
+  per window (`AlreadyExists`), at most `PICK_MAX_OPEN` per application and
+  one folder pick per application until its files are taken
+  (`LimitExceeded`), each refusal recording nothing and audited through
+  `WindowHost::pick_refused`; it forwards acceptance through the
+  `WindowHost::pick_requested` bridge, saying whether the application holds
+  the front as an alert is judged (the activation spent when it does), and
   concludes only through `conclude_pick`, which requires-and-clears the
   pending pick and holds the name, so exactly one conclusion follows each
   acceptance; the client half is `WindowClient::pick_file` and
@@ -358,14 +364,17 @@ Done (code + host coverage). What now holds:
   over. The session lists it under its own authority and keeps its regular
   files — no links, each opened `NO_FOLLOW` — whose content type the
   requester's *signed* manifest associates, in the browser's name order, at
-  most `WINDOW_FOLDER_PICK_MAX`. That bound is the kernel's own
-  `FD_GRANT_PENDING_MAX`, so every file a conclusion states can be pending at
-  once. Each is delegated read-only, and `FolderPicked { files, left_out }`
-  (kind 23) concludes; the app takes them one at a time with
+  most `WINDOW_FOLDER_PICK_MAX`. That bound is the kernel's
+  `FD_GRANT_PENDING_MAX` less `PICK_MAX_OPEN`, by a compile-time assertion, so
+  an application's one folder pick and the single grant of each other pick it
+  may have open are pending at once within what one grantor may hold for one
+  recipient. Each is delegated read-only, and `FolderPicked { files,
+  left_out }` (kind 23) concludes; the app takes them one at a time with
   `TakePickedFile` (op 36), each reply a `PickedFile { handle, name }`. A
-  minted delegation cannot be withdrawn, so the engine refuses a new pick
-  while any is untaken, and a file whose grant failed is counted as left out
-  rather than stated.
+  minted delegation cannot be withdrawn, so the engine refuses a new pick on
+  that window, and another folder pick of that application, while any is
+  untaken, and a file whose grant failed is counted as left out rather than
+  stated.
 - **The shared browser engine moved to `lib/browse`** (`tairix-browse`):
   the AW1 model/renderer/path-spelling hoisted out of the files app (its
   package is now the `Run` binary only) because the picker is its second
@@ -382,22 +391,31 @@ Done (code + host coverage). What now holds:
   what dismissal means is the owner's — and the serve loop routes the picker's
   to `SessionPicker::cancel`, which is the same conclusion Escape reaches. A
   host-side observer reconstructing a row's screen position adds the frame's
-  own client inset (`WindowFrame::insets`) to `PICKER_ORIGIN`, which is the
-  outer top-left.
+  own client inset (`WindowFrame::insets`) to the picker's outer top-left:
+  `PICKER_ORIGIN` for the first picker of its own, `picker_origin(slot,
+  scale)` for a later cascade slot, each kept on the work area.
 - **The session's trusted picker** (`tairix_desktop_session::picker`):
-  `SessionPicker` — one picker slot at a time, a fresh root listing under
-  the session's own authority per pick (a refused listing refuses the
-  pick), a session-owned window at the deterministic `PICKER_ORIGIN` for an
-  open or a folder and a dialog over the requester's window for a save,
-  key (`Down`/`Up`/`Enter`/`Backspace`/`Escape`) and click (shared
-  hit-test) navigation, conclusions delivered by the `Run` binary's
-  file worker and privileged tail (the open — read-write for an owner whose
-  attested bundle edits documents, where the user may write — → `fd_grant`
-  to the owner's attested instance, which is what the compositor records as
-  a window's owner → `fs_close` → `FilePicked`, any refusal honestly
-  `PickCancelled`), and
-  a requesting window's death aborts its pick via the
-  `ShellWindowHost` bridge. The session's manifest gained
+  `SessionPicker` — a table of picks, as on macOS, each named by a `PickId`
+  minted from a counter and never reused, so every message about a pick
+  names it and an answer for one that has closed reaches no later one (a file
+  made for it is taken back). One pick to a window, at most `PICKS_MAX`
+  together (`Busy`, audited as `PICK_REFUSED`); each lists afresh under the
+  session's own authority (a refused listing refuses the pick) through a
+  listing slot and a watch of its own. An open or a folder pick is a
+  session-owned window of its own in the lowest free cascade slot from
+  `PICKER_ORIGIN` (`picker_origin`), kept on the work area, and a save a
+  dialog over the requester's window. Each is titled by the requester's
+  attested name, takes the keyboard as it opens only when its application
+  holds the front (otherwise it opens beneath the window the user is in), and
+  ignores clicks for `ALERT_ARM_NS` after it is first on screen. Key
+  (`Down`/`Up`/`Enter`/`Backspace`/`Escape`) and click (shared hit-test)
+  navigation, conclusions delivered by the `Run` binary's per-volume readers
+  and privileged tail (the open — read-write for an owner whose attested
+  bundle edits documents, where the user may write — → `fd_grant` to the
+  owner's attested instance, which is what the compositor records as a
+  window's owner → `fs_close` → `FilePicked`, any refusal honestly
+  `PickCancelled`), and a requesting window's death takes its pick down via
+  the `ShellWindowHost` bridge. The session's manifest gained
   `CAP_FS_ACCESS` (AppInfo + kernel pin) — the CU6 trusted-UI widening.
 - **The consumer**: `userland/apps/view` (`view.app`, a program-library
   entry), manifest `CAP_CONSOLE_WRITE` + `CAP_SHM` + `CAP_PROC_SPAWN` and
@@ -413,14 +431,17 @@ Done (code + host coverage). What now holds:
   window-protocol round-trip/fail-closed tests (decoders remain in
   `fuzz_decode`), the `lib/window` loopback pick suite, the `lib/browse`
   hit-test tests, the session picker suite, and the viewer engine tests.
-- **Guest coverage: two verticals, one per route.** Both are dedicated
-  siblings rather than stages bolted onto the autoload script, whose every
-  delivery count, reply index, and cascade slot would shift under them (and
-  which is the D15 freeze case, so a security path's only guest coverage must
-  not live on it). `filepick_qemu_aarch64` drives the **picker** route —
-  library → `view`'s row → its bar slot → the planted document's row, gated on
-  the session's own `PICKER_SHOWN`, passing on `desktop fd_grant` then `view
-  fd_redeem`. `handover_qemu_aarch64` drives the **three-principal** route the
+- **Guest coverage: a vertical per route, and one for pickers up at once.**
+  Each is a dedicated sibling rather than a stage bolted onto the autoload
+  script, whose every delivery count, reply index, and cascade slot would
+  shift under it (and which is the D15 freeze case, so a security path's only
+  guest coverage must not live on it). `filepick_qemu_aarch64` drives the
+  **picker** route — library → `view`'s row → its bar slot → the planted
+  document's row, gated on the session's own `PICKER_SHOWN`, passing on
+  `desktop fd_grant` then `view fd_redeem`. `filepicks_qemu_aarch64` holds two
+  pickers of the viewer's two windows up at once, the later cascaded above,
+  and concludes each on its own, passing on two `desktop fd_grant` → `view
+  fd_redeem` chains from the one attested viewer task. `handover_qemu_aarch64` drives the **three-principal** route the
   file manager uses (`plans/VIEW.md`): activating a planted picture in a
   file-manager window through the item's own context-menu *Open* row, passing
   on two complete relays of `files fd_grant` → `desktop fd_redeem` →
@@ -428,8 +449,9 @@ Done (code + host coverage). What now holds:
   come from the same kernel-attested task, and each latched step printing its
   own marker so a failing run names the missing hop. A host-side observer
   reconstructs a gesture into a *cascade-placed* window through
-  `reconstruct_manager_item_click`, which is the shared counterpart of the
-  fixed-origin `PICKER_ORIGIN` arithmetic above.
+  `reconstruct_manager_item_click`, the counterpart of
+  `reconstruct_pick_click`, which aims into the picker of a given cascade slot
+  by the arithmetic above.
 
 ### AW6 — app-owned popup surfaces `[x]`
 
@@ -504,12 +526,21 @@ draws (`plans/COMPOSITOR-WORK.md` stage M).
 
 - **Protocol**: `WindowRequest::CreateTool { parent_window_id, shm_handle,
   event_endpoint, frame_count, width_px, height_px, stride_bytes, format,
-  offset_x, offset_y, carry, title }` — the popup's geometry block and
-  parent-relative offset (of the client), a `WindowTitle`, and `carry`, the
-  place along the band, from the client's left edge and within its width, to
-  hold under the pointer. Both halves describe one through `ToolSpec`, a
-  `TransientSpec` plus the carry and title; the engine opens both kinds through
-  one transient path (`WindowServer::open_transient`).
+  offset_x, offset_y, carry, title, sizing }` — the popup's geometry block and
+  parent-relative offset (of the client), a `WindowTitle`, `carry`, the place
+  along the band, from the client's left edge and within its width, to hold
+  under the pointer, and `sizing`, the `WindowSizing` block a `Create`
+  carries, decoded and refused on the same terms. Both halves describe one
+  through `ToolSpec`, a `TransientSpec` plus the carry, title and sizing; the
+  engine opens both kinds through one transient path
+  (`WindowServer::open_transient`).
+- **Resizable where it asks**: a tool window with a range has resize edges and
+  Close alone, never a maximize, and is held to its range as a window is; each
+  size a drag settles is a `WindowEvent::Resized` on the tool window's own id.
+  `SetSizing` restates its range, and one changing its kind is refused
+  (`NotSupported`), as a window's is. The document host re-maps the tool window
+  at the size given, hands it to `DocumentView::tool_resized`, restates the
+  range its view asks for, and repaints that tool window alone.
 - **Carried open**: when `carry` is set and the parent holds the seat's
   primary press, the session ends the parent's client grab without a release,
   places the tool window with that place of its band, halfway down, under the
@@ -532,14 +563,17 @@ draws (`plans/COMPOSITOR-WORK.md` stage M).
   opened while the seat is held, since opening restacks the family.
 - Coverage: `lib/abi` round trip and fail-closed decode (zero parent, a
   reserved endpoint, a bad extent, a dirty or out-of-band carry, an over-long,
-  dirty or control-character title) and the fuzz decode table; the
-  `lib/window` loopback suite (its own host path, close alone, a transient's
-  transient refused, the shared budget, parent-close cascade); the
+  dirty or control-character title, a dirty, crossed or fixed-with-a-range
+  sizing) and the fuzz decode table; the `lib/window` loopback suite (its own
+  host path, close alone, a transient's transient refused, the shared budget,
+  parent-close cascade, a resizable one told its size on its own id, a kind
+  change refused) and the host's refit rules (`docapp/refit.rs`); the
   compositor's floating-transient, family-visibility and carry tests; the
-  session suite (framed, off the taskbar, keyboard left alone, retitle,
-  minimise hiding the family, carry under a held press, `ToolMoved` over and
-  off the parent, refused while the seat is held) and the hold-back's fold
-  and end rules.
+  resizable tool frame's edges and no maximize; the session suite (framed, off
+  the taskbar, keyboard left alone, retitle, minimise hiding the family, carry
+  under a held press, `ToolMoved` over and off the parent, refused while the
+  seat is held, resized within its range and never maximized, its range
+  restated but never its kind) and the hold-back's fold and end rules.
 
 ### AW8 — alerts `[x]`
 

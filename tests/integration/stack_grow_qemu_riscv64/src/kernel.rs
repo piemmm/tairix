@@ -49,8 +49,8 @@ use tairix_kernel::riscv64::boot::{self as boot_riscv64, RiscvBinArch, RISCV_UAR
 use tairix_kernel::riscv64::spawn_producer::{CHILD_USER_BIAS, RISCV_PROCESS_SPAWN};
 use tairix_kernel::spawn_layout::{USER_STACK_COMMIT_PAGES, USER_STACK_RESERVE_PAGES};
 use tairix_kernel_core::{
-    AddressSpaceRegistry, BootReserve, DispatchCallbackSlot, EmbeddedProgram, InitSpawnCtx,
-    KernelArch, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap, ProcessWait,
+    AddressSpaceRegistry, DispatchCallbackSlot, EmbeddedProgram, InitSpawnCtx, KernelArch,
+    KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap, ProcessWait,
     ProgramRegistry, RandomReserve, SchedWaitQueueArch, NULL_DMA_ALLOC_FACILITY,
     NULL_MMIO_MAP_FACILITY, NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
 };
@@ -144,6 +144,8 @@ const FAIL_POLL: NonZeroU16 = fail_point!(12);
 const FAIL_DRAINED: NonZeroU16 = fail_point!(13);
 const FAIL_PARENT_STOPPED: NonZeroU16 = fail_point!(14);
 const FAIL_PAGING: NonZeroU16 = fail_point!(15);
+/// The random reserve could not be seeded.
+const FAIL_SEED: NonZeroU16 = fail_point!(16);
 /// Base finisher for a non-zero parent exit; the parent's diagnostic exit
 /// code is added so the failing role/site is identifiable in the finisher.
 const FAIL_EXIT_BASE: NonZeroU16 = fail_point!(100);
@@ -297,6 +299,11 @@ fn bring_up_board(dtb: u64) -> u64 {
     let Ok(fdt) = (unsafe { Fdt::from_ptr(dtb as *const u8) }) else {
         qemu_exit::exit_failure(FAIL_FDT);
     };
+    // The boot seed, captured as the boot path captures it: on a core with
+    // no hardware RNG it is the reserve's one dependable source.
+    if let Some(seed) = fdt.chosen_rng_seed() {
+        tairix_kernel_core::random::capture_boot_entropy_seed(seed);
+    }
     let Some(timebase_hz) = fdt.timebase_frequency() else {
         qemu_exit::exit_failure(FAIL_ZERO_FREQ);
     };
@@ -363,6 +370,10 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
         RiscvArch::new(&SCHED_STORAGE, BOOT_CPU, counter_hz),
         None,
     ));
+    // Seeded as the kernel's is, since a child's stack canary is drawn from it.
+    let Ok((reserve, _)) = tairix_kernel_core::random::seeded_reserve(&sched_arch) else {
+        qemu_exit::exit_failure(FAIL_SEED);
+    };
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), sched_arch) else {
         qemu_exit::exit_failure(FAIL_SCHED_NEW);
     };
@@ -379,7 +390,7 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
         ipc: Box::leak(Box::new(RwLock::new(PortRegistry::new()))),
         aspaces: Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new()))),
         rng: Box::leak(Box::new(RwLock::new(
-            Box::new(BootReserve::new()) as Box<dyn RandomReserve + Send + Sync>
+            Box::new(reserve) as Box<dyn RandomReserve + Send + Sync>
         ))),
         irq_table: Box::leak(Box::new(IrqTable::new(0))),
     }
@@ -478,6 +489,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
         sys.peer_watch,
         wait_producer,
         &RISCV_PROCESS_SPAWN,
+        sys.rng,
     );
 
     let init_ctx = KernelInitSpawner::new(

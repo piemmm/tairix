@@ -171,7 +171,10 @@ crt0 (which parses it) share (`AGENTS.md` §2.2):
 
 - `tairix_process_start_header_t` is the fixed prefix: the `TAIRIX_PROCESS_START_MAGIC`
   magic, the ABI version, the argument and environment counts, the block's
-  `total_len`, and a per-process random seed for the §19.2 stack canary.
+  `total_len`, a per-process random seed for the §19.2 stack canary, the
+  CPU-feature set common to every core the process may run on, and the
+  `heap_base`/`heap_len` region the kernel set aside for its heap, which no
+  window or mapping of its layout holds.
 - It is followed by `arg_count + env_count` `tairix_string_slot_t` records
   (arguments first, then environment), each an `(offset, len)` reference into
   the trailing string region.

@@ -193,6 +193,9 @@ extern "C" {
 #define TAIRIX_SYS_ARCHIVE_WRITE 166u
 #define TAIRIX_SYS_CALL_AWAIT 167u
 #define TAIRIX_SYS_VOLUME_RETITLE 168u
+#define TAIRIX_SYS_VOLUME_REPLAY 169u
+#define TAIRIX_SYS_CHILD_ORIGIN 170u
+#define TAIRIX_SYS_SHM_GRANT_TO 171u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -569,10 +572,18 @@ typedef struct tairix_image_attach_reply {
 #define TAIRIX_VOLUME_DETACH_LOST ((uint8_t)2u)
 #define TAIRIX_VOLUME_DETACH_IDLE ((uint8_t)3u)
 
-/* The frame volume_retitle() takes: the 16-byte identity an attach
- * reply names, one length byte, then that many bytes of UTF-8 with no
- * control character, at most TAIRIX_VOLUME_TITLE_MAX; none clears it. */
+/* The frame volume_retitle() takes: the 16-byte key a mount record
+ * names, one length byte, then that many bytes of UTF-8 with no control
+ * character, at most TAIRIX_VOLUME_TITLE_MAX; none clears it. */
 #define TAIRIX_VOLUME_RETITLE_MAX_LEN 269u
+
+/* The frame volume_replay() takes: the 16-byte key a mount record
+ * awaiting an answer names, then one TAIRIX_VOLUME_REPLAY_* byte. The mount
+ * authority answers for any such volume, the process holding the seat for
+ * a removable one. */
+#define TAIRIX_VOLUME_REPLAY_LEN 17u
+#define TAIRIX_VOLUME_REPLAY_WRITE ((uint8_t)1u)
+#define TAIRIX_VOLUME_REPLAY_DISCARD ((uint8_t)2u)
 
 /* fs_readdir() reads a directory a batch at a time from the open description's
 * position: whole records of at most TAIRIX_READDIR_BATCH_MAX bytes per call,
@@ -602,8 +613,8 @@ typedef struct tairix_image_attach_reply {
 
 /* fd_grant() write_ceiling that passes on the grantor's own reach: unbounded
 * for a file it opened itself, what it was handed for one it was delegated.
-* A writable descriptor refuses a zero ceiling, so its reach is always asked
-* for: a stated bound, or this. */
+* A writable file refuses a zero ceiling, so its reach is always asked for:
+* a stated bound, or this. A pipe end has no extent and takes zero. */
 #define TAIRIX_GRANT_EXTENT_INHERIT ((uint64_t)0xffffffffffffffffull)
 
 /* call_post() deadline_ns that never passes: the request is answered only
@@ -952,6 +963,9 @@ uint64_t tairix_sys_archive_read(uint64_t a0, uint32_t a1, uint64_t a2, void * a
 int32_t tairix_sys_archive_write(uint64_t a0, uint32_t a1, uint64_t a2, void * a3, uintptr_t a4);
 uint64_t tairix_sys_call_await(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);
 int32_t tairix_sys_volume_retitle(void * a0, uintptr_t a1);
+int32_t tairix_sys_volume_replay(void * a0, uintptr_t a1);
+uint64_t tairix_sys_child_origin(int64_t a0, void * a1, uintptr_t a2);
+uint64_t tairix_sys_shm_grant_to(uint64_t a0, void * a1, uintptr_t a2);
 
 #ifdef __cplusplus
 } /* extern "C" */

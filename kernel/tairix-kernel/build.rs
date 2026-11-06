@@ -722,17 +722,7 @@ fn build_and_convert(
     // allocate (the unreachable allocating paths are dead-stripped, so no
     // global allocator is needed). Scope the PIE link flags to the chosen
     // production target so the program's own host build script is unaffected.
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
-        .current_dir(manifest_dir)
-        // The outer build exports `CARGO_ENCODED_RUSTFLAGS` / `RUSTFLAGS`
-        // into this build script's environment; both outrank the
-        // target-scoped var below, so a nested cargo would inherit the
-        // outer kernel's flags and drop the PIE link recipe. Clear them so
-        // the target-scoped flags win and apply only to the program crates
-        // for this target (not the program's own host build script).
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("RUSTFLAGS")
+    let status = pie::nested_cargo(manifest_dir)
         .env(
             arch.rustflags_env_var(),
             format!("-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{run_ld}"),

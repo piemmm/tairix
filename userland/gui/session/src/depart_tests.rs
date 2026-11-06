@@ -25,17 +25,31 @@ fn every_window_is_asked_once_including_one_opened_while_leaving() {
 #[test]
 fn the_session_leaves_once_its_windows_are_closed_or_the_grace_is_spent() {
     let departure = Departure::begin(START, 103);
-    assert!(!departure.is_complete(START, true));
+    assert!(!departure.is_complete(START, true, false));
     assert!(
-        departure.is_complete(START, false),
+        departure.is_complete(START, false, false),
         "nothing left to wait for"
     );
-    assert!(!departure.is_complete(START + grace() - 1, true));
+    assert!(!departure.is_complete(START + grace() - 1, true, false));
     assert!(
-        departure.is_complete(START + grace(), true),
+        departure.is_complete(START + grace(), true, false),
         "a window that will not close is left"
     );
     assert_eq!(departure.exit_code(), 103);
+}
+
+/// A recording still being finished keeps the session past its grace, so a
+/// logout never ends a recorder midway through its file; the recording's own
+/// deadlines bound how long.
+#[test]
+fn a_recording_being_finished_keeps_the_session_until_it_is() {
+    let departure = Departure::begin(START, 0);
+    assert!(!departure.is_complete(START, false, true));
+    assert!(
+        !departure.is_complete(START + grace(), true, true),
+        "past the grace too"
+    );
+    assert!(departure.is_complete(START + grace(), true, false));
 }
 
 #[test]
@@ -57,5 +71,5 @@ fn the_grace_tightens_the_park_by_what_is_left_of_it() {
 #[test]
 fn a_departure_begun_near_the_clock_limit_still_ends() {
     let departure = Departure::begin(u64::MAX - 1, 0);
-    assert!(departure.is_complete(u64::MAX, true));
+    assert!(departure.is_complete(u64::MAX, true, false));
 }

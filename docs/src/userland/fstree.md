@@ -93,7 +93,10 @@ what is built.
   file the operation pauses per file: `o` overwrites, `s` skips (the
   skipped source stays in place, and so do the directories above it, so a
   skip never fails a move), `c` cancels the remaining steps — applied work
-  stays, and the completion report counts entries and skips. A file is copied by the shared engine
+  stays, and the completion report counts entries and skips. A directory
+  meeting one of its name merges into it, as `cp -r` does — a move's on one
+  volume by renaming what it holds — so only a taken file or link is asked
+  about. A file is copied by the shared engine
   ([`tairix-fscopy`](../lib/fscopy.md)) through a buffer sized to the file
   and at most 1 MiB, keeping its holes, then its extended attributes — a
   directory the copy creates takes its source's too. What a copy makes

@@ -110,9 +110,10 @@ pub const TARGETS: &[Target] = &[
                       delivered message outlives the drain, and a port seen \
                       closed stays closed; no thread waiting for room or an \
                       answer is stranded by the drain, answer or withdrawal \
-                      racing its wait; a caller waiting unparked on the \
-                      settle count always finds its answer; and a wait for \
-                      budget never sleeps through the release it waits for",
+                      racing its wait; a freed slot is held by the one thread \
+                      it was handed to, and one left unused passes to a \
+                      sibling looking for room as it is let go of; and a wait \
+                      for budget never sleeps through the release it waits for",
     },
     Target {
         package: "tairix-kernel-sched-mlfq",
@@ -121,6 +122,15 @@ pub const TARGETS: &[Target] = &[
         build: Build::SwappedAtomics,
         description: "the run queue's lock-free deque: each task goes to exactly \
                       one party, never lost and never duplicated",
+    },
+    Target {
+        package: "tairix-parallel",
+        dir: "lib/parallel",
+        harness: "loom",
+        build: Build::Feature("loom"),
+        description: "the slot an ordered dispatch's pieces park on: a wait \
+                      never sleeps through the write it waits for and reads \
+                      it, and of two writes one lands",
     },
 ];
 

@@ -41,8 +41,8 @@ use tairix_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_B
 use tairix_kernel::dispatch_core::{dispatch_via_slot, read_raw_args, resolve_user_fault_via_slot};
 use tairix_kernel::hwtree_store::{HW_TREE, HW_TREE_SOURCE};
 use tairix_kernel_core::{
-    AddressSpaceRegistry, BootReserve, DispatchCallbackSlot, EmbeddedProgram, InitSpawnCtx,
-    KernelArch, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LateIdentity, LiveMemMap,
+    AddressSpaceRegistry, DispatchCallbackSlot, EmbeddedProgram, InitSpawnCtx, KernelArch,
+    KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LateIdentity, LiveMemMap,
     ProcessWait, ProgramRegistry, RandomReserve, SchedWaitQueueArch, NULL_DMA_ALLOC_FACILITY,
     NULL_MMIO_MAP_FACILITY, NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
 };
@@ -160,6 +160,8 @@ const FAIL_IDENTITY: NonZeroU16 = fail_point!(15);
 const FAIL_PHYSMAP: NonZeroU16 = fail_point!(16);
 /// The hardware tree refused its seed.
 const FAIL_TREE_SEED: NonZeroU16 = fail_point!(17);
+/// The random reserve could not be seeded.
+const FAIL_SEED: NonZeroU16 = fail_point!(18);
 /// Base finisher for a non-zero parent exit; the parent's diagnostic exit
 /// code is added so the failing role/site is identifiable in the finisher.
 const FAIL_EXIT_BASE: NonZeroU16 = fail_point!(100);
@@ -303,6 +305,11 @@ fn bring_up_board() -> u64 {
     let Ok(fdt) = Fdt::new(DTB_BLOB) else {
         qemu_exit::exit_failure(FAIL_GIC);
     };
+    // The boot seed, captured as the boot path captures it: on a core with
+    // no hardware RNG it is the reserve's one dependable source.
+    if let Some(seed) = fdt.chosen_rng_seed() {
+        tairix_kernel_core::random::capture_boot_entropy_seed(seed);
+    }
     let counter_hz = timer_frequency_hz(&fdt);
     if counter_hz == 0 {
         qemu_exit::exit_failure(FAIL_ZERO_FREQ);
@@ -405,6 +412,10 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
         BOOT_CPU,
         counter_hz,
     )));
+    // Seeded as the kernel's is, since a child's stack canary is drawn from it.
+    let Ok((reserve, _)) = tairix_kernel_core::random::seeded_reserve(&sched_arch) else {
+        qemu_exit::exit_failure(FAIL_SEED);
+    };
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), sched_arch) else {
         qemu_exit::exit_failure(FAIL_SCHED_NEW);
     };
@@ -422,7 +433,7 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
         ipc: Box::leak(Box::new(RwLock::new(PortRegistry::new()))),
         aspaces: Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new()))),
         rng: Box::leak(Box::new(RwLock::new(
-            Box::new(BootReserve::new()) as Box<dyn RandomReserve + Send + Sync>
+            Box::new(reserve) as Box<dyn RandomReserve + Send + Sync>
         ))),
         irq_table: Box::leak(Box::new(IrqTable::new(0))),
     }
@@ -546,6 +557,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         sys.peer_watch,
         wait_producer,
         &AARCH64_PROCESS_SPAWN,
+        sys.rng,
     );
 
     let init_ctx = KernelInitSpawner::new(

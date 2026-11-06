@@ -6,7 +6,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use tairix_abi::fs::FileId;
+use tairix_abi::fs::{DocumentStamp, FileId};
 use tairix_abi::time::Time64;
 use tairix_geometry::Rect;
 
@@ -16,7 +16,7 @@ use super::{
 };
 use crate::artwork::{ArtworkRasteriser, ArtworkReader};
 use crate::picture::Fitted;
-use crate::thumbnail::{ArtworkDocument, DocumentStamp};
+use crate::thumbnail::ArtworkDocument;
 
 const APP: &str = "/Storage/disc/Apps/!Edit";
 const SIDE: u32 = 4;

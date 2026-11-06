@@ -26,9 +26,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::blkio::{BlkForm, BlkMedium, BlkTransport};
 use tairix_abi::driver::block::{Block, BlockGeometry};
-use tairix_abi::driver::filesystem::{
-    FilesystemLabel, FilesystemWrite, MountFlags, VolumeTitle, VOLUME_TITLE_MAX,
-};
+use tairix_abi::driver::filesystem::{MountFlags, VolumeTitle};
 use tairix_abi::fsserve::{ServeOffer, SERVED_IDLE_NS};
 use tairix_abi::imageattach::{ImageAccess, ImageAttach, ImageAttachReply, ImageRefusal};
 use tairix_abi::netattach::AttachReply;
@@ -37,8 +35,8 @@ use tairix_abi::volume::{
     ArchiveName, DetachMode, FormatName, ViewBindRequest, VolumeFsType, VOLUME_NAME_MAX,
 };
 use tairix_abi::{
-    DriverError, DriverHandle, Errno, FileId, FileStat, HwDeviceClass, HwNode, LockRange, ProcId,
-    FS_NAME_MAX, HW_NODE_ROOT_ID,
+    CapabilityId, CapabilityQuery, DriverError, DriverHandle, Errno, FileId, FileStat,
+    HwDeviceClass, HwNode, LockRange, ProcId, FS_NAME_MAX, HW_NODE_ROOT_ID,
 };
 use tairix_bytedev::ByteDevice;
 use tairix_caps::CapabilitySet;
@@ -66,8 +64,9 @@ use tairix_sync::SpinLock;
 use tairix_util::fallible::concatenated;
 
 use super::{
-    mount_flags, reattach, record, record_retired, records_owners, refusal_level, storage_path,
-    take_down, volume_node, GivenUp, RuntimeVolumeService, Wiring, Writes,
+    audit_retitled, mount_flags, probed_title, reattach, record, record_retired, records_owners,
+    refusal_level, refuse_retitle, storage_path, take_down, volume_node, write_held_title, GivenUp,
+    RuntimeVolumeService, Wiring, Writes, NAME_IN_USE,
 };
 use crate::hwtree_node_ids::IMAGE_VOLUMES_NODE_ID;
 use crate::served_volume::{Granted, ServedVolume};
@@ -92,10 +91,17 @@ const IMAGE_DETACH_REFUSED: EventId = EventId(4324);
 /// Audit event: an image volume left with its file's volume, or its driver
 /// was lost.
 const IMAGE_VOLUME_RETIRED: EventId = EventId(4325);
-/// Audit event: an image volume's owner retitled it.
-const IMAGE_VOLUME_RETITLED: EventId = EventId(4327);
-/// Audit event: an image volume's retitle was refused.
-const IMAGE_RETITLE_REFUSED: EventId = EventId(4328);
+
+/// A caller's authority short of the mount authority: what an image's target
+/// is bound as, so the bind keeps an owner's rules — an empty directory of the
+/// caller's own, never the catalog — whoever attaches.
+struct ShortOfMount<'a>(&'a dyn CapabilityQuery);
+
+impl CapabilityQuery for ShortOfMount<'_> {
+    fn holds(&self, cap: CapabilityId) -> bool {
+        cap != CapabilityId::FS_MOUNT && self.0.holds(cap)
+    }
+}
 
 /// Where image volumes' mount handles are numbered from (`"IMG"`): disjoint
 /// from every other volume's.
@@ -305,7 +311,8 @@ impl FileHold {
 ///
 /// # Errors
 ///
-/// [`Errno::Busy`] while another holder's lock is in the way.
+/// [`Errno::Busy`] while another holder's lock is in the way, and
+/// [`Errno::OutOfMemory`] when the kernel cannot record the lock.
 fn lock_whole(file: LockedNode, owner: OwnerId, held: Held, task: u64) -> Result<(), Errno> {
     filelock::acquire(&Request {
         file,
@@ -320,7 +327,10 @@ fn lock_whole(file: LockedNode, owner: OwnerId, held: Held, task: u64) -> Result
         waiting: false,
     })
     .map(|wakes| wakes.wake())
-    .map_err(|_| Errno::Busy)
+    .map_err(|refusal| match refusal {
+        filelock::Refusal::OutOfMemory => Errno::OutOfMemory,
+        _ => Errno::Busy,
+    })
 }
 
 impl Drop for FileHold {
@@ -1079,6 +1089,8 @@ enum Waited {
     TimedOut,
     /// It was taken out before the attach could answer.
     Gone,
+    /// No scheduler can park the attach to wait for its driver.
+    Unparkable,
 }
 
 /// An attach's wait for its volume's driver: judged once the driver's start
@@ -1282,6 +1294,7 @@ impl RuntimeVolumeService {
             Waited::Interrupted => return Err(refused("interrupted", Errno::Interrupted)),
             Waited::TimedOut => return Err(refused("driver_silent", Errno::TimedOut)),
             Waited::Gone => return Err(refused(GONE.0, GONE.1)),
+            Waited::Unparkable => return Err(refused("unparkable", Errno::NotImplemented)),
         }
         // Mounted now, so a volume the attach gives up on is taken back
         // before the caller hears why.
@@ -1458,7 +1471,7 @@ impl RuntimeVolumeService {
                 narrowing: MountFlags::default(),
             };
             FS_SERVICE
-                .view_bind(caller.uid, caller.caps, &bind)
+                .view_bind(caller.uid, &ShortOfMount(caller.caps), &bind)
                 .map_err(|errno| {
                     if self.images.still_served(&id) {
                         Unfinished::Target(errno)
@@ -1506,19 +1519,23 @@ impl RuntimeVolumeService {
 
     /// Wait for image volume `volume`'s driver, on `task`, judging it by
     /// `activity`: until it serves or refuses the volume, falls silent, or the
-    /// caller is killed. While an operation holds the volume the driver is not
-    /// judged, but the wait stays bounded and killable; the holder wakes it
-    /// as it lets go.
+    /// caller is killed or cannot be parked. While an operation holds the
+    /// volume the driver is not judged, but the wait stays bounded and
+    /// killable; the holder wakes it as it lets go.
     fn await_driver(&self, volume: u64, task: u64, activity: &ServerActivity) -> Waited {
         let now = || wait_arch().map_or(0, WaitQueueArch::now_ns);
         let arm = |deadline: u64| {
-            VOLUME_ATTACH_WAITQ.register(task, deadline);
+            let filed = VOLUME_ATTACH_WAITQ.register(task, deadline);
             if let Some(hook) = wait_arch() {
                 hook.set_wakeup(nearest_timed_deadline());
             }
+            filed.is_ok()
         };
         let mut wait = DriverWait::begin(now(), activity.mark());
-        arm(wait.judged_at);
+        // A wait the heap cannot register could never be woken.
+        if !arm(wait.judged_at) {
+            return Waited::Unparkable;
+        }
         let waited = loop {
             let (settled, claimed) = self.stage_of(volume);
             // An operation holding the volume settles it as the attach's
@@ -1526,14 +1543,15 @@ impl RuntimeVolumeService {
             let killed = tairix_kernel_core::procsignal::kill_pending(task);
             match wait.step(settled, claimed, killed, now(), activity.mark()) {
                 Step::Over(waited) => break waited,
-                Step::Rejudge(deadline) => arm(deadline),
+                Step::Rejudge(deadline) => {
+                    if !arm(deadline) {
+                        break Waited::Unparkable;
+                    }
+                }
                 Step::Wait => {}
             }
-            // With no scheduler to park on (a host test, its driver on another
-            // thread) the wait spins, as `SleepLock` does; never on a running
-            // kernel.
             if !park_calling_task() {
-                core::hint::spin_loop();
+                break Waited::Unparkable;
             }
         };
         VOLUME_ATTACH_WAITQ.deregister(task);
@@ -1929,6 +1947,7 @@ impl RuntimeVolumeService {
                 source: &target.source,
                 fstype: offer.format.as_str(),
                 volume_id: target.id,
+                identity: target.id,
             };
             LATE_FILESYSTEM
                 .register_served(
@@ -1961,9 +1980,14 @@ impl RuntimeVolumeService {
             // Published before the driver is reachable, so a refusal has no
             // operation to turn away.
             publish_volume_identity(target.id, &["Storage", &name], &name, wiring.audit).map_err(
-                |_| {
+                |err| {
                     unmount();
-                    ("identity_unpublishable", Errno::Busy)
+                    let errno = if err == tairix_kernel_core::VolumePublishError::OutOfMemory {
+                        Errno::OutOfMemory
+                    } else {
+                        Errno::Busy
+                    };
+                    ("identity_unpublishable", errno)
                 },
             )?;
             register(driver, watch).inspect_err(|_| {
@@ -1973,7 +1997,8 @@ impl RuntimeVolumeService {
             name
         };
         let _ = LATE_FILESYSTEM.set_served_state(target.handle, Some(state));
-        let _ = LATE_FILESYSTEM.set_title(target.handle, target.title);
+        let titled = target.fstype.takes_title() && offer.title;
+        let _ = LATE_FILESYSTEM.set_title(target.handle, target.title, titled);
         let _ = LATE_FILESYSTEM.set_availability(target.handle, MountAvailability::Available);
         Ok(name)
     }
@@ -2158,40 +2183,37 @@ impl RuntimeVolumeService {
         id: &[u8; 16],
         title: &VolumeTitle,
     ) -> Result<(), Errno> {
-        let refused = |name: &str, cause: &'static str, errno: Errno| {
-            // Only a refusal of the caller's authority is a warning.
-            let level = if errno == Errno::PermissionDenied {
-                Level::Warn
-            } else {
-                Level::Info
-            };
-            record(
-                audit,
-                level,
-                IMAGE_RETITLE_REFUSED,
-                RETITLE_REFUSED,
-                name,
-                cause,
-            );
-            errno
-        };
         let claimed = {
             let mut registry = self.images.registry.lock();
             let since = registry.releases;
-            let entry = registry
+            let found = registry
                 .volumes
                 .iter_mut()
                 .find(|v| v.id == *id)
-                .filter(|v| v.name().is_some())
-                .ok_or(Errno::NotFound)?;
-            if let Some((cause, errno)) = retitle_refusal(entry, caller.uid) {
-                let name = ArrayString::<VOLUME_NAME_MAX>::from_str_truncating(
-                    entry.name().unwrap_or_default(),
-                );
-                drop(registry);
-                return Err(refused(name.as_str(), cause, errno));
+                .filter(|v| v.name().is_some());
+            match found {
+                None => Err((
+                    ArrayString::<VOLUME_NAME_MAX>::from_str_truncating("unknown"),
+                    "identity_not_attached",
+                    Errno::NotFound,
+                )),
+                Some(entry) => match retitle_refusal(entry, caller.uid) {
+                    Some((cause, errno)) => Err((
+                        ArrayString::<VOLUME_NAME_MAX>::from_str_truncating(
+                            entry.name().unwrap_or_default(),
+                        ),
+                        cause,
+                        errno,
+                    )),
+                    None => Ok(Claimed::of(self, entry, Holder::Operation, since)),
+                },
             }
-            Claimed::of(self, entry, Holder::Operation, since)
+        };
+        let claimed = match claimed {
+            Ok(claimed) => claimed,
+            Err((name, cause, errno)) => {
+                return Err(refuse_retitle(audit, name.as_str(), cause, errno));
+            }
         };
         let Claimed {
             claim,
@@ -2200,30 +2222,15 @@ impl RuntimeVolumeService {
             ..
         } = claimed;
         let volume = claim.volume;
-        let listed = || {
+        let written = write_held_title(handle, title, || {
             let mut registry = self.images.registry.lock();
             if let Some(at) = position(&registry.volumes, volume) {
                 registry.volumes[at].title = *title;
             }
-            drop(registry);
-            let _ = LATE_FILESYSTEM.set_title(handle, *title);
-        };
-        let written = LATE_FILESYSTEM
-            .driver(handle)
-            .map_err(|_| ("volume_unserved", Errno::DeviceOffline))
-            .and_then(|driver| write_title(&mut *driver.lock(), title, listed));
+        });
         drop(claim);
-        if let Err((cause, errno)) = written {
-            return Err(refused(name.as_str(), cause, errno));
-        }
-        record(
-            audit,
-            Level::Info,
-            IMAGE_VOLUME_RETITLED,
-            "image-volume: retitled by its owner",
-            name.as_str(),
-            "owner",
-        );
+        written.map_err(|(cause, errno)| refuse_retitle(audit, name.as_str(), cause, errno))?;
+        audit_retitled(audit, name.as_str(), "owner");
         Ok(())
     }
 
@@ -2712,19 +2719,6 @@ fn archive_place(
     }))
 }
 
-/// The title a probed `label` is listed under: as much of it as a title
-/// holds, cut between characters, or none for a label that is no text.
-fn probed_title(label: &[u8]) -> VolumeTitle {
-    let Ok(text) = core::str::from_utf8(label) else {
-        return VolumeTitle::EMPTY;
-    };
-    let mut end = text.len().min(VOLUME_TITLE_MAX);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    VolumeTitle::new(&text[..end]).unwrap_or(VolumeTitle::EMPTY)
-}
-
 /// Why `entry` may not be retitled for `uid` now: only its owner retitles it,
 /// and only while a driver serves it and nothing else acts on it.
 fn retitle_refusal(entry: &ImageVolume, uid: u32) -> Option<(&'static str, Errno)> {
@@ -2741,35 +2735,6 @@ fn retitle_refusal(entry: &ImageVolume, uid: u32) -> Option<(&'static str, Errno
         _ => Some(("volume_unserved", Errno::DeviceOffline)),
     }
 }
-
-/// Write `title` through `fs`, the volume's driver, and flush it, telling
-/// `listed` once the driver holds the title: its writeback publishes it then,
-/// whether or not the flush succeeds. The title it replaces is never read,
-/// and the driver answers for its format, so one that keeps no title says so
-/// before a volume that takes no writes is refused for that.
-fn write_title<F: FilesystemLabel + FilesystemWrite>(
-    fs: &mut F,
-    title: &VolumeTitle,
-    listed: impl FnOnce(),
-) -> Result<(), (&'static str, Errno)> {
-    fs.set_label(title).map_err(driver_refusal)?;
-    listed();
-    fs.flush().map_err(|why| ("flush_failed", why.as_errno()))
-}
-
-/// Why a driver's refusal of a title refuses the retitle, and what it answers
-/// its caller: a format that keeps none is `NotSupported`, never the
-/// `NotImplemented` of a service not yet installed.
-const fn driver_refusal(why: DriverError) -> (&'static str, Errno) {
-    match why {
-        DriverError::Unsupported => ("untitled_format", Errno::NotSupported),
-        DriverError::ReadOnly => ("read_only", Errno::ReadOnly),
-        why => ("title_refused", why.as_errno()),
-    }
-}
-
-/// The message of a refused retitle.
-const RETITLE_REFUSED: &str = "image-volume: retitle refused";
 
 /// Why an image is not attached, given its driver's refusal.
 const fn refusal_of(why: DriverError) -> ImageRefusal {
@@ -2837,10 +2802,6 @@ const ATTACH_REFUSED: &str = "image-volume: attach refused";
 /// The cause and refusal of an attach whose volume was taken out before it
 /// could be answered.
 const GONE: (&str, Errno) = ("volume_gone", Errno::NotAttached);
-
-/// The cause and refusal of a catalog name some other volume shows or asked
-/// for first.
-const NAME_IN_USE: (&str, Errno) = ("name_in_use", Errno::AlreadyExists);
 
 /// Why a mounted image volume's attach could not be answered as attached.
 enum Unfinished {

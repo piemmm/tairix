@@ -47,7 +47,8 @@ pub trait Source {
     fn size(&mut self) -> Result<u64, Errno>;
 }
 
-/// A file a copy writes, empty as the copy starts.
+/// A file written by position: a copy's destination, empty as the copy
+/// starts, or a recording a muxer writes and never reads back.
 pub trait Target {
     /// Write every byte of `bytes` at `offset`.
     ///

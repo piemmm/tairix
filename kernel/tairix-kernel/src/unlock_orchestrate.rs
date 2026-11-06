@@ -238,8 +238,7 @@ pub fn spawn_unlock<P: UnlockPort>(
         port.release_console0_to_login();
         crate::app_store::APP_STORE.note_unavailable();
     };
-    let admitted = ctx.spawn_kernel_service(alloc::boxed::Box::new(body));
-    let Some(task_id) = admitted else {
+    let Some(task_id) = admit_service(ctx, body) else {
         note(
             audit,
             Level::Error,
@@ -263,6 +262,32 @@ pub fn spawn_unlock<P: UnlockPort>(
     true
 }
 
+/// Admit `body` as a kernel service through `ctx`: `None` when the heap
+/// refuses the box it is handed over in, or `ctx` the service.
+pub(crate) fn admit_service(
+    ctx: &dyn InitSpawnCtx,
+    body: impl FnMut(&mut dyn YieldHandle) + Send + 'static,
+) -> Option<tairix_kernel_sched_api::TaskId> {
+    ctx.spawn_kernel_service(alloc::boxed::Box::try_new(body).ok()?)
+}
+
+/// The unlock task's capability record, leaked because the brought-up
+/// device's host borrows it for the life of the shared disk.
+///
+/// # Errors
+///
+/// When the heap cannot hold the record or the box it is leaked from.
+fn unlock_caller(
+    caps: CapabilitySet,
+    audit: &'static (dyn Sink + Sync),
+) -> Result<&'static TaskCapabilities, &'static str> {
+    let record = TaskCapabilities::derive(UNLOCK_TASK, UserId(0), caps, caps, audit)
+        .ok()
+        .and_then(|record| alloc::boxed::Box::try_new(record).ok())
+        .ok_or("root-unlock: no memory for the unlock task's capability record")?;
+    Ok(alloc::boxed::Box::leak(record))
+}
+
 /// Admit the bound floor driver at the signed load gate, then bring its
 /// device up through `port` and run the shared tail over it; on success this
 /// never returns.
@@ -278,11 +303,7 @@ fn run_unlock<P: UnlockPort>(
     // The kthread's one yield handle, shared by the re-arming IRQ waiter and
     // the console reader.
     let coop = CooperativeYield::new(yielder);
-    // Leaked because the brought-up device's host borrows it for the life of
-    // the shared disk.
-    let caller: &'static TaskCapabilities = alloc::boxed::Box::leak(alloc::boxed::Box::new(
-        TaskCapabilities::derive(UNLOCK_TASK, UserId(0), caps, caps, env.audit),
-    ));
+    let caller = unlock_caller(caps, env.audit)?;
     admit_floor(binding.driver, env.audit)?;
     let floor = FloorEnv {
         caller,
@@ -497,11 +518,19 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
             return None;
         };
         grow_volume(&mut fs, self.audit);
-        let fs = fs.with_cluster_cache(alloc::boxed::Box::new(TransformClusterCache::for_volume(
-            ROOT_VOLUME_HANDLE,
-            self.pressure,
-            self.audit,
-        )));
+        let cache =
+            TransformClusterCache::for_volume(ROOT_VOLUME_HANDLE, self.pressure, self.audit)
+                .ok()
+                .and_then(|cache| alloc::boxed::Box::try_new(cache).ok());
+        let Some(cache) = cache else {
+            note(
+                self.audit,
+                Level::Error,
+                "root-unlock: writable-state no memory for the transform cache",
+            );
+            return None;
+        };
+        let fs = fs.with_cluster_cache(cache);
         // The root backs the system's writable grafts, so it holds the whole
         // system reserve: the system keeps writing once users fill it.
         let Ok(fs) = fs.with_system_reserve(&SYSTEM_WRITE_SET) else {
@@ -534,7 +563,14 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
         // through this driver directly. Fail-soft: a registration refusal
         // leaves the writable tree and `users_admin` failing closed.
         let volume_uuid = fs.volume_uuid();
-        let driver: alloc::boxed::Box<dyn KernelFs> = alloc::boxed::Box::new(fs);
+        let Ok(driver) = alloc::boxed::Box::try_new(fs) else {
+            note(
+                self.audit,
+                Level::Error,
+                "root-unlock: writable-state no memory for the volume's driver",
+            );
+            return None;
+        };
         register_writable_state(
             driver,
             volume_uuid,
@@ -618,6 +654,41 @@ pub fn finish_virtio_unlock<T: Transport + 'static>(
     finish_unlock(blk, coop, env, console)
 }
 
+/// The boot disk served as the driver store, leaked to `'static` behind the
+/// block-sharing layer so the store's serve loop and the root unlock, two
+/// preemptive tasks, each drive it through serialised windows of their own.
+///
+/// The disk has no block-service endpoint to fold its counters at, so they are
+/// metered around the device itself, beneath the cache: a hit never reaches
+/// the medium. A geometry fault refuses the disk.
+fn boot_store<B: Block + 'static>(
+    blk: B,
+    pressure: &'static MemoryPressure,
+    audit: &'static (dyn Sink + Sync),
+) -> Result<&'static DriverStoreService<BlockCache<MeteredBlock<B>>>, &'static str> {
+    let blk = MeteredBlock::new(blk, BOOT_DISK_DEV, audit);
+    let io = blk.io_source();
+    let blk = BlockCache::for_disk(blk, crate::block_cache::BOOT_DISK_OWNER, pressure, audit)
+        .map_err(|err| match err {
+            tairix_abi::DriverError::OutOfMemory => "root-unlock: no memory for the block cache",
+            _ => "root-unlock: block device geometry",
+        })?;
+    // `None` is a cache classification refused at birth, which admits nothing
+    // and is already audited.
+    if let Some(ledger) = blk.ledger() {
+        tairix_kernel_core::memstats::MEM_STATS
+            .register_ledger(ledger)
+            .map_err(|_| "root-unlock: no memory for the block cache")?;
+    }
+    let store = DriverStoreService::new(
+        SharedBlock::new(blk).map_err(|_| "root-unlock: block device geometry")?,
+        io,
+    );
+    let store = alloc::boxed::Box::try_new(store)
+        .map_err(|_| "root-unlock: no memory for the driver store")?;
+    Ok(alloc::boxed::Box::leak(store))
+}
+
 /// The shared two-task tail both floor block bring-ups feed, turning the one
 /// brought-up disk into a disk shared for life by two independent preemptive
 /// tasks (Design D D2b-2c).
@@ -668,35 +739,7 @@ pub fn finish_unlock<B: Block + 'static>(
     // storage floor passes through.
     crate::writeback_service::start(ctx, audit);
 
-    // The boot disk has no serving block-service endpoint to fold its
-    // counters at, so the fold is wrapped directly around the device here,
-    // *under* the cache: a cache hit never reaches the medium, and counting
-    // one as device work would report throughput and utilisation the disk
-    // never did. The readings travel with the store below so both boot-floor
-    // mounts publish them.
-    let blk = MeteredBlock::new(blk, BOOT_DISK_DEV, audit);
-    let io = blk.io_source();
-    // The one brought-up disk, boot-leaked to `'static` behind the
-    // block-sharing layer so two independent preemptive tasks drive it through
-    // their own serialised windows: *this* task is the driver-store serve loop
-    // (below), and a *separate* spawned task runs the root unlock. A
-    // geometry fault refuses the device fail-closed. The device sits behind
-    // the SMART11 block cache (`plans/SMARTRAM.md`), on the device side of the
-    // sharing lock, so every window reads through one coherent,
-    // pressure-governed cache of recently used blocks.
-    let blk = BlockCache::for_disk(blk, crate::block_cache::BOOT_DISK_OWNER, pressure, audit)
-        .map_err(|_| "root-unlock: block device geometry")?;
-    // A `None` means classification refused the cache at birth (it is then
-    // poisoned and admits nothing), so there is nothing to register — the
-    // refusal is already in the audit log.
-    if let Some(ledger) = blk.ledger() {
-        tairix_kernel_core::memstats::MEM_STATS.register_ledger(ledger);
-    }
-    let store: &'static DriverStoreService<BlockCache<MeteredBlock<B>>> =
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(DriverStoreService::new(
-            SharedBlock::new(blk).map_err(|_| "root-unlock: block device geometry")?,
-            io,
-        )));
+    let store = boot_store(blk, pressure, audit)?;
 
     // Spawn the root unlock as its own preemptive task. The user-data
     // volume's protection is independent of the always-readable
@@ -761,7 +804,7 @@ pub fn finish_unlock<B: Block + 'static>(
                 &coop,
                 crate::unlock_service::unlock_console_task(),
                 crate::unlock_service::WRONG_PASSPHRASE_RETRY_DELAY_NS,
-            );
+            )
         };
         // The set-once publish destinations a successful unlock fills. Bound
         // by name so the pre-unlock Supervisor's `mount` command publishes
@@ -816,7 +859,7 @@ pub fn finish_unlock<B: Block + 'static>(
         // `'static`-leaked — and this task's window borrow ends with it).
     };
     spawn_root_prefetch(ctx, store, audit);
-    if let Some(unlock_task) = ctx.spawn_kernel_service(alloc::boxed::Box::new(unlock_body)) {
+    if let Some(unlock_task) = admit_service(ctx, unlock_body) {
         // Publish the interactive unlock kthread's scheduler id so its
         // passphrase reader can register on `CONSOLE_WAITQ` and the console RX
         // interrupt can unpark it by id. On a multi-core boot the spawned body
@@ -878,7 +921,7 @@ fn spawn_root_prefetch<B: Block + 'static>(
             elapsed_ns.map(|ns| ns / 1_000_000),
         );
     };
-    match ctx.spawn_kernel_service(alloc::boxed::Box::new(prefetch)) {
+    match admit_service(ctx, prefetch) {
         Some(task) => note_field(
             audit,
             (
@@ -994,7 +1037,8 @@ fn serve_driver_store<B: Block + 'static>(
         store_endpoint_binder_caps(),
         store_endpoint_binder_caps(),
         audit,
-    );
+    )
+    .map_err(|_| "driver-store: no memory for the store binder's capability record")?;
     // The persistent `/System` window is taken in an inner scope so that, on a
     // fail-closed fallback, the window borrow of `store` ends before the
     // `store.hold` park. On the success path `serve_system_store` never
@@ -1034,6 +1078,73 @@ fn serve_driver_store<B: Block + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The unlock task's record the heap refuses, deriving it or boxing it to
+    /// leak, is a stated refusal rather than an abort.
+    #[test]
+    fn an_unlock_record_the_heap_refuses_is_a_stated_refusal() {
+        static QUIET: crate::test_support::NullSink = crate::test_support::NullSink;
+        let mut granted = 0;
+        loop {
+            let caller = tairix_fuzzseed::meter::refusing_after(granted, || {
+                unlock_caller(CapabilitySet::empty(), &QUIET)
+            });
+            if caller.is_ok() {
+                break;
+            }
+            granted += 1;
+            assert!(granted < 16, "the record was never granted");
+        }
+        assert!(granted >= 2, "the record and its box were each refused");
+    }
+
+    /// A service whose body the heap cannot box is not admitted, its context
+    /// never handed it, where the box aborted the kernel.
+    #[test]
+    fn a_service_the_heap_cannot_box_is_not_admitted() {
+        use core::sync::atomic::{AtomicU32, Ordering};
+
+        use tairix_kernel_core::kthread::KernelServiceBody;
+
+        use crate::test_support::{inert_spawn_ctx, scratch_frames};
+
+        /// A context counting the services it is handed, admitting none.
+        struct Counting {
+            frames: FrameAllocator,
+            handed: AtomicU32,
+        }
+
+        impl InitSpawnCtx for Counting {
+            inert_spawn_ctx!();
+
+            fn spawn_kernel_service(
+                &self,
+                _body: KernelServiceBody,
+            ) -> Option<tairix_kernel_sched_api::TaskId> {
+                self.handed.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+
+        let ctx = Counting {
+            frames: scratch_frames(),
+            handed: AtomicU32::new(0),
+        };
+        // A body holding something, so boxing it is an allocation.
+        let body = |tag: u64| move |_: &mut dyn YieldHandle| assert_ne!(tag, 0);
+        let refused = tairix_fuzzseed::meter::refusing_above(0, || admit_service(&ctx, body(1)));
+        assert!(refused.is_none());
+        assert_eq!(
+            ctx.handed.load(Ordering::Relaxed),
+            0,
+            "nothing was handed over"
+        );
+        assert!(
+            admit_service(&ctx, body(2)).is_none(),
+            "the context admits none"
+        );
+        assert_eq!(ctx.handed.load(Ordering::Relaxed), 1);
+    }
 
     /// Every driver the floor holds passes the signed gate, the virtio ones
     /// included now that they are admitted before their device is touched;

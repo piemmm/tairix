@@ -1565,8 +1565,8 @@ impl Window {
     /// declared resize range allows for maximize, and back to the geometry
     /// it had before it left restored, held inside that range. Returns the new size state and the
     /// resulting client rectangle, or `None` (changing nothing) for an
-    /// undecorated window, a non-resizable one, a state already in force,
-    /// or a resize that fails closed.
+    /// undecorated window, a non-resizable one or a tool window, a state
+    /// already in force, or a resize that fails closed.
     ///
     /// An application whose content stops growing declares a ceiling, and
     /// maximize honours it: "as large as this window is useful" is a better
@@ -1595,9 +1595,9 @@ impl Window {
         scale: Scale,
         theme: &Theme,
     ) -> Option<(WindowSizeState, Rect)> {
-        // The declaration, not the live furniture: a fullscreen window has
-        // none, and it still has to be able to leave.
-        if !self.declared_resizable()? || target == self.size_state {
+        // The frame's declaration, not the live furniture: a fullscreen
+        // window has none, and it still has to be able to leave.
+        if !self.frame.as_ref()?.maximizes() || target == self.size_state {
             return None;
         }
         let was = self.size_state;

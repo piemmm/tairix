@@ -8,6 +8,12 @@ mount — elencare i filesystem montati o montare un'immagine disco o un archivi
 
 `mount [option...] image [target]`
 
+`mount --list-held`
+
+`mount --replay-held name`
+
+`mount --discard-held name`
+
 ## DESCRIPTION
 
 Senza operandi, elenca i filesystem montati, una riga
@@ -52,6 +58,18 @@ disco partizionato, uno dei dischi di un array RAID o un filesystem
 i cui proprietari registrati sono sempre rispettati (ext2, ext3, ext4,
 ARXFS) non viene montata, e `mount` ne dice il motivo.
 
+Un disco reinserito mentre conteneva ancora modifiche non ancora
+scritte su di esso viene montato in sola lettura, con le modifiche
+conservate, quando il suo dispositivo non può mostrare che si tratta
+dello stesso disco e non di una copia; l'elenco lo contrassegna con
+`[replay-unconfirmed]`, e `--list-held` elenca solo questi volumi.
+`--replay-held` vi scrive le modifiche, se il suo contenuto lo mostra
+invariato da allora; `--discard-held` le scarta e prende il disco così
+com'è. In entrambi i casi il volume viene montato di nuovo, in lettura
+e scrittura dove possibile. Rispondere richiede l'autorità di montaggio
+(`CAP_FS_MOUNT`); per un disco rimovibile, il desktop pone la domanda
+anche all'utente davanti al computer.
+
 ## OPTIONS
 
 - `-r, --read-only` — montare il volume in sola lettura (come `-o ro`).
@@ -81,6 +99,14 @@ ARXFS) non viene montata, e `mount` ne dice il motivo.
 - `-v, --verbose` — indicare dove è stato montato il volume.
 - `-l, --show-labels` — accettato per l'elenco, che non ha etichette
   da aggiungere.
+- `--list-held` — elencare solo i volumi le cui modifiche attendono
+  `--replay-held` o `--discard-held`.
+- `--replay-held <name>` — scrivere sul suo disco le modifiche che un
+  volume conserva, se il suo contenuto lo mostra ancora invariato;
+  `name` è il nome del volume in `/Storage`, una directory in cui è
+  mostrato o la sua radice `id::`.
+- `--discard-held <name>` — scartare le modifiche che un volume
+  conserva, prendendo il suo disco così com'è.
 - `-h, -?, --help` — mostrare la guida breve di questo comando.
 
 ## EXAMPLES
@@ -96,15 +122,22 @@ ARXFS) non viene montata, e `mount` ne dice il motivo.
   quando potete scrivere l'archivio e la sua cartella.
 - `mount -r backup.tar.gz /Storage/backup` — montare in sola lettura un
   archivio tar compresso come `backup`.
+- `mount --list-held` — elencare i volumi le cui modifiche attendono
+  una risposta.
+- `mount --replay-held backup` — scrivere sul suo disco le modifiche
+  che `/Storage/backup` conserva.
 
 ## EXIT STATUS
 
-- `0` — l'elenco è stato scritto, o il volume è stato montato (o la
-  guida breve è stata scritta).
-- `1` — la riga di comando non è stata compresa.
+- `0` — l'elenco è stato scritto, il volume è stato montato, o le sue
+  modifiche conservate sono state scritte o scartate (o la guida breve
+  è stata scritta).
+- `1` — la riga di comando non è stata compresa, o non potete
+  rispondere per le modifiche del volume.
 - `2` — non è stato possibile leggere l'elenco dei montaggi, o
   scrivere sul terminale.
-- `32` — l'immagine non è stata montata.
+- `32` — l'immagine non è stata montata, o le modifiche del volume non
+  sono state né scritte né scartate.
 
 ## ENVIRONMENT
 

@@ -366,7 +366,7 @@ impl Picture {
 
     /// A copy, or `None` where the allocator refuses one.
     pub(crate) fn try_clone(&self) -> Option<Self> {
-        let copied = |bytes: &[u8]| fallible::collected(bytes.len(), bytes.iter().copied());
+        let copied = |bytes: &[u8]| fallible::copied(bytes);
         let pixels = match &self.pixels {
             Pixels::Rgba(rgba) => Pixels::Rgba(copied(rgba)?),
             Pixels::Indexed {
@@ -376,7 +376,7 @@ impl Picture {
                 mask,
             } => Pixels::Indexed {
                 depth: *depth,
-                palette: fallible::collected(palette.len(), palette.iter().copied())?,
+                palette: fallible::copied(palette)?,
                 indices: copied(indices)?,
                 mask: match mask {
                     Some(mask) => Some(copied(mask)?),

@@ -33,9 +33,18 @@ Deckkraft und der Angabe, ob sie sichtbar ist; gemalt wird immer auf einer
 Ebene, und das Fenster zeigt sie übereinandergelegt. OpenRaster behält die
 Ebenen; jedes andere Format erhält sie übereinandergelegt. Das Menü Ebenen
 fügt Ebenen hinzu, kopiert, löscht, hebt und senkt sie, vereint eine mit der
-darunter und reduziert das Bild auf eine Ebene, und seine
-Ebeneneigenschaften benennen eine Ebene um und legen fest, wie viel von ihr
-zu sehen ist. Korrekturen, Füllungen und Striche ändern die Ebene, auf der
+darunter und reduziert das Bild auf eine Ebene. Der Bereich Ebenen, den
+Ansicht ▸ Bereiche zeigt, hält oben die Deckkraft der Ebene, auf der gemalt
+wird, und die Schaltflächen Neu, Duplizieren, Löschen und Nach unten vereinen,
+darunter eine Zeile je Ebene, die oberste zuerst, mit einem Auge, einem
+kleinen Bild der Ebene, ihrem Namen und ihrer Deckkraft. Ein Druck auf eine
+Zeile malt auf ihrer Ebene, einer auf ihr Auge zeigt oder verbirgt die Ebene,
+einer auf den Namen der Ebene, auf der gemalt wird, benennt sie um, und eine
+gezogene Zeile verschiebt ihre Ebene nach oben oder unten; jedes davon außer
+dem Wählen einer Zeile, und eine Änderung der Deckkraft, wie lange sie auch
+gezogen wird, ist ein Schritt, der sich rückgängig machen lässt. Schwebend
+lässt sich das Fenster des Bereichs von zwei Zeilen bis zu allen in der Größe
+ändern. Korrekturen, Füllungen und Striche ändern die Ebene, auf der
 gemalt wird; Drehen, Spiegeln, Größe ändern und Zuschneiden ändern jede
 Ebene. Ein Bild mit Palette hat eine einzige Ebene.
 
@@ -82,8 +91,13 @@ solange er still gehalten wird. Mit gedrückter Umschalttaste entsteht ein
 Quadrat, ein Kreis oder eine Linie im Vielfachen von 45 Grad.
 
 An beiden Seiten des Fensters laufen Bereiche entlang: standardmäßig links der
-Bereich Werkzeuge und rechts der Bereich Farbe, darunter der Bereich
-Korrektur, sobald eine Korrektur geöffnet wird. Jeder trägt oben ein schmales
+Bereich Werkzeuge und rechts der Bereich Farbe, darunter die Bereiche Ebenen,
+Korrekturen und Effekte, sobald sie gezeigt werden oder eine Korrektur oder
+ein Effekt geöffnet wird. Die Bereiche einer Seite stapeln sich in einer
+Spalte: Jeder erhält mindestens den Platz, den er braucht, dann wächst der
+zuletzt geöffnete zuerst bis zu allem, was er enthält, und ein Bereich mit
+weniger Platz rollt in sich, während die Spalte nie rollt. Jeder trägt oben
+ein schmales
 Band mit seinem Namen, einem Schalter, der ihn auf sein Band einrollt, und
 einem Zeichen, das ihn schließt; Ansicht ▸ Bereiche zeigt einen geschlossenen
 Bereich wieder, und Bereiche zurücksetzen stellt alle Bereiche so, wie ein
@@ -95,8 +109,12 @@ verschoben wird, über dem Bild bleibt und mit seiner Markierung geschlossen
 wird; zurück über eine Seite gezogen, dockt er dort wieder an. Auch die
 Palette kann schweben: Die Schaltfläche am rechten Ende ihres Streifens oder
 Ansicht ▸ Bereiche ▸ Palette lösen bringt sie in ein kleines eigenes Fenster,
-ihre Farben in einem Raster angeordnet; wird dieses Fenster geschlossen oder
-an den unteren Rand des Fensters zurückgezogen, liegt sie wieder im Streifen.
+ihre Farben in einem Raster angeordnet. Wird dieses Fenster in der Größe
+verändert, werden die Farben passend zu seiner Breite neu angeordnet und rollen
+auf und ab, wenn nicht alle hineinpassen; wird es geschlossen oder an den
+unteren Rand des Fensters zurückgezogen, liegt sie wieder im Streifen. Im
+Streifen wie in ihrem Fenster sind Primär- und Sekundärfarbe mit ihren
+RISC-OS-Farbnummern gekennzeichnet.
 
 Das Auswahlwerkzeug zieht ein Rechteck, eine Ellipse, ein freihändiges
 Lasso oder ein Polygon Ecke für Ecke auf, oder es wählt mit dem Zauberstab
@@ -122,26 +140,47 @@ Hand schiebt das Bild durch das Fenster, wie die Leertaste mit jedem
 Werkzeug; das Zoomwerkzeug vergrößert per Klick, mit Alt verkleinert es,
 und ein aufgezogener Rahmen füllt das Fenster.
 
-Das Menü Korrekturen öffnet eine Korrektur im Bereich Korrektur, wobei jedes
-andere Werkzeug, jeder Bereich und jedes Menü zur Hand bleibt: Helligkeit und
-Kontrast, Farbton und Sättigung, Farbbalance, Tonwerte, Gradationskurven,
-Weißabgleich, Posterisieren, Schwellwert, Weichzeichnen, Schärfen, Verpixeln
-und Rauschen hinzufügen; Entsättigen und Kanten finden, die keine
-Einstellungen haben, wirken sofort. Das Bild zeigt die Korrektur, während sich
-ihre Einstellungen bewegen, Vorschau schaltet das zum Vergleich aus und ein,
+Zwei Bereiche halten die Operationen des Bildes, jeder angeführt von einer
+Liste, die eine davon wählt: Der Bereich Korrekturen hält Helligkeit und
+Kontrast, Tonwerte, Gradationskurven, Farbton und Sättigung, Farbbalance,
+Weißabgleich, Entsättigen, Umkehren, Posterisieren, Schwellwert und den
+Kanalmixer, der Bereich Effekte Gaußschen Weichzeichner, Unscharf maskieren,
+Median, Rauschen hinzufügen, Kanten finden, Relief und Verpixeln. Jede Zeile
+des Menüs Korrekturen öffnet ihre Operation in ihrem Bereich. Unter der Liste
+liegen die Einstellungen der gewählten Operation, dann Vorschau, Zurücksetzen
+und Anwenden; jedes andere Werkzeug, jeder Bereich und jedes Menü bleibt zur
+Hand. Das Bild zeigt die Operation, während sich ihre Einstellungen bewegen,
+den sichtbaren Teil zuerst; Vorschau schaltet das zum Vergleich aus und ein,
 Zurücksetzen stellt ihre Einstellungen zurück, und Anwenden behält sie als
-einen Schritt, der sich rückgängig machen lässt; Malen, Füllen oder das Wählen
-einer anderen Korrektur wendet sie zuerst an. Tonwerte setzt Schwarz-, Grau-
-und Weißpunkt über einem Histogramm der Ebene, für alle Kanäle zusammen oder
-jeden einzeln, mit Pipetten, die sie aus dem Bild nehmen, und Auto;
-Gradationskurven biegen die Töne eines Kanals durch Punkte, die über sein
-Histogramm gezogen werden; der Weißabgleich setzt Temperatur und Tönung des
-Lichts, aus einem gewählten neutralen Pixel oder per Auto; Farbton und
-Sättigung drehen, verstärken und erhellen alle Farben oder einen Bereich von
-ihnen; die Farbbalance verschiebt Tiefen, Mitteltöne und Lichter zu Rot, Grün
-oder Blau und erhält auf Wunsch ihre Helligkeit. Alles bleibt auf die Auswahl
+einen Schritt, der sich rückgängig machen lässt. Eine Vorschau gilt für beide
+Bereiche: Wer in einer Liste eine andere Operation wählt oder die
+Einstellungen des anderen Bereichs bewegt, wendet die verlassene Operation als
+einen Schritt an, wo ihre Einstellungen bewegt wurden und sie das Bild
+ändert, und verwirft sie sonst, sodass das Durchsehen einer Liste nichts
+ändert. Malen, Füllen, eine Transformation oder ein Speichern wendet die
+offene Operation zuerst auf dieselbe Weise an oder verwirft sie; das Markieren
+einer Auswahl, die Ansicht, die Farben und Rückgängig lassen sie offen.
+
+Tonwerte setzt Schwarz-, Grau- und Weißpunkt über einem Histogramm der Ebene,
+für alle Kanäle zusammen oder jeden einzeln, mit Pipetten, die sie aus dem
+Bild nehmen, und Auto; Gradationskurven biegen die Töne eines Kanals durch
+Punkte, die über sein Histogramm gezogen werden; der Weißabgleich setzt
+Temperatur und Tönung des Lichts, aus einem gewählten neutralen Pixel oder per
+Auto; Farbton und Sättigung drehen, verstärken und erhellen alle Farben oder
+einen Bereich von ihnen; die Farbbalance verschiebt Tiefen, Mitteltöne und
+Lichter zu Rot, Grün oder Blau und erhält auf Wunsch ihre Helligkeit; der
+Kanalmixer gewichtet jeden Kanal aus Rot, Grün und Blau und einer Konstante
+oder macht ein Grau aus ihnen. Der Gaußsche Weichzeichner macht das Bild um
+seinen Radius weicher; Unscharf maskieren schärft es, indem es jede Farbe um
+einen Betrag von ihrer Weichzeichnung wegschiebt, wo beide um mindestens einen
+Schwellwert auseinanderliegen; Median gibt jedem Pixel den mittleren Wert der
+Pixel um es herum, glättet Sprenkel und erhält Kanten; Rauschen hinzufügen
+legt gleichmäßige oder gaußsche Sprenkel, farbig oder grau; Kanten finden
+lässt die Kanten zwischen Farben aufleuchten; Relief macht aus dem Bild ein
+graues Relief, aus einem Winkel beleuchtet; und Verpixeln legt Quadrate, jedes
+in der mittleren Farbe dessen, was es bedeckt. Alles bleibt auf die Auswahl
 beschränkt. Bei einem Bild mit Palette ändert eine Korrektur dessen Palette,
-und solche, die benachbarte Farben brauchen, werden nicht angeboten.
+und die Effekte, die benachbarte Farben brauchen, werden nicht angeboten.
 
 Der Bereich Farbe enthält Primär- und Sekundärfarbe und einen Farbwähler für
 die gewählte der beiden: Ein Klick auf eine Farbe wählt sie, dann wird sie auf

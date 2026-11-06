@@ -188,6 +188,8 @@ const NUM_VOLUME_ATTACH: u64 = SyscallNumber::VOLUME_ATTACH.as_u16() as u64;
 const NUM_VOLUME_DETACH: u64 = SyscallNumber::VOLUME_DETACH.as_u16() as u64;
 /// `volume_retitle` syscall number (as above).
 const NUM_VOLUME_RETITLE: u64 = SyscallNumber::VOLUME_RETITLE.as_u16() as u64;
+/// `volume_replay` syscall number (as above).
+const NUM_VOLUME_REPLAY: u64 = SyscallNumber::VOLUME_REPLAY.as_u16() as u64;
 /// `volume_read` syscall number (as above).
 const NUM_VOLUME_READ: u64 = SyscallNumber::VOLUME_READ.as_u16() as u64;
 /// `volume_write` syscall number (as above).
@@ -232,6 +234,9 @@ const NUM_SHM_CREATE_DMA: u64 = SyscallNumber::SHM_CREATE_DMA.as_u16() as u64;
 
 /// `shm_grant_peer` syscall number (as above).
 const NUM_SHM_GRANT_PEER: u64 = SyscallNumber::SHM_GRANT_PEER.as_u16() as u64;
+
+/// `shm_grant_to` syscall number (as above).
+const NUM_SHM_GRANT_TO: u64 = SyscallNumber::SHM_GRANT_TO.as_u16() as u64;
 
 /// `call_peer_holds` syscall number (as above).
 const NUM_CALL_PEER_HOLDS: u64 = SyscallNumber::CALL_PEER_HOLDS.as_u16() as u64;
@@ -515,6 +520,9 @@ const NUM_IPC_RECV: u64 = SyscallNumber::IPC_RECV.as_u16() as u64;
 
 /// `call_peer_origin` syscall number (as above).
 const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u64;
+
+/// `child_origin` syscall number (as above).
+const NUM_CHILD_ORIGIN: u64 = SyscallNumber::CHILD_ORIGIN.as_u16() as u64;
 
 /// `wall_time_get` syscall number (as above).
 const NUM_WALL_TIME_GET: u64 = SyscallNumber::WALL_TIME_GET.as_u16() as u64;
@@ -1609,10 +1617,10 @@ pub fn spawn_with(
         Err(err) => return -i64::from(err.as_i32()),
     };
     let mut block = alloc::vec![0u8; len];
-    // The canary and cpu-features fields are the kernel's to mint for the
-    // child (the migration-safe common set, from the boot-time detection); the
-    // encoder requires values, so carry zero and the kernel ignores them.
-    if let Err(err) = tairix_abi::process_start_write_into(&mut block, args, env, 0, 0) {
+    // The facts are the kernel's to mint for the child, so the block carries
+    // none.
+    let facts = tairix_abi::StartFacts::UNSET;
+    if let Err(err) = tairix_abi::process_start_write_into(&mut block, args, env, &facts) {
         return -i64::from(err.as_i32());
     }
     spawn_raw(path, console, target_uid, &block)
@@ -1643,10 +1651,10 @@ pub fn spawn_attached(
         Err(err) => return -i64::from(err.as_i32()),
     };
     let mut block = alloc::vec![0u8; len];
-    // The canary and cpu-features fields are the kernel's to mint for the
-    // child (the migration-safe common set, from the boot-time detection); the
-    // encoder requires values, so carry zero and the kernel ignores them.
-    if let Err(err) = tairix_abi::process_start_write_into(&mut block, args, env, 0, 0) {
+    // The facts are the kernel's to mint for the child, so the block carries
+    // none.
+    let facts = tairix_abi::StartFacts::UNSET;
+    if let Err(err) = tairix_abi::process_start_write_into(&mut block, args, env, &facts) {
         return -i64::from(err.as_i32());
     }
     spawn_encoded(path, &attach.to_le_bytes(), &block)
@@ -1751,7 +1759,8 @@ fn spawn_encoded(path: &[u8], attach: &[u8], strings: &[u8]) -> i64 {
 /// and a write with no reader left fails with
 /// [`tairix_abi::Errno::BrokenPipe`]. An end is handed to a spawned child
 /// through a [`tairix_abi::FdWire::Handle`] wire in [`spawn_attached`]'s
-/// attach block. Unprivileged: a pipe reaches only the caller's own table.
+/// attach block, or to a live process through [`fd_grant`]. Unprivileged: the
+/// pipe is made in the caller's own table alone.
 ///
 /// # Errors
 ///
@@ -1774,6 +1783,51 @@ pub fn pipe_create() -> Result<(u32, u32), i64> {
         return Err(signed);
     }
     Ok((fds[0], fds[1]))
+}
+
+/// Spawn `path` with `args` over a fresh pipe pair — its fd 0 the read end
+/// of a request pipe, its fd 1 the write end of a reply pipe, its attach block
+/// built by `attach` from that wiring — returning the parent's
+/// `(pid, request write end, reply read end)`.
+///
+/// The one place a child is spawned over a pipe pair of its own, whatever its
+/// shape: a sandboxed parser, a drawing saver, a component its spawner speaks a
+/// protocol to, or an elevated program the login broker hands to its
+/// requester. The parent's copies of the child's two ends are closed whatever
+/// the spawn's outcome, so a dead child reads as end-of-stream rather than
+/// idling on a dangling write end, and a refusal leaves no end open.
+///
+/// # Errors
+///
+/// The pipes' or the spawn's typed refusal.
+pub fn spawn_piped<A>(path: &[u8], args: &[&[u8]], attach: A) -> Result<(i64, u32, u32), Errno>
+where
+    A: FnOnce([tairix_abi::FdWire; tairix_abi::STD_STREAM_COUNT]) -> tairix_abi::SpawnAttach,
+{
+    // Request pipe: parent writes, child fd 0 reads.
+    let (request_read, request_write) = pipe_create().map_err(Errno::from_syscall)?;
+    // Reply pipe: child fd 1 writes, parent reads.
+    let (reply_read, reply_write) = match pipe_create() {
+        Ok(pair) => pair,
+        Err(ret) => {
+            let _ = fs_close(request_read);
+            let _ = fs_close(request_write);
+            return Err(Errno::from_syscall(ret));
+        }
+    };
+    let mut wires = [tairix_abi::FdWire::Closed; tairix_abi::STD_STREAM_COUNT];
+    wires[STDIN as usize] = tairix_abi::FdWire::Handle(request_read);
+    wires[tairix_abi::STDOUT as usize] = tairix_abi::FdWire::Handle(reply_write);
+    let pid = spawn_attached(path, &attach(wires), args, &[]);
+    // The child holds counted clones of its two wired ends.
+    let _ = fs_close(request_read);
+    let _ = fs_close(reply_write);
+    if pid < 0 {
+        let _ = fs_close(request_write);
+        let _ = fs_close(reply_read);
+        return Err(Errno::from_syscall(pid));
+    }
+    Ok((pid, request_write, reply_read))
 }
 
 /// Create a pseudo-terminal — one kernel object joining a **master** end
@@ -2323,6 +2377,25 @@ pub fn volume_retitle(request: &[u8]) -> i64 {
     // reading it. `request` is a live shared `&[u8]` for the duration of
     // the call.
     let ret = unsafe { raw_syscall(NUM_VOLUME_RETITLE, [ptr, request.len() as u64, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Answer for the writes held for a re-inserted volume whose device could not
+/// prove its medium (`SyscallNumber::VOLUME_REPLAY`,
+/// `docs/src/filesystem/drives.md` §8).
+///
+/// `request` is an encoded [`tairix_abi::volume::VolumeReplayRequest`]. The
+/// mount authority answers for any such volume, the process holding the seat
+/// for a removable one. Returns `0` on success or `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn volume_replay(request: &[u8]) -> i64 {
+    let ptr = request.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(ptr, len)` pair against the caller's address space before
+    // reading it. `request` is a live shared `&[u8]` for the duration of
+    // the call.
+    let ret = unsafe { raw_syscall(NUM_VOLUME_REPLAY, [ptr, request.len() as u64, 0, 0, 0, 0]) };
     ret as i64
 }
 
@@ -4618,7 +4691,8 @@ fn call_recv_with_flags(
 /// reply larger than the endpoint's `max_reply` (`MessageTooLarge`), an
 /// unknown or already-answered ticket or unknown endpoint (`NotFound`), or a
 /// missing receive capability / foreign endpoint (`PermissionDenied`). The
-/// wrapper hides no error.
+/// wrapper hides no error. The answer lands in the room its call was posted
+/// with, so it is never refused for memory.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn call_reply(endpoint: u64, ticket: u64, reply: &[u8]) -> i64 {
@@ -4689,6 +4763,35 @@ pub fn call_peer_origin(endpoint: u64, ticket: u64, out: &mut [u8]) -> Result<us
 pub fn peer_origin(endpoint: u64, ticket: u64) -> Result<Origin, Errno> {
     let mut buf = [0u8; ORIGIN_WIRE_LEN];
     let len = call_peer_origin(endpoint, ticket, &mut buf).map_err(Errno::from_syscall)?;
+    Origin::from_bytes(buf.get(..len).ok_or(Errno::BufferTooSmall)?)
+}
+
+/// The kernel-attested [`Origin`] of the live child this process spawned as
+/// `pid` (`SyscallNumber::CHILD_ORIGIN`), decoded: how a parent learns who its
+/// own child is, as [`peer_origin`] is how a server learns whom it serves.
+///
+/// `pid` names that child until this process reaps it, so the answer is never
+/// a later holder's. It is read from the child's own record: until the child's
+/// program is verified it carries no app identity and no capabilities.
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] for any `pid` that is not a live child of this process —
+/// another's, exited, reaped or never drawn alike — or a record that does not
+/// decode, which a correct kernel never produces.
+pub fn child_origin(pid: i64) -> Result<Origin, Errno> {
+    let mut buf = [0u8; ORIGIN_WIRE_LEN];
+    let out_ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before writing.
+    // `buf` is a live exclusive local for the duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_CHILD_ORIGIN,
+            [i64_arg(pid), out_ptr, buf.len() as u64, 0, 0, 0],
+        )
+    };
+    let len = count_result(ret, buf.len()).map_err(Errno::from_syscall)?;
     Origin::from_bytes(buf.get(..len).ok_or(Errno::BufferTooSmall)?)
 }
 
@@ -5200,32 +5303,36 @@ pub fn call_grant(endpoint: u64, recipient: u64) -> i64 {
     ret as i64
 }
 
-/// Delegate the caller's own filesystem descriptor `fd` to the process
-/// instance `recipient` as a one-shot grant bounded above by
-/// `write_ceiling` bytes, returning the minted handle (≥ 1) or `-errno`
-/// (`SyscallNumber::FD_GRANT`, `plans/CAPABILITY_USE.md` CU6 — the file
-/// picker's user-mediated hand-off; `plans/APPDATA.md` §3.8 — the app-data
-/// service's blob descriptor).
+/// Delegate the caller's own descriptor `fd` — a filesystem file or a pipe
+/// end — to the process instance `recipient` as a one-shot grant, a file's
+/// bounded above by `write_ceiling` bytes, returning the minted handle (≥ 1)
+/// or `-errno` (`SyscallNumber::FD_GRANT`, `plans/CAPABILITY_USE.md` CU6 —
+/// the file picker's user-mediated hand-off; `plans/APPDATA.md` §3.8 — the
+/// app-data service's blob descriptor).
 ///
-/// Requires `CAP_FS_ACCESS`; the mint is audited. `recipient` is the
+/// Requires `CAP_FS_ACCESS`, a pipe end's hand-off included; the mint is
+/// audited. `recipient` is the
 /// attested `ProcId` the grantor read from an `Origin` (`call_peer_origin`,
-/// `self_origin`) — never a task id, which is redrawn once its task is gone
-/// and so may name a later holder by the time the grant is minted. An
-/// instance no live process holds fails closed (`NotFound`), and the
+/// `self_origin`, `child_origin`) — never a task id, which is redrawn once its
+/// task is gone and so may name a later holder by the time the grant is
+/// minted. An instance no live process holds fails closed (`NotFound`), and the
 /// instance is recorded with the delegation so only that process can redeem
 /// it. The kernel captures the *caller's* identity and effective capability
-/// set with the descriptor's path, so every operation on the redeemed
-/// descriptor is re-authorised under the grantor's authority.
+/// set with a file's path, so every operation on the redeemed descriptor is
+/// re-authorised under the grantor's authority. A pipe end is handed on as
+/// itself: until it is redeemed or let go it holds its side open, as a
+/// descriptor would.
 ///
 /// The delegation carries the descriptor's **own** read/write access and no
 /// more, so it never widens what the grantor opened. `write_ceiling` is the
 /// highest file length the recipient may write or truncate to: zero for a
-/// read-only descriptor, and for a writable one a stated bound or
-/// [`tairix_abi::GRANT_EXTENT_INHERIT`], this task's own reach, which a
-/// delegation it was itself handed can only narrow; zero is refused for a
-/// writable descriptor. A pipe, pty, resource or directory fails closed with
-/// `-errno` (`OutOfRange`), and a fresh delegation past the caller's pending
-/// bound to `recipient` with `LimitExceeded`.
+/// read-only file and for a pipe end, which has no extent, and for a writable
+/// file a stated bound or [`tairix_abi::GRANT_EXTENT_INHERIT`], this task's
+/// own reach, which a delegation it was itself handed can only narrow; zero
+/// is refused for a writable file. A pty end, resource or directory fails
+/// closed with `-errno` (`OutOfRange`), and a fresh delegation past the
+/// caller's pending bound to `recipient`, or a pipe end past those it may
+/// have in flight, with `LimitExceeded`.
 ///
 /// The caller forwards the returned handle in-band (e.g. a window-channel
 /// event field, or an app-data reply); it resolves only when presented by
@@ -5257,13 +5364,13 @@ pub fn fd_grant(fd: u32, write_ceiling: u64, recipient: ProcId) -> i64 {
 }
 
 /// Redeem an [`fd_grant`] handle minted to the calling task, installing
-/// the delegated file into the caller's own open table and returning the
-/// fresh descriptor number (≥ 0) or `-errno`
+/// the delegated file or pipe end into the caller's own open table and
+/// returning the fresh descriptor number (≥ 0) or `-errno`
 /// (`SyscallNumber::FD_REDEEM`).
 ///
 /// Unprivileged: receiving user-mediated, already-checked authority is the
-/// point of the delegation — every later read is still VFS-checked under
-/// the grantor's captured identity. One-shot: the grant is consumed only
+/// point of the delegation — every later read of a delegated file is still
+/// VFS-checked under the grantor's captured identity. One-shot: the grant is consumed only
 /// when the descriptor allocation succeeds, so a refused redemption leaves
 /// it intact and a redeemed handle can never be redeemed twice. A handle
 /// minted to another task fails closed with `-errno` (`NotFound`),
@@ -5498,6 +5605,44 @@ pub fn shm_grant_peer(region: u64, endpoint: u64, ticket: u64) -> i64 {
     // pointers, and the kernel checks the region grant and the endpoint's
     // ownership before minting anything.
     let ret = unsafe { raw_syscall(NUM_SHM_GRANT_PEER, [region, endpoint, ticket, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Grant the process instance `recipient` the right to map shared region
+/// `region` (`SyscallNumber::SHM_GRANT_TO`), returning the minted handle (≥ 1)
+/// or `-errno`.
+///
+/// The sibling of [`shm_grant`] and [`shm_grant_peer`] for a recipient that
+/// binds no endpoint and has no call in service: `recipient` is the attested
+/// `ProcId` read from an `Origin` ([`child_origin`], `call_peer_origin`),
+/// resolved as the grant is minted, so an instance no live process holds
+/// receives nothing (`NotFound`). The kernel demands `CAP_SHM` and the
+/// caller's own grant for the region, and refuses a fresh grant once the
+/// caller already has [`tairix_abi::SHM_GRANT_TO_MAX`] regions with that
+/// recipient (`LimitExceeded`); the mint is audited. The caller forwards the
+/// handle in-band; it maps only through the recipient's [`shm_map_from`]
+/// naming the caller.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 handle-or-errno encoding (handle ≥ 1, else -errno).
+pub fn shm_grant_to(region: u64, recipient: ProcId) -> i64 {
+    let instance = recipient.to_le_bytes();
+    // SAFETY: `raw_syscall` is always safe to invoke. The one pointer is to
+    // this frame's `instance` array, live across the call and exactly the
+    // length passed; the kernel validates `CAP_SHM`, the caller's own region
+    // grant, and that the instance names a live process before minting.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_SHM_GRANT_TO,
+            [
+                region,
+                instance.as_ptr() as u64,
+                instance.len() as u64,
+                0,
+                0,
+                0,
+            ],
+        )
+    };
     ret as i64
 }
 
@@ -7184,10 +7329,10 @@ impl File {
     /// The one owned redemption: a caller that redeemed by hand would have to
     /// remember its own [`fs_close`] on every path out, and the descriptor a
     /// delegation installs is exactly as leakable as one [`File::open`]
-    /// returns. What the handle conveys was fixed when it was minted — the
-    /// grantor's captured identity, the access it had opened, and, for a
-    /// writable delegation, its extent ceiling — so this adds no authority and
-    /// takes no flags.
+    /// returns. What the handle conveys was fixed when it was minted — a
+    /// file's captured identity, the access it had opened and, writable, its
+    /// extent ceiling, or a pipe end and its direction — so this adds no
+    /// authority and takes no flags.
     ///
     /// # Errors
     ///
@@ -8423,6 +8568,27 @@ mod tests {
     }
 
     #[test]
+    fn a_child_origin_asks_by_the_whole_pid_and_a_short_record_names_no_one() {
+        let (number, args) = capture(refusal(Errno::NotFound), || {
+            assert_eq!(child_origin(-7).map(|_| ()), Err(Errno::NotFound));
+        });
+        assert_eq!(number, NUM_CHILD_ORIGIN);
+        assert_eq!(
+            args[0],
+            (-7i64).cast_unsigned(),
+            "the pid is the whole register"
+        );
+        assert_eq!(
+            args[2],
+            u64::try_from(ORIGIN_WIRE_LEN).expect("fits"),
+            "room for one whole record"
+        );
+        assert_eq!(&args[3..], &[0, 0, 0]);
+        seam::arm(5);
+        assert_eq!(child_origin(9).map(|_| ()), Err(Errno::LengthOutOfRange));
+    }
+
+    #[test]
     fn reading_full_carries_on_past_short_reads_and_stops_at_the_end() {
         let mut into = [0u8; 3];
         seam::arm(1);
@@ -8753,6 +8919,7 @@ mod tests {
             name_matching: NameMatching::Exact,
             node_identity: NodeIdentity::Stable,
             attrs: false,
+            title: false,
             write_refusal: None,
             format: tairix_abi::volume::FormatName::Ext4,
         });
@@ -8779,6 +8946,7 @@ mod tests {
                 name_matching: NameMatching::AsciiCaseInsensitive,
                 node_identity: NodeIdentity::Stable,
                 attrs: false,
+                title: false,
                 write_refusal: None,
                 format: tairix_abi::volume::FormatName::Smb3,
             },
@@ -9129,6 +9297,36 @@ mod tests {
         });
     }
 
+    /// A child spawned over a pipe pair leaves no end open where a step is
+    /// refused, and the parent keeps only its own two ends where none is.
+    #[test]
+    fn a_piped_spawn_closes_every_end_it_does_not_hand_back() {
+        let path: &[u8] = b"/System/Components/recorder.app/Run";
+        let attach = |wires| tairix_abi::SpawnAttach {
+            wires,
+            ..tairix_abi::SpawnAttach::INHERIT
+        };
+        let closes = || {
+            seam::calls()
+                .iter()
+                .filter(|(number, _)| *number == NUM_FS_CLOSE)
+                .count()
+        };
+        seam::arm_script(&[0], refusal(Errno::LimitExceeded));
+        assert_eq!(
+            spawn_piped(path, &[path], attach),
+            Err(Errno::LimitExceeded)
+        );
+        assert_eq!(closes(), 2, "the first pipe's two ends");
+        seam::arm_script(&[0, 0], refusal(Errno::NotFound));
+        assert_eq!(spawn_piped(path, &[path], attach), Err(Errno::NotFound));
+        assert_eq!(closes(), 4, "both pipes' four ends");
+        seam::arm_script(&[0, 0, 42], 0);
+        assert_eq!(spawn_piped(path, &[path], attach), Ok((42, 0, 0)));
+        assert!(seam::calls().iter().any(|(number, _)| *number == NUM_SPAWN));
+        assert_eq!(closes(), 2, "the child's two ends, the parent's kept");
+    }
+
     #[test]
     fn spawn_with_marshals_the_encoded_startup_strings_block() {
         let path = *b"/System/Commands/man.app/Run";
@@ -9256,10 +9454,11 @@ mod tests {
 
     #[test]
     fn key_inject_marshals_the_seat_record_pointer_and_len() {
-        use tairix_abi::input::{KeyValue, Modifiers};
+        use tairix_abi::input::{KeyValue, Modifiers, PhysicalKey};
         let record = KeyInput::Pressed {
             key: KeyValue::Char('a'),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::A,
         };
         let want = i64::try_from(KeyInput::WIRE_LEN).expect("WIRE_LEN fits an i64");
         let (number, args) = capture(KeyInput::WIRE_LEN as u64, || {
@@ -9276,12 +9475,13 @@ mod tests {
 
     #[test]
     fn key_inject_surfaces_negative_errno_encoding() {
-        use tairix_abi::input::{KeyValue, Modifiers};
+        use tairix_abi::input::{KeyValue, Modifiers, PhysicalKey};
         // An unwired arbiter refuses the inject with `NotImplemented`; the
         // wrapper surfaces the raw `-errno` register.
         let record = KeyInput::Pressed {
             key: KeyValue::Char('x'),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::UNKNOWN,
         };
         let want = -i64::from(tairix_abi::Errno::NotImplemented.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
@@ -9575,6 +9775,23 @@ mod tests {
         });
         assert_eq!(number, NUM_SHM_GRANT_PEER);
         assert_eq!(&args[..3], &[42, 0xD15_1001, 9]);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn shm_grant_to_names_the_region_and_a_whole_instance() {
+        let recipient = ProcId::from_raw([0x5A; tairix_abi::PROC_ID_LEN]);
+        let (number, args) = capture(4, || {
+            assert_eq!(shm_grant_to(42, recipient), 4);
+        });
+        assert_eq!(number, NUM_SHM_GRANT_TO);
+        assert_eq!(args[0], 42);
+        assert_ne!(args[1], 0, "the instance is passed by address");
+        assert_eq!(
+            args[2],
+            u64::try_from(tairix_abi::PROC_ID_LEN).expect("fits"),
+            "the whole instance, never a prefix"
+        );
         assert_eq!(&args[3..], &[0, 0, 0]);
     }
 

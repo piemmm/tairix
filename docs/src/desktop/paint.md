@@ -12,8 +12,9 @@ or 32-bit colour with alpha. The tool-controls bar runs across the top — the
 tool in use and its settings, wrapping onto further rows when they do not fit,
 then the view's own commands (zoom out and in, fit, actual size, and the pixel
 grid, marked while it shows). A dock of panes runs down each side — by default
-the Tools pane on the left and the Colour pane on the right, with the
-Adjustment pane beneath it once an adjustment is opened — the canvas and its
+the Tools pane on the left and the Colour pane on the right, joined beneath by
+the Layers, Adjustments and Effects panes when they are shown or an adjustment
+or an effect is opened — the canvas and its
 bars lie between them with the palette strip beneath, and the status band runs
 along the bottom. The palette strip is one row of wells: every entry of a
 palette picture's own palette, or the desktop's colours where it has none, and
@@ -32,9 +33,15 @@ hidden pane again and *Reset panes* puts every pane back where the settings
 say a new window starts.
 Dragging a band moves its pane within its dock or into the other: while the
 drag is over a dock, or near the window's edge where a dock is empty, the gap
-it would land in is marked, and Escape turns the drag down. A dock is as wide
-as its widest pane and gives each pane its height in turn, the open adjustment
-first; a pane given no room shows its band alone.
+it would land in is marked, and Escape turns the drag down. A dock is one
+column as wide as its widest pane. Each pane's body has a least and a natural
+height (`layout::BodyHeights`): a dock seats every band first, then each body's
+least, then grows the bodies towards their natural heights, the pane opened
+most recently first; a pane given no room shows its band alone. A body given
+less than its natural height scrolls within itself and the column never does:
+the Tools pane's tools and the Layers pane's rows scroll themselves, and the
+Colour pane, laid out whole, scrolls by a bar down its right, a part Tab
+reaches scrolled into view.
 
 Let go away from a dock, or carried to the window's edge, a pane floats in a
 tool window of its own: the window manager's mini-titled palette, above the
@@ -45,12 +52,19 @@ moving it; let go in the window, it opens where it was dropped, its band where
 the pane's would have been. Its close
 mark hides the pane; moved back over a dock, the landing gap is marked and let
 go there it docks again. The palette docks only in its strip: its tool window
-sets the wells out as near a square as its entries make, at least four across,
-every well at its fullest and the clear ink after them, and never scrolls; its
-close mark, a refused tool window, or a move let go over the window's foot
+opens with the wells set out as near a square as its entries make, at least
+four across where there are as many, every well at its fullest and the clear
+ink after them, all showing. Its edges resize it, from one column of wells to
+one row of them: the wells keep their size, set out as many to a row as the
+width holds, and scroll down by the palette's own bar where they do not all
+fit, and the window keeps the size it was given while it floats, at any scale.
+Its close mark, a refused tool window, or a move let go over the window's foot
 between the docks, marked along it as the window passes, docks it in its strip
-again, so it is never lost. A floating pane is laid out at its own size in a
-rectangle of the window's drawing beside the window (`Layout::floating`), so
+again, so it is never lost. The Layers pane's tool window resizes too, from its
+controls over two rows to every row, and keeps the size it was given. A
+floating pane is laid out at its own size — the palette and the Layers pane at
+the size they were resized to — in a rectangle of the window's drawing
+beside the window (`Layout::floating`), so
 it is drawn and hit-tested by the same code as a docked one, and its lists
 open within its own window. A pane floating in the arrangement the settings
 name opens under the top band at the edge of its home side, the palette
@@ -72,7 +86,11 @@ or crossings in its colour and opacity, and left out where a cell would be
 under four screen pixels. The palette
 strip holds the picture's palette — the desktop's sixteen colours and the clear
 ink for a truecolour picture — in one row of wells at least 14 pixels across,
-each up to 24, beside the button that floats it; the status band says where the
+each up to 24 and a pixel apart, beside the button that floats it. In the strip
+and floating alike, the primary and secondary inks' wells show their RISC OS
+colour numbers — the Wimp colours 0–15 for a truecolour picture, a palette
+picture's own entries' — inside the well where the digits fit, else on a badge
+over it; the clear ink has none. The status band says where the
 pointer is and the
 colour the layers show there, what was last said, the picture's size, depth
 and, of several layers, which is painted on, which sprite shows, and the zoom.
@@ -157,8 +175,8 @@ layer is the picture's size, its untouched tiles one shared clear tile, so a
 small layer on a large picture costs what it covers. The Layers menu adds a
 clear layer, duplicates, deletes, raises and lowers one, steps to the layer
 above or below, goes to one by name or number, merges one down onto the one
-beneath, flattens the picture, shows or hides a layer, and opens its
-properties (name, opacity, shown). A merge lays the two together onto nothing
+beneath, flattens the picture, and shows or hides a layer, as the Layers pane
+does beside the picture. A merge lays the two together onto nothing
 and keeps the lower one's name, which keeps the look to within the rounding of
 a level, since source-over is associative; both layers must show, since the
 pixels of one hidden or wholly faint would have nowhere to go. A merge or
@@ -171,30 +189,93 @@ wholly (`document::MOST_LAYERS` bounds a colour one), so a picture of layers,
 or of one layer faded, is flattened before it is made a palette picture, and
 one hidden layer is shown first, since flattened it would come out clear.
 
-## Adjustments and filters
+## The Layers pane
 
-The Adjust menu (`filter::Filter`) holds brightness and contrast, hue and
-saturation, colour balance, levels, curves, white balance, posterise,
-threshold and desaturate, which map each colour alone, and blur, sharpen,
-pixelate, noise and find edges, which make each pixel from its neighbours;
-Invert colours is the same kind of adjustment. One with nothing to set —
-invert, desaturate, find edges — applies at once; one with settings opens in
-the Adjustment pane, and nothing else is taken from the window while it is
-open: the tools, the panes and the menus stay live. With nothing open the pane
-offers the list to open one from.
+The Layers pane (`layers_pane::LayersPane`, shown from View ▸ Panes) holds the
+opacity of the layer painted on and the New, Duplicate, Delete and Merge down
+buttons above a row for each layer, the top first: an eye, a thumbnail, the
+name and the opacity, the layer painted on marked. The rows scroll by a bar of
+their own and the controls stay whole. A press on a row, or Up, Down, Home and
+End on the rows, paints on its layer, which is no step to undo; an adjustment
+or effect open is applied first, and a floating selection put down, as
+stepping to a layer does. Each of these is one step: the eye, or Space on the
+rows, shows or hides its layer, painting staying where it was; a click on the
+name of the layer painted on, or Enter on the rows, renames it in place —
+Enter, a press elsewhere, any other action or the window losing the keyboard
+settles the name, Escape drops it, a name left empty keeps the old one, and the
+name lands only on the layer it was begun on, never on one that has taken its
+place; a row dragged to another gap between the rows moves its layer there;
+and New, Duplicate, Delete and Merge down. There is no layer form, and Paint
+has no blend modes.
 
-The picture shows the settings as they move: a worker works the preview out one
-job at a time, the latest settings asked again once it lands, and an answer
-worked from a picture, layer or selection that has moved since is dropped and
-asked again. *Preview* turns it off and on to compare; Reset, or Escape in the
-pane, puts the settings back; closing the pane drops the adjustment; Apply lands
-it as one step, adopting the preview's own tiles where they show exactly what is
-applied. Marking a selection or a crop box, undo and redo leave it open and
-show it over what the picture became; anything else that changes or reads the
-picture — a stroke, a fill, a transform, a save, a copy, another adjustment —
-applies it first, and a press that finds its preview still being worked out
-paints nothing. On a palette picture an adjustment maps the palette alone, and
-the neighbourly filters are not offered.
+The opacity field shows the layer painted on: dragged or typed, the layer shows
+each value at once, and the change lands as one step when it settles, or when
+anything else is done first. Its first sample asks the preview worker for the
+layers beneath laid together (`compose::laid_together`), and while that
+composite is
+of the picture as it stands each paint lays only the layer and those above over
+it (`compose::lay_run`), which shows exactly what laying every layer does;
+severe memory pressure lets that composite go, and each paint then lays every
+layer until the opacity settles. The thumbnails are drawn on the preview
+worker, the rows in view only, and kept by
+the
+revision of the layer they show (`Layer::revision`), which moves only when its
+pixels do, so a stroke redraws its own layer's alone; a row shows the picture
+glyph until its thumbnail lands. A palette picture's one layer, or a picture a
+worker has, withholds the controls, and no rename begins while a worker has it.
+
+## Adjustments and effects
+
+Two panes offer the operations, each headed by a selector that is always there
+(`op_pane::OpPane`): the **Adjustments** pane holds brightness & contrast,
+levels, curves, hue & saturation, colour balance, white balance, desaturate,
+invert, posterise, threshold and the channel mixer, which map each colour on
+its own, and the **Effects** pane holds Gaussian blur, unsharp mask, median,
+add noise, find edges, emboss and pixelate, which make each pixel from its
+neighbours and so take a colour picture alone (`op::Op`). The Adjust menu lists
+every one, each row opening its pane on it. Beneath the selector lie the chosen
+operation's settings, then *Preview*, *Reset* and *Apply*; a pane given less
+room than they need scrolls them within its body. Nothing else is taken from
+the window while either is in use: the tools, the panes and the menus stay
+live.
+
+Moving a setting shows the operation over the picture, and one preview runs
+across both panes: moving the other pane's settings, or choosing another
+operation in a selector, leaves the open operation — applied as one step where
+its settings were moved and it changes something, and dropped otherwise, an
+Invert chosen and never moved among them, so looking down a list changes
+nothing. Its pane keeps its settings until that step has landed, so an apply
+refused leaves it open as it was set. A slider's samples only preview; *Apply*
+alone records a step, and puts the pane back at its operation's starting
+settings; *Apply* in one pane while the other's operation is open applies that
+one first and then this one. *Preview* turns the preview off and on to
+compare; Reset, or Escape in an open pane, puts the settings back. Marking a
+selection or a crop box, undo and redo, and how the layers show and in what
+order — an eye, a name, an opacity, a layer raised or lowered — leave the
+operation open and show it over what the picture became; anything else that
+changes or reads the picture — a stroke, a fill, a transform, painting on
+another layer or page, a save, a copy — settles it first in the same way, and
+a press that finds its preview still being worked out paints nothing. On a
+palette picture an adjustment maps the palette alone, and the effects are not
+offered: an effect left open as an undo makes the picture a palette picture
+again is closed, saying so.
+
+The preview is worked out on Paint's own preview worker across every core,
+never on the queue saves are written on (`preview`): the tiles in view first,
+then the rest, a block of tiles at a time, each block at least four times the
+operation's reach on a side and reading as far about it as the operation
+reaches, so what it shows is the same to the bit however the work was cut
+(`tiled::run`). A setting moved while one is being worked out abandons it
+between blocks for the newest, the last preview showing until the newest
+lands, and a window that closes abandons what it asked. Apply adopts the
+preview where it is complete; otherwise what is left is worked out on the
+queue, taking every core ahead of the preview worker, which gives way at its
+next block and starts nothing more until that has landed, and the whole lands
+as one step; one refused says so, naming what waited on it — a save, or a save
+before the window closes — as not done. Under severe memory pressure the
+preview is let go, and one the worker ran short of memory for is asked again
+only once the picture or the operation moves, the memory pressure falls or the
+window is laid out anew, never because the pointer moved.
 
 - **Levels** sets the composite and each channel: input black, grey and white
   handles beneath the channel's histogram — the grey point placed where the
@@ -219,10 +300,25 @@ the neighbourly filters are not offered.
   shadows, midtones and highlights toward red, green or blue, keeping each
   colour's lightness when asked. **Threshold** sets its level on a handle
   beneath the histogram.
+- **Channel mixer** weighs each output channel from red, green and blue and a
+  constant of white; *Monochrome* makes every channel one grey.
+- The **effects**: *Gaussian blur* is three box passes matched to its radius,
+  worked at sixteen bits a channel; *Unsharp mask* pushes each channel away
+  from that blur where the two differ by its threshold or more; *Median* takes
+  each channel's median of the square about the pixel in the same time at any
+  radius; *Add noise* lays uniform or Gaussian speckle, in colour or grey,
+  drawn the same on every machine; *Find edges* lights each channel's
+  gradient; *Emboss* turns the picture into a grey relief lit from an angle;
+  *Pixelate* lays squares on the picture's corner, each the mean of what it
+  covers.
 
 The histograms count the layer painted on, held to the selection, each pixel
 weighed by its opacity and its share of the selection
-(`histogram::Histogram`), worked out on the worker while the pane reads one.
+(`histogram::Histogram`), worked out on the preview worker a band of rows at a
+time across every core while a pane reads one, the bands' counts added so the
+count is the same however it was cut. An operation reads the layer painted on
+and the selection alone, so an eye, a name, an opacity or the layers' order
+changing works neither its preview nor its histogram out again.
 A histogram is a reading of the picture, so moving from one adjustment that
 reads it to another keeps it, and one being read when the adjustment moves
 lands on the next.
@@ -267,8 +363,8 @@ the picker for the mask's clear ink, which is the mask and no colour.
 
 Tab walks the keyboard from the picture through the bar's settings, the palette
 — in its strip or floating — the Colour pane's buttons and choices, its picker
-and its recent colours, and the Adjustment pane's settings, and back to the
-picture; Shift+Tab walks the other way, and a part with nothing that can act is
+and its recent colours, the Layers pane's controls and rows, and the
+Adjustments and Effects panes' settings, and back to the picture; Shift+Tab walks the other way, and a part with nothing that can act is
 passed. In the palette the arrows walk the wells, Up and Down a row at a time
 in a floating palette's grid. Escape gives the keyboard back to the picture once a field has
 nothing to take back. While a field has the keyboard it takes every key it can
@@ -309,8 +405,9 @@ or the window's scale changes; until it lands the sprite shows the picture
 glyph, and a sprite the editor cannot read always does. Each sprite is drawn
 as the file manager draws a file, through the same tile, so a chosen sprite
 wears the file manager's selection mark over the window's ground. The window opens
-sized to its sprites, at most five across and three down, with room for its
-theme's text. A press chooses a sprite, Ctrl adds or takes
+250 logical pixels wide and as tall as its sprites need at that width, at most
+250, with room for its theme's text; a longer list scrolls, and the window can
+be resized from there. A press chooses a sprite, Ctrl adds or takes
 one, Shift chooses the run from the last one pressed, and the arrows, Page Up,
 Page Down, Home and End walk them. The window's menu edits the chosen sprites,
 makes a new sprite, renames, duplicates, deletes and reorders them, and saves
@@ -334,7 +431,7 @@ close with it. Deleting a sprite closes its window; renaming one, saving its
 file, or saving it under another name retitles it.
 
 Every form Paint asks — New picture, the page and sprite questions, Scale,
-Canvas, Convert, Save As and a layer's properties — is a dialog window of its
+Canvas, Convert and Save As — is a dialog window of its
 own, centred over the picture's window and holding it until the form is
 answered: a form's rows are filled from the picture as it stood when it
 opened, which an edit made behind it would make untrue. A form is laid out at
@@ -438,19 +535,29 @@ host hands Paint the window (`DocumentApp::driven`) before carrying out what
 was asked, so a sprite window's edit has reached its file before a save
 freezes it, and a file window's renames, changes and deletions reach its
 sprite windows. Nothing that grows with the picture rather than with the brush
-runs on the loop: a decode worker reads documents and pastes, and the queue
-encodes saves and copies and carries out fills, gradients, selections,
-adjustments and their previews, transforms of every layer, merges and
-flattens, the Save As survey, a sprite file's thumbnails, and the putting down
-or clearing of a floating selection. A job lands on the
+runs on the loop: a decode worker reads documents and pastes; the queue
+encodes saves and copies and carries out fills, gradients, selections, what an
+Apply of an operation still has to work out, transforms of every layer, merges
+and flattens, the Save As survey, a sprite file's thumbnails, and the putting
+down or clearing of a floating selection; and a preview worker of Paint's own
+works out previews, histograms, the Layers pane's thumbnails and the composite
+beneath a layer whose opacity is changing across every core, giving the cores
+up to an Apply's completion, a merge or a flatten on the queue — one asked
+while that is due is answered at once as given way, so neither the worker nor,
+where it has no thread of its own, the window's loop waits on the queue — so a
+save never waits behind one. A job lands on the
 layer it was asked of. While a job is out, nothing changes the document, the
 sprite showing or the layer painted on, so its answer is written over exactly
 the state it was asked of, and one that no longer finds that state is refused.
 A save chooses its format from the frozen document it writes. Every allocation
 that grows with the picture is asked for, so a refusal is said in the window
 rather than ending the program; closing a window, or quitting, with unsaved
-changes asks first; a sprite window's changes are its file's, asked about by
-the file window.
+changes asks first — an opacity or a palette entry still being dragged counts,
+and lands before the question, as do an operation whose settings were moved
+and work still being done on the picture, which Save there applies, or waits
+for, before it saves — and a sprite window's changes are its file's, asked
+about by the file window, closing one applying its operation and putting down
+what floats first.
 
 ## Limits
 

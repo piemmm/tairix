@@ -931,6 +931,7 @@ fn availability_name(availability: MountAvailability) -> &'static str {
         MountAvailability::UnavailableDirty => "lost-dirty",
         MountAvailability::UnavailableLost => "lost",
         MountAvailability::RecoveryConflict => "conflict",
+        MountAvailability::ReplayUnconfirmed => "unconfirmed",
     }
 }
 

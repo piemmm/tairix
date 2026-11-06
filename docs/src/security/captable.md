@@ -151,40 +151,69 @@ it is authoritative and immune to caller spoofing.
 
 ## Per-task registry
 
-`CapTable` owns a flat `BTreeMap<TaskId, TaskCapabilities>`. It carries
-no interior mutability: the owning scope — `KernelState` in
-`kernel/core::init` — composes it with the scheduler under a single
-lock-ordering policy and provides whichever reader/writer
-synchronisation primitive is appropriate. The same shape of access
-pattern already drives `Scheduler::tasks` (many concurrent syscall-
-context readers, occasional task-creation writers), so a
-reader-preferring `lib/sync::RwLock` mirrors that policy.
+`CapTable` holds one shared record per process and indexes it five ways:
+
+| index | container | answers |
+| ----- | --------- | ------- |
+| records | `OrderedMap<ProcessId, Arc<TaskCapabilities>>` | a process's record, and the process list paged in `ProcessId` order |
+| threads | `OrderedMap<TaskId, ProcessId>` | the process a thread belongs to |
+| grouped | `OrderedSet<(ProcessId, TaskId)>` | one process's threads as one range, walked from a cursor that survives a thread leaving |
+| groups | `OrderedMap<ProcessId, ThreadGroup>` | a process's live-thread count, job-control generation and level, and whether a kill has sealed it |
+| instances | `OrderedMap<ProcId, ProcessId>` | the process an instance names, while it lives |
+
+Every index is ordered: which ids stay in the table is up to what a user
+keeps running, so a lookup costs the same however they fall, and growing an
+index rebuilds nothing under the lock every credential read takes. The
+session tree sits beside them under the same lock. The table takes no lock
+of its own — a group's job-control generation and seal are atomics changed
+under the shared lock — and the owning scope, `KernelState` in
+`kernel/core::init`, composes it with the scheduler under a single
+lock-ordering policy behind a reader-preferring `lib/sync::RwLock`, the
+policy `Scheduler::tasks` already follows (many concurrent syscall-context
+readers, occasional task-creation writers).
 
 ### Lifecycle
 
 | event                                | registry effect                                       |
 | ------------------------------------ | ----------------------------------------------------- |
-| task creation (manifest verified, caps derived) | `CapTable::insert(caps)` registers the record  |
+| process admission (caps derived)     | `CapTable::admit(caps, placement)` registers the record and its leader in its session; `insert(caps)` does so in the root session |
+| thread creation                      | `CapTable::register_thread(thread, process)` aliases the thread onto its process's record |
+| group death claimed                  | `CapTable::seal_group(process)` closes the group, so `register_thread` refuses `Dying` while its threads are claimed a batch at a time |
 | syscall `cap_query` / handler reads  | `CapTable::caps_for(task_id) -> &TaskCapabilities`    |
 | syscall `cap_delegate`               | `CapTable::narrow(caller, target, set)`: authority over `target` first, then `TaskCapabilities::delegate` |
 | syscall `cap_revoke`                 | `CapTable::caps_for_mut(task_id) -> &mut TaskCapabilities` then mutate via `TaskCapabilities::revoke` |
 | `Scheduler::exit(task_id)` returned  | `CapTable::remove(task_id)` evicts the record         |
 
-`CapTable::insert` returns the previously-registered record for the
-same `TaskId` if any, surfacing the duplicate rather than silently
-overwriting. `kernel/sched` does not recycle task ids within a single
-scheduler instance (see
-[`architecture/scheduler.md`](../architecture/scheduler.md) §
-Invariants), so a non-`None` return is an anomaly the caller is
-expected to audit / refuse.
+Every insertion is all or nothing. `admit`, `insert`, `replace` and
+`register_thread` make all the room their change needs — the shared record,
+the process's level, an entry in each index, and the session nodes and
+memberships a placement founds — before changing anything, then enter what
+cannot be refused. A heap that refuses any of it answers `OutOfMemory` and
+leaves the table as it was: a spawn the table has no room for is refused
+with `Errno::OutOfMemory`, its child retired unrun; a thread with no room is
+never born; PID 1 refused its record halts the boot. Deriving a record makes
+one allocation, its shared accounting, and a refused derivation audits
+nothing.
 
-A record carries the process's live accounting as shared cells: its file
-I/O totals and its `ResourceCharges`, what it holds against the limits on
-the kernel objects it creates (`kernel/sec::charge`, see
-[resource limits](../architecture/resource-limits.md)). Every copy of the
-record shares them, and a replacement under the same id adopts them, so a
-record swapped in mid-life can neither restart a total nor hand the process
-its whole budget again while its objects still hold the old one.
+`CapTable::insert` over a process that already has a record replaces it,
+returning the displaced record rather than dropping it silently. A new
+process whose leader's id names a live thread is refused
+(`AdmitError::Placement(PlacementError::NotFound)`), so no insertion
+re-points a live thread's authority.
+`kernel/sched` does not recycle task ids within a single scheduler instance
+(see [`architecture/scheduler.md`](../architecture/scheduler.md) §
+Invariants), so a displaced record there is an anomaly the caller is
+expected to audit / refuse; the routine replacement is `replace`'s. Either
+keeps the process's threads, session and accounting as they were.
+
+A record carries the process's live accounting as one shared
+`ResourceCharges` (`kernel/sec::charge`, see
+[resource limits](../architecture/resource-limits.md)): what it holds
+against the limits on the kernel objects it creates, and its file I/O
+totals. Every copy of the record shares it, and a replacement under the
+same id adopts it, so a record swapped in mid-life can neither restart a
+total nor hand the process its whole budget again while its objects still
+hold the old one.
 
 `CapTable::remove` returns the evicted record so the caller can zero
 out any sensitive capability material in line with the kernel
@@ -194,8 +223,9 @@ allocator's "zero-on-free for credential-holding memory" requirement
 ### No ambient authority on lookup
 
 Lookups never widen the stored capability set. `caps_for(task)`
-returns `Some(&TaskCapabilities)` only when `insert` has stored a
-record for that exact id; there is no implicit grant, no "fall back to
+returns `Some(&TaskCapabilities)` only for a thread the table registered —
+a process's leader at its admission, any other through `register_thread`;
+there is no implicit grant, no "fall back to
 root" branch, and no policy hook that consults the numeric uid.
 `TaskCapabilities::derive` enforces the user-grant ∩ manifest-request
 invariant on the way in, so the registry's stored value is
@@ -249,7 +279,7 @@ A record is superseded whenever the table stops holding it. A mutation
 (`caps_for_mut`, behind `cap_delegate` and `cap_revoke`) copies a record
 any thread or syscall still shares and marks the shared one superseded, so
 a revocation by one thread reaches every sibling's next syscall; a
-replacement (`insert` over an existing process) and a removal mark theirs
+replacement (`replace`, or `insert` over an existing process) and a removal mark theirs
 the same way. The copy is fallible: a heap that refuses it fails the
 mutation with `OutOfMemory` and changes nothing. Mutations take
 `caps.write()` for exactly the in-registry change.
@@ -272,9 +302,6 @@ and halts. No silent recovery — `AGENTS.md` §5.4.5.
 
 ## Out of scope for Stage 2.7 follow-up (f2)
 
-* User-space task creation. The follow-up does not add a user-space
-  loader; `CapTable::insert` is exercised by tests and by the future
-  init(1) loader (Stage 6).
 * The signing-key authority for capability tokens. `lib/crypto` already
   ships the verifier; the per-installation authority key generation
   lives in the installer (Stage 8 / `AGENTS.md` §11.5).

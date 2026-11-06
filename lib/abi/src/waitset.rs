@@ -82,7 +82,10 @@ pub const WAITSET_TIMEOUT_NONE: u64 = u64::MAX;
 #[repr(u32)]
 pub enum WaitSourceKind {
     /// An IPC call endpoint the caller serves (its `id` is the
-    /// endpoint id). Ready when a request is waiting to be received on it.
+    /// endpoint id). Ready when a request is waiting to be received on it, or
+    /// once the endpoint is taken down under its owner, whose receive then
+    /// answers `NotFound`: a member whose endpoint went stays ready until it
+    /// is removed.
     Endpoint = 0,
     /// A hardware interrupt line the caller bound (its `id` is the
     /// [`crate::IrqHandle`] raw value). Ready when the line has fired.

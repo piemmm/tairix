@@ -184,7 +184,12 @@ mod tests {
         let buf: &'static mut [u8] = alloc_block(len);
         // aarch64 CRC32 (bit 0) + SHA2 (bit 4) as a representative delivered set.
         let features = 0x0000_0000_0000_0011u64;
-        tairix_abi::process_start_write_into(buf, &args, &envs, 7, features).expect("encoded");
+        let facts = tairix_abi::StartFacts {
+            canary: 7,
+            cpu_features: features,
+            heap: tairix_abi::HeapRegion::NONE,
+        };
+        tairix_abi::process_start_write_into(buf, &args, &envs, &facts).expect("encoded");
         let view = ProcessStart::parse(buf).expect("valid block");
         install(view);
 

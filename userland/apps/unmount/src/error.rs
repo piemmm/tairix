@@ -6,7 +6,7 @@ use core::fmt;
 pub use tairix_abi::sysinfo::Retention;
 use tairix_abi::Errno;
 use tairix_help::MISUSE;
-use tairix_procinfo::{CallError, ListError};
+use tairix_procinfo::{CallError, ListError, Unnamed};
 use tairix_util::getopt::Refusal;
 use tairix_util::quote::quote_subject;
 
@@ -118,25 +118,10 @@ impl fmt::Display for UnmountError {
         match self {
             Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("invalid usage"),
-            Self::NotFound(name) => write!(f, "{name}: not mounted.", name = quote_subject(name)),
-            Self::NotShown(name) => write!(
-                f,
-                "{name}: no volume shown to you; another user's private volume is named \
-                 by where it is mounted in /Storage.",
-                name = quote_subject(name)
-            ),
-            Self::Ambiguous(name) => write!(
-                f,
-                "{name}: more than one volume was mounted from a file of that name; \
-                 name it by where it is mounted.",
-                name = quote_subject(name)
-            ),
-            Self::NameCut(name) => write!(
-                f,
-                "{name}: the mount listing keeps only the start of that file name; \
-                 name the volume by where it is mounted.",
-                name = quote_subject(name)
-            ),
+            Self::NotFound(name) => write!(f, "{}: {}.", quote_subject(name), Unnamed::NotFound),
+            Self::NotShown(name) => write!(f, "{}: {}.", quote_subject(name), Unnamed::NotShown),
+            Self::Ambiguous(name) => write!(f, "{}: {}.", quote_subject(name), Unnamed::Ambiguous),
+            Self::NameCut(name) => write!(f, "{}: {}.", quote_subject(name), Unnamed::NameCut),
             Self::NotDetachable(name) => {
                 write!(
                     f,

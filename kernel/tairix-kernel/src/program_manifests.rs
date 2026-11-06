@@ -1328,15 +1328,12 @@ mod tests {
     // The windowed terminal `terminal` (plans/APPWIN.md AW4,
     // plans/GUI-TERMINAL.md): console write for its fail-loud diagnostics,
     // CAP_PROC_SPAWN to host the user's shell as its own child over a pty,
-    // CAP_SHM to create and grant the zero-copy window frame region the
-    // desktop session maps, and CAP_FS_ACCESS to read and rewrite the
-    // launching user's own terminal profile under their home — an ordinary
-    // per-user store, reaching nothing that user could not already reach.
-    // Not an embedded spawn-floor program, so the list lives only in this
-    // pin.
+    // and CAP_SHM to create and grant the zero-copy window frame region the
+    // desktop session maps. Its profile lives in the app-data store, so it
+    // holds no filesystem authority. Not an embedded spawn-floor program, so
+    // the list lives only in this pin.
     const TERMINAL_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
-        CapabilityId::FS_ACCESS,
         CapabilityId::PROC_SPAWN,
         CapabilityId::SHM,
     ];
@@ -1378,12 +1375,12 @@ mod tests {
         CapabilityId::FS_ACCESS,
     ];
 
-    // The volume-detach tool `unmount` (plans/DEVICES.md D4b): the
-    // pure-tool request plus `CAP_FS_MOUNT`, which *is* its job — the
-    // kernel's `volume_detach` path re-checks it and audits every
-    // decision. Not an embedded spawn-floor program, so the list lives
-    // only in this pin.
-    const UNMOUNT_TOOL_REQUEST: &[CapabilityId] = &[
+    // The volume tools `unmount` (plans/DEVICES.md D4b), `label` and `mount`:
+    // the pure-tool request plus `CAP_FS_MOUNT`, which the kernel's
+    // `volume_detach`, `volume_retitle` and `volume_replay` paths re-check,
+    // auditing every decision. Not embedded spawn-floor programs, so the list
+    // lives only in this pin.
+    const VOLUME_TOOL_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::FS_ACCESS,
         CapabilityId::FS_MOUNT,
@@ -1494,6 +1491,14 @@ mod tests {
     // one. They ship purely as discovered on-disk bundles, so no `spawn_layout`
     // row or manifest constant exists for them.
     const WINDOWED_APP_REQUEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::SHM];
+
+    // The screen recorder (plans/CAPTURE.md CP8): its frame slots, the sound
+    // it may hear, and the log every refusal goes to.
+    const RECORDER_REQUEST: &[CapabilityId] = &[
+        CapabilityId::SHM,
+        CapabilityId::AUDIO_CAPTURE,
+        CapabilityId::LOG_EMIT,
+    ];
 
     // The network map `netmap` (plans/NETMAP.md): the windowed application's
     // pair, plus `CAP_FS_ACCESS` to read the table of hardware makers its
@@ -1710,6 +1715,7 @@ mod tests {
         ("groupdel", ProgramKind::Command, ADMIN_TOOL_REQUEST),
         ("head", ProgramKind::Command, FILE_TOOL_REQUEST),
         ("host", ProgramKind::Command, HOST_TOOL_REQUEST),
+        ("label", ProgramKind::Command, VOLUME_TOOL_REQUEST),
         ("link", ProgramKind::Command, PURE_TOOL_REQUEST),
         ("ln", ProgramKind::Command, FILE_TOOL_REQUEST),
         ("login", ProgramKind::Service, LOGIN_MANIFEST),
@@ -1719,7 +1725,7 @@ mod tests {
         ("man", ProgramKind::Command, MAN_MANIFEST),
         ("mdadm", ProgramKind::Command, RAID_ADMIN_TOOL_REQUEST),
         ("mkdir", ProgramKind::Command, PURE_TOOL_REQUEST),
-        ("mount", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("mount", ProgramKind::Command, VOLUME_TOOL_REQUEST),
         (
             "music",
             ProgramKind::Application,
@@ -1735,6 +1741,7 @@ mod tests {
         ("printf", ProgramKind::Command, PURE_TOOL_REQUEST),
         ("ps", ProgramKind::Command, PS_MANIFEST),
         ("readlink", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("recorder", ProgramKind::Component, RECORDER_REQUEST),
         ("reset", ProgramKind::Command, RESET_MANIFEST),
         ("rm", ProgramKind::Command, FILE_TOOL_REQUEST),
         ("rmdir", ProgramKind::Command, PURE_TOOL_REQUEST),
@@ -1768,7 +1775,7 @@ mod tests {
         ("traceroute", ProgramKind::Command, ECHO_PROBE_TOOL_REQUEST),
         ("true", ProgramKind::Command, PURE_TOOL_REQUEST),
         ("unlink", ProgramKind::Command, PURE_TOOL_REQUEST),
-        ("unmount", ProgramKind::Command, UNMOUNT_TOOL_REQUEST),
+        ("unmount", ProgramKind::Command, VOLUME_TOOL_REQUEST),
         ("useradd", ProgramKind::Command, ADMIN_TOOL_REQUEST),
         ("userdel", ProgramKind::Command, ADMIN_TOOL_REQUEST),
         ("usermod", ProgramKind::Command, ADMIN_TOOL_REQUEST),

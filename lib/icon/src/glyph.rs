@@ -461,6 +461,21 @@ pub enum IconKind {
     /// A small window with an arrow leaving it, for floating what a window
     /// holds out into a window of its own.
     PopOut,
+    /// The whole screen, for capturing it.
+    CaptureScreen,
+    /// A window, for capturing one.
+    CaptureWindow,
+    /// A selection frame around a crosshair, for capturing an area.
+    CaptureArea,
+    /// The screen bearing a recording dot, for recording it.
+    RecordScreen,
+    /// A window bearing a recording dot, for recording one.
+    RecordWindow,
+    /// A selection frame around a recording dot, for recording an area.
+    RecordArea,
+    /// A stop square in a ring: a screen recording under way, which a press
+    /// stops.
+    StopRecording,
     /// A window divided into panels, for how a window shows its items.
     Layout,
     /// Four large tiles, for large icons.
@@ -557,6 +572,12 @@ pub enum IconKind {
     Noise,
     /// A diamond between corner marks, for finding edges.
     FindEdges,
+    /// Three channels running together into one, for the channel mixer.
+    ChannelMixer,
+    /// A square of dots about a larger one, for the median.
+    Median,
+    /// A tile raised from its frame, for embossing.
+    Emboss,
     /// Two pages, one behind the other, for sprites and pages.
     Pages,
     /// A toolbox, for the tools.
@@ -873,6 +894,13 @@ impl IconKind {
             "panes" => Self::Panes,
             "reset-panes" => Self::ResetPanes,
             "pop-out" => Self::PopOut,
+            "capture-screen" => Self::CaptureScreen,
+            "capture-window" => Self::CaptureWindow,
+            "capture-area" => Self::CaptureArea,
+            "record-screen" => Self::RecordScreen,
+            "record-window" => Self::RecordWindow,
+            "record-area" => Self::RecordArea,
+            "stop-recording" => Self::StopRecording,
             "layout" => Self::Layout,
             "large-icons" => Self::LargeIcons,
             "small-icons" => Self::SmallIcons,
@@ -921,6 +949,9 @@ impl IconKind {
             "pixelate" => Self::Pixelate,
             "noise" => Self::Noise,
             "find-edges" => Self::FindEdges,
+            "channel-mixer" => Self::ChannelMixer,
+            "median" => Self::Median,
+            "emboss" => Self::Emboss,
             "pages" => Self::Pages,
             "toolbox" => Self::Toolbox,
             "activity" => Self::Activity,
@@ -1289,6 +1320,16 @@ impl IconKind {
             Self::TextMakefile => 290,
             Self::FileManager => 291,
             Self::PopOut => 292,
+            Self::CaptureScreen => 293,
+            Self::CaptureWindow => 294,
+            Self::CaptureArea => 295,
+            Self::RecordScreen => 296,
+            Self::RecordWindow => 297,
+            Self::RecordArea => 298,
+            Self::StopRecording => 299,
+            Self::ChannelMixer => 300,
+            Self::Median => 301,
+            Self::Emboss => 302,
         }
     }
 
@@ -1599,6 +1640,16 @@ impl IconKind {
             Self::TextMakefile => "text-x-makefile",
             Self::FileManager => "file-manager",
             Self::PopOut => "pop-out",
+            Self::CaptureScreen => "capture-screen",
+            Self::CaptureWindow => "capture-window",
+            Self::CaptureArea => "capture-area",
+            Self::RecordScreen => "record-screen",
+            Self::RecordWindow => "record-window",
+            Self::RecordArea => "record-area",
+            Self::StopRecording => "stop-recording",
+            Self::ChannelMixer => "channel-mixer",
+            Self::Median => "median",
+            Self::Emboss => "emboss",
         }
     }
 }
@@ -1929,6 +1980,13 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         | IconKind::Panes
         | IconKind::ResetPanes
         | IconKind::PopOut
+        | IconKind::CaptureScreen
+        | IconKind::CaptureWindow
+        | IconKind::CaptureArea
+        | IconKind::RecordScreen
+        | IconKind::RecordWindow
+        | IconKind::RecordArea
+        | IconKind::StopRecording
         | IconKind::Layout
         | IconKind::LargeIcons
         | IconKind::SmallIcons
@@ -1980,6 +2038,9 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         | IconKind::Pixelate
         | IconKind::Noise
         | IconKind::FindEdges
+        | IconKind::ChannelMixer
+        | IconKind::Median
+        | IconKind::Emboss
         | IconKind::Pages
         | IconKind::Toolbox
         | IconKind::Activity

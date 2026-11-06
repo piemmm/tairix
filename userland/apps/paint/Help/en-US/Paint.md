@@ -31,8 +31,15 @@ opacity and whether it shows; painting lands on one layer at a time, and the
 window shows them laid together. OpenRaster keeps the layers; every other
 format is written them laid together. The Layers menu adds, copies, deletes,
 raises and lowers layers, merges one down onto the one beneath and flattens
-the picture, and its Layer properties renames a layer and sets how much of
-it shows. Adjustments, fills and strokes change the layer painted on; turns,
+the picture. The Layers pane, shown from View ▸ Panes, holds the opacity of
+the layer painted on and the New, Duplicate, Delete and Merge down buttons
+above a row for each layer, the top first, with an eye, a small picture of
+the layer, its name and its opacity. Press a row to paint on its layer, its
+eye to show or hide the layer, or the name of the layer painted on to rename
+it, and drag a row to move its layer up or down; each of these but choosing a
+row, and a change of opacity however long it is dragged, is one change to
+undo. Floating, the pane's window resizes from two rows to all of them.
+Adjustments, fills and strokes change the layer painted on; turns,
 flips, resizes and crops change every layer. A palette picture holds one
 layer.
 
@@ -72,8 +79,12 @@ The airbrush keeps spraying while it is held still. Holding Shift draws a
 square, a circle or a line at a multiple of 45 degrees.
 
 Panes run down both sides of the window: by default the Tools pane on the left
-and the Colour pane on the right, with the Adjustment pane beneath it once an
-adjustment is opened. Each is headed by a slim band naming it, with a control
+and the Colour pane on the right, joined beneath by the Layers, Adjustments and
+Effects panes when they are shown or an adjustment or an effect is opened. The
+panes on a side stack in one column: each gets at least the room it needs, the
+one opened last then grows first towards all it holds, and a pane given less
+scrolls within itself, while the column never does. Each is headed by a slim
+band naming it, with a control
 that rolls it up to its band and a mark that closes it; View ▸ Panes shows a
 closed pane again, and Reset panes puts every pane back as a new window has
 them. Dragging a band moves its pane within its side or to the other, the
@@ -82,8 +93,11 @@ out of the window, the pane floats in a small window of its own, moved by its
 band and kept above the picture, its mark closing it; dragged back over a
 side, it docks there again. The palette floats too: the button at the right
 end of its strip, or View ▸ Panes ▸ Float palette, moves it into a small
-window of its own, its colours set out in a grid; closing that window, or
-dragging it back to the bottom of the window, puts it back in the strip.
+window of its own, its colours set out in a grid. Resizing that window sets
+the colours out again to fit its width, and they scroll up and down when they
+do not all fit; closing it, or dragging it back to the bottom of the window,
+puts it back in the strip. In the strip and in its window alike, the primary
+and secondary colours are marked with their RISC OS colour numbers.
 
 The select tool marks out a rectangle, an ellipse, a freehand lasso, a
 polygon clicked corner by corner, or with the magic wand the pixels joined
@@ -105,23 +119,41 @@ hand drags the picture across the window, as Space does with any tool; the
 zoom tool magnifies a click, or with Alt shrinks it, and a box dragged fills
 the window.
 
-The Adjust menu opens an adjustment in the Adjustment pane, where every other
-tool, pane and menu stays to hand: brightness and contrast, hue and
-saturation, colour balance, levels, curves, white balance, posterise,
-threshold, blur, sharpen, pixelate and add noise; desaturate and find edges,
-which have no settings, apply at once. The picture shows the adjustment as its
-settings move, Preview turns that off and on to compare, Reset puts its
-settings back and Apply keeps it as one change to undo; painting, filling or
-choosing another adjustment applies it first. Levels sets black, grey and
-white points over a histogram of the layer, for every channel together or
-each alone, with pickers that take them from the picture and Auto; Curves
-bends a channel's tones through points dragged over its histogram; white
-balance sets the light's temperature and tint, from a neutral pixel picked or
-by Auto; hue and saturation turns, strengthens and lightens all colours or one
-range of them; colour balance moves the shadows, midtones and highlights
-towards red, green or blue, keeping their lightness when asked. Everything is
-held to the selection. On a palette picture an adjustment changes its
-palette, and those that need neighbouring colours are not offered.
+Two panes hold the picture's operations, each headed by a list that chooses
+one: the Adjustments pane holds brightness and contrast, levels, curves, hue
+and saturation, colour balance, white balance, desaturate, invert, posterise,
+threshold and the channel mixer, and the Effects pane holds Gaussian blur,
+unsharp mask, median, add noise, find edges, emboss and pixelate. Each row of
+the Adjust menu opens its operation in its pane. Beneath the list lie the
+chosen operation's settings, then Preview, Reset and Apply; every other tool,
+pane and menu stays to hand. The picture shows the operation as its settings
+move, the part in view first; Preview turns that off and on to compare, Reset
+puts its settings back, and Apply keeps it as one change to undo. One preview
+runs across both panes: choosing another operation in a list, or moving the
+other pane's settings, applies the operation left as one change where its
+settings were moved and it changes the picture, and drops it otherwise, so
+looking down a list changes nothing. Painting, filling, a transform or a save
+first applies or drops the open operation in the same way; marking a
+selection, the view, the colours and undo leave it open.
+
+Levels sets black, grey and white points over a histogram of the layer, for
+every channel together or each alone, with pickers that take them from the
+picture and Auto; Curves bends a channel's tones through points dragged over
+its histogram; white balance sets the light's temperature and tint, from a
+neutral pixel picked or by Auto; hue and saturation turns, strengthens and
+lightens all colours or one range of them; colour balance moves the shadows,
+midtones and highlights towards red, green or blue, keeping their lightness
+when asked; the channel mixer weighs each channel from red, green and blue
+and a constant, or makes one grey of them. Gaussian blur softens the picture
+by its radius; unsharp mask sharpens it, pushing each colour away from its
+blur by an amount where the two differ by at least a threshold; median gives
+each pixel the middle value of those about it, smoothing speckle and keeping
+edges; add noise lays uniform or Gaussian speckle, in colour or grey; find
+edges lights the edges between colours; emboss turns the picture into a grey
+relief lit from an angle; and pixelate lays squares, each the average colour
+of what it covers. Everything is held to the selection. On a palette picture
+an adjustment changes its palette, and the effects, which need neighbouring
+colours, are not offered.
 
 The Colour pane holds the primary and secondary colours and a colour picker
 for whichever of them is chosen: click a colour to choose it, then pick it on

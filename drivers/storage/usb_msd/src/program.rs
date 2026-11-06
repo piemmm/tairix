@@ -35,7 +35,8 @@ use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::LogSink;
 use tairix_usb::device::BULK_BUF_LEN;
 use tairix_usb::transport::{
-    read_configuration, Deadline, UrbCall, UrbClient, UrbLink, CONTROL_BUDGET_MAX,
+    read_configuration, read_serial_number, Deadline, DeviceSerial, UrbCall, UrbClient, UrbLink,
+    CONTROL_BUDGET_MAX,
 };
 use tairix_util::fmt::format_hex_u64;
 
@@ -768,17 +769,35 @@ fn discover_storage_interface(
     shm: &[u8],
     interface: u8,
 ) -> Result<StorageInterface, i32> {
-    let config = read_configuration(&mut |setup, data| {
-        let len = u32::try_from(data.len()).map_err(|_| Errno::LengthOutOfRange)?;
-        let delivered = usize::try_from(client.control_in(setup, len, CONTROL_BUDGET_MAX)?)
-            .map_err(|_| Errno::LengthOutOfRange)?
-            .min(data.len());
-        let landed = shm.get(..delivered).ok_or(Errno::LengthOutOfRange)?;
-        data[..delivered].copy_from_slice(landed);
-        Ok(delivered)
-    })
-    .map_err(|_| end(DriverExit::BringupFailed, &[]))?;
+    let config = read_configuration(&mut |setup, data| control_in(client, shm, setup, data))
+        .map_err(|_| end(DriverExit::BringupFailed, &[]))?;
     find_storage_interface(&config, interface).map_err(|_| end(DriverExit::BringupFailed, &[]))
+}
+
+/// The device's serial number, which its units' identities are taken from:
+/// `None` for a device naming none or failing the read, which proves nothing
+/// and is still served.
+fn read_device_serial(client: &mut UrbClient<IpcUrbCall>, shm: &[u8]) -> Option<DeviceSerial> {
+    read_serial_number(&mut |setup, data| control_in(client, shm, setup, data))
+        .ok()
+        .flatten()
+}
+
+/// One control-IN transfer through `client`, its data stage landing in the
+/// shared buffer `shm` and copied out into `data`: the bytes delivered.
+fn control_in(
+    client: &mut UrbClient<IpcUrbCall>,
+    shm: &[u8],
+    setup: [u8; 8],
+    data: &mut [u8],
+) -> Result<usize, Errno> {
+    let len = u32::try_from(data.len()).map_err(|_| Errno::LengthOutOfRange)?;
+    let delivered = usize::try_from(client.control_in(setup, len, CONTROL_BUDGET_MAX)?)
+        .map_err(|_| Errno::LengthOutOfRange)?
+        .min(data.len());
+    let landed = shm.get(..delivered).ok_or(Errno::LengthOutOfRange)?;
+    data[..delivered].copy_from_slice(landed);
+    Ok(delivered)
 }
 
 /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
@@ -800,6 +819,7 @@ fn main() -> i32 {
         Ok(interface) => interface,
         Err(code) => return code,
     };
+    let serial = read_device_serial(&mut client, shm);
 
     // Build the wire transport the interface's protocol byte named and run
     // the one shared bring-up + serve body over it.
@@ -820,10 +840,11 @@ fn main() -> i32 {
                 interrupt_endpoint: 0,
                 exchange: exchange_of(0),
             };
-            let scsi = ScsiDevice::new(
+            let mut scsi = ScsiDevice::new(
                 Bot::new(transport, interface.interface_number),
                 interface.command_set,
             );
+            scsi.set_serial(serial);
             run_device(scsi, endpoint, |scsi| {
                 disconnected(&scsi.transport().transport().link)
             })
@@ -853,10 +874,11 @@ fn main() -> i32 {
                 CommandSet::Ufi => CbiStatus::UfiSense,
                 CommandSet::Transparent | CommandSet::Atapi => CbiStatus::CommandStatus,
             };
-            let scsi = ScsiDevice::new(
+            let mut scsi = ScsiDevice::new(
                 Cbi::new(transport, interface.interface_number, status),
                 interface.command_set,
             );
+            scsi.set_serial(serial);
             run_device(scsi, endpoint, |scsi| {
                 disconnected(&scsi.transport().transport().link)
             })
@@ -877,7 +899,8 @@ fn main() -> i32 {
                 endpoints,
                 exchange: exchange_of(0),
             };
-            let scsi = ScsiDevice::new(Uas::new(pipes), interface.command_set);
+            let mut scsi = ScsiDevice::new(Uas::new(pipes), interface.command_set);
+            scsi.set_serial(serial);
             run_device(scsi, endpoint, |scsi| {
                 disconnected(&scsi.transport().pipes().link)
             })

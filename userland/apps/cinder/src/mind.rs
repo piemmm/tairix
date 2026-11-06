@@ -235,6 +235,12 @@ impl<R: RandU64> Mind<R> {
         self.intent
     }
 
+    /// Seconds until the held intent is reconsidered.
+    #[must_use]
+    pub fn reconsider_in(&self) -> f64 {
+        (RECONSIDER_SECONDS - self.held_for).max(0.0)
+    }
+
     /// Record a pet.
     pub fn petted(&mut self) {
         self.needs.petted();

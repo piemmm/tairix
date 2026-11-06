@@ -23,6 +23,7 @@ fn serve(format: FormatName) -> ServeOffer {
         name_matching: NameMatching::AsciiCaseInsensitive,
         node_identity: NodeIdentity::Stable,
         attrs: false,
+        title: false,
         write_refusal: None,
         format,
     }

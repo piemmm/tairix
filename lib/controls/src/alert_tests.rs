@@ -592,6 +592,36 @@ fn a_held_arrow_on_the_alerts_bar_steps_and_repeats_and_chooses_nothing() {
     assert_eq!(alert.repeat_deadline(due), None, "let go, nothing repeats");
 }
 
+/// A held arrow whose alert has come to fit its text is let go of when its
+/// step falls due, so nothing stays due for an owner to wake for at once.
+#[test]
+fn a_held_arrow_with_no_room_left_to_step_is_let_go_of() {
+    let theme = Theme::dark();
+    let (mut alert, bounds) = overflowing();
+    let down = bar_down_arrow(&alert, bounds);
+    let mut damage = Region::new();
+    for event in [
+        InputEvent::PointerMoved { to: down },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+    ] {
+        let _ = alert.on_pointer(&event, bounds, Scale::ONE, &theme, &mut damage);
+    }
+    let due = alert
+        .repeat_deadline(0)
+        .expect("a held arrow arms a repeat");
+
+    let room = Rect::new(bounds.left(), bounds.top(), bounds.width, 100_000);
+    assert_eq!(alert.layout(room, Scale::ONE, &theme).scroll_room, 0);
+    alert.repeat(due, room, Scale::ONE, &theme, &mut damage);
+    assert_eq!(
+        alert.repeat_deadline(due),
+        None,
+        "the press went with the room"
+    );
+}
+
 /// A picture the desktop sets replaces the severity's mark; an alert built
 /// from a spec alone wears its severity's.
 #[test]

@@ -36,6 +36,15 @@ s'affiche `*` et un port non lié `*` ; une adresse IPv6 est entre
 crochets pour que le séparateur `:port` reste sans ambiguïté — un nom
 résolu n'a pas besoin de crochets.
 
+`-s` rapporte autre chose que la table : les totaux de défense des
+connexions TCP de toute la pile réseau — la file d'attente SYN, le frein
+sans état des cookies SYN, la file d'acceptation et les réinitialisations
+envoyées. Chacun croît de façon monotone depuis le démarrage (un socket
+d'écoute qui se ferme verse ses totaux dans ceux de la pile), si bien
+qu'une inondation SYN reste visible après la disparition du socket
+qu'elle visait. Les mêmes chiffres se résolvent individuellement sous la
+forme `stats:net/stack/syn-cookies` et des références voisines.
+
 `ss` n'accepte que des options. La grammaire d'expressions de filtre
 d'iproute2 (filtres d'état et d'adresse) n'est pas implémentée, donc un
 opérande nu est une erreur d'usage plutôt qu'un argument silencieusement
@@ -69,14 +78,16 @@ ignoré.
 - `ss -l` — seulement les sockets en écoute.
 - `ss -tlp` — les sockets TCP en écoute, avec le processus propriétaire.
 - `ss -u4` — les sockets UDP sur IPv4.
+- `ss -s` — les totaux de défense des connexions de toute la pile.
 - `ss -r` — la même liste, adresses résolues en noms d'hôtes.
 
 ## EXIT STATUS
 
-- `0` — la liste a été produite (ou l'aide courte a été écrite).
-- `1` — la requête de sockets a été refusée ou a échoué, ou la sortie
-  n'a pu être écrite. Une ligne de commande non comprise sort aussi avec
-  `1`.
+- `0` — la liste ou le résumé a été produit (ou l'aide courte a été
+  écrite).
+- `1` — la requête de sockets ou de défense a été refusée ou a échoué, ou
+  la sortie n'a pu être écrite. Une ligne de commande non comprise sort
+  aussi avec `1`.
 
 ## ENVIRONMENT
 

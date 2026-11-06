@@ -6,6 +6,7 @@
 //! read-only-compatible feature is one the write path maintains, and nothing
 //! recorded against it says writing is unsafe.
 
+use tairix_abi::driver::filesystem::VolumeTitle;
 use tairix_abi::volume::FormatName;
 use tairix_abi::DriverError;
 
@@ -40,6 +41,11 @@ const SB_FEATURE_COMPAT: usize = 0x5C;
 pub(crate) const SB_FEATURE_INCOMPAT: usize = 0x60;
 pub(crate) const SB_FEATURE_RO_COMPAT: usize = 0x64;
 pub(crate) const SB_UUID: usize = 0x68;
+/// `s_volume_name`, the volume's title; the one definition lives where the
+/// volume probe shares it.
+pub(crate) const SB_VOLUME_NAME: usize = tairix_fsprobe::EXT4_VOLUME_NAME_AT;
+/// Bytes of `s_volume_name`.
+const VOLUME_NAME_LEN: usize = tairix_fsprobe::EXT4_VOLUME_NAME_LEN;
 const SB_RESERVED_GDT: usize = 0xCE;
 const SB_JOURNAL_INUM: usize = 0xE0;
 const SB_JOURNAL_DEV: usize = 0xE4;
@@ -675,6 +681,44 @@ pub(crate) fn set_free_blocks(sb: &mut [u8], wide: bool, free: u64) -> Result<()
         crate::bytes::put_le32(sb, SB_FREE_BLOCKS_HI, crate::bytes::high32(free));
     }
     Ok(())
+}
+
+/// The title superblock `sb`'s volume name spells, its padding trimmed as the
+/// volume probe trims it.
+///
+/// # Errors
+///
+/// [`DriverError::OutOfRange`] for a name no title spells: not UTF-8, or
+/// carrying a control character.
+pub(crate) fn volume_name(sb: &[u8]) -> Result<VolumeTitle, DriverError> {
+    let field = &sb[SB_VOLUME_NAME..SB_VOLUME_NAME + VOLUME_NAME_LEN];
+    let len = field
+        .iter()
+        .rposition(|&b| b != 0 && b != b' ')
+        .map_or(0, |last| last + 1);
+    let text = core::str::from_utf8(&field[..len]).map_err(|_| DriverError::OutOfRange)?;
+    VolumeTitle::new(text).map_err(|_| DriverError::OutOfRange)
+}
+
+/// The volume-name field spelling `title`: its bytes, NUL-padded. A title is
+/// refused rather than cut.
+///
+/// # Errors
+///
+/// [`DriverError::LengthOutOfRange`] past the field's sixteen bytes;
+/// [`DriverError::OutOfRange`] for one closing with the space every reader
+/// takes for padding.
+pub(crate) fn volume_name_of(title: &VolumeTitle) -> Result<[u8; VOLUME_NAME_LEN], DriverError> {
+    let text = title.as_str().as_bytes();
+    if text.len() > VOLUME_NAME_LEN {
+        return Err(DriverError::LengthOutOfRange);
+    }
+    if text.ends_with(b" ") {
+        return Err(DriverError::OutOfRange);
+    }
+    let mut field = [0u8; VOLUME_NAME_LEN];
+    field[..text.len()].copy_from_slice(text);
+    Ok(field)
 }
 
 /// Recompute `s_checksum` over a `metadata_csum` superblock.

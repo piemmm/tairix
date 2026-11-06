@@ -19,6 +19,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_browse::DriveClass;
 use tairix_controls::DisclosureSet;
 use tairix_icon::IconKind;
 
@@ -718,6 +719,11 @@ const FILES_SETTINGS: &[&str] = &[
     FilesSetting::HiddenItems.label(),
     FilesSetting::Thumbnails.label(),
     FilesSetting::FolderContents.label(),
+    FilesSetting::Desktop(DriveClass::System).label(),
+    FilesSetting::Desktop(DriveClass::Fixed).label(),
+    FilesSetting::Desktop(DriveClass::Removable).label(),
+    FilesSetting::Desktop(DriveClass::Network).label(),
+    FilesSetting::Desktop(DriveClass::Images).label(),
     FilesSetting::ConfirmTrash.label(),
     FilesSetting::UnmountWhenClosed.label(),
 ];

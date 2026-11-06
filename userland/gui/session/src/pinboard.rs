@@ -32,10 +32,11 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::sysinfo::VOLUME_ID_LEN;
 use tairix_abi::window_ipc::{AppMenuItemId, AppMenuSymbol};
 use tairix_abi::FileId;
 use tairix_appdata::AppDataHost;
-use tairix_controls::{ChainModel, ChainRow, MenuItem};
+use tairix_controls::{ChainModel, ChainRow, ControlState, MenuItem};
 use tairix_proglib::personal::FORGOTTEN;
 use tairix_wallpaper::{DesktopSettings, IconFlow, IconSort};
 
@@ -87,6 +88,14 @@ impl TidyOrder {
 pub enum PinboardCommand {
     /// Open the icon the menu was opened on.
     Open,
+    /// Eject the volume the drive the menu was opened on stands for.
+    Eject,
+    /// Retitle the volume the drive the menu was opened on stands for, with
+    /// the title its field commits.
+    Title,
+    /// Move the icon the menu was opened on to the Trash: refused for a
+    /// drive, which is drawn rather than stored.
+    MoveToTrash,
     /// Create a new folder in the desktop folder.
     NewFolder,
     /// List the desktop folder in this order.
@@ -109,8 +118,11 @@ impl PinboardCommand {
     /// A row's id is its position here, so the list fixes both the order the
     /// plate shows and the id an answer names — and a gesture that leaves
     /// `Open` out shifts neither.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 17] = [
         Self::Open,
+        Self::Eject,
+        Self::Title,
+        Self::MoveToTrash,
         Self::NewFolder,
         Self::SortBy(IconSort::Name),
         Self::SortBy(IconSort::Kind),
@@ -149,6 +161,9 @@ impl PinboardCommand {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Open => "Open",
+            Self::Eject => "Eject",
+            Self::Title => "Title",
+            Self::MoveToTrash => "Move to Trash",
             Self::NewFolder => "New Folder",
             Self::SortBy(IconSort::Name) => "Sort by Name",
             Self::SortBy(IconSort::Kind) => "Sort by Kind",
@@ -169,6 +184,9 @@ impl PinboardCommand {
     const fn symbol(self) -> AppMenuSymbol {
         match self {
             Self::Open => AppMenuSymbol::Open,
+            Self::Eject => AppMenuSymbol::Drive,
+            Self::Title => AppMenuSymbol::Rename,
+            Self::MoveToTrash => AppMenuSymbol::Trash,
             Self::NewFolder => AppMenuSymbol::NewFolder,
             Self::SortBy(IconSort::Name) | Self::TidyUp(TidyOrder::Name) => {
                 AppMenuSymbol::SortByName
@@ -222,39 +240,113 @@ impl PinboardCommand {
         }
     }
 
-    /// Whether this command is offered when the press did not land on an icon.
-    ///
-    /// A menu opened on empty backdrop has nothing to open.
-    const fn needs_icon(self) -> bool {
-        matches!(self, Self::Open)
+    /// Whether this command is offered over `over`: opening asks for an icon,
+    /// and ejecting, retitling or moving to the Trash for a drive the desktop
+    /// draws; the rest are the backdrop's own.
+    const fn offered(self, over: Over<'_>) -> bool {
+        match self {
+            Self::Open => !matches!(over, Over::Backdrop),
+            Self::Eject | Self::Title | Self::MoveToTrash => matches!(over, Over::Drive { .. }),
+            _ => true,
+        }
+    }
+
+    /// Why this command cannot be chosen over `over`, where it is offered but
+    /// refused: an eject or a retitle the viewer may not make, a drive, which
+    /// is no file to move to the Trash, and an open of several icons at once.
+    const fn refused(self, over: Over<'_>) -> Option<&'static str> {
+        match (self, over) {
+            (Self::Open, Over::Several) => Some(REASON_SEVERAL),
+            (Self::Eject, Over::Drive { eject_refused, .. }) => eject_refused,
+            (
+                Self::Title,
+                Over::Drive {
+                    title: Err(why), ..
+                },
+            ) => Some(why),
+            (Self::MoveToTrash, Over::Drive { .. }) => Some(REASON_DRIVE_NOT_TRASHED),
+            _ => None,
+        }
+    }
+
+    /// This command's row over `over`, answering `id`: a drive's *Title* opens
+    /// a field holding its title, the caret at its end, whose commit answers
+    /// `id`.
+    fn row(self, id: AppMenuItemId, over: Over<'_>, item: MenuItem) -> ChainRow {
+        match (self, over) {
+            (
+                Self::Title,
+                Over::Drive {
+                    title: Ok(title), ..
+                },
+            ) => {
+                let end = title.len();
+                ChainRow::entry((id, id), (title, end..end), self.symbol(), item)
+                    .opened_for_its_field()
+            }
+            _ => ChainRow::item(id, self.symbol(), item),
+        }
     }
 }
 
+/// What the backdrop menu is opened over.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Over<'a> {
+    /// The bare backdrop.
+    Backdrop,
+    /// An icon standing for a file.
+    Icon,
+    /// Several icons selected together.
+    Several,
+    /// A drive the desktop draws for a volume.
+    Drive {
+        /// Why the viewer may not eject it, or `None` where they may.
+        eject_refused: Option<&'static str>,
+        /// The volume's title, which its *Title* row's field opens on, or why
+        /// the viewer may not retitle it.
+        title: Result<&'a str, &'static str>,
+    },
+}
+
+/// Why a verb that acts on one icon was not carried out over several.
+pub const REASON_SEVERAL: &str = "several icons are selected; open them one at a time";
+
+/// Why a drive the desktop draws is not moved to the Trash.
+pub const REASON_DRIVE_NOT_TRASHED: &str =
+    "it stands for its drive and stores no file; Settings ▸ Files chooses which drives show";
+
 /// The backdrop menu the desktop's own secondary press opens, with the rows
-/// `on_icon` and `settings` imply.
+/// `over` and `settings` imply.
 ///
-/// `on_icon` is whether the press landed on an icon, which is the only thing
-/// that decides whether `Open` is offered. The sort order and the arrangement
-/// in force are shown as their group's chosen member and are non-actionable,
+/// `over` is what the press landed on, which alone decides whether `Open` is
+/// offered and, over a drive, `Eject`, `Title` — whose field opens on the
+/// volume's title — and `Move to Trash`, each refused with its reason where it
+/// cannot be chosen. The sort order and the arrangement in
+/// force are shown as their group's chosen member and are non-actionable,
 /// because choosing what already holds is a statement of where the desktop is
 /// rather than a command — and the first row of a plate never opens a group,
 /// since there is nothing above it to divide it from. The tidying orders sit on
 /// a plate of their own, opened from *Tidy Up*.
 #[must_use]
-pub fn model(on_icon: bool, settings: &DesktopSettings) -> ChainModel {
+pub fn model(over: Over<'_>, settings: &DesktopSettings) -> ChainModel {
     let mut model = ChainModel::new(PINBOARD_TITLE);
     let mut tidy = None;
     for (index, command) in PinboardCommand::ALL.into_iter().enumerate() {
-        if command.needs_icon() && !on_icon {
+        if !command.offered(over) {
             continue;
         }
         let Some(id) = AppMenuItemId::for_index(index) else {
             continue;
         };
         let in_force = command.in_force(settings);
-        let item = crate::menu::marked(MenuItem::new(command.label()), in_force);
-        let mut row = ChainRow::item(id, command.symbol(), item);
-        if let Some(why) = in_force.then(|| command.already_reason()).flatten() {
+        let refused = command.refused(over);
+        let mut item = crate::menu::marked(MenuItem::new(command.label()), in_force);
+        if refused.is_some() {
+            item = item.with_state(ControlState::disabled());
+        }
+        let mut row = command.row(id, over, item);
+        let already = in_force.then(|| command.already_reason()).flatten();
+        if let Some(why) = already.or(refused) {
             row = row.explained(why);
         }
         if matches!(command, PinboardCommand::TidyUp(_)) {
@@ -373,38 +465,85 @@ impl Placed {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ArrangementFull;
 
-/// The fingerprint of an icon's name its place is kept under, since the key
-/// grammar spells no file name.
+/// The key an icon's place is kept under: the fingerprint of a file's name,
+/// since the key grammar spells no file name, or the identity of the volume a
+/// drive stands for.
 ///
 /// Unkeyed, because a key must read the same in every session; two names
 /// sharing one cost each other no more than a remembered place.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct PlaceKey(u64);
+pub enum PlaceKey {
+    /// A file's, by the fingerprint of its name.
+    Name(u64),
+    /// A drive's, by its volume's identity, so the place outlives a new title,
+    /// a new catalog name and the volume being away.
+    Volume([u8; VOLUME_ID_LEN]),
+}
 
 impl PlaceKey {
-    /// The key the icon named `name` keeps its place under.
+    /// The key the icon named `name` keeps its place under: a drive, named by
+    /// its volume's root, under that volume.
     #[must_use]
     pub fn of(name: &str) -> Self {
-        Self(tairix_hash::FastHash::hash_bytes(0, name.as_bytes()))
+        match tairix_browse::volume::reference(name) {
+            Some(identity) => Self::of_volume(identity),
+            None => Self::Name(tairix_hash::FastHash::hash_bytes(0, name.as_bytes())),
+        }
+    }
+
+    /// The key the drive of the volume whose content carries `identity` keeps
+    /// its place under.
+    #[must_use]
+    pub const fn of_volume(identity: [u8; VOLUME_ID_LEN]) -> Self {
+        Self::Volume(identity)
+    }
+
+    /// Whether this is a drive's key, which names no file to follow.
+    #[must_use]
+    pub const fn is_volume(self) -> bool {
+        matches!(self, Self::Volume(_))
     }
 
     /// The store key this is spelled as.
     #[must_use]
     pub fn spelled(self) -> String {
-        format!("{ARRANGEMENT_PREFIX}.{:016x}", self.0)
+        match self {
+            Self::Name(print) => format!("{ARRANGEMENT_PREFIX}.{print:016x}"),
+            Self::Volume(identity) => format!(
+                "{ARRANGEMENT_PREFIX}.{VOLUME_SEGMENT}.{}",
+                tairix_util::hex::encode(&identity)
+            ),
+        }
     }
 
     /// The key the store key `key` spells exactly as [`spelled`](Self::spelled)
     /// does, or `None` for any other.
     fn read(key: &str) -> Option<Self> {
         let print = key.strip_prefix(ARRANGEMENT_PREFIX)?.strip_prefix('.')?;
-        let lowercase = print
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if let Some(identity) = print
+            .strip_prefix(VOLUME_SEGMENT)
+            .and_then(|rest| rest.strip_prefix('.'))
+        {
+            let mut bytes = [0u8; VOLUME_ID_LEN];
+            return (lowercase_hex(identity)
+                && tairix_util::hex::decode_into(identity, &mut bytes))
+            .then_some(Self::Volume(bytes));
+        }
         let mut bytes = [0u8; 8];
-        (lowercase && tairix_util::hex::decode_into(print, &mut bytes))
-            .then(|| Self(u64::from_be_bytes(bytes)))
+        (lowercase_hex(print) && tairix_util::hex::decode_into(print, &mut bytes))
+            .then(|| Self::Name(u64::from_be_bytes(bytes)))
     }
+}
+
+/// The segment a drive's place is kept under, after the record's own.
+const VOLUME_SEGMENT: &str = "volume";
+
+/// Whether `spelled` is lowercase hexadecimal digits alone, as every key the
+/// record writes is.
+fn lowercase_hex(spelled: &str) -> bool {
+    spelled
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// One change to where the user put their icons.

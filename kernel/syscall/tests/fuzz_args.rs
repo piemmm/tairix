@@ -494,6 +494,16 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn shm_grant_to(
+        &self,
+        _c: &CallerContext<'_>,
+        _region: u64,
+        _recipient: u64,
+        _recipient_len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn call_peer_holds(
         &self,
         _c: &CallerContext<'_>,
@@ -671,6 +681,16 @@ impl SyscallHandlers for AcceptingHandlers {
         Ok(0)
     }
     fn self_origin(&self, _c: &CallerContext<'_>, _out: u64, _out_cap: usize) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn child_origin(
+        &self,
+        _c: &CallerContext<'_>,
+        _pid: i64,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
@@ -1145,6 +1165,15 @@ impl SyscallHandlers for AcceptingHandlers {
         Ok(0)
     }
     fn volume_retitle(
+        &self,
+        _c: &CallerContext<'_>,
+        _request: u64,
+        _request_len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn volume_replay(
         &self,
         _c: &CallerContext<'_>,
         _request: u64,
@@ -1760,7 +1789,8 @@ fn fuzz_dispatcher_matches_mirror() {
             caps_set.insert(c);
         }
     }
-    let caps = TaskCapabilities::derive(ProcessId(0xF), UserId(42), caps_set, caps_set, &sink);
+    let caps = TaskCapabilities::derive(ProcessId(0xF), UserId(42), caps_set, caps_set, &sink)
+        .expect("derived");
     let ctx = CallerContext {
         task_id: TaskId(0xF),
         caps: &caps,
@@ -1887,7 +1917,8 @@ fn pointer_shaped_user_ptr_inputs_are_handled_deterministically() {
             caps_set.insert(c);
         }
     }
-    let caps = TaskCapabilities::derive(ProcessId(0x7), UserId(7), caps_set, caps_set, &sink);
+    let caps = TaskCapabilities::derive(ProcessId(0x7), UserId(7), caps_set, caps_set, &sink)
+        .expect("derived");
     let ctx = CallerContext {
         task_id: TaskId(0x7),
         caps: &caps,

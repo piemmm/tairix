@@ -36,18 +36,22 @@ there, and the full folder browser one press away.
   *Cancel* while naming goes back to the document's name, not out of the pick.
 - **A dialog of the requester's window.** It opens over the window that asked
   (`DesktopShell::open_dialog_window`), not at a fixed point, so it reads as
-  that document's question. The open and folder picks keep their fixed origin
-  and geometry (`PICKER_ORIGIN`), which the QEMU picker vertical reconstructs.
-- **Modal to its requester alone.** A pick holds the window that asked, as an
-  owner-modal dialog does (`SessionWindows::hold_for_pick`): a press on that
-  window brings the picker forward, and its menus, raises and drags are
-  refused. The picker holds the seat only while it has the keyboard
-  (`seat_held`), so every other application stays usable, and the desktop's own
-  menus and program library open over it even then (`seat_modal`), handing the
-  keyboard back as they close; when the pick ends
-  the keyboard goes back to the requester only if the picker had it. While it
-  is on screen it is still a trusted surface (`trusted_up`), so the desktop
-  layer surface stays hidden.
+  that document's question. The open and folder picks are windows of their own
+  at a fixed geometry, the first at `PICKER_ORIGIN` and each further one up at
+  once in the lowest free cascade slot (`picker_origin`), which the QEMU picker
+  vertical reconstructs.
+- **Modal to its requester alone.** Each pick holds the window that asked, as
+  an owner-modal dialog does (`SessionWindows::hold_for_pick`, one hold per
+  pick): a press on that window brings its picker forward, and its menus,
+  raises and drags are refused. A picker holds the seat only while it has the
+  keyboard (`seat_held`), so every other application stays usable and may ask
+  for a pick of its own, and the desktop's own menus and program library open
+  over it even then (`seat_modal`), handing the keyboard back as they close. A
+  save takes the keyboard as it opens only when its application holds the
+  front, and otherwise opens beneath the window the user is in; when the pick
+  ends the keyboard goes back to the requester only if the picker had it.
+  While any pick is on screen it is still a trusted surface (`trusted_up`), so
+  the desktop layer surface stays hidden.
 - **The name.** Offered as the requester suggests it, the stem selected so
   typing replaces the name and keeps the ending; an ending the registry names
   another type by is left off, so a picture saved in another format is not

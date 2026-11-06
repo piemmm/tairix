@@ -60,7 +60,7 @@ pub use rt::{
     RtShmRegion,
 };
 pub use scanout::{
-    add_damage, damage_list, scanout_len, stale_frames, sub_screen_damage, ChannelOrder,
+    add_damage, as_damage, damage_list, scanout_len, stale_frames, sub_screen_damage, ChannelOrder,
 };
 // The runner contract and the calling-thread runner a window-frame conversion
 // names, re-exported so a program that converts its own frame does not take a

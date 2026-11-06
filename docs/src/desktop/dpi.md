@@ -28,6 +28,10 @@ as a percentage:
 - `Scale::scale_length(logical)` is the **single** logical→physical
   conversion. It widens through `u64` and saturates at `u32::MAX`, so an
   extreme length clamps rather than wrapping (`AGENTS.md` §2.9).
+- `Scale::logical_length(physical)` is its one inverse: the least logical
+  length that scales to at least `physical`, so a size the user gave in
+  physical pixels — a resized tool window — is kept logically and comes back
+  exactly through `scale_length` at the scale it was given at.
 
 ## One conversion, no duplication
 

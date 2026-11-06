@@ -123,13 +123,16 @@ pub struct Applied {
 /// What of an entry a change reached.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Damage {
-    /// These pixels.
+    /// These pixels of the layer painted on.
     Area(Bounds),
     /// The whole picture, which may have changed size or kind.
     Whole,
     /// The layers — how many, their order, how each shows, or which is
-    /// painted on — the picture's size and kind kept.
+    /// painted on — the picture's size and kind kept, and no layer's pixels.
     Layers,
+    /// Pixels of a layer other than the one painted on, which painting moves
+    /// to.
+    OtherLayer,
     /// The list of entries itself.
     List,
 }
@@ -291,7 +294,12 @@ impl Step {
                 layer,
                 shown,
             } => {
-                let shown = picture_of(entries, entry)?.show_layer(layer, shown).ok()?;
+                // Showing a layer kept painting where it was, so taking that
+                // back, or making it again, does too.
+                let picture = picture_of(entries, entry)?;
+                let painted = picture.active();
+                let shown = picture.show_layer(layer, shown).ok()?;
+                picture.set_active(painted);
                 let step = Self::LayerShown {
                     entry,
                     layer,
@@ -349,7 +357,8 @@ fn swap_tiles(
     // A change to another layer than the one painted on paints on it again.
     let damage = match bounds {
         Some(area) if painted == layer => Damage::Area(area),
-        _ => Damage::Layers,
+        Some(_) => Damage::OtherLayer,
+        None => Damage::Layers,
     };
     picture.set_active(layer);
     let step = Step::Tiles {

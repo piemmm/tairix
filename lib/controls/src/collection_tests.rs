@@ -2177,6 +2177,36 @@ fn a_tile_that_sets_no_label_shadow_draws_the_bare_name() {
     assert_eq!(bare.pixels(), clear.pixels());
 }
 
+/// A faded tile draws its picture at part strength — the built-in glyph here —
+/// and its name whole, and is not the resting tile, so an owner's repaint gate
+/// sees the change.
+#[test]
+fn a_faded_tile_draws_its_picture_at_part_strength_and_its_name_whole() {
+    let theme = Theme::dark();
+    let ink = Color::rgb(250, 251, 252);
+    let resting = IconTile::new("Report.txt", IconKind::Text).with_label_ink(ink);
+    let faded = resting.clone().with_faded(true);
+    assert_ne!(resting, faded);
+    let Some(picture) = ONE_LINE
+        .parts(TILE, Scale::ONE, &theme, "Report.txt", Cut::End)
+        .and_then(|parts| parts.picture)
+    else {
+        panic!("the tile lays out a picture");
+    };
+    let full = ink.premultiply();
+    let in_picture = |surface: &Surface| {
+        (0..TH)
+            .flat_map(|y| (0..TW).map(move |x| (x, y)))
+            .filter(|&(x, y)| picture.contains(Point::new(to_i32(x), to_i32(y))))
+            .filter(|&(x, y)| surface.get(x, y) == Some(full))
+            .count()
+    };
+    let (drawn, dimmed) = (tile_with(&resting, &theme), tile_with(&faded, &theme));
+    assert!(in_picture(&drawn) > 0, "the glyph wears the name's ink");
+    assert_eq!(in_picture(&dimmed), 0, "a faded glyph never lands whole");
+    assert!(has_pixel(&dimmed, full), "the name is drawn whole");
+}
+
 /// An owner whose tile rests on ground the theme does not know states the ink
 /// its name reads in there, and the built-in glyph wearing the name's ink takes
 /// it too: the theme's foreground is drawn nowhere.

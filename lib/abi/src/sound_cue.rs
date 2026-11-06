@@ -128,6 +128,8 @@ pub enum SoundEvent {
     Info = 12,
     /// A terminal's bell.
     Bell = 13,
+    /// The output's volume changed by hand: the new level, heard.
+    VolumeFeedback = 14,
 }
 
 /// Who may cue an event.
@@ -143,7 +145,7 @@ pub enum CueAuthority {
 
 impl SoundEvent {
     /// Every event, in discriminant order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Startup,
         Self::Shutdown,
         Self::Login,
@@ -157,6 +159,7 @@ impl SoundEvent {
         Self::Warning,
         Self::Info,
         Self::Bell,
+        Self::VolumeFeedback,
     ];
 
     /// Raw on-wire discriminant.
@@ -192,6 +195,7 @@ impl SoundEvent {
             11 => Ok(Self::Warning),
             12 => Ok(Self::Info),
             13 => Ok(Self::Bell),
+            14 => Ok(Self::VolumeFeedback),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -213,6 +217,7 @@ impl SoundEvent {
             Self::Warning => "warning",
             Self::Info => "info",
             Self::Bell => "bell",
+            Self::VolumeFeedback => "volume_feedback",
         }
     }
 
@@ -245,7 +250,8 @@ impl SoundEvent {
             | Self::Error
             | Self::Warning
             | Self::Info
-            | Self::Bell => false,
+            | Self::Bell
+            | Self::VolumeFeedback => false,
         }
     }
 
@@ -265,7 +271,8 @@ impl SoundEvent {
             | Self::Error
             | Self::Warning
             | Self::Info
-            | Self::Bell => CueAuthority::Application,
+            | Self::Bell
+            | Self::VolumeFeedback => CueAuthority::Application,
         }
     }
 }

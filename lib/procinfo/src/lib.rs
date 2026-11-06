@@ -93,6 +93,8 @@
 //!   to this process's gauge, so every caching program does it one way.
 //! * [`process`] — the process-list paging walk and row rendering.
 //! * [`mount`] — the mount-table paging walk and row rendering.
+//! * [`named`] — which attached volume a command line's name means, as
+//!   `unmount` and `label` read it.
 //! * [`netsock`] — the open-socket-table paging walk.
 //! * [`raid`] — the composed-array and member-device paging walks.
 //! * [`dma`] — the DMA translation unit, group and node paging walks.
@@ -136,6 +138,7 @@ pub mod hwtree;
 pub mod kstats;
 pub mod list;
 pub mod mount;
+pub mod named;
 pub mod netaddr;
 pub mod netservers;
 pub mod netsock;
@@ -182,6 +185,7 @@ pub use mount::{
     render_binding, render_options, Namespace, MOUNT_PAGE, REMOVAL_PAGE, VIEW_PAGE,
     VOLUME_SERVICE_PAGE,
 };
+pub use named::{named_volume, Caller, Unnamed};
 pub use netaddr::{
     render_if_addr, render_ip, render_mac, render_neighbor, render_route, render_server,
 };

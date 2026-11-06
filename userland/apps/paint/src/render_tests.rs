@@ -13,7 +13,7 @@ use crate::canvas::{Canvas, CanvasBuilder, Kind, Sample};
 use crate::document::{Document, Picture};
 use crate::layout::{Faces, Layout};
 use crate::tool::Tool;
-use crate::view::{Action, View};
+use crate::view::{Action, Own, Request, View};
 
 const WINDOW: (u32, u32) = (900, 640);
 
@@ -559,6 +559,53 @@ fn the_layers_are_shown_laid_together() {
         Some(Color::rgb(0, 0, 255).premultiply()),
         "the top hidden"
     );
+}
+
+#[test]
+fn the_live_opacity_render_equals_the_committed_one() {
+    let size = (20, 10);
+    let layers = alloc::vec![
+        flat_layer(size, [0, 0, 255, 200], 255),
+        flat_layer(size, [0, 200, 0, 150], 210),
+        flat_layer(size, [250, 0, 0, 90], 160),
+    ];
+    let (mut view, layout, registry) = layered_window(layers, 1);
+    let theme = registry.active();
+    let before = paint(&view, &layout, theme);
+    view.layer_opacity(40, false, &layout, &mut Region::new());
+    let Some(Request::Own(Own::Preview { job, stamp, work })) =
+        view.wanted_preview(&layout, Scale::ONE)
+    else {
+        panic!("the layers beneath are asked to be laid together");
+    };
+    let asked = crate::preview::PreviewJob {
+        window: 0,
+        job,
+        stamp,
+        work,
+    };
+    let answer = crate::preview::serve(asked, &tairix_parallel::SERIAL, &|| false);
+    view.previewed(answer, &layout, &mut Region::new());
+    assert!(
+        view.composite_under().is_some(),
+        "the composite beneath is kept"
+    );
+    let live = paint(&view, &layout, theme);
+    view.layer_opacity(40, true, &layout, &mut Region::new());
+    assert!(
+        view.composite_under().is_none(),
+        "let go once the change lands"
+    );
+    let committed = paint(&view, &layout, theme);
+    let (x, y) = corner_of(&view, &layout, size, (3, 4));
+    assert_ne!(before.get(x, y), committed.get(x, y), "the opacity changed");
+    let shown = layout.canvas();
+    for y in shown.top()..shown.bottom() {
+        for x in shown.left()..shown.right() {
+            let (x, y) = (u32::try_from(x).expect("on"), u32::try_from(y).expect("on"));
+            assert_eq!(live.get(x, y), committed.get(x, y), "at ({x}, {y})");
+        }
+    }
 }
 
 #[test]

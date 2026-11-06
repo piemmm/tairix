@@ -2,13 +2,14 @@
 //! direction the protocol will accept.
 
 use super::*;
-use tairix_abi::input::Modifiers;
+use tairix_abi::input::{Modifiers, PhysicalKey};
 use tairix_wintersun_net::bounds::MAX_DIRECTION_MAGNITUDE_SQ;
 
 fn press(key: KeyValue) -> KeyInput {
     KeyInput::Pressed {
         key,
         modifiers: Modifiers::default(),
+        physical: PhysicalKey::UNKNOWN,
     }
 }
 
@@ -16,6 +17,7 @@ fn release(key: KeyValue) -> KeyInput {
     KeyInput::Released {
         key,
         modifiers: Modifiers::default(),
+        physical: PhysicalKey::UNKNOWN,
     }
 }
 

@@ -200,6 +200,25 @@ fn directories_and_files_map_to_the_storage_group() {
     assert_eq!((file.mode, file.uid, file.gid), (0o664, 0, STORAGE.0));
 }
 
+/// A removable volume attached before the unlock publishes the storage group
+/// is the system's alone, and is the group's the moment it is published.
+/// Regression: the group was read once at attach, so a stick present at boot
+/// stayed closed to every logged-in member until it was plugged in again.
+#[test]
+fn a_removable_volume_attached_before_the_unlock_opens_to_the_group_once_published() {
+    static GROUP: LateStorageGid = LateStorageGid::new();
+    let mut fs = PresentedFs::removable(TwoNodeFs::default(), &GROUP);
+    let dir = fs.security(ROOT).expect("root maps");
+    let file = fs.security(FILE).expect("file maps");
+    assert_eq!((dir.mode, dir.uid, dir.gid), (0o755, 0, 0));
+    assert_eq!((file.mode, file.uid, file.gid), (0o644, 0, 0));
+    GROUP.install(STORAGE);
+    let dir = fs.security(ROOT).expect("root maps");
+    let file = fs.security(FILE).expect("file maps");
+    assert_eq!((dir.mode, dir.uid, dir.gid), (0o775, 0, STORAGE.0));
+    assert_eq!((file.mode, file.uid, file.gid), (0o664, 0, STORAGE.0));
+}
+
 #[test]
 fn a_network_volume_is_presented_privately_shared_or_as_its_holder_chose() {
     let owner = GroupId(1000);

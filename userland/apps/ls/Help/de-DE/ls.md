@@ -19,34 +19,37 @@ selbst gelistet. Ohne Operand wird das aktuelle Verzeichnis (`.`)
 gelistet.
 
 Einträge werden nach Namen sortiert (oder mit `-S` nach Größe, die
-größte zuerst; mit `-t` nach Zeit, die neueste zuerst; mit `-r`
-umgekehrt), standardmäßig ein Name pro Zeile.
-Einträge, deren Name mit `.` beginnt, werden ausgeblendet, sofern
-nicht `-a` oder `-A` angegeben ist; werden Einträge ausgeblendet,
-erscheint ein Hinweis auf dem Standard-Informationsstrom (fd 3),
-niemals in der Liste selbst.
+größte zuerst; mit `-t` nach Zeitstempel, den neuesten zuerst; mit `-X`
+nach Endung; mit `-v` in natürlicher „Versions“-Reihenfolge; mit `-U`
+gar nicht — in Verzeichnisreihenfolge; mit `--sort` nach Name gewählt;
+mit `-r` umgekehrt). `--group-directories-first` hebt Verzeichnisse an
+den Anfang der Sortierung. Ist die Ausgabe ein Terminal, werden sie in
+Spalten angeordnet, die auf die Terminalbreite bemessen und von oben nach
+unten gefüllt sind (`-C`); ist sie keines (eine Pipe oder eine Datei),
+wird ein Name pro Zeile aufgelistet. `-x` füllt die Spalten stattdessen
+von links nach rechts, `-m` listet sie durch Kommas getrennt, `-1`
+erzwingt einen pro Zeile, und `-w` legt die Breite ausdrücklich fest.
+Einträge, deren Name mit `.` beginnt, werden ausgeblendet, sofern nicht
+`-a` oder `-A` angegeben ist; werden Einträge ausgeblendet, erscheint ein
+Hinweis auf dem Standard-Informationsstrom (fd 3), niemals in der Liste
+selbst.
 
 Das lange Format (`-l`) zeigt die Typ- und Berechtigungsbits, den
-Besitzer und die Gruppe, die Größe und dann den Namen. Besitzer und
-Gruppe sind numerische Ids: das Auflösen von Kontonamen erfordert die
-fähigkeitsgeschützte Benutzerdatenbank, die eine Auflistung nicht
-verlangen darf; die Ausgabe entspricht daher dem numerischen
-Rückfall des GNU-Werkzeugs (`-n` liefert dasselbe). Die
-Zeitstempelspalte zeigt standardmäßig die Änderungszeit; `-c`, `-u`
-und `--time` wählen, welcher der vier Zeitstempel angezeigt (und
-wonach sortiert) wird, und `--time-style` — oder `--full-time` — legt
-sein Format fest. Es gibt weiterhin keine Spalte für die Link-Anzahl,
-weil der Dateisystem-Vertrag noch keine harten Links trägt; sie
-erscheint, sobald er es tut.
-
-Bei mehreren Operanden — und stets unter `-R` — wird jeder
-Verzeichnisliste eine `pfad:`-Kopfzeile vorangestellt, und Blöcke werden
-durch eine Leerzeile getrennt. Der Pfad einer Kopfzeile erhält die
-Anführung im Stil der Auflistung, ebenso jeder `:` darin.
+Besitzer und die Gruppe, die Größe, einen Zeitstempel und dann den
+Namen. Besitzer und Gruppe sind numerische Ids: das Auflösen von
+Kontonamen erfordert die fähigkeitsgeschützte Benutzerdatenbank, die
+eine Auflistung nicht verlangen darf; die Ausgabe entspricht daher dem
+numerischen Rückfall des GNU-Werkzeugs (`-n` liefert dasselbe). Der
+Zeitstempel ist standardmäßig die Änderungszeit; `-c`, `-u` und
+`--time` wählen, welcher der vier Zeitstempel angezeigt (und wonach
+sortiert) wird, und `--time-style` — oder `--full-time` — legt sein
+Format fest. Die Spalte der Link-Anzahl gibt an, wie viele
+Verzeichniseinträge die Datei benennen, so wie das Dateisystem selbst es
+festhält; ein Format, das keine Anzahl führt, antwortet `1`.
 
 Eine symbolische Verknüpfung erscheint mit dem Typbuchstaben `l` und im
-Langformat als `Name -> Ziel` — das Ziel genau so, wie es gespeichert ist,
-unaufgelöst, denn das ist der Inhalt der Verknüpfung. Eine ins Leere
+Langformat als `name -> target` — das Ziel genau so, wie es gespeichert
+ist, unaufgelöst, denn das ist der Inhalt der Verknüpfung. Eine ins Leere
 zeigende Verknüpfung wird daher normal aufgelistet; nur eine auflösende
 Haltung (`-L`, oder `-H` für einen Operanden) meldet ein unerreichbares
 Ziel.
@@ -63,6 +66,20 @@ darin, sodass er nicht als Kennzeichnungssuffix durchgehen kann. GNUs
 `-F` lässt einen `*` unmarkiert, weshalb dort ein darauf endender Name
 wie eine ausführbare Datei wirkt.
 
+An einem Farbterminal werden Namen nach Art eingefärbt — Verzeichnisse,
+ausführbare Dateien und einfache Dateien jeweils in der Rolle des
+Standardschemas —, gesteuert durch `--color`. Farbe ist reine
+Darstellung: sie kommt nur zur Terminalausgabe hinzu und nie zu
+weitergeleiteter oder umgeleiteter Ausgabe, und abgesehen von den
+Escape-Sequenzen ist die Ausgabe Byte für Byte mit der einfachen
+Auflistung identisch, sodass Farbe nie Spalten, Reihenfolge oder die
+Sicht eines Skripts ändert.
+
+Bei mehreren Operanden — und stets unter `-R` — wird jeder
+Verzeichnisliste eine `path:`-Kopfzeile vorangestellt, und Blöcke werden
+durch eine Leerzeile getrennt. Der Pfad einer Kopfzeile erhält die
+Anführung im Stil der Auflistung, ebenso jeder `:` darin.
+
 ## OPTIONS
 
 - `-t` — nach dem angezeigten Zeitstempel sortieren, den neuesten
@@ -74,7 +91,9 @@ wie eine ausführbare Datei wirkt.
 - `-B, --ignore-backups` — Einträge, deren Name mit `~` endet, nicht
   auflisten, in jedem Modus (Sicherungen sind auch unter `-a` verborgen).
 - `-I, --ignore=PATTERN` — Einträge, die auf das Shell-Glob `PATTERN`
-  passen, nicht auflisten (wiederholbar); gilt in jedem Modus.
+  passen, nicht auflisten (wiederholbar); gilt in jedem Modus. Ein
+  führender `.` wird nur von einem `.` im Muster getroffen, nie von einem
+  Platzhalter.
 - `--hide=PATTERN` — wie `--ignore`, aber ohne Wirkung, wenn `-a` oder
   `-A` angegeben ist.
 - `--time=WORD` — welcher Zeitstempel angezeigt und wonach sortiert
@@ -92,11 +111,12 @@ wie eine ausführbare Datei wirkt.
 - `-F, --classify` — `/` an Verzeichnisse und `*` an ausführbare
   Dateien anhängen.
 - `-g` — langes Format ohne die Besitzerspalte; impliziert `-l`.
-- `-h, --human-readable` — mit `-l` Größen wie `1.1K`, `23M`
-  ausgeben (Potenzen von 1024).
+- `-h, --human-readable` — Größen wie `1.1K`, `23M` ausgeben (Potenzen
+  von 1024), sowohl für die Dateigrößen des Langformats als auch für die
+  `-s`-Blöcke.
 - `-l` — langes Format: Berechtigungsbits, Besitzer, Gruppe, Größe,
   dann Name.
-- `-m` — durch Kommas getrennte Namen, auf die Breite umgebrochen.
+- `-m` — durch Kommas getrennte Namen, auf die Ausgabebreite umgebrochen.
 - `-n, --numeric-uid-gid` — langes Format mit numerischem Besitzer
   und numerischer Gruppe; impliziert `-l`. Besitzer und Gruppe sind
   hier immer numerisch (siehe oben), also identisch zu `-l`.
@@ -133,12 +153,12 @@ wie eine ausführbare Datei wirkt.
   Formatoption etwas anderes erzwingt: eine Verknüpfung der Befehlszeile
   *auf ein Verzeichnis* wird aufgelöst, sodass `ls linkdir` das Verzeichnis
   auflistet, während jede andere Verknüpfung sich selbst zeigt. `-l`, `-d`
-  und `-F` zeigen stattdessen jede Verknüpfung selbst.
-- `-s, --size` — die belegte Größe jedes Eintrags in 1024-Byte-Blöcken
-  ausgeben (mit `-h` skaliert), mit einer `total`-Zeile je aufgelistetem
-  Verzeichnis.
+  und `-F` zeigen stattdessen standardmäßig jede Verknüpfung selbst.
+- `-s, --size` — die belegte Größe jedes Eintrags in Blöcken ausgeben
+  (skaliert durch `-h` / `--si` / `--block-size` / `-k`), mit einer
+  `total`-Zeile je aufgelistetem Verzeichnis.
 - `-C` — Einträge in Spalten auflisten, von oben nach unten gefüllt
-  (Standard am Terminal).
+  (Standard, wenn die Ausgabe ein Terminal ist).
 - `-S` — nach Größe sortieren, die größte zuerst.
 - `-U` — nicht sortieren; Einträge in Verzeichnisreihenfolge auflisten.
 - `-X` — nach Dateiendung (Text ab dem letzten `.`) sortieren, bei
@@ -153,13 +173,15 @@ wie eine ausführbare Datei wirkt.
   oder `name`.
 - `--group-directories-first` — Verzeichnisse vor anderen Einträgen
   auflisten; Verzeichnisse zuerst, auch mit `-r`.
-- `-w, --width <cols>` — die Ausgabebreite in Spalten festlegen;
-  `0` bedeutet unbegrenzt.
+- `-w, --width <cols>` — die Ausgabebreite in Spalten festlegen; `0`
+  bedeutet eine unbegrenzte Zeilenlänge. Ohne diese Option wird die
+  Breite des Terminals verwendet, oder 80, wenn sie sich nicht ermitteln
+  lässt.
 - `-x` — Einträge in Spalten auflisten, von links nach rechts gefüllt.
-- `-1` — ein Name pro Zeile (der Standard).
+- `-1` — ein Name pro Zeile (der Standard, wenn die Ausgabe kein Terminal
+  ist).
 - `-?` — die Kurzhilfe dieses Befehls anzeigen (`--help` ist die
   lange Form).
-
 - `--file-type` — `/` an Verzeichnisse anhängen, aber nie `*` an
   ausführbare Dateien (`--indicator-style=file-type`).
 - `--indicator-style=WORD` — das Kennzeichnungssuffix nach Name wählen:
@@ -167,24 +189,28 @@ wie eine ausführbare Datei wirkt.
   (`-F`).
 - `-G, --no-group` — die Gruppenspalte im Langformat weglassen; wählt
   anders als `-o` nicht selbst das Langformat.
-- `--author` — mit `-l` die Autorspalte (den besitzenden Benutzer)
-  nach dem Besitzer und vor der Gruppe ausgeben.
-- `--si` — wie `-h`, aber Zehnerpotenzen (1000), z. B. `1.1k`, `23M`.
+- `--author` — mit `-l` die Autorspalte (den besitzenden Benutzer, da es
+  keinen eigenen Autor gibt) nach dem Besitzer und vor der Gruppe
+  ausgeben.
+- `--si` — wie `-h`, aber Potenzen von 1000 (`1.1k`, `23M`).
 - `-k, --kibibytes` — 1024-Byte-Blöcke für die `-s`-Zellen und die
-  `total`-Zeile verwenden (bereits Standard; eine Größenoption hat
-  Vorrang).
-- `--block-size=SIZE` — die Dateigrößen und `-s`-Blöcke um SIZE
-  skalieren: eine ganze Zahl (Bytes) oder eine Einheit
-  `K`/`M`/`G`/`T`/`P`/`E` (1024), eine `KiB`-Einheit (1024) oder eine
-  `KB`-Einheit (1000), optional mit vorangestelltem Koeffizienten.
+  `total`-Zeile verwenden. Das ist bereits der Standard, daher bestätigt
+  es die Ausgabe, statt sie zu ändern; eine Größenoption hat Vorrang.
+- `--block-size=SIZE` — die Dateigrößen des Langformats und die
+  `-s`-Blöcke um SIZE skalieren: eine einfache ganze Zahl (Bytes) oder
+  eine Einheit `K`/`M`/`G`/`T`/`P`/`E` (auf 1024 bezogen), eine Einheit
+  im Stil von `KiB` (auf 1024 bezogen) oder im Stil von `KB` (auf 1000
+  bezogen), optional mit vorangestelltem ganzzahligem Koeffizienten. Eine
+  bloße Einheit gibt ihr Suffix aus; ein Koeffizient unterdrückt es. Ein
+  fehlerhaftes SIZE ist ein Fehler.
 - `--format=WORD` — die Anordnung nach Name wählen: `long` (`-l`) oder
   `verbose`, `single-column` (`-1`), `vertical` (`-C`), `across` oder
   `horizontal` (`-x`) oder `commas` (`-m`).
 - `-T, --tabsize <cols>` — den Tabulatorschritt des Spaltengitters
   setzen (Standard 8); `0` füllt nur mit Leerzeichen.
 - `--zero` — jede Ausgabezeile mit NUL statt Zeilenumbruch beenden;
-  wählt außerdem Einzelspalte, wörtliches Quoting und sichtbare
-  Steuerzeichen.
+  wählt außerdem, sofern nicht überschrieben, die Einzelspalte, wörtliche
+  Anführung und sichtbare Steuerzeichen.
 
 - `--color[=WHEN]` — Namen nach Art einfärben (Verzeichnisse,
   ausführbare Dateien, einfache Dateien). `WHEN` ist `auto` (die
@@ -199,6 +225,8 @@ wie eine ausführbare Datei wirkt.
 - `ls -al /System` — Auflistung von `/System` im langen Format,
   einschließlich ausgeblendeter Einträge.
 - `ls -lhS` — langes Format, lesbare Größen, die größte zuerst.
+- `ls -v` — natürliche Sortierung, sodass `f2` vor `f10` kommt.
+- `ls --group-directories-first` — zuerst Verzeichnisse, dann Dateien.
 - `ls -R Documents` — `Documents` rekursiv durchlaufen, eine
   Kopfzeile pro Verzeichnis.
 - `ls -F` — Verzeichnisse mit `/` und ausführbare Dateien mit `*`

@@ -233,6 +233,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // sample for sample.
     argv.extend(crate::audio_wav_args(spec, "virtio-sound-device"));
     argv.extend(crate::optical_disc_args(spec));
+    argv.extend(crate::usb_stick_args(spec));
 
     // Attach a virtio-mmio crypto accelerator behind QEMU's builtin
     // cryptodev backend, for a vertical that drives a real offload engine.
@@ -302,6 +303,7 @@ mod tests {
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             optical_disc: None,
+            usb_sticks: Vec::new(),
             sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,
@@ -349,6 +351,41 @@ mod tests {
         assert!(
             !bare.iter().any(|a| a.contains("optical")),
             "no disc, no drive"
+        );
+    }
+
+    #[test]
+    fn usb_sticks_hold_their_images_writable_on_a_controller_of_their_own() {
+        let sticks = [("/tmp/first.img", "FIRST1"), ("/tmp/second.img", "SECOND2")];
+        let mut spec = fixture_spec(1);
+        for (image, serial) in sticks {
+            spec = spec.with_usb_stick(image, serial);
+        }
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let controller = argv
+            .iter()
+            .position(|a| a == "qemu-xhci,id=stickhc")
+            .expect("a controller of their own");
+        assert_eq!(argv[controller - 1], "-device");
+        for (index, (image, serial)) in sticks.into_iter().enumerate() {
+            let at = controller + 1 + index * 4;
+            assert_eq!(argv[at], "-drive");
+            assert_eq!(
+                argv[at + 1],
+                format!("if=none,id=stick{index},format=raw,file={image}")
+            );
+            assert_eq!(argv[at + 2], "-device");
+            assert_eq!(
+                argv[at + 3],
+                format!(
+                    "usb-storage,bus=stickhc.0,drive=stick{index},removable=off,serial={serial}"
+                )
+            );
+        }
+        let bare = render(&build_argv(&fixture_spec(1), Path::new("/tmp/k.elf")));
+        assert!(
+            !bare.iter().any(|a| a.contains("stick")),
+            "no sticks, no controller"
         );
     }
 

@@ -53,7 +53,10 @@ carregam:
   de contas do sistema; o uid numérico substitui-o quando o nome não
   pode ser resolvido.
 - `SIZE` — a memória mapeada no espaço de endereçamento do processo
-  (imagem, pilha e heap por igual).
+  (imagem, pilha e heap por igual), em unidades binárias: a contagem
+  exata abaixo de um kibibyte, depois uma casa decimal com o sufixo `K`,
+  `M`, `G`, `T`, `P` ou `E` (`4.0K`, `986.2M`, `2.0G`). A escala chega
+  aos exbibytes, pelo que o número cabe sempre na sua coluna.
 - `S` — a letra de estado: `R` a correr (verde), `r` executável, à
   espera de um CPU (ciano), `S` a dormir, `T` parado (amarelo), `Z`
   zombie (magenta). As cores só aparecem num terminal a cores; a letra
@@ -62,7 +65,7 @@ carregam:
 - `WCPU` — a fração de CPU ponderada (suavizada exponencialmente)
   através das atualizações, mais estável do que a coluna instantânea.
 - `TIME+` — o tempo de CPU acumulado, como
-  `minutos:segundos.centésimos`.
+  `minutes:seconds.hundredths` (minutos, segundos e centésimos).
 - `COMMAND` — o nome do processo.
 
 ## OPTIONS

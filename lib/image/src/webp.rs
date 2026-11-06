@@ -2,7 +2,7 @@
 //! Specification).
 //!
 //! A WEBP file is a RIFF form holding one or both of the two bitstreams
-//! [`crate::vp8`] and [`crate::vp8l`] decode, plus the container's own
+//! [`tairix_video::vp8`] and [`crate::vp8l`] decode, plus the container's own
 //! alpha plane and animation. Two forms exist: the simple one, a bare
 //! `VP8 ` or `VP8L` chunk, and the extended one, a `VP8X` header declaring
 //! a canvas over an optional alpha chunk and either one still bitstream or a
@@ -53,6 +53,7 @@ use core::ops::Range;
 
 use tairix_raster::{RowOrder, RowReducer};
 use tairix_util::fallible;
+use tairix_video::vp8;
 
 use crate::frames::{Animation, FrameSource};
 use crate::{DecodeError, DecodeLimits, FitBox, RasterImage, MAX_ANIMATION_FRAMES, RGBA_BYTES};
@@ -135,17 +136,49 @@ enum Bitstream<'a> {
 impl Bitstream<'_> {
     fn geometry(self) -> Result<(u32, u32), DecodeError> {
         match self {
-            Self::Lossy(bytes) => crate::vp8::probe(bytes),
+            Self::Lossy(bytes) => Ok(vp8::probe(bytes)?),
             Self::Lossless(bytes) => crate::vp8l::probe(bytes),
         }
     }
 
     fn decode(self, limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
         match self {
-            Self::Lossy(bytes) => crate::vp8::decode(bytes, limits),
+            Self::Lossy(bytes) => decode_lossy(bytes, limits),
             Self::Lossless(bytes) => crate::vp8l::decode(bytes, limits),
         }
     }
+}
+
+/// Decode a lossy bitstream within `limits` into opaque straight-alpha RGBA8.
+fn decode_lossy(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
+    let (width, height) = vp8::probe(bytes)?;
+    limits.check(width, height)?;
+    let len = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|count| count.checked_mul(RGBA_BYTES as u64))
+        .and_then(|len| usize::try_from(len).ok())
+        .ok_or(DecodeError::DimensionsOverflow)?;
+    let mut rgba = Vec::new();
+    if !fallible::reserve(&mut rgba, len) {
+        return Err(DecodeError::OutOfMemory);
+    }
+    vp8::decode_rows(bytes, |row: &[vp8::Rgba8]| {
+        rgba.extend_from_slice(row.as_flattened());
+        Ok::<(), DecodeError>(())
+    })?;
+    Ok(RasterImage::from_parts(width, height, rgba))
+}
+
+/// Decode a lossy bitstream within `limits`, handing its RGBA8 rows to `row`
+/// top first.
+fn decode_lossy_rows(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    row: &mut impl FnMut(&[u8]) -> Result<(), DecodeError>,
+) -> Result<(), DecodeError> {
+    let (width, height) = vp8::probe(bytes)?;
+    limits.check(width, height)?;
+    vp8::decode_rows(bytes, |line: &[vp8::Rgba8]| row(line.as_flattened()))
 }
 
 /// One picture the container holds: a bitstream and, for a lossy one, the
@@ -236,7 +269,7 @@ impl<'a> Picture<'a> {
             row(&held)
         };
         match self.bitstream {
-            Bitstream::Lossy(bytes) => crate::vp8::decode_rows(bytes, limits, &mut with_alpha),
+            Bitstream::Lossy(bytes) => decode_lossy_rows(bytes, limits, &mut with_alpha),
             Bitstream::Lossless(bytes) => crate::vp8l::decode_rows(bytes, limits, &mut with_alpha),
         }
     }
@@ -719,7 +752,11 @@ fn peak_bytes(bytes: &[u8], form: &Layout<'_>, limits: &DecodeLimits) -> Result<
 fn picture_peak(picture: Picture<'_>, (width, height): (u32, u32)) -> u64 {
     let pixels = u64::from(width) * u64::from(height);
     let image = match picture.bitstream {
-        Bitstream::Lossy(_) => crate::vp8::peak_bytes(width, height),
+        // Reconstruction, then the RGBA picture it is converted into while
+        // that is still held.
+        Bitstream::Lossy(_) => {
+            vp8::frame_peak_bytes(width).saturating_add(pixels * RGBA_BYTES as u64)
+        }
         // The decoded words, then the RGBA picture converted from them.
         Bitstream::Lossless(stream) => crate::vp8l::peak_ceiling(width, height, stream.len())
             .saturating_add(pixels * RGBA_BYTES as u64),
@@ -842,7 +879,7 @@ pub(crate) fn fitted_peak_bytes(
     let (width, height) = geometry;
     let row = u64::from(width) * RGBA_BYTES as u64;
     let image = match picture.bitstream {
-        Bitstream::Lossy(_) => crate::vp8::frame_peak_bytes(width),
+        Bitstream::Lossy(_) => vp8::frame_peak_bytes(width),
         Bitstream::Lossless(stream) => crate::vp8l::peak_ceiling(width, height, stream.len()),
     };
     // The alpha rows, and the row they are applied to.

@@ -268,6 +268,12 @@ pub enum AppMenuSymbol {
     Noise,
     /// Trace its edges.
     FindEdges,
+    /// Mix each of its channels from all three.
+    ChannelMixer,
+    /// Smooth it to the median of each neighbourhood.
+    Median,
+    /// Raise it into a relief.
+    Emboss,
     /// The picture's sprites or pages.
     Pages,
     /// The tools.
@@ -392,12 +398,14 @@ pub enum AppMenuSymbol {
     SortByWorkgroup,
     /// Float it in a window of its own.
     Float,
+    /// The Trash: where removed items wait until it is emptied.
+    Trash,
 }
 
 impl AppMenuSymbol {
     /// Every symbol, in wire order: the symbol with wire value `n` is
     /// `ALL[n - 1]`.
-    pub const ALL: [Self; 188] = [
+    pub const ALL: [Self; 192] = [
         Self::Open,
         Self::OpenWith,
         Self::OpenFolder,
@@ -525,6 +533,9 @@ impl AppMenuSymbol {
         Self::Pixelate,
         Self::Noise,
         Self::FindEdges,
+        Self::ChannelMixer,
+        Self::Median,
+        Self::Emboss,
         Self::Pages,
         Self::Tools,
         Self::ToolSelect,
@@ -586,6 +597,7 @@ impl AppMenuSymbol {
         Self::SortByAddress,
         Self::SortByWorkgroup,
         Self::Float,
+        Self::Trash,
     ];
 
     /// The symbol's wire value, never zero.

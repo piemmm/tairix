@@ -64,13 +64,16 @@ const WRITEBACK_BOUND_REFUSED: EventId = EventId(4146);
 /// cannot hold one coalesced device transfer. Refusing here is deliberate:
 /// a machine that cannot spare that much would otherwise mount and then
 /// commit after every record, which is a wedge dressed as success.
+/// [`DriverError::OutOfMemory`] when the volume's pinned ledger cannot be
+/// allocated or listed.
 pub fn bound_volume<B: Block>(
     fs: ARXFS<B>,
     volume: u64,
     pressure: &'static MemoryPressure,
     sink: &'static (dyn Sink + Sync),
 ) -> Result<ARXFS<B>, DriverError> {
-    let pinned = Arc::new(PinnedAccounting::within(&WRITEBACK_SHARE));
+    let pinned = Arc::try_new(PinnedAccounting::within(&WRITEBACK_SHARE))
+        .map_err(|_| DriverError::OutOfMemory)?;
     // Budget from discovered physical RAM, exactly as the volume's clean
     // caches are (the growable kernel heap's bootstrap size is no longer the
     // memory to size anything against); falls back to the bootstrap size
@@ -82,11 +85,15 @@ pub fn bound_volume<B: Block>(
     );
     match bounded {
         Ok(fs) => {
-            tairix_kernel_core::memstats::MEM_STATS.register_pinned_ledger(PinnedLedger::new(
-                PINNED_LABEL,
-                ReclaimOwner::FilesystemVolume { volume },
-                pinned,
-            ));
+            // A volume whose pinned row the registry cannot list would pin
+            // unwritten memory nothing shows, so its mount is refused.
+            tairix_kernel_core::memstats::MEM_STATS
+                .register_pinned_ledger(PinnedLedger::new(
+                    PINNED_LABEL,
+                    ReclaimOwner::FilesystemVolume { volume },
+                    pinned,
+                ))
+                .map_err(|_| DriverError::OutOfMemory)?;
             Ok(fs)
         }
         Err(err) => {
@@ -105,5 +112,60 @@ pub fn bound_volume<B: Block>(
             );
             Err(err)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tairix_drv_fs_arxfs::{EntropySource, Keying};
+    use tairix_reclaim::FreeMemorySource;
+
+    use super::*;
+    use crate::test_support::{NullSink, RamBlock};
+
+    /// A counter standing in for the platform RNG.
+    struct Counter(u8);
+
+    impl EntropySource for Counter {
+        fn fill(&mut self, out: &mut [u8]) -> Result<(), DriverError> {
+            for byte in out.iter_mut() {
+                *byte = self.0;
+                self.0 = self.0.wrapping_add(1);
+            }
+            Ok(())
+        }
+    }
+
+    /// A machine with memory to spare.
+    struct Ample;
+
+    impl FreeMemorySource for Ample {
+        fn free_bytes(&self) -> usize {
+            1 << 30
+        }
+
+        fn total_bytes(&self) -> usize {
+            1 << 30
+        }
+    }
+
+    /// A bound the heap has no room for is refused for memory, where its
+    /// ledger's allocation aborted the kernel.
+    #[test]
+    fn a_bound_the_heap_cannot_hold_is_refused_for_memory() {
+        static AMPLE: Ample = Ample;
+        let pressure: &'static MemoryPressure =
+            tairix_kernel_core::forever(alloc::boxed::Box::new(MemoryPressure::over(&AMPLE)));
+        let fs = ARXFS::format(
+            RamBlock::new(1 << 14),
+            64,
+            Keying::Plaintext,
+            &mut Counter(1),
+        )
+        .expect("format");
+        let refused = tairix_fuzzseed::meter::refusing_above(0, || {
+            bound_volume(fs, 1, pressure, &NullSink).err()
+        });
+        assert_eq!(refused, Some(DriverError::OutOfMemory));
     }
 }

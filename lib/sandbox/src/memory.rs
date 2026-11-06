@@ -12,7 +12,7 @@ use crate::proto::MAX_FRAME;
 
 /// What a worker needs whatever it parses: its heap's bookkeeping and the
 /// stack and tables its service builds before the first request.
-const WORKER_BASELINE_BYTES: u64 = 16 << 20;
+pub(crate) const WORKER_BASELINE_BYTES: u64 = 16 << 20;
 
 /// The ceiling of a worker whose request and reply frames bound its work.
 pub const MESSAGE_WORKER_BYTES: u64 = 2 * MAX_FRAME as u64 + WORKER_BASELINE_BYTES;

@@ -16,7 +16,8 @@
 //! not match a supported format exactly is `None` — never a guess.
 //!
 //! [`fingerprint`] renders an identity as the short display fingerprint
-//! (`plans/ALIAS.md` §3.8).
+//! (`plans/ALIAS.md` §3.8), and [`twin_identity`] keys a volume attached
+//! beside another of its identity.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -35,11 +36,11 @@ use alloc::boxed::Box;
 
 use tairix_abi::blkio::BlkForm;
 use tairix_abi::driver::block::{Block, DiscLayout};
-use tairix_abi::driver::filesystem::VOLUME_TITLE_MAX;
+use tairix_abi::driver::filesystem::{VolumeTitle, VOLUME_TITLE_MAX};
 use tairix_abi::volume::VolumeFsType;
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
-use tairix_crypto::hash::Sha256Stream;
+use tairix_crypto::Fingerprint;
 
 /// Bytes of an extent's head that hold every signature opening an extent:
 /// the FAT32 boot sector (512), the `ARXFS` metadata header (128), and the
@@ -109,6 +110,37 @@ pub const EVIDENCE_MAX: u64 = 32 * 1024;
 pub const ARXFS_RING_BLOCKS: u64 = 8;
 
 const _: () = assert!(ARXFS_RING_BLOCKS * 4096 <= EVIDENCE_MAX);
+
+/// Logical slots of the `ARXFS` superblock ring, each a mirrored pair whose
+/// first block is its primary.
+const ARXFS_RING_SLOTS: u64 = ARXFS_RING_BLOCKS / 2;
+
+/// The `ARXFS` block type of a superblock-ring slot.
+const ARXFS_SUPERBLOCK_TYPE: u32 = 1;
+
+/// Offset, within an `ARXFS` metadata block, of the generation its header
+/// carries: the transaction that wrote it.
+pub const ARXFS_GENERATION_AT: usize = 40;
+
+/// Offset, within an `ARXFS` superblock slot, of the volume's title field: its
+/// length byte, then that many bytes of UTF-8, zero to the field's end
+/// (`docs/src/filesystem/arxfs-spec.md` §4).
+pub const ARXFS_TITLE_AT: usize = 256;
+
+/// Bytes of an `ARXFS` superblock slot's title field: the length byte and the
+/// longest title.
+pub const ARXFS_TITLE_LEN: usize = 1 + VOLUME_TITLE_MAX;
+
+/// How much of an `ARXFS` superblock slot its title is read from: its header
+/// through its title field.
+const ARXFS_SLOT_HEAD: usize = ARXFS_TITLE_AT + ARXFS_TITLE_LEN;
+
+/// Offset, within an ext4 superblock, of its NUL-padded volume name,
+/// `s_volume_name`.
+pub const EXT4_VOLUME_NAME_AT: usize = 0x78;
+
+/// Bytes of an ext4 superblock's volume name.
+pub const EXT4_VOLUME_NAME_LEN: usize = 16;
 
 /// What [`recognise`] found in an extent.
 // One result per extent, returned once and never held in bulk.
@@ -189,8 +221,9 @@ impl ProbedVolume {
     }
 
     /// The volume's human-facing label, trimmed of the format's padding;
-    /// empty when the format records none (`ARXFS`), the field is blank, or
-    /// it holds the format's "no label" placeholder.
+    /// empty when none is set, the field is blank, or it holds the format's
+    /// "no label" placeholder. An `ARXFS` title, whose field has no padding,
+    /// is kept exactly.
     #[must_use]
     pub fn label(&self) -> &[u8] {
         &self.label[..usize::from(self.label_len)]
@@ -207,7 +240,8 @@ impl ProbedVolume {
 /// `None` when nothing matches.
 ///
 /// A FAT32 volume is labelled from its root directory's label entry, which a
-/// relabel rewrites, over the boot sector's copy. A disc carrying both ISO
+/// relabel rewrites, over the boot sector's copy, and an `ARXFS` volume from
+/// its superblock ring's newest slot. A disc carrying both ISO
 /// 9660 and UDF over the same files (a bridge disc) is recognised as UDF,
 /// whose names and metadata are the richer, unless its ISO 9660 tree carries
 /// what UDF would lose: Rock Ridge's POSIX records or RISC OS filetypes.
@@ -224,11 +258,14 @@ pub fn recognise<B: Block>(dev: &mut ByteDevice<B>) -> Result<Option<Recognised>
     }
     let found = match head_volume(head) {
         Some(mut volume) => {
-            if volume.fstype == VolumeFsType::Fat32 {
-                if let Some((label, label_len)) = directory_label(dev, head)? {
-                    volume.label = label;
-                    volume.label_len = label_len;
-                }
+            let found = match volume.fstype {
+                VolumeFsType::Fat32 => directory_label(dev, head)?,
+                VolumeFsType::ARXFS => arxfs_ring_label(dev, head)?,
+                _ => None,
+            };
+            if let Some((label, label_len)) = found {
+                volume.label = label;
+                volume.label_len = label_len;
             }
             Some(volume)
         }
@@ -605,19 +642,28 @@ pub fn fingerprint(identity: &[u8; 16]) -> [u8; FINGERPRINT_CHARS] {
 }
 
 /// A content-derived 16-byte identity for a format that records no unique
-/// identifier: the leading bytes of a SHA-256 over a domain tag and each
-/// length-prefixed part, so no two layouts of parts digest the same message.
+/// identifier: its fingerprint under a domain tag over each length-prefixed
+/// part, so no two layouts of parts feed the same message.
 pub(crate) fn content_identity(domain: &[u8], parts: &[&[u8]]) -> [u8; 16] {
-    let mut digest = Sha256Stream::new();
-    digest.update(domain);
+    let mut fingerprint = Fingerprint::new(domain);
     for part in parts {
         let len = u32::try_from(part.len()).unwrap_or(u32::MAX);
-        digest.update(&len.to_le_bytes());
-        digest.update(part);
+        fingerprint.field(&len.to_le_bytes());
+        fingerprint.field(part);
     }
-    let mut identity = [0u8; 16];
-    identity.copy_from_slice(&digest.finalize()[..16]);
-    identity
+    fingerprint.finish()
+}
+
+/// The key a twin of the volume `identity` is published under while attached
+/// as `attachment`: derived from both under a domain of its own, so
+/// attachments numbered apart are keyed apart (`docs/src/filesystem/drives.md`
+/// §8).
+#[must_use]
+pub fn twin_identity(identity: &[u8; 16], attachment: u64) -> [u8; 16] {
+    content_identity(
+        b"tairix.volume.twin",
+        &[identity.as_slice(), &attachment.to_le_bytes()],
+    )
 }
 
 /// Fill `buf` from byte `offset` of `dev`, answering `false` when the range
@@ -690,15 +736,87 @@ pub(crate) fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
 /// records a label; interior bytes are kept verbatim (the naming policy above
 /// this crate decides what is renderable).
 fn take_label(field: &[u8]) -> ([u8; LABEL_MAX], u8) {
-    let mut label = [0u8; LABEL_MAX];
     let trimmed_len = field
         .iter()
         .rposition(|&b| b != 0 && b != b' ')
         .map_or(0, |last| last + 1);
-    let take = trimmed_len.min(LABEL_MAX);
-    label[..take].copy_from_slice(&field[..take]);
+    exact_label(&field[..trimmed_len])
+}
+
+/// A probe result's label buffer holding `text` as it is, cut to
+/// [`LABEL_MAX`] bytes.
+fn exact_label(text: &[u8]) -> ([u8; LABEL_MAX], u8) {
+    let mut label = [0u8; LABEL_MAX];
+    let take = text.len().min(LABEL_MAX);
+    label[..take].copy_from_slice(&text[..take]);
     #[allow(clippy::cast_possible_truncation)] // `take <= LABEL_MAX` (252).
     (label, take as u8)
+}
+
+/// The title an `ARXFS` superblock slot's title `field` records, or `None` for
+/// a field no writer leaves: a length past the field, a byte past the length,
+/// or text that is no title.
+#[must_use]
+pub fn arxfs_title(field: &[u8; ARXFS_TITLE_LEN]) -> Option<VolumeTitle> {
+    let (&len, text) = field.split_first()?;
+    let (title, rest) = text.split_at_checked(usize::from(len))?;
+    if rest.iter().any(|&byte| byte != 0) {
+        return None;
+    }
+    VolumeTitle::new(core::str::from_utf8(title).ok()?).ok()
+}
+
+/// The title field an `ARXFS` superblock slot records `title` in.
+#[must_use]
+// A title holds at most `VOLUME_TITLE_MAX` (252) bytes, so its length fits a
+// byte.
+#[allow(clippy::cast_possible_truncation)]
+pub fn arxfs_title_field(title: &VolumeTitle) -> [u8; ARXFS_TITLE_LEN] {
+    let text = title.as_str().as_bytes();
+    let mut field = [0u8; ARXFS_TITLE_LEN];
+    field[0] = text.len() as u8;
+    field[1..=text.len()].copy_from_slice(text);
+    field
+}
+
+/// The block size an `ARXFS` head declares, where the format allows it.
+/// Unauthenticated here, but it only places structures, and a lying value
+/// fails the format's bounds and places none.
+fn arxfs_block_size(head: &[u8]) -> Option<u32> {
+    le_u32(head, 128).filter(|bs| bs.is_power_of_two() && (512..=4096).contains(bs))
+}
+
+/// The label the newest slot of the `ARXFS` ring opening with `head` titles
+/// the volume with, kept exactly. Slots are read without their seals, as
+/// every reading here is: one whose header names another volume, or whose
+/// title field no writer leaves, is passed over, and a block size the format
+/// does not allow places no slot.
+fn arxfs_ring_label<B: Block>(
+    dev: &mut ByteDevice<B>,
+    head: &[u8],
+) -> Result<Option<([u8; LABEL_MAX], u8)>, DriverError> {
+    let (Some(block_size), Some(uuid)) = (arxfs_block_size(head), head.get(16..32)) else {
+        return Ok(None);
+    };
+    let mut newest: Option<(u64, VolumeTitle)> = None;
+    for slot in 0..ARXFS_RING_SLOTS {
+        let (block, len) = read_upto::<_, ARXFS_SLOT_HEAD>(dev, slot * 2 * u64::from(block_size))?;
+        let block = &block[..len];
+        let ours = le_u64(block, 0) == Some(ARXFS_HEADER_MAGIC)
+            && le_u32(block, 8) == Some(ARXFS_SUPERBLOCK_TYPE)
+            && block.get(16..32) == Some(uuid);
+        let generation = le_u64(block, ARXFS_GENERATION_AT).filter(|_| ours);
+        let title = block
+            .get(ARXFS_TITLE_AT..ARXFS_SLOT_HEAD)
+            .and_then(|field| <&[u8; ARXFS_TITLE_LEN]>::try_from(field).ok())
+            .and_then(arxfs_title);
+        if let (Some(generation), Some(title)) = (generation, title) {
+            if newest.is_none_or(|(held, _)| generation > held) {
+                newest = Some((generation, title));
+            }
+        }
+    }
+    Ok(newest.map(|(_, title)| exact_label(title.as_str().as_bytes())))
 }
 
 /// `ARXFS`: every metadata block opens with the header magic, and block 0
@@ -707,7 +825,6 @@ fn take_label(field: &[u8]) -> ([u8; LABEL_MAX], u8) {
 /// (`docs/src/filesystem/arxfs-spec.md` §8). The payload is sealed; only the
 /// identity, and the plaintext block size the ring is sized by, are read.
 fn probe_arxfs(head: &[u8]) -> Option<ProbedVolume> {
-    const ARXFS_SUPERBLOCK_TYPE: u32 = 1;
     if le_u64(head, 0)? != ARXFS_HEADER_MAGIC || le_u32(head, 8)? != ARXFS_SUPERBLOCK_TYPE {
         return None;
     }
@@ -716,15 +833,10 @@ fn probe_arxfs(head: &[u8]) -> Option<ProbedVolume> {
     if identity == [0u8; 16] {
         return None;
     }
-    // Unauthenticated here, but it only sizes the window, and a lying value
-    // fails the format's bounds and leaves no evidence.
-    let evidence = le_u32(head, 128)
-        .map(u64::from)
-        .filter(|bs| bs.is_power_of_two() && (512..=4096).contains(bs))
-        .map(|bs| Evidence {
-            offset: 0,
-            len: ARXFS_RING_BLOCKS * bs,
-        });
+    let evidence = arxfs_block_size(head).map(|bs| Evidence {
+        offset: 0,
+        len: ARXFS_RING_BLOCKS * u64::from(bs),
+    });
     Some(ProbedVolume::new(
         VolumeFsType::ARXFS,
         identity,
@@ -759,7 +871,7 @@ fn probe_ext4(head: &[u8]) -> Option<ProbedVolume> {
     Some(ProbedVolume::new(
         VolumeFsType::Ext4,
         identity,
-        sb.get(0x78..0x88)?,
+        sb.get(EXT4_VOLUME_NAME_AT..EXT4_VOLUME_NAME_AT + EXT4_VOLUME_NAME_LEN)?,
         evidence,
         None,
     ))

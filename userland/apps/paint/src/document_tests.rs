@@ -422,6 +422,101 @@ fn a_new_layer_is_named_for_a_number_no_layer_has() {
     );
 }
 
+/// The revisions of the showing picture's layers, the bottom first.
+fn revisions(document: &Document) -> alloc::vec::Vec<u64> {
+    document
+        .picture()
+        .expect("a picture")
+        .layers()
+        .iter()
+        .map(|layer| layer.revision)
+        .collect()
+}
+
+/// A layer's revision is raised as its pixels change, by a change or by its
+/// undoing, to one no layer has held, and by nothing else; each layer's is
+/// its own.
+#[test]
+fn a_layers_revision_moves_with_its_pixels_alone() {
+    let mut document = Document::new(plain());
+    document
+        .insert_layer(1, colour_layer([9; 4], "over"))
+        .expect("room");
+    let first = revisions(&document);
+    assert!(
+        first[0] != 0 && first[1] != 0 && first[0] != first[1],
+        "each its own"
+    );
+    let shown = super::Shown {
+        name: alloc::string::String::from("renamed"),
+        opacity: 9,
+        visible: false,
+    };
+    document.show_layer(1, shown).expect("shown");
+    assert_eq!(revisions(&document), first, "showing changes no pixel");
+    let other = Canvas::new(4, 4, Kind::Rgba, Sample::Rgba([1, 2, 3, 255])).expect("fits");
+    assert_eq!(
+        document.adopt_tiles(0, vec![(0, Arc::clone(other.tile(0)))]),
+        Ok(true)
+    );
+    let painted = revisions(&document);
+    assert_ne!(painted[0], first[0], "the layer written is raised");
+    assert_eq!(painted[1], first[1], "the other kept");
+    document.undo().expect("undone");
+    let undone = revisions(&document);
+    assert!(
+        undone[0] != painted[0] && undone[0] != first[0],
+        "raised again, never to one held before"
+    );
+    assert_eq!(undone[1], first[1]);
+}
+
+/// An opacity changed live is no step and no new generation until it is
+/// recorded, which takes one step undone whole; one that came back to where
+/// it began takes none, and a palette picture's layer takes none at all.
+#[test]
+fn an_opacity_changed_live_lands_as_one_step() {
+    use super::Shown;
+    let mut document = Document::new(plain());
+    document
+        .insert_layer(1, colour_layer([9; 4], "over"))
+        .expect("room");
+    let (depth, generation) = (document.history_depth(), document.generation());
+    let before = Shown::of(&document.picture().expect("a picture").layers()[1]).expect("room");
+    for opacity in [200, 120, 40] {
+        assert!(document.set_opacity_live(1, opacity));
+    }
+    assert_eq!(
+        (document.history_depth(), document.generation()),
+        (depth, generation),
+        "nothing recorded live"
+    );
+    let opacity = |document: &Document| document.picture().map(|p| p.layers()[1].opacity);
+    assert_eq!(document.record_shown(1, before), Ok(true));
+    assert_eq!(document.history_depth(), depth + 1, "one step");
+    assert_eq!(opacity(&document), Some(40));
+    document.undo().expect("undone");
+    assert_eq!(opacity(&document), Some(255), "undone whole");
+    let again = Shown::of(&document.picture().expect("a picture").layers()[1]).expect("room");
+    assert!(document.set_opacity_live(1, 255));
+    assert_eq!(
+        document.record_shown(1, again),
+        Ok(false),
+        "back where it began"
+    );
+    let kind = Kind::Indexed {
+        depth: IndexDepth::One,
+        palette: vec![[0, 0, 0, 255], [255; 4]],
+        masked: false,
+    };
+    let canvas = Canvas::new(2, 2, kind, Sample::Index(0, 255)).expect("fits");
+    let mut indexed = Document::new(Picture::plain(canvas));
+    assert!(
+        !indexed.set_opacity_live(0, 10),
+        "a palette picture's layer shows wholly"
+    );
+}
+
 #[test]
 fn a_flattened_picture_of_one_plain_layer_shares_its_pixels() {
     let picture = plain();

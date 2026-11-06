@@ -136,7 +136,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_geometry::Rect;
+use tairix_geometry::{fit_within, Rect};
 use tairix_icon::{VectorIcon, MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE};
 use tairix_image::{
     DecodeError, DecodeLimits, FitBox, ImageFormat, RasterImage, Sequence, SequenceKind, SpriteName,
@@ -629,7 +629,8 @@ fn sprite_in_square(
         drawn.width.saturating_mul(across),
         drawn.height.saturating_mul(down),
         side,
-    );
+    )
+    .ok_or(IconRefusal::MalformedImage)?;
     let (grow_x, grow_y) = (fit.0.div_ceil(drawn.width), fit.1.div_ceil(drawn.height));
     let (grown_w, grown_h) = (drawn.width * grow_x, drawn.height * grow_y);
     let row_bytes = pixel_buffer_len(grown_w, 1);
@@ -801,7 +802,8 @@ fn rasterise_png(side: u32, icon: &[u8]) -> Result<Vec<u8>, IconRefusal> {
 /// scaling implementation, so a downscale blends (never nearest-neighbour)
 /// exactly as the wallpaper path's resampling does.
 fn scale_to_square(src_w: u32, src_h: u32, src: &[u8], side: u32) -> Result<Vec<u8>, IconRefusal> {
-    place_in_square(src_w, src_h, src, side, fit_within(src_w, src_h, side)).map(|(rgba, _)| rgba)
+    let fit = fit_within(src_w, src_h, side).ok_or(IconRefusal::Unrenderable)?;
+    place_in_square(src_w, src_h, src, side, fit).map(|(rgba, _)| rgba)
 }
 
 /// [`scale_to_square`], except that a picture smaller than the square is
@@ -813,7 +815,7 @@ fn letterbox(
     src: &[u8],
     side: u32,
 ) -> Result<(Vec<u8>, Placed), IconRefusal> {
-    let (fit_w, fit_h) = fit_within(src_w, src_h, side);
+    let (fit_w, fit_h) = fit_within(src_w, src_h, side).ok_or(IconRefusal::Unrenderable)?;
     let fit = if fit_w > src_w || fit_h > src_h {
         (src_w, src_h)
     } else {
@@ -857,39 +859,6 @@ fn place_in_square(
             height: fit_h,
         },
     ))
-}
-
-/// The largest `(width, height)` no bigger than `side` on either axis that
-/// preserves `src_w`/`src_h`'s aspect ratio, so the source is never
-/// distorted — [`scale_to_square`] pads the shorter mapped axis
-/// transparent rather than stretching it.
-///
-/// `side` is already validated non-zero by every caller (the request
-/// dispatch bound of `1..=MAX_ICON_SIDE`); this private helper relies on
-/// that rather than re-checking it, exactly as `RasterImage::from_parts`
-/// relies on its own already-validated geometry.
-fn fit_within(src_w: u32, src_h: u32, side: u32) -> (u32, u32) {
-    if src_w >= src_h {
-        (side, scale_dimension(src_h, src_w, side))
-    } else {
-        (scale_dimension(src_w, src_h, side), side)
-    }
-}
-
-/// `round(value * side / reference)`, clamped to `1..=side`.
-///
-/// `reference` is `src_w` or `src_h` from a decoded PNG, which the format
-/// decoder already refuses to be zero; the zero guard below only keeps
-/// this function total rather than leaning on that invariant.
-fn scale_dimension(value: u32, reference: u32, side: u32) -> u32 {
-    if reference == 0 {
-        return 1;
-    }
-    let numerator = u64::from(value)
-        .saturating_mul(u64::from(side))
-        .saturating_add(u64::from(reference) / 2);
-    let scaled = numerator / u64::from(reference);
-    u32::try_from(scaled).unwrap_or(side).clamp(1, side)
 }
 
 /// Byte offset of pixel `(x, y)` in a row-major RGBA8 buffer `width`

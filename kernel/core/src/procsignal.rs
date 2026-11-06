@@ -21,13 +21,11 @@
 //! [`KernelProcessSignal`] (`plans/SPAWN.md` `SP7b`), installed at boot in
 //! place of the fail-closed floor.
 
-use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use tairix_abi::{Errno, ProcId, Signal};
-use tairix_collections::HashMap;
+use tairix_collections::{HashMap, OrderedMap};
 use tairix_hash::BuildSipHash13;
 use tairix_inline::ArrayVec;
 use tairix_kernel_sched_api::{ExitDisposition, SchedError, SchedulerArch, SchedulerPolicy};
@@ -52,14 +50,35 @@ use crate::procwait::{KernelProcessWait, ProcessWait};
 /// `^C ^C`. Entries are cleared on task teardown ([`clear_intake`], driven
 /// by the shared reclaim) and never inherited: a fresh task id is never in
 /// the map. Grows with the number of concurrently opted-in tasks, never a
-/// fixed ceiling.
-static SIGNAL_INTAKE: SpinLock<BTreeMap<u64, Option<Signal>>> = SpinLock::new(BTreeMap::new());
+/// fixed ceiling, and an opt-in it cannot grow for is refused rather than
+/// aborting. Ordered, so a lookup costs the same however the opted-in ids
+/// fall.
+static SIGNAL_INTAKE: SpinLock<Intake> = SpinLock::new(OrderedMap::new());
+
+/// The signal-intake table: each opted-in task's one pending slot.
+type Intake = OrderedMap<u64, Option<Signal>>;
 
 /// Opt `task` into observable delivery of its own `Interrupt`/`Terminate`.
 /// Idempotent: enabling an already-enabled intake keeps its pending slot
 /// (a recorded signal is never discarded by a re-enable).
-pub fn intake_enable(task: u64) {
-    SIGNAL_INTAKE.lock().entry(task).or_insert(None);
+///
+/// # Errors
+///
+/// [`Errno::OutOfMemory`] when the intake cannot grow; the task stays on the
+/// default terminate path.
+pub fn intake_enable(task: u64) -> Result<(), Errno> {
+    opt_in(&mut SIGNAL_INTAKE.lock(), task)
+}
+
+/// Opt `task` in on `intake`, keeping a slot it already has.
+fn opt_in(intake: &mut Intake, task: u64) -> Result<(), Errno> {
+    if intake.contains_key(&task) {
+        return Ok(());
+    }
+    intake
+        .try_insert(task, None)
+        .map(|_| ())
+        .map_err(|_| Errno::OutOfMemory)
 }
 
 /// Restore `task`'s default terminate disposition.
@@ -160,6 +179,8 @@ pub(crate) struct ThreadGate {
     /// The process record the thread last read, kept while it is current:
     /// see [`Self::credential`].
     credential: SpinLock<Option<Arc<TaskCapabilities>>>,
+    /// What the thread's last wait left it owing.
+    room: crate::waitset::RoomDebt,
 }
 
 /// Set between a kernel body's entry and its boundary, parked or running.
@@ -211,6 +232,7 @@ impl ThreadGate {
             process,
             word: AtomicU64::new(0),
             credential: SpinLock::new(None),
+            room: crate::waitset::RoomDebt::new(),
         }
     }
 
@@ -279,6 +301,12 @@ impl ThreadGate {
     #[must_use]
     pub(crate) const fn process(&self) -> ProcessId {
         self.process
+    }
+
+    /// What the thread's last wait left it owing.
+    #[must_use]
+    pub(crate) const fn room_debt(&self) -> &crate::waitset::RoomDebt {
+        &self.room
     }
 
     /// Mark the thread as executing inside the kernel on its own stack,
@@ -506,6 +534,23 @@ pub(crate) fn gate_of(task: u64) -> Option<Arc<ThreadGate>> {
         .and_then(|gates| gates.get(&task).cloned())
 }
 
+/// Run `read` against `task`'s gate without taking a share of it: the copy
+/// its CPU publishes while `task` runs there, which a thread asking about
+/// itself finds, else the registry's. [`None`] for a task with no gate.
+pub(crate) fn with_gate<R>(task: u64, read: impl FnOnce(&ThreadGate) -> R) -> Option<R> {
+    let mut once = Some(read);
+    let own = crate::waitq::wait_arch()
+        .and_then(crate::waitq::WaitQueueArch::current_cpu)
+        .and_then(|cpu| {
+            crate::kthread::with_current_gate(cpu, |gate| {
+                (gate.task == task).then(|| once.take().map(|read| read(gate)))
+            })
+        })
+        .flatten()
+        .flatten();
+    own.or_else(|| gate_of(task).and_then(|gate| once.take().map(|read| read(&gate))))
+}
+
 /// What teardown a thread's death owes. Both kinds reclaim the dying
 /// **process's** kernel resources once its last thread is down; they differ
 /// only in whether a parent's `wait` is also given a status.
@@ -577,27 +622,32 @@ pub struct ClaimedKill {
 }
 
 /// Record `teardown` as the death every live thread of its process owes, but
-/// `spare`, and report where each is owed.
+/// `spare`, and hand each claim to `each` with no lock held, to bring the
+/// thread to where its death lands.
 ///
-/// The thread set is read, and every death recorded, under the thread-group
-/// table's read lock, which makes the claim exact against both ends of a
-/// thread's life: a thread registered after it sees its creator's death owed
-/// and is refused ([`kill_pending`]), and a thread's teardown withdraws its
-/// membership before it clears its gate, so no death is recorded that the
-/// teardown would not clear. A build with no table treats the process as its
-/// single leader thread.
+/// The group is sealed first, under the thread-group table's read lock, and
+/// its threads are then claimed a batch at a time under that lock: a
+/// registration holds the write lock and a sealed group refuses it, so every
+/// thread is either one the claim reaches or never born, and nothing here
+/// allocates. A thread's teardown withdraws its membership before it clears
+/// its gate, so no death is recorded that the teardown would not clear. A
+/// build with no table treats the process as its single leader thread.
 pub fn claim_group_kill(
     caps: Option<&RwLock<CapTable>>,
     teardown: DeferredTeardown,
     spare: Option<u64>,
-) -> Vec<ClaimedKill> {
-    let process = teardown.process();
-    let members = caps.map(RwLock::read);
-    let threads: Vec<u64> = match &members {
-        Some(table) => table.threads_of(process).map(|thread| thread.0).collect(),
-        None => alloc::vec![process.leader_task().0],
+    mut each: impl FnMut(ClaimedKill),
+) {
+    let Some(caps) = caps else {
+        let leader = teardown.process().leader_task().0;
+        if Some(leader) != spare {
+            if let Some(claim) = claim_gated(leader, teardown) {
+                each(claim);
+            }
+        }
+        return;
     };
-    claim_threads(threads, teardown, spare)
+    claim_walk(caps, None, teardown, spare, each);
 }
 
 /// [`claim_group_kill`] for the process `instance`, and only while its number
@@ -607,39 +657,109 @@ pub fn claim_instance_kill(
     caps: &RwLock<CapTable>,
     instance: ProcId,
     teardown: DeferredTeardown,
-) -> Vec<ClaimedKill> {
-    let process = teardown.process();
-    let table = caps.read();
-    if table.instance_of(process) != instance {
-        return Vec::new();
-    }
-    let threads: Vec<u64> = table.threads_of(process).map(|thread| thread.0).collect();
-    claim_threads(threads, teardown, None)
+    each: impl FnMut(ClaimedKill),
+) {
+    claim_walk(caps, Some(instance), teardown, None, each);
 }
 
-/// Record `teardown` against each of `threads` but `spare`. The caller holds
-/// the thread-group table's read lock across this, which is what makes a claim
-/// exact against a thread's admission and teardown: a member always has its
-/// gate, installed before it joined and removed only after it left.
-fn claim_threads(
-    threads: Vec<u64>,
+/// Every claim [`claim_group_kill`] hands over, in the order it hands them.
+#[cfg(test)]
+pub(crate) fn claimed_kills(
+    caps: Option<&RwLock<CapTable>>,
     teardown: DeferredTeardown,
     spare: Option<u64>,
-) -> Vec<ClaimedKill> {
-    let mut claims = Vec::with_capacity(threads.len());
-    let gates = GATES.read();
-    for thread in threads.into_iter().filter(|thread| Some(*thread) != spare) {
-        let Some(gate) = gates.as_ref().and_then(|gates| gates.get(&thread)) else {
-            continue;
-        };
-        let (recorded, site) = gate.claim(teardown);
-        claims.push(ClaimedKill {
-            thread,
-            site,
-            recorded,
-        });
-    }
+) -> alloc::vec::Vec<ClaimedKill> {
+    let mut claims = alloc::vec::Vec::new();
+    claim_group_kill(caps, teardown, spare, |claim| claims.push(claim));
     claims
+}
+
+/// Seal `process`'s group, then claim `teardown` against its threads but
+/// `spare` while its number names `instance` ([`walk_group`]).
+fn claim_walk(
+    caps: &RwLock<CapTable>,
+    instance: Option<ProcId>,
+    teardown: DeferredTeardown,
+    spare: Option<u64>,
+    mut each: impl FnMut(ClaimedKill),
+) {
+    let process = teardown.process();
+    walk_group(
+        caps,
+        process,
+        instance,
+        |table| {
+            table.seal_group(process);
+            Some(())
+        },
+        |thread, gate| {
+            if Some(thread) == spare {
+                None
+            } else {
+                Some(claim_on(gate, thread, teardown))
+            }
+        },
+        |(), claim| each(claim),
+    );
+}
+
+/// `teardown` claimed on `thread`'s gate in the registry, under the
+/// registry's lock so a teardown clearing the gate cannot come between.
+fn claim_gated(thread: u64, teardown: DeferredTeardown) -> Option<ClaimedKill> {
+    let gates = GATES.read();
+    let gate = gates.as_ref()?.get(&thread)?;
+    Some(claim_on(gate, thread, teardown))
+}
+
+/// `teardown` claimed on `thread`'s `gate`.
+fn claim_on(gate: &ThreadGate, thread: u64, teardown: DeferredTeardown) -> ClaimedKill {
+    let (recorded, site) = gate.claim(teardown);
+    ClaimedKill {
+        thread,
+        site,
+        recorded,
+    }
+}
+
+/// Walk `process`'s gated threads in ascending order a batch at a time, so a
+/// walk of any group allocates nothing.
+///
+/// `decide` runs first, under the thread-group table's read lock, and its
+/// answer is what the walk returns — [`None`] ends the walk before it starts.
+/// Each batch is then taken under that lock, `take` seeing every thread, and
+/// handed to `act` once the lock is released. Every batch first checks that
+/// the number still names `instance`, or the instance holding it when the
+/// walk began for [`None`]: a group whose threads all left between two
+/// batches can have its number drawn again, and nothing is taken from the
+/// newcomer.
+fn walk_group<D, T>(
+    caps: &RwLock<CapTable>,
+    process: ProcessId,
+    instance: Option<ProcId>,
+    decide: impl FnOnce(&CapTable) -> Option<D>,
+    mut take: impl FnMut(u64, &Arc<ThreadGate>) -> Option<T>,
+    mut act: impl FnMut(&D, T),
+) -> Option<D> {
+    let (holder, decided) = {
+        let table = caps.read();
+        let holder = table.instance_of(process);
+        if instance.is_some_and(|wanted| wanted != holder) {
+            return None;
+        }
+        (holder, decide(&table)?)
+    };
+    crate::threads::walk_thread_batches(
+        caps,
+        process,
+        holder,
+        |thread| {
+            let gates = GATES.read();
+            let gate = gates.as_ref().and_then(|gates| gates.get(&thread.0));
+            gate.and_then(|gate| take(thread.0, gate))
+        },
+        |taken| act(&decided, taken),
+    );
+    Some(decided)
 }
 
 /// Take the death `task` owes, for a killer whose scheduler call retired the
@@ -657,36 +777,22 @@ pub fn take_owed_kill(task: u64) -> Option<DeferredTeardown> {
 /// registry.
 #[must_use]
 pub fn kill_pending(task: u64) -> bool {
-    crate::waitq::wait_arch()
-        .and_then(crate::waitq::WaitQueueArch::current_cpu)
-        .and_then(|cpu| {
-            crate::kthread::with_current_gate(cpu, |gate| {
-                (gate.task == task).then(|| gate.kill_pending())
-            })
-        })
-        .flatten()
-        .unwrap_or_else(|| gate_of(task).is_some_and(|gate| gate.kill_pending()))
+    with_gate(task, ThreadGate::kill_pending).unwrap_or(false)
 }
 
 /// Drop every trace of `task` from the gates on teardown — any death it owes,
-/// and its registration. Idempotent; driven by the one shared thread teardown
-/// once the thread has left its group, so a death claimed while it was still
-/// a member is cleared here and none can be claimed after.
+/// what its last wait left it owing, and its registration. Idempotent; driven
+/// by the one shared thread teardown once the thread has left its group, so a
+/// death claimed while it was still a member is cleared here and none can be
+/// claimed after.
 pub fn clear_kill_gate(task: u64) {
     let removed = GATES.write().as_mut().and_then(|gates| gates.remove(&task));
     if let Some(gate) = removed {
         let _ = gate.take_owed();
+        // Any room debt left here is a dying group's: its slot held back only
+        // that group's threads.
+        let _ = gate.room_debt().take();
     }
-}
-
-/// A job-control decision for one process and the threads it governs.
-struct JobTransition {
-    /// The generation that decides the process.
-    job: JobGeneration,
-    /// Whether this decision moved the process, rather than restating it.
-    moved: bool,
-    /// Every live thread of the process, with its gate.
-    members: Vec<(u64, Arc<ThreadGate>)>,
 }
 
 /// What a fan-out leaves a thread's scheduler state as, for the gate word it
@@ -1443,53 +1549,36 @@ where
     /// its threads to it, returning the generation that decides it and
     /// whether this call moved the process and any thread of it will hold.
     ///
-    /// The generation is advanced, and the threads it governs collected,
-    /// under the thread-group table's read lock alone: a registration holds
-    /// the write lock and gives the thread the generation it finds, so a
-    /// thread joins either before the collection or already holding the
-    /// decision. The threads are then driven with no lock held, so a fan-out
-    /// over a large group blocks no other CPU's syscall.
+    /// The generation is advanced under the thread-group table's read lock,
+    /// and the threads it governs are then collected a batch at a time under
+    /// that lock ([`walk_group`]): a registration holds the write lock and
+    /// gives the thread the generation it finds, so a thread joins either
+    /// before the advance, as one the walk reaches, or already holding the
+    /// decision. Each batch is driven with no lock held, so a fan-out over a
+    /// large group blocks no other CPU's syscall, and nothing is allocated. A
+    /// producer wired with no table treats the target as the single thread its
+    /// process id names, whose own gate carries the generation.
     fn drive_job(&self, process: ProcessId, stopped: bool) -> Result<(JobGeneration, bool), Errno> {
-        let transition = self
-            .job_transition(process, stopped)
-            .ok_or(Errno::NotFound)?;
-        let mut holds = false;
-        for (thread, gate) in &transition.members {
-            gate.apply_job(transition.job);
-            holds |= self.reconcile(*thread, gate);
-        }
-        Ok((transition.job, transition.moved && holds))
-    }
-
-    /// Advance `process`'s generation toward `stopped` and collect every live
-    /// thread of it with its gate. A producer wired with no table treats the
-    /// target as the single thread its process id names, whose own gate then
-    /// carries the generation.
-    fn job_transition(&self, process: ProcessId, stopped: bool) -> Option<JobTransition> {
         let Some(caps) = self.caps else {
-            let gate = gate_of(process.0)?;
+            let gate = gate_of(process.0).ok_or(Errno::NotFound)?;
             let (job, moved) = gate.advance_job(stopped);
-            return Some(JobTransition {
-                job,
-                moved,
-                members: alloc::vec![(process.0, gate)],
-            });
+            let holds = self.reconcile(process.0, &gate);
+            return Ok((job, moved && holds));
         };
-        let table = caps.read();
-        let (job, moved) = table.advance_job(process, stopped)?;
-        let gates = GATES.read();
-        let members = table
-            .threads_of(process)
-            .filter_map(|thread| {
-                let gate = gates.as_ref()?.get(&thread.0)?;
-                Some((thread.0, Arc::clone(gate)))
-            })
-            .collect();
-        Some(JobTransition {
-            job,
-            moved,
-            members,
-        })
+        let mut holds = false;
+        let (job, moved) = walk_group(
+            caps,
+            process,
+            None,
+            |table| table.advance_job(process, stopped),
+            |thread, gate| Some((thread, Arc::clone(gate))),
+            |&(job, _), (thread, gate): (u64, Arc<ThreadGate>)| {
+                gate.apply_job(job);
+                holds |= self.reconcile(thread, &gate);
+            },
+        )
+        .ok_or(Errno::NotFound)?;
+        Ok((job, moved && holds))
     }
 
     /// Bring `thread`'s scheduler state to what its gate now decides,
@@ -1577,16 +1666,10 @@ where
     /// bring each to where its death lands, reporting whether the scheduler
     /// still knew any of them.
     fn kill_group(&self, teardown: DeferredTeardown, spare: Option<u64>) -> bool {
-        self.stop_claims(claim_group_kill(self.caps, teardown, spare))
-    }
-
-    /// Bring every claimed thread to where its death lands, reporting whether
-    /// the scheduler still knew any of them.
-    fn stop_claims(&self, claims: Vec<ClaimedKill>) -> bool {
         let mut reached = false;
-        for claim in claims {
+        claim_group_kill(self.caps, teardown, spare, |claim| {
             reached |= self.stop_claimed(claim);
-        }
+        });
         reached
     }
 
@@ -1708,10 +1791,13 @@ where
         let (Some(caps), Some(status)) = (self.caps, Signal::Kill.termination_status()) else {
             return false;
         };
-        let claims =
-            claim_instance_kill(caps, instance, DeferredTeardown::Exit { process, status });
-        let recorded = claims.iter().any(|claim| claim.recorded);
-        self.stop_claims(claims) && recorded
+        let (mut reached, mut recorded) = (false, false);
+        let teardown = DeferredTeardown::Exit { process, status };
+        claim_instance_kill(caps, instance, teardown, |claim| {
+            recorded |= claim.recorded;
+            reached |= self.stop_claimed(claim);
+        });
+        reached && recorded
     }
 }
 
@@ -1825,7 +1911,8 @@ pub(crate) fn ensure_foreground_hook_for_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::collections::BTreeSet;
+    use alloc::collections::{BTreeMap, BTreeSet};
+    use alloc::vec::Vec;
     use std::boxed::Box;
 
     use tairix_abi::{WaitFlags, WaitStatus};
@@ -1931,6 +2018,26 @@ mod tests {
             Leave::Death(teardown) => Some(teardown),
             Leave::Left | Leave::Stop => None,
         }
+    }
+
+    /// A thread's gate keeps what its last wait left it owing, which a look at
+    /// its gate finds by its id and its teardown drops with the gate.
+    #[test]
+    fn a_gate_keeps_its_threads_room_debt_until_the_gate_goes() {
+        let task = crate::test_boot::claim_task();
+        let held = gate(task);
+        let owed = crate::waitset::OwedRoom {
+            port: 0x5EAD_0046,
+            budget: None,
+        };
+        assert_eq!(held.room_debt().owe(owed), Ok(()));
+        assert_eq!(
+            with_gate(task, |gate| gate.room_debt().port()),
+            Some(Some(0x5EAD_0046))
+        );
+        clear_kill_gate(task);
+        assert_eq!(with_gate(task, |_| ()), None, "the gate went");
+        assert_eq!(held.room_debt().take(), None, "and what it owed with it");
     }
 
     /// Drive the two halves of the producer in the order the syscall
@@ -2219,7 +2326,7 @@ mod tests {
     /// A death against the single-threaded process `task` names, as a build
     /// with no group table claims it.
     fn claim_one(teardown: DeferredTeardown) -> ClaimedKill {
-        let claims = claim_group_kill(None, teardown, None);
+        let claims = claimed_kills(None, teardown, None);
         assert_eq!(claims.len(), 1, "a table-less process is its leader");
         claims[0]
     }
@@ -2261,7 +2368,7 @@ mod tests {
         let _g = running_kill_test_lock();
         let stray = 0x00c0_ffe9;
         clear_kill_gate(stray);
-        assert!(claim_group_kill(None, exit_of(stray, 137), None).is_empty());
+        assert!(claimed_kills(None, exit_of(stray, 137), None).is_empty());
         assert!(!kill_pending(stray));
         assert_eq!(take_owed_kill(stray), None);
     }
@@ -2622,14 +2729,15 @@ mod tests {
             crate::forever(Box::new(crate::test_sink::TestSink::new()));
         let caps: &'static RwLock<CapTable> =
             crate::forever(Box::new(RwLock::new(CapTable::new())));
-        caps.write()
-            .insert(tairix_kernel_sec::TaskCapabilities::derive(
-                ProcessId(leader),
-                tairix_kernel_sec::UserId(0),
-                tairix_caps::CapabilitySet::empty(),
-                tairix_caps::CapabilitySet::empty(),
-                sink,
-            ));
+        let record = tairix_kernel_sec::TaskCapabilities::derive(
+            ProcessId(leader),
+            tairix_kernel_sec::UserId(0),
+            tairix_caps::CapabilitySet::empty(),
+            tairix_caps::CapabilitySet::empty(),
+            sink,
+        )
+        .expect("derived");
+        caps.write().insert(record).expect("inserted");
         caps.write()
             .register_thread(TaskId(sibling), ProcessId(leader))
             .expect("the sibling joins the group");
@@ -3347,14 +3455,15 @@ mod tests {
         let mut mount = tairix_caps::CapabilitySet::empty();
         mount.insert(tairix_abi::CapabilityId::FS_MOUNT);
         let caps = RwLock::new(CapTable::new());
-        caps.write()
-            .insert(tairix_kernel_sec::TaskCapabilities::derive(
-                ProcessId(7),
-                tairix_kernel_sec::UserId(0),
-                mount,
-                mount,
-                &sink,
-            ));
+        let record = tairix_kernel_sec::TaskCapabilities::derive(
+            ProcessId(7),
+            tairix_kernel_sec::UserId(0),
+            mount,
+            mount,
+            &sink,
+        )
+        .expect("derived");
+        caps.write().insert(record).expect("inserted");
         let empty = RwLock::new(CapTable::new());
         let gate = ThreadGate::new(7, ProcessId(7));
         assert!(gate.credential(&empty).is_none(), "nothing read yet");
@@ -3395,8 +3504,9 @@ mod tests {
             tairix_caps::CapabilitySet::empty(),
             &sink,
         )
+        .expect("derived")
         .with_proc_id(instance);
-        caps.write().insert(record);
+        caps.write().insert(record).expect("inserted");
         ProcessInstance { process, instance }
     }
 
@@ -3566,15 +3676,15 @@ mod tests {
         assert!(!intake_ready(4001));
         assert_eq!(intake_disable(4001), Ok(()));
         // Enable is idempotent; nothing is pending yet.
-        intake_enable(4001);
-        intake_enable(4001);
+        assert_eq!(intake_enable(4001), Ok(()));
+        assert_eq!(intake_enable(4001), Ok(()));
         assert!(intake_enabled(4001));
         assert!(!intake_ready(4001));
         assert_eq!(intake_take(4001), Err(Errno::WouldBlock));
         // A recorded signal is observable, drains exactly once, and a
         // re-enable never discards it.
         assert!(try_intake(4001, Signal::Interrupt));
-        intake_enable(4001);
+        assert_eq!(intake_enable(4001), Ok(()));
         assert!(intake_ready(4001));
         assert_eq!(intake_take(4001), Ok(Signal::Interrupt));
         assert_eq!(intake_take(4001), Err(Errno::WouldBlock));
@@ -3588,7 +3698,7 @@ mod tests {
     fn disable_with_a_pending_signal_is_refused_until_drained() {
         let _intake = intake_test_lock();
         clear_intake(4002);
-        intake_enable(4002);
+        assert_eq!(intake_enable(4002), Ok(()));
         assert!(try_intake(4002, Signal::Terminate));
         // A recorded termination request is never silently discarded.
         assert_eq!(intake_disable(4002), Err(Errno::WouldBlock));
@@ -3602,7 +3712,7 @@ mod tests {
     fn a_second_pending_termination_request_is_declined_for_escalation() {
         let _intake = intake_test_lock();
         clear_intake(4003);
-        intake_enable(4003);
+        assert_eq!(intake_enable(4003), Ok(()));
         assert!(try_intake(4003, Signal::Interrupt));
         // The slot is occupied: the second request is declined so the
         // caller escalates to the default terminate path (`^C ^C` kills).
@@ -3611,6 +3721,20 @@ mod tests {
         // The first observation is still intact for the drain.
         assert_eq!(intake_take(4003), Ok(Signal::Interrupt));
         clear_intake(4003);
+    }
+
+    /// An opt-in the heap cannot hold is refused with nothing recorded, so
+    /// the task stays on the default terminate path; the retry succeeds.
+    #[test]
+    fn an_opt_in_the_heap_cannot_hold_is_refused_and_records_nothing() {
+        let mut intake = Intake::new();
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let refused = opt_in(&mut intake, 4004);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(refused, Err(Errno::OutOfMemory));
+        assert!(intake.is_empty(), "a refused opt-in recorded the task");
+        assert_eq!(opt_in(&mut intake, 4004), Ok(()));
+        assert_eq!(intake.get(&4004), Some(&None));
     }
 
     #[test]
@@ -3627,7 +3751,7 @@ mod tests {
         .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
-        intake_enable(child);
+        intake_enable(child).expect("opted in");
         // The interrupt is recorded, not delivered as a termination: the
         // child stays live and nothing becomes reapable.
         assert_eq!(
@@ -3676,7 +3800,7 @@ mod tests {
         .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
-        intake_enable(child);
+        intake_enable(child).expect("opted in");
         assert_eq!(
             signal_child(&signaller, ProcessId(7), child_pid, Signal::Interrupt),
             Ok(())
@@ -3719,7 +3843,7 @@ mod tests {
         .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
-        intake_enable(child);
+        intake_enable(child).expect("opted in");
         // The console `^C` is observed, not fatal …
         assert_eq!(signaller.deliver(fg(child), Signal::Interrupt), Ok(()));
         assert_eq!(scheduler.live_task_count(), 1);
@@ -3798,6 +3922,7 @@ mod tests {
                 tairix_caps::CapabilitySet::empty(),
                 self.audit,
             )
+            .expect("derived")
             .with_proc_id(ProcId::from_raw([byte; 16]));
             let mut caps = self.caps.write();
             let placement = caps
@@ -3909,7 +4034,7 @@ mod tests {
         let scene = SessionScene::new();
         let desktop = scene.admit(0x71, None, New);
         let app = scene.admit(0x72, Some(desktop), Inherit);
-        let own = claim_group_kill(Some(scene.caps), exit_of(app, 0), None);
+        let own = claimed_kills(Some(scene.caps), exit_of(app, 0), None);
         assert!(own.iter().all(|claim| claim.recorded));
 
         scene.caps.write().remove(ProcessId(desktop));
@@ -3970,10 +4095,166 @@ mod tests {
         let owner = admit_instance(caps, ProcessId(0x6161), ProcId::from_raw([0x61; 16]));
         let _held = gate(0x6161);
         let teardown = exit_of(0x6161, 137);
-        assert!(claim_instance_kill(caps, ProcId::from_raw([0x62; 16]), teardown).is_empty());
+        let stale = ProcId::from_raw([0x62; 16]);
+        let mut claimed = 0;
+        claim_instance_kill(caps, stale, teardown, |_| claimed += 1);
+        assert_eq!(claimed, 0);
         assert!(!kill_pending(0x6161));
-        assert_eq!(claim_instance_kill(caps, owner.instance, teardown).len(), 1);
+        claim_instance_kill(caps, owner.instance, teardown, |_| claimed += 1);
+        assert_eq!(claimed, 1);
         assert!(kill_pending(0x6161));
         clear_kill_gate(0x6161);
+    }
+
+    /// A process of `size` threads numbered up from `leader`, minted as
+    /// instance `byte`, every thread registered and gated as its admission
+    /// leaves it.
+    fn gated_group(leader: u64, size: u64, byte: u8) -> &'static RwLock<CapTable> {
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let _ = admit_instance(caps, ProcessId(leader), ProcId::from_raw([byte; 16]));
+        for thread in leader..leader + size {
+            if thread != leader {
+                caps.write()
+                    .register_thread(TaskId(thread), ProcessId(leader))
+                    .expect("joins its group");
+            }
+            clear_kill_gate(thread);
+            install_gate(thread, ProcessId(leader)).expect("a gate installs");
+        }
+        caps
+    }
+
+    /// Threads enough for `batches` whole batches of a group walk, and a few.
+    fn past_batches(batches: usize) -> u64 {
+        u64::try_from(batches * crate::threads::THREAD_WALK_BATCH + 3).expect("a small group")
+    }
+
+    /// A kill of a group past one batch claims every thread with the heap
+    /// refused: the walk borrows a stack batch rather than collect the group,
+    /// so a kill still lands once memory has run out.
+    #[test]
+    fn a_group_kill_past_one_batch_claims_every_thread_on_an_exhausted_heap() {
+        let _g = running_kill_test_lock();
+        let (leader, size) = (0x00c2_0000, past_batches(2));
+        let caps = gated_group(leader, size, 0xc2);
+        let mut recorded = 0;
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        claim_group_kill(Some(caps), exit_of(leader, 137), None, |claim| {
+            recorded += u64::from(claim.recorded);
+        });
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(recorded, size);
+        for thread in leader..leader + size {
+            assert!(kill_pending(thread), "thread {thread} owes the death");
+            clear_kill_gate(thread);
+        }
+    }
+
+    /// The kill seals the group before its first claim, so a thread asking to
+    /// join between two of its batches — below the walk's cursor, where the
+    /// walk would never reach it — is refused rather than outliving the kill.
+    #[test]
+    fn no_thread_joins_a_group_between_two_batches_of_its_kill() {
+        let _g = running_kill_test_lock();
+        let (leader, size) = (0x00c3_0000, past_batches(1));
+        let caps = gated_group(leader, size, 0xc3);
+        let stray = TaskId(leader - 1);
+        let mut joined = None;
+        claim_group_kill(Some(caps), exit_of(leader, 137), None, |_| {
+            if joined.is_none() {
+                let refused = caps.write().register_thread(stray, ProcessId(leader));
+                joined = Some(refused);
+            }
+        });
+        assert_eq!(
+            joined,
+            Some(Err(tairix_kernel_sec::ThreadRegisterError::Dying))
+        );
+        assert_eq!(caps.read().process_of(stray), None);
+        for thread in leader..leader + size {
+            assert!(kill_pending(thread), "thread {thread} owes the death");
+            clear_kill_gate(thread);
+        }
+    }
+
+    /// A walk never carries over to a process that drew its number between
+    /// two batches: the newcomer's threads are not claimed.
+    #[test]
+    fn a_kill_walk_stops_where_its_number_is_drawn_again() {
+        let _g = running_kill_test_lock();
+        let (leader, size) = (0x00c5_0000, past_batches(1));
+        let caps = gated_group(leader, size, 0xc5);
+        let mut claimed = 0;
+        claim_group_kill(Some(caps), exit_of(leader, 137), None, |_| {
+            claimed += 1;
+            if claimed == 1 {
+                assert!(caps.write().remove(ProcessId(leader)).is_some());
+                let _ = admit_instance(caps, ProcessId(leader), ProcId::from_raw([0xc6; 16]));
+                for thread in leader + 1..leader + size {
+                    caps.write()
+                        .register_thread(TaskId(thread), ProcessId(leader))
+                        .expect("joins the newcomer");
+                }
+            }
+        });
+        let batch = u64::try_from(crate::threads::THREAD_WALK_BATCH).expect("a small batch");
+        assert_eq!(claimed, batch, "one batch, then none");
+        for thread in leader..leader + size {
+            assert_eq!(kill_pending(thread), thread < leader + batch);
+            clear_kill_gate(thread);
+        }
+    }
+
+    /// The batched walk every group-wide change shares stops where the
+    /// number is drawn again between two batches: a priority change no more
+    /// reaches the newcomer than a kill does.
+    #[test]
+    fn a_batched_walk_takes_nothing_from_a_process_that_drew_its_number() {
+        let _g = running_kill_test_lock();
+        let (leader, size) = (0x00c7_0000, past_batches(1));
+        let caps = gated_group(leader, size, 0xc7);
+        let holder = caps.read().instance_of(ProcessId(leader));
+        let mut seen = 0;
+        crate::threads::walk_thread_batches(caps, ProcessId(leader), holder, Some, |_| {
+            seen += 1;
+            if seen == 1 {
+                assert!(caps.write().remove(ProcessId(leader)).is_some());
+                let _ = admit_instance(caps, ProcessId(leader), ProcId::from_raw([0xc8; 16]));
+                for thread in leader + 1..leader + size {
+                    caps.write()
+                        .register_thread(TaskId(thread), ProcessId(leader))
+                        .expect("joins the newcomer");
+                }
+            }
+        });
+        let batch = u64::try_from(crate::threads::THREAD_WALK_BATCH).expect("a small batch");
+        assert_eq!(seen, batch, "one batch, then none");
+        for thread in leader..leader + size {
+            clear_kill_gate(thread);
+        }
+    }
+
+    /// A stop and a continue of a group past one batch reach every thread
+    /// with the heap refused.
+    #[test]
+    fn a_job_fan_out_past_one_batch_allocates_nothing() {
+        let _g = running_kill_test_lock();
+        let (wait, scheduler) = scaffold();
+        let (leader, size) = (0x00c4_0000, past_batches(2));
+        let caps = gated_group(leader, size, 0xc4);
+        let signaller = KernelProcessSignal::new(wait, scheduler, caps);
+        for (stopped, owed) in [(true, Owed::Stop), (false, Owed::Nothing)] {
+            crate::test_alloc::refuse_allocations_on_current_thread(true);
+            let driven = signaller.drive_job(ProcessId(leader), stopped);
+            crate::test_alloc::refuse_allocations_on_current_thread(false);
+            assert!(driven.is_ok_and(|(job, _)| job.is_stopped() == stopped));
+            for thread in leader..leader + size {
+                assert_eq!(gate_in_hand(thread).owed(), owed, "thread {thread}");
+            }
+        }
+        for thread in leader..leader + size {
+            clear_kill_gate(thread);
+        }
     }
 }

@@ -3,8 +3,8 @@
 Stage 6 ships a set of small command-line utilities, each its own crate.
 This page documents the ones that have landed (`sysinfo`, `ps`, `man`,
 `cat`, `clear`, `reset`, `ls`, `rm`, `cp`, `mv`, `chmod`, `chown`,
-`getcap`, `setcap`, `mount`, `unmount`, `true`, `false`, `yes`, `basename`,
-and `dirname`) and is extended as the others arrive.
+`getcap`, `setcap`, `mount`, `unmount`, `label`, `true`, `false`, `yes`,
+`basename`, and `dirname`) and is extended as the others arrive.
 
 Every tool's `Output` below is the one shared byte stream,
 `tairix_util::output::Output`: its engine writes through it, a test captures
@@ -379,21 +379,27 @@ With no operands `mount` lists the mount table, a read of live system state
 through the ungated `sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries — there
 is no `/proc` and no mount-table file. With an `IMAGE` operand it mounts the
 volume that disk-image file holds, privately, for the user who runs it
-([disk images](../filesystem/images.md)). The kernel recognises the image,
-decides whether it may be mounted, and audits the decision; `mount` makes no
-permission decision of its own. A device or volume `SOURCE` is not mounted:
+([disk images](../filesystem/images.md)). With `--replay-held` or
+`--discard-held` it answers for the writes a re-inserted volume holds while
+nothing proves its medium the one they were made on
+([Storage namespaces](../filesystem/drives.md) §8). The kernel recognises the
+image, decides whether it may be mounted and who may answer, and audits each
+decision; `mount` makes no permission decision of its own. A device or volume
+`SOURCE` is not mounted:
 nothing yet lets a user name an unattached storage object
 (`plans/OPEN-DEFECTS.md` D1014).
 
 The library is `no_std` with `alloc`, holds no `unsafe`, and reaches the
 outside world only through injected seams: `lib/procinfo`'s `Transport` for
-the listing, a `Mounter` for the mount, `lib/help`'s `HelpSource` for the
+the listing, a `Mounter` for the mount and the answers, `lib/help`'s
+`HelpSource` for the
 short help.
 
 ### Grammar
 
 ```
 mount [-lrvw] [-t LIST] [-o OPTIONS] [--] [IMAGE [TARGET]]
+mount [-v] --list-held | --replay-held NAME | --discard-held NAME
 
   (no operands)            list the mounted filesystems, of the types -t names
   IMAGE                    mount the disk image IMAGE, at /Storage/NAME
@@ -405,6 +411,9 @@ mount [-lrvw] [-t LIST] [-o OPTIONS] [--] [IMAGE [TARGET]]
   -o, --options LIST       comma-separated: ro,rw,noexec,loop,name=NAME
   -v, --verbose            say where it was mounted
   -l, --show-labels        accepted for the listing, which carries no labels
+  --list-held              list only the volumes holding writes awaiting an answer
+  --replay-held NAME       write the held writes of the volume NAME to its medium
+  --discard-held NAME      give up the held writes of the volume NAME
   -h, -?, --help           show the command's own short help
 ```
 
@@ -468,25 +477,52 @@ carved-out subtree as `source[/subtree]`, the `/Storage` catalog as
 volume with a trailing marker (` [unavailable-dirty]`, ` [recovery-conflict]`,
 ` [degraded]`, …), so it never looks healthy.
 
+### Held writes
+
+A volume put back while it held writes its device cannot prove belong on it
+is served read-only, its writes kept, and listed with the trailing
+` [replay-unconfirmed]`; `--list-held` lists only such volumes' bindings.
+`--replay-held NAME` and `--discard-held NAME` answer for one: `NAME` is read
+as `unmount` and `label` read one (`tairix_procinfo::named_volume`: its
+catalog name, a directory it is shown at, or its durable `id::` root), the
+volume must be listed awaiting an answer, and its key and the answer go to
+the kernel's `volume_replay` path through the `Mounter` seam. The kernel
+takes the answer from the mount authority for any volume and from the seat
+for a removable one, checks the medium's evidence again before writing, and
+audits every decision ([Storage namespaces](../filesystem/drives.md) §8).
+`mount` is silent on success; `-v` says what became of the writes
+(`mount: NAME: held writes written.`). An answer stands alone, for one
+volume: a second, an operand, `-r`, `-w`, `-o`, `-t` or `--list-held`
+beside it is a usage error. The options are TAIRiX's own, long alone so
+they take no letter util-linux gives another meaning, and named for the
+held writes the listing marks, so they collide with no util-linux option
+and leave every abbreviation an older option had as it was.
+
 ### Exit status
 
 As util-linux's: `0` on success, `1` for a command line not understood (an
 option `getopt` refuses, more than two operands, options with nothing to
 mount, two different names, an unknown `-o` element or an empty listing `-t`
-type, a name no volume may take — the kernel's naming policy's among them),
-`2` when the listing or the terminal failed, and `32` when the image was not
-mounted — an unknown filesystem type, a directory that would not take it, a
-write-protected image `-w`
-asked to write, its refusal stated in the user's words
+type, a name no volume may take — the kernel's naming policy's among them)
+or an answer for held writes the caller may not give, `2` when the listing
+or the terminal failed, and `32` when the image was not mounted — an unknown
+filesystem type, a directory that would not take it, a write-protected image
+`-w` asked to write, its refusal stated in the user's words
 (`ImageRefusal::reason`), the kernel's `Errno`, or `already mounted on` where
-the volume is, after where it was asked to go. A failure is a sentence ending
-in a full stop, as util-linux words it — `IMAGE is write-protected but explicit
-read-write mode requested.` among them — and is printed alone; a command line
-not understood is not, and is followed by the hint to `--help`.
+the volume is, after where it was asked to go — or held writes were not
+written or given up: a name naming no volume, a volume holding none awaiting
+an answer, or the kernel's refusal, `ReadOnly` saying the medium no longer
+matches and its writes are kept. A failure is a sentence ending in a full
+stop, as util-linux words it — `IMAGE is write-protected but explicit
+read-write mode requested.` among them — and is printed alone; a command
+line not understood is not, and is followed by the hint to `--help`.
 
-Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS`. `cargo test -p tairix-mount`
-drives the grammar, the listing and its query routing, the private attach and
-every field it carries, targets, the verbose line and the read-only warning,
+Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS` + `CAP_FS_MOUNT`, the authority
+the kernel's `volume_replay` path asks of an answer from anywhere but the
+seat, which no mount uses. `cargo test -p tairix-mount` drives the grammar,
+the listing and its query routing, the held listing, the answers and each of
+their refusals, the private attach and every field it carries, targets, the
+verbose line and the read-only warning,
 every refusal and its status, and the thirteen-locale `OPTIONS` pinning of
 the bundled `Help/` documents.
 
@@ -499,7 +535,8 @@ the bundled `Help/` documents.
 was mounted from — a disk image's file name — or its durable root
 (`id::<volume-id>`), resolved through the same
 ungated `sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries the other tools use
-(`tairix_procinfo::Namespace`), whose records carry each mount's stable
+(`tairix_procinfo::Namespace`, read by `tairix_procinfo::named_volume`, the
+resolution `label` shares), whose records carry each mount's stable
 16-byte volume identity, availability and owner. A durable root names the
 volume carrying that identity and no other, so one named by it — as the file
 manager names a device it asks an administrator to eject — is never another
@@ -542,7 +579,10 @@ the mount listing) refuses a plain detach: its retained uncommitted
 writes are held for the verified re-insert. So does a re-inserted
 volume in the `recovery-conflict` state (`plans/DEVICES.md` D4c): it is
 mounted read-only while its retained set is still held, and only the
-audited force-discard releases it. `--force` is the
+audited force-discard releases it. So does one in `replay-unconfirmed`,
+whose writes await an answer (`mount --replay-held` or `--discard-held`, or
+the desktop's question for a removable disk; `volume_replay`,
+[Storage namespaces](../filesystem/drives.md) §8). `--force` is the
 deliberate, separately-audited exit — the kernel discards the retained
 set, retracts the volume, and logs the data loss with its own event
 (`fs.hotplug.force_unmount`, carrying the discarded byte count and the
@@ -557,12 +597,16 @@ revoked and whether a flush was given up), and a network share's as its own
 (`fs.network.detached`, 4303, caused `forced` or `forced_unflushed`), never
 as a device's force-unmount.
 A verified re-insert needs no tool at all: a re-attached volume whose
-non-mutation is proven has its retained writes replayed by the kernel
-and returns to full service (`fs.hotplug.reinsert_replayed`).
+non-mutation is proven, on a device that proves it the volume's own, has
+its retained writes replayed by the kernel and returns to full service
+(`fs.hotplug.reinsert_replayed`); one its device does not prove waits,
+read-only, for an answer: `mount --replay-held` or `--discard-held` from the
+mount authority, or the desktop's question to the user at the seat for a
+removable disk.
 The refusal a plain detach earns from a volume's writes is defined once
 (`MountAvailability::plain_detach_refusal`): `DeviceFault` for
 `unavailable-dirty` and `unavailable-lost`, `NotEmpty` for
-`recovery-conflict`. For that refusal alone the tool spells out the `--force`
+`recovery-conflict` and `replay-unconfirmed`. For that refusal alone the tool spells out the `--force`
 consequence on standard error — discard for writes held, acknowledge for
 writes lost — and emits an fd-3 `suggestion` record
 (`fs.volume_force_required`, `safe_to_autorun: false` — `AGENTS.md` §20.1),
@@ -595,6 +639,56 @@ name, mount-point path, durable root, a source another user's image shares,
 unknown name, non-detachable mounts), the
 force flag reaching the kernel, the refusal paths with and without the
 fd-3 suggestion, the service-failure path, and the thirteen-locale
+`OPTIONS` pinning of the bundled `Help/` documents.
+
+## `label` — show or change a volume's title (`userland/apps/label`)
+
+`label NAME` writes the title of the volume `NAME` names, on its own line;
+`label NAME TITLE` sets it, as `e2label` and `fatlabel` do for one format each,
+and writes nothing. `NAME` is read by the one resolution `unmount` uses
+(`tairix_procinfo::named_volume`): a catalog name, a directory the volume is
+mounted on, a disk image's file name, or its durable root (`id::<volume-id>`).
+A title is shown quoted as any name from elsewhere is (`tairix_util::quote`),
+as an empty line for a volume titled nothing, and not at all for another
+user's private volume, which lists only its catalog entry. A title to set is
+checked as a `VolumeTitle` before anything is asked — at most
+`VOLUME_TITLE_MAX` bytes, no control character — and handed with the volume's
+key to the kernel's `volume_retitle` path through the injected `Retitler`
+seam; the empty title clears it. The kernel is the policy point and the format
+the judge of what it can store ([Storage namespaces](../filesystem/drives.md)
+§8): a disk image's owner retitles it, the user at the seat a removable
+device's volume whose root they may write, and any other volume needs
+`CAP_FS_MOUNT`. The catalog name stays until the volume next attaches.
+
+### Grammar
+
+```
+label [option...] [--] NAME [TITLE]
+
+  NAME            the volume (catalog name, a directory it is mounted on,
+                  a disk image's file name, or its durable root id::<volume-id>)
+  TITLE           the title to set; empty clears it
+  -h, -?, --help  show the command's own short help
+  --version       show the command's name and version
+```
+
+### Fail closed
+
+- An unknown option, no operand or more than two, or an empty `NAME` is a
+  usage error (exit `1`).
+- A name naming no volume, the catalog or a volume published under no key, a
+  title no volume could keep, another user's private volume, and the kernel's
+  refusal each exit `1`, the refusal worded for the volume: `NotSupported` (a
+  format keeping no title, a network share, a boot volume), `ReadOnly`,
+  `LengthOutOfRange` and `OutOfRange` (a title the format cannot store), or
+  the errno itself (`PermissionDenied`, `Busy`).
+- A listing or terminal failure is a hard error, exit `2`.
+
+Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS` + `CAP_FS_MOUNT`.
+`cargo test -p tairix-label` drives the parser, the title shown and set by
+catalog name and by durable root, the clearing title, the titles refused before
+the kernel is asked, the names that name no volume, the kernel's refusals, the
+withheld title, help and version, the service failure, and the thirteen-locale
 `OPTIONS` pinning of the bundled `Help/` documents.
 
 ## `mdadm` — administer RAID arrays (`userland/apps/mdadm`)

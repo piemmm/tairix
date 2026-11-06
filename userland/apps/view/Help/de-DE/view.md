@@ -29,6 +29,19 @@ RISC OS Sprite. Eine Datei, die der Dekodierer ablehnt, nennt ihren Grund im
 Fenster und auf der Standardfehlerausgabe; das Fenster bleibt niemals leer
 und es wird niemals ein Bild erfunden.
 
+Er spielt auch WebM-Filme mit ihrem Ton ab, etwa die Bildschirmaufnahmen des
+Desktops selbst. Ein Film öffnet sich angehalten auf seinem ersten Bild; das
+Abspielwerkzeug und `Space` spielen ihn ab und halten ihn an. Unter dem Bild
+zeigt eine Suchleiste, wie weit der Film fortgeschritten ist, daneben die
+abgespielte Zeit und die Länge des Films: Ziehen Sie entlang der Leiste oder
+klicken Sie darauf, um zum nächstgelegenen Schlüsselbild an oder vor dieser
+Stelle zu springen. Eine Aufnahme, die ihre Länge nicht angibt — etwa eine,
+deren Aufzeichnung unerwartet abbrach —, wird von ihrem Anfang an abgespielt,
+lässt sich aber nicht durchsuchen. Ein abgeschnittener Film oder einer, dessen
+Dekodierung abbricht, wird so weit wie möglich abgespielt und nennt den Grund,
+warum er anhielt; ein Film, dessen Ton sich nicht abspielen lässt, läuft stumm
+weiter und sagt das.
+
 Mehrere Dokumente gleichzeitig sind mehrere Fenster des einen Betrachters:
 Zwei Bilder nebeneinander zu vergleichen heißt, das zweite zu öffnen. Das
 Schließen eines Fensters lässt den Betrachter in der Symbolleiste zurück,
@@ -62,7 +75,7 @@ dahinter.
 * `[` / `]` — eine Vierteldrehung nach links oder rechts
 * `M` — von links nach rechts spiegeln
 * `I` — Informationsfeld ein- oder ausblenden
-* `Space` — Animation abspielen oder anhalten
+* `Space` — Animation oder Film abspielen oder anhalten
 * `O` — ein anderes Dokument wählen
 * `Page Up` / `Page Down` — vorheriger oder nächster Eintrag
 * `Home` / `End` — erster oder letzter Eintrag

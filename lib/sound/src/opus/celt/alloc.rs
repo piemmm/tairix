@@ -8,8 +8,8 @@
 //! arithmetic the encoder's matches exactly.
 
 use super::tables::{ALLOCATION, BANDS, CACHE_BITS, CACHE_CAPS, CACHE_INDEX, LOG2_FRAC, LOG_N};
-use super::{BAND_COUNT, MAX_FINE_BITS};
-use crate::opus::range::{RangeDecoder, BITRES};
+use super::{BAND_COUNT, EVEN_TRIM, MAX_FINE_BITS};
+use crate::opus::range::{Coder, BITRES};
 
 const ALLOC_STEPS: u32 = 6;
 const LOG_MAX_PSEUDO: usize = 6;
@@ -116,15 +116,20 @@ pub(super) struct Request<'r> {
     pub(super) total: i32,
     pub(super) channels: usize,
     pub(super) lm: usize,
+    /// The first band an encoder codes as intensity stereo.
+    pub(super) intensity: usize,
+    /// Whether an encoder codes the stereo bands below it as two mono ones.
+    pub(super) dual_stereo: bool,
 }
 
-/// Compute the allocation, reading the skip flags and stereo parameters it
-/// states.
+/// Compute the allocation and code the skip flags and stereo parameters it
+/// states: an encoder keeps every band the budget reaches and writes the
+/// request's stereo choices.
 #[allow(
     clippy::too_many_lines,
     reason = "the reference's clt_compute_allocation, kept whole so the port can be read against it"
 )]
-pub(super) fn compute(request: &Request<'_>, decoder: &mut RangeDecoder<'_>) -> Allocation {
+pub(super) fn compute<C: Coder>(request: &Request<'_>, coder: &mut C) -> Allocation {
     let Request {
         start,
         end,
@@ -158,7 +163,7 @@ pub(super) fn compute(request: &Request<'_>, decoder: &mut RangeDecoder<'_>) -> 
         thresh[band] = (c << BITRES).max(((3 * n) << lm << BITRES) >> 4);
         trim_offset[band] = (c
             * n
-            * (trim - 5 - lm as i32)
+            * (trim - EVEN_TRIM as i32 - lm as i32)
             * (end - band - 1) as i32
             * (1 << (lm as u32 + BITRES)))
             >> 6;
@@ -236,7 +241,7 @@ pub(super) fn compute(request: &Request<'_>, decoder: &mut RangeDecoder<'_>) -> 
             intensity: intensity_rsv,
             dual_stereo: dual_stereo_rsv,
         },
-        decoder,
+        coder,
     )
 }
 
@@ -260,11 +265,7 @@ struct Reserves {
     clippy::too_many_lines,
     reason = "the reference's interp_bits2pulses, kept whole so the port can be read against it"
 )]
-fn interpolate(
-    curves: &Curves<'_>,
-    reserves: Reserves,
-    decoder: &mut RangeDecoder<'_>,
-) -> Allocation {
+fn interpolate<C: Coder>(curves: &Curves<'_>, reserves: Reserves, coder: &mut C) -> Allocation {
     let Request {
         start,
         end,
@@ -320,21 +321,21 @@ fn interpolate(
         psum += tmp;
     }
     let span = |band: usize| (BANDS[band] - BANDS[start]) as i32;
-    let mut coded = end;
+    let mut last_band = end;
     loop {
-        let j = coded - 1;
+        let j = last_band - 1;
         if j <= curves.skip_start {
             total += skip_rsv;
             break;
         }
         let mut left = total - psum;
-        let per_coefficient = left.max(0) / span(coded);
-        left -= span(coded) * per_coefficient;
+        let per_coefficient = left.max(0) / span(last_band);
+        left -= span(last_band) * per_coefficient;
         let rem = (left - span(j)).max(0);
-        let band_width = (BANDS[coded] - BANDS[j]) as i32;
+        let band_width = (BANDS[last_band] - BANDS[j]) as i32;
         let mut band_bits = bits[j] + per_coefficient * band_width + rem;
         if band_bits >= thresh[j].max(alloc_floor + (1 << BITRES)) {
-            if decoder.bit_logp(1) {
+            if coder.bit_logp(true, 1) {
                 break;
             }
             psum += 1 << BITRES;
@@ -351,10 +352,15 @@ fn interpolate(
         } else {
             bits[j] = 0;
         }
-        coded -= 1;
+        last_band -= 1;
     }
     let intensity = if intensity_rsv > 0 {
-        start + decoder.uint((coded + 1 - start) as u32) as usize
+        let wanted = curves
+            .request
+            .intensity
+            .min(last_band)
+            .saturating_sub(start);
+        start + coder.uint(wanted as u32, (last_band + 1 - start) as u32) as usize
     } else {
         0
     };
@@ -362,12 +368,12 @@ fn interpolate(
         total += dual_stereo_rsv;
         dual_stereo_rsv = 0;
     }
-    let dual_stereo = dual_stereo_rsv > 0 && decoder.bit_logp(1);
+    let dual_stereo = dual_stereo_rsv > 0 && coder.bit_logp(curves.request.dual_stereo, 1);
 
     let mut left = total - psum;
-    let per_coefficient = left.max(0) / span(coded);
-    left -= span(coded) * per_coefficient;
-    for (band, bits) in bits.iter_mut().enumerate().take(coded).skip(start) {
+    let per_coefficient = left.max(0) / span(last_band);
+    left -= span(last_band) * per_coefficient;
+    for (band, bits) in bits.iter_mut().enumerate().take(last_band).skip(start) {
         let extra = left.min(width(band));
         *bits += per_coefficient * width(band) + extra;
         left -= extra;
@@ -376,7 +382,7 @@ fn interpolate(
     let mut fine = [0u32; BAND_COUNT];
     let mut priority = [false; BAND_COUNT];
     let mut balance = 0;
-    for band in start..coded {
+    for band in start..last_band {
         let n = width(band) << lm;
         let bit = bits[band] + balance;
         let mut excess;
@@ -419,7 +425,7 @@ fn interpolate(
         }
         balance = excess;
     }
-    for band in coded..end {
+    for band in last_band..end {
         fine[band] = (bits[band] >> stereo >> BITRES) as u32;
         bits[band] = 0;
         priority[band] = fine[band] < 1;
@@ -428,7 +434,7 @@ fn interpolate(
         pulses: bits,
         fine,
         priority,
-        coded,
+        coded: last_band,
         intensity,
         dual_stereo,
         balance,

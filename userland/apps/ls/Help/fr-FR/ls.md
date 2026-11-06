@@ -18,36 +18,39 @@ tout autre opérande est listé tel quel. Sans opérande, le répertoire
 courant (`.`) est listé.
 
 Les entrées sont triées par nom (ou par taille, la plus grande en
-premier, avec `-S` ; inversées avec `-r`), un nom par ligne par
-défaut. Les entrées dont le nom commence par `.` sont masquées sauf si
-`-a` ou `-A` est donné ; quand des entrées sont masquées, une note est
-émise sur le flux d'information standard (fd 3), jamais dans la liste
-elle-même.
+premier, avec `-S` ; par horodatage, la plus récente en premier, avec
+`-t` ; par extension avec `-X` ; dans l'ordre « version » naturel avec
+`-v` ; pas du tout — ordre du répertoire — avec `-U` ; selon une clé
+choisie par nom avec `--sort` ; inversées avec `-r`).
+`--group-directories-first` fait remonter les répertoires en tête du
+tri. Quand la sortie est un terminal, elles sont disposées en colonnes
+dimensionnées à la largeur du terminal, remplies de haut en bas (`-C`) ;
+sinon (un tube ou un fichier), elles sont listées à raison d'un nom par
+ligne. `-x` remplit plutôt les colonnes de gauche à droite, `-m` les
+liste séparées par des virgules, `-1` impose un nom par ligne, et `-w`
+fixe la largeur explicitement. Les entrées dont le nom commence par `.`
+sont masquées sauf si `-a` ou `-A` est donné ; quand des entrées sont
+masquées, une note est émise sur le flux d'information standard (fd 3),
+jamais dans la liste elle-même.
 
 Le format long (`-l`) affiche le type et les bits de permission, le
-propriétaire et le groupe, la taille, puis le nom. Le propriétaire et
-le groupe sont des identifiants numériques : résoudre les noms de
-comptes exige la base d'utilisateurs protégée par capacité, qu'une
-liste ne doit pas exiger ; la sortie correspond donc au repli
-numérique de l'outil GNU (`-n` produit la même chose). Il n'y a pas de
-colonne d'horodatage affiche l'heure de modification par défaut ;
-`-c`, `-u` et `--time` choisissent laquelle des quatre marques est
-affichée (et sert au tri), et `--time-style` — ou `--full-time` —
-fixe son format. La colonne du nombre de liens indique combien
-d'entrées de répertoire nomment le fichier, telle que le système de
-fichiers lui-même l'enregistre ; un format qui n'en tient pas le compte
-répond `1`.
-
-Quand plusieurs opérandes sont donnés — et toujours sous `-R` — la liste
-de chaque répertoire est précédée d'un en-tête `chemin:`, et les blocs
-sont séparés par une ligne vide. Le chemin d'un en-tête est mis entre
-guillemets dans le style de la liste, tout `:` qu'il contient compris.
+propriétaire et le groupe, la taille, un horodatage, puis le nom. Le
+propriétaire et le groupe sont des identifiants numériques : résoudre
+les noms de comptes exige la base d'utilisateurs protégée par capacité,
+qu'une liste ne doit pas exiger ; la sortie correspond donc au repli
+numérique de l'outil GNU (`-n` produit la même chose). L'horodatage est
+par défaut l'heure de modification ; `-c`, `-u` et `--time` choisissent
+laquelle des quatre marques est affichée (et sert au tri), et
+`--time-style` — ou `--full-time` — fixe son format. La colonne du
+nombre de liens indique combien d'entrées de répertoire nomment le
+fichier, telle que le système de fichiers lui-même l'enregistre ; un
+format qui n'en tient pas le compte répond `1`.
 
 Un lien symbolique s'affiche avec la lettre de type `l` et, au format
-long, sous la forme `nom -> cible` — la cible exactement telle qu'elle est
-stockée, non résolue, c'est-à-dire ce que le lien contient. Un lien qui
-pend se liste donc normalement ; seule une posture qui le résout (`-L`, ou
-`-H` pour un opérande) signale une cible inatteignable.
+long, sous la forme `name -> target` — la cible exactement telle qu'elle
+est stockée, non résolue, c'est-à-dire ce que le lien contient. Un lien
+qui pend se liste donc normalement ; seule une posture qui le résout
+(`-L`, ou `-H` pour un opérande) signale une cible inatteignable.
 
 Les noms sont mis entre guillemets afin que les caractères gênants
 soient visibles et puissent être recollés sans risque dans un shell :
@@ -63,6 +66,20 @@ qu'il ne peut pas passer pour un suffixe indicateur. Le `-F` de GNU
 laisse un `*` non marqué, de sorte que, là, un nom qui se termine par ce
 caractère passe pour un exécutable.
 
+Sur un terminal couleur, les noms sont colorés selon leur type —
+répertoires, exécutables et fichiers simples, chacun dans le rôle du
+schéma standard — sous le contrôle de `--color`. La couleur n'est que
+présentation : elle s'ajoute au rendu sur le terminal et jamais à une
+sortie redirigée ou dans un tube ; hormis les séquences d'échappement,
+la sortie est identique octet pour octet à la liste simple, si bien que
+la couleur ne change jamais les colonnes, l'ordre ni ce que voit un
+script.
+
+Quand plusieurs opérandes sont donnés — et toujours sous `-R` — la liste
+de chaque répertoire est précédée d'un en-tête `path:`, et les blocs
+sont séparés par une ligne vide. Le chemin d'un en-tête est mis entre
+guillemets dans le style de la liste, tout `:` qu'il contient compris.
+
 ## OPTIONS
 
 - `-t` — trier par l'horodatage affiché, le plus récent en premier.
@@ -75,7 +92,9 @@ caractère passe pour un exécutable.
   termine par `~`, dans tous les modes (les sauvegardes sont masquées
   même avec `-a`).
 - `-I, --ignore=PATTERN` — ne pas lister les entrées correspondant au
-  motif glob `PATTERN` (répétable) ; s'applique dans tous les modes.
+  motif glob `PATTERN` (répétable) ; s'applique dans tous les modes. Un
+  `.` initial n'est reconnu que par un `.` du motif, jamais par un
+  caractère générique.
 - `--hide=PATTERN` — comme `--ignore`, mais sans effet lorsque `-a` ou
   `-A` est fourni.
 - `--time=WORD` — quel horodatage afficher et selon lequel trier :
@@ -94,11 +113,13 @@ caractère passe pour un exécutable.
 - `-F, --classify` — ajouter `/` aux répertoires et `*` aux
   exécutables.
 - `-g` — format long sans la colonne propriétaire ; implique `-l`.
-- `-h, --human-readable` — avec `-l`, afficher les tailles comme
-  `1.1K`, `23M` (puissances de 1024).
+- `-h, --human-readable` — afficher les tailles comme `1.1K`, `23M`
+  (puissances de 1024), pour les tailles de fichiers du format long comme
+  pour les blocs `-s`.
 - `-l` — format long : bits de permission, propriétaire, groupe,
   taille, puis nom.
-- `-m` — noms séparés par des virgules, répartis sur la largeur.
+- `-m` — noms séparés par des virgules, répartis sur la largeur de
+  sortie.
 - `-n, --numeric-uid-gid` — format long avec propriétaire et groupe
   numériques ; implique `-l`. Le propriétaire et le groupe sont
   toujours numériques ici (voir ci-dessus), donc identique à `-l`.
@@ -135,12 +156,12 @@ caractère passe pour un exécutable.
   quand aucune option de format n'en impose un autre : un lien de la ligne
   de commande *vers un répertoire* est déréférencé, donc `ls linkdir` liste
   le répertoire, tandis que tout autre lien reste un lien. `-l`, `-d` et
-  `-F` affichent au contraire chaque lien lui-même.
-- `-s, --size` — afficher la taille allouée de chaque entrée en blocs de
-  1024 octets (mise à l'échelle avec `-h`), avec une ligne `total` par
-  répertoire listé.
-- `-C` — lister en colonnes, remplies de haut en bas (par défaut sur
-  un terminal).
+  `-F` affichent au contraire par défaut chaque lien lui-même.
+- `-s, --size` — afficher la taille allouée de chaque entrée en blocs
+  (mise à l'échelle par `-h` / `--si` / `--block-size` / `-k`), avec une
+  ligne `total` par répertoire listé.
+- `-C` — lister en colonnes, remplies de haut en bas (par défaut quand
+  la sortie est un terminal).
 - `-S` — trier par taille, la plus grande en premier.
 - `-U` — ne pas trier ; lister les entrées dans l'ordre du répertoire.
 - `-X` — trier par extension de nom (le texte à partir du dernier
@@ -155,13 +176,14 @@ caractère passe pour un exécutable.
   ou `name`.
 - `--group-directories-first` — lister les répertoires avant les
   autres entrées ; les répertoires en premier même avec `-r`.
-- `-w, --width <cols>` — définir la largeur de sortie en colonnes ;
-  `0` signifie illimitée.
+- `-w, --width <cols>` — définir la largeur de sortie en colonnes ; `0`
+  signifie une longueur de ligne illimitée. Sans cette option, la largeur
+  du terminal est utilisée, ou 80 quand elle ne peut être déterminée.
 - `-x` — lister en colonnes, remplies de gauche à droite.
-- `-1` — un nom par ligne (le comportement par défaut).
+- `-1` — un nom par ligne (le comportement par défaut quand la sortie
+  n'est pas un terminal).
 - `-?` — afficher l'aide courte de cette commande (`--help` est la
   forme longue).
-
 - `--file-type` — ajouter `/` aux répertoires, mais jamais `*` aux
   exécutables (`--indicator-style=file-type`).
 - `--indicator-style=WORD` — choisir le suffixe indicateur par nom :
@@ -170,23 +192,29 @@ caractère passe pour un exécutable.
 - `-G, --no-group` — omettre la colonne de groupe du format long ;
   contrairement à `-o`, ne sélectionne pas le format long à lui seul.
 - `--author` — avec `-l`, afficher la colonne auteur (l'utilisateur
-  propriétaire) après le propriétaire et avant le groupe.
+  propriétaire, puisqu'il n'y a pas d'auteur distinct) après le
+  propriétaire et avant le groupe.
 - `--si` — comme `-h` mais en puissances de 1000 (`1.1k`, `23M`).
 - `-k, --kibibytes` — utiliser des blocs de 1024 octets pour les
-  cellules `-s` et la ligne `total` (déjà la valeur par défaut ; une
-  option de taille l'emporte).
-- `--block-size=SIZE` — mettre à l'échelle les tailles de fichiers et
-  les blocs `-s` par SIZE : un entier (octets), ou une unité
-  `K`/`M`/`G`/`T`/`P`/`E` (1024), une unité `KiB` (1024) ou une unité
-  `KB` (1000), éventuellement avec un coefficient entier.
+  cellules `-s` et le `total`. C'est déjà la valeur par défaut, donc
+  cela confirme la sortie plutôt que de la changer ; une option de
+  taille l'emporte.
+- `--block-size=SIZE` — mettre à l'échelle les tailles de fichiers du
+  format long et les blocs `-s` par SIZE : un entier simple (octets), ou
+  une unité `K`/`M`/`G`/`T`/`P`/`E` (base 1024), une unité de style
+  `KiB` (base 1024) ou une unité de style `KB` (base 1000),
+  éventuellement précédée d'un coefficient entier. Une unité seule
+  affiche son suffixe ; un coefficient le supprime. Un SIZE mal formé
+  est une erreur.
 - `--format=WORD` — choisir la disposition par nom : `long` (`-l`) ou
   `verbose`, `single-column` (`-1`), `vertical` (`-C`), `across` ou
   `horizontal` (`-x`), ou `commas` (`-m`).
 - `-T, --tabsize <cols>` — définir le pas de tabulation de la grille de
   colonnes (8 par défaut) ; `0` remplit uniquement avec des espaces.
 - `--zero` — terminer chaque ligne par NUL au lieu d'un saut de ligne ;
-  sélectionne aussi la colonne unique, la citation littérale et
-  l'affichage des caractères de contrôle.
+  sélectionne aussi, sauf indication contraire, la colonne unique, le
+  style de guillemets littéral et l'affichage des caractères de
+  contrôle.
 
 - `--color[=WHEN]` — colorer les noms selon leur type (répertoires,
   exécutables, fichiers simples). `WHEN` vaut `auto` (par défaut :
@@ -202,6 +230,9 @@ caractère passe pour un exécutable.
   masquées comprises.
 - `ls -lhS` — format long, tailles lisibles, la plus grande en
   premier.
+- `ls -v` — tri naturel, de sorte que `f2` vient avant `f10`.
+- `ls --group-directories-first` — les répertoires d'abord, puis les
+  fichiers.
 - `ls -R Documents` — parcourir `Documents` récursivement, un en-tête
   par répertoire.
 - `ls -F` — marquer les répertoires avec `/` et les exécutables avec

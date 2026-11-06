@@ -1051,8 +1051,9 @@ on its own before the next.
       `[x]`.** The `tairix-elsh` interpreter is `no_std + alloc`, but the
       freestanding userland runtime had no heap, so the shell could not link
       it. `lib/rt` now registers a `#[global_allocator]`
-      (`lib/rt/src/heap.rs`): a free-span allocator over a fixed-base virtual
-      arena that grows by `mem_map(FIXED)` and shrinks by `mem_unmap`,
+      (`lib/rt/src/heap.rs`): a free-span allocator over a virtual arena in
+      the heap region the startup vector names, which grows by
+      `mem_map(FIXED)` and shrinks by `mem_unmap`,
       first-fit with alignment-padding return + neighbour coalescing, real
       free, deterministic-OOM-to-null (`AGENTS.md` §4/§2.9), no re-zero on
       free (the kernel already zeroes on map/free, §2.16). The pure free-span

@@ -52,7 +52,7 @@ use tairix_controls::ClipboardChord;
 use tairix_cursor::{CursorRegistry, CursorTheme, CURSOR_BASE_SIDE_PX};
 use tairix_geometry::Region;
 use tairix_icon::{
-    artwork_cache, ArtworkCache, ArtworkResolver, IconArtworkSource, IconKind, IconRequest,
+    artwork_cache, ArtworkCache, ArtworkResolver, ByTurn, IconArtworkSource, IconKind, IconRequest,
     IconSet, InlineArtwork, Landed, NoArtworkSeam,
 };
 use tairix_log::{EventId, Field, FieldValue, Level, Sink};
@@ -251,12 +251,12 @@ pub struct DesktopShell {
     /// keyed by asset path and pixel side.
     artwork: ArtworkCache,
     /// How a miss in that cache becomes pixels — a read of the asset plus a
-    /// decode of it, on a worker thread where the embedder has one. Boxed
-    /// because the embedder installs its own over a starting resolver that
-    /// finds and decodes nothing, so a shell that was never given one draws
-    /// entirely from built-in glyphs rather than reaching for I/O it does not
-    /// hold.
-    artwork_resolver: Box<dyn ArtworkResolver>,
+    /// decode of it, on a worker thread where the embedder has one — asked
+    /// each listed bundle's version once a turn. The embedder installs its own
+    /// over a starting resolver that finds and decodes nothing, so a shell that
+    /// was never given one draws entirely from built-in glyphs rather than
+    /// reaching for I/O it does not hold.
+    artwork_resolver: ByTurn,
     /// What yielding the pointer left owed to the clients it took it from,
     /// until the serve loop delivers it.
     abandoned: Abandoned,
@@ -428,7 +428,9 @@ impl DesktopShell {
     /// the built-in themes with the default light theme active.
     ///
     /// The router starts with the pointer at the screen origin and no focus,
-    /// the presenter has placed no window yet, the renderer draws the
+    /// until the embedder places it where its device starts
+    /// ([`track_pointer`](Self::track_pointer)); the presenter has placed no
+    /// window yet, the renderer draws the
     /// built-in icon set until [`set_icons`](Self::set_icons) installs a loaded
     /// one, and the program library is empty until
     /// [`set_library`](Self::set_library) hands it the resolved catalog.
@@ -478,6 +480,7 @@ impl DesktopShell {
         {
             tairix_rt::cachereport::register(ledger);
         }
+        let starting = Box::new(InlineArtwork::new(NoArtworkSeam, NoArtworkSeam));
         Self {
             session: DesktopSession::new(config),
             router: SessionInputRouter::new(),
@@ -486,7 +489,7 @@ impl DesktopShell {
             tasks: TaskBridge::new(),
             cursor: CursorController::new(cursors),
             artwork,
-            artwork_resolver: Box::new(InlineArtwork::new(NoArtworkSeam, NoArtworkSeam)),
+            artwork_resolver: ByTurn::new(starting),
             abandoned: Abandoned::default(),
             wallpaper: None,
             backdrop_fade: BackdropFade::default(),
@@ -551,7 +554,13 @@ impl DesktopShell {
     /// after it is installed does the same, so no slot can blank whatever the
     /// store holds.
     pub fn set_artwork_resolver(&mut self, resolver: Box<dyn ArtworkResolver>) {
-        self.artwork_resolver = resolver;
+        self.artwork_resolver = ByTurn::new(resolver);
+    }
+
+    /// A turn of the serve loop begins: each listed bundle's version is asked
+    /// of the installed resolver once more, the first time the turn needs it.
+    pub fn begin_artwork_turn(&mut self) {
+        self.artwork_resolver.begin_turn();
     }
 
     /// The artwork cache and the resolver it produces misses through,
@@ -561,7 +570,7 @@ impl DesktopShell {
     /// are the arguments of a single resolution) and two separate borrows of
     /// the same shell cannot be held together.
     pub fn artwork_parts(&mut self) -> (&mut ArtworkCache, &mut dyn ArtworkResolver) {
-        (&mut self.artwork, self.artwork_resolver.as_mut())
+        (&mut self.artwork, &mut self.artwork_resolver)
     }
 
     /// The active theme and the artwork lookup icons are drawn through, for a
@@ -570,7 +579,17 @@ impl DesktopShell {
     pub fn theme_and_artwork(&mut self) -> (&Theme, IconArtworkSource<'_>) {
         (
             self.session.active_theme(),
-            IconArtworkSource::new(&mut self.artwork, self.artwork_resolver.as_mut()),
+            IconArtworkSource::new(&mut self.artwork, &mut self.artwork_resolver),
+        )
+    }
+
+    /// [`theme_and_artwork`](Self::theme_and_artwork) for floating chrome the
+    /// shell does not paint itself — the capture bar — drawn in the floating
+    /// theme over a blurred backdrop.
+    pub fn chrome_theme_and_artwork(&mut self) -> (&Theme, IconArtworkSource<'_>) {
+        (
+            self.session.floating_theme(),
+            IconArtworkSource::new(&mut self.artwork, &mut self.artwork_resolver),
         )
     }
 
@@ -768,6 +787,12 @@ impl DesktopShell {
         self.aids.locate(now_ns);
     }
 
+    /// Ring the pointer from `now_ns` whatever the user's aids: a press a
+    /// screen recording shows.
+    pub fn ring_pointer(&mut self, now_ns: u64) {
+        self.aids.ring(now_ns);
+    }
+
     /// Let the pointer aids take in where the pointer is at `now_ns`: on
     /// every wake.
     pub fn observe_pointer_aids(&mut self, now_ns: u64, compositor: &Compositor) {
@@ -832,6 +857,33 @@ impl DesktopShell {
         // Focus moved to the new window; keep the decorated active frame in
         // step (a no-op for this bare window, but it deactivates whatever
         // decorated window previously held focus).
+        self.follow_focus(compositor);
+        self.present(compositor);
+        Some(window)
+    }
+
+    /// Open `surface` as a top-level window at `origin` beneath the window
+    /// holding the keyboard, list it on the taskbar titled `title`, and leave
+    /// the keyboard where it is: a window the user did not ask to work in, such
+    /// as a pick whose application had not earned the front.
+    ///
+    /// Returns `None`, opening nothing, only if the task-id space is
+    /// exhausted.
+    pub fn open_window_behind(
+        &mut self,
+        compositor: &mut Compositor,
+        origin: Point,
+        surface: Surface,
+        title: impl Into<String>,
+    ) -> Option<WindowId> {
+        let front = self.router.focused();
+        let window = self.tasks.open_behind(
+            compositor,
+            self.session.taskbar_mut(),
+            (origin, front),
+            surface,
+            title,
+        )?;
         self.follow_focus(compositor);
         self.present(compositor);
         Some(window)
@@ -976,7 +1028,8 @@ impl DesktopShell {
     /// and kept wholly on screen — *without* the keyboard and off the
     /// taskbar. A floating palette is part of the window that opened it: it
     /// stacks, hides and closes with it, and takes the keyboard only when the
-    /// user presses it. Returns `None`, opening nothing, for a parent the
+    /// user presses it. A `resizable` one is resized by its edges, never
+    /// maximized. Returns `None`, opening nothing, for a parent the
     /// compositor does not know.
     pub fn open_tool_window(
         &mut self,
@@ -985,8 +1038,9 @@ impl DesktopShell {
         client: Point,
         surface: Surface,
         title: &str,
+        resizable: bool,
     ) -> Option<WindowId> {
-        let frame = WindowFrame::tool();
+        let frame = WindowFrame::tool(resizable);
         let (scale, theme) = (compositor.scale(), compositor.theme());
         let client = Rect::new(client.x, client.y, surface.width(), surface.height());
         let outer = frame
@@ -1477,11 +1531,11 @@ impl DesktopShell {
         resolve_library_icons(
             self.session.taskbar_mut(),
             compositor.scale(),
-            self.artwork_resolver.as_mut(),
+            &mut self.artwork_resolver,
             &mut self.artwork,
         );
         let parts = self.session.taskbar_mut().take_repaint();
-        let mut artwork = IconArtworkSource::new(&mut self.artwork, self.artwork_resolver.as_mut());
+        let mut artwork = IconArtworkSource::new(&mut self.artwork, &mut self.artwork_resolver);
         self.presenter.present(
             compositor,
             &mut self.renderer,
@@ -1506,7 +1560,7 @@ impl DesktopShell {
         prefetch_bar_icons(
             self.session.taskbar(),
             compositor.scale(),
-            self.artwork_resolver.as_mut(),
+            &mut self.artwork_resolver,
             &mut self.artwork,
         );
     }
@@ -1533,7 +1587,7 @@ impl DesktopShell {
             let request = IconRequest::bundle(IconKind::AppBundle, bundle);
             for side in sides {
                 self.artwork
-                    .prefetch(self.artwork_resolver.as_mut(), request, side);
+                    .prefetch(&mut self.artwork_resolver, request, side);
             }
         }
     }
@@ -1563,8 +1617,39 @@ impl DesktopShell {
     ) {
         let layout = self.desktop_layout(compositor, desktop);
         let theme = self.session.active_theme();
-        let (artwork, resolver) = (&mut self.artwork, self.artwork_resolver.as_mut());
+        let (artwork, resolver): (_, &mut dyn ArtworkResolver) =
+            (&mut self.artwork, &mut self.artwork_resolver);
         desktop.want_shown_artwork(&layout, compositor.scale(), theme, |request, side| {
+            artwork.prefetch(resolver, request, side);
+        });
+    }
+
+    /// Ask for the picture of every card a carried drag shows, as
+    /// [`want_desktop_artwork`](Self::want_desktop_artwork) asks for the
+    /// desktop's: a RISC OS application's sprite is produced among the
+    /// thumbnails a sweep withdraws when nothing asked for them.
+    pub fn want_drag_artwork(&mut self, compositor: &Compositor) {
+        let theme = self.session.active_theme();
+        let (artwork, resolver): (_, &mut dyn ArtworkResolver) =
+            (&mut self.artwork, &mut self.artwork_resolver);
+        self.drag
+            .each_picture((compositor.scale(), theme), |request, side| {
+                artwork.prefetch(resolver, request, side);
+            });
+    }
+
+    /// Ask for the picture of every slot `shown` names, drawing nothing: what
+    /// a surface the shell does not paint itself, a picker, asks before a
+    /// sweep, as [`want_desktop_artwork`](Self::want_desktop_artwork) asks
+    /// for the desktop's. `shown` lays its slots out in the theme it is handed.
+    pub fn want_artwork(
+        &mut self,
+        shown: impl FnOnce(&Theme, &mut dyn FnMut(IconRequest<'_>, u32)),
+    ) {
+        let theme = self.session.active_theme();
+        let (artwork, resolver): (_, &mut dyn ArtworkResolver) =
+            (&mut self.artwork, &mut self.artwork_resolver);
+        shown(theme, &mut |request, side| {
             artwork.prefetch(resolver, request, side);
         });
     }
@@ -1693,8 +1778,8 @@ impl DesktopShell {
     ///
     /// This is the ordinary path, and [`present_desktop`](Self::present_desktop)
     /// is the whole-screen case of it: the desktop's own gestures report the
-    /// icon cells they changed, so taking the hover, moving a selection, or
-    /// gaining and losing the keyboard costs those cells. Repainting the layer
+    /// icon cells they changed, so moving a selection or gaining and losing
+    /// the keyboard costs those cells. Repainting the layer
     /// whole for a highlight would recomposite every window above it and blur
     /// every frosted backdrop over it again, which is why the model reports
     /// cells rather than a flag.
@@ -1707,8 +1792,8 @@ impl DesktopShell {
     /// backdrop in the margins it does not cover, rather than whatever the
     /// previous frame happened to leave there. Mid-crossfade the ground is the
     /// mix of the two grounds, laid down by the one ground routine every
-    /// rectangle paints through, so a rectangle repainted for a hover during a
-    /// fade still comes out the same as its neighbours.
+    /// rectangle paints through, so a rectangle repainted for a selection
+    /// during a fade still comes out the same as its neighbours.
     pub fn present_desktop_area<S: DirectorySource>(
         &mut self,
         compositor: &mut Compositor,
@@ -1724,7 +1809,7 @@ impl DesktopShell {
         let ground = wallpaper.is_none().then_some(backdrop);
         let fade = &self.backdrop_fade;
         let cache = &mut self.artwork;
-        let resolver = self.artwork_resolver.as_mut();
+        let resolver: &mut dyn ArtworkResolver = &mut self.artwork_resolver;
         compositor.repaint_desktop(area, |surface, rects| {
             let mut artwork = IconArtworkSource::new(cache, resolver);
             for rect in rects {
@@ -1742,6 +1827,24 @@ impl DesktopShell {
                 });
             }
         });
+    }
+
+    /// Whether every icon `desktop` shows is drawn as it will stay: none waits
+    /// on a picture still being produced.
+    pub fn desktop_drawn_as_kept<S: DirectorySource>(
+        &mut self,
+        compositor: &Compositor,
+        desktop: &Desktop<S>,
+    ) -> bool {
+        let layout = self.desktop_layout(compositor, desktop);
+        let theme = self.session.active_theme();
+        let cache = &self.artwork;
+        let resolver: &mut dyn ArtworkResolver = &mut self.artwork_resolver;
+        let mut kept = true;
+        desktop.want_shown_artwork(&layout, compositor.scale(), theme, |request, side| {
+            kept = kept && cache.settled(resolver, request, side);
+        });
+        kept
     }
 
     /// The colour the desktop layer shows wherever the wallpaper does not
@@ -1811,12 +1914,7 @@ impl DesktopShell {
         // A candidate row's own application icon is resolved before the
         // paint, so the row that asked for it is drawn with it in the same
         // frame — and the paint itself reads nothing.
-        resolve_chain_icons(
-            chain,
-            &geom,
-            self.artwork_resolver.as_mut(),
-            &mut self.artwork,
-        );
+        resolve_chain_icons(chain, &geom, &mut self.artwork_resolver, &mut self.artwork);
         // Every chain surface lays its own rounded plate, so the compositor
         // takes that shape as it is rather than cutting the corners again.
         let corners =
@@ -2395,6 +2493,20 @@ impl DesktopShell {
             self.present(compositor);
         }
         Ok(sound)
+    }
+
+    /// Show the screen-recording indicator while the desktop records the
+    /// screen and take it down after, re-presenting the bar only when that
+    /// moved its pixels.
+    pub fn set_screen_recording(&mut self, compositor: &mut Compositor, recording: bool) {
+        let scale = compositor.scale();
+        if self
+            .session
+            .taskbar_mut()
+            .set_screen_recording(recording, scale)
+        {
+            self.present(compositor);
+        }
     }
 
     /// Show what the audio service reports on the bar, re-presenting it only
@@ -3028,10 +3140,11 @@ impl DesktopShell {
         abandoned
     }
 
-    /// Follow the device to `to` while the stream is
-    /// [yielded](Self::yield_pointer) — the seat's position and the cursor's
-    /// hotspot both, and nothing else — so the pointer is where the device
-    /// put it when the stream comes back.
+    /// Follow the device to `to` without routing a motion — the seat's
+    /// position and the cursor's hotspot both, and nothing else — wherever the
+    /// device's own position moves with no event: at bring-up, on a screen
+    /// change, and while the stream is [yielded](Self::yield_pointer), so the
+    /// pointer is where the device put it when the stream comes back.
     pub fn track_pointer(&mut self, to: Point, compositor: &mut Compositor) {
         self.router.track_pointer(to);
         let _ = compositor.move_cursor(to);
@@ -3448,7 +3561,7 @@ const CHAIN_ORIGIN: Point = Point::new(0, 0);
 
 /// A screen rectangle as the region a tip is declared over, or `None` when it
 /// is not a representable one.
-fn tip_region(rect: Rect) -> Option<WindowRegion> {
+pub(crate) fn tip_region(rect: Rect) -> Option<WindowRegion> {
     WindowRegion::new(rect.left(), rect.top(), rect.width, rect.height).ok()
 }
 

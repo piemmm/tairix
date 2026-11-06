@@ -47,6 +47,38 @@ const SYSTEM_DIR: Security = Security::created(NodeKind::Directory, 0, 0);
 /// The record of a file the fixture plants for the system.
 const SYSTEM_FILE: Security = Security::created(NodeKind::RegularFile, 0, 0);
 
+/// The record of a file the fixture plants among the account's own: owned by
+/// the account and readable, as the owner-only home leaves it to the account
+/// alone.
+const HOME_FILE: Security = Security::new(
+    0o644,
+    tairix_users::FIRST_USER_UID,
+    tairix_users::FIRST_USER_GID,
+);
+
+/// Who a document planted on the root volume belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlantOwner {
+    /// The system's, as a file the image ships is; one planted in a
+    /// service's `/System/Settings` directory is that service's.
+    System,
+    /// The fixture account's, as one it wrote itself is. Planted only in the
+    /// account's home.
+    Account,
+}
+
+/// A document planted on the root volume.
+#[derive(Clone, Copy, Debug)]
+pub struct RootFile<'a> {
+    /// Its path from the volume root; every intermediate directory is
+    /// created.
+    pub components: &'a [&'a [u8]],
+    /// Its bytes.
+    pub bytes: &'a [u8],
+    /// Who owns it.
+    pub owner: PlantOwner,
+}
+
 /// Logical block (sector) size of the produced image, in bytes. Matches
 /// both the 512-byte sector QEMU's virtio-blk reports by default and the
 /// arxfs minimum block size, so the volume the driver formats here maps
@@ -263,7 +295,8 @@ impl Block for VecBlock {
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(BlockGeometry {
             block_size: u32::try_from(SECTOR_BYTES).unwrap_or(0),
-            block_count: TOTAL_SECTORS,
+            block_count: u64::try_from(self.store.len() / SECTOR_BYTES)
+                .map_err(|_| DriverError::LengthOutOfRange)?,
         })
     }
 
@@ -328,7 +361,7 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
 /// [`DriverError::Unsupported`] (a programming error in this fixture,
 /// surfaced rather than panicked).
 pub fn build_users_root_image() -> Result<Vec<u8>, DriverError> {
-    build_users_root_image_keyed(FIXTURE_KEYING, &[])
+    build_users_root_image_keyed(FIXTURE_KEYING, &[], TOTAL_SECTORS)
 }
 
 /// A shape refusal as the driver error this fixture reports.
@@ -353,12 +386,7 @@ fn plant_home_file(
     name: &[u8],
     content: &[u8],
 ) -> Result<(), DriverError> {
-    let record = Security::new(
-        0o644,
-        tairix_users::FIRST_USER_UID,
-        tairix_users::FIRST_USER_GID,
-    );
-    let node = fs.create(dir, name, NodeKind::RegularFile, &record)?;
+    let node = fs.create(dir, name, NodeKind::RegularFile, &HOME_FILE)?;
     if fs.write_at(node, 0, content)? != content.len() {
         return Err(DriverError::DeviceFault);
     }
@@ -373,27 +401,29 @@ fn plant_home_file(
 /// [`build_users_root_image`] delegates here with [`FIXTURE_KEYING`] (one
 /// authoring path).
 ///
-/// `root_files` are extra documents planted on this volume, each
-/// `(path_components, bytes)` relative to the volume root with every
-/// intermediate directory created ([`plant_nested_file`]) — how a vertical
+/// `root_files` are extra documents planted on this volume, each owned as
+/// its [`RootFile`] says, with every intermediate directory created
+/// ([`plant_nested_file`]) — how a vertical
 /// lays root-volume state the writable `/System/Settings` child mount
 /// rebases onto (e.g. the seeded program-library catalog,
 /// `plans/NEW-TASKBAR.md` T3), exactly where `tools/mkimage` writes it on
-/// a shipped image.
+/// a shipped image. The volume is `sectors` long: [`TOTAL_SECTORS`] for a
+/// vertical whose files are a few small documents.
 ///
 /// # Errors
 ///
 /// Propagates any [`DriverError`] from the driver; a fixture users
-/// database that violates the `users-v1` bounds surfaces as
-/// [`DriverError::Unsupported`] (a programming error in this fixture,
-/// surfaced rather than panicked).
+/// database that violates the `users-v1` bounds, or an account's file
+/// planted outside its home, surfaces as [`DriverError::Unsupported`] (a
+/// programming error in this fixture, surfaced rather than panicked).
 pub fn build_users_root_image_keyed(
     keying: Keying<'_>,
-    root_files: &[(&[&[u8]], &[u8])],
+    root_files: &[RootFile<'_>],
+    sectors: u64,
 ) -> Result<Vec<u8>, DriverError> {
     let text = users_db_text().map_err(|_| DriverError::Unsupported)?;
     let groups_text = groups_db_text().map_err(|_| DriverError::Unsupported)?;
-    let dev = VecBlock::new(TOTAL_SECTORS);
+    let dev = VecBlock::new(sectors);
     let mut fs = ARXFS::format(dev, INODE_COUNT, keying, &mut FixtureEntropy { next: 1 })?;
     let root = fs.root();
     for name in tairix_abi::stored_root_entries() {
@@ -451,9 +481,12 @@ pub fn build_users_root_image_keyed(
             }
         }
     }
-    for (components, bytes) in root_files {
-        plant_nested_file(&mut fs, root, components, bytes)?;
-        own_settings_document(&mut fs, root, components)?;
+    for file in root_files {
+        plant_nested_file(&mut fs, root, file.components, file.bytes)?;
+        match file.owner {
+            PlantOwner::System => own_settings_document(&mut fs, root, file.components)?,
+            PlantOwner::Account => own_home_document(&mut fs, root, file.components)?,
+        }
     }
     fs.flush()?;
     Ok(fs.into_block()?.into_bytes())
@@ -485,6 +518,32 @@ fn own_settings_document(
     fs.set_security(node, owned.document_security())
 }
 
+/// Give a document planted in the fixture account's home to the account, as
+/// it would own one it wrote itself.
+///
+/// # Errors
+///
+/// [`DriverError::Unsupported`] for a path outside that home.
+fn own_home_document(
+    fs: &mut ARXFS<VecBlock>,
+    root: NodeId,
+    components: &[&[u8]],
+) -> Result<(), DriverError> {
+    let [users, account, _, ..] = components else {
+        return Err(DriverError::Unsupported);
+    };
+    if *users != tairix_abi::home::USERS_DIR.as_bytes()
+        || *account != USERS_FIXTURE_USERNAME.as_bytes()
+    {
+        return Err(DriverError::Unsupported);
+    }
+    let mut node = root;
+    for part in components {
+        node = fs.lookup(node, part)?;
+    }
+    fs.set_security(node, HOME_FILE)
+}
+
 /// Re-export of the single store-planting helper. The
 /// definition lives in the arxfs driver (`tairix_drv_fs_arxfs`) so the
 /// image builder (`tools/mkimage`) and these fixtures share one routine that
@@ -514,9 +573,13 @@ mod tests {
         use tairix_abi::driver_store::SystemConfigFile;
 
         let components: [&[u8]; 4] = [b"System", b"Settings", b"Configuration", b"system.conf"];
-        let bytes =
-            build_users_root_image_keyed(FIXTURE_KEYING, &[(&components, b"time.network off\n")])
-                .expect("the image builds");
+        let planted = RootFile {
+            components: &components,
+            bytes: b"time.network off\n",
+            owner: PlantOwner::System,
+        };
+        let bytes = build_users_root_image_keyed(FIXTURE_KEYING, &[planted], TOTAL_SECTORS)
+            .expect("the image builds");
         let mut fs = ARXFS::open(VecBlock { store: bytes }, FIXTURE_KEYING).expect("mounts");
         let mut node = fs.root();
         for component in components {
@@ -578,6 +641,60 @@ mod tests {
 
     impl tairix_log::Sink for DiscardSink {
         fn write_event(&self, _event: &tairix_log::Event<'_>) {}
+    }
+
+    /// A planted document is owned as its plant says, wherever it lies.
+    /// Regression: every document under the account's home was given to the
+    /// account, so a system original planted there for it only to read took
+    /// its writes.
+    #[test]
+    fn a_planted_document_is_owned_as_its_plant_says() {
+        use tairix_abi::driver::filesystem::FilesystemSecurity;
+
+        let left: &[&[u8]] = &[b"Users", b"root", b"Desktop", b".keeping.png"];
+        let original: &[&[u8]] = &[b"Users", b"root", b"Home", b"Disks", b"floppy.adf"];
+        let shared: &[&[u8]] = &[b"Users", b"Shared.txt"];
+        let plant = |components, owner| RootFile {
+            components,
+            bytes: b"x",
+            owner,
+        };
+        let planted = [
+            plant(left, PlantOwner::Account),
+            plant(original, PlantOwner::System),
+            plant(shared, PlantOwner::System),
+        ];
+        let bytes = build_users_root_image_keyed(FIXTURE_KEYING, &planted, TOTAL_SECTORS)
+            .expect("users-root image builds");
+        let mut fs = ARXFS::open(VecBlock { store: bytes }, FIXTURE_KEYING).expect("a volume");
+        let walk = |fs: &mut ARXFS<VecBlock>, path: &[&[u8]]| {
+            let mut node = fs.root();
+            for part in path {
+                node = fs.lookup(node, part).expect("planted");
+            }
+            fs.security(node).expect("security present")
+        };
+        let sec = walk(&mut fs, left);
+        assert_eq!(
+            (sec.mode, sec.uid, sec.gid),
+            (
+                0o644,
+                tairix_users::FIRST_USER_UID,
+                tairix_users::FIRST_USER_GID
+            )
+        );
+        assert_eq!(walk(&mut fs, original).uid, 0, "the system's, in a home");
+        assert_eq!(walk(&mut fs, shared).uid, 0, "the system's, outside a home");
+        assert_eq!(
+            build_users_root_image_keyed(
+                FIXTURE_KEYING,
+                &[plant(shared, PlantOwner::Account)],
+                TOTAL_SECTORS
+            )
+            .err(),
+            Some(DriverError::Unsupported),
+            "an account's file outside its home"
+        );
     }
 
     #[test]

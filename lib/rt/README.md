@@ -73,8 +73,11 @@ reusing its own freed bytes is not a security boundary (`AGENTS.md` §2.16).
 arena byte has been handed out since its page was mapped, so a large zeroed
 buffer costs the pages its writer touches, the kernel backing each on first
 touch, rather than its length. The
-arena and metadata bases are fixed virtual addresses documented in
-`src/heap.rs`.
+heap grows only in the heap region the kernel names in the startup vector,
+which no window or mapping of the process's layout holds: `_start` places it
+there before `main`, the free-span table taking the region's first sixteenth
+and the arena the rest, and an allocation made before then, or one past the
+region, is refused.
 
 ### Retained top pages
 

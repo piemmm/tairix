@@ -329,6 +329,9 @@ pub enum Errno {
     /// [`OutOfMemory`](Self::OutOfMemory) (a genuine allocation failure): the
     /// system is healthy, this principal has simply reached its accounted
     /// ceiling and must release before it may allocate more (fail closed).
+    /// `volume_attach` answers it for a volume whose identity
+    /// [`VOLUME_TWINS_MAX`](crate::volume::VOLUME_TWINS_MAX) attached volumes
+    /// carry already.
     LimitExceeded = 38,
     /// The medium reported a permanent, unrecoverable read/write error.
     ///
@@ -365,9 +368,10 @@ pub enum Errno {
     /// user's next settings gesture displaced it, because that document is not
     /// going to be published and saying so beats leaving the caller parked.
     ///
-    /// `volume_attach` answers this for a volume that is attached already, its
-    /// identity published under another name: unlike a taken catalog name
-    /// ([`AlreadyExists`](Self::AlreadyExists)), no other name would help.
+    /// `volume_attach` answers this for a medium attached already — an extent
+    /// meeting one a volume is served over on the same device — and for a
+    /// re-insert whose volume another operation holds: unlike a taken catalog
+    /// name ([`AlreadyExists`](Self::AlreadyExists)), no other name would help.
     Busy = 41,
     /// A path could not be resolved because it traverses too many symbolic
     /// links, or because a link was found where the caller forbade one.

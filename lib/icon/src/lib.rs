@@ -65,6 +65,7 @@ pub mod store;
 pub mod svg;
 mod symbol;
 pub mod thumbnail;
+pub mod turn;
 pub mod vector;
 
 #[cfg(test)]
@@ -72,15 +73,19 @@ mod tests;
 
 pub use account::{monogram_disc, monogram_of, FALLBACK_MONOGRAM};
 pub use artwork::{
-    artwork_cache, artwork_kind_for_file, builtin_picture, glyph_mask, icon_artwork_path,
-    icon_vector_path, render_artwork, ArtworkCache, ArtworkKey, ArtworkOutcome, ArtworkRasteriser,
-    ArtworkReader, ArtworkResolver, IconArtwork, IconArtworkSource, IconRequest, InlineArtwork,
-    NoArtwork, NoArtworkSeam, Resolved, ARTWORK_ENTRY_METADATA_BYTES, GRAPHICS_DIR, ICONS_DIR,
-    MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE, MIN_ARTWORK_SIDE,
+    artwork_cache, artwork_kind_for_file, builtin_picture, bundle_icon_path, glyph_mask,
+    icon_artwork_path, icon_vector_path, render_artwork, ArtworkCache, ArtworkKey, ArtworkOutcome,
+    ArtworkRasteriser, ArtworkReader, ArtworkResolver, BundleFiles, BundleVersion, IconArtwork,
+    IconArtworkSource, IconRequest, InlineArtwork, ListedBundle, NoArtwork, NoArtworkSeam,
+    Resolved, ARTWORK_ENTRY_METADATA_BYTES, GRAPHICS_DIR, ICONS_DIR, MAX_ARTWORK_BYTES,
+    MAX_ARTWORK_SIDE, MIN_ARTWORK_SIDE,
 };
 pub use badge::{badge, BadgeHue, PlateShape};
 pub use command::menu_symbol_icon;
-pub use desk::{ArtworkDesk, ArtworkJob, Delivered, Landed};
+pub use desk::{
+    ArtworkDesk, ArtworkJob, Delivered, Landed, Produced, MAX_FOLLOWED_BUNDLES,
+    MAX_LISTED_BUNDLE_DIRS, MAX_LISTED_VERSIONS,
+};
 pub use folder::{DrawnCard, FolderSample, SampleCard};
 pub use glyph::{builtin_icon, disk_icon, IconKind};
 pub use load::{IconAssetSource, IconSet, ICON_KINDS};
@@ -90,5 +95,6 @@ pub use store::{serve_thumbnail, StoreAccess, StoreFile, StoreKey, ThumbnailStor
 pub use svg::decode as decode_svg;
 #[cfg(feature = "rt")]
 pub use thumbnail::RtDocument;
-pub use thumbnail::{ArtworkDocument, DocumentStamp, Thumbnail, MAX_THUMBNAIL_BYTES};
+pub use thumbnail::{ArtworkDocument, Thumbnail, MAX_THUMBNAIL_BYTES};
+pub use turn::ByTurn;
 pub use vector::{IconLayer, VectorIcon};

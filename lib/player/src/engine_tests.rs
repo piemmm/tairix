@@ -16,12 +16,14 @@ use tairix_audio::stream::{OpenFailure, Written};
 use tairix_hash::HashSeed;
 use tairix_log::DiscardSink;
 use tairix_sandbox::audiodecode::AudioDecodeService;
-use tairix_sandbox::loopback::LoopbackSessionLauncher;
+use tairix_sandbox::loopback::{LoopbackSessionLauncher, PipeSessionLauncher};
 use tairix_sandbox::session::{FrameOut, SessionService, SessionStep};
+use tairix_sandbox::supervise::SessionLauncher;
 use tairix_test_audio_wire as wire;
 
 use super::{
-    Control, Engine, Failure, FileRefusal, Files, Note, Outcome, Settings, Skip, Speaker, Transport,
+    fetch, Control, Engine, Failure, FileRefusal, Files, Note, Outcome, Settings, Skip, Speaker,
+    Transport, Unfetched,
 };
 use crate::programme::{Advance, EntryId, Extent, List, Passes, Programme};
 use crate::Span;
@@ -334,7 +336,11 @@ impl Speaker for FakeSpeaker {
     }
 }
 
-type TestEngine<P, F> = Engine<P, LoopbackSessionLauncher<F>, DiscardSink, MemFiles, FakeSpeaker>;
+/// An engine whose decoders `L` starts, over the in-memory files and the fake
+/// service.
+type EngineOver<P, L> = Engine<P, L, DiscardSink, MemFiles, FakeSpeaker>;
+
+type TestEngine<P, F> = EngineOver<P, LoopbackSessionLauncher<F>>;
 
 /// An engine and the fake service it plays into.
 type Harness<P, F> = (TestEngine<P, F>, Rc<RefCell<Service>>);
@@ -396,11 +402,27 @@ fn engine_playing<P: Programme<Item = str>, F: FnMut() -> S, S: SessionService>(
     files: MemFiles,
     factory: F,
 ) -> Harness<P, F> {
+    engine_launching(
+        programme,
+        settings,
+        files,
+        LoopbackSessionLauncher::new(factory),
+    )
+}
+
+/// An engine whose decoders `launcher` starts, and the fake service it plays
+/// into.
+fn engine_launching<P: Programme<Item = str>, L: SessionLauncher>(
+    programme: P,
+    settings: Settings,
+    files: MemFiles,
+    launcher: L,
+) -> (EngineOver<P, L>, Rc<RefCell<Service>>) {
     let service = Service::new();
     let engine = Engine::new(
         programme,
         settings,
-        LoopbackSessionLauncher::new(factory),
+        launcher,
         DiscardSink,
         files,
         FakeSpeaker(Rc::clone(&service)),
@@ -415,14 +437,28 @@ fn engine_playing<P: Programme<Item = str>, F: FnMut() -> S, S: SessionService>(
 fn run<P: Programme<Item = str>, F: FnMut() -> S, S: SessionService>(
     engine: &mut TestEngine<P, F>,
     service: &Rc<RefCell<Service>>,
+    now: u64,
+    done: impl FnMut(&TestEngine<P, F>, &Service) -> bool,
+) -> u64 {
+    run_ready(engine, service, now, done, |_, _| (true, true))
+}
+
+/// As [`run`], the decoder's pipes reported as `ready` says of the directions
+/// the engine watches.
+fn run_ready<P: Programme<Item = str>, L: SessionLauncher>(
+    engine: &mut EngineOver<P, L>,
+    service: &Rc<RefCell<Service>>,
     mut now: u64,
-    mut done: impl FnMut(&TestEngine<P, F>, &Service) -> bool,
+    mut done: impl FnMut(&EngineOver<P, L>, &Service) -> bool,
+    ready: impl Fn(bool, bool) -> (bool, bool),
 ) -> u64 {
     for _ in 0..200_000 {
         if engine.outcome().is_some() || done(engine, &service.borrow()) {
             return now;
         }
-        engine.on_decoder(now, true, true);
+        let (_, read, write) = engine.decoder_members();
+        let (readable, writable) = ready(read, write);
+        engine.on_decoder(now, readable, writable);
         service.borrow_mut().period();
         engine.on_notify(now);
         now += STEP_NS;
@@ -1376,6 +1412,61 @@ fn a_jump_after_playback_has_ended_begins_a_new_one() {
     assert_eq!(last.gains, vec![quieter]);
 }
 
+/// A player begun with nothing to play starts on the jump that follows the
+/// first file it is given: a decoder holding no file takes a request as one
+/// holding a file and idle does. The decoder's pipes are reported only as a
+/// host's wait-set reports them.
+#[test]
+fn a_player_begun_with_nothing_plays_the_file_it_is_given_and_jumped_to() {
+    let launcher = PipeSessionLauncher::new(AudioDecodeService::new as RealDecoder);
+    let pipes = launcher.gauge();
+    let files = MemFiles::of(&[("a.wav", counting_wav(8_000, 2, 4_000))]);
+    let (mut engine, service) =
+        engine_launching(Shelf::of(&[]), Settings::default(), files, launcher);
+    engine.begin(0);
+    assert_eq!(engine.outcome(), Some(Outcome::Played), "nothing to play");
+    let added = engine.edit(0, |shelf| shelf.push("a.wav"));
+    engine.on_control(0, Control::Jump(added));
+    assert_eq!(engine.outcome(), None);
+    let ready = |read: bool, write: bool| (read && pipes.readable(), write);
+    run_ready(&mut engine, &service, 0, |_, _| false, ready);
+    assert_eq!(engine.outcome(), Some(Outcome::Played));
+    assert_eq!(
+        spelled_frames(&heard(&service)),
+        (0..4_000).collect::<Vec<u32>>()
+    );
+    assert_eq!(pipes.parked(), 0, "no read of an empty pipe");
+}
+
+/// A refused file leaves the decoder holding none, which takes the next
+/// request: a jump once playback ended on a refusal plays.
+#[test]
+fn a_jump_after_the_last_file_was_refused_plays() {
+    let file = counting_wav(8_000, 2, 4_000);
+    let (mut engine, service) = engine(
+        ask(&["a.wav", "notes.txt"]),
+        &[
+            ("a.wav", file.clone()),
+            ("notes.txt", b"not a sound at all, only words".to_vec()),
+        ],
+    );
+    engine.begin(0);
+    let now = run(&mut engine, &service, 0, |_, _| false);
+    assert_eq!(engine.outcome(), Some(Outcome::Played));
+    assert!(engine.take_notes().iter().any(|note| matches!(
+        note,
+        Note::Skipped {
+            why: Skip::Refused(_),
+            ..
+        }
+    )));
+    engine.on_control(now, Control::Jump(FIRST));
+    assert_eq!(engine.outcome(), None);
+    run(&mut engine, &service, now, |_, _| false);
+    assert_eq!(engine.outcome(), Some(Outcome::Played));
+    assert_eq!(heard(&service), [pcm_of(&file), pcm_of(&file)].concat());
+}
+
 /// The signal as a FLAC file carrying `fields` as its Vorbis comments.
 fn tagged_signal(fields: &[&str]) -> Vec<u8> {
     use tairix_sound::flac_encode::{encode, Options, Params};
@@ -1590,4 +1681,40 @@ fn a_seek_past_a_link_s_end_goes_on_into_the_next() {
         Some(100_000 + heard_at + 80_000 - 40_000)
     );
     assert_eq!(engine.status().link, 1);
+}
+
+/// A decoder's need is read whole into a buffer kept from one need to the
+/// next and grown to hold it, and one that cannot be read says why: a file
+/// short of it, or a read refused.
+#[test]
+fn a_need_is_read_whole_or_says_why_not() {
+    let file = [1u8, 2, 3, 4, 5];
+    let mut read = |offset: u64, buf: &mut [u8]| -> Result<usize, Errno> {
+        let start = usize::try_from(offset).unwrap_or(usize::MAX);
+        let held = file.get(start..).unwrap_or(&[]);
+        let take = held.len().min(buf.len());
+        buf[..take].copy_from_slice(&held[..take]);
+        Ok(take)
+    };
+    let mut buffer = Vec::new();
+    assert_eq!(fetch(&mut buffer, &mut read, 1, 3), Ok(&[2u8, 3, 4][..]));
+    assert_eq!(buffer.len(), 3, "grown to hold the need");
+    let kept = (buffer.as_ptr(), buffer.capacity());
+    assert_eq!(fetch(&mut buffer, &mut read, 0, 2), Ok(&[1u8, 2][..]));
+    assert_eq!(
+        (buffer.as_ptr(), buffer.capacity()),
+        kept,
+        "kept for a smaller need"
+    );
+    assert_eq!(
+        fetch(&mut buffer, &mut read, 0, 5),
+        Ok(&[1u8, 2, 3, 4, 5][..])
+    );
+    assert_eq!(buffer.len(), 5, "grown for a larger one");
+    assert_eq!(fetch(&mut buffer, &mut read, 3, 4), Err(Unfetched::Short));
+    let mut refusing = |_: u64, _: &mut [u8]| Err::<usize, Errno>(Errno::DeviceFault);
+    assert_eq!(
+        fetch(&mut buffer, &mut refusing, 0, 2),
+        Err(Unfetched::Refused(Errno::DeviceFault))
+    );
 }

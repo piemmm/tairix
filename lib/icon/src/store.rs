@@ -13,12 +13,12 @@
 //! one way at once — reads as an empty way; a header for another side or
 //! version reformats the blob.
 
-use tairix_abi::fs::FileId;
+use tairix_abi::fs::{DocumentStamp, FileId};
 use tairix_geometry::Rect;
 use tairix_hash::FastHash;
 
 use crate::picture::Fitted;
-use crate::thumbnail::{ArtworkDocument, DocumentStamp};
+use crate::thumbnail::ArtworkDocument;
 
 /// Positioned I/O on the blob the store lives in.
 pub trait StoreFile {

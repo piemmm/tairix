@@ -779,8 +779,7 @@ fn parse_lvd(sector: &[u8]) -> Result<Option<LogicalVolume>, DriverError> {
     ) else {
         return Ok(None);
     };
-    let maps = tairix_util::fallible::collected(table.len(), table.iter().copied())
-        .ok_or(DriverError::OutOfMemory)?;
+    let maps = tairix_util::fallible::copied(table).ok_or(DriverError::OutOfMemory)?;
     Ok(Some(LogicalVolume {
         block_size,
         revision: if names_domain {

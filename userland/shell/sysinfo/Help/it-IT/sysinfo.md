@@ -36,10 +36,6 @@ Le interrogazioni:
   `CAP_SYSINFO_KERNEL`).
 - `cpu` — profondità della coda, cambi di contesto e prelazioni per CPU
   (richiede `CAP_SYSINFO_KERNEL`).
-- `irq`, `irqs` — la tabella IRQ del kernel: una riga per ogni linea di
-  interrupt associata — il suo id, il task del driver proprietario, il
-  numero di interrupt dall'avvio e se la linea è in quarantena (richiede
-  `CAP_SYSINFO_HW`).
 - `cpuinfo` — il rapporto sul processore per CPU (un soprainsieme di
   `/proc/cpuinfo`): modello/produttore, classe di prestazioni, flag delle
   estensioni ISA, il registro di identità grezzo, la frequenza di clock
@@ -47,14 +43,47 @@ Le interrogazioni:
   esiste alcun contatore di clock del core) e la frequenza fissa di
   riferimento o base tempi. Dati pubblici sull'hardware, nessuna
   capacità richiesta.
-- `storage`, `io` — la salute dell'I/O di archiviazione per volume: una
-  riga per ogni volume a blocchi consapevole dei guasti — un prefisso del
-  suo identificatore durevole, l'endpoint del servizio a blocchi che lo
-  serve, la sua disponibilità corrente
+- `irq`, `irqs` — la tabella IRQ del kernel: una riga per ogni linea di
+  interrupt associata — il suo id, il task del driver proprietario, il
+  numero di interrupt dall'avvio e se la linea è in quarantena (richiede
+  `CAP_SYSINFO_HW`).
+- `frames` — quanto sono costati i fotogrammi composti di ogni sessione
+  desktop: una riga per ogni sessione che pubblica — i pixel che i suoi
+  fotogrammi hanno ricomposto e la media per fotogramma, il multiplo di
+  sovradisegno (contributi di livello per pixel danneggiato), la quota
+  risolta copiando un tratto opaco, i pixel che uno sfondo in vetro
+  smerigliato ricalcolato ha sfocato di nuovo, i pixel convertiti per lo
+  scan-out, il fotogramma singolo peggiore e la sua quota dello schermo,
+  le chiamate al driver che li hanno presentati, e gli hit e i miss della
+  cache delle decorazioni delle finestre. Sono le cifre del desktop stesso
+  — solo un processo che detiene un compositore può contare i pixel —
+  quindi ogni riga nomina chi l'ha pubblicata, come attestato dal
+  servizio, e una sessione che non ha pubblicato nulla non produce alcuna
+  riga (richiede `CAP_SYSINFO_GLOBAL`).
+- `storage`, `io` — tre tabelle per volume, in ciascuna una riga per ogni
+  volume a blocchi consapevole dei guasti, contrassegnata da un prefisso
+  dell'identificatore durevole del volume e con il nome del dispositivo
+  che lo serve. Quell'identità è l'endpoint del servizio a blocchi che lo
+  serve quando un driver in spazio utente serve il dispositivo, e
+  un'identità riservata gestita dal kernel quando è il kernel stesso a
+  gestirlo — il disco da cui la macchina si è avviata, che non ha alcun
+  endpoint di servizio. **Servizio** nomina inoltre il dispositivo: il
+  nome breve dichiarato dal suo driver (`virtio-blk`, `emmc2`,
+  `usb-msd`), oppure `-` se non ne dichiara alcuno. Riporta i byte
+  cumulativi, le richieste completate e il tempo di occupazione del
+  dispositivo, da cui un lettore ricava per differenza throughput, IOPS,
+  utilizzo e attesa — nulla è precalcolato, quindi due lettori non
+  ereditano mai la stessa finestra di media (nessuna capacità
+  richiesta). **Coda** riporta ciò che è in sospeso adesso, gli
+  accumulatori da cui per differenza si ricava una profondità media, e la
+  profondità e la scadenza consentite dalla classe del dispositivo.
+  **Salute** riporta la disponibilità corrente del volume
   (available/degraded/recovering/lost) e i contatori cumulativi degli
   esiti (completamenti, reset, timeout, errori del supporto, riemissioni)
-  su cui un disco guasto o instabile diventa visibile (richiede
-  `CAP_SYSINFO_KERNEL`).
+  su cui un disco guasto o instabile diventa visibile. Le ultime due
+  richiedono `CAP_SYSINFO_KERNEL`; la tabella del servizio viene stampata
+  per prima, così un chiamante che non la possiede legge comunque le
+  cifre di utilizzo prima che venga segnalato il rifiuto.
 - `raid`, `arrays` — gli array RAID composti e i dispositivi che il
   compositore di array detiene: una riga per array — un prefisso della
   sua identità, il suo livello, la sua salute
@@ -110,6 +139,7 @@ Senza interrogazione viene mostrata la guida breve.
 - `sysinfo identity` — stampare l'identità della macchina e la versione
   del SO.
 - `sysinfo ps --all` — elencare tutti i processi del sistema.
+- `sysinfo frames` — mostrare quanto costano i fotogrammi del desktop.
 
 ## EXIT STATUS
 

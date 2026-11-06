@@ -4,20 +4,21 @@ flock — einen Befehl ausführen und dabei eine empfehlende Dateisperre halten
 
 ## SYNOPSIS
 
-`flock [options] datei befehl [argument...]`
+`flock [options] file command [argument...]`
 
 ## DESCRIPTION
 
-Nimmt eine empfehlende Sperre über die gesamte `datei`, führt den `befehl`
-aus, während sie gehalten wird, und endet mit dem Status des Befehls. Zwei
-Läufe, die dieselbe `datei` nennen, überschneiden sich damit nie — genau
-das braucht ein Skript, damit immer nur eine Kopie von sich selbst läuft.
+Nimmt eine empfehlende Sperre über die gesamte Datei `file`, führt den
+Befehl `command` aus, während sie gehalten wird, und endet mit dem Status
+des Befehls. Zwei Läufe, die dieselbe Datei `file` nennen, überschneiden
+sich damit nie — genau das braucht ein Skript, damit immer nur eine Kopie
+von sich selbst läuft.
 
 Die Sperre gehört zur offenen Datei dieses Laufs, also gibt das System sie
-frei, wenn der Lauf endet: regulär, unterbrochen oder abgestürzt. In die
-`datei` wird nichts geschrieben und danach ist nichts aufzuräumen, es
+frei, wenn der Lauf endet: regulär, unterbrochen oder abgestürzt. In
+`file` wird nichts geschrieben und danach ist nichts aufzuräumen, es
 bleibt also keine veraltete Sperre übrig, auf die der nächste Lauf warten
-müsste. Die `datei` wird angelegt, falls sie fehlt.
+müsste. Fehlt `file`, wird die Datei angelegt.
 
 Sperren sind **empfehlend**: sie koordinieren Programme, die sich darauf
 einlassen. Sie gewähren und verweigern keinen Zugriff, ein Programm ohne
@@ -35,19 +36,32 @@ Drei Optionen der `flock`-Befehle anderer Systeme fehlen absichtlich,
 anstatt angenommen und ignoriert zu werden. `-u` und `-o` wirken auf einen
 Dateideskriptor, den eine Shell vorher geöffnet hat — diese Form gibt es
 hier nicht; `-c` gibt sein Argument an eine Shell, was hier ausdrücklich
-`flock datei elsh -c '...'` heißt, damit klar ist, welche Shell läuft. Eine
+`flock file elsh -c '...'` heißt, damit klar ist, welche Shell läuft. Eine
 davon zu verlangen ist ein Anwendungsfehler, das Skript wird also gewarnt
 statt ohne die verlangte Sperre zu laufen.
 
 ## OPTIONS
 
-- `-s, --shared` — eine gemeinsame Sperre nehmen. Mehrere Läufe dürfen sie gleichzeitig halten, und alle schließen einen Lauf aus, der eine exklusive verlangt. Die Sperre für Leser.
-- `-x, --exclusive` — eine exklusive Sperre nehmen, die jeden anderen Halter ausschließt. Die Voreinstellung und die Sperre für Schreiber.
-- `-n, --nonblock` — nicht warten: ist die Sperre gehalten, sofort mit dem Konfliktcode enden.
-- `-w, --timeout <seconds>` — höchstens so viele ganze Sekunden warten, dann mit dem Konfliktcode enden.
-- `-E, --conflict-code <n>` — der Status beim Aufgeben nach `-n` oder `-w`. Voreingestellt `1`. Wählen Sie einen Wert, den der Befehl selbst nie liefert, wenn ein Skript beides unterscheiden muss.
-- `-v, --verbose` — auf der Standardfehlerausgabe melden, ob die Sperre genommen wurde.
+- `-s, --shared` — eine gemeinsame Sperre nehmen. Mehrere Läufe dürfen sie
+  gleichzeitig halten, und alle schließen einen Lauf aus, der eine
+  exklusive verlangt. Die Sperre für Leser.
+- `-x, --exclusive` — eine exklusive Sperre nehmen, die jeden anderen
+  Halter ausschließt. Die Voreinstellung und die Sperre für Schreiber.
+- `-n, --nonblock` — nicht warten: ist die Sperre gehalten, sofort mit dem
+  Konfliktcode enden.
+- `-w, --timeout <seconds>` — höchstens so viele ganze Sekunden warten,
+  dann mit dem Konfliktcode enden.
+- `-E, --conflict-code <n>` — der Status beim Aufgeben nach `-n` oder
+  `-w`. Voreingestellt `1`. Wählen Sie einen Wert, den der Befehl selbst
+  nie liefert, wenn ein Skript beides unterscheiden muss.
+- `-v, --verbose` — auf der Standardfehlerausgabe melden, ob die Sperre
+  genommen wurde.
 - `-?, --help` — die eigene Kurzhilfe dieses Befehls anzeigen.
+
+Optionen müssen vor `file` stehen: alles ab `file` gehört zum Befehl, daher
+gibt `flock lock ls -l` das `-l` an `ls` weiter. `--` beendet die
+Optionsauswertung, sodass auch eine Datei oder ein Befehl erreichbar ist,
+dessen Name mit einem Bindestrich beginnt.
 
 ## EXAMPLES
 

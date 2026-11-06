@@ -42,7 +42,7 @@ use core::cmp::Ordering;
 use crate::bounded_text::{BoundedText, WideText};
 use crate::desktop::DesktopInfo;
 use crate::driver::display::{DamageList, DamageRect, DisplayFormat, MAX_DAMAGE_RECTS, NO_RECT};
-use crate::fs::Filetype;
+use crate::fs::{DocumentStamp, Filetype};
 use crate::input::KeyInput;
 use crate::input::Modifiers;
 use crate::input::PointerButtonCode;
@@ -140,13 +140,26 @@ pub const WINDOW_TITLE_MAX: usize = 64;
 /// a plate the width of the screen is not a tooltip.
 pub const TOOLTIP_TEXT_MAX: usize = 96;
 
+/// Most picks one application may have open at once
+/// ([`WindowRequest::PickFile`]), one of them at most a folder's.
+///
+/// A containment bound, as [`ALERT_MAX_OPEN`] is: no application may stack
+/// pickers on the user faster than they can be answered, and everything its
+/// picks may hand it can be pending to it at once.
+pub const PICK_MAX_OPEN: usize = 4;
+
 /// Most files one folder pick delegates ([`PickPurpose::Folder`]).
 ///
-/// Every file is delegated before the pick concludes, so the bound is the
-/// most delegations one grantor may hold pending to one recipient: a folder is
-/// what a listener or a viewer opens at once — an album, a set of pictures —
-/// and the files past it are left out with their number stated.
-pub const WINDOW_FOLDER_PICK_MAX: usize = crate::FD_GRANT_PENDING_MAX;
+/// Every file is delegated before the pick concludes, and each of the
+/// application's other picks may be handing it one more, so the bound is what
+/// one grantor may hold pending to one recipient less those: a folder is what a
+/// listener or a viewer opens at once — an album, a set of pictures — and the
+/// files past it are left out with their number stated.
+pub const WINDOW_FOLDER_PICK_MAX: usize = crate::FD_GRANT_PENDING_MAX - PICK_MAX_OPEN;
+
+// A folder pick and every other pick its application may have open fit what
+// the desktop may hold pending to it, so no file a conclusion states is refused.
+const _: () = assert!(WINDOW_FOLDER_PICK_MAX + PICK_MAX_OPEN <= crate::FD_GRANT_PENDING_MAX);
 
 /// Most open targets one application may have queued for it at once
 /// ([`WindowRequest::TakeOpenTarget`]).
@@ -638,6 +651,13 @@ pub const WINDOW_BACKDROP_BLUR_MAX_PX: u16 = 64;
 /// in the fail-closed sense, never a capacity that scales with the machine.
 pub const DESKTOP_LAYER_MAX_SIDE_LOGICAL: u32 = 256;
 
+/// The widest or tallest a layer surface may be on the wire, in physical
+/// pixels: [`DESKTOP_LAYER_MAX_SIDE_LOGICAL`] at the largest UI scale, so a
+/// size the session could admit at the live scale is never refused before it
+/// judges it.
+pub const DESKTOP_LAYER_MAX_SIDE_PHYSICAL: u32 =
+    DESKTOP_LAYER_MAX_SIDE_LOGICAL * crate::desktop::UI_SCALE_MAX_PERCENT / 100;
+
 /// How many live layer surfaces one client may hold ([`WindowRequest::OpenLayer`]).
 ///
 /// A companion is a single presence on the desktop, so one is what the
@@ -832,16 +852,16 @@ pub const APP_MENU_REASON_MAX: usize = 64;
 /// rather than a second figure beside it.
 pub const APP_MENU_ENTRY_MAX: usize = crate::FS_NAME_MAX;
 
-/// Maximum encoded length, in bytes, of the bundle path a menu row names as
-/// the source of its icon ([`AppMenuItem::with_icon_bundle`]).
+/// Maximum encoded length, in bytes, of the path a surface draws an item's own
+/// icon from: a menu row's bundle ([`AppMenuItem::with_icon_bundle`]) and a
+/// dragged item's own picture ([`DragOwnIcon`]).
 ///
-/// A **format** bound on untrusted input, and the widest a row record's
-/// one-byte length can state. It is a program-store prefix, the folders the
-/// bundle is filed under, and `<Name>.app`; a path longer than this keeps its
-/// row and loses only its picture, which degrades to the built-in glyph. The
-/// whole model still has to fit [`APP_MENU_TEXT_BYTES`], so a menu asking for
-/// many pictures is bounded by that rather than by this.
-pub const APP_MENU_BUNDLE_MAX: usize = 255;
+/// A **format** bound on untrusted input, and the widest a one-byte length can
+/// state. A path longer than this keeps its row or its drag and loses only its
+/// own picture, which degrades to the class picture or the built-in glyph. A
+/// menu still has to fit [`APP_MENU_TEXT_BYTES`], so one asking for many
+/// pictures is bounded by that rather than by this.
+pub const ICON_PATH_MAX: usize = 255;
 
 /// A validated menu row label: bounded UTF-8 with no control characters,
 /// over the shared [`BoundedText`] validator.
@@ -874,14 +894,15 @@ pub type AppMenuReason = BoundedText<0, APP_MENU_REASON_MAX>;
 /// credential: it is refused rather than sanitised if it is not admissible.
 pub type AppMenuEntryText = BoundedText<0, APP_MENU_ENTRY_MAX>;
 
-/// The bundle path a row names as the source of its icon, over the shared
+/// The path a surface draws an item's own icon from, over the shared
 /// validator.
 ///
-/// A path the **desktop** resolves an icon from, never one it opens: the
-/// artwork tier reads the bundle's own signed manifest and draws only the
-/// icon that manifest declares, so a row naming a path that is not a bundle
-/// resolves to nothing and the row draws the built-in glyph.
-pub type AppMenuBundle = BoundedText<0, APP_MENU_BUNDLE_MAX>;
+/// A path the **desktop** resolves an icon from under its own identity, never
+/// one it opens for the caller: the artwork tier reads a bundle's own signed
+/// manifest and draws only the icon that manifest declares, or a RISC OS
+/// application's own sprite, so a path naming neither resolves to nothing and
+/// the class picture or the built-in glyph is drawn.
+pub type IconPath = BoundedText<0, ICON_PATH_MAX>;
 
 /// Maximum encoded length, in bytes, of the asset id an application names a
 /// class picture by — a menu row's ([`AppMenuItem::with_icon_asset`]), a
@@ -906,7 +927,7 @@ enum AppMenuIcon {
     /// None: the row draws its label alone.
     None,
     /// The icon of the application bundle at this path.
-    Bundle(AppMenuBundle),
+    Bundle(IconPath),
     /// A class picture the desktop ships.
     Asset(IconAsset),
 }
@@ -1230,7 +1251,7 @@ impl AppMenuItem {
     /// an unresolvable path costs the row that picture and it draws its
     /// symbol instead.
     #[must_use]
-    pub const fn with_icon_bundle(mut self, bundle: AppMenuBundle) -> Self {
+    pub const fn with_icon_bundle(mut self, bundle: IconPath) -> Self {
         self.icon = AppMenuIcon::Bundle(bundle);
         self
     }
@@ -2376,6 +2397,9 @@ pub enum ClipboardKind {
     Text,
     /// Bytes of no stated kind.
     Octets,
+    /// A PNG picture; the session refuses a payload that does not begin as
+    /// one.
+    Png,
 }
 
 impl ClipboardKind {
@@ -2383,6 +2407,7 @@ impl ClipboardKind {
         match self {
             Self::Text => CLIPBOARD_TEXT,
             Self::Octets => CLIPBOARD_OCTETS,
+            Self::Png => CLIPBOARD_PNG,
         }
     }
 
@@ -2390,6 +2415,7 @@ impl ClipboardKind {
         match byte {
             CLIPBOARD_TEXT => Ok(Self::Text),
             CLIPBOARD_OCTETS => Ok(Self::Octets),
+            CLIPBOARD_PNG => Ok(Self::Png),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -2398,6 +2424,7 @@ impl ClipboardKind {
 const CLIPBOARD_EMPTY: u8 = 0;
 const CLIPBOARD_TEXT: u8 = 1;
 const CLIPBOARD_OCTETS: u8 = 2;
+const CLIPBOARD_PNG: u8 = 3;
 
 /// Most bytes the clipboard holds.
 ///
@@ -2475,8 +2502,10 @@ impl CursorShape {
 /// minimum.
 ///
 /// One definition serves every half — the app fills it in for
-/// [`WindowRequest::Create`] and the session's window engine hands its host
-/// the same value — so they cannot drift.
+/// [`WindowRequest::Create`] and [`WindowRequest::CreateTool`], and the
+/// session's window engine hands its host the same value — so they cannot
+/// drift. A tool window is offered its resize edges alone, never the size
+/// toggle.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum WindowSizing {
     /// Neither a resize grabber nor a live maximize/restore size toggle is
@@ -2673,8 +2702,11 @@ pub enum WindowRequest {
     /// moved by the user, and takes the keyboard only when pressed. While
     /// the user moves it, its moves are reported to its owner relative to
     /// the parent ([`WindowEvent::ToolMoved`]). The geometry is the client
-    /// area's: the band and rim are the window manager's. It counts against
-    /// the same budget and answers with the same reply as [`Self::Create`].
+    /// area's: the band and rim are the window manager's. One whose `sizing`
+    /// is resizable is given resize edges — never a maximize — and told each
+    /// size the user gives it as [`WindowEvent::Resized`], as a window is. It
+    /// counts against the same budget and answers with the same reply as
+    /// [`Self::Create`].
     CreateTool {
         /// The caller's own top-level window the tool window belongs to;
         /// never zero, and never a transient itself.
@@ -2711,6 +2743,9 @@ pub enum WindowRequest {
         carry: Option<u32>,
         /// What its mini title bar reads.
         title: WindowTitle,
+        /// Whether the user may resize it, and within what range of clients;
+        /// restatable with [`Self::SetSizing`] as a window's is.
+        sizing: WindowSizing,
     },
     /// Open a dialog window: a form, a question or the progress of an
     /// operation, drawn by the caller and owned by one of its top-level
@@ -2814,7 +2849,8 @@ pub enum WindowRequest {
         title: WindowTitle,
     },
     /// Restate window `window_id`'s sizing contract, replacing the range
-    /// given at [`Self::Create`].
+    /// given at [`Self::Create`], or at [`Self::CreateTool`] for a tool
+    /// window.
     ///
     /// A window's resize range is no more fixed at birth than its title is:
     /// an app whose content constraints change — a board of square cells
@@ -2944,8 +2980,12 @@ pub enum WindowRequest {
     /// or — for an application whose signed manifest edits documents, where
     /// the user may write it — read-write), a [`WindowEvent::FolderPicked`]
     /// for a folder, or a [`WindowEvent::PickCancelled`] delivered to the
-    /// window's event endpoint. One pick may be pending per window; a second
-    /// request while one is pending is refused (`AlreadyExists`).
+    /// window's event endpoint. One pick may be pending per window and
+    /// [`PICK_MAX_OPEN`] per application, one of them a folder's: past the
+    /// window's it is refused `AlreadyExists`, past the application's
+    /// `LimitExceeded`. Picks of different applications run at once; the
+    /// desktop refuses one past what it shows together (`Busy`), or while a
+    /// lock or a system prompt holds the seat (`SeatBusy`).
     PickFile {
         /// The requesting app's own window the pick concludes to.
         window_id: u64,
@@ -2974,15 +3014,17 @@ pub enum WindowRequest {
     /// Hand the session the drag the user began on `items` in window
     /// `window_id`, while the press that began it is still held there.
     ///
-    /// Only a name, the filetype its volume records, and a count cross: what
-    /// the plate says, and what an application slot's declared types are
-    /// matched against. The dragging
-    /// application keeps the items and performs every drop itself
-    /// ([`WindowEvent::DragEnded`]), so no path of its own and no authority
-    /// reaches the session. While the pointer is over one of the application's
-    /// own windows or the desktop the session reports where
-    /// ([`WindowEvent::DragOver`]) and shows the verdict the application
-    /// answers ([`WindowRequest::DragVerdict`]).
+    /// Only a name, the filetype its volume records, a count and how each item
+    /// shown is pictured cross: what the plate says, what an application
+    /// slot's declared types are matched against, and what the cards are drawn
+    /// from. The dragging application keeps the items and performs every drop
+    /// itself ([`WindowEvent::DragEnded`]), so no authority reaches the
+    /// session: the only paths of its own that cross are those a bundle's or a
+    /// RISC OS application's own picture is read from ([`DragOwnIcon`]), which
+    /// the session reads under its own identity and answers nothing of. While
+    /// the pointer is over one of the application's own windows or the desktop
+    /// the session reports where ([`WindowEvent::DragOver`]) and shows the
+    /// verdict the application answers ([`WindowRequest::DragVerdict`]).
     BeginDrag {
         /// The window the drag began in.
         window_id: u64,
@@ -3010,8 +3052,10 @@ pub enum WindowRequest {
     },
     /// Read the desktop folder the [`WindowEvent::DragOver`] or
     /// [`WindowEvent::DragEnded`] numbered `serial` named, for the drag window
-    /// `window_id` began. The reply is a [`decode_drag_spot_reply`] frame, and
-    /// `NotFound` once the session has named another.
+    /// `window_id` began. The folder is held for every report made while the
+    /// pointer stays on it, so a report superseded there still reads it. The
+    /// reply is a [`decode_drag_spot_reply`] frame, and `NotFound` once the
+    /// pointer has gone elsewhere.
     QueryDragSpot {
         /// The window the drag began in.
         window_id: u64,
@@ -3046,6 +3090,27 @@ pub enum WindowRequest {
         serial: u32,
         /// The folder, or zero to decline.
         location: u64,
+    },
+    /// Step the drop onto the desktop that window `window_id`'s drag ended in
+    /// at the report numbered `serial` ([`DropSite::Desktop`]), as the caller
+    /// carries it out: each item announced before its first write, then what
+    /// became of it, and the drop's end, sent on every way it ends. The
+    /// desktop stands each name where it was let go, and reads a folder no
+    /// watch follows once the drop ends.
+    ///
+    /// Only the attested owner of the drag's window steps it, items in drag
+    /// order below the count the drag began with and each `Made` naming the
+    /// last `Making`: a step out of turn or a name that is no file name is
+    /// refused (`OutOfRange`), and a step for a drop that ended, or never
+    /// landed on the desktop, is `NotFound`. A window lands at most
+    /// [`DROP_LANDINGS_MAX`] drops at once.
+    DropLanding {
+        /// The window the drag began in.
+        window_id: u64,
+        /// The report the drop was concluded at.
+        serial: u32,
+        /// What happened.
+        step: LandingStep,
     },
     /// Set window `window_id`'s backdrop-blur radius, in **logical** pixels
     /// (at most [`WINDOW_BACKDROP_BLUR_MAX_PX`]): the compositor blurs
@@ -3658,6 +3723,8 @@ const OP_SAVE_OFFER_ANSWER: u16 = 46;
 const OP_SAVE_INTO: u16 = 47;
 /// Wire operation discriminant of [`WindowRequest::TakeAppBarText`].
 const OP_TAKE_APP_BAR_TEXT: u16 = 48;
+/// Wire operation discriminant of [`WindowRequest::DropLanding`].
+const OP_DROP_LANDING: u16 = 49;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -3715,29 +3782,44 @@ const DRAG_OPENABLE: u8 = 1;
 const DRAG_TYPED: u8 = 2;
 /// A drag picture's flag: it says where its picture stood.
 const DRAG_PICTURE_PLACED: u8 = 1;
+/// A drag picture's flag: its item's own picture follows its class picture's
+/// id.
+const DRAG_PICTURE_OWN: u8 = 2;
+/// A drag picture's flag: that own picture names the version its listing saw.
+const DRAG_PICTURE_STAMPED: u8 = 4;
 /// Bytes a drag picture takes ahead of its asset id: its flags, where it
 /// stood, and the id's length.
 const DRAG_PICTURE_HEAD: usize = 1 + 4 + 4 + 1;
+/// Bytes an own picture takes ahead of its path: its source and the path's
+/// length.
+const DRAG_OWN_HEAD: usize = 1 + 1;
+/// Most bytes one drag picture takes: the longest class picture id, then the
+/// longest own picture, stamped.
+const DRAG_PICTURE_MAX_LEN: usize =
+    DRAG_PICTURE_HEAD + ICON_ASSET_MAX + DRAG_OWN_HEAD + ICON_PATH_MAX + DocumentStamp::WIRE_LEN;
 
 /// Encoded size of a [`WindowRequest::BeginDrag`] carrying `items`: the
 /// operands ahead of the first item's name, the name, how much of it is
-/// hidden, then each picture shown.
+/// hidden, then each picture shown, with its own where it carries one.
 const fn begin_drag_wire_len(items: &DragItems) -> usize {
     let mut len = DRAG_NAME_OFFSET + items.first.len_byte() as usize + 1;
     let mut slot = 0;
     while slot < DRAG_SHOWN_MAX {
         if let Some(picture) = &items.pictures[slot] {
             len += DRAG_PICTURE_HEAD + picture.icon.len_byte() as usize;
+            if let Some(own) = &picture.own {
+                len += DRAG_OWN_HEAD + own.path.len_byte() as usize;
+                if own.stamp.is_some() {
+                    len += DocumentStamp::WIRE_LEN;
+                }
+            }
         }
         slot += 1;
     }
     len
 }
 const _: () = assert!(
-    DRAG_NAME_OFFSET
-        + crate::FS_NAME_MAX
-        + 1
-        + DRAG_SHOWN_MAX * (DRAG_PICTURE_HEAD + ICON_ASSET_MAX)
+    DRAG_NAME_OFFSET + crate::FS_NAME_MAX + 1 + DRAG_SHOWN_MAX * DRAG_PICTURE_MAX_LEN
         <= WindowRequest::MAX_WIRE_LEN
 );
 
@@ -3755,6 +3837,38 @@ const SAVE_INTO_LOCATION_OFFSET: usize = WINDOW_ID_WIRE_LEN;
 /// Encoded size of a [`WindowRequest::SaveInto`]: the header, the window, the
 /// location, and the serial.
 const SAVE_INTO_WIRE_LEN: usize = SAVE_INTO_LOCATION_OFFSET + 12;
+/// Byte offset of a [`WindowRequest::DropLanding`]'s step; its serial
+/// precedes it.
+const DROP_LANDING_STEP_OFFSET: usize = WINDOW_ID_WIRE_LEN + 4;
+/// Byte offset of a step's item.
+const DROP_LANDING_ITEM_OFFSET: usize = DROP_LANDING_STEP_OFFSET + 1;
+/// Byte offset of a `Made` step's outcome, and of a `Making` step's name
+/// length.
+const DROP_LANDING_DETAIL_OFFSET: usize = DROP_LANDING_ITEM_OFFSET + 4;
+/// Byte offset of a `Making` step's name.
+const DROP_LANDING_NAME_OFFSET: usize = DROP_LANDING_DETAIL_OFFSET + 1;
+/// Wire value of [`LandingStep::Making`].
+const LANDING_MAKING: u8 = 0;
+/// Wire value of [`LandingStep::Made`].
+const LANDING_MADE: u8 = 1;
+/// Wire value of [`LandingStep::Ended`].
+const LANDING_ENDED: u8 = 2;
+
+/// Encoded size of a [`WindowRequest::DropLanding`] stepping `step`: an end
+/// is its tag alone, an item done its item and outcome, an item begun its
+/// item and name.
+const fn drop_landing_wire_len(step: &LandingStep) -> usize {
+    match step {
+        LandingStep::Making { name, .. } => DROP_LANDING_NAME_OFFSET + name.len_byte() as usize,
+        LandingStep::Made { .. } => DROP_LANDING_NAME_OFFSET,
+        LandingStep::Ended => DROP_LANDING_ITEM_OFFSET,
+    }
+}
+
+/// Encoded size of the widest [`WindowRequest::DropLanding`]: an item begun
+/// under the longest name.
+pub const DROP_LANDING_MAX_WIRE_LEN: usize = DROP_LANDING_NAME_OFFSET + crate::FS_NAME_MAX;
+const _: () = assert!(DROP_LANDING_MAX_WIRE_LEN <= WindowRequest::MAX_WIRE_LEN);
 /// Byte offset of the frame-layout block [`WindowRequest::Create`],
 /// [`WindowRequest::CreatePopup`] and [`WindowRequest::Resize`] share
 /// verbatim ([`FrameLayout::write_to`] / [`read_frame_layout`]).
@@ -3906,8 +4020,11 @@ const TOOL_CARRY_FLAG_OFFSET: usize = TRANSIENT_END;
 const TOOL_CARRY_OFFSET: usize = TOOL_CARRY_FLAG_OFFSET + 1;
 /// Byte offset of a [`WindowRequest::CreateTool`]'s title length.
 const TOOL_TITLE_LEN_OFFSET: usize = TOOL_CARRY_OFFSET + 4;
+/// Byte offset of the [`WindowSizing`] block a [`WindowRequest::CreateTool`]
+/// carries, just past the title.
+const TOOL_SIZING_OFFSET: usize = TOOL_TITLE_LEN_OFFSET + 1 + WINDOW_TITLE_MAX;
 /// Encoded size of a [`WindowRequest::CreateTool`].
-const CREATE_TOOL_WIRE_LEN: usize = TOOL_TITLE_LEN_OFFSET + 1 + WINDOW_TITLE_MAX;
+const CREATE_TOOL_WIRE_LEN: usize = TOOL_SIZING_OFFSET + SIZING_WIRE_LEN;
 
 /// Byte offset of a [`WindowRequest::CreateDialog`]'s owner window id, after
 /// the shared frame-layout block.
@@ -4226,6 +4343,7 @@ impl WindowRequest {
             Self::QueryDragSpot { .. } => QUERY_DRAG_SPOT_WIRE_LEN,
             Self::SaveOfferAnswer { .. } => SAVE_OFFER_ANSWER_WIRE_LEN,
             Self::SaveInto { .. } => SAVE_INTO_WIRE_LEN,
+            Self::DropLanding { ref step, .. } => drop_landing_wire_len(step),
             Self::PickFile { purpose, .. } => pick_file_wire_len(
                 purpose.suggested_len_byte() as usize,
                 purpose.formats().wire_len(),
@@ -4291,9 +4409,9 @@ impl WindowRequest {
     /// * [`Errno::OutOfRange`] — a [`SetAppBar`](Self::SetAppBar) whose menu
     ///   states a title of its own, which an icon-bar menu never does
     ///   ([`AppMenu::titled`]), or an [`OpenMenu`](Self::OpenMenu) carrying
-    ///   no rows, which would open nothing, or a [`Create`](Self::Create) or
-    ///   [`SetSizing`](Self::SetSizing) whose declared resize maximum is
-    ///   below its own minimum.
+    ///   no rows, which would open nothing, or a [`Create`](Self::Create),
+    ///   [`CreateTool`](Self::CreateTool) or [`SetSizing`](Self::SetSizing)
+    ///   whose declared resize maximum is below its own minimum.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
         self.encodable()?;
         let len = self.wire_len();
@@ -4325,7 +4443,9 @@ impl WindowRequest {
             // be dragged to. `0` is how "no ceiling" is spelled, so such a
             // pair is a mistake on the app's side, refused here rather than
             // sent for the session to reject.
-            Self::Create { sizing, .. } | Self::SetSizing { sizing, .. }
+            Self::Create { sizing, .. }
+            | Self::CreateTool { sizing, .. }
+            | Self::SetSizing { sizing, .. }
                 if crossed_sizing(sizing) =>
             {
                 Err(Errno::OutOfRange)
@@ -4353,6 +4473,7 @@ impl WindowRequest {
             Self::QueryDragSpot { .. } => OP_QUERY_DRAG_SPOT,
             Self::SaveOfferAnswer { .. } => OP_SAVE_OFFER_ANSWER,
             Self::SaveInto { .. } => OP_SAVE_INTO,
+            Self::DropLanding { .. } => OP_DROP_LANDING,
             Self::Resize { .. } => OP_RESIZE,
             Self::SetTitle { .. } => OP_SET_TITLE,
             Self::SetSizing { .. } => OP_SET_SIZING,
@@ -4522,7 +4643,8 @@ impl WindowRequest {
             | Self::DragVerdict { .. }
             | Self::QueryDragSpot { .. }
             | Self::SaveOfferAnswer { .. }
-            | Self::SaveInto { .. } => write_transfer_operands(self, out),
+            | Self::SaveInto { .. }
+            | Self::DropLanding { .. } => write_transfer_operands(self, out),
             Self::OpenLayer { .. } | Self::PlaceLayer { .. } => self.write_layer_operands(out),
             Self::TakeMenuText { window_id, open_id } => {
                 put_u64(out, 8, window_id);
@@ -4723,10 +4845,17 @@ impl WindowRequest {
             return;
         };
         transient.write_to(out);
-        if let Self::CreateTool { carry, title, .. } = *self {
+        if let Self::CreateTool {
+            carry,
+            title,
+            sizing,
+            ..
+        } = *self
+        {
             out[TOOL_CARRY_FLAG_OFFSET] = u8::from(carry.is_some());
             put_u32(out, TOOL_CARRY_OFFSET, carry.unwrap_or(0));
             encode_title(out, TOOL_TITLE_LEN_OFFSET, &title);
+            write_sizing(out, TOOL_SIZING_OFFSET, sizing);
         }
     }
 
@@ -4870,7 +4999,7 @@ impl WindowRequest {
             }
             OP_PICK_FILE | OP_TAKE_PICKED_NAME | OP_TAKE_PICKED_FILE | OP_BEGIN_DRAG
             | OP_TAKE_DROP_TARGET | OP_DRAG_VERDICT | OP_QUERY_DRAG_SPOT | OP_SAVE_OFFER_ANSWER
-            | OP_SAVE_INTO => read_transfer_request(op, bytes),
+            | OP_SAVE_INTO | OP_DROP_LANDING => read_transfer_request(op, bytes),
             OP_TAKE_TERRAIN => {
                 exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
                 let window_id = nonzero_id(read_u64(bytes, 8))?;
@@ -5125,17 +5254,7 @@ fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
             out[at] = items.hidden;
             at += 1;
             for picture in items.pictures() {
-                let (flags, (dx, dy)) = picture
-                    .from
-                    .map_or((0, (0, 0)), |from| (DRAG_PICTURE_PLACED, from));
-                out[at] = flags;
-                put_i32(out, at + 1, dx);
-                put_i32(out, at + 5, dy);
-                let asset = picture.icon.as_str().as_bytes();
-                out[at + 9] = picture.icon.len_byte();
-                out[at + DRAG_PICTURE_HEAD..at + DRAG_PICTURE_HEAD + asset.len()]
-                    .copy_from_slice(asset);
-                at += DRAG_PICTURE_HEAD + asset.len();
+                at = write_drag_picture(out, at, picture);
             }
         }
         WindowRequest::DragVerdict {
@@ -5169,8 +5288,73 @@ fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
             put_u64(out, SAVE_INTO_LOCATION_OFFSET, location);
             put_u32(out, SAVE_INTO_LOCATION_OFFSET + 8, serial);
         }
+        WindowRequest::DropLanding {
+            window_id,
+            serial,
+            ref step,
+        } => write_drop_landing(out, window_id, serial, step),
         _ => {}
     }
+}
+
+/// Write the operands of a [`WindowRequest::DropLanding`]: the window, the
+/// report, and the one step.
+fn write_drop_landing(out: &mut [u8], window_id: u64, serial: u32, step: &LandingStep) {
+    put_u64(out, 8, window_id);
+    put_u32(out, WINDOW_ID_WIRE_LEN, serial);
+    match *step {
+        LandingStep::Making { item, ref name } => {
+            out[DROP_LANDING_STEP_OFFSET] = LANDING_MAKING;
+            put_u32(out, DROP_LANDING_ITEM_OFFSET, item);
+            out[DROP_LANDING_DETAIL_OFFSET] = name.len_byte();
+            let text = name.as_str().as_bytes();
+            out[DROP_LANDING_NAME_OFFSET..DROP_LANDING_NAME_OFFSET + text.len()]
+                .copy_from_slice(text);
+        }
+        LandingStep::Made { item, outcome } => {
+            out[DROP_LANDING_STEP_OFFSET] = LANDING_MADE;
+            put_u32(out, DROP_LANDING_ITEM_OFFSET, item);
+            out[DROP_LANDING_DETAIL_OFFSET] = outcome.to_wire();
+        }
+        LandingStep::Ended => out[DROP_LANDING_STEP_OFFSET] = LANDING_ENDED,
+    }
+}
+
+/// Write `picture` at `at` in `out`, answering where the next begins: its
+/// flags, where it stood and its class picture's id, then its own picture's
+/// source and path and the version its listing saw, where it carries them.
+fn write_drag_picture(out: &mut [u8], mut at: usize, picture: &DragPicture) -> usize {
+    let (mut flags, (dx, dy)) = picture
+        .from
+        .map_or((0, (0, 0)), |from| (DRAG_PICTURE_PLACED, from));
+    if let Some(own) = &picture.own {
+        flags |= DRAG_PICTURE_OWN;
+        if own.stamp.is_some() {
+            flags |= DRAG_PICTURE_STAMPED;
+        }
+    }
+    out[at] = flags;
+    put_i32(out, at + 1, dx);
+    put_i32(out, at + 5, dy);
+    out[at + 9] = picture.icon.len_byte();
+    at += DRAG_PICTURE_HEAD;
+    let asset = picture.icon.as_str().as_bytes();
+    out[at..at + asset.len()].copy_from_slice(asset);
+    at += asset.len();
+    let Some(own) = &picture.own else {
+        return at;
+    };
+    out[at] = own.source.to_wire();
+    out[at + 1] = own.path.len_byte();
+    at += DRAG_OWN_HEAD;
+    let path = own.path.as_str().as_bytes();
+    out[at..at + path.len()].copy_from_slice(path);
+    at += path.len();
+    if let Some(stamp) = &own.stamp {
+        out[at..at + DocumentStamp::WIRE_LEN].copy_from_slice(&stamp.to_le_bytes());
+        at += DocumentStamp::WIRE_LEN;
+    }
+    at
 }
 
 /// Decode a request that moves a file between an application and the user: a
@@ -5202,6 +5386,7 @@ fn read_transfer_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> 
                 accepts: flag_at(bytes, WINDOW_ID_WIRE_LEN + 4)?,
             })
         }
+        OP_DROP_LANDING => read_drop_landing(bytes),
         // A zero location is the decline, so only the window must name one.
         OP_SAVE_INTO => {
             exact_len(bytes, SAVE_INTO_WIRE_LEN)?;
@@ -5221,6 +5406,50 @@ fn read_transfer_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> 
             })
         }
     }
+}
+
+/// Decode a [`WindowRequest::DropLanding`]: the window, the serial, and one
+/// known step, the frame ending with what that step carries.
+fn read_drop_landing(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    let tag = *bytes
+        .get(DROP_LANDING_STEP_OFFSET)
+        .ok_or(Errno::BufferTooSmall)?;
+    let window_id = nonzero_id(read_u64(bytes, 8))?;
+    let serial = read_u32(bytes, WINDOW_ID_WIRE_LEN);
+    let step = match tag {
+        LANDING_ENDED => LandingStep::Ended,
+        LANDING_MADE => {
+            exact_len(bytes, DROP_LANDING_NAME_OFFSET)?;
+            LandingStep::Made {
+                item: read_u32(bytes, DROP_LANDING_ITEM_OFFSET),
+                outcome: LandingOutcome::from_wire(bytes[DROP_LANDING_DETAIL_OFFSET])?,
+            }
+        }
+        LANDING_MAKING => {
+            let len = *bytes
+                .get(DROP_LANDING_DETAIL_OFFSET)
+                .ok_or(Errno::BufferTooSmall)?;
+            let text = bytes
+                .get(DROP_LANDING_NAME_OFFSET..DROP_LANDING_NAME_OFFSET + usize::from(len))
+                .ok_or(Errno::BufferTooSmall)?;
+            let mut name = [0u8; crate::FS_NAME_MAX];
+            name.get_mut(..text.len())
+                .ok_or(Errno::LengthOutOfRange)?
+                .copy_from_slice(text);
+            LandingStep::Making {
+                item: read_u32(bytes, DROP_LANDING_ITEM_OFFSET),
+                name: LandingName::from_wire(len, &name)?,
+            }
+        }
+        _ => return Err(Errno::OutOfRange),
+    };
+    let request = WindowRequest::DropLanding {
+        window_id,
+        serial,
+        step,
+    };
+    exact_len(bytes, request.wire_len())?;
+    Ok(request)
 }
 
 /// Decode the operands of a [`WindowRequest::BeginDrag`]: the count, the
@@ -5276,27 +5505,61 @@ fn read_begin_drag(bytes: &[u8]) -> Result<WindowRequest, Errno> {
 }
 
 /// The drag picture at the head of `bytes`, and the bytes after it: one that
-/// says where it stood, or one that says nothing of it and carries no place.
+/// says where it stood, or one that says nothing of it and carries no place,
+/// with its item's own picture exactly where its flags say it carries one.
 fn read_drag_picture(bytes: &[u8]) -> Result<(DragPicture, &[u8]), Errno> {
     let head = bytes
         .get(..DRAG_PICTURE_HEAD)
         .ok_or(Errno::BufferTooSmall)?;
+    let flags = head[0];
+    let owned = flags & DRAG_PICTURE_OWN != 0;
+    let stamped = flags & DRAG_PICTURE_STAMPED != 0;
+    if flags & !(DRAG_PICTURE_PLACED | DRAG_PICTURE_OWN | DRAG_PICTURE_STAMPED) != 0
+        || (stamped && !owned)
+    {
+        return Err(Errno::OutOfRange);
+    }
     let place = (read_i32(head, 1), read_i32(head, 5));
-    let from = match head[0] {
-        DRAG_PICTURE_PLACED => Some(place),
-        0 if place == (0, 0) => None,
-        _ => return Err(Errno::OutOfRange),
+    let from = match (flags & DRAG_PICTURE_PLACED != 0, place) {
+        (true, place) => Some(place),
+        (false, (0, 0)) => None,
+        (false, _) => return Err(Errno::OutOfRange),
     };
     let end = DRAG_PICTURE_HEAD + usize::from(head[9]);
     let asset = bytes
         .get(DRAG_PICTURE_HEAD..end)
         .ok_or(Errno::BufferTooSmall)?;
     let asset = core::str::from_utf8(asset).map_err(|_| Errno::OutOfRange)?;
-    let picture = DragPicture {
-        icon: IconAsset::new(asset)?,
-        from,
+    let icon = IconAsset::new(asset)?;
+    let rest = &bytes[end..];
+    let (own, rest) = if owned {
+        let (own, rest) = read_drag_own_icon(rest, stamped)?;
+        (Some(own), rest)
+    } else {
+        (None, rest)
     };
-    Ok((picture, &bytes[end..]))
+    let picture = DragPicture { icon, from, own };
+    Ok((picture, rest))
+}
+
+/// The own picture at the head of `bytes`, naming the version its listing saw
+/// where `stamped` says it does, and the bytes after it: refused unless its
+/// path is one [`DragOwnIcon::new`] admits.
+fn read_drag_own_icon(bytes: &[u8], stamped: bool) -> Result<(DragOwnIcon, &[u8]), Errno> {
+    let head = bytes.get(..DRAG_OWN_HEAD).ok_or(Errno::BufferTooSmall)?;
+    let source = DragOwnSource::from_wire(head[0])?;
+    let end = DRAG_OWN_HEAD + usize::from(head[1]);
+    let path = bytes.get(DRAG_OWN_HEAD..end).ok_or(Errno::BufferTooSmall)?;
+    let path = core::str::from_utf8(path).map_err(|_| Errno::OutOfRange)?;
+    let mut rest = &bytes[end..];
+    let stamp = if stamped {
+        let stamp = DocumentStamp::from_bytes(rest)?;
+        rest = &rest[DocumentStamp::WIRE_LEN..];
+        Some(stamp)
+    } else {
+        None
+    };
+    Ok((DragOwnIcon::new(source, path, stamp)?, rest))
 }
 
 /// Decode the operands of a [`WindowRequest::PickFile`]: an open names no
@@ -5760,7 +6023,7 @@ fn read_app_menu_row(
             text, cursor, icon_len,
         )?)
     } else {
-        match read_app_menu_text::<0, APP_MENU_BUNDLE_MAX>(text, cursor, icon_len)? {
+        match read_app_menu_text::<0, ICON_PATH_MAX>(text, cursor, icon_len)? {
             bundle if bundle.is_empty() => AppMenuIcon::None,
             bundle => AppMenuIcon::Bundle(bundle),
         }
@@ -6048,7 +6311,8 @@ fn read_create_popup(bytes: &[u8]) -> Result<WindowRequest, Errno> {
 }
 
 /// Decode the operands of a [`WindowRequest::CreateTool`]: what every
-/// transient opens with, then the carry and the title.
+/// transient opens with, then the carry, the title and the sizing, which is
+/// refused on the terms a `Create`'s is.
 ///
 /// A carry has one encoding: a flag of `0` with a zero place, or `1` with a
 /// place along the band — inside the client's width, since the band is as
@@ -6082,6 +6346,7 @@ fn read_create_tool(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         offset_y,
         carry,
         title: decode_title(bytes, TOOL_TITLE_LEN_OFFSET)?,
+        sizing: read_sizing(bytes, TOOL_SIZING_OFFSET)?,
     })
 }
 
@@ -6118,12 +6383,10 @@ fn read_create_dialog(bytes: &[u8]) -> Result<WindowRequest, Errno> {
 /// geometry, or a depth outside the closed set is refused. The screen point
 /// is an unconstrained signed pair — the session clamps the surface onto the
 /// work area, so any point is a legitimate ask — but the *extent* is bounded
-/// here, because a layer surface larger than
-/// [`DESKTOP_LAYER_MAX_SIDE_LOGICAL`] is what the bound exists to refuse and
-/// the decoder is the first place that can say no. The bound is in logical
-/// pixels and the wire carries physical ones, so this check is the ceiling
-/// at a UI scale of 1 and the session re-checks against the live scale; a
-/// frame this refuses could not be legitimate at any scale.
+/// here by [`DESKTOP_LAYER_MAX_SIDE_PHYSICAL`]: the wire carries physical
+/// pixels and the decoder knows no scale, so it refuses only what no scale
+/// could admit, and the session holds the size to the logical bound at the
+/// live one.
 fn read_open_layer(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     exact_len(bytes, OPEN_LAYER_WIRE_LEN)?;
     let shm_handle = read_u64(bytes, 8);
@@ -6132,8 +6395,8 @@ fn read_open_layer(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         return Err(Errno::OutOfRange);
     }
     let layout = read_frame_layout(bytes)?;
-    if layout.width_px > DESKTOP_LAYER_MAX_SIDE_LOGICAL
-        || layout.height_px > DESKTOP_LAYER_MAX_SIDE_LOGICAL
+    if layout.width_px > DESKTOP_LAYER_MAX_SIDE_PHYSICAL
+        || layout.height_px > DESKTOP_LAYER_MAX_SIDE_PHYSICAL
     {
         return Err(Errno::LengthOutOfRange);
     }
@@ -6481,15 +6744,121 @@ pub const WINDOW_OPEN_TARGET_REPLY_MAX: usize = OPEN_TARGET_REPLY_TEXT_OFFSET + 
 /// what is carried behind it.
 pub const DRAG_SHOWN_MAX: usize = 4;
 
-/// One item a drag shows: the class picture its source shows it with, and
-/// where that picture's centre stood in the source window, from the press, in
-/// pixels — `None` where the source showed none of it.
+/// One item a drag shows: the class picture its source shows it with, its own
+/// picture where a path names one, and where that picture's centre stood in
+/// the source window, from the press, in pixels — `None` where the source
+/// showed none of it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DragPicture {
-    /// The class picture its source shows it with.
+    /// The class picture its source shows it with, which its own falls back
+    /// to.
     pub icon: IconAsset,
     /// Where its picture's centre stood, from the press.
     pub from: Option<(i32, i32)>,
+    /// Its own picture, where it is a bundle or a RISC OS application.
+    pub own: Option<DragOwnIcon>,
+}
+
+/// What a dragged item's own picture is read from.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum DragOwnSource {
+    /// An application bundle, drawn by the icon its signed manifest declares.
+    Bundle,
+    /// A RISC OS application directory, drawn by the sprite RISC OS's Filer
+    /// shows it by.
+    RiscOsApplication,
+}
+
+impl DragOwnSource {
+    /// The source's wire value.
+    const fn to_wire(self) -> u8 {
+        match self {
+            Self::Bundle => 1,
+            Self::RiscOsApplication => 2,
+        }
+    }
+
+    /// The source a wire value names.
+    fn from_wire(value: u8) -> Result<Self, Errno> {
+        match value {
+            1 => Ok(Self::Bundle),
+            2 => Ok(Self::RiscOsApplication),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// Whether `leaf`, a path's last component, names one of these.
+    fn names(self, leaf: &str) -> bool {
+        match self {
+            Self::Bundle => crate::appinfo::is_bundle_name(leaf),
+            Self::RiscOsApplication => crate::fs::is_riscos_application_name(leaf),
+        }
+    }
+}
+
+/// A dragged item's own picture: the bundle or RISC OS application at an
+/// absolute path, at the version its listing named where it named one.
+///
+/// A path the desktop draws from under its own identity, never one it opens
+/// for the dragging application: only the icon a bundle's signed manifest
+/// declares, or an application's own sprite, is drawn, and nothing read
+/// returns to the application, as for a menu row's bundle
+/// ([`AppMenuItem::with_icon_bundle`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DragOwnIcon {
+    source: DragOwnSource,
+    path: IconPath,
+    stamp: Option<DocumentStamp>,
+}
+
+impl DragOwnIcon {
+    /// The `source` at the absolute `path`, listed at `stamp` where its listing
+    /// named a version: the one check a drag's builder and its decoder make.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for a path longer than [`ICON_PATH_MAX`],
+    /// which a drag carries as its class picture alone, and
+    /// [`Errno::OutOfRange`] for one holding a control character, not
+    /// absolute, or whose last component does not name a `source`.
+    pub fn new(
+        source: DragOwnSource,
+        path: &str,
+        stamp: Option<DocumentStamp>,
+    ) -> Result<Self, Errno> {
+        let path = IconPath::new(path)?;
+        let named = path
+            .as_str()
+            .strip_prefix('/')
+            .and_then(|tail| tail.rsplit('/').next())
+            .is_some_and(|leaf| source.names(leaf));
+        if !named {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self {
+            source,
+            path,
+            stamp,
+        })
+    }
+
+    /// What its picture is read from.
+    #[must_use]
+    pub const fn source(&self) -> DragOwnSource {
+        self.source
+    }
+
+    /// Its absolute path.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        self.path.as_str()
+    }
+
+    /// The version its listing named, where it named one.
+    #[must_use]
+    pub const fn stamp(&self) -> Option<DocumentStamp> {
+        self.stamp
+    }
 }
 
 /// What a drag carries, as the session sees it: the item pressed — its name,
@@ -6622,6 +6991,9 @@ pub enum DropOperation {
     Copy,
     /// Move them.
     Move,
+    /// Make a shortcut to each where it lands: what a volume dragged from the
+    /// storage catalog makes, since a volume is never copied or moved.
+    Link,
 }
 
 impl DropOperation {
@@ -6630,6 +7002,7 @@ impl DropOperation {
         match self {
             Self::Copy => 1,
             Self::Move => 2,
+            Self::Link => 3,
         }
     }
 
@@ -6638,6 +7011,7 @@ impl DropOperation {
         match value {
             1 => Ok(Self::Copy),
             2 => Ok(Self::Move),
+            3 => Ok(Self::Link),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -6708,13 +7082,91 @@ pub enum DropSite {
         operation: DropOperation,
     },
     /// On the desktop folder [`WindowRequest::QueryDragSpot`] yields for
-    /// `serial`, with the operation the pointer showed.
+    /// `serial`, with the operation the pointer showed. The application
+    /// steps the drop as it carries it out ([`WindowRequest::DropLanding`]).
     Desktop {
         /// The report that named the folder.
         serial: u32,
         /// What the drop does.
         operation: DropOperation,
     },
+}
+
+/// The most drops onto the desktop one window's drags may be landing at once
+/// ([`WindowRequest::DropLanding`]).
+///
+/// A containment bound, not a capacity: each is a drop its source is still
+/// writing, and a fifth ends the oldest, whose later items then take free
+/// cells as any other arrival does.
+pub const DROP_LANDINGS_MAX: usize = 4;
+
+/// The name a drop's item lands under: one file name, never empty and at
+/// most [`crate::FS_NAME_MAX`] bytes.
+pub type LandingName = BoundedText<1, { crate::FS_NAME_MAX }>;
+
+/// One step of a drop onto the desktop, as its source carries it out
+/// ([`WindowRequest::DropLanding`]).
+// A transient request, encoded and dropped, never stored in bulk: boxing the
+// name would put an allocation into an ABI decode type and drop `Copy`.
+#[allow(clippy::large_enum_variant)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum LandingStep {
+    /// Item `item`, numbered in drag order from the lead's 0, is about to be
+    /// written under `name` in the folder it was dropped on: sent before its
+    /// first write.
+    Making {
+        /// The item, below the count the drag began with.
+        item: u32,
+        /// The name it lands under.
+        name: LandingName,
+    },
+    /// The item the last `Making` named is done with, as `outcome` says.
+    Made {
+        /// The item, the last `Making`'s.
+        item: u32,
+        /// What became of it.
+        outcome: LandingOutcome,
+    },
+    /// The drop is over: nothing more of it lands.
+    Ended,
+}
+
+/// What became of one item of a drop onto the desktop.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum LandingOutcome {
+    /// It was made under the name its `Making` gave.
+    Created,
+    /// It replaced what had that name.
+    Replaced,
+    /// It was a folder, merged into the folder of that name.
+    Merged,
+    /// What had that name was kept, and the item was not written.
+    Skipped,
+    /// It could not be written.
+    Failed,
+}
+
+impl LandingOutcome {
+    const fn to_wire(self) -> u8 {
+        match self {
+            Self::Created => 0,
+            Self::Replaced => 1,
+            Self::Merged => 2,
+            Self::Skipped => 3,
+            Self::Failed => 4,
+        }
+    }
+
+    const fn from_wire(raw: u8) -> Result<Self, Errno> {
+        Ok(match raw {
+            0 => Self::Created,
+            1 => Self::Replaced,
+            2 => Self::Merged,
+            3 => Self::Skipped,
+            4 => Self::Failed,
+            _ => return Err(Errno::OutOfRange),
+        })
+    }
 }
 
 /// Longest reply to a [`WindowRequest::QueryDragSpot`]: the status word, the
@@ -9655,14 +10107,14 @@ mod tests {
         encode_minted_id_reply, encode_notify_sources_reply, encode_open_target_reply,
         encode_picked_name_reply, encode_terrain_reply, encode_wallpapers_reply,
         hand_over_wire_len, open_menu_wire_len, put_i32, put_u16, put_u64, read_i32, read_u16,
-        read_u32, AppBar, AppBarClick, AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText,
-        AppMenuIconView, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason,
-        AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut, AppMenuSymbol, BundleRunPath,
-        ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DropOperation,
-        DropSite, DropTarget, HandOverDocument, HandOverOutcome, HandOverTarget, IconAsset,
-        LayerDepth, MenuOutcome, MenuRefusal, OpenTarget, PaneName, PickPurpose, PinchPhase,
-        PointerAction, SaveFormat, SaveFormats, TerrainPlate, TooltipText, WallpaperEntry,
-        WindowEvent, WindowRegion, WindowRequest, WindowSizeState, WindowSizing, WindowTitle,
+        read_u32, AppBar, AppBarClick, AppMenu, AppMenuEntry, AppMenuEntryText, AppMenuIconView,
+        AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole,
+        AppMenuRow, AppMenuRowView, AppMenuShortcut, AppMenuSymbol, BundleRunPath, ClipboardHeld,
+        ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DropOperation, DropSite,
+        DropTarget, HandOverDocument, HandOverOutcome, HandOverTarget, IconAsset, LayerDepth,
+        MenuOutcome, MenuRefusal, OpenTarget, PaneName, PickPurpose, PinchPhase, PointerAction,
+        SaveFormat, SaveFormats, TerrainPlate, TooltipText, WallpaperEntry, WindowEvent,
+        WindowRegion, WindowRequest, WindowSizeState, WindowSizing, WindowTitle,
         APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET,
         APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX, APP_MENU_KIND_SEPARATOR,
         APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS,
@@ -9673,9 +10125,9 @@ mod tests {
         APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_SYMBOL_OFFSET, APP_MENU_ROW_WIRE_LEN,
         APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET, CLIPBOARD_MAX_BYTES,
         CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN, DESKTOP_LAYER_MAX_PLATES,
-        DESKTOP_LAYER_MAX_SIDE_LOGICAL, DRAG_EVENT_KIND_OFFSET, DRAG_EVENT_SERIAL_OFFSET,
-        DRAG_EVENT_SHIFT_OFFSET, DRAG_EVENT_WINDOW_OFFSET, DRAG_EVENT_X_OFFSET,
-        DRAG_FILETYPE_OFFSET, DRAG_FLAGS_OFFSET, DRAG_NAME_OFFSET, DRAG_TYPED,
+        DESKTOP_LAYER_MAX_SIDE_LOGICAL, DESKTOP_LAYER_MAX_SIDE_PHYSICAL, DRAG_EVENT_KIND_OFFSET,
+        DRAG_EVENT_SERIAL_OFFSET, DRAG_EVENT_SHIFT_OFFSET, DRAG_EVENT_WINDOW_OFFSET,
+        DRAG_EVENT_X_OFFSET, DRAG_FILETYPE_OFFSET, DRAG_FLAGS_OFFSET, DRAG_NAME_OFFSET, DRAG_TYPED,
         DROP_TARGET_REPLY_FLAGS_OFFSET, HAND_OVER_FLAGS_OFFSET, HAND_OVER_GRANT_OFFSET,
         HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PANE,
         HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX, HAND_OVER_WRITABLE, ICON_ASSET_MAX,
@@ -9719,12 +10171,20 @@ mod tests {
         SAVER_REPLY_OPTIONS, SAVER_REPLY_OPTION_COUNT, SAVER_REPLY_ORIGIN, SAVER_REPLY_PURPOSE,
         SAVER_REPLY_STANDING, SAVER_REPLY_TITLE_LEN, WINDOW_SCREENSAVER_REPLY_MAX,
     };
-    use super::{DragPicture, DRAG_PICTURE_HEAD, DRAG_PICTURE_PLACED, DRAG_SHOWN_MAX};
+    use super::{
+        DragOwnIcon, DragOwnSource, DragPicture, IconPath, DRAG_OWN_HEAD, DRAG_PICTURE_HEAD,
+        DRAG_PICTURE_OWN, DRAG_PICTURE_PLACED, DRAG_PICTURE_STAMPED, DRAG_SHOWN_MAX, ICON_PATH_MAX,
+    };
+    use super::{
+        LandingName, LandingOutcome, LandingStep, DROP_LANDING_DETAIL_OFFSET,
+        DROP_LANDING_NAME_OFFSET, DROP_LANDING_STEP_OFFSET, LANDING_MAKING,
+    };
     use super::{PreviewOutcome, PreviewSubject, SystemTask};
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageList, DamageRect, DisplayFormat, MAX_DAMAGE_RECTS};
     use crate::elevate::{ElevateWords, ELEVATE_MAX_ARGS, ELEVATE_MAX_ARGV_BYTES};
-    use crate::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
+    use crate::fs::DocumentStamp;
+    use crate::input::{KeyInput, KeyValue, Modifiers, PhysicalKey, PointerButtonCode};
     use crate::pinboard_ipc::PinboardDocument;
     use crate::seat::SEATMGR_ENDPOINT;
     use crate::Errno;
@@ -9881,7 +10341,8 @@ mod tests {
         }
     }
 
-    fn sample_create_tool(carry: Option<u32>) -> WindowRequest {
+    /// A tool window carried at `carry`, sized as `sizing` says.
+    fn sample_create_tool(carry: Option<u32>, sizing: WindowSizing) -> WindowRequest {
         WindowRequest::CreateTool {
             parent_window_id: 3,
             shm_handle: 7,
@@ -9895,8 +10356,17 @@ mod tests {
             offset_y: 32,
             carry,
             title: WindowTitle::new("Colour").expect("a title"),
+            sizing,
         }
     }
+
+    /// A range a tool window may be resized within.
+    const TOOL_RANGE: WindowSizing = WindowSizing::Resizable {
+        min_width_px: 60,
+        min_height_px: 80,
+        max_width_px: 400,
+        max_height_px: 600,
+    };
 
     /// Distinct tasks get distinct mailbox ids that embed the pid recoverably
     /// and never land on a reserved rendezvous, right up to the widest pid
@@ -10154,28 +10624,60 @@ mod tests {
         crate::fs::Filetype::new(raw).expect("twelve bits")
     }
 
-    /// As many formats as a save pick holds, each typed and naming as many
-    /// extensions as one may, each as long as one may be.
     /// A picture of the class `asset`, standing `from` the press.
     fn picture(asset: &str, from: Option<(i32, i32)>) -> DragPicture {
         DragPicture {
             icon: IconAsset::new(asset).expect("a valid asset id"),
             from,
+            own: None,
         }
     }
 
+    /// A version of a file a listing may name, every field set.
+    fn listed_stamp() -> DocumentStamp {
+        DocumentStamp {
+            size: u64::MAX,
+            modified: crate::time::Time64::new(-1, 999_999_999).expect("canonical"),
+            id: crate::fs::FileId {
+                volume: [0xA5; 16],
+                node: u64::MAX - 1,
+            },
+            content_gen: 7,
+        }
+    }
+
+    /// The `source` at a path exactly as long as one may be, ending `leaf`.
+    fn widest_own(source: DragOwnSource, leaf: &str, stamp: Option<DocumentStamp>) -> DragOwnIcon {
+        let folder = "d".repeat(ICON_PATH_MAX - leaf.len() - 2);
+        DragOwnIcon::new(source, &alloc::format!("/{folder}/{leaf}"), stamp)
+            .expect("the widest own picture")
+    }
+
     /// As many pictures as a drag shows, each named as long as an asset id
-    /// may be, and standing as far off as a place may or nowhere.
+    /// may be, standing as far off as a place may or nowhere, and carrying the
+    /// widest own picture, stamped and not, or none.
     fn widest_pictures() -> [DragPicture; DRAG_SHOWN_MAX] {
         let long = "a".repeat(ICON_ASSET_MAX);
+        let stamp = Some(listed_stamp());
         [
-            picture(&long, Some((i32::MIN, i32::MAX))),
+            DragPicture {
+                own: Some(widest_own(DragOwnSource::Bundle, "x.app", stamp)),
+                ..picture(&long, Some((i32::MIN, i32::MAX)))
+            },
             picture(&long, None),
-            picture(&long, Some((i32::MAX, i32::MIN))),
-            picture(&long, Some((0, 0))),
+            DragPicture {
+                own: Some(widest_own(DragOwnSource::RiscOsApplication, "!x", None)),
+                ..picture(&long, Some((i32::MAX, i32::MIN)))
+            },
+            DragPicture {
+                own: Some(widest_own(DragOwnSource::Bundle, "x.app", stamp)),
+                ..picture(&long, Some((0, 0)))
+            },
         ]
     }
 
+    /// As many formats as a save pick holds, each typed and naming as many
+    /// extensions as one may, each as long as one may be.
     fn widest_formats() -> SaveFormats {
         let mut formats = SaveFormats::ANY;
         for slot in 0..SAVE_FORMATS_MAX {
@@ -10243,7 +10745,12 @@ mod tests {
             purpose: PickPurpose::Folder,
         });
         visit(WindowRequest::TakeDropTarget { window_id: 9 });
-        for verdict in [None, Some(DropOperation::Copy), Some(DropOperation::Move)] {
+        for verdict in [
+            None,
+            Some(DropOperation::Copy),
+            Some(DropOperation::Move),
+            Some(DropOperation::Link),
+        ] {
             visit(WindowRequest::DragVerdict {
                 window_id: 9,
                 serial: 3,
@@ -10270,6 +10777,37 @@ mod tests {
         }
     }
 
+    /// The steps of a drop [`each_request`] visits: an item begun under the
+    /// narrowest and widest name, each outcome, and the end.
+    fn each_landing_request(visit: &mut impl FnMut(WindowRequest)) {
+        for (item, len) in [(0, 1), (u32::MAX, crate::FS_NAME_MAX)] {
+            let name = LandingName::new(&"n".repeat(len)).expect("a valid name");
+            visit(WindowRequest::DropLanding {
+                window_id: 9,
+                serial: u32::MAX,
+                step: LandingStep::Making { item, name },
+            });
+        }
+        for outcome in [
+            LandingOutcome::Created,
+            LandingOutcome::Replaced,
+            LandingOutcome::Merged,
+            LandingOutcome::Skipped,
+            LandingOutcome::Failed,
+        ] {
+            visit(WindowRequest::DropLanding {
+                window_id: 9,
+                serial: 4,
+                step: LandingStep::Made { item: 2, outcome },
+            });
+        }
+        visit(WindowRequest::DropLanding {
+            window_id: 9,
+            serial: 4,
+            step: LandingStep::Ended,
+        });
+    }
+
     fn sample_create_dialog(modality: super::DialogModality) -> WindowRequest {
         WindowRequest::CreateDialog {
             owner_window_id: 3,
@@ -10289,8 +10827,8 @@ mod tests {
     fn each_opening_request(visit: &mut impl FnMut(WindowRequest)) {
         visit(sample_create());
         visit(sample_create_popup());
-        visit(sample_create_tool(None));
-        visit(sample_create_tool(Some(179)));
+        visit(sample_create_tool(None, WindowSizing::Fixed));
+        visit(sample_create_tool(Some(179), TOOL_RANGE));
         visit(sample_create_dialog(super::DialogModality::Modeless));
         visit(sample_create_dialog(super::DialogModality::OwnerModal));
     }
@@ -10352,6 +10890,7 @@ mod tests {
         visit(widest_present());
         visit(WindowRequest::Close { window_id: 9 });
         each_pick_request(&mut visit);
+        each_landing_request(&mut visit);
         visit(WindowRequest::Resize {
             window_id: 3,
             shm_handle: 11,
@@ -10442,6 +10981,11 @@ mod tests {
                 "id::07070707-0707-0707-0707-070707070707/",
                 "usb1",
             ])),
+            SystemTask::Retitle(words(&[
+                "id::07070707-0707-0707-0707-070707070707/",
+                "HOLIDAY",
+                "usb1",
+            ])),
         ] {
             visit(WindowRequest::Authorise {
                 window_id: core::num::NonZeroU64::new(9),
@@ -10466,7 +11010,11 @@ mod tests {
             shape: CursorShape::Text,
         });
         visit(WindowRequest::ActivateWindow { window_id: 9 });
-        for kind in [ClipboardKind::Text, ClipboardKind::Octets] {
+        for kind in [
+            ClipboardKind::Text,
+            ClipboardKind::Octets,
+            ClipboardKind::Png,
+        ] {
             visit(WindowRequest::SetClipboard {
                 window_id: 9,
                 shm_handle: 4,
@@ -10495,6 +11043,67 @@ mod tests {
             let bytes = request.frame();
             assert_eq!(WindowRequest::from_bytes(&bytes), Ok(request));
         });
+    }
+
+    /// A drop's step is a known step for a named window, with a known outcome
+    /// or a name; anything else is refused rather than read as one.
+    #[test]
+    fn a_drop_landing_refuses_what_no_step_is() {
+        let name = LandingName::new("notes.txt").expect("a valid name");
+        let making = WindowRequest::DropLanding {
+            window_id: 9,
+            serial: 4,
+            step: LandingStep::Making { item: 1, name },
+        };
+        let made = WindowRequest::DropLanding {
+            window_id: 9,
+            serial: 4,
+            step: LandingStep::Made {
+                item: 1,
+                outcome: LandingOutcome::Failed,
+            },
+        };
+        let mut frame = making.frame();
+        frame[DROP_LANDING_STEP_OFFSET] = 3;
+        assert_eq!(
+            WindowRequest::from_bytes(&frame),
+            Err(Errno::OutOfRange),
+            "no such step"
+        );
+        let mut frame = made.frame();
+        frame[DROP_LANDING_DETAIL_OFFSET] = 5;
+        assert_eq!(
+            WindowRequest::from_bytes(&frame),
+            Err(Errno::OutOfRange),
+            "no such outcome"
+        );
+        let mut frame = made.frame();
+        frame[DROP_LANDING_STEP_OFFSET] = LANDING_MAKING;
+        frame[DROP_LANDING_DETAIL_OFFSET] = 0;
+        assert_eq!(
+            WindowRequest::from_bytes(&frame),
+            Err(Errno::LengthOutOfRange),
+            "an item lands under a name"
+        );
+        let mut frame = making.frame();
+        frame[DROP_LANDING_NAME_OFFSET] = 0x07;
+        assert_eq!(
+            WindowRequest::from_bytes(&frame),
+            Err(Errno::OutOfRange),
+            "a name holds no control character"
+        );
+        let mut frame = making.frame();
+        frame[8..16].fill(0);
+        assert_eq!(
+            WindowRequest::from_bytes(&frame),
+            Err(Errno::OutOfRange),
+            "a window is named"
+        );
+        assert_eq!(
+            LandingName::new(""),
+            Err(Errno::LengthOutOfRange),
+            "no empty name is built"
+        );
     }
 
     /// Every operation encodes to exactly its own declared length, and a
@@ -11227,7 +11836,7 @@ mod tests {
                     AppMenuSymbol::Open,
                 )
                 .with_icon_bundle(
-                    AppMenuBundle::new("/System/Applications/view.app").expect("a valid path"),
+                    IconPath::new("/System/Applications/view.app").expect("a valid path"),
                 ),
             ),
             1,
@@ -12715,7 +13324,7 @@ mod tests {
         let at = DRAG_NAME_OFFSET + "a.txt".len() + 1;
         assert_eq!(bytes[at], 0, "placed nowhere");
         let mut unknown = bytes;
-        unknown[at] = DRAG_PICTURE_PLACED << 1;
+        unknown[at] = 0x80;
         let mut stated = bytes;
         put_i32(&mut stated, at + 1, 7);
         let mut unprintable = bytes;
@@ -12758,6 +13367,116 @@ mod tests {
             items.pictures().next().and_then(|shown| shown.from),
             Some((-12, 30))
         );
+    }
+
+    /// A dragged application, command and RISC OS application each carry
+    /// their own picture by its path, at the version listed or at none, and
+    /// come back exactly as they went; a path a drag cannot carry is refused
+    /// at once — too long for the bound, not absolute, or with a last
+    /// component that does not name what its source says.
+    #[test]
+    fn a_drag_carries_an_items_own_picture_by_its_path() {
+        let (bundle, riscos) = (DragOwnSource::Bundle, DragOwnSource::RiscOsApplication);
+        let stamp = Some(listed_stamp());
+        let listed = [
+            (bundle, "/Users/ann/Applications/Edit.app", stamp),
+            (bundle, "/System/Commands/ls.app", None),
+            (riscos, "/Storage/disc/!Edit", stamp),
+        ];
+        let pictures = listed.map(|(source, path, stamp)| {
+            let own = DragOwnIcon::new(source, path, stamp).expect("an own picture");
+            assert_eq!(
+                (own.source(), own.path(), own.stamp()),
+                (source, path, stamp)
+            );
+            DragPicture {
+                own: Some(own),
+                ..picture("app-bundle", Some((4, -2)))
+            }
+        });
+        let name = DocumentName::new("Edit.app").expect("a valid name");
+        let drag = WindowRequest::BeginDrag {
+            window_id: 9,
+            items: DragItems::new(name, 3, false, pictures).expect("three items"),
+        };
+        assert_eq!(WindowRequest::from_bytes(&drag.frame()), Ok(drag));
+
+        for (source, path, why) in [
+            (bundle, "Applications/Edit.app", "relative"),
+            (bundle, "", "no path"),
+            (bundle, "/Users/ann/Edit.app/", "no last component"),
+            (bundle, "/Users/ann/Edit", "no bundle's name"),
+            (bundle, "/Storage/disc/!Edit", "a RISC OS name"),
+            (riscos, "/Storage/disc/Edit", "no application name"),
+            (riscos, "/Storage/disc/!", "a bare bang"),
+            (bundle, "/Users/ann/\u{7}.app", "a control character"),
+        ] {
+            assert_eq!(
+                DragOwnIcon::new(source, path, None),
+                Err(Errno::OutOfRange),
+                "{why}"
+            );
+        }
+        let over = alloc::format!("/{}/x.app", "d".repeat(ICON_PATH_MAX));
+        assert_eq!(
+            DragOwnIcon::new(bundle, &over, None),
+            Err(Errno::LengthOutOfRange),
+            "a path past the bound"
+        );
+    }
+
+    /// An own picture is read only as it was written: a path that is not
+    /// absolute, a bundle tagged as a RISC OS application, an unknown source,
+    /// a stamp flagged with no own picture, a path running past the frame and
+    /// a time that is not canonical are refused.
+    #[test]
+    fn a_drag_own_picture_is_read_only_as_it_was_written() {
+        let name = DocumentName::new("Edit.app").expect("a valid name");
+        let path = "/Users/ann/Edit.app";
+        let own =
+            DragOwnIcon::new(DragOwnSource::Bundle, path, Some(listed_stamp())).expect("a bundle");
+        let carried = DragPicture {
+            own: Some(own),
+            ..picture("app-bundle", None)
+        };
+        let drag = WindowRequest::BeginDrag {
+            window_id: 9,
+            items: DragItems::new(name, 1, false, [carried]).expect("one bundle"),
+        };
+        let bytes = drag.frame();
+        assert_eq!(WindowRequest::from_bytes(&bytes), Ok(drag));
+        let at = DRAG_NAME_OFFSET + "Edit.app".len() + 1;
+        assert_eq!(bytes[at], DRAG_PICTURE_OWN | DRAG_PICTURE_STAMPED);
+        let own_at = at + DRAG_PICTURE_HEAD + "app-bundle".len();
+        let path_at = own_at + DRAG_OWN_HEAD;
+        let nanos_at = path_at + path.len() + 16;
+        let mut relative = bytes;
+        relative[path_at] = b'U';
+        let mut retagged = bytes;
+        retagged[own_at] = DragOwnSource::RiscOsApplication.to_wire();
+        let mut unknown = bytes;
+        unknown[own_at] = 0;
+        let mut overrun = bytes;
+        overrun[own_at + 1] = u8::MAX;
+        let mut late = bytes;
+        late[nanos_at..nanos_at + 4].copy_from_slice(&1_000_000_000u32.to_le_bytes());
+        let plain = WindowRequest::BeginDrag {
+            window_id: 9,
+            items: DragItems::new(name, 1, false, [picture("app-bundle", None)])
+                .expect("one bundle"),
+        };
+        let mut unowned = plain.frame();
+        unowned[at] = DRAG_PICTURE_STAMPED;
+        for (bad, refusal, why) in [
+            (&relative, Errno::OutOfRange, "not absolute"),
+            (&retagged, Errno::OutOfRange, "a bundle tagged RISC OS"),
+            (&unknown, Errno::OutOfRange, "an unknown source"),
+            (&unowned, Errno::OutOfRange, "a stamp with no own picture"),
+            (&overrun, Errno::BufferTooSmall, "a path past the frame"),
+            (&late, Errno::TimestampOutOfRange, "a time not canonical"),
+        ] {
+            assert_eq!(WindowRequest::from_bytes(bad), Err(refusal), "{why}");
+        }
     }
 
     /// The ending a source hides is a whole tail of the name, never all of it
@@ -12853,15 +13572,20 @@ mod tests {
     }
 
     #[test]
-    fn a_verdict_outside_refuse_copy_and_move_is_refused() {
+    fn a_verdict_outside_refuse_copy_move_and_link_is_refused() {
         let frame = WindowRequest::DragVerdict {
             window_id: 9,
             serial: 1,
-            verdict: Some(DropOperation::Move),
+            verdict: Some(DropOperation::Link),
         };
         let len = frame.wire_len();
         let mut bytes = frame.frame();
-        bytes[WINDOW_ID_WIRE_LEN + 4] = 3;
+        assert_eq!(
+            WindowRequest::from_bytes(&bytes[..len]),
+            Ok(frame),
+            "a link verdict crosses"
+        );
+        bytes[WINDOW_ID_WIRE_LEN + 4] = 4;
         assert_eq!(
             WindowRequest::from_bytes(&bytes[..len]),
             Err(Errno::OutOfRange)
@@ -12911,6 +13635,13 @@ mod tests {
                 site: DropSite::Desktop {
                     serial: 9,
                     operation: DropOperation::Move,
+                },
+            },
+            WindowEvent::DragEnded {
+                window_id: 4,
+                site: DropSite::Desktop {
+                    serial: 10,
+                    operation: DropOperation::Link,
                 },
             },
         ];
@@ -13597,18 +14328,62 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_window_round_trips_with_and_without_a_carry() {
+    fn a_tool_window_round_trips_with_and_without_a_carry_fixed_or_resizable() {
         for carry in [None, Some(0), Some(179)] {
-            let request = sample_create_tool(carry);
-            let frame = request.frame();
-            assert_eq!(frame.len(), super::CREATE_TOOL_WIRE_LEN);
-            assert_eq!(WindowRequest::from_bytes(&frame), Ok(request));
+            for sizing in [WindowSizing::Fixed, TOOL_RANGE] {
+                let request = sample_create_tool(carry, sizing);
+                let frame = request.frame();
+                assert_eq!(frame.len(), super::CREATE_TOOL_WIRE_LEN);
+                assert_eq!(WindowRequest::from_bytes(&frame), Ok(request));
+            }
         }
     }
 
     #[test]
+    fn a_tool_window_states_its_sizing_on_the_terms_a_window_does() {
+        let at = super::TOOL_SIZING_OFFSET;
+        let resizable = sample_create_tool(None, TOOL_RANGE).frame();
+        assert_eq!(
+            resizable[at..at + super::SIZING_WIRE_LEN],
+            sample_create_ranged(60, 80, 400, 600).frame()[CREATE_SIZING_OFFSET..CREATE_WIRE_LEN],
+            "one sizing block for every request that carries one"
+        );
+        let edited = |mut frame: Frame, offset: usize, value: &[u8]| {
+            frame[offset..offset + value.len()].copy_from_slice(value);
+            WindowRequest::from_bytes(&frame)
+        };
+        let fixed = sample_create_tool(None, WindowSizing::Fixed).frame();
+        assert_eq!(
+            edited(fixed, at, &[2]),
+            Err(Errno::OutOfRange),
+            "a dirty flag"
+        );
+        assert_eq!(
+            edited(fixed, at + SIZING_MAX_WIDTH, &900u32.to_le_bytes()),
+            Err(Errno::LengthOutOfRange),
+            "a range on a tool window that is never resized"
+        );
+        assert_eq!(
+            edited(resizable, at + SIZING_MAX_WIDTH, &59u32.to_le_bytes()),
+            Err(Errno::OutOfRange),
+            "a ceiling under its floor"
+        );
+        let crossed = sample_create_tool(
+            None,
+            WindowSizing::Resizable {
+                min_width_px: 60,
+                min_height_px: 80,
+                max_width_px: 59,
+                max_height_px: 600,
+            },
+        );
+        let mut out = [0u8; WindowRequest::MAX_WIRE_LEN];
+        assert_eq!(crossed.encode(&mut out), Err(Errno::OutOfRange), "nor sent");
+    }
+
+    #[test]
     fn a_tool_window_refuses_what_a_transient_refuses_and_a_bad_carry_or_title() {
-        let base = sample_create_tool(Some(12));
+        let base = sample_create_tool(Some(12), WindowSizing::Fixed);
         let refused = |edit: &dyn Fn(&mut [u8])| {
             let mut frame = base.frame();
             edit(&mut frame);
@@ -13899,6 +14674,7 @@ mod tests {
                 ctrl: true,
                 ..Modifiers::default()
             },
+            physical: PhysicalKey::from_usage(0x14),
         }
     }
 
@@ -15343,10 +16119,10 @@ mod tests {
 
     #[test]
     fn open_layer_refuses_a_surface_wider_or_taller_than_the_bound() {
-        // The bound is what keeps a layer surface from covering the desktop
-        // or reproducing a trusted prompt, so the decoder refuses rather
-        // than clamping.
-        let max = DESKTOP_LAYER_MAX_SIDE_LOGICAL;
+        // The decoder knows no scale, so it refuses only what no scale could
+        // admit, rather than clamping; the session holds the rest to the
+        // logical bound at the live scale.
+        let max = DESKTOP_LAYER_MAX_SIDE_PHYSICAL;
         assert!(WindowRequest::from_bytes(&layer_open(max, max).frame()).is_ok());
         assert_eq!(
             WindowRequest::from_bytes(&layer_open(max + 1, max).frame()),
@@ -15356,6 +16132,15 @@ mod tests {
             WindowRequest::from_bytes(&layer_open(max, max + 1).frame()),
             Err(Errno::LengthOutOfRange)
         );
+    }
+
+    /// A companion within the logical bound is drawn larger than it in
+    /// physical pixels at a larger UI scale, and the wire carries it.
+    #[test]
+    fn open_layer_carries_a_surface_within_the_bound_at_a_larger_scale() {
+        let at_150 = DESKTOP_LAYER_MAX_SIDE_LOGICAL * 3 / 2;
+        assert!(at_150 > DESKTOP_LAYER_MAX_SIDE_LOGICAL);
+        assert!(WindowRequest::from_bytes(&layer_open(at_150, at_150).frame()).is_ok());
     }
 
     #[test]

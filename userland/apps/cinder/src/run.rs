@@ -35,10 +35,9 @@ extern crate alloc;
 mod program {
     use alloc::sync::Arc;
 
-    use tairix_abi::driver::display::{DamageRect, DisplayMode, RefreshRate};
+    use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::window_ipc::{
-        AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuSymbol,
         LayerDepth, PointerAction, TerrainPlate, WindowEvent, WindowSizing,
         DESKTOP_LAYER_MAX_PLATES,
     };
@@ -49,6 +48,7 @@ mod program {
     use tairix_cinder::gait;
     use tairix_cinder::layout::{self, PenLayout, COMPANION_SIDE};
     use tairix_cinder::mind::{Intent, Mind};
+    use tairix_cinder::pace::Pace;
     use tairix_cinder::paint::{companion_origin, pen_client, Painter};
     use tairix_cinder::pen::{Pen, PenAction, Refusal, Whereabouts};
     use tairix_cinder::project::Ground;
@@ -60,20 +60,16 @@ mod program {
     use tairix_raster::Surface;
     use tairix_rng::FastRng;
     use tairix_rt::work::WorkerGuard;
-    use tairix_theme::motion::seconds;
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_util::mathf;
     use tairix_window::app::{self, AppWindow, Wake, WindowPane, EXIT_CHANNEL_LOST};
     use tairix_window::{
-        pointer_input_events, pointer_point, Desktop, EventDrain, EventMailbox, WindowClient,
+        pointer_input_events, pointer_point, Desktop, EventError, EventMailbox, WindowClient,
+        WindowEvents,
     };
 
     /// The wait-set token the saved-mood worker's answer wake arrives under.
     const WRITER_TOKEN: u64 = app::FIRST_APP_TOKEN;
-
-    /// The icon-bar row that lets Cinder out or puts him away, numbered from
-    /// the shared *Quit* id so the two can never collide.
-    const ROW_OUT: u16 = tairix_window::QUIT_ROW + 1;
 
     /// The name this program states its refusals under.
     const APP_NAME: &str = "cinder";
@@ -137,6 +133,8 @@ mod program {
         /// The terrain generation last pulled, so a pull is made only when
         /// the answer would differ.
         terrain_seen: Option<u64>,
+        /// Whether a frame of him has reached the desktop yet.
+        shown: bool,
     }
 
     impl Loose {
@@ -151,7 +149,7 @@ mod program {
             let side = scale.scale_length(COMPANION_SIDE);
             let mode = app::mode_for(side, side);
             let Some(surface) = Surface::new(side, side) else {
-                return Err(Refusal::NoDesktop);
+                return Err(Refusal::NoMemory);
             };
             let origin = companion_origin(at, side);
             let pane = WindowPane::open_layer(
@@ -165,6 +163,7 @@ mod program {
             .map_err(|err| match err.errno() {
                 Errno::PermissionDenied => Refusal::NotPermitted,
                 Errno::LimitExceeded => Refusal::SeatFull,
+                Errno::OutOfMemory => Refusal::NoMemory,
                 _ => Refusal::NoDesktop,
             })?;
             Ok(Self {
@@ -172,6 +171,7 @@ mod program {
                 surface,
                 roam: Roam::new(at),
                 terrain_seen: None,
+                shown: false,
             })
         }
     }
@@ -203,6 +203,15 @@ mod program {
             self.mind.intent() != Intent::Nap
         }
 
+        /// What the loop's next wake depends on.
+        fn pace(&self) -> Pace {
+            Pace {
+                moving: self.is_animated(),
+                unshown: self.loose.as_ref().is_some_and(|loose| !loose.shown),
+                reconsider_in: self.mind.reconsider_in(),
+            }
+        }
+
         /// What Cinder is saved as right now.
         fn saved(&self) -> Saved {
             Saved {
@@ -212,9 +221,7 @@ mod program {
         }
     }
 
-    /// Advance the whole companion by one frame of a desktop refreshing at
-    /// `refresh`, the period the session's pacer admits frames at — so a
-    /// companion is never woken for a frame the pacer would then refuse.
+    /// Advance the whole companion by `dt` seconds.
     ///
     /// Returns whether the pen needs repainting; the layer surface presents
     /// itself, because only it knows whether it moved.
@@ -222,9 +229,8 @@ mod program {
         companion: &mut Companion,
         client: &mut WindowClient<tairix_window::app::RtWindowTransport>,
         layout: &PenLayout,
-        refresh: RefreshRate,
+        dt: f64,
     ) -> bool {
-        let dt = seconds(refresh.frame_ns());
         companion.elapsed += dt;
 
         let Some(loose) = companion.loose.as_mut() else {
@@ -267,6 +273,7 @@ mod program {
             // a channel that has really gone is caught by the event drain.
             return false;
         }
+        loose.shown = true;
         let origin = companion_origin(loose.roam.at(), side);
         let _ = loose
             .pane
@@ -337,24 +344,7 @@ mod program {
         event_endpoint: u64,
         loose: bool,
     ) {
-        let (text, symbol) = if loose {
-            ("Bring Cinder home", AppMenuSymbol::BringHome)
-        } else {
-            ("Let Cinder out", AppMenuSymbol::LetOut)
-        };
-        let Some(row) = AppMenuItemId::new(ROW_OUT)
-            .ok()
-            .zip(AppMenuLabel::new(text).ok())
-            .map(|(id, label)| AppMenuRow::Item(AppMenuItem::new(id, label, symbol)))
-        else {
-            app::report(
-                APP_NAME,
-                "this application's icon-bar menu is invalid; carrying on without one",
-            );
-            return;
-        };
-        let rows = alloc::vec![row];
-        let declared = tairix_window::declaration(event_endpoint, AppBarClick::RaiseOrOpen, &rows);
+        let declared = tairix_cinder::appbar::declaration(event_endpoint, loose);
         if let Err(refused) = tairix_window::declare_app_bar(client, declared) {
             app::report(APP_NAME, format_args!("{refused}"));
         }
@@ -541,8 +531,9 @@ mod program {
         event_endpoint: u64,
         server: ProcId,
     ) -> i32 {
-        let mut mailbox = EventMailbox::new(event_endpoint, server);
+        let mut events = WindowEvents::new(EventMailbox::new(event_endpoint, server));
         let mut pen_open = true;
+        let mut advanced_at = tairix_rt::clock_get();
         let mut plates = [TerrainPlate {
             x: 0,
             y: 0,
@@ -551,23 +542,10 @@ mod program {
         }; DESKTOP_LAYER_MAX_PLATES as usize];
 
         loop {
-            // A frame deadline while anything moves; none at all when nothing
-            // does, so a dozing companion costs no wake.
-            let wake = if companion.is_animated() {
-                let deadline = tairix_rt::clock_get().saturating_add(desktop.refresh().frame_ns());
-                match app::park_until(set, deadline) {
-                    Ok(wake) => wake,
-                    Err(_) => {
-                        return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "the wait set was torn down")
-                    }
-                }
-            } else {
-                match app::park(set) {
-                    Ok(wake) => Some(wake),
-                    Err(_) => {
-                        return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "the wait set was torn down")
-                    }
-                }
+            let frame_ns = desktop.refresh().frame_ns();
+            let deadline = companion.pace().wake_at(tairix_rt::clock_get(), frame_ns);
+            let Ok(wake) = app::park_until(set, deadline) else {
+                return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "the wait set was torn down");
             };
 
             match wake {
@@ -587,8 +565,12 @@ mod program {
                 Some(Wake::PressureChanged | Wake::PressureUnchanged | Wake::App(_)) => continue,
                 // The frame deadline: advance and present.
                 None => {
-                    let repaint =
-                        advance_frame(companion, window.client(), pen_layout, desktop.refresh());
+                    let now = tairix_rt::clock_get();
+                    let dt = companion
+                        .pace()
+                        .step(now.saturating_sub(advanced_at), frame_ns);
+                    advanced_at = now;
+                    let repaint = advance_frame(companion, window.client(), pen_layout, dt);
                     if repaint && pen_open {
                         present_pen(
                             companion,
@@ -602,20 +584,22 @@ mod program {
                 }
             }
 
-            // Drain every event the mailbox holds.
-            let mut frame = [0u8; WindowEvent::WIRE_LEN];
+            // Drain every event, the answers to posted presents collected
+            // first: one left uncollected keeps the wait set ready.
             loop {
-                match mailbox.try_next(&mut frame) {
-                    Ok(true) => {}
-                    Ok(false) => break,
-                    Err(_) => {
+                let event = match events.try_wait(window.client()) {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break,
+                    // Already consumed and nothing guessed at; the next read
+                    // moves past it.
+                    Err(EventError::Undecodable(_)) => continue,
+                    Err(EventError::Refused(refused)) => {
+                        app::report(APP_NAME, refused);
+                        continue;
+                    }
+                    Err(EventError::Mailbox(_)) => {
                         return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "the event channel was lost")
                     }
-                }
-                let Ok(event) = WindowEvent::from_bytes(&frame) else {
-                    // A frame this build will not decode is already consumed
-                    // and nothing was guessed at; the next read moves past it.
-                    continue;
                 };
                 match event {
                     WindowEvent::CloseRequested { .. } => {
@@ -648,7 +632,7 @@ mod program {
                             put_away(companion, window, pen_layout);
                             return 0;
                         }
-                        if item.get() == ROW_OUT {
+                        if item.get() == tairix_cinder::appbar::ROW_OUT {
                             toggle_whereabouts(
                                 companion,
                                 window,

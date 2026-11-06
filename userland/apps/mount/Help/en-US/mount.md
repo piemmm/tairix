@@ -8,6 +8,12 @@ mount — list the mounted filesystems, or mount a disk image or archive
 
 `mount [option...] image [target]`
 
+`mount --list-held`
+
+`mount --replay-held name`
+
+`mount --discard-held name`
+
 ## DESCRIPTION
 
 With no operands, lists the mounted filesystems, one
@@ -47,6 +53,16 @@ login session ends. An image that holds a partitioned disk, one disk of
 a RAID array, or a filesystem whose recorded owners are always honoured
 (ext2, ext3, ext4, ARXFS) is not mounted, and `mount` says why.
 
+A disk put back while it still held changes not yet written to it is
+mounted read-only, the changes kept, when its device cannot show that it
+is the same disk and not a copy; the listing marks it
+`[replay-unconfirmed]`, and `--list-held` lists only such volumes.
+`--replay-held` writes the changes to it, if its contents show it
+unchanged since; `--discard-held` gives them up and takes the disk as it
+stands. Either way the volume is mounted again, read-write where it can
+be. Answering needs the mount authority (`CAP_FS_MOUNT`); the desktop
+also asks the user at the computer about a removable disk.
+
 ## OPTIONS
 
 - `-r, --read-only` — mount the volume read-only (as `-o ro`).
@@ -72,6 +88,13 @@ a RAID array, or a filesystem whose recorded owners are always honoured
 - `-v, --verbose` — say where the volume was mounted.
 - `-l, --show-labels` — accepted for the listing, which carries no
   labels to add.
+- `--list-held` — list only the volumes holding changes that wait for
+  `--replay-held` or `--discard-held`.
+- `--replay-held <name>` — write the changes a volume holds to its disk,
+  if its contents still show it unchanged; `name` is the volume's name in
+  `/Storage`, a directory it is shown at, or its `id::` root.
+- `--discard-held <name>` — give up the changes a volume holds, taking
+  its disk as it stands.
 - `-h, -?, --help` — show this command's own short help.
 
 ## EXAMPLES
@@ -87,15 +110,21 @@ a RAID array, or a filesystem whose recorded owners are always honoured
   write it and its folder.
 - `mount -r backup.tar.gz /Storage/backup` — mount a compressed tar
   read-only as `backup`.
+- `mount --list-held` — list the volumes whose changes wait for an
+  answer.
+- `mount --replay-held backup` — write the changes `/Storage/backup`
+  holds to its disk.
 
 ## EXIT STATUS
 
-- `0` — the listing was written, or the volume was mounted (or the
-  short help was written).
-- `1` — the command line was not understood.
+- `0` — the listing was written, the volume was mounted, or its held
+  changes were written or given up (or the short help was written).
+- `1` — the command line was not understood, or you may not answer for
+  the volume's changes.
 - `2` — the mount listing could not be read, or the terminal could not
   be written.
-- `32` — the image was not mounted.
+- `32` — the image was not mounted, or the volume's changes were not
+  written or given up.
 
 ## ENVIRONMENT
 

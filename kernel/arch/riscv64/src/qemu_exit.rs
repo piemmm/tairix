@@ -12,7 +12,8 @@
 //! Zero is therefore this board's *success* status, which is why a
 //! failure code is a [`NonZeroU16`]: a zero-coded failure would exit
 //! QEMU with status `0` and the runner would read the failing run as a
-//! pass.
+//! pass. The host keeps eight bits of that status, so [`fail_word`]
+//! saturates a code above them rather than let 256 exit as a pass.
 //!
 //! The host-side [`tairix_qemu`][crate-runner] crate decodes that status
 //! back into Pass/Fail (zero ⇒ Pass on this board, unlike x86_64's
@@ -45,13 +46,19 @@ pub const FINISHER_FAIL: u32 = 0x3333;
 ///
 /// The `SiFive` Test device interprets a write whose low 16 bits equal
 /// [`FINISHER_FAIL`] as "exit the host process with the status carried in
-/// the high 16 bits". A [`NonZeroU16`] code therefore cannot encode the
-/// zero status the runner reads as a pass. Keeping the shift/mask in a
-/// pure function lets the host tests pin both properties without a
+/// the high 16 bits", and the host keeps the low eight bits of that
+/// status. A code past them is carried as their top, so no failure word
+/// encodes the zero status the runner reads as a pass. Keeping the
+/// encoding in a pure function lets the host tests pin it without a
 /// riscv64 target.
 #[must_use]
 pub const fn fail_word(code: NonZeroU16) -> u32 {
-    ((code.get() as u32) << 16) | FINISHER_FAIL
+    let status = if code.get() > u8::MAX as u16 {
+        u8::MAX as u16
+    } else {
+        code.get()
+    };
+    ((status as u32) << 16) | FINISHER_FAIL
 }
 
 /// Tell QEMU the test passed and **never return**.
@@ -122,19 +129,24 @@ mod tests {
         // `sifive_test` device decodes into the host-process exit code.
         assert_eq!(fail_word(NonZeroU16::MIN), (1 << 16) | 0x3333);
         assert_eq!(fail_word(NonZeroU16::new(42).unwrap()), (42 << 16) | 0x3333);
-        assert_eq!(fail_word(NonZeroU16::MAX), 0xFFFF_3333);
+        assert_eq!(fail_word(NonZeroU16::new(255).unwrap()), 0x00FF_3333);
+        assert_eq!(fail_word(NonZeroU16::MAX), 0x00FF_3333);
     }
 
+    /// The host keeps the low eight bits of the status in the high half, and
+    /// the runner reads `0` as a pass. Regression: code 256 put `0x0100` on
+    /// the bus and exited with the pass status.
     #[test]
     fn no_reportable_code_exits_with_the_pass_status() {
-        // The high half is the status QEMU reports, and the runner reads `0`
-        // as a pass. Widening `code` to `u16` admits `fail_word(0)`, whose
-        // high half is zero — a failing run reported as a passing one.
         for raw in 1..=u16::MAX {
             let word = fail_word(NonZeroU16::new(raw).unwrap());
             assert_eq!(word & 0xFFFF, FINISHER_FAIL);
-            assert_eq!(word >> 16, u32::from(raw));
-            assert_ne!(word >> 16, 0, "code {raw} would exit QEMU with status 0");
+            assert_ne!(
+                (word >> 16) & 0xFF,
+                0,
+                "code {raw} would exit QEMU with status 0"
+            );
+            assert_eq!(word >> 16, u32::from(raw).min(0xFF));
         }
     }
 }

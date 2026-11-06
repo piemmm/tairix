@@ -164,6 +164,7 @@ members = [
     "lib/users",
     "lib/util",
     "lib/vcmailbox",
+    "lib/video",
     "lib/virtio",
     "lib/virtio_input",
     "lib/virtio_net",
@@ -301,6 +302,7 @@ members = [
     "userland/apps/groupdel",
     "userland/apps/head",
     "userland/apps/host",
+    "userland/apps/label",
     "userland/apps/link",
     "userland/apps/ln",
     "userland/apps/ls",
@@ -357,6 +359,7 @@ members = [
     "userland/gui/taskbar",
     "userland/gui/session",
     "userland/gui/switchboard",
+    "userland/gui/recorder",
     "userland/gui/screensavers/clock",
     "userland/gui/screensavers/life",
     "userland/gui/screensavers/raytrace",
@@ -528,6 +531,8 @@ members = [
     "tests/integration/memsoak_qemu_aarch64",
     "tests/integration/optical_program",
     "tests/integration/optical_qemu_aarch64",
+    "tests/integration/twins_program",
+    "tests/integration/twins_qemu_aarch64",
     "tests/integration/images_program",
     "tests/integration/images_qemu_aarch64",
     "tests/integration/stalltrace_program",
@@ -568,13 +573,16 @@ members = [
     "tests/integration/encrypted_root_image",
     "tests/integration/appbar_qemu_aarch64",
     "tests/integration/filepick_qemu_aarch64",
+    "tests/integration/filepicks_qemu_aarch64",
     "tests/integration/handover_qemu_aarch64",
     "tests/integration/fsmutate_qemu_aarch64",
     "tests/integration/menu_qemu_aarch64",
     "tests/integration/datetime_elevate_qemu_aarch64",
     "tests/integration/screensaver_qemu_aarch64",
+    "tests/integration/capture_qemu_aarch64",
     "tests/integration/settings_qemu_aarch64",
     "tests/integration/wintersun_client_qemu_aarch64",
+    "tests/integration/cinder_qemu_aarch64",
     "tests/integration/desktop_pressure_qemu_aarch64",
     "tests/integration/autoload_input_qemu_aarch64",
     "tests/integration/touch_qemu_aarch64",
@@ -762,6 +770,11 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.tairix-display]
+opt-level = 3
+
+# Every frame a recording codes or plays runs through the codec, so at
+# `opt-level = 1` a debug image measures the profile, not the codec.
+[profile.dev.package.tairix-video]
 opt-level = 3
 
 # The ray-traced screensaver traces every pixel of its picture from scratch,

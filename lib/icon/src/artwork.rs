@@ -50,6 +50,8 @@ use core::cell::Cell;
 use core::hash::{Hash, Hasher};
 
 use tairix_abi::appinfo::BUNDLE_SUFFIX;
+use tairix_abi::fs::DocumentStamp;
+use tairix_abi::window_ipc::{DragOwnIcon, DragOwnSource};
 use tairix_abi::BundleEntry;
 use tairix_appstore::{decode_manifest, identity_roots, manifest_path};
 use tairix_hash::BuildFastHash;
@@ -70,7 +72,7 @@ use crate::folder::{
 use crate::glyph::{builtin_icon_at, IconKind};
 use crate::picture::{Artwork, CastShadow, Fitted, IconPicture};
 use crate::riscos::SpriteNames;
-use crate::thumbnail::{render_thumbnail, ArtworkDocument, DocumentStamp, Thumbnail};
+use crate::thumbnail::{render_thumbnail, ArtworkDocument, Thumbnail};
 
 /// Where the OS ships its desktop graphics assets.
 pub const GRAPHICS_DIR: &str = "/System/Graphics";
@@ -329,6 +331,20 @@ pub trait ArtworkResolver {
     /// The default does nothing, which is right for a resolver that holds no
     /// queue.
     fn still_shown(&mut self, _key: &ArtworkKey, _side: u32) {}
+
+    /// The version of the bundle a listing names at `dir`, as `listed`, that
+    /// its picture at `side` is keyed by.
+    ///
+    /// The default reads none of the bundle's files and keys it by what was
+    /// listed, so one changed where its folder does not see it keeps the
+    /// picture drawn for it. A resolver whose producer reads the manifest and
+    /// the icon file a bundle is pictured from keys it by those once it has
+    /// read them ([`BundleVersion::Files`]), so a bundle a copy was still
+    /// writing is decoded again once its files are complete, and one whose
+    /// files stand is not.
+    fn bundle_version(&mut self, _dir: &str, listed: DocumentStamp, _side: u32) -> BundleVersion {
+        BundleVersion::Listed(listed)
+    }
 }
 
 /// The resolver that reads and decodes on the calling thread.
@@ -417,13 +433,16 @@ pub(crate) enum OwnIcon<'a> {
 /// folder it is, to draw where its own will not serve. The resulting order
 /// (own icon, then the folder, then class artwork, then glyph) is the
 /// desktop's one icon-resolution rule, stated here so every surface obeys the
-/// same one.
+/// same one. A request may also name a stand-in, drawn while the thing's own
+/// icon is still produced ([`standing_in`](Self::standing_in)).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct IconRequest<'a> {
     kind: IconKind,
     own: Option<OwnIcon<'a>>,
     /// The folder the thing is, drawn where its own icon will not serve.
     folder: Option<&'a FolderSample>,
+    /// The own picture drawn while the thing's own is still produced.
+    stand_in: Option<OwnIcon<'a>>,
 }
 
 impl<'a> IconRequest<'a> {
@@ -434,6 +453,7 @@ impl<'a> IconRequest<'a> {
             kind,
             own: None,
             folder: None,
+            stand_in: None,
         }
     }
 
@@ -445,6 +465,7 @@ impl<'a> IconRequest<'a> {
             kind,
             own: Some(OwnIcon::Asset(path)),
             folder: None,
+            stand_in: None,
         }
     }
 
@@ -460,13 +481,16 @@ impl<'a> IconRequest<'a> {
             kind,
             own: Some(OwnIcon::Bundle { dir, stamp: None }),
             folder: None,
+            stand_in: None,
         }
     }
 
     /// [`bundle`](Self::bundle), for a bundle a directory listing names at
     /// the version `stamp`: a bundle replaced, or changed where its folder
     /// sees it, is a different picture, and the one drawn before ages out
-    /// rather than being served for it.
+    /// rather than being served for it. Where the resolver reads the files
+    /// the bundle is pictured from, so is one whose manifest or icon file
+    /// changed ([`ArtworkResolver::bundle_version`]).
     #[must_use]
     pub const fn listed_bundle(kind: IconKind, dir: &'a str, stamp: DocumentStamp) -> Self {
         Self {
@@ -476,6 +500,7 @@ impl<'a> IconRequest<'a> {
                 stamp: Some(stamp),
             }),
             folder: None,
+            stand_in: None,
         }
     }
 
@@ -495,6 +520,7 @@ impl<'a> IconRequest<'a> {
             kind,
             own: Some(OwnIcon::Program { name, home }),
             folder: None,
+            stand_in: None,
         }
     }
 
@@ -506,6 +532,7 @@ impl<'a> IconRequest<'a> {
             kind,
             own: Some(OwnIcon::Thumbnail { path, stamp }),
             folder: None,
+            stand_in: None,
         }
     }
 
@@ -524,6 +551,7 @@ impl<'a> IconRequest<'a> {
                 Some(OwnIcon::Folder(sample))
             },
             folder: None,
+            stand_in: None,
         }
     }
 
@@ -542,6 +570,7 @@ impl<'a> IconRequest<'a> {
             kind,
             own: Some(OwnIcon::RiscOsApplication { dir, stamp }),
             folder: None,
+            stand_in: None,
         }
     }
 
@@ -557,10 +586,76 @@ impl<'a> IconRequest<'a> {
         }
     }
 
+    /// This request, drawn while the thing's own icon is still produced by
+    /// the own picture `stand_in` names: what a dropped bundle is drawn by
+    /// while it is written and read, the picture its drag carried. Never in
+    /// place of an own icon that was refused, whose class picture is the
+    /// honest one.
+    #[must_use]
+    pub const fn standing_in(self, stand_in: IconRequest<'a>) -> Self {
+        Self {
+            stand_in: stand_in.own,
+            ..self
+        }
+    }
+
     /// The kind that resolves when nothing of the thing's own does.
     #[must_use]
     pub const fn icon_kind(&self) -> IconKind {
         self.kind
+    }
+
+    /// What a drag carries of this request to the desktop as the item's own
+    /// picture: the bundle or RISC OS application it names, or `None` where
+    /// no path the desktop reads names its own picture — a kind alone, an
+    /// asset, a program, a folder's picture, a thumbnail — or where a drag
+    /// cannot carry the path ([`DragOwnIcon::new`]).
+    #[must_use]
+    pub fn carried(self) -> Option<DragOwnIcon> {
+        let (source, dir, stamp) = match self.own? {
+            OwnIcon::Bundle { dir, stamp } => (DragOwnSource::Bundle, dir, stamp),
+            OwnIcon::RiscOsApplication { dir, stamp } => {
+                (DragOwnSource::RiscOsApplication, dir, stamp)
+            }
+            OwnIcon::Asset(_)
+            | OwnIcon::Program { .. }
+            | OwnIcon::Folder(_)
+            | OwnIcon::Thumbnail { .. } => return None,
+        };
+        DragOwnIcon::new(source, dir, stamp).ok()
+    }
+
+    /// The request a dragged item's picture is drawn by: the own picture `own`
+    /// names, falling back to `kind` — [`carried`](Self::carried) undone, so a
+    /// carried picture resolves by the one tier order.
+    #[must_use]
+    pub fn from_carried(kind: IconKind, own: Option<&'a DragOwnIcon>) -> Self {
+        let own = own.map(|own| match own.source() {
+            DragOwnSource::Bundle => OwnIcon::Bundle {
+                dir: own.path(),
+                stamp: own.stamp(),
+            },
+            DragOwnSource::RiscOsApplication => OwnIcon::RiscOsApplication {
+                dir: own.path(),
+                stamp: own.stamp(),
+            },
+        });
+        Self {
+            kind,
+            own,
+            folder: None,
+            stand_in: None,
+        }
+    }
+
+    /// The candidate a stand-in is drawn by, where the request names one.
+    pub(crate) fn stand_in_tier(self) -> Option<Tier<'a>> {
+        self.stand_in.map(Tier::Own)
+    }
+
+    /// Whether `tier` is the thing's own icon.
+    fn is_own(self, tier: Tier<'a>) -> bool {
+        matches!(tier, Tier::Own(own) if Some(own) == self.own)
     }
 
     /// The candidates this request resolves through, in the order they are
@@ -602,9 +697,22 @@ pub(crate) enum Tier<'a> {
 }
 
 impl<'a> Tier<'a> {
-    /// Whether this candidate is `key`, compared without building a key.
+    /// Whether this candidate is `key`, compared without building a key: a
+    /// listed bundle's picture at whichever version its resolver keyed it by.
     pub(crate) fn names(self, key: &ArtworkKey) -> bool {
-        self.view() == key.view()
+        match (self.view(), key) {
+            (
+                ArtView::Bundle {
+                    dir,
+                    version: Some(_),
+                },
+                ArtworkKey::Bundle {
+                    dir: keyed,
+                    version: Some(_),
+                },
+            ) => dir == keyed.as_str(),
+            (view, key) => view == key.view(),
+        }
     }
 
     /// Whether this candidate is read from a file at or under `tree`
@@ -617,7 +725,10 @@ impl<'a> Tier<'a> {
     fn view(self) -> ArtView<'a> {
         match self {
             Self::Own(OwnIcon::Asset(path)) => ArtView::Asset(path),
-            Self::Own(OwnIcon::Bundle { dir, stamp }) => ArtView::Bundle { dir, stamp },
+            Self::Own(OwnIcon::Bundle { dir, stamp }) => ArtView::Bundle {
+                dir,
+                version: stamp.map(BundleVersion::Listed),
+            },
             Self::Own(OwnIcon::Program { name, home }) => ArtView::Program { name, home },
             Self::Own(OwnIcon::Folder(sample)) => ArtView::Folder(sample.drawn()),
             Self::FolderKinds(sample) => ArtView::Folder(sample.drawn_as_kinds()),
@@ -627,6 +738,21 @@ impl<'a> Tier<'a> {
             }
             Self::Raster(kind) => ArtView::Raster(kind),
             Self::Vector(kind) => ArtView::Vector(kind),
+        }
+    }
+
+    /// The artwork this candidate names at `side`: a listed bundle at the
+    /// version `resolver` keys its picture by.
+    fn resolved(self, resolver: &mut dyn ArtworkResolver, side: u32) -> ArtView<'a> {
+        match self {
+            Self::Own(OwnIcon::Bundle {
+                dir,
+                stamp: Some(listed),
+            }) => ArtView::Bundle {
+                dir,
+                version: Some(resolver.bundle_version(dir, listed, side)),
+            },
+            other => other.view(),
         }
     }
 }
@@ -794,16 +920,57 @@ pub fn artwork_cache(
     )
 }
 
+/// What a bundle's own picture is read from: its manifest and the icon file
+/// the manifest names, each at the version it was read at, `None` where it was
+/// absent.
+///
+/// What a listed bundle's picture is keyed by once its producer has read
+/// them, so a bundle whose files change is decoded again and one whose files
+/// stand is not.
+#[derive(Copy, Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct BundleFiles {
+    /// The manifest's version.
+    pub manifest: Option<DocumentStamp>,
+    /// The icon file's version.
+    pub icon: Option<DocumentStamp>,
+}
+
+/// Which version of a bundle a listing named its picture is keyed by.
+#[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum BundleVersion {
+    /// The version the listing named its directory at: until its files are
+    /// read, and for good where its resolver reads none.
+    Listed(DocumentStamp),
+    /// The files it was read from.
+    Files(BundleFiles),
+}
+
+/// A bundle as a listing names it: its directory and the version listed.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ListedBundle {
+    /// The bundle directory's absolute path.
+    pub dir: String,
+    /// The version of the directory the listing named.
+    pub listed: DocumentStamp,
+}
+
+/// Whether `path` is `tree` or lies under it.
+pub(crate) fn is_at_or_under(path: &str, tree: &str) -> bool {
+    path.strip_prefix(tree)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/') || tree.ends_with('/'))
+}
+
 /// What one retained decode is keyed by.
 ///
 /// A bundle is keyed by its *directory*, not by the asset its manifest names,
 /// so the manifest read is paid once per bundle and a bundle that declares no
 /// icon (or names one that will not decode) remembers that refusal too — and,
-/// drawn from a listing, by the version the listing named, so nothing ever
-/// needs invalidating: a bundle replaced or changed is a new key, and its old
-/// answer ages out. A directory and an asset file can never spell the same
-/// path, but keeping the two apart in the key type says so rather than relying
-/// on it.
+/// drawn from a listing, by its [`BundleVersion`]: what was listed until its
+/// producer reads the files it is pictured from, then those files. So nothing
+/// ever needs invalidating: a bundle replaced, or one whose files changed, is
+/// a new key, and its old answer ages out. A directory and an asset file can
+/// never spell the same path, but keeping the two apart in the key type says
+/// so rather than relying on it.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ArtworkKey {
     /// An asset file read directly: an icon path the caller had already
@@ -815,12 +982,12 @@ pub enum ArtworkKey {
     /// A kind's shipped vector master, [`icon_vector_path`].
     Vector(IconKind),
     /// An application-bundle directory, resolved through its own manifest, at
-    /// the version a listing named it at where it came from one.
+    /// the version its picture is keyed by where a listing named it.
     Bundle {
         /// The bundle directory's absolute path.
         dir: String,
-        /// The version of the directory the listing named.
-        stamp: Option<DocumentStamp>,
+        /// The version, `None` for a bundle found in a program store.
+        version: Option<BundleVersion>,
     },
     /// A program *name* and the asking session's home root, resolved to the
     /// first bundle of that name in the program-store order and then through
@@ -925,13 +1092,48 @@ impl ArtworkKey {
         }
     }
 
+    /// The bundle a listing names whose files producing this reads: a listed
+    /// bundle's picture asked for at the version listed, which its first read
+    /// of them, and each read again once they move, is keyed by. `None` too
+    /// where the heap refuses the path.
+    #[must_use]
+    pub fn listed_bundle(&self) -> Option<ListedBundle> {
+        let (dir, listed) = self.listed_dir()?;
+        Some(ListedBundle {
+            dir: fallible::concatenated(&[dir])?,
+            listed,
+        })
+    }
+
+    /// [`listed_bundle`](Self::listed_bundle) borrowed: the directory and the
+    /// version listed, copying nothing.
+    pub(crate) fn listed_dir(&self) -> Option<(&str, DocumentStamp)> {
+        let Self::Bundle {
+            dir,
+            version: Some(BundleVersion::Listed(listed)),
+        } = self
+        else {
+            return None;
+        };
+        Some((dir.as_str(), *listed))
+    }
+
+    /// This key copied, `None` where the heap has no room for the text it
+    /// owns.
+    pub(crate) fn try_clone(&self) -> Option<Self> {
+        self.view().to_key()
+    }
+
     /// This key borrowed, as a lookup compares it.
     fn view(&self) -> ArtView<'_> {
         match self {
             Self::Asset(path) => ArtView::Asset(path),
             Self::Raster(kind) => ArtView::Raster(*kind),
             Self::Vector(kind) => ArtView::Vector(*kind),
-            Self::Bundle { dir, stamp } => ArtView::Bundle { dir, stamp: *stamp },
+            Self::Bundle { dir, version } => ArtView::Bundle {
+                dir,
+                version: *version,
+            },
             Self::Program { name, home } => ArtView::Program {
                 name,
                 home: home.as_deref(),
@@ -958,7 +1160,7 @@ enum ArtView<'a> {
     Vector(IconKind),
     Bundle {
         dir: &'a str,
-        stamp: Option<DocumentStamp>,
+        version: Option<BundleVersion>,
     },
     Program {
         name: &'a str,
@@ -985,9 +1187,9 @@ impl ArtView<'_> {
             Self::Asset(path) => ArtworkKey::Asset(fallible::concatenated(&[path])?),
             Self::Raster(kind) => ArtworkKey::Raster(kind),
             Self::Vector(kind) => ArtworkKey::Vector(kind),
-            Self::Bundle { dir, stamp } => ArtworkKey::Bundle {
+            Self::Bundle { dir, version } => ArtworkKey::Bundle {
                 dir: fallible::concatenated(&[dir])?,
-                stamp,
+                version,
             },
             Self::Program { name, home } => ArtworkKey::Program {
                 name: fallible::concatenated(&[name])?,
@@ -1026,8 +1228,7 @@ impl ArtView<'_> {
         else {
             return false;
         };
-        path.strip_prefix(tree)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/') || tree.ends_with('/'))
+        is_at_or_under(path, tree)
     }
 }
 
@@ -1355,7 +1556,9 @@ impl ArtworkCache {
     /// still being produced stops the walk, because whether the next tier is
     /// reached at all depends on what this one turns out to be — except a
     /// thumbnail-class tier, whose picture always replaces the tier below once
-    /// it lands, so that tier is drawn meanwhile.
+    /// it lands, so that tier is drawn meanwhile. While the thing's own icon
+    /// is produced the request's stand-in is drawn, where it has one that
+    /// serves.
     fn serve<'a>(
         &mut self,
         resolver: &mut dyn ArtworkResolver,
@@ -1364,19 +1567,26 @@ impl ArtworkCache {
     ) -> Option<ServedPicture<'a>> {
         for tier in request.tiers() {
             let slot = SlotView {
-                art: tier.view(),
+                art: tier.resolved(resolver, side),
                 side,
                 shadow: None,
             };
             match self.build_slot(slot, resolver) {
                 Slot::Served => return Some(ServedPicture { slot, mask: false }),
-                Slot::Pending if slot.art.is_thumbnail_class() => {}
+                Slot::Pending => {
+                    if let Some(stood) = self.stand_in(resolver, request, tier, side) {
+                        return Some(stood);
+                    }
+                    if !slot.art.is_thumbnail_class() {
+                        break;
+                    }
+                }
                 // Nothing is being retained, so a later tier could only
                 // repeat the same refusal at the cost of another decode. The
                 // glyph below is still reached: it costs no decode at all, and
                 // drawing nothing while a decode is in flight would leave the
                 // slot empty on screen.
-                Slot::Uncached(_) | Slot::Pending => break,
+                Slot::Uncached(_) => break,
                 Slot::Empty => {}
             }
         }
@@ -1405,6 +1615,28 @@ impl ArtworkCache {
             slot,
             mask: kind.badge().is_none(),
         })
+    }
+
+    /// Where the picture `request` stands in with is retained, the tier
+    /// `pending` still being produced being the thing's own icon; `None` where
+    /// it names no stand-in, or that has yet to serve too.
+    fn stand_in<'a>(
+        &mut self,
+        resolver: &mut dyn ArtworkResolver,
+        request: IconRequest<'a>,
+        pending: Tier<'a>,
+        side: u32,
+    ) -> Option<ServedPicture<'a>> {
+        let stand_in = request
+            .stand_in_tier()
+            .filter(|_| request.is_own(pending))?;
+        let slot = SlotView {
+            art: stand_in.resolved(resolver, side),
+            side,
+            shadow: None,
+        };
+        matches!(self.build_slot(slot, resolver), Slot::Served)
+            .then_some(ServedPicture { slot, mask: false })
     }
 
     /// The picture retained where `served` says, as a draw site is handed it.
@@ -1436,7 +1668,7 @@ impl ArtworkCache {
         let mut served = None;
         for tier in request.tiers() {
             let slot = SlotView {
-                art: tier.view(),
+                art: tier.resolved(resolver, side),
                 side,
                 shadow: None,
             };
@@ -1478,7 +1710,7 @@ impl ArtworkCache {
         request: IconRequest<'_>,
         side: u32,
     ) {
-        self.each_unheld(request, side, |key| resolver.prefetch(key, side));
+        self.each_unheld(resolver, request, side, Unheld::Wanted);
     }
 
     /// Tell `resolver` that a surface still shows `request` at `side`, though
@@ -1494,20 +1726,56 @@ impl ArtworkCache {
         request: IconRequest<'_>,
         side: u32,
     ) {
-        self.each_unheld(request, side, |key| resolver.still_shown(key, side));
+        self.each_unheld(resolver, request, side, Unheld::Shown);
     }
 
-    /// Hand `ask` each tier of `request` at `side` that this cache holds no
-    /// answer for and that resolution would reach.
+    /// Whether `request` at `side` is drawn as it will stay: the tier its
+    /// resolution serves from is held, or every tier before the built-in
+    /// glyph refused. One still being produced — a thumbnail among them,
+    /// whose tier below stands in until it lands — is not, so a frame that
+    /// draws it is not yet the picture a reader should photograph.
+    pub fn settled(
+        &self,
+        resolver: &mut dyn ArtworkResolver,
+        request: IconRequest<'_>,
+        side: u32,
+    ) -> bool {
+        for tier in request.tiers() {
+            let slot = SlotView {
+                art: tier.resolved(resolver, side),
+                side,
+                shadow: None,
+            };
+            match self
+                .entries
+                .peek(&(), &slot as &dyn SlotLookup)
+                .map(CachedArtwork::artwork)
+            {
+                Some(Some(_)) => return true,
+                None if slot.art.to_key().is_some() => return false,
+                Some(None) | None => {}
+            }
+        }
+        true
+    }
+
+    /// Tell `resolver`, as `ask` says, of each tier of `request` at `side`
+    /// that this cache holds no answer for and that resolution would reach.
     ///
     /// Resolution stops at the first tier that serves, and a later one is only
     /// reached if that one refuses, so this names the first unheld tier —
     /// and past it the next too while it is thumbnail-class, whose tier below
     /// is drawn until it lands.
-    fn each_unheld(&self, request: IconRequest<'_>, side: u32, mut ask: impl FnMut(&ArtworkKey)) {
+    fn each_unheld(
+        &self,
+        resolver: &mut dyn ArtworkResolver,
+        request: IconRequest<'_>,
+        side: u32,
+        ask: Unheld,
+    ) {
         for tier in request.tiers() {
             let slot = SlotView {
-                art: tier.view(),
+                art: tier.resolved(resolver, side),
                 side,
                 shadow: None,
             };
@@ -1520,7 +1788,10 @@ impl ArtworkCache {
                 Some(None) => {}
                 None => {
                     if let Some(key) = slot.art.to_key() {
-                        ask(&key);
+                        match ask {
+                            Unheld::Wanted => resolver.prefetch(&key, side),
+                            Unheld::Shown => resolver.still_shown(&key, side),
+                        }
                     }
                     if !slot.art.is_thumbnail_class() {
                         return;
@@ -1601,6 +1872,15 @@ impl ArtworkCache {
             .peek(&(), &slot as &dyn SlotLookup)
             .and_then(CachedArtwork::artwork)
     }
+}
+
+/// What a surface tells a resolver of a tier its cache holds no answer for.
+#[derive(Copy, Clone)]
+enum Unheld {
+    /// It is about to be drawn: produce it.
+    Wanted,
+    /// It is still shown: keep what is being produced for it.
+    Shown,
 }
 
 /// Where the picture a request resolved to is retained, and whether it is a
@@ -1763,12 +2043,13 @@ fn program_bundles(name: &str, home: Option<&str>) -> Option<Vec<String>> {
 }
 
 /// The path of the icon a bundle's own manifest names, or `None` when it names
-/// none.
+/// none: with the manifest, what the bundle's own picture is read from.
 ///
 /// The manifest is untrusted: it is decoded under the shared wire bound, and
 /// the asset is accepted only as a plain file name resolved inside the bundle's
 /// own `Resources/`, so a bundle cannot aim the desktop at any other file.
-fn bundle_icon_path<R: ArtworkReader + ?Sized>(reader: &mut R, dir: &str) -> Option<String> {
+#[must_use]
+pub fn bundle_icon_path<R: ArtworkReader + ?Sized>(reader: &mut R, dir: &str) -> Option<String> {
     let header = decode_manifest(&reader.read(&manifest_path(dir))?)?;
     let asset = header.library_icon()?;
     tairix_path::validate_file_name(asset).ok()?;

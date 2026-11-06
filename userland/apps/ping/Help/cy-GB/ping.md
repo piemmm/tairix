@@ -4,7 +4,7 @@ ping — anfon ceisiadau atsain ICMP at westeiwr rhwydwaith
 
 ## SYNOPSIS
 
-`ping [option...] gwesteiwr`
+`ping [option...] host`
 
 ## DESCRIPTION
 
@@ -44,11 +44,11 @@ ac a dderbyniwyd, unrhyw wallau, y ganran colled, a'r amseroedd mynd a dod
 lleiaf, cyfartalog a mwyaf gyda'u gwyriad cymedrig. Mae `-q` yn dangos y
 pennyn a'r crynodeb yn unig.
 
-Mae pob ateb yn enwi'r cymar fel `enw (cyfeiriad)` pan fo gan y cyfeiriad
-gofnod `PTR`, wedi'i ddatrys unwaith ar gyfer y rhediad drwy'r un
-datryswr; mae cyfeiriad heb enw, a phob rhediad dan `-n`, yn argraffu'r
-cyfeiriad noeth. Mae `-n` hefyd yn golygu na roddir ymholiad `PTR` ar y
-wifren o gwbl.
+Mae pob ateb yn enwi'r cymar fel `name (address)` (yr enw, ac yna'r
+cyfeiriad mewn cromfachau) pan fo gan y cyfeiriad gofnod `PTR`, wedi'i
+ddatrys unwaith ar gyfer y rhediad drwy'r un datryswr; mae cyfeiriad heb
+enw, a phob rhediad dan `-n`, yn argraffu'r cyfeiriad noeth. Mae `-n`
+hefyd yn golygu na roddir ymholiad `PTR` ar y wifren o gwbl.
 
 Mae pob llinell ateb yn cario'r TTL IPv4 (neu'r terfyn naid IPv6) y
 cyrhaeddodd yr ateb ag ef mewn maes `ttl=`, fel y mae `iputils`.
@@ -74,9 +74,13 @@ cyrhaeddodd yr ateb ag ef mewn maes `ttl=`, fel y mae `iputils`.
 ## EXAMPLES
 
 - `ping 10.0.2.2` — pingio gwesteiwr IPv4 nes ei atal.
+- `ping gateway.example` — pingio gwesteiwr wrth ei enw.
 - `ping -c 4 fe80::1` — anfon pedwar cais at westeiwr IPv6.
 - `ping -c 10 -i 0.2 10.0.0.1` — deg cais, un bob 200 ms.
 - `ping -q -c 100 10.0.0.1` — rhediad tawel, crynodeb yn unig.
+- `ping -s 1400 -c 20 host.example` — ugain cais mawr, anghywasgadwy: y
+  siâp sy'n mesur cyswllt yn onest.
+- `ping -p ff00 -c 4 10.0.0.1` — patrwm eiledol sefydlog yn lle hynny.
 
 ## EXIT STATUS
 

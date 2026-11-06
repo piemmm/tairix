@@ -3,7 +3,7 @@
 //!
 //! Where the [`clipboard`](crate::clipboard) captures the selection for a move
 //! or copy, a [`DeletePlan`] captures it for removal: each marked entry as
-//! [`Listed`] and whether it is directory-backed on disk, in listing order. It is the one model behind the Delete verb — the engine names *what*
+//! [`Listed`] and the kind it was listed as, in listing order. It is the one model behind the Delete verb — the engine names *what*
 //! would be removed and *how many* items (so the app can confirm honestly, a
 //! `lib/controls` `Dialog` with truthful action warmth); the app removes each
 //! target, and everything beneath a directory-backed one, as an operation of
@@ -27,24 +27,27 @@ use alloc::vec::Vec;
 
 use tairix_abi::fs::FileId;
 
-use crate::entry::Listed;
+use crate::entry::{EntryKind, Listed};
 
-/// One entry queued for removal, and whether it was listed as
-/// directory-backed on disk.
+/// One entry queued for removal, and the kind it was listed as.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeleteTarget {
     listed: Listed,
-    is_directory: bool,
+    kind: EntryKind,
 }
 
 impl DeleteTarget {
-    /// `listed`, listed as directory-backed when `is_directory`.
+    /// `listed`, listed as an entry of `kind`.
     #[must_use]
-    pub const fn new(listed: Listed, is_directory: bool) -> Self {
-        Self {
-            listed,
-            is_directory,
-        }
+    pub const fn new(listed: Listed, kind: EntryKind) -> Self {
+        Self { listed, kind }
+    }
+
+    /// What the listing showed the target as, which a question naming it
+    /// shows its name by.
+    #[must_use]
+    pub const fn kind(&self) -> EntryKind {
+        self.kind
     }
 
     /// The target's root-first component path (never empty in a built
@@ -64,7 +67,7 @@ impl DeleteTarget {
     /// a bundle — so a confirmation can say it goes with everything in it.
     #[must_use]
     pub const fn is_directory(&self) -> bool {
-        self.is_directory
+        self.kind.is_directory_backed()
     }
 
     /// The target's leaf name — its last path component.

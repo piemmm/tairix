@@ -39,17 +39,19 @@ pub const AUDIOD_READY: EventId = EventId(30_027);
 
 /// A stream open the service refused, carrying what it refused with.
 ///
-/// Capture refusals also raise [`CAPTURE_REFUSED`], which is the
-/// security-relevant record; this one is the diagnosis, and covers playback
-/// too — without it a machine whose sound does not work says nothing at all.
+/// Capture refusals also raise [`CAPTURE_REFUSED`], and monitor refusals
+/// [`MONITOR_REFUSED`], which are the security-relevant records; this one is
+/// the diagnosis, and covers playback too — without it a machine whose sound
+/// does not work says nothing at all.
 pub const STREAM_REFUSED: EventId = EventId(30_028);
 
 /// The seat's lease moved, so the room the service mixes for did: which
 /// room, and how many streams it now holds.
 pub const ROOM_CHANGED: EventId = EventId(30_029);
 
-/// A client broke its own ring's protocol — its positions were corrupt — so
-/// that stream alone was stopped, and by whose stream.
+/// A stream was stopped alone, and whose it was: its client broke its own
+/// ring's protocol — its positions were corrupt — or, for a sink's monitors,
+/// the mix they hear could not be made.
 pub const STREAM_FAULTED: EventId = EventId(30_030);
 
 /// The seat's lease could not be read, so no stream plays, or the capture
@@ -71,11 +73,26 @@ pub const BASELINE_ADOPTED: EventId = EventId(30_034);
 /// cue authority may, and only for a notification, was refused, and to whom.
 pub const TENANCY_REFUSED: EventId = EventId(30_035);
 
-/// An endpoint's facts changed under its streams — a sink replugged that
-/// plays less — so its streams hold their positions as lost and the endpoint
-/// is released for the next stream to configure afresh.
+/// An endpoint was lost to its streams — its facts changed under them, a sink
+/// replugged that plays less, or a sink could be configured afresh beneath its
+/// monitors neither as a stream asked nor as they ran — so they hold their
+/// positions as lost and the endpoint is released for the next stream to
+/// configure afresh.
 pub const ENDPOINT_CHANGED: EventId = EventId(30_036);
 
 /// Client wakes their mailboxes refused for good were given up on: the
 /// running total, recorded each time it doubles.
 pub const WAKES_GIVEN_UP: EventId = EventId(30_037);
+
+/// A monitor of a sink's mix was opened, and by which principal: one holding
+/// the capture capability whose session holds the room the sink serves.
+pub const MONITOR_OPENED: EventId = EventId(30_038);
+
+/// A monitor of a sink's mix was refused, and to which principal: the
+/// capability missing, the room not the caller's session's, or a sink that
+/// could not be monitored.
+pub const MONITOR_REFUSED: EventId = EventId(30_039);
+
+/// A monitor closed, so the live-capture set — and the indicator drawn from
+/// it — shrank.
+pub const MONITOR_CLOSED: EventId = EventId(30_040);

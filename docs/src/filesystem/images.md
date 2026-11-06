@@ -60,8 +60,10 @@ program fills a `tairix_attach_head_t` and reads a
   caller's close and an unlink. It holds the file through the file's own
   volume, so opening it through a bind ties nothing to that bind.
 - **One attachment per user and file.** Its identity is SHA-256 over a
-  domain label, the attacher's uid, the file's volume and inode, and what the
-  probe found; attaching the same file again answers `AlreadyAttached` with
+  domain label, the attacher's uid, the file's volume — the key that volume
+  is published under, so the same image on each of two twin sticks is two
+  attachments ([drives](./drives.md)) — and inode, and what the probe found;
+  attaching the same file again answers `AlreadyAttached` with
   the volume there is. An attach that adopts it — the desktop's — hands it
   to its session too, so it lives until every login session it was handed
   to has ended, its teardown cancelled if one was owed, but only a volume as
@@ -76,12 +78,13 @@ program fills a `tairix_attach_head_t` and reads a
   second writable attach, or a cooperating writer, is refused `Busy`.
 - **Presented as its attacher's.** `Private` — the caller and their primary
   group, `rwx------`/`rw-------` — for anyone; `Shared` and `Explicit` need
-  `CAP_FS_MOUNT`. Always `noexec`. A target — for a caller without
-  `CAP_FS_MOUNT`, an empty directory of their own under `/Users` or inside a
-  volume in `/Storage`, reached through directories of their own or the
-  system's, and never on a FAT32 or ADFS volume, whose nodes keep no identity
-  a bind can hold — is bound in the same call, as any view bind is
-  ([drives](./drives.md)).
+  `CAP_FS_MOUNT`. Always `noexec`. A target — an empty directory of the
+  caller's own under `/Users` or inside a volume in `/Storage`, reached
+  through directories of their own or the system's, and never on a FAT32 or
+  ADFS volume, whose nodes keep no identity a bind can hold — is bound in the
+  same call, as any view bind is ([drives](./drives.md)), short of the mount
+  authority: an administrator's attach shows its volume over no one else's
+  directory and never in the catalog.
 - **Named from the volume.** An explicit name must be a label's own
   kebab-case spelling and no reserved word, so it can never take a name the
   policy gives a volume it names itself, else it is refused `OutOfRange`; it
@@ -239,20 +242,23 @@ A volume's title is the label its filesystem records (`FilesystemLabel`,
 (`MountRecord::title`): the probe's label as the volume attaches, cut between
 characters to `VOLUME_TITLE_MAX` bytes, and nothing for a label that is not
 text. Its owner alone retitles it, not even a holder of `CAP_FS_MOUNT`
-(`VolumeService::retitle`): the volume is held against every other operation
-while its driver writes the label and flushes it, and the new title is listed
-once the driver holds it, its writeback publishing it should the flush fail.
-The label it replaces is never read first, so a label no title spells is
-replaced as any other is. The catalog name does not move while the volume is
-attached; the next attach names it from the new label. No format's identity
-takes in its label, so a retitled volume is still the attachment it was, and
-its file attached again answers `AlreadyAttached`. A retitle is refused
-`Busy` while an operation holds the volume, `DeviceOffline` while no driver
-serves it, `NotSupported` for a format keeping no title (ISO 9660, an archive)
-or a volume no disk image holds, and `ReadOnly` for a volume taking no writes;
-a title its format cannot store is the driver's `LengthOutOfRange` or
-`OutOfRange`, and one it has no room for its `NoSpace`. The title is withheld with the source from a principal the
-volume is kept from.
+(`VolumeService::retitle`, the one path every volume is retitled through —
+[Storage namespaces](./drives.md) §8): the volume is held against every other
+operation while its driver writes the label and flushes it, and the new title
+is listed once the driver holds it, its writeback publishing it should the
+flush fail. The label it replaces is never read first, so a label no title
+spells is replaced as any other is. The catalog name does not move while the
+volume is attached; the next attach names it from the new label. No format's
+identity takes in its label, so a retitled volume is still the attachment it
+was, and its file attached again answers `AlreadyAttached`. A retitle is
+refused `Busy` while an operation holds the volume, `DeviceOffline` while no
+driver serves it, `NotSupported` for a format keeping no title (ISO 9660, an
+archive), and `ReadOnly` for a volume taking no writes; a title its format
+cannot store is the driver's `LengthOutOfRange` or `OutOfRange`, and one it
+has no room for its `NoSpace`. Each decision is audited
+(`fs.volume.retitled`, `fs.volume.retitled_refused`;
+[events](./served.md#events)). The title is withheld with the source from a
+principal the volume is kept from.
 
 ## Audit
 
@@ -265,5 +271,3 @@ volume is kept from.
 | 4324 | `fs.image.detach_refused` | a detach was refused (`cause`) |
 | 4325 | `fs.image.retired` | retired with its file's volume, or its driver lost (`cause`, `outcome`) |
 | 4326 | `fs.image.archive_commit` | an archive commit left work undone (`archive`, `cause`: `next_kept`, the next archive kept under its own name after a replace the medium stopped partway; `record_stale`, a record taken during the commit not carried; `not_durable`, the directory not yet durable; `next_left`, an uncommitted next archive not taken back out) |
-| 4327 | `fs.image.retitled` | its owner retitled it (`cause`: `owner`) |
-| 4328 | `fs.image.retitle_refused` | a retitle was refused (`cause`: `not_owner`, `volume_busy`, `volume_unserved`, `untitled_format`, `read_only`, `title_refused`, `flush_failed`) |

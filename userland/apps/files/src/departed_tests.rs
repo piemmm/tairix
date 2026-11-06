@@ -22,7 +22,9 @@ fn volume(label: &str, id: u8, availability: MountAvailability) -> Volume {
             availability,
             owner: None,
             volume_id: [id; 16],
+            identity: [id; 16],
             read_only: false,
+            titled: false,
         },
         offered: matches!(
             availability,

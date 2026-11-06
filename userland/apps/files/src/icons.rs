@@ -18,12 +18,14 @@
 //! The cache and the resolver are injected — only the running program knows the
 //! screen's frame size, the live pressure gauge, the audit sink, the capability
 //! the read runs under, and whether the kernel granted a thread to defer to —
-//! so every rule below is a host test.
+//! so every rule below is a host test. A listed bundle's version is asked of
+//! the resolver once a turn ([`IconPipeline::begin_turn`]), however often the
+//! turn walks its tile.
 
 use alloc::boxed::Box;
 
 use tairix_browse::render::ShownArt;
-use tairix_icon::{ArtworkCache, ArtworkResolver, IconArtworkSource, Landed};
+use tairix_icon::{ArtworkCache, ArtworkResolver, ByTurn, IconArtworkSource, Landed};
 
 /// The decode cache and the resolver its misses are produced through.
 pub struct IconPipeline {
@@ -33,7 +35,7 @@ pub struct IconPipeline {
     /// Where a miss goes: the reader thread's desk, or — with no thread to
     /// defer to — a resolver that reads and decodes in the paint, as this app
     /// did before it had one.
-    resolver: Box<dyn ArtworkResolver>,
+    resolver: ByTurn,
 }
 
 impl IconPipeline {
@@ -41,13 +43,22 @@ impl IconPipeline {
     /// produced through.
     #[must_use]
     pub fn new(cache: ArtworkCache, resolver: Box<dyn ArtworkResolver>) -> Self {
-        Self { cache, resolver }
+        Self {
+            cache,
+            resolver: ByTurn::new(resolver),
+        }
+    }
+
+    /// A turn of the event loop begins: each listed bundle's version is asked
+    /// of the resolver once more, the first time the turn needs it.
+    pub fn begin_turn(&mut self) {
+        self.resolver.begin_turn();
     }
 
     /// The lookup a paint is handed: the cache bound to its resolver, so a
     /// miss is recorded rather than read.
     pub fn source(&mut self) -> IconArtworkSource<'_> {
-        IconArtworkSource::new(&mut self.cache, self.resolver.as_mut())
+        IconArtworkSource::new(&mut self.cache, &mut self.resolver)
     }
 
     /// Give back what a changed memory-pressure band no longer allows,
@@ -70,7 +81,7 @@ impl IconPipeline {
         let moved = landed.resolves(art.request, art.side);
         if !moved {
             self.cache
-                .still_shown(self.resolver.as_mut(), art.request, art.side);
+                .still_shown(&mut self.resolver, art.request, art.side);
         }
         moved
     }

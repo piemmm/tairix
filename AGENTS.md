@@ -685,7 +685,7 @@ tairix/
 │   ├── inline/          # Allocation-free containers (bounded vector/string,
 │   │                    #   rings, intrusive list, fixed bitset). Links no
 │   │                    #   allocator, so the pre-heap layer can use it.
-│   ├── input/           # Shared pointer input-event vocabulary.
+│   ├── input/           # Shared input-event vocabulary + keyboard state and US layout.
 │   ├── kalloc/          # Freeing kernel heap allocator.
 │   ├── keymap/          # Shared terminal key map.
 │   ├── land/            # Land generator: relief, courses, channels, snow, crops, levels.
@@ -700,7 +700,8 @@ tairix/
 │   ├── netshare/        # Network-share client (netshare-v1 to smbfs).
 │   ├── noise/           # Procedural noise: gradient, octave, ridged, cellular.
 │   ├── pagezero/        # Page/region zeroing.
-│   ├── parallel/        # Bounded data-parallel work engine (JobRunner + pool).
+│   ├── parallel/        # Bounded data-parallel work engine (JobRunner, pool,
+│   │                    #   ordered dispatch).
 │   ├── partition/       # Shared, scheme-neutral partition-table layer (MBR/GPT).
 │   ├── path/            # Shared filesystem path-spelling parser.
 │   ├── pci/             # PCI/PCIe configuration access and the topology walk.
@@ -727,7 +728,7 @@ tairix/
 │   ├── smb/             # The pure SMB 3 protocol engine (no I/O, clock, or RNG).
 │   ├── sound/           # Sound-file decoding: AU, WAV, FLAC (native, Ogg),
 │   │                    #   MPEG audio, streamed from any input; the gated
-│   │                    #   FLAC encoder.
+│   │                    #   FLAC and Opus encoders.
 │   ├── soundtheme/      # Desktop sounds: event assets, themes, settings, cue client.
 │   ├── spirv/           # SPIR-V shader module: decode, validate, build.
 │   ├── ssh/             # The pure SSH protocol engine (no I/O, clock, or RNG).
@@ -749,6 +750,7 @@ tairix/
 │   ├── users/           # User-account database.
 │   ├── util/            # Strictly justified utilities.
 │   ├── vcmailbox/       # BCM2711 VideoCore firmware mailbox client.
+│   ├── video/           # Video codecs and containers: VP8, WebM.
 │   ├── virtio/          # Bus-agnostic virtio split-virtqueue protocol.
 │   ├── virtio_input/    # Arch-neutral virtio-input device logic.
 │   ├── virtio_net/      # Arch-neutral virtio-net device logic.
@@ -785,6 +787,7 @@ tairix/
 │   │   ├── taskbar/     # Desktop icon bar: launchers + per-application slots.
 │   │   ├── session/     # Desktop session glue (theme + taskbar model).
 │   │   ├── switchboard/ # System-overview monitor service (tray feed).
+│   │   ├── recorder/    # Screen recorder component: VP8 and Opus into WebM.
 │   │   └── screensavers/ # The shipped screensavers, one sandboxed bundle each.
 │   ├── net/             # Userland networking services.
 │   │   ├── netstack/    # The dual-stack network service (IPv4/IPv6/TCP/UDP).
@@ -1639,7 +1642,7 @@ You are not exempt from any rule above. In addition:
     | The graphical file manager (`files.app`): clickable icons, open/launch, rename, move/copy/delete, properties | `plans/NEW-FILEMANAGER.md` |
     | The file manager's interaction and icons: marquee and modifier selection, drag-and-drop between windows and onto the desktop with its copy/move cursors, the New ▸ submenu, one window per folder and the activation that raises it, folder content cards, image thumbnails and the store that keeps them per content generation, the item-name and title type, two-line names and in-place rename, the compact tile and the ground between tiles, the `Home` folder of the user's own files, the places rail's storage-only rows, the *Display* submenu's large icons, small icons and list, and the list's columns and header sort | `plans/FILES-INTERACTION.md` |
     | The picture and document viewer (`view.app`): the formats it claims, the page-source seam every document is reached through, sequence/animation decode, the sandboxed document decode, and the shared app-side window shell | `plans/VIEW.md` |
-    | Sound: the one audio path (client stream ABI, the `audiod` mixer/router, the `audiochan-v1` device channel), the exported device clock and latency grant, seat-leased sinks and gated capture, the file decoders (`lib/sound`), their sandboxed decode and the one feature-gated encoder (FLAC), the audio driver class, the two players (`play`, `music.app`), and the default desktop sounds (the `SoundEvent` vocabulary, the shipped FLAC masters, the `soundd` cue authority and who may cue what) | `plans/SOUND.md` |
+    | Sound: the one audio path (client stream ABI, the `audiod` mixer/router, the `audiochan-v1` device channel), the exported device clock and latency grant, seat-leased sinks and gated capture, the file decoders (`lib/sound`), their sandboxed decode and the feature-gated encoders (FLAC, Opus), the audio driver class, the two players (`play`, `music.app`), and the default desktop sounds (the `SoundEvent` vocabulary, the shipped FLAC masters, the `soundd` cue authority and who may cue what) | `plans/SOUND.md` |
     | Desktop responsiveness: non-blocking app launch (no UI freeze while an app loads), asynchronous process launch | `plans/FIX-DESKTOP.md` |
     | Diagnosing a desktop pause: the per-thread frame budget, the overrun report, the user-stack backtrace of the stalling call | `plans/FIX-STALLTRACE.md` |
     | The desktop pinboard: the wallpaper (default set, fit modes, sandboxed decode, the per-user settings the session publishes), the `Desktop` folder's icon arrangement and sort order, and the backdrop context menu | `plans/PINBOARD.md` |
@@ -1734,6 +1737,7 @@ You are not exempt from any rule above. In addition:
     | Code-quality / comment-discipline sweeps | `plans/CODEVERIFY.md`; `plans/WAFFLE.md` |
     | Open core-kernel defect tracking | `plans/OPEN-DEFECTS.md` |
     | The temporary work list from the Raspberry Pi 4 investigation: the USB host controller's serve loop never waiting (D1125), mass-storage medium detection, spin-up and deadlines, attached-volume names, removable-media ownership, DESK-21, owned dialog windows replacing in-window panels, and content-sized alerts | `plans/TEMPORARY.md` |
+    | Screen capture: the desktop as the only capturer, the compositor's capture tap, the capture chords and bar, stills, the recorder component, VP8/WebM and Opus, desktop-sound monitor streams, and playing recordings back | `plans/CAPTURE.md` |
 
     The sheet is maintained like any other doc (§2.8, §2.14): a new
     `plans/*.md` enters this table in the change that creates it, and a
@@ -1877,9 +1881,10 @@ Authoritative subdirectories:
 ├── Defaults/    # The image's own machine settings, read-only: what a
 │             #   Settings/ document holds until an administrator changes it.
 ├── Components/  # Parts of the OS the system starts by path: the desktop
-│             #   session and the file manager, Settings and Date & Time
-│             #   it opens. One §16.5 bundle each, never searched by a
-│             #   typed word (§16.8); a component runs only from here.
+│             #   session and the file manager, Settings, Date & Time and
+│             #   screen recorder it starts. One §16.5 bundle each, never
+│             #   searched by a typed word (§16.8); a component runs only
+│             #   from here.
 ├── Screensavers/ # The system screensaver store: one §16.5 bundle per
 │             #   shipped saver, never searched by a typed word (§16.8).
 │             #   The desktop starts the one chosen in the drawing
@@ -3512,8 +3517,9 @@ one writes a second.
   there is no shared global user heap.
 - **`mem_map`-backed, capability-clean.** The heap is built **only** on the
   `abi-v1` anonymous-memory pair (`mem_map` / `mem_unmap`, both unprivileged,
-  §16.6). It adds no syscall, no ABI surface, and no ambient authority (§5.4):
-  every check stays kernel-side. The arena is mapped `RW`-only, never
+  §16.6), growing only in the heap region the kernel names in the program's
+  startup vector, which no window or mapping of its layout holds. It adds no
+  syscall and no ambient authority (§5.4): every check stays kernel-side. The arena is mapped `RW`-only, never
   executable (W^X, §19.2), and the kernel zeroes every frame on map and on
   free, so no cross-process bytes ever leak (§4).
 - **No raw pointer arithmetic without bounds checks (§4).** The free-list

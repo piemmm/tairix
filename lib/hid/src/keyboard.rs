@@ -3,7 +3,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::driver::input::{InputEvent, InputEventKind};
+use tairix_abi::driver::input::InputEvent;
 use tairix_abi::DriverError;
 
 use crate::console::KeyboardConsole;
@@ -218,13 +218,7 @@ impl KeyboardDecoder {
         let modifiers_first = pressed;
         for pass in [modifiers_first, !modifiers_first] {
             for usage in keys.usages().filter(|&usage| is_modifier(usage) == pass) {
-                let edge = InputEvent {
-                    kind: InputEventKind::Key,
-                    reserved0: 0,
-                    code: usage,
-                    value: i32::from(pressed),
-                };
-                if let Some(record) = self.console.feed(edge) {
+                if let Some(record) = self.console.feed(InputEvent::key(usage, pressed)) {
                     sink.key(&record)?;
                 }
             }

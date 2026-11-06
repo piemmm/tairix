@@ -15,6 +15,7 @@
 | SP10 | spawn-time descriptor wiring and pipes | done |
 | SP11 | demand-grown user stack | done |
 | SP12 | sessions: processes that end together, placed by the spawn attach block | done |
+| SP13 | `child_origin`: a parent reads its live child's kernel-attested origin | done |
 
 This is the staged build plan for `plans/PI.md` **P6d** done *properly*
 (the standing direction, confirmed for this work): a real
@@ -398,9 +399,10 @@ was generalised to build **both** `init` and the `Shell` session program
 through one `elf2rxe` helper (§2.2; TAIRiX stays Rust-only, §1), embedding
 `SHELL_RXE` registered under `/System/Commands/elsh.app/Run`. `AdmitError`,
 build, and parse failures map onto stable `Errno`s (`NoSpace` /
-`AlreadyExists` / `PermissionDenied` / `BadMagic`); page-table and image
-frames are handed out monotonically (not reclaimed this stage), so a failed
-spawn leaks nothing user-visible (§2.9).
+`AlreadyExists` / `PermissionDenied` / `BadMagic`). From the moment a
+child's space exists it reaches its live space on every path
+(`spawn::build_retained`), so a refused spawn returns its image's frames and
+page tables, a frame drawn for a mapping the table refused among them.
 - `-M virt` vertical landed: `tairix-test-spawn-session-qemu-aarch64` boots
   the production pipeline, PID 1 `init` spawns `/System/Commands/elsh.app/Run` through
   the `spawn` syscall, both run (proving SP2 timesharing), the session writes
@@ -1423,6 +1425,26 @@ guarantees:
   walk, and end to end on all three MMU ports by the `threads` verticals'
   session step: killing an anchor ends its member, a nested session and a
   member's anchored child, and nothing outside.
+
+## SP13 — `child_origin`: a parent reads its live child's attested origin
+
+`child_origin(pid, out, len)` (no. 170) gives a parent the kernel-attested
+`Origin` of a child it talks to over pipes, which attest no peer, so the
+`ProcId` it names that child by in an `fd_grant` or a `shm_map_from` is the
+kernel's rather than the child's own claim.
+
+- **Who answers.** A live child of the caller's process, authorised by
+  `ProcessWait::authorise_child`, the live-child rule `signal` and
+  `console_foreground` share over the rows `wait` reaps. Every other pid —
+  another process's child, the caller, an exited child reaped or not, a number
+  never drawn — is the same `NotFound`, so the call is no oracle over the
+  process table.
+- **What it answers.** The child's current record, attested as `self_origin`
+  attests the caller's: until the child's program is verified, no app identity
+  and no capabilities.
+- **No pid-reuse race.** A parent holds its child's pid until it reaps it, so
+  the record under the pid is that child's.
+- **Authority.** None, and unaudited, like `self_origin`.
 
 ---
 

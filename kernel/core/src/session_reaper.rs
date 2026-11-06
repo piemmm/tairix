@@ -247,16 +247,17 @@ impl SessionReaper {
             // keeps ending where its anchor's death lands.
             return;
         };
+        // Filed once for the service's life, so no later park asks the heap;
+        // refused, sessions keep ending where their anchors' deaths land.
+        if REAPER_WAITQ.register(task, NO_DEADLINE).is_err() {
+            return;
+        }
         self.serving.store(true, Ordering::Release);
         loop {
             self.end_queued();
-            REAPER_WAITQ.register(task, NO_DEADLINE);
-            if !self.ending.lock().is_empty() {
-                REAPER_WAITQ.deregister(task);
-                continue;
+            if self.ending.lock().is_empty() {
+                yielder.park();
             }
-            yielder.park();
-            REAPER_WAITQ.deregister(task);
         }
     }
 }
@@ -320,16 +321,16 @@ impl Notifier {
         let Some(task) = parkable_task() else {
             return;
         };
+        // Filed once for the service's life, as the reaper's is.
+        if self.parked.register(task, NO_DEADLINE).is_err() {
+            return;
+        }
         self.serving.store(true, Ordering::Release);
         loop {
             self.round();
-            self.parked.register(task, NO_DEADLINE);
-            if *self.owed.lock() || owes() {
-                self.parked.deregister(task);
-                continue;
+            if !*self.owed.lock() && !owes() {
+                yielder.park();
             }
-            yielder.park();
-            self.parked.deregister(task);
         }
     }
 }

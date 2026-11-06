@@ -438,11 +438,12 @@ where
         return false;
     };
     let reply = build_reply(service, ctx, store, &call.request, audit);
-    // A reply failure (oversize / unknown ticket) is itself fail-closed and
-    // audited inside `CallEndpoint::reply`; the affected caller's own poll
-    // then observes the unanswered ticket fail-closed. On success wake
-    // exactly the threads the answer concerns.
-    if let Ok(woken) = endpoint.reply(call.ticket, &reply, audit) {
+    // The answer is written into the room the call came in, so it needs no
+    // memory. A refusal (oversize / unknown ticket) is itself fail-closed and
+    // audited inside the endpoint; the affected caller's own poll then
+    // observes the unanswered ticket fail-closed. On success wake exactly
+    // the threads the answer concerns.
+    if let Ok(woken) = endpoint.reply_with(call, &reply, audit) {
         tairix_kernel_core::call_woken(&woken);
     }
     true
@@ -527,46 +528,22 @@ pub fn serve_system_store(
     // again (the per-request full re-scan this replaces
     // turned each driver load into an O(bundles) re-read).
     let store = scan_store_view(&service, audit);
+    // Filed once for the server's life, so a request posted between an empty
+    // drain and the park still finds it and no park asks the heap again.
+    // Refused, or with no published id, it parks bare: the dispatch loop's
+    // wait-for-interrupt re-step still re-runs the body.
+    if let Some(task) = crate::unlock_service::store_service_task() {
+        let _ = tairix_kernel_core::SERVE_WAITQ.register(task, tairix_kernel_core::NO_DEADLINE);
+    }
     loop {
-        // Drain every pending call first.
         if serve_pending(&service, ctx, &store, &endpoint, audit) {
-            // One request served is one unit of work, and the gap before the
-            // next is this loop's safe boundary: nothing of the server's own
-            // is held across it. Offer the CPU back to the dispatcher here if
-            // the scheduler is owed a turn, so a caller that keeps the queue
-            // full cannot make this body drain request after request without
-            // ever returning — which would suspend the dispatch loop's
-            // housekeeping and heartbeats and stall everything else runnable
-            // on this CPU behind the burst. Nothing is given up unless a turn
-            // is owed, so an uncontended drain still costs no context switch.
+            // One request is one unit of work, and the gap before the next is
+            // this loop's safe boundary: a caller keeping the queue full must
+            // not keep the dispatcher from the turns it is owed.
             let _ = tairix_kernel_core::yield_if_owed();
             continue;
         }
-        // Nothing pending: park off the run queue until a request is posted
-        // (a real park, never a busy-yield). Register on
-        // `SERVE_WAITQ` *before* the final drain so a request posted in the
-        // window between the empty drain and the park is not lost: the
-        // `ipc_call` handler's `serve_wake` unparks this task by id, and the
-        // scheduler's wake-pending token converts a concurrent park into a
-        // re-ready (the same lost-wakeup interlock `hw_tree_wait` relies on).
-        match crate::unlock_service::store_service_task() {
-            Some(task) => {
-                tairix_kernel_core::SERVE_WAITQ.register(task, tairix_kernel_core::NO_DEADLINE);
-                // Re-check after registering: if a call arrived in the
-                // register window, serve it and skip the park.
-                if serve_pending(&service, ctx, &store, &endpoint, audit) {
-                    tairix_kernel_core::SERVE_WAITQ.deregister(task);
-                    continue;
-                }
-                coop.park();
-                tairix_kernel_core::SERVE_WAITQ.deregister(task);
-            }
-            // The server's scheduler id was never published (a degenerate
-            // build that did not go through `spawn_if_present`). Park bare
-            // rather than busy-yield; the dispatch loop's wait-for-interrupt
-            // re-step still re-runs the body.
-            None => coop.park(),
-        }
+        coop.park();
     }
 }
 
@@ -1210,7 +1187,8 @@ mod tests {
             CapabilitySet::empty(),
             CapabilitySet::empty(),
             &NullSink,
-        );
+        )
+        .expect("derived");
         let mut yielder = UnreachableYielder;
         let coop = CooperativeYield::new(&mut yielder);
 

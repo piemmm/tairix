@@ -13,16 +13,19 @@ auf die Standardausgabe. Der Operand `-` bezeichnet die
 Standardeingabe; ohne Operand ist die Standardeingabe die einzige
 Quelle.
 
-Ein Operand kann auch eine typisierte Ressourcenreferenz wie
-`sys:random` sein: Sie wird über den berechtigungsgeprüften
-Ressourcen-Resolver des Systems geöffnet, nicht über das Dateisystem —
-`cat sys:random` liefert Zufallsbytes. Eine `info:`-, `state:`- oder
-`stats:`-Referenz benennt einen typisierten Systemwert statt eines
+Ein Operand kann auch eine typisierte Ressourcenreferenz sein: Ein
+relativer Operand, dessen erste Pfadkomponente ein registrierter
+Namensraum ist, etwa `sys:random`, wird über den berechtigungsgeprüften
+Ressourcen-Resolver des Systems geöffnet, nicht über das Dateisystem,
+sodass `cat sys:random` Zufallsbytes liefert. Eine `info:`-, `state:`-
+oder `stats:`-Referenz benennt einen typisierten Systemwert statt eines
 Datenstroms; er wird über den Systeminformationsdienst gelesen, sodass
 `cat info:mem/physical` diesen Wert ausgibt und ein Lesevorgang ohne
 Berechtigung mit Nennung der fehlenden Berechtigung abgelehnt wird.
 Eine fehlerhafte Referenz in einem registrierten Namensraum ist ein
-Fehler und fällt nie auf einen Dateinamen zurück.
+Fehler und fällt nie auf einen Dateinamen zurück; eine Datei auf dem
+Datenträger, deren Name `:` enthält, bleibt als `./name` oder in
+Anführungszeichen gesetzt erreichbar.
 
 Mit `-n` werden die Ausgabezeilen fortlaufend über alle Quellen
 nummeriert, sodass eine Zeile, die sich über zwei Quellen erstreckt,
@@ -62,6 +65,8 @@ nächste wird trotzdem gelesen.
 ## EXAMPLES
 
 - `cat notes.txt` — `notes.txt` auf die Standardausgabe schreiben.
+- `cat sys:random` — Bytes aus der Zufallsquelle des Systems ausgeben
+  (endlos; zum Beenden den Befehl unterbrechen).
 - `cat a.txt - b.txt` — `a.txt`, dann die Standardeingabe, dann
   `b.txt` schreiben.
 - `cat -n log.txt` — jede Ausgabezeile nummerieren.

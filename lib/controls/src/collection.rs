@@ -2220,6 +2220,44 @@ impl Card {
 
 // --- IconTile ----------------------------------------------------------
 
+/// How much of a faded tile's picture lands: half, so the item reads as there
+/// but not present.
+const FADED_STRENGTH: u8 = 0x80;
+
+/// How a tile's picture is drawn beyond its artwork.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct PictureLook {
+    /// It casts the shadow its artwork allows.
+    shadow: bool,
+    /// It stands for something absent: it lands at [`FADED_STRENGTH`] and
+    /// casts no shadow, which would read as a solid object.
+    faded: bool,
+}
+
+impl PictureLook {
+    const fn casts_shadow(self) -> bool {
+        self.shadow && !self.faded
+    }
+
+    /// The ink a built-in glyph wears and the tone artwork is drawn in: the
+    /// name's `ink` and the artwork as cached, or both at [`FADED_STRENGTH`]
+    /// when faded.
+    fn ink(self, ink: Color) -> (Color, ArtworkTone) {
+        if !self.faded {
+            return (ink, ArtworkTone::FULL);
+        }
+        let glyph = Color {
+            a: div255(u32::from(ink.a) * u32::from(FADED_STRENGTH)),
+            ..ink
+        };
+        let tone = ArtworkTone {
+            saturation: u8::MAX,
+            strength: FADED_STRENGTH,
+        };
+        (glyph, tone)
+    }
+}
+
 /// One item of an icon view: a picture with its name beneath it, and no plate
 /// of its own (spec §11.34).
 ///
@@ -2266,7 +2304,7 @@ pub struct IconTile {
     label_halo: Option<Arc<LabelHalo>>,
     label_ink: Option<Color>,
     name_cut: Cut,
-    casts_shadow: bool,
+    picture: PictureLook,
     name_withheld: bool,
     live: bool,
     count: Option<u32>,
@@ -2287,7 +2325,7 @@ impl IconTile {
             label_halo: None,
             label_ink: None,
             name_cut: Cut::End,
-            casts_shadow: false,
+            picture: PictureLook::default(),
             name_withheld: false,
             live: false,
             count: None,
@@ -2318,6 +2356,15 @@ impl IconTile {
     #[must_use]
     pub fn with_name_withheld(mut self) -> Self {
         self.name_withheld = true;
+        self
+    }
+
+    /// This tile drawing its picture faded when `faded`, for an item standing
+    /// for something absent — a shortcut to a drive that is not attached — so
+    /// it reads as there but not present while its name stays legible.
+    #[must_use]
+    pub fn with_faded(mut self, faded: bool) -> Self {
+        self.picture.faded = faded;
         self
     }
 
@@ -2419,7 +2466,7 @@ impl IconTile {
     /// brings none, so a cached picture and an uncached one draw alike.
     #[must_use]
     pub fn with_picture_shadow(mut self) -> Self {
-        self.casts_shadow = true;
+        self.picture.shadow = true;
         self
     }
 
@@ -2484,14 +2531,8 @@ impl IconTile {
             if let Some(picture) = picture {
                 let at = centred_in(slot, picture.surface());
                 self.paint_picture_shadow(surface, picture, at, scale, theme);
-                paint_icon_slot(
-                    surface,
-                    slot,
-                    self.icon,
-                    ink,
-                    Some(picture),
-                    ArtworkTone::FULL,
-                );
+                let (glyph, tone) = self.picture.ink(ink);
+                paint_icon_slot(surface, slot, self.icon, glyph, Some(picture), tone);
                 self.paint_picture_tint(surface, picture, at, theme);
                 if let Some(frame) = picture.frame() {
                     paint_frame(surface, at, frame, scale, theme);
@@ -2564,7 +2605,7 @@ impl IconTile {
         scale: Scale,
         theme: &Theme,
     ) {
-        if !self.casts_shadow || picture.shadow_withheld() {
+        if !self.picture.casts_shadow() || picture.shadow_withheld() {
             return;
         }
         let tint = Color::from(theme.palette().drop_shadow);

@@ -12,6 +12,7 @@ crates.
 |---|---|---|
 | SHA-256 / SHA-384 / SHA-512, one-shot and streaming | `hash` | `sha2` |
 | BLAKE2sp, streaming: a RAR 5 member's integrity hash | `hash` | `blake2s_simd` |
+| Identity fingerprint: the leading 16 bytes of SHA-256 over a domain and fields, the block layer's device identities | `fingerprint` | `sha2` |
 | HMAC-SHA256 / HMAC-SHA384 / HMAC-SHA512 / HMAC-SHA1 | `mac` | `hmac` + `sha2` / `sha1` |
 | AES-128-CMAC, AES-128-GMAC | `mac` | `cmac` / `aes-gcm` |
 | Poly1305 one-time authenticator | `mac` | `poly1305` |

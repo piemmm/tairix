@@ -262,7 +262,7 @@ pub enum ReclaimRule {
 /// footprint rather than payload alone.
 ///
 /// One definition because it is one figure by construction — every
-/// bounded pool in the tree keys entries in a `BTreeMap` and indexes them
+/// bounded pool in the tree keys entries in an ordered map and indexes them
 /// the same way, so a per-pool copy could only ever diverge by accident.
 /// It is an accounting estimate, not a limit; the limit is
 /// [`MAX_ENTRY_METADATA`], which this stays far below.
@@ -843,6 +843,34 @@ impl CacheAccounting {
         Ok(())
     }
 
+    /// Move `class`'s bookkeeping bytes from `from` to `to` for an index
+    /// whose own room changed: room no one entry holds, so no entry is
+    /// counted.
+    ///
+    /// # Errors
+    ///
+    /// [`AccountingError::Overflow`] if the ledger cannot represent the new
+    /// total, [`AccountingError::Underflow`] if more is given back than is
+    /// charged; nothing is changed.
+    pub fn resize_room(
+        &self,
+        class: ReclaimClass,
+        from: usize,
+        to: usize,
+    ) -> Result<(), AccountingError> {
+        let slot = &self.metadata_bytes[class.index()];
+        let held = slot.load(Ordering::Relaxed);
+        let resized = if to >= from {
+            held.checked_add(to - from)
+                .ok_or(AccountingError::Overflow)?
+        } else {
+            held.checked_sub(from - to)
+                .ok_or(AccountingError::Underflow)?
+        };
+        slot.store(resized, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Reset the byte and entry ledger to empty, keeping the event
     /// counters.
     ///
@@ -1353,5 +1381,31 @@ mod tests {
         assert_eq!(acct.class_entries(ReclaimClass::TransformCache), 0);
         assert_eq!(acct.teardowns(), 1);
         assert_eq!(acct.insertions(), 1);
+    }
+
+    #[test]
+    fn room_moves_the_bookkeeping_and_counts_no_entry() {
+        let acct = CacheAccounting::new();
+        let class = ReclaimClass::FsMetadata;
+        acct.resize_room(class, 0, 520).expect("charges the room");
+        acct.resize_room(class, 520, 1040).expect("grows it");
+        assert_eq!(acct.class_metadata_bytes(class), 1040);
+        assert_eq!(acct.class_payload_bytes(class), 0);
+        assert_eq!(acct.class_entries(class), 0);
+        assert_eq!(acct.insertions(), 0);
+        acct.resize_room(class, 1040, 0).expect("gives it back");
+        assert_eq!(acct.total_bytes(), 0);
+        // Giving back more than is charged no longer balances: fail closed.
+        assert_eq!(
+            acct.resize_room(class, 1, 0),
+            Err(AccountingError::Underflow)
+        );
+        acct.resize_room(class, 0, usize::MAX)
+            .expect("charges all the ledger holds");
+        assert_eq!(
+            acct.resize_room(class, 0, 1),
+            Err(AccountingError::Overflow)
+        );
+        assert_eq!(acct.class_metadata_bytes(class), usize::MAX);
     }
 }

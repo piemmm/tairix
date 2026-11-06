@@ -84,6 +84,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, role: &str) -> V
 /// source the test includes.
 fn write_program_fixture(path: &std::path::Path, child: &[u8], parent: &[u8], intake: &[u8]) {
     let mut out = tairix_itest_harness::program_fixture::fixture_header();
+    tairix_itest_harness::program_fixture::push_heap_region(&mut out);
     tairix_itest_harness::program_fixture::push_rxe_blob(
         &mut out,
         "CHILD_RXE",

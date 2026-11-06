@@ -316,7 +316,8 @@ impl Attempt {
 ///
 /// One meter per device, however that device is reached. Both kernel-side
 /// consumers bracket each attempt with [`issued`](Self::issued) and
-/// [`completed`](Self::completed), so the queue gauge, the busy interval, the
+/// [`completed`](Self::completed) or [`withdrawn`](Self::withdrawn), so the
+/// queue gauge, the busy interval, the
 /// service tallies, the health buckets and the overlay can never be advanced
 /// in two different orders or for two different sets of attempts.
 pub struct DeviceIoMeter {
@@ -425,6 +426,13 @@ impl DeviceIoMeter {
         let status = attempt.status();
         self.counters.fold(status);
         self.note_health(status);
+    }
+
+    /// Record the attempt its own caller withdrew at `done_ns`, before the
+    /// device answered: the queue gauge and the busy interval close, and
+    /// nothing is said of the device.
+    pub fn withdrawn(&self, done_ns: u64) {
+        self.stats.note_done(done_ns);
     }
 
     /// Record one consumer reissue of a reissuable completion.

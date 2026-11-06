@@ -8,7 +8,8 @@
 //! handler (`crate::syscalls`); both must reach the *same* endpoint
 //! instance. This registry is that rendezvous: the server
 //! [`register`]s the endpoint it created under its well-known id,
-//! and the handler [`lookup`]s the id the caller named.
+//! and the handler [`lookup`]s the id the caller named. A server receives
+//! through [`receive_call`], the one blocking receive.
 //!
 //! # Why a registry and not a borrowed seam
 //!
@@ -18,27 +19,42 @@
 //! syscall handler live in different crates and neither owns the other, so
 //! a global rendezvous keyed by the well-known
 //! [`tairix_abi::driver_store::DRIVER_STORE_ENDPOINT`] avoids threading an
-//! [`Arc`] through `KernelState`'s cross-crate wiring. Each endpoint is held behind an [`Arc`] so the server and every
-//! in-flight caller share one instance for its life.
+//! [`Arc`] through `KernelState`'s cross-crate wiring. Each endpoint is held
+//! behind an [`Arc`] so the server and every in-flight caller share one
+//! instance for its life.
+//!
+//! # What an exit visits
+//!
+//! The registry indexes the endpoints each process owns, and every endpoint
+//! bound notes its callers in the registry's [`SenderIndex`], so an exit tears
+//! down and scrubs the endpoints its process owned and called, and no other.
+//! The locks order registry, endpoint, index, heap: an endpoint notes a caller
+//! under its own lock, nothing but the heap is taken under the index's, and
+//! no endpoint is destroyed or scrubbed under the registry's. An owner's
+//! teardown takes the address-space registry's write lock before this
+//! registry's, so the grants it revokes name exactly the endpoints the owner
+//! holds.
 //!
 //! # Fail closed
 //!
-//! [`register`] refuses to overwrite a live binding (returns
-//! [`Errno::AlreadyExists`] and audits the refusal as
-//! [`AuditEvent::CallEndpointRegisterDenied`], mirroring the port
-//! registry's register-denied event) so the kernel never silently
-//! re-points a live endpoint; [`lookup`] of an unbound id yields `None`,
-//! which the handler maps to [`Errno::NotFound`] and audits at that
-//! boundary (mirroring [`tairix_kernel_ipc::registry::PortRegistry`]).
+//! [`register`] refuses to overwrite a live binding ([`Errno::AlreadyExists`])
+//! and a binding it cannot keep ([`Errno::OutOfMemory`]), auditing either as
+//! [`AuditEvent::CallEndpointRegisterDenied`], mirroring the port registry's
+//! register-denied event, so the kernel never silently re-points a live
+//! endpoint; [`lookup`] of an unbound id yields `None`, which the handler
+//! maps to [`Errno::NotFound`] and audits at that boundary (mirroring
+//! [`tairix_kernel_ipc::registry::PortRegistry`]).
 
-use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::Errno;
+use tairix_collections::HashMap;
+use tairix_hash::BuildSipHash13;
 use tairix_kernel_ipc::audit::record;
-use tairix_kernel_ipc::{AuditEvent, CallEndpoint, EndpointId};
+use tairix_kernel_ipc::senders::{EndpointSets, Endpoints, SenderIndex};
+use tairix_kernel_ipc::{AuditEvent, CallEndpoint, Destroyed, EndpointId, ReceivedCall, RecvCall};
+use tairix_kernel_sec::ProcessId;
 use tairix_log::{Field, Sink};
 use tairix_sync::{RwLock, SpinLock};
 use tairix_util::fmt::{format_hex_u64, format_u64};
@@ -46,10 +62,72 @@ use tairix_util::fmt::{format_hex_u64, format_u64};
 use crate::aspace::AddressSpaceRegistry;
 
 /// The global call-endpoint registry (set-up by the boot path's kthread
-/// server, read by the `ipc_call` syscall handler). Pure data behind a
-/// [`SpinLock`]; see the module docs for why it is global.
-static CALL_ENDPOINTS: SpinLock<BTreeMap<EndpointId, Arc<CallEndpoint>>> =
-    SpinLock::new(BTreeMap::new());
+/// server, read by the `ipc_call` syscall handler), built by the first
+/// registration. Pure data behind a [`SpinLock`]; see the module docs for why
+/// it is global.
+static CALL_ENDPOINTS: SpinLock<Option<CallRegistry>> = SpinLock::new(None);
+
+/// The endpoints bound, those each process owns, and the index of those each
+/// caller holds a lane on, which every endpoint bound shares.
+struct CallRegistry {
+    /// Keyed: endpoint ids are numbers their binders choose.
+    endpoints: HashMap<EndpointId, Arc<CallEndpoint>, BuildSipHash13>,
+    owners: EndpointSets<u64>,
+    senders: Arc<SenderIndex<u64>>,
+}
+
+/// An unbound endpoint, and the set of its owner's endpoints its unbinding
+/// emptied, which the caller drops once it has released the registry.
+type Unbound = (Arc<CallEndpoint>, Option<Endpoints>);
+
+impl CallRegistry {
+    /// An empty registry, or [`None`] when its index cannot be made. A boot
+    /// that never got the per-boot key hashes unkeyed, as the futex table does.
+    fn new() -> Option<Self> {
+        let keyed = BuildSipHash13::keyed().unwrap_or(BuildSipHash13::UNKEYED);
+        Some(Self {
+            endpoints: HashMap::with_hasher(keyed),
+            owners: EndpointSets::new(),
+            senders: Arc::try_new(SenderIndex::new()).ok()?,
+        })
+    }
+
+    /// Bind `endpoint`, handing it the index first so its first caller is
+    /// noted, or hand it back with why it was refused: its id is bound, or the
+    /// binding cannot be kept.
+    fn bind(&mut self, endpoint: Arc<CallEndpoint>) -> Result<(), (Arc<CallEndpoint>, Errno)> {
+        let id = endpoint.id();
+        if self.endpoints.contains_key(&id) {
+            return Err((endpoint, Errno::AlreadyExists));
+        }
+        if self.endpoints.try_reserve(1).is_err() {
+            return Err((endpoint, Errno::OutOfMemory));
+        }
+        if let Err(err) = self.owners.insert(endpoint.owner(), id) {
+            return Err((endpoint, err));
+        }
+        endpoint.note_senders_in(Arc::clone(&self.senders));
+        // Reserved above, so this cannot fail.
+        let _ = self.endpoints.try_insert(id, endpoint);
+        Ok(())
+    }
+
+    /// Unbind `id`, forgetting it as its owner's.
+    fn unbind(&mut self, id: EndpointId) -> Option<Unbound> {
+        let endpoint = self.endpoints.remove(&id)?;
+        let emptied = self.owners.remove(endpoint.owner(), id);
+        Some((endpoint, emptied))
+    }
+
+    /// Unbind `id` if `owner` still holds it: an id another party unbound and
+    /// rebound since is no longer `owner`'s to tear down.
+    fn unbind_owned(&mut self, id: EndpointId, owner: u64) -> Option<Unbound> {
+        if self.endpoints.get(&id)?.owner() != owner {
+            return None;
+        }
+        self.unbind(id)
+    }
+}
 
 /// Serialise a test that binds into or reads the process-global call-endpoint
 /// registry, so no two tests hold the same endpoint id at once.
@@ -69,34 +147,38 @@ pub(crate) fn registry_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Bind `endpoint` into the registry under its own [`CallEndpoint::id`].
+/// Bind `endpoint` into the registry under its own [`CallEndpoint::id`],
+/// noting it as its owner's.
 ///
 /// # Errors
 ///
 /// [`Errno::AlreadyExists`] if the id is already bound; the existing
 /// binding is left untouched and the kernel never silently overwrites a
-/// live endpoint. The refusal is the security decision this rendezvous
-/// makes, so it is recorded on `audit` as
+/// live endpoint. [`Errno::OutOfMemory`] if the registry cannot keep the
+/// binding; nothing is bound. A refusal is the security decision this
+/// rendezvous makes, so it is recorded on `audit` as
 /// [`AuditEvent::CallEndpointRegisterDenied`] (a bare "endpoint created"
 /// with no subsequent denial would misread as a live endpoint); the
 /// emission happens after the registry lock is released.
 pub fn register(endpoint: Arc<CallEndpoint>, audit: &dyn Sink) -> Result<(), Errno> {
     let id = endpoint.id();
-    let clashed = match CALL_ENDPOINTS.lock().entry(id) {
-        alloc::collections::btree_map::Entry::Occupied(_) => true,
-        alloc::collections::btree_map::Entry::Vacant(slot) => {
-            slot.insert(endpoint);
-            false
-        }
+    let mut guard = CALL_ENDPOINTS.lock();
+    if guard.is_none() {
+        *guard = CallRegistry::new();
+    }
+    let bound = match guard.as_mut() {
+        Some(registry) => registry.bind(endpoint),
+        None => Err((endpoint, Errno::OutOfMemory)),
     };
-    if clashed {
+    drop(guard);
+    if let Err((_, err)) = bound {
         let mut id_buf = [0u8; 16];
         let id_field = Field {
             key: "endpoint",
             value: tairix_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
         };
         record(audit, AuditEvent::CallEndpointRegisterDenied, &[id_field]);
-        return Err(Errno::AlreadyExists);
+        return Err(err);
     }
     report_link_service(id);
     Ok(())
@@ -109,44 +191,104 @@ pub fn register(endpoint: Arc<CallEndpoint>, audit: &dyn Sink) -> Result<(), Err
 /// a security decision and is not audited here.
 #[must_use]
 pub fn lookup(id: EndpointId) -> Option<Arc<CallEndpoint>> {
-    CALL_ENDPOINTS.lock().get(&id).cloned()
+    #[cfg(test)]
+    LOOKUPS.with(|made| made.set(made.get() + 1));
+    CALL_ENDPOINTS.lock().as_ref()?.endpoints.get(&id).cloned()
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Lookups made on this thread, for the tests that bound them.
+    static LOOKUPS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// The lookups made on this thread so far.
+#[cfg(test)]
+pub(crate) fn lookups_made() -> usize {
+    LOOKUPS.with(core::cell::Cell::get)
+}
+
+/// Unbind and destroy `id` under a server that lives on, waking every thread
+/// its destruction concerns: the callers whose calls it cancelled or who were
+/// parked for room, those waiting for the budget those calls held, and its
+/// server, whose next receive answers that it went. Answers whether `id` was
+/// bound.
+pub fn take_down(id: EndpointId, audit: &dyn Sink) -> bool {
+    let Some(endpoint) = unregister(id) else {
+        return false;
+    };
+    let destroyed = endpoint.destroy(audit);
+    crate::waitq::call_wake_named(destroyed.tasks());
+    crate::waitq::serve_wake_server(endpoint.server_task());
+    release_callers(destroyed);
+    true
+}
+
+/// Drop what a destruction cancelled, waking those waiting for each caller's
+/// budget once what its calls held is back.
+fn release_callers(destroyed: Destroyed) {
+    destroyed.release_each(|caller| crate::waitq::budget_released_all(ProcessId(caller)));
+}
+
+/// Receive, as server task `server`, the next call posted to `endpoint` that
+/// fits `buf_cap` bytes. A non-`blocking` receive answers an empty queue at
+/// once; a blocking one parks through `park` on
+/// [`SERVE_WAITQ`](crate::waitq::SERVE_WAITQ), registered before its first
+/// look so a post in between still wakes it, until a call is posted. The
+/// server is recorded on the endpoint first, so a post wakes it alone.
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] once the endpoint is closed; [`Errno::BufferTooSmall`]
+/// for a call larger than `buf_cap`, left queued; [`Errno::WouldBlock`] for an
+/// empty queue a non-blocking receive meets; [`Errno::OutOfMemory`] when a
+/// blocking one has no room to register its wait; [`Errno::NotImplemented`]
+/// when `park` cannot park the caller; [`Errno::Interrupted`] once `abandoned`
+/// reports the server ending.
+pub fn receive_call(
+    endpoint: &CallEndpoint,
+    server: u64,
+    buf_cap: usize,
+    blocking: bool,
+    park: &mut dyn FnMut() -> bool,
+    abandoned: &dyn Fn() -> bool,
+) -> Result<ReceivedCall, Errno> {
+    endpoint.record_server_task(server);
+    if blocking {
+        crate::waitq::SERVE_WAITQ.register(server, crate::waitq::NO_DEADLINE)?;
+    }
+    let received = loop {
+        if endpoint.is_closed() {
+            break Err(Errno::NotFound);
+        }
+        match endpoint.recv_call(buf_cap) {
+            RecvCall::Received(call) => break Ok(call),
+            RecvCall::TooLarge { .. } => break Err(Errno::BufferTooSmall),
+            RecvCall::Empty if !blocking => break Err(Errno::WouldBlock),
+            RecvCall::Empty => {
+                if !park() {
+                    break Err(Errno::NotImplemented);
+                }
+                if abandoned() {
+                    break Err(Errno::Interrupted);
+                }
+            }
+        }
+    };
+    if blocking {
+        crate::waitq::SERVE_WAITQ.deregister(server);
+    }
+    received
 }
 
 /// Remove the binding for `id`, returning the endpoint that was bound (if
 /// any) so the caller can [`CallEndpoint::destroy`] it. Idempotent.
 pub fn unregister(id: EndpointId) -> Option<Arc<CallEndpoint>> {
-    let removed = CALL_ENDPOINTS.lock().remove(&id);
-    if removed.is_some() {
-        report_link_service(id);
-    }
-    removed
-}
-
-/// Unbind and [`CallEndpoint::destroy`] every endpoint owned by the exiting
-/// task `owner` (cancelling its in-flight calls), returning the ids that
-/// were torn down. Pure registry mechanics; the wake and the vanish
-/// notification live in [`teardown_owned_by`].
-fn unregister_owned_by(owner: u64, audit: &dyn Sink) -> Vec<EndpointId> {
-    // Collect-then-remove under one lock acquisition: gather the owned ids,
-    // then drop the lock before destroying (each `destroy` takes the
-    // endpoint's *own* interior lock, never this registry lock).
-    let removed: Vec<Arc<CallEndpoint>> = {
-        let mut map = CALL_ENDPOINTS.lock();
-        let ids: Vec<EndpointId> = map
-            .iter()
-            .filter(|(_, ep)| ep.owner() == owner)
-            .map(|(id, _)| *id)
-            .collect();
-        ids.into_iter().filter_map(|id| map.remove(&id)).collect()
-    };
-    for ep in &removed {
-        ep.destroy(audit);
-    }
-    let ids: Vec<EndpointId> = removed.iter().map(|ep| ep.id()).collect();
-    for &id in &ids {
-        report_link_service(id);
-    }
-    ids
+    let (removed, emptied) = CALL_ENDPOINTS.lock().as_mut()?.unbind(id)?;
+    // What the unbinding emptied goes once the registry is released.
+    drop(emptied);
+    report_link_service(id);
+    Some(removed)
 }
 
 /// An observer of the link suppliers' endpoints: told whether one is live
@@ -230,55 +372,84 @@ pub fn install_vanish_observer(observer: &'static dyn EndpointVanishObserver) {
 
 /// Tear down every endpoint owned by the exiting task `owner`, wake the
 /// callers its destruction cancelled, revoke the per-endpoint grants those
-/// endpoints' ids named, and notify the vanish observer.
+/// endpoints' ids named, and notify the vanish observer, answering how many
+/// it tore down. Only the endpoints `owner` owns are visited.
 ///
 /// A user-space service may exit (cleanly, by fault, or killed) while
 /// callers are blocked in `ipc_call` awaiting its replies. Without this,
 /// those callers would park forever on a dead endpoint; destroying the
 /// endpoint flips every outstanding call to
-/// [`tairix_kernel_ipc::ReplyOutcome::Cancelled`] so the next poll abandons
-/// fail-closed. The observer is notified strictly **after**
-/// [`crate::waitq::call_wake`]: a caller parked mid-call on the dead
-/// endpoint may hold a lock the observer needs, and the wake is what lets
-/// that caller finish and release it. The per-endpoint grants naming the
-/// destroyed ids are revoked *before* the wake, so no woken caller can re-post
-/// to an id that is about to be re-bindable by someone else.
-pub fn teardown_owned_by(owner: u64, aspaces: &RwLock<AddressSpaceRegistry>, audit: &dyn Sink) {
-    let removed = unregister_owned_by(owner, audit);
-    if removed.is_empty() {
-        return;
+/// [`tairix_kernel_ipc::ReplyOutcome::Cancelled`] and wakes exactly the
+/// threads it was holding, so each abandons fail-closed and no other parked
+/// caller stirs. The observer is notified strictly **after** every wake: a
+/// caller parked mid-call on a dead endpoint may hold a lock the observer
+/// needs, and the wake is what lets that caller finish and release it. The
+/// per-endpoint grants naming the doomed ids are revoked as the ids are taken
+/// from `owner`, under both registries' locks and before any is unbound: no
+/// woken caller can re-post to an id another task may bind next, and an id
+/// rebound by another owner meanwhile keeps that owner's grants.
+pub fn teardown_owned_by(
+    owner: u64,
+    aspaces: &RwLock<AddressSpaceRegistry>,
+    audit: &dyn Sink,
+) -> usize {
+    // Most processes own no endpoint, and never take the address-space
+    // registry's write lock here.
+    let owns = CALL_ENDPOINTS
+        .lock()
+        .as_ref()
+        .is_some_and(|registry| registry.owners.holds(owner));
+    if !owns {
+        return 0;
     }
-    revoke_grants_for(owner, &removed, aspaces, audit);
-    crate::waitq::call_wake();
-    // The cancelled calls gave back what they held of their callers' budgets.
-    crate::waitq::budget_released_everywhere();
+    let taken = {
+        let mut grants = aspaces.write();
+        let mut guard = CALL_ENDPOINTS.lock();
+        let endpoints = guard
+            .as_mut()
+            .and_then(|registry| registry.owners.take(owner));
+        endpoints.map(|endpoints| {
+            let revoked = grants.revoke_endpoint_grants(&endpoints);
+            (endpoints, revoked)
+        })
+    };
+    let Some((mut endpoints, revoked)) = taken else {
+        return 0;
+    };
+    record_grants_revoked(owner, revoked, audit);
+    endpoints.retain(|&id| {
+        let unbound = CALL_ENDPOINTS
+            .lock()
+            .as_mut()
+            .and_then(|registry| registry.unbind_owned(id, owner));
+        let Some((endpoint, emptied)) = unbound else {
+            return false;
+        };
+        // What the unbinding emptied goes once the registry is released.
+        drop(emptied);
+        report_link_service(id);
+        let destroyed = endpoint.destroy(audit);
+        crate::waitq::call_wake_named(destroyed.tasks());
+        release_callers(destroyed);
+        true
+    });
     if let Ok(Some(observer)) = VANISH_OBSERVER.get() {
-        for id in removed {
+        for &id in &endpoints {
             observer.endpoint_vanished(id);
         }
     }
+    endpoints.len()
 }
 
-/// Withdraw every per-endpoint grant naming one of the just-destroyed
-/// `endpoints`, recording what was withdrawn.
+/// Record that a teardown of `owner`'s endpoints withdrew `revoked` grants
+/// naming them.
 ///
 /// An endpoint id is a number, and a number is re-creatable: once these
 /// endpoints are gone another task may bind the same ids. A holder's grant
 /// that outlived its endpoint would then silently retarget onto the new
 /// instance, handing it the authority to call a service it was never
-/// granted. Revoking in the same teardown that destroyed the endpoints is
-/// what makes id reuse safe; taking the registry as an argument is what
-/// makes it impossible to destroy an endpoint without doing so.
-fn revoke_grants_for(
-    owner: u64,
-    endpoints: &[EndpointId],
-    aspaces: &RwLock<AddressSpaceRegistry>,
-    audit: &dyn Sink,
-) {
-    let ids: BTreeSet<u64> = endpoints.iter().map(|id| id.0).collect();
-    // The write guard is released with this statement, so the audit record
-    // below is emitted with no registry lock held.
-    let revoked = aspaces.write().revoke_endpoint_grants(&ids);
+/// granted, which is why a teardown revokes before it unbinds.
+fn record_grants_revoked(owner: u64, revoked: usize, audit: &dyn Sink) {
     if revoked == 0 {
         return;
     }
@@ -289,8 +460,7 @@ fn revoke_grants_for(
         AuditEvent::CallEndpointGrantsRevoked,
         &[
             // The task whose teardown withdrew the authority; the ids it lost
-            // are the `CallEndpointDestroyed` records emitted immediately
-            // before this one.
+            // are the `CallEndpointDestroyed` records that follow this one.
             Field {
                 key: "owner",
                 value: tairix_log::FieldValue::Str(format_hex_u64(owner, &mut owner_buf)),
@@ -303,9 +473,11 @@ fn revoke_grants_for(
     );
 }
 
-/// Cancel every in-flight call the exiting task `sender` posted, on every
-/// live endpoint — the converse of [`teardown_owned_by`]: that releases the
-/// endpoints a dead task *served*; this scrubs the calls a dead task *sent*.
+/// Cancel every in-flight call the exiting task `sender` posted — the
+/// converse of [`teardown_owned_by`]: that releases the endpoints a dead task
+/// *served*; this scrubs the calls a dead task *sent* — answering how many
+/// endpoints it visited: those `sender` called, which the index every
+/// endpoint notes its callers in names, however many are bound.
 ///
 /// Without it a dead caller's queued request outlives it and is later
 /// handed to the server as if live — the USB defect where an unloaded
@@ -314,42 +486,29 @@ fn revoke_grants_for(
 /// with cancellations records one `CallPosterVanished` audit event. No wake
 /// is needed: the poster is dead and the server parks only on *arrival* of
 /// requests, never their removal.
-pub fn cancel_posted_by(sender: u64, audit: &dyn Sink) {
-    // Walked one entry at a time rather than snapshotted: each step holds the
-    // registry lock only long enough to clone one `Arc` (an atomic bump, no
-    // allocation), so the heap's own global lock never nests inside the
-    // registry's critical section, and each cancellation — which takes the
-    // endpoint's interior lock — runs with the registry lock released.
-    //
-    // Ids strictly increase, so the walk terminates. An endpoint registered
-    // mid-walk under a lower id is skipped, which is correct: `sender` is
-    // dead and so cannot have posted to an endpoint that did not exist while
-    // it lived.
-    let mut after = None;
-    while let Some((id, ep)) = next_registered_after(after) {
-        let _ = ep.cancel_posted_by(sender, audit);
-        after = Some(id);
-    }
-}
-
-/// The bound endpoint with the smallest id above `after` (the smallest of
-/// all when `after` is [`None`]), cloned out under the registry lock.
-fn next_registered_after(after: Option<EndpointId>) -> Option<(EndpointId, Arc<CallEndpoint>)> {
-    let lower = match after {
-        Some(id) => core::ops::Bound::Excluded(id),
-        None => core::ops::Bound::Unbounded,
-    };
-    CALL_ENDPOINTS
+pub fn cancel_posted_by(sender: u64, audit: &dyn Sink) -> usize {
+    let index = CALL_ENDPOINTS
         .lock()
-        .range((lower, core::ops::Bound::Unbounded))
-        .next()
-        .map(|(id, ep)| (*id, Arc::clone(ep)))
+        .as_ref()
+        .map(|registry| Arc::clone(&registry.senders));
+    let Some(used) = index.and_then(|index| index.take(sender)) else {
+        return 0;
+    };
+    for &id in &used {
+        if let Some(endpoint) = lookup(id) {
+            let _ = endpoint.cancel_posted_by(sender, audit);
+        }
+    }
+    used.len()
 }
 
 /// `true` if `id` is currently bound. Diagnostic / test observer.
 #[must_use]
 pub fn contains(id: EndpointId) -> bool {
-    CALL_ENDPOINTS.lock().contains_key(&id)
+    CALL_ENDPOINTS
+        .lock()
+        .as_ref()
+        .is_some_and(|registry| registry.endpoints.contains_key(&id))
 }
 
 #[cfg(test)]
@@ -386,15 +545,17 @@ mod tests {
         }
     }
 
-    fn endpoint(id: u64) -> Arc<CallEndpoint> {
+    /// An endpoint `owner` binds at `id`.
+    fn endpoint(id: u64, owner: u64) -> Arc<CallEndpoint> {
         let sink = NullSink;
         let creator = TaskCapabilities::derive(
-            ProcessId(1),
+            ProcessId(owner),
             UserId(1),
             CapabilitySet::empty(),
             CapabilitySet::empty(),
             &sink,
-        );
+        )
+        .expect("derived");
         Arc::new(
             CallEndpoint::create(
                 EndpointId(id),
@@ -417,7 +578,7 @@ mod tests {
     fn register_then_lookup_round_trips() {
         let id = EndpointId(0xCA11_0001);
         assert!(!contains(id));
-        register(endpoint(id.0), &NullSink).expect("first bind succeeds");
+        register(endpoint(id.0, 1), &NullSink).expect("first bind succeeds");
         assert!(contains(id));
         assert_eq!(lookup(id).map(|e| e.id()), Some(id));
         // Clean up so the global registry does not leak across tests.
@@ -429,12 +590,12 @@ mod tests {
     fn duplicate_register_is_already_exists_and_audited() {
         let id = EndpointId(0xCA11_0002);
         let sink = RecordingSink::new();
-        register(endpoint(id.0), &sink).expect("first bind succeeds");
+        register(endpoint(id.0, 1), &sink).expect("first bind succeeds");
         assert!(
             sink.ids.borrow().is_empty(),
             "a successful bind emits no registry audit"
         );
-        let err = register(endpoint(id.0), &sink).expect_err("duplicate refused");
+        let err = register(endpoint(id.0, 1), &sink).expect_err("duplicate refused");
         assert_eq!(err, Errno::AlreadyExists);
         assert_eq!(
             *sink.ids.borrow(),
@@ -447,7 +608,7 @@ mod tests {
     #[test]
     fn cancel_posted_by_scrubs_the_dead_posters_calls_on_registered_endpoints() {
         let id = EndpointId(0xCA11_0004);
-        let ep = endpoint(id.0);
+        let ep = endpoint(id.0, 1);
         register(Arc::clone(&ep), &NullSink).expect("bound");
         // The poster task id must be unique to this test, not a small
         // shared constant: `cancel_posted_by` scrubs the poster's calls
@@ -462,7 +623,8 @@ mod tests {
             CapabilitySet::empty(),
             CapabilitySet::empty(),
             &NullSink,
-        );
+        )
+        .expect("derived");
         ep.post(
             &caller,
             0,
@@ -479,6 +641,276 @@ mod tests {
         // The dead poster's queued call is gone before any server sees it.
         assert!(!ep.has_pending());
         unregister(id);
+    }
+
+    /// An exit scrubs the calls its process posted at the endpoints it called,
+    /// visiting those alone however many are bound.
+    #[test]
+    fn an_exit_visits_only_the_endpoints_its_process_used() {
+        let owner = crate::test_boot::claim_task();
+        let poster = crate::test_boot::claim_peer_task();
+        let ids = 0xCA11_8000..0xCA11_8040;
+        let bound: std::vec::Vec<_> = ids.map(|id| endpoint(id, owner)).collect();
+        for ep in &bound {
+            register(Arc::clone(ep), &NullSink).expect("bound");
+        }
+        let caller = TaskCapabilities::derive(
+            ProcessId(poster),
+            UserId(1),
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            &NullSink,
+        )
+        .expect("derived");
+        for ep in [&bound[3], &bound[40]] {
+            ep.post(
+                &caller,
+                0,
+                b"q",
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                &NullSink,
+            )
+            .expect("posted");
+        }
+        assert_eq!(cancel_posted_by(poster, &NullSink), 2, "two of 64");
+        assert!(bound.iter().all(|ep| ep.outstanding() == 0));
+        assert_eq!(cancel_posted_by(poster, &NullSink), 0, "its notes went");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        assert_eq!(teardown_owned_by(owner, &aspaces, &NullSink), 64);
+    }
+
+    /// An exit tears down the endpoints its process owns, visiting those alone
+    /// however many are bound.
+    #[test]
+    fn a_teardown_visits_only_the_endpoints_its_process_owned() {
+        let owner = crate::test_boot::claim_task();
+        let neighbour = crate::test_boot::claim_peer_task();
+        let ids = 0xCA11_8100..0xCA11_8140_u64;
+        for id in ids.clone() {
+            let by = if id % 32 == 5 { owner } else { neighbour };
+            register(endpoint(id, by), &NullSink).expect("bound");
+        }
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        assert_eq!(teardown_owned_by(owner, &aspaces, &NullSink), 2);
+        let still_bound = ids.filter(|&id| contains(EndpointId(id))).count();
+        assert_eq!(still_bound, 62, "every other stays bound");
+        assert_eq!(teardown_owned_by(owner, &aspaces, &NullSink), 0);
+        assert_eq!(teardown_owned_by(neighbour, &aspaces, &NullSink), 62);
+    }
+
+    /// A destruction gives back what the calls it cancelled held of their
+    /// callers' budgets and wakes the threads waiting for it, however the
+    /// endpoint goes.
+    #[test]
+    fn taking_an_endpoint_down_wakes_its_callers_budget_waiters() {
+        let (_, waiter) = crate::test_boot::claim_scheduler();
+        for (at, owned_teardown) in [(0xCA11_8410, false), (0xCA11_8411, true)] {
+            let owner = crate::test_boot::claim_peer_task();
+            let caller = crate::test_boot::claim_peer_task();
+            let ep = endpoint(at, owner);
+            register(Arc::clone(&ep), &NullSink).expect("bound");
+            let caps = TaskCapabilities::derive(
+                ProcessId(caller),
+                UserId(1),
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                &NullSink,
+            )
+            .expect("derived");
+            ep.post(
+                &caps,
+                0,
+                b"q",
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                &NullSink,
+            )
+            .expect("posted");
+            crate::waitq::budget_watch(ProcessId(caller), waiter).expect("filed");
+            let _ = crate::test_boot::take_unparked();
+            if owned_teardown {
+                let aspaces = RwLock::new(AddressSpaceRegistry::new());
+                assert_eq!(teardown_owned_by(owner, &aspaces, &NullSink), 1);
+            } else {
+                assert!(take_down(ep.id(), &NullSink));
+            }
+            let woken = crate::test_boot::take_unparked();
+            crate::waitq::budget_unwatch(ProcessId(caller), waiter);
+            assert!(
+                woken.contains(&waiter),
+                "a budget waiter of its caller wakes"
+            );
+            assert_eq!(caps.charges().held(tairix_abi::LimitKind::IpcQueueBytes), 0);
+        }
+    }
+
+    /// A teardown revokes the grants naming the endpoints its owner holds, and
+    /// leaves those naming another's.
+    #[test]
+    fn a_teardown_revokes_only_the_grants_of_what_its_owner_holds() {
+        let owner = crate::test_boot::claim_task();
+        let other = crate::test_boot::claim_peer_task();
+        let holder = crate::test_boot::claim_peer_task();
+        let (mine, theirs) = (0xCA11_8412, 0xCA11_8413);
+        register(endpoint(mine, owner), &NullSink).expect("bound");
+        register(endpoint(theirs, other), &NullSink).expect("bound");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        for id in [mine, theirs] {
+            aspaces
+                .write()
+                .mint_grant(ProcessId(holder), tairix_abi::HwResource::endpoint(id))
+                .expect("minted");
+        }
+        assert_eq!(teardown_owned_by(owner, &aspaces, &NullSink), 1);
+        let covers = |id| {
+            aspaces
+                .read()
+                .grant_covers(ProcessId(holder), &tairix_abi::HwResource::endpoint(id))
+        };
+        assert!(!covers(mine), "its endpoint's grant is revoked");
+        assert!(covers(theirs), "another's stays");
+        assert_eq!(teardown_owned_by(other, &aspaces, &NullSink), 1);
+    }
+
+    /// Taking an endpoint down under its live server wakes the callers whose
+    /// calls it cancelled and the server, which would otherwise park on an
+    /// endpoint that is gone.
+    #[test]
+    fn taking_an_endpoint_down_wakes_its_server_and_its_callers() {
+        let (_, poster) = crate::test_boot::claim_scheduler();
+        let owner = crate::test_boot::claim_peer_task();
+        let caller = crate::test_boot::claim_peer_task();
+        let server = crate::test_boot::claim_peer_task();
+        let ep = endpoint(0xCA11_8300, owner);
+        register(Arc::clone(&ep), &NullSink).expect("bound");
+        ep.record_server_task(server);
+        let caps = TaskCapabilities::derive(
+            ProcessId(caller),
+            UserId(1),
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            &NullSink,
+        )
+        .expect("derived");
+        ep.post(
+            &caps,
+            poster,
+            b"q",
+            u64::MAX,
+            tairix_abi::RLIMIT_INFINITY,
+            &NullSink,
+        )
+        .expect("posted");
+        crate::waitq::CALL_WAITQ
+            .register(poster, crate::waitq::NO_DEADLINE)
+            .expect("filed");
+        crate::waitq::SERVE_WAITQ
+            .register(server, crate::waitq::NO_DEADLINE)
+            .expect("filed");
+        let _ = crate::test_boot::take_unparked();
+        assert!(take_down(ep.id(), &NullSink));
+        let woken = crate::test_boot::take_unparked();
+        crate::waitq::CALL_WAITQ.deregister(poster);
+        crate::waitq::SERVE_WAITQ.deregister(server);
+        assert!(woken.contains(&poster), "its caller wakes");
+        assert!(woken.contains(&server), "its server wakes");
+        assert!(!contains(ep.id()));
+        assert!(!take_down(ep.id(), &NullSink), "taken down once");
+    }
+
+    /// A receive meeting an empty queue answers at once unless it blocks; a
+    /// blocking one parks until a post wakes it, and one that cannot park fails
+    /// closed rather than spin.
+    #[test]
+    fn a_blocking_receive_parks_until_a_post_and_one_that_cannot_park_fails_closed() {
+        let boot = crate::test_boot::HostBoot::claim();
+        let ep = endpoint(0xCA11_8400, crate::test_boot::claim_peer_task());
+        register(Arc::clone(&ep), &NullSink).expect("bound");
+        let never = || false;
+        assert_eq!(
+            receive_call(&ep, boot.task(), usize::MAX, false, &mut || true, &never).err(),
+            Some(Errno::WouldBlock)
+        );
+        assert_eq!(
+            receive_call(&ep, boot.task(), usize::MAX, true, &mut || false, &never).err(),
+            Some(Errno::NotImplemented)
+        );
+        let server = {
+            let ep = Arc::clone(&ep);
+            boot.spawn(move || {
+                let task = crate::test_boot::HostBoot::current().task();
+                let park = &mut crate::waitq::park_calling_task;
+                receive_call(&ep, task, usize::MAX, true, park, &|| false)
+                    .map(|call| call.request.as_bytes().to_vec())
+            })
+        };
+        boot.until_blocked(server.id());
+        let caps = TaskCapabilities::derive(
+            ProcessId(boot.task()),
+            UserId(1),
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            &NullSink,
+        )
+        .expect("derived");
+        ep.post(
+            &caps,
+            boot.task(),
+            b"q",
+            u64::MAX,
+            tairix_abi::RLIMIT_INFINITY,
+            &NullSink,
+        )
+        .expect("posted");
+        crate::waitq::serve_wake_server(ep.server_task());
+        let id = server.id();
+        assert_eq!(server.join(), Ok(std::vec![b'q']));
+        assert_eq!(boot.waits(id), 1, "the receive parked once, until the post");
+        assert!(take_down(ep.id(), &NullSink));
+    }
+
+    /// A teardown wakes the callers of the calls it cancelled, and no other
+    /// parked caller: it is not a broadcast.
+    #[test]
+    fn a_teardown_wakes_only_the_callers_of_what_it_destroyed() {
+        let (_, thread) = crate::test_boot::claim_scheduler();
+        let owner = crate::test_boot::claim_peer_task();
+        let caller = crate::test_boot::claim_peer_task();
+        let bystander = crate::test_boot::claim_peer_task();
+        let ep = endpoint(0xCA11_8200, owner);
+        register(Arc::clone(&ep), &NullSink).expect("bound");
+        let caps = TaskCapabilities::derive(
+            ProcessId(caller),
+            UserId(1),
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            &NullSink,
+        )
+        .expect("derived");
+        ep.post(
+            &caps,
+            thread,
+            b"q",
+            u64::MAX,
+            tairix_abi::RLIMIT_INFINITY,
+            &NullSink,
+        )
+        .expect("posted");
+        for task in [thread, bystander] {
+            crate::waitq::CALL_WAITQ
+                .register(task, crate::waitq::NO_DEADLINE)
+                .expect("filed");
+        }
+        let _ = crate::test_boot::take_unparked();
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        assert_eq!(teardown_owned_by(owner, &aspaces, &NullSink), 1);
+        let woken = crate::test_boot::take_unparked();
+        for task in [thread, bystander] {
+            crate::waitq::CALL_WAITQ.deregister(task);
+        }
+        assert!(woken.contains(&thread), "its caller wakes");
+        assert!(!woken.contains(&bystander), "no other caller does");
     }
 
     #[test]
@@ -519,7 +951,8 @@ mod tests {
         let sink = NullSink;
         let mut caps = CapabilitySet::empty();
         caps.insert(tairix_abi::CapabilityId::IPC_BIND_PRIVILEGED);
-        let creator = TaskCapabilities::derive(ProcessId(owner), UserId(1), caps, caps, &sink);
+        let creator = TaskCapabilities::derive(ProcessId(owner), UserId(1), caps, caps, &sink)
+            .expect("derived");
         let limits = CallEndpointLimits {
             max_request: 64,
             max_reply: 64,
@@ -555,7 +988,7 @@ mod tests {
         assert_eq!(reports_for(clock), [true, false, true, false]);
 
         let plain = 0xCA11_0007;
-        register(endpoint(plain), &sink).expect("bound");
+        register(endpoint(plain, 1), &sink).expect("bound");
         unregister(EndpointId(plain));
         assert!(
             reports_for(plain).is_empty(),

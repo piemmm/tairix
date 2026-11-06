@@ -11,6 +11,11 @@
 //! answered to its own id and no other, and one whose window closes is
 //! cancelled and has its answer dropped.
 //!
+//! An operation meeting a name already taken asks its user, and waits for the
+//! answer parked on the desk rather than on a worker: it keeps its volumes, so
+//! nothing overtakes it on them, and once answered it resumes before anything
+//! waiting.
+//!
 //! # No I/O, and no lock
 //!
 //! [`OperationDesk`] is the policy alone, so it compiles and is tested on the
@@ -23,11 +28,11 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_browse::lanes::Lane;
 pub use tairix_browse::Reading;
 use tairix_browse::Tally;
+use tairix_fscopy::op::Conflict;
 use tairix_fscopy::Omissions;
-
-use crate::lanes::Lane;
 
 /// How an operation ended. What was done before the end stays done.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -49,26 +54,40 @@ pub enum Step {
     Done,
     /// A refusal stopped it, stated in these words.
     Stopped(String),
+    /// It waits on its user's answer to this question, its place held.
+    Asks(Conflict),
+}
+
+/// Where a slice of an operation carried out on the loop left it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Sliced {
+    /// The slice is spent and work remains.
+    Spent,
+    /// It waits on its user's answer to this question.
+    Asks(Conflict),
+    /// It ended so.
+    Ended(Ending),
 }
 
 /// Carry an operation on a unit at a time through `step`, for as long as
-/// `out_of_time` allows, answering how it ended — or `None`, still working,
-/// once the slice is spent. A cancel is honoured at a unit's end: `cancelled`
+/// `out_of_time` allows, answering how it ended, the question it waits on, or
+/// that the slice is spent. A cancel is honoured at a unit's end: `cancelled`
 /// is asked before each, and the caller abandons what was under way.
 pub fn run_slice(
     mut step: impl FnMut() -> Step,
     mut cancelled: impl FnMut() -> bool,
     mut out_of_time: impl FnMut() -> bool,
-) -> Option<Ending> {
+) -> Sliced {
     loop {
         if cancelled() {
-            return Some(Ending::Cancelled);
+            return Sliced::Ended(Ending::Cancelled);
         }
         match step() {
-            Step::Working if out_of_time() => return None,
+            Step::Working if out_of_time() => return Sliced::Spent,
             Step::Working => {}
-            Step::Done => return Some(Ending::Completed),
-            Step::Stopped(reason) => return Some(Ending::Stopped(reason)),
+            Step::Asks(conflict) => return Sliced::Asks(conflict),
+            Step::Done => return Sliced::Ended(Ending::Completed),
+            Step::Stopped(reason) => return Sliced::Ended(Ending::Stopped(reason)),
         }
     }
 }
@@ -89,38 +108,74 @@ pub trait Carried {
     fn remains(&mut self) -> Self::Remains;
 }
 
-/// Carry `job` out on a worker to its end, `nudge`ing the loop whenever a
-/// wake is owed. After each unit `report` answers whether one is owed and
-/// whether a cancel was asked, which is honoured at that unit's end. The job
-/// is dropped, closing its files, before `settle` records its answer: a close
-/// on a served volume waits for that volume's driver, so it never runs under
-/// the lock `settle` takes.
-pub fn carry<J: Carried>(
-    mut job: J,
-    mut report: impl FnMut(&mut J) -> (bool, bool),
-    settle: impl FnOnce(Ending, J::Remains) -> bool,
-    mut nudge: impl FnMut(),
-) {
+/// The desk's side of the job a worker carries, each call under the lock the
+/// loop shares.
+pub trait Carrier<J: Carried> {
+    /// Whether the job was asked to stop before its next unit.
+    fn cancelled(&mut self) -> bool;
+
+    /// The job did a unit: whether the loop is owed a wake to show it, and
+    /// whether a cancel was asked, which is honoured at that unit's end.
+    fn report(&mut self, job: &mut J) -> (bool, bool);
+
+    /// The job waits on `conflict`: parked to be answered, answering whether
+    /// the loop is owed a wake to ask it.
+    ///
+    /// # Errors
+    ///
+    /// The job, handed back to be stopped, where a cancel came first.
+    fn ask(&mut self, job: J, conflict: Conflict) -> Result<bool, J>;
+
+    /// The job ended as `ending` and its files are closed: whether the loop
+    /// is owed a wake to collect what `remains` carries.
+    fn settle(&mut self, ending: Ending, remains: J::Remains) -> bool;
+
+    /// Wake the loop.
+    fn nudge(&mut self);
+}
+
+/// Carry `job` out on a worker until it ends or asks, through `carrier`,
+/// nudging the loop whenever a wake is owed. A job asking a question is
+/// parked on the desk, holding no worker; one stopped first — before its
+/// first unit, or before it could be parked — is abandoned, and a cancel is
+/// otherwise honoured at a unit's end. The job is dropped, closing its files,
+/// before its answer is settled: a close on a served volume waits for that
+/// volume's driver, so it never runs under the lock settling takes.
+pub fn carry<J: Carried>(mut job: J, carrier: &mut impl Carrier<J>) {
+    let mut halted = carrier.cancelled();
     let ending = loop {
+        if halted {
+            job.abandon();
+            break Ending::Cancelled;
+        }
         let step = job.step();
-        let (owed, cancelled) = report(&mut job);
+        let (owed, cancelled) = carrier.report(&mut job);
         if owed {
-            nudge();
+            carrier.nudge();
         }
         match step {
-            Step::Working if cancelled => {
-                job.abandon();
-                break Ending::Cancelled;
-            }
-            Step::Working => {}
+            Step::Working => halted = cancelled,
+            Step::Asks(_) if cancelled => halted = true,
+            Step::Asks(conflict) => match carrier.ask(job, conflict) {
+                Ok(owed) => {
+                    if owed {
+                        carrier.nudge();
+                    }
+                    return;
+                }
+                Err(back) => {
+                    job = back;
+                    halted = true;
+                }
+            },
             Step::Done => break Ending::Completed,
             Step::Stopped(reason) => break Ending::Stopped(reason),
         }
     };
     let remains = job.remains();
     drop(job);
-    if settle(ending, remains) {
-        nudge();
+    if carrier.settle(ending, remains) {
+        carrier.nudge();
     }
 }
 
@@ -149,6 +204,8 @@ pub struct Standing<'a> {
     /// Whether it waits for an operation asked before it on a volume they
     /// share.
     pub waiting: bool,
+    /// The question it waits on its user's answer to.
+    pub asking: Option<&'a Conflict>,
 }
 
 /// Why an operation was not taken. The job is handed back with it.
@@ -169,8 +226,9 @@ struct Waiting<J> {
     lanes: Vec<Lane>,
 }
 
-/// An operation a worker is carrying out.
-struct Running {
+/// An operation a worker is carrying out, or one parked on its question with
+/// none.
+struct Running<J> {
     turn: u64,
     id: u64,
     lanes: Vec<Lane>,
@@ -179,6 +237,17 @@ struct Running {
     cancel: bool,
     /// Its window closed, so its answer belongs to nobody.
     orphaned: bool,
+    /// The job, while it waits on its user's answer.
+    parked: Option<Parked<J>>,
+}
+
+/// An operation waiting on its user's answer.
+struct Parked<J> {
+    job: J,
+    /// What it asks.
+    conflict: Conflict,
+    /// Whether it was answered, so it may resume.
+    answered: bool,
 }
 
 /// The run of one operation, by which its worker reports on it: apart from
@@ -190,7 +259,7 @@ pub struct Turn(u64);
 /// The operations waiting, those running, and the answers not yet collected.
 pub struct OperationDesk<J> {
     waiting: VecDeque<Waiting<J>>,
-    running: Vec<Running>,
+    running: Vec<Running<J>>,
     landed: Vec<(u64, Finished)>,
     /// The turns handed out, so each run is told apart.
     turns: u64,
@@ -256,11 +325,17 @@ impl<J> OperationDesk<J> {
     #[must_use]
     pub fn standing(&self, id: u64) -> Option<Standing<'_>> {
         if let Some(running) = self.running_for(id) {
+            let asking = running
+                .parked
+                .as_ref()
+                .filter(|parked| !parked.answered && !running.cancel)
+                .map(|parked| &parked.conflict);
             return Some(Standing {
                 reading: running.reading,
                 current: &running.current,
                 cancelling: running.cancel,
                 waiting: false,
+                asking,
             });
         }
         self.waiting
@@ -273,11 +348,13 @@ impl<J> OperationDesk<J> {
     }
 
     /// Cancel operation `id`: one still waiting ends at once with nothing
-    /// done, one running stops before its next step.
-    pub fn cancel(&mut self, id: u64) {
+    /// done, one running stops before its next step, and one parked on its
+    /// question is handed to a worker to stop. Answers whether a worker is
+    /// owed a call for it.
+    pub fn cancel(&mut self, id: u64) -> bool {
         if let Some(running) = self.running_for_mut(id) {
             running.cancel = true;
-            return;
+            return running.parked.is_some();
         }
         if let Some(at) = self.waiting.iter().position(|held| held.id == id) {
             drop(self.waiting.remove(at));
@@ -290,6 +367,7 @@ impl<J> OperationDesk<J> {
                 },
             ));
         }
+        false
     }
 
     /// Take operation `id`'s answer, if it has landed.
@@ -310,18 +388,23 @@ impl<J> OperationDesk<J> {
     }
 
     /// Operation `id`'s window has closed: if it waits it never runs, if it
-    /// runs it stops at its next step, and no answer is kept for it.
-    pub fn forget(&mut self, id: u64) {
+    /// runs it stops at its next step, if it is parked on its question it is
+    /// handed to a worker to stop, and no answer is kept for it. Answers
+    /// whether a worker is owed a call for it.
+    pub fn forget(&mut self, id: u64) -> bool {
         self.waiting.retain(|held| held.id != id);
-        if let Some(running) = self.running_for_mut(id) {
-            running.cancel = true;
-            running.orphaned = true;
-        }
         self.landed.retain(|(held, _)| *held != id);
+        let Some(running) = self.running_for_mut(id) else {
+            return false;
+        };
+        running.cancel = true;
+        running.orphaned = true;
+        running.parked.is_some()
     }
 
-    /// Send the workers away: nothing waiting runs, and what runs stops at its
-    /// next step.
+    /// Send the workers away: nothing waiting runs, what runs stops at its
+    /// next step, and what is parked on its question is handed to them to
+    /// stop before they go.
     pub fn stop(&mut self) {
         self.stopping = true;
         self.waiting.clear();
@@ -336,11 +419,24 @@ impl<J> OperationDesk<J> {
         self.stopping
     }
 
-    /// A worker's next operation and its turn: the oldest whose volumes no
-    /// operation running touches, nor one asked before it and still waiting,
-    /// so an operation never overtakes an earlier one on a volume they share.
-    /// None once the desk is stopping.
+    /// A worker's next operation and its turn: first one parked on its
+    /// question that was answered or is to stop, which holds its volumes
+    /// already; else the oldest waiting whose volumes no operation running or
+    /// parked touches, nor one asked before it and still waiting, so an
+    /// operation never overtakes an earlier one on a volume they share. Only a
+    /// parked one once the desk is stopping.
     pub fn next_job(&mut self) -> Option<(Turn, u64, J)> {
+        let resumed = self.running.iter_mut().find(|running| {
+            running
+                .parked
+                .as_ref()
+                .is_some_and(|parked| parked.answered || running.cancel)
+        });
+        if let Some(running) = resumed {
+            if let Some(parked) = running.parked.take() {
+                return Some((Turn(running.turn), running.id, parked.job));
+            }
+        }
         if self.stopping {
             return None;
         }
@@ -355,6 +451,7 @@ impl<J> OperationDesk<J> {
             current: String::new(),
             cancel: false,
             orphaned: false,
+            parked: None,
         });
         Some((Turn(self.turns), id, job))
     }
@@ -397,6 +494,51 @@ impl<J> OperationDesk<J> {
         shown && self.owe()
     }
 
+    /// The operation run as `turn` waits on `conflict`: its job is parked
+    /// here, holding its volumes and no worker, until its user answers.
+    /// Answers whether the loop is owed a wake to ask it.
+    ///
+    /// # Errors
+    ///
+    /// The job, handed back to be stopped, where a cancel came first.
+    pub fn ask(&mut self, turn: Turn, job: J, conflict: Conflict) -> Result<bool, J> {
+        let stopping = self.stopping;
+        let Some(running) = self
+            .running
+            .iter_mut()
+            .find(|running| running.turn == turn.0)
+        else {
+            return Err(job);
+        };
+        if stopping || running.cancel {
+            return Err(job);
+        }
+        running.parked = Some(Parked {
+            job,
+            conflict,
+            answered: false,
+        });
+        Ok(self.owe())
+    }
+
+    /// Answer the question operation `id` waits on: `apply` gives its parked
+    /// job the answer, and it resumes before anything waiting. Answers
+    /// whether one was waiting on an answer, so a worker is owed a call.
+    pub fn answer(&mut self, id: u64, apply: impl FnOnce(&mut J)) -> bool {
+        let Some(running) = self.running_for_mut(id) else {
+            return false;
+        };
+        if running.cancel {
+            return false;
+        }
+        let Some(parked) = running.parked.as_mut().filter(|parked| !parked.answered) else {
+            return false;
+        };
+        apply(&mut parked.job);
+        parked.answered = true;
+        true
+    }
+
     /// The operation run as `turn` ended as `ending`, its copies having left
     /// `omissions`, answering whether the loop is owed a wake to collect it.
     pub fn finish(&mut self, turn: Turn, ending: Ending, omissions: Omissions) -> bool {
@@ -426,17 +568,17 @@ impl<J> OperationDesk<J> {
         !core::mem::replace(&mut self.nudged, true)
     }
 
-    fn run(&self, turn: Turn) -> Option<&Running> {
+    fn run(&self, turn: Turn) -> Option<&Running<J>> {
         self.running.iter().find(|running| running.turn == turn.0)
     }
 
-    fn running_for(&self, id: u64) -> Option<&Running> {
+    fn running_for(&self, id: u64) -> Option<&Running<J>> {
         self.running
             .iter()
             .find(|running| running.id == id && !running.orphaned)
     }
 
-    fn running_for_mut(&mut self, id: u64) -> Option<&mut Running> {
+    fn running_for_mut(&mut self, id: u64) -> Option<&mut Running<J>> {
         self.running
             .iter_mut()
             .find(|running| running.id == id && !running.orphaned)

@@ -22,25 +22,42 @@
 //! always re-checks its condition after every wake, so a finished or
 //! timed-out wait returns rather than parks forever.
 //!
+//! # A registration can be refused
+//!
+//! Filing a waiter takes the room every index needs before it files anything,
+//! so a heap with none refuses the registration ([`WaitRefused`]) with nothing
+//! filed and the waiter fails its wait rather than the kernel aborting.
+//! Re-arming a filed row, sweeping its deadline and handing a choice on move it
+//! in the room it was filed with, so no path that cannot fail needs the heap.
+//!
 //! # Why an installed arch hook
 //!
 //! Waking a parked waiter needs the scheduler's `unpark`, the timed sweep
 //! needs the monotonic clock, and arming the one-shot needs the arch timer
 //! — none of which a global (`'static`) wait-queue can name without
-//! depending on the concrete `Scheduler<A>` / arch port. The boot path installs one [`WaitQueueArch`] adapter over the
-//! leaked `Scheduler` + arch, and every wake/sweep routes through
-//! it. A build that never installs one (host tests of unrelated paths)
-//! leaves the explicit-wake / timed-wake helpers as fail-safe no-ops.
+//! depending on the concrete `Scheduler<A>` / arch port. The boot path
+//! installs one [`WaitQueueArch`] adapter over the leaked `Scheduler` + arch,
+//! and every wake/sweep routes through it; until then the explicit-wake /
+//! timed-wake helpers are fail-safe no-ops.
+//!
+//! A host test build keeps no installed hook: [`wait_arch`] answers each
+//! thread from its own claim (`test_boot`), so parallel tests never share
+//! one, and a task of a test's `HostBoot` parks through the scheduler's own
+//! handshake, blocking until a wake ends the park.
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::sync::Arc;
 use core::ops::Bound;
 use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+use tairix_abi::Errno;
+use tairix_collections::{OrderedMap, OrderedSet, TryReserveError};
 use tairix_inline::ArrayVec;
 use tairix_kernel_sched_api::{CpuId, TaskId};
 use tairix_kernel_sec::ProcessId;
 use tairix_sync::once::OnceCell;
 use tairix_sync::SpinLock;
+
+use crate::sleeplock::LineRow;
 
 /// Waiters released per acquisition of the queue lock.
 ///
@@ -70,6 +87,33 @@ pub const NO_DEADLINE: u64 = u64::MAX;
 /// How late a woken or yielding task may run before the kernel records it: a
 /// healthy kernel runs one in microseconds.
 pub(crate) const LATE_WAKE_NS: u64 = 250_000_000;
+
+/// A wait the kernel heap had no room to register: nothing was filed, so the
+/// waiter fails its wait rather than park where no wake could find it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct WaitRefused;
+
+impl From<TryReserveError> for WaitRefused {
+    fn from(_: TryReserveError) -> Self {
+        Self
+    }
+}
+
+impl From<WaitRefused> for Errno {
+    fn from(_: WaitRefused) -> Self {
+        Self::OutOfMemory
+    }
+}
+
+/// An insertion into room taken before the change began, which therefore
+/// cannot fail.
+pub(crate) fn filed<T>(inserted: Result<T, TryReserveError>) {
+    let refused = inserted.err();
+    debug_assert!(
+        refused.is_none(),
+        "an insertion outran the room taken for it"
+    );
+}
 
 /// The kernel-installed hook a [`WaitQueue`] uses to wake a parked waiter,
 /// read the monotonic clock, and arm the timed-wake one-shot, without the
@@ -118,6 +162,15 @@ pub trait WaitQueueArch: Sync {
     /// default returns [`None`] so an uninstalled hook fails closed rather
     /// than acting on a guessed CPU.
     fn current_cpu(&self) -> Option<CpuId> {
+        None
+    }
+
+    /// The row the task running on `cpu` stands in a sleeping lock's line
+    /// with, made with its thread so a contended acquire never needs the heap,
+    /// or [`None`] where no such task runs. The default answers [`None`], so an
+    /// uninstalled hook fails closed.
+    fn line_row(&self, cpu: CpuId) -> Option<Arc<LineRow>> {
+        let _ = cpu;
         None
     }
 
@@ -175,6 +228,10 @@ struct Waiter {
     /// contention can never move an older task behind newer arrivals.
     seq: u64,
     deadline_ns: u64,
+    /// A first wake on its key chose it ([`WaitQueue::wake_key_first`]) and
+    /// it has not passed the wake on: one that finds nothing for it does
+    /// ([`WaitQueue::hand_on`]).
+    chosen: bool,
 }
 
 /// A registered waiter's identity: the condition it waits on and the task
@@ -191,34 +248,40 @@ type WaiterId = (WakeKey, TaskId);
 /// preserved across a re-`register` of a row that is still present, and never
 /// reused once a row is removed.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub(crate) struct Registration {
+struct Registration {
     id: WaiterId,
     seq: u64,
 }
 
 impl Registration {
-    /// The waiting task, for a caller that must name it (the
-    /// [`SleepLock`](crate::SleepLock) handoff publishes ownership to it).
-    pub(crate) const fn task(&self) -> TaskId {
+    /// The waiting task.
+    const fn task(&self) -> TaskId {
         self.id.1
     }
 }
 
+/// Where a waiter a first wake chose stood on its key, kept as it leaves so
+/// the wake can pass on from there ([`WaitQueue::pass_on`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Chosen {
+    key: WakeKey,
+    seq: u64,
+}
+
 /// The registered-waiter set behind a [`WaitQueue`]'s lock.
 ///
-/// A thin `Vec` scan was the P-2 slice; the complete primitive keeps three
-/// cross-indices so every load-bearing per-park operation is O(log n), never a
-/// linear scan under contended multi-user load:
+/// The set keeps four cross-indices beside its canonical one, so every
+/// load-bearing per-park operation is O(log n), never a linear scan under
+/// contended multi-user load:
 ///
 /// - [`by_waiter`](Self::by_waiter): the canonical set, keyed by
 ///   [`WaiterId`], for O(log n) `register` / `deregister` /
 ///   `wake_waiter` membership and, because the key sorts first, an O(log n +
 ///   woken) [`WaitQueue::wake_key`] over one condition's waiters alone.
 /// - [`order`](Self::order): arrival `seq` → waiter, so the FIFO head
-///   ([`WaitQueue::wake_one`], [`WaitQueue::oldest_registration`]) is the
-///   first key
-///   — O(log n), a *stated* first-come-first-served fairness discipline with
-///   no starvation (an older waiter is never overtaken).
+///   ([`WaitQueue::wake_one`]) is the first key — O(log n), a *stated*
+///   first-come-first-served fairness discipline with no starvation (an
+///   older waiter is never overtaken).
 /// - [`deadlines`](Self::deadlines): `(deadline_ns, seq)` → waiter, holding
 ///   only finite-deadline waiters, so [`WaitQueue::earliest_deadline`] is
 ///   the first key (O(log n)) and [`WaitQueue::sweep`] visits only the
@@ -228,19 +291,32 @@ impl Registration {
 ///   registrations are a contiguous range and dropping every row a retiring
 ///   thread holds ([`WaitQueue::deregister_task`]) is O(log n + rows) rather
 ///   than a scan of `by_waiter`, whose key-major order scatters them.
+/// - [`unchosen`](Self::unchosen): on a [`choosing`](WaitQueue::choosing)
+///   queue, `(key, seq)` to the task of each waiter no first wake has chosen,
+///   so the oldest on a key past an arrival is the first of a range, however
+///   many on the key are chosen.
 ///
-/// The four stay consistent: a waiter is in `by_waiter`, `order` and
-/// `by_task` always, and in `deadlines` iff its deadline is finite.
+/// The five stay consistent: a waiter is in `by_waiter`, `order` and
+/// `by_task` always, in `deadlines` iff its deadline is finite, and in
+/// `unchosen` iff its queue chooses and no wake has chosen it.
+///
+/// Filing a row takes every index's room before it files anything
+/// ([`Self::file`]). A filed row's deadline and unchosen entries then come and
+/// go on paths that cannot fail — a sweep consumes a deadline and a re-arm
+/// files another, a choice takes the entry out and a hand-on puts it back — so
+/// those two indices keep room for every row to stand in them at once, and no
+/// such move needs the heap.
 struct WaitSet {
     /// Next FIFO arrival sequence to hand out. Monotonic; a fresh `register`
     /// takes and increments it, a re-`register` of a present waiter keeps its
     /// existing `seq` so its FIFO position is preserved. Never reused, which
     /// is what makes a [`Registration`] name one park.
     next_seq: u64,
-    by_waiter: BTreeMap<WaiterId, Waiter>,
-    order: BTreeMap<u64, WaiterId>,
-    deadlines: BTreeMap<(u64, u64), WaiterId>,
-    by_task: BTreeSet<(TaskId, WakeKey)>,
+    by_waiter: OrderedMap<WaiterId, Waiter>,
+    order: OrderedMap<u64, WaiterId>,
+    deadlines: OrderedMap<(u64, u64), WaiterId>,
+    by_task: OrderedSet<(TaskId, WakeKey)>,
+    unchosen: OrderedMap<(WakeKey, u64), TaskId>,
 }
 
 impl WaitSet {
@@ -249,11 +325,65 @@ impl WaitSet {
     const fn new() -> Self {
         Self {
             next_seq: 0,
-            by_waiter: BTreeMap::new(),
-            order: BTreeMap::new(),
-            deadlines: BTreeMap::new(),
-            by_task: BTreeSet::new(),
+            by_waiter: OrderedMap::new(),
+            order: OrderedMap::new(),
+            deadlines: OrderedMap::new(),
+            by_task: OrderedSet::new(),
+            unchosen: OrderedMap::new(),
         }
+    }
+
+    /// File a fresh row for `id`, taking every index's room first, so a
+    /// refusal files nothing.
+    ///
+    /// `deadlines` and `unchosen` take room for as many entries again as the
+    /// set will hold rows: more than any arrangement of all of them needs.
+    fn file(&mut self, id: WaiterId, deadline_ns: u64, chooses: bool) -> Result<(), WaitRefused> {
+        let rows = self.by_waiter.len().saturating_add(1);
+        self.by_waiter.try_reserve(1)?;
+        self.order.try_reserve(1)?;
+        self.by_task.try_reserve(1)?;
+        self.deadlines.try_reserve(rows)?;
+        if chooses {
+            self.unchosen.try_reserve(rows)?;
+        }
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        let waiter = Waiter {
+            seq,
+            deadline_ns,
+            chosen: false,
+        };
+        filed(self.by_waiter.try_insert(id, waiter));
+        filed(self.order.try_insert(seq, id));
+        filed(self.by_task.try_insert((id.1, id.0)));
+        if deadline_ns != NO_DEADLINE {
+            filed(self.deadlines.try_insert((deadline_ns, seq), id));
+        }
+        if chooses {
+            filed(self.unchosen.try_insert((id.0, seq), id.1));
+        }
+        Ok(())
+    }
+
+    /// Move the filed row `id` to `deadline_ns`, in the room it was filed
+    /// with, answering whether one is filed.
+    fn refile(&mut self, id: WaiterId, deadline_ns: u64) -> bool {
+        let Some(waiter) = self.by_waiter.get_mut(&id) else {
+            return false;
+        };
+        let was = core::mem::replace(&mut waiter.deadline_ns, deadline_ns);
+        let seq = waiter.seq;
+        if was == deadline_ns {
+            return true;
+        }
+        if was != NO_DEADLINE {
+            self.deadlines.remove(&(was, seq));
+        }
+        if deadline_ns != NO_DEADLINE {
+            filed(self.deadlines.try_insert((deadline_ns, seq), id));
+        }
+        true
     }
 
     /// Drop `id` from every index, returning the row that went.
@@ -265,6 +395,9 @@ impl WaitSet {
         self.by_task.remove(&(id.1, id.0));
         if waiter.deadline_ns != NO_DEADLINE {
             self.deadlines.remove(&(waiter.deadline_ns, waiter.seq));
+        }
+        if !waiter.chosen {
+            self.unchosen.remove(&(id.0, waiter.seq));
         }
         Some(waiter)
     }
@@ -309,6 +442,9 @@ pub struct WaitQueue {
     /// When [`drain_pending_wakes`] last performed a flagged wake, on the
     /// wait clock; zero before the first.
     drained_at_ns: AtomicU64,
+    /// Its first wakes choose ([`Self::wake_key_first`]), so it files each
+    /// waiter no wake has chosen by key and arrival.
+    chooses: bool,
 }
 
 impl WaitQueue {
@@ -316,11 +452,24 @@ impl WaitQueue {
     /// `static` (the [`HW_TREE_WAITQ`] global below).
     #[must_use]
     pub const fn new() -> Self {
+        Self::with_choice(false)
+    }
+
+    /// An empty wait-queue whose first wakes choose among a key's waiters
+    /// ([`Self::wake_key_first`]): it files each waiter no wake has chosen by
+    /// key and arrival as well, which every other queue is spared.
+    #[must_use]
+    pub const fn choosing() -> Self {
+        Self::with_choice(true)
+    }
+
+    const fn with_choice(chooses: bool) -> Self {
         Self {
             waiters: SpinLock::new(WaitSet::new()),
             rows: AtomicUsize::new(0),
             wake_pending: AtomicBool::new(false),
             drained_at_ns: AtomicU64::new(0),
+            chooses,
         }
     }
 
@@ -367,8 +516,12 @@ impl WaitQueue {
     /// Register `task` as waiting on the whole queue ([`WakeKey::NONE`]) with
     /// an absolute monotonic-ns `deadline_ns` ([`NO_DEADLINE`] for no
     /// timeout).
-    pub fn register(&self, task: TaskId, deadline_ns: u64) {
-        self.register_keyed(WakeKey::NONE, task, deadline_ns);
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::register_keyed`].
+    pub fn register(&self, task: TaskId, deadline_ns: u64) -> Result<(), WaitRefused> {
+        self.register_keyed(WakeKey::NONE, task, deadline_ns)
     }
 
     /// Register `task` as waiting on the condition `key`, with an absolute
@@ -380,30 +533,25 @@ impl WaitQueue {
     /// wait-set naming more than one stream) registers under each key and is
     /// released by whichever fires. O(log n) — no linear scan on this per-park
     /// path.
-    pub fn register_keyed(&self, key: WakeKey, task: TaskId, deadline_ns: u64) {
+    ///
+    /// # Errors
+    ///
+    /// [`WaitRefused`] when a fresh row needs room the heap cannot give:
+    /// nothing is filed, so the caller fails its wait. Re-registering a row
+    /// that is filed never needs the heap.
+    pub fn register_keyed(
+        &self,
+        key: WakeKey,
+        task: TaskId,
+        deadline_ns: u64,
+    ) -> Result<(), WaitRefused> {
         let mut set = self.waiters.lock();
         let id = (key, task);
-        if let Some(existing) = set.by_waiter.get(&id).copied() {
-            // Present: keep the FIFO `seq`, only re-index the deadline.
-            if existing.deadline_ns != NO_DEADLINE {
-                set.deadlines.remove(&(existing.deadline_ns, existing.seq));
-            }
-            let seq = existing.seq;
-            set.by_waiter.insert(id, Waiter { seq, deadline_ns });
-            if deadline_ns != NO_DEADLINE {
-                set.deadlines.insert((deadline_ns, seq), id);
-            }
-        } else {
-            let seq = set.next_seq;
-            set.next_seq += 1;
-            set.by_waiter.insert(id, Waiter { seq, deadline_ns });
-            set.order.insert(seq, id);
-            set.by_task.insert((task, key));
-            if deadline_ns != NO_DEADLINE {
-                set.deadlines.insert((deadline_ns, seq), id);
-            }
+        if !set.refile(id, deadline_ns) {
+            set.file(id, deadline_ns, self.chooses)?;
             self.publish_rows(&set);
         }
+        Ok(())
     }
 
     /// Remove `task`'s unkeyed registration ([`WakeKey::NONE`]) from the wait
@@ -584,32 +732,105 @@ impl WaitQueue {
         self.wake_in_arrival_order(arch, count)
     }
 
-    /// The oldest registration, without waking or removing it.
-    ///
-    /// Used by [`SleepLock`](crate::SleepLock) to publish direct ownership
-    /// handoff before waking the designated FIFO waiter. The waiter remains
-    /// registered until it resumes, so the normal register-before-retest
-    /// lost-wake discipline is preserved. A [`Registration`] rather than a
-    /// task id because the lock is dropped before the designation is acted
-    /// on, and the waiter may park again in that window. O(log n).
+    /// Wake the oldest waiter on `key` no wake there has chosen yet, choosing
+    /// it, and answer whether a wake landed: one wake for an event that may be
+    /// what one waiter needs and not the next. A chosen waiter that finds
+    /// nothing for it passes the wake on ([`Self::hand_on`]). Only a
+    /// [`choosing`](Self::choosing) queue files its waiters for a choice, so on
+    /// any other this wakes nobody. O(log n).
+    pub fn wake_key_first(&self, arch: &dyn WaitQueueArch, key: WakeKey) -> bool {
+        self.choose_after(arch, key, None)
+    }
+
+    /// `task`, chosen on `key` by a wake it found nothing in, passes the wake
+    /// to the oldest unchosen waiter on `key` that arrived after it, answering
+    /// whether one landed, and may itself be chosen again. A task no wake
+    /// chose passes nothing, so a chain of hand-ons walks a key's waiters
+    /// once, forward.
+    pub fn hand_on(&self, arch: &dyn WaitQueueArch, key: WakeKey, task: TaskId) -> bool {
+        let after = {
+            let mut set = self.waiters.lock();
+            let Some(seq) = set
+                .by_waiter
+                .get_mut(&(key, task))
+                .filter(|waiter| waiter.chosen)
+                .map(|waiter| {
+                    waiter.chosen = false;
+                    waiter.seq
+                })
+            else {
+                return false;
+            };
+            // Back into the room the row was filed with.
+            filed(set.unchosen.try_insert((key, seq), task));
+            seq
+        };
+        self.choose_after(arch, key, Some(after))
+    }
+
+    /// Remove `task`'s registration on `key`, answering where it stood if a
+    /// first wake chose it and it has not passed the wake on: the wake is the
+    /// caller's to keep or to [`pass_on`](Self::pass_on).
     #[must_use]
-    pub(crate) fn oldest_registration(&self) -> Option<Registration> {
-        let set = self.waiters.lock();
-        let (&seq, &id) = set.order.iter().next()?;
-        Some(Registration { id, seq })
+    pub fn deregister_chosen(&self, key: WakeKey, task: TaskId) -> Option<Chosen> {
+        let mut set = self.waiters.lock();
+        let removed = set.remove((key, task));
+        self.publish_rows(&set);
+        drop(set);
+        let waiter = removed.filter(|waiter| waiter.chosen)?;
+        Some(Chosen {
+            key,
+            seq: waiter.seq,
+        })
+    }
+
+    /// Pass a wake a waiter kept as it left to the oldest unchosen waiter on
+    /// its key that arrived after it, answering whether one landed.
+    pub fn pass_on(&self, arch: &dyn WaitQueueArch, chosen: Chosen) -> bool {
+        self.choose_after(arch, chosen.key, Some(chosen.seq))
+    }
+
+    /// Choose and wake the oldest unchosen waiter on `key` arrived after
+    /// `after`; one the scheduler can no longer run is reaped and the next
+    /// chosen in its place. The first of a range of the unchosen index, so
+    /// O(log n) however many waiters on `key` are chosen.
+    fn choose_after(&self, arch: &dyn WaitQueueArch, key: WakeKey, after: Option<u64>) -> bool {
+        let floor = after.map_or(0, |after| after.saturating_add(1));
+        loop {
+            let chosen = {
+                let mut set = self.waiters.lock();
+                let next = set
+                    .unchosen
+                    .range((key, floor)..=(key, u64::MAX))
+                    .next()
+                    .map(|(&(_, seq), &task)| Registration {
+                        id: (key, task),
+                        seq,
+                    });
+                let Some(reg) = next else {
+                    return false;
+                };
+                set.unchosen.remove(&(key, reg.seq));
+                if let Some(waiter) = set.by_waiter.get_mut(&reg.id) {
+                    waiter.chosen = true;
+                }
+                reg
+            };
+            if self.wake_registration(arch, &chosen) {
+                return true;
+            }
+        }
     }
 
     /// Wake exactly the registration `reg`, reporting whether the wake
     /// landed.
     ///
-    /// `false` covers three outcomes a caller transferring ownership need not
-    /// tell apart, because none of them is a successor: the registration is
-    /// gone, a *newer* one stands in its place (its waiter went round its own
-    /// acquire loop), or the row is still there and the scheduler can never
-    /// run that task again. Only the last is reaped, and only under the same
-    /// identity check — removing a row this designation was not taken about
-    /// is what strands a live waiter on a free lock. O(log n).
-    pub(crate) fn wake_registration(&self, arch: &dyn WaitQueueArch, reg: &Registration) -> bool {
+    /// `false` covers three outcomes none of which is a waiter woken: the
+    /// registration is gone, a *newer* one stands in its place, or the row is
+    /// still there and the scheduler can never run that task again. Only the
+    /// last is reaped, and only under the same identity check, so a park that
+    /// began after `reg` was read survives. O(log n).
+    fn wake_registration(&self, arch: &dyn WaitQueueArch, reg: &Registration) -> bool {
         if self.waiters.lock().by_waiter.get(&reg.id).map(|w| w.seq) != Some(reg.seq) {
             return false;
         }
@@ -724,14 +945,18 @@ impl WaitQueue {
             .map(|&(deadline, _seq)| deadline)
     }
 
-    /// Re-arm `task` for the deadline `scan` reads from the state it waits
-    /// on, disarmed while it reads: a [`Self::wake_by`] for a deadline
-    /// published after the read then wakes the task, where the deadline this
-    /// pass replaces would have been taken as covering it.
+    /// Re-arm `task`'s filed row for the deadline `scan` reads from the state
+    /// it waits on, disarmed while it reads: a [`Self::wake_by`] for a
+    /// deadline published after the read then wakes the task, where the
+    /// deadline this pass replaces would have been taken as covering it.
+    ///
+    /// The row moves in the room it was filed with, so this never needs the
+    /// heap; a task not filed here stays unfiled.
     pub fn rearm(&self, task: TaskId, scan: impl FnOnce() -> Option<u64>) {
-        self.register(task, NO_DEADLINE);
+        let id = (WakeKey::NONE, task);
+        self.waiters.lock().refile(id, NO_DEADLINE);
         let due = scan();
-        self.register(task, due.unwrap_or(NO_DEADLINE));
+        self.waiters.lock().refile(id, due.unwrap_or(NO_DEADLINE));
     }
 
     /// Wake the queue's waiters so they re-arm for `deadline_ns`, unless one
@@ -768,7 +993,7 @@ impl Default for WaitQueue {
 }
 
 /// The boot-installed [`WaitQueueArch`] adapter (set-once per boot).
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-arch")))]
 static WAIT_ARCH: OnceCell<&'static (dyn WaitQueueArch + 'static)> = OnceCell::new();
 
 /// Error returned when [`install_wait_arch`] is called more than once.
@@ -784,31 +1009,34 @@ pub struct WaitArchAlreadyInstalled;
 pub fn install_wait_arch(
     arch: &'static (dyn WaitQueueArch + 'static),
 ) -> Result<(), WaitArchAlreadyInstalled> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-arch"))]
     {
-        // The unit-test binary runs many independent boots in one process, so
-        // each exercises the same set-once publication through a cell of its
-        // own rather than contaminating the next boot's view (the same
-        // treatment `crate::cpu_state::install` gives its table). A test that
-        // needs a live hook claims one for itself (`crate::test_boot`).
+        // A host test binary runs many independent boots in one process, so
+        // each exercises the set-once publication through a cell of its own
+        // rather than deciding the next boot's view, as `cpu_state::install`
+        // does. A test that needs a live hook claims one (`crate::test_boot`).
         OnceCell::new()
             .set(arch)
             .map_err(|_| WaitArchAlreadyInstalled)
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-arch")))]
     {
         WAIT_ARCH.set(arch).map_err(|_| WaitArchAlreadyInstalled)
     }
 }
 
 /// The installed [`WaitQueueArch`], or `None` before a hook is published.
+///
+/// A host test build answers from the calling thread's claim instead
+/// (`test_boot`): `None` unless it claimed the scheduler or is a task of a
+/// `HostBoot`.
 #[must_use]
 pub fn wait_arch() -> Option<&'static (dyn WaitQueueArch + 'static)> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-arch"))]
     {
         crate::test_boot::claimed_wait_arch()
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-arch")))]
     {
         WAIT_ARCH.get().ok().flatten().copied()
     }
@@ -852,6 +1080,16 @@ pub static SERVE_WAITQ: WaitQueue = WaitQueue::new();
 pub fn serve_wake() {
     if let Some(arch) = wait_arch() {
         SERVE_WAITQ.wake_all(arch);
+    }
+}
+
+/// Wake the server of an endpoint a request was posted to or that was taken
+/// down: exactly its recorded `server`, or every parked server while the
+/// endpoint has recorded none.
+pub fn serve_wake_server(server: Option<TaskId>) {
+    match server {
+        Some(server) => serve_wake_task(server),
+        None => serve_wake(),
     }
 }
 
@@ -1166,8 +1404,9 @@ pub fn request_writeback_reap() {
 pub static DEFERRED_FREE_WAITQ: WaitQueue = WaitQueue::new();
 
 /// The calling task, proven able to wait: the wait hook is installed and the
-/// task is one it can wake. A kernel service proves it once and parks for
-/// good, so no later registration can fail.
+/// task is one it can wake. A kernel service files its row once
+/// ([`Self::register`], the one step the heap can refuse) and re-arms that row
+/// for good ([`Self::rearm`]), which never needs the heap.
 #[derive(Clone, Copy)]
 pub struct Parker {
     arch: &'static (dyn WaitQueueArch + 'static),
@@ -1187,13 +1426,18 @@ impl Parker {
     /// Register on `queue` until `due` (or with no deadline) and re-point the
     /// timed one-shot: registered before it parks, the task cannot sleep
     /// through a wake raised in between.
-    pub fn register(&self, queue: &WaitQueue, due: Option<u64>) {
-        queue.register(self.task, due.unwrap_or(NO_DEADLINE));
+    ///
+    /// # Errors
+    ///
+    /// [`WaitRefused`] when its row cannot be filed; nothing is.
+    pub fn register(&self, queue: &WaitQueue, due: Option<u64>) -> Result<(), WaitRefused> {
+        queue.register(self.task, due.unwrap_or(NO_DEADLINE))?;
         self.arch.set_wakeup(nearest_timed_deadline());
+        Ok(())
     }
 
-    /// [`WaitQueue::rearm`] the task on `queue` for the deadline `scan`
-    /// answers at the current time, and re-point the timed one-shot.
+    /// [`WaitQueue::rearm`] the task's filed row on `queue` for the deadline
+    /// `scan` answers at the current time, and re-point the timed one-shot.
     pub fn rearm(&self, queue: &WaitQueue, scan: impl FnOnce(u64) -> Option<u64>) {
         queue.rearm(self.task, || scan(self.now_ns()));
         self.arch.set_wakeup(nearest_timed_deadline());
@@ -1339,12 +1583,10 @@ pub static CALL_WAITQ: WaitQueue = WaitQueue::new();
 /// cancellation) arrived; each re-checks its ticket and either claims the
 /// reply or parks again. A fail-safe no-op before the arch hook is installed.
 ///
-/// This broadcast remains for **cancellation** (endpoint destruction, whose
-/// affected callers are not individually known) and as the fallback for a
-/// poster that carried no scheduler identity; an ordinary reply uses the
-/// targeted [`call_wake_task`] with the poster id the endpoint captured at
-/// post time, so unrelated parked callers stay parked (wake-one, not a
-/// thundering herd).
+/// Only the fallback for a poster that carried no scheduler identity: a
+/// reply, a withdrawal and an endpoint's destruction each name the threads
+/// they concern ([`call_wake_named`]), so unrelated parked callers stay parked
+/// (wake-one, not a thundering herd).
 ///
 /// [`CallEndpoint`]: tairix_kernel_ipc::call::CallEndpoint
 pub fn call_wake() {
@@ -1365,11 +1607,17 @@ pub fn call_wake_task(task: TaskId) {
 }
 
 /// Wake every thread a call endpoint named once its locks were released: the
-/// threads a call's end concerns and those waiting for the room it freed. A
-/// poster with no scheduler identity is reached only by the broadcast.
+/// threads a call's end concerns and those waiting for the room it freed.
 pub fn call_woken(woken: &tairix_kernel_ipc::Woken) {
+    call_wake_named(woken.tasks());
+}
+
+/// Wake each of the `tasks` a call endpoint named once its locks were
+/// released. A `0` names a poster with no scheduler identity, which only the
+/// broadcast reaches.
+pub fn call_wake_named(tasks: impl Iterator<Item = TaskId>) {
     let mut broadcast = false;
-    for task in woken.tasks() {
+    for task in tasks {
         if task == 0 {
             broadcast = true;
         } else {
@@ -1407,14 +1655,22 @@ pub fn port_room_wake_task(task: TaskId) {
 /// The wait-queue holding the threads waiting for their own process's
 /// `ipc-queue-bytes` budget: a `PortRoom` wait-set member whose send the
 /// budget refuses, wherever the process's charges are held. Each waits under
-/// its process's [`budget_key`] and is woken by a release of one of those
-/// charges another party makes — a receive of one of the process's messages,
-/// the collection, withdrawal or timeout of one of its calls, a change to its
-/// limit — none of which the member's own port need see; a teardown, which
-/// releases many processes' charges at once, wakes every waiter. A release
-/// looks at [`WaitQueue::is_empty`] first, so it costs a fence and a load
-/// while nobody waits.
-pub static BUDGET_WAITQ: WaitQueue = WaitQueue::new();
+/// its process's [`budget_key`]. A release of one of those charges another
+/// party makes — a receive of one of the process's messages, the collection,
+/// withdrawal or timeout of one of its calls, none of which the member's own
+/// port need see — wakes one of them, the oldest no release has chosen yet,
+/// and one that waits on after it looks, or leaves without sending, passes
+/// the wake to the next ([`budget_pass`], [`budget_unwatch`]); one whose wait
+/// ends on room it is to send into keeps it, and passes it on from where it
+/// stood once it has sent or should its next call be another
+/// ([`budget_pass_on`]): one release never wakes all a process's threads. A
+/// change to the process's limit, which may make room for all of them, and a
+/// call endpoint's destruction, for each caller whose calls it cancelled,
+/// wake every waiter of the process ([`budget_released_all`]), and a port's
+/// teardown, which releases many processes' charges at once, every waiter. A
+/// release looks at [`WaitQueue::is_empty`] first, so it costs a fence and a
+/// load while nobody waits.
+pub static BUDGET_WAITQ: WaitQueue = WaitQueue::choosing();
 
 /// The key a thread of `process` waits for its budget under on
 /// [`BUDGET_WAITQ`].
@@ -1427,19 +1683,64 @@ pub const fn budget_key(process: ProcessId) -> WakeKey {
 /// would park it: the fence orders the registration before that look as
 /// [`budget_released`]'s orders a release before its look at the queue, so
 /// either the look sees the release or the release sees the registration.
-pub fn budget_watch(process: ProcessId, task: TaskId) {
-    BUDGET_WAITQ.register_keyed(budget_key(process), task, NO_DEADLINE);
+///
+/// # Errors
+///
+/// [`WaitRefused`] when its row cannot be filed; nothing is.
+pub fn budget_watch(process: ProcessId, task: TaskId) -> Result<(), WaitRefused> {
+    BUDGET_WAITQ.register_keyed(budget_key(process), task, NO_DEADLINE)?;
     fence(Ordering::SeqCst);
+    Ok(())
 }
 
-/// Forget `task`'s wait for `process`'s budget: its wait ended.
+/// Forget `task`'s wait for `process`'s budget: its wait ended without a
+/// send, so a release that chose it passes to the next waiter. The row goes
+/// and its choice is read in one step, so a release landing however late is
+/// passed on, never dropped with the row.
 pub fn budget_unwatch(process: ProcessId, task: TaskId) {
-    BUDGET_WAITQ.deregister_keyed(budget_key(process), task);
+    if let Some(chosen) = BUDGET_WAITQ.deregister_chosen(budget_key(process), task) {
+        budget_pass_on(chosen);
+    }
 }
 
-/// Wake the threads waiting for `process`'s budget, which a charge it held
-/// just gave back: called once the charge is dropped, outside every IPC lock.
+/// Forget `task`'s wait for `process`'s budget: its wait ended on room it is
+/// to send into, so a release it was woken for is its own, answered as where
+/// it stood for [`budget_pass_on`] once it has sent or should it not send.
+#[must_use]
+pub fn budget_spent(process: ProcessId, task: TaskId) -> Option<Chosen> {
+    BUDGET_WAITQ.deregister_chosen(budget_key(process), task)
+}
+
+/// Pass on a release a waiter kept as it left, once it has sent or should it
+/// not: to the next of its process's waiters behind where it stood, for whom
+/// the release may have left room too.
+pub fn budget_pass_on(chosen: Chosen) {
+    if let Some(arch) = budget_waker() {
+        let _ = BUDGET_WAITQ.pass_on(arch, chosen);
+    }
+}
+
+/// `task` looked at `process`'s budget after a release woke it, and waits on:
+/// the release passes to the next of the process's waiters.
+pub fn budget_pass(process: ProcessId, task: TaskId) {
+    if let Some(arch) = wait_arch() {
+        let _ = BUDGET_WAITQ.hand_on(arch, budget_key(process), task);
+    }
+}
+
+/// Wake one thread waiting for `process`'s budget, which a charge it held
+/// just gave back: the oldest no release has chosen yet. Called once the
+/// charge is dropped, outside every IPC lock.
 pub fn budget_released(process: ProcessId) {
+    if let Some(arch) = budget_waker() {
+        let _ = BUDGET_WAITQ.wake_key_first(arch, budget_key(process));
+    }
+}
+
+/// Wake every thread waiting for `process`'s budget: a new limit may make room
+/// for all of them, and a teardown gave back what many of its calls held at
+/// once.
+pub fn budget_released_all(process: ProcessId) {
     if let Some(arch) = budget_waker() {
         let _ = BUDGET_WAITQ.wake_key(arch, budget_key(process));
     }
@@ -1486,10 +1787,10 @@ pub fn volume_attach_wake(task: TaskId) {
 /// is worse than a leak, because a counted wake ([`WaitQueue::wake_n`], the
 /// futex's) spends itself on it and the live waiter behind stays parked.
 ///
-/// A [`SleepLock`](crate::SleepLock)'s own queue is embedded in the mount or
-/// device that owns it and is reachable from no registry, so it is not walked
-/// here: its rows are reaped by the release that next looks at the queue, and
-/// go with their owner when it is dropped.
+/// A [`SleepLock`](crate::SleepLock)'s line is embedded in the mount or device
+/// that owns it and is reachable from no registry, so it is not walked here:
+/// its rows are reaped by the release that next looks at the line, and go with
+/// their owner when it is dropped.
 pub fn retire_task(task: TaskId) {
     for entry in ALL_QUEUES {
         entry.queue.deregister_task(task);
@@ -1916,7 +2217,7 @@ mod tests {
         let arch = MockArch::new();
         let total = WAKE_BATCH * 2 + 7;
         for i in 0..total {
-            q.register(i as TaskId, NO_DEADLINE);
+            q.register(i as TaskId, NO_DEADLINE).expect("filed");
         }
         q.wake_all(&arch);
         let woken = arch.unparked.borrow();
@@ -1934,7 +2235,7 @@ mod tests {
         let q = WaitQueue::new();
         let arch = MockArch::new();
         for i in 0..(WAKE_BATCH * 2) {
-            q.register(i as TaskId, NO_DEADLINE);
+            q.register(i as TaskId, NO_DEADLINE).expect("filed");
         }
         let want = WAKE_BATCH + 3;
         assert_eq!(q.wake_n(&arch, want), want);
@@ -1953,7 +2254,7 @@ mod tests {
         let arch = MockArch::new();
         let total = WAKE_BATCH * 2 + 1;
         for i in 0..total {
-            q.register(i as TaskId, 100);
+            q.register(i as TaskId, 100).expect("filed");
         }
         q.sweep(&arch, 100);
         assert_eq!(arch.unparked.borrow().len(), total);
@@ -1975,8 +2276,10 @@ mod tests {
         let other = WakeKey::new(2);
         let total = WAKE_BATCH + 5;
         for i in 0..total {
-            q.register_keyed(wanted, i as TaskId, NO_DEADLINE);
-            q.register_keyed(other, (1000 + i) as TaskId, NO_DEADLINE);
+            q.register_keyed(wanted, i as TaskId, NO_DEADLINE)
+                .expect("filed");
+            q.register_keyed(other, (1000 + i) as TaskId, NO_DEADLINE)
+                .expect("filed");
         }
         assert_eq!(q.wake_key(&arch, wanted), total);
         let woken = arch.unparked.borrow();
@@ -2031,8 +2334,8 @@ mod tests {
     #[test]
     fn register_is_idempotent_and_updates_the_deadline() {
         let q = WaitQueue::new();
-        q.register(7, 100);
-        q.register(7, 250);
+        q.register(7, 100).expect("filed");
+        q.register(7, 250).expect("filed");
         // One waiter, with the updated deadline.
         assert_eq!(q.earliest_deadline(), Some(250));
         assert!(!q.is_empty());
@@ -2046,8 +2349,8 @@ mod tests {
     fn wake_all_unparks_every_registered_waiter() {
         let arch = MockArch::new();
         let q = WaitQueue::new();
-        q.register(1, NO_DEADLINE);
-        q.register(2, 500);
+        q.register(1, NO_DEADLINE).expect("filed");
+        q.register(2, 500).expect("filed");
         q.wake_all(&arch);
         let mut got = arch.unparked.borrow().clone();
         got.sort_unstable();
@@ -2058,8 +2361,8 @@ mod tests {
     fn wake_one_preserves_fifo_registration_order() {
         let arch = MockArch::new();
         let q = WaitQueue::new();
-        q.register(7, NO_DEADLINE);
-        q.register(3, NO_DEADLINE);
+        q.register(7, NO_DEADLINE).expect("filed");
+        q.register(3, NO_DEADLINE).expect("filed");
 
         assert!(q.wake_one(&arch));
         assert_eq!(*arch.unparked.borrow(), alloc::vec![7]);
@@ -2074,8 +2377,8 @@ mod tests {
     fn wake_task_unparks_only_the_named_registered_waiter() {
         let arch = MockArch::new();
         let q = WaitQueue::new();
-        q.register(1, NO_DEADLINE);
-        q.register(2, NO_DEADLINE);
+        q.register(1, NO_DEADLINE).expect("filed");
+        q.register(2, NO_DEADLINE).expect("filed");
         // The addressed wake releases its one target; the other waiter
         // stays parked (wake-one, never a thundering herd).
         assert!(q.wake_task(&arch, 2));
@@ -2097,7 +2400,7 @@ mod tests {
         // good (`plans/OPEN-DEFECTS.md` D112).
         let q = WaitQueue::new();
         let arch = MockArch::new();
-        q.register(3, NO_DEADLINE);
+        q.register(3, NO_DEADLINE).expect("filed");
         assert!(q.wake_task(&arch, 3));
 
         arch.refuse(3);
@@ -2124,8 +2427,8 @@ mod tests {
         // futex path that is a lost `FUTEX_WAKE`.
         let q = WaitQueue::new();
         let arch = MockArch::new();
-        q.register(1, NO_DEADLINE);
-        q.register(2, NO_DEADLINE);
+        q.register(1, NO_DEADLINE).expect("filed");
+        q.register(2, NO_DEADLINE).expect("filed");
         arch.refuse(1);
 
         assert_eq!(q.wake_n(&arch, 1), 1, "one waiter was asked for");
@@ -2148,10 +2451,10 @@ mod tests {
         let q = WaitQueue::new();
         let arch = MockArch::new();
         let (first, second) = (WakeKey::new(1), WakeKey::new(2));
-        q.register_keyed(first, 7, NO_DEADLINE);
-        q.register_keyed(second, 7, 4_000);
-        q.register(7, NO_DEADLINE);
-        q.register_keyed(first, 8, 9_000);
+        q.register_keyed(first, 7, NO_DEADLINE).expect("filed");
+        q.register_keyed(second, 7, 4_000).expect("filed");
+        q.register(7, NO_DEADLINE).expect("filed");
+        q.register_keyed(first, 8, 9_000).expect("filed");
 
         q.deregister_task(7);
 
@@ -2172,9 +2475,9 @@ mod tests {
         let arch = MockArch::new();
         let q = WaitQueue::new();
         let (mine, theirs) = (WakeKey::new(1), WakeKey::new(2));
-        q.register_keyed(mine, 1, NO_DEADLINE);
-        q.register_keyed(mine, 2, NO_DEADLINE);
-        q.register_keyed(theirs, 3, NO_DEADLINE);
+        q.register_keyed(mine, 1, NO_DEADLINE).expect("filed");
+        q.register_keyed(mine, 2, NO_DEADLINE).expect("filed");
+        q.register_keyed(theirs, 3, NO_DEADLINE).expect("filed");
 
         assert_eq!(q.wake_key(&arch, mine), 2);
         let mut got = arch.unparked.borrow().clone();
@@ -2199,9 +2502,9 @@ mod tests {
         let arch = MockArch::new();
         let q = WaitQueue::new();
         let (a, b) = (WakeKey::new(11), WakeKey::new(12));
-        q.register_keyed(a, 5, NO_DEADLINE);
-        q.register_keyed(b, 5, NO_DEADLINE);
-        q.register(5, NO_DEADLINE);
+        q.register_keyed(a, 5, NO_DEADLINE).expect("filed");
+        q.register_keyed(b, 5, NO_DEADLINE).expect("filed");
+        q.register(5, NO_DEADLINE).expect("filed");
 
         assert!(q.wake_waiter(&arch, a, 5));
         assert!(q.wake_waiter(&arch, b, 5));
@@ -2225,7 +2528,7 @@ mod tests {
         let arch = MockArch::new();
         let q = WaitQueue::new();
         let key = WakeKey::new(21);
-        q.register_keyed(key, 8, 400);
+        q.register_keyed(key, 8, 400).expect("filed");
         assert_eq!(q.earliest_deadline(), Some(400));
         q.sweep(&arch, 399);
         assert!(arch.unparked.borrow().is_empty(), "not yet due");
@@ -2242,9 +2545,9 @@ mod tests {
     fn sweep_releases_only_expired_finite_deadlines() {
         let arch = MockArch::new();
         let q = WaitQueue::new();
-        q.register(1, NO_DEADLINE); // never by timeout
-        q.register(2, 100); // expired at now=150
-        q.register(3, 1000); // not yet
+        q.register(1, NO_DEADLINE).expect("filed"); // never by timeout
+        q.register(2, 100).expect("filed"); // expired at now=150
+        q.register(3, 1000).expect("filed"); // not yet
         q.sweep(&arch, 150);
         assert_eq!(
             *arch.unparked.borrow(),
@@ -2265,7 +2568,7 @@ mod tests {
         // console-starving hard-lockup this regresses.
         let arch = MockArch::new();
         let q = WaitQueue::new();
-        q.register(1, 100);
+        q.register(1, 100).expect("filed");
         // The first sweep past the deadline releases the waiter exactly once.
         q.sweep(&arch, 150);
         assert_eq!(*arch.unparked.borrow(), alloc::vec![1]);
@@ -2286,9 +2589,9 @@ mod tests {
         );
         // The waiter keeps its FIFO slot (register-before-retest / edge wakes).
         assert!(!q.is_empty(), "the waiter itself stays registered");
-        assert_eq!(q.oldest_registration().map(|r| r.task()), Some(1));
+        assert!(q.wake_one(&arch), "and is still the FIFO head");
         // On its next park it re-registers a fresh deadline cleanly.
-        q.register(1, 500);
+        q.register(1, 500).expect("filed");
         assert_eq!(q.earliest_deadline(), Some(500));
     }
 
@@ -2300,7 +2603,7 @@ mod tests {
     fn a_deadline_published_while_the_waiter_reads_raises_a_wake() {
         let arch = MockArch::new();
         let q = WaitQueue::new();
-        q.register(1, 100);
+        q.register(1, 100).expect("filed");
         q.wake_all(&arch);
         assert_eq!(q.earliest_deadline(), Some(100), "an edge wake leaves it");
         q.rearm(1, || {
@@ -2320,10 +2623,10 @@ mod tests {
     #[test]
     fn earliest_deadline_ignores_no_deadline_waiters() {
         let q = WaitQueue::new();
-        q.register(1, NO_DEADLINE);
+        q.register(1, NO_DEADLINE).expect("filed");
         assert_eq!(q.earliest_deadline(), None, "an infinite wait arms nothing");
-        q.register(2, 900);
-        q.register(3, 400);
+        q.register(2, 900).expect("filed");
+        q.register(3, 400).expect("filed");
         assert_eq!(q.earliest_deadline(), Some(400), "the soonest finite one");
     }
 
@@ -2372,17 +2675,16 @@ mod tests {
         // guarantee.
         let arch = MockArch::new();
         let q = WaitQueue::new();
-        q.register(7, NO_DEADLINE);
-        q.register(3, NO_DEADLINE);
+        q.register(7, NO_DEADLINE).expect("filed");
+        q.register(3, NO_DEADLINE).expect("filed");
         // 7 re-arms with a new (finite) deadline; its FIFO seq is retained.
-        q.register(7, 500);
+        q.register(7, 500).expect("filed");
+        assert!(q.wake_one(&arch));
         assert_eq!(
-            q.oldest_registration().map(|r| r.task()),
-            Some(7),
+            *arch.unparked.borrow(),
+            alloc::vec![7],
             "re-register keeps FIFO head"
         );
-        assert!(q.wake_one(&arch));
-        assert_eq!(*arch.unparked.borrow(), alloc::vec![7]);
     }
 
     #[test]
@@ -2390,13 +2692,13 @@ mod tests {
         // Updating a present waiter's deadline moves it in the ordered
         // deadline index rather than leaving a stale entry behind.
         let q = WaitQueue::new();
-        q.register(1, 900);
+        q.register(1, 900).expect("filed");
         assert_eq!(q.earliest_deadline(), Some(900));
         // Tighten it, then relax it: the index always reflects the current
         // value, with no duplicate stale (900, _) entry lingering.
-        q.register(1, 300);
+        q.register(1, 300).expect("filed");
         assert_eq!(q.earliest_deadline(), Some(300));
-        q.register(1, NO_DEADLINE);
+        q.register(1, NO_DEADLINE).expect("filed");
         assert_eq!(
             q.earliest_deadline(),
             None,
@@ -2409,10 +2711,10 @@ mod tests {
     fn sweep_visits_only_the_expired_prefix_in_deadline_order() {
         let arch = MockArch::new();
         let q = WaitQueue::new();
-        q.register(1, 300);
-        q.register(2, 100);
-        q.register(3, 200);
-        q.register(4, NO_DEADLINE);
+        q.register(1, 300).expect("filed");
+        q.register(2, 100).expect("filed");
+        q.register(3, 200).expect("filed");
+        q.register(4, NO_DEADLINE).expect("filed");
         q.sweep(&arch, 250);
         // Exactly the finite deadlines at or before 250, in ascending
         // deadline order (100 then 200); 300 and the untimed waiter stay.
@@ -2464,7 +2766,7 @@ mod tests {
     fn a_flagged_wake_is_reported_exactly_once() {
         let arch = MockArch::new();
         let q = WaitQueue::new();
-        q.register(11, NO_DEADLINE);
+        q.register(11, NO_DEADLINE).expect("filed");
 
         q.request_wake();
         assert!(
@@ -2482,13 +2784,18 @@ mod tests {
     fn deregister_removes_from_every_index() {
         let arch = MockArch::new();
         let q = WaitQueue::new();
-        q.register(1, 100);
-        q.register(2, 200);
+        q.register(1, 100).expect("filed");
+        q.register(2, 200).expect("filed");
         q.deregister(1);
         // Gone from the deadline index (earliest is now 2's), from the FIFO
         // order (oldest is now 2), and from membership.
         assert_eq!(q.earliest_deadline(), Some(200));
-        assert_eq!(q.oldest_registration().map(|r| r.task()), Some(2));
+        assert!(q.wake_one(&arch));
+        assert_eq!(
+            *arch.unparked.borrow(),
+            alloc::vec![2],
+            "the oldest is now 2"
+        );
         assert!(!q.wake_task(&arch, 1), "no longer a member");
         assert!(q.wake_task(&arch, 2));
     }
@@ -2502,14 +2809,11 @@ mod tests {
         let arch = MockArch::new();
         let q = WaitQueue::new();
         for id in [10, 20, 30, 40] {
-            q.register(id, NO_DEADLINE);
+            q.register(id, NO_DEADLINE).expect("filed");
         }
-        for _ in 0..4 {
-            let head = q
-                .oldest_registration()
-                .map(|r| r.task())
-                .expect("a waiter remains");
+        for round in 0..4 {
             assert!(q.wake_one(&arch));
+            let head = arch.unparked.borrow()[round];
             q.deregister(head);
         }
         assert!(!q.wake_one(&arch), "queue drained");
@@ -2524,7 +2828,7 @@ mod tests {
         // waiter set untouched and only sets the flag.)
         let arch = MockArch::new();
         let q = WaitQueue::new();
-        q.register(5, NO_DEADLINE);
+        q.register(5, NO_DEADLINE).expect("filed");
         q.request_wake();
         assert!(
             arch.unparked.borrow().is_empty(),
@@ -2546,24 +2850,25 @@ mod tests {
         let q = WaitQueue::new();
         let arch = MockArch::new();
         assert!(q.is_empty());
-        q.register(1, NO_DEADLINE);
-        q.register(1, 50);
-        q.register_keyed(WakeKey::new(4), 2, NO_DEADLINE);
+        q.register(1, NO_DEADLINE).expect("filed");
+        q.register(1, 50).expect("filed");
+        q.register_keyed(WakeKey::new(4), 2, NO_DEADLINE)
+            .expect("filed");
         q.deregister(1);
         assert!(!q.is_empty(), "the keyed row is still there");
         q.deregister_keyed(WakeKey::new(4), 2);
         assert!(q.is_empty());
-        q.register(3, NO_DEADLINE);
+        q.register(3, NO_DEADLINE).expect("filed");
         q.deregister_task(3);
         assert!(q.is_empty(), "a retired task's rows are counted out");
-        q.register(5, NO_DEADLINE);
+        q.register(5, NO_DEADLINE).expect("filed");
         arch.refuse(5);
         q.wake_all(&arch);
         assert!(
             q.is_empty(),
             "a row no wake can land on is counted out as it is reaped"
         );
-        q.register(6, NO_DEADLINE);
+        q.register(6, NO_DEADLINE).expect("filed");
         arch.refuse(6);
         assert!(!q.wake_task(&arch, 6));
         assert!(q.is_empty(), "by an addressed wake too");
@@ -2576,8 +2881,8 @@ mod tests {
     fn a_budget_release_wakes_only_its_own_processs_waiters() {
         let (_, mine) = crate::test_boot::claim_scheduler();
         let theirs = crate::test_boot::claim_peer_task();
-        budget_watch(ProcessId(mine), mine);
-        budget_watch(ProcessId(theirs), theirs);
+        budget_watch(ProcessId(mine), mine).expect("filed");
+        budget_watch(ProcessId(theirs), theirs).expect("filed");
         let _ = crate::test_boot::take_unparked();
         budget_released(ProcessId(mine));
         assert_eq!(crate::test_boot::take_unparked(), [mine]);
@@ -2592,6 +2897,152 @@ mod tests {
         assert!(
             !late.contains(&mine) && !late.contains(&theirs),
             "an ended wait is not woken"
+        );
+    }
+
+    /// A first wake on a key chooses the oldest waiter there alone; one chosen
+    /// that finds nothing passes the wake to the next behind it, one never
+    /// chosen passes nothing, and a task the scheduler can no longer run is
+    /// passed over.
+    #[test]
+    fn a_first_wake_chooses_the_oldest_and_a_hand_on_passes_to_the_next() {
+        let q = WaitQueue::choosing();
+        let arch = MockArch::new();
+        let key = WakeKey::new(7);
+        for task in [1, 2, 3, 4] {
+            q.register_keyed(key, task, NO_DEADLINE).expect("filed");
+        }
+        q.register_keyed(WakeKey::new(8), 9, NO_DEADLINE)
+            .expect("filed");
+        assert!(q.wake_key_first(&arch, key));
+        assert!(q.wake_key_first(&arch, key), "a second event, the next");
+        assert_eq!(*arch.unparked.borrow(), [1, 2], "one wake an event");
+        assert!(!q.hand_on(&arch, key, 3), "unchosen, it passes none");
+        arch.refuse(3);
+        assert!(q.hand_on(&arch, key, 1), "the oldest passes its wake on");
+        assert_eq!(*arch.unparked.borrow(), [1, 2, 3, 4], "past the one gone");
+        assert!(!q.hand_on(&arch, key, 4), "the last has none to pass to");
+    }
+
+    /// A waiter that leaves holding the wake that chose it keeps where it
+    /// stood, so the wake passes on from there, once.
+    #[test]
+    fn a_kept_choice_passes_on_from_where_its_waiter_stood() {
+        let q = WaitQueue::choosing();
+        let arch = MockArch::new();
+        let key = WakeKey::new(7);
+        for task in [1, 2, 3] {
+            q.register_keyed(key, task, NO_DEADLINE).expect("filed");
+        }
+        assert!(q.wake_key_first(&arch, key));
+        assert_eq!(q.deregister_chosen(key, 3), None, "unchosen, it keeps none");
+        let kept = q
+            .deregister_chosen(key, 1)
+            .expect("chosen, it keeps the wake");
+        assert!(q.pass_on(&arch, kept));
+        assert_eq!(*arch.unparked.borrow(), [1, 2]);
+        assert!(!q.pass_on(&arch, kept), "none unchosen is left behind it");
+    }
+
+    /// A choice draws on the waiters no wake has chosen, the oldest past where
+    /// a passer stood whatever chosen waiters stand between, and one that
+    /// passed its wake on may be chosen again.
+    #[test]
+    fn a_choice_skips_the_chosen_and_one_that_passed_its_wake_on_is_chosen_again() {
+        let q = WaitQueue::choosing();
+        let arch = MockArch::new();
+        let key = WakeKey::new(7);
+        for task in 1..=5 {
+            q.register_keyed(key, task, NO_DEADLINE).expect("filed");
+        }
+        for _ in 0..3 {
+            assert!(q.wake_key_first(&arch, key));
+        }
+        assert!(q.hand_on(&arch, key, 1), "past the two chosen behind it");
+        assert!(q.wake_key_first(&arch, key), "the one that passed, again");
+        let kept = q
+            .deregister_chosen(key, 3)
+            .expect("chosen, it keeps its wake");
+        assert!(q.pass_on(&arch, kept), "to the last, past every chosen one");
+        assert!(!q.hand_on(&arch, key, 5), "none unchosen is left behind it");
+        assert_eq!(*arch.unparked.borrow(), [1, 2, 3, 4, 1, 5]);
+    }
+
+    /// The interleaving a departing budget waiter met, step by step: its last
+    /// look found it unchosen and passed nothing, a release then chose it, and
+    /// its departure must answer that choice so the waiter behind it wakes.
+    /// Dropping the row alone, as the departure did, lost the release.
+    #[test]
+    fn a_waiter_chosen_after_its_last_look_answers_the_choice_as_it_leaves() {
+        let q = WaitQueue::choosing();
+        let arch = MockArch::new();
+        let key = WakeKey::new(9);
+        for task in [1, 2] {
+            q.register_keyed(key, task, NO_DEADLINE).expect("filed");
+        }
+        assert!(
+            !q.hand_on(&arch, key, 1),
+            "unchosen, its last look passes nothing"
+        );
+        assert!(q.wake_key_first(&arch, key), "the release chooses it");
+        let chosen = q
+            .deregister_chosen(key, 1)
+            .expect("its departure answers the choice");
+        assert!(q.pass_on(&arch, chosen));
+        assert_eq!(*arch.unparked.borrow(), [1, 2], "the waiter behind wakes");
+    }
+
+    /// A teardown's release wakes every thread waiting for that process's
+    /// budget, and no other process's.
+    #[test]
+    fn a_wholesale_release_wakes_every_waiter_of_its_process_alone() {
+        let (_, first) = crate::test_boot::claim_scheduler();
+        let second = crate::test_boot::claim_peer_task();
+        let theirs = crate::test_boot::claim_peer_task();
+        let process = ProcessId(first);
+        budget_watch(process, first).expect("filed");
+        budget_watch(process, second).expect("filed");
+        budget_watch(ProcessId(theirs), theirs).expect("filed");
+        let _ = crate::test_boot::take_unparked();
+        budget_released_all(process);
+        let mut woken = crate::test_boot::take_unparked();
+        woken.sort_unstable();
+        let mut want = [first, second];
+        want.sort_unstable();
+        assert_eq!(woken, want);
+        for (owner, task) in [
+            (process, first),
+            (process, second),
+            (ProcessId(theirs), theirs),
+        ] {
+            budget_unwatch(owner, task);
+        }
+    }
+
+    /// A release of a process's budget wakes one of its waiting threads, which
+    /// passes it on if it waits on, and one whose wait ends on room it sends
+    /// into keeps it: a process's budget never wakes all its threads.
+    #[test]
+    fn a_budget_release_wakes_one_waiter_which_passes_it_on_if_it_waits_on() {
+        let (_, first) = crate::test_boot::claim_scheduler();
+        let second = crate::test_boot::claim_peer_task();
+        let process = ProcessId(first);
+        for task in [first, second] {
+            budget_watch(process, task).expect("filed");
+        }
+        let _ = crate::test_boot::take_unparked();
+        budget_released(process);
+        assert_eq!(crate::test_boot::take_unparked(), [first], "one");
+        budget_pass(process, first);
+        assert_eq!(crate::test_boot::take_unparked(), [second], "passed on");
+        assert!(
+            budget_spent(process, second).is_some(),
+            "the release passed to it is its own"
+        );
+        budget_unwatch(process, first);
+        assert!(
+            crate::test_boot::take_unparked().is_empty(),
+            "none left to pass to"
         );
     }
 
@@ -2628,7 +3079,7 @@ mod tests {
                     if round.load(Ordering::Acquire) == STOP {
                         return;
                     }
-                    budget_watch(process, waiter);
+                    budget_watch(process, waiter).expect("filed");
                     let held = charges.held(tairix_abi::LimitKind::IpcQueueBytes);
                     saw_release.store(held == 0, Ordering::Relaxed);
                     looked.store(this, Ordering::Release);
@@ -2658,5 +3109,140 @@ mod tests {
             missed, None,
             "a wait for budget and the release it waited for missed each other"
         );
+    }
+
+    /// A waiter leaving without sending and a release of its process's budget,
+    /// raced: the release chooses the leaver or the waiter behind it, and in
+    /// every round the waiter behind wakes, the leaver passing on a release
+    /// that chose it however late the choice landed.
+    ///
+    /// Regression: the leaver looked for a choice and then dropped its row, so
+    /// a release choosing it between the two was lost.
+    #[test]
+    fn a_leaving_waiter_and_a_release_racing_never_lose_the_release() {
+        extern crate std;
+
+        // The interpreter preempts at random points in every round, so it
+        // needs far fewer rounds than hardware to reach the racing orders.
+        const ROUNDS: usize = if cfg!(miri) { 200 } else { 20_000 };
+        const STOP: usize = usize::MAX;
+        let (_, leaver) = crate::test_boot::claim_scheduler();
+        let behind = crate::test_boot::claim_peer_task();
+        let process = ProcessId(leaver);
+        let (round, left) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let passed = AtomicBool::new(false);
+        let wait_for = |until: &dyn Fn() -> bool| {
+            while !until() {
+                std::thread::yield_now();
+            }
+        };
+        let mut lost = None;
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                // Its own hook, which a release it passes on wakes through.
+                let _ = crate::test_boot::claim_scheduler();
+                for this in 1..=ROUNDS {
+                    wait_for(&|| {
+                        let r = round.load(Ordering::Acquire);
+                        r == this || r == STOP
+                    });
+                    if round.load(Ordering::Acquire) == STOP {
+                        return;
+                    }
+                    budget_unwatch(process, leaver);
+                    let woke = crate::test_boot::take_unparked().contains(&behind);
+                    passed.store(woke, Ordering::Relaxed);
+                    left.store(this, Ordering::Release);
+                }
+            });
+            for this in 1..=ROUNDS {
+                budget_watch(process, leaver).expect("filed");
+                budget_watch(process, behind).expect("filed");
+                let _ = crate::test_boot::take_unparked();
+                round.store(this, Ordering::Release);
+                budget_released(process);
+                wait_for(&|| left.load(Ordering::Acquire) == this);
+                let woke = passed.load(Ordering::Relaxed)
+                    || crate::test_boot::take_unparked().contains(&behind);
+                budget_unwatch(process, behind);
+                if !woke {
+                    lost = Some(this);
+                    // Release the leaver, or the scope waits on it for ever.
+                    round.store(STOP, Ordering::Release);
+                    break;
+                }
+            }
+        });
+        assert_eq!(lost, None, "a release chosen for a leaving waiter was lost");
+    }
+
+    /// A registration the heap refuses at any of its allocations files
+    /// nothing, and the wait is refused rather than the kernel aborted; once
+    /// the heap has room the row files.
+    ///
+    /// Regression: the indices were `alloc` B-trees, whose insertion aborts on
+    /// a refused node (`plans/OPEN-DEFECTS.md` D1682).
+    #[test]
+    fn a_registration_the_heap_refuses_files_nothing_and_never_aborts() {
+        let q = WaitQueue::choosing();
+        let arch = MockArch::new();
+        let key = WakeKey::new(3);
+        let registered = crate::test_alloc::past_each_refusal(&Err(WaitRefused), || {
+            let answer = q.register_keyed(key, 2, 500);
+            if answer.is_err() {
+                assert!(q.is_empty(), "a refusal filed a row");
+                assert_eq!(q.earliest_deadline(), None, "or a deadline");
+                assert!(!q.wake_key_first(&arch, key), "or a choice");
+            }
+            answer
+        });
+        assert_eq!(registered, Ok(()));
+        assert_eq!(q.earliest_deadline(), Some(500));
+        assert!(q.wake_key_first(&arch, key), "filed once the heap had room");
+    }
+
+    /// A filed row's deadline and its place in a choice come and go on paths
+    /// that cannot fail, in the room it was filed with: a whole queue swept
+    /// and re-armed, then chosen and handed back, needs nothing of the heap.
+    #[test]
+    fn a_filed_queue_rearms_and_hands_on_without_the_heap() {
+        const ROWS: usize = 200;
+        let q = WaitQueue::choosing();
+        let arch = MockArch::new();
+        let key = WakeKey::new(5);
+        for task in 1..=ROWS {
+            q.register_keyed(key, task as TaskId, task as u64)
+                .expect("filed");
+        }
+        arch.unparked.borrow_mut().reserve(4 * ROWS);
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        q.sweep(&arch, ROWS as u64);
+        let rearmed = (1..=ROWS).rev().all(|task| {
+            q.register_keyed(key, task as TaskId, (ROWS + task) as u64)
+                .is_ok()
+        });
+        let chosen = (0..ROWS).all(|_| q.wake_key_first(&arch, key));
+        let handed = (1..=ROWS)
+            .rev()
+            .filter(|&task| q.hand_on(&arch, key, task as TaskId))
+            .count();
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert!(rearmed, "every row re-armed in its own room");
+        assert!(chosen, "every row was chosen");
+        assert_eq!(handed, ROWS - 1, "each passed its wake to the one behind");
+        assert_eq!(q.earliest_deadline(), Some(ROWS as u64 + 1));
+    }
+
+    /// A re-arm moves a filed row and files no other, so it never needs the
+    /// heap.
+    #[test]
+    fn a_rearm_moves_a_filed_row_and_files_no_other() {
+        let q = WaitQueue::new();
+        q.rearm(9, || Some(5));
+        assert!(q.is_empty(), "nothing was filed");
+        assert_eq!(q.earliest_deadline(), None);
+        q.register(9, NO_DEADLINE).expect("filed");
+        q.rearm(9, || Some(5));
+        assert_eq!(q.earliest_deadline(), Some(5));
     }
 }

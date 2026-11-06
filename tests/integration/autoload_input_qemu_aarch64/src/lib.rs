@@ -51,13 +51,13 @@
 //!    present moves the keyboard to it: the files window is told
 //!    `Focus { focused: false }` and the terminal `Focus { focused: true }`,
 //!    the gate after which the runner types the shell command.
-//! 5. Once the terminal is focused, the runner types [`TERMINAL_COMMAND`]
+//! 6. Once the terminal is focused, the runner types [`TERMINAL_COMMAND`]
 //!    (`sleep 3600` + Enter); the terminal writes the line to the shell,
 //!    which resolves and loads the store bundle
 //!    [`TERMINAL_ROUND_TRIP_BUNDLE`] (`sleep.app`). That load — attributed
 //!    by the bundle's own name — is the AW4 round-trip witness; on it the
 //!    guest emits [`CTRL_C_ARM_MARKER`].
-//! 6. The pty job-control (`Ctrl-C`) witness (`plans/PTY.md`): the
+//! 7. The pty job-control (`Ctrl-C`) witness (`plans/PTY.md`): the
 //!    [`CTRL_C_ARM_MARKER`] gates the runner's [`TERMINAL_CTRL_C_RECOVERY`]
 //!    step — a `Ctrl-C` (which the terminal encodes as the `0x03` interrupt
 //!    byte) whose cooked-mode line discipline signals the foreground `sleep`

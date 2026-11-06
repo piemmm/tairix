@@ -13,13 +13,22 @@ server and every app's client can never drift apart.
   `call_peer_origin` — an unforgeable `ProcId`, never a claimed id),
   keys every window to that owner, maps the app's endpoint-directed
   `shm_grant` region **once** at `Create` through the shared
-  `tairix_display::ShmMapper` seam, and answers each `Present` as it
-  records it: a window's newest frame and the damage since the last one
-  shown, one per window however often it presents. `latch`, which the
-  session calls once a desktop frame, hands each to the injected `FrameHost`
-  (the compositor's side) as a bounds-checked frame slice plus its damage —
-  so a client presenting faster than the desktop draws costs one conversion
-  a frame, and no present waits on the desktop's frame work. A resize or a
+  `tairix_display::ShmMapper` seam, and records each `Present`: a window's
+  newest frame and the damage since the last one shown, one per window
+  however often it presents. `latch`, which the session calls once a desktop
+  frame, hands each to the injected `FrameHost` (the compositor's side) as a
+  bounds-checked frame slice plus its damage — so a client presenting faster
+  than the desktop draws costs one conversion a frame, and the desktop's frame
+  work never waits on a present. A present to a window holding no unshown
+  frame is answered as it is served; one replacing a frame not yet shown is
+  `Served::Withheld` until that frame is shown or refused, or a resize, a
+  release or a close supersedes it, so a client is held to the desktop's
+  frames. A window holds at most one such answer, every call is answered once,
+  and the answers queue in an outbox reserved at window create — a latch never
+  allocates — which the session drains with `send_answers`, each reply landing
+  in the room its call was posted with, so none waits for kernel memory;
+  `release_answers` answers them with no frame while none can reach the
+  screen. A resize or a
   release drops what it supersedes, and a frame the host cannot show is
   reported to it once until the window next shows one and is tried again
   with the next frame the desktop composes, never asking for one of its own;
@@ -43,8 +52,11 @@ server and every app's client can never drift apart.
   `call_post`/`call_reap`, and `call_await` for one posted request's answer,
   in production). A `present` is posted once the window's previous one is
   answered — the session reads the frame a present names until a later one
-  replaces it — and the answer comes as the session records the frame, so a
-  present waits only for an app that outruns the session serving it. A
+  replaces it — and that answer comes with the desktop's next frame when the
+  present replaced one not yet shown, so a present waits only for an app that
+  outruns the desktop's frames; one that must never wait asks
+  `present_in_flight` first and owes its window the paint until the answer
+  lands. A
   present refused for room goes as a call, which waits for the room; a
   refused present is handed out like any posted request's refusal, and the
   window's next present declares the whole window. The requests an app makes as

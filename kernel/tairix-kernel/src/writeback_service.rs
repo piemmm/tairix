@@ -21,8 +21,6 @@
 //! it, whatever fails: a port with no storage floor, a service that was not
 //! admitted, a scheduler hook that is not wired.
 
-use alloc::boxed::Box;
-
 use tairix_kernel_core::fs::writeback;
 use tairix_kernel_core::kthread::YieldHandle;
 use tairix_kernel_core::waitq::{Parker, WRITEBACK_WAITQ};
@@ -52,7 +50,7 @@ pub fn start(ctx: &'static (dyn InitSpawnCtx + Sync), audit: &'static (dyn Sink 
         return;
     }
     let body = move |yielder: &mut dyn YieldHandle| flusher(yielder, audit);
-    if ctx.spawn_kernel_service(Box::new(body)).is_none() {
+    if crate::unlock_orchestrate::admit_service(ctx, body).is_none() {
         unavailable(audit, "flusher_not_admitted");
     }
 }
@@ -73,7 +71,10 @@ fn flusher(yielder: &mut dyn YieldHandle, audit: &'static (dyn Sink + Sync)) {
         unavailable(audit, "flusher_cannot_park");
         return;
     };
-    parker.register(&WRITEBACK_WAITQ, None);
+    if parker.register(&WRITEBACK_WAITQ, None).is_err() {
+        unavailable(audit, "flusher_cannot_park");
+        return;
+    }
     LATE_FILESYSTEM.arm_writeback();
     loop {
         yielder.park();

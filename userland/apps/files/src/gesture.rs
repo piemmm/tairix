@@ -21,8 +21,8 @@
 //! | shift-click | select the run from the anchor to the item |
 //! | click on the listing's ground | clear the selection, unless ctrl or shift is held |
 //! | drag on the listing's ground | draw a band selecting what it covers; escape takes it back ([`press_step`]) |
-//! | double-click | activate: descend, run a bundle, or open a file |
-//! | shift-double-click | list a bundle's contents instead of running it; anything else opens as a double-click opens it, and is left deselected |
+//! | double-click | activate: descend, run a bundle, or open a file; what it hands elsewhere is left deselected once that went ahead ([`crate::handoff`]) |
+//! | shift-double-click | list a bundle's contents instead of running it; anything else opens as a double-click opens it |
 //! | click on the one selected item's name | rename it, once the click can no longer pair ([`RenameArm`]) |
 //! | right-click | ask the desktop for the context menu on the item |
 //!
@@ -118,15 +118,14 @@ pub enum SelectHow {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PrimaryPress {
     /// The second press of a double-click on the item at `index`: select and
-    /// activate it.
+    /// activate it. What becomes of the selection is the activation's: an
+    /// item handed elsewhere is deselected once that went ahead
+    /// ([`crate::handoff`]).
     Activate {
         /// The item the pair landed on.
         index: usize,
         /// What the pair means for a bundle.
         intent: BundleIntent,
-        /// Whether the item is deselected once it has opened somewhere else,
-        /// as a shift-double-click leaves it.
-        deselect: bool,
     },
     /// A lone press on the item at `index`, changing the selection `how`.
     Select {
@@ -187,7 +186,6 @@ pub fn primary_press(
         ClickKind::Double => PrimaryPress::Activate {
             index,
             intent: bundle_intent(keys.extend),
-            deselect: keys.extend,
         },
         ClickKind::Single => PrimaryPress::Select {
             index,
@@ -647,16 +645,18 @@ mod tests {
             PrimaryPress::Activate {
                 index: 2,
                 intent: BundleIntent::Launch,
-                deselect: false,
             }
         );
     }
 
-    /// Shift asks a pair for a bundle's contents and for nothing to be left
-    /// selected; `Ctrl` changes what the first press selects and nothing the
-    /// pair does.
+    /// Shift asks a pair for a bundle's contents and decides nothing about the
+    /// selection, which only a hand-off that went ahead clears; `Ctrl` changes
+    /// what the first press selects and nothing the pair does.
+    ///
+    /// Regression: the pair asked for its item to be deselected, so a
+    /// shift-double-click the activation refused cleared the selection too.
     #[test]
-    fn a_shifted_pair_browses_a_bundle_and_leaves_its_item_deselected() {
+    fn a_shifted_pair_browses_a_bundle_and_decides_nothing_about_the_selection() {
         let pair = |keys| {
             let mut tracker = DoubleClickTracker::new();
             press_with(
@@ -684,7 +684,6 @@ mod tests {
             PrimaryPress::Activate {
                 index: 4,
                 intent: BundleIntent::Browse,
-                deselect: true,
             }
         );
         assert_eq!(
@@ -695,7 +694,6 @@ mod tests {
             PrimaryPress::Activate {
                 index: 4,
                 intent: BundleIntent::Launch,
-                deselect: false,
             }
         );
     }
@@ -772,6 +770,7 @@ mod tests {
             key: KeyInput::Pressed {
                 key,
                 modifiers: Modifiers::default(),
+                physical: tairix_abi::input::PhysicalKey::UNKNOWN,
             },
         }
     }

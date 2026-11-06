@@ -146,10 +146,42 @@ pub fn set_control<T: AudioTransport>(
 /// still waiting for its device, so a drag across a volume slider costs one
 /// request at a time however fast the pointer moves. Every round trip lists
 /// the devices after applying what it carries.
+///
+/// The newest settled change made by hand ([`Self::ask_confirmed`]) is
+/// confirmed once the listing of the trip that carried it shows it applied
+/// and heard ([`Self::landed`]), so its listener can be let hear the result.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ControlQueue {
     queued: Vec<(u32, DeviceControl)>,
     trip: Trip,
+    confirm: Option<Confirm>,
+}
+
+/// A settled change awaiting the listing that shows it applied.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Confirm {
+    device_id: u32,
+    control: DeviceControl,
+    /// Whether the round trip in flight carries it.
+    carried: bool,
+}
+
+impl Confirm {
+    /// Whether `device` shows this change applied and heard: the default
+    /// output, sounding, at the level asked for. A mute and a choice of
+    /// default are never heard.
+    fn heard_on(self, device: &AudioDeviceDescriptor) -> bool {
+        let applied = match self.control {
+            DeviceControl::Level(level) => device.level == level,
+            DeviceControl::Mute(muted) => !muted,
+            DeviceControl::Default => false,
+        };
+        applied
+            && device.device_id == self.device_id
+            && device.direction == StreamDirection::Playback
+            && device.default.is_default()
+            && !device.muted
+    }
 }
 
 /// Where a [`ControlQueue`]'s round trips stand.
@@ -175,6 +207,7 @@ impl ControlQueue {
         Self {
             queued: Vec::new(),
             trip: Trip::Idle,
+            confirm: None,
         }
     }
 
@@ -182,8 +215,37 @@ impl ControlQueue {
     ///
     /// It goes to the back however long the one it replaces has waited:
     /// making two devices default is ordered, so the one chosen last must be
-    /// the one applied last.
+    /// the one applied last. A settled change of its kind to that device is
+    /// confirmed no longer: what the listing will show is this one.
     pub fn ask(&mut self, device_id: u32, control: DeviceControl) {
+        if let Some(confirm) = self.confirm {
+            if confirm.device_id == device_id && same_kind(confirm.control, control) {
+                self.confirm = None;
+            }
+        }
+        self.enqueue(device_id, control);
+    }
+
+    /// [`Self::ask`] for a settled change made by hand — where a drag rests,
+    /// a key step, an unmute — which [`Self::landed`] confirms once a listing
+    /// shows it heard. It is the newest, so no earlier one is confirmed. A
+    /// change nobody hears — a mute, a choice of default — confirms nothing:
+    /// it is asked as [`Self::ask`] asks it, and takes no other change's
+    /// confirmation away.
+    pub fn ask_confirmed(&mut self, device_id: u32, control: DeviceControl) {
+        if !audible(control) {
+            self.ask(device_id, control);
+            return;
+        }
+        self.enqueue(device_id, control);
+        self.confirm = Some(Confirm {
+            device_id,
+            control,
+            carried: false,
+        });
+    }
+
+    fn enqueue(&mut self, device_id: u32, control: DeviceControl) {
         self.queued
             .retain(|&(device, held)| device != device_id || !same_kind(held, control));
         self.queued.push((device_id, control));
@@ -221,16 +283,42 @@ impl ControlQueue {
             Trip::Idle | Trip::Owed => {}
         }
         self.trip = Trip::InFlight { again: false };
-        Some(core::mem::take(&mut self.queued))
+        let controls = core::mem::take(&mut self.queued);
+        if let Some(confirm) = self.confirm.as_mut() {
+            confirm.carried = controls.contains(&(confirm.device_id, confirm.control));
+        }
+        Some(controls)
     }
 
-    /// The round trip in flight has come back.
-    pub fn landed(&mut self) {
+    /// The round trip in flight has come back with `listed`: the devices it
+    /// listed after making every control it carried, or `None` where the
+    /// service refused one of them or nothing could be listed.
+    ///
+    /// Answers whether it confirms the settled change it carried: that
+    /// change's device listed as the default output, sounding, as asked.
+    #[must_use = "a confirmed change is its listener's to hear"]
+    pub fn landed(&mut self, listed: Option<&[AudioDeviceDescriptor]>) -> bool {
         self.trip = match self.trip {
             Trip::InFlight { again: true } | Trip::Owed => Trip::Owed,
             Trip::InFlight { again: false } | Trip::Idle => Trip::Idle,
         };
+        let Some(confirm) = self.confirm.filter(|confirm| confirm.carried) else {
+            return false;
+        };
+        self.confirm = None;
+        listed
+            .unwrap_or_default()
+            .iter()
+            .any(|device| confirm.heard_on(device))
     }
+}
+
+/// Whether `control` can be heard once applied: a level, or an unmute.
+const fn audible(control: DeviceControl) -> bool {
+    matches!(
+        control,
+        DeviceControl::Level(_) | DeviceControl::Mute(false)
+    )
 }
 
 const fn same_kind(a: DeviceControl, b: DeviceControl) -> bool {

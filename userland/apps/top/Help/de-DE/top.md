@@ -4,12 +4,12 @@ top — die Prozessliste live beobachten
 
 ## SYNOPSIS
 
-`top [-d Sek.Zehntel] [-h | -?]`
+`top [-d secs.tenths] [-h | -?]`
 
 ## DESCRIPTION
 
 Zeigt eine live aktualisierte Vollbildansicht der Prozessliste über die
-Systeminformations-API, im Geiste des klassischen `top`. Es startet mit
+Systeminformations-API, im Geiste von GNU `top`. Es startet mit
 den Prozessen des Aufrufers; die systemweite Sicht gewährt der Dienst
 nur einem Aufrufer mit `CAP_SYSINFO_GLOBAL`.
 
@@ -53,7 +53,11 @@ tragen:
   Kontoverzeichnis des Systems; die numerische uid tritt an die Stelle,
   wenn der Name nicht aufgelöst werden kann.
 - `SIZE` — der im Adressraum des Prozesses eingeblendete Speicher
-  (Abbild, Stapel und Halde gleichermaßen).
+  (Abbild, Stapel und Halde gleichermaßen), in binären Einheiten: unter
+  einem Kibibyte die genaue Zahl, darüber eine Nachkommastelle mit dem
+  Suffix `K`, `M`, `G`, `T`, `P` oder `E` (`4.0K`, `986.2M`, `2.0G`).
+  Die Stufenleiter reicht bis zu Exbibyte, sodass der Wert immer in
+  seine Spalte passt.
 - `S` — der Zustandsbuchstabe: `R` laufend (grün), `r` lauffähig,
   wartet auf eine CPU (cyan), `S` schlafend, `T` angehalten (gelb), `Z`
   Zombie (magenta). Farben erscheinen nur auf einem Farbterminal; der
@@ -63,7 +67,7 @@ tragen:
 - `WCPU` — der gewichtete (exponentiell geglättete) CPU-Anteil über die
   Auffrischungen hinweg, ruhiger als die Momentanspalte.
 - `TIME+` — die kumulierte CPU-Zeit als
-  `Minuten:Sekunden.Hundertstel`.
+  `minutes:seconds.hundredths` (Minuten, Sekunden und Hundertstel).
 - `COMMAND` — der Prozessname.
 
 ## OPTIONS

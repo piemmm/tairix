@@ -38,6 +38,12 @@
 //! both wait on something. They run on the shared worker desk; the loop
 //! submits and carries on drawing.
 //!
+//! A movie is played rather than drawn: the open knows it by its signature and
+//! hands its descriptor to a thread of the window's own, which decodes it in a
+//! sandboxed session of this binary, plays its sound through the audio
+//! service, and posts each picture when it is due. The window loop only tells
+//! it what the user asked and adopts what it posted.
+//!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
 
@@ -54,6 +60,7 @@ mod program {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
     use core::cell::Cell;
+    use core::num::NonZeroUsize;
 
     use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
@@ -67,25 +74,37 @@ mod program {
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_icon::NoArtwork;
     use tairix_input::InputEvent;
+    use tairix_player::rt::{EngineWaits, RtSpeaker, Tokens};
+    use tairix_player::Failure;
     use tairix_raster::Surface;
+    use tairix_rt::sync::{Mutex, WorkerWake};
+    use tairix_rt::thread::Thread;
 
     use tairix_browse::{media_for_document, MediaType};
     use tairix_sandbox::imagerender::{
         close_view, open_view, render_page, select_page, upload_document, ImageRenderService,
         UploadFailure, ViewDocument, ViewFailure, ViewFormat, ViewPage, ViewRefusal,
     };
-    use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
-    use tairix_sandbox::ParserSandbox;
+    use tairix_sandbox::moviedecode::{
+        is_movie, MovieDecodeService, MovieInfo, RingLayout, RING_SLOTS, SIGNATURE_LEN,
+    };
+    use tairix_sandbox::rt::{
+        draw_seed, serve_session_stdio, serve_stdio, session_worker_role, spawn_share,
+        worker_ceiling, worker_role, RtLauncher, RtSessionLauncher,
+    };
+    use tairix_sandbox::{ParserSandbox, WorkerMemory};
     use tairix_theme::{TextRole, Theme};
+    use tairix_view::movie::{self, Note, Order, Player, Release, Status, Stop};
     use tairix_view::view::{Command, Outcome, View};
     use tairix_view::{
         Answer, Layout, Refusal, Request, MAX_DOCUMENT_BYTES, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
-        key_input_event, pinch_input_events, pointer_input_events, pointer_point, present_damage,
+        key_input_event, pinch_input_events, pointer_input_events, pointer_point,
         scroll_input_events, DeclaredTip, Desktop, EventDrain, EventError, EventMailbox,
-        EventSource, Parked, Repaint, Target, WindowClient, WindowEvents, WindowSizing,
+        EventSource, Owed, Parked, Repaint, Target, WindowClient, WindowEvents, WindowSizing,
+        EVENT_MAILBOX_CAPACITY,
     };
 
     /// The name this program states its own refusals under.
@@ -93,6 +112,18 @@ mod program {
 
     /// The wait-set token of the sandbox worker's answer wake.
     const WORKER_TOKEN: u64 = app::FIRST_APP_TOKEN;
+
+    /// The wait-set token of the wake every movie's playback thread posts on.
+    const PLAYBACK_TOKEN: u64 = app::FIRST_APP_TOKEN + 1;
+
+    /// A playback thread's own wait-set tokens: its decoder, its stream's
+    /// mailbox, and its window's orders.
+    const MOVIE: Tokens = Tokens {
+        decoder_read: 1,
+        decoder_write: 2,
+        notify: 3,
+    };
+    const ORDERS: u64 = 4;
 
     // ---- the sandbox session -------------------------------------------
 
@@ -180,6 +211,17 @@ mod program {
         },
         /// The decoders of closed windows have been ended.
         Forgotten,
+        /// The document is a movie, for a playback of the window's own.
+        Movie {
+            /// The window that asked.
+            window: u64,
+            /// The open this answers.
+            open_id: u64,
+            /// The movie's file.
+            source: Source,
+            /// Its length in bytes.
+            length: u64,
+        },
     }
 
     /// What the worker keeps between jobs: **one sandbox per window**, and so
@@ -221,41 +263,77 @@ mod program {
 
     /// Carry out one job against the window's own sandbox.
     ///
-    /// The job is taken by exclusive reference so the buffer a render was lent
-    /// is drawn into and handed straight back in the answer, rather than a
-    /// window's worth of pixels being allocated per pointer sample.
+    /// The work is taken out of the job, so the buffer a render was lent is
+    /// drawn into and handed straight back in the answer rather than a
+    /// window's worth of pixels being allocated per pointer sample, and a
+    /// movie's descriptor moves on to its playback.
     fn serve_job(session: &mut Session, job: &mut Job) -> Reply {
         let window = job.window;
-        let answer = match &mut job.work {
-            Work::Open { open_id, source } => Answer::Opened {
-                open_id: *open_id,
-                opened: open_source(session.sandbox(window), source),
+        let answer = match core::mem::replace(&mut job.work, Work::Forget(Vec::new())) {
+            Work::Open { open_id, source } => match movie_length(&source) {
+                Ok(Some(length)) => {
+                    // A movie's decoder is its playback's own.
+                    session.forget(window);
+                    return Reply::Movie {
+                        window,
+                        open_id,
+                        source,
+                        length,
+                    };
+                }
+                Ok(None) => Answer::Opened {
+                    open_id,
+                    opened: open_source(session.sandbox(window), &source),
+                },
+                Err(refusal) => Answer::Opened {
+                    open_id,
+                    opened: Err(refusal),
+                },
             },
             Work::Show {
                 page,
                 extent,
                 window: rect,
-                pixels,
+                mut pixels,
             } => {
                 let (decoded, outcome) =
-                    draw(session.sandbox(window), *page, *extent, *rect, pixels);
+                    draw(session.sandbox(window), page, extent, rect, &mut pixels);
                 Answer::Shown {
-                    page: *page,
-                    extent: *extent,
-                    window: *rect,
+                    page,
+                    extent,
+                    window: rect,
                     decoded,
-                    pixels: core::mem::take(pixels),
+                    pixels,
                     outcome,
                 }
             }
             Work::Forget(closed) => {
-                for window in closed.drain(..) {
+                for window in closed {
                     session.forget(window);
                 }
                 return Reply::Forgotten;
             }
         };
         Reply::Window { window, answer }
+    }
+
+    /// The length of the movie `source` holds, or `None` where it holds none:
+    /// known by its first bytes, which is stronger than its name.
+    fn movie_length(source: &Source) -> Result<Option<u64>, Refusal> {
+        let mut head = [0u8; SIGNATURE_LEN];
+        let read = source
+            .handle
+            .read_at(0, &mut head)
+            .map_err(|err| Refusal::Unreadable(Errno::from_syscall(err)))?;
+        if !is_movie(&head[..read]) {
+            return Ok(None);
+        }
+        let length = source
+            .handle
+            .regular_len()
+            .map_err(Refusal::Unreadable)?
+            .ok_or(Refusal::Unreadable(Errno::OutOfRange))?;
+        Ok(Some(length))
     }
 
     /// Stream `source` into the worker and open it, answering what the
@@ -355,6 +433,256 @@ mod program {
             .ok()?
             .checked_mul(usize::try_from(window.height).ok()?)?
             .checked_mul(4)
+    }
+
+    // ---- a movie's playback --------------------------------------------
+
+    /// A movie window's latest orders, until its playback thread takes them,
+    /// the slots it is done with, and whether the window is leaving. One batch
+    /// at most waits: the next stays in the window's own state, which folds it
+    /// into the latest.
+    #[derive(Default)]
+    struct Orders {
+        batch: Option<[Option<Order>; 2]>,
+        /// Each slot of the ring the window has handed back, by its place.
+        released: [Option<Release>; RING_SLOTS],
+        leaving: bool,
+    }
+
+    /// What a playback thread last posted, for its window to take.
+    #[derive(Default)]
+    struct Board {
+        status: Option<Status>,
+        opened: Option<Result<MovieInfo, Stop>>,
+        /// Decoders replaced since the window last looked.
+        replaced: u32,
+        silenced: Option<Failure>,
+        picture: Option<movie::Picture>,
+        /// A wake is on its way that the window has not yet read the board
+        /// for, so a further post needs none.
+        woken: bool,
+    }
+
+    /// What a window takes from its playback's board.
+    struct Posted {
+        status: Option<Status>,
+        opened: Option<Result<MovieInfo, Stop>>,
+        replaced: u32,
+        silenced: Option<Failure>,
+        picture: Option<movie::Picture>,
+    }
+
+    /// Where a movie window and its playback thread meet.
+    struct Link {
+        orders: Mutex<Orders>,
+        ordered: WorkerWake,
+        board: Mutex<Board>,
+        /// The wake every playback posts on.
+        posted: Arc<WorkerWake>,
+    }
+
+    /// The player a playback thread runs: its decoders are this binary in
+    /// the sandbox's session role.
+    type MoviePlayer<R> = Player<RtSessionLauncher, tairix_rt::LogSink, R, RtSpeaker>;
+
+    impl Link {
+        fn new(posted: Arc<WorkerWake>) -> Self {
+            Self {
+                orders: Mutex::new(Orders::default()),
+                ordered: WorkerWake::create(),
+                board: Mutex::new(Board::default()),
+                posted,
+            }
+        }
+
+        /// Tell the playback what `view` now calls for, once it has taken the
+        /// last batch.
+        fn tell(&self, view: &mut View) {
+            let mut orders = self.orders.lock();
+            if orders.batch.is_some() {
+                return;
+            }
+            let batch = view.take_orders();
+            if batch.iter().all(Option::is_none) {
+                return;
+            }
+            orders.batch = Some(batch);
+            drop(orders);
+            self.ordered.nudge();
+        }
+
+        fn leave(&self) {
+            self.orders.lock().leaving = true;
+            self.ordered.nudge();
+        }
+
+        /// The batch waiting, the slots handed back, and whether the window
+        /// is leaving.
+        fn take_orders(&self) -> ([Option<Order>; 2], [Option<Release>; RING_SLOTS], bool) {
+            let mut orders = self.orders.lock();
+            let released = core::mem::take(&mut orders.released);
+            (
+                orders.batch.take().unwrap_or([None; 2]),
+                released,
+                orders.leaving,
+            )
+        }
+
+        /// Hand back the slot of a picture the window has copied out, and wake
+        /// the thread, which may draw into it again.
+        fn give_back(&self, release: Release) {
+            if let Some(entry) = self.orders.lock().released.get_mut(release.index()) {
+                *entry = Some(release);
+            }
+            self.ordered.nudge();
+        }
+
+        /// Write the board through `write`, waking the window unless a wake is
+        /// already on its way.
+        fn publish(&self, write: impl FnOnce(&mut Board)) {
+            let wake = {
+                let mut board = self.board.lock();
+                write(&mut board);
+                !core::mem::replace(&mut board.woken, true)
+            };
+            if wake {
+                self.posted.nudge();
+            }
+        }
+
+        /// Post what the player has to say since it last said anything, at
+        /// `now`.
+        fn post<R>(&self, player: &mut MoviePlayer<R>, now: u64)
+        where
+            R: FnMut(u64, &mut [u8]) -> Result<usize, Errno>,
+        {
+            let notes = player.take_notes();
+            let picture = player.take_picture();
+            if !player.take_changed() && notes.is_empty() && picture.is_none() {
+                return;
+            }
+            let mut unseen = None;
+            self.publish(|board| {
+                board.status = Some(player.status());
+                for note in notes {
+                    match note {
+                        Note::Opened(info) => board.opened = Some(Ok(info)),
+                        Note::Unopened(stop) => board.opened = Some(Err(stop)),
+                        Note::Replaced => board.replaced = board.replaced.saturating_add(1),
+                        Note::SoundLost(failure) => board.silenced = Some(failure),
+                    }
+                }
+                unseen = picture.and_then(|picture| board.picture.replace(picture));
+            });
+            // Handed back once the board is let go: the player may then read
+            // the file, which the window must never wait behind.
+            if let Some(unseen) = unseen {
+                player.release(now, unseen.slot.release());
+            }
+        }
+
+        /// Post that the movie will not open, and why.
+        fn post_unopened(&self, stop: Stop) {
+            self.publish(|board| board.opened = Some(Err(stop)));
+        }
+
+        /// What the thread posted since the window last looked.
+        fn take(&self) -> Option<Posted> {
+            let mut board = self.board.lock();
+            if !core::mem::take(&mut board.woken) {
+                return None;
+            }
+            Some(Posted {
+                status: board.status.take(),
+                opened: board.opened.take(),
+                replaced: core::mem::take(&mut board.replaced),
+                silenced: board.silenced.take(),
+                picture: board.picture.take(),
+            })
+        }
+    }
+
+    /// A movie window's playback thread: the player, its decoder handed a
+    /// ring of slots the size of `screen`, parked on what it waits for, until
+    /// the window leaves or a wait fails.
+    fn playback(link: &Link, file: &tairix_rt::File, length: u64, screen: (u32, u32)) {
+        let read =
+            |offset: u64, into: &mut [u8]| file.read_at(offset, into).map_err(Errno::from_syscall);
+        let ring = RingLayout::new(screen.0, screen.1)
+            .and_then(|layout| Some((layout, NonZeroUsize::new(layout.ring_bytes())?)));
+        let Some((layout, ring_bytes)) = ring else {
+            return link.post_unopened(Stop::NoDecoder);
+        };
+        let memory = WorkerMemory::Documents;
+        let made = Player::new(
+            RtSessionLauncher::own_binary(memory).sharing(ring_bytes),
+            tairix_rt::LogSink,
+            (read, length),
+            (worker_ceiling(memory), layout),
+            RtSpeaker::new(),
+            draw_seed,
+        );
+        let mut player: MoviePlayer<_> = match made {
+            Ok(player) => player,
+            Err(stop) => return link.post_unopened(stop),
+        };
+        let unwatched = |what, errno| Stop::Abandoned(Failure::Wait { what, errno });
+        let set = match tairix_rt::WaitSet::create() {
+            Ok(set) => set,
+            Err(errno) => return link.post_unopened(unwatched("make a wait-set", errno)),
+        };
+        if let Err(errno) = app::watch_wake(set.handle(), &link.ordered, ORDERS) {
+            return link.post_unopened(unwatched("watch the window's orders", errno));
+        }
+        let mut waits = EngineWaits::new(set.handle(), MOVIE);
+        player.begin(tairix_rt::clock_get());
+        loop {
+            let members = player.decoder_members();
+            if let Err(failure) = waits.watch(members, player.speaker().notify_port()) {
+                player.abandon(failure);
+                return link.post(&mut player, tairix_rt::clock_get());
+            }
+            link.post(&mut player, tairix_rt::clock_get());
+            let woken = match set.wait_until(player.deadline().unwrap_or(u64::MAX)) {
+                Ok(woken) => woken,
+                Err(errno) => {
+                    let what = "wait for playback";
+                    player.abandon(Failure::Wait { what, errno });
+                    return link.post(&mut player, tairix_rt::clock_get());
+                }
+            };
+            let now = tairix_rt::clock_get();
+            match woken {
+                None => player.on_timer(now),
+                Some(token) if token == MOVIE.decoder_read => player.on_decoder(now, true, false),
+                Some(token) if token == MOVIE.decoder_write => player.on_decoder(now, false, true),
+                Some(token) if token == MOVIE.notify => player.on_notify(now),
+                Some(ORDERS) => {
+                    link.ordered.drain();
+                    let (batch, released, leaving) = link.take_orders();
+                    if leaving {
+                        player.close();
+                        return;
+                    }
+                    for release in released.into_iter().flatten() {
+                        player.release(now, release);
+                    }
+                    for order in batch.into_iter().flatten() {
+                        player.order(now, order);
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
+    /// A movie window's playback: the link to the thread playing it, and what
+    /// the window knows of the open it answers.
+    struct Playback {
+        link: Arc<Link>,
+        open_id: u64,
+        name: String,
+        bytes: u64,
     }
 
     // ---- the document a launch was given -------------------------------
@@ -523,9 +851,30 @@ mod program {
         title: String,
         /// Whether any frame of this window has reached the session.
         presented: bool,
+        /// What the window owes the screen since it last presented, folded
+        /// across every event of the turn so a burst costs one frame.
+        owed: Owed,
+        /// The movie's playback, while the window shows one.
+        playback: Option<Playback>,
     }
 
     impl Window {
+        /// Tell the window's playback what its state now calls for, and draw
+        /// its movie's picture again where the canvas has moved.
+        fn tell(&mut self, theme: &Theme, scale: Scale) {
+            if self.playback.is_none() {
+                return;
+            }
+            let layout = self.layout(theme, scale);
+            if let Some(playback) = &self.playback {
+                playback.link.tell(&mut self.view);
+            }
+            let mut owed = damage::sink();
+            if self.view.redraw_movie(&layout, &mut owed) {
+                self.owe(Repaint::Reported, &owed);
+            }
+        }
+
         /// Resolve the layout for the window's current extent.
         fn layout(&mut self, theme: &Theme, scale: Scale) -> Layout {
             let mode = *self.pane.mode();
@@ -552,16 +901,21 @@ mod program {
             !self.presented && self.view.nothing_to_show()
         }
 
-        /// Paint what `repaint` owes and present it.
+        /// Fold `repaint`, and what it `reported`, into what the window owes.
+        fn owe(&mut self, repaint: Repaint, reported: &Region) {
+            let mode = *self.pane.mode();
+            self.owed.owe(&mode, repaint, reported);
+        }
+
+        /// Paint what the window owes and present it, once a turn however many
+        /// events folded into it.
         ///
-        /// The whole viewer is re-derived under the clip narrowed to, so a
-        /// partial repaint lands the pixels a whole one would have ��� there is
+        /// The whole viewer is re-derived under each rectangle's clip, so a
+        /// partial repaint lands the pixels a whole one would have — there is
         /// no second "paint just this part" recipe.
         fn present(
             &mut self,
             client: &mut WindowClient<app::RtWindowTransport>,
-            repaint: Repaint,
-            reported: &Region,
             theme: &Theme,
             scale: Scale,
         ) -> Result<(), Errno> {
@@ -572,37 +926,40 @@ mod program {
             // Nothing of what was on screen survives where the session gave
             // its copy of the region back, or where the window has never been
             // on screen at all.
-            let repaint = if self.pane.content_released() || !self.presented {
-                Repaint::Whole
-            } else {
-                repaint
-            };
-            let Some(area) = present_damage(&mode, repaint, reported) else {
+            if self.pane.content_released() || !self.presented {
+                self.owed.owe_whole();
+            }
+            let Some(parts) = self.owed.take(&mode) else {
                 return Ok(());
             };
             let layout = self.layout(theme, scale);
             let view = &self.view;
-            let surface = &mut self.surface;
-            surface.with_clip(area.x, area.y, area.width_px, area.height_px, |clipped| {
-                tairix_view::paint::render_into(
-                    clipped,
-                    view,
-                    &layout,
-                    theme,
-                    scale,
-                    face(theme, scale),
-                    &mut NoArtwork,
-                );
-            });
-            let landed = self.pane.present(client, surface, area);
+            for rect in parts.rects() {
+                self.surface
+                    .with_clip(rect.x, rect.y, rect.width_px, rect.height_px, |clipped| {
+                        tairix_view::paint::render_into(
+                            clipped,
+                            view,
+                            &layout,
+                            theme,
+                            scale,
+                            face(theme, scale),
+                            &mut NoArtwork,
+                        );
+                    });
+            }
+            let landed = self.pane.present_list(client, &self.surface, &parts);
             if landed.is_ok() {
                 self.presented = true;
             }
             landed
         }
 
-        /// Close this window, its menu going with it.
+        /// Close this window, its menu and its playback going with it.
         fn close(self, client: &mut WindowClient<app::RtWindowTransport>) {
+            if let Some(playback) = &self.playback {
+                playback.link.leave();
+            }
             let _ = self.pane.close(client);
         }
     }
@@ -672,6 +1029,8 @@ mod program {
             tip: DeclaredTip::new(),
             title: String::from(APP_TITLE),
             presented: false,
+            owed: Owed::new(),
+            playback: None,
         })
     }
 
@@ -688,6 +1047,8 @@ mod program {
         mailbox: EventMailbox,
         set: u64,
         worker: &'a Worker,
+        /// The wake the movies' playback threads post on.
+        playback: &'a WorkerWake,
         /// Set when the session published a new desktop state, for the loop
         /// to adopt.
         desktop_moved: &'a Cell<bool>,
@@ -724,6 +1085,10 @@ mod program {
                     // would report ready for ever and turn the park into a
                     // spin.
                     self.worker.wake().drain();
+                    Ok(Parked::Interrupted)
+                }
+                Wake::App(PLAYBACK_TOKEN) => {
+                    self.playback.drain();
                     Ok(Parked::Interrupted)
                 }
                 Wake::PressureChanged => {
@@ -763,10 +1128,9 @@ mod program {
     fn retitle(window: &mut Window, client: &mut WindowClient<app::RtWindowTransport>) {
         let wanted = window
             .view
-            .document()
-            .map(|document| document.name.clone())
+            .name()
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| String::from(APP_TITLE));
+            .map_or_else(|| String::from(APP_TITLE), String::from);
         if wanted == window.title {
             return;
         }
@@ -787,7 +1151,7 @@ mod program {
         let Err(err) = client.pick_file(window.pane.id(), PickPurpose::Open) else {
             return true;
         };
-        let owner = window.view.document().is_some().then(|| window.pane.id());
+        let owner = window.view.name().is_some().then(|| window.pane.id());
         let _ = app::refuse(
             client,
             (APP_NAME, event_endpoint),
@@ -816,6 +1180,186 @@ mod program {
         window.close(app.client);
     }
 
+    /// Adopt the worker's `answer` for window `id`, folding what it changed
+    /// into what the window owes; one for a window this viewer has closed is
+    /// dropped, the window it described being gone.
+    fn adopt_answer(
+        app: &mut App<'_>,
+        (id, answer): (u64, Answer),
+        (theme, scale): (&Theme, Scale),
+    ) {
+        let Some(index) = index_of(app.windows, id) else {
+            return;
+        };
+        // A document that has just opened is the one moment the window sizes
+        // itself to the picture; a render, a zoom, or a resize never does, so
+        // it cannot fight the user's own drag.
+        let just_opened = matches!(
+            &answer,
+            Answer::Opened { opened: Ok(_), .. } | Answer::Movie { opened: Ok(_), .. }
+        );
+        let refused_open = matches!(
+            &answer,
+            Answer::Opened { opened: Err(_), .. } | Answer::Movie { opened: Err(_), .. }
+        );
+        let pictured = matches!(&answer, Answer::Opened { opened: Ok(_), .. });
+        let mut reported = damage::sink();
+        let layout = app.windows[index].layout(theme, scale);
+        let changed = app.windows[index]
+            .view
+            .deliver(answer, &layout, &mut reported)
+            .changed;
+        // A picture opened in a movie's window ends the movie's playback.
+        if pictured && changed {
+            if let Some(playback) = app.windows[index].playback.take() {
+                playback.link.leave();
+            }
+        }
+        // An open that was waited for and refused leaves the window nothing
+        // to show; one abandoned since changes nothing.
+        let refusal = app.windows[index].view.refusal().copied();
+        if let Some(refusal) = refusal.filter(|_| refused_open && changed) {
+            not_opened(app, index, &refusal);
+            return;
+        }
+        let window = &mut app.windows[index];
+        retitle(window, app.client);
+        let resized = just_opened && hug_picture(window, app.client, app.desktop, theme, scale);
+        let repaint = if resized {
+            Repaint::Whole
+        } else {
+            Repaint::reported_if(changed)
+        };
+        window.owe(repaint, &reported);
+    }
+
+    /// Play the movie `source` holds in window `id` on a thread of its own; one
+    /// the window has stopped waiting for is let go unplayed.
+    fn start_playback(
+        app: &mut App<'_>,
+        id: u64,
+        (open_id, source, length): (u64, Source, u64),
+        (posted, dressing): (&Arc<WorkerWake>, (&Theme, Scale)),
+    ) {
+        let Some(index) = index_of(app.windows, id) else {
+            return;
+        };
+        let window = &mut app.windows[index];
+        if !window.view.awaiting(open_id) {
+            return;
+        }
+        if let Some(old) = window.playback.take() {
+            old.link.leave();
+        }
+        let link = Arc::new(Link::new(Arc::clone(posted)));
+        let thread_link = Arc::clone(&link);
+        let file = source.handle;
+        let shown = app.desktop.screen();
+        let screen = (shown.width, shown.height);
+        match Thread::spawn(move || playback(&thread_link, &file, length, screen)) {
+            Ok(_) => {
+                window.playback = Some(Playback {
+                    link,
+                    open_id,
+                    name: source.name,
+                    bytes: length,
+                });
+            }
+            Err(errno) => {
+                let opened = Err(Refusal::NoPlayback(errno));
+                adopt_answer(app, (id, Answer::Movie { open_id, opened }), dressing);
+            }
+        }
+    }
+
+    /// Adopt what each movie window's playback has posted since the loop last
+    /// looked.
+    fn collect_playbacks(app: &mut App<'_>, dressing: (&Theme, Scale)) {
+        // Backwards, so a window a refused open closes moves none still to come.
+        for index in (0..app.windows.len()).rev() {
+            let posted = app.windows[index]
+                .playback
+                .as_ref()
+                .and_then(|playback| playback.link.take());
+            if let Some(posted) = posted {
+                adopt_posted(app, index, posted, dressing);
+            }
+        }
+    }
+
+    /// Adopt what window `index`'s playback posted: the open's outcome first,
+    /// then what became of the decoder and the sound, where the movie is, and
+    /// the picture due.
+    fn adopt_posted(
+        app: &mut App<'_>,
+        index: usize,
+        posted: Posted,
+        (theme, scale): (&Theme, Scale),
+    ) {
+        let id = app.windows[index].pane.id();
+        if let Some(opened) = posted.opened {
+            let Some(playback) = app.windows[index].playback.as_ref() else {
+                return;
+            };
+            let opened = opened
+                .map(|info| (info, playback.name.clone(), playback.bytes))
+                .map_err(Refusal::Movie);
+            let answer = Answer::Movie {
+                open_id: playback.open_id,
+                opened,
+            };
+            adopt_answer(app, (id, answer), (theme, scale));
+        }
+        // A refused open has closed the window.
+        let Some(index) = index_of(app.windows, id) else {
+            return;
+        };
+        let window = &mut app.windows[index];
+        let layout = window.layout(theme, scale);
+        let mut reported = damage::sink();
+        let mut changed = false;
+        for _ in 0..posted.replaced {
+            changed |= window
+                .view
+                .movie_note(Note::Replaced, &layout, &mut reported);
+        }
+        if let Some(failure) = posted.silenced {
+            let lost = Note::SoundLost(failure);
+            changed |= window.view.movie_note(lost, &layout, &mut reported);
+        }
+        if let Some(status) = posted.status {
+            changed |= window.view.movie_status(status, &layout, &mut reported);
+        }
+        if let Some(picture) = posted.picture {
+            changed |= window.view.show_frame(&picture, &layout, &mut reported);
+            if let Some(playback) = &window.playback {
+                playback.link.give_back(picture.slot.release());
+            }
+        }
+        window.owe(Repaint::reported_if(changed), &reported);
+    }
+
+    /// What a delivery carrying no event calls for: the channel dying ends the
+    /// viewer with the status this answers, while a malformed frame — refused
+    /// rather than guessed at — and a request the session refused are stated
+    /// and carried on from.
+    fn refused_delivery(err: EventError) -> Option<i32> {
+        match err {
+            EventError::Mailbox(_) => {
+                let code = app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "the event channel died");
+                Some(code)
+            }
+            EventError::Undecodable(_) => {
+                app::report(APP_NAME, "a malformed window event was refused");
+                None
+            }
+            EventError::Refused(refused) => {
+                app::report(APP_NAME, refused);
+                None
+            }
+        }
+    }
+
     /// The viewer's whole life.
     #[allow(
         clippy::too_many_lines,
@@ -828,6 +1372,12 @@ mod program {
         // streams and nothing else. It never becomes the viewer.
         if worker_role() {
             return serve_stdio(&mut ImageRenderService::default()).exit_code();
+        }
+        if session_worker_role() {
+            // A worker handed no ring refuses every open, and the viewer says
+            // the movie could not be opened.
+            let ring = spawn_share().ok();
+            return serve_session_stdio(&mut MovieDecodeService::new(ring)).exit_code();
         }
         if tairix_rt::arg(1).is_some_and(|arg| matches!(arg, b"-h" | b"--help" | b"-?")) {
             return tairix_help::print_own_short_help(APP_NAME, None);
@@ -891,6 +1441,16 @@ mod program {
                 format_args!("decode answer wake refused ({err})"),
             );
         }
+        // Every movie's playback thread posts on this one wake, and the loop
+        // reads each movie window's board when it fires.
+        let posted = Arc::new(WorkerWake::create());
+        if let Err(err) = app::watch_wake(set, &posted, PLAYBACK_TOKEN) {
+            return app::fail(
+                APP_NAME,
+                app::EXIT_NO_EVENTS,
+                format_args!("playback wake refused ({err})"),
+            );
+        }
 
         // A refused declaration is an answer, not a death: the viewer's
         // windows are still reachable, though nothing reaches it with none open.
@@ -920,10 +1480,7 @@ mod program {
         // screen yet. A window with nothing to show withholds it, and the
         // window with it.
         for window in &mut windows {
-            if window
-                .present(&mut client, Repaint::Whole, &damage::sink(), theme, scale)
-                .is_err()
-            {
+            if window.present(&mut client, theme, scale).is_err() {
                 return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "first present refused");
             }
         }
@@ -935,31 +1492,22 @@ mod program {
             mailbox: EventMailbox::new(event_endpoint, server),
             set,
             worker: &worker,
+            playback: &posted,
             desktop_moved: &desktop_moved,
             deadline_ns: &deadline,
         });
 
+        // The event the last park ended on, served first in the next drain.
+        let mut woken = None;
         loop {
-            let mut reported = damage::sink();
-
-            // The theme and density every window draws from moved: each is
-            // redrawn in the new state. A refused state is stated and the
-            // last good one stands.
+            // The theme and density every window draws from moved: each owes
+            // its whole frame in the new state. A refused state is stated and
+            // the last good one stands.
             if desktop_moved.replace(false) {
                 match app::adopt_desktop(&mut desktop, &mut themes) {
                     Ok(true) => {
-                        let (theme, scale) = (themes.active(), desktop.scale());
                         for window in &mut windows {
-                            if window
-                                .present(&mut client, Repaint::Whole, &reported, theme, scale)
-                                .is_err()
-                            {
-                                return app::fail(
-                                    APP_NAME,
-                                    app::EXIT_CHANNEL_LOST,
-                                    "present refused",
-                                );
-                            }
+                            window.owed.owe_whole();
                         }
                     }
                     Ok(false) => {}
@@ -972,131 +1520,34 @@ mod program {
 
             // An answer the worker landed first, so a picture appears the
             // moment it is ready rather than at whatever later input arrives.
-            // One that names a window this viewer has closed is dropped: the
-            // window it described is gone.
             if let Some(reply) = worker.collect() {
                 desk.outstanding = false;
-                if let Reply::Window { window, answer } = reply {
-                    if let Some(index) = index_of(&windows, window) {
-                        // A document that has just opened is the one moment
-                        // the window sizes itself to the picture; a render, a
-                        // zoom, or a resize never does, so it cannot fight
-                        // the user's own drag.
-                        let just_opened = matches!(&answer, Answer::Opened { opened: Ok(_), .. });
-                        let refused_open = matches!(&answer, Answer::Opened { opened: Err(_), .. });
-                        let layout = windows[index].layout(theme, scale);
-                        let changed = windows[index]
-                            .view
-                            .deliver(answer, &layout, &mut reported)
-                            .changed;
-                        // An open that was waited for and refused leaves the
-                        // window nothing to show; one abandoned since changes
-                        // nothing.
-                        let refusal = windows[index].view.refusal().copied();
-                        if let Some(refusal) = refusal.filter(|_| refused_open && changed) {
-                            not_opened(
-                                &mut App {
-                                    windows: &mut windows,
-                                    client: &mut client,
-                                    desk: &mut desk,
-                                    event_endpoint,
-                                    server,
-                                    desktop: &desktop,
-                                },
-                                index,
-                                &refusal,
-                            );
-                            continue;
-                        }
-                        retitle(&mut windows[index], &mut client);
-                        let resized = just_opened
-                            && hug_picture(
-                                &mut windows[index],
-                                &mut client,
-                                &desktop,
-                                theme,
-                                scale,
-                            );
-                        let repaint = if resized {
-                            Repaint::Whole
-                        } else {
-                            Repaint::Reported
-                        };
-                        if (changed || resized)
-                            && windows[index]
-                                .present(&mut client, repaint, &reported, theme, scale)
-                                .is_err()
-                        {
-                            return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
-                        }
+                let mut app = App {
+                    windows: &mut windows,
+                    client: &mut client,
+                    desk: &mut desk,
+                    event_endpoint,
+                    server,
+                    desktop: &desktop,
+                };
+                match reply {
+                    Reply::Window { window, answer } => {
+                        adopt_answer(&mut app, (window, answer), (theme, scale));
                     }
+                    Reply::Movie {
+                        window,
+                        open_id,
+                        source,
+                        length,
+                    } => {
+                        let movie = (open_id, source, length);
+                        start_playback(&mut app, window, movie, (&posted, (theme, scale)));
+                    }
+                    Reply::Forgotten => {}
                 }
-                continue;
             }
-
-            // Then queued input, drained before anything is painted so a
-            // burst of pointer motion costs one frame rather than one each;
-            // and with nothing queued, whatever the park wakes on. Both reach
-            // the one routing below: a park *consumes* the event it woke on,
-            // so nothing else would ever see it again.
-            let delivered = match events.try_wait(&mut client) {
-                Ok(None) => {
-                    // Nothing queued: submit whatever any window now calls
-                    // for. The answer is collected on the next turn either
-                    // way — a deferred job wakes the park, and one carried
-                    // out inline for want of a worker thread is already on
-                    // the desk — so what `submit` reports about where it ran
-                    // changes nothing here.
-                    if submit_next(&mut windows, &worker, &mut desk, theme, scale) {
-                        continue;
-                    }
-
-                    // Nothing to submit: arm the animation deadline — one
-                    // shot, to the next frame any window actually asks for —
-                    // and park. With nothing animating, nothing is armed.
-                    let now = tairix_rt::clock_get();
-                    deadline.set(next_deadline(&mut windows, now, theme, scale));
-                    let woken = events.wait(&mut client);
-                    // A frame may be due whether the park ended on the
-                    // deadline or on an event; the render it calls for is
-                    // asked for on the next turn.
-                    let now = tairix_rt::clock_get();
-                    for window in &mut windows {
-                        // Each window's own sink: one window's rectangles are
-                        // no description of another's surface.
-                        let mut owed = damage::sink();
-                        let layout = window.layout(theme, scale);
-                        if window.view.tick(now, &layout, scale, theme, &mut owed) {
-                            // A held control's step, or an animation frame,
-                            // moved pixels the park was woken for.
-                            let _ =
-                                window.present(&mut client, Repaint::Reported, &owed, theme, scale);
-                        }
-                    }
-                    woken
-                }
-                other => other,
-            };
-
-            let event = match delivered {
-                Ok(Some(event)) => event,
-                // A park the worker's answer interrupted carries no event;
-                // the collect at the top of the next turn adopts what it
-                // woke for.
-                Ok(None) => continue,
-                Err(EventError::Mailbox(_)) => {
-                    return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "the event channel died")
-                }
-                Err(EventError::Undecodable(_)) => {
-                    app::report(APP_NAME, "a malformed window event was refused");
-                    continue;
-                }
-                Err(EventError::Refused(refused)) => {
-                    app::report(APP_NAME, refused);
-                    continue;
-                }
-            };
-            match route(
+            // What the movies' playbacks posted, for the same reason.
+            collect_playbacks(
                 &mut App {
                     windows: &mut windows,
                     client: &mut client,
@@ -1105,16 +1556,100 @@ mod program {
                     server,
                     desktop: &desktop,
                 },
-                &event,
-                theme,
-                scale,
-                &mut reported,
-            ) {
-                Routed::Quit => return 0,
-                Routed::Lost => {
-                    return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused")
+                (theme, scale),
+            );
+
+            // Then every event queued, the one the last park ended on first,
+            // each only recording what it changed: a burst of pointer motion
+            // costs one frame rather than one each.
+            let mut drained = false;
+            for _ in 0..EVENT_MAILBOX_CAPACITY {
+                let delivered = match woken.take() {
+                    Some(event) => Ok(Some(event)),
+                    None => events.try_wait(&mut client),
+                };
+                let event = match delivered {
+                    Ok(Some(event)) => event,
+                    Ok(None) => {
+                        drained = true;
+                        break;
+                    }
+                    Err(err) => {
+                        if let Some(code) = refused_delivery(err) {
+                            return code;
+                        }
+                        continue;
+                    }
+                };
+                let routed = route(
+                    &mut App {
+                        windows: &mut windows,
+                        client: &mut client,
+                        desk: &mut desk,
+                        event_endpoint,
+                        server,
+                        desktop: &desktop,
+                    },
+                    &event,
+                    theme,
+                    scale,
+                );
+                if matches!(routed, Routed::Quit) {
+                    return 0;
                 }
-                Routed::Served => {}
+            }
+
+            // Each window tells its playback what the turn asked of it, and
+            // presents what the turn owes it, once.
+            for window in &mut windows {
+                window.tell(theme, scale);
+                if window.present(&mut client, theme, scale).is_err() {
+                    return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
+                }
+            }
+            // A drain cut short goes on without parking.
+            if !drained {
+                continue;
+            }
+            // Nothing queued: submit whatever any window now calls for. The
+            // answer is collected on the next turn either way — a deferred job
+            // wakes the park, and one carried out inline for want of a worker
+            // thread is already on the desk — so what `submit` reports about
+            // where it ran changes nothing here.
+            if submit_next(&mut windows, &worker, &mut desk, theme, scale) {
+                continue;
+            }
+
+            // Nothing to submit: arm the animation deadline — one shot, to the
+            // next frame any window actually asks for — and park. With nothing
+            // animating, nothing is armed.
+            let now = tairix_rt::clock_get();
+            deadline.set(next_deadline(&mut windows, now, theme, scale));
+            let parked = events.wait(&mut client);
+            // A frame may be due whether the park ended on the deadline or on
+            // an event; what it moved is presented with the next turn.
+            let now = tairix_rt::clock_get();
+            for window in &mut windows {
+                // Each window's own sink: one window's rectangles are no
+                // description of another's surface.
+                let mut owed = damage::sink();
+                let layout = window.layout(theme, scale);
+                if window.view.tick(now, &layout, scale, theme, &mut owed) {
+                    window.owe(Repaint::Reported, &owed);
+                }
+            }
+            match parked {
+                // Served first in the next turn's drain: a park consumes the
+                // event it woke on, so nothing else would ever see it again.
+                Ok(Some(event)) => woken = Some(event),
+                // A park the worker's answer interrupted carries no event; the
+                // collect at the top of the next turn adopts what it woke for.
+                Ok(None) => {}
+                Err(err) => {
+                    if let Some(code) = refused_delivery(err) {
+                        return code;
+                    }
+                }
             }
         }
     }
@@ -1241,8 +1776,6 @@ mod program {
         Served,
         /// *Quit* was chosen: close every window and end.
         Quit,
-        /// A present was refused: the channel is gone.
-        Lost,
     }
 
     /// What routing one event decided for the window it named.
@@ -1255,17 +1788,12 @@ mod program {
         Idle,
     }
 
-    /// Route one delivered window event.
+    /// Route one delivered window event, folding what it changed into what
+    /// the window it names owes.
     ///
     /// An event naming a window this viewer no longer has is dropped: the
     /// window it addressed is gone, and there is nothing left to apply it to.
-    fn route(
-        app: &mut App<'_>,
-        event: &WindowEvent,
-        theme: &Theme,
-        scale: Scale,
-        reported: &mut Region,
-    ) -> Routed {
+    fn route(app: &mut App<'_>, event: &WindowEvent, theme: &Theme, scale: Scale) -> Routed {
         // The application-scoped events first: they name no window, and two of
         // them are the whole of a resident viewer's own lifecycle.
         match event {
@@ -1296,15 +1824,11 @@ mod program {
         let Some(index) = index_of(app.windows, id) else {
             return Routed::Served;
         };
-        match act(app, index, event, theme, scale, reported) {
-            Acted::Changed(repaint) => {
-                if app.windows[index]
-                    .present(app.client, repaint, reported, theme, scale)
-                    .is_err()
-                {
-                    return Routed::Lost;
-                }
-            }
+        // The event's own sink: one window's rectangles are no description of
+        // another's surface.
+        let mut reported = damage::sink();
+        match act(app, index, event, theme, scale, &mut reported) {
+            Acted::Changed(repaint) => app.windows[index].owe(repaint, &reported),
             Acted::Close => {
                 // The viewer is not its windows: it keeps its icon-bar slot
                 // with none open, and a click there opens the next. Only
@@ -1600,7 +2124,7 @@ mod program {
     /// until there is something to show, so the window appears with the
     /// document in it rather than sitting blank behind the chooser.
     fn open_and_pick(app: &mut App<'_>, theme: &Theme, scale: Scale) {
-        let Some(mut opened) = open_window(
+        let Some(opened) = open_window(
             app.client,
             app.event_endpoint,
             app.server,
@@ -1615,7 +2139,6 @@ mod program {
             opened.close(app.client);
             return;
         }
-        let _ = opened.present(app.client, Repaint::Whole, &damage::sink(), theme, scale);
         app.windows.push(opened);
     }
 
@@ -1682,7 +2205,7 @@ mod program {
     /// Open a window at `source`, withheld from the screen until its document
     /// is in.
     fn open_document(app: &mut App<'_>, source: Source, theme: &Theme, scale: Scale) {
-        let Some(mut opened) = open_window(
+        let Some(opened) = open_window(
             app.client,
             app.event_endpoint,
             app.server,
@@ -1693,7 +2216,6 @@ mod program {
         ) else {
             return;
         };
-        let _ = opened.present(app.client, Repaint::Whole, &damage::sink(), theme, scale);
         app.windows.push(opened);
     }
 

@@ -1,11 +1,12 @@
 //! Unit tests for the terminal's colour schemes.
 
+use tairix_colour::legibility::contrast_hundredths;
 use tairix_colour::Rgb;
 use tairix_raster::Color;
-use tairix_theme::Theme;
+use tairix_theme::Palette;
 use tairix_vt::{Attributes, BasicColor, Color as VtColor};
 
-use super::{ColorScheme, Painted, Scheme, ANSI_COLORS};
+use super::{ColorScheme, Painted, Scheme, ANSI_COLORS, XTERM_ANSI};
 
 // --- Scheme::from_name / name / label -------------------------------------
 
@@ -40,70 +41,68 @@ fn every_scheme_label_is_non_empty_and_distinct() {
 // --- Scheme::palette -------------------------------------------------------
 
 #[test]
-fn system_and_custom_have_no_fixed_palette() {
-    assert_eq!(Scheme::System.palette(), None);
-    assert_eq!(Scheme::Custom.palette(), None);
-}
-
-#[test]
-fn every_other_scheme_has_a_fixed_palette() {
-    // Every variant but `System` and `Custom` carries a palette of its own.
+fn only_the_users_own_scheme_has_no_fixed_palette() {
     for scheme in Scheme::ALL {
-        if matches!(scheme, Scheme::System | Scheme::Custom) {
-            continue;
-        }
-        assert!(
-            scheme.palette().is_some(),
-            "{scheme:?} should carry a palette"
+        assert_eq!(
+            scheme.palette().is_none(),
+            scheme == Scheme::Custom,
+            "{scheme:?}"
         );
     }
+}
+
+/// The defect: the list of fixed palettes left Paper out, so a test walking
+/// it never looked at Paper's colours.
+#[test]
+fn the_builtins_are_exactly_the_schemes_with_a_fixed_palette() {
+    for scheme in Scheme::ALL {
+        assert_eq!(
+            Scheme::BUILTINS.contains(&scheme),
+            scheme.palette().is_some(),
+            "{scheme:?}"
+        );
+    }
+}
+
+/// System is the dark theme's own page, text, and accent over the xterm
+/// colours, whatever appearance the desktop is in: no theme is consulted.
+#[test]
+fn the_system_scheme_is_the_dark_themes_page_text_and_accent() {
+    let system = Scheme::System.palette().expect("a fixed palette");
+    let dark = Palette::DARK;
+    // The grid is a page, so its ground is the document role and not the
+    // window surface around it.
+    assert_eq!(system.background, dark.document.without_alpha());
+    assert_ne!(system.background, dark.surface.without_alpha());
+    assert_eq!(system.foreground, dark.on_surface.without_alpha());
+    assert_eq!(system.cursor, dark.accent.without_alpha());
+    assert_eq!(system.cursor_text, dark.on_accent.without_alpha());
+    assert_eq!(system.ansi, XTERM_ANSI);
 }
 
 // --- Painted::resolve -------------------------------------------------------
 
-#[test]
-fn resolve_system_takes_the_theme_page_and_accent_colors() {
-    // The grid is a page, so its ground is the theme's document role and not
-    // the window surface around it — which is what keeps the full-screen
-    // editors that draw on it writing on paper under a light theme.
-    for theme in [Theme::dark(), Theme::light()] {
-        let custom = ColorScheme::from_theme(&Theme::light());
-        let painted = Painted::resolve(Scheme::System, &custom, &theme, 255);
-        let palette = theme.palette();
-        assert_eq!(painted.scheme.background, palette.document.without_alpha());
-        assert_ne!(painted.scheme.background, palette.surface.without_alpha());
-        assert_eq!(
-            painted.scheme.foreground,
-            palette.on_surface.without_alpha()
-        );
-        assert_eq!(painted.scheme.cursor, palette.accent.without_alpha());
-        assert_eq!(
-            painted.scheme.cursor_text,
-            palette.on_accent.without_alpha()
-        );
-    }
-}
-
-#[test]
-fn resolve_custom_takes_the_passed_in_custom_scheme() {
-    let theme = Theme::dark();
-    let custom = ColorScheme {
+/// A custom scheme sharing no colour with any built-in.
+fn custom() -> ColorScheme {
+    ColorScheme {
         background: Rgb::new(1, 2, 3),
         foreground: Rgb::new(4, 5, 6),
         cursor: Rgb::new(7, 8, 9),
         cursor_text: Rgb::new(10, 11, 12),
         ansi: [Rgb::new(1, 1, 1); ANSI_COLORS],
-    };
-    let painted = Painted::resolve(Scheme::Custom, &custom, &theme, 255);
-    assert_eq!(painted.scheme, custom);
+    }
+}
+
+#[test]
+fn resolve_custom_takes_the_passed_in_custom_scheme() {
+    let painted = Painted::resolve(Scheme::Custom, &custom(), 255);
+    assert_eq!(painted.scheme, custom());
 }
 
 #[test]
 fn resolve_builtin_takes_its_own_fixed_palette() {
-    let theme = Theme::dark();
-    let custom = ColorScheme::from_theme(&Theme::light());
     for scheme in Scheme::BUILTINS {
-        let painted = Painted::resolve(scheme, &custom, &theme, 255);
+        let painted = Painted::resolve(scheme, &custom(), 255);
         assert_eq!(
             painted.scheme,
             scheme.palette().expect("builtin has a palette")
@@ -273,15 +272,16 @@ fn reverse_swaps_the_pair_and_forces_both_opaque() {
 
 // --- Legibility ------------------------------------------------------------
 
+/// Every fixed palette draws its text at WCAG 2.1's 4.5:1 or better against
+/// its own ground.
 #[test]
-fn every_builtin_scheme_has_visibly_distinct_foreground_and_background() {
-    for scheme in Scheme::BUILTINS.into_iter().chain([Scheme::Paper]) {
+fn every_fixed_palette_draws_legible_text_on_its_own_ground() {
+    for scheme in Scheme::BUILTINS {
         let palette = scheme.palette().expect("builtin has a palette");
-        let fg_luma = i32::from(Color::from(palette.foreground).luma());
-        let bg_luma = i32::from(Color::from(palette.background).luma());
+        let contrast = contrast_hundredths(palette.foreground, palette.background);
         assert!(
-            (fg_luma - bg_luma).abs() > 60,
-            "{scheme:?} text is too close in luminance to its background"
+            contrast >= 450,
+            "{scheme:?} text is {contrast} hundredths against its ground"
         );
     }
 }

@@ -1,19 +1,15 @@
 use alloc::boxed::Box;
-use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::RefCell;
 
 use tairix_abi::driver::audio::{ChannelMap, SampleFormat};
 use tairix_abi::Errno;
 use tairix_hash::HashSeed;
 use tairix_log::DiscardSink;
 use tairix_sandbox::audiodecode::{session_bounds, AudioDecodeService};
-use tairix_sandbox::loopback::{LoopbackSession, LoopbackSessionLauncher};
-use tairix_sandbox::session::{
-    FrameOut, SessionDescriptors, SessionService, SessionStep, SessionTransport,
-};
-use tairix_sandbox::supervise::{SessionLauncher, SupervisedSession};
+use tairix_sandbox::loopback::{LoopbackSessionLauncher, PipeSessionLauncher, PIPE_ROOM};
+use tairix_sandbox::session::{FrameOut, SessionService, SessionStep};
+use tairix_sandbox::supervise::SupervisedSession;
 use tairix_sound::SoundFormat;
 use tairix_soundtheme::{MAX_CUE_SAMPLES, MAX_CUE_SECONDS};
 
@@ -77,75 +73,6 @@ fn run<F: FnMut() -> Worker>(decoder: &mut TestDecoder<F>, now: u64) -> Option<(
     None
 }
 
-/// A pipe's room in one write: less than a supply of the decoder's largest
-/// read and its header, as on a machine.
-const PIPE_ROOM: usize = tairix_sound::MAX_READ;
-
-/// What the worker's pipes hold, read by the test as a wait-set would.
-#[derive(Default)]
-struct PipeState {
-    /// Answer bytes the owner has not read.
-    unread: usize,
-    /// Reads of an empty pipe, each of which parks its caller on a machine.
-    parked: usize,
-}
-
-/// The real worker behind a model of the kernel's pipe pair: a write takes at
-/// most [`PIPE_ROOM`], and a read of an empty pipe is counted rather than
-/// answered.
-struct ModelPipe {
-    worker: LoopbackSession<Worker>,
-    answers: Vec<u8>,
-    state: Rc<RefCell<PipeState>>,
-}
-
-impl SessionTransport for ModelPipe {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
-        if self.answers.is_empty() {
-            self.state.borrow_mut().parked += 1;
-            return Err(Errno::WouldBlock);
-        }
-        let take = buf.len().min(self.answers.len());
-        buf[..take].copy_from_slice(&self.answers[..take]);
-        self.answers.drain(..take);
-        self.state.borrow_mut().unread = self.answers.len();
-        Ok(take)
-    }
-
-    fn write(&mut self, buf: &[u8]) -> Result<usize, Errno> {
-        let taken = buf.len().min(PIPE_ROOM);
-        self.worker.write(&buf[..taken])?;
-        let mut chunk = [0u8; 4096];
-        while let Ok(read @ 1..) = self.worker.read(&mut chunk) {
-            self.answers.extend_from_slice(&chunk[..read]);
-        }
-        self.state.borrow_mut().unread = self.answers.len();
-        Ok(taken)
-    }
-
-    fn descriptors(&self) -> Option<SessionDescriptors> {
-        None
-    }
-
-    fn dispose(self) -> Option<i32> {
-        None
-    }
-}
-
-struct ModelLauncher(Rc<RefCell<PipeState>>);
-
-impl SessionLauncher for ModelLauncher {
-    type Transport = ModelPipe;
-
-    fn launch(&mut self) -> Result<ModelPipe, Errno> {
-        Ok(ModelPipe {
-            worker: LoopbackSession::new(real()),
-            answers: Vec::new(),
-            state: Rc::clone(&self.0),
-        })
-    }
-}
-
 /// Stereo white noise, which FLAC cannot shrink.
 fn noise(frames: usize) -> Vec<i32> {
     let mut state = 0x2545_F491_u32;
@@ -168,9 +95,10 @@ fn a_sound_larger_than_the_pipe_is_never_read_ahead_of_its_answer() {
     let samples = noise(48_000);
     let bytes = flac(&samples);
     assert!(bytes.len() > 2 * PIPE_ROOM, "{} bytes", bytes.len());
-    let state = Rc::new(RefCell::new(PipeState::default()));
+    let launcher = PipeSessionLauncher::new(real);
+    let pipes = launcher.gauge();
     let bounds = session_bounds().expect("bounds");
-    let session = SupervisedSession::new(ModelLauncher(Rc::clone(&state)), bounds, DiscardSink);
+    let session = SupervisedSession::new(launcher, bounds, DiscardSink);
     let mut decoder = Decoder::new(session, || Some(SEED));
     decoder
         .begin(0, 5, bytes, Some(SoundFormat::Flac))
@@ -182,14 +110,13 @@ fn a_sound_larger_than_the_pipe_is_never_read_ahead_of_its_answer() {
             break;
         }
         let (_, read, write) = decoder.members();
-        let readable = read && state.borrow().unread > 0;
-        decoder.on_ready(1, readable, write);
+        decoder.on_ready(1, read && pipes.readable(), write);
     }
     let Some((5, Decoded::Pcm(pcm))) = done else {
         panic!("the sound decodes: {done:?}");
     };
     assert_eq!(pcm.bytes, le_bytes(&samples));
-    assert_eq!(state.borrow().parked, 0, "no read of an empty pipe");
+    assert_eq!(pipes.parked(), 0, "no read of an empty pipe");
 }
 
 #[test]

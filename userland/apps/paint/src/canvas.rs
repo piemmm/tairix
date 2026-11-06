@@ -221,8 +221,13 @@ impl Tile {
         Ok(Self { samples, mask })
     }
 
-    /// A copy the allocator may refuse.
-    fn copy(&self) -> Result<Self, OutOfMemory> {
+    /// A copy the allocator may refuse: what a tile is written as where its
+    /// pixels are shared.
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfMemory`] when the copy is refused.
+    pub fn copy(&self) -> Result<Self, OutOfMemory> {
         let mut samples = Vec::new();
         let mut mask = Vec::new();
         if !fallible::reserve(&mut samples, self.samples.len())

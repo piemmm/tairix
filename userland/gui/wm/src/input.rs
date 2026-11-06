@@ -127,7 +127,7 @@ pub enum InputResponse {
     DesktopSecondaryPressed,
     /// Pointer motion resolved to the desktop background — no window lies
     /// under it and no grab is in flight — so the desktop layer's owner
-    /// interprets it (hover feedback, a drag it started itself). The
+    /// interprets it (a drag a press of its own started). The
     /// position is the router's own [`pointer`](InputRouter::pointer), which
     /// this motion has already updated.
     DesktopPointerMoved,

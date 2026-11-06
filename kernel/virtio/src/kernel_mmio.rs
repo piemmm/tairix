@@ -110,6 +110,7 @@ fn map_gate_error(e: MmioGateError) -> MmioMapError {
     match e {
         MmioGateError::CapabilityMissing => MmioMapError::CapabilityMissing,
         MmioGateError::Map(MmioError::InvalidRegion) => MmioMapError::InvalidRegion,
+        MmioGateError::Map(MmioError::OutOfMemory) => MmioMapError::OutOfMemory,
         // Every other mapper failure (no virtual space, page-table
         // error, guard violation, bad config) is reported as
         // `Unsupported`: the bus driver has no recovery action beyond
@@ -174,7 +175,7 @@ mod tests {
         for c in caps {
             set.insert(*c);
         }
-        TaskCapabilities::derive(ProcessId(7), UserId(1000), set, set, sink)
+        TaskCapabilities::derive(ProcessId(7), UserId(1000), set, set, sink).expect("derived")
     }
 
     #[test]
@@ -266,6 +267,10 @@ mod tests {
         assert_eq!(
             map_gate_error(MmioGateError::Map(MmioError::NoVirtualSpace)),
             MmioMapError::Unsupported
+        );
+        assert_eq!(
+            map_gate_error(MmioGateError::Map(MmioError::OutOfMemory)),
+            MmioMapError::OutOfMemory
         );
     }
 }

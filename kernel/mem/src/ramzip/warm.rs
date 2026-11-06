@@ -16,7 +16,7 @@
 //! stops churning is forgiven deterministically; there is no timer, no
 //! background work, and no retry loop.
 
-use alloc::collections::BTreeMap;
+use tairix_collections::{OrderedMap, TryReserveError};
 
 /// A restore counts toward thrash when the entry it restores was
 /// sealed fewer than this many events earlier.
@@ -33,7 +33,7 @@ const DECAY_INTERVAL_EVENTS: u64 = 256;
 /// The per-task thrash detector.
 #[derive(Debug, Default)]
 pub(crate) struct ThrashDetector {
-    scores: BTreeMap<u64, u32>,
+    scores: OrderedMap<u64, u32>,
     last_decay: u64,
 }
 
@@ -44,18 +44,28 @@ impl ThrashDetector {
     }
 
     /// Record a restore of an entry sealed at event `sealed_at`,
-    /// observed at event `now`. Returns `true` when this restore
+    /// observed at event `now`. Answers `true` when this restore
     /// *newly* pushed the task over the thrash threshold (so the
     /// caller can count one detection, not one per churned page).
-    pub(crate) fn on_restore(&mut self, task: u64, sealed_at: u64, now: u64) -> bool {
+    ///
+    /// # Errors
+    ///
+    /// [`TryReserveError`] when the task's score cannot be recorded; the
+    /// restore is not counted.
+    pub(crate) fn on_restore(
+        &mut self,
+        task: u64,
+        sealed_at: u64,
+        now: u64,
+    ) -> Result<bool, TryReserveError> {
         self.decay(now);
         if now.saturating_sub(sealed_at) >= RECENT_CYCLE_EVENTS {
-            return false;
+            return Ok(false);
         }
-        let score = self.scores.entry(task).or_insert(0);
-        let was_thrashing = *score >= THRASH_SCORE_LIMIT;
-        *score = score.saturating_add(1);
-        !was_thrashing && *score >= THRASH_SCORE_LIMIT
+        let held = self.scores.get(&task).copied().unwrap_or(0);
+        let score = held.saturating_add(1);
+        self.scores.try_insert(task, score)?;
+        Ok(held < THRASH_SCORE_LIMIT && score >= THRASH_SCORE_LIMIT)
     }
 
     /// Whether `task` is currently marked thrashing at event `now`.
@@ -104,7 +114,7 @@ mod tests {
         for i in 0..THRASH_SCORE_LIMIT + 3 {
             let now = u64::from(i) + 1;
             // Every restore hits an entry sealed one event earlier.
-            if detector.on_restore(7, now - 1, now) {
+            if detector.on_restore(7, now - 1, now) == Ok(true) {
                 detections += 1;
             }
         }
@@ -117,7 +127,10 @@ mod tests {
         let mut detector = ThrashDetector::new();
         for i in 0..100u64 {
             let now = RECENT_CYCLE_EVENTS * (i + 2);
-            assert!(!detector.on_restore(7, now - RECENT_CYCLE_EVENTS, now));
+            assert_eq!(
+                detector.on_restore(7, now - RECENT_CYCLE_EVENTS, now),
+                Ok(false)
+            );
         }
         assert!(!detector.is_thrashing(7, RECENT_CYCLE_EVENTS * 200));
     }
@@ -126,7 +139,7 @@ mod tests {
     fn scores_decay_and_the_task_is_forgiven() {
         let mut detector = ThrashDetector::new();
         for i in 0..u64::from(THRASH_SCORE_LIMIT) {
-            detector.on_restore(7, i, i + 1);
+            detector.on_restore(7, i, i + 1).unwrap();
         }
         assert!(detector.is_thrashing(7, u64::from(THRASH_SCORE_LIMIT)));
         // After enough quiet windows the halvings clear the score.
@@ -140,7 +153,7 @@ mod tests {
     fn tasks_are_scored_independently() {
         let mut detector = ThrashDetector::new();
         for i in 0..u64::from(THRASH_SCORE_LIMIT) {
-            detector.on_restore(1, i, i + 1);
+            detector.on_restore(1, i, i + 1).unwrap();
         }
         assert!(detector.is_thrashing(1, u64::from(THRASH_SCORE_LIMIT)));
         assert!(!detector.is_thrashing(2, u64::from(THRASH_SCORE_LIMIT)));
@@ -162,8 +175,19 @@ mod tests {
     #[test]
     fn a_huge_clock_jump_cannot_overflow_the_decay() {
         let mut detector = ThrashDetector::new();
-        detector.on_restore(1, 0, 1);
+        detector.on_restore(1, 0, 1).unwrap();
         assert!(!detector.is_thrashing(1, u64::MAX));
         assert!(detector.scores.is_empty());
+    }
+
+    #[test]
+    fn a_restore_with_no_memory_to_score_it_goes_uncounted() {
+        let mut detector = ThrashDetector::new();
+        let refused = tairix_fuzzseed::meter::refusing_above(0, || detector.on_restore(7, 0, 1));
+        assert!(refused.is_err());
+        assert!(detector.scores.is_empty());
+        assert!(!detector.is_thrashing(7, 1));
+        assert_eq!(detector.on_restore(7, 0, 1), Ok(false));
+        assert_eq!(detector.scores.get(&7), Some(&1));
     }
 }

@@ -16,8 +16,10 @@
 //! insertion that follows it unable to fail, so a holder changing several
 //! trees at once can make every allocation before changing any.
 
-use alloc::vec::Vec;
+use core::mem::MaybeUninit;
+use core::ptr;
 
+use crate::arena::{reserve_both, Arena, Linked, NIL};
 use crate::TryReserveError;
 
 /// Key bits a level resolves.
@@ -26,10 +28,6 @@ const FANOUT: usize = 1 << BITS;
 const SLOT: u64 = FANOUT as u64 - 1;
 /// The height that holds every `u64` key.
 const MAX_HEIGHT: usize = u64::BITS.div_ceil(BITS) as usize;
-const NIL: u32 = u32::MAX;
-/// A freed node's link past the last of its chain: a live node's link is
-/// [`NIL`], so a freed one is told from it.
-const FREE_END: u32 = NIL - 1;
 
 struct Inner<const TAGS: usize> {
     children: [u32; FANOUT],
@@ -48,12 +46,6 @@ struct Leaf<V, const TAGS: usize> {
     next_free: u32,
 }
 
-/// A node an arena chains through its link while it is freed.
-trait Linked {
-    fn link(&self) -> u32;
-    fn set_link(&mut self, link: u32);
-}
-
 impl<const TAGS: usize> Linked for Inner<TAGS> {
     fn link(&self) -> u32 {
         self.next_free
@@ -61,6 +53,15 @@ impl<const TAGS: usize> Linked for Inner<TAGS> {
 
     fn set_link(&mut self, link: u32) {
         self.next_free = link;
+    }
+
+    fn write_empty(slot: &mut MaybeUninit<Self>) {
+        slot.write(Self {
+            children: [NIL; FANOUT],
+            present: 0,
+            tags: [0; TAGS],
+            next_free: NIL,
+        });
     }
 }
 
@@ -72,131 +73,22 @@ impl<V, const TAGS: usize> Linked for Leaf<V, TAGS> {
     fn set_link(&mut self, link: u32) {
         self.next_free = link;
     }
-}
 
-impl<const TAGS: usize> Inner<TAGS> {
-    const fn empty() -> Self {
-        Self {
-            children: [NIL; FANOUT],
-            present: 0,
-            tags: [0; TAGS],
-            next_free: NIL,
+    fn write_empty(slot: &mut MaybeUninit<Self>) {
+        let node = slot.as_mut_ptr();
+        // SAFETY: every place lies within `slot`'s own aligned, writable
+        // storage and is written, never read or dropped: each value slot in
+        // turn, so the array is never built elsewhere, then the bitmaps and
+        // the link, so the node is whole once this returns.
+        unsafe {
+            let values = ptr::addr_of_mut!((*node).values).cast::<Option<V>>();
+            for at in 0..FANOUT {
+                values.add(at).write(None);
+            }
+            ptr::addr_of_mut!((*node).present).write(0);
+            ptr::addr_of_mut!((*node).tags).write([0; TAGS]);
+            ptr::addr_of_mut!((*node).next_free).write(NIL);
         }
-    }
-}
-
-impl<V, const TAGS: usize> Leaf<V, TAGS> {
-    fn empty() -> Self {
-        Self {
-            values: core::array::from_fn(|_| None),
-            present: 0,
-            tags: [0; TAGS],
-            next_free: NIL,
-        }
-    }
-}
-
-/// A node arena and the chain of its freed slots.
-struct Arena<N> {
-    nodes: Vec<N>,
-    free: u32,
-    free_count: usize,
-}
-
-impl<N: Linked> Arena<N> {
-    const fn new() -> Self {
-        Self {
-            nodes: Vec::new(),
-            free: NIL,
-            free_count: 0,
-        }
-    }
-
-    /// Make room for `count` more nodes, freed ones counting, every one
-    /// indexable by a `u32` below the links' sentinels.
-    fn reserve(&mut self, count: usize) -> Result<(), TryReserveError> {
-        let short = count.saturating_sub(self.free_count);
-        if self.nodes.len().saturating_add(short) > FREE_END as usize {
-            return Err(TryReserveError::CapacityOverflow);
-        }
-        if short > self.nodes.capacity() - self.nodes.len() {
-            self.nodes
-                .try_reserve(short)
-                .map_err(|_| TryReserveError::AllocFailed)?;
-        }
-        Ok(())
-    }
-
-    fn live(&self) -> usize {
-        self.nodes.len() - self.free_count
-    }
-
-    /// A node, freed first, else `empty` pushed into room reserved for it.
-    // A freed node is chained already empty, so taking one back resets
-    // nothing but its link.
-    fn take(&mut self, empty: impl FnOnce() -> N) -> u32 {
-        if self.free != NIL {
-            let index = self.free;
-            let node = &mut self.nodes[index as usize];
-            self.free = match node.link() {
-                FREE_END => NIL,
-                next => next,
-            };
-            node.set_link(NIL);
-            self.free_count -= 1;
-            return index;
-        }
-        self.nodes.push(empty());
-        u32::try_from(self.nodes.len() - 1).unwrap_or(NIL)
-    }
-
-    /// Chain the empty node at `index` into the free list.
-    fn free(&mut self, index: u32) {
-        let link = if self.free == NIL {
-            FREE_END
-        } else {
-            self.free
-        };
-        self.nodes[index as usize].set_link(link);
-        self.free = index;
-        self.free_count += 1;
-    }
-
-    /// Move the live node at `index`, where it lies at or past `live`, into
-    /// the first freed slot below it from `hole` on, answering where it now
-    /// is.
-    fn relocate(&mut self, index: u32, live: usize, hole: &mut usize) -> u32 {
-        if (index as usize) < live {
-            return index;
-        }
-        while self.nodes[*hole].link() == NIL {
-            *hole += 1;
-        }
-        self.nodes.swap(*hole, index as usize);
-        let moved = u32::try_from(*hole).unwrap_or(NIL);
-        *hole += 1;
-        moved
-    }
-
-    /// Drop the `live`-onward nodes [`Self::relocate`] left freed, and give
-    /// back the room they and any spare capacity took.
-    fn fit(&mut self, live: usize) -> Result<(), TryReserveError> {
-        self.nodes.truncate(live);
-        self.free = NIL;
-        self.free_count = 0;
-        if self.nodes.capacity() > live {
-            let mut fitted = Vec::new();
-            fitted
-                .try_reserve_exact(live)
-                .map_err(|_| TryReserveError::AllocFailed)?;
-            fitted.append(&mut self.nodes);
-            self.nodes = fitted;
-        }
-        Ok(())
-    }
-
-    fn bytes(&self) -> usize {
-        self.nodes.capacity() * core::mem::size_of::<N>()
     }
 }
 
@@ -300,9 +192,10 @@ impl<V, const TAGS: usize> RadixTree<V, TAGS> {
         if self.height == 0 || !self.holds(key) {
             return None;
         }
+        let inner = self.inner.nodes.view();
         let mut node = self.root;
         for level in (1..self.height).rev() {
-            node = self.inner.nodes[node as usize].children[slot(key, level)];
+            node = inner[node as usize].children[slot(key, level)];
             if node == NIL {
                 return None;
             }
@@ -352,9 +245,10 @@ impl<V, const TAGS: usize> RadixTree<V, TAGS> {
     /// The deepest node on `key`'s path and its level, in a non-empty tree
     /// tall enough to hold `key`.
     fn deepest(&self, key: u64) -> (u32, usize) {
+        let inner = self.inner.nodes.view();
         let mut node = self.root;
         for level in (1..self.height).rev() {
-            let child = self.inner.nodes[node as usize].children[slot(key, level)];
+            let child = inner[node as usize].children[slot(key, level)];
             if child == NIL {
                 return (node, level);
             }
@@ -369,11 +263,10 @@ impl<V, const TAGS: usize> RadixTree<V, TAGS> {
     /// # Errors
     ///
     /// [`TryReserveError`] when the nodes cannot be had; the tree is as it
-    /// was.
+    /// was, holding the room it had.
     pub fn try_reserve_key(&mut self, key: u64) -> Result<(), TryReserveError> {
-        let (inner, leaves) = self.missing(key);
-        self.inner.reserve(inner)?;
-        self.leaves.reserve(leaves)
+        let missing = self.missing(key);
+        reserve_both(&mut self.inner, &mut self.leaves, missing)
     }
 
     /// Put `value` at `key`, answering the value it replaces, whose tags the
@@ -382,7 +275,7 @@ impl<V, const TAGS: usize> RadixTree<V, TAGS> {
     /// # Errors
     ///
     /// [`TryReserveError`] when a node the key needs cannot be had; the tree
-    /// is as it was.
+    /// is as it was, holding the room it had.
     pub fn try_insert(&mut self, key: u64, value: V) -> Result<Option<V>, TryReserveError> {
         if self.height == 0 || !self.holds(key) {
             self.try_reserve_key(key)?;
@@ -390,18 +283,17 @@ impl<V, const TAGS: usize> RadixTree<V, TAGS> {
         }
         let (node, level) = self.deepest(key);
         if level > 0 {
-            self.inner.reserve(level - 1)?;
-            self.leaves.reserve(1)?;
+            reserve_both(&mut self.inner, &mut self.leaves, (level - 1, 1))?;
         }
         Ok(self.insert_below(node, level, key, value))
     }
 
     fn take_inner(&mut self) -> u32 {
-        self.inner.take(Inner::empty)
+        self.inner.take()
     }
 
     fn take_leaf(&mut self) -> u32 {
-        self.leaves.take(Leaf::empty)
+        self.leaves.take()
     }
 
     /// Chain an interior node that leads nowhere into the free list.
@@ -478,8 +370,11 @@ impl<V, const TAGS: usize> RadixTree<V, TAGS> {
                 depth += 1;
             }
         }
-        self.inner.fit(live.0)?;
-        self.leaves.fit(live.1)
+        // Both arenas were relocated, so each fits or chains its free nodes
+        // whatever the other did.
+        let inner = self.inner.fit(live.0);
+        let leaves = self.leaves.fit(live.1);
+        inner.and(leaves)
     }
 
     /// Insert where [`Self::try_reserve_key`] made room for `key`.

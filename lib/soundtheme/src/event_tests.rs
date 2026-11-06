@@ -35,6 +35,18 @@ fn the_bell_is_the_soft_notification() {
 }
 
 #[test]
+fn the_volumes_feedback_plays_its_own_asset() {
+    assert_eq!(
+        SoundAsset::of(SoundEvent::VolumeFeedback),
+        SoundAsset::Volume
+    );
+    assert_eq!(
+        SoundAsset::from_file_name("volume.flac"),
+        Some(SoundAsset::Volume)
+    );
+}
+
+#[test]
 fn a_file_no_event_plays_is_an_orphan() {
     for orphan in [
         "power_connected.flac",

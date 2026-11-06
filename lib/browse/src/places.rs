@@ -182,8 +182,15 @@ pub struct VolumeFacts {
     /// The identity a detach names it by, the reserved unpublished identity
     /// for one it cannot name.
     pub volume_id: [u8; VOLUME_ID_LEN],
+    /// The identity its content carries: its `volume_id` but for a twin's,
+    /// published under a key of its own. What a shortcut to it records.
+    pub identity: [u8; VOLUME_ID_LEN],
     /// Whether it is mounted read-only, so nothing can be made on it.
     pub read_only: bool,
+    /// Whether its format takes a title a retitle can set, as the mount table
+    /// says: never a disc's, an archive's or a share's, nor on a record
+    /// withheld from its reader.
+    pub titled: bool,
 }
 
 /// Who may eject a volume.
@@ -209,6 +216,84 @@ impl Ejector {
     }
 }
 
+/// Who may retitle a volume, as the kernel decides it under the volume's
+/// claim.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Retitler {
+    /// The principal a disk image was attached for, and no one else.
+    Owner(u32),
+    /// The user at the machine where they may write its root, and an
+    /// administrator: a removable device's volume.
+    AtTheSeat,
+    /// An administrator: a fixed device's volume.
+    Administrator,
+}
+
+impl Retitler {
+    /// Whether the principal `uid` may ask for the retitle: a disk image's
+    /// owner, or anyone for a device's volume, whom the kernel refuses only
+    /// for want of an authority an administrator holds.
+    #[must_use]
+    pub const fn admits(self, uid: u32) -> bool {
+        match self {
+            Self::Owner(owner) => owner == uid,
+            Self::AtTheSeat | Self::Administrator => true,
+        }
+    }
+
+    /// Whether a retitle the kernel refuses for want of the authority is an
+    /// administrator's to make in its place: a device's volume's, never a
+    /// disk image's.
+    #[must_use]
+    pub const fn administered(self) -> bool {
+        !matches!(self, Self::Owner(_))
+    }
+}
+
+/// How a principal may retitle a volume, as [`VolumeFacts::retitling_by`]
+/// answers it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Retitling {
+    /// They may ask the kernel, which decides under the volume's claim.
+    Allowed(Retitler),
+    /// It is theirs to retitle, but not as it is mounted now: why.
+    Unavailable(&'static str),
+    /// It is not theirs to retitle, or no one's: why.
+    Refused(&'static str),
+}
+
+impl Retitling {
+    /// Why the volume may not be retitled now, or `None` where it may.
+    #[must_use]
+    pub const fn refusal(self) -> Option<&'static str> {
+        match self {
+            Self::Allowed(_) => None,
+            Self::Unavailable(why) | Self::Refused(why) => Some(why),
+        }
+    }
+}
+
+/// Why a network share is not retitled here.
+pub const REASON_SHARE_TITLE: &str = "a network share's title is its server's";
+
+/// Why a volume published under no identity is not retitled.
+pub const REASON_UNNAMED_VOLUME: &str = "the system cannot name it";
+
+/// Why another principal's disk image is not retitled.
+pub const REASON_NOT_YOURS: &str = "only whoever mounted it titles it";
+
+/// Why a viewer the kernel would not name retitles nothing.
+pub const REASON_UNKNOWN_VIEWER: &str = "the system could not say who you are";
+
+/// Why a volume whose format fixes its title, or keeps none, is not retitled.
+pub const REASON_UNTITLED_FORMAT: &str = "its format does not let its title be changed";
+
+/// Why a volume mounted read-only is not retitled.
+pub const REASON_TITLE_READ_ONLY: &str = "it is mounted read-only";
+
+/// Why a volume whose medium has gone is not retitled.
+pub const REASON_TITLE_ABSENT: &str = "its disk is not there now";
+
 impl VolumeFacts {
     /// Whether the principal `uid`, using this machine, may eject the volume.
     #[must_use]
@@ -228,6 +313,60 @@ impl VolumeFacts {
             (None, VolumeClass::Removable) => Some(Ejector::AtTheSeat),
             (None, _) => None,
         }
+    }
+
+    /// Who may retitle the volume, or why no one may: a disk image's owner,
+    /// the user at the machine or an administrator for a removable device's
+    /// volume, and an administrator for a fixed one's; never a share, whose
+    /// title is its server's, an image no one owns, or a volume a retitle
+    /// could not name.
+    ///
+    /// # Errors
+    ///
+    /// Why no one may, as the user is told it.
+    pub fn retitler(&self) -> Result<Retitler, &'static str> {
+        if self.class == VolumeClass::Network {
+            return Err(REASON_SHARE_TITLE);
+        }
+        if self.volume_id == VOLUME_ID_UNPUBLISHED {
+            return Err(REASON_UNNAMED_VOLUME);
+        }
+        match (self.owner, self.class) {
+            (Some(owner), _) => Ok(Retitler::Owner(owner)),
+            (None, VolumeClass::Image) => Err(REASON_NOT_YOURS),
+            (None, VolumeClass::Removable) => Ok(Retitler::AtTheSeat),
+            (None, _) => Ok(Retitler::Administrator),
+        }
+    }
+
+    /// How the principal `viewer` may retitle the volume now: the one rule
+    /// every surface offering a title asks — the icon bar's plate, a drive's
+    /// Info window and the desktop's drive menu. Who may comes first, so a
+    /// volume another principal owns is refused as theirs whatever its record
+    /// withholds; then a format that takes a title, and a volume that takes
+    /// writes. `None`, a viewer the kernel would not name, retitles nothing.
+    #[must_use]
+    pub fn retitling_by(&self, viewer: Option<u32>) -> Retitling {
+        let retitler = match self.retitler() {
+            Ok(retitler) => retitler,
+            Err(why) => return Retitling::Refused(why),
+        };
+        let Some(uid) = viewer else {
+            return Retitling::Refused(REASON_UNKNOWN_VIEWER);
+        };
+        if !retitler.admits(uid) {
+            return Retitling::Refused(REASON_NOT_YOURS);
+        }
+        if !self.titled {
+            return Retitling::Refused(REASON_UNTITLED_FORMAT);
+        }
+        if crate::volume::gone(self.availability) {
+            return Retitling::Unavailable(REASON_TITLE_ABSENT);
+        }
+        if self.read_only || self.availability == MountAvailability::RecoveryConflict {
+            return Retitling::Unavailable(REASON_TITLE_READ_ONLY);
+        }
+        Retitling::Allowed(retitler)
     }
 }
 
@@ -255,8 +394,9 @@ pub struct Volume {
 }
 
 impl Volume {
-    /// The volume `record` reports, labelled by its mount point's leaf, or
-    /// `None` for one whose target is not valid text or names no leaf. One
+    /// The volume `record` reports, labelled by its mount point's leaf — the
+    /// view's root by `/` itself — or `None` for one whose target is not valid
+    /// text or names no leaf. One
     /// this session cannot navigate to — another principal's private volume,
     /// withheld from it, or a mount whose device has gone — is not offered.
     ///
@@ -265,17 +405,16 @@ impl Volume {
     #[must_use]
     pub fn from_mount(record: &MountRecord) -> Option<Self> {
         let availability = record.availability();
-        let gone = matches!(
-            availability,
-            MountAvailability::UnavailableDirty | MountAvailability::UnavailableLost
-        );
         let target = core::str::from_utf8(record.target_bytes()).ok()?;
-        let label = target.rsplit('/').find(|part| !part.is_empty())?;
+        let label = target
+            .rsplit('/')
+            .find(|part| !part.is_empty())
+            .or_else(|| (target == "/").then_some(target))?;
         Some(Self {
             label: String::from(label),
             target: String::from(target),
             medium: record.medium(),
-            offered: !record.is_withheld() && !gone,
+            offered: !record.is_withheld() && !crate::volume::gone(availability),
             facts: VolumeFacts {
                 filesystem: field_lossy(record.fstype_bytes()),
                 title: String::from(record.title().as_str()),
@@ -284,7 +423,9 @@ impl Volume {
                 availability,
                 owner: record.owner(),
                 volume_id: record.volume_id(),
+                identity: record.identity(),
                 read_only: record.flags().bits() & MountFlags::READ_ONLY.bits() != 0,
+                titled: record.titled(),
             },
         })
     }
@@ -404,6 +545,15 @@ impl Places {
     /// The storage volumes listed but not offered as rows.
     pub(crate) fn unoffered(&self) -> &[Place] {
         &self.unoffered
+    }
+
+    /// Every volume listed, offered as a row or not, and the name it is shown
+    /// by.
+    pub fn volumes(&self) -> impl Iterator<Item = (&VolumeFacts, &str)> {
+        self.rows
+            .iter()
+            .chain(&self.unoffered)
+            .filter_map(|place| Some((place.facts()?, place.label())))
     }
 
     /// What the volume published as `volume_id` is and how it is doing, from

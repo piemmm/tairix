@@ -86,6 +86,20 @@ scheduler never installs or removes a device, and drives nothing on a `Failed`
 array — recovering one is a re-resolution of its members' superblocks, not a
 maintenance decision.
 
+## The identity an array states
+
+A volume's writes held while its medium was away are replayed onto the medium
+that returns only when its device proves it is the one they were made on
+(`Block::device_identity`). `OwnedRaidArray::composed_identity` is what an
+array proves itself by: a fingerprint (`tairix_crypto::Fingerprint`) of the
+array's own identifier and of what each slot's device states, in slot order,
+and nothing while any slot holds no device or one that states none — no proof
+is better than a guessed one. Neither arrival order, member state nor
+generation enters it, so the same devices in the same slots of the same array
+state one identity however often it is assembled, and another device in any
+slot, or the same devices in another array, never do. `StatingArray` serves
+the array over the block-service seam stating that identity.
+
 ## Why it is a shared crate
 
 Composition is device-agnostic arithmetic over the generic block seam: this
@@ -107,14 +121,16 @@ This crate is the host-testable composition **engine** — one module per level
 `src/triple.rs`, `src/raid10.rs`, over the shared `src/gf256.rs` field) — plus
 the level-agnostic layers above it: the `src/array.rs` composed-device
 dispatch, the `src/assemble.rs` reassembly→member bridge, the `src/health.rs`
-per-family redundancy rules and device-class/health/availability folds, and the
+per-family redundancy rules and device-class/health/availability folds, the
+`src/device_identity.rs` identity an array states, and the
 `src/maintenance.rs` scheduler. Each is proven
 host-side over a fault-injecting `Block` double (its `*/tests.rs`). It is
 `no_std`, `forbid(unsafe_code)`, and allocation-free: every array borrows a
 caller-owned member slice (and, for the parity levels, a scratch buffer; and,
 for the scheduler, a per-member retry slice), so it imposes no fixed member
-ceiling and holds only a borrow. It depends only on `lib/abi` and the shared
-on-disk metadata crate `lib/raidmeta`; a member is reached through the `Block`
+ceiling and holds only a borrow. It depends only on `lib/abi`, the shared
+on-disk metadata crate `lib/raidmeta`, and `lib/crypto` for the fingerprint an
+array's identity is composed under; a member is reached through the `Block`
 trait the serve process is handed, never a sibling driver crate.
 
 The autoloaded serve process that assembles members from discovered array

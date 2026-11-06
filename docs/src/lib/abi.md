@@ -17,14 +17,15 @@ protocols programs speak to the system services.
   of its numeric `endpoint`. Encodes to a 32-byte length-prefixed wire form
   and resolves through the kernel port registry; see
   [Kernel IPC subsystem](../architecture/ipc.md).
-* `PointerInput` — 20-byte little-endian desktop pointer event (absolute
-  move, or a resolved primary/secondary/middle press/release) the window
-  manager and taskbar route. Distinct from the device-level
+* `PointerInput` — 20-byte little-endian desktop pointer event (a relative
+  move, a scroll, or a resolved primary/secondary/middle press/release) the
+  window manager and taskbar route. Distinct from the device-level
   `driver::input::InputEvent` (see [Input events](../abi/input.md)).
 * `KeyInput` — 20-byte little-endian desktop keyboard event (a press or
   release carrying a `KeyValue` — a produced `Char` or a `NamedKeyCode` —
-  and the held `Modifiers`) the window manager delivers to the focused
-  window (see [Input events](../abi/input.md)).
+  the held `Modifiers` and the `PhysicalKey` it was typed on, or a bare
+  modifier change) the window manager delivers to the focused window (see
+  [Input events](../abi/input.md)).
 * `ManifestHeader` — fixed-size prefix of the signed `rxe` manifest section,
   including the SHA-256 syscall-table fingerprint, the Ed25519 public key,
   and the signature.

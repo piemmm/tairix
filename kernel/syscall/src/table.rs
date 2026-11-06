@@ -506,8 +506,8 @@ pub trait SyscallHandlers {
     /// writing its exit code to the user `status` pointer; returns the
     /// reaped child's PID (`plans/SPAWN.md` SP6).
     ///
-    /// The dispatcher has already validated that `pid` is a sign-extended
-    /// `i32`, that `status` is a non-null `UserPtr`, and that `flags` carries
+    /// The dispatcher has already taken `pid` from the whole register and
+    /// validated that `status` is a non-null `UserPtr` and that `flags` carries
     /// no reserved bit. `pid` is either a specific child's PID or
     /// [`tairix_abi::WAIT_PID_ANY`] (wait for any child). The implementation
     /// validates the parent/child relationship — a process may only reap its
@@ -536,8 +536,8 @@ pub trait SyscallHandlers {
     /// Deliver control signal `signal` to a child of the calling process
     /// (`plans/SPAWN.md` SP7).
     ///
-    /// The dispatcher has already validated that `pid` is a sign-extended
-    /// `i32` and that `signal` is a defined [`Signal`] (a value outside the
+    /// The dispatcher has already taken `pid` from the whole register and
+    /// validated that `signal` is a defined [`Signal`] (a value outside the
     /// closed set is rejected before dispatch with [`Errno::OutOfRange`]).
     /// The implementation identifies the sender from the kernel-provided
     /// caller identity (never a caller-supplied one), validates the
@@ -891,7 +891,7 @@ pub trait SyscallHandlers {
     ///
     /// The dispatcher has already checked [`CapabilityId::CONSOLE_READ`]
     /// (the same fd-scoped terminal-control gate `stream_input_mode`
-    /// carries) and that `pid` is a sign-extended `i32`. The implementation
+    /// carries), and takes `pid` from the whole register. The implementation
     /// resolves `fd` against the caller's own descriptor table (a
     /// non-readable or unbacked descriptor fails closed with
     /// [`Errno::NotFound`]), and for a non-zero `pid` authorises it as a
@@ -1359,6 +1359,30 @@ pub trait SyscallHandlers {
         _region: u64,
         _endpoint: u64,
         _ticket: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Grant the live process instance whose attested `ProcId` is at
+    /// `recipient` (`recipient_len` bytes, at least
+    /// [`PROC_ID_LEN`](tairix_abi::PROC_ID_LEN)) the right to map shared region
+    /// `region`, returning the minted handle: [`Self::shm_grant`] for a
+    /// recipient that binds no endpoint and has no call in service.
+    ///
+    /// The dispatcher has already checked [`CapabilityId::SHM`] and that
+    /// `recipient` is non-null; the implementation checks the caller holds the
+    /// region before it reads the recipient, mints only to an instance a live
+    /// process holds, and refuses a grantor already holding
+    /// [`SHM_GRANT_TO_MAX`](tairix_abi::SHM_GRANT_TO_MAX) live regions with the
+    /// recipient.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn shm_grant_to(
+        &self,
+        _caller: &CallerContext<'_>,
+        _region: u64,
+        _recipient: u64,
+        _recipient_len: usize,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
@@ -1910,6 +1934,31 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Read the kernel-attested [`tairix_abi::Origin`] of a live child the
+    /// calling process spawned, returning its byte length.
+    ///
+    /// The dispatcher has already checked `out` is a non-null `UserPtr`; the
+    /// call is unprivileged (a parent learning who its own child is gains no
+    /// authority). The implementation authorises `pid` as a live child of the
+    /// caller's process before reading anything, then builds the origin from
+    /// that child's own kernel-held record. Every other `pid` fails closed with
+    /// the one [`Errno::NotFound`], so the call reveals nothing about other
+    /// processes, and a buffer shorter than [`tairix_abi::ORIGIN_WIRE_LEN`]
+    /// with [`Errno::BufferTooSmall`].
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn child_origin(
+        &self,
+        _caller: &CallerContext<'_>,
+        _pid: i64,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Read the **unfiltered, global** kernel introspection view (P-C).
     ///
     /// The dispatcher has already checked the caller holds
@@ -2297,24 +2346,26 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Delegate one of the caller's own open filesystem descriptors to
-    /// another live task as a one-shot grant bounded above by
-    /// `write_ceiling` bytes, returning the minted grant handle
-    /// (`plans/CAPABILITY_USE.md` CU6 — the file picker's user-mediated
-    /// hand-off; `plans/APPDATA.md` §3.8 — the app-data service's blob
-    /// descriptor).
+    /// Delegate one of the caller's own open descriptors — a filesystem file
+    /// or a pipe end — to another live task as a one-shot grant, a file's
+    /// bounded above by `write_ceiling` bytes, returning the minted grant
+    /// handle (`plans/CAPABILITY_USE.md` CU6 — the file picker's
+    /// user-mediated hand-off; `plans/APPDATA.md` §3.8 — the app-data
+    /// service's blob descriptor).
     ///
     /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`] and audited the call. The implementation
-    /// resolves `fd` against the **caller's own** open table (a foreign or
-    /// unopened descriptor fails closed with [`Errno::NotFound`]), refuses a
-    /// pipe, pty, resource, or directory with [`Errno::OutOfRange`], captures
-    /// the caller's uid and effective capability set beside a plain file's
-    /// path — or passes a delegation the caller was itself given on with its
-    /// first grantor's captured authority unchanged, so a relay can never
-    /// widen it and no chain forms — and mints the recipient an unforgeable
-    /// handle that resolves only when the recipient itself presents it to
-    /// [`Self::fd_redeem`].
+    /// [`CapabilityId::FS_ACCESS`], whatever the descriptor proves to be, and
+    /// audited the call. The implementation resolves `fd` against the
+    /// **caller's own** open table (a foreign or unopened descriptor fails
+    /// closed with [`Errno::NotFound`]), refuses a pty end, resource, or
+    /// directory with [`Errno::OutOfRange`], captures the caller's uid and
+    /// effective capability set beside a plain file's path — or passes a
+    /// delegation the caller was itself given on with its first grantor's
+    /// captured authority unchanged, so a relay can never widen it and no
+    /// chain forms — or hands a pipe end on as another reference to itself,
+    /// which holds its side open until redeemed or let go, and mints the
+    /// recipient an unforgeable handle that resolves only when the recipient
+    /// itself presents it to [`Self::fd_redeem`].
     ///
     /// The recipient is named by the attested `ProcId` at `recipient`
     /// (`recipient_len` bytes, at least [`PROC_ID_LEN`](tairix_abi::PROC_ID_LEN)),
@@ -2329,13 +2380,13 @@ pub trait SyscallHandlers {
     /// The delegation carries the descriptor's **own** read/write access and
     /// nothing more, so it never widens what the grantor opened.
     /// `write_ceiling` is the highest file length the holder may write or
-    /// truncate to: zero for a read-only descriptor, and for a writable one
-    /// a stated bound or
+    /// truncate to: zero for a read-only file and for a pipe end, which has
+    /// no extent, and for a writable file a stated bound or
     /// [`GRANT_EXTENT_INHERIT`](tairix_abi::GRANT_EXTENT_INHERIT), the
     /// caller's own reach — unbounded for a file it opened itself, what it
-    /// holds for one it was handed. Zero is refused for a writable
-    /// descriptor, so its reach is always asked for by name, and handing a
-    /// delegation on can only narrow it.
+    /// holds for one it was handed. Zero is refused for a writable file, so
+    /// its reach is always asked for by name, and handing a delegation on
+    /// can only narrow it.
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in
@@ -2352,12 +2403,12 @@ pub trait SyscallHandlers {
     }
 
     /// Redeem an [`Self::fd_grant`] handle minted to the calling task,
-    /// installing the delegated file into the caller's own open table and
-    /// returning the fresh descriptor number.
+    /// installing the delegated file or pipe end into the caller's own open
+    /// table and returning the fresh descriptor number.
     ///
     /// Needs no capability (the dispatcher gates nothing): receiving
     /// user-mediated, already-checked authority is the point of the
-    /// delegation, and every later operation on the descriptor is still
+    /// delegation, and every later operation on a delegated file is still
     /// VFS-checked under the grantor's captured identity. The
     /// implementation resolves `handle` against the grants minted **to the
     /// calling task** (a foreign or unknown handle fails closed with
@@ -3340,6 +3391,25 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Answer for the writes held for a re-inserted volume whose device could
+    /// not prove its medium the one they were made on.
+    ///
+    /// `request`/`request_len` name the caller's encoded
+    /// `VolumeReplayRequest`. The dispatcher checks no capability: who may
+    /// answer turns on the volume, which the volume service judges — the mount
+    /// authority over any volume, the process holding the seat over a
+    /// removable one.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn volume_replay(
+        &self,
+        _caller: &CallerContext<'_>,
+        _request: u64,
+        _request_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Read `len` bytes of whole blocks from `lba` of served volume `volume`
     /// into `buf` (`plans/FSSERVE.md` §4).
     ///
@@ -4181,6 +4251,14 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers
                     .shm_grant_peer(caller, args.0[0], args.0[1], args.0[2])
             }
+            SyscallNumber::SHM_GRANT_TO => {
+                // args[0] is the region id; args[1] is the non-null
+                // attested-`ProcId` `UserPtr` (dispatcher-checked) naming the
+                // recipient, and args[2] its length.
+                let recipient_len = decode_len(args.0[2])?;
+                self.handlers
+                    .shm_grant_to(caller, args.0[0], args.0[1], recipient_len)
+            }
             SyscallNumber::CALL_PEER_HOLDS => {
                 // The endpoint id, the in-service ticket, then the non-null
                 // pointer to the quoted resource record.
@@ -4813,6 +4891,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let request_len = decode_len(args.0[1])?;
                 self.handlers.volume_retitle(caller, args.0[0], request_len)
             }
+            SyscallNumber::VOLUME_REPLAY => {
+                let request_len = decode_len(args.0[1])?;
+                self.handlers.volume_replay(caller, args.0[0], request_len)
+            }
             SyscallNumber::VOLUME_READ => {
                 let len = decode_len(args.0[3])?;
                 self.handlers
@@ -4960,7 +5042,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.boot_facts_get(caller, args.0[0], out_cap)
             }
             SyscallNumber::FD_GRANT => {
-                // args[0] is the caller's own path-backed descriptor
+                // args[0] is the caller's own file or pipe-end descriptor
                 // (resolved owner-checked by the handler); args[1] is the
                 // write-extent ceiling, which the handler checks against the
                 // descriptor's own access; args[2] is the non-null
@@ -5059,6 +5141,11 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // args[1] is its capacity in bytes.
                 let out_cap = decode_len(args.0[1])?;
                 self.handlers.self_origin(caller, args.0[0], out_cap)
+            }
+            SyscallNumber::CHILD_ORIGIN => {
+                let pid = i64_from_register(args.0[0]);
+                let out_cap = decode_len(args.0[2])?;
+                self.handlers.child_origin(caller, pid, args.0[1], out_cap)
             }
             _ => Err(Errno::NotFound),
         }
@@ -5402,7 +5489,8 @@ mod tests {
 
     fn build_caps(items: &[CapabilityId], sink: &RecordingSink) -> TaskCapabilities {
         let set = caps_of(items);
-        let t = TaskCapabilities::derive(ProcessId(0xA), UserId(1000), set, set, sink);
+        let t = TaskCapabilities::derive(ProcessId(0xA), UserId(1000), set, set, sink)
+            .expect("derived");
         // Drop the derivation record whole — it carries a `task` field of its
         // own — so a test asserts against dispatcher output alone.
         sink.events.borrow_mut().clear();
@@ -5952,6 +6040,17 @@ mod tests {
             Ok(0)
         }
 
+        fn shm_grant_to(
+            &self,
+            _c: &CallerContext<'_>,
+            region: u64,
+            _recipient: u64,
+            _recipient_len: usize,
+        ) -> SyscallResult {
+            self.record("shm_grant_to");
+            self.force_err.map_or(Ok(region), Err)
+        }
+
         fn call_peer_holds(
             &self,
             _c: &CallerContext<'_>,
@@ -6258,6 +6357,17 @@ mod tests {
             // Echo the capacity so the reachability test can assert the
             // dispatcher decoded both arguments without wiring a real origin.
             Ok(out_cap as u64)
+        }
+
+        fn child_origin(
+            &self,
+            _c: &CallerContext<'_>,
+            pid: i64,
+            _out: u64,
+            _out_cap: usize,
+        ) -> SyscallResult {
+            self.record("child_origin");
+            Ok(pid.cast_unsigned())
         }
 
         fn sysinfo_introspect(
@@ -6841,6 +6951,16 @@ mod tests {
             Ok(0)
         }
 
+        fn volume_replay(
+            &self,
+            _c: &CallerContext<'_>,
+            _request: u64,
+            _request_len: usize,
+        ) -> SyscallResult {
+            self.record("volume_replay");
+            Ok(0)
+        }
+
         fn volume_read(
             &self,
             _c: &CallerContext<'_>,
@@ -7219,7 +7339,8 @@ mod tests {
             CapabilitySet::empty(),
             CapabilitySet::empty(),
             &sink,
-        );
+        )
+        .expect("derived");
         let ctx = CallerContext {
             task_id: TaskId(1),
             caps: &caps,
@@ -7459,6 +7580,7 @@ mod tests {
             CapabilitySet::empty(),
             &sink,
         )
+        .expect("derived")
         .with_proc_id(minted);
         let ctx = CallerContext {
             task_id: TaskId(7),
@@ -7506,6 +7628,7 @@ mod tests {
             CapabilitySet::empty(),
             &sink,
         )
+        .expect("derived")
         .with_proc_id(own)
         .with_parent_proc_id(parent);
         let ctx = CallerContext {
@@ -7552,6 +7675,7 @@ mod tests {
             CapabilitySet::empty(),
             &sink,
         )
+        .expect("derived")
         .with_name(ProcName::from_bytes_truncating(b"sysinfod"));
         let ctx = CallerContext {
             task_id: TaskId(7),
@@ -7590,6 +7714,7 @@ mod tests {
             CapabilitySet::empty(),
             &sink,
         )
+        .expect("derived")
         .with_start_time(start);
         let ctx = CallerContext {
             task_id: TaskId(7),
@@ -8793,7 +8918,7 @@ mod tests {
         // `wait` is ungated (a process reaps its own children, no
         // capability) but audited — reaping a child is a process-lifecycle
         // state change. With a well-typed
-        // `(pid, status)` tuple the dispatcher recovers the `i32` pid,
+        // `(pid, status)` tuple the dispatcher recovers the `i64` pid,
         // forwards the `status` pointer verbatim, reaches the handler, and
         // emits exactly one `SyscallInvoked` record on success.
         let sink = RecordingSink::new();
@@ -8806,7 +8931,6 @@ mod tests {
         let d = Dispatcher::new(&h, &sink);
 
         let mut args = RawArgs::ZERO;
-        // pid 5 as a sign-extended `i32` (low 32 bits only).
         args.0[0] = 5;
         args.0[1] = 0x1000; // status — a non-null user pointer
         let r = d.dispatch(&ctx, u64::from(SyscallNumber::WAIT.as_u16()), args);
@@ -8850,6 +8974,98 @@ mod tests {
         }
     }
 
+    /// `child_origin` reaches its handler with the pid the whole register,
+    /// refuses a null out pointer before it, and is not audited.
+    #[test]
+    fn child_origin_carries_the_whole_pid_and_audits_nothing() {
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+        let number = u64::from(SyscallNumber::CHILD_ORIGIN.as_u16());
+
+        for pid in [tairix_abi::PID_MAX, u64::MAX] {
+            let mut args = RawArgs::ZERO;
+            args.0[0] = pid;
+            args.0[1] = 0x1000;
+            args.0[2] = 64;
+            assert_eq!(d.dispatch(&ctx, number, args), Ok(pid));
+        }
+        assert_eq!(h.last(), Some("child_origin"));
+        assert!(sink.ids().is_empty(), "child_origin must not audit");
+
+        let h2 = MockHandlers::default();
+        let d2 = Dispatcher::new(&h2, &sink);
+        let mut null_out = RawArgs::ZERO;
+        null_out.0[0] = 5;
+        null_out.0[2] = 64;
+        assert_eq!(
+            d2.dispatch(&ctx, number, null_out),
+            Err(Errno::BadAlignment)
+        );
+        assert_eq!(h2.last(), None);
+    }
+
+    /// `shm_grant_to` is gated on `CAP_SHM`, refuses a null recipient before
+    /// its handler, and audits the grant whether it is made or refused.
+    #[test]
+    fn shm_grant_to_is_gated_and_audited_made_or_refused() {
+        let sink = RecordingSink::new();
+        let bare = build_caps(&[], &sink);
+        let caps = build_caps(&[CapabilityId::SHM], &sink);
+        let number = u64::from(SyscallNumber::SHM_GRANT_TO.as_u16());
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 42;
+        args.0[1] = 0x1000;
+        args.0[2] = 16;
+
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+        let unprivileged = CallerContext {
+            task_id: TaskId(7),
+            caps: &bare,
+        };
+        assert_eq!(
+            d.dispatch(&unprivileged, number, args),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(h.last(), None, "the handler must never be reached");
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        assert_eq!(d.dispatch(&ctx, number, args), Ok(42));
+        assert_eq!(h.last(), Some("shm_grant_to"));
+
+        let refusing = MockHandlers {
+            force_err: Some(Errno::LimitExceeded),
+            ..MockHandlers::default()
+        };
+        let d2 = Dispatcher::new(&refusing, &sink);
+        assert_eq!(d2.dispatch(&ctx, number, args), Err(Errno::LimitExceeded));
+        let mut unnamed = args;
+        unnamed.0[1] = 0;
+        assert_eq!(d2.dispatch(&ctx, number, unnamed), Err(Errno::BadAlignment));
+        assert_eq!(
+            refusing.calls.borrow().len(),
+            1,
+            "a null recipient is never handled"
+        );
+        assert_eq!(
+            sink.ids(),
+            [
+                AuditEvent::SyscallPermissionDenied.id().0,
+                AuditEvent::SyscallInvoked.id().0,
+                AuditEvent::SyscallHandlerRejected.id().0,
+                AuditEvent::SyscallBadArguments.id().0,
+            ]
+        );
+    }
+
     #[test]
     fn wait_recovers_a_negative_pid_and_rejects_a_null_status() {
         let sink = RecordingSink::new();
@@ -8891,7 +9107,7 @@ mod tests {
         // `signal` is ungated (a process signals its own children, no
         // capability) but audited — delivering a signal is a
         // process-lifecycle decision. With a well-typed `(pid, signal)` tuple
-        // the dispatcher recovers the `i32` pid, validates the `Signal`,
+        // the dispatcher recovers the `i64` pid, validates the `Signal`,
         // reaches the handler, and emits exactly one `SyscallInvoked` record
         // on success.
         let sink = RecordingSink::new();
@@ -8904,7 +9120,7 @@ mod tests {
         let d = Dispatcher::new(&h, &sink);
 
         let mut args = RawArgs::ZERO;
-        args.0[0] = 5; // pid 5 as a sign-extended `i32`
+        args.0[0] = 5;
         args.0[1] = u64::from(Signal::Terminate.as_u32());
         let r = d.dispatch(&ctx, u64::from(SyscallNumber::SIGNAL.as_u16()), args);
         // The Mock echoes the decoded pid back.
@@ -8943,7 +9159,7 @@ mod tests {
     fn console_foreground_decodes_fd_and_signed_pid() {
         // The dispatcher gates on `CAP_CONSOLE_READ` (the same fd-scoped
         // terminal-control gate `stream_input_mode` carries), recovers the
-        // sign-extended `i32` pid, and forwards both to the handler.
+        // whole-register `i64` pid, and forwards both to the handler.
         let sink = RecordingSink::new();
         let caps = build_caps(&[CapabilityId::CONSOLE_READ], &sink);
         let ctx = CallerContext {

@@ -213,7 +213,8 @@ clears the selection on empty desktop) and arms the shared
 `DoubleClickTracker` under the double-click interval the user chose, so a
 second press within it activates the icon
 — the desktop can never disagree with the file manager about what a gesture
-means. Motion drives hover feedback. While the desktop holds the keyboard, the
+means. Motion changes nothing about an icon; it only moves one being carried.
+While the desktop holds the keyboard, the
 arrows move the selection (down/up one icon, left/right one whole column),
 `Enter` activates it, and `Escape` clears it.
 
@@ -557,8 +558,7 @@ It runs once a desktop frame, not once a present: the window engine answers a
 `Present` as it records the window's newest frame, and `WindowServer::latch`
 converts each window's newest one through `FrameShow` just before the
 compositor composes. A client presenting faster than the desktop draws costs
-one conversion a frame, and no client's present waits on the desktop's frame
-work.
+one conversion a frame, and the desktop's frame work never waits on a present.
 
 ## Running-task list ↔ window stack
 

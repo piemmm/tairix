@@ -136,8 +136,8 @@ impl<B: Block> Ext4<B> {
 
     /// Drop the staged copies of `len` blocks from `start`, which nothing
     /// will reference once the transaction commits.
-    pub(crate) fn forget_meta(&mut self, start: u64, len: u64) {
-        self.dirty.discard_run(start, len);
+    pub(crate) fn forget_meta(&mut self, start: u64, len: u64) -> Result<(), DriverError> {
+        self.dirty.discard_run(start, len)
     }
 
     /// Read `buf.len()` bytes of file data from device byte `offset`.

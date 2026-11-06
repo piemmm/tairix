@@ -399,8 +399,10 @@ impl<A: Audio, I: ChannelIo> Dispatcher<A, I> {
         }
     }
 
-    /// Drop `endpoint`'s mapping, if it has one.
+    /// Drop `endpoint`'s mapping, if it has one, and what is held for the
+    /// attachment it served.
     fn release_region(&mut self, endpoint: u16) {
+        self.owed.forget_attachment(endpoint);
         if let Some(attached) = self
             .regions
             .get_mut(usize::from(endpoint))

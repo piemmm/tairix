@@ -38,6 +38,7 @@ use tairix_taskbar::MenuSubject;
 use tairix_icon::{ArtworkCache, ArtworkResolver, IconKind, IconPicture, IconRequest};
 
 use crate::clipboard::TextClipboard;
+use crate::picker::PickId;
 use crate::windows::seat_menu_refusal;
 use tairix_theme::Theme;
 use tairix_wm::{ChromeEpoch, InputEvent, Key, Modifiers, NamedKey};
@@ -74,13 +75,18 @@ pub enum ChainOwner {
     /// the next open displaces cannot have its answer read against the next
     /// chain's subject.
     Bar(MenuSubject),
-    /// The trusted picker's save panel: *Where* or *Format*, resolved in
-    /// process against the panel.
+    /// A pick's save panel: *Where* or *Format*, resolved in process against
+    /// the panel of the pick it names.
     Picker {
+        /// The pick whose panel asked.
+        pick: PickId,
         /// The window the pick is for, whose going takes the chain down with
         /// the pick; `None` for a pick the session made for itself.
         for_window: Option<u64>,
     },
+    /// The capture bar's Options menu, resolved in process against the
+    /// capture's options.
+    Capture,
 }
 
 /// How a chain ended.
@@ -435,7 +441,10 @@ impl MenuChain {
     pub fn owner_window(&self) -> Option<u64> {
         match self.owner()? {
             ChainOwner::Window { window_id, .. } => Some(*window_id),
-            ChainOwner::Backdrop | ChainOwner::Bar(_) | ChainOwner::Picker { .. } => None,
+            ChainOwner::Backdrop
+            | ChainOwner::Bar(_)
+            | ChainOwner::Picker { .. }
+            | ChainOwner::Capture => None,
         }
     }
 
@@ -995,7 +1004,10 @@ fn owned_by(owner: Option<&ChainOwner>, window_id: u64) -> bool {
         owner,
         Some(
             ChainOwner::Window { window_id: id, .. }
-                | ChainOwner::Picker { for_window: Some(id) }
+                | ChainOwner::Picker {
+                    for_window: Some(id),
+                    ..
+                }
         ) if *id == window_id
     )
 }

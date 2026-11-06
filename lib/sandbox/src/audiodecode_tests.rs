@@ -20,10 +20,11 @@ use super::{
     decode_from_wire, decode_to_wire, encode_info, encode_link, encode_metadata, session_bounds,
     AudioDecodeClient, AudioDecodeError, AudioDecodeService, AudioRefusal, DecodeEvent,
     CACHE_PAGES, COVER_LEN, FROM_BLOCK, FROM_LAST_LINK, FROM_NEED, FROM_OPENED, FROM_REFUSED,
-    FROM_SOUGHT, LIMITS, MAX_BLOCK_FRAMES, MAX_NEED_BYTES, MAX_OPENED_LEN, PAGE_BYTES, TO_DECODE,
-    TO_NEXT_LINK, TO_OPEN, TO_SUPPLY,
+    FROM_SOUGHT, LIMITS, MAX_BLOCK_FRAMES, MAX_OPENED_LEN, TO_DECODE, TO_NEXT_LINK, TO_OPEN,
+    TO_SUPPLY,
 };
 use crate::loopback::LoopbackSessionLauncher;
+use crate::paged::{MAX_NEED_BYTES, PAGE_BYTES};
 use crate::proto::ProtoError;
 use crate::session::{FrameOut, SessionError, SessionService, SessionStep};
 use crate::supervise::SupervisedSession;
@@ -1517,4 +1518,58 @@ fn a_request_out_of_turn_is_refused_before_it_is_sent() {
         client.decode(MAX_BLOCK_FRAMES + 1),
         Err(AudioDecodeError::BlockSize)
     );
+}
+
+/// A client is free for a request with no file open as with one open and
+/// idle, and never while one waits to be sent or for its answer.
+#[test]
+fn a_client_takes_a_request_only_with_nothing_outstanding() {
+    let mut client = AudioDecodeClient::new();
+    assert!(client.takes_request(), "nothing open");
+    assert!(!client.is_idle(), "nothing open to decode");
+    client.open(100, None, SEED).expect("free");
+    assert!(!client.takes_request(), "the open waits to be sent");
+    client.sent();
+    assert!(!client.takes_request(), "the open awaits its answer");
+    assert!(client
+        .on_frame(&refused(AudioRefusal::WorkingSetExceeded))
+        .is_ok());
+    assert!(client.takes_request(), "a refused open leaves none");
+
+    let file = wave(1, &[0; 8], &[], &[]);
+    let len = u32::try_from(file.len()).expect("small");
+    let mut client = opening(u64::from(len));
+    assert!(client.on_frame(&need(0, len)).is_ok());
+    assert!(!client.takes_request(), "a need awaits its bytes");
+    client.supply(&file).expect("the need's length");
+    assert!(!client.takes_request(), "the bytes wait to be sent");
+    client.sent();
+    assert_eq!(
+        client.on_frame(&honest_opened(&file)),
+        Ok(DecodeEvent::Opened)
+    );
+    assert!(client.takes_request() && client.is_idle(), "open, idle");
+    client.decode(1).expect("idle");
+    client.sent();
+    assert!(!client.takes_request(), "a decode awaits its block");
+}
+
+/// Every request goes through the one send step: queued and written while a
+/// worker is live, nothing while nothing waits, and lost with no worker to
+/// take it, the frame kept for a replacement.
+#[test]
+fn the_send_step_queues_what_waits_and_says_when_no_worker_takes_it() {
+    use crate::supervise::{send_waiting, Sent};
+
+    let mut session = healthy();
+    let mut client = AudioDecodeClient::new();
+    assert_eq!(send_waiting(&mut client, &mut session, 0), Sent::Nothing);
+    client.open(10, None, SEED).expect("free");
+    assert_eq!(send_waiting(&mut client, &mut session, 0), Sent::Queued);
+    assert!(client.outgoing().is_none(), "the session holds it");
+    session.condemn(0, "a worker gone");
+    let mut client = AudioDecodeClient::new();
+    client.open(10, None, SEED).expect("free");
+    assert_eq!(send_waiting(&mut client, &mut session, 0), Sent::Lost);
+    assert!(client.outgoing().is_some(), "kept for a replacement");
 }

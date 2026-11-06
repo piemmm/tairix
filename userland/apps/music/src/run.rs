@@ -6,19 +6,22 @@
 //! protocol, and in its worker role the image renderer, each over the two
 //! pipes the sandbox wires and nothing else.
 //!
-//! # Three threads, none of which polls
+//! # Five threads, none of which polls
 //!
 //! The **window** thread owns the window and the player's state and never
 //! waits on anything but its own wait-set. Playback is the shared engine on a
 //! **playback** thread of its own, parked on the decoder's pipes, the stream's
 //! mailbox and the orders the window posts; it posts its status back and wakes
-//! the window. Everything else that waits — a track's tags, its cover, the
-//! list of output devices, the listener's settings — is a job for the
-//! **worker**, whose answers wake the window in turn.
+//! the window. Everything else that waits is a job for one of three
+//! **workers**, whose answers wake the window in turn: one reads each track's
+//! tags, one decodes the cover heard, and one lists the output devices and
+//! saves the listener's settings. A track's tags and its cover are a
+//! stranger's bytes, each read on a worker of its own, so a hostile file holds
+//! up neither the other nor the player's own business.
 //!
 //! The app holds no filesystem capability. It plays exactly the files the user
 //! chose in the session's picker or handed it from the file manager, each a
-//! delegated descriptor shared by the window, the worker and the playback
+//! delegated descriptor shared by the window, the workers and the playback
 //! thread until the last of them lets it go.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy and
@@ -58,8 +61,10 @@ mod program {
     use tairix_input::InputEvent;
     use tairix_music::view::{Command, Device, Outcome, Player, Request, Saved};
     use tairix_music::{Edit, Layout, Playlist, Repeat, WIN_HEIGHT, WIN_WIDTH};
-    use tairix_player::rt::{live, EngineWaits, HeldFiles, RtEngine, Tokens};
-    use tairix_player::{Control, EntryId, Failure, Note, Outcome as Ended, Settings, Status};
+    use tairix_player::rt::{live, EngineWaits, HeldFiles, RtEngine, RtTags, Tokens};
+    use tairix_player::{
+        Control, EntryId, Failure, Note, Outcome as Ended, Settings, Status, Tags,
+    };
     use tairix_raster::{Color, Surface};
     use tairix_reclaim::desktop::working_set_ui_cache;
     use tairix_reclaim::{CachedBytes, ReclaimCache};
@@ -67,21 +72,15 @@ mod program {
     use tairix_rt::thread::Thread;
     use tairix_rt::work::{Worker, WorkerGuard};
     use tairix_rt::File;
-    use tairix_sandbox::audiodecode::{
-        session_bounds, AudioDecodeClient, AudioDecodeService, DecodeEvent,
-    };
+    use tairix_sandbox::audiodecode::AudioDecodeService;
     use tairix_sandbox::imagerender::{
         render_thumbnail, upload_document, ImageRenderService, MAX_ICON_SIDE,
     };
-    use tairix_sandbox::rt::draw_seed;
     use tairix_sandbox::rt::{
         serve_session_stdio, serve_stdio, session_worker_role, worker_role, RtLauncher,
-        RtSessionLauncher, SessionMembers,
     };
-    use tairix_sandbox::session::SessionError;
-    use tairix_sandbox::supervise::SupervisedSession;
     use tairix_sandbox::ParserSandbox;
-    use tairix_sound::{CoverRange, Metadata, SoundInfo};
+    use tairix_sound::{CoverRange, Metadata};
     use tairix_theme::{TextRole, Theme};
     use tairix_util::defer::JobQueue;
     use tairix_window::app::{self, Wake, WindowPane};
@@ -98,10 +97,12 @@ mod program {
     /// The window's title.
     const APP_TITLE: &str = "Music";
 
-    /// The window loop's wake tokens: the worker's answers, then the playback
-    /// thread's posts.
-    const WORKER_TOKEN: u64 = app::FIRST_APP_TOKEN;
+    /// The window loop's wake tokens: the chores worker's answers, the
+    /// playback thread's posts, then the tags and art workers' answers.
+    const CHORES_TOKEN: u64 = app::FIRST_APP_TOKEN;
     const PLAYBACK_TOKEN: u64 = app::FIRST_APP_TOKEN + 1;
+    const TAGS_TOKEN: u64 = app::FIRST_APP_TOKEN + 2;
+    const ART_TOKEN: u64 = app::FIRST_APP_TOKEN + 3;
 
     /// The playback thread's wait-set tokens.
     const ENGINE: Tokens = Tokens {
@@ -111,18 +112,9 @@ mod program {
     };
     const ORDERS: u64 = 4;
 
-    /// The prober's wait-set tokens.
-    const PROBE_READ: u64 = 1;
-    const PROBE_WRITE: u64 = 2;
-
-    /// Jobs the worker holds at once; the window keeps the rest in order and
+    /// Jobs a worker holds at once; the window keeps the rest in order and
     /// hands them on as answers come back, so none is dropped.
     const WORKER_QUEUE: usize = 16;
-
-    /// The longest a track's tags may take to read before the decoder reading
-    /// them is given up as hung: generous for a slow disk, and a bound, so
-    /// one stuck file cannot hold every later job behind it.
-    const PROBE_BUDGET_NS: u64 = 10_000_000_000;
 
     /// What an art cache entry costs beyond its pixels: its key and its place.
     const ART_ENTRY_METADATA_BYTES: usize = 128;
@@ -374,79 +366,76 @@ mod program {
         }
     }
 
-    // ---- the worker ----------------------------------------------------
-
-    /// What the worker is asked.
-    enum Job {
-        Probe {
-            entry: EntryId,
-            file: Arc<File>,
-        },
-        Art {
-            entry: EntryId,
-            file: Arc<File>,
-            cover: CoverRange,
-            side: u32,
-        },
+    /// What the chores worker is asked: the player's own business.
+    enum Chore {
         Devices,
         Save(Saved),
     }
 
-    /// What it answers.
-    enum Answer {
-        Probed {
-            entry: EntryId,
-            read: Option<(SoundInfo, Metadata)>,
-        },
-        Art {
-            entry: EntryId,
-            side: u32,
-            picture: Option<Surface>,
-        },
+    /// What a chore came to.
+    enum ChoreDone {
         Devices(Result<Vec<Device>, Errno>),
         Saved(Result<(), Errno>),
     }
 
-    /// What the worker keeps between jobs: the decoders, started on first use
-    /// and kept, so a folder of tracks costs one decoder process, not one each.
-    #[derive(Default)]
-    struct Workshop {
-        prober: Option<Prober>,
-        renderer: Option<ParserSandbox<RtLauncher, tairix_rt::LogSink>>,
+    fn do_chore(_: &mut (), chore: &mut Chore) -> ChoreDone {
+        match chore {
+            Chore::Devices => ChoreDone::Devices(list_devices()),
+            Chore::Save(saved) => ChoreDone::Saved(save_settings(saved)),
+        }
     }
 
-    fn serve(shop: &mut Workshop, job: &mut Job) -> Answer {
-        match job {
-            Job::Probe { entry, file } => {
-                if shop.prober.is_none() {
-                    shop.prober = Prober::new();
-                }
-                let read = shop.prober.as_mut().and_then(|prober| prober.probe(file));
-                Answer::Probed {
-                    entry: *entry,
-                    read,
-                }
-            }
-            Job::Art {
-                entry,
-                file,
-                cover,
-                side,
-            } => {
-                let renderer = shop.renderer.get_or_insert_with(|| {
-                    ParserSandbox::new(
-                        RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Documents),
-                        tairix_rt::LogSink,
-                    )
-                });
-                Answer::Art {
-                    entry: *entry,
-                    side: *side,
-                    picture: cover_picture(renderer, file, *cover, *side),
-                }
-            }
-            Job::Devices => Answer::Devices(list_devices()),
-            Job::Save(saved) => Answer::Saved(save_settings(saved)),
+    /// A track whose tags are to be read.
+    struct Probe {
+        entry: EntryId,
+        file: Arc<File>,
+    }
+
+    /// What its tags came to.
+    struct Probed {
+        entry: EntryId,
+        tags: Tags,
+    }
+
+    /// Read a track's tags in the tags worker's decoder, started on first use
+    /// and kept, so a folder of tracks costs one decoder process, not one each.
+    fn probe(reader: &mut Option<RtTags>, job: &mut Probe) -> Probed {
+        if reader.is_none() {
+            *reader = RtTags::new();
+        }
+        let tags = reader
+            .as_mut()
+            .map_or(Tags::Unread, |held| held.read_tags(&job.file));
+        Probed {
+            entry: job.entry,
+            tags,
+        }
+    }
+
+    /// A cover to decode: the picture `file` holds at `cover`, to a square of
+    /// `side`.
+    struct Art {
+        entry: EntryId,
+        file: Arc<File>,
+        cover: CoverRange,
+        side: u32,
+    }
+
+    /// What a cover was drawn as.
+    struct Drawn {
+        entry: EntryId,
+        side: u32,
+        picture: Option<Surface>,
+    }
+
+    /// The art worker's image sandbox, kept from one cover to the next.
+    type Renderer = ParserSandbox<RtLauncher, tairix_rt::LogSink>;
+
+    fn draw_art(renderer: &mut Renderer, art: &mut Art) -> Drawn {
+        Drawn {
+            entry: art.entry,
+            side: art.side,
+            picture: cover_picture(renderer, &art.file, art.cover, art.side),
         }
     }
 
@@ -482,172 +471,91 @@ mod program {
         Ok(listed)
     }
 
-    /// A track's tags and shape, read by a decoder in the parser sandbox the
-    /// worker drives to completion.
-    struct Prober {
-        session: SupervisedSession<RtSessionLauncher, tairix_rt::LogSink>,
-        client: AudioDecodeClient,
-        set: u64,
-        members: SessionMembers,
-        reading: Vec<u8>,
+    /// A worker of the window's, and the jobs it had no room for, which the
+    /// window keeps in order and hands on as answers come back so none is
+    /// dropped.
+    struct Lane<S, Req, Ans> {
+        worker: Arc<Worker<S, Req, Ans, JobQueue<Req, Ans>>>,
+        waiting: VecDeque<Req>,
+        _stops: WorkerGuard<S, Req, Ans, JobQueue<Req, Ans>>,
     }
 
-    /// What one frame from the prober's decoder came to.
-    enum Heard {
-        Need { offset: u64, len: usize },
-        Opened,
-        Refused,
-        Other,
-        Broken,
-    }
-
-    impl Prober {
-        fn new() -> Option<Self> {
-            let bounds = session_bounds().ok()?;
-            let set = u64::try_from(tairix_rt::waitset_create()).ok()?;
-            Some(Self {
-                session: SupervisedSession::new(
-                    RtSessionLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages),
-                    bounds,
-                    tairix_rt::LogSink,
-                ),
-                client: AudioDecodeClient::new(),
-                set,
-                members: SessionMembers::new(set, PROBE_READ, PROBE_WRITE),
-                reading: Vec::new(),
+    impl<S: Send + 'static, Req: Send + 'static, Ans: Send + 'static> Lane<S, Req, Ans> {
+        /// A worker carrying out `run` over `state`, its answers waking the
+        /// window's wait-set `set` as `token`.
+        fn start(
+            run: fn(&mut S, &mut Req) -> Ans,
+            state: S,
+            set: u64,
+            token: u64,
+        ) -> Result<Self, String> {
+            let worker = Worker::queued(run, state, WorkerWake::create(), WORKER_QUEUE)
+                .map(Arc::new)
+                .map_err(|_| String::from("no memory for a worker"))?;
+            if let Err(reason) = Worker::start(&worker) {
+                app::report(
+                    APP_NAME,
+                    format_args!("no worker thread ({reason:?}); jobs run on the window's thread"),
+                );
+            }
+            let stops = WorkerGuard::new(&worker);
+            app::watch_wake(set, worker.wake(), token)
+                .map_err(|err| format!("worker wake refused ({err})"))?;
+            Ok(Self {
+                worker,
+                waiting: VecDeque::new(),
+                _stops: stops,
             })
         }
 
-        /// `file`'s stream and tags, or `None` when no decoder can read it in
-        /// the budget.
-        fn probe(&mut self, file: &File) -> Option<(SoundInfo, Metadata)> {
-            let len = file.regular_len().ok()??;
-            let started = tairix_rt::clock_get();
-            let budget_ends = started.saturating_add(PROBE_BUDGET_NS);
-            if !self.ensure_live(budget_ends) {
-                return None;
-            }
-            self.client.open(len, None, draw_seed()?).ok()?;
-            loop {
-                let now = tairix_rt::clock_get();
-                if now >= budget_ends {
-                    self.give_up(now);
-                    return None;
-                }
-                self.send(now);
-                match self.take(now) {
-                    Heard::Need { offset, len } => self.serve_need(file, offset, len)?,
-                    Heard::Opened => {
-                        let info = *self.client.info()?;
-                        return Some((info, self.client.metadata()?.clone()));
-                    }
-                    Heard::Refused => return None,
-                    Heard::Broken => {
-                        self.give_up(now);
-                        return None;
-                    }
-                    Heard::Other => {}
-                }
-                self.park(budget_ends)?;
-            }
+        /// Ask for `job`, after every job asked before it.
+        fn ask(&mut self, job: Req) {
+            self.waiting.push_back(job);
+            self.hand_on();
         }
 
-        /// Have a decoder live, waiting out a paced replacement within the
-        /// budget.
-        fn ensure_live(&mut self, budget_ends: u64) -> bool {
-            for _ in 0..2 {
-                if self.session.is_live() {
-                    return true;
-                }
-                let now = tairix_rt::clock_get();
-                if let Some(at) = self.session.restart_deadline().filter(|&at| at > now) {
-                    if at >= budget_ends {
-                        return false;
-                    }
-                    let mut token = 0;
-                    let _ = tairix_rt::waitset_wait(self.set, at - now, &mut token);
-                }
-                if self.session.start(tairix_rt::clock_get()).is_some() {
-                    self.client = AudioDecodeClient::new();
+        /// Give the worker as many waiting jobs as it has room for.
+        fn hand_on(&mut self) {
+            while let Some(job) = self.waiting.pop_front() {
+                if let Err(job) = self.worker.submit(job) {
+                    self.waiting.push_front(job);
+                    return;
                 }
             }
-            self.session.is_live()
         }
+    }
 
-        fn send(&mut self, now: u64) {
-            while let Some(frame) = self.client.outgoing() {
-                match self.session.send(frame) {
-                    Ok(()) => self.client.sent(),
-                    Err(SessionError::OutboundFull) => break,
-                    Err(_) => {
-                        self.give_up(now);
-                        return;
-                    }
-                }
-            }
-            let _ = self.session.on_writable(now);
-        }
+    /// The window's three workers. A track's tags and its cover are a
+    /// stranger's bytes, each read on a worker of its own, so a hostile file
+    /// holds up neither the other nor the player's own business.
+    struct Workers {
+        /// The output devices, and the listener's settings.
+        chores: Lane<(), Chore, ChoreDone>,
+        /// Each track's tags.
+        tags: Lane<Option<RtTags>, Probe, Probed>,
+        /// The cover of the track heard.
+        art: Lane<Renderer, Art, Drawn>,
+    }
 
-        fn take(&mut self, now: u64) -> Heard {
-            let client = &mut self.client;
-            match self
-                .session
-                .recv(now, |frame| match client.on_frame(frame) {
-                    Ok(DecodeEvent::Need { offset, len }) => Heard::Need { offset, len },
-                    Ok(DecodeEvent::Opened) => Heard::Opened,
-                    Ok(DecodeEvent::Refused(_)) => Heard::Refused,
-                    Ok(_) => Heard::Other,
-                    Err(_) => Heard::Broken,
-                }) {
-                Ok(Some(heard)) => heard,
-                Ok(None) => Heard::Other,
-                Err(_) => Heard::Broken,
-            }
-        }
-
-        fn serve_need(&mut self, file: &File, offset: u64, len: usize) -> Option<()> {
-            if self.reading.len() < len {
-                self.reading.try_reserve(len - self.reading.len()).ok()?;
-                self.reading.resize(len, 0);
-            }
-            let read = file.read_at(offset, &mut self.reading[..len]);
-            let supplied = match read {
-                Ok(read) if read == len => self.client.supply(&self.reading[..len]),
-                _ => self.client.unreadable(),
-            };
-            supplied.ok()
-        }
-
-        /// Wait for the decoder's next answer or room, no later than
-        /// `budget_ends`.
-        fn park(&mut self, budget_ends: u64) -> Option<()> {
-            let (descriptors, read, write) = (
-                self.session.descriptors(),
-                self.session.wants_read(),
-                self.session.wants_write(),
+    impl Workers {
+        /// Start all three, waking the window's wait-set `set`.
+        fn start(set: u64) -> Result<Self, String> {
+            let renderer = ParserSandbox::new(
+                RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Documents),
+                tairix_rt::LogSink,
             );
-            self.members.sync(descriptors, read, write).ok()?;
-            let now = tairix_rt::clock_get();
-            let mut token = 0;
-            let waited =
-                tairix_rt::waitset_wait(self.set, budget_ends.saturating_sub(now), &mut token);
-            let now = tairix_rt::clock_get();
-            if waited != 0 {
-                return (Errno::from_syscall(waited) == Errno::TimedOut).then_some(());
-            }
-            let failed = match token {
-                PROBE_READ => self.session.on_readable(now).is_err(),
-                PROBE_WRITE => self.session.on_writable(now).is_err(),
-                _ => false,
-            };
-            (!failed).then_some(())
+            Ok(Self {
+                chores: Lane::start(do_chore, (), set, CHORES_TOKEN)?,
+                tags: Lane::start(probe, None, set, TAGS_TOKEN)?,
+                art: Lane::start(draw_art, renderer, set, ART_TOKEN)?,
+            })
         }
 
-        /// The decoder broke or hung: replace it before the next probe.
-        fn give_up(&mut self, now: u64) {
-            self.session
-                .condemn(now, "a track's tags were not read in the time allowed");
-            self.client = AudioDecodeClient::new();
+        /// Give each as many waiting jobs as it has room for.
+        fn hand_on(&mut self) {
+            self.chores.hand_on();
+            self.tags.hand_on();
+            self.art.hand_on();
         }
     }
 
@@ -676,11 +584,12 @@ mod program {
     // ---- the window ----------------------------------------------------
 
     /// The window's park: its mailbox, the memory-pressure band, the desktop
-    /// state, the worker's answers and the playback thread's posts.
+    /// state, the workers' answers and the playback thread's posts.
     struct RtEventSource<'a> {
         mailbox: EventMailbox,
         set: u64,
-        worker: &'a Workers,
+        /// Each worker's wake, by the token it fires as.
+        answers: [(u64, &'a WorkerWake); 3],
         link: &'a Link,
         desktop_moved: &'a Cell<bool>,
         pressure_moved: &'a Cell<bool>,
@@ -688,6 +597,20 @@ mod program {
         /// nothing held, so the park sleeps outright. The loop writes it just
         /// before each wait.
         deadline_ns: &'a Cell<Option<u64>>,
+    }
+
+    impl RtEventSource<'_> {
+        /// Drain the wake of the worker `token` names, whose answers the loop
+        /// then collects.
+        fn worker_woke(&self, token: u64) -> Parked {
+            match self.answers.iter().find(|(fired, _)| *fired == token) {
+                Some((_, wake)) => {
+                    wake.drain();
+                    Parked::Interrupted
+                }
+                None => Parked::Served,
+            }
+        }
     }
 
     impl EventDrain for RtEventSource<'_> {
@@ -708,14 +631,11 @@ mod program {
             match woken {
                 // Each wake is a level, so one left undrained would make the
                 // park spin.
-                Wake::App(WORKER_TOKEN) => {
-                    self.worker.wake().drain();
-                    Ok(Parked::Interrupted)
-                }
                 Wake::App(PLAYBACK_TOKEN) => {
                     self.link.posted.drain();
                     Ok(Parked::Interrupted)
                 }
+                Wake::App(token) => Ok(self.worker_woke(token)),
                 Wake::PressureChanged => {
                     tairix_font::trim_glyph_cache();
                     self.pressure_moved.set(true);
@@ -729,8 +649,6 @@ mod program {
             }
         }
     }
-
-    type Workers = Worker<Workshop, Job, Answer, JobQueue<Job, Answer>>;
 
     /// What a refusal the player states came from, each keeping at most one
     /// alert waiting.
@@ -758,9 +676,7 @@ mod program {
         /// The files the playlist names, held until no entry names them.
         files: BTreeMap<EntryId, Arc<File>>,
         link: Arc<Link>,
-        worker: Arc<Workers>,
-        /// Jobs the worker had no room for, in the order they were asked.
-        backlog: VecDeque<Job>,
+        workers: Workers,
         covers: Covers,
         /// The open context menu's id.
         menu: Option<u64>,
@@ -785,7 +701,7 @@ mod program {
         }
 
         /// Add `opened` to the playlist and have the playback thread and the
-        /// worker learn of it.
+        /// tags worker learn of it.
         fn add(&mut self, opened: Vec<(String, File)>, reported: &mut Region) {
             if opened.is_empty() {
                 return;
@@ -853,14 +769,13 @@ mod program {
         }
 
         fn request(&mut self, request: Request) {
-            let job = match request {
+            match request {
                 Request::Probe(entry) => {
-                    let Some(file) = self.files.get(&entry) else {
-                        return;
-                    };
-                    Job::Probe {
-                        entry,
-                        file: Arc::clone(file),
+                    if let Some(file) = self.files.get(&entry) {
+                        self.workers.tags.ask(Probe {
+                            entry,
+                            file: Arc::clone(file),
+                        });
                     }
                 }
                 Request::Art { entry, cover, side } => {
@@ -869,59 +784,56 @@ mod program {
                     if self.covers.peek(&side, &entry).is_some() {
                         return;
                     }
-                    let Some(file) = self.files.get(&entry) else {
-                        return;
-                    };
-                    Job::Art {
-                        entry,
-                        file: Arc::clone(file),
-                        cover,
-                        side,
+                    if let Some(file) = self.files.get(&entry) {
+                        self.workers.art.ask(Art {
+                            entry,
+                            file: Arc::clone(file),
+                            cover,
+                            side,
+                        });
                     }
                 }
-                Request::Devices => Job::Devices,
-                Request::Save(saved) => Job::Save(saved),
-            };
-            self.backlog.push_back(job);
-            self.hand_on();
+                Request::Devices => self.workers.chores.ask(Chore::Devices),
+                Request::Save(saved) => self.workers.chores.ask(Chore::Save(saved)),
+            }
         }
 
-        /// Give the worker as much of the backlog as it has room for.
-        fn hand_on(&mut self) {
-            while let Some(job) = self.backlog.pop_front() {
-                if let Err(job) = self.worker.submit(job) {
-                    self.backlog.push_front(job);
-                    return;
+        /// Adopt every answer the workers have landed.
+        fn collect(&mut self, reported: &mut Region) {
+            while let Some(done) = self.workers.chores.worker.collect() {
+                self.chore_done(done, reported);
+            }
+            while let Some(Probed { entry, tags }) = self.workers.tags.worker.collect() {
+                let read = match &tags {
+                    Tags::Read(info, metadata) => Some((*info, metadata)),
+                    Tags::Unread => None,
+                };
+                let outcome = self.player.probed(entry, read, &self.layout, reported);
+                self.act(outcome);
+            }
+            while let Some(drawn) = self.workers.art.worker.collect() {
+                let Drawn {
+                    entry,
+                    side,
+                    picture,
+                } = drawn;
+                if let Some(picture) = picture.filter(|_| self.files.contains_key(&entry)) {
+                    self.covers.retain(&side, entry, Cover(picture));
+                    self.player.art_landed(entry, &self.layout, reported);
                 }
             }
         }
 
-        /// Adopt one answer from the worker.
-        fn answered(&mut self, answer: Answer, reported: &mut Region) {
-            match answer {
-                Answer::Probed { entry, read } => {
-                    let read = read.as_ref().map(|(info, metadata)| (*info, metadata));
-                    let outcome = self.player.probed(entry, read, &self.layout, reported);
-                    self.act(outcome);
-                }
-                Answer::Art {
-                    entry,
-                    side,
-                    picture,
-                } => {
-                    if let Some(picture) = picture.filter(|_| self.files.contains_key(&entry)) {
-                        self.covers.retain(&side, entry, Cover(picture));
-                        self.player.art_landed(entry, &self.layout, reported);
-                    }
-                }
-                Answer::Devices(Ok(devices)) => self.player.devices_listed(devices),
-                Answer::Devices(Err(err)) => self.player.notify(
+        fn chore_done(&mut self, done: ChoreDone, reported: &mut Region) {
+            match done {
+                ChoreDone::Devices(Ok(devices)) => self.player.devices_listed(devices),
+                ChoreDone::Devices(Err(err)) => self.player.notify(
                     format!("The output devices could not be listed: {err}"),
                     &self.layout,
                     reported,
                 ),
-                Answer::Saved(Ok(())) => {}
-                Answer::Saved(Err(err)) => self.notices.refuse(
+                ChoreDone::Saved(Ok(())) => {}
+                ChoreDone::Saved(Err(err)) => self.notices.refuse(
                     Spoke::Settings,
                     "Your settings could not be saved",
                     &format!("{err}"),
@@ -1377,29 +1289,10 @@ mod program {
                 format_args!("playback wake refused ({err})"),
             );
         }
-        let worker = match Worker::queued(
-            serve,
-            Workshop::default(),
-            WorkerWake::create(),
-            WORKER_QUEUE,
-        ) {
-            Ok(worker) => Arc::new(worker),
-            Err(_) => return app::fail(APP_NAME, app::EXIT_NO_EVENTS, "no memory for the worker"),
+        let workers = match Workers::start(set) {
+            Ok(workers) => workers,
+            Err(why) => return app::fail(APP_NAME, app::EXIT_NO_EVENTS, why),
         };
-        if let Err(reason) = Worker::start(&worker) {
-            app::report(
-                APP_NAME,
-                format_args!("no worker thread ({reason:?}); jobs run on the window's thread"),
-            );
-        }
-        let _worker_guard = WorkerGuard::new(&worker);
-        if let Err(err) = app::watch_wake(set, worker.wake(), WORKER_TOKEN) {
-            return app::fail(
-                APP_NAME,
-                app::EXIT_NO_EVENTS,
-                format_args!("worker wake refused ({err})"),
-            );
-        }
 
         let theme = themes.active();
         let scale = desktop.scale();
@@ -1457,8 +1350,7 @@ mod program {
             layout,
             files: BTreeMap::new(),
             link,
-            worker,
-            backlog: VecDeque::new(),
+            workers,
             covers,
             menu: None,
             presented: false,
@@ -1489,12 +1381,20 @@ mod program {
         let desktop_moved = Cell::new(false);
         let pressure_moved = Cell::new(false);
         let deadline_ns = Cell::new(None);
-        let worker_handle = Arc::clone(&app_state.worker);
+        let (chores, tags, art) = (
+            Arc::clone(&app_state.workers.chores.worker),
+            Arc::clone(&app_state.workers.tags.worker),
+            Arc::clone(&app_state.workers.art.worker),
+        );
         let link_handle = Arc::clone(&app_state.link);
         let mut events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(endpoint, server),
             set,
-            worker: &worker_handle,
+            answers: [
+                (CHORES_TOKEN, chores.wake()),
+                (TAGS_TOKEN, tags.wake()),
+                (ART_TOKEN, art.wake()),
+            ],
             link: &link_handle,
             desktop_moved: &desktop_moved,
             pressure_moved: &pressure_moved,
@@ -1527,10 +1427,8 @@ mod program {
 
             // What has landed first, so a picture or a track's name appears the
             // moment it is ready rather than at the next input.
-            while let Some(answer) = app_state.worker.collect() {
-                app_state.answered(answer, &mut reported);
-            }
-            app_state.hand_on();
+            app_state.collect(&mut reported);
+            app_state.workers.hand_on();
             app_state.adopt_board(&mut reported);
 
             // Then every queued input, before anything is painted, so a burst

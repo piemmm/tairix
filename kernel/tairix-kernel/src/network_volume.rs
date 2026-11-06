@@ -364,13 +364,7 @@ impl NetworkVolumes {
             publish_volume_identity(offered.volume_id, &["Storage", &name], &name, audit)
         {
             unmount();
-            return Err(refused(
-                "identity_unpublishable",
-                match err {
-                    VolumePublishError::NilIdentity => Errno::OutOfRange,
-                    VolumePublishError::AlreadyPublished => Errno::AlreadyExists,
-                },
-            ));
+            return Err(refused("identity_unpublishable", unpublished(err)));
         }
         let registered = LATE_FILESYSTEM.register_network(
             handle,
@@ -732,6 +726,15 @@ impl NetworkVolumes {
     }
 }
 
+/// What a network attach answers for the identity it could not publish.
+const fn unpublished(err: VolumePublishError) -> Errno {
+    match err {
+        VolumePublishError::NilIdentity => Errno::OutOfRange,
+        VolumePublishError::AlreadyPublished => Errno::AlreadyExists,
+        VolumePublishError::OutOfMemory => Errno::OutOfMemory,
+    }
+}
+
 #[cfg(test)]
 impl NetworkVolumes {
     /// Run `during` while network volume `id` is held as an attach or detach
@@ -839,9 +842,7 @@ impl Retiring {
 /// Take the served endpoint `endpoint` down, if it is still up: its server
 /// learns its volume is gone by the endpoint going.
 fn end_endpoint(endpoint: u64, audit: &'static (dyn Sink + Sync)) {
-    if let Some(endpoint) = tairix_kernel_core::callreg::unregister(EndpointId(endpoint)) {
-        endpoint.destroy(audit);
-    }
+    tairix_kernel_core::callreg::take_down(EndpointId(endpoint), audit);
 }
 
 /// The message of a refused attach.

@@ -376,9 +376,10 @@ pub enum Prepared {
 pub struct WallpaperDesk {
     /// What the desktop wants painted, cleared when its answer is stored.
     wanted: Option<WallpaperSource>,
-    /// Whether a preparer has taken [`WallpaperDesk::wanted`] and not yet
-    /// answered it, so the same picture is never prepared twice at once.
-    preparing: bool,
+    /// What a preparer has taken of [`WallpaperDesk::wanted`] and not yet
+    /// answered, so the same picture is never prepared twice at once and an
+    /// eject knows what is being read.
+    preparing: Option<WallpaperSource>,
     /// The prepared surface (or the reason there is none), kept until the
     /// desktop asks for that same source.
     done: Option<(WallpaperSource, Result<Surface, String>)>,
@@ -398,6 +399,12 @@ pub struct WallpaperDesk {
     preparing_slide: Option<Slide>,
     /// The prepared slideshow picture waiting for the serve loop.
     slide_done: Option<(SlideWant, Result<Surface, String>)>,
+    /// The places each volume whose eject is under way is shown at, by its
+    /// hold: no backdrop or slide is read from within one until the eject is
+    /// made. Previews read shipped pictures alone, which no eject takes.
+    held: Vec<(u64, Vec<Vec<String>>)>,
+    /// The hold the next eject is given.
+    next_hold: u64,
     /// Set once the embedder is tearing down, so a parked preparer leaves.
     stopping: bool,
 }
@@ -415,7 +422,7 @@ impl WallpaperDesk {
     pub fn new() -> Self {
         Self {
             wanted: None,
-            preparing: false,
+            preparing: None,
             preparing_reserved: 0,
             done: None,
             previews: VecDeque::new(),
@@ -425,6 +432,8 @@ impl WallpaperDesk {
             wanted_slide: None,
             preparing_slide: None,
             slide_done: None,
+            held: Vec::new(),
+            next_hold: 0,
             stopping: false,
         }
     }
@@ -451,7 +460,7 @@ impl WallpaperDesk {
     /// How many renders of any kind are under way.
     fn running(&self) -> usize {
         self.rendering.len()
-            + usize::from(self.preparing)
+            + usize::from(self.preparing.is_some())
             + usize::from(self.preparing_slide.is_some())
     }
 
@@ -511,14 +520,36 @@ impl WallpaperDesk {
     #[must_use]
     pub fn has_work(&self) -> bool {
         !self.stopping
-            && ((self.wanted.is_some() && !self.preparing)
-                || self.has_slide_work()
-                || self.has_preview_work())
+            && (self.has_backdrop_work() || self.has_slide_work() || self.has_preview_work())
     }
 
-    /// Whether a slideshow picture is wanted that no preparer has taken.
-    const fn has_slide_work(&self) -> bool {
-        self.wanted_slide.is_some() && self.preparing_slide.is_none()
+    /// Whether the backdrop is wanted, no preparer has taken it, and no eject
+    /// holds it back.
+    fn has_backdrop_work(&self) -> bool {
+        self.preparing.is_none()
+            && self
+                .wanted
+                .as_ref()
+                .is_some_and(|source| !self.is_held(source))
+    }
+
+    /// Whether a slideshow picture is wanted, no preparer has taken it, and no
+    /// eject holds it back.
+    fn has_slide_work(&self) -> bool {
+        self.preparing_slide.is_none()
+            && self
+                .wanted_slide
+                .as_ref()
+                .is_some_and(|(_, source)| !self.is_held(source))
+    }
+
+    /// Whether `source` is read from within a volume an eject holds.
+    fn is_held(&self, source: &WallpaperSource) -> bool {
+        source.image_path().is_some_and(|path| {
+            self.held
+                .iter()
+                .any(|(_, roots)| tairix_browse::mount::path_within(roots, path))
+        })
     }
 
     /// Whether the oldest waiting preview may start now. Nothing starts beside
@@ -547,8 +578,9 @@ impl WallpaperDesk {
         }
         // The desktop's own pictures start whatever the budget says, but hold
         // their share of it, so no preview starts beside them unless it fits.
-        if let Some(source) = self.wanted.clone().filter(|_| !self.preparing) {
-            self.preparing = true;
+        if self.has_backdrop_work() {
+            let source = self.wanted.clone()?;
+            self.preparing = Some(source.clone());
             self.preparing_reserved = self
                 .budget
                 .preparation
@@ -629,7 +661,7 @@ impl WallpaperDesk {
     /// included, which it holds whatever the budget says, answering whether a
     /// waiting preview may now start beside it.
     pub fn plan_backdrop(&mut self, planned: u64) -> bool {
-        if self.preparing {
+        if self.preparing.is_some() {
             self.preparing_reserved = planned;
         }
         self.has_preview_work()
@@ -884,7 +916,7 @@ impl WallpaperDesk {
     /// handed itself the same picture forever — a decode loop, and this one
     /// reads and rasterises a whole screen's worth each time round.
     pub fn deliver(&mut self, source: WallpaperSource, outcome: Result<Surface, String>) -> bool {
-        self.preparing = false;
+        self.preparing = None;
         self.preparing_reserved = 0;
         if self.wanted.as_ref() != Some(&source) {
             return false;
@@ -892,6 +924,53 @@ impl WallpaperDesk {
         self.wanted = None;
         self.done = Some((source, outcome));
         true
+    }
+
+    /// Hold back every backdrop and slide read from within `roots`, the
+    /// places of a volume about to be ejected, until the hold answered is
+    /// [`release`](Self::release)d. `None` where the heap has no room to note
+    /// it.
+    pub fn hold_within(&mut self, roots: &[&[String]]) -> Option<u64> {
+        let mut owned = Vec::new();
+        owned.try_reserve_exact(roots.len()).ok()?;
+        for root in roots {
+            let mut parts = Vec::new();
+            parts.try_reserve_exact(root.len()).ok()?;
+            for part in *root {
+                parts.push(tairix_util::fallible::concatenated(&[part])?);
+            }
+            owned.push(parts);
+        }
+        self.held.try_reserve(1).ok()?;
+        let hold = self.next_hold;
+        self.next_hold = self.next_hold.wrapping_add(1);
+        self.held.push((hold, owned));
+        Some(hold)
+    }
+
+    /// Whether a backdrop or slide is being read from within `roots` now: what
+    /// a hold of them waits out.
+    #[must_use]
+    pub fn reads_within(&self, roots: &[&[String]]) -> bool {
+        let slide = self.preparing_slide.as_ref().map(|slide| &slide.source);
+        self.preparing
+            .iter()
+            .chain(slide)
+            .filter_map(WallpaperSource::image_path)
+            .any(|path| tairix_browse::mount::path_within(roots, path))
+    }
+
+    /// Whether an eject holds a volume, so a preparer ending a read wakes it.
+    #[must_use]
+    pub fn holds(&self) -> bool {
+        !self.held.is_empty()
+    }
+
+    /// End `hold`, answering whether a picture is now wanted that a preparer
+    /// must be woken for.
+    pub fn release(&mut self, hold: u64) -> bool {
+        self.held.retain(|(held, _)| *held != hold);
+        self.has_work()
     }
 
     /// Stop handing out work, so a parked preparer leaves its loop.

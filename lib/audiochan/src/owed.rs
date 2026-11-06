@@ -27,8 +27,9 @@
 //! A folded notification takes the place of the newest it absorbed, so what is
 //! held goes in the order it happened. Each goes where its endpoint reports
 //! when it is offered — a connector's change to the watch, the rest to the
-//! endpoint's attachment — and one whose endpoint the mixer has let go is owed
-//! to nobody.
+//! endpoint's attachment — and one whose attachment the mixer has let go or
+//! replaced is owed to nobody: it is forgotten as the attachment goes, so an
+//! old configuration's report never reaches the next.
 //!
 //! A notification refused for good is given up, counted and reported; one to a
 //! port gone with its mixer loses nobody anything.
@@ -149,6 +150,16 @@ impl Owed {
                 self.pending.remove(at);
             }
         }
+    }
+
+    /// Forget what is held for `endpoint`'s attachment, which the mixer has let
+    /// go or replaced: it is owed to nobody now, and would be stale to the
+    /// attachment after. A connector's change goes to the watch and stays.
+    pub(crate) fn forget_attachment(&mut self, endpoint: u16) {
+        self.pending.retain(|held| {
+            self::endpoint(&held.what) != endpoint
+                || matches!(held.what, AudioChannelNotify::JackChanged { .. })
+        });
     }
 
     /// Whether a held notification `to` names `port` for waits on its room.

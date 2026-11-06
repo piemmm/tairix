@@ -35,10 +35,12 @@ use tairix_log::{log, Event, EventId, Level, Sink};
 
 use crate::btree::TreeWalk;
 use crate::header::ReservedOwner;
+use crate::integrity::DataFault;
 use crate::scratch::{ElementWidth, ScratchArray};
 use crate::scrub::{ScrubReport, ARXFS_RANGE_END, ARXFS_RANGE_START};
 use crate::superblock;
 use crate::transaction::TxnRoot;
+use crate::xform;
 use crate::{
     as_usize, extent_spec, inode_spec, pending_delete_spec, DirScan, Extent, Inode, InodeKind, Pin,
     ARXFS, MAX_BLOCK_LEN, ROOT_INO,
@@ -745,6 +747,8 @@ impl<B: Block> ARXFS<B> {
     ///   superblock discovery header is present at all).
     /// * [`DriverError::DeviceFault`] on an unrecoverable low-level read while
     ///   scanning (never a panic).
+    /// * [`DriverError::OutOfMemory`] when a buffer a file's data needs is
+    ///   refused: extraction stops rather than pass readable blocks over.
     ///
     /// # Capabilities
     ///
@@ -892,6 +896,12 @@ impl<B: Block> ARXFS<B> {
                                         out.emit_block(ino, start + b, inode.size, slice);
                                         report.blocks_extracted += 1;
                                     }
+                                    xform::scrub(plain);
+                                }
+                                // A refused buffer judged nothing, so the pass
+                                // stops rather than pass readable blocks over.
+                                Err(DriverError::OutOfMemory) => {
+                                    return Err(DriverError::OutOfMemory);
                                 }
                                 Err(_) => report.blocks_skipped += ext.len,
                             }
@@ -899,14 +909,15 @@ impl<B: Block> ARXFS<B> {
                         }
                         for b in 0..ext.len {
                             let logical = start + b;
-                            if self
-                                .read_data_block_classified(ext.phys + b, &mut buf)
-                                .is_ok()
-                            {
-                                out.emit_block(ino, logical, inode.size, &buf[..cap]);
-                                report.blocks_extracted += 1;
-                            } else {
-                                report.blocks_skipped += 1;
+                            match self.read_data_block_classified(ext.phys + b, &mut buf) {
+                                Ok(()) => {
+                                    out.emit_block(ino, logical, inode.size, &buf[..cap]);
+                                    report.blocks_extracted += 1;
+                                }
+                                Err(DataFault::OutOfMemory) => {
+                                    return Err(DriverError::OutOfMemory);
+                                }
+                                Err(_) => report.blocks_skipped += 1,
                             }
                         }
                     }

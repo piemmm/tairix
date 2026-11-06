@@ -131,7 +131,10 @@ as the child's spawn share. The child maps it once, read-write, with
 second call answers `AlreadyExists`. The sandbox allow-list also admits a
 sandbox's own threads and futex words and the monotonic clock, each naming
 nothing outside the task (`docs/src/security/sandbox.md`).
-`SpawnAttach::drawing(wires, memory, threads, share)` is the canonical block.
+`SpawnAttach::drawing(wires, memory, threads, share)` is the canonical block,
+marked as the drawing sandbox's (`SPAWN_FLAG_DRAWING`): a share alone is any
+sandbox's, which is how a parser sandbox is handed the region it writes its
+output into, and it makes no spawn a drawing one.
 
 The host sizes the bounds from the machine and the saver's declared needs: one
 thread, or one per online core for `PARALLEL`; an address space of the region
@@ -215,7 +218,8 @@ instance that asked so none reaches a later one:
   by `screensaver.machine.tasks` before the reading is sent;
 - **picture keeping** — the feed area read out opaque and encoded as PNG on
   the saver file worker into `Home/Pictures/<saver's title>/`, written to a
-  hidden scratch file and renamed without replacing onto the first free name,
+  hidden scratch file and renamed without replacing onto the first free name
+  (a scratch file an earlier keep left there named for its saver first),
   named in the user's own zone (`plans/RAYTRACE.md` RT3); a keep sooner than
   `SAVER_KEEP_SPACING_NS` after the last, or past `SAVER_KEEPS_MAX` in one
   run, is answered as not kept;

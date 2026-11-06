@@ -11,10 +11,13 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# No dependencies on purpose: this crate is the bottom of the
-# layering. The compositing colour algebra lives in `lib/raster`; this
-# crate owns only the coordinate types the GUI crates share, so it is
-# depended on, never depends.
+# The only dependency is the ABI, below it: the UI scale range a desktop
+# carries across the boundary is the ABI's, and `Scale` is held to it. The
+# compositing colour algebra lives in `lib/raster`; this crate owns only the
+# coordinate types the GUI crates share.
+
+[dependencies]
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 [dev-dependencies]
 # The shared seeded generator the randomised unit tests draw from (never in a

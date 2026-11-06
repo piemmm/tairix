@@ -4,8 +4,8 @@
 //! real global boot statics (`LATE_FILESYSTEM`, `VOLUME_FOREST`,
 //! `VOLUME_SERVICE`, `LATE_IDENTITY`, `LATE_STORAGE_GID`, the recorded
 //! shared-memory facility): a FAT32 image is served over a genuine call
-//! endpoint from another thread (the shape a user-space block driver
-//! has), attached under the storage-group identity map (D3d), read and
+//! endpoint from a task of the test's host boot (the shape a user-space
+//! block driver has), attached under the storage-group identity map (D3d), read and
 //! written through the production `fs_*` service as a group member —
 //! with a non-member's write refused — and detached. It is the **only**
 //! test in this crate that touches those statics (the system-mount tests
@@ -23,8 +23,9 @@
 //! Every volume is served as on a running system (`plans/FSSERVE.md` FSS5):
 //! the attach publishes its volume node, and the harness plays `devmgr` and
 //! the format's driver bundle, opening the real driver over the volume's grant
-//! and answering the kernel's proxy through `lib/fsserve` from a thread of
-//! its own until the node leaves the tree.
+//! and answering the kernel's proxy through `lib/fsserve` from a task of its
+//! own until the node leaves the tree. Every thread that waits or wakes is a
+//! task of that boot, so a round trip blocks rather than spins.
 
 extern crate std;
 
@@ -33,15 +34,14 @@ use std::string::String;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc as StdArc, Condvar, Mutex};
-use std::thread;
 use std::time::Duration;
 use std::vec;
 use std::vec::Vec;
 
 use tairix_abi::blkio::{
-    encode_error_completion, BlkCompletion, BlkMedium, BlkOp, BlkRemovability,
+    encode_error_completion, BlkCompletion, BlkDeviceIdentity, BlkMedium, BlkOp, BlkRemovability,
     BlkRemovabilityEvidence, BlkRequest, BlkTransport, BLK_COMPLETION_LEN, BLK_DATA_LEN,
-    BLK_REQUEST_LEN,
+    BLK_DEVICE_IDENTITY_LEN, BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::NameMatching;
@@ -57,7 +57,10 @@ use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwResource, HW_NODE_ROOT, HW_NOD
 use tairix_abi::memory::PAGE_SIZE;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, RemovedWrites, VolumeClass};
 use tairix_abi::time::Time64;
-use tairix_abi::volume::{DetachMode, VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
+use tairix_abi::volume::{
+    DetachMode, ReplayAnswer, VolumeAttachRequest, VolumeDetachRequest, VolumeFsType,
+    VolumeReplayRequest,
+};
 use tairix_abi::{
     CapabilityId, CapabilityQuery, DriverError, DriverHandle, Errno, FileStat, LockRange,
     RenameFlags, UnlinkFlags,
@@ -82,8 +85,10 @@ use tairix_kernel_core::fs::{
     NodeHandle, OfferingServer, Opened, Principal, ServeChannel, Start,
 };
 use tairix_kernel_core::fswatch::WatchRegistry;
+use tairix_kernel_core::test_boot::{serve_next, HostBoot, StoppableTask};
+use tairix_kernel_core::waitq::park_calling_task;
 use tairix_kernel_core::{sharedreg, Path, Vfs};
-use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, RecvCall};
+use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, ReceivedCall};
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::{
     GroupId, GroupRecord, IdentityTableBuilder, ProcessId, UserId, UserRecord,
@@ -213,6 +218,17 @@ const NAME_TAKEN: u32 = 4181;
 const SERVE_RESUMED: u32 = 4193;
 const SERVE_REFUSED: u32 = 4194;
 const SERVER_LOST: u32 = 4195;
+const VOLUME_RETITLED: u32 = 4220;
+const VOLUME_RETITLE_REFUSED: u32 = 4221;
+const REINSERT_UNCONFIRMED: u32 = 4237;
+const REPLAY_ANSWERED: u32 = 4238;
+const REPLAY_REFUSED: u32 = 4239;
+
+/// What a fixture device states as its identity where its scenario has its
+/// medium proven by it, and what another device states.
+const UNIT: Option<BlkDeviceIdentity> = BlkDeviceIdentity::new([0x17; BLK_DEVICE_IDENTITY_LEN]);
+const OTHER_UNIT: Option<BlkDeviceIdentity> =
+    BlkDeviceIdentity::new([0x71; BLK_DEVICE_IDENTITY_LEN]);
 
 /// The address-space registry endpoint teardown revokes per-endpoint
 /// grants against.
@@ -548,11 +564,13 @@ struct ServedDevice {
     /// The publication the device's medium is served under: a request made
     /// for another is refused stale, as a medium-changing driver's is.
     binding: u64,
+    /// What the device states tells it from every other of its kind.
+    identity: Option<BlkDeviceIdentity>,
 }
 
 impl ServedDevice {
     /// A device whose geometry reply declares the medium its block backing
-    /// reports.
+    /// reports, stating no identity.
     fn new(block: RamBlock) -> Self {
         Self {
             medium: block.medium(),
@@ -563,6 +581,7 @@ impl ServedDevice {
             pulled: false,
             hold_first: None,
             binding: 0,
+            identity: None,
         }
     }
 
@@ -585,100 +604,106 @@ impl ServedDevice {
     }
 }
 
+/// The completion `device` answers `call` with, written to `reply`, moving
+/// data through `window`: its length.
+fn answer_block(
+    device: &Mutex<ServedDevice>,
+    window: *mut u8,
+    call: &ReceivedCall,
+    reply: &mut [u8],
+) -> usize {
+    let held = device.lock().unwrap().hold_first.take();
+    if let Some((received, gate)) = held {
+        received.send(()).unwrap();
+        gate.recv().unwrap();
+    }
+    match BlkRequest::decode(&call.request) {
+        Err(err) => encode_error_completion(reply, err).unwrap(),
+        Ok(_) if device.lock().unwrap().pulled => {
+            encode_error_completion(reply, Errno::DeviceOffline).unwrap()
+        }
+        Ok(request)
+            if request.op != BlkOp::Geometry
+                && request.binding != device.lock().unwrap().binding =>
+        {
+            encode_error_completion(reply, Errno::Stale).unwrap()
+        }
+        Ok(request) => {
+            let mut device = device.lock().unwrap();
+            let bytes = request.blocks as usize * BLOCK_SIZE;
+            match request.op {
+                BlkOp::Geometry => {
+                    device.geometries += 1;
+                    let geometry = device.block.geometry().unwrap();
+                    BlkCompletion {
+                        block_size: geometry.block_size,
+                        block_count: geometry.block_count,
+                        flags: 0,
+                        medium: device.medium,
+                        disc_layout: None,
+                        name: device.block.device_name(),
+                        binding: device.binding,
+                    }
+                    .encode(reply)
+                    .unwrap()
+                }
+                BlkOp::Read => {
+                    let mut buf = vec![0u8; bytes];
+                    match device.block.read_blocks(request.lba, &mut buf) {
+                        // SAFETY: test window of BLK_DATA_LEN bytes,
+                        // protocol-alternated access, bytes bounded
+                        // by the serving contract.
+                        Ok(()) => unsafe {
+                            core::ptr::copy_nonoverlapping(buf.as_ptr(), window, bytes);
+                            BlkCompletion::default().encode(reply).unwrap()
+                        },
+                        Err(err) => encode_error_completion(reply, err.as_errno()).unwrap(),
+                    }
+                }
+                BlkOp::Write => {
+                    let mut buf = vec![0u8; bytes];
+                    // SAFETY: as for the read arm.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(window, buf.as_mut_ptr(), bytes);
+                    }
+                    match device.block.write_blocks(request.lba, &buf) {
+                        Ok(()) => {
+                            let end = request.lba + u64::from(request.blocks);
+                            device.pulled = device
+                                .pull_after
+                                .is_some_and(|lba| (request.lba..end).contains(&lba));
+                            BlkCompletion::default().encode(reply).unwrap()
+                        }
+                        Err(err) => encode_error_completion(reply, err.as_errno()).unwrap(),
+                    }
+                }
+                BlkOp::Flush => {
+                    device.flushes += 1;
+                    BlkCompletion::default().encode(reply).unwrap()
+                }
+                BlkOp::Identity => {
+                    let stated = BlkDeviceIdentity::encode(device.identity);
+                    // SAFETY: as for the read arm.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(stated.as_ptr(), window, stated.len());
+                    }
+                    BlkCompletion::default().encode(reply).unwrap()
+                }
+            }
+        }
+    }
+}
+
 /// Serve blkio requests over `endpoint` against `device`, moving data
-/// through `window`, until `stop` is set.
+/// through `window`, from a task of the calling thread's boot until it is
+/// stopped.
 fn serve(
     endpoint: StdArc<CallEndpoint>,
     window: Window,
     device: StdArc<Mutex<ServedDevice>>,
-    stop: StdArc<AtomicBool>,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let window = window.ptr();
-        while !stop.load(Ordering::Relaxed) {
-            let RecvCall::Received(call) = endpoint.recv_call(BLK_REQUEST_LEN) else {
-                thread::yield_now();
-                continue;
-            };
-            let held = device.lock().unwrap().hold_first.take();
-            if let Some((received, gate)) = held {
-                received.send(()).unwrap();
-                gate.recv().unwrap();
-            }
-            let mut reply = [0u8; BLK_COMPLETION_LEN];
-            let len = match BlkRequest::decode(&call.request) {
-                Err(err) => encode_error_completion(&mut reply, err).unwrap(),
-                Ok(_) if device.lock().unwrap().pulled => {
-                    encode_error_completion(&mut reply, Errno::DeviceOffline).unwrap()
-                }
-                Ok(request)
-                    if request.op != BlkOp::Geometry
-                        && request.binding != device.lock().unwrap().binding =>
-                {
-                    encode_error_completion(&mut reply, Errno::Stale).unwrap()
-                }
-                Ok(request) => {
-                    let mut device = device.lock().unwrap();
-                    let bytes = request.blocks as usize * BLOCK_SIZE;
-                    match request.op {
-                        BlkOp::Geometry => {
-                            device.geometries += 1;
-                            let geometry = device.block.geometry().unwrap();
-                            BlkCompletion {
-                                block_size: geometry.block_size,
-                                block_count: geometry.block_count,
-                                flags: 0,
-                                medium: device.medium,
-                                disc_layout: None,
-                                name: device.block.device_name(),
-                                binding: device.binding,
-                            }
-                            .encode(&mut reply)
-                            .unwrap()
-                        }
-                        BlkOp::Read => {
-                            let mut buf = vec![0u8; bytes];
-                            match device.block.read_blocks(request.lba, &mut buf) {
-                                // SAFETY: test window of BLK_DATA_LEN bytes,
-                                // protocol-alternated access, bytes bounded
-                                // by the serving contract.
-                                Ok(()) => unsafe {
-                                    core::ptr::copy_nonoverlapping(buf.as_ptr(), window, bytes);
-                                    BlkCompletion::default().encode(&mut reply).unwrap()
-                                },
-                                Err(err) => {
-                                    encode_error_completion(&mut reply, err.as_errno()).unwrap()
-                                }
-                            }
-                        }
-                        BlkOp::Write => {
-                            let mut buf = vec![0u8; bytes];
-                            // SAFETY: as for the read arm.
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(window, buf.as_mut_ptr(), bytes);
-                            }
-                            match device.block.write_blocks(request.lba, &buf) {
-                                Ok(()) => {
-                                    let end = request.lba + u64::from(request.blocks);
-                                    device.pulled = device
-                                        .pull_after
-                                        .is_some_and(|lba| (request.lba..end).contains(&lba));
-                                    BlkCompletion::default().encode(&mut reply).unwrap()
-                                }
-                                Err(err) => {
-                                    encode_error_completion(&mut reply, err.as_errno()).unwrap()
-                                }
-                            }
-                        }
-                        BlkOp::Flush => {
-                            device.flushes += 1;
-                            BlkCompletion::default().encode(&mut reply).unwrap()
-                        }
-                    }
-                }
-            };
-            let _ = endpoint.reply(call.ticket, &reply[..len], &SINK).unwrap();
-        }
+) -> StoppableTask {
+    tairix_kernel_core::test_boot::serve(endpoint, &SINK, move |call, reply| {
+        answer_block(&device, window.ptr(), call, reply)
     })
 }
 
@@ -692,7 +717,8 @@ fn register_endpoint(id: u64, owner: u64) -> StdArc<CallEndpoint> {
         CapabilitySet::empty(),
         CapabilitySet::empty(),
         &SINK,
-    );
+    )
+    .expect("derived");
     let endpoint = StdArc::new(
         CallEndpoint::create(
             EndpointId(id),
@@ -855,6 +881,24 @@ fn undriven_volume_nodes(parent: u32) -> Vec<(u32, u64, VolumeFsType)> {
     found
 }
 
+/// Wait as the calling boot task on the hardware tree's changes, as `devmgr`
+/// waits, until `look` finds what it waits for: asked at once and after each
+/// change.
+fn on_tree_changes<T>(mut look: impl FnMut() -> Option<T>) -> T {
+    let task = HostBoot::current().task();
+    tairix_kernel_core::HW_TREE_WAITQ
+        .register(task, tairix_kernel_core::NO_DEADLINE)
+        .expect("filed");
+    let found = loop {
+        if let Some(found) = look() {
+            break found;
+        }
+        assert!(park_calling_task(), "a boot's task parks");
+    };
+    tairix_kernel_core::HW_TREE_WAITQ.deregister(task);
+    found
+}
+
 /// Start a driver for every volume node under `publisher` none serves, each
 /// having served or refused its volume before this returns.
 fn serve_published(facility: &'static TestFacility, publisher: u32) {
@@ -933,12 +977,12 @@ type Open<S> = fn(
 impl Driver {
     fn start<F: ServedFormat + 'static>(self, offered: mpsc::Sender<()>) {
         let open: Open<F::Fs<GrantedVolume<ServiceAccess>>> = F::open;
-        thread::spawn(move || self.run(&offered, open));
+        drop(HostBoot::current().spawn(move || self.run(&offered, open)));
     }
 
     fn start_archive<F: ServedArchive + 'static>(self, offered: mpsc::Sender<()>) {
         let open: Open<F::Fs<ServiceAccess>> = F::open;
-        thread::spawn(move || self.run(&offered, open));
+        drop(HostBoot::current().spawn(move || self.run(&offered, open)));
     }
 
     /// Open the volume over its grant, offer it, and answer the kernel until
@@ -976,19 +1020,28 @@ impl Driver {
         if outcome.is_ok() {
             let mut server = Server::new(opened.fs, host).expect("a server");
             let mut reply = vec![0u8; FSSERVE_REPLY_MAX];
-            while TREE.is_live(self.node) && !endpoint.is_closed() {
-                let RecvCall::Received(call) = endpoint.recv_call(FSSERVE_REQUEST_MAX) else {
-                    thread::yield_now();
-                    continue;
+            // `devmgr` unloads the driver once its node leaves the tree, so the
+            // tree's change wakes it as a kill would.
+            let task = HostBoot::current().task();
+            tairix_kernel_core::HW_TREE_WAITQ
+                .register(task, tairix_kernel_core::NO_DEADLINE)
+                .expect("filed");
+            let unloaded = || !TREE.is_live(self.node);
+            while !unloaded() {
+                let answer = |call: &ReceivedCall, reply: &mut [u8]| {
+                    // SAFETY: the window is a leaked `FSSERVE_WINDOW_LEN`-byte
+                    // buffer alive for the process, and the proxy leaves it
+                    // alone while a call it posted is in service, so this is
+                    // the only borrow of it in use.
+                    let window =
+                        unsafe { core::slice::from_raw_parts_mut(window, FSSERVE_WINDOW_LEN) };
+                    server.answer(&call.request, window, reply)
                 };
-                // SAFETY: the window is a leaked `FSSERVE_WINDOW_LEN`-byte
-                // buffer alive for the process, and the proxy leaves it alone
-                // while a call it posted is in service, so this is the only
-                // borrow of it in use.
-                let window = unsafe { core::slice::from_raw_parts_mut(window, FSSERVE_WINDOW_LEN) };
-                let len = server.answer(&call.request, window, &mut reply);
-                let _ = endpoint.reply(call.ticket, &reply[..len], &SINK);
+                if serve_next(&endpoint, &mut reply, &SINK, &unloaded, answer).is_err() {
+                    break;
+                }
             }
+            tairix_kernel_core::HW_TREE_WAITQ.deregister(task);
         }
         tairix_kernel_core::callreg::teardown_owned_by(self.owner, &ASPACES, &SINK);
     }
@@ -1002,7 +1055,8 @@ impl Driver {
             CapabilitySet::empty(),
             CapabilitySet::empty(),
             &SINK,
-        );
+        )
+        .expect("derived");
         let endpoint = StdArc::new(
             CallEndpoint::create_served(
                 EndpointId(mint_served_endpoint().expect("an endpoint id")),
@@ -1032,13 +1086,13 @@ impl Driver {
 /// else; the mount authority reaches every volume.
 #[test]
 fn the_seats_authority_reaches_only_a_removable_volume() {
-    use crate::volume_service::DetachAuthority;
+    use crate::volume_service::DeviceAuthority;
     for class in [VolumeClass::Local, VolumeClass::Network, VolumeClass::Image] {
-        assert!(!DetachAuthority::Seat.reaches(class), "{class:?}");
-        assert!(DetachAuthority::Mount.reaches(class), "{class:?}");
+        assert!(!DeviceAuthority::Seat.reaches(class), "{class:?}");
+        assert!(DeviceAuthority::Mount.reaches(class), "{class:?}");
     }
-    assert!(DetachAuthority::Seat.reaches(VolumeClass::Removable));
-    assert!(DetachAuthority::Mount.reaches(VolumeClass::Removable));
+    assert!(DeviceAuthority::Seat.reaches(VolumeClass::Removable));
+    assert!(DeviceAuthority::Mount.reaches(VolumeClass::Removable));
 }
 
 /// The removal record keeps the newest removals, numbered without a gap, so a
@@ -1069,21 +1123,22 @@ fn the_removal_record_keeps_the_newest_numbered_in_turn() {
 
 #[test]
 fn a_reattached_mount_takes_its_new_posture_in_place() {
-    let vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
+    let vfs =
+        Vfs::with_default_layout(UserId(0), GroupId(0)).expect("the default layout fits in memory");
     let handle = tairix_abi::DriverHandle::from_raw(0x7A11).expect("handle");
     let path = tairix_kernel_core::Path::parse("/Storage/usb9").expect("path");
     vfs.mounts_write()
         .attach_at(
             tairix_kernel_core::Attachment::new(handle, None, super::mount_flags(false)),
             path.owned().expect("held"),
-            super::mount_template(None),
+            super::mount_template(tairix_abi::VolumeFsType::Ext4),
         )
         .expect("the volume was attached writable");
     super::reattach(
         &vfs,
         tairix_kernel_core::Attachment::new(handle, None, super::mount_flags(true)),
         path.owned().expect("held"),
-        super::mount_template(None),
+        super::mount_template(tairix_abi::VolumeFsType::Ext4),
     )
     .expect("the mount moves to its new posture");
     let mounts = vfs.mounts();
@@ -1170,6 +1225,174 @@ fn an_unwired_service_fails_closed() {
             &tairix_abi::driver::filesystem::VolumeTitle::EMPTY
         ),
         Err(Errno::NotImplemented)
+    );
+}
+
+/// The `/`-view components the root published as `id` resolves to, as text.
+fn resolved(id: &[u8; 16]) -> Option<Vec<String>> {
+    VOLUME_FOREST
+        .resolve(id)
+        .map(|prefix| prefix.components().map(String::from).collect())
+}
+
+/// A registry entry for the volume `name` keyed `id` on device `(9, 1)`, for a
+/// test that drives the registry's own methods rather than an attach.
+fn registered(name: &str, id: [u8; 16]) -> super::AttachedVolume {
+    super::AttachedVolume {
+        class: VolumeClass::Removable,
+        id,
+        identity: id,
+        name: String::from(name),
+        title: tairix_abi::driver::filesystem::VolumeTitle::EMPTY,
+        path: Path::parse("/Storage/usb1").expect("a path"),
+        handle: DriverHandle::from_raw(0x7E57).expect("a handle"),
+        endpoint: 9,
+        window: 1,
+        device: None,
+        publisher: 0,
+        journal: StdArc::new(tairix_sync::SpinLock::new(
+            tairix_kernel_core::fs::RetainedWrites::new(
+                512,
+                tairix_reclaim::CacheBudget::from_backing(1 << 20),
+            ),
+        )),
+        fstype: VolumeFsType::Fat32,
+        mount: super::Mount::Pending,
+        served: None,
+        node: None,
+        first_lba: 0,
+        blocks: 1,
+        served_extent: (0, 1),
+        availability: super::Availability::Available,
+        claimed: false,
+    }
+}
+
+/// A volume name the heap cannot copy is stated as `unknown`, with nothing to
+/// allocate.
+#[test]
+fn a_name_the_heap_cannot_copy_is_stated_as_unknown_without_allocating() {
+    let stated = tairix_fuzzseed::meter::refusing_after(0, || super::stated_name("usb1"));
+    assert_eq!(stated, "unknown");
+    assert_eq!(super::stated_name("usb1"), "usb1");
+}
+
+/// A detach finds a volume whose name the heap cannot copy, stating it as
+/// `unknown` where the copy aborted the kernel, and claims it under the name
+/// it found it by rather than copying the name again.
+#[test]
+fn a_detach_claims_a_volume_whose_name_the_heap_cannot_copy() {
+    let service = RuntimeVolumeService::new();
+    let id = [0x71; 16];
+    service.state.lock().push(registered("usb1", id));
+    let found = tairix_fuzzseed::meter::refusing_above(0, || service.attached_device(&id));
+    let (named, device) = found.expect("the volume is attached");
+    assert_eq!((named.as_ref(), device), ("unknown", Some((9, 1))));
+    let (named, _) = service.attached_device(&id).expect("attached");
+    let claim = tairix_fuzzseed::meter::refusing_above(0, || {
+        service.claim_for_detach(&id, Some((9, 1)), super::DeviceAuthority::Mount, named)
+    });
+    let super::DetachClaim::Held(claim, target) = claim else {
+        panic!("the detach holds the volume");
+    };
+    assert_eq!(target.name, "usb1");
+    drop(claim);
+    assert!(!service.state.lock()[0].claimed, "and lets it go");
+}
+
+/// Device slots no operation holds and no present volume names retire on an
+/// exhausted heap, a slot at a time, where gathering them aborted the kernel.
+#[test]
+fn unused_devices_retire_on_an_exhausted_heap() {
+    let service = RuntimeVolumeService::new();
+    service.state.lock().push(registered("usb1", [0x72; 16]));
+    for window in [1, 2] {
+        service.devices.lock().push(super::DeviceSlot {
+            endpoint: 9,
+            window,
+            op: StdArc::new(tairix_kernel_core::SleepLock::new(())),
+            connected: None,
+            pins: 0,
+            retracted: false,
+        });
+    }
+    tairix_fuzzseed::meter::refusing_above(0, || service.retire_unused_devices());
+    let left: Vec<u64> = service
+        .devices
+        .lock()
+        .iter()
+        .map(|slot| slot.window)
+        .collect();
+    assert_eq!(left, [1], "the slot a present volume names stays");
+}
+
+/// Every unused slot retires in one call, those past a slot still in use and
+/// those beside each other alike.
+#[test]
+fn every_unused_device_retires_around_one_in_use() {
+    let service = RuntimeVolumeService::new();
+    let mut volume = registered("usb2", [0x73; 16]);
+    volume.window = 3;
+    service.state.lock().push(volume);
+    for window in 1..=5 {
+        service.devices.lock().push(super::DeviceSlot {
+            endpoint: 9,
+            window,
+            op: StdArc::new(tairix_kernel_core::SleepLock::new(())),
+            connected: None,
+            pins: usize::from(window == 5),
+            retracted: false,
+        });
+    }
+    service.retire_unused_devices();
+    let left: Vec<u64> = service
+        .devices
+        .lock()
+        .iter()
+        .map(|slot| slot.window)
+        .collect();
+    assert_eq!(left, [3, 5], "the slot in use and the pinned one stay");
+}
+
+/// A catalog path the heap cannot hold is refused for want of memory at
+/// whichever of its allocations the heap refuses — never aborted on, and
+/// never taken for a name the catalog could not show.
+#[test]
+fn a_catalog_path_the_heap_cannot_hold_is_refused_for_memory() {
+    let mut granted = 0;
+    loop {
+        match tairix_fuzzseed::meter::refusing_after(granted, || super::storage_path("usb1")) {
+            Ok(path) => {
+                assert_eq!(path.components(), ["Storage", "usb1"]);
+                break;
+            }
+            Err(refusal) => assert_eq!(refusal, ("path_unallocated", Errno::OutOfMemory)),
+        }
+        granted += 1;
+        assert!(granted < 8, "the path was never built");
+    }
+    assert!(granted >= 2, "the text and a component were each refused");
+}
+
+/// The audit of a volume the forest shows nowhere names it `unknown`, with
+/// nothing to allocate.
+#[test]
+fn a_volume_shown_nowhere_is_audited_as_unknown_without_allocating() {
+    let shown = tairix_fuzzseed::meter::refusing_after(0, || super::shown_name(&[0x5A; 16]));
+    assert_eq!(shown, "unknown");
+}
+
+/// Want of memory connecting a device's client is audited as every other
+/// allocation of an attach is, never as an endpoint it could not use.
+#[test]
+fn a_client_short_of_memory_is_refused_for_memory() {
+    assert_eq!(
+        super::client_refusal(Errno::OutOfMemory),
+        ("device_unallocated", Errno::OutOfMemory)
+    );
+    assert_eq!(
+        super::client_refusal(Errno::NotFound),
+        ("endpoint_unusable", Errno::NotFound)
     );
 }
 
@@ -1373,7 +1596,10 @@ fn boot() -> Booted {
     }));
     install_shared_mem_facility(facility);
     LATE_FILESYSTEM
-        .install_vfs(Vfs::with_default_layout(UserId(0), GroupId(0)))
+        .install_vfs(
+            Vfs::with_default_layout(UserId(0), GroupId(0))
+                .expect("the default layout fits in memory"),
+        )
         .expect("install the default-layout mount table once");
     Booted {
         pressure,
@@ -1394,6 +1620,7 @@ fn table_free(booted: &Booted, identity: [u8; 16]) -> bool {
 
 #[test]
 fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
+    let _host = HostBoot::claim();
     let booted = boot();
     let (window_ptr, facility) = (booted.window, booted.facility);
 
@@ -1405,12 +1632,10 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     let endpoint_id = 0xB1D0_5E17_0000_0001_u64;
     let endpoint = register_endpoint(endpoint_id, 0x70_0001);
     let device = StdArc::new(Mutex::new(ServedDevice::new(image)));
-    let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
         Window(window_ptr),
         StdArc::clone(&device),
-        StdArc::clone(&stop),
     );
 
     // The shared region the request names: created through the recorded
@@ -1428,7 +1653,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     };
     attach_served(facility, &attach).expect("attach");
     assert_eq!(
-        VOLUME_FOREST.resolve(&expected_identity),
+        resolved(&expected_identity),
         Some(vec![String::from("Storage"), String::from("usb1")]),
         "the volume's durable root is published under the catalog"
     );
@@ -1511,8 +1736,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
         "detaching let its change table go"
     );
 
-    stop.store(true, Ordering::Relaxed);
-    server.join().expect("server thread");
+    server.stop();
     assert!(
         device.lock().unwrap().flushes >= 1,
         "detach commits the device cache"
@@ -1567,6 +1791,7 @@ fn run_scenarios(window_ptr: *mut u8, facility: &'static TestFacility) {
     a_medium_that_leaves_while_its_volume_attaches_retracts_it_scenario(window_ptr, facility);
     a_medium_that_leaves_while_its_volume_recovers_retracts_it_scenario(window_ptr, facility);
     an_attach_naming_a_retracted_publication_is_refused_scenario();
+    a_volume_built_short_of_memory_leaves_nothing_in_service_scenario(window_ptr, facility);
     a_held_descriptor_holds_its_volume_attached_scenario(window_ptr, facility);
     a_descriptor_stays_with_its_node_scenario(window_ptr, facility);
     a_fat_files_lock_follows_it_through_writes_and_renames_scenario(window_ptr, facility);
@@ -1583,10 +1808,18 @@ fn run_scenarios(window_ptr: *mut u8, facility: &'static TestFacility) {
     a_lost_network_volume_waits_for_its_owner_scenario(facility);
     a_bind_within_a_network_volume_leaves_with_it_scenario(facility);
     image_scenarios::run(window_ptr, facility);
+    twin_scenarios::run(window_ptr, facility);
+    retitle_scenarios::run(window_ptr, facility);
 }
 
 #[path = "image_volume_scenarios.rs"]
 mod image_scenarios;
+
+#[path = "volume_twins_tests.rs"]
+mod twin_scenarios;
+
+#[path = "volume_retitle_tests.rs"]
+mod retitle_scenarios;
 
 /// The served volume, and the node it is published as, of the attached
 /// volume named `name`.
@@ -1730,8 +1963,7 @@ fn a_volume_its_driver_cannot_open_is_retracted_scenario(
         "nothing remains to detach"
     );
     tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
-    round.stop.store(true, Ordering::Relaxed);
-    round.server.join().expect("server thread");
+    round.server.stop();
     assert_every_attached_volume_is_served();
 }
 
@@ -1817,8 +2049,7 @@ fn a_driver_offering_another_format_is_refused_scenario(
     );
     tairix_kernel_core::callreg::teardown_owned_by(liar.owner, &ASPACES, &SINK);
     tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
-    round.stop.store(true, Ordering::Relaxed);
-    round.server.join().expect("server thread");
+    round.server.stop();
 }
 
 /// A conflicted re-insert whose driver will not serve it is kept, read-only
@@ -1898,8 +2129,7 @@ fn a_conflicted_volume_its_driver_refuses_is_kept_scenario(
         )
         .expect("the audited force retracts it");
     assert_eq!(VOLUME_FOREST.resolve(&round.identity), None);
-    inserted.stop.store(true, Ordering::Relaxed);
-    inserted.server.join().expect("server thread");
+    inserted.server.stop();
 }
 
 /// A volume no driver has served yet has no mount to take out of the table,
@@ -1949,8 +2179,7 @@ fn a_volume_awaiting_its_driver_detaches_scenario(
     );
     assert_eq!(VOLUME_FOREST.resolve(&identity), None);
     tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
-    round.stop.store(true, Ordering::Relaxed);
-    round.server.join().expect("server thread");
+    round.server.stop();
     assert_every_attached_volume_is_served();
 }
 
@@ -2009,12 +2238,10 @@ fn a_changed_medium_retracts_its_volume_and_serves_the_next_scenario(
         binding: 1,
         ..ServedDevice::new(first)
     }));
-    let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
         Window(window_ptr),
         StdArc::clone(&device),
-        StdArc::clone(&stop),
     );
     let (_va, first_region) = sharedreg::create(facility, ProcessId(0x70_0050), 8).expect("region");
     let attach = |window: u64, name: &[u8]| {
@@ -2071,8 +2298,7 @@ fn a_changed_medium_retracts_its_volume_and_serves_the_next_scenario(
         )
         .expect("the second disc detaches");
     tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
-    stop.store(true, Ordering::Relaxed);
-    server.join().expect("server thread");
+    server.stop();
     assert_every_attached_volume_is_served();
 }
 
@@ -2093,15 +2319,13 @@ fn a_medium_that_leaves_while_its_volume_attaches_retracts_it_scenario(
         hold_first: Some((received, gate)),
         ..ServedDevice::new(image)
     }));
-    let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         register_endpoint(endpoint_id, owner),
         Window(window_ptr),
         StdArc::clone(&device),
-        StdArc::clone(&stop),
     );
     let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0060), 8).expect("region");
-    let attaching = thread::spawn(move || {
+    let attaching = HostBoot::current().spawn(move || {
         attach_served(
             facility,
             &VolumeAttachRequest {
@@ -2121,7 +2345,7 @@ fn a_medium_that_leaves_while_its_volume_attaches_retracts_it_scenario(
     // Answered whatever happened, so a failure never wedges the suite.
     open_gate.send(()).unwrap();
     held.expect("the device holds the attach's first request");
-    assert_eq!(attaching.join().expect("the attach thread"), Ok(()));
+    assert_eq!(attaching.join(), Ok(()));
     assert_eq!(
         VOLUME_FOREST.resolve(&identity),
         None,
@@ -2135,15 +2359,14 @@ fn a_medium_that_leaves_while_its_volume_attaches_retracts_it_scenario(
     );
     assert_eq!(audited(SURPRISE_REMOVED_CLEAN, "gone1"), [None]);
     tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
-    stop.store(true, Ordering::Relaxed);
-    server.join().expect("scenario server thread");
+    server.stop();
     assert_every_attached_volume_is_served();
 }
 
-/// A card pulled with a write unflushed, put back, and pulled again while
-/// its volume is recovered, the reader's endpoint living on throughout: the
-/// recovered volume is retracted as the recovery lets go, never restored
-/// over a card that has left.
+/// A medium pulled with a write unflushed, put back, and pulled again while
+/// its volume is recovered, the unit's endpoint living on throughout and its
+/// device proving the medium: the recovered volume is retracted as the
+/// recovery lets go, never restored over a medium that has left.
 fn a_medium_that_leaves_while_its_volume_recovers_retracts_it_scenario(
     window_ptr: *mut u8,
     facility: &'static TestFacility,
@@ -2155,14 +2378,13 @@ fn a_medium_that_leaves_while_its_volume_recovers_retracts_it_scenario(
     let endpoint_id = 0xB1D0_5E17_0000_0061_u64;
     let device = StdArc::new(Mutex::new(ServedDevice {
         binding: 1,
+        identity: UNIT,
         ..ServedDevice::new(image)
     }));
-    let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         register_endpoint(endpoint_id, owner),
         Window(window_ptr),
         StdArc::clone(&device),
-        StdArc::clone(&stop),
     );
     let attach = move |window: u64| {
         attach_served(
@@ -2200,14 +2422,14 @@ fn a_medium_that_leaves_while_its_volume_recovers_retracts_it_scenario(
         reader.hold_first = Some((received, gate));
     }
     let (_va, second) = sharedreg::create(facility, ProcessId(0x70_0062), 8).expect("region");
-    let recovering = thread::spawn(move || attach(second));
+    let recovering = HostBoot::current().spawn(move || attach(second));
     let held = has_request.recv_timeout(Duration::from_secs(60));
     if held.is_ok() {
         tairix_kernel_core::callreg::notify_publication_retracted(&[endpoint_id]);
     }
     open_gate.send(()).unwrap();
     held.expect("the reader holds the recovery's first request");
-    assert_eq!(recovering.join().expect("the recovery thread"), Ok(()));
+    assert_eq!(recovering.join(), Ok(()));
     assert_eq!(
         VOLUME_FOREST.resolve(&identity),
         None,
@@ -2219,8 +2441,7 @@ fn a_medium_that_leaves_while_its_volume_recovers_retracts_it_scenario(
         "the replay was committed, so its retraction is clean"
     );
     tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
-    stop.store(true, Ordering::Relaxed);
-    server.join().expect("scenario server thread");
+    server.stop();
     assert_every_attached_volume_is_served();
 }
 
@@ -2228,8 +2449,10 @@ fn a_medium_that_leaves_while_its_volume_recovers_retracts_it_scenario(
 /// operation still holds its slot, is refused before the window's client is
 /// asked anything: all it would be answered is stale.
 fn an_attach_naming_a_retracted_publication_is_refused_scenario() {
-    let pressure: &'static MemoryPressure = Box::leak(Box::new(MemoryPressure::over(&AMPLE)));
-    let service: &'static RuntimeVolumeService = Box::leak(Box::new(RuntimeVolumeService::new()));
+    let pressure: &'static MemoryPressure =
+        tairix_kernel_core::forever(Box::new(MemoryPressure::over(&AMPLE)));
+    let service: &'static RuntimeVolumeService =
+        tairix_kernel_core::forever(Box::new(RuntimeVolumeService::new()));
     service.install(&SINK, pressure, None, &TREE);
     let (endpoint, window) = (0xB1D0_5E17_0000_0063_u64, 0x63);
     let holder = service.pin_device(endpoint, window).expect("a slot");
@@ -2248,6 +2471,76 @@ fn an_attach_naming_a_retracted_publication_is_refused_scenario() {
         [Some(String::from("publication_retracted"))]
     );
     drop(holder);
+}
+
+/// A volume the heap refuses while it is built, however far the building got
+/// — the copy of its name, once its last step, included — leaves nothing in
+/// service, and is built once the heap has room.
+fn a_volume_built_short_of_memory_leaves_nothing_in_service_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let pressure: &'static MemoryPressure =
+        tairix_kernel_core::forever(Box::new(MemoryPressure::over(&AMPLE)));
+    let service: &'static RuntimeVolumeService =
+        tairix_kernel_core::forever(Box::new(RuntimeVolumeService::new()));
+    service.install(&SINK, pressure, None, &TREE);
+    let (endpoint_id, owner, region_task) = (0xB1D0_5E17_0000_0064_u64, 0x70_1064, 0x70_0064);
+    let endpoint = register_endpoint(endpoint_id, owner);
+    let (image, _) = fat32_image(0x0D15_C064, b"short of memory");
+    let blocks = (image.data.len() / BLOCK_SIZE) as u64;
+    let device = StdArc::new(Mutex::new(ServedDevice::new(image)));
+    let server = serve(
+        StdArc::clone(&endpoint),
+        Window(window_ptr),
+        StdArc::clone(&device),
+    );
+    let (_va, region) = sharedreg::create(facility, ProcessId(region_task), 8).expect("region");
+    let request = VolumeAttachRequest {
+        endpoint: endpoint_id,
+        window: region,
+        first_lba: 0,
+        blocks,
+        fstype: VolumeFsType::Fat32,
+        name: b"lean1",
+    };
+    let wiring = service.wiring().expect("wired");
+    let pin = service.pin_device(endpoint_id, region).expect("a slot");
+    let shared = service
+        .connected(&pin, &request, wiring)
+        .expect("connected");
+    let mut probed =
+        super::recognise_extent(&mut shared.window(), &request).expect("a FAT32 volume");
+    // Nothing to read back, so the device is asked nothing while the heap
+    // refuses.
+    probed.evidence = None;
+    let mut granted = 0;
+    let built_volume = loop {
+        let disk = shared.window();
+        let built = tairix_fuzzseed::meter::refusing_after(granted, || {
+            service.fresh_volume(
+                &request,
+                wiring,
+                (&shared, disk),
+                (&probed, "lean1", PUBLISHER, false),
+            )
+        });
+        match built {
+            Ok((_, volume)) => break volume,
+            Err(refusal) => assert!(
+                service.served.lock().is_empty(),
+                "refused {refusal:?} after {granted} grants, a volume was left in service"
+            ),
+        }
+        granted += 1;
+        assert!(granted < 64, "the volume was never built");
+    };
+    service.retire_served(Some(&built_volume), None);
+    assert!(service.served.lock().is_empty());
+    drop((built_volume, shared, pin));
+    service.retire_unused_devices();
+    tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
+    server.stop();
 }
 
 /// The driver handle of the volume shown at `/Storage/<name>`.
@@ -2336,12 +2629,10 @@ fn attach_then_yank(
     let (image, identity) = fat32_image(scenario.serial, b"scenario payload");
     let blocks = (image.data.len() / BLOCK_SIZE) as u64;
     let device = StdArc::new(Mutex::new(ServedDevice::new(image)));
-    let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
         Window(window_ptr),
         StdArc::clone(&device),
-        StdArc::clone(&stop),
     );
     let (_va, region) =
         sharedreg::create(facility, ProcessId(scenario.region_task), 8).expect("region");
@@ -2371,8 +2662,7 @@ fn attach_then_yank(
     // Yank the stick: the serving driver dies and the kernel tears its
     // endpoint down, which drives the vanish observer synchronously.
     tairix_kernel_core::callreg::teardown_owned_by(scenario.owner, &ASPACES, &SINK);
-    stop.store(true, Ordering::Relaxed);
-    server.join().expect("scenario server thread");
+    server.stop();
     (identity, client, held)
 }
 
@@ -2407,7 +2697,7 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
     drop(held);
     assert_the_departed_disk_is_let_go(identity, &client);
     assert_eq!(
-        VOLUME_FOREST.resolve(&identity),
+        resolved(&identity),
         Some(vec![String::from("Storage"), String::from("usb2")]),
         "an unavailable-dirty volume's durable root stays visible"
     );
@@ -2623,12 +2913,10 @@ fn pulling_a_partitioned_stick_retracts_every_volume_scenario(
     let endpoint_id = 0xB1D0_5E17_0000_0030_u64;
     let endpoint = register_endpoint(endpoint_id, owner);
     let device = StdArc::new(Mutex::new(ServedDevice::new(RamBlock { data })));
-    let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
         Window(window_ptr),
         StdArc::clone(&device),
-        StdArc::clone(&stop),
     );
     let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0030), 8).expect("region");
     for (name, first_lba) in [(&b"pull1"[..], 0), (b"pull2", extent_blocks)] {
@@ -2650,8 +2938,7 @@ fn pulling_a_partitioned_stick_retracts_every_volume_scenario(
     let before = VOLUME_SERVICE.removals().expect("listed");
 
     tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
-    stop.store(true, Ordering::Relaxed);
-    server.join().expect("server thread");
+    server.stop();
 
     let after = VOLUME_SERVICE.removals().expect("listed");
     let newest = before
@@ -2739,10 +3026,9 @@ fn an_unpublished_transaction_is_recorded_lost_scenario(
     let held = Descriptor::open(0, "/Storage/usb9/hello.txt", OpenFlags::READ)
         .expect("a descriptor of the volume");
     tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
-    round.stop.store(true, Ordering::Relaxed);
-    round.server.join().expect("scenario server thread");
+    round.server.stop();
     assert_eq!(
-        VOLUME_FOREST.resolve(&identity),
+        resolved(&identity),
         Some(vec![String::from("Storage"), String::from("usb9")]),
         "a volume that lost writes stays visible rather than retracting"
     );
@@ -2796,6 +3082,16 @@ fn dirty_yank_round(
     facility: &'static TestFacility,
     scenario: &YankScenario,
 ) -> YankedRound {
+    dirty_yank_round_stating(window_ptr, facility, scenario, None)
+}
+
+/// [`dirty_yank_round`] over a device stating `stated`.
+fn dirty_yank_round_stating(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+    scenario: &YankScenario,
+    stated: Option<BlkDeviceIdentity>,
+) -> YankedRound {
     assert_eq!(
         scenario.unflushed,
         Unflushed::DeviceWrite,
@@ -2805,13 +3101,14 @@ fn dirty_yank_round(
     let (image, identity) = fat32_image(scenario.serial, b"scenario payload");
     let pristine = image.data.clone();
     let blocks = (image.data.len() / BLOCK_SIZE) as u64;
-    let device = StdArc::new(Mutex::new(ServedDevice::new(image)));
-    let stop = StdArc::new(AtomicBool::new(false));
+    let device = StdArc::new(Mutex::new(ServedDevice {
+        identity: stated,
+        ..ServedDevice::new(image)
+    }));
     let server = serve(
         StdArc::clone(&endpoint),
         Window(window_ptr),
         StdArc::clone(&device),
-        StdArc::clone(&stop),
     );
     let (_va, region) =
         sharedreg::create(facility, ProcessId(scenario.region_task), 8).expect("region");
@@ -2834,8 +3131,7 @@ fn dirty_yank_round(
     write_as(0, &path, 0, b"D").expect("write dirties the journal");
     let held = Descriptor::open(0, &path, OpenFlags::READ).expect("a descriptor of the volume");
     tairix_kernel_core::callreg::teardown_owned_by(scenario.owner, &ASPACES, &SINK);
-    stop.store(true, Ordering::Relaxed);
-    server.join().expect("re-insert round server thread");
+    server.stop();
     let at_yank = device.lock().unwrap().block.data.clone();
     YankedRound {
         identity,
@@ -2846,12 +3142,11 @@ fn dirty_yank_round(
 }
 
 /// A served, inserted device and its round facts: the device (for image
-/// assertions), the stop/join pair the caller ends the round with, and the
-/// attach outcome.
+/// assertions), the server the caller stops to end the round, and the attach
+/// outcome.
 struct Inserted {
     device: StdArc<Mutex<ServedDevice>>,
-    stop: StdArc<AtomicBool>,
-    server: thread::JoinHandle<()>,
+    server: StoppableTask,
     outcome: Result<(), Errno>,
 }
 
@@ -2872,8 +3167,19 @@ fn insert(
     insertion: &Insertion,
     device: ServedDevice,
 ) -> Inserted {
-    let inserted = insert_unserved(window_ptr, facility, insertion, device);
-    serve_published(facility, PUBLISHER);
+    insert_on(window_ptr, facility, (insertion, PUBLISHER), device)
+}
+
+/// [`insert`] over the block-service node `node`, whose place in the hardware
+/// tree gives the volume its class.
+fn insert_on(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+    (insertion, node): (&Insertion, u32),
+    device: ServedDevice,
+) -> Inserted {
+    let inserted = insert_unserved_on(window_ptr, facility, (insertion, node), device);
+    serve_published(facility, node);
     inserted
 }
 
@@ -2884,15 +3190,23 @@ fn insert_unserved(
     insertion: &Insertion,
     device: ServedDevice,
 ) -> Inserted {
+    insert_unserved_on(window_ptr, facility, (insertion, PUBLISHER), device)
+}
+
+/// [`insert_unserved`] over the block-service node `node`.
+fn insert_unserved_on(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+    (insertion, node): (&Insertion, u32),
+    device: ServedDevice,
+) -> Inserted {
     let endpoint = register_endpoint(insertion.endpoint_id, insertion.owner);
     let blocks = (device.block.data.len() / BLOCK_SIZE) as u64;
     let device = StdArc::new(Mutex::new(device));
-    let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
         Window(window_ptr),
         StdArc::clone(&device),
-        StdArc::clone(&stop),
     );
     let (_va, region) =
         sharedreg::create(facility, ProcessId(insertion.region_task), 8).expect("region");
@@ -2905,11 +3219,10 @@ fn insert_unserved(
             fstype: insertion.fstype,
             name: insertion.name,
         },
-        Some(PUBLISHER),
+        Some(node),
     );
     Inserted {
         device,
-        stop,
         server,
         outcome,
     }
@@ -2917,11 +3230,12 @@ fn insert_unserved(
 
 /// Verified re-insert (`plans/DEVICES.md` D4c): the device lost its
 /// cached writes (the medium is the pre-write image), non-mutation is
-/// proven from the evidence window, and the retained writes replay — the
+/// proven from the evidence window, the device states the identity it
+/// stated when the volume was attached, and the retained writes replay — the
 /// dirty write is back on the medium and the volume returns to full
 /// service under its original mount and published root.
 fn verified_reinsert_replays_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
-    let round = dirty_yank_round(
+    let round = dirty_yank_round_stating(
         window_ptr,
         facility,
         &YankScenario {
@@ -2932,6 +3246,7 @@ fn verified_reinsert_replays_scenario(window_ptr: *mut u8, facility: &'static Te
             name: b"usb5",
             unflushed: Unflushed::DeviceWrite,
         },
+        UNIT,
     );
     // Re-insert the pre-write image: the device accepted the writes into
     // its volatile cache and lost them with the power.
@@ -2945,9 +3260,12 @@ fn verified_reinsert_replays_scenario(window_ptr: *mut u8, facility: &'static Te
             name: b"usb5",
             fstype: VolumeFsType::Fat32,
         },
-        ServedDevice::new(RamBlock {
-            data: round.pristine,
-        }),
+        ServedDevice {
+            identity: UNIT,
+            ..ServedDevice::new(RamBlock {
+                data: round.pristine,
+            })
+        },
     );
     inserted.outcome.expect("the re-insert recovers the volume");
 
@@ -2962,7 +3280,7 @@ fn verified_reinsert_replays_scenario(window_ptr: *mut u8, facility: &'static Te
     assert_eq!(record.availability(), MountAvailability::Available);
     assert_eq!(record.volume_id(), round.identity);
     assert_eq!(
-        VOLUME_FOREST.resolve(&round.identity),
+        resolved(&round.identity),
         Some(vec![String::from("Storage"), String::from("usb5")]),
         "the durable root survived the whole unplug/re-insert cycle"
     );
@@ -2994,8 +3312,7 @@ fn verified_reinsert_replays_scenario(window_ptr: *mut u8, facility: &'static Te
             &admin(),
         )
         .expect("the recovered volume detaches cleanly");
-    inserted.stop.store(true, Ordering::Relaxed);
-    inserted.server.join().expect("reinsert server thread");
+    inserted.server.stop();
     assert!(
         inserted.device.lock().unwrap().flushes >= 1,
         "the replay committed the device cache"
@@ -3080,11 +3397,7 @@ fn mutated_reinsert_conflicts_scenario(window_ptr: *mut u8, facility: &'static T
         )
         .expect("force-unmount discards and retracts the conflicted volume");
     assert_eq!(VOLUME_FOREST.resolve(&round.identity), None);
-    inserted.stop.store(true, Ordering::Relaxed);
-    inserted
-        .server
-        .join()
-        .expect("conflict reinsert server thread");
+    inserted.server.stop();
 }
 
 /// A force detach of a **healthy** volume commits cleanly — the flush
@@ -3099,12 +3412,10 @@ fn forced_unmount_of_a_healthy_volume_scenario(
     let (image, identity) = fat32_image(0x0D15_C004, b"healthy force payload");
     let blocks = (image.data.len() / BLOCK_SIZE) as u64;
     let device = StdArc::new(Mutex::new(ServedDevice::new(image)));
-    let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
         Window(window_ptr),
         StdArc::clone(&device),
-        StdArc::clone(&stop),
     );
     let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0006), 8).expect("region");
     attach_served(
@@ -3130,8 +3441,7 @@ fn forced_unmount_of_a_healthy_volume_scenario(
             &admin(),
         )
         .expect("a force detach of a healthy volume succeeds");
-    stop.store(true, Ordering::Relaxed);
-    server.join().expect("healthy-force server thread");
+    server.stop();
     assert!(
         device.lock().unwrap().flushes >= 1,
         "a force detach of a healthy volume still commits the device cache"
@@ -3163,12 +3473,10 @@ fn the_user_at_the_seat_ejects_a_removable_volume_scenario(
     let (image, identity) = fat32_image(0x0D15_C087, b"ejected payload");
     let blocks = (image.data.len() / BLOCK_SIZE) as u64;
     let device = StdArc::new(Mutex::new(ServedDevice::new(image)));
-    let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
         Window(window_ptr),
         StdArc::clone(&device),
-        StdArc::clone(&stop),
     );
     let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0087), 8).expect("region");
     VOLUME_SERVICE
@@ -3217,8 +3525,7 @@ fn the_user_at_the_seat_ejects_a_removable_volume_scenario(
         "the eject is audited as the seat's"
     );
     assert_eq!(VOLUME_FOREST.resolve(&identity), None);
-    stop.store(true, Ordering::Relaxed);
-    server.join().expect("server thread");
+    server.stop();
     assert!(
         device.lock().unwrap().flushes >= 1,
         "an eject commits the device cache"
@@ -3233,7 +3540,7 @@ fn a_recovered_volume_lists_as_the_port_it_returned_on_scenario(
     window_ptr: *mut u8,
     facility: &'static TestFacility,
 ) {
-    let round = dirty_yank_round(
+    let round = dirty_yank_round_stating(
         window_ptr,
         facility,
         &YankScenario {
@@ -3244,6 +3551,7 @@ fn a_recovered_volume_lists_as_the_port_it_returned_on_scenario(
             name: b"usb88",
             unflushed: Unflushed::DeviceWrite,
         },
+        UNIT,
     );
     assert_eq!(mount_record(b"usb88").class(), VolumeClass::Local);
     let endpoint_id = 0xB1D0_5E17_0000_0089_u64;
@@ -3252,13 +3560,14 @@ fn a_recovered_volume_lists_as_the_port_it_returned_on_scenario(
     let pristine = RamBlock {
         data: round.pristine,
     };
-    let device = StdArc::new(Mutex::new(ServedDevice::new(pristine)));
-    let stop = StdArc::new(AtomicBool::new(false));
+    let device = StdArc::new(Mutex::new(ServedDevice {
+        identity: UNIT,
+        ..ServedDevice::new(pristine)
+    }));
     let server = serve(
         StdArc::clone(&endpoint),
         Window(window_ptr),
         StdArc::clone(&device),
-        StdArc::clone(&stop),
     );
     let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0089), 8).expect("region");
     VOLUME_SERVICE
@@ -3293,8 +3602,7 @@ fn a_recovered_volume_lists_as_the_port_it_returned_on_scenario(
             &seated(member()),
         )
         .expect("the user at the seat ejects it");
-    stop.store(true, Ordering::Relaxed);
-    server.join().expect("server thread");
+    server.stop();
 }
 
 /// Assert the file on the mounted volume at `path` holds exactly `expected`.
@@ -3346,12 +3654,10 @@ fn sibling_volumes_share_one_client_scenario(window_ptr: *mut u8, facility: &'st
     let endpoint_id = 0xB1D0_5E17_0000_0007_u64;
     let endpoint = register_endpoint(endpoint_id, 0x70_1007);
     let device = StdArc::new(Mutex::new(ServedDevice::new(disk)));
-    let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
         Window(window_ptr),
         StdArc::clone(&device),
-        StdArc::clone(&stop),
     );
     let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0008), 8).expect("region");
 
@@ -3428,8 +3734,7 @@ fn sibling_volumes_share_one_client_scenario(window_ptr: *mut u8, facility: &'st
         )
         .expect("detach the re-attached partition");
 
-    stop.store(true, Ordering::Relaxed);
-    server.join().expect("sibling scenario server thread");
+    server.stop();
 }
 
 /// A device whose geometry reply names a storage medium this ABI does not
@@ -3449,12 +3754,10 @@ fn unrecognised_medium_mounts_as_unknown_scenario(
     let endpoint_id = 0xB1D0_5E17_0000_0009_u64;
     let endpoint = register_endpoint(endpoint_id, 0x70_1009);
     let device = StdArc::new(Mutex::new(ServedDevice::unclassified(image)));
-    let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
         Window(window_ptr),
         StdArc::clone(&device),
-        StdArc::clone(&stop),
     );
     let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0009), 8).expect("region");
 
@@ -3488,10 +3791,7 @@ fn unrecognised_medium_mounts_as_unknown_scenario(
         )
         .expect("detach the volume whose class word is unreadable");
 
-    stop.store(true, Ordering::Relaxed);
-    server
-        .join()
-        .expect("unrecognised-medium scenario server thread");
+    server.stop();
 }
 
 /// A disk that stops answering mid-attach holds up only its own volumes:
@@ -3513,16 +3813,14 @@ fn a_device_that_stops_answering_holds_up_no_other_scenario(
         hold_first: Some((received, gate)),
         ..ServedDevice::new(stalled_image)
     }));
-    let stalled_stop = StdArc::new(AtomicBool::new(false));
     let stalled_server = serve(
         register_endpoint(stalled_endpoint, 0x70_1040),
         Window(window_ptr),
         StdArc::clone(&stalled),
-        StdArc::clone(&stalled_stop),
     );
     let (_va, stalled_region) =
         sharedreg::create(facility, ProcessId(0x70_0040), 8).expect("region");
-    let stalled_attach = thread::spawn(move || {
+    let stalled_attach = HostBoot::current().spawn(move || {
         attach_served(
             facility,
             &VolumeAttachRequest {
@@ -3542,16 +3840,14 @@ fn a_device_that_stops_answering_holds_up_no_other_scenario(
     let (image, identity) = fat32_image(0x0D15_C041, b"healthy payload");
     let blocks = (image.data.len() / BLOCK_SIZE) as u64;
     let endpoint = 0xB1D0_5E17_0000_0041_u64;
-    let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         register_endpoint(endpoint, 0x70_1041),
         Window(window_ptr),
         StdArc::new(Mutex::new(ServedDevice::new(image))),
-        StdArc::clone(&stop),
     );
     let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0041), 8).expect("region");
     let (attached, outcome) = mpsc::channel();
-    let healthy_attach = thread::spawn(move || {
+    let healthy_attach = HostBoot::current().spawn(move || {
         let result = attach_served(
             facility,
             &VolumeAttachRequest {
@@ -3576,9 +3872,9 @@ fn a_device_that_stops_answering_holds_up_no_other_scenario(
         Ok(Ok(())),
         "the other disk attached while the stalled one waited on its device"
     );
-    healthy_attach.join().expect("the healthy attach thread");
+    healthy_attach.join();
     assert_eq!(
-        stalled_attach.join().expect("the stalled attach thread"),
+        stalled_attach.join(),
         Ok(()),
         "the stalled disk attaches once it answers"
     );
@@ -3596,9 +3892,8 @@ fn a_device_that_stops_answering_holds_up_no_other_scenario(
             )
             .expect("detach");
     }
-    for (stop, server) in [(stop, server), (stalled_stop, stalled_server)] {
-        stop.store(true, Ordering::Relaxed);
-        server.join().expect("scenario server thread");
+    for server in [server, stalled_server] {
+        server.stop();
     }
 }
 
@@ -3672,12 +3967,10 @@ fn link_round_trip_through_the_real_service_scenario(
     let endpoint_id = 0xB1D0_5E17_0000_000A_u64;
     let endpoint = register_endpoint(endpoint_id, 0x70_100A);
     let device = StdArc::new(Mutex::new(ServedDevice::new(image)));
-    let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
         Window(window_ptr),
         StdArc::clone(&device),
-        StdArc::clone(&stop),
     );
     let (_va, region_id) = sharedreg::create(facility, ProcessId(0x70_200A), 8).expect("region");
 
@@ -3746,8 +4039,7 @@ fn link_round_trip_through_the_real_service_scenario(
             &admin(),
         )
         .expect("detach the ARXFS volume");
-    stop.store(true, Ordering::Relaxed);
-    server.join().expect("arxfs server thread");
+    server.stop();
 }
 
 /// The byte of an ext4 superblock's `s_state` and its "errors detected" bit,
@@ -3801,8 +4093,7 @@ fn retire(identity: [u8; 16], mode: DetachMode, round: Inserted) {
             &admin(),
         )
         .expect("the volume detaches");
-    round.stop.store(true, Ordering::Relaxed);
-    round.server.join().expect("server thread");
+    round.server.stop();
 }
 
 /// A second volume asking for a catalog name the first holds is answered
@@ -3856,8 +4147,7 @@ fn a_taken_catalog_name_is_answered_as_taken_scenario(
         read_as(0, "/Storage/usb8/hello.txt", 0, &mut buf).expect("the first volume still serves");
     assert_eq!(&buf[..n], b"first");
     retire(identity, DetachMode::Plain, first);
-    second.stop.store(true, Ordering::Relaxed);
-    second.server.join().expect("second server thread");
+    second.server.stop();
 }
 
 /// An ext4 volume carrying errors a checker recorded is attached read-only
@@ -3970,8 +4260,7 @@ fn an_ext_volume_keeps_its_on_disk_ownership_scenario(
             &admin(),
         )
         .expect("the volume detaches");
-    round.stop.store(true, Ordering::Relaxed);
-    round.server.join().expect("server thread");
+    round.server.stop();
     let kept = round.device.lock().unwrap().block.data.clone();
     let mut fs = Ext4::open(RamBlock { data: kept }).expect("the volume reopens");
     let shared = fs.lookup(fs.root(), b"shared").expect("shared");
@@ -4093,8 +4382,8 @@ fn assert_ownership_rules_govern_what_is_made() {
 
 /// A stick pulled mid-commit (`plans/DEVICES.md` D4c): the volume had been
 /// marked not clean and the pull came before the commit finished. Once its
-/// retained writes are replayed the volume needs a check, so it returns
-/// read-only and the recovery audit says why.
+/// retained writes are replayed onto the stick its device proves, the volume
+/// needs a check, so it returns read-only and the recovery audit says why.
 fn a_stick_pulled_mid_commit_returns_read_only_scenario(
     window_ptr: *mut u8,
     facility: &'static TestFacility,
@@ -4111,7 +4400,10 @@ fn a_stick_pulled_mid_commit_returns_read_only_scenario(
             name: b"ext4pull",
             fstype: VolumeFsType::Ext4,
         },
-        ServedDevice::pulled_after(ext4_image(identity), EXT4_SUPERBLOCK_LBA),
+        ServedDevice {
+            identity: UNIT,
+            ..ServedDevice::pulled_after(ext4_image(identity), EXT4_SUPERBLOCK_LBA)
+        },
     );
     pulled.outcome.expect("the volume attaches writable");
     assert!(
@@ -4123,8 +4415,7 @@ fn a_stick_pulled_mid_commit_returns_read_only_scenario(
         "the pull interrupts the commit"
     );
     tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
-    pulled.stop.store(true, Ordering::Relaxed);
-    pulled.server.join().expect("pulled server thread");
+    pulled.server.stop();
     let kept = pulled.device.lock().unwrap().block.data.clone();
 
     let back = insert(
@@ -4137,7 +4428,10 @@ fn a_stick_pulled_mid_commit_returns_read_only_scenario(
             name: b"ext4pull",
             fstype: VolumeFsType::Ext4,
         },
-        ServedDevice::new(RamBlock { data: kept }),
+        ServedDevice {
+            identity: UNIT,
+            ..ServedDevice::new(RamBlock { data: kept })
+        },
     );
     back.outcome.expect("the re-insert recovers the volume");
     assert_eq!(
@@ -4330,8 +4624,7 @@ fn a_held_descriptor_holds_its_volume_attached_scenario(
         audited_count(FORCE_UNMOUNTED, "held1", "revoked_nodes"),
         [Some(1)]
     );
-    first.stop.store(true, Ordering::Relaxed);
-    first.server.join().expect("server thread");
+    first.server.stop();
 
     let (image, other) = fat32_image(0x0D15_C071, b"other payload");
     let second = insert(
@@ -4719,13 +5012,13 @@ impl Gate {
 }
 
 /// A network filesystem server, as `smbfs` runs: the volume it offered, and
-/// the thread answering its lanes until its endpoint goes.
+/// the task answering its lanes until its endpoint goes.
 struct NetServer {
     owner: u64,
     offer: tairix_abi::netattach::OfferId,
     endpoint: StdArc<CallEndpoint>,
     host: &'static ServedHost<DriverClock>,
-    thread: Option<thread::JoinHandle<()>>,
+    server: Option<StoppableTask>,
 }
 
 impl NetServer {
@@ -4757,7 +5050,8 @@ impl NetServer {
             CapabilitySet::empty(),
             CapabilitySet::empty(),
             &SINK,
-        );
+        )
+        .expect("derived");
         let endpoint = StdArc::new(
             CallEndpoint::create_served(
                 EndpointId(mint_served_endpoint().expect("an endpoint id")),
@@ -4786,6 +5080,7 @@ impl NetServer {
                 name_matching: fs.name_matching(),
                 node_identity: fs.node_identity(),
                 attrs: false,
+                title: false,
                 write_refusal: None,
                 format: tairix_abi::volume::FormatName::Smb3,
             },
@@ -4812,14 +5107,10 @@ impl NetServer {
         let host: &'static ServedHost<DriverClock> =
             Box::leak(Box::new(ServedHost::new(DriverClock { defer: false })));
         let calls = StdArc::clone(&endpoint);
-        let thread = thread::spawn(move || {
+        let server = HostBoot::current().spawn_until_stopped(move |stopped| {
             let mut server = Server::new(fs, host).expect("a server");
             let mut reply = vec![0u8; FSSERVE_REPLY_MAX];
-            while !calls.is_closed() {
-                let RecvCall::Received(call) = calls.recv_call(FSSERVE_REQUEST_MAX) else {
-                    thread::yield_now();
-                    continue;
-                };
+            let mut answer = |call: &ReceivedCall, reply: &mut [u8]| {
                 if let Some(gate) = &gate {
                     gate.pass();
                 }
@@ -4828,30 +5119,32 @@ impl NetServer {
                 // alone while a call it posted is in service.
                 let window =
                     unsafe { core::slice::from_raw_parts_mut(bytes.ptr(), FSSERVE_WINDOW_LEN) };
-                let len = server.answer(&call.request, window, &mut reply);
-                let _ = calls.reply(call.ticket, &reply[..len], &SINK);
-            }
+                server.answer(&call.request, window, reply)
+            };
+            while serve_next(&calls, &mut reply, &SINK, stopped, &mut answer).is_ok() {}
         });
         Self {
             owner,
             offer: id,
             endpoint,
             host,
-            thread: Some(thread),
+            server: Some(server),
         }
     }
 
     /// Wait for the server to see its endpoint go.
     fn join(&mut self) {
-        if let Some(thread) = self.thread.take() {
-            thread.join().expect("the server thread");
+        if let Some(server) = self.server.take() {
+            server.join();
         }
     }
 
     /// The server process ends, taking its endpoint, as a crash would.
     fn exit(mut self) {
         tairix_kernel_core::callreg::teardown_owned_by(self.owner, &ASPACES, &SINK);
-        self.join();
+        if let Some(server) = self.server.take() {
+            server.stop();
+        }
     }
 }
 

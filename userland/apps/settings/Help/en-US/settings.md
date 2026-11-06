@@ -59,7 +59,13 @@ remembers what you set. *Sound Effects* turns the desktop's own sounds on or
 off and sets their theme and volume, and for each event — a notification, an
 error, the terminal bell — whether it plays its theme's sound, a file you
 choose, or nothing. The start-up, sign-in and sign-out sounds are the
-machine's, set by its administrator.
+machine's, set by its administrator. Changing the volume of the device sound
+plays through, here or from the icon bar, plays a short sound at the new
+volume — where a drag comes to rest, at each step of the arrow keys, and on
+unmuting — so you can hear how loud it now is. In *Sound Effects*,
+*Play feedback when the volume changes* turns it off. It does not follow the
+desktop's other sounds: it plays at the device's own volume, whether they are
+on or off.
 
 **Raspberry Pi** is listed only when the machine is one. It sets the processor's
 cooling fan, switched through one line of the 40-pin header: *Off*, *On* all the
@@ -86,12 +92,17 @@ it shows and orders what it lists, whether it shows the places rail and the
 toolbar, whether folders stay on top, which name endings and which items are
 hidden, whether a picture shows its own content and a folder what it holds,
 whether moving items to the Trash asks first, and whether a disk image or
-archive you opened is unmounted once its windows close. A row takes effect as
+archive you opened is unmounted once its windows close. The name endings it
+hides are hidden on the desktop too. *Show on the desktop* has a box for each
+kind of drive — *The system drive*, *Fixed drives*, *Removable drives*,
+*Network shares* and *Disk images and archives* — and the desktop shows an
+icon for each attached drive of a ticked kind, which opens it as the file
+manager does; only removable drives are ticked at first. A row takes effect as
 soon as it is chosen: where a new window opens and whether it shows the places
 rail and the toolbar apply to the next window you open, and everything else
-reaches every file manager window at once, though a window keeps a display or
-an order you chose in it yourself. *Settings…* on the file manager's own menu
-opens this pane.
+reaches the desktop and every file manager window at once, though a window
+keeps a display or an order you chose in it yourself. *Settings…* on the file
+manager's own menu opens this pane.
 
 **Users & Groups** shows your own account, every account's name and user id,
 and the machine's groups without asking for anything: a principal may read its

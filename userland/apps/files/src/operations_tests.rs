@@ -312,8 +312,18 @@ fn a_stopping_desk_takes_nothing_and_stops_what_runs() {
     );
 }
 
+/// What a job asks about a name already taken.
+fn conflict() -> Conflict {
+    Conflict {
+        source: String::from("/a/notes.txt"),
+        target: String::from("/b/notes.txt"),
+        occupant: tairix_fscopy::tree::Kind::File,
+    }
+}
+
 /// With no worker an operation runs a slice a turn on the loop: it stops when
-/// the slice is spent, still working, and a cancel stops it at a unit's end.
+/// the slice is spent, still working, or when it asks, and a cancel stops it
+/// at a unit's end.
 #[test]
 fn an_operation_run_on_the_loop_runs_a_slice_at_a_time() {
     let mut left = 5;
@@ -326,7 +336,7 @@ fn an_operation_run_on_the_loop_runs_a_slice_at_a_time() {
         }
     };
     let mut units = 0;
-    let ending = run_slice(
+    let sliced = run_slice(
         &mut step,
         || false,
         || {
@@ -334,14 +344,14 @@ fn an_operation_run_on_the_loop_runs_a_slice_at_a_time() {
             units >= 2
         },
     );
-    assert_eq!(ending, None, "the slice spent, the work goes on");
+    assert_eq!(sliced, Sliced::Spent, "the slice spent, the work goes on");
     assert_eq!(
         run_slice(&mut step, || false, || false),
-        Some(Ending::Completed)
+        Sliced::Ended(Ending::Completed)
     );
     assert_eq!(
         run_slice(|| Step::Working, || true, || false),
-        Some(Ending::Cancelled),
+        Sliced::Ended(Ending::Cancelled),
         "a cancel is taken before the next unit"
     );
     assert_eq!(
@@ -350,8 +360,108 @@ fn an_operation_run_on_the_loop_runs_a_slice_at_a_time() {
             || false,
             || false
         ),
-        Some(Ending::Stopped(String::from("refused")))
+        Sliced::Ended(Ending::Stopped(String::from("refused")))
     );
+    assert_eq!(
+        run_slice(|| Step::Asks(conflict()), || false, || false),
+        Sliced::Asks(conflict()),
+        "a question ends the slice, its place held"
+    );
+}
+
+/// An operation that asks holds no worker but keeps its volumes, so nothing
+/// overtakes it on them while one elsewhere runs; answered, it resumes on its
+/// own turn before anything waiting.
+#[test]
+fn an_asking_operation_holds_no_worker_but_keeps_its_volumes_and_resumes_first() {
+    let mut desk = OperationDesk::new(4);
+    desk.submit(1, "copy", on(&[1])).expect("taken");
+    desk.submit(2, "after it", on(&[1])).expect("taken");
+    desk.submit(3, "elsewhere", on(&[2])).expect("taken");
+    let (turn, id, job) = desk.next_job().expect("the copy");
+    assert_eq!(id, 1);
+    assert_eq!(desk.ask(turn, job, conflict()), Ok(true));
+    assert_eq!(
+        desk.standing(1).and_then(|standing| standing.asking),
+        Some(&conflict())
+    );
+    assert_eq!(
+        start(&mut desk).1,
+        3,
+        "its worker is free for another volume's"
+    );
+    assert!(
+        desk.next_job().is_none(),
+        "nothing overtakes it on its volume"
+    );
+    desk.submit(4, "later elsewhere", on(&[3])).expect("taken");
+    assert!(desk.answer(1, |job| *job = "copy, answered"));
+    assert!(!desk.answer(1, |_| {}), "answered once");
+    assert_eq!(desk.standing(1).and_then(|standing| standing.asking), None);
+    assert_eq!(
+        desk.next_job(),
+        Some((turn, 1, "copy, answered")),
+        "it resumes first, on its own turn"
+    );
+    desk.finish(turn, Ending::Completed, Omissions::default());
+    assert_eq!(start(&mut desk).1, 2);
+}
+
+/// A cancel, a closed window or a stop while an operation asks hands it to a
+/// worker to stop, and no answer reaches it afterwards; an ask after a cancel
+/// is handed straight back.
+#[test]
+fn an_asking_operation_is_handed_to_a_worker_to_stop() {
+    let mut desk = desk();
+    desk.submit(1, "copy", on(&[1])).expect("taken");
+    desk.submit(2, "move", on(&[2])).expect("taken");
+    desk.submit(3, "delete", on(&[3])).expect("taken");
+    let (first, _, job) = desk.next_job().expect("copy");
+    assert!(desk.ask(first, job, conflict()).is_ok());
+    let (second, _, job) = desk.next_job().expect("move");
+    assert!(desk.ask(second, job, conflict()).is_ok());
+    assert!(desk.cancel(1), "a worker is owed the stop");
+    assert_eq!(
+        desk.standing(1)
+            .map(|standing| (standing.cancelling, standing.asking)),
+        Some((true, None))
+    );
+    assert!(
+        !desk.answer(1, |_| {}),
+        "a cancelled question takes no answer"
+    );
+    let (turn, id, _) = desk.next_job().expect("handed out to be stopped");
+    assert_eq!((turn, id), (first, 1));
+    assert!(desk.cancelled(turn));
+    desk.finish(turn, Ending::Cancelled, Omissions::default());
+    assert_eq!(desk.take(1), Some(ended(0, Ending::Cancelled)));
+
+    assert!(desk.forget(2), "its window closed");
+    let (turn, _, _) = desk.next_job().expect("handed out to be stopped");
+    assert_eq!(turn, second);
+    assert!(desk.cancelled(turn));
+    assert!(
+        !desk.finish(turn, Ending::Cancelled, Omissions::default()),
+        "its answer belongs to nobody"
+    );
+    assert!(!desk.holds(2));
+
+    let (third, _, job) = desk.next_job().expect("delete");
+    desk.stop();
+    assert_eq!(desk.ask(third, job, conflict()), Err("delete"));
+
+    let mut desk = OperationDesk::new(3);
+    desk.submit(1, "copy", on(&[1])).expect("taken");
+    let (turn, _, job) = desk.next_job().expect("copy");
+    assert!(desk.ask(turn, job, conflict()).is_ok());
+    desk.stop();
+    assert_eq!(
+        desk.next_job().map(|(stopped, _, _)| stopped),
+        Some(turn),
+        "a stopping desk still hands out what asks, to be stopped"
+    );
+    assert!(desk.cancelled(turn));
+    assert!(desk.next_job().is_none());
 }
 
 /// A worker's job of `units` units ending as `last` does, recording in `log`
@@ -390,32 +500,76 @@ impl Drop for Logged<'_> {
     }
 }
 
-/// Carry a job of `units` units ending as `last` on a worker whose reports
-/// owe a wake on the first unit and ask a cancel from unit `cancel_at`:
-/// what was done, in order, and how it ended.
-fn carried(units: usize, last: Step, cancel_at: usize) -> (Vec<&'static str>, Option<Ending>) {
+/// The desk a test worker reports to: a wake owed on the first report, a
+/// cancel asked from report `cancel_at` — before the first unit at 0 — and a
+/// question parked where `parks` says, else handed back.
+struct Desk<'a> {
+    log: &'a core::cell::RefCell<Vec<&'static str>>,
+    reported: usize,
+    cancel_at: usize,
+    parks: bool,
+    parked: Option<Logged<'a>>,
+    settled: Option<Ending>,
+}
+
+impl<'a> Carrier<Logged<'a>> for Desk<'a> {
+    fn cancelled(&mut self) -> bool {
+        self.cancel_at == 0
+    }
+
+    fn report(&mut self, _: &mut Logged<'a>) -> (bool, bool) {
+        self.reported += 1;
+        (self.reported == 1, self.reported >= self.cancel_at)
+    }
+
+    fn ask(&mut self, job: Logged<'a>, _: Conflict) -> Result<bool, Logged<'a>> {
+        if !self.parks {
+            return Err(job);
+        }
+        self.log.borrow_mut().push("parked");
+        self.parked = Some(job);
+        Ok(true)
+    }
+
+    fn settle(&mut self, ending: Ending, remains: &'static str) -> bool {
+        assert_eq!(remains, "remains");
+        self.log.borrow_mut().push("settled");
+        self.settled = Some(ending);
+        true
+    }
+
+    fn nudge(&mut self) {
+        self.log.borrow_mut().push("nudge");
+    }
+}
+
+/// Carry a job of `units` units ending as `last` on a worker whose desk asks
+/// a cancel from report `cancel_at` and parks a question where `parks` says:
+/// what the worker did, in order, and how the job ended, if it did.
+fn carried(
+    units: usize,
+    last: Step,
+    (cancel_at, parks): (usize, bool),
+) -> (Vec<&'static str>, Option<Ending>) {
     let log = core::cell::RefCell::new(Vec::new());
-    let mut reported = 0;
-    let mut settled = None;
+    let mut desk = Desk {
+        log: &log,
+        reported: 0,
+        cancel_at,
+        parks,
+        parked: None,
+        settled: None,
+    };
     carry(
         Logged {
             units,
             last,
             log: &log,
         },
-        |_| {
-            reported += 1;
-            (reported == 1, reported >= cancel_at)
-        },
-        |ending, remains| {
-            assert_eq!(remains, "remains");
-            log.borrow_mut().push("settled");
-            settled = Some(ending);
-            true
-        },
-        || log.borrow_mut().push("nudge"),
+        &mut desk,
     );
-    (log.into_inner(), settled)
+    let done = log.borrow().clone();
+    (done, desk.settled.take())
 }
 
 /// A worker's job is dropped, closing its files, before its answer is
@@ -423,14 +577,14 @@ fn carried(units: usize, last: Step, cancel_at: usize) -> (Vec<&'static str>, Op
 #[test]
 fn a_carried_operations_files_close_before_its_answer_is_settled() {
     assert_eq!(
-        carried(2, Step::Done, usize::MAX),
+        carried(2, Step::Done, (usize::MAX, true)),
         (
             vec!["step", "nudge", "step", "closed", "settled", "nudge"],
             Some(Ending::Completed)
         )
     );
     assert_eq!(
-        carried(3, Step::Working, 2),
+        carried(3, Step::Working, (2, true)),
         (
             vec!["step", "nudge", "step", "abandon", "closed", "settled", "nudge"],
             Some(Ending::Cancelled)
@@ -438,13 +592,46 @@ fn a_carried_operations_files_close_before_its_answer_is_settled() {
         "a cancel is honoured at the end of the unit it is reported after"
     );
     assert_eq!(
-        carried(1, Step::Stopped(String::from("refused")), usize::MAX),
+        carried(
+            1,
+            Step::Stopped(String::from("refused")),
+            (usize::MAX, true)
+        ),
         (
             vec!["step", "nudge", "closed", "settled", "nudge"],
             Some(Ending::Stopped(String::from("refused")))
         ),
         "a refusal abandons nothing"
     );
+    assert_eq!(
+        carried(2, Step::Done, (0, true)),
+        (
+            vec!["abandon", "closed", "settled", "nudge"],
+            Some(Ending::Cancelled)
+        ),
+        "one stopped before its first unit, resumed only to stop, does nothing"
+    );
+}
+
+/// A job that asks is parked on the desk and the worker is free: it neither
+/// closes the job nor settles an answer. Handed back, a cancel having come
+/// first, it is stopped as any cancel stops it.
+#[test]
+fn a_carried_job_that_asks_is_parked_holding_no_worker() {
+    assert_eq!(
+        carried(2, Step::Asks(conflict()), (usize::MAX, true)),
+        (vec!["step", "nudge", "step", "parked", "nudge"], None)
+    );
+    for refused in [(usize::MAX, false), (1, true)] {
+        assert_eq!(
+            carried(1, Step::Asks(conflict()), refused),
+            (
+                vec!["step", "nudge", "abandon", "closed", "settled", "nudge"],
+                Some(Ending::Cancelled)
+            ),
+            "{refused:?}"
+        );
+    }
 }
 
 /// The window shows the walk's own figures and the item in hand, and the

@@ -91,6 +91,34 @@ pub struct InputEvent {
     pub value: i32,
 }
 
+impl InputEvent {
+    /// A key edge: `code` going down when `pressed`, else coming up.
+    #[must_use]
+    pub const fn key(code: u16, pressed: bool) -> Self {
+        Self {
+            kind: InputEventKind::Key,
+            reserved0: 0,
+            code,
+            value: pressed as i32,
+        }
+    }
+
+    /// `Some(true)` for a key going down, `Some(false)` for one coming up,
+    /// and `None` for any other event, a key value that is no edge (an
+    /// `evdev` repeat) among them.
+    #[must_use]
+    pub const fn key_edge(&self) -> Option<bool> {
+        if !matches!(self.kind, InputEventKind::Key) {
+            return None;
+        }
+        match self.value {
+            1 => Some(true),
+            0 => Some(false),
+            _ => None,
+        }
+    }
+}
+
 /// Trait every input driver implements.
 ///
 /// # Capabilities
@@ -131,6 +159,24 @@ mod tests {
         assert_eq!(InputEventKind::from_u8(2), Ok(InputEventKind::Pointer));
         assert_eq!(InputEventKind::from_u8(3), Ok(InputEventKind::Scroll));
         assert_eq!(InputEventKind::from_u8(0), Err(DriverError::OutOfRange));
+    }
+
+    /// A key edge reads back as it was made, and nothing else reads as one.
+    #[test]
+    fn a_key_edge_reads_back_and_nothing_else_is_one() {
+        for pressed in [true, false] {
+            assert_eq!(InputEvent::key(0x04, pressed).key_edge(), Some(pressed));
+        }
+        let repeat = InputEvent {
+            value: 2,
+            ..InputEvent::key(0x04, true)
+        };
+        assert_eq!(repeat.key_edge(), None, "a repeat is no edge");
+        let motion = InputEvent {
+            kind: InputEventKind::Pointer,
+            ..InputEvent::key(AXIS_X, true)
+        };
+        assert_eq!(motion.key_edge(), None, "motion is no key");
     }
 
     struct MockInput {

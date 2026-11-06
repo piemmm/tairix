@@ -145,6 +145,20 @@ impl CommitScheduler {
         self.report();
     }
 
+    /// The open transaction could not be published and stays open with every
+    /// operation it carries.
+    ///
+    /// One whose window has run out is dated afresh and reported, so the
+    /// host's timer comes back for it a window from now rather than at a
+    /// deadline already past; one still inside its window keeps the deadline
+    /// the host holds.
+    pub fn postponed(&mut self) {
+        if self.open && self.expired() {
+            self.opened_ns = self.now_ns();
+            self.report();
+        }
+    }
+
     /// Whether the open transaction has reached its window and the operation
     /// that just finished must publish it.
     #[must_use]

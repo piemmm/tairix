@@ -61,6 +61,7 @@ impl<F: ServedFilesystem> Opened<F> {
             name_matching: self.fs.name_matching(),
             node_identity: self.fs.node_identity(),
             attrs: self.fs.attrs_fs().is_some(),
+            title: !matches!(self.fs.label(), Err(DriverError::Unsupported)),
             write_refusal: self.write_refusal,
             format: self.format,
         }

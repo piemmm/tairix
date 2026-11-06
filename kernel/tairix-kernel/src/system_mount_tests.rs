@@ -380,3 +380,23 @@ fn a_volume_cache_the_heap_cannot_hold_is_refused() {
     );
     assert!(super::cached(RwMockFs::new(), 1, [0x3D; 16], pressure, &NullSink, None).is_ok());
 }
+
+/// The production layout the heap cannot build is refused for want of memory
+/// at whichever of its allocations the heap refuses, never aborted on.
+#[test]
+fn a_system_layout_the_heap_cannot_build_is_refused_for_memory() {
+    let mut granted = 0;
+    loop {
+        match tairix_fuzzseed::meter::refusing_after(granted, system_vfs) {
+            Ok(_) => break,
+            Err(err) => assert_eq!(
+                err,
+                tairix_kernel_core::VfsError::OutOfMemory,
+                "refused after {granted} grants"
+            ),
+        }
+        granted += 1;
+        assert!(granted < 1024, "the layout was never built");
+    }
+    assert!(granted > 0, "the layout asks the heap for memory");
+}

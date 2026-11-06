@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 use core::ptr;
 
 use tairix_abi::driver::display::{DisplayFormat, SeatGate};
-use tairix_abi::input::{KeyInput, KeyValue, Modifiers};
+use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PhysicalKey};
 use tairix_abi::seat::{SeatLease, SEAT_PRIMARY};
 use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapper};
 use tairix_caps::CapabilitySet;
@@ -267,7 +267,9 @@ fn drive_lifecycle(env: &dyn QemuEnv, config: FramebufferConfig) {
     let mut grants = CapabilitySet::empty();
     grants.insert(CapabilityId::MMIO_MAP);
     grants.insert(CapabilityId::DRV_LOAD);
-    let caller = TaskCapabilities::derive(TASK, UserId(0), grants, grants, audit);
+    let Ok(caller) = TaskCapabilities::derive(TASK, UserId(0), grants, grants, audit) else {
+        env.fail("caller capability record");
+    };
     let phys = identity_map();
     let Ok(mut mmio) = MmioMap::new(
         AddressSpace::new(HostPageTable::new()),
@@ -456,6 +458,7 @@ fn drive_multi_seat(env: &dyn QemuEnv, mapper: &dyn MmioMapper, config: Framebuf
         KeyInput::Pressed {
             key: KeyValue::Char(c),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::UNKNOWN,
         }
     }
 

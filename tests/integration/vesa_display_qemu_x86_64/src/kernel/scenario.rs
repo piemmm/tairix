@@ -311,7 +311,9 @@ fn drive_lifecycle(block: &[u8], phys_base: u64) {
     let mut grants = CapabilitySet::empty();
     grants.insert(CapabilityId::MMIO_MAP);
     grants.insert(CapabilityId::DRV_LOAD);
-    let caller = TaskCapabilities::derive(TASK, UserId(0), grants, grants, &SERIAL_SINK);
+    let Ok(caller) = TaskCapabilities::derive(TASK, UserId(0), grants, grants, &SERIAL_SINK) else {
+        fail("caller capability record");
+    };
     let Ok(mut mmio) = MmioMap::new(
         AddressSpace::new(HostPageTable::new()),
         VirtAddr::new(MMIO_VBASE),

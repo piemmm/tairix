@@ -28,13 +28,19 @@ une lettre finale `b`/`c`/`l` facultative) est acceptée, comme dans
 l'outil GNU.
 
 Le mode suivi garde chaque fichier ouvert et affiche les nouvelles
-données à mesure qu'il grandit ; il se bloque jusqu'à ce que le
-fichier change — jamais d'attente active. `-f` suit le descripteur ;
-`-F` suit le nom et rouvre un fichier après rotation, et `--retry`
-attend qu'un nom apparaisse. `--pid=PID` arrête le suivi à la fin du
-processus (vérifié toutes les `--sleep-interval` secondes, 1 par
-défaut ; `--max-unchanged-stats` 5 par défaut). Une troncature est
-signalée et le fichier est suivi depuis son nouveau début.
+données à mesure que le fichier grandit. `-f` suit le fichier ouvert par
+son descripteur — après un renommage ou un déplacement, c'est toujours
+le même fichier qui est suivi. `-F` suit le *nom* : quand le fichier
+subit une rotation (renommé ailleurs et remplacé par un nouveau fichier)
+il rouvre le nouveau fichier, et `--retry` continue d'essayer un nom
+qui n'existe pas encore. Un suivi se bloque jusqu'à ce que le fichier
+change réellement — il ne fait jamais tourner le CPU à vide.
+`--pid=PID` arrête le suivi dès que le processus `PID` se termine,
+vérifié toutes les `--sleep-interval` (secondes, 1 par défaut).
+`--max-unchanged-stats=N` règle combien de cycles sans changement
+s'écoulent avant que `-F` revérifie le nom en quête d'une rotation (5
+par défaut). Une troncature (le fichier rétrécit) est signalée et le
+fichier est de nouveau suivi depuis son nouveau début.
 
 Quand du contenu en tête n'est pas affiché, un enregistrement
 consultatif est écrit sur le flux d'information standard (fd 3) ; il ne
@@ -60,13 +66,20 @@ octet.
 - `-v, --verbose` — toujours afficher les en-têtes `==> file <==`.
 - `-z, --zero-terminated` — les lignes sont délimitées par NUL au lieu
   du saut de ligne.
-- `-f, --follow[=descriptor]` — suivre par descripteur, en affichant les données ajoutées.
-- `-F` — suivre par nom (`--follow=name --retry`) ; rouvrir un fichier après rotation.
+- `-f, --follow[=descriptor]` — garder le fichier ouvert et afficher les
+  données à mesure qu'elles sont ajoutées, en le suivant par
+  descripteur.
+- `-F` — suivre par nom (`--follow=name --retry`) : rouvrir le fichier
+  après une rotation.
 - `--follow=name` — suivre le nom plutôt que le descripteur.
-- `--retry` — continuer d'essayer d'ouvrir un fichier pas encore présent.
-- `--pid <PID>` — arrêter le suivi quand le processus `PID` meurt.
-- `--sleep-interval <N>` — secondes entre les vérifications (1 par défaut).
-- `--max-unchanged-stats <N>` — cycles sans changement avant que `-F` revérifie le nom (5 par défaut).
+- `--retry` — continuer d'essayer d'ouvrir un fichier pas encore
+  accessible.
+- `--pid <PID>` — pendant un suivi, s'arrêter dès que le processus `PID`
+  meurt.
+- `--sleep-interval <N>` — secondes entre les revérifications de
+  `--pid`/rotation (fractions permises ; 1 par défaut).
+- `--max-unchanged-stats <N>` — cycles sans changement avant que `-F`
+  revérifie le nom en quête d'une rotation (5 par défaut).
 - `-h, -?` — afficher l'aide courte de cette commande.
 
 ## EXAMPLES
@@ -76,6 +89,12 @@ octet.
   chacune sous son en-tête.
 - `tail -c 1K image` — afficher les 1024 derniers octets de `image`.
 - `tail -n +5 notes` — afficher `notes` à partir de sa 5e ligne.
+- `tail -f log.txt` — afficher les 10 dernières lignes, puis les
+  nouvelles lignes à mesure qu'elles sont écrites.
+- `tail -F /System/Logs/system` — suivre le journal système à travers
+  les rotations.
+- `tail -f --pid 1234 out` — suivre `out` jusqu'à la fin du processus
+  1234.
 
 ## EXIT STATUS
 

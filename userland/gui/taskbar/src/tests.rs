@@ -8069,7 +8069,8 @@ impl IconArtwork for ClassArtwork {
 /// side the bar could draw one at, built by driving a real desk so the test
 /// exercises the answer an embedder actually receives.
 fn landed_class_artwork(kinds: &[IconKind]) -> tairix_icon::Landed {
-    let mut desk = tairix_icon::ArtworkDesk::new();
+    let keys = tairix_hash::BuildSipHash13::with_seed(tairix_hash::HashSeed::from_words(7, 7));
+    let mut desk = tairix_icon::ArtworkDesk::new(keys);
     for &kind in kinds {
         for side in 1..=THICKNESS {
             desk.want(&tairix_icon::ArtworkKey::Raster(kind), side);

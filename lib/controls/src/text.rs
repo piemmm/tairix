@@ -2794,10 +2794,11 @@ impl TextArea {
             return;
         }
         let font = role_font(theme, scale, TextRole::Body);
-        let Some(geom) = self.geom(bounds, scale, theme, font) else {
-            return;
-        };
-        let Some(rect) = geom.bar else {
+        let Some((geom, rect)) = self
+            .geom(bounds, scale, theme, font)
+            .and_then(|geom| geom.bar.map(|bar| (geom, bar)))
+        else {
+            self.bar.let_go();
             return;
         };
         self.bar.set_model(self.scroll_model(&geom));

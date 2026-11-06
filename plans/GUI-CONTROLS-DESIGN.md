@@ -2299,6 +2299,15 @@ row by row — a picture's palette, a terminal scheme's sixteen.
   Left and Up the last.
 - **The owner fits the rows.** It sets how many wells go to a row as the room
   it has changes, and the colours and marks stay as they were.
+- **Spaced or packed.** Wells stand half the theme's gap apart, or a pixel
+  apart where the owner packs them (`WellSpacing::Packed`) — a palette, whose
+  wells are as many as fit — the focus ring then the pixel round the well.
+- **Numbers in place of marks.** An owner may number its first wells
+  (`number_wells`, in a `NumberFace` resolved from the theme): a marked well
+  then shows its number in place of its mark, black or white inside the well
+  where the digits fit within the primary ring, else on a count-badge pill
+  centred on the well and kept within the grid. A mark's move reports the well
+  and its badge (`mark_rect`).
 
 ### 11.45 NumberField
 

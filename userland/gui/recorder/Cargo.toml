@@ -1,0 +1,62 @@
+[package]
+name = "tairix-recorder"
+description = "TAIRiX screen recorder: the component the desktop session alone starts to record the screen. It codes the frames the session composes into two slots of the session's memory as VP8, and the microphone, the desktop's own sound or both, mixed on the output's clock, as Opus, and writes both as one WebM file through positional writes to the output the session delegated (plans/CAPTURE.md CP8)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The package is the recorder's host-testable core and the `Run` entry point
+# of the component at `/System/Components/recorder.app/Run`: a freestanding
+# program on the Tier-1 targets and an inert host stub elsewhere (see
+# `src/run.rs` and `build.rs`).
+[[bin]]
+name = "tairix-recorder-run"
+path = "src/run.rs"
+
+[dependencies]
+# The recorder protocol, the capture-stream vocabulary its sound is opened in,
+# and `Errno`.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The one mixer, resampler, channel matrix and sample conversion the sound
+# runs through.
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }
+# The bounded, committed queue each sound source's frames wait in.
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
+# The positional-write `Target` the recording is written through.
+tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0" }
+# The structured log every refusal and abnormal end is recorded in.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The cores a frame is coded across: the runner contract the core names, and
+# the worker pool the program makes.
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0" }
+# The duplex seam the session's two pipes are framed and bounded by.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
+# The Opus encoder the sound is coded with.
+tairix-sound = { path = "../../../lib/sound", version = "=0.0.0", features = ["encode-opus"] }
+# Fallible allocation, so a refused buffer is answered rather than aborting,
+# and the job queue the encoding thread takes its work from.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The VP8 encoder and the WebM muxer.
+tairix-video = { path = "../../../lib/video", version = "=0.0.0", features = ["encode"] }
+
+# What only the freestanding `Run` binary links, for the bare-metal targets it
+# is built for.
+[target.'cfg(target_os = "none")'.dependencies]
+# The userland runtime: `_start`, the allocator, the worker thread, the
+# wait-set, the shared regions and the delegated file.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# The audio service's live transport and its capture streams.
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0", features = ["rt"] }
+# The wait-set membership of the session's two pipes.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
+# The online CPUs, which the encoding pool is sized to.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

@@ -29,6 +29,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::fs::FileId;
+use tairix_abi::window_ipc::DropOperation;
+use tairix_abi::STORAGE_CATALOG;
 
 use crate::entry::Listed;
 
@@ -224,13 +226,26 @@ pub fn plan_paste(clipboard: &Clipboard, target: &[String]) -> Result<PastePlan,
 }
 
 /// What dropping the dragged `items` into the folder `target` does: a copy,
-/// or a move when `shift` is held — or `None` when the drop would put a folder
-/// inside itself, or would leave every item where it already is.
+/// or a move when `shift` is held; a shortcut to each when every item is a
+/// volume's entry in the storage catalog, since a volume is never copied or
+/// moved; or `None` when the drop would put a folder inside itself, would
+/// leave every item where it already is, mixes volumes with other items, or
+/// would make shortcuts where no file can be made.
 ///
 /// The one policy every drop of a drag decides through, so a window and the
 /// desktop can never disagree about what a drop means.
 #[must_use]
-pub fn drop_operation(items: &[Listed], target: &[String], shift: bool) -> Option<ClipboardOp> {
+pub fn drop_operation(items: &[Listed], target: &[String], shift: bool) -> Option<DropOperation> {
+    let volumes = items
+        .iter()
+        .filter(|item| is_catalog_entry(&item.path))
+        .count();
+    if volumes > 0 {
+        let linked = volumes == items.len()
+            && crate::vfs::stores_files(target)
+            && !items.iter().any(|item| is_within(target, &item.path));
+        return linked.then_some(DropOperation::Link);
+    }
     let mut moves_one = false;
     for item in items {
         if is_within(target, &item.path) {
@@ -242,10 +257,16 @@ pub fn drop_operation(items: &[Listed], target: &[String], shift: bool) -> Optio
             .is_some_and(|(_, parent)| parent != target);
     }
     moves_one.then_some(if shift {
-        ClipboardOp::Cut
+        DropOperation::Move
     } else {
-        ClipboardOp::Copy
+        DropOperation::Copy
     })
+}
+
+/// Whether `path` is an entry of the storage catalog: an attached volume as
+/// the catalog shows it.
+fn is_catalog_entry(path: &[String]) -> bool {
+    matches!(path, [catalog, _] if catalog == STORAGE_CATALOG)
 }
 
 /// Whether `path` is `ancestor` itself or lies inside it — an exact root-first

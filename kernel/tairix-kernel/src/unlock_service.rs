@@ -557,26 +557,30 @@ pub const WRONG_PASSPHRASE_RETRY_DELAY_NS: u64 = 3_000_000_000;
 /// and re-parks, so the minimum duration always elapses — never a spin, never
 /// a `yield_now` loop.
 ///
-/// `task` is the kthread's published scheduler id; without it (a degenerate
-/// build that never went through admission) or without an installed wait
-/// clock, no timed park is possible, so this returns at once. The delay is a
-/// rate limit, not a correctness invariant, and such a build has no monotonic
-/// clock to measure three seconds against.
+/// Answers whether the pause was had. Without `task` (a build that never went
+/// through admission), without a wait clock, or with no room on the heap to
+/// register the wait, it cannot be, and the answer is `false`: the caller
+/// then refuses what the pause guards rather than grant it sooner.
 pub fn park_for_ns(
     yielder: &CooperativeYield<'_>,
     task: Option<tairix_kernel_sched_api::TaskId>,
     min_ns: u64,
-) {
+) -> bool {
     let (Some(task), Some(start)) = (task, tairix_kernel_core::wait_now_ns()) else {
-        return;
+        return false;
     };
     let deadline = start.saturating_add(min_ns);
     loop {
         let now = tairix_kernel_core::wait_now_ns().unwrap_or(deadline);
         if now >= deadline {
-            return;
+            return true;
         }
-        tairix_kernel_core::CONSOLE_WAITQ.register(task, deadline);
+        if tairix_kernel_core::CONSOLE_WAITQ
+            .register(task, deadline)
+            .is_err()
+        {
+            return false;
+        }
         tairix_kernel_core::rearm_timed_wakeup();
         yielder.park();
         tairix_kernel_core::console_deregister(task, deadline);
@@ -722,7 +726,7 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
             // empty poll and the park is not lost (the register-before-poll
             // interlock).
             if let Some(task) = task {
-                tairix_kernel_core::CONSOLE_WAITQ.register(task, deadline);
+                tairix_kernel_core::CONSOLE_WAITQ.register(task, deadline)?;
             }
             let read = match self.inner.read(buf) {
                 Ok(read) => read,
@@ -809,7 +813,7 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
                 None => caller_deadline,
             };
             if let Some(task) = task {
-                tairix_kernel_core::CONSOLE_WAITQ.register(task, deadline);
+                tairix_kernel_core::CONSOLE_WAITQ.register(task, deadline)?;
             }
             let read = match self.inner.read(buf) {
                 Ok(read) => read,

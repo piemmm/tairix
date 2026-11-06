@@ -38,6 +38,23 @@ impl<T, const N: usize> ArrayVec<T, N> {
         }
     }
 
+    /// Make `slot` an empty vector where it lies, writing its length alone.
+    ///
+    /// The slots are uninitialised by definition, so a vector inside a large
+    /// structure built in place — an arena node, say — is never assembled on
+    /// the stack and moved there.
+    pub fn init_empty(slot: &mut MaybeUninit<Self>) -> &mut Self {
+        let vector = slot.as_mut_ptr();
+        // SAFETY: `vector` is `slot`'s own aligned, writable storage. Writing
+        // `len` through its place reads and drops nothing, and `slots` is an
+        // array of `MaybeUninit`, whole while uninitialised, so the vector is
+        // initialised once `len` is.
+        unsafe {
+            ptr::addr_of_mut!((*vector).len).write(0);
+            slot.assume_init_mut()
+        }
+    }
+
     /// The fixed capacity, `N`.
     #[must_use]
     pub const fn capacity(&self) -> usize {

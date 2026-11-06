@@ -25,9 +25,10 @@
 //! 2. **A disc image on a partitioned device is weighed against its table.**
 //!    ISO 9660 and UDF begin 32 KiB in, behind a system area where a hybrid
 //!    image keeps a partition table of its own. The image is the device's
-//!    volume when that table lays it out (`hybrid_layout`); its partitions
-//!    inside it are then windows onto it and are not planned, while those
-//!    after it — an appended boot partition — are. A table that contradicts
+//!    volume, over its own span, when that table lays it out
+//!    (`hybrid_layout`); its partitions inside it are then windows onto it
+//!    and are not planned, while those after it — an appended boot or
+//!    persistence partition — are. A table that contradicts
 //!    the image was laid out over a stale one's remains, and wins.
 //! 3. **Else the partition table** (`lib/partition`: GPT, then MBR,
 //!    fail-closed), recognising each present partition. A partition
@@ -157,8 +158,13 @@ pub fn plan_volumes<B: Block>(
     let mut image_end = None;
     if let Some((volume, span)) = image {
         if hybrid_layout(dev, &geometry, &table, volume.fstype, span)? {
-            plan(&volume, whole, &mut summary);
-            image_end = Some(span.div_ceil(u64::from(geometry.block_size)));
+            // The kernel refuses an extent meeting another's, so the image's
+            // window must not reach the partitions appended after it.
+            let end = span
+                .div_ceil(u64::from(geometry.block_size))
+                .min(geometry.block_count);
+            plan(&volume, (0, end), &mut summary);
+            image_end = Some(end);
         }
     }
     for partition in table.partitions() {
@@ -412,9 +418,18 @@ mod tests {
         sector[446 + index * 16 + 4] = byte;
     }
 
+    /// The device's plans, which never share a block: the kernel refuses an
+    /// extent meeting one attached already on its device.
     fn collect(dev: &mut MemBlock) -> (Vec<VolumePlan>, PlanSummary) {
         let mut plans = Vec::new();
         let summary = plan_volumes(dev, |plan| plans.push(*plan)).expect("plans");
+        for (at, one) in plans.iter().enumerate() {
+            for other in &plans[at + 1..] {
+                let apart = one.first_lba + one.blocks <= other.first_lba
+                    || other.first_lba + other.blocks <= one.first_lba;
+                assert!(apart, "{one:?} and {other:?} share a block");
+            }
+        }
         (plans, summary)
     }
 
@@ -771,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hybrid_images_own_table_leaves_it_whole() {
+    fn a_hybrid_images_own_table_leaves_it_one_volume() {
         // Partition 1 begins at the image's descriptors, partition 2 is a
         // boot image inside it, and partition 3 runs to the image's end.
         let mut image = with_table(
@@ -782,12 +797,12 @@ mod tests {
         let (plans, summary) = collect(&mut device(image, None));
         assert_eq!(plans.len(), 1, "the partitions are windows onto the image");
         assert_eq!(plans[0].fstype, VolumeFsType::Iso9660);
-        assert_eq!((plans[0].first_lba, plans[0].blocks), (0, 256));
+        assert_eq!((plans[0].first_lba, plans[0].blocks), (0, IMAGE_BLOCKS));
         assert_eq!(summary.unrecognised, 0);
     }
 
     #[test]
-    fn a_classic_hybrid_whose_partition_covers_the_mbr_is_planned_whole() {
+    fn a_classic_hybrid_whose_partition_covers_the_mbr_is_one_volume() {
         // The table's one partition starts at block 0, which no MBR may.
         let mut image = disc_image(256);
         image[446] = 0x80;
@@ -813,6 +828,11 @@ mod tests {
         let (plans, _) = collect(&mut device(image, None));
         assert_eq!(plans.len(), 2);
         assert_eq!(plans[0].fstype, VolumeFsType::Iso9660);
+        assert_eq!(
+            (plans[0].first_lba, plans[0].blocks),
+            (0, IMAGE_BLOCKS),
+            "the image ends where its appended partition begins"
+        );
         assert_eq!(plans[1].fstype, VolumeFsType::Fat32);
         assert_eq!(plans[1].first_lba, IMAGE_BLOCKS);
     }

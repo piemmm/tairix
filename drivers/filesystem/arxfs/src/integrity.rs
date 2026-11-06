@@ -20,6 +20,8 @@
 //!   encrypted volume the AEAD and the metadata MAC do, and a plaintext
 //!   volume's seal is a checksum too.
 
+use tairix_abi::DriverError;
+
 /// Length, in bytes, of a data block's logical content hash, keyed or not.
 pub const LOGICAL_HASH_LEN: usize = tairix_crypto::SHA256_OUTPUT_LEN;
 
@@ -105,12 +107,13 @@ pub fn read_stored_form(src: &[u8]) -> Result<StoredForm, DataFault> {
     }
 }
 
-/// Which integrity layer rejected a data block. Surfaced to the caller as a
-/// single [`tairix_abi::DriverError::DeviceFault`] (the `abi-v1` error surface
-/// is frozen), but kept distinct internally so a media /
-/// transport corruption (the fast [`Physical`](Self::Physical) checksum) is
-/// not confused with a failed region seal ([`Seal`](Self::Seal)) or content
-/// corruption that survived it ([`Logical`](Self::Logical)).
+/// What stopped a data block's read: the integrity layer that rejected it,
+/// surfaced to the caller as one [`DriverError::DeviceFault`] but kept
+/// distinct so a media or transport corruption (the fast
+/// [`Physical`](Self::Physical) checksum) is not confused with a failed
+/// region seal ([`Seal`](Self::Seal)) or content corruption that survived it
+/// ([`Logical`](Self::Logical)) — or a buffer the heap refused, which judged
+/// nothing.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DataFault {
     /// The fast physical checksum over the at-rest block did not match:
@@ -121,6 +124,29 @@ pub enum DataFault {
     Seal,
     /// The decrypted plaintext did not match its stored logical hash.
     Logical,
+    /// Memory the read needed was refused; the block was not judged.
+    OutOfMemory,
+}
+
+impl DataFault {
+    /// A failed device read's class: a refusal for memory stays one, and any
+    /// other failure reads as the medium's.
+    pub(crate) fn of_read(err: DriverError) -> Self {
+        if matches!(err, DriverError::OutOfMemory) {
+            Self::OutOfMemory
+        } else {
+            Self::Physical
+        }
+    }
+}
+
+impl From<DataFault> for DriverError {
+    fn from(fault: DataFault) -> Self {
+        match fault {
+            DataFault::OutOfMemory => Self::OutOfMemory,
+            DataFault::Physical | DataFault::Seal | DataFault::Logical => Self::DeviceFault,
+        }
+    }
 }
 
 /// A fast, non-cryptographic checksum over the at-rest `bytes` of a data

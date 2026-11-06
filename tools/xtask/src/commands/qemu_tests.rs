@@ -26,7 +26,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use tairix_desktop_session::capture::RECORDING_STARTED_MESSAGE;
 use tairix_desktop_session::SizedRecord;
+use tairix_desktop_session::PINBOARD_SETTLED_MESSAGE;
 use tairix_itest_harness::pie::PieArch;
 use tairix_qemu::screendump::Rgb;
 use tairix_qemu::{
@@ -517,6 +519,18 @@ enum FsDisk {
     /// Settings chooser every other desktop vertical's script would otherwise
     /// walk past unchanged.
     ScreensaverRootDisk,
+    /// The [`Self::AutoloadRootDisk`] layout, whose account's Pictures hold
+    /// the scratch file a session ended mid-capture left
+    /// ([`capture_plants`]): the screen-capture vertical's backing
+    /// (`plans/CAPTURE.md` CP11).
+    ///
+    /// Its own disk, because the leftover is named at the session's start and
+    /// becomes a file every other desktop vertical's account would hold.
+    CaptureRootDisk,
+    /// The [`Self::CaptureRootDisk`] layout with the virtio-GPU driver store:
+    /// the screen-capture vertical's backing on a board whose only display is
+    /// a virtio GPU.
+    CaptureVirtioGpuRootDisk,
     /// The [`Self::AutoloadRootDisk`] layout — the same graphical world, with
     /// the signed input and display driver bundles and the text-login
     /// document — whose store additionally carries the test-only `svgtext`
@@ -568,6 +582,14 @@ enum FsDisk {
     /// the three drivers down to the volume the disc is attached as. Only this
     /// disk carries the fixture; no production image ships it.
     OpticalRootDisk,
+    /// The encrypted root whose read-only `/System` volume carries the
+    /// standard store, the signed xHCI, USB mass-storage, volume-manager and
+    /// FAT32 drivers, and the test-only `twins` fixture bundle — the
+    /// twin-volume vertical's backing (`docs/src/filesystem/drives.md`). The run
+    /// plugs in two USB sticks holding copies of one FAT32 image
+    /// ([`twin_sticks`]), whose volumes therefore carry one identity. Only
+    /// this disk carries the fixture; no production image ships it.
+    TwinsRootDisk,
     /// The encrypted root whose read-only `/System` volume carries the
     /// standard store, with `mount` and `unmount`, the signed ADFS, AmigaDOS
     /// and ISO 9660 drivers and the test-only `images` fixture bundle, and
@@ -702,6 +724,78 @@ enum FsDisk {
     /// stays the UART. Nothing is typed at the passphrase prompt — the
     /// autoload, the endpoint bind, and `timed`'s read all happen pre-unlock.
     RtcRootDisk,
+}
+
+impl FsDisk {
+    /// Whether the disk's `/System` carries the complete app and service
+    /// store a booted system runs from.
+    const fn carries_app_store(self) -> bool {
+        matches!(
+            self,
+            Self::EncryptedRootDisk
+                | Self::PlaintextRootDisk
+                | Self::NetToolRootDisk
+                | Self::AutoloadRootDisk
+                | Self::ScreensaverRootDisk
+                | Self::CaptureRootDisk
+                | Self::CaptureVirtioGpuRootDisk
+                | Self::RtcRootDisk
+                | Self::GreeterRootDisk
+                | Self::VirtioGpuRootDisk
+        )
+    }
+
+    /// Whether the disk is the screen-capture vertical's, on either display.
+    const fn captures(self) -> bool {
+        matches!(self, Self::CaptureRootDisk | Self::CaptureVirtioGpuRootDisk)
+    }
+
+    /// Whether the disk's driver store carries the virtio-GPU board's drivers.
+    const fn carries_virtio_gpu_drivers(self) -> bool {
+        matches!(
+            self,
+            Self::VirtioGpuRootDisk | Self::CaptureVirtioGpuRootDisk
+        )
+    }
+
+    /// Whether the disk's driver store carries the autoloaded input and
+    /// display drivers of the graphical world.
+    const fn carries_autoload_drivers(self) -> bool {
+        matches!(
+            self,
+            Self::AutoloadRootDisk
+                | Self::ScreensaverRootDisk
+                | Self::CaptureRootDisk
+                | Self::GreeterRootDisk
+                | Self::HoverRootDisk
+                | Self::SvgTextRootDisk
+        )
+    }
+
+    /// The sectors of the disk's root volume.
+    const fn root_sectors(self) -> u64 {
+        if self.captures() {
+            CAPTURE_ROOT_SECTORS
+        } else {
+            tairix_test_encrypted_root_image::ROOT_SECTORS
+        }
+    }
+
+    /// Whether the disk's driver store carries the network drivers alone.
+    const fn carries_net_drivers(self) -> bool {
+        matches!(
+            self,
+            Self::StreamRootDisk
+                | Self::EcnRootDisk
+                | Self::ListenRootDisk
+                | Self::NetToolRootDisk
+                | Self::StaticNetRootDisk
+                | Self::TimeNetRootDisk
+                | Self::BondNetRootDisk
+                | Self::DhcpNetRootDisk
+                | Self::Dhcp6NetRootDisk
+        )
+    }
 }
 
 /// `true` if `line` is exactly `value` followed by a single `\n`.
@@ -1303,6 +1397,20 @@ const OPTICAL_COMMAND_LINE: &str = "optical\n";
 /// `exit` that completes its PASS chain: the `optical` fixture's pass, read
 /// from its own definition so the script and the program cannot drift.
 const OPTICAL_PASS_PREFIX: &str = tairix_test_optical::PASS_MARKER;
+
+/// The bare command word the twin-volume vertical types at the shell, with its
+/// newline. Pinned to the fixture's own `COMMAND` by a unit test below.
+const TWINS_COMMAND_LINE: &str = "twins\n";
+
+/// Serial marker the twin-volume vertical waits for before typing the shell
+/// `exit` that completes its PASS chain: the `twins` fixture's pass, read from
+/// its own definition so the script and the program cannot drift.
+const TWINS_PASS_PREFIX: &str = tairix_test_twins::PASS_MARKER;
+
+/// The serial numbers the twin-volume vertical's USB sticks report, one each,
+/// so each device states an identity of its own while the volumes they hold
+/// share one.
+const TWIN_STICK_SERIALS: [&str; 2] = ["TWINSTICK1", "TWINSTICK2"];
 
 /// The bare command word the disk-image vertical types at the shell, with its
 /// newline. Pinned to the fixture's own `COMMAND` by a unit test below.
@@ -7956,6 +8064,45 @@ static TESTS: &[QemuTest] = &[
         ],
         expect: Expect::Pass,
     },
+    // The twin-volume vertical (`docs/src/filesystem/drives.md`). Two USB sticks on
+    // one `qemu-xhci` controller hold copies of one labelled FAT32 image
+    // (`FsDisk::TwinsRootDisk`), so their volumes carry one identity. `devmgr`
+    // autoloads the host-controller driver, the mass-storage driver against
+    // each stick and the volume manager against each unit it publishes, and
+    // the kernel attaches the first under the identity and the label's name,
+    // the second under a key and a name of its own. The scripted root shell
+    // runs `twins`, whose crate doc states what it asserts. The guest sink
+    // arms on the fixture's exit and passes on the shell's, typed only once
+    // `TWINS PASS` appeared; a failing fixture parks with its reason, so the
+    // run times out loudly.
+    QemuTest {
+        package: "tairix-test-twins-qemu-aarch64",
+        binary: "tairix-test-twins-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::TwinsRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            ("root@tairix ~% ", Duration::ZERO, TWINS_COMMAND_LINE),
+            (TWINS_PASS_PREFIX, Duration::ZERO, "exit\n"),
+        ],
+        expect: Expect::Pass,
+    },
     // `plans/DISK-IMAGES.md` DI7: the disk-image vertical, whose crate doc
     // states what it asserts. The guest sink arms on the fixture's exit and
     // passes on the shell's, typed only once `IMAGES PASS` appeared; a failing
@@ -9964,6 +10111,54 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Pass,
     },
+    // `plans/APPWIN.md` AW5: the **concurrent-pickers** vertical, the only
+    // test with two trusted pickers up at once on a running machine.
+    //
+    // The same graphical world as the picker-delegation vertical above. The
+    // pointer script launches `view` from the program library, where it is
+    // resident and opens nothing, then launches it from there twice more:
+    // each launch reaches the running instance, which opens a window and asks
+    // a pick at once, so two pickers stand cascaded, the later above with the
+    // keyboard. It chooses the planted picture in the later, puts the window
+    // the picture opens in to the back, and chooses in the earlier.
+    //
+    // The guest's PASS is two session mints, each followed by the viewer's
+    // redeem from the one attested viewer task, every latched step printing
+    // its own marker. No screendump: the claim is a record, not a picture.
+    //
+    // Single CPU and the same 300-second *inactivity* budget as its siblings.
+    QemuTest {
+        package: "tairix-test-filepicks-qemu-aarch64",
+        binary: "tairix-test-filepicks-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::Ramfb,
+        crypto: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[
+            // The encrypted-root passphrase, held until both autoloaded
+            // input drivers have armed their interrupts.
+            TypedStep::text(
+                AUTOLOAD_INPUT_KEY_MARKER,
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            // The fixture account's login, then `desktop` at the shell.
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
+        ],
+        screendumps: &[],
+        pointer_script: Some(filepicks_pointer_script),
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
     // `plans/VIEW.md` / `plans/APPWIN.md` AW5: the **three-principal
     // hand-over** vertical — the only test in which a document's authority
     // travels from the principal that opened it, through the desktop, to a
@@ -10364,6 +10559,18 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Pass,
     },
+    CAPTURE_AARCH64,
+    // The same captures on a board whose only display is a virtio GPU, the
+    // pointer on its cursor plane. QEMU's dump of that board carries no
+    // pointer, so the still and the recording are held to it off the pointer
+    // as well as off the bar, and the still must draw the pointer the plane
+    // shows.
+    QemuTest {
+        display: VIRTIO_GPU,
+        fs_disk: FsDisk::CaptureVirtioGpuRootDisk,
+        typed_keys: &CAPTURE_DIALOGUE_ON_GPU,
+        ..CAPTURE_AARCH64
+    },
     // `plans/NETMAP.md` NM2c: the network-map vertical. It boots the same
     // graphical world as the Settings and file-pick verticals, but with a NIC
     // on the shared wire and a router-advertising peer behind it, so the guest's
@@ -10496,6 +10703,65 @@ static TESTS: &[QemuTest] = &[
             },
         ],
         pointer_script: Some(wintersun_pointer_script),
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
+    // `plans/CINDER.md` CD12: the companion let out onto the desktop, the
+    // regression test `OPEN-DEFECTS` D1807 owes. The revealed desktop is
+    // photographed; Cinder is opened from the program library and his pen is
+    // photographed and closed; his slot's menu lets him out, and once the
+    // session says his surface is on screen he is photographed on a desktop
+    // holding no window. That frame must differ from the bare desktop by one
+    // surface's worth of pixels and by nothing else.
+    //
+    // PASS needs the guest's two witnesses in order: an `APP_LOADED` naming
+    // the companion's bundle, then one naming the terminal's, which the script
+    // opens from the library only after the second dump.
+    QemuTest {
+        package: "tairix-test-cinder-qemu-aarch64",
+        binary: "tairix-test-cinder-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::Ramfb,
+        crypto: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[
+            TypedStep::text(
+                AUTOLOAD_INPUT_KEY_MARKER,
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
+        ],
+        screendumps: &[
+            ScreendumpPlan {
+                marker: AUTOLOAD_DESKTOP_REVEALED_MARKER,
+                occurrences: 1,
+                suffix: CINDER_DESKTOP_DUMP,
+                assert: assert_cinder_reference_screendump,
+            },
+            ScreendumpPlan {
+                marker: WINDOW_SHOWN_MARKER,
+                occurrences: 1,
+                suffix: CINDER_PEN_DUMP,
+                assert: assert_cinder_reference_screendump,
+            },
+            ScreendumpPlan {
+                marker: WINDOW_SHOWN_MARKER,
+                occurrences: 2,
+                suffix: CINDER_LOOSE_DUMP,
+                assert: assert_cinder_loose_screendump,
+            },
+        ],
+        pointer_script: Some(cinder_pointer_script),
         bounded_pointer_script: false,
         cpu: None,
         serial: &[],
@@ -12005,19 +12271,17 @@ fn root_disk_bytes(
     protection: tairix_test_encrypted_root_image::RootProtection<'_>,
 ) -> Result<Vec<u8>, String> {
     let plants = root_plants(t, apps)?;
-    let borrowed = root_plant_refs(&plants);
-    let root_files: Vec<(&[&[u8]], &[u8])> = borrowed
-        .iter()
-        .map(|(components, bytes)| (components.as_slice(), *bytes))
-        .collect();
-    super::image_apps::with_plant_refs(apps, |files| {
-        tairix_test_encrypted_root_image::build_image_with_contents(
-            &[],
-            files,
-            &root_files,
-            protection,
-        )
-        .map_err(|e| format!("test --qemu ({}): build root image: {e:?}", t.package))
+    with_root_files(&plants, |root_files| {
+        super::image_apps::with_plant_refs(apps, |files| {
+            tairix_test_encrypted_root_image::build_image_with_contents(
+                &[],
+                files,
+                root_files,
+                t.fs_disk.root_sectors(),
+                protection,
+            )
+            .map_err(|e| format!("test --qemu ({}): build root image: {e:?}", t.package))
+        })
     })
 }
 
@@ -12274,19 +12538,55 @@ fn user_saver_plants(
                 .map(String::from)
                 .collect::<Vec<String>>()
         };
-        plants.push((at(BundleEntry::AppInfo.as_str()), appinfo));
-        plants.push((at(BundleEntry::Run.as_str()), run.to_vec()));
-        plants.push((at(tairix_wallpaper::SAVER_PREVIEW_PATH), preview.to_vec()));
+        plants.push(RootPlant::account(
+            at(BundleEntry::AppInfo.as_str()),
+            appinfo,
+        ));
+        plants.push(RootPlant::account(
+            at(BundleEntry::Run.as_str()),
+            run.to_vec(),
+        ));
+        plants.push(RootPlant::account(
+            at(tairix_wallpaper::SAVER_PREVIEW_PATH),
+            preview.to_vec(),
+        ));
     }
     Ok(plants)
 }
 
-/// One file a vertical plants on its encrypted root volume: its path
-/// components from the volume root, and its bytes.
-type RootPlant = (Vec<String>, Vec<u8>);
+/// One file a vertical plants on its encrypted root volume.
+struct RootPlant {
+    /// Its path components from the volume root.
+    components: Vec<String>,
+    /// Its bytes.
+    bytes: Vec<u8>,
+    /// Who owns it.
+    owner: tairix_test_encrypted_root_image::PlantOwner,
+}
 
-/// Every document a vertical plants on its encrypted root volume, as the
-/// borrowed `(components, bytes)` pairs the image builder takes. The one
+impl RootPlant {
+    /// A file of the system's.
+    fn system(components: Vec<String>, bytes: Vec<u8>) -> Self {
+        let owner = tairix_test_encrypted_root_image::PlantOwner::System;
+        Self {
+            components,
+            bytes,
+            owner,
+        }
+    }
+
+    /// A file of the vertical's account, in its home.
+    fn account(components: Vec<String>, bytes: Vec<u8>) -> Self {
+        let owner = tairix_test_encrypted_root_image::PlantOwner::Account;
+        Self {
+            components,
+            bytes,
+            owner,
+        }
+    }
+}
+
+/// Every document a vertical plants on its encrypted root volume. The one
 /// place root-volume plants are assembled, so each encrypted-root builder
 /// lays down the same set.
 fn root_plants(
@@ -12298,11 +12598,431 @@ fn root_plants(
         .chain(login_type_plant(t)?)
         .chain(sound_plant(t)?);
     let mut plants: Vec<RootPlant> = documents
-        .map(|(components, text)| (components, text.into_bytes()))
+        .map(|(components, text)| RootPlant::system(components, text.into_bytes()))
         .collect();
     plants.extend(user_saver_plants(t, apps)?);
     plants.extend(disk_image_plants(t)?);
+    plants.extend(capture_plants(t));
     Ok(plants)
+}
+
+/// The scratch file a session ended mid-capture left in the capture
+/// vertical's account's pictures: a still's first, spelled by the session's
+/// own keep rule, holding a PNG cut short after its signature. The sweep the
+/// desktop runs at its start names it, which is the vertical's first witness.
+/// It is left in the pictures rather than on the Desktop, where its naming
+/// would put an icon on the screen between the dump and the still.
+fn capture_plants(t: &QemuTest) -> Vec<RootPlant> {
+    use tairix_desktop_session::capture::KeptFolder;
+    use tairix_desktop_session::keep::{scratch_path, PNG_ENDING};
+
+    if !t.fs_disk.captures() {
+        return Vec::new();
+    }
+    let scratch = scratch_path("", PNG_ENDING, 1);
+    let components = [
+        tairix_abi::home::USERS_DIR,
+        tairix_test_encrypted_root_image::USERNAME,
+    ]
+    .into_iter()
+    .chain(KeptFolder::Pictures.folders().iter().copied())
+    .chain([scratch.trim_start_matches('/')])
+    .map(String::from)
+    .collect();
+    vec![RootPlant::account(
+        components,
+        b"\x89PNG\r\n\x1a\ncut short".to_vec(),
+    )]
+}
+
+/// The capture vertical's disk's sidecar extension.
+const CAPTURE_DISK_EXT: &str = "capture-root.img";
+
+/// `plans/CAPTURE.md` CP11: the screen-capture vertical. The graphical
+/// world of the autoload disk, its account's Pictures holding the scratch
+/// file a session ended mid-capture left. The host unlocks, logs in and,
+/// once the revealed desktop's icons are drawn as they will stay, presses
+/// the screen chord at the seat keyboard; once the still's icon has
+/// settled among them, records the screen from the capture bar and stops
+/// it with the chord. PASS needs, in the guest: the leftover
+/// kept under its name by the sweep the desktop runs at its start, a still
+/// of the screen composed and kept, and a recording ended with nothing lost
+/// and kept; any refused capture fails the run. Keyboard only: nothing
+/// here is pointed at. Four cores, so the recording is coded across the
+/// encoding pool's threads.
+const CAPTURE_AARCH64: QemuTest = QemuTest {
+    package: "tairix-test-capture-qemu-aarch64",
+    binary: "tairix-test-capture-qemu-aarch64",
+    target: "aarch64-unknown-none",
+    cpus: 4,
+    timeout: Duration::from_secs(300),
+    ram_mib: None,
+    disk_sectors: None,
+    netstack_peer: NetPeerMode::None,
+    display: Display::Ramfb,
+    crypto: false,
+    fs_disk: FsDisk::CaptureRootDisk,
+    rtc_base: None,
+    keyboard: None,
+    typed_keys: &CAPTURE_DIALOGUE,
+    // Each taken before the chord keyed on its marker is sent, which
+    // waits for it.
+    screendumps: &[
+        ScreendumpPlan {
+            marker: PINBOARD_SETTLED_MESSAGE,
+            occurrences: 1,
+            suffix: CAPTURE_SCREEN_DUMP,
+            assert: assert_still_screendump,
+        },
+        ScreendumpPlan {
+            marker: RECORDING_STARTED_MESSAGE,
+            occurrences: 1,
+            suffix: CAPTURE_RECORDING_DUMP,
+            assert: assert_recording_screendump,
+        },
+    ],
+    pointer_script: None,
+    bounded_pointer_script: false,
+    cpu: None,
+    serial: &[],
+    expect: Expect::Pass,
+};
+
+/// The capture vertical's seat-keyboard dialogue, its passphrase typed once
+/// `armed` drivers have armed. Every capture waits for the desktop's icons
+/// to settle first: the revealed desktop's, then those with the still's
+/// among them, so none is keyed on a frame an icon's picture will change.
+const fn capture_dialogue(armed: u32) -> [TypedStep; 5] {
+    [
+        TypedStep::text(AUTOLOAD_INPUT_KEY_MARKER, armed, UNLOCK_PASSPHRASE_LINE),
+        TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
+        TypedStep::named(PINBOARD_SETTLED_MESSAGE, 1, &[NamedKey::CaptureScreen]),
+        TypedStep::named(PINBOARD_SETTLED_MESSAGE, 2, &RECORD_THE_SCREEN),
+        TypedStep::named(RECORDING_STARTED_MESSAGE, 1, &[NamedKey::CaptureScreen]),
+    ]
+}
+
+/// [`capture_dialogue`] on the ramfb board, the keyboard its only device.
+const CAPTURE_DIALOGUE: [TypedStep; 5] = capture_dialogue(armed_irq_drivers(
+    tairix_qemu::PointingDevices::NONE,
+    false,
+    Display::Ramfb,
+));
+
+/// [`capture_dialogue`] on a virtio-GPU board, whose GPU driver arms too.
+const CAPTURE_DIALOGUE_ON_GPU: [TypedStep; 5] = capture_dialogue(armed_irq_drivers(
+    tairix_qemu::PointingDevices::NONE,
+    false,
+    VIRTIO_GPU,
+));
+
+/// The capture bar opened on its first mode, moved along to recording the
+/// screen, and that started.
+const RECORD_THE_SCREEN: [NamedKey; 5] = [
+    NamedKey::CaptureBar,
+    NamedKey::Right,
+    NamedKey::Right,
+    NamedKey::Right,
+    NamedKey::Enter,
+];
+
+/// The capture vertical's root volume, in sectors: 16 MiB, room for the
+/// screen-sized pictures and recordings it keeps.
+const CAPTURE_ROOT_SECTORS: u64 = 32_768;
+
+/// File-name suffix of the capture vertical's first dump: the revealed
+/// desktop with its icons settled, taken before the screen chord is pressed.
+const CAPTURE_SCREEN_DUMP: &str = "capture-screen";
+
+/// File-name suffix of the capture vertical's second dump: the screen being
+/// recorded, taken before the chord that stops the recording.
+const CAPTURE_RECORDING_DUMP: &str = "capture-recording";
+
+/// [`ScreendumpPlan`] assertion: the still the screen chord kept in the
+/// account's Desktop, read back off the run's disk, is the dumped screen,
+/// every pixel off the bar the same. The bar is left out because its clock,
+/// its Switchboard readings and its icons' artwork settle on their own after
+/// the reveal the dump is keyed on. On a virtio GPU the pointer rides the
+/// cursor plane, which QEMU's dump of that board leaves out: there the still
+/// is held to the dump off the pointer too, and must show a pointer on it.
+fn assert_still_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
+    let fail = |what: String| format!("test --qemu ({}): capture: {what}", t.package);
+    let (dump, image) = capture_dump_and_disk(t, path, CAPTURE_SCREEN_DUMP)?;
+    let still = kept_still(&image, (dump.width, dump.height)).map_err(fail)?;
+    let mut differing = 0usize;
+    let mut first = None;
+    let mut drawn_on_plane = 0usize;
+    let pointer = pointer_off_plane(t);
+    for_each_off_bar(&dump, |x, y, at| {
+        let kept = (still[at], still[at + 1], still[at + 2]);
+        let shown = dump.pixel(x, y)?;
+        match (kept == shown, pointer.is_some_and(|area| on(area, x, y))) {
+            (true, _) => {}
+            (false, true) => drawn_on_plane += 1,
+            (false, false) => {
+                differing += 1;
+                first.get_or_insert((x, y, shown, kept));
+            }
+        }
+        Ok(())
+    })?;
+    if let Some((x, y, shown, kept)) = first {
+        return Err(fail(format!(
+            "{differing} pixels off the bar differ from the screen, the first at \
+             ({x}, {y}): {shown:?} shown, {kept:?} kept"
+        )));
+    }
+    if pointer.is_some() && drawn_on_plane == 0 {
+        return Err(fail(String::from(
+            "the still shows no pointer where the cursor plane shows one",
+        )));
+    }
+    Ok(())
+}
+
+/// [`ScreendumpPlan`] assertion: the last frame of the recording kept in the
+/// account's Desktop, decoded as a player decodes it, is the screen it
+/// recorded off the bar as closely as the codec keeps it.
+fn assert_recording_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
+    let fail = |what: String| format!("test --qemu ({}): capture: {what}", t.package);
+    let (dump, image) = capture_dump_and_disk(t, path, CAPTURE_RECORDING_DUMP)?;
+    let recorded = kept_recording(&image, (dump.width, dump.height)).map_err(fail)?;
+    let (mut squared, mut samples) = (0u64, 0u64);
+    let pointer = pointer_off_plane(t);
+    for_each_off_bar(&dump, |x, y, at| {
+        if pointer.is_some_and(|area| on(area, x, y)) {
+            return Ok(());
+        }
+        let shown = dump.pixel(x, y)?;
+        let channels = [shown.0, shown.1, shown.2]
+            .into_iter()
+            .zip(&recorded[at..at + 3]);
+        for (shown, &coded) in channels {
+            squared += u64::from(shown.abs_diff(coded)).pow(2);
+            samples += 1;
+        }
+        Ok(())
+    })?;
+    let fidelity = psnr(squared, samples);
+    if fidelity < RECORDING_PSNR_FLOOR {
+        return Err(fail(format!(
+            "the recording's last frame is {fidelity:.2} dB from the screen off the bar, \
+             under {RECORDING_PSNR_FLOOR} dB"
+        )));
+    }
+    Ok(())
+}
+
+/// The dump at `path`, taken under `suffix`, and the bytes of its run's disk.
+fn capture_dump_and_disk(
+    t: &QemuTest,
+    path: &Path,
+    suffix: &str,
+) -> Result<(tairix_qemu::screendump::Image, Vec<u8>), String> {
+    let dump = read_screendump(t, path)?;
+    let disk = sibling_sidecar(path, &screendump_ext(suffix), CAPTURE_DISK_EXT)?;
+    let image = std::fs::read(&disk).map_err(|e| {
+        format!(
+            "test --qemu ({}): capture: read {}: {e}",
+            t.package,
+            disk.display()
+        )
+    })?;
+    Ok((dump, image))
+}
+
+/// Visit every pixel of `dump` off the guest's bar with its column, its row
+/// and its offset into an RGBA8 picture of the same screen.
+fn for_each_off_bar(
+    dump: &tairix_qemu::screendump::Image,
+    mut visit: impl FnMut(u32, u32, usize) -> Result<(), String>,
+) -> Result<(), String> {
+    let bar = guest_bar(dump.width, dump.height);
+    for y in 0..dump.height {
+        for x in 0..dump.width {
+            if !on(bar, x, y) {
+                visit(x, y, (y as usize * dump.width as usize + x as usize) * 4)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether the pixel at column `x`, row `y` lies in `area`.
+fn on(area: tairix_geometry::Rect, x: u32, y: u32) -> bool {
+    i32::try_from(x)
+        .ok()
+        .zip(i32::try_from(y).ok())
+        .is_some_and(|(x, y)| area.contains(tairix_geometry::Point::new(x, y)))
+}
+
+/// Where the pointer may be drawn while it rests where the seat starts it, on
+/// a board of `t`'s that shows it on a cursor plane QEMU's dump leaves out.
+fn pointer_off_plane(t: &QemuTest) -> Option<tairix_geometry::Rect> {
+    match t.display {
+        Display::VirtioGpu { width, height } => Some(cursor_reach(seat_start((width, height)))),
+        _ => None,
+    }
+}
+
+/// The least a recording's frame of a still screen may miss it by, off the
+/// bar, as the peak signal-to-noise ratio of its red, green and blue. The
+/// codec's default quality keeps about 38 dB of this desktop; the floor
+/// leaves room for its tuning while failing a frame misplaced or miscoloured.
+const RECORDING_PSNR_FLOOR: f64 = 34.0;
+
+/// The peak signal-to-noise ratio, in decibels, of `samples` samples whose
+/// squared differences sum to `squared`; infinite where they are the same.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "a measure of error, in floating point"
+)]
+fn psnr(squared: u64, samples: u64) -> f64 {
+    if squared == 0 {
+        return f64::INFINITY;
+    }
+    10.0 * (255.0 * 255.0 * samples as f64 / squared as f64).log10()
+}
+
+/// Every file of the account's Desktop, on the root of the disk `image`,
+/// whose name ends `.ending`: read back as the guest unlocks it, by content
+/// rather than name, since the guest may exit before the rename that names a
+/// capture is committed.
+fn desktop_files(image: &[u8], ending: &str) -> Result<Vec<Vec<u8>>, String> {
+    use tairix_abi::driver::filesystem::{DirVisit, FilesystemRead as _, NodeKind};
+    use tairix_desktop_session::capture::KeptFolder;
+
+    let mut fs = tairix_test_encrypted_root_image::open_root(image, ENCRYPTED_ROOT)
+        .map_err(|e| format!("the root does not open: {e:?}"))?;
+    let mut node = fs.root();
+    let home = [
+        tairix_abi::home::USERS_DIR,
+        tairix_test_encrypted_root_image::USERNAME,
+    ];
+    for part in home.iter().chain(KeptFolder::Desktop.folders()) {
+        node = fs
+            .lookup(node, part.as_bytes())
+            .map_err(|e| format!("no {part} on the root: {e:?}"))?;
+    }
+    let mut files = Vec::new();
+    let ending = format!(".{ending}");
+    fs.read_dir(node, 0, &[], &mut |entry, name| {
+        if entry.info.kind == NodeKind::RegularFile && name.ends_with(ending.as_bytes()) {
+            files.push((entry.node, entry.info.size));
+        }
+        DirVisit::Take
+    })
+    .map_err(|e| format!("the Desktop does not list: {e:?}"))?;
+    files
+        .into_iter()
+        .map(|(file, size)| {
+            let mut bytes = vec![0; usize::try_from(size).map_err(|_| "a file past memory")?];
+            let read = fs
+                .read_at(file, 0, &mut bytes)
+                .map_err(|e| format!("a {ending} file does not read: {e:?}"))?;
+            bytes.truncate(read);
+            Ok(bytes)
+        })
+        .collect()
+}
+
+/// The one of `found`, each a picture of a `width`x`height` screen.
+fn the_one(
+    found: Vec<Vec<u8>>,
+    what: &str,
+    (width, height): (u32, u32),
+) -> Result<Vec<u8>, String> {
+    match <[Vec<u8>; 1]>::try_from(found) {
+        Ok([one]) => Ok(one),
+        Err(found) => Err(format!(
+            "the Desktop holds {} {what} of the {width}x{height} screen, not one",
+            found.len()
+        )),
+    }
+}
+
+/// The RGBA8 pixels of the one still of a `size` screen the account's Desktop
+/// holds on the root of the disk `image`.
+fn kept_still(image: &[u8], (width, height): (u32, u32)) -> Result<Vec<u8>, String> {
+    use tairix_desktop_session::keep::PNG_ENDING;
+
+    let pixels = u64::from(width) * u64::from(height);
+    let limits = tairix_image::DecodeLimits::new(width, height, pixels, 0);
+    let stills = desktop_files(image, PNG_ENDING)?
+        .iter()
+        .filter_map(|bytes| tairix_image::decode(bytes, &limits).ok())
+        .filter(|picture| (picture.width(), picture.height()) == (width, height))
+        .map(tairix_image::RasterImage::into_pixels)
+        .collect();
+    the_one(stills, "stills", (width, height))
+}
+
+/// The RGBA8 pixels of the last frame of the one recording of a `size`
+/// screen the account's Desktop holds on the root of the disk `image`, each
+/// of its frames decoded in turn as a player would.
+fn kept_recording(image: &[u8], (width, height): (u32, u32)) -> Result<Vec<u8>, String> {
+    use tairix_desktop_session::capture::RECORDING_ENDING;
+    use tairix_video::webm::{Demuxer, Media};
+
+    let rows = usize::try_from(height).map_err(|_| "a screen past memory")?;
+    let line = usize::try_from(width).map_err(|_| "a screen past memory")? * 4;
+    let last = |bytes: &[u8]| -> Option<Vec<u8>> {
+        let mut input = bytes;
+        let mut demuxer = Demuxer::open(&mut input).ok()?;
+        let track = demuxer
+            .tracks()
+            .iter()
+            .find_map(|track| match track.media {
+                Media::Video { .. } => Some(track.number),
+                _ => None,
+            })?;
+        let mut vp8 = tairix_video::vp8::Decoder::new();
+        let mut rgba = vec![0; rows * line];
+        let mut shown = None;
+        while let Some(frame) = demuxer.next_frame(&mut input).ok()? {
+            if frame.track != track {
+                continue;
+            }
+            let start = usize::try_from(frame.offset).ok()?;
+            let payload = bytes.get(start..start + usize::try_from(frame.len).ok()?)?;
+            let picture = vp8.decode(payload).ok()?;
+            if (picture.width(), picture.height()) != (width, height) {
+                return None;
+            }
+            picture.rgba_rows(0..rows, &mut rgba, line).ok()?;
+            shown = Some(rgba.clone());
+        }
+        shown
+    };
+    let recordings = desktop_files(image, RECORDING_ENDING)?
+        .iter()
+        .filter_map(|bytes| last(bytes))
+        .collect();
+    the_one(recordings, "recordings", (width, height))
+}
+
+/// Where the guest's bar lies on a `width`x`height` screen, by the desktop's
+/// own layout at its booted scale.
+fn guest_bar(width: u32, height: u32) -> tairix_geometry::Rect {
+    use tairix_desktop_session::DesktopShell;
+    use tairix_log::DiscardSink;
+    use tairix_reclaim::ReportedPressure;
+    use tairix_taskbar::TaskbarConfig;
+
+    static NO_PRESSURE_FEED: ReportedPressure = ReportedPressure::unknown();
+    static DISCARD_SINK: DiscardSink = DiscardSink;
+    let shell = DesktopShell::new(
+        TaskbarConfig::bottom_bar(width, height),
+        tairix_abi::seat::SEAT_PRIMARY,
+        (0, 0),
+        &NO_PRESSURE_FEED,
+        &DISCARD_SINK,
+    );
+    shell
+        .session()
+        .taskbar()
+        .layout(tairix_geometry::Scale::ONE)
+        .bar
 }
 
 /// The disk images and archives the disk-image vertical plants in its
@@ -12350,21 +13070,24 @@ fn disk_image_plants(t: &QemuTest) -> Result<Vec<RootPlant>, String> {
     .map_err(|err| fail("the Amiga floppy", err))?
     .into_bytes();
 
-    let planted = |name: &str| root_volume_components(t, &format!("{PLANTED}/{name}"));
+    let planted = |name: &str, bytes| {
+        root_volume_components(t, &format!("{PLANTED}/{name}"))
+            .map(|components| RootPlant::system(components, bytes))
+    };
     let mut plants = vec![
-        (planted(ACORN)?, acorn),
-        (planted(AMIGA)?, amiga),
-        (planted(DISC)?, tairix_test_iso9660_image::riscos_disc()),
+        planted(ACORN, acorn)?,
+        planted(AMIGA, amiga)?,
+        planted(DISC, tairix_test_iso9660_image::riscos_disc())?,
     ];
     for archive in tairix_test_images::WRITTEN_ARCHIVES {
         let bytes = written_archive(archive.file).map_err(|err| fail(archive.file, err))?;
-        plants.push((planted(archive.file)?, bytes));
+        plants.push(planted(archive.file, bytes)?);
     }
     let rar = tairix_test_images::RAR.file;
-    plants.push((
-        planted(rar)?,
+    plants.push(planted(
+        rar,
         tairix_test_archive_image::RAR5_BLAKE.to_vec(),
-    ));
+    )?);
     Ok(plants)
 }
 
@@ -12401,18 +13124,27 @@ fn written_archive(file: &str) -> Result<Vec<u8>, tairix_abi::DriverError> {
     })
 }
 
-/// Borrow [`root_plants`] output as the component-slice pairs the image
-/// builder's argument type needs.
-fn root_plant_refs(plants: &[RootPlant]) -> Vec<(Vec<&[u8]>, &[u8])> {
-    plants
+/// Lend [`root_plants`] output to `body` as the image builder's root files.
+fn with_root_files<R>(
+    plants: &[RootPlant],
+    body: impl FnOnce(&[tairix_test_encrypted_root_image::RootFile<'_>]) -> R,
+) -> R {
+    let components: Vec<Vec<&[u8]>> = plants
         .iter()
-        .map(|(components, bytes)| {
-            (
-                components.iter().map(String::as_bytes).collect(),
-                bytes.as_slice(),
-            )
-        })
-        .collect()
+        .map(|plant| plant.components.iter().map(String::as_bytes).collect())
+        .collect();
+    let files: Vec<_> = plants
+        .iter()
+        .zip(&components)
+        .map(
+            |(plant, components)| tairix_test_encrypted_root_image::RootFile {
+                components,
+                bytes: &plant.bytes,
+                owner: plant.owner,
+            },
+        )
+        .collect();
+    body(&files)
 }
 
 /// The composed `/System`-store bundle sets one enrolment plants on its
@@ -12451,7 +13183,8 @@ pub(crate) struct StoreSet {
     apps_with_tcpecho: &'static [AppStoreFile],
     /// The application/service bundles a device vertical plants: the shared
     /// set plus the test-only fixture bundle that drives the device its disk
-    /// attaches — `audiotone` for a sound card, `optical` for a disc.
+    /// attaches — `audiotone` for a sound card, `optical` for a disc, `twins`
+    /// for two sticks.
     device_apps: &'static [AppStoreFile],
     /// The signed driver bundles a device vertical plants: the device's own,
     /// as its disk says — and no display or input driver, to keep the UART
@@ -12509,16 +13242,10 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
     // matching Cargo profile — never the shippable `installer` `--release`
     // build.
     let profile = tairix_mkimage::ImageProfile::Debug;
-    let apps = match t.fs_disk {
-        FsDisk::EncryptedRootDisk
-        | FsDisk::PlaintextRootDisk
-        | FsDisk::NetToolRootDisk
-        | FsDisk::AutoloadRootDisk
-        | FsDisk::ScreensaverRootDisk
-        | FsDisk::RtcRootDisk
-        | FsDisk::GreeterRootDisk
-        | FsDisk::VirtioGpuRootDisk => super::image_apps::app_store_files(ctx, arch, profile)?,
-        _ => EMPTY,
+    let apps = if t.fs_disk.carries_app_store() {
+        super::image_apps::app_store_files(ctx, arch, profile)?
+    } else {
+        EMPTY
     };
     let FixtureStores {
         memsoak: apps_with_memsoak,
@@ -12527,21 +13254,15 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         framestats: apps_with_framestats,
         svgtext: apps_with_svgtext,
     } = fixture_stores(ctx, t, arch, profile)?;
-    let autoload_drivers = match t.fs_disk {
-        FsDisk::AutoloadRootDisk
-        | FsDisk::ScreensaverRootDisk
-        | FsDisk::GreeterRootDisk
-        | FsDisk::HoverRootDisk
-        | FsDisk::SvgTextRootDisk => {
-            super::image_drivers::autoload_driver_store_files(ctx, arch, profile)?
-        }
-        _ => EMPTY,
+    let autoload_drivers = if t.fs_disk.carries_autoload_drivers() {
+        super::image_drivers::autoload_driver_store_files(ctx, arch, profile)?
+    } else {
+        EMPTY
     };
-    let virtio_gpu_drivers = match t.fs_disk {
-        FsDisk::VirtioGpuRootDisk => {
-            super::image_drivers::virtio_gpu_driver_store_files(ctx, arch, profile)?
-        }
-        _ => EMPTY,
+    let virtio_gpu_drivers = if t.fs_disk.carries_virtio_gpu_drivers() {
+        super::image_drivers::virtio_gpu_driver_store_files(ctx, arch, profile)?
+    } else {
+        EMPTY
     };
     let apps_with_tcpecho = match t.fs_disk {
         FsDisk::StreamRootDisk => super::image_apps::tcpecho_store_files(ctx, arch, profile)?,
@@ -12559,19 +13280,10 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         FsDisk::RtcRootDisk => super::image_drivers::rtc_driver_store_files(ctx, arch, profile)?,
         _ => EMPTY,
     };
-    let net_only_drivers = match t.fs_disk {
-        FsDisk::StreamRootDisk
-        | FsDisk::EcnRootDisk
-        | FsDisk::ListenRootDisk
-        | FsDisk::NetToolRootDisk
-        | FsDisk::StaticNetRootDisk
-        | FsDisk::TimeNetRootDisk
-        | FsDisk::BondNetRootDisk
-        | FsDisk::DhcpNetRootDisk
-        | FsDisk::Dhcp6NetRootDisk => {
-            super::image_drivers::net_driver_store_files(ctx, arch, profile)?
-        }
-        _ => EMPTY,
+    let net_only_drivers = if t.fs_disk.carries_net_drivers() {
+        super::image_drivers::net_driver_store_files(ctx, arch, profile)?
+    } else {
+        EMPTY
     };
     let NetConfigStores {
         r#static: static_net_apps,
@@ -12744,6 +13456,12 @@ fn device_stores(
                 super::image_drivers::optical_driver_store_files(ctx, arch, profile)?,
             ));
         }
+        FsDisk::TwinsRootDisk => {
+            return Ok((
+                super::image_apps::twins_store_files(ctx, arch, profile)?,
+                super::image_drivers::twins_driver_store_files(ctx, arch, profile)?,
+            ));
+        }
         FsDisk::ImagesRootDisk => {
             return Ok((
                 super::image_apps::images_store_files(ctx, arch, profile)?,
@@ -12782,6 +13500,35 @@ fn optical_disc(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Resu
     Ok(spec
         .with_optical_disc(&first)
         .with_optical_disc_change(tairix_test_optical::SWAP_MARKER, &second))
+}
+
+/// Plug the twin-volume vertical's USB sticks in, each holding a copy of the
+/// one labelled FAT32 image its fixture names and reporting a serial number of
+/// its own ([`TWIN_STICK_SERIALS`]). Each copy is written beside the kernel
+/// binary, a stale one removed first, so no stick holds an earlier run's
+/// writes and the two share no file.
+///
+/// # Errors
+///
+/// A stick's image could not be replaced.
+fn twin_sticks(
+    t: &QemuTest,
+    kernel: &Path,
+    replica: usize,
+    mut spec: Spec,
+) -> Result<Spec, String> {
+    if t.fs_disk != FsDisk::TwinsRootDisk {
+        return Ok(spec);
+    }
+    let image = tairix_test_fat32_image::build_labelled_image(&tairix_test_twins::LABEL);
+    for (index, serial) in TWIN_STICK_SERIALS.into_iter().enumerate() {
+        let path = sidecar_path(kernel, t, replica, &format!("stick{index}.img"));
+        remove_stale_sidecar(t.package, "twin stick", &path)?;
+        std::fs::write(&path, &image)
+            .map_err(|e| format!("test --qemu ({}): write {}: {e}", t.package, path.display()))?;
+        spec = spec.with_usb_stick(path, serial);
+    }
+    Ok(spec)
 }
 
 /// Path of a per-run sidecar file for `t` — a planted backing image, or the
@@ -13018,12 +13765,8 @@ fn desktop_chrome_regions(
     theme: &tairix_theme::Theme,
     excluded: &[tairix_geometry::Rect],
 ) -> Vec<tairix_geometry::Rect> {
-    let (width, height) = ramfb_screen();
-    let centre = tairix_geometry::Point::new(
-        tairix_geometry::to_i32(width / 2),
-        tairix_geometry::to_i32(height / 2),
-    );
-    chrome_regions_on(theme, (width, height), centre, excluded)
+    let screen = ramfb_screen();
+    chrome_regions_on(theme, screen, seat_start(screen), excluded)
 }
 
 /// [`desktop_chrome_regions`] on a desktop of `screen` with the pointer
@@ -13034,22 +13777,13 @@ fn chrome_regions_on(
     pointer: tairix_geometry::Point,
     excluded: &[tairix_geometry::Rect],
 ) -> Vec<tairix_geometry::Rect> {
-    /// Half-width of the box kept clear of the pointer: comfortably larger
-    /// than the cursor artwork at unit scale.
-    const CURSOR_CLEARANCE_PX: u32 = 64;
     /// Width of the margin kept clear of the desktop's icon column,
     /// whether or not a fixture's `Desktop` folder holds icons to draw.
     const ICON_COLUMN_PX: u32 = 224;
-    let clearance = tairix_geometry::to_i32(CURSOR_CLEARANCE_PX);
     let mut regions = vec![
         taskbar_bar_rect_on(theme, screen),
         tairix_geometry::Rect::new(0, 0, ICON_COLUMN_PX, screen.1),
-        tairix_geometry::Rect::new(
-            pointer.x - clearance,
-            pointer.y - clearance,
-            2 * CURSOR_CLEARANCE_PX,
-            2 * CURSOR_CLEARANCE_PX,
-        ),
+        cursor_reach(pointer),
     ];
     regions.extend(
         excluded
@@ -13356,11 +14090,10 @@ const WINTERSUN_MAXIMIZED_DUMP: &str = "maximized";
 /// terminal it is launched from is the first window any client opens here.
 const WINTERSUN_CASCADE_SLOT: u64 = 1;
 
-/// Where the pointer rests while the game's window is photographed: the
-/// screen's last pixel, below every rectangle the game's client takes in any
-/// state but fullscreen, and past the end of the icon bar, whose slots open a
-/// picker under a resting pointer.
-fn wintersun_rest() -> tairix_geometry::Point {
+/// Where the pointer rests while a script photographs the desktop: the
+/// screen's last pixel, on no window short of a fullscreen one and past the
+/// end of the icon bar, whose slots open a picker under a resting pointer.
+fn corner_rest() -> tairix_geometry::Point {
     let (width, height) = ramfb_screen();
     #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
     tairix_geometry::Point::new(width as i32 - 1, height as i32 - 1)
@@ -13450,15 +14183,7 @@ fn wintersun_window() -> Result<WintersunWindow, String> {
         ));
     }
     let control = |layout: &tairix_controls::FrameLayout, wanted: WindowControlKind| {
-        frame
-            .title_bar()
-            .layout(layout.title_bar, scale, &theme)
-            .controls()
-            .iter()
-            .find(|(kind, _)| *kind == wanted)
-            .map(|&(_, rect)| rect)
-            .ok_or_else(|| fail(&format!("the title bar seats no {wanted:?}")))
-            .and_then(|rect| rect_centre(rect, "title-bar control"))
+        title_bar_control(&frame, layout, wanted, &theme).map_err(|why| fail(&why))
     };
     let toggle = control(&restored, WindowControlKind::SizeToggle)?;
     let (state, _) = compositor
@@ -13544,7 +14269,7 @@ fn wintersun_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
     pen.click(ready, 1, MouseButton::Primary, library_button);
     entry.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
-    pen.aim(LIBRARY_SHOWN_MARKER, 1, wintersun_rest());
+    pen.aim(LIBRARY_SHOWN_MARKER, 1, corner_rest());
     // Restored from fullscreen and photographed, so the next change is the
     // maximise; the pointer stays on the toggle through the last dump.
     pen.click(WINDOW_SIZED_MARKER, 2, MouseButton::Primary, window.toggle);
@@ -13640,9 +14365,28 @@ fn wintersun_reference(
     Ok(window.pixels().to_vec())
 }
 
+/// Where the session starts the pointer on a `screen` of that extent: its
+/// centre, where the device resolves its first motion from.
+fn seat_start((width, height): (u32, u32)) -> tairix_geometry::Point {
+    tairix_geometry::Point::new(
+        tairix_geometry::to_i32(width / 2),
+        tairix_geometry::to_i32(height / 2),
+    )
+}
+
+/// Every pixel a cursor resting at `pointer` can draw, whichever set draws it,
+/// wherever its hotspot lies and with its shadow on: twice the cursor's side
+/// from the hotspot every way.
+fn cursor_reach(pointer: tairix_geometry::Point) -> tairix_geometry::Rect {
+    let reach = RECONSTRUCTION_SCALE.scale_length(tairix_cursor::CURSOR_BASE_SIDE_PX) * 2;
+    let offset = tairix_geometry::to_i32(reach);
+    tairix_geometry::Rect::new(pointer.x - offset, pointer.y - offset, 2 * reach, 2 * reach)
+}
+
 /// Every screen pixel a cursor of the session's side can cover with its
-/// hotspot on `pointer`, whichever cursor it is: an image is that side square
-/// and its hotspot lies inside it.
+/// hotspot on `pointer`, whichever cursor it is, as the desktop draws it by
+/// default — its shadow off: an image is that side square and its hotspot
+/// lies inside it.
 fn cursor_footprint(pointer: tairix_geometry::Point) -> tairix_geometry::Rect {
     let side = RECONSTRUCTION_SCALE.scale_length(tairix_cursor::CURSOR_BASE_SIDE_PX);
     let reach = i32::try_from(side.saturating_sub(1)).unwrap_or(i32::MAX);
@@ -13758,7 +14502,7 @@ fn assert_wintersun_open_screendump(
     let window = wintersun_window()?;
     let image = read_screendump(t, path)?;
     let mut masked = plate_corners(window.restored.outer).to_vec();
-    masked.push(cursor_footprint(wintersun_rest()));
+    masked.push(cursor_footprint(corner_rest()));
     assert_wintersun_scene(
         t,
         path,
@@ -13799,7 +14543,7 @@ fn assert_wintersun_fullscreen_screendump(
         &image,
         window.fullscreen,
         screen,
-        &[cursor_footprint(wintersun_rest())],
+        &[cursor_footprint(corner_rest())],
     )
 }
 
@@ -13875,6 +14619,292 @@ fn assert_wintersun_maximized_screendump(
     )
 }
 
+/// The Cinder vertical's first dump: the bare desktop as it was revealed.
+const CINDER_DESKTOP_DUMP: &str = "desktop";
+/// The second: his pen as it opened, with him inside.
+const CINDER_PEN_DUMP: &str = "pen";
+/// The third: his surface's first frame on a desktop holding no window.
+const CINDER_LOOSE_DUMP: &str = "loose";
+
+/// The cascade slot the pen opens in: the first, because Cinder is opened from
+/// the program library and is the first client to open a window here.
+const CINDER_CASCADE_SLOT: u64 = 0;
+
+/// Where the Cinder script clicks.
+struct CinderClicks {
+    /// Centre of the program-library button.
+    library_button: tairix_geometry::Point,
+    /// The clicks that open Cinder; the pointer stays on the last until his
+    /// pen is photographed.
+    companion: LibraryClicks,
+    /// Centre of his pen's close control.
+    pen_close: tairix_geometry::Point,
+    /// Centre of his icon-bar slot.
+    slot: tairix_geometry::Point,
+    /// Centre of the row of his slot's menu that lets him out; the pointer
+    /// stays on it until he is photographed on the desktop.
+    let_out: tairix_geometry::Point,
+    /// The clicks that open the terminal, the guest's last witness.
+    terminal: LibraryClicks,
+}
+
+/// Reconstruct [`CinderClicks`] through the production taskbar and menu
+/// models, his slot carrying the declaration his own library builds.
+fn cinder_clicks() -> Result<CinderClicks, String> {
+    use tairix_cinder::{appbar, pen};
+    use tairix_input::PointerButton;
+    use tairix_taskbar::TaskbarResponse;
+    use tairix_test_cinder_qemu_aarch64::{COMPANION_APP_NAME, THEN_APP_NAME};
+
+    let what = "cinder script";
+    let declared = appbar::declaration(0, false)
+        .map_err(|err| format!("{what}: his declaration is invalid: {err}"))?;
+    let BarLaunch {
+        mut shell,
+        mut router,
+        library_button,
+        entry,
+        slot,
+    } = reconstruct_bar_launch_of(COMPANION_APP_NAME, &declared, what)?;
+    let request = match bar_press(&mut shell, &mut router, slot, PointerButton::Secondary) {
+        TaskbarResponse::OpenMenu(request) => request,
+        other => return Err(format!("{what}: his slot asked for no menu: {other:?}")),
+    };
+    let (_, row) = chain_plate_and_row(request.model, request.placement, pen::LET_OUT_LABEL, what)?;
+    let theme = booted_theme();
+    let pen_close = title_bar_control(
+        &window_frame(true),
+        &cinder_pen(&theme),
+        tairix_controls::WindowControlKind::Close,
+        &theme,
+    )?;
+    Ok(CinderClicks {
+        library_button,
+        companion: entry,
+        pen_close,
+        slot,
+        let_out: rect_centre(row, "Let Cinder out row")?,
+        terminal: library_clicks(THEN_APP_NAME, what)?,
+    })
+}
+
+/// Cinder's pen as the session places it and the window manager lays it out:
+/// its opening size, resizable, in its cascade slot.
+fn cinder_pen(theme: &tairix_theme::Theme) -> tairix_controls::FrameLayout {
+    let (width, height) = tairix_cinder::paint::pen_client(RECONSTRUCTION_SCALE);
+    served_window_layout(CINDER_CASCADE_SLOT, width, height, true, theme)
+}
+
+/// What the Cinder vertical compares on screen.
+struct CinderScene {
+    /// Every pixel the pen and the shadow it casts cover.
+    pen: tairix_geometry::Rect,
+    /// The work area the session places windows and his surface onto.
+    work_area: tairix_geometry::Rect,
+    /// The side of his square surface.
+    side: u32,
+    /// The cursor as the desktop was revealed, where the seat starts the
+    /// pointer.
+    revealed_cursor: tairix_geometry::Rect,
+}
+
+/// Rebuild [`CinderScene`] from the app's, the session's and the window
+/// manager's own geometry.
+fn cinder_scene() -> CinderScene {
+    let theme = booted_theme();
+    CinderScene {
+        pen: tairix_wm::shadow_footprint(cinder_pen(&theme).outer, RECONSTRUCTION_SCALE, &theme),
+        work_area: served_work_area(&theme),
+        side: RECONSTRUCTION_SCALE.scale_length(tairix_cinder::layout::COMPANION_SIDE),
+        revealed_cursor: cursor_footprint(seat_start(ramfb_screen())),
+    }
+}
+
+/// Photograph the revealed desktop, open Cinder from the program library and
+/// photograph his pen, close it — leaving him in, on the bar — and let him out
+/// from his slot's menu; once he is photographed on a desktop holding no
+/// window, open the terminal from the library.
+///
+/// Letting him out with the pen closed is what makes the last dump certain to
+/// show him: no window is left for him to walk behind, wherever he has got to
+/// by the time it is taken.
+fn cinder_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_qemu::MouseButton;
+
+    let clicks = cinder_clicks()?;
+    let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
+    let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
+    pen.open_library_beside_manager(clicks.library_button)?;
+    clicks.companion.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
+    pen.click(
+        WINDOW_SHOWN_MARKER,
+        1,
+        MouseButton::Primary,
+        clicks.pen_close,
+    );
+    pen.click(WINDOW_SHOWN_MARKER, 1, MouseButton::Secondary, clicks.slot);
+    pen.click(MENU_SHOWN_MARKER, 1, MouseButton::Primary, clicks.let_out);
+    pen.click(
+        WINDOW_SHOWN_MARKER,
+        2,
+        MouseButton::Primary,
+        clicks.library_button,
+    );
+    clicks.terminal.click(&mut pen, LIBRARY_SHOWN_MARKER, 2);
+    Ok(pen.steps())
+}
+
+/// The revealed desktop and the pen, the references his frame is compared
+/// with: each must be the whole scan-out.
+fn assert_cinder_reference_screendump(
+    t: &QemuTest,
+    path: &Path,
+    _serial: &str,
+) -> Result<(), String> {
+    let image = read_screendump(t, path)?;
+    let screen = ramfb_screen();
+    if (image.width, image.height) == screen {
+        Ok(())
+    } else {
+        Err(format!(
+            "test --qemu ({}): {} is {}x{}, not the {}x{} scan-out",
+            t.package,
+            path.display(),
+            image.width,
+            image.height,
+            screen.0,
+            screen.1
+        ))
+    }
+}
+
+/// Cinder let out: the session recorded his surface opening between the pen's
+/// witness and this frame's, and across the work area this frame differs from
+/// the bare desktop by at least a sixteenth of his surface, all within one
+/// surface's extent.
+///
+/// The revealed desktop is the reference everywhere but under the cursor it
+/// was revealed with, where the pen's dump shows bare desktop instead, so no
+/// pixel he can stand on goes uncompared but those under this frame's own
+/// cursor. Where he stands is not asserted: he walks from his first frame, so
+/// a tolerance on his position would be one on how long the dump took.
+fn assert_cinder_loose_screendump(t: &QemuTest, path: &Path, serial: &str) -> Result<(), String> {
+    use tairix_geometry::{Point, Rect};
+
+    let fail = |what: String| format!("test --qemu ({}): {what}", t.package);
+    cinder_layer_witnessed(serial).map_err(fail)?;
+    let scene = cinder_scene();
+    let clicks = cinder_clicks()?;
+    cinder_references_hold(&scene, &clicks).map_err(fail)?;
+    let desktop = read_screendump(
+        t,
+        &sibling_screendump(path, CINDER_LOOSE_DUMP, CINDER_DESKTOP_DUMP)?,
+    )?;
+    let pen = read_screendump(
+        t,
+        &sibling_screendump(path, CINDER_LOOSE_DUMP, CINDER_PEN_DUMP)?,
+    )?;
+    let loose = read_screendump(t, path)?;
+    let cursor = cursor_footprint(clicks.let_out);
+    let mut drawn = 0_u32;
+    let mut extent = Rect::EMPTY;
+    for y in scene.work_area.top()..scene.work_area.bottom() {
+        for x in scene.work_area.left()..scene.work_area.right() {
+            let at = Point::new(x, y);
+            if cursor.contains(at) {
+                continue;
+            }
+            let (Ok(column), Ok(row)) = (u32::try_from(x), u32::try_from(y)) else {
+                continue;
+            };
+            let reference = if scene.revealed_cursor.contains(at) {
+                &pen
+            } else {
+                &desktop
+            };
+            if reference.pixel(column, row)? == loose.pixel(column, row)? {
+                continue;
+            }
+            let pixel = Rect::new(x, y, 1, 1);
+            extent = if drawn == 0 {
+                pixel
+            } else {
+                extent.union(&pixel)
+            };
+            drawn += 1;
+        }
+    }
+    let side = scene.side;
+    let least = side * side / 16;
+    if drawn < least {
+        return Err(fail(format!(
+            "once he was let out only {drawn} px of the desktop changed, fewer than a \
+             sixteenth of his {side}-pixel surface ({least})"
+        )));
+    }
+    if extent.width > side || extent.height > side {
+        return Err(fail(format!(
+            "once he was let out the desktop changed across {extent:?}, more than his \
+             {side}-pixel surface spans"
+        )));
+    }
+    Ok(())
+}
+
+/// The pen's dump shows bare desktop wherever the revealed desktop's cursor
+/// hides it: neither the pen nor the pointer it was photographed with covers
+/// that place, so every pixel he can stand on has a reference.
+fn cinder_references_hold(scene: &CinderScene, clicks: &CinderClicks) -> Result<(), String> {
+    for (what, covered) in [
+        ("the pen", scene.pen),
+        (
+            "the pointer the pen is photographed with",
+            cursor_footprint(clicks.companion.entry),
+        ),
+    ] {
+        let hidden = scene.revealed_cursor.intersection(&covered);
+        if !hidden.is_empty() {
+            return Err(format!(
+                "{what} covers {hidden:?}, where the pen's dump stands in for the revealed \
+                 desktop under its cursor"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The session announced the pen on screen, then recorded his surface
+/// opening, then announced a second window on screen: his surface.
+fn cinder_layer_witnessed(serial: &str) -> Result<(), String> {
+    use tairix_desktop_session::{LAYER_OPENED, LAYER_OPENED_MESSAGE, WINDOW_SHOWN};
+
+    let opened_head = format!("id={} {LAYER_OPENED_MESSAGE}", LAYER_OPENED.0);
+    let shown_head = format!("id={} {WINDOW_SHOWN_MARKER}", WINDOW_SHOWN.0);
+    let mut opened = None;
+    let mut shown = Vec::new();
+    for (line_no, line) in serial.lines().enumerate() {
+        if opened.is_none() && line.contains(&opened_head) {
+            opened = Some(line_no);
+        }
+        if let Some(at) = line.find(&shown_head) {
+            let fields = &line[at + shown_head.len()..];
+            shown.push((line_no, witness_field(fields, "window")));
+        }
+    }
+    let opened = opened.ok_or("the session never recorded his surface opening")?;
+    match shown.as_slice() {
+        [(pen_at, pen), (loose_at, loose), ..]
+            if *pen_at < opened && opened < *loose_at && pen != loose =>
+        {
+            Ok(())
+        }
+        found => Err(format!(
+            "his surface opened at serial line {opened}, and the windows announced on screen \
+             were {found:?}: expected the pen's before it and his after"
+        )),
+    }
+}
+
 /// Where a run's dump with `suffix` is written: one of the run's sidecars
 /// ([`sidecar_path`]), so concurrent replicas and enrolments sharing a binary
 /// never delete or overwrite each other's dumps.
@@ -13890,13 +14920,18 @@ fn screendump_ext(suffix: &str) -> String {
 /// The dump `sibling` the same run took beside the one at `path`, whose own
 /// suffix is `suffix`: the two names differ in that suffix alone.
 fn sibling_screendump(path: &Path, suffix: &str, sibling: &str) -> Result<PathBuf, String> {
-    let own = format!(".{}", screendump_ext(suffix));
+    sibling_sidecar(path, &screendump_ext(suffix), &screendump_ext(sibling))
+}
+
+/// The sidecar with extension `sibling` the same run wrote beside the one at
+/// `path`, whose own extension is `own` ([`sidecar_path`]).
+fn sibling_sidecar(path: &Path, own: &str, sibling: &str) -> Result<PathBuf, String> {
     let stem = path
         .file_name()
         .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_suffix(&own))
-        .ok_or_else(|| format!("{} is not a {suffix} screendump", path.display()))?;
-    Ok(path.with_file_name(format!("{stem}.{}", screendump_ext(sibling))))
+        .and_then(|name| name.strip_suffix(&format!(".{own}")))
+        .ok_or_else(|| format!("{} is not a {own} sidecar", path.display()))?;
+    Ok(path.with_file_name(format!("{stem}.{sibling}")))
 }
 
 /// Read and fully decode a dumped scan-out image.
@@ -14128,6 +15163,25 @@ fn window_frame(resizable: bool) -> tairix_controls::WindowFrame {
         resizable,
         ..tairix_controls::WindowFurnitureState::default()
     })
+}
+
+/// Centre of the `kind` control on the title bar of a window `frame` lays out
+/// as `layout`, as the production title bar seats it.
+fn title_bar_control(
+    frame: &tairix_controls::WindowFrame,
+    layout: &tairix_controls::FrameLayout,
+    kind: tairix_controls::WindowControlKind,
+    theme: &tairix_theme::Theme,
+) -> Result<tairix_geometry::Point, String> {
+    let seated = frame
+        .title_bar()
+        .layout(layout.title_bar, RECONSTRUCTION_SCALE, theme)
+        .controls()
+        .iter()
+        .find(|(control, _)| *control == kind)
+        .map(|&(_, rect)| rect)
+        .ok_or_else(|| format!("the title bar seats no {kind:?}"))?;
+    rect_centre(seated, "title-bar control")
 }
 
 /// How far inside its own top-left corner a "focus this window" click aims,
@@ -16964,15 +18018,15 @@ impl LibraryClicks {
     }
 }
 
-/// A host copy of the desktop model advanced to "the terminal has been
+/// A host copy of the desktop model advanced to "an application has been
 /// launched from the program library", with the screen points that gesture
 /// used and the slot the session gives it.
 ///
 /// Every rectangle is reconstructed by driving the **production** taskbar
 /// model — the same layout, hit-testing, and menu-building code the guest runs
 /// — so a script clicks where the guest actually draws rather than at
-/// coordinates copied from a screenshot. Two verticals launch the terminal
-/// this way and then diverge, so the launch itself is reconstructed once.
+/// coordinates copied from a screenshot. Several verticals launch this way and
+/// then diverge, so the launch itself is reconstructed once.
 struct BarLaunch {
     /// The model, advanced to the launched state, for a caller that must keep
     /// driving it (opening the declared menu, say).
@@ -16982,7 +18036,7 @@ struct BarLaunch {
     router: tairix_taskbar::TaskbarInput,
     /// Centre of the program-library button.
     library_button: tairix_geometry::Point,
-    /// The clicks that open the terminal's bundle from the library.
+    /// The clicks that open the application's bundle from the library.
     entry: LibraryClicks,
     /// Centre of the bar slot the session gives the launched application.
     slot: tairix_geometry::Point,
@@ -17031,34 +18085,72 @@ fn bar_press(
     asked
 }
 
+/// Open the program library in `shell`'s model as a script's first click on
+/// its button opens it, answering that button's centre.
+fn open_library(
+    shell: &mut tairix_desktop_session::DesktopShell,
+    router: &mut tairix_taskbar::TaskbarInput,
+) -> Result<tairix_geometry::Point, String> {
+    let library_button = rect_centre(
+        shell
+            .session()
+            .taskbar()
+            .layout(RECONSTRUCTION_SCALE)
+            .library,
+        "Library button",
+    )?;
+    bar_press(
+        shell,
+        router,
+        library_button,
+        tairix_input::PointerButton::Primary,
+    );
+    Ok(library_button)
+}
+
+/// The clicks that open `app` from a freshly opened program library; `what`
+/// names the caller in the refusals.
+fn library_clicks(app: &str, what: &str) -> Result<LibraryClicks, String> {
+    let mut shell = reconstructed_shell(&[])?;
+    open_library(&mut shell, &mut tairix_taskbar::TaskbarInput::new())?;
+    LibraryClicks::to(
+        shell.session().taskbar(),
+        RECONSTRUCTION_SCALE,
+        &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, app),
+        what,
+    )
+}
+
 /// Reconstruct the launch of the terminal from the program library.
 fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
-    use tairix_desktop_session::FILES_LABEL;
-    use tairix_input::PointerButton;
-    use tairix_taskbar::{AppSlot, TaskbarInput};
     use tairix_test_appbar_qemu_aarch64::BAR_APP_NAME;
+
+    let what = "icon-bar script";
+    let declared = tairix_terminal::appbar::declaration(0)
+        .map_err(|err| format!("{what}: the terminal's declaration is invalid: {err}"))?;
+    reconstruct_bar_launch_of(BAR_APP_NAME, &declared, what)
+}
+
+/// Reconstruct the launch of `app` from the program library, its slot carrying
+/// `declared`, the declaration it makes as it starts; `what` names the caller
+/// in the refusals.
+fn reconstruct_bar_launch_of(
+    app: &str,
+    declared: &tairix_abi::window_ipc::AppBar,
+    what: &str,
+) -> Result<BarLaunch, String> {
+    use tairix_desktop_session::FILES_LABEL;
+    use tairix_taskbar::{AppSlot, TaskbarInput};
 
     let scale = RECONSTRUCTION_SCALE;
     let mut shell = reconstructed_shell(&[])?;
-    let bar = shell.session().taskbar().layout(scale);
-    let library_button = rect_centre(bar.library, "Library button")?;
-
     let mut router = TaskbarInput::new();
-
-    // Open the program-library popup, exactly as the first click will.
-    bar_press(
-        &mut shell,
-        &mut router,
-        library_button,
-        PointerButton::Primary,
-    );
-
-    // The clicks that open the application whose bar this drives.
+    let library_button = open_library(&mut shell, &mut router)?;
     let entry = LibraryClicks::to(
         shell.session().taskbar(),
         scale,
-        &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, BAR_APP_NAME),
-        "icon-bar script",
+        &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, app),
+        what,
     )?;
 
     // Launching from the library closes it and puts the application on the
@@ -17066,8 +18158,6 @@ fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
     // autostarted file manager already in the leading slot, and the launched
     // application beside it carrying the declaration it makes.
     entry.press(&mut shell, &mut router);
-    let declared = tairix_terminal::appbar::declaration(0)
-        .map_err(|err| format!("icon-bar script: the terminal's declaration is invalid: {err}"))?;
     let mut seated = (0..APPBAR_LAUNCHED_SLOT)
         .map(|slot| {
             AppSlot::new(
@@ -17080,7 +18170,7 @@ fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
     seated.push(
         AppSlot::new(
             modelled_owner(APPBAR_LAUNCHED_SLOT),
-            BAR_APP_NAME,
+            app,
             tairix_icon::IconKind::AppBundle,
         )
         .with_declaration(declared.menu, declared.click),
@@ -17217,68 +18307,70 @@ fn planted_home_components() -> Result<Vec<String>, String> {
     Ok(files)
 }
 
-/// Screen point of the picker's row for the document the fixture plants in the
-/// account's home.
+/// Screen point of the row for the planted document `name` in the picker
+/// standing in cascade slot `slot`.
 ///
 /// Reconstructed by driving the **production** browser and renderer — the same
 /// engine the picker composes its surface and inverts its clicks with — over
-/// that listing, at the picker's own viewport and chrome band. So the script
-/// clicks the row the guest actually draws rather than a coordinate read off a
-/// screenshot, and a change to the picker's layout moves both together.
+/// the planted home's listing, at the picker's own viewport and chrome band.
+/// So the script clicks the row the guest actually draws rather than a
+/// coordinate read off a screenshot, and a change to the picker's layout moves
+/// both together.
 ///
-/// The picker is a decorated dialog at a fixed origin, so a window-local
-/// rectangle is offset by its *client* origin: `PICKER_ORIGIN` — the outer
-/// top-left — plus the furniture band the window manager insets the client
-/// by. That band is read from the one shared frame definition the session
-/// decorates the picker with, never re-derived here.
+/// The picker is a decorated window placed as the session places one: its
+/// outer top-left the slot's origin (`picker_origin`), the outer rectangle
+/// kept on the work area by the same clamp (`Rect::clamped_onto`), and the
+/// client inset by the band of the one shared frame definition the session
+/// decorates it with, never re-derived here.
 fn reconstruct_pick_click(
     shell: &tairix_desktop_session::DesktopShell,
+    slot: usize,
+    name: &[u8],
 ) -> Result<tairix_geometry::Point, String> {
-    use tairix_desktop_session::{PICKER_ORIGIN, PICKER_TOOLBAR};
+    use tairix_desktop_session::{picker_origin, PICKER_TOOLBAR};
     use tairix_geometry::{Point, Rect};
-    use tairix_wm::{WindowFrame, WindowFurnitureState};
 
     const WHAT: &str = "pick script";
     let theme = shell.session().active_theme();
     let scale = RECONSTRUCTION_SCALE;
     let browser = planted_home_browser(WHAT)?;
-    let doc = core::str::from_utf8(tairix_test_arxfs_image::HOME_DOC_NAME)
+    let name = core::str::from_utf8(name)
         .map_err(|e| format!("{WHAT}: the planted document's name is not UTF-8: {e}"))?;
-    let index = planted_entry_index(&browser, doc, WHAT)?;
+    let index = planted_entry_index(&browser, name, WHAT)?;
+    let (width, height) = (
+        scale.scale_length(tairix_browse::WIN_WIDTH),
+        scale.scale_length(tairix_browse::WIN_HEIGHT),
+    );
 
     // The picker draws the engine's own default list view over the whole
     // client, below its own chrome band.
     let local = browsed_entry_centre(
         &browser,
         theme,
-        Rect::new(
-            0,
-            0,
-            scale.scale_length(tairix_browse::WIN_WIDTH),
-            scale.scale_length(tairix_browse::WIN_HEIGHT),
-        ),
+        Rect::new(0, 0, width, height),
         PICKER_TOOLBAR,
         index,
         "picker document row",
     )?;
-    // The picker is fixed-size, so the frame offers no resize edges and the
-    // bands are the plain furniture insets.
-    let insets = WindowFrame::new(WindowFurnitureState {
-        resizable: false,
-        ..WindowFurnitureState::default()
-    })
-    .insets(scale, theme);
-    let client = Point::new(
-        PICKER_ORIGIN
-            .x
-            .saturating_add(i32::try_from(insets.left).unwrap_or(i32::MAX)),
-        PICKER_ORIGIN
-            .y
-            .saturating_add(i32::try_from(insets.top).unwrap_or(i32::MAX)),
-    );
+    // The picker is fixed-size, so its frame offers no resize edges.
+    let frame = window_frame(false);
+    let insets = frame.insets(scale, theme);
+    let origin = picker_origin(slot, scale);
+    let outer = Rect::new(
+        origin.x,
+        origin.y,
+        width
+            .saturating_add(insets.left)
+            .saturating_add(insets.right),
+        height
+            .saturating_add(insets.top)
+            .saturating_add(insets.bottom),
+    )
+    .clamped_onto(served_work_area(theme));
+    let client = frame.layout(outer, scale, theme).client;
     Ok(Point::new(
-        client.x.saturating_add(local.x),
-        client.y.saturating_add(local.y),
+        client.left().saturating_add(local.x),
+        client.top().saturating_add(local.y),
     ))
 }
 
@@ -17491,7 +18583,10 @@ fn fsmutate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     // The plate the session opens for a press on bare backdrop, and its New
     // Folder row. The model is the production one: no icon under the pointer,
     // and the settings a session with nothing stored runs with.
-    let model = pinboard::model(false, &tairix_wallpaper::DesktopSettings::default());
+    let model = pinboard::model(
+        pinboard::Over::Backdrop,
+        &tairix_wallpaper::DesktopSettings::default(),
+    );
     let (_, row) = chain_plate_and_row(
         model,
         window_menu_placement(Rect::new(backdrop.x, backdrop.y, 0, 0)),
@@ -17547,7 +18642,7 @@ fn filepick_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
         &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, PICK_APP_NAME),
         "pick script",
     )?;
-    let document_row = reconstruct_pick_click(&shell)?;
+    let document_row = reconstruct_pick_click(&shell, 0, tairix_test_arxfs_image::HOME_DOC_NAME)?;
     let slot = rect_centre(
         appbar_slot_rect(shell.session().taskbar().theme(), APPBAR_LAUNCHED_SLOT)?,
         "slot",
@@ -17572,6 +18667,121 @@ fn filepick_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
         document_row,
     );
     Ok(pen.steps())
+}
+
+/// Launch the `view` viewer from the program library, launch it from there
+/// [`PICKS`](tairix_test_filepicks_qemu_aarch64::PICKS) times more so as many
+/// trusted pickers are up at once, then choose the planted picture in each,
+/// the topmost first.
+///
+/// Every gate is a fact the emitting side states for itself:
+///
+/// - The first launch waits on the file manager's slot
+///   ([`PointerPen::open_library_beside_manager`]) and the popup's own
+///   [`LIBRARY_SHOWN_MARKER`]. It starts the viewer, resident with no window.
+/// - The next launch waits on the viewer's own slot ([`APPBAR_SLOT_MARKER`]),
+///   its declaration on the bar, and each after it on the picker the one
+///   before opened ([`FILEPICK_PICKER_MARKER`]). A launch of the running
+///   viewer reaches it rather than starting another, and it opens a window and
+///   asks for a document at once; the launch is the user's click, so the
+///   picker takes the keyboard above the ones before it, in the next cascade
+///   slot.
+/// - The first choice waits on the last picker's announcement, so every picker
+///   is on screen before any concludes, which a desktop holding one pick at a
+///   time could never produce.
+/// - Each choice opens its document in a window over the pickers still up, so
+///   each later choice first puts that window to the back from its own title
+///   bar, once the session has shown it ([`WINDOW_SHOWN_MARKER`]). The session
+///   restacks at once, in input order, so the press after it reaches the
+///   picker beneath.
+///
+/// The picture rather than the text document, because the viewer keeps a
+/// window open on a document it draws: the window the later gate waits on and
+/// the put-to-back moves.
+fn filepicks_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_qemu::MouseButton;
+    use tairix_test_filepicks_qemu_aarch64::{PICKS, PICK_APP_NAME};
+
+    const WHAT: &str = "concurrent pick script";
+    let picture = tairix_test_arxfs_image::HOME_PICTURE_NAME;
+    let shell = reconstructed_shell(&[])?;
+    let theme = shell.session().active_theme();
+    let bar = shell.session().taskbar().layout(RECONSTRUCTION_SCALE);
+    let library_button = rect_centre(bar.library, "Library button")?;
+    let entry = LibraryClicks::to(
+        shell.session().taskbar(),
+        RECONSTRUCTION_SCALE,
+        &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, PICK_APP_NAME),
+        WHAT,
+    )?;
+    let range = |what: &str| format!("{WHAT}: {what} out of range");
+    let viewer_slot =
+        u32::try_from(APPBAR_LAUNCHED_SLOT + 1).map_err(|_| range("the viewer's slot"))?;
+
+    let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
+    let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
+    pen.open_library_beside_manager(library_button)?;
+    entry.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
+    for pick in 0..PICKS {
+        if pick == 0 {
+            pen.click(
+                APPBAR_SLOT_MARKER,
+                viewer_slot,
+                MouseButton::Primary,
+                library_button,
+            );
+        } else {
+            pen.click(
+                FILEPICK_PICKER_MARKER,
+                pick,
+                MouseButton::Primary,
+                library_button,
+            );
+        }
+        entry.click(&mut pen, LIBRARY_SHOWN_MARKER, pick + 2);
+    }
+    for (chosen, pick) in (0..PICKS).rev().enumerate() {
+        let slot = usize::try_from(pick).map_err(|_| range("a picker's slot"))?;
+        let row = reconstruct_pick_click(&shell, slot, picture)?;
+        if chosen == 0 {
+            pen.click(FILEPICK_PICKER_MARKER, PICKS, MouseButton::Primary, row);
+            continue;
+        }
+        // The viewer window that asked the picker one slot up is the one the
+        // previous choice opened its document in.
+        let back = viewer_put_to_back(theme, u64::from(pick + 1))?;
+        let shown = u32::try_from(chosen).map_err(|_| range("a window count"))?;
+        pen.click(WINDOW_SHOWN_MARKER, shown, MouseButton::Primary, back);
+        pen.click(WINDOW_SHOWN_MARKER, shown, MouseButton::Primary, row);
+    }
+    Ok(pen.steps())
+}
+
+/// Screen point of the put-to-back control on the title bar of the viewer
+/// window standing in served cascade slot `slot`, at the size the viewer opens
+/// one, as the production frame seats it.
+///
+/// Resizability is immaterial to the footprint (pinned by
+/// `served_window_layout_insets_the_client_inside_its_furniture`) and to the
+/// leading cluster the control sits in, so the viewer's sizing need not be
+/// plumbed out of its crate.
+fn viewer_put_to_back(
+    theme: &tairix_theme::Theme,
+    slot: u64,
+) -> Result<tairix_geometry::Point, String> {
+    let layout = served_window_layout(
+        slot,
+        tairix_view::WIN_WIDTH,
+        tairix_view::WIN_HEIGHT,
+        true,
+        theme,
+    );
+    title_bar_control(
+        &window_frame(true),
+        &layout,
+        tairix_controls::WindowControlKind::PutToBack,
+        theme,
+    )
 }
 
 /// The three tier hues the map draws, each with the tier it stands for: the
@@ -18904,6 +20114,8 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
         // copy.
         FsDisk::AutoloadRootDisk
         | FsDisk::ScreensaverRootDisk
+        | FsDisk::CaptureRootDisk
+        | FsDisk::CaptureVirtioGpuRootDisk
         | FsDisk::GreeterRootDisk
         | FsDisk::VirtioGpuRootDisk
         | FsDisk::HoverRootDisk
@@ -18922,6 +20134,7 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
         | FsDisk::HdaAudioRootDisk
         | FsDisk::LifecycleAudioRootDisk
         | FsDisk::OpticalRootDisk
+        | FsDisk::TwinsRootDisk
         | FsDisk::ImagesRootDisk
         | FsDisk::RtcRootDisk => Some(net_root_fs_disk_image(t, stores)?),
     })
@@ -18956,6 +20169,8 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<FsImage, St
     let (drivers, app_set, extension) = match t.fs_disk {
         FsDisk::AutoloadRootDisk => (autoload_drivers, apps, "autoload-root.img"),
         FsDisk::ScreensaverRootDisk => (autoload_drivers, apps, "screensaver-root.img"),
+        FsDisk::CaptureRootDisk => (autoload_drivers, apps, CAPTURE_DISK_EXT),
+        FsDisk::CaptureVirtioGpuRootDisk => (virtio_gpu_drivers, apps, CAPTURE_DISK_EXT),
         FsDisk::GreeterRootDisk => (autoload_drivers, apps, "greeter-root.img"),
         FsDisk::VirtioGpuRootDisk => (virtio_gpu_drivers, apps, "virtio-gpu-root.img"),
         FsDisk::HoverRootDisk => (autoload_drivers, apps_with_framestats, "hover-root.img"),
@@ -18966,6 +20181,7 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<FsImage, St
         FsDisk::HdaAudioRootDisk => (device_drivers, device_apps, "hda-audio-root.img"),
         FsDisk::LifecycleAudioRootDisk => (device_drivers, device_apps, "lifecycle-audio-root.img"),
         FsDisk::OpticalRootDisk => (device_drivers, device_apps, "optical-root.img"),
+        FsDisk::TwinsRootDisk => (device_drivers, device_apps, "twins-root.img"),
         FsDisk::ImagesRootDisk => (device_drivers, device_apps, "images-root.img"),
         FsDisk::EcnRootDisk => (net_only_drivers, apps_with_tcpecho_ecn, "ecn-root.img"),
         FsDisk::ListenRootDisk => (net_only_drivers, apps_with_tcpserve, "listen-root.img"),
@@ -18999,19 +20215,17 @@ fn net_root_image(
     // (the autoload vertical's desktop opens the popup over it), beside
     // whatever login configuration the vertical asks for.
     let plants = root_plants(t, apps)?;
-    let borrowed = root_plant_refs(&plants);
-    let root_files: Vec<(&[&[u8]], &[u8])> = borrowed
-        .iter()
-        .map(|(components, bytes)| (components.as_slice(), *bytes))
-        .collect();
-    let bytes = super::image_apps::with_plant_refs(drivers, |driver_files| {
-        super::image_apps::with_plant_refs(apps, |app_files| {
-            tairix_test_encrypted_root_image::build_image_with_contents(
-                driver_files,
-                app_files,
-                &root_files,
-                ENCRYPTED_ROOT,
-            )
+    let bytes = with_root_files(&plants, |root_files| {
+        super::image_apps::with_plant_refs(drivers, |driver_files| {
+            super::image_apps::with_plant_refs(apps, |app_files| {
+                tairix_test_encrypted_root_image::build_image_with_contents(
+                    driver_files,
+                    app_files,
+                    root_files,
+                    t.fs_disk.root_sectors(),
+                    ENCRYPTED_ROOT,
+                )
+            })
         })
     })
     .map_err(|e| format!("test --qemu ({}): build {extension}: {e:?}", t.package))?;
@@ -19674,6 +20888,7 @@ fn finish_run(
     spec = x86_64_topology_gates(spec, t.binary);
     spec = message_source_gates(spec, t.binary);
     spec = optical_disc(t, kernel, replica, spec)?;
+    spec = twin_sticks(t, kernel, replica, spec)?;
 
     // Attach a QEMU `ramfb` display device for the framebuffer vertical.
     spec = spec.with_display(t.display);
@@ -20067,10 +21282,10 @@ mod tests {
         desktop_hover_pointer_script, fatal_verdict, filepick_pointer_script, fold_peer_verdict,
         handover_pointer_script, login_type_plant, netmap_pointer_script, pass_verdict,
         persist_serial, qemu_host_budget_for, qemu_job_weight, row_holds_track, screendump_ext,
-        screendump_path, screensaver_pointer_script, settings_pointer_script, sidecar_path,
-        touch_pointer_script, Expect, FsDisk, NetPeerMode, QemuTest, TypedStep, AARCH64_TARGET,
-        APPBAR_LAUNCHED_SLOT, APPBAR_SETTLED_MARKER, APPBAR_SLOT_MARKER, AUDIOCUE_LINE,
-        AUDIOCUE_SERIAL, AUDIOSEAT_LINE, AUDIOSEAT_SERIAL, AUDIOTONE_PASS_PREFIX,
+        screendump_path, screensaver_pointer_script, settings_pointer_script, sibling_sidecar,
+        sidecar_path, touch_pointer_script, Expect, FsDisk, NetPeerMode, QemuTest, TypedStep,
+        AARCH64_TARGET, APPBAR_LAUNCHED_SLOT, APPBAR_SETTLED_MARKER, APPBAR_SLOT_MARKER,
+        AUDIOCUE_LINE, AUDIOCUE_SERIAL, AUDIOSEAT_LINE, AUDIOSEAT_SERIAL, AUDIOTONE_PASS_PREFIX,
         AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER,
         DESKTOP_PRESSURE_ICONS_DRAWN_DUMP, DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP,
         IMAGES_COMMAND_LINE, IMAGES_PASS_PREFIX, IPI_SMP_AARCH64, KEYBOARD_ONLY_ARMED_OCCURRENCES,
@@ -20085,6 +21300,45 @@ mod tests {
     };
     use std::path::Path;
     use std::time::Duration;
+
+    /// A run's sidecar is found from another of the same run's by its
+    /// extension alone, and a path that is not the sidecar named is refused.
+    #[test]
+    fn a_runs_sidecar_is_found_beside_another_of_its_own() {
+        use std::path::Path;
+
+        let dump = Path::new("/k/test.s3.r1.capture-screen.screendump.ppm");
+        let own = screendump_ext("capture-screen");
+        assert_eq!(
+            sibling_sidecar(dump, &own, "capture-root.img").as_deref(),
+            Ok(Path::new("/k/test.s3.r1.capture-root.img"))
+        );
+        assert!(sibling_sidecar(Path::new("/k/test.serial.log"), &own, "x.img").is_err());
+    }
+
+    /// The capture vertical's keys move the bar from the mode it opens on to
+    /// recording the whole screen: a reordered bar would otherwise send the
+    /// run recording something else, or taking a still.
+    #[test]
+    fn the_capture_script_moves_the_bar_to_recording_the_screen() {
+        use super::{NamedKey, RECORD_THE_SCREEN};
+        use tairix_desktop_session::capture::{CaptureMode, CaptureTarget};
+
+        let rights = RECORD_THE_SCREEN
+            .iter()
+            .filter(|&&key| key == NamedKey::Right)
+            .count();
+        assert_eq!(
+            CaptureMode::ALL[0],
+            CaptureMode::still(CaptureTarget::Screen)
+        );
+        assert_eq!(
+            CaptureMode::ALL[rights],
+            CaptureMode::record(CaptureTarget::Screen)
+        );
+        assert_eq!(RECORD_THE_SCREEN.first(), Some(&NamedKey::CaptureBar));
+        assert_eq!(RECORD_THE_SCREEN.last(), Some(&NamedKey::Enter));
+    }
 
     /// The boot-disk serial markers name the *reserved kernel-driven device
     /// identity* the boot floor reports its readings under, and the shell
@@ -20193,6 +21447,7 @@ mod tests {
             ("autoload desktop", autoload_desktop_pointer_script()),
             ("desktop hover", desktop_hover_pointer_script()),
             ("picker delegation", filepick_pointer_script()),
+            ("concurrent picks", super::filepicks_pointer_script()),
             ("hand-over", handover_pointer_script()),
             ("settings", settings_pointer_script()),
             ("screensaver", screensaver_pointer_script()),
@@ -20336,7 +21591,7 @@ mod tests {
     /// planted store actually understand, each read from its own definition.
     #[test]
     fn the_wintersun_vertical_types_what_the_game_and_its_store_understand() {
-        use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
+        use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PhysicalKey};
         use tairix_abi::window_ipc::WindowSizeState;
         use tairix_abi::ProgramKind;
         use tairix_qemu::NamedKey;
@@ -20372,10 +21627,14 @@ mod tests {
                 let key = match key {
                     NamedKey::F11 => NamedKeyCode::F11,
                     NamedKey::Escape => NamedKeyCode::Escape,
+                    NamedKey::Right => NamedKeyCode::Right,
+                    NamedKey::Enter => NamedKeyCode::Enter,
+                    NamedKey::CaptureScreen | NamedKey::CaptureBar => return None,
                 };
                 Controls::new().apply_key(&KeyInput::Pressed {
                     key: KeyValue::Named(key),
                     modifiers: Modifiers::default(),
+                    physical: PhysicalKey::UNKNOWN,
                 })
             })
             .collect();
@@ -20426,7 +21685,7 @@ mod tests {
         assert!(window.restored.title_bar.contains(window.toggle));
         assert!(screen.contains(window.close), "{:?}", window.close);
         assert!(window.maximized.title_bar.contains(window.close));
-        let rest = super::cursor_footprint(super::wintersun_rest());
+        let rest = super::cursor_footprint(super::corner_rest());
         for client in [window.restored.client, window.maximized.client] {
             assert!(
                 rest.intersection(&client.intersection(&window.work_area))
@@ -20435,6 +21694,90 @@ mod tests {
             );
         }
         assert_eq!(window.maximized.outer, window.work_area);
+    }
+
+    /// Every click the Cinder script makes lands where it means to, and the
+    /// pen's dump shows bare desktop wherever the revealed desktop's cursor
+    /// hides it, so every pixel he can stand on has a reference.
+    #[test]
+    fn the_cinder_script_lands_its_clicks_and_every_pixel_has_a_reference() {
+        let clicks = super::cinder_clicks().expect("every click reconstructs");
+        let scene = super::cinder_scene();
+        assert_ne!(clicks.companion.entry, clicks.terminal.entry);
+        assert!(
+            scene.pen.contains(clicks.pen_close),
+            "{:?}",
+            clicks.pen_close
+        );
+        assert!(
+            !scene.work_area.contains(clicks.slot),
+            "the slot is on the bar"
+        );
+        assert!(
+            scene.work_area.contains(clicks.let_out),
+            "{:?}",
+            clicks.let_out
+        );
+        assert_eq!(super::cinder_references_hold(&scene, &clicks), Ok(()));
+        assert!(scene.side > 0);
+    }
+
+    /// The capture still is excused the pointer only on a board whose cursor
+    /// plane QEMU's dump leaves out, and there over every pixel a cursor
+    /// resting where the seat starts it can draw — not at the origin, where
+    /// no seat starts one.
+    #[test]
+    fn a_cursor_plane_still_is_excused_the_pointer_where_the_seat_starts_it() {
+        let captures: Vec<&super::QemuTest> = super::TESTS
+            .iter()
+            .filter(|t| t.package == "tairix-test-capture-qemu-aarch64")
+            .collect();
+        assert_eq!(captures.len(), 2, "one ramfb board, one virtio GPU");
+        for t in captures {
+            match t.display {
+                super::Display::VirtioGpu { width, height } => {
+                    let area = super::pointer_off_plane(t).expect("a cursor plane");
+                    let resting = super::cursor_footprint(super::seat_start((width, height)));
+                    assert_eq!(area.intersection(&resting), resting, "{area:?}");
+                    assert!(!area.contains(tairix_geometry::Point::ORIGIN), "{area:?}");
+                }
+                _ => assert_eq!(super::pointer_off_plane(t), None),
+            }
+        }
+    }
+
+    /// His surface is witnessed only when it opened after the pen was shown and
+    /// before a second, different window was.
+    #[test]
+    fn cinder_s_surface_is_witnessed_only_between_two_windows_shown() {
+        use tairix_desktop_session::{LAYER_OPENED, LAYER_OPENED_MESSAGE, WINDOW_SHOWN};
+
+        let shown = |window: u32| {
+            format!(
+                "[ 1.0] [INFO] id={} {} window={window}",
+                WINDOW_SHOWN.0,
+                super::WINDOW_SHOWN_MARKER
+            )
+        };
+        let opened = format!("[ 2.0] [INFO] id={} {LAYER_OPENED_MESSAGE}", LAYER_OPENED.0);
+        let serial = |lines: &[&str]| lines.join("\n");
+        let (pen, loose) = (shown(7), shown(8));
+        assert_eq!(
+            super::cinder_layer_witnessed(&serial(&[&pen, &opened, &loose])),
+            Ok(())
+        );
+        for refused in [
+            serial(&[&opened, &pen, &loose]),
+            serial(&[&pen, &loose, &opened]),
+            serial(&[&pen, &opened, &pen]),
+            serial(&[&pen, &loose]),
+            serial(&[&pen, &opened]),
+        ] {
+            assert!(
+                super::cinder_layer_witnessed(&refused).is_err(),
+                "{refused}"
+            );
+        }
     }
 
     /// A `WINDOW_SIZED` record is read back from exactly the line the kernel's
@@ -20876,6 +22219,50 @@ mod tests {
                 && aim.y <= viewer.bottom(),
             "the viewer's window {viewer:?} no longer covers {aim:?}: the raise before each \
              later activation is now unnecessary",
+        );
+    }
+
+    /// The window the later choice opens its document in covers the earlier
+    /// picker's row, which is why the concurrent pick script puts it to the
+    /// back before choosing there: a press aimed at a covered picker reaches
+    /// whatever is on top of it. If it ever stops holding, the put-to-back is
+    /// pointless and is to be removed rather than worked around.
+    #[test]
+    fn the_viewers_window_is_why_the_concurrent_pick_script_puts_it_back() {
+        use super::{
+            reconstruct_pick_click, reconstructed_shell, served_window_layout, RECONSTRUCTION_SCALE,
+        };
+        use tairix_desktop_session::picker_origin;
+
+        let picture = tairix_test_arxfs_image::HOME_PICTURE_NAME;
+        let shell = reconstructed_shell(&[]).expect("the desktop reconstructs");
+        let theme = shell.session().active_theme();
+        let earlier = reconstruct_pick_click(&shell, 0, picture).expect("the earlier picker");
+        let later = reconstruct_pick_click(&shell, 1, picture).expect("the later picker");
+        let (first, second) = (
+            picker_origin(0, RECONSTRUCTION_SCALE),
+            picker_origin(1, RECONSTRUCTION_SCALE),
+        );
+        assert_eq!(
+            (later.x - earlier.x, later.y - earlier.y),
+            (second.x - first.x, second.y - first.y),
+            "each picker is aimed in its own cascade slot"
+        );
+        let viewer = served_window_layout(
+            1,
+            tairix_view::WIN_WIDTH,
+            tairix_view::WIN_HEIGHT,
+            true,
+            theme,
+        )
+        .outer;
+        assert!(
+            earlier.x >= viewer.left()
+                && earlier.x <= viewer.right()
+                && earlier.y >= viewer.top()
+                && earlier.y <= viewer.bottom(),
+            "the viewer's window {viewer:?} no longer covers {earlier:?}: putting it to the \
+             back before the earlier choice is now unnecessary",
         );
     }
 
@@ -21450,6 +22837,7 @@ mod tests {
         let scripts = [
             ("desktop-hover", desktop_hover_pointer_script()),
             ("filepick", filepick_pointer_script()),
+            ("filepicks", super::filepicks_pointer_script()),
             ("netmap", netmap_pointer_script()),
             ("appbar", appbar_pointer_script()),
         ];
@@ -21596,6 +22984,33 @@ mod tests {
         let pass = tairix_test_optical::pass_line();
         assert!(pass.starts_with(OPTICAL_PASS_PREFIX), "{pass}");
         assert!(!tairix_test_optical::swap_line().contains(OPTICAL_PASS_PREFIX));
+    }
+
+    /// The twin-volume vertical types the fixture's own command word, waits
+    /// for the pass line the fixture prints, and plugs in sticks that each
+    /// state a device identity of their own.
+    #[test]
+    fn twins_script_matches_the_fixture_vocabulary() {
+        use super::{TWINS_COMMAND_LINE, TWINS_PASS_PREFIX, TWIN_STICK_SERIALS};
+
+        assert_eq!(
+            TWINS_COMMAND_LINE.trim_end_matches('\n'),
+            tairix_test_twins::COMMAND
+        );
+        assert!(
+            TWINS_COMMAND_LINE.ends_with('\n'),
+            "the shell needs the return"
+        );
+        assert!(tairix_test_twins::pass_line().starts_with(TWINS_PASS_PREFIX));
+        let [first, second] = TWIN_STICK_SERIALS;
+        assert_ne!(first, second, "each stick states an identity of its own");
+        let spelled = |serial: &str| {
+            !serial.is_empty() && serial.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        };
+        assert!(
+            TWIN_STICK_SERIALS.into_iter().all(spelled),
+            "QEMU's option grammar takes a serial number of letters and digits as written"
+        );
     }
 
     /// The disk-image vertical types the fixture's own command word and waits

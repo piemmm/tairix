@@ -50,6 +50,15 @@ pub const CALL_DEADLINE_NONE: u64 = u64::MAX;
 /// delegations end with it, so churning processes cannot accumulate them.
 pub const FD_GRANT_PENDING_MAX: usize = 64;
 
+/// The most shared regions one grantor may have delegated to one recipient,
+/// counting those that still exist, when it names the recipient with
+/// [`SyscallNumber::SHM_GRANT_TO`].
+///
+/// A fixed containment bound, not a capacity: a recipient named outright never
+/// asked for what it holds, so each grantor's share of its grant table is
+/// bounded and its own, and a region every holder has released stops counting.
+pub const SHM_GRANT_TO_MAX: usize = 64;
+
 /// Stable syscall identifier.
 ///
 /// Wraps a `u16` so it cannot be confused with raw integer arguments at call
@@ -1797,22 +1806,24 @@ impl SyscallNumber {
     /// capability-gated System Information API.
     pub const BOOT_FACTS_GET: Self = Self(89);
 
-    /// Delegate one of the caller's own open **filesystem** descriptors to
-    /// another live process as a one-shot grant
+    /// Delegate one of the caller's own open descriptors — a filesystem file
+    /// or a pipe end — to another live process as a one-shot grant
     /// (`plans/CAPABILITY_USE.md` CU6 — the user-mediated file picker's
     /// hand-off).
     ///
     /// Arguments: `fd` (a descriptor of the caller's own open table backed
-    /// by a filesystem file; a pipe, pty, resource or directory is refused),
-    /// `write_ceiling`
-    /// (zero for a read-only descriptor; for a writable one, the most bytes
-    /// from the start of the file the recipient may write or extend to, or
+    /// by a filesystem file or a pipe end; a pty, resource or directory is
+    /// refused), `write_ceiling` (zero for a read-only file and for either
+    /// end of a pipe, which has no extent; for a writable file, the most
+    /// bytes from its start the recipient may write or extend to, or
     /// [`GRANT_EXTENT_INHERIT`] to pass on the caller's own reach), and the
     /// recipient's [`crate::ProcId`] (taken from a kernel-attested source
-    /// such as `call_peer_origin`). The kernel freezes the *caller's*
-    /// identity and effective capability set with the descriptor's node and
-    /// access, and mints the recipient an unforgeable handle that resolves
-    /// only when presented by the recipient itself ([`Self::FD_REDEEM`]).
+    /// such as `call_peer_origin`). For a file the kernel freezes the
+    /// *caller's* identity and effective capability set with the
+    /// descriptor's node and access; a pipe end is handed on as itself, and
+    /// holds its side open until it is redeemed or let go. The recipient is
+    /// minted an unforgeable handle that resolves only when presented by the
+    /// recipient itself ([`Self::FD_REDEEM`]).
     ///
     /// A descriptor that is itself a redeemed delegation is passed on as it
     /// was captured, under its original grantor's identity, and its ceiling
@@ -1823,7 +1834,8 @@ impl SyscallNumber {
     pub const FD_GRANT: Self = Self(90);
 
     /// Redeem a [`Self::FD_GRANT`] handle minted to the calling task,
-    /// installing the delegated file into the caller's own open table.
+    /// installing the delegated file or pipe end into the caller's own open
+    /// table.
     ///
     /// Arguments: `handle` (the grant handle received in-band). The
     /// redemption is **one-shot**: the grant record is consumed only when
@@ -1833,7 +1845,7 @@ impl SyscallNumber {
     /// (`NotFound`), indistinguishable from a handle that never existed.
     /// The call is unprivileged: receiving user-mediated, already-checked
     /// authority is the point of the delegation, and every later operation
-    /// on the descriptor is still VFS-checked under the grantor's captured
+    /// on a delegated file is still VFS-checked under the grantor's captured
     /// identity.
     pub const FD_REDEEM: Self = Self(91);
     /// Mark the calling process's entire anonymous memory — current and
@@ -2140,7 +2152,7 @@ impl SyscallNumber {
     /// ([`crate::SchedPriority`]) — the Switchboard's "lower priority"
     /// recovery action (`plans/NEW-TASKBAR.md` T12).
     ///
-    /// Arguments: `pid` (sign-extended `i32`, the target process) and
+    /// Arguments: `pid` (`i64`, the whole register, the target process) and
     /// `priority` (a [`crate::SchedPriority`] wire discriminant; `0` and
     /// unknown values fail closed with [`Errno::OutOfRange`]).
     ///
@@ -2978,7 +2990,7 @@ impl SyscallNumber {
     /// and its capacity. Returns the path's length, or `-errno`:
     /// [`Errno::NotFound`] for a handle that instance did not mint to the
     /// caller, as for a handle that never existed, [`Errno::OutOfRange`] for
-    /// a file delegation rather than a location, and
+    /// a delegated file or pipe end rather than a location, and
     /// [`Errno::BufferTooSmall`] for a buffer shorter than the path — each
     /// leaving the location pending — or [`Errno::PermissionDenied`] when the
     /// descriptor reaches its file as another user than the caller, since a
@@ -3014,7 +3026,8 @@ impl SyscallNumber {
     pub const CONSOLE_RELINQUISH: Self = Self(149);
 
     /// Map the caller's spawn share: the shared region its spawner handed it
-    /// in a drawing-sandbox spawn ([`crate::SpawnAttach::drawing`]).
+    /// in a sandbox spawn ([`crate::SpawnAttach::with_share`]) — a
+    /// screensaver's frame, or the output a parser sandbox writes.
     ///
     /// Arguments: `(len_out)`, a user pointer the region's byte length is
     /// written to. Returns the mapped base address (read-write, never
@@ -3024,7 +3037,7 @@ impl SyscallNumber {
     /// that cannot be written, and [`Errno::AlreadyExists`] once an earlier
     /// call claimed the share, whatever that call answered: a share is mapped
     /// by one call at most. No capability gates it — the spawn grant is the
-    /// authority — so it is the one memory call the drawing sandbox adds.
+    /// authority — so it is the one memory call a sandbox handed a share adds.
     /// Audited, as every grant of a window onto another process's memory is.
     pub const SHARE_MAP: Self = Self(150);
 
@@ -3238,16 +3251,67 @@ impl SyscallNumber {
     pub const CALL_AWAIT: Self = Self(167);
 
     /// Title a published volume: write the label its filesystem records
-    /// (`plans/DISK-IMAGES.md` DI23).
+    /// (`docs/src/filesystem/drives.md` §8).
     ///
     /// Arguments: a pointer to the encoded
-    /// [`crate::volume::VolumeRetitleRequest`] — the volume's identity and the
+    /// [`crate::volume::VolumeRetitleRequest`] — the volume's key and the
     /// title — and its length, at most
     /// [`crate::volume::VOLUME_RETITLE_MAX_LEN`]. The dispatcher checks no
-    /// capability: only the principal a disk image's volume was attached for
-    /// may retitle it, whatever authority anyone else holds, so the handler
-    /// decides once it knows the volume. Every decision is audited.
+    /// capability, since who may turns on the volume: a disk image's volume is
+    /// its owner's alone, a device's volume the mount authority's, and a
+    /// removable one also the user at the seat's where they may write its
+    /// root; a share's title is its server's. The handler decides once it
+    /// knows the volume, and every decision is audited.
     pub const VOLUME_RETITLE: Self = Self(168);
+
+    /// Answer for the writes a re-inserted volume holds while its device
+    /// cannot prove the medium the one they were made on: write them to it,
+    /// or discard them (`docs/src/filesystem/drives.md` §8).
+    ///
+    /// Arguments: a pointer to the encoded
+    /// [`crate::volume::VolumeReplayRequest`] — the volume's key and the
+    /// answer — and its exact length, [`crate::volume::VOLUME_REPLAY_LEN`].
+    /// The dispatcher requires [`crate::CapabilityId::DISPLAY`]; the handler
+    /// requires the caller to hold the seat for the user at it, so only the
+    /// desktop that put the question answers it, and only for a volume
+    /// awaiting an answer. Every decision is audited.
+    pub const VOLUME_REPLAY: Self = Self(169);
+
+    /// Read the kernel-attested [`Origin`](crate::Origin) of a live child the
+    /// calling process spawned.
+    ///
+    /// Arguments: `pid: i64` (as [`Self::SPAWN`] returned it), `out: *mut u8`
+    /// and `out_cap: usize` (at least [`crate::ORIGIN_WIRE_LEN`]). Returns the
+    /// origin's byte length, the origin written little-endian to `out` from the
+    /// child's own kernel-held record — with no app identity or capabilities
+    /// until its program is verified. A parent holds its child's pid until it
+    /// reaps it, so the answer is never a later holder's. Every other pid, an
+    /// exited child's included, is the same [`crate::Errno::NotFound`], and a
+    /// short buffer [`crate::Errno::BufferTooSmall`]. Unprivileged and
+    /// unaudited, like [`Self::SELF_ORIGIN`]: a parent learning who its own
+    /// child is gains no authority.
+    pub const CHILD_ORIGIN: Self = Self(170);
+
+    /// Grant the process instance the caller names the right to map a shared
+    /// region the caller holds: the sibling of [`Self::SHM_GRANT`] and
+    /// [`Self::SHM_GRANT_PEER`] for a recipient that binds no endpoint and has
+    /// no call in service, named as [`Self::FD_GRANT`] names its recipient.
+    ///
+    /// Arguments: the region id, then a user pointer to and the length of the
+    /// recipient's 16-byte attested [`crate::ProcId`], read from an `Origin`
+    /// ([`Self::CHILD_ORIGIN`], [`Self::CALL_PEER_ORIGIN`]). The caller's own
+    /// `Shared` grant for the region is checked before the recipient is read,
+    /// and the instance is resolved as the grant is minted, so one no live
+    /// process holds receives nothing, though a successor holds its number.
+    /// Returns the minted handle, which maps only through the recipient's
+    /// [`Self::SHM_MAP_FROM`] naming the caller, or `-errno`:
+    /// [`Errno::NotFound`] (no such region held, a released region, or no live
+    /// recipient), [`Errno::PermissionDenied`] (a region retired by its node's
+    /// removal), [`Errno::BufferTooSmall`] (a length short of an identity) and
+    /// [`Errno::LimitExceeded`] once the caller has [`SHM_GRANT_TO_MAX`]
+    /// regions with that recipient. Gated by [`crate::CapabilityId::SHM`];
+    /// audited.
+    pub const SHM_GRANT_TO: Self = Self(171);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -3568,6 +3632,9 @@ mod tests {
         assert_eq!(SyscallNumber::ARCHIVE_WRITE.as_u16(), 166);
         assert_eq!(SyscallNumber::CALL_AWAIT.as_u16(), 167);
         assert_eq!(SyscallNumber::VOLUME_RETITLE.as_u16(), 168);
+        assert_eq!(SyscallNumber::VOLUME_REPLAY.as_u16(), 169);
+        assert_eq!(SyscallNumber::CHILD_ORIGIN.as_u16(), 170);
+        assert_eq!(SyscallNumber::SHM_GRANT_TO.as_u16(), 171);
     }
 
     #[test]

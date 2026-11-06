@@ -4,7 +4,7 @@ sysmon — Speicher, Caches und Kernel-Last live beobachten
 
 ## SYNOPSIS
 
-`sysmon [-d Sek.Zehntel] [-h | -?]`
+`sysmon [-d secs.tenths] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -13,12 +13,12 @@ mit Speicher und CPU tut, vollständig über die Systeminformations-API
 gelesen — es gibt kein `/proc` zum Auslesen. Es zeigt den physischen
 Speicher und seine Zusammensetzung, den Kernel-Heap, das
 Speicherdruck-Band und dessen jüngste Historie, das Register der
-rückgewinnbaren Caches mit **Trefferquoten** je Klasse, die komprimierte
-`ramzip`-Stufe, die Summe des angehefteten Speichers, die
-Speichernutzung eingehängter Datenträger, die Last je CPU, die
-Kernel-Interrupt-Tabelle und eine Prozesszählung. Es bleibt unter
-absichtlicher Last benutzbar und ruht zwischen den Aktualisierungen im
-Leerlauf (die Lesung parkt; sie dreht nie leer).
+rückgewinnbaren Caches mit **Trefferquoten** je Klasse und einer
+Aufschlüsselung je Cache, die komprimierte `ramzip`-Stufe, die Summe des
+angehefteten Speichers, die Speichernutzung eingehängter Datenträger, die
+Last je CPU, die Kernel-Interrupt-Tabelle und eine Prozesszählung. Es
+bleibt unter absichtlicher Last benutzbar und ruht zwischen den
+Aktualisierungen im Leerlauf (die Lesung parkt; sie dreht nie leer).
 
 Beim Start heftet der Monitor seinen eigenen Speicher an (`mem_pin`, das
 `CAP_MEM_PIN` erfordert), damit er unter dem Druck, den er beobachtet, nie
@@ -48,13 +48,13 @@ Ein fester Zusammenfassungsblock geht dem Detailfeld voran. Jede Zeile ist
 links beschriftet, sodass sie ohne Farbe lesbar ist; Farbe ist nur
 Verstärkung.
 
-- **Titelzeile** — der Werkzeugname, die Systemlaufzeit (`up D days,
-  H:MM`), die drei Lastmittel (1/5/15 Minuten) und der Anheft-Zustand
-  (`[pinned]`, oder `[unpinned: <reason>]`, wenn das Anheften abgelehnt
-  wurde).
+- **Titelzeile** — der Werkzeugname, die Systemlaufzeit
+  (`up D days, H:MM`), die drei Lastmittel (1/5/15 Minuten) und der
+  Anheft-Zustand (`[pinned]`, oder `[unpinned: <reason>]`, wenn das
+  Anheften abgelehnt wurde).
 - **`Mem`** — der Speicherbalken (siehe die Balken-Legende), gefolgt von
-  den Werten belegt / gesamt (kompakte Einheiten `K`/`M`/`G`), dem
-  belegten Prozentsatz, der Größe des Kernel-Heaps und — falls von null
+  den Werten belegt / gesamt (kompakte Byte-Einheiten), dem belegten
+  Prozentsatz, der Größe des Kernel-Heaps und — falls von null
   verschieden — den Werten des komprimierten `ramzip`-Speichers und des
   angehefteten `pinned`-Speichers. Der Balken schrumpft, damit jeder Wert
   auf einer 80-Spalten-Zeile bleibt und nie abgeschnitten wird.
@@ -123,8 +123,11 @@ invertierte Spaltenüberschrift (inverse Darstellung, fett), sodass die
 Dies sind die Caches, die der Kernel zur Entlastung von Speicherdruck
 **ohne Datenverlust** zurückgeben kann: jeder Eintrag ist aus seiner
 kanonischen Quelle wiederherstellbar, sodass der Kernel ihn verwirft statt
-ihn auszulagern. Das Feld ist die direkte Antwort auf „tun die Caches ihre
-Arbeit?“: jede Zeile ist eine Rückgewinnungsklasse, über alle
+ihn auszulagern. Die Seite ist die direkte Antwort auf „tun die Caches
+ihre Arbeit?“, in zwei Tabellen: zuerst das Register je Klasse, dann die
+Aufschlüsselung je Cache dahinter.
+
+Jede Zeile der ersten Tabelle ist eine Rückgewinnungsklasse, über alle
 registrierten Caches aggregiert, und trägt ihre eigene **Trefferquote**.
 
 Spalten:
@@ -133,6 +136,14 @@ Spalten:
 - `entries` — derzeit für die Klasse gehaltene lebende Einträge.
 - `cached` — der residente Fußabdruck der Klasse: Eintragsnutzlast plus
   Buchführungsmetadaten je Eintrag, zusammen.
+- `self%` — der Anteil von `cached`, der **selbst gemeldet** statt vom
+  Kernel gemessen wurde: wie viel der Klassensumme auf Treu und Glauben
+  übernommen wird. Der Kernel misst nur die in ihm registrierten Caches,
+  daher wird ein Cache, den ein Userland-Prozess hält — Glyph-Atlanten,
+  Icon-Grafiken, Cursor —, nach dem gezählt, was dieser Prozess über sich
+  selbst meldet. `0%` heißt, dass die ganze Klassensumme beglaubigt ist;
+  `100%` heißt, dass nichts davon es ist. Für eine Klasse, die überhaupt
+  nichts hält, liest sie `-`, nie `0%`.
 - `hits` — Nachschlagevorgänge der Klasse, die seit dem Start aus dem Cache
   bedient wurden (der Cache vermied die kanonische Quelle).
 - `misses` — Nachschlagevorgänge der Klasse, die seit dem Start auf die
@@ -152,6 +163,14 @@ Spalten:
 
 Zahlen werden über 99 999 als `k`/`M`/`G`/`T` abgekürzt (dezimale Tausender,
 nicht KiB), damit eine Spalte sich nie verbreitert.
+
+Bytewerte werden in binären Einheiten abgekürzt: unter einem Kibibyte die
+genaue Zahl, darüber eine Nachkommastelle mit einem Suffix `K`, `M`, `G`,
+`T`, `P` oder `E` (`1.5K`, `986.2M`, `200.0T`). Die Leiter reicht bis zu
+Exbibytes, daher ist der breiteste Wert, den eine 64-Bit-Bytezahl ergeben
+kann, sieben Zeichen lang, und kein Wert wächst je über seine Spalte
+hinaus — eine Größe lässt sich nicht kürzen wie ein Name, denn eine
+gekürzte Zahl ist eine falsche Zahl.
 
 Die Rückgewinnungsklassen, in der Reihenfolge, in der der Kernel sie unter
 Druck zurückgewinnt (die erstgenannte wird zuerst verworfen, sodass ein
@@ -189,6 +208,50 @@ Cache weiter unten in der Liste am längsten überlebt):
   fassungen): durch die Wiederherstellungslatenz gerechtfertigt, daher am
   längsten bewahrt.
 
+### caches — die Aufschlüsselung je Cache
+
+Unter der Klassentabelle steht eine Zeile je registriertem Cache-Register:
+die Antwort auf „die Klasse `disposable-ui` hält 12 MiB — *welche* Caches
+halten sie?“. Vom Kernel gemessene Register kommen zuerst, dann jene, die
+Prozesse für sich selbst gemeldet haben; die Summe der Zeilen einer Klasse
+ergibt genau die Zeile dieser Klasse oben.
+
+Spalten:
+
+- `cache` — die Bezeichnung des Caches. Eine für die Spalte zu lange
+  Bezeichnung verliert ihre *Mitte*, nie ein Ende: `font.client.glyphs`
+  liest sich als `font.cli~.glyphs`. Diese Namen sind durch Punkte
+  gegliedert, und meist ist es das letzte Glied, das zwei Caches eines
+  Namensraums unterscheidet, daher behält die Spalte beide Enden, und
+  `~` markiert, was sie weggelassen hat.
+- `owner` — der Prinzipal, dem der Speicher angerechnet wird: `kernel` für
+  ein Kernel-Subsystem, `vol:<id>` für einen Dateisystem-Datenträger,
+  `task:<id>` für eine Aufgabe, `seat:<id>` für eine Desktop-Sitzung,
+  `proc` für einen Userland-Prozess. Eine gemeldete Zeile hängt `@<pid>`
+  an, den meldenden Prozess. Ein für die Spalte zu langer Besitzer wird
+  wie eine Bezeichnung in der Mitte gekürzt (`task:1~551615`), sodass
+  eine verkürzte ID sichtbar unvollständig ist — wo eine stillschweigend
+  abgeschnittene wie ein anderer Besitzer wirken würde.
+- `origin` — woher die Werte stammen: `kernel` für ein Register, das der
+  Kernel misst, `self` für eines, das der haltende Prozess über sich selbst
+  gemeldet hat, `?` für eine Zeile, die der Dienst ohne Zuordnung ließ.
+- `class` — die Rückgewinnungsklasse, zu der jeder Eintrag dieses Caches
+  gehört.
+- `entries`, `cached`, `hit%` — wie in der Klassentabelle, für diesen
+  einen Cache.
+
+Eine `self`-Zeile ist eine **Diagnose**, keine beglaubigte Messung: nichts
+außerhalb des haltenden Prozesses kann in seinen Cache sehen, und ein
+kompromittierter Prozess kann melden, was er will. Das Wort steht in der
+Zeile selbst, sodass es auch auf einer einfarbigen seriellen Konsole
+lesbar ist; die Hinweisfarbe verstärkt es nur. `self`-Zeilen sind als
+Behauptungen zu lesen, `kernel`-Zeilen als Messungen.
+
+Eine Maschine ohne registrierten Cache sagt das in einer Zeile, statt die
+Tabelle leer zu lassen — und eine *abgelehnte* Abfrage sagt stattdessen
+dies, sodass eine leere Tabelle nie mit „es gibt keine Caches“
+verwechselt werden kann.
+
 ### ramzip — die komprimierte Speicherstufe
 
 `ramzip` komprimiert kalte anonyme Seiten in einen kleineren Speicher im
@@ -219,13 +282,21 @@ RAM, statt sie auszulagern. Seine Abschnitte:
 
 Eine `df`-artige Zeile je eingehängtem Datenträger: Einhängepunkt,
 Dateisystemtyp, Gesamtgröße, belegt, verfügbar, Nutzungsprozentsatz und
-ein ASCII-Nutzungsbalken. Ein Datenträger, dessen Treiber keine Kapazität
-meldet, zeigt `capacity unknown` statt einer erfundenen Größe; ein
-überraschend entfernter oder in Wiederherstellungskonflikt geratener
-Datenträger wird in der Warndarstellung gezeichnet und markiert
-(`[unavailable-dirty]`, `[unavailable-lost]`, `[recovery-conflict]`). Es
-gibt in der API keine E-A-Durchsatzzähler je Gerät, daher sind dies
-ehrliche Kapazität und Nutzung, keine erfundenen Übertragungsraten.
+ein ASCII-Nutzungsbalken.
+
+Ein für seine Spalte zu langer Einhängepunkt verliert seine *Mitte*, nie
+ein Ende, genau wie eine Cache-Bezeichnung: `/Storage/backup-2024-vol1`
+liest sich als `/Storage/b~2024-vol1`, sodass zwei nebeneinander
+abgelegte Datenträger weiterhin an dem letzten Glied zu unterscheiden
+sind, das sie unterscheidet.
+
+Ein Datenträger, dessen Treiber keine Kapazität meldet, zeigt
+`capacity unknown` statt einer erfundenen Größe; ein überraschend
+entfernter oder in Wiederherstellungskonflikt geratener Datenträger wird
+in der Warndarstellung gezeichnet und markiert (`[unavailable-dirty]`,
+`[unavailable-lost]`, `[recovery-conflict]`). Es gibt in der API keine
+E-A-Durchsatzzähler je Gerät, daher sind dies ehrliche Kapazität und
+Nutzung, keine erfundenen Übertragungsraten.
 
 ### cpu — Last je CPU
 
@@ -252,7 +323,8 @@ ist nur die Zählungszusammenfassung.
 ### Fähigkeiten
 
 Jede Zahl reist über die Systeminformations-API. Die kernelweiten
-Statistikabfragen (Speicher, Druck, Caches, `ramzip`, Last je CPU) brauchen
+Statistikabfragen (Speicher, Druck, die Cache-Klassen und die
+Aufschlüsselung je Cache, `ramzip`, Last je CPU) brauchen
 `CAP_SYSINFO_KERNEL`; das Feld der Interrupt-Leitungen braucht
 `CAP_SYSINFO_HW`; die Zählung aller Prozesse braucht `CAP_SYSINFO_GLOBAL`.
 Ein Aufrufer ohne eine sieht die Ablehnung jenes Feldes ausbuchstabiert —

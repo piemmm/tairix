@@ -24,12 +24,13 @@
 //! Keyboard input is modelled alongside the pointer by [`KeyInput`]: the
 //! *desktop-level* key event the window manager delivers to the focused
 //! surface — a produced [`KeyValue`] (a Unicode character, or a named
-//! non-character key) plus the [`Modifiers`] held while it was produced. As
-//! with the pointer, this is **not** the device-level report: turning raw
-//! platform keycodes and a keyboard layout into a produced character is policy
-//! that lives above the driver, not a second copy of the same data.
-//! [`KeyInput::from_bytes`] validates every field and fails closed on
-//! untrusted input.
+//! non-character key), the [`Modifiers`] held while it was produced, and the
+//! [`PhysicalKey`] it was typed on, which no layout changes, so a binding made
+//! by position holds under any layout. As with the pointer, this is **not**
+//! the device-level report: turning raw platform keycodes and a keyboard layout
+//! into a produced character is policy that lives above the driver, not a
+//! second copy of the same data. [`KeyInput::from_bytes`] validates every field
+//! and fails closed on untrusted input.
 //!
 //! # Relationship to the driver input ABI
 //!
@@ -303,11 +304,11 @@ impl PointerInput {
                 // the device codes 0-based from the base; `from_code`
                 // keeps the closed set authoritative.
                 let button = PointerButtonCode::from_code(offset + 1).ok()?;
-                match event.value {
-                    1 => Some(Self::Pressed(button)),
-                    0 => Some(Self::Released(button)),
-                    _ => None,
-                }
+                Some(if event.key_edge()? {
+                    Self::Pressed(button)
+                } else {
+                    Self::Released(button)
+                })
             }
             InputEventKind::Scroll => match event.code {
                 AXIS_X => Some(Self::Scrolled {
@@ -567,6 +568,73 @@ impl NamedKeyCode {
     }
 }
 
+/// Where a key sits on the keyboard, whatever the layout makes of it: its
+/// usage ID on the Keyboard/Keypad page (`0x07`) of the USB HID Usage Tables.
+///
+/// USB and I2C keyboards report these usages natively, and every other
+/// keyboard producer maps its own codes onto them, so a binding made by
+/// position — a system chord — holds under any layout. Only
+/// [`UNKNOWN`](Self::UNKNOWN) or a usage the page assigns a key is
+/// representable.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct PhysicalKey(u16);
+
+impl PhysicalKey {
+    /// A key its producer could not name, which matches no binding.
+    pub const UNKNOWN: Self = Self(0x00);
+    /// The `A` key.
+    pub const A: Self = Self(0x04);
+    /// The main block's `3` key.
+    pub const DIGIT_3: Self = Self(0x20);
+    /// The main block's `4` key.
+    pub const DIGIT_4: Self = Self(0x21);
+    /// The main block's `5` key.
+    pub const DIGIT_5: Self = Self(0x22);
+    /// The Escape key.
+    pub const ESCAPE: Self = Self(0x29);
+    /// The space bar.
+    pub const SPACE: Self = Self(0x2C);
+    /// The Caps Lock key.
+    pub const CAPS_LOCK: Self = Self(0x39);
+    /// The keypad's Num Lock key.
+    pub const NUM_LOCK: Self = Self(0x53);
+    /// The left Control key.
+    pub const LEFT_CTRL: Self = Self(0xE0);
+    /// The left Shift key.
+    pub const LEFT_SHIFT: Self = Self(0xE1);
+    /// The left Alt key.
+    pub const LEFT_ALT: Self = Self(0xE2);
+    /// The left GUI key: Meta, marked with its maker's logo on a PC keyboard
+    /// and Command on a Mac one.
+    pub const LEFT_GUI: Self = Self(0xE3);
+    /// The right Control key.
+    pub const RIGHT_CTRL: Self = Self(0xE4);
+    /// The right Shift key.
+    pub const RIGHT_SHIFT: Self = Self(0xE5);
+    /// The right Alt key.
+    pub const RIGHT_ALT: Self = Self(0xE6);
+    /// The right GUI key.
+    pub const RIGHT_GUI: Self = Self(0xE7);
+
+    /// The key HID usage `usage` names, or [`UNKNOWN`](Self::UNKNOWN) where the
+    /// page assigns it none: no event and the three error codes
+    /// (`0x00..=0x03`), the reserved runs `0xA5..=0xAF` and `0xDE..=0xDF`, and
+    /// everything past Right GUI.
+    #[must_use]
+    pub const fn from_usage(usage: u16) -> Self {
+        match usage {
+            0x04..=0xA4 | 0xB0..=0xDD | 0xE0..=0xE7 => Self(usage),
+            _ => Self::UNKNOWN,
+        }
+    }
+
+    /// The key's HID usage, `0` for [`UNKNOWN`](Self::UNKNOWN).
+    #[must_use]
+    pub const fn usage(self) -> u16 {
+        self.0
+    }
+}
+
 /// The key a [`KeyInput`] names: either a produced character or a named
 /// non-character key.
 ///
@@ -585,8 +653,9 @@ pub enum KeyValue {
 /// A single decoded keyboard input event.
 ///
 /// The desktop-level counterpart of [`PointerInput`]: a key going down or
-/// coming up, the [`KeyValue`] it produced, and the [`Modifiers`] held at the
-/// time — or a bare change of the held modifiers, which names no key at all.
+/// coming up, the [`KeyValue`] it produced, the [`Modifiers`] held at the time
+/// and the [`PhysicalKey`] it was typed on — or a bare change of the held
+/// modifiers, which names no key at all.
 /// [`from_bytes`](Self::from_bytes) is the only way to build one from
 /// untrusted bytes and validates the whole record before returning it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -597,6 +666,8 @@ pub enum KeyInput {
         key: KeyValue,
         /// The modifiers held while it was pressed.
         modifiers: Modifiers,
+        /// Where the key sits on the keyboard.
+        physical: PhysicalKey,
     },
     /// A key came up.
     Released {
@@ -604,6 +675,8 @@ pub enum KeyInput {
         key: KeyValue,
         /// The modifiers held while it was released.
         modifiers: Modifiers,
+        /// Where the key sits on the keyboard.
+        physical: PhysicalKey,
     },
     /// The set of held modifiers changed, and no key was produced.
     ///
@@ -642,6 +715,16 @@ impl KeyInput {
         }
     }
 
+    /// Where this event's key sits on the keyboard, or `None` for a bare
+    /// modifier change, which names no key.
+    #[must_use]
+    pub const fn physical(&self) -> Option<PhysicalKey> {
+        match *self {
+            Self::Pressed { physical, .. } | Self::Released { physical, .. } => Some(physical),
+            Self::ModifiersChanged { .. } => None,
+        }
+    }
+
     /// Encode `self` into its little-endian wire representation.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -665,23 +748,25 @@ impl KeyInput {
         put_u16(&mut out, 10, class);
         put_u32(&mut out, 12, codepoint);
         put_u16(&mut out, 16, named);
-        // bytes 18..20 reserved, already zero.
+        let physical = self.physical().unwrap_or(PhysicalKey::UNKNOWN);
+        put_u16(&mut out, 18, physical.usage());
         out
     }
 
     /// Decode `bytes` into a [`KeyInput`].
     ///
     /// Every field is validated; an invalid record is refused rather than
-    /// interpreted (fail closed on untrusted
-    /// input).
+    /// interpreted. A physical key the page assigns no key reads as
+    /// [`PhysicalKey::UNKNOWN`] rather than refusing an edge that still
+    /// carries what it typed.
     ///
     /// # Errors
     ///
     /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
-    /// * [`Errno::BadMagic`] if the magic word does not match, if the reserved
-    ///   field is non-zero, or if the unused key field for the record's class
-    ///   is non-zero (a named code on a character record, a codepoint on a
-    ///   named record, or any key field at all on a modifier-change record).
+    /// * [`Errno::BadMagic`] if the magic word does not match, or if a key
+    ///   field the record does not use is non-zero (a named code on a
+    ///   character record, a codepoint on a named record, or any key field at
+    ///   all, the physical key among them, on a modifier-change record).
     /// * [`Errno::AbiVersionUnsupported`] if `version` is not
     ///   [`crate::ABI_VERSION_CURRENT`].
     /// * [`Errno::OutOfRange`] if `kind`, `key_class`, the modifier bits, the
@@ -697,19 +782,17 @@ impl KeyInput {
         if u32::from(read_u16(bytes, 4)) != crate::ABI_VERSION_CURRENT {
             return Err(Errno::AbiVersionUnsupported);
         }
-        if read_u16(bytes, 18) != 0 {
-            return Err(Errno::BadMagic);
-        }
         let kind = read_u16(bytes, 6);
         let modifiers = Modifiers::from_bits(read_u16(bytes, 8))?;
         let class = read_u16(bytes, 10);
         let codepoint = read_u32(bytes, 12);
         let named = read_u16(bytes, 16);
+        let usage = read_u16(bytes, 18);
         if kind == KIND_MODIFIERS_CHANGED {
             // A modifier change names no key, so an all-zero key field is its
             // only spelling; a dirty one is refused rather than read as a NUL
             // character.
-            if class != 0 || codepoint != 0 || named != 0 {
+            if class != 0 || codepoint != 0 || named != 0 || usage != 0 {
                 return Err(Errno::BadMagic);
             }
             return Ok(Self::ModifiersChanged { modifiers });
@@ -729,9 +812,18 @@ impl KeyInput {
             }
             _ => return Err(Errno::OutOfRange),
         };
+        let physical = PhysicalKey::from_usage(usage);
         match kind {
-            KIND_KEY_PRESSED => Ok(Self::Pressed { key, modifiers }),
-            KIND_KEY_RELEASED => Ok(Self::Released { key, modifiers }),
+            KIND_KEY_PRESSED => Ok(Self::Pressed {
+                key,
+                modifiers,
+                physical,
+            }),
+            KIND_KEY_RELEASED => Ok(Self::Released {
+                key,
+                modifiers,
+                physical,
+            }),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -1011,7 +1103,7 @@ mod tests {
     }
 
     use super::{
-        ClickDebounce, KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode,
+        ClickDebounce, KeyInput, KeyValue, Modifiers, NamedKeyCode, PhysicalKey, PointerButtonCode,
         PointerInput, TimedPointer, BUTTON_NONE, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC,
         KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MODIFIERS_CHANGED, KIND_MOVED_BY, KIND_PRESSED,
         KIND_RELEASED, KIND_SCROLLED, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, POINTER_INPUT_MAGIC,
@@ -1316,6 +1408,7 @@ mod tests {
                 ctrl: true,
                 ..Modifiers::default()
             },
+            physical: PhysicalKey::from_usage(0x14),
         };
         let decoded = KeyInput::from_bytes(&event.to_le_bytes()).expect("valid record");
         assert_eq!(decoded, event);
@@ -1336,6 +1429,7 @@ mod tests {
                 KeyInput::Pressed {
                     key: KeyValue::Named(code),
                     modifiers: Modifiers::default(),
+                    physical: PhysicalKey::UNKNOWN,
                 },
                 KeyInput::Released {
                     key: KeyValue::Named(code),
@@ -1344,6 +1438,7 @@ mod tests {
                         meta: true,
                         ..Modifiers::default()
                     },
+                    physical: PhysicalKey::ESCAPE,
                 },
             ] {
                 let decoded = KeyInput::from_bytes(&event.to_le_bytes()).expect("valid record");
@@ -1357,6 +1452,7 @@ mod tests {
         let event = KeyInput::Pressed {
             key: KeyValue::Char('é'),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::UNKNOWN,
         };
         let decoded = KeyInput::from_bytes(&event.to_le_bytes()).expect("valid record");
         assert_eq!(decoded.key(), Some(KeyValue::Char('é')));
@@ -1376,6 +1472,7 @@ mod tests {
         let decoded = KeyInput::from_bytes(&bytes).expect("valid record");
         assert_eq!(decoded, event);
         assert_eq!(decoded.key(), None);
+        assert_eq!(decoded.physical(), None);
         assert!(decoded.modifiers().shift && decoded.modifiers().meta);
         assert!(!decoded.modifiers().ctrl && !decoded.modifiers().alt);
     }
@@ -1393,7 +1490,7 @@ mod tests {
 
     #[test]
     fn modifier_change_rejects_a_dirty_key_field() {
-        for offset in [10usize, 12, 16] {
+        for offset in [10usize, 12, 16, 18, 19] {
             let mut bytes = KeyInput::ModifiersChanged {
                 modifiers: Modifiers::default(),
             }
@@ -1417,6 +1514,7 @@ mod tests {
         let mut bytes = KeyInput::Pressed {
             key: KeyValue::Char('a'),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::A,
         }
         .to_le_bytes();
         bytes[0] ^= 0xFF;
@@ -1428,6 +1526,7 @@ mod tests {
         let mut bytes = KeyInput::Pressed {
             key: KeyValue::Char('a'),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::A,
         }
         .to_le_bytes();
         bytes[4] = 99;
@@ -1438,14 +1537,63 @@ mod tests {
     }
 
     #[test]
-    fn key_rejects_nonzero_reserved() {
-        let mut bytes = KeyInput::Pressed {
-            key: KeyValue::Char('a'),
-            modifiers: Modifiers::default(),
+    fn a_key_edge_round_trips_its_physical_key() {
+        let chord = Modifiers {
+            shift: true,
+            meta: true,
+            ..Modifiers::default()
+        };
+        for event in [
+            KeyInput::Pressed {
+                key: KeyValue::Char('#'),
+                modifiers: chord,
+                physical: PhysicalKey::DIGIT_3,
+            },
+            KeyInput::Released {
+                key: KeyValue::Named(NamedKeyCode::Escape),
+                modifiers: Modifiers::default(),
+                physical: PhysicalKey::ESCAPE,
+            },
+        ] {
+            let bytes = event.to_le_bytes();
+            let usage = event.physical().map(PhysicalKey::usage);
+            assert_eq!(Some(read_u16(&bytes, 18)), usage);
+            assert_eq!(KeyInput::from_bytes(&bytes), Ok(event));
         }
-        .to_le_bytes();
-        bytes[18] = 1;
-        assert_eq!(KeyInput::from_bytes(&bytes), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn a_physical_key_the_page_assigns_no_key_reads_as_unknown() {
+        // No event, `ErrorRollOver`, a reserved run, past Right GUI: the edge
+        // is still delivered, its key unnamed.
+        for usage in [0x0000u16, 0x0001, 0x00A5, 0x00DF, 0x00E8, 0xFFFF] {
+            let mut bytes = KeyInput::Pressed {
+                key: KeyValue::Char('a'),
+                modifiers: Modifiers::default(),
+                physical: PhysicalKey::A,
+            }
+            .to_le_bytes();
+            bytes[18..20].copy_from_slice(&usage.to_le_bytes());
+            let decoded = KeyInput::from_bytes(&bytes).expect("delivered");
+            assert_eq!(decoded.physical(), Some(PhysicalKey::UNKNOWN));
+            assert_eq!(decoded.key(), Some(KeyValue::Char('a')));
+        }
+    }
+
+    #[test]
+    fn a_physical_key_keeps_the_usages_the_page_assigns_a_key_and_no_other() {
+        for usage in [0x04u16, 0x20, 0xA4, 0xB0, 0xDD, 0xE0, 0xE7] {
+            assert_eq!(PhysicalKey::from_usage(usage).usage(), usage);
+        }
+        for usage in [
+            0x00u16, 0x01, 0x03, 0xA5, 0xAF, 0xDE, 0xDF, 0xE8, 0x0100, 0xFFFF,
+        ] {
+            assert_eq!(
+                PhysicalKey::from_usage(usage),
+                PhysicalKey::UNKNOWN,
+                "usage {usage:#06x}"
+            );
+        }
     }
 
     #[test]
@@ -1453,6 +1601,7 @@ mod tests {
         let mut bytes = KeyInput::Pressed {
             key: KeyValue::Char('a'),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::A,
         }
         .to_le_bytes();
         bytes[6] = 9;
@@ -1464,6 +1613,7 @@ mod tests {
         let mut bytes = KeyInput::Pressed {
             key: KeyValue::Char('a'),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::A,
         }
         .to_le_bytes();
         // The high bits of the modifier field are not defined.
@@ -1476,6 +1626,7 @@ mod tests {
         let mut bytes = KeyInput::Pressed {
             key: KeyValue::Char('a'),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::A,
         }
         .to_le_bytes();
         bytes[10] = 9;
@@ -1489,6 +1640,7 @@ mod tests {
         let mut bytes = KeyInput::Pressed {
             key: KeyValue::Char('a'),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::A,
         }
         .to_le_bytes();
         // Enter's wire code is 1.
@@ -1501,6 +1653,7 @@ mod tests {
         let mut bytes = KeyInput::Pressed {
             key: KeyValue::Named(NamedKeyCode::Enter),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::from_usage(0x28),
         }
         .to_le_bytes();
         bytes[12] = 1;
@@ -1512,6 +1665,7 @@ mod tests {
         let mut bytes = KeyInput::Pressed {
             key: KeyValue::Named(NamedKeyCode::Enter),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::from_usage(0x28),
         }
         .to_le_bytes();
         bytes[16] = 99;
@@ -1524,6 +1678,7 @@ mod tests {
         let mut bytes = KeyInput::Pressed {
             key: KeyValue::Char('a'),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::A,
         }
         .to_le_bytes();
         bytes[12] = 0x00;
@@ -1541,6 +1696,10 @@ mod tests {
         assert_eq!((MOD_SHIFT, MOD_CTRL, MOD_ALT, MOD_META), (1, 2, 4, 8));
         assert_eq!(NamedKeyCode::Enter.code(), 1);
         assert_eq!(NamedKeyCode::F12.code(), 26);
+        assert_eq!(PhysicalKey::UNKNOWN.usage(), 0);
+        assert_eq!(PhysicalKey::A.usage(), 0x04);
+        assert_eq!(PhysicalKey::DIGIT_3.usage(), 0x20);
+        assert_eq!(PhysicalKey::LEFT_GUI.usage(), 0xE3);
     }
 
     #[test]

@@ -2,8 +2,6 @@
 //! back from. The grid's own behaviour is the shared control's, tested with
 //! it.
 
-use tairix_theme::Theme;
-
 use crate::scheme::{ColorScheme, Scheme};
 use crate::swatch::{adopt, apply, colour, grid_for, COLUMNS, WELL_COUNT};
 use tairix_colour::Rgb;
@@ -16,7 +14,7 @@ fn scheme() -> ColorScheme {
 fn a_grid_read_back_onto_a_fresh_scheme_reproduces_it() {
     let original = scheme();
     let grid = grid_for(&original);
-    let mut round_tripped = ColorScheme::from_theme(&Theme::dark());
+    let mut round_tripped = Scheme::System.palette().expect("System has a palette");
     apply(&grid, &mut round_tripped);
     assert_eq!(round_tripped, original);
     assert_eq!((grid.len(), grid.columns()), (WELL_COUNT, COLUMNS));

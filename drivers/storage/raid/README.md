@@ -43,7 +43,8 @@ one node and the composer starts whether or not any array member exists yet.
    Sending to the rendezvous also requires `CAP_SHM`, which every genuine
    offer's window delegation needs.
 3. For each admitted offer it maps the window by that handle, connects a
-   read/write block client, and **reads that device's own superblock itself**.
+   read/write block client, asks the identity the device states, and **reads
+   that device's own superblock itself**.
    A member node says only "look here": which array a device belongs to, which
    slot it fills and how current it is are read off the disk, never taken from
    the offering agent.
@@ -214,6 +215,15 @@ loudly, so they are stated in one place.
   size the disks happen to have — publishing a device shorter than the one a
   filesystem was made on would leave every address past the end silently
   unreachable.
+- **An array proves itself by its members, or not at all.** It answers the
+  block service's identity request with a fingerprint of its own identifier
+  and of what each slot's device stated when its client was connected, slot by
+  slot (`OwnedRaidArray::composed_identity`), recomposed whenever a slot gains
+  or loses a device — and with none while any slot holds no device or one that
+  states none. A volume whose writes were held across a composer restart is
+  therefore replayed onto the array only when the same devices fill the same
+  slots again; another device in any slot, or the same devices in another
+  array, prove nothing, and the writes wait for an answer.
 
 A member the authoritative shape does not place — one contradicting the array's
 width, or losing a slot contest to a fresher copy — is held unused rather than
@@ -345,9 +355,13 @@ already recorded as behind does not move the array's generation again.
 
 The live array is proven the same way (`src/runtime/tests.rs`): it answers block
 requests through the shared serve engine, refuses a malformed one without
-touching the array's health, reports the ids it was published on, and places a
-returning member past its own metadata exactly once while refusing a slot
-outside the array or a device too small for its own metadata. Its maintenance is
+touching the array's health, reports the ids it was published on, states the
+identity its members compose — the same after a restart over the same members,
+another with a member replaced, the members swapped or in another array, and
+none while a member states none, a slot holds no device, or a member has been
+taken out — and places a returning member past its own metadata exactly once
+while refusing a slot outside the array or a device too small for its own
+metadata. Its maintenance is
 proven end to end against real member disks: an array verified recently enough
 asks for no work at all yet still says when to look again; an array of unknown
 history verifies itself and the completed pass reaches its members' records; a
@@ -362,8 +376,9 @@ builds no runtime; a member whose agent exited is faulted and retired so its
 returning disk can take the slot, while a stripe keeps its departed member.
 
 A member's window is lent to one client at a time, dropping the client returns
-it, and a departed member's client refuses every transfer without reaching the
-device (`src/member/tests.rs`).
+it, a member device states what its device stated when its client was
+connected, and a departed member's client refuses every transfer without
+reaching the device (`src/member/tests.rs`).
 
 An offer is vetted against what the kernel attests (`src/intake/tests.rs`): a
 genuine member or candidate offer is admitted, while one from a task no member

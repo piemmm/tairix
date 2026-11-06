@@ -63,7 +63,7 @@ fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
 fn task_with(task_id: u64, caps: &[CapabilityId]) -> TaskCapabilities {
     let sink = SyncSink::new();
     let set = caps_of(caps);
-    TaskCapabilities::derive(ProcessId(task_id), UserId(1), set, set, &sink)
+    TaskCapabilities::derive(ProcessId(task_id), UserId(1), set, set, &sink).expect("derived")
 }
 
 /// A send racing with `destroy()` must either succeed *or* fail
@@ -103,7 +103,13 @@ fn destroy_during_in_flight_send_never_leaks_a_message() {
                 while !start.load(Ordering::Acquire) {
                     std::hint::spin_loop();
                 }
-                port.send(&sender_task, b"race", tairix_abi::RLIMIT_INFINITY, &*sink)
+                port.send(
+                    &sender_task,
+                    0,
+                    b"race",
+                    tairix_abi::RLIMIT_INFINITY,
+                    &*sink,
+                )
             })
         };
 
@@ -247,7 +253,7 @@ fn end_to_end_port_shmem_and_notification() {
     .unwrap();
 
     let client = task_with(2, &[CapabilityId::NET_RAW]);
-    port.send(&client, b"ping", tairix_abi::RLIMIT_INFINITY, &sink)
+    port.send(&client, 0, b"ping", tairix_abi::RLIMIT_INFINITY, &sink)
         .unwrap();
     let mapping = shm.map(&client, &sink).unwrap();
     mapping
@@ -261,7 +267,7 @@ fn end_to_end_port_shmem_and_notification() {
         )
         .unwrap();
 
-    assert_eq!(port.recv().unwrap().payload.as_bytes(), b"ping");
+    assert_eq!(port.recv().unwrap().0.payload.as_bytes(), b"ping");
     assert_eq!(mapping.as_bytes().unwrap(), b"0123456789abcdef".to_vec());
     assert_eq!(
         channel.take_pending(),
@@ -272,7 +278,7 @@ fn end_to_end_port_shmem_and_notification() {
     port.destroy(&sink);
     shm.revoke(&sink);
     assert_eq!(
-        port.send(&client, b"x", tairix_abi::RLIMIT_INFINITY, &sink),
+        port.send(&client, 0, b"x", tairix_abi::RLIMIT_INFINITY, &sink),
         Err(Errno::NotFound)
     );
     assert!(mapping.as_bytes().is_none());

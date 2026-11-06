@@ -31,11 +31,11 @@ use crate::opus::{Layout, Multistream, MAX_PACKET_SAMPLES, RATE, SILENT};
 use crate::{comment, vorbis, DecodeError, DecodeLimits, Encoding, SoundFormat, SoundInfo};
 
 /// The identification and comment headers open with these.
-pub(super) const HEAD_SIGNATURE: &[u8; 8] = b"OpusHead";
+pub(crate) const HEAD_SIGNATURE: &[u8; 8] = b"OpusHead";
 const TAGS_SIGNATURE: &[u8; 8] = b"OpusTags";
 /// The identification header before its mapping table, and the table's
 /// stream and coupled counts.
-const HEAD_LEN: usize = 19;
+pub(crate) const HEAD_LEN: usize = 19;
 /// The most bytes an audio packet may take: RFC 7845's bound for the channel
 /// mapping families read here, past which a packet can only be padding.
 const MAX_PACKET_LEN: usize = 61_440;
@@ -46,16 +46,17 @@ const PRE_ROLL: u64 = 7680;
 
 /// The identification header's fields.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct Head {
-    pub(super) layout: Layout,
-    pub(super) pre_skip: u64,
+pub(crate) struct Head {
+    pub(crate) layout: Layout,
+    pub(crate) pre_skip: u64,
     /// The output gain, Q7.8 dB.
-    pub(super) gain: i16,
-    pub(super) family: u8,
+    pub(crate) gain: i16,
+    pub(crate) family: u8,
 }
 
-/// Parse an identification header (RFC 7845, section 5.1).
-pub(super) fn parse_head(packet: &[u8]) -> Result<Head, DecodeError> {
+/// Parse an identification header (RFC 7845, section 5.1): Ogg's first
+/// packet, and the codec private data of a Matroska or `WebM` track.
+pub(crate) fn parse_head(packet: &[u8]) -> Result<Head, DecodeError> {
     let malformed = DecodeError::OpusBadIdentification;
     let fields = packet
         .get(..HEAD_LEN)
@@ -103,7 +104,7 @@ pub(super) fn parse_head(packet: &[u8]) -> Result<Head, DecodeError> {
 
 /// The output's channel positions: family 0's mono or stereo, family 1's
 /// Vorbis order; any other family's channels have no positions to play.
-fn channel_map(head: &Head, limits: &DecodeLimits) -> Result<ChannelMap, DecodeError> {
+pub(crate) fn channel_map(head: &Head, limits: &DecodeLimits) -> Result<ChannelMap, DecodeError> {
     let channels =
         u8::try_from(head.layout.channels).map_err(|_| DecodeError::ChannelsExceedLimit)?;
     let decoded = head.layout.streams + head.layout.coupled;
@@ -122,7 +123,7 @@ fn channel_map(head: &Head, limits: &DecodeLimits) -> Result<ChannelMap, DecodeE
     clippy::cast_possible_truncation,
     reason = "rounded to single precision once, as the reference's float build rounds it"
 )]
-fn gain_factor(gain: i16) -> f32 {
+pub(crate) fn gain_factor(gain: i16) -> f32 {
     const LOG2_10_OVER_5120: f32 = 6.488_141e-4;
     let exponent = LOG2_10_OVER_5120 * f32::from(gain);
     tairix_util::mathf::exp(core::f64::consts::LN_2 * f64::from(exponent)) as f32

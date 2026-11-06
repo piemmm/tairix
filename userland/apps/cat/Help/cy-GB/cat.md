@@ -12,15 +12,18 @@ Mae'n darllen pob operand ffeil yn ei drefn ac yn ysgrifennu ei feitiau
 i'r allbwn safonol. Mae'r operand `-` yn enwi'r mewnbwn safonol, a heb
 operand y mewnbwn safonol yw'r unig ffynhonnell.
 
-Gall operand hefyd fod yn gyfeiriad adnodd teipiedig fel `sys:random`:
-caiff ei agor drwy ddatryswr adnoddau'r system (gyda gwiriad galluoedd)
-yn hytrach na'r system ffeiliau — mae `cat sys:random` yn ffrydio
-beitiau ar hap. Mae cyfeiriad `info:`, `state:` neu `stats:` yn enwi
-gwerth system teipiedig yn hytrach na ffrwd; caiff ei ddarllen drwy
-wasanaeth gwybodaeth y system, felly mae `cat info:mem/physical` yn
-argraffu'r gwerth hwnnw, a gwrthodir darlleniad nad yw'r cyfrif â hawl
-iddo gan enwi'r gallu sydd ei angen. Mae cyfeiriad camffurfiedig mewn
-gofod enwau cofrestredig yn wall, byth yn enw ffeil.
+Gall operand hefyd fod yn gyfeiriad adnodd teipiedig: caiff operand
+perthynol y mae cydran gyntaf ei lwybr yn ofod enwau cofrestredig, fel
+`sys:random`, ei agor drwy ddatryswr adnoddau'r system (gyda gwiriad
+galluoedd) yn hytrach na'r system ffeiliau, felly mae `cat sys:random`
+yn ffrydio beitiau ar hap. Mae cyfeiriad `info:`, `state:` neu `stats:`
+yn enwi gwerth system teipiedig yn hytrach na ffrwd; caiff ei ddarllen
+drwy wasanaeth gwybodaeth y system, felly mae `cat info:mem/physical`
+yn argraffu'r gwerth hwnnw, a gwrthodir darlleniad nad yw'r cyfrif â
+hawl iddo gan enwi'r gallu sydd ei angen. Mae cyfeiriad camffurfiedig
+mewn gofod enwau cofrestredig yn wall, byth yn enw ffeil; mae ffeil ar
+ddisg y mae ei henw'n cynnwys `:` yn dal yn gyrraeddadwy fel `./name`
+neu pan gaiff ei dyfynnu.
 
 Gydag `-n` rhifir llinellau'r allbwn yn ddi-dor ar draws pob
 ffynhonnell, felly rhifir llinell sy'n pontio dwy ffynhonnell unwaith
@@ -60,6 +63,8 @@ hyd.
 ## EXAMPLES
 
 - `cat notes.txt` — ysgrifennu `notes.txt` i'r allbwn safonol.
+- `cat sys:random` — ffrydio beitiau o ffynhonnell hap y system
+  (diddiwedd; torrwch ar draws y gorchymyn i'w atal).
 - `cat a.txt - b.txt` — ysgrifennu `a.txt`, yna'r mewnbwn safonol, yna
   `b.txt`.
 - `cat -n log.txt` — rhifo pob llinell allbwn.

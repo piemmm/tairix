@@ -925,8 +925,9 @@ alternatives.
   runs before it, mirroring `resolve_library_icons`).
 
 The bounds are the format's, not capacities: `APP_MENU_ENTRY_MAX` is
-`FS_NAME_MAX` because the field's purpose is a name, and `APP_MENU_BUNDLE_MAX`
-is what a row record's one-byte length can state. The whole model still has to
+`FS_NAME_MAX` because the field's purpose is a name, and `ICON_PATH_MAX` — the
+one bound and type (`IconPath`) a row's bundle and a dragged item's own picture
+share — is what a one-byte length can state. The whole model still has to
 fit `APP_MENU_TEXT_BYTES`, so a builder asks what is left before adding a row
 rather than pushing and swallowing a refusal.
 

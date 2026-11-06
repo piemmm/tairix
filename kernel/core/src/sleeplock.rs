@@ -25,21 +25,30 @@
 //! a `lib/*` crate from depending on the kernel. So, unlike the spinning
 //! primitives, a sleeping lock cannot live in `lib/sync`: it reaches the
 //! scheduler through the installed [`WaitQueueArch`]
-//! hook (for the current CPU, the current task, and `unpark`) and the
-//! kernel's `reschedule_current` park primitive (to park the caller),
-//! exactly as the console-read and process-wait blocking backings do.
+//! hook (for the current CPU, the current task, and `unpark`) and the one
+//! park of the calling task ([`park_calling_task`]), exactly as the
+//! console-read and process-wait blocking backings do.
 //!
 //! # No lost wake-ups
 //!
 //! The acquire path closes the release/park race with the same discipline
-//! the other kernel waiters use: the contender **registers on the wait queue
+//! the other kernel waiters use: the contender **stands in the lock's line
 //! before it re-tests** the lock, so a release in the window between its
 //! failed fast-path attempt and its park cannot be missed — the releaser's
-//! wake finds the registered task, and the scheduler's wake-pending token
-//! turns an `unpark` that races a not-yet-committed park into a re-ready
-//! rather than a lost wake-up. Each woken contender re-tests and either
-//! acquires or parks again, so a wake meant for another contender is a
-//! harmless spurious wake.
+//! wake finds the task in line, and the scheduler's wake-pending token turns
+//! an `unpark` that races a not-yet-committed park into a re-ready rather
+//! than a lost wake-up. Each woken contender re-tests and either acquires or
+//! parks again, so a wake meant for another contender is a harmless spurious
+//! wake.
+//!
+//! # Waiting needs no heap
+//!
+//! An acquire cannot fail, and a lock is often contended exactly where memory
+//! is short — a filesystem writing back to make room. So a contender stands in
+//! line through the [`LineRow`] its thread was made with, and the line threads
+//! its rows through their own links: joining it allocates nothing. A line
+//! holds a share of every row in it, so a thread that dies waiting leaves its
+//! row there until a release reaps it.
 //!
 //! # No livelock
 //!
@@ -62,7 +71,7 @@
 //! # The uncontended path is two atomics
 //!
 //! Acquire and release are one compare-exchange each when nobody is waiting,
-//! and the wait queue is not touched at all. That matters because this lock
+//! and the line is not touched at all. That matters because this lock
 //! serialises *every* block-device operation on a shared disk
 //! (`crate::shared_block`), so a filesystem read walking a file pays one
 //! acquire/release per device operation — and a device operation served from
@@ -76,8 +85,7 @@
 //! the release makes that release take the wake path, and one that looks
 //! after it takes the lock and never parks. Keeping the
 //! "is anyone waiting?" answer in a separate structure would have needed the
-//! wait-queue lock (and a `BTreeMap` lookup) on every release to learn that
-//! nobody was.
+//! line's lock on every release to learn that nobody was.
 //!
 //! That holds for the fast path, which is itself a read-modify-write of the
 //! word and so cannot miss a bit set before it. It does **not** extend to the
@@ -88,18 +96,18 @@
 //! path therefore releases *before* it decides nobody is waiting, and reads
 //! the queue once more afterwards (`release_and_recheck`).
 
+use alloc::sync::{Arc, Weak};
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::panic::Location;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use tairix_kernel_sched_api::TaskId;
 use tairix_log::{Field, FieldValue, Level, Sink};
 use tairix_sync::SpinLock;
 
 use crate::audit::{emit, AuditEvent};
-use crate::dispatch_slot::RescheduleAction;
-use crate::kthread::reschedule_current;
-use crate::waitq::{wait_arch, Registration, WaitQueue, WaitQueueArch, LATE_WAKE_NS, NO_DEADLINE};
+use crate::waitq::{park_calling_task, wait_arch, WaitQueueArch, LATE_WAKE_NS};
 
 /// Lock-word bit: the lock is held.
 const LOCKED: u32 = 1 << 0;
@@ -140,11 +148,8 @@ pub struct SleepLock<T: ?Sized> {
     /// claimant that ran late can say so. Written before the
     /// [`Self::handoff`] publication and touched only on the contended path.
     handed: SpinLock<Handed>,
-    /// Contenders parked waiting for the holder to release. Reuses the one
-    /// kernel wait-queue definition (its register/wake/unpark bookkeeping is
-    /// tested in `crate::waitq`); this lock adds only the acquire/release
-    /// policy on top.
-    waiters: WaitQueue,
+    /// Contenders parked waiting for the holder to release, in arrival order.
+    waiters: Line,
     /// The protected value. Access is guarded by [`LOCKED`]: a live
     /// [`SleepGuard`] is proof of exclusive ownership.
     data: UnsafeCell<T>,
@@ -186,7 +191,7 @@ impl<T> SleepLock<T> {
                 at_ns: 0,
                 from: None,
             }),
-            waiters: WaitQueue::new(),
+            waiters: Line::new(),
             data: UnsafeCell::new(value),
         }
     }
@@ -253,8 +258,10 @@ impl<T: ?Sized> SleepLock<T> {
         }
         let asked_ns = crate::waitq::wait_now_ns();
         let mut wait = Wait::default();
-        let (guard, handed) = match current_task() {
-            Some(task) => self.wait_in_line(site, task, &mut park_current, &mut wait),
+        let (guard, handed) = match current_waiter() {
+            Some((task, row)) => {
+                self.wait_in_line(site, task, &row, &mut park_calling_task, &mut wait)
+            }
             None => (self.spin_unscheduled(site, &mut wait), None),
         };
         if let (Some(asked_ns), Some(now_ns)) = (asked_ns, crate::waitq::wait_now_ns()) {
@@ -295,22 +302,24 @@ impl<T: ?Sized> SleepLock<T> {
             .is_ok()
     }
 
-    /// Wait as `task` for the lock, a caller at `site`, until it owns it:
-    /// `park` gives the CPU up between looks and reports whether it parked.
+    /// Wait as `task`, standing in line with `row`, for the lock, a caller at
+    /// `site`, until it owns it: `park` gives the CPU up between looks and
+    /// reports whether it parked.
     ///
-    /// The task stays registered from before its first look until it owns
-    /// the lock, so a release that finds the registration can always hand the
-    /// lock to it, and a spurious wake keeps its place in line. Registering
-    /// before the look is what makes the release/park race lossless.
+    /// The task stands in line from before its first look until it owns the
+    /// lock, so a release that finds it there can always hand the lock to it,
+    /// and a spurious wake keeps its place. Joining before the look is what
+    /// makes the release/park race lossless.
     fn wait_in_line(
         &self,
         site: &'static Location<'static>,
-        task: u64,
+        task: TaskId,
+        row: &Arc<LineRow>,
         park: &mut dyn FnMut() -> bool,
         wait: &mut Wait,
     ) -> (SleepGuard<'_, T>, Option<Handed>) {
         wait.task = Some(task);
-        self.waiters.register(task, NO_DEADLINE);
+        self.waiters.join(row, task);
         let owned = loop {
             if self.take_or_contend() {
                 break (SleepGuard::new(self, site), None);
@@ -332,7 +341,7 @@ impl<T: ?Sized> SleepLock<T> {
                 wait.unhanded = wait.unhanded.saturating_add(1);
             }
         };
-        self.waiters.deregister(task);
+        self.waiters.leave(row);
         owned
     }
 
@@ -360,8 +369,8 @@ impl<T: ?Sized> SleepLock<T> {
     }
 
     /// Take the lock for a caller no scheduler can park: before the boot path
-    /// installs one, or outside any task. It is registered nowhere, so no
-    /// release waits on it.
+    /// installs one, or outside any task. It stands in no line, so no release
+    /// waits on it.
     fn spin_unscheduled(
         &self,
         site: &'static Location<'static>,
@@ -542,7 +551,7 @@ impl<T: ?Sized> SleepLock<T> {
     /// the release mirrors the contender's register-then-look: whichever of
     /// the two read-modify-writes on the word runs second observes the first.
     fn recheck_after_release(&self) -> bool {
-        if self.waiters.oldest_registration().is_none() {
+        if self.waiters.is_empty() {
             // Genuinely nobody, so the next release is one compare-exchange
             // again. A contender arriving after this look finds the lock bit
             // clear and takes the lock in its own. The bit carries no data,
@@ -591,21 +600,202 @@ struct Handed {
     from: Option<&'static Location<'static>>,
 }
 
-/// The task a scheduler has switched in on the calling CPU, or [`None`]
-/// before the boot path installs one, or outside any task.
-fn current_task() -> Option<u64> {
+/// The task a scheduler has switched in on the calling CPU and the row it
+/// stands in line with, or [`None`] before the boot path installs one, or
+/// outside any task.
+fn current_waiter() -> Option<(TaskId, Arc<LineRow>)> {
     let hook = wait_arch()?;
-    hook.current_task(hook.current_cpu()?)
+    let cpu = hook.current_cpu()?;
+    Some((hook.current_task(cpu)?, hook.line_row(cpu)?))
 }
 
-/// Park the calling task off the CPU it runs on now, reporting whether it
-/// parked. A waiter woken from one park may resume on another core, so the
-/// CPU is read afresh for each: parking through the core it left would
-/// suspend whatever task runs there instead.
-fn park_current() -> bool {
-    wait_arch()
-        .and_then(WaitQueueArch::current_cpu)
-        .is_some_and(|cpu| reschedule_current(cpu, RescheduleAction::Park))
+/// The room one thread's wait on a sleeping lock takes: its place in the
+/// lock's line, made with the thread so a contended acquire never needs the
+/// heap.
+///
+/// A thread waits on one lock at a time, so one row serves every lock it
+/// contends on. A line holds a share of each row standing in it, so the row
+/// of a thread that died waiting stays until the line reaps it.
+pub struct LineRow {
+    place: SpinLock<Place>,
+}
+
+impl LineRow {
+    /// A row standing in no line.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            place: SpinLock::new(Place {
+                task: None,
+                joins: 0,
+                prev: Weak::new(),
+                next: None,
+            }),
+        }
+    }
+}
+
+impl Default for LineRow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Where a row stands: in no line, or in one between its neighbours.
+struct Place {
+    /// The task waiting, while the row stands in a line.
+    task: Option<TaskId>,
+    /// How often the row has joined a line, so a designation names one stand
+    /// and never a later one.
+    joins: u64,
+    prev: Weak<LineRow>,
+    next: Option<Arc<LineRow>>,
+}
+
+/// A sleeping lock's waiters in arrival order, threaded through their rows.
+///
+/// Every link changes under the line's lock, and a row's own lock is taken
+/// only inside it, one row at a time, by the one line the row stands in.
+struct Line {
+    ends: SpinLock<Ends>,
+}
+
+/// A line's first and last rows.
+struct Ends {
+    first: Option<Arc<LineRow>>,
+    last: Weak<LineRow>,
+}
+
+/// One stand of a row in a line, named well enough that a decision taken
+/// about it cannot be applied to a later one: a waiter that left and joined
+/// again inside the window a release acts in is a new stand.
+struct Registration {
+    row: Arc<LineRow>,
+    task: TaskId,
+    joins: u64,
+}
+
+impl Registration {
+    /// The waiting task, which the handoff publishes ownership to.
+    const fn task(&self) -> TaskId {
+        self.task
+    }
+
+    /// Whether this is still the row's present stand.
+    fn stands(&self) -> bool {
+        let place = self.row.place.lock();
+        place.task.is_some() && place.joins == self.joins
+    }
+}
+
+impl Line {
+    const fn new() -> Self {
+        Self {
+            ends: SpinLock::new(Ends {
+                first: None,
+                last: Weak::new(),
+            }),
+        }
+    }
+
+    /// Stand `row` at the back as `task`'s; a row standing already stays
+    /// where it is.
+    fn join(&self, row: &Arc<LineRow>, task: TaskId) {
+        let mut ends = self.ends.lock();
+        {
+            let mut place = row.place.lock();
+            if place.task.is_some() {
+                return;
+            }
+            place.task = Some(task);
+            place.joins = place.joins.wrapping_add(1);
+            place.prev.clone_from(&ends.last);
+        }
+        match ends.last.upgrade() {
+            Some(last) => last.place.lock().next = Some(Arc::clone(row)),
+            None => ends.first = Some(Arc::clone(row)),
+        }
+        ends.last = Arc::downgrade(row);
+    }
+
+    /// Take `row` out if it stands here. Idempotent.
+    fn leave(&self, row: &Arc<LineRow>) {
+        Self::unlink(&mut self.ends.lock(), row);
+    }
+
+    /// Splice `row` out of the line `ends` bounds, unless it stands in none.
+    fn unlink(ends: &mut Ends, row: &LineRow) {
+        let (prev, next) = {
+            let mut place = row.place.lock();
+            if place.task.take().is_none() {
+                return;
+            }
+            (core::mem::take(&mut place.prev), place.next.take())
+        };
+        match prev.upgrade() {
+            Some(before) => before.place.lock().next.clone_from(&next),
+            None => ends.first.clone_from(&next),
+        }
+        match &next {
+            Some(after) => after.place.lock().prev = prev,
+            None => ends.last = prev,
+        }
+    }
+
+    /// The front row's stand, without taking it out. O(1).
+    fn oldest_registration(&self) -> Option<Registration> {
+        let ends = self.ends.lock();
+        let first = ends.first.as_ref()?;
+        let place = first.place.lock();
+        Some(Registration {
+            row: Arc::clone(first),
+            task: place.task?,
+            joins: place.joins,
+        })
+    }
+
+    /// Wake exactly the stand `reg`, reporting whether the wake landed.
+    ///
+    /// `false` covers three outcomes a caller transferring ownership need not
+    /// tell apart, because none of them is a successor: the stand is over, a
+    /// *newer* one of the same row stands in its place (its waiter went round
+    /// its own acquire loop), or the row still stands and the scheduler can
+    /// never run that task again. Only the last is reaped, and only under the
+    /// same identity check — removing a stand this designation was not taken
+    /// about is what strands a live waiter on a free lock. The `unpark` runs
+    /// with no lock held.
+    fn wake_registration(&self, arch: &dyn WaitQueueArch, reg: &Registration) -> bool {
+        if !reg.stands() {
+            return false;
+        }
+        if arch.unpark(reg.task()) {
+            return true;
+        }
+        let mut ends = self.ends.lock();
+        if reg.stands() {
+            Self::unlink(&mut ends, &reg.row);
+        }
+        false
+    }
+
+    /// Whether no row stands here.
+    fn is_empty(&self) -> bool {
+        self.ends.lock().first.is_none()
+    }
+}
+
+impl Drop for Ends {
+    /// Splice the rows out one at a time: each holds the next, so dropping
+    /// the first would drop a long line of them recursively.
+    fn drop(&mut self) {
+        let mut next = self.first.take();
+        while let Some(row) = next {
+            let mut place = row.place.lock();
+            place.task = None;
+            place.prev = Weak::new();
+            next = place.next.take();
+        }
+    }
 }
 
 /// How a contended acquire spent its wait: the task it waited as, how often
@@ -779,11 +969,15 @@ mod tests {
     use super::*;
 
     use alloc::vec::Vec;
-    use tairix_kernel_sched_api::TaskId;
 
     /// The site every test release hands the lock over from.
     fn releaser() -> &'static Location<'static> {
         Location::caller()
+    }
+
+    /// A row of a thread a test plays, standing in no line.
+    fn row() -> Arc<LineRow> {
+        Arc::new(LineRow::new())
     }
 
     struct RecordingWake {
@@ -831,10 +1025,11 @@ mod tests {
         let wake = RecordingWake::new();
         wake.now.store(1_000, Ordering::Relaxed);
         lock.state.store(LOCKED | CONTENDED, Ordering::Relaxed);
-        lock.waiters.register(7, NO_DEADLINE);
+        let waiter = row();
+        lock.waiters.join(&waiter, 7);
 
         lock.release_contended(Some(&wake), releaser());
-        lock.waiters.deregister(7);
+        lock.waiters.leave(&waiter);
         let site = Location::caller();
         assert!(lock.take_handoff(8, site).is_none(), "not 8's");
         let (guard, handed) = lock.take_handoff(7, site).expect("handed to 7");
@@ -1041,7 +1236,7 @@ mod tests {
         // before it parks (`take_or_contend`).
         let lock = SleepLock::new(());
         let wake = RecordingWake::new();
-        lock.waiters.register(44, NO_DEADLINE);
+        lock.waiters.join(&row(), 44);
         {
             let _guard = lock.try_lock().expect("free lock is acquirable");
             assert_eq!(lock.state.load(Ordering::Acquire), LOCKED);
@@ -1096,11 +1291,12 @@ mod tests {
         let lock = SleepLock::new(());
         let wake = RecordingWake::new();
         lock.state.store(LOCKED | CONTENDED, Ordering::Relaxed);
-        lock.waiters.register(51, NO_DEADLINE);
-        lock.waiters.register(52, NO_DEADLINE);
-        // 51 leaves the queue after registering, exactly the window the
+        let first = row();
+        lock.waiters.join(&first, 51);
+        lock.waiters.join(&row(), 52);
+        // 51 leaves the line after joining it, exactly the window the
         // pass-over exists for.
-        lock.waiters.deregister(51);
+        lock.waiters.leave(&first);
 
         lock.release_contended(Some(&wake), releaser());
 
@@ -1125,7 +1321,7 @@ mod tests {
         let lock = SleepLock::new(());
         let wake = RecordingWake::new();
         lock.state.store(LOCKED | CONTENDED, Ordering::Relaxed);
-        lock.waiters.register(61, NO_DEADLINE);
+        lock.waiters.join(&row(), 61);
         wake.refuse_wakes();
 
         lock.release_contended(Some(&wake), releaser());
@@ -1152,14 +1348,15 @@ mod tests {
         dead.refuse_wakes();
         let live = RecordingWake::new();
         lock.state.store(LOCKED | CONTENDED, Ordering::Relaxed);
-        lock.waiters.register(71, NO_DEADLINE);
-        lock.waiters.register(72, NO_DEADLINE);
+        let successor = row();
+        lock.waiters.join(&row(), 71);
+        lock.waiters.join(&successor, 72);
 
         // 71 is unwakeable; the scan must drop it and hand off to 72.
         assert!(!lock.hand_off_oldest(&dead, releaser()), "no wake landed");
         assert!(lock.waiters.is_empty(), "both rows were passed over");
 
-        lock.waiters.register(72, NO_DEADLINE);
+        lock.waiters.join(&successor, 72);
         assert!(lock.hand_off_oldest(&live, releaser()));
         assert_eq!(lock.handoff.load(Ordering::Acquire), 72);
         assert_eq!(live.tasks.lock().as_slice(), &[72]);
@@ -1181,16 +1378,17 @@ mod tests {
         let lock = SleepLock::new(());
         let wake = RecordingWake::new();
         lock.state.store(LOCKED | CONTENDED, Ordering::Relaxed);
-        lock.waiters.register(81, NO_DEADLINE);
+        let waiter = row();
+        lock.waiters.join(&waiter, 81);
 
         let designated = lock
             .waiters
             .oldest_registration()
             .expect("81 is the FIFO head");
 
-        // 81 resumes, leaves the queue, and parks again on a fresh row.
-        lock.waiters.deregister(81);
-        lock.waiters.register(81, NO_DEADLINE);
+        // 81 resumes, leaves the line, and stands in it again: a new stand.
+        lock.waiters.leave(&waiter);
+        lock.waiters.join(&waiter, 81);
 
         assert!(
             !lock.offer_to(&wake, &designated, releaser()),
@@ -1233,8 +1431,8 @@ mod tests {
         let lock = SleepLock::new(());
         let wake = RecordingWake::new();
         lock.state.store(LOCKED | CONTENDED, Ordering::Relaxed);
-        lock.waiters.register(82, NO_DEADLINE);
-        lock.waiters.register(83, NO_DEADLINE);
+        lock.waiters.join(&row(), 82);
+        lock.waiters.join(&row(), 83);
 
         lock.release_contended(Some(&wake), releaser());
 
@@ -1253,16 +1451,17 @@ mod tests {
         // that began after the designation was read.
         /// Re-parks `task` while the wake is in flight, then refuses it —
         /// the live-task-reported-unwakeable case. Legal because the wake is
-        /// issued with the queue lock released.
+        /// issued with the line's lock released.
         struct ReparkThenRefuse<'q> {
-            queue: &'q WaitQueue,
+            line: &'q Line,
+            row: Arc<LineRow>,
             task: TaskId,
         }
 
         impl crate::waitq::WaitQueueArch for ReparkThenRefuse<'_> {
             fn unpark(&self, _id: TaskId) -> bool {
-                self.queue.deregister(self.task);
-                self.queue.register(self.task, NO_DEADLINE);
+                self.line.leave(&self.row);
+                self.line.join(&self.row, self.task);
                 false
             }
 
@@ -1274,13 +1473,15 @@ mod tests {
         }
 
         let lock = SleepLock::new(());
-        lock.waiters.register(84, NO_DEADLINE);
+        let waiter = row();
+        lock.waiters.join(&waiter, 84);
         let designated = lock
             .waiters
             .oldest_registration()
             .expect("84 is the FIFO head");
         let wake = ReparkThenRefuse {
-            queue: &lock.waiters,
+            line: &lock.waiters,
+            row: waiter,
             task: 84,
         };
 
@@ -1320,8 +1521,8 @@ mod tests {
         let lock = SleepLock::new(());
         let wake = RecordingWake::new();
         lock.state.store(LOCKED | CONTENDED, Ordering::Relaxed);
-        lock.waiters.register(11, NO_DEADLINE);
-        lock.waiters.register(22, NO_DEADLINE);
+        lock.waiters.join(&row(), 11);
+        lock.waiters.join(&row(), 22);
 
         lock.release_contended(Some(&wake), releaser());
 
@@ -1341,15 +1542,16 @@ mod tests {
         let lock = SleepLock::new(());
         let wake = RecordingWake::new();
         lock.state.store(LOCKED | CONTENDED, Ordering::Relaxed);
-        for task in [31, 32, 33] {
-            lock.waiters.register(task, NO_DEADLINE);
+        let rows = [31, 32, 33].map(|task| (task, row()));
+        for (task, waiter) in &rows {
+            lock.waiters.join(waiter, *task);
         }
 
-        for task in [31, 32, 33] {
+        for (task, waiter) in &rows {
             lock.release_contended(Some(&wake), releaser());
-            assert_eq!(lock.handoff.load(Ordering::Acquire), task);
-            lock.waiters.deregister(task);
-            assert!(lock.claim_handoff(task));
+            assert_eq!(lock.handoff.load(Ordering::Acquire), *task);
+            lock.waiters.leave(waiter);
+            assert!(lock.claim_handoff(*task));
         }
         assert_eq!(wake.tasks.lock().as_slice(), &[31, 32, 33]);
 
@@ -1379,7 +1581,7 @@ mod tests {
 
         // A contender arrives now: it registers, finds `LOCKED` still set,
         // publishes `CONTENDED`, and parks.
-        lock.waiters.register(77, NO_DEADLINE);
+        lock.waiters.join(&row(), 77);
         assert!(
             !lock.take_or_contend(),
             "the contender observed a held lock, so it parks"
@@ -1426,7 +1628,7 @@ mod tests {
         lock.state.store(LOCKED | CONTENDED, Ordering::Relaxed);
         assert!(!lock.hand_off_oldest(&wake, releaser()), "nobody in line");
 
-        lock.waiters.register(95, NO_DEADLINE);
+        lock.waiters.join(&row(), 95);
         lock.state.fetch_and(!LOCKED, Ordering::AcqRel);
         assert!(lock.take_or_contend(), "the look takes the free lock");
 
@@ -1449,7 +1651,7 @@ mod tests {
         lock.state.store(LOCKED | CONTENDED, Ordering::Relaxed);
         assert!(!lock.hand_off_oldest(&wake, releaser()), "nobody in line");
 
-        lock.waiters.register(96, NO_DEADLINE);
+        lock.waiters.join(&row(), 96);
         assert!(lock.release_and_recheck(), "the registration is seen");
         assert!(!lock.take_or_contend(), "the retaken lock is held");
 
@@ -1465,21 +1667,23 @@ mod tests {
         let lock = SleepLock::new(());
         let wake = RecordingWake::new();
         lock.state.store(LOCKED, Ordering::Relaxed);
-        lock.waiters.register(40, NO_DEADLINE);
+        let older = row();
+        lock.waiters.join(&older, 40);
 
         let mut parks = 0;
         let mut park = || {
             parks += 1;
             if parks == 2 {
                 lock.release_contended(Some(&wake), releaser());
-                lock.waiters.deregister(40);
+                lock.waiters.leave(&older);
                 assert!(lock.claim_handoff(40), "the older waiter is first");
                 lock.release_contended(Some(&wake), releaser());
             }
             true
         };
         let mut wait = Wait::default();
-        let (guard, handed) = lock.wait_in_line(Location::caller(), 41, &mut park, &mut wait);
+        let (guard, handed) =
+            lock.wait_in_line(Location::caller(), 41, &row(), &mut park, &mut wait);
 
         assert!(handed.is_some(), "it was handed the lock in its turn");
         assert_eq!(wake.tasks.lock().as_slice(), &[40, 41]);
@@ -1501,7 +1705,8 @@ mod tests {
             false
         };
         let mut wait = Wait::default();
-        let (_guard, handed) = lock.wait_in_line(Location::caller(), 42, &mut park, &mut wait);
+        let (_guard, handed) =
+            lock.wait_in_line(Location::caller(), 42, &row(), &mut park, &mut wait);
 
         assert!(handed.is_some());
         assert_eq!((wait.parks, wait.unparkable), (0, 1));
@@ -1517,10 +1722,79 @@ mod tests {
 
         let mut park = || unreachable!("a free lock is taken in the look");
         let mut wait = Wait::default();
-        let (_guard, handed) = lock.wait_in_line(Location::caller(), 43, &mut park, &mut wait);
+        let (_guard, handed) =
+            lock.wait_in_line(Location::caller(), 43, &row(), &mut park, &mut wait);
 
         assert!(handed.is_none());
         assert_eq!(lock.state.load(Ordering::Acquire), LOCKED | CONTENDED);
+        assert!(lock.waiters.is_empty());
+    }
+
+    /// A contender on an exhausted heap still stands in line, parks, and is
+    /// handed the lock: its row was made with its thread.
+    ///
+    /// Regression: standing in line filed the contender in a wait queue's
+    /// B-tree indices, and a refused node aborted the kernel
+    /// (`plans/OPEN-DEFECTS.md` D1682).
+    #[test]
+    fn a_contended_acquire_on_an_exhausted_heap_parks_and_is_handed_the_lock() {
+        let lock = SleepLock::new(());
+        let wake = RecordingWake::new();
+        lock.state.store(LOCKED, Ordering::Relaxed);
+        let _ = crate::test_boot::claim_scheduler();
+        let cpu = crate::test_boot::claim_cpu();
+        crate::test_boot::run_claim_on(cpu);
+        crate::test_boot::with_park_probe(
+            cpu,
+            |_| {
+                // The holder's release is another party's work, and its own
+                // record of the wake may use the heap.
+                crate::test_alloc::refuse_allocations_on_current_thread(false);
+                lock.release_contended(Some(&wake), releaser());
+                crate::test_alloc::refuse_allocations_on_current_thread(true);
+            },
+            |probe| {
+                crate::test_alloc::refuse_allocations_on_current_thread(true);
+                let guard = lock.lock();
+                crate::test_alloc::refuse_allocations_on_current_thread(false);
+                assert_eq!(probe.parks(), 1, "it parked rather than spun");
+                assert!(lock.waiters.is_empty(), "and left the line once it owned");
+                drop(guard);
+            },
+        );
+    }
+
+    /// Joins and leaves racing a release that reaps the stand it read leave
+    /// the line whole: it is empty once the row has left, and takes it again.
+    #[test]
+    fn a_line_stays_whole_under_a_reap_racing_a_rejoin() {
+        // The interpreter preempts at random points in every round, so it
+        // needs far fewer rounds than hardware to reach the racing orders.
+        const ROUNDS: usize = if cfg!(miri) { 200 } else { 20_000 };
+        let lock = SleepLock::new(());
+        let refuse = RecordingWake::new();
+        refuse.refuse_wakes();
+        let waiter = row();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..ROUNDS {
+                    lock.waiters.join(&waiter, 5);
+                    lock.waiters.leave(&waiter);
+                }
+            });
+            for _ in 0..ROUNDS {
+                if let Some(reg) = lock.waiters.oldest_registration() {
+                    let _ = lock.waiters.wake_registration(&refuse, &reg);
+                }
+            }
+        });
+        assert!(lock.waiters.is_empty(), "the row left the line");
+        lock.waiters.join(&waiter, 5);
+        assert!(
+            !lock.waiters.is_empty(),
+            "and stands in it again on joining"
+        );
+        lock.waiters.leave(&waiter);
         assert!(lock.waiters.is_empty());
     }
 

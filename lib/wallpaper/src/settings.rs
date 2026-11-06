@@ -12,7 +12,8 @@
 //! which notices reach the desktop at all, the *input* keys how the pointer
 //! and keyboard behave, and the *idle* keys when the screensaver starts, what
 //! it shows and how each scene draws, when the display is switched off, and
-//! when the screen locks.
+//! when the screen locks. The *capture* keys are where a screen capture is
+//! put and how it is taken.
 //! Every field is a
 //! closed value set, and the document itself is a plain `lib/appconf`
 //! `key = value` document — the one format engine the app-data store speaks,
@@ -66,6 +67,9 @@ use tairix_colour::Rgb;
 use tairix_geometry::Scale;
 use tairix_theme::CursorSetId;
 
+use crate::capture::{
+    parse_sound, sound_value, CaptureDuration, CaptureFolder, CaptureSettings, CaptureTimer,
+};
 use crate::catalog;
 use crate::civil::RegionCode;
 use crate::idle::{DisplayOffAfter, IdleAfter};
@@ -553,11 +557,27 @@ pub enum SettingsKey {
     AudioLevels,
     /// `audio.muted` — the endpoints the user muted.
     AudioMuted,
+    /// `capture.save_to` — where a screen capture is put.
+    CaptureSaveTo,
+    /// `capture.timer_s` — how long a capture taken from the capture bar
+    /// waits.
+    CaptureTimer,
+    /// `capture.duration_s` — how long a recording runs before it stops
+    /// itself.
+    CaptureDuration,
+    /// `capture.sound` — what a recording hears.
+    CaptureSound,
+    /// `capture.pointer` — whether a capture shows the pointer.
+    CapturePointer,
+    /// `capture.clicks` — whether a recording marks each click.
+    CaptureClicks,
+    /// `capture.thumbnail` — whether a floating thumbnail shows each capture.
+    CaptureThumbnail,
 }
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 49] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -600,6 +620,13 @@ impl SettingsKey {
         Self::AudioInput,
         Self::AudioLevels,
         Self::AudioMuted,
+        Self::CaptureSaveTo,
+        Self::CaptureTimer,
+        Self::CaptureDuration,
+        Self::CaptureSound,
+        Self::CapturePointer,
+        Self::CaptureClicks,
+        Self::CaptureThumbnail,
     ];
 
     /// The keys describing the backdrop and the icons standing on it: what
@@ -687,6 +714,18 @@ impl SettingsKey {
         Self::AudioMuted,
     ];
 
+    /// The keys deciding where a screen capture is put and how it is taken:
+    /// what the capture bar's options set.
+    pub const CAPTURE: [Self; 7] = [
+        Self::CaptureSaveTo,
+        Self::CaptureTimer,
+        Self::CaptureDuration,
+        Self::CaptureSound,
+        Self::CapturePointer,
+        Self::CaptureClicks,
+        Self::CaptureThumbnail,
+    ];
+
     /// The canonical key spelling.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -733,6 +772,13 @@ impl SettingsKey {
             Self::AudioInput => "audio.input",
             Self::AudioLevels => "audio.levels",
             Self::AudioMuted => "audio.muted",
+            Self::CaptureSaveTo => "capture.save_to",
+            Self::CaptureTimer => "capture.timer_s",
+            Self::CaptureDuration => "capture.duration_s",
+            Self::CaptureSound => "capture.sound",
+            Self::CapturePointer => "capture.pointer",
+            Self::CaptureClicks => "capture.clicks",
+            Self::CaptureThumbnail => "capture.thumbnail",
         }
     }
 
@@ -853,6 +899,8 @@ pub struct DesktopSettings {
     pub time_zone: Option<ZoneName>,
     /// What the user set on the sound devices.
     pub sound: SoundControls,
+    /// What screen capture keeps between captures.
+    pub capture: CaptureSettings,
 }
 
 impl Default for DesktopSettings {
@@ -895,6 +943,7 @@ impl Default for DesktopSettings {
             region: None,
             time_zone: None,
             sound: SoundControls::default(),
+            capture: CaptureSettings::default(),
         }
     }
 }
@@ -1037,6 +1086,21 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
         SettingsKey::AudioInput => settings.sound.set_input(value),
         SettingsKey::AudioLevels => settings.sound.set_levels(value),
         SettingsKey::AudioMuted => settings.sound.set_muted(value),
+        SettingsKey::CaptureSaveTo => put(
+            &mut settings.capture.save_to,
+            CaptureFolder::from_value(value),
+        ),
+        SettingsKey::CaptureTimer => {
+            put(&mut settings.capture.timer, CaptureTimer::from_value(value))
+        }
+        SettingsKey::CaptureDuration => put(
+            &mut settings.capture.duration,
+            CaptureDuration::from_value(value),
+        ),
+        SettingsKey::CaptureSound => put(&mut settings.capture.sound, parse_sound(value)),
+        SettingsKey::CapturePointer => put_bool(&mut settings.capture.pointer, value),
+        SettingsKey::CaptureClicks => put_bool(&mut settings.capture.clicks, value),
+        SettingsKey::CaptureThumbnail => put_bool(&mut settings.capture.thumbnail, value),
     }
 }
 
@@ -1147,6 +1211,19 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
         SettingsKey::AudioInput => settings.sound.render_input(),
         SettingsKey::AudioLevels => settings.sound.render_levels(),
         SettingsKey::AudioMuted => settings.sound.render_muted(),
+        SettingsKey::CaptureSaveTo => settings.capture.save_to.as_str().to_string(),
+        SettingsKey::CaptureTimer => settings.capture.timer.as_str().to_string(),
+        SettingsKey::CaptureDuration => settings.capture.duration.as_str().to_string(),
+        SettingsKey::CaptureSound => sound_value(settings.capture.sound).to_string(),
+        SettingsKey::CapturePointer => {
+            tairix_appconf::bool_text(settings.capture.pointer).to_string()
+        }
+        SettingsKey::CaptureClicks => {
+            tairix_appconf::bool_text(settings.capture.clicks).to_string()
+        }
+        SettingsKey::CaptureThumbnail => {
+            tairix_appconf::bool_text(settings.capture.thumbnail).to_string()
+        }
     }
 }
 

@@ -70,7 +70,8 @@ Which gives:
 - **Logging out** closes windows first: the desktop sends every top-level
   window `CloseRequested` and keeps serving for up to `SESSION_CLOSE_GRACE`
   (5 s), so an application can finish through the window server it still has,
-  then exits; the kernel ends whatever remains. `login` waits up to
+  and while a screen recording's file is being finished, then exits; the
+  kernel ends whatever remains. `login` waits up to
   `SESSION_END_GRACE` (10 s) for the sessions it told to end.
 - **Closing a terminal window** ends its shell (`Terminate`), which ends the
   jobs started in it. Ending the terminal ends every window's shell.
@@ -105,7 +106,13 @@ is freed when its range empties.
 Admission places the child at its final step, together with its capability
 record and its first wake, after it is registered with its parent — so no
 signal lands on a half-admitted or unstarted child, and a placement that has
-become impossible is caught under the same lock as the insert.
+become impossible is caught under the same lock as the insert. The placement
+makes its room — the session nodes it founds, held in a hash map keyed by
+their anchor's instance, and a membership in every session of the chain —
+with the record's before it changes anything. A heap that refuses any of it
+refuses the spawn whole with `OutOfMemory`: the child is retired unrun, the
+refusal is audited (`PROCESS_SPAWN_DENIED`, `cause=out_of_memory`), and no
+row is left for its parent to wait on.
 
 When an anchor's record is removed its session is marked ending, and once its
 own teardown is done the session is handed to the **session reaper**

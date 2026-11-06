@@ -122,7 +122,9 @@ The count-and-byte kinds a kernel object is charged to — `DirWatches`,
 `IpcQueueBytes`, `WaitSets`, `WaitSetMembers` — are held in one
 `ResourceCharges` per process (`kernel/sec`), atomics on the capability
 record every syscall already holds, which every copy of the record shares and
-a record replacement carries over. A charge is taken when its object is made
+a record replacement carries over. It holds the process's file I/O totals
+too, and is the one allocation deriving a record makes. A charge is taken
+when its object is made
 and travels with it, so dropping the object returns it: no teardown path can
 forget to, and a check-and-charge takes no lock.
 
@@ -199,7 +201,10 @@ resource**, before the resource is committed, and fails closed (`AGENTS.md`
   pending. A descriptor pins its node and holds its open file description in
   the kernel heap, which is what the bound protects. The standard streams a
   spawner wires into a child count but are never refused. The live usage is
-  the number of descriptors the table holds.
+  the number of descriptors the table holds. `fd_grant` holds the pipe ends a
+  process has granted and not yet seen redeemed to the same bound: a fresh one
+  past it is refused with `LimitExceeded`, so a pipe kept alive by a
+  delegation alone is still charged to the process that sent it.
 - **`DirWatches` on `fs_watch`.** Each armed watch is charged to the arming
   process and released when its open file description closes; a watch past
   the soft bound is refused with `LimitExceeded` and arms nothing. A watch's

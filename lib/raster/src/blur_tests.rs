@@ -23,10 +23,10 @@ use alloc::vec::Vec;
 use tairix_fuzzseed::Prng;
 
 use super::{
-    box_blur, box_blur_coverage, cast_shadow, soften_coverage, BlurScratch, Blurring, Reciprocal,
-    ShadowCast, RECIPROCAL_MAX_COUNT, RECIPROCAL_SHIFT, SOFTEN_PASSES,
+    box_blur, box_blur16, box_blur_coverage, cast_shadow, soften_coverage, BlurScratch, Blurring,
+    Reciprocal, ShadowCast, DEEP_MAX_COUNT, RECIPROCAL_MAX_COUNT, RECIPROCAL_SHIFT, SOFTEN_PASSES,
 };
-use crate::color::{div255_biased, Pixel, ROUND_NEAREST};
+use crate::color::{div255_biased, Color, Pixel, Pixel16, ROUND_NEAREST};
 use crate::dither::DitherRow;
 use crate::round::round_rect_coverage;
 use crate::surface::Surface;
@@ -1907,6 +1907,156 @@ fn a_lane_mean_is_the_scalar_mean_for_every_sum_a_window_holds() {
                 u32::from(recip.apply(sum)),
                 "radius {radius} sum {sum}"
             );
+        }
+    }
+}
+
+/// Sixteen-bit premultiplied pixels whose every channel differs, so a blur that
+/// reads or writes the wrong sample cannot hide behind a flat field.
+fn deep_field(width: usize, height: usize) -> Vec<Pixel16> {
+    (0..width * height)
+        .map(|at| {
+            let level =
+                |k: usize| u8::try_from((at * (31 + 2 * k) + k * 97) % 256).expect("a level");
+            Color::rgba(level(0), level(1), level(2), level(3)).premultiply16()
+        })
+        .collect()
+}
+
+/// [`box_blur16`] by its definition: a horizontal pass then a vertical one,
+/// each output the rounded mean of the `2 * radius + 1` samples about it with
+/// the edges replicated. It shares no running sum and no reciprocal with the
+/// blur, so an error in either shows as a differing pixel.
+fn naive_deep_blur(field: &[Pixel16], width: usize, height: usize, radius: usize) -> Vec<Pixel16> {
+    let reach = isize::try_from(radius).expect("a test radius fits");
+    let count = u64::try_from(radius * 2 + 1).expect("a test radius fits");
+    let mean = |sum: u64| u16::try_from((sum + count / 2) / count).expect("a sixteen-bit mean");
+    let pass = |field: &[Pixel16], horizontal: bool| -> Vec<Pixel16> {
+        let mut out = vec![Pixel16::TRANSPARENT; field.len()];
+        for y in 0..height {
+            for x in 0..width {
+                let (along, limit) = if horizontal {
+                    (x, width - 1)
+                } else {
+                    (y, height - 1)
+                };
+                let along = isize::try_from(along).expect("in range");
+                let mut sums = [0u64; 4];
+                for step in -reach..=reach {
+                    let at = usize::try_from(along + step).unwrap_or(0).min(limit);
+                    let pixel = if horizontal {
+                        field[y * width + at]
+                    } else {
+                        field[at * width + x]
+                    };
+                    let channels = [pixel.r, pixel.g, pixel.b, pixel.a];
+                    for (sum, channel) in sums.iter_mut().zip(channels) {
+                        *sum += u64::from(channel);
+                    }
+                }
+                let [r, g, b, a] = sums.map(mean);
+                out[y * width + x] = Pixel16 { r, g, b, a };
+            }
+        }
+        out
+    };
+    pass(&pass(field, true), false)
+}
+
+#[test]
+fn a_deep_blur_is_the_naive_average_of_every_window() {
+    for (width, height) in [(23, 17), (1, 9), (12, 1)] {
+        let field = deep_field(width, height);
+        for radius in [1, 2, 5, 30] {
+            let mut blurred = field.clone();
+            let mut aux = vec![Pixel16::TRANSPARENT; field.len()];
+            box_blur16(&mut blurred, width, height, radius, &mut aux);
+            assert_eq!(
+                blurred,
+                naive_deep_blur(&field, width, height, radius),
+                "{width}x{height} at radius {radius}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_deep_blur_keeps_a_uniform_field_and_every_colour_within_its_alpha() {
+    let pixel = Color::rgba(200, 40, 90, 77).premultiply16();
+    let mut aux = vec![Pixel16::TRANSPARENT; 30 * 20];
+    let mut uniform = vec![pixel; 30 * 20];
+    box_blur16(&mut uniform, 30, 20, 4, &mut aux);
+    assert!(uniform.iter().all(|&blurred| blurred == pixel));
+    let mut mixed = deep_field(30, 20);
+    box_blur16(&mut mixed, 30, 20, 3, &mut aux);
+    let within = mixed.iter().all(|p| p.r <= p.a && p.g <= p.a && p.b <= p.a);
+    assert!(within, "no colour channel above its alpha");
+}
+
+#[test]
+fn a_colour_premultiplies_into_sixteen_bits_and_back_exactly() {
+    let step = if cfg!(miri) { 17 } else { 1 };
+    for alpha in (0..=255u8).step_by(step) {
+        for level in (0..=255u8).step_by(step) {
+            let colour = Color::rgba(level, 255 - level, level / 2, alpha);
+            let expected = if alpha == 0 {
+                Color::TRANSPARENT
+            } else {
+                colour
+            };
+            assert_eq!(
+                colour.premultiply16().unpremultiply(),
+                expected,
+                "level {level} at alpha {alpha}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_deep_reciprocal_answers_exactly_what_the_divide_would() {
+    // The reference is written out here rather than called, so it is an
+    // oracle and not a restatement of the code under test.
+    let reference = |sum: u32, count: u32| -> u16 {
+        let divisor = u64::from(count);
+        u16::try_from(((u64::from(sum) + divisor / 2) / divisor).min(65_535)).expect("clamped")
+    };
+    let check = |count: u32, sum: u32| {
+        let recip = Reciprocal::new(usize::try_from(count).expect("a test count fits"));
+        assert_eq!(
+            recip.apply16(sum),
+            reference(sum, count),
+            "count {count}, sum {sum}"
+        );
+    };
+    let thorough = !cfg!(miri);
+    for count in [1u32, 2, 3, 5] {
+        for sum in (0..=65_535 * count).step_by(if thorough { 1 } else { 997 }) {
+            check(count, sum);
+        }
+    }
+    // Either side of each step of the quotient, where a reciprocal off by one
+    // first shows, from narrow windows past both cutoffs.
+    let counts = [
+        7u32,
+        63,
+        255,
+        4_095,
+        16_385,
+        DEEP_MAX_COUNT - 1,
+        DEEP_MAX_COUNT,
+        DEEP_MAX_COUNT + 1,
+        RECIPROCAL_MAX_COUNT,
+        RECIPROCAL_MAX_COUNT + 1,
+    ];
+    for count in counts {
+        for quotient in (1..=65_535u64).step_by(if thorough { 1 } else { 4_099 }) {
+            let step = quotient * u64::from(count) - u64::from(count / 2);
+            for sum in [step - 1, step] {
+                if let Ok(sum) = u32::try_from(sum) {
+                    check(count, sum);
+                }
+            }
         }
     }
 }

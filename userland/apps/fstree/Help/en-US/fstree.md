@@ -165,6 +165,10 @@ A copy keeps a file's holes and its extended attributes; any
 attribute the destination cannot keep is named on the message line
 once the operation ends.
 
+A directory copied or moved onto a directory of its own name is merged into
+it: what it holds joins the directory already there, and each of its files
+already there is asked about in the same way.
+
 The top disk-statistics header shows the listed path, the backing
 volume's free/total bytes (when the System Information service can
 report them), the visible item count, and — while anything is tagged —

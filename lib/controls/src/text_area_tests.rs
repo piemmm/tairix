@@ -574,6 +574,25 @@ fn a_press_the_bar_holds_ends_even_once_the_box_has_no_room() {
     );
 }
 
+/// A held arrow whose box no longer draws a bar is let go of when its step
+/// falls due, so nothing stays due for an owner to wake for at once.
+#[test]
+fn a_held_arrow_whose_bar_is_gone_is_let_go_of_when_due() {
+    const ROWS: u32 = 4;
+    let mut long = area(TEN_LINES);
+    let arrow = bar_down_arrow(&long, ROWS);
+    press(&mut long, arrow, ROWS);
+    let due = long.repeat_deadline(0).expect("a held arrow arms a repeat");
+
+    let no_room = Rect::new(0, 0, W, 0);
+    long.repeat(due, no_room, Scale::ONE, &theme(), &mut sink());
+    assert_eq!(
+        long.repeat_deadline(due),
+        None,
+        "the press went with the bar"
+    );
+}
+
 #[test]
 fn a_bar_part_the_pointer_leaves_for_the_text_goes_out() {
     const ROWS: u32 = 4;

@@ -19,8 +19,8 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
-use crate::filter::Parameter;
 use crate::layout::Faces;
+use crate::op::Parameter;
 use crate::tool_controls::{spacing, words};
 use crate::track::{Track, TRACK_HEIGHT};
 
@@ -470,6 +470,23 @@ impl Panel {
             .map(|part| measures.height(part, width))
             .sum::<u32>()
             .saturating_add(measures.gap * count.saturating_sub(1))
+    }
+
+    /// How tall part `index` stands across `width`; nought for a part the
+    /// panel lacks.
+    #[must_use]
+    pub fn part_height(
+        &self,
+        index: usize,
+        width: u32,
+        faces: Faces,
+        scale: Scale,
+        theme: &Theme,
+    ) -> u32 {
+        let measures = Measures::of(faces, scale, theme);
+        self.parts
+            .get(index)
+            .map_or(0, |part| measures.height(part, width))
     }
 
     /// Each part as laid out down `bounds`, top first. Bounds shorter than
@@ -1101,18 +1118,6 @@ impl Panel {
         (viewport, scale, theme): (Rect, Scale, &Theme),
         damage: &mut Region,
     ) -> PanelOutcome {
-        let number = |action: Option<NumberAction>, cell: usize| match action {
-            Some(action) => {
-                let (value, settled) = number_value(action);
-                PanelOutcome::Event(PanelEvent::Number {
-                    part,
-                    cell,
-                    value,
-                    settled,
-                })
-            }
-            None => PanelOutcome::Ignored,
-        };
         match &mut self.parts[part] {
             Part::Choice { combo, .. } => {
                 let field = placed.controls[0];
@@ -1129,44 +1134,21 @@ impl Panel {
                 parameter,
                 field,
                 slide,
-            } => {
-                if stop == 0 {
-                    let action =
-                        field.on_key(stroke.key, stroke.modifiers, placed.controls[0], damage);
-                    if let Some(action) = action {
-                        let (value, _) = number_value(action);
-                        slide.show(parameter, value);
-                        damage.add(placed.controls[1]);
-                    }
-                    return number(action, 0);
-                }
-                let stepped = match slide {
-                    Slide::Slider(slider) => slider
-                        .on_key(stroke.key, placed.controls[1], damage)
-                        .map(|action| slid(parameter, action)),
-                    Slide::Track(track) => track
-                        .on_key(stroke, placed.controls[1], damage)
-                        .map(|moved| (moved.value, moved.settled)),
-                };
-                match stepped {
-                    Some((value, settled)) => {
-                        field.set_value(value);
-                        damage.add(placed.controls[0]);
-                        PanelOutcome::Event(PanelEvent::Number {
-                            part,
-                            cell: 0,
-                            value,
-                            settled,
-                        })
-                    }
-                    None => PanelOutcome::Ignored,
-                }
-            }
+            } => number_key(
+                part,
+                stop,
+                stroke,
+                (parameter, field, slide),
+                placed,
+                damage,
+            ),
             Part::Fields(row) => match row.get_mut(stop) {
-                Some(cell) => number(
+                Some(cell) => typed(
+                    part,
+                    stop,
                     cell.field
                         .on_key(stroke.key, stroke.modifiers, placed.controls[stop], damage),
-                    stop,
+                    stroke,
                 ),
                 None => PanelOutcome::Ignored,
             },
@@ -1349,6 +1331,70 @@ impl Placements {
             .find(|&&(index, _)| index == part)
             .map(|&(_, placed)| placed)
     }
+}
+
+/// What `stroke` typed in field `cell` of part `part` came to. A field claims
+/// even a key it cannot take, a digit past its length among them, so typing
+/// never reaches the owner's shortcuts; Escape alone passes.
+fn typed(
+    part: usize,
+    cell: usize,
+    action: Option<NumberAction>,
+    stroke: Keystroke,
+) -> PanelOutcome {
+    match action {
+        Some(action) => {
+            let (value, settled) = number_value(action);
+            PanelOutcome::Event(PanelEvent::Number {
+                part,
+                cell,
+                value,
+                settled,
+            })
+        }
+        None if stroke.key == Key::Named(NamedKey::Escape) => PanelOutcome::Ignored,
+        None => PanelOutcome::Taken,
+    }
+}
+
+/// A key at stop `stop` of number part `part`: its field's typing, or its
+/// slider or track stepped, each shown in the other.
+fn number_key(
+    part: usize,
+    stop: usize,
+    stroke: Keystroke,
+    (parameter, field, slide): (&Parameter, &mut NumberField, &mut Slide),
+    placed: &Placed,
+    damage: &mut Region,
+) -> PanelOutcome {
+    if stop == 0 {
+        let action = field.on_key(stroke.key, stroke.modifiers, placed.controls[0], damage);
+        if let Some(action) = action {
+            let (value, _) = number_value(action);
+            slide.show(parameter, value);
+            damage.add(placed.controls[1]);
+        }
+        return typed(part, 0, action, stroke);
+    }
+    let stepped = match slide {
+        Slide::Slider(slider) => slider
+            .on_key(stroke.key, placed.controls[1], damage)
+            .map(|action| slid(parameter, action)),
+        Slide::Track(track) => track
+            .on_key(stroke, placed.controls[1], damage)
+            .map(|moved| (moved.value, moved.settled)),
+    };
+    let Some((value, settled)) = stepped else {
+        return PanelOutcome::Ignored;
+    };
+    field.set_value(value);
+    damage.add(placed.controls[0]);
+    PanelOutcome::Event(PanelEvent::Number {
+        part,
+        cell: 0,
+        value,
+        settled,
+    })
 }
 
 /// A pointer event on number part `part`: its field's typing, or its slider

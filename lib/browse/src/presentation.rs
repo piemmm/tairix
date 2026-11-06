@@ -3,11 +3,15 @@
 //! themselves rather than as their kind.
 //!
 //! The engine presents every entry exactly ([`Presentation::EXACT`]), which is
-//! what the trusted picker and the desktop show; the file manager presents by
-//! its user's own settings. Presentation decides only what is *shown*: every
-//! operation still names an entry by the name the volume holds.
+//! what the trusted picker shows, since it is where an application is granted
+//! a file; the file manager and the desktop present by their user's own
+//! settings. Presentation decides only what is *shown*: every operation still
+//! names an entry by the name the volume holds, and no ending is hidden that
+//! would leave a name reading as another type or application.
 
-use crate::entry::{bundle_stem, Entry, EntryKind};
+use tairix_abi::appinfo::{bundle_stem, is_bundle_name};
+
+use crate::entry::{Entry, EntryKind};
 use crate::media::{media_for_name, Ending};
 
 /// The endings a name is shown without.
@@ -26,14 +30,25 @@ impl HiddenEndings {
         known_types: false,
     };
 
-    /// The name `entry` is shown as: its name less the ending these hide.
+    /// The name `entry` is shown as: the label it is shown by, where it has
+    /// one ([`Entry::label`]), else its name less the ending these hide.
     ///
     /// A folder's name is shown whole, since a folder has no type an ending
-    /// names; so is a name that would be shown empty.
+    /// names; so is a name that would be shown empty, and one whose ending
+    /// would leave a typed name or a bundle's — `invoice.pdf.app` is never
+    /// shown as `invoice.pdf`.
     #[must_use]
     pub fn shown(self, entry: &Entry) -> &str {
-        let name = entry.name();
-        name.get(..name.len() - self.hidden_len(entry))
+        entry
+            .label()
+            .unwrap_or_else(|| self.shown_name(entry.name(), entry.kind()))
+    }
+
+    /// The name `name`, listed as an entry of `kind`, is shown as, by
+    /// [`shown`](Self::shown)'s rule.
+    #[must_use]
+    pub fn shown_name(self, name: &str, kind: EntryKind) -> &str {
+        name.get(..name.len() - self.hidden_len(name, kind))
             .unwrap_or(name)
     }
 
@@ -42,22 +57,23 @@ impl HiddenEndings {
     #[must_use]
     pub fn hidden(self, entry: &Entry) -> &str {
         let name = entry.name();
-        name.get(name.len() - self.hidden_len(entry)..)
+        name.get(name.len() - self.hidden_len(name, entry.kind())..)
             .unwrap_or_default()
     }
 
-    /// How many bytes at the end of `entry`'s name these leave off.
-    fn hidden_len(self, entry: &Entry) -> usize {
-        let name = entry.name();
-        match entry.kind().resolved() {
-            Some(EntryKind::Bundle) if self.applications => {
-                bundle_stem(name).map_or(0, |stem| name.len() - stem.len())
-            }
+    /// How many bytes at the end of `name`, an entry of `kind`'s, these leave
+    /// off: none where what would be left reads as a type or an application of
+    /// its own, so a hidden ending never disguises what an entry is.
+    fn hidden_len(self, name: &str, kind: EntryKind) -> usize {
+        let left = match kind.resolved() {
+            Some(EntryKind::Bundle) if self.applications => bundle_stem(name),
             Some(EntryKind::File) if self.known_types && media_for_name(name).is_some() => {
-                name.len() - Ending::of(name).stem.len()
+                Some(Ending::of(name).stem)
             }
-            _ => 0,
-        }
+            _ => None,
+        };
+        left.filter(|stem| media_for_name(stem).is_none() && !is_bundle_name(stem))
+            .map_or(0, |stem| name.len() - stem.len())
     }
 }
 

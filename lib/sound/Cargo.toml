@@ -13,8 +13,12 @@ workspace = true
 
 [features]
 # The FLAC encoder: the asset build converts the shipped sound masters with
-# it. Off for every crate that runs on the machine, which decodes only.
-encode = []
+# it, and tests write their streams with it. Off for every crate that runs on
+# the machine.
+encode-flac = []
+# The Opus encoder: the screen recorder codes its sound with it, and nothing
+# else on the machine enables it.
+encode-opus = []
 
 [dependencies]
 # The PCM vocabulary a decoded stream is stated in: its rate, channel layout
@@ -37,4 +41,4 @@ tairix-crc16 = { path = "../crc16", version = "=0.0.0" }
 tairix-fuzzseed = { path = "../../tests/fuzzseed" }
 # The fuzz target emits FLAC through the encoder, so its tests build the
 # crate with it.
-tairix-sound = { path = ".", features = ["encode"] }
+tairix-sound = { path = ".", features = ["encode-flac"] }

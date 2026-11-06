@@ -4,20 +4,20 @@ flock — executar um comando mantendo um bloqueio de ficheiro consultivo
 
 ## SYNOPSIS
 
-`flock [options] ficheiro comando [argumento...]`
+`flock [options] file command [argument...]`
 
 ## DESCRIPTION
 
-Toma um bloqueio consultivo que cobre todo o `ficheiro`, executa o
-`comando` enquanto o mantém e termina com o estado do próprio comando. Duas
-execuções que nomeiem o mesmo `ficheiro` nunca se sobrepõem, que é o que um
-script precisa para ter apenas uma cópia de si mesmo em curso.
+Toma um bloqueio consultivo que cobre todo o ficheiro `file`, executa o
+comando `command` enquanto o mantém e termina com o estado do próprio
+comando. Duas execuções que nomeiem o mesmo `file` nunca se sobrepõem, que
+é o que um script precisa para ter apenas uma cópia de si mesmo em curso.
 
 O bloqueio pertence ao ficheiro aberto por esta execução, pelo que o
 sistema o liberta quando a execução termina: normalmente, interrompida ou
-com falha. Nada é escrito no `ficheiro` e não há nada a limpar depois,
-pelo que não fica um bloqueio obsoleto que a execução seguinte tenha de
-esperar. O `ficheiro` é criado se não existir.
+com falha. Nada é escrito em `file` e não há nada a limpar depois, pelo
+que não fica um bloqueio obsoleto que a execução seguinte tenha de
+esperar. `file` é criado se não existir.
 
 Os bloqueios são **consultivos**: coordenam programas que aceitam usá-los.
 Não concedem nem retiram qualquer acesso, pelo que um programa que não tome
@@ -35,19 +35,31 @@ Três opções dos `flock` de outros sistemas faltam deliberadamente em vez
 de serem aceites e ignoradas. `-u` e `-o` agem sobre um descritor de
 ficheiro que uma consola abriu previamente, forma que este comando não
 oferece; `-c` passa o seu argumento a uma consola, o que aqui se escreve
-explicitamente `flock ficheiro elsh -c '...'` para que seja claro qual
+explicitamente `flock file elsh -c '...'` para que seja claro qual
 executa. Pedir qualquer uma delas é um erro de utilização: o script é
 avisado em vez de correr sem o bloqueio que pediu.
 
 ## OPTIONS
 
-- `-s, --shared` — tomar um bloqueio partilhado. Várias execuções podem mantê-lo ao mesmo tempo, e todas excluem quem peça um exclusivo. É o bloqueio dos leitores.
-- `-x, --exclusive` — tomar um bloqueio exclusivo, que exclui qualquer outro detentor. O valor por omissão e o bloqueio dos escritores.
-- `-n, --nonblock` — não esperar: se o bloqueio estiver tomado, sair de imediato com o código de conflito.
-- `-w, --timeout <seconds>` — esperar no máximo esse número de segundos inteiros e depois sair com o código de conflito.
-- `-E, --conflict-code <n>` — o estado de saída quando `-n` ou `-w` desiste. Por omissão `1`. Escolha um valor que o comando nunca devolva se um script tiver de os distinguir.
+- `-s, --shared` — tomar um bloqueio partilhado. Várias execuções podem
+  mantê-lo ao mesmo tempo, e todas excluem quem peça um exclusivo. É o
+  bloqueio dos leitores.
+- `-x, --exclusive` — tomar um bloqueio exclusivo, que exclui qualquer
+  outro detentor. O valor por omissão e o bloqueio dos escritores.
+- `-n, --nonblock` — não esperar: se o bloqueio estiver tomado, sair de
+  imediato com o código de conflito.
+- `-w, --timeout <seconds>` — esperar no máximo esse número de segundos
+  inteiros e depois sair com o código de conflito.
+- `-E, --conflict-code <n>` — o estado de saída quando `-n` ou `-w`
+  desiste. Por omissão `1`. Escolha um valor que o comando nunca devolva se
+  um script tiver de os distinguir.
 - `-v, --verbose` — indicar na saída de erro se o bloqueio foi tomado.
 - `-?, --help` — mostrar a ajuda breve deste comando.
+
+As opções têm de vir antes de `file`: tudo a partir de `file` pertence ao
+comando, pelo que `flock lock ls -l` passa `-l` a `ls`. `--` termina a
+análise de opções, de modo que um ficheiro ou comando cujo nome comece por
+um hífen continua acessível.
 
 ## EXAMPLES
 

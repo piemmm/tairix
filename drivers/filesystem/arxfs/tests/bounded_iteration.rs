@@ -287,12 +287,13 @@ fn contiguous_volume(blocks: u64) -> (ARXFS<SparseBlock>, u64) {
 /// file on a small machine.
 fn a_delete_holds_its_runs_not_its_blocks() {
     // Fixed by the geometry: the walk's node buffers, the transaction's run
-    // bookkeeping, the sparse device double's own storage for the metadata
-    // blocks the commit rewrote, and the commit drain's gather window.
-    // Measured: 10 352 bytes over 35 allocations to truncate and 11 376 over
-    // 52 to remove, at either size. The per-block set and its per-block chunk
-    // lookups scaled both with the file.
-    const PEAK_BUDGET: usize = 16 * 1024;
+    // bookkeeping and the room its sets keep so an undo never asks the heap,
+    // the sparse device double's own storage for the metadata blocks the
+    // commit rewrote, and the commit drain's gather window. Measured: 12 368
+    // bytes over 40 allocations to truncate and 15 816 over 69 to remove, at
+    // either size. The per-block set and its per-block chunk lookups scaled
+    // both with the file.
+    const PEAK_BUDGET: usize = 24 * 1024;
     const ALLOC_BUDGET: usize = 128;
     const SMALL: u64 = 400;
 
@@ -644,9 +645,10 @@ fn a_fragmented_delete_holds_its_ceiling_not_its_extents() {
     const SMALL: u64 = 1_200;
     // Fixed by the ceiling and the block geometry: the transaction's run
     // bookkeeping and staged blocks inside one transfer window, the commit
-    // drain's gather window, the allocation map's bounded page cache, and the
-    // walk and edit node buffers. Measured: 88 600 bytes to delete 1 200
-    // extents and 110 368 to delete 4 800. Freeing the same file inside one
+    // drain's gather window, the allocation map's bounded page cache, the walk
+    // and edit node buffers, and the undo copies a commit refused memory would
+    // put back. Measured: 110 992 bytes to delete 1 200 extents and
+    // 113 736 to delete 4 800. Freeing the same file inside one
     // transaction — the shape before this — holds 448 448 at 1 200 extents and
     // 626 312 at 2 400, growing with the file and past this budget at either
     // size.

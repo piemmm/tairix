@@ -31,6 +31,13 @@ that hold them to it. A masked wash's field answers a row at a time, so a
 ramp or a glow is stepped along it rather than evaluated per pixel, and the
 row is laid by one kernel.
 
+The box blur averages eight-bit premultiplied `Pixel`s, one byte of coverage,
+or `Pixel16`s — premultiplied at sixteen bits a channel, which an eight-bit
+colour goes into and comes back out of exactly — so a Gaussian of three box
+passes, as Paint's is, rounds each pass at sixteen bits rather than losing a
+translucent pixel's colour to eight. Each pass's mean is an exact fixed-point
+reciprocal of its window, at either width.
+
 The fills draw into a `Surface` or one `RowBand` of it, and the mesh path into
 a `DepthBuffer` or one `DepthBand` of it, handing each fragment to the caller's
 shader, so a pass cut into bands on several cores draws the picture the whole

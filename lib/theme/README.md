@@ -37,7 +37,10 @@ This crate is pure theme *data*. A `Theme` is a table of:
   `#c8500c4d` on light), authored per theme so a theme can tune its weight
   rather than have it derived at the draw site. It is this light because the
   frosted backdrop under a selected item is what marks it, leaving the accent
-  to tint rather than to cover.
+  to tint rather than to cover. The built-in themes' palettes are
+  `Palette::DARK` and `Palette::LIGHT`, defined once, so a surface that keeps
+  one appearance whatever the desktop shows reads the colours the theme wears
+  rather than a copy of them.
 - `Metrics` — corner radii (window, taskbar, popup) and border thickness,
   the data the window manager's single anti-aliased rounded-corner path
   consumes; `taskbar_margin`, how far the bar stands off the three screen edges

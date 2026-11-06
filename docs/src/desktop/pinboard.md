@@ -215,7 +215,13 @@ The pinboard lists the user's `Desktop` folder through exactly the same
 machinery the file manager uses: the same directory seam, the same shared
 sort, the same content-type classifier, the same grid, and the same
 double-click activation ([desktop icons](./icons.md),
-`plans/NEW-TASKBAR.md` T7/T16).
+`plans/NEW-TASKBAR.md` T7/T16). It names and orders its icons as a
+file-manager window does: less the endings the file manager's settings hide —
+an application's `.app` by default — and by the names shown. Only the trusted
+file picker shows exact names, since it is where an application is granted a
+file. An item whose name begins with a dot has an icon only while the file
+manager's settings show hidden items, off by default; one left out keeps the
+place it was put in for when they are shown again.
 
 An icon stands where the user put it, as on Windows or macOS: carried across
 the desktop with the mouse, dropped or saved onto it — each file as far from
@@ -235,6 +241,22 @@ scale — is shown on the free cell nearest it, never piled onto another at the
 edge, and kept as it was. The arrow keys move to the nearest icon in their
 direction, meeting icons stacked on one another in the order they are drawn.
 
+Icons are selected as a file-manager window selects its items. A press on the
+backdrop drags out a band, which selects every icon whose picture or name it
+touches as it grows, beside what a press with `Ctrl` or `Shift` kept; `Escape`
+takes back what it selected, and letting go keeps it. `Ctrl`-clicking an icon
+toggles it and `Shift`-clicking adds it. Dragging one of several selected icons
+carries them all, a click that does not drag collapses the selection to the
+icon clicked, and a right-click inside the selection keeps it. *Open* and
+`Enter` act on one icon, and with several selected they say so rather than
+pick one. A step of the band repaints the icons whose mark changed and the
+band's own edges, never the whole desktop.
+
+A pointer over an icon changes nothing about it. An icon shows its selection,
+the keyboard's focus ring, the lit folder an accepted drag would drop into, and
+the lift of those being carried — never a hover look or a tooltip — and the
+cursor stays the arrow, so moving the mouse across the desktop repaints nothing.
+
 Three things are settings:
 
 - **Arrangement** — the grid's cells fill a column downward and grow a new
@@ -253,7 +275,41 @@ library's row menu asked the session to make (`plans/SYMLINKS.md` S5, see
 [the session](./session.md#desktop-shortcuts)). It is classified and
 activated as what it *names*: bundle-ness reads off the target's own leaf, a
 folder or file is opened through the link, and one whose target has gone is
-refused with its reason rather than launched blind.
+refused with its reason rather than launched blind. It is pictured where its
+activation reaches what it names, so an application shortcut shows the
+application's own icon.
+
+An application or command bundle on the desktop shows its own icon, read from
+its manifest and icon file and read again whenever either changes, however it
+arrived — dropped from a window or copied with `cp` in a shell. An item a drop
+is still writing is drawn by the picture its drag carried until its own is
+read.
+
+**Drives.** The desktop shows a drive for each attached volume of a kind the
+file manager's *Show on the desktop* settings tick (`files.desktop.*`,
+`tairix_browse::DesktopDrives`): removable drives alone at first, with the
+view's root `/` counted as the system drive. A drive is drawn, never written
+into the folder, labelled by its volume's title, else its catalog name, and
+kept where it was put under its volume's identity, so it returns there. A
+`/Storage` volume dragged onto the desktop leaves a shortcut instead
+(`DropOperation::Link`): a link to `id::<identity>/` that opens the volume,
+through `tairix_browse::volume::locate`, while it is attached, is drawn faded
+while it is not, and says "“X” is not present" when opened then. A volume a
+shortcut already shows is not drawn again as a drive. The session reads the
+mount list off the loop on each mount-table notice — one read in flight, one
+owed — and repaints only the icons whose presence moved. A drive's menu offers
+*Eject* where its viewer may eject it and *Title* where they may retitle its
+volume (`VolumeFacts::retitling_by`) — its field opening on the title, the
+retitle carried out on the session's file worker as an eject is — and refuses
+*Move to Trash* with the reason. The worker carrying an eject out first holds
+the volume's lane off the icon readers (`lanes::hold`), so the decode under
+way there ends and none begins, and holds the backdrop and slideshow
+pictures read from the volume off the wallpaper preparers
+(`WallpaperDesk::hold_within`) once the one being read ends; then it lets go
+of each listing's watch on the volume and ends the follow of every bundle
+shown there, so nothing the desktop holds refuses it as busy. With no worker
+to hold, a picture or icon read on the session's own loop at that moment can
+still refuse it as busy, and the eject says so.
 
 **A name reads on whatever ground it stands on.** A resting icon wears no
 plate, so its name sits straight on the backdrop. Over a picture, whose light
@@ -262,12 +318,12 @@ halo; over a flat backdrop it takes whichever of near-white or near-black
 contrasts more with that colour, and needs no halo. The shell hands the paint
 the ground it lays down (`Desktop::render`), so the ink changes when the
 picture arrives rather than when the setting does. Only a resting name takes
-that ink (`IconTile::with_label_ink`): a selected, hovered or pressed icon
-keeps the theme's ink on its plate. The halo is clipped to the icon's cell, so
-repainting a cell still covers everything it drew. Each name's halo is blurred
-once and kept until the name, the scale or the theme changes, so repainting
-the layer — every frame of a wallpaper crossfade — lays the halos down again
-rather than blurring each anew.
+that ink (`IconTile::with_label_ink`): a selected icon, or a folder lit for a
+drop, keeps the theme's ink on its plate. The halo is clipped to the icon's
+cell, so repainting a cell still covers everything it drew. Each name's halo is
+blurred once and kept until the name shown, the scale or the theme changes, so
+repainting the layer — every frame of a wallpaper crossfade — lays the halos
+down again rather than blurring each anew.
 
 **A folder no watch can follow.** The column follows its folder through a
 [directory watch](../filesystem/watch.md). A volume that records no changes — a
@@ -276,16 +332,18 @@ folder without one. The desktop says so once, on `stderr` and on the system log
 (`PINBOARD_UNFOLLOWED`, 20036), until a watch joins again. It reads the folder
 again after a save it made there itself (`Desktop::show_made`) and whenever the
 mount table moves (`Desktop::relist_unfollowed`), which arms a watch once the
-volume behind it records changes again. A copy a dragging application makes
-there shows on the next of those reads: nothing tells the desktop when that
-copy ends (`plans/PINBOARD.md` P12).
+volume behind it records changes again, and once more as a drop onto it
+ends, so a copy a dragging application makes there shows when its drop ends
+(`plans/PINBOARD.md` P12).
 
 ## The backdrop menu
 
 A right-click on the backdrop opens the desktop's own menu at the pointer. It
 is a chain like every other menu on the system — the pinboard hands a row model
 to the one [menu service](./menus.md) and keeps no shell of its own — and it
-offers: `Open` (only when the click landed on an icon), `New Folder`, the four
+offers: `Open` (only when the click landed on an icon), `Eject`, `Title` and
+`Move to Trash` (only over a drive, the last always refused with its reason),
+`New Folder`, the four
 sort orders, the two arrangements, `Tidy Up ▸ By Name / By Date / By Size`,
 `Refresh`, `Open Desktop Folder`, and `Change Background…`, with the sort and
 the arrangement in force shown as their group's chosen member and not offered

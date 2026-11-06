@@ -11,11 +11,20 @@ This crate owns the device-level input types the desktop routes:
   modifier keys, the named non-character keys (Enter, the arrows, F1–F12, …),
   and a `Key` that is either a produced `Char` or a `NamedKey`.
 - `ModifierState` / `ModifierKey` / `ModifierSide` — which modifier keys are
-  held. The one definition every keyboard producer shares: each maps its own
-  device's usage or keycode space to a `ModifierKey` + `ModifierSide` and feeds
-  the edge here, so the left/right collapsing rule (releasing one shift key
-  while the other is held is not a change) and the "did the visible set
-  actually change?" test cannot differ between two drivers.
+  held, so the left/right collapsing rule (releasing one shift key while the
+  other is held is not a change) and the "did the visible set actually
+  change?" test cannot differ between two drivers.
+- `KeyboardState` / `KeyEdge` (`keyboard`) — what every keyboard producer
+  shares once it has named a key edge's `tairix_abi` `PhysicalKey` (a HID
+  usage is one already; the virtio-input producer maps its `evdev` keycodes
+  through one table): the held modifiers, the caps and num locks, and the US
+  layout. `edge` answers a change of the held modifiers, the `Key` the layout
+  makes of the key, or nothing, so no two drivers resolve a key differently.
+- `wire` — the one crossing between the wire keyboard vocabulary
+  (`tairix_abi::input`) and this crate's: `key_input_event` reads a delivered
+  `KeyInput` record as its `InputEvent`, and the key, named-key and modifier
+  maps go both ways, so the kernel arbiter, the desktop seat and every
+  application read a record alike.
 - `InputEvent` — what a device reports: the pointer's `PointerMoved`,
   `PointerPressed`, `PointerReleased` (button events act at the pointer's
   current position, which a router tracks from the motion events), the
@@ -75,9 +84,10 @@ crate may not depend on the window manager nor on a sibling userland crate
 (`AGENTS.md` §17.4). Per §6 / §2.2 the shared vocabulary therefore lives in
 `lib/*` — the same reasoning that placed `Point`/`Rect` in `lib/geometry` and
 the colour algebra in `lib/raster`. It is `no_std`, `#![forbid(unsafe_code)]`,
-and depends only on `lib/geometry` (a motion event names a screen `Point`). It
-is depended on by the GUI crates, never the reverse — `Layer::Lib` in the
-§17.4 layering.
+and depends only on `lib/geometry` (a motion event names a screen `Point`) and
+`lib/abi` (the span, pinch phase and physical key it shares with the wire). It
+is depended on by the GUI crates and the keyboard producers, never the reverse
+— `Layer::Lib` in the §17.4 layering.
 
 Keyboard input is modelled alongside the pointer; this is the in-process
 routing vocabulary, while the bytes that cross the kernel boundary are

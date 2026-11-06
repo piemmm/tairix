@@ -14,14 +14,16 @@ use tairix_abi::Errno;
 use tairix_greeter::{Asking, Courier, Verifier};
 use tairix_wm::{Compositor, InputEvent, Point};
 
+use crate::capture::{CaptureChord, CaptureController};
 use crate::clipboard::TextClipboard;
 use crate::drag::{DragEnd, DragPlace, DragStep, DragSurface, OwedReport};
 use crate::elevate::{AuthorisePrompt, Elevator, PromptOutcome};
 use crate::keyboard::{is_secure_attention, KeyInputChannel, KeyboardInputSource};
 use crate::lock::{LockOutcome, ScreenLock, UnlockAnswer};
-use crate::menu::MenuChain;
+use crate::menu::{open_desktop_menu, ChainOwner, MenuChain};
 use crate::saver::Waking;
 use crate::shell::{DesktopShell, InputSource, ShellOutcome, Stopped, Timed};
+use crate::windows::chain_geometry;
 
 /// What routing one outcome decided about the session.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -64,6 +66,9 @@ pub struct Seat<'a> {
     /// The desktop clipboard a menu chain's quick-entry field cuts, copies
     /// and pastes through.
     pub clipboard: &'a mut dyn TextClipboard,
+    /// The screen capture, which takes the capture chords before any holder
+    /// and the seat while its bar, overlay or countdown is up.
+    pub capture: &'a mut CaptureController,
 }
 
 /// Where a seat drain hands what only the session program can act on.
@@ -169,11 +174,22 @@ impl SeatDrain {
                         at_ns: now_ns,
                     }));
                 stopped
+            } else if seat.capture.holds_seat() {
+                drain_capture(seat, pointer, keyboard, router, now_ns)?
             } else if seat.shell.drag_active() {
                 drain_drag(seat, pointer, keyboard, router, now_ns)?
             } else {
-                seat.shell
-                    .pump(pointer, seat.compositor, now_ns, &mut self.outcomes)?
+                let mut clicks = Clicks {
+                    inner: &mut *pointer,
+                    pressed: false,
+                };
+                let stopped =
+                    seat.shell
+                        .pump(&mut clicks, seat.compositor, now_ns, &mut self.outcomes)?;
+                if clicks.pressed && seat.capture.rings_clicks() {
+                    seat.shell.ring_pointer(now_ns);
+                }
+                stopped
             };
             carried |= seat.shell.pointer_carries();
             for outcome in self.outcomes.drain(..) {
@@ -186,7 +202,11 @@ impl SeatDrain {
             }
         }
         let mut typed = false;
-        while !seat.menu.is_open() && !seat.shell.drag_active() && !seat.lock.is_locked() {
+        while !seat.menu.is_open()
+            && !seat.capture.holds_seat()
+            && !seat.shell.drag_active()
+            && !seat.lock.is_locked()
+        {
             let Some((event, record)) = seat.shell.poll_key(keyboard, seat.compositor, now_ns)?
             else {
                 break;
@@ -195,6 +215,9 @@ impl SeatDrain {
                 // What it brings up holds the seat; what follows is its.
                 router.attend(seat, now_ns);
                 break;
+            }
+            if take_chord(seat, keyboard, &record, now_ns) {
+                continue;
             }
             let outcome = Timed {
                 value: seat.shell.apply(event, seat.compositor, now_ns),
@@ -221,6 +244,9 @@ fn route<R: SeatRouter>(
     key: Option<KeyInput>,
     now_ns: u64,
 ) -> Option<SeatWake> {
+    if seat.capture.claims(&outcome.value) {
+        return None;
+    }
     match router.route(seat, outcome, key, now_ns) {
         Routed::Continue => None,
         Routed::EndSession => Some(SeatWake::EndSession),
@@ -282,12 +308,19 @@ where
     }
     handled = false;
     while seat.menu.is_open() {
-        let Some((event, _)) = seat.shell.poll_key(keyboard, seat.compositor, now_ns)? else {
+        let Some((event, record)) = seat.shell.poll_key(keyboard, seat.compositor, now_ns)? else {
             break;
         };
         if is_secure_attention(&event) {
             router.attend(seat, now_ns);
             break;
+        }
+        if CaptureChord::of(&record).is_some() {
+            // The chain's owner hears it end before the capture takes the screen.
+            let _ = seat.menu.dismiss();
+            router.settle_chain(seat, answered, now_ns);
+            take_chord(seat, keyboard, &record, now_ns);
+            return Ok(Stopped::Empty);
         }
         if matches!(event, InputEvent::KeyPressed { .. }) {
             seat.shell
@@ -359,6 +392,125 @@ where
     } else {
         Stopped::AtEdge
     })
+}
+
+/// Take `record` if it is a capture chord, as the capture's: before any
+/// holder sees it, and never repeating.
+fn take_chord<C: KeyInputChannel>(
+    seat: &mut Seat<'_>,
+    keyboard: &mut KeyboardInputSource<C>,
+    record: &KeyInput,
+    now_ns: u64,
+) -> bool {
+    let Some(chord) = CaptureChord::of(record) else {
+        return false;
+    };
+    keyboard.cancel_repeat();
+    seat.capture
+        .chord(chord, now_ns, seat.shell, seat.compositor);
+    true
+}
+
+/// Drain the pointer, then the keys, into the capture holding the seat — its
+/// bar, its overlay or its countdown — until it lets go or opens its menu.
+///
+/// Nothing behind it is reachable while it is up, and its chrome is painted
+/// once for the batch. [`Stopped::AtEdge`] when it let go with pointer input
+/// still queued, which is the next holder's.
+fn drain_capture<P, C, R>(
+    seat: &mut Seat<'_>,
+    pointer: &mut P,
+    keyboard: &mut KeyboardInputSource<C>,
+    router: &mut R,
+    now_ns: u64,
+) -> Result<Stopped, Errno>
+where
+    P: InputSource + ?Sized,
+    C: KeyInputChannel,
+    R: SeatRouter,
+{
+    seat.shell.yield_pointer(seat.compositor);
+    let pointer_empty = loop {
+        if !seat.capture.holds_seat() || seat.menu.is_open() {
+            break false;
+        }
+        let Some(Timed {
+            value: event,
+            at_ns,
+        }) = pointer.poll(now_ns)?
+        else {
+            break true;
+        };
+        if let InputEvent::PointerMoved { to } = event {
+            seat.shell.track_pointer(to, seat.compositor);
+        }
+        seat.capture
+            .pointer(&event, at_ns, seat.shell, seat.compositor);
+        open_capture_menu(seat);
+    };
+    while pointer_empty && seat.capture.holds_seat() && !seat.menu.is_open() {
+        let Some((event, record)) = seat.shell.poll_key(keyboard, seat.compositor, now_ns)? else {
+            break;
+        };
+        if is_secure_attention(&event) {
+            router.attend(seat, now_ns);
+            break;
+        }
+        if !take_chord(seat, keyboard, &record, now_ns) {
+            seat.capture
+                .key(&record, now_ns, seat.shell, seat.compositor);
+        }
+    }
+    seat.capture.settle(seat.shell, seat.compositor);
+    seat.shell.settle(seat.compositor);
+    Ok(if pointer_empty {
+        Stopped::Empty
+    } else {
+        Stopped::AtEdge
+    })
+}
+
+/// Open the Options menu the capture bar asked for as the seat's one chain.
+fn open_capture_menu(seat: &mut Seat<'_>) {
+    let Some((model, placement)) = seat.capture.take_menu() else {
+        return;
+    };
+    let geom = chain_geometry(seat.shell.session(), seat.compositor);
+    let opened = open_desktop_menu(
+        seat.menu,
+        ChainOwner::Capture,
+        model,
+        placement,
+        seat.lock.is_locked(),
+        &geom,
+    );
+    if opened.is_ok() {
+        let _ = seat
+            .shell
+            .present_menu_chain(seat.compositor, seat.menu, None);
+        let _ = seat.shell.present_tooltip(seat.compositor);
+    }
+}
+
+/// The pointer, noting whether a press went by: a recording that shows
+/// clicks rings the pointer at each.
+struct Clicks<'a, P: ?Sized> {
+    inner: &'a mut P,
+    pressed: bool,
+}
+
+impl<P: InputSource + ?Sized> InputSource for Clicks<'_, P> {
+    fn poll(&mut self, now_ns: u64) -> Result<Option<Timed<InputEvent>>, Errno> {
+        let polled = self.inner.poll(now_ns)?;
+        self.pressed |= matches!(
+            polled,
+            Some(Timed {
+                value: InputEvent::PointerPressed { .. },
+                ..
+            })
+        );
+        Ok(polled)
+    }
 }
 
 /// Drain the seat straight into the engaged lock: no motion, click or key

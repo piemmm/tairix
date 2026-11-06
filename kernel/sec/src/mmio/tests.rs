@@ -26,7 +26,7 @@ fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
 
 fn task_with(caps: &[CapabilityId], sink: &RecordingSink) -> TaskCapabilities {
     let grant = caps_of(caps);
-    TaskCapabilities::derive(ProcessId(42), UserId(1000), grant, grant, sink)
+    TaskCapabilities::derive(ProcessId(42), UserId(1000), grant, grant, sink).expect("derived")
 }
 
 /// Simulated register block covering the BAR addresses the tests map.
@@ -158,5 +158,9 @@ fn as_errno_maps_every_mapper_error_into_abi_v1() {
     assert_eq!(
         MmioGateError::Map(MmioError::InvalidMapConfig).as_errno(),
         Errno::OutOfRange
+    );
+    assert_eq!(
+        MmioGateError::Map(MmioError::OutOfMemory).as_errno(),
+        Errno::OutOfMemory
     );
 }

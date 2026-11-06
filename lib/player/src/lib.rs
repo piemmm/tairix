@@ -10,10 +10,11 @@
 //! |---|---|
 //! | [`programme`] | What plays and in what order, named by entries that survive edits. |
 //! | [`engine`] | The engine, with the files, the stream and the decoder's worker as seams. |
+//! | [`probe`] | A track's stream and tags, read in the sandbox without blocking. |
 //! | [`loudness`] | A track's gain from its own tags, held below clipping. |
 //! | [`span`] | A span of time, the frames it holds, and its clock. |
 //! | [`describe`](mod@describe) | How a stream reads to people. |
-//! | `rt` | The live seams and a host's wait-set members (feature `rt`). |
+//! | `rt` | The live seams, a host's wait-set members and the tag reader's drive (feature `rt`). |
 //!
 //! `no_std` with `alloc`, no `unsafe`, and no I/O outside `rt`. The page is
 //! `docs/src/lib/player.md`.
@@ -27,6 +28,7 @@ extern crate alloc;
 pub mod describe;
 pub mod engine;
 pub mod loudness;
+pub mod probe;
 pub mod programme;
 #[cfg(feature = "rt")]
 pub mod rt;
@@ -34,8 +36,9 @@ pub mod span;
 
 pub use describe::describe;
 pub use engine::{
-    Control, Engine, Failure, FileRefusal, Files, Note, Outcome, Settings, Skip, Speaker, Status,
-    Transport,
+    fetch, Control, Engine, Failure, FileRefusal, Files, Note, Outcome, Settings, Skip, Speaker,
+    Status, Transport, Unfetched,
 };
+pub use probe::{TagReader, Tags};
 pub use programme::{Advance, EntryId, Extent, List, Passes, Programme};
 pub use span::Span;

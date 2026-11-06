@@ -62,9 +62,9 @@ pub const PICK_APP_NAME: &str = "view";
 /// The session runs as the logged-in account, so this is what distinguishes
 /// it from every other principal in the audit trail. Matching it is what
 /// makes a witness a statement about *which* process acted, not merely that
-/// some process did. The sibling hand-over vertical
-/// (`tairix-test-handover-qemu-aarch64`) names the same principal, so it
-/// reads this rather than restating the value.
+/// some process did. The sibling hand-over and concurrent-pickers verticals
+/// (`tairix-test-handover-qemu-aarch64`, `tairix-test-filepicks-qemu-aarch64`)
+/// name the same principal, so they read this rather than restating the value.
 pub const SESSION_COMM: &str = "desktop";
 
 /// Process name (`comm`) the kernel attests for the launched viewer — the

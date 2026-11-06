@@ -55,8 +55,8 @@ use tairix_kernel::aarch64::arch_wrapper::Aarch64BinArch;
 use tairix_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
 use tairix_kernel::driver_spawn_loader::{InitCtxDriverProcessSpawn, SpawnDriverLoader};
 use tairix_kernel_core::{
-    AddressSpaceRegistry, InitSpawnCtx, KernelArch, KernelInitSpawner, NULL_PROCESS_WAIT,
-    NULL_SHARED_MEM_FACILITY,
+    AddressSpaceRegistry, InitSpawnCtx, KernelArch, KernelInitSpawner, RandomReserve,
+    NULL_PROCESS_WAIT, NULL_SHARED_MEM_FACILITY,
 };
 use tairix_kernel_irq::{IrqTable, UnsupportedController};
 use tairix_kernel_mem::{
@@ -123,6 +123,8 @@ const FAIL_ASPACE_LEFT: NonZeroU16 = fail_point!(13);
 const FAIL_NOT_IDEMPOTENT: NonZeroU16 = fail_point!(14);
 /// The direct physical map could not be installed over the board's RAM.
 const FAIL_PHYSMAP: NonZeroU16 = fail_point!(15);
+/// The random reserve could not be seeded.
+const FAIL_SEED: NonZeroU16 = fail_point!(16);
 
 /// The test's heap, in bytes.
 const HEAP_SIZE: usize = 4 * 1024 * 1024;
@@ -214,6 +216,7 @@ struct Subsystems {
     caps: &'static RwLock<CapTable>,
     peer_watch: &'static tairix_kernel_core::PeerWatch,
     aspaces: &'static RwLock<AddressSpaceRegistry>,
+    rng: &'static RwLock<Box<dyn RandomReserve + Send + Sync>>,
     irq_table: &'static IrqTable,
 }
 
@@ -239,6 +242,10 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
         BOOT_CPU,
         counter_hz,
     )));
+    // Seeded as the kernel's is, since a child's stack canary is drawn from it.
+    let Ok((reserve, _)) = tairix_kernel_core::random::seeded_reserve(&sched_arch) else {
+        qemu_exit::exit_failure(FAIL_SEED);
+    };
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), sched_arch) else {
         qemu_exit::exit_failure(FAIL_SCHED_NEW);
     };
@@ -254,6 +261,9 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
         caps: Box::leak(Box::new(RwLock::new(CapTable::new()))),
         peer_watch: Box::leak(Box::new(tairix_kernel_core::PeerWatch::new())),
         aspaces: Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new()))),
+        rng: Box::leak(Box::new(RwLock::new(
+            Box::new(reserve) as Box<dyn RandomReserve + Send + Sync>
+        ))),
         irq_table: Box::leak(Box::new(IrqTable::new(0))),
     }
 }
@@ -271,6 +281,11 @@ fn bring_up_board() -> u64 {
     let Ok(fdt) = Fdt::new(DTB_BLOB) else {
         qemu_exit::exit_failure(FAIL_GIC);
     };
+    // The boot seed, captured as the boot path captures it: on a core with
+    // no hardware RNG it is the reserve's one dependable source.
+    if let Some(seed) = fdt.chosen_rng_seed() {
+        tairix_kernel_core::random::capture_boot_entropy_seed(seed);
+    }
     let counter_hz = timer_frequency_hz(&fdt);
     if counter_hz == 0 {
         qemu_exit::exit_failure(FAIL_ZERO_FREQ);
@@ -388,6 +403,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         sys.peer_watch,
         &NULL_PROCESS_WAIT,
         &AARCH64_PROCESS_SPAWN,
+        sys.rng,
     );
     let init_ctx = KernelInitSpawner::new(
         sys.frames,

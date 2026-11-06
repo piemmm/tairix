@@ -33,10 +33,11 @@
 //! producer that calls these — this layer knows only the page table, the
 //! direct map, the frame allocator, and the device-window allocator.
 
-use alloc::collections::BTreeSet;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::ops::Range;
 
+use tairix_collections::{OrderedSet, RangeSet};
 use tairix_log::Sink;
 use tairix_reclaim::MemoryPressure;
 use tairix_sync::SpinLock;
@@ -45,6 +46,7 @@ use crate::anon::{map_anonymous, page_at, unmap_anonymous, AnonError};
 use crate::anon_window::AnonWindowMap;
 use crate::coldscan::{ColdPageScanner, ColdScanError};
 use crate::dma::{CarveDevice, DmaCustodian, DmaError, DmaWindowMap};
+use crate::error::AllocError;
 use crate::filemap::{map_file_page, unmap_file_region};
 use crate::frame::{Frame, FrameAllocator, MemoryClass, PAGE_SIZE};
 use crate::mmio::{MmioError, MmioWindowMap, SharedMemory};
@@ -214,7 +216,8 @@ pub trait LiveUserSpace: Send {
     /// # Errors
     ///
     /// [`LiveSpaceError::Anon`] — [`AnonError::OutOfMemory`] when the heap
-    /// window is exhausted, or the precise placement error otherwise.
+    /// window is exhausted or the region's records cannot be allocated, or
+    /// the precise placement error otherwise.
     fn reserve_anonymous_growable(&mut self, page_count: u64) -> Result<u64, LiveSpaceError>;
 
     /// Reserve exactly the `page_count`-page anonymous region based at the
@@ -403,8 +406,7 @@ pub trait LiveUserSpace: Send {
     ///
     /// [`LiveSpaceError::Dma`] carrying the precise [`DmaError`]: zero
     /// length, an untranslated carve past the max buddy order, no block below
-    /// the limit ([`AllocError::OutOfRange`](crate::AllocError::OutOfRange)
-    /// when no RAM lies below it), frames the machine cannot spare past the
+    /// the limit ([`AllocError::OutOfRange`] when no RAM lies below it), frames the machine cannot spare past the
     /// kernel reserve ([`DmaError::Alloc`]), no virtual slot, a page-table or
     /// direct-map failure, the translation's refusal to map the carve
     /// ([`DeviceTranslation::map`](crate::dma::DeviceTranslation::map)), a
@@ -501,7 +503,11 @@ pub trait LiveUserSpace: Send {
     /// is the object-safe seam `kernel/core` calls to produce that fresh
     /// snapshot without naming the concrete page-table backend `P`
     /// (one freeze definition).
-    fn freeze(&self) -> FrozenAddressSpace;
+    ///
+    /// # Errors
+    ///
+    /// [`AllocError::OutOfMemory`] when the snapshot cannot be allocated.
+    fn freeze(&self) -> Result<FrozenAddressSpace, AllocError>;
 
     /// Translate a single `page` to the `(frame, flags)` the backend
     /// resolves it to, or `None` when it is not mapped.
@@ -676,10 +682,134 @@ pub struct LiveSpace<P: PageTable, M: PhysMap> {
     /// back the headroom of every page that never faulted in, whereas such a
     /// page of a growable region was never committed, so crediting it would
     /// hand the pool budget it never received and let the machine overcommit.
-    growable: BTreeSet<u64>,
+    growable: OrderedSet<u64>,
+    /// Byte extents of the caller-placed (`FIXED`) anonymous reservations:
+    /// outside the heap window, the only memory an anonymous release may
+    /// tear down, so a release by extent never reaches a frame another kind
+    /// of mapping owns.
+    fixed: RangeSet<u64>,
 }
 
 impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
+    /// [`LiveUserSpace::unmap_anonymous`], purging `tier`'s compressed copies
+    /// of the released pages: one left behind would be restored into
+    /// whatever is mapped there next, and its charge would stand until exit.
+    fn release_anonymous(
+        &mut self,
+        base_va: u64,
+        page_count: u64,
+        retire: &mut dyn Retire,
+        tier: Option<&SpinLock<Ramzip>>,
+    ) -> Result<(), LiveSpaceError> {
+        // A file-mapped region is released only through
+        // `release_file_region` (its residency is sparse and its
+        // bookkeeping lives in the file window): an anonymous unmap naming
+        // an address in the file window is the wrong call and fails closed
+        // before any teardown.
+        if self.file.as_ref().is_some_and(|file| file.owns(base_va)) {
+            return Err(LiveSpaceError::Anon(AnonError::NotMapped));
+        }
+        // A base inside the heap window is a non-`FIXED` placement: every
+        // page of the range must be live in the window before any teardown,
+        // so a bad (base, len) for an in-window address fails closed without
+        // unmapping a neighbour's pages. Pages rather than a whole placement,
+        // because the anonymous ABI releases what the caller names — a
+        // program that grew a region over several calls hands back the part
+        // of it that came free. A `FIXED` base (outside the window) has no
+        // placement record and is torn down by extent.
+        let placed = self.anon.owns(base_va);
+        let extent = fixed_extent(base_va, page_count)?;
+        if placed {
+            self.anon.prepare_release_pages(base_va, page_count)?;
+        } else {
+            // Elsewhere only a caller-placed reservation held whole is
+            // released, so nothing another kind of mapping owns is reached.
+            if self.fixed.first_gap(extent.clone()).is_some() {
+                return Err(LiveSpaceError::Anon(AnonError::NotMapped));
+            }
+            self.fixed
+                .try_reserve(1)
+                .map_err(|_| LiveSpaceError::Anon(AnonError::OutOfMemory))?;
+        }
+        let frames = self.frames;
+        // Count the frames actually reclaimed: a demand-paged region is
+        // sparsely resident, so the resident count tells us how many of its
+        // pages ever faulted in. The remainder are still committed-unbacked
+        // reservations whose physical headroom must be returned to the pool.
+        let mut resident = 0u64;
+        unmap_anonymous(
+            &mut self.space,
+            &self.physmap,
+            base_va,
+            page_count,
+            retire,
+            &mut |frame| {
+                resident = resident.saturating_add(1);
+                let _ = frames.free(frame);
+            },
+        )?;
+        // Release the reservation for every page that never became resident
+        // (an eager, fully-resident region leaves nothing to release). The
+        // resident pages already left the committed tally when they faulted
+        // in; their frames were just freed above.
+        //
+        // A growable region's unbacked pages were never committed at all, so
+        // crediting them would hand the pool budget it never received — the
+        // machine would then believe it has more headroom than it does and
+        // overcommit. Whatever such a region *did* commit was consumed by the
+        // growth step that mapped it; anything an interrupted step left
+        // outstanding is returned when the space is dropped.
+        let unbacked = if self.growable.remove(&base_va) {
+            0
+        } else {
+            page_count.saturating_sub(resident)
+        };
+        if unbacked > 0 {
+            self.frames.uncommit(unbacked);
+            self.committed_unbacked = self.committed_unbacked.saturating_sub(unbacked);
+        }
+        if placed {
+            // Prepared above, so the release is not refused.
+            let released = self.anon.release_pages(base_va, page_count);
+            debug_assert!(released.is_ok(), "a prepared release was refused");
+        } else {
+            // Room for the split was made above.
+            let removed = self.fixed.remove(extent);
+            debug_assert!(removed.is_ok(), "a reserved split was refused");
+        }
+        if let Some(tier) = tier {
+            tier.lock()
+                .purge_range(self.space_id, base_va / PAGE_SIZE as u64, page_count);
+        }
+        Ok(())
+    }
+
+    /// Whether `extent`, the `page_count` pages from `base_va`, touches a
+    /// window, a caller-placed reservation, or a mapped page of this space.
+    fn overlaps_held(&self, base_va: u64, page_count: u64, extent: &Range<u64>) -> bool {
+        let windows = [
+            Some(self.mmio.span()),
+            Some(self.anon.span()),
+            Some(self.dma.span()),
+            Some(self.shared.span()),
+            self.file.as_ref().map(AnonWindowMap::span),
+        ];
+        if windows
+            .into_iter()
+            .flatten()
+            .any(|window| window.start < extent.end && extent.start < window.end)
+        {
+            return true;
+        }
+        if self.fixed.first_overlap(extent.clone()).is_some() {
+            return true;
+        }
+        let (Ok(first), Ok(last)) = (page_at(base_va, 0), page_at(base_va, page_count - 1)) else {
+            return true;
+        };
+        self.space.next_live(first, last).is_some()
+    }
+
     /// Retain `space` as a live, mutable user address space.
     ///
     /// `tlb` is how an entry this space clears is discarded on the other CPUs
@@ -701,7 +831,8 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
     ///
     /// [`MmioError::InvalidMapConfig`] if any window is misconfigured
     /// (zero pages, a base that is not page-aligned, or a size that
-    /// overflows the address space).
+    /// overflows the address space). The space is torn down first, so the
+    /// frames and page tables it holds go back rather than with it.
     // Each argument is a *distinct* piece of the retained space the
     // architecture spawn producer threads explicitly — the live arch space,
     // the direct map, the frame allocator, and the three guarded windows'
@@ -726,31 +857,32 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
         file_window_base: VirtAddr,
         file_window_pages: usize,
     ) -> Result<Self, MmioError> {
-        let mmio = MmioWindowMap::new(mmio_window_base, mmio_window_pages)?;
-        // An anonymous-heap-window config error is the same class of fault as
-        // an MMIO-window one; fold it onto `InvalidMapConfig` so the spawn
-        // producer has one constructor error to handle.
-        let anon = AnonWindowMap::new(anon_window_base, anon_window_pages)
-            .map_err(|_| MmioError::InvalidMapConfig)?;
-        // A DMA-window config error is likewise folded onto `InvalidMapConfig`
-        // (the [`DmaWindowMap`] constructor returns its own `DmaError`).
-        let dma = DmaWindowMap::new(dma_window_base, dma_window_pages)
-            .map_err(|_| MmioError::InvalidMapConfig)?;
-        // The shared-memory window reuses the guarded-window mechanism, in
-        // its own virtual range distinct from the device-window range so the
-        // two never collide.
-        let shared = MmioWindowMap::new(shared_window_base, shared_window_pages)?;
-        // The file-mapping window is the one window that may legitimately be
-        // empty: a degenerate configuration with no address space left above
-        // the heap window still spawns, and file mapping fails closed at
-        // reservation time. A non-empty window is validated like the others.
-        let file = if file_window_pages == 0 {
-            None
-        } else {
-            Some(
-                AnonWindowMap::new(file_window_base, file_window_pages)
-                    .map_err(|_| MmioError::InvalidMapConfig)?,
-            )
+        // Every window is checked before the space is retained, each refusal
+        // the one configuration fault the spawn producer handles. The
+        // shared-memory window reuses the guarded-window mechanism in a range
+        // of its own, so it never collides with the device window. The
+        // file-mapping window alone may be empty: a degenerate configuration
+        // with no address space left above the heap window still spawns, and
+        // file mapping fails closed at reservation time.
+        let windows = (
+            MmioWindowMap::new(mmio_window_base, mmio_window_pages),
+            AnonWindowMap::new(anon_window_base, anon_window_pages),
+            DmaWindowMap::new(dma_window_base, dma_window_pages),
+            MmioWindowMap::new(shared_window_base, shared_window_pages),
+            if file_window_pages == 0 {
+                Ok(None)
+            } else {
+                AnonWindowMap::new(file_window_base, file_window_pages).map(Some)
+            },
+        );
+        let (Ok(mmio), Ok(anon), Ok(dma), Ok(shared), Ok(file)) = windows else {
+            // SAFETY: the space was handed over by value and nothing retains
+            // it, so nothing can make it active again or reach into its
+            // tables; every entry is flushed here before its frame goes, and a
+            // CPU still holding its root (PID 1's seam builds into the active
+            // space) is re-parked by the port's reclaim before the tables go.
+            unsafe { release_space(&mut space, &physmap, frames, false, |_| false) };
+            return Err(MmioError::InvalidMapConfig);
         };
         let context = Arc::clone(tlb.context());
         space.attach_tlb(tlb);
@@ -768,7 +900,8 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
             file,
             scanner: ColdPageScanner::new(),
             committed_unbacked: 0,
-            growable: BTreeSet::new(),
+            growable: OrderedSet::new(),
+            fixed: RangeSet::new(),
         })
     }
 
@@ -881,68 +1014,7 @@ where
         page_count: u64,
         retire: &mut dyn Retire,
     ) -> Result<(), LiveSpaceError> {
-        // A file-mapped region is released only through
-        // `release_file_region` (its residency is sparse and its
-        // bookkeeping lives in the file window): an anonymous unmap naming
-        // an address in the file window is the wrong call and fails closed
-        // before any teardown.
-        if self.file.as_ref().is_some_and(|file| file.owns(base_va)) {
-            return Err(LiveSpaceError::Anon(AnonError::NotMapped));
-        }
-        // A base inside the heap window is a non-`FIXED` placement: every
-        // page of the range must be live in the window before any teardown,
-        // so a bad (base, len) for an in-window address fails closed without
-        // unmapping a neighbour's pages. Pages rather than a whole placement,
-        // because the anonymous ABI releases what the caller names — a
-        // program that grew a region over several calls hands back the part
-        // of it that came free. A `FIXED` base (outside the window) has no
-        // placement record and is torn down by extent.
-        let placed = self.anon.owns(base_va);
-        if placed {
-            self.anon.validate_pages(base_va, page_count)?;
-        }
-        let frames = self.frames;
-        // Count the frames actually reclaimed: a demand-paged region is
-        // sparsely resident, so the resident count tells us how many of its
-        // pages ever faulted in. The remainder are still committed-unbacked
-        // reservations whose physical headroom must be returned to the pool.
-        let mut resident = 0u64;
-        unmap_anonymous(
-            &mut self.space,
-            &self.physmap,
-            base_va,
-            page_count,
-            retire,
-            &mut |frame| {
-                resident = resident.saturating_add(1);
-                let _ = frames.free(frame);
-            },
-        )?;
-        // Release the reservation for every page that never became resident
-        // (an eager, fully-resident region leaves nothing to release). The
-        // resident pages already left the committed tally when they faulted
-        // in; their frames were just freed above.
-        //
-        // A growable region's unbacked pages were never committed at all, so
-        // crediting them would hand the pool budget it never received — the
-        // machine would then believe it has more headroom than it does and
-        // overcommit. Whatever such a region *did* commit was consumed by the
-        // growth step that mapped it; anything an interrupted step left
-        // outstanding is returned when the space is dropped.
-        let unbacked = if self.growable.remove(&base_va) {
-            0
-        } else {
-            page_count.saturating_sub(resident)
-        };
-        if unbacked > 0 {
-            self.frames.uncommit(unbacked);
-            self.committed_unbacked = self.committed_unbacked.saturating_sub(unbacked);
-        }
-        if placed {
-            // Validated above, so the pages are held; ignore the result.
-            let _ = self.anon.release_pages(base_va, page_count);
-        }
-        Ok(())
+        self.release_anonymous(base_va, page_count, retire, crate::ramzip::global())
     }
 
     fn reserve_anonymous(&mut self, page_count: u64) -> Result<u64, LiveSpaceError> {
@@ -974,7 +1046,11 @@ where
         // Address space only: the caller commits as the region grows, so
         // nothing is charged against the no-overcommit budget here.
         let base_va = self.anon.allocate(page_count)?;
-        self.growable.insert(base_va);
+        if self.growable.try_insert(base_va).is_err() {
+            // Just placed, so the release matches.
+            let _ = self.anon.release(base_va, page_count);
+            return Err(LiveSpaceError::Anon(AnonError::OutOfMemory));
+        }
         Ok(base_va)
     }
 
@@ -983,23 +1059,27 @@ where
         base_va: u64,
         page_count: u64,
     ) -> Result<u64, LiveSpaceError> {
-        // A caller-placed (`FIXED`) reservation records no window entry: it
-        // is torn down by extent, and the fault path fails closed if a page
-        // it backs collides with resident memory. Validate the shape first,
-        // *before* charging the commitment, so a malformed request reserves
-        // nothing.
-        if page_count == 0 {
-            return Err(LiveSpaceError::Anon(AnonError::ZeroLength));
+        // A caller-placed (`FIXED`) reservation claims address space no
+        // mapping, window or other reservation holds, so the release that
+        // tears it down by extent can only reach pages the anonymous path
+        // backed there. Validate first, before charging the commitment.
+        let extent = fixed_extent(base_va, page_count)?;
+        if self.overlaps_held(base_va, page_count, &extent) {
+            return Err(LiveSpaceError::Anon(AnonError::Overlap));
         }
-        if !base_va.is_multiple_of(crate::frame::PAGE_SIZE as u64) {
-            return Err(LiveSpaceError::Anon(AnonError::Unaligned));
-        }
+        self.fixed
+            .try_reserve(1)
+            .map_err(|_| LiveSpaceError::Anon(AnonError::OutOfMemory))?;
         // No-overcommit admission (see `reserve_anonymous`): reserve physical
         // headroom for the whole extent up front, so a first touch is
         // guaranteed a frame.
         self.frames
             .commit(page_count)
             .map_err(|_| LiveSpaceError::Anon(AnonError::OutOfMemory))?;
+        if self.fixed.insert(extent).is_err() {
+            self.frames.uncommit(page_count);
+            return Err(LiveSpaceError::Anon(AnonError::OutOfMemory));
+        }
         self.committed_unbacked = self.committed_unbacked.saturating_add(page_count);
         Ok(base_va)
     }
@@ -1200,7 +1280,7 @@ where
             .map_err(LiveSpaceError::from)
     }
 
-    fn freeze(&self) -> FrozenAddressSpace {
+    fn freeze(&self) -> Result<FrozenAddressSpace, AllocError> {
         // One freeze definition lives on `AddressSpace`; this only erases the
         // backend `P` for the registry.
         self.space.freeze()
@@ -1367,6 +1447,78 @@ where
     }
 }
 
+/// The byte extent of the `page_count` pages from `base_va`, checked.
+fn fixed_extent(base_va: u64, page_count: u64) -> Result<Range<u64>, LiveSpaceError> {
+    if page_count == 0 {
+        return Err(LiveSpaceError::Anon(AnonError::ZeroLength));
+    }
+    if !base_va.is_multiple_of(PAGE_SIZE as u64) {
+        return Err(LiveSpaceError::Anon(AnonError::Unaligned));
+    }
+    page_count
+        .checked_mul(PAGE_SIZE as u64)
+        .and_then(|len| base_va.checked_add(len))
+        .map(|end| base_va..end)
+        .ok_or(LiveSpaceError::Anon(AnonError::Overflow))
+}
+
+/// Clear every page `space` records, zeroing and releasing each frame `kept`
+/// does not claim, then return the space's page-table frames: the one
+/// teardown walk, for a live space's drop and for a space refused before one
+/// was made.
+///
+/// Every page left is backed by a frame drawn from `frames`; it is zeroed, so
+/// no dead process's bytes are recycled readable, and a frame the direct map
+/// cannot reach is leaked rather than freed unscrubbed. The walk allocates
+/// nothing, so a teardown under memory pressure cannot fail for want of the
+/// memory it is about to return.
+///
+/// # Safety
+///
+/// `space` never becomes active again and nothing else reaches into its
+/// tables; a CPU still holding its root is re-parked by the port's reclaim
+/// before the tables go. When `quiet`, no CPU may still use a translation of
+/// it, since its entries are then cleared unflushed.
+unsafe fn release_space<P: PageTable>(
+    space: &mut AddressSpace<P>,
+    physmap: &dyn PhysMap,
+    frames: &FrameAllocator,
+    quiet: bool,
+    kept: impl Fn(VirtAddr) -> bool,
+) {
+    let mut release = |frame| {
+        let _ = frames.free(frame);
+    };
+    let mut unpublished = Unpublished;
+    let reach = if quiet { None } else { space.tlb().cloned() };
+    let mut retiring = Retiring::new(reach, &mut unpublished, physmap, &mut release);
+    loop {
+        let next = if quiet {
+            // SAFETY: the caller's contract: no CPU uses a translation of the
+            // space again.
+            unsafe { space.clear_lowest() }
+        } else {
+            space.unmap_lowest()
+        };
+        let Some((page, cleared)) = next else {
+            break;
+        };
+        // The page was recorded live, so the unmap can only fail on a
+        // backend defect; declining to touch the frame is the only safe
+        // recovery (never a panic).
+        let Ok(frame) = cleared else {
+            continue;
+        };
+        if !kept(page.start()) {
+            retiring.hold(page.start().as_u64(), frame);
+        }
+    }
+    drop(retiring);
+    // SAFETY: the caller's contract: the space never becomes active again and
+    // nothing else reaches into its tables.
+    unsafe { space.reclaim_table_frames() };
+}
+
 impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
     /// Reclaim the dead task's **entire** memory footprint — the fix for
     /// the login/logout RAM leak (`plans/APPS.md` I2): before this, exit
@@ -1392,76 +1544,33 @@ impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
                 .surrender_into(&mut self.space, self.frames, &self.physmap, &custodian);
         }
 
-        // 2. Release every remaining tracked mapping. A page inside the
-        //    device-window or shared-memory window is only *unmapped* —
-        //    its frame belongs to a device (MMIO registers) or to the
-        //    shared-region registry, which zeroes and frees region frames
-        //    itself once the owner and every grantee have released them. A
-        //    page left in the DMA window (an unmap that failed above) is
-        //    unmapped likewise: its frame is the custodian's now.
-        //    Every other page (image segments, user stack, startup block,
-        //    anonymous heap — `FIXED` and placed alike) is backed by a
-        //    frame this task drew from the kernel allocator: it is zeroed
-        //    (no dead process's bytes are ever recycled readable) and
-        //    freed. A frame the direct map cannot reach is leaked rather
-        //    than freed unscrubbed (fail closed; unreachable in practice
-        //    — every allocator frame lies in the direct map).
-        //    The walk allocates nothing, so a teardown under memory pressure
-        //    cannot fail for want of the memory it is about to return.
+        // 2. Release every remaining tracked mapping, then the page tables.
+        //    A page inside the device-window or shared-memory window is only
+        //    *unmapped* — its frame belongs to a device (MMIO registers) or
+        //    to the shared-region registry, which zeroes and frees region
+        //    frames itself once the owner and every grantee have released
+        //    them. A page left in the DMA window (an unmap that failed above)
+        //    is unmapped likewise: its frame is the custodian's now.
         //
         //    A space no CPU runs needs no flush at all: a CPU that ran it
         //    keeps its entries only under a tag it discards before it gives
         //    the tag to another space, and this one never runs again.
         let quiet = self.context.is_idle();
-        let frames = self.frames;
-        let mut release = |frame| {
-            let _ = frames.free(frame);
-        };
-        let mut unpublished = Unpublished;
-        let reach = if quiet {
-            None
-        } else {
-            self.space.tlb().cloned()
-        };
-        let mut retiring = Retiring::new(reach, &mut unpublished, &self.physmap, &mut release);
-        loop {
-            let next = if quiet {
-                // SAFETY: no CPU runs the space and none can come to — the
-                // last handle a thread could run it through is gone — so no
-                // CPU can use a translation of it again.
-                unsafe { self.space.clear_lowest() }
-            } else {
-                self.space.unmap_lowest()
-            };
-            let Some((page, cleared)) = next else {
-                break;
-            };
-            // The page was recorded live, so the unmap can only fail on a
-            // backend defect; declining to touch the frame is the only
-            // safe recovery (never a panic).
-            let Ok(frame) = cleared else {
-                continue;
-            };
-            if self.mmio.contains(page.start())
-                || self.shared.contains(page.start())
-                || self.dma.contains(page.start())
-            {
-                continue;
-            }
-            retiring.hold(page.start().as_u64(), frame);
+        let (mmio, shared, dma) = (&self.mmio, &self.shared, &self.dma);
+        // SAFETY: the owning task has exited and the dispatcher parked every
+        // CPU that ran it off its root at switch-back (the port's reclaim
+        // additionally re-parks defensively if the calling CPU still holds
+        // this root), and when `quiet` no CPU runs the space and none can come
+        // to, the last handle a thread could run it through being gone;
+        // `self` is being dropped, so no other reference into the tables is
+        // live.
+        unsafe {
+            release_space(&mut self.space, &self.physmap, self.frames, quiet, |va| {
+                mmio.contains(va) || shared.contains(va) || dma.contains(va)
+            });
         }
-        drop(retiring);
 
-        // 3. Return the page-table frames themselves — the root and every
-        //    intermediate table — to the source they were drawn from.
-        // SAFETY: the owning task has exited and the dispatcher parked
-        // every CPU that ran it off its root at switch-back (the port's
-        // reclaim additionally re-parks defensively if the calling CPU
-        // still holds this root); `self` is being dropped, so no other
-        // reference into the tables is live.
-        unsafe { self.space.reclaim_table_frames() };
-
-        // 4. Return this space's outstanding no-overcommit reservations —
+        // 3. Return this space's outstanding no-overcommit reservations —
         //    the pages a `mem_map`/stack commit reserved physical headroom
         //    for but which never faulted in — to the global budget. Their
         //    resident siblings already left the tally as they faulted in and
@@ -1626,6 +1735,7 @@ mod tests {
     fn unmap_anonymous_releases_the_whole_region() {
         let mut live = live_space!();
         let base = 0x4000;
+        live.reserve_anonymous_at(base, 4).expect("reserve");
         live.map_anonymous(base, 4).expect("map");
         assert_eq!(live.space().mapped_pages(), 4);
         live.unmap_anonymous(base, 4, &mut Unpublished)
@@ -1640,6 +1750,7 @@ mod tests {
         // A demand-paged region: two of the three pages ever faulted in (the
         // fault path backs one page at a time via `map_anonymous`), so the
         // third is a never-touched reservation page.
+        live.reserve_anonymous_at(base, 3).expect("reserve");
         live.map_anonymous(base, 2).expect("map");
         // Releasing the whole three-page range reclaims the two resident
         // pages and skips the unbacked one — sparse residency is not an
@@ -1647,6 +1758,100 @@ mod tests {
         live.unmap_anonymous(base, 3, &mut Unpublished)
             .expect("sparse release");
         assert_eq!(live.space().mapped_pages(), 0);
+    }
+
+    /// A caller-placed reservation claims only address space nothing else
+    /// holds, so the release that tears it down by extent never frees a frame
+    /// another kind of mapping owns.
+    #[test]
+    fn a_fixed_reservation_over_held_memory_is_refused() {
+        let mut live = live_space!();
+        let page = PAGE_SIZE as u64;
+        let overlap = Err(LiveSpaceError::Anon(AnonError::Overlap));
+        live.reserve_anonymous_at(0x4000, 2)
+            .expect("free address space");
+        for (at, pages) in [(0x4000, 1), (0x5000, 4), (0x3000, 2)] {
+            assert_eq!(live.reserve_anonymous_at(at, pages), overlap, "{at:#x}");
+        }
+        let image = 0x10_0000;
+        live.map_anonymous(image, 1)
+            .expect("a page mapped by another path");
+        assert_eq!(live.reserve_anonymous_at(image - page, 2), overlap);
+        for window in [
+            MMIO_WINDOW_BASE,
+            ANON_WINDOW_BASE,
+            DMA_WINDOW_BASE,
+            SHARED_WINDOW_BASE,
+            FILE_WINDOW_BASE,
+        ] {
+            assert_eq!(live.reserve_anonymous_at(window, 1), overlap, "{window:#x}");
+            assert_eq!(
+                live.reserve_anonymous_at(window - page, 2),
+                overlap,
+                "{window:#x}"
+            );
+        }
+        assert_eq!(
+            live.reserve_anonymous_at(0x6000, 2),
+            Ok(0x6000),
+            "beside one is free"
+        );
+    }
+
+    /// A heap in a region outside every window — as the spawn layout sets one
+    /// aside between the heap window and the file window — grows by `FIXED`
+    /// maps at its top, hands its top back, and grows again, every step
+    /// granted.
+    #[test]
+    fn a_heap_between_the_windows_grows_and_trims_at_its_top() {
+        let mut live = live_space!();
+        let page = PAGE_SIZE as u64;
+        let region = 0x2_8000_0000;
+        assert!(region > SHARED_WINDOW_BASE + SHARED_WINDOW_PAGES as u64 * page);
+        assert!(region + 16 * page < FILE_WINDOW_BASE);
+        let mut top = region;
+        for pages in [1, 2, 4] {
+            assert_eq!(live.reserve_anonymous_at(top, pages), Ok(top));
+            top += pages * page;
+        }
+        live.unmap_anonymous(top - 5 * page, 5, &mut Unpublished)
+            .expect("the top handed back");
+        top -= 5 * page;
+        assert_eq!(live.reserve_anonymous_at(top, 3), Ok(top), "grown again");
+        live.unmap_anonymous(region, 5, &mut Unpublished)
+            .expect("all of it");
+        assert_eq!(
+            live.reserve_anonymous_at(region, 1),
+            Ok(region),
+            "the region is whole again"
+        );
+    }
+
+    /// A release outside the heap window reaches only a caller-placed
+    /// reservation held whole: anything else is refused before a page goes.
+    #[test]
+    fn an_unmap_outside_a_held_fixed_reservation_frees_nothing() {
+        let mut live = live_space!();
+        let image = 0x10_0000;
+        live.map_anonymous(image, 2)
+            .expect("pages mapped by another path");
+        let not_mapped = Err(LiveSpaceError::Anon(AnonError::NotMapped));
+        assert_eq!(live.unmap_anonymous(image, 2, &mut Unpublished), not_mapped);
+        assert_eq!(live.space().mapped_pages(), 2, "nothing was torn down");
+        live.reserve_anonymous_at(0x4000, 2).expect("reserved");
+        assert_eq!(
+            live.unmap_anonymous(0x4000, 3, &mut Unpublished),
+            not_mapped
+        );
+        live.unmap_anonymous(0x4000, 1, &mut Unpublished)
+            .expect("part of it");
+        assert_eq!(
+            live.unmap_anonymous(0x4000, 1, &mut Unpublished),
+            not_mapped
+        );
+        live.unmap_anonymous(0x5000, 1, &mut Unpublished)
+            .expect("the rest");
+        assert_eq!(live.space().mapped_pages(), 2);
     }
 
     #[test]
@@ -1933,6 +2138,21 @@ mod tests {
         live.unmap_anonymous(held, 4, &mut Unpublished)
             .expect("release the reservation");
         assert_eq!(frames.committed_frames(), 0);
+    }
+
+    #[test]
+    fn a_growable_reservation_with_no_memory_for_its_mark_places_nothing() {
+        let mut live = live_space!();
+        // The placement's record is granted; the growable mark is refused.
+        let refused =
+            tairix_fuzzseed::meter::refusing_after(1, || live.reserve_anonymous_growable(8));
+        assert_eq!(refused, Err(LiveSpaceError::Anon(AnonError::OutOfMemory)));
+        assert_eq!(live.anon.live(), 0, "the placement is given back");
+        assert!(live.growable.is_empty());
+        let base = live
+            .reserve_anonymous_growable(8)
+            .expect("heap window has room");
+        assert!(live.growable.contains(&base));
     }
 
     #[test]
@@ -2462,6 +2682,53 @@ mod tests {
         assert_eq!(frames.free_frames(), before);
     }
 
+    /// A window the live space refuses tears down the space it was handed,
+    /// so every frame that space maps goes back, zeroed.
+    ///
+    /// Regression: the refusal dropped the space bare, which keeps its frames
+    /// and page tables for good.
+    #[test]
+    fn a_refused_window_returns_the_frames_its_space_maps() {
+        let (frames, simmap) = backing!();
+        let before = frames.free_frames();
+        let frame = frames.alloc(MemoryClass::UserAnon).expect("a free frame");
+        fill_phys(simmap, frame.start(), PAGE_SIZE, 0xA5);
+        let mut space = AddressSpace::new(HostPageTable::new());
+        space
+            .map(
+                Page::from_addr(VirtAddr::new(0x4000)).expect("aligned"),
+                frame,
+                crate::vmm::MapFlags::READ | crate::vmm::MapFlags::USER,
+            )
+            .expect("maps");
+        // A device window of no pages is the configuration fault.
+        let refused = LiveSpace::new(
+            space,
+            host_tlb(),
+            SharedSim(simmap),
+            frames,
+            VirtAddr::new(MMIO_WINDOW_BASE),
+            0,
+            VirtAddr::new(ANON_WINDOW_BASE),
+            ANON_WINDOW_PAGES,
+            VirtAddr::new(DMA_WINDOW_BASE),
+            DMA_WINDOW_PAGES,
+            VirtAddr::new(SHARED_WINDOW_BASE),
+            SHARED_WINDOW_PAGES,
+            VirtAddr::new(FILE_WINDOW_BASE),
+            FILE_WINDOW_PAGES,
+        );
+        assert!(matches!(
+            refused,
+            Err(crate::mmio::MmioError::InvalidMapConfig)
+        ));
+        assert_eq!(frames.free_frames(), before, "the space's frame went back");
+        assert!(
+            phys_is_zero(simmap, frame.start(), PAGE_SIZE),
+            "and was zeroed first"
+        );
+    }
+
     #[test]
     fn free_dma_releases_a_carve_and_repeated_cycles_reclaim_fully() {
         // `free_dma` is the per-buffer release the `dma_free` syscall drives:
@@ -2920,6 +3187,41 @@ mod tests {
         /// The tier entry count, read through the shared stats projection.
         fn entries(tier: &SpinLock<Ramzip>) -> u64 {
             crate::ramzip::stats_of(&tier.lock()).entries
+        }
+
+        /// Releasing an anonymous range purges the tier's copies of its
+        /// pages: one left behind would be restored, old contents and all,
+        /// into the next mapping placed there.
+        #[test]
+        fn a_released_range_leaves_no_compressed_copy_to_restore() {
+            let (mut live, frames, pressure, _simmap) = env!();
+            let tier = tier();
+            let sink = NullSink;
+            let base = live.map_anonymous_placed(4).expect("place anon region");
+            let kept = live.map_anonymous_placed(1).expect("a neighbour");
+            press_to(frames, &pressure, PressureBand::Moderate);
+            let summary = live.ramzip_reclaim(
+                &tier,
+                &pressure,
+                0,
+                5,
+                PageCandidate::cold_anonymous(),
+                &sink,
+                &mut Unpublished,
+            );
+            assert_eq!(summary.compressed, 5);
+            live.release_anonymous(base, 4, &mut Unpublished, Some(&tier))
+                .expect("released");
+            assert_eq!(entries(&tier), 1, "only the neighbour's copy is left");
+            assert_eq!(live.reserve_anonymous(4), Ok(base), "placed where it was");
+            assert_eq!(
+                live.ramzip_fault_in(&tier, base, &sink),
+                RamzipFaultOutcome::NoEntry
+            );
+            assert_eq!(
+                live.ramzip_fault_in(&tier, kept, &sink),
+                RamzipFaultOutcome::Handled
+            );
         }
 
         #[test]

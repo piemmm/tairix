@@ -35,6 +35,16 @@ pub(crate) struct FakeLive {
     pub(crate) next: Option<LiveSpaceError>,
 }
 
+/// A process space over a fresh [`FakeLive`], for a host test that admits a
+/// task its process space must go with but never maps through it.
+pub(crate) fn fake_process_space() -> Arc<crate::procspace::ProcessSpace> {
+    Arc::new(crate::procspace::ProcessSpace::new(
+        alloc::boxed::Box::new(FakeLive::default()),
+        crate::test_arch::inert_process_resume(),
+        &crate::test_arch::NEVER_ENTER_USER,
+    ))
+}
+
 /// The physical base a DMA carve reports back from the fake, so the
 /// producer test can assert the device address flows through unchanged.
 pub(crate) const DMA_PHYS: u64 = 0x4001_0000;
@@ -251,7 +261,7 @@ impl LiveUserSpace for FakeLive {
         }
     }
 
-    fn freeze(&self) -> FrozenAddressSpace {
+    fn freeze(&self) -> Result<FrozenAddressSpace, tairix_kernel_mem::AllocError> {
         // The producer-routing tests never inspect the snapshot; an empty
         // frozen space satisfies the trait. The re-freeze behaviour is
         // exercised end-to-end against a real `LiveSpace` in `aspace`.

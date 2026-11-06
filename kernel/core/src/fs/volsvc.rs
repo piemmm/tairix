@@ -27,7 +27,9 @@ use tairix_abi::fsserve::ServeOffer;
 use tairix_abi::imageattach::{ImageAttach, ImageAttachReply};
 use tairix_abi::netattach::{AttachReply, FsserveCtl, NetworkAttach, NetworkOffer, OfferId};
 use tairix_abi::sysinfo::VolumeRemovalRecord;
-use tairix_abi::volume::{VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeInfo};
+use tairix_abi::volume::{
+    VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeInfo, VolumeReplayRequest,
+};
 use tairix_abi::{AppIdentity, CapabilityId, CapabilityQuery, DriverError, Errno, ProcId};
 use tairix_kernel_ipc::CallEndpoint;
 
@@ -125,19 +127,21 @@ impl Drop for ImageDirectory {
 /// and the caller's endpoint/window grants; the service decides what turns on
 /// the volume itself — who may detach it, what presentation a principal may
 /// ask for — and re-validates everything against live state (the endpoint,
-/// the window, the device geometry, name/identity collisions), failing
-/// closed.
+/// the window, the device geometry, a name taken, a medium attached already),
+/// failing closed.
 pub trait VolumeService: Sync {
     /// Attach a filesystem to the runtime block source `request` names,
-    /// mount it under its catalog view location, and publish its stable
-    /// identity.
+    /// mount it under its catalog view location, and publish it under its
+    /// key: its stable identity, or for a twin of a volume published under
+    /// that, a key of its own, the twin catalogued beside it.
     ///
     /// # Errors
     ///
     /// A stable [`Errno`] for every refusal: an unreachable endpoint or
-    /// window, an unusable geometry, an unmountable volume, a name or
-    /// identity collision, or [`Errno::NotImplemented`] before a service
-    /// is installed.
+    /// window, an unusable geometry, an unmountable volume, a name a volume
+    /// of another identity holds, the same medium attached already, an
+    /// identity attached as often as it may be, or [`Errno::NotImplemented`]
+    /// before a service is installed.
     ///
     /// `publisher` is the hardware node the caller was loaded for, which the
     /// volume's own node is published under.
@@ -350,14 +354,17 @@ pub trait VolumeService: Sync {
 
     /// Title the volume published as `volume_id` `title`, for `caller`: written
     /// as its filesystem's label and made durable, the catalog name it is shown
-    /// under left as it is.
+    /// under left as it is. A disk image's volume is its owner's alone to
+    /// retitle; a device's volume is the mount authority's, and a removable
+    /// one also the user at the seat's where they may write its root.
     ///
     /// # Errors
     ///
     /// [`Errno::NotFound`] for no volume of that identity;
-    /// [`Errno::NotSupported`] for one no disk-image file holds, or whose
-    /// format keeps no title; [`Errno::PermissionDenied`] for a caller other
-    /// than the principal it was attached for; [`Errno::Busy`] for one another
+    /// [`Errno::NotSupported`] for a share, whose title is its server's, a
+    /// boot volume, or a format that keeps no title;
+    /// [`Errno::PermissionDenied`] for a caller none of those authorities
+    /// reaches it for; [`Errno::Busy`] for one another
     /// operation holds; [`Errno::DeviceOffline`] for one no driver serves;
     /// [`Errno::ReadOnly`] for one that takes no writes; the driver's refusal
     /// of the title ([`Errno::LengthOutOfRange`] past what its format stores,
@@ -370,6 +377,26 @@ pub trait VolumeService: Sync {
         volume_id: &[u8; 16],
         title: &VolumeTitle,
     ) -> Result<(), Errno>;
+
+    /// Answer for `caller` whether the writes held for the re-inserted volume
+    /// `request` names are written to its medium or discarded: the mount
+    /// authority answers for any volume, the process holding the seat for a
+    /// removable device's, and only for a volume awaiting the answer
+    /// (`docs/src/filesystem/drives.md` §8). Either way the volume is served
+    /// again, writable unless its medium no longer proves it unmutated.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for no volume of that key;
+    /// [`Errno::PermissionDenied`] for a caller whose authority does not reach
+    /// the volume;
+    /// [`Errno::Stale`] for a volume no longer awaiting an answer;
+    /// [`Errno::Busy`] for one another operation holds;
+    /// [`Errno::ReadOnly`] for writes not written, the medium no longer
+    /// proving itself unmutated, which are kept as the volume is served
+    /// read-only; the refusals of serving it again; or
+    /// [`Errno::NotImplemented`] before a service is installed.
+    fn replay(&self, caller: &Principal<'_>, request: &VolumeReplayRequest) -> Result<(), Errno>;
 }
 
 /// Where an image attach's answer is delivered to its caller.
@@ -500,6 +527,10 @@ impl VolumeService for NullVolumeService {
     ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
+
+    fn replay(&self, _caller: &Principal<'_>, _request: &VolumeReplayRequest) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// The shared [`NullVolumeService`] the syscall handlers default to.
@@ -546,6 +577,14 @@ mod tests {
                 },
                 &caller
             ),
+            Err(Errno::NotImplemented)
+        );
+        let answer = VolumeReplayRequest {
+            volume_id: [7; 16],
+            answer: tairix_abi::volume::ReplayAnswer::Write,
+        };
+        assert_eq!(
+            NULL_VOLUME_SERVICE.replay(&caller, &answer),
             Err(Errno::NotImplemented)
         );
         let offer = OfferId::new(1).unwrap();

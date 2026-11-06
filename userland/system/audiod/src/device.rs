@@ -19,20 +19,39 @@
 //! dry, which is strictly worse and is what its driver would report instead.
 //! A *draining* stream is different: the pump emits only the frames it
 //! genuinely has, so a drain's tail is a short chunk rather than a padded
-//! one, and the drain is then passed down to the device.
+//! one, and the drain is then passed down to the device — unless a monitor
+//! keeps the sink clocking, when the tail is padded with silence and the
+//! drain is over once the device reaches the frame its last one ends on.
+//!
+//! # A sink's monitors
+//!
+//! A monitor is a capture stream riding a sink, handed each period the device
+//! is given as it was before the sink's own level and mute: the device's
+//! period itself where the mixer took none of that level, otherwise the period
+//! mixed again by a mixer of its own, so a monitor never moves the device's
+//! dither. A live monitor keeps its sink clocking, silent when nothing plays
+//! and never drained beneath it, so it hears the sink's own timeline. It
+//! never chooses how its sink runs: a
+//! sink monitors alone ride runs as nobody asked, and the first stream to play
+//! has it configured afresh as that stream alone would, the monitors moving
+//! onto it where they stand. A tap that cannot make their mix faults them
+//! alone.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use tairix_abi::appinfo::BundleId;
 use tairix_abi::audio::{
-    AudioGain, AudioLocation, AudioNotify, StreamGrant, StreamRole, StreamState,
+    AudioGain, AudioLocation, AudioNotify, OpenParams, StreamGrant, StreamRole, StreamState,
+    MONITOR_FLAG,
 };
 use tairix_abi::driver::audio::{
-    AudioEndpointFacts, Frames, GainRange, Rate, SampleFormat, StreamDirection,
+    AudioEndpointFacts, ChannelMap, Frames, GainRange, Rate, RateSupport, SampleFormat,
+    StreamDirection,
 };
 use tairix_abi::driver::audio_channel::{AttachParams, ConfigureGrant, ConfigureParams};
 use tairix_abi::driver::audio_ring::{PcmGeometry, PcmRing};
+use tairix_abi::time::Time64;
 use tairix_abi::Errno;
 use tairix_audio::channel::ChannelMatrix;
 use tairix_audio::clock::ClockModel;
@@ -58,7 +77,7 @@ use crate::wakes::Wake;
 const RESAMPLED_FORMAT: SampleFormat = SampleFormat::F32;
 
 /// Device sample encodings an endpoint is run in when the client's own is not
-/// among the ones it accepts, widest first.
+/// among the ones it accepts, or no client asks, widest first.
 ///
 /// Widest first because a wider device encoding never costs the client bits:
 /// the pivot carries twenty-four and every scale factor is a power of two, so
@@ -112,15 +131,15 @@ pub(crate) struct Endpoint {
     pub(crate) active: Option<Active>,
 }
 
-/// One phase bank, shared by every stream on this endpoint at one source
-/// rate.
+/// One phase bank, shared by every stream on this endpoint converting between
+/// one pair of rates: a playback stream's to the device's, or the device's to
+/// a capture stream's.
 ///
 /// Reference-counted rather than kept for the endpoint's life: the
 /// coefficients depend on the rate pair alone, so one bank serves all of that
-/// rate's streams, and the last stream leaving takes it with it — otherwise a
+/// pair's streams, and the last stream leaving takes it with it — otherwise a
 /// client naming a fresh rate each time would grow the table without bound.
 struct BankSlot {
-    rate: Rate,
     bank: FilterBank,
     users: u32,
 }
@@ -128,12 +147,19 @@ struct BankSlot {
 /// A programmed endpoint: the device ring, the mixer, the clock, and the
 /// buffers a period reuses.
 pub(crate) struct Active {
+    /// What it was asked to run at: a stream opening where only monitors ride
+    /// has the sink configured afresh unless it asks the same.
+    pub(crate) asked: ConfigureParams,
     /// What the device answered it would run at.
     pub(crate) grant: ConfigureGrant,
     /// The device ring's shape.
     geometry: PcmGeometry,
     /// The device ring this service created and granted to the driver.
     pub(crate) region: RegionId,
+    /// When it was attached, on the monotonic clock the driver stamps its
+    /// reports with: one sampled before then is an earlier configuration's,
+    /// however late it arrives.
+    pub(crate) attached_at: Time64,
     /// The measured device clock, from the `(position, sampled_at)` pairs the
     /// driver reports.
     pub(crate) clock: ClockModel,
@@ -147,6 +173,8 @@ pub(crate) struct Active {
     pivot: Vec<f32>,
     /// The phase banks this endpoint's streams share.
     banks: Vec<Option<BankSlot>>,
+    /// The mix made again for monitors, while one rides the sink.
+    tap: Option<Tap>,
     /// Whether the device is clocking.
     pub(crate) running: bool,
     /// The device's own position as last reported.
@@ -167,29 +195,29 @@ impl Active {
     pub(crate) fn follow(&mut self, facts: &AudioEndpointFacts) -> Result<(), Errno> {
         let bits = facts.resolved_bits(self.sink.format);
         self.mixer.set_resolution(bits)?;
+        if let Some(tap) = self.tap.as_mut() {
+            tap.mixer.set_resolution(bits)?;
+        }
         self.sink.resolution = bits;
         Ok(())
     }
 
-    /// Reserve (or find) the phase bank carrying `source` to this endpoint's
-    /// rate, and answer its slot.
-    fn acquire_bank(&mut self, source: Rate) -> Result<usize, Errno> {
+    /// Reserve (or find) the phase bank carrying `from` to `to`, and answer
+    /// its slot.
+    fn acquire_bank(&mut self, from: Rate, to: Rate) -> Result<usize, Errno> {
+        let ratio = Ratio::between(from, to);
         if let Some(index) = self
             .banks
             .iter()
-            .position(|slot| slot.as_ref().is_some_and(|held| held.rate == source))
+            .position(|slot| slot.as_ref().is_some_and(|held| held.bank.ratio() == ratio))
         {
             if let Some(held) = self.banks[index].as_mut() {
                 held.users = held.users.saturating_add(1);
             }
             return Ok(index);
         }
-        let bank = FilterBank::new(source, self.grant.rate)?;
-        let slot = BankSlot {
-            rate: source,
-            bank,
-            users: 1,
-        };
+        let bank = FilterBank::new(from, to)?;
+        let slot = BankSlot { bank, users: 1 };
         if let Some(index) = self.banks.iter().position(Option::is_none) {
             self.banks[index] = Some(slot);
             return Ok(index);
@@ -215,6 +243,57 @@ impl Active {
             *slot = None;
         }
     }
+
+    /// Mix for monitors too: a mixer and a period of the tap's own beside the
+    /// device's. Nothing changes while a tap is held.
+    pub(crate) fn add_tap(&mut self, dither_seed: u64) -> Result<(), Errno> {
+        if self.tap.is_some() {
+            return Ok(());
+        }
+        let period = self.period_frames() as usize;
+        self.tap = Some(Tap {
+            mixer: Mixer::new(self.sink, period, dither_seed)?,
+            period: fallible::filled(period * self.sink.frame_bytes(), 0u8)
+                .ok_or(Errno::OutOfMemory)?,
+        });
+        Ok(())
+    }
+
+    /// Give the tap back: no monitor rides the sink any more.
+    pub(crate) fn remove_tap(&mut self) {
+        self.tap = None;
+    }
+}
+
+/// A sink's mix made again without the sink's own level, for its monitors,
+/// where the mixer takes part of that level.
+///
+/// A mixer of its own, so a monitor never moves the device's dither and the
+/// device is given the same frames whether or not it is monitored.
+struct Tap {
+    /// The monitors' mixer, sized for one device period.
+    mixer: Mixer,
+    /// One device period of that mix, in the device's encoding.
+    period: Vec<u8>,
+}
+
+impl Tap {
+    /// `frames` of the sink's mix of `streams` made again at the multiply its
+    /// monitors hear each at, without the sink's own level.
+    fn remix(
+        &mut self,
+        streams: &[Stream],
+        device_index: usize,
+        slot: usize,
+        frames: usize,
+    ) -> Result<&[u8], Errno> {
+        let contributions = streams
+            .iter()
+            .filter(|stream| stream.feeds(device_index, slot))
+            .filter_map(|stream| stream.contribution(stream.monitor_gain));
+        let written = self.mixer.mix(contributions, frames, &mut self.period)?;
+        Ok(&self.period[..written])
+    }
 }
 
 /// One live `audio-v1` stream.
@@ -234,6 +313,8 @@ pub(crate) struct Stream {
     pub(crate) endpoint: usize,
     /// Playback or capture.
     pub(crate) direction: StreamDirection,
+    /// A capture stream hearing its sink's mix rather than a source.
+    pub(crate) monitor: bool,
     /// What the sound is for.
     pub(crate) role: StreamRole,
     /// Whom it plays for, which the seat's room is arbitrated on.
@@ -244,35 +325,17 @@ pub(crate) struct Stream {
     pub(crate) geometry: PcmGeometry,
     /// The client's ring, once attached.
     pub(crate) region: Option<RegionId>,
-    /// This stream's layout onto the device's (playback) or the device's onto
-    /// this stream's (capture), derived once at open.
-    matrix: ChannelMatrix,
-    /// Present only where the stream's rate differs from the device's.
-    resampler: Option<Resampler>,
-    /// Which of the endpoint's shared banks that resampler runs over.
-    bank: usize,
-    /// Client-encoding frames moved this period.
-    bytes: Vec<u8>,
-    /// Those frames decoded, in this stream's own layout.
-    pivot: Vec<f32>,
-    /// Filtered frames awaiting their mix (playback) or their client ring
-    /// (capture), in this stream's layout.
-    pending: Vec<f32>,
-    /// Frames held in `pending`.
-    pending_frames: usize,
-    /// `pending` staged in the pivot's encoding for the mixer (a resampled
-    /// playback stream only).
-    staged: Vec<u8>,
-    /// Device frames this stream contributes to the chunk being mixed.
-    covered: usize,
-    /// Client-rate frames pulled per top-up.
-    want_in: usize,
+    /// What it derives from its endpoint's configuration.
+    work: Working,
     /// This stream's own level.
     pub(crate) gain: AudioGain,
     /// Whether it is muted, independently of its gain.
     pub(crate) muted: bool,
     /// The multiply the mix applies, resolved from every gain in force.
     pub(crate) software_gain: f32,
+    /// The multiply the sink's monitors hear a playback stream at: its own
+    /// gains and the ducking, without the sink's level.
+    pub(crate) monitor_gain: f32,
     /// Where the client's own requests leave it; never
     /// [`StreamState::SeatInactive`], which is the room's word, not the
     /// client's.
@@ -285,6 +348,10 @@ pub(crate) struct Stream {
     /// The frame a scheduled stop settles on, where one was named ahead of
     /// the position the stream had reached.
     pub(crate) stop_at: Option<Frames>,
+    /// The device frame a drain's last frame ends on, once it is handed to a
+    /// sink a monitor keeps clocking: the drain is over when the device
+    /// reaches it.
+    pub(crate) drain_end: Option<Frames>,
     /// Frames this service has taken from (or given to) the client ring.
     pub(crate) position: Frames,
     /// Frames lost to under- or over-run.
@@ -309,6 +376,8 @@ pub(crate) struct StreamOpen {
     pub(crate) endpoint: usize,
     /// Playback or capture.
     pub(crate) direction: StreamDirection,
+    /// Whether it hears the sink's mix rather than a source.
+    pub(crate) monitor: bool,
     /// What the sound is for.
     pub(crate) role: StreamRole,
     /// Whom it plays for.
@@ -322,6 +391,139 @@ pub(crate) struct StreamOpen {
     pub(crate) geometry: PcmGeometry,
 }
 
+/// What a stream derives from its endpoint's configuration, allocated whole
+/// so no period allocates: built when the stream opens, and again when its
+/// sink is configured afresh beneath it.
+struct Working {
+    /// This stream's layout onto the device's (playback) or the device's onto
+    /// this stream's (capture).
+    matrix: ChannelMatrix,
+    /// Present only where the stream's rate differs from the device's.
+    resampler: Option<Resampler>,
+    /// Which of the endpoint's shared banks that resampler runs over, while
+    /// the stream holds a share of it.
+    bank: Option<usize>,
+    /// Client-encoding frames moved this period.
+    bytes: Vec<u8>,
+    /// Those frames decoded, in this stream's own layout.
+    pivot: Vec<f32>,
+    /// Filtered frames awaiting their mix (playback) or their client ring
+    /// (capture), in this stream's layout.
+    pending: Vec<f32>,
+    /// Frames held in `pending`.
+    pending_frames: usize,
+    /// `pending` staged in the pivot's encoding for the mixer (a resampled
+    /// playback stream only).
+    staged: Vec<u8>,
+    /// Device frames this stream contributes to the chunk being mixed.
+    covered: usize,
+    /// Client-rate frames pulled per top-up.
+    want_in: usize,
+}
+
+impl Working {
+    /// The working set of a stream moving frames `direction` at what `grant`
+    /// fixes, against `active`, holding a share of its phase bank where the
+    /// stream's rate is not the device's.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotSupported`] for a pair of channel layouts with no defined
+    /// relationship, [`Errno::OutOfMemory`] for a buffer that would not fit,
+    /// or whatever the resampler's bank refuses; a refusal holds no share.
+    fn new(
+        active: &mut Active,
+        direction: StreamDirection,
+        grant: &StreamGrant,
+    ) -> Result<Self, Errno> {
+        let client_map = grant.channel_map;
+        let matrix = matrix_for(direction, &client_map, &active.grant.channel_map)?;
+        let channels = usize::from(client_map.channels());
+        let (source, sink_rate) = match direction {
+            StreamDirection::Playback => (grant.rate, active.grant.rate),
+            StreamDirection::Capture => (active.grant.rate, grant.rate),
+        };
+        let resampled = if source == sink_rate {
+            None
+        } else {
+            let bank = active.acquire_bank(source, sink_rate)?;
+            let built = active
+                .banks
+                .get(bank)
+                .and_then(Option::as_ref)
+                .ok_or(Errno::NotFound)
+                .and_then(|slot| Resampler::new(&slot.bank, channels));
+            match built {
+                Ok(resampler) => Some((resampler, bank)),
+                Err(err) => {
+                    active.release_bank(bank);
+                    return Err(err);
+                }
+            }
+        };
+        let bank = resampled.as_ref().map(|(_, bank)| *bank);
+        let period = active.period_frames() as usize;
+        let ratio = Ratio::between(source, sink_rate);
+        let work = Self::sized(&matrix, resampled, direction, grant, period, ratio);
+        if let (Err(_), Some(bank)) = (&work, bank) {
+            active.release_bank(bank);
+        }
+        work
+    }
+
+    /// The buffers of a stream moving frames `direction` at what `grant`
+    /// fixes, filtered by `resampled` where its rate is not the device's,
+    /// sized as upper bounds over a device period of `period` frames at
+    /// `ratio` so none ever has to grow: what a playback stream's pull loop
+    /// reads for one period and what that makes, and what a capture makes of
+    /// the one period it is handed.
+    fn sized(
+        matrix: &ChannelMatrix,
+        filtering: Option<(Resampler, usize)>,
+        direction: StreamDirection,
+        grant: &StreamGrant,
+        period: usize,
+        ratio: Ratio,
+    ) -> Result<Self, Errno> {
+        let channels = usize::from(grant.channel_map.channels());
+        let frame_bytes = channels * grant.format.bytes_per_sample();
+        let (resampler, bank) = filtering.unzip();
+        let want_in = period
+            .saturating_mul(ratio.input() as usize)
+            .div_ceil((ratio.output() as usize).max(1))
+            .saturating_add(1);
+        let made_from = |frames: usize| {
+            resampler
+                .as_ref()
+                .map_or(frames, |filter| filter.max_output_frames(frames))
+        };
+        let (bytes_frames, pivot_frames, pending_frames, staged_frames) = match direction {
+            StreamDirection::Playback => {
+                let produced = made_from(want_in);
+                (want_in, want_in, period + produced, period + produced)
+            }
+            StreamDirection::Capture => {
+                let heard = made_from(period);
+                (heard, period, heard, 0)
+            }
+        };
+        let bytes = |count: usize| fallible::filled(count, 0u8).ok_or(Errno::OutOfMemory);
+        let pivot = |count: usize| fallible::filled(count, 0.0f32).ok_or(Errno::OutOfMemory);
+        Ok(Self {
+            matrix: *matrix,
+            resampler,
+            bank,
+            bytes: bytes(bytes_frames * frame_bytes)?,
+            pivot: pivot(pivot_frames * channels)?,
+            pending: pivot(pending_frames * channels)?,
+            pending_frames: 0,
+            staged: bytes(staged_frames * channels * RESAMPLED_FORMAT.bytes_per_sample())?,
+            covered: 0,
+            want_in,
+        })
+    }
+}
+
 impl Stream {
     /// Allocate a stream's whole working set against `active`, so no later
     /// period allocates.
@@ -332,58 +534,7 @@ impl Stream {
     /// relationship, [`Errno::OutOfMemory`] for a buffer that would not fit,
     /// or whatever the resampler's bank refuses.
     pub(crate) fn open(active: &mut Active, params: &StreamOpen) -> Result<Self, Errno> {
-        let client_map = params.grant.channel_map;
-        let device_map = active.grant.channel_map;
-        let matrix = match params.direction {
-            StreamDirection::Playback => ChannelMatrix::derive(&client_map, &device_map)?,
-            StreamDirection::Capture => ChannelMatrix::derive(&device_map, &client_map)?,
-        };
-        let channels = usize::from(client_map.channels());
-        let frame_bytes = channels * params.grant.format.bytes_per_sample();
-        let period = active.period_frames() as usize;
-        let (source, sink_rate) = match params.direction {
-            StreamDirection::Playback => (params.grant.rate, active.grant.rate),
-            StreamDirection::Capture => (active.grant.rate, params.grant.rate),
-        };
-
-        let (resampler, bank) = if source == sink_rate {
-            (None, usize::MAX)
-        } else {
-            let bank = active.acquire_bank(source)?;
-            let built = active
-                .banks
-                .get(bank)
-                .and_then(Option::as_ref)
-                .ok_or(Errno::NotFound)
-                .and_then(|slot| Resampler::new(&slot.bank, channels));
-            match built {
-                Ok(resampler) => (Some(resampler), bank),
-                Err(err) => {
-                    active.release_bank(bank);
-                    return Err(err);
-                }
-            }
-        };
-
-        // Upper bounds, so the pull loop never leaves input unconsumed and
-        // never has to grow a buffer: how much input one device period
-        // consumes, and how much output that input can produce.
-        let ratio = Ratio::between(source, sink_rate);
-        let want_in = period
-            .saturating_mul(ratio.input() as usize)
-            .div_ceil((ratio.output() as usize).max(1))
-            .saturating_add(1);
-        let produced = resampler
-            .as_ref()
-            .map_or(want_in, |filter| filter.max_output_frames(want_in));
-
-        let (bytes_frames, pivot_frames, pending_frames, staged_frames) = match params.direction {
-            StreamDirection::Playback => (want_in, want_in, period + produced, period + produced),
-            StreamDirection::Capture => (produced, period, produced, 0),
-        };
-        let bytes = |count: usize| fallible::filled(count, 0u8).ok_or(Errno::OutOfMemory);
-        let pivot = |count: usize| fallible::filled(count, 0.0f32).ok_or(Errno::OutOfMemory);
-        let stream = Self {
+        Ok(Self {
             id: params.id,
             owner_pid: params.owner_pid,
             owner_uid: params.owner_uid,
@@ -391,39 +542,47 @@ impl Stream {
             device: params.device,
             endpoint: params.endpoint,
             direction: params.direction,
+            monitor: params.monitor,
             role: params.role,
             principal: params.principal,
             grant: params.grant,
             geometry: params.geometry,
             region: None,
-            matrix,
-            resampler,
-            bank,
-            bytes: bytes(bytes_frames * frame_bytes)?,
-            pivot: pivot(pivot_frames * channels)?,
-            pending: pivot(pending_frames * channels)?,
-            pending_frames: 0,
-            staged: bytes(staged_frames * channels * RESAMPLED_FORMAT.bytes_per_sample())?,
-            covered: 0,
-            want_in,
+            work: Working::new(active, params.direction, &params.grant)?,
             gain: AudioGain::UNITY,
             muted: false,
             software_gain: 1.0,
+            monitor_gain: 1.0,
             state: StreamState::Idle,
             held: params.held,
             state_at: Frames::ZERO,
             stop_at: None,
+            drain_end: None,
             position: Frames::ZERO,
             xrun_frames: 0,
             xruns: 0,
-        };
-        Ok(stream)
+        })
+    }
+
+    /// Build the working set again against `active`, a configuration its
+    /// sink was given afresh beneath it: the frames in flight and the
+    /// filter's memory went with the old one, and with them the frame a
+    /// drain was to end on.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open`], the old working set kept.
+    pub(crate) fn rebind(&mut self, active: &mut Active) -> Result<(), Errno> {
+        self.work = Working::new(active, self.direction, &self.grant)?;
+        self.drain_end = None;
+        Ok(())
     }
 
     /// Whether the stream is moving frames this period.
     ///
     /// A draining stream still is: it is playing out what it queued, and the
-    /// difference is only that the pump stops padding for it.
+    /// difference is only that the pump stops padding for it, unless a
+    /// monitor keeps its sink clocking.
     pub(crate) fn is_live(&self) -> bool {
         self.moving() && !self.held && self.region.is_some()
     }
@@ -436,6 +595,19 @@ impl Stream {
     /// Whether the stream is playing out what it has and then stopping.
     pub(crate) fn is_draining(&self) -> bool {
         self.state == StreamState::Draining
+    }
+
+    /// Whether it holds its endpoint to the configuration it runs under:
+    /// every stream but a monitor, which hears its sink without choosing how
+    /// it runs, and one lost with that configuration.
+    pub(crate) fn holds_configuration(&self) -> bool {
+        !self.monitor && self.state != StreamState::DeviceLost
+    }
+
+    /// Whether it may move frames again: neither lost with its device nor
+    /// stopped for a fault.
+    pub(crate) fn may_move(&self) -> bool {
+        !matches!(self.state, StreamState::DeviceLost | StreamState::Faulted)
     }
 
     /// The state its client sees: its own, unless the room holds a stream
@@ -460,16 +632,34 @@ impl Stream {
     /// Discard the filter's memory: the frames that were in flight are gone,
     /// so the history they would have coloured goes with them.
     pub(crate) fn reset_filter(&mut self) {
-        if let Some(filter) = self.resampler.as_mut() {
+        if let Some(filter) = self.work.resampler.as_mut() {
             filter.reset();
         }
-        self.pending_frames = 0;
-        self.covered = 0;
+        self.work.pending_frames = 0;
+        self.work.covered = 0;
     }
 
     /// Whether this stream belongs to `endpoint` of `device`.
     pub(crate) fn on(&self, device: usize, endpoint: usize) -> bool {
         self.device == device && self.endpoint == endpoint
+    }
+
+    /// Whether it is a playback stream live on `endpoint` of `device`, its
+    /// frames mixed there.
+    pub(crate) fn feeds(&self, device: usize, endpoint: usize) -> bool {
+        self.direction == StreamDirection::Playback && self.on(device, endpoint) && self.is_live()
+    }
+
+    /// Whether it is a monitor live on `endpoint` of `device`, hearing its
+    /// mix.
+    pub(crate) fn hears(&self, device: usize, endpoint: usize) -> bool {
+        self.monitor && self.on(device, endpoint) && self.is_live()
+    }
+
+    /// Whether the device is given it at the very multiply a monitor hears it
+    /// at, bit for bit: the mixer takes none of the sink's level.
+    fn heard_as_played(&self) -> bool {
+        self.software_gain.to_bits() == self.monitor_gain.to_bits()
     }
 
     /// Interleaved channels one client frame carries.
@@ -482,6 +672,8 @@ impl Stream {
     pub(crate) fn set_state(&mut self, state: StreamState, at: Frames, notifier: &mut dyn Wake) {
         let told = self.reported();
         self.state = state;
+        // A drain's end belongs to the drain it was marked in.
+        self.drain_end = None;
         self.tell(told, at, notifier);
     }
 
@@ -509,16 +701,16 @@ impl Stream {
         );
     }
 
-    /// Stop moving a stream whose ring its client corrupted, tell the client,
-    /// and record whose it was. Every other stream, and the device, carry on.
-    fn fault(&mut self, err: Errno, notifier: &mut dyn Wake, sink: &dyn Sink) {
+    /// Stop moving the stream, tell the client, and record whose it was and
+    /// `why`. Every other stream, and the device, carry on.
+    fn fault(&mut self, err: Errno, why: &'static str, notifier: &mut dyn Wake, sink: &dyn Sink) {
         let at = self.position;
         self.set_state(StreamState::Faulted, at, notifier);
         audit(
             sink,
             events::STREAM_FAULTED,
             Level::Warn,
-            "a client's ring broke the protocol; its stream alone was stopped",
+            why,
             &[
                 Field {
                     key: "pid",
@@ -554,39 +746,61 @@ impl Stream {
         );
     }
 
-    /// This stream's contribution to the chunk being mixed, or [`None`] when
-    /// it had no frames.
-    fn contribution(&self) -> Option<StreamMix<'_>> {
-        if self.covered == 0 {
+    /// This stream's contribution at `gain` to the chunk being mixed, or
+    /// [`None`] when it had no frames.
+    fn contribution(&self, gain: f32) -> Option<StreamMix<'_>> {
+        let work = &self.work;
+        if work.covered == 0 {
             return None;
         }
         let channels = self.channels();
-        let (format, samples) = if self.resampler.is_some() {
+        let (format, samples) = if work.resampler.is_some() {
             (
                 RESAMPLED_FORMAT,
-                &self.staged[..self.covered * channels * RESAMPLED_FORMAT.bytes_per_sample()],
+                &work.staged[..work.covered * channels * RESAMPLED_FORMAT.bytes_per_sample()],
             )
         } else {
             (
                 self.grant.format,
-                &self.bytes[..self.covered * channels * self.grant.format.bytes_per_sample()],
+                &work.bytes[..work.covered * channels * self.grant.format.bytes_per_sample()],
             )
         };
         Some(StreamMix {
             format,
-            matrix: &self.matrix,
-            gain: self.software_gain,
-            resampled: self.resampler.is_some(),
+            matrix: &work.matrix,
+            gain,
+            resampled: work.resampler.is_some(),
             samples,
         })
     }
 }
 
+/// The matrix carrying a stream's layout `client` onto its sink's `device`
+/// (playback), or its source's `device` onto the stream's (capture).
+///
+/// # Errors
+///
+/// [`Errno::NotSupported`] for a pair of layouts with no defined relationship.
+pub(crate) fn matrix_for(
+    direction: StreamDirection,
+    client: &ChannelMap,
+    device: &ChannelMap,
+) -> Result<ChannelMatrix, Errno> {
+    match direction {
+        StreamDirection::Playback => ChannelMatrix::derive(client, device),
+        StreamDirection::Capture => ChannelMatrix::derive(device, client),
+    }
+}
+
 /// The device encoding an endpoint is programmed in for a client asking for
 /// `wanted`: the client's own where the endpoint accepts it — which is what
-/// keeps the bit-exact path bit-exact — and otherwise the widest it does.
-fn device_format(facts: &AudioEndpointFacts, wanted: SampleFormat) -> Result<SampleFormat, Errno> {
-    if facts.formats.contains(wanted) {
+/// keeps the bit-exact path bit-exact — and otherwise, or for nobody asking,
+/// the widest it does.
+fn device_format(
+    facts: &AudioEndpointFacts,
+    wanted: Option<SampleFormat>,
+) -> Result<SampleFormat, Errno> {
+    if let Some(wanted) = wanted.filter(|format| facts.formats.contains(*format)) {
         return Ok(wanted);
     }
     FORMAT_PREFERENCE
@@ -594,6 +808,35 @@ fn device_format(facts: &AudioEndpointFacts, wanted: SampleFormat) -> Result<Sam
         .copied()
         .find(|format| facts.formats.contains(*format))
         .ok_or(Errno::NotSupported)
+}
+
+/// What endpoint `index`, offering `facts`, is programmed with for the stream
+/// `asked` opens — or, with nobody asking, as it runs with no stream to suit:
+/// at its rate nearest the stack's default, in its widest encoding, with its
+/// longest period. A monitor asks nothing, so a sink it hears runs as it
+/// would without it.
+///
+/// # Errors
+///
+/// [`Errno::NotSupported`] for an endpoint offering no encoding this service
+/// mixes.
+pub(crate) fn configuration(
+    facts: &AudioEndpointFacts,
+    index: u16,
+    asked: Option<&OpenParams>,
+) -> Result<ConfigureParams, Errno> {
+    let wanted = asked.map_or(Rate::HZ_48000, |open| open.rate);
+    let rate = facts.rates.nearest(wanted);
+    let target = asked.map_or(u32::MAX, |open| {
+        scale_frames(open.latency_target_frames.max(2), open.rate, rate)
+    });
+    Ok(ConfigureParams {
+        endpoint: index,
+        rate,
+        format: device_format(facts, asked.map(|open| open.format))?,
+        channel_map: facts.channel_map,
+        period_frames: device_period(facts, target, rate),
+    })
 }
 
 /// The longest period, in milliseconds, an endpoint is programmed with.
@@ -617,6 +860,22 @@ fn device_period(facts: &AudioEndpointFacts, target_frames: u32, rate: Rate) -> 
         .min(longest)
         .max(1)
         .clamp(facts.min_period_frames, facts.max_period_frames)
+}
+
+/// The longest period, in frames at `rate`, any stream could have endpoint
+/// `facts` programmed with, rounded up: what a monitor's ring holds two of,
+/// since the first stream to play has its sink configured afresh beneath it.
+pub(crate) fn longest_period(facts: &AudioEndpointFacts, rate: Rate) -> u32 {
+    // A period the endpoint's bounds clamp lasts longest at its slowest clock.
+    let slowest = match facts.rates {
+        RateSupport::Discrete(set) => set.rates().first().copied().unwrap_or(rate),
+        RateSupport::Continuous { min, .. } => min,
+    };
+    let scaled = u64::from(rate.hz()) * u64::from(MAX_PERIOD_MS);
+    let bound = u32::try_from(scaled.div_ceil(1_000)).unwrap_or(u32::MAX);
+    bound
+        .max(scale_frames(facts.min_period_frames, slowest, rate))
+        .min(scale_frames(facts.max_period_frames, slowest, rate))
 }
 
 /// The power-of-two device ring `grant` admits: two periods where the
@@ -679,8 +938,10 @@ impl Device {
             }
             endpoints.push(Endpoint {
                 index,
+                // An id carrying the monitor flag would name a sink's mix.
                 device_id: first_device_id
                     .checked_add(u32::from(index))
+                    .filter(|id| id & MONITOR_FLAG == 0)
                     .ok_or(Errno::OutOfRange)?,
                 location: AudioLocation::new(location, index)?,
                 control: endpoint_facts.gain,
@@ -703,13 +964,10 @@ impl Device {
     }
 }
 
-/// Program endpoint `slot` for a client at `rate`/`format` wanting
-/// `latency_target_frames`, create the device ring, and attach it.
-///
-/// Idempotent once configured: a second stream joins the running
-/// configuration rather than reprogramming the hardware underneath the first,
-/// because a reconfiguration is a device-wide event a live stream has not
-/// agreed to.
+/// Program endpoint `slot` as `params` ask, create the device ring, and
+/// attach it, recorded as attached at `attached_at`. One already programmed is
+/// left as it runs: a reconfiguration is a device-wide event, so its caller
+/// releases the endpoint first.
 ///
 /// # Errors
 ///
@@ -718,30 +976,26 @@ pub(crate) fn configure_endpoint<H: RegionHost>(
     device: &mut Device,
     slot: usize,
     regions: &mut H,
-    rate: Rate,
-    format: SampleFormat,
-    latency_target_frames: u32,
+    params: ConfigureParams,
     dither_seed: u64,
+    attached_at: Time64,
 ) -> Result<(), Errno> {
     let endpoint = device.endpoints.get_mut(slot).ok_or(Errno::NotFound)?;
     if endpoint.active.is_some() {
         return Ok(());
     }
     let facts = endpoint.facts;
-    let device_rate = facts.rates.nearest(rate);
-    let device_format = device_format(&facts, format)?;
-    let channel_map = facts.channel_map;
-    let target = scale_frames(latency_target_frames.max(2), rate, device_rate);
-    let index = endpoint.index;
-    let grant = device.channel.configure(ConfigureParams {
-        endpoint: index,
-        rate: device_rate,
-        format: device_format,
-        channel_map,
-        period_frames: device_period(&facts, target, device_rate),
-    })?;
+    let grant = device.channel.configure(params)?;
     let resolution = facts.resolved_bits(grant.format);
-    match attach_ring(device, regions, index, grant, resolution, dither_seed) {
+    match attach_ring(
+        device,
+        regions,
+        params,
+        grant,
+        resolution,
+        dither_seed,
+        attached_at,
+    ) {
         Ok(active) => {
             if let Some(endpoint) = device.endpoints.get_mut(slot) {
                 endpoint.active = Some(active);
@@ -750,22 +1004,24 @@ pub(crate) fn configure_endpoint<H: RegionHost>(
         }
         Err(err) => {
             // The driver holds a configuration until it is detached.
-            let _ = device.channel.detach(index);
+            let _ = device.channel.detach(params.endpoint);
             Err(err)
         }
     }
 }
 
-/// Create the ring `grant` shapes, attach it to endpoint `index`, and build
-/// the state the endpoint is mixed through — onto the grid of `resolution`
-/// bits — the ring released on any refusal.
+/// Create the ring `grant` shapes, attach it to the endpoint `asked` named,
+/// and build the state the endpoint is mixed through — onto the grid of
+/// `resolution` bits, attached at `attached_at` — the ring released on any
+/// refusal.
 fn attach_ring<H: RegionHost>(
     device: &mut Device,
     regions: &mut H,
-    index: u16,
+    asked: ConfigureParams,
     grant: ConfigureGrant,
     resolution: u32,
     dither_seed: u64,
+    attached_at: Time64,
 ) -> Result<Active, Errno> {
     let ring_frames = device_ring_frames(&grant)?;
     let geometry = grant.geometry(ring_frames)?;
@@ -774,7 +1030,7 @@ fn attach_ring<H: RegionHost>(
         .grant(region, device.channel_endpoint)
         .and_then(|region_grant| {
             device.channel.attach(AttachParams {
-                endpoint: index,
+                endpoint: asked.endpoint,
                 ring_frames,
                 region_grant,
                 notify_endpoint: device.notify_endpoint,
@@ -789,9 +1045,11 @@ fn attach_ring<H: RegionHost>(
             };
             let period = grant.period_frames as usize;
             Ok(Active {
+                asked,
                 grant,
                 geometry,
                 region,
+                attached_at,
                 clock: ClockModel::new(grant.rate),
                 mixer: Mixer::new(sink, period, dither_seed)?,
                 sink,
@@ -800,6 +1058,7 @@ fn attach_ring<H: RegionHost>(
                 pivot: fallible::filled(period * sink.channels(), 0.0f32)
                     .ok_or(Errno::OutOfMemory)?,
                 banks: Vec::new(),
+                tap: None,
                 running: false,
                 position: Frames::ZERO,
                 xrun_frames: 0,
@@ -833,10 +1092,11 @@ pub(crate) fn release_endpoint<H: RegionHost>(device: &mut Device, slot: usize, 
     regions.release(active.region);
 }
 
-/// Give a closed stream's hold on its endpoint's shared phase bank back.
-pub(crate) fn release_stream_bank(active: &mut Active, stream: &Stream) {
-    if stream.resampler.is_some() {
-        active.release_bank(stream.bank);
+/// Give a stream's share of its endpoint's phase bank back, so it holds
+/// nothing of `active` any more.
+pub(crate) fn release_stream_bank(active: &mut Active, stream: &mut Stream) {
+    if let Some(bank) = stream.work.bank.take() {
+        active.release_bank(bank);
     }
 }
 
@@ -846,13 +1106,18 @@ pub(crate) struct Pumped {
     /// Device frames published into (or taken from) the device ring.
     pub(crate) moved: u32,
     /// Every live stream on the endpoint is draining and has nothing left,
-    /// so the drain may be passed down to the device.
+    /// so the drain may be passed down to the device: never while a monitor
+    /// keeps it clocking.
     pub(crate) drained: bool,
+    /// A stream was faulted, so what is live on the endpoint changed.
+    pub(crate) faulted: bool,
 }
 
-/// Move frames for one endpoint: refill a sink, or harvest a source.
+/// Move frames for one endpoint: refill a sink, its monitors hearing what the
+/// device is given, or harvest a source.
 ///
-/// A stream whose own ring fails is faulted alone and never fails the pump.
+/// A stream whose own ring fails is faulted alone and never fails the pump,
+/// as are a sink's monitors when the mix they hear cannot be made.
 ///
 /// # Errors
 ///
@@ -877,6 +1142,7 @@ pub(crate) fn pump_endpoint<H: RegionHost>(
         slot,
         notifier,
         sink,
+        faulted: false,
     };
     match endpoint.facts.direction {
         StreamDirection::Playback => refill_sink(active, streams, regions, pump),
@@ -884,13 +1150,26 @@ pub(crate) fn pump_endpoint<H: RegionHost>(
     }
 }
 
-/// Which endpoint a pump serves, and where what it does is told.
+/// Which endpoint a pump serves, where what it does is told, and whether it
+/// faulted a stream.
 struct Pump<'a> {
     device_index: usize,
     slot: usize,
     notifier: &'a mut dyn Wake,
     sink: &'a dyn Sink,
+    faulted: bool,
 }
+
+impl Pump<'_> {
+    /// Stop `stream` alone for `err`, recorded as `why`.
+    fn fault(&mut self, stream: &mut Stream, err: Errno, why: &'static str) {
+        stream.fault(err, why, self.notifier, self.sink);
+        self.faulted = true;
+    }
+}
+
+/// What a stream whose own ring broke the protocol is recorded as.
+const RING_BROKEN: &str = "a client's ring broke the protocol; its stream alone was stopped";
 
 /// Move what the ring now holds onto the device, and adopt what the driver
 /// reports.
@@ -940,20 +1219,31 @@ pub(crate) fn discard_captured<H: RegionHost>(
     Ok(())
 }
 
+/// What the playback streams live on a sink gave one chunk.
+struct Pulled {
+    /// Any was live.
+    live: bool,
+    /// Every one is draining or stops inside the chunk, so the chunk is cut
+    /// to what they had rather than padded, unless a monitor keeps the sink
+    /// clocking.
+    finishing: bool,
+    /// The most frames any of them gave.
+    covered: usize,
+}
+
 /// Fill the device ring with mixed periods while it has room and a live
-/// stream has something to say.
+/// stream has something to say, handing each to the sink's live monitors.
+///
+/// A live monitor keeps the sink clocking, so every chunk is whole: with
+/// nothing playing it is the device's silence, and a draining stream that
+/// runs dry is padded rather than cut, the device frame its last one ends on
+/// marked for its drain to be settled at.
 fn refill_sink<H: RegionHost>(
     active: &mut Active,
     streams: &mut [Stream],
     regions: &mut H,
-    pump: Pump<'_>,
+    mut pump: Pump<'_>,
 ) -> Result<Pumped, Errno> {
-    let Pump {
-        device_index,
-        slot,
-        notifier,
-        sink,
-    } = pump;
     let mut pumped = Pumped::default();
     loop {
         let room = ring_room(active, regions)?;
@@ -961,36 +1251,28 @@ fn refill_sink<H: RegionHost>(
         if chunk == 0 {
             break;
         }
-        let mut live = false;
-        let mut all_draining = true;
-        let mut covered_max = 0usize;
-        for stream in streams.iter_mut() {
-            if !stream.on(device_index, slot) || !stream.is_live() {
-                continue;
-            }
-            // A stream stopping at a named frame takes no more than the
-            // frames left before it, so the stop lands exactly there.
-            let cap = stream.stop_limit().map_or(chunk, |limit| limit.min(chunk));
-            match pull_playback(stream, active, regions, cap) {
-                Ok(covered) => {
-                    live = true;
-                    all_draining &= stream.is_draining() || cap < chunk;
-                    covered_max = covered_max.max(covered);
-                }
-                Err(err) => stream.fault(err, notifier, sink),
-            }
-        }
-        if !live {
+        let pulled = pull_streams(active, streams, regions, &mut pump, chunk);
+        let monitored = streams
+            .iter()
+            .any(|stream| stream.hears(pump.device_index, pump.slot));
+        if !pulled.live && !monitored {
             break;
         }
-        let frames = if all_draining {
-            covered_max.min(chunk)
+        let frames = if pulled.live && pulled.finishing && !monitored {
+            pulled.covered.min(chunk)
         } else {
             chunk
         };
         if frames == 0 {
-            pumped.drained = all_draining;
+            pumped.drained = true;
             break;
+        }
+        if monitored {
+            // The device reaches this chunk once it has taken what the ring
+            // already holds.
+            let queued = active.geometry.frames().saturating_sub(room);
+            let start = advance(active.position, u64::from(queued));
+            mark_drain_ends(streams, &pump, start, frames);
         }
         let Active {
             mixer,
@@ -1001,30 +1283,154 @@ fn refill_sink<H: RegionHost>(
         let bytes = frames * sink.frame_bytes();
         let contributions = streams
             .iter()
-            .filter(|stream| stream.on(device_index, slot) && stream.is_live())
-            .filter_map(Stream::contribution);
+            .filter(|stream| stream.feeds(pump.device_index, pump.slot))
+            .filter_map(|stream| stream.contribution(stream.software_gain));
         mixer.mix(contributions, frames, &mut period[..bytes])?;
         let published = write_device_ring(active, regions, bytes)?;
         pumped.moved = pumped.moved.saturating_add(published);
-        // A running stream that had nothing queued was mixed as silence for
-        // the frames it missed; a draining one asked for exactly what it had.
-        for stream in streams.iter_mut() {
-            if !stream.on(device_index, slot) || !stream.is_live() {
-                continue;
-            }
-            if !stream.is_draining() && stream.stop_at.is_none() && stream.covered < frames {
-                let short = u32::try_from(frames - stream.covered).unwrap_or(u32::MAX);
-                let lost = scale_frames(short, active.grant.rate, stream.grant.rate);
-                stream.account_loss(u64::from(lost), notifier);
-            }
-            stream.covered = 0;
+        if monitored {
+            hear_mix(active, streams, regions, &mut pump, published as usize);
         }
+        account_shortfall(active, streams, &mut pump, frames);
         if published == 0 {
             break;
         }
     }
-    wake_clients(device_index, slot, streams, notifier);
+    pumped.faulted = pump.faulted;
+    wake_clients(pump.device_index, pump.slot, streams, pump.notifier);
     Ok(pumped)
+}
+
+/// Pull up to `chunk` frames from every playback stream live on the sink. A
+/// stream whose own ring fails is faulted alone.
+fn pull_streams<H: RegionHost>(
+    active: &Active,
+    streams: &mut [Stream],
+    regions: &mut H,
+    pump: &mut Pump<'_>,
+    chunk: usize,
+) -> Pulled {
+    let mut pulled = Pulled {
+        live: false,
+        finishing: true,
+        covered: 0,
+    };
+    for stream in streams.iter_mut() {
+        if !stream.feeds(pump.device_index, pump.slot) {
+            continue;
+        }
+        // A stream stopping at a named frame takes no more than the frames
+        // left before it, so the stop lands exactly there.
+        let cap = stream.stop_limit().map_or(chunk, |limit| limit.min(chunk));
+        match pull_playback(stream, active, regions, cap) {
+            Ok(covered) => {
+                pulled.live = true;
+                pulled.finishing &= stream.is_draining() || cap < chunk;
+                pulled.covered = pulled.covered.max(covered);
+            }
+            Err(err) => pump.fault(stream, err, RING_BROKEN),
+        }
+    }
+    pulled
+}
+
+/// Account what each running playback stream on the sink could not give a
+/// chunk of `frames`: it was mixed as silence for them. A draining or
+/// stopping stream asked for exactly what it had.
+fn account_shortfall(active: &Active, streams: &mut [Stream], pump: &mut Pump<'_>, frames: usize) {
+    for stream in streams.iter_mut() {
+        if !stream.feeds(pump.device_index, pump.slot) {
+            continue;
+        }
+        let covered = stream.work.covered;
+        if !stream.is_draining() && stream.stop_at.is_none() && covered < frames {
+            let short = u32::try_from(frames - covered).unwrap_or(u32::MAX);
+            let lost = scale_frames(short, active.grant.rate, stream.grant.rate);
+            stream.account_loss(u64::from(lost), pump.notifier);
+        }
+        stream.work.covered = 0;
+    }
+}
+
+/// Mark where each draining stream fed into a chunk of `frames` beginning at
+/// device frame `start` ran dry: the frame its last one ends on, which its
+/// drain is settled at once the device reaches it. One that filled the chunk
+/// has not ended, and one that gave nothing ended where its mark already
+/// stands, or by the chunk's start.
+fn mark_drain_ends(streams: &mut [Stream], pump: &Pump<'_>, start: Frames, frames: usize) {
+    for stream in streams.iter_mut() {
+        if !stream.feeds(pump.device_index, pump.slot) || !stream.is_draining() {
+            continue;
+        }
+        stream.drain_end = match stream.work.covered {
+            0 => stream.drain_end.or(Some(start)),
+            covered if covered >= frames => None,
+            covered => Some(advance(start, covered as u64)),
+        };
+    }
+}
+
+/// Give every live monitor of the sink the `frames` the device was just given,
+/// as they sounded before the sink's own level and mute: the device's own
+/// period where the mixer took none of that level, else the period mixed again
+/// without it. A reader that is behind takes the over-run, so the device never
+/// waits on a monitor; one whose ring fails is faulted alone, and a mix the
+/// tap cannot make faults the monitors and nothing the device plays.
+fn hear_mix<H: RegionHost>(
+    active: &mut Active,
+    streams: &mut [Stream],
+    regions: &mut H,
+    pump: &mut Pump<'_>,
+    frames: usize,
+) {
+    let (device_index, slot) = (pump.device_index, pump.slot);
+    let as_played = streams
+        .iter()
+        .filter(|stream| stream.feeds(device_index, slot))
+        .all(Stream::heard_as_played);
+    let Active {
+        sink: format,
+        period,
+        pivot,
+        tap,
+        ..
+    } = active;
+    let heard = if as_played {
+        Ok(&period[..frames * format.frame_bytes()])
+    } else {
+        tap.as_mut()
+            .ok_or(Errno::NotConnected)
+            .and_then(|tap| tap.remix(streams, device_index, slot, frames))
+    };
+    let heard = match heard {
+        Ok(heard) => heard,
+        Err(err) => {
+            for stream in streams
+                .iter_mut()
+                .filter(|stream| stream.hears(device_index, slot))
+            {
+                pump.fault(
+                    stream,
+                    err,
+                    "a sink's monitors could not be given its mix; they alone were stopped",
+                );
+            }
+            return;
+        }
+    };
+    let decoded = convert::decode(
+        format.format,
+        heard,
+        &mut pivot[..frames * format.channels()],
+    );
+    for stream in streams.iter_mut() {
+        if !stream.hears(device_index, slot) {
+            continue;
+        }
+        if let Err(err) = push_capture(stream, active, regions, decoded, pump.notifier) {
+            pump.fault(stream, err, RING_BROKEN);
+        }
+    }
 }
 
 /// Take the device's captured periods and fan them out to every live capture
@@ -1033,14 +1439,9 @@ fn harvest_source<H: RegionHost>(
     active: &mut Active,
     streams: &mut [Stream],
     regions: &mut H,
-    pump: Pump<'_>,
+    mut pump: Pump<'_>,
 ) -> Result<Pumped, Errno> {
-    let Pump {
-        device_index,
-        slot,
-        notifier,
-        sink,
-    } = pump;
+    let (device_index, slot) = (pump.device_index, pump.slot);
     let mut pumped = Pumped::default();
     loop {
         let period_bytes = active.period_frames() as usize * active.sink.frame_bytes();
@@ -1063,8 +1464,8 @@ fn harvest_source<H: RegionHost>(
             if !stream.on(device_index, slot) || !stream.is_live() {
                 continue;
             }
-            if let Err(err) = push_capture(stream, active, regions, decoded, notifier) {
-                stream.fault(err, notifier, sink);
+            if let Err(err) = push_capture(stream, active, regions, decoded, pump.notifier) {
+                pump.fault(stream, err, RING_BROKEN);
             }
         }
         if streams
@@ -1078,7 +1479,8 @@ fn harvest_source<H: RegionHost>(
         .iter()
         .filter(|stream| stream.on(device_index, slot) && stream.is_live())
         .all(Stream::is_draining);
-    wake_clients(device_index, slot, streams, notifier);
+    pumped.faulted = pump.faulted;
+    wake_clients(device_index, slot, streams, pump.notifier);
     Ok(pumped)
 }
 
@@ -1112,48 +1514,55 @@ fn pull_playback<H: RegionHost>(
     chunk: usize,
 ) -> Result<usize, Errno> {
     let Some(region) = stream.region else {
-        stream.covered = 0;
+        stream.work.covered = 0;
         return Ok(0);
     };
     let channels = stream.channels();
-    let frame_bytes = channels * stream.grant.format.bytes_per_sample();
-    if stream.resampler.is_none() {
-        let wanted = (chunk * frame_bytes).min(stream.bytes.len());
+    let format = stream.grant.format;
+    let frame_bytes = channels * format.bytes_per_sample();
+    let Stream {
+        geometry,
+        position,
+        work,
+        ..
+    } = stream;
+    if work.resampler.is_none() {
+        let wanted = (chunk * frame_bytes).min(work.bytes.len());
         let got = {
             let bytes = regions.bytes(region)?;
-            let mut ring = PcmRing::bind(bytes, stream.geometry)?;
-            ring.read(&mut stream.bytes[..wanted])?
+            let mut ring = PcmRing::bind(bytes, *geometry)?;
+            ring.read(&mut work.bytes[..wanted])?
         };
-        stream.position = advance(stream.position, u64::from(got));
-        stream.covered = got as usize;
-        return Ok(stream.covered);
+        *position = advance(*position, u64::from(got));
+        work.covered = got as usize;
+        return Ok(work.covered);
     }
-    let bank = active
-        .banks
-        .get(stream.bank)
+    let bank = work
+        .bank
+        .and_then(|bank| active.banks.get(bank))
         .and_then(Option::as_ref)
         .ok_or(Errno::NotFound)?;
-    while stream.pending_frames < chunk {
-        let wanted = stream.want_in * frame_bytes;
+    while work.pending_frames < chunk {
+        let wanted = work.want_in * frame_bytes;
         let got = {
             let bytes = regions.bytes(region)?;
-            let mut ring = PcmRing::bind(bytes, stream.geometry)?;
-            ring.read(&mut stream.bytes[..wanted])?
+            let mut ring = PcmRing::bind(bytes, *geometry)?;
+            ring.read(&mut work.bytes[..wanted])?
         } as usize;
         if got == 0 {
             break;
         }
-        stream.position = advance(stream.position, got as u64);
-        let Stream {
+        *position = advance(*position, got as u64);
+        let Working {
             bytes,
             pivot,
             pending,
             pending_frames,
             resampler,
             ..
-        } = stream;
+        } = &mut *work;
         let decoded = convert::decode(
-            stream.grant.format,
+            format,
             &bytes[..got * frame_bytes],
             &mut pivot[..got * channels],
         );
@@ -1170,18 +1579,17 @@ fn pull_playback<H: RegionHost>(
             break;
         }
     }
-    let take = stream.pending_frames.min(chunk);
+    let take = work.pending_frames.min(chunk);
     let samples = take * channels;
     convert::encode(
         RESAMPLED_FORMAT,
-        &stream.pending[..samples],
-        &mut stream.staged[..samples * RESAMPLED_FORMAT.bytes_per_sample()],
+        &work.pending[..samples],
+        &mut work.staged[..samples * RESAMPLED_FORMAT.bytes_per_sample()],
     );
-    stream
-        .pending
-        .copy_within(samples..stream.pending_frames * channels, 0);
-    stream.pending_frames -= take;
-    stream.covered = take;
+    work.pending
+        .copy_within(samples..work.pending_frames * channels, 0);
+    work.pending_frames -= take;
+    work.covered = take;
     Ok(take)
 }
 
@@ -1203,44 +1611,44 @@ fn push_capture<H: RegionHost>(
     }
     let frames = decoded / device_channels;
     let channels = stream.channels();
-    stream.matrix.map(
+    let format = stream.grant.format;
+    let work = &mut stream.work;
+    work.matrix.map(
         frames,
         stream.software_gain,
         &active.pivot[..frames * device_channels],
-        &mut stream.pivot[..frames * channels],
+        &mut work.pivot[..frames * channels],
     )?;
-    let produced = if let Some(filter) = stream.resampler.as_mut() {
-        {
-            let bank = active
-                .banks
-                .get(stream.bank)
-                .and_then(Option::as_ref)
-                .ok_or(Errno::NotFound)?;
-            let (_, made) = filter.process(
-                &bank.bank,
-                &stream.pivot[..frames * channels],
-                &mut stream.pending[..],
-            )?;
-            convert::encode(
-                stream.grant.format,
-                &stream.pending[..made * channels],
-                &mut stream.bytes[..],
-            );
-            made
-        }
+    let produced = if let Some(filter) = work.resampler.as_mut() {
+        let bank = work
+            .bank
+            .and_then(|bank| active.banks.get(bank))
+            .and_then(Option::as_ref)
+            .ok_or(Errno::NotFound)?;
+        let (_, made) = filter.process(
+            &bank.bank,
+            &work.pivot[..frames * channels],
+            &mut work.pending[..],
+        )?;
+        convert::encode(
+            format,
+            &work.pending[..made * channels],
+            &mut work.bytes[..],
+        );
+        made
     } else {
         convert::encode(
-            stream.grant.format,
-            &stream.pivot[..frames * channels],
-            &mut stream.bytes[..],
+            format,
+            &work.pivot[..frames * channels],
+            &mut work.bytes[..],
         );
         frames
     };
-    let frame_bytes = channels * stream.grant.format.bytes_per_sample();
+    let frame_bytes = channels * format.bytes_per_sample();
     let written = {
         let bytes = regions.bytes(region)?;
         let mut ring = PcmRing::bind(bytes, stream.geometry)?;
-        ring.write(&stream.bytes[..produced * frame_bytes])?
+        ring.write(&work.bytes[..produced * frame_bytes])?
     } as usize;
     stream.position = advance(stream.position, written as u64);
     // The client's ring could not hold everything the device gave: the frames
@@ -1276,12 +1684,17 @@ fn advance(position: Frames, frames: u64) -> Frames {
 
 #[cfg(test)]
 mod tests {
+    use tairix_abi::audio::{OpenParams, StreamRole, Tenancy};
     use tairix_abi::driver::audio::{
         AudioEndpointFacts, AudioName, ChannelMap, JackState, Rate, RateSupport, SampleFormat,
         SampleFormats, StreamDirection,
     };
 
-    use super::device_period;
+    use super::{configuration, device_period, longest_period, scale_frames};
+
+    fn rate(hz: u32) -> Rate {
+        Rate::new(hz).expect("a rate inside the vocabulary")
+    }
 
     fn facts(min: u32, max: u32) -> AudioEndpointFacts {
         AudioEndpointFacts {
@@ -1323,5 +1736,72 @@ mod tests {
             device_period(&facts(2_048, 4_096), 36_480, Rate::HZ_48000),
             2_048
         );
+    }
+
+    /// A stream at `hz` wanting `latency` frames, as a client opens one.
+    fn asking(hz: u32, latency: u32) -> OpenParams {
+        OpenParams {
+            device_id: 0,
+            direction: StreamDirection::Playback,
+            format: SampleFormat::S16,
+            rate: rate(hz),
+            channel_map: ChannelMap::STEREO,
+            role: StreamRole::Media,
+            latency_target_frames: latency,
+            tenancy: Tenancy::Caller,
+        }
+    }
+
+    /// With nobody asking — a monitor opening on an idle sink — an endpoint
+    /// runs at its rate nearest the stack's default, in its widest encoding,
+    /// with its longest period; a stream asking has its own.
+    #[test]
+    fn an_endpoint_nobody_asks_of_runs_as_its_own() {
+        let mut endpoint = facts(64, 4_096);
+        endpoint.formats = SampleFormats::EMPTY
+            .with(SampleFormat::S16)
+            .with(SampleFormat::S32);
+        endpoint.rates = RateSupport::Continuous {
+            min: rate(8_000),
+            max: rate(96_000),
+        };
+        let own = configuration(&endpoint, 0, None).expect("a configuration");
+        assert_eq!(
+            (own.rate, own.format, own.period_frames),
+            (Rate::HZ_48000, SampleFormat::S32, 960)
+        );
+        let theirs =
+            configuration(&endpoint, 0, Some(&asking(24_000, 512))).expect("a configuration");
+        assert_eq!(
+            (theirs.rate, theirs.format, theirs.period_frames),
+            (rate(24_000), SampleFormat::S16, 256)
+        );
+    }
+
+    /// No period any stream could have an endpoint run at outlasts the bound
+    /// a monitor's ring is sized for, at whatever rate the monitor hears.
+    #[test]
+    fn no_period_outlasts_the_bound_a_monitors_ring_holds() {
+        for (min, max) in [(64, 4_096), (2_048, 4_096), (256, 256)] {
+            let mut endpoint = facts(min, max);
+            endpoint.rates = RateSupport::Continuous {
+                min: rate(8_000),
+                max: rate(48_000),
+            };
+            for heard in [8_000, 24_000, 44_100, 48_000] {
+                let bound = longest_period(&endpoint, rate(heard));
+                for hz in [8_000, 11_025, 22_050, 44_100, 48_000] {
+                    for target in [2, 512, 8_192, u32::MAX] {
+                        let period = device_period(&endpoint, target, rate(hz));
+                        let at_heard = scale_frames(period, rate(hz), rate(heard));
+                        assert!(
+                            at_heard <= bound,
+                            "{min}..{max}: {at_heard} past {bound} at {heard} Hz"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(longest_period(&facts(256, 256), Rate::HZ_48000), 256);
     }
 }

@@ -197,6 +197,10 @@ fn build_el0_space(
         args: &[b"syscall-resume"],
         env: &[],
         canary: CANARY,
+        heap: tairix_abi::HeapRegion {
+            base: USER_HEAP_BASE,
+            len: USER_HEAP_LEN,
+        },
     };
     // SAFETY: the returned entry is used only after its retained page-table
     // root is activated by the user kthread's pre-resume hook.

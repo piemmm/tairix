@@ -828,13 +828,16 @@ kernel-side `kernel/arch/riscv64::qemu_exit` mirrors the same values
 tie-down test, so the two sides cannot drift. The kernel writes the
 finisher word through `qemu_exit::exit_success` / `exit_failure(code)`;
 the failure word is built by the pure `qemu_exit::fail_word(code)`
-(`(code << 16) | FINISHER_FAIL`).
+(`(code << 16) | FINISHER_FAIL`, a code past the host's eight-bit exit
+status carried as `255`).
 
 `code` is a `NonZeroU16`. Zero is this board's *pass* status, so a
 zero-coded failure would put `FINISHER_FAIL` alone on the bus and exit
 QEMU with status 0 — a failing run reported as a passing one. The type is
-what forecloses it; `fail_word`'s unit test walks the whole `1..=0xFFFF`
-domain and asserts the reported status is never zero. Fixtures mint their
+what forecloses it, with the saturation above: the host keeps eight bits
+of the status, so code `256` would otherwise exit as a pass. `fail_word`'s
+unit test walks the whole `1..=0xFFFF` domain and asserts the status the
+host keeps is never zero. Fixtures mint their
 codes with `tairix_itest_finisher::fail_point!`, which rejects a zero
 literal at compile time.
 

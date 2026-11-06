@@ -13,9 +13,10 @@ use tairix_rng::{FastRng, RandU64};
 
 use super::{
     acquire, dequeue, enqueue, held_ranges, invariants_hold, live_records, locks_present,
-    mint_owner, query, registry_guard, release, release_owner, usage, Conflict, Held, LockedNode,
-    OwnerId, Refusal, Request,
+    mint_owner, query, queued_state, registry_guard, release, release_owner, usage, withdraw,
+    Conflict, Held, LockedNode, OwnerId, Refusal, Request, Wakes,
 };
+use crate::test_alloc::{past_each_refusal, refuse_allocations_on_current_thread};
 
 /// A distinct locked node per test.
 fn file(node: u64) -> LockedNode {
@@ -456,7 +457,7 @@ fn a_waiter_is_woken_only_when_the_range_it_waits_on_is_freed() {
     let f = file(17);
     let (holder, waiter_owner) = (mint_owner(), mint_owner());
     take(f, holder, PID, 1, range(0, 99), Held::Exclusive);
-    let key = enqueue(f, waiter_owner, 2, range(50, 59), Held::Exclusive);
+    let key = enqueue(f, waiter_owner, 2, range(50, 59), Held::Exclusive).expect("queued");
     assert!(key > 0);
 
     let wakes = release(f, holder, range(0, 9), ROOMY).expect("release the head");
@@ -466,8 +467,13 @@ fn a_waiter_is_woken_only_when_the_range_it_waits_on_is_freed() {
     );
 
     let wakes = release(f, holder, range(50, 59), ROOMY).expect("release the waited range");
-    assert_eq!(wakes.tasks, std::vec![2]);
-    assert_eq!(wakes.key, Some(key));
+    assert_eq!(
+        wakes,
+        Wakes::Named {
+            key,
+            tasks: std::vec![2]
+        }
+    );
     dequeue(2);
 }
 
@@ -477,11 +483,15 @@ fn a_release_of_the_description_wakes_the_waiters_it_was_blocking() {
     let f = file(18);
     let (holder, other) = (mint_owner(), mint_owner());
     take(f, holder, PID, 1, LockRange::WHOLE, Held::Exclusive);
-    let key = enqueue(f, other, 5, range(0, 9), Held::Exclusive);
+    let key = enqueue(f, other, 5, range(0, 9), Held::Exclusive).expect("queued");
     let wakes = release_owner(holder);
-    assert_eq!(wakes.len(), 1);
-    assert_eq!(wakes[0].tasks, std::vec![5]);
-    assert_eq!(wakes[0].key, Some(key));
+    assert_eq!(
+        wakes,
+        std::vec![Wakes::Named {
+            key,
+            tasks: std::vec![5]
+        }]
+    );
     dequeue(5);
 }
 
@@ -952,4 +962,256 @@ fn an_error_from_the_abi_range_constructor_never_reaches_the_registry() {
     // future caller cannot quietly pass an unvalidated pair.
     assert_eq!(LockRange::new(u64::MAX, 2), Err(Errno::OutOfRange));
     assert_eq!(LockRange::between(9, 8), Err(Errno::OutOfRange));
+}
+
+/// Waiters queued behind one holder are an ordinary wait, not a cycle: a
+/// waiter waits for those queued ahead of it, never behind, so the re-test
+/// each makes once queued, as `fs_lock` does, reports the holder.
+#[test]
+fn waiters_queued_behind_one_holder_are_not_a_deadlock() {
+    let _serial = registry_guard();
+    let f = file(32);
+    let (holder, first, second) = (mint_owner(), mint_owner(), mint_owner());
+    take(f, holder, PID, 1, LockRange::WHOLE, Held::Exclusive);
+    let blocked = |owner, task| {
+        acquire(&Request {
+            file: f,
+            owner,
+            pid: OTHER_PID,
+            task,
+            range: LockRange::WHOLE,
+            held: Held::Exclusive,
+            limit: ROOMY,
+            waiting: true,
+        })
+    };
+    for (owner, task) in [(first, 2), (second, 3)] {
+        assert!(matches!(blocked(owner, task), Err(Refusal::Held(_))));
+        enqueue(f, owner, task, LockRange::WHOLE, Held::Exclusive).expect("queued");
+        assert!(
+            matches!(blocked(owner, task), Err(Refusal::Held(_))),
+            "waiter {task}'s re-test found a cycle that is not there"
+        );
+    }
+    dequeue(2);
+    dequeue(3);
+}
+
+/// Every allocation an acquisition makes is taken before it changes
+/// anything: refused at each one in turn it answers `OutOfMemory` with the
+/// registry as it was, and granted them all it goes through.
+#[test]
+fn an_acquisition_refused_at_any_allocation_records_nothing() {
+    let _serial = registry_guard();
+    let (held, fresh) = (file(33), file(34));
+    let (holder, newcomer) = (mint_owner(), mint_owner());
+    take(held, holder, PID, 1, range(0, 99), Held::Exclusive);
+    for (f, owner, span) in [
+        // A file nothing has locked, for a process with no record.
+        (fresh, newcomer, range(0, 9)),
+        // An owner new to a file another holds records on.
+        (held, newcomer, range(200, 299)),
+        // A conversion cutting the holder's record in three.
+        (held, holder, range(40, 49)),
+    ] {
+        let before = (usage(PID), usage(OTHER_PID), live_records());
+        let granted = past_each_refusal(&Err(Refusal::OutOfMemory), || {
+            let answer = acquire(&Request {
+                file: f,
+                owner,
+                pid: OTHER_PID,
+                task: 9,
+                range: span,
+                held: Held::Shared,
+                limit: ROOMY,
+                waiting: false,
+            })
+            .map(drop);
+            if answer.is_err() {
+                assert_eq!(
+                    (usage(PID), usage(OTHER_PID), live_records()),
+                    before,
+                    "a refused acquisition was charged"
+                );
+            }
+            answer
+        });
+        assert_eq!(granted, Ok(()));
+        assert!(invariants_hold(f));
+    }
+    assert_eq!(
+        held_ranges(fresh, newcomer),
+        std::vec![(0, 9, Held::Shared)]
+    );
+    assert_eq!(
+        held_ranges(held, newcomer),
+        std::vec![(200, 299, Held::Shared)]
+    );
+    assert_eq!(
+        held_ranges(held, holder),
+        std::vec![
+            (0, 39, Held::Exclusive),
+            (40, 49, Held::Shared),
+            (50, 99, Held::Exclusive)
+        ]
+    );
+}
+
+/// A waiter the heap cannot queue is refused with nothing queued, and once
+/// queued a release names it once.
+#[test]
+fn a_queueing_refused_for_memory_queues_nothing() {
+    let _serial = registry_guard();
+    let f = file(35);
+    let (holder, waiter) = (mint_owner(), mint_owner());
+    take(f, holder, PID, 1, LockRange::WHOLE, Held::Exclusive);
+    let queued = past_each_refusal(&Err(Refusal::OutOfMemory), || {
+        let answer = enqueue(f, waiter, 4, range(0, 9), Held::Exclusive).map(drop);
+        if answer.is_err() {
+            assert_eq!(
+                queued_state(f, 4),
+                (false, false),
+                "a refusal queued the waiter"
+            );
+        }
+        answer
+    });
+    assert_eq!(queued, Ok(()));
+    assert_eq!(queued_state(f, 4), (true, true));
+    let key = enqueue(f, waiter, 4, range(0, 9), Held::Exclusive).expect("re-queued");
+    assert_eq!(
+        release(f, holder, range(0, 9), ROOMY),
+        Ok(Wakes::Named {
+            key,
+            tasks: std::vec![4]
+        })
+    );
+    dequeue(4);
+}
+
+/// Closing a description never fails for memory: with every allocation
+/// refused it still releases everything the description held, waking every
+/// lock waiter in place of the list it could not make.
+#[test]
+fn a_description_releases_everything_with_the_heap_exhausted() {
+    let _serial = registry_guard();
+    let f = file(36);
+    let (holder, waiter) = (mint_owner(), mint_owner());
+    take(f, holder, PID, 1, range(0, 9), Held::Exclusive);
+    take(f, holder, PID, 1, range(20, 29), Held::Shared);
+    enqueue(f, waiter, 6, range(0, 9), Held::Exclusive).expect("queued");
+    refuse_allocations_on_current_thread(true);
+    let wakes = release_owner(holder);
+    refuse_allocations_on_current_thread(false);
+    assert!(wakes.is_empty(), "waking everyone stands in for the list");
+    assert!(held_ranges(f, holder).is_empty());
+    assert_eq!(usage(PID), 0);
+    assert!(invariants_hold(f));
+    take(f, waiter, OTHER_PID, 6, range(0, 9), Held::Exclusive);
+    dequeue(6);
+}
+
+/// An unlock of whole records takes no memory, so a caller can always let
+/// go; with no room to list the waiter it frees, the whole file is woken.
+#[test]
+fn an_unlock_of_whole_records_needs_no_memory() {
+    let _serial = registry_guard();
+    let f = file(37);
+    let (holder, waiter) = (mint_owner(), mint_owner());
+    take(f, holder, PID, 1, range(0, 9), Held::Exclusive);
+    take(f, holder, PID, 1, range(20, 29), Held::Exclusive);
+    let key = enqueue(f, waiter, 7, range(0, 9), Held::Exclusive).expect("queued");
+    refuse_allocations_on_current_thread(true);
+    let released = release(f, holder, range(0, 9), ROOMY);
+    refuse_allocations_on_current_thread(false);
+    assert_eq!(released, Ok(Wakes::File(key)));
+    assert_eq!(held_ranges(f, holder), std::vec![(20, 29, Held::Exclusive)]);
+    assert!(invariants_hold(f));
+    dequeue(7);
+}
+
+/// A request held up only by an earlier waiter runs the deadlock search too:
+/// `a` waits on the record `b` holds, so `b` queueing behind `a` would leave
+/// both parked for good.
+#[test]
+fn a_request_queued_behind_a_waiter_on_its_own_record_is_a_deadlock() {
+    let _serial = registry_guard();
+    let f = file(38);
+    let (a, b) = (mint_owner(), mint_owner());
+    take(f, b, OTHER_PID, 2, range(0, 9), Held::Exclusive);
+    let ask = |owner, task, span| {
+        acquire(&Request {
+            file: f,
+            owner,
+            pid: PID,
+            task,
+            range: span,
+            held: Held::Exclusive,
+            limit: ROOMY,
+            waiting: true,
+        })
+    };
+    assert!(matches!(ask(a, 1, range(0, 99)), Err(Refusal::Held(_))));
+    enqueue(f, a, 1, range(0, 99), Held::Exclusive).expect("queued");
+    assert_eq!(ask(b, 2, range(50, 59)), Err(Refusal::Deadlock));
+    dequeue(1);
+}
+
+/// The deadlock search walks every waiter, so a registry that queued many and
+/// let them go walks only those still waiting: its levels go with its rows.
+#[test]
+fn a_waiter_table_that_emptied_walks_only_those_still_waiting() {
+    let _serial = registry_guard();
+    let f = file(39);
+    let (holder, waiter) = (mint_owner(), mint_owner());
+    take(f, holder, PID, 1, LockRange::WHOLE, Held::Exclusive);
+    for task in 100..2100 {
+        enqueue(f, waiter, task, range(0, 9), Held::Exclusive).expect("queued");
+    }
+    for task in 100..2097 {
+        dequeue(task);
+    }
+    let registry = super::REGISTRY.lock();
+    let waiting: Vec<u64> = registry.waiters.keys().copied().collect();
+    assert_eq!(waiting, [2097, 2098, 2099]);
+    assert_eq!(registry.waiters.height(), 1, "the search visits one node");
+}
+
+/// A request that leaves the queue without its lock answers those queued on
+/// ranges it overlaps: its place may have been all that held them back.
+///
+/// Regression: leaving woke nobody, so a request held up only by an earlier
+/// waiter slept on once that waiter timed out, was signalled, or had no room
+/// to register its wait.
+#[test]
+fn a_waiter_leaving_without_its_lock_wakes_those_it_held_back() {
+    let _serial = registry_guard();
+    let f = file(40);
+    let (holder, ahead, behind) = (mint_owner(), mint_owner(), mint_owner());
+    take(f, holder, PID, 1, range(0, 9), Held::Exclusive);
+    let key = enqueue(f, ahead, 2, range(5, 19), Held::Exclusive).expect("queued");
+    assert_eq!(
+        acquire(&Request {
+            file: f,
+            owner: behind,
+            pid: OTHER_PID,
+            task: 3,
+            range: range(15, 24),
+            held: Held::Exclusive,
+            limit: ROOMY,
+            waiting: true,
+        }),
+        Err(Refusal::Queued),
+        "only the waiter ahead holds it back"
+    );
+    let _ = enqueue(f, behind, 3, range(15, 24), Held::Exclusive).expect("queued");
+    assert_eq!(
+        withdraw(2),
+        Wakes::Named {
+            key,
+            tasks: std::vec![3]
+        },
+        "the waiter it held back is woken"
+    );
+    dequeue(3);
 }

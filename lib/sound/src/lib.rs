@@ -16,6 +16,10 @@
 //! `ID3v2` tag other software put ahead of a FLAC or MPEG stream is stepped
 //! over.
 //!
+//! [`OpusPackets`] decodes the Opus stream a container other than Ogg carries
+//! — a `WebM` recording's track — a packet at a time, from the identification
+//! header the container holds.
+//!
 //! # Streaming
 //!
 //! A decoder reads its file through [`SoundInput`], at offsets of its own
@@ -34,6 +38,13 @@
 //! the bytes it holds or the limits before it is used, and all arithmetic over
 //! a declared value is checked, so a malformed file is refused with a
 //! [`DecodeError`] and never panics.
+//!
+//! # Encoding
+//!
+//! Two formats are also written, each behind its own off-by-default feature:
+//! FLAC (`flac_encode`, `encode-flac`), for the tests, the fuzz generator and
+//! the asset build, and Opus (`opus_encode`, `encode-opus`), for screen
+//! recordings.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -50,7 +61,7 @@ mod bits;
 mod comment;
 mod crc;
 mod flac;
-#[cfg(any(test, feature = "encode"))]
+#[cfg(any(test, feature = "encode-flac"))]
 pub mod flac_encode;
 mod flac_frame;
 mod g711;
@@ -65,6 +76,8 @@ mod mpeg;
 mod msadpcm;
 mod ogg;
 mod opus;
+#[cfg(any(test, feature = "encode-opus"))]
+pub mod opus_encode;
 mod pcm;
 mod transform;
 mod vorbis;
@@ -72,6 +85,7 @@ mod wav;
 
 pub use input::{InputError, SoundInput, MAX_READ};
 pub use meta::{CoverRange, Cue, Loop, LoopKind, Metadata, Tag, TagKey, TagKind, TAG_KEY_MAX};
+pub use opus::OpusPackets;
 
 /// A sound-file format this crate decodes.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

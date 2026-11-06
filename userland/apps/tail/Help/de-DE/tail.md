@@ -26,7 +26,19 @@ Die historische Erst-Argument-Form `tail -num` / `tail +num` (mit einem
 optionalen abschließenden Buchstaben `b`/`c`/`l`) wird akzeptiert, wie im
 GNU-Werkzeug.
 
-Der Folgemodus hält jede Datei geöffnet und gibt neue Daten aus, sobald sie wächst; er blockiert, bis sich die Datei ändert — nie aktives Warten. `-f` folgt dem Deskriptor; `-F` folgt dem Namen und öffnet eine rotierte Datei erneut, und `--retry` wartet, bis ein Name erscheint. `--pid=PID` beendet den Folgemodus, wenn der Prozess endet (geprüft alle `--sleep-interval` Sekunden, Standard 1; `--max-unchanged-stats` Standard 5). Eine Kürzung wird gemeldet und der Datei ab ihrem neuen Anfang gefolgt.
+Der Folgemodus hält jede Datei geöffnet und gibt neue Daten aus, sobald
+die Datei wächst. `-f` folgt der geöffneten Datei über den Deskriptor —
+nach einem Umbenennen oder Verschieben folgt es weiter derselben Datei.
+`-F` folgt dem *Namen*: wird die Datei rotiert (wegbenannt und durch
+eine neue Datei an ihrer Stelle ersetzt), öffnet es die neue Datei, und
+`--retry` versucht es weiter mit einem Namen, den es noch nicht gibt.
+Ein Folgen blockiert, bis sich die Datei tatsächlich ändert — es lässt
+die CPU nie leer drehen. `--pid=PID` beendet das Folgen, sobald Prozess
+`PID` endet, geprüft alle `--sleep-interval` (Sekunden, Standard 1).
+`--max-unchanged-stats=N` legt fest, wie viele ruhige Zyklen vergehen,
+bevor `-F` den Namen erneut auf eine Rotation prüft (Standard 5). Eine
+Kürzung (die Datei schrumpft) wird gemeldet, und der Datei wird ab ihrem
+neuen Anfang erneut gefolgt.
 
 Wenn führender Inhalt nicht angezeigt wird, wird ein Hinweisdatensatz
 auf den Standard-Informationsstrom (fd 3) geschrieben; er ändert nie die
@@ -50,13 +62,18 @@ aus. Eine Pipe oder eine Datei erhält den Namen Byte für Byte.
 - `-v, --verbose` — die Kopfzeilen `==> file <==` immer ausgeben.
 - `-z, --zero-terminated` — Zeilen sind NUL-getrennt statt
   zeilenumbruchgetrennt.
-- `-f, --follow[=descriptor]` — dem Deskriptor folgen und angehängte Daten ausgeben.
-- `-F` — dem Namen folgen (`--follow=name --retry`); rotierte Datei erneut öffnen.
+- `-f, --follow[=descriptor]` — die Datei geöffnet halten und angehängte
+  Daten ausgeben, wobei ihr über den Deskriptor gefolgt wird.
+- `-F` — dem Namen folgen (`--follow=name --retry`): die Datei erneut
+  öffnen, wenn sie rotiert wird.
 - `--follow=name` — dem Namen statt dem Deskriptor folgen.
-- `--retry` — weiter versuchen, eine noch fehlende Datei zu öffnen.
-- `--pid <PID>` — den Folgemodus beenden, wenn Prozess `PID` endet.
-- `--sleep-interval <N>` — Sekunden zwischen den Prüfungen (Standard 1).
-- `--max-unchanged-stats <N>` — ruhige Zyklen, bevor `-F` den Namen erneut prüft (Standard 5).
+- `--retry` — weiter versuchen, eine noch nicht zugängliche Datei zu
+  öffnen.
+- `--pid <PID>` — beim Folgen aufhören, sobald Prozess `PID` endet.
+- `--sleep-interval <N>` — Sekunden zwischen den erneuten Prüfungen von
+  `--pid`/Rotation (Bruchteile erlaubt; Standard 1).
+- `--max-unchanged-stats <N>` — ruhige Zyklen, bevor `-F` den Namen
+  erneut auf eine Rotation prüft (Standard 5).
 - `-h, -?` — die eigene Kurzhilfe dieses Befehls anzeigen.
 
 ## EXAMPLES
@@ -66,6 +83,11 @@ aus. Eine Pipe oder eine Datei erhält den Namen Byte für Byte.
   unter ihrer Kopfzeile.
 - `tail -c 1K image` — die letzten 1024 Bytes von `image` ausgeben.
 - `tail -n +5 notes` — `notes` ab der 5. Zeile ausgeben.
+- `tail -f log.txt` — die letzten 10 Zeilen ausgeben, danach neue Zeilen,
+  sobald sie geschrieben werden.
+- `tail -F /System/Logs/system` — dem Systemprotokoll über Rotationen
+  hinweg folgen.
+- `tail -f --pid 1234 out` — `out` folgen, bis Prozess 1234 endet.
 
 ## EXIT STATUS
 

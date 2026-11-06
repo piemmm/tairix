@@ -24,6 +24,15 @@ Quando nessun servizio di visualizzazione è in esecuzione, o un'altra
 sessione detiene già la postazione, il comando fallisce scrivendo il
 motivo sull'errore standard — non spodesta mai una sessione in corso.
 
+Mentre la scrivania è in funzione, `Meta+Shift+3` salva un'immagine dello
+schermo e `Meta+Shift+4` quella di un'area che si trascina — oppure, dopo
+`Space`, di una finestra su cui si fa clic. `Meta+Shift+5` apre la barra
+di cattura, che registra anche lo schermo. Aggiungendo `Ctrl` l'immagine
+va negli appunti, e una scorciatoia di cattura premuta durante una
+registrazione la interrompe. Una registrazione con l'audio chiede la
+password di un amministratore quando il proprio account non può registrare
+l'audio da sé.
+
 ## OPTIONS
 
 - `-h, -?` — mostrare la guida breve di questo comando.

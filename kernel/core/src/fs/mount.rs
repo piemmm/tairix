@@ -503,28 +503,38 @@ pub struct MountTable {
 impl MountTable {
     /// Construct a table whose only entry is a policy-only root projection
     /// carrying `root_flags`.
-    #[must_use]
-    pub fn new(root_flags: MountFlags) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::OutOfMemory`] when the heap cannot hold the table.
+    pub fn new(root_flags: MountFlags) -> Result<Self, VfsError> {
+        let root = Arc::try_new(Projection {
+            id: 0,
+            path: Path::root(),
+            flags: root_flags,
+            backing: None,
+            subtree: Vec::new(),
+            template: None,
+            class: AllocationClass::Ordinary,
+            changed_at: 0,
+            live: AtomicBool::new(true),
+            cover: None,
+            binder: None,
+            binds_within: AtomicUsize::new(0),
+        })
+        .map_err(|_| VfsError::OutOfMemory)?;
+        let mut mounts = Vec::new();
+        mounts
+            .try_reserve_exact(1)
+            .map_err(|_| VfsError::OutOfMemory)?;
+        mounts.push(root);
+        Ok(Self {
             attachments: Vec::new(),
-            mounts: alloc::vec![Arc::new(Projection {
-                id: 0,
-                path: Path::root(),
-                flags: root_flags,
-                backing: None,
-                subtree: Vec::new(),
-                template: None,
-                class: AllocationClass::Ordinary,
-                changed_at: 0,
-                live: AtomicBool::new(true),
-                cover: None,
-                binder: None,
-                binds_within: AtomicUsize::new(0),
-            })],
+            mounts,
             epoch: 0,
             next_id: 1,
-            covers: Arc::new(Covers::default()),
-        }
+            covers: Arc::try_new(Covers::default()).map_err(|_| VfsError::OutOfMemory)?,
+        })
     }
 
     /// How many times the table has changed.
@@ -669,10 +679,15 @@ impl MountTable {
     ///
     /// [`VfsError::AlreadyExists`] if its driver is already attached: a
     /// volume is attached once, never re-flagged in place.
+    /// [`VfsError::OutOfMemory`] when the table has no room for it; nothing
+    /// changes.
     pub fn attach(&mut self, attachment: Attachment) -> Result<(), VfsError> {
         if self.attachment(attachment.driver).is_some() {
             return Err(VfsError::AlreadyExists);
         }
+        self.attachments
+            .try_reserve(1)
+            .map_err(|_| VfsError::OutOfMemory)?;
         self.changed();
         self.attachments.push(attachment);
         Ok(())
@@ -1274,7 +1289,7 @@ mod tests {
 
     /// A table projecting the `/Storage` catalog, as the boot layout does.
     fn with_catalog() -> MountTable {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = MountTable::new(MountFlags::default()).expect("a table");
         table
             .mount(
                 p("/Storage"),
@@ -1353,14 +1368,14 @@ mod tests {
 
     #[test]
     fn root_mount_covers_everything() {
-        let table = MountTable::new(MountFlags::default());
+        let table = MountTable::new(MountFlags::default()).expect("a table");
         assert_eq!(table.resolve(&p("/anything/deep")).path(), &Path::root());
         assert!(!table.is_read_only(&p("/anything")));
     }
 
     #[test]
     fn longest_prefix_wins() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = MountTable::new(MountFlags::default()).expect("a table");
         table
             .mount(p("/System"), MountFlags::READ_ONLY, None)
             .expect("mount /System");
@@ -1379,7 +1394,7 @@ mod tests {
 
     #[test]
     fn duplicate_mount_is_rejected() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = MountTable::new(MountFlags::default()).expect("a table");
         table
             .mount(p("/Storage"), MountFlags::default(), None)
             .expect("first");
@@ -1391,7 +1406,7 @@ mod tests {
 
     #[test]
     fn a_volume_is_attached_once() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = MountTable::new(MountFlags::default()).expect("a table");
         let driver = attached(&mut table, 0x5A00, MountFlags::READ_ONLY);
         assert_eq!(
             table.attach(Attachment::new(driver, None, MountFlags::default())),
@@ -1523,7 +1538,7 @@ mod tests {
 
     #[test]
     fn the_root_volume_cannot_be_detached() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = MountTable::new(MountFlags::default()).expect("a table");
         let root = attached(&mut table, 0x5A30, MountFlags::default());
         table.back_root(root).expect("root");
         assert_eq!(
@@ -1603,6 +1618,27 @@ mod tests {
         assert_eq!(judged, Ok(31));
     }
 
+    /// An attachment the table has no room for is refused for want of memory
+    /// and changes nothing, where its push aborted the kernel.
+    #[test]
+    fn an_attachment_the_heap_cannot_hold_is_refused() {
+        let mut table = with_catalog();
+        let mut raw = 0x5A60;
+        while table.attachments.len() < table.attachments.capacity() {
+            attached(&mut table, raw, MountFlags::default());
+            raw += 1;
+        }
+        let driver = handle(raw);
+        let refused = Attachment::new(driver, None, MountFlags::default());
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let answer = table.attach(refused);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(answer, Err(VfsError::OutOfMemory));
+        assert!(table.attachment(driver).is_none(), "nothing was attached");
+        let granted = Attachment::new(driver, None, MountFlags::default());
+        assert_eq!(table.attach(granted), Ok(()));
+    }
+
     #[test]
     fn each_volume_reports_the_earliest_projection_of_its_root() {
         let mut table = with_catalog();
@@ -1654,7 +1690,7 @@ mod tests {
 
     #[test]
     fn back_root_attaches_a_driver_exactly_once() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = MountTable::new(MountFlags::default()).expect("a table");
         assert_eq!(table.resolve(&p("/System")).backing(), None);
 
         let backing = attached(&mut table, 0x5EC0, MountFlags::default());
@@ -1669,7 +1705,7 @@ mod tests {
 
     #[test]
     fn an_attachment_records_the_medium_the_device_reported() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = MountTable::new(MountFlags::default()).expect("a table");
         for (raw, medium) in [
             (0x5ED0, Some(BlkMedium::of_transport(BlkTransport::Ata))),
             (0x5ED1, Some(BlkMedium::of_transport(BlkTransport::Nvme))),
@@ -1688,7 +1724,7 @@ mod tests {
 
     #[test]
     fn set_backing_attaches_a_driver_and_subtree_preserving_flags() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = MountTable::new(MountFlags::default()).expect("a table");
         table
             .mount(p("/Users"), MountFlags::NOEXEC, None)
             .expect("mount /Users");
@@ -1708,7 +1744,7 @@ mod tests {
 
     #[test]
     fn set_backing_is_refused_for_an_unknown_mount_or_a_second_backing() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = MountTable::new(MountFlags::default()).expect("a table");
         let backing = attached(&mut table, 0x5702, MountFlags::default());
         // No mount covers exactly `/Storage` yet.
         assert_eq!(
@@ -1821,13 +1857,13 @@ mod tests {
 
     #[test]
     fn unmount_root_is_refused() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = MountTable::new(MountFlags::default()).expect("a table");
         assert_eq!(table.unmount(&Path::root()), Err(VfsError::InvalidPath));
     }
 
     #[test]
     fn unmount_unknown_is_not_found() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = MountTable::new(MountFlags::default()).expect("a table");
         assert_eq!(table.unmount(&p("/Storage/usb0")), Err(VfsError::NotFound));
     }
 
@@ -1848,7 +1884,7 @@ mod tests {
     /// refused and changes nothing.
     #[test]
     fn a_projection_sits_beneath_another_projections_floor() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = MountTable::new(MountFlags::default()).expect("a table");
         let backed = attached(&mut table, 0x5B00, MountFlags::NOEXEC);
         assert_eq!(
             table.mount(p("/Users/vol"), MountFlags::default(), Some(backed)),
@@ -1907,7 +1943,7 @@ mod tests {
     /// catalog, so no runtime volume is shown beneath it.
     #[test]
     fn a_backed_storage_is_no_catalog() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = MountTable::new(MountFlags::default()).expect("a table");
         let disk = attached(&mut table, 0x5B03, MountFlags::default());
         table
             .mount(p("/Storage"), MountFlags::default(), Some(disk))
@@ -1965,7 +2001,7 @@ mod tests {
     /// it is served by the volume.
     #[test]
     fn backing_a_projection_replaces_it_and_withdraws_the_old() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = MountTable::new(MountFlags::default()).expect("a table");
         table
             .mount(p("/Users"), MountFlags::NOEXEC, None)
             .expect("policy mount");

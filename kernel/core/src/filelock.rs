@@ -20,17 +20,31 @@
 //!   means — so this map is non-overlapping and an interval query over it is
 //!   an exact `O(log n)`: the predecessor of the range plus the records
 //!   starting inside it are the whole candidate set.
-//! * `shared_records`, a count. A shared request conflicts only with an
-//!   exclusive holder, so it never reads further than the map above; an
-//!   exclusive request against a file with no shared records stops there
-//!   too, which is the whole cost for the record-per-row workload where
-//!   every lock is exclusive.
+//! * `shared`, a count. A shared request conflicts only with an exclusive
+//!   holder, so it never reads further than the map above; an exclusive
+//!   request against a file with no shared records stops there too, which
+//!   is the whole cost for the record-per-row workload where every lock is
+//!   exclusive.
+//!
+//! Both change with each record an operation adds or removes, in the same
+//! step, so an operation costs what it touches rather than what the file
+//! holds; the randomised runs rebuild them from the records after every step
+//! and compare.
 //!
 //! Only an exclusive request on a file that *does* hold shared records walks
 //! owners, and it stops at the first conflict. That walk is over
 //! participants — not over records — and the record count is bounded per
 //! process by the `file-locks` resource limit, so it cannot grow without
 //! someone being charged for it.
+//!
+//! # Memory
+//!
+//! Every allocation an operation makes is taken before it changes anything,
+//! so an acquisition, a queueing, or an unlock that cuts a record is refused
+//! `OutOfMemory` with the registry as it was. An unlock of whole records and
+//! the release of a description need none, and a release that cannot list
+//! whom it frees wakes every waiter on the file — or, with no room even for
+//! that, every lock waiter — each to re-test its own request.
 //!
 //! # Fairness
 //!
@@ -54,11 +68,14 @@
 //! # Deadlock
 //!
 //! A blocking request whose grant would close a cycle is refused with
-//! [`Errno::Deadlock`] rather than joining a
-//! wait none of the participants could leave. The search is an iterative
-//! breadth-first walk of the wait-for graph, bounded by the owners it has
+//! [`Errno::Deadlock`] rather than joining a wait none of the participants
+//! could leave, whether a holder is in its way or only an earlier waiter,
+//! which may itself be waiting on what the requester holds. The search is an
+//! iterative breadth-first walk of the wait-for graph, bounded by the owners it has
 //! already visited, so it neither recurses on a depth a hostile process
-//! chooses nor expands an owner twice.
+//! chooses nor expands an owner twice. A waiter's edges are the conflicts
+//! acquisition itself decides: the holders in its way and the waiters queued
+//! ahead of it, never one behind, and holders alone for a conversion.
 //!
 //! Owners are descriptions, so the graph sees a cycle whenever each
 //! participant blocks and holds through the same description — which is what
@@ -69,14 +86,17 @@
 //! throughout, so it is recoverable rather than an unkillable hang. Linux
 //! detects none of these cases for its equivalent (`F_OFD_SETLKW`) locks.
 
-use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::{Errno, LockConflict, LockMode, LockRange};
+use tairix_collections::{OrderedMap, OrderedSet, TryReserveError};
+use tairix_inline::ArrayVec;
 use tairix_kernel_sched_api::TaskId;
 use tairix_kernel_sec::ProcessId;
 use tairix_sync::SpinLock;
+
+use crate::waitq::{self, filed, WakeKey, FILE_LOCK_WAITQ};
 
 /// The node a lock is taken on: the volume registration that pinned it and
 /// the id that pin answered, which stay the node's for as long as any
@@ -165,7 +185,40 @@ struct OwnerLocks {
     /// when the owner first locked this file. A later split keeps the charge
     /// here rather than migrating it to whoever split the record.
     pid: ProcessId,
-    records: BTreeMap<u64, Record>,
+    records: OrderedMap<u64, Record>,
+}
+
+/// The conflict projections of one file's records, kept in step with them.
+struct Projection {
+    /// Every exclusive record on the file, non-overlapping and ordered by
+    /// start — the exact interval index exclusivity makes possible.
+    exclusive: OrderedMap<u64, (LockRange, OwnerId)>,
+    /// How many shared records the file holds, so an exclusive request can
+    /// skip the owner walk when there are none.
+    shared: usize,
+}
+
+impl Projection {
+    /// Take `record` out. Never allocates.
+    fn forget(&mut self, record: Record) {
+        match record.held {
+            Held::Shared => self.shared = self.shared.saturating_sub(1),
+            Held::Exclusive => {
+                self.exclusive.remove(&record.range.start());
+            }
+        }
+    }
+
+    /// Put `owner`'s `record` in, in room taken before the change began.
+    fn note(&mut self, owner: OwnerId, record: Record) {
+        match record.held {
+            Held::Shared => self.shared += 1,
+            Held::Exclusive => {
+                let start = record.range.start();
+                filed(self.exclusive.try_insert(start, (record.range, owner)));
+            }
+        }
+    }
 }
 
 /// One file's lock state, alive only while something holds or awaits a lock
@@ -175,22 +228,19 @@ struct FileEntry {
     /// monotonic counter and never reused, so a stale registration can never
     /// alias a later file's waiters.
     key: u64,
-    owners: BTreeMap<OwnerId, OwnerLocks>,
-    /// Every exclusive record on the file, non-overlapping and ordered by
-    /// start — the exact interval index exclusivity makes possible.
-    exclusive: BTreeMap<u64, (LockRange, OwnerId)>,
-    /// How many shared records the file holds, so an exclusive request can
-    /// skip the owner walk when there are none.
-    shared_records: usize,
+    owners: OrderedMap<OwnerId, OwnerLocks>,
+    projection: Projection,
 }
 
 impl FileEntry {
     fn new(key: u64) -> Self {
         Self {
             key,
-            owners: BTreeMap::new(),
-            exclusive: BTreeMap::new(),
-            shared_records: 0,
+            owners: OrderedMap::new(),
+            projection: Projection {
+                exclusive: OrderedMap::new(),
+                shared: 0,
+            },
         }
     }
 
@@ -210,7 +260,7 @@ impl FileEntry {
         }
         // A shared request is compatible with every shared record, so the
         // exclusive projection above was the whole question.
-        if matches!(held, Held::Shared) || self.shared_records == 0 {
+        if matches!(held, Held::Shared) || self.projection.shared == 0 {
             return None;
         }
         self.owners
@@ -231,14 +281,14 @@ impl FileEntry {
     /// The first exclusive record overlapping `range` that `owner` does not
     /// hold.
     fn exclusive_conflict(&self, owner: OwnerId, range: LockRange) -> Option<Conflict> {
-        let predecessor = self
-            .exclusive
+        let exclusive = &self.projection.exclusive;
+        let predecessor = exclusive
             .range(..range.start())
             .next_back()
             .filter(|(_, (held, _))| held.end_inclusive() >= range.start());
         predecessor
             .into_iter()
-            .chain(self.exclusive.range(range.start()..=range.end_inclusive()))
+            .chain(exclusive.range(range.start()..=range.end_inclusive()))
             .find(|(_, (_, holder))| *holder != owner)
             .map(|(_, &(held_range, holder))| Conflict {
                 owner: holder,
@@ -251,43 +301,46 @@ impl FileEntry {
             })
     }
 
-    /// Make `range` be `new` for `owner`, applying the edits `plan`
-    /// described and rebuilding the projections from the result.
-    fn apply(&mut self, owner: OwnerId, pid: ProcessId, plan: &Plan) {
-        let locks = self.owners.entry(owner).or_insert_with(|| OwnerLocks {
+    /// Take the room `plan` needs here for `owner` — its records' and the
+    /// exclusive projection's — answering, for an owner new to the file, the
+    /// container its first records go in.
+    fn make_room(
+        &mut self,
+        owner: OwnerId,
+        pid: ProcessId,
+        plan: &Plan,
+    ) -> Result<Option<OwnerLocks>, TryReserveError> {
+        let exclusive = plan.exclusive_inserts();
+        self.projection.exclusive.try_reserve(exclusive)?;
+        if let Some(locks) = self.owners.get_mut(&owner) {
+            locks.records.try_reserve(plan.insert.len())?;
+            return Ok(None);
+        }
+        self.owners.try_reserve(1)?;
+        Ok(Some(OwnerLocks {
             pid,
-            records: BTreeMap::new(),
-        });
-        for &start in &plan.remove {
-            locks.records.remove(&start);
+            records: OrderedMap::try_with_capacity(plan.insert.len())?,
+        }))
+    }
+
+    /// Make `range` be what `plan` says for `owner`, keeping the projections
+    /// in step record by record, in the room [`Self::make_room`] took.
+    fn apply(&mut self, owner: OwnerId, plan: &Plan) {
+        let Some(locks) = self.owners.get_mut(&owner) else {
+            return;
+        };
+        // The records the plan absorbs or cuts back are the ones it was
+        // built from, found again rather than listed.
+        while let Some(record) = first_taken(&locks.records, plan) {
+            locks.records.remove(&record.range.start());
+            self.projection.forget(record);
         }
         for &record in &plan.insert {
-            locks.records.insert(record.range.start(), record);
+            filed(locks.records.try_insert(record.range.start(), record));
+            self.projection.note(owner, record);
         }
         if locks.records.is_empty() {
             self.owners.remove(&owner);
-        }
-        self.reindex();
-    }
-
-    /// Rebuild the conflict projections from the records they describe.
-    ///
-    /// Derived rather than nudged by a delta: an index that accumulates
-    /// increments can drift from the records it is meant to describe, and a
-    /// conflict check reading a drifted index is a lock granted twice.
-    fn reindex(&mut self) {
-        self.exclusive.clear();
-        self.shared_records = 0;
-        for (&owner, locks) in &self.owners {
-            for record in locks.records.values() {
-                match record.held {
-                    Held::Shared => self.shared_records += 1,
-                    Held::Exclusive => {
-                        self.exclusive
-                            .insert(record.range.start(), (record.range, owner));
-                    }
-                }
-            }
         }
     }
 
@@ -297,7 +350,7 @@ impl FileEntry {
     }
 }
 
-/// One task parked in `fs_lock`.
+/// One request waiting in `fs_lock`, or one asking to.
 struct Waiter {
     file: LockedNode,
     owner: OwnerId,
@@ -374,6 +427,9 @@ pub enum Refusal {
     /// The request would push the charged process past its `file-locks`
     /// bound.
     LimitExceeded,
+    /// The kernel could not hold what the request needs; nothing was
+    /// recorded.
+    OutOfMemory,
 }
 
 impl Refusal {
@@ -389,47 +445,80 @@ impl Refusal {
             Self::Held(_) | Self::Queued => Errno::WouldBlock,
             Self::Deadlock => Errno::Deadlock,
             Self::LimitExceeded => Errno::LimitExceeded,
+            Self::OutOfMemory => Errno::OutOfMemory,
         }
     }
 }
 
-/// The waiters a state change made able to progress, and the file wait key
-/// they are registered under.
+impl From<TryReserveError> for Refusal {
+    fn from(_: TryReserveError) -> Self {
+        Self::OutOfMemory
+    }
+}
+
+impl From<alloc::collections::TryReserveError> for Refusal {
+    fn from(_: alloc::collections::TryReserveError) -> Self {
+        Self::OutOfMemory
+    }
+}
+
+/// The waiters a state change made able to progress.
 #[derive(Debug, Default, Eq, PartialEq)]
-pub struct Wakes {
-    /// The file wait key, or `None` when nothing is to be woken.
-    pub key: Option<u64>,
-    /// The waiters whose blocked ranges the change freed.
-    pub tasks: Vec<TaskId>,
+pub enum Wakes {
+    /// Nobody.
+    #[default]
+    Nobody,
+    /// Exactly these waiters, on the file whose wait key is `key`.
+    Named {
+        /// The file's wait key.
+        key: u64,
+        /// The waiters whose blocked ranges the change freed.
+        tasks: Vec<TaskId>,
+    },
+    /// Every waiter on the file whose wait key this is: the change could not
+    /// list whom it freed, so each re-tests its own request.
+    File(u64),
 }
 
 impl Wakes {
     /// Whether anything is to be woken.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.tasks.is_empty()
+    pub const fn is_empty(&self) -> bool {
+        matches!(self, Self::Nobody)
     }
 
     /// Unpark the waiters, with the registry's lock already released.
     pub fn wake(&self) {
-        if let Some(key) = self.key {
-            crate::waitq::file_lock_wake(crate::waitq::WakeKey::new(key), &self.tasks);
+        match self {
+            Self::Nobody => {}
+            Self::Named { key, tasks } => waitq::file_lock_wake(WakeKey::new(*key), tasks),
+            Self::File(key) => {
+                if let Some(arch) = waitq::wait_arch() {
+                    FILE_LOCK_WAITQ.wake_key(arch, WakeKey::new(*key));
+                }
+            }
         }
     }
 }
 
 /// Registry state behind [`REGISTRY`].
+///
+/// Every map is ordered. A pinned id is its driver's, which a foreign
+/// volume's layout chooses, and which owners, processes and tasks stay in the
+/// rest is up to what users keep locking: no lookup's cost depends on how the
+/// keys fall, and the deadlock search's walk of the waiters costs the rows
+/// still queued.
 struct Registry {
-    files: BTreeMap<LockedNode, FileEntry>,
+    files: OrderedMap<LockedNode, FileEntry>,
     /// Which files each owner holds records on, so releasing a description
     /// does not scan every locked file.
-    owned: BTreeMap<OwnerId, BTreeSet<LockedNode>>,
+    owned: OrderedMap<OwnerId, OrderedSet<LockedNode>>,
     /// Live record count per charged process — the `file-locks` usage.
-    charged: BTreeMap<ProcessId, u64>,
-    waiters: BTreeMap<TaskId, Waiter>,
+    charged: OrderedMap<ProcessId, u64>,
+    waiters: OrderedMap<TaskId, Waiter>,
     /// The tasks queued per file, so a release considers that file's waiters
     /// rather than every waiter in the system.
-    queued: BTreeMap<LockedNode, BTreeSet<TaskId>>,
+    queued: OrderedMap<LockedNode, OrderedSet<TaskId>>,
     next_key: u64,
     next_seq: u64,
 }
@@ -437,11 +526,11 @@ struct Registry {
 /// The lock-guarded registry: pure data behind a spin lock, never a mutable
 /// static.
 static REGISTRY: SpinLock<Registry> = SpinLock::new(Registry {
-    files: BTreeMap::new(),
-    owned: BTreeMap::new(),
-    charged: BTreeMap::new(),
-    waiters: BTreeMap::new(),
-    queued: BTreeMap::new(),
+    files: OrderedMap::new(),
+    owned: OrderedMap::new(),
+    charged: OrderedMap::new(),
+    waiters: OrderedMap::new(),
+    queued: OrderedMap::new(),
     next_key: 1,
     next_seq: 1,
 });
@@ -519,7 +608,7 @@ pub fn query(file: LockedNode, owner: OwnerId, range: LockRange, held: Held) -> 
 /// # Errors
 ///
 /// The [`Refusal`] saying why: a holder in the way, an earlier waiter ahead,
-/// a cycle the grant would close, or the record bound.
+/// a cycle the grant would close, the record bound, or memory.
 pub fn acquire(request: &Request) -> Result<Wakes, Refusal> {
     let &Request {
         file,
@@ -538,45 +627,46 @@ pub fn acquire(request: &Request) -> Result<Wakes, Refusal> {
         .get(&file)
         .is_some_and(|entry| entry.holds_any(owner, range));
 
-    if let Some(conflict) = reg
+    let refusal = match reg
         .files
         .get(&file)
         .and_then(|entry| entry.holder_conflict(owner, range, held))
     {
-        if waiting && reg.would_deadlock(file, owner, range, held) {
+        Some(conflict) => Some(Refusal::Held(conflict)),
+        None if waiting && !converting && reg.queue_blocked(file, owner, range, held, seq) => {
+            Some(Refusal::Queued)
+        }
+        None => None,
+    };
+    if let Some(refusal) = refusal {
+        // A waiter queued ahead can itself be waiting on what this owner
+        // holds, so a queued refusal is searched exactly as a held one.
+        let wanting = Waiter {
+            file,
+            owner,
+            range,
+            held,
+            seq,
+        };
+        if waiting && reg.would_deadlock(&wanting)? {
             return Err(Refusal::Deadlock);
         }
-        return Err(Refusal::Held(conflict));
-    }
-    if waiting && !converting && reg.queue_blocked(file, owner, range, held, seq) {
-        return Err(Refusal::Queued);
+        return Err(refusal);
     }
 
-    let plan = reg.files.get(&file).map_or_else(
-        || Plan::fresh(range, held),
-        |entry| {
-            entry.owners.get(&owner).map_or_else(
-                || Plan::fresh(range, held),
-                |locks| Plan::build(&locks.records, range, Some(held)),
-            )
-        },
-    );
-    let charge_pid = reg
+    let locks = reg
         .files
         .get(&file)
-        .and_then(|entry| entry.owners.get(&owner))
-        .map_or(pid, |locks| locks.pid);
+        .and_then(|entry| entry.owners.get(&owner));
+    let plan = locks.map_or_else(
+        || Plan::fresh(range, held),
+        |locks| Plan::build(&locks.records, range, Some(held)),
+    );
+    let charge_pid = locks.map_or(pid, |locks| locks.pid);
     reg.price(charge_pid, plan.delta(), limit)?;
-
-    let key = reg.ensure_file(file);
-    let _ = key;
-    if let Some(entry) = reg.files.get_mut(&file) {
-        entry.apply(owner, pid, &plan);
-    }
-    reg.settle_charge(charge_pid, plan.delta());
-    reg.owned.entry(owner).or_default().insert(file);
-    let wakes = reg.collect_wakes(file, range);
-    reg.drop_if_vacant(file);
+    let fresh = reg.make_room(file, owner, charge_pid, &plan)?;
+    let wakes = reg.freed_waiters(file, |queued| queued.overlaps(range));
+    reg.commit(file, owner, charge_pid, &plan, fresh);
     Ok(wakes)
 }
 
@@ -591,7 +681,9 @@ pub fn acquire(request: &Request) -> Result<Wakes, Refusal> {
 ///
 /// # Errors
 ///
-/// [`Refusal::LimitExceeded`] when the split would pass the record bound.
+/// [`Refusal::LimitExceeded`] when the split would pass the record bound, and
+/// [`Refusal::OutOfMemory`] when the records it cuts cannot be held. An
+/// unlock of whole records is refused neither.
 pub fn release(
     file: LockedNode,
     owner: OwnerId,
@@ -605,22 +697,13 @@ pub fn release(
             .get(&owner)
             .map(|locks| (locks.pid, Plan::build(&locks.records, range, None)))
     }) else {
-        return Ok(Wakes::default());
+        return Ok(Wakes::Nobody);
     };
     reg.price(charge_pid, plan.delta(), limit)?;
-    if let Some(entry) = reg.files.get_mut(&file) {
-        entry.apply(owner, charge_pid, &plan);
-        if !entry.owners.contains_key(&owner) {
-            if let Some(files) = reg.owned.get_mut(&owner) {
-                files.remove(&file);
-                if files.is_empty() {
-                    reg.owned.remove(&owner);
-                }
-            }
-        }
-    }
-    reg.settle_charge(charge_pid, plan.delta());
-    let wakes = reg.collect_wakes(file, range);
+    let fresh = reg.make_room(file, owner, charge_pid, &plan)?;
+    let wakes = reg.freed_waiters(file, |queued| queued.overlaps(range));
+    reg.commit(file, owner, charge_pid, &plan, fresh);
+    reg.disown_if_released(file, owner);
     reg.drop_if_vacant(file);
     Ok(wakes)
 }
@@ -628,37 +711,27 @@ pub fn release(
 /// Release everything `owner` holds, on every file — the last descriptor on
 /// a description closing, which a process exit does for all of them.
 ///
-/// Never refuses: dropping records only ever lowers the count.
+/// Never refuses and never needs memory: when even the list of whom it frees
+/// cannot be had, every lock waiter is woken here instead, each to re-test
+/// its own request, and nothing is returned.
 #[must_use]
 pub fn release_owner(owner: OwnerId) -> Vec<Wakes> {
     if !locks_present() {
         return Vec::new();
     }
-    let mut reg = REGISTRY.lock();
-    let Some(files) = reg.owned.remove(&owner) else {
-        return Vec::new();
-    };
-    let mut wakes = Vec::new();
-    for file in files {
-        let Some(entry) = reg.files.get_mut(&file) else {
-            continue;
-        };
-        let Some(locks) = entry.owners.remove(&owner) else {
-            continue;
-        };
-        entry.reindex();
-        let spans: Vec<LockRange> = locks.records.values().map(|record| record.range).collect();
-        let freed = i64::try_from(spans.len()).unwrap_or(i64::MAX);
-        reg.settle_charge(locks.pid, -freed);
-        for span in spans {
-            let released = reg.collect_wakes(file, span);
-            if !released.is_empty() {
-                wakes.push(released);
-            }
-        }
-        reg.drop_if_vacant(file);
+    let released = REGISTRY.lock().release_all(owner);
+    released.unwrap_or_else(|| {
+        wake_every_waiter();
+        Vec::new()
+    })
+}
+
+/// Wake every task parked in `fs_lock`, each to re-test its own request: what
+/// a release that may not fail does when it cannot list whom it freed.
+fn wake_every_waiter() {
+    if let Some(arch) = waitq::wait_arch() {
+        FILE_LOCK_WAITQ.wake_all(arch);
     }
-    wakes
 }
 
 /// Join the queue for `held` over `range` on `file`, returning the wait key
@@ -667,70 +740,80 @@ pub fn release_owner(owner: OwnerId) -> Vec<Wakes> {
 /// Registered before the caller parks, so a release landing in the window
 /// between the failed attempt and the park still finds the waiter and wakes
 /// it rather than leaving it parked on a lock that is already free.
-#[must_use]
+///
+/// # Errors
+///
+/// [`Refusal::OutOfMemory`] when the queue cannot hold the waiter: nothing is
+/// queued, and the caller fails rather than parks.
 pub fn enqueue(
     file: LockedNode,
     owner: OwnerId,
     task: TaskId,
     range: LockRange,
     held: Held,
-) -> u64 {
-    let mut reg = REGISTRY.lock();
-    let key = reg.ensure_file(file);
-    // Re-queuing after a spurious wake keeps the original arrival order, so
-    // a waiter that loops never loses its place to a newcomer.
-    let seq = if let Some(existing) = reg.waiters.get(&task) {
-        existing.seq
-    } else {
-        let seq = reg.next_seq;
-        reg.next_seq = reg.next_seq.saturating_add(1);
-        seq
-    };
-    reg.waiters.insert(
-        task,
-        Waiter {
-            file,
-            owner,
-            range,
-            held,
-            seq,
-        },
-    );
-    reg.queued.entry(file).or_default().insert(task);
-    key
+) -> Result<u64, Refusal> {
+    REGISTRY
+        .lock()
+        .join_queue(file, owner, task, range, held)
+        .map_err(Refusal::from)
 }
 
-/// Leave the queue, whether the wait ended in a grant, a timeout, or a
-/// signal. Idempotent.
+/// Leave the queue once the wait was granted its lock. Idempotent.
 pub fn dequeue(task: TaskId) {
     let mut reg = REGISTRY.lock();
-    let Some(waiter) = reg.waiters.remove(&task) else {
-        return;
-    };
-    if let Some(tasks) = reg.queued.get_mut(&waiter.file) {
-        tasks.remove(&task);
-        if tasks.is_empty() {
-            reg.queued.remove(&waiter.file);
-        }
+    if let Some(waiter) = reg.unqueue(task) {
+        reg.drop_if_vacant(waiter.file);
     }
-    reg.drop_if_vacant(waiter.file);
 }
 
-/// The record edits one replace performs: which starts leave, and which
-/// records arrive. Computed before anything is touched so the caller can
-/// price it against the resource limit first.
+/// Leave the queue without the lock — the wait timed out, was signalled, or
+/// had no room to register — answering the waiters on ranges it overlaps: its
+/// place in the queue may have been all that held them back. Idempotent.
+#[must_use]
+pub fn withdraw(task: TaskId) -> Wakes {
+    let mut reg = REGISTRY.lock();
+    let Some(waiter) = reg.unqueue(task) else {
+        return Wakes::Nobody;
+    };
+    let wakes = reg.freed_waiters(waiter.file, |queued| queued.overlaps(waiter.range));
+    reg.drop_if_vacant(waiter.file);
+    wakes
+}
+
+/// Records one replace puts in at most: the parts of a straddling record of
+/// the other mode either side of the range, and the new record.
+const PLAN_INSERTS: usize = 3;
+
+/// The record edits one replace performs: how many records leave, and which
+/// arrive. Computed before anything is touched so the caller can price it
+/// against the resource limit first, and allocation-free.
 struct Plan {
-    remove: Vec<u64>,
-    insert: Vec<Record>,
+    /// The range being replaced.
+    range: LockRange,
+    /// What it becomes: a mode, or `None` for a release.
+    new: Option<Held>,
+    /// How many records the replace takes out.
+    removes: usize,
+    /// The records it puts in.
+    insert: ArrayVec<Record, PLAN_INSERTS>,
 }
 
 impl Plan {
+    /// A replace of `range` with `new` that changes nothing yet.
+    fn empty(range: LockRange, new: Option<Held>) -> Self {
+        Self {
+            range,
+            new,
+            removes: 0,
+            insert: ArrayVec::new(),
+        }
+    }
+
     /// The edits for an owner that holds nothing on this file yet.
     fn fresh(range: LockRange, held: Held) -> Self {
-        Self {
-            remove: Vec::new(),
-            insert: Vec::from([Record { range, held }]),
-        }
+        let mut plan = Self::empty(range, Some(held));
+        plan.put(Record { range, held });
+        plan
     }
 
     /// The edits that make `range` be `new` in `records`.
@@ -740,18 +823,16 @@ impl Plan {
     /// byte does not accumulate a record per byte. A record of the *other*
     /// mode is cut back to the parts outside the range, which is how a
     /// partial unlock and a partial upgrade split one record into two.
-    fn build(records: &BTreeMap<u64, Record>, range: LockRange, new: Option<Held>) -> Self {
-        let mut remove = Vec::new();
-        let mut insert = Vec::new();
+    fn build(records: &OrderedMap<u64, Record>, range: LockRange, new: Option<Held>) -> Self {
+        let mut plan = Self::empty(range, new);
         let mut span = range;
         for record in touching(records, range) {
-            let same_mode = new == Some(record.held);
-            if !same_mode && !record.range.overlaps(range) {
+            if !plan.takes(record) {
                 // Abutting, different mode: untouched.
                 continue;
             }
-            remove.push(record.range.start());
-            if same_mode {
+            plan.removes += 1;
+            if new == Some(record.held) {
                 span = span.joined(record.range);
                 continue;
             }
@@ -759,7 +840,7 @@ impl Plan {
                 if let Ok(prefix) =
                     LockRange::between(record.range.start(), range.start().saturating_sub(1))
                 {
-                    insert.push(Record {
+                    plan.put(Record {
                         range: prefix,
                         held: record.held,
                     });
@@ -768,7 +849,7 @@ impl Plan {
             if record.range.end_inclusive() > range.end_inclusive() {
                 if let Some(from) = range.end_inclusive().checked_add(1) {
                     if let Ok(suffix) = LockRange::between(from, record.range.end_inclusive()) {
-                        insert.push(Record {
+                        plan.put(Record {
                             range: suffix,
                             held: record.held,
                         });
@@ -777,17 +858,43 @@ impl Plan {
             }
         }
         if let Some(held) = new {
-            insert.push(Record { range: span, held });
+            plan.put(Record { range: span, held });
         }
-        Self { remove, insert }
+        plan
+    }
+
+    /// Whether the replace takes out `record`, one touching its range: one
+    /// of the new mode is absorbed, and one of the other mode is cut back
+    /// where it overlaps and left alone where it merely abuts.
+    fn takes(&self, record: Record) -> bool {
+        self.new == Some(record.held) || record.range.overlaps(self.range)
+    }
+
+    /// Queue `record` to go in; [`PLAN_INSERTS`] is every replace's most.
+    fn put(&mut self, record: Record) {
+        let pushed = self.insert.try_push(record);
+        debug_assert!(pushed.is_ok(), "a replace planned more records than it can");
+    }
+
+    /// How many exclusive records the replace puts in.
+    fn exclusive_inserts(&self) -> usize {
+        self.insert
+            .iter()
+            .filter(|record| record.held == Held::Exclusive)
+            .count()
     }
 
     /// How many records the owner's count changes by.
     fn delta(&self) -> i64 {
         let added = i64::try_from(self.insert.len()).unwrap_or(i64::MAX);
-        let removed = i64::try_from(self.remove.len()).unwrap_or(i64::MAX);
+        let removed = i64::try_from(self.removes).unwrap_or(i64::MAX);
         added - removed
     }
+}
+
+/// The first of `records` that `plan` takes out.
+fn first_taken(records: &OrderedMap<u64, Record>, plan: &Plan) -> Option<Record> {
+    touching(records, plan.range).find(|&record| plan.takes(record))
 }
 
 /// The records of one non-overlapping ordered set that overlap `range` or
@@ -798,7 +905,7 @@ impl Plan {
 /// plus everything starting at or just past the range, and the walk costs
 /// `O(log n)` plus the records it yields.
 fn touching(
-    records: &BTreeMap<u64, Record>,
+    records: &OrderedMap<u64, Record>,
     range: LockRange,
 ) -> impl Iterator<Item = Record> + '_ {
     let predecessor = records
@@ -820,25 +927,199 @@ fn touching(
 
 /// The records of one owner that overlap `range`.
 fn overlapping(
-    records: &BTreeMap<u64, Record>,
+    records: &OrderedMap<u64, Record>,
     range: LockRange,
 ) -> impl Iterator<Item = Record> + '_ {
     touching(records, range).filter(move |record| record.range.overlaps(range))
 }
 
+/// What a commit installs that did not exist before it, each built with the
+/// room its first insertions take.
+struct Fresh {
+    file: Option<FileEntry>,
+    owner: Option<OwnerLocks>,
+    owned: Option<OrderedSet<LockedNode>>,
+}
+
 impl Registry {
-    /// The wait key for `file`, creating its entry if nothing has locked or
-    /// awaited it yet.
-    fn ensure_file(&mut self, file: LockedNode) -> u64 {
-        let fresh = self.next_key;
-        let entry = self
-            .files
-            .entry(file)
-            .or_insert_with(|| FileEntry::new(fresh));
-        if entry.key == fresh {
-            self.next_key = self.next_key.saturating_add(1);
+    /// A new entry for `file` when it has none, with room in the registry to
+    /// file it; `None` when it has one.
+    fn fresh_file(&mut self, file: LockedNode) -> Result<Option<FileEntry>, TryReserveError> {
+        if self.files.contains_key(&file) {
+            return Ok(None);
         }
-        entry.key
+        self.files.try_reserve(1)?;
+        Ok(Some(FileEntry::new(self.next_key)))
+    }
+
+    /// File the entry [`Self::fresh_file`] built, if any, answering `file`'s
+    /// wait key.
+    fn install_file(&mut self, file: LockedNode, fresh: Option<FileEntry>) -> u64 {
+        if let Some(entry) = fresh {
+            self.next_key = self.next_key.saturating_add(1);
+            filed(self.files.try_insert(file, entry));
+        }
+        self.files.get(&file).map_or(0, |entry| entry.key)
+    }
+
+    /// Take every allocation committing `plan` for `owner` on `file` makes,
+    /// changing nothing a reader sees: room in each map an insertion lands
+    /// in, and the containers that do not exist yet.
+    fn make_room(
+        &mut self,
+        file: LockedNode,
+        owner: OwnerId,
+        pid: ProcessId,
+        plan: &Plan,
+    ) -> Result<Fresh, TryReserveError> {
+        let mut entry = self.fresh_file(file)?;
+        let locks = match entry.as_mut().or_else(|| self.files.get_mut(&file)) {
+            Some(target) => target.make_room(owner, pid, plan)?,
+            None => None,
+        };
+        if plan.delta() > 0 && !self.charged.contains_key(&pid) {
+            self.charged.try_reserve(1)?;
+        }
+        let owned_files = if let Some(files) = self.owned.get_mut(&owner) {
+            if !files.contains(&file) {
+                files.try_reserve(1)?;
+            }
+            None
+        } else {
+            self.owned.try_reserve(1)?;
+            Some(OrderedSet::try_with_capacity(1)?)
+        };
+        Ok(Fresh {
+            file: entry,
+            owner: locks,
+            owned: owned_files,
+        })
+    }
+
+    /// Install `fresh` and carry out `plan` for `owner` on `file`, in the room
+    /// [`Self::make_room`] took — so nothing here can fail.
+    fn commit(
+        &mut self,
+        file: LockedNode,
+        owner: OwnerId,
+        pid: ProcessId,
+        plan: &Plan,
+        fresh: Fresh,
+    ) {
+        self.install_file(file, fresh.file);
+        if let Some(entry) = self.files.get_mut(&file) {
+            if let Some(locks) = fresh.owner {
+                filed(entry.owners.try_insert(owner, locks));
+            }
+            entry.apply(owner, plan);
+        }
+        self.settle_charge(pid, plan.delta());
+        if let Some(files) = fresh.owned {
+            filed(self.owned.try_insert(owner, files));
+        }
+        if let Some(files) = self.owned.get_mut(&owner) {
+            filed(files.try_insert(file));
+        }
+    }
+
+    /// Forget that `owner` holds records on `file` once it holds none there.
+    fn disown_if_released(&mut self, file: LockedNode, owner: OwnerId) {
+        let holds = self
+            .files
+            .get(&file)
+            .is_some_and(|entry| entry.owners.contains_key(&owner));
+        if holds {
+            return;
+        }
+        if let Some(files) = self.owned.get_mut(&owner) {
+            files.remove(&file);
+            if files.is_empty() {
+                self.owned.remove(&owner);
+            }
+        }
+    }
+
+    /// Drop everything `owner` holds, answering each file's freed waiters —
+    /// or `None` when even the list of them cannot be had.
+    fn release_all(&mut self, owner: OwnerId) -> Option<Vec<Wakes>> {
+        let Some(files) = self.owned.remove(&owner) else {
+            return Some(Vec::new());
+        };
+        let mut wakes = Vec::new();
+        let listed = wakes.try_reserve_exact(files.len()).is_ok();
+        for file in files {
+            let Some(entry) = self.files.get_mut(&file) else {
+                continue;
+            };
+            let Some(locks) = entry.owners.remove(&owner) else {
+                continue;
+            };
+            for &record in locks.records.values() {
+                entry.projection.forget(record);
+            }
+            let freed = i64::try_from(locks.records.len()).unwrap_or(i64::MAX);
+            self.settle_charge(locks.pid, -freed);
+            if listed {
+                let woken = self.freed_waiters(file, |queued| {
+                    overlapping(&locks.records, queued).next().is_some()
+                });
+                if !woken.is_empty() {
+                    wakes.push(woken);
+                }
+            }
+            self.drop_if_vacant(file);
+        }
+        listed.then_some(wakes)
+    }
+
+    /// Queue `task`, keeping the arrival order of one already queued, with
+    /// every allocation taken first; answers the file's wait key.
+    fn join_queue(
+        &mut self,
+        file: LockedNode,
+        owner: OwnerId,
+        task: TaskId,
+        range: LockRange,
+        held: Held,
+    ) -> Result<u64, TryReserveError> {
+        let entry = self.fresh_file(file)?;
+        if !self.waiters.contains_key(&task) {
+            self.waiters.try_reserve(1)?;
+        }
+        let tasks = if let Some(tasks) = self.queued.get_mut(&file) {
+            if !tasks.contains(&task) {
+                tasks.try_reserve(1)?;
+            }
+            None
+        } else {
+            self.queued.try_reserve(1)?;
+            Some(OrderedSet::try_with_capacity(1)?)
+        };
+        let key = self.install_file(file, entry);
+        // Re-queuing after a spurious wake keeps the original arrival order,
+        // so a waiter that loops never loses its place to a newcomer.
+        let seq = if let Some(existing) = self.waiters.get(&task) {
+            existing.seq
+        } else {
+            let seq = self.next_seq;
+            self.next_seq = self.next_seq.saturating_add(1);
+            seq
+        };
+        let waiter = Waiter {
+            file,
+            owner,
+            range,
+            held,
+            seq,
+        };
+        filed(self.waiters.try_insert(task, waiter));
+        if let Some(tasks) = tasks {
+            filed(self.queued.try_insert(file, tasks));
+        }
+        if let Some(tasks) = self.queued.get_mut(&file) {
+            filed(tasks.try_insert(task));
+        }
+        Ok(key)
     }
 
     /// Refuse a plan that would push `pid` past `limit` records.
@@ -858,24 +1139,38 @@ impl Registry {
     }
 
     /// Charge or credit `delta` records to `pid`, keeping the system-wide
-    /// live count in step.
+    /// live count in step. A first charge lands in room
+    /// [`Self::make_room`] took; a credit never allocates.
     fn settle_charge(&mut self, pid: ProcessId, delta: i64) {
-        if delta == 0 {
-            return;
-        }
         let magnitude = delta.unsigned_abs();
-        let slot = self.charged.entry(pid).or_insert(0);
         if delta > 0 {
-            *slot = slot.saturating_add(magnitude);
+            match self.charged.get_mut(&pid) {
+                Some(slot) => *slot = slot.saturating_add(magnitude),
+                None => filed(self.charged.try_insert(pid, magnitude)),
+            }
             LIVE_RECORDS.fetch_add(magnitude, Ordering::Relaxed);
-        } else {
-            *slot = slot.saturating_sub(magnitude);
+        } else if delta < 0 {
+            if let Some(slot) = self.charged.get_mut(&pid) {
+                *slot = slot.saturating_sub(magnitude);
+                if *slot == 0 {
+                    self.charged.remove(&pid);
+                }
+            }
             let shed = magnitude.min(LIVE_RECORDS.load(Ordering::Relaxed));
             LIVE_RECORDS.fetch_sub(shed, Ordering::Relaxed);
         }
-        if *slot == 0 {
-            self.charged.remove(&pid);
+    }
+
+    /// Take `task`'s request out of the queue, answering it.
+    fn unqueue(&mut self, task: TaskId) -> Option<Waiter> {
+        let waiter = self.waiters.remove(&task)?;
+        if let Some(tasks) = self.queued.get_mut(&waiter.file) {
+            tasks.remove(&task);
+            if tasks.is_empty() {
+                self.queued.remove(&waiter.file);
+            }
         }
+        Some(waiter)
     }
 
     /// Forget a file nothing holds or awaits, so the registry carries only
@@ -889,28 +1184,36 @@ impl Registry {
         }
     }
 
-    /// The queued waiters whose blocked ranges `range` overlaps — exactly
-    /// those a change to it can advance, so a release of one range never
-    /// disturbs a waiter queued on a disjoint one.
-    fn collect_wakes(&self, file: LockedNode, range: LockRange) -> Wakes {
+    /// The waiters queued on `file` whose blocked ranges `freed` says a change
+    /// advances — exactly those, so releasing one range never disturbs a
+    /// waiter queued on a disjoint one. When that list cannot be had the
+    /// answer is every waiter on the file, each to re-test its own request,
+    /// so no change is refused for whom it wakes.
+    fn freed_waiters(&self, file: LockedNode, freed: impl Fn(LockRange) -> bool) -> Wakes {
         let Some(entry) = self.files.get(&file) else {
-            return Wakes::default();
+            return Wakes::Nobody;
         };
-        let tasks: Vec<TaskId> = self
-            .queued
-            .get(&file)
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|task| {
-                self.waiters
-                    .get(task)
-                    .is_some_and(|waiter| waiter.range.overlaps(range))
-            })
-            .collect();
-        Wakes {
-            key: (!tasks.is_empty()).then_some(entry.key),
-            tasks,
+        let mut tasks = Vec::new();
+        for &task in self.queued.get(&file).into_iter().flatten() {
+            if !self
+                .waiters
+                .get(&task)
+                .is_some_and(|waiter| freed(waiter.range))
+            {
+                continue;
+            }
+            if tasks.try_reserve(1).is_err() {
+                return Wakes::File(entry.key);
+            }
+            tasks.push(task);
+        }
+        if tasks.is_empty() {
+            Wakes::Nobody
+        } else {
+            Wakes::Named {
+                key: entry.key,
+                tasks,
+            }
         }
     }
 
@@ -940,55 +1243,57 @@ impl Registry {
             .filter_map(|task| self.waiters.get(task))
     }
 
-    /// Every owner that blocks `held` over `range` on `file` — the holders
-    /// in the way, plus the earlier-queued waiters that go first.
+    /// Push every owner `wanting` waits for onto `found`: the holders in its
+    /// way, and — unless it converts a range its owner holds — the waiters
+    /// queued ahead of it on those bytes, exactly as acquisition decides.
     fn blocking_owners(
         &self,
-        file: LockedNode,
-        owner: OwnerId,
-        range: LockRange,
-        held: Held,
-    ) -> BTreeSet<OwnerId> {
-        let mut blockers = BTreeSet::new();
-        if let Some(entry) = self.files.get(&file) {
-            for (&other, locks) in &entry.owners {
-                if other == owner {
-                    continue;
-                }
-                if overlapping(&locks.records, range)
-                    .any(|record| !held.compatible_with(record.held))
-                {
-                    blockers.insert(other);
-                }
+        wanting: &Waiter,
+        found: &mut Vec<OwnerId>,
+    ) -> Result<(), alloc::collections::TryReserveError> {
+        let Some(entry) = self.files.get(&wanting.file) else {
+            return Ok(());
+        };
+        for (&other, locks) in &entry.owners {
+            let blocks = other != wanting.owner
+                && overlapping(&locks.records, wanting.range)
+                    .any(|record| !wanting.held.compatible_with(record.held));
+            if blocks {
+                found.try_reserve(1)?;
+                found.push(other);
             }
         }
-        for waiter in self.file_waiters(file) {
-            if waiter.owner != owner
-                && waiter.range.overlaps(range)
-                && !held.compatible_with(waiter.held)
-            {
-                blockers.insert(waiter.owner);
+        if entry.holds_any(wanting.owner, wanting.range) {
+            return Ok(());
+        }
+        for waiter in self.file_waiters(wanting.file) {
+            let ahead = waiter.owner != wanting.owner
+                && waiter.seq < wanting.seq
+                && waiter.range.overlaps(wanting.range)
+                && !wanting.held.compatible_with(waiter.held);
+            if ahead {
+                found.try_reserve(1)?;
+                found.push(waiter.owner);
             }
         }
-        blockers
+        Ok(())
     }
 
-    /// Whether granting `owner` a wait for `held` over `range` on `file`
-    /// would close a cycle.
-    fn would_deadlock(
-        &self,
-        file: LockedNode,
-        owner: OwnerId,
-        range: LockRange,
-        held: Held,
-    ) -> bool {
-        let mut visited = BTreeSet::new();
-        let mut frontier = Vec::from_iter(self.blocking_owners(file, owner, range, held));
+    /// Whether granting `wanting` its wait would close a cycle.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::OutOfMemory`] when the search cannot hold the owners it
+    /// has reached.
+    fn would_deadlock(&self, wanting: &Waiter) -> Result<bool, Refusal> {
+        let mut visited = OrderedSet::new();
+        let mut frontier = Vec::new();
+        self.blocking_owners(wanting, &mut frontier)?;
         while let Some(blocker) = frontier.pop() {
-            if blocker == owner {
-                return true;
+            if blocker == wanting.owner {
+                return Ok(true);
             }
-            if !visited.insert(blocker) {
+            if !visited.try_insert(blocker)? {
                 continue;
             }
             // What that owner is itself waiting for. Registry-wide because
@@ -996,19 +1301,10 @@ impl Registry {
             // that is already blocked, and the waiter set is bounded by the
             // tasks currently parked in `fs_lock`.
             for waiter in self.waiters.values().filter(|w| w.owner == blocker) {
-                for next in
-                    self.blocking_owners(waiter.file, waiter.owner, waiter.range, waiter.held)
-                {
-                    if next == owner {
-                        return true;
-                    }
-                    if !visited.contains(&next) {
-                        frontier.push(next);
-                    }
-                }
+                self.blocking_owners(waiter, &mut frontier)?;
             }
         }
-        false
+        Ok(false)
     }
 }
 
@@ -1088,10 +1384,11 @@ pub(crate) fn invariants_hold(file: LockedNode) -> bool {
             }
         }
     }
-    if shared != entry.shared_records {
+    if shared != entry.projection.shared {
         return false;
     }
     let mut projected: Vec<(u64, u64, OwnerId)> = entry
+        .projection
         .exclusive
         .iter()
         .map(|(_, &(range, owner))| (range.start(), range.end_inclusive(), owner))
@@ -1110,6 +1407,20 @@ pub(crate) fn invariants_hold(file: LockedNode) -> bool {
 #[cfg(test)]
 pub(crate) fn live_records() -> u64 {
     LIVE_RECORDS.load(Ordering::Relaxed)
+}
+
+/// Whether `task` has a waiter row, and whether `file`'s queue names it —
+/// both or neither, outside a change. Allocation-free, so a refusal sweep
+/// can ask it between runs.
+#[cfg(test)]
+pub(crate) fn queued_state(file: LockedNode, task: TaskId) -> (bool, bool) {
+    let reg = REGISTRY.lock();
+    (
+        reg.waiters.contains_key(&task),
+        reg.queued
+            .get(&file)
+            .is_some_and(|tasks| tasks.contains(&task)),
+    )
 }
 
 #[cfg(test)]

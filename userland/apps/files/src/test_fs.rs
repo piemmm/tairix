@@ -73,7 +73,9 @@ pub fn mounted(label: &str, target: &str, medium: Option<BlkMedium>) -> Volume {
             availability: MountAvailability::Available,
             owner: None,
             volume_id: [0; 16],
+            identity: [0; 16],
             read_only: false,
+            titled: false,
         },
         offered: true,
     }

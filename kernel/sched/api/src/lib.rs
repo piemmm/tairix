@@ -14,9 +14,13 @@
 //!   policy shares;
 //! * the [`park`] handshake — the park/unpark window, its wake token, the
 //!   job-control stop, taking a task from a run-queue entry, and the settle
-//!   after a body returns, which are task lifecycle rather than policy;
+//!   after a body returns, which are task lifecycle rather than policy — and
+//!   the registry a policy files its task records in, whose admission takes
+//!   every allocation before it files anything;
 //! * [`queue::Keyed`], the heap slot a run queue orders its ready tasks in,
-//!   carrying each task so a pick needs no registry lookup;
+//!   carrying each task so a pick needs no registry lookup, and
+//!   [`queue::Overflow`], where an entry a queue refused waits without
+//!   allocating;
 //! * the [`share`] accounting the proportional-share policies divide a CPU
 //!   by — band weights, the per-run charge, and the ledger of where each
 //!   task's weight is counted; and
@@ -29,6 +33,8 @@
 //! every other crate depends on this contract.
 
 #![no_std]
+// `Arc::try_new`, so an admission the heap cannot hold is refused as a value.
+#![feature(allocator_api)]
 
 extern crate alloc;
 

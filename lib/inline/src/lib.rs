@@ -32,11 +32,8 @@
 //!   at the use site, and reaching it is answered with [`CapacityError`]
 //!   holding the refused value — never a panic and never a heap block.
 //! * **A capacity fault answers with [`Result`], an index fault with
-//!   [`Option`], and no operation carries both.** That is why the
-//!   fixed-capacity vectors offer no positional insert: its two failure modes
-//!   — no room, and an index past the end — are unrelated, and no single error
-//!   spells them honestly. `push`, `pop`, `remove`, `swap_remove`, `truncate`,
-//!   and `retain` cover every in-tree need without the ambiguity.
+//!   [`Option`].** The one operation open to both, [`ArrayVec::try_insert`],
+//!   hands the value back unplaced for either, leaving the vector as it was.
 //! * **Secret hygiene is the holder's job.** A container does not scrub the
 //!   slots it frees — reuse inside one address space is not a security
 //!   boundary — so a holder of a key, credential, or capability token stores a

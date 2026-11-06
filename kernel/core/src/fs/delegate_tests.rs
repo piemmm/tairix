@@ -141,7 +141,8 @@ fn secret_volume() -> RwMockFs {
 /// A default-layout VFS whose root projection the test volume backs, as an
 /// installed system's root volume backs `/`.
 fn root_backed() -> Vfs {
-    let vfs = Vfs::with_default_layout(UserId(ADMIN_UID), GroupId(ADMIN_GID));
+    let vfs = Vfs::with_default_layout(UserId(ADMIN_UID), GroupId(ADMIN_GID))
+        .expect("the default layout fits in memory");
     {
         let mut mounts = vfs.mounts_write();
         mounts
@@ -1247,6 +1248,145 @@ fn resolution_follows_a_link_used_as_an_interior_directory() {
     assert_eq!(
         read_text(&serving.service, ADMIN_UID, &path("via/leaf")),
         "inside"
+    );
+}
+
+/// A volume's root by its identity, as a desktop shortcut to it stores it.
+const VOLUME_ROOT: &str = "id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/";
+
+/// A link naming another root — a volume by its identity, an alias — is never
+/// followed, as the final component or through it, and still reads back as it
+/// was stored.
+#[test]
+fn a_link_naming_another_root_is_never_followed() {
+    let targets = [VOLUME_ROOT, "System:/Applications/Editor.app"];
+    let mut fs = RwMockFs::new();
+    let root = fs.root();
+    for (index, target) in targets.iter().enumerate() {
+        mk_link(&mut fs, root, &alloc::format!("l{index}"), target);
+    }
+    let serving = mounted(fs, false, &[ADMIN]);
+    let svc = &serving.service;
+    let caps = caps();
+    for (index, &target) in targets.iter().enumerate() {
+        let link = path(&alloc::format!("l{index}"));
+        assert_eq!(
+            svc.stat(ADMIN_UID, &caps, at(&link), FinalLink::Follow)
+                .map(|_| ()),
+            Err(Errno::CrossVolume),
+            "{target}"
+        );
+        assert_eq!(
+            svc.stat(ADMIN_UID, &caps, at(&link), FinalLink::Keep)
+                .map(|stat| stat.kind),
+            Ok(FileKind::Symlink),
+            "{target}"
+        );
+        assert_eq!(
+            svc.readlink(ADMIN_UID, &caps, at(&link)),
+            Ok(String::from(target))
+        );
+        let through = alloc::format!("{link}/x");
+        assert_eq!(
+            svc.stat(ADMIN_UID, &caps, at(&through), FinalLink::Follow)
+                .map(|_| ()),
+            Err(Errno::CrossVolume),
+            "{target} as a directory"
+        );
+    }
+}
+
+/// A target naming another root is never read as names in the link's own
+/// directory, so a sibling spelled as that root is not reached through it.
+///
+/// Regression: `id::…/x` and `Home:/x` were relative names, so a link holding
+/// one read the directory of that literal spelling beside it.
+#[test]
+fn a_link_naming_another_root_never_reaches_a_sibling_so_spelled() {
+    let volume = VOLUME_ROOT.trim_end_matches('/');
+    for (decoy, target) in [
+        (volume, alloc::format!("{VOLUME_ROOT}x")),
+        ("Home:", String::from("Home:/x")),
+    ] {
+        let mut fs = RwMockFs::new();
+        let root = fs.root();
+        let beside = mk_dir(&mut fs, root, decoy);
+        mk_file(&mut fs, beside, "x", b"decoy");
+        mk_link(&mut fs, root, "link", &target);
+        let serving = mounted(fs, false, &[ADMIN]);
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            read_path(
+                &serving.service,
+                ADMIN_UID,
+                &caps(),
+                &path("link"),
+                0,
+                &mut buf
+            ),
+            Err(Errno::CrossVolume),
+            "{target}"
+        );
+    }
+}
+
+/// A shortcut on the root volume spelled as a view path into another volume
+/// reads as broken, since a link never crosses into a projection beneath its
+/// floor; spelled from the root it names, it is never followed and is left to
+/// its caller, which reaches the bundle as a path of its own.
+#[test]
+fn a_shortcut_into_another_volume_is_spelled_from_the_root_it_names() {
+    let h_root = DriverHandle::from_raw(31).expect("handle");
+    let h_apps = DriverHandle::from_raw(32).expect("handle");
+    let mut root = RwMockFs::new();
+    let top = root.root();
+    let desktop = mk_dir(&mut root, top, "Desktop");
+    mk_link(&mut root, desktop, "Viewed", "/Storage/apps/Editor.app");
+    mk_link(&mut root, desktop, "Rooted", "Storage:/apps/Editor.app");
+    let mut apps = RwMockFs::new();
+    let top = apps.root();
+    let _ = mk_dir(&mut apps, top, "Editor.app");
+    let vfs = Vfs::with_default_layout(UserId(ADMIN_UID), GroupId(ADMIN_GID))
+        .expect("the default layout fits in memory");
+    {
+        let mut mounts = vfs.mounts_write();
+        mounts
+            .attach(Attachment::new(h_root, None, MountFlags::default()))
+            .expect("attach");
+        mounts.back_root(h_root).expect("back /");
+        mounts
+            .attach_at(
+                Attachment::new(h_apps, None, MountFlags::default()),
+                p("/Storage/apps"),
+                crate::fs::Metadata::new(
+                    UserId(ADMIN_UID),
+                    GroupId(ADMIN_GID),
+                    crate::fs::Mode::from_bits(0o755),
+                ),
+            )
+            .expect("attach the bundles' volume");
+    }
+    let serving = serve(vfs, alloc::vec![(h_root, root), (h_apps, apps)], &[ADMIN]);
+    let svc = &serving.service;
+    let caps = caps();
+    let kind = |at_path: &str| {
+        svc.stat(ADMIN_UID, &caps, at(at_path), FinalLink::Follow)
+            .map(|stat| stat.kind)
+    };
+    assert_eq!(kind("/Storage/apps/Editor.app"), Ok(FileKind::Directory));
+    assert_eq!(
+        kind("/Desktop/Viewed"),
+        Err(Errno::NotFound),
+        "read as broken"
+    );
+    assert_eq!(
+        kind("/Desktop/Rooted"),
+        Err(Errno::CrossVolume),
+        "left to its caller"
+    );
+    assert_eq!(
+        svc.readlink(ADMIN_UID, &caps, at("/Desktop/Rooted")),
+        Ok(String::from("Storage:/apps/Editor.app"))
     );
 }
 

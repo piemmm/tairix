@@ -121,7 +121,7 @@ pub struct KernelSupervisorHost<'a, B: Block + 'static> {
     /// passphrase, key, or volume byte is ever logged.
     audit: &'a dyn Sink,
     /// The pause a wrong passphrase waits out, the boot prompt's own.
-    delay: &'a dyn Fn(),
+    delay: &'a dyn Fn() -> bool,
 }
 
 impl<'a, B: Block + 'static> KernelSupervisorHost<'a, B> {
@@ -132,7 +132,7 @@ impl<'a, B: Block + 'static> KernelSupervisorHost<'a, B> {
         store: &'static DriverStoreService<BlockCache<B>>,
         install: &'a UnlockInstall<'a>,
         audit: &'a dyn Sink,
-        delay: &'a dyn Fn(),
+        delay: &'a dyn Fn() -> bool,
     ) -> Self {
         Self {
             store,

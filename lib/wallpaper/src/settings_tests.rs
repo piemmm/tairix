@@ -149,6 +149,15 @@ fn every_key_moved() -> DesktopSettings {
         region: RegionCode::new("FI"),
         time_zone: ZoneName::new("Europe/Helsinki"),
         sound,
+        capture: crate::capture::CaptureSettings {
+            save_to: crate::capture::CaptureFolder::Home,
+            timer: crate::capture::CaptureTimer::Seconds10,
+            duration: crate::capture::CaptureDuration::Minutes5,
+            sound: tairix_abi::recorder_ipc::RecordSound::Both,
+            pointer: false,
+            clicks: true,
+            thumbnail: false,
+        },
     }
 }
 
@@ -200,6 +209,13 @@ fn the_render_is_canonical_and_round_trips() {
          audio.input = \"\"\n\
          audio.levels = 0000000000000051.0:-6.5dB\n\
          audio.muted = 0000000000000052.0\n\
+         capture.save_to = home\n\
+         capture.timer_s = 10\n\
+         capture.duration_s = 300\n\
+         capture.sound = both\n\
+         capture.pointer = false\n\
+         capture.clicks = true\n\
+         capture.thumbnail = false\n\
          saver.os.tairix.saver.life.speed = fast\n\
          saver.os.tairix.saver.starfield.stars = dense\n"
     );
@@ -947,7 +963,7 @@ fn a_refused_merge_changes_nothing_at_all() {
 fn the_key_groups_partition_the_registry() {
     // Every key belongs to exactly one group, so a surface that renders
     // its group can never leave a key with no owner or post one twice.
-    let groups: [&[SettingsKey]; 11] = [
+    let groups: [&[SettingsKey]; 12] = [
         &SettingsKey::PINBOARD,
         &SettingsKey::APPEARANCE,
         &SettingsKey::DISPLAY,
@@ -959,6 +975,7 @@ fn the_key_groups_partition_the_registry() {
         &SettingsKey::LOCK,
         &SettingsKey::CIVIL,
         &SettingsKey::SOUND,
+        &SettingsKey::CAPTURE,
     ];
     for key in SettingsKey::ALL {
         let owners = groups.iter().filter(|group| group.contains(&key)).count();

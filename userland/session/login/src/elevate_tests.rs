@@ -5,8 +5,9 @@
 extern crate std;
 
 use super::{
-    audit_launch_ended_abnormally, drain_bounded, handle_elevate_request, AuthoriserPage,
-    Authority, Caller, Captured, ElevateDirectory, ElevateLauncher, ProgramRequests,
+    audit_launch_ended_abnormally, audit_wired_ended, drain_bounded, handle_elevate_request,
+    AuthoriserPage, Authority, Caller, Captured, ElevateDirectory, ElevateLauncher,
+    ProgramRequests, Wired,
 };
 use crate::budget::{AttemptBudget, FREE_ATTEMPTS};
 use crate::events;
@@ -14,14 +15,16 @@ use crate::session::{AuthenticatedUser, Authenticator, Credentials, Gid, Uid};
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
+use core::num::NonZeroU64;
 use tairix_abi::elevate::{
-    ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_ARGS, ELEVATE_MAX_OUTPUT,
+    ElevateArgv, ElevateReply, ElevateRequest, WiredLaunch, ELEVATE_MAX_ARGS, ELEVATE_MAX_OUTPUT,
     ELEVATE_MAX_REPLY, ELEVATE_MAX_REQUEST,
 };
+use tairix_abi::recorder_ipc::RECORDER_RUN_PATH;
 use tairix_abi::secret::Secret;
 use tairix_abi::session_ipc::{decode_account_page, SessionAccount, DESKTOP_BUNDLE};
 use tairix_abi::time::Duration64;
-use tairix_abi::{AppIdentity, CapabilityId, Errno, PublisherId, LOAD_UNVERIFIED};
+use tairix_abi::{AppIdentity, CapabilityId, Errno, ProcId, PublisherId, LOAD_UNVERIFIED};
 use tairix_caps::CapabilitySet;
 use tairix_log::{Event, EventId, Sink};
 
@@ -276,8 +279,8 @@ impl Authenticator for FixedAuth {
 /// account it ran as.
 type RecordedRun = (alloc::string::String, Vec<alloc::string::String>, u32);
 
-/// Launcher recording each run, launch, and capture, and returning a
-/// scripted outcome for all three.
+/// Launcher recording each run, launch, capture, and wired launch, and
+/// returning a scripted outcome for all four.
 struct MockLauncher {
     outcome: Result<i32, Errno>,
     /// What a captured run prints; longer than the caller's scratch
@@ -286,6 +289,7 @@ struct MockLauncher {
     runs: RefCell<Vec<RecordedRun>>,
     launches: RefCell<Vec<(alloc::string::String, u32)>>,
     captures: RefCell<Vec<RecordedRun>>,
+    wired: RefCell<Vec<(alloc::string::String, u32)>>,
 }
 
 impl MockLauncher {
@@ -296,6 +300,7 @@ impl MockLauncher {
             runs: RefCell::new(Vec::new()),
             launches: RefCell::new(Vec::new()),
             captures: RefCell::new(Vec::new()),
+            wired: RefCell::new(Vec::new()),
         }
     }
 
@@ -344,6 +349,23 @@ impl ElevateLauncher for MockLauncher {
             exit_code,
             len: self.printed.len(),
         })
+    }
+
+    fn launch_wired_as(&self, program: &str, uid: u32) -> Result<Wired, Errno> {
+        self.wired.borrow_mut().push((program.to_string(), uid));
+        Ok(Wired {
+            pid: i64::from(self.outcome?),
+            launch: wired_launch(),
+        })
+    }
+}
+
+/// What the mock's wired launch hands its requester.
+fn wired_launch() -> WiredLaunch {
+    WiredLaunch {
+        instance: ProcId::from_raw([7; tairix_abi::PROC_ID_LEN]),
+        input: NonZeroU64::new(3).expect("non-zero"),
+        output: NonZeroU64::new(4).expect("non-zero"),
     }
 }
 
@@ -1373,4 +1395,149 @@ fn a_system_program_whose_manifest_cannot_be_read_is_refused_with_its_code() {
     );
     assert!(bench.directory.asked.borrow().is_empty());
     assert_eq!(sink.count(events::AUTHORISERS_REFUSED), 1);
+}
+
+fn encoded_wired(
+    username: &str,
+    password: &str,
+    program: &str,
+) -> ([u8; ELEVATE_MAX_REQUEST], usize) {
+    let mut buf = [0u8; ELEVATE_MAX_REQUEST];
+    let len = ElevateRequest::LaunchWired {
+        username,
+        password: Secret::new(password),
+        program,
+    }
+    .encode(&mut buf)
+    .expect("encodes");
+    (buf, len)
+}
+
+/// A bench on which the recorder's signed manifest requests `ids`.
+fn recorder_bench<'t>(
+    authenticator: &'t dyn Authenticator,
+    launcher: &'t dyn ElevateLauncher,
+    sink: &'t dyn Sink,
+    ids: &[CapabilityId],
+) -> Bench<'t> {
+    let mut bench = Bench::new(authenticator, launcher, sink);
+    bench.programs = Manifests::shipped().with(RECORDER_RUN_PATH, ids);
+    bench
+}
+
+#[test]
+fn a_wired_launch_starts_the_recorder_and_hands_its_pipes_to_the_requester() {
+    let launcher = MockLauncher::new(Ok(4210));
+    let sink = CountSink::default();
+    let bench = recorder_bench(&FixedAuth, &launcher, &sink, &[]);
+    let (buf, len) = encoded_wired("root", "correct", RECORDER_RUN_PATH);
+    let reply = bench.decide(&buf[..len], shell(OWN_CONSOLE, Some(1000)));
+    assert_eq!(reply, ElevateReply::Wired(wired_launch()));
+    assert_eq!(
+        launcher.wired.borrow().as_slice(),
+        &[(RECORDER_RUN_PATH.to_string(), 0)],
+        "started as the account that allowed it"
+    );
+    assert!(
+        launcher.launches.borrow().is_empty(),
+        "a wired launch never takes the plain launch path"
+    );
+    assert_eq!(sink.count(events::WIRED_GRANTED), 1);
+    assert_eq!(sink.count(events::LAUNCH_GRANTED), 0);
+    assert_eq!(sink.field("pid").as_deref(), Some("4210"));
+}
+
+#[test]
+fn a_wired_launch_starts_the_recorder_and_nothing_else() {
+    let launcher = MockLauncher::new(Ok(4210));
+    let sink = CountSink::default();
+    let auth = CountingAuth::default();
+    let bench = recorder_bench(&auth, &launcher, &sink, &[]);
+    for program in [
+        tairix_abi::DATETIME_RUN_PATH,
+        "/System/Commands/users.app/Run",
+    ] {
+        let (buf, len) = encoded_wired("root", "correct", program);
+        let reply = bench.decide(&buf[..len], shell(OWN_CONSOLE, Some(1000)));
+        assert_eq!(
+            reply,
+            ElevateReply::Refused(Errno::PermissionDenied),
+            "{program}"
+        );
+    }
+    assert_eq!(
+        auth.attempts.get(),
+        0,
+        "no attempt is spent on a program never run"
+    );
+    assert!(launcher.wired.borrow().is_empty());
+    assert_eq!(sink.count(events::WIRED_REFUSED), 2);
+    assert_eq!(sink.field("cause").as_deref(), Some("not the recorder"));
+}
+
+#[test]
+fn a_wired_launch_with_the_wrong_password_is_refused_and_starts_nothing() {
+    let launcher = MockLauncher::new(Ok(4210));
+    let sink = CountSink::default();
+    let bench = recorder_bench(&FixedAuth, &launcher, &sink, &[]);
+    let (buf, len) = encoded_wired("root", "wrong", RECORDER_RUN_PATH);
+    let reply = bench.decide(&buf[..len], shell(OWN_CONSOLE, Some(1000)));
+    assert_eq!(reply, ElevateReply::Refused(Errno::PermissionDenied));
+    assert!(launcher.wired.borrow().is_empty());
+    assert_eq!(sink.count(events::WIRED_REFUSED), 1);
+    assert_eq!(
+        sink.field("cause").as_deref(),
+        Some("authentication failed")
+    );
+}
+
+#[test]
+fn an_account_that_may_not_record_sound_is_refused_as_a_wrong_password_is() {
+    let launcher = MockLauncher::new(Ok(4210));
+    let sink = CountSink::default();
+    let capture = [CapabilityId::AUDIO_CAPTURE];
+    let bench = recorder_bench(&FixedAuth, &launcher, &sink, &capture);
+    let (right, right_len) = encoded_wired("root", "correct", RECORDER_RUN_PATH);
+    let (wrong, wrong_len) = encoded_wired("root", "wrong", RECORDER_RUN_PATH);
+    let not_allowed = bench.decide(&right[..right_len], shell(OWN_CONSOLE, Some(1000)));
+    assert_eq!(
+        sink.field("cause").as_deref(),
+        Some("account may not allow the program")
+    );
+    let wrong_password = bench.decide(&wrong[..wrong_len], shell(OWN_CONSOLE, Some(1000)));
+    assert_eq!(not_allowed, ElevateReply::Refused(Errno::PermissionDenied));
+    assert_eq!(not_allowed, wrong_password);
+    assert!(launcher.wired.borrow().is_empty(), "nothing was started");
+}
+
+#[test]
+fn a_wired_launch_whose_pipes_cannot_be_handed_over_is_refused_verbatim() {
+    let launcher = MockLauncher::new(Err(Errno::LimitExceeded));
+    let sink = CountSink::default();
+    let bench = recorder_bench(&FixedAuth, &launcher, &sink, &[]);
+    let (buf, len) = encoded_wired("root", "correct", RECORDER_RUN_PATH);
+    let reply = bench.decide(&buf[..len], shell(OWN_CONSOLE, Some(1000)));
+    assert_eq!(reply, ElevateReply::Refused(Errno::LimitExceeded));
+    assert_eq!(sink.count(events::WIRED_REFUSED), 1);
+    assert_eq!(sink.count(events::WIRED_GRANTED), 0);
+    assert_eq!(sink.field("cause").as_deref(), Some("launch failed"));
+}
+
+#[test]
+fn a_wired_programs_end_is_recorded_however_it_ends() {
+    let sink = CountSink::default();
+    audit_wired_ended(&sink, 4210, 0);
+    assert_eq!(
+        sink.count(events::WIRED_ENDED),
+        1,
+        "a clean end closes the run"
+    );
+    assert_eq!(sink.field("status").as_deref(), Some("0"));
+    audit_wired_ended(&sink, 4210, LOAD_UNVERIFIED);
+    assert_eq!(sink.count(events::WIRED_ENDED), 2);
+    assert_eq!(
+        sink.field("reason").as_deref(),
+        tairix_abi::load_failure_reason(LOAD_UNVERIFIED)
+    );
+    assert_eq!(sink.count(events::LAUNCH_ENDED_ABNORMALLY), 0);
 }

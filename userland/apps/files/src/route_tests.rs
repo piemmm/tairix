@@ -147,3 +147,41 @@ fn a_key_reaches_only_the_section_that_draws_its_control() {
         );
     }
 }
+
+/// A drive's *Title* field takes the keyboard on `Down` or `Tab` from the
+/// strip, and while it holds it every key is its own — the arrows its caret's
+/// and `Escape` its way out; until then nothing types into it.
+#[test]
+fn a_drives_title_takes_the_keyboard_from_the_strip() {
+    use crate::route::{properties_key, PropertiesKey};
+    use tairix_abi::input::{KeyValue, NamedKeyCode};
+    use tairix_browse::render::PropertiesTab;
+
+    let named = |code| KeyValue::Named(code);
+    let drive = |held, key| properties_key(PropertiesTab::Drive, held, key);
+    for code in [NamedKeyCode::Down, NamedKeyCode::Tab] {
+        assert_eq!(drive(false, named(code)), PropertiesKey::Title);
+    }
+    assert_eq!(
+        drive(false, KeyValue::Char('a')),
+        PropertiesKey::Ignored,
+        "nothing types into a field that does not hold the keyboard"
+    );
+    assert_eq!(
+        drive(false, named(NamedKeyCode::Escape)),
+        PropertiesKey::Close
+    );
+    for key in [
+        named(NamedKeyCode::Left),
+        named(NamedKeyCode::Right),
+        named(NamedKeyCode::Escape),
+        KeyValue::Char('a'),
+    ] {
+        assert_eq!(drive(true, key), PropertiesKey::Title);
+    }
+    assert_ne!(
+        properties_key(PropertiesTab::General, false, named(NamedKeyCode::Down)),
+        PropertiesKey::Title,
+        "the title is the Drive section's alone"
+    );
+}

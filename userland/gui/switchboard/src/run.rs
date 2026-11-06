@@ -1143,9 +1143,9 @@ mod program {
     }
 
     impl Reads {
-        fn new(wake: tairix_rt::sync::WorkerWake) -> Self {
+        fn new(wake: tairix_rt::sync::WorkerWake, keys: tairix_hash::BuildSipHash13) -> Self {
             Self {
-                desk: tairix_rt::sync::Mutex::new(ArtworkDesk::new()),
+                desk: tairix_rt::sync::Mutex::new(ArtworkDesk::new(keys)),
                 signal: tairix_rt::sync::Condvar::new(),
                 wake,
             }
@@ -1375,16 +1375,26 @@ mod program {
     /// Start the icon reader and arm its wake as a member of `set`.
     ///
     /// The desk comes back either way: a kernel that refuses the pipe or the
-    /// thread leaves it stopped, which records nothing and draws every row's
-    /// built-in glyph. Only a refused *wake arm* is fatal — the loop would
+    /// thread, or a process with no hash key, leaves it stopped, which records
+    /// nothing and draws every row's built-in glyph. Only a refused *wake arm* is fatal — the loop would
     /// otherwise hold answers it is never told about.
     ///
     /// The worker's handle is dropped, which detaches it: a reader mid-read of
     /// a slow disk must not hold the teardown for as long as that disk takes,
     /// and it leaves at its next turn round its loop anyway.
     fn open_reads(set: u64) -> Result<alloc::sync::Arc<Reads>, i32> {
-        let reads = alloc::sync::Arc::new(Reads::new(tairix_rt::sync::WorkerWake::create()));
-        if spawn_reader(&reads).is_none() {
+        let keys = tairix_rt::hash_seed().map(tairix_hash::BuildSipHash13::with_seed);
+        let reads = alloc::sync::Arc::new(Reads::new(
+            tairix_rt::sync::WorkerWake::create(),
+            keys.unwrap_or(tairix_hash::BuildSipHash13::UNKEYED),
+        ));
+        if keys.is_none() {
+            app::report(
+                APP_NAME,
+                format_args!("no hash key; every row draws its built-in glyph"),
+            );
+            reads.stop();
+        } else if spawn_reader(&reads).is_none() {
             reads.stop();
         }
         if let Some(read) = reads.wake.read_end() {

@@ -1,9 +1,10 @@
 extern crate std;
 
+use std::vec;
 use std::vec::Vec;
 
 use super::writer::RangeEncoder;
-use super::RangeDecoder;
+use super::{Coder, RangeDecoder};
 
 /// One symbol of each kind the decoder reads.
 #[derive(Clone, Copy, Debug)]
@@ -79,19 +80,29 @@ fn symbols(seed: u64, count: usize) -> Vec<Symbol> {
 }
 
 fn write(symbols: &[Symbol]) -> (Vec<u8>, u32) {
-    let mut encoder = RangeEncoder::new();
+    let mut frame = vec![0u8; 4096];
+    let mut encoder = RangeEncoder::new(&mut frame);
     for &symbol in symbols {
         match symbol {
-            Symbol::Frequency { low, high, total } => encoder.encode(low, high, total),
-            Symbol::Binary { low, high, bits } => encoder.encode_bin(low, high, bits),
-            Symbol::Bit { set, logp } => encoder.bit_logp(set, logp),
-            Symbol::Inverse { symbol } => encoder.icdf(symbol, &ICDF, 8),
-            Symbol::Uniform { value, total } => encoder.uint(value, total),
-            Symbol::Raw { value, count } => encoder.bits(value, count),
+            Symbol::Frequency { low, high, total } => encoder.take(low, high, total),
+            Symbol::Binary { low, high, bits } => encoder.take(low, high, 1 << bits),
+            Symbol::Bit { set, logp } => {
+                encoder.bit_logp(set, logp);
+            }
+            Symbol::Inverse { symbol } => {
+                encoder.icdf(symbol, &ICDF, 8);
+            }
+            Symbol::Uniform { value, total } => {
+                encoder.uint(value, total);
+            }
+            Symbol::Raw { value, count } => {
+                encoder.bits(value, count);
+            }
         }
     }
     let range = encoder.range();
-    (encoder.finish(4096).expect("fits"), range)
+    assert!(encoder.finish(), "fits");
+    (frame, range)
 }
 
 #[test]
@@ -149,10 +160,58 @@ fn a_read_past_the_frame_yields_zeros_and_a_value_out_of_range_reads_as_the_larg
     }
     assert!(empty.tell() > 0);
 
-    let mut encoder = RangeEncoder::new();
-    encoder.encode(255, 256, 256);
+    let mut frame = [0u8; 8];
+    let mut encoder = RangeEncoder::new(&mut frame);
+    encoder.take(255, 256, 256);
     encoder.bits(0x3FF, 10);
-    let frame = encoder.finish(8).expect("fits");
+    assert!(encoder.finish(), "fits");
     let mut decoder = RangeDecoder::new(&frame);
     assert_eq!(decoder.uint(0x3_FF00), 0x3_FEFF);
+}
+
+/// A frame coded right up to its last bit, its final raw bits sharing the
+/// range coder's last byte, still finishes and reads back.
+#[test]
+fn a_frame_filled_to_its_last_bit_finishes_and_reads_back() {
+    let mut rng = Xorshift(11);
+    for len in 1..48 {
+        let mut frame = vec![0u8; len];
+        let mut encoder = RangeEncoder::new(&mut frame);
+        let budget = 8 * i32::try_from(len).expect("a short frame");
+        let mut written = Vec::new();
+        loop {
+            let raw = rng.below(2) == 0;
+            let count = if raw { 1 + rng.below(3) } else { 1 };
+            if encoder.tell() + i32::try_from(count).expect("a few bits") > budget {
+                break;
+            }
+            let value = rng.next() & ((1 << count) - 1);
+            if raw {
+                encoder.bits(value, count);
+            } else {
+                encoder.bit_logp(value != 0, 1);
+            }
+            written.push((raw, count, value));
+        }
+        assert!(encoder.finish(), "a frame of {len}");
+        let mut decoder = RangeDecoder::new(&frame);
+        for &(raw, count, value) in &written {
+            let read = if raw {
+                decoder.bits(count)
+            } else {
+                u32::from(decoder.bit_logp(1))
+            };
+            assert_eq!(read, value, "a frame of {len}");
+        }
+    }
+}
+
+#[test]
+fn symbols_outrunning_their_frame_are_refused() {
+    let mut frame = [0u8; 2];
+    let mut encoder = RangeEncoder::new(&mut frame);
+    for _ in 0..64 {
+        encoder.bit_logp(true, 15);
+    }
+    assert!(!encoder.finish());
 }

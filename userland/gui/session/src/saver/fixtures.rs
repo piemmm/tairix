@@ -15,7 +15,8 @@ use tairix_abi::Errno;
 use tairix_log::{Event, EventId, FieldValue, Sink};
 use tairix_sandbox::{SessionDescriptors, SessionTransport};
 
-use super::{Picture, SaverErrands, SaverLauncher, SaverMemory};
+use super::{SaverErrands, SaverLauncher, SaverMemory};
+use crate::keep::Picture;
 
 /// What passed down a saver's pipes, held in memory.
 #[derive(Default)]

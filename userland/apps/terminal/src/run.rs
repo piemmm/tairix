@@ -27,10 +27,11 @@
 //! Everything with behaviour worth testing lives in host-tested crates —
 //! the screen model and its `lib/vt`-consuming parser (`tairix_terminal`),
 //! the retained cell renderer (`tairix_terminal::render`), the user's profile
-//! and its document, the screen-effect pipeline, the right-click menu, the
-//! settings sheet, the spawned shell's pipe wiring, the icon-bar declaration,
-//! and the window channel's client half (`tairix_window`). This binary only
-//! composes them over the live syscalls:
+//! and its document, the look each window is drawn with
+//! (`tairix_terminal::look`), the screen-effect pipeline, the right-click
+//! menu, the settings sheet, the spawned shell's pipe wiring, the icon-bar
+//! declaration, and the window channel's client half (`tairix_window`). This
+//! binary only composes them over the live syscalls:
 //!
 //! * Per window, two ends of one kernel pseudo-terminal: keystrokes flow to
 //!   that shell's standard input and its cooked output flows back to that
@@ -81,25 +82,20 @@ mod program {
         AppMenuItemId, DialogModality, MenuOutcome, PointerAction, WindowEvent, WindowRegion,
     };
     use tairix_abi::{Errno, ProcId, Signal, WaitSetOp, WaitSourceKind};
-    use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::InputEvent;
     use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
     use tairix_parallel::{JobRunner, Pool};
     use tairix_terminal::appbar::{self, BarCommand};
-    use tairix_terminal::effects::{frame_due, frame_interval_ns, Effects, Phase};
-    use tairix_terminal::layout::{
-        cell_font, fit_font_size, grid_dims, grid_size, snap_to_cells, window_size,
-    };
+    use tairix_terminal::effects::{frame_due, frame_interval_ns};
+    use tairix_terminal::layout::{grid_dims, grid_size, snap_to_cells, window_size};
     use tairix_terminal::menu::{self, Command};
-    use tairix_terminal::pipeline::Pipeline;
     // `Settings` here is the sheet UI; the app-data handle is `SettingsStore`.
     use tairix_appdata::{Opening, Publication, PublishWorker, RtHost, Settings as SettingsStore};
     use tairix_soundtheme::cue::RtCuePost;
     use tairix_soundtheme::{Answer, PostedCues, SoundEvent, CUE_ANSWER_DEADLINE_NS};
     use tairix_terminal::profile::{Invalidation, Profile};
     use tairix_terminal::render::Screen;
-    use tairix_terminal::scheme::Painted;
     use tairix_terminal::settings::{preferred_extent, Settings, SheetOutcome, SETTINGS_TITLE};
     use tairix_terminal::sheet::SheetScreen;
     use tairix_terminal::{
@@ -242,6 +238,9 @@ mod program {
         /// Set once the sheet has asked to go. The loop closes the window;
         /// the routing itself holds no window client.
         dismissed: bool,
+        /// Its paint waits for the answer to its last frame, and is given
+        /// before the next park once that lands.
+        owed: bool,
     }
 
     impl SettingsWindow {
@@ -401,6 +400,7 @@ mod program {
             pane,
             owner,
             dismissed: false,
+            owed: false,
         };
         if present_settings(&mut window, theme, desktop.scale(), client).is_err() {
             app::report(OWN_WORD, "settings window present refused; not shown");
@@ -411,14 +411,20 @@ mod program {
     }
 
     /// Paint whatever the Settings window owes and present exactly that
-    /// rectangle. A region the session released holds none of the pixels a
-    /// partial present would leave standing, so it is drawn whole instead.
+    /// rectangle, once the answer to its last frame is in: until then the
+    /// paint waits, its damage kept, so the loop never waits for the desktop.
+    /// A region the session released holds none of the pixels a partial
+    /// present would leave standing, so it is drawn whole instead.
     fn present_settings(
         window: &mut SettingsWindow,
         theme: &Theme,
         scale: Scale,
         client: &mut WindowClient<app::RtWindowTransport>,
     ) -> Result<(), Errno> {
+        window.owed = client.present_in_flight(window.pane.id());
+        if window.owed {
+            return Ok(());
+        }
         if window.pane.content_released() {
             window.picture.invalidate();
         }
@@ -477,29 +483,9 @@ mod program {
         }
     }
 
-    /// Everything the program holds about how the screen currently looks.
-    ///
-    /// Derived from the [`Profile`] and the desktop, and re-derived whenever
-    /// either changes, so the renderer, the window geometry, and the effect
-    /// pipeline can never disagree about what is in force.
-    struct Look {
-        /// The face the screen is drawn in.
-        font: BitmapFont,
-        /// The colours the screen is painted with.
-        painted: Painted,
-        /// The effect pipeline in force, held beside the colours it was
-        /// resolved with so a frame cannot be drawn under one profile and
-        /// post-processed under another.
-        effects: Effects,
-        /// The desktop scale everything above was sized at.
-        scale: Scale,
-        /// The animation step the effects are drawn at.
-        phase: Phase,
-        /// The effect passes' stages, kept between frames.
-        pipeline: Pipeline,
-        /// The workers the passes spread across.
-        pool: &'static EffectPool,
-    }
+    /// How a window's screen currently looks, its passes spread across the
+    /// process's one pool.
+    type Look = tairix_terminal::Look<&'static EffectPool>;
 
     /// The worker pool the screen effects spread across, started the first
     /// time a pass draws, so a terminal with the effects off holds no worker
@@ -517,85 +503,6 @@ mod program {
         fn runner(&self) -> &dyn JobRunner {
             self.pool
                 .get_or_init(|| app::pool_across(OWN_WORD, self.online, "drawing screen effects"))
-        }
-    }
-
-    impl Look {
-        /// The look `profile` implies on `desktop` under `theme`, its passes
-        /// spread across `pool`.
-        fn resolve(
-            profile: &Profile,
-            theme: &Theme,
-            desktop: &Desktop,
-            pool: &'static EffectPool,
-        ) -> Self {
-            let screen = (desktop.screen_width_px(), desktop.screen_height_px());
-            let size = fit_font_size(profile.font_size_px, screen, theme, desktop.scale());
-            Self {
-                font: cell_font(size, theme, desktop.scale()),
-                painted: Painted::resolve(
-                    profile.scheme,
-                    &profile.custom,
-                    theme,
-                    profile.effects.background_alpha(),
-                ),
-                effects: profile.effects,
-                scale: desktop.scale(),
-                phase: Phase::default(),
-                pipeline: Pipeline::new(),
-                pool,
-            }
-        }
-
-        /// Adopt a changed desktop or theme, forgetting what the passes
-        /// remembered so a trail of the old screen cannot ghost over the new
-        /// one, and the effect buffer so a terminal whose effects were
-        /// switched off stops holding a screen's worth of pixels.
-        ///
-        /// This is the whole-surface case — a re-theme or a scale change
-        /// restyles every pixel. A *profile* change goes through
-        /// [`adopt`](Self::adopt), which touches only what it named.
-        fn refresh(&mut self, profile: &Profile, theme: &Theme, desktop: &Desktop) {
-            let phase = self.phase;
-            *self = Self::resolve(profile, theme, desktop, self.pool);
-            self.phase = phase;
-        }
-
-        /// Adopt the parts of `profile` that `changed` says are stale, and
-        /// nothing else.
-        ///
-        /// A drag delivers one of these per motion sample, so re-deriving the
-        /// whole look here would make each sample cost a screenful; and the
-        /// state a field did not name (the persistence trail, the scratch
-        /// buffer) must survive it, because dropping either is visible.
-        fn adopt(
-            &mut self,
-            changed: Invalidation,
-            profile: &Profile,
-            theme: &Theme,
-            desktop: &Desktop,
-        ) {
-            if changed.metrics() {
-                let screen = (desktop.screen_width_px(), desktop.screen_height_px());
-                let size = fit_font_size(profile.font_size_px, screen, theme, desktop.scale());
-                self.font = cell_font(size, theme, desktop.scale());
-            }
-            if changed.painted() {
-                self.painted = Painted::resolve(
-                    profile.scheme,
-                    &profile.custom,
-                    theme,
-                    profile.effects.background_alpha(),
-                );
-            }
-            self.effects = profile.effects;
-            // Only a wholesale change of what the screen *shows* invalidates
-            // the trail: a persistence record of the old face or the old
-            // colours would ghost over the new ones. Turning an effect's
-            // strength up or down leaves what was lit still true.
-            if changed.metrics() || changed.painted() {
-                self.pipeline.clear();
-            }
         }
     }
 
@@ -631,9 +538,10 @@ mod program {
         /// answer that names anything else belongs to a gesture already
         /// settled and is not acted on.
         menu: Option<u64>,
-        /// Whether an event the drain applied changed what the window shows,
-        /// so it is painted once the drain is applied rather than once per
-        /// event.
+        /// Whether the window owes a paint: an event the drain applied changed
+        /// what it shows, painted once the drain is applied rather than once
+        /// per event, or its screen moved while its last frame was unanswered,
+        /// painted before the next park once that answer lands.
         unpainted: bool,
     }
 
@@ -649,7 +557,10 @@ mod program {
         }
 
         /// Bring this window's picture up to date and present what changed,
-        /// the screen first taking the size last asked of it.
+        /// the screen first taking the size last asked of it — or, while the
+        /// window's last frame is unanswered, owe it the paint: the desktop
+        /// answers once it shows that frame, and the loop never waits for it,
+        /// so the shell's output is read as fast as it parses.
         ///
         /// A region the session released while the window was hidden is
         /// re-attached first, so this paints into a live one.
@@ -657,6 +568,10 @@ mod program {
             &mut self,
             client: &mut WindowClient<app::RtWindowTransport>,
         ) -> Result<(), Errno> {
+            if client.present_in_flight(self.pane.id()) {
+                self.unpainted = true;
+                return Ok(());
+            }
             self.settle();
             self.unpainted = false;
             present_frame(
@@ -681,6 +596,42 @@ mod program {
                     "the screen could not take its window's new size; it keeps the one it had",
                 ),
             }
+        }
+
+        /// Bring this window up to what `changed` made stale — the backdrop
+        /// blur, the grid, the retained picture, the scrollback's limit — and
+        /// present it if its pixels moved.
+        ///
+        /// The one path a profile change and a desktop change both reach a
+        /// window by, so each costs the window only what it moved.
+        fn restyle(
+            &mut self,
+            changed: Invalidation,
+            profile: &Profile,
+            client: &mut WindowClient<app::RtWindowTransport>,
+        ) -> Result<(), Errno> {
+            if changed.blur() {
+                apply_blur(client, self.pane.id(), profile);
+            }
+            if changed.metrics() {
+                let mode = *self.pane.mode();
+                let (cols, rows) = grid_dims(mode.width_px, mode.height_px, self.look.font);
+                self.terminal.resize(cols, rows);
+            }
+            if changed.metrics() || changed.painted() {
+                // A new face or new colours: every retained pixel is stale,
+                // and the cell diff can see neither.
+                self.screen.invalidate();
+            }
+            // Lines let go under a view scrolled back move what it shows.
+            let shed = changed.scrollback()
+                && self
+                    .terminal
+                    .set_scrollback_limit(usize::from(profile.scrollback_lines));
+            if changed.repaints() || shed {
+                self.present(client)?;
+            }
+            Ok(())
         }
 
         /// Fit the window to the client the session granted, snapped down to
@@ -1092,13 +1043,14 @@ mod program {
         // yet, so there is no frame to owe anyone.
         let mut publication = {
             let mut host = RtHost;
-            Publication::new(load_profile(&SettingsStore::open(&mut host, OWN_WORD)))
+            Publication::new(load_profile(&SettingsStore::open_without_defaults(
+                &mut host,
+            )))
         };
 
         // Every later write goes to this worker instead, so a settled edit
         // costs the window no frame. It starts once the wait-set exists.
-        let publisher =
-            alloc::sync::Arc::new(tairix_appdata::publish_worker(Opening::Defaults(OWN_WORD)));
+        let publisher = alloc::sync::Arc::new(tairix_appdata::publish_worker(Opening::Bare));
         let _publisher_guard = tairix_rt::work::WorkerGuard::new(&publisher);
 
         let pool: &'static EffectPool =
@@ -1214,6 +1166,24 @@ mod program {
         // When the next animation frame is due, while an effect is animated.
         let mut next_frame_ns: Option<u64> = None;
         let code = 'serve: loop {
+            // A window owed a paint is painted before the park once its last
+            // frame has been answered; while it has not, the answer is what
+            // wakes the park.
+            for open in windows.iter_mut().filter(|open| open.unpainted) {
+                if open.present(&mut client).is_err() {
+                    break 'serve app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, "present refused");
+                }
+            }
+            if let Some(held) = settings.as_mut().filter(|held| held.owed) {
+                let (theme, scale) = (themes.active(), desktop.scale());
+                if present_settings(held, theme, scale, &mut client).is_err() {
+                    break 'serve app::fail(
+                        OWN_WORD,
+                        app::EXIT_CHANNEL_LOST,
+                        "settings present refused",
+                    );
+                }
+            }
             let now = tairix_rt::clock_get();
             let animated = windows.iter().any(|open| {
                 open.look
@@ -1513,7 +1483,8 @@ mod program {
         Lost(&'static str),
     }
 
-    /// Drain what `open`'s shell wrote and repaint that window.
+    /// Drain what `open`'s shell wrote and repaint that window, or owe it the
+    /// paint while its last frame is unanswered.
     fn pump_shell(
         open: &mut TerminalWindow,
         client: &mut WindowClient<app::RtWindowTransport>,
@@ -1613,27 +1584,7 @@ mod program {
             if changed.any() {
                 open.look.adopt(changed, &profile, theme, ctx.desktop);
             }
-            if changed.blur() {
-                apply_blur(client, open.pane.id(), &profile);
-            }
-            if changed.metrics() {
-                let mode = *open.pane.mode();
-                let (cols, rows) = grid_dims(mode.width_px, mode.height_px, open.look.font);
-                open.terminal.resize(cols, rows);
-            }
-            if changed.metrics() || changed.painted() {
-                // A new face or new colours: every retained pixel is stale,
-                // and the cell diff can see neither.
-                open.screen.invalidate();
-            }
-            // Lines let go under a view scrolled back move what it shows.
-            let shed = changed.scrollback()
-                && open
-                    .terminal
-                    .set_scrollback_limit(usize::from(profile.scrollback_lines));
-            if changed.repaints() || shed {
-                open.present(client).map_err(|_| ())?;
-            }
+            open.restyle(changed, &profile, client).map_err(|_| ())?;
         }
         if let Some(held) = ctx.settings.as_mut() {
             held.follow(&profile, theme, scale);
@@ -1642,9 +1593,13 @@ mod program {
         Ok(())
     }
 
-    /// Re-derive every window from scratch and repaint it whole, for a change
-    /// that genuinely restyles the whole surface: a re-theme or a scale change
-    /// leaves nothing on screen standing, so the surface *is* the scope.
+    /// Bring every window up to a changed desktop through the path a profile
+    /// change takes, so each repaints only what the change moved: a new scale
+    /// or a screen the face no longer fits refits the grid, and a light/dark
+    /// switch moves nothing a terminal draws.
+    ///
+    /// The Settings window is drawn in the desktop's theme, so it is repainted
+    /// whole.
     ///
     /// # Errors
     ///
@@ -1655,19 +1610,11 @@ mod program {
         ctx: &mut AppContext<'_>,
     ) -> Result<(), ()> {
         let profile = *ctx.publication.live();
-        // The whole surface is rebuilt from the live profile, so nothing is
-        // left for the next scoped pass to catch up on.
-        ctx.publication.take_pending(|_, _| ());
         let theme = ctx.themes.active();
         let scale = ctx.desktop.scale();
         for open in windows.iter_mut() {
-            open.look.refresh(&profile, theme, ctx.desktop);
-            apply_blur(client, open.pane.id(), &profile);
-            let mode = *open.pane.mode();
-            let (cols, rows) = grid_dims(mode.width_px, mode.height_px, open.look.font);
-            open.terminal.resize(cols, rows);
-            open.screen.invalidate();
-            open.present(client).map_err(|_| ())?;
+            let changed = open.look.refresh(theme, ctx.desktop);
+            open.restyle(changed, &profile, client).map_err(|_| ())?;
         }
         if let Some(held) = ctx.settings.as_mut() {
             // New colours and new metrics leave nothing on the sheet
@@ -1959,10 +1906,8 @@ mod program {
                 adopt_published(windows, client, &mut *ctx)
             }
             EventOutcome::DesktopChanged => {
-                // The scale and/or appearance changed, which restyles every
-                // pixel and re-sizes every face, so the whole surface is the
-                // scope. The desktop and the theme registry were both already
-                // brought into step where the notice was read.
+                // The desktop and the theme registry were both already brought
+                // into step where the notice was read.
                 if restyle_windows(windows, client, &mut *ctx).is_err() {
                     return Applied::Lost("present refused");
                 }

@@ -324,3 +324,174 @@ fn a_renumbering_rename_frees_the_old_number_for_the_next_node() {
     let read = fs.read_at(moved, 0, &mut body).expect("read");
     assert_eq!(&body[..read], b"kept");
 }
+
+/// Fold `value` into `acc`.
+fn mixed(acc: u64, value: u64) -> u64 {
+    acc.wrapping_mul(0x0100_0000_01b3).wrapping_add(value)
+}
+
+/// What a reader of `fs` can see, gathered without allocating, so a refusal
+/// sweep can hold a refused attempt to having changed none of it.
+fn seen(fs: &RwMockFs) -> [u64; 9] {
+    let mut tree = 0;
+    for node in &fs.nodes {
+        tree = match node {
+            RwNode::Dir(children) => children.iter().fold(mixed(tree, 1), |acc, (name, &child)| {
+                name.bytes().fold(mixed(acc, child as u64), |acc, byte| {
+                    mixed(acc, u64::from(byte))
+                })
+            }),
+            RwNode::File(body) | RwNode::Link(body) => body
+                .iter()
+                .fold(mixed(tree, 2), |acc, &byte| mixed(acc, u64::from(byte))),
+        };
+    }
+    let holes = fs
+        .holes
+        .iter()
+        .flatten()
+        .fold(0, |acc, (&start, &end)| mixed(mixed(acc, start), end));
+    let names = fs
+        .nlink
+        .iter()
+        .fold(0, |acc, &count| mixed(acc, u64::from(count)));
+    let parents = fs.parent.iter().fold(0, |acc, &dir| mixed(acc, dir as u64));
+    let held = fs.held.iter().fold(0, |acc, (key, &count)| {
+        mixed(mixed(acc, key), u64::from(count))
+    });
+    let free = fs
+        .free
+        .iter()
+        .flatten()
+        .fold(0, |acc, &index| mixed(acc, index as u64));
+    let unrecorded = fs
+        .unrecorded
+        .iter()
+        .fold(0, |acc, &index| mixed(acc, index as u64));
+    [
+        fs.nodes.len() as u64,
+        u64::from(fs.generation),
+        tree,
+        holes,
+        names,
+        parents,
+        held,
+        free,
+        unrecorded,
+    ]
+}
+
+/// Run `mutate` with the heap refused from each of its allocations on — the
+/// first, then the second, and so on — holding every refused attempt to
+/// answering `OutOfMemory` with nothing a reader sees changed, and answer
+/// what the attempt the heap granted in full answered.
+fn granted_at_last<T: PartialEq + core::fmt::Debug>(
+    fs: &mut RwMockFs,
+    mut mutate: impl FnMut(&mut RwMockFs) -> Result<T, DriverError>,
+) -> Result<T, DriverError> {
+    let refused = (Err(DriverError::OutOfMemory), seen(fs));
+    let (answer, _) = crate::test_alloc::past_each_refusal(&refused, || {
+        let answer = mutate(fs);
+        (answer, seen(fs))
+    });
+    assert_ne!(
+        answer,
+        Err(DriverError::OutOfMemory),
+        "a refused attempt changed what a reader sees"
+    );
+    answer
+}
+
+/// Every name mutation the heap refuses, however far it got, answers
+/// `OutOfMemory` with the tree as it was, and goes through once granted.
+#[test]
+fn a_name_mutation_the_heap_refuses_changes_nothing() {
+    let mut fs = RwMockFs::new().with_reused_numbers();
+    let root = fs.root();
+    let file = fs
+        .create(root, b"file", NodeKind::RegularFile, &ADMIN_RECORD)
+        .expect("create");
+    fs.create(root, b"gone", NodeKind::RegularFile, &ADMIN_RECORD)
+        .expect("create");
+    fs.remove(root, b"gone").expect("unlink");
+    let dir = granted_at_last(&mut fs, |fs| {
+        fs.create(root, b"dir", NodeKind::Directory, &ADMIN_RECORD)
+    })
+    .expect("a directory, under the freed number");
+    let other = granted_at_last(&mut fs, |fs| {
+        fs.create(dir, b"other", NodeKind::RegularFile, &ADMIN_RECORD)
+    })
+    .expect("a file");
+    granted_at_last(&mut fs, |fs| {
+        fs.create_link(dir, b"link", b"/file", &ADMIN_RECORD)
+    })
+    .expect("a link");
+    granted_at_last(&mut fs, |fs| fs.link(dir, b"alias", file)).expect("a second name");
+    granted_at_last(&mut fs, |fs| fs.rename(root, b"file", dir, b"other"))
+        .expect("a move over a file");
+    granted_at_last(&mut fs, |fs| fs.remove(dir, b"link")).expect("an unlink");
+    assert_eq!(fs.lookup(dir, b"other"), Ok(file));
+    assert_eq!(
+        fs.node_info(other),
+        Err(DriverError::NotFound),
+        "the file moved over is freed"
+    );
+}
+
+/// Every byte write the heap refuses, however far it got, answers
+/// `OutOfMemory` with the file as it was — its number too, where writes
+/// renumber — and goes through once granted.
+#[test]
+fn a_byte_write_the_heap_refuses_changes_nothing() {
+    for mut fs in [RwMockFs::new(), RwMockFs::new().with_renumbering_writes()] {
+        let root = fs.root();
+        fs.create(root, b"file", NodeKind::RegularFile, &ADMIN_RECORD)
+            .expect("create");
+        let file = fs.lookup(root, b"file").expect("resolves");
+        granted_at_last(&mut fs, |fs| fs.write_at(file, 8, b"body")).expect("a write past a gap");
+        let file = fs.lookup(root, b"file").expect("resolves");
+        granted_at_last(&mut fs, |fs| fs.truncate(file, 64)).expect("a truncate that grows");
+        let file = fs.lookup(root, b"file").expect("resolves");
+        granted_at_last(&mut fs, |fs| fs.punch(file, 9, 2)).expect("a punch");
+        let file = fs.lookup(root, b"file").expect("resolves");
+        let mut body = [0u8; 12];
+        assert_eq!(fs.read_at(file, 0, &mut body), Ok(12));
+        assert_eq!(body, [0, 0, 0, 0, 0, 0, 0, 0, b'b', 0, 0, b'y']);
+    }
+}
+
+/// A truncate that cuts a file back into the holes it keeps, refused by the
+/// heap however far it got, answers `OutOfMemory` with the file as it was.
+#[test]
+fn a_shrinking_truncate_the_heap_refuses_changes_nothing() {
+    let mut fs = RwMockFs::new();
+    let root = fs.root();
+    let file = fs
+        .create(root, b"file", NodeKind::RegularFile, &ADMIN_RECORD)
+        .expect("create");
+    fs.write_at(file, 0, &[1; 32]).expect("write");
+    // Enough holes that the piece a cut leaves needs a node of its own.
+    for at in (0..20).step_by(2) {
+        fs.punch(file, at, 1).expect("punch");
+    }
+    granted_at_last(&mut fs, |fs| fs.truncate(file, 5)).expect("a truncate that shrinks");
+    let mut body = [9u8; 8];
+    assert_eq!(fs.read_at(file, 0, &mut body), Ok(5));
+    assert_eq!(body[..5], [0u8, 1, 0, 1, 0]);
+}
+
+/// An unpin the heap refuses keeps its hold, and frees the node once granted.
+#[test]
+fn an_unpin_the_heap_refuses_keeps_its_hold() {
+    let mut fs = RwMockFs::new().with_reused_numbers();
+    let root = fs.root();
+    let file = fs
+        .create(root, b"file", NodeKind::RegularFile, &ADMIN_RECORD)
+        .expect("create");
+    let held = fs.pin(file).expect("pin");
+    fs.remove(root, b"file").expect("unlink");
+    assert_eq!(
+        granted_at_last(&mut fs, |fs| fs.unpin(held)),
+        Ok(Unpinned::Freed)
+    );
+}

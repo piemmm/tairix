@@ -208,6 +208,13 @@ impl ScreenLock {
         self.engaged.is_some()
     }
 
+    /// The lock's window while it is engaged: what a screen capture shows
+    /// blanked.
+    #[must_use]
+    pub fn window(&self) -> Option<WindowId> {
+        self.engaged.as_ref().map(|engaged| engaged.wm)
+    }
+
     /// Lock the screen, naming the account as `shown` so the user knows whose
     /// password is wanted, and offering `login` to the broker. An empty
     /// `shown` name heads the prompt with the surface's placeholder.

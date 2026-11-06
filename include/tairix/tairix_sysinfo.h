@@ -129,6 +129,7 @@
 #define TAIRIX_MOUNT_RECOVERY_CONFLICT ((uint8_t)3u)
 #define TAIRIX_MOUNT_DEGRADED ((uint8_t)4u)
 #define TAIRIX_MOUNT_RECOVERING ((uint8_t)5u)
+#define TAIRIX_MOUNT_REPLAY_UNCONFIRMED ((uint8_t)6u)
 /* A mount record's owner, or a view binding's binder, when there is none. */
 #define TAIRIX_MOUNT_NO_OWNER 0xffffffffu
 /* The kind of volume a mount record describes (uint8_t). */
@@ -209,7 +210,7 @@
 #define TAIRIX_UPTIME_WIRE_LEN 24u
 #define TAIRIX_LOAD_AVERAGE_WIRE_LEN 24u
 #define TAIRIX_SYSTEM_IDENTITY_WIRE_LEN 88u
-#define TAIRIX_MOUNT_RECORD_WIRE_LEN 488u
+#define TAIRIX_MOUNT_RECORD_WIRE_LEN 504u
 #define TAIRIX_VIEW_BINDING_RECORD_WIRE_LEN 160u
 #define TAIRIX_VOLUME_REMOVAL_RECORD_WIRE_LEN 32u
 #define TAIRIX_RESOURCE_LIMIT_RECORD_WIRE_LEN 32u
@@ -342,8 +343,11 @@ typedef struct tairix_blk_medium {
 * its transport is TAIRIX_BLK_TRANSPORT_UNDECLARED when no block device
 * backs it or its medium was not recognised -- never a guess.
 * `usage` is the backing volume's space accounting (all-zero when none is
-* known). `volume_id` is the volume's stable published identity (all-zero
-* when the mount has none), the identity a volume_detach request names.
+* known). `volume_id` is the key the volume is published under (all-zero
+* when the mount has none), the key a volume_detach request names, and
+* `identity` the identity its content carries: volume_id but for a twin,
+* which is published under a key of its own; all-zero exactly when
+* volume_id is.
 * `owner` is the uid that attached a network or disk-image volume,
 * TAIRIX_MOUNT_NO_OWNER for one no one owns; `volume_class` is a
 * TAIRIX_VOLUME_CLASS_*; `private_to_owner` is 1 for a volume presented
@@ -353,6 +357,8 @@ typedef struct tairix_blk_medium {
 * `source_cut` is 1 when the source is only the first bytes of a longer
 * name, cut between characters to fit. `title` is the volume's own
 * label: empty where its filesystem records none, and on a withheld record.
+* `titled` is 1 where the volume's format takes a title a retitle can set,
+* else 0, and 0 on a withheld record.
 * The inline source/target/fstype/title buffers are valid for their
 * respective *_len byte counts. */
 typedef struct tairix_mount_record {
@@ -364,6 +370,7 @@ typedef struct tairix_mount_record {
     tairix_blk_medium_t medium;
     tairix_volume_stats_t usage;
     uint8_t volume_id[TAIRIX_VOLUME_ID_LEN];
+    uint8_t identity[TAIRIX_VOLUME_ID_LEN];
     uint32_t owner;
     uint8_t volume_class;
     uint8_t private_to_owner;
@@ -374,6 +381,7 @@ typedef struct tairix_mount_record {
     uint8_t fstype[TAIRIX_MOUNT_FSTYPE_MAX];
     uint8_t title_len;
     uint8_t title[TAIRIX_VOLUME_TITLE_MAX];
+    uint8_t titled;
 } tairix_mount_record_t;
 
 /* One view binding: a view path (`target`), the path within an attached

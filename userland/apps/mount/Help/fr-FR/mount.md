@@ -8,6 +8,12 @@ mount — lister les systèmes de fichiers montés, ou monter une image disque o
 
 `mount [option...] image [target]`
 
+`mount --list-held`
+
+`mount --replay-held name`
+
+`mount --discard-held name`
+
 ## DESCRIPTION
 
 Sans opérande, liste les systèmes de fichiers montés, une ligne
@@ -56,6 +62,18 @@ système de fichiers dont les propriétaires enregistrés sont toujours
 respectés (ext2, ext3, ext4, ARXFS) n'est pas montée, et `mount` en
 donne la raison.
 
+Un disque remis en place alors qu'il retenait encore des modifications
+qui n'y étaient pas encore écrites est monté en lecture seule, les
+modifications conservées, quand son périphérique ne peut pas montrer
+qu'il s'agit du même disque et non d'une copie ; la liste le marque
+`[replay-unconfirmed]`, et `--list-held` ne liste que ces volumes.
+`--replay-held` y écrit les modifications, si son contenu le montre
+inchangé depuis ; `--discard-held` les abandonne et prend le disque tel
+qu'il est. Dans les deux cas, le volume est monté à nouveau, en
+lecture-écriture là où c'est possible. Répondre exige l'autorité de
+montage (`CAP_FS_MOUNT`) ; pour un disque amovible, le bureau pose
+aussi la question à l'utilisateur devant l'ordinateur.
+
 ## OPTIONS
 
 - `-r, --read-only` — monter le volume en lecture seule (comme
@@ -86,6 +104,14 @@ donne la raison.
 - `-v, --verbose` — indiquer où le volume a été monté.
 - `-l, --show-labels` — accepté pour la liste, qui n'a pas d'étiquettes
   à ajouter.
+- `--list-held` — ne lister que les volumes dont les modifications
+  attendent `--replay-held` ou `--discard-held`.
+- `--replay-held <name>` — écrire sur son disque les modifications
+  qu'un volume retient, si son contenu le montre encore inchangé ;
+  `name` est le nom du volume dans `/Storage`, un répertoire où il est
+  présenté, ou sa racine `id::`.
+- `--discard-held <name>` — abandonner les modifications qu'un volume
+  retient, en prenant son disque tel qu'il est.
 - `-h, -?, --help` — afficher l'aide courte de cette commande.
 
 ## EXAMPLES
@@ -101,15 +127,22 @@ donne la raison.
   vous pouvez écrire dans l'archive et dans son dossier.
 - `mount -r backup.tar.gz /Storage/backup` — monter une archive tar
   compressée en lecture seule sous le nom `backup`.
+- `mount --list-held` — lister les volumes dont les modifications
+  attendent une réponse.
+- `mount --replay-held backup` — écrire sur son disque les
+  modifications que retient `/Storage/backup`.
 
 ## EXIT STATUS
 
-- `0` — la liste a été écrite, ou le volume a été monté (ou l'aide
+- `0` — la liste a été écrite, le volume a été monté, ou ses
+  modifications retenues ont été écrites ou abandonnées (ou l'aide
   courte a été écrite).
-- `1` — la ligne de commande n'a pas été comprise.
+- `1` — la ligne de commande n'a pas été comprise, ou vous ne pouvez
+  pas répondre pour les modifications du volume.
 - `2` — la liste des montages n'a pas pu être lue, ou l'écriture sur
   le terminal a échoué.
-- `32` — l'image n'a pas été montée.
+- `32` — l'image n'a pas été montée, ou les modifications du volume
+  n'ont été ni écrites ni abandonnées.
 
 ## ENVIRONMENT
 

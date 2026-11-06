@@ -37,6 +37,8 @@ pub enum Refusal {
     NoDesktop,
     /// The seat already has as many companions as it allows.
     SeatFull,
+    /// There is not the memory to draw him on the desktop.
+    NoMemory,
 }
 
 impl Refusal {
@@ -47,6 +49,7 @@ impl Refusal {
             Self::NotPermitted => "not allowed out: this account may not place desktop companions",
             Self::NoDesktop => "not allowed out: no desktop session to be loose on",
             Self::SeatFull => "not allowed out: the desktop already has its companions",
+            Self::NoMemory => "not allowed out: there is not the memory to draw him on the desktop",
         }
     }
 }

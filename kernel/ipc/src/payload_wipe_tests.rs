@@ -124,7 +124,7 @@ fn task_with(process: u64, caps: &[CapabilityId]) -> TaskCapabilities {
     for cap in caps {
         set.insert(*cap);
     }
-    TaskCapabilities::derive(ProcessId(process), UserId(1), set, set, &sink)
+    TaskCapabilities::derive(ProcessId(process), UserId(1), set, set, &sink).expect("derived")
 }
 
 fn endpoint(id: u64, sink: &RecordingSink) -> CallEndpoint {
@@ -156,7 +156,7 @@ fn secret() -> tairix_kernel_mem::SensitiveBuffer {
 #[test]
 fn probe_detects_an_unwiped_payload() {
     // Keeps the round-trip assertions from passing vacuously: a plain `Vec`
-    // copy is exactly what the endpoints used to leave in freed heap.
+    // copy leaves its bytes in freed heap.
     let seen = with_probe(SELFCHECK_SENTINEL, || {
         drop(alloc::vec![SELFCHECK_SENTINEL; PAYLOAD_LEN]);
     });
@@ -192,11 +192,11 @@ fn call_round_trip_leaves_no_plaintext_in_freed_heap() {
             panic!("the request must be received");
         };
         assert_eq!(call.request.len(), PAYLOAD_LEN);
+        // The request's room comes back wiped, and the reply is written there.
+        ep.keep_room(call);
         let _ = ep
-            .reply(call.ticket, secret().as_bytes(), &sink)
+            .reply(ticket, secret().as_bytes(), &sink)
             .expect("replied");
-        // Releases the kernel-owned copy of the request the server was handed.
-        drop(call);
         let outcome = ep.take_reply(7, ticket, 0, &sink);
         assert!(matches!(outcome, ReplyOutcome::Ready(_)));
         // Releases the kernel-owned copy of the reply.
@@ -293,7 +293,7 @@ fn abandoned_calls_leave_no_plaintext_in_freed_heap() {
         drop(call);
         ep.reply(CallTicket(ticket.0), secret().as_bytes(), &sink)
             .expect_err("that ticket is no longer in service");
-        ep.destroy(&sink);
+        drop(ep.destroy(&sink));
     });
 
     assert!(
@@ -335,7 +335,7 @@ fn refused_calls_leave_no_plaintext_in_freed_heap() {
         // A reply for an unknown ticket: its copy is dropped inside `reply`.
         ep.reply(CallTicket(0xDEAD), secret().as_bytes(), &sink)
             .expect_err("unknown ticket");
-        ep.destroy(&sink);
+        drop(ep.destroy(&sink));
     });
 
     assert!(
@@ -365,12 +365,13 @@ fn port_message_leaves_no_plaintext_in_freed_heap() {
         // A delivered-and-drained message.
         port.send(
             &sender,
+            0,
             secret().as_bytes(),
             tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .expect("delivered");
-        let msg = port.recv().expect("drained");
+        let (msg, _) = port.recv().expect("drained");
         assert_eq!(msg.payload.len(), PAYLOAD_LEN);
         drop(msg);
 
@@ -378,6 +379,7 @@ fn port_message_leaves_no_plaintext_in_freed_heap() {
         for _ in 0..4 {
             port.send(
                 &sender,
+                0,
                 secret().as_bytes(),
                 tairix_abi::RLIMIT_INFINITY,
                 &sink,
@@ -386,6 +388,7 @@ fn port_message_leaves_no_plaintext_in_freed_heap() {
         }
         port.send(
             &sender,
+            0,
             secret().as_bytes(),
             tairix_abi::RLIMIT_INFINITY,
             &sink,

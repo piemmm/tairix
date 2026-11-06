@@ -1,10 +1,11 @@
-//! What one round of the window's event loop lays out and presents
-//! ([`Round`]).
+//! What one turn of the window's event loop presents ([`Round`]): every
+//! event the turn drained, folded into one present.
 //!
 //! Decided here rather than in the bare-metal loop so it is tested on the
 //! host: a round that adopted an answer rebuilt the pane, whose rows report
-//! nothing of their own, and a round that concluded anything is presented
-//! even where it reported no rectangle.
+//! nothing of their own, a round that concluded anything is presented even
+//! where it reported no rectangle, and a turn owes whatever any of its events
+//! owed.
 
 use tairix_geometry::{Rect, Region};
 use tairix_window::Repaint;
@@ -22,11 +23,15 @@ pub struct Round {
 }
 
 impl Round {
-    /// Whether the shell must be laid out again before it is drawn: an
-    /// adopted answer rebuilt rows no layout has measured.
+    /// This round and `next`, drained in the same turn and presented once:
+    /// whatever either owes.
     #[must_use]
-    pub const fn relays(self) -> bool {
-        self.answered
+    pub const fn and(self, next: Self) -> Self {
+        Self {
+            whole: self.whole || next.whole,
+            acted: self.acted || next.acted,
+            answered: self.answered || next.answered,
+        }
     }
 
     /// What the round presents, `damage` widened to `pane` where an answer
@@ -51,12 +56,11 @@ mod tests {
     const PANE: Rect = Rect::new(224, 40, 556, 560);
 
     #[test]
-    fn an_answered_round_lays_out_and_presents_the_pane_it_rebuilt() {
+    fn an_answered_round_presents_the_pane_it_rebuilt() {
         let round = Round {
             answered: true,
             ..Round::default()
         };
-        assert!(round.relays());
         let mut damage = Region::new();
         assert_eq!(round.repaint(&mut damage, PANE), Repaint::Reported);
         assert_eq!(damage.bounds(), PANE);
@@ -68,7 +72,6 @@ mod tests {
             acted: true,
             ..Round::default()
         };
-        assert!(!round.relays());
         let mut damage = Region::new();
         assert_eq!(round.repaint(&mut damage, PANE), Repaint::Reported);
         assert!(damage.is_empty(), "the present covers the window instead");
@@ -92,5 +95,30 @@ mod tests {
             Repaint::Reported,
             "what an idle round still reported is presented"
         );
+    }
+
+    #[test]
+    fn rounds_drained_in_one_turn_owe_whatever_any_owed() {
+        let answered = Round {
+            answered: true,
+            ..Round::default()
+        };
+        let whole = Round {
+            whole: true,
+            ..Round::default()
+        };
+        let turn = Round::default()
+            .and(answered)
+            .and(whole)
+            .and(Round::default());
+        assert_eq!(
+            turn,
+            Round {
+                whole: true,
+                acted: false,
+                answered: true,
+            }
+        );
+        assert_eq!(Round::default().and(Round::default()), Round::default());
     }
 }

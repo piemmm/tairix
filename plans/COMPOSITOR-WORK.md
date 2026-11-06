@@ -26,7 +26,7 @@ without exception.
 | J | Exclusive fullscreen, the third size state (`plans/WINTERSUN.md` P3) | done |
 | K | A translucent client's plate takes that client's own ground | planned |
 | L | Drop shadows under floating surfaces, and bevelled window furniture | done |
-| M | The tool frame: a mini title bar — caption-face title, close alone, on `tool_title_bar_height` — for `plans/APPWIN.md` AW7 tool windows, its move reported to the owner | done |
+| M | The tool frame: a mini title bar — caption-face title, close alone, on `tool_title_bar_height` — for `plans/APPWIN.md` AW7 tool windows, its move reported to the owner; resize edges where it asks, never a maximize | done |
 | N | The window in front stands above the rest, and every edge resizes: two shadow levels eased with the focus, all four edges and corners, drags out of maximization at the window's size, and gestures that always end | done |
 
 Input-transparent overlays (`set_input_transparent`) landed alongside these
@@ -750,11 +750,14 @@ the window manager's to draw and to move like any other window.
 
 - **A mini title bar, one more command set.** `TitleBarCommands::Tool` seats
   Close alone, its title in the caption face, on a band
-  `Metrics::tool_title_bar_height` deep. `WindowFrame::tool()` composes it
+  `Metrics::tool_title_bar_height` deep. `WindowFrame::tool` composes it
   over the window's rim, bevel, plate and hit map: the frame's insets, layout,
   floor and hit map read the band height of the commands it seats
   (`TitleBar::height_of`), so the band drags the window exactly as a full
-  title bar does and the client never reaches it. It offers no resize edge.
+  title bar does and the client never reaches it. One that asks to be
+  resizable has the window's resize edges and is held to its range as a window
+  is; none is maximized (`WindowFrame::maximizes`), so a double-click on its
+  band or an application's fullscreen request leaves it as it is.
 - **Its move is reported to its owner**, relative to the owner's client area:
   the session turns a tool window's `Moved` and `MoveEnded` into
   `WindowEvent::ToolMoved`, the pointer over the owner or elsewhere.

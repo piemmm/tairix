@@ -421,7 +421,8 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         }
         .with_mastering(state.mastering)
         .with_watches(&state.fswatch)
-        .with_wall_clock(&state.wall_clock);
+        .with_wall_clock(&state.wall_clock)
+        .with_random(&state.rng);
         let ctx: &'static (dyn InitSpawnCtx + Sync) = crate::forever(Box::new(spawner));
         start_init(init, ctx, audit_sink);
     }
@@ -512,6 +513,13 @@ impl<A: KernelArch + 'static> crate::waitq::WaitQueueArch for SchedWaitQueueArch
         // caller context (a `SleepLock` contended acquire) resolves the
         // current CPU here to then look up and park the current task.
         Some(SchedulerArch::current_cpu(self.arch))
+    }
+
+    fn line_row(
+        &self,
+        cpu: tairix_kernel_sched_api::CpuId,
+    ) -> Option<Arc<crate::sleeplock::LineRow>> {
+        crate::kthread::current_line_row(cpu)
     }
 
     fn stop(&self, id: tairix_kernel_sched_api::TaskId) -> bool {
@@ -968,50 +976,13 @@ fn wait_secondary_online<A: KernelArch + 'static>(
 /// source withholds only that source, so a machine whose hardware RNG is not
 /// wired yet still seeds from the others.
 fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>) {
-    use crate::random::{
-        seed_sources, take_boot_seed_source, ArchEntropy, ArchTicks, IrqEntropyObserver,
-        SeededReserve, IRQ_ENTROPY_POOL,
-    };
-    use tairix_rng::{EntropySource, InterruptPoolSource, JitterSource, MixedPair};
+    use crate::random::{seeded_reserve, IrqEntropyObserver, IRQ_ENTROPY_POOL};
 
-    // Never trust the hardware RNG alone: XOR-mix it with an independent
-    // CPU-timing-jitter source before it seeds (and reseeds) the reserve. A
-    // stuck, backdoored, or observable hardware source cannot lower the seed's
-    // quality below the jitter source's contribution, and vice versa.
-    let hardware = ArchEntropy::new(state.arch.platform_entropy());
-    let mut jitter = JitterSource::new(ArchTicks::new(state.arch.clone()));
-    // Probed once so the audit says whether jitter contributes here: an
-    // emulated counter fails its health tests.
-    let jitter_healthy = {
-        let mut probe = [0u8; 8];
-        jitter.fill(&mut probe).is_ok()
-    };
-
-    // Add the asynchronous interrupt-arrival-timing pool as a third,
-    // independent source. It contributes nothing at boot (it fails closed
-    // until interrupts have flowed) but folds fresh timing into every reseed
-    // for forward secrecy; the interrupt observer that feeds it is installed
-    // below, only once a seeded reserve exists to drain it.
-    let interrupt = InterruptPoolSource::new(&IRQ_ENTROPY_POOL);
-
-    // The firmware boot seed (FDT `/chosen/rng-seed`) is the one source an
-    // emulated machine with no usable hardware RNG has. One-shot: consumed
-    // and wiped here, so reseeds draw on the interrupt pool.
-    let boot_seed = take_boot_seed_source();
-    let sources = seed_sources(hardware.is_present(), jitter_healthy, boot_seed.has_seed());
-
-    let mixed = MixedPair::new(
-        MixedPair::new(MixedPair::new(hardware, jitter), interrupt),
-        boot_seed,
-    );
-    let mut reserve: SeededReserve<A> = SeededReserve::new();
-    match reserve.seed(mixed) {
-        Ok(()) => {
-            // Swap the seeded reserve in for the unseeded boot reserve.
+    match seeded_reserve(&state.arch) {
+        Ok((reserve, sources)) => {
             *state.rng.write() = Box::new(reserve);
-            // Now that a seeded, reseeding reserve exists, start feeding
-            // interrupt-arrival timing into the pool it reseeds from. The
-            // observer is set-once and lives for the kernel's lifetime.
+            // A seeded reserve now exists to drain the interrupt pool, so its
+            // observer starts feeding it; set once, for the kernel's life.
             let observer: &'static IrqEntropyObserver<A> = crate::forever(Box::new(
                 IrqEntropyObserver::new(state.arch.clone(), &IRQ_ENTROPY_POOL),
             ));
@@ -1022,32 +993,23 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
                 AuditEvent::EntropyReserveSeeded,
                 &[Field {
                     key: "sources",
-                    value: tairix_log::FieldValue::Str(sources.unwrap_or("unattributed")),
+                    value: tairix_log::FieldValue::Str(sources),
                 }],
             );
-            // A seeded CSPRNG now exists, so bring the process-global
-            // compressed-memory tier (`ramzip`) online: this is the one
-            // point a tier is installed. A failed key draw leaves none
-            // installed and the compressed path stays inert (fail closed).
+            // The one point the compressed-memory tier is installed: its key
+            // is drawn from the reserve just seeded, and a failed draw leaves
+            // none (fail closed).
             install_ramzip_tier(state);
         }
-        Err(_) => {
-            // Every bounded draw was exhausted, or no source could contribute
-            // at all. Leave the reserve unseeded.
-            emit(
-                state.audit_sink,
-                Level::Info,
-                AuditEvent::EntropyReserveUnseeded,
-                &[Field {
-                    key: "cause",
-                    value: tairix_log::FieldValue::Str(if sources.is_some() {
-                        "draw_failed"
-                    } else {
-                        "no_source"
-                    }),
-                }],
-            );
-        }
+        Err(cause) => emit(
+            state.audit_sink,
+            Level::Info,
+            AuditEvent::EntropyReserveUnseeded,
+            &[Field {
+                key: "cause",
+                value: tairix_log::FieldValue::Str(cause),
+            }],
+        ),
     }
 }
 
@@ -1170,6 +1132,9 @@ pub struct KernelInitSpawner<'a, A: KernelArch> {
     watches: Option<&'static crate::fswatch::WatchRegistry>,
     /// The wall clock those volumes stamp their times from.
     wall_clock: &'static (dyn crate::WallClockSource + 'static),
+    /// The reserve PID 1's stack canary is drawn from; with none, PID 1 is
+    /// refused.
+    rng: Option<&'a RwLock<Box<dyn RandomReserve + Send + Sync>>>,
 }
 
 impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
@@ -1217,7 +1182,15 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
             mastering: None,
             watches: None,
             wall_clock: &crate::NULL_WALL_CLOCK,
+            rng: None,
         }
+    }
+
+    /// Draw PID 1's stack canary from `rng`, the kernel's CSPRNG reserve.
+    #[must_use]
+    pub fn with_random(mut self, rng: &'a RwLock<Box<dyn RandomReserve + Send + Sync>>) -> Self {
+        self.rng = Some(rng);
+        self
     }
 
     /// Hand the volumes the boot path mounts `watches` to claim their
@@ -1662,6 +1635,10 @@ mod dispatch_loop_tests {
 }
 
 impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
+    fn canary(&self) -> Option<u64> {
+        self.rng.and_then(crate::random::draw_canary)
+    }
+
     fn frames(&self) -> &FrameAllocator {
         self.frames
     }
@@ -1694,7 +1671,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         stack_span: crate::aspace::StackSpan,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: crate::spawn::ProcessResume,
-        live: Option<alloc::sync::Arc<crate::procspace::ProcessSpace>>,
+        live: alloc::sync::Arc<crate::procspace::ProcessSpace>,
         entry: crate::spawn::UserThreadEntry,
     ) {
         let cpu: CpuId = SchedulerArch::current_cpu(self.arch);
@@ -1719,11 +1696,9 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // one).
         let pre_resume = crate::spawn::thread_pre_resume(&pre_resume, entry.regs.tls_base);
         let cs = self.arch.context_switch();
-        // When the seam retained a live, mutable address space, admit PID 1
-        // with it so its `mem_map` / `mmio_map` syscalls mutate its own
-        // space through the per-CPU live-space slot (`plans/PI.md`
-        // 5d-0-ii (b′)); otherwise admit the plain form and those syscalls
-        // fail closed.
+        // PID 1 is admitted with its live address space, so its `mem_map` /
+        // `mmio_map` syscalls mutate its own space through the per-CPU
+        // live-space slot (`plans/PI.md` 5d-0-ii (b′)).
         //
         // PID 1 is admitted **parked**: the secondary CPUs are already
         // online by the time this runs, so a Ready admission could be
@@ -1732,30 +1707,18 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // the `unpark` just before the dispatch loop, once that state is
         // installed. It is also the one admission that names its id rather
         // than drawing one: `init` is expected at PID 1.
-        let registered_live = live.as_ref().map(alloc::sync::Arc::downgrade);
-        let admitted = match live {
-            Some(live) => crate::kthread::spawn_user_kthread_with_stack_live(
-                self.scheduler,
-                cs,
-                stack,
-                cpu,
-                Priority::Normal,
-                pre_resume,
-                live,
-                work,
-                crate::kthread::Admission::ParkedAs(tairix_kernel_sched_api::INIT_TASK_ID),
-            ),
-            None => crate::kthread::spawn_user_kthread_with_stack(
-                self.scheduler,
-                cs,
-                stack,
-                cpu,
-                Priority::Normal,
-                pre_resume,
-                work,
-                crate::kthread::Admission::ParkedAs(tairix_kernel_sched_api::INIT_TASK_ID),
-            ),
-        };
+        let registered_live = alloc::sync::Arc::downgrade(&live);
+        let admitted = crate::kthread::spawn_user_kthread_with_stack_live(
+            self.scheduler,
+            cs,
+            stack,
+            cpu,
+            Priority::Normal,
+            pre_resume,
+            live,
+            work,
+            crate::kthread::Admission::ParkedAs(tairix_kernel_sched_api::INIT_TASK_ID),
+        );
         let Ok(task_id) = admitted else {
             // The home queue could not admit the task — fail closed: return
             // so the seam (and then `kernel_main`) halts the CPU.
@@ -1777,11 +1740,17 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             let _ = self.scheduler.exit(task_id);
             return;
         }
+        // A heap that refuses PID 1 its record fails closed to the halt, like
+        // every other refused piece of its state.
+        let Ok(record) = TaskCapabilities::derive(sec_id, UserId(0), caps, caps, self.audit) else {
+            let _ = self.scheduler.exit(task_id);
+            return;
+        };
         // Attach PID 1's process-instance identity (a kernel-trusted bootstrap
         // principal minted from the shared per-boot counter), so its syscalls
         // are attributed to this instance distinctly from any task that later
         // reuses the numeric id.
-        let record = TaskCapabilities::derive(sec_id, UserId(0), caps, caps, self.audit)
+        let record = record
             // Marked so PID 1's inherit-spawned children (the boot
             // services) are each bounded by their own registered manifest,
             // not by PID 1's.
@@ -1790,7 +1759,10 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             // PID 1 is the init process; its name is kernel-known, not
             // resolved from any caller.
             .with_name(ProcName::from_bytes_truncating(INIT_PROC_NAME.as_bytes()));
-        self.caps.write().insert(record);
+        if self.caps.write().insert(record).is_err() {
+            let _ = self.scheduler.exit(task_id);
+            return;
+        }
 
         // Register PID 1's frozen address space + direct map under the same
         // id, so a first syscall that copies from user memory (e.g.
@@ -1818,18 +1790,26 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // discovered console the boot path installed, so `init` writes
         // its banner through `stream_write(STDOUT, …)` over an inherited
         // stream rather than an ambient device.
-        {
+        let established = {
             let mut aspaces = self.aspaces.write();
-            if let Some(live) = registered_live.and_then(|weak| weak.upgrade()) {
-                aspaces.set_live_space(sec_id, &live);
-            }
-            aspaces.set_streams(sec_id, DescriptorTable::standard());
+            // A PID 1 already gone has no space to register.
+            let live = registered_live
+                .upgrade()
+                .ok_or(Errno::NotFound)
+                .and_then(|live| aspaces.set_live_space(sec_id, &live));
             // Record PID 1's reserved user-stack span beside its streams,
             // under the same write lock, so the stack-growth fault path can
             // back pages inside it on demand — bounded by its `StackBytes`
             // limit. The span is seam-derived from the validated spawn
             // layout, never a caller-supplied value.
-            aspaces.set_stack_span(sec_id, SecTaskId(task_id), stack_span);
+            live.and_then(|()| aspaces.set_streams(sec_id, DescriptorTable::standard()))
+                .and_then(|()| aspaces.set_stack_span(sec_id, SecTaskId(task_id), stack_span))
+        };
+        if established.is_err() {
+            // A PID 1 without its streams or its stack cannot run as the boot
+            // needs it to: retire it and halt, as a refused registration does.
+            let _ = self.scheduler.exit(task_id);
+            return;
         }
 
         // Drive PID 1 (and anything it spawns) to completion: each `step`
@@ -2028,7 +2008,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // it now.
         let teardown = crate::procsignal::DeferredTeardown::Plain { process: sec_id };
         let mut deferred = false;
-        for claim in crate::procsignal::claim_group_kill(Some(self.caps), teardown, None) {
+        crate::procsignal::claim_group_kill(Some(self.caps), teardown, None, |claim| {
             let quiesced = match claim.site {
                 // Every in-kernel park loop re-tests the gate after a wake and
                 // unwinds, so even an unbounded `irq_wait` reaches its boundary;
@@ -2063,7 +2043,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             } else {
                 deferred = true;
             }
-        }
+        });
         if deferred {
             let mut handle_buf = [0u8; 16];
             emit(
@@ -2095,8 +2075,8 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // dropping its capability record, mirroring the `exit` syscall: a
         // user-space service that is torn down must not leave callers blocked
         // in `ipc_call` forever — destroying its endpoints cancels their
-        // in-flight calls, waking `CALL_WAITQ` re-runs each parked caller's
-        // poll so it abandons fail-closed, and the vanish observer lets the
+        // in-flight calls, waking each caller parked on one re-runs its poll
+        // so it abandons fail-closed, and the vanish observer lets the
         // volume layer react to an unplugged disk's dead block service.
         crate::callreg::teardown_owned_by(handle, self.aspaces, self.audit);
 
@@ -2844,6 +2824,7 @@ fn run_phases<A: KernelArch>(
         &state.peer_watch,
         process_wait,
         image_builder,
+        &state.rng,
     );
 
     Ok((state, process_wait))
@@ -3844,16 +3825,16 @@ mod tests {
         let (state, _process_wait) =
             run_phases(boot, log_sink, audit_sink).expect("phases succeed");
         let (process, proc_id) = (ProcessId(0x7111), ProcId::from_raw([0x7A; 16]));
-        state.caps.write().insert(
-            TaskCapabilities::derive(
-                process,
-                UserId(1000),
-                CapabilitySet::EMPTY,
-                CapabilitySet::EMPTY,
-                audit_sink,
-            )
-            .with_proc_id(proc_id),
-        );
+        let record = TaskCapabilities::derive(
+            process,
+            UserId(1000),
+            CapabilitySet::EMPTY,
+            CapabilitySet::EMPTY,
+            audit_sink,
+        )
+        .expect("derived")
+        .with_proc_id(proc_id);
+        state.caps.write().insert(record).expect("inserted");
         for _ in 0..3 {
             state
                 .aspaces
@@ -3884,6 +3865,96 @@ mod tests {
         assert_eq!(open_files.usage, 3);
     }
 
+    /// Each paged domain, and the load census, is refused for memory however
+    /// far it got. Regression: their pages grew infallibly, so an exhausted
+    /// heap aborted the kernel at a `sysinfo` query.
+    #[test]
+    fn the_paged_domains_are_refused_for_memory_wherever_it_runs_out() {
+        use crate::introspect::IntrospectSource;
+        use crate::test_alloc::past_each_refusal;
+        use tairix_abi::{Errno, ProcId};
+        use tairix_kernel_sec::{ProcessId, TaskCapabilities, UserId};
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        let heap = boot.heap;
+        let (state, _process_wait) =
+            run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+        for (process, uid) in [(0x7131, 1000), (0x7132, 1001)] {
+            let record = TaskCapabilities::derive(
+                ProcessId(process),
+                UserId(uid),
+                CapabilitySet::EMPTY,
+                CapabilitySet::EMPTY,
+                audit_sink,
+            )
+            .expect("derived")
+            .with_proc_id(ProcId::from_raw(
+                [u8::try_from(process & 0xFF).expect("a byte"); 16],
+            ));
+            state.caps.write().insert(record).expect("inserted");
+        }
+        let source = crate::introspect_source::KernelIntrospectSource::new(
+            state,
+            &crate::fs::NULL_FILESYSTEM,
+            &crate::wallclock::NULL_WALL_CLOCK,
+            &crate::NULL_USERS_DB,
+            &crate::NULL_GROUPS_DB,
+            heap,
+        );
+        let oom = Err(Errno::OutOfMemory);
+        let answered =
+            |page: Result<alloc::vec::Vec<u8>, Errno>| page.map(|bytes| !bytes.is_empty());
+        let processes = || answered(source.processes(0, 8));
+        let cpu_times = || answered(source.cpu_times(0, 8));
+        let cpu_info = || answered(source.cpu_info(0, 8));
+        let load = || answered(source.load_average());
+        for (domain, read) in [
+            ("processes", &processes as &dyn Fn() -> Result<bool, Errno>),
+            ("cpu times", &cpu_times),
+            ("cpu info", &cpu_info),
+            ("load", &load),
+        ] {
+            assert_eq!(past_each_refusal(&oom, read), Ok(true), "{domain}");
+        }
+    }
+
+    /// The limits domain names no process for the kernel sentinel every kernel
+    /// thread shares, rather than the first kernel record it happens on.
+    #[test]
+    fn the_limits_domain_refuses_the_kernel_sentinel() {
+        use tairix_abi::{Errno, ProcId};
+        use tairix_kernel_sec::{ProcessId, TaskCapabilities, UserId};
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        let heap = boot.heap;
+        let (state, _process_wait) =
+            run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+        let kernel_record = TaskCapabilities::derive(
+            ProcessId(0x7121),
+            UserId(0),
+            CapabilitySet::EMPTY,
+            CapabilitySet::EMPTY,
+            audit_sink,
+        )
+        .expect("derived");
+        assert_eq!(kernel_record.proc_id(), ProcId::KERNEL);
+        state.caps.write().insert(kernel_record).expect("inserted");
+        let source = crate::introspect_source::KernelIntrospectSource::new(
+            state,
+            &crate::fs::NULL_FILESYSTEM,
+            &crate::wallclock::NULL_WALL_CLOCK,
+            &crate::NULL_USERS_DB,
+            &crate::NULL_GROUPS_DB,
+            heap,
+        );
+        assert_eq!(
+            crate::introspect::IntrospectSource::task_limits(&source, ProcId::KERNEL),
+            Err(Errno::NotFound)
+        );
+    }
+
     /// The process domain marks a parser-sandbox worker as one and names its
     /// owner by pid, so a listing can present the worker as its owner's, not
     /// as a second copy of the owner's program.
@@ -3906,14 +3977,18 @@ mod tests {
                 CapabilitySet::EMPTY,
                 audit_sink,
             )
+            .expect("derived")
             .with_proc_id(ProcId::from_raw([byte; 16]))
         };
-        state.caps.write().insert(record(0x7101, 0x71));
-        state.caps.write().insert(
-            record(0x7102, 0x72)
-                .with_parent_proc_id(ProcId::from_raw([0x71; 16]))
-                .as_sandboxed(),
-        );
+        state
+            .caps
+            .write()
+            .insert(record(0x7101, 0x71))
+            .expect("inserted");
+        let worker = record(0x7102, 0x72)
+            .with_parent_proc_id(ProcId::from_raw([0x71; 16]))
+            .as_sandboxed();
+        state.caps.write().insert(worker).expect("inserted");
 
         let source = crate::introspect_source::KernelIntrospectSource::new(
             state,
@@ -3987,8 +4062,9 @@ mod tests {
             CapabilitySet::EMPTY,
             audit_sink,
         )
+        .expect("derived")
         .with_proc_id(ProcId::from_raw([0x73; 16]));
-        state.caps.write().insert(record);
+        state.caps.write().insert(record).expect("inserted");
         state
             .caps
             .write()
@@ -4244,8 +4320,9 @@ mod tests {
         let sec = SecProcessId(handle);
         let mut caps = CapabilitySet::empty();
         caps.insert(tairix_abi::CapabilityId::DRV_LOAD);
-        let record = TaskCapabilities::derive(sec, UserId(0), caps, caps, audit_sink);
-        state.caps.write().insert(record);
+        let record =
+            TaskCapabilities::derive(sec, UserId(0), caps, caps, audit_sink).expect("derived");
+        state.caps.write().insert(record).expect("inserted");
         assert!(state.caps.read().caps_of_process(sec).is_some());
 
         audit_sink.clear();
@@ -4294,13 +4371,15 @@ mod tests {
         );
         let retired_elsewhere = 0x05ee_d296u64;
         let sec = SecProcessId(retired_elsewhere);
-        state.caps.write().insert(TaskCapabilities::derive(
+        let record = TaskCapabilities::derive(
             sec,
             UserId(0),
             CapabilitySet::empty(),
             CapabilitySet::empty(),
             audit_sink,
-        ));
+        )
+        .expect("derived");
+        state.caps.write().insert(record).expect("inserted");
         // Still a member, so still gated, until the landing under way retires it.
         crate::procsignal::clear_kill_gate(retired_elsewhere);
         crate::procsignal::install_gate(retired_elsewhere, sec).expect("a gate installs");
@@ -4360,13 +4439,9 @@ mod tests {
         let sec = SecProcessId(leader);
         let mut caps = CapabilitySet::empty();
         caps.insert(tairix_abi::CapabilityId::DRV_LOAD);
-        state.caps.write().insert(TaskCapabilities::derive(
-            sec,
-            UserId(0),
-            caps,
-            caps,
-            audit_sink,
-        ));
+        let record =
+            TaskCapabilities::derive(sec, UserId(0), caps, caps, audit_sink).expect("derived");
+        state.caps.write().insert(record).expect("inserted");
         state
             .caps
             .write()
@@ -4427,13 +4502,15 @@ mod tests {
             })
             .expect("the driver's task is admitted");
         let sec = SecProcessId(handle);
-        state.caps.write().insert(TaskCapabilities::derive(
+        let record = TaskCapabilities::derive(
             sec,
             UserId(0),
             CapabilitySet::empty(),
             CapabilitySet::empty(),
             audit_sink,
-        ));
+        )
+        .expect("derived");
+        state.caps.write().insert(record).expect("inserted");
         tairix_kernel_sched_api::reserve_task_id(handle).expect("the admission's hold");
 
         assert_eq!(ctx.terminate_driver_process(handle), Ok(()));
@@ -4480,13 +4557,15 @@ mod tests {
             .expect("the task is admitted");
         let process = SecProcessId(task);
         crate::procsignal::install_gate(task, process).expect("a gate installs");
-        state.caps.write().insert(TaskCapabilities::derive(
+        let record = TaskCapabilities::derive(
             process,
             UserId(0),
             CapabilitySet::empty(),
             CapabilitySet::empty(),
             audit_sink,
-        ));
+        )
+        .expect("derived");
+        state.caps.write().insert(record).expect("inserted");
         process_wait
             .register_child(
                 SecProcessId(1),
@@ -4494,7 +4573,7 @@ mod tests {
                 crate::procwait::ChildListing::Listed,
             )
             .expect("registered");
-        let claims = crate::procsignal::claim_group_kill(
+        let claims = crate::procsignal::claimed_kills(
             Some(&state.caps),
             crate::procsignal::DeferredTeardown::Exit {
                 process,
@@ -4594,13 +4673,9 @@ mod tests {
         mount.insert(tairix_abi::CapabilityId::FS_MOUNT);
         crate::procsignal::install_gate(leader, process).expect("a gate installs");
         crate::procsignal::install_gate(sibling, process).expect("a gate installs");
-        state.caps.write().insert(TaskCapabilities::derive(
-            process,
-            UserId(0),
-            mount,
-            mount,
-            audit_sink,
-        ));
+        let record = TaskCapabilities::derive(process, UserId(0), mount, mount, audit_sink)
+            .expect("derived");
+        state.caps.write().insert(record).expect("inserted");
         state
             .caps
             .write()

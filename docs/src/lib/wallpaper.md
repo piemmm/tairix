@@ -111,6 +111,13 @@ that key's own closed vocabulary:
 | `lock.after_min` | `never`, or whole minutes, `1..=1440`           | `15`                                          |
 | `region` | empty, or an ISO 3166-1 alpha-2 code (two capitals); a region the zone store no longer holds is kept and reads as its default | empty: the zone store's own |
 | `time.zone` | empty, or an IANA zone name in the shape `tairix_abi::zone` checks; a zone the store no longer holds is kept and passed over | empty: the machine's own, else the zone store's |
+| `capture.save_to` | `desktop` \| `home` (`Pictures` for a still, `Videos` for a recording) \| `clipboard` (a still; a recording goes to the desktop) | `desktop` |
+| `capture.timer_s` | `off` \| `5` \| `10` | `off` |
+| `capture.duration_s` | `unlimited` \| `10` \| `30` \| `60` \| `300` \| `600` | `unlimited` |
+| `capture.sound` | `none` \| `microphone` \| `desktop` \| `both` | `none` |
+| `capture.pointer` | `true` \| `false` | `true` |
+| `capture.clicks` | `true` \| `false` | `false` |
+| `capture.thumbnail` | `true` \| `false` | `true` |
 
 Keys and values are case-sensitive: each has one canonical spelling.
 
@@ -123,8 +130,9 @@ starts never switches its display off.
 The keys fall into groups, which is a reader's distinction rather than the
 document's, and each surface posts only its own: `SettingsKey::PINBOARD` (the
 backdrop and the icons standing on it), `APPEARANCE` (how every surface is
-drawn), `NOTIFICATIONS`, `POINTER`, `KEYBOARD`, `SCREENSAVER`, `LOCK` and
-`CIVIL` (the region the clocks are written in and the zone they read). Only the
+drawn), `NOTIFICATIONS`, `POINTER`, `KEYBOARD`, `SCREENSAVER`, `LOCK`,
+`CIVIL` (the region the clocks are written in and the zone they read) and
+`CAPTURE` (where a screen capture is put and how it is taken). Only the
 shape of a region code or zone name is checked here: the session refuses an
 apply that changes either to one its zone store does not hold. `civil_clock` is
 the one answer to which clock the document asks for — its zone and region where

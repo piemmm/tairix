@@ -4,7 +4,7 @@ sysmon — observar ao vivo a memória, as caches e a carga do núcleo
 
 ## SYNOPSIS
 
-`sysmon [-d seg.décimos] [-h | -?]`
+`sysmon [-d secs.tenths] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -13,11 +13,12 @@ memória e a CPU, lida inteiramente através da API de informação do
 sistema — não há `/proc` a raspar. Mostra a memória física e a sua
 composição, a pilha do núcleo, a banda de pressão de memória e o seu
 historial recente, o registo das caches recuperáveis com as **proporções
-de acertos** por classe, o nível comprimido `ramzip`, o total de memória
-fixada, o uso de armazenamento dos volumes montados, a carga por CPU, a
-tabela de interrupções do núcleo e um censo de processos. Mantém-se
-utilizável enquanto o sistema está sob carga deliberada e repousa entre
-atualizações quando está ocioso (a leitura estaciona; nunca gira em vazio).
+de acertos** por classe e uma discriminação por cache, o nível comprimido
+`ramzip`, o total de memória fixada, o uso de armazenamento dos volumes
+montados, a carga por CPU, a tabela de interrupções do núcleo e um censo
+de processos. Mantém-se utilizável enquanto o sistema está sob carga
+deliberada e repousa entre atualizações quando está ocioso (a leitura
+estaciona; nunca gira em vazio).
 
 Ao arrancar, o monitor fixa a sua própria memória (`mem_pin`, que exige
 `CAP_MEM_PIN`) para nunca encalhar nas suas próprias falhas de página sob
@@ -51,7 +52,7 @@ rotulada à esquerda para se ler sem cor; a cor é apenas reforço.
   estado de fixação (`[pinned]`, ou `[unpinned: <reason>]` quando a fixação
   foi recusada).
 - **`Mem`** — a barra de memória (ver a legenda das barras), seguida dos
-  valores usado / total (unidades compactas `K`/`M`/`G`), da percentagem
+  valores usado / total (unidades de bytes compactas), da percentagem
   usada, do tamanho da pilha do núcleo e — quando não nulos — dos valores
   do armazém comprimido `ramzip` e da memória fixada `pinned`. A barra
   encolhe para manter cada valor numa linha de 80 colunas, pelo que nunca
@@ -117,10 +118,13 @@ uma barra distinta acima do corpo.
 
 São as caches que o núcleo pode devolver para aliviar a pressão de memória
 **sem perda de dados**: cada entrada é reconstruível a partir da sua fonte
-canónica, pelo que o núcleo a descarta em vez de a paginar. O painel é a
-resposta direta a «estão as caches a fazer o seu trabalho?»: cada linha é
-uma classe de recuperação, agregada sobre todas as caches registadas, e
-traz a sua própria **proporção de acertos**.
+canónica, pelo que o núcleo a descarta em vez de a paginar. A página é a
+resposta direta a «estão as caches a fazer o seu trabalho?», em duas
+tabelas: o registo por classe e, depois, a discriminação por cache que
+lhe está por trás.
+
+Cada linha da primeira tabela é uma classe de recuperação, agregada sobre
+todas as caches registadas, e traz a sua própria **proporção de acertos**.
 
 Colunas:
 
@@ -128,6 +132,14 @@ Colunas:
 - `entries` — entradas vivas atualmente retidas para a classe.
 - `cached` — a pegada residente da classe: a carga útil das entradas mais
   os metadados de contabilidade por entrada, juntos.
+- `self%` — a parte de `cached` que foi **autodeclarada** em vez de
+  medida pelo núcleo: quanto do total da classe é aceite sob palavra. O
+  núcleo só mede as caches registadas dentro dele, pelo que uma cache
+  detida por um processo do espaço de utilizador — atlas de glifos,
+  imagens de ícones, cursores — é contada pelo que esse processo declara
+  sobre si próprio. `0%` significa que todo o total da classe é atestado;
+  `100%`, que nenhuma parte o é. Lê `-`, nunca `0%`, para uma classe que
+  não retém absolutamente nada.
 - `hits` — procuras da classe servidas a partir da cache desde o arranque
   (a cache evitou a fonte canónica).
 - `misses` — procuras da classe que caíram na fonte canónica desde o
@@ -146,6 +158,14 @@ Colunas:
 
 As contagens abreviam-se acima de 99 999 como `k`/`M`/`G`/`T` (milhares
 decimais, não KiB) para que uma coluna nunca se alargue.
+
+Os valores em bytes abreviam-se em unidades binárias: a contagem exata
+abaixo de um kibibyte e, depois, uma casa decimal com um sufixo `K`, `M`,
+`G`, `T`, `P` ou `E` (`1.5K`, `986.2M`, `200.0T`). A escala chega aos
+exbibytes, pelo que o valor mais largo que qualquer contagem de bytes de
+64 bits pode produzir tem sete carateres e nenhum valor ultrapassa alguma
+vez a sua coluna — um tamanho não pode ser encurtado como um nome, porque
+um número encurtado é um número errado.
 
 As classes de recuperação, pela ordem em que o núcleo as recupera sob
 pressão (a primeira listada é descartada primeiro, pelo que uma cache baixa
@@ -183,6 +203,51 @@ na lista sobrevive mais tempo):
   (janelas de verificação, resumos de saúde): justificado pela latência de
   recuperação, pelo que é preservado mais tempo.
 
+### caches — a discriminação por cache
+
+Abaixo da tabela de classes, uma linha por registo de cache registado: a
+resposta a «a classe `disposable-ui` retém 12 MiB — *que* caches a
+retêm?». Primeiro vêm os registos medidos pelo núcleo e depois os que os
+processos declararam sobre si próprios; a soma das linhas de uma classe
+reproduz exatamente a linha dessa classe acima.
+
+Colunas:
+
+- `cache` — o rótulo da cache. Um rótulo demasiado longo para a coluna
+  perde o *meio*, nunca uma ponta: `font.client.glyphs` lê-se
+  `font.cli~.glyphs`. Estes nomes são separados por pontos, e é em geral
+  o último segmento que distingue duas caches de um mesmo espaço de
+  nomes, pelo que a coluna mantém ambas as pontas e `~` marca o que foi
+  retirado.
+- `owner` — o principal a quem a memória é imputada: `kernel` para um
+  subsistema do núcleo, `vol:<id>` para um volume de sistema de
+  ficheiros, `task:<id>` para uma tarefa, `seat:<id>` para uma sessão de
+  ambiente de trabalho, `proc` para um processo do espaço de utilizador.
+  Uma linha declarada acrescenta `@<pid>`, o processo declarante. Um dono
+  demasiado longo para a coluna é elidido ao meio como um rótulo
+  (`task:1~551615`), pelo que um id encurtado fica visivelmente
+  incompleto — ao passo que um cortado em silêncio se leria como outro
+  dono.
+- `origin` — de onde vêm os valores: `kernel` para um registo que o
+  núcleo mede, `self` para um que o processo detentor declarou sobre si
+  próprio, `?` para uma linha que o serviço deixou sem atribuição.
+- `class` — a classe de recuperação a que pertence cada entrada desta
+  cache.
+- `entries`, `cached`, `hit%` — como na tabela de classes, para esta
+  única cache.
+
+Uma linha `self` é um **diagnóstico**, não uma medição atestada: nada
+fora do processo detentor consegue ver o interior da sua cache, e um
+processo comprometido pode declarar o que quiser. A palavra está na
+própria linha, pelo que se lê numa consola série monocromática; a cor de
+aviso apenas a reforça. Leia as linhas `self` como afirmações e as linhas
+`kernel` como medições.
+
+Uma máquina sem caches registadas di-lo numa linha em vez de deixar a
+tabela em branco — e uma consulta *recusada* diz, em vez disso, que foi
+recusada, pelo que uma tabela vazia nunca pode ser confundida com «não há
+caches».
+
 ### ramzip — o nível de memória comprimida
 
 `ramzip` comprime páginas anónimas frias num armazém menor em RAM em vez de
@@ -213,13 +278,20 @@ as paginar. As suas secções:
 
 Uma linha ao estilo `df` por volume montado: ponto de montagem, tipo de
 sistema de ficheiros, tamanho total, usado, disponível, percentagem de uso
-e uma barra de uso ASCII. Um volume cujo controlador não reporta capacidade
-mostra `capacity unknown` em vez de um tamanho fabricado; um volume
-removido por surpresa ou em conflito de recuperação é desenhado na
-representação de aviso e marcado (`[unavailable-dirty]`,
-`[unavailable-lost]`, `[recovery-conflict]`). Não há contadores de débito
-de e-s por dispositivo na API, pelo que isto é capacidade e uso honestos,
-não taxas de transferência fabricadas.
+e uma barra de uso ASCII.
+
+Um ponto de montagem demasiado longo para a sua coluna perde o *meio*,
+nunca uma ponta, tal como um rótulo de cache: `/Storage/backup-2024-vol1`
+lê-se `/Storage/b~2024-vol1`, pelo que dois volumes arrumados lado a lado
+continuam a distinguir-se pelo último segmento que os diferencia.
+
+Um volume cujo controlador não reporta capacidade mostra
+`capacity unknown` em vez de um tamanho fabricado; um volume removido por
+surpresa ou em conflito de recuperação é desenhado na representação de
+aviso e marcado (`[unavailable-dirty]`, `[unavailable-lost]`,
+`[recovery-conflict]`). Não há contadores de débito de e-s por
+dispositivo na API, pelo que isto é capacidade e uso honestos, não taxas
+de transferência fabricadas.
 
 ### cpu — carga por CPU
 
@@ -246,8 +318,9 @@ do censo.
 ### Capacidades
 
 Cada valor viaja pela API de informação do sistema. As consultas de
-estatísticas do núcleo (memória, pressão, caches, `ramzip`, carga por CPU)
-exigem `CAP_SYSINFO_KERNEL`; o painel das linhas de interrupção exige
+estatísticas do núcleo (memória, pressão, as classes de caches e a
+discriminação por cache, `ramzip`, carga por CPU) exigem
+`CAP_SYSINFO_KERNEL`; o painel das linhas de interrupção exige
 `CAP_SYSINFO_HW`; o censo de todos os processos exige `CAP_SYSINFO_GLOBAL`.
 Um chamador sem uma vê a recusa desse painel explicitada — nunca um valor
 fabricado — enquanto o resto da sessão continua (falhar fechado, degradar

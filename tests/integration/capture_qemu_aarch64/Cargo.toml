@@ -1,0 +1,45 @@
+[package]
+name = "tairix-test-capture-qemu-aarch64"
+description = "plans/CAPTURE.md CP11 QEMU integration test: boot the graphical desktop on the aarch64 virt board with a capture an earlier session was cut short in left in the account's Desktop, and hold the run to that leftover being kept under its name, the screen chord composing a still, and the still being kept"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The vertical's shared contract (src/lib.rs): the desktop's capture records
+# and how they name a kept capture, read by the freestanding gate. `no_std`
+# consts only, host-buildable.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tairix-test-capture-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 desktop and capture its screen"
+# integration test. It runs the entire production boot pipeline through
+# `tairix-kernel`'s library half and only swaps the sinks for the PASS gate.
+# Keeping the QEMU-exit shortcut in a dedicated bin (not a Cargo feature on a
+# production crate) prevents feature unification from leaking it into any
+# production build.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+# The field readings every guest gate shares.
+tairix-itest-witness = { path = "../witness", version = "=0.0.0" }
+# The failure codes a gate exits with.
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+# The desktop's capture record ids and the names it gives a kept capture,
+# read from their own definitions at build time so the guest links none of
+# the desktop.
+tairix-desktop-session = { path = "../../../userland/gui/session", version = "=0.0.0" }

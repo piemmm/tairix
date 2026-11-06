@@ -16,6 +16,10 @@ publish.workspace = true
 # `tairix-curses`'s split.
 [features]
 program = ["dep:tairix-rt", "dep:tairix-procinfo"]
+# A movie recording muxed in memory, for the tests of the crates that play
+# one (`moviedecode::fixture`). Test scaffolding only; never in a TAIRiX
+# build.
+fixture = ["dep:tairix-fscopy", "tairix-video/fixture", "tairix-sound/encode-opus"]
 
 [dependencies]
 # The frozen `Errno` vocabulary the channel and launcher report, and the
@@ -75,6 +79,15 @@ tairix-sound = { path = "../sound", version = "=0.0.0" }
 # The keyed hash the audio worker's page cache is indexed under: a file
 # chooses which offsets it reads, so the cache's key is drawn by the owner.
 tairix-hash = { path = "../hash", version = "=0.0.0" }
+# The WebM demuxer and the VP8 stream decoder the sandboxed movie service
+# runs, so a viewer never parses a byte of an untrusted recording itself.
+tairix-video = { path = "../video", version = "=0.0.0" }
+# The lock the heap stand-in for a shared region is reached through, as two
+# processes reach one region (`loopback::HeapShare`).
+tairix-sync = { path = "../sync", version = "=0.0.0" }
+# The positional-write target the movie fixture muxes a recording into
+# (feature `fixture` only).
+tairix-fscopy = { path = "../fscopy", version = "=0.0.0", optional = true }
 
 # The `program`-feature transport links the freestanding userland runtime
 # for `pipe_create`/`spawn_attached`/`fs_*`/`wait` on the parent side and
@@ -97,9 +110,17 @@ workspace = true
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 # The CRC-32 the PNG fixtures frame their chunks with.
 tairix-crc32 = { path = "../crc32", version = "=0.0.0" }
+# The crate itself with the movie recordings its fuzz harness plays.
+tairix-sandbox = { path = ".", features = ["fixture"] }
 # The chained Ogg files the link tests read, written through the FLAC
-# encoder the sound library keeps behind a feature for exactly this.
-tairix-sound = { path = "../sound", version = "=0.0.0", features = ["encode"] }
+# encoder the sound library keeps behind a feature for exactly this; and the
+# movie tests' sound, written through the Opus encoder.
+tairix-sound = { path = "../sound", version = "=0.0.0", features = ["encode-flac", "encode-opus"] }
+# The movie tests' recordings: VP8 keyframes and inter frames from the
+# bitstream fixture, muxed into WebM.
+tairix-video = { path = "../video", version = "=0.0.0", features = ["fixture"] }
+# The positional-write target a recording is muxed into in memory.
+tairix-fscopy = { path = "../fscopy", version = "=0.0.0" }
 
 [build-dependencies]
 tairix-buildcfg = { path = "../buildcfg", version = "=0.0.0", features = ["std"] }

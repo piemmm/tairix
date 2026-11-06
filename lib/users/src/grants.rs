@@ -211,6 +211,11 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
 ///   the clock's sources and the interfaces' addresses reach every principal
 ///   on the machine; an ordinary session reads the settings that are open and
 ///   changes none.
+/// * `CAP_AUDIO_CAPTURE` — record sound: a microphone, or the desktop's own
+///   sound through a monitor of the seat's output (`plans/CAPTURE.md`).
+///   Listening in is the one audio act that reaches past the caller's own
+///   work, so an ordinary session records sound only through an
+///   administrator's one-run grant to the recorder.
 pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::USER_ADMIN,
     CapabilityId::FS_CHOWN,
@@ -232,6 +237,7 @@ pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::SERVICE_CONTROL,
     CapabilityId::NET_DISCOVER_ALL,
     CapabilityId::SETTINGS_WRITE,
+    CapabilityId::AUDIO_CAPTURE,
 ];
 
 /// The `devmgr` service account's grant ceiling: read the hardware tree,
@@ -552,7 +558,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 31);
+        assert_eq!(set.len(), 32);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }
@@ -577,9 +583,14 @@ mod tests {
             CapabilityId::SERVICE_CONTROL,
             CapabilityId::NET_DISCOVER_ALL,
             CapabilityId::SETTINGS_WRITE,
+            CapabilityId::AUDIO_CAPTURE,
         ] {
             assert!(set.contains(cap), "{cap:?} missing from the ceiling");
         }
+        assert!(
+            !session_baseline().contains(CapabilityId::AUDIO_CAPTURE),
+            "an ordinary session records sound only through an administrator"
+        );
     }
 
     /// Each service ceiling is exactly its service's needs — pinned, so

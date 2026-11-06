@@ -583,6 +583,31 @@ pub const GREETER_RUN_PATH: &str = "/System/Services/greeter.app/Run";
 /// recognises it on an explicitly-typed bundle name (`plans/APPS.md` §9).
 pub const BUNDLE_SUFFIX: &str = ".app";
 
+/// Whether `name` is an application bundle's: a stem before
+/// [`BUNDLE_SUFFIX`], the suffix matched in any ASCII case so a bundle reads
+/// as one however its volume cased it (`Example.app`, `Thing.APP`, never the
+/// bare `.app`).
+///
+/// The one test a listing classifies a directory by and a dragged item's own
+/// picture is checked against.
+#[must_use]
+pub fn is_bundle_name(name: &str) -> bool {
+    bundle_stem(name).is_some()
+}
+
+/// `name` without its bundle suffix, or `None` when it is no bundle name
+/// ([`is_bundle_name`]).
+#[must_use]
+pub fn bundle_stem(name: &str) -> Option<&str> {
+    let at = name
+        .len()
+        .checked_sub(BUNDLE_SUFFIX.len())
+        .filter(|&at| at > 0)?;
+    name.get(at..)
+        .filter(|tail| tail.eq_ignore_ascii_case(BUNDLE_SUFFIX))?;
+    name.get(..at)
+}
+
 /// What a program *is*, and therefore which OS-provided store its bundle is
 /// planted in and may run from.
 ///
@@ -3242,5 +3267,20 @@ mod tests {
         let real = PublisherId::from_raw([1u8; PUBLISHER_ID_LEN]);
         assert!(!real.is_none());
         assert_ne!(real, PublisherId::NONE);
+    }
+
+    #[test]
+    fn a_bundle_name_is_a_stem_before_dot_app_in_any_case() {
+        use super::{bundle_stem, is_bundle_name};
+        assert!(is_bundle_name("Example.app"));
+        assert!(is_bundle_name("Text Editor.app"));
+        // Case-insensitive, so a volume's casing does not hide a bundle.
+        assert!(is_bundle_name("Thing.APP"));
+        assert_eq!(bundle_stem("Thing.APP"), Some("Thing"));
+        // A stem is required: the bare suffix is not a bundle.
+        for name in [".app", "app", "notes.txt", "", "Example.apple"] {
+            assert!(!is_bundle_name(name), "{name:?}");
+            assert_eq!(bundle_stem(name), None, "{name:?}");
+        }
     }
 }

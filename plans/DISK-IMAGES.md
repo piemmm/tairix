@@ -36,7 +36,7 @@ session ends. It consumes and never contradicts
 | DI20 | Partitioned removable devices: the volume manager plans the partitions an Amiga Rigid Disk Block lays out on a device, as it plans a PC table's, rather than attaching none | planned |
 | DI21 | An image the user opened unmounted once no window shows it: `DetachMode::Idle`, the file manager's opened set, the `files.unmount_when_closed` setting | done |
 | DI22 | A per-attachment identity in the image attach reply and the idle detach, so an unmount the user did not ask for can only take the attachment the file manager made | planned |
-| DI23 | Retitling an owned image volume: its label written through `FilesystemLabel` and `fsserve-v1`'s `Label`/`SetLabel` by `VolumeService::retitle`, for its owner alone; the mount record's title; the syscall and `files.app`'s *Title* row | done |
+| DI23 | Retitling an owned image volume: its label written through `FilesystemLabel` and `fsserve-v1`'s `Label`/`SetLabel` by `VolumeService::retitle`, the path every volume is retitled through, for its owner alone; the mount record's title and `titled`; the syscall, the one rule every surface offers a title by (`VolumeFacts::retitler`), `files.app`'s *Title* row and a drive's Info field | done |
 
 ## 1. What an image is
 
@@ -102,7 +102,11 @@ session ends. It consumes and never contradicts
 - **Presented as its attacher's.** *Private* — owner the caller, its primary
   group, `rwx------`/`rw-------` — for anyone; *shared* or *explicit* with
   `CAP_FS_MOUNT`; every node presented whole (`PresentedFs::whole`). Always
-  `noexec`. A target directory is a `view_bind` made under the same call.
+  `noexec`. A target directory is a `view_bind` made under the same call,
+  short of the mount authority (`ShortOfMount`): it keeps an owner's rules —
+  an empty directory of the caller's own, never the catalog — whoever
+  attaches, so `mount`'s `CAP_FS_MOUNT`, asked for its answers for held
+  writes, widens no mount.
 - **Named from the volume.** An explicit name must pass
   `tairix_fsprobe::name::chosen` — a label's own kebab-case spelling and no
   reserved word, so never a name the policy generates for another volume —
@@ -209,11 +213,17 @@ so before a volume taking no writes is refused — and lists the new title once
 the driver holds it, its writeback publishing it should the flush fail; no
 format's identity takes in its label, so a retitled volume is still the
 attachment it was, and the catalog name stays while the volume is
-attached. It is withheld with the source. The file manager's icon-bar slot
-offers *Title* on a titled image of the user's own: the row's field opens on
-the title with the caret at its end, choosing the row opens it, and a commit
-is carried out on the mount worker (`MountAct::Retitle`), never on the loop; an
-emptied or over-long title is refused before the kernel is asked.
+attached. It is withheld with the source. Whom a surface offers a title to is
+one rule (`VolumeFacts::retitler`, `retitling_by` for a viewer): an image's
+owner alone, as here, and anyone for a device's volume, the kernel deciding
+and an administrator asked through the desktop's prompt where it refuses the
+authority. The file manager's icon-bar slot offers *Title* on every volume
+that rule lets the user retitle, and a drive's Info window a *Title* field:
+the row's field opens on the title with the caret at its end, choosing the row
+opens it, and a commit is checked by `MountAct::retitle` and carried out on
+the mount worker, never on the loop; a title longer than a disk records, or
+holding a control character, is refused before the kernel is asked, and an
+empty one clears the label.
 
 ## 6. AmigaDOS (`drivers/filesystem/affs`)
 
@@ -264,8 +274,10 @@ emptied or over-long title is refused before the kernel is asked.
   volume is shown (`tairix_browse::mount::shown_at`: its rail row and each
   view binding, `Projection`) to the catalog, giving up a navigation onto it
   and letting go of what they watch or were offered there
-  (`Watches::release_within`); the reader serving the volume's lane then
-  carries the eject out (`tairix_browse::mount::carry_out`) after the read under
+  (`Watches::release_within`) and of the follows of the bundles shown there
+  (`BundleFollows::release_within`, which stops the desk following them too);
+  the reader serving the volume's lane ends those follows first, then carries
+  the eject out (`tairix_browse::mount::carry_out`) after the read under
   way there, so no read of the app's own routed to the volume overlaps it — one
   routed before the mount table was re-read can still hold it, and the eject is
   then refused as busy, saying so — and with no reader the loop does, as it
@@ -283,8 +295,10 @@ emptied or over-long title is refused before the kernel is asked.
   user's settings has said so, a noted volume no window shows, describes a
   node of, is opening onto, or runs an operation reaching (a progress window,
   or one still starting) is asked an idle detach (`EjectAsked::Finished`), one
-  at a time: no window is moved off it, and one a window has come to show by
-  the time it is located is withdrawn (`EjectDesk::withdraw`) and the places
+  at a time: no window is moved off it, what the app still watches or follows
+  there is let go first, as for an eject the user asks, and one a window has
+  come to show by the time it is located is withdrawn (`EjectDesk::withdraw`)
+  and the places
   it was found shown at are learned, so it is asked again once that window
   leaves. No idle detach is asked while an attach is on its way, and an attach
   asked for while one is waits for its answer, so the two never race. Found in
@@ -297,7 +311,12 @@ emptied or over-long title is refused before the kernel is asked.
   image the shell unmounts and mounts again before the mount table is re-read
   keeps its identity, so the opened set would take that attachment for its
   own; a per-attachment identity in the attach reply and the idle detach
-  closes that (DI22, planned).
+  closes that (DI22, planned). A device volume's twin key
+  (`docs/src/filesystem/drives.md` §8) does not: an image is published under
+  its identity whenever no attachment holds it, so one mounted again takes
+  the key back. That identity takes in the key its file's volume is
+  published under, so the same file on a twin stick is a fresh attachment
+  each time that twin attaches.
 
 ## 8. The command line
 

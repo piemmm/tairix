@@ -1,5 +1,5 @@
-//! The sound document: whether the desktop makes sounds, the theme, how far
-//! its sounds are turned down, and each event's switch and replacement file.
+//! The sound document: whether the desktop makes its sound effects, the theme,
+//! how far they are turned down, and each event's switch and replacement file.
 //!
 //! The same registry is read at two layers — the machine's document beneath,
 //! the user's own choices over it while their session holds the seat — read
@@ -18,11 +18,12 @@ use crate::SoundEvent;
 /// One setting of the sound document.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SoundKey {
-    /// `sound.enabled` — whether the desktop makes any sound.
+    /// `sound.enabled` — whether the desktop makes its sound effects
+    /// ([`is_effect`]).
     Enabled,
     /// `sound.theme` — the theme sounds are drawn from.
     Theme,
-    /// `sound.gain` — how far every sound is turned down.
+    /// `sound.gain` — how far every sound effect is turned down.
     Gain,
     /// `sound.<event>.enabled` — whether the event makes its sound.
     EventEnabled(SoundEvent),
@@ -78,6 +79,10 @@ const EVENT_KEY_NAMES: [[&str; PER_EVENT]; EVENTS] = [
     ["sound.warning.enabled", "sound.warning.file"],
     ["sound.info.enabled", "sound.info.file"],
     ["sound.bell.enabled", "sound.bell.file"],
+    [
+        "sound.volume_feedback.enabled",
+        "sound.volume_feedback.file",
+    ],
 ];
 
 impl fmt::Display for SoundKey {
@@ -125,7 +130,7 @@ impl Default for SoundSettings {
 }
 
 impl SoundSettings {
-    /// Whether the desktop makes any sound.
+    /// Whether the desktop makes its sound effects.
     #[must_use]
     pub const fn enabled(&self) -> bool {
         self.enabled
@@ -137,7 +142,7 @@ impl SoundSettings {
         &self.theme
     }
 
-    /// How far every sound is turned down; unity plays each asset bit-exact.
+    /// How far every sound effect is turned down; unity plays each asset bit-exact.
     #[must_use]
     pub const fn gain(&self) -> AudioGain {
         self.gain
@@ -148,6 +153,17 @@ impl SoundSettings {
     pub const fn event(&self, event: SoundEvent) -> &EventSettings {
         &self.events[event.index()]
     }
+}
+
+/// Whether `event` is a sound effect, which the desktop's switch and volume
+/// govern.
+///
+/// The volume's own feedback is not one: it tells the listener how loud the
+/// output now is, so it sounds at that output's level whatever the effects'
+/// volume, under a switch of its own.
+#[must_use]
+pub const fn is_effect(event: SoundEvent) -> bool {
+    !matches!(event, SoundEvent::VolumeFeedback)
 }
 
 /// The namespace every sound setting's key lives under.

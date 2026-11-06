@@ -471,7 +471,9 @@ mod kernel {
         loop {
             // Registered before the check, so a record landing in between
             // re-readies the park instead of being slept through.
-            parker.register(&FAULT_RECORDED, Some(due));
+            parker
+                .register(&FAULT_RECORDED, Some(due))
+                .map_err(|_| "no room to wait for the fault record")?;
             if AUDIT_SINK.seen(FAULTED) {
                 return Ok(());
             }
@@ -495,13 +497,15 @@ mod kernel {
         let translation = ctx.dma_translation().ok_or("no dma translation unit")?;
         let parker = Parker::current().ok_or("the driver cannot park")?;
         let (node, streams) = translated_block_node()?;
-        let caller: &'static TaskCapabilities = Box::leak(Box::new(TaskCapabilities::derive(
+        let record = TaskCapabilities::derive(
             MISBEHAVE_OWNER,
             UserId(0),
             driver_caps(),
             driver_caps(),
             audit,
-        )));
+        )
+        .map_err(|_| "no memory for the driver's capability record")?;
+        let caller: &'static TaskCapabilities = Box::leak(Box::new(record));
         let mut block = Block::open(bring_up_virtio_pci(
             ctx,
             &node,

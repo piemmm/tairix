@@ -1,0 +1,49 @@
+[package]
+name = "tairix-video"
+description = "First-party TAIRiX video: the VP8 codec, keyframes and inter frames, and the WebM container, for untrusted recordings and the desktop's own (`lib/`)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The VP8 encoder: the screen recorder codes its pictures with it, and nothing
+# that only decodes enables it. Its passes spread across a `lib/parallel`
+# runner's cores.
+encode = ["dep:tairix-parallel"]
+# The bitstream writer the VP8 tests are drawn from, for the tests of the
+# containers that carry VP8 (lossy WebP, WebM). Test scaffolding only.
+fixture = []
+
+[dependencies]
+# `Errno`, the refusal a muxer's positional writes answer with.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The positional-write `Target` a muxer writes its recording through.
+tairix-fscopy = { path = "../fscopy", version = "=0.0.0" }
+# The bounded codec-identifier string a demuxed track names its codec with,
+# and the encoder's second-pass jobs.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
+# The encoder's ordered row dispatch and the slots its rows publish through.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", optional = true }
+# The random-access input the sandbox's page cache serves, shared with the
+# sound decoders so one demuxer reads a recording's frames as they do.
+tairix-sound = { path = "../sound", version = "=0.0.0" }
+# The one shared fallible-allocation reservation: a frame's planes are sized by
+# the stream's own declared geometry, so a machine short of memory refuses one
+# and the decode reports that rather than aborting.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
+[dev-dependencies]
+# The fuzz harness and the fixture streams draw through the shared seed/budget
+# seam. Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed" }
+# The stream fuzz harness draws its streams from the bitstream writer.
+tairix-video = { path = ".", features = ["fixture"] }
+# The runners the encoder's bytes are proved the same on: lanes run last
+# first, and real threads.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", features = ["test-util"] }

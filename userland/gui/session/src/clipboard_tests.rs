@@ -153,3 +153,40 @@ fn a_payload_past_the_bound_or_past_its_region_is_refused() {
         "another client's name for the region"
     );
 }
+
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+
+#[test]
+fn a_still_the_desktop_holds_is_pasted_as_a_png() {
+    let mut board = clipboard(&[(1, &[0; 32])]);
+    board.hold_png(PNG.to_vec()).expect("held");
+    assert_eq!(
+        board.get(region(1)),
+        Ok(ClipboardHeld {
+            kind: Some(ClipboardKind::Png),
+            len: u64::try_from(PNG.len()).expect("small"),
+            copied: true,
+        })
+    );
+}
+
+#[test]
+fn a_png_past_the_bound_or_no_png_at_all_is_not_held() {
+    let mut board = clipboard(&[]);
+    assert_eq!(
+        board.hold_png(alloc::vec![0x89; CLIPBOARD_MAX_BYTES + 1]),
+        Err(Errno::LengthOutOfRange)
+    );
+    assert_eq!(board.hold_png(b"text".to_vec()), Err(Errno::OutOfRange));
+}
+
+#[test]
+fn a_put_naming_a_png_that_is_none_is_refused() {
+    let mut board = clipboard(&[(1, b"not a picture"), (2, PNG)]);
+    assert_eq!(
+        board.put(region(1), 13, ClipboardKind::Png),
+        Err(Errno::OutOfRange)
+    );
+    let len = u64::try_from(PNG.len()).expect("small");
+    assert_eq!(board.put(region(2), len, ClipboardKind::Png), Ok(()));
+}

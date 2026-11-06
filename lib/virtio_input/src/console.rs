@@ -4,114 +4,34 @@
 //! [`VirtioInput`](crate::VirtioInput) decodes the device's eventq into
 //! [`InputEvent`] key edges whose `code` is the raw evdev keycode
 //! (virtio-input reports in the `evdev` namespace, virtio 1.1 §5.8). This
-//! module is the producer half: it tracks the held modifiers and the
-//! caps-/num-lock state and resolves each printable or named key edge into
-//! the [`Key`] a US keyboard layout produces, then emits the *device-resolved
-//! key edge* — a [`tairix_abi::input::KeyInput`] record built through the
-//! shared [`tairix_keymap::key_input`] map — leaving the encoding and routing
-//! to the kernel input-focus arbiter. A keyboard driver
-//! injects each record into the kernel through the `key_inject` syscall, which
-//! decides by who holds focus whether to encode the press to a text console's
-//! tty bytes or deliver the whole record to the desktop.
-//!
-//! The `evdev`-keycode→[`Key`] table is `evdev`-specific (a USB HID boot
-//! keyboard decodes HID usages into the same [`Key`] vocabulary in
-//! `lib/hid`), so it lives here; the [`Key`]→[`KeyInput`] map is shared in
-//! `lib/keymap` (one definition, the `lib/hid` console
-//! producer reaches it too).
+//! module is the producer half: it names each edge's [`PhysicalKey`] — the HID
+//! usage a USB keyboard reports for the same key — through its one table,
+//! resolves it through the shared `lib/input` keyboard state (the held
+//! modifiers, the caps and num locks and the US layout), and emits the
+//! *device-resolved key edge*: a [`KeyInput`] record built through the shared
+//! [`tairix_keymap::key_record`], leaving the encoding and routing to the
+//! kernel input-focus arbiter. A keyboard driver injects each record into the
+//! kernel through the `key_inject` syscall, which decides by who holds focus
+//! whether to encode the press to a text console's tty bytes or deliver the
+//! whole record to the desktop.
 //!
 //! Everything here is allocation-free and fail-closed: an
 //! unknown keycode or a non-key event produces no record rather than guessing.
 
-use tairix_abi::driver::input::{InputEvent, InputEventKind};
-use tairix_abi::input::KeyInput;
-use tairix_input::{Key, ModifierKey, ModifierSide, ModifierState, NamedKey};
-use tairix_keymap::{key_input, modifier_change};
-
-/// evdev keycodes this producer recognises (FreeBSD's `input-event-codes.h`).
-/// Only the constants the resolver and the modifier/lock tracking name are
-/// listed; the resolution tables below carry the rest inline.
-mod code {
-    /// `KEY_ESC`.
-    pub const ESC: u16 = 1;
-    /// `KEY_BACKSPACE`.
-    pub const BACKSPACE: u16 = 14;
-    /// `KEY_TAB`.
-    pub const TAB: u16 = 15;
-    /// `KEY_ENTER` (main block).
-    pub const ENTER: u16 = 28;
-    /// `KEY_KPENTER` (numeric keypad).
-    pub const KP_ENTER: u16 = 96;
-
-    /// `KEY_CAPSLOCK`.
-    pub const CAPS_LOCK: u16 = 58;
-    /// `KEY_NUMLOCK`.
-    pub const NUM_LOCK: u16 = 69;
-
-    /// `KEY_LEFTCTRL`.
-    pub const LEFT_CTRL: u16 = 29;
-    /// `KEY_LEFTSHIFT`.
-    pub const LEFT_SHIFT: u16 = 42;
-    /// `KEY_RIGHTSHIFT`.
-    pub const RIGHT_SHIFT: u16 = 54;
-    /// `KEY_LEFTALT`.
-    pub const LEFT_ALT: u16 = 56;
-    /// `KEY_RIGHTCTRL`.
-    pub const RIGHT_CTRL: u16 = 97;
-    /// `KEY_RIGHTALT`.
-    pub const RIGHT_ALT: u16 = 100;
-    /// `KEY_LEFTMETA`.
-    pub const LEFT_META: u16 = 125;
-    /// `KEY_RIGHTMETA`.
-    pub const RIGHT_META: u16 = 126;
-
-    /// `KEY_HOME`.
-    pub const HOME: u16 = 102;
-    /// `KEY_UP`.
-    pub const UP: u16 = 103;
-    /// `KEY_PAGEUP`.
-    pub const PAGE_UP: u16 = 104;
-    /// `KEY_LEFT`.
-    pub const LEFT: u16 = 105;
-    /// `KEY_RIGHT`.
-    pub const RIGHT: u16 = 106;
-    /// `KEY_END`.
-    pub const END: u16 = 107;
-    /// `KEY_DOWN`.
-    pub const DOWN: u16 = 108;
-    /// `KEY_PAGEDOWN`.
-    pub const PAGE_DOWN: u16 = 109;
-    /// `KEY_INSERT`.
-    pub const INSERT: u16 = 110;
-    /// `KEY_DELETE`.
-    pub const DELETE: u16 = 111;
-
-    /// First main-block function key (`KEY_F1`); `F1..=F10` are `59..=68`.
-    pub const F1: u16 = 59;
-    /// Last contiguous main-block function key (`KEY_F10`).
-    pub const F10: u16 = 68;
-    /// `KEY_F11` (out of the `F1..=F10` run).
-    pub const F11: u16 = 87;
-    /// `KEY_F12`.
-    pub const F12: u16 = 88;
-}
-
-/// `value` of a press edge in an [`InputEvent`].
-const VALUE_PRESS: i32 = 1;
-/// `value` of a release edge.
-const VALUE_RELEASE: i32 = 0;
+use tairix_abi::driver::input::InputEvent;
+use tairix_abi::input::{KeyInput, PhysicalKey};
+use tairix_input::KeyboardState;
+use tairix_keymap::key_record;
 
 /// Stateful translation of virtio-input keyboard [`InputEvent`] edges into the
 /// [`KeyInput`] records a driver injects through `key_inject`.
 ///
-/// The only state carried between [`feed`](Self::feed) calls is the held
-/// modifiers and the two lock toggles, so a reload starts from a clean
-/// state by constructing a fresh instance.
+/// The only state carried between [`feed`](Self::feed) calls is the
+/// keyboard's — the held modifiers and the two lock toggles — so a reload
+/// starts from a clean state by constructing a fresh instance.
 #[derive(Debug, Default)]
 pub struct VirtioKeyboardConsole {
-    modifiers: ModifierState,
-    caps_lock: bool,
-    num_lock: bool,
+    keyboard: KeyboardState,
 }
 
 impl VirtioKeyboardConsole {
@@ -119,9 +39,7 @@ impl VirtioKeyboardConsole {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            modifiers: ModifierState::new(),
-            caps_lock: false,
-            num_lock: false,
+            keyboard: KeyboardState::new(),
         }
     }
 
@@ -136,245 +54,136 @@ impl VirtioKeyboardConsole {
     /// held) produces nothing. The lock keys update the internal state and
     /// produce no record. A *press* or *release* of a printable or named key
     /// produces the corresponding [`KeyInput::Pressed`] / [`KeyInput::Released`]
-    /// record carrying the resolved [`Key`] and the modifiers held; an unknown
-    /// keycode or a non-keyboard event produces nothing. Both edges are
-    /// emitted so the desktop sees key-up as well as key-down; the text path
-    /// ignores releases in the kernel arbiter.
+    /// record carrying the key the layout made of it, the modifiers held, and
+    /// its physical key; an unknown keycode or a non-keyboard event produces
+    /// nothing. Both edges are emitted so the desktop sees key-up as well as
+    /// key-down; the text path ignores releases in the kernel arbiter.
     ///
     /// # Capabilities
     ///
     /// None (the producer holds no authority; delivery is the caller's).
     pub fn feed(&mut self, event: InputEvent) -> Option<KeyInput> {
-        if event.kind != InputEventKind::Key {
-            return None;
-        }
-        let pressed = match event.value {
-            VALUE_PRESS => true,
-            VALUE_RELEASE => false,
-            // A key-repeat (`value == 2`) or any other value carries no
-            // press/release edge here (fail closed).
-            _ => return None,
-        };
-        let keycode = event.code;
-        if let Some((key, side)) = modifier_of(keycode) {
-            let changed = if pressed {
-                self.modifiers.press(key, side)
-            } else {
-                self.modifiers.release(key, side)
-            };
-            return changed.then(|| modifier_change(self.modifiers.modifiers()));
-        }
-        if keycode == code::CAPS_LOCK {
-            if pressed {
-                self.caps_lock = !self.caps_lock;
-            }
-            return None;
-        }
-        if keycode == code::NUM_LOCK {
-            if pressed {
-                self.num_lock = !self.num_lock;
-            }
-            return None;
-        }
-        let modifiers = self.modifiers.modifiers();
-        let key = resolve_keycode(keycode, modifiers.shift, self.caps_lock, self.num_lock)?;
-        // `key_input` returns `None` only for a `Key` with no wire form (a
-        // function number outside `F1..=F12`); `resolve_keycode` never
-        // produces one, so a resolvable key always yields a record.
-        key_input(key, modifiers, pressed)
+        // A key repeat carries no edge, so it produces nothing (fail closed).
+        let pressed = event.key_edge()?;
+        key_record(&mut self.keyboard, physical_key(event.code), pressed)
     }
 }
 
-/// The modifier a modifier keycode names, or [`None`] if `keycode` is not a
-/// modifier key.
-fn modifier_of(keycode: u16) -> Option<(ModifierKey, ModifierSide)> {
-    Some(match keycode {
-        code::LEFT_CTRL => (ModifierKey::Ctrl, ModifierSide::Left),
-        code::LEFT_SHIFT => (ModifierKey::Shift, ModifierSide::Left),
-        code::LEFT_ALT => (ModifierKey::Alt, ModifierSide::Left),
-        code::LEFT_META => (ModifierKey::Meta, ModifierSide::Left),
-        code::RIGHT_CTRL => (ModifierKey::Ctrl, ModifierSide::Right),
-        code::RIGHT_SHIFT => (ModifierKey::Shift, ModifierSide::Right),
-        code::RIGHT_ALT => (ModifierKey::Alt, ModifierSide::Right),
-        code::RIGHT_META => (ModifierKey::Meta, ModifierSide::Right),
-        _ => return None,
-    })
-}
+/// Each `evdev` keycode this producer reads (FreeBSD's `input-event-codes.h`)
+/// and the HID usage of the key it names (HID Usage Tables, page `0x07`), in
+/// keycode order: the one table from the `evdev` namespace into the system's.
+const KEYCODES: &[(u16, u16)] = &[
+    (1, 0x29),   // KEY_ESC
+    (2, 0x1E),   // KEY_1
+    (3, 0x1F),   // KEY_2
+    (4, 0x20),   // KEY_3
+    (5, 0x21),   // KEY_4
+    (6, 0x22),   // KEY_5
+    (7, 0x23),   // KEY_6
+    (8, 0x24),   // KEY_7
+    (9, 0x25),   // KEY_8
+    (10, 0x26),  // KEY_9
+    (11, 0x27),  // KEY_0
+    (12, 0x2D),  // KEY_MINUS
+    (13, 0x2E),  // KEY_EQUAL
+    (14, 0x2A),  // KEY_BACKSPACE
+    (15, 0x2B),  // KEY_TAB
+    (16, 0x14),  // KEY_Q
+    (17, 0x1A),  // KEY_W
+    (18, 0x08),  // KEY_E
+    (19, 0x15),  // KEY_R
+    (20, 0x17),  // KEY_T
+    (21, 0x1C),  // KEY_Y
+    (22, 0x18),  // KEY_U
+    (23, 0x0C),  // KEY_I
+    (24, 0x12),  // KEY_O
+    (25, 0x13),  // KEY_P
+    (26, 0x2F),  // KEY_LEFTBRACE
+    (27, 0x30),  // KEY_RIGHTBRACE
+    (28, 0x28),  // KEY_ENTER
+    (29, 0xE0),  // KEY_LEFTCTRL
+    (30, 0x04),  // KEY_A
+    (31, 0x16),  // KEY_S
+    (32, 0x07),  // KEY_D
+    (33, 0x09),  // KEY_F
+    (34, 0x0A),  // KEY_G
+    (35, 0x0B),  // KEY_H
+    (36, 0x0D),  // KEY_J
+    (37, 0x0E),  // KEY_K
+    (38, 0x0F),  // KEY_L
+    (39, 0x33),  // KEY_SEMICOLON
+    (40, 0x34),  // KEY_APOSTROPHE
+    (41, 0x35),  // KEY_GRAVE
+    (42, 0xE1),  // KEY_LEFTSHIFT
+    (43, 0x31),  // KEY_BACKSLASH
+    (44, 0x1D),  // KEY_Z
+    (45, 0x1B),  // KEY_X
+    (46, 0x06),  // KEY_C
+    (47, 0x19),  // KEY_V
+    (48, 0x05),  // KEY_B
+    (49, 0x11),  // KEY_N
+    (50, 0x10),  // KEY_M
+    (51, 0x36),  // KEY_COMMA
+    (52, 0x37),  // KEY_DOT
+    (53, 0x38),  // KEY_SLASH
+    (54, 0xE5),  // KEY_RIGHTSHIFT
+    (55, 0x55),  // KEY_KPASTERISK
+    (56, 0xE2),  // KEY_LEFTALT
+    (57, 0x2C),  // KEY_SPACE
+    (58, 0x39),  // KEY_CAPSLOCK
+    (59, 0x3A),  // KEY_F1
+    (60, 0x3B),  // KEY_F2
+    (61, 0x3C),  // KEY_F3
+    (62, 0x3D),  // KEY_F4
+    (63, 0x3E),  // KEY_F5
+    (64, 0x3F),  // KEY_F6
+    (65, 0x40),  // KEY_F7
+    (66, 0x41),  // KEY_F8
+    (67, 0x42),  // KEY_F9
+    (68, 0x43),  // KEY_F10
+    (69, 0x53),  // KEY_NUMLOCK
+    (71, 0x5F),  // KEY_KP7
+    (72, 0x60),  // KEY_KP8
+    (73, 0x61),  // KEY_KP9
+    (74, 0x56),  // KEY_KPMINUS
+    (75, 0x5C),  // KEY_KP4
+    (76, 0x5D),  // KEY_KP5
+    (77, 0x5E),  // KEY_KP6
+    (78, 0x57),  // KEY_KPPLUS
+    (79, 0x59),  // KEY_KP1
+    (80, 0x5A),  // KEY_KP2
+    (81, 0x5B),  // KEY_KP3
+    (82, 0x62),  // KEY_KP0
+    (83, 0x63),  // KEY_KPDOT
+    (87, 0x44),  // KEY_F11
+    (88, 0x45),  // KEY_F12
+    (96, 0x58),  // KEY_KPENTER
+    (97, 0xE4),  // KEY_RIGHTCTRL
+    (98, 0x54),  // KEY_KPSLASH
+    (100, 0xE6), // KEY_RIGHTALT
+    (102, 0x4A), // KEY_HOME
+    (103, 0x52), // KEY_UP
+    (104, 0x4B), // KEY_PAGEUP
+    (105, 0x50), // KEY_LEFT
+    (106, 0x4F), // KEY_RIGHT
+    (107, 0x4D), // KEY_END
+    (108, 0x51), // KEY_DOWN
+    (109, 0x4E), // KEY_PAGEDOWN
+    (110, 0x49), // KEY_INSERT
+    (111, 0x4C), // KEY_DELETE
+    (125, 0xE3), // KEY_LEFTMETA
+    (126, 0xE7), // KEY_RIGHTMETA
+];
 
-/// Resolve an `evdev` keycode to the [`Key`] a US keyboard layout produces,
-/// given the active `shift`, `caps`, and `num` lock state.
-///
-/// Returns `None` for a keycode with no console key (an unmapped keycode, a
-/// lock or modifier key, or numeric-keypad `5` with Num Lock off) — fail
-/// closed, never guess.
-fn resolve_keycode(keycode: u16, shift: bool, caps: bool, num: bool) -> Option<Key> {
-    if let Some(letter) = letter(keycode, shift, caps) {
-        return Some(Key::Char(letter));
-    }
-    if let Some(ch) = printable(keycode, shift) {
-        return Some(Key::Char(ch));
-    }
-    if let Some(named) = named(keycode) {
-        return Some(Key::Named(named));
-    }
-    keypad(keycode, num)
-}
-
-/// Map a letter keycode to its character, applying shift XOR caps lock for
-/// the case. `evdev` letter keycodes are not alphabetical, so the lowercase
-/// glyph is looked up in a table rather than computed from an offset.
-fn letter(keycode: u16, shift: bool, caps: bool) -> Option<char> {
-    // (keycode, lowercase letter). The US QWERTY letter block.
-    const TABLE: &[(u16, u8)] = &[
-        (16, b'q'),
-        (17, b'w'),
-        (18, b'e'),
-        (19, b'r'),
-        (20, b't'),
-        (21, b'y'),
-        (22, b'u'),
-        (23, b'i'),
-        (24, b'o'),
-        (25, b'p'),
-        (30, b'a'),
-        (31, b's'),
-        (32, b'd'),
-        (33, b'f'),
-        (34, b'g'),
-        (35, b'h'),
-        (36, b'j'),
-        (37, b'k'),
-        (38, b'l'),
-        (44, b'z'),
-        (45, b'x'),
-        (46, b'c'),
-        (47, b'v'),
-        (48, b'b'),
-        (49, b'n'),
-        (50, b'm'),
-    ];
-    for &(code, lower) in TABLE {
-        if code == keycode {
-            let byte = if shift ^ caps {
-                lower.to_ascii_uppercase()
-            } else {
-                lower
-            };
-            return Some(char::from(byte));
-        }
-    }
-    None
-}
-
-/// Map a printable non-letter keycode (digits, space, punctuation) to its
-/// character, selecting the shifted glyph when `shift` is held.
-fn printable(keycode: u16, shift: bool) -> Option<char> {
-    // (keycode, unshifted, shifted). The US ANSI layout's non-letter
-    // printables.
-    const TABLE: &[(u16, char, char)] = &[
-        (2, '1', '!'),
-        (3, '2', '@'),
-        (4, '3', '#'),
-        (5, '4', '$'),
-        (6, '5', '%'),
-        (7, '6', '^'),
-        (8, '7', '&'),
-        (9, '8', '*'),
-        (10, '9', '('),
-        (11, '0', ')'),
-        (12, '-', '_'),
-        (13, '=', '+'),
-        (26, '[', '{'),
-        (27, ']', '}'),
-        (39, ';', ':'),
-        (40, '\'', '"'),
-        (41, '`', '~'),
-        (43, '\\', '|'),
-        (51, ',', '<'),
-        (52, '.', '>'),
-        (53, '/', '?'),
-        (57, ' ', ' '),
-    ];
-    for &(code, unshifted, shifted) in TABLE {
-        if code == keycode {
-            return Some(if shift { shifted } else { unshifted });
-        }
-    }
-    None
-}
-
-/// Map a named-key keycode (editing, navigation, function, the main-block
-/// control keys) to its [`NamedKey`].
-fn named(keycode: u16) -> Option<NamedKey> {
-    Some(match keycode {
-        code::ENTER | code::KP_ENTER => NamedKey::Enter,
-        code::ESC => NamedKey::Escape,
-        code::BACKSPACE => NamedKey::Backspace,
-        code::TAB => NamedKey::Tab,
-        code::INSERT => NamedKey::Insert,
-        code::HOME => NamedKey::Home,
-        code::PAGE_UP => NamedKey::PageUp,
-        code::DELETE => NamedKey::Delete,
-        code::END => NamedKey::End,
-        code::PAGE_DOWN => NamedKey::PageDown,
-        code::RIGHT => NamedKey::Right,
-        code::LEFT => NamedKey::Left,
-        code::DOWN => NamedKey::Down,
-        code::UP => NamedKey::Up,
-        code::F1..=code::F10 => NamedKey::Function {
-            number: u8::try_from(keycode - code::F1 + 1).ok()?,
-        },
-        code::F11 => NamedKey::Function { number: 11 },
-        code::F12 => NamedKey::Function { number: 12 },
-        _ => return None,
-    })
-}
-
-/// Map a numeric-keypad keycode to its [`Key`], honouring Num Lock.
-///
-/// With Num Lock on the keypad sends digits, `.`, and the operators; with it
-/// off the digit keys are the navigation cluster (`KP1`=End, `KP8`=Up, …) and
-/// `KP5` sends nothing.
-fn keypad(keycode: u16, num: bool) -> Option<Key> {
-    Some(match keycode {
-        98 => Key::Char('/'), // KEY_KPSLASH
-        55 => Key::Char('*'), // KEY_KPASTERISK
-        74 => Key::Char('-'), // KEY_KPMINUS
-        78 => Key::Char('+'), // KEY_KPPLUS
-        71 => keypad_digit('7', NamedKey::Home, num),
-        72 => keypad_digit('8', NamedKey::Up, num),
-        73 => keypad_digit('9', NamedKey::PageUp, num),
-        75 => keypad_digit('4', NamedKey::Left, num),
-        76 => {
-            if num {
-                Key::Char('5')
-            } else {
-                return None;
-            }
-        }
-        77 => keypad_digit('6', NamedKey::Right, num),
-        79 => keypad_digit('1', NamedKey::End, num),
-        80 => keypad_digit('2', NamedKey::Down, num),
-        81 => keypad_digit('3', NamedKey::PageDown, num),
-        82 => keypad_digit('0', NamedKey::Insert, num),
-        83 => {
-            if num {
-                Key::Char('.')
-            } else {
-                Key::Named(NamedKey::Delete)
-            }
-        }
-        _ => return None,
-    })
-}
-
-/// A keypad key that is `digit` with Num Lock on and `nav` with it off.
-fn keypad_digit(digit: char, nav: NamedKey, num: bool) -> Key {
-    if num {
-        Key::Char(digit)
-    } else {
-        Key::Named(nav)
-    }
+/// The physical key `keycode` names, or [`PhysicalKey::UNKNOWN`] for a keycode
+/// this producer reads no key from.
+fn physical_key(keycode: u16) -> PhysicalKey {
+    let usage = KEYCODES
+        .binary_search_by_key(&keycode, |&(code, _)| code)
+        .ok()
+        .and_then(|at| KEYCODES.get(at))
+        .map_or(0, |&(_, usage)| usage);
+    PhysicalKey::from_usage(usage)
 }
 
 #[cfg(test)]

@@ -475,6 +475,23 @@ fn closing_or_leaving_hands_the_watch_back_to_release() {
     assert_eq!(watches.forget(1), [None, None]);
 }
 
+/// The consumers named as holding a place on a volume are those watching, or
+/// offered, a place there, and no other; released, none is named.
+#[test]
+fn the_consumers_holding_a_place_on_a_volume_are_named_and_no_other() {
+    let mut watches = Watches::new();
+    let disk = at(&["Storage", "disk"]);
+    let on_disk: &[&[String]] = &[disk.as_slice()];
+    installed(&mut watches, 0, &["Storage"], 1);
+    installed(&mut watches, 1, &["Storage", "disk", "Games"], 2);
+    watches.offer(2, &at(&["Storage", "disk"]), 3);
+    assert_eq!(watches.holding_within(on_disk).collect::<Vec<_>>(), [1, 2]);
+    for client in [1, 2] {
+        let _ = watches.release_within(client, on_disk);
+    }
+    assert_eq!(watches.holding_within(on_disk).next(), None);
+}
+
 #[test]
 fn leaving_a_volume_releases_what_lies_on_it_and_nothing_else() {
     let mut watches = Watches::new();
@@ -519,7 +536,7 @@ fn merging_into_a_bare_listing_answers_where_each_entry_went() {
             EntryChange::Remove(String::from("b")),
             upsert("a"),
         ],
-        crate::sort::SortMode::default_order(),
+        crate::sort::SortMode::default_order().into(),
     )
     .expect("merged");
     assert!(moved);
@@ -537,7 +554,7 @@ fn merging_into_a_bare_listing_answers_where_each_entry_went() {
 /// rebuild alike.
 #[test]
 fn a_merge_lands_what_a_fresh_sort_would() {
-    use crate::sort::{sort_entries, Folders, SortDirection, SortKey, SortMode};
+    use crate::sort::{sort_entries, Folders, Order, SortDirection, SortKey, SortMode};
     let sized = |name: &str, size: u64| {
         Entry::new(
             name,
@@ -602,9 +619,10 @@ fn a_merge_lands_what_a_fresh_sort_would() {
             })
     });
     for mode in modes {
+        let order = Order::from(mode);
         for changes in &cases {
             let mut before = listing();
-            sort_entries(&mut before, mode);
+            sort_entries(&mut before, order);
             let mut wanted: BTreeMap<String, Entry> = before
                 .iter()
                 .map(|entry| (String::from(entry.name()), entry.clone()))
@@ -620,10 +638,10 @@ fn a_merge_lands_what_a_fresh_sort_would() {
                 }
             }
             let mut wanted: Vec<Entry> = wanted.into_values().collect();
-            sort_entries(&mut wanted, mode);
+            sort_entries(&mut wanted, order);
 
             let mut merged = before.clone();
-            let (placed, _) = merge_changes(&mut merged, changes.clone(), mode).expect("merged");
+            let (placed, _) = merge_changes(&mut merged, changes.clone(), order).expect("merged");
             assert_eq!(merged, wanted, "{mode:?} {changes:?}");
             for (at, was) in before.iter().enumerate() {
                 let now = merged.iter().position(|entry| entry.name() == was.name());
@@ -632,6 +650,34 @@ fn a_merge_lands_what_a_fresh_sort_would() {
             assert_eq!(placed.place(before.len()), None);
         }
     }
+}
+
+/// A merge orders by the names shown as the full sort does, the name the
+/// volume holds breaking a tie.
+#[test]
+fn a_merge_orders_by_the_names_shown() {
+    use crate::entry::EntryKind;
+    use crate::presentation::HiddenEndings;
+    use crate::sort::{sort_entries, Order, SortMode};
+    let bundle = |name: &str| Entry::new(name, EntryKind::Bundle, 0, Time64::UNIX_EPOCH);
+    let order = Order {
+        mode: SortMode::default_order(),
+        endings: HiddenEndings {
+            applications: true,
+            known_types: false,
+        },
+    };
+    let mut entries = vec![bundle("Ab.app"), Entry::file("Ab-2"), bundle("Paint.app")];
+    sort_entries(&mut entries, order);
+    let arriving = [Entry::file("Paint"), bundle("Ab-1.app")];
+    let mut wanted = entries.clone();
+    wanted.extend(arriving.iter().cloned());
+    sort_entries(&mut wanted, order);
+    let changes = arriving.into_iter().map(EntryChange::Upsert).collect();
+    merge_changes(&mut entries, changes, order).expect("merged");
+    assert_eq!(entries, wanted);
+    let names: Vec<&str> = entries.iter().map(Entry::name).collect();
+    assert_eq!(names, ["Ab.app", "Ab-1.app", "Ab-2", "Paint", "Paint.app"]);
 }
 
 /// A filter never turns away a name it holds, whatever its length, so a merge
@@ -664,7 +710,7 @@ fn a_merges_placement_is_the_size_of_its_change() {
     let (placed, moved) = merge_changes(
         &mut entries,
         vec![upsert("f00000a")],
-        crate::sort::SortMode::default_order(),
+        crate::sort::SortMode::default_order().into(),
     )
     .expect("merged");
     assert!(moved);

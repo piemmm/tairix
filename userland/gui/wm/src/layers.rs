@@ -484,8 +484,9 @@ pub(super) enum Change<'a> {
 impl Compositor {
     /// Take a change to window `id` as its free layer's own, damaging only the
     /// composite zones above it, which read it, and its own frost where a move
-    /// or a whole change shifts it. Answers whether `id` has a free layer; any
-    /// other window's change is the caller's to mark.
+    /// or a whole change shifts it, and owing the change itself to an armed
+    /// capture, which no damage of the base carries. Answers whether `id` has
+    /// a free layer; any other window's change is the caller's to mark.
     pub(super) fn route_to_layer(
         &mut self,
         id: WindowId,
@@ -536,6 +537,13 @@ impl Compositor {
             // A layer of the wrong size is replaced by the next plan.
             if let Some(footprint) = footprint.filter(|footprint| layer.fits(*footprint)) {
                 layer.at.origin = footprint.origin;
+            }
+        }
+        if let Change::Region(region) = change {
+            self.tap_changed_region(region);
+        } else {
+            for rect in footprints {
+                self.tap_changed(rect);
             }
         }
         // Every frost above reads this window's pixels, whatever layer it

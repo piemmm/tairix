@@ -12,22 +12,26 @@ use alloc::vec::Vec;
 
 use tairix_abi::Errno;
 use tairix_controls::{
-    wheel_steps, ControlRole, IconButton, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation,
-    ScrollRange, Slider, SliderAction, Toolbar, ToolbarAction, ToolbarOutcome,
+    wheel_steps, ControlRole, ControlState, IconButton, ScrollAction, ScrollBar, ScrollModel,
+    ScrollOrientation, ScrollRange, Slider, SliderAction, Toolbar, ToolbarAction, ToolbarOutcome,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PinchPhase, PointerButton};
-use tairix_raster::{Reorient, Surface};
+use tairix_player::Span;
+use tairix_raster::{resample_window_in, Reorient, ResampleScratch, Rgba8Image, Surface};
 use tairix_sandbox::imagerender::{ViewDocument, ViewFailure, ViewPage};
+use tairix_sandbox::moviedecode::MovieInfo;
 use tairix_theme::Theme;
+use tairix_util::fallible;
 
 use crate::layout::TOOL_COUNT;
+use crate::movie::{self, Note, Order, Status, Stop, Transport};
 use crate::{
     fitted_zoom, pan_step, slider_at_zoom, window_in_page_space, zoom_at_slider, zoom_rung_above,
-    zoom_rung_below, Answer, Document, Fit, Layout, Picture, Request, Viewport,
-    ZOOM_ACTUAL_PER_MILLE, ZOOM_SLIDER_LINE_STEP, ZOOM_SLIDER_PAGE_STEP,
+    zoom_rung_below, Answer, Bands, Document, Fit, Layout, Movie, Picture, Request, Viewport,
+    SLIDER_FULL, ZOOM_ACTUAL_PER_MILLE, ZOOM_SLIDER_LINE_STEP, ZOOM_SLIDER_PAGE_STEP,
 };
 
 /// The toolbar's tools, in the order they are drawn.
@@ -166,6 +170,11 @@ pub enum Refusal {
     TooLong,
     /// The document's pixels arrived but could not be held.
     Unholdable,
+    /// The movie's playback would not open it, or stopped where it cannot go
+    /// on.
+    Movie(Stop),
+    /// No thread could be started to play the movie on.
+    NoPlayback(Errno),
 }
 
 impl core::fmt::Display for Refusal {
@@ -175,6 +184,10 @@ impl core::fmt::Display for Refusal {
             Self::Unreadable(err) => write!(f, "the document could not be read ({err})"),
             Self::TooLong => f.write_str("the document is larger than this viewer opens"),
             Self::Unholdable => f.write_str("the picture could not be held in memory"),
+            Self::Movie(stop) => write!(f, "{stop}"),
+            Self::NoPlayback(err) => {
+                write!(f, "no thread could be started to play the movie ({err})")
+            }
         }
     }
 }
@@ -210,6 +223,24 @@ enum Pending {
     Idle,
     /// This render has been asked for and not yet answered.
     Show(Shape),
+}
+
+/// What a movie's playback has been told, so it is told only what changes.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct Told {
+    playing: bool,
+    seeks: u32,
+}
+
+/// A movie's latest picture, copied out of the decoder's ring: what the canvas
+/// is drawn from at whatever shape it asks, however long the slot is gone.
+#[derive(Default)]
+struct MovieFrame {
+    pixels: Vec<u8>,
+    size: (u32, u32),
+    /// The canvas's window of it, scaled, and the scaler's working memory.
+    scaled: Vec<u8>,
+    scratch: ResampleScratch,
 }
 
 /// The viewer.
@@ -262,6 +293,17 @@ pub struct View {
     zoom_carry: i64,
     /// A pinch under way: the view it began from and where, canvas-local.
     pinch: Option<(Viewport, (i64, i64))>,
+    /// The movie open, once one is: a window shows a movie or a document,
+    /// never both.
+    movie: Option<Movie>,
+    /// The movie's seek bar.
+    seek: Slider,
+    /// Where a drag of the seek bar points, while one is under way.
+    scrub_ns: Option<u64>,
+    /// A seek settled on and not yet told the playback.
+    seek_ns: Option<u64>,
+    told: Told,
+    movie_frame: MovieFrame,
 }
 
 impl View {
@@ -303,6 +345,12 @@ impl View {
             modifiers: Modifiers::default(),
             zoom_carry: 0,
             pinch: None,
+            movie: None,
+            seek: Slider::new(0),
+            scrub_ns: None,
+            seek_ns: None,
+            told: Told::default(),
+            movie_frame: MovieFrame::default(),
         }
     }
 
@@ -319,13 +367,38 @@ impl View {
     /// document, or the reason there is none.
     #[must_use]
     pub const fn nothing_to_show(&self) -> bool {
-        self.document.is_none() && self.refusal.is_none()
+        self.document.is_none() && self.movie.is_none() && self.refusal.is_none()
     }
 
     /// The document open, if one is.
     #[must_use]
     pub const fn document(&self) -> Option<&Document> {
         self.document.as_ref()
+    }
+
+    /// The movie open, if one is.
+    #[must_use]
+    pub const fn movie(&self) -> Option<&Movie> {
+        self.movie.as_ref()
+    }
+
+    /// The file name of what is open, for the window's title.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        match (&self.document, &self.movie) {
+            (Some(document), _) => Some(document.name.as_str()),
+            (None, Some(movie)) => Some(movie.name.as_str()),
+            (None, None) => None,
+        }
+    }
+
+    /// Which optional bands the window shows.
+    #[must_use]
+    pub const fn bands(&self) -> Bands {
+        Bands {
+            info: self.info,
+            transport: self.movie.is_some(),
+        }
     }
 
     /// Where the viewer is looking.
@@ -390,6 +463,18 @@ impl View {
         &self.zoom
     }
 
+    /// The movie's seek bar, for the painter.
+    #[must_use]
+    pub(crate) const fn seek_control(&self) -> &Slider {
+        &self.seek
+    }
+
+    /// Where a drag of the seek bar points, while one is under way.
+    #[must_use]
+    pub(crate) const fn scrub_ns(&self) -> Option<u64> {
+        self.scrub_ns
+    }
+
     /// The toolbar, for the painter.
     #[must_use]
     pub(crate) const fn toolbar_control(&self) -> &Toolbar {
@@ -447,7 +532,7 @@ impl View {
             scale,
             font,
             self.toolbar.natural_length(scale, theme),
-            self.info,
+            self.bands(),
         );
         let canvas = (layout.canvas().width, layout.canvas().height);
         if canvas != self.canvas {
@@ -485,7 +570,7 @@ impl View {
             return None;
         }
         let natural = self.natural()?;
-        let (want_w, want_h) = Layout::client_for_canvas(natural, theme, scale, font, self.info);
+        let (want_w, want_h) = Layout::client_for_canvas(natural, theme, scale, font, self.bands());
         let (floor_w, floor_h) =
             Layout::min_client(theme, scale, font, self.toolbar.min_length(scale, theme));
         Some((want_w.max(floor_w), want_h.max(floor_h)))
@@ -504,9 +589,15 @@ impl View {
             .is_some_and(|fitted| fitted >= ZOOM_ACTUAL_PER_MILLE)
     }
 
-    /// The selected page's natural pixel size, or `None` with nothing open.
-    fn natural(&self) -> Option<(u32, u32)> {
-        self.document.as_ref().map(Document::natural)
+    /// The natural pixel size of what is shown — the selected page, or the
+    /// movie's pictures — or `None` with nothing open.
+    #[must_use]
+    pub(crate) fn natural(&self) -> Option<(u32, u32)> {
+        match (&self.document, &self.movie) {
+            (Some(document), _) => Some(document.natural()),
+            (None, Some(movie)) => Some((movie.info.width, movie.info.height)),
+            (None, None) => None,
+        }
     }
 
     /// Run one command, reporting what changed and what it is worth
@@ -676,29 +767,36 @@ impl View {
         true
     }
 
-    /// Start or stop playback, arming or disarming the frame deadline.
+    /// Start or stop playback: an animation's frame deadline is armed or
+    /// disarmed, and a movie's playback is told on the next turn.
     fn toggle_playback(&mut self) -> bool {
-        let Some(document) = self.document.as_ref() else {
-            return false;
+        let playable = match (&self.document, &self.movie) {
+            (Some(document), _) => document.info.animated,
+            (None, Some(movie)) => movie.playable(),
+            (None, None) => false,
         };
-        if !document.info.animated {
+        if !playable {
             return false;
         }
         self.playing = !self.playing;
         if !self.playing {
             self.frame_ns = None;
         }
-        if let Some(button) = self.toolbar.icon_mut(PLAYBACK_TOOL) {
-            *button = IconButton::new(
-                if self.playing {
-                    IconKind::Pause
-                } else {
-                    IconKind::Resume
-                },
-                ControlRole::Neutral,
-            );
-        }
+        self.sync_playback_tool();
         true
+    }
+
+    /// Draw the playback tool as what it would do: play while stopped, pause
+    /// while playing.
+    fn sync_playback_tool(&mut self) {
+        let glyph = if self.playing {
+            IconKind::Pause
+        } else {
+            IconKind::Resume
+        };
+        if let Some(button) = self.toolbar.icon_mut(PLAYBACK_TOOL) {
+            *button = IconButton::new(glyph, ControlRole::Neutral);
+        }
     }
 
     /// Bring the zoom slider and the two scrollbars into line with the
@@ -806,6 +904,10 @@ impl View {
             Pending::Show(_) => return None,
             Pending::Idle => {}
         }
+        // A movie's pictures come from its playback, never from a render.
+        if self.movie.is_some() {
+            return None;
+        }
         let shape = self.wanted_shape()?;
         if self.holds(shape) {
             return None;
@@ -826,7 +928,7 @@ impl View {
     /// against cannot be computed two ways.
     fn wanted_shape(&self) -> Option<Shape> {
         let natural = self.natural()?;
-        let page = self.document.as_ref()?.index();
+        let page = self.document.as_ref().map_or(0, Document::index);
         let visible = self.viewport.visible(natural, self.canvas);
         if visible.is_empty() {
             return None;
@@ -844,8 +946,12 @@ impl View {
 
     /// Whether the picture held is already the render `shape` describes.
     fn holds(&self, shape: Shape) -> bool {
-        self.document.as_ref().is_some_and(Document::decoded)
-            && self.picture.surface().is_some()
+        self.document.as_ref().is_some_and(Document::decoded) && self.picture_at(shape)
+    }
+
+    /// Whether the picture held is drawn at `shape`, turned as the view is.
+    fn picture_at(&self, shape: Shape) -> bool {
+        self.picture.surface().is_some()
             && self.picture.window == shape.window
             && self.picture.extent == shape.extent
             && self.picture.reorient == self.viewport.reorient
@@ -859,13 +965,12 @@ impl View {
     pub fn deliver(&mut self, answer: Answer, layout: &Layout, damage: &mut Region) -> Outcome {
         match answer {
             Answer::Opened { open_id, opened } => {
-                if !self.opened(open_id, opened) {
-                    return Outcome::changed(false);
-                }
-                // A document that has just opened, or refused to, changes the
-                // title, the facts, the chrome and the canvas together.
-                damage.add(layout.window());
-                Outcome::changed(true)
+                let adopted = self.opened(open_id, opened);
+                open_outcome(adopted, layout, damage)
+            }
+            Answer::Movie { open_id, opened } => {
+                let adopted = self.movie_opened(open_id, opened);
+                open_outcome(adopted, layout, damage)
             }
             Answer::Shown {
                 page,
@@ -894,38 +999,86 @@ impl View {
         // An answer to an open this viewer has abandoned describes a document
         // nobody is waiting for; adopting it would put one window's document
         // in another.
-        if self.pending != Pending::Open(open_id) {
+        if !self.awaiting(open_id) {
             return false;
         }
-        self.pending = Pending::Idle;
+        self.clear_for_open();
         match opened {
             Ok((info, name, bytes)) => {
                 self.document = Some(Document::new(info, name, bytes));
-                self.refusal = None;
-                self.viewport = Viewport::new();
-                if let Some(natural) = self.natural() {
-                    // A picture the window can hold opens at the size it was
-                    // authored at; one too big for it is zoomed out to fit,
-                    // because opening part-shown hides the picture behind its
-                    // own corner.
-                    let fit = if self.fits_canvas() {
-                        Fit::Actual
-                    } else {
-                        Fit::Window
-                    };
-                    self.viewport.set_fit(fit, natural, self.canvas);
-                    self.viewport.cap_zoom(natural);
-                }
-                self.sync_controls();
+                self.fit_opened();
             }
-            Err(refusal) => {
-                self.document = None;
-                self.refusal = Some(refusal);
-                self.picture = Picture::default();
-                self.sync_controls();
-            }
+            Err(refusal) => self.refuse_open(refusal),
         }
         true
+    }
+
+    /// Adopt a movie's open, or the reason there is not one.
+    fn movie_opened(
+        &mut self,
+        open_id: u64,
+        opened: Result<(MovieInfo, String, u64), Refusal>,
+    ) -> bool {
+        if !self.awaiting(open_id) {
+            return false;
+        }
+        self.clear_for_open();
+        match opened {
+            Ok((info, name, bytes)) => {
+                self.seek = seek_slider(info.duration_ns.is_some());
+                self.movie = Some(Movie::new(info, name, bytes));
+                self.fit_opened();
+            }
+            Err(refusal) => self.refuse_open(refusal),
+        }
+        true
+    }
+
+    /// Whether `open_id` is the open this viewer is waiting for.
+    #[must_use]
+    pub fn awaiting(&self, open_id: u64) -> bool {
+        self.pending == Pending::Open(open_id)
+    }
+
+    /// Let go of what was open, and of how it was playing, for what an open's
+    /// answer brings. The picture stays drawn until the new one arrives.
+    fn clear_for_open(&mut self) {
+        self.pending = Pending::Idle;
+        self.document = None;
+        self.movie = None;
+        self.movie_frame = MovieFrame::default();
+        self.refusal = None;
+        self.frame_ns = None;
+        self.scrub_ns = None;
+        self.seek_ns = None;
+        self.told = Told::default();
+        if core::mem::take(&mut self.playing) {
+            self.sync_playback_tool();
+        }
+    }
+
+    /// Frame what has just opened: at the size it was authored at where the
+    /// window can hold it, else zoomed out to fit, since opening part-shown
+    /// hides it behind its own corner.
+    fn fit_opened(&mut self) {
+        self.viewport = Viewport::new();
+        if let Some(natural) = self.natural() {
+            let fit = if self.fits_canvas() {
+                Fit::Actual
+            } else {
+                Fit::Window
+            };
+            self.viewport.set_fit(fit, natural, self.canvas);
+            self.viewport.cap_zoom(natural);
+        }
+        self.sync_controls();
+    }
+
+    /// An open refused: nothing is shown, and why is.
+    fn refuse_open(&mut self, refusal: Refusal) {
+        self.refusal = Some(refusal);
+        self.picture = Picture::default();
+        self.sync_controls();
     }
 
     /// Adopt a drawn window, or the reason there is not one.
@@ -942,10 +1095,15 @@ impl View {
         pixels: Vec<u8>,
         outcome: Result<(), Refusal>,
     ) -> bool {
-        self.pending = Pending::Idle;
         // The buffer comes back whatever happened, so the next render neither
         // allocates nor waits for one.
         self.scratch = Some(pixels);
+        // An open asked for since is what the window waits for; this draws
+        // what it replaces.
+        if !matches!(self.pending, Pending::Show(_)) {
+            return false;
+        }
+        self.pending = Pending::Idle;
         // Which entry the worker holds decoded is a fact about the session
         // whatever became of this draw, so it is recorded even when the user
         // has since moved to another entry.
@@ -1045,6 +1203,12 @@ impl View {
                 self.report_framing(layout, damage);
             }
             return Outcome::changed(changed);
+        }
+        if let Some(action) = self
+            .seek
+            .on_pointer(event, layout.seek_bar(), scale, theme, damage)
+        {
+            return Outcome::changed(self.scrubbed(action, layout, damage));
         }
         if let Some(changed) = self.bar_pointer(event, layout, scale, theme, damage) {
             return Outcome::changed(changed);
@@ -1319,6 +1483,197 @@ impl View {
         true
     }
 
+    /// Adopt a move of the seek bar: a drag shows where it points, and letting
+    /// go seeks there.
+    fn scrubbed(&mut self, action: SliderAction, layout: &Layout, damage: &mut Region) -> bool {
+        let Some(length) = self.movie.as_ref().and_then(|movie| movie.info.duration_ns) else {
+            return false;
+        };
+        damage.add(layout.clock());
+        match action {
+            SliderAction::SetValue { permille } => {
+                self.scrub_ns = Some(at_permille(length, permille));
+            }
+            SliderAction::Settled { permille } => {
+                let target = at_permille(length, permille);
+                self.scrub_ns = None;
+                self.seek_ns = Some(target);
+                if let Some(movie) = self.movie.as_mut() {
+                    movie.status.position_ns = target;
+                }
+            }
+        }
+        true
+    }
+
+    /// What the movie's playback is to be told, as the state now calls for:
+    /// a seek settled on, then play or pause. Each is told once.
+    pub fn take_orders(&mut self) -> [Option<Order>; 2] {
+        if self.movie.is_none() {
+            return [None; 2];
+        }
+        let seek = self.seek_ns.take().map(|target| {
+            self.told.seeks = self.told.seeks.wrapping_add(1);
+            Order::Seek(target)
+        });
+        let play = (self.playing != self.told.playing).then(|| {
+            self.told.playing = self.playing;
+            if self.playing {
+                Order::Play
+            } else {
+                Order::Pause
+            }
+        });
+        [seek, play]
+    }
+
+    /// Show a picture of the movie: copied out of its slot, which the caller
+    /// then hands back, and drawn at the shape the canvas draws at. Reports
+    /// whether anything drawn changed.
+    pub fn show_frame(
+        &mut self,
+        picture: &movie::Picture,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> bool {
+        if self.movie.is_none() {
+            return false;
+        }
+        let (width, height) = picture.slot.size();
+        let Some(len) = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+        else {
+            return false;
+        };
+        let pixels = &mut self.movie_frame.pixels;
+        if pixels.len() != len {
+            pixels.clear();
+            if !fallible::grow_to(pixels, len, 0) {
+                self.refusal = Some(Refusal::Unholdable);
+                damage.add(layout.canvas());
+                return true;
+            }
+        }
+        if !picture.slot.copy_out(pixels) {
+            return false;
+        }
+        self.movie_frame.size = (width, height);
+        self.draw_frame(layout, damage)
+    }
+
+    /// Draw the movie's picture again where the canvas has moved — a zoom, a
+    /// pan, a turn or a resize — reporting whether anything drawn changed.
+    pub fn redraw_movie(&mut self, layout: &Layout, damage: &mut Region) -> bool {
+        if self.movie.is_none() || self.movie_frame.size.0 == 0 {
+            return false;
+        }
+        match self.wanted_shape() {
+            Some(shape) if !self.picture_at(shape) => self.draw_frame(layout, damage),
+            _ => false,
+        }
+    }
+
+    /// Draw the movie's picture at the shape the canvas draws at: as it is
+    /// where the window is the whole of it at its own size, scaled through the
+    /// shared resampler otherwise.
+    fn draw_frame(&mut self, layout: &Layout, damage: &mut Region) -> bool {
+        let Some(shape) = self.wanted_shape() else {
+            return false;
+        };
+        let reorient = self.viewport.reorient;
+        let frame = &mut self.movie_frame;
+        let whole = Rect::new(0, 0, frame.size.0, frame.size.1);
+        let adopted = if shape.extent == frame.size && shape.window == whole {
+            self.picture
+                .adopt(shape.window, shape.extent, reorient, &frame.pixels)
+        } else {
+            scaled(frame, shape).is_some_and(|pixels| {
+                self.picture
+                    .adopt(shape.window, shape.extent, reorient, pixels)
+            })
+        };
+        self.refusal = (!adopted).then_some(Refusal::Unholdable);
+        damage.add(layout.canvas());
+        true
+    }
+
+    /// Adopt where the movie's playback stands, reporting whether anything
+    /// drawn changed. A position from before the latest seek the playback was
+    /// told is not adopted, so the seek bar holds where the user put it.
+    pub fn movie_status(&mut self, status: Status, layout: &Layout, damage: &mut Region) -> bool {
+        let told_seeks = self.told.seeks;
+        let Some(movie) = self.movie.as_mut() else {
+            return false;
+        };
+        let before = movie.status;
+        let position_ns = if status.seeks == told_seeks {
+            status.position_ns
+        } else {
+            before.position_ns
+        };
+        movie.status = Status {
+            position_ns,
+            ..status
+        };
+        let mut drawn = false;
+        if before.transport != status.transport {
+            damage.add(layout.status());
+            drawn = true;
+        }
+        if Span::from_nanos(before.position_ns).seconds() != Span::from_nanos(position_ns).seconds()
+        {
+            damage.add(layout.clock());
+            drawn = true;
+        }
+        let stopped = matches!(status.transport, Transport::Stopped(_))
+            && !matches!(before.transport, Transport::Stopped(_));
+        if stopped && self.playing {
+            self.playing = false;
+            self.told.playing = false;
+            self.sync_playback_tool();
+            damage.add(layout.tools());
+            drawn = true;
+        }
+        let value = self.seek.value();
+        self.sync_seek();
+        if self.seek.value() != value {
+            damage.add(layout.seek_bar());
+            drawn = true;
+        }
+        drawn
+    }
+
+    /// Bring the seek bar into line with where the movie is, unless the user
+    /// is dragging it.
+    fn sync_seek(&mut self) {
+        if self.seek.is_dragging() {
+            return;
+        }
+        if let Some(movie) = self.movie.as_ref() {
+            let at = permille_of(movie.status.position_ns, movie.info.duration_ns);
+            self.seek.set_value(at);
+        }
+    }
+
+    /// Adopt what the playback said became of it — its decoder replaced, or
+    /// its sound lost — reporting whether anything drawn changed.
+    pub fn movie_note(&mut self, note: Note, layout: &Layout, damage: &mut Region) -> bool {
+        let Some(movie) = self.movie.as_mut() else {
+            return false;
+        };
+        match note {
+            Note::Replaced => movie.replaced = movie.replaced.saturating_add(1),
+            Note::SoundLost(failure) => movie.silenced = Some(failure),
+            Note::Opened(_) | Note::Unopened(_) => return false,
+        }
+        damage.add(layout.status());
+        if self.info {
+            damage.add(layout.info());
+        }
+        true
+    }
+
     /// Feed one key press, reporting what the user asked for.
     ///
     /// The keyboard reaches every command the toolbar and the menus do, with
@@ -1443,6 +1798,73 @@ fn empty_scroll() -> ScrollModel {
 fn scroll_for(scaled: u32, canvas: u32, offset: u32) -> ScrollModel {
     let range = ScrollRange::new(u64::from(scaled), u64::from(canvas), u64::from(offset));
     ScrollModel::new(range, u64::from(pan_step(canvas)), u64::from(canvas).max(1))
+}
+
+/// The `shape` window of the movie's `frame` scaled to its extent, in the
+/// frame's own buffer, or `None` where it cannot be.
+fn scaled(frame: &mut MovieFrame, shape: Shape) -> Option<&[u8]> {
+    let window = shape.window;
+    let region = tairix_raster::Region {
+        x: u32::try_from(window.origin.x).ok()?,
+        y: u32::try_from(window.origin.y).ok()?,
+        width: window.width,
+        height: window.height,
+    };
+    let len = (window.width as usize)
+        .checked_mul(window.height as usize)?
+        .checked_mul(4)?;
+    frame.scaled.truncate(len);
+    if !fallible::grow_to(&mut frame.scaled, len, 0) {
+        return None;
+    }
+    let (width, height) = frame.size;
+    let source = Rgba8Image::new(width, height, &frame.pixels).ok()?;
+    let into = (region, frame.scaled.as_mut_slice());
+    resample_window_in(
+        &source,
+        source.whole(),
+        shape.extent,
+        into,
+        &mut frame.scratch,
+    )
+    .ok()?;
+    Some(&frame.scaled)
+}
+
+/// What adopting an open's answer reports: the whole window, since an open
+/// changes the title, the facts, the chrome and the canvas together.
+fn open_outcome(adopted: bool, layout: &Layout, damage: &mut Region) -> Outcome {
+    if adopted {
+        damage.add(layout.window());
+    }
+    Outcome::changed(adopted)
+}
+
+/// A movie's seek bar at its start; one whose length the file does not state
+/// has nothing to be a share of, and is disabled.
+fn seek_slider(seekable: bool) -> Slider {
+    let mut slider = Slider::new(0);
+    if !seekable {
+        slider.set_state(ControlState::disabled());
+    }
+    slider
+}
+
+/// Where `position_ns` lies along a movie `length_ns` long, in thousandths;
+/// the start where the length is not known.
+fn permille_of(position_ns: u64, length_ns: Option<u64>) -> u16 {
+    let Some(length) = length_ns.filter(|&length| length > 0) else {
+        return 0;
+    };
+    let share = u128::from(position_ns.min(length)) * u128::from(SLIDER_FULL) / u128::from(length);
+    u16::try_from(share).unwrap_or(u16::MAX)
+}
+
+/// The time `permille` thousandths along a movie `length_ns` long.
+fn at_permille(length_ns: u64, permille: u16) -> u64 {
+    let share = u32::from(permille).min(SLIDER_FULL);
+    let at = u128::from(length_ns) * u128::from(share) / u128::from(SLIDER_FULL);
+    u64::try_from(at).unwrap_or(length_ns)
 }
 
 /// Report the canvas's two bars, whose thumbs show where the pan is.

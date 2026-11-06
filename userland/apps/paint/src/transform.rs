@@ -564,8 +564,7 @@ pub fn indexed(
     let mut nearest = Nearest::new(palette).ok_or(TransformError::OutOfMemory)?;
     let kind = Kind::Indexed {
         depth,
-        palette: fallible::collected(palette.len(), palette.iter().copied())
-            .ok_or(TransformError::OutOfMemory)?,
+        palette: fallible::copied(palette).ok_or(TransformError::OutOfMemory)?,
         masked,
     };
     let mut out = CanvasBuilder::new(width, height, kind, Sample::Index(0, 255))?;

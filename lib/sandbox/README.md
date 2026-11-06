@@ -184,6 +184,26 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   printable UTF-8, or none of it is believed — the one report reply the decode
   service's `file_report` shares. `TextEdit.app`'s Data display is the
   consumer.
+- **The page cache** (`paged`): what a long-lived decode worker reads its
+  owner's file through — a bounded ask at a time, its pages held in a cache
+  keyed by a seed the owner draws, so the worker never holds the file and a
+  file cannot choose which of its pages collide. The sound and movie decodes
+  share it.
+- **The movie-decode service** (`moviedecode`): a `WebM` recording's VP8
+  pictures, drawn into a ring of three slots the owner shares with the worker
+  and named over the pipe by a head alone, and its Opus sound as blocks of
+  `F32`, each walked through the file from a place of its own; a seek to the
+  latest keyframe at or before its target; a stream weighed, the ring among
+  it, against the ceiling its owner states before anything is reserved.
+  `MovieDecodeClient` believes only answers to what it asked — a head names a
+  slot it left free and a size a slot holds — and brings a replaced worker,
+  handed a ring of its own, back to the latest keyframe. `View.app` plays
+  movies through it.
+- **The spawn share** (`session::Share`, `session::ShareWrite`): a region an
+  owner hands its session worker at spawn, read by the owner only by copying
+  out of it. `rt::RtSessionLauncher::sharing` makes a fresh one for each worker
+  it starts and `rt::spawn_share` maps it in the worker; `loopback::HeapShare`
+  stands in for one in host tests.
 - **The NTP-evaluation service** (`timesync`): a network time server's reply
   is evaluated in the worker (`tairix-net`'s RFC 5905 rules), because the
   `timed` service that acts on the verdict holds `CAP_TIME_SET` and must
@@ -236,7 +256,10 @@ untrusted work imports this seam; a second per-app copy is forbidden.
 - `no_std` + `alloc`, and `forbid(unsafe_code)` throughout: the `program`
   transport reaches the kernel only through `tairix-rt`'s safe wrappers.
 - Host-testable end to end: the `Launcher`/`SessionLauncher`/`Channel` seams
-  take in-process fakes exactly as the `Fs`/`Tty` seams do elsewhere.
+  take in-process fakes (`loopback`) exactly as the `Fs`/`Tty` seams do
+  elsewhere, among them a model of the kernel's pipe pair
+  (`PipeSessionLauncher`) for an owner tested under the readiness a wait-set
+  reports.
 
 ## Stability
 

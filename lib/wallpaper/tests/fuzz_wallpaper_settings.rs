@@ -233,6 +233,37 @@ const KEYS: &[RegistryRow] = &[
         ],
         &["0000000000000051.0 0000000000000051.0", "muted"],
     ),
+    (
+        "capture.save_to",
+        &["desktop", "home", "clipboard"],
+        &["pictures", "Desktop"],
+    ),
+    ("capture.timer_s", &["off", "5", "10"], &["0", "3"]),
+    (
+        "capture.duration_s",
+        &["unlimited", "10", "30", "60", "300", "600"],
+        &["0", "20", "forever"],
+    ),
+    (
+        "capture.sound",
+        &["none", "microphone", "desktop", "both"],
+        &["speaker", "Both"],
+    ),
+    (
+        "capture.pointer",
+        &["true", "false", "on", "off"],
+        &["shown"],
+    ),
+    (
+        "capture.clicks",
+        &["true", "false", "on", "off"],
+        &["rings"],
+    ),
+    (
+        "capture.thumbnail",
+        &["true", "false", "on", "off"],
+        &["small"],
+    ),
 ];
 const BAD_TOKENS: &[&str] = &["", " ", "has space", "bogus", "relative/path.png"];
 

@@ -225,7 +225,8 @@ pub fn sub_screen_damage(bounds: &Rect, mode: &DisplayMode) -> Option<DamageRect
 
 /// One screen rectangle as the wire's damage rectangle, or `None` when it is
 /// empty or has an edge the wire's unsigned fields cannot express.
-pub(crate) fn as_damage(rect: &Rect) -> Option<DamageRect> {
+#[must_use]
+pub fn as_damage(rect: &Rect) -> Option<DamageRect> {
     let (x, y) = rect.surface_origin()?;
     Some(DamageRect {
         x,

@@ -1,8 +1,9 @@
 use tairix_colour::{Hsl, Rgb};
 
 use super::{
-    clipped_span, Channel, ChannelLevels, ColourBalance, Curve, Curves, HueRange, HueRanges,
-    Levels, Tones, WhiteBalance, IDENTITY_TABLE, MOST_POINTS,
+    band_weights, brightness_table, clipped_span, posterise_table, Channel, ChannelLevels,
+    ChannelMixer, ColourBalance, Curve, Curves, HueRange, HueRanges, Levels, ToneMap, Tones,
+    WhiteBalance, IDENTITY_TABLE, INVERT_TABLE, MOST_POINTS,
 };
 
 fn through(tables: &[[u8; 256]; 3], colour: Rgb) -> Rgb {
@@ -261,13 +262,11 @@ fn colour_balance_moves_each_band_and_one_move_everywhere_is_even() {
         band[2] = 50;
     }
     let shifts = even.shifts();
-    for level in [0, 64, 128, 192, 255] {
-        assert!(
-            shifts[2][level].abs_diff(shifts[2][128]) <= 1,
-            "level {level}: {}",
-            shifts[2][level]
-        );
-    }
+    assert!(
+        shifts[2].iter().all(|&shift| shift == 64),
+        "63.75 levels at every lightness: {:?}",
+        shifts[2]
+    );
     let mut kept = ColourBalance::NEUTRAL;
     kept.tones[Tones::Midtones.index()] = [60, -30, 10];
     let colour = Rgb::new(120, 130, 110);
@@ -275,6 +274,48 @@ fn colour_balance_moves_each_band_and_one_move_everywhere_is_even() {
     assert_ne!(moved, colour);
     let lightness = |rgb| Hsl::from_rgb(rgb, Hsl::default()).lightness.byte();
     assert!(lightness(moved).abs_diff(lightness(colour)) <= 1);
+}
+
+/// The quadratic Bernstein basis the bands weigh lightness by sums to one at
+/// every level, black all shadow and white all highlight.
+#[test]
+fn the_bands_weigh_every_lightness_to_one() {
+    for level in 0..=u8::MAX {
+        let [shadows, midtones, highlights] = band_weights(level);
+        assert_eq!(shadows + midtones + highlights, 255 * 255, "level {level}");
+    }
+    assert_eq!(band_weights(0), [255 * 255, 0, 0]);
+    assert_eq!(band_weights(u8::MAX), [0, 0, 255 * 255]);
+}
+
+/// A slider at its end moves a channel half its range, rounded, where its band
+/// weighs one, never further and never the other way; the midtones never weigh
+/// more than a half.
+#[test]
+fn a_slider_at_its_end_moves_a_channel_half_its_range_at_most() {
+    for tones in Tones::ALL {
+        for end in [-100i8, 100] {
+            let mut balance = ColourBalance::NEUTRAL;
+            balance.tones[tones.index()][1] = end;
+            let moved = balance.shifts()[1];
+            let furthest = moved.iter().map(|shift| shift.unsigned_abs()).max();
+            let most = if tones == Tones::Midtones { 64 } else { 128 };
+            assert_eq!(furthest, Some(most), "{tones:?} at {end}");
+            assert!(
+                moved
+                    .iter()
+                    .all(|&shift| i32::from(shift) * i32::from(end) >= 0),
+                "{tones:?} at {end} moves one way"
+            );
+        }
+    }
+    let mut shadows = ColourBalance::NEUTRAL;
+    shadows.tones[Tones::Shadows.index()][0] = 100;
+    assert_eq!(
+        shadows.shifts()[0][0],
+        128,
+        "black, all shadow, moves 127.5"
+    );
 }
 
 #[test]
@@ -298,4 +339,75 @@ fn a_hue_range_fades_out_a_range_away_and_leaves_greys() {
     assert_eq!(lighter.map(Rgb::new(90, 90, 90)), Rgb::new(90, 90, 90));
     lighter.of_mut(HueRange::Master).lightness = 100;
     assert_eq!(lighter.map(Rgb::new(90, 90, 90)), Rgb::new(255, 255, 255));
+}
+
+#[test]
+fn brightness_posterise_and_invert_are_one_table_each() {
+    assert_eq!(brightness_table(0, 0), IDENTITY_TABLE);
+    assert_eq!(
+        brightness_table(50, 0)[100],
+        228,
+        "lighter by half the range"
+    );
+    let steep = brightness_table(0, 50);
+    assert!(steep[64] < 64 && steep[192] > 192, "spread from mid grey");
+    let mut kept = posterise_table(4).to_vec();
+    kept.dedup();
+    assert_eq!(kept, [0, 85, 170, 255]);
+    assert_eq!(posterise_table(256), IDENTITY_TABLE);
+    assert_eq!(posterise_table(1), posterise_table(2), "held to two levels");
+    assert_eq!((INVERT_TABLE[0], INVERT_TABLE[200]), (255, 55));
+}
+
+#[test]
+fn the_channel_mixer_weighs_each_channel_and_its_grey() {
+    let colour = Rgb::new(200, 100, 50);
+    assert_eq!(ChannelMixer::IDENTITY.map(colour), colour);
+    assert!(ChannelMixer::IDENTITY.is_identity());
+    let mut swapped = ChannelMixer::IDENTITY;
+    swapped.rows = [[0, 0, 100, 0], [0, 100, 0, 0], [100, 0, 0, 0]];
+    assert_eq!(swapped.map(colour), Rgb::new(50, 100, 200));
+    assert!(!swapped.is_identity());
+    let mut lifted = ChannelMixer::IDENTITY;
+    lifted.set(0, 3, 20);
+    assert_eq!(lifted.row(0), [100, 0, 0, 20]);
+    assert_eq!(
+        lifted.map(colour),
+        Rgb::new(251, 100, 50),
+        "a fifth of white"
+    );
+    lifted.set(0, 0, 900);
+    assert_eq!(lifted.row(0)[0], 200, "held to its bound");
+    let mut grey = ChannelMixer::IDENTITY;
+    grey.monochrome = true;
+    assert!(!grey.is_identity());
+    assert_eq!(
+        grey.map(colour),
+        Rgb::new(125, 125, 125),
+        "30%, 59% and 11%"
+    );
+    grey.set(2, 1, 0);
+    assert_eq!(
+        grey.grey,
+        [30, 0, 11, 0],
+        "a monochrome mixer sets its grey"
+    );
+    assert_eq!(grey.row(0), grey.grey);
+}
+
+#[test]
+fn a_tone_map_maps_each_colour_and_keeps_its_alpha() {
+    let colour = [200, 100, 50, 77];
+    let inverted = ToneMap::Tables([INVERT_TABLE; 3]).map(colour);
+    assert_eq!(inverted, [55, 155, 205, 77]);
+    let luma = tairix_raster::Color::rgb(200, 100, 50).luma();
+    assert_eq!(ToneMap::Grey.map(colour), [luma, luma, luma, 77]);
+    let at = i32::from(luma);
+    assert_eq!(ToneMap::Threshold(at).map(colour), [255, 255, 255, 77]);
+    assert_eq!(ToneMap::Threshold(at + 1).map(colour), [0, 0, 0, 77]);
+    let mut swapped = ChannelMixer::IDENTITY;
+    swapped.rows = [[0, 0, 100, 0], [0, 100, 0, 0], [100, 0, 0, 0]];
+    assert_eq!(ToneMap::Mixer(swapped).map(colour), [50, 100, 200, 77]);
+    assert_eq!(ToneMap::balance(ColourBalance::NEUTRAL).map(colour), colour);
+    assert_eq!(ToneMap::Hue(HueRanges::IDENTITY).map(colour)[3], 77);
 }

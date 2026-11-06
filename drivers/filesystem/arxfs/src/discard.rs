@@ -175,6 +175,9 @@ impl<B: Block> ARXFS<B> {
         // Eligibility is read from the committed allocation map, so a block an
         // open transaction has taken again must not still read as free.
         self.close_transaction()?;
+        // A map a device fault left in doubt is rebuilt first: the pages on the
+        // device may name blocks free that the trees hold.
+        self.ensure_allocation_map()?;
         let cap = self.block.discard_capability()?;
         let mut report = TrimReport::default();
         if !cap.supported {

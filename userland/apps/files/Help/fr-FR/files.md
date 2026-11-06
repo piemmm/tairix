@@ -4,7 +4,7 @@ files — navigateur de fichiers graphique
 
 ## SYNOPSIS
 
-`files --desktop [--mount] [chemin] [-h | -?]`
+`files --desktop [--mount] [path] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -24,20 +24,25 @@ deviné.
 Le bureau démarre le gestionnaire de fichiers avec la session et le garde
 dans la barre d'icônes, et celui-ci ne se termine jamais : le menu de son
 emplacement liste vos propres lieux et tout ce qui est monté, et choisir l'un
-d'eux y ouvre une fenêtre ; *Réseau* et *Paramètres…* viennent en dernier.
+d'eux y ouvre une fenêtre ; *Réseau* suit, et *Corbeille*
+vient en dernier : cette ligne ouvre votre Corbeille, et s'il n'y a pas de
+répertoire personnel où en garder une, elle est grisée et en donne la raison.
 Un volume que vous pouvez éjecter — une clé USB, une carte mémoire ou un
 autre disque amovible, ou une image disque ou un partage que vous avez monté
-— ouvre un sous-menu contenant *Éjecter*, et celui d'une image disque qui
-vous appartient et porte un titre contient aussi *Titre* : cette ligne ouvre
-un champ contenant le titre du disque, prêt à être modifié, et un appui sur
-`Return` écrit le nouveau sur le disque. Un clic sur l'emplacement en ouvre
+— ouvre un sous-menu contenant *Éjecter*, et celui d'un volume dont vous
+pouvez changer le titre — une image disque qui vous appartient, ou un disque
+dont le format garde un titre — contient *Titre* : cette ligne ouvre un champ
+contenant le titre, prêt à être modifié, et un appui sur `Return` écrit le
+nouveau sur le disque ; un titre vide l'efface. Lorsque vous ne pouvez pas
+changer vous-même le titre d'un disque, le bureau demande le nom et le mot de
+passe d'un administrateur, et le change avec son accord. Un clic sur l'emplacement en ouvre
 une à l'endroit que choisissent les
 paramètres. Demander un dossier qui a déjà une fenêtre amène cette fenêtre au
 premier plan au lieu d'en ouvrir une autre. Le menu n'a pas de ligne
 *Quitter* — le gestionnaire de fichiers fait partie du bureau, fermer ses
 fenêtres le range simplement, et si jamais il s'arrête, le bureau le relance.
 
-*Réseau*, dans le menu de l'emplacement juste au-dessus de *Paramètres…*,
+*Réseau*, dans le menu de l'emplacement juste au-dessus de *Corbeille*,
 ouvre une fenêtre sur les ordinateurs du réseau local qui partagent des
 fichiers. Chacun est listé avec son nom, l'adresse à laquelle on le joint,
 son groupe de travail ou son domaine, et ce qu'il est, et la liste se
@@ -59,18 +64,21 @@ session graphique en cours : sans elle, le canal des fenêtres est
 injoignable, et il signale le refus sur le flux d'erreur standard puis se
 termine.
 
-La fenêtre se pilote au clavier : `Bas` et `Haut` déplacent la sélection,
-`Entrée` ouvre le répertoire sélectionné, et `Retour arrière` remonte au
-répertoire parent. `F5` relit à la fois le listage et la colonne des lieux ;
-un volume nouvellement branché y apparaît de lui-même. `Ctrl+Shift+N` crée
-un nouveau dossier.
+La fenêtre se pilote au clavier : les flèches `Down` et `Up` déplacent la
+sélection, `Enter` ouvre le répertoire sélectionné, et `Backspace` remonte
+au répertoire parent. `F5` relit à la fois le listage et la colonne des
+lieux ; un volume nouvellement branché y apparaît de lui-même.
+`Ctrl+Shift+N` crée un nouveau dossier.
 
 Un listage s'ouvre sans rien de sélectionné. Un clic sélectionne une entrée,
 un clic avec `Ctrl` en ajoute ou en retire une, et un clic avec `Shift`
 sélectionne la suite depuis la dernière entrée choisie ; un clic dans un
-espace vide efface la sélection. Un double-clic ouvre une entrée ; en
+espace vide efface la sélection. Un double-clic ouvre une entrée, et celle
+qu'il ouvre ailleurs — un document dans son application, une application,
+une image disque en tant que volume — est laissée désélectionnée une fois
+ouverte, tandis que celle qui n'a pas pu être ouverte reste sélectionnée. En
 maintenant `Shift`, il liste le contenu d'une application au lieu de la
-lancer, et laisse désélectionné tout ce qu'il ouvre ailleurs. Faire glisser
+lancer. `Enter` ouvre la sélection et la conserve. Faire glisser
 dans un espace vide trace un cadre qui sélectionne tout ce qu'il touche à
 mesure qu'il grandit ; maintenu en haut ou en bas du listage, celui-ci
 défile, et `Escape` reprend ce que le cadre avait sélectionné.
@@ -84,30 +92,53 @@ Le nom d'une entrée est affiché en entier, sur deux lignes au besoin ; un
 nom trop long même pour celles-ci garde son début et sa fin, avec `…` au
 milieu, de sorte que son extension reste toujours visible. Une application
 est affichée sans son suffixe `.app` ; les paramètres peuvent l'afficher, ou
-masquer aussi les suffixes des types de fichiers que le système connaît. Les
-entrées dont le nom commence par un point ne sont listées que si les
-paramètres le demandent.
+masquer aussi les suffixes des types de fichiers que le système connaît. Un
+suffixe reste affiché partout où le masquer laisserait un nom qui se lirait
+comme un autre type de fichier ou une autre application — `invoice.pdf.app`
+est affiché en entier — et une fenêtre trie ses entrées selon leur nom tel
+qu'il est affiché. Les entrées dont le nom commence par un point ne sont
+listées que si les paramètres le demandent.
 
 `F2` renomme l'entrée sélectionnée sur place, tout comme un clic sur le nom
 de la seule entrée sélectionnée suivi d'une pause : le nom s'ouvre à la
 modification dès que le clic ne peut plus devenir un double-clic. La partie
 qui précède l'extension est sélectionnée, si bien que la saisie remplace le
 nom et conserve l'extension ; un suffixe que la fenêtre n'affiche pas est
-conservé lui aussi. `Entrée`, ou un clic hors du nom, garde le nouveau nom —
+conservé lui aussi. `Enter`, ou un clic hors du nom, garde le nouveau nom —
 un nom que le volume refuse reste ouvert avec la raison — et `Escape`
 l'abandonne. Un clic qui a renommé l'entrée ne fait rien d'autre, car le
 dossier a pu être retrié sous le pointeur.
 
 Faire glisser les entrées sélectionnées sur une autre fenêtre du
 gestionnaire de fichiers, sur un dossier de celle-ci ou sur le bureau les y
-copie ; en maintenant Maj, elles sont déplacées à la place. Le pointeur
+copie ; en maintenant `Shift`, elles sont déplacées à la place. Le pointeur
 montre un plus tant qu'un dépôt copierait et une flèche tant qu'il
 déplacerait, et le dossier où un dépôt aboutirait est mis en évidence. Un
 fichier seul déposé sur l'emplacement d'une application dans la barre
-d'icônes y est ouvert.
+d'icônes y est ouvert. Un lecteur glissé hors de `/Storage` n'est jamais copié
+ni déplacé : il laisse un raccourci là où il est déposé, et le pointeur montre
+une flèche courbe. Le raccourci ouvre le lecteur tant qu'il est branché ;
+quand il ne l'est pas, l'ouvrir le signale, et sur le bureau il est dessiné
+estompé.
 Copier ou déplacer conserve les trous de chaque fichier et ses attributs
 étendus, tel un type de fichier RISC OS ; tout attribut que la destination
 ne peut conserver est nommé dans un avertissement à la fin de l'opération.
+
+Lorsqu'une entrée du même nom s'y trouve déjà, la fenêtre propre à l'opération
+demande quoi en faire : *Remplacer* met la nouvelle à sa place, *Ignorer*
+laisse celle qui s'y trouve déjà, et *Arrêter* met fin à l'opération en
+gardant ce qu'elle a fait. Un dossier rencontrant un dossier de son nom
+propose *Fusionner* au lieu de *Remplacer* : ce qu'il contient rejoint le
+dossier déjà présent, et chaque fichier qui s'y trouve déjà fait l'objet d'une
+question à son tour. Cocher *Faire de même pour chaque fichier déjà présent*
+donne la même réponse à toutes les questions suivantes portant sur un fichier.
+Lorsqu'un dossier rencontre un dossier, la case s'intitule *Faire de même pour
+chaque dossier déjà présent* et ne répond qu'aux dossiers suivants, si bien
+que chaque fichier d'un dossier fusionné fait toujours l'objet d'une question.
+`Escape` équivaut à *Arrêter*, et `Enter` donne le choix sur lequel repose le
+clavier — d'abord *Ignorer* ; `Tab` passe de la case aux choix, et `Space`
+coche la case. Sur le bureau, une entrée remplacée se place là où elle a été
+déposée, tandis qu'une entrée ignorée ou fusionnée reste où elle était.
 
 Le menu contextuel commence par *Affichage*. En dessous, un sous-menu nomme
 ce sur quoi le menu agit — *Fichier « notes.txt »*, un nom long raccourci en
@@ -116,7 +147,9 @@ plusieurs entrées sont sélectionnées — et contient *Ouvrir*, *Ouvrir avec�
 *Monter en lecture seule*, *Éjecter*, *Lire les informations…*, *Renommer*,
 *Couper*, *Copier* et *Supprimer* ; une ligne qui ne peut pas agir là est
 grisée et en donne la raison. Viennent ensuite *Nouveau*, puis *Tout
-sélectionner* et *Effacer la sélection*, et enfin *Coller*. Un clic droit
+sélectionner* et *Effacer la sélection*, et *Coller*. Dans la Corbeille,
+*Vider la Corbeille* vient en dernier : après votre confirmation, cette ligne
+supprime définitivement tout ce que contient la Corbeille. Un clic droit
 sur un espace vide efface la sélection, si bien que le sous-menu de l'entrée
 est grisé.
 
@@ -163,8 +196,7 @@ aussi la liste selon celle-ci, et un second clic inverse l'ordre. Les
 dossiers restent en tête quel que soit l'ordre choisi, à moins que les
 paramètres ne les placent parmi les fichiers.
 
-*Paramètres…* dans le menu de l'emplacement de la barre d'icônes, ou
-`Ctrl+,`, ouvre les paramètres du navigateur dans l'application Paramètres,
+`Ctrl+,` ouvre les paramètres du navigateur dans l'application Paramètres,
 sous *Fichiers* : où s'ouvre une nouvelle fenêtre, comment les fenêtres
 affichent et trient leurs entrées, et si une nouvelle montre la colonne des
 lieux et la barre d'outils ; si les dossiers restent en tête ; quels suffixes
@@ -187,15 +219,18 @@ par une écriture ordinaire, soumise aux permissions, sous votre propre
 identité — un refus en donne la raison et ne change rien. Réattribuer un
 propriétaire exige la capacité `CAP_FS_CHOWN` ; une session qui ne l'a pas
 voit le propriétaire et le groupe marqués d'un cadenas, avec une ligne qui
-en donne la raison.
+en donne la raison. La fenêtre d'*informations* d'un lecteur s'ouvre sur sa
+section *Lecteur*, dont le champ *Titre* change le titre du volume de la même
+manière : cliquez dessus ou appuyez sur `Tab`, tapez le nouveau titre et
+appuyez sur `Return` ; `Escape` le remet tel qu'il était.
 
-`Gauche` et `Droite` passent d'une section de la fenêtre à l'autre. Dans
-*Autorisations*, `Bas` ou `Tab` entre dans ses commandes : les flèches
-passent de l'une à l'autre, `Space` bascule une permission ou ouvre le
-propriétaire ou le groupe pour le modifier, et `Tab` ou `Escape` revient aux
-sections.
+Les flèches `Left` et `Right` passent d'une section de la fenêtre à
+l'autre. Dans *Autorisations*, `Down` ou `Tab` entre dans ses commandes :
+les flèches passent de l'une à l'autre, `Space` bascule une permission ou
+ouvre le propriétaire ou le groupe pour le modifier, et `Tab` ou `Escape`
+revient aux sections.
 
-L'opérande `chemin` est traité comme une entrée non fiable : ce doit être
+L'opérande `path` est traité comme une entrée non fiable : ce doit être
 un chemin absolu dans la limite de longueur de chemin du système, et
 chacun de ses composants doit être un vrai nom — `.` et `..` n'en sont
 pas, si bien qu'une écriture ne peut jamais désigner ailleurs que ce
@@ -212,11 +247,11 @@ qu'ignoré.
   lui-même : un emplacement permanent sur la barre d'icônes offrant vos lieux
   et les volumes montés, et aucun moyen de quitter. La session de bureau
   passe cette option à chaque lancement du gestionnaire de fichiers, qui ne
-  s'exécute qu'avec elle ; un `chemin` donné en plus y ouvre une fenêtre.
-- `--mount` — ouvrir `chemin` en tant qu'image disque ou archive, comme
+  s'exécute qu'avec elle ; un `path` donné en plus y ouvre une fenêtre.
+- `--mount` — ouvrir `path` en tant qu'image disque ou archive, comme
   lorsqu'on l'ouvre dans une fenêtre : elle est montée pour vous et sa
   fenêtre s'ouvre, et elle est de nouveau démontée une fois ses fenêtres
-  fermées, selon les paramètres. Cette option exige un `chemin`.
+  fermées, selon les paramètres. Cette option exige un `path`.
 - `-h, -?` — afficher la courte aide de cette commande et quitter.
 
 ## EXIT STATUS

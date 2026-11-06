@@ -384,7 +384,7 @@ impl<B: Block> ARXFS<B> {
         // committed root still names.
         if !self.read_only && self.scrub_progress_root != 0 {
             let old = self.scrub_progress_root;
-            self.free_meta(old);
+            self.free_meta(old)?;
             self.scrub_progress_root = 0;
             mutated = true;
         }
@@ -495,7 +495,7 @@ impl<B: Block> ARXFS<B> {
                     // its decompression.
                     report.data_blocks_checked += ext.stored;
                     if let Err(fault) = self.read_data_cluster_classified(&ext) {
-                        report.note_data_fault(fault);
+                        report.note_data_fault(fault)?;
                     }
                     continue;
                 }
@@ -507,7 +507,7 @@ impl<B: Block> ARXFS<B> {
                     } else {
                         report.data_blocks_checked += 1;
                         if let Err(fault) = self.read_data_block_classified(block, &mut buf) {
-                            report.note_data_fault(fault);
+                            report.note_data_fault(fault)?;
                         }
                     }
                 }
@@ -558,7 +558,9 @@ impl<B: Block> ARXFS<B> {
                     // Visited by popping the tail, so reversing keeps the
                     // ascending key order the recursive walk had.
                     children.reverse();
-                    pending.try_reserve(1).map_err(|_| DriverError::NoSpace)?;
+                    pending
+                        .try_reserve(1)
+                        .map_err(|_| DriverError::OutOfMemory)?;
                     pending.push((level - 1, children));
                 }
             }
@@ -648,13 +650,22 @@ impl ScrubReport {
         }
     }
 
-    /// Fold one data-block integrity fault into the report, keyed by class.
-    pub(crate) fn note_data_fault(&mut self, fault: DataFault) {
+    /// Fold one data block's failed read into the report, keyed by the layer
+    /// that rejected it.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfMemory`] for a read refused a buffer: no layer
+    /// judged the block, so the pass stops with the refusal rather than
+    /// record a fault the medium does not have.
+    pub(crate) fn note_data_fault(&mut self, fault: DataFault) -> Result<(), DriverError> {
         match fault {
             DataFault::Physical => self.data_physical_faults += 1,
             DataFault::Seal => self.data_seal_faults += 1,
             DataFault::Logical => self.data_logical_faults += 1,
+            DataFault::OutOfMemory => return Err(DriverError::OutOfMemory),
         }
+        Ok(())
     }
 }
 

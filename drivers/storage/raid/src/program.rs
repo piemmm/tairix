@@ -342,12 +342,14 @@ fn refusal_message(refusal: OfferRefusal) -> &'static str {
 }
 
 /// Connect a read/write block client over `endpoint`, staging through the
-/// member's already-mapped data window at `window_base`, or [`None`] while
-/// another client holds that window or the device does not answer.
+/// member's already-mapped data window at `window_base`, and ask the identity
+/// its device states, or [`None`] while another client holds that window or
+/// the device does not answer.
 ///
 /// The composer opens every member read/write from the one shared client
 /// definition: it both reads superblocks and, on a degraded start, re-stamps
-/// them.
+/// them. Every client asks the identity, so an array composed over one states
+/// what its device states now.
 fn connect(window: &MemberWindow, endpoint: u64, window_base: usize) -> Option<MemberClient> {
     let lease = window.lend()?;
     // SAFETY: `window_base` maps at least `BLK_DATA_LEN` bytes for this member
@@ -358,8 +360,9 @@ fn connect(window: &MemberWindow, endpoint: u64, window_base: usize) -> Option<M
     // unmaps it under this process: a removed node's region is retired in
     // place, and one it must withdraw takes the process with it.
     let slice = unsafe { core::slice::from_raw_parts_mut(window_base as *mut u8, BLK_DATA_LEN) };
-    let device = RemoteBlock::connect_read_write(RtBlkCall::new(endpoint), slice).ok()?;
-    Some(MemberDevice::new(device, lease))
+    let mut device = RemoteBlock::connect_read_write(RtBlkCall::new(endpoint), slice).ok()?;
+    let identity = device.identify();
+    Some(MemberDevice::new(device, lease, identity))
 }
 
 /// Reconnect the block client for a registered member, for assembly or for

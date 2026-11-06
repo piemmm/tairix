@@ -73,8 +73,8 @@ per scorrere. *Fine*, `Escape` o il pulsante di chiusura della finestra
 la chiude.
 **Aspetto** sceglie lo schema di colori, imposta la dimensione del testo e
 quante righe conserva la cronologia (da nessuna a 10.000, 500 all'inizio),
-e modifica lo schema dell'utente. Gli schemi forniti sono *System* (che
-segue l'aspetto scuro o chiaro del desktop), *Midnight*, *Phosphor*,
+e modifica lo schema dell'utente. Gli schemi forniti sono *System* (l'aspetto
+scuro del desktop, che il desktop stesso sia scuro o chiaro), *Midnight*, *Phosphor*,
 *Amber*, *Ember*, *Contrast*, *Paper* e *Custom*. Scegliendo *Custom*
 vengono utilizzati i colori modificati sotto il selettore: una griglia
 dei venti colori con cui viene disegnato uno schermo — lo sfondo, il
@@ -122,11 +122,6 @@ eventi è stata rifiutata (la ragione è indicata sul flusso di errore
 standard).
 
 ## ENVIRONMENT
-
-`HOME`
-: La directory home dell'account, dove il terminale legge e scrive il
-proprio profilo. Senza di essa il terminale funziona con il profilo
-predefinito e non salva nulla.
 
 `TERM`
 : Esportata alla shell ospitata come `xterm-256color`, che nomina

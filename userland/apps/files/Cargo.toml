@@ -89,6 +89,9 @@ tairix-discovery = { path = "../../../lib/discovery", version = "=0.0.0" }
 # grid resolves each tile through, and the empty lookup the host tests paint a
 # listing with.
 tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+# The key the icon desk indexes shown bundles under, a user naming their
+# paths; the host tests key their desks with it too.
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
 # The one namespace join: a piece of work runs on the lane of the volume the
 # binding covering its place shows (`src/lanes.rs`), by the rule `mount` and
 # `df` resolve a path with.

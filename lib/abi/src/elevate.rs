@@ -38,6 +38,15 @@
 //! [`ElevateRequest::Launch`] — what the seam bounds is the *volume* of
 //! relayed bytes, not their secrecy.
 //!
+//! A caller that must speak a protocol to the program it starts posts
+//! [`ElevateRequest::LaunchWired`]: the identical re-authentication as a
+//! launch, but the program's standard input and output are pipes the broker
+//! makes, and the reply hands the caller its ends of them as delegations to
+//! redeem, beside the program's kernel-attested instance. It is how the
+//! desktop runs the screen recorder as an administrator for one recording
+//! whose sound the signed-in account may not record, and the broker starts no
+//! other program this way.
+//!
 //! The same broker also answers a narrower [`ElevateRequest::Verify`]
 //! request that re-authenticates the **caller's own** kernel-attested
 //! account and runs nothing — the primitive a graphical session's screen
@@ -76,7 +85,12 @@
 //! same trust boundary as typing it at the login prompt); both ends zeroise
 //! their copies as soon as the exchange resolves.
 
-use crate::le::{put_i32, put_i64, put_u32, read_i32, read_i64, read_u32, Reader, Writer};
+use core::num::NonZeroU64;
+
+use crate::le::{
+    put_i32, put_i64, put_u32, put_u64, read_i32, read_i64, read_u32, read_u64, Reader, Writer,
+};
+use crate::origin::{ProcId, PROC_ID_LEN};
 use crate::process::CONSOLE_INDEX_MAX;
 use crate::secret::Secret;
 use crate::time::Duration64;
@@ -136,10 +150,14 @@ pub const ELEVATE_MAX_OUTPUT: usize = 4096;
 /// status word and the value word beside it.
 const REPLY_HEAD_LEN: usize = 12;
 
+/// Byte length of an encoded [`ElevateReply::Wired`]: the head, the started
+/// program's instance, and its two delegation handles.
+const WIRED_REPLY_LEN: usize = REPLY_HEAD_LEN + PROC_ID_LEN + 8 + 8;
+
 /// Largest encoded [`ElevateReply`] — also the endpoint's maximum reply
-/// size. Every reply but [`ElevateReply::Captured`] is exactly the fixed
-/// head; a captured one appends a length-prefixed output region bounded by
-/// [`ELEVATE_MAX_OUTPUT`].
+/// size. A captured run and an account listing append a length-prefixed
+/// region bounded by [`ELEVATE_MAX_OUTPUT`], and a wired launch a short fixed
+/// tail; every other reply is exactly the fixed head.
 pub const ELEVATE_MAX_REPLY: usize = REPLY_HEAD_LEN + 4 + ELEVATE_MAX_OUTPUT;
 
 /// Base of the reserved per-console elevation endpoint-id range; console
@@ -487,6 +505,8 @@ const OPCODE_LAUNCH: u8 = 2;
 const OPCODE_CAPTURE: u8 = 3;
 /// Wire opcode naming an [`ElevateRequest::Authorisers`] request.
 const OPCODE_AUTHORISERS: u8 = 4;
+/// Wire opcode naming an [`ElevateRequest::LaunchWired`] request.
+const OPCODE_LAUNCH_WIRED: u8 = 5;
 
 /// One elevation request, posted to the console's supervisor.
 ///
@@ -570,6 +590,24 @@ pub enum ElevateRequest<'a> {
         /// Absolute path of the program to start on success.
         program: &'a str,
     },
+    /// Re-authenticate `username` and, on success, start `program` as that
+    /// account with its standard input and output wired to the caller,
+    /// without waiting for it, answering [`ElevateReply::Wired`].
+    ///
+    /// The same authority and re-authentication as [`Self::Launch`]; what
+    /// differs is where the program's streams go. The broker makes the two
+    /// pipes, starts the program in the caller's own login session, and hands
+    /// the caller its ends of them, so the caller speaks a protocol to a
+    /// program running with authority the caller does not hold. Only the
+    /// screen recorder is started this way; every other program is refused.
+    LaunchWired {
+        /// The target account to re-authenticate and run as.
+        username: &'a str,
+        /// The offered password for that account.
+        password: Secret<'a>,
+        /// Absolute path of the program to start on success.
+        program: &'a str,
+    },
     /// Which accounts may allow `program`, from the `offset`th: whether the
     /// caller's own account may, and a page of those that may.
     ///
@@ -597,53 +635,7 @@ impl<'a> ElevateRequest<'a> {
     /// `out` cannot hold it, which leaves `out` untouched rather than holding
     /// a password the rest did not follow.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
-        let total = 2
-            + 1
-            + match *self {
-                Self::Run {
-                    username,
-                    password,
-                    program,
-                    argv,
-                }
-                | Self::Capture {
-                    username,
-                    password,
-                    program,
-                    argv,
-                } => {
-                    if username.is_empty() || password.is_empty() || program.is_empty() {
-                        return Err(Errno::LengthOutOfRange);
-                    }
-                    check_argv(argv.len(), argv.iter().map(str::len))?;
-                    (2 + username.len())
-                        + (2 + password.len())
-                        + (2 + program.len())
-                        + argv.encoded_len()
-                }
-                Self::Launch {
-                    username,
-                    password,
-                    program,
-                } => {
-                    if username.is_empty() || password.is_empty() || program.is_empty() {
-                        return Err(Errno::LengthOutOfRange);
-                    }
-                    (2 + username.len()) + (2 + password.len()) + (2 + program.len())
-                }
-                Self::Verify { password } => {
-                    if password.is_empty() {
-                        return Err(Errno::LengthOutOfRange);
-                    }
-                    2 + password.len()
-                }
-                Self::Authorisers { program, .. } => {
-                    if program.is_empty() {
-                        return Err(Errno::LengthOutOfRange);
-                    }
-                    (2 + program.len()) + 4
-                }
-            };
+        let total = self.encoded_len()?;
         if total > ELEVATE_MAX_REQUEST {
             return Err(Errno::LengthOutOfRange);
         }
@@ -678,6 +670,11 @@ impl<'a> ElevateRequest<'a> {
                 username,
                 password,
                 program,
+            }
+            | Self::LaunchWired {
+                username,
+                password,
+                program,
             } => {
                 w.str(username)?;
                 w.str(password.expose())?;
@@ -692,6 +689,61 @@ impl<'a> ElevateRequest<'a> {
         Ok(w.written())
     }
 
+    /// The bytes the request encodes to, every field checked.
+    fn encoded_len(&self) -> Result<usize, Errno> {
+        let body = match *self {
+            Self::Run {
+                username,
+                password,
+                program,
+                argv,
+            }
+            | Self::Capture {
+                username,
+                password,
+                program,
+                argv,
+            } => {
+                if username.is_empty() || password.is_empty() || program.is_empty() {
+                    return Err(Errno::LengthOutOfRange);
+                }
+                check_argv(argv.len(), argv.iter().map(str::len))?;
+                (2 + username.len())
+                    + (2 + password.len())
+                    + (2 + program.len())
+                    + argv.encoded_len()
+            }
+            Self::Launch {
+                username,
+                password,
+                program,
+            }
+            | Self::LaunchWired {
+                username,
+                password,
+                program,
+            } => {
+                if username.is_empty() || password.is_empty() || program.is_empty() {
+                    return Err(Errno::LengthOutOfRange);
+                }
+                (2 + username.len()) + (2 + password.len()) + (2 + program.len())
+            }
+            Self::Verify { password } => {
+                if password.is_empty() {
+                    return Err(Errno::LengthOutOfRange);
+                }
+                2 + password.len()
+            }
+            Self::Authorisers { program, .. } => {
+                if program.is_empty() {
+                    return Err(Errno::LengthOutOfRange);
+                }
+                (2 + program.len()) + 4
+            }
+        };
+        Ok(2 + 1 + body)
+    }
+
     /// The wire opcode naming this request.
     const fn opcode(&self) -> u8 {
         match *self {
@@ -700,6 +752,7 @@ impl<'a> ElevateRequest<'a> {
             Self::Launch { .. } => OPCODE_LAUNCH,
             Self::Capture { .. } => OPCODE_CAPTURE,
             Self::Authorisers { .. } => OPCODE_AUTHORISERS,
+            Self::LaunchWired { .. } => OPCODE_LAUNCH_WIRED,
         }
     }
 
@@ -720,7 +773,7 @@ impl<'a> ElevateRequest<'a> {
             return Err(Errno::OutOfRange);
         }
         let request = match r.u8()? {
-            opcode @ (OPCODE_RUN | OPCODE_LAUNCH | OPCODE_CAPTURE) => {
+            opcode @ (OPCODE_RUN | OPCODE_LAUNCH | OPCODE_CAPTURE | OPCODE_LAUNCH_WIRED) => {
                 let username = r.str()?;
                 let password = Secret::new(r.str()?);
                 let program = r.str()?;
@@ -739,6 +792,11 @@ impl<'a> ElevateRequest<'a> {
                         password,
                         program,
                         argv: read_argv(&mut r)?,
+                    },
+                    OPCODE_LAUNCH_WIRED => Self::LaunchWired {
+                        username,
+                        password,
+                        program,
                     },
                     _ => Self::Launch {
                         username,
@@ -773,11 +831,28 @@ impl<'a> ElevateRequest<'a> {
     }
 }
 
+/// What an [`ElevateRequest::LaunchWired`] started, as its caller takes it up.
+///
+/// The program is the broker's child, and the broker reaps it. The caller
+/// speaks to it over the two pipe ends these delegations convey, and names it
+/// by its instance in every grant it makes it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct WiredLaunch {
+    /// The program's process, as the kernel attested the broker's child.
+    pub instance: ProcId,
+    /// The delegation the caller redeems for the write end of the pipe the
+    /// program reads as its standard input.
+    pub input: NonZeroU64,
+    /// The delegation the caller redeems for the read end of the pipe the
+    /// program writes as its standard output.
+    pub output: NonZeroU64,
+}
+
 /// The supervisor's answer to one [`ElevateRequest`].
 ///
-/// Borrows the buffer it was decoded from, because
-/// [`Self::Captured`] carries the run's output and this crate has no
-/// allocator to own it with; every other variant borrows nothing.
+/// Borrows the buffer it was decoded from, because [`Self::Captured`] and
+/// [`Self::Authorisers`] carry bytes of it and this crate has no allocator to
+/// own them with; every other variant borrows nothing.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ElevateReply<'a> {
     /// A [`ElevateRequest::Run`] re-authenticated, the program ran on the
@@ -800,6 +875,9 @@ pub enum ElevateReply<'a> {
         /// Process id of the started program, always non-negative.
         pid: i64,
     },
+    /// An [`ElevateRequest::LaunchWired`] re-authenticated and the program was
+    /// started as that account, wired to the caller; it is still running.
+    Wired(WiredLaunch),
     /// An [`ElevateRequest::Capture`] re-authenticated, the program ran as
     /// that account with its output bound to the supervisor's pipe, and it
     /// exited with this code having printed these bytes.
@@ -868,10 +946,16 @@ const STATUS_OVERRAN: i32 = 4;
 const STATUS_AUTHORISERS: i32 = 5;
 /// Wire status word naming an [`ElevateReply::Cooling`] reply.
 const STATUS_COOLING: i32 = 6;
+/// Wire status word naming an [`ElevateReply::Wired`] reply.
+const STATUS_WIRED: i32 = 7;
 
 const _: () = assert!(
     crate::session_ipc::SESSION_MAX_REPLY <= ELEVATE_MAX_OUTPUT,
     "an account page fits the reply's region"
+);
+const _: () = assert!(
+    WIRED_REPLY_LEN <= ELEVATE_MAX_REPLY,
+    "a wired launch fits the reply"
 );
 
 impl<'a> ElevateReply<'a> {
@@ -880,18 +964,23 @@ impl<'a> ElevateReply<'a> {
     /// The first word is a result discriminant: `0` for a completed run,
     /// `1` for a verified re-authentication, `2` for a started program,
     /// `3` for a captured one, `4` for one whose output overran the bound,
-    /// else the negated [`Errno`] discriminant (the
-    /// [`crate::driver_store`] status-word convention). The second word is
-    /// the exit code of a completed, captured, or overrun run, the pid of a
-    /// started program, and `0` for [`Self::Verified`] and
-    /// [`Self::Refused`]. A [`Self::Captured`] reply appends a `u32` output
-    /// length and that many bytes; every other reply ends at the head.
+    /// `5` for the accounts that may allow a program, `6` for an account
+    /// cooling down, `7` for a program started wired to the caller, else the
+    /// negated [`Errno`] discriminant (the [`crate::driver_store`]
+    /// status-word convention). The second word is the exit code of a
+    /// completed, captured, or overrun run, the pid of a started program,
+    /// the own-account flag of a listing, the wait in nanoseconds of a
+    /// cooling account, and `0` for [`Self::Verified`], [`Self::Wired`] and
+    /// [`Self::Refused`]. A [`Self::Captured`] or [`Self::Authorisers`] reply
+    /// appends a `u32` length and that many bytes, and a [`Self::Wired`] one
+    /// the program's instance and its two delegation handles; every other
+    /// reply ends at the head.
     ///
     /// # Errors
     ///
     /// [`Errno::BufferTooSmall`] when `out` cannot hold the encoding;
-    /// [`Errno::OutOfRange`] on a negative pid or an output longer than
-    /// [`ELEVATE_MAX_OUTPUT`].
+    /// [`Errno::OutOfRange`] on a negative pid, an output longer than
+    /// [`ELEVATE_MAX_OUTPUT`], or a wired launch naming no process.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
         if out.len() < REPLY_HEAD_LEN {
             return Err(Errno::BufferTooSmall);
@@ -916,6 +1005,7 @@ impl<'a> ElevateReply<'a> {
                 return encode_region(out, STATUS_AUTHORISERS, i64::from(own), page);
             }
             Self::Overran { exit_code } => (STATUS_OVERRAN, i64::from(exit_code)),
+            Self::Wired(launch) => return encode_wired(out, launch),
             Self::Cooling { retry_after } => (
                 STATUS_COOLING,
                 i64::try_from(retry_after.saturating_total_nanos()).unwrap_or(i64::MAX),
@@ -929,14 +1019,16 @@ impl<'a> ElevateReply<'a> {
 
     /// Decode a reply from `bytes`, failing closed on a wrong length, an
     /// unknown errno, an unrecognised status word, a launched pid that is
-    /// negative, or a captured output region that is over-long, short, or
-    /// followed by trailing bytes.
+    /// negative, a captured output region that is over-long, short, or
+    /// followed by trailing bytes, or a wired launch naming no process or a
+    /// delegation the kernel never mints.
     ///
     /// # Errors
     ///
     /// [`Errno::LengthOutOfRange`] on a wrong length;
     /// [`Errno::OutOfRange`] on an unrecognised status word, an
-    /// unrepresentable pid, or an over-long output region.
+    /// unrepresentable pid, an over-long output region, or a wired launch
+    /// naming no process or a zero delegation.
     pub fn decode(bytes: &'a [u8]) -> Result<Self, Errno> {
         if bytes.len() < REPLY_HEAD_LEN || bytes.len() > ELEVATE_MAX_REPLY {
             return Err(Errno::LengthOutOfRange);
@@ -960,6 +1052,9 @@ impl<'a> ElevateReply<'a> {
                 },
                 page,
             });
+        }
+        if status == STATUS_WIRED {
+            return decode_wired(bytes, word);
         }
         // Every other reply is exactly the head: trailing bytes are a frame
         // this end does not understand, not a longer one to read past.
@@ -1023,6 +1118,46 @@ fn decode_region(bytes: &[u8]) -> Result<&[u8], Errno> {
     Ok(&bytes[REPLY_HEAD_LEN + 4..])
 }
 
+/// Encode a [`ElevateReply::Wired`] reply: the head, then the program's
+/// instance and its two delegation handles.
+fn encode_wired(out: &mut [u8], launch: WiredLaunch) -> Result<usize, Errno> {
+    if launch.instance.is_kernel() {
+        return Err(Errno::OutOfRange);
+    }
+    if out.len() < WIRED_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    put_i32(out, 0, STATUS_WIRED);
+    put_i64(out, 4, 0);
+    out[REPLY_HEAD_LEN..REPLY_HEAD_LEN + PROC_ID_LEN].copy_from_slice(launch.instance.as_bytes());
+    put_u64(out, REPLY_HEAD_LEN + PROC_ID_LEN, launch.input.get());
+    put_u64(out, REPLY_HEAD_LEN + PROC_ID_LEN + 8, launch.output.get());
+    Ok(WIRED_REPLY_LEN)
+}
+
+/// Decode the [`ElevateReply::Wired`] reply `bytes` hold, whose head carried
+/// `word`: exactly the head and its tail, naming a process and two
+/// delegations.
+fn decode_wired(bytes: &[u8], word: i64) -> Result<ElevateReply<'_>, Errno> {
+    if bytes.len() != WIRED_REPLY_LEN {
+        return Err(Errno::LengthOutOfRange);
+    }
+    if word != 0 {
+        return Err(Errno::OutOfRange);
+    }
+    let instance = ProcId::from_bytes(&bytes[REPLY_HEAD_LEN..REPLY_HEAD_LEN + PROC_ID_LEN])?;
+    if instance.is_kernel() {
+        return Err(Errno::OutOfRange);
+    }
+    // The kernel mints delegation handles from one: zero names none.
+    let handle = |at| NonZeroU64::new(read_u64(bytes, at)).ok_or(Errno::OutOfRange);
+    Ok(ElevateReply::Wired(WiredLaunch {
+        instance,
+        input: handle(REPLY_HEAD_LEN + PROC_ID_LEN)?,
+        output: handle(REPLY_HEAD_LEN + PROC_ID_LEN + 8)?,
+    }))
+}
+
 /// A `u16` argument count and that many length-prefixed UTF-8 arguments,
 /// validated whole against the same rule an encoder applies.
 ///
@@ -1065,7 +1200,7 @@ fn read_words(r: &mut Reader<'_>, count: u16) -> Result<(), Errno> {
 #[cfg(test)]
 mod tests {
     use super::{
-        elevate_endpoint, ElevateArgv, ElevateReply, ElevateRequest, ElevateWords,
+        elevate_endpoint, ElevateArgv, ElevateReply, ElevateRequest, ElevateWords, WiredLaunch,
         ELEVATE_ENDPOINT_BASE, ELEVATE_MAX_ARGS, ELEVATE_MAX_ARGV_BYTES, ELEVATE_MAX_ARG_LEN,
         ELEVATE_MAX_OUTPUT, ELEVATE_MAX_REPLY, ELEVATE_MAX_REQUEST, ELEVATE_VERSION,
         ELEVATE_WORDS_BYTES,
@@ -1073,7 +1208,8 @@ mod tests {
     use crate::secret::Secret;
     use crate::session_ipc::{encode_account_page, SessionAccount, SESSION_MAX_REPLY};
     use crate::time::Duration64;
-    use crate::{Errno, ORIGIN_CONSOLE_NONE};
+    use crate::{Errno, ProcId, ORIGIN_CONSOLE_NONE, PROC_ID_LEN};
+    use core::num::NonZeroU64;
 
     #[test]
     fn endpoint_is_per_console_and_refuses_non_consoles() {
@@ -1291,9 +1427,9 @@ mod tests {
             ElevateRequest::decode(&wrong[..len]),
             Err(Errno::OutOfRange)
         );
-        // Unknown opcode (one past the five the protocol defines).
+        // Unknown opcode (one past the six the protocol defines).
         let mut unknown_opcode = buf;
-        unknown_opcode[2] = 5;
+        unknown_opcode[2] = 6;
         assert_eq!(
             ElevateRequest::decode(&unknown_opcode[..len]),
             Err(Errno::OutOfRange)
@@ -1475,6 +1611,7 @@ mod tests {
             },
             ElevateReply::Overran { exit_code: 0 },
             ElevateReply::Overran { exit_code: 7 },
+            ElevateReply::Wired(wired()),
             ElevateReply::Refused(Errno::PermissionDenied),
             ElevateReply::Refused(Errno::NotFound),
         ] {
@@ -1538,9 +1675,9 @@ mod tests {
         );
         // A status word past the known discriminants (`0` completed, `1`
         // verified, `2` launched, `3` captured, `4` overran, `5` authorisers,
-        // `6` cooling) is neither a success nor a negated errno.
+        // `6` cooling, `7` wired) is neither a success nor a negated errno.
         let mut buf = [0u8; ELEVATE_MAX_REPLY];
-        buf[..4].copy_from_slice(&7i32.to_le_bytes());
+        buf[..4].copy_from_slice(&8i32.to_le_bytes());
         assert_eq!(ElevateReply::decode(&buf[..head]), Err(Errno::OutOfRange));
         // A launched reply whose pid word is negative names no process.
         buf[..4].copy_from_slice(&2i32.to_le_bytes());
@@ -1780,6 +1917,92 @@ mod tests {
         assert_eq!(
             ElevateWords::from_packed(0, &past),
             Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    /// A program started wired to its caller, as a broker answers it.
+    fn wired() -> WiredLaunch {
+        WiredLaunch {
+            instance: ProcId::from_raw([7; PROC_ID_LEN]),
+            input: NonZeroU64::new(3).expect("non-zero"),
+            output: NonZeroU64::new(4).expect("non-zero"),
+        }
+    }
+
+    #[test]
+    fn a_wired_launch_round_trips_and_is_its_own_form() {
+        let program = crate::recorder_ipc::RECORDER_RUN_PATH;
+        let req = ElevateRequest::LaunchWired {
+            username: "root",
+            password: Secret::new("hunter2"),
+            program,
+        };
+        let mut buf = [0u8; ELEVATE_MAX_REQUEST];
+        let len = req.encode(&mut buf).expect("encodes");
+        assert_eq!(ElevateRequest::decode(&buf[..len]), Ok(req));
+        // The same fields posted as a plain launch are other bytes, so a
+        // broker can never take one for the other.
+        let mut launch_buf = [0u8; ELEVATE_MAX_REQUEST];
+        let launch_len = ElevateRequest::Launch {
+            username: "root",
+            password: Secret::new("hunter2"),
+            program,
+        }
+        .encode(&mut launch_buf)
+        .expect("encodes");
+        assert_eq!(len, launch_len);
+        assert_ne!(buf[..len], launch_buf[..launch_len]);
+        let unnamed = ElevateRequest::LaunchWired {
+            username: "root",
+            password: Secret::new("hunter2"),
+            program: "",
+        };
+        assert_eq!(unnamed.encode(&mut buf), Err(Errno::LengthOutOfRange));
+    }
+
+    #[test]
+    fn a_wired_reply_round_trips_and_refuses_one_naming_no_process() {
+        let mut buf = [0u8; ELEVATE_MAX_REPLY];
+        let len = ElevateReply::Wired(wired())
+            .encode(&mut buf)
+            .expect("encodes");
+        assert_eq!(
+            ElevateReply::decode(&buf[..len]),
+            Ok(ElevateReply::Wired(wired()))
+        );
+        // Short or long of its tail: a frame this end does not understand.
+        assert_eq!(
+            ElevateReply::decode(&buf[..len - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            ElevateReply::decode(&buf[..=len]),
+            Err(Errno::LengthOutOfRange)
+        );
+        // A value word the form does not carry.
+        let mut worded = buf;
+        worded[4] = 1;
+        assert_eq!(ElevateReply::decode(&worded[..len]), Err(Errno::OutOfRange));
+        // A zero delegation, which the kernel never mints.
+        let mut empty = buf;
+        empty[len - 8..len].fill(0);
+        assert_eq!(ElevateReply::decode(&empty[..len]), Err(Errno::OutOfRange));
+        // The kernel sentinel names no process, at either end.
+        let mut kernel = buf;
+        kernel[12..12 + PROC_ID_LEN].fill(0);
+        assert_eq!(ElevateReply::decode(&kernel[..len]), Err(Errno::OutOfRange));
+        let unnamed = WiredLaunch {
+            instance: ProcId::KERNEL,
+            ..wired()
+        };
+        assert_eq!(
+            ElevateReply::Wired(unnamed).encode(&mut buf),
+            Err(Errno::OutOfRange)
+        );
+        // A buffer short of the tail refuses rather than writing half a frame.
+        assert_eq!(
+            ElevateReply::Wired(wired()).encode(&mut buf[..len - 1]),
+            Err(Errno::BufferTooSmall)
         );
     }
 }

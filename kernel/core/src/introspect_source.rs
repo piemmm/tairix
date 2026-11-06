@@ -22,8 +22,6 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_util::fallible::collected;
-
 use tairix_abi::sysinfo::SYSTEM_CONFIG_MAX_LEN;
 use tairix_abi::sysinfo::{
     CacheLedgerRecord, CpuCoreClass, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord,
@@ -376,7 +374,7 @@ fn system_config_layer(
             // as the truth.
             return Err(Errno::LengthOutOfRange);
         }
-        document.extend_from_slice(buf.get(..read).ok_or(Errno::OutOfRange)?);
+        append(&mut document, buf.get(..read).ok_or(Errno::OutOfRange)?)?;
     }
 }
 
@@ -438,7 +436,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 record.name().as_bytes(),
             )?
             .with_sandboxed(record.is_sandboxed());
-            out.extend_from_slice(&process.to_le_bytes());
+            append(&mut out, &process.to_le_bytes())?;
         }
         Ok(out)
     }
@@ -573,7 +571,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             .current_task(SchedulerArch::current_cpu(&*self.state.arch));
         let mut runnable: u32 = 0;
         let mut total: u32 = 0;
-        let mut uids = alloc::collections::BTreeSet::new();
+        let mut uids = tairix_collections::OrderedSet::new();
         {
             let caps = self.state.caps.read();
             for record in caps.iter() {
@@ -591,7 +589,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 }
                 let uid = record.owner().0;
                 if live && uid != 0 {
-                    uids.insert(uid);
+                    uids.try_insert(uid).map_err(|_| Errno::OutOfMemory)?;
                 }
             }
         }
@@ -643,7 +641,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 busy_ns,
                 idle_ns: now_ns.saturating_sub(busy_ns),
             };
-            out.extend_from_slice(&record.to_le_bytes());
+            append(&mut out, &record.to_le_bytes())?;
         }
         Ok(out)
     }
@@ -747,7 +745,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 // the preemptions actually taken under load.
                 preemptions: crate::preempt::preemption_count(cpu_id),
             };
-            out.extend_from_slice(&record.to_le_bytes());
+            append(&mut out, &record.to_le_bytes())?;
         }
         Ok(out)
     }
@@ -804,21 +802,21 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 reference_hz,
                 model_bytes,
             )?;
-            out.extend_from_slice(&record.to_le_bytes());
+            append(&mut out, &record.to_le_bytes())?;
         }
         Ok(out)
     }
 
     fn task_limits(&self, proc_id: ProcId) -> Result<Vec<u8>, Errno> {
         // Resolve the target task by its unforgeable proc-id against the
-        // authoritative CapTable; a proc-id with no live task fails closed.
+        // authoritative CapTable's instance index; a proc-id with no live
+        // task, and the kernel sentinel every kernel thread shares, fail
+        // closed.
         let found = {
             let caps = self.state.caps.read();
-            let found = caps
-                .iter()
-                .find(|record| record.proc_id() == proc_id)
-                .map(|record| (record.process(), Arc::clone(record.charges())));
-            found
+            caps.process_of_instance(proc_id)
+                .and_then(|process| caps.caps_of_process(process))
+                .map(|record| (record.process(), Arc::clone(record.charges())))
         };
         let (task_id, charges) = found.ok_or(Errno::NotFound)?;
 
@@ -871,7 +869,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 LimitKind::Processes => 0,
             };
             let record = ResourceLimitRecord::new(kind, limits.get(kind), usage);
-            out.extend_from_slice(&record.to_le_bytes());
+            append(&mut out, &record.to_le_bytes())?;
         }
         Ok(out)
     }
@@ -1134,7 +1132,15 @@ pub(crate) fn record_page<R, const N: usize>(
 
 /// A copy of `bytes`, or [`Errno::OutOfMemory`].
 fn copied(bytes: &[u8]) -> Result<Vec<u8>, Errno> {
-    collected(bytes.len(), bytes.iter().copied()).ok_or(Errno::OutOfMemory)
+    tairix_util::fallible::copied(bytes).ok_or(Errno::OutOfMemory)
+}
+
+/// Append `bytes` to `out`, refused for memory with `out` as it was.
+fn append(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), Errno> {
+    out.try_reserve(bytes.len())
+        .map_err(|_| Errno::OutOfMemory)?;
+    out.extend_from_slice(bytes);
+    Ok(())
 }
 
 #[cfg(test)]

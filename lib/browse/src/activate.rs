@@ -89,4 +89,13 @@ pub enum Activation {
         /// The image's validated absolute path.
         path: String,
     },
+    /// The entry is a shortcut to a volume, which no walk follows: the caller
+    /// finds where the volume is now ([`crate::volume::locate`]) and shows it
+    /// as the storage catalog does, or says it is not there.
+    OpenVolume {
+        /// The shortcut's name, as its listing holds it.
+        name: String,
+        /// The volume's root the shortcut stores.
+        target: String,
+    },
 }

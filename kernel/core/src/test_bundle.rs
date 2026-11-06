@@ -60,7 +60,7 @@ pub(crate) fn test_volume() -> Arc<VolumeNodes> {
 /// by a volume, as every projection a node is reached through is.
 pub(crate) fn projection_with(flags: MountFlags) -> Arc<Projection> {
     let volume = DriverHandle::from_raw(1).expect("a non-zero handle");
-    let mut table = MountTable::new(flags);
+    let mut table = MountTable::new(flags).expect("a fresh table");
     table
         .attach(Attachment::new(volume, None, MountFlags::default()))
         .expect("a fresh table attaches the volume");

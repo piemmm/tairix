@@ -66,6 +66,7 @@ pub const fn played_out_message(event: SoundEvent) -> &'static str {
         | SoundEvent::Error
         | SoundEvent::Warning
         | SoundEvent::Info
-        | SoundEvent::Bell => "soundd: a machine sound played out",
+        | SoundEvent::Bell
+        | SoundEvent::VolumeFeedback => "soundd: a machine sound played out",
     }
 }

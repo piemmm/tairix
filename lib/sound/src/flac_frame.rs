@@ -115,7 +115,7 @@ impl Assignment {
     }
 
     /// The four-bit code the header carries.
-    #[cfg(any(test, feature = "encode"))]
+    #[cfg(any(test, feature = "encode-flac"))]
     pub(crate) const fn code(self) -> u8 {
         match self {
             Self::Independent(count) => count - 1,
@@ -456,7 +456,7 @@ pub(crate) fn lpc_prediction(coefficients: &[i64], shift: u32, past: &[i64]) -> 
 }
 
 /// A residual folded to the unsigned form Rice coding takes.
-#[cfg(any(test, feature = "encode"))]
+#[cfg(any(test, feature = "encode-flac"))]
 pub(crate) const fn fold(residual: i64) -> u64 {
     if residual >= 0 {
         residual.unsigned_abs() << 1

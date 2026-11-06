@@ -48,7 +48,7 @@ use tairix_kernel::{
     handle_panic_via_kernel_core, BinArch, FreeListAllocator, DISPATCH_SLOT, SERIAL_SINK,
 };
 use tairix_kernel_core::{
-    AddressSpaceRegistry, AuditEvent, BootReserve, EmbeddedProgram, InitSpawnCtx, KernelArch,
+    AddressSpaceRegistry, AuditEvent, EmbeddedProgram, InitSpawnCtx, KernelArch,
     KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap, ProcessWait,
     ProgramRegistry, RandomReserve, SchedWaitQueueArch, NULL_DMA_ALLOC_FACILITY,
     NULL_MMIO_MAP_FACILITY, NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
@@ -332,6 +332,10 @@ fn leak_subsystems(board: &BspBringUp) -> Subsystems {
         board.calibration,
         board.irq_routing,
     ));
+    // Seeded as the kernel's is, since a child's stack canary is drawn from it.
+    let Ok((reserve, _)) = tairix_kernel_core::random::seeded_reserve(&sched_arch) else {
+        fail("wild-fault test: the random reserve could not be seeded");
+    };
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), sched_arch) else {
         fail("wild-fault test: scheduler construction failed");
     };
@@ -358,7 +362,7 @@ fn leak_subsystems(board: &BspBringUp) -> Subsystems {
         ipc: Box::leak(Box::new(RwLock::new(PortRegistry::new()))),
         aspaces: Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new()))),
         rng: Box::leak(Box::new(RwLock::new(
-            Box::new(BootReserve::new()) as Box<dyn RandomReserve + Send + Sync>
+            Box::new(reserve) as Box<dyn RandomReserve + Send + Sync>
         ))),
         irq_table: Box::leak(Box::new(IrqTable::new(0))),
     }
@@ -467,6 +471,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
         sys.peer_watch,
         wait_producer,
         &X86_64_PROCESS_SPAWN,
+        sys.rng,
     );
 
     // Spawn the parent role through the production runtime-spawn seam

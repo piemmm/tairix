@@ -323,6 +323,15 @@
 //! them, so a member's recorded state (in particular a fault) is carried
 //! forward untouched rather than re-derived from a fresh probe on every call.
 //!
+//! # The identity an array states ([`OwnedRaidArray::composed_identity`])
+//!
+//! A volume's writes held while its medium was away are replayed onto the
+//! medium that returns only when its device proves it is the one they were
+//! made on. An array proves itself by its own identifier and what each slot's
+//! device states, in slot order, and by nothing while any slot proves
+//! nothing; [`StatingArray`] serves it over the block-service seam stating
+//! that identity.
+//!
 //! [`RaidLevel`]: tairix_abi::raid::RaidLevel
 //! [`SlotDisposition`]: tairix_abi::raid::SlotDisposition
 //! [`ArrayHealth`]: tairix_abi::raid::ArrayHealth
@@ -341,6 +350,7 @@ extern crate alloc;
 mod array;
 mod assemble;
 mod backoff;
+mod device_identity;
 mod dualparity;
 mod gf256;
 mod health;
@@ -356,6 +366,7 @@ mod triple;
 pub use array::{RaidArray, RaidError};
 pub use assemble::{fill_members, AssembleError, AssembleMember};
 pub use backoff::{RetryCadence, RetryState};
+pub use device_identity::StatingArray;
 pub use dualparity::{DualParityArray, DualParityError, DualParityMember, SCRATCH_BLOCKS};
 pub use maintenance::{
     ArrayMaintenance, MaintenanceAction, MaintenanceError, MaintenancePolicy, MemberRetry,

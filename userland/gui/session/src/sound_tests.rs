@@ -164,3 +164,78 @@ fn the_bar_follows_the_default_sink_and_the_captures() {
     assert_eq!(shown.output.map(|output| output.device_id), Some(3));
     assert!(!sound.captures(0).recording);
 }
+
+/// A drag is heard once: where it settles, once the round trip carrying that
+/// level lists it applied; nothing on its way is.
+#[test]
+fn a_drag_is_heard_once_after_the_round_trip_that_applies_it() {
+    let remembered = SoundControls::default();
+    let mut sound = SoundSession::new();
+    sound.refresh();
+    let _ = sound.next_job();
+    let _ = sound.landed(listed(vec![speakers(ControlAccess::Own)]), &remembered);
+
+    let mut moving = speakers(ControlAccess::Own);
+    moving.own_level = true;
+    for millibel in [-2_000, -1_600] {
+        moving.level = level(millibel);
+        sound.ask(3, DeviceControl::Level(moving.level), false);
+        let _ = sound.next_job();
+        let landed = sound.landed(listed(vec![moving]), &remembered);
+        assert!(!landed.confirmed, "mid-drag");
+    }
+    moving.level = level(-1_200);
+    sound.ask(3, DeviceControl::Level(moving.level), true);
+    assert!(sound.next_job().is_some(), "the settled level goes out");
+    assert!(sound.landed(listed(vec![moving]), &remembered).confirmed);
+    sound.refresh();
+    let _ = sound.next_job();
+    let again = sound.landed(listed(vec![moving]), &remembered);
+    assert!(!again.confirmed, "heard once");
+}
+
+/// Only the user's own hand on the output is heard: not the controls put back
+/// as the room is claimed, a refused change, a mute or an input's level; an
+/// unmute is.
+#[test]
+fn a_restore_a_refusal_a_mute_and_an_input_are_not_heard() {
+    let mut set = speakers(ControlAccess::Own);
+    set.own_level = true;
+    set.level = level(-1_500);
+    let mut remembered = SoundControls::default();
+    assert!(remembered.observe(&[set]));
+
+    let mut sound = SoundSession::new();
+    sound.refresh();
+    let _ = sound.next_job();
+    let _ = sound.landed(listed(vec![speakers(ControlAccess::Own)]), &remembered);
+    assert!(sound.next_job().is_some(), "the remembered level put back");
+    let restored = sound.landed(listed(vec![set]), &remembered);
+    assert!(!restored.confirmed, "a restore is not the user's hand");
+
+    sound.ask(3, DeviceControl::Level(level(-1_500)), true);
+    let _ = sound.next_job();
+    let refused = SoundAnswer {
+        refused: Some(Errno::SeatNotOwner),
+        devices: Ok(vec![set]),
+    };
+    assert!(!sound.landed(refused, &remembered).confirmed, "refused");
+
+    let mut muted = set;
+    muted.muted = true;
+    sound.ask(3, DeviceControl::Mute(true), true);
+    let _ = sound.next_job();
+    assert!(!sound.landed(listed(vec![muted]), &remembered).confirmed);
+    sound.ask(3, DeviceControl::Mute(false), true);
+    let _ = sound.next_job();
+    let unmuted = sound.landed(listed(vec![set]), &remembered);
+    assert!(unmuted.confirmed, "an unmute is heard");
+
+    let mut microphone = set;
+    microphone.device_id = 7;
+    microphone.direction = StreamDirection::Capture;
+    sound.ask(7, DeviceControl::Level(level(-1_500)), true);
+    let _ = sound.next_job();
+    let input = sound.landed(listed(vec![set, microphone]), &remembered);
+    assert!(!input.confirmed, "an input");
+}

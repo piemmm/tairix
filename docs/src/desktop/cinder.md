@@ -146,6 +146,14 @@ An edge deflects him rather than pinning him: the destination he was walking to
 lies outside the work area, so clamping alone left him pressed against the
 boundary for good.
 
+He is drawn on the desktop the frame after he is let out, asleep or not, and
+then every frame the desktop shows while he moves. While he is still, he is
+woken only when his mind next reconsiders what he is doing, a few seconds on,
+so a nap ends and a sleeping companion costs a wake in seconds rather than one
+a frame; a wake advances him by the time that passed, held to a few frames
+while he moves so a stall never carries him across the screen
+(`tairix_cinder::pace`).
+
 All of this is in the crate's host-tested library rather than in its `Run`
 binary, because it is behaviour and behaviour has to be testable without a
 screen.
@@ -166,7 +174,14 @@ next time.
 ## Being refused
 
 If the account's grants do not carry `CAP_DESKTOP_LAYER`, if there is no
-graphical session, or if the seat already holds its companions, *Let Cinder out*
-is refused. The reason is stated on `stderr` and in the pen, the pen keeps
+graphical session, if the seat already holds its companions, or if there is not
+the memory to draw him, *Let Cinder out* is refused. The reason is stated on
+`stderr` and on the pen's wall, the pen keeps
 working, and Cinder stays in. A denied optional action is an answer, not a
 fatal error.
+
+## Tested end to end
+
+`cinder_qemu_aarch64` boots the production desktop, opens Cinder from the
+program library, lets him out, and finds his surface composited on the desktop
+(`plans/CINDER.md` CD12).

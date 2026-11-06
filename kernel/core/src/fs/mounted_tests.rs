@@ -115,7 +115,8 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
     // The VFS: two rebased mounts on the shared driver and one plain mount on
     // the other, with their in-RAM mount-point directories created so the
     // delegated walk has a permission template.
-    let mut vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    let mut vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID))
+        .expect("the default layout fits in memory");
     let caps = caps();
     let cred = Credentials {
         uid: UserId(TEST_UID),
@@ -225,7 +226,8 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
     usb.create(uroot, b"note", NodeKind::RegularFile, &PLANTED)
         .expect("note file");
 
-    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID))
+        .expect("the default layout fits in memory");
     root_with_children(&vfs, h_parent, &[(h_usb, "/usb1"), (h_dup, "/dup")]);
 
     let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
@@ -336,10 +338,10 @@ fn before_the_root_is_served(
 /// closed as one standing on it does.
 #[test]
 fn the_projections_beneath_an_unserved_floor_are_reached_through_it() {
-    let (cell, h_root, svc) = before_the_root_is_served(Vfs::with_default_layout(
-        UserId(TEST_UID),
-        GroupId(TEST_GID),
-    ));
+    let (cell, h_root, svc) = before_the_root_is_served(
+        Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID))
+            .expect("the default layout fits in memory"),
+    );
     let caps = caps();
     let read = |path| {
         let mut buf = [0u8; 1];
@@ -398,7 +400,8 @@ fn an_unserved_floor_is_searched_under_its_layout_record() {
         UserId(0),
         GroupId(0),
         Mode::from_bits(0o700),
-    ));
+    ))
+    .expect("a table");
     for (point, flags) in [
         ("/System", MountFlags::READ_ONLY),
         ("/System/Logs", MountFlags::NOEXEC),
@@ -1122,7 +1125,8 @@ fn a_listing_holds_no_mount_table_guard_into_its_driver() {
             "a mount-table guard was held into the driver"
         );
     }));
-    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID))
+        .expect("the default layout fits in memory");
     root_with_children(&vfs, h_parent, &[(h_usb, "/usb1")]);
     cell.install_vfs(vfs).expect("install vfs");
     cell.register(h_parent, parent, "root", "memfs", [0u8; 16], None)
@@ -2148,7 +2152,8 @@ fn production_layout_planted(
 
     // The production mount layout: writable root as `/`, read-only volume
     // over `/System`, writable exceptions rebased back out of it.
-    let vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
+    let vfs =
+        Vfs::with_default_layout(UserId(0), GroupId(0)).expect("the default layout fits in memory");
     let system_handle = DriverHandle::from_raw(9).expect("handle");
     let root_handle = DriverHandle::from_raw(10).expect("handle");
     {
@@ -2360,7 +2365,8 @@ fn a_snapshot_the_heap_cannot_hold_is_refused_whole() {
 #[test]
 fn a_busy_volume_is_listed_with_its_last_figures_without_waiting() {
     let handle = DriverHandle::from_raw(23).expect("handle");
-    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID))
+        .expect("the default layout fits in memory");
     {
         let mut mounts = vfs.mounts_write();
         mounts
@@ -2402,7 +2408,8 @@ fn a_volume_shown_at_several_paths_is_reported_once() {
     }));
     let handle = DriverHandle::from_raw(21).expect("handle");
     let id = [0x5Au8; 16];
-    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID))
+        .expect("the default layout fits in memory");
     {
         let mut mounts = vfs.mounts_write();
         mounts
@@ -2524,9 +2531,9 @@ fn a_volume_coming_going_or_failing_is_published_as_a_mounts_notice() {
     assert!(generation() > failed, "a volume leaving is published");
 }
 
-/// A volume is listed under the title its registration was given, which a
-/// driver replaced in place keeps; a retitle is published as a `Mounts`
-/// notice, and an unregistered handle takes none.
+/// A volume is listed under the title its registration was given, and as
+/// taking one, both of which a driver replaced in place keeps; a retitle is
+/// published as a `Mounts` notice, and an unregistered handle takes none.
 #[test]
 fn a_volume_is_listed_under_the_title_it_was_given() {
     use tairix_abi::driver::filesystem::VolumeTitle;
@@ -2546,22 +2553,30 @@ fn a_volume_is_listed_under_the_title_it_was_given() {
             .expect("snapshot")
             .iter()
             .find(|record| record.source_bytes() == b"vol")
+            .map(|record| (record.title(), record.titled()))
             .expect("the registered volume is listed")
-            .title()
     };
-    assert!(listed().is_empty(), "untitled until it is given one");
+    assert_eq!(
+        listed(),
+        (VolumeTitle::EMPTY, false),
+        "untitled until it is given one"
+    );
     let title = VolumeTitle::new("Workbench").expect("a title");
     let before = generation();
-    cell.set_title(handle, title).expect("titled");
+    cell.set_title(handle, title, true).expect("titled");
     assert!(generation() > before, "a retitle is published");
-    assert_eq!(listed(), title);
+    assert_eq!(listed(), (title, true));
     let nodes = cell.nodes(handle).expect("its registration");
     cell.register_with_nodes(handle, driver(), "vol", "memfs", [0u8; 16], None, nodes)
         .expect("replaced in place");
-    assert_eq!(listed(), title, "a driver replaced in place keeps it");
+    assert_eq!(
+        listed(),
+        (title, true),
+        "a driver replaced in place keeps it"
+    );
     let unregistered = DriverHandle::from_raw(10).expect("handle");
     assert_eq!(
-        cell.set_title(unregistered, title),
+        cell.set_title(unregistered, title, true),
         Err(Errno::NotImplemented)
     );
 }
@@ -3522,7 +3537,8 @@ fn a_link_in_a_submount_cannot_resolve_outside_the_projected_subtree() {
         .write_at(inside, 0, b"I")
         .expect("projected contents");
 
-    let mut vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    let mut vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID))
+        .expect("the default layout fits in memory");
     let caps = caps();
     let cred = Credentials {
         uid: UserId(TEST_UID),
@@ -3799,7 +3815,8 @@ fn realpath_answers_a_submount_with_its_own_mount_point() {
         .create_link(area, b"up", b"../inside", &PLANTED)
         .expect("ascending link");
 
-    let mut vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    let mut vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID))
+        .expect("the default layout fits in memory");
     let caps = caps();
     let cred = Credentials {
         uid: UserId(TEST_UID),
@@ -4121,7 +4138,8 @@ fn a_program_is_read_only_from_a_mount_that_runs_programs() {
         .create_link(stick_dir, b"hop", b"/run", &PLANTED)
         .expect("link");
 
-    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID))
+        .expect("the default layout fits in memory");
     {
         let mut mounts = vfs.mounts_write();
         mounts
@@ -4868,7 +4886,8 @@ mod held {
         let root = fs.root();
         fs.create(root, b"Sub", NodeKind::Directory, &PLANTED)
             .expect("subtree");
-        let mut vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+        let mut vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID))
+            .expect("the default layout fits in memory");
         let caps = caps();
         let cred = Credentials {
             uid: UserId(TEST_UID),
@@ -5184,7 +5203,8 @@ mod resolve {
     /// The default layout with each of `points` attached as a removable
     /// volume beneath the catalog, under handles from 11 up.
     fn removables(points: &[&str]) -> Vfs {
-        let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+        let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID))
+            .expect("the default layout fits in memory");
         let template = Metadata::new(UserId(TEST_UID), GroupId(TEST_GID), Mode::from_bits(0o755));
         for (raw, point) in (11..).zip(points) {
             let handle = DriverHandle::from_raw(raw).expect("handle");
@@ -5850,6 +5870,7 @@ fn a_stand_in_is_known_as_one_until_a_driver_serves_again() {
         source: "vol",
         fstype: "memfs",
         volume_id: [0x33; 16],
+        identity: [0x33; 16],
     };
     cell.register_stand_in(
         handle,
@@ -5912,6 +5933,7 @@ fn a_stand_in_is_listed_unavailable_from_its_registration() {
         source: "gone",
         fstype: "memfs",
         volume_id: [0x34; 16],
+        identity: [0x34; 16],
     };
     let before = generation();
     cell.register_stand_in(
@@ -5945,6 +5967,7 @@ fn a_recovery_stand_in_is_listed_as_its_volume_from_its_registration() {
         source: "back",
         fstype: "memfs",
         volume_id: [0x35; 16],
+        identity: [0x35; 16],
     };
     cell.register_recovery_stand_in(
         handle,
@@ -5965,6 +5988,63 @@ fn a_recovery_stand_in_is_listed_as_its_volume_from_its_registration() {
     assert!(
         cell.reach(handle).expect("registered").1,
         "the stand-in answers it"
+    );
+}
+
+/// A twin's registration lists the identity its content carries beside the
+/// key it is published under, and a stand-in replacing its driver in place
+/// keeps that identity, whatever it is named with.
+#[test]
+fn a_twins_identity_is_listed_beside_its_key_and_kept_by_its_stand_in() {
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs(false)).expect("install vfs");
+    let handle = crate::fs::test_volume::volume_handle();
+    let (key, identity) = ([0x36; 16], [0x37; 16]);
+    let names = crate::fs::VolumeNames {
+        source: "twin_2",
+        fstype: "memfs",
+        volume_id: key,
+        identity,
+    };
+    cell.register_served(
+        handle,
+        driver(),
+        names,
+        None,
+        None,
+        tairix_abi::sysinfo::VolumeClass::Removable,
+    )
+    .expect("registers");
+    let users: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
+    users.install(identity_table()).expect("identity");
+    let svc = MountedFilesystemService::new(cell, users);
+    let listed = || {
+        let record = svc
+            .mount_snapshot()
+            .expect("snapshot")
+            .into_iter()
+            .find(|record| record.source_bytes() == b"twin_2")
+            .expect("the twin is listed");
+        (record.volume_id(), record.identity())
+    };
+    assert_eq!(listed(), (key, identity));
+    let (nodes, _) = cell.reach(handle).expect("registered");
+    let stood = crate::fs::VolumeNames {
+        identity: key,
+        ..names
+    };
+    cell.register_stand_in(
+        handle,
+        driver(),
+        stood,
+        nodes,
+        MountAvailability::UnavailableDirty,
+    )
+    .expect("stands in");
+    assert_eq!(
+        listed(),
+        (key, identity),
+        "the registration keeps its identity"
     );
 }
 

@@ -27,12 +27,10 @@ mod catalog;
 #[cfg(test)]
 pub(crate) mod fixtures;
 mod hosted;
-mod keep;
 mod talk;
 
 pub use catalog::{load_savers, Saver, SaverCatalog, SAVER_REFUSED, SAVER_REFUSED_MESSAGE};
 pub use hosted::{Ended, Hosted, SaverErrands, SaverMemory};
-pub use keep::{keep, kept_at, Picture, PictureFiles, Unkept};
 pub use talk::Fault;
 
 use alloc::boxed::Box;

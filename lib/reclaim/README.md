@@ -13,7 +13,9 @@ that enforces all of it.
   `CacheBudget` derives the grow/shrink watermarks from the size of the
   backing resource, never a hand-picked constant. `CacheAccounting` is the
   checked, per-class, payload/metadata-split byte ledger with saturating
-  event counters. `ReclaimOwner::UserlandProcess` names a userland process
+  event counters; `resize_room` charges an index's own room to its class's
+  bookkeeping apart from any entry. `ReclaimOwner::UserlandProcess` names a
+  userland process
   or service that has no numeric task id to charge memory against (`abi-v1`
   gives a process no way to read its own id back) — used by a library
   embedded in many different consumer programs, or by a singleton system

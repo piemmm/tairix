@@ -32,6 +32,7 @@ mod build_support;
 pub mod cipher;
 pub mod constant_time;
 pub mod ffdh;
+pub mod fingerprint;
 pub mod hash;
 pub mod kdf;
 pub mod kem;
@@ -67,6 +68,7 @@ pub use ffdh::{
     ffdh_group18_agree, ffdh_group18_public, Ffdh2048Value, Ffdh4096Value, Ffdh8192Value,
     FfdhError, FFDH_GROUP14_LEN, FFDH_GROUP16_LEN, FFDH_GROUP18_LEN,
 };
+pub use fingerprint::{Fingerprint, FINGERPRINT_LEN};
 pub use hash::{
     sha256, sha384, sha512, Sha256Digest, Sha256Stream, Sha384Digest, Sha384Stream, Sha512Digest,
     Sha512Stream, SHA256_OUTPUT_LEN, SHA384_OUTPUT_LEN, SHA512_OUTPUT_LEN,

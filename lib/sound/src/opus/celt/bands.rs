@@ -1,16 +1,22 @@
 //! The bands' shapes (RFC 6716, sections 4.3.4 to 4.3.6): each band coded
 //! whole or split in time or stereo by a coded angle, its pulses where it has
 //! bits for them, and otherwise folded from the bands below it.
+//!
+//! An encoder runs the same routines over its bands' unit shapes: each split
+//! turns them into what is coded where the decoder turns it back, and the
+//! shapes the decoder will read are left in their place.
 
 use super::alloc::{bits_to_pulses, most_bits, pulses, pulses_to_bits};
-use super::pvq::{renormalise, unquantise, MAX_WIDTH};
+use super::pvq::{inner, renormalise, shape, MAX_WIDTH};
 use super::tables::{BANDS, LOG_N};
 use super::{rsqrt, sqrt, BAND_COUNT, SPREAD_AGGRESSIVE};
 use alloc::vec::Vec;
+use core::f32::consts::FRAC_1_SQRT_2;
 
 use tairix_util::fallible::filled;
+use tairix_util::mathf;
 
-use crate::opus::range::{ilog, RangeDecoder, BITRES};
+use crate::opus::range::{ilog, Coder, BITRES};
 use crate::DecodeError;
 
 const QTHETA_OFFSET: i32 = 4;
@@ -19,7 +25,7 @@ const QTHETA_OFFSET_TWOPHASE: i32 = 16;
 /// The longest frame's coefficients a channel below the last band holds.
 const NORM_LEN: usize = 8 * BANDS[BAND_COUNT - 1];
 
-/// The decoder's scratch for one frame's bands, kept across frames so a
+/// The scratch of one frame's bands at either end, kept across frames so a
 /// frame allocates nothing.
 pub(super) struct Scratch {
     norm: Vec<f32>,
@@ -107,6 +113,22 @@ fn angle_steps(n: usize, bits: i32, offset: i32, pulse_cap: i32, stereo: bool) -
     ((qn + 1) >> 1) << 1
 }
 
+/// The angle, in Q14 of a right angle, at which a split divides its energy
+/// between `x` and `y`: for stereo, between their sum and their difference.
+fn angle(x: &[f32], y: &[f32], stereo: bool) -> i32 {
+    let (mid, side) = if stereo {
+        x.iter()
+            .zip(y)
+            .fold((0.0f32, 0.0f32), |(mid, side), (&l, &r)| {
+                (mid + (l + r) * (l + r), side + (l - r) * (l - r))
+            })
+    } else {
+        (inner(x, x), inner(y, y))
+    };
+    let theta = mathf::atan2(mathf::sqrt(f64::from(side)), mathf::sqrt(f64::from(mid)));
+    mathf::round_i32(theta * (32768.0 / core::f64::consts::PI))
+}
+
 /// Pairs of samples `stride` apart rotated by π/4.
 fn haar(x: &mut [f32], n0: usize, stride: usize) {
     const HALF_ROOT: f32 = core::f32::consts::FRAC_1_SQRT_2;
@@ -153,6 +175,8 @@ fn interleave(x: &mut [f32], n0: usize, stride: usize, hadamard: bool, tmp: &mut
 
 /// A split's angle and what it implies.
 struct Split {
+    /// Whether a stereo split's channels share one shape: intensity stereo.
+    intensity: bool,
     inverted: bool,
     mid: i32,
     side: i32,
@@ -161,9 +185,9 @@ struct Split {
     spent: i32,
 }
 
-/// Decodes one frame's bands.
-pub(super) struct Bands<'d, 'f> {
-    pub(super) decoder: &'d mut RangeDecoder<'f>,
+/// Codes one frame's bands.
+pub(super) struct Bands<'d, C> {
+    pub(super) coder: &'d mut C,
     pub(super) band: usize,
     pub(super) intensity: usize,
     pub(super) spread: usize,
@@ -171,19 +195,23 @@ pub(super) struct Bands<'d, 'f> {
     pub(super) remaining: i32,
     pub(super) seed: u32,
     pub(super) disable_inversion: bool,
-    pub(super) avoid_split_noise: bool,
     pub(super) order: &'d mut [f32],
     pub(super) pulses: &'d mut [i32],
+    /// Each band's amplitude, which an encoder weighs intensity stereo's
+    /// channels by.
+    pub(super) amplitudes: &'d [f32; 2 * BAND_COUNT],
 }
 
-impl Bands<'_, '_> {
+impl<C: Coder> Bands<'_, C> {
+    /// The split of `x` from `y`, whose angle an encoder measures.
     #[allow(
         clippy::too_many_arguments,
         reason = "the split's state, one value each"
     )]
     fn theta(
         &mut self,
-        n: usize,
+        x: &[f32],
+        y: &[f32],
         bits: &mut i32,
         blocks: usize,
         blocks0: usize,
@@ -191,6 +219,7 @@ impl Bands<'_, '_> {
         stereo: bool,
         fill: &mut u32,
     ) -> Split {
+        let n = x.len();
         let pulse_cap = i32::from(LOG_N[self.band]) + lm * (1 << BITRES);
         let offset = (pulse_cap >> 1)
             - if stereo && n == 2 {
@@ -202,27 +231,32 @@ impl Bands<'_, '_> {
         if stereo && self.band >= self.intensity {
             qn = 1;
         }
-        let tell = self.decoder.tell_frac();
+        let tell = self.coder.tell_frac();
         let mut itheta = 0;
         let mut inverted = false;
         if qn != 1 {
-            itheta = if stereo && n > 2 {
-                self.stepped_angle(qn)
-            } else if blocks0 > 1 || stereo {
-                self.decoder.uint(qn as u32 + 1) as i32
+            let aim = if C::WRITES {
+                (angle(x, y, stereo) * qn + 8192) >> 14
             } else {
-                self.triangular_angle(qn)
+                0
+            };
+            itheta = if stereo && n > 2 {
+                self.stepped_angle(aim, qn)
+            } else if blocks0 > 1 || stereo {
+                self.coder.uint(aim as u32, qn as u32 + 1) as i32
+            } else {
+                self.triangular_angle(aim, qn)
             };
             itheta = itheta * 16384 / qn;
         } else if stereo {
             if *bits > 2 << BITRES && self.remaining > 2 << BITRES {
-                inverted = self.decoder.bit_logp(2);
+                inverted = self.coder.bit_logp(C::WRITES && inner(x, y) < 0.0, 2);
             }
             if self.disable_inversion {
                 inverted = false;
             }
         }
-        let spent = self.decoder.tell_frac() - tell;
+        let spent = self.coder.tell_frac() - tell;
         *bits -= spent;
         let (mid, side, delta) = match itheta {
             0 => {
@@ -244,6 +278,7 @@ impl Bands<'_, '_> {
             }
         };
         Split {
+            intensity: qn == 1,
             inverted,
             mid,
             side,
@@ -254,52 +289,66 @@ impl Bands<'_, '_> {
     }
 
     /// A stereo angle: probability three to each step up to the middle and
-    /// one to each above.
-    fn stepped_angle(&mut self, qn: i32) -> i32 {
+    /// one to each above; an encoder writes `aim`.
+    fn stepped_angle(&mut self, aim: i32, qn: i32) -> i32 {
         let p0 = 3;
         let x0 = qn / 2;
         let total = p0 * (x0 + 1) + x0;
-        let point = self.decoder.decode(total as u32) as i32;
-        let x = if point < (x0 + 1) * p0 {
-            point / p0
-        } else {
-            x0 + 1 + (point - (x0 + 1) * p0)
+        let x = match self.coder.point(total as u32) {
+            Some(point) => {
+                let point = point as i32;
+                if point < (x0 + 1) * p0 {
+                    point / p0
+                } else {
+                    x0 + 1 + (point - (x0 + 1) * p0)
+                }
+            }
+            None => aim,
         };
         let (low, high) = if x <= x0 {
             (p0 * x, p0 * (x + 1))
         } else {
             ((x - 1 - x0) + (x0 + 1) * p0, (x - x0) + (x0 + 1) * p0)
         };
-        self.decoder.update(low as u32, high as u32, total as u32);
+        self.coder.take(low as u32, high as u32, total as u32);
         x
     }
 
-    /// A time split's angle, from a triangular distribution.
-    fn triangular_angle(&mut self, qn: i32) -> i32 {
+    /// A time split's angle, from a triangular distribution; an encoder
+    /// writes `aim`.
+    fn triangular_angle(&mut self, aim: i32, qn: i32) -> i32 {
         let half = qn >> 1;
         let total = (half + 1) * (half + 1);
-        let point = self.decoder.decode(total as u32) as i32;
-        let (itheta, width, low) = if point < (half * (half + 1)) >> 1 {
-            let itheta = (isqrt(8 * point as u32 + 1) as i32 - 1) >> 1;
-            (itheta, itheta + 1, (itheta * (itheta + 1)) >> 1)
-        } else {
-            let itheta = (2 * (qn + 1) - isqrt(8 * (total - point - 1) as u32 + 1) as i32) >> 1;
+        let rising = |itheta: i32| (itheta, itheta + 1, (itheta * (itheta + 1)) >> 1);
+        let falling = |itheta: i32| {
             (
                 itheta,
                 qn + 1 - itheta,
                 total - (((qn + 1 - itheta) * (qn + 2 - itheta)) >> 1),
             )
         };
-        self.decoder
-            .update(low as u32, (low + width) as u32, total as u32);
+        let (itheta, width, low) = match self.coder.point(total as u32) {
+            Some(point) => {
+                let point = point as i32;
+                if point < (half * (half + 1)) >> 1 {
+                    rising((isqrt(8 * point as u32 + 1) as i32 - 1) >> 1)
+                } else {
+                    falling((2 * (qn + 1) - isqrt(8 * (total - point - 1) as u32 + 1) as i32) >> 1)
+                }
+            }
+            None if aim < half => rising(aim),
+            None => falling(aim),
+        };
+        self.coder
+            .take(low as u32, (low + width) as u32, total as u32);
         itheta
     }
 
     /// A band of one coefficient: a sign for each channel.
     fn single(&mut self, x: &mut [f32], y: Option<&mut [f32]>, out: Option<&mut [f32]>) -> u32 {
-        x[0] = self.sign();
+        x[0] = self.sign(x[0]);
         if let Some(y) = y {
-            y[0] = self.sign();
+            y[0] = self.sign(y[0]);
         }
         if let Some(out) = out {
             out[0] = x[0];
@@ -307,12 +356,14 @@ impl Bands<'_, '_> {
         1
     }
 
-    fn sign(&mut self) -> f32 {
+    /// The sign the frame codes for one coefficient, `value`'s at an encoder,
+    /// and positive where the frame has no bit for it.
+    fn sign(&mut self, value: f32) -> f32 {
         if self.remaining < 1 << BITRES {
             return 1.0;
         }
         self.remaining -= 1 << BITRES;
-        if self.decoder.bits(1) != 0 {
+        if self.coder.bits(u32::from(C::WRITES && value < 0.0), 1) != 0 {
             -1.0
         } else {
             1.0
@@ -345,7 +396,7 @@ impl Bands<'_, '_> {
                 fill = (fill & 1) | (fill << 1);
             }
             blocks = (blocks + 1) >> 1;
-            let split = self.theta(half, &mut bits, blocks, blocks0, lm, false, &mut fill);
+            let split = self.theta(x, y, &mut bits, blocks, blocks0, lm, false, &mut fill);
             let mid = (1.0 / 32768.0) * split.mid as f32;
             let side = (1.0 / 32768.0) * split.side as f32;
             let mut delta = split.delta;
@@ -419,8 +470,8 @@ impl Bands<'_, '_> {
             self.remaining -= cost;
         }
         if q != 0 {
-            return unquantise(
-                self.decoder,
+            return shape(
+                self.coder,
                 x,
                 pulses(q) as usize,
                 self.spread,
@@ -465,7 +516,8 @@ impl Bands<'_, '_> {
     /// `lowband` is the fold's private copy, which this may reorder.
     #[allow(
         clippy::too_many_arguments,
-        reason = "the band's state, one value each"
+        clippy::too_many_lines,
+        reason = "the band's state, one value each, and the reference's quant_band kept whole"
     )]
     pub(super) fn mono(
         &mut self,
@@ -492,6 +544,9 @@ impl Bands<'_, '_> {
         let mut tf_change = self.tf_change;
         let recombine = tf_change.max(0) as usize;
         for k in 0..recombine {
+            if C::WRITES {
+                haar(x, n0 >> k, 1 << k);
+            }
             if let Some(lowband) = lowband.as_deref_mut() {
                 haar(lowband, n0 >> k, 1 << k);
             }
@@ -502,6 +557,9 @@ impl Bands<'_, '_> {
         n_b <<= recombine;
         let mut time_divide = 0;
         while n_b & 1 == 0 && tf_change < 0 {
+            if C::WRITES {
+                haar(x, n_b, blocks);
+            }
             if let Some(lowband) = lowband.as_deref_mut() {
                 haar(lowband, n_b, blocks);
             }
@@ -514,14 +572,12 @@ impl Bands<'_, '_> {
         let blocks0 = blocks;
         let n_b0 = n_b;
         if blocks0 > 1 {
+            let (block_len, stride) = (n_b >> recombine, blocks0 << recombine);
+            if C::WRITES {
+                deinterleave(x, block_len, stride, long_blocks, self.order);
+            }
             if let Some(lowband) = lowband.as_deref_mut() {
-                deinterleave(
-                    lowband,
-                    n_b >> recombine,
-                    blocks0 << recombine,
-                    long_blocks,
-                    self.order,
-                );
+                deinterleave(lowband, block_len, stride, long_blocks, self.order);
             }
         }
         let mut mask = self.partition(x, bits, blocks, lowband.as_deref(), lm, gain, fill);
@@ -559,7 +615,8 @@ impl Bands<'_, '_> {
     /// A stereo band: the angle between its channels, then mid and side.
     #[allow(
         clippy::too_many_arguments,
-        reason = "the band's state, one value each"
+        clippy::too_many_lines,
+        reason = "the band's state, one value each, and the reference's quant_band_stereo kept whole"
     )]
     pub(super) fn stereo(
         &mut self,
@@ -577,7 +634,10 @@ impl Bands<'_, '_> {
             return self.single(x, Some(y), out);
         }
         let original_fill = fill;
-        let split = self.theta(n, &mut bits, blocks, blocks, lm, true, &mut fill);
+        let split = self.theta(x, y, &mut bits, blocks, blocks, lm, true, &mut fill);
+        if C::WRITES {
+            self.prepare_stereo(x, y, &split);
+        }
         let mid = (1.0 / 32768.0) * split.mid as f32;
         let side = (1.0 / 32768.0) * split.side as f32;
         let mask;
@@ -590,15 +650,16 @@ impl Bands<'_, '_> {
             let mbits = bits - sbits;
             let swapped = split.itheta > 8192;
             self.remaining -= split.spent + sbits;
-            let sign = if sbits != 0 && self.decoder.bits(1) != 0 {
-                -1.0
-            } else {
-                1.0
-            };
             let (x2, y2) = if swapped {
                 (&mut *y, &mut *x)
             } else {
                 (&mut *x, &mut *y)
+            };
+            let aim = C::WRITES && x2[0] * y2[1] - x2[1] * y2[0] < 0.0;
+            let sign = if sbits != 0 && self.coder.bits(u32::from(aim), 1) != 0 {
+                -1.0
+            } else {
+                1.0
             };
             mask = self.mono(x2, mbits, blocks, lowband, lm, out, 1.0, original_fill);
             y2[0] = -sign * x2[1];
@@ -639,6 +700,27 @@ impl Bands<'_, '_> {
             }
         }
         mask
+    }
+
+    /// Turn a stereo band's left and right shapes into what its split codes:
+    /// their sum, each weighed by its amplitude, under intensity stereo and
+    /// where the angle leaves the side nothing, and otherwise the mid and
+    /// side [`merge`] turns back.
+    fn prepare_stereo(&self, x: &mut [f32], y: &mut [f32], split: &Split) {
+        if split.intensity || split.itheta == 0 {
+            let left = self.amplitudes[self.band];
+            let right = self.amplitudes[BAND_COUNT + self.band];
+            let right = if split.inverted { -right } else { right };
+            for (l, &r) in x.iter_mut().zip(y.iter()) {
+                *l = left * *l + right * r;
+            }
+        } else {
+            for (l, r) in x.iter_mut().zip(y.iter_mut()) {
+                let (left, right) = (*l, *r);
+                *l = FRAC_1_SQRT_2 * (left + right);
+                *r = FRAC_1_SQRT_2 * (right - left);
+            }
+        }
     }
 }
 
@@ -682,16 +764,21 @@ pub(super) struct Frame<'p> {
     pub(super) total_bits: i32,
     pub(super) balance: i32,
     pub(super) disable_inversion: bool,
+    /// Each band's amplitude, which an encoder weighs intensity stereo's
+    /// channels by.
+    pub(super) amplitudes: &'p [f32; 2 * BAND_COUNT],
 }
 
-/// Decode every band's shape into `x` (and `y` for a stereo frame), each
-/// one channel's coefficients; the short blocks each band filled.
+/// Code every band's shape in `x` (and `y` for a stereo frame), each one
+/// channel's coefficients, which at an encoder hold its bands' unit shapes:
+/// the shapes the frame carries are left there. The short blocks each band
+/// filled.
 #[allow(
     clippy::too_many_lines,
     reason = "the reference's quant_all_bands, kept whole so the port can be read against it"
 )]
-pub(super) fn all(
-    decoder: &mut RangeDecoder<'_>,
+pub(super) fn all<C: Coder>(
+    coder: &mut C,
     frame: &Frame<'_>,
     x: &mut [f32],
     mut y: Option<&mut [f32]>,
@@ -709,7 +796,7 @@ pub(super) fn all(
     let (norm, norm2) = scratch.norm.split_at_mut(norm_len);
     let fold = &mut scratch.fold;
     let mut bands = Bands {
-        decoder,
+        coder,
         band: start,
         intensity: frame.intensity,
         spread: frame.spread,
@@ -717,9 +804,9 @@ pub(super) fn all(
         remaining: 0,
         seed: *seed,
         disable_inversion: frame.disable_inversion,
-        avoid_split_noise: blocks > 1,
         order: &mut scratch.order,
         pulses: &mut scratch.pulses,
+        amplitudes: frame.amplitudes,
     };
     let mut balance = frame.balance;
     let mut dual_stereo = frame.dual_stereo;
@@ -730,7 +817,7 @@ pub(super) fn all(
         let last = band == frame.end - 1;
         let range = m * BANDS[band]..m * BANDS[band + 1];
         let n = range.len();
-        let tell = bands.decoder.tell_frac();
+        let tell = bands.coder.tell_frac();
         if band != start {
             balance -= tell;
         }
@@ -829,7 +916,6 @@ pub(super) fn all(
         collapse[band * channels + channels - 1] = y_cm as u8;
         balance += frame.pulses[band] + tell;
         update_lowband = bits > ((n as i32) << BITRES);
-        bands.avoid_split_noise = false;
     }
     *seed = bands.seed;
 }
@@ -946,7 +1032,9 @@ pub(super) fn denormalise(
 
 #[cfg(test)]
 mod tests {
-    use super::{bitexact_cos, bitexact_log2tan, isqrt};
+    use super::{bitexact_cos, bitexact_log2tan, isqrt, Bands, Split, BAND_COUNT, FRAC_1_SQRT_2};
+    use crate::opus::celt::SPREAD_NORMAL;
+    use crate::opus::range::writer::RangeEncoder;
 
     #[test]
     fn the_integer_square_root_is_exact() {
@@ -969,5 +1057,57 @@ mod tests {
         }
         assert_eq!(bitexact_log2tan(23171, 23171), 0);
         assert_eq!(bitexact_log2tan(32767, 1), 30690);
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "one product and one sum a coefficient, done alike"
+    )]
+    fn a_split_that_leaves_the_side_nothing_codes_the_channels_downmix() {
+        let mut amplitudes = [1.0f32; 2 * BAND_COUNT];
+        amplitudes[BAND_COUNT] = 0.25;
+        let mut frame = [0u8; 8];
+        let mut coder = RangeEncoder::new(&mut frame);
+        let (mut order, mut pulses) = ([0.0f32; 4], [0i32; 4]);
+        let bands = Bands {
+            coder: &mut coder,
+            band: 0,
+            intensity: BAND_COUNT,
+            spread: SPREAD_NORMAL,
+            tf_change: 0,
+            remaining: 0,
+            seed: 0,
+            disable_inversion: false,
+            order: &mut order,
+            pulses: &mut pulses,
+            amplitudes: &amplitudes,
+        };
+        let (left, right) = ([0.6f32, 0.8, 0.0, 0.0], [0.0f32, 0.6, 0.8, 0.0]);
+        let unangled = Split {
+            intensity: false,
+            inverted: false,
+            mid: 32767,
+            side: 0,
+            delta: -16384,
+            itheta: 0,
+            spent: 0,
+        };
+        let (mut x, mut y) = (left, right);
+        bands.prepare_stereo(&mut x, &mut y, &unangled);
+        let downmix: [f32; 4] = core::array::from_fn(|at| left[at] + 0.25 * right[at]);
+        assert_eq!(x, downmix, "the side coded with nothing");
+        let angled = Split {
+            mid: 23171,
+            side: 23171,
+            delta: 0,
+            itheta: 8192,
+            ..unangled
+        };
+        let (mut x, mut y) = (left, right);
+        bands.prepare_stereo(&mut x, &mut y, &angled);
+        let mid: [f32; 4] = core::array::from_fn(|at| FRAC_1_SQRT_2 * (left[at] + right[at]));
+        let side: [f32; 4] = core::array::from_fn(|at| FRAC_1_SQRT_2 * (right[at] - left[at]));
+        assert_eq!((x, y), (mid, side), "a split with an angle");
     }
 }

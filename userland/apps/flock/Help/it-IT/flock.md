@@ -4,12 +4,12 @@ flock — eseguire un comando mantenendo un blocco di file consultivo
 
 ## SYNOPSIS
 
-`flock [options] file comando [argomento...]`
+`flock [options] file command [argument...]`
 
 ## DESCRIPTION
 
-Prende un blocco consultivo che copre l'intero `file`, esegue il `comando`
-mentre lo mantiene e termina con lo stato del comando stesso. Due
+Prende un blocco consultivo che copre l'intero `file`, esegue il comando
+`command` mentre lo mantiene e termina con lo stato del comando stesso. Due
 esecuzioni che nominano lo stesso `file` non si sovrappongono mai, che è
 quanto serve a uno script per avere una sola copia di sé in funzione.
 
@@ -41,13 +41,26 @@ eseguito senza il blocco che aveva chiesto.
 
 ## OPTIONS
 
-- `-s, --shared` — prendere un blocco condiviso. Più esecuzioni possono mantenerlo insieme, e tutte escludono chi ne chieda uno esclusivo. È il blocco dei lettori.
-- `-x, --exclusive` — prendere un blocco esclusivo, che esclude ogni altro detentore. Il valore predefinito e il blocco degli scrittori.
-- `-n, --nonblock` — non attendere: se il blocco è mantenuto, uscire subito con il codice di conflitto.
-- `-w, --timeout <seconds>` — attendere al massimo questo numero di secondi interi, poi uscire con il codice di conflitto.
-- `-E, --conflict-code <n>` — lo stato di uscita quando `-n` o `-w` rinuncia. Vale `1` per impostazione predefinita. Scegliete un valore che il comando non restituisca mai se uno script deve distinguerli.
-- `-v, --verbose` — riportare sull'errore standard se il blocco è stato preso.
+- `-s, --shared` — prendere un blocco condiviso. Più esecuzioni possono
+  mantenerlo insieme, e tutte escludono chi ne chieda uno esclusivo. È il
+  blocco dei lettori.
+- `-x, --exclusive` — prendere un blocco esclusivo, che esclude ogni altro
+  detentore. Il valore predefinito e il blocco degli scrittori.
+- `-n, --nonblock` — non attendere: se il blocco è mantenuto, uscire subito
+  con il codice di conflitto.
+- `-w, --timeout <seconds>` — attendere al massimo questo numero di secondi
+  interi, poi uscire con il codice di conflitto.
+- `-E, --conflict-code <n>` — lo stato di uscita quando `-n` o `-w`
+  rinuncia. Vale `1` per impostazione predefinita. Scegliete un valore che
+  il comando non restituisca mai se uno script deve distinguerli.
+- `-v, --verbose` — riportare sull'errore standard se il blocco è stato
+  preso.
 - `-?, --help` — mostrare la guida breve di questo comando.
+
+Le opzioni devono precedere `file`: tutto ciò che va da `file` in poi
+appartiene al comando, quindi `flock lock ls -l` passa `-l` a `ls`. `--`
+termina l'analisi delle opzioni, così si può raggiungere un file o un
+comando il cui nome comincia con un trattino.
 
 ## EXAMPLES
 

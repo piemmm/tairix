@@ -631,6 +631,23 @@ exist from CU3).
   of stream *before* it reaps, because a child that fills the pipe blocks
   until it is emptied. The audit records that output was returned and how
   much, never what it was — the same reasoning as the argument count.
+- The same rendezvous also serves a **wired launch** request
+  (`LaunchWired`): the identical re-authentication, meter and authority
+  check as a launch, but the broker makes the program's standard input and
+  output pipes, starts it in the requester's own login session, reads its
+  instance with `child_origin`, and hands the requester its ends with
+  `fd_grant` — login's `CAP_FS_ACCESS` is the gate a pipe end's delegation
+  carries — and the reply carries the two delegation handles and the
+  instance, which the requester redeems with `fd_redeem`. It exists for the
+  desktop's recording with sound: the kernel never widens a live process's
+  set, so an account without `CAP_AUDIO_CAPTURE` — every ordinary one: it
+  is in the administrative set, never the session baseline — records with
+  an administrator's leave by running the recorder as that administrator
+  for one recording. It accepts the screen recorder alone, a program of the
+  read-only component store, and refuses every other before an attempt is
+  spent. The child is login's, reaped as a launch's, its `stderr` closed; its
+  end is always audited, since it closes the run an administrator allowed,
+  and one whose hand-over or reply failed is ended at once.
 - **Who may allow a program.** An account may allow one only when every
   capability the program's signed manifest requests lies within the
   account's ceiling. The broker decides it from the users database and the
@@ -663,28 +680,33 @@ exist from CU3).
   asks, maps the task to its program and how it runs, and posts the request
   (`docs/src/desktop/session.md`, *Asked for by Settings*).
 - Wire contract: `lib/abi/src/elevate.rs` — `ElevateRequest` is a
-  five-variant enum (`Run { username, password, program, argv }` /
+  six-variant enum (`Run { username, password, program, argv }` /
   `Verify { password }` / `Launch { username, password, program }` /
   `Capture { username, password, program, argv }` /
-  `Authorisers { program, offset }`, an opcode byte after the version word;
-  `Run`, `Capture` and `Launch` share one encode/decode arm so their shape
-  cannot drift) and `ElevateReply<'_>` is an eight-variant enum
+  `Authorisers { program, offset }` /
+  `LaunchWired { username, password, program }`, an opcode byte after the
+  version word; `Run` and `Capture` share one encode arm, `Launch` and
+  `LaunchWired` another, and the four one decode arm, so their shapes cannot
+  drift) and `ElevateReply<'_>` is a nine-variant enum
   (`Completed { exit_code }` / `Verified` / `Launched { pid }` /
-  `Captured { exit_code, output }` / `Overran { exit_code }` /
-  `Authorisers { own, page }` / `Cooling { retry_after }` /
-  `Refused(Errno)`, encoded as a result-discriminant word — `0` completed,
-  `1` verified, `2` launched, `3` captured, `4` overran, `5` authorisers,
-  `6` cooling, negative `-errno` refused — plus a second word carrying the
-  exit code, the pid, the own-account flag, the wait in nanoseconds, or
-  zero). A captured or authorisers reply appends a `u32` length and that
-  many bytes; every other reply is exactly that fixed head, so a reply that
+  `Wired(WiredLaunch)` / `Captured { exit_code, output }` /
+  `Overran { exit_code }` / `Authorisers { own, page }` /
+  `Cooling { retry_after }` / `Refused(Errno)`, encoded as a
+  result-discriminant word — `0` completed, `1` verified, `2` launched, `3`
+  captured, `4` overran, `5` authorisers, `6` cooling, `7` wired, negative
+  `-errno` refused — plus a second word carrying the exit code, the pid,
+  the own-account flag, the wait in nanoseconds, or zero). A captured or
+  authorisers reply appends a `u32` length and that many bytes, and a wired
+  one the program's 16-byte instance and its two delegation handles; every
+  other reply is exactly that fixed head, so a reply that
   relays nothing costs nothing to copy and `ELEVATE_MAX_REPLY` is the
   endpoint's ceiling rather than every frame's size. The reply borrows the buffer it
   was decoded from, because `lib/abi` has no allocator to own the output
   with. Both decode fail-closed (wrong version, unknown opcode/status, a
   negative pid, an output region longer than the bound or disagreeing with
-  its length word, over-long buffer, a field past the end, non-UTF-8, an
-  empty field, trailing bytes). The per-console rendezvous
+  its length word, a wired reply naming no process or a zero handle,
+  over-long buffer, a field past the end, non-UTF-8, an empty field,
+  trailing bytes). The per-console rendezvous
   `elevate_endpoint(console) = ELEVATE_ENDPOINT_BASE + console` refuses the
   "no console" sentinel. Both ends derive the endpoint from their **own**
   kernel-attested `Origin::console` (never a claim), and the supervisor
@@ -721,9 +743,11 @@ exist from CU3).
   exists.
 - Audit: `ELEVATE_GRANTED` / `ELEVATE_REFUSED` / `ELEVATE_UNAVAILABLE` /
   `VERIFY_GRANTED` / `VERIFY_REFUSED` / `LAUNCH_GRANTED` /
-  `LAUNCH_REFUSED` / `LAUNCH_ENDED_ABNORMALLY` / `AUTHORISERS_SENT` /
-  `AUTHORISERS_REFUSED` (login's 10_007–10_009, 10_012–10_013,
-  10_024–10_026, 10_033–10_034); the launch pair is separate from the run
+  `LAUNCH_REFUSED` / `LAUNCH_ENDED_ABNORMALLY` / `CAPTURE_GRANTED` /
+  `CAPTURE_REFUSED` / `AUTHORISERS_SENT` / `AUTHORISERS_REFUSED` /
+  `WIRED_GRANTED` / `WIRED_REFUSED` / `WIRED_ENDED` (login's
+  10_007–10_009, 10_012–10_013, 10_024–10_028, 10_033–10_034,
+  10_037–10_039); the launch pair is separate from the run
   pair because no exit code exists at that point and the record names the
   pid login now owns. The exit code arrives later, at the reap, and a
   non-zero one is audited then: a launched child's `stderr` is login's
@@ -734,10 +758,14 @@ exist from CU3).
   uid) are audited but never disclosed — the requester sees one
   indistinguishable `PermissionDenied`.
 - Tests: abi encode/decode round-trip and fail-closed rejects for all
-  three request variants and all four reply variants (including a
-  launch and a run being distinct on the wire, and a negative pid
-  refused at both encode and decode); the login broker decision
-  table host-tested (grant + audit, foreign console refused before
+  six request variants and all nine reply variants (including a launch and
+  a run, and a launch and a wired launch, being distinct on the wire, a
+  negative pid refused at both encode and decode, and a wired reply naming
+  no process or a zero delegation refused); the login broker decision
+  table host-tested (a wired launch starting the recorder alone and
+  refusing any other program before an attempt is spent, an account that
+  may not record sound refused as a wrong password is, a wired program's
+  every end audited, grant + audit, foreign console refused before
   parsing, malformed refused without authentication, indistinguishable
   auth refusals, spawn refusal reported verbatim, a verify-only request
   answered without ever invoking the launcher, an attested uid owning no
@@ -818,6 +846,20 @@ what it wants first is recorded in `plans/VIEW.md`.**
   document lives while the editor knows it by name only
   (`plans/TEXTEDIT.md` TE17).
 
+  **A pipe end is conveyed as itself.** `fd_grant` hands on a pipe end the
+  grantor holds as another counted reference to that end, so one in flight
+  holds its side open — a write end keeps its reader from end-of-stream, a
+  read end its writer from `BrokenPipe` — and one let go unredeemed, with
+  either process, is released as a close is. The redeemed descriptor is that
+  end with the grantor's access. A pipe has no identity to freeze and no
+  extent to bound, so its ceiling is zero. The gate is the one `fd_grant`
+  carries, `CAP_FS_ACCESS`: the dispatcher checks it before the descriptor is
+  read, so it cannot vary with what the descriptor is, and a capability for
+  pipes alone would guard no class the existing one does not. A grantor's
+  pipe ends in flight are bounded by its own `open-files` soft bound. A pty
+  end is refused: its reads and job control answer to the terminal's
+  foreground, which a hand-off cannot carry.
+
   **The recipient is named by its attested `ProcId`, never by a task id.**
   `fd_grant(fd, write_ceiling, recipient, len)` takes a pointer to the
   16-byte instance the grantor read from an `Origin`; the kernel resolves it
@@ -834,6 +876,20 @@ what it wants first is recorded in `plans/VIEW.md`.**
   file: spawn-time narrowing plus user-mediated widening, with no new
   capability added (the §5.2 minimalism rule — `CAP_FS_ACCESS` already
   gates delegating filesystem authority).
+
+  **A shared region reaches a named instance the same way.** `shm_grant`
+  and `call_grant` resolve their recipient as an endpoint's live server and
+  `shm_grant_peer` as the caller in service; `shm_grant_to(region,
+  recipient, len)` names it by the attested `ProcId`, as `fd_grant` does, for
+  a process that binds no endpoint — the screen recorder, which the session
+  knows by `child_origin` or by the login broker's reply
+  (`plans/CAPTURE.md`). It needs `CAP_SHM` and the grantor's own grant for
+  the region, resolves the instance as it mints, and mints the record
+  `shm_grant` mints, so the recipient maps the region through
+  `shm_map_from` naming the grantor. No capability is added: `CAP_SHM`
+  already gates delegating a mapping. The recipient never asked, so each
+  grantor keeps at most `SHM_GRANT_TO_MAX` live regions with it, refused
+  `LimitExceeded` past that.
 
   A pick carries a purpose. An *open* delegates the descriptor the picker
   opened, whose access `FilePicked` states: `plans/APPDATA.md` §3.8

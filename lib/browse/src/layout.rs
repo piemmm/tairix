@@ -260,7 +260,7 @@ fn overlaps(lo: i32, len: u32, other: i32, other_len: u32) -> bool {
 /// A list has one slot per line. Membership, and the difference between two
 /// bands, are arithmetic over the two ranges, so neither walks the listing.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct BandCells {
+pub struct BandCells {
     lines: Range<usize>,
     slots: Range<usize>,
     per_line: usize,
@@ -288,7 +288,7 @@ impl BandCells {
 
     /// Whether the band touches the entry at `index`.
     #[must_use]
-    pub(crate) fn contains(&self, index: usize) -> bool {
+    pub fn contains(&self, index: usize) -> bool {
         self.per_line != 0
             && index < self.count
             && self.lines.contains(&(index / self.per_line))
@@ -296,7 +296,7 @@ impl BandCells {
     }
 
     /// Every entry the band touches, line by line.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
         cells(
             self.lines.clone(),
             self.slots.clone(),
@@ -310,7 +310,7 @@ impl BandCells {
     /// Two bands over one layout differ only along their edges, so only those
     /// cells are visited; bands over different layouts are compared entry by
     /// entry.
-    pub(crate) fn each_not_in(&self, other: &Self, mut visit: impl FnMut(usize)) {
+    pub fn each_not_in(&self, other: &Self, mut visit: impl FnMut(usize)) {
         if self.per_line != other.per_line || self.count != other.count {
             self.iter()
                 .filter(|index| !other.contains(*index))
@@ -793,14 +793,14 @@ impl GridView {
     /// The tiles any part of which lies within `band`, a rectangle in layout
     /// coordinates. A band lying only in a margin or a gap touches none.
     #[must_use]
-    pub(crate) fn band_cells(&self, band: Rect) -> BandCells {
+    pub fn band_cells(&self, band: Rect) -> BandCells {
         self.band_cells_over(band, self.line_run(), self.slot_run())
     }
 
     /// The tiles whose `part` — a rectangle relative to a tile's own top-left
     /// corner — `band` touches.
     #[must_use]
-    pub(crate) fn band_cells_within(&self, band: Rect, part: Rect) -> BandCells {
+    pub fn band_cells_within(&self, band: Rect, part: Rect) -> BandCells {
         let left = u32::try_from(part.left()).unwrap_or(0);
         let top = u32::try_from(part.top()).unwrap_or(0);
         // The trailing-edge column measures across inward from a tile's right

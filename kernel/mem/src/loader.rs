@@ -30,8 +30,27 @@ pub enum LoadError {
     Layout(RxeError),
     /// The page table refused a mapping (e.g. an address already mapped).
     PageTable(PageTableError),
+    /// The page table refused to map `frame`, drawn for the page and so in
+    /// no space: the drawer's to give back.
+    Refused {
+        /// The frame drawn for the page.
+        frame: Frame,
+        /// Why the table refused it.
+        cause: PageTableError,
+    },
     /// The injected frame allocator ran out of frames.
     OutOfFrames,
+}
+
+impl LoadError {
+    /// The frame a refused mapping leaves its drawer to give back.
+    #[must_use]
+    pub const fn unmapped_frame(&self) -> Option<Frame> {
+        match self {
+            Self::Refused { frame, .. } => Some(*frame),
+            _ => None,
+        }
+    }
 }
 
 impl From<RxeError> for LoadError {
@@ -72,7 +91,8 @@ pub fn map_flags_for(perm: RxePermission) -> MapFlags {
 ///
 /// * [`LoadError::Layout`] if a relocated address overflows.
 /// * [`LoadError::OutOfFrames`] if `alloc_frame` is exhausted.
-/// * [`LoadError::PageTable`] if the underlying table refuses a mapping.
+/// * [`LoadError::Refused`] if the underlying table refuses a mapping, handing
+///   back the frame drawn for it.
 pub fn map_image<P, A>(
     space: &mut AddressSpace<P>,
     image: &LoadImage,
@@ -117,8 +137,8 @@ where
 /// * [`LoadError::Layout`] (converted into `E`) if a page address overflows.
 /// * [`LoadError::OutOfFrames`] (converted into `E`) if `alloc_frame` is
 ///   exhausted.
-/// * [`LoadError::PageTable`] (converted into `E`) if the table refuses a
-///   mapping.
+/// * [`LoadError::Refused`] (converted into `E`) if the table refuses a
+///   mapping, handing back the frame drawn for it.
 /// * any error `per_page` returns.
 pub(crate) fn map_region<P, A, F, E>(
     space: &mut AddressSpace<P>,
@@ -149,10 +169,9 @@ where
         let frame = alloc_frame()
             .ok_or(LoadError::OutOfFrames)
             .map_err(E::from)?;
-        space
-            .map(page, frame, flags)
-            .map_err(LoadError::from)
-            .map_err(E::from)?;
+        if let Err(cause) = space.map(page, frame, flags) {
+            return Err(E::from(LoadError::Refused { frame, cause }));
+        }
         per_page(page_index, frame)?;
     }
     Ok(())
@@ -162,6 +181,7 @@ where
 mod tests {
     use super::{map_flags_for, map_image, LoadError};
     use crate::frame::Frame;
+    use crate::vmm::PageTableError;
     use crate::vmm::{AddressSpace, HostPageTable, MapFlags, Page, VirtAddr};
     use tairix_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
     use tairix_abi::{LoadImage, ABI_VERSION_CURRENT, LOAD_MAGIC, SYSCALL_TABLE_HASH_LEN};
@@ -252,6 +272,29 @@ mod tests {
         let mut space = AddressSpace::new(HostPageTable::new());
         let err = map_image(&mut space, &image, 0, || None).unwrap_err();
         assert_eq!(err, LoadError::OutOfFrames);
+    }
+
+    /// A page the table refuses hands back the frame drawn for it, which is
+    /// in no space to be returned from.
+    #[test]
+    fn a_refused_mapping_hands_back_its_frame() {
+        let segs = [segment(0x1000, 2, RxePermission::ReadExecute)];
+        let bytes = image_bytes(0x1000, &segs);
+        let image = LoadImage::parse(&bytes, &TAG).expect("valid image");
+        let mut space = AddressSpace::new(HostPageTable::new());
+        let second = Page::from_addr(VirtAddr::new(0x2000)).unwrap();
+        space
+            .map(second, Frame(99), MapFlags::READ | MapFlags::USER)
+            .unwrap();
+        let err = map_image(&mut space, &image, 0, frame_source()).unwrap_err();
+        assert_eq!(
+            err,
+            LoadError::Refused {
+                frame: Frame(2),
+                cause: PageTableError::AlreadyMapped,
+            }
+        );
+        assert_eq!(err.unmapped_frame(), Some(Frame(2)));
     }
 
     #[test]

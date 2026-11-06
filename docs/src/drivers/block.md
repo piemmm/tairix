@@ -16,6 +16,7 @@ loaded as user-space drivers unless their manifest declares
 | `medium`                       | report the `BlkMedium` the device is, which its class and I/O budget follow from | `DriverHandle` ownership |
 | `device_name`                  | report the device's own short name, for a consumer that lists devices | `DriverHandle` ownership |
 | `backing_availability`         | report what the device can promise a background consumer | `DriverHandle` ownership |
+| `device_identity`              | report the device's own identity, which proves a re-inserted medium the one its volume's held writes were made on; a RAID array's is composed of its members'; `None` for a device that has none | `DriverHandle` ownership |
 | `read_blocks` / `write_blocks` | bulk transfer (multiple of `block_size`)      | `DriverHandle` ownership       |
 | `read_blocks_with_class` / `write_blocks_with_class` | classed transfer (see below) | `DriverHandle` ownership |
 
@@ -929,6 +930,12 @@ spinning up never holds back its siblings:
   the unit — many bridges set it for a fixed disk — so it never decides how
   patiently the unit is served. The unit's command budget follows the medium
   learnt.
+- **Which unit it is.** The device's serial-number string, read in its first
+  listed language, is fingerprinted with the vendor and product ids and the
+  unit's LUN into the identity a unit whose medium cannot leave it states
+  (`device_identity`, the block service's `Identity` request). A
+  removable-medium unit states none — the medium in it may be another — nor
+  does a device without a serial.
 - **Geometry and write policy.** `READ CAPACITY(10)`/`(16)` with a fully
   validated geometry (power-of-two block size 512–4096; the 16-byte form
   covers units past the 32-bit LBA horizon), and the command set's
@@ -991,7 +998,9 @@ descriptor reader, and block service are host-proven over scripted doubles;
 the USB optical vertical (`tairix-test-optical-qemu-aarch64`) drives a QEMU
 `usb-bot` + `scsi-cd` drive on its xHCI controller end to end — changing the
 disc mid-run, so the second disc is read back through a fresh publication of
-the unit — and the rest of the live path is Pi 4 metal acceptance.
+the unit — the twin-volume vertical (`tairix-test-twins-qemu-aarch64`) two
+`usb-storage` sticks of distinct serial numbers holding copies of one FAT32
+image, and the rest of the live path is Pi 4 metal acceptance.
 
 ### Volume manager (automount policy) — `drivers/storage/volmgr`
 
@@ -1021,7 +1030,10 @@ already in use, or one spelling a root-view entry, a storage resolver or a
 resource namespace, takes `_<fingerprint>` of the volume's own identity,
 lengthened while taken. A label never yields `_`, so it cannot spell
 another volume's generated name, and unlabelled volumes take the same names
-whatever order they arrive in.
+whatever order they arrive in. Twins — volumes carrying one identity, as
+media formatted alike do — take the same names too, and the kernel shows a
+twin asking a name a volume of its identity holds as that name with `_<n>`
+([drives](../filesystem/drives.md)).
 
 It runs in **two ordered phases**, because the probe and the mounts it
 creates would otherwise be two concurrent users of the device's one staging
@@ -1064,6 +1076,24 @@ The assembly decisions, the degraded-start re-stamp that stops a returning
 member masquerading as current, and the reserved-metadata offset that keeps a
 member's superblock out of array data are documented with the composition
 engines in the RAID library page.
+
+#### What an array states it is
+
+An array answers the block service's `Identity` request with an identity of
+its own (`OwnedRaidArray::composed_identity`, served through `StatingArray`):
+a fingerprint (`tairix_crypto::Fingerprint`) of the array's identifier and of
+what each slot's device stated when the composer connected to it
+(`RemoteBlock::identify`), slot by slot. While any slot holds no device, or one
+that states none, the array states none: no proof is better than a guessed
+one. Neither the order its members arrived in, what each is doing, nor the
+array's generation enters it, and it is recomposed whenever a slot gains or
+loses a device. A composer that restarts while a volume on its array holds
+writes, and reassembles the same devices into the same slots, therefore
+states the identity the kernel recorded when the volume came in, and the
+writes are replayed onto the array on that proof
+([drives](../filesystem/drives.md)); a member replaced by another device, or
+the same devices in another array, state another, and the writes wait for an
+answer.
 
 #### Blank disks are held, not ignored
 

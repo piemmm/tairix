@@ -32,7 +32,7 @@ fn only_the_sounds_heard_while_a_session_holds_the_seat_are_a_users() {
 
 #[test]
 fn a_session_hands_over_every_switch_and_gain_it_decides_and_no_file() {
-    assert_eq!(PUSHABLE.len(), 3 + 10);
+    assert_eq!(PUSHABLE.len(), 3 + 11);
     let in_order: Vec<SoundKey> = SoundSettings::KEYS
         .iter()
         .copied()

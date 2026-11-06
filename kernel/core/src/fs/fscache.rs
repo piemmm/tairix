@@ -63,11 +63,14 @@
 //! (hysteresis), evicting file data before metadata
 //! ([`ReclaimClass::reclaim_priority`]). Oversized entries (a name over
 //! the component bound) are refused, never admitted unbounded. Every
-//! payload buffer the cache copies is allocated fallibly
-//! (`try_reserve`): allocation failure refuses the entry and the
-//! operation is served straight from the driver. The remaining map-node
-//! allocations are small, fixed-size, and bounded by the budget's
-//! entry-overhead charge.
+//! payload buffer the cache copies is allocated fallibly, and every index
+//! an entry is filed in makes its room before anything is evicted for the
+//! entry or it is charged: an allocation failure refuses the entry, leaving
+//! the cache exactly as it was, and the operation is served straight from
+//! the driver. A directory's name index is charged the room it holds; the
+//! room the other indexes keep beyond their entries goes back to the heap
+//! at the first operation above normal pressure, and a forced shrink fits
+//! them all.
 //!
 //! # Read size is a cost, never an admission rule
 //!
@@ -84,9 +87,9 @@
 //! # Secret hygiene
 //!
 //! The volumes this wraps are encrypted at rest, so cached file bytes
-//! and names are decrypted user data: every buffer is zeroed before its
-//! entry is released — on invalidation, eviction, purge, and teardown —
-//! so reclaim never leaves plaintext in reusable heap memory.
+//! and names are decrypted user data: every buffer the cache keeps or
+//! copies erases itself as it is let go, on whichever path lets it go, so
+//! reclaim never leaves plaintext in reusable heap memory.
 //!
 //! # Concurrency
 //!
@@ -95,11 +98,12 @@
 //! rebuild, and teardown racing reclaim are impossible by construction
 //! rather than by locking discipline.
 
-use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use super::VfsError;
+use core::borrow::Borrow;
+use core::cmp::Ordering;
 use core::mem::size_of;
 
 use tairix_abi::driver::filesystem::{
@@ -111,15 +115,15 @@ use tairix_abi::driver::filesystem::{
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
 use tairix_abi::SeekRegion;
+use tairix_collections::{OrderedMap, OrderedSet};
 use tairix_kernel_mem::PAGE_SIZE;
 use tairix_log::Sink;
 use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
-    CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost,
-    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
+    CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, PressureBand,
+    RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
 };
-use tairix_util::secret::Wiped;
-use zeroize::Zeroize;
+use tairix_util::secret::{Wiped, WipedBuf};
 
 use super::changelog::ChangeLog;
 use super::path::MAX_COMPONENT_LEN;
@@ -139,14 +143,15 @@ const ENTRY_OVERHEAD: usize = 96;
 const EMBED_INDEX_OVERHEAD: usize = 3 * size_of::<(u64, u64, u64)>();
 
 /// Which cache pool a key lives in, for the LRU index.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 enum KeyRef {
     /// `stat` pool: node id.
     Stat(u64),
     /// `sec` pool: node id.
     Sec(u64),
-    /// `lookup` pool: (directory id, child name).
-    Lookup(u64, Vec<u8>),
+    /// `lookup` pool: (directory id, child name), the name wiped when the
+    /// slot is let go.
+    Lookup(u64, WipedBuf),
     /// `dirent` pool: (directory id, cursor).
     Dirent(u64, u64),
     /// `data` pool: (file id, chunk base offset).
@@ -174,7 +179,7 @@ struct LookupEntry {
 /// A cached `read_dir` entry: the fixed record plus its name bytes.
 struct DirentEntry {
     entry: DirEntry,
-    name: Vec<u8>,
+    name: WipedBuf,
     tick: u64,
 }
 
@@ -182,8 +187,60 @@ struct DirentEntry {
 /// `base + bytes.len()` — authoritative because every write to the
 /// volume invalidates the file's chunks before the next read.
 struct DataEntry {
-    bytes: Vec<u8>,
+    bytes: WipedBuf,
     tick: u64,
+}
+
+/// A cached name as its directory's lookup key: ordered as its bytes, so a
+/// hit borrows the queried name.
+struct NameKey(WipedBuf);
+
+impl Borrow<[u8]> for NameKey {
+    fn borrow(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl PartialEq for NameKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0[..] == other.0[..]
+    }
+}
+
+impl Eq for NameKey {}
+
+impl PartialOrd for NameKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for NameKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0[..].cmp(&other.0[..])
+    }
+}
+
+/// One directory's cached names, and the room its index held when the
+/// ledger was last charged for it.
+struct Names {
+    map: OrderedMap<NameKey, LookupEntry>,
+    charged: usize,
+}
+
+impl Names {
+    /// Charge `ledger` for what the index's room moved by since it was last
+    /// charged, answering whether the ledger could account it.
+    fn recharge(&mut self, ledger: &CacheAccounting) -> bool {
+        let held = self.map.allocated_bytes();
+        let recharged = ledger
+            .resize_room(ReclaimClass::FsMetadata, self.charged, held)
+            .is_ok();
+        if recharged {
+            self.charged = held;
+        }
+        recharged
+    }
 }
 
 /// The clean, rebuildable filesystem cache wrapping one volume's driver.
@@ -218,22 +275,29 @@ pub struct CachedFs<F> {
     /// cache has been purged and admits nothing further — every
     /// operation is served straight from the driver (fail closed).
     poisoned: bool,
-    stat: BTreeMap<u64, StatEntry>,
-    sec: BTreeMap<u64, SecEntry>,
+    stat: OrderedMap<u64, StatEntry>,
+    sec: OrderedMap<u64, SecEntry>,
     /// Positive lookup results, nested per directory so a hit borrows
     /// the queried name instead of allocating a tuple key.
-    lookup: BTreeMap<u64, BTreeMap<Vec<u8>, LookupEntry>>,
-    dirent: BTreeMap<(u64, u64), DirentEntry>,
+    lookup: OrderedMap<u64, Names>,
+    dirent: OrderedMap<(u64, u64), DirentEntry>,
     /// Each cached listing entry by `(child, dir, cursor)`, so a change to a
     /// node drops exactly the entries embedding its metadata, in every
     /// directory that names it. One flat set, so a node named once costs one
     /// key rather than a tree of its own.
-    embedded: BTreeSet<(u64, u64, u64)>,
-    data: BTreeMap<(u64, u64), DataEntry>,
+    embedded: OrderedSet<(u64, u64, u64)>,
+    data: OrderedMap<(u64, u64), DataEntry>,
     /// LRU index of the data pool, keyed by tick (oldest first).
-    lru_data: BTreeMap<u64, KeyRef>,
+    lru_data: OrderedMap<u64, KeyRef>,
     /// LRU index of the metadata pools, keyed by tick (oldest first).
-    lru_meta: BTreeMap<u64, KeyRef>,
+    lru_meta: OrderedMap<u64, KeyRef>,
+    /// An entry left an index outside a forced shrink, so the index may
+    /// hold room it no longer needs.
+    slack: bool,
+    /// The directory whose name index an admission made room in: an
+    /// eviction for that admission leaves the index standing, emptied or
+    /// not, for the name about to be filed.
+    filing: Option<u64>,
     /// Where every mutation is reported for the volume's watchers. Every
     /// mutation passes through here, so nothing on a mounted volume changes
     /// unreported — the same reason the invalidation above is complete.
@@ -332,14 +396,16 @@ impl<F> CachedFs<F> {
             policies,
             tick: 0,
             poisoned: policies.is_none(),
-            stat: BTreeMap::new(),
-            sec: BTreeMap::new(),
-            lookup: BTreeMap::new(),
-            dirent: BTreeMap::new(),
-            embedded: BTreeSet::new(),
-            data: BTreeMap::new(),
-            lru_data: BTreeMap::new(),
-            lru_meta: BTreeMap::new(),
+            stat: OrderedMap::new(),
+            sec: OrderedMap::new(),
+            lookup: OrderedMap::new(),
+            dirent: OrderedMap::new(),
+            embedded: OrderedSet::new(),
+            data: OrderedMap::new(),
+            lru_data: OrderedMap::new(),
+            lru_meta: OrderedMap::new(),
+            slack: false,
+            filing: None,
             changes: None,
         })
     }
@@ -431,14 +497,14 @@ impl<F> CachedFs<F> {
         self.tick
     }
 
-    /// Copy `bytes` into a fresh exact-capacity buffer, fallibly: an
-    /// allocation failure yields `None` and the caller refuses the
-    /// entry instead of aborting on heap exhaustion.
-    fn try_copy(bytes: &[u8]) -> Option<Vec<u8>> {
+    /// Copy `bytes` into a fresh exact-capacity buffer that erases itself as
+    /// it is let go, fallibly: an allocation failure yields `None` and the
+    /// caller refuses the entry instead of aborting on heap exhaustion.
+    fn try_copy(bytes: &[u8]) -> Option<WipedBuf> {
         let mut out = Vec::new();
         out.try_reserve_exact(bytes.len()).ok()?;
         out.extend_from_slice(bytes);
-        Some(out)
+        Some(WipedBuf::new(out))
     }
 
     /// The ledger class an LRU key belongs to.
@@ -449,6 +515,14 @@ impl<F> CachedFs<F> {
         }
     }
 
+    /// The accounted `(payload, metadata)` cost of a lookup of a
+    /// `name_len`-byte name: the cached content is the resolved node id,
+    /// and the name is carried twice as bookkeeping, as the map key and the
+    /// LRU key's copy.
+    const fn lookup_cost(name_len: usize) -> (usize, usize) {
+        (8, ENTRY_OVERHEAD.saturating_add(name_len.saturating_mul(2)))
+    }
+
     /// The accounted `(payload, metadata)` byte cost of an LRU key's
     /// entry: the cached content, and the per-entry bookkeeping (the
     /// fixed overhead plus any key-copy bytes) on top of it.
@@ -456,12 +530,7 @@ impl<F> CachedFs<F> {
         match key {
             KeyRef::Stat(_) => (size_of::<NodeInfo>(), ENTRY_OVERHEAD),
             KeyRef::Sec(_) => (size_of::<NodeSecurity>(), ENTRY_OVERHEAD),
-            // The cached content is the resolved node id; the name is
-            // carried twice as bookkeeping (map key and LRU key copy).
-            KeyRef::Lookup(_, name) => (
-                8,
-                ENTRY_OVERHEAD.saturating_add(name.len().saturating_mul(2)),
-            ),
+            KeyRef::Lookup(_, name) => Self::lookup_cost(name.len()),
             KeyRef::Dirent(dir, cursor) => (
                 self.dirent
                     .get(&(*dir, *cursor))
@@ -475,48 +544,82 @@ impl<F> CachedFs<F> {
         }
     }
 
-    /// Remove the entry `key` names, zeroing its buffers, dropping its
-    /// LRU index slot, and discharging its cost. Returns the removed
+    /// Remove the entry `key` names, its buffers erasing themselves, dropping
+    /// its LRU index slot, and discharging its cost. Returns the removed
     /// entry's tick, or `None` when it was already gone.
     fn remove_entry(&mut self, key: &KeyRef) -> Option<u64> {
-        let (payload, metadata) = self.cost_of(key);
+        let cost = self.cost_of(key);
         let tick = match key {
             KeyRef::Stat(node) => self.stat.remove(node).map(|e| e.tick),
             KeyRef::Sec(node) => self.sec.remove(node).map(|e| e.tick),
             KeyRef::Lookup(dir, name) => {
-                let removed = self.lookup.get_mut(dir).and_then(|names| {
-                    names
-                        .remove_entry(name.as_slice())
-                        .map(|(mut stored_name, entry)| {
-                            stored_name.as_mut_slice().zeroize();
-                            entry.tick
-                        })
-                });
-                if self.lookup.get(dir).is_some_and(BTreeMap::is_empty) {
-                    self.lookup.remove(dir);
+                let name: &[u8] = name;
+                let removed = self
+                    .lookup
+                    .get_mut(dir)
+                    .and_then(|names| names.map.remove(name))
+                    .map(|entry| entry.tick);
+                if self.filing != Some(*dir) {
+                    self.drop_names_if_empty(*dir);
                 }
                 removed
             }
-            KeyRef::Dirent(dir, cursor) => self.dirent.remove(&(*dir, *cursor)).map(|mut e| {
-                e.name.as_mut_slice().zeroize();
+            KeyRef::Dirent(dir, cursor) => self.dirent.remove(&(*dir, *cursor)).map(|e| {
                 self.embedded.remove(&(e.entry.node.raw(), *dir, *cursor));
                 e.tick
             }),
-            KeyRef::Data(file, base) => self.data.remove(&(*file, *base)).map(|mut e| {
-                e.bytes.as_mut_slice().zeroize();
-                e.tick
-            }),
+            KeyRef::Data(file, base) => self.data.remove(&(*file, *base)).map(|e| e.tick),
         }?;
-        self.lru_data.remove(&tick);
-        self.lru_meta.remove(&tick);
+        self.release_slot(Self::class_of(key), cost, tick);
+        Some(tick)
+    }
+
+    /// Drop the recency slot at `tick` of an entry of `class` just taken
+    /// out, and give the ledger back its `(payload, metadata)` cost.
+    fn release_slot(
+        &mut self,
+        class: ReclaimClass,
+        (payload, metadata): (usize, usize),
+        tick: u64,
+    ) {
+        self.lru_of(class).remove(&tick);
+        self.slack = true;
+        if self.accounting.discharge(class, payload, metadata).is_err() {
+            self.poison("ledger_imbalance");
+        }
+    }
+
+    /// Let `dir`'s name index go once it holds no name, giving the ledger
+    /// back the room it was charged.
+    fn drop_names_if_empty(&mut self, dir: u64) {
+        if self
+            .lookup
+            .get(&dir)
+            .is_some_and(|names| names.map.is_empty())
+        {
+            if let Some(names) = self.lookup.remove(&dir) {
+                self.release_room(names.charged);
+            }
+        }
+    }
+
+    /// Give the ledger back `bytes` of a let-go name index's room.
+    fn release_room(&mut self, bytes: usize) {
         if self
             .accounting
-            .discharge(Self::class_of(key), payload, metadata)
+            .resize_room(ReclaimClass::FsMetadata, bytes, 0)
             .is_err()
         {
             self.poison("ledger_imbalance");
         }
-        Some(tick)
+    }
+
+    /// The recency index the entries of `class` are slotted in.
+    fn lru_of(&mut self, class: ReclaimClass) -> &mut OrderedMap<u64, KeyRef> {
+        match class {
+            ReclaimClass::CleanFileData => &mut self.lru_data,
+            _ => &mut self.lru_meta,
+        }
     }
 
     /// Drop every cached entry (zeroed) and admit nothing further: the
@@ -537,44 +640,35 @@ impl<F> CachedFs<F> {
         self.purge();
     }
 
-    /// Drop every cached entry, zeroing all buffers and rebalancing the
-    /// ledger to empty. Every whole-cache drain is counted as a
-    /// teardown.
+    /// Drop every cached entry, each buffer erasing itself, and rebalance
+    /// the ledger to empty, every index giving its room back. Every
+    /// whole-cache drain is counted as a teardown.
     fn purge(&mut self) {
         // A whole-cache drain hits both classes this cache serves.
         self.accounting.record_teardown(ReclaimClass::CleanFileData);
         self.accounting.record_teardown(ReclaimClass::FsMetadata);
-        for entry in self.data.values_mut() {
-            entry.bytes.as_mut_slice().zeroize();
-        }
-        for entry in self.dirent.values_mut() {
-            entry.name.as_mut_slice().zeroize();
-        }
-        while let Some((_, mut names)) = self.lookup.pop_first() {
-            while let Some((mut name, _)) = names.pop_first() {
-                name.as_mut_slice().zeroize();
-            }
-        }
         self.stat.clear();
         self.sec.clear();
+        self.lookup.clear();
         self.dirent.clear();
         self.embedded.clear();
         self.data.clear();
         self.lru_data.clear();
         self.lru_meta.clear();
         self.accounting.zero_ledger();
+        self.slack = false;
     }
 
     /// Evict least-recently-used entries until the ledger total is at
     /// most `target`, taking file data before metadata.
     fn evict_until(&mut self, target: usize) {
         while self.accounting.total_bytes() > target {
-            let key = match self.lru_data.first_key_value() {
-                Some((_, key)) => key.clone(),
-                None => match self.lru_meta.first_key_value() {
-                    Some((_, key)) => key.clone(),
-                    None => return,
-                },
+            let Some((_, key)) = self
+                .lru_data
+                .pop_first()
+                .or_else(|| self.lru_meta.pop_first())
+            else {
+                return;
             };
             if self.remove_entry(&key).is_none() {
                 // An index entry with no backing entry is a ledger
@@ -595,7 +689,8 @@ impl<F> CachedFs<F> {
     /// pressure clean file data drops to the low watermark, at moderate
     /// it drains fully while metadata is capped at the low watermark, and
     /// at severe or critical pressure everything goes. Every evicted
-    /// buffer is zeroed on the way out, exactly as ordinary eviction.
+    /// buffer erases itself on the way out, and at any band above normal
+    /// the room an earlier removal left in an index goes back to the heap.
     fn enforce_pressure(&mut self) {
         if self.poisoned {
             return;
@@ -631,59 +726,119 @@ impl<F> CachedFs<F> {
                     .record_pressure_shrink(ReclaimClass::FsMetadata);
             }
             self.evict_until(target);
+            self.release_index_room();
+        } else if self.slack && band > PressureBand::Normal {
+            self.release_flat_room();
         }
+    }
+
+    /// Give the heap back the index room a forced shrink freed: all of an
+    /// index it emptied, and what a fitted arena spares of the rest, each
+    /// directory's name index giving the ledger back what it no longer holds.
+    fn release_index_room(&mut self) {
+        let mut balanced = true;
+        for names in self.lookup.values_mut() {
+            // A refused fit keeps the room it had, every entry in place.
+            let _ = names.map.try_shrink_to_fit();
+            balanced &= names.recharge(&self.accounting);
+        }
+        if balanced {
+            self.release_flat_room();
+        } else {
+            self.poison("ledger_imbalance");
+        }
+    }
+
+    /// Give the heap back what the flat indexes hold beyond their entries:
+    /// room the ledger is charged nothing for, so it goes back under any
+    /// band above normal, not only after a forced shrink.
+    fn release_flat_room(&mut self) {
+        // A refused fit keeps the room it had, every entry in place.
+        let _ = [
+            self.stat.try_shrink_to_fit(),
+            self.sec.try_shrink_to_fit(),
+            self.lookup.try_shrink_to_fit(),
+            self.dirent.try_shrink_to_fit(),
+            self.embedded.try_shrink_to_fit(),
+            self.data.try_shrink_to_fit(),
+            self.lru_data.try_shrink_to_fit(),
+            self.lru_meta.try_shrink_to_fit(),
+        ];
+        self.slack = false;
     }
 
     /// Cache the entry read at `cursor` of `dir`, and the child's stat record
     /// it carries, so a follow-up listing or `node_info` is a hit.
-    fn admit_dirent(&mut self, dir: u64, cursor: u64, entry: DirEntry, mut name: Vec<u8>) {
+    fn admit_dirent(&mut self, dir: u64, cursor: u64, entry: DirEntry, name: WipedBuf) {
         if name.len() <= MAX_COMPONENT_LEN {
-            let payload = name.len().saturating_add(size_of::<DirEntry>());
-            let metadata = ENTRY_OVERHEAD + EMBED_INDEX_OVERHEAD;
-            if let Some(tick) = self.admit(KeyRef::Dirent(dir, cursor), payload, metadata) {
-                self.dirent
-                    .insert((dir, cursor), DirentEntry { entry, name, tick });
-                self.embedded.insert((entry.node.raw(), dir, cursor));
-            } else {
-                name.as_mut_slice().zeroize();
+            let cost = (
+                name.len().saturating_add(size_of::<DirEntry>()),
+                ENTRY_OVERHEAD + EMBED_INDEX_OVERHEAD,
+            );
+            let room = |cache: &mut Self| {
+                cache.dirent.try_reserve(1).ok()?;
+                cache.embedded.try_reserve(1).ok().map(|()| ((), 0))
+            };
+            if let Some((tick, ())) = self.admit(KeyRef::Dirent(dir, cursor), cost, room) {
+                let filed = self
+                    .dirent
+                    .try_insert((dir, cursor), DirentEntry { entry, name, tick })
+                    .is_ok()
+                    && self
+                        .embedded
+                        .try_insert((entry.node.raw(), dir, cursor))
+                        .is_ok();
+                if !filed {
+                    self.poison("index_divergence");
+                }
             }
         } else {
-            name.as_mut_slice().zeroize();
             self.accounting.record_refusal(ReclaimClass::FsMetadata);
         }
         let child = entry.node.raw();
         if !self.stat.contains_key(&child) {
-            if let Some(tick) =
-                self.admit(KeyRef::Stat(child), size_of::<NodeInfo>(), ENTRY_OVERHEAD)
+            self.keep_stat(child, entry.info);
+        }
+    }
+
+    /// Keep `info` as `node`'s stat record, unless the cache refuses it.
+    fn keep_stat(&mut self, node: u64, info: NodeInfo) {
+        let room = |cache: &mut Self| cache.stat.try_reserve(1).ok().map(|()| ((), 0));
+        let cost = (size_of::<NodeInfo>(), ENTRY_OVERHEAD);
+        if let Some((tick, ())) = self.admit(KeyRef::Stat(node), cost, room) {
+            if self
+                .stat
+                .try_insert(node, StatEntry { info, tick })
+                .is_err()
             {
-                self.stat.insert(
-                    child,
-                    StatEntry {
-                        info: entry.info,
-                        tick,
-                    },
-                );
+                self.poison("index_divergence");
             }
         }
     }
 
     /// Admit an entry of `payload` cached-content bytes plus `metadata`
-    /// bookkeeping bytes under `key`, evicting to make room. Returns
-    /// the recency tick to store in the entry, or `None` when the entry
-    /// is refused (over budget, poisoned, growth is forbidden by the
-    /// pressure band or would dip into the reserve, or the ledger
-    /// cannot account it) — the caller then serves without caching.
-    fn admit(&mut self, key: KeyRef, payload: usize, metadata: usize) -> Option<u64> {
+    /// bookkeeping bytes under `key`: `room` makes the entry's room in its
+    /// pool and answers what it made, with the bytes of index room the
+    /// entry's filing charges besides, and only then is anything evicted for
+    /// the entry. Returns the recency tick to store in the entry and what
+    /// `room` made, or `None` when the entry is refused (over budget,
+    /// poisoned, growth is forbidden by the pressure band or would dip into
+    /// the reserve, the ledger cannot account it, or an index cannot grow)
+    /// — the caller then serves without caching. An eviction only adds to
+    /// the room an index has made, so a refusal for want of room leaves the
+    /// cache exactly as it was.
+    fn admit<R>(
+        &mut self,
+        key: KeyRef,
+        (payload, metadata): (usize, usize),
+        room: impl FnOnce(&mut Self) -> Option<(R, usize)>,
+    ) -> Option<(u64, R)> {
         let class = Self::class_of(&key);
-        if !self.control.admits(CacheClass::Filesystem) {
+        if !self.control.admits(CacheClass::Filesystem) || self.poisoned {
             self.accounting.record_refusal(class);
             return None;
         }
         let cost = payload.saturating_add(metadata);
-        if self.poisoned {
-            self.accounting.record_refusal(class);
-            return None;
-        }
         // One reading, both bounds: the band's ceiling for this entry's
         // class and the reserve floor it leaves.
         let mut allowance = self.pressure.growth_allowance();
@@ -692,8 +847,18 @@ impl<F> CachedFs<F> {
             self.accounting.record_refusal(class);
             return None;
         }
+        let made = if self.lru_of(class).try_reserve(1).is_ok() {
+            room(self)
+        } else {
+            None
+        };
+        let Some((made, filed_room)) = made else {
+            self.accounting.record_refusal(class);
+            return None;
+        };
+        let cost = cost.saturating_add(filed_room);
         if self.accounting.total_bytes().saturating_add(cost) > ceiling {
-            let headroom = self.budget.low().min(ceiling - cost);
+            let headroom = self.budget.low().min(ceiling.saturating_sub(cost));
             self.evict_until(headroom);
             if self.poisoned {
                 self.accounting.record_refusal(class);
@@ -705,21 +870,28 @@ impl<F> CachedFs<F> {
             return None;
         }
         let tick = self.next_tick();
-        match class {
-            ReclaimClass::CleanFileData => self.lru_data.insert(tick, key),
-            _ => self.lru_meta.insert(tick, key),
-        };
-        Some(tick)
+        if self.lru_of(class).try_insert(tick, key).is_err() {
+            self.poison("index_divergence");
+            return None;
+        }
+        Some((tick, made))
     }
 
-    /// Refresh `key`'s recency: move its LRU slot from `old_tick` to a
-    /// fresh tick, returning the new tick for the entry to store.
-    fn touch(&mut self, old_tick: u64) -> u64 {
+    /// Refresh the recency of the `class` entry slotted at `old_tick`,
+    /// answering the tick it holds now: `old_tick` still where its index
+    /// has no room to move it, since a hit is served either way.
+    fn touch(&mut self, class: ReclaimClass, old_tick: u64) -> u64 {
         let tick = self.next_tick();
-        if let Some(key) = self.lru_data.remove(&old_tick) {
-            self.lru_data.insert(tick, key);
-        } else if let Some(key) = self.lru_meta.remove(&old_tick) {
-            self.lru_meta.insert(tick, key);
+        let lru = self.lru_of(class);
+        if lru.try_reserve(1).is_err() {
+            return old_tick;
+        }
+        let Some(key) = lru.remove(&old_tick) else {
+            return old_tick;
+        };
+        if lru.try_insert(tick, key).is_err() {
+            self.poison("index_divergence");
+            return old_tick;
         }
         tick
     }
@@ -749,7 +921,7 @@ impl<F: FilesystemRead> CachedFs<F> {
         if let Some(entry) = self
             .lookup
             .get(&dir.raw())
-            .and_then(|names| names.get(name))
+            .and_then(|names| names.map.get(name))
         {
             return Ok(Some(entry.node));
         }
@@ -764,14 +936,18 @@ impl<F: FilesystemRead> CachedFs<F> {
     /// recency, a miss asks the driver and keeps its answer.
     fn cached_lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
         let dir_raw = dir.raw();
-        if let Some(entry) = self.lookup.get(&dir_raw).and_then(|names| names.get(name)) {
+        if let Some(entry) = self
+            .lookup
+            .get(&dir_raw)
+            .and_then(|names| names.map.get(name))
+        {
             let node = entry.node;
             let old_tick = entry.tick;
-            let tick = self.touch(old_tick);
+            let tick = self.touch(ReclaimClass::FsMetadata, old_tick);
             if let Some(entry) = self
                 .lookup
                 .get_mut(&dir_raw)
-                .and_then(|names| names.get_mut(name))
+                .and_then(|names| names.map.get_mut(name))
             {
                 entry.tick = tick;
             }
@@ -786,23 +962,61 @@ impl<F: FilesystemRead> CachedFs<F> {
             self.accounting.record_refusal(ReclaimClass::FsMetadata);
             return Ok(node);
         }
-        let (Some(key_name), Some(entry_name)) = (Self::try_copy(name), Self::try_copy(name))
-        else {
+        let Some(key_name) = Self::try_copy(name) else {
             self.accounting.record_refusal(ReclaimClass::FsMetadata);
             return Ok(node);
         };
-        let metadata = ENTRY_OVERHEAD.saturating_add(name.len().saturating_mul(2));
-        if let Some(tick) = self.admit(KeyRef::Lookup(dir_raw, key_name), 8, metadata) {
-            self.lookup.entry(dir_raw).or_default().insert(
-                entry_name,
-                LookupEntry {
-                    node: node.raw(),
-                    tick,
-                },
-            );
+        let Some(entry_name) = Self::try_copy(name).map(NameKey) else {
+            self.accounting.record_refusal(ReclaimClass::FsMetadata);
+            return Ok(node);
+        };
+        // Room for the name in its directory's index, which an eviction for
+        // it leaves standing, or an index of its own where the directory has
+        // none yet.
+        let room = |cache: &mut Self| {
+            if let Some(names) = cache.lookup.get_mut(&dir_raw) {
+                names.map.try_reserve(1).ok()?;
+                if !names.recharge(&cache.accounting) {
+                    cache.poison("ledger_imbalance");
+                    return None;
+                }
+                cache.filing = Some(dir_raw);
+                return Some((None, 0));
+            }
+            cache.lookup.try_reserve(1).ok()?;
+            let map = OrderedMap::try_with_capacity(1).ok()?;
+            let held = map.allocated_bytes();
+            Some((Some(Names { map, charged: 0 }), held))
+        };
+        let cost = Self::lookup_cost(name.len());
+        let admitted = self.admit(KeyRef::Lookup(dir_raw, key_name), cost, room);
+        self.filing = None;
+        let Some((tick, fresh)) = admitted else {
+            // An eviction ahead of the refusal may have emptied the index the
+            // name was to join.
+            self.drop_names_if_empty(dir_raw);
+            return Ok(node);
+        };
+        let entry = LookupEntry {
+            node: node.raw(),
+            tick,
+        };
+        if let Some(mut names) = fresh {
+            if names.map.try_insert(entry_name, entry).is_err() {
+                self.poison("index_divergence");
+            } else if !names.recharge(&self.accounting) {
+                self.poison("ledger_imbalance");
+            } else if self.lookup.try_insert(dir_raw, names).is_err() {
+                self.poison("index_divergence");
+            }
         } else {
-            let mut entry_name = entry_name;
-            entry_name.as_mut_slice().zeroize();
+            let filed = self
+                .lookup
+                .get_mut(&dir_raw)
+                .is_some_and(|names| names.map.try_insert(entry_name, entry).is_ok());
+            if !filed {
+                self.poison("index_divergence");
+            }
         }
         Ok(node)
     }
@@ -827,20 +1041,21 @@ impl<F: FilesystemRead> CachedFs<F> {
     /// (`create` / `remove` / `rename`): name matching policy belongs to
     /// the driver and may fold case, so an exact-byte removal could
     /// leave a differently-spelled alias of the same binding standing —
-    /// the whole directory's lookups go instead (fail closed).
+    /// the whole directory's lookups go instead (fail closed). Its map is
+    /// taken out whole, so no name is copied to find the next.
     fn invalidate_lookups(&mut self, dir: u64) {
-        loop {
-            let Some(key) = self
-                .lookup
-                .get(&dir)
-                .and_then(|names| names.first_key_value())
-                .map(|(name, _)| KeyRef::Lookup(dir, name.clone()))
-            else {
-                return;
-            };
-            if self.remove_entry(&key).is_some() {
+        let Some(mut names) = self.lookup.remove(&dir) else {
+            return;
+        };
+        while let Some((name, entry)) = names.map.pop_first() {
+            if !self.poisoned {
+                let cost = Self::lookup_cost(name.0.len());
+                self.release_slot(ReclaimClass::FsMetadata, cost, entry.tick);
                 self.accounting.record_invalidation();
             }
+        }
+        if !self.poisoned {
+            self.release_room(names.charged);
         }
     }
 
@@ -940,7 +1155,7 @@ impl<F: FilesystemRead> CachedFs<F> {
             out[..copied].copy_from_slice(&entry.bytes[from..from + copied]);
             (copied, entry.tick)
         };
-        let tick = self.touch(old_tick);
+        let tick = self.touch(ReclaimClass::CleanFileData, old_tick);
         if let Some(entry) = self.data.get_mut(&(raw, base)) {
             entry.tick = tick;
         }
@@ -977,16 +1192,17 @@ impl<F: FilesystemRead> CachedFs<F> {
             let Some(chunk_base) = base.checked_add((index * CHUNK) as u64) else {
                 return;
             };
-            let Some(mut copy) = Self::try_copy(bytes) else {
+            let Some(copy) = Self::try_copy(bytes) else {
                 self.accounting.record_refusal(ReclaimClass::CleanFileData);
                 return;
             };
-            match self.admit(KeyRef::Data(raw, chunk_base), copy.len(), ENTRY_OVERHEAD) {
-                Some(tick) => {
-                    self.data
-                        .insert((raw, chunk_base), DataEntry { bytes: copy, tick });
+            let room = |cache: &mut Self| cache.data.try_reserve(1).ok().map(|()| ((), 0));
+            let cost = (copy.len(), ENTRY_OVERHEAD);
+            if let Some((tick, ())) = self.admit(KeyRef::Data(raw, chunk_base), cost, room) {
+                let entry = DataEntry { bytes: copy, tick };
+                if self.data.try_insert((raw, chunk_base), entry).is_err() {
+                    self.poison("index_divergence");
                 }
-                None => copy.as_mut_slice().zeroize(),
             }
         }
     }
@@ -1003,29 +1219,29 @@ impl<F: FilesystemRead> CachedFs<F> {
 /// the caller asked for, rounded out to whole chunks. A refused
 /// reservation leaves the stage empty and the read serves uncached
 /// rather than failing. The staged bytes are decrypted file content, so
-/// they are wiped when the stage is dropped, on every path out of the
-/// read.
-#[derive(Default)]
+/// they erase themselves on every path out of the read, and a wider window
+/// is a fresh block, the one it outgrew erased rather than moved.
 struct ReadStage {
-    bytes: Vec<u8>,
+    bytes: WipedBuf,
 }
 
 impl ReadStage {
+    /// An empty stage, which allocates nothing.
+    const fn new() -> Self {
+        Self {
+            bytes: WipedBuf::new(Vec::new()),
+        }
+    }
+
     /// A window of exactly `span` bytes, or `None` when the reservation
     /// was refused.
     fn window(&mut self, span: usize) -> Option<&mut [u8]> {
         if self.bytes.len() < span {
-            let more = span - self.bytes.len();
-            self.bytes.try_reserve_exact(more).ok()?;
-            self.bytes.resize(span, 0);
+            let mut wider = WipedBuf::with_capacity(span).ok()?;
+            wider.extend_zeroed(span)?;
+            self.bytes = wider;
         }
-        Some(&mut self.bytes[..span])
-    }
-}
-
-impl Drop for ReadStage {
-    fn drop(&mut self) {
-        self.bytes.as_mut_slice().zeroize();
+        self.bytes.get_mut(..span)
     }
 }
 
@@ -1075,7 +1291,7 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
         if let Some(entry) = self.stat.get(&raw) {
             let info = entry.info;
             let old_tick = entry.tick;
-            let tick = self.touch(old_tick);
+            let tick = self.touch(ReclaimClass::FsMetadata, old_tick);
             if let Some(entry) = self.stat.get_mut(&raw) {
                 entry.tick = tick;
             }
@@ -1084,9 +1300,7 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
         }
         self.accounting.record_miss(ReclaimClass::FsMetadata);
         let info = self.inner.node_info(node)?;
-        if let Some(tick) = self.admit(KeyRef::Stat(raw), size_of::<NodeInfo>(), ENTRY_OVERHEAD) {
-            self.stat.insert(raw, StatEntry { info, tick });
-        }
+        self.keep_stat(raw, info);
         Ok(info)
     }
 
@@ -1110,7 +1324,7 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
         }
         let raw = file.raw();
         let chunk_len = CHUNK as u64;
-        let mut stage = ReadStage::default();
+        let mut stage = ReadStage::new();
         let mut total = 0usize;
         while total < buf.len() {
             let Some(pos) = offset.checked_add(total as u64) else {
@@ -1205,7 +1419,7 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
                 resume_len = cached.name.len();
                 resume[..resume_len].copy_from_slice(&cached.name);
             }
-            let tick = self.touch(old_tick);
+            let tick = self.touch(ReclaimClass::FsMetadata, old_tick);
             if let Some(cached) = self.dirent.get_mut(&(dir_raw, at)) {
                 cached.tick = tick;
             }
@@ -1219,17 +1433,15 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
         // Each entry the driver reads is kept once it returns, keyed by the
         // cursor it was read at; one still cached past a hole a change left is
         // kept already, and charging it again would count it twice.
-        let mut read: Vec<(u64, DirEntry, Vec<u8>)> = Vec::new();
+        let mut read: Vec<(u64, DirEntry, WipedBuf)> = Vec::new();
         let mut key = at;
         let cached = &self.dirent;
         let result = self
             .inner
             .read_dir(dir, at, &resume[..resume_len], &mut |entry, name| {
-                if !cached.contains_key(&(dir_raw, key)) {
+                if !cached.contains_key(&(dir_raw, key)) && read.try_reserve(1).is_ok() {
                     if let Some(copy) = Self::try_copy(name) {
-                        if read.try_reserve(1).is_ok() {
-                            read.push((key, *entry, copy));
-                        }
+                        read.push((key, *entry, copy));
                     }
                 }
                 let flow = visit(entry, name);
@@ -1487,7 +1699,7 @@ impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for CachedFs<F> 
         if let Some(entry) = self.sec.get(&raw) {
             let sec = entry.sec;
             let old_tick = entry.tick;
-            let tick = self.touch(old_tick);
+            let tick = self.touch(ReclaimClass::FsMetadata, old_tick);
             if let Some(entry) = self.sec.get_mut(&raw) {
                 entry.tick = tick;
             }
@@ -1496,9 +1708,12 @@ impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for CachedFs<F> 
         }
         self.accounting.record_miss(ReclaimClass::FsMetadata);
         let sec = self.inner.security(node)?;
-        if let Some(tick) = self.admit(KeyRef::Sec(raw), size_of::<NodeSecurity>(), ENTRY_OVERHEAD)
-        {
-            self.sec.insert(raw, SecEntry { sec, tick });
+        let room = |cache: &mut Self| cache.sec.try_reserve(1).ok().map(|()| ((), 0));
+        let cost = (size_of::<NodeSecurity>(), ENTRY_OVERHEAD);
+        if let Some((tick, ())) = self.admit(KeyRef::Sec(raw), cost, room) {
+            if self.sec.try_insert(raw, SecEntry { sec, tick }).is_err() {
+                self.poison("index_divergence");
+            }
         }
         Ok(sec)
     }
@@ -1633,24 +1848,3 @@ where
 #[cfg(test)]
 #[path = "fscache_tests.rs"]
 mod tests;
-
-impl<F> Drop for CachedFs<F> {
-    /// Teardown zeroes every cached buffer: the entries hold decrypted
-    /// file bytes and names, which must not outlive their owner in
-    /// reusable heap memory.
-    fn drop(&mut self) {
-        for entry in self.data.values_mut() {
-            entry.bytes.as_mut_slice().zeroize();
-        }
-        for entry in self.dirent.values_mut() {
-            entry.name.as_mut_slice().zeroize();
-        }
-        // Lookup keys carry name bytes; BTreeMap keys are immutable in
-        // place, so drain the maps and zeroize each key as it comes out.
-        while let Some((_, mut names)) = self.lookup.pop_first() {
-            while let Some((mut name, _)) = names.pop_first() {
-                name.as_mut_slice().zeroize();
-            }
-        }
-    }
-}

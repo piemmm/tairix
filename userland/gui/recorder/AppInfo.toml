@@ -1,0 +1,21 @@
+# Signed-AppInfo manifest source for `recorder.app`, the screen recorder
+# (plans/CAPTURE.md CP8). Discovered by the build's app-bundle composer and
+# planted in the component store under /System/Components/: only the desktop
+# session starts it, by its one path, over two pipes only the session holds.
+# The capability list is the bundle's request, intersected with the launching
+# user's grants. CAP_SHM maps the two slots the session grants it and makes the
+# capture rings the audio service fills. CAP_AUDIO_CAPTURE opens the microphone
+# and the desktop's own sound; an account without it records sound only as an
+# administrator allows, the recorder then running as them for that recording.
+# CAP_LOG_EMIT is where every refusal and abnormal end is recorded, since its
+# standard error reaches no one. No file, display, input or spawn authority:
+# its one file is the session's delegated output, and it reads no pixel but
+# those the session puts in its slots.
+id = "os.tairix.recorder"
+name = "recorder"
+title = "Screen Recorder"
+version = "0.1.0"
+kind = "component"
+capabilities = ["CAP_SHM", "CAP_AUDIO_CAPTURE", "CAP_LOG_EMIT"]
+# This bundle's own icon in its Resources/ (plans/ICONS.md).
+library-icon = "recorder.svg"

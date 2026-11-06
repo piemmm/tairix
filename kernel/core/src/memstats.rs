@@ -44,7 +44,6 @@
 //! how every consumer of the gauge reads it).
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -142,7 +141,7 @@ pub struct MemStats {
     /// drops them, so a volume attached and detached over and over cannot
     /// grow the list. Registration order is preserved, so
     /// [`Self::cache_ledger_records`] pages a stable list.
-    ledgers: RwLock<Vec<CacheLedger>>,
+    ledgers: RwLock<Vec<Registered<CacheLedger>>>,
     /// Every registered **pinned** pool: memory the reclaim model
     /// measures but can never take (a mounted volume's unwritten blocks).
     /// Held apart from [`Self::ledgers`] because it must never reach
@@ -151,7 +150,7 @@ pub struct MemStats {
     /// waiting for memory nothing can free. Growable, registration order
     /// preserved, and appended after the cache rows so the paged list is
     /// stable.
-    pinned: RwLock<Vec<PinnedLedger>>,
+    pinned: RwLock<Vec<Registered<PinnedLedger>>>,
     /// The live `ramzip` tier, once one registers.
     ramzip: RwLock<Option<&'static (dyn RamzipStatsSource + 'static)>>,
 }
@@ -169,20 +168,62 @@ fn measured(record: Result<CacheLedgerRecord, Errno>) -> Option<CacheLedgerRecor
     Some(record)
 }
 
+/// A registered ledger and the order it was registered in, which the paged
+/// list keeps.
+struct Registered<L> {
+    seq: u64,
+    ledger: L,
+}
+
 /// Drop every ledger whose cache is gone: one whose books nothing but this
 /// list's own ledgers still holds. `books` names a ledger's shared books
 /// and how many hold them; pools of one cache share one set.
-fn retain_live<L>(ledgers: &mut Vec<L>, books: impl Fn(&L) -> (*const (), usize)) {
-    let mut listed: BTreeMap<*const (), usize> = BTreeMap::new();
-    for ledger in ledgers.iter() {
-        *listed.entry(books(ledger).0).or_insert(0) += 1;
+///
+/// Sorted in place by books, so a set's ledgers lie together and are counted
+/// in one pass, then back into registration order: O(n log n), with nothing
+/// the heap could refuse.
+fn retain_live<L>(ledgers: &mut Vec<Registered<L>>, books: impl Fn(&L) -> (*const (), usize)) {
+    ledgers.sort_unstable_by_key(|held| (books(&held.ledger).0, held.seq));
+    let (mut kept, mut at) = (0, 0);
+    while let Some(first) = ledgers.get(at) {
+        let (shared, holders) = books(&first.ledger);
+        let listed = ledgers[at..]
+            .iter()
+            .take_while(|held| books(&held.ledger).0 == shared)
+            .count();
+        // Dropping a ledger lowers its books' holders and their listing
+        // alike, so a set this list alone holds stays at its listing.
+        if holders > listed {
+            for offset in 0..listed {
+                ledgers.swap(kept + offset, at + offset);
+            }
+            kept += listed;
+        }
+        at += listed;
     }
-    // A dropped ledger lowers its books' count, never another set's, so a
-    // set this list alone held stays at or below its listing to the last.
-    ledgers.retain(|ledger| {
-        let (shared, holders) = books(ledger);
-        holders > listed.get(&shared).copied().unwrap_or(0)
-    });
+    ledgers.truncate(kept);
+    ledgers.sort_unstable_by_key(|held| held.seq);
+}
+
+/// Register `ledger` after the live ones in `ledgers`, the gone dropped
+/// first.
+///
+/// # Errors
+///
+/// [`Errno::OutOfMemory`] when the heap has no room to list it; nothing is
+/// registered.
+fn register<L>(
+    ledgers: &mut Vec<Registered<L>>,
+    ledger: L,
+    books: impl Fn(&L) -> (*const (), usize),
+) -> Result<(), Errno> {
+    retain_live(ledgers, books);
+    let seq = ledgers.last().map_or(0, |last| last.seq.saturating_add(1));
+    if tairix_util::fallible::push(ledgers, Registered { seq, ledger }) {
+        Ok(())
+    } else {
+        Err(Errno::OutOfMemory)
+    }
 }
 
 impl MemStats {
@@ -284,14 +325,20 @@ impl MemStats {
     ///
     /// Called by the production construction sites (a mounted volume's
     /// filesystem cache, the block/transform caches, the launch cache);
-    /// unit-test caches simply never register.
-    pub fn register_ledger(&self, ledger: CacheLedger) {
-        let mut ledgers = self.ledgers.write();
-        retain_live(&mut ledgers, |ledger| {
-            let books = ledger.accounting();
+    /// unit-test caches simply never register. A site refuses its cache when
+    /// this refuses: an unlisted cache would spend memory the reclaim
+    /// decision cannot see, since [`Self::ramzip_reclaimable_residue`] reads
+    /// only the listed ledgers.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the heap has no room to list it; nothing is
+    /// registered.
+    pub fn register_ledger(&self, ledger: CacheLedger) -> Result<(), Errno> {
+        register(&mut self.ledgers.write(), ledger, |held| {
+            let books = held.accounting();
             (Arc::as_ptr(books).cast(), Arc::strong_count(books))
-        });
-        ledgers.push(ledger);
+        })
     }
 
     /// Install the live `ramzip` tier's stats feed. First install wins.
@@ -332,7 +379,8 @@ impl MemStats {
     pub fn reclaim_class_stats(&self, class: ReclaimClass) -> ReclaimClassStats {
         let ledgers = self.ledgers.read();
         let mut total = ReclaimClassStats::default();
-        for ledger in ledgers.iter().filter(|ledger| ledger.class() == class) {
+        let listed = ledgers.iter().map(|held| &held.ledger);
+        for ledger in listed.filter(|ledger| ledger.class() == class) {
             let stats = ledger.accounting().class_stats(class);
             total.payload_bytes = total.payload_bytes.saturating_add(stats.payload_bytes);
             total.metadata_bytes = total.metadata_bytes.saturating_add(stats.metadata_bytes);
@@ -352,14 +400,19 @@ impl MemStats {
     /// Register a live pinned pool's ledger for the per-pool export.
     ///
     /// Called by the production construction sites (a writable volume's
-    /// write-back dirty set); unit-test pools simply never register.
-    pub fn register_pinned_ledger(&self, ledger: PinnedLedger) {
-        let mut pinned = self.pinned.write();
-        retain_live(&mut pinned, |ledger| {
-            let books = ledger.accounting();
+    /// write-back dirty set), which refuse their pool when this refuses, so
+    /// no unwritten memory goes unshown; unit-test pools simply never
+    /// register.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the heap has no room to list it; nothing is
+    /// registered.
+    pub fn register_pinned_ledger(&self, ledger: PinnedLedger) -> Result<(), Errno> {
+        register(&mut self.pinned.write(), ledger, |held| {
+            let books = held.accounting();
             (Arc::as_ptr(books).cast(), Arc::strong_count(books))
-        });
-        pinned.push(ledger);
+        })
     }
 
     /// One [`CacheLedgerRecord`] per registered ledger — the reclaimable
@@ -393,7 +446,7 @@ impl MemStats {
             records.extend(
                 ledgers
                     .iter()
-                    .filter_map(|ledger| measured(ledger.to_record())),
+                    .filter_map(|held| measured(held.ledger.to_record())),
             );
         }
         {
@@ -404,7 +457,7 @@ impl MemStats {
             records.extend(
                 pinned
                     .iter()
-                    .filter_map(|ledger| measured(ledger.to_record())),
+                    .filter_map(|held| measured(held.ledger.to_record())),
             );
         }
         Ok(records)
@@ -496,10 +549,16 @@ mod tests {
         let owner = ReclaimOwner::KernelSubsystem("mem");
         // One cache, two pools over one set of books, as a volume cache has.
         let detached = Arc::new(CacheAccounting::new());
-        stats.register_ledger(CacheLedger::new("a", owner, class, Arc::clone(&detached)));
-        stats.register_ledger(CacheLedger::new("b", owner, class, Arc::clone(&detached)));
+        stats
+            .register_ledger(CacheLedger::new("a", owner, class, Arc::clone(&detached)))
+            .expect("registers");
+        stats
+            .register_ledger(CacheLedger::new("b", owner, class, Arc::clone(&detached)))
+            .expect("registers");
         let live = Arc::new(CacheAccounting::new());
-        stats.register_ledger(CacheLedger::new("c", owner, class, Arc::clone(&live)));
+        stats
+            .register_ledger(CacheLedger::new("c", owner, class, Arc::clone(&live)))
+            .expect("registers");
         assert_eq!(
             stats.cache_ledger_records().expect("records").len(),
             3,
@@ -507,10 +566,78 @@ mod tests {
         );
         drop(detached);
         let next = Arc::new(CacheAccounting::new());
-        stats.register_ledger(CacheLedger::new("d", owner, class, Arc::clone(&next)));
+        stats
+            .register_ledger(CacheLedger::new("d", owner, class, Arc::clone(&next)))
+            .expect("registers");
         let records = stats.cache_ledger_records().expect("records");
         let labels: Vec<&str> = records.iter().map(CacheLedgerRecord::label).collect();
         assert_eq!(labels, ["c", "d"], "the gone cache's pools left");
+    }
+
+    /// Pools of several caches registered interleaved: the sweep drops every
+    /// pool of a gone cache, whatever lies between them, and keeps the rest
+    /// in registration order.
+    ///
+    /// Regression: the sweep counted each ledger's siblings with a pass over
+    /// the whole list, O(n²) on every registration.
+    #[test]
+    fn a_gone_caches_pools_go_from_among_the_live_ones_in_order() {
+        let stats = MemStats::new();
+        let class = ReclaimClass::CleanFileData;
+        let owner = ReclaimOwner::KernelSubsystem("mem");
+        let first = Arc::new(CacheAccounting::new());
+        let gone = Arc::new(CacheAccounting::new());
+        let last = Arc::new(CacheAccounting::new());
+        let pools = [
+            ("a", &first),
+            ("x", &gone),
+            ("b", &last),
+            ("y", &gone),
+            ("c", &first),
+        ];
+        for (label, books) in pools {
+            stats
+                .register_ledger(CacheLedger::new(label, owner, class, Arc::clone(books)))
+                .expect("registers");
+        }
+        drop(gone);
+        stats
+            .register_ledger(CacheLedger::new("d", owner, class, Arc::clone(&last)))
+            .expect("registers");
+        let records = stats.cache_ledger_records().expect("records");
+        let labels: Vec<&str> = records.iter().map(CacheLedgerRecord::label).collect();
+        assert_eq!(labels, ["a", "b", "c", "d"]);
+    }
+
+    /// A ledger the heap has no room to list is refused, the list as it was,
+    /// so the cache that asked is refused construction rather than run
+    /// unseen.
+    ///
+    /// Regression: the push aborted the kernel, and then the refusal went
+    /// unanswered, the cache running on with memory no reclaim decision saw.
+    #[test]
+    fn a_ledger_the_heap_cannot_list_is_refused() {
+        use tairix_reclaim::{PinnedAccounting, PinnedLedger};
+
+        let stats = MemStats::new();
+        let class = ReclaimClass::CleanFileData;
+        let owner = ReclaimOwner::KernelSubsystem("mem");
+        let books = Arc::new(CacheAccounting::new());
+        let pool = Arc::new(PinnedAccounting::new());
+        let cache = crate::test_alloc::past_each_refusal(&Err(Errno::OutOfMemory), || {
+            stats.register_ledger(CacheLedger::new("listed", owner, class, Arc::clone(&books)))
+        });
+        let pinned = crate::test_alloc::past_each_refusal(&Err(Errno::OutOfMemory), || {
+            stats.register_pinned_ledger(PinnedLedger::new("pinned", owner, Arc::clone(&pool)))
+        });
+        assert_eq!((cache, pinned), (Ok(()), Ok(())));
+        let records = stats.cache_ledger_records().expect("records");
+        let labels: Vec<&str> = records.iter().map(CacheLedgerRecord::label).collect();
+        assert_eq!(
+            labels,
+            ["listed", "pinned"],
+            "each refused attempt left nothing behind"
+        );
     }
 
     #[test]
@@ -525,18 +652,22 @@ mod tests {
 
         let a = Arc::new(CacheAccounting::new());
         let b = Arc::new(CacheAccounting::new());
-        stats.register_ledger(CacheLedger::new(
-            "cache-a",
-            ReclaimOwner::KernelSubsystem("mem"),
-            class,
-            a.clone(),
-        ));
-        stats.register_ledger(CacheLedger::new(
-            "cache-b",
-            ReclaimOwner::KernelSubsystem("mem"),
-            class,
-            b.clone(),
-        ));
+        stats
+            .register_ledger(CacheLedger::new(
+                "cache-a",
+                ReclaimOwner::KernelSubsystem("mem"),
+                class,
+                a.clone(),
+            ))
+            .expect("registers");
+        stats
+            .register_ledger(CacheLedger::new(
+                "cache-b",
+                ReclaimOwner::KernelSubsystem("mem"),
+                class,
+                b.clone(),
+            ))
+            .expect("registers");
 
         a.charge(class, 4096, 64).expect("charges");
         b.charge(class, 1024, 32).expect("charges");
@@ -583,7 +714,9 @@ mod tests {
         let shared = MemStats::new();
         let accounting = Arc::new(CacheAccounting::new());
         for (label, class, payload, metadata) in pools {
-            shared.register_ledger(CacheLedger::new(label, owner, class, accounting.clone()));
+            shared
+                .register_ledger(CacheLedger::new(label, owner, class, accounting.clone()))
+                .expect("registers");
             charge(&accounting, class, payload, metadata);
         }
 
@@ -594,7 +727,9 @@ mod tests {
         for (label, class, payload, metadata) in pools {
             let own = Arc::new(CacheAccounting::new());
             charge(&own, class, payload, metadata);
-            separate.register_ledger(CacheLedger::new(label, owner, class, Arc::clone(&own)));
+            separate
+                .register_ledger(CacheLedger::new(label, owner, class, Arc::clone(&own)))
+                .expect("registers");
             caches.push(own);
         }
 
@@ -639,22 +774,26 @@ mod tests {
         first
             .charge(ReclaimClass::DisposableUi, 4096, 64)
             .expect("charges");
-        stats.register_ledger(CacheLedger::new(
-            "wm.cursor",
-            ReclaimOwner::DesktopSession { seat: 1 },
-            ReclaimClass::DisposableUi,
-            Arc::clone(&first),
-        ));
+        stats
+            .register_ledger(CacheLedger::new(
+                "wm.cursor",
+                ReclaimOwner::DesktopSession { seat: 1 },
+                ReclaimClass::DisposableUi,
+                Arc::clone(&first),
+            ))
+            .expect("registers");
         let second = Arc::new(CacheAccounting::new());
         second
             .charge(ReclaimClass::CleanFileData, 1024, 32)
             .expect("charges");
-        stats.register_ledger(CacheLedger::new(
-            "arxfs.clean",
-            ReclaimOwner::FilesystemVolume { volume: 3 },
-            ReclaimClass::CleanFileData,
-            Arc::clone(&second),
-        ));
+        stats
+            .register_ledger(CacheLedger::new(
+                "arxfs.clean",
+                ReclaimOwner::FilesystemVolume { volume: 3 },
+                ReclaimClass::CleanFileData,
+                Arc::clone(&second),
+            ))
+            .expect("registers");
 
         let records = stats.cache_ledger_records().expect("records");
         assert_eq!(records.len(), 2, "one row per registered ledger");
@@ -685,17 +824,21 @@ mod tests {
 
         let stats = MemStats::new();
         let owner = ReclaimOwner::KernelSubsystem("mem");
-        stats.register_ledger(CacheLedger::new(
-            "clean",
-            owner,
-            ReclaimClass::CleanFileData,
-            Arc::new(CacheAccounting::new()),
-        ));
-        stats.register_pinned_ledger(PinnedLedger::new(
-            "pinned",
-            owner,
-            Arc::new(PinnedAccounting::new()),
-        ));
+        stats
+            .register_ledger(CacheLedger::new(
+                "clean",
+                owner,
+                ReclaimClass::CleanFileData,
+                Arc::new(CacheAccounting::new()),
+            ))
+            .expect("registers");
+        stats
+            .register_pinned_ledger(PinnedLedger::new(
+                "pinned",
+                owner,
+                Arc::new(PinnedAccounting::new()),
+            ))
+            .expect("registers");
         let listed = crate::test_alloc::past_each_refusal(&Err(Errno::OutOfMemory), || {
             stats.cache_ledger_records().map(|records| records.len())
         });
@@ -711,19 +854,23 @@ mod tests {
         clean
             .charge(ReclaimClass::CleanFileData, 1024, 32)
             .expect("a fresh ledger accepts a charge");
-        stats.register_ledger(CacheLedger::new(
-            "arxfs.clean",
-            ReclaimOwner::FilesystemVolume { volume: 3 },
-            ReclaimClass::CleanFileData,
-            clean,
-        ));
+        stats
+            .register_ledger(CacheLedger::new(
+                "arxfs.clean",
+                ReclaimOwner::FilesystemVolume { volume: 3 },
+                ReclaimClass::CleanFileData,
+                clean,
+            ))
+            .expect("registers");
         let pinned = Arc::new(PinnedAccounting::new());
         pinned.set(1 << 20, 512);
-        stats.register_pinned_ledger(PinnedLedger::new(
-            "arxfs.writeback",
-            ReclaimOwner::FilesystemVolume { volume: 3 },
-            pinned,
-        ));
+        stats
+            .register_pinned_ledger(PinnedLedger::new(
+                "arxfs.writeback",
+                ReclaimOwner::FilesystemVolume { volume: 3 },
+                pinned,
+            ))
+            .expect("registers");
 
         let records = stats.cache_ledger_records().expect("records");
         assert_eq!(records.len(), 2, "the cache row, then the pinned one");
@@ -751,18 +898,22 @@ mod tests {
         // A control character in the label makes `to_record` refuse; the
         // query must still answer with every other registered row rather
         // than failing the whole page over one defective cache.
-        stats.register_ledger(CacheLedger::new(
-            "broken\u{1b}[2Jlabel",
-            ReclaimOwner::KernelSubsystem("mem"),
-            ReclaimClass::DisposableUi,
-            Arc::new(CacheAccounting::new()),
-        ));
-        stats.register_ledger(CacheLedger::new(
-            "good-cache",
-            ReclaimOwner::KernelSubsystem("mem"),
-            ReclaimClass::DisposableUi,
-            Arc::new(CacheAccounting::new()),
-        ));
+        stats
+            .register_ledger(CacheLedger::new(
+                "broken\u{1b}[2Jlabel",
+                ReclaimOwner::KernelSubsystem("mem"),
+                ReclaimClass::DisposableUi,
+                Arc::new(CacheAccounting::new()),
+            ))
+            .expect("registers");
+        stats
+            .register_ledger(CacheLedger::new(
+                "good-cache",
+                ReclaimOwner::KernelSubsystem("mem"),
+                ReclaimClass::DisposableUi,
+                Arc::new(CacheAccounting::new()),
+            ))
+            .expect("registers");
 
         let records = stats.cache_ledger_records().expect("records");
         assert_eq!(records.len(), 1);
@@ -796,12 +947,14 @@ mod tests {
             ReclaimClass::FsMetadata,
             ReclaimClass::DisposableUi,
         ] {
-            stats.register_ledger(CacheLedger::new(
-                "test-cache",
-                ReclaimOwner::KernelSubsystem("mem"),
-                class,
-                ledger.clone(),
-            ));
+            stats
+                .register_ledger(CacheLedger::new(
+                    "test-cache",
+                    ReclaimOwner::KernelSubsystem("mem"),
+                    class,
+                    ledger.clone(),
+                ))
+                .expect("registers");
         }
         // Clean file data and transform cache both count, payload+metadata.
         ledger

@@ -1,8 +1,8 @@
 //! Tests for the shared fallible allocation helpers.
 
 use super::{
-    boxed_array, collected, concatenated, filled, grow_to, push, read_snapshot, reserve, trim,
-    written, zeroed,
+    boxed_array, collected, concatenated, copied, filled, grow_to, push, read_snapshot, reserve,
+    trim, written, zeroed,
 };
 use alloc::vec::Vec;
 use tairix_abi::Errno;
@@ -21,6 +21,13 @@ fn a_refused_reservation_is_answered_not_aborted() {
     assert!(scratch.is_empty(), "a refused growth leaves the scratch");
     let mut buffer: Vec<u32> = Vec::new();
     assert!(!reserve(&mut buffer, UNRESERVABLE));
+}
+
+#[test]
+fn a_copy_holds_exactly_what_it_copied() {
+    let copy = copied(&[3_u16, 1, 4]).expect("granted");
+    assert_eq!((copy.as_slice(), copy.capacity()), (&[3, 1, 4][..], 3));
+    assert_eq!(copied::<u8>(&[]), Some(Vec::new()));
 }
 
 #[test]

@@ -1,11 +1,15 @@
 //! `cargo xtask sound-encode`: turn authored WAV masters into a theme's
-//! shipped FLAC assets (`plans/SOUND.md` §The shipped set).
+//! shipped FLAC assets (`plans/SOUND.md` §The shipped set), or with
+//! `--synthesised` the masters `synth` makes into the shipped theme's.
 //!
 //! FLAC is lossless, so the asset written is the master from then on. Each
 //! master is held to the authoring contract, encoded by the first-party
 //! encoder, and decoded back sample for sample before anything is written.
 
+mod synth;
+
 use std::ffi::OsString;
+use std::fmt::Display;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,33 +20,63 @@ use tairix_syshelp::sound::{shipped_samples, SOUND_RATE_HZ};
 
 use crate::Context;
 
+use synth::SYNTHESISED;
+
 /// Where the themes' shipped assets live in the tree.
 const ASSETS_DIR: &str = "lib/soundtheme/assets";
 
-const USAGE: &str = "usage: cargo xtask sound-encode [--theme <name>] <master.wav>...";
+const USAGE: &str =
+    "usage: cargo xtask sound-encode [--theme <name>] <master.wav>... | --synthesised";
 
-/// Encode every master `args` names into its theme's assets.
+/// Encode every master `args` names into its theme's assets, or with
+/// `--synthesised` every synthesised master into the shipped theme's.
 ///
 /// # Errors
 ///
 /// A bad argument, or the first master that breaks the contract or cannot be
 /// written; nothing past it is written.
 pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    if matches!(args, [flag] if flag == "--synthesised") {
+        let dir = theme_dir(ctx, DEFAULT_THEME)?;
+        for (asset, synthesise) in SYNTHESISED {
+            let flac = synthesise()
+                .and_then(|samples| encode_samples(&samples))
+                .map_err(|why| format!("sound-encode: synthesised {}: {why}", asset.name()))?;
+            write_asset(&dir, asset, &flac, &"its synthesis")?;
+        }
+        return Ok(());
+    }
     let (theme, masters) = parse(args)?;
-    let dir = ctx.workspace_root.join(ASSETS_DIR).join(&theme);
-    fs::create_dir_all(&dir).map_err(|err| format!("sound-encode: {}: {err}", dir.display()))?;
+    let dir = theme_dir(ctx, &theme)?;
     for master in masters {
         let (asset, flac) = encode_master(&master)
             .map_err(|why| format!("sound-encode: {}: {why}", master.display()))?;
-        let out = dir.join(format!("{}.flac", asset.name()));
-        fs::write(&out, &flac).map_err(|err| format!("sound-encode: {}: {err}", out.display()))?;
-        noteln!(
-            "xtask: [sound-encode] {} -> {} ({} bytes)",
-            master.display(),
-            out.display(),
-            flac.len()
-        );
+        write_asset(&dir, asset, &flac, &master.display())?;
     }
+    Ok(())
+}
+
+/// `theme`'s directory of assets, made if it is not there.
+fn theme_dir(ctx: &Context, theme: &str) -> Result<PathBuf, String> {
+    let dir = ctx.workspace_root.join(ASSETS_DIR).join(theme);
+    fs::create_dir_all(&dir).map_err(|err| format!("sound-encode: {}: {err}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Write `asset`'s `flac` into `dir`, saying what it was made from.
+fn write_asset(
+    dir: &Path,
+    asset: SoundAsset,
+    flac: &[u8],
+    from: &dyn Display,
+) -> Result<(), String> {
+    let out = dir.join(format!("{}.flac", asset.name()));
+    fs::write(&out, flac).map_err(|err| format!("sound-encode: {}: {err}", out.display()))?;
+    noteln!(
+        "xtask: [sound-encode] {from} -> {} ({} bytes)",
+        out.display(),
+        flac.len()
+    );
     Ok(())
 }
 

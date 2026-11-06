@@ -96,6 +96,8 @@ pub mod tasks;
 pub mod tray;
 
 #[cfg(test)]
+mod recording_tests;
+#[cfg(test)]
 mod tests;
 
 pub use apps::{AppIdentity, AppSlot, AppStrip};
@@ -111,7 +113,8 @@ pub use library::{
 pub use menu::{EntryRow, MenuRequest, MenuSubject};
 pub use notifications::{
     arrival_sound, IconId, NotificationArea, NotifySeverity, Producer, Raised, StatusKind,
-    StatusSignal, TransientNotification, NOTIFICATIONS_MAX, SOURCE_NOTIFICATIONS_MAX,
+    StatusSignal, TransientNotification, NOTIFICATIONS_MAX, SCREEN_RECORDING_SIGNAL,
+    SOURCE_NOTIFICATIONS_MAX,
 };
 pub use picker::{
     entries_have_picker, has_picker, slot_has_picker, PickerEntry, PickerLayout, WindowPicker,

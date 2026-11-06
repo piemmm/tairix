@@ -62,9 +62,9 @@ dropped is a category the surface then has to lie about.
 | **DS24** | The ray tracer's scene detail: its `detail` option, `simple` (the default) or `maximum`, a *Detail* row reading *Simple* or *Maximum realism*, falling back to Simple where the memory band says Maximum's peak is not free of the memory the desktop granted | DS21, `plans/RAYTRACE.md` RT39 | DS24 | done |
 | **DS25** | Trackpad — tap to click, natural scrolling and the touchpad speed (`touchpad.*`), handed to the seat's gesture recogniser; the Touchscreen pane states what it would need to set anything | DS11 | §2, §3; `plans/POINTING.md` PO6 | done |
 | **DS26** | Text — the desktop font and its size (`font.family`, `font.size`, in points) on Appearance's TEXT group, resolved by the session against the font store and carried to every application in the desktop notice; the shipped base one point smaller (16 px, 10 pt of Inter) | DS3, `plans/FONT-SERVICE.md` | DS26 | done |
-| **DS27** | Sound — an Output and an Input plate, each choosing the device its direction uses and setting that device's volume and mute (a checkbox: muted, the volume stands silent and disabled), and a Recording plate; acting on `audio-v1` directly under the room the session holds, each change shown at once in the rows it touches | DS11 | §0, §2; `plans/SOUND.md` SND15 | done |
+| **DS27** | Sound — an Output and an Input plate, each choosing the device its direction uses and setting that device's volume and mute (a checkbox: muted, the volume stands silent and disabled), and a Recording plate; acting on `audio-v1` directly under the room the session holds, each change shown at once in the rows it touches, and a settled change to the output heard at its new level (`plans/SOUND.md` SND25) | DS11 | §0, §2; `plans/SOUND.md` SND15 | done |
 | **DS28** | Displays — the desktop's Resolution over the output's own modes, applied at once behind the session's Keep/Revert trial | DS3, `plans/DISPLAY.md` D11 | DS28 | done |
-| **DS29** | Sound Effects — the user's own sound choices (the switch, the theme and one volume, then one chooser per event of what it plays: its theme's sound, a chosen file, none, or a pick), read and changed through the desktop session's pinboard sound requests, a file chosen in the session's own picker; the Sound category's two panes, *Output & Input* and *Sound Effects* | DS27, `plans/SOUND.md` SND23 | §2; `plans/SOUND.md` SND23 | done |
+| **DS29** | Sound Effects — the user's own sound choices (the switch, the theme and one volume, the volume feedback's own switch, then one chooser per sound effect of what it plays: its theme's sound, a chosen file, none, or a pick), read and changed through the desktop session's pinboard sound requests, a file chosen in the session's own picker; the Sound category's two panes, *Output & Input* and *Sound Effects* | DS27, `plans/SOUND.md` SND23 | §2; `plans/SOUND.md` SND23 | done |
 | **DS30** | Raspberry Pi — a board-conditional category shown only where `PLATFORM_COMPATIBLE` names a Raspberry Pi: the CPU fan's `cooling.fan.*` policy staged over `system.conf` and applied through the one `configure` run, beside the cooling service's live `thermal-v1` reading, asked on a worker every two seconds while the pane is on show | DS6, `plans/COOLING.md` CL6 | §2; `plans/COOLING.md` CL7 | done |
 | **DS31** | Files — the file manager's settings (`tairix_browse::FilerPreferences`, `files.*`) on an immediate pane of their own, posted through `PinboardRequest::ApplyFiles` on a desk of their own and reached by the file manager's *Settings…* through `tairix_browse::SETTINGS_PANE` | DS3, `plans/NEW-FILEMANAGER.md` FM23 | DS31 | done |
 | **DS32** | A desktop row posts only what its choice changed, follows `settings_generation`, and adopts only its newest answer: today an immediate pane posts its whole key group from the reading it opened on, so a later choice there puts back a key another writer moved since (the backdrop menu's `icons`/`sort` under Wallpaper), and its desk adopts every answer as Files no longer does | DS3, DS31 | DS32 | planned |
@@ -1885,9 +1885,12 @@ What it guarantees:
 The file manager keeps no settings store of its own: its registry
 (`tairix_browse::FilerPreferences`, every key under `files.`) lives in the
 desktop session's document, published with the desktop's own. The pane's
-fourteen rows (`userland/apps/settings/src/files.rs`, `FilesSetting`, grouped
-New windows, Items, Names, Icons, Trash, Disk images and archives) are
-immediate. A choice renders the `files.*` keys alone and posts them as
+nineteen rows (`userland/apps/settings/src/files.rs`, `FilesSetting`, grouped
+New windows, Items, Names, Icons, Show on the desktop, Trash, Disk images and
+archives) are immediate. Show on the desktop is a box per drive class
+(`FilesSetting::Desktop(DriveClass)`, the `files.desktop.*` keys, removable
+alone ticked by default); a box never ticks itself, so a tick restates its row
+to what the rows then hold. A choice renders the `files.*` keys alone and posts them as
 `PinboardRequest::ApplyFiles` (`tairix_wallpaper::apply(ApplyTo::Files, ..)`)
 on a desk of their own (`FILES_TOKEN`), since a latest-wins desk shared with
 the desktop's apply would let one evict the other's answer; the session merges

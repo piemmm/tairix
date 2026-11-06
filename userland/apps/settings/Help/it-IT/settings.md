@@ -44,7 +44,13 @@ e il silenziamento, e ciò che sta registrando: le proprie registrazioni per
 nome e quante ne fanno gli altri. I controlli cambiano subito il dispositivo,
 e solo finché la propria sessione occupa la stanza che serve; un dispositivo
 della stanza di un'altra sessione è mostrato ma qui non si può cambiare. La
-scrivania ricorda ciò che si imposta.
+scrivania ricorda ciò che si imposta. Cambiare il volume del dispositivo da cui
+esce il suono, qui o dalla barra delle icone, riproduce un breve suono al nuovo
+volume — dove un trascinamento si ferma, a ogni passo dei tasti freccia e
+togliendo il silenziamento — così da sentire quanto è forte ora. In
+*Sound Effects*, *Play feedback when the volume changes* lo disattiva. Non
+segue gli altri suoni della scrivania: suona al volume del dispositivo stesso,
+che siano attivi o no.
 
 **Raspberry Pi** compare solo quando la macchina lo è. Imposta la ventola del
 processore, comandata da una linea del connettore a 40 pin: *Off*, *On* sempre
@@ -73,10 +79,17 @@ luoghi e la barra degli strumenti, se le cartelle restano in cima, quali
 estensioni dei nomi e quali voci sono nascoste, se un'immagine mostra il
 proprio contenuto e una cartella ciò che contiene, se spostare delle voci nel
 Cestino chiede prima conferma e se un'immagine disco o un archivio aperto viene
-smontato una volta chiuse le sue finestre. Una riga ha effetto non appena viene
+smontato una volta chiuse le sue finestre. Le estensioni dei nomi che nasconde
+sono nascoste anche sul desktop. *Show on the desktop* ha una casella per ogni
+tipo di unità — *The system drive*, *Fixed drives*, *Removable drives*,
+*Network shares* e *Disk images and archives* — e il desktop mostra un'icona
+per ogni unità collegata di un tipo spuntato, che la apre come fa il gestore di
+file; all'inizio sono spuntate solo le unità rimovibili. Una riga ha effetto non
+appena viene
 scelta: dove si apre una nuova finestra e se mostra la colonna dei luoghi e la
 barra degli strumenti valgono per la prossima finestra che viene aperta, e tutto
-il resto raggiunge tutte le finestre del gestore di file contemporaneamente,
+il resto raggiunge il desktop e tutte le finestre del gestore di file
+contemporaneamente,
 anche se una finestra mantiene una visualizzazione o un ordine scelti
 personalmente in essa. *Settings…* nel menu del gestore di file stesso apre
 questo pannello.

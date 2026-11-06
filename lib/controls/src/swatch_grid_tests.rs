@@ -6,13 +6,13 @@ use alloc::vec::Vec;
 
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Surface};
+use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::Theme;
 
 use crate::damage;
 use crate::paint::authority_rgba;
 use crate::state::{AuthorityState, ControlState};
-use crate::swatch_grid::{SwatchAction, SwatchGrid, SwatchMark};
+use crate::swatch_grid::{NumberFace, SwatchAction, SwatchGrid, SwatchMark, WellSpacing};
 use crate::testkit::{has_pixel, premul};
 
 const W: u32 = 400;
@@ -651,4 +651,167 @@ fn the_pointer_and_the_latch_are_not_drawn() {
         surface
     };
     assert_eq!(render(&pressed).pixels(), render(&resting).pixels());
+}
+
+/// The face the tests number wells in.
+fn face() -> NumberFace {
+    NumberFace::of(Scale::ONE, &Theme::dark())
+}
+
+/// `grid` drawn into a surface the size of `bounds`, which starts at the
+/// origin.
+fn drawn(grid: &SwatchGrid, bounds: Rect) -> Surface {
+    let mut surface = Surface::new(bounds.width, bounds.height).expect("surface");
+    grid.render(&mut surface, bounds, Scale::ONE, &Theme::dark());
+    surface
+}
+
+/// The pixel at column `x` and row `y`, as a point.
+fn point(x: u32, y: u32) -> Point {
+    Point::new(
+        i32::try_from(x).expect("fits"),
+        i32::try_from(y).expect("fits"),
+    )
+}
+
+/// Every pixel at which `a` and `b` differ.
+fn differences(a: &Surface, b: &Surface) -> Vec<Point> {
+    (0..a.height())
+        .flat_map(|y| (0..a.width()).map(move |x| (x, y)))
+        .filter(|&(x, y)| a.get(x, y) != b.get(x, y))
+        .map(|(x, y)| point(x, y))
+        .collect()
+}
+
+/// A packed grid stands its wells a pixel apart where a spaced one keeps
+/// half the theme's gap round each, and rings the focused well in that pixel.
+#[test]
+fn a_packed_grid_insets_each_well_by_a_pixel_and_rings_it_there() {
+    let theme = Theme::dark();
+    let mut packed = grid().with_spacing(WellSpacing::Packed);
+    let cell = packed.cell_rect(bounds(), 6).expect("a well");
+    let (left, row) = (
+        u32::try_from(cell.left()).expect("on the surface"),
+        u32::try_from(cell.center().y).expect("on the surface"),
+    );
+    let inked =
+        |surface: &Surface, into: u32| surface.get(left + into, row) != Some(Pixel::TRANSPARENT);
+    let (loose, tight) = (drawn(&grid(), bounds()), drawn(&packed, bounds()));
+    assert!(!inked(&tight, 0) && inked(&tight, 1), "a pixel apart");
+    let margin = Scale::ONE.scale_length(theme.metrics().control_gap) / 2;
+    assert!(
+        !inked(&loose, margin - 1) && inked(&loose, margin),
+        "half the gap apart"
+    );
+    packed.adopt_selected(Some(6));
+    let resting = drawn(&packed, bounds());
+    packed.set_focused(true);
+    let ringed = differences(&resting, &drawn(&packed, bounds()));
+    assert!(
+        ringed.iter().all(|&at| cell.contains(at)),
+        "the ring stays in the cell"
+    );
+    assert!(
+        ringed.contains(&point(left, row)) && !ringed.contains(&point(left + 1, row)),
+        "it is drawn in the pixel round the well"
+    );
+}
+
+/// Numbered, a marked well shows its number in place of its mark, inside a
+/// well that holds it, and nothing else changes.
+#[test]
+fn a_marked_numbered_well_shows_its_number_in_place_of_its_mark() {
+    let mut grid = grid();
+    grid.adopt_secondary(Some(8));
+    let marked = drawn(&grid, bounds());
+    assert!(grid.number_wells(COUNT, face()), "it changes the grid");
+    assert!(!grid.number_wells(COUNT, face()), "the same numbers do not");
+    assert_eq!(grid.numbered(), COUNT);
+    for index in 0..COUNT {
+        assert_eq!(
+            grid.mark_rect(bounds(), index),
+            grid.cell_rect(bounds(), index),
+            "well {index} holds its number"
+        );
+    }
+    let changed = differences(&marked, &drawn(&grid, bounds()));
+    let wells = [0, 8].map(|index| grid.cell_rect(bounds(), index).expect("a well"));
+    let in_wells = |at: &Point| wells.iter().any(|well| well.contains(*at));
+    let touched = |well: &Rect| changed.iter().any(|&at| well.contains(at));
+    assert!(changed.iter().all(in_wells), "only the marked wells change");
+    assert!(wells.iter().all(touched), "both marked wells change");
+    assert!(grid.number_wells(0, face()));
+    assert_eq!(grid.numbered(), 0);
+    assert_eq!(
+        drawn(&grid, bounds()).pixels(),
+        marked.pixels(),
+        "unnumbered, the marks return"
+    );
+}
+
+/// A number too big for its well stands on a badge centred on the well and
+/// kept within the grid, and a mark's move reports the badges with the wells.
+#[test]
+fn a_number_too_big_for_its_well_stands_on_a_badge_within_the_grid() {
+    let bounds = Rect::new(0, 0, 160, 160);
+    let mut grid = SwatchGrid::new(16, colours(256)).with_spacing(WellSpacing::Packed);
+    grid.number_wells(256, face());
+    for index in [0, 15, 136, 255] {
+        let cell = grid.cell_rect(bounds, index).expect("a well");
+        let badge = grid.mark_rect(bounds, index).expect("a mark");
+        assert_ne!(badge, cell, "well {index} is too small for its number");
+        assert_eq!(badge.union(&cell), badge, "well {index}'s badge covers it");
+        assert_eq!(
+            bounds.union(&badge),
+            bounds,
+            "well {index}'s badge stays in the grid"
+        );
+    }
+    grid.adopt_selected(Some(136));
+    let cell = grid.cell_rect(bounds, 136).expect("a well");
+    let badge = grid.mark_rect(bounds, 136).expect("a mark");
+    let numbered = drawn(&grid, bounds);
+    grid.number_wells(0, face());
+    let changed = differences(&drawn(&grid, bounds), &numbered);
+    assert!(
+        changed.iter().all(|&at| badge.contains(at)),
+        "the badge alone is drawn"
+    );
+    assert!(
+        changed.iter().any(|&at| !cell.contains(at)),
+        "over the wells round it"
+    );
+    grid.number_wells(256, face());
+    grid.set_focused(true);
+    let mut damage = damage::sink();
+    assert_eq!(
+        grid.on_key(Key::Named(NamedKey::Down), bounds, &mut damage),
+        Some(SwatchAction::Selected {
+            mark: SwatchMark::Primary,
+            index: 152
+        })
+    );
+    let reported = [136, 152].map(|index| grid.mark_rect(bounds, index).expect("a mark"));
+    assert_eq!(
+        damage.bounds(),
+        reported[0].union(&reported[1]),
+        "both badges repaint"
+    );
+}
+
+/// A well past those numbered keeps its mark, which repaints its cell alone.
+#[test]
+fn a_well_past_the_numbered_ones_marks_its_cell_alone() {
+    let bounds = Rect::new(0, 0, 160, 160);
+    let mut grid = SwatchGrid::new(16, colours(256)).with_spacing(WellSpacing::Packed);
+    grid.adopt_selected(Some(255));
+    let marked = drawn(&grid, bounds);
+    grid.number_wells(255, face());
+    assert_eq!(grid.mark_rect(bounds, 255), grid.cell_rect(bounds, 255));
+    assert_ne!(grid.mark_rect(bounds, 254), grid.cell_rect(bounds, 254));
+    assert_eq!(
+        drawn(&grid, bounds).pixels(),
+        marked.pixels(),
+        "its mark is drawn as it was"
+    );
 }

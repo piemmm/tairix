@@ -4,13 +4,13 @@ top — osservare la lista dei processi dal vivo
 
 ## SYNOPSIS
 
-`top [-d sec.decimi] [-h | -?]`
+`top [-d secs.tenths] [-h | -?]`
 
 ## DESCRIPTION
 
 Mostra una vista a schermo intero, dal vivo, della lista dei processi
-tramite l'API di informazioni di sistema, nello spirito del classico
-`top`. Parte dai processi del chiamante; la vista dell'intero sistema è
+tramite l'API di informazioni di sistema, nello spirito di GNU `top`.
+Parte dai processi del chiamante; la vista dell'intero sistema è
 concessa dal servizio solo a un chiamante che detiene
 `CAP_SYSINFO_GLOBAL`.
 
@@ -50,11 +50,14 @@ Le righe sono ordinate per `%CPU`, il consumatore maggiore per primo, e
 riportano:
 
 - `PID` — l'identificatore numerico del processo.
-- `USER` — il nome dell'account proprietario, risolto dall'elenco dei
-  conti del sistema; l'uid numerico lo sostituisce quando il nome non può
+- `USER` — il nome dell'account proprietario, risolto dall'elenco degli
+  account del sistema; l'uid numerico lo sostituisce quando il nome non può
   essere risolto.
 - `SIZE` — la memoria mappata nello spazio di indirizzamento del
-  processo (immagine, pila e heap insieme).
+  processo (immagine, pila e heap insieme), in unità binarie: il conteggio
+  esatto sotto un kibibyte, poi un decimale con il suffisso `K`, `M`, `G`,
+  `T`, `P` o `E` (`4.0K`, `986.2M`, `2.0G`). La scala arriva agli
+  exbibyte, quindi la cifra entra sempre nella sua colonna.
 - `S` — la lettera di stato: `R` in esecuzione (verde), `r` pronto, in
   attesa di una CPU (ciano), `S` dormiente, `T` fermato (giallo), `Z`
   zombie (magenta). I colori compaiono solo su un terminale a colori; la
@@ -64,7 +67,7 @@ riportano:
 - `WCPU` — la quota di CPU ponderata (livellata esponenzialmente) tra
   gli aggiornamenti, più stabile della colonna istantanea.
 - `TIME+` — il tempo di CPU cumulato, come
-  `minuti:secondi.centesimi`.
+  `minutes:seconds.hundredths` (minuti, secondi e centesimi).
 - `COMMAND` — il nome del processo.
 
 ## OPTIONS

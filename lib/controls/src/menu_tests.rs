@@ -1905,7 +1905,7 @@ fn a_chooseable_row_that_has_children_draws_a_chevron_and_keeps_its_id() {
         AppMenuRow::Item(
             AppMenuItem::new(wire_id(2), wire_label("View"), AppMenuSymbol::Application)
                 .with_icon_bundle(
-                    tairix_abi::window_ipc::AppMenuBundle::new("/System/Applications/view.app")
+                    tairix_abi::window_ipc::IconPath::new("/System/Applications/view.app")
                         .expect("a valid path"),
                 ),
         ),

@@ -246,7 +246,13 @@ every stream for the System Information service, and `set_control` makes a
 device its direction's default or sets its level or mute. `ControlQueue` paces
 those for an interactive surface: one round trip in flight, and a control asked
 meanwhile replacing a waiting one of its kind for its device and going to the
-back, so the default chosen last is the one applied last.
+back, so the default chosen last is the one applied last. `ask_confirmed` asks
+for a settled change made by hand, and `landed` answers whether the listing of
+the trip that carried it shows it applied — its device the default output,
+sounding, at the level asked for — so the caller can let its listener hear the
+new level. Only the newest such change is confirmed, and never one the service
+refused; a change nobody hears — a mute, a choice of default — confirms
+nothing, so it takes no earlier change's confirmation away.
 
 A program supplies that seam with `live` (feature `rt`): `RtAudio` is the
 service's rendezvous and its streams' notify mailboxes — each bound the first

@@ -199,3 +199,33 @@ fn a_closed_transaction_forgets_the_operations_it_carried() {
     schedule.closed();
     assert_eq!(schedule.acknowledged(), 0);
 }
+
+#[test]
+fn a_postponed_transaction_is_dated_afresh_once_its_window_has_run_out() {
+    let window = writeback_window_ns(BlkCommandCost::Cheap, PressureBand::Normal);
+    let host = TestVolumeHost::leaked(0);
+    let mut schedule = CommitScheduler::new(BlkCommandCost::Cheap);
+    schedule.set_host(TestVolumeHost::volume(), host);
+    schedule.opened();
+    schedule.joined();
+    let reports = host.reports();
+    schedule.postponed();
+    assert_eq!(host.reports(), reports, "a deadline still ahead stands");
+    host.set_now(window + 7);
+    schedule.postponed();
+    assert_eq!(
+        host.reported(),
+        Some(window + 7 + window),
+        "the timer comes back a window from the refusal, not in the past"
+    );
+    assert!(!schedule.expired());
+    assert_eq!(schedule.acknowledged(), 1, "what it carries stays");
+    schedule.closed();
+    let reports = host.reports();
+    schedule.postponed();
+    assert_eq!(
+        host.reports(),
+        reports,
+        "a closed transaction has nothing to postpone"
+    );
+}

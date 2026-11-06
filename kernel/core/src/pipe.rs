@@ -34,6 +34,7 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use tairix_abi::Errno;
 use tairix_sync::SpinLock;
 
 use crate::waitq::WakeKey;
@@ -174,17 +175,21 @@ pub enum WriteStep {
 impl Pipe {
     /// Create a pipe and hand back its two initial end handles
     /// (`(read, write)`), each counting one live end.
-    #[must_use]
-    pub fn create() -> (PipeEnd, PipeEnd) {
-        let pipe = Arc::new(Pipe {
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the pipe cannot be allocated.
+    pub fn create() -> Result<(PipeEnd, PipeEnd), Errno> {
+        let pipe = Arc::try_new(Pipe {
             state: SpinLock::new(PipeState {
                 buf: VecDeque::new(),
                 readers: 1,
                 writers: 1,
             }),
             waits: RingWaits::mint(),
-        });
-        (
+        })
+        .map_err(|_| Errno::OutOfMemory)?;
+        Ok((
             PipeEnd {
                 pipe: Arc::clone(&pipe),
                 role: PipeRole::Read,
@@ -193,7 +198,7 @@ impl Pipe {
                 pipe,
                 role: PipeRole::Write,
             },
-        )
+        ))
     }
 }
 
@@ -420,9 +425,26 @@ mod tests {
     use super::*;
     use alloc::vec;
 
+    /// A pipe, which a test heap always has room for.
+    fn pipe() -> (PipeEnd, PipeEnd) {
+        Pipe::create().expect("a test heap has room for a pipe")
+    }
+
+    /// A pipe the heap cannot hold is refused as a value.
+    ///
+    /// Regression: the pipe was allocated infallibly, so an exhausted heap
+    /// aborted the kernel from `pipe_create`.
+    #[test]
+    fn a_pipe_the_heap_cannot_hold_is_refused() {
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let made = Pipe::create();
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(made.err(), Some(Errno::OutOfMemory));
+    }
+
     #[test]
     fn bytes_flow_in_order_through_the_ring() {
-        let (read, write) = Pipe::create();
+        let (read, write) = pipe();
         assert_eq!(write.try_write(b"hello "), WriteStep::Wrote(6));
         assert_eq!(write.try_write(b"world"), WriteStep::Wrote(5));
         let mut out = [0u8; 16];
@@ -434,7 +456,7 @@ mod tests {
 
     #[test]
     fn a_full_ring_reports_full_and_frees_after_a_drain() {
-        let (read, write) = Pipe::create();
+        let (read, write) = pipe();
         let chunk = vec![7u8; PIPE_CAPACITY];
         assert_eq!(write.try_write(&chunk), WriteStep::Wrote(PIPE_CAPACITY));
         // No space left: the writer must park.
@@ -450,7 +472,7 @@ mod tests {
         // Transfers are bulk copies, one per ring segment, so the seam a
         // wrapped ring puts in the middle of a read is the case to pin:
         // the reader must see one unbroken stream across it.
-        let (read, write) = Pipe::create();
+        let (read, write) = pipe();
         let filler = vec![0xEEu8; PIPE_CAPACITY];
         assert_eq!(write.try_write(&filler), WriteStep::Wrote(PIPE_CAPACITY));
         // Free the head, then refill it: the live bytes now straddle the
@@ -477,7 +499,7 @@ mod tests {
 
     #[test]
     fn dropping_the_last_writer_yields_eof_after_the_drain() {
-        let (read, write) = Pipe::create();
+        let (read, write) = pipe();
         assert_eq!(write.try_write(b"tail"), WriteStep::Wrote(4));
         drop(write);
         // Buffered bytes are still readable after the writer is gone…
@@ -489,14 +511,14 @@ mod tests {
 
     #[test]
     fn dropping_the_last_reader_breaks_the_writer() {
-        let (read, write) = Pipe::create();
+        let (read, write) = pipe();
         drop(read);
         assert_eq!(write.try_write(b"x"), WriteStep::Broken);
     }
 
     #[test]
     fn cloned_ends_keep_their_side_alive_until_the_last_drop() {
-        let (read, write) = Pipe::create();
+        let (read, write) = pipe();
         let write2 = write.clone();
         drop(write);
         // One write end still lives: the empty pipe means park, not EOF.
@@ -505,7 +527,7 @@ mod tests {
         drop(write2);
         assert_eq!(read.try_read(&mut out), ReadStep::Eof);
         // The read side mirrors it.
-        let (read_a, write_b) = Pipe::create();
+        let (read_a, write_b) = pipe();
         let read_b = read_a.clone();
         drop(read_a);
         assert_eq!(write_b.try_write(b"y"), WriteStep::Wrote(1));
@@ -515,7 +537,7 @@ mod tests {
 
     #[test]
     fn direction_is_enforced_at_the_step_level() {
-        let (read, write) = Pipe::create();
+        let (read, write) = pipe();
         // A mis-routed step starves fail-closed rather than crossing the
         // direction: the handler rejects it before ever parking.
         assert_eq!(write.try_read(&mut [0u8; 4]), ReadStep::Empty);
@@ -524,7 +546,7 @@ mod tests {
 
     #[test]
     fn zero_length_transfers_are_inert() {
-        let (read, write) = Pipe::create();
+        let (read, write) = pipe();
         assert_eq!(write.try_write(b""), WriteStep::Wrote(0));
         assert_eq!(write.try_write(b"a"), WriteStep::Wrote(1));
         assert_eq!(read.try_read(&mut []), ReadStep::Read(0));
@@ -535,7 +557,7 @@ mod tests {
 
     #[test]
     fn readable_peeks_without_consuming_and_reports_eof() {
-        let (read, write) = Pipe::create();
+        let (read, write) = pipe();
         // Empty with a live writer: a read would park, so not readable.
         assert!(!read.readable());
         assert_eq!(write.try_write(b"hi"), WriteStep::Wrote(2));
@@ -550,7 +572,7 @@ mod tests {
         assert!(read.readable());
         assert_eq!(read.try_read(&mut out), ReadStep::Eof);
         // A write end is never readable, buffered bytes or not.
-        let (read_b, write_b) = Pipe::create();
+        let (read_b, write_b) = pipe();
         assert_eq!(write_b.try_write(b"x"), WriteStep::Wrote(1));
         assert!(!write_b.readable());
         assert!(read_b.readable());
@@ -558,7 +580,7 @@ mod tests {
 
     #[test]
     fn writable_peeks_room_without_consuming_and_reports_a_broken_stream() {
-        let (read, write) = Pipe::create();
+        let (read, write) = pipe();
         // An empty ring has room, and the peek appends nothing.
         assert!(write.writable());
         assert!(write.writable());
@@ -584,7 +606,7 @@ mod tests {
     /// produced it.
     #[test]
     fn each_pipe_waits_on_its_own_ring_and_the_ends_mirror_each_other() {
-        let (read, write) = Pipe::create();
+        let (read, write) = pipe();
         let (r, w) = (read.waits(), write.waits());
         assert_ne!(r.park(), w.park(), "the two directions block separately");
         assert_eq!(
@@ -598,7 +620,7 @@ mod tests {
             "an append supplies the bytes its reader parks on"
         );
 
-        let (read2, write2) = Pipe::create();
+        let (read2, write2) = pipe();
         let keys = [
             r.park(),
             w.park(),
@@ -621,7 +643,7 @@ mod tests {
     /// about.
     #[test]
     fn the_last_end_of_a_side_retires_exactly_its_peers_condition() {
-        let (read, write) = Pipe::create();
+        let (read, write) = pipe();
         assert_eq!(
             read.retired_condition(),
             write.waits().park(),
@@ -636,11 +658,11 @@ mod tests {
 
     #[test]
     fn equality_names_the_end_not_the_content() {
-        let (read, write) = Pipe::create();
+        let (read, write) = pipe();
         let read2 = read.clone();
         assert_eq!(read, read2);
         assert_ne!(read, write);
-        let (other_read, _other_write) = Pipe::create();
+        let (other_read, _other_write) = pipe();
         assert_ne!(read, other_read);
     }
 }

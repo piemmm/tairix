@@ -148,8 +148,9 @@ while the window is still making one, a Trash that cannot be read to be
 emptied — one notice at a time, a later one waiting its turn rather than
 replacing the one shown. An operation does not begin while the window waits on
 a one-shot change, whose answer would otherwise act on the listing behind its
-panel. Empty Trash confirms what the Trash holds when the reader reads it, not
-the listing on show. Closing a window cancels what it was running, removing a
+panel. Empty Trash — on the toolbar, and on the Trash window's own menu —
+confirms what the Trash holds when the reader reads it, not the listing on
+show. Closing a window cancels what it was running, removing a
 file it was part-way through copying; every bring-up refusal exits fail-loud
 with a reserved code and a stated reason on `stderr`.
 
@@ -164,11 +165,16 @@ catalog entry asks first, as the window's one question
 (`files::question`), before a detach that takes the lost.
 A mount runs on a mount worker of its own (`tairix_browse::mount::MountWorker`),
 since an attach waits for the volume's driver; an eject runs on the reader
-serving the volume's lane, after the read under way there, so no read or watch
-of the app's own routed to it still holds the volume — one routed before the
-mount table was re-read can, and the eject is then refused as busy
+serving the volume's lane, after the read under way there and after the files
+of the bundles shown there are let go, so no read, watch or follow of the app's
+own routed to it still holds the volume — one routed before the mount table was
+re-read can, and the eject is then refused as busy
 (`plans/DISK-IMAGES.md`). A refusal of either is stated in an
-alert in the words the desktop uses too. The mount is
+alert in the words the desktop uses too. *Title*, on the icon-bar slot's plate
+and in a drive's Info window, is offered wherever the one rule lets the user
+retitle the volume (`tairix_browse::VolumeFacts::retitling_by`) and carried out
+on the mount worker; a refusal of the authority over a device's volume asks an
+administrator through the desktop's prompt (`SystemTask::Retitle`). The mount is
 the kernel's decision, made on the user's own open of the file
 (`CAP_FS_ACCESS`); no capability is added for it.
 
@@ -299,8 +305,10 @@ slots drawn through what landed: an application copied into one window
 repaints its own tile, and no other window repaints. While a paste writes an
 item, nothing pictured from inside it is decoded, so a half-copied bundle is
 never pictured or refused; once the item is whole its tile asks again. A
-listed bundle is keyed by its listing's stamp, so a replaced one is decoded
-afresh. A picture file's own content is decoded last of all, after the icons
+listed bundle is keyed by the files its picture was read from, followed while
+a window shows it (`tairix_browse::follow`), so one a plain `cp` was still
+writing shows its own icon once its files are whole, and a replaced one is
+decoded afresh. A picture file's own content is decoded last of all, after the icons
 and the folder cues, and shown as it lands. The paint side is `src/icons.rs`,
 host-tested there.
 
@@ -320,7 +328,7 @@ close and a fail-loud exit alike.
 
 ## The Network view
 
-The slot menu's *Network* row, above *Settings…*, opens a window on the
+The slot menu's *Network* row, above *Trash*, opens a window on the
 `lib/browse` network location (`plans/ZEROCONF.md` Z9): the storage
 endpoints the `lib/discovery` catalogue lists, drawn by the same renderer as
 any folder. The `netbrowse` module (host-tested) decides when the reader is
@@ -386,6 +394,12 @@ directions: every pixel a scripted walk over the view draws differently lies
 inside what that round reported (asserted against a real render of the frame
 before and after), and a focus move reports exactly the two entries it moved
 between while a scroll reports the item area and the bar beside it.
+
+What a double-click that opens its item elsewhere owes its window is the
+host-visible `handoff` module's — reported once when it went ahead, never for
+a refusal, an image's mount paired by the number its attach carries — and what
+the icon-bar slot offers, its closing *Trash* row among it, the `appbar`
+module's.
 
 The command-line decision is host-visible for the same reason, in the
 `command` module: the accepted absolute path (collapsed separators and

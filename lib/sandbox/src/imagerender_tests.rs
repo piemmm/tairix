@@ -2745,8 +2745,8 @@ fn a_thumbnail_placed_outside_its_square_or_nowhere_is_refused() {
 struct Held(Vec<u8>);
 
 impl tairix_icon::ArtworkDocument for Held {
-    fn stamp(&self) -> tairix_icon::DocumentStamp {
-        tairix_icon::DocumentStamp {
+    fn stamp(&self) -> tairix_abi::fs::DocumentStamp {
+        tairix_abi::fs::DocumentStamp {
             size: self.0.len() as u64,
             modified: tairix_abi::time::Time64::UNIX_EPOCH,
             id: tairix_abi::FileId::NONE,

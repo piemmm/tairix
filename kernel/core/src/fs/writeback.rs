@@ -138,7 +138,9 @@ impl WritebackDue {
 ///
 /// A failed publish is not retried here: the driver's own commit failure
 /// path abandons the transaction and reports that it holds nothing, so the
-/// volume leaves the due set either way. The failure is logged, because a
+/// volume leaves the due set — except a commit refused memory, which keeps
+/// its transaction and reports a deadline a window later. The failure is
+/// logged, because a
 /// background publish is the one durability failure no caller is waiting on,
 /// so the log is the only place its reason can land.
 pub fn publish_due<F>(

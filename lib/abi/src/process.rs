@@ -6,8 +6,9 @@
 //! in the new address space and hands the program's entry trampoline (crt0,
 //! `plans/CCOMPAT.md` CC3) a pointer to it. The block carries the program's
 //! command-line arguments, its environment, a per-process random seed for
-//! the stack canary, and the migration-safe common CPU-feature set the
-//! program's runtime resolves its accelerated routines against. This module is
+//! the stack canary, the migration-safe common CPU-feature set the
+//! program's runtime resolves its accelerated routines against, and the
+//! address space set aside for its heap. This module is
 //! the one definition both sides share: the kernel *builds* the block and
 //! crt0 *parses* it.
 //!
@@ -38,6 +39,7 @@
 
 use crate::fs::PathAt;
 use crate::le::{read_u32, read_u64};
+use crate::memory::PAGE_SIZE;
 use crate::origin::{ProcId, PROC_ID_LEN};
 use crate::rlimit::{LimitKind, ResourceLimit, RLIMIT_INFINITY};
 use crate::Errno;
@@ -115,6 +117,55 @@ impl StringSlot {
     }
 }
 
+/// Address space the kernel set aside for a process's heap: `len` bytes from
+/// `base`, which no window or mapping of the process's layout holds, so the
+/// runtime can grow its heap there with `FIXED` maps that meet nothing else.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct HeapRegion {
+    /// First byte of the region; a page multiple.
+    pub base: u64,
+    /// Bytes the region spans; a page multiple, and nought for no heap.
+    pub len: u64,
+}
+
+impl HeapRegion {
+    /// No heap: every allocation of a runtime handed it is refused.
+    pub const NONE: Self = Self { base: 0, len: 0 };
+
+    /// Whether the region is whole pages that end inside the address space.
+    #[must_use]
+    pub const fn is_well_formed(self) -> bool {
+        let page = PAGE_SIZE as u64;
+        self.base.is_multiple_of(page)
+            && self.len.is_multiple_of(page)
+            && self.base.checked_add(self.len).is_some()
+    }
+}
+
+/// What the kernel tells a process about itself in its startup vector: the
+/// stack-canary seed, the CPU features common to every core it may run on,
+/// and its heap region. A spawner's own block carries [`Self::UNSET`]; the
+/// kernel mints the child's.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct StartFacts {
+    /// Per-process random seed for the stack canary.
+    pub canary: u64,
+    /// The CPU-feature bits ([`crate::cpufeatures::CpuFeatureSet`]) common to
+    /// every core the process may run on.
+    pub cpu_features: u64,
+    /// The address space set aside for the process's heap.
+    pub heap: HeapRegion,
+}
+
+impl StartFacts {
+    /// Facts a spawner's block carries for the kernel to replace.
+    pub const UNSET: Self = Self {
+        canary: 0,
+        cpu_features: 0,
+        heap: HeapRegion::NONE,
+    };
+}
+
 /// Fixed prefix of a startup-vector block.
 ///
 /// Total wire size is exactly [`ProcessStartHeader::WIRE_LEN`] bytes, encoded
@@ -155,64 +206,39 @@ pub struct ProcessStartHeader {
     /// portable baseline everywhere) before the common set is finalised, so a
     /// program always fails closed to a correct routine.
     pub cpu_features: u64,
+    /// The first byte of the process's [`HeapRegion`].
+    pub heap_base: u64,
+    /// The bytes the process's [`HeapRegion`] spans.
+    pub heap_len: u64,
 }
 
 impl ProcessStartHeader {
     /// Encoded size of a [`ProcessStartHeader`] on the wire.
-    pub const WIRE_LEN: usize = 40;
+    pub const WIRE_LEN: usize = 56;
 
     /// Encode `self` into its little-endian wire representation.
     #[must_use]
     pub const fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
         let mut out = [0u8; Self::WIRE_LEN];
-        let magic = self.magic.to_le_bytes();
-        let abi_version = self.abi_version.to_le_bytes();
-        let arg_count = self.arg_count.to_le_bytes();
-        let env_count = self.env_count.to_le_bytes();
-        let total_len = self.total_len.to_le_bytes();
-        let canary = self.canary.to_le_bytes();
-        out[0] = magic[0];
-        out[1] = magic[1];
-        out[2] = magic[2];
-        out[3] = magic[3];
-        out[4] = abi_version[0];
-        out[5] = abi_version[1];
-        out[6] = abi_version[2];
-        out[7] = abi_version[3];
-        out[8] = arg_count[0];
-        out[9] = arg_count[1];
-        out[10] = arg_count[2];
-        out[11] = arg_count[3];
-        out[12] = env_count[0];
-        out[13] = env_count[1];
-        out[14] = env_count[2];
-        out[15] = env_count[3];
-        out[16] = total_len[0];
-        out[17] = total_len[1];
-        out[18] = total_len[2];
-        out[19] = total_len[3];
-        out[20] = total_len[4];
-        out[21] = total_len[5];
-        out[22] = total_len[6];
-        out[23] = total_len[7];
-        out[24] = canary[0];
-        out[25] = canary[1];
-        out[26] = canary[2];
-        out[27] = canary[3];
-        out[28] = canary[4];
-        out[29] = canary[5];
-        out[30] = canary[6];
-        out[31] = canary[7];
-        let cpu_features = self.cpu_features.to_le_bytes();
-        out[32] = cpu_features[0];
-        out[33] = cpu_features[1];
-        out[34] = cpu_features[2];
-        out[35] = cpu_features[3];
-        out[36] = cpu_features[4];
-        out[37] = cpu_features[5];
-        out[38] = cpu_features[6];
-        out[39] = cpu_features[7];
+        put(&mut out, 0, &self.magic.to_le_bytes());
+        put(&mut out, 4, &self.abi_version.to_le_bytes());
+        put(&mut out, 8, &self.arg_count.to_le_bytes());
+        put(&mut out, 12, &self.env_count.to_le_bytes());
+        put(&mut out, 16, &self.total_len.to_le_bytes());
+        put(&mut out, 24, &self.canary.to_le_bytes());
+        put(&mut out, 32, &self.cpu_features.to_le_bytes());
+        put(&mut out, 40, &self.heap_base.to_le_bytes());
+        put(&mut out, 48, &self.heap_len.to_le_bytes());
         out
+    }
+
+    /// The heap region the header names.
+    #[must_use]
+    pub const fn heap(&self) -> HeapRegion {
+        HeapRegion {
+            base: self.heap_base,
+            len: self.heap_len,
+        }
     }
 
     /// Decode a [`ProcessStartHeader`] from the first
@@ -246,7 +272,18 @@ impl ProcessStartHeader {
             total_len: read_u64(bytes, 16),
             canary: read_u64(bytes, 24),
             cpu_features: read_u64(bytes, 32),
+            heap_base: read_u64(bytes, 40),
+            heap_len: read_u64(bytes, 48),
         })
+    }
+}
+
+/// Copy `bytes` into `out` from `at`.
+const fn put(out: &mut [u8; ProcessStartHeader::WIRE_LEN], at: usize, bytes: &[u8]) {
+    let mut index = 0;
+    while index < bytes.len() {
+        out[at + index] = bytes[index];
+        index += 1;
     }
 }
 
@@ -285,9 +322,13 @@ impl<'a> ProcessStart<'a> {
     ///   `total_len` exceeds its frozen maximum, or if the slot table does
     ///   not fit inside `total_len`.
     /// * [`Errno::OutOfRange`] if a slot points outside the string region,
-    ///   its end overflows, or a string contains an embedded NUL byte.
+    ///   its end overflows, a string contains an embedded NUL byte, or the
+    ///   heap region is not whole pages inside the address space.
     pub fn parse(block: &'a [u8]) -> Result<Self, Errno> {
         let header = ProcessStartHeader::from_bytes(block)?;
+        if !header.heap().is_well_formed() {
+            return Err(Errno::OutOfRange);
+        }
 
         if header.arg_count > PROCESS_START_MAX_STRINGS
             || header.env_count > PROCESS_START_MAX_STRINGS
@@ -376,6 +417,12 @@ impl<'a> ProcessStart<'a> {
     #[must_use]
     pub const fn cpu_features(&self) -> crate::cpufeatures::CpuFeatureSet {
         crate::cpufeatures::CpuFeatureSet::from_bits(self.header.cpu_features)
+    }
+
+    /// The address space the kernel set aside for the process's heap.
+    #[must_use]
+    pub const fn heap(&self) -> HeapRegion {
+        self.header.heap()
     }
 
     /// The argument string at index `index`, or `None` if out of range.
@@ -475,9 +522,8 @@ pub fn encoded_len(args: &[&[u8]], env: &[&[u8]]) -> Result<usize, Errno> {
     Ok(total)
 }
 
-/// Build a startup-vector block for `args` / `env` with the per-process
-/// stack-canary seed `canary` into `buf`, returning the number of bytes
-/// written.
+/// Build a startup-vector block for `args` / `env` carrying `facts` into
+/// `buf`, returning the number of bytes written.
 ///
 /// This is the production builder the loader uses: the kernel sizes a
 /// buffer with [`encoded_len`], calls this to serialise the block, and copies
@@ -493,15 +539,18 @@ pub fn encoded_len(args: &[&[u8]], env: &[&[u8]]) -> Result<usize, Errno> {
 ///   over the frozen `abi-v1` limits);
 /// * [`Errno::BufferTooSmall`] if `buf` is shorter than [`encoded_len`];
 /// * [`Errno::OutOfRange`] if any string contains an embedded NUL byte (which
-///   would make it unrepresentable as a C string — the same rule
-///   [`ProcessStart::parse`] enforces).
+///   would make it unrepresentable as a C string), or the heap region is not
+///   whole pages inside the address space — the rules
+///   [`ProcessStart::parse`] enforces.
 pub fn write_into(
     buf: &mut [u8],
     args: &[&[u8]],
     env: &[&[u8]],
-    canary: u64,
-    cpu_features: u64,
+    facts: &StartFacts,
 ) -> Result<usize, Errno> {
+    if !facts.heap.is_well_formed() {
+        return Err(Errno::OutOfRange);
+    }
     let total_len = encoded_len(args, env)?;
     if buf.len() < total_len {
         return Err(Errno::BufferTooSmall);
@@ -521,8 +570,10 @@ pub fn write_into(
         arg_count: u32::try_from(args.len()).map_err(|_| Errno::LengthOutOfRange)?,
         env_count: u32::try_from(env.len()).map_err(|_| Errno::LengthOutOfRange)?,
         total_len: total_len as u64,
-        canary,
-        cpu_features,
+        canary: facts.canary,
+        cpu_features: facts.cpu_features,
+        heap_base: facts.heap.base,
+        heap_len: facts.heap.len,
     };
     buf[..ProcessStartHeader::WIRE_LEN].copy_from_slice(&header.to_le_bytes());
 
@@ -803,10 +854,18 @@ pub const SPAWN_FLAG_SANDBOX: u64 = 1;
 /// [`SPAWN_FLAG_SANDBOX`] is refused at parse.
 pub const SPAWN_FLAG_FOREGROUND: u64 = 2;
 
+/// [`SpawnAttach::flags`] bit: the **drawing sandbox** — a sandbox spawn
+/// whose child may only be a screensaver, presenting through the spawn share
+/// it is handed ([`SpawnAttach::drawing`]). A parser sandbox handed a share
+/// to write its output into does not carry it, and so loads no screensaver.
+/// A block carrying it without [`SPAWN_FLAG_SANDBOX`] and a share is refused
+/// at parse.
+pub const SPAWN_FLAG_DRAWING: u64 = 4;
+
 /// Every [`SpawnAttach::flags`] bit with a defined meaning. A block
 /// carrying any bit outside this mask is refused — reserved bits fail
 /// closed instead of silently meaning nothing.
-pub const SPAWN_FLAGS_ALL: u64 = SPAWN_FLAG_SANDBOX | SPAWN_FLAG_FOREGROUND;
+pub const SPAWN_FLAGS_ALL: u64 = SPAWN_FLAG_SANDBOX | SPAWN_FLAG_FOREGROUND | SPAWN_FLAG_DRAWING;
 
 /// Reserved `spawn` path token: re-spawn the **caller's own program**.
 ///
@@ -984,8 +1043,10 @@ pub struct SpawnAttach {
     /// The limits the child is lowered to below the ones it inherits.
     pub limits: SpawnLimits,
     /// The id of a shared region the spawner holds a grant for, handed to a
-    /// sandboxed child as its one spawn share ([`crate::SyscallNumber::SHARE_MAP`]);
-    /// zero for none. Refused on any spawn but a sandbox one.
+    /// sandboxed child as its one spawn share ([`crate::SyscallNumber::SHARE_MAP`]):
+    /// the frame a screensaver presents through, or the output a parser
+    /// sandbox writes; zero for none. Refused on any spawn but a sandbox one,
+    /// and required by a drawing one.
     pub share: u64,
     /// The directory the child starts in, resolved as the child from where
     /// the path starts for the spawner, or [`None`] to share the spawner's.
@@ -1125,8 +1186,9 @@ impl SpawnAttach {
         threads: u64,
         share: u64,
     ) -> Self {
-        let sandbox = Self::sandbox(wires, address_space_bytes);
+        let sandbox = Self::sandbox(wires, address_space_bytes).with_share(share);
         Self {
+            flags: sandbox.flags | SPAWN_FLAG_DRAWING,
             limits: sandbox.limits.lowering(
                 LimitKind::Threads,
                 ResourceLimit {
@@ -1134,16 +1196,33 @@ impl SpawnAttach {
                     hard: threads,
                 },
             ),
-            share,
             ..sandbox
         }
     }
 
-    /// Whether this block hands a sandboxed child a spawn share — the
-    /// drawing sandbox.
+    /// This block, handing its sandboxed child the shared region `share` the
+    /// spawner holds a grant for as its one spawn share: how a parser sandbox
+    /// is given the region it writes its output into, read by the spawner
+    /// with no copy through the pipes.
+    #[must_use]
+    pub const fn with_share(self, share: u64) -> Self {
+        Self { share, ..self }
+    }
+
+    /// Whether this block is the drawing sandbox's ([`SPAWN_FLAG_DRAWING`]).
     #[must_use]
     pub const fn is_drawing(&self) -> bool {
-        self.is_sandbox() && self.share != 0
+        self.flags & SPAWN_FLAG_DRAWING != 0
+    }
+
+    /// The shared region this block hands its child, if any.
+    #[must_use]
+    pub const fn spawn_share(&self) -> Option<u64> {
+        if self.share == 0 {
+            None
+        } else {
+            Some(self.share)
+        }
     }
 
     /// Whether this block requests the parser-sandbox spawn mode.
@@ -1247,7 +1326,9 @@ impl SpawnAttach {
             share: read_u64(bytes, SPAWN_ATTACH_SHARE_AT),
             working_directory,
         };
-        if block.share != 0 && !block.is_sandbox() {
+        if block.share != 0 && !block.is_sandbox()
+            || block.is_drawing() && (!block.is_sandbox() || block.share == 0)
+        {
             return Err(Errno::OutOfRange);
         }
         if block.is_sandbox() {
@@ -1973,16 +2054,16 @@ impl Default for DescriptorTable {
 mod tests {
     extern crate alloc;
     use super::{
-        load_failure_reason, load_failure_status, DescriptorTable, FdWire, ProcessStart,
-        ProcessStartHeader, SchedPriority, Signal, SignalIntakeOp, SpawnAttach, SpawnLimits,
-        SpawnSession, StreamMode, StringSlot, WaitStatus, WaitStatusRecord,
-        LOAD_FAILURE_STATUS_BASE, LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED,
-        PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
-        PROCESS_START_MAX_TOTAL_LEN, SPAWN_ATTACH_CWD_AT, SPAWN_ATTACH_LEN, SPAWN_ATTACH_LIMITS_AT,
-        SPAWN_ATTACH_SESSION_AT, SPAWN_ATTACH_SHARE_AT, SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL,
-        SPAWN_FLAG_FOREGROUND, SPAWN_FLAG_SANDBOX, SPAWN_SESSION_ANCHORED, SPAWN_SESSION_INHERIT,
-        SPAWN_SESSION_JOIN, STDERR, STDIN, STDINFO, STDOUT, STD_STREAM_COUNT,
-        WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
+        load_failure_reason, load_failure_status, DescriptorTable, FdWire, HeapRegion,
+        ProcessStart, ProcessStartHeader, SchedPriority, Signal, SignalIntakeOp, SpawnAttach,
+        SpawnLimits, SpawnSession, StartFacts, StreamMode, StringSlot, WaitStatus,
+        WaitStatusRecord, LOAD_FAILURE_STATUS_BASE, LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM,
+        LOAD_UNVERIFIED, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
+        PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN, SPAWN_ATTACH_CWD_AT,
+        SPAWN_ATTACH_LEN, SPAWN_ATTACH_LIMITS_AT, SPAWN_ATTACH_SESSION_AT, SPAWN_ATTACH_SHARE_AT,
+        SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL, SPAWN_FLAG_FOREGROUND, SPAWN_FLAG_SANDBOX,
+        SPAWN_SESSION_ANCHORED, SPAWN_SESSION_INHERIT, SPAWN_SESSION_JOIN, STDERR, STDIN, STDINFO,
+        STDOUT, STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
     };
     use crate::fs::{PathAt, FD_CWD};
     use crate::{Errno, LimitKind, ProcId, ResourceLimit, ABI_VERSION_CURRENT, RLIMIT_INFINITY};
@@ -2355,6 +2436,41 @@ mod tests {
         assert!(!SpawnAttach::sandbox(explicit, CEILING).is_drawing());
     }
 
+    /// A parser sandbox handed a share carries it without being the drawing
+    /// sandbox, and a drawing flag on anything but a sandbox handed a share is
+    /// refused: the share once was the drawing sandbox, so no parser sandbox
+    /// could be given the region it writes its output into.
+    #[test]
+    fn a_parser_sandbox_carries_a_share_and_only_a_shared_sandbox_draws() {
+        let explicit = [
+            FdWire::Handle(4),
+            FdWire::Handle(5),
+            FdWire::Closed,
+            FdWire::Closed,
+        ];
+        let parser = SpawnAttach::sandbox(explicit, CEILING).with_share(77);
+        assert!(parser.is_sandbox() && !parser.is_drawing());
+        assert_eq!(parser.spawn_share(), Some(77));
+        assert_eq!(SpawnAttach::parse(&parser.to_le_bytes()), Ok(parser));
+        assert_eq!(SpawnAttach::sandbox(explicit, CEILING).spawn_share(), None);
+        let unshared = SpawnAttach {
+            share: 0,
+            ..SpawnAttach::drawing(explicit, CEILING, 2, 77)
+        };
+        assert_eq!(
+            SpawnAttach::parse(&unshared.to_le_bytes()),
+            Err(Errno::OutOfRange)
+        );
+        let unsandboxed = SpawnAttach {
+            flags: super::SPAWN_FLAG_DRAWING,
+            ..SpawnAttach::INHERIT
+        };
+        assert_eq!(
+            SpawnAttach::parse(&unsandboxed.to_le_bytes()),
+            Err(Errno::OutOfRange)
+        );
+    }
+
     #[test]
     fn only_a_sandbox_block_carries_a_spawn_share() {
         let shared = SpawnAttach {
@@ -2696,16 +2812,20 @@ mod tests {
         // parser agree end-to-end rather than re-implementing the layout.
         let total_len = super::encoded_len(args, env).expect("within abi-v1 limits");
         let mut block = alloc::vec![0u8; total_len];
-        let written = super::write_into(&mut block, args, env, canary, cpu_features)
-            .expect("fits the buffer");
+        let facts = StartFacts {
+            canary,
+            cpu_features,
+            heap: HeapRegion::NONE,
+        };
+        let written = super::write_into(&mut block, args, env, &facts).expect("fits the buffer");
         assert_eq!(written, total_len);
         block
     }
 
     #[test]
     fn wire_sizes_are_frozen() {
-        assert_eq!(ProcessStartHeader::WIRE_LEN, 40);
-        assert_eq!(core::mem::size_of::<ProcessStartHeader>(), 40);
+        assert_eq!(ProcessStartHeader::WIRE_LEN, 56);
+        assert_eq!(core::mem::size_of::<ProcessStartHeader>(), 56);
         assert_eq!(core::mem::align_of::<ProcessStartHeader>(), 8);
         assert_eq!(StringSlot::WIRE_LEN, 8);
         assert_eq!(core::mem::size_of::<StringSlot>(), 8);
@@ -2722,9 +2842,57 @@ mod tests {
             total_len: 1234,
             canary: 0x0123_4567_89AB_CDEF,
             cpu_features: 0x0000_0000_0004_0001,
+            heap_base: 0x0011_2233_4455_6000,
+            heap_len: 0x0000_0040_0000_0000,
         };
         let decoded = ProcessStartHeader::from_bytes(&header.to_le_bytes()).expect("valid");
         assert_eq!(decoded, header);
+    }
+
+    #[test]
+    fn a_heap_region_reads_back_and_a_malformed_one_is_refused() {
+        let (args, env): (&[&[u8]], &[&[u8]]) = (&[b"prog"], &[]);
+        let mut buf = alloc::vec![0u8; super::encoded_len(args, env).expect("len")];
+        let heap = HeapRegion {
+            base: 0x14_0000_0000,
+            len: 0x4000_0000,
+        };
+        let facts = StartFacts {
+            heap,
+            ..StartFacts::UNSET
+        };
+        super::write_into(&mut buf, args, env, &facts).expect("write");
+        assert_eq!(ProcessStart::parse(&buf).map(|view| view.heap()), Ok(heap));
+        let unaligned = HeapRegion {
+            base: 0x1000_0800,
+            ..heap
+        };
+        let past_the_end = HeapRegion {
+            base: u64::MAX - 0xFFF,
+            len: 0x2000,
+        };
+        for heap in [unaligned, past_the_end] {
+            let facts = StartFacts {
+                heap,
+                ..StartFacts::UNSET
+            };
+            assert_eq!(
+                super::write_into(&mut buf, args, env, &facts),
+                Err(Errno::OutOfRange)
+            );
+            let mut header = ProcessStart::parse(&buf)
+                .expect("the last good block")
+                .header();
+            header.heap_base = heap.base;
+            header.heap_len = heap.len;
+            buf[..ProcessStartHeader::WIRE_LEN].copy_from_slice(&header.to_le_bytes());
+            assert_eq!(
+                ProcessStart::parse(&buf),
+                Err(Errno::OutOfRange),
+                "{heap:?}"
+            );
+            super::write_into(&mut buf, args, env, &StartFacts::UNSET).expect("rewrite");
+        }
     }
 
     #[test]
@@ -2895,8 +3063,8 @@ mod tests {
         let len = super::encoded_len(args, env).expect("within limits");
         let block = build(args, env);
         assert_eq!(block.len(), len);
-        // Header(40) + 3 slots(24) + strings("prog"+"--flag"+"TERM=vt100").
-        assert_eq!(len, 40 + 3 * 8 + 4 + 6 + 10);
+        // Header(56) + 3 slots(24) + strings("prog"+"--flag"+"TERM=vt100").
+        assert_eq!(len, 56 + 3 * 8 + 4 + 6 + 10);
     }
 
     #[test]
@@ -2905,8 +3073,11 @@ mod tests {
         let env: &[&[u8]] = &[b"K=v"];
         let len = super::encoded_len(args, env).expect("len");
         let mut buf = alloc::vec![0u8; len];
-        let written =
-            super::write_into(&mut buf, args, env, 0x1122_3344_5566_7788, 0).expect("write");
+        let facts = StartFacts {
+            canary: 0x1122_3344_5566_7788,
+            ..StartFacts::UNSET
+        };
+        let written = super::write_into(&mut buf, args, env, &facts).expect("write");
         assert_eq!(written, len);
         let view = ProcessStart::parse(&buf).expect("round-trips");
         assert_eq!(view.arg_count(), 3);
@@ -2922,7 +3093,7 @@ mod tests {
         let len = super::encoded_len(args, &[]).expect("len");
         let mut buf = alloc::vec![0u8; len - 1];
         assert_eq!(
-            super::write_into(&mut buf, args, &[], 0, 0),
+            super::write_into(&mut buf, args, &[], &StartFacts::UNSET),
             Err(Errno::BufferTooSmall)
         );
     }
@@ -2930,9 +3101,9 @@ mod tests {
     #[test]
     fn write_into_rejects_nul() {
         let args: &[&[u8]] = &[b"a\0b"];
-        let mut buf = alloc::vec![0u8; 64];
+        let mut buf = alloc::vec![0u8; super::encoded_len(args, &[]).expect("len")];
         assert_eq!(
-            super::write_into(&mut buf, args, &[], 0, 0),
+            super::write_into(&mut buf, args, &[], &StartFacts::UNSET),
             Err(Errno::OutOfRange)
         );
     }

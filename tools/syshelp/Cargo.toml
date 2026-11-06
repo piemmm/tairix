@@ -101,4 +101,4 @@ tairix-theme = { path = "../../lib/theme", version = "=0.0.0" }
 # The sound family's names and bounds, and the encoder the contract's tests
 # emit their streams with.
 tairix-soundtheme = { path = "../../lib/soundtheme", version = "=0.0.0" }
-tairix-sound = { path = "../../lib/sound", version = "=0.0.0", features = ["encode"] }
+tairix-sound = { path = "../../lib/sound", version = "=0.0.0", features = ["encode-flac"] }

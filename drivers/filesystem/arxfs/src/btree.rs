@@ -100,7 +100,14 @@ impl TreeSpec {
 /// mutation degrades to an error rather than aborting the system on a refused
 /// allocation.
 fn node_buf(len: usize) -> Result<Vec<u8>, DriverError> {
-    tairix_util::fallible::filled(len, 0).ok_or(DriverError::NoSpace)
+    tairix_util::fallible::filled(len, 0).ok_or(DriverError::OutOfMemory)
+}
+
+/// The value of the leaf entry at `base`, copied out fallibly so a lookup
+/// refused memory answers rather than aborts.
+fn leaf_value(buf: &[u8], base: usize, spec: TreeSpec) -> Result<Vec<u8>, DriverError> {
+    let value = &buf[base + 8..base + spec.leaf_stride()];
+    tairix_util::fallible::copied(value).ok_or(DriverError::OutOfMemory)
 }
 
 fn node_count(buf: &[u8]) -> usize {
@@ -345,13 +352,20 @@ impl Descent {
 
 /// The first of a leaf's `count` entries whose key is `>= key`, as
 /// `(key, value)`. Leaf keys ascend, so the first match is the ceiling.
-fn leaf_ceil(buf: &[u8], count: usize, key: u64, spec: TreeSpec) -> Option<(u64, Vec<u8>)> {
+fn leaf_ceil(
+    buf: &[u8],
+    count: usize,
+    key: u64,
+    spec: TreeSpec,
+) -> Result<Option<(u64, Vec<u8>)>, DriverError> {
     let stride = spec.leaf_stride();
-    (0..count).find_map(|i| {
-        let base = N_ENTRIES + i * stride;
-        let k = rd_u64(buf, base);
-        (k >= key).then(|| (k, buf[base + 8..base + stride].to_vec()))
-    })
+    let found = (0..count)
+        .map(|i| N_ENTRIES + i * stride)
+        .map(|base| (rd_u64(buf, base), base))
+        .find(|&(k, _)| k >= key);
+    found
+        .map(|(k, base)| leaf_value(buf, base, spec).map(|value| (k, value)))
+        .transpose()
 }
 
 /// Index of the last of `count` entries whose key is `<= key`, or `0` when
@@ -402,12 +416,12 @@ impl TreeEdit {
     ///
     /// # Errors
     ///
-    /// [`DriverError::NoSpace`] when a node buffer cannot be allocated; a
+    /// [`DriverError::OutOfMemory`] when a node buffer cannot be allocated; a
     /// mutation holding one allocates nothing thereafter.
     pub(crate) fn new(block_size: usize) -> Result<Self, DriverError> {
         let len = block_size
             .checked_add(MAX_ENTRY_STRIDE)
-            .ok_or(DriverError::NoSpace)?;
+            .ok_or(DriverError::OutOfMemory)?;
         Ok(Self {
             node: node_buf(len)?,
             lo: node_buf(len)?,
@@ -568,7 +582,7 @@ impl<B: Block> ARXFS<B> {
         for i in 0..count {
             let base = N_ENTRIES + i * stride;
             if rd_u64(&buf, base) == key {
-                return Ok(Some(buf[base + 8..base + stride].to_vec()));
+                return leaf_value(&buf, base, spec).map(Some);
             }
         }
         Ok(None)
@@ -589,17 +603,18 @@ impl<B: Block> ARXFS<B> {
         let mut buf = [0u8; MAX_BLOCK_LEN];
         let count = self.btree_descend(root, key, spec, &mut buf, None)?;
         let stride = spec.leaf_stride();
-        let mut found: Option<(u64, Vec<u8>)> = None;
+        let mut found = None;
         for i in 0..count {
             let base = N_ENTRIES + i * stride;
             let k = rd_u64(&buf, base);
-            if k <= key {
-                found = Some((k, buf[base + 8..base + stride].to_vec()));
-            } else {
+            if k > key {
                 break;
             }
+            found = Some((k, base));
         }
-        Ok(found)
+        found
+            .map(|(k, base)| leaf_value(&buf, base, spec).map(|value| (k, value)))
+            .transpose()
     }
 
     /// Look up the entry with the smallest key `>= key` (a "ceiling" query),
@@ -622,7 +637,7 @@ impl<B: Block> ARXFS<B> {
         let mut buf = [0u8; MAX_BLOCK_LEN];
         let mut trace = Descent::new();
         let count = self.btree_descend(root, key, spec, &mut buf, Some(&mut trace))?;
-        if let Some(found) = leaf_ceil(&buf, count, key, spec) {
+        if let Some(found) = leaf_ceil(&buf, count, key, spec)? {
             return Ok(Some(found));
         }
         // Every key in this leaf is below `key`, so the answer — if there is
@@ -632,7 +647,7 @@ impl<B: Block> ARXFS<B> {
             return Ok(None);
         };
         let count = self.btree_descend(root, next, spec, &mut buf, None)?;
-        Ok(leaf_ceil(&buf, count, next, spec))
+        leaf_ceil(&buf, count, next, spec)
     }
 
     /// Borrow the mount's mutation scratch.
@@ -991,7 +1006,7 @@ impl<B: Block> ARXFS<B> {
         node_append(&mut edit.lo, &edit.hi, stride)?;
         let lo_min = node_required_min(&edit.lo)?;
         let lo = self.btree_write_node(lo_phys, &mut edit.lo, spec)?;
-        self.free_meta(hi_phys);
+        self.free_meta(hi_phys)?;
         node_set_child(&mut edit.node, lo_index, lo_min, lo)?;
         node_remove_entry(&mut edit.node, INTERNAL_STRIDE, hi_index)
     }
@@ -1015,7 +1030,7 @@ impl<B: Block> ARXFS<B> {
         loop {
             if level == 0 {
                 if count == 0 {
-                    self.free_meta(phys);
+                    self.free_meta(phys)?;
                     return Ok(0);
                 }
                 return Ok(phys);
@@ -1024,7 +1039,7 @@ impl<B: Block> ARXFS<B> {
                 return Ok(phys);
             }
             let only = internal_child(&edit.node, 0);
-            self.free_meta(phys);
+            self.free_meta(phys)?;
             phys = only;
             (level, count) = self.btree_read_node(phys, Some(level - 1), spec, &mut edit.node)?;
         }
@@ -1060,7 +1075,7 @@ impl<B: Block> ARXFS<B> {
         let mut children = Vec::new();
         children
             .try_reserve_exact(count)
-            .map_err(|_| DriverError::NoSpace)?;
+            .map_err(|_| DriverError::OutOfMemory)?;
         for i in 0..count {
             children.push(rd_u64(buf, N_ENTRIES + i * INTERNAL_STRIDE + 8));
         }
@@ -1171,7 +1186,7 @@ impl TreeWalk {
     ///
     /// # Errors
     ///
-    /// [`DriverError::NoSpace`] when the one node-sized buffer cannot be
+    /// [`DriverError::OutOfMemory`] when the one node-sized buffer cannot be
     /// allocated; the walk allocates nothing thereafter.
     pub(crate) fn new(block_size: usize) -> Result<Self, DriverError> {
         Ok(Self {

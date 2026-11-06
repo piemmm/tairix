@@ -50,6 +50,12 @@ rather than mounted and misread. Two bits are defined, `symlinks` and
 names rather than at format time, so a volume that has never held a link stays
 readable by a build without the feature.
 
+After the protection word sits the volume's **title** (`FilesystemLabel`): a
+length byte and up to 252 bytes of UTF-8, published with the transaction a
+retitle joins and read by the volume probe (`lib/fsprobe`) to name the medium
+before the volume is opened. It is plaintext, so an encrypted volume keeps
+none and refuses one `Unsupported`.
+
 Every **metadata** block is self-identifying (`AGENTS.md` §8 block
 identity): its first 128 bytes carry a magic, block type, format version,
 the volume UUID, an owner object, a generation, its logical and physical
@@ -269,7 +275,10 @@ bounded by the window, wiped on drop (it holds decrypted user content), and
 falls back to a single block when memory is too tight to reserve it — a
 machine under pressure reads slower rather than failing (`AGENTS.md` §4,
 §26.3). A compressed cluster's stored blocks are contiguous too, so its frame
-is fetched in one request as well.
+is fetched in one request as well. Its frame and plaintext buffers are reserved
+before anything is read, so a read refused memory answers `OutOfMemory` and
+changes nothing, and `scrub`, `check` and `rescue` stop with that answer rather
+than record or skip a block no layer judged.
 
 ## Compression
 
@@ -651,7 +660,9 @@ second free-tracking mechanism (`AGENTS.md` §2.2). The queue holds coalesced
 blocks. `ARXFS::trim` later issues the discards:
 
 - **Safety by re-check.** A queued block is discarded only if it is **still
-  free** at trim time. The allocation map marks every block reachable from the
+  free** at trim time, read from a map rebuilt from the trees first when a
+  device fault left it in doubt. The allocation map marks every block reachable
+  from the
   committed root — including every reflink target and every deduped chunk at
   refcount ≥ 1 — as *used*, so a free block is, by construction, unreachable
   from every retained root. A block freed and then reallocated is *used* again
@@ -898,6 +909,22 @@ refused for an ordinary reason, such as a `create` over a name already taken,
 would make the next one walk every tree on the volume, which is unbounded read
 amplification from a call that changes nothing.
 
+Memory refused is an answer too. Every step that records runs in that
+bookkeeping first makes room for its own and for every run the undo, an
+abandoned transaction or a publication could then record, so a step refused
+that room changes nothing and its operation fails with `OutOfMemory`, undone as
+above, while those paths never ask the heap for anything. The write-back
+ceiling counts each set at what it holds, that room included. Once the
+transaction is published the sets that outlive it keep its room for the next,
+which would otherwise grow them afresh, up to a quarter of the ceiling and none
+once memory is short, and give the rest back. One that met a
+refusal would mean the room was miscounted, so the handle freezes read-only
+rather than guess what the map holds, and a remount rebuilds it. A deferred
+mark leaves the deferred set only once a fold has applied it, so a fold cut
+short by a refusal or a failed read loses none, and an eviction refused the
+memory to stage its page has written nothing, so the page stays resident with
+its changes and the map needs no rebuild.
+
 ## Copy-on-write and the superblock ring
 
 `arxfs` keeps metadata and data consistent across a crash without
@@ -1013,7 +1040,14 @@ in place**:
   reported successful — are left exactly as they were. A failed *commit* is the
   wider undo: it abandons the whole transaction back to the last published
   root, and a handle that had reported operations into it forces itself
-  read-only rather than serving writes it can no longer honour.
+  read-only rather than serving writes it can no longer honour. A commit
+  *refused memory* is not: it stops before any block it staged reaches the
+  device, so it is undone with the operation whose close asked for it, the
+  transaction stays open holding every reported operation, and the next commit
+  — the next close, a sync, an unmount, or the host's timer, given a fresh
+  window once the old one has run out — publishes it. An operation that would
+  carry such a transaction past its ceiling is refused at its close, so it
+  cannot grow while it cannot be published.
 - **The set is pinned, so it is bounded by back-pressure rather than by
   eviction.** A staged block exists nowhere else: it can be written out but
   never dropped, so it is not admitted through the reclaim classification gate
@@ -1028,12 +1062,15 @@ in place**:
   a machine whose other volumes are empty leaves the whole ceiling to the one
   writing.
   Reaching the ceiling publishes the transaction, so a writer that outruns the
-  device waits for real I/O. The ceiling counts the transaction's run bookkeeping with its
-  staged blocks: a delete holds almost all of its memory in runs and dirties a
-  spine's worth of blocks whatever the file's extent count, so a ceiling over
-  the blocks alone would not bound one. Measured, deleting a maximally
-  fragmented file holds 88 600 bytes at 1 200 extents and 110 368 at 4 800,
-  where doing it inside one transaction holds 448 448 and grows with the file.
+  device waits for real I/O. The ceiling counts the transaction's run
+  bookkeeping, each set at what it holds, with its staged blocks: a delete
+  holds almost all of its memory in runs and dirties a spine's worth of blocks
+  whatever the file's extent count, so a ceiling over the blocks alone would
+  not bound one. The sets that outlive a transaction keep its room for the
+  next, up to a quarter of the ceiling and none once memory is short.
+  Measured, deleting a maximally fragmented file holds 110 992 bytes at 1 200
+  extents and 113 736 at 4 800, where doing it inside one transaction holds
+  448 448 and grows with the file.
   Measured across volumes, four 100 TiB volumes writing at once peak together
   at 4 195 744 bytes against a 4 194 304-byte machine ceiling — that ceiling
   plus a fraction of one record — where a per-volume ceiling let the same four

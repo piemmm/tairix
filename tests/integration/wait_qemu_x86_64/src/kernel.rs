@@ -352,6 +352,10 @@ fn build_el0_space(
         args: &[b"wait"],
         env: &[],
         canary: CANARY,
+        heap: tairix_abi::HeapRegion {
+            base: USER_HEAP_BASE,
+            len: USER_HEAP_LEN,
+        },
     };
 
     // SAFETY: building the image is itself safe; the returned `UserEntry` is
@@ -380,7 +384,11 @@ fn build_el0_space(
     // reaped child's exit code out to the parent's `status` pointer. Only the
     // parent calls `wait`, so only its space is kept.
     if is_parent {
-        let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
+        let Ok(frozen) = space.freeze() else {
+            note(TEST_FAIL, "X4 test: freezing the parent's space failed");
+            qemu_exit::exit_failure();
+        };
+        let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(frozen);
         *PARENT_SPACE.lock() = Some(frozen);
     }
 

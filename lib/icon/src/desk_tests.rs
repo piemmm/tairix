@@ -37,7 +37,7 @@ fn is_pending(resolved: &Resolved) -> bool {
 
 #[test]
 fn a_first_ask_records_the_decode_and_answers_pending() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     assert!(is_pending(&desk.collect(&asset("/a.png"), 32).0));
     assert!(desk.has_work());
     assert_eq!(desk.next_job(), Some(job("/a.png", 32)));
@@ -45,7 +45,7 @@ fn a_first_ask_records_the_decode_and_answers_pending() {
 
 #[test]
 fn asking_again_for_the_same_asset_starts_no_second_decode() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk.collect(&asset("/a.png"), 32).0;
     let _ = desk.collect(&asset("/a.png"), 32).0;
     assert!(desk.next_job().is_some());
@@ -60,7 +60,7 @@ fn asking_again_for_the_same_asset_starts_no_second_decode() {
 /// decodes — a scale change must not be served a resized copy of the old one.
 #[test]
 fn the_same_asset_at_a_different_side_is_a_different_decode() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk.collect(&asset("/a.png"), 32).0;
     let _ = desk.collect(&asset("/a.png"), 48).0;
     assert_eq!(desk.next_job(), Some(job("/a.png", 32)));
@@ -69,7 +69,7 @@ fn the_same_asset_at_a_different_side_is_a_different_decode() {
 
 #[test]
 fn decodes_are_handed_out_in_the_order_they_were_asked_for() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     for name in ["/c.png", "/a.png", "/b.png"] {
         let _ = desk.collect(&asset(name), 16).0;
     }
@@ -80,7 +80,7 @@ fn decodes_are_handed_out_in_the_order_they_were_asked_for() {
 
 #[test]
 fn a_delivered_decode_is_collected_once_and_reports_a_landing() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, Some(picture(8))).kept());
@@ -108,7 +108,7 @@ fn a_delivered_decode_is_collected_once_and_reports_a_landing() {
 /// before the frame that needs it.
 #[test]
 fn a_want_records_a_decode_without_collecting_it() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     desk.want(&asset("/a.png"), 32);
     assert!(desk.has_work());
     assert_eq!(desk.next_job(), Some(job("/a.png", 32)));
@@ -122,7 +122,7 @@ fn a_want_records_a_decode_without_collecting_it() {
 /// stays put, and is still served once.
 #[test]
 fn a_want_never_consumes_an_answer_a_draw_is_about_to_collect() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     desk.want(&asset("/a.png"), 8);
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, Some(picture(8))).kept());
@@ -142,7 +142,7 @@ fn a_want_never_consumes_an_answer_a_draw_is_about_to_collect() {
 /// launcher press — must cost nothing beyond the lookup.
 #[test]
 fn warming_the_same_key_twice_starts_one_decode() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     desk.want(&asset("/a.png"), 8);
     desk.want(&asset("/a.png"), 8);
     assert!(desk.next_job().is_some());
@@ -155,7 +155,7 @@ fn warming_the_same_key_twice_starts_one_decode() {
 /// hold it never asks (it peeks before warming).
 #[test]
 fn a_want_for_a_key_already_handed_over_starts_a_decode_again() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     desk.want(&asset("/a.png"), 8);
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, Some(picture(8))).kept());
@@ -170,7 +170,7 @@ fn a_want_for_a_key_already_handed_over_starts_a_decode_again() {
 
 #[test]
 fn a_stopping_desk_warms_nothing() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     desk.stop();
     desk.want(&asset("/a.png"), 8);
     assert!(!desk.has_work());
@@ -181,7 +181,7 @@ fn a_stopping_desk_warms_nothing() {
 /// retained by the cache, so a broken asset is read once rather than each frame.
 #[test]
 fn a_refusal_is_delivered_and_collected_like_a_picture() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk.collect(&asset("/broken.png"), 8).0;
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, None).kept());
@@ -198,7 +198,7 @@ fn a_refusal_is_delivered_and_collected_like_a_picture() {
 /// arrived.
 #[test]
 fn a_key_the_cache_dropped_is_decoded_again() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, Some(picture(8))).kept());
@@ -228,7 +228,7 @@ fn a_key_the_cache_dropped_is_decoded_again() {
 /// the machine was short of the memory that would have held the answer.
 #[test]
 fn a_declined_answer_is_not_offered_again_until_the_band_moves() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, Some(picture(8))).kept());
@@ -257,7 +257,7 @@ fn a_declined_answer_is_not_offered_again_until_the_band_moves() {
 /// itself.
 #[test]
 fn declining_a_key_the_collect_forgot_still_records_the_refusal() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     desk.decline(&asset("/gone.png"), 8);
     assert!(!desk.has_work());
     assert!(is_pending(&desk.collect(&asset("/gone.png"), 8).0));
@@ -276,7 +276,7 @@ fn declining_a_key_the_collect_forgot_still_records_the_refusal() {
 /// will report the refusal again if it still stands.
 #[test]
 fn declining_a_key_in_flight_leaves_the_decode_to_land() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
 
@@ -296,7 +296,7 @@ fn declining_a_key_in_flight_leaves_the_decode_to_land() {
 /// re-recorded.
 #[test]
 fn asking_again_keeps_work_in_flight_and_answers_not_yet_collected() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk.collect(&asset("/done.png"), 8).0;
     let _ = desk.collect(&asset("/running.png"), 8).0;
     let done = desk.next_job().expect("the first job");
@@ -323,7 +323,7 @@ fn asking_again_keeps_work_in_flight_and_answers_not_yet_collected() {
 /// second one.
 #[test]
 fn a_key_re_asked_after_its_answer_is_handed_out_exactly_once() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, Some(picture(8))).kept());
@@ -342,7 +342,7 @@ fn a_key_re_asked_after_its_answer_is_handed_out_exactly_once() {
 /// artwork does not outlive their session in reusable heap.
 #[test]
 fn teardown_releases_a_decode_it_is_still_holding() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk.collect(&asset("/a.png"), 4).0;
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, Some(picture(4))).kept());
@@ -358,7 +358,7 @@ fn teardown_releases_a_decode_it_is_still_holding() {
 /// between the hand-out and the delivery — is dropped, and owes no wake.
 #[test]
 fn an_answer_the_desk_is_not_holding_is_dropped() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
     desk.stop();
@@ -368,7 +368,7 @@ fn an_answer_the_desk_is_not_holding_is_dropped() {
 
 #[test]
 fn a_stopping_desk_records_nothing_and_hands_out_nothing() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk.collect(&asset("/a.png"), 8).0;
     desk.stop();
     assert!(desk.stopping());
@@ -385,7 +385,7 @@ fn a_stopping_desk_records_nothing_and_hands_out_nothing() {
 /// resolving one can never serve the other's manifest-derived picture.
 #[test]
 fn a_bundle_and_an_asset_of_the_same_spelling_are_different_decodes() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk
         .collect(
             &ArtworkKey::Asset(String::from("/System/Applications/E.app")),
@@ -396,7 +396,7 @@ fn a_bundle_and_an_asset_of_the_same_spelling_are_different_decodes() {
         .collect(
             &ArtworkKey::Bundle {
                 dir: String::from("/System/Applications/E.app"),
-                stamp: None,
+                version: None,
             },
             8,
         )
@@ -411,7 +411,7 @@ fn a_bundle_and_an_asset_of_the_same_spelling_are_different_decodes() {
 /// answers `Pending`, and the answer is served once a job has been delivered.
 #[test]
 fn the_desk_answers_as_a_deferring_resolver() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let key = asset("/a.png");
     assert!(is_pending(&ArtworkResolver::resolve(&mut desk, &key, 16)));
 
@@ -430,7 +430,7 @@ fn the_desk_answers_as_a_deferring_resolver() {
 /// directly.
 #[test]
 fn the_resolver_impl_prefetches_and_declines_through_the_same_policy() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let key = asset("/a.png");
     ArtworkResolver::prefetch(&mut desk, &key, 16);
     assert!(desk.has_work(), "a prefetch records the decode");
@@ -452,7 +452,7 @@ fn the_resolver_impl_prefetches_and_declines_through_the_same_policy() {
 /// working through is empty.
 #[test]
 fn a_batch_of_decodes_owes_one_wake_on_the_last_of_them() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     for name in ["/a.png", "/b.png", "/c.png"] {
         desk.want(&asset(name), 16);
     }
@@ -482,7 +482,7 @@ fn a_batch_of_decodes_owes_one_wake_on_the_last_of_them() {
 /// is ready rather than waiting for company.
 #[test]
 fn a_lone_decode_owes_its_wake_at_once() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk.collect(&asset("/a.png"), 16).0;
     let job = desk.next_job().expect("a job");
     assert!(desk.deliver(&job, Some(picture(16))).wake());
@@ -498,7 +498,7 @@ fn a_lone_decode_owes_its_wake_at_once() {
 /// answer unshown or believe a spent job had been accepted.
 #[test]
 fn a_delivery_that_keeps_nothing_still_discharges_an_outstanding_debt() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     desk.want(&asset("/a.png"), 16);
     desk.want(&asset("/b.png"), 16);
     let first = desk.next_job().expect("the first job");
@@ -542,7 +542,7 @@ fn stick(share: &&str) -> bool {
 /// passed over keeps its place for its own producer.
 #[test]
 fn a_producer_takes_only_the_decodes_its_share_admits() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     for name in [
         "/Storage/stick/a.png",
         "/Users/b.png",
@@ -568,7 +568,7 @@ fn a_producer_takes_only_the_decodes_its_share_admits() {
 /// Across the shares a producer admits, the decode asked for first goes first.
 #[test]
 fn across_the_shares_admitted_the_first_asked_goes_first() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     for name in ["/Users/x.png", "/Storage/stick/a.png", "/Users/y.png"] {
         desk.want(&asset(name), 16);
     }
@@ -587,7 +587,7 @@ fn across_the_shares_admitted_the_first_asked_goes_first() {
 /// another share's producer, held up on its own device, still has queued.
 #[test]
 fn a_share_drained_owes_its_wake_beside_another_shares_queue() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     for name in ["/Storage/stick/a.png", "/Users/b.png", "/Users/c.png"] {
         desk.want(&asset(name), 16);
     }
@@ -619,7 +619,7 @@ fn a_share_drained_owes_its_wake_beside_another_shares_queue() {
 /// wake, so a paint asking again for what is already queued wakes nobody.
 #[test]
 fn only_the_ask_that_records_a_decode_says_so() {
-    let mut desk: ArtworkDesk = ArtworkDesk::new();
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
     assert!(desk.want(&asset("/a.png"), 8), "the first ask records it");
     assert!(!desk.want(&asset("/a.png"), 8));
     let (answer, recorded) = desk.collect(&asset("/a.png"), 8);
@@ -650,7 +650,7 @@ fn only_the_ask_that_records_a_decode_says_so() {
 /// and again only after a reroute, which keeps the order asked.
 #[test]
 fn a_decode_is_routed_once_however_often_it_is_passed_over() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     for name in [
         "/Storage/stick/a.png",
         "/Storage/stick/b.png",
@@ -687,7 +687,7 @@ fn a_decode_is_routed_once_however_often_it_is_passed_over() {
 /// it was routed to.
 #[test]
 fn the_oldest_thumbnail_goes_past_the_bound_whatever_its_share() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     desk.want(&thumbnail_at("/Storage/stick/first.png"), 64);
     desk.want(&thumbnail("second.png"), 64);
     assert_eq!(desk.next_thumbnail_where(share_of, |_| false), None);
@@ -710,7 +710,7 @@ fn the_oldest_thumbnail_goes_past_the_bound_whatever_its_share() {
 /// batch's wake back, and is dropped from the hand-out order as it is passed.
 #[test]
 fn a_job_declined_while_queued_is_passed_and_holds_no_wake() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     desk.want(&asset("/Users/a.png"), 16);
     desk.want(&asset("/Users/b.png"), 16);
     let first = desk.next_job().expect("the first job");
@@ -729,7 +729,7 @@ fn a_job_declined_while_queued_is_passed_and_holds_no_wake() {
 /// Teardown discards the debt with the answers it would have shown.
 #[test]
 fn a_stopped_desk_owes_no_wake_for_what_it_wiped() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     desk.want(&asset("/a.png"), 16);
     desk.want(&asset("/b.png"), 16);
     let first = desk.next_job().expect("the first job");
@@ -743,7 +743,7 @@ fn a_stopped_desk_owes_no_wake_for_what_it_wiped() {
 /// whole of what lets a surface repaint one item instead of all of them.
 #[test]
 fn a_landing_names_only_what_it_answered() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk.collect(&asset("/a.png"), 8).0;
     let _ = desk.collect(&asset("/b.png"), 8).0;
     let running = desk.next_job().expect("a job");
@@ -765,7 +765,7 @@ fn a_landing_names_only_what_it_answered() {
 /// is named exactly as a picture would be.
 #[test]
 fn a_refusal_lands_like_a_picture() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
     let _ = desk.deliver(&running, None);
@@ -776,7 +776,7 @@ fn a_refusal_lands_like_a_picture() {
 /// today depends on which of them have answered.
 #[test]
 fn a_landed_class_picture_names_the_request_that_falls_back_to_it() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk
         .collect(&ArtworkKey::Raster(crate::IconKind::AppBundle), 8)
         .0;
@@ -798,7 +798,7 @@ fn a_landed_class_picture_names_the_request_that_falls_back_to_it() {
 /// that no longer exist.
 #[test]
 fn a_teardown_drops_the_unreported_batch() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
     let _ = desk.deliver(&running, Some(picture(8)));
@@ -813,7 +813,7 @@ fn thumbnail(name: &str) -> ArtworkKey {
 fn thumbnail_at(path: &str) -> ArtworkKey {
     ArtworkKey::Thumbnail(crate::Thumbnail {
         path: String::from(path),
-        stamp: crate::DocumentStamp {
+        stamp: tairix_abi::fs::DocumentStamp {
             size: 1,
             modified: tairix_abi::time::Time64::UNIX_EPOCH,
             id: tairix_abi::fs::FileId {
@@ -830,7 +830,7 @@ fn thumbnail_at(path: &str) -> ArtworkKey {
 /// stays queued.
 #[test]
 fn a_sweep_withdraws_the_thumbnails_no_surface_asked_for() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let (shown, scrolled) = (thumbnail("shown.png"), thumbnail("scrolled.png"));
     desk.want(&scrolled, 64);
     desk.want(&shown, 64);
@@ -855,7 +855,7 @@ fn a_sweep_withdraws_the_thumbnails_no_surface_asked_for() {
 /// to land.
 #[test]
 fn an_uncollected_thumbnail_goes_at_the_next_sweep() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let (landed, running) = (thumbnail("landed.png"), thumbnail("running.png"));
     desk.want(&landed, 64);
     desk.want(&running, 64);
@@ -877,7 +877,7 @@ fn an_uncollected_thumbnail_goes_at_the_next_sweep() {
 /// Icons are never swept: their decode is cheap and every surface shares it.
 #[test]
 fn a_sweep_leaves_icons_alone() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     desk.want(&asset("/System/Graphics/Icons/file.png"), 32);
     desk.sweep_thumbnails();
     desk.sweep_thumbnails();
@@ -891,7 +891,7 @@ fn a_sweep_leaves_icons_alone() {
 /// between two sweeps cannot queue without limit.
 #[test]
 fn the_thumbnails_waiting_are_bounded() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     for n in 0..=MAX_WANTED_THUMBNAILS {
         desk.want(&thumbnail(&alloc::format!("{n}.png")), 64);
     }
@@ -912,7 +912,7 @@ fn the_thumbnails_waiting_are_bounded() {
 /// picture the desk does not hold.
 #[test]
 fn keeping_spares_a_thumbnail_from_the_sweep_and_records_nothing_new() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     let shown = thumbnail("shown.png");
     desk.want(&shown, 64);
     desk.sweep_thumbnails();
@@ -937,7 +937,7 @@ fn keeping_spares_a_thumbnail_from_the_sweep_and_records_nothing_new() {
 /// shows is already on screen.
 #[test]
 fn retrying_the_declined_names_them_as_landed() {
-    let mut desk: ArtworkDesk = ArtworkDesk::new();
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
     assert!(!desk.retry_declined(), "nothing was declined");
     desk.decline(&asset("/a.png"), 8);
     assert!(desk.retry_declined());
@@ -953,19 +953,42 @@ fn retrying_the_declined_names_them_as_landed() {
     );
 }
 
-/// A listed bundle's own icon at version `stamp`.
-fn listed(dir: &str, stamp: u64) -> ArtworkKey {
+/// The version a listing named a bundle at as `n`.
+fn stamp(n: u64) -> DocumentStamp {
+    DocumentStamp {
+        size: n,
+        modified: tairix_abi::time::Time64::UNIX_EPOCH,
+        id: tairix_abi::fs::FileId {
+            volume: [1; 16],
+            node: 7,
+        },
+        content_gen: n,
+    }
+}
+
+/// A listed bundle's own icon at version `n`, asked for before its files are
+/// read.
+fn listed(dir: &str, n: u64) -> ArtworkKey {
     ArtworkKey::Bundle {
         dir: String::from(dir),
-        stamp: Some(crate::DocumentStamp {
-            size: stamp,
-            modified: tairix_abi::time::Time64::UNIX_EPOCH,
-            id: tairix_abi::fs::FileId {
-                volume: [1; 16],
-                node: 7,
-            },
-            content_gen: stamp,
-        }),
+        version: Some(BundleVersion::Listed(stamp(n))),
+    }
+}
+
+/// The bundle at `dir` a listing names at `n`.
+fn listed_bundle(dir: &str, n: u64) -> ListedBundle {
+    ListedBundle {
+        dir: String::from(dir),
+        listed: stamp(n),
+    }
+}
+
+/// What a bundle's picture is read from: a manifest and an icon at the
+/// versions named, each `None` where absent.
+fn files(manifest: Option<u64>, icon: Option<u64>) -> BundleFiles {
+    BundleFiles {
+        manifest: manifest.map(stamp),
+        icon: icon.map(stamp),
     }
 }
 
@@ -975,7 +998,7 @@ fn listed(dir: &str, stamp: u64) -> ArtworkKey {
 /// so however much of it is shown the hold costs one path.
 #[test]
 fn nothing_under_a_held_tree_is_run_or_recorded() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     desk.hold_under("/Storage/B/One.app");
     for stamp in 1..=64 {
         assert!(is_pending(
@@ -1003,7 +1026,7 @@ fn nothing_under_a_held_tree_is_run_or_recorded() {
 /// listing has since replaced costs nothing.
 #[test]
 fn releasing_a_tree_names_it_for_every_item_drawn_from_inside() {
-    let mut desk = ArtworkDesk::new();
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
     desk.hold_under("/Storage/B/One.app");
     let current = listed("/Storage/B/One.app", 2);
     let _ = desk.collect(&current, 32).0;
@@ -1039,7 +1062,7 @@ fn releasing_a_tree_names_it_for_every_item_drawn_from_inside() {
 /// released itself.
 #[test]
 fn a_tree_inside_a_held_tree_stays_held_until_both_are_released() {
-    let mut desk: ArtworkDesk = ArtworkDesk::new();
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
     desk.hold_under("/Storage/B/Apps");
     desk.hold_under("/Storage/B/Apps/One.app");
     let inner = listed("/Storage/B/Apps/One.app", 1);
@@ -1058,7 +1081,7 @@ fn a_tree_inside_a_held_tree_stays_held_until_both_are_released() {
 /// reports no release.
 #[test]
 fn a_tree_never_held_releases_nothing_and_a_stop_drops_every_hold() {
-    let mut desk: ArtworkDesk = ArtworkDesk::new();
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
     assert!(!desk.release_under("/Storage/B/One.app"));
     desk.hold_under("/Storage/B/One.app");
     assert!(desk.release_under("/Storage/B/One.app"));
@@ -1074,7 +1097,7 @@ fn a_tree_never_held_releases_nothing_and_a_stop_drops_every_hold() {
 /// The root holds everything named by a path.
 #[test]
 fn holding_the_root_holds_every_path() {
-    let mut desk: ArtworkDesk = ArtworkDesk::new();
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
     desk.hold_under("/");
     let _ = desk
         .collect(&asset("/System/Graphics/Icons/file.png"), 32)
@@ -1084,4 +1107,561 @@ fn holding_the_root_holds_every_path() {
     assert!(desk
         .take_landed()
         .resolves(request("/System/Graphics/Icons/file.png"), 32));
+}
+
+/// A listed bundle is pictured by the files its first read found: asked for
+/// at the version listed until then, and at those files' version after, under
+/// which the decode the read made is kept.
+#[test]
+fn a_listed_bundle_is_pictured_by_the_files_its_first_read_found() {
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
+    let one = listed_bundle("/Users/ann/Desktop/One.app", 1);
+    assert_eq!(
+        desk.version_of(&one.dir, one.listed, 32),
+        BundleVersion::Listed(one.listed)
+    );
+    assert!(is_pending(&desk.collect(&listed(&one.dir, 1), 32).0));
+    let first = desk.next_job().expect("the first read");
+    let read = files(Some(2), Some(3));
+    assert!(desk
+        .deliver_listed(&first, Some(picture(32)), read, |_| (), &())
+        .kept());
+    assert_eq!(
+        desk.version_of(&one.dir, one.listed, 32),
+        BundleVersion::Files(read)
+    );
+    assert_eq!(desk.files_of(&one), Some(read));
+    let request = IconRequest::listed_bundle(crate::IconKind::AppBundle, &one.dir, one.listed);
+    assert!(desk.take_landed().resolves(request, 32));
+    let keyed = ArtworkKey::Bundle {
+        dir: one.dir.clone(),
+        version: Some(BundleVersion::Files(read)),
+    };
+    assert!(
+        matches!(desk.collect(&keyed, 32).0, Resolved::Done(Some(_))),
+        "the answer is kept under the files' version"
+    );
+}
+
+/// A bundle read again with its files as they stood decodes nothing, and
+/// nothing lands for it.
+#[test]
+fn a_bundle_read_again_with_its_files_unchanged_decodes_nothing() {
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
+    desk.follow_bundles();
+    let one = listed_bundle("/Users/ann/Desktop/One.app", 1);
+    let _ = desk.version_of(&one.dir, one.listed, 32);
+    let _ = desk.collect(&listed(&one.dir, 1), 32);
+    let first = desk.next_job().expect("the first read");
+    let read = files(Some(2), Some(3));
+    let _ = desk.deliver_listed(&first, Some(picture(32)), read, |_| (), &());
+    let _ = desk.take_landed();
+    assert!(desk.moved(&one));
+    let again = desk.next_job().expect("the read again");
+    assert_eq!(
+        desk.files_of(&one),
+        Some(read),
+        "what a producer holds a read against"
+    );
+    let _ = desk.unchanged(&again, |_| (), &());
+    assert!(
+        desk.take_landed().is_empty(),
+        "an unchanged bundle repaints nothing"
+    );
+    assert_eq!(
+        desk.version_of(&one.dir, one.listed, 32),
+        BundleVersion::Files(read)
+    );
+    assert!(!desk.has_work());
+}
+
+/// A change reported while a bundle's files are being read is read again once
+/// that read is answered, since the read may have found them before it.
+#[test]
+fn a_change_during_a_read_is_read_again_after_it() {
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
+    let one = listed_bundle("/Users/ann/Desktop/One.app", 1);
+    let _ = desk.version_of(&one.dir, one.listed, 32);
+    let _ = desk.collect(&listed(&one.dir, 1), 32);
+    let first = desk.next_job().expect("the first read");
+    assert!(!desk.moved(&one), "a read is under way");
+    assert!(!desk.has_work());
+    let _ = desk.deliver_listed(&first, None, files(None, None), |_| (), &());
+    assert_eq!(
+        desk.next_job(),
+        Some(first),
+        "read again after the read under way"
+    );
+}
+
+/// A desk follows the bundles asked about once its embedder follows bundles,
+/// as many as the bound allows, and a sweep lets go of each no surface asked
+/// about since the last.
+#[test]
+fn a_bundle_is_followed_while_it_is_shown_and_as_far_as_the_bound_allows() {
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
+    let early = listed_bundle("/Users/ann/Desktop/Early.app", 1);
+    let _ = desk.version_of(&early.dir, early.listed, 32);
+    assert!(
+        !desk.follows(&early),
+        "followed before its embedder follows bundles"
+    );
+
+    desk.follow_bundles();
+    let shown: Vec<ListedBundle> = (0..=MAX_FOLLOWED_BUNDLES)
+        .map(|n| listed_bundle(&alloc::format!("/Users/ann/Desktop/{n}.app"), 1))
+        .collect();
+    for bundle in &shown {
+        let _ = desk.version_of(&bundle.dir, bundle.listed, 32);
+    }
+    let followed = shown.iter().filter(|bundle| desk.follows(bundle)).count();
+    assert_eq!(
+        followed, MAX_FOLLOWED_BUNDLES,
+        "one past the bound is not followed"
+    );
+
+    assert!(
+        desk.sweep_follows().is_empty(),
+        "every bundle was just asked about"
+    );
+    let still = &shown[0];
+    let _ = desk.version_of(&still.dir, still.listed, 32);
+    let gone = desk.sweep_follows();
+    assert_eq!(gone.len(), MAX_FOLLOWED_BUNDLES - 1);
+    assert!(
+        !gone.contains(still),
+        "a bundle still shown keeps its follow"
+    );
+    assert!(desk.follows(still));
+}
+
+/// Past the bound the bundle asked about least recently is forgotten, its
+/// follow let go and its files read again once it is next shown.
+#[test]
+fn the_bundle_asked_about_least_recently_is_forgotten_past_the_bound() {
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
+    desk.follow_bundles();
+    let oldest = listed_bundle("/Users/ann/Desktop/Oldest.app", 1);
+    let _ = desk.version_of(&oldest.dir, oldest.listed, 32);
+    assert!(desk.follows(&oldest));
+    for n in 1..MAX_LISTED_BUNDLE_DIRS {
+        let _ = desk.version_of(&alloc::format!("/Users/ann/Desktop/{n}.app"), stamp(1), 32);
+    }
+    assert!(
+        desk.take_unfollowed().next().is_none(),
+        "nothing is forgotten within the bound"
+    );
+    let _ = desk.version_of("/Users/ann/Desktop/Newest.app", stamp(1), 32);
+    assert_eq!(
+        desk.take_unfollowed().collect::<Vec<_>>(),
+        core::slice::from_ref(&oldest)
+    );
+    assert_eq!(desk.files_of(&oldest), None);
+}
+
+/// Past the bound the bundle forgotten is the one asked about least recently,
+/// however long ago the others were first remembered: one asked about again
+/// outlasts those asked about since.
+#[test]
+fn a_bundle_asked_about_again_outlasts_those_asked_about_since() {
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
+    let first = listed_bundle("/Users/ann/Desktop/First.app", 1);
+    let second = listed_bundle("/Users/ann/Desktop/Second.app", 1);
+    for bundle in [&first, &second] {
+        let _ = desk.version_of(&bundle.dir, bundle.listed, 32);
+    }
+    for n in 2..MAX_LISTED_BUNDLE_DIRS {
+        let _ = desk.version_of(&alloc::format!("/Users/ann/Desktop/{n}.app"), stamp(1), 32);
+    }
+    let _ = desk.version_of(&first.dir, first.listed, 32);
+    let _ = desk.version_of("/Users/ann/Desktop/Newest.app", stamp(1), 32);
+    assert!(
+        desk.record_mut(&first.dir, first.listed).is_some(),
+        "the bundle asked about again was forgotten"
+    );
+    assert!(
+        desk.record_mut(&second.dir, second.listed).is_none(),
+        "the bundle asked about least recently was kept"
+    );
+    assert_eq!(desk.bundles.len(), MAX_LISTED_BUNDLE_DIRS);
+}
+
+/// Forgetting the bundle asked about least recently allocates nothing: the
+/// room for the follow it hands back was kept before it began.
+#[test]
+fn forgetting_the_least_recent_bundle_allocates_nothing() {
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
+    desk.follow_bundles();
+    let oldest = listed_bundle("/Users/ann/Desktop/Oldest.app", 1);
+    let _ = desk.version_of(&oldest.dir, oldest.listed, 32);
+    assert!(desk.follows(&oldest));
+    for n in 1..MAX_LISTED_BUNDLE_DIRS {
+        let _ = desk.version_of(&alloc::format!("/Users/ann/Desktop/{n}.app"), stamp(1), 32);
+    }
+    assert!(tairix_util::fallible::reserve(&mut desk.unfollowed, 1));
+    let ((), metering) = tairix_fuzzseed::meter::metered(|| desk.forget_least_recent());
+    assert_eq!(metering.allocations, 0, "{metering:?}");
+    assert_eq!(desk.take_unfollowed().collect::<Vec<_>>(), [oldest]);
+}
+
+/// A bundle read before a copy held its tree is read again once the copy is
+/// done, since the copy may have written its files meanwhile.
+#[test]
+fn a_bundle_read_before_its_tree_was_held_is_read_again_on_release() {
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
+    let one = listed_bundle("/Users/ann/Desktop/One.app", 1);
+    let _ = desk.version_of(&one.dir, one.listed, 32);
+    let _ = desk.collect(&listed(&one.dir, 1), 32);
+    let first = desk.next_job().expect("the first read");
+    let _ = desk.deliver_listed(
+        &first,
+        Some(picture(32)),
+        files(Some(2), Some(3)),
+        |_| (),
+        &(),
+    );
+    desk.hold_under(&one.dir);
+    assert!(
+        !desk.moved(&one),
+        "nothing is read while the copy writes it"
+    );
+    assert!(desk.release_under(&one.dir));
+    assert_eq!(
+        desk.next_job(),
+        Some(first),
+        "read again once its writing is done"
+    );
+}
+
+/// A producer reads a listed bundle's files before it decodes the bundle,
+/// decodes nothing where they are as its picture was last read from, and
+/// makes any other decode without reading a bundle's files at all.
+#[test]
+fn a_producer_decodes_a_listed_bundle_only_where_its_files_moved() {
+    let (mut reader, mut rasteriser) = (crate::NoArtworkSeam, crate::NoArtworkSeam);
+    let read = files(Some(2), Some(3));
+    let one = ArtworkJob {
+        key: listed("/Users/ann/Desktop/One.app", 1),
+        side: 32,
+    };
+    let produced = one.produce((&mut reader, &mut rasteriser), |_, _| read, |_| Some(read));
+    assert!(matches!(produced, Produced::Unchanged), "{produced:?}");
+    let produced = one.produce((&mut reader, &mut rasteriser), |_, _| read, |_| None);
+    assert!(
+        matches!(produced, Produced::Listed(found, None) if found == read),
+        "{produced:?}"
+    );
+
+    let mut read_files = false;
+    let produced = job("/a.png", 32).produce(
+        (&mut reader, &mut rasteriser),
+        |_, _| {
+            read_files = true;
+            read
+        },
+        |_| None,
+    );
+    assert!(matches!(produced, Produced::Decoded(None)), "{produced:?}");
+    assert!(!read_files, "an asset's decode read a bundle's files");
+}
+
+/// What a producer made is recorded as its kind is delivered: a listed
+/// bundle's picture under the files it was read from, files that stood as
+/// nothing landing, and any other decode as itself.
+#[test]
+fn a_produced_decode_is_recorded_by_what_its_producer_read() {
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
+    let one = listed_bundle("/Users/ann/Desktop/One.app", 1);
+    let _ = desk.version_of(&one.dir, one.listed, 32);
+    let _ = desk.collect(&listed(&one.dir, 1), 32);
+    let first = desk.next_job().expect("the first read");
+    let read = files(Some(2), Some(3));
+    let produced = Produced::Listed(read, Some(picture(32)));
+    assert!(desk.deliver_produced(&first, produced, |_| (), &()).kept());
+    assert_eq!(
+        desk.version_of(&one.dir, one.listed, 32),
+        BundleVersion::Files(read)
+    );
+    let _ = desk.take_landed();
+
+    assert!(desk.moved(&one));
+    let again = desk.next_job().expect("the read again");
+    let delivered = desk.deliver_produced(&again, Produced::Unchanged, |_| (), &());
+    assert!(!delivered.kept());
+    assert!(
+        desk.take_landed().is_empty(),
+        "files that stood repainted something"
+    );
+
+    let _ = desk.collect(&asset("/a.png"), 32);
+    let plain = desk.next_job().expect("the asset");
+    let _ = desk.deliver_produced(&plain, Produced::Decoded(None), |_| (), &());
+    assert!(desk.take_landed().resolves(request("/a.png"), 32));
+}
+
+/// A bundle unfollowed — let go by a sweep while off screen, or remembered
+/// before its embedder followed bundles — is followed again once asked about
+/// with room: its files are read anew, so that read arms the follow.
+#[test]
+fn a_bundle_shown_again_is_followed_again() {
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
+    desk.follow_bundles();
+    let one = listed_bundle("/Users/ann/Desktop/One.app", 1);
+    let _ = desk.version_of(&one.dir, one.listed, 32);
+    let _ = desk.collect(&listed(&one.dir, 1), 32);
+    let first = desk.next_job().expect("the first read");
+    assert!(desk.follows(&one), "its first read arms its follow");
+    let read = files(Some(2), Some(3));
+    let _ = desk.deliver_listed(&first, Some(picture(32)), read, |_| (), &());
+    assert!(desk.sweep_follows().is_empty(), "it was just asked about");
+    assert_eq!(
+        desk.sweep_follows(),
+        core::slice::from_ref(&one),
+        "the bundle that left the screen kept its follow"
+    );
+    let recorded = desk.recorded();
+    assert_eq!(
+        desk.version_of(&one.dir, one.listed, 32),
+        BundleVersion::Files(read),
+        "shown again, it is pictured from the files it was read from"
+    );
+    assert_ne!(desk.recorded(), recorded, "nothing read it anew");
+    assert_eq!(desk.next_job(), Some(first), "its files are read anew");
+    assert!(desk.follows(&one), "that read does not arm its follow");
+
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
+    let early = listed_bundle("/Users/ann/Desktop/Early.app", 1);
+    let _ = desk.version_of(&early.dir, early.listed, 32);
+    desk.follow_bundles();
+    let _ = desk.version_of(&early.dir, early.listed, 32);
+    assert!(
+        desk.follows(&early),
+        "remembered before its embedder followed bundles, it is never followed"
+    );
+}
+
+/// A bundle past the bound is followed once a sweep makes room and it is next
+/// asked about.
+#[test]
+fn a_bundle_past_the_bound_is_followed_once_room_frees() {
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
+    desk.follow_bundles();
+    let shown: Vec<ListedBundle> = (0..=MAX_FOLLOWED_BUNDLES)
+        .map(|n| listed_bundle(&alloc::format!("/Users/ann/Desktop/{n}.app"), 1))
+        .collect();
+    for bundle in &shown {
+        let _ = desk.version_of(&bundle.dir, bundle.listed, 32);
+    }
+    let past = &shown[MAX_FOLLOWED_BUNDLES];
+    assert!(
+        desk.sweep_follows().is_empty(),
+        "every bundle was just asked about"
+    );
+    let _ = desk.version_of(&past.dir, past.listed, 32);
+    assert!(!desk.follows(past), "followed past the bound");
+    assert!(
+        desk.sweep_follows().is_empty(),
+        "a bundle only wanted followed was handed back"
+    );
+    let _ = desk.version_of(&past.dir, past.listed, 32);
+    assert!(desk.follows(past), "not followed once room freed");
+}
+
+/// A bundle whose follow was refused is not followed again: its next read
+/// would only be refused again.
+#[test]
+fn a_bundle_whose_follow_was_refused_is_not_followed_again() {
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
+    desk.follow_bundles();
+    let one = listed_bundle("/Users/ann/Desktop/One.app", 1);
+    let _ = desk.version_of(&one.dir, one.listed, 32);
+    assert!(desk.follows(&one));
+    desk.unfollowable(&one);
+    let recorded = desk.recorded();
+    let _ = desk.version_of(&one.dir, one.listed, 32);
+    assert_eq!(
+        desk.recorded(),
+        recorded,
+        "its files were read anew to be refused again"
+    );
+    assert!(!desk.follows(&one));
+}
+
+/// The bundles on a volume about to be ejected are followed no more, so a
+/// read of one under way arms no follow that stands; each is followed again
+/// once asked about.
+#[test]
+fn the_bundles_on_a_volume_ejected_are_followed_no_more() {
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
+    desk.follow_bundles();
+    let ejected = listed_bundle("/Storage/usb1/Games.app", 1);
+    let kept = listed_bundle("/Users/ann/Desktop/One.app", 1);
+    for bundle in [&ejected, &kept] {
+        let _ = desk.version_of(&bundle.dir, bundle.listed, 32);
+        assert!(desk.follows(bundle));
+    }
+    desk.stop_following_where(|dir| dir.starts_with("/Storage/usb1/"));
+    assert!(
+        !desk.follows(&ejected),
+        "a bundle on the volume is still followed"
+    );
+    assert!(desk.follows(&kept));
+    assert!(
+        desk.sweep_follows().is_empty(),
+        "a bundle let go was handed back"
+    );
+    let _ = desk.version_of(&ejected.dir, ejected.listed, 32);
+    assert!(
+        desk.follows(&ejected),
+        "not followed again once asked about"
+    );
+}
+
+/// A directory's versions are remembered and forgotten together: asking
+/// about one keeps every version of it, and past the bound the directory
+/// asked about least recently goes with every version, each follow handed
+/// back.
+#[test]
+fn a_directory_s_versions_are_remembered_and_forgotten_together() {
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
+    desk.follow_bundles();
+    let old = listed_bundle("/Users/ann/Desktop/One.app", 1);
+    let new = listed_bundle("/Users/ann/Desktop/One.app", 2);
+    for version in [&old, &new] {
+        let _ = desk.version_of(&version.dir, version.listed, 32);
+        assert!(desk.follows(version));
+    }
+    for n in 1..MAX_LISTED_BUNDLE_DIRS {
+        let _ = desk.version_of(&alloc::format!("/Users/ann/Desktop/{n}.app"), stamp(1), 32);
+    }
+    let _ = desk.version_of(&new.dir, new.listed, 32);
+    let _ = desk.version_of("/Users/ann/Desktop/Newest.app", stamp(1), 32);
+    assert!(
+        desk.record_mut(&old.dir, old.listed).is_some(),
+        "asking about one version forgot another"
+    );
+    assert!(desk
+        .record_mut("/Users/ann/Desktop/1.app", stamp(1))
+        .is_none());
+    assert!(desk.take_unfollowed().next().is_none());
+    for n in 0..MAX_LISTED_BUNDLE_DIRS {
+        let _ = desk.version_of(&alloc::format!("/Users/ann/Later/{n}.app"), stamp(1), 32);
+    }
+    let gone: Vec<ListedBundle> = desk.take_unfollowed().collect();
+    assert!(gone.contains(&old) && gone.contains(&new), "{gone:?}");
+    assert_eq!(desk.files_of(&old), None);
+}
+
+/// A directory listed at more versions than the bound forgets the version
+/// asked about least recently, handing its follow back.
+#[test]
+fn a_directory_past_its_versions_forgets_the_one_asked_about_least_recently() {
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
+    desk.follow_bundles();
+    let dir = "/Users/ann/Desktop/One.app";
+    let versions: Vec<ListedBundle> = (1..)
+        .take(MAX_LISTED_VERSIONS)
+        .map(|n| listed_bundle(dir, n))
+        .collect();
+    for version in &versions {
+        let _ = desk.version_of(&version.dir, version.listed, 32);
+        assert!(desk.follows(version));
+    }
+    let _ = desk.version_of(dir, versions[0].listed, 32);
+    let past = listed_bundle(dir, 100);
+    let _ = desk.version_of(&past.dir, past.listed, 32);
+    assert_eq!(
+        desk.take_unfollowed().collect::<Vec<_>>(),
+        core::slice::from_ref(&versions[1])
+    );
+    assert!(desk.record_mut(dir, versions[0].listed).is_some());
+    assert!(desk.record_mut(dir, past.listed).is_some());
+    assert!(desk.record_mut(dir, versions[1].listed).is_none());
+}
+
+/// Asks, a collect and a want under an exhausted heap answer without
+/// aborting and record nothing the heap refused, and the desk stays whole: a
+/// bundle refused is remembered once the heap has room, and one remembered
+/// still answers the files it was read from.
+#[test]
+fn a_refused_heap_answers_every_ask_and_keeps_the_desk_whole() {
+    use tairix_fuzzseed::meter::{refusing_above, refusing_after};
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
+    desk.follow_bundles();
+    let known = listed_bundle("/Users/ann/Desktop/Known.app", 1);
+    let _ = desk.version_of(&known.dir, known.listed, 32);
+    let _ = desk.collect(&listed(&known.dir, 1), 32);
+    let first = desk.next_job().expect("the first read");
+    let read = files(Some(2), Some(3));
+    let _ = desk.deliver_listed(&first, Some(picture(32)), read, |_| (), &());
+    let _ = desk.take_landed();
+    let fresh = listed_bundle("/Users/ann/Desktop/Fresh.app", 1);
+    let (collected, wanted) = (asset("/a.png"), asset("/b.png"));
+    refusing_above(0, || {
+        assert_eq!(
+            desk.version_of(&known.dir, known.listed, 32),
+            BundleVersion::Files(read)
+        );
+        assert_eq!(
+            desk.version_of(&fresh.dir, fresh.listed, 32),
+            BundleVersion::Listed(fresh.listed)
+        );
+        assert!(matches!(
+            desk.collect(&collected, 32),
+            (Resolved::Pending, false)
+        ));
+        assert!(!desk.want(&wanted, 32));
+    });
+    assert!(!desk.has_work(), "a refused ask queued a decode");
+    assert!(desk.record_mut(&fresh.dir, fresh.listed).is_none());
+    let _ = desk.version_of(&fresh.dir, fresh.listed, 32);
+    assert!(desk.record_mut(&fresh.dir, fresh.listed).is_some());
+    for granted in 0..8 {
+        let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
+        let (_, recorded) = refusing_after(granted, || desk.collect(&collected, 32));
+        assert_eq!(desk.has_work(), recorded, "{granted}");
+        assert_eq!(desk.collect(&collected, 32).1, !recorded, "{granted}");
+        assert!(desk.next_job().is_some(), "{granted}");
+        assert!(desk.next_job().is_none(), "recorded twice: {granted}");
+    }
+    for granted in 0..8 {
+        let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
+        desk.follow_bundles();
+        let answer = refusing_after(granted, || desk.version_of(&known.dir, known.listed, 32));
+        assert_eq!(answer, BundleVersion::Listed(known.listed), "{granted}");
+        let _ = desk.version_of(&known.dir, known.listed, 32);
+        assert!(
+            desk.record_mut(&known.dir, known.listed).is_some(),
+            "{granted}"
+        );
+        assert!(desk.follows(&known), "{granted}");
+        assert_eq!(desk.following.len(), 1, "{granted}");
+    }
+}
+
+/// A listed bundle's answer the heap has no room to name lands as everything
+/// having landed, so the item drawn from it repaints and asks again rather
+/// than keeping what it showed until unrelated input.
+#[test]
+fn a_listed_answer_the_heap_cannot_name_repaints_everything() {
+    let mut desk = ArtworkDesk::new(TEST_KEYS);
+    let one = listed_bundle("/Users/ann/Desktop/One.app", 1);
+    let _ = desk.version_of(&one.dir, one.listed, 32);
+    let _ = desk.collect(&listed(&one.dir, 1), 32);
+    let first = desk.next_job().expect("the first read");
+    let (read, art) = (files(Some(2), Some(3)), Some(picture(32)));
+    let delivered = tairix_fuzzseed::meter::refusing_above(0, || {
+        desk.deliver_listed(&first, art, read, |_| (), &())
+    });
+    assert!(delivered.wake(), "the loop is not woken to repaint");
+    let request = IconRequest::listed_bundle(crate::IconKind::AppBundle, &one.dir, one.listed);
+    assert!(desk.take_landed().resolves(request, 32));
+    assert!(
+        desk.take_landed().is_empty(),
+        "the landing was reported twice"
+    );
+    assert_eq!(
+        desk.version_of(&one.dir, one.listed, 32),
+        BundleVersion::Files(read)
+    );
 }

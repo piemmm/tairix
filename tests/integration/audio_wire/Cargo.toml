@@ -24,4 +24,4 @@ flac = ["dep:tairix-sound"]
 # The desktop sound the cue run asks for, named in the protocol's own
 # vocabulary.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-tairix-sound = { path = "../../../lib/sound", version = "=0.0.0", features = ["encode"], optional = true }
+tairix-sound = { path = "../../../lib/sound", version = "=0.0.0", features = ["encode-flac"], optional = true }

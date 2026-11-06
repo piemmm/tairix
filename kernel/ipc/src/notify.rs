@@ -246,7 +246,7 @@ mod tests {
     fn task_with(task_id: u64, caps: &[CapabilityId]) -> TaskCapabilities {
         let sink = RecordingSink::new();
         let set = caps_of(caps);
-        TaskCapabilities::derive(ProcessId(task_id), UserId(1), set, set, &sink)
+        TaskCapabilities::derive(ProcessId(task_id), UserId(1), set, set, &sink).expect("derived")
     }
 
     #[test]

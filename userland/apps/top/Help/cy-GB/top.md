@@ -53,7 +53,10 @@ yn cario:
   gyfeiriadur cyfrifon y system; saif yr uid rhifol yn ei le pan na
   ellir datrys yr enw.
 - `SIZE` — y cof a fapiwyd yng ngofod cyfeiriadau'r broses (delwedd,
-  pentwr a thomen fel ei gilydd).
+  pentwr a thomen fel ei gilydd), mewn unedau deuaidd: y cyfrif union o
+  dan gibibeit, yna un lle degol gydag ôl-ddodiad `K`, `M`, `G`, `T`, `P`
+  neu `E` (`4.0K`, `986.2M`, `2.0G`). Mae'r ysgol yn cyrraedd
+  ecsbibeitiau, felly mae'r ffigur bob amser yn ffitio'i golofn.
 - `S` — llythyren y cyflwr: `R` yn rhedeg (gwyrdd), `r` yn rhedadwy,
   yn aros am CPU (cyan), `S` yn cysgu, `T` wedi'i atal (melyn), `Z`
   zombie (magenta). Dim ond ar derfynell liw yr ymddengys y lliwiau;
@@ -61,7 +64,8 @@ yn cario:
 - `%CPU` — cyfran y CPU dros y cyfwng ers yr adnewyddiad blaenorol.
 - `WCPU` — cyfran bwysol (wedi'i llyfnhau'n esbonyddol) y CPU ar
   draws adnewyddiadau, sefydlocach na'r golofn ennyd.
-- `TIME+` — amser CPU cronnus, fel `munudau:eiliadau.canfedau`.
+- `TIME+` — amser CPU cronnus, fel `minutes:seconds.hundredths`
+  (munudau, eiliadau a chanfedau).
 - `COMMAND` — enw'r broses.
 
 ## OPTIONS

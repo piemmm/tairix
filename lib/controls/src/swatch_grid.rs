@@ -9,17 +9,25 @@
 //!
 //! The wells share the bounds they are drawn in evenly, row by row, so one
 //! layout serves drawing, hit-testing and the damage a mark's move reports.
+//! A palette packs its wells a pixel apart and may number them: a marked
+//! well shows its number in place of its mark, on a badge where the well is
+//! too small to hold it.
 
 use alloc::vec::Vec;
 
+use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
+use tairix_inline::ArrayString;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Ring, RingInk, Surface, SUBPIXEL};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::checker::Checker;
 use crate::damage;
-use crate::paint::{inset, paint_bead, plate_border, resolve_bead, surface_rect, withheld};
+use crate::paint::{
+    inset, paint_bead, paint_count_badge, plate_border, resolve_bead, role_font, surface_rect,
+    withheld,
+};
 use crate::state::{ControlDisposition, ControlState, RenderInvariant};
 
 /// Which of a grid's two marks an interaction moves.
@@ -44,6 +52,100 @@ pub enum SwatchAction {
     },
 }
 
+/// How far apart a grid's wells stand.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum WellSpacing {
+    /// Half the theme's control gap round each well: a handful of wells a
+    /// user edits one at a time.
+    #[default]
+    Spaced,
+    /// A pixel round each well: a palette, whose wells are as many as fit.
+    Packed,
+}
+
+impl WellSpacing {
+    /// The margin round a well in a `(width, height)` cell, never more than
+    /// an eighth of it.
+    fn margin(self, metrics: WellMetrics, (width, height): (u32, u32)) -> u32 {
+        let margin = match self {
+            Self::Spaced => metrics.gap / 2,
+            Self::Packed => metrics.pixel,
+        };
+        margin.min(width / 8).min(height / 8)
+    }
+}
+
+/// The face a grid's well numbers are set in, resolved once from the theme
+/// at a scale: a grid lays its numbers out when fed input, which carries
+/// neither.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NumberFace {
+    font: BitmapFont,
+    pad: u32,
+    metrics: WellMetrics,
+}
+
+impl NumberFace {
+    /// The caption face at `scale` under `theme`.
+    #[must_use]
+    pub fn of(scale: Scale, theme: &Theme) -> Self {
+        Self {
+            font: role_font(theme, scale, TextRole::Caption),
+            pad: scale.scale_length(theme.metrics().control_inset).max(1),
+            metrics: WellMetrics::of(scale, theme),
+        }
+    }
+}
+
+/// The lengths wells are drawn with at one scale.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct WellMetrics {
+    gap: u32,
+    pixel: u32,
+    border: u32,
+}
+
+impl WellMetrics {
+    fn of(scale: Scale, theme: &Theme) -> Self {
+        Self {
+            gap: well_gap(scale, theme),
+            pixel: scale.scale_length(1).max(1),
+            border: plate_border(theme, scale),
+        }
+    }
+}
+
+/// How many wells, from the first, a grid numbers, and the face it sets
+/// their numbers in.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Numbers {
+    count: usize,
+    face: NumberFace,
+}
+
+/// A marked well's number: its digits, how wide they are set, and where they
+/// are shown.
+#[derive(Copy, Clone, Debug)]
+struct Number {
+    index: usize,
+    digits: Digits,
+    width: u32,
+    font: BitmapFont,
+    shown: Shown,
+}
+
+/// Where a marked well's number is shown.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Shown {
+    /// Inside the well, in place of its mark.
+    Inside,
+    /// On a badge standing over the well, which is too small to hold it.
+    Badge(Rect),
+}
+
+/// A well's number as text, with room for any index.
+type Digits = ArrayString<20>;
+
 /// A grid of colour wells.
 ///
 /// Equal grids draw the same pixels: the pointer and the press latch are
@@ -52,6 +154,8 @@ pub enum SwatchAction {
 pub struct SwatchGrid {
     colours: Vec<Color>,
     columns: usize,
+    spacing: WellSpacing,
+    numbers: Option<Numbers>,
     primary: Option<usize>,
     secondary: Option<usize>,
     state: ControlState,
@@ -70,12 +174,21 @@ impl SwatchGrid {
         Self {
             colours,
             columns: columns.max(1),
+            spacing: WellSpacing::Spaced,
+            numbers: None,
             primary,
             secondary: None,
             state: ControlState::idle(),
             pointer: RenderInvariant::new(Point::ORIGIN),
             armed: RenderInvariant::new(None),
         }
+    }
+
+    /// This grid with its wells set `spacing` apart.
+    #[must_use]
+    pub fn with_spacing(mut self, spacing: WellSpacing) -> Self {
+        self.spacing = spacing;
+        self
     }
 
     /// How many wells the grid holds.
@@ -133,6 +246,22 @@ impl SwatchGrid {
     /// owner reports the repaint.
     pub fn set_columns(&mut self, columns: usize) {
         self.columns = columns.max(1);
+    }
+
+    /// Number the first `count` wells in `face` — none where `count` is `0` —
+    /// answering whether that changes what the grid draws; the owner reports
+    /// the repaint.
+    pub fn number_wells(&mut self, count: usize, face: NumberFace) -> bool {
+        let numbers = (count > 0).then_some(Numbers { count, face });
+        let changed = self.numbers != numbers;
+        self.numbers = numbers;
+        changed
+    }
+
+    /// How many wells, from the first, the grid numbers.
+    #[must_use]
+    pub fn numbered(&self) -> usize {
+        self.numbers.map_or(0, |numbers| numbers.count)
     }
 
     /// The well the primary mark is on, if any is marked.
@@ -227,6 +356,65 @@ impl SwatchGrid {
         (index < self.colours.len()).then_some(index)
     }
 
+    /// What a mark on well `index` repaints within `bounds`: its cell, with
+    /// the badge its number stands on where it has one.
+    #[must_use]
+    pub fn mark_rect(&self, bounds: Rect, index: usize) -> Option<Rect> {
+        let cell = self.cell_rect(bounds, index)?;
+        Some(
+            match self.number_of(bounds, index).map(|number| number.shown) {
+                Some(Shown::Badge(badge)) => cell.union(&badge),
+                _ => cell,
+            },
+        )
+    }
+
+    /// The numbers the marked wells show within `bounds`: the primary's, and
+    /// the secondary's where it marks another well.
+    fn marked_numbers(&self, bounds: Rect) -> [Option<Number>; 2] {
+        let secondary = self.secondary.filter(|&index| self.primary != Some(index));
+        [self.primary, secondary].map(|mark| mark.and_then(|index| self.number_of(bounds, index)))
+    }
+
+    /// Well `index`'s number within `bounds`, where it is numbered: inside the
+    /// well where the digits fit within the primary mark's ring, else on a
+    /// badge centred on the well and kept within the grid.
+    fn number_of(&self, bounds: Rect, index: usize) -> Option<Number> {
+        use core::fmt::Write as _;
+        let face = self.numbers.filter(|numbers| index < numbers.count)?.face;
+        let cell = self.cell_rect(bounds, index)?;
+        let mut digits = Digits::new();
+        write!(digits, "{index}").ok()?;
+        let text_w = face.font.text_width(digits.as_str());
+        let text_h = face.font.glyph_height();
+        let inner = cell.inset(self.spacing.margin(face.metrics, (cell.width, cell.height)));
+        let (_, ring) = rings(face.metrics.border, (inner.width, inner.height));
+        let clear = ring.saturating_mul(2);
+        let fits = text_w.saturating_add(clear) <= inner.width
+            && text_h.saturating_add(clear) <= inner.height;
+        let shown = if fits {
+            Shown::Inside
+        } else {
+            let height = text_h.saturating_add(face.pad);
+            let width = text_w.saturating_add(face.pad).max(height);
+            let centre = cell.center();
+            let badge = Rect::new(
+                centre.x.saturating_sub(to_i32(width / 2)),
+                centre.y.saturating_sub(to_i32(height / 2)),
+                width,
+                height,
+            );
+            Shown::Badge(badge.clamped_onto(bounds).intersection(&bounds))
+        };
+        Some(Number {
+            index,
+            digits,
+            width: text_w,
+            font: face.font,
+            shown,
+        })
+    }
+
     /// The well the keyboard acts on: the primary mark's, or the first.
     fn cursor(&self) -> Option<usize> {
         self.primary.or((!self.colours.is_empty()).then_some(0))
@@ -237,20 +425,29 @@ impl SwatchGrid {
         if withheld(surface, bounds) {
             return;
         }
+        let metrics = WellMetrics::of(scale, theme);
+        let numbers = self.marked_numbers(bounds);
         let focus = self.state.focus.focused.then(|| self.cursor()).flatten();
         for index in 0..self.colours.len() {
             let Some((x, y, w, h)) = self.cell_rect(bounds, index).and_then(surface_rect) else {
                 continue;
             };
             if surface.admits(x, y, w, h) {
+                let number = numbers
+                    .iter()
+                    .flatten()
+                    .find(|number| number.index == index);
                 self.paint_well(
                     surface,
-                    index,
-                    (x, y, w, h),
-                    focus == Some(index),
-                    (scale, theme),
+                    (index, (x, y, w, h)),
+                    (focus == Some(index), number),
+                    (scale, theme, metrics),
                 );
             }
+        }
+        // After every well, so a badge stands over the wells round its own.
+        for number in numbers.iter().flatten() {
+            self.paint_badge(surface, number, theme);
         }
         if let Some((colour, shape)) = resolve_bead(theme, self.state) {
             if let Some((x, y, w, _)) = surface_rect(bounds) {
@@ -263,13 +460,12 @@ impl SwatchGrid {
     fn paint_well(
         &self,
         surface: &mut Surface,
-        index: usize,
-        (cx, cy, cw, ch): (u32, u32, u32, u32),
-        focused: bool,
-        (scale, theme): (Scale, &Theme),
+        (index, (cx, cy, cw, ch)): (usize, (u32, u32, u32, u32)),
+        (focused, number): (bool, Option<&Number>),
+        (scale, theme, metrics): (Scale, &Theme, WellMetrics),
     ) {
         let palette = theme.palette();
-        let margin = (well_gap(scale, theme) / 2).min(cw / 8).min(ch / 8);
+        let margin = self.spacing.margin(metrics, (cw, ch));
         let Some((x, y, w, h)) = inset(cx, cy, cw, ch, margin) else {
             return;
         };
@@ -284,23 +480,21 @@ impl SwatchGrid {
             .min(w / 4)
             .min(h / 4);
         surface.fill_round_rect(x, y, w, h, radius, colour);
-        let border = plate_border(theme, scale).min(w / 4).min(h / 4).max(1);
+        let (border, ring) = rings(metrics.border, (w, h));
         outline(surface, (x, y, w, h), border, Color::from(palette.rim));
-        let contrast = contrast_for(colour, theme);
         if self.primary == Some(index) {
-            let ring = border.saturating_mul(2).min(w / 3).min(h / 3).max(1);
             outline(surface, (x, y, w, h), ring, Color::from(palette.rim_active));
-            paint_diamond(surface, (x, y, w, h), contrast);
         }
-        if self.secondary == Some(index) {
-            let inner = (w.min(h) / 4).max(1);
-            if let Some(square) = inset(x, y, w, h, inner) {
-                outline(surface, square, border, contrast);
+        let contrast = contrast_for(colour, theme);
+        match number {
+            Some(number) if number.shown == Shown::Inside => {
+                paint_digits(surface, (x, y, w, h), number, contrast);
             }
+            Some(_) => {}
+            None => self.paint_marks(surface, index, (x, y, w, h), (border, contrast)),
         }
         if self.state.disposition() == ControlDisposition::DisabledByState {
-            let veil = Color::from(palette.surface.with_alpha(128));
-            surface.fill_round_rect(x, y, w, h, radius, veil);
+            surface.fill_round_rect(x, y, w, h, radius, veil(theme));
         }
         // In the margin round the well, so it never covers the mark inside it.
         if focused && margin > 0 {
@@ -312,6 +506,53 @@ impl SwatchGrid {
                 Ring::uniform(radius.saturating_add(margin), border.min(margin)),
                 RingInk::Solid(Color::from(palette.rim_active)),
             );
+        }
+    }
+
+    /// The marks on well `index`, drawn at `well` in `contrast`: a diamond
+    /// for the primary, a hollow square `border` thick for the secondary.
+    fn paint_marks(
+        &self,
+        surface: &mut Surface,
+        index: usize,
+        well: (u32, u32, u32, u32),
+        (border, contrast): (u32, Color),
+    ) {
+        if self.primary == Some(index) {
+            paint_diamond(surface, well, contrast);
+        }
+        let (x, y, w, h) = well;
+        if self.secondary == Some(index) {
+            let inner = (w.min(h) / 4).max(1);
+            if let Some(square) = inset(x, y, w, h, inner) {
+                outline(surface, square, border, contrast);
+            }
+        }
+    }
+
+    /// `number`'s badge, where it stands on one, in the accent's colours and
+    /// veiled as the wells are while the grid is disabled.
+    fn paint_badge(&self, surface: &mut Surface, number: &Number, theme: &Theme) {
+        let Shown::Badge(badge) = number.shown else {
+            return;
+        };
+        let Some((x, y, w, h)) = surface_rect(badge) else {
+            return;
+        };
+        if !surface.admits(x, y, w, h) {
+            return;
+        }
+        let palette = theme.palette();
+        paint_count_badge(
+            surface,
+            (x, y, w, h),
+            Color::from(palette.accent),
+            Color::from(palette.on_accent),
+            number.font,
+            number.digits.as_str(),
+        );
+        if self.state.disposition() == ControlDisposition::DisabledByState {
+            surface.fill_round_rect(x, y, w, h, h / 2, veil(theme));
         }
     }
 
@@ -392,10 +633,11 @@ impl SwatchGrid {
     }
 
     /// Move `mark` onto well `index`, reporting the well it left and the one
-    /// it arrives on. A re-selection is still a completed interaction, so the
-    /// action is always answered; only the report is conditional. A focused
-    /// grid's focus ring follows the primary mark, so the first well, which
-    /// carries the ring while none is marked, reports too.
+    /// it arrives on, each with the badge its number stands on. A
+    /// re-selection is still a completed interaction, so the action is always
+    /// answered; only the report is conditional. A focused grid's focus ring
+    /// follows the primary mark, so the first well, which carries the ring
+    /// while none is marked, reports too.
     fn select(
         &mut self,
         mark: SwatchMark,
@@ -410,11 +652,11 @@ impl SwatchGrid {
         damage::move_mark(
             from,
             Some(index),
-            |well| self.cell_rect(bounds, well),
+            |well| self.mark_rect(bounds, well),
             damage,
         );
         if mark == SwatchMark::Primary && self.primary.is_none() {
-            if let Some(rect) = self.cell_rect(bounds, index) {
+            if let Some(rect) = self.mark_rect(bounds, index) {
                 damage.add(rect);
             }
         }
@@ -429,6 +671,31 @@ impl SwatchGrid {
 /// The scaled gap between wells, from the theme's control gap.
 fn well_gap(scale: Scale, theme: &Theme) -> u32 {
     scale.scale_length(theme.metrics().control_gap).max(1)
+}
+
+/// The rim every well is outlined with and the ring the primary mark adds,
+/// for a well `(w, h)` whose plate border is `border`.
+fn rings(border: u32, (w, h): (u32, u32)) -> (u32, u32) {
+    let rim = border.min(w / 4).min(h / 4).max(1);
+    (rim, rim.saturating_mul(2).min(w / 3).min(h / 3).max(1))
+}
+
+/// What a disabled grid lays over its wells and badges.
+fn veil(theme: &Theme) -> Color {
+    Color::from(theme.palette().surface.with_alpha(128))
+}
+
+/// `number`'s digits centred in the well `(x, y, w, h)`, in `colour`.
+fn paint_digits(
+    surface: &mut Surface,
+    (x, y, w, h): (u32, u32, u32, u32),
+    number: &Number,
+    colour: Color,
+) {
+    let font = number.font;
+    let left = to_i32(x).saturating_add(to_i32(w.saturating_sub(number.width) / 2));
+    let top = font.centred_top(to_i32(y), h);
+    font.draw_text(surface, left, top, number.digits.as_str(), colour);
 }
 
 /// Black or white, whichever reads over `colour` as it shows: a translucent

@@ -370,9 +370,9 @@ Landed:
   a live `Degraded`/`Recovering` reading onto an otherwise-`Available` volume
   (`overlaid_availability`), so `sysinfo`/`mount`/`df`/`sysmon` show a
   live-but-unwell volume distinctly (new `MountAvailability::{Degraded,
-  Recovering}`). The authoritative D4 `Unavailable*`/`RecoveryConflict` vanish
-  states always win over the overlay, so a vanished volume never masquerades
-  as merely unwell; the serving driver still owns the sticky `BlkHealth`
+  Recovering}`). The authoritative D4 `Unavailable*`, `RecoveryConflict` and
+  `ReplayUnconfirmed` states always win over the overlay, so a vanished or
+  held volume never masquerades as merely unwell; the serving driver still owns the sticky `BlkHealth`
   machine, so the consumer only reflects its verdict (no second, divergent
   state machine). Proven host-side: the status→availability mapping, the
   consumer fold, and the snapshot overlay (incl. stored-state precedence).

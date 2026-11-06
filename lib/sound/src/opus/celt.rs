@@ -4,6 +4,10 @@
 //! The arithmetic is single-precision float throughout and follows the
 //! reference implementation's float build operation for operation, so a
 //! decode agrees with libopus's to within the rounding of the last bit.
+//!
+//! A frame's symbols are coded by one routine at either end, `code`: the
+//! decoder reads them, and the encoder, behind `encode-opus`, writes the
+//! choices its analysis made.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -15,6 +19,8 @@
 
 mod alloc;
 mod bands;
+#[cfg(any(test, feature = "encode-opus"))]
+mod encoder;
 mod energy;
 mod plc;
 mod pvq;
@@ -25,11 +31,13 @@ use ::alloc::vec::Vec;
 use tairix_util::fallible::filled;
 use tairix_util::mathf;
 
-use self::alloc::{caps, Allocation, Request};
+use self::alloc::{caps, Request};
 use self::bands::{anti_collapse, denormalise, Frame as BandFrame, Scratch};
+#[cfg(any(test, feature = "encode-opus"))]
+pub(crate) use self::encoder::CeltEncoder;
 pub(super) use self::tables::WINDOW;
 use self::tables::{BANDS, SPREAD_ICDF, TAPSET_ICDF, TF_SELECT, TRIM_ICDF};
-use super::range::{RangeDecoder, BITRES};
+use super::range::{Coder, RangeDecoder, BITRES};
 use crate::transform::Dct4;
 use crate::DecodeError;
 
@@ -54,10 +62,14 @@ const PREEMPHASIS: f32 = 0.850_006_1;
 const SPREAD_NONE: usize = 0;
 const SPREAD_NORMAL: usize = 2;
 const SPREAD_AGGRESSIVE: usize = 3;
+/// The allocation's tilt that leans toward neither end.
+const EVEN_TRIM: usize = 5;
 const EPSILON: f32 = 1e-15;
 const VERY_SMALL: f32 = 1e-30;
 /// The scale CELT's signals are carried at: full scale is `32768`.
 const SIGNAL_SCALE: f32 = 32768.0;
+/// The energy a band of silence is held at.
+const SILENT_ENERGY: f32 = -28.0;
 
 const fn max16(a: f32, b: f32) -> f32 {
     if a > b {
@@ -210,8 +222,8 @@ impl Celt {
         self.history.fill(0.0);
         self.lpc = [[0.0; LPC_ORDER]; 2];
         self.energy = [0.0; 2 * BAND_COUNT];
-        self.previous = [-28.0; 2 * BAND_COUNT];
-        self.before = [-28.0; 2 * BAND_COUNT];
+        self.previous = [SILENT_ENERGY; 2 * BAND_COUNT];
+        self.before = [SILENT_ENERGY; 2 * BAND_COUNT];
         self.background = [0.0; 2 * BAND_COUNT];
     }
 
@@ -269,7 +281,7 @@ impl Celt {
     #[allow(
         clippy::too_many_lines,
         clippy::many_single_char_names,
-        reason = "the reference's celt_decode_with_ec, kept whole and in its names so the port can be read against it"
+        reason = "the synthesis of the reference's celt_decode_with_ec, kept whole and in its names so the port can be read against it"
     )]
     fn decode_coded(
         &mut self,
@@ -288,137 +300,32 @@ impl Celt {
                 self.energy[band] = max16(self.energy[band], self.energy[BAND_COUNT + band]);
             }
         }
-        let mut total_bits = len * 8;
-        let mut tell = decoder.tell();
-        let silence = if tell >= total_bits {
-            true
-        } else if tell == 1 {
-            decoder.bit_logp(15)
-        } else {
-            false
-        };
-        if silence {
-            tell = len * 8;
-            decoder.skip_to(tell);
-        }
-        let mut post = PostFilter::default();
-        if start == 0 && tell + 16 <= total_bits {
-            if decoder.bit_logp(1) {
-                let octave = decoder.uint(6);
-                post.period = ((16 << octave) + decoder.bits(4 + octave) - 1) as usize;
-                let gain = decoder.bits(3);
-                if decoder.tell() + 2 <= total_bits {
-                    post.tapset = decoder.icdf(&TAPSET_ICDF, 2);
-                }
-                post.gain = 0.093_75 * (gain + 1) as f32;
-            }
-            tell = decoder.tell();
-        }
-        let transient = lm > 0 && tell + 3 <= total_bits && {
-            let transient = decoder.bit_logp(3);
-            tell = decoder.tell();
-            transient
-        };
-        let intra = tell + 3 <= total_bits && decoder.bit_logp(3);
-        energy::coarse(decoder, &mut self.energy, start..end, intra, c, lm);
-
-        let tf = tf_decode(decoder, start..end, transient, lm);
-        let spread = if decoder.tell() + 4 <= total_bits {
-            decoder.icdf(&SPREAD_ICDF, 5)
-        } else {
-            SPREAD_NORMAL
-        };
-        let caps = caps(lm, c);
-        let mut offsets = [0i32; BAND_COUNT];
-        let mut dynalloc_logp = 6;
-        total_bits <<= BITRES;
-        let mut tell = decoder.tell_frac();
-        for band in start..end {
-            let width = ((c * (BANDS[band + 1] - BANDS[band])) << lm) as i32;
-            let quanta = (width << BITRES).min((6 << BITRES).max(width));
-            let mut loop_logp = dynalloc_logp;
-            let mut boost = 0;
-            while tell + ((loop_logp as i32) << BITRES) < total_bits && boost < caps[band] {
-                let more = decoder.bit_logp(loop_logp);
-                tell = decoder.tell_frac();
-                if !more {
-                    break;
-                }
-                boost += quanta;
-                total_bits -= quanta;
-                loop_logp = 1;
-            }
-            offsets[band] = boost;
-            if boost > 0 {
-                dynalloc_logp = 2.max(dynalloc_logp - 1);
-            }
-        }
-        let trim = if tell + (6 << BITRES) <= total_bits {
-            decoder.icdf(&TRIM_ICDF, 7) as i32
-        } else {
-            5
-        };
-        let mut bits = ((len * 8) << BITRES) - decoder.tell_frac() - 1;
-        let anti_collapse_rsv = if transient && lm >= 2 && bits >= ((lm as i32 + 2) << BITRES) {
-            1 << BITRES
-        } else {
-            0
-        };
-        bits -= anti_collapse_rsv;
-        let allocation: Allocation = alloc::compute(
-            &Request {
-                start,
-                end,
-                offsets: &offsets,
-                caps: &caps,
-                trim,
-                total: bits,
-                channels: c,
-                lm,
-            },
-            decoder,
-        );
-        energy::fine(decoder, &mut self.energy, start..end, &allocation.fine, c);
-
         for channel in 0..self.channels {
             let history = &mut self.history[channel * HISTORY_LEN..(channel + 1) * HISTORY_LEN];
             history.copy_within(n.., 0);
         }
-        let (x, y) = work.coefficients.split_at_mut(n);
-        let y = (c == 2).then_some(&mut y[..n]);
-        let mut collapse = [0u8; 2 * BAND_COUNT];
-        bands::all(
+        let span = Span {
+            start,
+            end,
+            channels: c,
+            lm,
+            disable_inversion: self.disable_inversion,
+        };
+        let Coded {
+            transient,
+            silence,
+            post,
+            anti_collapse: anti_collapse_on,
+            collapse,
+            pulses,
+        } = code(
             decoder,
-            &BandFrame {
-                start,
-                end,
-                lm,
-                short_blocks: transient,
-                spread,
-                dual_stereo: allocation.dual_stereo,
-                intensity: allocation.intensity,
-                tf: &tf,
-                pulses: &allocation.pulses,
-                coded: allocation.coded,
-                total_bits: len * (8 << BITRES) - anti_collapse_rsv,
-                balance: allocation.balance,
-                disable_inversion: self.disable_inversion,
-            },
-            &mut x[..n],
-            y,
-            &mut collapse,
-            &mut self.rng,
-            &mut work.bands,
-        );
-        let anti_collapse_on = anti_collapse_rsv > 0 && decoder.bits(1) != 0;
-        energy::finalise(
-            decoder,
+            &span,
             &mut self.energy,
-            start..end,
-            &allocation.fine,
-            &allocation.priority,
-            len * 8 - decoder.tell(),
-            c,
+            &mut self.rng,
+            &mut work.coefficients,
+            &mut work.bands,
+            &Aims::NONE,
         );
         if anti_collapse_on {
             anti_collapse(
@@ -431,12 +338,9 @@ impl Celt {
                 &self.energy,
                 &self.previous,
                 &self.before,
-                &allocation.pulses,
+                &pulses,
                 self.rng,
             );
-        }
-        if silence {
-            self.energy[..c * BAND_COUNT].fill(-28.0);
         }
         self.synthesise(lm, transient, silence, c, work);
 
@@ -490,8 +394,8 @@ impl Celt {
             let row = channel * BAND_COUNT;
             for band in (0..start).chain(end..BAND_COUNT) {
                 self.energy[row + band] = 0.0;
-                self.previous[row + band] = -28.0;
-                self.before[row + band] = -28.0;
+                self.previous[row + band] = SILENT_ENERGY;
+                self.before[row + band] = SILENT_ENERGY;
             }
         }
         self.rng = decoder.range();
@@ -619,15 +523,263 @@ fn imdct(
     }
 }
 
-/// The time-frequency resolution changes of bands `bands`.
-fn tf_decode(
-    decoder: &mut RangeDecoder<'_>,
+/// What an encoder's analysis found a frame to hold.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Content {
+    /// Nothing: the frame is coded as silence.
+    Silence,
+    /// Sound one long block codes.
+    Steady,
+    /// An onset, coded as short blocks.
+    Onset,
+}
+
+/// What an encoder chose for a frame, which the shared coding writes; a
+/// decoder, reading every value from the frame, hands it [`Aims::NONE`].
+struct Aims<'a> {
+    content: Content,
+    /// Whether the energies are predicted within the frame alone.
+    intra: bool,
+    /// Each band's energy, which the coarse and fine energies aim at.
+    energy: &'a [f32; 2 * BAND_COUNT],
+    /// Each band's amplitude, which intensity stereo weighs its channels by.
+    amplitudes: &'a [f32; 2 * BAND_COUNT],
+    /// Each band's time-frequency flag.
+    tf: [bool; BAND_COUNT],
+    /// The first band coded as intensity stereo.
+    intensity: usize,
+    /// Whether the bands below it are coded as two mono channels.
+    dual_stereo: bool,
+    /// The spreading the bands' shapes are coded with.
+    spread: usize,
+    /// Each band's boost, in quanta of its dynamic allocation.
+    boosts: [i32; BAND_COUNT],
+    /// The allocation's tilt.
+    trim: usize,
+}
+
+impl Aims<'static> {
+    /// What a decoder hands the shared coding, which reads past it.
+    const NONE: Self = Self {
+        content: Content::Steady,
+        intra: false,
+        energy: &[0.0; 2 * BAND_COUNT],
+        amplitudes: &[0.0; 2 * BAND_COUNT],
+        tf: [false; BAND_COUNT],
+        intensity: BAND_COUNT,
+        dual_stereo: false,
+        spread: SPREAD_NORMAL,
+        boosts: [0; BAND_COUNT],
+        trim: EVEN_TRIM,
+    };
+}
+
+/// What a frame is coded over, alike at both ends.
+struct Span {
+    start: usize,
+    end: usize,
+    /// The channels the frame codes.
+    channels: usize,
+    lm: usize,
+    disable_inversion: bool,
+}
+
+/// What a frame's coding decided, which a decoder synthesises it from.
+struct Coded {
+    transient: bool,
+    silence: bool,
+    post: PostFilter,
+    anti_collapse: bool,
+    /// Which short blocks each band's shape filled.
+    collapse: [u8; 2 * BAND_COUNT],
+    /// Each band's shape bits, in eighths.
+    pulses: [i32; BAND_COUNT],
+}
+
+/// Band `band`'s coefficients across `channels` at block size `lm`, and the
+/// eighths of a bit each of its boosts adds (RFC 6716, section 4.3.3): six
+/// bits, but no more than one and no less than an eighth a coefficient.
+fn boost_step(band: usize, channels: usize, lm: usize) -> (i32, i32) {
+    let width = ((channels * (BANDS[band + 1] - BANDS[band])) << lm) as i32;
+    (width, (width << BITRES).min((6 << BITRES).max(width)))
+}
+
+/// Code a frame's every symbol over `span`, at either end: the header's
+/// flags, the energies into `energy`, the allocation, and the bands' shapes
+/// into `coefficients`, each channel's after the last. An encoder writes
+/// what `aims` holds and the shapes `coefficients` holds; a decoder reads
+/// them.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the reference's celt_decode_with_ec up to its synthesis, kept whole so the port can be read against it"
+)]
+fn code<C: Coder>(
+    coder: &mut C,
+    span: &Span,
+    energy: &mut [f32; 2 * BAND_COUNT],
+    seed: &mut u32,
+    coefficients: &mut [f32],
+    scratch: &mut Scratch,
+    aims: &Aims<'_>,
+) -> Coded {
+    let Span {
+        start,
+        end,
+        channels: c,
+        lm,
+        disable_inversion,
+    } = *span;
+    let n = SHORT_BLOCK << lm;
+    let len = coder.storage() as i32;
+    let mut total_bits = len * 8;
+    let mut tell = coder.tell();
+    let silence = if tell >= total_bits {
+        true
+    } else if tell == 1 {
+        coder.bit_logp(aims.content == Content::Silence, 15)
+    } else {
+        false
+    };
+    if silence {
+        tell = len * 8;
+        coder.skip_to(tell);
+    }
+    let mut post = PostFilter::default();
+    if start == 0 && tell + 16 <= total_bits {
+        // The encoder runs no pitch pre-filter.
+        if coder.bit_logp(false, 1) {
+            let octave = coder.uint(0, 6);
+            post.period = ((16 << octave) + coder.bits(0, 4 + octave) - 1) as usize;
+            let gain = coder.bits(0, 3);
+            if coder.tell() + 2 <= total_bits {
+                post.tapset = coder.icdf(0, &TAPSET_ICDF, 2);
+            }
+            post.gain = 0.093_75 * (gain + 1) as f32;
+        }
+        tell = coder.tell();
+    }
+    let transient = lm > 0 && tell + 3 <= total_bits && {
+        let transient = coder.bit_logp(aims.content == Content::Onset, 3);
+        tell = coder.tell();
+        transient
+    };
+    let intra = tell + 3 <= total_bits && coder.bit_logp(aims.intra, 3);
+    energy::coarse(coder, energy, aims.energy, start..end, intra, c, lm);
+
+    let tf = tf_changes(coder, &aims.tf, start..end, transient, lm);
+    let spread = if coder.tell() + 4 <= total_bits {
+        coder.icdf(aims.spread, &SPREAD_ICDF, 5)
+    } else {
+        SPREAD_NORMAL
+    };
+    let caps = caps(lm, c);
+    let mut offsets = [0i32; BAND_COUNT];
+    let mut dynalloc_logp = 6;
+    total_bits <<= BITRES;
+    let mut tell = coder.tell_frac();
+    for band in start..end {
+        let (_, quanta) = boost_step(band, c, lm);
+        let mut loop_logp = dynalloc_logp;
+        let mut boost = 0;
+        while tell + ((loop_logp as i32) << BITRES) < total_bits && boost < caps[band] {
+            let more = coder.bit_logp(boost < quanta * aims.boosts[band], loop_logp);
+            tell = coder.tell_frac();
+            if !more {
+                break;
+            }
+            boost += quanta;
+            total_bits -= quanta;
+            loop_logp = 1;
+        }
+        offsets[band] = boost;
+        if boost > 0 {
+            dynalloc_logp = 2.max(dynalloc_logp - 1);
+        }
+    }
+    let trim = if tell + (6 << BITRES) <= total_bits {
+        coder.icdf(aims.trim, &TRIM_ICDF, 7) as i32
+    } else {
+        EVEN_TRIM as i32
+    };
+    let mut bits = ((len * 8) << BITRES) - coder.tell_frac() - 1;
+    let anti_collapse_rsv = if transient && lm >= 2 && bits >= ((lm as i32 + 2) << BITRES) {
+        1 << BITRES
+    } else {
+        0
+    };
+    bits -= anti_collapse_rsv;
+    let allocation = alloc::compute(
+        &Request {
+            start,
+            end,
+            offsets: &offsets,
+            caps: &caps,
+            trim,
+            total: bits,
+            channels: c,
+            lm,
+            intensity: aims.intensity,
+            dual_stereo: aims.dual_stereo,
+        },
+        coder,
+    );
+    energy::fine(coder, energy, aims.energy, start..end, &allocation.fine, c);
+    let (x, y) = coefficients.split_at_mut(n);
+    let y = (c == 2).then_some(&mut y[..n]);
+    let mut collapse = [0u8; 2 * BAND_COUNT];
+    bands::all(
+        coder,
+        &BandFrame {
+            start,
+            end,
+            lm,
+            short_blocks: transient,
+            spread,
+            dual_stereo: allocation.dual_stereo,
+            intensity: allocation.intensity,
+            tf: &tf,
+            pulses: &allocation.pulses,
+            coded: allocation.coded,
+            total_bits: len * (8 << BITRES) - anti_collapse_rsv,
+            balance: allocation.balance,
+            disable_inversion,
+            amplitudes: aims.amplitudes,
+        },
+        &mut x[..n],
+        y,
+        &mut collapse,
+        seed,
+        scratch,
+    );
+    // The encoder has anti-collapse fill whatever short blocks the shapes
+    // left empty.
+    let anti_collapse = anti_collapse_rsv > 0 && coder.bits(1, 1) != 0;
+    let left = len * 8 - coder.tell();
+    energy::finalise(coder, energy, aims.energy, start..end, &allocation, left, c);
+    if silence {
+        energy[..c * BAND_COUNT].fill(SILENT_ENERGY);
+    }
+    Coded {
+        transient,
+        silence,
+        post,
+        anti_collapse,
+        collapse,
+        pulses: allocation.pulses,
+    }
+}
+
+/// Code the time-frequency resolution changes of bands `bands`: an encoder
+/// writes the flags `aim` holds.
+fn tf_changes<C: Coder>(
+    coder: &mut C,
+    aim: &[bool; BAND_COUNT],
     bands: core::ops::Range<usize>,
     transient: bool,
     lm: usize,
 ) -> [i32; BAND_COUNT] {
-    let mut budget = decoder.storage() as i32 * 8;
-    let mut tell = decoder.tell();
+    let mut budget = coder.storage() as i32 * 8;
+    let mut tell = coder.tell();
     let mut logp = if transient { 2 } else { 4 };
     let select_rsv = lm > 0 && tell + logp < budget;
     budget -= i32::from(select_rsv);
@@ -636,8 +788,9 @@ fn tf_decode(
     let mut flags = [0usize; BAND_COUNT];
     for band in bands.clone() {
         if tell + logp <= budget {
-            current ^= usize::from(decoder.bit_logp(logp as u32));
-            tell = decoder.tell();
+            let change = aim[band] != (current != 0);
+            current ^= usize::from(coder.bit_logp(change, logp as u32));
+            tell = coder.tell();
             changed |= current;
         }
         flags[band] = current;
@@ -645,8 +798,9 @@ fn tf_decode(
     }
     let row = &TF_SELECT[lm];
     let base = 4 * usize::from(transient);
+    // The encoder keeps the first of each resolution's two tables.
     let select =
-        select_rsv && row[base + changed] != row[base + 2 + changed] && decoder.bit_logp(1);
+        select_rsv && row[base + changed] != row[base + 2 + changed] && coder.bit_logp(false, 1);
     let mut tf = [0i32; BAND_COUNT];
     for band in bands {
         tf[band] = i32::from(row[base + 2 * usize::from(select) + flags[band]]);

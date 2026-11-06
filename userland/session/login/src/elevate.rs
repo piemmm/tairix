@@ -33,6 +33,16 @@
 //! never reads a prefix as the whole. The audit records how much was
 //! relayed and never what it was.
 //!
+//! A caller that must speak a protocol to the program posts
+//! [`ElevateRequest::LaunchWired`]. It takes the identical re-authentication
+//! again, but the `Run` binary makes the program's two control pipes, starts
+//! it in the requester's own login session, and hands the requester its ends
+//! of them with `fd_grant`; the reply carries those delegations and the
+//! program's kernel-attested instance. The form starts the screen recorder
+//! and nothing else. The child is login's, reaped as a launched one is, and
+//! its end is always recorded ([`audit_wired_ended`]): it closes the run an
+//! administrator allowed.
+//!
 //! The same endpoint also answers a narrower [`ElevateRequest::Verify`]
 //! request: re-authenticate the **caller's own** kernel-attested account and
 //! run nothing. This is the primitive a graphical session's screen lock
@@ -61,7 +71,8 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest};
+use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest, WiredLaunch};
+use tairix_abi::recorder_ipc::RECORDER_RUN_PATH;
 use tairix_abi::secret::Secret;
 use tairix_abi::session_ipc::{SessionAccount, DESKTOP_BUNDLE};
 use tairix_abi::time::Duration64;
@@ -135,6 +146,22 @@ pub trait ElevateLauncher {
         uid: u32,
         out: &mut [u8],
     ) -> Result<Captured, Errno>;
+
+    /// Spawn `program` as `uid` with its standard input and output wired to
+    /// fresh pipes and the requester's instance its one operand, hand the
+    /// requester its ends of them, and report what was started **without
+    /// waiting for it**. The operand is what the program maps the requester's
+    /// grants by: the broker's word, since the pipes attest no peer.
+    ///
+    /// The same authority and terms as [`Self::launch_as`]: the child lives
+    /// in the requester's session and is the implementation's own to reap.
+    ///
+    /// # Errors
+    ///
+    /// Returns the implementation's [`Errno`] verbatim when the program
+    /// cannot be spawned or its ends handed over; a child already started is
+    /// ended rather than left running where nobody can reach it.
+    fn launch_wired_as(&self, program: &str, uid: u32) -> Result<Wired, Errno>;
 }
 
 /// What one [`ElevateLauncher::capture_as`] run produced.
@@ -158,6 +185,15 @@ pub enum Captured {
         /// The program's exit status.
         exit_code: i32,
     },
+}
+
+/// What one [`ElevateLauncher::launch_wired_as`] started.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Wired {
+    /// The started program's pid: login's own child, which login reaps.
+    pub pid: i64,
+    /// What the requester takes it up by.
+    pub launch: WiredLaunch,
 }
 
 /// What a program's signed manifest requests, as the authority reads it.
@@ -296,8 +332,9 @@ const DRAIN_CHUNK: usize = 512;
 /// 1. **Placement** — the caller's attested console must be the authority's
 ///    own; a caller on another console, or on none, is refused before its
 ///    bytes are parsed.
-/// 2. **Shape** — the request must decode, so a request that could never
-///    run costs no attempt against the account it names.
+/// 2. **Shape** — the request must decode, and a wired launch must name the
+///    screen recorder, so a request that could never run costs no attempt
+///    against the account it names.
 /// 3. **Meter** — an account still cooling down is answered
 ///    [`ElevateReply::Cooling`] and nothing about it is checked.
 /// 4. **Program** — what the program's manifest requests must be readable.
@@ -365,6 +402,11 @@ pub fn handle_elevate_request<'o>(
             password,
             program,
         } => handle_launch(&mut gate, Credentials { username, password }, program),
+        ElevateRequest::LaunchWired {
+            username,
+            password,
+            program,
+        } => handle_launch_wired(&mut gate, Credentials { username, password }, program),
         ElevateRequest::Capture {
             username,
             password,
@@ -485,6 +527,7 @@ enum Form {
     Run,
     Launch,
     Capture,
+    Wired,
 }
 
 impl Form {
@@ -494,6 +537,7 @@ impl Form {
             Self::Run => (events::ELEVATE_REFUSED, "elevation refused"),
             Self::Launch => (events::LAUNCH_REFUSED, "elevated launch refused"),
             Self::Capture => (events::CAPTURE_REFUSED, "elevated capture refused"),
+            Self::Wired => (events::WIRED_REFUSED, "wired elevated launch refused"),
         }
     }
 }
@@ -549,10 +593,50 @@ fn handle_launch(
     };
     match gate.authority.launcher.launch_as(program, user.uid.0) {
         Ok(pid) => {
-            audit_launch_granted(sink, username, program, user.uid.0, pid);
+            let started = (events::LAUNCH_GRANTED, "elevated program started");
+            audit_started(sink, started, username, program, (user.uid.0, pid));
             ElevateReply::Launched { pid }
         }
         Err(err) => refuse(sink, Form::Launch, Some(username), launch_failed(err)),
+    }
+}
+
+/// Decide a [`ElevateRequest::LaunchWired`] request: authorise the named
+/// account and, on success, start the recorder as it, wired to the requester.
+///
+/// The identical checks as [`handle_launch`], after one of its own: the form
+/// starts the screen recorder — a program of the read-only, system-signed
+/// component store whose pipes the requester is handed — and nothing else, so
+/// any other program is refused before an attempt is spent on it.
+fn handle_launch_wired(
+    gate: &mut Gate<'_, '_>,
+    credentials: Credentials<'_>,
+    program: &str,
+) -> ElevateReply<'static> {
+    let sink = gate.authority.sink;
+    let username = credentials.username;
+    if program != RECORDER_RUN_PATH {
+        return refuse(
+            sink,
+            Form::Wired,
+            Some(username),
+            refused("not the recorder"),
+        );
+    }
+    let user = match gate.authorise(&credentials, program) {
+        Ok(user) => user,
+        Err(refusal) => return refuse(sink, Form::Wired, Some(username), refusal),
+    };
+    match gate.authority.launcher.launch_wired_as(program, user.uid.0) {
+        Ok(wired) => {
+            let started = (
+                events::WIRED_GRANTED,
+                "elevated program started wired to its requester",
+            );
+            audit_started(sink, started, username, program, (user.uid.0, wired.pid));
+            ElevateReply::Wired(wired.launch)
+        }
+        Err(err) => refuse(sink, Form::Wired, Some(username), launch_failed(err)),
     }
 }
 
@@ -821,14 +905,23 @@ fn answer_field(buf: &mut DecBuf, denial: Denial) -> Field<'_> {
     }
 }
 
-fn audit_launch_granted(sink: &dyn Sink, username: &str, program: &str, uid: u32, pid: i64) {
+/// Audit a program started without waiting for it, under `id` and `message`:
+/// who allowed it, as which uid, what was started, and the pid login now
+/// reaps.
+fn audit_started(
+    sink: &dyn Sink,
+    (id, message): (EventId, &str),
+    username: &str,
+    program: &str,
+    (uid, pid): (u32, i64),
+) {
     let mut uid_buf = DecBuf::new();
     let mut pid_buf = DecBuf::new();
     emit(
         sink,
         Level::Info,
-        events::LAUNCH_GRANTED,
-        "elevated program started",
+        id,
+        message,
         &[
             Field {
                 key: "user",
@@ -986,13 +1079,46 @@ pub fn audit_launch_ended_abnormally(sink: &dyn Sink, pid: i64, status: i32) {
     if status == 0 {
         return;
     }
+    let ended = (
+        Level::Warn,
+        events::LAUNCH_ENDED_ABNORMALLY,
+        "elevated program ended abnormally",
+    );
+    emit_ended(sink, ended, pid, status);
+}
+
+/// Audit the end of a program started for an
+/// [`ElevateRequest::LaunchWired`] request, however it ended.
+///
+/// A clean end is recorded too, unlike a plain launch's: it closes the run an
+/// administrator allowed, which the record of its start opened. Its `stderr`
+/// is closed, so the reaper is the only observer of how it ended, and a
+/// reserved load status is named in words as for a plain launch.
+pub fn audit_wired_ended(sink: &dyn Sink, pid: i64, status: i32) {
+    let level = if status == 0 {
+        Level::Info
+    } else {
+        Level::Warn
+    };
+    let ended = (level, events::WIRED_ENDED, "elevated wired program ended");
+    emit_ended(sink, ended, pid, status);
+}
+
+/// Record that `pid` ended with `status`: the number, and the reason in words
+/// where the status is a reserved load failure.
+fn emit_ended(
+    sink: &dyn Sink,
+    (level, id, message): (Level, EventId, &str),
+    pid: i64,
+    status: i32,
+) {
     let mut pid_buf = DecBuf::new();
     let mut status_buf = DecBuf::new();
     emit(
         sink,
-        Level::Warn,
-        events::LAUNCH_ENDED_ABNORMALLY,
-        "elevated program ended abnormally",
+        level,
+        id,
+        message,
         &[
             Field {
                 key: "pid",

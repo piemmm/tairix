@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::time::NANOS_PER_MILLI;
+use tairix_abi::window_ipc::DragOwnIcon;
 use tairix_browse::render::{name_cut, Tiles};
 use tairix_controls::{ControlState, IconTile};
 use tairix_geometry::{to_i32, Point, Rect, Scale};
@@ -48,12 +49,22 @@ const TRAIL_SAMPLES: usize = 32;
 pub(crate) struct Look {
     /// The name it shows, for the one card of a drag that shows one.
     pub(crate) label: Option<String>,
-    /// Its picture.
+    /// Its class picture.
     pub(crate) icon: IconKind,
+    /// The item's own picture, where it carries one.
+    pub(crate) own: Option<DragOwnIcon>,
     /// Its state, as its listing draws it.
     pub(crate) state: ControlState,
     /// How many items the front of a stack stands for.
     pub(crate) count: Option<u32>,
+}
+
+impl Look {
+    /// The picture it is drawn by: the item's own where it carries one, else
+    /// its class's.
+    fn request(&self) -> IconRequest<'_> {
+        IconRequest::from_carried(self.icon, self.own.as_ref())
+    }
 }
 
 /// Where the pointer holds the front card's picture: from the picture's
@@ -240,23 +251,23 @@ impl Stack {
         theme: &Theme,
         (artwork, landed): (&mut dyn IconArtwork, &Landed),
     ) {
-        self.paint_where(compositor, theme, artwork, |icon, across| {
-            landed.resolves(IconRequest::kind(icon), across)
+        self.paint_where(compositor, theme, artwork, |look, across| {
+            landed.resolves(look.request(), across)
         });
     }
 
-    /// Paint the cards whose picture — its kind, so many pixels across —
-    /// `wanted` admits, as [`paint`](Self::paint) paints them.
+    /// Paint the cards whose look, its picture so many pixels across, `wanted`
+    /// admits, as [`paint`](Self::paint) paints them.
     fn paint_where(
         &mut self,
         compositor: &mut Compositor,
         theme: &Theme,
         artwork: &mut dyn IconArtwork,
-        wanted: impl Fn(IconKind, u32) -> bool,
+        wanted: impl Fn(&Look, u32) -> bool,
     ) {
         let scale = compositor.scale();
         for card in self.cards.iter_mut().rev() {
-            if !wanted(card.look.icon, picture_side(card.size, (scale, theme))) {
+            if !wanted(&card.look, picture_side(card.size, (scale, theme))) {
                 continue;
             }
             let Some(pixels) = paint_card(&card.look, card.size, (scale, theme), artwork) else {
@@ -396,6 +407,18 @@ impl Stack {
     pub(crate) fn windows(&self) -> impl Iterator<Item = WindowId> + '_ {
         self.cards.iter().filter_map(|card| card.window)
     }
+
+    /// Hand `ask` the picture each card is drawn by and how many pixels across,
+    /// the front first: what the stack still shows, for its producer to keep.
+    pub(crate) fn each_picture(
+        &self,
+        (scale, theme): (Scale, &Theme),
+        mut ask: impl FnMut(IconRequest<'_>, u32),
+    ) {
+        for card in &self.cards {
+            ask(card.look.request(), picture_side(card.size, (scale, theme)));
+        }
+    }
 }
 
 /// Paint `look` into a surface `size` across at `scale` in `theme`: a listed
@@ -417,11 +440,7 @@ fn paint_card(
         None => tile,
     };
     let across = picture_side(size, (scale, theme));
-    let picture = artwork.shadowed(
-        IconRequest::kind(look.icon),
-        across,
-        IconTile::shadow_cast(scale, theme),
-    );
+    let picture = artwork.shadowed(look.request(), across, IconTile::shadow_cast(scale, theme));
     tile.render(&mut pixels, bounds, scale, theme, picture);
     Some(pixels)
 }

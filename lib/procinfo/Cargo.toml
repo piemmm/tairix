@@ -27,6 +27,10 @@ program = ["dep:tairix-rt"]
 # `lib/*` crate it depends only on other `lib/*` crates.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 
+# The one path grammar a command line's name for a volume is read by
+# (`named`), so `unmount` and `label` resolve a name alike.
+tairix-path = { path = "../path", version = "=0.0.0" }
+
 # The single shared resource-reference parser: the `info:`/`stats:` resolver
 # dispatches on a parsed `ResourceRef` rather than re-lexing references, so it
 # never embeds a second reference parser.

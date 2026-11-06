@@ -17,7 +17,9 @@ can never diverge in navigation semantics, listing policy, or look.
   and statted to fill a listing. `EntryKind` refines the VFS's
   file/directory split with the one distinction a manager must make
   structurally: a `<Name>.app` directory is a `Bundle` — a sealed unit the
-  user launches, not a folder to descend into.
+  user launches, not a folder to descend into — by the ABI's one bundle-name
+  test (`tairix_abi::appinfo::is_bundle_name`), which a dragged bundle's own
+  picture is checked against too.
 - **Content-type registry** (`media`): the one closed registry both the drawn
   file-type icon and the "Open With…" association vocabulary read, so the two
   can never drift apart. `MediaType` names a type by its IANA (or TAIRiX
@@ -49,10 +51,13 @@ can never diverge in navigation semantics, listing policy, or look.
   listing's `EntryReader` (`plans/ICONS.md` I18).
   `icon_for_entry(entry, parent)` is the one classification both views draw
   through: the registry's glyph, except that a plain directory *known* to hold
-  something takes `IconKind::FolderFilled`, and `entry_icon_request` asks for
-  the composite of its `FolderSample` (`folder_sample`, by file `Family`).
-  Only a known answer changes the icon, so an unprobed, empty, or unreadable
-  folder is the plain one.
+  something takes `IconKind::FolderFilled`, and `entry_icon` asks for the
+  composite of its `FolderSample` (`folder_sample`, by file `Family`). Only a
+  known answer changes the icon, so an unprobed, empty, or unreadable folder is
+  the plain one. `drag_picture` is what a drag carries of an entry: its class
+  picture, and a bundle's or a RISC OS application's own picture by its path
+  (`IconRequest::carried`), a shortcut's by the path it resolves to, a
+  thumbnail or a folder's fan crossing as its class.
 - **Folder occupancy** (`Occupancy`, `DirectorySource::has_children`,
   `resolve_occupancy`): a directory's `size` is `0` and no VFS surface reports
   a child count, so "what does this folder hold?" is a separate per-child read
@@ -80,12 +85,14 @@ can never diverge in navigation semantics, listing policy, or look.
   folder no pass asked about, a landed batch holds the next until it runs,
   and `MAX_WANTED_PROBES` bounds what one pass may want. A stopped desk
   answers as a source that does not probe.
-- **Sort** (`SortMode`/`sort_entries`): the one listing order both views
-  share — directories first, then a `Name`/`Size`/`Modified` key with a
-  direction, with a case-insensitive name tiebreak so the result never
-  depends on the source's incidental order. The default is name-ascending;
-  `Browser::set_sort_mode` re-orders in place, keeping the selection on the
-  same entry.
+- **Sort** (`SortMode`/`Order`/`sort_entries`): the one listing order every
+  view shares — directories first, then a key with a direction, names
+  compared as the `Order`'s endings show them, with a case-insensitive
+  tiebreak (the name shown, then the name held) so the result never depends
+  on the source's incidental order; a watch's merge orders by the same value.
+  The default is name-ascending; `Browser::set_sort_mode`, and a presentation
+  changing its endings, re-order in place, keeping the selection on the same
+  entry.
 - **Scrolling columns** (`column::ScrollColumn`): the one offset-plus-bar
   every scrolling surface here holds — the listing, the places rail, the
   chooser, an Info window — moved by the wheel (`wheel`) and by the bar's
@@ -130,6 +137,32 @@ can never diverge in navigation semantics, listing policy, or look.
   and gets its own slot the first time it asks, until the program `forget`s it:
   two consumers sharing one slot would each discard the other's answer and
   neither would ever settle.
+- **Readers per volume** (`lanes`): every piece of off-loop work runs on the
+  lane of the volume it touches (`Lane`), routed by the binding covering its
+  place in the namespace's view list (`Routes`, read once per mount change by
+  `Routes::read` under `rt`), one worker to a lane at a time (`Serving`), with
+  a spare started whenever every worker is busy and a third waiting one
+  leaving (`Crew`). So a slow or failing device holds up only the work aimed
+  at it. While the memory-pressure band is not normal (`Crew::adopt_band`), a
+  worker with nothing to do lets go of what it holds for its work, a decode
+  worker among it, before it rests. Work another set of workers does on a volume holds its lane off
+  these (`hold`, under `rt`): from the moment the hold waits no worker takes
+  work there, and it is the holder's once the work under way there ends, which
+  the workers' own wake (`LaneSignal`) tells it apart from theirs. The file
+  manager's readers and the desktop session's listing and file work both take
+  their volumes from this one definition.
+- **Followed bundles** (`follow`): while a listed bundle is shown, the files
+  its picture is read from are followed. A reader arms a change wait on its
+  manifest, `Resources/` and icon before reading them (`Follower::decode`,
+  under `rt`), a thread of the readers' own parks on the waits
+  (`Follower::follow`), and a change has the bundle read again, decoded only
+  where its files differ. `BundleFollows` — lock-, thread- and syscall-free —
+  holds whose waits are armed, keeping a follow only while its desk still
+  follows the bundle through the wait it was armed in, lets go of every follow
+  on a volume about to be ejected (`release_within`), and hands each follow
+  let go to the reader of its own volume's lane to end (`end`). The desktop
+  session's icon readers and the file manager's follow bundles through it
+  alone.
 - **Live listings** (`watch`, `docs/src/filesystem/watch.md`): every directory
   view follows its folder through a kernel directory watch with the one
   implementation here. `WatchedDirectory::list` arms the watch on the
@@ -182,7 +215,9 @@ can never diverge in navigation semantics, listing policy, or look.
   descends and a bundle launches itself, so neither has an application to
   choose), and Select All / Clear Selection / Paste act on the folder, Paste
   needing only the app's held clipboard — threaded in, since the clipboard
-  lives in the app, not the browser. Each command's `label()` and
+  lives in the app, not the browser — and Empty Trash follows them only where
+  `showing_trash` says the window shows the user's Trash, greyed while it is
+  empty. Each command's `label()` and
   keyboard-`shortcut()` caption drive its declared row, and `CONTEXT_COMMANDS`
   is the one order the rows are declared in. Display ▸ and New ▸ are not
   commands: New ▸ always opens, offering Folder and then each `BlankDocument`
@@ -276,10 +311,11 @@ can never diverge in navigation semantics, listing policy, or look.
   `Ctrl`-click (`toggle`), a `Shift`-click range (`range_to`, grown from the
   anchor), and Select All (`select_all`); `Browser::toggle_selection` /
   `extend_selection_to` / `select_all` / `clear_selection` bounds-check every
-  index against the live listing. The selection is index-based, so any listing
-  change (navigate, refresh, re-sort) collapses it to the single focused entry,
-  and an unmodified keyboard move collapses it too — standard file-manager
-  semantics.
+  index against the live listing. A reload, a re-sort and a watch's report
+  keep the selection on the entries it named, a fresh location clears it, and
+  an unmodified keyboard move collapses it — standard file-manager semantics.
+  `deselect_handed` clears it after a hand-off only while the entry handed,
+  by path and node, is still the one chosen.
 - **Cut/copy clipboard** (`clipboard`, `Browser::clipboard`,
   `plans/NEW-FILEMANAGER.md` FM7): the cross-directory set the move/copy verbs
   act on. `Browser::clipboard(op)` captures the selected entries onto a
@@ -364,9 +400,10 @@ can never diverge in navigation semantics, listing policy, or look.
   confirms it with the `DeleteDisposition::Permanent` dialog, and hands the plan
   to the same operations worker a delete uses.
 - **Drops** (`plans/FILES-INTERACTION.md` FI9): `drop_operation` is the one
-  policy a drag's drop is decided by — a copy, or a move with `Shift`, and
-  nothing for a drop that would put a folder inside itself or leave every item
-  where it is. `render::drop_folder_at` resolves the folder a drop at a point
+  policy a drag's drop is decided by — a copy, or a move with `Shift`; a link
+  for `/Storage` volumes alone, which are never copied or moved; and nothing
+  for a drop that would put a folder inside itself, leave every item where it
+  is, or mix volumes with files. `render::drop_folder_at` resolves the folder a drop at a point
   lands in (a folder under it, else the listing's own folder, and nothing off
   the listing or mid-navigation), and `Browser::set_drop_mark` lights that
   folder's entry, drawn as the shared drop-target look; any change to the
@@ -414,11 +451,21 @@ can never diverge in navigation semantics, listing policy, or look.
   `MountDone::attached` names the volume an attach made, which is the only
   one its surface may let go; `MOUNT_SWITCH` is the file manager's switch for
   an image to attach and show, spelled once for the desktop that starts it so.
+- **Drives and volume shortcuts** (`volume`, `plans/PINBOARD.md` §4):
+  `locate` is the one resolution of a link to `id::<identity>/` over the
+  volumes a caller was handed — Present (preferring the attachment keyed by
+  the identity), Absent, or Withheld for one attached for another principal —
+  and `Located::refusal` its wording. `DriveClass` and `DesktopDrives` are the
+  `files.desktop.*` classes (`/` as the system drive, each `/Storage` entry by
+  what backs it), `drive_entry` the icon the desktop draws for one, and
+  `shortcuts` the links a drop of volumes makes, by content identity, never a
+  twin's key.
 - **Settings** (`preferences`, `plans/NEW-FILEMANAGER.md` FM23):
   `FilerPreferences`, the file manager's closed `tairix_appconf` registry of
   `files.*` keys — where a new window opens (`Start`), its view, order, rail
-  and toolbar, the presentation, whether a move to the Trash asks, and whether
-  an image opened is unmounted once closed. The desktop session keeps the keys
+  and toolbar, the presentation, whether a move to the Trash asks, whether an
+  image opened is unmounted once closed, and which drives the desktop shows
+  (`DesktopDrives`). The desktop session keeps the keys
   in its document, the Settings application edits them in the pane
   `SETTINGS_PANE` names, and `reorder` is the one rule for where a window's own
   order puts its folders.
@@ -674,9 +721,15 @@ can never diverge in navigation semantics, listing policy, or look.
   own uncaptioned `Progress` bar (its state from `progress_state`, its motion
   its owner's to clock) and a Cancel `Button`, with `progress_cancel_at` the
   mirror hit-test resolving a click to the drawn Cancel (fail closed off it)
-  and `progress_bar_rect` what a frame of the bar's motion repaints. The model
-  holds no authority and does no I/O, so the read-only picker (which never
-  deletes or copies) never builds one.
+  and `progress_bar_rect` what a frame of the bar's motion repaints. An
+  operation asking about a name already taken holds its `Clash`
+  (`set_asking`, `question`), its bar still meanwhile, and the window draws in
+  place of the figures and Cancel the question and a `ClashPanel` — the
+  `Checkbox` answering every later one the same way, then Stop, Replace
+  (Merge for a folder) and Skip, the default — answered by pointer and by
+  keyboard with a `ClashAnswer`; `progress_window_extent` sizes the window for
+  either. The model holds no authority and does no I/O, so the read-only
+  picker (which never deletes or copies) never builds one.
   The delete, copy/paste, and move-to-Trash drives are all wired end to end in
   the files app, each in a progress window of its own.
 - **Renderer** (`render`): every entry point takes the desktop's

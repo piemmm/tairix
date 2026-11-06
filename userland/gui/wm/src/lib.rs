@@ -88,7 +88,9 @@ mod tests;
 
 pub use chrome::{chrome_cache, ChromeEpoch, WindowChrome};
 pub use color::{Color, Pixel};
-pub use compositor::{output_reach, Compositor, PointerTarget, Presentation};
+pub use compositor::{
+    output_reach, CaptureError, CaptureTap, Compositor, PointerTarget, Presentation,
+};
 pub use corner::Corners;
 pub use frost::{frost_cache, FrostEpoch, FrostField};
 pub use geometry::{Point, Rect, Region, Scale};

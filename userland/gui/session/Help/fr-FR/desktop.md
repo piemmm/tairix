@@ -24,6 +24,15 @@ Quand aucun service d'affichage ne tourne, ou qu'une autre session
 détient déjà le poste, la commande échoue en écrivant sa raison sur la
 sortie d'erreur — elle ne déloge jamais une session en cours.
 
+Pendant que le bureau fonctionne, `Meta+Shift+3` enregistre une image de
+l'écran et `Meta+Shift+4` celle d'une zone que vous tracez — ou, après
+`Space`, celle d'une fenêtre sur laquelle vous cliquez. `Meta+Shift+5`
+ouvre la barre de capture, qui enregistre aussi l'écran en vidéo. Avec
+`Ctrl` en plus, l'image va dans le presse-papiers, et un raccourci de
+capture pressé pendant un enregistrement l'arrête. Un enregistrement avec
+du son demande le mot de passe d'un administrateur lorsque votre compte ne
+peut pas lui-même enregistrer de son.
+
 ## OPTIONS
 
 - `-h, -?` — afficher l'aide courte de cette commande.

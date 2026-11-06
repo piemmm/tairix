@@ -1156,13 +1156,19 @@ fn desktop(uid: u32, tag: u8) -> Origin {
     .with_login_session(session(tag))
 }
 
+/// A push's file slots: one an event.
+const EVENTS: usize = SoundEvent::ALL.len();
+
+/// A push that hands over no file.
+const NO_FILES: [u64; EVENTS] = [0; EVENTS];
+
 /// Push `document` and `files` from `caller` while `seat` is at the seat.
 fn push(
     authority: &mut Authority,
     caller: &Origin,
     seat: Option<ProcId>,
     document: &str,
-    files: [u64; 13],
+    files: [u64; EVENTS],
 ) -> Result<(), Errno> {
     let request = frame(&CueRequest::Policy { document, files });
     let reply = authority
@@ -1171,8 +1177,8 @@ fn push(
     decode_status_reply(reply.as_bytes())
 }
 
-fn with_file(event: SoundEvent, handle: u64) -> [u64; 13] {
-    let mut files = [0u64; 13];
+fn with_file(event: SoundEvent, handle: u64) -> [u64; EVENTS] {
+    let mut files = NO_FILES;
     files[event.index()] = handle;
     files
 }
@@ -1194,7 +1200,7 @@ fn the_seats_session_governs_every_sound_but_the_machines_moments() {
             &desktop(ALICE, A),
             seat,
             "sound.enabled = false\n",
-            [0; 13]
+            NO_FILES
         ),
         Ok(())
     );
@@ -1286,16 +1292,16 @@ fn a_push_naming_a_file_or_a_machine_moment_is_refused_whole() {
             &anchor,
             seat,
             "sound.bell.enabled = false\n",
-            [0; 13]
+            NO_FILES
         ),
         Ok(())
     );
     store.grant(5, anchor.proc_id(), "/Users/ada/hello.wav");
     for (document, files) in [
-        ("sound.bell.file = /Users/ada/bell.wav\n", [0; 13]),
-        ("sound.login.enabled = false\n", [0; 13]),
-        ("sound.gain = 6dB\n", [0; 13]),
-        ("sound.info.gain = -6dB\n", [0; 13]),
+        ("sound.bell.file = /Users/ada/bell.wav\n", NO_FILES),
+        ("sound.login.enabled = false\n", NO_FILES),
+        ("sound.gain = 6dB\n", NO_FILES),
+        ("sound.info.gain = -6dB\n", NO_FILES),
         ("", with_file(SoundEvent::Login, 5)),
     ] {
         assert_eq!(
@@ -1412,7 +1418,7 @@ fn the_seats_holder_is_read_again_before_every_request() {
             &desktop(ALICE, A),
             seat,
             "sound.bell.enabled = off\n",
-            [0; 13]
+            NO_FILES
         ),
         Ok(())
     );
@@ -1444,7 +1450,7 @@ fn the_machines_document_changing_beneath_the_choices_is_seen_through_them() {
             &desktop(ALICE, A),
             seat,
             "sound.gain = -6dB\n",
-            [0; 13]
+            NO_FILES
         ),
         Ok(())
     );
@@ -1478,6 +1484,66 @@ fn the_machines_document_changing_beneath_the_choices_is_seen_through_them() {
         mixer.line(0, |line| line.gain),
         Some(AudioGain::new(-600).expect("attenuation")),
         "the user's own level over the machine's"
+    );
+}
+
+/// The volume's feedback tells the listener how loud the output now is, so
+/// neither the effects' switch nor their gain reaches it: it plays at the
+/// output's own level under effects turned down 12 dB and off, and only its
+/// own switch silences it.
+#[test]
+fn the_volumes_feedback_sounds_at_the_outputs_own_level_under_its_own_switch() {
+    let (store, mixer, audit) = (shipped(), Fake::new(BIG_RING), Audit::default());
+    let mut authority = authority(&store, &mixer, &audit);
+    let (anchor, alice, seat) = (desktop(ALICE, A), app(ALICE, A), Some(session(A)));
+    let cued = |authority: &mut Authority, now, event| {
+        ask_at(authority, now, &alice, event, Answer::Started, seat)
+    };
+    assert_eq!(
+        push(
+            &mut authority,
+            &anchor,
+            seat,
+            "sound.enabled = false\nsound.gain = -12dB\n",
+            NO_FILES
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        cued(&mut authority, 0, SoundEvent::VolumeFeedback),
+        Some(Ok(CueOutcome::Played))
+    );
+    assert_eq!(mixer.line(0, |line| line.gain), None, "unity is left alone");
+    assert_eq!(
+        cued(&mut authority, 1, SoundEvent::Info),
+        Some(Ok(CueOutcome::Silent(Silence::Disabled))),
+        "an effect is switched off"
+    );
+    end_all(&mixer, &mut authority);
+
+    assert_eq!(
+        push(
+            &mut authority,
+            &anchor,
+            seat,
+            "sound.gain = -12dB\nsound.volume_feedback.enabled = false\n",
+            NO_FILES
+        ),
+        Ok(())
+    );
+    let later = 10 * MIN_RETRIGGER_NS;
+    assert_eq!(
+        cued(&mut authority, later, SoundEvent::VolumeFeedback),
+        Some(Ok(CueOutcome::Silent(Silence::Disabled)))
+    );
+    assert_eq!(
+        cued(&mut authority, later, SoundEvent::Info),
+        Some(Ok(CueOutcome::Played))
+    );
+    assert_eq!(
+        mixer.line(1, |line| line.gain),
+        Some(AudioGain::new(-1_200).expect("attenuation")),
+        "an effect is turned down"
     );
 }
 
@@ -1570,7 +1636,7 @@ fn a_session_pushing_again_keeps_what_was_known_of_its_unchanged_files() {
     store.put(chosen[1].1, wav(&chime(300)));
     store.put(chosen[2].1, b"RIFF and nothing after it".to_vec());
     let hand_over = |first: u64| {
-        let mut files = [0u64; 13];
+        let mut files = NO_FILES;
         for (handle, (event, path)) in (first..).zip(chosen) {
             store.grant(handle, anchor.proc_id(), path);
             files[event.index()] = handle;
@@ -1696,7 +1762,7 @@ fn a_malformed_push_is_refused_in_a_pushes_shape() {
     let mut authority = authority(&store, &mixer, &audit);
     let mut request = frame(&CueRequest::Policy {
         document: "",
-        files: [0; 13],
+        files: NO_FILES,
     });
     request.push(b'x');
     let reply = authority
@@ -1720,7 +1786,7 @@ fn a_file_chosen_for_two_events_is_redeemed_once_and_plays_for_both() {
     let path = "/Users/ada/ding.wav";
     store.put(path, wav(&chime(500)));
     store.grant(5, anchor.proc_id(), path);
-    let mut files = [0u64; 13];
+    let mut files = NO_FILES;
     files[SoundEvent::Notification.index()] = 5;
     files[SoundEvent::Bell.index()] = 5;
     assert_eq!(push(&mut authority, &anchor, seat, "", files), Ok(()));

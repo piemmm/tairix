@@ -209,6 +209,11 @@ pub struct Layer {
     pub opacity: u8,
     /// Whether it shows at all.
     pub visible: bool,
+    /// Its pixels' revision in its document: raised, whenever they change,
+    /// to one no layer of the document has held, so what was drawn of them
+    /// at one revision shows them while the layer keeps it. A layer made
+    /// outside a document holds none until it joins one.
+    pub revision: u64,
 }
 
 impl Layer {
@@ -220,6 +225,7 @@ impl Layer {
             name,
             opacity: u8::MAX,
             visible: true,
+            revision: 0,
         }
     }
 
@@ -238,6 +244,7 @@ impl Layer {
             name,
             opacity: self.opacity,
             visible: self.visible,
+            revision: self.revision,
         })
     }
 
@@ -379,6 +386,7 @@ impl Picture {
                 name,
                 opacity: held.opacity,
                 visible: held.visible,
+                revision: 0,
             });
         }
         self.with_layers(layers, self.active)
@@ -475,13 +483,14 @@ impl Picture {
         out[0]
     }
 
-    /// The picture as its layers show together, as one canvas.
+    /// The picture as its layers show together, as one canvas, laid on the
+    /// calling thread.
     ///
     /// # Errors
     ///
     /// [`OutOfMemory`] when the canvas cannot be had.
     pub fn flattened(&self) -> Result<Canvas, OutOfMemory> {
-        crate::compose::flatten(&self.layers)
+        crate::compose::flatten(&self.layers, &tairix_parallel::SERIAL)
     }
 
     /// Why `layer` could not join the stack at `index`, if it could not.
@@ -983,6 +992,8 @@ pub struct Document {
     history: History,
     generation: u64,
     settings: SaveSettings,
+    /// The last revision a layer was given.
+    revisions: u64,
 }
 
 impl Document {
@@ -1019,7 +1030,7 @@ impl Document {
 
     fn built(entries: Vec<Entry>, origin: Origin, unkept: Unkept, settings: SaveSettings) -> Self {
         let count = u64::try_from(entries.len()).unwrap_or(u64::MAX);
-        Self {
+        let mut document = Self {
             ids: (0..count).map(EntryId).collect(),
             next_id: count,
             entries,
@@ -1029,7 +1040,12 @@ impl Document {
             history: History::new(),
             generation: 0,
             settings,
+            revisions: 0,
+        };
+        for entry in 0..document.entries.len() {
+            document.restamp(entry, None);
         }
+        document
     }
 
     /// Every entry.
@@ -1207,6 +1223,7 @@ impl Document {
                 layer,
                 tiles,
             });
+            self.restamp(entry, Some(layer));
         }
     }
 
@@ -1248,6 +1265,7 @@ impl Document {
                 layer,
                 tiles: before,
             });
+            self.restamp(entry, Some(layer));
         }
         Ok(true)
     }
@@ -1269,6 +1287,7 @@ impl Document {
             entry,
             picture: old,
         });
+        self.restamp(entry, None);
         Ok(true)
     }
 
@@ -1298,6 +1317,7 @@ impl Document {
             entry,
             layer: index,
         });
+        self.restamp(entry, Some(index));
         Ok(())
     }
 
@@ -1370,6 +1390,74 @@ impl Document {
         }
     }
 
+    /// Show the showing picture's layer `index` at `opacity` while it is being
+    /// chosen, as no step and no new generation:
+    /// [`record_shown`](Self::record_shown) lands the change once it settles.
+    /// Answers whether the layer took it; a palette picture's one layer shows
+    /// wholly.
+    pub fn set_opacity_live(&mut self, index: usize, opacity: u8) -> bool {
+        let Entry::Picture(picture) = &mut self.entries[self.current] else {
+            return false;
+        };
+        if picture.kind().palette().is_some() {
+            return false;
+        }
+        let Some(layer) = picture.layers_mut().get_mut(index) else {
+            return false;
+        };
+        layer.opacity = opacity;
+        true
+    }
+
+    /// Record that the showing picture's layer `index` showed as `before`
+    /// until now — a change made to it live — as one step, or none where it
+    /// shows so still; answers whether a step was taken.
+    ///
+    /// # Errors
+    ///
+    /// [`LayerRefusal`]: no such layer, or no room to record the step, when
+    /// the layer is put back as `before` says.
+    pub fn record_shown(&mut self, index: usize, before: Shown) -> Result<bool, LayerRefusal> {
+        let entry = self.current;
+        let room = self.history.reserve();
+        let Entry::Picture(picture) = &mut self.entries[entry] else {
+            return Err(LayerRefusal::NoSuchLayer);
+        };
+        let Some(layer) = picture.layers().get(index) else {
+            return Err(LayerRefusal::NoSuchLayer);
+        };
+        if (&layer.name, layer.opacity, layer.visible)
+            == (&before.name, before.opacity, before.visible)
+        {
+            return Ok(false);
+        }
+        if room.is_err() {
+            let _ = picture.show_layer(index, before);
+            return Err(LayerRefusal::OutOfMemory);
+        }
+        self.record(Step::LayerShown {
+            entry,
+            layer: index,
+            shown: before,
+        });
+        Ok(true)
+    }
+
+    /// Give layer `layer` of entry `entry` — or, for `None`, every layer of
+    /// it — a revision no layer of this document has had: its pixels changed,
+    /// so what was drawn of them is out of date.
+    fn restamp(&mut self, entry: usize, layer: Option<usize>) {
+        let Some(Entry::Picture(picture)) = self.entries.get_mut(entry) else {
+            return;
+        };
+        for (index, held) in picture.layers_mut().iter_mut().enumerate() {
+            if layer.is_none_or(|only| only == index) {
+                self.revisions += 1;
+                held.revision = self.revisions;
+            }
+        }
+    }
+
     /// Give the showing entry `palette`, which must be as long as the one it
     /// has, and `sprite` details; `false`, changing nothing, where the entry
     /// has no such palette.
@@ -1400,6 +1488,7 @@ impl Document {
             palette,
             sprite,
         });
+        self.restamp(entry, None);
         Ok(true)
     }
 
@@ -1426,6 +1515,7 @@ impl Document {
         self.next_id += 1;
         self.current = index;
         self.record(Step::Inserted { index });
+        self.restamp(index, None);
         Ok(())
     }
 
@@ -1500,6 +1590,18 @@ impl Document {
     fn adopt(&mut self, applied: Applied) -> Applied {
         self.generation += 1;
         let shown = applied.entry.min(self.entries.len().saturating_sub(1));
+        // Pixels the step put back are the layer's it left painted on, or
+        // every layer's of a picture put back whole; how the layers show,
+        // their order and their number move no layer's pixels.
+        match applied.damage {
+            Damage::Area(_) | Damage::OtherLayer => {
+                if let Some(layer) = self.entries[shown].picture().map(Picture::active) {
+                    self.restamp(shown, Some(layer));
+                }
+            }
+            Damage::Whole => self.restamp(shown, None),
+            Damage::Layers | Damage::List => {}
+        }
         let moved = shown != self.current;
         self.current = shown;
         if moved {
@@ -1566,6 +1668,7 @@ impl Document {
         *held = picture;
         self.generation += 1;
         self.history.forget_saved();
+        self.restamp(index, None);
         Some(index)
     }
 

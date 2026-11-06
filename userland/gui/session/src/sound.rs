@@ -4,7 +4,9 @@
 //! put back when it claims the room again.
 //!
 //! Its round trips are a [`ControlQueue`]'s: one in flight, the latest
-//! control of each kind for each device winning meanwhile.
+//! control of each kind for each device winning meanwhile. A change the user
+//! settles is confirmed once its trip lists it applied, so the session can let
+//! them hear the output's new level.
 
 use alloc::vec::Vec;
 
@@ -41,6 +43,9 @@ pub struct Landed {
     pub remember: Option<SoundControls>,
     /// A control the service refused, to be stated.
     pub refused: Option<Errno>,
+    /// Whether it shows a change the user settled applied, so they are to hear
+    /// the output's new level.
+    pub confirmed: bool,
 }
 
 /// The session's side of the audio service.
@@ -71,12 +76,16 @@ impl SoundSession {
 
     /// Ask for `control` on the device `device_id`, replacing a control of
     /// the same kind still queued for it. A level not yet `settled` is part
-    /// of a drag.
+    /// of a drag; a `settled` change is confirmed once it is applied.
     pub fn ask(&mut self, device_id: u32, control: DeviceControl, settled: bool) {
         if let DeviceControl::Level(_) = control {
             self.dragging = !settled;
         }
-        self.queue.ask(device_id, control);
+        if settled {
+            self.queue.ask_confirmed(device_id, control);
+        } else {
+            self.queue.ask(device_id, control);
+        }
     }
 
     /// Ask for the devices to be listed again.
@@ -96,7 +105,12 @@ impl SoundSession {
     /// shows the machine's baseline, or what another session left, and
     /// neither is the user's choice.
     pub fn landed(&mut self, answer: SoundAnswer, remembered: &SoundControls) -> Landed {
-        self.queue.landed();
+        let listed = if answer.refused.is_none() {
+            answer.devices.as_deref().ok()
+        } else {
+            None
+        };
+        let confirmed = self.queue.landed(listed);
         let mut remember = None;
         if let Ok(devices) = answer.devices {
             self.output = devices
@@ -135,6 +149,7 @@ impl SoundSession {
             shown: self.shown(),
             remember,
             refused: answer.refused,
+            confirmed,
         }
     }
 

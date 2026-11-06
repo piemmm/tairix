@@ -8,6 +8,12 @@ mount — die eingehängten Dateisysteme auflisten oder ein Datenträgerabbild o
 
 `mount [option...] image [target]`
 
+`mount --list-held`
+
+`mount --replay-held name`
+
+`mount --discard-held name`
+
 ## DESCRIPTION
 
 Ohne Operanden werden die eingehängten Dateisysteme aufgelistet, eine
@@ -55,6 +61,19 @@ Platte, eine Platte eines RAID-Verbunds oder ein Dateisystem enthält,
 dessen verzeichnete Eigentümer stets gelten (ext2, ext3, ext4, ARXFS),
 wird nicht eingehängt, und `mount` nennt den Grund.
 
+Eine Platte, die zurückgesteckt wurde, während sie noch Änderungen
+hielt, die noch nicht auf sie geschrieben waren, wird schreibgeschützt
+eingehängt und die Änderungen bleiben erhalten, wenn ihr Gerät nicht
+zeigen kann, dass es dieselbe Platte und keine Kopie ist; die
+Auflistung kennzeichnet sie mit `[replay-unconfirmed]`, und
+`--list-held` listet nur solche Datenträger auf. `--replay-held`
+schreibt die Änderungen auf sie, sofern ihr Inhalt zeigt, dass sie
+seither unverändert ist; `--discard-held` verwirft sie und nimmt die
+Platte, wie sie ist. In beiden Fällen wird der Datenträger erneut
+eingehängt, beschreibbar, wo das möglich ist. Antworten erfordert die
+Einhängebefugnis (`CAP_FS_MOUNT`); bei einer Wechselplatte fragt der
+Desktop zudem den Benutzer am Computer.
+
 ## OPTIONS
 
 - `-r, --read-only` — den Datenträger schreibgeschützt einhängen (wie
@@ -84,6 +103,15 @@ wird nicht eingehängt, und `mount` nennt den Grund.
 - `-v, --verbose` — melden, wo der Datenträger eingehängt wurde.
 - `-l, --show-labels` — für die Auflistung angenommen, die keine
   Bezeichnungen hinzuzufügen hat.
+- `--list-held` — nur die Datenträger auflisten, deren Änderungen auf
+  `--replay-held` oder `--discard-held` warten.
+- `--replay-held <name>` — die Änderungen, die ein Datenträger hält,
+  auf seine Platte schreiben, sofern ihr Inhalt sie noch als
+  unverändert zeigt; `name` ist der Name des Datenträgers in
+  `/Storage`, ein Verzeichnis, an dem er gezeigt wird, oder seine
+  `id::`-Wurzel.
+- `--discard-held <name>` — die Änderungen, die ein Datenträger hält,
+  verwerfen und seine Platte nehmen, wie sie ist.
 - `-h, -?, --help` — die Kurzhilfe dieses Befehls anzeigen.
 
 ## EXAMPLES
@@ -100,15 +128,22 @@ wird nicht eingehängt, und `mount` nennt den Grund.
   Sie in das Archiv und seinen Ordner schreiben dürfen.
 - `mount -r backup.tar.gz /Storage/backup` — ein komprimiertes
   tar-Archiv schreibgeschützt als `backup` einhängen.
+- `mount --list-held` — die Datenträger auflisten, deren Änderungen
+  auf eine Antwort warten.
+- `mount --replay-held backup` — die Änderungen, die
+  `/Storage/backup` hält, auf seine Platte schreiben.
 
 ## EXIT STATUS
 
-- `0` — die Auflistung wurde ausgegeben oder der Datenträger
-  eingehängt (oder die Kurzhilfe wurde ausgegeben).
-- `1` — die Befehlszeile wurde nicht verstanden.
+- `0` — die Auflistung wurde ausgegeben, der Datenträger eingehängt
+  oder seine gehaltenen Änderungen geschrieben oder verworfen (oder
+  die Kurzhilfe wurde ausgegeben).
+- `1` — die Befehlszeile wurde nicht verstanden, oder Sie dürfen für
+  die Änderungen des Datenträgers nicht antworten.
 - `2` — die Einhängeliste konnte nicht gelesen werden, oder die
   Ausgabe auf das Terminal schlug fehl.
-- `32` — das Abbild wurde nicht eingehängt.
+- `32` — das Abbild wurde nicht eingehängt, oder die Änderungen des
+  Datenträgers wurden weder geschrieben noch verworfen.
 
 ## ENVIRONMENT
 

@@ -155,6 +155,41 @@ fn the_pen_shows_an_empty_bed_while_he_is_out() {
     );
 }
 
+/// A refused let-out is stated in the pen itself, on its wall, as well as on
+/// standard error.
+#[test]
+fn the_pen_states_why_he_was_not_let_out() {
+    let mut painter = Painter::new();
+    let (w, h) = pen_client(scale());
+    let layout = lay(w, h);
+    let mut pen = Pen::new();
+    pen.settle(&layout);
+    let draw = |pen: &Pen, painter: &mut Painter| {
+        let mut surface = blank(w, h);
+        painter.draw_pen(
+            &mut surface,
+            &layout,
+            pen,
+            &pose_in(&layout),
+            &theme(),
+            scale(),
+        );
+        surface
+    };
+    let quiet = draw(&pen, &mut painter);
+    assert!(!pen.let_out(Some(crate::pen::Refusal::NotPermitted)));
+    let refused = draw(&pen, &mut painter);
+    let wall_differs = (layout.wall.top()..layout.wall.bottom()).any(|y| {
+        (layout.wall.left()..layout.wall.right()).any(|x| {
+            let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) else {
+                return false;
+            };
+            quiet.get(x, y) != refused.get(x, y)
+        })
+    });
+    assert!(wall_differs, "the reason must reach the wall");
+}
+
 #[test]
 fn the_default_pen_client_matches_the_authored_size() {
     assert_eq!(pen_client(scale()), (PEN_WIDTH, PEN_HEIGHT));

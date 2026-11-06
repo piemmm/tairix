@@ -22,9 +22,15 @@ traffic, the stream's notifications, a deadline, a `Control` — and reads
 heard. `Settings` carries the level, the device and whether a track's own
 Replay Gain is applied.
 
+`TagReader` (`probe`) reads a track's stream and tags through the same
+decoder: a state machine shaped like the engine, which never parks holding a
+request its session was not given, gives a file ten seconds once a decoder
+takes it, and kills a worker it abandons part-way through a request.
+
 The `rt` feature adds the live seams: files opened by path (`RtFiles`) or held
-as descriptors (`HeldFiles`), the audio service's stream (`RtSpeaker`), and the
-wait-set members a host parks on (`EngineWaits`). Everything else performs no
+as descriptors (`HeldFiles`), the audio service's stream (`RtSpeaker`), the
+wait-set members a host parks on (`EngineWaits`), and the tag reader a worker
+thread drives to the end of each file (`RtTags`). Everything else performs no
 I/O and is host-tested.
 
 See `docs/src/lib/player.md` for the design and the tests.

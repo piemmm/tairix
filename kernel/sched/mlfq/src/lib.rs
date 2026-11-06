@@ -48,6 +48,9 @@
 //! `docs/src/architecture/scheduler.md`.
 
 #![no_std]
+// `Box::try_new`, so a task body the heap cannot hold refuses its admission
+// instead of aborting the kernel.
+#![feature(allocator_api)]
 // The `loom` model-checking build compiles only the interleaving harnesses,
 // so items only production reaches read as dead there.
 #![cfg_attr(loom, allow(dead_code))]

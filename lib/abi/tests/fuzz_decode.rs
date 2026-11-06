@@ -135,14 +135,15 @@ use tairix_abi::window_ipc::{
     decode_open_target_reply, decode_picked_name_reply, decode_wallpapers_reply,
     encode_drag_spot_reply, encode_drop_target_reply, encode_open_target_reply,
     encode_picked_name_reply, AlertButton, AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec,
-    AppBar, AppBarClick, AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem,
-    AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow,
-    AppMenuShortcut, AppMenuSymbol, BundleRunPath, ClipboardKind, CursorShape, DocumentName,
-    DragAt, DragItems, DragPicture, DropOperation, DropSite, HandOverDocument, HandOverTarget,
-    IconAsset, MenuOutcome, MenuRefusal, PaneName, PickPurpose, PreviewOutcome, PreviewSubject,
-    SaveFormat, SaveFormats, ToolOver, TooltipText, WindowEvent, WindowRegion, WindowRequest,
-    WindowSizing, WindowTitle,
+    AppBar, AppBarClick, AppMenu, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId,
+    AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut,
+    AppMenuSymbol, BundleRunPath, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems,
+    DragOwnIcon, DragOwnSource, DragPicture, DropOperation, DropSite, HandOverDocument,
+    HandOverTarget, IconAsset, IconPath, MenuOutcome, MenuRefusal, PaneName, PickPurpose,
+    PreviewOutcome, PreviewSubject, SaveFormat, SaveFormats, ToolOver, TooltipText, WindowEvent,
+    WindowRegion, WindowRequest, WindowSizing, WindowTitle,
 };
+use tairix_abi::window_ipc::{LandingName, LandingOutcome, LandingStep};
 use tairix_abi::BUNDLE_ID_MAX;
 use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, Origin, PortName,
@@ -196,7 +197,7 @@ fn exercise_elevate(bytes: &[u8]) {
 }
 
 /// Drive the `session-v1` graphical-login decoders on `bytes` (one arm of
-/// [`exercise`]): the request, the account page, and the verdict each
+/// [`exercise_desktop_children`]): the request, the account page, and the verdict each
 /// round-trip through their encoder; everything else refuses cleanly.
 fn exercise_session_ipc(bytes: &[u8]) {
     if let Ok(request) = SessionRequest::decode(bytes) {
@@ -708,6 +709,7 @@ fn netattach_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
             name_matching: NameMatching::AsciiCaseInsensitive,
             node_identity: NodeIdentity::Stable,
             attrs: false,
+            title: false,
             write_refusal: None,
             format: FormatName::Smb3,
         },
@@ -896,8 +898,9 @@ fn open_target_frames_with_flipped_bits_round_trip_or_are_refused() {
 /// not define, which reads as none.
 fn exercise_volume_requests(bytes: &[u8]) {
     use tairix_abi::volume::{
-        VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeInfo, VolumeRetitleRequest,
-        VOLUME_ATTACH_MAX_LEN, VOLUME_DETACH_LEN, VOLUME_RETITLE_MAX_LEN,
+        VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeInfo, VolumeReplayRequest,
+        VolumeRetitleRequest, VOLUME_ATTACH_MAX_LEN, VOLUME_DETACH_LEN, VOLUME_REPLAY_LEN,
+        VOLUME_RETITLE_MAX_LEN,
     };
     if let Ok(attach) = VolumeAttachRequest::decode(bytes) {
         let mut out = [0u8; VOLUME_ATTACH_MAX_LEN];
@@ -919,6 +922,13 @@ fn exercise_volume_requests(bytes: &[u8]) {
             .encode(&mut out)
             .expect("an accepted retitle must re-encode");
         assert_eq!(&out[..len], bytes, "an accepted retitle is canonical");
+    }
+    if let Ok(replay) = VolumeReplayRequest::decode(bytes) {
+        let mut out = [0u8; VOLUME_REPLAY_LEN];
+        let len = replay
+            .encode(&mut out)
+            .expect("an accepted answer must re-encode");
+        assert_eq!(&out[..len], bytes, "an accepted answer is canonical");
     }
     if let Ok(ctl) = VolumeCtl::decode(bytes) {
         assert_eq!(
@@ -1491,7 +1501,8 @@ fn exercise_switchboard_ipc(bytes: &[u8]) {
     }
 }
 
-/// Drive the screensaver protocol on `bytes` (one arm of [`exercise`]).
+/// Drive the screensaver protocol on `bytes` (one arm of
+/// [`exercise_desktop_children`]).
 ///
 /// Every saver is untrusted code, a user's own included, so the host decodes
 /// whatever it sends; and a saver decodes its host's messages. An accepted
@@ -1515,8 +1526,42 @@ fn exercise_saver_ipc(bytes: &[u8]) {
     }
 }
 
+/// Drive what the desktop session decodes of the programs it starts — a
+/// session's own, a screensaver's and its options, and the recorder's — on
+/// `bytes` (one arm of [`exercise`]).
+fn exercise_desktop_children(bytes: &[u8]) {
+    exercise_session_ipc(bytes);
+    exercise_saver_ipc(bytes);
+    exercise_recorder_ipc(bytes);
+    exercise_saver_options(bytes);
+}
+
+/// Drive the recorder protocol's two decoders on `bytes` (one arm of
+/// [`exercise_desktop_children`]): the session decodes what the recorder it started says, and
+/// the recorder what the session says. An accepted message must re-encode to
+/// the bytes it came from.
+fn exercise_recorder_ipc(bytes: &[u8]) {
+    use tairix_abi::recorder_ipc::{
+        RecorderMessage, SessionMessage, RECORDER_MESSAGE_MAX, RECORDER_SESSION_MESSAGE_MAX,
+    };
+    if let Ok(message) = RecorderMessage::decode(bytes) {
+        let mut out = [0u8; RECORDER_MESSAGE_MAX];
+        let len = message
+            .encode(&mut out)
+            .expect("an accepted recorder message re-encodes");
+        assert_eq!(&out[..len], bytes, "a recorder message is its own encoding");
+    }
+    if let Ok(message) = SessionMessage::decode(bytes) {
+        let mut out = vec![0u8; RECORDER_SESSION_MESSAGE_MAX];
+        let len = message
+            .encode(&mut out)
+            .expect("an accepted session message re-encodes");
+        assert_eq!(&out[..len], bytes, "a session message is its own encoding");
+    }
+}
+
 /// Drive a screensaver manifest's declared options on `bytes` (one arm of
-/// [`exercise`]): a user's own saver is a self-signed manifest the desktop
+/// [`exercise_desktop_children`]): a user's own saver is a self-signed manifest the desktop
 /// reads to list it and the load gate reads to admit it, so every option an
 /// accepted header names must decode or refuse, and one that decodes must
 /// round-trip through its entry.
@@ -1733,9 +1778,7 @@ fn exercise(bytes: &[u8]) {
     exercise_imageattach(bytes);
     exercise_volume_requests(bytes);
     exercise_elevate(bytes);
-    exercise_session_ipc(bytes);
-    exercise_saver_ipc(bytes);
-    exercise_saver_options(bytes);
+    exercise_desktop_children(bytes);
     if let Ok(time) = Time64::from_bytes(bytes) {
         let redecoded = Time64::from_bytes(&time.to_le_bytes())
             .expect("round-trip of an accepted instant must succeed");
@@ -2213,25 +2256,37 @@ fn exercise_process_builder(bytes: &[u8]) {
     let take = core::cmp::min(8, bytes.len());
     seed[..take].copy_from_slice(&bytes[..take]);
     let canary = u64::from_le_bytes(seed);
-    // A distinct value in the cpu-features field, to prove it round-trips
-    // independently of the canary.
+    // Distinct values in the other fields, to prove each round-trips
+    // independently of the canary; a heap region of either form, whole pages
+    // or not, which the builder must refuse rather than write.
     let cpu_features = canary.rotate_left(17) ^ 0x0F0F_0F0F_0F0F_0F0F;
+    let heap = tairix_abi::HeapRegion {
+        base: canary.rotate_left(29) & !0xF00,
+        len: canary.rotate_left(41) & !0xF00,
+    };
+    let facts = tairix_abi::StartFacts {
+        canary,
+        cpu_features,
+        heap,
+    };
 
     let Ok(len) = tairix_abi::process::encoded_len(args, env) else {
         return;
     };
     let mut buf = vec![0u8; len];
-    let Ok(written) = tairix_abi::process::write_into(&mut buf, args, env, canary, cpu_features)
-    else {
-        // A rejected build (an embedded NUL, say) is a fail-closed outcome.
+    let Ok(written) = tairix_abi::process::write_into(&mut buf, args, env, &facts) else {
+        // A rejected build (an embedded NUL, a malformed heap region) is a
+        // fail-closed outcome.
         return;
     };
+    assert!(heap.is_well_formed(), "a malformed heap region was written");
     assert_eq!(written, len);
     let view = ProcessStart::parse(&buf).expect("a freshly built block must parse");
     assert_eq!(view.arg_count() as usize, args.len());
     assert_eq!(view.env_count() as usize, env.len());
     assert_eq!(view.canary(), canary);
     assert_eq!(view.cpu_features().bits(), cpu_features);
+    assert_eq!(view.heap(), heap);
     let mut idx: u32 = 0;
     for a in args {
         assert_eq!(view.arg(idx), Some(*a));
@@ -2273,6 +2328,69 @@ fn timed_pointer_records_with_flipped_bits_round_trip_or_are_refused() {
                     TimedPointer::from_bytes(&flipped).map(|timed| timed.input),
                     Ok(input),
                     "a flipped time leaves the record as it was (bit {bit})"
+                );
+            }
+        }
+    }
+}
+
+/// Every bit of every canonical key record, flipped: each result is refused or
+/// round-trips, and a flipped physical key never refuses a key edge, whose key
+/// and modifiers stand. Random bytes almost never pass the record's magic, so
+/// its physical key is reached only from a canonical record.
+#[test]
+fn key_records_with_flipped_bits_round_trip_or_are_refused() {
+    use tairix_abi::input::{KeyValue, Modifiers, NamedKeyCode, PhysicalKey};
+    use tairix_abi::Errno;
+    let records = [
+        KeyInput::Pressed {
+            key: KeyValue::Char('#'),
+            modifiers: Modifiers {
+                shift: true,
+                meta: true,
+                ..Modifiers::default()
+            },
+            physical: PhysicalKey::DIGIT_3,
+        },
+        KeyInput::Released {
+            key: KeyValue::Named(NamedKeyCode::Escape),
+            modifiers: Modifiers::default(),
+            physical: PhysicalKey::ESCAPE,
+        },
+        KeyInput::Pressed {
+            key: KeyValue::Char('a'),
+            modifiers: Modifiers::default(),
+            physical: PhysicalKey::UNKNOWN,
+        },
+        KeyInput::ModifiersChanged {
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        },
+    ];
+    // The record's last half-word is its physical key.
+    let physical_bits = (KeyInput::WIRE_LEN - 2) * 8;
+    for record in records {
+        let canonical = record.to_le_bytes();
+        assert_eq!(KeyInput::from_bytes(&canonical), Ok(record));
+        for bit in 0..KeyInput::WIRE_LEN * 8 {
+            let mut flipped = canonical;
+            flipped[bit / 8] ^= 1 << (bit % 8);
+            exercise_input(&flipped);
+            if bit < physical_bits {
+                continue;
+            }
+            let decoded = KeyInput::from_bytes(&flipped);
+            if record.physical().is_some() {
+                let edge = decoded.expect("a flipped physical key leaves the edge");
+                assert_eq!(edge.key(), record.key(), "bit {bit}");
+                assert_eq!(edge.modifiers(), record.modifiers(), "bit {bit}");
+            } else {
+                assert_eq!(
+                    decoded,
+                    Err(Errno::BadMagic),
+                    "a modifier change names no key"
                 );
             }
         }
@@ -2512,6 +2630,7 @@ fn fsserve_reply_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
         name_matching: NameMatching::Exact,
         node_identity: NodeIdentity::Stable,
         attrs: true,
+        title: true,
         write_refusal: None,
         format: tairix_abi::volume::FormatName::Ext3,
     };
@@ -2645,6 +2764,65 @@ fn structured_saver_messages_with_corrupted_fields_never_panic() {
     for mut base in seeds {
         exercise_saver_ipc(&base);
         each_bit_flipped(&mut base, exercise_saver_ipc);
+    }
+}
+
+/// Every recorder message and every session message, each bit of each flipped
+/// in turn: each must decode to its own encoding or be refused, never panic.
+#[test]
+fn structured_recorder_messages_with_corrupted_fields_never_panic() {
+    use tairix_abi::recorder_ipc::{
+        RecordEnding, RecordSound, RecordStart, RecorderDamage, RecorderMessage, RecorderSlot,
+        SessionMessage, RECORDER_MESSAGE_MAX, RECORDER_SESSION_MESSAGE_MAX,
+    };
+    use tairix_abi::Errno;
+    let damage = RecorderDamage::new(&[DamageRect {
+        x: 1,
+        y: 2,
+        width_px: 3,
+        height_px: 4,
+    }])
+    .expect("damage");
+    let session = [
+        SessionMessage::Start(RecordStart {
+            slot: RecorderSlot::new(64, 48).expect("a slot"),
+            sound: RecordSound::Desktop,
+            output: 5,
+            slots: [8, 9],
+            started_ns: 6,
+        }),
+        SessionMessage::Frame {
+            slot: 1,
+            at_ns: 7,
+            damage,
+        },
+        SessionMessage::Stop,
+    ];
+    let recorder = [
+        RecorderMessage::Hello,
+        RecorderMessage::Ready,
+        RecorderMessage::Released { slot: 1 },
+        RecorderMessage::Finished {
+            bytes: 10,
+            ending: RecordEnding::DiskFull,
+        },
+        RecorderMessage::Unstarted(Errno::PermissionDenied),
+    ];
+    let mut seeds: Vec<Vec<u8>> = Vec::new();
+    for message in &session {
+        let mut out = vec![0u8; RECORDER_SESSION_MESSAGE_MAX];
+        let len = message.encode(&mut out).expect("encodes");
+        out.truncate(len);
+        seeds.push(out);
+    }
+    for message in &recorder {
+        let mut out = [0u8; RECORDER_MESSAGE_MAX];
+        let len = message.encode(&mut out).expect("encodes");
+        seeds.push(out[..len].to_vec());
+    }
+    for mut base in seeds {
+        exercise_recorder_ipc(&base);
+        each_bit_flipped(&mut base, exercise_recorder_ipc);
     }
 }
 
@@ -2921,6 +3099,41 @@ fn structured_cache_ledger_inputs_with_corrupted_fields_never_panic() {
     each_bit_flipped(&mut base, exercise);
 }
 
+/// A mount record of the volume first published under an identity, one of its
+/// twin and one titled, each bit flipped in turn: random bytes never reach the
+/// check that an identity rides only with a key, nor the title and its flag, so
+/// each is walked from a record carrying it.
+#[test]
+fn structured_mount_records_with_corrupted_fields_never_panic() {
+    use tairix_abi::driver::filesystem::{MountFlags, VolumeStats, VolumeTitle};
+    use tairix_abi::sysinfo::{MountAvailability, MountVolumeState};
+    let record = |volume_id| {
+        MountRecord::new(
+            b"backup",
+            b"/Storage/backup",
+            b"fat32",
+            MountFlags::NOEXEC,
+            MountVolumeState {
+                usage: VolumeStats::default(),
+                availability: MountAvailability::Available,
+                medium: None,
+            },
+            volume_id,
+        )
+        .expect("a well-formed mount record")
+    };
+    for seed in [
+        record([0x5A; 16]),
+        record([0xA5; 16]).with_identity([0x5A; 16]),
+        record([0x5B; 16])
+            .with_title(VolumeTitle::new("HOLIDAY").expect("a title"))
+            .with_titled(true),
+    ] {
+        let mut base = seed.to_le_bytes();
+        each_bit_flipped(&mut base, exercise);
+    }
+}
+
 #[test]
 fn structured_fs_inputs_with_corrupted_fields_never_panic() {
     // Walk the accepted/rejected boundary of the filesystem decoders from
@@ -3102,6 +3315,11 @@ fn structured_elevate_requests_with_corrupted_fields_never_panic() {
             password: Secret::new("hunter2"),
             program: tairix_abi::DATETIME_RUN_PATH,
         },
+        ElevateRequest::LaunchWired {
+            username: "root",
+            password: Secret::new("hunter2"),
+            program: tairix_abi::recorder_ipc::RECORDER_RUN_PATH,
+        },
         ElevateRequest::Verify {
             password: Secret::new("hunter2"),
         },
@@ -3150,6 +3368,11 @@ fn structured_elevate_replies_with_corrupted_fields_never_panic() {
         ElevateReply::Completed { exit_code: 0 },
         ElevateReply::Verified,
         ElevateReply::Launched { pid: 4210 },
+        ElevateReply::Wired(tairix_abi::elevate::WiredLaunch {
+            instance: tairix_abi::ProcId::from_raw([7; tairix_abi::PROC_ID_LEN]),
+            input: core::num::NonZeroU64::new(3).expect("non-zero"),
+            output: core::num::NonZeroU64::new(4).expect("non-zero"),
+        }),
         ElevateReply::Overran { exit_code: 1 },
         ElevateReply::Refused(tairix_abi::Errno::PermissionDenied),
         ElevateReply::Captured {
@@ -3473,14 +3696,15 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
     seeds.extend(window_request_desktop_seeds());
     seeds.extend(window_request_text_seeds());
     seeds.extend(begin_drag_seeds());
+    seeds.extend(drop_landing_seeds());
     seeds.extend(window_request_alert_seeds());
     seeds
 }
 
 /// The seeds of the requests that hang a surface from one of the caller's
-/// windows: a popup, a tool window carried by a held press, and an
-/// owner-modal dialog.
-fn window_request_transient_seeds() -> [WindowRequest; 3] {
+/// windows: a popup, a fixed tool window carried by a held press and a
+/// resizable one, and an owner-modal dialog.
+fn window_request_transient_seeds() -> [WindowRequest; 4] {
     [
         WindowRequest::CreatePopup {
             parent_window_id: 3,
@@ -3507,6 +3731,27 @@ fn window_request_transient_seeds() -> [WindowRequest; 3] {
             offset_y: 24,
             carry: Some(40),
             title: WindowTitle::new("Tools").expect("a valid title"),
+            sizing: WindowSizing::Fixed,
+        },
+        WindowRequest::CreateTool {
+            parent_window_id: 3,
+            shm_handle: 7,
+            event_endpoint: 0x900d,
+            frame_count: 1,
+            width_px: 120,
+            height_px: 80,
+            stride_bytes: 480,
+            format: DisplayFormat::Bgra8888,
+            offset_x: -12,
+            offset_y: 24,
+            carry: None,
+            title: WindowTitle::new("Palette").expect("a valid title"),
+            sizing: WindowSizing::Resizable {
+                min_width_px: 52,
+                min_height_px: 66,
+                max_width_px: 422,
+                max_height_px: 422,
+            },
         },
         WindowRequest::CreateDialog {
             owner_window_id: 3,
@@ -3555,10 +3800,39 @@ fn window_request_desktop_seeds() -> std::vec::Vec<WindowRequest> {
     ]
 }
 
+/// Every step of a drop: an item begun under a name, so a flip lands on its
+/// length prefix, an item done, and the end.
+fn drop_landing_seeds() -> [WindowRequest; 3] {
+    [
+        WindowRequest::DropLanding {
+            window_id: 3,
+            serial: 9,
+            step: LandingStep::Making {
+                item: 2,
+                name: LandingName::new("notes.txt").expect("a valid name"),
+            },
+        },
+        WindowRequest::DropLanding {
+            window_id: 3,
+            serial: 9,
+            step: LandingStep::Made {
+                item: 2,
+                outcome: LandingOutcome::Replaced,
+            },
+        },
+        WindowRequest::DropLanding {
+            window_id: 3,
+            serial: 9,
+            step: LandingStep::Ended,
+        },
+    ]
+}
+
 /// Drags of one item and of several, a picture placed and one placed nowhere,
-/// and one hiding an ending, so a flip lands on each count, flag, place, id
-/// length and hidden-ending byte.
-fn begin_drag_seeds() -> [WindowRequest; 3] {
+/// one hiding an ending, and one carrying own pictures — a bundle stamped and
+/// not, a RISC OS application — so a flip lands on each count, flag, place, id
+/// length, hidden-ending byte, source, path and stamp byte.
+fn begin_drag_seeds() -> [WindowRequest; 4] {
     [
         WindowRequest::BeginDrag {
             window_id: 3,
@@ -3599,6 +3873,37 @@ fn begin_drag_seeds() -> [WindowRequest; 3] {
             )
             .and_then(|items| items.with_hidden_ending(4))
             .expect("forty items"),
+        },
+        WindowRequest::BeginDrag {
+            window_id: 3,
+            items: DragItems::new(
+                DocumentName::new("Editor.app").expect("a valid name"),
+                4,
+                false,
+                [
+                    own_drag_picture(
+                        ("app-bundle", Some((6, -6))),
+                        DragOwnSource::Bundle,
+                        "/Users/ann/Desktop/Editor.app",
+                        Some(fuzz_stamp()),
+                    ),
+                    own_drag_picture(
+                        ("app-bundle", None),
+                        DragOwnSource::Bundle,
+                        "/System/Commands/ls.app",
+                        None,
+                    ),
+                    own_drag_picture(
+                        ("folder", Some((40, 2))),
+                        DragOwnSource::RiscOsApplication,
+                        "/Storage/disc/!Edit",
+                        Some(fuzz_stamp()),
+                    ),
+                    drag_picture("text", None),
+                ],
+            )
+            .and_then(|items| items.with_hidden_ending(4))
+            .expect("two bundles, a RISC OS application and a file"),
         },
     ]
 }
@@ -3755,6 +4060,17 @@ fn window_request_alert_seeds() -> std::vec::Vec<WindowRequest> {
                 .expect("within bounds"),
             ),
         },
+        WindowRequest::Authorise {
+            window_id: core::num::NonZeroU64::new(3),
+            task: SystemTask::Retitle(
+                tairix_abi::elevate::ElevateWords::new(&[
+                    "id::07070707-0707-0707-0707-070707070707/",
+                    "HOLIDAY",
+                    "usb1",
+                ])
+                .expect("within bounds"),
+            ),
+        },
         WindowRequest::TakeAuthorisedOutput {
             window_id: core::num::NonZeroU64::new(3),
         },
@@ -3766,6 +4082,34 @@ fn drag_picture(asset: &str, from: Option<(i32, i32)>) -> DragPicture {
     DragPicture {
         icon: IconAsset::new(asset).expect("a valid asset id"),
         from,
+        own: None,
+    }
+}
+
+/// [`drag_picture`], carrying the item's own picture read from `path` as
+/// `source` says, listed at `stamp`.
+fn own_drag_picture(
+    (asset, from): (&str, Option<(i32, i32)>),
+    source: DragOwnSource,
+    path: &str,
+    stamp: Option<tairix_abi::fs::DocumentStamp>,
+) -> DragPicture {
+    DragPicture {
+        own: Some(DragOwnIcon::new(source, path, stamp).expect("an own picture")),
+        ..drag_picture(asset, from)
+    }
+}
+
+/// A version of a file its listing named, every field set.
+fn fuzz_stamp() -> tairix_abi::fs::DocumentStamp {
+    tairix_abi::fs::DocumentStamp {
+        size: 4096,
+        modified: Time64::new(1_700_000_000, 5).expect("canonical"),
+        id: tairix_abi::fs::FileId {
+            volume: [0x5A; 16],
+            node: 42,
+        },
+        content_gen: 9,
     }
 }
 
@@ -3885,7 +4229,7 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
                 AppMenuSymbol::Application,
             )
             .with_icon_bundle(
-                AppMenuBundle::new("/System/Applications/view.app").expect("a valid path"),
+                IconPath::new("/System/Applications/view.app").expect("a valid path"),
             ),
         ),
         chooser,

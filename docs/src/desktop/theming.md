@@ -396,6 +396,10 @@ surfaces (dark) or one descending ladder of **neutral greys** (light) under one
 alloy-orange accent family, with the semantic signal hues the boards' own
 legend fixes.
 
+Their palettes are the constants `Palette::DARK` and `Palette::LIGHT`, so a
+surface whose look must not follow the desktop's reads one directly: the
+terminal's *System* scheme is `Palette::DARK` under either theme.
+
 The light theme's neutrals are neutral by test — `r == g == b` on every one of
 them — so the only colour on a light desktop is a signal hue. Its window
 ground is a mid-light grey (a 15% grey) rather than paper, and its title bands

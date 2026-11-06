@@ -10,7 +10,8 @@ a `.app` bundle in `/System/Applications` (`AGENTS.md` §16.5).
 A screen **model** (`Grid` + `Parser`, tied together by `Terminal`) driven by
 an injected `ShellSource`, a **renderer** (`render`), and everything that
 makes it a first-class desktop program: the user's `Profile`, the colour
-`Scheme`s a screen is painted with, the `Effects` pipeline a frame passes
+`Scheme`s a screen is painted with, the `Look` each window is drawn with,
+the `Effects` pipeline a frame passes
 through, the window `layout` rules, the right-click `menu`, and the
 `settings` sheet. Like the file browser it is a graphical app, so it consumes
 the same `lib/*` building blocks the taskbar does — `lib/geometry`,
@@ -118,10 +119,13 @@ the compiled-in atlas fallback, so only a runtime measurement is honest.
 One place a terminal colour comes from. A `ColorScheme` is the sixteen ANSI
 slots plus background, foreground, cursor, and cursor text; `Painted` resolves
 the scheme in force once per repaint (never once per cell) and answers each
-cell's pair. `Scheme::System` follows the desktop theme and is the default;
-`Midnight`, `Phosphor`, `Amber`, `Ember`, `Contrast`, and `Paper` carry fixed
-palettes; `Custom` is the user's own. Adding a scheme is a variant plus a
-palette, and the compiler then forces every consumer to state what it means.
+cell's pair. `Scheme::System` is the default: the dark theme's page, text and
+accent (`Palette::DARK`) whatever appearance the desktop is in. It, `Midnight`,
+`Phosphor`, `Amber`, `Ember`, `Contrast`, and `Paper` carry fixed palettes
+(`Scheme::BUILTINS`); `Custom` is the user's own. No scheme reads the desktop
+theme, so a light/dark switch changes no terminal colour. Adding a scheme is a
+variant plus a palette, and the compiler then forces every consumer to state
+what it means.
 
 ## The profile (`profile`)
 
@@ -192,13 +196,16 @@ it scrolls it.
 
 ## Rendering (`render`)
 
-`render(terminal, painted, viewport, font)` paints the grid into a `lib/raster`
-`Surface` sized to the viewport, using the resolved colours and the shared
-`lib/font` monospace face it is given. The face is the caller's because its
-size follows both the profile and the desktop's UI density: the `Run` binary
-resolves it from the two and re-resolves it (re-deriving the grid and resizing
-the pty) when either changes, so the renderer always measures cells at the
-size the window is actually drawn at.
+`Screen::paint` draws the grid into a retained `lib/raster` `Surface`, using
+the resolved colours and the shared `lib/font` monospace face it is given. Both
+are the window's `Look` (`look`), because the face's size follows the profile
+and the desktop's UI density: `Look::adopt` re-derives what a profile change
+named, and `Look::refresh` fits the face to a changed desktop, answering an
+`Invalidation` — the cell geometry when the face or the scale moved, never the
+colours, which are the profile's alone. The `Run` binary applies either answer
+through one path, re-deriving the grid and resizing the pty only for a new
+face, so a light/dark switch costs a window nothing and the renderer always
+measures cells at the size the window is drawn at.
 
 Each cell is drawn with its own rendition:
 its `lib/vt` `Attributes` select the foreground and background, resolved one
@@ -218,11 +225,13 @@ viewport smaller than the grid paints what fits rather than panicking
 `ShellSource::read() -> Result<Vec<u8>, Errno>` and
 `ShellSource::write(&[u8]) -> Result<(), Errno>` are the one thing the
 terminal needs from outside. On a running system the seam is
-`spawned::PipeShellSource`: two kernel pipes to a shell child the terminal
-spawned under its own `CAP_PROC_SPAWN` (`plans/APPWIN.md` AW4), wired at
-spawn through `spawned::shell_wires` — the child's stdin is the keystroke
-pipe, and its stdout *and* stderr land on the one output pipe a terminal
-renders. The process-spawn authority lives in the `Run` binary, behind the
+`spawned::StreamShellSource` over the master end of one kernel
+pseudo-terminal, whose slave end is the shell child's stdin, stdout *and*
+stderr, wired at spawn through `spawned::shell_wires` (`plans/PTY.md`). The
+child is spawned under the terminal's own `CAP_PROC_SPAWN` into a session of
+its own, so the shell sees a single controlling tty and the line discipline
+cooks and echoes as a console's does. The process-spawn authority lives in the
+`Run` binary, behind the
 seam, not in the screen model; tests wire an in-memory queue or injected
 closures, so everything with behaviour is exhaustively testable without a
 kernel (`AGENTS.md` §7).
@@ -233,9 +242,9 @@ kernel (`AGENTS.md` §7).
 profile, creates the pty, spawns the user's default shell
 (`tairix_users::policy::DEFAULT_SHELL`) with `TERM` exported, creates and
 grants the zero-copy window frame region, and **parks** on one wait-set with
-three members — its window-event mailbox (`WaitSourceKind::Port`), the
-shell-output pipe's read end (`WaitSourceKind::Stream`, the AW4 kernel
-addition: ready on buffered bytes or end-of-stream), and the shell child
+three members — its window-event mailbox (`WaitSourceKind::Port`), the pty
+master end (`WaitSourceKind::Stream`: ready on buffered output or
+end-of-stream), and the shell child
 (`WaitSourceKind::Child`) — dispatching on the woken member's token, never a
 poll loop. The park carries a one-shot frame deadline only while an animated
 effect is in force. A key press for a terminal window is claimed by a
@@ -255,10 +264,10 @@ to open after its shell was spawned ends that shell the same way. Every
 bring-up refusal exits fail-loud with a reserved code and its reason on
 `stderr`.
 
-The bundle's manifest requests `CAP_FS_ACCESS` for the profile document — an
-ordinary read and write under the launching user's own identity, reaching
-nothing they could not already reach — alongside `CAP_CONSOLE_WRITE`,
-`CAP_PROC_SPAWN`, and `CAP_SHM`.
+The bundle's manifest requests `CAP_CONSOLE_WRITE`, `CAP_PROC_SPAWN` and
+`CAP_SHM`, and no filesystem authority: the profile is kept by the app-data
+service and the bundle ships no `DefaultSettings/`, so the process that parses
+every program's output cannot reach the user's files.
 
 ## Layering & safety
 
@@ -295,8 +304,12 @@ resume loop, and the wedged-channel fail-closed refusal).
 
 The desktop half is covered beside its own modules: the colour schemes (hex
 round-trips, every scheme resolving, the whole `Attributes`→colour mapping
-including the bright/cube/grey/reverse rules, and every built-in's text being
-legible against its own ground); the profile document (round-trip exactness
+including the bright/cube/grey/reverse rules, *System* being the dark theme's
+look, and every fixed palette's text being legible against its own ground);
+the look (a *System* screen on a light desktop painting the dark page, a
+light/dark switch making nothing stale and keeping the effect stages, a new
+scale or text size refitting the face); the profile document (round-trip
+exactness
 and every documented refusal, with its line number); the layout rules (the
 headline 80×25-plus-furniture-fits-640×480 property, the step-down search, and
 the grid/pixel inverses); the effects (determinism, each pass's visible

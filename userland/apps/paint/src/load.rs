@@ -126,9 +126,7 @@ impl Assembly {
                 palette,
                 plane,
             } => {
-                let palette =
-                    tairix_util::fallible::collected(palette.len(), palette.iter().copied())
-                        .ok_or(Refusal::NoMemory)?;
+                let palette = tairix_util::fallible::copied(palette).ok_or(Refusal::NoMemory)?;
                 (
                     Kind::Indexed {
                         depth: *depth,
@@ -204,6 +202,7 @@ impl Assembly {
                 name,
                 opacity: layer.opacity,
                 visible: layer.visible,
+                revision: 0,
             });
             return Ok(());
         }

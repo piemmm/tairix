@@ -18,31 +18,34 @@ a rhestrir unrhyw operand arall fel ef ei hun. Heb operand, rhestrir
 y cyfeiriadur cyfredol (`.`).
 
 Trefnir y cofnodion yn ôl enw (neu yn ôl maint, y mwyaf yn gyntaf,
-gydag `-S`; yn ôl stamp amser, y diweddaraf yn gyntaf, gydag `-t`;
-gwrthdroir gydag `-r`), un enw fesul llinell yn
-ragosodedig. Cuddir cofnodion y mae eu henw'n dechrau â `.` oni roddir
+gydag `-S`; yn ôl stamp amser, y diweddaraf yn gyntaf, gydag `-t`; yn ôl
+estyniad gydag `-X`; yn nhrefn «fersiwn» naturiol gydag `-v`; dim o gwbl
+— trefn y cyfeiriadur — gydag `-U`; wedi'i ddewis yn ôl enw gydag
+`--sort`; wedi'i wrthdroi gydag `-r`). Mae `--group-directories-first`
+yn codi cyfeiriaduron i frig y drefn. Pan fo'r allbwn yn derfynell,
+gosodir hwy mewn colofnau wedi'u maintio i led y derfynell, wedi'u
+llenwi o'r brig i'r gwaelod (`-C`); pan nad yw (pibell neu ffeil),
+rhestrir hwy un enw fesul llinell. Mae `-x` yn llenwi'r colofnau o'r
+chwith i'r dde yn lle hynny, mae `-m` yn eu rhestru wedi'u gwahanu â
+choma, mae `-1` yn gorfodi un fesul llinell, ac mae `-w` yn gosod y lled
+yn benodol. Cuddir cofnodion y mae eu henw'n dechrau â `.` oni roddir
 `-a` neu `-A`; pan guddir cofnodion, cyhoeddir nodyn ar y ffrwd
 gwybodaeth safonol (fd 3), byth yn y rhestriad ei hun.
 
 Mae'r fformat hir (`-l`) yn dangos y didau math a chaniatâd, y
-perchennog a'r grŵp, y maint, yna'r enw. IDau rhifol yw'r perchennog
-a'r grŵp: byddai datrys enwau cyfrifon yn gofyn am y gronfa ddata
-defnyddwyr a warchodir gan allu, na ddylai rhestriad ei mynnu, felly
-mae'r allbwn yn cyfateb i ateb rhifol yr offeryn GNU (mae `-n` yn
-rendro'n unfath). Mae'r golofn stamp amser yn dangos yr amser addasu
-yn ragosodedig; mae `-c`, `-u` a `--time` yn dewis pa un o'r pedwar
-stamp a ddangosir (ac a ddefnyddir i drefnu), ac mae `--time-style`
-(neu `--full-time`) yn gosod ei fformat. Nid oes colofn cyfrif
-cysylltau eto am nad yw cytundeb y system ffeiliau'n cario cysylltau
-caled eto; ymddengys pan wnaiff.
-
-Pan roddir mwy nag un operand — a bob amser o dan `-R` — rhagflaenir
-rhestriad pob cyfeiriadur gan bennawd `path:`, a gwahenir y blociau â
-llinell wag. Dyfynnir y llwybr mewn pennawd yn arddull y rhestriad, a
-phob `:` sydd ynddo hefyd.
+perchennog a'r grŵp, y maint, stamp amser, yna'r enw. IDau rhifol yw'r
+perchennog a'r grŵp: byddai datrys enwau cyfrifon yn gofyn am y gronfa
+ddata defnyddwyr a warchodir gan allu, na ddylai rhestriad ei mynnu,
+felly mae'r allbwn yn cyfateb i ateb rhifol yr offeryn GNU (mae `-n` yn
+rendro'n unfath). Yr amser addasu yw'r stamp amser yn ragosodedig; mae
+`-c`, `-u` a `--time` yn dewis pa un o'r pedwar stamp a ddangosir (ac a
+ddefnyddir i drefnu), ac mae `--time-style` (neu `--full-time`) yn gosod
+ei fformat. Mae colofn cyfrif y cysylltau yn adrodd faint o gofnodion
+cyfeiriadur sy'n enwi'r ffeil, fel y mae'r system ffeiliau ei hun yn ei
+gofnodi; mae fformat nad yw'n cadw cyfrif yn ateb `1`.
 
 Mae cysylltiad symbolaidd yn ymddangos â'r llythyren deip `l` ac, yn y
-fformat hir, fel `enw -> targed` — y targed yn union fel y'i cedwir, heb
+fformat hir, fel `name -> target` — y targed yn union fel y'i cedwir, heb
 ei ddatrys, sef yr hyn y mae'r cysylltiad yn ei gadw. Felly rhestrir
 cysylltiad sy'n hongian fel arfer; dim ond ystum sy'n ei ddatrys (`-L`,
 neu `-H` ar gyfer operand) sy'n adrodd am darged na all gyrraedd.
@@ -59,6 +62,19 @@ gamgymryd am ôl-ddodiad dynodwr. Mae `-F` GNU yn gadael `*` heb ei
 farcio, ac yno mae enw sy'n gorffen ag un yn edrych fel ffeil
 weithredadwy.
 
+Ar derfynell liw, lliwir enwau yn ôl math — cyfeiriaduron, ffeiliau
+gweithredadwy a ffeiliau cyffredin, pob un yn ei rôl yn y cynllun
+safonol — dan reolaeth `--color`. Cyflwyniad yn unig yw lliw: fe'i
+ychwanegir at yr hyn a rendrir ar y derfynell a byth at allbwn wedi'i
+biblinellu na'i ailgyfeirio; ar wahân i'r dilyniannau dianc, mae'r
+allbwn yn unfath beit am feit â'r rhestriad plaen, felly nid yw lliw
+byth yn newid colofnau, trefn, na'r hyn a wêl sgript.
+
+Pan roddir mwy nag un operand — a bob amser o dan `-R` — rhagflaenir
+rhestriad pob cyfeiriadur gan bennawd `path:`, a gwahenir y blociau â
+llinell wag. Dyfynnir y llwybr mewn pennawd yn arddull y rhestriad, a
+phob `:` sydd ynddo hefyd.
+
 ## OPTIONS
 
 - `-t` — didoli yn ôl y stamp amser a ddangosir, y diweddaraf yn
@@ -71,7 +87,8 @@ weithredadwy.
 - `-B, --ignore-backups` — peidio â rhestru cofnodion sy'n gorffen â
   `~`, ym mhob modd (cuddir copïau wrth gefn hyd yn oed gyda `-a`).
 - `-I, --ignore=PATTERN` — peidio â rhestru cofnodion sy'n cyfateb i'r
-  patrwm glob `PATTERN` (ailadroddadwy); yn berthnasol ym mhob modd.
+  patrwm glob `PATTERN` (ailadroddadwy); yn berthnasol ym mhob modd. Dim
+  ond `.` yn y patrwm sy'n cyfateb i `.` ar y dechrau, byth nod gwyllt.
 - `--hide=PATTERN` — fel `--ignore`, ond heb effaith pan roddir `-a`
   neu `-A`.
 - `--time=WORD` — pa stamp amser i'w ddangos ac i drefnu yn ôl:
@@ -89,11 +106,12 @@ weithredadwy.
 - `-F, --classify` — atodi `/` at gyfeiriaduron a `*` at rai
   gweithredadwy.
 - `-g` — fformat hir heb golofn y perchennog; mae'n awgrymu `-l`.
-- `-h, --human-readable` — gydag `-l`, argraffu meintiau fel `1.1K`,
-  `23M` (pwerau 1024).
+- `-h, --human-readable` — argraffu meintiau fel `1.1K`, `23M` (pwerau
+  1024), ar gyfer meintiau ffeiliau'r fformat hir a blociau `-s` fel ei
+  gilydd.
 - `-l` — fformat hir: didau caniatâd, perchennog, grŵp, maint, yna'r
   enw.
-- `-m` — enwau wedi'u gwahanu â choma, wedi'u lapio i'r lled.
+- `-m` — enwau wedi'u gwahanu â choma, wedi'u lapio i led yr allbwn.
 - `-n, --numeric-uid-gid` — fformat hir gyda pherchennog a grŵp
   rhifol; mae'n awgrymu `-l`. Mae'r perchennog a'r grŵp bob amser yn
   rhifol yma (gweler uchod), felly mae'n cyfateb i `-l`.
@@ -129,12 +147,12 @@ weithredadwy.
   unrhyw faner fformat yn gorfodi fel arall: dadgyfeirir cysylltiad o'r
   llinell orchymyn *at gyfeiriadur*, felly mae `ls linkdir` yn rhestru'r
   cyfeiriadur, tra bod pob cysylltiad arall yn dangos ei hun. Mae `-l`,
-  `-d` ac `-F` yn dangos pob cysylltiad ei hun yn lle hynny.
+  `-d` ac `-F` yn hytrach yn dangos pob cysylltiad ei hun yn ragosodedig.
 - `-s, --size` — argraffu maint neilltuedig pob cofnod mewn blociau
-  1024-beit (wedi'i raddio gan `-h`), gyda llinell `total` fesul
-  rhestriad cyfeiriadur.
+  (wedi'i raddio gan `-h` / `--si` / `--block-size` / `-k`), gyda llinell
+  `total` fesul rhestriad cyfeiriadur.
 - `-C` — rhestru mewn colofnau, wedi'u llenwi o'r brig i'r gwaelod
-  (rhagosodiad ar derfynell).
+  (y rhagosodiad pan fo'r allbwn yn derfynell).
 - `-S` — didoli yn ôl maint, y mwyaf yn gyntaf.
 - `-U` — peidio â didoli; rhestru cofnodion yn nhrefn y cyfeiriadur.
 - `-X` — didoli yn ôl estyniad enw (y testun o'r `.` olaf),
@@ -150,12 +168,13 @@ weithredadwy.
 - `--group-directories-first` — rhestru cyfeiriaduron cyn cofnodion
   eraill; cyfeiriaduron yn gyntaf hyd yn oed gyda `-r`.
 - `-w, --width <cols>` — gosod lled yr allbwn mewn colofnau; mae `0`
-  yn golygu diderfyn.
+  yn golygu hyd llinell diderfyn. Hebddo defnyddir lled y derfynell, neu
+  80 pan na ellir ei bennu.
 - `-x` — rhestru mewn colofnau, wedi'u llenwi o'r chwith i'r dde.
-- `-1` — un enw fesul llinell (y rhagosodiad).
+- `-1` — un enw fesul llinell (y rhagosodiad pan nad terfynell yw'r
+  allbwn).
 - `-?` — dangos cymorth byr y gorchymyn hwn ei hun (`--help` yw'r
   ffurf hir).
-
 - `--file-type` — atodi `/` at gyfeiriaduron, ond byth `*` at ffeiliau
   gweithredadwy (`--indicator-style=file-type`).
 - `--indicator-style=WORD` — dewis yr ôl-ddodiad dynodwr yn ôl enw:
@@ -163,23 +182,26 @@ weithredadwy.
   (`-F`).
 - `-G, --no-group` — hepgor y golofn grŵp o'r fformat hir; yn wahanol
   i `-o`, nid yw'n dewis y fformat hir ei hun.
-- `--author` — gyda `-l`, dangos y golofn awdur (y defnyddiwr piau) ar
-  ôl y perchennog ac o flaen y grŵp.
+- `--author` — gyda `-l`, dangos y golofn awdur (y defnyddiwr piau, gan
+  nad oes awdur ar wahân) ar ôl y perchennog ac o flaen y grŵp.
 - `--si` — fel `-h` ond pwêrau 1000 (`1.1k`, `23M`).
 - `-k, --kibibytes` — defnyddio blociau 1024-beit ar gyfer celloedd
-  `-s` a'r llinell `total` (y rhagosodiad eisoes; mae opsiwn maint yn
-  drech).
-- `--block-size=SIZE` — graddio meintiau ffeiliau a blociau `-s` yn ôl
-  SIZE: cyfanrif (beitiau), neu uned `K`/`M`/`G`/`T`/`P`/`E` (1024),
-  uned `KiB` (1024) neu uned `KB` (1000), gyda chyfernod cyfanrif
-  dewisol.
+  `-s` a'r `total`. Dyma'r rhagosodiad eisoes, felly mae'n cadarnhau'r
+  allbwn yn hytrach na'i newid; mae opsiwn maint yn drech.
+- `--block-size=SIZE` — graddio meintiau ffeiliau'r fformat hir a
+  blociau `-s` yn ôl SIZE: cyfanrif plaen (beitiau), neu uned
+  `K`/`M`/`G`/`T`/`P`/`E` (sail 1024), uned arddull `KiB` (sail 1024)
+  neu uned arddull `KB` (sail 1000), gyda chyfernod cyfanrif dewisol o'i
+  blaen. Mae uned ar ei phen ei hun yn argraffu ei hôl-ddodiad; mae
+  cyfernod yn ei atal. Gwall yw SIZE camffurfiedig.
 - `--format=WORD` — dewis y trefniant yn ôl enw: `long` (`-l`) neu
   `verbose`, `single-column` (`-1`), `vertical` (`-C`), `across` neu
   `horizontal` (`-x`), neu `commas` (`-m`).
 - `-T, --tabsize <cols>` — gosod cam tab y grid colofnau (rhagosodiad
   8); mae `0` yn llenwi â bylchau'n unig.
 - `--zero` — gorffen pob llinell â NUL yn lle llinell newydd; mae hefyd
-  yn dewis un golofn, dyfynnu llythrennol a nodau rheoli gweladwy.
+  yn dewis, oni chaiff ei ddiystyru, un golofn, dyfynnu llythrennol a
+  nodau rheoli gweladwy.
 
 - `--color[=WHEN]` — lliwio enwau yn ôl math (cyfeiriaduron, ffeiliau
   gweithredadwy, ffeiliau cyffredin). `auto` yw `WHEN` (y rhagosodiad:
@@ -194,6 +216,9 @@ weithredadwy.
 - `ls -al /System` — rhestriad fformat hir o `/System`, gan gynnwys y
   cofnodion cudd.
 - `ls -lhS` — fformat hir, meintiau darllenadwy, y mwyaf yn gyntaf.
+- `ls -v` — didoli naturiol, fel bod `f2` yn dod cyn `f10`.
+- `ls --group-directories-first` — cyfeiriaduron yn gyntaf, yna
+  ffeiliau.
 - `ls -R Documents` — mynd trwy `Documents` yn ailadroddus, un pennawd
   fesul cyfeiriadur.
 - `ls -F` — marcio cyfeiriaduron â `/` a rhai gweithredadwy â `*`.

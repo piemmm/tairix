@@ -8,20 +8,29 @@ ln — creare collegamenti fra file
 
 ## DESCRIPTION
 
-Crea un collegamento simbolico che nomina ciascuna destinazione. Con un
+Crea un collegamento che nomina ciascuna destinazione. Con un
 solo operando il collegamento è creato nella directory di lavoro col
 nome proprio della destinazione. Con due, il secondo operando è una
 directory da riempire se lo è — o un collegamento a una, tranne con
 `-n` — e il nome del collegamento altrimenti. Con tre o più, l'ultimo
 deve già essere una directory.
 
-La destinazione è memorizzata **letteralmente** e non è mai risolta: può
-essere relativa, contenere `..` e non nominare nulla, quindi un
-collegamento può legittimamente pendere. La sua grammatica è comunque
-verificata prima della scrittura, così una destinazione che nessun
-risolutore potrebbe percorrere è rifiutata. Creare un collegamento non
-concede alcuna autorità su ciò che nomina: ogni uso successivo è
-autorizzato componente per componente sotto la vostra identità.
+Senza `-s` il collegamento è **fisico**: una seconda voce di directory
+per l'inode della destinazione stessa. Entrambi i nomi raggiungono un
+solo file, una scrittura tramite l'uno è visibile tramite l'altro, e lo
+spazio del file resta finché non si rimuove l'ultimo nome. Entrambi i
+nomi devono stare su un solo volume, e a una directory non si dà mai un
+secondo nome: è perché l'albero dei file resta un albero che `..`
+indica la directory da cui si è realmente passati.
+
+Con `-s` il collegamento è **simbolico**, e la sua destinazione è
+memorizzata **letteralmente** e non è mai risolta: può essere relativa,
+contenere `..` e non nominare nulla, quindi un tale collegamento può
+legittimamente pendere. La sua grammatica è comunque verificata prima
+della scrittura, così una destinazione che nessun risolutore potrebbe
+percorrere è rifiutata. Creare un collegamento dell'uno o dell'altro
+tipo non concede alcuna autorità su ciò che nomina: ogni uso successivo
+è autorizzato componente per componente sotto la vostra identità.
 
 Un nome di collegamento già occupato è rifiutato a meno che `-f` o `-i`
 dica di sostituirlo. Il nuovo collegamento prende allora il posto del
@@ -40,14 +49,6 @@ stesso.
 Un collegamento che non si può creare è segnalato, e il successivo è
 creato comunque. `--` termina l'analisi delle opzioni: ogni argomento
 successivo è un operando.
-
-Senza `-s` il collegamento è **fisico**: una seconda voce di directory
-per l'inode della destinazione stessa. Entrambi i nomi raggiungono un
-solo file, una scrittura tramite l'uno è visibile tramite l'altro, e lo
-spazio del file resta finché non si rimuove l'ultimo nome. Entrambi i
-nomi devono stare su un solo volume, e a una directory non si dà mai un
-secondo nome: è perché l'albero dei file resta un albero che `..`
-indica la directory da cui si è realmente passati.
 
 `-r` memorizza il bersaglio di un collegamento simbolico relativamente
 alla directory del collegamento stesso. Il filesystem canonizza prima
@@ -96,6 +97,8 @@ sicurezza.
 
 ## EXAMPLES
 
+- `ln notes.txt notes.bak` — dare a un file un secondo nome; rimuovere
+  l'uno o l'altro lascia intatti l'altro e il suo contenuto.
 - `ln -s /System/Commands/ls.app tools/ls` — collegare un nome a un
   pacchetto.
 - `ln -s ../shared/notes.txt` — collegare `notes.txt` qui a una

@@ -28,6 +28,18 @@ RISC OS Sprite. Un archivo que el decodificador rechaza declara su motivo en
 la ventana y en la salida de error estándar; la ventana nunca se deja en
 blanco y nunca se fabrica una imagen.
 
+También reproduce películas WebM con su sonido, como las grabaciones de
+pantalla del propio escritorio. Una película se abre en pausa sobre su primera
+imagen; la herramienta de reproducción y `Space` la reproducen y la pausan.
+Bajo la imagen, una barra de búsqueda muestra cuánto se ha avanzado en la
+película, con el tiempo reproducido y la duración de la película al lado:
+arrastre a lo largo de ella, o púlsela, para ir al fotograma clave más cercano
+en ese punto o antes de él. Una grabación que no declara su duración — una
+cuya grabadora se detuvo inesperadamente — se reproduce desde su inicio, pero
+no admite búsquedas. Una película cortada, o que deja de decodificarse, se
+reproduce hasta donde puede y declara por qué se detuvo; una película cuyo
+sonido no puede reproducirse continúa en silencio y lo indica.
+
 Varios documentos a la vez son varias ventanas del mismo visor: comparar dos
 imágenes una al lado de la otra es abrir la segunda. Cerrar una ventana deja
 el visor en la barra de iconos, listo para el siguiente documento; la fila
@@ -59,7 +71,7 @@ transparente se lea como transparente y no como el color que hay detrás.
 * `[` / `]` — un cuarto de giro a la izquierda o a la derecha
 * `M` — reflejar de izquierda a derecha
 * `I` — mostrar u ocultar el panel de información
-* `Space` — reproducir o pausar una animación
+* `Space` — reproducir o pausar una animación o una película
 * `O` — elegir otro documento
 * `Page Up` / `Page Down` — entrada anterior o siguiente
 * `Home` / `End` — primera o última entrada

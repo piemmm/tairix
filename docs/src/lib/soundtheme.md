@@ -30,6 +30,11 @@ cue it (`CueAuthority`), and `SoundAsset::of` names the asset it plays:
 | `NotificationMessage` | `notification_message` | application |
 | `NotificationReminder` | `notification_reminder` | application |
 | `Error`, `Warning`, `Info` | `error`, `warning`, `info` | application |
+| `VolumeFeedback` | `volume` | application |
+
+`is_effect` says which events are sound effects: every one but
+`VolumeFeedback`, which tells the listener how loud the default output now is,
+so the settings' switch and gain do not reach it.
 
 An asset is stored as `<name>.flac`. A file named for no asset is an orphan, and
 the build refuses it.
@@ -57,11 +62,14 @@ legal name once, in name order.
 
 ## The shipped set
 
-`assets/TAIRiX/` holds the twelve assets, 48 kHz stereo 16-bit FLAC, about
-554 KiB against 3.1 MiB of raw samples. `cargo xtask sound-encode
-[--theme <name>] <master.wav>...` encodes an authored master into a theme with
-the first-party encoder, deterministically, and decodes the result back sample
-for sample before writing it; from then on the FLAC is the master.
+`assets/TAIRiX/` holds the thirteen assets, 48 kHz stereo 16-bit FLAC; the
+twelve authored ones are about 554 KiB against 3.1 MiB of raw samples.
+`cargo xtask sound-encode [--theme <name>] <master.wav>...` encodes an authored
+master into a theme with the first-party encoder, deterministically, and
+decodes the result back sample for sample before writing it; from then on the
+FLAC is the master. `volume` is synthesised instead: `cargo xtask sound-encode
+--synthesised` makes it from its kept generator, and a host test holds the
+shipped file to the generator's samples.
 
 `tools/syshelp` holds every asset to the authoring contract as it plants it
 under `/System/Audio/Sounds/<Theme>/`: decoded in full, 48 kHz stereo 16-bit,
@@ -82,8 +90,10 @@ than it does for artwork.
 | `sound.<event>.enabled` | `true` / `false` | `true` |
 | `sound.<event>.file` | an absolute path, or empty for none | none |
 
-`<event>` is the event's stable name (`device_attached`, `bell`, …). The gain
-is one level for every sound, not one an event carries: an event that is too
+`<event>` is the event's stable name (`device_attached`, `bell`, …).
+`sound.enabled` and `sound.gain` are the sound effects', so
+`sound.volume_feedback.enabled` alone decides the volume's feedback. The gain
+is one level for every sound effect, not one an event carries: an event that is too
 loud plays another file or none. It is an `AudioGain`, so it can only turn
 sounds down: unity plays each asset bit-exact. A file is a `SettingPath`;
 whoever opens it reads untrusted bytes under its own identity.
@@ -117,7 +127,9 @@ the session stores it.
 ## Resolution
 
 `resolve(event, settings, own, holds)` is the one order a cue resolves in:
-silence if the event or every sound is off, the file chosen for the event where
+silence if the event is off, or if it is a sound effect and every effect is;
+then, at the settings' gain for an effect and at unity for the volume's
+feedback, the file chosen for the event where
 there is one — the session's own, or the machine's replacement — the active
 theme's asset, the shipped theme's, else silence (`NoAsset`). `holds` answers whether a theme holds an asset, and is asked about
 the shipped theme only when the active one has none. It is a pure function of

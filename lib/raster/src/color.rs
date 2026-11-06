@@ -162,6 +162,70 @@ impl Color {
             a: self.a,
         }
     }
+
+    /// Premultiply this colour exactly, at sixteen bits a channel.
+    #[must_use]
+    #[inline]
+    pub fn premultiply16(self) -> Pixel16 {
+        let a = u16::from(self.a);
+        Pixel16 {
+            r: u16::from(self.r) * a,
+            g: u16::from(self.g) * a,
+            b: u16::from(self.b) * a,
+            a: a * 255,
+        }
+    }
+}
+
+/// A premultiplied pixel at sixteen bits a channel: each colour channel its
+/// straight level times the alpha, and the alpha its level times 255, so every
+/// colour channel is `<= a`.
+///
+/// An eight-bit colour premultiplies into it ([`Color::premultiply16`]) and
+/// comes back out ([`unpremultiply`](Self::unpremultiply)) exactly, so work
+/// that averages pixels pass after pass — a Gaussian of box blurs
+/// ([`box_blur16`](crate::box_blur16)) — rounds once a pass at sixteen bits,
+/// and a translucent pixel keeps its colour.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Pixel16 {
+    /// Red, premultiplied by the alpha.
+    pub r: u16,
+    /// Green, premultiplied by the alpha.
+    pub g: u16,
+    /// Blue, premultiplied by the alpha.
+    pub b: u16,
+    /// Alpha, at most `255 × 255`.
+    pub a: u16,
+}
+
+impl Pixel16 {
+    /// Fully transparent.
+    pub const TRANSPARENT: Self = Self {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 0,
+    };
+
+    /// The straight colour this pixel holds, each channel rounded to the
+    /// nearest level; clear where its alpha rounds to none.
+    #[must_use]
+    pub fn unpremultiply(self) -> Color {
+        let alpha = u32::from(self.a);
+        let level = (alpha + 127) / 255;
+        if level == 0 {
+            return Color::TRANSPARENT;
+        }
+        let channel = |value: u16| {
+            u8::try_from(((u32::from(value) * 255 + alpha / 2) / alpha).min(255)).unwrap_or(u8::MAX)
+        };
+        Color {
+            r: channel(self.r),
+            g: channel(self.g),
+            b: channel(self.b),
+            a: u8::try_from(level).unwrap_or(u8::MAX),
+        }
+    }
 }
 
 /// A premultiplied-alpha pixel: every colour channel is `<= a`.

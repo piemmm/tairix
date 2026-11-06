@@ -59,25 +59,26 @@ use tairix_abi::{
     HwMatchKey, HwMatchKind, HwNode, HwProperty, HwResource, HwResourceKind, IpcMessageHeader,
     KernelMemoryStats, KeyInput, LibraryCategory, LibraryScope, LimitKind, LinkFlags, LoadAverage,
     LoadHeader, ManifestHeader, MapFlags, MountAvailability, MountRecord, NamedKeyCode,
-    NeededLibrary, NoticeTopic, OpenFlags, PageRequest, PeerWatchOp, PointerButtonCode,
-    PointerInput, PortName, PowerAction, ProcessRecord, ProcessStartHeader, ProcessState,
-    RandomFlags, ReaddirFrom, RealpathMode, RenameFlags, ResourceLimit, ResourceLimitRecord,
-    RxePermission, SchedPriority, SeekRegion, Segment, SelfAccountRecord, Severity, Signal,
-    SignalIntakeOp, StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity,
-    Time64, UnlinkFlags, Uptime, UserDirectoryRecord, ViewBindingRecord, WaitFlags, WaitSetOp,
-    WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES,
-    APPINFO_MAX_MIME, BROWSE_ENTRY_LEN, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
-    BUNDLE_PURPOSE_MAX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CALL_DEADLINE_NONE,
-    CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS,
-    DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,
-    DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN,
-    DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
-    FS_MODE_MASK, FS_UMASK_BITS, FS_UMASK_QUERY, GRANT_EXTENT_INHERIT, HOSTNAME_MAX,
-    HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS,
-    HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED,
-    KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED_BY, KIND_PRESSED,
-    KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC,
-    LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX, LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX,
+    NeededLibrary, NoticeTopic, OpenFlags, PageRequest, PeerWatchOp, PhysicalKey,
+    PointerButtonCode, PointerInput, PortName, PowerAction, ProcessRecord, ProcessStartHeader,
+    ProcessState, RandomFlags, ReaddirFrom, RealpathMode, RenameFlags, ResourceLimit,
+    ResourceLimitRecord, RxePermission, SchedPriority, SeekRegion, Segment, SelfAccountRecord,
+    Severity, Signal, SignalIntakeOp, StdInfoKind, StringSlot, SysinfoQueryId,
+    SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime, UserDirectoryRecord,
+    ViewBindingRecord, WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC,
+    APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN,
+    BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_TITLE_MAX,
+    BUNDLE_VERSION_MAX, BUTTON_NONE, CALL_DEADLINE_NONE, CAPABILITY_ID_MAX,
+    COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, DRIVER_MANIFEST_MAGIC,
+    DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
+    DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
+    ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, FS_UMASK_BITS,
+    FS_UMASK_QUERY, GRANT_EXTENT_INHERIT, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
+    HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT,
+    IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED,
+    KIND_KEY_RELEASED, KIND_MODIFIERS_CHANGED, KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED,
+    KIND_SCROLLED, LIBRARY_ICON_MAX, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED,
+    LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX, LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX,
     LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX,
     MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN,
     MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX,
@@ -1087,9 +1088,10 @@ fn generate_manifest() -> String {
 ///
 /// Declares the pointer ([`PointerInput`]) and keyboard ([`KeyInput`]) record
 /// magics and packed wire sizes, the untimed `pointer_inject` device time, the
-/// `kind`, `button`, `key_class`, and modifier field codes, and the
-/// [`PointerButtonCode`] / [`NamedKeyCode`] `#[repr(u16)]` discriminant sets. Both records are hand-serialised
-/// little-endian byte images (not a `#[repr(C)]` struct), so the header
+/// `kind`, `button`, `key_class`, and modifier field codes, the
+/// [`PointerButtonCode`] / [`NamedKeyCode`] `#[repr(u16)]` discriminant sets,
+/// and the [`PhysicalKey`] usages `lib/abi` names. Both records are
+/// hand-serialised little-endian byte images (not a `#[repr(C)]` struct), so the header
 /// exports their field codes and wire sizes rather than a C struct mirror; a
 /// [`Errno`] decoder on the Rust side validates the bytes. Every value is read
 /// from `lib/abi`, never re-typed; only the C spelling lives here.
@@ -1144,15 +1146,8 @@ fn generate_input() -> String {
         out.push('\n');
     };
     emit(
-        "Record `kind` codes: pointer moves/clicks/scroll then key down/up (uint16_t).",
-        &[
-            ("TAIRIX_INPUT_KIND_MOVED_BY", KIND_MOVED_BY),
-            ("TAIRIX_INPUT_KIND_PRESSED", KIND_PRESSED),
-            ("TAIRIX_INPUT_KIND_RELEASED", KIND_RELEASED),
-            ("TAIRIX_INPUT_KIND_SCROLLED", KIND_SCROLLED),
-            ("TAIRIX_INPUT_KIND_KEY_PRESSED", KIND_KEY_PRESSED),
-            ("TAIRIX_INPUT_KIND_KEY_RELEASED", KIND_KEY_RELEASED),
-        ],
+        "Record `kind` codes: pointer moves/clicks/scroll, key down/up, modifier change (uint16_t).",
+        &INPUT_KINDS,
         false,
     );
     emit(
@@ -1191,6 +1186,11 @@ fn generate_input() -> String {
         "Named non-character key codes carried in a record's `named` field (uint16_t).",
         &NAMED_KEY_CODES,
         false,
+    );
+    emit(
+        "Physical keys: a key record's `physical` field (bytes 18..20) is its HID Keyboard/Keypad-page usage; these are the ones the ABI names (uint16_t).",
+        &PHYSICAL_KEYS,
+        true,
     );
 
     out.push_str("#endif /* TAIRIX_INPUT_H */\n");
@@ -1251,6 +1251,71 @@ fn push_touch_frame(out: &mut String) {
 /// code, read from `lib/abi` via [`NamedKeyCode::code`]. Only the C *name*
 /// lives here (Rust offers no variant-name reflection); the numeric value is
 /// the source of truth and is pinned by the in-module test.
+/// The input records' `kind` codes, shared by the generator and its test.
+const INPUT_KINDS: [(&str, u16); 7] = [
+    ("TAIRIX_INPUT_KIND_MOVED_BY", KIND_MOVED_BY),
+    ("TAIRIX_INPUT_KIND_PRESSED", KIND_PRESSED),
+    ("TAIRIX_INPUT_KIND_RELEASED", KIND_RELEASED),
+    ("TAIRIX_INPUT_KIND_SCROLLED", KIND_SCROLLED),
+    ("TAIRIX_INPUT_KIND_KEY_PRESSED", KIND_KEY_PRESSED),
+    ("TAIRIX_INPUT_KIND_KEY_RELEASED", KIND_KEY_RELEASED),
+    (
+        "TAIRIX_INPUT_KIND_MODIFIERS_CHANGED",
+        KIND_MODIFIERS_CHANGED,
+    ),
+];
+
+/// The [`PhysicalKey`] constants `lib/abi` names.
+const PHYSICAL_KEYS: [(&str, u16); 17] = [
+    ("TAIRIX_PHYSICAL_KEY_UNKNOWN", PhysicalKey::UNKNOWN.usage()),
+    ("TAIRIX_PHYSICAL_KEY_A", PhysicalKey::A.usage()),
+    ("TAIRIX_PHYSICAL_KEY_DIGIT_3", PhysicalKey::DIGIT_3.usage()),
+    ("TAIRIX_PHYSICAL_KEY_DIGIT_4", PhysicalKey::DIGIT_4.usage()),
+    ("TAIRIX_PHYSICAL_KEY_DIGIT_5", PhysicalKey::DIGIT_5.usage()),
+    ("TAIRIX_PHYSICAL_KEY_ESCAPE", PhysicalKey::ESCAPE.usage()),
+    ("TAIRIX_PHYSICAL_KEY_SPACE", PhysicalKey::SPACE.usage()),
+    (
+        "TAIRIX_PHYSICAL_KEY_CAPS_LOCK",
+        PhysicalKey::CAPS_LOCK.usage(),
+    ),
+    (
+        "TAIRIX_PHYSICAL_KEY_NUM_LOCK",
+        PhysicalKey::NUM_LOCK.usage(),
+    ),
+    (
+        "TAIRIX_PHYSICAL_KEY_LEFT_CTRL",
+        PhysicalKey::LEFT_CTRL.usage(),
+    ),
+    (
+        "TAIRIX_PHYSICAL_KEY_LEFT_SHIFT",
+        PhysicalKey::LEFT_SHIFT.usage(),
+    ),
+    (
+        "TAIRIX_PHYSICAL_KEY_LEFT_ALT",
+        PhysicalKey::LEFT_ALT.usage(),
+    ),
+    (
+        "TAIRIX_PHYSICAL_KEY_LEFT_GUI",
+        PhysicalKey::LEFT_GUI.usage(),
+    ),
+    (
+        "TAIRIX_PHYSICAL_KEY_RIGHT_CTRL",
+        PhysicalKey::RIGHT_CTRL.usage(),
+    ),
+    (
+        "TAIRIX_PHYSICAL_KEY_RIGHT_SHIFT",
+        PhysicalKey::RIGHT_SHIFT.usage(),
+    ),
+    (
+        "TAIRIX_PHYSICAL_KEY_RIGHT_ALT",
+        PhysicalKey::RIGHT_ALT.usage(),
+    ),
+    (
+        "TAIRIX_PHYSICAL_KEY_RIGHT_GUI",
+        PhysicalKey::RIGHT_GUI.usage(),
+    ),
+];
+
 const NAMED_KEY_CODES: [(&str, u16); 26] = [
     ("TAIRIX_KEY_ENTER", NamedKeyCode::Enter.code()),
     ("TAIRIX_KEY_ESCAPE", NamedKeyCode::Escape.code()),
@@ -1712,6 +1777,8 @@ fn generate_process() -> String {
          \x20   uint64_t total_len;\n\
          \x20   uint64_t canary;\n\
          \x20   uint64_t cpu_features;\n\
+         \x20   uint64_t heap_base;\n\
+         \x20   uint64_t heap_len;\n\
          } tairix_process_start_header_t;\n\n",
     );
 
@@ -2109,6 +2176,10 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
         ),
         ("TAIRIX_MOUNT_DEGRADED", MountAvailability::Degraded),
         ("TAIRIX_MOUNT_RECOVERING", MountAvailability::Recovering),
+        (
+            "TAIRIX_MOUNT_REPLAY_UNCONFIRMED",
+            MountAvailability::ReplayUnconfirmed,
+        ),
     ];
     for (name, state) in mount_availabilities {
         let _ = writeln!(out, "#define {name} ((uint8_t){}u)", state.as_u8());
@@ -2311,8 +2382,11 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          * its transport is TAIRIX_BLK_TRANSPORT_UNDECLARED when no block device\n\
          * backs it or its medium was not recognised -- never a guess.\n\
          * `usage` is the backing volume's space accounting (all-zero when none is\n\
-         * known). `volume_id` is the volume's stable published identity (all-zero\n\
-         * when the mount has none), the identity a volume_detach request names.\n\
+         * known). `volume_id` is the key the volume is published under (all-zero\n\
+         * when the mount has none), the key a volume_detach request names, and\n\
+         * `identity` the identity its content carries: volume_id but for a twin,\n\
+         * which is published under a key of its own; all-zero exactly when\n\
+         * volume_id is.\n\
          * `owner` is the uid that attached a network or disk-image volume,\n\
          * TAIRIX_MOUNT_NO_OWNER for one no one owns; `volume_class` is a\n\
          * TAIRIX_VOLUME_CLASS_*; `private_to_owner` is 1 for a volume presented\n\
@@ -2322,6 +2396,8 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          * `source_cut` is 1 when the source is only the first bytes of a longer\n\
          * name, cut between characters to fit. `title` is the volume's own\n\
          * label: empty where its filesystem records none, and on a withheld record.\n\
+         * `titled` is 1 where the volume's format takes a title a retitle can set,\n\
+         * else 0, and 0 on a withheld record.\n\
          * The inline source/target/fstype/title buffers are valid for their\n\
          * respective *_len byte counts. */\n\
          typedef struct tairix_mount_record {\n\
@@ -2333,6 +2409,7 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   tairix_blk_medium_t medium;\n\
          \x20   tairix_volume_stats_t usage;\n\
          \x20   uint8_t volume_id[TAIRIX_VOLUME_ID_LEN];\n\
+         \x20   uint8_t identity[TAIRIX_VOLUME_ID_LEN];\n\
          \x20   uint32_t owner;\n\
          \x20   uint8_t volume_class;\n\
          \x20   uint8_t private_to_owner;\n\
@@ -2343,6 +2420,7 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint8_t fstype[TAIRIX_MOUNT_FSTYPE_MAX];\n\
          \x20   uint8_t title_len;\n\
          \x20   uint8_t title[TAIRIX_VOLUME_TITLE_MAX];\n\
+         \x20   uint8_t titled;\n\
          } tairix_mount_record_t;\n\n",
     "/* One view binding: a view path (`target`), the path within an attached\n\
          * volume it shows (`subtree`, `/` for the volume's root), and the\n\
@@ -3039,6 +3117,7 @@ fn generate_syscall() -> String {
     emit_attach_contract(&mut out);
     emit_detach_contract(&mut out);
     emit_retitle_contract(&mut out);
+    emit_replay_contract(&mut out);
     emit_readdir_contract(&mut out);
     emit_dir_watch_contract(&mut out);
     emit_grant_contract(&mut out);
@@ -3844,8 +3923,8 @@ fn emit_grant_contract(out: &mut String) {
     out.push_str(
         "/* fd_grant() write_ceiling that passes on the grantor's own reach: unbounded\n\
          * for a file it opened itself, what it was handed for one it was delegated.\n\
-         * A writable descriptor refuses a zero ceiling, so its reach is always asked\n\
-         * for: a stated bound, or this. */\n",
+         * A writable file refuses a zero ceiling, so its reach is always asked for:\n\
+         * a stated bound, or this. A pipe end has no extent and takes zero. */\n",
     );
     let _ = writeln!(
         out,
@@ -4249,14 +4328,37 @@ fn emit_retitle_contract(out: &mut String) {
     use tairix_abi::volume::{VOLUME_ID_LEN, VOLUME_RETITLE_MAX_LEN};
     let _ = writeln!(
         out,
-        "/* The frame volume_retitle() takes: the {VOLUME_ID_LEN}-byte identity an attach\n\
-         \x20* reply names, one length byte, then that many bytes of UTF-8 with no\n\
-         \x20* control character, at most TAIRIX_VOLUME_TITLE_MAX; none clears it. */"
+        "/* The frame volume_retitle() takes: the {VOLUME_ID_LEN}-byte key a mount record\n\
+         \x20* names, one length byte, then that many bytes of UTF-8 with no control\n\
+         \x20* character, at most TAIRIX_VOLUME_TITLE_MAX; none clears it. */"
     );
     let _ = writeln!(
         out,
         "#define TAIRIX_VOLUME_RETITLE_MAX_LEN {VOLUME_RETITLE_MAX_LEN}u"
     );
+    out.push('\n');
+}
+
+/// Emit the frame `volume_replay()` takes, its length and answers read from
+/// `lib/abi` and the answers spelled by an exhaustive match, so an answer
+/// added there fails this build until it is named here.
+fn emit_replay_contract(out: &mut String) {
+    use std::fmt::Write as _;
+    use tairix_abi::volume::{ReplayAnswer, VOLUME_ID_LEN, VOLUME_REPLAY_LEN};
+    let _ = writeln!(
+        out,
+        "/* The frame volume_replay() takes: the {VOLUME_ID_LEN}-byte key a mount record\n\
+         \x20* awaiting an answer names, then one TAIRIX_VOLUME_REPLAY_* byte. The mount\n\
+         \x20* authority answers for any such volume, the process holding the seat for\n\
+         \x20* a removable one. */"
+    );
+    let _ = writeln!(out, "#define TAIRIX_VOLUME_REPLAY_LEN {VOLUME_REPLAY_LEN}u");
+    emit_u8_discriminants(out, "TAIRIX_VOLUME_REPLAY", |raw| {
+        ReplayAnswer::from_u8(raw).ok().map(|answer| match answer {
+            ReplayAnswer::Write => "WRITE",
+            ReplayAnswer::Discard => "DISCARD",
+        })
+    });
     out.push('\n');
 }
 
@@ -5491,9 +5593,8 @@ mod tests {
     fn input_header_pins_constants_and_discriminants() {
         use tairix_abi::{
             KeyInput, NamedKeyCode, PointerButtonCode, PointerInput, BUTTON_NONE, KEY_CLASS_CHAR,
-            KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED_BY,
-            KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META,
-            MOD_SHIFT, POINTER_INPUT_MAGIC,
+            KEY_CLASS_NAMED, KEY_INPUT_MAGIC, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT,
+            POINTER_INPUT_MAGIC,
         };
         let h = body("tairix_input.h");
         assert!(h.contains("#ifndef TAIRIX_INPUT_H"), "guard present");
@@ -5513,13 +5614,7 @@ mod tests {
                 tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT
             ),
         ];
-        for (name, value) in [
-            ("TAIRIX_INPUT_KIND_MOVED_BY", KIND_MOVED_BY),
-            ("TAIRIX_INPUT_KIND_PRESSED", KIND_PRESSED),
-            ("TAIRIX_INPUT_KIND_RELEASED", KIND_RELEASED),
-            ("TAIRIX_INPUT_KIND_SCROLLED", KIND_SCROLLED),
-            ("TAIRIX_INPUT_KIND_KEY_PRESSED", KIND_KEY_PRESSED),
-            ("TAIRIX_INPUT_KIND_KEY_RELEASED", KIND_KEY_RELEASED),
+        for (name, value) in INPUT_KINDS.into_iter().chain([
             ("TAIRIX_INPUT_BUTTON_NONE", BUTTON_NONE),
             (
                 "TAIRIX_POINTER_BUTTON_PRIMARY",
@@ -5535,7 +5630,7 @@ mod tests {
             ),
             ("TAIRIX_KEY_CLASS_CHAR", KEY_CLASS_CHAR),
             ("TAIRIX_KEY_CLASS_NAMED", KEY_CLASS_NAMED),
-        ] {
+        ]) {
             expected.push(format!("#define {name} ((uint16_t){value}u)"));
         }
         for (name, bits) in [
@@ -5549,6 +5644,9 @@ mod tests {
         }
         for (name, code) in NAMED_KEY_CODES {
             expected.push(format!("#define {name} ((uint16_t){code}u)"));
+        }
+        for (name, usage) in PHYSICAL_KEYS {
+            expected.push(format!("#define {name} ((uint16_t){usage:#x}u)"));
         }
         {
             use tairix_abi::touch::{
@@ -5782,6 +5880,7 @@ mod tests {
 
     #[test]
     fn process_header_pins_layout_constants_and_sizes() {
+        use core::mem::offset_of;
         use tairix_abi::{
             ProcessStartHeader, StringSlot, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
             PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
@@ -5819,6 +5918,20 @@ mod tests {
             core::mem::size_of::<ProcessStartHeader>(),
             ProcessStartHeader::WIRE_LEN,
             "ProcessStartHeader repr(C) size equals wire len"
+        );
+        assert_eq!(
+            c_field_offsets(&h, "tairix_process_start_header"),
+            named(&[
+                ("magic", offset_of!(ProcessStartHeader, magic)),
+                ("abi_version", offset_of!(ProcessStartHeader, abi_version)),
+                ("arg_count", offset_of!(ProcessStartHeader, arg_count)),
+                ("env_count", offset_of!(ProcessStartHeader, env_count)),
+                ("total_len", offset_of!(ProcessStartHeader, total_len)),
+                ("canary", offset_of!(ProcessStartHeader, canary)),
+                ("cpu_features", offset_of!(ProcessStartHeader, cpu_features)),
+                ("heap_base", offset_of!(ProcessStartHeader, heap_base)),
+                ("heap_len", offset_of!(ProcessStartHeader, heap_len)),
+            ])
         );
         assert_eq!(
             core::mem::size_of::<StringSlot>(),
@@ -6010,9 +6123,6 @@ mod tests {
         );
     }
 
-    /// The fields of `typedef struct <tag>` in `header`, reserved padding left
-    /// out, at the offsets a C compiler lays them out at. The struct may name
-    /// only fixed-width unsigned integers and arrays of them.
     /// The filesystem records' C fields lie where `lib/abi` lays them out, so
     /// a field added on one side and not the other is caught even where it
     /// leaves the size unchanged.
@@ -6061,6 +6171,9 @@ mod tests {
             .collect()
     }
 
+    /// The fields of `typedef struct <tag>` in `header`, reserved padding left
+    /// out, at the offsets a C compiler lays them out at. The struct may name
+    /// only fixed-width integers and arrays of them.
     fn c_field_offsets(header: &str, tag: &str) -> Vec<(String, usize)> {
         c_field_offsets_with(header, tag, &[])
     }
@@ -6335,7 +6448,7 @@ mod tests {
             (
                 "MountRecord",
                 core::mem::size_of::<MountRecord>(),
-                488,
+                504,
                 core::mem::align_of::<MountRecord>(),
                 8,
             ),
@@ -6622,7 +6735,7 @@ mod tests {
             ("tairix_manifest.h", "} tairix_manifest_header_t;", size_of::<ManifestHeader>(), 144, align_of::<ManifestHeader>(), 4),
             ("tairix_appinfo.h", "} tairix_appinfo_header_t;", size_of::<AppInfoHeader>(), 732, align_of::<AppInfoHeader>(), 4),
             ("tairix_rxe.h", "} tairix_load_header_t;", size_of::<LoadHeader>(), 56, align_of::<LoadHeader>(), 8),
-            ("tairix_process.h", "} tairix_process_start_header_t;", size_of::<ProcessStartHeader>(), 40, align_of::<ProcessStartHeader>(), 8),
+            ("tairix_process.h", "} tairix_process_start_header_t;", size_of::<ProcessStartHeader>(), 56, align_of::<ProcessStartHeader>(), 8),
             ("tairix_process.h", "} tairix_string_slot_t;", size_of::<StringSlot>(), 8, align_of::<StringSlot>(), 4),
             ("tairix_sysinfo.h", "} tairix_sysinfo_request_header_t;", size_of::<SysinfoRequestHeader>(), 16, align_of::<SysinfoRequestHeader>(), 4),
             ("tairix_sysinfo.h", "} tairix_page_request_t;", size_of::<PageRequest>(), 12, align_of::<PageRequest>(), 4),
@@ -6631,7 +6744,7 @@ mod tests {
             ("tairix_sysinfo.h", "} tairix_uptime_t;", size_of::<Uptime>(), 32, align_of::<Uptime>(), 8),
             ("tairix_sysinfo.h", "} tairix_load_average_t;", size_of::<LoadAverage>(), 24, align_of::<LoadAverage>(), 4),
             ("tairix_sysinfo.h", "} tairix_system_identity_t;", size_of::<SystemIdentity>(), 88, align_of::<SystemIdentity>(), 2),
-            ("tairix_sysinfo.h", "} tairix_mount_record_t;", size_of::<MountRecord>(), 488, align_of::<MountRecord>(), 8),
+            ("tairix_sysinfo.h", "} tairix_mount_record_t;", size_of::<MountRecord>(), 504, align_of::<MountRecord>(), 8),
             ("tairix_sysinfo.h", "} tairix_view_binding_record_t;", size_of::<ViewBindingRecord>(), 160, align_of::<ViewBindingRecord>(), 4),
             ("tairix_sysinfo.h", "} tairix_volume_removal_record_t;", size_of::<VolumeRemovalRecord>(), 32, align_of::<VolumeRemovalRecord>(), 8),
             ("tairix_driver.h", "} tairix_volume_stats_t;", size_of::<VolumeStats>(), 48, align_of::<VolumeStats>(), 8),

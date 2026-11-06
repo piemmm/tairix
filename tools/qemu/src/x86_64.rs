@@ -346,6 +346,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     };
     argv.extend(crate::audio_wav_args(spec, sound));
     argv.extend(crate::optical_disc_args(spec));
+    argv.extend(crate::usb_stick_args(spec));
 
     argv
 }
@@ -379,6 +380,7 @@ mod tests {
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             optical_disc: None,
+            usb_sticks: Vec::new(),
             sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,

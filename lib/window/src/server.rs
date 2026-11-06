@@ -68,6 +68,7 @@ use tairix_abi::window_ipc::{
     WINDOW_PICKED_FILE_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX,
     WINDOW_WALLPAPERS_REPLY_MAX,
 };
+use tairix_abi::window_ipc::{LandingStep, DROP_LANDINGS_MAX};
 pub use tairix_abi::window_ipc::{WindowSizeState, WindowSizing};
 use tairix_abi::{BundleId, CapabilityId, Errno};
 use tairix_display::{add_damage, damage_list, FrameRegion, ShmMapper};
@@ -129,6 +130,18 @@ pub const WINDOW_REPLY_MAX: usize = {
         ),
     )
 };
+
+/// What [`WindowServer::serve`] made of one request.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Served {
+    /// Answer the call now with this many bytes of the reply buffer.
+    Reply(usize),
+    /// The answer is withheld: a present whose window holds a frame the
+    /// desktop has yet to show, answered through
+    /// [`WindowServer::send_answers`] once that frame is shown or refused, or
+    /// something supersedes it.
+    Withheld,
+}
 
 /// Where a carried drag is, as the host reports it ([`WindowServer::report_drag`]).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -207,6 +220,12 @@ const CLIENT_FRAME_RAM_DIVISOR: u64 = 2;
 /// frame; the rest is stacked-under, minimised, and double-buffered windows.
 /// Enough of those that no ordinary desktop meets the bound, and still a bound.
 const CLIENT_FRAME_SCREENFULS: u64 = 32;
+
+/// Why a pick was refused past one of the bounds on the picks open: the
+/// window's, the application's, and its folder pick's.
+const PICK_ON_WINDOW: &str = "the window has a pick open";
+const PICKS_PER_APPLICATION: &str = "the application has as many picks open as it may";
+const FOLDER_PICK_OPEN: &str = "the application has a folder pick open";
 
 /// The bytes of window frame one attested client may hold mapped in the
 /// session at once.
@@ -376,6 +395,10 @@ pub trait WindowHost {
     /// `spec.carry` is set and the parent holds the seat's primary press,
     /// under the pointer, that press carried on as a move of the new window —
     /// and stacks it with its parent, off the taskbar, without the keyboard.
+    /// A `spec.sizing` the user may resize it within gives it resize edges,
+    /// never a maximize, the host enforcing the range as a window's; each
+    /// size a drag settles is delivered as a [`WindowEvent::Resized`] on the
+    /// tool window's own id.
     ///
     /// An error refuses it exactly as [`popup_opened`](Self::popup_opened)'s
     /// does, and the default accepts it without drawing anything.
@@ -514,8 +537,9 @@ pub trait WindowHost {
     /// the client and the previous title stands.
     fn window_retitled(&mut self, window_id: u64, title: &str) -> Result<(), Errno>;
 
-    /// A validated `SetSizing`: the attested owner of live `window_id`
-    /// restated the range a *user* may resize it within. The host adopts it
+    /// A validated `SetSizing`: the attested owner of live `window_id` — a
+    /// window or a tool window — restated the range a *user* may resize it
+    /// within. The host adopts it
     /// as the range it enforces from here on, in place of the one the
     /// `Create` declared.
     ///
@@ -553,19 +577,35 @@ pub trait WindowHost {
     fn window_closed(&mut self, window_id: u64);
 
     /// A validated `PickFile`: the attested owner of live window
-    /// `window_id` (which has no pick pending) asked for the session's
-    /// trusted file picker to choose a file for `purpose`. The host opens its
-    /// picker UI and, when the user concludes, routes the outcome back
-    /// through [`WindowServer::conclude_pick`] — the engine tracks the pending
-    /// pick and enforces that exactly one conclusion follows each acceptance.
+    /// `window_id` (which has no pick pending, its application within
+    /// [`PICK_MAX_OPEN`](tairix_abi::window_ipc::PICK_MAX_OPEN)) asked for the
+    /// session's trusted file picker to choose a file for `purpose`. The
+    /// picker takes the keyboard only when `focus` — the application holds
+    /// the front, as an alert's must — and otherwise opens beneath the window
+    /// that has it. The host opens its picker UI and, when the user concludes,
+    /// routes the outcome back through [`WindowServer::conclude_pick`] — the
+    /// engine tracks the pending pick and enforces that exactly one conclusion
+    /// follows each acceptance.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the host cannot run a picker for (its one picker
-    /// slot is taken by another window's pick, it holds no filesystem
-    /// authority, the desktop is tearing down); the refusal is relayed
-    /// to the client and no pick is recorded.
-    fn pick_requested(&mut self, window_id: u64, purpose: &PickPurpose) -> Result<(), Errno>;
+    /// Any [`Errno`] the host cannot run a picker for (a lock or a system
+    /// prompt holds the seat, it shows as many picks as it may, it holds no
+    /// filesystem authority, the desktop is tearing down); the refusal is
+    /// relayed to the client and no pick is recorded.
+    fn pick_requested(
+        &mut self,
+        window_id: u64,
+        purpose: &PickPurpose,
+        focus: bool,
+    ) -> Result<(), Errno>;
+
+    /// `caller` asked for a pick on its window `window_id` past a bound on
+    /// the picks open, and was refused for `reason`: a decision for the
+    /// host's audit trail.
+    fn pick_refused(&mut self, caller: ProcId, window_id: u64, reason: &'static str) {
+        let _ = (caller, window_id, reason);
+    }
 
     /// A validated `BeginDrag`: the attested owner of live window
     /// `window_id` (which has no drag pending) began dragging `items`. The
@@ -597,6 +637,13 @@ pub trait WindowHost {
     ) -> Result<(), Errno> {
         Err(Errno::NotSupported)
     }
+
+    /// A validated `DropLanding`: the owner of window `window_id` took `step`
+    /// of the drop numbered `serial` its drag concluded on the desktop. A
+    /// window going ends every drop it was landing here, before
+    /// [`window_closed`](Self::window_closed); one a later drop displaced is
+    /// the serial [`WindowServer::conclude_drag`] answers.
+    fn drop_landing(&mut self, _window_id: u64, _serial: u32, _step: &LandingStep) {}
 
     /// A validated `SaveOfferAnswer`: the owner of window `window_id`
     /// answered the save offer numbered `serial` with whether a drop there
@@ -1167,6 +1214,10 @@ struct Pending {
     /// A frame was refused since the window last showed one, and the host was
     /// told.
     reported: bool,
+    /// The ticket of the present that replaced an unshown frame, its answer
+    /// held until the frame it named is shown or refused, or something
+    /// supersedes it.
+    withheld: Option<u64>,
 }
 
 impl Pending {
@@ -1176,6 +1227,7 @@ impl Pending {
             damage: Region::with_budget(MAX_DAMAGE_RECTS),
             refused: false,
             reported: false,
+            withheld: None,
         }
     }
 
@@ -1240,6 +1292,85 @@ impl Unshown {
             (None, _) => {}
             (Some(_), false) => self.due = self.due.saturating_sub(1),
             (Some(_), true) => self.refused = self.refused.saturating_sub(1),
+        }
+    }
+}
+
+/// One withheld present's answer, due.
+#[derive(Copy, Clone)]
+struct Answer {
+    owner: ProcId,
+    ticket: u64,
+}
+
+/// The answers to withheld presents: those due, oldest first, and how many
+/// windows still hold one.
+///
+/// Room is kept for every held answer beside those due, so one falls due — at
+/// a latch, a resize, a release or a close — without allocating.
+struct Outbox {
+    due: VecDeque<Answer>,
+    held: usize,
+}
+
+impl Outbox {
+    const fn new() -> Self {
+        Self {
+            due: VecDeque::new(),
+            held: 0,
+        }
+    }
+
+    /// Room for an answer from each of `windows` windows, and for the one a
+    /// present replacing a held one sends at once.
+    fn reserve(&mut self, windows: usize) -> Result<(), Errno> {
+        let wanted = windows.saturating_add(1);
+        self.due
+            .try_reserve(wanted.saturating_sub(self.due.len()))
+            .map_err(|_| Errno::OutOfMemory)
+    }
+
+    /// Hold `ticket`, `owner`'s present to the window `pending` belongs to,
+    /// the answer it held before falling due now. Answers whether it is held:
+    /// with no room kept for its answer it is not, and is answered at once.
+    fn hold(&mut self, pending: &mut Pending, owner: ProcId, ticket: u64) -> bool {
+        let room = self.due.capacity() - self.due.len() > self.held;
+        self.release(pending, owner);
+        if !room {
+            return false;
+        }
+        pending.withheld = Some(ticket);
+        self.held = self.held.saturating_add(1);
+        true
+    }
+
+    /// The answer `pending`, a window of `owner`'s, holds falls due.
+    fn release(&mut self, pending: &mut Pending, owner: ProcId) {
+        if let Some(ticket) = pending.withheld.take() {
+            self.held = self.held.saturating_sub(1);
+            // Room was kept for every held answer, so this never allocates.
+            self.due.push_back(Answer { owner, ticket });
+        }
+    }
+
+    /// Forget the answer `pending` holds: its caller has gone.
+    fn drop_held(&mut self, pending: &Pending) {
+        if pending.withheld.is_some() {
+            self.held = self.held.saturating_sub(1);
+        }
+    }
+
+    /// Forget every answer due to `owner`, whose calls ended with it.
+    fn forget(&mut self, owner: ProcId) {
+        self.due.retain(|answer| answer.owner != owner);
+    }
+
+    /// Send every answer due through `reply`, oldest first: a reply lands in
+    /// the room its call was posted with, so each is answered once sent.
+    fn send(&mut self, mut reply: impl FnMut(u64, &[u8])) {
+        let recorded = encode_status_reply(Ok(()));
+        while let Some(answer) = self.due.pop_front() {
+            reply(answer.ticket, &recorded);
         }
     }
 }
@@ -1379,6 +1510,8 @@ pub struct ToolSpec {
     pub carry: Option<u32>,
     /// What its mini title bar reads.
     pub title: WindowTitle,
+    /// Whether the user may resize it, and within what range of clients.
+    pub sizing: WindowSizing,
 }
 
 /// Everything one `CreateDialog` asks for: what any transient opens with,
@@ -1646,7 +1779,8 @@ struct WindowRecord<R> {
     /// pages can actually go, which needs both sides to let go. The geometry
     /// stays, so the window still lays out, hit-tests, and re-attaches.
     region: Option<R>,
-    /// The frame presented since the last the session showed.
+    /// The frame presented since the last the session showed, and the
+    /// present held behind it.
     pending: Pending,
     /// A `PickFile` was accepted for this purpose and its conclusion
     /// (`FilePicked`, `FolderPicked` or `PickCancelled`) has not been
@@ -1664,9 +1798,14 @@ struct WindowRecord<R> {
     picked_files: VecDeque<tairix_abi::window_ipc::PickedFile>,
     /// A `BeginDrag` was accepted and its `DragEnded` is still owed.
     drag_pending: bool,
-    /// The desktop folder the host last named for this window's drag, and
-    /// the report that named it, until another drag begins.
-    drag_spot: Option<(u32, String)>,
+    /// How many items the last drag began with.
+    drag_count: u32,
+    /// The desktop folder the reports of the place the drag was last on
+    /// named, until another drag begins.
+    drag_spot: Option<DragSpot>,
+    /// The drops onto the desktop the owner is still landing, the oldest
+    /// first, at most [`DROP_LANDINGS_MAX`].
+    landings: VecDeque<Landing>,
     /// Where the last drag was dropped, until the owner takes it or begins
     /// another.
     drop_target: Option<DropTarget>,
@@ -1716,6 +1855,109 @@ struct WindowRecord<R> {
 struct Transient {
     parent: u64,
     kind: TransientKind,
+}
+
+/// The desktop folder the reports of one place named, from the first of them
+/// to the last: every report a pointer resting there makes names that folder.
+struct DragSpot {
+    first: u32,
+    last: u32,
+    folder: String,
+}
+
+impl DragSpot {
+    /// Whether the report numbered `serial` was made at this place, counting
+    /// across the numbers' wrap.
+    const fn holds(&self, serial: u32) -> bool {
+        serial.wrapping_sub(self.first) <= self.last.wrapping_sub(self.first)
+    }
+}
+
+/// Hold `folder` for the report numbered `serial`: the place `spot` holds goes
+/// on where the report follows its last and names its folder, and a new place
+/// begins otherwise.
+fn hold_spot(spot: &mut Option<DragSpot>, serial: u32, folder: &str) {
+    let follows =
+        |held: &&mut DragSpot| held.folder == folder && serial == held.last.wrapping_add(1);
+    if let Some(held) = spot.as_mut().filter(follows) {
+        held.last = serial;
+        return;
+    }
+    *spot = Some(DragSpot {
+        first: serial,
+        last: serial,
+        folder: String::from(folder),
+    });
+}
+
+/// A drop onto the desktop a window's drag concluded, which its owner is
+/// still stepping ([`WindowRequest::DropLanding`]).
+struct Landing {
+    serial: u32,
+    /// How many items the drag began with: every step names one below.
+    count: u32,
+    /// The item the last `Making` named, which the next must follow.
+    last: Option<u32>,
+    /// Whether that item is still being made.
+    making: bool,
+}
+
+impl Landing {
+    /// Take `step`, or refuse it out of turn: an item past the drag's or not
+    /// after the last, a `Making` while an item is made, a `Made` for any item
+    /// but that one, or a name that is no file name.
+    fn step(&mut self, step: &LandingStep) -> Result<(), Errno> {
+        match *step {
+            LandingStep::Making { item, name } => {
+                let follows = self.last.is_none_or(|last| item > last);
+                if self.making
+                    || item >= self.count
+                    || !follows
+                    || tairix_path::validate_file_name(name.as_str()).is_err()
+                {
+                    return Err(Errno::OutOfRange);
+                }
+                self.last = Some(item);
+                self.making = true;
+            }
+            LandingStep::Made { item, .. } => {
+                if !self.making || self.last != Some(item) {
+                    return Err(Errno::OutOfRange);
+                }
+                self.making = false;
+            }
+            LandingStep::Ended => {}
+        }
+        Ok(())
+    }
+}
+
+/// Record the drop numbered `serial` of a drag of `count` items as landing,
+/// answering the landing it ended past [`DROP_LANDINGS_MAX`]. With no memory
+/// to record it, the drop lands as one never stepped does.
+fn land_drop(landings: &mut VecDeque<Landing>, serial: u32, count: u32) -> Option<u32> {
+    let ended = if landings.len() >= DROP_LANDINGS_MAX {
+        landings.pop_front().map(|landing| landing.serial)
+    } else {
+        None
+    };
+    if landings.try_reserve(1).is_ok() {
+        landings.push_back(Landing {
+            serial,
+            count,
+            last: None,
+            making: false,
+        });
+    }
+    ended
+}
+
+/// Tell `host` every drop window `window_id` was landing has ended: nothing
+/// can step one now.
+fn end_landings(host: &mut dyn WindowHost, window_id: u64, landings: &VecDeque<Landing>) {
+    for landing in landings {
+        host.drop_landing(window_id, landing.serial, &LandingStep::Ended);
+    }
 }
 
 /// What a transient is: a dialog stays until it is answered, so an alert may
@@ -1817,6 +2059,9 @@ pub struct WindowServer<M: ShmMapper> {
     /// out and in around every change to one: a latch runs only while some
     /// are counted, so a frame left out would wait for another present.
     unshown: Unshown,
+    /// The answers to presents held behind a frame not yet shown, and those
+    /// due, which [`Self::send_answers`] sends.
+    answers: Outbox,
 }
 
 impl<M: ShmMapper> WindowServer<M> {
@@ -1840,6 +2085,7 @@ impl<M: ShmMapper> WindowServer<M> {
             activations: BTreeMap::new(),
             client_frame_max,
             unshown: Unshown::NONE,
+            answers: Outbox::new(),
         }
     }
 
@@ -1884,10 +2130,15 @@ impl<M: ShmMapper> WindowServer<M> {
 
     /// Handle one received request: decode `request`, attest the caller
     /// behind `ticket`, act through `host`, and write the encoded reply
-    /// into `reply`, returning its length.
+    /// into `reply`.
     ///
     /// Every outcome — including a malformed request — is a well-formed
-    /// reply frame; the engine never leaves a caller without an answer.
+    /// reply frame; the engine never leaves a caller without an answer. A
+    /// present whose window holds a frame the desktop has yet to show is
+    /// [`Served::Withheld`] and answered through [`Self::send_answers`] once
+    /// that frame is shown or refused, or something supersedes it, so a
+    /// client drawing faster than the desktop shows frames is held to the
+    /// desktop's pace.
     pub fn serve(
         &mut self,
         host: &mut dyn WindowHost,
@@ -1896,27 +2147,55 @@ impl<M: ShmMapper> WindowServer<M> {
         ticket: u64,
         request: &[u8],
         reply: &mut [u8; WINDOW_REPLY_MAX],
-    ) -> usize {
+    ) -> Served {
         let decoded = match WindowRequest::from_bytes(request) {
             Ok(decoded) => decoded,
-            Err(err) => return status(reply, Err(err)),
+            Err(err) => return Served::Reply(status(reply, Err(err))),
         };
         let caller = match identity.caller(ticket) {
             Ok(caller) => caller,
-            Err(err) => return refused(&decoded, reply, err, self.server),
+            Err(err) => return Served::Reply(refused(&decoded, reply, err, self.server)),
         };
-        if let Some(named) = named_mailbox(&decoded) {
+        if let WindowRequest::Present {
+            window_id,
+            frame_index,
+            damage,
+        } = decoded
+        {
+            return match self.present((caller, ticket), window_id, frame_index, &damage) {
+                Ok(true) => Served::Withheld,
+                Ok(false) => Served::Reply(status(reply, Ok(()))),
+                Err(err) => Served::Reply(status(reply, Err(err))),
+            };
+        }
+        let len = self.serve_attested(host, sink, identity, (caller, ticket), &decoded, reply);
+        Served::Reply(len)
+    }
+
+    /// Serve `decoded`, a request from the attested `caller` behind `ticket`
+    /// answered as it is served — every request but a present — writing the
+    /// encoded reply into `reply` and returning its length.
+    fn serve_attested(
+        &mut self,
+        host: &mut dyn WindowHost,
+        sink: &mut dyn EventSink,
+        identity: &mut dyn CallerIdentity,
+        (caller, ticket): (ProcId, u64),
+        decoded: &WindowRequest,
+        reply: &mut [u8; WINDOW_REPLY_MAX],
+    ) -> usize {
+        if let Some(named) = named_mailbox(decoded) {
             let own = identity.caller_mailbox(ticket);
             if own != Ok(named) {
                 let err = own.err().unwrap_or(Errno::PermissionDenied);
-                return refused(&decoded, reply, err, self.server);
+                return refused(decoded, reply, err, self.server);
             }
         }
         // The one gated group on this channel, checked before dispatch
         // touches any state and re-checked on every layer operation rather
         // than only at open, so a revoked grant stops the surface at its
         // next request instead of lasting as long as the process does.
-        if is_layer_op(&decoded) {
+        if is_layer_op(decoded) {
             let refusal = match identity.caller_holds(ticket, CapabilityId::DESKTOP_LAYER) {
                 Ok(true) => None,
                 Ok(false) => Some(Errno::PermissionDenied),
@@ -1924,12 +2203,12 @@ impl<M: ShmMapper> WindowServer<M> {
             };
             if let Some(err) = refusal {
                 host.layer_refused(caller, err);
-                return layer_refusal(&decoded, reply, err, self.server);
+                return layer_refusal(decoded, reply, err, self.server);
             }
         }
         // Reserved for one application: the host decides against the
         // kernel-attested caller, a second attestation only these pay.
-        match decoded {
+        match *decoded {
             WindowRequest::QueryNotifySources => {
                 let answered = identity
                     .caller_app(ticket)
@@ -1949,7 +2228,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 return status(reply, shown);
             }
             WindowRequest::RenderPreview { .. } => {
-                let rendered = preview_request(&decoded)
+                let rendered = preview_request(decoded)
                     .ok_or(Errno::NotSupported)
                     .and_then(|(to, size)| {
                         // A screensaver's picture says what the user installed,
@@ -1995,7 +2274,7 @@ impl<M: ShmMapper> WindowServer<M> {
             }
             _ => {}
         }
-        self.dispatch(host, sink, caller, &decoded, reply)
+        self.dispatch(host, sink, caller, decoded, reply)
     }
 
     /// Act on one decoded request from the attested `caller`, writing the
@@ -2098,7 +2377,8 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::DragVerdict { .. }
             | WindowRequest::QueryDragSpot { .. }
             | WindowRequest::SaveOfferAnswer { .. }
-            | WindowRequest::SaveInto { .. } => {
+            | WindowRequest::SaveInto { .. }
+            | WindowRequest::DropLanding { .. } => {
                 self.dispatch_transfer(host, caller, decoded, reply)
             }
             ref other => self.dispatch_status_op(host, caller, other, reply),
@@ -2203,7 +2483,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 let read =
                     owned_window_mut(&mut self.windows, caller, window_id).and_then(|record| {
                         match &record.drag_spot {
-                            Some((named, folder)) if *named == serial => Ok(folder.as_str()),
+                            Some(spot) if spot.holds(serial) => Ok(spot.folder.as_str()),
                             _ => Err(Errno::NotFound),
                         }
                     });
@@ -2212,6 +2492,14 @@ impl<M: ShmMapper> WindowServer<M> {
                 reply[..len].copy_from_slice(&frame[..len]);
                 len
             }
+            WindowRequest::DropLanding {
+                window_id,
+                serial,
+                ref step,
+            } => status(
+                reply,
+                self.step_landing(host, caller, window_id, serial, step),
+            ),
             WindowRequest::TakeDropTarget { window_id } => {
                 let taken = owned_window_mut(&mut self.windows, caller, window_id)
                     .and_then(|record| record.drop_target.take().ok_or(Errno::NotFound));
@@ -2240,8 +2528,33 @@ impl<M: ShmMapper> WindowServer<M> {
         }
         host.drag_requested(window_id, items)?;
         record.drag_pending = true;
+        record.drag_count = items.count();
         record.drag_spot = None;
         record.drop_target = None;
+        Ok(())
+    }
+
+    /// Take `step` of the drop numbered `serial` that `caller`'s window
+    /// `window_id` is landing on the desktop, and tell the host: the one way
+    /// a landing moves, so a step out of turn reaches nothing.
+    fn step_landing(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        window_id: u64,
+        serial: u32,
+        step: &LandingStep,
+    ) -> Result<(), Errno> {
+        let landings = &mut owned_window_mut(&mut self.windows, caller, window_id)?.landings;
+        landings
+            .iter_mut()
+            .find(|landing| landing.serial == serial)
+            .ok_or(Errno::NotFound)?
+            .step(step)?;
+        if matches!(step, LandingStep::Ended) {
+            landings.retain(|landing| landing.serial != serial);
+        }
+        host.drop_landing(window_id, serial, step);
         Ok(())
     }
 
@@ -2345,11 +2658,6 @@ impl<M: ShmMapper> WindowServer<M> {
         reply: &mut [u8; WINDOW_REPLY_MAX],
     ) -> usize {
         match *decoded {
-            WindowRequest::Present {
-                window_id,
-                frame_index,
-                damage,
-            } => status(reply, self.present(caller, window_id, frame_index, &damage)),
             WindowRequest::PlaceLayer {
                 window_id,
                 x,
@@ -2403,13 +2711,14 @@ impl<M: ShmMapper> WindowServer<M> {
                 screensaver_refusal(reply, Errno::NotSupported)
             }
             WindowRequest::QueryCursorSets => cursor_sets_refusal(reply, Errno::NotSupported),
-            // ...and the requests answered before this is reached: those
-            // `serve` decides against the attested application, and those
-            // `dispatch` routes to their own groups.
+            // ...and the requests answered before this is reached: a present
+            // and those decided against the attested application, which
+            // `serve` takes, and those `dispatch` routes to their own groups.
             WindowRequest::QueryNotifySources => {
                 notify_sources_reply(reply, Err(Errno::NotSupported))
             }
-            WindowRequest::LockScreen
+            WindowRequest::Present { .. }
+            | WindowRequest::LockScreen
             | WindowRequest::Authorise { .. }
             | WindowRequest::TakeAuthorisedOutput { .. }
             | WindowRequest::Close { .. }
@@ -2423,6 +2732,7 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::QueryDragSpot { .. }
             | WindowRequest::SaveOfferAnswer { .. }
             | WindowRequest::SaveInto { .. }
+            | WindowRequest::DropLanding { .. }
             | WindowRequest::RevealDocument { .. } => status(reply, Err(Errno::NotSupported)),
             // ...and a committed-text pull, likewise.
             WindowRequest::TakeMenuText { .. } | WindowRequest::TakeAppBarText { .. } => {
@@ -2481,6 +2791,9 @@ impl<M: ShmMapper> WindowServer<M> {
         // Minting never wraps in practice (2^64 creates); refuse rather
         // than reuse an id if it ever would.
         let next = window_id.checked_add(1).ok_or(Errno::NoSpace)?;
+        // Room for the answer a present of it may hold, so that answer falls
+        // due without allocating.
+        self.answers.reserve(self.windows.len().saturating_add(1))?;
         // Tell the host before committing: a refused open leaves no
         // record and drops the mapping (the mapper's cue to unmap).
         host.window_opened(
@@ -2505,7 +2818,9 @@ impl<M: ShmMapper> WindowServer<M> {
                 picked_name: None,
                 picked_files: VecDeque::new(),
                 drag_pending: false,
+                drag_count: 0,
                 drag_spot: None,
+                landings: VecDeque::new(),
                 drop_target: None,
                 renders_pending: Vec::new(),
                 menu_open: None,
@@ -2572,6 +2887,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 offset_y,
                 carry,
                 title,
+                sizing,
             } => {
                 let spec = ToolSpec {
                     transient: TransientSpec {
@@ -2585,6 +2901,7 @@ impl<M: ShmMapper> WindowServer<M> {
                     offset_y,
                     carry,
                     title,
+                    sizing,
                 };
                 let kind = TransientKind::Tool;
                 self.open_transient(host, caller, &spec.transient, kind, |host, window_id| {
@@ -2614,21 +2931,32 @@ impl<M: ShmMapper> WindowServer<M> {
                     modality,
                     title,
                 };
-                // Earned as an alert's is, and spent the same way: one
-                // activation brings one surface over the user's work.
-                let focus = self.holds_the_front(host, caller);
-                let kind = TransientKind::Dialog;
-                let window_id =
-                    self.open_transient(host, caller, &spec.transient, kind, |host, window_id| {
-                        host.dialog_opened(window_id, focus, &spec)
-                    })?;
-                if focus {
-                    self.activations.remove(&caller);
-                }
-                Ok(window_id)
+                self.open_dialog(host, caller, &spec)
             }
             _ => Err(Errno::NotSupported),
         }
+    }
+
+    /// Open the dialog `spec` describes, given the keyboard only where
+    /// `caller` has earned the front.
+    fn open_dialog(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        spec: &DialogSpec,
+    ) -> Result<u64, Errno> {
+        // Earned as an alert's is, and spent the same way: one activation
+        // brings one surface over the user's work.
+        let focus = self.holds_the_front(host, caller);
+        let kind = TransientKind::Dialog;
+        let window_id =
+            self.open_transient(host, caller, &spec.transient, kind, |host, window_id| {
+                host.dialog_opened(window_id, focus, spec)
+            })?;
+        if focus {
+            self.activations.remove(&caller);
+        }
+        Ok(window_id)
     }
 
     /// Open a transient of `kind` for `caller`, hung from the caller's own
@@ -2669,6 +2997,7 @@ impl<M: ShmMapper> WindowServer<M> {
         let region = self.mapper.map(caller, spec.shm_handle, total)?;
         let window_id = self.next_id;
         let next = window_id.checked_add(1).ok_or(Errno::NoSpace)?;
+        self.answers.reserve(self.windows.len().saturating_add(1))?;
         opened(host, window_id)?;
         self.next_id = next;
         self.windows.insert(
@@ -2685,7 +3014,9 @@ impl<M: ShmMapper> WindowServer<M> {
                 picked_name: None,
                 picked_files: VecDeque::new(),
                 drag_pending: false,
+                drag_count: 0,
                 drag_spot: None,
+                landings: VecDeque::new(),
                 drop_target: None,
                 renders_pending: Vec::new(),
                 menu_open: None,
@@ -2735,6 +3066,7 @@ impl<M: ShmMapper> WindowServer<M> {
         let region = self.mapper.map(caller, spec.shm_handle, total)?;
         let window_id = self.next_id;
         let next = window_id.checked_add(1).ok_or(Errno::NoSpace)?;
+        self.answers.reserve(self.windows.len().saturating_add(1))?;
         host.layer_opened(caller, window_id, &spec.surface, spec.x, spec.y, spec.depth)?;
         self.next_id = next;
         self.windows.insert(
@@ -2751,7 +3083,9 @@ impl<M: ShmMapper> WindowServer<M> {
                 picked_name: None,
                 picked_files: VecDeque::new(),
                 drag_pending: false,
+                drag_count: 0,
                 drag_spot: None,
+                landings: VecDeque::new(),
                 drop_target: None,
                 renders_pending: Vec::new(),
                 menu_open: None,
@@ -2889,26 +3223,33 @@ impl<M: ShmMapper> WindowServer<M> {
             record.frame_count = spec.frame_count;
             record.frame_len = frame_len;
             record.region = Some(region);
-            // What was pending named a frame of the region just dropped.
+            // What was pending named a frame of the region just dropped, and
+            // the present held behind it was recorded, so it is answered.
             self.unshown.count_out(&record.pending);
             record.pending.clear();
+            self.answers.release(&mut record.pending, record.owner);
         }
         Ok(())
     }
 
-    /// Present one frame of `caller`'s window `window_id`.
+    /// Present one frame of `caller`'s window `window_id`, the call answered
+    /// as `ticket`, answering whether that answer is withheld.
     ///
     /// Recorded, not shown: [`Self::latch`] shows it with the desktop's next
-    /// frame. The answer goes out at once, so the client may draw its other
-    /// frame while this one waits — never the one named here, which the
-    /// session reads until a later present replaces it.
+    /// frame. A window holding no unshown frame is answered at once, so the
+    /// client may draw its other frame while this one waits — never the one
+    /// named here, which the session reads until a later present replaces it.
+    /// One replacing an unshown frame is held until the frame it names is
+    /// shown or refused, or something supersedes it: answered, its client
+    /// draws again, so one drawing faster than the desktop shows frames draws
+    /// at most two a desktop frame rather than frames nobody sees.
     fn present(
         &mut self,
-        caller: ProcId,
+        (caller, ticket): (ProcId, u64),
         window_id: u64,
         frame_index: u32,
         damage: &DamageList,
-    ) -> Result<(), Errno> {
+    ) -> Result<bool, Errno> {
         let record = owned_window_mut(&mut self.windows, caller, window_id)?;
         if frame_index >= record.frame_count {
             return Err(Errno::OutOfRange);
@@ -2923,16 +3264,18 @@ impl<M: ShmMapper> WindowServer<M> {
         if record.region.is_none() {
             return Err(Errno::NotAttached);
         }
+        let replaces = record.pending.frame.is_some();
         self.unshown.count_out(&record.pending);
         record.pending.record(frame_index, damage, &record.surface);
         self.unshown.count_in(&record.pending);
-        Ok(())
+        Ok(replaces && self.answers.hold(&mut record.pending, caller, ticket))
     }
 
     /// Show every window's newest presented frame through `host`, once a
     /// desktop frame: a client presenting faster than the desktop draws costs
     /// one conversion a frame, never one a present. A refused frame is tried
-    /// again with each, until it shows or a later present replaces it.
+    /// again with each, until it shows or a later present replaces it. Either
+    /// way the present held behind the frame falls due: it was recorded.
     pub fn latch(&mut self, host: &mut dyn FrameHost) {
         if self.unshown.is_empty() {
             return;
@@ -2952,6 +3295,7 @@ impl<M: ShmMapper> WindowServer<M> {
                         }
                     }
                 }
+                self.answers.release(&mut record.pending, record.owner);
             }
             unshown.count_in(&record.pending);
         }
@@ -2964,6 +3308,36 @@ impl<M: ShmMapper> WindowServer<M> {
     #[must_use]
     pub const fn has_pending_frames(&self) -> bool {
         self.unshown.due > 0
+    }
+
+    /// Whether a present's answer is held behind a frame the desktop has yet
+    /// to show.
+    #[must_use]
+    pub const fn holds_answers(&self) -> bool {
+        self.answers.held > 0
+    }
+
+    /// Answer every held present without showing its frame, which stays
+    /// pending for the desktop's next: the session's turn while no frame can
+    /// reach the screen, taken once an output period, so a client is held to
+    /// the same pace with the screen dark as lit and never stalls behind it.
+    pub fn release_answers(&mut self) {
+        if self.answers.held == 0 {
+            return;
+        }
+        for record in self.windows.values_mut() {
+            self.answers.release(&mut record.pending, record.owner);
+        }
+    }
+
+    /// Send every answer due through `reply`, which carries a ticket's reply
+    /// frame to its caller, oldest first. Each is a withheld present's, so
+    /// `Ok`: the present was recorded and its client may draw its other
+    /// frame. A reply lands in the room its call was posted with, so the
+    /// kernel refuses one only for a caller no longer waiting, and every
+    /// answer goes once sent.
+    pub fn send_answers(&mut self, reply: impl FnMut(u64, &[u8])) {
+        self.answers.send(reply);
     }
 
     /// Frame `frame_index` of `record`'s region.
@@ -2985,9 +3359,13 @@ impl<M: ShmMapper> WindowServer<M> {
     }
 
     /// Accept a trusted-picker request for `caller`'s window `window_id`:
-    /// at most one pick pends per window, and the host must be able to
-    /// run its picker before anything is recorded (fail closed — a
-    /// refused request leaves no pending state).
+    /// at most one pick pends per window and
+    /// [`PICK_MAX_OPEN`](tairix_abi::window_ipc::PICK_MAX_OPEN) per
+    /// application, one of them a folder's, each refusal told to the host to
+    /// audit; and the host must be able to run its picker before anything is
+    /// recorded (fail closed — a refused request leaves no pending state).
+    /// The picker earns the keyboard as an alert does, spending the
+    /// activation that earned it.
     fn pick_file(
         &mut self,
         host: &mut dyn WindowHost,
@@ -2997,16 +3375,54 @@ impl<M: ShmMapper> WindowServer<M> {
     ) -> Result<(), Errno> {
         // Owned-window check first: a window the caller does not own
         // answers exactly like one that never existed.
-        let record = owned_window_mut(&mut self.windows, caller, window_id)?;
-        if record.pick_pending.is_some() || !record.picked_files.is_empty() {
-            return Err(Errno::AlreadyExists);
+        owned_window(&self.windows, caller, window_id)?;
+        if let Some((refused, reason)) = self.pick_refusal(caller, window_id, purpose) {
+            host.pick_refused(caller, window_id, reason);
+            return Err(refused);
         }
-        // Tell the host before committing: a refused picker (slot taken,
+        let focus = self.holds_the_front(host, caller);
+        // Tell the host before committing: a refused picker (the seat held,
         // no filesystem authority) leaves no pending pick behind.
-        host.pick_requested(window_id, purpose)?;
+        host.pick_requested(window_id, purpose, focus)?;
+        if focus {
+            self.activations.remove(&caller);
+        }
+        let record = owned_window_mut(&mut self.windows, caller, window_id)?;
         record.pick_pending = Some(*purpose);
         record.picked_name = None;
         Ok(())
+    }
+
+    /// Why `caller`'s pick for `purpose` on its window `window_id` is past a
+    /// bound, if it is, and the refusal it is answered with. A folder pick
+    /// whose files are delegated and not yet taken is still open, since a
+    /// delegation cannot be withdrawn.
+    fn pick_refusal(
+        &self,
+        caller: ProcId,
+        window_id: u64,
+        purpose: &PickPurpose,
+    ) -> Option<(Errno, &'static str)> {
+        let folder = |record: &WindowRecord<M::Region>| {
+            record.pick_pending == Some(PickPurpose::Folder) || !record.picked_files.is_empty()
+        };
+        let open =
+            |record: &WindowRecord<M::Region>| record.pick_pending.is_some() || folder(record);
+        if self.windows.get(&window_id).is_some_and(open) {
+            return Some((Errno::AlreadyExists, PICK_ON_WINDOW));
+        }
+        let mine = || {
+            self.windows
+                .values()
+                .filter(move |record| record.owner == caller)
+        };
+        if mine().filter(|&record| open(record)).count() >= tairix_abi::window_ipc::PICK_MAX_OPEN {
+            return Some((Errno::LimitExceeded, PICKS_PER_APPLICATION));
+        }
+        if matches!(purpose, PickPurpose::Folder) && mine().any(folder) {
+            return Some((Errno::LimitExceeded, FOLDER_PICK_OPEN));
+        }
+        None
     }
 
     /// Answer `caller`'s take of what window `window_id`'s last task
@@ -3678,7 +4094,8 @@ impl<M: ShmMapper> WindowServer<M> {
 
     /// Remove `window_id` and every transient keyed to it, telling the host
     /// of each teardown, and answer every id removed. The window is dropped
-    /// first, then its transients.
+    /// first, then its transients, and a present held behind any of them is
+    /// answered.
     fn remove_with_transients(&mut self, host: &mut dyn WindowHost, window_id: u64) -> Vec<u64> {
         let mut closed = Vec::from([window_id]);
         closed.extend(
@@ -3692,8 +4109,10 @@ impl<M: ShmMapper> WindowServer<M> {
                 .map(|(&id, _)| id),
         );
         for &id in &closed {
-            if let Some(record) = self.windows.remove(&id) {
+            if let Some(mut record) = self.windows.remove(&id) {
                 self.unshown.count_out(&record.pending);
+                self.answers.release(&mut record.pending, record.owner);
+                end_landings(host, id, &record.landings);
             }
             host.window_closed(id);
         }
@@ -3715,7 +4134,8 @@ impl<M: ShmMapper> WindowServer<M> {
     /// route, title, and place in the stack. The client re-attaches a fresh
     /// region with an ordinary [`WindowRequest::Resize`], which is what its
     /// next paint does; until then a present is refused
-    /// ([`Errno::NotAttached`]) rather than reading a mapping nobody has.
+    /// ([`Errno::NotAttached`]) rather than reading a mapping nobody has. A
+    /// present held behind the frame it drops is answered: it was recorded.
     pub fn release_frames(&mut self, window_id: u64) -> u64 {
         let Some(record) = self.windows.get_mut(&window_id) else {
             return 0;
@@ -3725,6 +4145,7 @@ impl<M: ShmMapper> WindowServer<M> {
         record.region = None;
         self.unshown.count_out(&record.pending);
         record.pending.clear();
+        self.answers.release(&mut record.pending, record.owner);
         bytes
     }
 
@@ -3741,9 +4162,13 @@ impl<M: ShmMapper> WindowServer<M> {
         for id in closed {
             if let Some(record) = self.windows.remove(&id) {
                 self.unshown.count_out(&record.pending);
+                self.answers.drop_held(&record.pending);
+                end_landings(host, id, &record.landings);
             }
             host.window_closed(id);
         }
+        // Its calls ended with it, so nothing it was owed has anyone to take it.
+        self.answers.forget(client);
         if self.app_bars.remove(&client).is_some() {
             host.app_bar_withdrawn(client);
         }
@@ -3962,7 +4387,10 @@ impl<M: ShmMapper> WindowServer<M> {
     /// A report over a window is addressed to that window, which must be the
     /// owner's own and the point inside it; any other is addressed to the
     /// window the drag began in. A desktop report holds `folder` for the
-    /// owner to read ([`WindowRequest::QueryDragSpot`]) before it is sent.
+    /// owner to read ([`WindowRequest::QueryDragSpot`]) before it is sent,
+    /// for every report of the one place: one that follows the last and names
+    /// its folder goes on with it, so a report a later one superseded there is
+    /// still read.
     ///
     /// # Errors
     ///
@@ -4001,7 +4429,7 @@ impl<M: ShmMapper> WindowServer<M> {
             }
             DragReport::Desktop { folder } => {
                 let record = self.windows.get_mut(&window_id).ok_or(Errno::NotFound)?;
-                record.drag_spot = Some((serial, String::from(folder)));
+                hold_spot(&mut record.drag_spot, serial, folder);
                 (window_id, DragAt::Desktop)
             }
             DragReport::Nowhere => (window_id, DragAt::Nowhere),
@@ -4021,8 +4449,12 @@ impl<M: ShmMapper> WindowServer<M> {
     ///
     /// Delivers `DragEnded` and, once the sink accepted it, clears the pending
     /// drag and holds an application target for the owner's `TakeDropTarget`
-    /// — the one way a drag ends. A drop on the desktop names the folder the
-    /// report numbered `serial` held, which stays for the owner to read.
+    /// — the one way a drag ends. A drop on the desktop names the folder held
+    /// for the place the report numbered `serial` was made at, which stays for
+    /// the owner to read, and lands as the owner steps it
+    /// ([`WindowRequest::DropLanding`]). Answers the serial of a landing it
+    /// ended past [`DROP_LANDINGS_MAX`], which the host ends as though its
+    /// owner had.
     ///
     /// # Errors
     ///
@@ -4036,7 +4468,7 @@ impl<M: ShmMapper> WindowServer<M> {
         sink: &mut dyn EventSink,
         window_id: u64,
         ended: DragConclusion,
-    ) -> Result<(), Errno> {
+    ) -> Result<Option<u32>, Errno> {
         let record = self.windows.get(&window_id).ok_or(Errno::NotFound)?;
         if !record.drag_pending {
             return Err(Errno::OutOfRange);
@@ -4065,7 +4497,11 @@ impl<M: ShmMapper> WindowServer<M> {
                 )
             }
             DragConclusion::Desktop { serial, operation } => {
-                if !matches!(&record.drag_spot, Some((named, _)) if *named == serial) {
+                let held = record
+                    .drag_spot
+                    .as_ref()
+                    .is_some_and(|spot| spot.holds(serial));
+                if !held {
                     return Err(Errno::OutOfRange);
                 }
                 (DropSite::Desktop { serial, operation }, None)
@@ -4078,7 +4514,10 @@ impl<M: ShmMapper> WindowServer<M> {
         )?;
         record.drag_pending = false;
         record.drop_target = target;
-        Ok(())
+        let DropSite::Desktop { serial, .. } = site else {
+            return Ok(None);
+        };
+        Ok(land_drop(&mut record.landings, serial, record.drag_count))
     }
 
     /// Route one event to the owning app of the window it addresses:

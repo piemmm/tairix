@@ -8,18 +8,17 @@ use alloc::vec::Vec;
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, AppMenuSymbol as S};
 use tairix_colour::Rgba;
 use tairix_controls::{
-    wheel_steps, ButtonAction, Keystroke, PickerOutcome, ScrollAction, ScrollModel, SwatchAction,
-    SwatchMark, ToolActivation, ToolbarOutcome,
+    wheel_steps, ButtonAction, Keystroke, PickerOutcome, ScrollAction, ScrollBar, ScrollModel,
+    ScrollOrientation, ScrollRange, SwatchAction, SwatchMark, ToolActivation, ToolbarOutcome,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PinchPhase, PointerButton};
 use tairix_raster::Color;
 use tairix_theme::Theme;
 use tairix_util::fallible;
-use tairix_window::docapp::Relayout;
 use tairix_window::menu::{MenuBuilder, Plate};
 
-use super::adjust::Applying;
+use super::operations::Applying;
 use super::{
     Action, Aim, Clip, Compute, Computed, Draft, Gesture, Lands, MenuKind, Modal, NewPicture,
     Outcome, Own, PaletteEdit, Pending, Request, Settles, Then, View, APP_TITLE, GO_TO_ENTRY,
@@ -33,6 +32,8 @@ use crate::document::{Entry, Layer, Picture};
 use crate::history::{Applied, Damage, Unapplied};
 use crate::layout::Layout;
 use crate::mask::{Combine, Mask, Recipe};
+use crate::op::{Halted, Op};
+use crate::pane::PaneKind;
 use crate::render::write_zoom;
 use crate::save::{natural, restated, writable_as, SaveFormat};
 use crate::selection::Floating;
@@ -62,6 +63,13 @@ const NO_ROOM_TO_SELECT: &str = "There is not enough memory to select that";
 
 /// Why a sprite kept as its bytes takes no edit.
 const KEPT_UNCHANGED: &str = "This sprite cannot be edited; it is kept, and saved back unchanged";
+
+/// Why a change a worker made of the picture could not be kept.
+const NO_ROOM_TO_KEEP: &str = "There is not enough memory to keep the change";
+
+/// Why a save before closing, chosen while work was out, was not carried on:
+/// that work's landing asked for something of its own first.
+const KEPT_OPEN: &str = "The window stays open for what was asked first: close it again";
 
 impl View {
     /// Feed one pointer event, which its device reported at `at_ns`; where it
@@ -122,7 +130,7 @@ impl View {
                 .unwrap_or_else(Outcome::none);
         }
         // A list a pane opened, or a press held on it, owns the pointer.
-        if self.adjustment_pane().listing() || self.adjustment_pane().holding() {
+        if self.operation_holding() {
             return self
                 .adjustment_pointer(event, layout, scale, theme, damage)
                 .unwrap_or_else(Outcome::none);
@@ -130,6 +138,16 @@ impl View {
         if self.colour_controls().listing() || self.colour_controls().holding() {
             return self
                 .colour_controls_pointer(event, layout, scale, theme, damage)
+                .unwrap_or_else(Outcome::none);
+        }
+        if self.layers.holding() {
+            return self
+                .layers_pointer(event, layout, scale, theme, damage)
+                .unwrap_or_else(Outcome::none);
+        }
+        if self.body_bars.iter().any(ScrollBar::is_pressing) {
+            return self
+                .body_bars_pointer(event, layout, scale, theme, damage)
                 .unwrap_or_else(Outcome::none);
         }
         // An open list owns the pointer wherever it reaches: a press on its
@@ -233,7 +251,7 @@ impl View {
     }
 
     /// The pointer on the window's chrome: the tool box, the view strip, the
-    /// tool-controls bar, the dock, the palette, the bars and the status
+    /// tool-controls bar, the panes, the palette, the bars and the status
     /// band. Every part sees every event, so a hover leaves and a press held
     /// on one part ends there wherever the pointer went; `None` where nothing
     /// asked for more than a repaint.
@@ -248,7 +266,13 @@ impl View {
         if let Some(outcome) = self.panes_pointer(event, layout, scale, theme, damage) {
             return Some(outcome);
         }
+        if let Some(outcome) = self.body_bars_pointer(event, layout, scale, theme, damage) {
+            return Some(outcome);
+        }
         if let Some(outcome) = self.adjustment_pointer(event, layout, scale, theme, damage) {
+            return Some(outcome);
+        }
+        if let Some(outcome) = self.layers_pointer(event, layout, scale, theme, damage) {
             return Some(outcome);
         }
         if let Some(outcome) = self.colour_controls_pointer(event, layout, scale, theme, damage) {
@@ -406,57 +430,55 @@ impl View {
         }
     }
 
-    /// The wells where each now lies, scrolled along the strip.
+    /// The wells where each now lies, scrolled along the strip or down a
+    /// floating palette.
     pub(crate) fn swatch_bounds(&self, layout: &Layout) -> Rect {
-        let offset = self.palette_bar.model().range().offset();
+        let offset = i32::try_from(self.palette_bar.model().range().offset()).unwrap_or(i32::MAX);
         let swatches = layout.swatches();
-        Rect::new(
-            swatches
-                .left()
-                .saturating_sub(i32::try_from(offset).unwrap_or(i32::MAX)),
-            swatches.top(),
-            swatches.width,
-            swatches.height,
-        )
+        let shift = |at: i32| at.saturating_sub(offset);
+        let (left, top) = match layout.palette_axis() {
+            ScrollOrientation::Horizontal => (shift(swatches.left()), swatches.top()),
+            ScrollOrientation::Vertical => (swatches.left(), shift(swatches.top())),
+        };
+        Rect::new(left, top, swatches.width, swatches.height)
     }
 
-    /// Scroll the row of wells to `offset` along the strip.
+    /// Scroll the wells to `offset` along the way they scroll.
     pub(super) fn scroll_palette(&mut self, offset: u64, layout: &Layout, damage: &mut Region) {
         let range = self.palette_bar.model().range().with_offset(offset);
-        self.palette_bar.set_model(ScrollModel::in_pixels(
-            range,
-            u64::from(layout.wells_view().height.max(1)),
-        ));
+        self.palette_bar.set_model(well_steps(range, layout));
         damage.add(layout.palette());
     }
 
-    /// Bring the strip's bar into line with its row of wells, keeping the
-    /// offset within it.
+    /// Bring the palette's bar into line with its wells — along the strip, or
+    /// down a floating palette — keeping the offset within them.
     pub(crate) fn settle_palette_bar(&mut self, layout: &Layout, damage: &mut Region) {
+        let axis = layout.palette_axis();
+        if self.palette_bar.orientation() != axis {
+            self.palette_bar = ScrollBar::new(axis, well_steps(ScrollRange::new(0, 0, 0), layout));
+            damage.add(layout.palette());
+        }
         let range = self.palette_bar.model().range();
         let fresh = range.resize(
-            u64::from(layout.swatches().width),
-            u64::from(layout.wells_view().width),
+            u64::from(span_along(axis, layout.swatches()).1),
+            u64::from(span_along(axis, layout.wells_view()).1),
         );
         if fresh != range {
             damage.add(layout.palette());
         }
-        self.palette_bar.set_model(ScrollModel::in_pixels(
-            fresh,
-            u64::from(layout.wells_view().height.max(1)),
-        ));
+        self.palette_bar.set_model(well_steps(fresh, layout));
     }
 
-    /// Scroll the strip so well `well` shows.
+    /// Scroll the wells so well `well` shows.
     fn reveal_well(&mut self, well: usize, layout: &Layout, damage: &mut Region) {
         let Some(cell) = self.swatches.cell_rect(layout.swatches(), well) else {
             return;
         };
-        let start = u64::try_from(cell.left() - layout.swatches().left()).unwrap_or(0);
-        let model = self
-            .palette_bar
-            .model()
-            .revealing(start, u64::from(cell.width));
+        let axis = layout.palette_axis();
+        let (start, length) = span_along(axis, cell);
+        let (origin, _) = span_along(axis, layout.swatches());
+        let start = u64::try_from(i64::from(start) - i64::from(origin)).unwrap_or(0);
+        let model = self.palette_bar.model().revealing(start, u64::from(length));
         if model.range().offset() != self.palette_bar.model().range().offset() {
             self.palette_bar.set_model(model);
             // The bar's thumb moved with the wells.
@@ -484,7 +506,7 @@ impl View {
 
     /// The inks changed, `changed` among them: show them in the wells, the
     /// palette's marks and the picker, the changed ink's well scrolled into
-    /// the strip.
+    /// view.
     pub(super) fn inks_changed(
         &mut self,
         changed: SwatchMark,
@@ -500,13 +522,13 @@ impl View {
             self.reveal_well(well, layout, damage);
         }
         self.sync_picker();
-        damage.add(layout.wells());
-        damage.add(layout.picker());
+        self.damage_colour(layout, layout.wells(), damage);
+        self.damage_colour(layout, layout.picker(), damage);
     }
 
     /// Put the palette's marks on the wells the inks now are, reporting the
     /// wells a mark, or the focus ring that follows the primary, left or
-    /// reached.
+    /// reached, with the badges their numbers stand on.
     fn remark_wells(&mut self, layout: &Layout, damage: &mut Region) {
         let marks = |view: &Self| {
             let primary = view.swatches.selected();
@@ -518,19 +540,20 @@ impl View {
         let before = marks(self);
         self.mark_wells();
         let (bounds, shown) = (self.swatch_bounds(layout), layout.wells_view());
-        let cell = |well| {
+        let reported = |well| {
             self.swatches
-                .cell_rect(bounds, well)
+                .mark_rect(bounds, well)
                 .map(|rect| rect.intersection(&shown))
         };
         for (was, now) in before.into_iter().zip(marks(self)) {
-            tairix_controls::damage::move_mark(was, now, cell, damage);
+            tairix_controls::damage::move_mark(was, now, reported, damage);
         }
     }
 
     /// The pointer on the colour dock: a press on a well makes it the one the
-    /// picker edits, and the picker takes the rest. `None` where the event is
-    /// none of the dock's.
+    /// picker edits, and the picker takes the rest, a drag it holds following
+    /// the pointer past the pane's edge. `None` where the event is none of
+    /// the dock's.
     fn dock_pointer(
         &mut self,
         event: &InputEvent,
@@ -540,23 +563,31 @@ impl View {
         damage: &mut Region,
     ) -> Option<Outcome> {
         let pressed = matches!(event, InputEvent::PointerPressed { .. });
+        let view = self.held_view(layout, PaneKind::Colour, self.picker.is_dragging());
         if pressed && !self.picker.is_dragging() {
+            let at = view.to_content(self.pointer);
             for (well, mark) in [
                 (layout.primary_well(), SwatchMark::Primary),
                 (layout.secondary_well(), SwatchMark::Secondary),
             ] {
-                if well.contains(self.pointer) {
+                if at.is_some_and(|at| well.contains(at)) {
                     self.edit_well(mark, layout, scale, theme, damage);
                     return Some(Outcome::none());
                 }
             }
         }
-        let outcome = self
-            .picker
-            .on_pointer(event, layout.picker(), scale, theme, damage);
+        let mut drew = tairix_controls::damage::sink();
+        let outcome = self.picker.on_pointer(
+            &view.event_in_layout(event),
+            layout.picker(),
+            scale,
+            theme,
+            &mut drew,
+        );
+        view.report(&drew, damage);
         if pressed && outcome != PickerOutcome::Ignored && !self.picker.state().focus.focused {
             self.picker.set_focused(true);
-            damage.add(layout.picker());
+            self.damage_colour(layout, layout.picker(), damage);
         }
         match outcome {
             PickerOutcome::Ignored => {
@@ -582,8 +613,8 @@ impl View {
         self.commit_dock(layout, scale, theme, damage);
         self.editing = mark;
         self.sync_picker();
-        damage.add(layout.wells());
-        damage.add(layout.picker());
+        self.damage_colour(layout, layout.wells(), damage);
+        self.damage_colour(layout, layout.picker(), damage);
     }
 
     /// Settle what the picker holds — a drag, a field's typing — keeping its
@@ -598,7 +629,10 @@ impl View {
     ) {
         let dragged = self.picker.finish_drag();
         self.picked(dragged, layout, damage);
-        let committed = self.picker.commit(layout.picker(), scale, theme, damage);
+        let mut drew = tairix_controls::damage::sink();
+        let committed = self.picker.commit(layout.picker(), scale, theme, &mut drew);
+        self.held_view(layout, PaneKind::Colour, false)
+            .report(&drew, damage);
         self.picked(committed, layout, damage);
     }
 
@@ -613,7 +647,10 @@ impl View {
     ) {
         self.commit_dock(layout, scale, theme, damage);
         if self.picker.state().focus.focused {
-            let blurred = self.picker.blur(layout.picker(), scale, theme, damage);
+            let mut drew = tairix_controls::damage::sink();
+            let blurred = self.picker.blur(layout.picker(), scale, theme, &mut drew);
+            self.held_view(layout, PaneKind::Colour, false)
+                .report(&drew, damage);
             self.picked(blurred, layout, damage);
         }
     }
@@ -648,7 +685,8 @@ impl View {
         self.release_dock(layout, scale, theme, damage);
         self.release_bar(layout, damage);
         self.release_palette(layout, damage);
-        self.release_adjustment(layout, scale, theme, damage);
+        self.release_adjustment(None, layout, scale, theme, damage);
+        self.release_layers(layout, scale, theme, damage);
         self.release_colour_controls(layout, scale, theme, damage);
         self.release_recents(layout, damage);
     }
@@ -669,10 +707,19 @@ impl View {
         if !layout.controls().contains(self.pointer) {
             self.release_bar(layout, damage);
         }
-        if !layout.adjustment().contains(self.pointer) {
-            self.release_adjustment(layout, scale, theme, damage);
+        let pointer = self.pointer;
+        let on_operation = PaneKind::OPERATIONS
+            .into_iter()
+            .find(|&kind| layout.operation(kind).contains(pointer));
+        self.release_adjustment(on_operation, layout, scale, theme, damage);
+        if !layout.layers_body().contains(pointer) {
+            self.release_layers(layout, scale, theme, damage);
         }
-        if !layout.colour_controls().contains(self.pointer) {
+        let on_colour_controls = self
+            .held_view(layout, PaneKind::Colour, false)
+            .to_content(pointer)
+            .is_some_and(|at| layout.colour_controls().contains(at));
+        if !on_colour_controls {
             self.release_colour_controls(layout, scale, theme, damage);
         }
         self.release_palette(layout, damage);
@@ -687,8 +734,13 @@ impl View {
             Keyboard::Bar
         } else if self.swatches.state().focus.focused {
             Keyboard::Palette
-        } else if self.adjustment_pane().has_focus() {
-            Keyboard::Adjustment
+        } else if let Some(kind) = PaneKind::OPERATIONS
+            .into_iter()
+            .find(|&kind| self.operation_pane(kind).has_focus())
+        {
+            Keyboard::Operation(kind)
+        } else if self.layers.has_focus() {
+            Keyboard::Layers
         } else if self.colour_controls().focus().is_some() {
             Keyboard::Colours
         } else if self.recent_colours().state().focus.focused {
@@ -699,8 +751,8 @@ impl View {
     }
 
     /// Carry the keyboard on from `from` to the next part that takes it, in
-    /// the order Tab walks — the picture, the bar, the palette, the dock —
-    /// or back the other way; the picture always takes it.
+    /// the order Tab walks — the picture, the bar, the palette, then the
+    /// panes' parts — or back the other way; the picture always takes it.
     pub(super) fn walk_keyboard(
         &mut self,
         from: Keyboard,
@@ -751,14 +803,15 @@ impl View {
                 if layout.picker().is_empty() || !self.picker.state().is_actionable() {
                     return false;
                 }
+                self.reveal_body(PaneKind::Colour, layout.picker(), layout, damage);
                 self.picker
                     .enter_focus(forward, layout.picker(), scale, theme);
-                damage.add(layout.picker());
+                self.damage_colour(layout, layout.picker(), damage);
                 true
             }
-            Keyboard::Adjustment => {
-                let bounds = layout.adjustment_settings();
-                !bounds.is_empty() && self.enter_adjustment(forward, bounds, damage)
+            Keyboard::Layers => self.enter_layers(forward, layout, damage),
+            Keyboard::Operation(kind) => {
+                self.enter_adjustment(kind, forward, layout, scale, theme, damage)
             }
             Keyboard::Colours => self.enter_colour_controls(forward, layout, damage),
             Keyboard::Recents => self.enter_recents(layout, damage),
@@ -786,7 +839,7 @@ impl View {
                     self.remember_colour(colour, layout, damage);
                 }
                 self.remark_wells(layout, damage);
-                damage.add(layout.wells());
+                self.damage_colour(layout, layout.wells(), damage);
             }
             (Kind::Indexed { .. }, Ink::Index(entry)) => {
                 self.edit_entry(entry, colour, settled, layout, damage);
@@ -815,7 +868,7 @@ impl View {
         }
         if self.palette_edit.is_none() && !self.begin_entry_edit(entry, layout, damage) {
             self.sync_picker();
-            damage.add(layout.picker());
+            self.damage_colour(layout, layout.picker(), damage);
             return;
         }
         // A sprite's palette holds colours; its transparency is its mask.
@@ -838,7 +891,7 @@ impl View {
             }
         }
         damage.add(layout.canvas());
-        damage.add(layout.wells());
+        self.damage_colour(layout, layout.wells(), damage);
         if settled {
             self.settle_entry_edit(layout, damage);
         }
@@ -898,6 +951,11 @@ impl View {
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
+        if self.wheel_layers(dy, layout, scale, damage)
+            || self.wheel_body(dy, layout, scale, damage)
+        {
+            return Outcome::none();
+        }
         if layout.tools().contains(self.pointer) {
             self.tool_box
                 .wheel(dx, dy, layout.tools(), scale, theme, damage);
@@ -914,12 +972,12 @@ impl View {
             return Outcome::none();
         }
         if layout.palette().contains(self.pointer) {
-            // The strip scrolls only sideways, so the wheel's either turn
-            // moves it.
-            let along = if dx == 0 { dy } else { dx };
+            // The wells scroll one way alone, so the wheel's either turn
+            // moves them.
+            let turn = if dx == 0 { dy } else { dx };
             if let Some(ScrollAction::ScrollTo { offset }) =
                 self.palette_bar
-                    .wheel(along, 0, scale, layout.palette_bar(), damage)
+                    .wheel(turn, turn, scale, layout.palette_bar(), damage)
             {
                 self.scroll_palette(offset, layout, damage);
             }
@@ -1110,24 +1168,19 @@ impl View {
             return Outcome::none();
         }
         let at = self.at(layout);
-        if self.adjustment_pane().picking().is_some() {
-            return self.pick_for_adjustment(at, layout, damage);
+        if let Some(kind) = self.picking_operation() {
+            return self.pick_for_adjustment(kind, at, layout, damage);
         }
         // Marking a selection or a crop box leaves the picture as it is; any
-        // other tool applies an open adjustment first, and a press that finds
+        // other tool applies an open operation first, and a press that finds
         // it still being worked out paints nothing.
-        let applying = self.adjustment_pane().filter().is_some()
-            && !matches!(self.tool, Tool::Select | Tool::Crop);
+        let applying =
+            self.adjusting().is_some() && !matches!(self.tool, Tool::Select | Tool::Crop);
         if !applying {
             return self.use_tool(at, secondary, layout, scale, damage);
         }
         match self.apply_adjustment(Then::Rest, layout, damage) {
-            Applying::Now(_) => {
-                let mut outcome = self.use_tool(at, secondary, layout, scale, damage);
-                // The pane went back to its list, and stands at its height.
-                outcome.relayout = Relayout::Whole;
-                outcome
-            }
+            Applying::Now(_) => self.use_tool(at, secondary, layout, scale, damage),
             Applying::Waiting(outcome) => outcome,
         }
     }
@@ -1669,16 +1722,28 @@ impl View {
             generation: self.document.generation(),
             lands,
             what,
+            closing: false,
         });
-        self.sync_picker();
-        self.sync_adjustment();
-        damage.add(layout.picker());
-        damage.add(layout.adjustment());
+        self.sync_working(layout, damage);
         self.state("Working\u{2026}", layout, damage);
         Outcome::asking(Request::Own(Own::Compute { job, work }))
     }
 
-    /// A worker answered job `job`.
+    /// Offer, or withhold, what a worker's having the picture decides: the
+    /// picker, the Adjustments and the Effects panes, and the Layers pane's
+    /// controls.
+    fn sync_working(&mut self, layout: &Layout, damage: &mut Region) {
+        self.sync_picker();
+        self.sync_operations();
+        self.sync_layers(layout, damage);
+        self.damage_colour(layout, layout.picker(), damage);
+        for body in layout.operations() {
+            damage.add(body);
+        }
+    }
+
+    /// A worker answered job `job`: a save before the window closes, chosen
+    /// while it was out, follows its landing and goes with its refusal.
     pub fn computed(
         &mut self,
         job: u64,
@@ -1686,125 +1751,172 @@ impl View {
         layout: &Layout,
         damage: &mut Region,
     ) -> Outcome {
-        if self.looking(job) {
-            return self.looked(answer, layout, damage);
-        }
         let Some(pending) = self.pending.take_if(|pending| pending.job == job) else {
             return Outcome::none();
         };
+        let closing = pending.closing;
         let before = self.basis();
-        let outcome = self.landed(pending, answer, layout, damage);
-        self.follow_picture(before, outcome, layout, damage)
+        let landed = self.landed(pending, answer, layout, damage);
+        let carried = closing && landed.is_some();
+        let outcome = landed.unwrap_or_else(Outcome::none);
+        let outcome = self.follow_picture(before, outcome, layout, damage);
+        if carried {
+            self.close_once_landed(outcome, layout, damage)
+        } else {
+            outcome
+        }
     }
 
     /// The window's own job `pending` answered: land it where the picture is
-    /// as it was asked of.
+    /// as it was asked of, or say why it could not be — naming what waited on
+    /// it as not done — answering `None` then; an operation refused stays
+    /// open as it was set.
     fn landed(
         &mut self,
         pending: Pending,
         answer: Computed,
         layout: &Layout,
         damage: &mut Region,
-    ) -> Outcome {
-        self.sync_picker();
-        self.sync_adjustment();
-        damage.add(layout.picker());
-        damage.add(layout.adjustment());
+    ) -> Option<Outcome> {
+        self.end_applying();
+        self.sync_working(layout, damage);
         self.end_gesture(layout, damage);
         self.message = None;
         damage.add(layout.message());
-        if (self.document.current(), self.document.generation())
-            != (pending.entry, pending.generation)
+        let undone = pending.undone();
+        let applying = pending.lands.operation();
+        let landing = if (self.document.current(), self.document.generation())
+            == (pending.entry, pending.generation)
         {
-            self.state(
+            self.land(pending, answer, layout, damage)
+        } else {
+            Err(String::from(
                 "The picture changed while it was being worked on; it was left as it is",
-                layout,
-                damage,
-            );
-            return Outcome::none();
+            ))
+        };
+        let refusal = match landing {
+            Ok(outcome) => return Some(outcome),
+            Err(refusal) => refusal,
+        };
+        match undone {
+            Some(undone) => self.say(alloc::format!("{refusal}; {undone}")),
+            None => self.say(refusal),
         }
-        self.land(pending, answer, layout, damage)
+        if let Some(kind) = applying {
+            self.operation_refused(kind, layout, damage);
+        }
+        None
     }
 
-    /// Land a worker's answer to `pending` on the picture it was asked of.
+    /// Carry a save before the window closes, chosen while work was out, on
+    /// once that has landed: behind the work its landing asked for in turn;
+    /// in place of a save, a close or the question whether to close that it
+    /// asked for; and beside anything else it asked for not at all, saying
+    /// so, so nothing asked is dropped.
+    fn close_once_landed(
+        &mut self,
+        outcome: Outcome,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> Outcome {
+        if let Some(pending) = self.pending.as_mut() {
+            pending.closing = true;
+            return outcome;
+        }
+        match outcome.request {
+            None | Some(Request::Save | Request::Close | Request::AskToClose) => {
+                let mut closing = self.save_then_close(layout, damage);
+                closing.relayout = closing.relayout.max(outcome.relayout);
+                closing
+            }
+            Some(Request::SaveThenClose) => outcome,
+            Some(_) => {
+                self.state(KEPT_OPEN, layout, damage);
+                outcome
+            }
+        }
+    }
+
+    /// Land a worker's answer to `pending` on the picture it was asked of,
+    /// or answer why it could not be.
     fn land(
         &mut self,
         pending: Pending,
         answer: Computed,
         layout: &Layout,
         damage: &mut Region,
-    ) -> Outcome {
+    ) -> Result<Outcome, String> {
         let what = pending.what;
+        let answer = match answer {
+            Computed::Op(Ok(mut tiles)) => {
+                self.keep_changed(pending.layer, &mut tiles);
+                Computed::Tiles(Ok(tiles))
+            }
+            other => other,
+        };
         match (answer, pending.lands) {
-            (Computed::Filtered(Ok(tiles)) | Computed::Tiles(Ok(tiles)), Lands::Tiles(settles)) => {
-                let filled = self.document.picture().and_then(|picture| {
-                    tiles
-                        .iter()
-                        .map(|(index, _)| picture.canvas().tile_rect(*index).bounds())
-                        .reduce(|a, b| a.union(&b))
-                });
-                let refusal = match self.document.adopt_tiles(pending.layer, tiles) {
+            (Computed::Tiles(Ok(tiles)), Lands::Tiles(settles)) => {
+                let filled = self.tiles_bounds(&tiles);
+                match self.document.adopt_tiles(pending.layer, tiles) {
                     Ok(true) => {
                         self.damage_picture(filled, layout, damage);
-                        return self.settle_selection(settles, layout, damage);
+                        Ok(self.settle_selection(settles, layout, damage))
                     }
-                    Ok(false) => alloc::format!(
+                    Ok(false) => Err(alloc::format!(
                         "What was asked no longer fits the picture, so it could not {what}"
-                    ),
-                    Err(OutOfMemory) => alloc::format!("There is not enough memory to {what}"),
-                };
-                self.say(refusal);
+                    )),
+                    Err(OutOfMemory) => Err(alloc::format!("There is not enough memory to {what}")),
+                }
             }
-            (Computed::Filtered(Err(crate::filter::FilterError::NeedsColour)), _) => {
-                self.say(alloc::format!("This picture cannot {what}"));
+            (Computed::Op(Err(Halted::NeedsColour)), _) => {
+                Err(alloc::format!("This picture cannot {what}"))
             }
             (
-                Computed::Filtered(Err(crate::filter::FilterError::OutOfMemory))
+                Computed::Op(Err(Halted::OutOfMemory))
                 | Computed::Tiles(Err(OutOfMemory))
                 | Computed::Selection(Err(OutOfMemory))
                 | Computed::Composed(Err(OutOfMemory))
                 | Computed::Survey(Err(OutOfMemory)),
                 _,
-            ) => self.say(alloc::format!("There is not enough memory to {what}")),
+            ) => Err(alloc::format!("There is not enough memory to {what}")),
             (Computed::Selection(Ok(marked)), Lands::Selection) => {
                 self.adopt_selection(marked, layout, damage);
+                Ok(Outcome::none())
             }
             (Computed::Picture(Ok(canvases)), Lands::Transform(transform)) => {
-                return self.adopt_transformed(canvases, transform, layout, damage);
+                self.adopt_transformed(canvases, transform, layout, damage)
             }
             (Computed::Composed(Ok(canvas)), Lands::Merged(range)) => {
-                return self.adopt_merged(canvas, range, layout, damage);
+                self.adopt_merged(canvas, range, layout, damage)
             }
             (Computed::Survey(Ok(formats)), Lands::Sheet { then_close }) => {
                 self.put_up_save_as(formats, then_close, layout, damage);
+                Ok(Outcome::none())
             }
-            (Computed::Picture(Err(err)), _) => {
-                let reason = match err {
-                    TransformError::OutOfMemory => {
-                        alloc::format!("There is not enough memory to {what}")
-                    }
-                    TransformError::BadSize => {
-                        alloc::format!("The picture cannot {what}: it would be too large or empty")
-                    }
-                    TransformError::NotApplicable => alloc::format!("This picture cannot {what}"),
-                };
-                self.say(reason);
-            }
+            (Computed::Picture(Err(err)), _) => Err(match err {
+                TransformError::OutOfMemory => {
+                    alloc::format!("There is not enough memory to {what}")
+                }
+                TransformError::BadSize => {
+                    alloc::format!("The picture cannot {what}: it would be too large or empty")
+                }
+                TransformError::NotApplicable => alloc::format!("This picture cannot {what}"),
+            }),
             // Every job lands as what it was asked for.
-            _ => self.say(alloc::format!("The picture could not {what}")),
+            _ => Err(alloc::format!("The picture could not {what}")),
         }
-        Outcome::none()
     }
 
     /// A transform's layers are in: they replace the picture's, its sprite
-    /// details refitted to what it became.
+    /// details refitted to what it became, or why they could not is answered,
+    /// the picture left as it was.
     fn adopt_transformed(
         &mut self,
         canvases: Vec<Canvas>,
         transform: Transform,
         layout: &Layout,
         damage: &mut Region,
-    ) -> Outcome {
+    ) -> Result<Outcome, String> {
         let made = self.document.picture().and_then(|held| {
             let mut picture = held.with_canvases(canvases)?;
             // A sprite is one layer.
@@ -1814,23 +1926,24 @@ impl View {
                 .map(|sprite| sprite.refit(transform, picture.canvas()));
             Some(picture)
         });
-        match made.map(|picture| self.document.replace_picture(picture)) {
-            Some(Ok(true)) => {}
-            Some(Ok(false)) | None => self.say(KEPT_UNCHANGED),
-            Some(Err(OutOfMemory)) => self.say("There is not enough memory to keep the change"),
-        }
-        self.after_picture_change(layout, damage)
+        let refusal = match made.map(|picture| self.document.replace_picture(picture)) {
+            Some(Ok(true)) => return Ok(self.after_picture_change(layout, damage)),
+            Some(Ok(false)) | None => KEPT_UNCHANGED,
+            Some(Err(OutOfMemory)) => NO_ROOM_TO_KEEP,
+        };
+        Err(String::from(refusal))
     }
 
     /// Layers `range`, laid together as `canvas`, are in: they become one
-    /// layer, shown wholly under the lowest one's name, and it is painted on.
+    /// layer, shown wholly under the lowest one's name, and it is painted on;
+    /// or why they could not is answered, the layers left as they were.
     fn adopt_merged(
         &mut self,
         canvas: Canvas,
         range: core::ops::Range<usize>,
         layout: &Layout,
         damage: &mut Region,
-    ) -> Outcome {
+    ) -> Result<Outcome, String> {
         let merged = self.document.picture().and_then(|held| {
             let mut name = String::new();
             let lowest = &held.layers().get(range.start)?.name;
@@ -1850,20 +1963,12 @@ impl View {
             }
             held.with_layers(layers, range.start)
         });
-        match merged.map(|picture| self.document.replace_picture(picture)) {
-            Some(Ok(true)) => {}
-            Some(Ok(false)) | None => self.say("There is not enough memory to merge the layers"),
-            Some(Err(OutOfMemory)) => self.say("There is not enough memory to keep the change"),
-        }
-        Self::layers_changed(layout, damage)
-    }
-
-    /// The layers changed, the picture's size and kind kept: what shows, and
-    /// what the status band says of them, is drawn again.
-    pub(super) fn layers_changed(layout: &Layout, damage: &mut Region) -> Outcome {
-        damage.add(layout.canvas());
-        damage.add(layout.status());
-        Outcome::none()
+        let refusal = match merged.map(|picture| self.document.replace_picture(picture)) {
+            Some(Ok(true)) => return Ok(self.layers_changed(layout, damage)),
+            Some(Ok(false)) | None => "There is not enough memory to merge the layers",
+            Some(Err(OutOfMemory)) => NO_ROOM_TO_KEEP,
+        };
+        Err(String::from(refusal))
     }
 
     /// A worker's tiles are in: what it settles of the selection follows.
@@ -1881,11 +1986,9 @@ impl View {
                 }
                 Outcome::none()
             }
-            Settles::Adjusted(then) => {
-                self.close_adjustment(layout, damage);
-                let mut outcome = self.carry_on(then, layout, damage);
-                outcome.relayout = Relayout::Whole;
-                outcome
+            Settles::Adjusted { closes, then } => {
+                self.operation_applied(closes, layout, damage);
+                self.carry_on(then, layout, damage)
             }
             Settles::PutDown(then) => {
                 if let Some(held) = self.held.take() {
@@ -2188,7 +2291,12 @@ impl View {
     /// Put the floating selection down on a worker, then carry out `then` once it
     /// has landed; with nothing floating, carry it out now. The picture takes
     /// no edits until it is down.
-    fn put_down_then(&mut self, then: Then, layout: &Layout, damage: &mut Region) -> Outcome {
+    pub(super) fn put_down_then(
+        &mut self,
+        then: Then,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> Outcome {
         if self.held.is_none() {
             return self.carry_on(then, layout, damage);
         }
@@ -2217,15 +2325,18 @@ impl View {
         )
     }
 
-    /// Carry out what follows a floating selection's putting down.
-    fn carry_on(&mut self, then: Then, layout: &Layout, damage: &mut Region) -> Outcome {
+    /// Carry out what follows a worker's answer once it has landed.
+    pub(super) fn carry_on(&mut self, then: Then, layout: &Layout, damage: &mut Region) -> Outcome {
         match then {
             Then::Rest => Outcome::none(),
             Then::Act(action) => self.act(action, layout, damage),
             Then::Float(floating) => self.float(floating, layout, damage),
             Then::SaveThenClose => self.save_then_close(layout, damage),
-            Then::Enter(id, text) => self.carry_out_entry(id, &text, layout, damage),
-            Then::Close => Outcome::asking(Request::Close),
+            Then::Enter(id, text) => self.commit_entry(id, text, layout, damage),
+            Then::Close => self.close_requested(layout, damage),
+            Then::Apply(kind) => self.apply_pressed(kind, layout, damage),
+            Then::Choose(kind, to) => self.open_chosen(kind, to, layout, damage),
+            Then::PaintOn(layer) => self.work_on(layer, layout, damage),
         }
     }
 
@@ -2404,17 +2515,17 @@ impl View {
         self.put_down_then(Then::Float(Floating::pasted(canvas, at)), layout, damage)
     }
 
-    /// The user asked to close the window.
+    /// The user asked to close the window: an opacity or a palette entry
+    /// changing and a name being typed land first, so the question asks about
+    /// them, as it does about an operation moved and work still out.
     pub fn close_requested(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
         self.end_gesture(layout, damage);
+        self.settle_opacity(layout, damage);
+        self.settle_entry_edit(layout, damage);
+        self.settle_rename(layout, damage);
         self.commit_text(layout, damage);
         if self.member.is_some() {
-            // Its sprite is its file's: what floats is put down into it, and
-            // the file window asks about the file.
-            if self.held.is_some() {
-                return self.put_down_then(Then::Close, layout, damage);
-            }
-            return Outcome::asking(Request::Close);
+            return self.close_member(layout, damage);
         }
         if tairix_window::document::SavedDocument::is_modified(self) {
             Outcome::asking(Request::AskToClose)
@@ -2423,17 +2534,42 @@ impl View {
         }
     }
 
-    /// The user chose to save before the window closes: an open adjustment
-    /// is applied and a floating selection put down first, as for any save,
-    /// each step coming back here once it has landed.
+    /// Close a sprite window, whose sprite is its file's, so nothing is asked:
+    /// not while work is out on it, and only once an operation moved is
+    /// applied to it and what floats put down into it, each coming back here
+    /// once it has landed; the file window asks about the file.
+    fn close_member(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+        if !self.idle(layout, damage) {
+            return Outcome::none();
+        }
+        if self.adjusting().is_some() {
+            return match self.apply_adjustment(Then::Close, layout, damage) {
+                Applying::Now(then) => self.carry_on(then, layout, damage),
+                Applying::Waiting(outcome) => outcome,
+            };
+        }
+        if self.held.is_some() {
+            return self.put_down_then(Then::Close, layout, damage);
+        }
+        Outcome::asking(Request::Close)
+    }
+
+    /// The user chose to save before the window closes: work still out lands
+    /// first — a Save As being readied becoming the save that closes — then
+    /// an open adjustment is applied and a floating selection put down, as
+    /// for any save, each step coming back here once it has landed.
     pub fn save_then_close(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        if self.adjustment.filter().is_some() {
+        if let Some(pending) = self.pending.as_mut() {
+            if let Lands::Sheet { then_close } = &mut pending.lands {
+                *then_close = true;
+            } else {
+                pending.closing = true;
+            }
+            return Outcome::none();
+        }
+        if self.adjusting().is_some() {
             return match self.apply_adjustment(Then::SaveThenClose, layout, damage) {
-                Applying::Now(then) => {
-                    let mut outcome = self.carry_on(then, layout, damage);
-                    outcome.relayout = Relayout::Whole;
-                    outcome
-                }
+                Applying::Now(then) => self.carry_on(then, layout, damage),
                 Applying::Waiting(outcome) => outcome,
             };
         }
@@ -2477,10 +2613,6 @@ impl View {
                 self.save_as = Some(format);
                 Outcome::asking(Request::SaveWhere { then_close })
             }
-            Purpose::Layer => match form.layer_answer() {
-                Ok(shown) => self.reshow_layer(shown, layout, damage),
-                Err(reason) => refused(self, form, &reason),
-            },
             // A sprite file window's form: no picture window asks it.
             Purpose::NewSprite => Outcome::none(),
             Purpose::Scale => match form.scale_answer() {
@@ -2591,15 +2723,15 @@ impl View {
     }
 
     /// Give the palette picture showing `palette`, as one step, its sprite
-    /// details restating it.
+    /// details restating it, answering whether it took it.
     pub(super) fn change_palette(
         &mut self,
         palette: Vec<[u8; 4]>,
         layout: &Layout,
         damage: &mut Region,
-    ) {
+    ) -> bool {
         if !self.idle(layout, damage) {
-            return;
+            return false;
         }
         let kind = self.kind();
         let sprite = self.document.picture().and_then(|picture| {
@@ -2615,13 +2747,17 @@ impl View {
             Ok(true) => {
                 self.adopt_kind();
                 layout.damage_all(damage);
+                true
             }
-            Ok(false) => {}
-            Err(OutOfMemory) => self.state(
-                "There is not enough memory to change the palette",
-                layout,
-                damage,
-            ),
+            Ok(false) => false,
+            Err(OutOfMemory) => {
+                self.state(
+                    "There is not enough memory to change the palette",
+                    layout,
+                    damage,
+                );
+                false
+            }
         }
     }
 
@@ -2780,7 +2916,8 @@ impl View {
             Keyboard::Dock => self.dock_key(stroke, layout, scale, theme, damage),
             Keyboard::Bar => self.bar_key(stroke, layout, scale, theme, damage),
             Keyboard::Palette => self.palette_key(stroke, layout, scale, theme, damage),
-            Keyboard::Adjustment => self.adjustment_key(stroke, layout, scale, theme, damage),
+            Keyboard::Layers => self.layers_key(stroke, layout, scale, theme, damage),
+            Keyboard::Operation(_) => self.adjustment_key(stroke, layout, scale, theme, damage),
             Keyboard::Colours => self.colour_controls_key(stroke, layout, scale, theme, damage),
             Keyboard::Recents => self.recents_walk_key(stroke, layout, scale, theme, damage),
             Keyboard::Picture if stroke.key == Key::Named(NamedKey::Tab) => {
@@ -2806,6 +2943,7 @@ impl View {
             Some(action) => {
                 self.commit_dock(layout, scale, theme, damage);
                 self.commit_bar(layout, damage);
+                self.release_layers(layout, scale, theme, damage);
                 self.act(action, layout, damage)
             }
             None => self.plain_key(stroke.key, layout, damage),
@@ -2824,13 +2962,16 @@ impl View {
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Outcome> {
+        let mut drew = tairix_controls::damage::sink();
         let outcome = self.picker.on_key(
             stroke.key,
             stroke.modifiers,
             layout.picker(),
             (scale, theme),
-            damage,
+            &mut drew,
         );
+        self.held_view(layout, PaneKind::Colour, false)
+            .report(&drew, damage);
         if outcome != PickerOutcome::Ignored {
             return Some(self.picked(outcome, layout, damage));
         }
@@ -2890,7 +3031,7 @@ impl View {
 
     /// Tab carries the keyboard on from `part` and Escape gives it back to
     /// the picture; `None` for any other key, which is the window's.
-    fn leave_on(
+    pub(super) fn leave_on(
         &mut self,
         part: Keyboard,
         stroke: Keystroke,
@@ -2958,22 +3099,43 @@ impl View {
         damage: &mut Region,
     ) -> Outcome {
         self.end_gesture(layout, damage);
+        self.settle_opacity(layout, damage);
+        self.settle_rename(layout, damage);
         self.settle_tool(layout, damage);
-        let id = id.get();
-        if self.held.is_none() {
-            return self.carry_out_entry(id, text, layout, damage);
-        }
         let mut held = String::new();
         if held.try_reserve_exact(text.len()).is_err() {
             self.state("There is not enough memory to do that", layout, damage);
             return Outcome::none();
         }
         held.push_str(text);
-        self.put_down_then(Then::Enter(id, held), layout, damage)
+        self.commit_entry(id.get(), held, layout, damage)
     }
 
-    /// Carry out what entry field `id` was committed holding: a floating
-    /// selection was put down before this was reached, but for a rename.
+    /// Go where entry field `id` committed `text` names — another layer or
+    /// entry — the open operation applied and a floating selection put down
+    /// first, each coming back here once it has landed.
+    fn commit_entry(
+        &mut self,
+        id: u16,
+        text: String,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> Outcome {
+        if self.adjusting().is_some() {
+            return match self.apply_adjustment(Then::Enter(id, text), layout, damage) {
+                Applying::Now(then) => self.carry_on(then, layout, damage),
+                Applying::Waiting(outcome) => outcome,
+            };
+        }
+        if self.held.is_some() {
+            return self.put_down_then(Then::Enter(id, text), layout, damage);
+        }
+        self.carry_out_entry(id, &text, layout, damage)
+    }
+
+    /// Carry out what entry field `id` was committed holding, the open
+    /// operation applied and a floating selection put down before this was
+    /// reached.
     fn carry_out_entry(
         &mut self,
         id: u16,
@@ -3031,16 +3193,15 @@ impl View {
         reason = "one arm an action; splitting it would part each action from its siblings"
     )]
     fn carry_out(&mut self, action: Action, layout: &Layout, damage: &mut Region) -> Outcome {
-        // Whatever the action, a drag under way is finished first: none acts
-        // on a picture a stroke is still being laid on.
+        // Whatever the action, a drag under way is finished first, a stroke's
+        // or an opacity's, and a name being typed lands: none acts on a
+        // picture still being laid on or a layer still being named.
         self.end_gesture(layout, damage);
-        if self.adjustment.filter().is_some() && !self.leaves_adjustment(action) {
+        self.settle_opacity(layout, damage);
+        self.settle_rename(layout, damage);
+        if self.adjusting().is_some() && !self.leaves_adjustment(action) {
             return match self.apply_adjustment(Then::Act(action), layout, damage) {
-                Applying::Now(then) => {
-                    let mut outcome = self.carry_on(then, layout, damage);
-                    outcome.relayout = Relayout::Whole;
-                    outcome
-                }
+                Applying::Now(then) => self.carry_on(then, layout, damage),
                 Applying::Waiting(outcome) => outcome,
             };
         }
@@ -3118,7 +3279,7 @@ impl View {
             Action::FlipDown => {
                 return self.transform(Transform::Flip { vertical: true }, "mirror", layout, damage)
             }
-            Action::Invert => return self.adjust(crate::filter::Filter::Invert, layout, damage),
+            Action::Invert => return self.apply_now(Op::Invert, layout, damage),
             Action::Convert => {
                 self.ask(Form::convert(self.kind().depth()), layout, damage);
             }
@@ -3213,7 +3374,6 @@ impl View {
             Action::MergeDown => return self.merge_down(layout, damage),
             Action::Flatten => return self.flatten(layout, damage),
             Action::ShowLayer => return self.toggle_layer(layout, damage),
-            Action::LayerProperties => return self.ask_layer(layout, damage),
             // Put down before this was reached, which is all the action asks.
             Action::PutDown
             | Action::GoTo
@@ -3225,8 +3385,8 @@ impl View {
             | Action::DeleteEntry => {}
             Action::Tool(tool) => return self.choose_tool(tool, layout, damage),
             Action::Adjust(index) => {
-                if let Some(&filter) = crate::filter::Filter::ALL.get(index) {
-                    return self.adjust(filter, layout, damage);
+                if let Some(op) = Op::every().nth(index) {
+                    return self.open_op(op, layout, damage);
                 }
             }
             Action::Pane(kind) => return self.toggle_pane(kind, layout, damage),
@@ -3257,9 +3417,9 @@ impl View {
                 return Outcome::none();
             }
             Ok(Applied {
-                damage: Damage::Layers,
+                damage: Damage::Layers | Damage::OtherLayer,
                 ..
-            }) => return Self::layers_changed(layout, damage),
+            }) => return self.layers_changed(layout, damage),
             Ok(_) => return self.after_picture_change(layout, damage),
             Err(Unapplied::Nothing) => return Outcome::none(),
             Err(Unapplied::NoMemory) => "There is not enough memory for that; nothing changed",
@@ -3561,25 +3721,17 @@ impl View {
         );
     }
 
-    /// Every adjustment and filter, one with settings marked as opening
-    /// them; a palette picture offers no filter.
+    /// Every operation, each row opening its pane on it, the effects after
+    /// the adjustments; a palette picture offers no effect.
     fn adjust_rows(&self, menu: &mut MenuBuilder, plate: Plate, picture: bool) {
         let palette = self.kind().palette().is_some();
-        for (index, filter) in crate::filter::Filter::ALL.iter().enumerate() {
-            let label = if filter.has_settings() {
-                alloc::format!("{}\u{2026}", filter.label())
-            } else {
-                String::from(filter.label())
-            };
-            let can = picture && !(palette && filter.neighbourly());
-            menu.item(
-                Action::Adjust(index),
-                filter.symbol(),
-                &label,
-                "",
-                can,
-                plate,
-            );
+        for (index, op) in Op::every().enumerate() {
+            if index == Op::ADJUSTMENTS.len() {
+                menu.separator(plate);
+            }
+            let label = alloc::format!("{}\u{2026}", op.label());
+            let can = picture && !(palette && op.needs_colour());
+            menu.item(Action::Adjust(index), op.symbol(), &label, "", can, plate);
         }
     }
 
@@ -3845,14 +3997,6 @@ impl View {
                 plate,
             );
         }
-        menu.item(
-            Action::LayerProperties,
-            S::Properties,
-            "Layer properties\u{2026}",
-            "",
-            colour,
-            plate,
-        );
     }
 
     /// A TIFF's pages' rows: a page has no name, so it is gone to by number.
@@ -4102,20 +4246,24 @@ pub(super) enum Keyboard {
     Dock,
     /// The colour pane's recent colours.
     Recents,
-    /// The Adjustment pane's settings.
-    Adjustment,
+    /// The Layers pane's controls and rows.
+    Layers,
+    /// The settings of the Adjustments or the Effects pane.
+    Operation(PaneKind),
 }
 
 impl Keyboard {
     /// The order Tab walks.
-    const ORDER: [Self; 7] = [
+    const ORDER: [Self; 9] = [
         Self::Picture,
         Self::Bar,
         Self::Palette,
         Self::Colours,
         Self::Dock,
         Self::Recents,
-        Self::Adjustment,
+        Self::Layers,
+        Self::Operation(PaneKind::Adjustments),
+        Self::Operation(PaneKind::Effects),
     ];
 }
 
@@ -4127,6 +4275,19 @@ fn activated(outcome: ToolbarOutcome) -> Option<usize> {
         }
         _ => None,
     }
+}
+
+/// Where `rect` starts and how far it runs along `axis`.
+fn span_along(axis: ScrollOrientation, rect: Rect) -> (i32, u32) {
+    match axis {
+        ScrollOrientation::Horizontal => (rect.left(), rect.width),
+        ScrollOrientation::Vertical => (rect.top(), rect.height),
+    }
+}
+
+/// The palette bar's model over `range`, stepping a well at a time.
+fn well_steps(range: ScrollRange, layout: &Layout) -> ScrollModel {
+    ScrollModel::in_pixels(range, u64::from(layout.palette_well()))
 }
 
 /// The pixels a straight edge from `a` to `b` may cross.

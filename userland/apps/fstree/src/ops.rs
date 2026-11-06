@@ -30,7 +30,7 @@ use core::fmt::{self, Write as _};
 
 use tairix_abi::{Errno, FileId, FileKind};
 use tairix_fscopy::op::{self, Named, Operation, Progress, Report, Stager, Taken, Verb};
-use tairix_fscopy::tree::{Dir, Roots};
+use tairix_fscopy::tree::{Dir, Kind, Roots};
 use tairix_fscopy::{Landing, Omissions};
 use tairix_path::{dir_name, join, leaf_name};
 use tairix_util::quote::quote_subject;
@@ -390,16 +390,26 @@ impl FileOp {
         self.run.resolve(decision);
     }
 
-    /// Run the operation until it ends, fails, or pauses on a question.
+    /// Run the operation until it ends, fails, or pauses on a question about
+    /// a taken file or link. A directory meeting one of its name merges into
+    /// it, as `cp -r` does, so only a leaf is put to the user.
     pub fn advance(&mut self) -> OpProgress {
         loop {
             match self.run.advance(usize::MAX, &mut self.buf) {
                 Progress::Yielded => {}
                 Progress::Done => return OpProgress::Done,
+                Progress::Paused if self.merges() => self.run.resolve(Decision::Overwrite),
                 Progress::Paused => return OpProgress::NeedsDecision,
                 Progress::Failed(error) => return OpProgress::Failed(OpError::Engine(error)),
             }
         }
+    }
+
+    /// Whether the question it waits on is a directory meeting one.
+    fn merges(&self) -> bool {
+        self.run
+            .conflict()
+            .is_some_and(|conflict| conflict.occupant == Kind::Directory)
     }
 
     /// The one-line completion report for the message line.

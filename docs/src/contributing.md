@@ -52,7 +52,7 @@ says why on the line before its closing `FAILED in`. A measured warm run:
 | `docs-check` (rustdoc + mdBook + link check) | 68 s | sequential |
 | `image` gate | 193 s over 319 spawns | sequential |
 | `clippy` host + 2 feature-lane + 17 target passes | 330 s | sequential |
-| `test --qemu --wasm` (host matrix + doctests + 226 guests + 6 wasm32 verticals + 3 fixture cross-compiles) | 711 s | guests concurrent, `nproc/3` weighted budget |
+| `test --qemu --wasm` (host matrix + doctests + the QEMU guests + the wasm32 verticals + the fixture cross-compiles) | 711 s, measured with 226 guests, 6 wasm32 verticals and 3 fixture cross-compiles | guests concurrent, `nproc/3` weighted budget |
 | `miri` (the UB oracle over the hand-written `unsafe` cores, the userland runtime and its C stubs, the three paging ports, `kernel/mem`, `kernel/core`, the MLFQ run queue, the DMA translation unit families, `lib/virtio` with the drivers that drive its rings, and the GENET frame carve) | 1836 s | one process per crate, concurrent; `lib/collections`'s, `kernel/core`'s, `lib/spirv`'s and `lib/gpu`'s libraries, `kernel/mem`, `lib/abi`, `lib/rt`, the aarch64 and x86_64 ports, the DMA translation API and its RISC-V, AMD-Vi and virtio-iommu families, and GENET dealt across the host's cores, at most 64 tests a shard |
 
 Miri runs one interpreted thread at a time and reports a single CPU to the
@@ -237,7 +237,7 @@ concurrently as the one `static gates` stage:
 | `spirv` | Verifies the SPIR-V grammar tables against the pinned Khronos grammar, regenerated in-process |
 | `artsheet` | Measures the shipped figure art against its bounds and the committed ledger |
 | `icons` | Redraws the file-type icon masters in-process and compares each with its committed file |
-| `model-check` | Exhaustively model-checks the capability + IPC state machine, failing on any invariant counterexample |
+| `model-check` | Exhaustively model-checks the capability + IPC state machine and the hand-on of freed room, failing on any invariant counterexample |
 | `deny`        | `cargo deny --all-features check` (license + advisory)      |
 | `proptest --once` | Runs one iteration of each stateful capability model, fresh logged seed |
 | `crypto-constant-time` | Re-runs `lib/crypto`'s tests under release optimisation, where the optimiser can break constant time |
@@ -330,6 +330,52 @@ a CPU takes it from `test_boot::claim_cpu`, which never hands a slot out twice,
 and runs on it through `TestArch::on_cpu`. The test publication helpers refuse
 a CPU no test claimed, so a hand-picked one fails every run rather than one in
 thousands.
+
+## A host test's waits block on its boot
+
+A host test has no dispatch loop. A thread that only claims the scheduler
+(`test_boot::claim_scheduler`) runs on a CPU with no per-CPU slot, so it can
+never block on a peer: a syscall or kernel-client wait it starts fails closed
+with `NotImplemented`, withdrawing any call it posted, as one no scheduler can
+park does on a booted system. A test whose threads wait on one another
+runs them as the tasks of a `test_boot::HostBoot` instead: one test's kernel
+instance, holding a claimed CPU slot, a virtual clock and a record per task.
+
+- `HostBoot::claim` makes the calling thread its first task, and
+  `HostBoot::current` names the boot of the task calling it. `spawn` runs a
+  closure as a further task, whose value `HostTask::join` waits for; `enter`
+  admits a thread started some other way until its guard drops, and
+  `enter_unparkable` admits one whose parks fail closed. Admit a thread
+  before another task blocks waiting on it.
+- A park reaches the boot's resume handle through `reschedule_current`, as on
+  a booted system, and runs the scheduler's own `park::settle`: a wake already
+  owed returns at once, and otherwise the thread blocks until a wake readies
+  it. A wake runs `park::unpark_task`, so a handoff costs a wakeup. A syscall
+  handler reads its CPU from its architecture, so a handler under test runs
+  on `TestArch::on_cpu(boot.cpu())`.
+- Every thread that waits or wakes is a task of the boot. A wake reaches only
+  the waking thread's boot: another test's task on a shared queue is answered
+  as landed and left alone, and a retired task answers that it can never run.
+- `advance_clock` is the boot's timer interrupt: every other task is woken to
+  re-check its deadline.
+- A task about to block while every other live task waits on another —
+  parked, or joining a live task — fails the test and wakes the rest to fail
+  too, so a lost wake fails rather than hangs.
+- `until_blocked` sequences a test on a task's park, and `waits` counts the
+  parks that blocked, so a test can assert that a round trip blocked exactly
+  once.
+- A fixture server is a task, never a loop polling a stop flag.
+  `spawn_until_stopped` hands its body the question whether it has been
+  asked to stop, which it asks after each park, and `StoppableTask::stop`
+  asks, ends the park the task is in and waits for it to retire.
+  `test_boot::serve` answers an endpoint so: each `serve_next` receives
+  through `callreg::receive_call`, the blocking receive `call_recv` runs,
+  parked on `SERVE_WAITQ`, then replies and wakes whom `call_reply` wakes. A
+  stand-in for `devmgr` parks on `HW_TREE_WAITQ`, which every change to the
+  hardware tree wakes.
+
+`kernel/core`'s own tests reach it as `crate::test_boot`; the kernel binary's
+tests reach it through the `test-arch` feature.
 
 ## `clippy` lints every target, not just the host
 

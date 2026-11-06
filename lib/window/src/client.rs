@@ -21,9 +21,7 @@ use tairix_display::winframe::damage_in;
 
 use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageList, DamageRect, DisplayMode};
-use tairix_abi::input::{
-    KeyInput, KeyValue, Modifiers as WireModifiers, NamedKeyCode, PointerButtonCode,
-};
+use tairix_abi::input::PointerButtonCode;
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     decode_authorised_output_reply, decode_screensaver_reply, ScreensaverEntry, SystemTask,
@@ -45,9 +43,10 @@ use tairix_abi::window_ipc::{
     WINDOW_PICKED_FILE_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX,
     WINDOW_WALLPAPERS_REPLY_MAX,
 };
+use tairix_abi::window_ipc::{LandingStep, DROP_LANDING_MAX_WIRE_LEN};
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PinchPhase, PointerButton};
+use tairix_input::{InputEvent, PinchPhase, PointerButton};
 
 use crate::server::{
     DialogSpec, LayerSpec, PopupSpec, ToolSpec, TransientSpec, WindowSizeState, WindowSizing,
@@ -529,81 +528,6 @@ const fn pointer_button(code: PointerButtonCode) -> PointerButton {
     }
 }
 
-/// The shared input event one delivered [`KeyInput`] means.
-///
-/// The companion to [`pointer_input_events`] for the keyboard: every app
-/// that hands key input to the shared control family needs the same
-/// translation from the wire vocabulary, so it has one definition here
-/// rather than a private copy per app. The mapping is total — every key and
-/// every modifier has exactly one meaning — so no app has to decide what an
-/// unhandled code means.
-#[must_use]
-pub const fn key_input_event(input: KeyInput) -> InputEvent {
-    match input {
-        KeyInput::Pressed { key, modifiers } => InputEvent::KeyPressed {
-            key: key_value(key),
-            modifiers: key_modifiers(modifiers),
-        },
-        KeyInput::Released { key, modifiers } => InputEvent::KeyReleased {
-            key: key_value(key),
-            modifiers: key_modifiers(modifiers),
-        },
-        KeyInput::ModifiersChanged { modifiers } => InputEvent::ModifiersChanged {
-            modifiers: key_modifiers(modifiers),
-        },
-    }
-}
-
-/// The control-facing key one wire key value names.
-const fn key_value(value: KeyValue) -> Key {
-    match value {
-        KeyValue::Char(ch) => Key::Char(ch),
-        KeyValue::Named(named) => Key::Named(named_key(named)),
-    }
-}
-
-/// The control-facing named key one wire key code names.
-const fn named_key(code: NamedKeyCode) -> NamedKey {
-    match code {
-        NamedKeyCode::Enter => NamedKey::Enter,
-        NamedKeyCode::Escape => NamedKey::Escape,
-        NamedKeyCode::Backspace => NamedKey::Backspace,
-        NamedKeyCode::Tab => NamedKey::Tab,
-        NamedKeyCode::Delete => NamedKey::Delete,
-        NamedKeyCode::Insert => NamedKey::Insert,
-        NamedKeyCode::Home => NamedKey::Home,
-        NamedKeyCode::End => NamedKey::End,
-        NamedKeyCode::PageUp => NamedKey::PageUp,
-        NamedKeyCode::PageDown => NamedKey::PageDown,
-        NamedKeyCode::Left => NamedKey::Left,
-        NamedKeyCode::Right => NamedKey::Right,
-        NamedKeyCode::Up => NamedKey::Up,
-        NamedKeyCode::Down => NamedKey::Down,
-        NamedKeyCode::F1 => NamedKey::Function { number: 1 },
-        NamedKeyCode::F2 => NamedKey::Function { number: 2 },
-        NamedKeyCode::F3 => NamedKey::Function { number: 3 },
-        NamedKeyCode::F4 => NamedKey::Function { number: 4 },
-        NamedKeyCode::F5 => NamedKey::Function { number: 5 },
-        NamedKeyCode::F6 => NamedKey::Function { number: 6 },
-        NamedKeyCode::F7 => NamedKey::Function { number: 7 },
-        NamedKeyCode::F8 => NamedKey::Function { number: 8 },
-        NamedKeyCode::F9 => NamedKey::Function { number: 9 },
-        NamedKeyCode::F10 => NamedKey::Function { number: 10 },
-        NamedKeyCode::F11 => NamedKey::Function { number: 11 },
-        NamedKeyCode::F12 => NamedKey::Function { number: 12 },
-    }
-}
-
-/// The control-facing modifiers the wire modifiers name.
-const fn key_modifiers(modifiers: WireModifiers) -> Modifiers {
-    Modifiers {
-        shift: modifiers.shift,
-        ctrl: modifiers.ctrl,
-        alt: modifiers.alt,
-        meta: modifiers.meta,
-    }
-}
-
 /// Bounded slot count every window-channel app binds its event mailbox
 /// with: input-rate events, drained after every wake, so a small queue is
 /// ample and a stalled app costs the kernel a bounded mailbox rather than
@@ -666,6 +590,34 @@ pub trait WindowTransport {
     fn await_reply(&mut self, ticket: u64, reply: &mut [u8]) -> Result<usize, Errno>;
 }
 
+/// Step the drop numbered `serial` onto the desktop that window `window_id`'s
+/// drag concluded there, over `transport`, waiting for the desktop to take
+/// it: what the thread carrying the drop out calls around each item, so the
+/// desktop knows a name before its first write.
+///
+/// # Errors
+///
+/// The desktop's refusal — [`Errno::NotFound`] once the drop has ended there
+/// or its window has gone, [`Errno::OutOfRange`] for a step out of turn — a
+/// transport failure, or a corrupt status frame.
+pub fn step_landing<T: WindowTransport>(
+    transport: &mut T,
+    window_id: u64,
+    serial: u32,
+    step: LandingStep,
+) -> Result<(), Errno> {
+    let mut frame = [0u8; DROP_LANDING_MAX_WIRE_LEN];
+    let len = WindowRequest::DropLanding {
+        window_id,
+        serial,
+        step,
+    }
+    .encode(&mut frame)?;
+    let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
+    let got = transport.call(&frame[..len], &mut reply)?;
+    decode_status_reply(reply.get(..got).ok_or(Errno::BufferTooSmall)?)
+}
+
 /// A request the client posts rather than waits on. Each is made as input
 /// moves, so awaiting each would hand the application the desktop's frame
 /// time per pointer sample.
@@ -687,6 +639,9 @@ pub enum PostedRequest {
     Sizing,
     /// [`WindowClient::present`].
     Present,
+    /// [`WindowClient::end_landing`], for the drop it numbers: each drop's
+    /// end is its own, never folded into another's.
+    LandingEnded(u32),
 }
 
 impl PostedRequest {
@@ -700,6 +655,7 @@ impl PostedRequest {
             Self::Title => "a title",
             Self::Sizing => "a resize range",
             Self::Present => "a frame",
+            Self::LandingEnded(_) => "a drop's end",
         }
     }
 }
@@ -739,6 +695,7 @@ enum Asked {
     Title(WindowTitle),
     Sizing(WindowSizing),
     Present(u32, DamageList),
+    LandingEnded(u32),
 }
 
 impl Asked {
@@ -751,6 +708,7 @@ impl Asked {
             Self::Title(_) => PostedRequest::Title,
             Self::Sizing(_) => PostedRequest::Sizing,
             Self::Present(..) => PostedRequest::Present,
+            Self::LandingEnded(serial) => PostedRequest::LandingEnded(*serial),
         }
     }
 
@@ -778,6 +736,11 @@ impl Asked {
                 window_id,
                 frame_index,
                 damage,
+            },
+            Self::LandingEnded(serial) => WindowRequest::DropLanding {
+                window_id,
+                serial,
+                step: LandingStep::Ended,
             },
         }
     }
@@ -1034,14 +997,16 @@ impl<T: WindowTransport> WindowClient<T> {
     /// relative to the parent's client origin, above the parent, closed and
     /// hidden with it, off the taskbar — except that `spec.carry` asks for
     /// the press the parent still holds to carry it, and it takes the
-    /// keyboard only when the user presses it. The reply is the same shape
-    /// as [`Self::create`]'s.
+    /// keyboard only when the user presses it. A `spec.sizing` the user may
+    /// resize it within gives it resize edges — never a maximize — and each
+    /// new client size arrives as [`WindowEvent::Resized`], as a window's
+    /// does. The reply is the same shape as [`Self::create`]'s.
     ///
     /// # Errors
     ///
     /// * [`Errno::OutOfRange`] / [`Errno::LengthOutOfRange`] — a geometry, a
-    ///   carry off the band, or a reserved event endpoint the protocol
-    ///   refuses, caught before any call.
+    ///   carry off the band, a range naming no reachable size, or a reserved
+    ///   event endpoint the protocol refuses, caught before any call.
     /// * The session's typed refusal (a foreign or unknown parent,
     ///   [`Errno::NotSupported`] for a parent that is itself a transient, the
     ///   window budget reached), a transport failure, or a corrupt reply.
@@ -1060,6 +1025,7 @@ impl<T: WindowTransport> WindowClient<T> {
             offset_y: spec.offset_y,
             carry: spec.carry,
             title: spec.title,
+            sizing: spec.sizing,
         };
         self.create_transient(&request, transient)
     }
@@ -1270,10 +1236,11 @@ impl<T: WindowTransport> WindowClient<T> {
     /// `damage` changed.
     ///
     /// Posted once the window's previous present is answered
-    /// ([`Self::await_present`]), so the client never has two in flight; the
-    /// session answers as it records the frame, and shows it with its next
-    /// one. A frame this process's own calls leave no room for is sent as a
-    /// call instead, which waits for the room. A refusal of a posted present
+    /// ([`Self::await_present`]), so the client never has two in flight. The
+    /// session shows the frame with its next one, answering at once when the
+    /// window held no frame it had yet to show and otherwise once it shows
+    /// that one. A frame this process's own calls leave no room for is sent as
+    /// a call instead, which waits for the room. A refusal of a posted present
     /// arrives later as [`EventError::Refused`], and the window's next present
     /// declares the whole window, since the refused one never reached it.
     ///
@@ -1329,11 +1296,12 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// The session reads the frame a present names until a later present
     /// replaces it, so a client draws its other frame only once the present
-    /// naming that one is answered. The answer is prompt — the session records
-    /// a frame and replies, it does not draw it first — so this waits only
-    /// for a client that presents faster than the session serves it. How an
-    /// awaited present ended reaches the application as any posted request's
-    /// answer does.
+    /// naming that one is answered. A present replacing a frame the desktop
+    /// had yet to show is answered with the desktop's next frame, so this
+    /// holds a client drawing faster than the desktop shows frames to its
+    /// pace; a loop that must never wait asks [`Self::present_in_flight`]
+    /// first. How an awaited present ended reaches the application as any
+    /// posted request's answer does.
     pub fn await_present(&mut self, window_id: u64) {
         // Each present is awaited by its own answer and nothing else is
         // reaped, so a window with none in flight costs no call.
@@ -1358,6 +1326,19 @@ impl<T: WindowTransport> WindowClient<T> {
                 .and_then(|len| decode_status_reply(&reply[..len]));
             let _ = self.answered(index, answer);
         }
+    }
+
+    /// Whether a present of window `window_id` is still unanswered once every
+    /// answer that has landed is taken in. A loop that must never wait — one
+    /// draining a stream into its window — presents only while this is false
+    /// and otherwise owes the window its paint: the answer, when it lands,
+    /// wakes the loop.
+    pub fn present_in_flight(&mut self, window_id: u64) -> bool {
+        self.reap_posted();
+        let presents = |posting: &Posting| {
+            posting.window_id == window_id && posting.kind == PostedRequest::Present
+        };
+        self.posted.iter().any(presents)
     }
 
     /// Whether the session released window `window_id`'s pixels because
@@ -1641,13 +1622,25 @@ impl<T: WindowTransport> WindowClient<T> {
         })
     }
 
+    /// Tell the desktop, without waiting, that the drop numbered `serial`
+    /// window `window_id`'s drag concluded there has ended: what a drop that
+    /// ends before its own thread steps it owes. A refusal is not reported,
+    /// since a drop the desktop already ended has nothing left to end.
+    ///
+    /// # Errors
+    ///
+    /// A request the wire cannot carry, or a transport failure.
+    pub fn end_landing(&mut self, window_id: u64, serial: u32) -> Result<(), Errno> {
+        self.post_or_hold(window_id, Asked::LandingEnded(serial))
+    }
+
     /// The desktop folder the drag report numbered `serial` named, for the
     /// drag window `window_id` began.
     ///
     /// # Errors
     ///
-    /// [`Errno::NotFound`] once the session has named another, a transport
-    /// failure, or a corrupt reply.
+    /// [`Errno::NotFound`] once the pointer has gone from that folder, a
+    /// transport failure, or a corrupt reply.
     pub fn drag_spot(&mut self, window_id: u64, serial: u32) -> Result<String, Errno> {
         let folder = decode_drag_spot_reply(
             self.pull(&WindowRequest::QueryDragSpot { window_id, serial })?,
@@ -2526,6 +2519,9 @@ impl<T: WindowTransport> WindowClient<T> {
 
     /// Act on `answer` to `posting`.
     fn settle(&mut self, posting: &Posting, answer: Result<(), Errno>) {
+        if matches!(posting.kind, PostedRequest::LandingEnded(_)) {
+            return;
+        }
         if posting.kind == PostedRequest::Present {
             if let Err(errno) = answer {
                 if self.present_refused(posting.window_id, errno) {

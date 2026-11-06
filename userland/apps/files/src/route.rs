@@ -71,6 +71,9 @@ pub enum PropertiesKey {
     /// The permissions section's own cursor, its flags and its ownership
     /// cells.
     Permissions,
+    /// A drive's *Title* field: `Down` or `Tab` hands it the keyboard, and
+    /// while it holds it every key is its own.
+    Title,
     /// Close the window.
     Close,
     /// Nothing the showing section draws.
@@ -78,25 +81,30 @@ pub enum PropertiesKey {
 }
 
 /// What `key` acts on while `tab` is the section on show, `held` saying
-/// whether the permissions section has taken the keyboard from the strip.
+/// whether that section — the permissions section, or a drive's *Title*
+/// field — has taken the keyboard from the strip.
 ///
 /// The section strip is the window's own navigation, so it answers on every
-/// section until the permissions section takes the keyboard: from then on
-/// Left and Right walk that section's flags, and `Escape` hands the keyboard
-/// back rather than closing the window. Everything else belongs to the section
-/// that draws a control for it — the attributes section's list cursor and its
-/// one text surface, the permissions section's cursor — and a section that
-/// draws neither must not reach them: typing on General would otherwise fill
-/// a field the user cannot see, and a stray arrow would move an invisible
-/// cursor and pay for a repaint. Otherwise `Escape` closes the window, since
-/// that is the window's own answer and not a section's.
+/// section until one takes the keyboard: from then on Left and Right walk the
+/// permissions section's flags or the title's caret, and `Escape` hands the
+/// keyboard back rather than closing the window. `Down` or `Tab` hands a
+/// drive's title the keyboard. Everything else belongs to the section that
+/// draws a control for it — the attributes section's list cursor and its one
+/// text surface, the permissions section's cursor — and a section that draws
+/// neither must not reach them: typing on General would otherwise fill a field
+/// the user cannot see, and a stray arrow would move an invisible cursor and
+/// pay for a repaint. Otherwise `Escape` closes the window, since that is the
+/// window's own answer and not a section's.
 #[must_use]
 pub fn properties_key(tab: PropertiesTab, held: bool, key: KeyValue) -> PropertiesKey {
     let permissions = tab == PropertiesTab::Permissions;
+    let drive = tab == PropertiesTab::Drive;
     match key {
         _ if permissions && held => PropertiesKey::Permissions,
+        _ if drive && held => PropertiesKey::Title,
         KeyValue::Named(NamedKeyCode::Left) => PropertiesKey::Section(-1),
         KeyValue::Named(NamedKeyCode::Right) => PropertiesKey::Section(1),
+        KeyValue::Named(NamedKeyCode::Down | NamedKeyCode::Tab) if drive => PropertiesKey::Title,
         _ if tab == PropertiesTab::Attributes => PropertiesKey::Attributes,
         KeyValue::Named(NamedKeyCode::Escape) => PropertiesKey::Close,
         _ if permissions => PropertiesKey::Permissions,

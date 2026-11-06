@@ -1,5 +1,40 @@
 use super::*;
 
+/// A volume name reads as the probe reads it and takes a title exactly, NUL
+/// padded; a longer one, or one closing with a space, is refused rather than
+/// cut, and the empty title clears it.
+#[test]
+fn a_volume_name_holds_a_title_exactly() {
+    let mut sb = [0u8; SUPERBLOCK_LEN];
+    assert_eq!(volume_name(&sb), Ok(VolumeTitle::EMPTY));
+    let title = VolumeTitle::new("Backup Café").expect("a title");
+    let field = volume_name_of(&title).expect("it fits");
+    assert_eq!(field[12..], [0; 4], "padded with NULs");
+    sb[SB_VOLUME_NAME..SB_VOLUME_NAME + field.len()].copy_from_slice(&field);
+    assert_eq!(volume_name(&sb), Ok(title));
+    let sixteen = VolumeTitle::new(&"x".repeat(16)).expect("a title");
+    assert!(volume_name_of(&sixteen).is_ok(), "the whole field");
+    assert_eq!(
+        volume_name_of(&VolumeTitle::new("Seventeen bytes!!").expect("a title")),
+        Err(DriverError::LengthOutOfRange)
+    );
+    assert_eq!(
+        volume_name_of(&VolumeTitle::new("Trailing ").expect("a title")),
+        Err(DriverError::OutOfRange)
+    );
+    assert_eq!(
+        volume_name_of(&VolumeTitle::EMPTY),
+        Ok([0; VOLUME_NAME_LEN]),
+        "the empty title clears it"
+    );
+    sb[SB_VOLUME_NAME] = 0xFF;
+    assert_eq!(
+        volume_name(&sb),
+        Err(DriverError::OutOfRange),
+        "a name no title spells"
+    );
+}
+
 use crate::bytes::{put_le16, put_le32};
 
 /// A valid superblock for `groups` groups of 8192 blocks of 1 KiB, 2048

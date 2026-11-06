@@ -175,7 +175,6 @@ mod sprite;
 mod sprite_encode;
 mod tiff;
 mod tiff_encode;
-mod vp8;
 mod vp8l;
 mod webp;
 mod zip;
@@ -1015,6 +1014,23 @@ impl DecodeError {
             Self::OraBadStack => "OpenRaster layer stack is missing or malformed",
             Self::OraMissingLayer => "OpenRaster layer names an image the archive does not hold",
             Self::OraTooManyLayers => "OpenRaster stack holds more layers than are read",
+        }
+    }
+}
+
+impl From<tairix_video::vp8::Vp8Error> for DecodeError {
+    fn from(refusal: tairix_video::vp8::Vp8Error) -> Self {
+        use tairix_video::vp8::Vp8Error;
+        match refusal {
+            Vp8Error::Truncated => Self::WebpLossyTruncated,
+            Vp8Error::Interframe | Vp8Error::ReservedBufferCopy => Self::WebpLossyInterframe,
+            Vp8Error::UnsupportedProfile => Self::WebpLossyUnsupportedProfile,
+            Vp8Error::BadStartCode => Self::WebpLossyBadStartCode,
+            Vp8Error::InvalidGeometry => Self::WebpLossyInvalidGeometry,
+            Vp8Error::ReservedColourSpace => Self::WebpLossyReservedColourSpace,
+            Vp8Error::InvalidPartitions => Self::WebpLossyInvalidPartitions,
+            Vp8Error::DimensionsOverflow => Self::DimensionsOverflow,
+            Vp8Error::OutOfMemory => Self::OutOfMemory,
         }
     }
 }

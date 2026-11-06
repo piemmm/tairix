@@ -96,6 +96,19 @@ pub trait MemMap: Sync {
     /// returns [`Errno::NotImplemented`] to mark an inert interface.
     fn map(&self, len: usize, flags: MapFlags, addr_hint: u64) -> Result<u64, Errno>;
 
+    /// Back the one reserved page at `page_va` as [`MemMap::map`] does, but
+    /// only if `holds` — asked under the lock of the caller's own space —
+    /// answers that the caller still holds it. A release takes its range out
+    /// of the holding before it takes that lock to release a page, so none can
+    /// slip between the answer and the mapping and leave a page mapped that no
+    /// record holds.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when `holds` answers no; otherwise as
+    /// [`MemMap::map`].
+    fn map_held(&self, page_va: u64, holds: &dyn Fn() -> bool) -> Result<(), Errno>;
+
     /// Release the region of `len` bytes based at `base` previously reserved
     /// by [`MemMap::reserve`] from the caller's own address space.
     ///
@@ -133,6 +146,10 @@ impl MemMap for NullMemMap {
     }
 
     fn map(&self, _len: usize, _flags: MapFlags, _addr_hint: u64) -> Result<u64, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn map_held(&self, _page_va: u64, _holds: &dyn Fn() -> bool) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 

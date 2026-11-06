@@ -1426,7 +1426,7 @@ where
             // the reader's last empty poll and its park), wedging the
             // line-oriented reader; registering first closes that race.
             if let Some(task) = parkable {
-                crate::waitq::CONSOLE_WAITQ.register(task, deadline);
+                crate::waitq::CONSOLE_WAITQ.register(task, deadline)?;
             }
             if let Err(refused) = may_read() {
                 if let Some(task) = parkable {

@@ -879,14 +879,17 @@ with a deadline, by the **timed sweep** (`WaitQueue::sweep`). An explicit
 event that is **addressed** — a request posted to one endpoint's server, a
 reply for one caller's ticket — wakes exactly its target
 (`WaitQueue::wake_task`, the wake-one discipline of `AGENTS.md` §27): the
-`ipc_call` post wakes the endpoint's recorded server task and a
-`call_reply` wakes the ticket's recorded poster, so unrelated parked
-servers and callers stay parked (a broadcast there is a thundering herd
-that keeps spuriously-woken tasks runnable and floors the idle load
-average at ~1). A **condition broadcast** — endpoint destruction, console
-input, a child exit, a hardware-tree bump — still wakes every registered
-waiter (`WaitQueue::wake_all`), each of which re-checks its own condition
-and re-parks on a miss.
+`ipc_call` post wakes the endpoint's recorded server task, a
+`call_reply` wakes the ticket's recorded poster and awaiter, and the
+threads watching for its caller's answers only when neither of those
+watches, and an endpoint's destruction wakes the threads
+its cancelled calls, room waits and answer watches name, so unrelated
+parked servers and callers stay parked (a broadcast there is a thundering
+herd that keeps spuriously-woken tasks runnable and floors the idle load
+average at ~1). A **condition broadcast** — console input, a child exit, a
+hardware-tree bump — still wakes every registered waiter
+(`WaitQueue::wake_all`), each of which re-checks its own condition and
+re-parks on a miss.
 
 One queue that holds waiters of *many independent objects* keys each
 registration instead (`WakeKey`, `WaitQueue::register_keyed`), and its
@@ -900,6 +903,22 @@ share the single deadline index the timed sweep and
 `nearest_timed_deadline` fold over. Broadcasting to that queue instead
 made every 64 KiB moved anywhere on the machine unpark every stream
 waiter on it (`plans/OPEN-DEFECTS.md` D62).
+
+A queue whose wakes choose one waiter at a time — the IPC budget queue,
+where one release may be all one waiter needs — is made
+`WaitQueue::choosing` and files each waiter no wake has chosen by key and
+arrival as well, so a first wake (`wake_key_first`) and each waiter passing
+it on (`hand_on`, `pass_on`) find the next in O(log n) however many on the
+key are chosen; every other queue is spared the index.
+
+A registration can be refused. Filing a waiter takes the room every index
+needs before it files anything, so a heap with none answers `WaitRefused`
+with nothing filed, and the caller fails its wait — a syscall with
+`OutOfMemory`, its own state undone — rather than the kernel aborting. A filed
+row's deadline and its place in a choice come and go on paths that cannot
+fail (the timed sweep, a re-arm, a hand-on), so those indices keep room for
+every row the queue holds and none of those moves needs the heap
+(`plans/OPEN-DEFECTS.md` D1682).
 
 An interrupt-reachable wake never touches the
 wait-queue or scheduler locks: the device-IRQ dispatcher and the timer
@@ -954,7 +973,9 @@ has not yet observed, and always re-checks its condition after each wake, so
 a finished or timed-out wait returns rather than parking forever. The shared
 `SchedulerPolicy` conformance suite's `unpark_before_park_is_not_lost` case
 asserts this for every policy, and `kernel/sched/api/tests/loom.rs` checks
-the handshake over every interleaving (`cargo xtask loom`).
+the handshake over every interleaving (`cargo xtask loom`). A host test's
+`test_boot::HostBoot` drives the same two halves, so a kernel wait loop under
+test blocks on its peer exactly as on a booted system.
 
 `unpark` reports an error **only** for a task that can never run again — it is
 terminal, or the id names none. Callers rely on exactly that reading: the
@@ -1027,21 +1048,21 @@ arriving after the continue that overtook it changes nothing. Introspection
 reports a process `ProcessState::Stopped` from its generation, the moment job
 control decides it (`docs/src/architecture/syscalls.md`, the signal section).
 
-`SleepLock` builds fair mutex contention on the same wait queue. Contenders
-retain FIFO registration order and release wakes only the oldest waiter,
-avoiding a thundering herd and preventing a long-waiting storage operation
-from being displaced indefinitely by newer app-load reads.
+`SleepLock` builds fair mutex contention on a line of its own, threaded
+through a row each thread is made with, so a contended acquire — which cannot
+fail — never needs the heap. Contenders keep FIFO order and release wakes only
+the oldest waiter, avoiding a thundering herd and preventing a long-waiting
+storage operation from being displaced indefinitely by newer app-load reads.
 
 ### A registration, not a task id
 
-The FIFO handoff reads the queue, drops the queue lock, publishes ownership,
-and only then wakes its designate — and a waiter released by an unrelated
-wake can deregister and **park again** inside that window. So the queue
-addresses a *registration*, not a task: `oldest_registration` /
-`wake_registration` carry the row's arrival sequence, which is minted
-monotonically, preserved across a re-`register` of a row still present, and
-never reused. A decision taken about one park therefore cannot be applied to
-a later one. Identifying the row by task id alone let the releaser delete the
+The FIFO handoff reads the line, drops the line's lock, publishes ownership,
+and only then wakes its designate — and a waiter can leave and **stand in
+line again** inside that window. So the line addresses a *registration*, not a
+task: `oldest_registration` / `wake_registration` carry the row and how many
+times it has joined a line, which only rises; the wait queue names its rows
+the same way, by a never-reused arrival sequence. A decision taken about one
+park therefore cannot be applied to a later one. Identifying the row by task id alone let the releaser delete the
 waiter's *new* registration and then release the lock with its contention bit
 clear — so no later release consulted the queue and the waiter slept for ever
 on a free lock (`plans/OPEN-DEFECTS.md` D129, `plans/FIX-SLEEPLOCK.md`).
@@ -1059,9 +1080,9 @@ Rows are also dropped at the source. A thread that dies inside the kernel
 never unwinds to its own park site's `deregister`, so the one per-thread
 retirement path (`threads::retire`) calls `waitq::retire_task`, which clears
 that thread from every `ALL_QUEUES` entry and every futex key —
-task-major-indexed, so O(log n + rows) rather than a scan. A `SleepLock`'s own
-queue is embedded in the mount or device that owns it and is reachable from no
-registry; its rows are reaped by the release that next looks at the queue, and
+task-major-indexed, so O(log n + rows) rather than a scan. A `SleepLock`'s line
+is embedded in the mount or device that owns it and is reachable from no
+registry; its rows are reaped by the release that next looks at the line, and
 go with their owner when it is dropped.
 
 ## Current-task slot
@@ -1210,6 +1231,13 @@ handled; `dispatch_step` additionally refuses to switch into a suspension
 point that is not on the task's own kernel stack, so a mispairing fails
 closed instead of corrupting.
 
+A park can also fail: a caller no dispatcher switched in has no resume
+handle on its CPU, so nothing can suspend it. A blocking syscall, and the
+kernel's block, served-filesystem and image-attach clients, then fail closed
+— answering `NotImplemented` and withdrawing any call they posted — rather
+than spinning on their condition. `park_current_task` is `#[must_use]`, so
+no wait loop can drop that answer.
+
 The **same live-CPU rule binds the syscall completion path**, not only
 the park loop. The dispatch hook reads the caller's CPU once at entry to
 identify the caller (correct — the task is running on that CPU then), but
@@ -1253,19 +1281,29 @@ These hold at every API boundary:
 
 1. **No global mutable state outside per-CPU areas.** The
    `Scheduler<A>` owns a `Box<[CpuState]>` and a single
-   `RwLock<BTreeMap<TaskId, Arc<TaskInner>>>` registry, plus a
-   `SpinLock<Vec<Arc<TaskInner>>>` overflow list. Each is documented at its
-   field. Static / `lazy_static` mutable state is forbidden
-   (`AGENTS.md` §2.1).
+   `RwLock<TaskTable<TaskInner>>` registry, plus an `Overflow` list (both
+   `kernel/sched/api`). Each is documented at its field. Static /
+   `lazy_static` mutable state is forbidden (`AGENTS.md` §2.1).
 2. **A pick needs no lookup.** Every run-queue entry and overflow slot holds
    the task itself, so `step` — pick, dispatch, requeue, steal, overflow
    drain — never takes the registry; the registry serves only the
    id-addressed calls (`unpark`, `stop`, `exit`, the observations). A stale
    entry names the record it was queued for, never a later task that drew
-   the same id.
-3. **Bounded queues.** Every `RunDeque` has its capacity fixed at
-   construction. Push returns `Err(task)` on overflow; the scheduler
-   routes the task into the overflow list rather than panicking.
+   the same id. The registry is an ordered map (`park::TaskTable`): which ids
+   stay in it is up to the threads a user keeps, so a lookup costs the same
+   however they fall, growth rebuilds nothing under the write lock every
+   admission and exit takes, and a walk of it (`live_task_count`, MLFQ's
+   boost) costs the records it holds rather than the most it ever held.
+3. **Bounded queues, and no admission or wake that aborts for memory.**
+   Every `RunDeque` has its capacity fixed at construction. Push returns
+   `Err(task)` on overflow; the scheduler routes the task into the overflow
+   list rather than panicking. An admission (`park::admit_record`) takes
+   every allocation — the task's body, its record, its registry slot and its
+   room in the overflow list — before it files anything, so a heap that
+   cannot hold a task refuses it as `SchedError::OutOfMemory` with the
+   scheduler as it was. Every record holds room for its one queue entry in
+   the overflow list, so routing an entry there never allocates and a wake
+   on an exhausted heap still lands.
 4. **No `panic!`, `unwrap`, `expect` in the dispatch path.** Every
    reachable failure produces a typed [`SchedError`].
 5. **Cancellation safety.** `unpark`, `stop`, `resume` and `exit` can race
@@ -1430,6 +1468,10 @@ The scheduler's behaviour is covered by:
   fairness across bands, and a deadlock-free, lossless, bounded-latency
   stress of 10 000 tasks across 4 simulated cores. Every concrete policy
   must pass it.
+* `run_refusals`, in the same suite, driven by each conformance binary's
+  metered allocator: an admission of every form, refused at each of its
+  allocations in turn, answers `OutOfMemory` and leaves nothing behind,
+  and a wake with every allocation refused still lands and runs.
 * `kernel/sched/api/src/park.rs` and `share.rs` — the post-body settle
   against every transition a remote party can land (including a lost
   exchange decided again), and the weight ledger's count/departure

@@ -8,7 +8,9 @@
 //! against the request it answers and a malformed one fails the call closed.
 //!
 //! A call is abandoned when the driver goes [`SERVED_IDLE_NS`] neither
-//! answering nor touching its volume, or when the caller is being killed.
+//! answering nor touching its volume, when the caller is being killed, or
+//! when no scheduler can park the caller, which is refused before it posts
+//! where it can be.
 //! The driver may still be working on an abandoned call, so the shared
 //! window is quarantined: nothing stages data in it or reads data out of it
 //! until a [`Request::Release`] round trip proves the driver has finished
@@ -44,16 +46,15 @@ use tairix_abi::netattach::OfferId;
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, Errno};
 use tairix_caps::CapabilitySet;
-use tairix_kernel_ipc::{CallEndpoint, CallTicket, ReplyOutcome};
-use tairix_kernel_mem::SensitiveBuffer;
+use tairix_kernel_ipc::{CallEndpoint, CallPayload, CallTicket, ReplyOutcome};
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, UserId};
 use tairix_log::{Field, FieldValue, Level, Sink};
 
 use crate::audit::{emit, AuditEvent};
 use crate::sharedreg::KernelHold;
 use crate::waitq::{
-    nearest_timed_deadline, park_calling_task, serve_wake, serve_wake_task, wait_arch,
-    WaitQueueArch, CALL_WAITQ, NO_DEADLINE,
+    nearest_timed_deadline, park_calling_task, serve_wake_server, wait_arch, WaitQueueArch,
+    CALL_WAITQ, NO_DEADLINE,
 };
 
 /// The most entries one listing call hands its caller before the driver is
@@ -179,6 +180,8 @@ enum Unanswered {
     Killed,
     /// The driver's endpoint is gone.
     Gone,
+    /// The caller cannot be parked to wait.
+    Unparkable,
 }
 
 /// How a call's driver was last judged: what it was doing, and when it is
@@ -298,7 +301,7 @@ impl ServedFs {
     /// [`FSSERVE_WINDOW_LEN`](tairix_abi::fsserve::FSSERVE_WINDOW_LEN);
     /// [`Errno::MessageTooLarge`] for an endpoint whose
     /// frame bounds cannot carry the protocol; [`Errno::OutOfMemory`] if the
-    /// request buffer cannot be allocated.
+    /// lane cannot be allocated.
     pub fn new(
         endpoint: &Arc<CallEndpoint>,
         window: KernelHold,
@@ -382,7 +385,7 @@ impl ServedFs {
             poster,
             poster,
             audit,
-        );
+        )?;
         Ok(Self {
             endpoint,
             window,
@@ -455,7 +458,7 @@ impl ServedFs {
 
     /// Post `request` once the hold call abandoned before it is settled, and
     /// park until its reply.
-    fn call(&mut self, request: &Request<'_>) -> Result<SensitiveBuffer, Failed> {
+    fn call(&mut self, request: &Request<'_>) -> Result<CallPayload, Failed> {
         self.settle().map_err(Failed::Unsent)?;
         self.post_and_wait(request)
     }
@@ -495,8 +498,16 @@ impl ServedFs {
                     call,
                     mut liveness,
                 }) => {
+                    let Some(task) = calling_task() else {
+                        self.unsettled = Some(Unsettled::Asked {
+                            ticket,
+                            call,
+                            liveness,
+                        });
+                        return Err(DriverError::NotImplemented);
+                    };
                     let request = call.request();
-                    let bytes = match self.wait(ticket, calling_task(), &mut liveness) {
+                    let bytes = match self.wait(ticket, task, &mut liveness) {
                         Ok(bytes) => bytes,
                         Err(why) => {
                             let err = self.abandoned(why, request.op(), &mut liveness);
@@ -527,10 +538,10 @@ impl ServedFs {
     /// Post `request`, wake the driver, and park until its reply. Abandoned,
     /// a call on the driver's holds is left unsettled; any other is withdrawn
     /// and the window quarantined.
-    fn post_and_wait(&mut self, request: &Request<'_>) -> Result<SensitiveBuffer, Failed> {
+    fn post_and_wait(&mut self, request: &Request<'_>) -> Result<CallPayload, Failed> {
         let len = encode_request(request, self.class, &mut self.frame)
             .map_err(|_| Failed::Unsent(DriverError::OutOfRange))?;
-        let task = calling_task();
+        let task = calling_task().ok_or(Failed::Unsent(DriverError::NotImplemented))?;
         let ticket = self.post(len, task).map_err(Failed::Unsent)?;
         let mut liveness = Liveness::from(self.activity.mark(), now_ns());
         let why = match self.wait(ticket, task, &mut liveness) {
@@ -556,12 +567,12 @@ impl ServedFs {
     }
 
     /// Post the first `len` bytes of the frame for `task` and wake the driver.
-    fn post(&self, len: usize, task: Option<u64>) -> Result<CallTicket, DriverError> {
+    fn post(&self, len: usize, task: u64) -> Result<CallTicket, DriverError> {
         let ticket = self
             .endpoint
             .post(
                 &self.caps,
-                task.unwrap_or(0),
+                task,
                 &self.frame[..len],
                 NO_DEADLINE,
                 // The kernel's own client, bounded by its depth at the driver.
@@ -572,10 +583,7 @@ impl ServedFs {
                 Errno::NotFound => DriverError::DeviceOffline,
                 _ => DriverError::DeviceFault,
             })?;
-        match self.endpoint.server_task() {
-            Some(server) => serve_wake_task(server),
-            None => serve_wake(),
-        }
+        serve_wake_server(self.endpoint.server_task());
         Ok(ticket)
     }
 
@@ -585,6 +593,7 @@ impl ServedFs {
         match why {
             Unanswered::Gone => DriverError::DeviceOffline,
             Unanswered::Killed => DriverError::Interrupted,
+            Unanswered::Unparkable => DriverError::NotImplemented,
             Unanswered::Stalled => {
                 if !liveness.recorded {
                     liveness.recorded = true;
@@ -595,63 +604,60 @@ impl ServedFs {
         }
     }
 
-    /// Park on `ticket` until its reply lands, the driver stalls by
-    /// `liveness`, the caller is killed, or the endpoint goes.
+    /// Park as `task` on `ticket` until its reply lands, the driver stalls by
+    /// `liveness`, the caller is killed or cannot be parked, or the endpoint
+    /// goes.
     fn wait(
         &self,
         ticket: CallTicket,
-        task: Option<u64>,
+        task: u64,
         liveness: &mut Liveness,
-    ) -> Result<SensitiveBuffer, Unanswered> {
+    ) -> Result<CallPayload, Unanswered> {
         let claimant = self.caps.process().0;
         let arm = |deadline: u64| {
-            if let Some(task) = task {
-                CALL_WAITQ.register(task, deadline);
-                if let Some(hook) = wait_arch() {
-                    hook.set_wakeup(nearest_timed_deadline());
-                }
+            let filed = CALL_WAITQ.register(task, deadline).is_ok();
+            if let Some(hook) = wait_arch() {
+                hook.set_wakeup(nearest_timed_deadline());
             }
+            filed
         };
-        arm(liveness.judged_at);
+        if !arm(liveness.judged_at) {
+            return Err(Unanswered::Unparkable);
+        }
         let outcome = loop {
-            let mark = self.endpoint.settle_mark();
             match self
                 .endpoint
                 .take_reply(claimant, ticket, now_ns(), self.audit)
             {
                 ReplyOutcome::Ready(bytes) => break Ok(bytes),
-                ReplyOutcome::Cancelled | ReplyOutcome::Unknown | ReplyOutcome::TimedOut => {
-                    break Err(Unanswered::Gone)
+                // The slot a timed-out call held goes to whom it was handed.
+                ReplyOutcome::TimedOut(freed) => {
+                    crate::waitq::call_wake_named(freed.tasks());
+                    break Err(Unanswered::Gone);
                 }
+                ReplyOutcome::Cancelled | ReplyOutcome::Unknown => break Err(Unanswered::Gone),
                 ReplyOutcome::Pending => {}
             }
-            if task.is_some_and(crate::procsignal::kill_pending) {
+            if crate::procsignal::kill_pending(task) {
                 break Err(Unanswered::Killed);
             }
-            if task.is_some() && now_ns() >= liveness.judged_at {
+            if now_ns() >= liveness.judged_at {
                 let seen = self.activity.mark();
                 if !shows_life(liveness.mark, seen) {
                     break Err(Unanswered::Stalled);
                 }
                 *liveness = Liveness::from(seen, now_ns());
-                arm(liveness.judged_at);
+                if !arm(liveness.judged_at) {
+                    break Err(Unanswered::Unparkable);
+                }
             }
-            // With no scheduler to park on (a host test, where the driver
-            // runs on another thread) the wait spins; never a steady state on
-            // a running kernel.
-            if task.is_none() || !park_calling_task() {
-                self.endpoint.await_settle(mark, || {
-                    task.is_some_and(|task| {
-                        crate::procsignal::kill_pending(task) || now_ns() >= liveness.judged_at
-                    })
-                });
+            if !park_calling_task() {
+                break Err(Unanswered::Unparkable);
             }
         };
-        if let Some(task) = task {
-            CALL_WAITQ.deregister(task);
-            if let Some(hook) = wait_arch() {
-                hook.set_wakeup(nearest_timed_deadline());
-            }
+        CALL_WAITQ.deregister(task);
+        if let Some(hook) = wait_arch() {
+            hook.set_wakeup(nearest_timed_deadline());
         }
         outcome
     }

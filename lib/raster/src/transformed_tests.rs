@@ -78,6 +78,20 @@ fn the_transformed_blit_is_clipped_and_refuses_a_collapsed_transform() {
     assert!(untouched.pixels().iter().all(|p| p.a == 0));
 }
 
+/// A strip of a larger drawing, held at an origin, takes the part of a
+/// transformed picture that falls on it, not only the part within its own
+/// width of the drawing's corner.
+#[test]
+fn a_strip_at_an_origin_takes_its_part_of_the_picture() {
+    let src = solid(4, 4, Color::rgb(0, 0, 0));
+    let mut strip = Surface::new(10, 10).expect("a surface");
+    strip.with_origin(20, 30, |strip| {
+        strip.blit_transformed(&src, Affine::translate(24.0, 32.0));
+    });
+    assert_eq!(strip.get(5, 3).map(|p| p.a), Some(255), "drawn at (25, 33)");
+    assert_eq!(strip.get(3, 3).map(|p| p.a), Some(0), "left of the picture");
+}
+
 /// A magnified edge keeps its whole blend ramp, which reaches half a source
 /// pixel past the picture at the picture's own scale.
 #[test]

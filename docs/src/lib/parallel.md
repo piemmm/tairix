@@ -58,6 +58,28 @@ order on the calling thread. The compositor's band split and the frost's three
 passes dispatch this way, which is what lets a frost run from a reserved
 scratch without allocating.
 
+## Pieces that wait on the pieces before them
+
+A wavefront's rows are not independent: each reads what the row above has
+produced, a little ahead of where it is working. `for_each_ordered(runner,
+lanes, pieces, visit)` runs such pieces. Each lane — the caller's own state for
+one participant, such as the buffers a row is worked in — takes the next piece
+the iterator yields whenever it finishes one, under a lock held only for the
+draw, so the pieces are begun in the order they are yielded and numbered so.
+A piece waits on what an earlier one publishes through a `Published<T>`: a value
+written once and read through `wait`, which parks the reader on the slot's own
+state word until the write lands, the write waking it only when someone sleeps.
+
+That cannot deadlock however many lanes the runner runs at once. A piece is
+taken only by a lane that then works it, so every piece before one under way is
+itself under way or done, and the earliest piece still running waits on nothing.
+A runner one thread wide works every piece on one lane, in order, so no wait
+ever blocks it; `Reversed` runs the lanes last first and the first lane run
+still takes the pieces in order. The slot's protocol is generic over its state
+word, and `cargo xtask loom` checks it with the futex modelled as a check and a
+sleep under one lock: a wait never sleeps through the write it waits for, and
+reads it.
+
 ## Sizing
 
 `bands(runner, units, grain)` is the one split policy: how many pieces `units`

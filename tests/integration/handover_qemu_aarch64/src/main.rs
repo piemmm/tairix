@@ -93,9 +93,9 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_itest_witness::{marker, ChainNote, SyscallChain};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, Sink};
@@ -119,117 +119,13 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
-    /// The task field's value for "no viewer has redeemed yet".
-    ///
-    /// Task 0 is the in-kernel system context, which issues no user-space
-    /// syscall, so it can never be a captured value and needs no second flag
-    /// to distinguish "unset" from a real reading. Keeping the whole identity
-    /// in one atomic means nothing here depends on the visibility of one
-    /// location relative to another.
-    const NO_VIEWER_TASK: u64 = 0;
+    /// The relays the gate watches: [`RELAY_CHAIN`] in order, the viewer's
+    /// redeem made by one kernel-attested task in every relay.
+    static RELAYS: SyscallChain = SyscallChain::new(&RELAY_CHAIN, VIEWER_REDEEM_STEP);
 
     /// Audit observer that replays the whole trail to serial and latches the
     /// ordered relay chains described in the module docs.
-    struct HandOverSink {
-        /// How far the relay currently being watched has got: the index in
-        /// [`RELAY_CHAIN`] of the record still owed.
-        step: AtomicU32,
-        /// Complete relays seen so far.
-        relays: AtomicU32,
-        /// The kernel-attested task of the viewer that redeemed the first
-        /// relayed document, or [`NO_VIEWER_TASK`].
-        viewer_task: AtomicU64,
-    }
-
-    impl HandOverSink {
-        /// A sink watching for the first record of the first relay.
-        const fn new() -> Self {
-            Self {
-                step: AtomicU32::new(0),
-                relays: AtomicU32::new(0),
-                viewer_task: AtomicU64::new(NO_VIEWER_TASK),
-            }
-        }
-
-        /// Advance the watched relay if this dispatched syscall is the record
-        /// it is owed.
-        ///
-        /// The calling process, the syscall, and the calling task are all read
-        /// from the record's own kernel-attested fields, so no principal can
-        /// present itself as another. A record that is not the one owed is
-        /// ignored: unrelated calls separate the steps of a real relay, so
-        /// only their relative order is asserted.
-        fn note_syscall(&self, event: &Event<'_>) {
-            let mut comm = "";
-            let mut call = "";
-            let mut task = "";
-            for field in event.fields {
-                let tairix_log::FieldValue::Str(value) = field.value else {
-                    continue;
-                };
-                match field.key {
-                    "comm" => comm = value,
-                    "sc" => call = value,
-                    "task" => task = value,
-                    _ => {}
-                }
-            }
-            let step = self.step.load(Ordering::Relaxed) as usize;
-            let Some(&(want_comm, want_call)) = RELAY_CHAIN.get(step) else {
-                return;
-            };
-            if comm != want_comm || call != want_call {
-                return;
-            }
-            if step == VIEWER_REDEEM_STEP && !self.viewer_is_the_running_instance(task) {
-                // A redeem by some other viewer says nothing about the funnel
-                // reaching the instance already running, so the relay does not
-                // complete: start watching for a fresh one.
-                emit_marker(FOREIGN_VIEWER_MARKER);
-                self.step.store(0, Ordering::Relaxed);
-                return;
-            }
-            if let Some(&marker) = RELAY_STEP_MARKERS.get(step) {
-                emit_marker(marker);
-            }
-            if step + 1 < RELAY_CHAIN.len() {
-                #[allow(clippy::cast_possible_truncation)] // A chain index is tiny.
-                self.step.store(step as u32 + 1, Ordering::Relaxed);
-                return;
-            }
-            self.step.store(0, Ordering::Relaxed);
-            self.relays.fetch_add(1, Ordering::Relaxed);
-        }
-
-        /// Whether the `task` that just redeemed is the viewer instance this
-        /// run has been watching — capturing it if this is the first redeem.
-        ///
-        /// An unparsable task field is refused rather than treated as a match:
-        /// the gate would otherwise pass on a record whose identity it could
-        /// not read.
-        fn viewer_is_the_running_instance(&self, task: &str) -> bool {
-            let Ok(task) = u64::from_str_radix(task, 16) else {
-                return false;
-            };
-            if task == NO_VIEWER_TASK {
-                return false;
-            }
-            match self.viewer_task.compare_exchange(
-                NO_VIEWER_TASK,
-                task,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => true,
-                Err(captured) => captured == task,
-            }
-        }
-
-        /// Whether enough complete relays have been seen.
-        fn passed(&self) -> bool {
-            self.relays.load(Ordering::Relaxed) >= RELAY_ROUNDS
-        }
-    }
+    struct HandOverSink;
 
     impl Sink for HandOverSink {
         fn write_event(&self, event: &Event<'_>) {
@@ -240,27 +136,25 @@ mod kernel {
             if event.id.0 != tairix_kernel_syscall::AuditEvent::SyscallInvoked.id().0 {
                 return;
             }
-            self.note_syscall(event);
-            if self.passed() {
+            // A redeem by some other viewer says nothing about the funnel
+            // reaching the instance already running, so it restarts the relay
+            // rather than completing it, and says so.
+            let said = match RELAYS.note(event) {
+                ChainNote::Latched { step, .. } => RELAY_STEP_MARKERS.get(step).copied(),
+                ChainNote::Foreign => Some(FOREIGN_VIEWER_MARKER),
+                ChainNote::Unrelated => None,
+            };
+            if let Some(said) = said {
+                SerialSink::new().write_event(&marker(said));
+            }
+            if RELAYS.rounds() >= RELAY_ROUNDS {
                 qemu_exit::exit_success();
             }
         }
     }
 
-    /// Print one progress marker on serial. Carries no fields: the marker *is*
-    /// the fact, and it names a step the kernel attested rather than anything
-    /// this sink inferred.
-    fn emit_marker(message: &'static str) {
-        SerialSink::new().write_event(&Event {
-            level: tairix_log::Level::Info,
-            id: tairix_log::EventId(0),
-            message,
-            fields: &[],
-        });
-    }
-
     /// The audit observer the boot pipeline is handed.
-    static AUDIT_SINK: HandOverSink = HandOverSink::new();
+    static AUDIT_SINK: HandOverSink = HandOverSink;
 
     /// Forward to the shared aarch64 panic bridge. A panic before the PASS
     /// finisher parks the CPU, the run times out, and the harness reports

@@ -6,11 +6,10 @@ use alloc::format;
 use alloc::string::String;
 
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
-use tairix_abi::sysinfo::{MountAvailability, MountRecord, ViewBindingRecord, VOLUME_ID_LEN};
+use tairix_abi::sysinfo::{MountAvailability, MountRecord, VOLUME_ID_LEN};
 use tairix_abi::{Errno, STORAGE_CATALOG};
 use tairix_help::{own_short_help, HelpSource};
-use tairix_path::{Root, Step};
-use tairix_procinfo::{availability_marker, Namespace, Transport};
+use tairix_procinfo::{availability_marker, named_volume, Namespace, Transport, Unnamed};
 use tairix_util::quote::quote_if_needed;
 
 use crate::command::Command;
@@ -124,142 +123,30 @@ pub fn run(
     }
 }
 
-/// Resolve `name` against the namespace: a volume's durable root
-/// (`id::<volume-id>`) names the volume carrying that identity, whatever it
-/// is mounted as; any other path — a name holding a slash, or `.` or `..` —
-/// names the binding at the place it spells, a catalog entry
-/// or a directory a volume was bound at, matched as spelled and canonicalised
-/// only when that names none, so a volume that no longer answers is still
-/// named by where it is mounted; a bare word names the catalog entry it
-/// spells or, failing that, the file a volume was attached from. A binding is
-/// unique, but a file name is not: two users' images may share one, so a
-/// volume the caller attached is taken over another's, and a name two of
-/// either could mean, or one longer than the listing keeps, names nothing.
-/// Another user's private volume shows neither its source nor its bindings
-/// but its catalog entry, so a miss with one listed may be that volume.
+/// Resolve `name` against the namespace by the rules every tool naming a
+/// volume shares ([`named_volume`]): a durable root, a path, a catalog word,
+/// or the file a volume was attached from, the caller's own over another's.
 fn resolve(
     name: &str,
     detacher: &dyn Detacher,
     transport: &dyn Transport,
 ) -> Result<Resolved, UnmountError> {
     let namespace = Namespace::read(transport)?;
-    let unseen = || {
-        if namespace.volumes().iter().any(MountRecord::is_withheld) {
-            UnmountError::NotShown(String::from(name))
-        } else {
-            UnmountError::NotFound(String::from(name))
-        }
-    };
-    if let Some(id) = volume_root(name) {
-        return namespace
-            .volumes()
-            .iter()
-            .find(|volume| volume.volume_id() == id)
-            .map(Resolved::of)
-            .ok_or_else(unseen);
-    }
-    let bound_at = |at: &str| -> Option<&ViewBindingRecord> {
-        namespace
-            .views()
-            .iter()
-            .find(|view| view.target_bytes() == at.as_bytes())
-    };
-    let path = name.contains('/') || matches!(name, "." | "..");
-    let view = if path {
-        match spelled(name, detacher).as_deref().and_then(bound_at) {
-            Some(view) => Some(view),
-            None => bound_at(&detacher.canonical(name).map_err(|errno| match errno {
-                Errno::NotFound => UnmountError::NotFound(String::from(name)),
-                errno => UnmountError::Path {
-                    name: String::from(name),
-                    errno,
-                },
-            })?),
-        }
-    } else {
-        bound_at(&format!("/{STORAGE_CATALOG}/{name}"))
-    };
-    if let Some(view) = view {
-        if !view.shows_volume() {
-            return Err(UnmountError::NotDetachable(String::from(name)));
-        }
-        return namespace
-            .volume_of(view)
-            .map(Resolved::of)
-            .ok_or_else(|| UnmountError::NotFound(String::from(name)));
-    }
-    if path {
-        return Err(unseen());
-    }
-    by_file_name(name, detacher.user(), namespace.volumes()).map_err(|err| match err {
-        UnmountError::NotFound(_) => unseen(),
-        err => err,
-    })
+    named_volume(&namespace, name, detacher)
+        .map(Resolved::of)
+        .map_err(|why| unnamed(name, why))
 }
 
-/// The identity `name` spells as a volume's durable root, `id::<volume-id>`
-/// with nothing below it, or `None` for any other name.
-fn volume_root(name: &str) -> Option<[u8; VOLUME_ID_LEN]> {
-    let path = tairix_path::parse(name).ok()?;
-    match path.root() {
-        Root::VolumeId(id) if path.components().is_empty() => Some(*id.as_bytes()),
-        _ => None,
-    }
-}
-
-/// The view path `name` spells, nothing resolved: a `.` dropped, a relative
-/// one joined to the working directory, as util-linux's `umount` reads a
-/// mount point. `None` where only resolving can say: a `..`, or a spelling
-/// the grammar refuses. A bind pins every directory down to its target, so a
-/// target is always a link-free spelling of what it binds.
-fn spelled(name: &str, detacher: &dyn Detacher) -> Option<String> {
-    let (root, steps) = tairix_path::steps(name).ok()?;
-    let mut at = match root {
-        Root::View => String::from("/"),
-        Root::Relative => detacher.canonical(".").ok()?,
-        Root::Alias(_) | Root::VolumeId(_) => return None,
-    };
-    for step in steps {
-        match step.ok()? {
-            Step::Name(part) => tairix_path::push_name(&mut at, part),
-            Step::Up => return None,
-        }
-    }
-    Some(at)
-}
-
-/// The volume attached from the file `name`, in one pass over `volumes`.
-fn by_file_name(
-    name: &str,
-    user: Option<u32>,
-    volumes: &[MountRecord],
-) -> Result<Resolved, UnmountError> {
-    let (mut taken, mut takers) = (None, 0usize);
-    let (mut anothers, mut others) = (None, 0usize);
-    let mut cut = false;
-    for volume in volumes {
-        let source = volume.source_bytes();
-        if volume.source_cut() {
-            cut |= name.as_bytes().starts_with(source);
-            continue;
-        }
-        if source != name.as_bytes() {
-            continue;
-        }
-        if volume.owner().is_some_and(|owner| Some(owner) != user) {
-            anothers.get_or_insert(volume);
-            others += 1;
-        } else {
-            taken.get_or_insert(volume);
-            takers += 1;
-        }
-    }
-    let owned = || String::from(name);
-    match (taken, takers, anothers, others) {
-        (Some(volume), 1, ..) | (None, 0, Some(volume), 1) => Ok(Resolved::of(volume)),
-        (Some(_), ..) | (None, 0, Some(_), _) => Err(UnmountError::Ambiguous(owned())),
-        _ if cut => Err(UnmountError::NameCut(owned())),
-        _ => Err(UnmountError::NotFound(owned())),
+/// `unmount`'s refusal of `name`, which names no volume for `why`.
+fn unnamed(name: &str, why: Unnamed) -> UnmountError {
+    let name = String::from(name);
+    match why {
+        Unnamed::NotFound => UnmountError::NotFound(name),
+        Unnamed::NotShown => UnmountError::NotShown(name),
+        Unnamed::Path(errno) => UnmountError::Path { name, errno },
+        Unnamed::Ambiguous => UnmountError::Ambiguous(name),
+        Unnamed::NameCut => UnmountError::NameCut(name),
+        Unnamed::NoVolume => UnmountError::NotDetachable(name),
     }
 }
 
@@ -334,7 +221,7 @@ mod tests {
     };
     use tairix_abi::Errno;
     use tairix_help::{HelpSource, SourceError};
-    use tairix_procinfo::Transport;
+    use tairix_procinfo::{Caller, Transport};
 
     /// An in-memory `sysinfod` stand-in answering the mount and view lists
     /// from a fixture, decoding the request the same way the real service
@@ -463,10 +350,6 @@ mod tests {
     }
 
     impl Detacher for MemDetacher {
-        fn user(&self) -> Option<u32> {
-            Some(VIEWER)
-        }
-
         fn detach(&self, volume_id: [u8; 16], force: bool) -> Result<(), Errno> {
             self.detached
                 .borrow_mut()
@@ -475,6 +358,12 @@ mod tests {
                 Some(errno) => Err(errno),
                 None => Ok(()),
             }
+        }
+    }
+
+    impl Caller for MemDetacher {
+        fn user(&self) -> Option<u32> {
+            Some(VIEWER)
         }
 
         /// As `realpath` resolves in the working directory, where nothing

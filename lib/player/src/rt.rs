@@ -1,6 +1,7 @@
 //! The engine's live seams: files read through the runtime, the audio
 //! service's stream, the seed a decoder's page cache is keyed by, and the
-//! members a host parks the engine's sources on.
+//! members a host parks the engine's sources on; and the tag reader a worker
+//! thread drives to the end of each file ([`RtTags`]).
 
 use alloc::sync::Arc;
 
@@ -11,9 +12,13 @@ use tairix_abi::{Errno, OpenFlags};
 use tairix_audio::live::{LiveStream, RtAudio};
 use tairix_audio::stream::{OpenFailure, Written};
 use tairix_rt::File;
+use tairix_sandbox::audiodecode::session_bounds;
 use tairix_sandbox::rt::{draw_seed, RtSessionLauncher, SessionMembers};
+use tairix_sandbox::session::SessionDescriptors;
+use tairix_sandbox::supervise::SupervisedSession;
 
 use crate::engine::{Engine, Failure, FileRefusal, Files, Settings, Speaker};
+use crate::probe::{TagReader, Tags};
 use crate::programme::Programme;
 
 /// The engine a live player runs over `F`: its decoders are the program's own
@@ -38,10 +43,7 @@ pub fn live<P: Programme, F: Files<P::Item>>(
         RtSessionLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages),
         tairix_rt::LogSink,
         files,
-        RtSpeaker {
-            transport: RtAudio::new(),
-            stream: None,
-        },
+        RtSpeaker::new(),
         draw_seed,
     )
 }
@@ -137,6 +139,15 @@ pub struct RtSpeaker {
 }
 
 impl RtSpeaker {
+    /// A speaker with no stream open.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            transport: RtAudio::new(),
+            stream: None,
+        }
+    }
+
     /// The mailbox the open stream's notifications arrive in.
     #[must_use]
     pub fn notify_port(&self) -> Option<u64> {
@@ -148,6 +159,12 @@ impl RtSpeaker {
             Some(stream) => Ok((stream, &mut self.transport)),
             None => Err(Errno::NotConnected),
         }
+    }
+}
+
+impl Default for RtSpeaker {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -218,7 +235,7 @@ pub struct Tokens {
     pub notify: u64,
 }
 
-/// The engine's sources on a host's wait-set: the decoder's pipes in the
+/// A player's sources on a host's wait-set: the decoder's pipes in the
 /// directions it wants, and the open stream's mailbox.
 pub struct EngineWaits {
     set: u64,
@@ -243,20 +260,33 @@ impl EngineWaits {
     /// when a source cannot be watched: a source no one watches would leave it
     /// waiting for ever.
     pub fn sync<P: Programme, F: Files<P::Item>>(&mut self, engine: &mut RtEngine<P, F>) {
-        let (descriptors, read, write) = engine.decoder_members();
-        if let Err(errno) = self.members.sync(descriptors, read, write) {
-            engine.abandon(Failure::Wait {
+        let port = engine.speaker().notify_port();
+        if let Err(failure) = self.watch(engine.decoder_members(), port) {
+            engine.abandon(failure);
+        }
+    }
+
+    /// Bring the wait-set up to date with a decoder's descriptors and the
+    /// directions it wants, and with the stream mailbox `port`.
+    ///
+    /// # Errors
+    ///
+    /// Which source the wait-set would not watch, and why.
+    pub fn watch(
+        &mut self,
+        (descriptors, read, write): (Option<SessionDescriptors>, bool, bool),
+        port: Option<u64>,
+    ) -> Result<(), Failure> {
+        self.members
+            .sync(descriptors, read, write)
+            .map_err(|errno| Failure::Wait {
                 what: "watch the decoder",
                 errno,
-            });
-        }
-        let port = engine.speaker().notify_port();
-        if let Err(errno) = self.watch_mailbox(port) {
-            engine.abandon(Failure::Wait {
-                what: "watch the stream's notifications",
-                errno,
-            });
-        }
+            })?;
+        self.watch_mailbox(port).map_err(|errno| Failure::Wait {
+            what: "watch the stream's notifications",
+            errno,
+        })
     }
 
     /// Hand `token`, reported at `now`, to `engine`, answering whether it was
@@ -307,5 +337,91 @@ impl EngineWaits {
             self.watched = Some(port);
         }
         Ok(())
+    }
+}
+
+/// The tag reader's tokens on its own wait-set.
+const TAGS_READABLE: u64 = 1;
+const TAGS_WRITABLE: u64 = 2;
+
+/// A tag reader whose decoders are the program's own binary in the sandbox's
+/// worker role, driven to the end of each file on the calling thread and
+/// parked on a wait-set of its own: file I/O and a wait, so a worker's to
+/// call and never an interactive loop's.
+pub struct RtTags {
+    reader: TagReader<RtSessionLauncher, tairix_rt::LogSink>,
+    set: u64,
+    members: SessionMembers,
+}
+
+impl RtTags {
+    /// A reader that starts its first decoder when first asked, or `None`
+    /// when the kernel refuses the wait-set it parks on.
+    #[must_use]
+    pub fn new() -> Option<Self> {
+        let bounds = session_bounds().ok()?;
+        let set = u64::try_from(tairix_rt::waitset_create()).ok()?;
+        let session = SupervisedSession::new(
+            RtSessionLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages),
+            bounds,
+            tairix_rt::LogSink,
+        );
+        Some(Self {
+            reader: TagReader::new(session, draw_seed),
+            set,
+            members: SessionMembers::new(set, TAGS_READABLE, TAGS_WRITABLE),
+        })
+    }
+
+    /// `file`'s stream and tags, read to the end within
+    /// [`crate::probe::BUDGET_NS`] of a decoder taking it.
+    #[must_use]
+    pub fn read_tags(&mut self, file: &File) -> Tags {
+        let Ok(Some(len)) = file.regular_len() else {
+            return Tags::Unread;
+        };
+        let mut read =
+            |offset, buf: &mut [u8]| file.read_at(offset, buf).map_err(Errno::from_syscall);
+        self.reader.begin(tairix_rt::clock_get(), len);
+        loop {
+            if let Some(tags) = self.reader.pump(tairix_rt::clock_get(), &mut read) {
+                return tags;
+            }
+            if self.park().is_err() {
+                // A worker left mid-request would answer the next file with
+                // this one's frames.
+                self.reader.abandon(tairix_rt::clock_get());
+                return Tags::Unread;
+            }
+        }
+    }
+
+    /// Wait for the reader's worker, or its deadline, and hand on what fired.
+    fn park(&mut self) -> Result<(), Errno> {
+        let (descriptors, read, write) = self.reader.members();
+        self.members.sync(descriptors, read, write)?;
+        let now = tairix_rt::clock_get();
+        let timeout = self
+            .reader
+            .deadline()
+            .map_or(u64::MAX, |at| at.saturating_sub(now));
+        let mut token = 0;
+        let waited = tairix_rt::waitset_wait(self.set, timeout, &mut token);
+        if waited == 0 {
+            let now = tairix_rt::clock_get();
+            let (readable, writable) = (token == TAGS_READABLE, token == TAGS_WRITABLE);
+            self.reader.on_ready(now, readable, writable);
+            return Ok(());
+        }
+        match Errno::from_syscall(waited) {
+            Errno::TimedOut => Ok(()),
+            errno => Err(errno),
+        }
+    }
+}
+
+impl Drop for RtTags {
+    fn drop(&mut self) {
+        let _ = tairix_rt::waitset_close(self.set);
     }
 }

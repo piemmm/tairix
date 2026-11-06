@@ -103,6 +103,13 @@ impl ProcId {
     pub fn write_hex(self, out: &mut [u8; PROC_ID_HEX_LEN]) -> &str {
         crate::hex::encode(&self.0, out)
     }
+
+    /// The identifier `text` spells as [`write_hex`](Self::write_hex) renders
+    /// it, or `None` for any other spelling.
+    #[must_use]
+    pub fn from_hex(text: &[u8]) -> Option<Self> {
+        crate::hex::decode::<PROC_ID_LEN>(text).map(Self)
+    }
 }
 
 /// The trust class of a process instance, as attested by the kernel.
@@ -612,6 +619,18 @@ mod tests {
         let mut buf = [0u8; PROC_ID_HEX_LEN];
         let rendered = ProcId::from_raw(bytes).write_hex(&mut buf);
         assert_eq!(rendered, "00112233445566778899aabbccddeeff");
+    }
+
+    #[test]
+    fn the_hex_rendering_reads_back_and_no_other_spelling_does() {
+        let id = ProcId::from_raw([0xA5; PROC_ID_LEN]);
+        let mut buf = [0u8; PROC_ID_HEX_LEN];
+        let rendered = id.write_hex(&mut buf);
+        assert_eq!(ProcId::from_hex(rendered.as_bytes()), Some(id));
+        let upper = rendered.to_ascii_uppercase();
+        assert_eq!(ProcId::from_hex(upper.as_bytes()), None, "another spelling");
+        assert_eq!(ProcId::from_hex(&rendered.as_bytes()[1..]), None);
+        assert_eq!(ProcId::from_hex(b""), None);
     }
 
     #[test]

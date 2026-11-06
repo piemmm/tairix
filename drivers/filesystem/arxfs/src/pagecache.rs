@@ -9,16 +9,18 @@
 //! its size, and there is one eviction and write-back discipline rather than
 //! one per region.
 
-use alloc::collections::BTreeMap;
-use alloc::vec;
 use alloc::vec::Vec;
+
+use tairix_collections::{OrderedMap, TryReserveError};
+use tairix_util::fallible;
 
 use crate::header::HEADER_LEN;
 
 /// Pages one cache holds at once.
 ///
-/// This is a cache bound, not a capacity: a miss costs one block read, never a
-/// failure, so the ceiling is deliberately fixed and **volume-independent**.
+/// This is a cache bound, not a capacity: at the bound a miss evicts and costs
+/// one block read rather than failing, so the ceiling is deliberately fixed and
+/// **volume-independent**.
 /// Sizing it from the device would make resident memory scale with volume
 /// size, which is the very thing paging exists to avoid — several 100 TB+
 /// volumes must mount together on a 1 GiB machine, so each region's footprint
@@ -39,7 +41,7 @@ struct CachedBlock {
 /// does — the cache itself performs no I/O, so it stays free of the block
 /// device and is unit-testable on the host.
 pub(crate) struct BlockCache {
-    entries: BTreeMap<u64, CachedBlock>,
+    entries: OrderedMap<u64, CachedBlock>,
     payload_len: usize,
     clock: u64,
 }
@@ -54,7 +56,7 @@ impl BlockCache {
     /// An empty cache over pages of `block_size`.
     pub(crate) fn new(block_size: usize) -> Self {
         Self {
-            entries: BTreeMap::new(),
+            entries: OrderedMap::new(),
             payload_len: page_payload_len(block_size),
             clock: 0,
         }
@@ -87,34 +89,51 @@ impl BlockCache {
         self.entries.remove(&page);
     }
 
-    /// Install a page whose bytes match the device.
-    pub(crate) fn insert_clean(&mut self, page: u64, payload: &[u8]) {
-        let stamp = self.tick();
-        let mut bytes = vec![0u8; self.payload_len];
+    /// Install a page whose bytes match the device; a payload shorter than a
+    /// page is padded with zeroes.
+    ///
+    /// # Errors
+    ///
+    /// [`TryReserveError`] when its copy or its entry cannot be had; the cache
+    /// is as it was.
+    pub(crate) fn insert_clean(
+        &mut self,
+        page: u64,
+        payload: &[u8],
+    ) -> Result<(), TryReserveError> {
+        let Some(mut bytes) = fallible::zeroed(self.payload_len) else {
+            return Err(TryReserveError::AllocFailed);
+        };
         let len = payload.len().min(self.payload_len);
         bytes[..len].copy_from_slice(&payload[..len]);
-        self.entries.insert(
-            page,
-            CachedBlock {
-                payload: bytes,
-                dirty: false,
-                stamp,
-            },
-        );
+        self.install(page, bytes, false)
     }
 
-    /// Install a page that exists only in RAM so far — a synthesised
-    /// all-free page, or a page of a map being built — so a flush writes it.
-    pub(crate) fn insert_dirty(&mut self, page: u64, payload: Vec<u8>) {
-        let stamp = self.tick();
-        self.entries.insert(
-            page,
-            CachedBlock {
-                payload,
-                dirty: true,
-                stamp,
-            },
-        );
+    /// Install a page that exists only in RAM so far — a page of a map being
+    /// built — so a flush writes it.
+    ///
+    /// # Errors
+    ///
+    /// [`TryReserveError`] when its entry cannot be had; the cache is as it
+    /// was.
+    pub(crate) fn insert_dirty(
+        &mut self,
+        page: u64,
+        payload: Vec<u8>,
+    ) -> Result<(), TryReserveError> {
+        self.install(page, payload, true)
+    }
+
+    fn install(&mut self, page: u64, payload: Vec<u8>, dirty: bool) -> Result<(), TryReserveError> {
+        let stamp = self.clock.wrapping_add(1);
+        let entry = CachedBlock {
+            payload,
+            dirty,
+            stamp,
+        };
+        self.entries.try_insert(page, entry)?;
+        self.clock = stamp;
+        Ok(())
     }
 
     /// A cached page's bytes for reading, refreshing its recency.
@@ -175,6 +194,7 @@ impl BlockCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tairix_fuzzseed::meter::refusing_above;
 
     const BS: usize = 4096;
 
@@ -182,7 +202,7 @@ mod tests {
     fn cache_evicts_the_least_recently_used_page_once_full() {
         let mut cache = BlockCache::new(BS);
         for page in 0..MAX_CACHED_PAGES as u64 {
-            cache.insert_clean(page, &[0u8; 4]);
+            cache.insert_clean(page, &[0u8; 4]).expect("room");
         }
         assert_eq!(cache.len(), MAX_CACHED_PAGES);
         // Touch every page but page 0, so it is the coldest.
@@ -197,7 +217,7 @@ mod tests {
     #[test]
     fn cache_tracks_dirty_pages_until_they_are_written() {
         let mut cache = BlockCache::new(BS);
-        cache.insert_clean(5, &[0u8; 4]);
+        cache.insert_clean(5, &[0u8; 4]).expect("room");
         assert_eq!(cache.first_dirty(), None);
         cache.write(5).expect("cached")[0] = 0xAA;
         assert_eq!(cache.first_dirty(), Some(5));
@@ -210,7 +230,7 @@ mod tests {
     fn cache_reports_a_dirty_eviction_candidate_so_it_is_written_back() {
         let mut cache = BlockCache::new(BS);
         for page in 0..MAX_CACHED_PAGES as u64 {
-            cache.insert_dirty(page, alloc::vec![0u8; 4]);
+            cache.insert_dirty(page, alloc::vec![0u8; 4]).expect("room");
         }
         let (page, dirty) = cache.eviction_candidate().expect("full");
         assert_eq!(page, 0);
@@ -220,9 +240,21 @@ mod tests {
     #[test]
     fn clearing_the_cache_drops_every_page() {
         let mut cache = BlockCache::new(BS);
-        cache.insert_dirty(1, alloc::vec![0u8; 4]);
+        cache.insert_dirty(1, alloc::vec![0u8; 4]).expect("room");
         cache.clear();
         assert_eq!(cache.len(), 0);
         assert!(cache.peek(1).is_none());
+    }
+
+    #[test]
+    fn a_page_refused_memory_leaves_the_cache_as_it_was() {
+        let mut cache = BlockCache::new(BS);
+        cache.insert_clean(1, &[1u8; 4]).expect("room");
+        let refused = refusing_above(0, || cache.insert_clean(3, &[7u8; 4]));
+        assert_eq!(refused, Err(TryReserveError::AllocFailed));
+        assert!(!cache.contains(3));
+        assert_eq!(cache.len(), 1);
+        cache.insert_clean(3, &[7u8; 4]).expect("room");
+        assert_eq!(cache.peek(3).expect("cached")[0], 7);
     }
 }

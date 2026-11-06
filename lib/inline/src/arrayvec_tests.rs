@@ -20,6 +20,35 @@ fn an_empty_vector_reads_back_nothing() {
     assert_eq!(vec.first(), None);
 }
 
+/// A vector made empty in storage that held garbage is whole and usable, and
+/// what it then holds is dropped with it.
+#[test]
+fn a_vector_made_empty_in_place_holds_nothing_and_owns_what_it_takes() {
+    use core::mem::MaybeUninit;
+    use std::rc::Rc;
+
+    let mut slot = MaybeUninit::<ArrayVec<Rc<u8>, 4>>::uninit();
+    // SAFETY: the bytes written are the slot's own; garbage stands where the
+    // vector will lie, as it does in a reused allocation.
+    unsafe {
+        slot.as_mut_ptr()
+            .cast::<u8>()
+            .write_bytes(0xA5, size_of::<ArrayVec<Rc<u8>, 4>>());
+    };
+    let shared = Rc::new(7);
+    let vec = ArrayVec::init_empty(&mut slot);
+    assert!(vec.is_empty());
+    assert_eq!(vec.try_push(Rc::clone(&shared)), Ok(()));
+    assert_eq!(Rc::strong_count(&shared), 2);
+    // SAFETY: `init_empty` initialised the slot, and nothing else owns it.
+    drop(unsafe { slot.assume_init() });
+    assert_eq!(
+        Rc::strong_count(&shared),
+        1,
+        "the pushed element dropped with it"
+    );
+}
+
 #[test]
 fn a_full_vector_refuses_and_hands_the_value_back() {
     let mut vec: ArrayVec<u32, 3> = ArrayVec::new();

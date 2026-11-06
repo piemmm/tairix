@@ -4,7 +4,7 @@ use tairix_abi::audio::AudioGain;
 use tairix_appconf::{Document, Registry};
 
 use super::{resolve, CueSource, Resolution};
-use crate::{Silence, SoundAsset, SoundEvent, SoundSettings, DEFAULT_THEME};
+use crate::{is_effect, Silence, SoundAsset, SoundEvent, SoundSettings, DEFAULT_THEME};
 
 fn settings(text: &str) -> SoundSettings {
     let (settings, refused) = SoundSettings::load(&Document::parse(text).expect("a document"));
@@ -65,7 +65,12 @@ fn every_cue_resolves_in_the_one_order() {
                                     shelf.shipped
                                 }
                             });
-                            let gain = AudioGain::new(-300).expect("attenuation");
+                            let effect = is_effect(event);
+                            let gain = if effect {
+                                AudioGain::new(-300).expect("attenuation")
+                            } else {
+                                AudioGain::UNITY
+                            };
                             let from = |theme| Resolution::Play {
                                 source: CueSource::Theme {
                                     theme,
@@ -73,7 +78,7 @@ fn every_cue_resolves_in_the_one_order() {
                                 },
                                 gain,
                             };
-                            let expected = if !master || !own_switch {
+                            let expected = if (effect && !master) || !own_switch {
                                 Resolution::Silent(Silence::Disabled)
                             } else if own {
                                 Resolution::Play {
@@ -121,4 +126,49 @@ fn nothing_stored_plays_the_shipped_asset_at_unity() {
             }
         );
     }
+}
+
+/// What the volume's feedback resolves to under `settings`, with the shipped
+/// theme holding every asset.
+fn feedback(settings: &SoundSettings) -> Resolution<'_> {
+    resolve(SoundEvent::VolumeFeedback, settings, false, |theme, _| {
+        theme == DEFAULT_THEME
+    })
+}
+
+/// The volume's feedback tells the listener how loud the output now is, so
+/// neither the effects' switch nor their gain reaches it: it plays at unity
+/// under effects turned down 12 dB, or off, and only its own switch silences
+/// it.
+#[test]
+fn the_volumes_feedback_answers_to_its_own_switch_at_full_level() {
+    let heard = Resolution::Play {
+        source: CueSource::Theme {
+            theme: DEFAULT_THEME,
+            asset: SoundAsset::Volume,
+        },
+        gain: AudioGain::UNITY,
+    };
+    for text in [
+        "sound.gain = -12dB\n",
+        "sound.enabled = false\nsound.gain = -12dB\n",
+    ] {
+        assert_eq!(feedback(&settings(text)), heard, "{text}");
+    }
+    assert_eq!(
+        feedback(&settings("sound.volume_feedback.enabled = false\n")),
+        Resolution::Silent(Silence::Disabled)
+    );
+    let turned_down = settings("sound.gain = -12dB\n");
+    assert_eq!(
+        resolve(SoundEvent::Info, &turned_down, false, |_, _| true),
+        Resolution::Play {
+            source: CueSource::Theme {
+                theme: DEFAULT_THEME,
+                asset: SoundAsset::Info,
+            },
+            gain: AudioGain::new(-1_200).expect("attenuation"),
+        },
+        "an effect is turned down"
+    );
 }

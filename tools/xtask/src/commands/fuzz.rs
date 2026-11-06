@@ -485,6 +485,18 @@ pub const TARGETS: &[Target] = &[
             "raster-image decode and structure report (untrusted picture bytes: chunk framing, filters, interlace, marker segments, Huffman scans, EXIF directories)",
     },
     Target {
+        package: "tairix-video",
+        test: "fuzz_vp8",
+        description:
+            "VP8 stream decode (untrusted frame bytes: tags and headers, probability updates, modes and vectors, residual tokens, references replaced and copied, decodes refused their memory and left as they were)",
+    },
+    Target {
+        package: "tairix-video",
+        test: "fuzz_webm",
+        description:
+            "WebM demux (untrusted recording bytes: EBML element ids and sizes, unknown-size Segments and Clusters, the seek index, blocks retried through a miss)",
+    },
+    Target {
         package: "tairix-sound",
         test: "fuzz_sound",
         description:

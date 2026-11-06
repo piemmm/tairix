@@ -13,10 +13,8 @@ use crate::cursor::CursorSet;
 use crate::metrics::Metrics;
 use crate::motion::{Contrast, Density, Motion, MotionTheme};
 use crate::palette::Palette;
-use crate::syntax::SyntaxPalette;
 use crate::typography::{DesktopText, FamilyKey, Fonts};
 use tairix_abi::desktop::DesktopInfo;
-use tairix_colour::Rgba;
 
 /// A stable identifier for a theme.
 ///
@@ -331,75 +329,15 @@ impl Theme {
         }
     }
 
-    /// The built-in **dark** theme.
-    ///
-    /// The tokens are the Reactive Alloy design boards (`plans/desktop1.png`,
-    /// `plans/desktop2a.png`) measured rather than invented: near-black cool
-    /// surfaces, one alloy-orange accent family (a burnt-orange plate fill
-    /// under a bright signal edge), the semantic signal hues the boards' own
-    /// legend fixes, and a hover plate one measured step above the bar fill —
-    /// the boards draw a hovered icon on the taskbar as a bare wash roughly
-    /// nine levels lighter than the bar behind it.
+    /// The built-in **dark** theme: [`Palette::DARK`] over the metrics, fonts,
+    /// cursors, and motion both built-ins share.
     #[must_use]
     pub fn dark() -> Self {
-        let accent = Rgba::rgb(0xd1, 0x55, 0x0f);
         Self::new(
             ThemeId::DARK,
             "TAIRiX Dark",
             Appearance::Dark,
-            Palette {
-                desktop: Rgba::rgb(0x0b, 0x0e, 0x10),
-                surface: Rgba::rgb(0x0f, 0x13, 0x16),
-                surface_raised: Rgba::rgb(0x15, 0x1b, 0x1f),
-                document: Rgba::rgb(0x0a, 0x0d, 0x0f),
-                title_band: Rgba::rgb(0x23, 0x2b, 0x31),
-                chrome_alpha: CHROME_ALPHA,
-                chrome_plate_alpha: CHROME_PLATE_ALPHA,
-                on_surface: Rgba::rgb(0xe8, 0xeb, 0xed),
-                on_surface_muted: Rgba::rgb(0x8e, 0x97, 0x9c),
-                accent,
-                on_accent: ON_ACCENT,
-                selection_fill: accent.with_alpha(SELECTION_ALPHA),
-                selection_tint: accent.with_alpha(SELECTION_TINT_ALPHA),
-                border: Rgba::rgb(0x1c, 0x23, 0x27),
-                surface_hover: Rgba::rgb(0x28, 0x31, 0x37),
-                surface_pressed: Rgba::rgb(0x0b, 0x0f, 0x11),
-                surface_selected: Rgba::rgb(0x3d, 0x47, 0x4e),
-                rim: Rgba::rgb(0x23, 0x2b, 0x30),
-                rim_active: Rgba::rgb(0xff, 0x60, 0x00),
-                danger: Rgba::rgb(0xe4, 0x1d, 0x21),
-                cpu_pressure: Rgba::rgb(0xf7, 0x62, 0x02),
-                memory_pressure: Rgba::rgb(0x8b, 0x43, 0xd6),
-                disk_pressure: Rgba::rgb(0xf8, 0xa3, 0x30),
-                network_activity: Rgba::rgb(0x0b, 0x88, 0xd9),
-                power_pressure: Rgba::rgb(0xa8, 0xd8, 0x4f),
-                thermal_pressure: Rgba::rgb(0xff, 0x8a, 0x5c),
-                gpu_pressure: Rgba::rgb(0x22, 0xb8, 0xa6),
-                accelerator_pressure: Rgba::rgb(0xd9, 0x4f, 0x8c),
-                recovery: Rgba::rgb(0xe8, 0x48, 0x4c),
-                success: Rgba::rgb(0x6f, 0xb2, 0x3a),
-                warning: Rgba::rgb(0xe8, 0xb1, 0x3a),
-                denied: Rgba::rgb(0xb0, 0x3a, 0x3d),
-                workload: Rgba::rgb(0x3f, 0xb9, 0x50),
-                disk_read: Rgba::rgb(0x62, 0xcf, 0x7a),
-                disk_write: Rgba::rgb(0xdb, 0x4a, 0x3a),
-                net_receive: Rgba::rgb(0x2f, 0x9f, 0xe0),
-                net_send: Rgba::rgb(0x7b, 0x6c, 0xe8),
-                scroll_track: Rgba::rgb(0x13, 0x1a, 0x1d),
-                scroll_thumb: Rgba::rgb(0x2f, 0x3a, 0x3f),
-                scroll_thumb_active: Rgba::rgb(0x5a, 0x66, 0x6c),
-                frame: Rgba::rgb(0x4b, 0x52, 0x57),
-                bevel_light: Rgba::new(0xff, 0xff, 0xff, 0x40),
-                bevel_shade: Rgba::new(0x00, 0x00, 0x00, 0x78),
-                drop_shadow: Rgba::new(0x00, 0x00, 0x00, 0x8c),
-                inactive_drop_shadow: Rgba::new(0x00, 0x00, 0x00, 0x54),
-                window_close: Rgba::rgb(0xff, 0x3b, 0x30).with_alpha(COMMAND_ALPHA),
-                window_minimize: Rgba::rgb(0xff, 0xc1, 0x0a).with_alpha(COMMAND_ALPHA),
-                window_maximize: Rgba::rgb(0x34, 0xc7, 0x59).with_alpha(COMMAND_ALPHA),
-                window_put_to_back: Rgba::rgb(0x0a, 0x93, 0xe6).with_alpha(COMMAND_ALPHA),
-                title_hue_alpha: TITLE_HUE_ALPHA,
-                syntax: SyntaxPalette::dark(),
-            },
+            Palette::DARK,
             common_metrics(),
             common_fonts(),
             CursorSet::canonical(),
@@ -409,81 +347,15 @@ impl Theme {
         )
     }
 
-    /// The built-in **light** theme — TAIRiX's default.
-    ///
-    /// The light board (`plans/desktop1-light.png`) keeps the dark variant's
-    /// alloy-orange accent family and semantic vocabulary and re-tunes every
-    /// signal hue until it carries on a light ground, with the accent deepened
-    /// to the burnt end of the family so orange text and rims stay legible.
-    ///
-    /// The neutrals are one descending ladder of *neutral* greys — no warm
-    /// cast, so a signal hue is the only colour on screen. The window ground
-    /// is a mid-light grey rather than paper: white window grounds left every
-    /// app reading as a blank sheet, with nothing for a plate to be raised off
-    /// and nowhere for a title band to sit. Paper is [`Palette::document`]'s
-    /// alone, so the surfaces a user *writes* on are the white ones. Raised
-    /// chrome — plates, menus, the taskbar — catches the light *above* the
-    /// window ground, and the interaction ladder deepens away from it.
+    /// The built-in **light** theme — TAIRiX's default: [`Palette::LIGHT`]
+    /// over the same shared parts.
     #[must_use]
     pub fn light() -> Self {
-        let accent = Rgba::rgb(0xc8, 0x50, 0x0c);
         Self::new(
             ThemeId::LIGHT,
             "TAIRiX Light",
             Appearance::Light,
-            Palette {
-                desktop: Rgba::rgb(0x80, 0x80, 0x80),
-                surface: Rgba::rgb(0xd9, 0xd9, 0xd9),
-                surface_raised: Rgba::rgb(0xec, 0xec, 0xec),
-                document: Rgba::rgb(0xff, 0xff, 0xff),
-                title_band: Rgba::rgb(0xbf, 0xbf, 0xbf),
-                chrome_alpha: CHROME_ALPHA,
-                chrome_plate_alpha: CHROME_PLATE_ALPHA,
-                on_surface: Rgba::rgb(0x1b, 0x1d, 0x20),
-                on_surface_muted: Rgba::rgb(0x6a, 0x6f, 0x75),
-                accent,
-                on_accent: ON_ACCENT,
-                selection_fill: accent.with_alpha(SELECTION_ALPHA),
-                selection_tint: accent.with_alpha(SELECTION_TINT_ALPHA),
-                border: Rgba::rgb(0xad, 0xad, 0xad),
-                surface_hover: Rgba::rgb(0xcc, 0xcc, 0xcc),
-                surface_pressed: Rgba::rgb(0xb3, 0xb3, 0xb3),
-                surface_selected: Rgba::rgb(0xa6, 0xa6, 0xa6),
-                rim: Rgba::rgb(0xc4, 0xc4, 0xc4),
-                rim_active: Rgba::rgb(0xd2, 0x54, 0x0b),
-                danger: Rgba::rgb(0xc4, 0x16, 0x1a),
-                cpu_pressure: Rgba::rgb(0xd8, 0x54, 0x0a),
-                memory_pressure: Rgba::rgb(0x74, 0x33, 0xbd),
-                disk_pressure: Rgba::rgb(0xc4, 0x7a, 0x12),
-                network_activity: Rgba::rgb(0x0b, 0x6f, 0xb0),
-                power_pressure: Rgba::rgb(0x64, 0x8f, 0x1e),
-                thermal_pressure: Rgba::rgb(0xc2, 0x50, 0x1a),
-                gpu_pressure: Rgba::rgb(0x0f, 0x84, 0x78),
-                accelerator_pressure: Rgba::rgb(0xa8, 0x2f, 0x66),
-                recovery: Rgba::rgb(0xc9, 0x33, 0x37),
-                success: Rgba::rgb(0x4b, 0x7d, 0x22),
-                warning: Rgba::rgb(0xa9, 0x74, 0x1a),
-                denied: Rgba::rgb(0x8f, 0x25, 0x28),
-                workload: Rgba::rgb(0x2f, 0x7d, 0x33),
-                disk_read: Rgba::rgb(0x1d, 0x7f, 0x47),
-                disk_write: Rgba::rgb(0xb0, 0x36, 0x2a),
-                net_receive: Rgba::rgb(0x11, 0x6f, 0xb0),
-                net_send: Rgba::rgb(0x55, 0x46, 0xc4),
-                scroll_track: Rgba::rgb(0xcf, 0xcf, 0xcf),
-                scroll_thumb: Rgba::rgb(0x9e, 0x9e, 0x9e),
-                scroll_thumb_active: Rgba::rgb(0x74, 0x74, 0x74),
-                frame: Rgba::rgb(0x91, 0x91, 0x91),
-                bevel_light: Rgba::new(0xff, 0xff, 0xff, 0x8c),
-                bevel_shade: Rgba::new(0x00, 0x00, 0x00, 0x50),
-                drop_shadow: Rgba::new(0x00, 0x00, 0x00, 0x5a),
-                inactive_drop_shadow: Rgba::new(0x00, 0x00, 0x00, 0x36),
-                window_close: Rgba::rgb(0xd7, 0x1f, 0x18).with_alpha(COMMAND_ALPHA),
-                window_minimize: Rgba::rgb(0xc9, 0x8a, 0x00).with_alpha(COMMAND_ALPHA),
-                window_maximize: Rgba::rgb(0x1d, 0x8c, 0x3c).with_alpha(COMMAND_ALPHA),
-                window_put_to_back: Rgba::rgb(0x0b, 0x6f, 0xb0).with_alpha(COMMAND_ALPHA),
-                title_hue_alpha: TITLE_HUE_ALPHA,
-                syntax: SyntaxPalette::light(),
-            },
+            Palette::LIGHT,
             common_metrics(),
             common_fonts(),
             CursorSet::canonical(),
@@ -493,76 +365,6 @@ impl Theme {
         )
     }
 }
-
-/// The foreground both built-in themes draw on an accent fill.
-///
-/// A primary action is one treatment in the design boards — a warm white
-/// label on the alloy-orange plate — and it reads identically on either
-/// appearance, so the two variants share the token instead of restating it.
-const ON_ACCENT: Rgba = Rgba::rgb(0xff, 0xf5, 0xee);
-
-/// The opacity both built-in themes give their selection fill: a little under
-/// a third.
-///
-/// A selection marks an item without hiding it, so the surface or wallpaper
-/// under a selected tile still reads through the accent rather than being
-/// replaced by it. It is this light because it is not doing the work alone:
-/// the backdrop beneath a selected item is frosted first, and that separation
-/// is what makes the item read as picked, leaving the accent to tint rather
-/// than to cover. Each theme still authors its own fill colour and may tune
-/// this.
-pub(crate) const SELECTION_ALPHA: u8 = 77;
-
-/// The opacity both built-in themes wash a selected item's picture with:
-/// about nine twentieths, enough to read as lit over the picture's own colour
-/// where the lighter fill beside it only tints a plate.
-pub(crate) const SELECTION_TINT_ALPHA: u8 = 115;
-
-/// The opacity both built-in themes give their window-command highlights:
-/// half.
-///
-/// A command's hue says which of the four the pointer is on; it is not trying
-/// to replace the title bar it sits in. Half opacity is enough for the colour
-/// to be unmistakable while the bar still reads through it, so a lit command
-/// looks like part of the window rather than a sticker on it. The two
-/// appearances share the weight and author the hues themselves, deeper on
-/// paper-white and brighter on near-black, so each carries on its own bar.
-pub(crate) const COMMAND_ALPHA: u8 = 128;
-
-/// The opacity both built-in themes give the hue a title bar takes from its
-/// window's identity icon: a little under a third.
-///
-/// The bar is not trying to show the icon twice. At this weight the colour is
-/// unmistakable as *that application's* while the chrome underneath still reads
-/// as chrome, and the icon a few pixels away stays the saturated thing the eye
-/// goes to. Both appearances share it because the wash is not a palette colour
-/// of theirs at all — it is whatever the application's artwork happens to be.
-///
-/// A fifth was the first authored weight and read as almost nothing at the
-/// densities the desktop actually runs at, which is why the wash carries this
-/// much: a hue that has to be looked for is not identifying anything.
-pub(crate) const TITLE_HUE_ALPHA: u8 = 82;
-
-/// The opacity both built-in themes give their floating chrome: four fifths.
-///
-/// The bar, its popups and every menu plate sit over the wallpaper and over
-/// whatever windows are open, and the desktop reads better when they are part
-/// of that picture rather than solid cards on top of it. One fifth through is
-/// as far as it goes: the icons and text on top need a settled ground to read
-/// against, and the backdrop they are laid over is blurred first, which is
-/// what carries the separation the missing opacity would otherwise have to.
-pub(crate) const CHROME_ALPHA: u8 = 204;
-
-/// The opacity both built-in themes give a plate raised on floating chrome:
-/// half of what is left between its ground and solid.
-///
-/// A button or a text field is furniture standing on the glass, so it reads
-/// as a distinct object rather than a hole cut in the surface — while still
-/// letting the blurred backdrop through, which is what keeps a popup one
-/// piece of glass instead of a frosted sheet with solid patches on it. Derived
-/// from the ground rather than authored beside it, so raising the chrome
-/// opacity cannot quietly narrow the step to nothing.
-pub(crate) const CHROME_PLATE_ALPHA: u8 = CHROME_ALPHA + (u8::MAX - CHROME_ALPHA) / 2;
 
 /// The metrics shared by both built-in themes. Corner radii and border
 /// thickness are an appearance-independent house style, so the dark and

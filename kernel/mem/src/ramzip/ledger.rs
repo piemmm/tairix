@@ -18,11 +18,12 @@
 //! detections — exposed only through these internal figures and the
 //! audit log, never a public ABI.
 
-use alloc::collections::BTreeMap;
+use tairix_collections::OrderedMap;
 
-/// Why a ledger operation was refused. Both variants are defects in
-/// the caller's books (a charge that cannot fit, or a release of bytes
-/// never charged); the tier reacts by poisoning admission.
+/// Why a ledger operation was refused. [`Self::Overflow`] and
+/// [`Self::Underflow`] are defects in the caller's books (a charge that
+/// cannot fit, or a release of bytes never charged), to which the tier
+/// reacts by poisoning admission; [`Self::OutOfMemory`] is not.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum LedgerError {
     /// A charge would overflow a byte or entry total.
@@ -30,6 +31,8 @@ pub enum LedgerError {
     /// A release exceeds the recorded total (global or per-task), or
     /// names a task with no recorded usage.
     Underflow,
+    /// A task's first charge could not record its usage.
+    OutOfMemory,
 }
 
 /// One task's recorded contribution to the tier.
@@ -96,7 +99,7 @@ pub struct RamzipLedger {
     compressed_bytes: usize,
     stored_bytes: usize,
     metadata_bytes: usize,
-    per_task: BTreeMap<u64, TaskUsage>,
+    per_task: OrderedMap<u64, TaskUsage>,
     counters: RamzipCounters,
 }
 
@@ -171,8 +174,9 @@ impl RamzipLedger {
     ///
     /// # Errors
     ///
-    /// [`LedgerError::Overflow`] if any total cannot fit; nothing is
-    /// charged in that case (all-or-nothing).
+    /// [`LedgerError::Overflow`] if any total cannot fit, and
+    /// [`LedgerError::OutOfMemory`] if a task's first usage cannot be
+    /// recorded; nothing is charged in either case (all-or-nothing).
     pub fn charge(
         &mut self,
         task: u64,
@@ -198,7 +202,7 @@ impl RamzipLedger {
             .metadata_bytes
             .checked_add(metadata)
             .ok_or(LedgerError::Overflow)?;
-        let usage = self.per_task.entry(task).or_default();
+        let usage = self.per_task.get(&task).copied().unwrap_or_default();
         let task_entries = usage.entries.checked_add(1).ok_or(LedgerError::Overflow)?;
         let task_logical = usage
             .logical_bytes
@@ -208,10 +212,14 @@ impl RamzipLedger {
             .stored_bytes
             .checked_add(stored.saturating_add(metadata))
             .ok_or(LedgerError::Overflow)?;
-
-        usage.entries = task_entries;
-        usage.logical_bytes = task_logical;
-        usage.stored_bytes = task_stored;
+        let charged = TaskUsage {
+            entries: task_entries,
+            logical_bytes: task_logical,
+            stored_bytes: task_stored,
+        };
+        self.per_task
+            .try_insert(task, charged)
+            .map_err(|_| LedgerError::OutOfMemory)?;
         self.entries = entries;
         self.logical_bytes = logical_total;
         self.compressed_bytes = compressed_total;
@@ -378,5 +386,25 @@ mod tests {
         assert_eq!(counter, u64::MAX);
         bump(&mut counter);
         assert_eq!(counter, u64::MAX);
+    }
+
+    #[test]
+    fn a_first_charge_with_no_memory_to_record_it_charges_nothing() {
+        let mut ledger = RamzipLedger::new();
+        let refused =
+            tairix_fuzzseed::meter::refusing_above(0, || ledger.charge(7, 4096, 1000, 1016, 128));
+        assert_eq!(refused, Err(LedgerError::OutOfMemory));
+        assert_eq!(ledger.entries(), 0);
+        assert_eq!(ledger.footprint(), 0);
+        assert_eq!(ledger.task_usage(7), TaskUsage::default());
+        ledger
+            .charge(7, 4096, 1000, 1016, 128)
+            .expect("the retry charges");
+        // A further charge to a task already recorded needs nothing from the
+        // heap.
+        let again =
+            tairix_fuzzseed::meter::refusing_above(0, || ledger.charge(7, 4096, 1000, 1016, 128));
+        assert_eq!(again, Ok(()));
+        assert_eq!(ledger.task_usage(7).entries, 2);
     }
 }

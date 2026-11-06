@@ -20,6 +20,7 @@ fn tile(label: &str) -> Look {
     Look {
         label: Some(String::from(label)),
         icon: IconKind::File,
+        own: None,
         state: ControlState::idle(),
         count: None,
     }
@@ -30,6 +31,7 @@ fn card(count: Option<u32>) -> Look {
     Look {
         label: None,
         icon: IconKind::Folder,
+        own: None,
         state: ControlState::idle(),
         count,
     }

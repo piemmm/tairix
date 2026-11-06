@@ -53,6 +53,7 @@ pub const fn menu_symbol_icon(symbol: AppMenuSymbol) -> IconKind {
         S::Rename => IconKind::Rename,
         S::Duplicate => IconKind::Duplicate,
         S::Delete => IconKind::Delete,
+        S::Trash => IconKind::Trash,
         S::Remove => IconKind::Remove,
         S::Clear => IconKind::Clear,
         S::Undo => IconKind::Undo,
@@ -156,6 +157,9 @@ pub const fn menu_symbol_icon(symbol: AppMenuSymbol) -> IconKind {
         S::Pixelate => IconKind::Pixelate,
         S::Noise => IconKind::Noise,
         S::FindEdges => IconKind::FindEdges,
+        S::ChannelMixer => IconKind::ChannelMixer,
+        S::Median => IconKind::Median,
+        S::Emboss => IconKind::Emboss,
         S::Pages => IconKind::Pages,
         S::Tools => IconKind::Toolbox,
         S::ToolSelect => IconKind::ToolSelect,
@@ -270,6 +274,13 @@ pub(crate) const fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::Panes => PANES,
         IconKind::ResetPanes => TURN_BACK,
         IconKind::PopOut => POP_OUT,
+        IconKind::CaptureScreen => CAPTURE_SCREEN,
+        IconKind::CaptureWindow => CAPTURE_WINDOW,
+        IconKind::CaptureArea => CAPTURE_AREA,
+        IconKind::RecordScreen => RECORD_SCREEN,
+        IconKind::RecordWindow => RECORD_WINDOW,
+        IconKind::RecordArea => RECORD_AREA,
+        IconKind::StopRecording => STOP_RECORDING,
         IconKind::Layout => LAYOUT,
         IconKind::LargeIcons => LARGE_TILES,
         IconKind::SmallIcons => SMALL_TILES,
@@ -324,6 +335,9 @@ pub(crate) const fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::Pixelate => CHEQUER,
         IconKind::Noise => SCATTER,
         IconKind::FindEdges => EDGES,
+        IconKind::ChannelMixer => CHANNELS,
+        IconKind::Median => MEDIAN,
+        IconKind::Emboss => RELIEF,
         IconKind::Pages => PAGES,
         IconKind::Toolbox => TOOLBOX,
         IconKind::Activity => PULSE,
@@ -393,10 +407,13 @@ const OPEN_WITH: &[Mark] = &[line(&[
 const WINDOW: Outline =
     Outline::Path("M5 4H19A2 2 0 0 1 21 6V18A2 2 0 0 1 19 20H5A2 2 0 0 1 3 18V6A2 2 0 0 1 5 4Z");
 
+/// The title band across [`WINDOW`].
+const TITLE_BAND: Outline = Outline::Path("M3 8.6H21");
+
 /// A window bearing a plus.
 const NEW_WINDOW: &[Mark] = &[line(&[
     WINDOW,
-    Outline::Path("M3 8.6H21"),
+    TITLE_BAND,
     Outline::Path("M12 11.4V17.2M9.1 14.3H14.9"),
 ])];
 
@@ -787,6 +804,46 @@ const POP_OUT: &[Mark] = &[line(&[
 
 /// A window divided into its panels.
 const LAYOUT: &[Mark] = &[line(&[WINDOW, Outline::Path("M3 9H21M11 9V20")])];
+
+/// A screen, which [`STAND`] holds up.
+const SCREEN: Outline =
+    Outline::Path("M5 4H19A2 2 0 0 1 21 6V15A2 2 0 0 1 19 17H5A2 2 0 0 1 3 15V6A2 2 0 0 1 5 4Z");
+
+/// The stand [`SCREEN`] rests on.
+const STAND: Outline = Outline::Path("M12 17V20.5M8.5 20.5H15.5");
+
+/// The whole screen.
+const CAPTURE_SCREEN: &[Mark] = &[line(&[SCREEN, STAND])];
+
+/// A window with its title band.
+const CAPTURE_WINDOW: &[Mark] = &[line(&[WINDOW, TITLE_BAND])];
+
+/// A selection frame around a crosshair.
+const CAPTURE_AREA: &[Mark] = &[line(&[
+    DASHED_FRAME,
+    Outline::Path("M12 9.5V14.5M9.5 12H14.5"),
+])];
+
+/// The screen bearing a recording dot.
+const RECORD_SCREEN: &[Mark] = &[line(&[SCREEN, STAND]), fill(&[circle(12.0, 10.5, 3.0)])];
+
+/// A window bearing a recording dot below its title band.
+const RECORD_WINDOW: &[Mark] = &[
+    line(&[WINDOW, TITLE_BAND]),
+    fill(&[circle(12.0, 14.3, 3.0)]),
+];
+
+/// A selection frame around a recording dot.
+const RECORD_AREA: &[Mark] = &[line(&[DASHED_FRAME]), fill(&[circle(12.0, 12.0, 3.2)])];
+
+/// A stop square in a ring.
+const STOP_RECORDING: &[Mark] = &[
+    line(&[circle(12.0, 12.0, 9.0)]),
+    fill(&[Outline::Path(
+        "M9.5 8.5H14.5A1 1 0 0 1 15.5 9.5V14.5A1 1 0 0 1 14.5 15.5H9.5A1 1 0 0 1 8.5 14.5V9.5\
+         A1 1 0 0 1 9.5 8.5Z",
+    )]),
+];
 
 /// Four large tiles.
 const LARGE_TILES: &[Mark] = &[line(&[
@@ -1191,6 +1248,41 @@ const EDGES: &[Mark] = &[line(&[
     ),
     Outline::Path("M12 7L17 12L12 17L7 12Z"),
 ])];
+
+/// Three channels running down into one.
+const CHANNELS: &[Mark] = &[line(&[
+    Outline::Path("M5 4V8.5C5 12 12 12 12 15.5V20"),
+    Outline::Path("M12 4V15.5"),
+    Outline::Path("M19 4V8.5C19 12 12 12 12 15.5"),
+])];
+
+/// A frame of dots about a larger one at its middle.
+const MEDIAN: &[Mark] = &[
+    line(&[Outline::Path(
+        "M5 3H19A2 2 0 0 1 21 5V19A2 2 0 0 1 19 21H5A2 2 0 0 1 3 19V5A2 2 0 0 1 5 3Z",
+    )]),
+    fill(&[
+        circle(7.5, 7.5, 1.3),
+        circle(12.0, 7.5, 1.3),
+        circle(16.5, 7.5, 1.3),
+        circle(7.5, 12.0, 1.3),
+        circle(16.5, 12.0, 1.3),
+        circle(7.5, 16.5, 1.3),
+        circle(12.0, 16.5, 1.3),
+        circle(16.5, 16.5, 1.3),
+        circle(12.0, 12.0, 2.3),
+    ]),
+];
+
+/// A tile raised from its frame, its upper and left faces lit.
+const RELIEF: &[Mark] = &[
+    line(&[
+        Outline::Path("M4 4H20V20H4Z"),
+        Outline::Path("M8.5 8.5H15.5V15.5H8.5Z"),
+        Outline::Path("M20 4L15.5 8.5M20 20L15.5 15.5M4 20L8.5 15.5"),
+    ]),
+    fill(&[Outline::Path("M4 4H20L15.5 8.5H8.5V15.5L4 20Z")]),
+];
 
 /// Two pages, one behind the other.
 const PAGES: &[Mark] = &[line(&[

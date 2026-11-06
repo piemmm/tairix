@@ -42,7 +42,13 @@ a'i fudo, a'r hyn sy'n recordio: eich recordiadau chi wrth eu henw, a faint
 sydd gan bawb arall. Mae ei reolyddion yn newid y ddyfais ar unwaith, a dim
 ond tra bo'ch sesiwn yn dal yr ystafell y mae'n ei gwasanaethu; dangosir
 dyfais yn ystafell sesiwn arall, ond ni ellir ei newid yma. Mae'ch bwrdd
-gwaith yn cofio'r hyn a osodwch.
+gwaith yn cofio'r hyn a osodwch. Mae newid lefel sain y ddyfais y mae sain yn
+chwarae drwyddi, yma neu o'r bar eiconau, yn chwarae sain fer ar y lefel newydd
+— lle daw llusgo i orffwys, ar bob cam o'r bysellau saeth, ac wrth ddad-fudo —
+fel y gallwch glywed pa mor uchel yw hi nawr. Yn *Sound Effects*, mae
+*Play feedback when the volume changes* yn ei diffodd. Nid yw'n dilyn synau
+eraill y bwrdd gwaith: mae'n chwarae ar lefel y ddyfais ei hun, p'un a ydynt
+ymlaen ai peidio.
 
 Dim ond pan fo'r peiriant yn un y caiff **Raspberry Pi** ei restru. Mae'n gosod
 ffan oeri'r prosesydd, a gaiff ei droi drwy un o linellau'r pennawd 40 pin:
@@ -71,10 +77,17 @@ restru, a yw'n dangos colofn y lleoedd a'r bar offer, a yw ffolderi'n aros ar y
 brig, pa ôl-ddodiaid enwau a pha eitemau a guddir, a yw llun yn dangos ei
 gynnwys ei hun a ffolder yr hyn sydd ynddi, a yw symud eitemau i'r Sbwriel yn
 gofyn yn gyntaf, ac a gaiff delwedd ddisg neu archif a agorwyd gennych ei
-dad-osod unwaith y caiff ei ffenestri eu cau. Mae rhes yn dod i rym cyn gynted
+dad-osod unwaith y caiff ei ffenestri eu cau. Mae'r ôl-ddodiaid enwau y mae'n
+eu cuddio wedi'u cuddio ar y bwrdd gwaith hefyd. Mae gan *Show on the desktop*
+flwch ar gyfer pob math o yriant — *The system drive*, *Fixed drives*,
+*Removable drives*, *Network shares* a *Disk images and archives* — ac mae'r
+bwrdd gwaith yn dangos eicon ar gyfer pob gyriant cysylltiedig o fath sydd
+wedi'i dicio, sy'n ei agor fel y mae'r rheolwr ffeiliau'n ei wneud; dim ond
+gyriannau symudadwy sydd wedi'u ticio i ddechrau. Mae rhes yn dod i rym cyn gynted
 ag y caiff ei dewis: mae ble mae ffenestr newydd yn agor ac a yw'n dangos colofn
 y lleoedd a'r bar offer yn berthnasol i'r ffenestr nesaf a agorwch, ac mae
-popeth arall yn cyrraedd pob ffenestr rheolwr ffeiliau ar unwaith, er bod
+popeth arall yn cyrraedd y bwrdd gwaith a phob ffenestr rheolwr ffeiliau ar
+unwaith, er bod
 ffenestr yn cadw dull dangos neu drefn a ddewisoch chi ynddi eich hun. Mae
 *Settings…* ar ddewislen y rheolwr ffeiliau ei hun yn agor y cwarel hwn.
 

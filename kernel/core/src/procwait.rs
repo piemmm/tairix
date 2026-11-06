@@ -930,7 +930,7 @@ where
                         key,
                         waiter.0,
                         crate::waitq::NO_DEADLINE,
-                    );
+                    )?;
                     let parked = reschedule_current(cpu, RescheduleAction::Park);
                     crate::waitq::PROCWAIT_WAITQ.deregister_keyed(key, waiter.0);
                     if !parked {
@@ -1601,7 +1601,9 @@ mod tests {
         p.register_child(theirs, ProcessId(other_child), ChildListing::Listed)
             .expect("registered");
         for (parent, task) in [(mine, waiter), (mine, sibling_waiter), (theirs, stranger)] {
-            PROCWAIT_WAITQ.register_keyed(procwait_key(parent), task, NO_DEADLINE);
+            PROCWAIT_WAITQ
+                .register_keyed(procwait_key(parent), task, NO_DEADLINE)
+                .expect("filed");
         }
         let _ = take_unparked();
 

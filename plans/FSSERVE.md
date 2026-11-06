@@ -113,8 +113,8 @@ surprise removal, verified re-insert), `plans/FIX-IO.md` (deadlines, health),
 - Replies carry a `DriverError` code or the result, plus two state bits: the
   server holds unpublished writes, and the volume is in its reserve.
 - The bind offer (`volume_serve`) carries the root, `NameMatching`,
-  `NodeIdentity`, whether the driver keeps attributes, and whether it asks
-  for read-only and why; the kernel's answer carries the endpoint, the window
+  `NodeIdentity`, whether the driver keeps attributes and the volume a
+  title, and whether it asks for read-only and why; the kernel's answer carries the endpoint, the window
   and its length.
 - The C view of these records and the framing is `plans/CCOMPAT.md` CC1.2.
 

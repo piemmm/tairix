@@ -3,14 +3,17 @@
 //! the window into a tool window of its own, and docking it again; and the
 //! palette, floated out of its strip and docked in it again.
 
-use tairix_controls::{TitleBar, TitleBarEvent, WindowControlKind};
+use tairix_controls::{
+    ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, ScrollView, TitleBar, TitleBarEvent,
+    WindowControlKind,
+};
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::InputEvent;
 use tairix_theme::Theme;
 use tairix_window::docapp::{ToolGone, ToolMove, ToolOpening};
 
-use super::{pane_header, tool_pane, Landing, Outcome, PaneDrag, View};
-use crate::layout::Layout;
+use super::{pane_header, tool_pane, Landing, Outcome, PaneDrag, View, SCROLL_LINE};
+use crate::layout::{Layout, PaneSlot};
 use crate::pane::{Arrangement, PaneKind, Side};
 
 /// How far in from the window's edge a dragged pane is taken to an empty
@@ -45,8 +48,8 @@ impl View {
             .or(self.tool_landing)
     }
 
-    /// Show pane `kind`, or hide it; hiding the Adjustment pane closes the
-    /// adjustment open in it.
+    /// Show pane `kind`, or hide it; hiding the pane an adjustment or an
+    /// effect is open in closes it.
     pub(super) fn toggle_pane(
         &mut self,
         kind: PaneKind,
@@ -55,8 +58,8 @@ impl View {
     ) -> Outcome {
         if self.panes.shows(kind) {
             self.panes.hide(kind);
-            if kind == PaneKind::Adjustment {
-                self.close_adjustment(layout, damage);
+            if self.open_operation() == Some(kind) {
+                self.close_operation(kind, layout, damage);
             }
         } else {
             self.panes.show(kind);
@@ -64,14 +67,18 @@ impl View {
         Outcome::relaid()
     }
 
-    /// Put every pane back where a new window has it, which closes an open
-    /// adjustment with its pane.
+    /// Put every pane back where, and at the size, a new window has it, which
+    /// closes an open adjustment with its pane.
     pub(super) fn reset_panes(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
         self.pane_drag = None;
         self.tool_landing = None;
         self.panes.clone_from(&self.home_panes);
-        if !self.panes.shows(PaneKind::Adjustment) {
-            self.close_adjustment(layout, damage);
+        self.chosen = [None; PaneKind::ALL.len()];
+        if let Some(kind) = self
+            .open_operation()
+            .filter(|&kind| !self.panes.shows(kind))
+        {
+            self.close_operation(kind, layout, damage);
         }
         Outcome::relaid()
     }
@@ -277,6 +284,30 @@ impl View {
         }
     }
 
+    /// A floating pane's tool window was resized to `size`: one that may be
+    /// resized keeps that size while it floats, in logical pixels so a change
+    /// of scale keeps it too, and its tool window alone is repainted.
+    pub(super) fn tool_resized(
+        &mut self,
+        id: u32,
+        (width, height): (u32, u32),
+        layout: &Layout,
+        scale: Scale,
+        damage: &mut Region,
+    ) -> Outcome {
+        let Some(slot) = tool_pane(id)
+            .filter(|&kind| self.panes.floats(kind))
+            .and_then(|kind| layout.pane(kind))
+            .filter(|slot| slot.sizing.resizable())
+        else {
+            return Outcome::none();
+        };
+        self.chosen[slot.kind.index()] =
+            Some((scale.logical_length(width), scale.logical_length(height)));
+        damage.add(slot.frame);
+        Outcome::reshaped()
+    }
+
     /// A floating pane's tool window went: closed, the pane is hidden as a
     /// docked pane's close mark hides it, but for the palette, which is never
     /// lost and docks in its strip; refused, it docks at the foot of its home
@@ -359,6 +390,169 @@ impl View {
             if let Some(slot) = layout.pane(*kind) {
                 damage.add(slot.header);
             }
+        }
+    }
+
+    /// How far pane `kind`'s body is scrolled by its dock, in pixels.
+    pub(crate) fn body_offset(&self, kind: PaneKind) -> u64 {
+        self.body_bars[kind.index()].model().offset()
+    }
+
+    /// The bar pane `kind`'s body is scrolled by, for the painter.
+    pub(crate) fn body_bar(&self, kind: PaneKind) -> &ScrollBar {
+        &self.body_bars[kind.index()]
+    }
+
+    /// Pane `kind`'s body as it shows: its content's own layout scrolled
+    /// through the part of the body beside its bar.
+    pub(crate) fn body_view(&self, layout: &Layout, kind: PaneKind) -> ScrollView {
+        let viewport = layout.pane(kind).map_or(Rect::EMPTY, PaneSlot::viewport);
+        ScrollView::new(
+            ScrollOrientation::Vertical,
+            viewport,
+            self.body_offset(kind),
+        )
+    }
+
+    /// Pane `kind`'s body as it shows; while `held` — a press held or a list
+    /// open, which follow the pointer past the pane's edge — over the whole
+    /// window the pane lies in.
+    pub(crate) fn held_view(&self, layout: &Layout, kind: PaneKind, held: bool) -> ScrollView {
+        let view = self.body_view(layout, kind);
+        if held {
+            view.confined_to(layout.pane_window(kind))
+        } else {
+            view
+        }
+    }
+
+    /// The room an open list of pane `kind`'s hangs in, in the pane's own
+    /// layout: the window the pane lies in, scrolled with the pane.
+    pub(crate) fn list_room(&self, layout: &Layout, kind: PaneKind) -> Rect {
+        let window = layout.pane_window(kind);
+        let offset = u32::try_from(self.body_offset(kind)).unwrap_or(u32::MAX);
+        Rect::new(
+            window.left(),
+            window.top().saturating_add(to_i32(offset)),
+            window.width,
+            window.height,
+        )
+    }
+
+    /// Bring each body's bar into line with how much of the body shows, its
+    /// offset held within what there is to scroll; a body that moved is
+    /// repainted.
+    pub(super) fn settle_body_bars(&mut self, layout: &Layout, damage: &mut Region) {
+        for kind in PaneKind::ALL {
+            let slot = layout.pane(kind).filter(|slot| !slot.bar.is_empty());
+            let bar = &mut self.body_bars[kind.index()];
+            let range = slot.map_or(ScrollRange::new(0, 0, 0), |slot| {
+                bar.model().range().resize(
+                    u64::from(slot.content.height),
+                    u64::from(slot.viewport().height),
+                )
+            });
+            if range == bar.model().range() {
+                continue;
+            }
+            let moved = range.offset() != bar.model().offset();
+            bar.set_model(ScrollModel::in_pixels(range, SCROLL_LINE));
+            if let Some(slot) = slot {
+                damage.add(if moved { slot.body } else { slot.bar });
+            }
+        }
+    }
+
+    /// The pointer on the bars pane bodies are scrolled by: each sees every
+    /// event, so a press held on one ends wherever it is let go.
+    pub(super) fn body_bars_pointer(
+        &mut self,
+        event: &InputEvent,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<Outcome> {
+        let mut outcome = None;
+        for slot in layout.panes().chain(layout.floating()) {
+            let bar = &mut self.body_bars[slot.kind.index()];
+            if slot.bar.is_empty() && !bar.is_pressing() {
+                continue;
+            }
+            if bar
+                .on_pointer(event, slot.bar, scale, theme, damage)
+                .is_some()
+            {
+                damage.add(slot.body);
+                outcome = Some(Outcome::none());
+            }
+        }
+        outcome
+    }
+
+    /// Scroll the body under the pointer by a turn of the wheel, where its
+    /// dock scrolls it, answering whether the turn was its.
+    pub(super) fn wheel_body(
+        &mut self,
+        dy: i32,
+        layout: &Layout,
+        scale: Scale,
+        damage: &mut Region,
+    ) -> bool {
+        let pointer = self.pointer;
+        let Some(slot) = layout
+            .panes()
+            .chain(layout.floating())
+            .find(|slot| !slot.bar.is_empty() && slot.body.contains(pointer))
+        else {
+            return false;
+        };
+        if self.body_bars[slot.kind.index()]
+            .wheel(0, dy, scale, slot.bar, damage)
+            .is_some()
+        {
+            damage.add(slot.body);
+        }
+        true
+    }
+
+    /// Step a press held on a body's bar, where it has fallen due.
+    pub(super) fn repeat_body_bars(
+        &mut self,
+        now_ns: u64,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        for slot in layout.panes().chain(layout.floating()) {
+            if self.body_bars[slot.kind.index()]
+                .repeat(now_ns, slot.bar, scale, theme, damage)
+                .is_some()
+            {
+                damage.add(slot.body);
+            }
+        }
+    }
+
+    /// Scroll pane `kind`'s body so `rect`, laid out in its content, shows.
+    pub(super) fn reveal_body(
+        &mut self,
+        kind: PaneKind,
+        rect: Rect,
+        layout: &Layout,
+        damage: &mut Region,
+    ) {
+        let Some(slot) = layout.pane(kind).filter(|slot| !slot.bar.is_empty()) else {
+            return;
+        };
+        let bar = &mut self.body_bars[kind.index()];
+        let start =
+            u64::try_from(i64::from(rect.top()) - i64::from(slot.content.top())).unwrap_or(0);
+        let model = bar.model().revealing(start, u64::from(rect.height));
+        if model.offset() != bar.model().offset() {
+            bar.set_model(model);
+            damage.add(slot.body);
         }
     }
 }

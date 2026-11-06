@@ -15,8 +15,8 @@ use tairix_abi::Errno;
 use tairix_hash::HashSeed;
 use tairix_log::Sink;
 use tairix_sandbox::audiodecode::{AudioDecodeClient, DecodeEvent, MAX_BLOCK_FRAMES};
-use tairix_sandbox::session::{SessionDescriptors, SessionError};
-use tairix_sandbox::supervise::{SessionLauncher, SupervisedSession};
+use tairix_sandbox::session::SessionDescriptors;
+use tairix_sandbox::supervise::{send_waiting, Sent, SessionLauncher, SupervisedSession};
 use tairix_sound::{SoundFormat, SoundInfo};
 use tairix_soundtheme::{MAX_CUE_SAMPLES, MAX_CUE_SECONDS};
 
@@ -197,8 +197,10 @@ impl<L: SessionLauncher, S: Sink + Clone> Decoder<L, S> {
                 }
                 job.stage = Stage::Opening;
             }
-            let Ok(mut moved) = self.send(now) else {
-                return self.finish(Decoded::Refused);
+            let mut moved = match send_waiting(&mut self.client, &mut self.session, now) {
+                Sent::Queued => true,
+                Sent::Nothing => false,
+                Sent::Lost => return self.finish(Decoded::Refused),
             };
             loop {
                 match self.take(now) {
@@ -214,32 +216,6 @@ impl<L: SessionLauncher, S: Sink + Clone> Decoder<L, S> {
             }
             if !moved {
                 return None;
-            }
-        }
-    }
-
-    /// Queue the client's waiting frame to the worker and write what the pipe
-    /// takes, answering whether one went.
-    ///
-    /// The write cannot park: a request goes only once the worker has
-    /// answered the last, which it does only having read all of it, so the
-    /// pipe is empty. What does not fit waits for the pipe's room.
-    fn send(&mut self, now: u64) -> Result<bool, ()> {
-        let Some(frame) = self.client.outgoing() else {
-            return Ok(false);
-        };
-        match self.session.send(frame) {
-            Ok(()) => {
-                self.client.sent();
-                self.session.on_writable(now).map_err(|_| ())?;
-                Ok(true)
-            }
-            Err(SessionError::OutboundFull) => Ok(false),
-            Err(SessionError::WorkerFailed) => Err(()),
-            Err(_) => {
-                self.session
-                    .condemn(now, "a request to the decoder could not be framed");
-                Err(())
             }
         }
     }

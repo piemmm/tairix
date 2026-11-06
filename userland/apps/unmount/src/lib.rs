@@ -16,8 +16,9 @@
 //!
 //! The tool is a resolver and presenter, not a policy point:
 //!
-//! * **Resolving** `NAME` to the volume's stable 16-byte identity goes
-//!   through the ungated `sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries
+//! * **Resolving** `NAME` to the volume's stable 16-byte identity is the one
+//!   resolution `label` shares ([`tairix_procinfo::named_volume`]), over the
+//!   ungated `sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries
 //!   (the shared `lib/procinfo` namespace `mount` and `df` read too), whose
 //!   records carry each mount's volume identity and availability; a path is
 //!   matched against the mount points as spelled, as util-linux's `umount`

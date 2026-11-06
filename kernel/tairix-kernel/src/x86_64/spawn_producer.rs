@@ -39,7 +39,6 @@
 use core::ptr::NonNull;
 
 use alloc::boxed::Box;
-use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::Errno;
@@ -47,13 +46,12 @@ use tairix_arch_api::AddressTag;
 use tairix_arch_x86_64::paging::{self, activate_user_root, AddressSpace as ArchAddressSpace};
 use tairix_arch_x86_64::syscall_entry;
 use tairix_arch_x86_64::userentry::{set_user_thread_pointer, USER_MODE};
+use tairix_kernel_core::spawn::build_retained;
 use tairix_kernel_core::{
-    refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BuiltImage, ImageBuildCtx,
-    ProcessResume, ProcessSpace, SpawnMode, SpawnRequest, UserThreadEntry,
+    refuse_build, spawn_image, ArchImageBuilder, BuiltImage, ImageBuildCtx, SpawnMode,
 };
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, PhysAddr, PhysMap,
-    UserAddressSpace, UserStack,
 };
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_sync::Once;
@@ -188,6 +186,18 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
             .page_table_allocator()
             .ok_or_else(|| refuse_build(ctx, "page_table_allocator_unwired"))?;
         let table_frames = page_table_source(pt_frames)?;
+        let dynamic = spawn_layout::dynamic_windows(pt_frames, &WINDOWS, super::USER_VA_TOP);
+
+        // Parsed against the kernel's own compiled-in syscall CFI tag (a
+        // mismatch fails closed), placed, and given its CPU set before the
+        // child's space exists, so none of these refusals leaves anything
+        // behind.
+        let image = LoadImage::parse(rxe, &SYSCALL_TABLE_HASH).map_err(|_| Errno::BadMagic)?;
+        let (request, stack_span, load_base) =
+            spawn_layout::child_request(ctx, &image, rxe, args, env, dynamic.heap)?;
+        let tlb = ctx
+            .space_tlb()
+            .map_err(|_| refuse_build(ctx, "space_tlb_unallocated"))?;
 
         // Build the child's PML4 and capture its root *without* switching
         // CR3: the spawning caller (PID 1) stays active under its own root,
@@ -201,57 +211,8 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
             .ok_or_else(|| refuse_build(ctx, "page_table_frames_exhausted"))?;
         let child_root_phys = arch.pml4_phys();
 
-        let mut space = AddressSpace::new(arch);
         let physmap = ConfiguredPhysMap;
 
-        // Parse the build-time `rxe` blob against the kernel's own compiled-in
-        // syscall CFI tag. A mismatch fails closed; the registry
-        // holds bytes that already parsed once at build time, so reaching this
-        // is a kernel build defect, surfaced as a stable errno.
-        let image = LoadImage::parse(rxe, &SYSCALL_TABLE_HASH).map_err(|_| Errno::BadMagic)?;
-
-        // Place the stack and startup block above the image's mapped top
-        // through the shared per-spawn derivation (one definition across
-        // the ports); an image too large for the user region fails closed.
-        let layout = spawn_layout::user_layout(&image, CHILD_USER_BIAS)
-            .ok_or_else(|| refuse_build(ctx, "user_layout_unfit"))?;
-        // The span record the admission path stores so the stack-growth
-        // fault path can back pages inside it (one shared derivation
-        // across the ports; a malformed span refuses the spawn closed).
-        let stack_span = spawn_layout::stack_span(&layout)
-            .ok_or_else(|| refuse_build(ctx, "stack_span_malformed"))?;
-        // The image's relocated load base, so a later diagnostic can express
-        // a code address as an offset into the program's own binary rather
-        // than disclosing where it was placed. Derived from the same image
-        // and bias the layout above was.
-        let load_base = tairix_kernel_mem::image_load_base(&image, CHILD_USER_BIAS)
-            .ok_or_else(|| refuse_build(ctx, "load_base_unfit"))?;
-
-        let request = SpawnRequest {
-            image: &image,
-            image_bytes: rxe,
-            bias: CHILD_USER_BIAS,
-            stack: UserStack {
-                base: layout.stack_base,
-                page_count: spawn_layout::USER_STACK_COMMIT_PAGES,
-            },
-            start_block_base: layout.block_base,
-            args,
-            env,
-            canary: spawn_layout::CHILD_CANARY,
-        };
-
-        // Authorise + build the child's ring-3 image (emits `ProcessSpawned`).
-        // SAFETY: building the image is itself safe; the returned `UserEntry`
-        // is only entered later, once the child is dispatched and its
-        // `pre_resume` hook has made `space` active (the `spawn_image`
-        // contract). The frame source draws RAM frames from the kernel's live
-        // allocator, written through the `physmap` the caller's active root
-        // carries. The retained live space
-        // below owns the whole footprint and returns it (frames zeroed,
-        // tables freed) when the task exits. A returning `Err` maps to a
-        // stable errno; the cause is already audited by `spawn_image`.
-        //
         // The image and stack are *user* pages, so they draw through the
         // reserve-gated user path: a spawn cannot dip into the kernel
         // reserve, nor steal a frame a prior `mem_map`/stack reservation is
@@ -259,28 +220,53 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
         // rather than overcommitting. (The child's page-table frames are
         // kernel structures drawn separately from the reserve above.)
         let frames = ctx.frames();
-        let entry = unsafe {
-            spawn_image(
-                &spawn_layout::SpawnAuthority,
-                SpawnMode::General,
-                ctx.audit(),
-                &mut space,
-                &physmap,
-                &request,
-                move || frames.alloc_user(spawn_layout::SPAWN_IMAGE_CLASS).ok(),
-            )
-        }
-        .map_err(spawn_caller_errno)?;
-
-        // The child's switch-in hook (`plans/SPAWN.md` SP2, `plans/PI.md` X1):
-        // the core runs it on the dispatcher's context immediately before every
-        // switch into any thread of the child. It reloads CR3 to the child's
-        // own root (isolation), repoints the per-CPU `syscall` entry stack at
-        // the switching-in thread's own kernel stack, and reinstalls that
-        // thread's thread pointer. It captures only the `u64` root, so it is
-        // `Send`.
-        let pre_resume: ProcessResume =
-            Arc::new(move |stack_top: u64, tls_base: u64, tag: AddressTag| {
+        // Build the child's ring-3 image (emits `ProcessSpawned`), then hand
+        // its space to the child's threads as their process address space
+        // (`plans/PI.md` 5d-0-ii (b′)) whatever the build answered, so their
+        // `mem_map` / `mmio_map` mutate exactly the mappings the snapshot
+        // describes and a refusal returns the frames rather than dropping the
+        // space bare.
+        let retained = build_retained(
+            ctx.audit(),
+            frames,
+            AddressSpace::new(arch),
+            |space| {
+                // SAFETY: building the image is itself safe; the returned
+                // `UserEntry` is only entered later, once the child is
+                // dispatched and its switch-in hook has made `space` active
+                // (the `spawn_image` contract). The tables and the image are
+                // written through the direct map the caller's active root
+                // carries.
+                unsafe {
+                    spawn_image(
+                        &spawn_layout::SpawnAuthority,
+                        SpawnMode::General,
+                        ctx.audit(),
+                        space,
+                        &physmap,
+                        &request,
+                        move || frames.alloc_user(spawn_layout::SPAWN_IMAGE_CLASS).ok(),
+                    )
+                }
+            },
+            |space| {
+                spawn_layout::live_space(
+                    space,
+                    tlb,
+                    ConfiguredPhysMap,
+                    pt_frames,
+                    &WINDOWS,
+                    &dynamic,
+                )
+            },
+            // The child's switch-in hook (`plans/SPAWN.md` SP2, `plans/PI.md`
+            // X1): the core runs it on the dispatcher's context immediately
+            // before every switch into any thread of the child. It reloads CR3
+            // to the child's own root (isolation), repoints the per-CPU
+            // `syscall` entry stack at the switching-in thread's own kernel
+            // stack, and reinstalls that thread's thread pointer. It captures
+            // only the `u64` root, so it is `Send`.
+            move |stack_top: u64, tls_base: u64, tag: AddressTag| {
                 // `set_kernel_rsp0` repoints **both** the child's `syscall` entry
                 // stack (`gs:0`) and its trap entry stack (`TSS.RSP0`) at the
                 // child's own kernel stack — the latter is what makes an involuntary
@@ -306,49 +292,18 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
                 // the running dispatcher executes from and carries the direct
                 // physical map — exactly `activate_user_root`'s contract.
                 unsafe { activate_user_root(child_root_phys, tag) };
-            });
-
-        // Freeze the just-built mappings into the registry-storable,
-        // `Send + Sync` snapshot the kernel-wide address-space registry holds
-        // (the live arch `space` is not `Sync`), and box the direct map that
-        // backs it, so the child's `stream_write` can copy its banner out of
-        // its own user memory. Freezing *after* `spawn_image` captures every
-        // mapped page — segments, stack, and the startup-vector block.
-        let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
-
-        // The child's process address space (`plans/PI.md` 5d-0-ii (b′)): the
-        // *same* arch space the snapshot above was frozen from, zeroing
-        // anonymous frames through the same direct map the image build used
-        // (the child's CR3 carries it). No
-        // `'static` allocator, a window the allocator rejects, or a CPU set that
-        // cannot be allocated retains none
-        // and the child's `mem_map` / `mmio_map` fail closed.
-        let live: Option<Arc<ProcessSpace>> = ctx.page_table_allocator().and_then(|frames| {
-            spawn_layout::process_space(
-                space,
-                ctx.space_tlb(),
-                ConfiguredPhysMap,
-                frames,
-                &WINDOWS,
-                super::USER_VA_TOP,
-                &pre_resume,
-                &USER_MODE,
-            )
-        });
-
-        let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
+            },
+            &USER_MODE,
+        )?;
 
         Ok(BuiltImage {
-            frozen,
-            physmap,
+            frozen: retained.frozen,
+            physmap: Box::new(physmap),
             stack_span,
             load_base,
-            live,
-            pre_resume,
-            entry: UserThreadEntry {
-                port: &USER_MODE,
-                regs: entry,
-            },
+            live: retained.live,
+            pre_resume: retained.pre_resume,
+            entry: retained.entry,
         })
     }
 }

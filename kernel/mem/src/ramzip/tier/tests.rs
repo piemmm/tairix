@@ -263,6 +263,56 @@ fn near_zero_idle_cost_and_no_eager_reservation() {
     assert!(ramzip.caps().min() > 0);
 }
 
+/// A purge takes nothing from the heap: it runs as a dying space gives its
+/// memory back.
+///
+/// Regression: the doomed keys were collected into a vector the heap could
+/// refuse, aborting the kernel.
+#[test]
+fn a_purge_needs_nothing_from_the_heap() {
+    let mut env = env!();
+    let mut ramzip = tier(&env);
+    env.press_to(PressureBand::Moderate);
+    for number in 30..34 {
+        let page = env.map_page(number, 0x40);
+        compress(&mut env, &mut ramzip, page);
+    }
+    let purged = tairix_fuzzseed::meter::refusing_above(0, || ramzip.purge_space(SPACE));
+    assert_eq!(purged, 4);
+    assert_eq!(ramzip.ledger().entries(), 0);
+    assert_eq!(ramzip.ledger().task_usage(TASK).entries, 0);
+}
+
+/// A compression refused for want of memory at any of its allocations puts
+/// its page back as it was and charges nothing.
+#[test]
+fn a_compression_refused_for_want_of_memory_keeps_its_page() {
+    let mut env = env!();
+    let mut ramzip = tier(&env);
+    env.press_to(PressureBand::Moderate);
+    let page = env.map_page(40, 0x40);
+    let bytes = env.page_bytes(page);
+    for granted in 0..64 {
+        let verdict = tairix_fuzzseed::meter::refusing_after(granted, || {
+            try_compress(&mut env, &mut ramzip, page, TASK)
+        });
+        if verdict.is_ok() {
+            assert!(ramzip.has_entry(SPACE, page));
+            return;
+        }
+        assert_eq!(
+            verdict,
+            Err(CompressRefusal::OutOfMemory),
+            "after {granted} grants"
+        );
+        assert!(!ramzip.has_entry(SPACE, page));
+        assert_eq!(ramzip.ledger().entries(), 0);
+        assert_eq!(ramzip.ledger().task_usage(TASK).entries, 0);
+        assert_eq!(env.page_bytes(page), bytes, "the page is back as it was");
+    }
+    panic!("the compression never went through");
+}
+
 #[test]
 fn purge_space_drops_entries_and_rebalances_the_ledger() {
     let mut env = env!();

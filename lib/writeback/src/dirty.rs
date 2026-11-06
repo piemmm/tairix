@@ -10,21 +10,36 @@
 //! without disturbing the ones already reported successful: each block the
 //! running operation changes is remembered as it stood before, once, in a
 //! savepoint that undoing restores.
+//!
+//! A change the heap refuses leaves the set as it was, and each change keeps
+//! room for what undoing it would put back, so the undo asks the heap for
+//! nothing.
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::mem;
 use core::num::NonZeroUsize;
 
 use tairix_abi::DriverError;
+use tairix_collections::{OrderedMap, TryReserveError};
 use tairix_reclaim::MAP_ENTRY_OVERHEAD;
 use zeroize::Zeroize;
 
 use crate::RunWindow;
 
+/// One staged block's bytes, wiped as they are dropped: drained, replaced,
+/// discarded, undone or refused room, a block leaves the set through here.
+struct Staged(Vec<u8>);
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 /// One block's staged state before the running operation first changed it.
 struct Prior {
     phase: WritePhase,
-    bytes: Vec<u8>,
+    bytes: Staged,
 }
 
 /// Which side of the commit barrier may issue a staged block.
@@ -51,23 +66,32 @@ impl WritePhase {
 
 /// Blocks waiting for their ordered device drain.
 pub struct DirtySet {
-    entries: BTreeMap<(WritePhase, u64), Vec<u8>>,
+    entries: OrderedMap<(WritePhase, u64), Staged>,
     /// Each block the running operation has changed, as it stood before —
     /// `None` where the set held nothing. Absent between operations.
-    savepoint: Option<BTreeMap<u64, Option<Prior>>>,
+    savepoint: Option<OrderedMap<u64, Option<Prior>>>,
     block_size: usize,
     /// Buffers the savepoint holds; the staged half is the map's length.
     saved_priors: usize,
+    /// Blocks the running operation took out of `entries` that its record
+    /// holds as they stood: what undoing it puts back, so `entries` keeps room
+    /// for that many. Never more than `saved_priors`.
+    undo_inserts: usize,
 }
 
 /// `block` in a buffer of its own.
-fn block_copy(block: &[u8]) -> Result<Vec<u8>, DriverError> {
+fn block_copy(block: &[u8]) -> Result<Staged, DriverError> {
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(block.len())
-        .map_err(|_| DriverError::NoSpace)?;
+        .map_err(|_| DriverError::OutOfMemory)?;
     bytes.extend_from_slice(block);
-    Ok(bytes)
+    Ok(Staged(bytes))
+}
+
+/// The answer to a map refused the room a change needs.
+fn out_of_memory(_: TryReserveError) -> DriverError {
+    DriverError::OutOfMemory
 }
 
 impl DirtySet {
@@ -83,10 +107,11 @@ impl DirtySet {
     #[must_use]
     pub const fn new(block_size: NonZeroUsize) -> Self {
         Self {
-            entries: BTreeMap::new(),
+            entries: OrderedMap::new(),
             savepoint: None,
             block_size: block_size.get(),
             saved_priors: 0,
+            undo_inserts: 0,
         }
     }
 
@@ -106,7 +131,7 @@ impl DirtySet {
     /// Start recording an operation's changes so they can be undone alone.
     pub fn begin_operation(&mut self) {
         self.drop_savepoint();
-        self.savepoint = Some(BTreeMap::new());
+        self.savepoint = Some(OrderedMap::new());
     }
 
     /// The operation succeeded: its changes are the transaction's now.
@@ -115,33 +140,42 @@ impl DirtySet {
     }
 
     /// Undo the running operation's changes, leaving every block the rest of
-    /// the transaction staged exactly as it was.
-    pub fn undo_operation(&mut self) {
+    /// the transaction staged exactly as it was. It asks the heap for
+    /// nothing: every change kept room for what this puts back.
+    ///
+    /// # Errors
+    ///
+    /// [`TryReserveError`] if a block could not be put back after all, which
+    /// only a miscounted room can cause; the set then no longer holds what
+    /// the transaction staged, and its owner must not publish it.
+    pub fn undo_operation(&mut self) -> Result<(), TryReserveError> {
         let Some(savepoint) = self.savepoint.take() else {
-            return;
+            return Ok(());
         };
         self.saved_priors = 0;
+        self.undo_inserts = 0;
+        let mut undone = Ok(());
         for (phys, prior) in savepoint {
-            for phase in WritePhase::ALL {
-                if let Some(mut bytes) = self.entries.remove(&(phase, phys)) {
-                    bytes.zeroize();
+            let Some(Prior { phase, bytes }) = prior else {
+                for phase in WritePhase::ALL {
+                    self.entries.remove(&(phase, phys));
                 }
-            }
-            if let Some(prior) = prior {
-                self.entries.insert((prior.phase, phys), prior.bytes);
+                continue;
+            };
+            self.entries.remove(&(phase.other(), phys));
+            if let Some(held) = self.entries.get_mut(&(phase, phys)) {
+                *held = bytes;
+            } else if let Err(refused) = self.entries.try_insert((phase, phys), bytes) {
+                undone = Err(refused);
             }
         }
+        undone
     }
 
     fn drop_savepoint(&mut self) {
-        let Some(savepoint) = self.savepoint.take() else {
-            return;
-        };
+        self.savepoint = None;
         self.saved_priors = 0;
-        for prior in savepoint.into_values().flatten() {
-            let mut bytes = prior.bytes;
-            bytes.zeroize();
-        }
+        self.undo_inserts = 0;
     }
 
     /// Whether the running operation has yet to record `phys` as it stood.
@@ -151,36 +185,82 @@ impl DirtySet {
             .is_some_and(|savepoint| !savepoint.contains_key(&phys))
     }
 
-    /// Record `prior` — `phys` as it stood, absent when the set did not hold
-    /// it — in the running operation's savepoint.
-    fn record_prior(&mut self, phys: u64, prior: Option<Prior>) {
-        if prior.is_some() {
-            self.saved_priors = self.saved_priors.saturating_add(1);
-        }
+    /// The phase `phys` is staged for, if the set holds it.
+    fn phase_of(&self, phys: u64) -> Option<WritePhase> {
+        WritePhase::ALL
+            .into_iter()
+            .find(|&phase| self.entries.contains_key(&(phase, phys)))
+    }
+
+    /// Make room for `inserts` new entries and `records` savepoint records,
+    /// and for a change taking `removes` keys out — each of which undoing the
+    /// running operation would put back — over the room it is already owed.
+    /// Only a key taken out costs the undo room: one replaced in place is put
+    /// back in place.
+    fn make_room(
+        &mut self,
+        inserts: usize,
+        records: usize,
+        removes: usize,
+    ) -> Result<(), DriverError> {
+        let mut owed = 0;
         if let Some(savepoint) = self.savepoint.as_mut() {
-            savepoint.insert(phys, prior);
+            savepoint.try_reserve(records).map_err(out_of_memory)?;
+            owed = self.undo_inserts.saturating_add(removes);
+        }
+        self.entries
+            .try_reserve(inserts.saturating_add(owed))
+            .map_err(out_of_memory)
+    }
+
+    /// Account for `(phase, phys)` having been taken out of `entries`: a block
+    /// the running operation's record holds as it stood is one an undo puts
+    /// back, and a record of a block the set did not hold is let go once no
+    /// key for it is left, as the set is then as the operation found it.
+    fn took_out(&mut self, phase: WritePhase, phys: u64) {
+        let absent = self.phase_of(phys).is_none();
+        let Some(savepoint) = self.savepoint.as_mut() else {
+            return;
+        };
+        match savepoint.get(&phys) {
+            Some(Some(prior)) if prior.phase == phase => {
+                self.undo_inserts = self.undo_inserts.saturating_add(1).min(self.saved_priors);
+            }
+            Some(None) if absent => {
+                savepoint.remove(&phys);
+            }
+            _ => {}
         }
     }
 
-    /// Copy `phys` as it stands into the running operation's savepoint, the
-    /// first time that operation changes it. A block the set does not hold is
-    /// recorded as absent, so undoing removes whatever the operation staged.
-    fn save_prior(&mut self, phys: u64) -> Result<(), DriverError> {
-        if !self.saves_first(phys) {
+    /// Record `prior` — `phys` as it stood, absent when the set did not hold
+    /// it — as the running operation's first sight of `phys`.
+    fn record(&mut self, phys: u64, prior: Option<Prior>) -> Result<(), DriverError> {
+        let Some(savepoint) = self.savepoint.as_mut() else {
             return Ok(());
+        };
+        let kept = prior.is_some();
+        savepoint.try_insert(phys, prior).map_err(out_of_memory)?;
+        if kept {
+            self.saved_priors = self.saved_priors.saturating_add(1);
         }
-        let mut prior = None;
-        for phase in WritePhase::ALL {
-            if let Some(held) = self.entries.get(&(phase, phys)) {
-                prior = Some(Prior {
-                    phase,
-                    bytes: block_copy(held)?,
-                });
-                break;
-            }
-        }
-        self.record_prior(phys, prior);
         Ok(())
+    }
+
+    /// Put `prior` in the record opened for `phys`, once the change it
+    /// records has been made.
+    fn fill_record(&mut self, phys: u64, prior: Option<Prior>) {
+        let Some(slot) = self
+            .savepoint
+            .as_mut()
+            .and_then(|savepoint| savepoint.get_mut(&phys))
+        else {
+            return;
+        };
+        if prior.is_some() {
+            self.saved_priors = self.saved_priors.saturating_add(1);
+        }
+        *slot = prior;
     }
 
     /// Whether staging `phys` for `phase` must be undoable.
@@ -191,45 +271,115 @@ impl DirtySet {
                 .contains_key(&(WritePhase::BeforeBarrier, phys))
     }
 
+    /// Put `bytes` at `phys` for `phase` in place of whatever the set holds
+    /// there, recording what it replaces when `saves`.
+    ///
+    /// The record goes in first and a new key before the one it replaces
+    /// comes out, so a refusal at any step leaves the set as it was.
+    fn put(
+        &mut self,
+        phase: WritePhase,
+        phys: u64,
+        bytes: Staged,
+        saves: bool,
+    ) -> Result<(), DriverError> {
+        let held = self.phase_of(phys);
+        self.make_room(
+            usize::from(held != Some(phase)),
+            usize::from(saves),
+            usize::from(held == Some(phase.other())),
+        )?;
+        if saves {
+            self.record(phys, None)?;
+        }
+        let replaced = if let Some(slot) = self.entries.get_mut(&(phase, phys)) {
+            Some(Prior {
+                phase,
+                bytes: mem::replace(slot, bytes),
+            })
+        } else {
+            if let Err(refused) = self.entries.try_insert((phase, phys), bytes) {
+                if saves {
+                    if let Some(savepoint) = self.savepoint.as_mut() {
+                        savepoint.remove(&phys);
+                    }
+                }
+                return Err(out_of_memory(refused));
+            }
+            let other = phase.other();
+            self.entries.remove(&(other, phys)).map(|bytes| Prior {
+                phase: other,
+                bytes,
+            })
+        };
+        let moved = replaced.as_ref().is_some_and(|prior| prior.phase != phase);
+        if saves {
+            self.fill_record(phys, replaced);
+        }
+        if moved {
+            self.took_out(phase.other(), phys);
+        }
+        Ok(())
+    }
+
+    /// File the block `phys` holds for the other phase under `phase`, its
+    /// buffer moved rather than copied: [`Self::put`] for a change whose
+    /// savepoint keeps nothing of the version it replaces.
+    fn move_across(&mut self, phase: WritePhase, phys: u64) -> Result<(), DriverError> {
+        let other = phase.other();
+        self.make_room(1, 0, 1)?;
+        // An empty buffer takes the key first, so a refusal leaves the block
+        // where it was.
+        self.entries
+            .try_insert((phase, phys), Staged(Vec::new()))
+            .map_err(out_of_memory)?;
+        let moved = self
+            .entries
+            .get_mut(&(other, phys))
+            .map(|held| mem::replace(held, Staged(Vec::new())));
+        if let (Some(moved), Some(slot)) = (moved, self.entries.get_mut(&(phase, phys))) {
+            *slot = moved;
+        }
+        self.entries.remove(&(other, phys));
+        self.took_out(other, phys);
+        Ok(())
+    }
+
     /// Stage `bytes` at `phys` for `phase`, replacing any held version.
     ///
     /// # Errors
     ///
     /// [`DriverError::BufferTooSmall`] when `bytes` is shorter than a block,
-    /// [`DriverError::NoSpace`] when a first-time entry cannot be allocated.
+    /// [`DriverError::OutOfMemory`] when the change cannot be had; the set is
+    /// then as it was.
     pub fn stage(&mut self, phase: WritePhase, phys: u64, bytes: &[u8]) -> Result<(), DriverError> {
         let block = bytes
             .get(..self.block_size)
             .ok_or(DriverError::BufferTooSmall)?;
-        if self.undoable(phase, phys) && self.saves_first(phys) {
-            // Replaced whole, the held version moves into the savepoint
-            // rather than being copied there and then overwritten.
-            let fresh = block_copy(block)?;
-            let prior = WritePhase::ALL.into_iter().find_map(|held| {
-                self.entries
-                    .remove(&(held, phys))
-                    .map(|bytes| Prior { phase: held, bytes })
-            });
-            self.record_prior(phys, prior);
-            self.entries.insert((phase, phys), fresh);
-            return Ok(());
+        let saves = self.undoable(phase, phys) && self.saves_first(phys);
+        if !saves {
+            if let Some(held) = self.entries.get_mut(&(phase, phys)) {
+                held.0.copy_from_slice(block);
+                return Ok(());
+            }
         }
-        self.stage_with(phase, phys, |_| Ok(()))?
-            .copy_from_slice(block);
-        Ok(())
+        // Replaced whole: a version the savepoint keeps moves there rather
+        // than being copied first.
+        self.put(phase, phys, block_copy(block)?, saves)
     }
 
     /// The block staged at `phys` for `phase`, made writable in place.
     ///
     /// A block the set does not hold yet is first filled by `load` — the
     /// caller's read of what the device has there — so an in-place edit
-    /// starts from the current contents. The savepoint is taken exactly as
-    /// [`Self::stage`] takes it.
+    /// starts from the current contents, and one it holds for the other phase
+    /// moves across, copied only where the savepoint keeps it as it was. The
+    /// savepoint is taken exactly as [`Self::stage`] takes it.
     ///
     /// # Errors
     ///
-    /// Whatever `load` reports, or [`DriverError::NoSpace`] when a first-time
-    /// entry cannot be allocated. A failed `load` stages nothing.
+    /// Whatever `load` reports, or [`DriverError::OutOfMemory`] when the
+    /// change cannot be had; either stages nothing.
     pub fn stage_with<F>(
         &mut self,
         phase: WritePhase,
@@ -239,29 +389,34 @@ impl DirtySet {
     where
         F: FnOnce(&mut [u8]) -> Result<(), DriverError>,
     {
-        if self.undoable(phase, phys) {
-            self.save_prior(phys)?;
-        }
-        if !self.entries.contains_key(&(phase, phys)) {
-            let held = if let Some(held) = self.entries.remove(&(phase.other(), phys)) {
-                held
+        let saves = self.undoable(phase, phys) && self.saves_first(phys);
+        if let Some(held) = self.entries.get(&(phase, phys)) {
+            if saves {
+                // Edited in place, so the version as it stands is copied.
+                let prior = Prior {
+                    phase,
+                    bytes: block_copy(&held.0)?,
+                };
+                self.make_room(0, 1, 0)?;
+                self.record(phys, Some(prior))?;
+            }
+        } else if !saves && self.entries.contains_key(&(phase.other(), phys)) {
+            self.move_across(phase, phys)?;
+        } else {
+            let fresh = if let Some(held) = self.staged(phys) {
+                block_copy(held)?
             } else {
-                let mut held = Vec::new();
-                held.try_reserve_exact(self.block_size)
-                    .map_err(|_| DriverError::NoSpace)?;
-                held.resize(self.block_size, 0);
-                if let Err(err) = load(&mut held) {
-                    held.zeroize();
-                    return Err(err);
-                }
-                held
+                let zeroed = tairix_util::fallible::zeroed(self.block_size);
+                let mut fresh = Staged(zeroed.ok_or(DriverError::OutOfMemory)?);
+                load(&mut fresh.0)?;
+                fresh
             };
-            self.entries.insert((phase, phys), held);
+            self.put(phase, phys, fresh, saves)?;
         }
         self.entries
             .get_mut(&(phase, phys))
-            .map(Vec::as_mut_slice)
-            .ok_or(DriverError::NoSpace)
+            .map(|held| held.0.as_mut_slice())
+            .ok_or(DriverError::OutOfMemory)
     }
 
     /// The bytes staged at `phys` in either phase, if the set holds it.
@@ -270,7 +425,7 @@ impl DirtySet {
         WritePhase::ALL
             .iter()
             .find_map(|&phase| self.entries.get(&(phase, phys)))
-            .map(Vec::as_slice)
+            .map(|held| held.0.as_slice())
     }
 
     /// Every block staged for `phase`, in ascending address order, left
@@ -278,7 +433,7 @@ impl DirtySet {
     pub fn blocks(&self, phase: WritePhase) -> impl Iterator<Item = (u64, &[u8])> + '_ {
         self.entries
             .range((phase, 0)..=(phase, u64::MAX))
-            .map(|(&(_, phys), bytes)| (phys, bytes.as_slice()))
+            .map(|(&(_, phys), bytes)| (phys, bytes.0.as_slice()))
     }
 
     /// How many blocks `phase` holds.
@@ -324,7 +479,7 @@ impl DirtySet {
                 let slot = run
                     .get_mut(off..off + self.block_size)
                     .ok_or(DriverError::BufferTooSmall)?;
-                slot.copy_from_slice(bytes);
+                slot.copy_from_slice(&bytes.0);
             }
         }
         Ok(())
@@ -361,7 +516,7 @@ impl DirtySet {
                     (blocks, write(start, run))
                 }
                 None => match self.entries.get(&(phase, start)) {
-                    Some(block) => (1, write(start, block)),
+                    Some(block) => (1, write(start, &block.0)),
                     None => (1, Err(DriverError::BufferTooSmall)),
                 },
             };
@@ -390,7 +545,7 @@ impl DirtySet {
             .entries
             .get(&(phase, phys))
             .ok_or(DriverError::DeviceFault)?;
-        write(phys, block)?;
+        write(phys, &block.0)?;
         self.release(phase, phys, 1);
         Ok(())
     }
@@ -453,11 +608,11 @@ impl DirtySet {
             let Some(slot) = window.get_mut(span..end) else {
                 break;
             };
-            slot.copy_from_slice(
-                bytes
-                    .get(..self.block_size)
-                    .ok_or(DriverError::BufferTooSmall)?,
-            );
+            let held = bytes
+                .0
+                .get(..self.block_size)
+                .ok_or(DriverError::BufferTooSmall)?;
+            slot.copy_from_slice(held);
             span = end;
             want = want.saturating_add(1);
         }
@@ -471,21 +626,36 @@ impl DirtySet {
     fn release(&mut self, phase: WritePhase, start: u64, blocks: usize) {
         let mut at = start;
         for _ in 0..blocks {
-            if let Some(mut bytes) = self.entries.remove(&(phase, at)) {
-                bytes.zeroize();
-            }
+            self.entries.remove(&(phase, at));
             at = at.saturating_add(1);
+        }
+        self.shrink_if_empty();
+    }
+
+    /// Give the node arena back once nothing is staged and no undo is owed
+    /// room in it, as the transaction's blocks leave.
+    fn shrink_if_empty(&mut self) {
+        if self.entries.is_empty() && self.undo_inserts == 0 {
+            self.entries.clear();
         }
     }
 
     /// Drop every block of `start..start + len` the set holds: nothing will
     /// reference them, so writing them out would cost a command for contents
     /// no reader can reach. Costs what is staged inside the run, nothing per
-    /// block of it.
-    pub fn discard_run(&mut self, start: u64, len: u64) {
+    /// block of it. A block the running operation has yet to change moves
+    /// into its savepoint, so an undo restores it.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfMemory`] when the savepoint cannot be given room
+    /// for those blocks; nothing is dropped.
+    pub fn discard_run(&mut self, start: u64, len: u64) -> Result<(), DriverError> {
         let Some(last) = len.checked_sub(1).map(|last| start.saturating_add(last)) else {
-            return;
+            return Ok(());
         };
+        let (held, unsaved) = self.held_in(start, last);
+        self.make_room(0, unsaved, held)?;
         for phase in WritePhase::ALL {
             while let Some(phys) = self
                 .entries
@@ -493,24 +663,35 @@ impl DirtySet {
                 .next()
                 .map(|(&(_, phys), _)| phys)
             {
-                if let Some(bytes) = self.entries.remove(&(phase, phys)) {
-                    self.retire(phase, phys, bytes);
+                let saves = self.saves_first(phys);
+                if saves {
+                    self.record(phys, None)?;
                 }
+                let held = self.entries.remove(&(phase, phys));
+                if saves {
+                    self.fill_record(phys, held.map(|bytes| Prior { phase, bytes }));
+                }
+                self.took_out(phase, phys);
             }
         }
+        Ok(())
     }
 
-    /// Retire `bytes`, just taken from `phys` in `phase`: moved into the
-    /// running operation's savepoint the first time that operation changes
-    /// `phys`, so an undo restores it, and wiped otherwise.
-    fn retire(&mut self, phase: WritePhase, phys: u64, mut bytes: Vec<u8>) {
-        match self.savepoint.as_mut() {
-            Some(savepoint) if !savepoint.contains_key(&phys) => {
-                self.saved_priors = self.saved_priors.saturating_add(1);
-                savepoint.insert(phys, Some(Prior { phase, bytes }));
+    /// Blocks of `start..=last` the set holds, and those of them the running
+    /// operation has yet to record; none while no operation runs, as then no
+    /// undo is owed room.
+    fn held_in(&self, start: u64, last: u64) -> (usize, usize) {
+        let Some(savepoint) = self.savepoint.as_ref() else {
+            return (0, 0);
+        };
+        let mut counts = (0, 0);
+        for phase in WritePhase::ALL {
+            for ((_, phys), _) in self.entries.range((phase, start)..=(phase, last)) {
+                counts.0 += 1;
+                counts.1 += usize::from(!savepoint.contains_key(phys));
             }
-            _ => bytes.zeroize(),
         }
+        counts
     }
 
     /// Drop and wipe every block in one phase.
@@ -518,18 +699,15 @@ impl DirtySet {
         self.drop_savepoint();
         while let Some((&(_, phys), _)) = self.entries.range((phase, 0)..=(phase, u64::MAX)).next()
         {
-            if let Some(mut bytes) = self.entries.remove(&(phase, phys)) {
-                bytes.zeroize();
-            }
+            self.entries.remove(&(phase, phys));
         }
+        self.shrink_if_empty();
     }
 
     /// Drop and wipe every staged block.
     pub fn clear(&mut self) {
         self.drop_savepoint();
-        while let Some((_, mut bytes)) = self.entries.pop_first() {
-            bytes.zeroize();
-        }
+        self.entries.clear();
     }
 
     /// Blocks currently staged.
@@ -550,12 +728,6 @@ impl DirtySet {
     #[must_use]
     pub const fn operation_running(&self) -> bool {
         self.savepoint.is_some()
-    }
-}
-
-impl Drop for DirtySet {
-    fn drop(&mut self) {
-        self.clear();
     }
 }
 

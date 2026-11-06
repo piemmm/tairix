@@ -467,6 +467,70 @@ fn a_press_the_strip_bar_holds_is_its_own_over_the_pane() {
     );
 }
 
+/// A held pane arrow whose bar the window stops drawing — it grew to show
+/// the whole pane — leaves no step due, which no turn could take and the
+/// loop would wake for at once.
+#[test]
+fn a_held_pane_arrow_leaves_no_step_due_once_its_bar_is_no_longer_drawn() {
+    let theme = theme();
+    let short = Rect::new(0, 0, 420, 110);
+    let tall = Rect::new(0, 0, 420, 4_000);
+    let mut shell = stating();
+    let down = pane_down_arrow(&mut shell, short, &theme);
+    pointer(
+        &mut shell,
+        InputEvent::PointerMoved { to: down },
+        short,
+        &theme,
+    );
+    pointer(&mut shell, PRIMARY_PRESS, short, &theme);
+    let due = shell
+        .repeat_deadline(0)
+        .expect("a held arrow arms a repeat");
+
+    shell.lay_out(tall, Scale::ONE, &theme);
+    assert!(
+        shell.frame(tall, Scale::ONE, &theme).scrollbar.is_none(),
+        "the tall window shows the whole pane"
+    );
+    let _ = shell.repeat(due, tall, Scale::ONE, &theme, &mut damage());
+    assert_eq!(shell.repeat_deadline(due), None, "nothing is due");
+}
+
+/// Nor does the strip's, once every category fits.
+#[test]
+fn a_held_strip_arrow_leaves_no_step_due_once_its_bar_is_no_longer_drawn() {
+    let theme = theme();
+    let short = Rect::new(0, 0, WIDE.width, 160);
+    let tall = Rect::new(0, 0, WIDE.width, 4_000);
+    let mut shell = shell();
+    shell.lay_out(short, Scale::ONE, &theme);
+    let bar = shell
+        .frame(short, Scale::ONE, &theme)
+        .strip_scrollbar
+        .expect("every category does not fit a short strip");
+    let down = Point::new(bar.left() + to_i32(bar.width / 2), bar.bottom() - 2);
+    pointer(
+        &mut shell,
+        InputEvent::PointerMoved { to: down },
+        short,
+        &theme,
+    );
+    pointer(&mut shell, PRIMARY_PRESS, short, &theme);
+    let due = shell.repeat_deadline(0).expect("the strip's arrow is held");
+
+    shell.lay_out(tall, Scale::ONE, &theme);
+    assert!(
+        shell
+            .frame(tall, Scale::ONE, &theme)
+            .strip_scrollbar
+            .is_none(),
+        "every category fits the tall strip"
+    );
+    let _ = shell.repeat(due, tall, Scale::ONE, &theme, &mut damage());
+    assert_eq!(shell.repeat_deadline(due), None, "nothing is due");
+}
+
 /// A turn smaller than a detent moves the column nothing yet and is not
 /// lost: the rest of the detent completes the step.
 #[test]
@@ -2356,9 +2420,13 @@ fn unread_files_rows_post_nothing_until_a_reading_lands() {
 
     assert!(shell.adopt_files(Some(tairix_browse::FilerPreferences::default())));
     assert!(!shell.files_wanted());
-    assert!(rows(&shell)
-        .iter()
-        .all(|row| matches!(row.control(), tairix_controls::FieldControl::Combo(_))));
+    let choosable = |row: &tairix_controls::FieldRow| {
+        matches!(
+            row.control(),
+            tairix_controls::FieldControl::Combo(_) | tairix_controls::FieldControl::Checkbox(_)
+        )
+    };
+    assert!(rows(&shell).iter().all(choosable));
 }
 
 /// A Files choice is the newest the rows asked for: the pane built again
@@ -2470,6 +2538,49 @@ fn choosing_the_files_value_held_posts_nothing() {
     press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
     let chosen = press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
     assert!(!matches!(chosen, ShellOutcome::ApplyFiles(_)), "{chosen:?}");
+}
+
+/// Ticking a kind of drive on the Files pane posts the file manager's keys
+/// with it shown and ticks its box, which never ticks itself; ticking what is
+/// held posts nothing.
+#[test]
+fn ticking_a_kind_of_drive_posts_it_and_ticks_its_box() {
+    let mut shell = shell_at(Location {
+        category: Category::Files,
+        pane: Pane::Files,
+    });
+    assert!(shell.adopt_files(Some(tairix_browse::FilerPreferences::default())));
+    let tick = |shell: &mut Shell, row: usize| {
+        let set = tairix_controls::FieldAction::Set { on: true };
+        shell
+            .form_mut_for_test()
+            .map(|form| form.act_for_test(4, row, set))
+    };
+    let ticked = tick(&mut shell, 1);
+    let Some(crate::form::FormOutcome::ApplyFiles(document)) = ticked else {
+        panic!("ticking fixed drives applies the file manager's settings: {ticked:?}");
+    };
+    assert!(
+        document.contains("files.desktop.fixed = true"),
+        "{document}"
+    );
+    assert!(
+        document.contains("files.desktop.removable = true"),
+        "{document}"
+    );
+    let fixed = rows(&shell)
+        .into_iter()
+        .find(|row| row.label() == tairix_browse::DriveClass::Fixed.label())
+        .and_then(|row| match row.control() {
+            tairix_controls::FieldControl::Checkbox(shown) => Some(shown.selection()),
+            _ => None,
+        });
+    assert_eq!(fixed, Some(tairix_controls::SelectionState::Selected));
+    let again = tick(&mut shell, 2);
+    assert!(
+        !matches!(again, Some(crate::form::FormOutcome::ApplyFiles(_))),
+        "removable drives are shown already: {again:?}"
+    );
 }
 
 /// The pointer pair is a real control now, so both rows must draw a choice
@@ -4927,10 +5038,12 @@ fn opening_a_list_reports_every_choice_it_draws() {
 }
 
 fn effects_reading(document: &str) -> crate::EffectsReading {
+    use tairix_abi::pinboard_ipc::{SoundFile, SoundReading};
+    use tairix_abi::sound_cue::SoundEvent;
     crate::EffectsReading::of(
-        &tairix_abi::pinboard_ipc::SoundReading {
+        &SoundReading {
             document,
-            files: [tairix_abi::pinboard_ipc::SoundFile::Theme; 13],
+            files: [SoundFile::Theme; SoundEvent::ALL.len()],
         },
         alloc::vec![alloc::string::String::from("TAIRiX")],
     )

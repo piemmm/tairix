@@ -5,9 +5,11 @@
 //!
 //! The `Run` binary around it is a freestanding program — it only exists when
 //! the crate is built for a bare-metal target — so nothing inside it can be
-//! reached by a host test. Which press cancels a running operation is worth
-//! testing: it is a pure function of the event and the window's client, so it
-//! lives here, compiles on the host, and is covered by the tests beside it.
+//! reached by a host test. Which press cancels a running operation, and what
+//! answers the question one asks about a name already taken, are worth
+//! testing: each is a function of the event, the window's client and the
+//! question's own controls, so it lives here, compiles on the host, and is
+//! covered by the tests beside it.
 //!
 //! # No I/O, and no authority
 //!
@@ -22,11 +24,14 @@ use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::window_ipc::WindowEvent;
 use tairix_abi::Errno;
-use tairix_browse::render::progress_cancel_at;
-use tairix_browse::DeletePlan;
-use tairix_fscopy::op::OpError;
-use tairix_geometry::{Rect, Scale};
+use tairix_browse::render::{progress_cancel_at, ClashAnswer, ClashChoice, ClashPanel};
+use tairix_browse::{Clash, DeletePlan};
+use tairix_fscopy::op::{Conflict, Decision, OpError};
+use tairix_fscopy::tree::Kind;
+use tairix_geometry::{Rect, Region, Scale};
+use tairix_input::{Key, NamedKey};
 use tairix_theme::{MotionInteraction, MotionTheme, Theme};
+use tairix_window::{pointer_input_events, pointer_point};
 
 use crate::sidebar::press_point;
 
@@ -35,23 +40,32 @@ use crate::sidebar::press_point;
 pub enum ProgressControl {
     /// The user asked to cancel (Escape, or a click on the Cancel button).
     Cancel,
+    /// The user answered the question the operation asks, Stop among the
+    /// answers.
+    Answer(ClashAnswer),
     /// The desktop needs the window's pixels again: it is presented only as
     /// its count moves, which a stalled operation may not do.
     Redraw,
-    /// Nothing that affects the operation.
+    /// Nothing that affects the operation; what the question's controls
+    /// redrew is reported.
     Ignore,
 }
 
-/// Classify `event` to an operation's progress window, whose client is
-/// `client`: a cancel (Escape, or a primary press on the drawn Cancel
-/// button), a redraw, or nothing.
+/// Classify `event` to an operation's progress window, whose client, scale
+/// and theme `frame` gives: a cancel (Escape, or a primary press on the drawn
+/// Cancel button), an answer to the question whose controls `asking` holds, a
+/// redraw, or nothing, what the controls redrew reported into `damage`.
 #[must_use]
 pub fn progress_control(
-    client: Rect,
-    scale: Scale,
-    theme: &Theme,
+    frame: (Rect, Scale, &Theme),
+    asking: Option<&mut ClashPanel>,
     event: &WindowEvent,
+    damage: &mut Region,
 ) -> ProgressControl {
+    if let Some(panel) = asking {
+        return question_control(frame, panel, event, damage);
+    }
+    let (client, scale, theme) = frame;
     match event {
         WindowEvent::Key {
             key:
@@ -70,6 +84,75 @@ pub fn progress_control(
         WindowEvent::RedrawRequested { .. } => ProgressControl::Redraw,
         _ => ProgressControl::Ignore,
     }
+}
+
+/// Classify `event` to a progress window asking about a name already taken:
+/// its controls take every key and pointer event, answering through `panel`.
+fn question_control(
+    frame: (Rect, Scale, &Theme),
+    panel: &mut ClashPanel,
+    event: &WindowEvent,
+    damage: &mut Region,
+) -> ProgressControl {
+    let answer = match event {
+        WindowEvent::Key {
+            key: KeyInput::Pressed { key, modifiers, .. },
+            ..
+        } => question_key(*key).and_then(|key| panel.on_key(key, modifiers.shift, frame, damage)),
+        WindowEvent::Pointer { x, y, action, .. } => {
+            let mut answer = None;
+            for input in pointer_input_events(*action, pointer_point(*x, *y)) {
+                if let Some(given) = panel.on_pointer(frame, &input, damage) {
+                    answer = Some(given);
+                }
+            }
+            answer
+        }
+        WindowEvent::RedrawRequested { .. } => return ProgressControl::Redraw,
+        _ => None,
+    };
+    answer.map_or(ProgressControl::Ignore, ProgressControl::Answer)
+}
+
+/// The key a question's controls take a wire key press as, if any.
+const fn question_key(key: KeyValue) -> Option<Key> {
+    match key {
+        KeyValue::Char(ch) => Some(Key::Char(ch)),
+        KeyValue::Named(NamedKeyCode::Escape) => Some(Key::Named(NamedKey::Escape)),
+        KeyValue::Named(NamedKeyCode::Enter) => Some(Key::Named(NamedKey::Enter)),
+        KeyValue::Named(NamedKeyCode::Tab) => Some(Key::Named(NamedKey::Tab)),
+        KeyValue::Named(_) => None,
+    }
+}
+
+/// The engine's answer a choice gives: none for Stop, which cancels.
+#[must_use]
+pub const fn decision_of(choice: ClashChoice) -> Option<Decision> {
+    match choice {
+        ClashChoice::Replace => Some(Decision::Overwrite),
+        ClashChoice::Skip => Some(Decision::Skip),
+        ClashChoice::Stop => None,
+    }
+}
+
+/// What an operation's window asks about `conflict`: the name taken, the
+/// folder it is taken in, and whether a folder meets a folder.
+#[must_use]
+pub fn clash_of(conflict: &Conflict) -> Clash {
+    Clash {
+        name: String::from(tairix_path::leaf_name(&conflict.target)),
+        folder: String::from(tairix_path::leaf_name(tairix_path::dir_name(
+            &conflict.target,
+        ))),
+        folders: merges(conflict),
+    }
+}
+
+/// Whether `conflict` is a folder meeting a folder, which merges: a question
+/// of its own kind, apart from a file's, which replaces.
+#[must_use]
+pub const fn merges(conflict: &Conflict) -> bool {
+    matches!(conflict.occupant, Kind::Directory)
 }
 
 /// Whether a permission flip may be computed from the mode a Properties window

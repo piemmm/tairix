@@ -4,7 +4,9 @@
 //! first driver is `virtio_blk`; the trait carries only the minimum
 //! the filesystem layer needs.
 
-use crate::blkio::{BlkCommandCost, BlkDeviceClass, BlkDeviceName, BlkMedium, BlkReissue};
+use crate::blkio::{
+    BlkCommandCost, BlkDeviceClass, BlkDeviceIdentity, BlkDeviceName, BlkMedium, BlkReissue,
+};
 use crate::sysinfo::MountAvailability;
 
 use super::{BufferClass, DriverError};
@@ -508,6 +510,30 @@ pub trait Block {
         BlkDeviceName::UNNAMED
     }
 
+    /// What tells this unit from every other of its kind, where its driver
+    /// can prove the medium by it ([`BlkDeviceIdentity`]).
+    ///
+    /// The default is `None`, which proves nothing: a consumer that must know
+    /// the medium is the one it held writes for asks the user instead. The
+    /// driver that binds the hardware states one, and a consumer learns it
+    /// over the block-service seam
+    /// ([`BlkOp::Identity`](crate::blkio::BlkOp::Identity)). A layer above a
+    /// device keeps the default or states only what that seam told it, so the
+    /// identity is never a layer's own word for the hardware beneath it; a
+    /// device composed of others (a RAID array) states one composed of theirs.
+    ///
+    /// Stating the identity is a pure observation: it touches no hardware and
+    /// cannot fail.
+    ///
+    /// # Capabilities
+    ///
+    /// Caller must present the driver's [`DriverHandle`].
+    ///
+    /// [`DriverHandle`]: crate::driver::DriverHandle
+    fn device_identity(&self) -> Option<BlkDeviceIdentity> {
+        None
+    }
+
     /// What this device can currently promise a consumer that is deciding
     /// whether to spend *discretionary* I/O on it.
     ///
@@ -632,6 +658,10 @@ impl<B: Block + ?Sized> Block for &mut B {
 
     fn device_name(&self) -> BlkDeviceName {
         (**self).device_name()
+    }
+
+    fn device_identity(&self) -> Option<BlkDeviceIdentity> {
+        (**self).device_identity()
     }
 
     fn backing_availability(&self) -> MountAvailability {

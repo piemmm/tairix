@@ -26,10 +26,11 @@ use tairix_util::fallible;
 
 use crate::canvas::{Canvas, Kind, Sample};
 use crate::colour::Ink;
-use crate::compose::compose_run;
+use crate::compose::{compose_run, lay_run};
 use crate::document::{Entry, Layer, Picture};
 use crate::gradient::Laying;
 use crate::grid::GridLines;
+use crate::layers_pane::thumb_side;
 use crate::layout::{Faces, Layout, PaneSlot};
 use crate::mask::Mask;
 use crate::pane::{PaneKind, Side};
@@ -86,14 +87,7 @@ pub fn render_into(
     for slot in layout.floating() {
         if !withheld(surface, slot.frame) {
             fill_area(surface, slot.frame, chrome);
-            pane_body(
-                surface,
-                view,
-                layout,
-                slot.kind,
-                (theme, scale, faces),
-                artwork,
-            );
+            pane_body(surface, view, layout, slot, (theme, scale, faces), artwork);
         }
     }
     if let Some(landing) = view.landing() {
@@ -125,18 +119,26 @@ pub fn render_into(
     controls
         .bar
         .render_popup(surface, layout.bar(), scale, theme);
-    view.adjustment_pane().render_popup(
-        surface,
-        layout.adjustment_settings(),
-        layout.pane_window(PaneKind::Adjustment),
-        (faces, scale, theme),
-    );
-    view.colour_controls().render_popup(
-        surface,
-        layout.colour_controls(),
-        layout.pane_window(PaneKind::Colour),
-        (faces, scale, theme),
-    );
+    for kind in PaneKind::OPERATIONS {
+        view.held_view(layout, kind, true)
+            .paint(surface, |surface| {
+                view.operation_pane(kind).render_popup(
+                    surface,
+                    layout.operation_settings(kind),
+                    view.list_room(layout, kind),
+                    (faces, scale, theme),
+                );
+            });
+    }
+    view.held_view(layout, PaneKind::Colour, true)
+        .paint(surface, |surface| {
+            view.colour_controls().render_popup(
+                surface,
+                layout.colour_controls(),
+                view.list_room(layout, PaneKind::Colour),
+                (faces, scale, theme),
+            );
+        });
     if let Some(form) = view.modal() {
         form.render(surface, layout.dialog_origin(), scale, theme);
     }
@@ -168,50 +170,69 @@ fn pane(
     );
     view.header(slot.kind)
         .render(surface, slot.header, scale, theme, None);
-    pane_body(
-        surface,
-        view,
-        layout,
-        slot.kind,
-        (theme, scale, faces),
-        artwork,
-    );
+    pane_body(surface, view, layout, slot, (theme, scale, faces), artwork);
 }
 
-/// What pane `kind` holds, wherever it is laid out.
+/// What pane `slot` holds, wherever it is laid out, and the bar its body
+/// scrolls by where its dock scrolls it.
 fn pane_body(
     surface: &mut Surface,
     view: &View,
     layout: &Layout,
-    kind: PaneKind,
+    slot: &PaneSlot,
     (theme, scale, faces): (&Theme, Scale, Faces),
     artwork: &mut dyn IconArtwork,
 ) {
-    match kind {
+    match slot.kind {
         PaneKind::Tools => {
             view.controls()
                 .tool_box
                 .render(surface, layout.tools(), scale, theme, artwork);
         }
-        PaneKind::Colour => {
-            wells(surface, view, layout, theme, scale, faces.status);
-            view.colour_controls().render(
+        PaneKind::Colour => view
+            .body_view(layout, PaneKind::Colour)
+            .paint(surface, |surface| {
+                wells(surface, view, layout, theme, scale, faces.status);
+                view.colour_controls().render(
+                    surface,
+                    layout.colour_controls(),
+                    (faces, scale, theme),
+                    &crate::panel::Plain,
+                );
+                view.dock().0.render(surface, layout.picker(), scale, theme);
+                view.recent_colours()
+                    .render(surface, view.recents_rect(layout), scale, theme);
+            }),
+        PaneKind::Layers => {
+            let (layers, active) = view
+                .document()
+                .picture()
+                .map_or((&[][..], 0), |picture| (picture.layers(), picture.active()));
+            let side = thumb_side(scale);
+            view.layers_pane().render(
                 surface,
-                layout.colour_controls(),
+                layout.layers(),
+                (layers, active),
+                &|revision| view.layer_thumb(revision, side),
+                artwork,
                 (faces, scale, theme),
-                &crate::panel::Plain,
             );
-            view.dock().0.render(surface, layout.picker(), scale, theme);
-            view.recent_colours()
-                .render(surface, view.recents_rect(layout), scale, theme);
         }
-        PaneKind::Adjustment => view.adjustment_pane().render(
-            surface,
-            layout.adjustment_settings(),
-            (faces, scale, theme),
-            view.histogram(),
-        ),
+        PaneKind::Adjustments | PaneKind::Effects => {
+            view.body_view(layout, slot.kind).paint(surface, |surface| {
+                view.operation_pane(slot.kind).render(
+                    surface,
+                    layout.operation_settings(slot.kind),
+                    (faces, scale, theme),
+                    view.histogram(),
+                );
+            });
+        }
         PaneKind::Palette => palette_wells(surface, view, layout, (theme, scale), artwork),
+    }
+    if !slot.bar.is_empty() {
+        view.body_bar(slot.kind)
+            .render(surface, slot.bar, scale, theme);
     }
 }
 
@@ -527,6 +548,9 @@ struct Rows<'a> {
     /// The picture's layers and which is painted on, where they must be laid
     /// together to show.
     layers: Option<(&'a [Layer], usize)>,
+    /// The layers beneath the one painted on laid together, while its opacity
+    /// is changed live: only it and those above it are laid over them.
+    under: Option<&'a Canvas>,
     kind: &'a Kind,
     origin: (i64, i64),
     span: (u64, u64, u64),
@@ -606,6 +630,7 @@ impl<'a> Rows<'a> {
             view,
             canvas,
             layers,
+            under: view.composite_under(),
             kind,
             origin,
             span: view.viewport().span(),
@@ -729,8 +754,9 @@ impl<'a> Rows<'a> {
     }
 
     /// Lay the layers together over row `y` where they must be, the one
-    /// painted on as its colours were read. Answers whether the room could
-    /// be had.
+    /// painted on as its colours were read: over the composite of those
+    /// beneath it where that is kept, else from nothing. Answers whether the
+    /// room could be had.
     fn lay_layers(&mut self, y: u32) -> bool {
         let Some((layers, active)) = self.layers else {
             return true;
@@ -744,22 +770,35 @@ impl<'a> Rows<'a> {
         self.composed.truncate(count);
         self.beneath.truncate(count);
         let map = &self.columns;
-        let shown = Some((active, self.colours.as_slice()));
-        compose_run(
-            layers,
-            shown,
-            &mut self.composed,
-            &mut self.beneath,
-            |canvas, into| {
-                if map.gathered {
-                    for (slot, &tap) in into.iter_mut().zip(&map.taps) {
-                        *slot = canvas.colour_at(map.first + tap, y).unwrap_or([0; 4]);
-                    }
-                } else {
-                    canvas.row_colours(y, map.first, into);
+        let read = |canvas: &Canvas, into: &mut [Rgba8]| {
+            if map.gathered {
+                for (slot, &tap) in into.iter_mut().zip(&map.taps) {
+                    *slot = canvas.colour_at(map.first + tap, y).unwrap_or([0; 4]);
                 }
-            },
-        );
+            } else {
+                canvas.row_colours(y, map.first, into);
+            }
+        };
+        let shown = self.colours.as_slice();
+        match (self.under, layers.get(active..)) {
+            (Some(under), Some(above)) => {
+                read(under, &mut self.composed);
+                lay_run(
+                    above,
+                    Some((0, shown)),
+                    &mut self.composed,
+                    &mut self.beneath,
+                    &read,
+                );
+            }
+            _ => compose_run(
+                layers,
+                Some((active, shown)),
+                &mut self.composed,
+                &mut self.beneath,
+                &read,
+            ),
+        }
         core::mem::swap(&mut self.colours, &mut self.composed);
         true
     }

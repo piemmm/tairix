@@ -115,6 +115,12 @@ impl PointerAids {
         }
     }
 
+    /// Ring the pointer from `now_ns` whatever the policy: a press a screen
+    /// recording shows.
+    pub fn ring(&mut self, now_ns: u64) {
+        self.beacon.start(now_ns);
+    }
+
     /// Take in that the pointer is at `at` at `now_ns`: on every wake, so a
     /// shake and a trail follow its path more finely than a frame. Nothing
     /// is taken in while the pointer is withheld from the screen.

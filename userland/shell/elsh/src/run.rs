@@ -1094,6 +1094,7 @@ mod program {
                 // closed rather than being treated as success.
                 ElevateReply::Verified
                 | ElevateReply::Launched { .. }
+                | ElevateReply::Wired(_)
                 | ElevateReply::Captured { .. }
                 | ElevateReply::Overran { .. }
                 | ElevateReply::Authorisers { .. } => Err(Denied::Refused(Errno::OutOfRange)),

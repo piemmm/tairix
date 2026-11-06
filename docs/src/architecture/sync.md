@@ -92,6 +92,15 @@ free, against a release that retook the lock on seeing the registration, held
 two cores in a livelock until an interrupt broke the rhythm
 (`plans/OPEN-DEFECTS.md` D968).
 
+A contender stands in the lock's *line* through a row its thread was made
+with, never one allocated as it contends: an acquire cannot fail, and a lock
+is often contended exactly where the heap is short — a filesystem writing back
+to make room. The rows are threaded through their own links, so joining the
+line allocates nothing; the line holds a share of each row in it, so a thread
+that dies waiting leaves its row until a release reaps it
+(`plans/OPEN-DEFECTS.md` D1682). Every link changes under the line's spin
+lock, and a row's own lock is taken only inside it.
+
 A contended acquire that waited 1 s or more, whose task ran 250 ms or more
 after the prior holder handed it the lock, or that waited 250 ms having been
 unable to park, is recorded (`4076` `LOCK_ACQUIRED_LATE`, Warn) with the site
@@ -135,12 +144,13 @@ no release ever consults the queue again and that waiter sleeps for ever on a
 free lock. About half of all four-CPU boots stopped at the passphrase prompt
 with no input driver loaded (`plans/OPEN-DEFECTS.md` D129).
 
-So the designation is a *registration*, carrying the row's never-reused
-arrival sequence, and the scan removes nothing itself: `wake_registration`
-reaps a row only after proving that row's own task can never run again, under
-the same identity. A stale designation wakes nobody and is simply rescanned,
-which terminates because a fresh registration takes a strictly larger
-sequence — the head's sequence rises monotonically, so no round revisits one.
+So the designation is a *registration* — the row and how many times it has
+joined a line, which only rises — and the scan removes nothing itself:
+`wake_registration` reaps a row only after proving that row's own task can
+never run again, under the same identity. A stale designation wakes nobody and
+is simply rescanned, which terminates: while the scan holds the lock no waiter
+can own it and leave, so the head changes only by the scan's own reaps or by a
+waiter claiming the handoff, which ends the scan.
 The other half of the same defect was `unpark` reporting `Err` for a live task
 whose `Parked -> Ready` claim lost to a concurrent waker, which made
 "the wake did not land" mean two different things; it now means terminal and
@@ -168,9 +178,7 @@ clear, and so never reach a round at all — spinning hot while a peer blocks on
 work only it can do. Stating it once in `spin_until` is also what makes it
 testable, since the window it guards (a release landing between one CPU's
 compare-exchange and its next load) is not one a test can schedule from
-outside the lock. It is public so a waiter outside the crate that no
-scheduler can park — the call endpoint's `await_settle` — spins through the
-same round.
+outside the lock.
 
 The case that needs it is a cross-CPU TLB shootdown whose targets must
 acknowledge in software. x86_64 has no broadcast invalidation, so the

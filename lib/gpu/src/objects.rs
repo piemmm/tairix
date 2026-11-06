@@ -120,7 +120,7 @@ fn listed<T: Copy>(items: &[T]) -> Result<alloc::vec::Vec<T>, Error> {
     if items.len() > MAX_COPY_REGIONS {
         return Err(Error::TooMany);
     }
-    tairix_util::fallible::collected(items.len(), items.iter().copied()).ok_or(Error::OutOfMemory)
+    tairix_util::fallible::copied(items).ok_or(Error::OutOfMemory)
 }
 
 impl Context {

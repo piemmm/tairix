@@ -16,6 +16,8 @@ Stability tier: **experimental**.
 | Item | Contents |
 |------|----------|
 | `encode_key(key, modifiers, out)` | Write the console (tty) bytes one key press sends into `out`, returning their length. |
+| `encode_key_input(record, out)` | The same for a wire `KeyInput` record, for the kernel arbiter's text sink; a release or a modifier change writes nothing. |
+| `key_record(keyboard, physical, pressed)` | The wire `KeyInput` record a keyboard producer injects for one key edge, resolved through its `lib/input` `KeyboardState`: a `ModifiersChanged` record, a press or release carrying the physical key unchanged, or nothing. |
 | `MAX_KEY_BYTES` | The longest sequence any key encodes to; a buffer of this size never overflows. |
 | `KeymapError` | The single failure mode — `BufferTooSmall`. |
 
@@ -56,10 +58,11 @@ parser of untrusted bytes.
 `lib/keymap` depends on `lib/*` only (`tairix_input` for the key vocabulary,
 `tairix_vt` for the escape tables) — never on `kernel/*`, `drivers/*`, or
 `userland/*` (`AGENTS.md` §17.4) — and is text-mode infrastructure outside
-`userland/gui/*`, so a headless image links it freely (§17.3). Its consumer is
-the keyboard drivers' console-input producer (`lib/hid`'s
-`console` module, composed by `drivers/input/usb_hid`); the HID-usage→`Key` resolution is the driver's
-device-specific half, while this `Key`→bytes map is the shared half. Unit
+`userland/gui/*`, so a headless image links it freely (§17.3). Its consumers
+are the keyboard producers in `lib/hid` and `lib/virtio_input`, which name each
+edge's physical key and build its record with `key_record` over `lib/input`'s
+keyboard state, and the kernel arbiter, which types a press with
+`encode_key_input`. Unit
 tests (`AGENTS.md` §7) live next to the code (`src/lib.rs`): the printable,
 control, alt-prefix, arrow, editing, and function-key encodings, the
 fail-closed buffer and unmappable-key cases, and a `MAX_KEY_BYTES` bound check

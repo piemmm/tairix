@@ -24,19 +24,24 @@ ddarllen, ac ni ddyfelir byth.
 Mae'r bwrdd gwaith yn cychwyn y rheolwr ffeiliau gyda'r sesiwn ac yn ei gadw
 ar y bar eiconau, ac nid yw byth yn gadael: mae dewislen ei slot yn rhestru
 eich lleoedd eich hun a phopeth sydd wedi'i osod, ac mae dewis un yn agor
-ffenestr yno; daw *Rhwydwaith* a *Gosodiadau…* yn olaf. Mae cyfrol y gallwch
+ffenestr yno; daw *Rhwydwaith* wedyn, a *Sbwriel* yn olaf:
+mae'n agor eich Sbwriel, ac mae'n llwyd, gan ddweud pam, pan nad oes
+cyfeiriadur cartref i'w gadw ynddo. Mae cyfrol y gallwch
 ei thaflu allan — cof bach USB, cerdyn cof neu ddisg symudadwy arall, neu
 ddelwedd ddisg neu gyfran a osodwyd gennych — yn agor is-ddewislen sy'n dal
-*Taflu allan*, ac mae delwedd ddisg o'ch eiddo sydd â theitl yn dal *Teitl*
-hefyd: mae'n agor maes sy'n dal teitl y ddisg, yn barod i'w newid, ac mae
-pwyso `Return` yn ysgrifennu'r un newydd i'r ddisg. Mae clic ar y slot yn
+*Taflu allan*, ac mae gan gyfrol y gallwch newid ei theitl — delwedd ddisg o'ch eiddo, neu
+ddisg y mae ei fformat yn cadw teitl — *Teitl* yn ei his-ddewislen: mae'n agor
+maes sy'n dal y teitl, yn barod i'w newid, ac mae pwyso `Return` yn
+ysgrifennu'r un newydd i'r ddisg, a theitl gwag yn ei glirio. Pan na chewch chi
+newid teitl disg eich hun, mae'r bwrdd gwaith yn gofyn am enw a chyfrinair
+gweinyddwr, ac yn ei newid ar air y gweinyddwr. Mae clic ar y slot yn
 agor un yn y man y mae'r gosodiadau'n ei ddewis. Mae gofyn am ffolder sydd
 eisoes â ffenestr yn dod â'r ffenestr honno i'r blaen yn hytrach nag agor un
 arall. Nid oes rhes *Gadael* ar y ddewislen — mae'r rheolwr ffeiliau'n rhan
 o'r bwrdd gwaith, mae cau ei ffenestri yn ei gadw o'r neilltu, ac os daw i
 ben rywbryd, mae'r bwrdd gwaith yn ei gychwyn eto.
 
-Mae *Rhwydwaith*, ar ddewislen y slot yn union uwchben *Gosodiadau…*, yn
+Mae *Rhwydwaith*, ar ddewislen y slot yn union uwchben *Sbwriel*, yn
 agor ffenestr ar y cyfrifiaduron ar y rhwydwaith lleol sy'n rhannu ffeiliau.
 Rhestrir pob un gyda'i enw, y cyfeiriad lle mae ar gael, ei weithgor neu ei
 barth, a'r hyn ydyw, ac mae'r rhestr yn llenwi wrth i gyfrifiaduron ateb.
@@ -57,18 +62,22 @@ ffrwd gwallau safonol. Mae angen sesiwn graffigol sy'n rhedeg: hebddi, ni
 ellir cyrraedd sianel y ffenestri, ac mae'n adrodd y gwrthodiad ar y ffrwd
 gwallau safonol ac yn gadael.
 
-Caiff y ffenestr ei gyrru â'r bysellfwrdd: mae `I lawr` ac `I fyny` yn symud
-y dewisiad, mae `Enter` yn agor y cyfeiriadur a ddewiswyd, ac mae
-`Backspace` yn mynd i fyny i'r cyfeiriadur rhiant. Mae `F5` yn ail-ddarllen
-y rhestriad a cholofn y lleoedd; mae cyfrol newydd ei chysylltu yn ymddangos
-yn y golofn ohoni ei hun. Mae `Ctrl+Shift+N` yn creu ffolder newydd.
+Caiff y ffenestr ei gyrru â'r bysellfwrdd: mae'r bysellau saeth `Down` ac
+`Up` yn symud y dewisiad, mae `Enter` yn agor y cyfeiriadur a ddewiswyd,
+ac mae `Backspace` yn mynd i fyny i'r cyfeiriadur rhiant. Mae `F5` yn
+ail-ddarllen y rhestriad a cholofn y lleoedd; mae cyfrol newydd ei
+chysylltu yn ymddangos yn y golofn ohoni ei hun. Mae `Ctrl+Shift+N` yn
+creu ffolder newydd.
 
 Mae rhestriad yn agor heb ddim wedi'i ddewis. Mae clic yn dewis eitem, mae
 clic gyda `Ctrl` yn ychwanegu neu'n tynnu un, ac mae clic gyda `Shift` yn
 dewis y rhediad o'r eitem a ddewiswyd ddiwethaf; mae clic ar le gwag yn
-clirio'r dewisiad. Mae clic dwbl yn agor eitem; o ddal `Shift`, mae'n
-rhestru cynnwys rhaglen yn hytrach na'i chychwyn, ac yn gadael unrhyw beth
-y mae'n ei agor mewn man arall heb ei ddewis. Mae llusgo ar draws lle gwag
+clirio'r dewisiad. Mae clic dwbl yn agor eitem, ac mae un y mae'n ei hagor
+mewn man arall — dogfen yn ei rhaglen, rhaglen, delwedd ddisg fel cyfrol —
+yn cael ei gadael heb ei dewis unwaith y bydd wedi agor, tra bo un na ellid
+ei hagor yn aros wedi'i dewis. O ddal `Shift`, mae'n rhestru cynnwys rhaglen
+yn hytrach na'i chychwyn. Mae `Enter` yn agor y dewisiad ac yn ei gadw.
+Mae llusgo ar draws lle gwag
 yn tynnu blwch sy'n dewis popeth y mae'n ei gyffwrdd wrth iddo dyfu; o'i
 ddal ar frig neu waelod y rhestriad, mae'n sgrolio, ac mae `Escape` yn
 dadwneud yr hyn a ddewisodd.
@@ -82,9 +91,12 @@ Dangosir enw eitem yn gyfan, dros ddwy linell pan fo angen; mae enw sy'n rhy
 hir hyd yn oed i'r rheini'n cadw ei ddechrau a'i ddiwedd, gyda `…` yn y
 canol, fel bod ei estyniad yn dangos bob amser. Dangosir rhaglen heb ei
 hôl-ddodiad `.app`, a gall y gosodiadau ei ddangos, neu guddio ôl-ddodiaid y
-mathau o ffeil y mae'r system yn eu hadnabod hefyd. Dim ond pan fo'r
-gosodiadau'n gofyn amdanynt y rhestrir eitemau y mae eu henwau'n dechrau â
-dot.
+mathau o ffeil y mae'r system yn eu hadnabod hefyd. Mae ôl-ddodiad yn dal i
+ddangos lle bynnag y byddai ei guddio'n gadael enw sy'n darllen fel math
+arall o ffeil neu raglen arall — dangosir `invoice.pdf.app` yn gyfan — ac
+mae ffenestr yn trefnu ei heitemau yn ôl eu henwau fel y'u dangosir. Dim ond
+pan fo'r gosodiadau'n gofyn amdanynt y rhestrir eitemau y mae eu henwau'n
+dechrau â dot.
 
 Mae `F2` yn ailenwi'r eitem a ddewiswyd yn ei lle, fel y mae clicio ar enw'r
 unig eitem a ddewiswyd ac aros: mae'r enw'n agor i'w olygu cyn gynted ag na
@@ -101,10 +113,30 @@ ffolder ynddi, neu ar y bwrdd gwaith yn eu copïo yno; o ddal `Shift`, cânt
 eu symud yn lle hynny. Mae'r pwyntydd yn dangos plws tra byddai gollwng yn
 copïo a saeth tra byddai'n symud, ac mae'r ffolder y byddai gollwng yn
 glanio ynddi wedi'i hamlygu. Caiff un ffeil a lusgir ar slot rhaglen ar y
-bar eiconau ei hagor yno.
+bar eiconau ei hagor yno. Ni chaiff gyriant a lusgir allan o `/Storage` byth
+ei gopïo na'i symud: mae'n gadael llwybr byr lle mae'n glanio, ac mae'r
+pwyntydd yn dangos saeth grom. Mae'r llwybr byr yn agor y gyriant tra bydd
+wedi'i gysylltu; pan na fydd, mae ei agor yn dweud hynny, ac ar y bwrdd
+gwaith caiff ei luniadu'n welw.
 Mae copïo neu symud yn cadw tyllau pob ffeil a'i phriodoleddau
 estynedig, megis math ffeil RISC OS; caiff unrhyw briodoledd na all y
 gyrchfan ei chadw ei henwi mewn rhybudd pan ddaw'r weithred i ben.
+
+Lle mae eitem o'r un enw yno eisoes, mae ffenestr y weithred ei hun yn gofyn
+beth i'w wneud â hi: mae *Amnewid* yn rhoi'r un newydd yn ei lle, mae *Hepgor*
+yn gadael yr un sydd yno eisoes, ac mae *Atal* yn dod â'r weithred i ben gan
+gadw'r hyn a wnaeth. Mae ffolder sy'n cwrdd â ffolder o'r un enw yn cynnig
+*Cyfuno* yn lle *Amnewid*: mae'r hyn sydd ynddi yn mynd i'r ffolder sydd yno
+eisoes, a gofynnir am bob ffeil ynddi sydd yno eisoes yn ei thro. Mae ticio
+*Gwneud yr un peth i bob ffeil sy'n bodoli eisoes* yn rhoi'r un ateb i bob
+cwestiwn wedyn am ffeil. Lle mae ffolder yn cwrdd â ffolder, mae'r blwch yn
+darllen *Gwneud yr un peth i bob ffolder sy'n bodoli eisoes* ac yn ateb
+ffolderi wedyn yn unig, felly gofynnir o hyd am bob ffeil mewn ffolder a
+gyfunwyd. *Atal* yw `Escape`, ac mae `Enter` yn rhoi'r dewis y mae'r
+bysellfwrdd yn gorffwys arno — *Hepgor* i ddechrau; mae `Tab` yn symud rhwng y
+blwch a'r dewisiadau, ac mae `Space` yn ticio'r blwch. Ar y bwrdd gwaith, mae
+eitem a amnewidiwyd yn sefyll lle cafodd ei gollwng, tra bo un a hepgorwyd neu
+a gyfunwyd yn aros lle'r oedd.
 
 Mae'r ddewislen clic de yn dechrau gyda *Dangos*. Oddi tani mae is-ddewislen
 yn enwi'r hyn y mae'r ddewislen yn gweithredu arno — *Ffeil ‘notes.txt’*,
@@ -113,7 +145,9 @@ neu *Dewis* pan fo sawl eitem wedi'u dewis — ac mae'n dal *Agor*, *Agor
 gyda…*, *Mowntio darllen-yn-unig*, *Taflu allan*, *Cael gwybodaeth…*,
 *Ailenwi*, *Torri*, *Copïo* a *Dileu*; mae rhes na all weithredu yno wedi'i
 llwydo ac yn dweud pam. Wedyn daw *Newydd*, yna *Dewis y cyfan* a *Clirio'r
-dewis*, ac yn olaf *Gludo*. Mae clic de ar le gwag yn clirio'r dewis, felly
+dewis*, a *Gludo*. Yn y Sbwriel, daw *Gwagio'r Sbwriel* yn olaf: ar ôl i chi
+gadarnhau, mae'n tynnu popeth sydd yn y Sbwriel am byth. Mae clic de
+ar le gwag yn clirio'r dewis, felly
 mae is-ddewislen yr eitem wedi'i llwydo.
 
 Mae agor delwedd ddisg neu archif — ffeil `.iso`, `.adf`, `.hdf`, `.zip` ac
@@ -159,7 +193,7 @@ trefnu'r rhestr yn ôl honno hefyd, ac mae ail glic yn gwrthdroi'r drefn. Mae
 ffolderi'n aros ar y brig pa drefn bynnag a ddewisir, oni bai bod y
 gosodiadau'n eu gosod ymhlith y ffeiliau.
 
-Mae *Gosodiadau…* ar ddewislen slot y bar eiconau, neu `Ctrl+,`, yn agor
+Mae `Ctrl+,` yn agor
 gosodiadau'r porwr yn y rhaglen Gosodiadau, dan *Ffeiliau*: ble mae ffenestr
 newydd yn agor, sut mae ffenestri'n dangos ac yn trefnu eu heitemau, ac a
 yw un newydd yn dangos colofn y lleoedd a'r bar offer; a yw ffolderi'n aros
@@ -180,12 +214,16 @@ newid caniatâd, perchennog a phriodoleddau yno, pob un fel ysgrifen
 gyffredin wedi'i gwirio yn erbyn caniatâd dan eich hunaniaeth eich hun — mae
 gwrthodiad yn dweud pam ac yn newid dim. Mae ailbennu perchennog yn gofyn am
 y gallu `CAP_FS_CHOWN`; mae sesiwn hebddo yn gweld y perchennog a'r grŵp
-wedi'u marcio â chlo, a llinell sy'n dweud pam.
+wedi'u marcio â chlo, a llinell sy'n dweud pam. Mae ffenestr *Gwybodaeth*
+gyriant yn agor ar ei adran *Gyriant*, ac mae ei maes *Teitl* yn newid teitl y
+gyfrol yn yr un modd: cliciwch arno neu pwyswch `Tab`, teipiwch y teitl
+newydd a phwyswch `Return`; mae `Escape` yn ei roi'n ôl.
 
-Mae `Chwith` a `De` yn symud rhwng adrannau'r ffenestr. Ar *Caniatâd*, mae
-`I lawr` neu `Tab` yn symud i mewn i'w rheolyddion: mae'r bysellau saeth yn
-symud rhyngddynt, mae `Space` yn toglo caniatâd neu'n agor y perchennog
-neu'r grŵp i'w olygu, ac mae `Tab` neu `Escape` yn dychwelyd at yr adrannau.
+Mae'r bysellau saeth `Left` a `Right` yn symud rhwng adrannau'r ffenestr.
+Ar *Caniatâd*, mae `Down` neu `Tab` yn symud i mewn i'w rheolyddion: mae'r
+bysellau saeth yn symud rhyngddynt, mae `Space` yn toglo caniatâd neu'n
+agor y perchennog neu'r grŵp i'w olygu, ac mae `Tab` neu `Escape` yn
+dychwelyd at yr adrannau.
 
 Trinnir yr operand `path` fel mewnbwn nad ymddiredir ynddo: rhaid iddo
 fod yn llwybr absoliwt o fewn terfyn hyd llwybr y system, a rhaid i bob

@@ -2,7 +2,8 @@
 
 The **heap-backed** `no_std` containers TAIRiX runs on that `core` and `alloc`
 have no answer for. `alloc` already supplies `Vec`, `String`, `BTreeMap`,
-`BTreeSet`, `VecDeque`, and `BinaryHeap`; none of them is re-implemented here,
+`BTreeSet`, `VecDeque`, and `BinaryHeap`; the one re-implemented here is the
+ordered map, because `alloc`'s cannot refuse an insertion it has no memory for,
 and a container with no caller in the tree is not added.
 `plans/COLLECTIONS.md` is the ledger of what has landed and what is still to
 come.
@@ -12,12 +13,8 @@ a crate that links neither this one nor `alloc`, so the layer running before a
 heap exists can use them. This crate depends on it for the inline half of its
 `SmallVec`.
 
-`HashSet` and `SmallVec` are the two types here without an in-tree caller yet.
-Every remaining `BTreeSet` is either order-load-bearing (`kernel/sec`'s
-per-process thread set fans signals out in ascending id order) or small enough
-that the ordered set is the cheaper structure; `SmallVec`'s first consumer is a
-compositor damage list, which is measured rather than assumed. Both arrive with
-a later tier.
+Every remaining `alloc` `BTreeSet` is either order-load-bearing or small
+enough that the ordered set is the cheaper structure.
 
 ## Inventory
 
@@ -26,6 +23,8 @@ a later tier.
 | `HashMap<K, V, S>` | expected O(1) lookup, insert, and remove; one control byte and one `(K, V)` slot per bucket, no per-entry node | a `BTreeMap` used where the key order was never wanted |
 | `HashSet<T, S>` | the same, over a zero-sized value | a `BTreeSet` used as an unordered set |
 | `LruMap<K, V, S>` | the same table with a recency order through it: expected O(1) lookup, touch, and eviction of the coldest entry | a cache's `(tick -> key)` `BTreeMap` eviction index, O(log n) on all three |
+| `OrderedMap<K, V>` | ordered lookup, insertion and removal, each a descent of a B-tree's height comparing at most five keys a level; reads and removals allocate nothing, an insertion is all or nothing, and room for a run of them is reserved ahead | `alloc`'s `BTreeMap`, whose insertion cannot refuse for want of memory |
+| `OrderedSet<T>` | the same, over a zero-sized value | `alloc`'s `BTreeSet`, likewise |
 | `RangeMap<K, V>` | disjoint half-open ranges, each an identity: O(log n) covering lookup, insertion that refuses an overlap, and first-fit placement over the gaps | a `base -> length` `BTreeMap` plus a hand-written overlap probe, and the occupancy bitmap a window scanned to place |
 | `RangeSet<K>` | the same storage canonicalised — insertion absorbs what it touches, removal splits what it cuts | a run set built by hand per subsystem, and the free-list that fragmented beside a live-region map |
 | `SmallVec<T, N>` | inline to `N`, then one spill to the heap | a hot path that holds a handful of elements and allocates anyway |
@@ -34,6 +33,7 @@ a later tier.
 | `RadixTree<V, TAGS>` | a sparse `u64`-keyed index of 64-way nodes: lookup, insertion, removal and tagging cost the tree's height — eleven nodes at most — whatever it holds, and an ordered or tagged walk resumes from the path it last took | a sorted `Vec` whose every insertion moved the entries above it |
 | `IndexedHeap<P>` | a min-heap over a holder's own dense slot numbers: the least read in O(1), a slot's priority moved either way or withdrawn in O(log n), and every entry at or below a bound walked in O(k) for the k it returns | a per-slot deadline array swept whole for what was due, and `alloc::BinaryHeap`, which can neither find an entry nor move one |
 | `SlotMap<K, V>` | values filed under keys it issues: O(1) insertion, lookup and removal, and a generation in every key that refuses it once its value is gone | a counter handing out identifiers with no reuse and no generation, so a stale one aliased whatever took its place |
+| `BitVec` | a bitmap of run-time length: O(1) get and set, the next or previous set or clear bit in time proportional to its summary's height, nothing allocated after a fallible resize | a `Vec<bool>`, a scanned `Vec<u64>`, and the `BTreeSet` a selection aborted its holder through |
 
 ## `ByteQueue`
 
@@ -100,10 +100,11 @@ costs four nodes, and none costs more than eleven.
 * A walk keeps the path to the entry it last found and resumes from the
   deepest node that entry and its successor share, so a whole walk reaches
   each node it passes a bounded number of times, never a descent per entry.
-* Nodes live in two arenas, interior and leaf. A removal chains the nodes it
-  empties into its arena's free list and lowers the tree once its largest key
-  no longer needs the height, so the nodes resident are the live keys' paths
-  and a tree at a steady size draws nothing from the allocator.
+* Nodes live in two arenas, interior and leaf, chunked as the ordered map's
+  are. A removal chains the nodes it empties into its arena's free list and
+  lowers the tree once its largest key no longer needs the height, so the
+  nodes resident are the live keys' paths and a tree at a steady size draws
+  nothing from the allocator.
   `try_shrink_to_fit` moves the live nodes to the front of their arenas and
   gives the freed ones and any spare room back, `clear` gives back
   everything, and `allocated_bytes` says what the arenas hold: a holder
@@ -168,6 +169,69 @@ the context for their room. `smbfs` files its
 connections in one, keying the deadline heap beside it on the dense slot index
 and carrying each entry's key, so a due deadline names its connection.
 
+## `OrderedMap` and `OrderedSet`
+
+An ordered map a kernel inserts into from a system call has to be able to say
+no. `alloc`'s `BTreeMap` cannot: it has no `try_insert` and no `reserve`, and
+an insertion it has no memory for ends the program. `OrderedMap` is the same
+structure — a B-tree of up to eleven entries a node, every node but the root
+at least five full, every leaf at one depth — with that refusal designed in.
+
+* A leaf holds its entries, its parent and its free-list link; an interior
+  node holds the same and its twelve children inline — the layout production
+  B-trees use, since five nodes in six are leaves and children held out of
+  line would cost every lookup a dependent load a level. Leaves and interior
+  nodes live in an arena each, addressed by `u32` index — the tree's height
+  says which arena an index names — a freed node chained into its arena's
+  free list. An arena costs the structure holding it one word: its chunks,
+  counts and free chain lie behind one pointer, allocated with its first
+  chunk and given back with its last, so an empty map allocates nothing and
+  a map is 40 bytes where it is embedded. A fresh node is made empty where it
+  will lie, its fields written in place — the arena's one `unsafe` — so a
+  node far larger than a stack frame should hold is never built on the stack
+  and moved in. Each arena is held in chunks: the first
+  two hold one node each and each after them twice its predecessor until a
+  chunk reaches 16 KiB, after which every chunk is that size. A small map so
+  holds at most twice the nodes it uses, and a large one grows a chunk at a
+  time — never one block of its whole size, never a copy of what it holds —
+  so a kernel table the size of a process's resident set needs no large
+  contiguous allocation and its growth costs no pause under the lock that
+  holds it. A removal never allocates, an insertion takes a freed node before
+  its arena grows, a refused reservation leaves both arenas holding exactly
+  the room they had, and `try_shrink_to_fit` moves the live nodes to the
+  front of each and gives back every chunk past them — or, refused, keeps
+  them chained free for reuse.
+* Ten thousand `u64` insertions in any order hold at most 266 416 bytes as an
+  `OrderedSet` and 445 680 as an `OrderedMap`. Ascending keys meet that
+  exactly: they leave every node off the last path at the fill floor, the
+  most nodes so many entries can take. One node shape for leaves and interior
+  nodes alike held 345 504 and 525 728.
+* An insertion counts the leaves and interior nodes its splits will take —
+  one for each full node on its way up, and a new root — and takes them from
+  both arenas before it changes anything, so a refused allocation leaves the
+  map exactly as it was. `try_reserve(n)` takes room for the worst `n`
+  insertions up front, in each arena the fewer of the most nodes of that kind
+  a tree of `len + n` entries can hold and the most `n` insertions take: a
+  leaf each, and an interior node a level of the tallest such tree. After it
+  those insertions cannot fail, and removals between them only add room,
+  which is what a holder changing several maps at once needs to make every
+  allocation before committing any.
+* Lookup, iteration and a range query allocate nothing, and a range whose
+  start lies past its end admits nothing rather than panicking.
+* A mutable walk — `iter_mut`, `values_mut`, `range_mut` — cannot borrow an
+  arena's nodes in key order without `unsafe`, so it moves each node it opens
+  to an end of the stretch of its arena it has not yet opened, re-pointing
+  whatever named the nodes it moved — the parents of the nodes beside a range
+  included, whose frames it keeps once they are used up. The tree is whole
+  after every step, a walk abandoned part-way leaves it whole, and a walk
+  costs what it visits and the freed nodes it passes.
+* An owning walk drains entries without rebalancing, since nothing reads the
+  tree after it; `retain` visits in key order and searches back past each
+  entry it drops.
+
+`OrderedSet` is the map over a zero-sized value, as `HashSet` is over
+`HashMap`. `RangeMap` and `RangeSet` stand on the map.
+
 ## `RangeMap` and `RangeSet`
 
 Address space, block numbers, and slot indices are all held in *runs*, and
@@ -192,6 +256,15 @@ only in what they do to a neighbour:
   extent costs one entry, not one per block. It keeps a running `covered()`
   total in step with its entries, so a caller's accounting reads it rather than
   summing.
+
+Both stand on the ordered map, so recording a range can be refused for want of
+memory, and changes nothing when it is: an insertion, a placement, and a
+removal that cuts one range in two. A `RangeSet` insertion that touches a held
+range reuses that range's record — re-filed under the union's start, or
+stretched to its end — so only one that touches nothing needs memory, and
+`try_reserve` makes room for a run of them ahead. `allocated_bytes` says what
+that room and the records removals freed cost, and `try_shrink_to_fit` gives
+back what the ranges do not need.
 
 Only ordering decides overlap, adjacency, and splitting, so `RangeKey` carries
 just the arithmetic that *measures* a range: `span` turns one `(base, count)`
@@ -222,13 +295,9 @@ runs it handed out and nothing per slot, and a placement walks those runs.
 
 1. **Nothing that can fail panics.** Every allocating operation has a fallible
    form returning `TryReserveError` — `try_insert`, `try_reserve`,
-   `try_with_capacity_and_hasher`. No map has an `Index` implementation,
-   because a subscript that panics on a missing key has no place in a kernel.
-   The one allocation this crate does not own is the ordered tier's:
-   `RangeMap` holds its entries in `alloc`'s `BTreeMap`, whose insertion cannot
-   be made fallible from outside `alloc`, and re-implementing an ordered map is
-   not this crate's business. Every *read* on that tier still allocates
-   nothing.
+   `try_with_capacity_and_hasher` — the ordered tier's insertions included. No
+   map has an `Index` implementation, because a subscript that panics on a
+   missing key has no place in a kernel.
 2. **No allocation on a read path.** Lookup, iteration, and removal allocate
    nothing; growth is amortised and off the hot path.
 3. **No fixed capacity ceiling.** A container here grows on demand and fails
@@ -379,6 +448,20 @@ and — for `ArrayVec::retain`, the one operation that moves elements out and ba
 has written back, so the unswept tail leaks where a double drop would be
 unsound.
 
+`OrderedMap` is held after every step of a seeded history of insertions,
+removals, pops, retains and walks both to `alloc`'s ordered map and to its own
+invariants — keys strictly ascending, every node but the root at least five
+full and none past eleven, one leaf depth, each child naming its parent, every
+live node reachable — and is gated on comparisons as `IndexedHeap` is: no
+lookup compares more than five keys a level. Its mutable walks are driven from
+both ends in turn and abandoned part-way, the tree checked whole after each.
+`tests/heap_allocation_failure.rs` refuses its allocations part-way — each in
+turn of an insertion splitting a leaf, an interior node or the root — and
+holds every refusal to changing nothing, the range containers' with it; runs
+reserved insertions of every key shape under an allocator that refuses
+everything; meters its reads, walks and removals at no allocation; and meters
+the footprint of ten thousand insertions against the figures above.
+
 `tests/fuzz_collections.rs` drives the map against a plain association list
 over deliberately colliding key streams, the recency map against a naive
 `(membership, order)` list — the same membership, the same victim on every
@@ -388,7 +471,10 @@ and the range containers against a per-element set and a naive entry list over
 `mem_map` page count, a run off a foreign volume, and the counts that run past
 the top of the key space. Those sweeps run at the bottom of the key space, deep
 inside it, and hard against `u64::MAX`, so the arithmetic that must saturate
-rather than wrap is exercised rather than assumed. `tests/fuzz_sequences.rs` drives the
+rather than wrap is exercised rather than assumed. The ordered map is driven
+against `alloc`'s over the same adversarial key streams: every range walked
+from either end, a mutable walk of one, and a height no greater than its entry
+count allows. `tests/fuzz_sequences.rs` drives the
 sequence tier against naive models over arbitrary lengths and text — the
 lengths are attacker-influenced by design, since a boot audit line carries
 caller-controlled text into an `ArrayString` and a console ring takes whatever
@@ -405,3 +491,21 @@ in bounds, whether a slot was initialised before it was read, and whether two
 ## Stability
 
 **experimental.** The public API may change until the first tagged release.
+
+## `BitVec`
+
+`BitVec` keeps its bits in words of 64 under two summary towers: one marks
+the words holding a set bit, the other the words holding a clear bit within
+the length, each level one bit per word of the level beneath. A search looks
+in its own word, climbs while each level shows nothing past where it began,
+and descends to the first mark it meets, so finding the next or previous set or
+clear bit reads at most twice the tower's height — eleven levels for any
+length a `usize` can name — however sparse the bits are. Writing a bit carries
+a change up only as far as a level's word changes between zero and not.
+
+Reads, writes, ranges, fills, searches and the walk of the set bits allocate
+nothing. Growing is fallible and all or nothing: `try_resize` reserves the
+words and both towers before it changes anything, and `try_reserve` makes room
+ahead so a later growth allocates nothing. There is no `Clone`; `try_clone`
+copies fallibly.
+

@@ -7,8 +7,9 @@
 //! runtime volume attach path builds a filesystem on: it posts one bounded
 //! [`BlkRequest`] at a time on the endpoint, wakes the serving driver,
 //! parks the calling task until the reply lands (never a busy-poll — the
-//! same post/park/wake discipline as the `ipc_call` handler), and moves
-//! the data through its [`KernelHold`] on the shared window.
+//! same post/park/wake discipline as the `ipc_call` handler; a caller no
+//! scheduler can park is refused), and moves the data through its
+//! [`KernelHold`] on the shared window.
 //!
 //! The serving driver is untrusted: the geometry it reports is validated
 //! fail-closed at [`BlkClient::connect`], every completion is decoded
@@ -22,22 +23,23 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::blkio::{
-    decode_outcome, BlkCompletion, BlkDeviceName, BlkMedium, BlkOp, BlkOutcome, BlkRequest,
-    BlkStatus, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
+    decode_outcome, BlkCompletion, BlkDeviceIdentity, BlkDeviceName, BlkMedium, BlkOp, BlkOutcome,
+    BlkRequest, BlkStatus, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_DEVICE_IDENTITY_LEN,
+    BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscLayout, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE};
 use tairix_abi::driver::DriverError;
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
-use tairix_kernel_ipc::{CallEndpoint, EndpointId, ReplyOutcome};
+use tairix_kernel_ipc::{CallEndpoint, CallPayload, CallTicket, EndpointId, ReplyOutcome};
 use tairix_kernel_sec::{ProcessId as SecProcessId, TaskCapabilities, UserId};
 use tairix_log::Sink;
 
 use crate::sharedreg::KernelHold;
 use crate::waitq::{
-    nearest_timed_deadline, park_calling_task, serve_wake, serve_wake_task, wait_arch,
-    WaitQueueArch, CALL_WAITQ, NO_DEADLINE,
+    nearest_timed_deadline, park_calling_task, serve_wake_server, wait_arch, WaitQueueArch,
+    CALL_WAITQ,
 };
 
 use super::blkmeter::{Attempt, DeviceIoMeter, VolumeIoSource};
@@ -103,13 +105,11 @@ pub struct BlkClient {
     meter: DeviceIoMeter,
 }
 
-/// Park the calling task for `ns`, the pacing a reissue waits out. A caller
-/// the scheduler cannot park (a host test, before the dispatch loop runs)
-/// reissues at once.
-fn pause(ns: u64) {
-    if let Some(hook) = wait_arch() {
-        let _ = crate::sleep::park_until(hook.now_ns().saturating_add(ns));
-    }
+/// Park the calling task for `ns`, the pacing a reissue waits out, answering
+/// whether it could.
+fn pause(ns: u64) -> bool {
+    wait_arch()
+        .is_some_and(|hook| crate::sleep::park_until(hook.now_ns().saturating_add(ns)).is_ok())
 }
 
 impl BlkClient {
@@ -127,6 +127,10 @@ impl BlkClient {
     /// * [`Errno::OutOfRange`] — the device reported an unusable geometry
     ///   (block size not a power of two in `512..=4096`, a zero block
     ///   count, or a window that cannot hold whole blocks).
+    /// * [`Errno::NotImplemented`] — the caller is no task its scheduler can
+    ///   park, so it cannot wait for the device.
+    /// * [`Errno::OutOfMemory`] — the heap refused the client its capability
+    ///   record.
     /// * Any transport error the geometry query surfaced.
     pub fn connect(
         endpoint: u64,
@@ -155,7 +159,7 @@ impl BlkClient {
             caps,
             caps,
             audit,
-        );
+        )?;
         let mut client = Self {
             endpoint,
             window,
@@ -217,6 +221,27 @@ impl BlkClient {
     #[must_use]
     pub fn read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// What the device states tells it from every other of its kind
+    /// ([`BlkOp::Identity`]), asked once by a consumer that must know the
+    /// medium: `None` for a device that states none or refuses the question,
+    /// which proves nothing.
+    #[must_use]
+    pub fn identify(&self) -> Option<BlkDeviceIdentity> {
+        // Cleared first, so a driver answering without writing the window
+        // states none rather than an earlier transfer's bytes.
+        self.window_write(&[0; BLK_DEVICE_IDENTITY_LEN]);
+        self.transfer(BlkRequest {
+            op: BlkOp::Identity,
+            lba: 0,
+            blocks: 0,
+            binding: self.binding,
+        })
+        .ok()?;
+        let mut stated = [0u8; BLK_DEVICE_IDENTITY_LEN];
+        self.window_read(&mut stated);
+        BlkDeviceIdentity::new(stated)
     }
 
     /// The shared live-reading handles for this device — the serving endpoint
@@ -282,8 +307,42 @@ impl BlkClient {
             };
             self.meter.reissued();
             attempts += 1;
-            if wait_ns > 0 {
-                pause(wait_ns);
+            if wait_ns > 0 && !pause(wait_ns) {
+                return Err(Errno::NotImplemented);
+            }
+        }
+    }
+
+    /// Poll-and-park as the registered caller until `ticket`'s reply, its
+    /// deadline, or the endpoint's destruction releases it.
+    fn await_reply(
+        &self,
+        hook: &dyn WaitQueueArch,
+        claimant: u64,
+        ticket: CallTicket,
+    ) -> Result<CallPayload, Errno> {
+        loop {
+            match self
+                .endpoint
+                .take_reply(claimant, ticket, hook.now_ns(), self.audit)
+            {
+                ReplyOutcome::Ready(bytes) => break Ok(bytes),
+                // The device did not answer within its budget: fail closed so
+                // the filesystem path is never wedged behind a dead disk, the
+                // slot the call held going to whom it was handed.
+                ReplyOutcome::TimedOut(freed) => {
+                    crate::waitq::call_wake_named(freed.tasks());
+                    break Err(Errno::TimedOut);
+                }
+                // The endpoint was torn down (the driver exited — the
+                // device is gone) or the ticket is no longer ours: abandon
+                // the call fail-closed.
+                ReplyOutcome::Cancelled | ReplyOutcome::Unknown => break Err(Errno::NotFound),
+                ReplyOutcome::Pending => {
+                    if !park_calling_task() {
+                        break Err(Errno::NotImplemented);
+                    }
+                }
             }
         }
     }
@@ -292,36 +351,33 @@ impl BlkClient {
     /// `ipc_call` handler's post → wake-server → park → take-reply
     /// discipline. Returns the fully-decoded [`BlkOutcome`] (health status
     /// plus payload/error), or fails closed with [`Errno::TimedOut`] on a
-    /// deadline miss and [`Errno::NotFound`] on a torn-down endpoint. The
-    /// reissue policy lives in [`transfer`](Self::transfer); this issues
-    /// exactly one attempt.
+    /// deadline miss, [`Errno::NotFound`] on a torn-down endpoint, and
+    /// [`Errno::NotImplemented`] for a caller no scheduler can park, which
+    /// posts nothing or withdraws what it posted. The reissue policy lives in
+    /// [`transfer`](Self::transfer); this issues exactly one attempt.
     fn transfer_once(&self, request: BlkRequest) -> Result<BlkOutcome, Errno> {
         let mut frame = [0u8; BLK_REQUEST_LEN];
         let len = request.encode(&mut frame)?;
 
-        // The task this operation runs as, for the reply's wake. Absent a
-        // live scheduler hook (a host test of this path, where the server
-        // runs on another thread) there is nothing to park on, so the wait
-        // spins — never reachable as a steady state on a running kernel.
-        let task =
-            wait_arch().and_then(|hook| hook.current_cpu().and_then(|cpu| hook.current_task(cpu)));
+        // The task this operation runs as, which the reply wakes.
+        let hook = wait_arch().ok_or(Errno::NotImplemented)?;
+        let task = hook
+            .current_cpu()
+            .and_then(|cpu| hook.current_task(cpu))
+            .ok_or(Errno::NotImplemented)?;
 
         // Post under the client's synthetic identity; the reply wakes the
         // *scheduler* task that is running this operation. The per-request
         // deadline (absolute monotonic) turns a wedged device from an
         // infinite park into a deterministic `TimedOut` — the mechanism, not
-        // a spin. Absent a live clock hook (a host test of this path) there
-        // is no deadline.
-        let poster = task.unwrap_or(0);
-        let issued_ns = wait_arch().map_or(0, WaitQueueArch::now_ns);
-        let deadline_abs = wait_arch().map_or(NO_DEADLINE, |_| {
-            issued_ns.saturating_add(self.meter.budget().deadline_ns)
-        });
+        // a spin.
+        let issued_ns = hook.now_ns();
+        let deadline_abs = issued_ns.saturating_add(self.meter.budget().deadline_ns);
         // The kernel's own client: its depth at the driver bounds it, and the
         // bytes are not a user principal's to budget.
         let ticket = self.endpoint.post(
             &self.caps,
-            poster,
+            task,
             &frame[..len],
             deadline_abs,
             tairix_abi::RLIMIT_INFINITY,
@@ -335,61 +391,41 @@ impl BlkClient {
         // Wake the serving driver parked between requests — exactly the
         // endpoint's recorded server where known, the broadcast fallback
         // otherwise (a thundering herd is worse than one spurious wake).
-        match self.endpoint.server_task() {
-            Some(server) => serve_wake_task(server),
-            None => serve_wake(),
-        }
+        serve_wake_server(self.endpoint.server_task());
 
         // Register before the first poll so a reply landing in the
         // check/park window is never lost, then poll-and-park until the
         // reply, the deadline, or the endpoint's destruction releases us.
         // Arming the one-shot to the nearest pending deadline lets the timed
         // sweep wake this task at its deadline even with nothing else to run.
-        if let Some(task) = task {
-            CALL_WAITQ.register(task, deadline_abs);
-            if let Some(hook) = wait_arch() {
-                hook.set_wakeup(nearest_timed_deadline());
-            }
-        }
         let claimant = self.caps.process().0;
-        let now = || wait_arch().map_or(0, WaitQueueArch::now_ns);
-        let outcome = loop {
-            let mark = self.endpoint.settle_mark();
-            match self
-                .endpoint
-                .take_reply(claimant, ticket, now(), self.audit)
-            {
-                ReplyOutcome::Ready(bytes) => break Ok(bytes),
-                // The device did not answer within its budget: fail closed so
-                // the filesystem path is never wedged behind a dead disk.
-                ReplyOutcome::TimedOut => break Err(Errno::TimedOut),
-                // The endpoint was torn down (the driver exited — the
-                // device is gone) or the ticket is no longer ours: abandon
-                // the call fail-closed.
-                ReplyOutcome::Cancelled | ReplyOutcome::Unknown => break Err(Errno::NotFound),
-                ReplyOutcome::Pending => {
-                    if task.is_none() || !park_calling_task() {
-                        self.endpoint.await_settle(mark, || now() >= deadline_abs);
-                    }
-                }
-            }
+        let filed = CALL_WAITQ.register(task, deadline_abs);
+        hook.set_wakeup(nearest_timed_deadline());
+        let outcome = if filed.is_err() {
+            Err(Errno::OutOfMemory)
+        } else {
+            self.await_reply(hook, claimant, ticket)
         };
-        if let Some(task) = task {
-            CALL_WAITQ.deregister(task);
-            if let Some(hook) = wait_arch() {
-                hook.set_wakeup(nearest_timed_deadline());
-            }
-        }
-        // The attempt has left the device either way: a deadline miss and a
-        // torn-down endpoint both consumed device time, and both say
-        // something about the device, so both are folded. A deadline the
-        // device consumed whole classifies through the same shared errno
-        // mapping a driver-framed refusal would, so a wedged disk lands in
-        // the timeouts bucket rather than vanishing from the health reading
-        // altogether.
-        let done_ns = wait_arch().map_or(0, WaitQueueArch::now_ns);
+        CALL_WAITQ.deregister(task);
+        hook.set_wakeup(nearest_timed_deadline());
+        let done_ns = hook.now_ns();
         let outcome = match outcome {
             Ok(reply) => decode_outcome(&reply),
+            // Only a park that failed, or a wait the heap had no room for,
+            // answers these: the caller withdraws what it posted, which says
+            // nothing of the device.
+            Err(errno @ (Errno::NotImplemented | Errno::OutOfMemory)) => {
+                if let Some(woken) = self.endpoint.cancel_one(claimant, ticket) {
+                    crate::waitq::call_woken(&woken);
+                }
+                self.meter.withdrawn(done_ns);
+                return Err(errno);
+            }
+            // A deadline miss and a torn-down endpoint both consumed device
+            // time and both say something about the device, so both are
+            // folded, classified through the shared errno mapping a
+            // driver-framed refusal would take: a wedged disk lands in the
+            // timeouts bucket rather than vanishing from the health reading.
             Err(err) => {
                 self.meter.completed(
                     request.op,
@@ -582,7 +618,7 @@ mod tests {
 
     extern crate std;
     use core::ptr::NonNull;
-    use std::sync::atomic::{AtomicBool, AtomicU32};
+    use std::sync::atomic::AtomicU32;
     use std::sync::{Arc as StdArc, Mutex};
     use std::thread;
     use std::vec;
@@ -593,10 +629,15 @@ mod tests {
         BlkRotationEvidence, BlkStatus, BlkTransport, BLK_FLAG_READ_ONLY,
     };
     use tairix_abi::driver::block::BlockClass;
-    use tairix_kernel_ipc::{CallEndpointLimits, RecvCall};
+    use tairix_kernel_ipc::{CallEndpointLimits, ReceivedCall};
     use tairix_log::Level;
 
     use crate::audit::AuditEvent;
+    use crate::test_boot::{serve_next, HostBoot, HostTask};
+
+    /// A fixture server's task, answering whether it served every request it
+    /// was asked to.
+    type Server = HostTask<Result<(), Errno>>;
 
     /// Fold one completion of `status` through `client`'s own per-device
     /// meter — the same call the live transfer path makes — so a test drives
@@ -652,7 +693,8 @@ mod tests {
             CapabilitySet::empty(),
             CapabilitySet::empty(),
             &SINK,
-        );
+        )
+        .expect("derived");
         let endpoint = Arc::new(
             CallEndpoint::create(
                 EndpointId(id),
@@ -706,6 +748,7 @@ mod tests {
         /// is how a device speaking an unknown medium is simulated.
         reported_medium: Option<BlkMedium>,
         reported_layout: Option<DiscLayout>,
+        reported_identity: Option<BlkDeviceIdentity>,
     }
 
     impl MemDevice {
@@ -717,6 +760,7 @@ mod tests {
                 reported_block_size: BLOCK_SIZE_U32,
                 reported_medium: Some(MEM_DEVICE_MEDIUM),
                 reported_layout: None,
+                reported_identity: None,
             }
         }
 
@@ -725,105 +769,109 @@ mod tests {
         }
     }
 
-    /// Serve `count` requests against `device` over `endpoint`, moving data
-    /// through the shared `window`, then return the device.
+    /// The completion `device` answers `call` with, written to `reply`, moving
+    /// data through `window`: its length.
+    fn answer_mem(
+        device: &Mutex<MemDevice>,
+        window: &Window,
+        call: &ReceivedCall,
+        reply: &mut [u8],
+    ) -> usize {
+        let request = match BlkRequest::decode(&call.request) {
+            Ok(request) => request,
+            Err(err) => return encode_error_completion(reply, err).unwrap(),
+        };
+        let mut device = device.lock().unwrap();
+        match request.op {
+            BlkOp::Geometry => BlkCompletion {
+                disc_layout: device.reported_layout,
+                name: BlkDeviceName::new(MEM_DEVICE_NAME),
+                block_size: device.reported_block_size,
+                block_count: device.block_count(),
+                flags: if device.read_only {
+                    BLK_FLAG_READ_ONLY
+                } else {
+                    0
+                },
+                medium: device.reported_medium,
+                binding: 0,
+            }
+            .encode(reply)
+            .unwrap(),
+            BlkOp::Read => {
+                let start = usize::try_from(request.lba).unwrap() * BLOCK_SIZE;
+                let len = request.blocks as usize * BLOCK_SIZE;
+                if start + len > device.data.len() {
+                    encode_error_completion(reply, Errno::LengthOutOfRange).unwrap()
+                } else {
+                    // SAFETY: test window, protocol-alternated access, length
+                    // bounded by BLK_DATA_LEN.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            device.data[start..].as_ptr(),
+                            window.ptr(),
+                            len,
+                        );
+                    }
+                    BlkCompletion::default().encode(reply).unwrap()
+                }
+            }
+            BlkOp::Write => {
+                let start = usize::try_from(request.lba).unwrap() * BLOCK_SIZE;
+                let len = request.blocks as usize * BLOCK_SIZE;
+                if device.read_only {
+                    encode_error_completion(reply, Errno::PermissionDenied).unwrap()
+                } else if start + len > device.data.len() {
+                    encode_error_completion(reply, Errno::LengthOutOfRange).unwrap()
+                } else {
+                    // SAFETY: as for the read arm.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            window.ptr(),
+                            device.data[start..].as_mut_ptr(),
+                            len,
+                        );
+                    }
+                    BlkCompletion::default().encode(reply).unwrap()
+                }
+            }
+            BlkOp::Flush => {
+                device.flushes += 1;
+                BlkCompletion::default().encode(reply).unwrap()
+            }
+            BlkOp::Identity => {
+                let stated = BlkDeviceIdentity::encode(device.reported_identity);
+                // SAFETY: as for the read arm.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(stated.as_ptr(), window.ptr(), stated.len());
+                }
+                BlkCompletion::default().encode(reply).unwrap()
+            }
+        }
+    }
+
+    /// Serve `count` requests against `device` over `endpoint` from a task of
+    /// the calling thread's boot, moving data through the shared `window`.
     fn serve(
         endpoint: Arc<CallEndpoint>,
         window: Window,
         device: StdArc<Mutex<MemDevice>>,
         count: usize,
-        stop: StdArc<AtomicBool>,
-    ) -> thread::JoinHandle<()> {
-        thread::spawn(move || {
-            let mut served = 0;
-            while served < count && !stop.load(Ordering::Relaxed) {
-                let call = match endpoint.recv_call(BLK_REQUEST_LEN) {
-                    RecvCall::Received(call) => call,
-                    RecvCall::Empty => {
-                        thread::yield_now();
-                        continue;
-                    }
-                    RecvCall::TooLarge { .. } => panic!("oversize request"),
-                };
-                let mut reply = [0u8; BLK_COMPLETION_LEN];
-                let len = match BlkRequest::decode(&call.request) {
-                    Err(err) => encode_error_completion(&mut reply, err).unwrap(),
-                    Ok(request) => {
-                        let mut device = device.lock().unwrap();
-                        match request.op {
-                            BlkOp::Geometry => BlkCompletion {
-                                disc_layout: device.reported_layout,
-                                name: BlkDeviceName::new(MEM_DEVICE_NAME),
-                                block_size: device.reported_block_size,
-                                block_count: device.block_count(),
-                                flags: if device.read_only {
-                                    BLK_FLAG_READ_ONLY
-                                } else {
-                                    0
-                                },
-                                medium: device.reported_medium,
-                                binding: 0,
-                            }
-                            .encode(&mut reply)
-                            .unwrap(),
-                            BlkOp::Read => {
-                                let start = usize::try_from(request.lba).unwrap() * BLOCK_SIZE;
-                                let len = request.blocks as usize * BLOCK_SIZE;
-                                if start + len > device.data.len() {
-                                    encode_error_completion(&mut reply, Errno::LengthOutOfRange)
-                                        .unwrap()
-                                } else {
-                                    // SAFETY: test window, protocol-alternated
-                                    // access, length bounded by BLK_DATA_LEN.
-                                    unsafe {
-                                        core::ptr::copy_nonoverlapping(
-                                            device.data[start..].as_ptr(),
-                                            window.ptr(),
-                                            len,
-                                        );
-                                    }
-                                    BlkCompletion::default().encode(&mut reply).unwrap()
-                                }
-                            }
-                            BlkOp::Write => {
-                                let start = usize::try_from(request.lba).unwrap() * BLOCK_SIZE;
-                                let len = request.blocks as usize * BLOCK_SIZE;
-                                if device.read_only {
-                                    encode_error_completion(&mut reply, Errno::PermissionDenied)
-                                        .unwrap()
-                                } else if start + len > device.data.len() {
-                                    encode_error_completion(&mut reply, Errno::LengthOutOfRange)
-                                        .unwrap()
-                                } else {
-                                    // SAFETY: as for the read arm.
-                                    unsafe {
-                                        core::ptr::copy_nonoverlapping(
-                                            window.ptr(),
-                                            device.data[start..].as_mut_ptr(),
-                                            len,
-                                        );
-                                    }
-                                    BlkCompletion::default().encode(&mut reply).unwrap()
-                                }
-                            }
-                            BlkOp::Flush => {
-                                device.flushes += 1;
-                                BlkCompletion::default().encode(&mut reply).unwrap()
-                            }
-                        }
-                    }
-                };
-                let _ = endpoint.reply(call.ticket, &reply[..len], &SINK).unwrap();
-                served += 1;
+    ) -> Server {
+        HostBoot::current().spawn(move || {
+            let mut reply = [0u8; BLK_COMPLETION_LEN];
+            for _ in 0..count {
+                serve_next(&endpoint, &mut reply, &SINK, &|| false, |call, reply| {
+                    answer_mem(&device, &window, call, reply)
+                })?;
             }
+            Ok(())
         })
     }
 
-    /// Stand a device + server up and connect a client to it.
-    fn connected(
-        blocks: u64,
-        requests: usize,
-    ) -> (BlkClient, StdArc<Mutex<MemDevice>>, thread::JoinHandle<()>) {
+    /// Stand a device and its server up on a boot the calling thread becomes
+    /// the first task of, and connect a client to it.
+    fn connected(blocks: u64, requests: usize) -> (BlkClient, StdArc<Mutex<MemDevice>>, Server) {
         connected_declaring(blocks, requests, Some(MEM_DEVICE_MEDIUM))
     }
 
@@ -833,20 +881,15 @@ mod tests {
         blocks: u64,
         requests: usize,
         medium: Option<BlkMedium>,
-    ) -> (BlkClient, StdArc<Mutex<MemDevice>>, thread::JoinHandle<()>) {
+    ) -> (BlkClient, StdArc<Mutex<MemDevice>>, Server) {
+        let _boot = HostBoot::claim();
         let id = fresh_endpoint_id();
         let endpoint = register_endpoint(id);
         let window = leak_window();
         let mut mem = MemDevice::new(blocks);
         mem.reported_medium = medium;
         let device = StdArc::new(Mutex::new(mem));
-        let server = serve(
-            endpoint,
-            Window(window),
-            StdArc::clone(&device),
-            requests,
-            StdArc::new(AtomicBool::new(false)),
-        );
+        let server = serve(endpoint, Window(window), StdArc::clone(&device), requests);
         let hold = KernelHold::for_test(window, BLK_DATA_LEN);
         let client = BlkClient::connect(id, hold, &SINK).expect("connect");
         (client, device, server)
@@ -872,6 +915,7 @@ mod tests {
 
     #[test]
     fn connect_adopts_the_disc_layout_the_device_reported() {
+        let _boot = HostBoot::claim();
         let id = fresh_endpoint_id();
         let endpoint = register_endpoint(id);
         let window = leak_window();
@@ -882,13 +926,7 @@ mod tests {
         let mut mem = MemDevice::new(64);
         mem.reported_layout = Some(layout);
         let device = StdArc::new(Mutex::new(mem));
-        let server = serve(
-            endpoint,
-            Window(window),
-            StdArc::clone(&device),
-            1,
-            StdArc::new(AtomicBool::new(false)),
-        );
+        let server = serve(endpoint, Window(window), StdArc::clone(&device), 1);
         let hold = KernelHold::for_test(window, BLK_DATA_LEN);
         let client = BlkClient::connect(id, hold, &SINK).expect("connect");
         assert_eq!(client.disc_layout(), Some(layout));
@@ -906,6 +944,31 @@ mod tests {
         assert_eq!(client.device_class(), BlkDeviceClass::Virtual);
         assert_eq!(client.medium(), None);
         server.join().unwrap();
+    }
+
+    /// The identity a device states is read out of the window once asked, and
+    /// one stating none, even over bytes an earlier transfer left, reads none.
+    #[test]
+    fn identify_reads_what_the_device_states_and_none_for_none() {
+        let _boot = HostBoot::claim();
+        for identity in [
+            BlkDeviceIdentity::new([0x5A; BLK_DEVICE_IDENTITY_LEN]),
+            None,
+        ] {
+            let id = fresh_endpoint_id();
+            let endpoint = register_endpoint(id);
+            let window = leak_window();
+            let mut mem = MemDevice::new(64);
+            mem.reported_identity = identity;
+            let device = StdArc::new(Mutex::new(mem));
+            // The geometry, then the identity.
+            let server = serve(endpoint, Window(window), StdArc::clone(&device), 2);
+            let hold = KernelHold::for_test(window, BLK_DATA_LEN);
+            let client = BlkClient::connect(id, hold, &SINK).expect("connect");
+            client.window_write(&[0xEE; BLK_DEVICE_IDENTITY_LEN]);
+            assert_eq!(client.identify(), identity);
+            server.join().unwrap();
+        }
     }
 
     #[test]
@@ -956,22 +1019,16 @@ mod tests {
     /// before.
     #[test]
     fn a_waiting_transfer_parks_on_the_core_it_runs_on() {
+        let boot = HostBoot::claim();
         let id = fresh_endpoint_id();
         let endpoint = register_endpoint(id);
         let window = leak_window();
         let device = StdArc::new(Mutex::new(MemDevice::new(8)));
-        let geometry = serve(
-            Arc::clone(&endpoint),
-            Window(window),
-            device,
-            1,
-            StdArc::new(AtomicBool::new(false)),
-        );
+        let geometry = serve(Arc::clone(&endpoint), Window(window), device, 1);
         let hold = KernelHold::for_test(window, BLK_DATA_LEN);
         let mut client = BlkClient::connect(id, hold, &SINK).expect("connect");
         geometry.join().unwrap();
 
-        let _ = crate::test_boot::claim_scheduler();
         let (first, second) = (crate::test_boot::claim_cpu(), crate::test_boot::claim_cpu());
         crate::test_boot::run_claim_on(first);
         let move_to_second = |_| crate::test_boot::run_claim_on(second);
@@ -983,25 +1040,22 @@ mod tests {
                     thread::scope(|scope| {
                         // Answer only once the client has parked twice, so its
                         // second park comes after the move whatever the threads'
-                        // timing.
+                        // timing: a deliberate spin barrier on the probes.
                         scope.spawn(|| {
-                            let call = loop {
-                                match endpoint.recv_call(BLK_REQUEST_LEN) {
-                                    RecvCall::Received(call) => break call,
-                                    RecvCall::Empty => thread::yield_now(),
-                                    RecvCall::TooLarge { .. } => panic!("oversize request"),
-                                }
-                            };
-                            let give_up =
-                                std::time::Instant::now() + std::time::Duration::from_secs(30);
-                            while on_first.parks() + on_second.parks() < 2
-                                && std::time::Instant::now() < give_up
-                            {
-                                thread::yield_now();
-                            }
+                            let _server = boot.enter();
                             let mut reply = [0u8; BLK_COMPLETION_LEN];
-                            let len = BlkCompletion::default().encode(&mut reply).unwrap();
-                            let _ = endpoint.reply(call.ticket, &reply[..len], &SINK).unwrap();
+                            let answer = |_: &ReceivedCall, reply: &mut [u8]| {
+                                let give_up =
+                                    std::time::Instant::now() + std::time::Duration::from_secs(30);
+                                while on_first.parks() + on_second.parks() < 2
+                                    && std::time::Instant::now() < give_up
+                                {
+                                    thread::yield_now();
+                                }
+                                BlkCompletion::default().encode(reply).unwrap()
+                            };
+                            serve_next(&endpoint, &mut reply, &SINK, &|| false, answer)
+                                .expect("the flush is served");
                         });
                         client.flush().expect("flush");
                     });
@@ -1019,21 +1073,104 @@ mod tests {
         });
     }
 
+    /// Each request of a round trip blocks its caller exactly once, waiting on
+    /// the device rather than spinning for it, however busy the machine is: a
+    /// caller that spun for its replies would block no times at all.
+    #[test]
+    fn a_round_trip_blocks_its_caller_once_per_request_beside_busy_threads() {
+        const READS: u32 = 4;
+        let boot = HostBoot::claim();
+        let me = boot.task();
+        let busy: Vec<_> = (0..thread::available_parallelism().map_or(2, usize::from))
+            .map(|_| {
+                boot.spawn_until_stopped(|stopped| {
+                    while !stopped() {
+                        core::hint::spin_loop();
+                    }
+                })
+            })
+            .collect();
+        let id = fresh_endpoint_id();
+        let endpoint = register_endpoint(id);
+        let window = leak_window();
+        let device = StdArc::new(Mutex::new(MemDevice::new(8)));
+        let server = {
+            let window = Window(window);
+            boot.spawn(move || {
+                let mut reply = [0u8; BLK_COMPLETION_LEN];
+                for _ in 0..=READS {
+                    // Answered only once the caller has blocked for it.
+                    serve_next(&endpoint, &mut reply, &SINK, &|| false, |call, reply| {
+                        HostBoot::current().until_blocked(me);
+                        answer_mem(&device, &window, call, reply)
+                    })?;
+                }
+                Ok::<(), Errno>(())
+            })
+        };
+        let hold = KernelHold::for_test(window, BLK_DATA_LEN);
+        let mut client = BlkClient::connect(id, hold, &SINK).expect("connect");
+        let mut buf = [0u8; BLOCK_SIZE];
+        for _ in 0..READS {
+            client.read_blocks(0, &mut buf).expect("read");
+        }
+        server.join().unwrap();
+        busy.into_iter()
+            .for_each(crate::test_boot::StoppableTask::stop);
+        assert_eq!(
+            boot.waits(me),
+            READS + 1,
+            "the geometry probe and each read blocked once"
+        );
+    }
+
+    /// A transfer whose caller cannot park is refused, rather than left to
+    /// spin: with no scheduler it posts nothing, and with a park that fails it
+    /// withdraws what it posted, saying nothing of the device.
+    #[test]
+    fn a_transfer_no_scheduler_can_park_fails_closed_and_withdraws() {
+        let (client, _device, server) = connected(8, 1);
+        server.join().unwrap();
+        let boot = HostBoot::current();
+        let read = BlkRequest {
+            op: BlkOp::Read,
+            lba: 0,
+            blocks: 1,
+            binding: client.binding,
+        };
+        let refused = thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _unparkable = boot.enter_unparkable();
+                    client.transfer(read).err()
+                })
+                .join()
+                .unwrap()
+        });
+        assert_eq!(refused, Some(Errno::NotImplemented));
+        assert_eq!(
+            client.endpoint.outstanding(),
+            0,
+            "its request was withdrawn"
+        );
+        assert_eq!(client.io_source().stats.queue_snapshot().in_flight, 0);
+        assert_eq!(health(&client), MountAvailability::Available);
+        let unscheduled =
+            thread::scope(|scope| scope.spawn(|| client.transfer(read).err()).join().unwrap());
+        assert_eq!(unscheduled, Some(Errno::NotImplemented));
+        assert_eq!(client.endpoint.outstanding(), 0, "nothing was posted");
+    }
+
     #[test]
     fn a_read_only_device_refuses_writes_client_side() {
+        let _boot = HostBoot::claim();
         let id = fresh_endpoint_id();
         let endpoint = register_endpoint(id);
         let window = leak_window();
         let device = StdArc::new(Mutex::new(MemDevice::new(8)));
         device.lock().unwrap().read_only = true;
         // Only the geometry request ever reaches the server.
-        let server = serve(
-            endpoint,
-            Window(window),
-            StdArc::clone(&device),
-            1,
-            StdArc::new(AtomicBool::new(false)),
-        );
+        let server = serve(endpoint, Window(window), StdArc::clone(&device), 1);
         let hold = KernelHold::for_test(window, BLK_DATA_LEN);
         let mut client = BlkClient::connect(id, hold, &SINK).expect("connect");
         assert!(client.read_only());
@@ -1073,6 +1210,7 @@ mod tests {
 
     #[test]
     fn a_hostile_geometry_is_refused_at_connect() {
+        let _boot = HostBoot::claim();
         for (block_size, blocks) in [(0u32, 8u64), (3, 8), (8192, 8), (512, 0)] {
             let id = fresh_endpoint_id();
             let endpoint = register_endpoint(id);
@@ -1085,13 +1223,7 @@ mod tests {
                     device.data.clear();
                 }
             }
-            let server = serve(
-                endpoint,
-                Window(window),
-                StdArc::clone(&device),
-                1,
-                StdArc::new(AtomicBool::new(false)),
-            );
+            let server = serve(endpoint, Window(window), StdArc::clone(&device), 1);
             let hold = KernelHold::for_test(window, BLK_DATA_LEN);
             assert_eq!(
                 BlkClient::connect(id, hold, &SINK).err(),
@@ -1125,7 +1257,7 @@ mod tests {
         server.join().unwrap();
         // The driver exits (unplug): the endpoint is destroyed. The next
         // operation fails typed, never hangs.
-        client.endpoint.destroy(&SINK);
+        drop(client.endpoint.destroy(&SINK));
         let mut buf = [0u8; BLOCK_SIZE];
         assert_eq!(
             client.read_blocks(0, &mut buf),
@@ -1133,13 +1265,6 @@ mod tests {
         );
     }
 
-    /// Serve `count` requests, answering the geometry probe normally and
-    /// each subsequent data request from `script` (front to back): `None`
-    /// serves it successfully, `Some(err)` frames an error completion. This
-    /// injects a driver's reissuable statuses (a `Reset` from
-    /// `EndpointStalled`, a transient from `WouldBlock`) and its hard ones
-    /// (a `MediumError`, a `DeviceOffline`) to exercise the client's
-    /// bounded-reissue policy.
     /// What the scripted device answers one data request with.
     #[derive(Clone, Copy)]
     enum Verdict {
@@ -1158,70 +1283,71 @@ mod tests {
         }
     }
 
+    /// Serve `count` requests from a task of the calling thread's boot,
+    /// answering the geometry probe normally and each data request with the
+    /// next of `script`, front to back: a driver's reissuable statuses (a
+    /// `Reset` from `EndpointStalled`) and its hard ones (a `MediumError`, a
+    /// `DeviceOffline`), to exercise the client's bounded-reissue policy.
     fn serve_scripted(
         endpoint: Arc<CallEndpoint>,
         script: StdArc<Mutex<Vec<Verdict>>>,
         count: usize,
-    ) -> thread::JoinHandle<()> {
-        thread::spawn(move || {
-            let mut served = 0;
-            while served < count {
-                let call = match endpoint.recv_call(BLK_REQUEST_LEN) {
-                    RecvCall::Received(call) => call,
-                    RecvCall::Empty => {
-                        thread::yield_now();
-                        continue;
-                    }
-                    RecvCall::TooLarge { .. } => panic!("oversize request"),
-                };
-                let mut reply = [0u8; BLK_COMPLETION_LEN];
-                let len = match BlkRequest::decode(&call.request) {
-                    Err(err) => encode_error_completion(&mut reply, err).unwrap(),
-                    Ok(request) => match request.op {
-                        BlkOp::Geometry => BlkCompletion {
-                            block_size: BLOCK_SIZE_U32,
-                            block_count: 8,
-                            flags: 0,
-                            medium: Some(SCRIPTED_DEVICE_MEDIUM),
-                            disc_layout: None,
-                            name: BlkDeviceName::new(SCRIPTED_DEVICE_NAME),
-                            binding: 0,
-                        }
-                        .encode(&mut reply)
-                        .unwrap(),
-                        // A scripted data request: the next verdict, or a
-                        // (window-unchanged) success when the script says so.
-                        _ => match script.lock().unwrap().remove(0) {
-                            Verdict::Failed(err) => {
-                                encode_error_completion(&mut reply, err).unwrap()
-                            }
-                            Verdict::Served => BlkCompletion::default().encode(&mut reply).unwrap(),
-                            Verdict::Recovered => BlkCompletion::default()
-                                .encode_reissuable(BlkStatus::Reset, BlkReissue::Now, &mut reply)
-                                .unwrap(),
-                        },
-                    },
-                };
-                let _ = endpoint.reply(call.ticket, &reply[..len], &SINK).unwrap();
-                served += 1;
+    ) -> Server {
+        HostBoot::current().spawn(move || {
+            let mut reply = [0u8; BLK_COMPLETION_LEN];
+            for _ in 0..count {
+                serve_next(&endpoint, &mut reply, &SINK, &|| false, |call, reply| {
+                    answer_scripted(&script, call, reply)
+                })?;
             }
+            Ok(())
         })
     }
 
+    /// The completion the scripted device answers `call` with, written to
+    /// `reply`: its length.
+    fn answer_scripted(
+        script: &Mutex<Vec<Verdict>>,
+        call: &ReceivedCall,
+        reply: &mut [u8],
+    ) -> usize {
+        match BlkRequest::decode(&call.request) {
+            Err(err) => encode_error_completion(reply, err).unwrap(),
+            Ok(request) => match request.op {
+                BlkOp::Geometry => BlkCompletion {
+                    block_size: BLOCK_SIZE_U32,
+                    block_count: 8,
+                    flags: 0,
+                    medium: Some(SCRIPTED_DEVICE_MEDIUM),
+                    disc_layout: None,
+                    name: BlkDeviceName::new(SCRIPTED_DEVICE_NAME),
+                    binding: 0,
+                }
+                .encode(reply)
+                .unwrap(),
+                // A scripted data request: the next verdict, or a
+                // (window-unchanged) success when the script says so.
+                _ => match script.lock().unwrap().remove(0) {
+                    Verdict::Failed(err) => encode_error_completion(reply, err).unwrap(),
+                    Verdict::Served => BlkCompletion::default().encode(reply).unwrap(),
+                    Verdict::Recovered => BlkCompletion::default()
+                        .encode_reissuable(BlkStatus::Reset, BlkReissue::Now, reply)
+                        .unwrap(),
+                },
+            },
+        }
+    }
+
     /// Connect a client to a scripted server (see [`serve_scripted`]).
-    fn connect_scripted(
-        script: Vec<Option<Errno>>,
-        count: usize,
-    ) -> (BlkClient, thread::JoinHandle<()>) {
+    fn connect_scripted(script: Vec<Option<Errno>>, count: usize) -> (BlkClient, Server) {
         connect_verdicts(script.into_iter().map(Verdict::from).collect(), count)
     }
 
-    /// Connect a client to a server answering each data request with the
-    /// next of `verdicts`.
-    fn connect_verdicts(
-        verdicts: Vec<Verdict>,
-        count: usize,
-    ) -> (BlkClient, thread::JoinHandle<()>) {
+    /// Connect a client, on a boot the calling thread becomes the first task
+    /// of, to a server answering each data request with the next of
+    /// `verdicts`.
+    fn connect_verdicts(verdicts: Vec<Verdict>, count: usize) -> (BlkClient, Server) {
+        let _boot = HostBoot::claim();
         let id = fresh_endpoint_id();
         let endpoint = register_endpoint(id);
         let window = leak_window();
@@ -1239,6 +1365,27 @@ mod tests {
         usize::try_from(SCRIPTED_DEVICE_CLASS.budget().max_retries).expect("budget fits")
     }
 
+    /// Run `body` on a CPU whose every park returns at once, as a dispatcher
+    /// with nothing else to run resumes a task: a park while the caller
+    /// sleeps out a reissue's pacing first moves the boot's clock past it, as
+    /// the timer would.
+    fn paced<R>(body: impl FnOnce() -> R) -> R {
+        let boot = HostBoot::current();
+        let task = boot.task();
+        let pacing = SCRIPTED_DEVICE_CLASS.budget().reissue_pacing_ns();
+        let cpu = crate::test_boot::claim_cpu();
+        crate::test_boot::run_claim_on(cpu);
+        let on_park = |_| {
+            let arch = crate::test_boot::claimed_wait_arch().expect("a boot's hook");
+            if crate::waitq::SLEEP_WAITQ.wake_task(arch, task) {
+                boot.advance_clock(pacing);
+            }
+        };
+        let answer = crate::test_boot::with_park_probe(cpu, on_park, |_| body());
+        crate::test_boot::run_claim_on(boot.cpu());
+        answer
+    }
+
     #[test]
     fn a_transient_fault_is_reissued_and_then_succeeds() {
         // Geometry, then reissuable resets up to one short of the budget,
@@ -1250,7 +1397,7 @@ mod tests {
         script.push(None);
         let (mut client, server) = connect_scripted(script, 1 + retries);
         let mut buf = [0u8; BLOCK_SIZE];
-        client.read_blocks(0, &mut buf).expect("read after reissue");
+        paced(|| client.read_blocks(0, &mut buf)).expect("read after reissue");
         server.join().unwrap();
     }
 
@@ -1273,7 +1420,7 @@ mod tests {
             "the shares divide the pacing"
         );
 
-        let (_, task) = crate::test_boot::claim_scheduler();
+        let task = HostBoot::current().task();
         let cpu = crate::test_boot::claim_cpu();
         crate::test_boot::run_claim_on(cpu);
         let paced = AtomicU32::new(0);
@@ -1308,7 +1455,7 @@ mod tests {
         verdicts.push(Verdict::Served);
         let (mut client, server) = connect_verdicts(verdicts, 2 + retries);
         let pacing = SCRIPTED_DEVICE_CLASS.budget().reissue_pacing_ns();
-        let (_, task) = crate::test_boot::claim_scheduler();
+        let task = HostBoot::current().task();
         let cpu = crate::test_boot::claim_cpu();
         crate::test_boot::run_claim_on(cpu);
         let paced = AtomicU32::new(0);
@@ -1340,7 +1487,10 @@ mod tests {
         let (mut client, server) =
             connect_scripted(vec![Some(Errno::EndpointStalled); attempts], 1 + attempts);
         let mut buf = [0u8; BLOCK_SIZE];
-        assert_eq!(client.read_blocks(0, &mut buf), Err(DriverError::Busy));
+        assert_eq!(
+            paced(|| client.read_blocks(0, &mut buf)),
+            Err(DriverError::Busy)
+        );
         server.join().unwrap();
     }
 
@@ -1391,7 +1541,7 @@ mod tests {
             4,
         );
         let mut buf = [0u8; BLOCK_SIZE];
-        client.read_blocks(0, &mut buf).expect("read after reissue");
+        paced(|| client.read_blocks(0, &mut buf)).expect("read after reissue");
         server.join().unwrap();
 
         let counters = client.io_source().counters.snapshot();
@@ -1435,9 +1585,8 @@ mod tests {
         assert_eq!(io.read_bytes, BLOCK_SIZE as u64);
         assert_eq!(io.write_bytes, BLOCK_SIZE as u64);
 
-        // A host test has no clock hook, so no interval is measurable and
-        // nothing is attributed: an unmeasurable wait is zero, never a
-        // fabricated duration.
+        // The boot's clock stands still while these round trips run, so
+        // every interval measures zero; none is fabricated.
         assert_eq!(io.busy_ns, 0);
         assert_eq!(io.read_wait_ns, 0);
         assert_eq!(io.write_wait_ns, 0);
@@ -1473,7 +1622,7 @@ mod tests {
             4,
         );
         let mut buf = [0u8; BLOCK_SIZE];
-        client.read_blocks(0, &mut buf).expect("read after reissue");
+        paced(|| client.read_blocks(0, &mut buf)).expect("read after reissue");
         server.join().unwrap();
 
         let io = client.io_source().stats.io_snapshot();
@@ -1524,7 +1673,7 @@ mod tests {
         // so the overlay settles back to available (the transient recovering
         // window is invisible once the device answers `Ok`).
         let mut buf = [0u8; BLOCK_SIZE];
-        client.read_blocks(0, &mut buf).expect("read after reissue");
+        paced(|| client.read_blocks(0, &mut buf)).expect("read after reissue");
         assert_eq!(health(&client), MountAvailability::Available);
         server.join().unwrap();
     }
@@ -1536,7 +1685,10 @@ mod tests {
         // recovering (a live device riding out a blip), never healthy.
         let (mut client, server) = connect_scripted(vec![Some(Errno::EndpointStalled); 4], 5);
         let mut buf = [0u8; BLOCK_SIZE];
-        assert_eq!(client.read_blocks(0, &mut buf), Err(DriverError::Busy));
+        assert_eq!(
+            paced(|| client.read_blocks(0, &mut buf)),
+            Err(DriverError::Busy)
+        );
         assert_eq!(health(&client), MountAvailability::Recovering);
         server.join().unwrap();
     }
@@ -1597,7 +1749,8 @@ mod tests {
         script: Vec<Option<Errno>>,
         count: usize,
         audit: &'static (dyn Sink + Sync),
-    ) -> (BlkClient, u64, thread::JoinHandle<()>) {
+    ) -> (BlkClient, u64, Server) {
+        let _boot = HostBoot::claim();
         let id = fresh_endpoint_id();
         let endpoint = register_endpoint(id);
         let window = leak_window();
@@ -1626,7 +1779,7 @@ mod tests {
             let (mut client, id, server) =
                 connect_scripted_audited(vec![Some(Errno::EndpointStalled), None], 3, &REC);
             let mut buf = [0u8; BLOCK_SIZE];
-            client.read_blocks(0, &mut buf).expect("read after reissue");
+            paced(|| client.read_blocks(0, &mut buf)).expect("read after reissue");
             server.join().unwrap();
             assert_eq!(
                 recorded_for(id),

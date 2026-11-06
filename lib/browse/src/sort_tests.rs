@@ -6,9 +6,10 @@ use tairix_abi::time::Time64;
 use tairix_fsmeta::preset::acorn::Filetype;
 use tairix_icon::IconKind;
 
-use super::{entry_cmp, sort_entries, Folders, SortDirection, SortKey, SortMode};
+use super::{entry_cmp, sort_entries, Folders, Order, SortDirection, SortKey, SortMode};
 use crate::entry::{DriveMark, Entry, EntryKind};
 use crate::places::VolumeFacts;
+use crate::presentation::HiddenEndings;
 
 /// The root of a volume called `name` carrying `filesystem`, with `free`
 /// bytes to spare, serving as `availability` says.
@@ -29,7 +30,9 @@ fn volume_root(
             availability,
             owner: None,
             volume_id: [0; 16],
+            identity: [0; 16],
             read_only: false,
+            titled: false,
         },
     }));
     root
@@ -68,20 +71,20 @@ fn folders_stand_first_unless_the_order_places_them_among_the_files() {
         ]
     };
     let mut first = listed();
-    sort_entries(&mut first, ascending(SortKey::Name));
+    sort_entries(&mut first, ascending(SortKey::Name).into());
     assert_eq!(names(&first), ["b", "d", "a", "c"]);
     let among = SortMode {
         folders: Folders::Among,
         ..ascending(SortKey::Name)
     };
     let mut mixed = listed();
-    sort_entries(&mut mixed, among);
+    sort_entries(&mut mixed, among.into());
     assert_eq!(names(&mixed), ["a", "b", "c", "d"]);
     let reversed = SortMode {
         direction: SortDirection::Descending,
         ..among
     };
-    sort_entries(&mut mixed, reversed);
+    sort_entries(&mut mixed, reversed.into());
     assert_eq!(names(&mixed), ["d", "c", "b", "a"]);
 }
 
@@ -99,25 +102,25 @@ fn a_header_press_and_the_sort_cycle_keep_where_folders_stand() {
 #[test]
 fn volumes_order_by_the_space_they_have_free_one_keeping_none_first() {
     let mut entries = volumes();
-    sort_entries(&mut entries, ascending(SortKey::Free));
+    sort_entries(&mut entries, ascending(SortKey::Free).into());
     assert_eq!(names(&entries), ["Camera", "Media", "Backup", "Archive"]);
 }
 
 #[test]
 fn volumes_order_by_their_filesystem_then_by_name() {
     let mut entries = volumes();
-    sort_entries(&mut entries, ascending(SortKey::Filesystem));
+    sort_entries(&mut entries, ascending(SortKey::Filesystem).into());
     assert_eq!(names(&entries), ["Archive", "Backup", "Camera", "Media"]);
 }
 
 #[test]
 fn volumes_order_healthiest_first_and_reversed_on_a_second_press() {
     let mut entries = volumes();
-    sort_entries(&mut entries, ascending(SortKey::Health));
+    sort_entries(&mut entries, ascending(SortKey::Health).into());
     assert_eq!(names(&entries), ["Archive", "Backup", "Camera", "Media"]);
     let reversed = ascending(SortKey::Health).pressed(SortKey::Health);
     assert_eq!(reversed.direction, SortDirection::Descending);
-    sort_entries(&mut entries, reversed);
+    sort_entries(&mut entries, reversed.into());
     // The name tiebreak does not turn round with the key.
     assert_eq!(names(&entries), ["Camera", "Media", "Archive", "Backup"]);
 }
@@ -170,8 +173,8 @@ fn a_kind_sort_lands_every_entry_where_its_comparison_puts_it() {
         direction: SortDirection::Descending,
         ..SortMode::default_order()
     };
-    expected.sort_by(|a, b| entry_cmp(a, b, mode));
-    sort_entries(&mut entries, mode);
+    expected.sort_by(|a, b| entry_cmp(a, b, mode.into()));
+    sort_entries(&mut entries, mode.into());
     assert_eq!(names(&entries), names(&expected));
 }
 
@@ -188,10 +191,60 @@ fn a_recorded_filetype_sorts_a_file_by_the_type_it_names() {
         direction: SortDirection::Ascending,
         ..SortMode::default_order()
     };
-    sort_entries(&mut entries, mode);
+    sort_entries(&mut entries, mode.into());
     assert_eq!(
         names(&entries),
         ["c", "b", "a"],
         "Data, then Sprite, then Text"
     );
+}
+
+/// Names order as they are shown, the name the volume holds breaking a tie,
+/// whichever the direction; classifying each entry once orders exactly as the
+/// comparison does.
+#[test]
+fn names_order_as_shown_with_the_held_name_breaking_a_tie() {
+    let bundle = |name: &str| Entry::new(name, EntryKind::Bundle, 0, Time64::UNIX_EPOCH);
+    let listed = || {
+        alloc::vec![
+            Entry::file("Paint-old.txt"),
+            bundle("Paint.app"),
+            Entry::file("Ab-2"),
+            Entry::file("Paint"),
+            bundle("Ab.app"),
+        ]
+    };
+    let shown = |direction| Order {
+        mode: SortMode {
+            direction,
+            ..ascending(SortKey::Name)
+        },
+        endings: HiddenEndings {
+            applications: true,
+            known_types: false,
+        },
+    };
+    let mut entries = listed();
+    sort_entries(&mut entries, ascending(SortKey::Name).into());
+    assert_eq!(
+        names(&entries),
+        ["Ab-2", "Ab.app", "Paint", "Paint-old.txt", "Paint.app"],
+        "as the volume holds them"
+    );
+    sort_entries(&mut entries, shown(SortDirection::Ascending));
+    assert_eq!(
+        names(&entries),
+        ["Ab.app", "Ab-2", "Paint", "Paint.app", "Paint-old.txt"]
+    );
+    sort_entries(&mut entries, shown(SortDirection::Descending));
+    assert_eq!(
+        names(&entries),
+        ["Paint-old.txt", "Paint", "Paint.app", "Ab-2", "Ab.app"],
+        "the held name's tiebreak does not turn round"
+    );
+    let order = shown(SortDirection::Ascending);
+    let mut compared = listed();
+    compared.sort_by(|a, b| entry_cmp(a, b, order));
+    sort_entries(&mut entries, order);
+    assert_eq!(names(&compared), names(&entries));
 }

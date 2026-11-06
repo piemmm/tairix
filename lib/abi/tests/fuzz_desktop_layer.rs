@@ -17,8 +17,9 @@
 //! * anything a decoder *accepts* re-encodes and re-decodes identically
 //!   (round-trip stability), so nothing is silently normalised on the way in;
 //! * an accepted `OpenLayer` never carries an extent past
-//!   `DESKTOP_LAYER_MAX_SIDE_LOGICAL` — the bound that keeps a layer surface
-//!   from reproducing a surface the user is meant to trust.
+//!   `DESKTOP_LAYER_MAX_SIDE_PHYSICAL` — the logical bound that keeps a layer
+//!   surface from reproducing a surface the user is meant to trust, at the
+//!   largest scale; the session holds it to the live one.
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` mutates valid
 //! seed frames and feeds pure noise. A plain `cargo test` runs the fixed smoke
@@ -27,7 +28,7 @@
 use tairix_abi::driver::display::DisplayFormat;
 use tairix_abi::window_ipc::{
     decode_terrain_reply, encode_terrain_reply, LayerDepth, TerrainPlate, WindowEvent,
-    WindowRequest, DESKTOP_LAYER_MAX_PLATES, DESKTOP_LAYER_MAX_SIDE_LOGICAL,
+    WindowRequest, DESKTOP_LAYER_MAX_PLATES, DESKTOP_LAYER_MAX_SIDE_PHYSICAL,
     WINDOW_TERRAIN_REPLY_MAX,
 };
 use tairix_fuzzseed::Prng;
@@ -110,8 +111,8 @@ fn exercise_request(bytes: &[u8]) {
     } = request
     {
         assert!(
-            width_px <= DESKTOP_LAYER_MAX_SIDE_LOGICAL
-                && height_px <= DESKTOP_LAYER_MAX_SIDE_LOGICAL,
+            width_px <= DESKTOP_LAYER_MAX_SIDE_PHYSICAL
+                && height_px <= DESKTOP_LAYER_MAX_SIDE_PHYSICAL,
             "an accepted layer surface must never exceed the bound that keeps it \
              from reproducing a trusted surface ({width_px}x{height_px})"
         );

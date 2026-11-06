@@ -15,11 +15,13 @@
 
 extern crate alloc;
 
+pub mod appbar;
 pub mod cinder;
 pub mod fur;
 pub mod gait;
 pub mod layout;
 pub mod mind;
+pub mod pace;
 pub mod paint;
 pub mod pen;
 pub mod project;

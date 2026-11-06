@@ -46,6 +46,17 @@ accidentally widen its own authority by forgetting which methods it should
 avoid calling, and a client cannot be tricked into writing to a
 write-protected device by either side alone.
 
+## Asking what the device is
+
+`identify` asks the device what tells it from every other of its kind (the
+block service's `Identity` request), as the kernel's own client does when it
+records the device a volume came in on: the window's leading bytes are
+cleared, the request names no blocks and repeats the publication's binding,
+and the reply is decoded fail-closed, so a device that states none, refuses
+the question, or answers in a frame that does not decode states nothing. The
+RAID composer asks it of every member it connects and composes the identity an
+array states from the answers.
+
 ## The transport seam and the production transport
 
 `RemoteBlock` is generic over `BlkCall`, one synchronous request/reply

@@ -201,21 +201,26 @@ advance makes.
   leads it nowhere: the paths an operation carries are only spellings for its
   reports. A volume attached inside a tree is listed with no identity of its
   own and is gone into as the volume it is.
-- **A taken name.** Under `Taken::Ask` a leaf whose target name is taken pauses
-  on a `Conflict` — the leaf, the name, and whether a file or a link holds it —
-  until `resolve(Decision)`. `Overwrite` builds the replacement under a staging
-  name beside the occupant and, once it is whole and on the medium, renames it
-  over the occupant only while that is the node asked about (else the question
-  is asked again about whatever took its place), so a failure on the way
-  leaves the occupant as it was; a move on one volume is one replacing rename,
-  bound to the occupant the same way. `Skip` leaves both, and `Cancel`, taken
-  at any time, stops. A copy's directory meeting a directory merges into it; a
-  move's replaces it only while it is empty, on one volume or across two, and
-  is refused by a full one (`Rename`, `NotEmpty`). A leaf meeting a directory,
-  or the reverse, fails as `KindMismatch`. Under `Taken::Refuse`, for a caller
-  that chose free names, any taken name fails. A copy onto its source's only
-  name fails rather than destroying it; one onto another name for the same
-  node keeps the source whole.
+- **A taken name.** Under `Taken::Ask` a leaf whose target name a leaf holds
+  pauses on a `Conflict` — the leaf, the name, and whether a file or a link
+  holds it — until `resolve(Decision)`, and so does the operation's own
+  directory meeting a directory, the `Conflict` saying a directory holds the
+  name. `Overwrite` builds the replacement under a staging name beside the
+  occupant and, once it is whole and on the medium, renames it over the
+  occupant only while that is the node asked about (else the question is asked
+  again about whatever took its place), so a failure on the way leaves the
+  occupant as it was; a move on one volume is one replacing rename, bound to
+  the occupant the same way. On a directory `Overwrite` merges into it:
+  beneath, a directory meeting a directory merges as its parent did, and each
+  taken leaf is asked about in turn. A copy merges by copying into it, and so
+  does a move across volumes, which then removes what it copied; a move on one
+  volume renames each entry into it, a directory meeting one gone into in
+  turn, and removes each source directory once everything in it went, so it
+  copies nothing. `Skip` leaves both, and `Cancel`, taken at any time, stops.
+  A leaf meeting a directory, or the reverse, fails as `KindMismatch`. Under
+  `Taken::Refuse`, for a caller that chose free names, any taken name fails. A
+  copy onto its source's only name fails rather than destroying it; one onto
+  another name for the same node keeps the source whole.
 - **A copy** gives what it makes `cp`'s modes (`file_mode`, `DirModes`), its
   attributes as far as the destination keeps them (noted in `omissions()`),
   and never copies a directory into itself (`landing`, `Descent`). Like `cp`
@@ -237,16 +242,20 @@ advance makes.
   refusal ends an operation, what was done staying done; `rm` and `cp` carry
   past a refused entry, where a surface acting for a user stops and says which.
   The `Report` counts what was done (`done` entries, `bytes` accounted for,
-  `skipped` leaves), whether it was cancelled, and what was kept. Each
+  `skipped` entries), whether it was cancelled and what was kept, and its
+  `root` says what a transfer left under its target's name — `Created`,
+  `Replaced`, `Merged` or `Skipped`, none where it stopped first. Each
   `OpError` names the entry it stopped at where there is one (`path()`). What
   grows with the tree — the levels it is inside, a move's record of what it
   copied, the names it kept — is allocated fallibly, so a heap that cannot hold
   it stops the operation as `Read` with `OutOfMemory`.
 
-`fstree` drives an operation to its end or its question on its key loop; the
-file manager runs one per item of a paste, a delete or a move to Trash on its
-operations worker, a unit per step, under `Taken::Refuse` since its plan chose
-free names.
+`fstree` drives an operation to its end or its question on its key loop,
+merging a directory into one of its name as `cp -r` does; the file manager
+runs one per item of a paste, a delete or a move to Trash on its operations
+worker, a unit per step — a paste's under `Taken::Ask`, each question put in
+the operation's own window, and a move to Trash's under `Taken::Refuse`, since
+it chose free names.
 
 ## One run, one destination: `Created`
 

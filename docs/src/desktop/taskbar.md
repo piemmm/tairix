@@ -569,7 +569,9 @@ on the signal again, a press outside, or `Escape` closes it — though an
 `Escape` during a drag first settles the level where it stands. The level moves
 live as it is dragged (`SoundAction::Level { settled: false }`) and settles
 where it is released, the session asking the audio service for each over one
-coalescing queue. Muting marks the box and drops the level to the bottom of its
+coalescing queue. Where a change settles — a release, a key step, an unmute —
+the session plays the volume's feedback once the service lists it applied, so
+the new level is heard ([the cue authority](../userland/soundd.md)). Muting marks the box and drops the level to the bottom of its
 travel, disabled, at once; unmuting restores the level the sink was left at
 (`tairix_audio::volume::control_permille`). A sink whose room another session
 holds is drawn under an Authority Mark and asks for nothing. A report arriving

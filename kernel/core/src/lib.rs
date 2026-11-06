@@ -66,10 +66,10 @@
 
 extern crate alloc;
 
-// Host tests need `std` for `catch_unwind` and
-// `String::from_utf8`. The crate itself remains `no_std` for
-// production builds (no hacks).
-#[cfg(test)]
+// Host tests, and the host-test fixtures `test-arch` exposes to the kernel
+// binary's tests, need `std`. The crate itself remains `no_std` for
+// production builds.
+#[cfg(any(test, feature = "test-arch"))]
 extern crate std;
 
 pub mod appspawn;
@@ -176,9 +176,10 @@ pub(crate) mod test_entropy;
 // Shared host-test stand-ins for the process-global publications a real boot
 // makes once (the per-boot hash key, the scheduler wait hook), so a test that
 // needs one is not left observing whichever independent test boot reached the
-// publication first.
-#[cfg(test)]
-pub(crate) mod test_boot;
+// publication first, and the host boot a test's waiting threads block on:
+// public under `test-arch` for the kernel binary's tests.
+#[cfg(any(test, feature = "test-arch"))]
+pub mod test_boot;
 #[cfg(test)]
 pub(crate) mod test_identity;
 #[cfg(test)]

@@ -13,7 +13,7 @@ use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 
 use tairix_abi::audio::{
     decode_enumerate_reply, decode_open_reply, decode_state_reply, decode_streams_reply,
@@ -37,7 +37,7 @@ use tairix_abi::waitset::WaitSetOp;
 use tairix_abi::{CapabilityId, DriverError, Errno};
 use tairix_audio::route::Room;
 use tairix_audiochan::AudioChannelServer;
-use tairix_log::DiscardSink;
+use tairix_log::{DiscardSink, Sink};
 
 use crate::{AudioChannelTransport, AudioService, Notifier, RegionHost, RegionId};
 
@@ -60,8 +60,9 @@ fn rate(hz: u32) -> Rate {
 
 // ---------------------------------------------------------------- doubles
 
-/// A recording in-process audio device: it accepts one stereo `s16` sink and
-/// one stereo `s16` source, and keeps every frame it was handed.
+/// A recording in-process audio device: one stereo sink and one stereo
+/// source, taking the encodings and periods a test gives them, keeping every
+/// frame it was handed.
 struct FixtureDevice {
     configured: Option<ConfigureGrant>,
     running: bool,
@@ -74,7 +75,8 @@ struct FixtureDevice {
     /// Frames a capture endpoint hands back, drawn from here in order.
     captured: Vec<u8>,
     xrun_frames: u64,
-    now: Time64,
+    /// The clock its reports are stamped with, the service's own.
+    clock: Ticks,
     /// Whether the sink endpoint refuses every rate but the device's own, so
     /// a test can force the resampled path.
     fixed_rate: bool,
@@ -84,14 +86,22 @@ struct FixtureDevice {
     programmed: Vec<(u16, i32, bool)>,
     /// Whether the sink's connector is occupied.
     jack: JackState,
-    /// The one encoding the endpoints take.
-    format: SampleFormat,
-    /// The bits of it the endpoints resolve, where fewer.
+    /// The encodings the endpoints take.
+    formats: SampleFormats,
+    /// The bits of them the endpoints resolve, where fewer.
     resolution: Option<u8>,
+    /// The shortest and longest period the endpoints take.
+    periods: (u32, u32),
+    /// The period it grants whatever it is asked, where a test fixes one, as
+    /// a device whose hardware sets its own does.
+    fixed_period: Option<u32>,
+    /// How many configurations it has been asked for.
+    configurations: u32,
 }
 
 impl FixtureDevice {
-    fn new() -> Self {
+    /// A device stamping its reports with `clock`.
+    fn new(clock: &Ticks) -> Self {
         Self {
             configured: None,
             running: false,
@@ -100,13 +110,16 @@ impl FixtureDevice {
             played: Vec::new(),
             captured: Vec::new(),
             xrun_frames: 0,
-            now: Time64::from_secs(1),
+            clock: clock.clone(),
             fixed_rate: true,
             control: None,
             programmed: Vec::new(),
             jack: JackState::Unknown,
-            format: SampleFormat::S16,
+            formats: SampleFormats::EMPTY.with(SampleFormat::S16),
             resolution: None,
+            periods: (PERIOD, PERIOD),
+            fixed_period: None,
+            configurations: 0,
         }
     }
 }
@@ -139,12 +152,12 @@ impl Audio for FixtureDevice {
             index: endpoint,
             direction,
             jack: self.jack,
-            formats: SampleFormats::EMPTY.with(self.format),
+            formats: self.formats,
             resolution: self.resolution,
             channel_map: ChannelMap::STEREO,
             rates,
-            min_period_frames: PERIOD,
-            max_period_frames: PERIOD,
+            min_period_frames: self.periods.0,
+            max_period_frames: self.periods.1,
             max_ring_frames: MAX_RING,
             gain: if direction == StreamDirection::Playback {
                 self.control
@@ -160,12 +173,19 @@ impl Audio for FixtureDevice {
         endpoint: u16,
         params: &ConfigureParams,
     ) -> Result<ConfigureGrant, DriverError> {
+        self.configurations += 1;
         let facts = self.endpoint_facts(endpoint)?;
+        if !facts.formats.contains(params.format) {
+            return Err(DriverError::Unsupported);
+        }
         let grant = ConfigureGrant {
             rate: facts.rates.nearest(params.rate),
-            format: SampleFormat::S16,
+            format: params.format,
             channel_map: ChannelMap::STEREO,
-            period_frames: PERIOD,
+            period_frames: self
+                .fixed_period
+                .unwrap_or(params.period_frames)
+                .clamp(facts.min_period_frames, facts.max_period_frames),
             max_ring_frames: MAX_RING,
         };
         grant.validate().map_err(|_| DriverError::DeviceFault)?;
@@ -217,14 +237,12 @@ impl Audio for FixtureDevice {
             self.running = false;
             self.draining = false;
         }
-        self.now =
-            Time64::new(self.now.secs(), self.now.subsec_nanos() + 1_000_000).unwrap_or(self.now);
         Ok(AudioServiced {
             transferred,
             running: self.running,
             position: self.position,
             xrun_frames: self.xrun_frames,
-            sampled_at: self.now,
+            sampled_at: Time64::from_nanos(self.clock.tick()),
         })
     }
 
@@ -421,24 +439,34 @@ impl Notifier for Recorder {
     }
 }
 
-/// A monotonic clock that advances a millisecond per reading.
-struct TickClock {
-    now: RefCell<u64>,
+/// The one monotonic clock the service reads and the fixture's devices stamp
+/// their reports with, as one machine's clock serves both: a millisecond on
+/// per reading.
+#[derive(Clone, Default)]
+struct Ticks(Rc<Cell<u64>>);
+
+impl Ticks {
+    /// The next reading.
+    fn tick(&self) -> u64 {
+        let now = self.0.get() + 1_000_000;
+        self.0.set(now);
+        now
+    }
 }
 
-impl MonotonicClock for TickClock {
+impl MonotonicClock for Ticks {
     fn now_ns(&self) -> u64 {
-        let mut now = self.now.borrow_mut();
-        *now += 1_000_000;
-        *now
+        self.tick()
     }
 }
 
 /// The whole fixture: the service plus the halves a test reaches into.
 struct Fixture {
-    service: AudioService<SharedRegions, Recorder, TickClock>,
+    service: AudioService<SharedRegions, Recorder, Ticks>,
     regions: Rc<RefCell<FixtureRegions>>,
     device: Rc<RefCell<AudioChannelServer<FixtureDevice>>>,
+    /// The clock the service and every device read.
+    clock: Ticks,
     notified: Notified,
     refusals: Refusals,
     /// Each stream's client ring, by stream id.
@@ -503,20 +531,22 @@ impl Fixture {
     /// A fixture whose service has not yet read the seat's lease.
     fn with_no_seat_read() -> Self {
         let regions = Rc::new(RefCell::new(FixtureRegions::new()));
-        let device = Rc::new(RefCell::new(AudioChannelServer::new(FixtureDevice::new())));
+        let clock = Ticks::default();
+        let device = Rc::new(RefCell::new(AudioChannelServer::new(FixtureDevice::new(
+            &clock,
+        ))));
         let notified = Notified::default();
         let refusals = Refusals::default();
         let service = AudioService::new(
             SharedRegions(Rc::clone(&regions)),
             Recorder(Rc::clone(&notified), Rc::clone(&refusals)),
-            TickClock {
-                now: RefCell::new(0),
-            },
+            clock.clone(),
         );
         Self {
             service,
             regions,
             device,
+            clock,
             notified,
             refusals,
             rings: Vec::new(),
@@ -582,7 +612,7 @@ impl Fixture {
 
     /// Bind a second device, on channel `endpoint` at `location`.
     fn bind_another(&mut self, endpoint: u64, location: u64) {
-        self.bind_another_device(endpoint, location, FixtureDevice::new());
+        self.bind_another_device(endpoint, location, FixtureDevice::new(&self.clock));
     }
 
     /// Bind `device` as another channel.
@@ -644,12 +674,16 @@ impl Fixture {
 
     /// Serve one request and answer the reply bytes.
     fn call(&mut self, caller: &Origin, request: &AudioRequest) -> Vec<u8> {
+        self.call_logged(caller, request, &DiscardSink)
+    }
+
+    /// Serve one request, the service's records made into `sink`, and answer
+    /// the reply bytes.
+    fn call_logged(&mut self, caller: &Origin, request: &AudioRequest, sink: &dyn Sink) -> Vec<u8> {
         let mut frame = [0u8; AUDIO_MAX_REQUEST];
         let len = request.encode(&mut frame).expect("encoded");
         let mut reply = [0u8; AUDIO_MAX_REPLY];
-        let reply_len = self
-            .service
-            .handle(caller, &frame[..len], &mut reply, &DiscardSink);
+        let reply_len = self.service.handle(caller, &frame[..len], &mut reply, sink);
         reply[..reply_len].to_vec()
     }
 
@@ -1154,6 +1188,113 @@ fn a_clock_read_before_the_first_period_refuses_rather_than_inventing_one() {
     );
 }
 
+/// A period a device reports for a configuration since given up is not taken
+/// as the next one's: the clock a stream is told of is its own. Regression: a
+/// report the driver sent before the endpoint was released became the new
+/// configuration's first, every later one ran behind it, and the clock stayed
+/// where the old configuration had left it.
+#[test]
+fn a_period_of_a_configuration_given_up_is_not_the_next_ones() {
+    let mut fixture = Fixture::new();
+    fixture.bind();
+    let player = caller(7, &[]);
+    let first = fixture.open_playback(&player, DEVICE_HZ, 2_048);
+    fixture.grant(
+        &player,
+        &AudioRequest::Close {
+            stream_id: first.stream_id,
+        },
+    );
+    let music = fixture.open_playback(&player, DEVICE_HZ, 2_048);
+    let stale = tairix_abi::driver::audio_channel::AudioChannelNotify::PeriodElapsed {
+        endpoint: 0,
+        position: Frames::new(1_000_000),
+        sampled_at: Time64::from_secs(1),
+    }
+    .encode();
+    fixture.service.on_device_notify(0, &stale, &DiscardSink);
+    fixture.client_write(&music, &signal(1_000));
+    start(&mut fixture, &player, &music);
+    run(&mut fixture, 2);
+    let reply = fixture.call(
+        &player,
+        &AudioRequest::Clock {
+            stream_id: music.stream_id,
+        },
+    );
+    let clock = tairix_abi::audio::decode_clock_reply(&reply).expect("a clock");
+    assert!(clock.position.get() < 1_000_000, "{clock:?}");
+}
+
+/// A report a device made for a configuration since given up is refused
+/// whenever it arrives, not only before the next one starts. Regression: a
+/// source closed, opened and started again back to back took the old
+/// configuration's last report, served after the start, as the new one's
+/// first, refused every report behind it as going backwards, and its clock
+/// stayed where the old configuration had left it.
+#[test]
+fn a_report_of_a_configuration_given_up_is_refused_after_the_next_starts() {
+    let mut fixture = Fixture::new();
+    fixture.bind();
+    let recorder = caller(8, &[CapabilityId::AUDIO_CAPTURE]);
+    let capture = |fixture: &mut Fixture| {
+        let grant = open_capture(fixture, &recorder);
+        fixture.attach_capture(&recorder, &grant);
+        start(fixture, &recorder, &grant);
+        grant
+    };
+    let hear = |fixture: &mut Fixture| {
+        let heard = signal(PERIOD as usize);
+        fixture
+            .device
+            .borrow_mut()
+            .audio_mut()
+            .captured
+            .extend_from_slice(&heard);
+    };
+    let first = capture(&mut fixture);
+    for _ in 0..4 {
+        hear(&mut fixture);
+        fixture.period_on(1);
+    }
+    hear(&mut fixture);
+    let stale = fixture
+        .service_only(1)
+        .expect("the device captured on")
+        .report;
+    fixture.grant(
+        &recorder,
+        &AudioRequest::Close {
+            stream_id: first.stream_id,
+        },
+    );
+    let second = capture(&mut fixture);
+    let late = tairix_abi::driver::audio_channel::AudioChannelNotify::PeriodElapsed {
+        endpoint: 1,
+        position: stale.position,
+        sampled_at: stale.sampled_at,
+    }
+    .encode();
+    fixture.service.on_device_notify(0, &late, &DiscardSink);
+    for _ in 0..2 {
+        hear(&mut fixture);
+        fixture.period_on(1);
+    }
+    let reply = fixture.call(
+        &recorder,
+        &AudioRequest::Clock {
+            stream_id: second.stream_id,
+        },
+    );
+    let clock = tairix_abi::audio::decode_clock_reply(&reply).expect("a clock");
+    assert_eq!(
+        clock.position,
+        fixture.device.borrow().audio().position,
+        "the running configuration's own"
+    );
+    assert!(clock.sampled_at > stale.sampled_at, "{clock:?}");
+}
+
 #[test]
 fn closing_the_last_stream_releases_the_endpoint() {
     let mut fixture = Fixture::new();
@@ -1441,7 +1582,8 @@ fn a_sink_that_no_longer_plays_its_configuration_loses_its_streams() {
     fixture.bind();
     let owner = caller(7, &[]);
     let grant = fixture.open_playback(&owner, DEVICE_HZ, 2_048);
-    fixture.device.borrow_mut().audio_mut().format = SampleFormat::S24In32;
+    fixture.device.borrow_mut().audio_mut().formats =
+        SampleFormats::EMPTY.with(SampleFormat::S24In32);
     jack_changed(&mut fixture, 0);
     assert_lost(&mut fixture, &[(&owner, grant.stream_id)]);
     assert!(
@@ -1450,6 +1592,37 @@ fn a_sink_that_no_longer_plays_its_configuration_loses_its_streams() {
     );
     let sink = fixture.sink(&owner, SINK);
     assert!(sink.formats.contains(SampleFormat::S24In32));
+}
+
+/// A stream lost with its endpoint's configuration holds nothing of the next:
+/// its close leaves a stream the endpoint was configured afresh for playing.
+/// Regression: its share of the lost configuration's phase bank was given back
+/// to the next one's, freeing the bank the new stream ran over and faulting
+/// it.
+#[test]
+fn a_stream_lost_with_its_configuration_holds_nothing_of_the_next() {
+    let mut fixture = Fixture::new();
+    fixture.bind();
+    let owner = caller(7, &[]);
+    let lost = fixture.open_playback(&owner, 24_000, 2_048);
+    fixture.device.borrow_mut().audio_mut().formats = SampleFormats::EMPTY.with(SampleFormat::S32);
+    jack_changed(&mut fixture, 0);
+    assert_lost(&mut fixture, &[(&owner, lost.stream_id)]);
+    let fresh = fixture.open_playback(&owner, 24_000, 2_048);
+    fixture.grant(
+        &owner,
+        &AudioRequest::Close {
+            stream_id: lost.stream_id,
+        },
+    );
+    fixture.client_write(&fresh, &signal(1_024));
+    start(&mut fixture, &owner, &fresh);
+    run(&mut fixture, 2);
+    assert_eq!(fixture.state(&owner, &fresh), StreamState::Running);
+    assert!(
+        fixture.played().iter().any(|byte| *byte != 0),
+        "the new stream is heard"
+    );
 }
 
 /// An attach the mixer could not complete leaves nothing programmed in the
@@ -1477,10 +1650,10 @@ fn an_attach_that_fails_detaches_the_driver() {
     assert!(fixture.device.borrow().audio().configured.is_none());
 }
 
-/// A stream refused after its endpoint was programmed for it leaves the
-/// endpoint programmed for nobody no longer.
+/// A stream whose layout has nowhere to go is refused before its endpoint is
+/// programmed for it.
 #[test]
-fn a_stream_refused_after_its_endpoint_was_programmed_gives_it_back() {
+fn a_stream_whose_layout_has_nowhere_to_go_programs_nothing() {
     let mut fixture = Fixture::new();
     fixture.bind();
     let recorder = caller(8, &[CapabilityId::AUDIO_CAPTURE]);
@@ -1508,6 +1681,11 @@ fn a_stream_refused_after_its_endpoint_was_programmed_gives_it_back() {
         fixture.device.borrow().audio().configured.is_none(),
         "no stereo source has anywhere to go in a lone LFE channel"
     );
+    assert_eq!(
+        fixture.device.borrow().audio().configurations,
+        0,
+        "nothing was asked of it"
+    );
 }
 
 #[test]
@@ -1534,21 +1712,25 @@ fn the_last_stream_closing_gives_the_device_back() {
     );
 }
 
+/// What a client capturing the source `device_id` names at `hz` for `role`
+/// asks for, its ring holding `latency` frames.
+fn capture_params(device_id: u32, role: StreamRole, hz: u32, latency: u32) -> OpenParams {
+    OpenParams {
+        device_id,
+        direction: StreamDirection::Capture,
+        format: SampleFormat::S16,
+        rate: rate(hz),
+        channel_map: ChannelMap::STEREO,
+        role,
+        latency_target_frames: latency,
+        tenancy: Tenancy::Caller,
+    }
+}
+
 /// A capture stream for `recorder` on the fixture device.
 fn open_capture(fixture: &mut Fixture, recorder: &Origin) -> StreamGrant {
-    let reply = fixture.call(
-        recorder,
-        &AudioRequest::Open(OpenParams {
-            device_id: 0,
-            direction: StreamDirection::Capture,
-            format: SampleFormat::S16,
-            rate: rate(DEVICE_HZ),
-            channel_map: ChannelMap::STEREO,
-            role: StreamRole::Media,
-            latency_target_frames: 2_048,
-            tenancy: Tenancy::Caller,
-        }),
-    );
+    let params = capture_params(0, StreamRole::Media, DEVICE_HZ, 2_048);
+    let reply = fixture.call(recorder, &AudioRequest::Open(params));
     decode_open_reply(&reply).expect("the capture open is granted")
 }
 
@@ -2159,6 +2341,27 @@ fn a_corrupt_client_ring_faults_its_own_stream_and_nothing_else() {
     assert_eq!(fixture.state(&bystander, &music), StreamState::Idle);
 }
 
+/// A stream faulted for its ring settles its endpoint as a stop does: with
+/// nothing else live the device plays out what it holds and stops clocking.
+/// Regression: the endpoint was left clocking with nothing to play.
+#[test]
+fn a_device_whose_last_live_stream_is_faulted_winds_down() {
+    let mut fixture = Fixture::new();
+    fixture.bind();
+    let vandal = caller(7, &[]);
+    let broken = fixture.open_playback(&vandal, DEVICE_HZ, 4_096);
+    fixture.client_write(&broken, &signal(2_000));
+    start(&mut fixture, &vandal, &broken);
+    let ring = fixture.ring_of(&broken);
+    fixture.regions.borrow_mut().bytes(ring).expect("mapped")[..8].fill(0xFF);
+    run(&mut fixture, 2);
+    assert_eq!(fixture.state(&vandal, &broken), StreamState::Faulted);
+    assert!(
+        !fixture.device.borrow().audio().running,
+        "nothing live is left to clock the device for"
+    );
+}
+
 /// A stream on a lost device cannot be stopped back into a state that
 /// claims it could play again.
 #[test]
@@ -2362,6 +2565,17 @@ fn level(millibel: i32) -> AudioGain {
     AudioGain::new(millibel).expect("attenuation")
 }
 
+/// The loudest sample of a stereo `s16` block, as a magnitude.
+fn peak(bytes: &[u8]) -> u16 {
+    bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair).unsigned_abs())
+        .max()
+        .unwrap_or(0)
+}
+
 /// The fixture sink's id: the first device's first endpoint.
 const SINK: u32 = 1;
 
@@ -2530,10 +2744,14 @@ fn a_default_with_no_preference_goes_where_something_is_plugged_in() {
     fixture.device.borrow_mut().audio_mut().jack = JackState::Absent;
     fixture.bind();
     let anyone = caller(9, &[]);
-    let mut monitor = FixtureDevice::new();
+    let mut monitor = FixtureDevice::new(&fixture.clock);
     monitor.jack = JackState::Present;
     fixture.bind_another_device(0x4143_4841_4E00_0002, 0x51e7, monitor);
-    fixture.bind_another_device(0x4143_4841_4E00_0003, 0x51e8, FixtureDevice::new());
+    fixture.bind_another_device(
+        0x4143_4841_4E00_0003,
+        0x51e8,
+        FixtureDevice::new(&fixture.clock),
+    );
     let sinks = fixture.devices(&anyone, StreamDirection::Playback);
     assert_eq!(sinks.len(), 3);
     let defaults: Vec<u32> = sinks
@@ -2819,15 +3037,6 @@ fn a_level_a_device_without_a_control_cannot_take_is_the_mixers() {
     run(&mut fixture, 16);
     let played = fixture.played();
     assert_eq!(played.len(), samples.len());
-    let peak = |bytes: &[u8]| {
-        bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| i16::from_le_bytes(*pair).unsigned_abs())
-            .max()
-            .unwrap_or(0)
-    };
     assert_eq!(peak(&samples), 1_000);
     // -6 dB is a factor of 0.501, give or take the last bit's rounding.
     let quieter = peak(&played);
@@ -3046,3 +3255,6 @@ fn a_closed_streams_held_wakes_go_with_it() {
         "nothing owed for a closed stream"
     );
 }
+
+#[path = "capture_tests.rs"]
+mod capture;

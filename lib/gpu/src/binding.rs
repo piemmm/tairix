@@ -298,8 +298,7 @@ impl LayoutTables {
             }),
         )
         .ok_or(Error::OutOfMemory)?;
-        let bindings = fallible::collected(bindings.len(), bindings.iter().copied())
-            .ok_or(Error::OutOfMemory)?;
+        let bindings = fallible::copied(bindings).ok_or(Error::OutOfMemory)?;
         Ok(Self {
             bindings,
             firsts,

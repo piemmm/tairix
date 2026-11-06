@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use tairix_parallel::JobRunner;
 use tairix_util::fallible;
 
-use crate::color::{mix, Pixel};
+use crate::color::{mix, Pixel, Pixel16};
 use crate::dither::DitherRow;
 use crate::surface::{band_rows, RowBand, Surface};
 
@@ -74,6 +74,24 @@ pub fn box_blur_coverage(
     aux: &mut [u8],
 ) {
     blur_block(coverage, width, height, radius, aux);
+}
+
+/// Blur `region` in place: a dense, row-major `width`×`height` block of
+/// sixteen-bit premultiplied pixels ([`Pixel16`]), by the same separable box
+/// blur [`box_blur`] gives eight-bit ones, using `aux` as the intermediate
+/// buffer.
+///
+/// For work that blurs a picture pass after pass — a Gaussian of box blurs —
+/// so that each pass rounds at sixteen bits rather than at eight. The refusals
+/// are [`box_blur`]'s.
+pub fn box_blur16(
+    region: &mut [Pixel16],
+    width: usize,
+    height: usize,
+    radius: usize,
+    aux: &mut [Pixel16],
+) {
+    blur_block(region, width, height, radius, aux);
 }
 
 /// How many box passes [`soften_coverage`] runs: three are within a few
@@ -1562,8 +1580,8 @@ pub(crate) fn blur_span<S: Copy, W: Window<S>>(
     }
 }
 
-/// What the sliding window averages: a pixel's four premultiplied channels,
-/// or one byte of coverage.
+/// What the sliding window averages: a pixel's four premultiplied channels, at
+/// eight bits or sixteen, or one byte of coverage.
 trait Sample: Copy {
     /// The running sums of the samples inside the window.
     type Window: Window<Self>;
@@ -1599,6 +1617,10 @@ impl Sample for Pixel {
 
 impl Sample for u8 {
     type Window = CoverageSum;
+}
+
+impl Sample for Pixel16 {
+    type Window = DeepSum;
 }
 
 /// Add `row` into the column sums `sums`, pairwise: the portable reference.
@@ -1641,9 +1663,10 @@ pub(crate) fn line_portable(
 
 /// The running sums of the samples currently inside a sliding window.
 ///
-/// A `u32` per channel is ample: a channel is at most 255 and the window
-/// holds at most one screen dimension's worth of samples, so the sum cannot
-/// approach the type's range for any radius a surface is drawn at. Every
+/// A `u32` per channel is ample: a channel is at most 255, or 65 535 at
+/// sixteen bits, and the window holds at most one screen dimension's worth of
+/// samples, so the sum cannot approach the type's range for any radius a
+/// surface is drawn at. Every
 /// operation saturates so that a caller passing an absurd radius — the
 /// entry points are public and take any `usize` — gets a flattened region
 /// rather than an arithmetic panic.
@@ -1729,6 +1752,49 @@ impl Window<u8> for CoverageSum {
     }
 }
 
+/// One window's four sixteen-bit channel sums.
+#[derive(Copy, Clone, Default)]
+struct DeepSum {
+    r: u32,
+    g: u32,
+    b: u32,
+    a: u32,
+}
+
+impl Window<Pixel16> for DeepSum {
+    fn add_many(&mut self, pixel: Pixel16, times: usize) {
+        let times = u32::try_from(times).unwrap_or(u32::MAX);
+        let weighted = |channel: u16| u32::from(channel).saturating_mul(times);
+        self.r = self.r.saturating_add(weighted(pixel.r));
+        self.g = self.g.saturating_add(weighted(pixel.g));
+        self.b = self.b.saturating_add(weighted(pixel.b));
+        self.a = self.a.saturating_add(weighted(pixel.a));
+    }
+
+    fn add(&mut self, pixel: Pixel16) {
+        self.r = self.r.saturating_add(u32::from(pixel.r));
+        self.g = self.g.saturating_add(u32::from(pixel.g));
+        self.b = self.b.saturating_add(u32::from(pixel.b));
+        self.a = self.a.saturating_add(u32::from(pixel.a));
+    }
+
+    fn sub(&mut self, pixel: Pixel16) {
+        self.r = self.r.saturating_sub(u32::from(pixel.r));
+        self.g = self.g.saturating_sub(u32::from(pixel.g));
+        self.b = self.b.saturating_sub(u32::from(pixel.b));
+        self.a = self.a.saturating_sub(u32::from(pixel.a));
+    }
+
+    fn mean(self, recip: Reciprocal) -> Pixel16 {
+        Pixel16 {
+            r: recip.apply16(self.r),
+            g: recip.apply16(self.g),
+            b: recip.apply16(self.b),
+            a: recip.apply16(self.a),
+        }
+    }
+}
+
 /// The fractional bits the reciprocal multiply is computed with.
 const RECIPROCAL_SHIFT: u32 = 40;
 
@@ -1763,9 +1829,14 @@ pub(crate) enum Reciprocal {
     /// The product saturates so the answer stays a total function of its
     /// argument: a numerator from outside a window of `d` samples — which no
     /// blur produces — reads as fully bright rather than overflowing.
+    ///
+    /// A sixteen-bit window's mean ([`apply16`](Self::apply16)) multiplies by
+    /// its own reciprocal, `deep`, exact for its wider sums by the same
+    /// argument.
     Multiply {
         m: u64,
         half: u32,
+        deep: DeepDivisor,
         #[cfg(raster_lanes)]
         lanes: LaneDivisor,
     },
@@ -1815,6 +1886,53 @@ impl LaneDivisor {
     }
 }
 
+/// The most samples a sixteen-bit window's mean is multiplied out for; a wider
+/// window divides.
+const DEEP_MAX_COUNT: u32 = 1 << 15;
+
+/// One sixteen-bit channel's rounded mean as a multiply,
+/// `floor((sum + half) * m / 2^shift)` with `shift = 16 + 2b` for a count
+/// `d <= 2^b`.
+///
+/// Exact by [`Reciprocal`]'s argument with `S = 16 + 2b`: a window of `d`
+/// samples of at most 65 535 holds `n < 2^16·d <= 2^(16+b)`, and `e < d`, with
+/// `d <= 2^b`, so `n·e < 2^S`. And `m <= 2^(17+b)`, so the product stays below
+/// `2^(33+2b)`, within 64 bits for every count up to [`DEEP_MAX_COUNT`]; a
+/// wider count divides. `blur_tests` checks it either side of every step of
+/// the quotient.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeepDivisor {
+    /// The multiplier and the shift, for a count the multiply is exact over.
+    multiply: Option<(u64, u32)>,
+    half: u32,
+    d: u32,
+}
+
+impl DeepDivisor {
+    /// The sixteen-bit mean over a window of `d` samples; nought reads as one.
+    fn new(d: u32) -> Self {
+        let d = d.max(1);
+        let bits = u32::BITS - (d - 1).leading_zeros();
+        let shift = 16 + 2 * bits;
+        let multiply =
+            (d <= DEEP_MAX_COUNT).then(|| ((1u64 << shift).div_ceil(u64::from(d)), shift));
+        Self {
+            multiply,
+            half: d / 2,
+            d,
+        }
+    }
+
+    /// The rounded mean of `sum`, unclamped.
+    fn apply(self, sum: u32) -> u64 {
+        let n = u64::from(sum.saturating_add(self.half));
+        match self.multiply {
+            Some((m, shift)) => n.saturating_mul(m) >> shift,
+            None => n / u64::from(self.d),
+        }
+    }
+}
+
 impl Reciprocal {
     /// The divisor for a window of `count` samples. A count of zero would make
     /// no window, so it reads as one.
@@ -1825,6 +1943,7 @@ impl Reciprocal {
             Self::Multiply {
                 m,
                 half: d / 2,
+                deep: DeepDivisor::new(d),
                 #[cfg(raster_lanes)]
                 lanes: LaneDivisor::new(d),
             }
@@ -1858,6 +1977,16 @@ impl Reciprocal {
             Self::Divide { d } => u64::from(sum.saturating_add(d / 2)) / u64::from(d),
         };
         u8::try_from(rounded.min(255)).unwrap_or(u8::MAX)
+    }
+
+    /// One sixteen-bit channel's rounded mean, clamped to the channel range.
+    #[inline]
+    pub(crate) fn apply16(self, sum: u32) -> u16 {
+        let rounded = match self {
+            Self::Multiply { deep, .. } => deep.apply(sum),
+            Self::Divide { d } => u64::from(sum.saturating_add(d / 2)) / u64::from(d),
+        };
+        u16::try_from(rounded.min(u64::from(u16::MAX))).unwrap_or(u16::MAX)
     }
 }
 

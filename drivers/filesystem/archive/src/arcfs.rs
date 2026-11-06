@@ -546,8 +546,7 @@ fn arcfs_method(coding: Coding) -> Option<(u8, u8)> {
 
 /// A table entry, copied to be kept as a member's notes.
 fn notes(entry: &[u8]) -> Result<Vec<u8>, DriverError> {
-    tairix_util::fallible::collected(entry.len(), entry.iter().copied())
-        .ok_or(DriverError::OutOfMemory)
+    tairix_util::fallible::copied(entry).ok_or(DriverError::OutOfMemory)
 }
 
 /// Fill a 36-byte table entry.

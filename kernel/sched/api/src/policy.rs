@@ -59,10 +59,14 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// `home_cpu`.
     ///
     /// Implementations must never panic on a full home queue; they
-    /// back-pressure or relocate the task instead.
+    /// back-pressure or relocate the task instead. Nor do they abort for want
+    /// of memory: every allocation an admission makes is taken before
+    /// anything is filed ([`crate::park::admit_record`]), so a refusal leaves
+    /// the scheduler as it was.
     ///
     /// # Errors
     /// * [`crate::SchedError::NoSuchCpu`] if `home_cpu` is out of range.
+    /// * [`crate::SchedError::OutOfMemory`] if the task cannot be held.
     fn spawn<F>(&self, home_cpu: CpuId, priority: Priority, body: F) -> SchedResult<TaskId>
     where
         F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static;
@@ -90,6 +94,7 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     ///
     /// # Errors
     /// * [`crate::SchedError::NoSuchCpu`] if `home_cpu` is out of range.
+    /// * [`crate::SchedError::OutOfMemory`] if the task cannot be held.
     fn spawn_parked<F>(&self, home_cpu: CpuId, priority: Priority, body: F) -> SchedResult<TaskId>
     where
         F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static;
@@ -114,6 +119,7 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     ///   `id` — the admission is refused rather than displacing it.
     /// * [`crate::SchedError::NoTaskIdAvailable`] if `id` is
     ///   [`crate::NO_TASK`], which names no task and is never admitted.
+    /// * [`crate::SchedError::OutOfMemory`] if the task cannot be held.
     fn spawn_parked_as<F>(
         &self,
         id: TaskId,

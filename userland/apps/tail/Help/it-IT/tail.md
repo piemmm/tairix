@@ -25,7 +25,19 @@ La forma storica come primo argomento `tail -num` / `tail +num` (con una
 lettera finale `b`/`c`/`l` facoltativa) è accettata, come nello strumento
 GNU.
 
-La modalità di inseguimento tiene ogni file aperto e stampa i nuovi dati man mano che cresce; si blocca finché il file non cambia — mai attesa attiva. `-f` segue il descrittore; `-F` segue il nome e riapre un file ruotato, e `--retry` attende che un nome compaia. `--pid=PID` termina l'inseguimento quando il processo finisce (verificato ogni `--sleep-interval` secondi, predefinito 1; `--max-unchanged-stats` predefinito 5). Un troncamento viene segnalato e il file inseguito dal suo nuovo inizio.
+La modalità di inseguimento tiene ogni file aperto e stampa i nuovi dati
+man mano che il file cresce. `-f` segue il file aperto tramite il
+descrittore — dopo una rinomina o uno spostamento continua a seguire lo
+stesso file. `-F` segue il *nome*: quando il file viene ruotato
+(rinominato altrove e sostituito da un nuovo file al suo posto) riapre il
+nuovo file, e `--retry` continua a provare un nome che non c'è ancora.
+Un inseguimento si blocca finché il file non cambia davvero — non fa mai
+girare la CPU a vuoto. `--pid=PID` termina l'inseguimento non appena il
+processo `PID` esce, verificato ogni `--sleep-interval` (secondi,
+predefinito 1). `--max-unchanged-stats=N` stabilisce quanti cicli fermi
+passano prima che `-F` ricontrolli il nome in cerca di una rotazione
+(predefinito 5). Un troncamento (il file si riduce) viene segnalato e il
+file viene inseguito di nuovo dal suo nuovo inizio.
 
 Quando del contenuto iniziale non viene mostrato, un record informativo
 è scritto sul flusso di informazioni standard (fd 3); non cambia mai
@@ -50,13 +62,19 @@ per byte.
 - `-v, --verbose` — stampare sempre le intestazioni `==> file <==`.
 - `-z, --zero-terminated` — le righe sono delimitate da NUL invece che
   dall'a capo.
-- `-f, --follow[=descriptor]` — seguire per descrittore, stampando i dati aggiunti.
-- `-F` — seguire per nome (`--follow=name --retry`); riaprire un file ruotato.
+- `-f, --follow[=descriptor]` — tenere aperto il file e stampare i dati
+  man mano che vengono aggiunti, seguendolo per descrittore.
+- `-F` — seguire per nome (`--follow=name --retry`): riaprire il file
+  quando viene ruotato.
 - `--follow=name` — seguire il nome anziché il descrittore.
-- `--retry` — continuare a provare ad aprire un file non ancora presente.
-- `--pid <PID>` — fermare l'inseguimento quando il processo `PID` muore.
-- `--sleep-interval <N>` — secondi tra i controlli (predefinito 1).
-- `--max-unchanged-stats <N>` — cicli fermi prima che `-F` ricontrolli il nome (predefinito 5).
+- `--retry` — continuare a provare ad aprire un file non ancora
+  accessibile.
+- `--pid <PID>` — durante un inseguimento, fermarsi non appena il
+  processo `PID` muore.
+- `--sleep-interval <N>` — secondi tra i ricontrolli di `--pid`/rotazione
+  (frazioni ammesse; predefinito 1).
+- `--max-unchanged-stats <N>` — cicli fermi prima che `-F` ricontrolli il
+  nome in cerca di una rotazione (predefinito 5).
 - `-h, -?` — mostrare l'aiuto breve di questo comando.
 
 ## EXAMPLES
@@ -66,6 +84,12 @@ per byte.
   sotto la sua intestazione.
 - `tail -c 1K image` — stampare gli ultimi 1024 byte di `image`.
 - `tail -n +5 notes` — stampare `notes` dalla sua 5ª riga alla fine.
+- `tail -f log.txt` — stampare le ultime 10 righe, poi le nuove righe
+  man mano che vengono scritte.
+- `tail -F /System/Logs/system` — seguire il registro di sistema
+  attraverso le rotazioni.
+- `tail -f --pid 1234 out` — seguire `out` finché il processo 1234 non
+  esce.
 
 ## EXIT STATUS
 

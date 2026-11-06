@@ -313,36 +313,6 @@ fn clicking_the_confirm_button_accepts() {
     assert_eq!(answer, Some(Answer::Confirmed));
 }
 
-#[test]
-fn a_layer_form_keeps_the_exact_opacity_until_its_slider_moves() {
-    use crate::document::Shown;
-    let shown = Shown {
-        name: alloc::string::String::from("Haze"),
-        opacity: 127,
-        visible: true,
-    };
-    let mut form = Form::layer(&shown);
-    assert_eq!(form.purpose(), Purpose::Layer);
-    assert_eq!(
-        form.layer_answer(),
-        Ok(shown.clone()),
-        "nothing moved, nothing changed"
-    );
-    form.follow_opacity(&FieldGroupAction {
-        row: 1,
-        action: FieldAction::Settled { permille: 1000 },
-    });
-    let answered = form.layer_answer().expect("a name");
-    assert_eq!((answered.opacity, answered.visible), (255, true));
-    clear_field(&mut form, 4);
-    assert!(form.layer_answer().is_err(), "a layer has a name");
-    typed(&mut form, "Mist");
-    assert_eq!(
-        form.layer_answer().map(|shown| shown.name),
-        Ok(alloc::string::String::from("Mist"))
-    );
-}
-
 /// A choice list opens within the form's own dialog window, the only room it
 /// has, and what it opens into is reported.
 #[test]

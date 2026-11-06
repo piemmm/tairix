@@ -38,9 +38,12 @@
 //! pages are handed to `ramzip` (`plans/SWAPSWAPSWAP.md` section 6).
 //! Growth is admitted only at normal pressure and never into the
 //! reserve ([`tairix_reclaim::PressureGauge::growth_permitted`]). Inserts
-//! over the
-//! hard limit first evict least-recently-used blocks down to the low
-//! watermark (hysteresis).
+//! over the hard limit first evict least-recently-used blocks down to the
+//! low watermark (hysteresis). A block the heap cannot index is not
+//! retained, the read served all the same: its copy and its room in both
+//! indexes are had before anything is evicted for it. Room a shrink or an
+//! invalidation frees goes back to the heap at the first operation above
+//! normal pressure.
 //!
 //! # Coherence and secret hygiene
 //!
@@ -52,10 +55,9 @@
 //! writes issued under [`BufferClass::Sensitive`] carry material the
 //! caller will scrub (key slots, credentials): they bypass the cache
 //! entirely *and* evict any cached copy of their range, so no
-//! credential-bearing block is ever retained. Every cached buffer is
-//! volatilely wiped before its entry is released — on invalidation,
-//! eviction, pressure shrink, poisoning, and teardown — because the
-//! disk carries the user volume, whose cached blocks are user data even
+//! credential-bearing block is ever retained. Every cached buffer erases
+//! itself as its entry is released, on whichever path releases it, because
+//! the disk carries the user volume, whose cached blocks are user data even
 //! when they are ciphertext.
 //!
 //! # Bypasses
@@ -70,7 +72,6 @@
 //! Unaligned or zero-length requests are the device's own error
 //! surface and are forwarded untouched.
 
-use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -82,14 +83,16 @@ use tairix_abi::driver::block::{
 use tairix_abi::driver::BufferClass;
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::DriverError;
+use tairix_collections::OrderedMap;
 use tairix_kernel_core::{CacheClass, CacheControl, CACHE_CONTROL};
 use tairix_log::Sink;
 use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
     CacheCandidate, CacheLedger, CachePolicy, GrowthAllowance, InvalidationSource, MemoryPressure,
-    RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity, MAP_ENTRY_OVERHEAD,
+    PressureBand, RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
+    MAP_ENTRY_OVERHEAD,
 };
-use zeroize::Zeroize;
+use tairix_util::secret::WipedBuf;
 
 /// The fixed `cache` label this cache's audit records carry.
 const CACHE_LABEL: &str = "block";
@@ -126,7 +129,7 @@ const READAHEAD_MAX_BYTES: u64 = 256 * 1024;
 
 /// One retained device block: its bytes and its recency tick.
 struct Entry {
-    data: Vec<u8>,
+    data: WipedBuf,
     tick: u64,
 }
 
@@ -163,9 +166,12 @@ pub struct BlockCache<B: Block> {
     /// so ticks are unique and the LRU index is keyed by them.
     tick: u64,
     /// Retained blocks, keyed by LBA.
-    entries: BTreeMap<u64, Entry>,
+    entries: OrderedMap<u64, Entry>,
     /// LRU index: tick (oldest first) to entry key.
-    lru: BTreeMap<u64, u64>,
+    lru: OrderedMap<u64, u64>,
+    /// A block left the indexes outside a forced shrink, so they may hold
+    /// room they no longer need.
+    slack: bool,
     /// The LBA the next read is *expected* at if the caller is streaming
     /// sequentially: the block just past the previous request's span.
     /// A request whose start matches it is a sequential continuation and
@@ -200,7 +206,8 @@ impl<B: Block> BlockCache<B> {
     ///
     /// Propagates [`Block::geometry`]'s error: the device is never
     /// wrapped on a geometry fault, exactly as the block-sharing layer
-    /// refuses it.
+    /// refuses it. [`DriverError::OutOfMemory`] when the cache's ledger
+    /// cannot be allocated.
     pub fn new(
         device: B,
         owner: &'static str,
@@ -226,6 +233,8 @@ impl<B: Block> BlockCache<B> {
                 None
             }
         };
+        let accounting =
+            Arc::try_new(CacheAccounting::new()).map_err(|_| DriverError::OutOfMemory)?;
         let mut cache = Self {
             device,
             geometry,
@@ -233,12 +242,13 @@ impl<B: Block> BlockCache<B> {
             control: &CACHE_CONTROL,
             pressure,
             sink,
-            accounting: Arc::new(CacheAccounting::new()),
+            accounting,
             poisoned: policy.is_none(),
             policy,
             tick: 0,
-            entries: BTreeMap::new(),
-            lru: BTreeMap::new(),
+            entries: OrderedMap::new(),
+            lru: OrderedMap::new(),
+            slack: false,
             readahead_next: None,
             readahead_window: 0,
             readahead_suspect: None,
@@ -257,7 +267,8 @@ impl<B: Block> BlockCache<B> {
     ///
     /// # Errors
     ///
-    /// Propagates [`Block::geometry`]'s error, exactly as [`Self::new`].
+    /// As [`Self::new`]: the device's geometry fault, or
+    /// [`DriverError::OutOfMemory`].
     pub fn for_disk(
         device: B,
         owner: &'static str,
@@ -338,21 +349,15 @@ impl<B: Block> BlockCache<B> {
         (self.block_size(), MAP_ENTRY_OVERHEAD)
     }
 
-    /// Volatilely wipe a cached buffer: the disk carries the user volume,
-    /// so released bytes must not linger in reusable heap memory.
-    fn wipe(data: &mut Vec<u8>) {
-        data.as_mut_slice().zeroize();
-    }
-
-    /// Remove (and wipe) the block cached at `lba`, dropping its LRU
-    /// slot and discharging its cost. `false` when no such entry
-    /// exists.
+    /// Remove the block cached at `lba`, its bytes erasing themselves,
+    /// dropping its LRU slot and discharging its cost. `false` when no such
+    /// entry exists.
     fn remove_lba(&mut self, lba: u64) -> bool {
-        let Some(mut entry) = self.entries.remove(&lba) else {
+        let Some(entry) = self.entries.remove(&lba) else {
             return false;
         };
-        Self::wipe(&mut entry.data);
         self.lru.remove(&entry.tick);
+        self.slack = true;
         let (payload, metadata) = self.cost_of();
         if self
             .accounting
@@ -362,6 +367,16 @@ impl<B: Block> BlockCache<B> {
             self.poison("ledger_imbalance");
         }
         true
+    }
+
+    /// Drop (and wipe) every cached block of the `len` bytes at `lba`, so the
+    /// next read of them is the medium's: what a check that the medium is
+    /// still what it was must read, since nothing outside this system's own
+    /// writes reaches the cache.
+    pub(crate) fn forget(&mut self, lba: u64, len: usize) {
+        let bs = self.block_size().max(1);
+        let blocks = u64::try_from(len.div_ceil(bs)).unwrap_or(u64::MAX);
+        self.invalidate_range(lba, blocks);
     }
 
     /// Remove (and wipe) every cached block in `lba .. lba + blocks`,
@@ -391,16 +406,15 @@ impl<B: Block> BlockCache<B> {
         self.drop_all();
     }
 
-    /// Drop every entry, wiping all payload and rebalancing the ledger
-    /// to empty. Every whole-cache drain is counted as a teardown.
+    /// Drop every entry, each block erasing itself, and rebalance the ledger
+    /// to empty, both indexes giving their room back. Every whole-cache
+    /// drain is counted as a teardown.
     pub(crate) fn drop_all(&mut self) {
         self.accounting.record_teardown(ReclaimClass::CleanFileData);
-        for entry in self.entries.values_mut() {
-            Self::wipe(&mut entry.data);
-        }
         self.entries.clear();
         self.lru.clear();
         self.accounting.zero_ledger();
+        self.slack = false;
     }
 
     /// Evict least-recently-used blocks until the ledger total is at
@@ -425,7 +439,8 @@ impl<B: Block> BlockCache<B> {
     /// operation before the cache is read or grown
     /// (`plans/SMARTRAM.md` section 7): shrunk to the low watermark at
     /// mild pressure, drained to zero from moderate on. Every evicted
-    /// buffer is wiped on the way out.
+    /// buffer erases itself on the way out, and at any band above normal
+    /// the room an earlier removal left in the indexes goes back to the heap.
     ///
     /// Returns the allowance the same reading yields, which the
     /// operation then admits its whole run of blocks against. One
@@ -453,8 +468,22 @@ impl<B: Block> BlockCache<B> {
             self.accounting
                 .record_pressure_shrink(ReclaimClass::CleanFileData);
             self.evict_until(target);
+            self.release_index_room();
+        } else if self.slack && allowance.band() > PressureBand::Normal {
+            self.release_index_room();
         }
         allowance
+    }
+
+    /// Give the heap back the room the indexes hold beyond their entries:
+    /// all of an index emptied, and what a fitted arena spares of the rest.
+    fn release_index_room(&mut self) {
+        // A refused fit keeps the room it had, every entry in place.
+        let _ = [
+            self.entries.try_shrink_to_fit(),
+            self.lru.try_shrink_to_fit(),
+        ];
+        self.slack = false;
     }
 
     /// Serve `blocks` device blocks starting at `lba` into `buf` from
@@ -468,6 +497,7 @@ impl<B: Block> BlockCache<B> {
         }
         let bs = self.block_size();
         let mut at = 0usize;
+        let mut indexed = true;
         for i in 0..blocks {
             let key = lba + i;
             let tick = self.next_tick();
@@ -479,9 +509,16 @@ impl<B: Block> BlockCache<B> {
             };
             buf[at..at + bs].copy_from_slice(&entry.data);
             at += bs;
-            self.lru.remove(&entry.tick);
-            self.lru.insert(tick, key);
-            entry.tick = tick;
+            // Recency is a hint: a block whose slot has no room to move is
+            // served from where it stands.
+            if self.lru.try_reserve(1).is_ok() {
+                self.lru.remove(&entry.tick);
+                entry.tick = tick;
+                indexed &= self.lru.try_insert(tick, key).is_ok();
+            }
+        }
+        if !indexed {
+            self.poison("index_divergence");
         }
         true
     }
@@ -517,6 +554,11 @@ impl<B: Block> BlockCache<B> {
                 self.accounting.record_refusal(ReclaimClass::CleanFileData);
                 return;
             }
+            // An eviction only adds to the room the indexes have made, so the
+            // block's room comes first and a refusal evicts nothing for it.
+            let Some(data) = self.room_for(bytes) else {
+                return;
+            };
             // The band's ceiling for this class bounds the *total*, not
             // just the entry: a band that has begun reclaiming clean file
             // data must not be grown back past its watermark by the very
@@ -529,27 +571,47 @@ impl<B: Block> BlockCache<B> {
                     return;
                 }
             }
-            // The copy is fallible: heap exhaustion refuses the entry
-            // instead of aborting.
-            let mut data = Vec::new();
-            if data.try_reserve_exact(bs).is_err() {
-                self.accounting.record_refusal(ReclaimClass::CleanFileData);
+            if !self.keep_block(key, data) {
                 return;
             }
-            data.extend_from_slice(bytes);
-            if self
-                .accounting
-                .charge(ReclaimClass::CleanFileData, payload, metadata)
-                .is_err()
-            {
-                Self::wipe(&mut data);
-                self.accounting.record_refusal(ReclaimClass::CleanFileData);
-                return;
-            }
-            let tick = self.next_tick();
-            self.lru.insert(tick, key);
-            self.entries.insert(key, Entry { data, tick });
         }
+    }
+
+    /// A copy of `bytes` with room for it in both indexes, or `None`, the
+    /// refusal counted, when the heap has no room for either.
+    fn room_for(&mut self, bytes: &[u8]) -> Option<WipedBuf> {
+        let mut data = Vec::new();
+        if data.try_reserve_exact(bytes.len()).is_err()
+            || self.entries.try_reserve(1).is_err()
+            || self.lru.try_reserve(1).is_err()
+        {
+            self.accounting.record_refusal(ReclaimClass::CleanFileData);
+            return None;
+        }
+        data.extend_from_slice(bytes);
+        Some(WipedBuf::new(data))
+    }
+
+    /// Keep `data` as the block at `lba` under a fresh tick, in the room
+    /// [`Self::room_for`] made for it. Answers whether it was kept.
+    fn keep_block(&mut self, lba: u64, data: WipedBuf) -> bool {
+        let (payload, metadata) = self.cost_of();
+        if self
+            .accounting
+            .charge(ReclaimClass::CleanFileData, payload, metadata)
+            .is_err()
+        {
+            self.accounting.record_refusal(ReclaimClass::CleanFileData);
+            return false;
+        }
+        let tick = self.next_tick();
+        if self.lru.try_insert(tick, lba).is_err()
+            || self.entries.try_insert(lba, Entry { data, tick }).is_err()
+        {
+            self.poison("index_divergence");
+            return false;
+        }
+        true
     }
 
     /// Whether a request shaped `(lba, len)` is cacheable: block-
@@ -693,18 +755,17 @@ impl<B: Block> BlockCache<B> {
         if want_bytes > buf.len() {
             // A refused readahead buffer falls back to the exact read: a real
             // read never fails for want of a speculative one.
-            if let Some(mut scratch) = tairix_util::fallible::filled(want_bytes, 0) {
+            if let Some(scratch) = tairix_util::fallible::filled(want_bytes, 0) {
+                let mut scratch = WipedBuf::new(scratch);
                 if forward(&mut self.device, lba, &mut scratch).is_ok() {
                     buf.copy_from_slice(&scratch[..buf.len()]);
                     self.populate(lba, prefetch, &scratch, &mut allowance);
-                    Self::wipe(&mut scratch);
                     return Ok(());
                 }
                 // The coalesced read faulted: fall through to the
                 // exact-span read so a genuine device fault is reported
                 // for the requested blocks alone — a speculative
                 // over-read never widens a caller's fault.
-                Self::wipe(&mut scratch);
                 self.readahead_window = 0;
                 self.readahead_suspect =
                     Some(lba.saturating_add(blocks)..lba.saturating_add(prefetch));
@@ -872,17 +933,6 @@ impl<B: Block> Block for BlockCache<B> {
 
     fn backing_availability(&self) -> MountAvailability {
         self.device.backing_availability()
-    }
-}
-
-impl<B: Block> Drop for BlockCache<B> {
-    /// Teardown wipes every retained buffer: the cached blocks are
-    /// treated as user data, which must not outlive their owner in
-    /// reusable heap memory.
-    fn drop(&mut self) {
-        for entry in self.entries.values_mut() {
-            Self::wipe(&mut entry.data);
-        }
     }
 }
 

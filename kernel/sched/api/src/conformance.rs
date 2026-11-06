@@ -14,7 +14,8 @@
 //! the ≥ 4-core SMP paths (per-CPU queues, work stealing, IPI bookkeeping).
 //! [`run_races`] holds the few properties only real host threads can
 //! interleave, each repeated over enough rounds to reach the interleaving it
-//! guards.
+//! guards, and [`run_refusals`] the ones only a refusing allocator reaches,
+//! which the test binary installs and hands in.
 //!
 //! Only the public trait surface is used — no implementation internals —
 //! so the same source is a valid acceptance test for a future EEVDF, RT,
@@ -30,10 +31,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::{CoreClass, SchedulerArch, TestArch};
 use crate::config::SchedulerConfig;
-use crate::error::SchedError;
+use crate::error::{SchedError, SchedResult};
 use crate::outcome::{ExitDisposition, StepOutcome};
 use crate::policy::SchedulerPolicy;
-use crate::task::{Priority, SchedClass, TaskAction, TaskState};
+use crate::task::{Priority, SchedClass, TaskAction, TaskContext, TaskId, TaskState};
 
 /// Run the entire conformance suite against scheduler policy `S`.
 ///
@@ -74,6 +75,182 @@ pub fn run_all<S: SchedulerPolicy<TestArch> + Send + Sync + 'static>() {
     priority_reports_changes_and_fails_closed::<S>();
     smp_stress_four_cores::<S>();
     heterogeneous_topology_preserves_liveness::<S>();
+}
+
+/// Run the allocation-refusal properties against policy `S`.
+///
+/// `refusing_after(granted, call)` runs `call` with its first `granted`
+/// allocations on the calling thread let through and every later one
+/// refused — the metered allocator of the test binary driving the suite,
+/// which only that binary can install.
+///
+/// # Panics
+///
+/// Panics (failing the test) if a refused admission answers anything but
+/// [`SchedError::OutOfMemory`] or leaves anything behind, or if a wake needs
+/// memory.
+pub fn run_refusals<S: SchedulerPolicy<TestArch>>(
+    refusing_after: &dyn Fn(usize, &mut dyn FnMut()),
+) {
+    for form in [Admission::Runnable, Admission::Parked, Admission::Reserved] {
+        an_admission_refused_for_memory_leaves_nothing_behind::<S>(refusing_after, form);
+    }
+    a_wake_on_an_exhausted_heap_still_lands::<S>(refusing_after);
+}
+
+/// How a refusal property admits its task.
+#[derive(Copy, Clone, Debug)]
+enum Admission {
+    /// [`SchedulerPolicy::spawn`].
+    Runnable,
+    /// [`SchedulerPolicy::spawn_parked`].
+    Parked,
+    /// [`SchedulerPolicy::spawn_parked_as`], at the reserved init id.
+    Reserved,
+}
+
+/// The most grants a refusal sweep offers an admission before calling it one
+/// that never goes through.
+const REFUSAL_SWEEP: usize = 32;
+
+/// Admit a task whose body counts its runs into `runs` and exits, as `form`
+/// says.
+fn admit_counted<S: SchedulerPolicy<TestArch>>(
+    sched: &S,
+    form: Admission,
+    runs: &Arc<AtomicU64>,
+) -> SchedResult<TaskId> {
+    let runs = Arc::clone(runs);
+    let body = move |_: &mut TaskContext| {
+        runs.fetch_add(1, Ordering::Relaxed);
+        TaskAction::Exit
+    };
+    match form {
+        Admission::Runnable => sched.spawn(0, Priority::Normal, body),
+        Admission::Parked => sched.spawn_parked(0, Priority::Normal, body),
+        Admission::Reserved => {
+            sched.spawn_parked_as(crate::INIT_TASK_ID, 0, Priority::Normal, body)
+        }
+    }
+}
+
+/// Step every CPU of `sched` until `runs` reaches `want`, answering whether it
+/// did.
+fn run_until<S: SchedulerPolicy<TestArch>>(
+    arch: &TestArch,
+    sched: &S,
+    runs: &AtomicU64,
+    want: u64,
+) -> bool {
+    for _ in 0..16 {
+        for cpu in 0..sched.cpu_count() {
+            if runs.load(Ordering::Relaxed) >= want {
+                return true;
+            }
+            arch.set_current_cpu(cpu);
+            let _ = sched.step(cpu);
+        }
+    }
+    runs.load(Ordering::Relaxed) >= want
+}
+
+/// An admission refused for memory at any of its allocations answers
+/// [`SchedError::OutOfMemory`] and leaves the scheduler as it was — no
+/// record, no queued entry, the task admitted before it untouched — and
+/// once its allocations are granted the same admission goes through and
+/// runs.
+fn an_admission_refused_for_memory_leaves_nothing_behind<S: SchedulerPolicy<TestArch>>(
+    refusing_after: &dyn Fn(usize, &mut dyn FnMut()),
+    form: Admission,
+) {
+    let (arch, sched) = make::<S>(2, 64);
+    let standing = sched
+        .spawn_parked(0, Priority::Normal, |_ctx| TaskAction::Exit)
+        .expect("spawn_parked");
+    let runs = Arc::new(AtomicU64::new(0));
+    for granted in 0..REFUSAL_SWEEP {
+        let mut answer = None;
+        refusing_after(granted, &mut || {
+            answer = Some(admit_counted(&sched, form, &runs));
+        });
+        match answer {
+            Some(Err(SchedError::OutOfMemory)) => {
+                assert_eq!(
+                    sched.live_task_count(),
+                    1,
+                    "{form:?} refused at grant {granted} left a task behind"
+                );
+                assert_eq!(
+                    sched.state_of(standing),
+                    TaskState::Parked,
+                    "{form:?}: the task admitted before was disturbed"
+                );
+                assert_eq!(
+                    sched.state_of(crate::INIT_TASK_ID),
+                    TaskState::Exited,
+                    "{form:?}: the reserved id stayed free"
+                );
+                for cpu in 0..sched.cpu_count() {
+                    arch.set_current_cpu(cpu);
+                    assert_eq!(
+                        sched.step(cpu),
+                        Ok(StepOutcome::Idle),
+                        "{form:?} refused at grant {granted} left work queued"
+                    );
+                }
+            }
+            Some(Ok(id)) => {
+                assert!(
+                    granted > 0,
+                    "{form:?} went through with every allocation refused: the test \
+                     binary's allocator refuses nothing"
+                );
+                if !matches!(form, Admission::Runnable) {
+                    sched.unpark(id).expect("unpark");
+                }
+                assert!(
+                    run_until(&arch, &sched, &runs, 1),
+                    "{form:?} admitted at grant {granted} never ran"
+                );
+                assert_eq!(
+                    runs.load(Ordering::Relaxed),
+                    1,
+                    "{form:?}: its body ran once"
+                );
+                return;
+            }
+            other => panic!("{form:?} at grant {granted} answered {other:?}"),
+        }
+    }
+    panic!("{form:?} was refused at every grant up to {REFUSAL_SWEEP}");
+}
+
+/// A wake needs no memory: with every allocation refused, waking a parked
+/// task whose CPU's queue is full still makes it runnable — its entry waits
+/// in the overflow list, in room its admission took — and it runs.
+fn a_wake_on_an_exhausted_heap_still_lands<S: SchedulerPolicy<TestArch>>(
+    refusing_after: &dyn Fn(usize, &mut dyn FnMut()),
+) {
+    let (arch, sched) = make::<S>(1, 2);
+    let runs = Arc::new(AtomicU64::new(0));
+    // Two runnable tasks fill the one CPU's band, so the wake has to
+    // overflow.
+    for _ in 0..2 {
+        admit_counted(&sched, Admission::Runnable, &runs).expect("spawn");
+    }
+    let parked = admit_counted(&sched, Admission::Parked, &runs).expect("spawn_parked");
+    let mut woken = None;
+    refusing_after(0, &mut || woken = Some(sched.unpark(parked)));
+    assert_eq!(
+        woken,
+        Some(Ok(())),
+        "a wake with every allocation refused still lands"
+    );
+    assert!(
+        run_until(&arch, &sched, &runs, 3),
+        "every task ran, the woken one among them"
+    );
+    assert_eq!(sched.state_of(parked), TaskState::Exited);
 }
 
 /// An admission's id is drawn, not counted: the ids a policy hands out

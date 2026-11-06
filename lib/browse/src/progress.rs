@@ -75,6 +75,18 @@ pub struct Reading {
     pub removing: bool,
 }
 
+/// An item an operation carries meeting one of the same name where it lands:
+/// what the operation's window asks about.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Clash {
+    /// The name both carry.
+    pub name: String,
+    /// The folder the name is taken in, by its own name.
+    pub folder: String,
+    /// Whether a folder meets a folder, which merges rather than replaces.
+    pub folders: bool,
+}
+
 /// How long a reading must hold before a rate is stated: long enough that the
 /// first files, and the folders made before them, do not set it.
 const PACE_SETTLE_NS: u64 = 2_000_000_000;
@@ -149,6 +161,8 @@ pub struct ProgressModel {
     pace: Pace,
     cancel_requested: bool,
     waiting: bool,
+    /// The question it waits on its user's answer to.
+    asking: Option<Clash>,
 }
 
 impl ProgressModel {
@@ -165,6 +179,7 @@ impl ProgressModel {
             pace: Pace::default(),
             cancel_requested: false,
             waiting: false,
+            asking: None,
         }
     }
 
@@ -177,6 +192,35 @@ impl ProgressModel {
     /// Note whether it is still waiting for the operations before it.
     pub fn set_waiting(&mut self, waiting: bool) {
         self.waiting = waiting;
+    }
+
+    /// Note the question it waits on its user's answer to, or that it waits
+    /// on none.
+    pub fn set_asking(&mut self, asking: Option<Clash>) {
+        self.asking = asking;
+    }
+
+    /// The question it waits on its user's answer to, if any.
+    #[must_use]
+    pub const fn asking(&self) -> Option<&Clash> {
+        self.asking.as_ref()
+    }
+
+    /// The question in words, while it asks one: "An item named “notes.txt”
+    /// already exists in “Desktop”.", a folder's naming it a folder.
+    #[must_use]
+    pub fn question(&self) -> Option<String> {
+        let clash = self.asking.as_ref()?;
+        let what = if clash.folders { "A folder" } else { "An item" };
+        let name = shown(&clash.name);
+        Some(if clash.folder.is_empty() {
+            format!("{what} named \u{201c}{name}\u{201d} already exists there.")
+        } else {
+            format!(
+                "{what} named \u{201c}{name}\u{201d} already exists in \u{201c}{}\u{201d}.",
+                shown(&clash.folder)
+            )
+        })
     }
 
     /// Which operation this reports.
@@ -207,9 +251,10 @@ impl ProgressModel {
             self.current.push_str(current);
         }
         // Only carrying against a counted whole sets the pace: time spent
-        // waiting its turn, counting or removing originals would read as a
-        // crawl once it carried on.
-        if reading.preparing || reading.removing || self.waiting || reading.total.is_none() {
+        // waiting its turn or its user's answer, counting or removing
+        // originals would read as a crawl once it carried on.
+        let idle = self.waiting || self.asking.is_some();
+        if reading.preparing || reading.removing || idle || reading.total.is_none() {
             self.pace.pause();
         } else {
             self.pace.observe(now_ns, self.units(reading.done));

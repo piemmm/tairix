@@ -9,7 +9,6 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_colour::Fraction;
 use tairix_controls::{
     Button, ButtonContent, ComboBox, ControlRole, Dialog, DialogAction, FieldAction, FieldControl,
     FieldGroup, FieldGroupAction, FieldLayout, FieldRow, Keystroke, Slider, TextAction, TextField,
@@ -21,11 +20,8 @@ use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
-use tairix_sandbox::imageedit::MAX_LAYER_NAME;
-
 use crate::canvas::{admissible, MAX_PIXELS, MAX_SIDE};
-use crate::document::{colours_for, NewPicture, Shown, COLOURS, NAME_REFUSAL};
-use crate::filter::Parameter;
+use crate::document::{colours_for, NewPicture, COLOURS, NAME_REFUSAL};
 use crate::save::{Loss, SaveFormat, SaveSettings};
 use crate::transform::{Anchor, PaletteChoice};
 
@@ -91,16 +87,7 @@ pub enum Purpose {
         /// Close the window once saved.
         then_close: bool,
     },
-    /// A layer's name, how much of it shows, and whether it shows.
-    Layer,
 }
-
-/// The layer form's opacity slider, in percent.
-const OPACITY: Parameter = Parameter {
-    label: "Opacity",
-    least: 0,
-    most: 100,
-};
 
 /// What a Save As sheet offers: each format the document can be written as,
 /// with what that format would not keep of it.
@@ -134,9 +121,6 @@ pub struct Form {
     /// The settings a Save As sheet is answered with, kept as its rows come
     /// and go with the format.
     settings: SaveSettings,
-    /// The opacity a layer form sets, out of 255: exactly the layer's own
-    /// until its slider moves.
-    opacity: u8,
 }
 
 fn text_row(label: &str, text: &str, len: usize) -> FieldRow {
@@ -179,46 +163,7 @@ impl Form {
             formats: Vec::new(),
             format: SaveFormat::Png,
             settings: SaveSettings::default(),
-            opacity: u8::MAX,
         }
-    }
-
-    /// The form showing a layer as `shown` says.
-    #[must_use]
-    pub fn layer(shown: &Shown) -> Self {
-        let percent =
-            i32::try_from(Fraction::from_byte(shown.opacity).percent()).unwrap_or(OPACITY.most);
-        let rows = vec![
-            text_row("Name", &shown.name, MAX_LAYER_NAME),
-            slider_row(opacity_label(percent), &OPACITY, percent),
-            toggle_row("Shown", shown.visible),
-        ];
-        let mut form = Self::new(Purpose::Layer, "Layer", "Change", rows);
-        form.opacity = shown.opacity;
-        form
-    }
-
-    /// How the layer is to show.
-    ///
-    /// # Errors
-    ///
-    /// The reason, where the name is empty or longer than a layer's may be.
-    pub fn layer_answer(&self) -> Result<Shown, String> {
-        let typed = self.text(0).trim();
-        if typed.is_empty() || typed.len() > MAX_LAYER_NAME {
-            return Err(alloc::format!(
-                "A layer's name is from 1 to {MAX_LAYER_NAME} bytes"
-            ));
-        }
-        let mut name = String::new();
-        name.try_reserve_exact(typed.len())
-            .map_err(|_| String::from("There is not enough memory to rename the layer"))?;
-        name.push_str(typed);
-        Ok(Shown {
-            name,
-            opacity: self.opacity,
-            visible: self.on(2),
-        })
     }
 
     /// The form for a new picture, starting at `picture` to be saved as
@@ -569,7 +514,6 @@ impl Form {
             Purpose::Scale => self.follow_proportions(acted),
             Purpose::NewPicture => self.follow_new_picture(acted),
             Purpose::SaveAs { .. } => self.follow_save_as(acted),
-            Purpose::Layer => self.follow_opacity(acted),
             _ => {}
         }
         damage.add(self.rect(origin, scale, theme));
@@ -629,18 +573,6 @@ impl Form {
         colours_for(self.format)
             .nth(self.choice(3))
             .and_then(|colours| colours.depth)
-    }
-
-    fn follow_opacity(&mut self, acted: &FieldGroupAction) {
-        let (1, FieldAction::SetValue { permille } | FieldAction::Settled { permille }) =
-            (acted.row, &acted.action)
-        else {
-            return;
-        };
-        let permille = *permille;
-        let percent = OPACITY.value_of(permille);
-        self.opacity = Fraction::from_percent(u32::try_from(percent).unwrap_or(0)).byte();
-        self.relabel(1, opacity_label(percent));
     }
 
     /// Give row `index` the label `label`, its control and the keyboard
@@ -817,21 +749,6 @@ pub struct NewSprite {
     pub eig: (u8, u8),
     /// Whether it has a mask.
     pub masked: bool,
-}
-
-/// A row of a slider labelled `label`, setting `parameter` from `value`; a
-/// key moves the number by at least one.
-fn slider_row(label: String, parameter: &Parameter, value: i32) -> FieldRow {
-    let (line, page) = parameter.steps();
-    FieldRow::new(
-        label,
-        FieldControl::Slider(Slider::new(parameter.permille_of(value)).with_steps(line, page)),
-    )
-}
-
-/// What the opacity slider says.
-fn opacity_label(percent: i32) -> String {
-    alloc::format!("{}: {percent}%", OPACITY.label)
 }
 
 fn quality_label(quality: u8) -> String {

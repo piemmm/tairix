@@ -46,11 +46,11 @@ gesendete und empfangene Pakete, etwaige Fehler, den Verlustanteil sowie
 die minimale, mittlere und maximale Umlaufzeit mit ihrer mittleren
 Abweichung. `-q` zeigt nur den Kopf und die Statistik.
 
-Jede Antwort nennt die Gegenstelle als `Name (Adresse)`, wenn die Adresse
-einen `PTR`-Eintrag hat — einmal pro Lauf über denselben Stub-Resolver
-aufgelöst. Eine Adresse ohne Namen, und jeder Lauf unter `-n`, zeigt die
-nackte Adresse; `-n` heißt außerdem, dass gar keine `PTR`-Abfrage auf die
-Leitung geht.
+Jede Antwort nennt die Gegenstelle als `name (address)` (Name, dahinter
+die Adresse in Klammern), wenn die Adresse einen `PTR`-Eintrag hat —
+einmal pro Lauf über denselben Stub-Resolver aufgelöst. Eine Adresse
+ohne Namen, und jeder Lauf unter `-n`, zeigt die nackte Adresse; `-n`
+heißt außerdem, dass gar keine `PTR`-Abfrage auf die Leitung geht.
 
 Jede Antwortzeile trägt die IPv4-TTL (bzw. das IPv6-Hop-Limit), mit der
 die Antwort eintraf, als `ttl=`-Feld, wie `iputils`.
@@ -76,9 +76,14 @@ die Antwort eintraf, als `ttl=`-Feld, wie `iputils`.
 ## EXAMPLES
 
 - `ping 10.0.2.2` — einen IPv4-Host bis zum Abbruch anpingen.
+- `ping gateway.example` — einen Host über seinen Namen anpingen.
 - `ping -c 4 fe80::1` — vier Anfragen an einen IPv6-Host senden.
 - `ping -c 10 -i 0.2 10.0.0.1` — zehn Anfragen, alle 200 ms eine.
 - `ping -q -c 100 10.0.0.1` — stiller Lauf, nur Statistik.
+- `ping -s 1400 -c 20 host.example` — zwanzig große, nicht komprimierbare
+  Anfragen: die Form, die eine Verbindung ehrlich misst.
+- `ping -p ff00 -c 4 10.0.0.1` — stattdessen ein festes, abwechselndes
+  Muster.
 
 ## EXIT STATUS
 

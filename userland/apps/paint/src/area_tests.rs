@@ -16,7 +16,9 @@ use tairix_icon::{IconKind, IconPicture};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_window::docapp::Relayout;
 
-use super::{render_area, AreaLayout, AreaView, SpriteOpening, OPEN_CELLS, SPRITES_AT_ONCE};
+use super::{
+    render_area, AreaLayout, AreaView, SpriteOpening, OPEN_HEIGHT_MAX, OPEN_WIDTH, SPRITES_AT_ONCE,
+};
 use crate::canvas::{Canvas, Kind, Sample};
 use crate::document::{Document, Entry, EntryId, Kept, Origin, Picture, SpriteInfo};
 use crate::layout::Faces;
@@ -326,7 +328,7 @@ fn thumbnails_are_asked_for_one_job_at_a_time_and_land_on_their_sprites() {
     };
     assert_eq!(side, window.layout.thumb());
     assert_eq!(pictures.len(), 2);
-    let answer = compute(work);
+    let answer = compute(work, &tairix_parallel::SERIAL);
     let outcome = window
         .view
         .computed(job, answer, &window.layout, &mut Region::new());
@@ -362,7 +364,7 @@ fn an_edit_handed_back_keeps_the_files_name_and_is_drawn_again() {
     let Some(HostRequest::Own(Own::Compute { job, work })) = window.view.wanted() else {
         panic!("thumbnails asked for");
     };
-    let answer = compute(work);
+    let answer = compute(work, &tairix_parallel::SERIAL);
     window
         .view
         .computed(job, answer, &window.layout, &mut Region::new());
@@ -448,7 +450,7 @@ fn a_sprite_added_is_drawn_and_a_new_one_is_offered_a_free_name() {
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let mut window = Window::of(&refs);
     while let Some(HostRequest::Own(Own::Compute { job, work })) = window.view.wanted() {
-        let answer = compute(work);
+        let answer = compute(work, &tairix_parallel::SERIAL);
         window
             .view
             .computed(job, answer, &window.layout, &mut Region::new());
@@ -476,7 +478,7 @@ fn a_sprite_added_is_drawn_and_a_new_one_is_offered_a_free_name() {
 /// Draw every thumbnail `window` asks for, on this thread.
 fn draw_thumbnails(window: &mut Window) {
     while let Some(HostRequest::Own(Own::Compute { job, work })) = window.view.wanted() {
-        let answer = compute(work);
+        let answer = compute(work, &tairix_parallel::SERIAL);
         window
             .view
             .computed(job, answer, &window.layout, &mut Region::new());
@@ -632,28 +634,66 @@ fn what_the_window_said_goes_at_the_next_act() {
     assert_eq!(window.view.message(), None);
 }
 
-#[test]
-fn a_sprite_file_opens_with_room_for_its_sprites_and_its_band() {
-    let registry = ThemeRegistry::with_builtins();
-    let theme = registry.active();
-    // Text set large, as a theme may set it: twice the reference size.
-    let faces = Faces::of(theme, Scale::from_percent(200).expect("a scale"));
-    let most = (OPEN_CELLS.0 * OPEN_CELLS.1) as usize;
-    let names: Vec<String> = (0..most).map(|i| alloc::format!("s{i}")).collect();
+/// A view of `count` sprites, named `s0`, `s1`, ….
+fn sprites(count: usize) -> AreaView {
+    let names: Vec<String> = (0..count).map(|i| alloc::format!("s{i}")).collect();
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let view = AreaView::new(
+    AreaView::new(
         area(&refs),
         String::from("Sprites"),
         None,
         Access::Writable,
         DOUBLE,
+    )
+}
+
+/// The window opens 250 wide whatever it holds, as tall as its rows need up to
+/// 250, with a scroll bar exactly when its sprites overflow and every cell
+/// shown above the band.
+#[test]
+fn a_sprite_window_opens_250_wide_and_at_most_250_high() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let faces = Faces::of(theme, Scale::ONE);
+    for count in [1, 2, 5, 15, 200] {
+        let view = sprites(count);
+        let (width, height) = AreaView::open_size(count, theme, faces);
+        assert_eq!(width, OPEN_WIDTH, "{count} sprites");
+        assert!(height <= OPEN_HEIGHT_MAX, "{count} sprites");
+        let layout = view.layout(width, height, theme, Scale::ONE, faces);
+        let overflows = layout.content_height() > layout.grid().height;
+        assert_eq!(!layout.bar().is_empty(), overflows, "{count} sprites");
+        let shown = layout.shown(0, count);
+        let last = layout.cell_rect(shown.end - 1, 0);
+        assert!(last.top() < layout.status().top(), "{count} sprites");
+        if overflows {
+            assert_eq!(height, OPEN_HEIGHT_MAX, "{count} sprites");
+        } else {
+            assert_eq!(shown, 0..count, "{count} sprites");
+            assert!(last.bottom() <= layout.status().top(), "{count} sprites");
+        }
+    }
+    let one = AreaView::open_size(1, theme, faces).1;
+    assert!(one < OPEN_HEIGHT_MAX, "a lone sprite opens one row high");
+    assert_eq!(
+        AreaView::open_size(2, theme, faces).1,
+        one,
+        "two share a row"
     );
-    let (width, height) = AreaView::open_size(most, theme, faces);
-    let layout = view.layout(width, height, theme, Scale::ONE, faces);
-    assert!(layout.bar().is_empty(), "every sprite shows");
-    assert_eq!(layout.shown(0, most), 0..most);
-    let last = layout.cell_rect(most - 1, 0);
-    assert!(last.bottom() <= layout.status().top(), "above its band");
+}
+
+/// Text set large, as a theme may set it, raises the opening size to the
+/// window's own minimum.
+#[test]
+fn a_large_text_theme_opens_at_least_its_minimum() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let faces = Faces::of(theme, Scale::from_percent(200).expect("a scale"));
+    let least = AreaView::min_size(theme, Scale::ONE, faces);
+    for count in [1, 200] {
+        let (width, height) = AreaView::open_size(count, theme, faces);
+        assert!(width >= least.0 && height >= least.1, "{count} sprites");
+    }
 }
 
 /// The window's drawing of `window`, at the reference scale.

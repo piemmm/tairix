@@ -397,11 +397,10 @@ impl FeedPicture<'_> {
 /// the host's screen shows until the first frame.
 pub const GROUND: Color = Color::rgb(0, 0, 0);
 
-/// The side, in pixels, of the tiles a scene tracks a scattered change in:
-/// covered in whole tiles of this side, at most
-/// [`SAVER_DAMAGE_RECTS`](tairix_abi::saver_ipc::SAVER_DAMAGE_RECTS) of them,
-/// a change costs the compositor little more than its pixels.
-pub const DAMAGE_TILE: u32 = 16;
+/// The side of the tiles a scene tracks a scattered change in, covered by at
+/// most [`SAVER_DAMAGE_RECTS`](tairix_abi::saver_ipc::SAVER_DAMAGE_RECTS) of
+/// them.
+pub use tairix_geometry::DAMAGE_TILE;
 
 /// Lay the ground over `rect` of `canvas`, a surface or one band of it, for a
 /// scene to draw on afresh.

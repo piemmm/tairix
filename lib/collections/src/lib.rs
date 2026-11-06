@@ -2,10 +2,11 @@
 //! provide.
 //!
 //! `alloc` already gives TAIRiX `Vec`, `String`, `BTreeMap`, `BTreeSet`,
-//! `VecDeque`, and `BinaryHeap`, and this crate does not re-implement any of
-//! them. It holds the containers a kernel runs on that `alloc` has no answer
-//! for, each with a caller in the tree (`plans/COLLECTIONS.md` is the ledger
-//! of what is landed and what is still to come).
+//! `VecDeque`, and `BinaryHeap`. This crate re-implements only the ordered
+//! map, whose `alloc` form cannot refuse an insertion it has no memory for;
+//! the rest are containers a kernel runs on that `alloc` has no answer for,
+//! each with a caller in the tree (`plans/COLLECTIONS.md` is the ledger of
+//! what is landed and what is still to come).
 //!
 //! The containers that allocate *nothing* live in `tairix-inline` instead —
 //! a crate that links neither this one nor `alloc`, so the layer running
@@ -20,6 +21,11 @@
 //! * [`LruMap`] — the same table with a recency order threaded through it, so
 //!   a cache finds and drops its coldest entry without a search. What every
 //!   hand-rolled `(tick -> key)` eviction index was standing in for.
+//! * [`OrderedMap`] / [`OrderedSet`] — an ordered map and set whose
+//!   insertions are fallible and all or nothing, a B-tree over an arena of
+//!   leaves and one of interior nodes. What `alloc`'s `BTreeMap` and
+//!   `BTreeSet` were standing in for wherever an insertion must be able to
+//!   refuse.
 //! * [`RangeMap`] / [`RangeSet`] — disjoint half-open ranges, the map holding
 //!   each as an identity and the set canonicalising by absorbing everything it
 //!   touches. What every hand-rolled `base -> length` reservation table and
@@ -44,6 +50,9 @@
 //!   generation, so a key that outlived its value is refused. What a counter
 //!   handing out identifiers with no reuse and no generation was standing in
 //!   for.
+//! * [`BitVec`] — a bitmap of run-time length whose summary levels find the
+//!   next or previous set or clear bit in time proportional to their height.
+//!   What a `Vec<bool>` or a scanned `Vec<u64>` was standing in for.
 //!
 //! ## Rules every container here obeys
 //!
@@ -71,6 +80,9 @@
 //!   releases itself.
 
 #![no_std]
+// `Box::try_new`, so an arena's bookkeeping the heap refuses fails the
+// insertion that needed it rather than aborting.
+#![feature(allocator_api)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
@@ -78,12 +90,16 @@ extern crate alloc;
 
 use core::fmt;
 
+mod arena;
+pub mod bitvec;
 pub mod bytequeue;
 pub mod chunkvec;
 pub mod group;
 pub mod heap;
 pub mod lru;
 pub mod map;
+pub mod ordered;
+pub mod orderedset;
 pub mod radix;
 pub mod range;
 pub mod rangeset;
@@ -92,11 +108,14 @@ pub mod set;
 pub mod slotmap;
 pub mod smallvec;
 
+pub use bitvec::BitVec;
 pub use bytequeue::{ByteQueue, QueueError};
 pub use chunkvec::ChunkVec;
 pub use heap::IndexedHeap;
 pub use lru::LruMap;
 pub use map::HashMap;
+pub use ordered::OrderedMap;
+pub use orderedset::OrderedSet;
 pub use radix::RadixTree;
 pub use range::{RangeError, RangeKey, RangeMap};
 pub use rangeset::RangeSet;

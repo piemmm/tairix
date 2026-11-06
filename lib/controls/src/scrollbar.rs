@@ -289,6 +289,16 @@ impl ScrollBar {
         self
     }
 
+    /// The shortest bar `breadth` across that seats both end buttons
+    /// breadth-square and a thumb at the theme's least length between them,
+    /// at `scale`: the room an owner keeps where a bar may appear.
+    #[must_use]
+    pub fn least_length(breadth: u32, scale: Scale, theme: &Theme) -> u32 {
+        breadth
+            .saturating_mul(2)
+            .saturating_add(least_thumb(scale, theme).max(breadth))
+    }
+
     /// The bar's orientation.
     #[must_use]
     pub fn orientation(&self) -> ScrollOrientation {
@@ -340,6 +350,15 @@ impl ScrollBar {
     #[must_use]
     pub fn is_pressing(&self) -> bool {
         self.dragging || self.held.is_some()
+    }
+
+    /// End the press the bar holds for an owner that has stopped drawing it,
+    /// so no release can reach it: a held press it cannot step would keep its
+    /// repeat due for ever, and an owner folding that into its wait would
+    /// wake at once every time.
+    pub fn let_go(&mut self) {
+        *self.hover = ScrollPart::Outside;
+        self.end_press(PointerState::None, Rect::EMPTY, &mut damage::sink());
     }
 
     /// When the held press steps next, as a monotonic instant, or `None` when
@@ -680,7 +699,7 @@ impl ScrollBar {
         if sw == 0 || sh == 0 {
             return None;
         }
-        let min_thumb = scale.scale_length(theme.metrics().min_thumb_length).max(1);
+        let min_thumb = least_thumb(scale, theme);
         let (breadth, long) = match self.orientation {
             ScrollOrientation::Vertical => (sw, sh),
             ScrollOrientation::Horizontal => (sh, sw),
@@ -854,6 +873,11 @@ impl ScrollBar {
         };
         paint_chevron(surface, rect, dir, Color::from(glyph));
     }
+}
+
+/// The least length a thumb is drawn at, at `scale`.
+fn least_thumb(scale: Scale, theme: &Theme) -> u32 {
+    scale.scale_length(theme.metrics().min_thumb_length).max(1)
 }
 
 /// Paint one raised part of the bar — the thumb or an end button — as a

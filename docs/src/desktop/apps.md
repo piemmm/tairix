@@ -284,7 +284,10 @@ manager's mini title band, above its owner, off the taskbar.
 
 - `WindowClient::create_tool(&ToolSpec { .. })`, or
   `WindowPane::open_tool`, names the owner, the client's geometry, its offset
-  from the owner's client origin, its title, and optionally a `carry`: the
+  from the owner's client origin, its title, its `sizing` — fixed, or the
+  range of clients a user may resize it within by its edges, never maximized,
+  each size it settles at told as `WindowEvent::Resized` on its own id — and
+  optionally a `carry`: the
   place along the band at which the press the owner still holds carries the
   new window on, so a palette dragged out of its window keeps following the
   pointer without the button being let go. The owner then hears no release
@@ -296,7 +299,10 @@ manager's mini title band, above its owner, off the taskbar.
   (`tairix_window::docapp`): its view declares the tool windows it wants
   (`DocumentView::tool_window`), each a rectangle of the window's own drawing
   laid out beside the window, and the host opens, resizes, retitles, closes,
-  routes and paints them to match, so the view draws and hit-tests a floating
+  routes and paints them to match — restating the range a resizable one may be
+  sized within as the view asks, handing each size the user gives one to
+  `DocumentView::tool_resized`, then repainting that tool window alone — so
+  the view draws and hit-tests a floating
   palette with the code that drew it docked; a menu the view anchors on a tool
   window's part of the drawing opens over that tool window. Paint's panes are
   the first consumer ([Paint](paint.md)).
@@ -397,21 +403,25 @@ it was. `Browser::is_listing` is what the shared renderer draws its cue from.
 ### A slow device holds up only its own work
 
 Everything the file manager reads or writes off its loop runs on the lane of
-the volume it touches (`lanes::Lane`), routed by the binding covering its place
+the volume it touches (`tairix_browse::lanes::Lane`), routed by the binding covering its place
 in the namespace's view list (`lanes::Routes`, through the
 `tairix_procinfo::covering` rule `mount` and `df` resolve a path by). The view
 list is read with the places rail and again whenever the kernel says the mount
 table moved, so routing touches no device. Work on no place a listing named —
 the System Information and discovery services, the program stores, the system's
 own artwork — has a lane of its own, and a place no published volume answers
-for, such as the `/Storage` catalog, another.
+for, such as the `/Storage` catalog, another. The policy, its reader loop
+included (`lanes::serve`), is `lib/browse`'s, the one the desktop session's
+readers run too.
 
 One reader serves a lane at a time, so a volume's work keeps the order
 `deferred::READ_ORDER` states and an eject waits for the read under way on its
-own volume alone. Whenever every reader is busy a spare is started, so work for
-a free volume is taken at once however long another is held up, and a reader
-finding two already waiting leaves (`lanes::Crew`), so work arriving now and
-then is taken by a waiting reader rather than costing a thread. A reader that
+own volume alone, the follows of the bundles shown there ended first
+(`BundleFollows::release_within`). Whenever every reader is busy a spare is
+started, so work for a free volume is taken at once however long another is
+held up, and a reader finding two already waiting leaves (`lanes::Crew`), so
+work arriving now and then is taken by a waiting reader rather than costing a
+thread. A reader that
 finishes takes its own lane's next job of each kind first, waking no other for
 it, but a kind the order puts first on another volume before it
 (`deferred::first_in_order`), and a reader moving on wakes another for what its
@@ -434,7 +444,9 @@ decoder held to one document and a thumbnail's decode on any machine, so
 however many volumes the windows show, a pool of more than one leaves the
 machine what one document decoder would; below 512 MiB of RAM the one decoder
 may map more. A decode finding none free stays queued: that delays
-decoration, never a listing.
+decoration, never a listing. While the pressure band is not normal, a reader
+with nothing to do ends every idle decoder (`lanes::Crew::adopt_band`), so a
+decoder outlives only the run of work it was made for.
 
 ### Entries, kinds, and the shared sort
 
@@ -490,10 +502,13 @@ as `…/<Name>.app/Run` and a link named after the program is not that shape.
 space, filesystem and health — a `SortDirection`, and where `Folders` stand)
 is the one listing order the file manager, the trusted picker and the desktop
 share (`AGENTS.md` §2.2): directories first, unless the mode puts them among the
-files, then the chosen key, with a case-insensitive name tiebreak so the
-result never depends on the source's incidental order. `sort_entries` is the
-pure definition; the `Browser` applies it to every listing and `set_sort_mode`
-re-orders in place, keeping the selection on the same entry. The default is
+files, then the chosen key, names compared as they are shown, with a
+case-insensitive tiebreak — the name shown, then the name held — so the
+result never depends on the source's incidental order. `sort_entries` over an
+`Order` (the mode, and the endings names are shown without) is the pure
+definition a watch's merge shares; the `Browser` applies it to every listing,
+and `set_sort_mode` and a change of the endings re-order in place, keeping the
+selection on the same entry. The default is
 name-ascending with folders first — a general-purpose directory order. The
 window menu's Display ▸ offers every key a listing's columns show, both
 directions and whether folders come first, beside the three views.
@@ -785,6 +800,12 @@ not a crash (`AGENTS.md` §2.24, §5.4). **Empty Trash** asks the reader to read
 what the Trash holds now, so the confirmation names exactly what a confirmed
 empty removes, never a listing on show that lags behind the Trash; it opens
 only if the window still shows the Trash with nothing else open over it.
+The Trash's own window offers **Empty Trash** on its background menu as
+well (`ContextCommand::EmptyTrash`, declared only where
+`ContextMenuModel::showing_trash` says the window shows the user's Trash, and
+greyed with its reason in an empty one), and the app spells the Trash once —
+`Library/Trash` in the home `HOME` names, or why a session with no home has
+none (`trash_location`) — wherever it reaches it.
 
 ### Activating an entry
 
@@ -837,8 +858,8 @@ press is comes from the app's own pure, host-tested `gesture` module:
 
 | gesture | what it does |
 |---|---|
-| double-click / `Enter` | activate: descend, run a bundle, or open a file |
-| shift-double-click / `Shift+Enter` | list a bundle's contents instead of running it; a shift-double-click leaves what it opened deselected |
+| double-click / `Enter` | activate: descend, run a bundle, or open a file; a double-click leaves what it handed elsewhere deselected once that went ahead |
+| shift-double-click / `Shift+Enter` | list a bundle's contents instead of running it |
 | right-click | ask the desktop for the context menu on the item |
 
 There is no right-*double*-click. The menu the first press opens is the
@@ -867,12 +888,16 @@ itself (`WindowEvent::Pointer`'s `modifiers`, stamped by the seat): a modifier
 key reaches no surface as a key, so an app could not otherwise know one is
 held. `Shift+Enter` is the same intent from the keyboard, resolved through the
 one `gesture::bundle_intent` spelling so the two cannot diverge. A
-shift-double-click that opens something elsewhere then clears the selection,
-so nothing it opened is left highlighted; one that lists the item's contents
-replaces the listing anyway, and `Shift+Enter` keeps the selection the keyboard
-moves from. The pair's first press may have selected more than the item, so
-the repaint covers the marks that changed since before the second press,
-whatever the pair did.
+double-click whose activation hands the item elsewhere — a document to its
+application, an application started or reached, a disk image mounted —
+carries a `handoff::Handoff` (its window, and the entry as listed) with the
+open; the success that comes back deselects the item
+(`Browser::deselect_handed`) while it is still, by path and node, the one
+chosen and nothing holds the listing, repainting only its mark. A refusal,
+descending, browsing a bundle, `Enter`, `Shift+Enter` and the menu's Open
+leave the selection alone. The pair's first press may have selected more
+than the item, so the repaint covers the marks that changed since before the
+second press, whatever the pair did.
 
 On any activation, a refusal — a link that names nothing, a folder that cannot
 be listed — is stated in an alert over the window, the listing as it was;
@@ -923,18 +948,24 @@ past `DRAG_SLOP` logical pixels hands it to the desktop
 (`WindowClient::begin_drag`, naming the entry pressed, the count, and whether
 it is one openable file); a drag the desktop will not carry stays the press it
 was. The entry pressed leads, then the rest of the selection in listing order
-(`gesture::drag_order`), and each of the first four is described by the
-picture its listing draws (`render::icon_for_entry`) and where that picture
-stood from the press (`render::entry_target`), with the ending the window
-hides of the lead, so the desktop shows one item as its tile and several as a
-stack gathering from where they stood.
+(`gesture::drag_order`), and each of the first four is described as a drag
+carries it (`media::drag_picture`) — its class picture and, for an
+application, a command or a RISC OS application, its own picture by its path
+and listed version (a shortcut's by the path it resolves to), a thumbnail or a
+folder's fan crossing as its class — and where that picture stood from the
+press (`render::entry_target`), with the ending the window hides of the lead,
+so the desktop shows one item as its tile and several as a stack gathering
+from where they stood, each by its own picture where it carries one.
 
 - **Every folder drop is the manager's to decide.** Each report of where the
   drag is (`DragOver`) resolves the folder there — a folder under the point
   (`render::drop_folder_at`), the window's own folder elsewhere on its listing,
   or the desktop folder the session names — and answers with the one drop
-  policy (`drop_operation`): copy, or move with `Shift`, refusing a drop back
-  into the items' own folder or a folder into itself. The folder under the
+  policy (`drop_operation`): copy, or move with `Shift` — or, for volumes
+  dragged from `/Storage` alone, a link: one shortcut per volume to its
+  identity (`id::<identity>/`), made through the one-shot writer and refused as
+  *Shortcut not made* — refusing a drop back into the items' own folder or a
+  folder into itself. The folder under the
   pointer is lit (`Browser::set_drop_mark`, drawn as the shared drop-target
   look) while the answer accepts it.
 - **The drop runs as a paste.** Dropped on one of its windows, the manager
@@ -1205,7 +1236,7 @@ the real icon artwork when the system ships and can decode it and drawing the
 built-in vector glyph when it cannot — so a missing or refused asset degrades
 to a meaningful icon and can never blank the tile (`AGENTS.md` §10). A tile
 for an application bundle names the bundle itself in that request
-(`entry_icon_request`, shared with the desktop's own icons), so `ls.app` draws
+(`entry_icon`, shared with the desktop's own icons), so `ls.app` draws
 the icon `ls` carries in its own `Resources/` rather than the one generic
 every-application picture. The file manager binds a real cache to that lookup
 (*Grid-view icon artwork*, below); the read-only trusted picker still passes
@@ -1460,10 +1491,18 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
   writes an item the desk produces nothing pictured from inside it
   (`ArtworkDesk::hold_under`), so its tile draws the built-in glyph; once the
   item is copied whole, what was asked for meanwhile lands and is decoded from
-  the finished tree. A listed bundle is keyed by the stamp its listing reports
-  (`IconRequest::listed_bundle`), so one replaced, or changed where its folder
-  sees it, is decoded afresh and the old answer ages out of the cache. Nothing
-  invalidates it.
+  the finished tree. A listed bundle is keyed by the files its picture is read
+  from — its manifest and the icon the manifest names, read before the decode
+  (`ArtworkJob::produce`) — and until they are read by the stamp its listing
+  reports (`IconRequest::listed_bundle`). While a window shows it those files
+  are followed, through the desktop's own `tairix_browse::follow`: a thread of
+  the readers' parks on their change waits, and a change has the bundle read
+  again, decoded only where its files differ, so a bundle a plain `cp` was
+  still writing shows its own icon once it is whole; one shown again after it
+  was let go is followed again, its files read anew. A turn of the loop asks
+  each bundle's version of the readers' desk once, however often the turn walks
+  its tile (`IconPipeline::begin_turn`). A replaced bundle is a new key and the
+  old answer ages out of the cache; nothing invalidates it.
 - **A picture file is drawn as its own content.** A file of one picture whose
   type the shared raster decoders read asks for its thumbnail ahead of its
   class artwork — a sprite file, holding many, draws the sprite file icon
@@ -1720,9 +1759,9 @@ image or archive the user opened is unmounted once its windows close (on by
 default, [disk images](../filesystem/images.md)).
 
 The Settings application's *Files* pane edits them
-([Settings](settings.md)); *Settings…* on the icon-bar menu and `Ctrl+,`
-hand that pane to the running Settings or start it on it
-(`tairix_browse::SETTINGS_PANE`). The file manager reads the published
+([Settings](settings.md)); `Ctrl+,` in a window hands that pane to the
+running Settings or starts it on it (`tairix_browse::SETTINGS_PANE`), and the
+icon-bar menu offers no way there, since the settings are that application's. The file manager reads the published
 document before its first window and again, on a reader rather than the
 loop, each time `DesktopInfo::settings_generation` moves — one read a
 publication. A refused one is stated, the settings in force stand, and it is
@@ -1738,9 +1777,13 @@ listing is held by a menu, a rename or a drag waits for the hold to end, and a
 window still opening takes it too. The presentation is the browser's
 (`Browser::set_presentation`, `tairix_browse::Presentation`): a hidden ending
 is display only — an entry keeps its exact name, which every operation acts
-on — and a hidden item is left out of the listing, so nothing in the window
-reaches it. The desktop and the trusted picker show every entry by its exact
-name whatever the manager's settings say.
+on — is never one whose hiding would leave another type's or application's
+name, and the listing orders by the names shown, re-sorted with the selection
+kept when the endings change; a hidden item is left out of the listing, so
+nothing in the window reaches it. The desktop names and leaves out its icons
+as a window does ([the pinboard](./pinboard.md)); the trusted picker shows
+every entry by its exact name whatever the manager's settings say, since it is
+where an application is granted a file.
 
 ### The `Run` bundle
 
@@ -1772,7 +1815,7 @@ that asked may have moved on, and on `stderr` where the desktop draws none. The 
 application strip and opens a window on demand (`plans/NEW-TASKBAR.md` T4).
 
 The slot menu's **Network** row (`AppMenuSymbol::Network`, directly above
-*Settings…*) brings forward the window showing the network,
+*Trash*) brings forward the window showing the network,
 or opens one. The browse is a reader's: a `netbrowse::Browse` on the
 loop decides each turn whether a window wants the network, submits a collect
 or a close to the readers' latest-wins `network` desk, and takes the answer
@@ -1790,6 +1833,25 @@ refreshes. Opening an endpoint states that connecting to network shares is
 not available on this system (`plans/ZEROCONF.md` Z11 awaits the `smbfs`
 service, `plans/SMB.md` SMB9a–SMB9e). The trusted picker composes no network
 view.
+
+The slot menu's last row, **Trash** (`AppMenuSymbol::Trash`, beneath a rule
+of its own), brings forward the window showing the user's Trash — spending
+the slot's activation before any disk is touched — or has the reader make
+sure the Trash exists, the slot's one such ask in flight, and opens it once
+that lands; one it cannot show is stated in an alert holding no window. With
+no home the row is greyed with the reason Go to Trash states.
+
+A volume's row on the slot menu opens a plate of what the user may do to it
+(`appbar::push_plate`): **Eject** where `VolumeFacts::ejector` admits them,
+and **Title** wherever the one rule lets them retitle it
+(`VolumeFacts::retitling_by`: a disk image of theirs, or any device's volume,
+whose format takes a title), greyed with the reason for one of theirs not to
+be retitled as it is mounted. Its field opens on the title; a commit is checked
+by `MountAct::retitle` — an empty title clears it — and carried out on the
+mount worker, and one the kernel refuses a device's volume for want of the
+authority asks an administrator through the desktop's prompt
+(`SystemTask::Retitle`), as a refused eject of a removable volume does
+(`SystemTask::Eject`).
 
 ### In-place rename
 
@@ -1893,6 +1955,8 @@ on a `SyscallInvoked` `sc=fd_grant` from `comm=desktop` followed by
 `sc=fd_redeem` from `comm=view`. The planted document is a text file, which a
 picture viewer states it cannot draw — the claim the run makes is which
 principal delegated to which, and a refusal reads it just as a render would.
+The `filepicks-qemu-aarch64` vertical holds two such pickers up at once, one
+for each of two viewer windows, and concludes each on its own.
 
 Its sibling, the `handover-qemu-aarch64` vertical, drives the **three**-principal
 route the file manager uses (`plans/VIEW.md`): with `view` already running and
@@ -2023,8 +2087,8 @@ operation holds on it, once the item is copied whole, fails or is cancelled. A
 move keeps its source's mode and owner as `mv` does; across volumes the engine
 puts the copy on the medium, then removes only what it copied while unchanged,
 so a failed copy loses no data and an entry added or changed meanwhile is kept
-and named. The plan chose every destination name free, so a name taken since
-refuses the item rather than being replaced. The model does no I/O; the app's operations run
+and named. A name already taken where an item lands is asked about rather than
+replaced (*Replace, skip or stop* below). The model does no I/O; the app's operations run
 under the launching user's own identity, so the read-only picker never runs one.
 
 ### The delete model
@@ -2115,7 +2179,7 @@ holding the next until then rather than waking per unit (`AGENTS.md` §2.23,
 operation it belongs to: closing a folder window closes its progress windows
 and cancels their operations, and their answers are dropped. A
 machine that refuses the thread carries an operation out on the loop to its
-end — slower and not cancellable, never wrong. A single `Job` carries a
+end — slower, but cancelled at a unit's end and never wrong. A single `Job` carries a
 `Removal` (a delete), a `TrashRun` (a move to Trash) or a `Paste` (a copy/move),
 the first and last an engine operation per item, so all three run through one
 path (`AGENTS.md` §2.2). The
@@ -2292,12 +2356,53 @@ the window naming the item (fail loud, `AGENTS.md` §2.24), and leaves whatever
 already landed in place rather than a fabricated success (`AGENTS.md` §5.4); the
 view is then re-listed so a partial paste is shown honestly. Initiating a `Cut`
 paste clears the clipboard (its sources are being moved, so re-pasting the same
-cut would name items that are gone); a `Copy` keeps it for another paste. A
-destination is created **exclusively**, so a pre-existing item of the same name
-is refused rather than clobbered, and a `Copy` back into an item's own directory
-is refused rather than silently duplicating a file onto itself (`AGENTS.md`
-§2.24) — overwrite/merge confirmation is a separately-staged follow-up. Only the
-file manager builds and drives this; the read-only picker never pastes.
+cut would name items that are gone); a `Copy` keeps it for another paste. An
+item of the same name already there is never clobbered unasked — the operation
+asks (*Replace, skip or stop* below) — and a `Copy` back into an item's own
+directory is refused rather than silently duplicating a file onto itself
+(`AGENTS.md` §2.24). Only the file manager builds and drives this; the
+read-only picker never pastes.
+
+### Replace, skip or stop
+
+A paste or a drop meeting a name already taken — in a folder window or on the
+desktop, a copy or a move — asks, in the operation's own progress window rather
+than a second one: **Replace** (**Merge** where a folder meets a folder),
+**Skip** and **Stop**, and **Do the same for every file that already exists**
+(**…every folder…** where a folder meets a folder).
+They are `lib/controls` controls (`render::ClashPanel`), which the window grows
+to show (`render::progress_window_extent`) and shrinks back from once answered.
+A question brings its window forward where the app holds the front; where it
+does not, the session refuses the raise and the question waits in place without
+taking the keyboard from the user's work. The keyboard rests on **Skip**, the
+default: `Tab` and `Shift+Tab` move it
+between the box and the choices, `Enter` takes the choice it rests on (**Skip**
+from the box), `Space` ticks the box, and `Escape` is **Stop**, which cancels as
+**Cancel** does; a click takes a choice once it is released over it. What each
+event to the window asks is the host-tested `progress_control`.
+
+Each item is one operation of the shared engine under `Taken::Ask`
+(`userland/apps/files/src/paste.rs`): a file or link meeting one pauses on the
+engine's question, and so does the item's own folder meeting a folder; merged
+into, a folder beneath meeting one merges as its parent did, and each taken
+file inside is asked about in turn. A move merges as well — by renames on one
+volume, and across two by the copy whose originals then go. An answer for the
+rest answers every later question of its own kind unasked — a folder's every
+later folder, a file's every later file (`turns::Rest`) — so a merge for the
+rest still asks about each taken file inside.
+
+A job that asks holds no worker (`AGENTS.md` §2.23, §28): its unit answers
+`Step::Asks`, and the worker parks the job on the operation desk, where it
+keeps its volume lanes, so nothing overtakes it on them. The answer reaches the
+parked job under the desk's lock, in memory alone, and the job resumes before
+any waiting. A cancel, a closed window or the app's teardown hands a parked job
+to a worker to stop, which settles what it made; one carried out on the loop is
+not stepped while it asks, so the loop parks.
+
+What a transfer left under its target's name — `Report::root`: created,
+replaced, merged or skipped — is what the drop onto the desktop is told of the
+item (`landing::outcome_of`), so a replaced item stands where it was dropped
+and a skipped or merged one moves nothing; an item that stopped is failed.
 
 ### The New ▸ model
 
@@ -2500,6 +2605,14 @@ own General, Permissions and Attributes follow, since a mount point is a
 directory with an owner and a mode too. The section is drawn from the pure
 `tairix_browse::Drive` model, which the window adopts a `DriveSample` into:
 
+- **Title** as a `TextField` holding the volume's title (`Drive::title`),
+  editable where the reader may retitle the volume and saying why not
+  otherwise. A press, or `Down` or `Tab` from the strip, gives it the keyboard
+  (`route::PropertiesKey::Title`); `Return` commits through
+  `MountAct::retitle` on the mount worker, as the slot's field does, and
+  `Escape` or `Tab` puts the title as read back. What was committed shows until
+  a reading says what the volume records; a title is a fact the section
+  states, so a retitle lays the section out again.
 - **Capacity** as a `lib/controls` `CompositionRing` of used and free with the
   share used in its middle, and the whole and what is available beneath it. A
   format that tracks no fixed capacity says so instead.
@@ -2788,11 +2901,11 @@ shell I/O seam, so the parsing and rendering logic is testable without a kernel
 `ShellSource::read()` returns the bytes the shell has produced since the last
 call (an empty read is not an error) and `ShellSource::write(bytes)` forwards
 the user's keystrokes. On a running system the seam is
-`spawned::PipeShellSource` (`plans/APPWIN.md` AW4): two kernel pipes to a
-shell child the terminal spawned under its own `CAP_PROC_SPAWN`, wired at
-spawn through `spawned::shell_wires` — the child's stdin is the keystroke
-pipe and its stdout *and* stderr land on the one output pipe a terminal
-renders (fd 3 is closed; advisory records are best-effort by contract).
+`spawned::StreamShellSource` over the master end of one kernel
+pseudo-terminal (`plans/PTY.md`): its slave end is the stdin, stdout *and*
+stderr of a shell child the terminal spawned under its own `CAP_PROC_SPAWN`
+into a session of its own, wired at spawn through `spawned::shell_wires`
+(fd 3 is closed; advisory records are best-effort by contract).
 Reads drain one bounded chunk per wait-set wake and surface end-of-stream as
 the typed "shell has exited" refusal; writes loop over short writes and fail
 closed on a wedged channel. The process-spawn authority lives in the `Run`
@@ -2923,8 +3036,11 @@ blits, a couple of cells copied into the shared frame, and a two-cell
 damage rectangle for the session to recomposite — rather than re-rendering,
 re-converting, and re-presenting the whole window for one character. A wake
 that changed nothing presents nothing at all. Two equal cells paint
-identically only under the same colours and the same face, so a theme or
-scale change calls `Screen::invalidate` and the next paint covers the window.
+identically only under the same colours and the same face, so a change that
+moves either calls `Screen::invalidate` and the next paint covers the window.
+A desktop change can move only the face — a new scale, or a screen the face
+no longer fits — since no terminal colour is the desktop's, so a light/dark
+switch repaints nothing and keeps the effect stages it had drawn.
 A *profile* change calls it only when it moved one of those two: a backdrop
 blur the compositor draws behind the window, or a post-processing pass over
 the finished frame, leaves every retained cell still true, so a drag of
@@ -2944,14 +3060,16 @@ erases, and wide-glyph clobbering.
 `scheme.rs` is the one place a terminal colour comes from: a `ColorScheme` is
 the sixteen ANSI slots plus background, foreground, cursor, and cursor text,
 and `Painted` resolves the scheme in force once per repaint rather than once
-per cell. **System** follows the desktop's own dark/light appearance and is
-the default, taking its ground from the theme's *document* role rather than its
-window surface: a terminal's grid is a page, and the full-screen editors that
-draw on it (`edit`, `vim`) are editing text on it, so it belongs on the same
-ground an editable field does. **Midnight**, **Phosphor**, **Amber**,
-**Ember**, **Contrast**,
-and **Paper** carry fixed palettes; **Custom** is the user's own, editable in
-the settings sheet.
+per cell. **System** is the default: the dark theme's own page, text, and
+accent (`Palette::DARK`, the palette `Theme::dark` wears) whatever appearance
+the desktop is in. Its ground is the *document* role rather than the window
+surface: a terminal's grid is a page, and the full-screen editors that draw on
+it (`edit`, `vim`) are editing text on it, so it belongs on the same ground an
+editable field does. It, **Midnight**, **Phosphor**, **Amber**, **Ember**,
+**Contrast**, and **Paper** carry fixed palettes; **Custom** is the user's own,
+editable in the settings sheet. No scheme reads the desktop's theme, so a
+light/dark switch changes no terminal colour; the Settings window is drawn in
+the desktop's theme and follows it.
 
 Everything a user can change is one `Profile`, held in the OS app-data store
 and reached through [`tairix-appdata`](../lib/appdata.md). It is private to
@@ -3044,8 +3162,8 @@ frame — and a round that *did* report keeps its whole-plate repaint, because a
 change the sheet composes above its controls (a switched tab's body) is wider
 than the rectangle the control that caused it reports.
 
-*Settings…* opens a modal sheet built from the shared Reactive
-Alloy controls: an **Appearance** tab (the scheme chooser, the text-size
+*Settings…* opens the one modeless Settings window, built from the shared
+Reactive Alloy controls: an **Appearance** tab (the scheme chooser, the text-size
 slider, and the custom scheme's twenty colour wells with the shared colour
 picker editing the selected one, which shows the well's colour as it was when
 it was selected beside it) and an **Effects** tab (one slider per effect). The
@@ -3078,7 +3196,10 @@ park carries a one-shot frame deadline only while an animated screen effect is
 in force. A key press is claimed by an open menu or settings sheet, else by a
 terminal accelerator, else encoded through the one shared `lib/keymap` rule
 and written to the shell (releases send nothing); shell output is pumped into
-the grid and the repainted frame presented. The shell exiting closes its
+the grid as fast as it parses, and a window is presented once the desktop has
+answered its last frame (`WindowClient::present_in_flight`) — owed its paint
+until then, given before the next park — so a stream costs a frame a desktop
+frame and never waits on the desktop. The shell exiting closes its
 window. The user choosing *Close*, or a `CloseRequested` from the desktop,
 closes the window and ends its shell with `Terminate`; the window's child
 member stays on the wait-set until the shell is reaped. Each shell anchors a
@@ -3171,7 +3292,8 @@ The `view.app` bundle is the desktop's viewer for pictures and documents
 (`plans/VIEW.md`): the app the file manager hands a picture to, and a resident
 application that asks the session's trusted picker when the user clicks its
 icon-bar slot. It claims JPEG, PNG, SVG, GIF, TIFF, WEBP, BMP, ICO and
-RISC OS Sprite — every format the decoder supports *completely*. PDF is
+RISC OS Sprite — every format the decoder supports *completely* — and plays
+WebM movies. PDF is
 deliberately absent from its `associations` until `lib/pdf` lands behind the
 same page source: claiming a format with no decoder behind it would offer the
 viewer for a file it must always refuse.
@@ -3214,8 +3336,8 @@ a later one.
 
 ### Two capabilities the viewer does not have, and one it does
 
-Its manifest requests `CAP_CONSOLE_WRITE`, `CAP_SHM` and `CAP_PROC_SPAWN`,
-and deliberately **no filesystem capability**. A document reaches it only as
+Its manifest requests `CAP_CONSOLE_WRITE`, `CAP_SHM`, `CAP_SANDBOX_SPAWN` and
+`CAP_LOG_EMIT`, and deliberately **no filesystem capability**. A document reaches it only as
 the user's own act: a read-only descriptor the file manager had the kernel
 clone in at spawn (`DOCUMENT_ROLE_ARG` plus `STDIN`, the inherited-document
 hand-off), the one-shot `fd_grant` a `FilePicked` carries after the user chose a
@@ -3270,6 +3392,11 @@ submits and carries on drawing; the answer arrives as a wake on the wait-set
 it already parks in. The pixel buffer travels with the job and comes back in
 the answer, so an interactive re-render allocates nothing once the geometry
 has settled.
+
+Input never paints. Each event, worker answer and animation step folds what it
+changed into its window's account (`Owed`), and once the turn has drained what
+is queued each window presents once, so a burst of pointer motion costs one
+frame rather than one each.
 
 An answer is adopted only if it still describes what the state calls for. A
 rectangle the user has panned or zoomed away from is a real picture of the
@@ -3330,3 +3457,48 @@ carries no signature, and is recognised from its content only where its
 header states the file's own length, else by its name or the filetype its
 volume records — opens from the picker as it does from the file manager. A name the session no longer holds leaves
 the document unnamed rather than refusing it.
+
+### Movies
+
+A WebM file is *played* rather than drawn. The open job knows it by its EBML
+signature, ends the window's picture decoder, and hands the descriptor to a
+thread of the window's own, which runs `tairix_view::movie::Player`: a
+supervised `moviedecode` session of the viewer's own binary — the same
+capability-empty child, in the session role — that pages the file through the
+shared page cache and walks its pictures and its sound apart, and one
+`audio-v1` stream the sound plays into through `lib/player`'s `Speaker` seam.
+The thread parks on the decoder's pipes, the stream's mailbox, the window's
+orders and one deadline; the window loop never waits on it.
+
+Pictures cross in shared memory. Each decoder is handed, at spawn, a ring of
+three slots the size of the screen (`RtSessionLauncher::sharing`), mapped in
+the viewer too; it draws each picture into a slot the viewer does not hold, at
+the stream's own size, and names it over the pipe by a head the client checks
+before it reads a pixel. The window copies the picture out of its slot, hands
+the slot back — the playback's next picture request says so — and scales its
+copy to the canvas through the viewer's own fit, zoom and turn, so a pan or a
+zoom of a paused movie draws again from what the window already holds. A
+replaced decoder is handed a ring of its own.
+
+The window tells the thread what its state calls for — play or pause, a seek
+let go of — one batch at a time, the next folded in the view's state until the
+thread takes the last, and adopts what the thread posts on the one wake every
+playback shares: where the movie is, what became of its decoder and its sound,
+and the picture due. A position from before the latest seek told is not
+adopted, so the seek bar stays where the user put it.
+
+The sound is the clock: each report of how far the audio service has read
+re-anchors it, and the monotonic clock runs between, so the pictures follow a
+device whose clock drifts; a silent movie runs on the monotonic clock alone.
+A picture overtaken before it is shown is dropped and counted, and the decoder
+is told not to draw one already 100 ms late unless the window has gone 250 ms
+without one.
+
+The transport band beneath the canvas holds the seek bar and the clock — the
+position, or where a drag points, and the length the file states. The seek
+lands on the latest keyframe at or before the target. A recording that states
+no length has nothing to seek by: it plays from its start with its seek bar
+disabled. A file cut short plays as far as it holds; a refused frame, a
+decoder that failed twice at one place, or sound that could not be played is
+stated in the status line. A movie that will not open closes its window with
+an alert saying why.

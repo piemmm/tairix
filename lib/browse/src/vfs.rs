@@ -32,7 +32,7 @@ use tairix_fsmeta::preset::acorn::Filetype;
 use tairix_util::utf8::shown;
 use tairix_visible::shown_chars;
 
-use crate::entry::{Entry, EntryKind, LinkResolution};
+use crate::entry::{Entry, EntryKind};
 use crate::source::{DirectorySource, Listing, Probe};
 
 /// What a listed symbolic link holds, as the browser must see it.
@@ -47,7 +47,8 @@ pub struct LinkInfo {
     /// naming nothing. It is data, never a path this engine walks.
     pub target: String,
     /// The kind the target resolves to, or [`None`] when the target cannot be
-    /// reached at all: a dangling link, or one the caller may not follow.
+    /// reached at all: a dangling link, one the caller may not follow, or a
+    /// volume's root, which only the mount table places.
     pub kind: Option<FileKind>,
 }
 
@@ -305,19 +306,6 @@ fn cut_to_bytes(text: &str, budget: usize) -> &str {
     &text[..end]
 }
 
-/// Append the leaf `name` to the directory path already spelled in `path`.
-///
-/// The one place a directory path and a leaf are joined, so the root case
-/// (`/` plus a name, never `//name`) is handled once. Appending in place lets
-/// a caller that spells many children of one directory — a grid of tiles —
-/// reuse a single buffer instead of allocating a path each time.
-pub fn push_child(path: &mut String, name: &str) {
-    if !path.ends_with('/') {
-        path.push('/');
-    }
-    path.push_str(name);
-}
-
 /// Parse an absolute path string into validated root-first components — the
 /// inverse of [`spell_absolute_path`].
 ///
@@ -433,13 +421,7 @@ pub(crate) fn entry_from_record(
         FileKind::Symlink => reader.describe_link(&tairix_path::join(directory, name)),
         FileKind::Directory | FileKind::Regular => None,
     };
-    let resolution = described.as_ref().and_then(|link| {
-        link.kind.map(|kind| LinkResolution {
-            kind,
-            target_name: tairix_path::leaf_name(&link.target),
-        })
-    });
-    let kind = EntryKind::for_listing(entry.kind, name, resolution);
+    let kind = EntryKind::for_listing(entry.kind, name, described.as_ref());
     let mut built = Entry::new(name, kind, entry.size, entry.modified)
         .with_id(entry.id)
         .with_content_gen(entry.content_gen);
@@ -686,10 +668,20 @@ impl EntryReader for RtLinkReader {
 #[cfg(feature = "rt")]
 fn describe_link(path: &str) -> Option<LinkInfo> {
     let target = tairix_rt::readlink(path).ok()?;
+    // No walk follows a target naming another root: a volume's is placed by
+    // the mount table alone, and any other is reached at that root as the
+    // caller's own path.
+    let reached = match tairix_path::names_another_root(&target) {
+        Ok(true) if crate::volume::reference(&target).is_some() => {
+            return Some(LinkInfo { target, kind: None });
+        }
+        Ok(true) => target.as_str(),
+        Ok(false) | Err(_) => path,
+    };
     // A resolve-only open with the *following* posture: no read authority
     // is requested, the handle closes on drop, and a target that cannot be
     // reached simply yields no kind.
-    let kind = tairix_rt::File::open(path.as_bytes(), tairix_abi::fs::OpenFlags::empty())
+    let kind = tairix_rt::File::open(reached.as_bytes(), tairix_abi::fs::OpenFlags::empty())
         .ok()
         .and_then(|file| file.stat().ok())
         .map(|stat| stat.kind);

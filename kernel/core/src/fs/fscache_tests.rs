@@ -10,6 +10,9 @@ use super::*;
 use crate::fs::memfs::{RwMockFs, ADMIN_RECORD};
 use crate::fs::test_volume::{mounted, path, read_path, Account};
 use crate::fs::wrapper_conformance as conformance;
+use crate::test_alloc::{
+    opt_in_current_thread, opt_out_current_thread, past_each_refusal, LiveBytes,
+};
 use crate::test_pressure::{free_for, pressured, unpressured, TestSource};
 use crate::test_sink::TestSink;
 
@@ -697,7 +700,7 @@ fn refilling_a_hole_in_a_cached_listing_charges_each_entry_once() {
         .dirent
         .range((dir.raw(), 0)..=(dir.raw(), u64::MAX))
         .next()
-        .map(|(_, entry)| entry.name.clone())
+        .map(|(_, entry)| entry.name.to_vec())
         .expect("a cached entry");
     let node = cache.lookup(dir, &first).expect("the first entry resolves");
     let charged = cache.accounting().class_bytes(ReclaimClass::FsMetadata);
@@ -756,7 +759,7 @@ fn a_change_to_a_node_drops_exactly_the_listing_entries_naming_it() {
         cache
             .dirent
             .range((listing.raw(), 0)..=(listing.raw(), u64::MAX))
-            .map(|(_, entry)| entry.name.clone())
+            .map(|(_, entry)| entry.name.to_vec())
             .collect()
     };
 
@@ -1591,4 +1594,244 @@ fn a_cache_the_heap_cannot_hold_is_refused() {
     let built = CachedFs::new(fs, budget, owner, pressure, sink).map(drop);
     crate::test_alloc::refuse_allocations_on_current_thread(false);
     assert_eq!(built, Err(VfsError::OutOfMemory));
+}
+
+/// What every pool holds is exactly what its recency index slots and the
+/// ledger charges.
+fn assert_books_balance(cache: &CachedFs<Counting<RwMockFs>>) {
+    let lookups: usize = cache.lookup.values().map(|names| names.map.len()).sum();
+    assert_eq!(cache.lru_data.len(), cache.data.len());
+    assert_eq!(
+        cache.lru_meta.len(),
+        cache.stat.len() + cache.sec.len() + cache.dirent.len() + lookups
+    );
+    assert_index_matches(cache);
+    for names in cache.lookup.values() {
+        assert_eq!(
+            names.charged,
+            names.map.allocated_bytes(),
+            "a name index is charged the room it holds"
+        );
+    }
+    let room: usize = cache.lookup.values().map(|names| names.charged).sum();
+    let charged: usize = cache
+        .lru_data
+        .values()
+        .chain(cache.lru_meta.values())
+        .map(|key| {
+            let (payload, metadata) = cache.cost_of(key);
+            payload + metadata
+        })
+        .sum();
+    assert_eq!(cache.accounting().total_bytes(), charged + room);
+}
+
+/// However far an admission gets before the heap refuses it, the operation
+/// is served whole and nothing is kept that the books do not account for.
+#[test]
+fn an_admission_refused_part_way_is_a_miss_with_the_books_balanced() {
+    let mut cache = fixture(b"x");
+    let dir = dir_of(&mut cache);
+    let names: Vec<Vec<u8>> = (0..32u8)
+        .map(|n| vec![b'f', b'a' + n % 26, b'0' + n / 26])
+        .collect();
+    for name in &names {
+        let file = cache
+            .create(dir, name, NodeKind::RegularFile, &ADMIN_RECORD)
+            .expect("create");
+        cache.write_all(file, 0, name).expect("write");
+    }
+    let mut fresh = names.iter();
+    let refused = past_each_refusal(&true, || {
+        let Some(name) = fresh.next() else {
+            return false;
+        };
+        let refusals = cache.accounting().refusals();
+        let file = cache.lookup(dir, name).expect("a lookup is served");
+        let info = cache.node_info(file).expect("a stat is served");
+        cache.security(file).expect("a record is served");
+        let mut body = [0u8; CHUNK];
+        let read = cache.read_at(file, 0, &mut body).expect("a read is served");
+        assert_eq!(&body[..read], name.as_slice());
+        assert_eq!(info.size, name.len() as u64);
+        assert_books_balance(&cache);
+        cache.accounting().refusals() > refusals
+    });
+    assert!(!refused, "the heap was granted in full at last");
+    assert!(fresh.next().is_some(), "the sweep outran its files");
+    assert_books_balance(&cache);
+}
+
+/// Letting cached lookups go — a change to their directory, or an eviction —
+/// copies no name: a path that frees memory must not need any.
+#[test]
+fn letting_cached_lookups_go_allocates_nothing() {
+    static COUNTER: LiveBytes = LiveBytes::new();
+    let mut cache = fixture(b"x");
+    let dir = dir_of(&mut cache);
+    for name in [&b"a"[..], b"b"] {
+        cache
+            .create(dir, name, NodeKind::RegularFile, &ADMIN_RECORD)
+            .expect("create");
+    }
+    let warm = |cache: &mut CachedFs<Counting<RwMockFs>>| {
+        for name in [&b"file.txt"[..], b"a", b"b"] {
+            cache.lookup(dir, name).expect("resolves");
+        }
+    };
+    warm(&mut cache);
+    opt_in_current_thread(&COUNTER);
+    cache.invalidate_lookups(dir.raw());
+    opt_out_current_thread();
+    assert_eq!(COUNTER.allocations(), 0, "an invalidation copied a name");
+    assert!(cache.lookup.get(&dir.raw()).is_none());
+    warm(&mut cache);
+    opt_in_current_thread(&COUNTER);
+    cache.evict_until(0);
+    opt_out_current_thread();
+    assert_eq!(COUNTER.allocations(), 0, "an eviction copied a name");
+    assert_eq!(cache.accounting().total_bytes(), 0);
+    assert_books_balance(&cache);
+}
+
+/// The room each of the flat indexes holds.
+fn index_room(cache: &CachedFs<Counting<RwMockFs>>) -> [usize; 8] {
+    [
+        cache.stat.allocated_bytes(),
+        cache.sec.allocated_bytes(),
+        cache.lookup.allocated_bytes(),
+        cache.dirent.allocated_bytes(),
+        cache.embedded.allocated_bytes(),
+        cache.data.allocated_bytes(),
+        cache.lru_data.allocated_bytes(),
+        cache.lru_meta.allocated_bytes(),
+    ]
+}
+
+/// A shrink that drains the cache gives the heap back every index's room.
+#[test]
+fn a_drain_gives_the_heap_back_the_index_room() {
+    let (source, mut cache) = pressured_fixture(b"room to give back");
+    assert!(cache.data.allocated_bytes() > 0, "file data is indexed");
+    assert!(cache.lru_meta.allocated_bytes() > 0, "metadata is indexed");
+    source.set_free(free_for(PressureBand::Severe));
+    let root = cache.root();
+    cache.lookup(root, b"dir").expect("still served");
+    assert_eq!(cache.accounting().total_bytes(), 0);
+    assert_eq!(
+        index_room(&cache),
+        [0; 8],
+        "the drained indexes hold no room"
+    );
+}
+
+/// Room a change freed in the indexes goes back to the heap once pressure
+/// rises, though the ledger the change emptied is under every band's target
+/// and no shrink runs.
+#[test]
+fn room_a_change_freed_is_given_back_once_pressure_rises() {
+    let (source, mut cache) = pressured_fixture(b"freed by a change");
+    let root = cache.root();
+    let dir = dir_of(&mut cache);
+    let file = cache.lookup(dir, b"file.txt").expect("file resolves");
+    assert_eq!(
+        names_of(&mut cache, dir),
+        [b"file.txt".to_vec()],
+        "the listing is kept"
+    );
+    cache.write_at(file, 0, b"changed").expect("write");
+    for parent in [dir, root] {
+        cache
+            .create(parent, b"new", NodeKind::RegularFile, &ADMIN_RECORD)
+            .expect("create");
+    }
+    assert_eq!(
+        cache.accounting().total_bytes(),
+        0,
+        "everything kept went with its change"
+    );
+    assert!(
+        cache.lru_meta.allocated_bytes() > 0,
+        "the indexes kept their room"
+    );
+    // Mild pressure keeps metadata, so nothing here is over its target.
+    source.set_free(free_for(PressureBand::Mild));
+    cache.parent(dir).expect("served");
+    assert_eq!(index_room(&cache), [0; 8], "the heap has the room back");
+}
+
+/// An entry the heap refuses room for is refused before anything is evicted
+/// for it, so the cache is left exactly as it was.
+#[test]
+fn an_entry_refused_its_room_evicts_nothing_for_it() {
+    let mut cache = fixture(b"kept");
+    let root = cache.root();
+    cache
+        .create(root, b"other", NodeKind::Directory, &ADMIN_RECORD)
+        .expect("mkdir");
+    let other = cache.lookup(root, b"other").expect("other resolves");
+    cache
+        .create(other, b"x", NodeKind::RegularFile, &ADMIN_RECORD)
+        .expect("create");
+    let file = file_of(&mut cache);
+    cache.node_info(file).expect("stat");
+    // A ceiling the cache fills already, so the next entry has to evict.
+    cache.budget = CacheBudget::from_ceiling(cache.accounting().total_bytes());
+    let held = cache.accounting().total_bytes();
+    let evictions = cache.accounting().evictions();
+    // The name's copies are had; a fresh index's room is not.
+    crate::test_alloc::refuse_allocations_from_on_current_thread(64);
+    let found = cache.lookup(other, b"x");
+    crate::test_alloc::refuse_allocations_on_current_thread(false);
+    assert!(found.is_ok(), "the lookup is served");
+    assert_eq!(
+        cache.accounting().evictions(),
+        evictions,
+        "nothing was evicted for it"
+    );
+    assert_eq!(cache.accounting().total_bytes(), held);
+    assert!(
+        cache.lookup.get(&other.raw()).is_none(),
+        "and nothing was kept"
+    );
+    assert_books_balance(&cache);
+}
+
+/// A directory's name index is charged the room it holds, and the ledger is
+/// given that room back as the index goes.
+#[test]
+fn a_directorys_name_index_is_charged_the_room_it_holds() {
+    let mut cache = fixture(b"x");
+    let dir = dir_of(&mut cache);
+    let before = cache.accounting().class_bytes(ReclaimClass::FsMetadata);
+    cache.lookup(dir, b"file.txt").expect("resolves");
+    let names = cache.lookup.get(&dir.raw()).expect("an index");
+    let room = names.map.allocated_bytes();
+    assert!(room > 0, "the index holds room");
+    let (payload, metadata) = CachedFs::<Counting<RwMockFs>>::lookup_cost(b"file.txt".len());
+    assert_eq!(
+        cache.accounting().class_bytes(ReclaimClass::FsMetadata),
+        before + payload + metadata + room
+    );
+    assert_books_balance(&cache);
+    cache.invalidate_lookups(dir.raw());
+    assert_eq!(
+        cache.accounting().class_bytes(ReclaimClass::FsMetadata),
+        before
+    );
+}
+
+/// Every buffer the cache keeps or copies erases itself as it is let go, on
+/// whichever path lets it go — an index that would not take it included —
+/// because each is a wiping buffer: this stops compiling if one becomes a
+/// plain vector again.
+#[test]
+fn every_buffer_the_cache_keeps_or_copies_erases_itself() {
+    fn erases<T>(_: fn(&T) -> &WipedBuf) {}
+    erases::<DataEntry>(|entry| &entry.bytes);
+    erases::<DirentEntry>(|entry| &entry.name);
+    erases::<NameKey>(|key| &key.0);
+    erases::<ReadStage>(|stage| &stage.bytes);
+    let copy: fn(&[u8]) -> Option<WipedBuf> = CachedFs::<RwMockFs>::try_copy;
+    assert!(copy(b"name").is_some_and(|name| *name == *b"name"));
 }

@@ -28,10 +28,10 @@
 //! [`InputEvent`]: tairix_wm::InputEvent
 //! [`DeviceInputSource`]: crate::DeviceInputSource
 
-use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
+use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PhysicalKey};
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
-use tairix_keymap::modifiers_from_abi;
+use tairix_input::wire::key_input_event;
 use tairix_wm::{InputEvent, Key, NamedKey, WindowId};
 
 use crate::switchuser::park_within;
@@ -124,10 +124,29 @@ fn alone(held: Modifiers) -> Option<TapKey> {
     }
 }
 
+/// What tells one key from another: where it sits, when its producer names
+/// that, else what it typed. Two keys typing one character — the keypad's `1`
+/// and the main row's — are two keys.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyIdentity {
+    Physical(PhysicalKey),
+    Typed(KeyValue),
+}
+
+impl KeyIdentity {
+    fn of(key: KeyValue, physical: PhysicalKey) -> Self {
+        if physical == PhysicalKey::UNKNOWN {
+            Self::Typed(key)
+        } else {
+            Self::Physical(physical)
+        }
+    }
+}
+
 /// The key held down, and when it next repeats.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Held {
-    key: KeyValue,
+    key: KeyIdentity,
     event: InputEvent,
     record: KeyInput,
     /// Monotonic nanoseconds of the next repeat, or `None` when it will not.
@@ -254,50 +273,6 @@ impl<C> KeyboardInputSource<C> {
     }
 }
 
-/// Map an ABI wire [`NamedKeyCode`] to the desktop's [`NamedKey`].
-///
-/// The wire ABI gives every function key its own discriminant; the routing
-/// vocabulary folds them into one [`NamedKey::Function`] carrying the number,
-/// so callers match on the family rather than twelve variants.
-const fn named_key(code: NamedKeyCode) -> NamedKey {
-    match code {
-        NamedKeyCode::Enter => NamedKey::Enter,
-        NamedKeyCode::Escape => NamedKey::Escape,
-        NamedKeyCode::Backspace => NamedKey::Backspace,
-        NamedKeyCode::Tab => NamedKey::Tab,
-        NamedKeyCode::Delete => NamedKey::Delete,
-        NamedKeyCode::Insert => NamedKey::Insert,
-        NamedKeyCode::Home => NamedKey::Home,
-        NamedKeyCode::End => NamedKey::End,
-        NamedKeyCode::PageUp => NamedKey::PageUp,
-        NamedKeyCode::PageDown => NamedKey::PageDown,
-        NamedKeyCode::Left => NamedKey::Left,
-        NamedKeyCode::Right => NamedKey::Right,
-        NamedKeyCode::Up => NamedKey::Up,
-        NamedKeyCode::Down => NamedKey::Down,
-        NamedKeyCode::F1 => NamedKey::Function { number: 1 },
-        NamedKeyCode::F2 => NamedKey::Function { number: 2 },
-        NamedKeyCode::F3 => NamedKey::Function { number: 3 },
-        NamedKeyCode::F4 => NamedKey::Function { number: 4 },
-        NamedKeyCode::F5 => NamedKey::Function { number: 5 },
-        NamedKeyCode::F6 => NamedKey::Function { number: 6 },
-        NamedKeyCode::F7 => NamedKey::Function { number: 7 },
-        NamedKeyCode::F8 => NamedKey::Function { number: 8 },
-        NamedKeyCode::F9 => NamedKey::Function { number: 9 },
-        NamedKeyCode::F10 => NamedKey::Function { number: 10 },
-        NamedKeyCode::F11 => NamedKey::Function { number: 11 },
-        NamedKeyCode::F12 => NamedKey::Function { number: 12 },
-    }
-}
-
-/// Map a decoded ABI [`KeyValue`] to the desktop's [`Key`].
-const fn key(value: KeyValue) -> Key {
-    match value {
-        KeyValue::Char(c) => Key::Char(c),
-        KeyValue::Named(named) => Key::Named(named_key(named)),
-    }
-}
-
 /// Whether `event` is the secure attention key: Ctrl+Alt+Delete pressed.
 ///
 /// The session takes it before any holder of the seat routes a key, so no
@@ -311,27 +286,6 @@ pub fn is_secure_attention(event: &InputEvent) -> bool {
             modifiers,
         } if modifiers.ctrl && modifiers.alt
     )
-}
-
-/// Translate a decoded ABI [`KeyInput`] into the desktop [`InputEvent`].
-///
-/// The one translation from the wire vocabulary to the routing one, so a
-/// surface the serve loop hands a raw record (the trusted picker, which the
-/// router reaches by window id rather than through this source) reads it
-/// exactly as every other event was read.
-pub(crate) fn to_input_event(record: KeyInput) -> InputEvent {
-    let modifiers = modifiers_from_abi(record.modifiers());
-    match record {
-        KeyInput::Pressed { key: value, .. } => InputEvent::KeyPressed {
-            key: key(value),
-            modifiers,
-        },
-        KeyInput::Released { key: value, .. } => InputEvent::KeyReleased {
-            key: key(value),
-            modifiers,
-        },
-        KeyInput::ModifiersChanged { .. } => InputEvent::ModifiersChanged { modifiers },
-    }
 }
 
 impl<C: KeyInputChannel> KeyboardInputSource<C> {
@@ -360,14 +314,15 @@ impl<C: KeyInputChannel> KeyboardInputSource<C> {
     ) -> Result<Option<(InputEvent, KeyInput)>, Errno> {
         while let Some(bytes) = self.channel.next_record()? {
             let record = KeyInput::from_bytes(&bytes)?;
-            let event = to_input_event(record);
+            let event = key_input_event(record);
             if let KeyInput::ModifiersChanged { modifiers } = record {
                 self.follow_modifiers(modifiers, now_ns);
             } else if self.tapping != Tapping::Idle {
                 self.tapping = Tapping::Spoiled;
             }
             match record {
-                KeyInput::Pressed { key, .. } => {
+                KeyInput::Pressed { key, physical, .. } => {
+                    let key = KeyIdentity::of(key, physical);
                     if self.held.is_some_and(|held| held.key == key) {
                         continue;
                     }
@@ -381,8 +336,11 @@ impl<C: KeyInputChannel> KeyboardInputSource<C> {
                         focus,
                     });
                 }
-                KeyInput::Released { key, .. } => {
-                    if self.held.is_some_and(|held| held.key == key) {
+                KeyInput::Released { key, physical, .. } => {
+                    if self
+                        .held
+                        .is_some_and(|held| held.key == KeyIdentity::of(key, physical))
+                    {
                         self.held = None;
                     }
                 }
@@ -414,7 +372,9 @@ impl<C: KeyInputChannel> KeyboardInputSource<C> {
 mod tests {
     use super::{KeyInputChannel, KeyRepeat, KeyboardInputSource};
     use alloc::collections::VecDeque;
-    use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
+    use tairix_abi::input::{
+        KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PhysicalKey,
+    };
     use tairix_abi::time::{Duration64, NANOS_PER_MILLI as MS};
     use tairix_abi::Errno;
     use tairix_wm::{InputEvent, Key, Modifiers, NamedKey};
@@ -539,6 +499,7 @@ mod tests {
                 meta: true,
                 ..AbiModifiers::default()
             },
+            physical: PhysicalKey::UNKNOWN,
         };
         assert_eq!(tapped(&[meta(true), key, meta(false)]), None);
     }
@@ -551,6 +512,7 @@ mod tests {
                 ctrl: true,
                 ..AbiModifiers::default()
             },
+            physical: PhysicalKey::UNKNOWN,
         };
         let spoiled: [&[KeyInput]; 3] = [
             &[modifiers(true, false), key, modifiers(false, false)],
@@ -580,6 +542,7 @@ mod tests {
                 ctrl: true,
                 ..AbiModifiers::default()
             },
+            physical: PhysicalKey::UNKNOWN,
         };
         assert!(tapped(&[
             modifiers(true, false),
@@ -617,6 +580,7 @@ mod tests {
                     ctrl: true,
                     ..AbiModifiers::default()
                 },
+                physical: PhysicalKey::UNKNOWN,
             }]),
             REPEAT,
         );
@@ -639,10 +603,12 @@ mod tests {
             KeyInput::Released {
                 key: KeyValue::Named(NamedKeyCode::Escape),
                 modifiers: AbiModifiers::default(),
+                physical: PhysicalKey::UNKNOWN,
             },
             KeyInput::Pressed {
                 key: KeyValue::Named(NamedKeyCode::F5),
                 modifiers: AbiModifiers::default(),
+                physical: PhysicalKey::UNKNOWN,
             },
         ];
         let mut source = KeyboardInputSource::new(QueueChannel::new(&events), REPEAT);
@@ -678,6 +644,7 @@ mod tests {
         let mut channel = QueueChannel::new(&[KeyInput::Pressed {
             key: KeyValue::Char('a'),
             modifiers: AbiModifiers::default(),
+            physical: PhysicalKey::UNKNOWN,
         }]);
         channel.fault_with(Errno::NotFound);
         let mut source = KeyboardInputSource::new(channel, REPEAT);
@@ -698,6 +665,7 @@ mod tests {
             QueueChannel::new(&[KeyInput::Pressed {
                 key: KeyValue::Char('a'),
                 modifiers: AbiModifiers::default(),
+                physical: PhysicalKey::UNKNOWN,
             }]),
             REPEAT,
         );
@@ -705,10 +673,28 @@ mod tests {
         assert_eq!(channel.records.len(), 1);
     }
 
+    #[test]
+    fn the_desktop_reads_each_records_physical_key_beside_its_event() {
+        let chord = KeyInput::Pressed {
+            key: KeyValue::Char('#'),
+            modifiers: AbiModifiers {
+                meta: true,
+                shift: true,
+                ..AbiModifiers::default()
+            },
+            physical: PhysicalKey::DIGIT_3,
+        };
+        let mut source = KeyboardInputSource::new(QueueChannel::new(&[chord]), REPEAT);
+        let polled = source.poll_record(0, None).expect("well-formed");
+        let (_, record) = polled.expect("a record");
+        assert_eq!(record.physical(), Some(PhysicalKey::DIGIT_3));
+    }
+
     fn press(c: char) -> KeyInput {
         KeyInput::Pressed {
             key: KeyValue::Char(c),
             modifiers: AbiModifiers::default(),
+            physical: PhysicalKey::UNKNOWN,
         }
     }
 
@@ -716,6 +702,7 @@ mod tests {
         KeyInput::Released {
             key: KeyValue::Char(c),
             modifiers: AbiModifiers::default(),
+            physical: PhysicalKey::UNKNOWN,
         }
     }
 
@@ -784,6 +771,53 @@ mod tests {
         assert_eq!(typed(&mut source, 5_000 * MS), None);
         assert!(!source.repeat_due(5_049 * MS));
         assert!(source.repeat_due(5_050 * MS));
+    }
+
+    /// An edge of the key at `usage`, typing `1`.
+    fn typed_one(pressed: bool, usage: u16) -> KeyInput {
+        let (key, modifiers) = (KeyValue::Char('1'), AbiModifiers::default());
+        let physical = PhysicalKey::from_usage(usage);
+        if pressed {
+            KeyInput::Pressed {
+                key,
+                modifiers,
+                physical,
+            }
+        } else {
+            KeyInput::Released {
+                key,
+                modifiers,
+                physical,
+            }
+        }
+    }
+
+    /// Two keys typing one character are two keys: the main row's `1`
+    /// pressed while the keypad's is held is typed, not dropped as the
+    /// keypad's repeat, and letting the keypad's go leaves the main row's
+    /// repeating.
+    #[test]
+    fn a_second_key_typing_the_held_keys_character_is_its_own() {
+        const KEYPAD_1: u16 = 0x59;
+        const MAIN_ROW_1: u16 = 0x1E;
+        let mut source = KeyboardInputSource::new(
+            QueueChannel::new(&[
+                typed_one(true, KEYPAD_1),
+                typed_one(true, MAIN_ROW_1),
+                typed_one(false, KEYPAD_1),
+            ]),
+            REPEAT,
+        );
+        assert_eq!(typed(&mut source, 0), Some('1'));
+        assert_eq!(typed(&mut source, 0), Some('1'), "the main row's own press");
+        assert!(
+            matches!(source.poll_record(0, None), Ok(Some(_))),
+            "the release"
+        );
+        assert!(
+            source.repeat_due(500 * MS),
+            "the main row's key still repeats"
+        );
     }
 
     /// A device that repeats a held key itself is not repeated twice: its

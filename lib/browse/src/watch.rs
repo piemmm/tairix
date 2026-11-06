@@ -10,7 +10,7 @@ use tairix_abi::Errno;
 use tairix_abi::{DirChange, DirChangeBatch, DirWatchStatus};
 
 use crate::entry::Entry;
-use crate::sort::{entry_cmp, SortMode};
+use crate::sort::{entry_cmp, Order};
 #[cfg(any(feature = "rt", test))]
 use crate::vfs::{entry_from_record, EntryReader};
 
@@ -214,7 +214,7 @@ fn change_name(change: &EntryChange) -> &str {
     }
 }
 
-fn fate(change: &EntryChange, held: Option<usize>, entries: &[Entry], mode: SortMode) -> Fate {
+fn fate(change: &EntryChange, held: Option<usize>, entries: &[Entry], order: Order) -> Fate {
     let was = held.and_then(|at| Some((at, entries.get(at)?)));
     match (change, was) {
         (EntryChange::Remove(_), None) => Fate::Untouched,
@@ -227,7 +227,7 @@ fn fate(change: &EntryChange, held: Option<usize>, entries: &[Entry], mode: Sort
         {
             Fate::Untouched
         }
-        (EntryChange::Upsert(fresh), Some((at, was))) if entry_cmp(was, fresh, mode).is_eq() => {
+        (EntryChange::Upsert(fresh), Some((at, was))) if entry_cmp(was, fresh, order).is_eq() => {
             Fate::Replaced(at)
         }
         (EntryChange::Upsert(_), Some((at, _))) => Fate::Moved(at),
@@ -298,7 +298,7 @@ impl NameFilter {
 
 /// What each of `changes` does to `entries`: the latest change to a name has
 /// the last word, and an earlier one does nothing.
-fn fates(entries: &[Entry], changes: &[EntryChange], mode: SortMode) -> Option<Vec<Fate>> {
+fn fates(entries: &[Entry], changes: &[EntryChange], order: Order) -> Option<Vec<Fate>> {
     let mut touched = Vec::new();
     touched.try_reserve_exact(changes.len()).ok()?;
     touched.extend(changes.iter().enumerate().map(|(change, named)| Touched {
@@ -327,14 +327,14 @@ fn fates(entries: &[Entry], changes: &[EntryChange], mode: SortMode) -> Option<V
     for touch in &touched {
         if let (Some(slot), Some(change)) = (fates.get_mut(touch.change), changes.get(touch.change))
         {
-            *slot = fate(change, touch.held, entries, mode);
+            *slot = fate(change, touch.held, entries, order);
         }
     }
     Some(fates)
 }
 
-/// Merge the `changes` a watch reported into `entries`, a listing in `mode`'s
-/// order: the latest change to a name wins, an entry a change left as it was
+/// Merge the `changes` a watch reported into `entries`, a listing in `order`:
+/// the latest change to a name wins, an entry a change left as it was
 /// keeps its occupancy untouched, and a changed folder keeps showing its
 /// occupancy until probed again.
 ///
@@ -351,10 +351,10 @@ fn fates(entries: &[Entry], changes: &[EntryChange], mode: SortMode) -> Option<V
 pub fn merge_changes(
     entries: &mut Vec<Entry>,
     changes: Vec<EntryChange>,
-    mode: SortMode,
+    order: Order,
 ) -> Option<(Placement, bool)> {
     let before = entries.len();
-    let fates = fates(entries, &changes, mode)?;
+    let fates = fates(entries, &changes, order)?;
     let (mut leaving, mut arriving) = (0, 0);
     for fate in &fates {
         match fate {
@@ -409,12 +409,12 @@ pub fn merge_changes(
         }
     }
     gone.sort_unstable_by_key(|&(at, _)| at);
-    incoming.sort_unstable_by(|a: &(Option<usize>, Entry), b| entry_cmp(&a.1, &b.1, mode));
+    incoming.sort_unstable_by(|a: &(Option<usize>, Entry), b| entry_cmp(&a.1, &b.1, order));
     if in_place {
-        insert_in_place(entries, &mut gone, incoming, &mut arrived, mode);
+        insert_in_place(entries, &mut gone, incoming, &mut arrived, order);
     } else {
         let old = core::mem::take(entries);
-        *entries = rebuild(old, &mut gone, incoming, &mut arrived, merged, mode);
+        *entries = rebuild(old, &mut gone, incoming, &mut arrived, merged, order);
     }
     let placement = Placement {
         before,
@@ -450,7 +450,7 @@ fn insert_in_place(
     gone: &mut [(usize, Option<usize>)],
     incoming: Vec<(Option<usize>, Entry)>,
     arrived: &mut Vec<usize>,
-    mode: SortMode,
+    order: Order,
 ) {
     // A few go by moving the tail once each, more by one compacting pass.
     if gone.len() <= INSERTS_IN_PLACE {
@@ -471,7 +471,7 @@ fn insert_in_place(
     // Each lands after the ones already put in, so every kept entry ahead of
     // it is one of `to`'s.
     for (ahead, (from, fresh)) in incoming.into_iter().enumerate() {
-        let to = entries.partition_point(|entry| entry_cmp(entry, &fresh, mode).is_lt());
+        let to = entries.partition_point(|entry| entry_cmp(entry, &fresh, order).is_lt());
         entries.insert(to, fresh);
         arrived.push(to - ahead);
         put_back(gone, from, to);
@@ -486,7 +486,7 @@ fn rebuild(
     incoming: Vec<(Option<usize>, Entry)>,
     arrived: &mut Vec<usize>,
     mut merged: Vec<Entry>,
-    mode: SortMode,
+    order: Order,
 ) -> Vec<Entry> {
     let mut incoming = incoming.into_iter().peekable();
     let mut next = 0;
@@ -496,7 +496,7 @@ fn rebuild(
             continue;
         }
         while let Some(fresh) =
-            incoming.next_if(|(_, fresh)| entry_cmp(fresh, &entry, mode).is_lt())
+            incoming.next_if(|(_, fresh)| entry_cmp(fresh, &entry, order).is_lt())
         {
             arrive(&mut merged, gone, arrived, fresh);
         }
@@ -787,6 +787,21 @@ impl<C: Copy + Ord, H: Clone> Watches<C, H> {
         slot.wanted = false;
         slot.landed = WatchUpdate::Quiet;
         slot.watching.take().map(|(_, handle)| handle)
+    }
+
+    /// The consumers holding a watch, or an offer of one, within `roots` — a
+    /// volume about to be ejected — for each to be released by
+    /// [`release_within`](Self::release_within).
+    pub fn holding_within<'a>(&'a self, roots: &'a [&'a [String]]) -> impl Iterator<Item = C> + 'a {
+        self.slots
+            .iter()
+            .filter(move |(_, slot)| {
+                [&slot.watching, &slot.offered]
+                    .into_iter()
+                    .flatten()
+                    .any(|(at, _)| crate::mount::within(roots, at))
+            })
+            .map(|(client, _)| *client)
     }
 
     /// The window is leaving every place within `roots` — a volume about to

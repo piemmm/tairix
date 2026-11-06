@@ -36,6 +36,15 @@ stampa come `*` e una porta non legata come `*`; un indirizzo IPv6 è tra
 parentesi quadre affinché il separatore `:port` resti privo di ambiguità
 — un nome risolto non ne ha bisogno.
 
+`-s` riporta qualcosa di diverso dalla tabella: i totali di difesa delle
+connessioni TCP dell'intero stack di rete — la coda dei SYN in attesa, il
+freno senza stato dei SYN cookie, la coda di accettazione e i reset
+inviati. Ciascuno è monotono nell'arco dell'avvio (un socket in ascolto
+che si chiude riversa i suoi totali in quelli dello stack), quindi un
+flood di SYN resta visibile anche dopo che il socket preso di mira è
+sparito. Le stesse cifre si risolvono singolarmente come
+`stats:net/stack/syn-cookies` e i riferimenti affini.
+
 `ss` accetta solo opzioni. La grammatica delle espressioni di filtro di
 iproute2 (filtri di stato e di indirizzo) non è implementata, quindi un
 operando nudo è un errore d'uso e non un argomento ignorato in silenzio.
@@ -68,14 +77,16 @@ operando nudo è un errore d'uso e non un argomento ignorato in silenzio.
 - `ss -l` — solo i socket in ascolto.
 - `ss -tlp` — i socket TCP in ascolto, con il processo proprietario.
 - `ss -u4` — i socket UDP su IPv4.
+- `ss -s` — i totali di difesa delle connessioni dell'intero stack.
 - `ss -r` — lo stesso elenco con gli indirizzi risolti in nomi host.
 
 ## EXIT STATUS
 
-- `0` — l'elenco è stato prodotto (o l'aiuto breve è stato scritto).
-- `1` — l'interrogazione dei socket è stata rifiutata o è fallita, o
-  l'output non è stato scritto. Anche una riga di comando non compresa
-  termina con `1`.
+- `0` — l'elenco o il riepilogo è stato prodotto (o l'aiuto breve è stato
+  scritto).
+- `1` — l'interrogazione dei socket o della difesa è stata rifiutata o è
+  fallita, o l'output non è stato scritto. Anche una riga di comando non
+  compresa termina con `1`.
 
 ## ENVIRONMENT
 

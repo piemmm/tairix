@@ -292,15 +292,8 @@ mod tests {
     use tairix_abi::{Errno, ProcId, SpawnSession};
     use tairix_caps::CapabilitySet;
     use tairix_kernel_sec::{CapTable, ProcessId, TaskCapabilities, UserId};
-    use tairix_log::Event;
     use tairix_seat::SeatOwner;
     use tairix_sync::RwLock;
-
-    struct Quiet;
-
-    impl tairix_log::Sink for Quiet {
-        fn write_event(&self, _event: &Event<'_>) {}
-    }
 
     fn no_processes() -> RwLock<CapTable> {
         RwLock::new(CapTable::new())
@@ -554,8 +547,15 @@ mod tests {
                 .resolve_placement(ProcessId::KERNEL, SpawnSession::New, true)
                 .expect("placeable");
             let set = CapabilitySet::empty();
-            let record = TaskCapabilities::derive(ProcessId(7), UserId(1000), set, set, &Quiet)
-                .with_proc_id(desktop);
+            let record = TaskCapabilities::derive(
+                ProcessId(7),
+                UserId(1000),
+                set,
+                set,
+                &tairix_log::DiscardSink,
+            )
+            .expect("derived")
+            .with_proc_id(desktop);
             table.admit(record, placement).expect("admitted");
         }
         seats.acquire(SEAT_PRIMARY, SeatOwner(7)).expect("free");

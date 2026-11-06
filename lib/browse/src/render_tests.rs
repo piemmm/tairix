@@ -4,12 +4,15 @@ use alloc::vec::Vec;
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::time::Time64;
 use tairix_abi::Errno;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
+use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_theme::Theme;
 
 use super::{
-    drive_cells, entry_row, header_sort_at, list_header_rect, listing_top, ListColumns, Tiles,
+    clash_layout, drive_cells, entry_row, header_sort_at, list_header_rect, listing_top,
+    progress_window_extent, replace_word, rest_label, ClashAnswer, ClashChoice, ClashPanel,
+    ListColumns, Tiles,
 };
 use crate::browser::Browser;
 use crate::chrome::ToolbarBand;
@@ -17,6 +20,7 @@ use crate::entry::{DriveMark, Entry, EntryKind};
 use crate::layout::ViewMode;
 use crate::places::VolumeFacts;
 use crate::presentation::HiddenEndings;
+use crate::progress::{Clash, ProgressModel, ProgressOp, Subject};
 use crate::sort::{SortDirection, SortKey, SortMode};
 use crate::source::{DirectorySource, Listing};
 
@@ -40,7 +44,9 @@ fn facts(free: Option<u64>, availability: MountAvailability) -> VolumeFacts {
         availability,
         owner: None,
         volume_id: [0; 16],
+        identity: [0; 16],
         read_only: false,
+        titled: false,
     }
 }
 
@@ -285,4 +291,229 @@ fn a_small_tile_sets_one_line_of_name_beside_a_row_sized_picture() {
     assert_eq!(Tiles::of(ViewMode::SmallIcons), Some(Tiles::Small));
     assert_eq!(Tiles::of(ViewMode::LargeIcons), Some(Tiles::Large));
     assert_eq!(Tiles::of(ViewMode::List), None);
+}
+
+/// The client of a progress window asking about a name taken, at its own
+/// extent.
+fn asking_client(theme: &Theme) -> Rect {
+    let (width, height) = progress_window_extent(Scale::ONE, theme, true);
+    Rect::new(0, 0, width, height)
+}
+
+/// The question about `one.jpg`, taken in `Photos`, by a folder where
+/// `folders` says.
+fn clash_panel(folders: bool) -> ClashPanel {
+    ClashPanel::new(&Clash {
+        name: String::from("one.jpg"),
+        folder: String::from("Photos"),
+        folders,
+    })
+}
+
+/// A click — the pointer brought there, pressed and let go — at the centre of
+/// `at`.
+fn click(panel: &mut ClashPanel, frame: (Rect, Scale, &Theme), at: Rect) -> Option<ClashAnswer> {
+    let centre = Point::new(
+        at.left() + i32::try_from(at.width / 2).unwrap_or(0),
+        at.top() + i32::try_from(at.height / 2).unwrap_or(0),
+    );
+    let mut damage = Region::new();
+    let mut answer = None;
+    for input in [
+        InputEvent::PointerMoved { to: centre },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+    ] {
+        if let Some(given) = panel.on_pointer(frame, &input, &mut damage) {
+            answer = Some(given);
+        }
+    }
+    answer
+}
+
+/// The question's first choice replaces a file and merges a folder.
+#[test]
+fn a_folder_meeting_a_folder_is_offered_a_merge() {
+    assert_eq!(replace_word(false), "Replace");
+    assert_eq!(replace_word(true), "Merge");
+}
+
+/// The box answering the rest names the kind it answers for: a merge given
+/// for the rest never answers a question about a file.
+#[test]
+fn the_box_for_the_rest_names_the_kind_it_answers_for() {
+    assert_eq!(
+        rest_label(false),
+        "Do the same for every file that already exists"
+    );
+    assert_eq!(
+        rest_label(true),
+        "Do the same for every folder that already exists"
+    );
+}
+
+/// A click on a drawn choice answers with it once released over it, the box
+/// ticked first answering for the rest; a press alone answers nothing.
+#[test]
+fn the_question_is_answered_by_a_click_on_what_it_draws() {
+    let theme = Theme::dark();
+    let frame = (asking_client(&theme), Scale::ONE, &theme);
+    let mut panel = clash_panel(false);
+    let layout = clash_layout(frame, &panel);
+    let choices = [ClashChoice::Stop, ClashChoice::Replace, ClashChoice::Skip];
+    for (at, choice) in layout.choices.iter().zip(choices) {
+        assert_eq!(frame.0.intersection(at), *at, "{choice:?} is drawn inside");
+        assert_eq!(
+            click(&mut panel, frame, *at),
+            Some(ClashAnswer {
+                choice,
+                for_the_rest: false
+            })
+        );
+    }
+    assert_eq!(
+        click(&mut panel, frame, layout.rest),
+        None,
+        "the box answers nothing"
+    );
+    assert!(panel.for_the_rest());
+    assert_eq!(
+        click(&mut panel, frame, layout.choices[2]),
+        Some(ClashAnswer {
+            choice: ClashChoice::Skip,
+            for_the_rest: true
+        })
+    );
+    let press = InputEvent::PointerPressed {
+        button: PointerButton::Primary,
+    };
+    let mut damage = Region::new();
+    assert_eq!(
+        panel.on_pointer(frame, &press, &mut damage),
+        None,
+        "a press alone answers nothing"
+    );
+}
+
+/// From the keyboard the default is Skip: `Enter` takes it, `Escape` is Stop,
+/// `Tab` moves between the box and the choices and `Shift+Tab` back, and
+/// `Space` ticks the box.
+#[test]
+fn the_question_is_answered_from_the_keyboard() {
+    let theme = Theme::dark();
+    let frame = (asking_client(&theme), Scale::ONE, &theme);
+    let mut damage = Region::new();
+    let mut panel = clash_panel(true);
+    let enter = Key::Named(NamedKey::Enter);
+    let tab = Key::Named(NamedKey::Tab);
+    let answer = |choice, for_the_rest| {
+        Some(ClashAnswer {
+            choice,
+            for_the_rest,
+        })
+    };
+    assert_eq!(
+        panel.on_key(enter, false, frame, &mut damage),
+        answer(ClashChoice::Skip, false)
+    );
+    let escape = Key::Named(NamedKey::Escape);
+    assert_eq!(
+        panel.on_key(escape, false, frame, &mut damage),
+        answer(ClashChoice::Stop, false)
+    );
+    assert_eq!(
+        panel.on_key(tab, false, frame, &mut damage),
+        None,
+        "onto the box"
+    );
+    assert!(!damage.is_empty(), "the ring's move is redrawn");
+    assert_eq!(
+        panel.on_key(Key::Char(' '), false, frame, &mut damage),
+        None
+    );
+    assert!(panel.for_the_rest());
+    assert_eq!(
+        panel.on_key(enter, false, frame, &mut damage),
+        answer(ClashChoice::Skip, true),
+        "Enter on the box gives the default"
+    );
+    assert_eq!(
+        panel.on_key(tab, true, frame, &mut damage),
+        None,
+        "onto Skip"
+    );
+    assert_eq!(
+        panel.on_key(tab, true, frame, &mut damage),
+        None,
+        "onto Merge"
+    );
+    assert_eq!(
+        panel.on_key(enter, false, frame, &mut damage),
+        answer(ClashChoice::Replace, true)
+    );
+}
+
+/// A window asking is taller than one working, and one fitted shorter keeps
+/// its choices on show.
+#[test]
+fn a_window_asking_grows_to_its_question_and_keeps_its_choices_on_show() {
+    let theme = Theme::dark();
+    let working = progress_window_extent(Scale::ONE, &theme, false);
+    let asking = progress_window_extent(Scale::ONE, &theme, true);
+    assert_eq!(working.0, asking.0);
+    assert!(asking.1 > working.1);
+    let short = Rect::new(0, 0, asking.0, working.1);
+    let layout = clash_layout((short, Scale::ONE, &theme), &clash_panel(false));
+    for at in layout.choices {
+        assert_eq!(
+            short.intersection(&at),
+            at,
+            "drawn inside the shorter window"
+        );
+    }
+}
+
+/// A window asking paints its question and its controls, and a tiny one
+/// paints without panicking.
+#[test]
+fn a_window_asking_paints_its_question() {
+    use tairix_controls::value::Progress;
+    use tairix_raster::Surface;
+
+    let theme = Theme::dark();
+    let client = asking_client(&theme);
+    let mut model = ProgressModel::new(
+        ProgressOp::Copy,
+        Subject::One(String::from("Photos")),
+        Some(String::from("Desktop")),
+    );
+    model.set_asking(Some(Clash {
+        name: String::from("Photos"),
+        folder: String::from("Desktop"),
+        folders: true,
+    }));
+    let trace = Progress::new().uncaptioned();
+    let panel = clash_panel(true);
+    let mut surface = Surface::new(client.width, client.height).expect("surface");
+    let before = surface.pixels().to_vec();
+    super::draw_progress_window(
+        &mut surface,
+        (&model, &trace, Some(&panel)),
+        Scale::ONE,
+        &theme,
+        client,
+    );
+    assert_ne!(surface.pixels().to_vec(), before);
+    let mut tiny = Surface::new(2, 2).expect("tiny surface");
+    super::draw_progress_window(
+        &mut tiny,
+        (&model, &trace, Some(&panel)),
+        Scale::ONE,
+        &theme,
+        Rect::new(0, 0, 2, 2),
+    );
 }

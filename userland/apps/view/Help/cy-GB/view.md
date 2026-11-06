@@ -29,6 +29,17 @@ RISC OS Sprite. Mae ffeil y mae'r dadgodiwr yn ei gwrthod yn nodi ei rheswm
 yn y ffenestr ac ar y llif gwallau safonol; ni adewir y ffenestr yn wag
 byth, ac ni ffugir delwedd byth.
 
+Mae hefyd yn chwarae ffilmiau WebM gyda'u sain, megis recordiadau sgrin y
+bwrdd gwaith ei hun. Mae ffilm yn agor wedi'i hoedi ar ei llun cyntaf; mae'r
+offeryn chwarae a `Space` yn ei chwarae a'i hoedi. O dan y llun mae bar
+chwilio'n dangos pa mor bell drwy'r ffilm yw hi, gyda'r amser a chwaraewyd a
+hyd y ffilm wrth ei ochr: llusgwch ar ei hyd, neu cliciwch arno, i fynd i'r
+ffrâm allweddol agosaf ar y pwynt hwnnw neu cyn hynny. Mae recordiad nad yw'n
+nodi ei hyd — un y stopiodd ei recordydd yn annisgwyl — yn chwarae o'i
+ddechrau, ond ni ellir chwilio drwyddo. Mae ffilm a dorrwyd yn fyr, neu sy'n
+peidio â dadgodio, yn chwarae cyn belled ag y gall ac yn nodi pam y stopiodd;
+mae ffilm na ellir chwarae ei sain yn parhau'n ddistaw ac yn dweud hynny.
+
 Mae sawl dogfen ar y tro yn sawl ffenestr o'r un gwyliwr: cymharu dwy
 ddelwedd ochr yn ochr yw agor yr ail. Mae cau ffenestr yn gadael y gwyliwr
 ar y bar eiconau, yn barod am y ddogfen nesaf; rhes Gadael ei fwydlen eicon
@@ -59,7 +70,7 @@ fel un dryloyw ac nid fel y lliw sydd y tu ôl iddi.
 * `[` / `]` — chwarter tro i'r chwith neu i'r dde
 * `M` — drychu o'r chwith i'r dde
 * `I` — dangos neu guddio'r panel gwybodaeth
-* `Space` — chwarae neu oedi animeiddiad
+* `Space` — chwarae neu oedi animeiddiad neu ffilm
 * `O` — dewis dogfen arall
 * `Page Up` / `Page Down` — y cofnod blaenorol neu nesaf
 * `Home` / `End` — y cofnod cyntaf neu olaf

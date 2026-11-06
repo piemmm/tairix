@@ -1,6 +1,7 @@
-//! The task lifecycle every policy shares: the park/unpark handshake, the
-//! job-control stop, taking a task from a run-queue entry, and the settle
-//! after a body returns.
+//! The task lifecycle every policy shares: the registry its records are
+//! admitted to and dropped from, the park/unpark handshake, the job-control
+//! stop, taking a task from a run-queue entry, and the settle after a body
+//! returns.
 //!
 //! Parking and stopping are the task lifecycle, not scheduling policy: which
 //! CPU a woken task lands on differs per policy, but the window between
@@ -10,14 +11,16 @@
 //! stop, wake or kill did while it ran. One definition here, so the three
 //! policies carry only their own placement.
 
-use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use core::cell::Cell;
 use core::sync::atomic::{fence, AtomicBool, AtomicU8, Ordering};
 
+use tairix_collections::OrderedMap;
 use tairix_sync::RwLock;
 
-use crate::{CpuId, SchedError, SchedResult, SchedulerArch, TaskAction, TaskId, TaskState};
+use crate::{
+    choose_task_id, CpuId, SchedError, SchedResult, SchedulerArch, TaskAction, TaskId, TaskState,
+};
 
 /// A task's lifecycle state together with its wake token.
 ///
@@ -443,9 +446,52 @@ where
     left.get()
 }
 
+/// A policy's registry of the task records it holds, by id.
+///
+/// Ordered: which ids stay in it is up to the threads a user keeps, so a
+/// lookup costs the same however they fall, growth rebuilds nothing under the
+/// write lock every admission and exit takes, and a walk costs the records
+/// held rather than the most ever held.
+pub type TaskTable<T> = OrderedMap<TaskId, Arc<T>>;
+
+/// An empty [`TaskTable`], which allocates nothing.
+#[must_use]
+pub const fn task_table<T>() -> TaskTable<T> {
+    OrderedMap::new()
+}
+
+/// Admit a task record: choose its id under the registry's write lock — the
+/// `requested` one, or a draw — build the record with `build`, and file it.
+///
+/// Every allocation is taken before anything is filed, so a refusal leaves
+/// the registry as it was. `room` runs under the same lock with the number of
+/// records the admission will leave, for a policy's own per-record
+/// reservation, and a refusal there refuses the admission.
+///
+/// # Errors
+/// * [`SchedError::OutOfMemory`] when the registry's slot, `room`, or the
+///   record cannot be had.
+/// * The refusals of [`choose_task_id`].
+pub fn admit_record<T>(
+    tasks: &RwLock<TaskTable<T>>,
+    requested: Option<TaskId>,
+    room: impl FnOnce(usize) -> SchedResult<()>,
+    build: impl FnOnce(TaskId) -> T,
+) -> SchedResult<Arc<T>> {
+    let mut tasks = tasks.write();
+    tasks.try_reserve(1).map_err(|_| SchedError::OutOfMemory)?;
+    room(tasks.len().saturating_add(1))?;
+    let id = choose_task_id(requested, |candidate| tasks.contains_key(&candidate))?;
+    let record = Arc::try_new(build(id)).map_err(|_| SchedError::OutOfMemory)?;
+    tasks
+        .try_insert(id, Arc::clone(&record))
+        .map_err(|_| SchedError::OutOfMemory)?;
+    Ok(record)
+}
+
 /// Remove the record of `task`, admitted as `id`, from a policy's registry —
 /// unless the id has since been drawn again and names another task.
-pub fn drop_record<T>(tasks: &RwLock<BTreeMap<TaskId, Arc<T>>>, id: TaskId, task: &T) {
+pub fn drop_record<T>(tasks: &RwLock<TaskTable<T>>, id: TaskId, task: &T) {
     let mut tasks = tasks.write();
     if tasks
         .get(&id)
@@ -954,10 +1000,13 @@ mod tests {
     /// drawn again, the old task's last reference leaves the new one's alone.
     #[test]
     fn a_record_is_dropped_only_for_the_task_it_holds() {
-        let tasks: RwLock<BTreeMap<TaskId, Arc<u32>>> = RwLock::new(BTreeMap::new());
+        let tasks: RwLock<TaskTable<u32>> = RwLock::new(task_table());
         let old = Arc::new(1);
         let new = Arc::new(2);
-        tasks.write().insert(7, Arc::clone(&new));
+        tasks
+            .write()
+            .try_insert(7, Arc::clone(&new))
+            .expect("room for one record");
         drop_record(&tasks, 7, &*old);
         assert!(
             tasks.read().contains_key(&7),
@@ -967,6 +1016,68 @@ mod tests {
         assert!(!tasks.read().contains_key(&7));
         drop_record(&tasks, 7, &*new);
         assert!(tasks.read().is_empty(), "a repeat drop finds nothing");
+    }
+
+    /// An admission refused its room files nothing and builds nothing, and
+    /// the room is asked for with the count the admission would leave.
+    #[test]
+    fn an_admission_refused_its_room_files_nothing() {
+        let tasks: RwLock<TaskTable<u64>> = RwLock::new(task_table());
+        let built = Cell::new(false);
+        let answer = admit_record(
+            &tasks,
+            Some(7),
+            |records| {
+                assert_eq!(records, 1, "the admission would leave one record");
+                Err(SchedError::OutOfMemory)
+            },
+            |id| {
+                built.set(true);
+                id
+            },
+        );
+        assert_eq!(answer.err(), Some(SchedError::OutOfMemory));
+        assert!(!built.get(), "a refused admission builds no record");
+        assert!(tasks.read().is_empty());
+    }
+
+    /// An admitted record is filed under the id it was built for, and an
+    /// admission at a live id is refused with the first left in place.
+    #[test]
+    fn an_admitted_record_is_filed_under_its_id() {
+        let tasks: RwLock<TaskTable<u64>> = RwLock::new(task_table());
+        let first = admit_record(&tasks, Some(7), |_| Ok(()), |id| id).expect("admitted");
+        assert_eq!(*first, 7);
+        assert_eq!(
+            admit_record(&tasks, Some(7), |_| Ok(()), |id| id + 1).err(),
+            Some(SchedError::TaskIdInUse)
+        );
+        let held = tasks.read().get(&7).map(Arc::clone);
+        assert!(held.is_some_and(|held| Arc::ptr_eq(&held, &first)));
+        assert_eq!(tasks.read().len(), 1);
+    }
+
+    /// A registry that held many records and now holds few walks only those
+    /// few, in id order: its levels go with its records, where a hash table's
+    /// walk cost the most it ever held.
+    #[test]
+    fn a_registry_that_held_many_walks_only_the_records_it_holds() {
+        let tasks: RwLock<TaskTable<u64>> = RwLock::new(task_table());
+        for id in 1..=4096 {
+            tasks
+                .write()
+                .try_insert(id, Arc::new(id))
+                .expect("room for a record");
+        }
+        let kept = [7, 1999, 4001];
+        for id in (1..=4096).filter(|id| !kept.contains(id)) {
+            let held = tasks.read().get(&id).map(Arc::clone).expect("filed");
+            drop_record(&tasks, id, &*held);
+        }
+        let tasks = tasks.read();
+        let walked: alloc::vec::Vec<u64> = tasks.values().map(|record| **record).collect();
+        assert_eq!(walked, kept);
+        assert_eq!(tasks.height(), 1, "the walk visits one node");
     }
 
     #[test]

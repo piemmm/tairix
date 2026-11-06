@@ -13,7 +13,7 @@ use crate::color::{div255, Color, Pixel};
 use crate::corner::Corners;
 use crate::geometry::{Point, Rect, Region};
 use crate::surface::Surface;
-use crate::{Compositor, PointerCatch, Presentation, WindowId};
+use crate::{CaptureTap, Compositor, PointerCatch, Presentation, WindowId};
 
 use tairix_cursor::CursorImage;
 use tairix_hash::BuildFastHash;
@@ -62,6 +62,26 @@ pub(crate) fn new_compositor(mode: DisplayMode, background: Color) -> Option<Com
     // invented to carry it.
     compositor.set_background(background);
     Some(compositor)
+}
+
+/// A capture tap over the whole of `c`'s desktop, showing the pointer where
+/// `pointer`.
+pub(crate) fn whole_tap(c: &Compositor, pointer: bool) -> CaptureTap {
+    CaptureTap {
+        area: c.screen_rect(),
+        pointer,
+        ..CaptureTap::default()
+    }
+}
+
+/// `tap` armed on `c`, and its whole area composed into a picture of its own.
+pub(crate) fn captured(c: &mut Compositor, tap: CaptureTap) -> Surface {
+    let area = tap.area;
+    c.arm_capture(tap).expect("the tap lies on the desktop");
+    let mut picture = Surface::new(area.width, area.height).expect("a picture");
+    c.compose_capture(&mut picture, &Region::from(area))
+        .expect("composed");
+    picture
 }
 
 /// Convert a client present at the window's *current* client size, as the
@@ -9520,6 +9540,28 @@ fn releasing_content_overwrites_the_pixels_before_dropping_them() {
     assert_eq!(window.bounds(), Rect::new(0, 0, 8, 4));
 }
 
+/// A window the embedder paints itself gives its pixels back only while it is
+/// hidden, and once shown keeps none, so the embedder's next repaint paints it
+/// whole; an application's are the pressure ladder's alone.
+#[test]
+fn an_embedder_window_gives_its_pixels_back_only_while_hidden() {
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    let mut c = releasable_compositor(&PRESSURE, mode(320, 240), BLUE);
+    let own = c.add_window(Point::new(20, 20), Surface::new(60, 60).expect("a surface"));
+    assert_eq!(c.release_hidden_content(own), 0, "it is on screen");
+    assert!(c.set_visible(own, false));
+    assert_eq!(c.release_hidden_content(own), 60 * 60 * size_of::<Pixel>());
+    assert_eq!(c.release_hidden_content(own), 0, "given back once");
+    assert!(c.set_visible(own, true));
+    assert!(!c.keeps_content(own, (60, 60)));
+
+    let app = app_window(&mut c, 120, 20, 40, "app");
+    present_full(&mut c, app, GREEN);
+    assert!(c.set_visible(app, false));
+    assert_eq!(c.release_hidden_content(app), 0);
+    assert!(c.window(app).expect("window").has_content());
+}
+
 #[test]
 fn releasing_content_drops_the_retained_bytes_to_zero() {
     static PRESSURE: ReportedPressure = ReportedPressure::unknown();
@@ -10976,7 +11018,7 @@ fn a_one_participant_runner_composes_exactly_what_no_runner_does() {
 
 /// A content surface of one flat translucent tone, which is what a terminal
 /// painted at less than full opacity hands the compositor.
-fn veiled(w: u32, h: u32, alpha: u8) -> Surface {
+pub(crate) fn veiled(w: u32, h: u32, alpha: u8) -> Surface {
     opaque(w, h, Color::rgba(20, 24, 30, alpha))
 }
 

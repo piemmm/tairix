@@ -9,8 +9,9 @@
 //! playing the serving driver.
 
 use tairix_abi::blkio::{
-    decode_outcome, BlkCompletion, BlkDeviceClass, BlkDeviceName, BlkMedium, BlkOp, BlkOutcome,
-    BlkRequest, IoBudget, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
+    decode_outcome, BlkCompletion, BlkDeviceClass, BlkDeviceIdentity, BlkDeviceName, BlkMedium,
+    BlkOp, BlkOutcome, BlkRequest, IoBudget, BLK_COMPLETION_LEN, BLK_DATA_LEN,
+    BLK_DEVICE_IDENTITY_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscLayout, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE};
 use tairix_abi::sysinfo::MountAvailability;
@@ -211,6 +212,26 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
     #[must_use]
     pub fn read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// What the device states tells it from every other of its kind
+    /// ([`BlkOp::Identity`]), asked by a consumer that must know the medium:
+    /// `None` for a device that states none, refuses the question, or answers
+    /// in a frame that does not decode, which proves nothing.
+    #[must_use]
+    pub fn identify(&mut self) -> Option<BlkDeviceIdentity> {
+        // Cleared first, so a driver answering without writing the window
+        // states none rather than an earlier transfer's bytes.
+        self.window.get_mut(..BLK_DEVICE_IDENTITY_LEN)?.fill(0);
+        self.transfer(BlkRequest {
+            op: BlkOp::Identity,
+            lba: 0,
+            blocks: 0,
+            binding: self.binding,
+        })
+        .ok()?;
+        let stated = self.window.get(..BLK_DEVICE_IDENTITY_LEN)?;
+        BlkDeviceIdentity::new(stated.try_into().ok()?)
     }
 
     /// Issue one request, reissuing a *reissuable* completion up to the

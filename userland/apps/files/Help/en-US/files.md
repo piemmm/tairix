@@ -21,18 +21,23 @@ unreadable directory is refused, never guessed at.
 
 The desktop starts the file manager with the session and keeps it on the
 icon bar, and it never quits: its slot's menu lists your own places and
-whatever is mounted, and choosing one opens a window there; *Network* and
-*Settings…* come last. A volume you can eject — a USB stick, card or other
+whatever is mounted, and choosing one opens a window there; *Network*
+follows, and *Trash* comes last: it opens your Trash, and is
+greyed, saying why, when there is no home folder to keep one in. A volume
+you can eject — a USB stick, card or other
 removable disk, or a disk image or share you mounted — opens a submenu
-holding *Eject*, and a disk image of yours that has a title holds *Title*
-too: it opens a field holding the disk's title, ready to change, and
-pressing `Return` writes the new one to the disk. A click on the slot
+holding *Eject*, and a volume whose title you can change — a disk image of
+yours, or a disk whose format keeps a title — has *Title* in its submenu: it
+opens a field holding the title, ready to change, and pressing `Return`
+writes the new one to the disk, an empty title clearing it. When you may not
+change a disk's title yourself, the desktop asks for an administrator's name
+and password, and changes it on their say. A click on the slot
 opens one where the settings choose. Asking for a folder that already has a window brings that window to
 the front rather than opening another. The menu has no *Quit* row — the file
 manager is part of the desktop, closing its windows simply puts it away, and
 should it ever stop, the desktop starts it again.
 
-*Network*, on the slot's menu just above *Settings…*, opens a window onto
+*Network*, on the slot's menu just above *Trash*, opens a window onto
 the computers on the local network that share files. Each is listed with its
 name, the address it is reached at, its workgroup or domain, and what it is,
 and the list fills in as computers answer. The network is looked through
@@ -60,9 +65,11 @@ rail; a newly attached volume appears in the rail on its own.
 A listing opens with nothing selected. A click selects an item, a
 `Ctrl`-click adds or removes one, and a `Shift`-click selects the run from
 the item last chosen; a click on empty space clears the selection. A
-double-click opens an item; with `Shift` held it lists an application's
-contents instead of starting it, and leaves anything it opens elsewhere
-unselected.
+double-click opens an item, and one it opens somewhere else — a document in
+its application, an application, a disk image as a volume — is left
+unselected once it has opened, while one that could not be opened stays
+selected. With `Shift` held it lists an application's contents instead of
+starting it. `Enter` opens the selection and keeps it.
 Dragging across empty space draws a band that selects everything it touches
 as it grows; held at the top or bottom of the listing it scrolls, and
 `Escape` takes back what it selected.
@@ -75,8 +82,10 @@ An item's name is shown whole, over two lines when it needs them; a name too
 long even for those keeps its start and its end, with `…` in the middle, so
 its extension always shows. An application is shown without its `.app`
 ending, and the settings can show it, or hide the endings of the file types
-the system knows too. Items whose names begin with a dot are listed only when
-the settings ask for them.
+the system knows too. An ending stays on show wherever hiding it would leave
+a name that reads as another file type or application — `invoice.pdf.app` is
+shown whole — and a window orders its items by their names as shown. Items
+whose names begin with a dot are listed only when the settings ask for them.
 
 `F2` renames the selected item in place, as does clicking the name of the one
 selected item and pausing: the name opens for editing once the click can no
@@ -91,10 +100,29 @@ Dragging selected items onto another file-manager window, a folder in one,
 or the desktop copies them there; holding `Shift` moves them instead. The
 pointer shows a plus while a drop would copy and an arrow while it would
 move, and the folder a drop would land in is highlighted. A single file
-dragged onto an application's icon-bar slot opens it there.
+dragged onto an application's icon-bar slot opens it there. A drive dragged
+out of `/Storage` is never copied or moved: it leaves a shortcut where it
+lands, and the pointer shows a curved arrow. The shortcut opens the drive
+while it is attached; while it is not, opening it says so, and on the desktop
+it is drawn faded.
 Copying or moving keeps each file's holes and extended attributes, such
 as a RISC OS filetype; any attribute the destination cannot keep is named
 in a warning once the operation ends.
+
+Where an item of the same name is already there, the operation's own window
+asks what to do with it: *Replace* puts the new one in its place, *Skip*
+leaves the one already there, and *Stop* ends the operation, keeping what it
+has done. A folder meeting a folder of its name offers *Merge* in place of
+*Replace*: what it holds goes into the folder already there, and each file in
+it that is already there is asked about in turn. Ticking *Do the same for
+every file that already exists* gives every later question about a file the
+same answer. Where a folder meets a folder, the box reads *Do the same for
+every folder that already exists* and answers only later folders, so each file
+inside a merged folder is still asked about. `Escape` is *Stop*, and `Enter`
+gives the choice the keyboard rests on — *Skip* at first; `Tab` moves between
+the box and the choices, and `Space` ticks the box. On the desktop, a replaced
+item stands where it was dropped, while a skipped or merged one stays where it
+was.
 
 The right-click menu opens with *Display*. Beneath it a submenu names what
 the menu acts on — *File ‘notes.txt’*, a long name shortened in the middle
@@ -102,8 +130,9 @@ so its extension still shows, or *Selection* when several items are selected
 — and holds *Open*, *Open With…*, *Mount Read-Only*, *Eject*, *Get Info…*,
 *Rename*, *Cut*, *Copy* and *Delete*; a row that cannot act there is greyed
 and says why. *New* follows it, then *Select All* and *Clear Selection*, and
-*Paste* last. A right-click on empty space clears the selection, so the
-item's submenu is greyed.
+*Paste*. In the Trash, *Empty Trash* comes last: once you confirm it, it
+removes everything in the Trash for good. A right-click on empty space clears
+the selection, so the item's submenu is greyed.
 
 Opening a disk image or archive — an `.iso`, `.adf`, `.hdf`, `.zip` and the
 like — mounts it for you in `/Storage`, writable where both the file and its
@@ -139,8 +168,8 @@ descending. A press on a column's title orders the list by it too, and a
 second press reverses the order. Folders stay on top whichever order is
 chosen, unless the settings place them among the files.
 
-*Settings…* on the icon-bar slot's menu, or `Ctrl+,`, opens the browser's
-settings in the Settings application, under *Files*: where a new window
+`Ctrl+,` opens the browser's settings in the Settings application, under
+*Files*: where a new window
 opens, how windows show and order their items, and whether a new one shows
 the places rail and the toolbar; whether folders stay on top; which name
 endings and which items are hidden; whether a picture shows its own content
@@ -158,7 +187,9 @@ owner, and attributes can be changed there, each as an ordinary
 permission-checked write under your own identity — a refusal says why and
 changes nothing. Reassigning an owner needs the `CAP_FS_CHOWN` capability; a
 session without it sees the owner and group marked with a lock, and a line
-saying why.
+saying why. A drive's *Info* window opens on its *Drive* section, whose *Title*
+field changes the volume's title in the same way: click it or press `Tab`,
+type the new title and press `Return`; `Escape` puts it back.
 
 `Left` and `Right` move between the window's sections. On *Permissions*,
 `Down` or `Tab` moves into its controls: the arrow keys move between them,

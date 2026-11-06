@@ -24,6 +24,9 @@ workspace = true
 
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The identity fingerprint a unit's identity is taken from: its device's
+# vendor, product and serial number and its own number (`scsi::unit_identity`).
+tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 # The URB transport (`UrbClient`, `UrbLink`), the configuration descriptor
 # walk the descriptor reader runs, and the per-URB bulk chunk ceiling
 # (`device::BULK_BUF_LEN`): the seam this class driver reaches its

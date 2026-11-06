@@ -24,7 +24,8 @@ detail becomes its done-state summary — nothing is appended, here or there.
 | C4 | Recency | `LruMap`, O(1) touch / insert / evict, and the caches whose key order is not load-bearing | C1, C3 | **done** |
 | C4a | Ordered recency | the three caches whose key index answers range queries — `block_cache`, `transform_cache`, `fscache` — reach O(1) recency without losing them | C4, C7 | **planned** |
 | C5 | Intervals | `RangeMap`, `RangeSet` | — | **done** |
-| C6 | Identity | `SlotMap`, `IdAllocator`, `BitVec` | — | **in progress**: the `SlotMap` is done, with `lib/gpu` its first consumer; the `IdAllocator`, the `BitVec`, and the `sharedreg` and `dma.rs` migrations remain |
+| C5a | Fallible ordered tier | `OrderedMap`, `OrderedSet`, and `RangeMap`/`RangeSet` and every kernel ordered map a syscall or an IPC path inserts into moved onto them | C5 | **done** |
+| C6 | Identity | `SlotMap`, `IdAllocator`, `BitVec` | — | **in progress**: the `SlotMap` is done, with `lib/gpu` its first consumer, and the `BitVec`, with the shared `Selection` its first; the `IdAllocator` and the `sharedreg` and `dma.rs` migrations remain |
 | C7 | Sparse index | `RadixTree` with tagged iteration | — | **in progress**: the `RadixTree` is done, with the IOVA free lists its first consumer; the page-cache, dirty-set and block-cache migrations remain |
 | C8 | Deadlines | `IndexedHeap`, `TimerWheel` | C3 | **in progress**: the `IndexedHeap` is done, with the multicast DNS record cache and question table its first consumers; the `TimerWheel` and the kernel deadline migrations remain |
 | C9 | Concurrent tier | `SpscRing`, `MpscQueue`, `ConcurrentMap`, with loom models | C1, C3 | **planned** |
@@ -50,8 +51,10 @@ today:
 * **A monotonic `next_id` counter** standing in for identifier allocation in
   `kernel/core/src/sharedreg.rs`, with no reuse and no generation — so a
   recycled identifier aliases a dead object rather than being rejected.
-* **A `BTreeMap` per futex bucket** (`kernel/core/src/futex.rs`), which is a
-  hash table with the hashing removed.
+* **An ordered map per futex bucket** (`kernel/core/src/futex.rs`), which is
+  a hash table with the hashing removed; it is an `OrderedMap` so a waiter's
+  registration refuses an exhausted heap, and the address half of its key is
+  the caller's.
 
 Every one of those is the duplication the charter forbids, and several are
 the §27.2 "O(n) linear scan on a load-bearing path" defect by name.
@@ -142,15 +145,10 @@ one is not done.
    not a panic. No `Index`/`IndexMut` impl exists on any map: `map[key]`
    panicking on a missing key has no place in a kernel. Infallible forms
    exist only where they genuinely cannot fail (`get`, `remove`, `len`).
-   The **one exception is the ordered tier**, and it is `alloc`'s rather than
-   ours: `RangeMap` stores its entries in `alloc::collections::BTreeMap`,
-   whose `insert` cannot be made fallible from outside `alloc` — there is no
-   `try_insert` and no `reserve` to pre-charge. Re-implementing an ordered map
-   to gain one is exactly the bloat §6 excludes, and every ordered map already
-   in the tree has the same property, so C5 did not introduce it and does not
-   close it. Recorded here so a later sweep does not re-derive the question:
-   changing it is a whole-tree decision about `BTreeMap`, not a container one.
-   Every *read* on that tier still allocates nothing.
+   The ordered tier is no exception. `alloc::collections::BTreeMap` has no
+   `try_insert` and no `reserve` to pre-charge, so by the user's 2026-11-04
+   ruling the ordered map is first-party: `OrderedMap` and `OrderedSet`
+   (C5a), on which `RangeMap` and `RangeSet` stand.
 2. **No allocation on any read path, ever.** Lookup, iteration, and range
    query allocate nothing. Growth is amortised and off the hot path.
 3. **No fixed capacity ceiling.** Every heap-backed container grows from
@@ -184,7 +182,11 @@ one is not done.
    than a wild store. That is the stronger property for a free list a stray
    write can reach, and it is the representation both `LruMap` and `TimerWheel`
    want anyway, since their nodes live in a growable arena a reallocation
-   moves.
+   moves. **The ordered tier needs none either**: its nodes live in arenas
+   held in bounded chunks, so growth never moves a node or needs a large
+   contiguous block, and its mutable walk moves each node it opens to an end
+   of the stretch it has not opened rather than aliasing two borrows of one
+   arena.
 7. **Untrusted keys are a threat surface.** Every container that accepts
    attacker-influenced keys or lengths gets a fuzz harness in the per-PR
    `--quick` set and the nightly soak.
@@ -246,7 +248,7 @@ is not in this plan — see §6.
 | Type | Guarantee | Replaces |
 |---|---|---|
 | `HashMap<K, V, S>` | O(1) expected lookup/insert/remove, no allocation on lookup | `BTreeMap` used as an unordered index across `kernel/*`, `lib/*`, `drivers/*`, and a `Vec` searched linearly on a load-bearing path. Its first production consumer is `netstack`'s socket table, whose four indices replaced a scan per received packet, and whose memory budget reads their `allocated_bytes` so the containers' own spare capacity is charged rather than ignored (`plans/SSH.md` S0b) |
-| `HashSet<T, S>` | as above | `BTreeSet` used as an unordered set. **No such site exists yet**: C1 surveyed every in-tree `BTreeSet` and each is either order-load-bearing (`kernel/sec`'s per-process thread set fans signals out in ascending id order; `kernel/sched/cfq`'s run queue is keyed on virtual runtime) or a handful of entries, where the ordered set is cheaper and a conversion would worsen the counters. The type is a zero-duplication wrapper over `HashMap<T, ()>`; C10 either lands its first caller or deletes it |
+| `HashSet<T, S>` | as above | `BTreeSet` used as an unordered set: the IPC sender ledger, the peer-watch set and the reserved task ids. An order-load-bearing set stays ordered (`kernel/sec`'s per-process threads, one `OrderedSet<(ProcessId, TaskId)>` range each, fan signals out in ascending id order). The type is a zero-duplication wrapper over `HashMap<T, ()>` |
 
 `S` carries **no default**, though the two rows above once spelled one. A
 defaulted hasher is a `Default`-constructible hasher, which is precisely the
@@ -309,19 +311,17 @@ construction and a `Copy` element cannot un-initialise one, `backing_store`
 safely reports the whole store — which is how a holder's own test proves the
 scrub, an observation a container's safe API otherwise cannot offer.
 
-**`SmallVec` has no in-tree caller yet.** It landed with C2 by decision, with
-its debt recorded here exactly as `HashSet`'s is: its intended first consumer
-is `lib/geometry`'s `Region` damage list, whose `rects`/`scratch` `Vec<Rect>`
-allocate for the one-to-four-rectangle case a compositor damage region almost
-always is. That migration belongs with the measurement `plans/FIX-DESKTOP-SPEEDUP.md`'s
-damage work will take, not ahead of it. C10 either lands that caller or deletes
-the type.
+**`SmallVec` holds the one-block case inline.** A frame allocation's chunk
+list (`kernel/mem`'s `Chunks`), and the DMA block lists the IOMMU and shared
+regions derive from it, are almost always one physically contiguous block, so
+the common case allocates nothing for the list. `lib/geometry`'s `Region`
+damage list is a candidate whose migration belongs with the measurement
+`plans/FIX-DESKTOP-SPEEDUP.md`'s damage work will take, not ahead of it.
 
-The fixed-capacity vectors deliberately offer **no positional insert**: its two
-failure modes — no room, and an index past the end — are unrelated, and no
-single error spells both honestly. The tier's rule instead is that a capacity
-fault answers with `Result` and an index fault with `Option`, and no operation
-carries both.
+The fixed-capacity vectors' one positional insert, `ArrayVec::try_insert`,
+hands its value back when the vector is full or the index lies past its
+length; every other positional operation answers an index fault with `Option`
+and a capacity fault with `Result`.
 
 ### 4.3 Indexed and keyed
 
@@ -348,11 +348,13 @@ describes that sweep and currently has no structure that supports it.
 
 ### 4.4 Ordered and time-ordered
 
-`IntrusiveList` is `lib/inline` (it allocates nothing); the other two rows are
+`IntrusiveList` is `lib/inline` (it allocates nothing); the other rows are
 `lib/collections`.
 
 | Type | Guarantee | Replaces |
 |---|---|---|
+| `OrderedMap<K, V>` | ordered lookup, insertion and removal, each one node a level and at most five key comparisons in each; an insertion takes every node it needs before changing anything, `try_reserve(n)` covers the worst `n`, and no read or removal allocates | `alloc::collections::BTreeMap` wherever an insertion must be able to refuse: `RangeMap` and `RangeSet`, and every kernel ordered map a syscall or an IPC path inserts into (done) |
+| `OrderedSet<T>` | as above, over a zero-sized value | `alloc::collections::BTreeSet`, likewise |
 | `IntrusiveList` | O(1) unlink **without a search**, no allocation, links live in the element | the per-site free-list link handling; the `BTreeMap`-based wait set is C8's, once the deadline index it needs exists |
 | `IndexedHeap<P>` | binary heap over a holder's dense slot numbers with **decrease-key**, O(log n) removal by slot, and an O(k) walk of the k entries at or below a bound | `alloc::BinaryHeap`, which supports none of them, and a per-slot deadline array swept whole |
 | `TimerWheel` | O(1) arm and cancel, O(1) amortised expiry over thousands of timers | per-subsystem deadline bookkeeping |
@@ -372,7 +374,7 @@ Built on `lib/sync`'s existing atomics and epoch reclamation, and living in
 |---|---|---|
 | `SpscRing<T, N>` | wait-free single-producer / single-consumer, safe from interrupt context | ISR-to-dispatcher hand-off written per site |
 | `MpscQueue<T>` | lock-free many-producer / one-consumer, bounded, **fails closed when full** | per-CPU log and console ingest |
-| `ConcurrentMap<K, V>` | lock-free read, epoch-reclaimed; readers never block writers | the `BTreeMap`-per-bucket futex table, and read-mostly registries on the syscall path |
+| `ConcurrentMap<K, V>` | lock-free read, epoch-reclaimed; readers never block writers | the ordered-map-per-bucket futex table, and read-mostly registries on the syscall path |
 
 `MpscQueue` failing closed rather than growing is deliberate: an unbounded
 producer-side queue is how a hostile client exhausts kernel memory (§26.4).
@@ -424,8 +426,8 @@ Listing these is part of the plan: "everything an OS expects" is not
 "everything that exists", and each of the following was considered and
 rejected for a stated reason.
 
-* **`IndexMap` (insertion-ordered map)** — `BTreeMap` already gives every
-  in-tree consumer the deterministic order it needs.
+* **`IndexMap` (insertion-ordered map)** — the ordered tier already gives
+  every in-tree consumer the deterministic order it needs.
 * **String interner, Bloom filter, skip list, `LinkedList`** — no consumer
   in the tree. Adding them would be speculative surface.
 * **A general LPM trie** — `lib/net/src/route.rs` has one and is its only
@@ -451,11 +453,14 @@ rejected for a stated reason.
   itself allocates — `lib/kalloc` is deliberately a leaf over `core` and
   stays one. Recorded here so a later sweep does not "fix" them into a
   defect.
-* **`kernel/sec/src/captable.rs`'s three `BTreeMap`s** — these look like
-  hash-map candidates and are not. The System Information API pages a
-  consistent process list off the ascending `ProcessId` iteration order, so
-  the order is load-bearing and the ordered map is the correct structure.
-  Recorded here so a later sweep does not "fix" it into a defect.
+* **`kernel/sec/src/captable.rs`'s process table** — it looks like a hash-map
+  candidate and is not. The System Information API pages a consistent process
+  list off the ascending `ProcessId` iteration order, so the order is
+  load-bearing and the ordered map is the correct structure. Its indices are
+  ordered too: which ids stay is up to what a user keeps running, so a lookup
+  costs the same however they fall, and growing one rebuilds nothing under the
+  lock every credential read takes (`docs/src/security/captable.md`). Recorded
+  here so a later sweep does not "fix" the table into a defect.
 * **An augmented order-statistic tree for EEVDF** — EEVDF is currently the
   only candidate consumer, so it stays scheduler-internal until a second
   appears. Whether EEVDF's `BTreeMap` run queue should become one is a
@@ -486,13 +491,14 @@ links no allocator, so those binaries have no `alloc` in their graph at all |
 | C2a | **done.** `lib/sandbox/src/session.rs`'s private `ByteQueue`, hoisted rather than copied when the SSH transport needed the same shape for its inbound, outbound, and held queues. It commits its holder's bound up front (`committed`, the session's admission guarantee) or as bytes arrive (`new`, so an idle connection costs little), and wipes storage it releases, which the session's arena did not |
 | C2b | **done.** `ChunkVec<T, CHUNK>`: chunks of `CHUNK` elements, each reserved whole when the last fills, so an element never moves and a push copies nothing, where a doubling `Vec` copies all it holds in one push. Indexing is a shift, a mask and one load more than a slice's; no `Index`, as no container here has one. **Converted:** `lib/raytrace`'s stage and scene objects — 320 bytes each and hundreds of thousands at *Maximum*, so the `Vec` they were held in copied up to hundreds of megabytes in one unit of preparation |
 | C3 | **done.** The tier was **split into two crates** (§1): `lib/inline` for the containers that allocate nothing and `lib/collections` for the heap-backed ones, so `lib/log`, `lib/caps`, the boot console and three of the four architecture ports link no allocator. `kernel/mem/src/frame.rs`'s hand-written per-order free lists: the `FrameNode` `prev`/`next` pair, the `usize::MAX` `NIL` sentinel, the `free_heads` array, and both splice bodies are gone, replaced by one `IntrusiveList` per order over a single `Vec<Link>` indexed by slot. The link is the same two words the old node was, so the per-frame overhead is unchanged. The `blk_order` tag array stays and earns its keep: one store carries every order's list, so it is what says *which* list a registered head is on — the knowledge a shared store cannot hold in the links without a word per node. Two silent-corruption paths closed with it: re-registering a block, and unlinking one whose tag and links disagree, are now `AllocError::InvariantViolation` where the first was undetected and the second a release-mode `debug_assert` above a frame handed out twice. The counter gate is nodes reached: a mid-list unlink reaches the departing node and its two neighbours and writes exactly those three links, identically over three nodes and over ten thousand |
-| C4 | **done.** `LruMap` is one open-addressed index over a node arena, with the recency order and the free list as two `IntrusiveList`s through the same arena: a key is stored once (the index holds the node handle, not a copy), the hash is stored beside the entry so eviction and a table rebuild hash nothing, and a steady-state map returns to the allocator not at all. It evicts nothing on its own — the caller's budget calls `pop_lru` — which is what lets one map serve a fixed-entry index and a byte-budgeted cache alike. Converted with it: **`lib/net/src/neigh.rs`**, whose `entries.iter().position(…)` cost a scan of the table *per transmitted packet* and whose eviction cost a second one, both now one probe and one splice, and whose index is keyed under the service's peer-input key because a remote peer chooses the addresses (the `Entry`'s own `ip` and `last_used` fields went with it, and `learn`'s unused `now` with them); **`drivers/filesystem/arxfs/src/dedupe.rs`**, whose two-tier `LruTier` was a `by_key`/`by_recency` `BTreeMap` pair, now one map per tier under the per-boot key — its keys carry a hash of the writer's own bytes, so a boot with no key indexes nothing rather than filing them under a predictable one; **`kernel/core/src/launch_cache.rs`**, whose `Entry` collapsed to the `Arc` it held; and **`lib/reclaim/src/cache.rs`**, the shared engine, which gains an `S` parameter so every consumer names its hasher in review — the desktop's window, cursor, and artwork caches the fast unkeyed one (identifiers the compositor assigned), the font glyph and measurement caches the keyed one (a caller chooses the characters and the text). A cache with no key takes a zero budget and retains nothing rather than an index a grinder could crowd. **What C4 did not convert, and why, is C4a:** `block_cache`, `transform_cache`, and `fscache` answer *range* queries against their key index — `invalidate_range(lba, blocks)`, `invalidate_run(phys, len)`, and `data.range((node, 0)..=(node, u64::MAX))` — so a hash index would turn each into a scan. Their recency order is the defect; their key order is load-bearing, exactly the per-site judgement C1 fixed |
+| C4 | **done.** `LruMap` is one open-addressed index over a node arena, with the recency order and the free list as two `IntrusiveList`s through the same arena: a key is stored once (the index holds the node handle, not a copy), the hash is stored beside the entry so eviction and a table rebuild hash nothing, and a steady-state map returns to the allocator not at all. It evicts nothing on its own — the caller's budget calls `pop_lru` — which is what lets one map serve a fixed-entry index and a byte-budgeted cache alike. Converted with it: **`lib/net/src/neigh.rs`**, whose `entries.iter().position(…)` cost a scan of the table *per transmitted packet* and whose eviction cost a second one, both now one probe and one splice, and whose index is keyed under the service's peer-input key because a remote peer chooses the addresses (the `Entry`'s own `ip` and `last_used` fields went with it, and `learn`'s unused `now` with them); **`drivers/filesystem/arxfs/src/dedupe.rs`**, whose two-tier `LruTier` was a `by_key`/`by_recency` `BTreeMap` pair, now one map per tier under the per-boot key — its keys carry a hash of the writer's own bytes, so a boot with no key indexes nothing rather than filing them under a predictable one; **`kernel/core/src/launch_cache.rs`**, whose `Entry` collapsed to the `Arc` it held; **`lib/icon/src/desk.rs`**, whose listed-bundle `by_use` tick index beside a `bundles` `BTreeMap` is one map keyed by bundle directory under the process's key, since a user names the paths, so a touch on the paint path is a probe and a splice and remembering a bundle refuses an exhausted heap; and **`lib/reclaim/src/cache.rs`**, the shared engine, which gains an `S` parameter so every consumer names its hasher in review — the desktop's window, cursor, and artwork caches the fast unkeyed one (identifiers the compositor assigned), the font glyph and measurement caches the keyed one (a caller chooses the characters and the text). A cache with no key takes a zero budget and retains nothing rather than an index a grinder could crowd. **What C4 did not convert, and why, is C4a:** `block_cache`, `transform_cache`, and `fscache` answer *range* queries against their key index — `invalidate_range(lba, blocks)`, `invalidate_run(phys, len)`, and `data.range((node, 0)..=(node, u64::MAX))` — so a hash index would turn each into a scan. Their recency order is the defect; their key order is load-bearing, exactly the per-site judgement C1 fixed |
 | C4a | the recency index and `evict_until` loop in `block_cache`, `transform_cache`, and `fscache`, without a hash index. The shape they need is the one `LruMap` already has — a node arena, a recency list, and a free list — under an *ordered* key index rather than a hash one, so the engine is extended rather than a second one written (§2.2). C7 is a dependency because it names the block-cache index as its own: settle whether that index becomes a `RadixTree` before deciding what the ordered variant must offer |
 | C5 | **done.** `RangeMap` and `RangeSet` are one storage and one disjointness invariant, differing only in what they do to a neighbour: the map keeps abutting entries apart because an entry is an identity, and refuses an *overlapping* insertion; the set absorbs everything it touches, so its entry count is one per contiguous run. Only `Ord` decides overlap, adjacency, and splitting, so `RangeKey` carries just the measuring arithmetic — `span`, the one place a `(base, count)` pair becomes a range with the overflow checked, and `distance_from`. `RangeMap::place` is first-fit over the gaps *between* what a window handed out, which is the whole free-space representation. Converted with it: **`anon_window.rs`**, whose released-hole map beside its live-region map never joined the two holes an adjacent pair of releases left — so a request larger than either was refused while the address space for it sat free (a regression test now covers it) — and whose free-list, bump cursor, and slot/address conversions went with it; **`mmio.rs`**, whose `Vec<bool>` occupancy bitmap was first-fit *scanned* up to the window's whole 262 144-slot ceiling per placement and grew to the deepest slot ever touched, now one entry per handed-out run keyed by leading guard slot and valued by the block's within-page offset (the data-page count being the run's own length less its guards), which deleted `Record`, `slot_is_used`, `alloc_free_run`, and the `OutOfMemory` variant the bitmap growth existed to report, and turned the part-way-mapped rollback into one `unwind_run` that releases the record as well as the pages; **`aspace.rs`**, both maps, where `FileRegion` lost the `base`/`len` the index already held (the fault path now asks the registry for the file offset a page reads from, since the registry is what holds the extent) and `nearest_region_end_at_or_below` stopped walking every region of a task in favour of two probes per map; and **`arxfs`**'s `runs.rs`, deleted outright, its eight transaction sets now `RangeSet<u64>` with the byte-accounting constant left where the accounting policy is. Two records over one address are now refused rather than recorded, so `mem_map`/`file_map` hand a refused overlapping reservation straight back and answer `AlreadyExists` |
-| C6 | **`SlotMap` done; the rest remains.** A slot per value with its generation beside it, vacant slots chained most recently freed first, a removal advancing the slot's generation and a slot whose generation is spent retired rather than reused, so no key is ever accepted for a value it did not name; `try_reserve` covers that many insertions, and keys are typed by the holder through `Key`. Its consumers are `lib/gpu`, whose contexts, jobs, allocations, buffers and timelines it files, and `smbfs`'s connection table. **Remaining:** the `next_id` counter in `sharedreg`; `dma.rs`'s `slot_used`, the one flat bitmap scan C5 left (the MMIO window's is gone: its slots are now runs in a `RangeMap`, and a DMA pool's are a *bitmap* question rather than a range one because it hands out single pages); and the `IdAllocator` and `BitVec` they need |
+| C5a | **done.** `OrderedMap` is a B-tree of up to eleven entries a node over two `u32`-indexed node arenas, one of leaves and one of interior nodes, each with a free chain — the arena `RadixTree` already used, hoisted into one shared definition, which costs its holder one word (its chunks, counts and free chain behind one pointer allocated with its first chunk) and makes a fresh node empty where it lies rather than building it on the stack — every node but the root at least five full and every leaf at one depth; `OrderedSet` is it over `()`. A leaf holds its entries, its parent and its free-list link; an interior node holds the same and its twelve children inline, so the five nodes in six that are leaves carry no child links and a lookup still reads one node a level. Reads and removals allocate nothing. `try_insert` counts the leaves and interior nodes its splits will take and takes them from both arenas before changing anything, so a refusal leaves the map as it was, and `try_reserve(n)` takes, in each arena, the fewer of the most nodes of its kind a tree of `len + n` entries can hold and the most `n` insertions take — a leaf each, and an interior node a level of the tallest such tree — after which `n` insertions cannot fail and removals between them only add room. A mutable walk moves each node it opens to an end of the stretch of its arena it has not opened, re-pointing what named it, so it hands out values in key order without `unsafe` and costs what it visits; an owning walk drains without rebalancing; `retain` searches back past each entry it drops; a range whose ends cross admits nothing. Its counter gates are comparisons, at most five a level, and bytes: ten thousand `u64` insertions in any order hold at most 266 416 as an `OrderedSet` and 445 680 as an `OrderedMap`, met exactly by ascending keys, which leave the most nodes, where one node shape for leaves and interior nodes alike held 345 504 and 525 728. **Converted:** `RangeMap` and `RangeSet`, whose insertion, placement and splitting removal are fallible and all or nothing, with `try_reserve` for a holder changing several before it may fail any; a `RangeSet` insertion that touches a held range re-files or stretches that range's record, so only one touching nothing can be refused. With them, every kernel `BTreeMap` and `BTreeSet` a syscall or an IPC path inserts into: the capability table's record and indices and the session tree, which an admission reserves for before it changes anything; the IPC port registry, the futex buckets and the wait set; the address-space, file-lock, VFS, memfs, file-cache and retained-node maps; the latency and introspection maps and the signal tables; the memory manager's spaces, mappings and RAM-compression ledgers; the schedulers' task table; and the block and transform caches' key indices. None is left outside the tests |
+| C6 | **`SlotMap` and `BitVec` done; the rest remains.** `BitVec` is the bits in words of 64 under two summary towers, one marking the words holding a set bit and one those holding a clear bit within the length, each level a bit per word of the level beneath, kept in one vector per tower: a next or previous set or clear bit is found by looking in its own word, climbing while each level shows nothing past it, and descending to the first mark, so it reads at most twice the height — eleven levels for any length — however sparse the bits, and a walk of the set bits takes a word's bits in turn and finds the next word through the tower. Reads, writes, ranges, fills and searches allocate nothing; `try_resize`, `try_reserve` and `try_clone` are fallible and all or nothing across the words and both towers. Its counter gate is summary words read: a search over a million-bit bitmap holding one set bit reads at most six. **Converted:** `lib/browse`'s `Selection`, whose `BTreeSet` aborted its holder on an exhausted heap; a selection is now one bit per listed entry, fitted when the listing changes, so choosing, a band's sweep and Select All allocate nothing. The `SlotMap` keeps a slot per value with its generation beside it, vacant slots chained most recently freed first, a removal advancing the slot's generation and a slot whose generation is spent retired rather than reused, so no key is ever accepted for a value it did not name; `try_reserve` covers that many insertions, and keys are typed by the holder through `Key`. Its consumers are `lib/gpu`, whose contexts, jobs, allocations, buffers and timelines it files, and `smbfs`'s connection table. **Remaining:** the `next_id` counter in `sharedreg`; `dma.rs`'s `slot_used`, the one flat bitmap scan C5 left (the MMIO window's is gone: its slots are now runs in a `RangeMap`, and a DMA pool's are a *bitmap* question rather than a range one because it hands out single pages); and the `IdAllocator` and `BitVec` they need |
 | C7 | **`RadixTree` done; three migrations remain.** Six key bits a level, as tall as its largest key needs, so every point operation costs at most eleven nodes, and a walk resumes from the path it last took. Each node carries an occupancy bitmap and one per tag, so a successor or predecessor search and a tagged walk skip empty and untagged subtrees a word at a time. Nodes live in an interior and a leaf arena with a free chain each: a removal frees what it empties and lowers the tree, so the nodes resident are the live keys' paths; `try_shrink_to_fit` compacts and returns the freed nodes, `clear` everything, and `allocated_bytes` accounts for them; `try_reserve_key` allocates what one insertion needs while changing nothing, so a holder updating several trees makes every allocation first. Its counter gates are bytes per dense entry and a walk across every level's last slot; the §26.7 floor test waits for the page-cache migration, whose key volume it is. **Converted:** `kernel/iommu/api/src/iova.rs`, whose per-order sorted vectors moved every later block on each update, now one tree per order beside the order's highest block, with the double-free probe replaced by an owned `IovaBlock` that `free` consumes. **Remaining:** `arxfs/pagecache.rs`, `lib/writeback`'s dirty set (whose `BTreeMap` insertion cannot be made fallible), and the block-cache index (C4a settles that one's shape) |
 | C8 | **`IndexedHeap` done; the `TimerWheel` and its consumers remain.** A binary min-heap over the holder's own dense slot numbers, each slot's heap place recorded beside it, so moving a priority either way, removing, and popping sift one path and a bounded walk of everything due costs what is due; room for a slot, once reserved, covers every lower slot and is never given back, so a holder reserves beside its own slot storage and every later schedule is infallible. `lib/net`'s multicast DNS record cache and question table were its first consumers, deleting the whole-table deadline sweep each ran per timer and the conservative "early, never late" deadline that guarded it. Remaining: the `TimerWheel`, then per-subsystem deadline bookkeeping elsewhere, which wires `plans/FIX-IO.md`'s per-request deadlines |
-| C9 | `kernel/core/src/futex.rs`'s `BTreeMap`-per-bucket table, which becomes one `ConcurrentMap` — migrated once, here, rather than through an interim `HashMap` under the same bucket locks; and per-CPU log and console ingest |
+| C9 | `kernel/core/src/futex.rs`'s ordered-map-per-bucket table, which becomes one `ConcurrentMap` — migrated once, here, rather than through an interim `HashMap` under the same bucket locks; and per-CPU log and console ingest |
 | C10 | `docs/src/lib/collections.md` and `docs/src/lib/hash.md` rewritten; stability tiers set in both `README.md`s; a `deps-check` rule that fails a new hand-rolled container in `kernel/*`, `drivers/*`, or `userland/*` |
 
 ---

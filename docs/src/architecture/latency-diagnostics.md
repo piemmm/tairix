@@ -39,6 +39,8 @@ It returns the budget actually armed: the value clamped up to
 `MIN_FRAME_BUDGET_NS`, or `0` on an image that compiles the diagnostics out.
 Zero is an answer, not a failure — a surface reads it back and carries on
 rather than branching on the image it runs in. `BUDGET_DISARM` (`0`) disarms.
+A thread holding no watch yet that the heap cannot give one is answered
+`OutOfMemory`, and nothing is armed.
 
 Declaring a budget grants nothing, changes no scheduling decision, and
 reaches no other thread, which is why it needs no capability: a thread

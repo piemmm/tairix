@@ -167,7 +167,7 @@ pub fn empty_trash_plan(
             path,
             id: child.id(),
         };
-        targets.push(DeleteTarget::new(listed, child.is_directory_backed()));
+        targets.push(DeleteTarget::new(listed, child.kind()));
     }
     // Every target path is `trash_dir` + a validated leaf, so none is empty and
     // the set is non-empty: `DeletePlan::new` yields `Some`. Threading the

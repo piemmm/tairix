@@ -66,6 +66,7 @@ fn main() {
 /// Emit `PROGRAM_RXE`, `HYGIENE_RXE`, `USER_BIAS`, and `ROUNDS_PER_TASK`.
 fn write_program_fixture(path: &std::path::Path, probe: &[u8], hygiene: &[u8]) {
     let mut out = tairix_itest_harness::program_fixture::fixture_header();
+    tairix_itest_harness::program_fixture::push_heap_region(&mut out);
     let _ = writeln!(
         out,
         "/// Rounds each probe task fills and checks the file (pinned by build.rs)."

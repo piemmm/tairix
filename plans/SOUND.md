@@ -67,12 +67,15 @@ seek slider.
 | SND22 | The cue sites: session login/logout, machine startup/shutdown, hotplug attach/detach, the terminal's `Op::Bell`, and the notification area's own cues; the lifecycle QEMU vertical | done |
 | SND23 | The user's layer: the session pushes its user's sound policy when it claims the seat, and a chosen file reaches the decoder as a one-shot read descriptor | done |
 | SND24 | The user-layer QEMU vertical: a desktop session at the seat with a sound card, its user's choice of a file planted in its store, a layered cue provoked, and the host's capture held to that file's own samples | planned |
+| SND25 | The volume's feedback: `SoundEvent::VolumeFeedback` and its synthesised `volume` asset, heard at the default output's own level under a switch of its own, cued by Settings and the icon bar's panel once a settled change is listed applied | done |
+| SND26 | `lib/sound`: the Opus encoder — CELT-only packets of one fullband 20 ms frame at a constant bitrate, coded by the decoder's own model — and `encode` split into `encode-flac` and `encode-opus` | done |
 
 The ledger is worked in dependency order: an item is complete before anything
 that depends on it begins, and each carries its own tests and documentation.
 Every item through SND19 depends on the one before it. SND20–SND23 depend on
 SND9's sandboxed decode seam and on SND12's FLAC codec, which is the shipped
-sound set's format, and on nothing later. SND24 depends on SND23.
+sound set's format, and on nothing later. SND24 depends on SND23, SND25 on
+SND15 and SND22, and SND26 on SND18.
 
 **What SND4 guarantees.** The vertical passes on all three Tier-1 QEMU
 targets: boot, discovery, signed-bundle autoload of the driver into its own
@@ -208,7 +211,9 @@ for ever. The owner believes a reply only once it holds against what was
 asked. A replacement worker is brought back to the stream's position by
 seeking, or by decoding up to it where the stream cannot seek; one that finds
 another stream, or a stream that fails its worker twice at one position, is
-given up. `CACHE_PAGES`, `MAX_NEED_BYTES`, `MAX_BLOCK_FRAMES` and `LIMITS` are
+given up. Every owner — the engine, the tag reader and the cue authority —
+hands a request to the worker through one step, `supervise::send_waiting`.
+`CACHE_PAGES`, `MAX_NEED_BYTES`, `MAX_BLOCK_FRAMES` and `LIMITS` are
 the sandbox's fixed input-byte and output-frame ceilings. `fuzz_sound` is
 registered with `cargo xtask fuzz`.
 
@@ -275,7 +280,7 @@ headers, narrowed by a checked seek table; in Ogg it bisects pages on the
 frame each opens, never trusting a granule. The Ogg reader verifies every
 page's CRC and sequence and reads one logical stream among interleaved
 others; links chained after it are SND17's. The encoder, behind the off-by-default
-`encode` feature, is a core that emits exactly the constructs it is told
+`encode-flac` feature, is a core that emits exactly the constructs it is told
 (refusing any frame past the decoder's bound) under a chooser that picks the
 cheapest; both halves share one format model. Conformance rests on RFC 9639's
 own three reference-encoded example streams, which decode to the samples the
@@ -386,6 +391,20 @@ whose serial a later link carries and one whose pages are lost behind
 another's damaged page, and the fuzz target drives libopus's streams through
 every link invariant, chained among Vorbis ones.
 
+**What SND26 guarantees.** `lib/sound` writes Opus, behind `encode-opus`:
+CELT-only packets of one fullband 20 ms frame, mono or stereo, the size a
+constant bitrate from 6 to 510 kb/s sets, with the identification header a
+container carries and a pre-skip of 120 samples. The frame is coded by the
+decoder's own routines, so after every frame the encoder holds the decoder's
+state. In the tree, every packet decodes through SND18's decoder to the
+encoder's own range state; tones, noise and stereo come back within floors
+of their signal at each bitrate tested; an onset's pre-echo stays at least
+15 dB under it; silence decodes to silence; an Ogg stream of the packets
+plays in time with its input; every bound is refused without changing the
+encoder; and a frame refused as an overrun, which only an encoder defect
+makes, is undone, the packets after it a fresh encoder's. The FLAC encoder's
+feature is `encode-flac`.
+
 **Why the two capabilities sit in SND4 rather than beside the ABI.** A
 capability is added with the subsystem that enforces it, never ahead of it: it
 needs a live holder and a live enforcement point in the same change, and
@@ -465,10 +484,11 @@ TAIRiX's answers, stated as binding invariants:
    user's speakers, never silently discarded. Fast user switching pauses and
    resumes at exact positions.
 5. **Capture is an unforgeable capability with a consequence no program can
-   suppress.** `CAP_AUDIO_CAPTURE` gates opening a source; beyond it, every
-   live capture stream is machine state published through the System
-   Information API and raised as a system notice, so the session draws a
-   recording indicator the recording application cannot touch.
+   suppress.** `CAP_AUDIO_CAPTURE` gates opening a source — a microphone, or a
+   sink's own mix; beyond it, every live capture stream is machine state
+   published through the System Information API and raised as a system
+   notice, so the session draws a recording indicator the recording
+   application cannot touch.
 6. **Untrusted bytes never decode in a process holding a stream.** Every
    file format decodes in a minimum-capability sandbox worker holding the two
    pipes its owner wired and nothing else. MP3, Vorbis and Opus decoders have a long
@@ -490,7 +510,7 @@ TAIRiX's answers, stated as binding invariants:
 
 | Piece | Home |
 |---|---|
-| File decoders (AU, WAV, FLAC, Vorbis, Opus, MPEG audio), their containers, and the one encoder (FLAC, feature-gated) | `lib/sound` |
+| File decoders (AU, WAV, FLAC, Vorbis, Opus, MPEG audio), their containers, and two encoders (FLAC and Opus, each feature-gated) | `lib/sound` |
 | Mixing, format conversion, resampling, channel mapping, the clock model, routing policy, the client half | `lib/audio` |
 | The device-channel serve loop every audio driver runs | `lib/audiochan` |
 | Client stream ABI (`audio-v1`) | `lib/abi/src/audio.rs` |
@@ -521,7 +541,7 @@ serves; the mixer is the one client.
 
 ## The layers
 
-### `lib/sound` — the decoder registry, and the one encoder
+### `lib/sound` — the decoder registry, and its two encoders
 
 Shaped exactly like `lib/image`, because it is the same job on a different
 medium: `SoundFormat` / `sniff` / `probe` / `open` dispatch, one private module
@@ -597,9 +617,8 @@ rather than guessed at. What "complete" means per format:
   primitive, and nothing security-relevant may reach for it. A mismatch is a
   decoder defect, reported as a decode failure rather than passed off as audio.
 
-  FLAC is also the one format that is **encoded** here, behind an off-by-
-  default `encode` feature, so no shipped binary carries it (§The FLAC
-  encoder).
+  FLAC is also **encoded** here, behind an off-by-default `encode-flac`
+  feature, so no shipped binary carries it (§The FLAC encoder).
 - **MPEG audio** — MPEG-1, MPEG-2 and MPEG-2.5 Layers I, II and III. Layer III
   is what "MP3" means and is the reason the format is claimed; Layers I and II
   are the same framework's earlier members and fall out of the same header
@@ -631,7 +650,8 @@ rather than guessed at. What "complete" means per format:
     the post-filter, transient handling), the hybrid mode and the mode
     switching between them; the TOC byte and all four packet codes including
     code 3's padding and CBR/VBR frame counts; and the Ogg encapsulation's
-    `OpusHead`/`OpusTags`, pre-skip, output gain and granule mapping.
+    `OpusHead`/`OpusTags`, pre-skip, output gain and granule mapping. Its
+    CELT layer is encoded too, behind `encode-opus` (§The Opus encoder).
 
   Opus is by a wide margin the largest single item in this plan and is staged
   last for that reason. Its saving grace is that RFC 6716 ships both a
@@ -654,8 +674,8 @@ each held to the direct form it replaces.
 
 #### The FLAC encoder
 
-One format is encoded as well as decoded. It is the only one, it is off by
-default, and it earns its place three times over.
+FLAC is encoded as well as decoded, behind the off-by-default `encode-flac`
+feature, and it earns its place three times over.
 
 **The test story needs it, and this is the argument that decides it.** The
 no-committed-fixtures rule means every test input is assembled in code, so a
@@ -703,11 +723,53 @@ Encoding and decoding share one format model — the constants, the CRC-8 and
 CRC-16, the digest, the bitstream reader and writer, the fixed predictors, the
 Rice coding — rather than growing a second, divergent one.
 
-**What it is not.** It is not a shipped library: the `encode` feature is off
-for every consumer that runs on the machine, so a player, the sandbox worker
-and the cue authority carry decode only, and §16.4's curated set is unchanged.
-It is not a general audio-encoding surface either — no other format gains one,
-and none should until something needs to write that format.
+**What it is not.** It is not a shipped library: the `encode-flac` feature is
+off for every consumer that runs on the machine, so a player, the sandbox
+worker and the cue authority carry decode only, and §16.4's curated set is
+unchanged. It is not a general audio-encoding surface either: the one other
+format written is Opus, for the screen recorder (§The Opus encoder), and no
+other gains an encoder until something needs to write it.
+
+#### The Opus encoder
+
+The screen recorder writes WebM with Opus (`plans/CAPTURE.md`), so Opus is
+the second format written, behind `encode-opus`, which only the recorder
+enables. It is CELT only: every Opus decoder plays a CELT-only packet, and
+SILK and hybrid serve speech at bitrates below a recording's. Its output is
+raw packets and the identification header, which the WebM muxer carries as
+the track's codec private data.
+
+**One model.** A CELT frame is coded by one routine over
+`opus::range::Coder`, either end of the range coder: each symbol is handed
+the value an encoder writes, which a decoder ignores, and returns the value
+the frame carries. The header's flags, the energies, the allocation with its
+skip and stereo parameters, the bands' splits, folding and collapse masks,
+and the pyramid vector quantiser's enumeration are therefore one definition.
+The encoder's analysis — a split's angle, mid and side or the intensity mix,
+the forward spreading rotation, the codeword search — runs only where the
+coder writes.
+
+**Its choices.** A transform that is the exact inverse of the decoder's MDCT
+and overlap-add; eight short blocks where a 2.5 ms block's energy rises
+tenfold over the mean of those before it; each energy to the nearest coarse
+step and fine cell, a fall held to an eighth of a step a byte of the frame
+and a step held to one where the bands after it would otherwise lose the
+three bits each keeps (RFC 6716, section 5.3.3); each shape's codeword by
+projection onto the pyramid, then a pulse at a time (section 5.3.8);
+intensity stereo from a band the bitrate sets, inverted where the channels
+anti-correlate, and the channels' downmix wherever a coded angle leaves the
+side nothing; dual stereo where the shapes' L1 norms favour it; the spreading
+from how peaked the audible bands' shapes are, averaged and held across
+frames, normal for an onset (section 5.3.7); a boost of a bit a coefficient
+for each 6 dB a band stands over its neighbours' envelope, in frames of 45
+bytes or more and to two thirds of a frame (section 4.3.3), so a tone's band
+has the bits its level asks for; the allocation's tilt from the spectrum's
+slope and the low bands' inter-channel correlation; every band the bitrate
+reaches; and no pitch pre-filter. Only basic float operations and
+`tairix_util::mathf`, so every target writes the same packets.
+
+**What it is not.** Not variable bitrate, not a frame other than 20 ms, and
+not SILK, hybrid or a multistream mapping.
 
 ### `lib/audio` — the engine
 
@@ -791,12 +853,14 @@ deliberately does **not** expose a period or buffer size.
 - `Enumerate` — the sinks and sources the caller may see, each with its
   identity, its `audio:` resource reference, its channel map, its supported
   rates and formats, its jack/presence state, and whether it has hardware gain.
+  Each sink names its monitor, and none is listed among the sources
+  (**Monitoring**, below).
 - `OpenStream { direction, format, rate, channels, map, role, latency_target }`
   — answers the granted latency in frames *and* in `Time64`, the shared ring's
   geometry, and the stream's clock domain. A request the device cannot meet is
   answered with what it *can* meet, so a client adapts rather than failing; a
-  request the caller may not make (a source without `CAP_AUDIO_CAPTURE`) is
-  refused, not downgraded.
+  request the caller may not make (a source without `CAP_AUDIO_CAPTURE`, a
+  monitor of a room not the caller's) is refused, not downgraded.
 - `Start`, `Stop`, `Drain`, `Flush` — each at an exact frame position.
 - `Clock` — the (frames, `Time64`) pair and the estimated rate.
 - `Gain`, `Mute` — per stream.
@@ -923,7 +987,7 @@ Its real-time discipline is structural, not hopeful:
 
 Every security decision it takes lands on the hash-chained audit log with a
 stable event id: a capture stream opened or refused and by which principal, a
-monitor stream authorised against a seat lease, a default-device or per-device
+monitor stream opened, refused or closed, a default-device or per-device
 policy change, and a device bound or lost. A capture refusal is as
 audit-worthy as a capture grant — "who tried" is the question an incident
 asks — and the indicator invariant 5 draws is rendered from the same state, so
@@ -1001,10 +1065,51 @@ you can debug and one you cannot.
   with a graphical session the session claims its seat's sinks at login, so a
   remote login cannot make noise in the room.
 
-**Monitoring** — capturing a sink's own mix — is authorised by *holding that
-seat's lease*, not by `CAP_AUDIO_CAPTURE`. A session may monitor its own
-output; nothing may monitor another principal's. No third capability is needed
-because the lease already expresses exactly the right boundary.
+**Monitoring** — capturing a sink's own mix, which is what a screen
+recording's desktop sound is (`plans/CAPTURE.md`) — needs both
+`CAP_AUDIO_CAPTURE` and the caller's session *holding the room the sink
+serves*. A monitor records sound, so it is a capture like any other; the lease
+keeps it to the caller's own output. Nothing may monitor another principal's:
+an unclaimed room, which anybody may play into, is no session's to monitor,
+and a live monitor is held whenever its session does not hold the room. No
+third capability is needed: the two boundaries together are exactly the right
+one.
+
+- **Opening one.** A capture stream whose device id names a sink's monitor
+  (`audio-v1`'s `CaptureSource::Monitor`, zero naming the default sink's),
+  through the one capture path with the one stream ABI. Every sink advertises
+  its own; none is listed among the sources, so no list of inputs offers a
+  speaker's mix as a microphone and no source default lands on one. Every
+  open, refusal and close is audited.
+- **What it hears.** Each period the device is given, before the sink's own
+  level and mute, so a recording does not follow the speaker's volume: the
+  device's period itself where the mixer took none of that level, otherwise
+  the period mixed again by a mixer of its own, so the device is given the
+  same frames whether or not anything monitors it. It reaches its client as a
+  source's period does, and ducks no media. A tap that cannot make that mix
+  faults the monitors alone; the device plays on.
+- **How its sink runs.** Never as a monitor asks: one opened on an idle sink
+  has it run as no stream asked — its rate nearest 48 kHz, its widest
+  encoding, its longest period — and the first stream to play where only
+  monitors ride has it configured afresh as that stream alone would, the
+  monitors moving onto it where they stand. A monitor's ring holds two of the
+  longest period any stream could have its sink run at. An open refused there
+  changes nothing: what its record would refuse is refused before the sink is
+  touched, and a refusal only the device's grant or an allocation reveals has
+  the sink configured again as it ran.
+- **Back-pressure.** A reader that falls behind takes the over-run; the device
+  never waits on it.
+- **Its clock.** A live monitor keeps its sink clocking, silent when nothing
+  plays, so a recording holds the output's own timeline. A sink is never
+  drained beneath a live monitor: a drain beside it has its tail padded with
+  silence and is over once the device's position passes its last frame, the
+  sink clocking on; a monitor's own drain is over at once.
+- **The indicator.** A monitor counts toward the `AudioCapture` notice as a
+  microphone does, and the indicator does not tell them apart: both record
+  sound, the one thing it promises no program can hide, and the screen
+  recording a monitor serves raises a signal of its own beside it. A count of
+  monitors apart would put a second figure on a notice the kernel retains, for
+  a distinction those two signals already draw.
 
 ## The capability set
 
@@ -1015,10 +1120,11 @@ Two new capabilities, and the discipline of §5.2 applied honestly to each:
   live holder (`audiod`) and a live enforcement point (the kernel, at the
   driver's restricted-sender endpoint) in the same change, and no existing
   capability expresses it. It is the `CAP_NET_RAW` of audio.
-- **`CAP_AUDIO_CAPTURE`** — open a capture stream on any source. It guards a
-  group of resources (every microphone and line input), has a live holder (a
-  recording application's manifest) and a live enforcement point (`audiod` at
-  stream open), and is a privacy boundary no existing capability covers.
+- **`CAP_AUDIO_CAPTURE`** — open a capture stream on any source, a sink's
+  monitor among them. It guards a group of resources (every microphone, line
+  input and sink's mix), has a live holder (a recording application's
+  manifest) and a live enforcement point (`audiod` at stream open), and is a
+  privacy boundary no existing capability covers.
 
 And three things that deliberately are **not** capabilities:
 
@@ -1033,7 +1139,6 @@ And three things that deliberately are **not** capabilities:
   authority that already exists, carried to `audiod` by the device manager on
   the authority it binds devices with. Inventing `CAP_AUDIO_ADMIN` would be a
   third name for an authority already spelled.
-- **Monitoring** is the seat lease, as above.
 - **Cueing a desktop sound** is the seat lease for an application event and
   the existing owner of the transition for a lifecycle one. A capability every
   program would hold is not a boundary, and the authority that actually
@@ -1572,7 +1677,22 @@ How those resolve:
 - **Playback is `lib/player`**, the engine `play` runs too, on a thread of its
   own parked on the decoder, the stream and the window's orders. The window
   holds a copy of the playlist kept alike by the same closed set of edits, so
-  neither thread reads the other's.
+  neither thread reads the other's. The engine starts empty and plays the
+  first file it is given on the jump that follows: a decoder holding no file —
+  never opened, or left by a refusal — takes a request as one idle with a file
+  open does (`AudioDecodeClient::takes_request`).
+- **A track's tags are `lib/player`'s `TagReader`**, read on a worker thread of
+  the player's own in a decoder process of its own, and shaped like the
+  engine: a pump queues every request to the worker, takes every answer and
+  serves every byte asked for before it returns, so it never parks holding a
+  request its session was not given. A file gets `probe::BUDGET_NS` (10 s)
+  from when a live worker is asked for it, so a replacement the restart pacing
+  holds back costs it time and never its tags, and a worker that cannot be
+  launched leaves it unread. A worker it abandons part-way through a request
+  is killed rather than left to answer the next file with this one's frames.
+  The cover is decoded on a
+  worker of its own and the device list and the settings on a third, so a
+  hostile file holds up neither the other nor the player's own business.
 - **A folder is chosen in the session's trusted picker** (`PickPurpose::Folder`,
   `plans/APPWIN.md` AW5): the session delegates, one by one, the files in it
   whose content type the player's manifest associates. The player holds no
@@ -1592,7 +1712,11 @@ file or its album art parsed in the player. A seek drag seeks once and a volume
 drag saves once; the meters repaint their own rectangle; a change that alters
 nothing owes no damage. An edit re-plans only what is still to be heard: a
 removed or moved entry is never heard out of place, and a removed entry being
-heard gives way at once to what followed it.
+heard gives way at once to what followed it. A player begun with nothing plays
+the first file it is given, and one whose last file was refused plays the next
+it is jumped to; a track's tags are read under the readiness a wait-set
+reports, whatever its length, and a hostile file holds up neither its cover
+nor the player's settings and device list.
 
 **Not in it**: a spectrum analyser (it needs an FFT nothing else in the tree
 wants, and nobody asked for one), an equaliser, a library database, and any
@@ -1600,11 +1724,11 @@ form of editing. Peak and RMS meters are the whole of the visualisation.
 
 ## Default desktop sounds
 
-Fourteen authored masters, one closed event vocabulary, one authority that
-plays them, and the same single path every other sample takes. The masters
-exist and are measured (below); what this section fixes is everything around
-them — who may make a sound, where the bytes live, what happens when an asset
-is missing, and why a cue is not a notice.
+Fourteen authored masters and one synthesised, one closed event vocabulary,
+one authority that plays them, and the same single path every other sample
+takes. The masters exist and are measured (below); what this section fixes is
+everything around them — who may make a sound, where the bytes live, what
+happens when an asset is missing, and why a cue is not a notice.
 
 ### A cue is an occurrence, not a state edge
 
@@ -1650,6 +1774,7 @@ name it does not recognise.
 | `Warning` | `warning` | the same |
 | `Info` | `info` | the same |
 | `Bell` | `notification_soft` | the same |
+| `VolumeFeedback` | `volume` | the same: it claims nothing the machine did |
 
 Two authority classes, **no new capability**, each checked against a fact the
 kernel already attests:
@@ -1660,7 +1785,7 @@ kernel already attests:
   binding before considering a capability. A `CAP_SOUND_CUE` would fail the
   capability-minimalism tests anyway: every program wants to beep, and a
   capability every program holds is not a boundary.
-- **Application events** (the last seven) need what playback already needs — a
+- **Application events** (the last eight) need what playback already needs — a
   session holding the seat lease on the target sink, checked at open against
   the kernel-attested caller. An unclaimed sink is the headless case and any
   principal with a stream may cue on it, because a server beeping at a failure
@@ -1684,14 +1809,25 @@ notification asset rather than one of its own — a terminal bell should be
 unobtrusive, and an event-to-asset mapping is theme *data*, so two events
 sharing an asset cost one cache entry and no code.
 
+`VolumeFeedback` is the one sound that answers what the user just did, since
+no screen can show how loud a level is: a change made by hand to the default
+output's volume — a drag where it comes to rest, each key step, an unmute —
+plays it once the audio service lists that output at the new level (*The cue
+sites*). It is no sound effect (`tairix_soundtheme::is_effect`): the effects'
+switch and their gain do not reach it, so it plays at unity and the output's
+own level is what is heard, and its one switch is its own,
+`sound.volume_feedback.enabled`, on unless turned off — as on macOS, apart
+from the switch for the interface's sound effects.
+
 **`PowerConnected` and `PowerDisconnected` are authored and held back.** Both
 assets exist and nothing in the tree can cue them: there is no power-supply or
 battery interface at all, which `plans/NEW-DESKTOP-SETTINGS.md` §3 and
 `plans/NEW-SWITCHBOARD.md` each state as an absent interface. An enum variant
 with no cue site is speculative surface, so the two variants and their two
 assets land together with the power-supply interface (`plans/DEVICES.md`'s
-sensor work), not before. Twelve events ship; these two wait for a publisher,
-which is the discipline the two audio capabilities were already held to.
+sensor work), not before. Thirteen sounds ship, twelve authored and `volume`
+synthesised; these two wait for a publisher, which is the discipline the two
+audio capabilities were already held to.
 
 ### `lib/soundtheme` — vocabulary, shipped set, settings, client
 
@@ -1814,6 +1950,18 @@ its own wait-set, so nothing that makes a sound waits for one.
   batch of output that rang it. The desktop session cues a newly shown
   notification's severity sound — `Notification`, `Warning`, `Error` — and
   nothing for a replacement.
+- **The volume's feedback.** Settings' *Output & Input* pane and the icon
+  bar's volume panel ask for each settled change — where a drag rests, a key
+  step, a mute or an unmute — with `ControlQueue::ask_confirmed`, and post
+  `VolumeFeedback` from their own `PostedCues` once the listing returned by
+  the trip that carried it shows that output, the default, sounding at the
+  level asked for. A drag on its way, a refused change, a mute, an input, the
+  controls a session puts back as it claims the room, and a change made
+  anywhere else — `audioctl`, another session — sound nothing, and a change
+  nothing can hear holds no confirmation, so it takes none from a level asked
+  before it. The queue's
+  latest-wins, the authority's coalescing and its cue rate bound a burst of
+  steps.
 
 `soundd` records a machine sound that played out whole
 (`MACHINE_CUE_PLAYED`). The lifecycle verticals, on all three QEMU targets,
@@ -1850,9 +1998,10 @@ Two documents, layered, with no gap and no third place:
   `soundd` reads it again only when the file changes. A file it names for an
   event is the administrator's replacement, which `soundd` reads itself.
 - **The user's own choices**, layered over it while their session holds the
-  seat: a master enable, the theme and one gain, and each event's enable and
-  file. The gain is the document's, not an event's: an event that is too loud
-  plays another file or none. They
+  seat: a master enable, the theme and one gain, which are the sound effects'
+  and so do not reach the volume's feedback, and each event's enable and file.
+  The gain is the document's, not an event's: an event that is too loud plays
+  another file or none. They
   reach every sound but `Startup`, `Login` and `Logout`, which sound when no
   session holds the seat and so are the machine document's alone.
   They are the desktop session's private app-data document, and the session
@@ -1941,8 +2090,9 @@ sounds say, only while it is there, and nothing it hands over is a path.
   A store that cannot be read is read again on the same deadline, and nothing
   is stored over choices it was not read for.
 - **The pane.** Settings' *Sound Effects* pane reads the choices in effect and
-  every theme through `pinboard-v1`: one plate of the switch, the theme and the
-  volume, and one chooser per event of what it plays — its theme's sound, the
+  every theme through `pinboard-v1`: one plate of the switch, the theme, the
+  volume and the volume feedback's own switch, and one chooser per sound effect
+  of what it plays — its theme's sound, the
   file chosen for it, none, or a pick. It renders each change through the sound
   registry, asks once the volume settles — one round trip at a time, every
   setting changed meanwhile carried in the next with its newest value — and
@@ -1960,8 +2110,9 @@ testable against the asset itself.
 
 ### The shipped set
 
-Fourteen masters authored as one family, all 48 kHz stereo 16-bit signed PCM.
-The twelve that ship are FLAC: 554 KiB, from 3.1 MiB of raw samples.
+Fourteen masters authored as one family and one synthesised beside them, all
+48 kHz stereo 16-bit signed PCM. The twelve authored ones that ship are FLAC:
+554 KiB, from 3.1 MiB of raw samples.
 
 | Event | Asset | Seconds | Peak |
 |---|---|---|---|
@@ -1977,6 +2128,7 @@ The twelve that ship are FLAC: 554 KiB, from 3.1 MiB of raw samples.
 | `Error` | `error` | 1.08 | −10.5 dBFS |
 | `Warning` | `warning` | 1.18 | −14.7 dBFS |
 | `Info` | `info` | 0.95 | −17.6 dBFS |
+| `VolumeFeedback` | `volume` | 0.11 | −12.0 dBFS |
 | held for its publisher | `power_connected` | 1.02 | −14.9 dBFS |
 | held for its publisher | `power_disconnected` | 1.02 | −15.5 dBFS |
 
@@ -1998,7 +2150,7 @@ The authoring contract, checked at build time, failing the build when broken:
   corrupted asset fails the build against its own claim.
 - First and last frame exactly zero, so a cue neither clicks in nor out. All
   fourteen masters already satisfy this, with 7–20 ms of lead-in and a uniform
-  12 ms tail.
+  12 ms tail; `volume` opens on 5 ms and ends on the same tail.
 - Within `MAX_SOUND_BYTES`, as a wallpaper is within its own bound.
 - A name resolving to an asset a live `SoundEvent` plays. An orphan asset
   fails the build; a stray `.DS_Store` or `Thumbs.db` never reaches the check,
@@ -2053,6 +2205,13 @@ the master now, because keeping a WAV beside a lossless encoding of it would be
 two copies of one thing. The two held for their publisher stay in
 `plans/tairix-desktop-audio/` until it lands, when they are encoded the same
 way and the directory goes with them.
+
+`volume` alone is synthesised rather than authored: a short pop that falls
+onto C6 as it dies away, made by `cargo xtask sound-encode --synthesised` from
+its kept generator (`tools/xtask/src/commands/sound_encode/synth.rs`) with
+`tairix_util::mathf`, which computes alike on every host. A host test holds
+the shipped FLAC to the generator's samples, so the file is remade from the
+tree and never edited.
 
 **Loudness normalisation is not claimed.** The measured peaks span −18.7 to
 −9.2 dBFS, and peak is not loudness. A real loudness match needs an ITU-R
@@ -2116,7 +2275,11 @@ That is stated rather than left implied by a table of peaks.
   tolerant and strict readings against malformed input; the authority split,
   asserting a lifecycle event is refused to an application principal; and the
   rate limit, the retrigger coalescing and the concurrent cap, each asserting
-  the drop is *counted* rather than silently lost.
+  the drop is *counted* rather than silently lost. The volume's feedback plays
+  at unity under effects turned down or off and is silent under its own
+  switch, and the control queue confirms only the newest settled change, by
+  the listing of the trip that carried it, never a refusal, a mute, an input
+  or a restore.
 - **Build.** The family contract above over the real shipped assets, through
   the same `tools/syshelp` table and loop that already validates icons,
   wallpapers and cursors.
@@ -2207,11 +2370,12 @@ The consumers, each owned by its own plan:
   a Recording plate (the user's own live captures, and how many others there
   are). The controls act on `audio-v1` directly, under the room the user's
   session holds; the app holds no capability, and a device another session's
-  room holds is drawn disabled.
+  room holds is drawn disabled. A settled change to the output is heard at its
+  new level (`VolumeFeedback`).
 - **The taskbar** — a volume signal in the notification area, whose popup holds
   the default sink's level and mute: the level moves live as it is dragged,
-  coalesced, and is remembered where the drag settles. Mute is a checkbox here
-  and in Settings alike: muted, the level stands at the bottom of its travel,
+  coalesced, and is remembered and heard where the drag settles. Mute is a
+  checkbox here and in Settings alike: muted, the level stands at the bottom of its travel,
   disabled, until unmuting restores it (`tairix_audio::volume::control_permille`,
   the one rule both draw by). Beside it the recording
   indicator, drawn from the `AudioCapture` notice. Both are the session's own
@@ -2252,20 +2416,24 @@ The consumers, each owned by its own plan:
   and the alternative has no charter-legal home.
 - **VCHIQ.** A second device-interconnect stack, used by nothing else in the
   tree, that would put the Pi's audio path behind closed firmware.
-- **MIDI, audio capture-to-file utilities, an equaliser, effects processors,
-  and a sound-server protocol for foreign clients.** None has a consumer.
+- **MIDI, an equaliser, effects processors, and a sound-server protocol for
+  foreign clients.** None has a consumer. Recording sound to a file is the
+  screen recorder's (`plans/CAPTURE.md`), over a capture stream and a monitor
+  like any other client's.
 - **A sound for every interaction.** Clicks, keystrokes, window opens and
   focus changes get none. A cue marks something the user did not ask for and
   must notice; feedback for an action they just took is what the screen is
   for, and a desktop that chirps at every click is one whose sound gets
-  switched off entirely.
+  switched off entirely. The volume's feedback is the one exception, since no
+  screen can show how loud a level is, and it has a switch of its own.
 - **An installable third-party sound pack.** A theme is a directory of assets
   the build discovers and validates. An install format for untrusted sound
   bundles is a packaging surface with no consumer, and a user who wants their
   own sound sets it per event.
 - **A synthesised fallback tone.** Where an asset is missing or refuses to
   decode, the answer is silence and a reported reason, never a fabricated
-  beep.
+  beep. The `volume` asset is synthesised when it is made, not when it is
+  missing: it resolves, and falls silent, like any other.
 
 ## Native HDMI on the Pi 4
 
@@ -2535,6 +2703,10 @@ the tests are chosen to check it rather than to check that nothing crashed.
 - Channel-map matrices against the standard downmix coefficients.
 - The clock model's rate estimate against a synthesised drifting device.
 - The routing policy exhaustively over (role × seat state × device set).
+- A sink's monitor: refused without the capture capability or outside its own
+  session's room, counted, audited, and given the device's own period bit for
+  bit — before the sink's level and mute, the stream as it is — while the
+  device is given the same frames whether or not it is monitored.
 - The three damage-correctness properties every app owes, for `music.app`, and
   the layout at several scales.
 

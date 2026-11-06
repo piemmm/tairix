@@ -2123,12 +2123,18 @@ impl WindowFrame {
 
     /// A tool window's frame: the window's rim, plate and hit map around a
     /// mini title band seating Close alone, its title in the caption face —
-    /// what a floating palette is moved and closed by. It is never resized.
+    /// what a floating palette is moved and closed by. A `resizable` one is
+    /// resized by its edges as a window is; none is maximized.
     #[must_use]
-    pub fn tool() -> Self {
-        let title_bar = TitleBar::tool();
+    pub fn tool(resizable: bool) -> Self {
+        let mut title_bar = TitleBar::tool();
+        let furniture = WindowFurnitureState {
+            resizable,
+            ..title_bar.furniture()
+        };
+        title_bar.set_furniture(furniture);
         Self {
-            furniture: title_bar.furniture(),
+            furniture,
             title_bar,
         }
     }
@@ -2150,6 +2156,18 @@ impl WindowFrame {
     #[must_use]
     pub fn furniture(&self) -> WindowFurnitureState {
         self.furniture
+    }
+
+    /// Whether the window may leave its restored size — maximized, or made
+    /// fullscreen at its application's asking: a resizable window whose band
+    /// seats the size toggle. A tool window is resized by its edges alone.
+    #[must_use]
+    pub fn maximizes(&self) -> bool {
+        self.furniture.resizable
+            && self
+                .title_bar
+                .commands()
+                .seats(WindowControlKind::SizeToggle)
     }
 
     /// Replace the furniture state, updating the title bar and its controls.

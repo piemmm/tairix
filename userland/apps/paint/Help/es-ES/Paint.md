@@ -32,9 +32,17 @@ Una imagen puede estar hecha de capas, la de abajo primero, cada una con un
 nombre, una opacidad y si se muestra; se pinta en una capa cada vez, y la
 ventana las muestra superpuestas. OpenRaster conserva las capas; cualquier
 otro formato las recibe superpuestas. El menú Capas añade, copia, elimina,
-sube y baja capas, combina una con la de debajo y acopla la imagen, y sus
-Propiedades de capa cambian el nombre de una capa y fijan cuánto se ve de
-ella. Los ajustes, rellenos y trazos cambian la capa en que se pinta; los
+sube y baja capas, combina una con la de debajo y acopla la imagen. El panel
+Capas, que muestra Ver ▸ Paneles, reúne la opacidad de la capa en que se pinta
+y los botones Nueva, Duplicar, Eliminar y Combinar hacia abajo, y debajo una
+fila por capa, la de arriba primero, con un ojo, una imagen pequeña de la
+capa, su nombre y su opacidad. Pulse una fila para pintar en su capa, su ojo
+para mostrar u ocultar la capa, o el nombre de la capa en que se pinta para
+cambiárselo, y arrastre una fila para subir o bajar su capa; cada una de estas
+acciones salvo elegir una fila, y un cambio de opacidad por mucho que se
+arrastre, es un solo cambio que se puede deshacer. Flotante, la ventana del
+panel cambia de tamaño desde dos filas hasta todas. Los ajustes, rellenos y
+trazos cambian la capa en que se pinta; los
 giros, volteos, cambios de tamaño y recortes cambian todas las capas. Una
 imagen con paleta tiene una sola capa.
 
@@ -79,8 +87,13 @@ sigue rociando mientras se mantiene quieto. Manteniendo Mayús se dibuja un
 cuadrado, un círculo o una línea en un múltiplo de 45 grados.
 
 A ambos lados de la ventana corren paneles: de forma predeterminada el panel
-Herramientas a la izquierda y el panel Color a la derecha, con el panel Ajuste
-debajo en cuanto se abre un ajuste. Cada uno lleva arriba una banda fina que
+Herramientas a la izquierda y el panel Color a la derecha, al que se suman
+debajo los paneles Capas, Ajustes y Efectos cuando se muestran o se abre un
+ajuste o un efecto. Los paneles de un lado se apilan en una sola columna: cada
+uno recibe al menos el espacio que necesita, luego el abierto en último lugar
+crece primero hacia todo lo que contiene, y un panel con menos se desplaza
+dentro de sí, mientras que la columna nunca se desplaza. Cada uno lleva arriba
+una banda fina que
 lo nombra, con un control que lo enrolla sobre su banda y una marca que lo
 cierra; Ver ▸ Paneles vuelve a mostrar un panel cerrado, y Restablecer paneles
 devuelve cada panel a como lo tiene una ventana nueva. Arrastrar una banda
@@ -90,8 +103,12 @@ en una ventanita propia, que se mueve por su banda, se mantiene sobre la
 imagen y se cierra con su marca; arrastrado de nuevo sobre un lado, vuelve a
 acoplarse allí. También la paleta flota: el botón del extremo derecho de su
 tira, o Ver ▸ Paneles ▸ Hacer flotar la paleta, la lleva a una ventanita
-propia, con sus colores dispuestos en una cuadrícula; cerrar esa ventana, o
-arrastrarla de nuevo al borde inferior de la ventana, la devuelve a la tira.
+propia, con sus colores dispuestos en una cuadrícula. Al cambiar el tamaño de
+esa ventana, los colores se vuelven a disponer para ajustarse a su anchura, y
+se desplazan arriba y abajo cuando no caben todos; cerrarla, o arrastrarla de
+nuevo al borde inferior de la ventana, la devuelve a la tira. Tanto en la tira
+como en su ventana, los colores principal y secundario llevan marcados sus
+números de color de RISC OS.
 
 La herramienta de selección marca un rectángulo, una elipse, un lazo a mano
 alzada, un polígono pulsado esquina a esquina o, con la varita mágica, los
@@ -115,24 +132,44 @@ recorta. La mano arrastra la imagen por la ventana, como Espacio con
 cualquier herramienta; el zoom amplía con un clic, o con Alt reduce, y un
 recuadro arrastrado llena la ventana.
 
-El menú Ajustes abre un ajuste en el panel Ajuste, donde cualquier otra
-herramienta, panel y menú sigue a mano: brillo y contraste, tono y saturación,
-equilibrio de color, niveles, curvas, balance de blancos, posterizar, umbral,
-desenfocar, enfocar, pixelar y añadir ruido; desaturar y buscar bordes, que no
-tienen ajustes, se aplican al momento. La imagen muestra el ajuste a medida
-que se mueven sus valores, Vista previa lo apaga y lo enciende para comparar,
-Restablecer devuelve sus valores y Aplicar lo conserva como un solo cambio que
-se puede deshacer; pintar, rellenar o elegir otro ajuste lo aplica antes. Los
-niveles fijan los puntos negro, gris y blanco sobre un histograma de la capa,
-para todos los canales juntos o cada uno por separado, con cuentagotas que los
-toman de la imagen y Auto; las curvas doblan los tonos de un canal mediante
-puntos arrastrados sobre su histograma; el balance de blancos fija la
+Dos paneles reúnen las operaciones de la imagen, cada uno encabezado por una
+lista que elige una: el panel Ajustes reúne brillo y contraste, niveles,
+curvas, tono y saturación, equilibrio de color, balance de blancos,
+desaturar, invertir, posterizar, umbral y el mezclador de canales, y el panel
+Efectos reúne desenfoque gaussiano, máscara de enfoque, mediana, añadir
+ruido, buscar bordes, relieve y pixelar. Cada fila del menú Ajustes abre su
+operación en su panel. Bajo la lista están los valores de la operación
+elegida y luego Vista previa, Restablecer y Aplicar; cualquier otra
+herramienta, panel y menú sigue a mano. La imagen muestra la operación a
+medida que se mueven sus valores, primero la parte a la vista; Vista previa la
+apaga y la enciende para comparar, Restablecer devuelve sus valores y Aplicar
+la conserva como un solo cambio que se puede deshacer. Una sola vista previa
+abarca ambos paneles: elegir otra operación en una lista, o mover los valores
+del otro panel, aplica la operación que se deja como un solo cambio si sus
+valores se movieron y cambia la imagen, y la descarta en otro caso, así que
+recorrer una lista no cambia nada. Pintar, rellenar, una transformación o
+guardar aplica o descarta antes la operación abierta del mismo modo; marcar
+una selección, la vista, los colores y deshacer la dejan abierta.
+
+Los niveles fijan los puntos negro, gris y blanco sobre un histograma de la
+capa, para todos los canales juntos o cada uno por separado, con cuentagotas
+que los toman de la imagen y Auto; las curvas doblan los tonos de un canal
+mediante puntos arrastrados sobre su histograma; el balance de blancos fija la
 temperatura y el matiz de la luz, a partir de un píxel neutro elegido o con
 Auto; tono y saturación giran, refuerzan y aclaran todos los colores o una
 gama de ellos; el equilibrio de color lleva las sombras, los medios tonos y
 las luces hacia el rojo, el verde o el azul, conservando su luminosidad si se
-pide. Todo queda limitado a la selección. En una imagen con paleta, un ajuste
-cambia su paleta, y los que necesitan colores vecinos no se ofrecen.
+pide; el mezclador de canales pondera cada canal a partir del rojo, el verde,
+el azul y una constante, o hace de ellos un solo gris. El desenfoque gaussiano
+suaviza la imagen según su radio; la máscara de enfoque la enfoca, alejando
+cada color de su desenfoque en una cantidad allí donde ambos difieren al menos
+en un umbral; la mediana da a cada píxel el valor central de los que lo
+rodean, suavizando las motas y conservando los bordes; añadir ruido pone motas
+uniformes o gaussianas, en color o en gris; buscar bordes ilumina los bordes
+entre colores; relieve convierte la imagen en un relieve gris iluminado desde
+un ángulo; y pixelar pone cuadrados, cada uno del color medio de lo que cubre.
+Todo queda limitado a la selección. En una imagen con paleta, un ajuste cambia
+su paleta, y los efectos, que necesitan colores vecinos, no se ofrecen.
 
 El panel Color guarda los colores principal y secundario y un selector de
 color para el que esté elegido: un clic en un color lo elige, y luego se toma

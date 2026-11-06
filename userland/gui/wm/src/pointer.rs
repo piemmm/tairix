@@ -268,16 +268,20 @@ impl PointerOverlay {
             .then_some((image, self.pointer))
     }
 
-    /// Everything the overlay draws, bottom to top, that the frame carries:
-    /// all of it, the aids alone, or nothing, by route.
+    /// Everything the overlay draws over `area`, bottom to top, that the frame
+    /// carries: all of it, the aids alone, or nothing, by route.
     pub(crate) fn frame_sprites_over(&self, area: Rect) -> ArrayVec<Sprite<'_>, MAX_SPRITES> {
-        let mut sprites = match self.route {
-            PointerRoute::Frame => self.laid(true),
-            PointerRoute::Plane => self.laid(false),
-            PointerRoute::Layer => return ArrayVec::new(),
-        };
-        sprites.retain(|sprite| !sprite.bounds().intersection(&area).is_empty());
-        sprites
+        match self.route {
+            PointerRoute::Frame => self.laid_over(true, area),
+            PointerRoute::Plane => self.laid_over(false, area),
+            PointerRoute::Layer => ArrayVec::new(),
+        }
+    }
+
+    /// Everything the overlay draws over `area`, bottom to top, whatever its
+    /// route: what a capture shows of it.
+    pub(crate) fn sprites_over(&self, area: Rect) -> ArrayVec<Sprite<'_>, MAX_SPRITES> {
+        self.laid_over(true, area)
     }
 
     /// The rectangle every sprite lies in, while any is drawn.
@@ -436,6 +440,13 @@ impl PointerOverlay {
                 opacity: u8::MAX,
             });
         }
+        sprites
+    }
+
+    /// [`laid`](Self::laid), keeping only what reaches `area`.
+    fn laid_over(&self, with_cursor: bool, area: Rect) -> ArrayVec<Sprite<'_>, MAX_SPRITES> {
+        let mut sprites = self.laid(with_cursor);
+        sprites.retain(|sprite| !sprite.bounds().intersection(&area).is_empty());
         sprites
     }
 

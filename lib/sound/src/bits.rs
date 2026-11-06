@@ -159,7 +159,7 @@ impl<'b> BitReader<'b> {
 }
 
 /// Bytes written a bit at a time, most significant bit first.
-#[cfg(any(test, feature = "encode"))]
+#[cfg(any(test, feature = "encode-flac"))]
 #[derive(Default)]
 pub(crate) struct BitWriter {
     bytes: alloc::vec::Vec<u8>,
@@ -167,7 +167,7 @@ pub(crate) struct BitWriter {
     partial: u32,
 }
 
-#[cfg(any(test, feature = "encode"))]
+#[cfg(any(test, feature = "encode-flac"))]
 impl BitWriter {
     /// The low `count` bits of `value`, `count` at most 64.
     pub(crate) fn write(&mut self, value: u64, count: u32) {

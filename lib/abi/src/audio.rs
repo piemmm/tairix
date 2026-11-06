@@ -38,9 +38,12 @@
 //! kernel-attested caller. Opening a *source* additionally demands the capture
 //! capability, and every live capture stream is machine state the session
 //! draws an indicator from — a recording program cannot suppress it
-//! (`plans/SOUND.md`). A stream id is a service-issued token, and the service
-//! checks it against the kernel-attested caller, so a guessed id cannot reach
-//! another principal's stream.
+//! (`plans/SOUND.md`). A sink's monitor is a source too
+//! ([`CaptureSource::Monitor`]), and opening one demands besides that the
+//! caller's session holds the room the sink serves. A stream id is a
+//! service-issued token, and the service checks it against the
+//! kernel-attested caller, so a guessed id cannot reach another principal's
+//! stream.
 //!
 //! A device's controls — which sink or source is the default, an endpoint's
 //! level and mute — belong to the room it serves, as its sound does: the
@@ -765,9 +768,11 @@ pub struct OpenParams {
     /// one, so zero can never name a real device; a client with no
     /// preference spends no round trip enumerating and cannot race the
     /// default changing under it. With no default adopted the open is
-    /// refused rather than resolved to an arbitrary device.
+    /// refused rather than resolved to an arbitrary device. A capture
+    /// stream's id names a [`CaptureSource`], a sink's monitor among them.
     pub device_id: u32,
-    /// Playback or capture. Capture demands the capture capability.
+    /// Playback or capture. Capture demands the capture capability, and a
+    /// monitor the room its sink serves too.
     pub direction: StreamDirection,
     /// The sample encoding the client will write or read.
     pub format: SampleFormat,
@@ -801,6 +806,55 @@ pub enum Tenancy {
     Machine,
     /// This login session's, played only while it holds the room.
     Session(ProcId),
+}
+
+/// The flag a capture stream's [`OpenParams::device_id`] carries when it
+/// names a sink's monitor rather than a physical input. The service numbers
+/// its endpoints below it, so no endpoint's id carries it.
+pub const MONITOR_FLAG: u32 = 1 << 31;
+
+/// What a capture stream hears: the source its [`OpenParams::device_id`]
+/// names.
+///
+/// The kind travels in the id, so the one capture-open path and the one
+/// stream ABI serve both, and every id names one or the other.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum CaptureSource {
+    /// A microphone or line input by its enumerated id, or zero for the
+    /// default source.
+    Input(u32),
+    /// The mix a sink plays, before the sink's own level and mute, so a
+    /// recording does not follow the speaker's volume: the sink by its
+    /// enumerated id, or zero for the default sink. Opening one demands the
+    /// capture capability and that the caller's session holds the room the
+    /// sink serves.
+    Monitor(u32),
+}
+
+impl CaptureSource {
+    /// The source a capture stream's `device_id` names.
+    #[must_use]
+    pub const fn of(device_id: u32) -> Self {
+        if device_id & MONITOR_FLAG == 0 {
+            Self::Input(device_id)
+        } else {
+            Self::Monitor(device_id & !MONITOR_FLAG)
+        }
+    }
+
+    /// The `device_id` a capture stream opens with to hear this source.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for an id itself carrying [`MONITOR_FLAG`],
+    /// which names no endpoint.
+    pub const fn device_id(self) -> Result<u32, Errno> {
+        match self {
+            Self::Input(id) | Self::Monitor(id) if id & MONITOR_FLAG != 0 => Err(Errno::OutOfRange),
+            Self::Input(id) => Ok(id),
+            Self::Monitor(sink) => Ok(sink | MONITOR_FLAG),
+        }
+    }
 }
 
 impl AudioRequest {
@@ -1284,10 +1338,12 @@ impl DefaultChoice {
 ///
 /// The `audio:` resource reference is derived rather than carried:
 /// `audio:sink/<id>` for a playback device and `audio:source/<id>` for a
-/// capture one, so the scheme and the descriptor cannot disagree.
+/// capture one, so the scheme and the descriptor cannot disagree. A sink's
+/// monitor is derived the same way ([`Self::monitor`]).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct AudioDeviceDescriptor {
-    /// The service-assigned identity a stream is opened against.
+    /// The service-assigned identity a stream is opened against, never
+    /// carrying [`MONITOR_FLAG`].
     pub device_id: u32,
     /// Whether it is a sink or a source.
     pub direction: StreamDirection,
@@ -1376,8 +1432,9 @@ impl AudioDeviceDescriptor {
     /// # Errors
     ///
     /// [`Errno::BufferTooSmall`] for a short record, [`Errno::BadMagic`] for
-    /// a dirty reserved field or an undefined flag, or whatever the embedded
-    /// values' own decoders refuse.
+    /// a dirty reserved field or an undefined flag, [`Errno::OutOfRange`] for
+    /// an id carrying [`MONITOR_FLAG`], or whatever the embedded values' own
+    /// decoders refuse.
     pub fn from_le_bytes(body: &[u8]) -> Result<Self, Errno> {
         let body = body
             .get(..AUDIO_DEVICE_RECORD_LEN)
@@ -1393,6 +1450,12 @@ impl AudioDeviceDescriptor {
             || body[descriptor::FLAGS] & !descriptor::ALL != 0
         {
             return Err(Errno::BadMagic);
+        }
+        let device_id = read_u32(body, descriptor::DEVICE);
+        // An endpoint's id never carries the flag, so a listing cannot pass a
+        // sink's mix off as an input.
+        if device_id & MONITOR_FLAG != 0 {
+            return Err(Errno::OutOfRange);
         }
         let default = DefaultChoice::from_u8(body[descriptor::DEFAULT])?;
         let formats = SampleFormats::from_bits(read_u16(body, descriptor::FORMATS))?;
@@ -1410,7 +1473,7 @@ impl AudioDeviceDescriptor {
             (false, true) => return Err(Errno::OutOfRange),
         };
         Ok(Self {
-            device_id: read_u32(body, descriptor::DEVICE),
+            device_id,
             direction: StreamDirection::from_u8(body[descriptor::DIRECTION])?,
             jack: JackState::from_u8(body[descriptor::JACK])?,
             default,
@@ -1428,6 +1491,20 @@ impl AudioDeviceDescriptor {
             clock_millihertz: read_u32(body, descriptor::CLOCK),
             lost_frames: read_u64(body, descriptor::LOST),
         })
+    }
+
+    /// The source a capture stream opens to hear this sink's mix, or [`None`]
+    /// for a source.
+    ///
+    /// Derived rather than carried, as the `audio:` reference is. No monitor
+    /// is listed among the sources: a list of inputs would otherwise offer a
+    /// speaker's mix as a microphone, and a source default could land on one.
+    #[must_use]
+    pub const fn monitor(&self) -> Option<CaptureSource> {
+        match self.direction {
+            StreamDirection::Playback => Some(CaptureSource::Monitor(self.device_id)),
+            StreamDirection::Capture => None,
+        }
     }
 }
 
@@ -1482,7 +1559,8 @@ mod stream_descriptor {
 pub struct StreamDescriptor {
     /// The service-issued stream id.
     pub stream_id: u64,
-    /// The sink or source it rides.
+    /// The sink or source it rides; a capture stream riding a sink is that
+    /// sink's monitor.
     pub device_id: u32,
     /// Playback or capture.
     pub direction: StreamDirection,

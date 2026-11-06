@@ -45,13 +45,45 @@ Die Abfragen:
   Interrupt-Leitung — ihre Kennung, die besitzende Treiber-Task, die
   Anzahl der Interrupts seit dem Start und ob die Leitung unter
   Quarantäne steht (benötigt `CAP_SYSINFO_HW`).
-- `storage`, `io` — die Speicher-E/A-Gesundheit je Datenträger: eine
-  Zeile je fehlerbewusstem blockgestütztem Datenträger — ein Präfix
-  seiner dauerhaften Kennung, der bedienende Blockdienst-Endpunkt, seine
-  aktuelle Verfügbarkeit (available/degraded/recovering/lost) und die
-  kumulativen Ergebniszähler (Abschlüsse, Resets, Zeitüberschreitungen,
-  Medienfehler, Wiederholungen), an denen eine ausfallende oder
-  flatternde Platte sichtbar wird (benötigt `CAP_SYSINFO_KERNEL`).
+- `frames` — was die zusammengesetzten Frames jeder Desktop-Sitzung
+  gekostet haben: eine Zeile je veröffentlichender Sitzung — die Pixel,
+  die ihre Frames neu zusammengesetzt haben, und der Mittelwert je Frame,
+  das Überzeichnungsvielfache (Ebenenbeiträge je beschädigtem Pixel), der
+  Anteil, der durch Kopieren eines deckenden Laufs erledigt wurde, die
+  Pixel, die eine neu berechnete Milchglas-Hinterlegung erneut
+  weichgezeichnet hat, die für den Scan-out umgewandelten Pixel, der
+  teuerste einzelne Frame und sein Anteil am Bildschirm, die
+  Treiberaufrufe, mit denen sie ausgegeben wurden, sowie Treffer und
+  Fehlschläge des Caches der Fensterdekoration. Das sind die eigenen
+  Zahlen des Desktops — nur ein Prozess, der einen Compositor hält, kann
+  Pixel zählen —, daher nennt jede Zeile den vom Dienst bestätigten
+  Herausgeber, und eine Sitzung, die nichts veröffentlicht hat, ergibt
+  keine Zeile (benötigt `CAP_SYSINFO_GLOBAL`).
+- `storage`, `io` — drei Tabellen je Datenträger, in jeder eine Zeile je
+  fehlerbewusstem blockgestütztem Datenträger, gekennzeichnet durch ein
+  Präfix seiner dauerhaften Kennung und mit dem Gerät, das ihn bedient.
+  Diese Identität ist der bedienende Blockdienst-Endpunkt, wo ein Treiber
+  im Benutzerbereich das Gerät bedient, und eine reservierte
+  kernelgesteuerte Identität, wo der Kernel es selbst steuert — die
+  Platte, von der die Maschine gestartet ist und die überhaupt keinen
+  bedienenden Endpunkt hat. **Dienst** nennt zusätzlich das Gerät: den
+  Kurznamen, den sein eigener Treiber angibt (`virtio-blk`, `emmc2`,
+  `usb-msd`), oder `-`, wo er keinen angibt. Diese Tabelle enthält die
+  kumulierten Bytes, abgeschlossenen Anfragen und die Belegtzeit des
+  Geräts, aus deren Differenzen ein Leser Durchsatz, IOPS, Auslastung und
+  Wartezeit bildet — nichts ist vorberechnet, sodass zwei Leser nie
+  dasselbe Mittelungsfenster erben (keine Capability nötig).
+  **Warteschlange** enthält, was gerade aussteht, die Akkumulatoren, aus
+  deren Differenzen sich eine mittlere Tiefe ergibt, sowie Tiefe und
+  Frist, die die eigene Klasse des Geräts erlaubt. **Gesundheit** enthält
+  die aktuelle Verfügbarkeit des Datenträgers
+  (available/degraded/recovering/lost) und die kumulativen
+  Ergebniszähler (Abschlüsse, Resets, Zeitüberschreitungen, Medienfehler,
+  Wiederholungen), an denen eine ausfallende oder flatternde Platte
+  sichtbar wird. Die letzten beiden benötigen `CAP_SYSINFO_KERNEL`; die
+  Dienst-Tabelle wird zuerst ausgegeben, sodass ein Aufrufer ohne diese
+  Capability die Auslastungswerte noch liest, bevor die Ablehnung
+  gemeldet wird.
 - `raid`, `arrays` — die zusammengesetzten RAID-Verbünde und die Geräte,
   die der Verbund-Komponist hält: eine Zeile je Verbund — ein Präfix
   seiner Identität, sein Level, seine Gesundheit
@@ -103,6 +135,7 @@ Ohne Abfrage wird die Kurzhilfe angezeigt.
 
 - `sysinfo identity` — die Maschinenidentität und OS-Version ausgeben.
 - `sysinfo ps --all` — alle Prozesse des Systems auflisten.
+- `sysinfo frames` — zeigen, was die Frames des Desktops kosten.
 
 ## EXIT STATUS
 

@@ -145,6 +145,22 @@ pub const AUTH_COOLING: EventId = EventId(10_035);
 /// A session's home could not be entered as its account, so the session
 /// started at the root; the refusal is recorded with it.
 pub const SESSION_HOME_REFUSED: EventId = EventId(10_036);
+/// A [`tairix_abi::elevate::ElevateRequest::LaunchWired`] request
+/// re-authenticated and the screen recorder was started as the target
+/// account, its control pipes handed to the requester. Recorded apart from
+/// [`LAUNCH_GRANTED`] because the requester now speaks to a program running
+/// with that account's authority; the record names the pid login reaps.
+pub const WIRED_GRANTED: EventId = EventId(10_037);
+/// A [`tairix_abi::elevate::ElevateRequest::LaunchWired`] request was refused
+/// — a program other than the recorder, a failed re-authentication or an
+/// account that may not allow it (causes never disclosed to the caller, only
+/// audited), or a launch whose pipes could not be handed over.
+pub const WIRED_REFUSED: EventId = EventId(10_038);
+/// A program started for a [`tairix_abi::elevate::ElevateRequest::LaunchWired`]
+/// request ended. Recorded however it ended, closing the run its
+/// [`WIRED_GRANTED`] record opened; a reserved load-failure status is named in
+/// words.
+pub const WIRED_ENDED: EventId = EventId(10_039);
 
 #[cfg(test)]
 mod tests {
@@ -156,11 +172,11 @@ mod tests {
         SESSION_AUTH_GRANTED, SESSION_AUTH_REFUSED, SESSION_BACKGROUNDED, SESSION_ENDED,
         SESSION_ENDED_ON_EXIT, SESSION_ENDPOINT_UNAVAILABLE, SESSION_HOME_REFUSED,
         SESSION_LAUNCH_FAILED, SESSION_REQUEST_REFUSED, SESSION_RESUMED, SESSION_STARTED,
-        TEXT_ROUND_SUPERSEDED, TEXT_ROUND_UNWATCHED, VERIFY_GRANTED, VERIFY_REFUSED,
-        ZONE_STORE_WITHHELD,
+        TEXT_ROUND_SUPERSEDED, TEXT_ROUND_UNWATCHED, VERIFY_GRANTED, VERIFY_REFUSED, WIRED_ENDED,
+        WIRED_GRANTED, WIRED_REFUSED, ZONE_STORE_WITHHELD,
     };
 
-    const ALL: [u32; 34] = [
+    const ALL: [u32; 37] = [
         SESSION_STARTED.0,
         AUTH_FAILED.0,
         LOCKED_OUT.0,
@@ -195,6 +211,9 @@ mod tests {
         AUTHORISERS_REFUSED.0,
         AUTH_COOLING.0,
         SESSION_HOME_REFUSED.0,
+        WIRED_GRANTED.0,
+        WIRED_REFUSED.0,
+        WIRED_ENDED.0,
     ];
 
     #[test]

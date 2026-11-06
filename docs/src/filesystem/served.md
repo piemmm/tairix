@@ -71,6 +71,15 @@ write-back flusher, which serves every volume and so never waits on a
 driver. Every reply says whether the driver holds unpublished
 writes.
 
+## Retitling
+
+A volume's title is its driver's to write (`SetLabel`) and the kernel's to
+allow ([Storage namespaces](./drives.md) §8). The kernel holds the volume
+against every other operation while the driver writes the title and flushes
+it, lists the new title once the driver holds it, and audits each decision
+(`fs.volume.retitled`, `fs.volume.retitled_refused`). The volume keeps its
+key, its identity and its catalog name while it stays attached.
+
 ## When things go
 
 - **Detach.** The kernel hands the driver the releases waiting, flushes
@@ -91,7 +100,11 @@ writes.
   fault while the volume waits, and stale once the restarted driver serves it.
 - **Re-insert.** The retained writes are replayed at the block layer, then a
   fresh served volume and node are published; the stand-in answers the mount,
-  under its new posture, until the new driver serves it.
+  under its new posture, until the new driver serves it. A medium its device
+  does not prove the volume's own is served read-only with the writes held
+  until it is answered for ([Storage namespaces](./drives.md) §8).
+  The driver serving it is then let go before the medium is written or the
+  writes given up, and the volume is served afresh the same way.
 - **Refusal of a conflicted re-insert.** A volume whose non-mutation could not
   be proven keeps its retained set for the audited force-unmount, so a driver
   that will not serve it leaves it mounted read-only behind the stand-in
@@ -101,11 +114,17 @@ writes.
 
 | Id   | Name                     | Meaning |
 |------|--------------------------|---------|
+| 4219 | `fs.root.twin_attached`  | attached beside a volume of its identity, under a key and a name of its own |
+| 4220 | `fs.volume.retitled`     | retitled, carrying its catalog name and the authority (`cause`: `owner`, `mount_authority` or `seat`) |
+| 4221 | `fs.volume.retitled_refused` | a retitle was refused (`cause`: `not_owner`, `no_mount_authority`, `root_not_writable`, `root_unreachable`, `volume_busy`, `volume_unserved`, `read_only`, `untitled_format`, `share_titled_by_server`, `system_volume`, `identity_not_attached`, `title_refused`, `flush_failed`) |
 | 4192 | `fs.serve.awaiting`      | attached, its node published for its driver |
 | 4172 | `fs.hotplug.root_added`  | first served, mounted and published |
 | 4193 | `fs.serve.resumed`       | served again after a lost driver or a re-insert |
 | 4194 | `fs.serve.refused`       | not served (`cause`: `driver_refused` or the kernel's refusal); retracted, or kept when conflicted |
 | 4195 | `fs.serve.lost`          | its driver is gone (`cause`: `unpublished_writes_lost` or `nothing_unpublished`) |
+| 4237 | `fs.hotplug.reinsert_unconfirmed` | proven unmutated on a device that does not prove it the volume's own; served read-only, its writes held for the seat's answer |
+| 4238 | `fs.hotplug.replay_answered` | the seat's answer carried out (`cause`: `written` or `discarded`, with the byte count) |
+| 4239 | `fs.hotplug.replay_refused` | an answer refused, nothing written or given up (`cause`: `not_at_seat`, `identity_not_attached`, `not_awaiting_answer`, `volume_busy`, `registry_full`, `device_gone`, or why serving it again failed) |
 
 ## Network volumes
 

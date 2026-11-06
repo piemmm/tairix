@@ -32,6 +32,8 @@
 //! * [`entry`] — the [`Entry`]/[`EntryKind`] listing vocabulary, including
 //!   the [`LinkTarget`] a symbolic link resolves to and the
 //!   [`resolve_target`] rule a relative one is reached through.
+//! * [`volume`](mod@volume) — shortcuts to volumes, found again by
+//!   [`volume::locate`], and the drives the desktop shows for attached ones.
 //! * [`activate`](mod@activate) — the [`Activation`] dispatch-by-kind decision
 //!   (descend / launch a bundle / open a file) the manager and picker share.
 //! * [`chrome`](mod@chrome) — the file-manager frame model: the [`ToolbarModel`]
@@ -58,7 +60,8 @@
 //!   model ([`applications_for`]) over the installed applications' declared
 //!   associations, resolving a file's type through [`media`](mod@media) and
 //!   matching along its subclass chain, most specific declaration first.
-//! * [`sort`](mod@sort) — the [`SortMode`] and the one shared listing order.
+//! * [`sort`](mod@sort) — the [`SortMode`], the [`Order`] a listing takes by
+//!   the names it shows, and the one shared listing order.
 //! * [`presentation`](mod@presentation) — the [`Presentation`] a browser shows
 //!   its listing by: the [`HiddenEndings`] names are shown without, whether
 //!   hidden items are listed, and the [`Pictures`] entries are drawn as.
@@ -139,7 +142,9 @@ pub mod drive;
 pub mod entry;
 pub mod error;
 pub mod execute;
+pub mod follow;
 pub mod format;
+pub mod lanes;
 pub mod layout;
 pub mod marquee;
 pub mod media;
@@ -163,6 +168,7 @@ pub mod source;
 pub mod survey;
 pub mod trash;
 pub mod vfs;
+pub mod volume;
 pub mod watch;
 
 pub use activate::{Activation, BundleIntent};
@@ -179,15 +185,14 @@ pub use column::ScrollColumn;
 pub use create::{validate_new_entry_name, CreateError, NewEntry, NEW_FOLDER_BASE};
 pub use delete::{DeletePlan, DeleteTarget};
 pub use desk::{ListingDesk, ListingJob};
-pub use drive::{Drive, DriveChange, DrivePanels, DriveSample};
-pub use entry::{
-    bundle_stem, is_bundle_name, is_riscos_application_name, resolve_target, DriveMark, Entry,
-    EntryKind, LinkResolution, LinkTarget, Listed, Occupancy,
-};
+pub use drive::{Drive, DriveChange, DrivePanels, DriveSample, TitleKeyed};
+pub use entry::{resolve_target, DriveMark, Entry, EntryKind, LinkTarget, Listed, Occupancy};
 pub use error::{BrowseError, Unnamable};
 pub use execute::{paste_strategy, PasteStrategy, VolumeId};
 pub use format::{format_datetime, format_minute, format_size};
-pub use layout::{GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode};
+pub use layout::{
+    BandCells, GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode,
+};
 pub use marquee::Marquee;
 pub use media::{
     entry_icon, folder_sample, icon_for_entry, media_for_document, media_for_entry,
@@ -201,19 +206,19 @@ pub use open_with::{
 };
 pub use owner_edit::{validate_owner, OwnerChange, OwnerError};
 pub use places::{
-    bare_open_places, Ejector, Place, PlaceKind, Places, Volume, VolumeFacts, FIXED_LABELS,
-    MAX_PLACE_LABEL,
+    bare_open_places, Ejector, Place, PlaceKind, Places, Retitler, Retitling, Volume, VolumeFacts,
+    FIXED_LABELS, MAX_PLACE_LABEL,
 };
 pub use preferences::{FilerKey, FilerPreferences, Start, SETTINGS_PANE, SORT_KEYS};
 pub use presentation::{HiddenEndings, Pictures, Presentation};
 pub use probes::Probes;
-pub use progress::{ProgressModel, ProgressOp, Reading, Subject, Tally};
+pub use progress::{Clash, ProgressModel, ProgressOp, Reading, Subject, Tally};
 pub use properties::{Attribute, Attributes, Properties};
 pub use rename::{rename_text, renamed, validate_new_name, RenameError};
 pub use render::{render_into, ManagerChrome};
 pub use rowlist::RowList;
 pub use select::Selection;
-pub use sort::{sort_entries, Folders, SortDirection, SortKey, SortMode};
+pub use sort::{sort_entries, Folders, Order, SortDirection, SortKey, SortMode};
 pub use source::{resolve_occupancy, DirectorySource, Listing, Probe};
 pub use survey::{Survey, SurveyStep};
 pub use tairix_abi::window_ipc::WindowSizing;
@@ -236,6 +241,7 @@ pub use trash::{
 #[cfg(feature = "rt")]
 pub use vfs::{recorded_filetype_of, RtEntryReader, RtLinkReader};
 pub use vfs::{EntryReader, LinkInfo, ListingOnly, NoProbe, VfsDirectorySource};
+pub use volume::{DesktopDrives, DriveClass};
 pub use watch::{
     merge_changes, EntryChange, Placement, Took, WatchUpdate, Watches, WATCH_BUFFER_LEN,
     WATCH_LATENCY_NS,

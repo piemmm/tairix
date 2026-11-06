@@ -3,16 +3,19 @@
 //! Both views drive the same [`Browser`](crate::Browser), so the order they
 //! show a directory in must come from a single definition — otherwise the two
 //! could disagree about which row a click lands on. [`sort_entries`] is that
-//! definition: a pure, total, stable order over [`Entry`], parameterised by a
-//! [`SortMode`] the app may toggle.
+//! definition: a pure, total, stable order over [`Entry`], parameterised by an
+//! [`Order`] — the [`SortMode`] the app may toggle, and the endings the names
+//! it compares are shown without.
 //!
 //! The order is **directories first, then the chosen key**, unless the mode
 //! asks for folders among the files ([`Folders::Among`]). Grouped, folders
 //! stay ahead of files (and bundles) whichever the direction — reversing only
 //! reverses the order *within* each group — because a file manager that
 //! scattered folders through a descending size list would be harder to scan,
-//! not easier. Equal keys fall back to a deterministic case-insensitive name
-//! order so the result never depends on the source's incidental ordering.
+//! not easier. Names compare as they are shown, and equal keys fall back to a
+//! deterministic case-insensitive name order — the name shown, then the name
+//! the volume holds — so the result never depends on the source's incidental
+//! ordering.
 
 use core::cmp::Ordering;
 
@@ -20,6 +23,7 @@ use alloc::vec::Vec;
 
 use crate::entry::{Entry, EntryKind};
 use crate::media::{media_for_named, Site};
+use crate::presentation::HiddenEndings;
 
 /// Which field a listing is ordered by.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
@@ -178,26 +182,89 @@ impl SortMode {
     }
 }
 
-/// Sort `entries` in place into the shared listing order for `mode`.
+/// How a listing is ordered: by its [`SortMode`], comparing names as the
+/// [`HiddenEndings`] show them, the name the volume holds breaking a tie.
 ///
-/// Stable and total: directories come before files and bundles unless
-/// `mode` places them among the files, then the chosen key decides, then a
-/// case-insensitive name tiebreak makes the result independent of the input
-/// order.
-pub fn sort_entries(entries: &mut [Entry], mode: SortMode) {
-    if mode.key != SortKey::Kind {
-        entries.sort_by(|a, b| entry_cmp(a, b, mode));
-        return;
+/// One value, so the full sort, a re-sort and a watch's merge order a listing
+/// alike.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Order {
+    /// The key, the direction and where folders stand.
+    pub mode: SortMode,
+    /// The endings the names compared are shown without.
+    pub endings: HiddenEndings,
+}
+
+impl Order {
+    /// Whether comparing under this order reads the type registry, which is
+    /// then done once an entry rather than at every comparison.
+    fn classifies(self) -> bool {
+        self.mode.key == SortKey::Kind || self.endings != HiddenEndings::NONE
     }
-    // Classifying a name scans the type registry's tables, so each entry is
-    // classified once rather than at every comparison.
-    let mut order: Vec<(usize, &'static str)> = entries
-        .iter()
-        .enumerate()
-        .map(|(at, entry)| (at, type_name(entry)))
-        .collect();
-    order.sort_by(|a, b| ordered(&entries[a.0], &entries[b.0], mode, (a.1, b.1)));
-    permute(entries, order.into_iter().map(|(at, _)| at).collect());
+}
+
+impl From<SortMode> for Order {
+    /// `mode`, comparing names as the volume holds them.
+    fn from(mode: SortMode) -> Self {
+        Self {
+            mode,
+            endings: HiddenEndings::NONE,
+        }
+    }
+}
+
+/// Sort `entries` in place into the shared listing order `order` sets.
+///
+/// Stable and total: directories come before files and bundles unless the
+/// order places them among the files, then the chosen key decides, then a
+/// case-insensitive name tiebreak — the name shown, then the name held —
+/// makes the result independent of the input order.
+pub fn sort_entries(entries: &mut [Entry], order: Order) {
+    let sorted = if order.classifies() {
+        sorted_indices(entries, order)
+    } else {
+        None
+    };
+    match sorted {
+        Some(sorted) => permute(entries, sorted),
+        // Nothing to classify, or no memory to classify each entry once:
+        // each comparison classifies its own.
+        None => entries.sort_by(|a, b| entry_cmp(a, b, order)),
+    }
+}
+
+/// Sort `entries` into `order`, answering where each went, by its index
+/// before; or [`None`], the entries untouched, without the memory to track
+/// them.
+pub(crate) fn sort_tracked(entries: &mut [Entry], order: Order) -> Option<Vec<usize>> {
+    let sorted = sorted_indices(entries, order)?;
+    let mut place = tairix_util::fallible::filled(sorted.len(), 0)?;
+    for (after, &before) in sorted.iter().enumerate() {
+        if let Some(slot) = place.get_mut(before) {
+            *slot = after;
+        }
+    }
+    permute(entries, sorted);
+    Some(place)
+}
+
+/// Which entry of `entries` each place of `order` holds, by its index, each
+/// entry classified once — a name's type and the name it is shown as both
+/// scan the type registry's tables; or [`None`] without the memory for it.
+fn sorted_indices(entries: &[Entry], order: Order) -> Option<Vec<usize>> {
+    let mut keyed = Vec::new();
+    keyed.try_reserve_exact(entries.len()).ok()?;
+    keyed.extend(
+        entries
+            .iter()
+            .enumerate()
+            .map(|(at, entry)| (at, Keys::of(entry, order))),
+    );
+    keyed.sort_by(|a, b| ordered(&entries[a.0], &entries[b.0], order.mode, (a.1, b.1)));
+    let mut sorted = Vec::new();
+    sorted.try_reserve_exact(keyed.len()).ok()?;
+    sorted.extend(keyed.into_iter().map(|(at, _)| at));
+    Some(sorted)
 }
 
 /// Rearrange `entries` so the entry now at `order[i]` ends at `i`, following
@@ -232,27 +299,46 @@ fn group_rank(entry: &Entry, folders: Folders) -> u8 {
     }
 }
 
-/// The total order two entries take under `mode`.
-pub(crate) fn entry_cmp(a: &Entry, b: &Entry, mode: SortMode) -> Ordering {
-    let types = if mode.key == SortKey::Kind {
-        (type_name(a), type_name(b))
-    } else {
-        ("", "")
-    };
-    ordered(a, b, mode, types)
+/// The total order two entries take under `order`.
+pub(crate) fn entry_cmp(a: &Entry, b: &Entry, order: Order) -> Ordering {
+    ordered(a, b, order.mode, (Keys::of(a, order), Keys::of(b, order)))
 }
 
-/// [`entry_cmp`]'s order, given what [`type_name`] answers for each entry
-/// under [`SortKey::Kind`]: the one comparison both the one-off sort and the
-/// incremental insertions read.
-fn ordered(a: &Entry, b: &Entry, mode: SortMode, types: (&str, &str)) -> Ordering {
+/// What an entry is compared by beyond its own fields, read off the type
+/// registry: the name of its content type under [`SortKey::Kind`], and the
+/// name it is shown as.
+#[derive(Copy, Clone)]
+struct Keys<'a> {
+    type_name: &'static str,
+    shown: &'a str,
+}
+
+impl<'a> Keys<'a> {
+    /// What `entry` is compared by under `order`.
+    fn of(entry: &'a Entry, order: Order) -> Self {
+        Self {
+            type_name: if order.mode.key == SortKey::Kind {
+                type_name(entry)
+            } else {
+                ""
+            },
+            shown: order.endings.shown(entry),
+        }
+    }
+}
+
+/// [`entry_cmp`]'s order under `mode`, given what [`Keys::of`] answers for
+/// each entry: the one comparison both the one-off sort and the incremental
+/// insertions read.
+fn ordered(a: &Entry, b: &Entry, mode: SortMode, keys: (Keys<'_>, Keys<'_>)) -> Ordering {
     let group = |entry| group_rank(entry, mode.folders);
+    let names = || name_cmp(keys.0.shown, keys.1.shown);
     group(a).cmp(&group(b)).then_with(|| {
         let primary = match mode.key {
-            SortKey::Name => name_cmp(a.name(), b.name()),
+            SortKey::Name => names(),
             SortKey::Kind => kind_rank(a)
                 .cmp(&kind_rank(b))
-                .then_with(|| name_cmp(types.0, types.1)),
+                .then_with(|| name_cmp(keys.0.type_name, keys.1.type_name)),
             SortKey::Size => a.size().cmp(&b.size()),
             SortKey::Modified => a.modified().cmp(&b.modified()),
             SortKey::Free => free(a).cmp(&free(b)),
@@ -265,9 +351,12 @@ fn ordered(a: &Entry, b: &Entry, mode: SortMode, types: (&str, &str)) -> Orderin
             SortDirection::Ascending => primary,
             SortDirection::Descending => primary.reverse(),
         };
-        // A deterministic, direction-independent tiebreak so equal keys never
-        // leave the order at the mercy of the source's incidental ordering.
-        primary.then_with(|| name_cmp(a.name(), b.name()))
+        // A deterministic, direction-independent tiebreak — the name shown,
+        // then the name the volume holds — so equal keys never leave the
+        // order at the mercy of the source's incidental ordering.
+        primary
+            .then_with(names)
+            .then_with(|| name_cmp(a.name(), b.name()))
     })
 }
 

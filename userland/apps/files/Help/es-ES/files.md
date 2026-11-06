@@ -4,7 +4,7 @@ files — navegador gráfico del sistema de archivos
 
 ## SYNOPSIS
 
-`files --desktop [--mount] [ruta] [-h | -?]`
+`files --desktop [--mount] [path] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -23,20 +23,25 @@ nunca se adivina.
 
 El escritorio inicia el gestor de archivos con la sesión y lo mantiene en la
 barra de iconos, y este nunca termina: el menú de su ranura lista sus propios
-lugares y todo lo montado, y elegir uno abre allí una ventana; *Red* y
-*Configuración…* van al final. Un volumen que puede expulsar — una memoria
+lugares y todo lo montado, y elegir uno abre allí una ventana; *Red* va a
+continuación, y *Papelera* va al final: esta fila abre
+su Papelera, y aparece atenuada y dice por qué cuando no hay un directorio
+personal donde guardarla. Un volumen que puede expulsar — una memoria
 USB, una tarjeta de memoria u otro disco extraíble, o una imagen de disco o
 un recurso compartido que usted montó — abre un submenú que contiene
-*Expulsar*, y el de una imagen de disco suya que tiene título contiene
-también *Título*: esta fila abre un campo con el título del disco, listo
-para cambiarlo, y pulsar `Return` escribe el nuevo en el disco. Un clic en
+*Expulsar*, y el de un volumen cuyo título puede cambiar — una imagen de
+disco suya, o un disco cuyo formato guarda un título — contiene *Título*:
+esta fila abre un campo con el título, listo para cambiarlo, y pulsar
+`Return` escribe el nuevo en el disco; un título vacío lo borra. Cuando no
+puede cambiar usted mismo el título de un disco, el escritorio pide el
+nombre y la contraseña de un administrador, y lo cambia con su autorización. Un clic en
 la ranura abre una donde indique la configuración. Pedir una carpeta que ya
 tiene ventana trae esa ventana al
 frente en lugar de abrir otra. El menú no tiene fila *Salir*: el gestor de
 archivos forma parte del escritorio, cerrar sus ventanas simplemente lo
 retira y, si alguna vez se detiene, el escritorio vuelve a iniciarlo.
 
-*Red*, en el menú de la ranura justo encima de *Configuración…*, abre una
+*Red*, en el menú de la ranura justo encima de *Papelera*, abre una
 ventana con los ordenadores de la red local que comparten archivos. Cada uno
 aparece con su nombre, la dirección en la que se le alcanza, su grupo de
 trabajo o dominio y lo que es, y la lista se completa a medida que responden
@@ -56,18 +61,21 @@ a ejecutarse, indicando el motivo en el flujo de error estándar. Requiere una
 sesión gráfica en marcha: sin ella el canal de ventanas es inalcanzable, e
 informa del rechazo en el flujo de error estándar y termina.
 
-La ventana se maneja con el teclado: `Abajo` y `Arriba` mueven la selección,
-`Intro` abre el directorio seleccionado y `Retroceso` sube al directorio
-padre. `F5` vuelve a leer tanto el listado como la columna de lugares; un
-volumen recién conectado aparece en ella por sí solo. `Ctrl+Shift+N` crea
-una carpeta nueva.
+La ventana se maneja con el teclado: las flechas `Down` y `Up` mueven la
+selección, `Enter` abre el directorio seleccionado y `Backspace` sube al
+directorio padre. `F5` vuelve a leer tanto el listado como la columna de
+lugares; un volumen recién conectado aparece en ella por sí solo.
+`Ctrl+Shift+N` crea una carpeta nueva.
 
 Un listado se abre sin nada seleccionado. Un clic selecciona un elemento, un
 clic con `Ctrl` añade o quita uno, y un clic con `Shift` selecciona la serie
 desde el último elemento elegido; un clic en un espacio vacío borra la
-selección. Un doble clic abre un elemento; manteniendo `Shift`, lista el
-contenido de una aplicación en lugar de iniciarla, y deja sin seleccionar
-lo que abra en otro lugar. Arrastrar por un espacio vacío traza un recuadro
+selección. Un doble clic abre un elemento, y el que abre en otro lugar — un
+documento en su aplicación, una aplicación, una imagen de disco como
+volumen — queda sin seleccionar una vez abierto, mientras que el que no se
+pudo abrir sigue seleccionado. Manteniendo `Shift`, lista el contenido de una
+aplicación en lugar de iniciarla. `Enter` abre la selección y la conserva.
+Arrastrar por un espacio vacío traza un recuadro
 que selecciona todo lo que toca a medida que crece; sostenido en el borde
 superior o inferior del listado, este se desplaza, y `Escape` deshace lo
 que el recuadro seleccionó.
@@ -82,29 +90,51 @@ necesita; un nombre demasiado largo incluso para ellas conserva su principio
 y su final, con `…` en medio, de modo que su extensión siempre se ve. Una
 aplicación se muestra sin su sufijo `.app`, y la configuración puede
 mostrarlo, o bien ocultar también los sufijos de los tipos de archivo que el
-sistema conoce. Los elementos cuyo nombre empieza por un punto solo se
-listan cuando la configuración lo pide.
+sistema conoce. Un sufijo sigue visible allí donde ocultarlo dejaría un
+nombre que se leería como otro tipo de archivo u otra aplicación —
+`invoice.pdf.app` se muestra entero — y una ventana ordena sus elementos por
+sus nombres tal como se muestran. Los elementos cuyo nombre empieza por un
+punto solo se listan cuando la configuración lo pide.
 
 `F2` cambia el nombre del elemento seleccionado en su sitio, igual que hacer
 clic en el nombre del único elemento seleccionado y esperar: el nombre se
 abre para editarlo en cuanto el clic ya no puede ser un doble clic. Queda
 seleccionada la parte anterior a la extensión, así que lo que se escribe
 sustituye al nombre y conserva la extensión; un sufijo que la ventana no
-muestra también se conserva. `Intro`, o un clic fuera del nombre, conserva
+muestra también se conserva. `Enter`, o un clic fuera del nombre, conserva
 el nombre nuevo —un nombre que el volumen rechaza sigue abierto con el
 motivo— y `Escape` lo descarta. Un clic que ha cambiado el nombre del
 elemento no hace nada más, ya que la carpeta puede haberse reordenado bajo
 el puntero.
 
 Arrastrar los elementos seleccionados a otra ventana del gestor de archivos,
-a una carpeta de ella o al escritorio los copia allí; manteniendo Mayús, en
+a una carpeta de ella o al escritorio los copia allí; manteniendo `Shift`, en
 cambio, los mueve. El puntero muestra un signo más mientras soltar copiaría
 y una flecha mientras movería, y la carpeta donde caería lo soltado aparece
 resaltada. Un solo archivo arrastrado a la ranura de una aplicación en la
-barra de iconos se abre allí.
+barra de iconos se abre allí. Una unidad arrastrada fuera de `/Storage` nunca
+se copia ni se mueve: deja un acceso directo donde cae, y el puntero muestra
+una flecha curva. El acceso directo abre la unidad mientras está conectada;
+cuando no lo está, abrirlo lo indica, y en el escritorio se dibuja atenuado.
 Copiar o mover conserva los huecos de cada archivo y sus atributos
 extendidos, como un tipo de archivo de RISC OS; cualquier atributo que el
 destino no pueda conservar se indica en un aviso al terminar la operación.
+
+Si ya hay allí un elemento con el mismo nombre, la propia ventana de la
+operación pregunta qué hacer con él: *Reemplazar* pone el nuevo en su lugar,
+*Omitir* deja el que ya está y *Detener* termina la operación, conservando lo
+que ya ha hecho. Una carpeta que se encuentra con otra carpeta de su mismo
+nombre ofrece *Combinar* en lugar de *Reemplazar*: lo que contiene pasa a la
+carpeta que ya está, y por cada archivo de dentro que ya esté allí se pregunta
+a su vez. Marcar *Hacer lo mismo con cada archivo que ya exista* da la misma
+respuesta a todas las preguntas siguientes sobre un archivo. Cuando una
+carpeta se encuentra con otra carpeta, la casilla dice *Hacer lo mismo con
+cada carpeta que ya exista* y solo responde a las carpetas siguientes, de modo
+que se sigue preguntando por cada archivo de una carpeta combinada. `Escape`
+equivale a *Detener*, y `Enter` da la opción en la que descansa el teclado
+—*Omitir* al principio—; `Tab` pasa de la casilla a las opciones, y `Space`
+marca la casilla. En el escritorio, un elemento reemplazado queda donde se
+soltó, mientras que uno omitido o combinado se queda donde estaba.
 
 El menú contextual empieza por *Mostrar*. Debajo, un submenú nombra aquello
 sobre lo que actúa el menú — *Archivo «notes.txt»*, con un nombre largo
@@ -113,7 +143,9 @@ cuando hay varios elementos seleccionados — y contiene *Abrir*, *Abrir
 con…*, *Montar solo lectura*, *Expulsar*, *Obtener información…*,
 *Renombrar*, *Cortar*, *Copiar* y *Eliminar*; una fila que no puede actuar
 ahí aparece atenuada y dice por qué. Le siguen *Nuevo*, luego *Seleccionar
-todo* y *Borrar selección*, y por último *Pegar*. Un clic derecho en un
+todo* y *Borrar selección*, y *Pegar*. En la Papelera, *Vaciar Papelera* va
+al final: una vez que lo confirma, elimina definitivamente todo lo que hay en
+la Papelera. Un clic derecho en un
 espacio vacío borra la selección, así que el submenú del elemento aparece
 atenuado.
 
@@ -158,8 +190,7 @@ la lista por ella, y un segundo clic invierte el orden. Las carpetas quedan
 arriba sea cual sea el orden elegido, salvo que la configuración las coloque
 entre los archivos.
 
-*Configuración…* en el menú de la ranura de la barra de iconos, o `Ctrl+,`,
-abre la configuración del explorador en la aplicación Configuración, bajo
+`Ctrl+,` abre la configuración del explorador en la aplicación Configuración, bajo
 *Archivos*: dónde se abre una ventana nueva, cómo muestran y ordenan las
 ventanas sus elementos, y si una nueva muestra la columna de lugares y la
 barra de herramientas; si las carpetas quedan arriba; qué sufijos de nombre
@@ -180,14 +211,17 @@ cambiarse allí, cada uno como una escritura ordinaria, sujeta a permisos,
 bajo su propia identidad: un rechazo dice por qué y no cambia nada.
 Reasignar un propietario requiere la capacidad `CAP_FS_CHOWN`; una sesión
 sin ella ve el propietario y el grupo marcados con un candado y una línea
-que explica por qué.
+que explica por qué. La ventana de *información* de una unidad se abre en su
+sección *Unidad*, cuyo campo *Título* cambia el título del volumen del mismo
+modo: haga clic en él o pulse `Tab`, escriba el nuevo título y pulse
+`Return`; `Escape` lo deja como estaba.
 
-`Izquierda` y `Derecha` se mueven entre las secciones de la ventana. En
-*Permisos*, `Abajo` o `Tab` entra en sus controles: las flechas se mueven
+Las flechas `Left` y `Right` se mueven entre las secciones de la ventana.
+En *Permisos*, `Down` o `Tab` entra en sus controles: las flechas se mueven
 entre ellos, `Space` activa o desactiva un permiso o abre el propietario o
 el grupo para editarlo, y `Tab` o `Escape` vuelve a las secciones.
 
-El operando `ruta` se trata como entrada no confiable: debe ser una ruta
+El operando `path` se trata como entrada no confiable: debe ser una ruta
 absoluta dentro del límite de longitud de ruta del sistema, y cada uno de
 sus componentes debe ser un nombre real — `.` y `..` no lo son, de modo
 que una escritura nunca puede significar un lugar distinto del que se
@@ -203,11 +237,11 @@ operando se rechaza de plano en lugar de ignorarse.
   una ranura permanente en la barra de iconos que ofrece sus lugares y los
   volúmenes montados, y ninguna forma de salir. La sesión de escritorio pasa
   esta opción siempre que inicia el gestor de archivos, que solo se ejecuta
-  con ella; una `ruta` junto a ella abre allí una ventana.
-- `--mount` — abrir `ruta` como imagen de disco o archivo comprimido, igual
+  con ella; un `path` junto a ella abre allí una ventana.
+- `--mount` — abrir `path` como imagen de disco o archivo comprimido, igual
   que al abrirlo en una ventana: se monta para usted y se abre su ventana, y
   se vuelve a desmontar una vez cerradas sus ventanas, según indique la
-  configuración. Requiere una `ruta`.
+  configuración. Requiere un `path`.
 - `-h, -?` — mostrar la ayuda corta de esta orden y salir.
 
 ## EXIT STATUS

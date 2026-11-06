@@ -45,10 +45,12 @@ routing policy from the kernel-attested origin — at open, and again for every
 live stream as the seat's lease moves, holding a stream outside the room on
 its frame and resuming it there. The capture streams moving frames are
 published as the `AudioCapture` notice the recording indicator is drawn from.
-Opening a source additionally demands
-`CAP_AUDIO_CAPTURE`, read from the attested capability summary. Adopting a
+Opening a source additionally demands `CAP_AUDIO_CAPTURE`, read from the
+attested capability summary; a sink's monitor — its mix before its own level
+and mute, a screen recording's desktop sound — demands that and the caller's
+session holding the room the sink serves, and counts as a capture. Adopting a
 driver's device channel demands `CAP_DRV_LOAD` — the authority to put a driver
 on the machine is exactly the authority to tell the mixer about one, so no
-third capability is minted for it. Every capture grant and refusal, every
-device bound or lost, and every default-device change lands on the audit log
-with a stable event id.
+third capability is minted for it. Every capture or monitor grant and refusal,
+every device bound or lost, and every default-device change lands on the audit
+log with a stable event id.

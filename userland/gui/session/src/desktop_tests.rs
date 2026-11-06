@@ -12,15 +12,25 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
 use tairix_abi::desktop::{Appearance, Contrast, Density, Motion};
-use tairix_abi::window_ipc::{AppMenuItemId, DocumentName, DragItems, DragPicture, IconAsset};
+use tairix_abi::pinboard_ipc::{PinboardDocument, PinboardRequest, PINBOARD_MAX_REQUEST};
+use tairix_abi::sysinfo::{MountAvailability, VolumeClass};
+use tairix_abi::window_ipc::{
+    AppMenuItemId, DocumentName, DragItems, DragOwnIcon, DragOwnSource, DragPicture, IconAsset,
+};
+use tairix_abi::window_ipc::{LandingName, LandingOutcome, LandingStep};
 use tairix_abi::{Errno, FileId, Time64};
+use tairix_browse::chrome::REASON_NOT_EJECTABLE;
+use tairix_browse::mount::{volume_root, MountAct};
+use tairix_browse::render::{entry_parts, Tiles};
 use tairix_browse::{
-    AppAssociation, DirectorySource, Entry, EntryChange, EntryKind, GridView, LinkTarget, Listing,
+    AppAssociation, DesktopDrives, DirectorySource, DriveClass, Entry, EntryChange, EntryKind,
+    FilerPreferences, GridView, HiddenEndings, LinkTarget, Listing, Volume, VolumeFacts,
 };
 use tairix_colour::Rgb;
 use tairix_controls::{ActivityState, LabelHalo, MenuMark};
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_icon::NoArtwork;
+use tairix_icon::{IconKind, IconRequest, NoArtwork};
+use tairix_log::DiscardSink;
 use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
 use tairix_raster::Surface;
 use tairix_theme::{CursorSetId, Theme};
@@ -29,17 +39,22 @@ use tairix_wallpaper::{
 };
 use tairix_wm::{Compositor, InputEvent, InputResponse, Key, NamedKey};
 
+use crate::desktop::LandingWork;
 use crate::desktop::{
     BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, GestureRefusal,
     LandingOffer, LaunchDocument, PinboardChange, SettingsEdit, DESKTOP_MARGIN,
 };
+use crate::drag::{DragEnd, DragStep, DragSurface, ItemsEnd, OwedReport};
 use crate::launcher::Kept;
 use crate::pinboard::{
-    self, Arrangement, ArrangementEdit, ArrangementMemory, PinboardCommand, Place, PlaceKey,
-    Placed, TidyOrder, MAX_PLACED, PLACE_UNITS,
+    self, Arrangement, ArrangementEdit, ArrangementMemory, Over, PinboardCommand, Place, PlaceKey,
+    Placed, TidyOrder, MAX_PLACED, PLACE_UNITS, REASON_DRIVE_NOT_TRASHED, REASON_SEVERAL,
 };
+use crate::settings::{serve_pinboard, PinboardCall};
 use crate::shell::{DesktopShell, ShellOutcome, Stopped};
+use tairix_abi::window_ipc::DropOperation;
 use tairix_controls::{ChainChild, ChainModel, ChainRow};
+use tairix_window::DragConclusion;
 
 /// What a [`FakeDir`] answers with, and how often it has been asked.
 ///
@@ -51,6 +66,8 @@ use tairix_controls::{ChainChild, ChainModel, ChainRow};
 struct Folder {
     answer: Option<Result<Listing, Errno>>,
     listings: usize,
+    /// Whether a watch follows it.
+    follows: bool,
 }
 
 /// A directory seam over a shared [`Folder`].
@@ -65,6 +82,10 @@ impl DirectorySource for FakeDir {
             .clone()
             .unwrap_or(Err(Errno::PermissionDenied))
     }
+
+    fn follows(&self, _components: &[String]) -> bool {
+        self.0.borrow().follows
+    }
 }
 
 /// A shared folder holding `entries`.
@@ -72,6 +93,7 @@ fn holding(entries: Vec<Entry>) -> Rc<RefCell<Folder>> {
     Rc::new(RefCell::new(Folder {
         answer: Some(Ok(Listing::Ready(entries))),
         listings: 0,
+        follows: false,
     }))
 }
 
@@ -279,6 +301,7 @@ fn a_relist_keeps_the_selection_on_the_same_named_icon() {
     let layout = layout_of(&desktop);
     desktop.press(
         centre_of(&layout, 1),
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -307,6 +330,7 @@ fn a_relist_that_removes_the_selected_icon_selects_nothing() {
     let layout = layout_of(&desktop);
     desktop.press(
         centre_of(&layout, 1),
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -370,6 +394,7 @@ fn a_reported_change_merges_in_place_and_repaints_only_the_icons_it_moved() {
     let layout = layout_of(&desktop);
     desktop.press(
         centre_of(&layout, 1),
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -427,6 +452,7 @@ fn a_reported_change_keeps_a_double_click_on_an_icon_it_did_not_move() {
     let at = centre_of(&layout, 0);
     desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -441,6 +467,7 @@ fn a_reported_change_keeps_a_double_click_on_an_icon_it_did_not_move() {
     );
     let acted = desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -465,6 +492,7 @@ fn a_relist_moving_the_icons_ends_a_double_click_in_progress() {
     let at = centre_of(&layout, 0);
     desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -476,6 +504,7 @@ fn a_relist_moving_the_icons_ends_a_double_click_in_progress() {
     assert!(desktop.relist());
     let acted = desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -662,6 +691,7 @@ fn a_reported_removal_takes_its_selection_and_an_unchanged_entry_costs_nothing()
     let layout = layout_of(&desktop);
     desktop.press(
         centre_of(&layout, 1),
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -692,16 +722,15 @@ fn a_reported_removal_takes_its_selection_and_an_unchanged_entry_costs_nothing()
     assert!(unchanged.is_empty());
 }
 
-// --- Hover, selection, focus ---------------------------------------------
-
-/// The ground around an icon's picture and name is the desktop's: a press or
-/// a hover there is on no icon, though it lies inside the icon's cell.
+/// The ground around an icon's picture and name is the desktop's: a press
+/// there is on no icon, though it lies inside the icon's cell.
 #[test]
 fn the_ground_in_an_icons_cell_is_the_desktops() {
     let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
     let layout = layout_of(&desktop);
     desktop.press(
         centre_of(&layout, 0),
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -713,10 +742,9 @@ fn the_ground_in_an_icons_cell_is_the_desktops() {
 
     let corner = cell(&layout, 1);
     let ground = Point::new(corner.left() + 1, corner.top() + 1);
-    desktop.pointer_moved(ground, &layout, Scale::ONE, &theme(), &mut Region::new());
-    assert_eq!(desktop.hovered(), None);
     desktop.press(
         ground,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -727,49 +755,58 @@ fn the_ground_in_an_icons_cell_is_the_desktops() {
     assert_eq!(desktop.selected(), None);
 }
 
+/// What the session does with pointer motion over the desktop: it follows a
+/// press still carrying an icon and nothing else, answering what that owes a
+/// repaint.
+fn moved_to(desktop: &mut Desktop<FakeDir>, at: Point, layout: &GridView) -> Region {
+    damage_of(|damage| {
+        let outcome = desktop.follow_press(at, false, layout, Scale::ONE, &theme(), damage);
+        assert_eq!(outcome, DesktopOutcome::ignored(), "motion asks nothing");
+    })
+}
+
+/// A pointer over an icon changes nothing about it — no plate, and the resting
+/// ink and halo kept — so motion over the desktop repaints nothing, with an
+/// icon selected and the keyboard on the desktop or without.
 #[test]
-fn hover_follows_the_pointer_and_damages_only_the_cells_it_moves_between() {
-    let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
+fn moving_over_an_icon_draws_the_same_pixels_and_owes_no_damage() {
+    let mut desktop = desktop_of(vec![folder("Work"), file("a.txt"), bundle("Chess.app")]);
     let layout = layout_of(&desktop);
-    let mut damage = Region::new();
-
-    desktop.pointer_moved(
+    let theme = theme();
+    let paint = |desktop: &Desktop<FakeDir>| {
+        let mut surface = Surface::new(800, 600).expect("a screen-sized layer");
+        desktop.render(
+            &mut surface,
+            &layout,
+            Scale::ONE,
+            &theme,
+            &mut NoArtwork,
+            work_area(),
+            None,
+        );
+        pixels_in(&surface, work_area())
+    };
+    let over = [
         centre_of(&layout, 0),
-        &layout,
-        Scale::ONE,
-        &theme(),
-        &mut damage,
-    );
-    assert_eq!(damage.rects(), [cell(&layout, 0)]);
-    assert_eq!(desktop.hovered(), Some(0));
-
-    damage.clear();
-    desktop.pointer_moved(
-        centre_of(&layout, 0),
-        &layout,
-        Scale::ONE,
-        &theme(),
-        &mut damage,
-    );
-    assert!(damage.is_empty(), "the same icon is not a change");
-
-    // Moving between icons costs both cells and nothing between them: the one
-    // that lost the highlight and the one that took it.
-    damage.clear();
-    desktop.pointer_moved(
         centre_of(&layout, 1),
-        &layout,
-        Scale::ONE,
-        &theme(),
-        &mut damage,
-    );
-    assert_eq!(damage.rects(), [cell(&layout, 0), cell(&layout, 1)]);
-    assert_eq!(desktop.hovered(), Some(1));
-
-    damage.clear();
-    desktop.pointer_moved(EMPTY_DESKTOP, &layout, Scale::ONE, &theme(), &mut damage);
-    assert_eq!(damage.rects(), [cell(&layout, 1)]);
-    assert_eq!(desktop.hovered(), None);
+        centre_of(&layout, 2),
+        EMPTY_DESKTOP,
+    ];
+    for focused in [false, true] {
+        if focused {
+            desktop.set_focused(true, &layout, &mut Region::new());
+            desktop.key(down(), true, &layout, &[], &mut Region::new());
+            assert!(desktop.selected().is_some(), "an icon is selected");
+        }
+        let still = paint(&desktop);
+        for at in over {
+            assert!(
+                moved_to(&mut desktop, at, &layout).is_empty(),
+                "{at:?} owes a repaint"
+            );
+            assert!(paint(&desktop) == still, "{at:?} drew something");
+        }
+    }
 }
 
 /// The desktop never scrolls, so an icon the field has no free cell for is
@@ -798,34 +835,6 @@ fn an_icon_the_field_has_no_cell_for_is_left_off_it() {
 }
 
 #[test]
-fn leaving_the_desktop_clears_the_hover() {
-    let mut desktop = desktop_of(vec![file("a.txt")]);
-    let layout = layout_of(&desktop);
-    desktop.pointer_moved(
-        centre_of(&layout, 0),
-        &layout,
-        Scale::ONE,
-        &theme(),
-        &mut Region::new(),
-    );
-    assert_eq!(
-        damage_of(|damage| {
-            desktop.pointer_left(&layout, damage);
-        })
-        .rects(),
-        [cell(&layout, 0)]
-    );
-    assert_eq!(desktop.hovered(), None);
-    assert!(
-        damage_of(|damage| {
-            desktop.pointer_left(&layout, damage);
-        })
-        .is_empty(),
-        "leaving twice changes nothing"
-    );
-}
-
-#[test]
 fn a_press_selects_an_icon_and_a_press_on_empty_desktop_clears_it() {
     let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
     let layout = layout_of(&desktop);
@@ -833,6 +842,7 @@ fn a_press_selects_an_icon_and_a_press_on_empty_desktop_clears_it() {
 
     desktop.press(
         centre_of(&layout, 1),
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -848,6 +858,7 @@ fn a_press_selects_an_icon_and_a_press_on_empty_desktop_clears_it() {
     damage.clear();
     desktop.press(
         centre_of(&layout, 0),
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -861,6 +872,7 @@ fn a_press_selects_an_icon_and_a_press_on_empty_desktop_clears_it() {
     damage.clear();
     desktop.press(
         EMPTY_DESKTOP,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -874,6 +886,7 @@ fn a_press_selects_an_icon_and_a_press_on_empty_desktop_clears_it() {
     damage.clear();
     desktop.press(
         EMPTY_DESKTOP,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -907,6 +920,7 @@ fn focus_moves_the_ring_onto_the_selection_and_costs_nothing_without_one() {
 
     desktop.press(
         centre_of(&layout, 0),
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1045,6 +1059,7 @@ fn escape_clears_the_selection() {
     let layout = layout_of(&desktop);
     desktop.press(
         centre_of(&layout, 0),
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1078,6 +1093,7 @@ fn double_clicking_a_folder_opens_the_file_manager_at_its_path() {
     let at = centre_of(&layout, 0);
     desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1087,6 +1103,7 @@ fn double_clicking_a_folder_opens_the_file_manager_at_its_path() {
     );
     let acted = desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1109,6 +1126,7 @@ fn double_clicking_an_application_bundle_launches_its_run_binary() {
     let at = centre_of(&layout, 0);
     desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1120,6 +1138,7 @@ fn double_clicking_an_application_bundle_launches_its_run_binary() {
         desktop
             .press(
                 at,
+                tairix_input::Modifiers::default(),
                 &layout,
                 Scale::ONE,
                 &theme(),
@@ -1143,6 +1162,7 @@ fn double_clicking_a_file_launches_its_associated_application_with_the_file() {
     let at = centre_of(&layout, 0);
     desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1154,6 +1174,7 @@ fn double_clicking_a_file_launches_its_associated_application_with_the_file() {
         desktop
             .press(
                 at,
+                tairix_input::Modifiers::default(),
                 &layout,
                 Scale::ONE,
                 &theme(),
@@ -1198,6 +1219,7 @@ fn double_clicking_a_disk_image_mounts_it_even_where_an_application_claims_it() 
             desktop
                 .press(
                     at,
+                    tairix_input::Modifiers::default(),
                     &layout,
                     Scale::ONE,
                     &theme(),
@@ -1229,6 +1251,7 @@ fn a_file_opened_with_an_editor_carries_the_editor_s_signed_claim_to_edit() {
         .collect();
     desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1239,6 +1262,7 @@ fn a_file_opened_with_an_editor_carries_the_editor_s_signed_claim_to_edit() {
     let Some(DesktopAction::Activate(DesktopActivation::Launch { document, .. })) = desktop
         .press(
             at,
+            tairix_input::Modifiers::default(),
             &layout,
             Scale::ONE,
             &theme(),
@@ -1260,6 +1284,7 @@ fn a_file_no_application_opens_is_refused_with_its_reason_and_does_nothing_else(
     let at = centre_of(&layout, 0);
     desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1269,6 +1294,7 @@ fn a_file_no_application_opens_is_refused_with_its_reason_and_does_nothing_else(
     );
     let acted = desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1288,7 +1314,7 @@ fn a_file_no_application_opens_is_refused_with_its_reason_and_does_nothing_else(
 }
 
 #[test]
-fn a_shortcut_is_named_in_the_desktop_folder_and_stores_its_target_verbatim() {
+fn a_shortcut_is_named_in_the_desktop_folder_and_spelled_from_the_root_it_names() {
     let desktop = desktop_of(vec![]);
     let catalog = catalog_of(
         "os.tairix.chess",
@@ -1299,10 +1325,10 @@ fn a_shortcut_is_named_in_the_desktop_folder_and_stores_its_target_verbatim() {
         desktop.shortcut_to(&catalog, &entry_id("os.tairix.chess")),
         DesktopAction::CreateShortcut {
             link: "/Users/ada/Desktop/Chess".to_string(),
-            target: "/System/Applications/games/chess.app".to_string(),
+            target: "System:/Applications/games/chess.app".to_string(),
         },
         "the link is the entry's own name inside the desktop folder, and the \
-         target is the bundle directory, untouched"
+         target is the bundle directory spelled from its root, which no walk follows"
     );
 }
 
@@ -1376,7 +1402,7 @@ fn a_shortcut_is_asked_for_even_where_the_name_is_already_taken() {
         desktop.shortcut_to(&catalog, &entry_id("os.tairix.chess")),
         DesktopAction::CreateShortcut {
             link: "/Users/ada/Desktop/Chess".to_string(),
-            target: "/System/Applications/chess.app".to_string(),
+            target: "System:/Applications/chess.app".to_string(),
         }
     );
 }
@@ -1395,6 +1421,7 @@ fn double_clicking_a_shortcut_to_a_bundle_launches_the_resolved_target() {
     let at = centre_of(&layout, 0);
     desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1406,6 +1433,7 @@ fn double_clicking_a_shortcut_to_a_bundle_launches_the_resolved_target() {
         desktop
             .press(
                 at,
+                tairix_input::Modifiers::default(),
                 &layout,
                 Scale::ONE,
                 &theme(),
@@ -1432,6 +1460,7 @@ fn double_clicking_a_shortcut_to_a_folder_or_a_file_acts_through_the_link() {
     let folder_at = centre_of(&layout, 0);
     desktop.press(
         folder_at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1443,6 +1472,7 @@ fn double_clicking_a_shortcut_to_a_folder_or_a_file_acts_through_the_link() {
         desktop
             .press(
                 folder_at,
+                tairix_input::Modifiers::default(),
                 &layout,
                 Scale::ONE,
                 &theme(),
@@ -1459,6 +1489,7 @@ fn double_clicking_a_shortcut_to_a_folder_or_a_file_acts_through_the_link() {
     let file_at = centre_of(&layout, 1);
     desktop.press(
         file_at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1470,6 +1501,7 @@ fn double_clicking_a_shortcut_to_a_folder_or_a_file_acts_through_the_link() {
         desktop
             .press(
                 file_at,
+                tairix_input::Modifiers::default(),
                 &layout,
                 Scale::ONE,
                 &theme(),
@@ -1501,6 +1533,7 @@ fn double_clicking_a_shortcut_whose_target_has_gone_is_refused_with_its_reason()
     let at = centre_of(&layout, 0);
     desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1510,6 +1543,7 @@ fn double_clicking_a_shortcut_whose_target_has_gone_is_refused_with_its_reason()
     );
     let acted = desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1542,6 +1576,7 @@ fn a_shortcut_that_names_nothing_at_all_is_refused_rather_than_opened() {
     let at = centre_of(&layout, 0);
     desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1553,6 +1588,7 @@ fn a_shortcut_that_names_nothing_at_all_is_refused_rather_than_opened() {
         desktop
             .press(
                 at,
+                tairix_input::Modifiers::default(),
                 &layout,
                 Scale::ONE,
                 &theme(),
@@ -1580,6 +1616,7 @@ fn a_refused_entry_is_quoted_with_what_hides_in_its_name_shown() {
         for clicks in [0, 1] {
             let acted = desktop.press(
                 at,
+                tairix_input::Modifiers::default(),
                 &layout,
                 Scale::ONE,
                 &theme(),
@@ -1639,6 +1676,7 @@ fn enter_activates_the_selection_and_does_nothing_with_no_selection() {
     );
     desktop.press(
         centre_of(&layout, 0),
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1663,6 +1701,7 @@ fn two_slow_clicks_are_two_clicks_not_an_activation() {
     let at = centre_of(&layout, 0);
     desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1673,6 +1712,7 @@ fn two_slow_clicks_are_two_clicks_not_an_activation() {
     let past = desktop.settings().double_click.saturating_total_nanos() + 1;
     let late = desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1694,6 +1734,7 @@ fn the_icons_pair_clicks_under_the_chosen_interval() {
     let at = centre_of(&layout, 0);
     desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1703,6 +1744,7 @@ fn the_icons_pair_clicks_under_the_chosen_interval() {
     );
     let slow = desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -1727,18 +1769,12 @@ fn every_icon_the_column_shows_is_painted_even_with_no_artwork_at_all() {
     desktop.set_focused(true, &layout, &mut Region::new());
     desktop.press(
         centre_of(&layout, 0),
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme,
         0,
         &[],
-        &mut Region::new(),
-    );
-    desktop.pointer_moved(
-        centre_of(&layout, 1),
-        &layout,
-        Scale::ONE,
-        &theme,
         &mut Region::new(),
     );
 
@@ -1924,6 +1960,7 @@ fn a_selected_name_keeps_the_theme_ink_on_its_plate() {
     let layout = desktop.layout(work_area(), Scale::ONE, &theme);
     desktop.press(
         centre_of(&layout, 0),
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme,
@@ -1942,6 +1979,317 @@ fn a_selected_name_keeps_the_theme_ink_on_its_plate() {
     assert!(
         reads_light(&name_ink(&surface, &layout, 1, &theme)),
         "the resting name beside it kept the theme's ink"
+    );
+}
+
+/// The file manager's settings `in_effect` with the files apply `text` merged
+/// over them, as the session admits one from Settings.
+fn files_applied(in_effect: &FilerPreferences, text: &str) -> FilerPreferences {
+    let request = PinboardRequest::ApplyFiles {
+        document: PinboardDocument::new(text).expect("a bounded document"),
+    };
+    let mut frame = [0u8; PINBOARD_MAX_REQUEST];
+    let len = request.encode(&mut frame).expect("encodes");
+    let called = serve_pinboard(
+        &DiscardSink,
+        (1000, 1000),
+        (&DesktopSettings::default(), in_effect, None),
+        &frame[..len],
+    );
+    match called {
+        Ok(PinboardCall::ApplyFiles(files)) => files,
+        other => panic!("not a files apply: {other:?}"),
+    }
+}
+
+/// The names on the desktop follow the endings a files apply from Settings
+/// hides: an application without its `.app` by default, whole once that is
+/// turned off and without it again once it is back on, each over a halo
+/// blurred for the name shown.
+#[test]
+fn the_names_shown_follow_the_endings_a_files_apply_hides() {
+    let ink_of = |desktop: &Desktop<FakeDir>| {
+        let (surface, layout) = painted_over(desktop, None);
+        name_ink(&surface, &layout, 0, &Theme::light())
+    };
+    let short = ink_of(&desktop_of(vec![file("Chess")]));
+    let whole = ink_of(&desktop_of(vec![file("Chess.app")]));
+    assert!(short != whole, "the two names draw apart");
+    let mut desktop = desktop_of(vec![bundle("Chess.app")]);
+    assert!(ink_of(&desktop) == short, "hidden by default");
+    let mut files = FilerPreferences::default();
+    for (text, shown) in [
+        ("files.hide_app_endings = false\n", &whole),
+        ("files.hide_app_endings = true\n", &short),
+    ] {
+        let was = desktop.halo_for_test("Chess.app").expect("kept");
+        files = files_applied(&files, text);
+        let endings = files.presentation.endings;
+        assert!(desktop.hide_endings(endings), "{text:?}");
+        assert!(ink_of(&desktop) == *shown, "{text:?}");
+        let now = desktop.halo_for_test("Chess.app").expect("kept");
+        assert!(!Arc::ptr_eq(&was, &now), "{text:?}: blurred anew");
+        assert!(!desktop.hide_endings(endings), "{text:?}: again, nothing");
+    }
+}
+
+/// A press meets an icon's picture whatever its name, and its name as it is
+/// shown: where a hidden ending would have stood is the desktop's ground.
+#[test]
+fn a_press_meets_the_name_as_it_is_shown() {
+    let theme = theme();
+    let mut desktop = desktop_of(vec![bundle("Chess.app")]);
+    let layout = layout_of(&desktop);
+    let parts = |name: &str| {
+        entry_parts(
+            Tiles::Large,
+            (&file(name), HiddenEndings::NONE),
+            cell(&layout, 0),
+            Scale::ONE,
+            &theme,
+        )
+        .expect("the tile draws")
+    };
+    let hits = |desktop: &mut Desktop<FakeDir>, at: Point| {
+        desktop.context_press(at, &layout, Scale::ONE, &theme, &mut Region::new())
+    };
+    let on_picture = parts("Chess.app").picture.expect("a picture").center();
+    let whole = parts("Chess.app").name.expect("the whole name is drawn");
+    let on_ending = Point::new(whole.right() - 1, whole.center().y);
+    assert!(
+        !parts("Chess").contains(on_ending),
+        "beside the short name is ground"
+    );
+    for (endings, on_icon) in [
+        (HiddenEndings::NONE, true),
+        (FilerPreferences::default().presentation.endings, false),
+    ] {
+        assert!(desktop.hide_endings(endings), "{endings:?}");
+        assert!(hits(&mut desktop, on_picture), "{endings:?}: its picture");
+        assert_eq!(
+            hits(&mut desktop, on_ending),
+            on_icon,
+            "{endings:?}: its ending"
+        );
+    }
+}
+
+/// The names the desktop draws icons for.
+fn names<S: DirectorySource>(desktop: &Desktop<S>) -> Vec<&str> {
+    desktop.entries().iter().map(Entry::name).collect()
+}
+
+/// An item whose name marks it hidden has no icon while the file manager's
+/// settings leave hidden items out, as they do by default, so a capture's
+/// scratch file is never drawn while it is written; leaving them out again
+/// reads nothing.
+#[test]
+fn a_hidden_item_has_an_icon_only_while_the_settings_show_hidden_items() {
+    let folder = holding(vec![file("a.txt"), file(".keeping.webm")]);
+    let mut desktop = desktop_over(&folder);
+    assert_eq!(names(&desktop), ["a.txt"]);
+    assert!(!desktop.show_hidden_items(false), "left out already");
+
+    assert!(desktop.show_hidden_items(true));
+    let mut shown = names(&desktop);
+    shown.sort_unstable();
+    assert_eq!(shown, [".keeping.webm", "a.txt"]);
+
+    let reads = listings(&folder);
+    assert!(desktop.show_hidden_items(false));
+    assert_eq!(names(&desktop), ["a.txt"]);
+    assert_eq!(listings(&folder), reads, "leaving them out read the folder");
+}
+
+/// A watch's report of a hidden item adds no icon, and the rename that keeps
+/// it under a name of its own adds one then: a recording appears once, kept.
+#[test]
+fn a_reported_hidden_item_has_no_icon_until_it_is_renamed_into_view() {
+    let mut desktop = desktop_of(vec![file("a.txt")]);
+    assert!(!desktop.apply_changes(
+        vec![EntryChange::Upsert(file(".keeping.webm"))],
+        layout_of,
+        &mut Region::new(),
+    ));
+    assert_eq!(names(&desktop), ["a.txt"]);
+    assert!(desktop.apply_changes(
+        vec![
+            EntryChange::Remove(String::from(".keeping.webm")),
+            EntryChange::Upsert(file("Recording.webm")),
+        ],
+        layout_of,
+        &mut Region::new(),
+    ));
+    let mut shown = names(&desktop);
+    shown.sort_unstable();
+    assert_eq!(shown, ["Recording.webm", "a.txt"]);
+}
+
+/// Showing hidden items reads nothing while no folder is shown yet or a
+/// listing is on its way: that listing is adopted as the setting then says.
+#[test]
+fn showing_hidden_items_adopts_a_listing_on_its_way_without_reading_again() {
+    let worker = Rc::new(RefCell::new(Worker::default()));
+    let mut desktop = Desktop::new(DeferredDir(Rc::clone(&worker)), home());
+    assert!(!desktop.show_hidden_items(true), "nothing listed yet");
+    assert_eq!(worker.borrow().reads, 0);
+    assert!(!desktop.show_hidden_items(false));
+
+    desktop.relist();
+    assert!(!desktop.show_hidden_items(true));
+    land(&worker, vec![file("a.txt"), file(".profile")]);
+    assert!(desktop.resume());
+    assert_eq!(desktop.entries().len(), 2, "the hidden item is shown");
+    assert_eq!(worker.borrow().reads, 1, "showing hidden items read again");
+}
+
+/// Leaving hidden items out forgets none of their places: shown again, a
+/// hidden item stands where the user put it.
+#[test]
+fn a_hidden_item_left_out_keeps_its_place_for_when_it_is_shown_again() {
+    let mut desktop = placed_on(
+        vec![file("a.txt"), file(".notes")],
+        &[(".notes", cell_place(3, 2))],
+    );
+    assert_eq!(names(&desktop), ["a.txt"]);
+    assert!(desktop.show_hidden_items(true));
+    let layout = layout_of(&desktop);
+    let put = bounds(&desktop, &layout, named(&desktop, ".notes"));
+    assert_ne!(
+        put,
+        cell(&layout, 1),
+        "it stands where it was put, not flowed"
+    );
+
+    assert!(desktop.show_hidden_items(false));
+    assert!(
+        desktop.take_arrangement_edits().is_empty(),
+        "a place was forgotten"
+    );
+    assert!(desktop.show_hidden_items(true));
+    assert_eq!(bounds(&desktop, &layout, named(&desktop, ".notes")), put);
+}
+
+/// The settled witness is given once a revealed desktop's icons are drawn as
+/// they will stay, once for each arrangement of them, and never for a folder
+/// not yet read or with a listing on its way.
+#[test]
+fn the_settled_witness_is_given_once_for_each_arrangement_drawn_as_kept() {
+    let worker = Rc::new(RefCell::new(Worker::default()));
+    let mut desktop = Desktop::new(DeferredDir(Rc::clone(&worker)), home());
+    let reports = Cell::new(0);
+    let report = || reports.set(reports.get() + 1);
+    desktop.report_settled(true, |_| true, report);
+    assert_eq!(reports.get(), 0, "nothing read yet");
+    desktop.relist();
+    desktop.report_settled(true, |_| true, report);
+    assert_eq!(reports.get(), 0, "a listing still on its way");
+    land(&worker, vec![file("a.txt")]);
+    assert!(desktop.resume());
+    desktop.report_settled(false, |_| true, report);
+    assert_eq!(reports.get(), 0, "not yet revealed");
+    desktop.report_settled(true, |_| false, report);
+    assert_eq!(reports.get(), 0, "an icon's picture still coming");
+    desktop.report_settled(true, |_| true, report);
+    assert_eq!(reports.get(), 1);
+    desktop.report_settled(true, |_| panic!("asked with nothing owed"), report);
+    assert_eq!(reports.get(), 1, "once for this arrangement");
+    assert!(desktop.apply_changes(
+        vec![EntryChange::Upsert(file("b.txt"))],
+        layout_of,
+        &mut Region::new(),
+    ));
+    desktop.report_settled(true, |_| true, report);
+    assert_eq!(reports.get(), 2, "and again for the next");
+}
+
+/// A hidden item deleted while left out gives up the place the record kept
+/// for it, as an icon's file does.
+#[test]
+fn a_hidden_item_deleted_while_left_out_gives_up_its_place() {
+    let mut desktop = placed_on(
+        vec![file("a.txt"), file(".notes")],
+        &[(".notes", cell_place(3, 2))],
+    );
+    assert!(!desktop.apply_changes(
+        vec![EntryChange::Remove(String::from(".notes"))],
+        layout_of,
+        &mut Region::new(),
+    ));
+    assert_eq!(
+        desktop.take_arrangement_edits(),
+        [ArrangementEdit::Set(vec![(String::from(".notes"), None)])]
+    );
+}
+
+/// An icon renamed to a hidden name keeps its place under that name, and
+/// stands there once hidden items are shown.
+#[test]
+fn an_icon_renamed_to_a_hidden_name_keeps_its_place_set_aside() {
+    let id = FileId {
+        volume: [3; 16],
+        node: 42,
+    };
+    let mut desktop = desktop_of(vec![file("a.txt").with_id(id), file("b.txt")]);
+    let layout = layout_of(&desktop);
+    carry(&mut desktop, &layout, 0, (300, 200));
+    let put = bounds(&desktop, &layout, 0);
+    let _ = desktop.take_arrangement_edits();
+    assert!(desktop.apply_changes(
+        vec![
+            EntryChange::Remove(String::from("a.txt")),
+            EntryChange::Upsert(file(".a.txt").with_id(id)),
+        ],
+        layout_of,
+        &mut Region::new(),
+    ));
+    assert_eq!(names(&desktop), ["b.txt"]);
+    assert_eq!(
+        desktop.take_arrangement_edits(),
+        [ArrangementEdit::Renamed {
+            from: PlaceKey::of("a.txt"),
+            to: String::from(".a.txt"),
+            id,
+        }]
+    );
+    assert!(desktop.show_hidden_items(true));
+    assert_eq!(bounds(&desktop, &layout, named(&desktop, ".a.txt")), put);
+}
+
+/// A change of the endings shown re-lays the desktop: the icons no one placed
+/// flow again, closing the gap a deleted file left, and the selection stays on
+/// its icon.
+#[test]
+fn a_change_of_endings_flows_the_icons_again_and_keeps_the_selection() {
+    let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt"), file("c.txt")]);
+    let layout = layout_of(&desktop);
+    press_at(&mut desktop, &layout, centre_of(&layout, 2), 0);
+    desktop.apply_changes(
+        vec![EntryChange::Remove(String::from("b.txt"))],
+        layout_of,
+        &mut Region::new(),
+    );
+    let c_txt = named(&desktop, "c.txt");
+    assert_eq!(
+        bounds(&desktop, &layout, c_txt),
+        cell(&layout, 2),
+        "a deleted file leaves its cell free"
+    );
+    assert!(desktop.hide_endings(HiddenEndings::NONE));
+    let c_txt = named(&desktop, "c.txt");
+    assert_eq!(
+        bounds(&desktop, &layout, c_txt),
+        cell(&layout, 1),
+        "and the icons flow again"
+    );
+    assert_eq!(
+        desktop.selected(),
+        Some(c_txt),
+        "the selection stays on c.txt"
+    );
+    assert!(
+        !desktop.hide_endings(HiddenEndings::NONE),
+        "the endings in force change nothing"
     );
 }
 
@@ -2011,6 +2359,7 @@ fn each_arrangement_lays_the_column_out_at_its_own_corner_and_hit_tests_there() 
         // corner the column grew from.
         desktop.press(
             centre_of(&layout, 0),
+            tairix_input::Modifiers::default(),
             &layout,
             Scale::ONE,
             &theme(),
@@ -2187,18 +2536,12 @@ fn a_new_sort_order_reorders_the_icons_shown_without_reading_the_folder() {
     let layout = layout_of(&desktop);
     desktop.press(
         centre_of(&layout, 0),
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
         0,
         &[],
-        &mut Region::new(),
-    );
-    desktop.pointer_moved(
-        centre_of(&layout, 1),
-        &layout,
-        Scale::ONE,
-        &theme(),
         &mut Region::new(),
     );
 
@@ -2209,13 +2552,9 @@ fn a_new_sort_order_reorders_the_icons_shown_without_reading_the_folder() {
     assert_eq!(names, ["c.txt", "b.txt", "a.txt"]);
     assert_eq!(listings(&folder), 1, "the icons shown are the folder's");
     assert_eq!(desktop.selected(), Some(2), "the selection stays on a.txt");
-    assert_eq!(
-        desktop.hovered(),
-        None,
-        "the cell under the pointer changed"
-    );
     let acted = desktop.press(
         centre_of(&layout, 0),
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -2257,6 +2596,7 @@ fn a_secondary_press_on_the_backdrop_leaves_the_selection_untouched() {
     let layout = layout_of(&desktop);
     desktop.press(
         centre_of(&layout, 0),
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -2285,6 +2625,7 @@ fn the_menus_open_command_resolves_exactly_as_a_double_click_does() {
     let at = centre_of(&layout, 0);
     desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -2294,6 +2635,7 @@ fn the_menus_open_command_resolves_exactly_as_a_double_click_does() {
     );
     let clicked = desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         &layout,
         Scale::ONE,
         &theme(),
@@ -2425,7 +2767,7 @@ fn labels(model: &ChainModel) -> Vec<&str> {
 
 #[test]
 fn the_menu_offers_exactly_the_closed_row_set_with_the_settings_in_force_marked() {
-    let model = pinboard::model(true, &arranged_by(IconFlow::Trailing, IconSort::Size));
+    let model = pinboard::model(Over::Icon, &arranged_by(IconFlow::Trailing, IconSort::Size));
 
     assert_eq!(
         labels(&model),
@@ -2483,11 +2825,15 @@ fn the_menu_offers_exactly_the_closed_row_set_with_the_settings_in_force_marked(
 
 #[test]
 fn every_row_names_the_command_at_its_own_index() {
-    let model = pinboard::model(true, &DesktopSettings::default());
+    let model = pinboard::model(DRIVE, &DesktopSettings::default());
+    // A row opened for its field answers as the field commits.
     let commands: Vec<PinboardCommand> = model
         .rows()
         .iter()
-        .filter_map(ChainRow::id)
+        .filter_map(|row| match row.child() {
+            ChainChild::Entry { id, .. } => Some(*id),
+            _ => row.id(),
+        })
         .map(|id| PinboardCommand::from_item(id).expect("a declared row"))
         .collect();
     assert_eq!(commands, PinboardCommand::ALL.to_vec());
@@ -2505,7 +2851,7 @@ fn every_row_names_the_command_at_its_own_index() {
 /// mean: an id is a command's own position, never a row's.
 #[test]
 fn a_menu_opened_on_the_backdrop_offers_no_open_row_and_shifts_no_id() {
-    let bare = pinboard::model(false, &DesktopSettings::default());
+    let bare = pinboard::model(Over::Backdrop, &DesktopSettings::default());
     assert_eq!(
         bare.rows().first().map(|row| row.drawn().label()),
         Some("New Folder")
@@ -2516,19 +2862,19 @@ fn a_menu_opened_on_the_backdrop_offers_no_open_row_and_shifts_no_id() {
     );
     assert_eq!(
         bare.rows().iter().filter_map(ChainRow::id).count(),
-        PinboardCommand::ALL.len() - 1,
-        "only `Open` is left out"
+        PinboardCommand::ALL.len() - 4,
+        "only the rows about an icon are left out"
     );
 
-    let over_icon = pinboard::model(true, &DesktopSettings::default());
+    let over_icon = pinboard::model(Over::Icon, &DesktopSettings::default());
     assert!(
         over_icon.rows()[1].drawn().is_group_break(),
         "with Open above it, New Folder starts its own group"
     );
 
-    // `New Folder` is `ALL` position 1, so its id is 2 whichever gesture built
+    // `New Folder` is `ALL` position 4, so its id is 5 whichever gesture built
     // the plate — the row it sits at moved, its command did not.
-    let id = AppMenuItemId::new(2).expect("a non-zero row id");
+    let id = AppMenuItemId::new(5).expect("a non-zero row id");
     assert_eq!(
         PinboardCommand::from_item(id),
         Some(PinboardCommand::NewFolder)
@@ -2539,7 +2885,7 @@ fn a_menu_opened_on_the_backdrop_offers_no_open_row_and_shifts_no_id() {
 /// that begins nothing.
 #[test]
 fn the_menu_groups_its_rows_by_what_they_are() {
-    let model = pinboard::model(true, &DesktopSettings::default());
+    let model = pinboard::model(Over::Icon, &DesktopSettings::default());
     let grouped: Vec<&str> = model
         .rows()
         .iter()
@@ -2562,8 +2908,8 @@ fn the_menu_groups_its_rows_by_what_they_are() {
 /// offers carries one it can read back or opens the plate of rows that do.
 #[test]
 fn the_model_declares_no_row_the_chain_cannot_answer_with() {
-    for on_icon in [false, true] {
-        let model = pinboard::model(on_icon, &DesktopSettings::default());
+    for over in [Over::Backdrop, Over::Icon, DRIVE] {
+        let model = pinboard::model(over, &DesktopSettings::default());
         assert!(!model.rows().is_empty(), "a plate with nothing to choose");
         for (at, row) in model.rows().iter().enumerate() {
             let label = row.drawn().label();
@@ -2576,7 +2922,14 @@ fn the_model_declares_no_row_the_chain_cannot_answer_with() {
                         .any(|child| child.parent() == Some(at) && child.id().is_some()),
                     "{label:?} opens an empty plate"
                 ),
-                other => panic!("the backdrop menu hangs no window: {other:?}"),
+                ChainChild::Entry { id, .. } => assert_eq!(
+                    PinboardCommand::from_item(*id),
+                    Some(PinboardCommand::Title),
+                    "{label:?} answers as its field commits"
+                ),
+                other @ ChainChild::Info(_) => {
+                    panic!("the backdrop menu hangs no window: {other:?}")
+                }
             }
         }
     }
@@ -2586,7 +2939,7 @@ fn the_model_declares_no_row_the_chain_cannot_answer_with() {
 /// command.
 #[test]
 fn tidy_up_files_its_orders_on_a_plate_of_their_own() {
-    let model = pinboard::model(false, &DesktopSettings::default());
+    let model = pinboard::model(Over::Backdrop, &DesktopSettings::default());
     let plate = model
         .rows()
         .iter()
@@ -2708,6 +3061,7 @@ fn press_at(
 ) -> DesktopOutcome {
     desktop.press(
         at,
+        tairix_input::Modifiers::default(),
         layout,
         Scale::ONE,
         &theme(),
@@ -2735,8 +3089,8 @@ fn carry(
     let from = bounds(desktop, layout, index).center();
     press_at(desktop, layout, from, 0);
     let to = Point::new(from.x + by.0, from.y + by.1);
-    desktop.follow_press(to, true, layout, Scale::ONE, &mut Region::new());
-    desktop.follow_press(to, false, layout, Scale::ONE, &mut Region::new())
+    desktop.follow_press(to, true, layout, Scale::ONE, &theme(), &mut Region::new());
+    desktop.follow_press(to, false, layout, Scale::ONE, &theme(), &mut Region::new())
 }
 
 /// The record `edits` make of an empty one.
@@ -2839,6 +3193,7 @@ fn a_carried_icon_repaints_what_it_leaves_and_covers_and_keeps_nothing_yet() {
             true,
             &layout,
             Scale::ONE,
+            &theme(),
             damage,
         );
     });
@@ -2859,17 +3214,24 @@ fn a_press_that_never_travels_is_a_click_and_moves_nothing() {
     press_at(&mut desktop, &layout, at, 0);
     let still = Point::new(at.x + 1, at.y + 1);
     let held = damage_of(|damage| {
-        desktop.follow_press(still, true, &layout, Scale::ONE, damage);
+        desktop.follow_press(still, true, &layout, Scale::ONE, &theme(), damage);
     });
     assert!(held.is_empty(), "a hand holding still is not a drag");
     assert_eq!(
-        desktop.follow_press(still, false, &layout, Scale::ONE, &mut Region::new()),
+        desktop.follow_press(
+            still,
+            false,
+            &layout,
+            Scale::ONE,
+            &theme(),
+            &mut Region::new()
+        ),
         DesktopOutcome::ignored()
     );
     let later = Point::new(at.x + 300, at.y + 200);
     assert!(
         damage_of(|damage| {
-            desktop.follow_press(later, true, &layout, Scale::ONE, damage);
+            desktop.follow_press(later, true, &layout, Scale::ONE, &theme(), damage);
         })
         .is_empty(),
         "and the press it was is over"
@@ -3116,168 +3478,206 @@ fn a_new_order_flows_again_only_the_icons_no_one_placed() {
     );
 }
 
-/// Wait for a save of `name`, which its volume may make as `finished`, let
-/// go at `drop` with a wait ending at monotonic time 100.
-fn expect_save(desktop: &mut Desktop<FakeDir>, name: &str, finished: Option<&str>, drop: Point) {
-    let layout = layout_of(desktop);
-    desktop.offer_landing(Some(LandingOffer::saved(name, finished)));
-    desktop.expect_offered(drop, &layout, Scale::ONE, &theme(), 100);
-}
+/// The drop the tests' drags are concluded as: window 9's, at report 3.
+const SOURCE: (u64, u32) = (9, 3);
 
-/// Wait for a drop of the one file `name`, its picture held where the press
-/// was, let go at `drop` with a wait ending at monotonic time 100.
-fn expect_drop(desktop: &mut Desktop<FakeDir>, name: &str, drop: Point) {
-    let layout = layout_of(desktop);
-    let picture = DragPicture {
+/// A drag of `count` items led by `lead`, those shown held `from` the press.
+fn items_held(lead: &str, count: u32, from: &[(i32, i32)]) -> DragItems {
+    let pictures = from.iter().map(|&from| DragPicture {
         icon: IconAsset::new("text").expect("a valid asset id"),
-        from: Some((0, 0)),
-    };
-    let items = DragItems::new(
-        DocumentName::new(name).expect("a valid name"),
-        1,
+        from: Some(from),
+        own: None,
+    });
+    DragItems::new(
+        DocumentName::new(lead).expect("a valid name"),
+        count,
         false,
-        [picture],
+        pictures,
     )
-    .expect("one file");
-    desktop.offer_landing(Some(LandingOffer::of(&items)));
-    desktop.expect_offered(drop, &layout, Scale::ONE, &theme(), 100);
+    .expect("items")
 }
 
-/// A copy that finds its name taken tells the file it makes apart, and the
-/// file still stands where the drop was let go.
-#[test]
-fn a_dropped_file_its_copy_names_apart_still_lands_where_it_was_let_go() {
-    let mut desktop = desktop_of(vec![file("x.txt")]);
-    let layout = layout_of(&desktop);
-    let drop = Point::new(500, 400);
-    expect_drop(&mut desktop, "x.txt", drop);
+/// Let `items` go at `drop` over the bare desktop, as [`SOURCE`]'s drop.
+fn expect_drop(desktop: &mut Desktop<FakeDir>, items: &DragItems, drop: Point) {
+    let layout = layout_of(desktop);
+    let folder = desktop.folder_path();
+    desktop.offer_landing(Some(LandingOffer::of(items, folder, true)));
+    desktop.expect_drop(SOURCE, drop, &layout, Scale::ONE, &theme());
+}
+
+/// Take `step` of [`SOURCE`]'s drop, answering what it asked of the embedder.
+fn take_step(desktop: &mut Desktop<FakeDir>, step: &LandingStep) -> LandingWork {
+    desktop.step_landing(SOURCE, step, layout_of, &mut Region::new())
+}
+
+/// Item `item` about to be written as `name`.
+fn making(item: u32, name: &str) -> LandingStep {
+    LandingStep::Making {
+        item,
+        name: LandingName::new(name).expect("a valid name"),
+    }
+}
+
+/// Item `item` done, as `outcome` says.
+const fn made(item: u32, outcome: LandingOutcome) -> LandingStep {
+    LandingStep::Made { item, outcome }
+}
+
+/// `names` arrive in the folder, as its watch reports them.
+fn arrive(desktop: &mut Desktop<FakeDir>, names: &[&str]) {
     desktop.apply_changes(
-        vec![EntryChange::Upsert(file("x (2).txt"))],
+        names
+            .iter()
+            .map(|name| EntryChange::Upsert(file(name)))
+            .collect(),
         layout_of,
         &mut Region::new(),
     );
-    assert!(bounds(&desktop, &layout, named(&desktop, "x (2).txt")).contains(drop));
 }
 
-/// A file a one-file drop did not name is not taken for the one it did, which
-/// still stands where it was let go when it arrives after.
+/// Make item `item` as `name`, its icon arriving while it is written.
+fn make_arriving(desktop: &mut Desktop<FakeDir>, item: u32, name: &str) {
+    take_step(desktop, &making(item, name));
+    arrive(desktop, &[name]);
+    take_step(desktop, &made(item, LandingOutcome::Created));
+}
+
+/// An arrival a drop's source did not announce is not taken for its item,
+/// however like it it is named; the item announced stands where it was let
+/// go from the moment it appears.
 #[test]
-fn a_file_a_one_file_drop_did_not_name_is_not_taken_for_it() {
+fn a_name_its_source_did_not_announce_is_not_taken_for_its_drop() {
     let mut desktop = desktop_of(Vec::new());
     let layout = layout_of(&desktop);
     let drop = Point::new(500, 400);
-    expect_drop(&mut desktop, "report.txt", drop);
-    desktop.apply_changes(
-        vec![EntryChange::Upsert(file("other.txt"))],
-        layout_of,
-        &mut Region::new(),
-    );
+    expect_drop(&mut desktop, &items_held("x.txt", 1, &[(0, 0)]), drop);
+    take_step(&mut desktop, &making(0, "x.txt"));
+    arrive(&mut desktop, &["x (2).txt"]);
     assert_eq!(
-        bounds(&desktop, &layout, named(&desktop, "other.txt")),
+        bounds(&desktop, &layout, named(&desktop, "x (2).txt")),
         cell(&layout, 0),
-        "the file it did not name flows"
+        "a name it did not announce flows"
     );
     assert!(
         desktop.take_arrangement_edits().is_empty(),
         "and nothing is kept for it"
     );
-    desktop.apply_changes(
-        vec![EntryChange::Upsert(file("report.txt"))],
-        layout_of,
-        &mut Region::new(),
-    );
+    arrive(&mut desktop, &["x.txt"]);
     assert!(
-        bounds(&desktop, &layout, named(&desktop, "report.txt")).contains(drop),
-        "the file it named stands where it was let go"
+        bounds(&desktop, &layout, named(&desktop, "x.txt")).contains(drop),
+        "the one it announced stands where it was let go"
     );
 }
 
+/// An arrival during a drop of several items that is none of them flows as
+/// any other does.
 #[test]
-fn a_saved_file_lands_where_its_save_was_let_go() {
-    let mut desktop = desktop_of(vec![file("a.txt")]);
+fn an_unrelated_arrival_during_a_drop_of_several_is_not_placed() {
+    let mut desktop = desktop_of(Vec::new());
+    let layout = layout_of(&desktop);
+    let several = items_held("one.txt", 2, &[(0, 0), (150, 40)]);
+    expect_drop(&mut desktop, &several, Point::new(500, 400));
+    take_step(&mut desktop, &making(0, "one.txt"));
+    arrive(&mut desktop, &["other.txt"]);
+    assert_eq!(
+        bounds(&desktop, &layout, named(&desktop, "other.txt")),
+        cell(&layout, 0)
+    );
+    assert!(desktop.take_arrangement_edits().is_empty());
+}
+
+/// An item listed long after it was made, after its drop ended, still stands
+/// where it was let go: a drop waits for its source's steps, not a clock.
+#[test]
+fn an_item_made_long_after_its_drop_still_lands_where_it_was_let_go() {
+    let folder = holding(Vec::new());
+    folder.borrow_mut().follows = true;
+    let mut desktop = desktop_over(&folder);
     let layout = layout_of(&desktop);
     let drop = Point::new(500, 400);
-    expect_save(&mut desktop, "Letter.txt", None, drop);
-    desktop.apply_changes(
-        vec![EntryChange::Upsert(file("Letter.txt"))],
-        layout_of,
-        &mut Region::new(),
+    expect_drop(&mut desktop, &items_held("notes.txt", 1, &[(0, 0)]), drop);
+    take_step(&mut desktop, &making(0, "notes.txt"));
+    take_step(&mut desktop, &made(0, LandingOutcome::Created));
+    take_step(&mut desktop, &LandingStep::Ended);
+    assert_eq!(
+        listings(&folder),
+        1,
+        "a folder its watch follows is not read"
     );
+    arrive(&mut desktop, &["notes.txt"]);
     assert!(
-        bounds(&desktop, &layout, named(&desktop, "Letter.txt")).contains(drop),
-        "it stands under the pointer it was let go at"
+        bounds(&desktop, &layout, named(&desktop, "notes.txt")).contains(drop),
+        "listed after its drop ended"
     );
     assert!(
         matches!(
             desktop.take_arrangement_edits().as_slice(),
             [ArrangementEdit::Set(set)] if set.len() == 1
         ),
-        "and is kept there"
+        "and kept there"
     );
 }
 
-/// A volume that keeps no file type finishes a save's name with its type, and
-/// the file it makes lands as surely as one made under the name asked for.
+/// A replaced item moves to where the drop was let go; a skipped, merged or
+/// failed one moves nothing.
 #[test]
-fn a_save_its_volume_names_otherwise_still_lands_where_it_was_let_go() {
-    let mut desktop = desktop_of(vec![file("a.txt")]);
+fn a_replaced_item_moves_to_its_drop_and_a_skipped_one_stays() {
+    let names = ["a.txt", "b.txt", "c.txt", "d.txt"];
+    let mut desktop = desktop_of(names.iter().map(|name| file(name)).collect());
     let layout = layout_of(&desktop);
     let drop = Point::new(500, 400);
-    expect_save(&mut desktop, "Letter", Some("Letter,fff"), drop);
-    desktop.apply_changes(
-        vec![EntryChange::Upsert(file("Letter,fff"))],
-        layout_of,
-        &mut Region::new(),
-    );
-    assert!(bounds(&desktop, &layout, named(&desktop, "Letter,fff")).contains(drop));
-}
-
-#[test]
-fn a_file_appearing_after_the_wait_takes_the_next_free_cell() {
-    let mut desktop = desktop_of(vec![file("a.txt")]);
-    let layout = layout_of(&desktop);
-    expect_save(&mut desktop, "Letter.txt", None, Point::new(500, 400));
-    desktop.expire_landing(100);
-    desktop.apply_changes(
-        vec![EntryChange::Upsert(file("Letter.txt"))],
-        layout_of,
-        &mut Region::new(),
-    );
-    assert_eq!(
-        bounds(&desktop, &layout, named(&desktop, "Letter.txt")),
-        cell(&layout, 1)
-    );
+    expect_drop(&mut desktop, &items_held("a.txt", 4, &[(0, 0); 4]), drop);
+    take_step(&mut desktop, &making(0, "a.txt"));
+    take_step(&mut desktop, &made(0, LandingOutcome::Replaced));
     assert!(
-        desktop.take_arrangement_edits().is_empty(),
-        "nothing the user did not place is stored"
+        bounds(&desktop, &layout, named(&desktop, "a.txt")).contains(drop),
+        "a replaced item moves to its drop"
     );
+    for (item, name, outcome) in [
+        (1, "b.txt", LandingOutcome::Skipped),
+        (2, "c.txt", LandingOutcome::Merged),
+        (3, "d.txt", LandingOutcome::Failed),
+    ] {
+        let stood = bounds(&desktop, &layout, named(&desktop, name));
+        take_step(&mut desktop, &making(item, name));
+        take_step(&mut desktop, &made(item, outcome));
+        assert_eq!(
+            bounds(&desktop, &layout, named(&desktop, name)),
+            stood,
+            "{name} moves nothing"
+        );
+    }
 }
 
+/// An item a drag carried past those it showed takes the free cell nearest
+/// where the drop was let go, never an arbitrary one.
 #[test]
-fn each_file_a_drop_carried_lands_as_far_from_the_drop_as_it_was_held() {
+fn an_item_past_those_shown_takes_the_free_cell_nearest_its_drop() {
     let mut desktop = desktop_of(Vec::new());
     let layout = layout_of(&desktop);
-    let picture = |from| DragPicture {
-        icon: IconAsset::new("text").expect("a valid asset id"),
-        from: Some(from),
-    };
-    let items = DragItems::new(
-        DocumentName::new("one.txt").expect("a valid name"),
-        2,
-        false,
-        [picture((0, 0)), picture((150, 40))],
-    )
-    .expect("two files");
-    desktop.offer_landing(Some(LandingOffer::of(&items)));
-    desktop.expect_offered(Point::new(300, 300), &layout, Scale::ONE, &theme(), 100);
-    desktop.apply_changes(
-        vec![
-            EntryChange::Upsert(file("one.txt")),
-            EntryChange::Upsert(file("two.txt")),
-        ],
-        layout_of,
-        &mut Region::new(),
+    let far = [(-2000, -2000), (2000, 2000), (-2000, 2000), (2000, -2000)];
+    expect_drop(
+        &mut desktop,
+        &items_held("0.txt", 5, &far),
+        centre_of(&layout, 7),
     );
+    for item in 0..5 {
+        make_arriving(&mut desktop, item, &format!("{item}.txt"));
+    }
+    assert_eq!(
+        bounds(&desktop, &layout, named(&desktop, "4.txt")),
+        cell(&layout, 7)
+    );
+}
+
+#[test]
+fn each_item_a_drop_carried_lands_as_far_from_the_drop_as_it_was_held() {
+    let mut desktop = desktop_of(Vec::new());
+    let layout = layout_of(&desktop);
+    let two = items_held("one.txt", 2, &[(0, 0), (150, 40)]);
+    expect_drop(&mut desktop, &two, Point::new(300, 300));
+    make_arriving(&mut desktop, 0, "one.txt");
+    make_arriving(&mut desktop, 1, "two.txt");
     let (one, two) = (
         bounds(&desktop, &layout, named(&desktop, "one.txt")),
         bounds(&desktop, &layout, named(&desktop, "two.txt")),
@@ -3285,19 +3685,219 @@ fn each_file_a_drop_carried_lands_as_far_from_the_drop_as_it_was_held() {
     assert_eq!((two.left() - one.left(), two.top() - one.top()), (150, 40));
 }
 
-/// A drop that moved on from the bare desktop leaves nothing to land.
+/// A drop that moved on from the desktop before it was let go lands nothing.
 #[test]
 fn a_drop_with_no_offer_standing_lands_nothing() {
     let mut desktop = desktop_of(Vec::new());
     let layout = layout_of(&desktop);
     desktop.offer_landing(None);
-    desktop.expect_offered(Point::new(300, 300), &layout, Scale::ONE, &theme(), 100);
-    desktop.apply_changes(
-        vec![EntryChange::Upsert(file("one.txt"))],
-        layout_of,
-        &mut Region::new(),
-    );
+    desktop.expect_drop(SOURCE, Point::new(300, 300), &layout, Scale::ONE, &theme());
+    make_arriving(&mut desktop, 0, "one.txt");
     assert_eq!(bounds(&desktop, &layout, 0), cell(&layout, 0));
+    assert!(desktop.take_arrangement_edits().is_empty());
+}
+
+/// A drop into a folder no watch covers shows what it made once its source
+/// ends it: the folder is read then, once, and each item stands where it was
+/// let go.
+#[test]
+fn a_folder_no_watch_covers_is_read_when_its_drop_ends() {
+    let folder = holding(Vec::new());
+    let mut desktop = desktop_over(&folder);
+    let layout = layout_of(&desktop);
+    let drop = Point::new(500, 400);
+    expect_drop(&mut desktop, &items_held("notes.txt", 1, &[(0, 0)]), drop);
+    take_step(&mut desktop, &making(0, "notes.txt"));
+    take_step(&mut desktop, &made(0, LandingOutcome::Created));
+    folder.borrow_mut().answer = Some(Ok(Listing::Ready(vec![file("notes.txt")])));
+    let read = listings(&folder);
+    take_step(&mut desktop, &LandingStep::Ended);
+    assert_eq!(listings(&folder), read + 1, "read as the drop ends");
+    assert!(bounds(&desktop, &layout, named(&desktop, "notes.txt")).contains(drop));
+}
+
+/// What a drop writes is held from its first write, pictured again once it is
+/// made or once the drop ends with it unfinished, and nothing is taken after
+/// the end.
+#[test]
+fn what_a_drop_writes_is_held_until_it_is_done_or_the_drop_ends() {
+    let mut desktop = desktop_of(Vec::new());
+    let two = items_held("App.app", 2, &[(0, 0), (0, 0)]);
+    expect_drop(&mut desktop, &two, Point::new(300, 300));
+    let path = |name: &str| Some(format!("/Users/ada/Desktop/{name}"));
+    let work = take_step(&mut desktop, &making(0, "App.app"));
+    assert_eq!((work.hold, work.release), (path("App.app"), None));
+    let work = take_step(&mut desktop, &made(0, LandingOutcome::Created));
+    assert_eq!((work.hold, work.release), (None, path("App.app")));
+    take_step(&mut desktop, &making(1, "Tool.app"));
+    let work = take_step(&mut desktop, &LandingStep::Ended);
+    assert_eq!(
+        (work.hold, work.release),
+        (None, path("Tool.app")),
+        "an unfinished item is let go with its drop"
+    );
+    assert_eq!(
+        take_step(&mut desktop, &making(0, "App.app")),
+        LandingWork::default(),
+        "nothing is taken after the end"
+    );
+}
+
+/// An item a drop writes is drawn, while its own picture is produced, by the
+/// one its drag carried — an application's and a command's own icon, which
+/// the session already reads for the drag — rather than its glyph while the
+/// copy is held and read.
+#[test]
+fn a_dropped_bundle_stands_in_with_the_picture_its_drag_carried() {
+    for (source, name) in [
+        ("/System/Applications/Paint.app", "Paint.app"),
+        ("/System/Commands/ls.app", "ls.app"),
+    ] {
+        let mut desktop = desktop_of(Vec::new());
+        let own = DragOwnIcon::new(DragOwnSource::Bundle, source, None).expect("an own picture");
+        let picture = DragPicture {
+            icon: IconAsset::new(IconKind::AppBundle.asset_id()).expect("an asset id"),
+            from: Some((0, 0)),
+            own: Some(own),
+        };
+        let first = DocumentName::new(name).expect("a valid name");
+        let items = DragItems::new(first, 1, false, [picture]).expect("one bundle");
+        expect_drop(&mut desktop, &items, Point::new(300, 300));
+        take_step(&mut desktop, &making(0, name));
+        let made = bundle(name).with_id(FileId {
+            volume: [1; 16],
+            node: 7,
+        });
+        let arrived = vec![EntryChange::Upsert(made.clone())];
+        desktop.apply_changes(arrived, layout_of, &mut Region::new());
+        let path = format!("/Users/ada/Desktop/{name}");
+        let carried = IconRequest::from_carried(IconKind::AppBundle, Some(&own));
+        let mut asked = Vec::new();
+        desktop.want_shown_artwork(&layout_of(&desktop), Scale::ONE, &theme(), |request, _| {
+            let listed = IconRequest::listed_bundle(request.icon_kind(), &path, made.stamp());
+            asked.push(request == listed.standing_in(carried));
+        });
+        assert_eq!(asked, [true], "{name}");
+    }
+}
+
+/// A shortcut to an application is drawn by the application's own icon,
+/// asked for where its activation reaches it: its target names another root,
+/// which no walk through the shortcut follows.
+#[test]
+fn a_shortcut_to_an_application_draws_the_application_s_icon() {
+    let desktop = desktop_of(vec![link(
+        "Editor",
+        LinkTarget::Bundle,
+        "System:/Applications/Editor.app",
+    )]);
+    let mut asked = Vec::new();
+    desktop.want_shown_artwork(&layout_of(&desktop), Scale::ONE, &theme(), |request, _| {
+        let target = IconRequest::bundle(request.icon_kind(), "/System/Applications/Editor.app");
+        asked.push(request == target);
+    });
+    assert_eq!(asked, [true]);
+}
+
+/// A save dropped on the bare desktop stands under the pointer it was let go
+/// at, under the exact name the session's own open made it as.
+#[test]
+fn a_saved_file_stands_where_its_save_was_let_go() {
+    for made in ["Letter.txt", "Letter,fff"] {
+        let mut desktop = desktop_of(vec![file("a.txt")]);
+        let layout = layout_of(&desktop);
+        let drop = Point::new(500, 400);
+        desktop.expect_save((1, 2), "Letter", drop, (&layout, Scale::ONE, &theme()));
+        let path = format!("/Users/ada/Desktop/{made}");
+        assert!(
+            !desktop.saved((1, 2), Some(path.as_str()), layout_of, &mut Region::new()),
+            "owed until it is listed"
+        );
+        arrive(&mut desktop, &[made]);
+        assert!(
+            bounds(&desktop, &layout, named(&desktop, made)).contains(drop),
+            "{made} stands where it was let go"
+        );
+    }
+}
+
+/// A change made in Settings lays the desktop out again — its scale, here —
+/// and nothing settles it there until a drag's first report over it lights
+/// the drop target, which moves its revision. The drag, still on the bare
+/// desktop, owes its source no second report: one would have taken the
+/// folder held for the first, whose answer is the one that decides the drop.
+#[test]
+fn a_drag_on_the_desktop_settings_laid_out_again_is_asked_once() {
+    let mut desktop = desktop_of(Vec::new());
+    desktop.set_focused(false, &layout_of(&desktop), &mut Region::new());
+    let mut shell = crate::tests::shell();
+    let mut comp = crate::tests::compositor();
+    let window = crate::tests::opaque_window(&mut comp, Point::new(100, 100), 120, 80);
+    let _ = shell.handle(crate::tests::moved(150, 140), &mut comp, 0);
+    let _ = shell.handle(crate::tests::PRIMARY_PRESS, &mut comp, 0);
+    let items = items_held("a.txt", 1, &[(0, 0)]);
+    shell
+        .begin_drag(&mut comp, 7, window, items)
+        .expect("carried");
+    let on_desktop = |desktop: &Desktop<FakeDir>| DragSurface::Desktop {
+        folder: desktop.folder_path(),
+        icon: None,
+        revision: desktop.revision(),
+    };
+    shell.drag_over(&mut comp, on_desktop(&desktop));
+    let Some(OwedReport::Items(first)) = shell.take_drag_report() else {
+        panic!("the first report is owed");
+    };
+    let scaled = Scale::from_percent(150).expect("a scale Settings offers");
+    let relaid = desktop.layout(work_area(), scaled, &theme());
+    let settled = desktop.revision();
+    desktop.set_drop_target(shell.drag_drop_icon(), &relaid, &mut Region::new());
+    assert_ne!(
+        desktop.revision(),
+        settled,
+        "settled where Settings laid it out"
+    );
+    shell.drag_over(&mut comp, on_desktop(&desktop));
+    assert_eq!(
+        shell.take_drag_report(),
+        None,
+        "the folder is asked about once"
+    );
+    assert!(shell.drag_verdict(&mut comp, 7, first.serial, Some(DropOperation::Copy)));
+    let release = InputEvent::PointerReleased {
+        button: tairix_wm::PointerButton::Primary,
+    };
+    assert_eq!(
+        shell.drag_pointer(&mut comp, &release),
+        DragStep::Ended(DragEnd::Items(ItemsEnd {
+            source: 7,
+            ended: DragConclusion::Desktop {
+                serial: first.serial,
+                operation: DropOperation::Copy,
+            },
+            refused: None,
+        }))
+    );
+}
+
+/// A save whose open made nothing, or made its file elsewhere, stands
+/// nothing.
+#[test]
+fn a_save_that_made_nothing_here_places_nothing() {
+    let mut desktop = desktop_of(vec![file("a.txt")]);
+    let layout = layout_of(&desktop);
+    let drop = Point::new(500, 400);
+    let look = (&layout, Scale::ONE, &theme());
+    desktop.expect_save((1, 2), "Letter.txt", drop, look);
+    assert!(!desktop.saved((1, 2), None, layout_of, &mut Region::new()));
+    desktop.expect_save((1, 3), "Letter.txt", drop, look);
+    let elsewhere = Some("/Users/ada/Documents/Letter.txt");
+    assert!(!desktop.saved((1, 3), elsewhere, layout_of, &mut Region::new()));
+    arrive(&mut desktop, &["Letter.txt"]);
+    assert_eq!(
+        bounds(&desktop, &layout, named(&desktop, "Letter.txt")),
+        cell(&layout, 1)
+    );
     assert!(desktop.take_arrangement_edits().is_empty());
 }
 
@@ -3509,10 +4109,18 @@ fn routed(
         let layout = shell.desktop_layout(comp, desktop);
         let (pointer, held) = (shell.router().pointer(), shell.router().holds_primary());
         for outcome in &outcomes {
-            desktop.follow_press(pointer, held, &layout, comp.scale(), &mut Region::new());
+            desktop.follow_press(
+                pointer,
+                held,
+                &layout,
+                comp.scale(),
+                &theme(),
+                &mut Region::new(),
+            );
             if outcome.value == ShellOutcome::WindowManager(InputResponse::DesktopPressed) {
                 desktop.press(
                     pointer,
+                    tairix_input::Modifiers::default(),
                     &layout,
                     comp.scale(),
                     shell.session().active_theme(),
@@ -3816,31 +4424,20 @@ fn a_drop_of_pictures_held_at_the_ends_of_the_coordinates_lands_on_the_field() {
     };
     let mut desktop = desktop_with(Vec::new(), settings);
     let layout = layout_of(&desktop);
-    let picture = |from| DragPicture {
-        icon: IconAsset::new("text").expect("a valid asset id"),
-        from: Some(from),
-    };
-    let items = DragItems::new(
-        DocumentName::new("0.txt").expect("a valid name"),
-        4,
-        false,
-        [
-            picture((i32::MIN, i32::MIN)),
-            picture((i32::MAX, i32::MAX)),
-            picture((i32::MIN, i32::MAX)),
-            picture((i32::MAX, i32::MIN)),
-        ],
-    )
-    .expect("four files");
-    desktop.offer_landing(Some(LandingOffer::of(&items)));
-    desktop.expect_offered(Point::new(300, 300), &layout, Scale::ONE, &theme(), 100);
-    desktop.apply_changes(
-        (0..4)
-            .map(|n| EntryChange::Upsert(file(&format!("{n}.txt"))))
-            .collect(),
-        layout_of,
-        &mut Region::new(),
+    let ends = [
+        (i32::MIN, i32::MIN),
+        (i32::MAX, i32::MAX),
+        (i32::MIN, i32::MAX),
+        (i32::MAX, i32::MIN),
+    ];
+    expect_drop(
+        &mut desktop,
+        &items_held("0.txt", 4, &ends),
+        Point::new(300, 300),
     );
+    for n in 0..4 {
+        make_arriving(&mut desktop, n, &format!("{n}.txt"));
+    }
     let area = layout.tile_area();
     for n in 0..4 {
         let shown = bounds(&desktop, &layout, named(&desktop, &format!("{n}.txt")));
@@ -3908,4 +4505,843 @@ fn a_halo_is_blurred_again_only_for_a_new_name_scale_or_theme() {
         "a new name blurs its own and no other"
     );
     assert!(renamed[1].is_none(), "and a name gone keeps none");
+}
+
+/// The identity the stick's content carries.
+const STICK: [u8; 16] = [7; 16];
+
+/// The menu over a drive its viewer may eject and retitle.
+const DRIVE: Over<'static> = Over::Drive {
+    eject_refused: None,
+    title: Ok(""),
+};
+
+/// An attached volume at `target` of `class`, published under `key` with the
+/// content identity `identity`, shown to the desktop's user.
+fn attached(target: &str, class: VolumeClass, (key, identity): ([u8; 16], [u8; 16])) -> Volume {
+    let label = target.rsplit('/').find(|part| !part.is_empty());
+    Volume {
+        label: String::from(label.unwrap_or(target)),
+        target: String::from(target),
+        medium: None,
+        facts: VolumeFacts {
+            filesystem: String::from("fat32"),
+            title: String::new(),
+            class,
+            free: None,
+            availability: MountAvailability::Available,
+            owner: None,
+            volume_id: key,
+            identity,
+            read_only: false,
+            titled: false,
+        },
+        offered: true,
+    }
+}
+
+/// The stick, attached first, at `/Storage/USB`.
+fn stick() -> Volume {
+    attached("/Storage/USB", VolumeClass::Removable, (STICK, STICK))
+}
+
+/// The desktop's mount table read as `volumes`: whether any icon changed, and
+/// what it repainted.
+fn mounted<S: DirectorySource>(desktop: &mut Desktop<S>, volumes: Vec<Volume>) -> (bool, Region) {
+    let mut damage = Region::new();
+    let moved = desktop.adopt_mounts(Some(volumes), layout_of, &mut damage);
+    (moved, damage)
+}
+
+/// The labels the desktop's icons are shown by, in byte order.
+fn labels_of<S: DirectorySource>(desktop: &Desktop<S>) -> Vec<String> {
+    let mut labels: Vec<String> = desktop
+        .entries()
+        .iter()
+        .map(|entry| entry.label().unwrap_or(entry.name()).to_string())
+        .collect();
+    labels.sort_unstable();
+    labels
+}
+
+/// Where the icon called `name` is listed.
+fn position<S: DirectorySource>(desktop: &Desktop<S>, name: &str) -> usize {
+    desktop
+        .entries()
+        .iter()
+        .position(|entry| entry.name() == name)
+        .unwrap_or_else(|| panic!("{name} is listed"))
+}
+
+/// The centre of where the icon listed at `index` stands, which is a cell of
+/// its own rather than the `index`th once icons have been placed or kept.
+fn icon_centre<S: DirectorySource>(desktop: &Desktop<S>, layout: &GridView, index: usize) -> Point {
+    desktop
+        .bounds_for_test(layout, index)
+        .expect("a shown icon")
+        .center()
+}
+
+/// What a double-click on the icon at `index`, from `at_ns`, asks for.
+fn opened<S: DirectorySource>(
+    desktop: &mut Desktop<S>,
+    index: usize,
+    at_ns: u64,
+) -> Option<DesktopAction> {
+    let layout = layout_of(desktop);
+    let at = icon_centre(desktop, &layout, index);
+    let mut press = |now_ns| {
+        desktop
+            .press(
+                at,
+                tairix_input::Modifiers::default(),
+                &layout,
+                Scale::ONE,
+                &theme(),
+                now_ns,
+                &[],
+                &mut Region::new(),
+            )
+            .action
+    };
+    press(at_ns);
+    press(at_ns + 1)
+}
+
+/// Whether the menu `model` lets the row labelled `label` be chosen, and the
+/// reason it gives where it does not; `None` where it offers no such row.
+fn offered(model: &ChainModel, label: &str) -> Option<(bool, Option<String>)> {
+    model
+        .rows()
+        .iter()
+        .find(|row| row.drawn().label() == label)
+        .map(|row| (row.drawn().state().enabled, row.tip().map(String::from)))
+}
+
+/// A shortcut to a volume opens the volume where the storage catalog shows it
+/// while it is attached, and otherwise says it is not there, or is someone
+/// else's.
+#[test]
+fn a_shortcut_to_a_volume_opens_it_where_storage_shows_it_or_says_it_is_not_present() {
+    let shortcut = link("Holiday", LinkTarget::Volume, &volume_root(STICK));
+    let mut desktop = desktop_of(vec![shortcut]);
+    assert_eq!(
+        opened(&mut desktop, 0, 0),
+        Some(DesktopAction::Refuse(GestureRefusal::new(
+            "\u{201c}Holiday\u{201d} is not present",
+            "The drive it stands for is not attached.",
+        )))
+    );
+    assert!(mounted(&mut desktop, vec![stick()]).0);
+    assert_eq!(
+        opened(&mut desktop, 0, 10_000_000_000),
+        Some(DesktopAction::Activate(DesktopActivation::OpenFolder {
+            path: "/Storage/USB".to_string(),
+        }))
+    );
+    let mut theirs = stick();
+    theirs.offered = false;
+    assert!(mounted(&mut desktop, vec![theirs]).0);
+    assert_eq!(
+        opened(&mut desktop, 0, 20_000_000_000),
+        Some(DesktopAction::Refuse(GestureRefusal::new(
+            "\u{201c}Holiday\u{201d} is not available",
+            "The drive it stands for is attached for someone else.",
+        )))
+    );
+}
+
+/// The mount table moving repaints the icons it changed and no other: the
+/// shortcut whose volume came, while the files around it stay as they were.
+#[test]
+fn only_the_icons_the_mount_table_changed_repaint() {
+    let shortcut = link("Holiday", LinkTarget::Volume, &volume_root(STICK));
+    let mut desktop = desktop_of(vec![file("a.txt"), shortcut, file("z.txt")]);
+    let layout = layout_of(&desktop);
+    let at = position(&desktop, "Holiday");
+    let (moved, damage) = mounted(&mut desktop, vec![stick()]);
+    assert!(moved);
+    assert_eq!(damage.rects(), [cell(&layout, at)]);
+    let (moved, damage) = mounted(&mut desktop, vec![stick()]);
+    assert!(
+        !moved && damage.is_empty(),
+        "the same table changes nothing"
+    );
+}
+
+/// The desktop draws a drive for each attached volume of the classes its
+/// settings name — removable drives alone by default — and counts the view's
+/// root as the system drive, opened as the root.
+#[test]
+fn the_desktop_draws_drives_of_the_classes_it_shows_and_the_root_as_the_system_drive() {
+    let mut desktop = desktop_of(vec![file("notes.txt")]);
+    let volumes = vec![
+        attached("/", VolumeClass::Local, ([1; 16], [1; 16])),
+        attached("/System", VolumeClass::Local, ([2; 16], [2; 16])),
+        attached("/Storage/Data", VolumeClass::Local, ([3; 16], [3; 16])),
+        stick(),
+        attached("/Storage/Share", VolumeClass::Network, ([4; 16], [4; 16])),
+        attached("/Storage/disk.adf", VolumeClass::Image, ([5; 16], [5; 16])),
+    ];
+    assert!(mounted(&mut desktop, volumes).0);
+    assert_eq!(labels_of(&desktop), ["USB", "notes.txt"]);
+    let mut everything = DesktopDrives::default();
+    for class in DriveClass::ALL {
+        *everything.setting_mut(class) = true;
+    }
+    assert!(desktop.show_drives(everything));
+    assert_eq!(
+        labels_of(&desktop),
+        ["/", "Data", "Share", "USB", "disk.adf", "notes.txt"],
+        "the system tree's own mounts are no drive"
+    );
+    assert!(!desktop.show_drives(everything), "nothing more to draw");
+    let root = position(&desktop, &volume_root([1; 16]));
+    assert_eq!(
+        opened(&mut desktop, root, 0),
+        Some(DesktopAction::Activate(DesktopActivation::OpenFolder {
+            path: "/".to_string(),
+        }))
+    );
+}
+
+/// A volume already on the desktop by shortcut is not drawn twice, and twins
+/// of one identity draw one drive: the attachment a shortcut would open.
+#[test]
+fn a_volume_is_drawn_once_however_it_is_shown() {
+    let twin = attached("/Storage/USB_2", VolumeClass::Removable, ([9; 16], STICK));
+    let shortcut = link("Holiday", LinkTarget::Volume, &volume_root(STICK));
+    let mut desktop = desktop_of(vec![shortcut]);
+    assert!(mounted(&mut desktop, vec![stick(), twin.clone()]).0);
+    assert_eq!(labels_of(&desktop), ["Holiday"]);
+    let mut bare = desktop_of(vec![]);
+    assert!(mounted(&mut bare, vec![twin, stick()]).0);
+    assert_eq!(labels_of(&bare), ["USB"]);
+}
+
+/// A drive offers its eject where its viewer may make it, and refuses moving
+/// it to the Trash with the reason; a fixed drive's eject is refused too.
+#[test]
+fn a_drive_offers_its_eject_and_refuses_the_trash_with_the_reason() {
+    let mut desktop = Desktop::new(FakeDir(holding(vec![])), home()).acting_for(1000);
+    desktop.relist();
+    let shown = DesktopDrives::default().with(DriveClass::Fixed, true);
+    let _ = desktop.show_drives(shown);
+    let fixed = attached("/Storage/Data", VolumeClass::Local, ([3; 16], [3; 16]));
+    assert!(mounted(&mut desktop, vec![stick(), fixed]).0);
+    let layout = layout_of(&desktop);
+    for (name, identity, ejects) in [
+        ("USB", STICK, Ok(MountAct::eject(&stick().facts, "USB"))),
+        ("Data", [3; 16], Err(REASON_NOT_EJECTABLE)),
+    ] {
+        let at = position(&desktop, &volume_root(identity));
+        let on_icon = desktop.context_press(
+            icon_centre(&desktop, &layout, at),
+            &layout,
+            Scale::ONE,
+            &theme(),
+            &mut Region::new(),
+        );
+        assert!(on_icon, "{name}");
+        let menu = desktop.menu(true);
+        let refused = ejects.as_ref().err().copied();
+        assert_eq!(
+            offered(&menu, "Eject"),
+            Some((refused.is_none(), refused.map(String::from))),
+            "{name}"
+        );
+        assert_eq!(
+            offered(&menu, "Move to Trash"),
+            Some((false, Some(String::from(REASON_DRIVE_NOT_TRASHED))))
+        );
+        let ejected = match ejects {
+            Ok(act) => DesktopAction::Volume(act),
+            Err(reason) => DesktopAction::Refuse(GestureRefusal::new(
+                tairix_util::utf8::refusal_headline(name, "ejected"),
+                reason,
+            )),
+        };
+        assert_eq!(
+            desktop.command(PinboardCommand::Eject, &layout, &[]).action,
+            Some(ejected)
+        );
+        assert_eq!(
+            desktop
+                .command(PinboardCommand::MoveToTrash, &layout, &[])
+                .action,
+            Some(DesktopAction::Refuse(GestureRefusal::new(
+                tairix_util::utf8::refusal_headline(name, "moved to the Trash"),
+                REASON_DRIVE_NOT_TRASHED,
+            )))
+        );
+    }
+}
+
+/// A retitle of a fixed drive the kernel refused the user for want of the
+/// authority is asked of an administrator through the desktop's own prompt,
+/// once and then awaited: a second meanwhile is refused as busy, a failed run
+/// is stated, and a declined or a done one says nothing.
+#[test]
+fn a_drive_retitle_refused_for_want_of_authority_asks_an_administrator() {
+    use tairix_abi::window_ipc::{AuthorisedOutcome, SystemTask};
+    use tairix_browse::mount::{MountDone, ADMINISTRATOR_BUSY, ADMINISTRATOR_FAILED};
+    let mut desktop = Desktop::new(FakeDir(holding(vec![])), home()).acting_for(1000);
+    desktop.relist();
+    let _ = desktop.show_drives(DesktopDrives::default().with(DriveClass::Fixed, true));
+    let mut fixed = attached("/Storage/Data", VolumeClass::Local, ([3; 16], [3; 16]));
+    fixed.facts.titled = true;
+    let facts = fixed.facts.clone();
+    assert!(mounted(&mut desktop, vec![fixed]).0);
+    let retitle = || {
+        MountAct::retitle(&facts, "Data", Some(1000), "Archive")
+            .expect("the user may ask")
+            .expect("a change")
+    };
+    let refused = |act| MountDone {
+        act,
+        answer: Err(Errno::PermissionDenied),
+    };
+
+    desktop.volume_done(refused(retitle()));
+    assert_eq!(desktop.take_refusal(), None, "asked, not refused");
+    let Some(SystemTask::Retitle(words)) = desktop.take_administrator_ask() else {
+        panic!("an administrator is asked to retitle it");
+    };
+    assert_eq!(
+        words.argv().iter().collect::<Vec<_>>(),
+        [volume_root([3; 16]).as_str(), "Archive", "Data"]
+    );
+    assert_eq!(desktop.take_administrator_ask(), None, "asked once");
+
+    desktop.volume_done(refused(retitle()));
+    let busy = retitle().refused(ADMINISTRATOR_BUSY);
+    assert_eq!(
+        desktop.take_refusal(),
+        Some(GestureRefusal::new(busy.headline, busy.reason)),
+        "one question at a time"
+    );
+
+    desktop.administrator_answered(AuthorisedOutcome::Ran { exit_code: 1 });
+    let failed = retitle().refused(ADMINISTRATOR_FAILED);
+    assert_eq!(
+        desktop.take_refusal(),
+        Some(GestureRefusal::new(failed.headline, failed.reason))
+    );
+    for outcome in [
+        AuthorisedOutcome::Declined,
+        AuthorisedOutcome::Ran { exit_code: 0 },
+    ] {
+        desktop.volume_done(refused(retitle()));
+        assert!(desktop.take_administrator_ask().is_some());
+        desktop.administrator_answered(outcome);
+        assert_eq!(desktop.take_refusal(), None, "{outcome:?} says nothing");
+    }
+    // Another refusal is the user's to read, and owes no question.
+    desktop.volume_done(MountDone {
+        act: retitle(),
+        answer: Err(Errno::Busy),
+    });
+    assert!(desktop.take_refusal().is_some());
+    assert_eq!(desktop.take_administrator_ask(), None);
+}
+
+/// A drive offers its title where its viewer may retitle the volume: its row
+/// opens a field on the title, whose commit retitles it through the one check;
+/// otherwise the row is refused with the reason, and so is a commit.
+#[test]
+fn a_drive_offers_its_title_where_its_viewer_may_retitle_it() {
+    use tairix_browse::places::REASON_UNTITLED_FORMAT;
+    let mut desktop = Desktop::new(FakeDir(holding(vec![])), home()).acting_for(1000);
+    desktop.relist();
+    let shown = DesktopDrives::default().with(DriveClass::Fixed, true);
+    let _ = desktop.show_drives(shown);
+    let mut titled = stick();
+    titled.facts.titled = true;
+    titled.facts.title = String::from("Holiday");
+    let fixed = attached("/Storage/Data", VolumeClass::Local, ([3; 16], [3; 16]));
+    assert!(mounted(&mut desktop, vec![titled, fixed]).0);
+    let layout = layout_of(&desktop);
+    for (identity, retitles) in [(STICK, true), ([3; 16], false)] {
+        let at = position(&desktop, &volume_root(identity));
+        assert!(desktop.context_press(
+            icon_centre(&desktop, &layout, at),
+            &layout,
+            Scale::ONE,
+            &theme(),
+            &mut Region::new(),
+        ));
+        let menu = desktop.menu(true);
+        if !retitles {
+            assert_eq!(
+                offered(&menu, "Title"),
+                Some((false, Some(String::from(REASON_UNTITLED_FORMAT))))
+            );
+            assert_eq!(
+                desktop.retitle_selection("Data 2").action,
+                Some(DesktopAction::Refuse(GestureRefusal::new(
+                    tairix_util::utf8::refusal_headline("Data", "retitled"),
+                    REASON_UNTITLED_FORMAT,
+                )))
+            );
+            continue;
+        }
+        let row = menu
+            .rows()
+            .iter()
+            .find(|row| row.drawn().label() == "Title")
+            .expect("the Title row");
+        let ChainChild::Entry {
+            id,
+            initial,
+            selected,
+        } = row.child()
+        else {
+            panic!("the Title row opens a field");
+        };
+        assert_eq!((initial.as_str(), selected.clone()), ("Holiday", 7..7));
+        assert_eq!(
+            PinboardCommand::from_item(*id),
+            Some(PinboardCommand::Title)
+        );
+        assert_eq!(row.id(), None, "choosing the row opens its field");
+        let Some(DesktopAction::Volume(MountAct::Retitle {
+            volume_id, titling, ..
+        })) = desktop.retitle_selection("Photos").action
+        else {
+            panic!("a retitle");
+        };
+        assert_eq!(
+            (volume_id, titling.title.as_str(), titling.retitler),
+            (STICK, "Photos", tairix_browse::Retitler::AtTheSeat)
+        );
+        assert_eq!(
+            desktop.retitle_selection("Holiday").action,
+            None,
+            "the title it records asks nothing"
+        );
+    }
+}
+
+/// A drive keeps its place under its volume while the volume is away: the
+/// record's first read forgets no place a drive not attached keeps, the drive
+/// stands there once its volume returns, and its going forgets nothing.
+#[test]
+fn a_drive_keeps_its_place_while_its_volume_is_away() {
+    let mut desktop = desktop_of(vec![file("notes.txt")]);
+    let place = Placed {
+        id: FileId::NONE,
+        at: Place {
+            across: 0,
+            down: PLACE_UNITS,
+            from: IconFlow::Leading,
+        },
+        order: 0,
+    };
+    let mut live = Arrangement::default();
+    live.make(&ArrangementEdit::Set(vec![(
+        volume_root(STICK),
+        Some(place),
+    )]))
+    .expect("room");
+    let layout = layout_of(&desktop);
+    desktop.adopt_arrangement(&live, true, &layout, &mut Region::new());
+    assert!(
+        desktop.take_arrangement_edits().is_empty(),
+        "nothing forgotten"
+    );
+    assert!(mounted(&mut desktop, vec![stick()]).0);
+    let drive = position(&desktop, &volume_root(STICK));
+    assert_eq!(
+        desktop.bounds_for_test(&layout, drive),
+        Some(cell(&layout, 1)),
+        "standing where it was put"
+    );
+    assert!(mounted(&mut desktop, Vec::new()).0);
+    assert!(
+        desktop.take_arrangement_edits().is_empty(),
+        "nor as it goes"
+    );
+}
+
+/// The mount table is read one read at a time, with one more owed at most: a
+/// failed read leaves the one owed, and a refused one is owed again.
+#[test]
+fn the_mount_table_is_read_once_at_a_time_with_one_more_owed() {
+    let mut desktop = desktop_of(vec![]);
+    assert!(!desktop.take_mount_read(), "nothing moved");
+    desktop.mounts_moved();
+    desktop.mounts_moved();
+    assert!(desktop.take_mount_read());
+    desktop.mounts_moved();
+    assert!(!desktop.take_mount_read(), "one under way");
+    assert!(!desktop.adopt_mounts(None, layout_of, &mut Region::new()));
+    assert!(desktop.take_mount_read(), "the one owed");
+    desktop.mount_read_refused();
+    assert!(desktop.take_mount_read(), "a refused read is owed again");
+    assert!(!desktop.take_mount_read());
+}
+
+/// A shortcut spelled from the root it names, which no walk follows, is
+/// reached at its target: a bundle launched by its view path, a folder opened
+/// where it is.
+#[test]
+fn a_shortcut_spelled_from_its_root_is_reached_at_its_target() {
+    let mut desktop = desktop_of(vec![
+        link(
+            "Chess",
+            LinkTarget::Bundle,
+            "System:/Applications/chess.app",
+        ),
+        link("Work", LinkTarget::Directory, "Users:/ada/Documents/Work"),
+    ]);
+    let (chess, work) = (position(&desktop, "Chess"), position(&desktop, "Work"));
+    assert_eq!(
+        opened(&mut desktop, chess, 0),
+        Some(DesktopAction::Activate(DesktopActivation::Launch {
+            run_path: "/System/Applications/chess.app/Run".to_string(),
+            label: "chess".to_string(),
+            document: None,
+        }))
+    );
+    assert_eq!(
+        opened(&mut desktop, work, 10_000_000_000),
+        Some(DesktopAction::Activate(DesktopActivation::OpenFolder {
+            path: "/Users/ada/Documents/Work".to_string(),
+        }))
+    );
+}
+
+/// The icons a desktop has selected, low first.
+fn chosen(desktop: &Desktop<FakeDir>) -> Vec<usize> {
+    desktop.selection().iter().collect()
+}
+
+/// A press on the backdrop with `modifiers`, dragged out to `to` and, unless
+/// `held`, let go there; answers the damage the drag reported.
+fn band_to(
+    desktop: &mut Desktop<FakeDir>,
+    layout: &GridView,
+    modifiers: tairix_input::Modifiers,
+    to: Point,
+    held: bool,
+) -> Region {
+    desktop.press(
+        EMPTY_DESKTOP,
+        modifiers,
+        layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
+    damage_of(|damage| {
+        desktop.follow_press(to, true, layout, Scale::ONE, &theme(), damage);
+        if !held {
+            desktop.follow_press(to, false, layout, Scale::ONE, &theme(), damage);
+        }
+    })
+}
+
+/// The far corner of the cell `index` stands on.
+fn far_corner(layout: &GridView, index: usize) -> Point {
+    let tile = cell(layout, index);
+    Point::new(tile.right() - 1, tile.bottom() - 1)
+}
+
+const CTRL: tairix_input::Modifiers = tairix_input::Modifiers {
+    shift: false,
+    ctrl: true,
+    alt: false,
+    meta: false,
+};
+
+const SHIFT: tairix_input::Modifiers = tairix_input::Modifiers {
+    shift: true,
+    ctrl: false,
+    alt: false,
+    meta: false,
+};
+
+/// A band dragged from the backdrop selects every icon it touches and none it
+/// does not, keeps them once let go, and is drawn only while it is held.
+#[test]
+fn a_band_dragged_over_icons_selects_those_it_touches() {
+    let mut desktop = desktop_of(vec![file("a"), file("b"), file("c"), file("d")]);
+    let layout = layout_of(&desktop);
+    band_to(
+        &mut desktop,
+        &layout,
+        tairix_input::Modifiers::default(),
+        far_corner(&layout, 1),
+        true,
+    );
+    assert_eq!(chosen(&desktop), [0, 1]);
+    assert!(desktop.band().is_some(), "drawn while held");
+    desktop.follow_press(
+        far_corner(&layout, 1),
+        false,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        &mut Region::new(),
+    );
+    assert_eq!(chosen(&desktop), [0, 1], "kept once let go");
+    assert_eq!(desktop.band(), None);
+    assert_eq!(
+        desktop.selected(),
+        None,
+        "no one icon is chosen among several"
+    );
+}
+
+/// A press that never travels past the drag slop draws no band and selects
+/// nothing.
+#[test]
+fn a_band_short_of_the_drag_slop_selects_nothing() {
+    let mut desktop = desktop_of(vec![file("a"), file("b")]);
+    let layout = layout_of(&desktop);
+    let near = Point::new(EMPTY_DESKTOP.x + 1, EMPTY_DESKTOP.y + 1);
+    band_to(
+        &mut desktop,
+        &layout,
+        tairix_input::Modifiers::default(),
+        near,
+        true,
+    );
+    assert_eq!(desktop.band(), None);
+    assert!(chosen(&desktop).is_empty());
+}
+
+/// With Control held the band adds to what the press kept, and shrinking it
+/// releases only what it took, never what was kept.
+#[test]
+fn a_band_with_control_adds_to_the_selection_the_press_kept() {
+    let mut desktop = desktop_of(vec![file("a"), file("b"), file("c"), file("d")]);
+    let layout = layout_of(&desktop);
+    press_at(&mut desktop, &layout, centre_of(&layout, 3), 0);
+    band_to(&mut desktop, &layout, CTRL, far_corner(&layout, 1), true);
+    assert_eq!(chosen(&desktop), [0, 1, 3]);
+    desktop.follow_press(
+        far_corner(&layout, 0),
+        true,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        &mut Region::new(),
+    );
+    assert_eq!(chosen(&desktop), [0, 3], "shrunk off b, d kept");
+}
+
+/// Escape while a band is held takes back what it selected.
+#[test]
+fn escape_takes_back_what_the_band_selected() {
+    let mut desktop = desktop_of(vec![file("a"), file("b"), file("c"), file("d")]);
+    let layout = layout_of(&desktop);
+    press_at(&mut desktop, &layout, centre_of(&layout, 3), 0);
+    band_to(&mut desktop, &layout, CTRL, far_corner(&layout, 1), true);
+    desktop.key(
+        Key::Named(NamedKey::Escape),
+        true,
+        &layout,
+        &[],
+        &mut Region::new(),
+    );
+    assert_eq!(chosen(&desktop), [3]);
+    assert_eq!(desktop.band(), None);
+}
+
+/// A step of the band repaints the icons whose mark it changed and the band's
+/// own edges, never an icon it left as it was.
+#[test]
+fn a_band_repaints_only_what_it_changed() {
+    let mut desktop = desktop_of(vec![file("a"), file("b"), file("c"), file("d")]);
+    let layout = layout_of(&desktop);
+    band_to(
+        &mut desktop,
+        &layout,
+        tairix_input::Modifiers::default(),
+        far_corner(&layout, 0),
+        true,
+    );
+    let step = damage_of(|damage| {
+        desktop.follow_press(
+            far_corner(&layout, 1),
+            true,
+            &layout,
+            Scale::ONE,
+            &theme(),
+            damage,
+        );
+    });
+    assert!(step.intersects(cell(&layout, 1)), "b was marked");
+    assert!(!step.intersects(cell(&layout, 3)), "d was not touched");
+}
+
+/// Control toggles an icon in the selection and Shift adds one, each leaving
+/// the rest selected.
+#[test]
+fn control_toggles_and_shift_adds_an_icon() {
+    let mut desktop = desktop_of(vec![file("a"), file("b"), file("c")]);
+    let layout = layout_of(&desktop);
+    let press = |desktop: &mut Desktop<FakeDir>, index, modifiers| {
+        desktop.press(
+            centre_of(&layout, index),
+            modifiers,
+            &layout,
+            Scale::ONE,
+            &theme(),
+            0,
+            &[],
+            &mut Region::new(),
+        );
+        desktop.follow_press(
+            centre_of(&layout, index),
+            false,
+            &layout,
+            Scale::ONE,
+            &theme(),
+            &mut Region::new(),
+        );
+    };
+    press(&mut desktop, 0, tairix_input::Modifiers::default());
+    press(&mut desktop, 2, SHIFT);
+    assert_eq!(chosen(&desktop), [0, 2]);
+    press(&mut desktop, 0, CTRL);
+    assert_eq!(chosen(&desktop), [2]);
+}
+
+/// A press inside a selection of several keeps it, and a release that did not
+/// travel collapses it to the icon pressed.
+#[test]
+fn a_still_press_inside_several_collapses_them_to_the_icon() {
+    let mut desktop = desktop_of(vec![file("a"), file("b"), file("c"), file("d")]);
+    let layout = layout_of(&desktop);
+    band_to(
+        &mut desktop,
+        &layout,
+        tairix_input::Modifiers::default(),
+        far_corner(&layout, 2),
+        false,
+    );
+    assert_eq!(chosen(&desktop), [0, 1, 2]);
+    press_at(&mut desktop, &layout, centre_of(&layout, 1), 10_000_000_000);
+    assert_eq!(chosen(&desktop), [0, 1, 2], "kept while held");
+    desktop.follow_press(
+        centre_of(&layout, 1),
+        false,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        &mut Region::new(),
+    );
+    assert_eq!(chosen(&desktop), [1]);
+}
+
+/// Dragging one of several selected icons carries every one of them by the
+/// same distance.
+#[test]
+fn dragging_one_of_several_carries_them_all() {
+    let mut desktop = desktop_of(vec![file("a"), file("b"), file("c")]);
+    let layout = layout_of(&desktop);
+    band_to(
+        &mut desktop,
+        &layout,
+        tairix_input::Modifiers::default(),
+        far_corner(&layout, 1),
+        false,
+    );
+    let (a, b, c) = (
+        bounds(&desktop, &layout, 0),
+        bounds(&desktop, &layout, 1),
+        bounds(&desktop, &layout, 2),
+    );
+    carry(&mut desktop, &layout, 0, (300, 40));
+    let moved = |was: Rect, now: Rect| (now.left() - was.left(), now.top() - was.top());
+    let shift = moved(a, bounds(&desktop, &layout, 0));
+    assert_ne!(shift, (0, 0), "a moved");
+    assert_eq!(
+        moved(b, bounds(&desktop, &layout, 1)),
+        shift,
+        "b moved with it"
+    );
+    assert_eq!(bounds(&desktop, &layout, 2), c, "c, not selected, stayed");
+    assert_eq!(chosen(&desktop), [0, 1], "the selection rides along");
+}
+
+/// A secondary press inside a selection of several keeps it, and the menu's
+/// *Open* says why it does not open them.
+#[test]
+fn a_menu_over_several_icons_says_why_it_opens_none() {
+    let mut desktop = desktop_of(vec![file("a"), file("b"), file("c")]);
+    let layout = layout_of(&desktop);
+    band_to(
+        &mut desktop,
+        &layout,
+        tairix_input::Modifiers::default(),
+        far_corner(&layout, 1),
+        false,
+    );
+    let on_icon = desktop.context_press(
+        centre_of(&layout, 1),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        &mut Region::new(),
+    );
+    assert!(on_icon);
+    assert_eq!(chosen(&desktop), [0, 1]);
+    let menu = desktop.menu(true);
+    assert_eq!(
+        offered(&menu, "Open"),
+        Some((false, Some(String::from(REASON_SEVERAL))))
+    );
+    let opened = desktop.command(PinboardCommand::Open, &layout, &[]).action;
+    assert!(
+        matches!(&opened, Some(DesktopAction::Refuse(refusal)) if refusal.detail() == REASON_SEVERAL),
+        "{opened:?}"
+    );
+}
+
+/// The band is drawn where it lies, over the backdrop, and confined to the
+/// area repainted.
+#[test]
+fn the_band_is_drawn_where_it_lies() {
+    let mut desktop = desktop_of(vec![file("a")]);
+    let layout = layout_of(&desktop);
+    let to = Point::new(400, 300);
+    let draw = |desktop: &Desktop<FakeDir>, area: Rect| {
+        let mut surface = Surface::new(800, 600).expect("a surface");
+        desktop.render(
+            &mut surface,
+            &layout,
+            Scale::ONE,
+            &theme(),
+            &mut NoArtwork,
+            area,
+            None,
+        );
+        surface
+    };
+    let bare = draw(&desktop, work_area());
+    band_to(
+        &mut desktop,
+        &layout,
+        tairix_input::Modifiers::default(),
+        to,
+        true,
+    );
+    let banded = draw(&desktop, work_area());
+    let inside = Rect::new(350, 250, 10, 10);
+    assert_ne!(
+        pixels_in(&bare, inside),
+        pixels_in(&banded, inside),
+        "the band tints its inside"
+    );
+    let clipped = draw(&desktop, Rect::new(0, 0, 300, 600));
+    assert_eq!(
+        pixels_in(&clipped, inside),
+        pixels_in(&bare, inside),
+        "nothing outside the area"
+    );
 }

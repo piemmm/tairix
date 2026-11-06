@@ -3,7 +3,7 @@ extern crate std;
 use alloc::vec::Vec;
 use std::vec;
 
-use tairix_abi::input::{KeyInput, KeyValue};
+use tairix_abi::input::{KeyInput, KeyValue, PhysicalKey};
 
 use super::KeyboardDecoder;
 use crate::descriptor::{CollectionIndex, ReportDescriptor};
@@ -55,6 +55,21 @@ fn a_shifted_key_resolves_under_the_shift_typed_with_it() {
         }
     ));
     assert!(matches!(sink.keys[1], KeyInput::ModifiersChanged { modifiers } if !modifiers.shift));
+}
+
+#[test]
+fn a_boot_report_types_a_chords_symbol_on_the_key_it_was_typed_on() {
+    // Meta and Shift held with the 3 key: the layout types `#`, and the key is
+    // still the 3 key, down and up.
+    let model = boot::keyboard().expect("boot layout");
+    let mut keyboard = decoder(&model);
+    let (_, sink) = feed(&mut keyboard, &model, &[0x0A, 0, 0x20, 0, 0, 0, 0, 0]);
+    let pressed = sink.keys.last().expect("the key edge");
+    assert_eq!(pressed.key(), Some(KeyValue::Char('#')));
+    assert_eq!(pressed.physical(), Some(PhysicalKey::DIGIT_3));
+    assert!(pressed.modifiers().meta && pressed.modifiers().shift);
+    let (_, sink) = feed(&mut keyboard, &model, &[0; 8]);
+    assert_eq!(sink.keys[0].physical(), Some(PhysicalKey::DIGIT_3));
 }
 
 #[test]
@@ -130,6 +145,20 @@ fn a_bitmap_keyboard_holds_every_key_its_bits_name() {
     report[1] = 1 << 4 | 1 << 5;
     let (_, sink) = feed(&mut keyboard, &model, &report);
     assert_eq!(pressed_chars(&sink), ['a', 'b']);
+}
+
+#[test]
+fn a_bitmap_report_names_each_key_by_its_usage() {
+    let model = ReportDescriptor::parse(&nkro()).expect("parses");
+    let mut keyboard = decoder(&model);
+    let mut report = vec![0u8; 14];
+    // Usage `n` is bit `n` of the bitmap after the modifier byte: `A` (0x04)
+    // and the space bar (0x2C).
+    report[1] = 1 << 4;
+    report[6] = 1 << 4;
+    let (_, sink) = feed(&mut keyboard, &model, &report);
+    let physical: Vec<_> = sink.keys.iter().filter_map(KeyInput::physical).collect();
+    assert_eq!(physical, [PhysicalKey::A, PhysicalKey::SPACE]);
 }
 
 /// A keyboard reporting under ID 6 beside a vendor collection under ID 1: the

@@ -5,13 +5,18 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use alloc::boxed::Box;
 use tairix_abi::blkio::{BlkDeviceName, BlkIoCounters, BlkMedium, BlkTransport};
-use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
+use tairix_abi::driver::filesystem::{MountFlags, VolumeStats, VolumeTitle};
 use tairix_abi::sysinfo::{
     MountAvailability, MountRecord, MountVolumeState, VolumeHealth, VolumeIoStatsRecord,
 };
+use tairix_geometry::{Rect, Region};
+use tairix_input::{Key, Modifiers, NamedKey};
 
-use super::{Drive, DriveChange, DrivePanels, DriveSample};
+use super::{Drive, DriveChange, DrivePanels, DriveSample, TitleKeyed};
+use crate::mount::{MountAct, Titling};
+use crate::places::Retitler;
 
 /// An `NVMe` namespace.
 const NVME: BlkMedium = BlkMedium::of_transport(BlkTransport::Nvme);
@@ -64,6 +69,135 @@ fn sample(free: u64, service: Option<VolumeIoStatsRecord>, at: u64) -> DriveSamp
         service,
         at_ns: at,
     }
+}
+
+/// The fixed disk's volume at `/Storage/Backup` read at `at`, recording
+/// `title` in a format that takes one.
+fn titled_sample(title: &str, at: u64) -> DriveSample {
+    DriveSample {
+        mount: Some(
+            record(10, MountAvailability::Available)
+                .with_title(VolumeTitle::new(title).expect("a title"))
+                .with_titled(true),
+        ),
+        service: None,
+        at_ns: at,
+    }
+}
+
+/// `key` fed to `drive`'s *Title* field.
+fn keyed(drive: &mut Drive, key: Key) -> TitleKeyed {
+    drive.title_key(
+        (key, Modifiers::default()),
+        Rect::new(0, 0, 200, 40),
+        &mut Region::new(),
+    )
+}
+
+/// A retitle moves what the section states, so the window lays it out again
+/// and its *Title* field follows.
+#[test]
+fn a_retitle_moves_the_layout() {
+    let mut drive = Drive::new().acting_for(Some(1000));
+    assert_eq!(
+        drive.adopt(&titled_sample("Backup", 0)),
+        DriveChange::Layout
+    );
+    assert_eq!(drive.title().text(), "Backup");
+    assert_eq!(
+        drive.adopt(&titled_sample("Backup", SECOND)),
+        DriveChange::Nothing
+    );
+    assert_eq!(
+        drive.adopt(&titled_sample("Photos", 2 * SECOND)),
+        DriveChange::Layout,
+        "a title is a fact the section states"
+    );
+    assert_eq!(drive.title().text(), "Photos");
+}
+
+/// The *Title* field commits through the one check: what was committed shows
+/// until a reading says what the volume records, `Escape` puts the title as
+/// read back, and a refused commit keeps the keyboard.
+#[test]
+fn the_title_field_commits_through_the_one_check() {
+    let mut drive = Drive::new().acting_for(Some(1000));
+    let _ = drive.adopt(&titled_sample("Backup", 0));
+    assert_eq!(
+        keyed(&mut drive, Key::Char('x')),
+        TitleKeyed::Ignored,
+        "not until it holds the keyboard"
+    );
+    assert!(drive.begin_title());
+    assert!(!drive.begin_title(), "it holds it already");
+    for ch in "s2".chars() {
+        assert_eq!(keyed(&mut drive, Key::Char(ch)), TitleKeyed::Typed);
+    }
+    assert_eq!(
+        keyed(&mut drive, Key::Named(NamedKey::Enter)),
+        TitleKeyed::Retitle(MountAct::Retitle {
+            volume_id: [0x5f; 16],
+            name: alloc::string::String::from("Backup"),
+            titling: Box::new(Titling {
+                title: VolumeTitle::new("Backups2").expect("a title"),
+                retitler: Retitler::Administrator,
+            }),
+        })
+    );
+    assert!(!drive.is_titling(), "a commit hands the keyboard back");
+    assert_eq!(drive.title().text(), "Backups2", "until a reading says");
+    assert_eq!(
+        drive.adopt(&titled_sample("Backup", SECOND)),
+        DriveChange::Layout,
+        "a reading after a refused retitle puts the title back"
+    );
+    assert_eq!(drive.title().text(), "Backup");
+
+    assert!(drive.begin_title());
+    let _ = keyed(&mut drive, Key::Char('!'));
+    assert_eq!(
+        keyed(&mut drive, Key::Named(NamedKey::Escape)),
+        TitleKeyed::Ended
+    );
+    assert_eq!(
+        (drive.is_titling(), drive.title().text()),
+        (false, "Backup")
+    );
+    assert!(drive.begin_title());
+    assert_eq!(
+        keyed(&mut drive, Key::Named(NamedKey::Enter)),
+        TitleKeyed::Ended,
+        "an unchanged title asks nothing"
+    );
+
+    assert!(drive.begin_title());
+    for _ in 0..127 {
+        let _ = keyed(&mut drive, Key::Char('\u{e9}'));
+    }
+    assert_eq!(
+        keyed(&mut drive, Key::Named(NamedKey::Enter)),
+        TitleKeyed::Refused,
+        "longer than any disk records"
+    );
+    assert!(drive.is_titling(), "a refused commit keeps the keyboard");
+    assert_eq!(
+        keyed(&mut drive, Key::Named(NamedKey::Tab)),
+        TitleKeyed::Ended
+    );
+}
+
+/// A title its viewer may not change takes no keyboard: one read for no one,
+/// and one whose format keeps no title.
+#[test]
+fn a_title_its_viewer_may_not_change_takes_no_keyboard() {
+    let mut anonymous = Drive::new();
+    let _ = anonymous.adopt(&titled_sample("Backup", 0));
+    assert!(anonymous.title().is_read_only());
+    assert!(!anonymous.begin_title());
+    let mut untitled = Drive::new().acting_for(Some(1000));
+    let _ = untitled.adopt(&sample(10, None, 0));
+    assert!(untitled.title().is_read_only());
+    assert!(!untitled.begin_title());
 }
 
 #[test]

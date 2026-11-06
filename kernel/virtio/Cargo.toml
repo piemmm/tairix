@@ -21,6 +21,10 @@ workspace = true
 [dependencies]
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 tairix-caps = { path = "../../lib/caps", version = "=0.0.0" }
+# The table the host recovers a dropped slab's buffer from: a hash map over
+# the host's own slot stamps, whose insertion refuses an exhausted heap.
+tairix-collections = { path = "../../lib/collections", version = "=0.0.0" }
+tairix-hash = { path = "../../lib/hash", version = "=0.0.0" }
 # The bus-agnostic virtio protocol (Transport, SplitQueue, DmaSlab,
 # VirtioHost) and the `PciTransportWindows` transport-construction seam the
 # provisioning walks assemble. The walks are generic over a
@@ -47,3 +51,5 @@ tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }
 # `host-tests` feature so production builds never link them
 # (mirrors `tairix-kernel`).
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }
+# The metered allocator a host test refuses an exhausted heap's requests by.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

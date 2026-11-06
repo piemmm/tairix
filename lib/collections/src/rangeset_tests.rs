@@ -32,22 +32,36 @@ fn assert_canonical(set: &RangeSet<u64>) {
 #[test]
 fn an_insert_absorbs_every_range_it_touches() {
     let mut set: RangeSet<u64> = RangeSet::new();
-    set.insert(10..15);
-    set.insert(20..25);
-    set.insert(30..35);
+    set.insert(10..15).unwrap();
+    set.insert(20..25).unwrap();
+    set.insert(30..35).unwrap();
     assert_eq!(ranges(&set), [(10, 15), (20, 25), (30, 35)]);
     // Bridges the first two and touches the third's start.
-    set.insert(15..30);
+    set.insert(15..30).unwrap();
     assert_eq!(ranges(&set), [(10, 35)]);
+    assert_canonical(&set);
+}
+
+#[test]
+fn an_insertion_reuses_the_record_of_what_it_touches() {
+    let mut set: RangeSet<u64> = RangeSet::new();
+    set.insert(10..15).unwrap();
+    set.insert(20..25).unwrap();
+    // Nothing reaches 5 from below, so the first range above is re-filed
+    // under the union's start and the next absorbed into it.
+    set.insert(5..21).unwrap();
+    assert_eq!(ranges(&set), [(5, 25)]);
+    assert_eq!(set.covering(5), Some(5..25));
+    assert_eq!(set.covered(), 20);
     assert_canonical(&set);
 }
 
 #[test]
 fn adjacent_ranges_coalesce_from_either_side() {
     let mut set: RangeSet<u64> = RangeSet::new();
-    set.insert(100..101);
-    set.insert(101..102);
-    set.insert(99..100);
+    set.insert(100..101).unwrap();
+    set.insert(101..102).unwrap();
+    set.insert(99..100).unwrap();
     assert_eq!(ranges(&set), [(99, 102)]);
     assert_eq!(set.len(), 1);
     assert_eq!(set.covered(), 3);
@@ -57,9 +71,9 @@ fn adjacent_ranges_coalesce_from_either_side() {
 #[test]
 fn a_repeated_or_contained_insert_changes_nothing() {
     let mut set: RangeSet<u64> = RangeSet::new();
-    set.insert(8..12);
-    set.insert(9..11);
-    set.insert(8..12);
+    set.insert(8..12).unwrap();
+    set.insert(9..11).unwrap();
+    set.insert(8..12).unwrap();
     assert_eq!(ranges(&set), [(8, 12)]);
     assert_canonical(&set);
 }
@@ -67,12 +81,12 @@ fn a_repeated_or_contained_insert_changes_nothing() {
 #[test]
 fn an_empty_insert_or_removal_is_a_no_op() {
     let mut set: RangeSet<u64> = RangeSet::new();
-    set.insert(10..10);
-    set.insert(Range { start: 20, end: 10 });
+    set.insert(10..10).unwrap();
+    set.insert(Range { start: 20, end: 10 }).unwrap();
     assert!(set.is_empty() && set.covered() == 0);
-    set.insert(10..20);
-    set.remove(15..15);
-    set.remove(Range { start: 20, end: 10 });
+    set.insert(10..20).unwrap();
+    set.remove(15..15).unwrap();
+    set.remove(Range { start: 20, end: 10 }).unwrap();
     assert_eq!(ranges(&set), [(10, 20)]);
     assert_canonical(&set);
 }
@@ -80,18 +94,18 @@ fn an_empty_insert_or_removal_is_a_no_op() {
 #[test]
 fn a_removal_splits_the_range_it_cuts() {
     let mut set: RangeSet<u64> = RangeSet::new();
-    set.insert(0..100);
-    set.remove(40..60);
+    set.insert(0..100).unwrap();
+    set.remove(40..60).unwrap();
     assert_eq!(ranges(&set), [(0, 40), (60, 100)]);
     assert_eq!(set.covered(), 80);
     // A cut that clears a whole range leaves nothing of it behind.
-    set.remove(0..40);
+    set.remove(0..40).unwrap();
     assert_eq!(ranges(&set), [(60, 100)]);
     // A cut spanning several ranges takes them all, trimming the ends.
-    set.insert(0..20);
-    set.insert(30..60);
+    set.insert(0..20).unwrap();
+    set.insert(30..60).unwrap();
     assert_eq!(ranges(&set), [(0, 20), (30, 100)]);
-    set.remove(10..40);
+    set.remove(10..40).unwrap();
     assert_eq!(ranges(&set), [(0, 10), (40, 100)]);
     assert_canonical(&set);
 }
@@ -99,9 +113,9 @@ fn a_removal_splits_the_range_it_cuts() {
 #[test]
 fn a_removal_of_nothing_held_changes_nothing() {
     let mut set: RangeSet<u64> = RangeSet::new();
-    set.insert(10..20);
-    set.remove(0..10);
-    set.remove(20..30);
+    set.insert(10..20).unwrap();
+    set.remove(0..10).unwrap();
+    set.remove(20..30).unwrap();
     assert_eq!(ranges(&set), [(10, 20)]);
     assert_canonical(&set);
 }
@@ -109,7 +123,7 @@ fn a_removal_of_nothing_held_changes_nothing() {
 #[test]
 fn contains_and_covering_answer_for_the_whole_range() {
     let mut set: RangeSet<u64> = RangeSet::new();
-    set.insert(10..20);
+    set.insert(10..20).unwrap();
     assert!(set.contains(10) && set.contains(19));
     assert!(!set.contains(9) && !set.contains(20));
     assert_eq!(set.covering(15), Some(10..20));
@@ -119,8 +133,8 @@ fn contains_and_covering_answer_for_the_whole_range() {
 #[test]
 fn first_overlap_and_first_gap_split_a_query_between_two_owners() {
     let mut set: RangeSet<u64> = RangeSet::new();
-    set.insert(10..20);
-    set.insert(30..40);
+    set.insert(10..20).unwrap();
+    set.insert(30..40).unwrap();
     // Held parts are clamped to the query, gaps are what is left.
     assert_eq!(set.first_overlap(0..50), Some(10..20));
     assert_eq!(set.first_overlap(15..17), Some(15..17));
@@ -160,8 +174,8 @@ fn first_overlap_and_first_gap_split_a_query_between_two_owners() {
 #[test]
 fn pop_first_takes_the_lowest_range_and_discharges_it() {
     let mut set: RangeSet<u64> = RangeSet::new();
-    set.insert(30..35);
-    set.insert(10..12);
+    set.insert(30..35).unwrap();
+    set.insert(10..12).unwrap();
     assert_eq!(set.covered(), 7);
     assert_eq!(set.pop_first(), Some(10..12));
     assert_eq!(set.covered(), 5);
@@ -173,7 +187,7 @@ fn pop_first_takes_the_lowest_range_and_discharges_it() {
 #[test]
 fn clear_drops_everything_and_the_count_with_it() {
     let mut set: RangeSet<u64> = RangeSet::new();
-    set.insert(0..1000);
+    set.insert(0..1000).unwrap();
     assert_eq!(set.covered(), 1000);
     set.clear();
     assert!(set.is_empty() && set.covered() == 0 && set.iter().next().is_none());
@@ -183,9 +197,9 @@ fn clear_drops_everything_and_the_count_with_it() {
 #[test]
 fn iteration_is_ascending_from_both_ends() {
     let mut set: RangeSet<u64> = RangeSet::new();
-    set.insert(30..35);
-    set.insert(10..15);
-    set.insert(20..25);
+    set.insert(30..35).unwrap();
+    set.insert(10..15).unwrap();
+    set.insert(20..25).unwrap();
     let forward: Vec<u64> = set.iter().map(|held| held.start).collect();
     assert_eq!(forward, [10, 20, 30]);
     let backward: Vec<u64> = set.iter().rev().map(|held| held.start).collect();
@@ -202,13 +216,13 @@ fn a_run_costs_one_entry_however_many_elements_it_holds() {
     // rather than a thousand; the property is the entry count, not the run.
     let appended: u64 = if cfg!(miri) { 8 } else { 1_000 };
     let mut set: RangeSet<u64> = RangeSet::new();
-    set.insert(0..25_000_000_000);
+    set.insert(0..25_000_000_000).unwrap();
     assert_eq!(set.len(), 1);
     assert_eq!(set.covered(), 25_000_000_000);
     // Appending each further block *contiguously* still costs one entry,
     // because every insert coalesces into the one held run.
     for block in 25_000_000_000..25_000_000_000 + appended {
-        set.insert(block..block + 1);
+        set.insert(block..block + 1).unwrap();
     }
     assert_eq!(set.len(), 1, "a contiguous stream stays one entry");
     assert_eq!(set.covered(), 25_000_000_000 + appended);
@@ -218,8 +232,8 @@ fn a_run_costs_one_entry_however_many_elements_it_holds() {
 #[test]
 fn a_slot_keyed_set_coalesces_the_same_way() {
     let mut set: RangeSet<usize> = RangeSet::new();
-    set.insert(4..8);
-    set.insert(0..4);
+    set.insert(4..8).unwrap();
+    set.insert(0..4).unwrap();
     assert_eq!(set.len(), 1);
     assert_eq!(set.covering(7), Some(0..8));
     assert_eq!(set.covered(), 8);
@@ -228,13 +242,13 @@ fn a_slot_keyed_set_coalesces_the_same_way() {
 #[test]
 fn the_top_of_the_key_range_neither_wraps_nor_panics() {
     let mut set: RangeSet<u64> = RangeSet::new();
-    set.insert(u64::MAX - 4..u64::MAX);
+    set.insert(u64::MAX - 4..u64::MAX).unwrap();
     assert_eq!(set.covered(), 4);
     assert!(set.contains(u64::MAX - 1));
-    set.insert(u64::MAX - 8..u64::MAX - 4);
+    set.insert(u64::MAX - 8..u64::MAX - 4).unwrap();
     assert_eq!(ranges(&set), [(u64::MAX - 8, u64::MAX)]);
     assert_eq!(set.first_gap(0..u64::MAX), Some(0..u64::MAX - 8));
-    set.remove(u64::MAX - 6..u64::MAX - 2);
+    set.remove(u64::MAX - 6..u64::MAX - 2).unwrap();
     assert_eq!(
         ranges(&set),
         [(u64::MAX - 8, u64::MAX - 6), (u64::MAX - 2, u64::MAX)]
@@ -265,9 +279,9 @@ fn every_operation_matches_a_per_element_model() {
         let end = (start + len).min(WINDOW);
         let inserting = (raw >> 16) & 1 == 0;
         if inserting {
-            set.insert(start..end);
+            set.insert(start..end).unwrap();
         } else {
-            set.remove(start..end);
+            set.remove(start..end).unwrap();
         }
         for element in start..end {
             if inserting {
@@ -317,12 +331,43 @@ fn every_operation_matches_a_per_element_model() {
 #[test]
 fn one_element_of_separation_is_a_gap_and_closing_it_merges() {
     let mut set: RangeSet<u64> = RangeSet::new();
-    set.insert(1 << 20..1 << 21);
+    set.insert(1 << 20..1 << 21).unwrap();
     assert_eq!(set.len(), 1);
-    set.insert((1 << 21) + 1..(1 << 21) + 2);
+    set.insert((1 << 21) + 1..(1 << 21) + 2).unwrap();
     assert_eq!(set.len(), 2, "one element of separation is a gap");
-    set.insert(1 << 21..(1 << 21) + 1);
+    set.insert(1 << 21..(1 << 21) + 1).unwrap();
     assert_eq!(set.len(), 1, "closing the gap merges them");
     assert_eq!(set.covered(), (1 << 20) + 2);
     assert_canonical(&set);
+}
+
+/// What a set holds is counted with the room reserved and the records
+/// removals freed, and a shrink gives back what its ranges do not need.
+#[test]
+fn reserved_and_freed_room_is_counted_until_a_shrink_gives_it_back() {
+    let mut set: RangeSet<u64> = RangeSet::new();
+    assert_eq!(set.allocated_bytes(), 0, "an empty set holds nothing");
+    for run in 0..64u64 {
+        set.insert(run * 4..run * 4 + 2).unwrap();
+    }
+    set.try_shrink_to_fit().unwrap();
+    let fitted = set.allocated_bytes();
+    assert!(fitted > 0);
+    set.try_reserve(256).unwrap();
+    assert!(set.allocated_bytes() > fitted, "reserved room is held");
+    set.try_shrink_to_fit().unwrap();
+    assert_eq!(set.allocated_bytes(), fitted, "and given back");
+    assert_eq!(set.len(), 64);
+    assert_canonical(&set);
+    while set.pop_first().is_some() {}
+    assert!(
+        set.allocated_bytes() > 0,
+        "draining frees no record to the heap"
+    );
+    set.try_shrink_to_fit().unwrap();
+    assert_eq!(
+        set.allocated_bytes(),
+        0,
+        "an emptied set gives back everything"
+    );
 }

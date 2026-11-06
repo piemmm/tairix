@@ -115,6 +115,28 @@ impl TaskBridge {
         Some(window)
     }
 
+    /// Open `surface` as a top-level window at `origin` beneath `front` — the
+    /// window holding the keyboard, if any — and register it as a running
+    /// task titled `title`, leaving the keyboard and the bar's highlight where
+    /// they are. Returns `None`, changing nothing, on the same exhausted-id-space
+    /// refusal as [`open`](Self::open).
+    pub fn open_behind(
+        &mut self,
+        compositor: &mut Compositor,
+        taskbar: &mut Taskbar,
+        (origin, front): (Point, Option<WindowId>),
+        surface: Surface,
+        title: impl Into<String>,
+    ) -> Option<WindowId> {
+        let task = self.mint()?;
+        let window = compositor.add_window(origin, surface);
+        self.attach(taskbar, window, task, title);
+        if let Some(front) = front {
+            compositor.stack_below(window, front);
+        }
+        Some(window)
+    }
+
     /// Open a top-level window of client extent `client` at `origin` that a
     /// client has yet to present into, and register it as a running task
     /// titled `title` — **without** showing, raising, or focusing it.

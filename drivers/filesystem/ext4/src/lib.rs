@@ -74,8 +74,8 @@ pub use served::{Served, BIND_KEYS};
 pub use superblock::Generation;
 use superblock::{
     Layout, NoWrite, INCOMPAT_RECOVER, RO_COMPAT_METADATA_CSUM, SB_FEATURE_INCOMPAT,
-    SB_FEATURE_RO_COMPAT, SB_FREE_INODES, SB_STATE, SB_WTIME, STATE_VALID, SUPERBLOCK_LEN,
-    SUPERBLOCK_OFFSET,
+    SB_FEATURE_RO_COMPAT, SB_FREE_INODES, SB_STATE, SB_VOLUME_NAME, SB_WTIME, STATE_VALID,
+    SUPERBLOCK_LEN, SUPERBLOCK_OFFSET,
 };
 use txn::OpMark;
 
@@ -1972,8 +1972,24 @@ impl<B: Block> FilesystemSecurity for Ext4<B> {
 /// error.
 impl<B: Block> FilesystemAttrsProvider for Ext4<B> {}
 
-/// The superblock's volume name is not served.
-impl<B: Block> tairix_abi::driver::filesystem::FilesystemLabel for Ext4<B> {}
+/// The title is the superblock's volume name, published with the transaction
+/// a retitle joins, its checksum restamped as every superblock change's is.
+impl<B: Block> tairix_abi::driver::filesystem::FilesystemLabel for Ext4<B> {
+    fn label(&mut self) -> Result<tairix_abi::driver::filesystem::VolumeTitle, DriverError> {
+        superblock::volume_name(&self.sb)
+    }
+
+    fn set_label(
+        &mut self,
+        title: &tairix_abi::driver::filesystem::VolumeTitle,
+    ) -> Result<(), DriverError> {
+        let field = superblock::volume_name_of(title)?;
+        self.operation(|fs| {
+            fs.sb[SB_VOLUME_NAME..SB_VOLUME_NAME + field.len()].copy_from_slice(&field);
+            Ok(())
+        })
+    }
+}
 
 impl<B: Block> FilesystemStats for Ext4<B> {
     fn stats(&mut self) -> Result<VolumeStats, DriverError> {

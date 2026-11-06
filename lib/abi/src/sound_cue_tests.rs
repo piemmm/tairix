@@ -140,6 +140,23 @@ fn only_the_cue_service_account_is_the_cue_authority() {
     )));
 }
 
+/// The volume's feedback claims nothing the machine did, so it is an
+/// application's to cue, like any sound heard in its caller's own room.
+#[test]
+fn the_volumes_feedback_is_an_application_sound() {
+    let event = SoundEvent::VolumeFeedback;
+    assert_eq!(event.authority(), CueAuthority::Application);
+    assert_eq!(SoundEvent::from_name("volume_feedback"), Some(event));
+    for principal in [user(1000), user(LOGIN_UID), user(DEVMGR_UID)] {
+        assert!(!event.owned_by(&principal));
+    }
+    let request = CueRequest::Cue {
+        event,
+        answer: Answer::Started,
+    };
+    assert_eq!(CueRequest::from_bytes(&frame(&request)), Ok(request));
+}
+
 #[test]
 fn a_cue_round_trips_for_every_event_and_answer() {
     for event in SoundEvent::ALL {
@@ -186,7 +203,8 @@ fn a_malformed_cue_is_refused() {
     assert_eq!(flipped(6, 3), Err(Errno::OutOfRange));
     assert_eq!(flipped(7, 1), Err(Errno::BadMagic));
     assert_eq!(flipped(HEADER_LEN, 0), Err(Errno::OutOfRange));
-    assert_eq!(flipped(HEADER_LEN, 14), Err(Errno::OutOfRange));
+    let past = u8::try_from(SoundEvent::ALL.len() + 1).expect("an event's byte");
+    assert_eq!(flipped(HEADER_LEN, past), Err(Errno::OutOfRange));
     assert_eq!(flipped(HEADER_LEN + 1, 2), Err(Errno::OutOfRange));
     for at in HEADER_LEN + 2..CUE_REQUEST_LEN {
         assert_eq!(flipped(at, 1), Err(Errno::BadMagic), "reserved byte {at}");

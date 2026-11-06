@@ -1487,7 +1487,7 @@ mod tests {
     use crate::console::{ConsoleInputQueue, ConsoleRead, ConsoleWrite, NULL_CONSOLE_READ};
     use crate::test_sink::TestSink;
     use alloc::boxed::Box;
-    use tairix_abi::input::{KeyValue, Modifiers, NamedKeyCode};
+    use tairix_abi::input::{KeyValue, Modifiers, NamedKeyCode, PhysicalKey};
 
     impl SeatRegistry {
         /// One `kind` record off seat `seat_id` for `owner`: its length, or
@@ -1598,6 +1598,7 @@ mod tests {
         KeyInput::Pressed {
             key: KeyValue::Char(c),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::UNKNOWN,
         }
     }
 
@@ -2013,6 +2014,7 @@ mod tests {
         let release = KeyInput::Released {
             key: KeyValue::Char('a'),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::A,
         };
         assert_eq!(seat.inject(SEAT_PRIMARY, release), Ok(KeyInput::WIRE_LEN));
         let mut buf = [0u8; 8];
@@ -2087,6 +2089,7 @@ mod tests {
                 ctrl: true,
                 ..Modifiers::default()
             },
+            physical: PhysicalKey::from_usage(0x28),
         };
         assert_eq!(seat.inject(SEAT_PRIMARY, record), Ok(KeyInput::WIRE_LEN));
         let mut buf = [0u8; KeyInput::WIRE_LEN];

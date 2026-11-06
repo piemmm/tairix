@@ -20,19 +20,20 @@
 
 extern crate alloc;
 
-use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::ops::Bound;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use tairix_abi::{
     AppIdentity, CapabilitySummary, Errno, Origin, ProcId, SpawnSession, TrustDomain,
     ORIGIN_CONSOLE_NONE,
 };
 use tairix_caps::{CapabilitySet, CapabilityToken, RevocationEpoch};
+use tairix_collections::{OrderedMap, OrderedSet};
 use tairix_crypto::Ed25519PublicKey;
 use tairix_log::{Field, Sink};
-use tairix_util::fallible::collected;
+use tairix_util::fallible::{collected, copied};
 
 use crate::audit::{record, AuditEvent};
 use crate::charge::ResourceCharges;
@@ -216,13 +217,12 @@ impl Default for ProcName {
 /// [`Self::revoke`].
 ///
 /// Carries no [`Eq`]/[`PartialEq`]: nothing in the kernel compares a whole
-/// record, and the per-process I/O counters are live accounting state, not
-/// a value with a meaningful equality. A mutation of a record a thread or a
-/// syscall still shares copies it ([`CapTable::caps_for_mut`]), so the
-/// counters are [`Arc`]-shared [`AtomicU64`]s: the copy shares the same
-/// underlying counters rather than resetting a fresh pair, so an increment
-/// made through a snapshot still lands on the one total the registry's live
-/// entry reads back.
+/// record, and its accounting is live state, not a value with a meaningful
+/// equality. A mutation of a record a thread or a syscall still shares copies
+/// it ([`CapTable::caps_for_mut`]), so the accounting is one [`Arc`]-shared
+/// [`ResourceCharges`]: a copy shares it rather than starting afresh, so an
+/// increment made through a snapshot lands on the one total the table's live
+/// record reads back.
 #[derive(Clone, Debug)]
 pub struct TaskCapabilities {
     /// The **process** (thread group) this record authorises.
@@ -358,25 +358,11 @@ pub struct TaskCapabilities {
     /// so a per-console service may trust the origin to place its caller on
     /// a console. It confers no capability.
     console: u64,
-    /// Bytes actually transferred by this process's own `fs_read`
-    /// (and delegated-read) system calls: the count the secured VFS really
-    /// moved, never the length the caller asked for. Monotonic for the
-    /// process's lifetime and saturating rather than wrapping.
-    ///
-    /// `Arc<AtomicU64>` rather than a plain `u64` or a bare `AtomicU64`: a
-    /// syscall may be working off a snapshot of this record while a mutation
-    /// copies it (see the struct docs), so the counter must be a shared cell
-    /// every copy of one task's record points at. [`Self::record_bytes_read`]
-    /// then updates it through the shared `&TaskCapabilities` every syscall
-    /// handler already holds, with no additional lock on the file I/O hot
-    /// path.
-    io_bytes_read: Arc<AtomicU64>,
-    /// Bytes actually transferred by this process's own `fs_write` system
-    /// calls, mirroring [`Self::io_bytes_read`] in every respect but
-    /// direction.
-    io_bytes_written: Arc<AtomicU64>,
-    /// What the process holds against its object limits, shared by every
-    /// copy of its record for the same reason as [`Self::io_bytes_read`].
+    /// What the process holds against its object limits and the bytes its
+    /// own file calls have moved: one allocation, made at derivation and
+    /// shared by every copy of the record (see the struct docs), so a syscall
+    /// counts through the record it already holds, with no lock on the file
+    /// I/O path.
     charges: Arc<ResourceCharges>,
     /// Set when the table stops holding this record: see [`Self::is_current`].
     superseded: Supersession,
@@ -393,37 +379,25 @@ impl Clone for Supersession {
     }
 }
 
-/// Add `delta` to the value `counter` holds, clamping at [`u64::MAX`]
-/// rather than wrapping on overflow.
-///
-/// Ordering is [`Ordering::Relaxed`] throughout: the counter is a pure
-/// accounting total with no other memory access it must be ordered
-/// against, so the compare-and-swap loop only needs to converge on a
-/// single, consistent value, never to publish or observe unrelated state.
-fn saturating_fetch_add(counter: &AtomicU64, delta: u64) {
-    let mut current = counter.load(Ordering::Relaxed);
-    loop {
-        let next = current.saturating_add(delta);
-        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => return,
-            Err(observed) => current = observed,
-        }
-    }
-}
-
 impl TaskCapabilities {
     /// Derive a task's effective capabilities from its user grant and the
     /// verified manifest request.
     ///
     /// The effective set is the intersection of the two inputs. Emits exactly one
     /// [`AuditEvent::TaskCapabilitiesDerived`].
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`], auditing nothing, when the heap refuses the
+    /// record its accounting — the one allocation a record makes.
     pub fn derive<S: Sink + ?Sized>(
         process: ProcessId,
         owner: UserId,
         user_grant: CapabilitySet,
         manifest_request: CapabilitySet,
         audit: &S,
-    ) -> Self {
+    ) -> Result<Self, Errno> {
+        let charges = Arc::try_new(ResourceCharges::new()).map_err(|_| Errno::OutOfMemory)?;
         let effective = user_grant.intersection(&manifest_request);
         let mut task_buf = [0u8; 16];
         let task_field = format_hex_u64(process.0, &mut task_buf);
@@ -452,7 +426,7 @@ impl TaskCapabilities {
                 },
             ],
         );
-        Self {
+        Ok(Self {
             process,
             owner,
             primary_gid: GroupId::default(),
@@ -471,11 +445,9 @@ impl TaskCapabilities {
             app: None,
             start_time: 0,
             console: ORIGIN_CONSOLE_NONE,
-            io_bytes_read: Arc::new(AtomicU64::new(0)),
-            io_bytes_written: Arc::new(AtomicU64::new(0)),
-            charges: Arc::new(ResourceCharges::new()),
+            charges,
             superseded: Supersession::default(),
-        }
+        })
     }
 
     /// Whether this is still its process's live record: `false` once a
@@ -501,7 +473,7 @@ impl TaskCapabilities {
             self.supplementary_gids.len(),
             self.supplementary_gids.iter().copied(),
         )?;
-        let spawn_path = collected(self.spawn_path.len(), self.spawn_path.iter().copied())?;
+        let spawn_path = copied(&self.spawn_path)?;
         Some(Self {
             process: self.process,
             owner: self.owner,
@@ -521,8 +493,6 @@ impl TaskCapabilities {
             app: self.app,
             start_time: self.start_time,
             console: self.console,
-            io_bytes_read: Arc::clone(&self.io_bytes_read),
-            io_bytes_written: Arc::clone(&self.io_bytes_written),
             charges: Arc::clone(&self.charges),
             superseded: Supersession::default(),
         })
@@ -786,7 +756,7 @@ impl TaskCapabilities {
     /// [`Self::start_time`]-relative CPU time.
     #[must_use]
     pub fn io_bytes_read(&self) -> u64 {
-        self.io_bytes_read.load(Ordering::Relaxed)
+        self.charges.bytes_read()
     }
 
     /// Cumulative bytes this process has actually written through its own
@@ -796,7 +766,7 @@ impl TaskCapabilities {
     /// [`Self::io_bytes_read`] in every respect but direction.
     #[must_use]
     pub fn io_bytes_written(&self) -> u64 {
-        self.io_bytes_written.load(Ordering::Relaxed)
+        self.charges.bytes_written()
     }
 
     /// Attribute `n` more bytes transferred by this process's own
@@ -805,20 +775,18 @@ impl TaskCapabilities {
     /// Called once, from the one shared descriptor-read path in
     /// `kernel/core`, with the byte count the secured VFS actually moved —
     /// never the length the caller requested. Saturates at [`u64::MAX`]
-    /// rather than wrapping. Takes `&self` (not `&mut self`): the counter
-    /// is a plain [`Ordering::Relaxed`] atomic with no ordering relationship
-    /// to any other memory, so every concurrent reader of this task's
-    /// record — including the syscall path itself — can update it without
-    /// taking a write lock on the surrounding [`CapTable`].
+    /// rather than wrapping. Takes `&self`: the total is a relaxed atomic
+    /// every copy of the record shares, so the syscall path counts through
+    /// the record it holds without the [`CapTable`]'s write lock.
     pub fn record_bytes_read(&self, n: u64) {
-        saturating_fetch_add(&self.io_bytes_read, n);
+        self.charges.add_bytes_read(n);
     }
 
     /// Attribute `n` more bytes transferred by this process's own
     /// `fs_write` call to its running total. Mirrors
     /// [`Self::record_bytes_read`] in every respect but direction.
     pub fn record_bytes_written(&self, n: u64) {
-        saturating_fetch_add(&self.io_bytes_written, n);
+        self.charges.add_bytes_written(n);
     }
 
     /// What this process holds against the limits on the kernel objects it
@@ -835,11 +803,10 @@ impl TaskCapabilities {
     /// admit, then the verified set) would otherwise restart its totals
     /// mid-life, and fresh charge counters would hand the process its whole
     /// budget again while its objects still hold the old one.
-    /// [`CapTable::insert`] applies it at the one place a record replaces a
-    /// live entry, and only between records of the same task.
+    /// A replacement ([`CapTable::replace`], or [`CapTable::insert`] over a
+    /// live process) applies it at the one place a record replaces a live
+    /// entry, and only between records of the same task.
     fn adopt_accounting(&mut self, previous: &Self) {
-        self.io_bytes_read = Arc::clone(&previous.io_bytes_read);
-        self.io_bytes_written = Arc::clone(&previous.io_bytes_written);
         self.charges = Arc::clone(&previous.charges);
     }
 
@@ -1162,14 +1129,18 @@ impl tairix_abi::CapabilityQuery for TaskCapabilities {
 /// thread.
 ///
 /// The registry owns one record per **process** and the mapping from every
-/// thread to its process. Callers pass a freshly derived
-/// [`TaskCapabilities`] in via [`Self::insert`] (at process creation, after
-/// `TaskCapabilities::derive` has audited the intersection), add each further
-/// thread with [`Self::register_thread`], and tear down with
+/// thread to its process. A freshly derived [`TaskCapabilities`] enters
+/// through [`Self::admit`] (or [`Self::insert`], into the root session), each
+/// further thread through [`Self::register_thread`], and teardown is
 /// [`Self::remove_thread`] per thread and [`Self::remove`] when the last one
 /// goes. Lookups go through [`Self::caps_for`], which resolves the calling
 /// thread to its process, so a thread is authorised by exactly its process's
 /// record and revocation is never partial.
+///
+/// Every insertion is all or nothing: it makes every allocation it needs
+/// before it changes anything, so a heap that refuses one leaves the table as
+/// it was, and the caller answers `OutOfMemory` rather than the kernel
+/// aborting.
 ///
 /// # Why the thread↔process relation lives here
 ///
@@ -1180,9 +1151,10 @@ impl tairix_abi::CapabilityQuery for TaskCapabilities {
 ///
 /// # Synchronisation
 ///
-/// `CapTable` carries no interior mutability. The owning scope —
-/// `KernelState` in `kernel/core::init` — is responsible for whatever
-/// lock policy is appropriate (a reader-preferring `RwLock` mirrors
+/// `CapTable` takes no lock of its own, and changes nothing under a shared
+/// borrow but a group's job-control generation and its seal, each an atomic.
+/// The owning scope — `KernelState` in `kernel/core::init` — is responsible
+/// for whatever lock policy is appropriate (a reader-preferring `RwLock` mirrors
 /// what `Scheduler::tasks` already uses for the same shape of access
 /// pattern: many concurrent syscall-context readers, occasional
 /// task-creation writers). Pushing the lock outside the type keeps
@@ -1199,34 +1171,40 @@ impl tairix_abi::CapabilityQuery for TaskCapabilities {
 /// intersection-on-derive invariant in [`TaskCapabilities::derive`];
 /// the registry simply stores it. There is no "make this task root"
 /// shortcut and no implicit grant on lookup.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CapTable {
-    /// One record per process, keyed by the process (its leader's id).
+    /// One record per process, keyed by the process (its leader's id), in the
+    /// ascending order [`Self::iter`] pages a process list in.
     ///
     /// Shared, so a syscall's point-in-time snapshot ([`Self::snapshot_of`])
     /// and each thread's cached copy are reference counts rather than copies;
     /// a mutation copies a record any of them still holds and supersedes the
     /// held one ([`TaskCapabilities::is_current`]).
-    entries: BTreeMap<ProcessId, Arc<TaskCapabilities>>,
+    entries: OrderedMap<ProcessId, Arc<TaskCapabilities>>,
     /// Every live thread, mapped to the process it belongs to. A process's
     /// leader maps to its own process, so [`Self::process_of`] is a single
     /// lookup for leaders and additional threads alike.
-    threads: BTreeMap<TaskId, ProcessId>,
-    /// The reverse index: each process's live threads.
     ///
-    /// Held alongside [`Self::threads`] so a group-wide operation — the
-    /// thread-group exit, a process-directed signal — costs
-    /// `O(log n + threads)` instead of a scan across every thread on the
-    /// machine, which is what a system under load would actually pay. The two
-    /// indices are only ever updated together, by the four mutators below.
-    members: BTreeMap<ProcessId, ThreadGroup>,
+    /// Ordered, like every index here: which ids stay is up to what a user
+    /// keeps running, so a lookup costs the same however they fall, and
+    /// growth rebuilds nothing under the lock every credential read takes.
+    threads: OrderedMap<TaskId, ProcessId>,
+    /// Every live thread under its process, ordered so one process's threads
+    /// are one range: a group-wide walk — the thread-group exit, a
+    /// process-directed signal — costs `O(log n + threads)` rather than a scan
+    /// of every thread on the machine, and resumes past a thread that has
+    /// since left. Changed only with [`Self::threads`], by the mutators below.
+    grouped: OrderedSet<(ProcessId, TaskId)>,
+    /// Each process with a live thread: how many, the job-control generation
+    /// and level they run under, and whether a kill has sealed the group.
+    members: OrderedMap<ProcessId, ThreadGroup>,
     /// Each live process instance, by the [`ProcId`] its record carries.
     ///
     /// The one authority for whether an instance still exists, because it
     /// changes under the same lock as the record: a caller that finds an
     /// instance here while holding the table has found one whose teardown has
     /// not yet removed it.
-    instances: BTreeMap<ProcId, ProcessId>,
+    instances: OrderedMap<ProcId, ProcessId>,
     /// Which session each process belongs to, and which sessions are ending.
     ///
     /// Beside the records, under the same lock, so a process joins its session
@@ -1289,17 +1267,31 @@ impl JobGeneration {
     }
 }
 
-/// One process's live threads, the job-control generation they run under, and
-/// the scheduling level they run at.
-#[derive(Debug, Default)]
+/// One process's live threads: how many, the job-control generation they run
+/// under, the scheduling level they run at, and whether a kill has closed the
+/// group to new ones.
+#[derive(Debug)]
 struct ThreadGroup {
-    threads: BTreeSet<TaskId>,
+    /// Its threads in [`CapTable::grouped`].
+    threads: usize,
     job: AtomicU32,
     /// Shared, so a change outlasts the table lock it was found under.
     level: Arc<ProcessLevel>,
+    /// Set by [`CapTable::seal_group`]; a sealed group takes no thread.
+    sealed: AtomicBool,
 }
 
 impl ThreadGroup {
+    /// A group of its leader alone, running at `level`.
+    fn led(level: Arc<ProcessLevel>) -> Self {
+        Self {
+            threads: 1,
+            job: AtomicU32::new(0),
+            level,
+            sealed: AtomicBool::new(false),
+        }
+    }
+
     fn job(&self) -> JobGeneration {
         JobGeneration::from_bits(self.job.load(Ordering::Acquire))
     }
@@ -1319,82 +1311,114 @@ pub struct Removed {
 
 /// Why registering a thread against a process was refused.
 ///
-/// Both variants fail the registration closed: a thread that is not in the
+/// Each variant fails the registration closed: a thread that is not in the
 /// table resolves to no capability record at all, so it cannot issue a
 /// syscall, rather than being silently attached to the wrong process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ThreadRegisterError {
-    /// No capability record exists for the named process, so there is nothing
-    /// for the thread to be authorised by. A thread can only ever join a
-    /// process the kernel has already admitted.
+    /// No capability record exists for the named process, or none of its
+    /// threads is still live, so there is nothing for the thread to join. A
+    /// thread can only ever join a process the kernel has admitted and that
+    /// has not ended.
     UnknownProcess,
     /// The thread id is already registered. Never silently re-pointed at
     /// another process: that would move a live thread's authority.
     AlreadyPresent,
+    /// A kill has sealed the process's group ([`CapTable::seal_group`]): a
+    /// thread joining it now could outlive the kill.
+    Dying,
+    /// The heap refused the room the thread's entries need; nothing changed.
+    OutOfMemory,
 }
 
-/// [`CapTable::replace`] found no record to replace: the process has died,
-/// and a record re-inserted for it would stand outside the session it was
-/// admitted to.
+/// Why [`CapTable::replace`] replaced nothing; the table is as it was and the
+/// record offered is dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NoRecord;
+pub enum ReplaceError {
+    /// The process has no record left to replace: it has died, and a record
+    /// re-inserted for it would stand outside the session it was admitted to.
+    NoRecord,
+    /// The heap refused the new record's room.
+    OutOfMemory,
+}
+
+/// Why [`CapTable::admit`] or [`CapTable::insert`] admitted nothing; the
+/// table is as it was and the record offered is dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmitError {
+    /// The placement was refused, the process already has a record, or its
+    /// leader's id names a live thread.
+    Placement(PlacementError),
+    /// The heap refused the room the record needs.
+    OutOfMemory,
+}
+
+impl From<PlacementError> for AdmitError {
+    fn from(refusal: PlacementError) -> Self {
+        Self::Placement(refusal)
+    }
+}
+
+/// What a new process's entries take, made before any of them is entered.
+struct Room {
+    record: Arc<TaskCapabilities>,
+    level: Arc<ProcessLevel>,
+}
+
+impl Default for CapTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl CapTable {
-    /// Construct an empty registry.
+    /// Construct an empty registry, which allocates nothing.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            entries: BTreeMap::new(),
-            threads: BTreeMap::new(),
-            members: BTreeMap::new(),
-            instances: BTreeMap::new(),
+            entries: OrderedMap::new(),
+            threads: OrderedMap::new(),
+            grouped: OrderedSet::new(),
+            members: OrderedMap::new(),
+            instances: OrderedMap::new(),
             sessions: SessionTree::new(),
         }
     }
 
-    /// Register a process's capabilities, and its leader as the process's
-    /// first thread. The [`ProcessId`] is taken from the record
-    /// (`caps.process()`); callers do not pass it separately so the id and
-    /// the body cannot diverge.
+    /// Register a process's capabilities, with its leader as its first thread,
+    /// in the root session — or, for a process that already has a record,
+    /// replace that record. The [`ProcessId`] is taken from the record
+    /// (`caps.process()`), so the id and the body cannot diverge.
     ///
-    /// Returns the previously-registered record, if any. A non-`None`
-    /// return is an unusual condition — task ids are not recycled
-    /// within a single scheduler instance (see
-    /// `kernel/sched::scheduler` invariants) — but is surfaced rather
-    /// than silently dropped so callers can audit / refuse it. The one
-    /// routine replacement is a spawned child's effective record taking
-    /// over from its admit-time placeholder; because the entry is keyed on
-    /// the record's own [`TaskCapabilities::process`], a replacement always
-    /// concerns that same process, so the incoming record continues the
-    /// outgoing one's accounting rather than restarting it.
-    /// A replacement leaves the process's thread set and its session
-    /// untouched: both belong to the process, not to the record that
-    /// describes it. A new process inserted here is in the root session;
-    /// placing one anywhere else is [`Self::admit`]'s.
-    pub fn insert(&mut self, mut caps: TaskCapabilities) -> Option<Arc<TaskCapabilities>> {
-        let process = caps.process();
-        if let Some(previous) = self.entries.get(&process) {
-            caps.adopt_accounting(previous);
-            caps.session = previous.session;
-            caps.login_session = previous.login_session;
-            self.instances.remove(&previous.proc_id());
+    /// Returns the displaced record, if any. Task ids are not recycled while
+    /// their process lives (`kernel/sched::scheduler` invariants), so a
+    /// replacement here is unusual and surfaced rather than silently dropped;
+    /// the routine one is [`Self::replace`]'s. Either continues the outgoing
+    /// record's accounting and leaves the process's threads and session as
+    /// they were. Placing a new process anywhere but the root is
+    /// [`Self::admit`]'s.
+    ///
+    /// # Errors
+    ///
+    /// [`AdmitError::OutOfMemory`] when the heap refuses the room the record
+    /// needs, and [`AdmitError::Placement`] with [`PlacementError::NotFound`]
+    /// for a new process whose leader's id names a live thread; either way
+    /// the table is as it was and `caps` is dropped.
+    pub fn insert(
+        &mut self,
+        caps: TaskCapabilities,
+    ) -> Result<Option<Arc<TaskCapabilities>>, AdmitError> {
+        if !self.entries.contains_key(&caps.process()) {
+            return self
+                .admit(caps, Placement::join(ROOT_SESSION))
+                .map(|()| None);
         }
-        let leader = process.leader_task();
-        self.threads.insert(leader, process);
-        self.members
-            .entry(process)
-            .or_default()
-            .threads
-            .insert(leader);
-        if !caps.proc_id().is_kernel() {
-            self.instances.insert(caps.proc_id(), process);
+        match self.swap(caps) {
+            Ok(displaced) => Ok(Some(displaced)),
+            // The record was found above, so only the heap can refuse.
+            Err(ReplaceError::NoRecord | ReplaceError::OutOfMemory) => Err(AdmitError::OutOfMemory),
         }
-        let previous = self.entries.insert(process, Arc::new(caps));
-        if let Some(previous) = &previous {
-            previous.supersede();
-        }
-        previous
     }
 
     /// Attach `thread` to the already-registered process `process`, so the
@@ -1403,10 +1427,14 @@ impl CapTable {
     /// # Errors
     ///
     /// * [`ThreadRegisterError::UnknownProcess`] when `process` has no
-    ///   record — a thread never joins a process the kernel has not admitted.
+    ///   record, or no live thread for `thread` to join — a thread never joins
+    ///   a process the kernel has not admitted, nor one already ended.
     /// * [`ThreadRegisterError::AlreadyPresent`] when `thread` is already
     ///   registered anywhere, so a live thread's authority can never be
     ///   re-pointed.
+    /// * [`ThreadRegisterError::Dying`] when a kill has sealed the group.
+    /// * [`ThreadRegisterError::OutOfMemory`] when the heap refuses the
+    ///   thread its room; nothing changes.
     pub fn register_thread(
         &mut self,
         thread: TaskId,
@@ -1418,12 +1446,24 @@ impl CapTable {
         if self.threads.contains_key(&thread) {
             return Err(ThreadRegisterError::AlreadyPresent);
         }
-        self.threads.insert(thread, process);
-        self.members
-            .entry(process)
-            .or_default()
-            .threads
-            .insert(thread);
+        let Some(group) = self.members.get_mut(&process) else {
+            return Err(ThreadRegisterError::UnknownProcess);
+        };
+        if *group.sealed.get_mut() {
+            return Err(ThreadRegisterError::Dying);
+        }
+        self.threads
+            .try_reserve(1)
+            .and_then(|()| self.grouped.try_reserve(1))
+            .map_err(|_| ThreadRegisterError::OutOfMemory)?;
+        // Both indices made the thread's room above, so neither can refuse it.
+        let threaded = self.threads.try_insert(thread, process);
+        let grouped = self.grouped.try_insert((process, thread));
+        debug_assert!(
+            threaded.is_ok() && grouped.is_ok(),
+            "reserved room refused a thread"
+        );
+        group.threads += 1;
         Ok(())
     }
 
@@ -1451,16 +1491,12 @@ impl CapTable {
         process: ProcessId,
         after: Option<TaskId>,
     ) -> impl Iterator<Item = TaskId> + '_ {
-        let from = after.map_or(core::ops::Bound::Unbounded, core::ops::Bound::Excluded);
-        self.members
-            .get(&process)
-            .into_iter()
-            .flat_map(move |group| {
-                group
-                    .threads
-                    .range((from, core::ops::Bound::Unbounded))
-                    .copied()
-            })
+        let from = after.map_or(Bound::Included((process, TaskId(0))), |thread| {
+            Bound::Excluded((process, thread))
+        });
+        self.grouped
+            .range((from, Bound::Included((process, TaskId(u64::MAX)))))
+            .map(|&(_, thread)| thread)
     }
 
     /// The scheduling level `process`'s threads run at, or [`None`] for a
@@ -1480,9 +1516,7 @@ impl CapTable {
     /// How many live threads `process` has. `0` for an unknown process.
     #[must_use]
     pub fn thread_count(&self, process: ProcessId) -> usize {
-        self.members
-            .get(&process)
-            .map_or(0, |group| group.threads.len())
+        self.members.get(&process).map_or(0, |group| group.threads)
     }
 
     /// The job-control generation `process`'s threads run under, or [`None`]
@@ -1521,6 +1555,20 @@ impl CapTable {
                 Ok(_) => return Some((next, true)),
                 Err(seen) => current = JobGeneration::from_bits(seen),
             }
+        }
+    }
+
+    /// Close `process`'s group to new threads: its death is being claimed a
+    /// batch at a time, and a thread joining between two batches could
+    /// outlive it.
+    ///
+    /// Taken under the table's read lock, as [`Self::advance_job`] is: a
+    /// registration holds the write lock, so it lands wholly before the seal,
+    /// as a thread the claim then reaches, or is refused with
+    /// [`ThreadRegisterError::Dying`]. A seal lasts as long as the group.
+    pub fn seal_group(&self, process: ProcessId) {
+        if let Some(group) = self.members.get(&process) {
+            group.sealed.store(true, Ordering::Relaxed);
         }
     }
 
@@ -1695,17 +1743,14 @@ impl CapTable {
     /// [`None`] for a thread that was not registered — idempotent teardown.
     pub fn remove_thread(&mut self, thread: TaskId) -> Option<(ProcessId, usize)> {
         let process = self.threads.remove(&thread)?;
-        let remaining = match self.members.get_mut(&process) {
-            Some(group) => {
-                group.threads.remove(&thread);
-                let remaining = group.threads.len();
-                if remaining == 0 {
-                    self.members.remove(&process);
-                }
-                remaining
-            }
-            None => 0,
-        };
+        self.grouped.remove(&(process, thread));
+        let remaining = self.members.get_mut(&process).map_or(0, |group| {
+            group.threads = group.threads.saturating_sub(1);
+            group.threads
+        });
+        if remaining == 0 {
+            self.members.remove(&process);
+        }
         Some((process, remaining))
     }
 
@@ -1727,10 +1772,12 @@ impl CapTable {
     /// ([`crate::SessionTree::is_ending`] on the removed record's instance),
     /// and so is retiring every exit the departure released.
     pub fn remove(&mut self, process: ProcessId) -> Option<Removed> {
-        if let Some(group) = self.members.remove(&process) {
-            for thread in group.threads {
-                self.threads.remove(&thread);
-            }
+        self.members.remove(&process);
+        let mut next = self.threads_of(process).next();
+        while let Some(thread) = next {
+            self.grouped.remove(&(process, thread));
+            self.threads.remove(&thread);
+            next = self.threads_of(process).next();
         }
         let record = self.entries.remove(&process)?;
         record.supersede();
@@ -1753,19 +1800,49 @@ impl CapTable {
     }
 
     /// Replace the record of an admitted process, keeping its threads, its
-    /// session and its I/O totals — the spawned child's effective record
+    /// session and its accounting — the spawned child's effective record
     /// taking over from its admit-time placeholder.
     ///
     /// # Errors
     ///
-    /// [`NoRecord`], dropping `caps`, when its process has none left to
-    /// replace.
-    pub fn replace(&mut self, caps: TaskCapabilities) -> Result<(), NoRecord> {
-        if !self.entries.contains_key(&caps.process()) {
-            return Err(NoRecord);
+    /// [`ReplaceError::NoRecord`] when its process has none left to replace,
+    /// and [`ReplaceError::OutOfMemory`] when the heap refuses the new
+    /// record's room; either way the table is as it was and `caps` is
+    /// dropped.
+    pub fn replace(&mut self, caps: TaskCapabilities) -> Result<(), ReplaceError> {
+        self.swap(caps).map(drop)
+    }
+
+    /// Put `caps` in its process's record's place, carrying over what belongs
+    /// to the process rather than to the record — its threads, its session and
+    /// its accounting — and answering the record it displaced.
+    fn swap(&mut self, mut caps: TaskCapabilities) -> Result<Arc<TaskCapabilities>, ReplaceError> {
+        let process = caps.process();
+        let previous = self.entries.get(&process).ok_or(ReplaceError::NoRecord)?;
+        caps.adopt_accounting(previous);
+        caps.session = previous.session;
+        caps.login_session = previous.login_session;
+        let (old, new) = (previous.proc_id(), caps.proc_id());
+        let reindexed = old != new && !new.is_kernel();
+        self.instances
+            .try_reserve(usize::from(reindexed))
+            .map_err(|_| ReplaceError::OutOfMemory)?;
+        let record = Arc::try_new(caps).map_err(|_| ReplaceError::OutOfMemory)?;
+        let slot = self
+            .entries
+            .get_mut(&process)
+            .ok_or(ReplaceError::NoRecord)?;
+        let displaced = core::mem::replace(slot, record);
+        if old != new {
+            self.instances.remove(&old);
         }
-        let _ = self.insert(caps);
-        Ok(())
+        if reindexed {
+            // Its room was made above, so the entry cannot be refused.
+            let indexed = self.instances.try_insert(new, process);
+            debug_assert!(indexed.is_ok(), "a reserved instance refused its entry");
+        }
+        displaced.supersede();
+        Ok(displaced)
     }
 
     /// Resolve where a child of `spawner` goes for `request`, before any of
@@ -1818,32 +1895,76 @@ impl CapTable {
         Ok(placement)
     }
 
-    /// Admit a new process's record into the session `placement` names.
+    /// Admit a new process's record, with its leader as its first thread,
+    /// into the session `placement` names.
     ///
     /// The placement is re-checked here, under the same lock as the insert,
     /// because a session resolved before the child's state was built may have
-    /// begun ending since; a refused admission changes nothing.
+    /// begun ending since. Every allocation the admission needs is made before
+    /// anything changes, and what is then entered cannot be refused, so a
+    /// refused admission changes nothing.
     ///
     /// # Errors
     ///
-    /// The [`PlacementError`] the re-check raises, and
-    /// [`PlacementError::NotFound`] for a process that already has a record —
-    /// admission is for a new process only, and a replacement is
-    /// [`Self::insert`]'s.
+    /// [`AdmitError::Placement`] with the [`PlacementError`] the re-check
+    /// raises, or with [`PlacementError::NotFound`] for a process that already
+    /// has a record or whose leader's id names a live thread — admission is
+    /// for a new process only, and a replacement is [`Self::replace`]'s;
+    /// [`AdmitError::OutOfMemory`] when the heap refuses the room. `caps` is
+    /// dropped either way.
     pub fn admit(
         &mut self,
         mut caps: TaskCapabilities,
         placement: Placement,
-    ) -> Result<(), PlacementError> {
-        if self.entries.contains_key(&caps.process()) {
-            return Err(PlacementError::NotFound);
+    ) -> Result<(), AdmitError> {
+        let process = caps.process();
+        if self.entries.contains_key(&process) || self.threads.contains_key(&process.leader_task())
+        {
+            return Err(AdmitError::Placement(PlacementError::NotFound));
         }
-        caps.session = self
-            .sessions
-            .place(caps.process(), caps.proc_id(), placement)?;
-        caps.login_session = self.sessions.login_session(caps.session);
-        self.insert(caps);
+        let place = self.sessions.try_reserve_place(caps.proc_id(), placement)?;
+        caps.session = place.session();
+        caps.login_session = place.login_session();
+        let room = self.try_reserve_process(caps)?;
+        self.sessions.place_reserved(process, place);
+        self.commit(room);
         Ok(())
+    }
+
+    /// Make every allocation a new process's entries take — its record and
+    /// its level shared, and room in each index — changing nothing the table
+    /// answers with.
+    fn try_reserve_process(&mut self, caps: TaskCapabilities) -> Result<Room, AdmitError> {
+        let indexed = usize::from(!caps.proc_id().is_kernel());
+        self.entries
+            .try_reserve(1)
+            .and_then(|()| self.threads.try_reserve(1))
+            .and_then(|()| self.grouped.try_reserve(1))
+            .and_then(|()| self.members.try_reserve(1))
+            .and_then(|()| self.instances.try_reserve(indexed))
+            .map_err(|_| AdmitError::OutOfMemory)?;
+        let level = Arc::try_new(ProcessLevel::default()).map_err(|_| AdmitError::OutOfMemory)?;
+        let record = Arc::try_new(caps).map_err(|_| AdmitError::OutOfMemory)?;
+        Ok(Room { record, level })
+    }
+
+    /// Enter a process whose room [`Self::try_reserve_process`] made into
+    /// every index.
+    fn commit(&mut self, room: Room) {
+        let Room { record, level } = room;
+        let process = record.process();
+        let leader = process.leader_task();
+        let instance = record.proc_id();
+        // Each index made its entry's room, so no insertion here can refuse.
+        let threaded = self.threads.try_insert(leader, process);
+        let grouped = self.grouped.try_insert((process, leader));
+        let joined = self.members.try_insert(process, ThreadGroup::led(level));
+        let indexed = instance.is_kernel() || self.instances.try_insert(instance, process).is_ok();
+        let entered = self.entries.try_insert(process, record);
+        debug_assert!(
+            threaded.is_ok() && grouped.is_ok() && joined.is_ok() && indexed && entered.is_ok(),
+            "an admission's reserved room refused an entry"
+        );
     }
 
     /// The session tree, for a walk of an ending session's members.
@@ -1855,7 +1976,7 @@ impl CapTable {
     /// Iterate every registered **process's** attested capability record, in
     /// ascending [`ProcessId`] order.
     ///
-    /// The order is the `BTreeMap` key order, so it is stable across calls
+    /// The order is the map's key order, so it is stable across calls
     /// as long as the registry is unchanged — letting the System Information
     /// introspection source page a consistent process list. Every field of
     /// each [`TaskCapabilities`] is kernel-attested (minted at admit), so a
@@ -1913,7 +2034,8 @@ mod tests {
             user_grant,
             manifest_request,
             &sink,
-        );
+        )
+        .expect("derived");
         // Intersection: only FS_MOUNT is in both.
         assert!(t.has(CapabilityId::FS_MOUNT));
         assert!(!t.has(CapabilityId::NET_RAW));
@@ -1926,7 +2048,8 @@ mod tests {
         use tairix_abi::ProcId;
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let base = TaskCapabilities::derive(ProcessId(7), UserId(1000), grant, grant, &sink);
+        let base = TaskCapabilities::derive(ProcessId(7), UserId(1000), grant, grant, &sink)
+            .expect("derived");
         // A freshly-derived record carries the kernel sentinel: it is not a
         // distinct user process instance until a minted id is attached.
         assert_eq!(base.proc_id(), ProcId::KERNEL);
@@ -1945,7 +2068,8 @@ mod tests {
         use tairix_abi::ProcId;
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let base = TaskCapabilities::derive(ProcessId(9), UserId(1000), grant, grant, &sink);
+        let base = TaskCapabilities::derive(ProcessId(9), UserId(1000), grant, grant, &sink)
+            .expect("derived");
         // A freshly-derived record is kernel-parented until the admit path
         // attaches the spawning parent's attested identity.
         assert_eq!(base.parent_proc_id(), ProcId::KERNEL);
@@ -1966,7 +2090,8 @@ mod tests {
     fn proc_name_defaults_empty_and_with_name_attaches() {
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let base = TaskCapabilities::derive(ProcessId(11), UserId(1000), grant, grant, &sink);
+        let base = TaskCapabilities::derive(ProcessId(11), UserId(1000), grant, grant, &sink)
+            .expect("derived");
         // A freshly-derived record has no attested name.
         assert_eq!(base.name(), "");
 
@@ -1980,7 +2105,8 @@ mod tests {
     fn start_time_defaults_to_boot_sentinel_and_with_start_time_attaches() {
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let base = TaskCapabilities::derive(ProcessId(15), UserId(1000), grant, grant, &sink);
+        let base = TaskCapabilities::derive(ProcessId(15), UserId(1000), grant, grant, &sink)
+            .expect("derived");
         // A freshly-derived record carries the `0` boot/kernel-principal
         // sentinel until an admission timestamp is attested.
         assert_eq!(base.start_time(), 0);
@@ -2097,7 +2223,8 @@ mod tests {
     fn credential_defaults_empty_and_with_credential_attaches() {
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let base = TaskCapabilities::derive(ProcessId(13), UserId(1000), grant, grant, &sink);
+        let base = TaskCapabilities::derive(ProcessId(13), UserId(1000), grant, grant, &sink)
+            .expect("derived");
         // A freshly-derived record carries the system group and no
         // supplementary groups until a credential is attached.
         assert_eq!(base.primary_gid(), GroupId::default());
@@ -2118,6 +2245,7 @@ mod tests {
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
         let proc = TaskCapabilities::derive(ProcessId(44), UserId(1000), grant, grant, &sink)
+            .expect("derived")
             .with_proc_id(ProcId::from_raw([0x5A; 16]))
             .with_credential(GroupId(77), alloc::vec![]);
         assert_eq!(proc.attest_origin().gid(), 77);
@@ -2133,6 +2261,7 @@ mod tests {
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
         let base = TaskCapabilities::derive(ProcessId(51), UserId(1000), grant, grant, &sink)
+            .expect("derived")
             .with_proc_id(ProcId::from_raw([0x5A; 16]));
         assert_eq!(base.app_identity(), None);
         assert_eq!(base.attest_origin().app(), None);
@@ -2156,17 +2285,18 @@ mod tests {
         let sink = RecordingSink::new();
         let record = |process: u64, id: u8| {
             TaskCapabilities::derive(ProcessId(process), UserId(1000), grant, grant, &sink)
+                .expect("derived")
                 .with_proc_id(ProcId::from_raw([id; 16]))
         };
         let mut table = CapTable::new();
-        table.insert(record(60, 1));
+        table.insert(record(60, 1)).expect("inserted");
         assert_eq!(
             table.process_of_instance(ProcId::from_raw([1; 16])),
             Some(ProcessId(60))
         );
 
         // A placeholder replaced by a record carrying a fresh instance.
-        table.insert(record(60, 2));
+        table.insert(record(60, 2)).expect("inserted");
         assert_eq!(table.process_of_instance(ProcId::from_raw([1; 16])), None);
         assert_eq!(
             table.process_of_instance(ProcId::from_raw([2; 16])),
@@ -2176,10 +2306,13 @@ mod tests {
         table.remove(ProcessId(60));
         assert_eq!(table.process_of_instance(ProcId::from_raw([2; 16])), None);
 
-        table.insert(
-            TaskCapabilities::derive(ProcessId(61), UserId(0), grant, grant, &sink)
-                .with_proc_id(ProcId::KERNEL),
-        );
+        table
+            .insert(
+                TaskCapabilities::derive(ProcessId(61), UserId(0), grant, grant, &sink)
+                    .expect("derived")
+                    .with_proc_id(ProcId::KERNEL),
+            )
+            .expect("inserted");
         assert_eq!(table.process_of_instance(ProcId::KERNEL), None);
     }
 
@@ -2194,6 +2327,7 @@ mod tests {
         let identity = AppIdentity::new("os.tairix.fstree", PublisherId::from_raw([0x22; 32]))
             .expect("well formed");
         let sandboxed = TaskCapabilities::derive(ProcessId(52), UserId(1000), grant, grant, &sink)
+            .expect("derived")
             .with_proc_id(ProcId::from_raw([0x6B; 16]))
             .with_app_identity(identity)
             .as_sandboxed();
@@ -2208,7 +2342,8 @@ mod tests {
         let grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::SYSINFO_GLOBAL]);
         let sink = RecordingSink::new();
         // A kernel-domain record (no minted proc_id) attests as Kernel.
-        let kernel_task = TaskCapabilities::derive(ProcessId(3), UserId(0), grant, grant, &sink);
+        let kernel_task = TaskCapabilities::derive(ProcessId(3), UserId(0), grant, grant, &sink)
+            .expect("derived");
         let kernel_origin = kernel_task.attest_origin();
         assert_eq!(kernel_origin.trust_domain(), TrustDomain::Kernel);
         assert!(kernel_origin.proc_id().is_kernel());
@@ -2217,6 +2352,7 @@ mod tests {
         // pid, proc_id, and a capability summary mirroring its effective set.
         let minted = ProcId::from_raw([0x5A; 16]);
         let proc = TaskCapabilities::derive(ProcessId(42), UserId(1000), grant, grant, &sink)
+            .expect("derived")
             .with_proc_id(minted);
         let origin = proc.attest_origin();
         assert_eq!(origin.trust_domain(), TrustDomain::User);
@@ -2251,19 +2387,18 @@ mod tests {
         let mut table = CapTable::new();
 
         let minted = ProcId::from_raw([0x5A; 16]);
-        table.insert(
-            TaskCapabilities::derive(ProcessId(42), UserId(1000), grant, grant, &sink)
-                .with_proc_id(minted),
-        );
+        table
+            .insert(
+                TaskCapabilities::derive(ProcessId(42), UserId(1000), grant, grant, &sink)
+                    .expect("derived")
+                    .with_proc_id(minted),
+            )
+            .expect("inserted");
         // A record with no minted instance — a kernel thread — reads as the
         // sentinel, so the table genuinely holds one to be matched.
-        table.insert(TaskCapabilities::derive(
-            ProcessId(3),
-            UserId(0),
-            grant,
-            grant,
-            &sink,
-        ));
+        let kernel_thread = TaskCapabilities::derive(ProcessId(3), UserId(0), grant, grant, &sink)
+            .expect("derived");
+        table.insert(kernel_thread).expect("inserted");
         assert!(table.instance_of(ProcessId(3)).is_kernel());
 
         assert_eq!(table.process_of_instance(minted), Some(ProcessId(42)));
@@ -2288,7 +2423,8 @@ mod tests {
         let manifest_request = user_grant; // identical → effective == both.
         let sink = RecordingSink::new();
         let mut t =
-            TaskCapabilities::derive(ProcessId(2), UserId(1), user_grant, manifest_request, &sink);
+            TaskCapabilities::derive(ProcessId(2), UserId(1), user_grant, manifest_request, &sink)
+                .expect("derived");
         let narrower = caps_of(&[CapabilityId::FS_MOUNT]);
         assert_eq!(t.delegate(&narrower, &sink), Ok(()));
         assert!(t.has(CapabilityId::FS_MOUNT));
@@ -2308,7 +2444,8 @@ mod tests {
         let manifest_request = user_grant;
         let sink = RecordingSink::new();
         let mut t =
-            TaskCapabilities::derive(ProcessId(3), UserId(1), user_grant, manifest_request, &sink);
+            TaskCapabilities::derive(ProcessId(3), UserId(1), user_grant, manifest_request, &sink)
+                .expect("derived");
         let wider = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::DRV_KERNEL]);
         assert_eq!(t.delegate(&wider, &sink), Err(Errno::DelegationWiden));
         // The effective set is unchanged.
@@ -2343,17 +2480,20 @@ mod tests {
         let parent_id = ProcId::from_raw([0x10; 16]);
         let parent =
             TaskCapabilities::derive(ProcessId(20), UserId(1000), parent_set, parent_set, sink)
+                .expect("derived")
                 .with_proc_id(parent_id);
         let child = TaskCapabilities::derive(ProcessId(21), UserId(1000), pair, pair, sink)
+            .expect("derived")
             .with_proc_id(ProcId::from_raw([0x11; 16]))
             .with_parent_proc_id(parent_id);
         let stranger = TaskCapabilities::derive(ProcessId(22), UserId(1000), pair, pair, sink)
+            .expect("derived")
             .with_proc_id(ProcId::from_raw([0x12; 16]))
             .with_parent_proc_id(ProcId::from_raw([0x99; 16]));
         let mut table = CapTable::new();
-        table.insert(parent.clone());
-        table.insert(child);
-        table.insert(stranger);
+        table.insert(parent.clone()).expect("inserted");
+        table.insert(child).expect("inserted");
+        table.insert(stranger).expect("inserted");
         (table, parent)
     }
 
@@ -2445,10 +2585,12 @@ mod tests {
         // child.
         let sink = RecordingSink::new();
         let pair = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
-        let floor = TaskCapabilities::derive(ProcessId(30), UserId(0), pair, pair, &sink);
-        let unminted = TaskCapabilities::derive(ProcessId(31), UserId(0), pair, pair, &sink);
+        let floor =
+            TaskCapabilities::derive(ProcessId(30), UserId(0), pair, pair, &sink).expect("derived");
+        let unminted =
+            TaskCapabilities::derive(ProcessId(31), UserId(0), pair, pair, &sink).expect("derived");
         let mut table = CapTable::new();
-        table.insert(floor);
+        table.insert(floor).expect("inserted");
         assert_eq!(
             table.narrow(
                 &unminted,
@@ -2490,13 +2632,9 @@ mod tests {
         let thread = process.leader_task();
         let mut table = CapTable::new();
         let mount = caps_of(&[CapabilityId::FS_MOUNT]);
-        table.insert(TaskCapabilities::derive(
-            process,
-            UserId(1000),
-            mount,
-            mount,
-            &sink,
-        ));
+        let record =
+            TaskCapabilities::derive(process, UserId(1000), mount, mount, &sink).expect("derived");
+        table.insert(record).expect("inserted");
 
         let before = table.snapshot_of(thread).expect("registered");
         let again = table.snapshot_of(thread).expect("registered");
@@ -2534,13 +2672,9 @@ mod tests {
         let process = ProcessId(0x61);
         let mut table = CapTable::new();
         let none = caps_of(&[]);
-        table.insert(TaskCapabilities::derive(
-            process,
-            UserId(1000),
-            none,
-            none,
-            &sink,
-        ));
+        let record =
+            TaskCapabilities::derive(process, UserId(1000), none, none, &sink).expect("derived");
+        table.insert(record).expect("inserted");
         let snapshot = table
             .snapshot_of(process.leader_task())
             .expect("registered");
@@ -2580,13 +2714,9 @@ mod tests {
         let process = ProcessId(0x71);
         let mut table = CapTable::new();
         let none = caps_of(&[]);
-        table.insert(TaskCapabilities::derive(
-            process,
-            UserId(1000),
-            none,
-            none,
-            &sink,
-        ));
+        let record =
+            TaskCapabilities::derive(process, UserId(1000), none, none, &sink).expect("derived");
+        table.insert(record).expect("inserted");
         assert_eq!(
             table.job_generation(process),
             Some(JobGeneration::default())
@@ -2608,7 +2738,8 @@ mod tests {
         let user_grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
         let sink = RecordingSink::new();
         let mut t =
-            TaskCapabilities::derive(ProcessId(4), UserId(1), user_grant, user_grant, &sink);
+            TaskCapabilities::derive(ProcessId(4), UserId(1), user_grant, user_grant, &sink)
+                .expect("derived");
         assert!(t.revoke(CapabilityId::FS_MOUNT, &sink));
         assert!(!t.has(CapabilityId::FS_MOUNT));
         // Revoking again is idempotent (returns false) but still
@@ -2632,7 +2763,8 @@ mod tests {
         let user_grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::AUDIT_READ]);
         let sink = RecordingSink::new();
         let mut t =
-            TaskCapabilities::derive(ProcessId(5), UserId(1), user_grant, user_grant, &sink);
+            TaskCapabilities::derive(ProcessId(5), UserId(1), user_grant, user_grant, &sink)
+                .expect("derived");
 
         let epoch = RevocationEpoch(3);
         let narrowed = caps_of(&[CapabilityId::FS_MOUNT]);
@@ -2660,6 +2792,7 @@ mod tests {
         let grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
         let sink = RecordingSink::new();
         let t = TaskCapabilities::derive(ProcessId(11), UserId(1000), grant, grant, &sink)
+            .expect("derived")
             .as_sandboxed();
         assert!(t.is_sandboxed());
         assert!(t.effective().is_empty());
@@ -2678,6 +2811,7 @@ mod tests {
             caps_of(&[CapabilityId::FS_MOUNT]),
             &sink,
         )
+        .expect("derived")
         .as_sandboxed();
         // Even the empty set is refused: the answer never depends on the
         // payload, and the attempt is audited as a widening attempt.
@@ -2714,6 +2848,7 @@ mod tests {
             caps_of(&[CapabilityId::FS_MOUNT]),
             &sink,
         )
+        .expect("derived")
         .as_sandboxed();
         let epoch = RevocationEpoch(1);
         let payload = CapabilitySet::empty();
@@ -2745,7 +2880,8 @@ mod tests {
         let user_grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::AUDIT_READ]);
         let sink = RecordingSink::new();
         let mut t =
-            TaskCapabilities::derive(ProcessId(9), UserId(1), user_grant, user_grant, &sink);
+            TaskCapabilities::derive(ProcessId(9), UserId(1), user_grant, user_grant, &sink)
+                .expect("derived");
 
         let epoch = RevocationEpoch(3);
         let narrowed = caps_of(&[CapabilityId::FS_MOUNT]);
@@ -2781,7 +2917,8 @@ mod tests {
         let user_grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
         let mut t =
-            TaskCapabilities::derive(ProcessId(6), UserId(1), user_grant, user_grant, &sink);
+            TaskCapabilities::derive(ProcessId(6), UserId(1), user_grant, user_grant, &sink)
+                .expect("derived");
 
         // Sign for epoch 1 but verify under epoch 2 — mass revocation.
         let issued_at = RevocationEpoch(1);
@@ -2827,7 +2964,8 @@ mod tests {
             CapabilitySet::empty(), // ambient powers? no.
             manifest_request,
             &sink,
-        );
+        )
+        .expect("derived");
         assert!(t.effective().is_empty());
     }
 
@@ -2835,7 +2973,8 @@ mod tests {
     fn io_counters_start_at_zero_and_add_the_bytes_moved() {
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let t = TaskCapabilities::derive(ProcessId(60), UserId(1000), grant, grant, &sink);
+        let t = TaskCapabilities::derive(ProcessId(60), UserId(1000), grant, grant, &sink)
+            .expect("derived");
         assert_eq!(t.io_bytes_read(), 0);
         assert_eq!(t.io_bytes_written(), 0);
 
@@ -2862,7 +3001,8 @@ mod tests {
     fn io_counters_saturate_rather_than_wrapping() {
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let t = TaskCapabilities::derive(ProcessId(61), UserId(1000), grant, grant, &sink);
+        let t = TaskCapabilities::derive(ProcessId(61), UserId(1000), grant, grant, &sink)
+            .expect("derived");
         t.record_bytes_read(u64::MAX - 1);
         t.record_bytes_written(u64::MAX);
 
@@ -2881,8 +3021,10 @@ mod tests {
     fn io_counters_are_independent_between_tasks() {
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let parent = TaskCapabilities::derive(ProcessId(62), UserId(1000), grant, grant, &sink);
-        let child = TaskCapabilities::derive(ProcessId(63), UserId(1000), grant, grant, &sink);
+        let parent = TaskCapabilities::derive(ProcessId(62), UserId(1000), grant, grant, &sink)
+            .expect("derived");
+        let child = TaskCapabilities::derive(ProcessId(63), UserId(1000), grant, grant, &sink)
+            .expect("derived");
         parent.record_bytes_read(4096);
         parent.record_bytes_written(512);
         // Each task's record is derived on its own, so one task's I/O can
@@ -2898,7 +3040,8 @@ mod tests {
     fn cloned_snapshots_of_one_task_share_its_counters() {
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let live = TaskCapabilities::derive(ProcessId(64), UserId(1000), grant, grant, &sink);
+        let live = TaskCapabilities::derive(ProcessId(64), UserId(1000), grant, grant, &sink)
+            .expect("derived");
         // The dispatcher answers each syscall off a clone of the live record;
         // an increment made through that snapshot must land on the one total
         // the registry's entry reads back.
@@ -2916,7 +3059,8 @@ mod tests {
     fn narrowing_a_record_leaves_its_io_totals_alone() {
         let grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
         let sink = RecordingSink::new();
-        let mut t = TaskCapabilities::derive(ProcessId(65), UserId(1000), grant, grant, &sink);
+        let mut t = TaskCapabilities::derive(ProcessId(65), UserId(1000), grant, grant, &sink)
+            .expect("derived");
         t.record_bytes_read(300);
         t.record_bytes_written(30);
         t.delegate(&caps_of(&[CapabilityId::FS_MOUNT]), &sink)
@@ -2936,6 +3080,7 @@ mod tests {
         let grant = caps_of(caps);
         let sink = RecordingSink::new();
         TaskCapabilities::derive(ProcessId(task), UserId(1000), grant, grant, &sink)
+            .expect("derived")
     }
 
     #[test]
@@ -2950,7 +3095,7 @@ mod tests {
     fn captable_insert_then_lookup_returns_record() {
         let mut table = CapTable::new();
         let caps = make_caps(7, &[tairix_abi::CapabilityId::FS_MOUNT]);
-        assert!(table.insert(caps).is_none());
+        assert!(table.insert(caps).expect("inserted").is_none());
         assert_eq!(table.len(), 1);
         let got = table.caps_for(TaskId(7)).expect("registered");
         assert!(got.has(tairix_abi::CapabilityId::FS_MOUNT));
@@ -2961,7 +3106,7 @@ mod tests {
     fn captable_lookup_miss_returns_none() {
         let mut table = CapTable::new();
         let caps = make_caps(1, &[tairix_abi::CapabilityId::FS_MOUNT]);
-        table.insert(caps);
+        table.insert(caps).expect("inserted");
         assert!(table.caps_for(TaskId(2)).is_none());
     }
 
@@ -2971,8 +3116,12 @@ mod tests {
         // insert is a real anomaly. Surface it via the return value so
         // a caller can audit / refuse rather than silently lose state.
         let mut table = CapTable::new();
-        table.insert(make_caps(3, &[tairix_abi::CapabilityId::FS_MOUNT]));
-        let displaced = table.insert(make_caps(3, &[tairix_abi::CapabilityId::NET_RAW]));
+        table
+            .insert(make_caps(3, &[tairix_abi::CapabilityId::FS_MOUNT]))
+            .expect("inserted");
+        let displaced = table
+            .insert(make_caps(3, &[tairix_abi::CapabilityId::NET_RAW]))
+            .expect("inserted");
         let prior = displaced.expect("first record returned");
         assert!(prior.has(tairix_abi::CapabilityId::FS_MOUNT));
         // The registry now reflects the second insert only.
@@ -2985,7 +3134,9 @@ mod tests {
     #[test]
     fn a_freshly_inserted_process_has_its_leader_as_its_only_thread() {
         let mut table = CapTable::new();
-        table.insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        table
+            .insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]))
+            .expect("inserted");
         assert_eq!(table.process_of(TaskId(5)), Some(ProcessId(5)));
         assert_eq!(table.thread_count(ProcessId(5)), 1);
         assert_eq!(
@@ -2997,7 +3148,9 @@ mod tests {
     #[test]
     fn every_thread_of_a_process_resolves_to_the_one_shared_record() {
         let mut table = CapTable::new();
-        table.insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        table
+            .insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]))
+            .expect("inserted");
         table
             .register_thread(TaskId(11), ProcessId(5))
             .expect("joins the process");
@@ -3039,13 +3192,15 @@ mod tests {
     #[test]
     fn a_revoke_through_one_thread_binds_its_siblings() {
         let mut table = CapTable::new();
-        table.insert(make_caps(
-            5,
-            &[
-                tairix_abi::CapabilityId::FS_MOUNT,
-                tairix_abi::CapabilityId::NET_RAW,
-            ],
-        ));
+        table
+            .insert(make_caps(
+                5,
+                &[
+                    tairix_abi::CapabilityId::FS_MOUNT,
+                    tairix_abi::CapabilityId::NET_RAW,
+                ],
+            ))
+            .expect("inserted");
         table
             .register_thread(TaskId(11), ProcessId(5))
             .expect("joins the process");
@@ -3078,8 +3233,12 @@ mod tests {
     #[test]
     fn a_live_threads_authority_can_never_be_re_pointed() {
         let mut table = CapTable::new();
-        table.insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]));
-        table.insert(make_caps(6, &[tairix_abi::CapabilityId::NET_RAW]));
+        table
+            .insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]))
+            .expect("inserted");
+        table
+            .insert(make_caps(6, &[tairix_abi::CapabilityId::NET_RAW]))
+            .expect("inserted");
         table
             .register_thread(TaskId(11), ProcessId(5))
             .expect("joins the first process");
@@ -3108,7 +3267,9 @@ mod tests {
     #[test]
     fn removing_a_thread_leaves_its_siblings_authorised() {
         let mut table = CapTable::new();
-        table.insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        table
+            .insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]))
+            .expect("inserted");
         table
             .register_thread(TaskId(11), ProcessId(5))
             .expect("joins the process");
@@ -3131,7 +3292,9 @@ mod tests {
     #[test]
     fn a_process_outlives_its_leader_thread() {
         let mut table = CapTable::new();
-        table.insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        table
+            .insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]))
+            .expect("inserted");
         table
             .register_thread(TaskId(11), ProcessId(5))
             .expect("joins the process");
@@ -3152,7 +3315,9 @@ mod tests {
     #[test]
     fn removing_a_process_clears_every_thread_mapping() {
         let mut table = CapTable::new();
-        table.insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        table
+            .insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]))
+            .expect("inserted");
         table
             .register_thread(TaskId(11), ProcessId(5))
             .expect("joins the process");
@@ -3171,13 +3336,16 @@ mod tests {
     #[test]
     fn replacing_a_record_keeps_the_processes_threads() {
         let mut table = CapTable::new();
-        table.insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        table
+            .insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]))
+            .expect("inserted");
         table
             .register_thread(TaskId(11), ProcessId(5))
             .expect("joins the process");
 
         assert!(table
             .insert(make_caps(5, &[tairix_abi::CapabilityId::NET_RAW]))
+            .expect("inserted")
             .is_some());
         assert_eq!(table.thread_count(ProcessId(5)), 2);
         let record = table.caps_for(TaskId(11)).expect("still authorised");
@@ -3196,7 +3364,7 @@ mod tests {
         pid: u64,
         byte: u8,
         request: SpawnSession,
-    ) -> Result<(), PlacementError> {
+    ) -> Result<(), AdmitError> {
         let placement = table.resolve_placement(ProcessId(spawner), request, false)?;
         table.admit(instance_record(pid, byte), placement)
     }
@@ -3214,7 +3382,7 @@ mod tests {
     #[test]
     fn a_session_founded_as_another_user_is_its_descendants_login() {
         let mut table = CapTable::new();
-        table.insert(instance_record(1, 1));
+        table.insert(instance_record(1, 1)).expect("inserted");
         let login_of = |table: &CapTable, pid: u64| {
             table
                 .caps_of_process(ProcessId(pid))
@@ -3246,21 +3414,21 @@ mod tests {
     #[test]
     fn a_child_is_placed_in_its_spawners_session_unless_asked_otherwise() {
         let mut table = CapTable::new();
-        table.insert(instance_record(1, 1));
+        table.insert(instance_record(1, 1)).expect("inserted");
         assert_eq!(session_of(&table, 1), ROOT_SESSION);
         spawn_into(&mut table, 1, 2, 2, SpawnSession::New).expect("founded");
         assert_eq!(session_of(&table, 2), ProcId::from_raw([2; 16]));
         spawn_into(&mut table, 2, 3, 3, SpawnSession::Inherit).expect("joined");
         assert_eq!(session_of(&table, 3), ProcId::from_raw([2; 16]));
         // A record replacement keeps the session the admission placed it in.
-        table.insert(instance_record(3, 3));
+        table.insert(instance_record(3, 3)).expect("inserted");
         assert_eq!(session_of(&table, 3), ProcId::from_raw([2; 16]));
     }
 
     #[test]
     fn removing_an_anchor_ends_its_session_and_nothing_joins_it_after() {
         let mut table = CapTable::new();
-        table.insert(instance_record(1, 1));
+        table.insert(instance_record(1, 1)).expect("inserted");
         spawn_into(&mut table, 1, 2, 2, SpawnSession::New).expect("founded");
         spawn_into(&mut table, 2, 3, 3, SpawnSession::Inherit).expect("joined");
         let desktop = ProcId::from_raw([2; 16]);
@@ -3270,7 +3438,7 @@ mod tests {
         assert_eq!(left, [ProcessId(3)]);
         assert_eq!(
             spawn_into(&mut table, 3, 4, 4, SpawnSession::Inherit),
-            Err(PlacementError::Ending)
+            Err(AdmitError::Placement(PlacementError::Ending))
         );
         assert!(table.caps_of_process(ProcessId(4)).is_none());
     }
@@ -3278,7 +3446,7 @@ mod tests {
     #[test]
     fn a_join_reaches_only_a_session_inside_the_spawners_own() {
         let mut table = CapTable::new();
-        table.insert(instance_record(1, 1));
+        table.insert(instance_record(1, 1)).expect("inserted");
         spawn_into(&mut table, 1, 2, 2, SpawnSession::New).expect("login");
         spawn_into(&mut table, 2, 3, 3, SpawnSession::New).expect("desktop");
         spawn_into(&mut table, 3, 4, 4, SpawnSession::Inherit).expect("an app");
@@ -3298,7 +3466,7 @@ mod tests {
         for target in [ProcId::from_raw([4; 16]), ProcId::from_raw([0x7f; 16])] {
             assert_eq!(
                 spawn_into(&mut table, 5, 7, 7, SpawnSession::Join(target)),
-                Err(PlacementError::NotFound)
+                Err(AdmitError::Placement(PlacementError::NotFound))
             );
         }
     }
@@ -3306,7 +3474,7 @@ mod tests {
     #[test]
     fn an_anchored_child_ends_with_its_spawner_even_outside_its_session() {
         let mut table = CapTable::new();
-        table.insert(instance_record(1, 1));
+        table.insert(instance_record(1, 1)).expect("inserted");
         spawn_into(&mut table, 1, 2, 2, SpawnSession::New).expect("a shell");
         spawn_into(&mut table, 2, 3, 3, SpawnSession::Inherit).expect("a desktop");
         spawn_into(&mut table, 3, 4, 4, SpawnSession::Anchored).expect("an app");
@@ -3321,7 +3489,7 @@ mod tests {
     #[test]
     fn a_child_in_a_session_of_its_own_still_ends_with_its_spawner() {
         let mut table = CapTable::new();
-        table.insert(instance_record(1, 1));
+        table.insert(instance_record(1, 1)).expect("inserted");
         spawn_into(&mut table, 1, 2, 2, SpawnSession::New).expect("a login");
         spawn_into(&mut table, 2, 3, 3, SpawnSession::New).expect("a desktop");
         spawn_into(&mut table, 3, 4, 4, SpawnSession::Anchored).expect("a terminal");
@@ -3358,17 +3526,19 @@ mod tests {
                 "a spawner that has gone never places a child in the root"
             );
         }
-        table.insert(instance_record(1, 1));
+        table.insert(instance_record(1, 1)).expect("inserted");
         assert_eq!(
             table.admit(instance_record(1, 1), Placement::join(ROOT_SESSION)),
-            Err(PlacementError::NotFound)
+            Err(AdmitError::Placement(PlacementError::NotFound))
         );
     }
 
     #[test]
     fn a_process_can_be_read_without_resolving_a_thread() {
         let mut table = CapTable::new();
-        table.insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        table
+            .insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]))
+            .expect("inserted");
         assert!(table
             .caps_of_process(ProcessId(5))
             .expect("present")
@@ -3385,10 +3555,12 @@ mod tests {
     #[test]
     fn a_mutation_supersedes_the_record_a_holder_shares_and_keeps_its_own_current() {
         let mut table = CapTable::new();
-        table.insert(make_caps(
-            5,
-            &[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW],
-        ));
+        table
+            .insert(make_caps(
+                5,
+                &[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW],
+            ))
+            .expect("inserted");
         let held = table.snapshot_of(TaskId(5)).expect("registered");
         assert!(held.is_current());
 
@@ -3412,7 +3584,9 @@ mod tests {
     #[test]
     fn an_unshared_record_is_mutated_in_place() {
         let mut table = CapTable::new();
-        table.insert(make_caps(5, &[CapabilityId::FS_MOUNT]));
+        table
+            .insert(make_caps(5, &[CapabilityId::FS_MOUNT]))
+            .expect("inserted");
         let before: *const TaskCapabilities = table.caps_for(TaskId(5)).expect("registered");
         let sink = RecordingSink::new();
         let record = table.caps_for_mut(TaskId(5)).expect("registered");
@@ -3427,10 +3601,13 @@ mod tests {
     #[test]
     fn a_replaced_or_removed_record_is_no_longer_current() {
         let mut table = CapTable::new();
-        table.insert(make_caps(5, &[CapabilityId::FS_MOUNT]));
+        table
+            .insert(make_caps(5, &[CapabilityId::FS_MOUNT]))
+            .expect("inserted");
         let placeholder = table.snapshot_of(TaskId(5)).expect("registered");
         let displaced = table
             .insert(make_caps(5, &[CapabilityId::NET_RAW]))
+            .expect("inserted")
             .expect("replaced");
         assert!(Arc::ptr_eq(&displaced, &placeholder));
         assert!(!placeholder.is_current());
@@ -3447,7 +3624,9 @@ mod tests {
     #[test]
     fn a_shared_record_whose_copy_the_heap_refuses_is_left_as_it_was() {
         let mut table = CapTable::new();
-        table.insert(make_caps(5, &[CapabilityId::FS_MOUNT]));
+        table
+            .insert(make_caps(5, &[CapabilityId::FS_MOUNT]))
+            .expect("inserted");
         let held = table.snapshot_of(TaskId(5)).expect("registered");
         let refused = tairix_fuzzseed::meter::refusing_above(
             core::mem::size_of::<TaskCapabilities>() - 1,
@@ -3464,7 +3643,9 @@ mod tests {
     #[test]
     fn captable_remove_returns_and_evicts_record() {
         let mut table = CapTable::new();
-        table.insert(make_caps(9, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        table
+            .insert(make_caps(9, &[tairix_abi::CapabilityId::FS_MOUNT]))
+            .expect("inserted");
         let evicted = table
             .remove(ProcessId(9))
             .expect("present before remove")
@@ -3485,13 +3666,15 @@ mod tests {
         // mutable lookup is covered by the same security-relevant
         // assertions as `caps_for`.
         let mut table = CapTable::new();
-        table.insert(make_caps(
-            11,
-            &[
-                tairix_abi::CapabilityId::FS_MOUNT,
-                tairix_abi::CapabilityId::NET_RAW,
-            ],
-        ));
+        table
+            .insert(make_caps(
+                11,
+                &[
+                    tairix_abi::CapabilityId::FS_MOUNT,
+                    tairix_abi::CapabilityId::NET_RAW,
+                ],
+            ))
+            .expect("inserted");
         let sink = RecordingSink::new();
         let entry = table.caps_for_mut(TaskId(11)).expect("present");
         assert!(entry.revoke(tairix_abi::CapabilityId::FS_MOUNT, &sink));
@@ -3503,9 +3686,15 @@ mod tests {
     #[test]
     fn captable_stores_multiple_tasks_independently() {
         let mut table = CapTable::new();
-        table.insert(make_caps(1, &[tairix_abi::CapabilityId::FS_MOUNT]));
-        table.insert(make_caps(2, &[tairix_abi::CapabilityId::NET_RAW]));
-        table.insert(make_caps(3, &[tairix_abi::CapabilityId::DRV_LOAD]));
+        table
+            .insert(make_caps(1, &[tairix_abi::CapabilityId::FS_MOUNT]))
+            .expect("inserted");
+        table
+            .insert(make_caps(2, &[tairix_abi::CapabilityId::NET_RAW]))
+            .expect("inserted");
+        table
+            .insert(make_caps(3, &[tairix_abi::CapabilityId::DRV_LOAD]))
+            .expect("inserted");
         assert_eq!(table.len(), 3);
         assert!(table
             .caps_for(TaskId(1))
@@ -3536,11 +3725,14 @@ mod tests {
         let placeholder = make_caps(21, &[]);
         placeholder.record_bytes_read(4096);
         placeholder.record_bytes_written(512);
-        table.insert(placeholder);
+        table.insert(placeholder).expect("inserted");
 
         let effective = make_caps(21, &[tairix_abi::CapabilityId::FS_MOUNT]);
         assert_eq!(effective.io_bytes_read(), 0);
-        let displaced = table.insert(effective).expect("placeholder returned");
+        let displaced = table
+            .insert(effective)
+            .expect("inserted")
+            .expect("placeholder returned");
         let current = table.caps_for(TaskId(21)).expect("present");
         assert_eq!(current.io_bytes_read(), 4096);
         assert_eq!(current.io_bytes_written(), 512);
@@ -3562,8 +3754,8 @@ mod tests {
             .charges()
             .charge(LimitKind::WaitSets, 3, 4)
             .expect("fits");
-        table.insert(placeholder);
-        table.insert(make_caps(22, &[]));
+        table.insert(placeholder).expect("inserted");
+        table.insert(make_caps(22, &[])).expect("inserted");
         let current = table.caps_for(TaskId(22)).expect("present");
         // A replacement that restarted the counters would grant the whole
         // budget again while the placeholder's objects still held it.
@@ -3583,8 +3775,8 @@ mod tests {
         let mut table = CapTable::new();
         let first = make_caps(31, &[]);
         first.record_bytes_read(1024);
-        table.insert(first);
-        table.insert(make_caps(32, &[]));
+        table.insert(first).expect("inserted");
+        table.insert(make_caps(32, &[])).expect("inserted");
         // A different id is a different task: it starts its own accounting
         // and observing one never reveals the other's activity.
         assert_eq!(
@@ -3613,12 +3805,323 @@ mod tests {
         let mut table = CapTable::new();
         let first = make_caps(41, &[]);
         first.record_bytes_read(9999);
-        table.insert(first);
+        table.insert(first).expect("inserted");
         table.remove(ProcessId(41)).expect("evicted on exit");
-        table.insert(make_caps(41, &[]));
+        table.insert(make_caps(41, &[])).expect("inserted");
         assert_eq!(
             table.caps_for(TaskId(41)).expect("present").io_bytes_read(),
             0
         );
+    }
+
+    /// A table holding a spawner inside a session nested in another, so a
+    /// `New` it asks for founds a container around it and a session of the
+    /// child's own: every allocation an admission can make.
+    fn admission_fixture() -> CapTable {
+        let mut table = CapTable::new();
+        table.insert(instance_record(1, 1)).expect("inserted");
+        spawn_into(&mut table, 1, 2, 2, SpawnSession::New).expect("founded");
+        spawn_into(&mut table, 2, 3, 3, SpawnSession::Inherit).expect("joined");
+        table
+    }
+
+    /// What the table answers about processes and sessions 1 to 4, in an
+    /// order its layout does not decide.
+    fn answers(table: &CapTable) -> Vec<alloc::string::String> {
+        let mut out: Vec<alloc::string::String> = table
+            .iter()
+            .map(|record| {
+                let process = record.process();
+                alloc::format!(
+                    "{process:?} {:?} {:?} {:?} {} {:?}",
+                    record.proc_id(),
+                    record.session(),
+                    record.login_session(),
+                    table.thread_count(process),
+                    table.threads_of(process).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        for byte in 1..=4u8 {
+            let instance = ProcId::from_raw([byte; 16]);
+            out.push(alloc::format!(
+                "{byte}: {:?} {:?} {} {:?}",
+                table.process_of(TaskId(u64::from(byte))),
+                table.process_of_instance(instance),
+                table.sessions().is_ending(instance),
+                table
+                    .sessions()
+                    .members_after(instance, None)
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        out
+    }
+
+    /// D1661: an admission makes every allocation it needs before it changes
+    /// anything, so a heap that refuses any one of them leaves the table as it
+    /// was — no record, no thread, no instance, no session founded or joined.
+    #[test]
+    fn an_admission_refused_at_any_allocation_changes_nothing() {
+        let mut refusals = 0;
+        for granted in 0.. {
+            let mut table = admission_fixture();
+            let before = answers(&table);
+            let placement = table
+                .resolve_placement(ProcessId(3), SpawnSession::New, true)
+                .expect("placeable");
+            let record = instance_record(4, 4);
+            let admitted =
+                tairix_fuzzseed::meter::refusing_after(granted, || table.admit(record, placement));
+            match admitted {
+                Err(AdmitError::OutOfMemory) => {
+                    assert_eq!(answers(&table), before, "refused at allocation {granted}");
+                    refusals += 1;
+                }
+                Err(AdmitError::Placement(refusal)) => panic!("placement refused: {refusal:?}"),
+                Ok(()) => {
+                    let child = ProcId::from_raw([4; 16]);
+                    assert_eq!(session_of(&table, 4), child, "a session of its own");
+                    assert_eq!(
+                        table
+                            .caps_of_process(ProcessId(4))
+                            .map(TaskCapabilities::login_session),
+                        Some(child),
+                        "founded naming its user, so its own login"
+                    );
+                    assert_eq!(
+                        table.threads_of(ProcessId(4)).collect::<Vec<_>>(),
+                        [TaskId(4)]
+                    );
+                    assert_eq!(table.process_of_instance(child), Some(ProcessId(4)));
+                    break;
+                }
+            }
+        }
+        assert!(refusals > 0, "the admission had allocations to refuse");
+    }
+
+    /// An admission whose room is made enters every index without
+    /// allocating, so nothing it changes can be left half done.
+    #[test]
+    fn an_admission_whose_room_is_made_commits_without_allocating() {
+        let mut table = admission_fixture();
+        let placement = table
+            .resolve_placement(ProcessId(3), SpawnSession::New, true)
+            .expect("placeable");
+        let mut record = instance_record(4, 4);
+        let place = table
+            .sessions
+            .try_reserve_place(record.proc_id(), placement)
+            .expect("the host heap makes the room");
+        (record.session, record.login_session) = (place.session(), place.login_session());
+        let room = table
+            .try_reserve_process(record)
+            .expect("the host heap makes the room");
+        let ((), metering) = tairix_fuzzseed::meter::metered(|| {
+            table.sessions.place_reserved(ProcessId(4), place);
+            table.commit(room);
+        });
+        assert_eq!(metering.allocations, 0, "a commit takes nothing more");
+        assert_eq!(session_of(&table, 4), ProcId::from_raw([4; 16]));
+        assert_eq!(table.process_of(TaskId(4)), Some(ProcessId(4)));
+    }
+
+    /// The root session's own admission, and a replacement through `insert`,
+    /// refuse as an admission does, changing nothing.
+    #[test]
+    fn an_insertion_the_heap_refuses_changes_nothing() {
+        let mut table = CapTable::new();
+        let first = instance_record(5, 1);
+        let refused = tairix_fuzzseed::meter::refusing_after(0, || table.insert(first));
+        assert_eq!(refused.err(), Some(AdmitError::OutOfMemory));
+        assert!(table.is_empty());
+        assert_eq!(table.process_of(TaskId(5)), None);
+
+        table.insert(instance_record(5, 1)).expect("inserted");
+        let held = table.snapshot_of(TaskId(5)).expect("registered");
+        let successor = instance_record(5, 2);
+        let refused = tairix_fuzzseed::meter::refusing_after(0, || table.insert(successor));
+        assert_eq!(refused.err(), Some(AdmitError::OutOfMemory));
+        assert!(held.is_current(), "nothing was superseded");
+        assert_eq!(
+            table.process_of_instance(ProcId::from_raw([1; 16])),
+            Some(ProcessId(5))
+        );
+        assert_eq!(table.process_of_instance(ProcId::from_raw([2; 16])), None);
+    }
+
+    /// A replacement makes its room first: one the heap refuses leaves the
+    /// record it would have displaced current and indexed, and a process with
+    /// no record has nothing to replace.
+    #[test]
+    fn a_replacement_refused_its_room_changes_nothing() {
+        let mut refusals = 0;
+        for granted in 0.. {
+            let mut table = CapTable::new();
+            table.insert(instance_record(5, 1)).expect("inserted");
+            let held = table.snapshot_of(TaskId(5)).expect("registered");
+            let successor = instance_record(5, 2);
+            let replaced =
+                tairix_fuzzseed::meter::refusing_after(granted, || table.replace(successor));
+            match replaced {
+                Err(ReplaceError::OutOfMemory) => {
+                    assert!(held.is_current(), "refused at allocation {granted}");
+                    assert_eq!(table.instance_of(ProcessId(5)), ProcId::from_raw([1; 16]));
+                    assert_eq!(table.process_of_instance(ProcId::from_raw([2; 16])), None);
+                    refusals += 1;
+                }
+                Err(ReplaceError::NoRecord) => panic!("the record is there"),
+                Ok(()) => {
+                    assert!(!held.is_current());
+                    assert_eq!(table.instance_of(ProcessId(5)), ProcId::from_raw([2; 16]));
+                    break;
+                }
+            }
+        }
+        assert!(refusals > 0, "the replacement had an allocation to refuse");
+        assert_eq!(
+            CapTable::new().replace(instance_record(6, 3)),
+            Err(ReplaceError::NoRecord)
+        );
+    }
+
+    /// A thread's registration makes its room first: across enough
+    /// registrations to grow both thread indices, each one the heap refuses
+    /// leaves the group as it was, and the next attempt joins.
+    #[test]
+    fn a_thread_refused_its_room_is_not_registered() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(5, &[])).expect("inserted");
+        let mut refusals = 0;
+        let mut joined = 1;
+        for thread in 100..300 {
+            let registered = tairix_fuzzseed::meter::refusing_after(0, || {
+                table.register_thread(TaskId(thread), ProcessId(5))
+            });
+            match registered {
+                Ok(()) => {}
+                Err(ThreadRegisterError::OutOfMemory) => {
+                    refusals += 1;
+                    assert_eq!(table.process_of(TaskId(thread)), None);
+                    assert_eq!(table.thread_count(ProcessId(5)), joined);
+                    assert_eq!(table.threads_of(ProcessId(5)).count(), joined);
+                    table
+                        .register_thread(TaskId(thread), ProcessId(5))
+                        .expect("the heap has room again");
+                }
+                Err(other) => panic!("refused for {other:?}"),
+            }
+            joined += 1;
+        }
+        assert!(refusals > 0, "the indices had to grow");
+        assert_eq!(table.thread_count(ProcessId(5)), joined);
+        assert_eq!(table.threads_of(ProcessId(5)).count(), joined);
+    }
+
+    /// A record's accounting — what it holds against its limits and its I/O
+    /// totals — is the one allocation deriving it makes, and a heap that
+    /// refuses it refuses the derivation, auditing nothing.
+    #[test]
+    fn a_derivation_makes_one_allocation_and_refuses_without_it() {
+        let grant = caps_of(&[CapabilityId::FS_MOUNT]);
+        // A sink that keeps nothing, so every allocation counted is the derivation's.
+        let (derived, metering) = tairix_fuzzseed::meter::metered(|| {
+            TaskCapabilities::derive(
+                ProcessId(8),
+                UserId(1000),
+                grant,
+                grant,
+                &tairix_log::DiscardSink,
+            )
+        });
+        assert!(derived.is_ok());
+        assert_eq!(metering.allocations, 1);
+
+        let sink = RecordingSink::new();
+        let refused = tairix_fuzzseed::meter::refusing_after(0, || {
+            TaskCapabilities::derive(ProcessId(8), UserId(1000), grant, grant, &sink).err()
+        });
+        assert_eq!(refused, Some(Errno::OutOfMemory));
+        assert_eq!(sink.len(), 0, "nothing was audited");
+    }
+
+    /// A replacement belongs to the record, not the threads: a leader that has
+    /// left stays gone, so the group can still empty and be removed. A
+    /// replacement once registered the leader afresh, and the process then
+    /// never reached its last thread.
+    #[test]
+    fn replacing_a_record_never_brings_back_a_leader_that_left() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(5, &[])).expect("inserted");
+        table
+            .register_thread(TaskId(11), ProcessId(5))
+            .expect("joins the process");
+        assert_eq!(table.remove_thread(TaskId(5)), Some((ProcessId(5), 1)));
+
+        table
+            .replace(make_caps(5, &[CapabilityId::FS_MOUNT]))
+            .expect("replaced");
+        assert_eq!(table.process_of(TaskId(5)), None);
+        assert_eq!(table.thread_count(ProcessId(5)), 1);
+        assert_eq!(
+            table.remove_thread(TaskId(11)),
+            Some((ProcessId(5), 0)),
+            "its last thread empties the group"
+        );
+    }
+
+    /// A process whose threads have all left takes no new one: a thread
+    /// registered there would revive a group its teardown is removing.
+    #[test]
+    fn a_thread_never_joins_a_process_whose_threads_have_all_left() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(5, &[])).expect("inserted");
+        assert_eq!(table.remove_thread(TaskId(5)), Some((ProcessId(5), 0)));
+        assert_eq!(
+            table.register_thread(TaskId(11), ProcessId(5)),
+            Err(ThreadRegisterError::UnknownProcess)
+        );
+        assert!(table.caps_for(TaskId(11)).is_none());
+        assert_eq!(table.thread_count(ProcessId(5)), 0);
+    }
+
+    /// A new process whose leader's id names a live thread is refused, so an
+    /// admission never moves a live thread's authority either.
+    #[test]
+    fn an_admission_never_re_points_a_live_thread() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(5, &[])).expect("inserted");
+        table
+            .register_thread(TaskId(11), ProcessId(5))
+            .expect("joins the process");
+        assert_eq!(
+            table.insert(make_caps(11, &[CapabilityId::FS_MOUNT])).err(),
+            Some(AdmitError::Placement(PlacementError::NotFound))
+        );
+        assert_eq!(table.process_of(TaskId(11)), Some(ProcessId(5)));
+        assert!(table.caps_of_process(ProcessId(11)).is_none());
+    }
+
+    /// A sealed group takes no thread, since one joining between two batches
+    /// of its kill could outlive it; a process later admitted under the number
+    /// starts open.
+    #[test]
+    fn a_sealed_group_takes_no_thread_and_its_successor_starts_open() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(5, &[])).expect("inserted");
+        table.seal_group(ProcessId(5));
+        assert_eq!(
+            table.register_thread(TaskId(11), ProcessId(5)),
+            Err(ThreadRegisterError::Dying)
+        );
+        assert!(table.caps_for(TaskId(11)).is_none());
+        assert_eq!(table.thread_count(ProcessId(5)), 1);
+
+        assert!(table.remove(ProcessId(5)).is_some());
+        table.insert(make_caps(5, &[])).expect("admitted again");
+        table
+            .register_thread(TaskId(11), ProcessId(5))
+            .expect("a fresh group takes threads");
     }
 }

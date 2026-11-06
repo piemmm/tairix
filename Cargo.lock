@@ -1254,6 +1254,8 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-appconf",
+ "tairix-appstore",
+ "tairix-collections",
  "tairix-controls",
  "tairix-discovery",
  "tairix-font",
@@ -1684,7 +1686,7 @@ dependencies = [
  "tairix-icon",
  "tairix-image",
  "tairix-inline",
- "tairix-keymap",
+ "tairix-input",
  "tairix-log",
  "tairix-netconfig",
  "tairix-parallel",
@@ -2545,6 +2547,7 @@ dependencies = [
  "tairix-abi",
  "tairix-buildcfg",
  "tairix-caps",
+ "tairix-crypto",
  "tairix-drvrt",
  "tairix-log",
  "tairix-rt",
@@ -2724,6 +2727,7 @@ dependencies = [
  "tairix-fscopy",
  "tairix-fsmeta",
  "tairix-geometry",
+ "tairix-hash",
  "tairix-help",
  "tairix-icon",
  "tairix-input",
@@ -2899,6 +2903,7 @@ dependencies = [
 name = "tairix-geometry"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-fuzzseed",
 ]
 
@@ -3086,6 +3091,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-appstore",
+ "tairix-collections",
  "tairix-colour",
  "tairix-crc32c",
  "tairix-font",
@@ -3112,6 +3118,7 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-raster",
  "tairix-util",
+ "tairix-video",
  "tairix-xml",
 ]
 
@@ -3239,6 +3246,7 @@ dependencies = [
  "tairix-buildcfg",
  "tairix-bytedev",
  "tairix-caps",
+ "tairix-collections",
  "tairix-crypto",
  "tairix-devmatch",
  "tairix-devmgr",
@@ -3500,6 +3508,7 @@ dependencies = [
  "tairix-abi",
  "tairix-arch-api",
  "tairix-collections",
+ "tairix-fuzzseed",
  "tairix-hash",
  "tairix-kernel-sched-api",
  "tairix-kernel-sched-mlfq",
@@ -3512,6 +3521,7 @@ name = "tairix-kernel-sched-cfq"
 version = "0.0.0"
 dependencies = [
  "tairix-arch-api",
+ "tairix-fuzzseed",
  "tairix-kernel-sched-api",
  "tairix-kernel-sched-cfq",
  "tairix-sync",
@@ -3546,6 +3556,7 @@ dependencies = [
  "proptest",
  "tairix-abi",
  "tairix-caps",
+ "tairix-collections",
  "tairix-crypto",
  "tairix-fuzzseed",
  "tairix-kernel-mem",
@@ -3574,6 +3585,9 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-caps",
+ "tairix-collections",
+ "tairix-fuzzseed",
+ "tairix-hash",
  "tairix-kernel-irq",
  "tairix-kernel-mem",
  "tairix-kernel-sec",
@@ -3589,6 +3603,19 @@ dependencies = [
  "tairix-abi",
  "tairix-input",
  "tairix-vt",
+]
+
+[[package]]
+name = "tairix-label"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-help",
+ "tairix-path",
+ "tairix-procinfo",
+ "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3980,13 +4007,14 @@ dependencies = [
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
- "tairix-hash",
  "tairix-help",
  "tairix-icon",
  "tairix-image",
  "tairix-inline",
  "tairix-input",
  "tairix-log",
+ "tairix-mix",
+ "tairix-parallel",
  "tairix-procinfo",
  "tairix-raster",
  "tairix-reclaim",
@@ -4001,6 +4029,7 @@ dependencies = [
 name = "tairix-parallel"
 version = "0.0.0"
 dependencies = [
+ "loom",
  "tairix-abi",
  "tairix-inline",
  "tairix-rt",
@@ -4131,6 +4160,7 @@ dependencies = [
  "tairix-abi",
  "tairix-buildcfg",
  "tairix-fuzzseed",
+ "tairix-path",
  "tairix-reclaim",
  "tairix-resref",
  "tairix-rt",
@@ -4177,6 +4207,7 @@ name = "tairix-raid"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-crypto",
  "tairix-raidmeta",
 ]
 
@@ -4242,6 +4273,25 @@ dependencies = [
  "tairix-collections",
  "tairix-hash",
  "tairix-log",
+]
+
+[[package]]
+name = "tairix-recorder"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-audio",
+ "tairix-buildcfg",
+ "tairix-collections",
+ "tairix-fscopy",
+ "tairix-log",
+ "tairix-parallel",
+ "tairix-procinfo",
+ "tairix-rt",
+ "tairix-sandbox",
+ "tairix-sound",
+ "tairix-util",
+ "tairix-video",
 ]
 
 [[package]]
@@ -4353,6 +4403,7 @@ dependencies = [
  "tairix-collections",
  "tairix-crc32",
  "tairix-disasm",
+ "tairix-fscopy",
  "tairix-fuzzseed",
  "tairix-geometry",
  "tairix-hash",
@@ -4364,11 +4415,14 @@ dependencies = [
  "tairix-procinfo",
  "tairix-raster",
  "tairix-rt",
+ "tairix-sandbox",
  "tairix-sound",
  "tairix-svg",
+ "tairix-sync",
  "tairix-syntax",
  "tairix-theme",
  "tairix-util",
+ "tairix-video",
  "tairix-vt",
  "tairix-wallpaper",
 ]
@@ -4834,6 +4888,7 @@ dependencies = [
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
+ "tairix-hash",
  "tairix-icon",
  "tairix-input",
  "tairix-log",
@@ -5412,6 +5467,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-capture-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-desktop-session",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+]
+
+[[package]]
 name = "tairix-test-cc3-program"
 version = "0.0.0"
 dependencies = [
@@ -5426,6 +5495,21 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi-sys",
  "tairix-crt0",
+]
+
+[[package]]
+name = "tairix-test-cinder-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appload",
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-test-appbar-qemu-aarch64",
 ]
 
 [[package]]
@@ -5947,6 +6031,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-filepicks-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-syscall",
+ "tairix-log",
+ "tairix-test-filepick-qemu-aarch64",
+]
+
+[[package]]
 name = "tairix-test-fiq-selfsample-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -6136,6 +6235,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-syscall",
@@ -8289,6 +8389,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-twins"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-bytedev",
+ "tairix-fsprobe",
+ "tairix-path",
+ "tairix-procinfo",
+ "tairix-rt",
+ "tairix-test-fat32-image",
+]
+
+[[package]]
+name = "tairix-test-twins-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-syscall",
+ "tairix-log",
+ "tairix-test-twins",
+]
+
+[[package]]
 name = "tairix-test-uaccess-fault-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -8959,19 +9087,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-video"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-fscopy",
+ "tairix-fuzzseed",
+ "tairix-inline",
+ "tairix-parallel",
+ "tairix-sound",
+ "tairix-util",
+ "tairix-video",
+]
+
+[[package]]
 name = "tairix-view"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-audio",
  "tairix-browse",
  "tairix-buildcfg",
  "tairix-controls",
  "tairix-display",
  "tairix-font",
+ "tairix-fuzzseed",
  "tairix-geometry",
+ "tairix-hash",
  "tairix-help",
  "tairix-icon",
  "tairix-input",
+ "tairix-log",
+ "tairix-player",
  "tairix-procinfo",
  "tairix-raster",
  "tairix-rt",
@@ -9109,6 +9256,7 @@ dependencies = [
  "tairix-geometry",
  "tairix-input",
  "tairix-parallel",
+ "tairix-path",
  "tairix-procinfo",
  "tairix-raster",
  "tairix-rt",
@@ -9251,6 +9399,8 @@ name = "tairix-writeback"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-collections",
+ "tairix-fuzzseed",
  "tairix-reclaim",
  "tairix-util",
  "zeroize",
@@ -9274,6 +9424,7 @@ dependencies = [
  "tairix-appstore",
  "tairix-arch-api",
  "tairix-browse",
+ "tairix-cinder",
  "tairix-colour",
  "tairix-controls",
  "tairix-cpuops",
@@ -9381,12 +9532,14 @@ dependencies = [
  "tairix-test-arxfs-image",
  "tairix-test-audio-wire",
  "tairix-test-autoload-input-qemu-aarch64",
+ "tairix-test-cinder-qemu-aarch64",
  "tairix-test-datetime-elevate-qemu-aarch64",
  "tairix-test-desktop-hover-qemu-aarch64",
  "tairix-test-desktop-pressure-qemu-aarch64",
  "tairix-test-encrypted-root-image",
  "tairix-test-fat32-image",
  "tairix-test-filepick-qemu-aarch64",
+ "tairix-test-filepicks-qemu-aarch64",
  "tairix-test-framestats",
  "tairix-test-handover-qemu-aarch64",
  "tairix-test-images",
@@ -9404,6 +9557,7 @@ dependencies = [
  "tairix-test-svgtext",
  "tairix-test-tcpecho",
  "tairix-test-tcpserve",
+ "tairix-test-twins",
  "tairix-test-wintersun-client-qemu-aarch64",
  "tairix-theme",
  "tairix-tz",
@@ -9411,6 +9565,7 @@ dependencies = [
  "tairix-users",
  "tairix-util",
  "tairix-vcmailbox",
+ "tairix-video",
  "tairix-view",
  "tairix-virtio-input",
  "tairix-visible",

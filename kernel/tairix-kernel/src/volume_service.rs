@@ -27,10 +27,11 @@
 //! take its one client in turn and never interleave a half-built volume,
 //! while a disk that stops answering holds up only the volumes that live on
 //! it. What concerns every device is settled atomically where it lives — a
-//! catalog name in the mount table, an identity in the volume forest, and a
-//! volume another operation is building, recovering or retracting by that
-//! operation's claim on its registry entry — never by one device's lock
-//! held over another's. The attached-volume registry itself lives behind a
+//! volume's key and catalog name as it enters the registry, and again in the
+//! volume forest and the mount table as it is served, and a volume another
+//! operation is building, recovering or retracting by that operation's claim
+//! on its registry entry — never by one device's lock held over another's.
+//! The attached-volume registry itself lives behind a
 //! spin lock so the surprise-removal path can walk it from the
 //! endpoint-teardown context without parking.
 //!
@@ -75,38 +76,68 @@
 //! # Verified re-insert (`plans/DEVICES.md` D4c)
 //!
 //! An attach whose probed identity (`lib/fsprobe`) matches an unavailable
-//! volume is a **re-insert** and is recovered in place rather than
-//! re-attached as a duplicate. The journal carries a dual-acceptance
+//! volume of that identity is a **re-insert** and is recovered in place
+//! rather than re-attached as a duplicate. The candidates are the unavailable
+//! volumes of its identity, narrowed to the one whose device the medium's
+//! states it is, where it states one; of two or more none is recovered, and
+//! the medium attaches afresh, read-only, so no write of its own strands
+//! theirs. The journal carries a dual-acceptance
 //! shadow of the volume's mutation-evidence window (the region any
 //! foreign mutation must rewrite: the `ARXFS` superblock ring, the ext4
 //! superblock, the FAT32 boot+`FSInfo` head — honestly weaker for weaker
 //! formats), seeded at attach and maintained on every write. When the
 //! re-read window proves non-mutation — every evidence block equals its
-//! last-committed or latest shadow copy — the retained writes are
-//! replayed, the device cache committed, and the volume returns to full
-//! service under its original mount, name, and published root. Any doubt
+//! last-committed or latest shadow copy — and the device states the identity
+//! the volume's device stated (`Block::device_identity`), the retained writes
+//! are replayed, the device cache committed, and the volume returns to full
+//! service under its original mount, name, and published root. Proven
+//! unmutated on a device that proves nothing — none stated, or another's — the
+//! medium may be a lookalike: the volume returns **read-only** with its writes
+//! held until it is answered for — by the mount authority, or for a removable
+//! device's volume by the user at the seat — whether to write them to it or
+//! discard them (`volume_replay.rs`), and nothing is written unasked. Any doubt
 //! (foreign mutation, a moved extent, abandoned retention, a replay or
 //! flush failure) fails closed: the volume returns **read-only** in the
 //! *recovery-conflict* state with the retained set still held for
 //! explicit salvage or the audited force-discard — never a silent merge.
 //! Either way the volume returns under a fresh registration, so a
 //! descriptor held across the removal answers stale.
+//!
+//! # Twins (`docs/src/filesystem/drives.md` §8)
+//!
+//! Media formatted alike carry one identity. Each attachment is published
+//! under a key of its own — the identity while no attached volume holds it,
+//! else a twin key derived from the identity and the attachment's handle — so
+//! `id::` of an identity names the volume attached first, and a twin asking a
+//! name a volume of its identity holds is shown under that name with `_<n>`.
+//! Key and name are decided under the registry guard as the volume enters.
+//! The same medium attached again, an extent meeting one a volume still on
+//! its device is served over, is refused busy.
+//!
+//! # Titles (`docs/src/filesystem/drives.md` §8)
+//!
+//! A retitle writes the label a volume's filesystem records through its
+//! driver, under the volume's claim: a disk image's owner retitles it, the
+//! mount authority any device's volume, and the user at the seat a removable
+//! one whose root they may write. It changes neither the volume's key nor its
+//! identity, and the catalog name follows the new title at the next attach.
 
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
-use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use tairix_abi::blkio::BlkMedium;
+use tairix_abi::blkio::{BlkDeviceIdentity, BlkMedium};
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
     FilesystemLabel, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
     MountFlags, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, Unpinned,
-    VolumeStats, VolumeTitle, WriteRefusal,
+    VolumeStats, VolumeTitle, WriteRefusal, VOLUME_TITLE_MAX,
 };
+use tairix_abi::fs::{Access as Wanted, STORAGE_CATALOG};
 use tairix_abi::fsserve::{is_served_endpoint, ServeOffer};
 use tairix_abi::hwtree::HwDeviceClass;
 use tairix_abi::imageattach::ImageAttach;
@@ -115,12 +146,15 @@ use tairix_abi::sysinfo::{
     MountAvailability, RemovedWrites, VolumeClass, VolumeRemovalRecord, VOLUME_REMOVALS_KEPT,
 };
 use tairix_abi::volume::{
-    DetachMode, FormatName, VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeFsType,
-    VolumeInfo,
+    DetachMode, FormatName, ReplayAnswer, VolumeAttachRequest, VolumeCtl, VolumeDetachRequest,
+    VolumeFsType, VolumeInfo, VolumeReplayRequest, VOLUME_TWINS_MAX,
 };
-use tairix_abi::{DriverError, DriverHandle, Errno, HwMatchKey, HwNode, HwResource, SeekRegion};
+use tairix_abi::{
+    CapabilityId, DriverError, DriverHandle, Errno, HwMatchKey, HwNode, HwResource, SeekRegion,
+};
 use tairix_bytedev::ByteDevice;
-use tairix_fsprobe::{Evidence, ProbedVolume, Recognised};
+use tairix_fsprobe::name::VolumeName;
+use tairix_fsprobe::{twin_identity, Evidence, ProbedVolume, Recognised};
 use tairix_inline::RingBuf;
 use tairix_kernel_core::callreg::EndpointVanishObserver;
 use tairix_kernel_core::devres::installed_shared_mem_facility;
@@ -128,14 +162,14 @@ use tairix_kernel_core::fs::blkclient::BlkClient;
 use tairix_kernel_core::fs::blkmeter::VolumeIoSource;
 use tairix_kernel_core::fs::served::ServedFs;
 use tairix_kernel_core::fs::{
-    AnswerSink, ChunkSink, ChunkSource, ImageSource, JournaledBlock, OfferingServer, Principal,
-    RetainedWrites, ServeChannel, VolumeNames, VolumeNodes,
+    AnswerSink, At, ChunkSink, ChunkSource, FinalLink, ImageSource, JournaledBlock, OfferingServer,
+    Principal, RetainedWrites, ServeChannel, Start, VolumeNames, VolumeNodes,
 };
 use tairix_kernel_core::fswatch::{ClaimRef, WatchRegistry};
 use tairix_kernel_core::sharedreg::kernel_hold;
 use tairix_kernel_core::{
-    Attachment, BindsWithin, DriverLock, Metadata, Mode, Path, SleepLock, Vfs, VfsError,
-    VolumePublishError, VolumeService,
+    Attachment, BindsWithin, DriverLock, FilesystemService, Metadata, Mode, Path, SleepLock, Vfs,
+    VfsError, VolumePublishError, VolumeService,
 };
 use tairix_kernel_ipc::EndpointId;
 use tairix_kernel_sec::{GroupId, UserId};
@@ -150,7 +184,9 @@ use crate::hwtree_store::HwTreeStore;
 use crate::kernel_fs::KernelFs;
 use crate::served_volume::{Granted, ServedVolume, Window};
 use crate::shared_block::{OwnedBlockWindow, SharedBlock};
-use crate::system_mount::{cached, publish_volume_identity, LATE_FILESYSTEM, VOLUME_FOREST};
+use crate::system_mount::{
+    cached, publish_volume_identity, FS_SERVICE, LATE_FILESYSTEM, VOLUME_FOREST,
+};
 use crate::volume_policy::{Presented, PresentedFs, LATE_STORAGE_GID};
 
 #[path = "network_volume.rs"]
@@ -159,6 +195,9 @@ mod network;
 #[path = "image_volume.rs"]
 mod image;
 
+#[path = "volume_replay.rs"]
+mod replay;
+
 pub(crate) use image::image_volumes_node;
 
 /// Audit event: a runtime volume was first served by its driver, mounted,
@@ -166,16 +205,33 @@ pub(crate) use image::image_volumes_node;
 const VOLUME_ATTACHED: EventId = EventId(4172);
 
 /// Audit event: a runtime volume was attached read-only because its
-/// filesystem driver refuses to write it. The `cause` field names why — a
+/// filesystem driver refuses to write it, or because volumes of its identity
+/// hold writes it may be the medium of. The `cause` field names why — a
 /// feature it does not maintain, errors a checker recorded, a crash that
-/// left the volume for a checker — so a user told a write failed learns
-/// what to do about it.
+/// left the volume for a checker, `lookalikes_hold_writes` — so a user told a
+/// write failed learns what to do about it.
 const VOLUME_ATTACHED_READ_ONLY: EventId = EventId(4180);
 
 /// Audit event: a runtime volume's requested catalog name is already taken.
 /// Not a refusal of the volume: the volume manager tries its next candidate
 /// name on this answer, so it is recorded at `Info`.
 const VOLUME_NAME_TAKEN: EventId = EventId(4181);
+
+/// Audit event: a volume carrying the identity of one attached already was
+/// attached beside it as its twin, under a key and a catalog name of its own,
+/// so `id::` of the identity still names the volume attached first (drives.md
+/// `fs.root.twin_attached`). Carries the name it asked.
+const VOLUME_TWIN_ATTACHED: EventId = EventId(4219);
+
+/// The cause and refusal of a catalog name some other volume shows or asked
+/// for first.
+const NAME_IN_USE: (&str, Errno) = ("name_in_use", Errno::AlreadyExists);
+
+/// The name an audit gives a volume it has no name of to copy.
+const UNKNOWN_VOLUME: &str = "unknown";
+
+/// How many twin names a catalog name has, from `_2` up.
+const TWIN_NAMES: usize = VOLUME_TWINS_MAX as usize - 1;
 
 /// Audit event: a runtime volume attach was refused; nothing was mounted
 /// (drives.md `fs.hotplug.root_added` deny half). The `cause` field names
@@ -196,6 +252,22 @@ const VOLUME_EJECTED_AT_SEAT: EventId = EventId(4213);
 
 /// What a [`VOLUME_DETACH_REFUSED`] record says, whatever refused the detach.
 const DETACH_REFUSED: &str = "volume-service: runtime volume detach refused";
+
+/// Audit event: a volume was retitled, its filesystem's label written and made
+/// durable (drives.md `fs.volume.retitled`). `cause` names the authority it
+/// rested on: `owner`, `mount_authority` or `seat`.
+const VOLUME_RETITLED: EventId = EventId(4220);
+
+/// Audit event: a retitle was refused and nothing was written (drives.md
+/// `fs.volume.retitled_refused`); `cause` says why.
+const VOLUME_RETITLE_REFUSED: EventId = EventId(4221);
+
+/// What a [`VOLUME_RETITLE_REFUSED`] record says, whatever refused it.
+const RETITLE_REFUSED: &str = "volume-service: retitle refused";
+
+/// The cause and refusal of an operation no authority the caller holds
+/// reaches.
+const NO_MOUNT_AUTHORITY: (&str, Errno) = ("no_mount_authority", Errno::PermissionDenied);
 
 /// Audit event: a volume's serving driver vanished with nothing
 /// uncommitted; the volume was retracted cleanly (drives.md §10 — a
@@ -233,6 +305,18 @@ const VOLUME_REINSERT_REPLAYED: EventId = EventId(4185);
 /// and the retained byte count still held.
 const VOLUME_REINSERT_CONFLICT: EventId = EventId(4186);
 
+/// Audit event: a re-inserted volume's content proved it unmutated but its
+/// device proved nothing — none stated, or another's — so it is mounted
+/// read-only with its retained writes held until it is answered for (drives.md
+/// `fs.hotplug.reinsert_unconfirmed`). Carries the retained byte count.
+const VOLUME_REINSERT_UNCONFIRMED: EventId = EventId(4237);
+
+/// Audit event: an answer for a re-inserted volume's held writes was carried
+/// out (drives.md `fs.hotplug.replay_answered`): `cause` is `written` with the
+/// replayed byte count, or `discarded` with the byte count given up, and
+/// `authority` the one it rested on, `mount_authority` or `seat`.
+const VOLUME_REPLAY_ANSWERED: EventId = EventId(4238);
+
 /// Audit event: a runtime volume was attached and its node published; it
 /// is mounted once its format's driver serves it (drives.md
 /// `fs.serve.awaiting`).
@@ -246,7 +330,8 @@ const VOLUME_SERVE_RESUMED: EventId = EventId(4193);
 /// or the kernel could not mount what the driver offered — and was retracted
 /// (drives.md `fs.serve.refused`). `cause` says which, `error` why, and
 /// `discarded_bytes` what of its device writes could not be committed; a
-/// conflicted volume is kept instead, its retained set the force-unmount's.
+/// volume holding writes is kept instead, the writes its answer's or the
+/// force-unmount's.
 const VOLUME_SERVE_REFUSED: EventId = EventId(4194);
 
 /// Audit event: the driver serving a volume is gone; the volume stays
@@ -276,12 +361,30 @@ enum Availability {
     /// it is mounted fresh and read-only over a live driver while the
     /// retained set stays held for the audited force-discard (D4c).
     RecoveryConflict,
+    /// The volume was re-inserted and proven unmutated, but its device could
+    /// not prove the medium the one its writes were made on: read-only over a
+    /// live driver with the retained set held until an answer says whether to
+    /// write it or discard it.
+    ReplayUnconfirmed,
 }
 
 impl Availability {
     /// Whether the device the volume was attached over is still there.
     const fn device_present(self) -> bool {
-        matches!(self, Self::Available | Self::RecoveryConflict)
+        match self {
+            Self::Available | Self::RecoveryConflict | Self::ReplayUnconfirmed => true,
+            Self::UnavailableDirty | Self::UnavailableLost => false,
+        }
+    }
+
+    /// What a volume served while it keeps its retained set is listed as, or
+    /// `None` for one that keeps none while served.
+    const fn held(self) -> Option<MountAvailability> {
+        match self {
+            Self::RecoveryConflict => Some(MountAvailability::RecoveryConflict),
+            Self::ReplayUnconfirmed => Some(MountAvailability::ReplayUnconfirmed),
+            Self::Available | Self::UnavailableDirty | Self::UnavailableLost => None,
+        }
     }
 }
 
@@ -292,10 +395,16 @@ struct AttachedVolume {
     /// device's, on a port it can be pulled from while the machine runs, which
     /// the user at the seat may eject, or a fixed one.
     class: VolumeClass,
-    /// The volume's published 16-byte identity.
+    /// The key the volume is published under: its identity, or a twin's own.
     id: [u8; 16],
+    /// The identity its content carries, which a twin shares with the volume
+    /// it twins.
+    identity: [u8; 16],
     /// The catalog name the root is projected under.
     name: String,
+    /// What the mount listing titles it: its filesystem's label, as the probe
+    /// read it and as a retitle set it since.
+    title: VolumeTitle,
     /// The mount-table entry's path (`/Storage/<name>`).
     path: Path,
     /// The mount's driver handle in the registry.
@@ -306,6 +415,12 @@ struct AttachedVolume {
     /// The shared data window's region id, for the detach-time device
     /// flush.
     window: u64,
+    /// What the device it last came in on stated tells that device from
+    /// every other of its kind; `None` for one that proved nothing.
+    device: Option<BlkDeviceIdentity>,
+    /// The node its own node is published under: the one its volume manager
+    /// was loaded for when it last came in.
+    publisher: u32,
     /// The volume's uncommitted-write journal, shared with the
     /// [`JournaledBlock`] its served volume writes through.
     journal: Arc<SpinLock<RetainedWrites>>,
@@ -325,6 +440,9 @@ struct AttachedVolume {
     first_lba: u64,
     /// The attached extent's block count.
     blocks: u64,
+    /// The extent of its device it is served over, as its first LBA and block
+    /// count: the attached one, or where a re-insert found it.
+    served_extent: (u64, u64),
     /// Whether its device is still there, and how it came back if it left.
     availability: Availability,
     /// An operation is building, recovering or retracting the volume: no
@@ -388,6 +506,10 @@ impl Mount {
 /// links") instead of the transient fault it is, and a caller cannot tell
 /// those apart.
 struct UnavailableFs;
+
+// Boxing the stand-in allocates nothing, so putting it in a driver's place
+// cannot be refused for memory.
+const _: () = assert!(size_of::<UnavailableFs>() == 0);
 
 impl FilesystemRead for UnavailableFs {
     fn root(&self) -> NodeId {
@@ -757,18 +879,27 @@ enum Removal {
     Publication,
 }
 
-/// Whose authority a detach of a device's volume rests on.
-#[derive(Copy, Clone, Eq, PartialEq)]
-enum DetachAuthority {
+/// Whose authority a detach, a retitle or an answer for the held writes of a
+/// device's volume rests on.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum DeviceAuthority {
     /// The mount authority, which reaches every volume.
     Mount,
     /// The user at the seat, which reaches a removable device's volume alone.
     Seat,
 }
 
-impl DetachAuthority {
+impl DeviceAuthority {
     fn reaches(self, class: VolumeClass) -> bool {
         self == Self::Mount || class == VolumeClass::Removable
+    }
+
+    /// How an audit names it.
+    const fn cause(self) -> &'static str {
+        match self {
+            Self::Mount => "mount_authority",
+            Self::Seat => "seat",
+        }
     }
 }
 
@@ -780,10 +911,33 @@ enum DetachClaim<'a> {
     Gone,
     /// The detach's authority does not reach the volume; its name for the
     /// refusal.
-    Unauthorised(String),
+    Unauthorised(Cow<'static, str>),
     /// Another operation holds the volume, or moved it to a device this
     /// detach does not hold; the volume's name for the refusal.
-    Busy(String),
+    Busy(Cow<'static, str>),
+}
+
+/// What holds a catalog name an entering volume asks for.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum Holder {
+    /// Nothing does.
+    Free,
+    /// A volume this service attached, carrying this identity.
+    Volume([u8; 16]),
+    /// Something else the catalog shows or holds the name for.
+    Other,
+}
+
+impl Holder {
+    /// Whether a volume carrying `identity` may enter asking the name held so:
+    /// one nothing holds, or, as a twin, one a volume of its identity holds.
+    fn admits(self, identity: Option<[u8; 16]>) -> bool {
+        match self {
+            Self::Free => true,
+            Self::Volume(held) => identity == Some(held),
+            Self::Other => false,
+        }
+    }
 }
 
 /// The facts of a volume awaiting its driver a serve or a refusal acts on,
@@ -792,7 +946,9 @@ enum DetachClaim<'a> {
 struct ServeTarget {
     class: VolumeClass,
     id: [u8; 16],
+    identity: [u8; 16],
     name: String,
+    title: VolumeTitle,
     path: Path,
     handle: DriverHandle,
     endpoint: u64,
@@ -802,7 +958,8 @@ struct ServeTarget {
     /// What the mount table shows it as, if a driver served it before.
     mounted_as: Option<FormatName>,
     served: Arc<ServedVolume>,
-    conflicted: bool,
+    /// What it is listed as while it keeps its retained set, if it does.
+    kept: Option<MountAvailability>,
 }
 
 /// What a device's volume published through hardware-tree node `publisher`
@@ -841,7 +998,7 @@ fn volume_node(publisher: u32, fstype: VolumeFsType, served: u64) -> Result<HwNo
 /// The facts of an attached volume a detach acts on, snapshotted out of the
 /// registry so its device I/O never runs under the registry guard.
 struct DetachTarget {
-    name: String,
+    name: Cow<'static, str>,
     handle: DriverHandle,
     endpoint: u64,
     window: u64,
@@ -849,6 +1006,15 @@ struct DetachTarget {
     availability: Availability,
     /// A driver serves it, whose filesystem state the detach flushes first.
     served: bool,
+}
+
+/// The facts of a device's volume a retitle acts on, snapshotted out of the
+/// registry so its driver's I/O never runs under the registry guard.
+struct RetitleTarget {
+    name: String,
+    handle: DriverHandle,
+    /// The authority it rests on.
+    authority: DeviceAuthority,
 }
 
 /// The one production service instance the boot handover installs.
@@ -994,49 +1160,138 @@ impl RuntimeVolumeService {
     /// marks volumes, so it never drops a client there; the next operation,
     /// or the last pin on the slot going, does.
     fn retire_unused_devices(&self) {
-        let mut live: Vec<(u64, u64)> = {
-            let state = self.state.lock();
-            state
-                .iter()
-                .filter(|v| v.availability.device_present())
-                .map(|v| (v.endpoint, v.window))
-                .collect()
-        };
-        live.sort_unstable();
-        // The retired slots are dropped *outside* the registry guard:
-        // releasing the last reference closes the client and its window
-        // hold, which must not run under a spin lock.
-        let retired: Vec<DeviceSlot> = self
-            .devices
-            .lock()
-            .extract_if(.., |slot| {
-                slot.pins == 0 && live.binary_search(&(slot.endpoint, slot.window)).is_err()
-            })
-            .collect();
-        drop(retired);
+        // Decided under both guards, so a volume entered meanwhile cannot
+        // lose its slot to a list taken before it, and each slot is taken
+        // alone and dropped *outside* them: releasing the last reference
+        // closes the client and its window hold, which must not run under a
+        // spin lock. The slots before the one taken were judged in use, so
+        // the next pass resumes there rather than judging them again.
+        let mut from = 0;
+        loop {
+            let retired = {
+                let state = self.state.lock();
+                let mut devices = self.devices.lock();
+                let Some(at) = devices.iter().skip(from).position(|slot| {
+                    slot.pins == 0
+                        && !state.iter().any(|v| {
+                            v.availability.device_present()
+                                && (v.endpoint, v.window) == (slot.endpoint, slot.window)
+                        })
+                }) else {
+                    return;
+                };
+                from += at;
+                devices.remove(from)
+            };
+            drop(retired);
+        }
     }
 
-    /// Enter `volume` into the registry claimed by the attach building it.
+    /// Enter `volume` into the registry claimed by the attach building it,
+    /// keyed and named under the registry's guard so no two attaches take one
+    /// key or one name: it is published under its identity while no attached
+    /// volume holds that, else under a twin key of its own, and a twin asking
+    /// a name a volume of its identity holds is shown under the first of that
+    /// name's twin names nothing holds. What holds a key or a name outside the
+    /// registry is judged before its guard is taken, so the guard is held
+    /// over the registry's own entries alone. Answers the claim and, for such
+    /// a twin, the name it is shown as.
     ///
     /// # Errors
     ///
-    /// `(cause, errno)` pairs the attach path audits: a volume of the same
-    /// identity is registered already (`Busy`, as a published one is), or
-    /// the registry cannot grow.
-    fn enter(&self, volume: AttachedVolume) -> Result<VolumeClaim<'_>, (&'static str, Errno)> {
-        let id = volume.id;
+    /// `(cause, errno)` pairs the attach path audits: [`VOLUME_TWINS_MAX`]
+    /// volumes of its identity attached already (`LimitExceeded`), a key some
+    /// root holds already (`Busy`), a name another volume holds or no twin
+    /// name free (`AlreadyExists`), or a registry or a name that cannot be
+    /// held.
+    fn enter(
+        &self,
+        mut volume: AttachedVolume,
+        vfs: &Vfs,
+    ) -> Result<(VolumeClaim<'_>, Option<String>), (&'static str, Errno)> {
+        let identity = volume.identity;
+        let twin_key = twin_identity(&identity, volume.handle.as_u64());
+        let published = (
+            VOLUME_FOREST.publishes(&identity),
+            VOLUME_FOREST.publishes(&twin_key),
+        );
+        let asked_outside = self.held_outside(vfs, &volume.name);
+        let twins_outside = self.twins_held_outside(vfs, &volume.name);
         let mut state = self.state.lock();
-        if state.iter().any(|v| v.id == id) {
-            return Err(("identity_attached", Errno::Busy));
+        let alike = state.iter().filter(|v| v.identity == identity).count();
+        if alike >= usize::from(VOLUME_TWINS_MAX) {
+            return Err(("twins_full", Errno::LimitExceeded));
         }
+        if key_held(&state, &identity, published.0) {
+            volume.id = twin_key;
+            if key_held(&state, &twin_key, published.1) {
+                return Err(("identity_unpublishable", Errno::Busy));
+            }
+        }
+        let holder = holder_among(&state, &volume.name, asked_outside);
+        let shown = if holder == Holder::Free {
+            None
+        } else if holder.admits(Some(identity)) {
+            let Some(twin) = free_twin(&state, &volume.name, twins_outside) else {
+                return Err(NAME_IN_USE);
+            };
+            let Ok(text) = core::str::from_utf8(twin.as_bytes()) else {
+                return Err(NAME_IN_USE);
+            };
+            volume.path = storage_path(text)?;
+            volume.name = held_text(text)?;
+            Some(held_text(text)?)
+        } else {
+            return Err(NAME_IN_USE);
+        };
         state
             .try_reserve(1)
             .map_err(|_| ("registry_full", Errno::OutOfMemory))?;
+        let id = volume.id;
         state.push(AttachedVolume {
             claimed: true,
             ..volume
         });
-        Ok(VolumeClaim { service: self, id })
+        Ok((VolumeClaim { service: self, id }, shown))
+    }
+
+    /// What holds the catalog name `name`: an attached volume, or else an
+    /// image volume or whatever the catalog shows. Only the registry's own
+    /// entries are judged under its guard.
+    fn holder_of(&self, vfs: &Vfs, name: &str) -> Holder {
+        let outside = self.held_outside(vfs, name);
+        holder_among(&self.state.lock(), name, outside)
+    }
+
+    /// Whether something other than an attached volume holds the catalog name
+    /// `name`: an image volume, or whatever the catalog shows.
+    fn held_outside(&self, vfs: &Vfs, name: &str) -> bool {
+        self.images.reserves(name, None) || shown_in_catalog(vfs, name)
+    }
+
+    /// Which of `name`'s twin names, from `_2` up, something other than an
+    /// attached volume holds.
+    fn twins_held_outside(&self, vfs: &Vfs, name: &str) -> [bool; TWIN_NAMES] {
+        let mut held = [false; TWIN_NAMES];
+        for (slot, ordinal) in held.iter_mut().zip(2..=VOLUME_TWINS_MAX) {
+            let candidate = tairix_fsprobe::name::twin(name.as_bytes(), ordinal);
+            *slot = candidate.is_some_and(|twin| {
+                core::str::from_utf8(twin.as_bytes()).is_ok_and(|text| self.held_outside(vfs, text))
+            });
+        }
+        held
+    }
+
+    /// Whether a volume still on the device `request` names is served over a
+    /// block of the extent it asks for: that medium is attached already.
+    fn attached_over(&self, request: &VolumeAttachRequest<'_>) -> bool {
+        let device = (request.endpoint, request.window);
+        let asked = (request.first_lba, request.blocks);
+        self.state.lock().iter().any(|v| {
+            v.availability.device_present()
+                && (v.endpoint, v.window) == device
+                && extents_meet(v.served_extent, asked)
+        })
     }
 
     /// Whether a device volume holds the catalog name `name`, mounted or
@@ -1176,7 +1431,9 @@ impl RuntimeVolumeService {
         let target = ServeTarget {
             class: entry.class,
             id: entry.id,
+            identity: entry.identity,
             name,
+            title: entry.title,
             path,
             handle: entry.handle,
             endpoint: entry.endpoint,
@@ -1185,7 +1442,7 @@ impl RuntimeVolumeService {
             fstype: entry.fstype,
             mounted_as: entry.mount.format(),
             served,
-            conflicted: entry.availability == Availability::RecoveryConflict,
+            kept: entry.availability.held(),
         };
         Ok((
             VolumeClaim {
@@ -1199,28 +1456,36 @@ impl RuntimeVolumeService {
     /// Claim the volume `id` for a detach on `authority` holding the device
     /// `held` (`None` for one whose device is gone): the authority must reach
     /// it, it must still be on that device or have lost its device, and no
-    /// other operation may hold it.
+    /// other operation may hold it. `named` is the name the detach found it
+    /// under, which the claim answers with unless another volume took the key
+    /// meanwhile: only then is the name copied under the registry's guard.
     fn claim_for_detach(
         &self,
         id: &[u8; 16],
         held: Option<(u64, u64)>,
-        authority: DetachAuthority,
+        authority: DeviceAuthority,
+        named: Cow<'static, str>,
     ) -> DetachClaim<'_> {
         let mut state = self.state.lock();
         let Some(volume) = state.iter_mut().find(|v| v.id == *id) else {
             return DetachClaim::Gone;
         };
+        let name = if named == volume.name.as_str() {
+            named
+        } else {
+            stated_name(&volume.name)
+        };
         if !authority.reaches(volume.class) {
-            return DetachClaim::Unauthorised(volume.name.clone());
+            return DetachClaim::Unauthorised(name);
         }
         let on_held =
             !volume.availability.device_present() || held == Some((volume.endpoint, volume.window));
         if volume.claimed || !on_held {
-            return DetachClaim::Busy(volume.name.clone());
+            return DetachClaim::Busy(name);
         }
         volume.claimed = true;
         let target = DetachTarget {
-            name: volume.name.clone(),
+            name,
             handle: volume.handle,
             endpoint: volume.endpoint,
             window: volume.window,
@@ -1237,6 +1502,87 @@ impl RuntimeVolumeService {
         )
     }
 
+    /// Claim device volume `id` for a retitle by `caller`, deciding under the
+    /// claim on whose authority it may go ahead ([`retitle_authority`]).
+    ///
+    /// # Errors
+    ///
+    /// The name the refusal is audited under — the volume's catalog name, or
+    /// `unknown` for one that left or whose name the heap cannot copy — with
+    /// its cause and errno.
+    fn claim_for_retitle(
+        &self,
+        id: &[u8; 16],
+        caller: &Principal<'_>,
+    ) -> Result<(VolumeClaim<'_>, RetitleTarget), (Cow<'static, str>, &'static str, Errno)> {
+        let mut state = self.state.lock();
+        let Some(volume) = state.iter_mut().find(|v| v.id == *id) else {
+            return Err((
+                Cow::Borrowed(UNKNOWN_VOLUME),
+                "identity_not_attached",
+                Errno::NotFound,
+            ));
+        };
+        let name = held_text(&volume.name)
+            .map_err(|(cause, errno)| (Cow::Borrowed(UNKNOWN_VOLUME), cause, errno))?;
+        let authority = match retitle_authority(volume, caller) {
+            Ok(authority) => authority,
+            Err((cause, errno)) => return Err((Cow::Owned(name), cause, errno)),
+        };
+        volume.claimed = true;
+        let target = RetitleTarget {
+            name,
+            handle: volume.handle,
+            authority,
+        };
+        Ok((
+            VolumeClaim {
+                service: self,
+                id: *id,
+            },
+            target,
+        ))
+    }
+
+    /// Title device volume `id` `title` for `caller`: on the mount authority,
+    /// or on the seat's over a removable device's volume whose root they may
+    /// write ([`root_writable`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`VolumeService::retitle`], each refusal audited.
+    fn retitle_device(
+        &self,
+        audit: &'static (dyn Sink + Sync),
+        caller: &Principal<'_>,
+        id: &[u8; 16],
+        title: &VolumeTitle,
+    ) -> Result<(), Errno> {
+        let (claim, target) = self
+            .claim_for_retitle(id, caller)
+            .map_err(|(name, cause, errno)| refuse_retitle(audit, &name, cause, errno))?;
+        let permitted = match target.authority {
+            DeviceAuthority::Seat => root_writable(caller, &target.name),
+            DeviceAuthority::Mount => Ok(()),
+        };
+        let written = permitted.and_then(|()| {
+            write_held_title(target.handle, title, || {
+                if let Some(volume) = self.state.lock().iter_mut().find(|v| v.id == *id) {
+                    volume.title = *title;
+                }
+            })
+        });
+        drop(claim);
+        written.map_err(|(cause, errno)| refuse_retitle(audit, &target.name, cause, errno))?;
+        audit_retitled(audit, &target.name, target.authority.cause());
+        Ok(())
+    }
+
+    /// Whether a device volume `id` is attached.
+    fn attaches(&self, id: &[u8; 16]) -> bool {
+        self.state.lock().iter().any(|volume| volume.id == *id)
+    }
+
     /// Whether the attached device volume `id` is on a removable port.
     fn removable(&self, id: &[u8; 16]) -> bool {
         self.state
@@ -1247,12 +1593,12 @@ impl RuntimeVolumeService {
 
     /// The name of volume `id` and the device it is attached over: `None`
     /// when no such volume is attached, and no device when its device is
-    /// gone.
-    fn attached_device(&self, id: &[u8; 16]) -> Option<(String, Option<(u64, u64)>)> {
+    /// gone. A name the heap cannot copy is stated as `unknown`.
+    fn attached_device(&self, id: &[u8; 16]) -> Option<AttachedOn> {
         let state = self.state.lock();
         let volume = state.iter().find(|v| v.id == *id)?;
         Some((
-            volume.name.clone(),
+            stated_name(&volume.name),
             volume
                 .availability
                 .device_present()
@@ -1292,43 +1638,31 @@ impl RuntimeVolumeService {
         )
         .map_err(|err| ("proxy_unbuilt", err))?;
         let state = fs.state();
-        let map_gid = identity_map_gid(target.fstype);
         let handle = target.handle.as_u64();
-        let (driver, watch) = match map_gid {
-            Some(gid) => cached(
-                PresentedFs::new(fs, Presented::removable(gid)),
-                handle,
-                target.id,
-                wiring.pressure,
-                wiring.audit,
-                wiring.watches,
-            ),
-            None => cached(
-                fs,
-                handle,
-                target.id,
-                wiring.pressure,
-                wiring.audit,
-                wiring.watches,
-            ),
-        }
+        let (driver, watch) = cached(
+            fs,
+            handle,
+            target.id,
+            wiring.pressure,
+            wiring.audit,
+            wiring.watches,
+        )
         .map_err(|err| ("cache_unbuilt", err))?;
+        // Presented above its cache, so a storage group the unlock publishes
+        // after the attach is shown at once rather than past what was cached.
+        let driver: Box<dyn KernelFs> = if records_owners(target.fstype) {
+            driver
+        } else {
+            Box::try_new(PresentedFs::removable(driver, &LATE_STORAGE_GID))
+                .map_err(|_| ("presentation_unbuilt", Errno::OutOfMemory))?
+        };
         let read_only = target.served.read_only() || offer.write_refusal.is_some();
         let attachment = Attachment::new(target.handle, device.medium, mount_flags(read_only));
-        let template = mount_template(map_gid);
+        let template = mount_template(target.fstype);
         let path = held_path(&target.path)?;
         let register = |driver, watch| {
-            register_with_health(
-                target.handle,
-                driver,
-                watch,
-                &target.name,
-                offer.format.as_str(),
-                target.id,
-                device.health.clone(),
-                target.class,
-            )
-            .map_err(|()| ("handle_in_use", Errno::Busy))
+            register_with_health(target, offer.format, device, driver, watch)
+                .map_err(|()| ("handle_in_use", Errno::Busy))
         };
         if target.mounted_as.is_some() {
             // The posture goes first, under the stand-in's lock while it still
@@ -1344,7 +1678,7 @@ impl RuntimeVolumeService {
         } else {
             vfs.mounts_write()
                 .attach_at(attachment, path, template)
-                .map_err(|_| ("name_in_use", Errno::AlreadyExists))?;
+                .map_err(|_| NAME_IN_USE)?;
             let unmount = || {
                 let _ = vfs
                     .mounts_write()
@@ -1366,6 +1700,7 @@ impl RuntimeVolumeService {
                     match err {
                         VolumePublishError::NilIdentity => Errno::OutOfRange,
                         VolumePublishError::AlreadyPublished => Errno::Busy,
+                        VolumePublishError::OutOfMemory => Errno::OutOfMemory,
                     },
                 )
             })?;
@@ -1375,13 +1710,11 @@ impl RuntimeVolumeService {
             })?;
         }
         let _ = LATE_FILESYSTEM.set_served_state(target.handle, Some(state));
+        let titled = target.fstype.takes_title() && offer.title;
+        let _ = LATE_FILESYSTEM.set_title(target.handle, target.title, titled);
         let _ = LATE_FILESYSTEM.set_availability(
             target.handle,
-            if target.conflicted {
-                MountAvailability::RecoveryConflict
-            } else {
-                MountAvailability::Available
-            },
+            target.kept.unwrap_or(MountAvailability::Available),
         );
         Ok(())
     }
@@ -1389,9 +1722,10 @@ impl RuntimeVolumeService {
     /// Retract `target`, which no driver will serve, for `cause` and `error`,
     /// committing first what its device holds of it.
     ///
-    /// A conflicted volume is kept: its retained set is the audited
-    /// force-unmount's to discard, never a refusal's, so only its served
-    /// volume and node go and the stand-in keeps answering its mount.
+    /// A volume keeping its retained set is kept: the set is an answer's or
+    /// the audited force-unmount's to discard, never a refusal's,
+    /// so only its served volume and node go and the stand-in keeps answering
+    /// its mount.
     fn retract_unserved(
         &self,
         target: &ServeTarget,
@@ -1399,7 +1733,7 @@ impl RuntimeVolumeService {
         cause: &'static str,
         error: Errno,
     ) {
-        let discarded = if target.conflicted {
+        let discarded = if target.kept.is_some() {
             let node = self
                 .state
                 .lock()
@@ -1463,8 +1797,8 @@ impl RuntimeVolumeService {
                     &Event {
                         level: Level::Warn,
                         id: VOLUME_SERVE_REFUSED,
-                        message: "volume-service: the conflicted volume could not be served; \
-                                  kept read-only for its force-unmount",
+                        message: "volume-service: the volume holding writes could not be served; \
+                                  kept read-only with them",
                         fields: &[volume, cause, error],
                     },
                 );
@@ -1554,6 +1888,56 @@ impl RuntimeVolumeService {
         Errno::AlreadyExists
     }
 
+    /// Audit that the volume shown as `name` was attached and awaits its
+    /// driver, as the twin of a volume of its identity when `twin_asked`
+    /// names the name it asked, and read-only when `lookalike` says volumes
+    /// of its identity hold writes it may be the medium of.
+    fn audit_awaiting(
+        audit: &'static (dyn Sink + Sync),
+        name: &str,
+        twin_asked: Option<&str>,
+        lookalike: bool,
+    ) {
+        if lookalike {
+            Self::audit_event(
+                audit,
+                VOLUME_ATTACHED_READ_ONLY,
+                "volume-service: volumes of its identity hold writes it may be the medium of; \
+                 attached read-only",
+                name,
+                Some("lookalikes_hold_writes"),
+            );
+        }
+        if let Some(asked) = twin_asked {
+            log(
+                audit,
+                &Event {
+                    level: Level::Info,
+                    id: VOLUME_TWIN_ATTACHED,
+                    message: "volume-service: a volume of an attached volume's identity \
+                              attached beside it as its twin",
+                    fields: &[
+                        Field {
+                            key: "volume",
+                            value: FieldValue::Str(name),
+                        },
+                        Field {
+                            key: "asked",
+                            value: FieldValue::Str(asked),
+                        },
+                    ],
+                },
+            );
+        }
+        Self::audit_event(
+            audit,
+            VOLUME_AWAITING_DRIVER,
+            "volume-service: runtime volume attached; awaiting its filesystem driver",
+            name,
+            None,
+        );
+    }
+
     /// Audit why a volume asked for writable was mounted read-only, if its
     /// driver refused to write it.
     fn audit_write_refusal(
@@ -1608,6 +1992,10 @@ impl Default for RuntimeVolumeService {
 
 /// The disk stack every runtime volume is served over: its extent of the one
 /// shared, cached device, behind the uncommitted-write journal.
+/// A volume's name as stated, and the device — its endpoint and window — it is
+/// attached over while that device is present.
+type AttachedOn = (Cow<'static, str>, Option<(u64, u64)>);
+
 pub(crate) type VolumeWindow =
     PartitionBlock<JournaledBlock<OwnedBlockWindow<BlockCache<BlkClient>>>>;
 
@@ -1617,9 +2005,75 @@ fn held_path(path: &Path) -> Result<Path, (&'static str, Errno)> {
         .map_err(|_| ("path_unallocated", Errno::OutOfMemory))
 }
 
+/// A copy of `text` the heap can hold.
+fn held_text(text: &str) -> Result<String, (&'static str, Errno)> {
+    concatenated(&[text]).ok_or(("name_unallocated", Errno::OutOfMemory))
+}
+
+/// A copy of the volume name `name` to state an outcome or a refusal under:
+/// `unknown` where the heap cannot hold one.
+fn stated_name(name: &str) -> Cow<'static, str> {
+    concatenated(&[name]).map_or(Cow::Borrowed(UNKNOWN_VOLUME), Cow::Owned)
+}
+
+/// The text of the catalog path a volume named `name` is shown at.
+fn storage_text(name: &str) -> Result<String, (&'static str, Errno)> {
+    concatenated(&["/", STORAGE_CATALOG, "/", name]).ok_or(("path_unallocated", Errno::OutOfMemory))
+}
+
 /// Where the catalog shows a volume named `name`.
 fn storage_path(name: &str) -> Result<Path, (&'static str, Errno)> {
-    Path::parse(&format!("/Storage/{name}")).map_err(|_| ("mount_path_invalid", Errno::OutOfRange))
+    Path::parse(&storage_text(name)?).map_err(|err| match err {
+        VfsError::OutOfMemory => ("path_unallocated", Errno::OutOfMemory),
+        _ => ("mount_path_invalid", Errno::OutOfRange),
+    })
+}
+
+/// Whether the catalog shows anything as `name`.
+fn shown_in_catalog(vfs: &Vfs, name: &str) -> bool {
+    vfs.mounts()
+        .iter()
+        .any(|mount| mount.path().components() == [STORAGE_CATALOG, name])
+}
+
+/// Whether `key` names a volume among `attached`, or, by `published`, a root
+/// the forest publishes.
+fn key_held(attached: &[AttachedVolume], key: &[u8; 16], published: bool) -> bool {
+    published || attached.iter().any(|v| v.id == *key)
+}
+
+/// What holds the catalog name `name`: one of `attached`, or, by `outside`,
+/// something else.
+fn holder_among(attached: &[AttachedVolume], name: &str, outside: bool) -> Holder {
+    if let Some(volume) = attached.iter().find(|v| v.name == name) {
+        Holder::Volume(volume.identity)
+    } else if outside {
+        Holder::Other
+    } else {
+        Holder::Free
+    }
+}
+
+/// The first of `name`'s twin names, from `_2` up, that nothing holds: none
+/// of `attached`, and nothing else `outside` marks.
+fn free_twin(
+    attached: &[AttachedVolume],
+    name: &str,
+    outside: [bool; TWIN_NAMES],
+) -> Option<VolumeName> {
+    (2..=VOLUME_TWINS_MAX)
+        .zip(outside)
+        .filter(|&(_, held)| !held)
+        .filter_map(|(ordinal, _)| tairix_fsprobe::name::twin(name.as_bytes(), ordinal))
+        .find(|twin| {
+            core::str::from_utf8(twin.as_bytes())
+                .is_ok_and(|text| attached.iter().all(|v| v.name != text))
+        })
+}
+
+/// Whether two extents, each a first LBA and a block count, share a block.
+const fn extents_meet((start, len): (u64, u64), (other, other_len): (u64, u64)) -> bool {
+    start < other.saturating_add(other_len) && other < start.saturating_add(len)
 }
 
 /// Move the mount at `path` to `attachment`'s posture. The binds standing
@@ -1641,34 +2095,31 @@ fn reattach(
         .map_err(|_| ("mount_path_invalid", Errno::Busy))
 }
 
-/// Register `driver`, a user-space server's proxy, under `handle`, its
-/// releases reaped by the operations on the volume, and attach the live
-/// block-health overlay the mount snapshot reads (`plans/FIX-IO.md`
-/// IO2/IO3): the one place a served volume is registered, so the wiring
-/// cannot diverge between a first serve and a later one. Returns `Err(())`
-/// when the handle is already registered (fail closed — the caller unwinds);
-/// the `set_io_source` cannot miss, the handle having just been registered by
-/// the one operation that holds it.
-#[allow(clippy::too_many_arguments)] // The one registration: every fact the listing shows of the volume.
+/// Register `driver`, a user-space server's proxy serving `target` as
+/// `format`, under its handle, its releases reaped by the operations on the
+/// volume, and attach the live block-health overlay of its `device` the mount
+/// snapshot reads (`plans/FIX-IO.md` IO2/IO3): the one place a served volume
+/// is registered, so the wiring cannot diverge between a first serve and a
+/// later one. Returns `Err(())` when the handle is already registered (fail
+/// closed — the caller unwinds); the `set_io_source` cannot miss, the handle
+/// having just been registered by the one operation that holds it.
 fn register_with_health(
-    handle: DriverHandle,
+    target: &ServeTarget,
+    format: FormatName,
+    device: &SharedDevice,
     driver: Box<dyn KernelFs>,
     watch: Option<ClaimRef>,
-    source: &str,
-    fstype: &str,
-    volume_id: [u8; 16],
-    health: VolumeIoSource,
-    class: VolumeClass,
 ) -> Result<(), ()> {
     let names = VolumeNames {
-        source,
-        fstype,
-        volume_id,
+        source: &target.name,
+        fstype: format.as_str(),
+        volume_id: target.id,
+        identity: target.identity,
     };
     LATE_FILESYSTEM
-        .register_served(handle, driver, names, watch, None, class)
+        .register_served(target.handle, driver, names, watch, None, target.class)
         .map_err(|_| ())?;
-    let _ = LATE_FILESYSTEM.set_io_source(handle, health);
+    let _ = LATE_FILESYSTEM.set_io_source(target.handle, device.health.clone());
     Ok(())
 }
 
@@ -1704,6 +2155,9 @@ struct SharedDevice {
     /// The device's reported-health overlay, folded once for every volume
     /// on the device.
     health: VolumeIoSource,
+    /// What the device states tells it from every other of its kind, asked
+    /// once at connect; `None` for one that proves nothing.
+    identity: Option<BlkDeviceIdentity>,
 }
 
 impl SharedDevice {
@@ -1715,6 +2169,15 @@ impl SharedDevice {
     /// The device's block size, from the geometry cached at connect.
     fn block_size(&self) -> u32 {
         self.device.geometry().block_size
+    }
+}
+
+/// Why a block client could not be connected: want of memory, as every other
+/// allocation an attach makes is, or else the endpoint's own refusal.
+const fn client_refusal(errno: Errno) -> (&'static str, Errno) {
+    match errno {
+        Errno::OutOfMemory => ("device_unallocated", Errno::OutOfMemory),
+        errno => ("endpoint_unusable", errno),
     }
 }
 
@@ -1733,18 +2196,24 @@ fn connect_device(
     let hold = kernel_hold(installed_shared_mem_facility(), request.window)
         .map_err(|err| ("window_unreachable", err))?;
     // Connect the kernel blkio client and validate the device geometry.
-    let client = BlkClient::connect(request.endpoint, hold, wiring.audit)
-        .map_err(|err| ("endpoint_unusable", err))?;
+    let client =
+        BlkClient::connect(request.endpoint, hold, wiring.audit).map_err(client_refusal)?;
     let read_only = client.read_only();
     let medium = client.medium();
     let health = client.io_source();
+    let identity = client.identify();
     // Every volume on the disk reads through one coherent cache of its
     // recently used blocks, on the device side of the sharing lock, so a
     // filesystem's metadata reads stop costing a device round trip each.
     let client = BlockCache::for_disk(client, REMOVABLE_DISK_OWNER, wiring.pressure, wiring.audit)
-        .map_err(|err| ("geometry_unreadable", err.as_errno()))?;
+        .map_err(|err| match err {
+            DriverError::OutOfMemory => ("device_unallocated", Errno::OutOfMemory),
+            fault => ("geometry_unreadable", fault.as_errno()),
+        })?;
     if let Some(ledger) = client.ledger() {
-        tairix_kernel_core::memstats::MEM_STATS.register_ledger(ledger);
+        tairix_kernel_core::memstats::MEM_STATS
+            .register_ledger(ledger)
+            .map_err(|_| ("device_unallocated", Errno::OutOfMemory))?;
     }
     // Wrapping caches the geometry, so the shared device answers it
     // lock-free; a device whose geometry cannot be read is never wrapped.
@@ -1755,6 +2224,7 @@ fn connect_device(
         read_only,
         medium,
         health,
+        identity,
     })
 }
 
@@ -1801,26 +2271,15 @@ fn mount_flags(read_only: bool) -> MountFlags {
 
 /// The mount point's permission template (a runtime mount point has no
 /// node in the boot layout tree, so the template travels with the
-/// mount). An identity-mapped volume's template matches the map —
-/// system-owned under the storage group, group-writable — so the mount
-/// point itself is as reachable as its content; every other volume gets
-/// the system-owned world-traversable default, writes gated per inode by
-/// the volume's own records.
-fn mount_template(map_gid: Option<GroupId>) -> Metadata {
-    match map_gid {
-        Some(gid) => Presented::removable(gid).template(),
-        None => Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)),
-    }
-}
-
-/// The storage-group identity map an **ownerless** format is mounted
-/// under (`plans/DEVICES.md` D3d); formats with a real owner model keep
-/// their on-disk records.
-fn identity_map_gid(fstype: VolumeFsType) -> Option<GroupId> {
+/// mount). An ownerless format's is its presentation as it stands
+/// ([`Presented::removable_now`]), so the mount point is as reachable as its
+/// content; every other volume gets the system-owned world-traversable
+/// default, writes gated per inode by the volume's own records.
+fn mount_template(fstype: VolumeFsType) -> Metadata {
     if records_owners(fstype) {
-        None
+        Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755))
     } else {
-        LATE_STORAGE_GID.get()
+        Presented::removable_now(&LATE_STORAGE_GID).template()
     }
 }
 
@@ -1909,60 +2368,140 @@ fn recognise_extent<B: Block>(
     }
 }
 
-/// Audit how a re-insert resolved: the replayed recovery (with its byte
-/// count) or the read-only conflict (with its cause and the retained
-/// byte count still held).
+/// Audit how a recovery of the volume `name` resolved: a re-insert's replay or
+/// an answer carried out (`proof`), a conflict, or a medium held for an
+/// answer, each with the byte count it concerns.
 fn audit_recovery_outcome(
     audit: &'static (dyn Sink + Sync),
     name: &str,
     outcome: &RecoveryOutcome,
     journal: &Arc<SpinLock<RetainedWrites>>,
+    proof: Proof,
 ) {
-    match outcome {
-        RecoveryOutcome::Replayed(bytes) => {
+    let retained = || journal.lock().retained_bytes();
+    match *outcome {
+        RecoveryOutcome::Replayed(bytes) => match proof {
+            Proof::Answer(by) => audit_answer(audit, name, (by, ReplayAnswer::Write), bytes),
+            Proof::Device | Proof::Unproven => audit_bytes(
+                audit,
+                (VOLUME_REINSERT_REPLAYED, Level::Info),
+                "volume-service: re-inserted volume proven unmutated on its own device; \
+                 retained writes replayed and committed",
+                name,
+                (None, "replayed_bytes", bytes),
+            ),
+        },
+        RecoveryOutcome::Discarded(bytes, by) => {
+            audit_answer(audit, name, (by, ReplayAnswer::Discard), bytes);
+        }
+        RecoveryOutcome::Unconfirmed => audit_bytes(
+            audit,
+            (VOLUME_REINSERT_UNCONFIRMED, Level::Warn),
+            "volume-service: re-inserted volume proven unmutated on a device that does not \
+             prove it its own; mounted read-only until it is answered for",
+            name,
+            (None, "retained_bytes", retained()),
+        ),
+        RecoveryOutcome::Conflict(cause) => audit_bytes(
+            audit,
+            (VOLUME_REINSERT_CONFLICT, Level::Warn),
+            "volume-service: re-inserted volume could not be proven \
+             unmutated; mounted read-only with the retained set kept",
+            name,
+            (Some(cause), "retained_bytes", retained()),
+        ),
+    }
+}
+
+/// Record the answer `answer`, on `by`'s authority, carried out for the held
+/// writes of the volume `name`, with the `bytes` it wrote or gave up.
+fn audit_answer(
+    audit: &'static (dyn Sink + Sync),
+    name: &str,
+    (by, answer): (DeviceAuthority, ReplayAnswer),
+    bytes: u64,
+) {
+    let (message, cause, key) = match answer {
+        ReplayAnswer::Write => (
+            "volume-service: held writes written to the medium on an answer",
+            "written",
+            "replayed_bytes",
+        ),
+        ReplayAnswer::Discard => (
+            "volume-service: held writes discarded on an answer",
+            "discarded",
+            "discarded_bytes",
+        ),
+    };
+    log(
+        audit,
+        &Event {
+            level: Level::Warn,
+            id: VOLUME_REPLAY_ANSWERED,
+            message,
+            fields: &[
+                Field {
+                    key: "volume",
+                    value: FieldValue::Str(name),
+                },
+                Field {
+                    key: "cause",
+                    value: FieldValue::Str(cause),
+                },
+                Field {
+                    key: "authority",
+                    value: FieldValue::Str(by.cause()),
+                },
+                Field {
+                    key,
+                    value: FieldValue::UnsignedInt(bytes),
+                },
+            ],
+        },
+    );
+}
+
+/// Record `id` at `level`, `message`, about the volume `name`: its `cause`
+/// where it carries one, then the byte count `key` names.
+fn audit_bytes(
+    audit: &'static (dyn Sink + Sync),
+    (id, level): (EventId, Level),
+    message: &'static str,
+    name: &str,
+    (cause, key, bytes): (Option<&str>, &'static str, u64),
+) {
+    let volume = Field {
+        key: "volume",
+        value: FieldValue::Str(name),
+    };
+    let count = Field {
+        key,
+        value: FieldValue::UnsignedInt(bytes),
+    };
+    match cause {
+        Some(cause) => {
+            let cause = Field {
+                key: "cause",
+                value: FieldValue::Str(cause),
+            };
             log(
                 audit,
                 &Event {
-                    level: Level::Info,
-                    id: VOLUME_REINSERT_REPLAYED,
-                    message: "volume-service: re-inserted volume proven unmutated; \
-                              retained writes replayed and committed",
-                    fields: &[
-                        Field {
-                            key: "volume",
-                            value: FieldValue::Str(name),
-                        },
-                        Field {
-                            key: "replayed_bytes",
-                            value: FieldValue::UnsignedInt(*bytes),
-                        },
-                    ],
+                    level,
+                    id,
+                    message,
+                    fields: &[volume, cause, count],
                 },
             );
         }
-        RecoveryOutcome::Conflict(cause) => {
-            let retained = journal.lock().retained_bytes();
+        None => {
             log(
                 audit,
                 &Event {
-                    level: Level::Warn,
-                    id: VOLUME_REINSERT_CONFLICT,
-                    message: "volume-service: re-inserted volume could not be proven \
-                              unmutated; mounted read-only with the retained set kept",
-                    fields: &[
-                        Field {
-                            key: "volume",
-                            value: FieldValue::Str(name),
-                        },
-                        Field {
-                            key: "cause",
-                            value: FieldValue::Str(cause),
-                        },
-                        Field {
-                            key: "retained_bytes",
-                            value: FieldValue::UnsignedInt(retained),
-                        },
-                    ],
+                    level,
+                    id,
+                    message,
+                    fields: &[volume, count],
                 },
             );
         }
@@ -2001,7 +2540,11 @@ impl VolumeService for RuntimeVolumeService {
             .connected(&pin, request, wiring)
             .map_err(|(cause, errno)| refused(cause, errno))?;
         validate_extent(request, &device).map_err(|(cause, errno)| refused(cause, errno))?;
-        let block_size = device.block_size();
+        // Judged under the device's lock, which every attach and recovery on it
+        // holds: no other name would help a medium attached already.
+        if self.attached_over(request) {
+            return Err(refused("volume_attached", Errno::Busy));
+        }
         let mut disk = device.window();
 
         // The kernel names the volume from its own probe, never from the
@@ -2009,19 +2552,25 @@ impl VolumeService for RuntimeVolumeService {
         // volume's identity.
         let recognised =
             recognise_extent(&mut disk, request).filter(|volume| volume.fstype == request.fstype);
-        // A re-insert of a surprise-removed volume is recovered in place
-        // — proven unmutated and replayed, or held read-only with its
-        // retained set — never re-attached as a duplicate (D4c).
-        if let Some((target, _claim)) = self
-            .claim_reinsert_target(recognised.as_ref())
+        // A re-insert of a surprise-removed volume is recovered in place —
+        // replayed where its device proves it, else held read-only with its
+        // retained set — never re-attached as a duplicate (D4c); a medium two
+        // or more could be attaches afresh, read-only.
+        let lookalike = match self
+            .claim_reinsert_target(recognised.as_ref(), device.identity)
             .map_err(|errno| refused("recovery_unclaimed", errno))?
         {
-            return self.recover(request, publisher, wiring, &device, &target);
-        }
+            Reinsert::Fresh => false,
+            Reinsert::Lookalikes => true,
+            Reinsert::One(target, _claim, proof) => {
+                return self.recover(request, publisher, wiring, &device, (&target, proof));
+            }
+        };
         // A name another volume holds is answered before the volume is judged,
-        // so the volume manager tries its next candidate at once.
-        let path = storage_path(name).map_err(|(cause, errno)| refused(cause, errno))?;
-        if vfs.mounts().resolve(&path).path() == &path || self.name_reserved(name) {
+        // so the volume manager tries its next candidate at once; a twin of
+        // the volume holding it is named beside it as it enters.
+        let holder = self.holder_of(vfs, name);
+        if !holder.admits(recognised.as_ref().map(|volume| volume.identity)) {
             return Err(Self::name_taken(audit, name));
         }
         let Some(probed) = recognised else {
@@ -2029,65 +2578,39 @@ impl VolumeService for RuntimeVolumeService {
         };
         let publisher =
             publisher.ok_or_else(|| refused("no_publisher", Errno::PermissionDenied))?;
-        // A volume whose identity another root publishes is attached already,
-        // under another name: that is no name for the volume manager to try
-        // its next candidate over.
-        let unpublishable = if probed.identity == [0; 16] {
-            Some(Errno::OutOfRange)
-        } else {
-            VOLUME_FOREST.resolve(&probed.identity).map(|_| Errno::Busy)
-        };
-        if let Some(errno) = unpublishable {
-            return Err(refused("identity_unpublishable", errno));
+        if probed.identity == [0; 16] {
+            return Err(refused("identity_unpublishable", Errno::OutOfRange));
         }
-
-        // Thread the device through the uncommitted-write journal, its
-        // mutation-evidence shadow seeded from the window the volume declares.
-        let journal = seeded_journal(&mut disk, request, block_size, probed.evidence)
-            .ok_or_else(|| refused("journal_unallocated", Errno::OutOfMemory))?;
-        let journaled = JournaledBlock::new(disk, Arc::clone(&journal), wiring.pressure);
-        let window = PartitionBlock::new(journaled, request.first_lba, request.blocks)
-            .map_err(|err| refused("window_invalid", err.as_errno()))?;
-        let handle = DriverHandle::from_raw(self.next_handle.fetch_add(1, Ordering::Relaxed))
-            .map_err(|_| refused("handle_invalid", Errno::OutOfRange))?;
-        let served = self
-            .new_served(window, device.read_only)
-            .map_err(|err| refused("served_volume_unbuilt", err))?;
-        let volume = AttachedVolume {
-            class: device_class(wiring.tree, publisher),
-            id: probed.identity,
-            name: String::from(name),
-            path,
-            handle,
-            endpoint: request.endpoint,
-            window: request.window,
-            journal,
-            fstype: request.fstype,
-            mount: Mount::Pending,
-            served: Some(Arc::clone(&served)),
-            node: None,
-            first_lba: request.first_lba,
-            blocks: request.blocks,
-            availability: Availability::Available,
-            claimed: true,
-        };
+        let (volume, served) = self
+            .fresh_volume(
+                request,
+                wiring,
+                (&device, disk),
+                (&probed, name, publisher, lookalike),
+            )
+            .map_err(|(cause, errno)| refused(cause, errno))?;
         // Released as the attach returns, when a surprise removal that
         // landed while the volume was built is applied.
-        let _claim = self
-            .enter(volume)
-            .map_err(|(cause, errno)| refused(cause, errno))?;
+        let (claim, renamed) = self.enter(volume, vfs).map_err(|(cause, errno)| {
+            self.retire_served(Some(&served), None);
+            if errno == Errno::AlreadyExists {
+                Self::name_taken(audit, name)
+            } else {
+                refused(cause, errno)
+            }
+        })?;
+        let shown = renamed.as_deref().unwrap_or(name);
         let node = publish_volume_node(wiring.tree, publisher, request.fstype, served.id())
             .map_err(|err| {
-                self.retract(&probed.identity);
-                refused("volume_node_unpublished", err)
+                self.retract(&claim.id);
+                Self::refuse_attach(audit, shown, "volume_node_unpublished", err)
             })?;
-        self.set_node(&probed.identity, Some((publisher, node)));
-        RuntimeVolumeService::audit_event(
+        self.set_node(&claim.id, Some((publisher, node)));
+        Self::audit_awaiting(
             audit,
-            VOLUME_AWAITING_DRIVER,
-            "volume-service: runtime volume attached; awaiting its filesystem driver",
-            name,
-            None,
+            shown,
+            (claim.id != probed.identity).then_some(name),
+            lookalike,
         );
         Ok(())
     }
@@ -2113,12 +2636,12 @@ impl VolumeService for RuntimeVolumeService {
         // The claim decides; this refuses short of the device's lock a detach
         // the claim would refuse.
         let authority = if caller.may_mount() {
-            DetachAuthority::Mount
+            DeviceAuthority::Mount
         } else if caller.at_seat
             && request.mode == DetachMode::Plain
             && self.removable(&request.volume_id)
         {
-            DetachAuthority::Seat
+            DeviceAuthority::Seat
         } else {
             let Some((name, _)) = self.attached_device(&request.volume_id) else {
                 return Err(Errno::NotFound);
@@ -2323,23 +2846,124 @@ impl VolumeService for RuntimeVolumeService {
         title: &VolumeTitle,
     ) -> Result<(), Errno> {
         let wiring = self.wiring()?;
+        let audit = wiring.audit;
         if self.images.holds(volume_id) {
-            return self.retitle_image(wiring.audit, caller, volume_id, title);
+            return self.retitle_image(audit, caller, volume_id, title);
         }
-        // Only a disk image has an owner to retitle it: a device's volume has
-        // none, and a share's title is its server's.
-        let attached = self.network.holds(volume_id)
-            || self.attached_device(volume_id).is_some()
-            || LATE_FILESYSTEM.volume_of(volume_id).is_some();
-        Err(if attached {
-            Errno::NotSupported
+        if self.attaches(volume_id) {
+            return self.retitle_device(audit, caller, volume_id, title);
+        }
+        // A share's title is its server's, and a boot volume is the system's.
+        let (cause, errno) = if self.network.holds(volume_id) {
+            ("share_titled_by_server", Errno::NotSupported)
+        } else if LATE_FILESYSTEM.volume_of(volume_id).is_some() {
+            ("system_volume", Errno::NotSupported)
         } else {
-            Errno::NotFound
-        })
+            ("identity_not_attached", Errno::NotFound)
+        };
+        Err(refuse_retitle(audit, &shown_name(volume_id), cause, errno))
+    }
+
+    fn replay(&self, caller: &Principal<'_>, request: &VolumeReplayRequest) -> Result<(), Errno> {
+        let wiring = self.wiring()?;
+        self.answer_held(wiring, caller, request)
     }
 }
 
 impl RuntimeVolumeService {
+    /// The volume `probed` is over a fresh attach of `request` as `name`: its
+    /// journal seeded from the evidence window it declares, its extent
+    /// windowed through that journal under a fresh handle, and the served
+    /// volume its driver is granted — read-only where the device is, or where
+    /// volumes of its identity hold writes it may be the medium of
+    /// (`lookalike`).
+    ///
+    /// # Errors
+    ///
+    /// `(cause, errno)` pairs the attach path audits.
+    fn fresh_volume(
+        &self,
+        request: &VolumeAttachRequest<'_>,
+        wiring: &Wiring,
+        (device, mut disk): (&SharedDevice, OwnedBlockWindow<BlockCache<BlkClient>>),
+        (probed, name, publisher, lookalike): (&ProbedVolume, &str, u32, bool),
+    ) -> Result<(AttachedVolume, Arc<ServedVolume>), (&'static str, Errno)> {
+        // Everything that can fail comes before the served volume is filed,
+        // so a refusal leaves nothing in service.
+        let name = held_text(name)?;
+        let path = storage_path(&name)?;
+        let journal = seeded_journal(&mut disk, request, device.block_size(), probed.evidence)
+            .ok_or(("journal_unallocated", Errno::OutOfMemory))?;
+        let journaled = JournaledBlock::new(disk, Arc::clone(&journal), wiring.pressure);
+        let window = PartitionBlock::new(journaled, request.first_lba, request.blocks)
+            .map_err(|err| ("window_invalid", err.as_errno()))?;
+        let handle = DriverHandle::from_raw(self.next_handle.fetch_add(1, Ordering::Relaxed))
+            .map_err(|_| ("handle_invalid", Errno::OutOfRange))?;
+        let served = self
+            .new_served(window, device.read_only || lookalike)
+            .map_err(|err| ("served_volume_unbuilt", err))?;
+        let volume = AttachedVolume {
+            class: device_class(wiring.tree, publisher),
+            id: probed.identity,
+            identity: probed.identity,
+            name,
+            title: probed_title(probed.label()),
+            path,
+            handle,
+            endpoint: request.endpoint,
+            window: request.window,
+            device: device.identity,
+            publisher,
+            journal,
+            fstype: request.fstype,
+            mount: Mount::Pending,
+            served: Some(Arc::clone(&served)),
+            node: None,
+            first_lba: request.first_lba,
+            blocks: request.blocks,
+            served_extent: (request.first_lba, request.blocks),
+            availability: Availability::Available,
+            claimed: true,
+        };
+        Ok((volume, served))
+    }
+
+    /// The commit a detach makes of a volume in `availability`, or why it
+    /// cannot. A surprise-removed volume never detaches implicitly: giving up
+    /// its retained (or already lost) writes is the deliberate, separately
+    /// audited force, which still commits a healthy volume when it can.
+    fn final_commit(
+        &self,
+        availability: Availability,
+        live: (bool, Option<&mut Box<dyn KernelFs>>),
+        device: (u64, u64),
+        journal: &Arc<SpinLock<RetainedWrites>>,
+    ) -> Option<(&'static str, Errno)> {
+        match availability {
+            Availability::Available => self.commit_live(live, device, journal).err(),
+            Availability::UnavailableDirty => writes_refusal(
+                "volume_unavailable_dirty",
+                MountAvailability::UnavailableDirty,
+            ),
+            Availability::UnavailableLost => writes_refusal(
+                "volume_unavailable_lost",
+                MountAvailability::UnavailableLost,
+            ),
+            // A conflicted volume's device is live, but its journal still
+            // holds the retained set: a plain detach would discard it
+            // silently.
+            Availability::RecoveryConflict => writes_refusal(
+                "volume_recovery_conflict",
+                MountAvailability::RecoveryConflict,
+            ),
+            // Nor may a plain detach give up what still awaits an answer.
+            Availability::ReplayUnconfirmed => writes_refusal(
+                "volume_replay_unconfirmed",
+                MountAvailability::ReplayUnconfirmed,
+            ),
+        }
+    }
+
     /// Flush and commit a live volume before it detaches, through the device
     /// at `(endpoint, window)` and, where a driver `served` it, its driver's
     /// filesystem `fs`. A volume no driver serves has no filesystem state to
@@ -2380,7 +3004,7 @@ impl RuntimeVolumeService {
         &self,
         id: &[u8; 16],
         mode: DetachMode,
-        authority: DetachAuthority,
+        authority: DeviceAuthority,
         audit: &'static (dyn Sink + Sync),
     ) -> Result<(), Errno> {
         let refuse = |name: &str, cause: &'static str, errno: Errno| -> Errno {
@@ -2388,7 +3012,11 @@ impl RuntimeVolumeService {
         };
         self.retire_unused_devices();
         let Some((named, device)) = self.attached_device(id) else {
-            return Err(refuse("unknown", "identity_not_attached", Errno::NotFound));
+            return Err(refuse(
+                UNKNOWN_VOLUME,
+                "identity_not_attached",
+                Errno::NotFound,
+            ));
         };
         // A volume still on its device is detached under that device's lock,
         // so its final commit takes the disk's one client in turn with the
@@ -2399,7 +3027,7 @@ impl RuntimeVolumeService {
             .transpose()
             .map_err(|errno| refuse(&named, "registry_full", errno))?;
         let _op = pin.as_ref().map(|pin| pin.op.lock());
-        let (_claim, target) = match self.claim_for_detach(id, device, authority) {
+        let (_claim, target) = match self.claim_for_detach(id, device, authority, named) {
             DetachClaim::Held(claim, target) => (claim, target),
             // Detached, or retracted by a surprise removal, while this waited:
             // the goal state is reached.
@@ -2457,31 +3085,12 @@ impl RuntimeVolumeService {
             return Err(Self::refuse_open_nodes(audit, &name, open, mode));
         }
 
-        // A surprise-removed volume never detaches implicitly: discarding
-        // its retained (or already lost) uncommitted data is the
-        // deliberate, separately-audited force-unmount operation. A force
-        // detach still commits a healthy volume cleanly when it can; only
-        // when nothing can be committed does it discard.
-        let commit_refusal = match availability {
-            Availability::Available => self
-                .commit_live((served, fs.as_deref_mut()), (endpoint, window), &journal)
-                .err(),
-            Availability::UnavailableDirty => writes_refusal(
-                "volume_unavailable_dirty",
-                MountAvailability::UnavailableDirty,
-            ),
-            Availability::UnavailableLost => writes_refusal(
-                "volume_unavailable_lost",
-                MountAvailability::UnavailableLost,
-            ),
-            // A conflicted volume's device is live, but its journal still
-            // holds the retained set: a plain detach would discard it
-            // silently, so only the audited force is the exit.
-            Availability::RecoveryConflict => writes_refusal(
-                "volume_recovery_conflict",
-                MountAvailability::RecoveryConflict,
-            ),
-        };
+        let commit_refusal = self.final_commit(
+            availability,
+            (served, fs.as_deref_mut()),
+            (endpoint, window),
+            &journal,
+        );
         let discarded = match commit_refusal {
             None => None,
             Some((cause, errno)) => {
@@ -2611,6 +3220,183 @@ fn record(
     );
 }
 
+/// The authority `caller` retitles device volume `volume` on, decided under
+/// its claim, or why not: a format taking a title, the mount authority over
+/// any device's volume or the user at the seat over a removable one, and a
+/// volume a driver serves writably with nothing else acting on it.
+fn retitle_authority(
+    volume: &AttachedVolume,
+    caller: &Principal<'_>,
+) -> Result<DeviceAuthority, (&'static str, Errno)> {
+    if !volume.fstype.takes_title() {
+        return Err(("untitled_format", Errno::NotSupported));
+    }
+    let authority = match (caller.may_mount(), caller.at_seat) {
+        (true, _) => DeviceAuthority::Mount,
+        (false, true) => DeviceAuthority::Seat,
+        (false, false) => return Err(NO_MOUNT_AUTHORITY),
+    };
+    if !authority.reaches(volume.class) {
+        return Err(NO_MOUNT_AUTHORITY);
+    }
+    if volume.claimed {
+        return Err(("volume_busy", Errno::Busy));
+    }
+    match (volume.availability, volume.mount.server()) {
+        (Availability::Available, Some(_)) => Ok(authority),
+        (Availability::RecoveryConflict | Availability::ReplayUnconfirmed, Some(_)) => {
+            Err(("read_only", Errno::ReadOnly))
+        }
+        _ => Err(("volume_unserved", Errno::DeviceOffline)),
+    }
+}
+
+/// The authority `caller` answers for a volume's held writes on, judged before
+/// the volume is looked at: the mount authority's, or the seat's for the
+/// process holding it while it holds the seat's own capability. The claim then
+/// decides whether that authority reaches the volume.
+fn answering_authority(caller: &Principal<'_>) -> Option<DeviceAuthority> {
+    if caller.may_mount() {
+        Some(DeviceAuthority::Mount)
+    } else if caller.at_seat && caller.caps.holds(CapabilityId::DISPLAY) {
+        Some(DeviceAuthority::Seat)
+    } else {
+        None
+    }
+}
+
+/// Whether `caller` may write the root of the volume the catalog shows as
+/// `name`, judged as any write there is: by the volume's own records, the
+/// presentation it is mounted under, and its mount's posture.
+fn root_writable(caller: &Principal<'_>, name: &str) -> Result<(), (&'static str, Errno)> {
+    let path = storage_text(name)?;
+    FS_SERVICE
+        .access(
+            caller.uid,
+            caller.caps,
+            At {
+                start: Start::Root,
+                path: &path,
+            },
+            Wanted::WRITE,
+            FinalLink::Follow,
+        )
+        .map_err(|errno| match errno {
+            Errno::ReadOnly => ("read_only", Errno::ReadOnly),
+            Errno::PermissionDenied => ("root_not_writable", Errno::PermissionDenied),
+            errno => ("root_unreachable", errno),
+        })
+}
+
+/// Write `title` through the driver registered as `handle`, its volume held
+/// by the caller's claim against every other operation: `listed` is told once
+/// the driver holds the title, and the mount listing titles the volume then.
+fn write_held_title(
+    handle: DriverHandle,
+    title: &VolumeTitle,
+    listed: impl FnOnce(),
+) -> Result<(), (&'static str, Errno)> {
+    let driver = LATE_FILESYSTEM
+        .driver(handle)
+        .map_err(|_| ("volume_unserved", Errno::DeviceOffline))?;
+    let mut fs = driver.lock();
+    write_title(&mut *fs, title, || {
+        listed();
+        let _ = LATE_FILESYSTEM.set_title(handle, *title, true);
+    })
+}
+
+/// Write `title` through `fs`, the volume's driver, and flush it, telling
+/// `listed` once the driver holds the title: its writeback publishes it then,
+/// whether or not the flush succeeds. The title it replaces is never read,
+/// and the driver answers for its format, so one that keeps no title says so
+/// before a volume that takes no writes is refused for that.
+fn write_title<F: FilesystemLabel + FilesystemWrite>(
+    fs: &mut F,
+    title: &VolumeTitle,
+    listed: impl FnOnce(),
+) -> Result<(), (&'static str, Errno)> {
+    fs.set_label(title).map_err(driver_refusal)?;
+    listed();
+    fs.flush().map_err(|why| ("flush_failed", why.as_errno()))
+}
+
+/// Why a driver's refusal of a title refuses the retitle, and what it answers
+/// its caller: a format that keeps none is `NotSupported`, never the
+/// `NotImplemented` of a service not yet installed.
+const fn driver_refusal(why: DriverError) -> (&'static str, Errno) {
+    match why {
+        DriverError::Unsupported => ("untitled_format", Errno::NotSupported),
+        DriverError::ReadOnly => ("read_only", Errno::ReadOnly),
+        why => ("title_refused", why.as_errno()),
+    }
+}
+
+/// Audit the refused retitle of the volume shown as `name`, for `cause`, and
+/// hand back `errno`: a refusal of the caller's authority is a warning, any
+/// other information.
+fn refuse_retitle(
+    audit: &'static (dyn Sink + Sync),
+    name: &str,
+    cause: &'static str,
+    errno: Errno,
+) -> Errno {
+    record(
+        audit,
+        judged_level(errno),
+        VOLUME_RETITLE_REFUSED,
+        RETITLE_REFUSED,
+        name,
+        cause,
+    );
+    errno
+}
+
+/// The level a refusal answering `errno` is recorded at: one of the caller's
+/// authority is a warning, any other information.
+fn judged_level(errno: Errno) -> Level {
+    if errno == Errno::PermissionDenied {
+        Level::Warn
+    } else {
+        Level::Info
+    }
+}
+
+/// Audit the retitle of the volume shown as `name`, on the authority `cause`
+/// names: its owner's, the mount authority's or the seat's.
+fn audit_retitled(audit: &'static (dyn Sink + Sync), name: &str, cause: &'static str) {
+    record(
+        audit,
+        Level::Info,
+        VOLUME_RETITLED,
+        "volume-service: volume retitled",
+        name,
+        cause,
+    );
+}
+
+/// The catalog name the volume published as `id` is shown under, for the
+/// audit of one no registry here holds: `unknown` where the forest shows it
+/// nowhere or its name cannot be copied.
+fn shown_name(id: &[u8; 16]) -> Cow<'static, str> {
+    VOLUME_FOREST
+        .shown_name(id)
+        .map_or(Cow::Borrowed(UNKNOWN_VOLUME), Cow::Owned)
+}
+
+/// The title a probed `label` is listed under: as much of it as a title
+/// holds, cut between characters, or none for a label that is no text.
+fn probed_title(label: &[u8]) -> VolumeTitle {
+    let Ok(text) = core::str::from_utf8(label) else {
+        return VolumeTitle::EMPTY;
+    };
+    let mut end = text.len().min(VOLUME_TITLE_MAX);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    VolumeTitle::new(&text[..end]).unwrap_or(VolumeTitle::EMPTY)
+}
+
 /// Record `id`, `message`: the volume `name` was retired for `cause`, and
 /// what became of it.
 fn record_retired(
@@ -2652,9 +3438,9 @@ fn audit_detach_outcome(
     audit: &'static (dyn Sink + Sync),
     name: &str,
     forced: Option<Forced>,
-    authority: DetachAuthority,
+    authority: DeviceAuthority,
 ) {
-    if authority == DetachAuthority::Seat {
+    if authority == DeviceAuthority::Seat {
         RuntimeVolumeService::audit_event(
             audit,
             VOLUME_EJECTED_AT_SEAT,
@@ -2867,9 +3653,10 @@ fn vanished_commit(journal: &Arc<SpinLock<RetainedWrites>>) -> Result<(), (&'sta
     }
 }
 
-/// The facts of an unavailable volume a re-insert may recover
-/// (`plans/DEVICES.md` D4c), snapshotted out of the registry so the
-/// device I/O below never runs under the registry guard.
+/// The facts of a volume holding writes a recovery acts on — an unavailable
+/// one a re-insert finds, or one awaiting an answer
+/// (`plans/DEVICES.md` D4c) — snapshotted out of the registry so the device
+/// I/O below never runs under the registry guard.
 struct RecoveryTarget {
     /// The catalog name the volume keeps through recovery.
     name: String,
@@ -2879,8 +3666,15 @@ struct RecoveryTarget {
     handle: DriverHandle,
     /// What the mount table calls the volume, its stand-in's included.
     format: FormatName,
-    /// The published 16-byte identity the re-insert matched.
+    /// The format family the kernel's probe recognised.
+    fstype: VolumeFsType,
+    /// The key the volume is published under.
     id: [u8; 16],
+    /// The identity the re-insert matched.
+    identity: [u8; 16],
+    /// The title the medium carries: what a volume none of whose retained
+    /// writes reach the medium is listed under.
+    title: VolumeTitle,
     /// The journal holding the retained set and the evidence shadow.
     journal: Arc<SpinLock<RetainedWrites>>,
     /// The original extent — the frame of reference the retained LBAs
@@ -2891,27 +3685,116 @@ struct RecoveryTarget {
     lost: bool,
 }
 
-/// How a re-insert resolved: the retained writes replayed onto the
-/// proven-unmutated medium, or the read-only conflict fallback with the
-/// cause that forbade replay.
+/// Where a recovered volume is served again: the device it now lies on, that
+/// device's endpoint and window, its extent there, and the node its own node
+/// is published under.
+struct Place<'a> {
+    device: &'a SharedDevice,
+    at: (u64, u64),
+    extent: (u64, u64),
+    publisher: u32,
+}
+
+/// How a recovery resolved.
 enum RecoveryOutcome {
-    /// Non-mutation was proven; this many retained bytes were replayed
-    /// and committed.
+    /// The medium was proven unmutated and the volume's own; this many
+    /// retained bytes were replayed and committed.
     Replayed(u64),
     /// Replay was refused for the named cause; the volume returns
     /// read-only with its retained set kept.
     Conflict(&'static str),
+    /// The medium was proven unmutated but not the volume's own: it returns
+    /// read-only with its retained set kept until it is answered for.
+    Unconfirmed,
+    /// An answer on this authority gave this many retained bytes up.
+    Discarded(u64, DeviceAuthority),
+}
+
+impl RecoveryOutcome {
+    /// What the volume is listed as while it is served holding writes it
+    /// could not give its medium, or `None` once it holds none.
+    const fn held(&self) -> Option<MountAvailability> {
+        match self {
+            Self::Conflict(_) => Some(MountAvailability::RecoveryConflict),
+            Self::Unconfirmed => Some(MountAvailability::ReplayUnconfirmed),
+            Self::Replayed(_) | Self::Discarded(..) => None,
+        }
+    }
+
+    /// The registry's word for the volume once it is served again.
+    const fn availability(&self) -> Availability {
+        match self {
+            Self::Conflict(_) => Availability::RecoveryConflict,
+            Self::Unconfirmed => Availability::ReplayUnconfirmed,
+            Self::Replayed(_) | Self::Discarded(..) => Availability::Available,
+        }
+    }
+}
+
+/// What an attach's medium is to the volumes held unavailable with writes it
+/// could take.
+// Moved once per re-insert, a cold path; boxing the target would allocate
+// where the attach has nothing to unwind.
+#[allow(clippy::large_enum_variant)]
+enum Reinsert<'a> {
+    /// None of them could be its: it attaches afresh.
+    Fresh,
+    /// Two or more could, and its device tells none of them apart: it
+    /// attaches afresh, read-only, so a write of its own cannot strand theirs.
+    Lookalikes,
+    /// The one it re-inserts, claimed, and what proves the medium that one's.
+    One(RecoveryTarget, VolumeClaim<'a>, Proof),
+}
+
+/// What proves a re-inserted medium the one its volume's held writes were
+/// made on, beyond its content's evidence.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Proof {
+    /// Its device states the identity the volume's device stated.
+    Device,
+    /// An answer on this authority says so.
+    Answer(DeviceAuthority),
+    /// Nothing does: its device states none, or another's.
+    Unproven,
+}
+
+/// How many of the attached volumes a test names.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Named {
+    /// None.
+    Nothing,
+    /// Exactly the one at this index.
+    One(usize),
+    /// Two or more.
+    Several,
+}
+
+/// How many of `attached` `test` names.
+fn named(attached: &[AttachedVolume], test: impl Fn(&AttachedVolume) -> bool) -> Named {
+    let mut found = attached
+        .iter()
+        .enumerate()
+        .filter(|&(_, volume)| test(volume))
+        .map(|(at, _)| at);
+    match (found.next(), found.next()) {
+        (None, _) => Named::Nothing,
+        (Some(at), None) => Named::One(at),
+        (Some(_), Some(_)) => Named::Several,
+    }
 }
 
 /// The applied surprise-removal transition [`RuntimeVolumeService::
 /// handle_vanished`] reports on: the volume either retracted cleanly or
 /// became unavailable with its journal's outcome on record.
+// Moved once a surprise removal, a cold path; boxing the entry would allocate
+// where an allocation must not fail.
+#[allow(clippy::large_enum_variant)]
 enum VanishOutcome {
     /// Nothing was uncommitted: the whole entry retracts.
     Clean(AttachedVolume),
     /// Uncommitted writes exist: held, with their byte count, or lost.
     Unavailable {
-        name: String,
+        name: Cow<'static, str>,
         handle: DriverHandle,
         format: FormatName,
         id: [u8; 16],
@@ -2931,39 +3814,49 @@ enum Pending {
 }
 
 impl RuntimeVolumeService {
-    /// Claim the volume an attach's `recognised` extent re-inserts, if
-    /// any: its identity and format must match an unavailable volume no
-    /// other operation holds. Only a volume whose serving driver is gone is a recovery
-    /// target: a live volume with the same identity is a duplicate, refused
-    /// by the normal attach path.
+    /// What an attach's `recognised` extent, on a device stating `device`, is
+    /// to the volumes held unavailable with writes of its identity and format.
+    /// The candidates are those volumes, narrowed to the one whose device the
+    /// medium's states it is where it states one: one is claimed for
+    /// recovery, proven by its device or not, and two or more are lookalikes
+    /// none of which is. A live volume of the identity is a twin's holder,
+    /// never a candidate.
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfMemory`] when the target cannot be held; the volume is
+    /// [`Errno::Busy`] while another operation holds the one it re-inserts;
+    /// [`Errno::OutOfMemory`] when the target cannot be held. The volume is
     /// left unclaimed.
     fn claim_reinsert_target(
         &self,
         recognised: Option<&ProbedVolume>,
-    ) -> Result<Option<(RecoveryTarget, VolumeClaim<'_>)>, Errno> {
+        device: Option<BlkDeviceIdentity>,
+    ) -> Result<Reinsert<'_>, Errno> {
         let Some(recognised) = recognised else {
-            return Ok(None);
+            return Ok(Reinsert::Fresh);
         };
-        let identity = recognised.identity;
         let mut state = self.state.lock();
-        let found = state.iter_mut().find(|v| {
-            v.id == identity
+        let candidate = |v: &AttachedVolume| {
+            v.identity == recognised.identity
                 && v.fstype == recognised.fstype
-                && !v.claimed
                 && matches!(
                     v.availability,
                     Availability::UnavailableDirty | Availability::UnavailableLost
                 )
-        });
-        let Some(volume) = found else {
-            return Ok(None);
         };
+        let proven = |v: &AttachedVolume| candidate(v) && device.is_some() && v.device == device;
+        let (at, proof) = match (named(&state, proven), named(&state, candidate)) {
+            (Named::One(at), _) => (at, Proof::Device),
+            (_, Named::One(at)) => (at, Proof::Unproven),
+            (_, Named::Nothing) => return Ok(Reinsert::Fresh),
+            (_, Named::Several) => return Ok(Reinsert::Lookalikes),
+        };
+        let volume = &mut state[at];
+        if volume.claimed {
+            return Err(Errno::Busy);
+        }
         let Some(format) = volume.mount.format() else {
-            return Ok(None);
+            return Ok(Reinsert::Fresh);
         };
         let name = concatenated(&[&volume.name]).ok_or(Errno::OutOfMemory)?;
         let path = volume.path.owned().map_err(VfsError::to_errno)?;
@@ -2973,31 +3866,33 @@ impl RuntimeVolumeService {
             path,
             handle: volume.handle,
             format,
+            fstype: volume.fstype,
             id: volume.id,
+            identity: volume.identity,
+            title: probed_title(recognised.label()),
             journal: Arc::clone(&volume.journal),
             first_lba: volume.first_lba,
             blocks: volume.blocks,
             lost: volume.availability == Availability::UnavailableLost,
         };
-        Ok(Some((
-            target,
-            VolumeClaim {
-                service: self,
-                id: identity,
-            },
-        )))
+        let claim = VolumeClaim {
+            service: self,
+            id: volume.id,
+        };
+        Ok(Reinsert::One(target, claim, proof))
     }
 
-    /// Prove the re-inserted medium was not mutated elsewhere and replay
-    /// the retained writes onto it, or name the conflict that forbids
-    /// replay (`plans/DEVICES.md` D4c). Any doubt is a conflict — never a
-    /// silent merge.
+    /// Prove the re-inserted medium was not mutated elsewhere and, where
+    /// `proof` makes it the volume's own, replay the retained writes onto it
+    /// over `extent`; otherwise name what holds them back
+    /// (`plans/DEVICES.md` D4c). Any doubt is a conflict, and a medium nothing
+    /// proves the volume's own is held for an answer — never a silent merge.
     fn attempt_replay<B: Block>(
-        request: &VolumeAttachRequest<'_>,
+        (first_lba, blocks): (u64, u64),
         client: &mut B,
         block_size: u32,
         target: &RecoveryTarget,
-        device_read_only: bool,
+        (device_read_only, proof): (bool, Proof),
     ) -> RecoveryOutcome {
         // Nothing retained can be replayed after retention was abandoned.
         if target.lost || target.journal.lock().is_lost() {
@@ -3005,7 +3900,7 @@ impl RuntimeVolumeService {
         }
         // The retained LBAs live in the original extent's frame of
         // reference; a moved or resized extent can never accept them.
-        if target.first_lba != request.first_lba || target.blocks != request.blocks {
+        if target.first_lba != first_lba || target.blocks != blocks {
             return RecoveryOutcome::Conflict("extent_changed");
         }
         // The retained writes cannot land on a now write-protected medium.
@@ -3015,12 +3910,12 @@ impl RuntimeVolumeService {
         let Some((evidence_lba, evidence_len)) = target.journal.lock().evidence_window() else {
             return RecoveryOutcome::Conflict("no_evidence");
         };
-        let extent_end = request.first_lba.saturating_add(request.blocks);
+        let extent_end = first_lba.saturating_add(blocks);
         let evidence_end = u64::try_from(evidence_len)
             .ok()
             .map(|len| len.div_ceil(u64::from(block_size.max(1))))
-            .and_then(|blocks| evidence_lba.checked_add(blocks));
-        if evidence_lba < request.first_lba || evidence_end.is_none_or(|end| end > extent_end) {
+            .and_then(|span| evidence_lba.checked_add(span));
+        if evidence_lba < first_lba || evidence_end.is_none_or(|end| end > extent_end) {
             return RecoveryOutcome::Conflict("no_evidence");
         }
         let Some(current) = read_blocks_at(client, evidence_lba, evidence_len) else {
@@ -3028,6 +3923,11 @@ impl RuntimeVolumeService {
         };
         if !target.journal.lock().verify_evidence(&current) {
             return RecoveryOutcome::Conflict("evidence_mismatch");
+        }
+        // Unmutated, but only its device or an answer makes the medium the one
+        // the writes were made on.
+        if proof == Proof::Unproven {
+            return RecoveryOutcome::Unconfirmed;
         }
         // Proven unmutated: replay the retained set, commit it to the
         // medium, and empty the journal. A failure mid-replay falls back
@@ -3051,13 +3951,9 @@ impl RuntimeVolumeService {
         RecoveryOutcome::Replayed(replayed)
     }
 
-    /// Recover the unavailable volume `target` over the re-inserted
-    /// device: verify and replay ([`Self::attempt_replay`]), then serve the
-    /// volume in place — same handle, mount path, catalog name, and
-    /// published root — over a fresh served volume and node, writable when
-    /// proven and read-only with the retained set kept when not, and of the
-    /// class the port the device came back on gives it. The stand-in, listed
-    /// so, answers the mount until the new driver serves it. The caller
+    /// Recover the unavailable volume `target` over the re-inserted device:
+    /// verify and, where `proof` allows, replay ([`Self::attempt_replay`]),
+    /// then serve it again in place ([`Self::serve_afresh`]). The caller
     /// holds the re-inserted device's operation lock and the claim on
     /// `target`, whose release applies a surprise removal that landed while
     /// the volume was rebuilt.
@@ -3067,60 +3963,83 @@ impl RuntimeVolumeService {
         publisher: Option<u32>,
         wiring: &Wiring,
         device: &SharedDevice,
-        target: &RecoveryTarget,
+        (target, proof): (&RecoveryTarget, Proof),
     ) -> Result<(), Errno> {
         let audit = wiring.audit;
         let refused = |cause, errno| Self::refuse_attach(audit, &target.name, cause, errno);
         let publisher =
             publisher.ok_or_else(|| refused("no_publisher", Errno::PermissionDenied))?;
-        let vfs = LATE_FILESYSTEM
-            .vfs()
-            .map_err(|err| refused("no_mount_table", err))?;
-        let mut disk = device.window();
+        let extent = (request.first_lba, request.blocks);
         let outcome = Self::attempt_replay(
-            request,
-            &mut disk,
+            extent,
+            &mut device.window(),
             device.block_size(),
             target,
-            device.read_only,
+            (device.read_only, proof),
         );
-        let conflict = matches!(outcome, RecoveryOutcome::Conflict(_));
-        // A conflicted volume returns read-only until its retained set is
-        // explicitly discarded, down to the blocks its driver may write.
-        let read_only = device.read_only || conflict;
-        let journaled = JournaledBlock::new(disk, Arc::clone(&target.journal), wiring.pressure);
-        let window = PartitionBlock::new(journaled, request.first_lba, request.blocks)
-            .map_err(|err| refused("window_invalid", err.as_errno()))?;
-        let path = held_path(&target.path).map_err(|(cause, errno)| refused(cause, errno))?;
+        audit_recovery_outcome(audit, &target.name, &outcome, &target.journal, proof);
+        let place = Place {
+            device,
+            at: (request.endpoint, request.window),
+            extent,
+            publisher,
+        };
+        self.serve_afresh(wiring, &place, target, &outcome)
+            .map_err(|(cause, errno)| refused(cause, errno))
+    }
+
+    /// Serve `target` again at `place` once `outcome` settled its writes, in
+    /// place — same handle, mount path, catalog name and published root —
+    /// over a fresh served volume and node: writable where the outcome holds
+    /// nothing back and the device takes writes, read-only with the retained
+    /// set kept where it holds some back, and of the class the port the
+    /// device came back on gives it. The stand-in, listed so, answers the
+    /// mount until the new driver serves it. The caller holds the device's
+    /// operation lock and the claim on `target`.
+    ///
+    /// # Errors
+    ///
+    /// `(cause, errno)` pairs the caller audits.
+    fn serve_afresh(
+        &self,
+        wiring: &Wiring,
+        place: &Place<'_>,
+        target: &RecoveryTarget,
+        outcome: &RecoveryOutcome,
+    ) -> Result<(), (&'static str, Errno)> {
+        let vfs = LATE_FILESYSTEM
+            .vfs()
+            .map_err(|err| ("no_mount_table", err))?;
+        let held = outcome.held();
+        // Down to the blocks its driver may write.
+        let read_only = place.device.read_only || held.is_some();
+        let journaled = JournaledBlock::new(
+            place.device.window(),
+            Arc::clone(&target.journal),
+            wiring.pressure,
+        );
+        let window = PartitionBlock::new(journaled, place.extent.0, place.extent.1)
+            .map_err(|err| ("window_invalid", err.as_errno()))?;
+        let path = held_path(&target.path)?;
         let served = self
             .new_served(window, read_only)
-            .map_err(|err| refused("served_volume_unbuilt", err))?;
+            .map_err(|err| ("served_volume_unbuilt", err))?;
         // Under the stand-in's lock, so an operation that takes it after the
         // move finds its projection gone. The stand-in answers under a fresh
         // registration: a descriptor held across the removal answers stale,
         // and holds up no detach.
         let standing = LATE_FILESYSTEM.driver(target.handle).ok();
-        let held = standing.as_deref().map(DriverLock::lock);
-        reattach(
-            vfs,
-            Attachment::new(target.handle, device.medium, mount_flags(read_only)),
-            path,
-            mount_template(identity_map_gid(request.fstype)),
-        )
-        .map_err(|(cause, errno)| {
-            self.retire_served(Some(&served), None);
-            refused(cause, errno)
-        })?;
-        let class = device_class(wiring.tree, publisher);
+        let lock = standing.as_deref().map(DriverLock::lock);
+        let attachment =
+            Attachment::new(target.handle, place.device.medium, mount_flags(read_only));
+        reattach(vfs, attachment, path, mount_template(target.fstype))
+            .inspect_err(|_| self.retire_served(Some(&served), None))?;
+        let class = device_class(wiring.tree, place.publisher);
         let names = VolumeNames {
             source: &target.name,
             fstype: target.format.as_str(),
             volume_id: target.id,
-        };
-        let availability = if conflict {
-            MountAvailability::RecoveryConflict
-        } else {
-            MountAvailability::Recovering
+            identity: target.identity,
         };
         let _ = LATE_FILESYSTEM.unregister(target.handle);
         let _ = LATE_FILESYSTEM.register_recovery_stand_in(
@@ -3128,25 +4047,26 @@ impl RuntimeVolumeService {
             Box::new(UnavailableFs),
             names,
             class,
-            availability,
+            held.unwrap_or(MountAvailability::Recovering),
         );
-        drop(held);
-        let _ = LATE_FILESYSTEM.set_io_source(target.handle, device.health.clone());
+        drop(lock);
+        let _ = LATE_FILESYSTEM.set_io_source(target.handle, place.device.health.clone());
         if let Some(entry) = self.state.lock().iter_mut().find(|v| v.id == target.id) {
             entry.class = class;
-            entry.endpoint = request.endpoint;
-            entry.window = request.window;
+            (entry.endpoint, entry.window) = place.at;
+            entry.device = place.device.identity;
+            entry.publisher = place.publisher;
+            entry.served_extent = place.extent;
             entry.served = Some(Arc::clone(&served));
-            entry.availability = if conflict {
-                Availability::RecoveryConflict
-            } else {
-                Availability::Available
-            };
+            entry.availability = outcome.availability();
+            // None of the writes reached the medium, which keeps its own title.
+            if !matches!(outcome, RecoveryOutcome::Replayed(_)) {
+                entry.title = target.title;
+            }
         }
-        audit_recovery_outcome(audit, &target.name, &outcome, &target.journal);
-        let node = publish_volume_node(wiring.tree, publisher, request.fstype, served.id())
-            .map_err(|err| refused("volume_node_unpublished", err))?;
-        self.set_node(&target.id, Some((publisher, node)));
+        let node = publish_volume_node(wiring.tree, place.publisher, target.fstype, served.id())
+            .map_err(|err| ("volume_node_unpublished", err))?;
+        self.set_node(&target.id, Some((place.publisher, node)));
         Ok(())
     }
 
@@ -3204,7 +4124,7 @@ impl RuntimeVolumeService {
             server: None,
         };
         Some(VanishOutcome::Unavailable {
-            name: entry.name.clone(),
+            name: stated_name(&entry.name),
             handle: entry.handle,
             format,
             id: entry.id,
@@ -3236,17 +4156,28 @@ impl RuntimeVolumeService {
     /// using this instant can be reached without waiting; one that is goes
     /// with its device at the next attach or detach.
     fn release_vanished_cache(&self, endpoint: u64, removal: Removal) {
-        let vanished: Vec<SharedDevice> = self
-            .devices
-            .lock()
-            .iter()
-            .filter(|slot| {
-                slot.endpoint == endpoint && (removal == Removal::Endpoint || slot.retracted)
-            })
-            .filter_map(|slot| slot.connected.clone())
-            .collect();
-        for device in &vanished {
-            device.device.try_with_device(BlockCache::drop_all);
+        // A device at a time, in window order, each reached once the guard is
+        // let go: neither a list nor a cache's release runs under it.
+        let mut past = None;
+        loop {
+            let next = self
+                .devices
+                .lock()
+                .iter()
+                .filter(|slot| {
+                    slot.endpoint == endpoint
+                        && (removal == Removal::Endpoint || slot.retracted)
+                        && past.is_none_or(|past| slot.window > past)
+                })
+                .min_by_key(|slot| slot.window)
+                .map(|slot| (slot.window, slot.connected.clone()));
+            let Some((window, device)) = next else {
+                return;
+            };
+            past = Some(window);
+            if let Some(device) = device {
+                device.device.try_with_device(BlockCache::drop_all);
+            }
         }
     }
 
@@ -3354,10 +4285,13 @@ impl RuntimeVolumeService {
         availability: MountAvailability,
     ) {
         let stood = LATE_FILESYSTEM.nodes(handle).is_some_and(|nodes| {
+            // In its registration's place, which keeps the identity the
+            // volume's content carries.
             let names = VolumeNames {
                 source: name,
                 fstype: format.as_str(),
                 volume_id: id,
+                identity: id,
             };
             LATE_FILESYSTEM
                 .register_stand_in(handle, Box::new(UnavailableFs), names, nodes, availability)
@@ -3393,29 +4327,24 @@ impl RuntimeVolumeService {
                         format,
                         server: None,
                     };
-                    let conflicted = v.availability == Availability::RecoveryConflict;
                     Some((
-                        v.name.clone(),
+                        stated_name(&v.name),
                         v.handle,
                         format,
                         v.id,
-                        conflicted,
+                        v.availability.held(),
                         (v.endpoint, v.window),
                     ))
                 })
         };
-        let Some((name, handle, format, id, conflicted, (endpoint, window))) = lost else {
+        let Some((name, handle, format, id, kept, (endpoint, window))) = lost else {
             return;
         };
         let unpublished = LATE_FILESYSTEM.holds_unpublished(handle);
         Self::stand_in(
             handle,
             (&name, format, id),
-            if conflicted {
-                MountAvailability::RecoveryConflict
-            } else {
-                MountAvailability::Recovering
-            },
+            kept.unwrap_or(MountAvailability::Recovering),
         );
         if let Some(device) = self.device_for(endpoint, window) {
             let _ = LATE_FILESYSTEM.set_io_source(handle, device.health);

@@ -9,16 +9,16 @@
 //! greyscale ramp above it are the fixed xterm arithmetic no scheme
 //! reinterprets.
 //!
-//! [`Scheme::System`] is the odd one out: it has no colours of its own and
-//! resolves against the active desktop [`Theme`], so a terminal left on the
-//! default follows the desktop's dark/light appearance exactly as the rest of
-//! the session does. Every other built-in carries its own fixed palette, and
-//! a user may author one [`Custom`](Scheme::Custom) scheme of their own that
-//! is persisted with the rest of their profile.
+//! [`Scheme::System`], the default, is the dark theme's own page, text, and
+//! accent ([`Palette::DARK`]) over the xterm ANSI palette, whatever appearance
+//! the desktop is in. Every built-in carries a fixed palette and no scheme
+//! reads the desktop theme, so a light/dark switch changes no terminal colour;
+//! a user may author one [`Custom`](Scheme::Custom) scheme of their own that is
+//! persisted with the rest of their profile.
 
 use tairix_colour::Rgb;
 use tairix_raster::Color;
-use tairix_theme::Theme;
+use tairix_theme::Palette;
 use tairix_vt::{Attributes, BasicColor, Color as VtColor};
 
 /// The number of ANSI colours a scheme carries: the eight normal colours and
@@ -28,10 +28,8 @@ pub const ANSI_COLORS: usize = 16;
 /// A scheme's resolved colours: the sixteen ANSI slots plus the three screen
 /// roles.
 ///
-/// This is what the renderer actually reads. A named built-in resolves to a
-/// fixed one; [`Scheme::System`] resolves against the live desktop theme, so
-/// the same terminal follows a dark/light switch without a second palette
-/// definition anywhere.
+/// This is what the renderer actually reads: a built-in's fixed palette, or
+/// the user's own.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ColorScheme {
     /// The default background — what a cell with no explicit background is
@@ -70,18 +68,15 @@ const XTERM_ANSI: [Rgb; ANSI_COLORS] = [
 ];
 
 impl ColorScheme {
-    /// The scheme a [`Scheme::System`] terminal resolves to on `theme`: the
-    /// desktop's own page and text colours over the xterm ANSI palette, so
-    /// the terminal reads as part of the session rather than as a foreign
-    /// window.
+    /// A desktop `palette`'s page and text colours over the xterm ANSI
+    /// palette, its accent the cursor, so the terminal reads as part of the
+    /// session rather than as a foreign window.
     ///
-    /// The ground is the theme's *document* role, not its window surface: a
+    /// The ground is the *document* role, not the window surface: a
     /// terminal's grid is a page, and the full-screen curses tools that draw
     /// on it (`edit`, `vim`) are editing text on it, so it belongs on the
     /// same ground an editable field does.
-    #[must_use]
-    pub fn from_theme(theme: &Theme) -> Self {
-        let palette = theme.palette();
+    const fn from_palette(palette: &Palette) -> Self {
         Self {
             background: palette.document.without_alpha(),
             foreground: palette.on_surface.without_alpha(),
@@ -102,12 +97,13 @@ impl ColorScheme {
 /// A built-in scheme, or the user's own.
 ///
 /// The variants are the closed vocabulary the profile document spells; adding
-/// one means adding a variant, its row in [`Scheme::BUILTINS`], and its
-/// palette in [`Scheme::palette`], and the compiler then forces every
-/// consumer to state what it means.
+/// one means adding a variant, its rows in [`Scheme::ALL`] and
+/// [`Scheme::BUILTINS`], and its palette in [`Scheme::palette`], and the
+/// compiler then forces every consumer to state what it means.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Scheme {
-    /// Follow the desktop theme's own surface, text, and accent colours.
+    /// The dark desktop theme's own page, text, and accent colours, whatever
+    /// appearance the desktop is in.
     System,
     /// A deep blue-black scheme with a cool, low-glare palette.
     Midnight,
@@ -139,14 +135,15 @@ impl Scheme {
     ];
 
     /// Every scheme that carries a fixed palette of its own — everything but
-    /// [`System`](Self::System), which follows the theme, and
     /// [`Custom`](Self::Custom), which the user authors.
-    pub const BUILTINS: [Self; 5] = [
+    pub const BUILTINS: [Self; 7] = [
+        Self::System,
         Self::Midnight,
         Self::Phosphor,
         Self::Amber,
         Self::Ember,
         Self::Contrast,
+        Self::Paper,
     ];
 
     /// The canonical spelling in a profile document.
@@ -185,22 +182,25 @@ impl Scheme {
         Self::ALL.into_iter().find(|scheme| scheme.name() == name)
     }
 
-    /// This scheme's fixed palette, or `None` for the two that have none of
-    /// their own: [`System`](Self::System) resolves against the desktop theme
-    /// and [`Custom`](Self::Custom) against the user's own profile.
+    /// This scheme's fixed palette, or `None` for [`Custom`](Self::Custom),
+    /// whose colours are the user's own profile's.
     #[must_use]
     pub const fn palette(self) -> Option<ColorScheme> {
         match self {
-            Self::System | Self::Custom => None,
+            Self::System => Some(SYSTEM),
             Self::Midnight => Some(MIDNIGHT),
             Self::Phosphor => Some(PHOSPHOR),
             Self::Amber => Some(AMBER),
             Self::Ember => Some(EMBER),
             Self::Contrast => Some(CONTRAST),
             Self::Paper => Some(PAPER),
+            Self::Custom => None,
         }
     }
 }
+
+/// The dark theme's page, text, and accent over the xterm ANSI palette.
+const SYSTEM: ColorScheme = ColorScheme::from_palette(&Palette::DARK);
 
 /// A deep blue-black scheme: low glare, cool accents, legible at length.
 const MIDNIGHT: ColorScheme = ColorScheme {
@@ -361,8 +361,8 @@ const PAPER: ColorScheme = ColorScheme {
 /// The colours a terminal is actually painting with right now: the resolved
 /// [`ColorScheme`] plus the background alpha translucency asks for.
 ///
-/// Resolving happens once per repaint, never per cell, so a screenful of
-/// cells costs one theme lookup rather than thousands.
+/// Resolved once for the profile in force, never per cell, so a screenful of
+/// cells costs one lookup rather than thousands.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Painted {
     /// The resolved colours.
@@ -373,22 +373,12 @@ pub struct Painted {
 }
 
 impl Painted {
-    /// The colours `scheme` resolves to on `theme`, with `custom` standing in
-    /// for [`Scheme::Custom`], painted at `background_alpha`.
+    /// The colours `scheme` resolves to, with `custom` standing in for
+    /// [`Scheme::Custom`], painted at `background_alpha`.
     #[must_use]
-    pub fn resolve(
-        scheme: Scheme,
-        custom: &ColorScheme,
-        theme: &Theme,
-        background_alpha: u8,
-    ) -> Self {
-        let resolved = match scheme.palette() {
-            Some(palette) => palette,
-            None if scheme == Scheme::Custom => *custom,
-            None => ColorScheme::from_theme(theme),
-        };
+    pub fn resolve(scheme: Scheme, custom: &ColorScheme, background_alpha: u8) -> Self {
         Self {
-            scheme: resolved,
+            scheme: scheme.palette().unwrap_or(*custom),
             background_alpha,
         }
     }

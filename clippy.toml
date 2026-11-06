@@ -24,6 +24,7 @@ doc-valid-idents = [
     "..",
     "FreeCell",
     "OpenRaster",
+    "WebM",
     "TAIRiX",
     "RISC",
     "RISC-V",

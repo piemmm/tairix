@@ -22,7 +22,8 @@ See `docs/src/lib/hid.md`.
   decoders a `HidDevice` composes.
 - `boot::keyboard`, `boot::mouse` — the boot-protocol report layouts, as
   models.
-- `KeyboardConsole` — key usages resolved to `KeyInput` records through
+- `KeyboardConsole` — key usages resolved to `KeyInput` records, each usage
+  the record's physical key, through `lib/input`'s keyboard state and
   `lib/keymap`.
 - `transport_error`, `pump_error_limit_reached` — a driver loop's refusal
   policy.

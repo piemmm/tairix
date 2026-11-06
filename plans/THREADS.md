@@ -35,7 +35,8 @@ modules; the reference documentation is `docs/src/architecture/threads.md`.
    returned by `threads::retire`, the leader's by the process teardown once
    the group's last record is gone (`plans/OPEN-DEFECTS.md` D91, D269).
 2. **One capability record per process, with a thread alias map.** `CapTable`
-   holds `threads: BTreeMap<TaskId, ProcessId>`; `caps_for` resolves through it.
+   holds `threads`, an ordered map from `TaskId` to `ProcessId`; `caps_for`
+   resolves through it.
    Credentials, `proc_id`, attested name, and I/O counters are therefore
    genuinely process-wide, and a `cap_revoke` by one thread binds its siblings —
    a per-thread copy would make revocation incomplete, which is a security

@@ -16,6 +16,11 @@ use crate::{Rect, Region};
 /// Bits in a word of tiles.
 const WORD: usize = u64::BITS as usize;
 
+/// The side, in pixels, of the tiles a change bound for a compositor is
+/// marked in: covered in whole tiles of this side, a scattered change costs
+/// the compositor little more than its own pixels.
+pub const DAMAGE_TILE: u32 = 16;
+
 /// The tiles of a picture, each marked or not.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Tiles {

@@ -1045,3 +1045,46 @@ fn the_longest_spellings_are_the_bounds_stated() {
     let widest = format!("{}", AudioLocation::new(u64::MAX, last).expect("a place"));
     assert_eq!(widest.len(), AudioLocation::TEXT_MAX);
 }
+
+#[test]
+fn a_capture_source_is_an_input_or_a_sinks_monitor_and_its_id_says_which() {
+    for source in [
+        CaptureSource::Input(0),
+        CaptureSource::Input(2),
+        CaptureSource::Monitor(0),
+        CaptureSource::Monitor(7),
+    ] {
+        let device_id = source.device_id().expect("an id below the flag");
+        assert_eq!(CaptureSource::of(device_id), source);
+    }
+    assert_eq!(
+        CaptureSource::Monitor(0).device_id(),
+        Ok(MONITOR_FLAG),
+        "the default sink's"
+    );
+    assert_ne!(
+        CaptureSource::Monitor(7).device_id(),
+        Ok(7),
+        "never the sink's own id"
+    );
+    for flagged in [
+        CaptureSource::Input(MONITOR_FLAG | 2),
+        CaptureSource::Monitor(MONITOR_FLAG),
+    ] {
+        assert_eq!(flagged.device_id(), Err(Errno::OutOfRange), "{flagged:?}");
+    }
+}
+
+#[test]
+fn a_sink_advertises_its_monitor_and_no_listing_passes_one_off_as_an_input() {
+    let sink = descriptor();
+    assert_eq!(sink.monitor(), Some(CaptureSource::Monitor(sink.device_id)));
+    let source = AudioDeviceDescriptor {
+        direction: StreamDirection::Capture,
+        ..descriptor()
+    };
+    assert_eq!(source.monitor(), None);
+    let mut flagged = encode_enumerate_reply(Ok(descriptor()));
+    put_u32(&mut flagged, 4 + descriptor::DEVICE, 7 | MONITOR_FLAG);
+    assert_eq!(decode_enumerate_reply(&flagged), Err(Errno::OutOfRange));
+}

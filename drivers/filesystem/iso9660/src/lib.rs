@@ -969,8 +969,7 @@ fn heap_sector() -> Result<Box<[u8; SECTOR_LEN]>, DriverError> {
 
 /// `bytes`, copied fallibly.
 fn copied(bytes: &[u8]) -> Result<Vec<u8>, DriverError> {
-    tairix_util::fallible::collected(bytes.len(), bytes.iter().copied())
-        .ok_or(DriverError::OutOfMemory)
+    tairix_util::fallible::copied(bytes).ok_or(DriverError::OutOfMemory)
 }
 
 impl<B: Block> FilesystemRead for Iso9660<B> {

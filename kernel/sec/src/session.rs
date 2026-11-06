@@ -23,14 +23,12 @@
 //! so a parent that reaps an anchor finds nothing of its session still
 //! running.
 
-extern crate alloc;
-
-use alloc::collections::{BTreeMap, BTreeSet};
 use core::ops::Bound;
 
 use tairix_abi::ProcId;
+use tairix_collections::{OrderedMap, OrderedSet};
 
-use crate::captable::ProcessId;
+use crate::captable::{AdmitError, ProcessId};
 
 /// The deepest a session may nest below the root.
 ///
@@ -149,6 +147,28 @@ struct Plan {
     founds: Option<(u8, bool)>,
 }
 
+/// A placement whose room is made: [`SessionTree::place_reserved`] cannot
+/// refuse it, and consumes it, so one room is placed once.
+#[derive(Debug)]
+pub(crate) struct ReservedPlace {
+    plan: Plan,
+    instance: ProcId,
+    session: ProcId,
+    login_session: ProcId,
+}
+
+impl ReservedPlace {
+    /// The session the process will be in.
+    pub(crate) const fn session(&self) -> ProcId {
+        self.session
+    }
+
+    /// The innermost login session that session lies within.
+    pub(crate) const fn login_session(&self) -> ProcId {
+        self.login_session
+    }
+}
+
 /// Why a process could not be placed.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PlacementError {
@@ -175,21 +195,31 @@ struct Node {
 }
 
 /// The session tree.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SessionTree {
-    nodes: BTreeMap<ProcId, Node>,
+    /// Each live session, by its anchor's instance. Ordered: which sessions
+    /// stay is up to what a user keeps running, so a lookup costs the same
+    /// however their instances fall.
+    nodes: OrderedMap<ProcId, Node>,
     /// `(session, member)` for every member of every non-root session and each
     /// of its ancestors, ordered so one session's members are one range.
-    members: BTreeSet<(ProcId, ProcessId)>,
+    members: OrderedSet<(ProcId, ProcessId)>,
+}
+
+impl Default for SessionTree {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionTree {
-    /// An empty tree: every process is in the root session.
+    /// An empty tree, which allocates nothing: every process is in the root
+    /// session.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            nodes: BTreeMap::new(),
-            members: BTreeSet::new(),
+            nodes: OrderedMap::new(),
+            members: OrderedSet::new(),
         }
     }
 
@@ -265,18 +295,59 @@ impl SessionTree {
         self.plan(placement).map(|_| ())
     }
 
-    /// Place `member`, instance `instance`, as `placement` asks, returning the
-    /// session it is now in. Nothing changes on a refusal.
-    pub(crate) fn place(
+    /// Check that a process of instance `instance` can be placed as
+    /// `placement` asks, and make the room placing it takes; nothing the tree
+    /// answers with changes.
+    ///
+    /// # Errors
+    ///
+    /// [`AdmitError::Placement`] with why it cannot be placed;
+    /// [`AdmitError::OutOfMemory`] when the heap refuses the room.
+    pub(crate) fn try_reserve_place(
         &mut self,
-        member: ProcessId,
         instance: ProcId,
         placement: Placement,
-    ) -> Result<ProcId, PlacementError> {
+    ) -> Result<ReservedPlace, AdmitError> {
         let plan = self.plan(placement)?;
         if plan.founds.is_some() && instance.is_kernel() {
-            return Err(PlacementError::NotFound);
+            return Err(AdmitError::Placement(PlacementError::NotFound));
         }
+        let (session, depth) = match (plan.founds, plan.container) {
+            (Some((depth, _)), _) => (instance, depth),
+            (None, Some(container)) => (plan.session, container.depth),
+            (None, None) => (plan.session, self.depth(plan.session).unwrap_or(0)),
+        };
+        // A container is no login session of its own: what is placed in it
+        // lies within the login session of the session it is founded in.
+        let login_session = match (plan.founds, plan.container) {
+            (Some((_, true)), _) => instance,
+            (_, Some(container)) => self.login_session(container.parent),
+            _ => self.login_session(plan.session),
+        };
+        let founded = usize::from(plan.container.is_some()) + usize::from(plan.founds.is_some());
+        self.nodes
+            .try_reserve(founded)
+            .and_then(|()| self.members.try_reserve(usize::from(depth)))
+            .map_err(|_| AdmitError::OutOfMemory)?;
+        Ok(ReservedPlace {
+            plan,
+            instance,
+            session,
+            login_session,
+        })
+    }
+
+    /// Place `member` where `reserved` made its room, returning the session
+    /// it is now in.
+    // Taken by value so a reservation is redeemed once.
+    #[allow(clippy::needless_pass_by_value)]
+    pub(crate) fn place_reserved(&mut self, member: ProcessId, reserved: ReservedPlace) -> ProcId {
+        let ReservedPlace {
+            plan,
+            instance,
+            session,
+            login_session,
+        } = reserved;
         if let Some(Founding {
             anchor,
             parent,
@@ -285,19 +356,22 @@ impl SessionTree {
         {
             self.insert_node(anchor, parent, depth, false);
         }
-        let session = match plan.founds {
-            Some((depth, login)) => {
-                self.insert_node(instance, plan.session, depth, login);
-                instance
-            }
-            None => plan.session,
-        };
+        if let Some((depth, login)) = plan.founds {
+            self.insert_node(instance, plan.session, depth, login);
+        }
         let mut at = session;
         while let Some(node) = self.nodes.get(&at) {
-            self.members.insert((at, member));
+            // The chain's room was made with the reservation.
+            let joined = self.members.try_insert((at, member));
+            debug_assert!(joined.is_ok(), "a reserved session refused a member");
             at = node.parent;
         }
-        Ok(session)
+        debug_assert_eq!(
+            self.login_session(session),
+            login_session,
+            "a placement's login session was foretold wrongly"
+        );
+        session
     }
 
     fn plan(&self, placement: Placement) -> Result<Plan, PlacementError> {
@@ -381,16 +455,16 @@ impl SessionTree {
     }
 
     fn insert_node(&mut self, session: ProcId, parent: ProcId, depth: u8, login: bool) {
-        self.nodes.insert(
-            session,
-            Node {
-                parent,
-                depth,
-                login,
-                ending: false,
-                held: None,
-            },
-        );
+        let node = Node {
+            parent,
+            depth,
+            login,
+            ending: false,
+            held: None,
+        };
+        // Its room was made with the placement's reservation.
+        let founded = self.nodes.try_insert(session, node);
+        debug_assert!(founded.is_ok(), "a reserved session refused its node");
     }
 
     /// Release `member` from `session` and every session enclosing it,

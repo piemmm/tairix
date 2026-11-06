@@ -61,7 +61,12 @@ fn letting_him_out_works_and_a_refusal_is_stated_rather_than_fatal() {
 
 #[test]
 fn every_refusal_states_a_reason() {
-    for refusal in [Refusal::NotPermitted, Refusal::NoDesktop, Refusal::SeatFull] {
+    for refusal in [
+        Refusal::NotPermitted,
+        Refusal::NoDesktop,
+        Refusal::SeatFull,
+        Refusal::NoMemory,
+    ] {
         assert!(
             !refusal.reason().is_empty(),
             "a silent refusal is a program failing without saying why"

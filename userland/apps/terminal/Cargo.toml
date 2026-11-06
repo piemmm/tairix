@@ -128,6 +128,8 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The engine library's host tests draw text, so they inject the shared solid
 # test transport (never a running `fontd`) via the `test-util` feature.
 [dev-dependencies]
+# The WCAG contrast measure every fixed palette is held to.
+tairix-colour = { path = "../../../lib/colour", version = "=0.0.0", features = ["test-util"] }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
 # The backwards runner the effect stages' splits are proved order-independent
 # with.

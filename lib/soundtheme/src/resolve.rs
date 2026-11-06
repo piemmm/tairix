@@ -1,13 +1,14 @@
 //! What a cue plays: nothing if the event is off, else the user's own file
 //! for it, else the active theme's asset, else the shipped theme's, else
-//! silence.
+//! silence; and how loud: a sound effect at the settings' gain, the volume's
+//! feedback at unity, so the output's own level is what is heard.
 //!
 //! Silence is an answer, not a fallback beep: a sound that is turned off,
 //! or that no theme holds, makes none, and the caller is told why.
 
 use tairix_abi::audio::AudioGain;
 
-use crate::{Silence, SoundAsset, SoundEvent, SoundSettings, DEFAULT_THEME};
+use crate::{is_effect, Silence, SoundAsset, SoundEvent, SoundSettings, DEFAULT_THEME};
 
 /// Where a cue's sound is read from.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -30,7 +31,8 @@ pub enum Resolution<'a> {
     Play {
         /// Where the sound is read from.
         source: CueSource<'a>,
-        /// The level the settings turn every sound down to.
+        /// The level it plays at: the settings' gain for a sound effect,
+        /// unity for the volume's feedback.
         gain: AudioGain,
     },
     /// Make no sound, for this reason.
@@ -42,16 +44,24 @@ pub enum Resolution<'a> {
 /// `own` is whether the user's own file for the event was handed over, and
 /// `holds(theme, asset)` whether a theme holds an asset; it is asked about the
 /// active theme first and the shipped one only if the active theme does not.
+///
+/// A sound effect answers to the settings' switch as well as its own; the
+/// volume's feedback ([`is_effect`]) to its own alone.
 pub fn resolve(
     event: SoundEvent,
     settings: &SoundSettings,
     own: bool,
     mut holds: impl FnMut(&str, SoundAsset) -> bool,
 ) -> Resolution<'_> {
-    if !settings.enabled() || !settings.event(event).enabled {
+    let effect = is_effect(event);
+    if (effect && !settings.enabled()) || !settings.event(event).enabled {
         return Resolution::Silent(Silence::Disabled);
     }
-    let gain = settings.gain();
+    let gain = if effect {
+        settings.gain()
+    } else {
+        AudioGain::UNITY
+    };
     if own {
         return Resolution::Play {
             source: CueSource::Own,

@@ -20,13 +20,14 @@ console's read half.
   console (tty) bytes for one key press into `out`, returning their length.
 - `MAX_KEY_BYTES` — the longest sequence any key encodes to; a buffer of this
   size can never overflow.
-- `key_input(key, modifiers, pressed)` / `modifier_change(modifiers)` — build
-  the wire `KeyInput` record a keyboard driver injects, for a key edge and for
-  a bare change of the held modifiers respectively.
-- `modifiers_from_abi` / `modifiers_to_abi` — the one `lib/input` ↔ wire
-  modifier mapping, both directions. The kernel arbiter and the desktop seat
-  read it rather than each keeping an opinion: the seat needs the encode
-  direction to stamp its held set onto the pointer events it delivers.
+- `key_record(keyboard, physical, pressed)` — the wire `KeyInput` record a
+  keyboard producer injects for one key edge, resolved through its
+  `lib/input` `KeyboardState`: a bare change of the held modifiers, a press or
+  release carrying the physical key, or nothing.
+
+The wire ↔ `lib/input` key and modifier mapping it reads records through is
+`lib/input`'s (`tairix_input::wire`), shared with the desktop seat and every
+application.
 
 ## Design
 

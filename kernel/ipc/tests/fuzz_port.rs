@@ -86,7 +86,7 @@ fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
 /// Build a task whose effective set is exactly `caps` (the derive
 /// intersection of a set with itself is that set).
 fn task_with(task_id: u64, caps: &CapabilitySet, sink: &NullSink) -> TaskCapabilities {
-    TaskCapabilities::derive(ProcessId(task_id), UserId(1), *caps, *caps, sink)
+    TaskCapabilities::derive(ProcessId(task_id), UserId(1), *caps, *caps, sink).expect("derived")
 }
 
 /// Create the port under test, owned by an authorised creator.
@@ -157,7 +157,7 @@ fn fuzz_send_is_fail_closed_and_recv_is_faithful() {
             let size_ok = payload.len() <= effective_max;
             let capacity_ok = expected.len() < MAILBOX_CAPACITY;
 
-            let result = port.send(&sender, &payload, tairix_abi::RLIMIT_INFINITY, &sink);
+            let result = port.send(&sender, 0, &payload, tairix_abi::RLIMIT_INFINITY, &sink);
             if !caps_ok {
                 assert_eq!(
                     result,
@@ -193,7 +193,7 @@ fn fuzz_send_is_fail_closed_and_recv_is_faithful() {
             // Drain occasionally, asserting FIFO byte-for-byte fidelity.
             if rng.next_u64().is_multiple_of(3) {
                 match port.recv() {
-                    Some(msg) => {
+                    Some((msg, _)) => {
                         let want = expected.pop_front().expect("model had a queued message");
                         assert_eq!(
                             msg.payload.as_bytes(),
@@ -237,7 +237,7 @@ fn fuzz_closed_port_fails_closed_for_any_sender() {
         let len = (rng.next_u64() % 129) as usize;
         let payload = vec![0u8; len];
         assert_eq!(
-            port.send(&sender, &payload, tairix_abi::RLIMIT_INFINITY, &sink),
+            port.send(&sender, 0, &payload, tairix_abi::RLIMIT_INFINITY, &sink),
             Err(Errno::NotFound)
         );
         assert!(port.is_empty());

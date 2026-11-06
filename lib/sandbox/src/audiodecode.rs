@@ -20,7 +20,10 @@
 //! One request at a time: open, decode, seek or move to the next link, then
 //! any number of need and supply exchanges, then that request's one answer.
 //! The owner sends nothing else until the answer arrives, so every frame
-//! either way has exactly one reading.
+//! either way has exactly one reading, and it hands each request over through
+//! [`send_waiting`](crate::supervise::send_waiting), the one step that queues
+//! it to the worker. The file is read through the shared page cache
+//! ([`crate::paged`]).
 //!
 //! # Links
 //!
@@ -45,20 +48,21 @@ use alloc::vec::Vec;
 use tairix_abi::driver::audio::{
     ChannelMap, Rate, SampleFormat, CHANNEL_MAP_WIRE_LEN, MAX_CHANNELS,
 };
-use tairix_collections::LruMap;
-use tairix_hash::{BuildSipHash13, HashSeed};
+use tairix_hash::HashSeed;
 use tairix_sound::{
-    CoverRange, Cue, DataLength, DecodeError, DecodeLimits, Encoding, InputError, Link, Loop,
-    LoopKind, Metadata, PcmSource, SoundFormat, SoundInfo, SoundInput, Tag, TagKey, TagKind,
+    CoverRange, Cue, DataLength, DecodeError, DecodeLimits, Encoding, Link, Loop, LoopKind,
+    Metadata, PcmSource, SoundFormat, SoundInfo, Tag, TagKey, TagKind,
 };
 
 use crate::host::Unbelieved;
+use crate::paged::{
+    shaped_need, Need, Pages, Shortfall, Unasked, MAX_NEED_BYTES, MAX_NEED_PAGES, PAGE,
+    READ_AHEAD_PAGES,
+};
 use crate::proto::FRAME_HEADER_LEN;
 use crate::session::{FrameOut, SessionBounds, SessionError, SessionService, SessionStep};
+use crate::supervise::Requests;
 use crate::wire::{Reader, WireError, Writer};
-
-/// Bytes one page of the worker's cache holds; every need starts on a page.
-pub const PAGE_BYTES: usize = 4096;
 
 /// Pages the worker holds: the most of a file one request can read.
 ///
@@ -76,10 +80,6 @@ pub const CACHE_PAGES: usize = (tairix_sound::max_working_set(&LIMITS, MAX_BLOCK
     .div_ceil(PAGE)
     + READ_AHEAD_PAGES
     + 2) as usize;
-
-/// Most bytes one need asks for, so one supply is bounded however a file is
-/// laid out.
-pub const MAX_NEED_BYTES: usize = MAX_NEED_PAGES * PAGE_BYTES;
 
 /// Most frames one decode answers.
 pub const MAX_BLOCK_FRAMES: u32 = 4096;
@@ -120,19 +120,7 @@ const STREAM_CHANNELS: u8 = MAX_CHANNELS as u8;
 
 const _: () = assert!(MAX_CHANNELS <= u8::MAX as usize);
 
-const PAGE: u64 = PAGE_BYTES as u64;
-
-const MAX_NEED_PAGES: usize = 128;
-
-/// Pages a need asks for past those the read that missed wants: the bytes a
-/// sequential decode reads next, so a stream costs one exchange a window.
-const READ_AHEAD_PAGES: u64 = 32;
-
 const _: () = assert!(MAX_NEED_PAGES <= CACHE_PAGES);
-
-// One read, wherever it falls, misses at most the pages it straddles, and
-// every need of them fits one supply.
-const _: () = assert!(tairix_sound::MAX_READ / PAGE_BYTES < MAX_NEED_PAGES);
 
 /// The widest frame a block carries: every channel in a four-byte sample.
 const MAX_FRAME_BYTES: usize = MAX_CHANNELS * 4;
@@ -253,7 +241,9 @@ const WAV_UNKNOWN_FORMAT_TAG: u8 = 65;
 /// new decoder refusal cannot be left without one.
 macro_rules! decode_codes {
     ($($code:literal => $variant:ident,)+) => {
-        fn decode_to_wire(err: DecodeError) -> (u8, u32) {
+        /// A decoder refusal's wire code and detail, shared by every decode
+        /// protocol that carries one.
+        pub(crate) fn decode_to_wire(err: DecodeError) -> (u8, u32) {
             match err {
                 $(DecodeError::$variant => ($code, 0),)+
                 DecodeError::AuUnknownEncoding(code) => (AU_UNKNOWN_ENCODING, code),
@@ -261,7 +251,8 @@ macro_rules! decode_codes {
             }
         }
 
-        fn decode_from_wire(code: u8, detail: u32) -> Option<DecodeError> {
+        /// The decoder refusal a wire code and detail name, if any.
+        pub(crate) fn decode_from_wire(code: u8, detail: u32) -> Option<DecodeError> {
             match code {
                 $($code => (detail == 0).then_some(DecodeError::$variant),)+
                 AU_UNKNOWN_ENCODING => Some(DecodeError::AuUnknownEncoding(detail)),
@@ -376,178 +367,12 @@ enum Request {
     NextLink,
 }
 
-/// The pages a need asks for: those the read that missed wants, then the
-/// read-ahead behind them.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-struct Need {
-    first: u64,
-    needed_end: u64,
-    end: u64,
-}
-
-/// Why supplied pages could not be held.
-enum Shortfall {
-    WorkingSet,
-    Memory,
-}
-
-/// One held page of the file: a whole page, or the file's tail.
-struct Page {
-    bytes: Vec<u8>,
-    /// The request that last read it. A page the current request has read is
-    /// never given up before that request is answered.
-    read_in: u64,
-}
-
-/// The pages of one file the worker holds, read as the decoder's input.
-struct Pages {
-    held: LruMap<u64, Page, BuildSipHash13>,
-    len: u64,
-    /// The request being served, counted from one; zero is no request.
-    request: u64,
-    /// The first and last page the failing read of this attempt lacked.
-    miss: Option<(u64, u64)>,
-}
-
-impl Pages {
-    fn new(len: u64, seed: HashSeed) -> Option<Self> {
-        let held =
-            LruMap::try_with_capacity_and_hasher(CACHE_PAGES, BuildSipHash13::with_seed(seed))
-                .ok()?;
-        Some(Self {
-            held,
-            len,
-            request: 0,
-            miss: None,
-        })
+/// What a miss no need answers is refused as.
+const fn unasked_refusal(unasked: Unasked) -> AudioRefusal {
+    match unasked {
+        Unasked::NoMiss => AudioRefusal::Decode(DecodeError::InputFailed),
+        Unasked::TooWide => AudioRefusal::WorkingSetExceeded,
     }
-
-    fn page_count(&self) -> u64 {
-        self.len.div_ceil(PAGE)
-    }
-
-    /// The need that answers this attempt's miss, or the refusal when no need
-    /// could.
-    fn need(&self) -> Result<Need, AudioRefusal> {
-        let (first, last) = self
-            .miss
-            .ok_or(AudioRefusal::Decode(DecodeError::InputFailed))?;
-        let needed_end = last + 1;
-        if needed_end - first > MAX_NEED_PAGES as u64 {
-            return Err(AudioRefusal::WorkingSetExceeded);
-        }
-        let limit = (first + MAX_NEED_PAGES as u64)
-            .min(needed_end + READ_AHEAD_PAGES)
-            .min(self.page_count());
-        let mut end = needed_end;
-        while end < limit && !self.held.contains_key(&end) {
-            end += 1;
-        }
-        Ok(Need {
-            first,
-            needed_end,
-            end,
-        })
-    }
-
-    /// Bytes `need` covers: its pages, the last cut at the file's end.
-    fn need_bytes(&self, need: Need) -> (u64, usize) {
-        let offset = need.first * PAGE;
-        let end = (need.end * PAGE).min(self.len);
-        (offset, usize::try_from(end - offset).unwrap_or(usize::MAX))
-    }
-
-    /// Hold the pages `bytes` holds, which are `need`'s.
-    ///
-    /// A page the request needs displaces any page the request has not read,
-    /// and is refused only when every page held is one it has; read-ahead
-    /// displaces nothing the request has read, so it stops there instead.
-    fn take(&mut self, need: Need, bytes: &[u8]) -> Result<(), Shortfall> {
-        for (page, chunk) in (need.first..need.end).zip(bytes.chunks(PAGE_BYTES)) {
-            if self.held.contains_key(&page) {
-                continue;
-            }
-            let needed = page < need.needed_end;
-            let mut buffer = if self.held.len() < CACHE_PAGES {
-                let mut buffer = Vec::new();
-                buffer
-                    .try_reserve_exact(PAGE_BYTES)
-                    .map_err(|_| Shortfall::Memory)?;
-                buffer
-            } else {
-                // Pages are refreshed as they are read, and a retry reads
-                // again every page the request read before, so the least
-                // recent page is one the request has read only when all are.
-                let spare = self
-                    .held
-                    .peek_lru()
-                    .is_some_and(|(_, lru)| lru.read_in != self.request);
-                let recycled = if spare { self.held.pop_lru() } else { None };
-                match recycled {
-                    Some((_, recycled)) => recycled.bytes,
-                    None if needed => return Err(Shortfall::WorkingSet),
-                    None => return Ok(()),
-                }
-            };
-            buffer.clear();
-            buffer.extend_from_slice(chunk);
-            let read_in = if needed { self.request } else { 0 };
-            self.held
-                .try_insert(
-                    page,
-                    Page {
-                        bytes: buffer,
-                        read_in,
-                    },
-                )
-                .map_err(|_| Shortfall::Memory)?;
-        }
-        Ok(())
-    }
-}
-
-impl SoundInput for Pages {
-    fn len(&self) -> u64 {
-        self.len
-    }
-
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, InputError> {
-        if offset >= self.len || buf.is_empty() {
-            return Ok(0);
-        }
-        let wanted = u64::try_from(buf.len()).map_err(|_| InputError::Failed)?;
-        let end = offset.saturating_add(wanted).min(self.len);
-        let mut missing: Option<(u64, u64)> = None;
-        for page in offset / PAGE..=(end - 1) / PAGE {
-            let Some(held) = self.held.get_mut(&page) else {
-                missing = Some((missing.map_or(page, |(first, _)| first), page));
-                continue;
-            };
-            held.read_in = self.request;
-            if missing.is_some() {
-                continue;
-            }
-            let start = page * PAGE;
-            let (from, to) = (offset.max(start), end.min(start + PAGE));
-            let (Some(source), Some(target)) = (
-                span(from - start, to - start).and_then(|range| held.bytes.get(range)),
-                span(from - offset, to - offset).and_then(|range| buf.get_mut(range)),
-            ) else {
-                return Err(InputError::Failed);
-            };
-            target.copy_from_slice(source);
-        }
-        if let Some(span) = missing {
-            self.miss.get_or_insert(span);
-            return Err(InputError::Unavailable);
-        }
-        usize::try_from(end - offset).map_err(|_| InputError::Failed)
-    }
-}
-
-/// `from..to` as indices, both within one read and so within `usize`.
-fn span(from: u64, to: u64) -> Option<core::ops::Range<usize>> {
-    Some(usize::try_from(from).ok()?..usize::try_from(to).ok()?)
 }
 
 /// The file the worker has open.
@@ -601,7 +426,7 @@ impl AudioDecodeService {
         link: Link,
     ) -> Answer {
         self.close();
-        let Some(pages) = Pages::new(len, seed) else {
+        let Some(pages) = Pages::new(len, seed, CACHE_PAGES) else {
             return Answer::Refused(AudioRefusal::Decode(DecodeError::OutOfMemory));
         };
         self.file = Some(OpenFile {
@@ -622,7 +447,7 @@ impl AudioDecodeService {
         let Some(file) = self.file.as_mut() else {
             return Answer::Refused(AudioRefusal::NotOpen);
         };
-        file.pages.request += 1;
+        file.pages.next_request();
         self.attempt(request)
     }
 
@@ -630,7 +455,7 @@ impl AudioDecodeService {
         let Some(file) = self.file.as_mut() else {
             return Answer::Refused(AudioRefusal::NotOpen);
         };
-        file.pages.miss = None;
+        file.pages.next_attempt();
         let outcome = match request {
             Request::Open => Self::open_source(file),
             Request::Decode { frames } => Self::decode(file, frames),
@@ -649,7 +474,7 @@ impl AudioDecodeService {
                     self.pending = Some((request, need));
                     Answer::Need(file.pages.need_bytes(need))
                 }
-                Err(refusal) => self.refuse(request, refusal),
+                Err(unasked) => self.refuse(request, unasked_refusal(unasked)),
             },
             Err(err) => self.refuse(request, AudioRefusal::Decode(err)),
         }
@@ -990,7 +815,8 @@ fn encode_info(out: &mut Writer, info: &SoundInfo) {
     out.u64(disagreement.held);
 }
 
-fn flag(reader: &mut Reader<'_>) -> Result<bool, WireError> {
+/// A flag as the wire states it: nought or one, and nothing else.
+pub(crate) fn flag(reader: &mut Reader<'_>) -> Result<bool, WireError> {
     match reader.u8()? {
         0 => Ok(false),
         1 => Ok(true),
@@ -1400,6 +1226,15 @@ impl AudioDecodeClient {
         self.awaiting == Awaiting::Idle && self.outgoing.is_none()
     }
 
+    /// Whether the client is free for a request: none is outstanding or waits
+    /// to be sent, with a file open or none. An open needs no more; a decode,
+    /// a seek or a move to the next link needs a file open too
+    /// ([`Self::is_idle`]).
+    #[must_use]
+    pub fn takes_request(&self) -> bool {
+        matches!(self.awaiting, Awaiting::Closed | Awaiting::Idle) && self.outgoing.is_none()
+    }
+
     /// The frame waiting to be sent, until [`Self::sent`].
     #[must_use]
     pub fn outgoing(&self) -> Option<&[u8]> {
@@ -1444,7 +1279,7 @@ impl AudioDecodeClient {
         seed: HashSeed,
         link: Link,
     ) -> Result<(), AudioDecodeError> {
-        if !matches!(self.awaiting, Awaiting::Closed | Awaiting::Idle) || self.outgoing.is_some() {
+        if !self.takes_request() {
             return Err(AudioDecodeError::OutOfTurn);
         }
         self.len = len;
@@ -1614,16 +1449,8 @@ impl AudioDecodeClient {
         reader: &mut Reader<'_>,
     ) -> Result<DecodeEvent<'a>, AudioDecodeError> {
         let (offset, len) = whole(reader, |reader| Ok((reader.u64()?, reader.u32()? as usize)))?;
-        let end = offset.checked_add(len as u64);
-        let whole = len % PAGE_BYTES == 0 || end == Some(self.len);
         self.needs += 1;
-        let honest = offset % PAGE == 0
-            && len > 0
-            && len <= MAX_NEED_BYTES
-            && whole
-            && end.is_some_and(|end| end <= self.len)
-            && self.needs <= CACHE_PAGES + 1;
-        if !honest {
+        if !shaped_need(offset, len, self.len) || self.needs > CACHE_PAGES + 1 {
             return Err(AudioDecodeError::Unbelievable);
         }
         self.need = Some((offset, len));
@@ -1874,18 +1701,25 @@ impl AudioDecodeClient {
     }
 }
 
+impl Requests for AudioDecodeClient {
+    fn outgoing(&self) -> Option<&[u8]> {
+        Self::outgoing(self)
+    }
+
+    fn sent(&mut self) {
+        Self::sent(self);
+    }
+}
+
 /// Read a whole reply's fields with `fields`, refusing one with bytes left
 /// over.
 fn whole<'r, T>(
     reader: &mut Reader<'r>,
     fields: impl FnOnce(&mut Reader<'r>) -> Result<T, WireError>,
 ) -> Result<T, AudioDecodeError> {
-    let value = fields(reader).map_err(|_| AudioDecodeError::Unbelievable)?;
-    if reader.is_exhausted() {
-        Ok(value)
-    } else {
-        Err(AudioDecodeError::Unbelievable)
-    }
+    reader
+        .whole(fields)
+        .map_err(|_| AudioDecodeError::Unbelievable)
 }
 
 /// Read a reply's leading fields with `fields`; what follows is its payload.

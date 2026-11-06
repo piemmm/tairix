@@ -4,7 +4,7 @@ ping — envoyer des requêtes d'écho ICMP à un hôte réseau
 
 ## SYNOPSIS
 
-`ping [option...] hôte`
+`ping [option...] host`
 
 ## DESCRIPTION
 
@@ -44,11 +44,11 @@ bilan final indique les paquets émis et reçus, les erreurs éventuelles, le
 pourcentage de perte, et les temps d'aller-retour minimum, moyen et
 maximum avec leur écart moyen. `-q` n'affiche que l'en-tête et le bilan.
 
-Chaque réponse nomme le pair sous la forme `nom (adresse)` lorsque
-l'adresse possède un enregistrement `PTR`, résolu une seule fois pour
-l'exécution via le même résolveur ; une adresse sans nom, et toute
-exécution avec `-n`, affiche l'adresse nue. `-n` signifie en outre
-qu'aucune requête `PTR` n'est émise sur le réseau.
+Chaque réponse nomme le pair sous la forme `name (address)` (le nom, puis
+l'adresse entre parenthèses) lorsque l'adresse possède un enregistrement
+`PTR`, résolu une seule fois pour l'exécution via le même résolveur ; une
+adresse sans nom, et toute exécution avec `-n`, affiche l'adresse nue.
+`-n` signifie en outre qu'aucune requête `PTR` n'est émise sur le réseau.
 
 Chaque ligne de réponse porte le TTL IPv4 (ou la limite de sauts IPv6)
 avec lequel la réponse est arrivée dans un champ `ttl=`, comme `iputils`.
@@ -74,9 +74,14 @@ avec lequel la réponse est arrivée dans un champ `ttl=`, comme `iputils`.
 ## EXAMPLES
 
 - `ping 10.0.2.2` — envoyer des requêtes à un hôte IPv4 jusqu'à interruption.
+- `ping gateway.example` — envoyer des requêtes à un hôte désigné par son
+  nom.
 - `ping -c 4 fe80::1` — envoyer quatre requêtes à un hôte IPv6.
 - `ping -c 10 -i 0.2 10.0.0.1` — dix requêtes, une toutes les 200 ms.
 - `ping -q -c 100 10.0.0.1` — exécution silencieuse, bilan seul.
+- `ping -s 1400 -c 20 host.example` — vingt grandes requêtes
+  incompressibles : la forme qui mesure un lien honnêtement.
+- `ping -p ff00 -c 4 10.0.0.1` — un motif fixe alterné à la place.
 
 ## EXIT STATUS
 

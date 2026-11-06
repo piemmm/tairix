@@ -68,6 +68,42 @@ impl<R> SessionClipboard<R> {
         }
         self.held = next;
     }
+
+    /// Hold `png`, a still the desktop captured, in place of what was held:
+    /// the desktop's own copy, which no client region carries.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] past the clipboard's bound and
+    /// [`Errno::OutOfRange`] for bytes that do not begin with the PNG
+    /// signature; either wipes `png` and keeps what was held.
+    pub fn hold_png(&mut self, mut png: Vec<u8>) -> Result<(), Errno> {
+        let refused = if png.len() > CLIPBOARD_MAX_BYTES {
+            Some(Errno::LengthOutOfRange)
+        } else if misnamed(ClipboardKind::Png, &png) {
+            Some(Errno::OutOfRange)
+        } else {
+            None
+        };
+        if let Some(errno) = refused {
+            wipe(&mut png);
+            return Err(errno);
+        }
+        self.replace(Some((ClipboardKind::Png, png)));
+        Ok(())
+    }
+}
+
+/// Whether `bytes` are not what `kind` names: text that is not UTF-8, or a
+/// picture that does not begin with the PNG signature. Only the signature is
+/// checked, since decoding a picture is the parser sandbox's work, never the
+/// session's.
+fn misnamed(kind: ClipboardKind, bytes: &[u8]) -> bool {
+    match kind {
+        ClipboardKind::Text => core::str::from_utf8(bytes).is_err(),
+        ClipboardKind::Png => tairix_image::sniff(bytes) != Some(tairix_image::ImageFormat::Png),
+        ClipboardKind::Octets => false,
+    }
 }
 
 impl<R: PayloadRegion> ClipboardService for SessionClipboard<R> {
@@ -84,9 +120,7 @@ impl<R: PayloadRegion> ClipboardService for SessionClipboard<R> {
         // may change under a check made in place.
         let refused = match self.regions.read(region, len, &mut bytes) {
             Err(err) => Some(err),
-            Ok(()) if kind == ClipboardKind::Text && core::str::from_utf8(&bytes).is_err() => {
-                Some(Errno::OutOfRange)
-            }
+            Ok(()) if misnamed(kind, &bytes) => Some(Errno::OutOfRange),
             Ok(()) => None,
         };
         if let Some(err) = refused {

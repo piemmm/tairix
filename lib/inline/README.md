@@ -29,10 +29,9 @@ crates and what is still to come.
 1. **Nothing allocates, ever.** A capacity is the caller's own bound, chosen at
    the use site; reaching it is answered with `CapacityError` holding the
    refused value, never a panic and never a heap block.
-2. **A capacity fault answers with `Result`, an index fault with `Option`, and
-   no operation carries both.** Hence no positional insert on the
-   fixed-capacity vectors: its two failure modes are unrelated and no single
-   error spells them honestly.
+2. **A capacity fault answers with `Result`, an index fault with `Option`.**
+   The one operation open to both, `ArrayVec::try_insert`, hands the value
+   back unplaced for either, leaving the vector as it was.
 3. **Secret hygiene is the holder's job.** A container does not scrub the slots
    it frees — reuse inside one address space is not a security boundary — so a
    holder of a key, credential, or capability token stores a value type that

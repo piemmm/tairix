@@ -1,6 +1,8 @@
 //! The window's panes and where each one is: docked down the left or the
 //! right edge, in order, rolled up to its band or open, or the palette in its
 //! strip beneath the canvas; floating in a tool window of its own; or hidden.
+//! Each counts when it was last opened in a dock, which its dock gives it room
+//! by (`layout`).
 
 use alloc::string::String;
 
@@ -17,8 +19,12 @@ pub enum PaneKind {
     Tools,
     /// The two inks and the colour picker.
     Colour,
-    /// The adjustment being set.
-    Adjustment,
+    /// The picture's layers, the one painted on chosen among them.
+    Layers,
+    /// The adjustments, the one chosen in its selector set beneath it.
+    Adjustments,
+    /// The effects, the one chosen in its selector set beneath it.
+    Effects,
     /// The palette's wells, which dock only in their strip beneath the
     /// canvas.
     Palette,
@@ -26,13 +32,17 @@ pub enum PaneKind {
 
 impl PaneKind {
     /// Every pane, in the order a list of them reads.
-    pub const ALL: [Self; 4] = [Self::Tools, Self::Colour, Self::Adjustment, Self::Palette];
+    pub const ALL: [Self; 6] = [
+        Self::Tools,
+        Self::Colour,
+        Self::Layers,
+        Self::Adjustments,
+        Self::Effects,
+        Self::Palette,
+    ];
 
-    /// The order a dock down a side gives its panes room in when it cannot
-    /// give each all it wants: the adjustment first, as what was asked for
-    /// last, then the tool box, which scrolls, then the colour picker, which
-    /// gives up its fields. The palette docks down neither side.
-    pub const BY_CLAIM: [Self; 3] = [Self::Adjustment, Self::Tools, Self::Colour];
+    /// The panes an adjustment or an effect is set in, in that order.
+    pub const OPERATIONS: [Self; 2] = [Self::Adjustments, Self::Effects];
 
     /// What the pane's band names it.
     #[must_use]
@@ -40,7 +50,9 @@ impl PaneKind {
         match self {
             Self::Tools => "Tools",
             Self::Colour => "Colour",
-            Self::Adjustment => "Adjustment",
+            Self::Layers => "Layers",
+            Self::Adjustments => "Adjustments",
+            Self::Effects => "Effects",
             Self::Palette => "Palette",
         }
     }
@@ -51,7 +63,9 @@ impl PaneKind {
         match self {
             Self::Tools => AppMenuSymbol::Tools,
             Self::Colour | Self::Palette => AppMenuSymbol::Colours,
-            Self::Adjustment => AppMenuSymbol::Adjust,
+            Self::Layers => AppMenuSymbol::Layers,
+            Self::Adjustments => AppMenuSymbol::Adjust,
+            Self::Effects => AppMenuSymbol::Blur,
         }
     }
 
@@ -61,7 +75,9 @@ impl PaneKind {
         match self {
             Self::Tools => "tools",
             Self::Colour => "colour",
-            Self::Adjustment => "adjustment",
+            Self::Layers => "layers",
+            Self::Adjustments => "adjustments",
+            Self::Effects => "effects",
             Self::Palette => "palette",
         }
     }
@@ -72,8 +88,21 @@ impl PaneKind {
         match self {
             Self::Tools => 0,
             Self::Colour => 1,
-            Self::Adjustment => 2,
-            Self::Palette => 3,
+            Self::Layers => 2,
+            Self::Adjustments => 3,
+            Self::Effects => 4,
+            Self::Palette => 5,
+        }
+    }
+
+    /// Where the pane sits in [`OPERATIONS`](Self::OPERATIONS); `None` for
+    /// any pane but the Adjustments and the Effects panes.
+    #[must_use]
+    pub const fn operation(self) -> Option<usize> {
+        match self {
+            Self::Adjustments => Some(0),
+            Self::Effects => Some(1),
+            Self::Tools | Self::Colour | Self::Layers | Self::Palette => None,
         }
     }
 }
@@ -121,14 +150,16 @@ pub struct Docked {
 
 /// The panes down one dock: at most every pane but the palette, held inline
 /// so an arrangement copies without an allocation.
-type Dock = ArrayVec<Docked, { PaneKind::BY_CLAIM.len() }>;
+type Dock = ArrayVec<Docked, { PaneKind::ALL.len() - 1 }>;
 
-/// Where every pane is.
+/// Where every pane is, and when each was last opened in a dock.
 ///
 /// A pane is in one dock or in none, never in two, the palette's one dock its
 /// strip. One not docked floats or is hidden, and remembers the side it last
-/// stood on, which showing a hidden one puts it back on.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// stood on, which showing a hidden one puts it back on. Two arrangements are
+/// equal where every pane stands alike: the order the panes were opened in is
+/// the window's own, neither stored nor compared.
+#[derive(Clone, Debug)]
 pub struct Arrangement {
     docks: [Dock; 2],
     /// The side each pane last stood on: none for the palette.
@@ -136,21 +167,43 @@ pub struct Arrangement {
     floating: [bool; PaneKind::ALL.len()],
     /// Whether the palette lies in its strip.
     strip: bool,
+    /// The opening each pane was last opened in a dock by, counted from one;
+    /// none for a pane not opened since the arrangement began.
+    opened: [u64; PaneKind::ALL.len()],
+    openings: u64,
 }
+
+impl PartialEq for Arrangement {
+    fn eq(&self, other: &Self) -> bool {
+        (&self.docks, &self.homes, &self.floating, self.strip)
+            == (&other.docks, &other.homes, &other.floating, other.strip)
+    }
+}
+
+impl Eq for Arrangement {}
 
 impl Default for Arrangement {
     /// The tool box down the left; the colour pane down the right, where the
-    /// adjustment pane joins it beneath once one is opened; the palette in
-    /// its strip.
+    /// Layers, Adjustments and Effects panes join it beneath once shown; the
+    /// palette in its strip. No pane counts as opened yet.
     fn default() -> Self {
         let mut arrangement = Self {
             docks: [Dock::new(), Dock::new()],
-            homes: [Some(Side::Left), Some(Side::Right), Some(Side::Right), None],
+            homes: [
+                Some(Side::Left),
+                Some(Side::Right),
+                Some(Side::Right),
+                Some(Side::Right),
+                Some(Side::Right),
+                None,
+            ],
             floating: [false; PaneKind::ALL.len()],
             strip: false,
+            opened: [0; PaneKind::ALL.len()],
+            openings: 0,
         };
         for kind in [PaneKind::Tools, PaneKind::Colour, PaneKind::Palette] {
-            arrangement.show(kind);
+            arrangement.open(kind);
         }
         arrangement
     }
@@ -205,6 +258,14 @@ impl Arrangement {
         self.homes[kind.index()]
     }
 
+    /// The opening `kind` was last opened in a dock by — shown, unrolled or
+    /// moved there — counted from one since the arrangement began; `0` for a
+    /// pane not opened since.
+    #[must_use]
+    pub const fn opened(&self, kind: PaneKind) -> u64 {
+        self.opened[kind.index()]
+    }
+
     /// Whether `kind` is shown open rather than rolled up to its band: a
     /// floating pane, and the palette, always are.
     #[must_use]
@@ -215,24 +276,34 @@ impl Arrangement {
 
     /// Show `kind` at the foot of the side it last stood on, or the palette in
     /// its strip, open; one already shown is unrolled where it is, and one
-    /// floating floats on.
+    /// floating floats on. A pane shown or unrolled in a dock counts as the one
+    /// opened last.
     pub fn show(&mut self, kind: PaneKind) {
+        if self.open(kind) {
+            self.stamp(kind);
+        }
+    }
+
+    /// Stand `kind` where showing it puts it, answering whether it now lies
+    /// open in a dock where it did not.
+    fn open(&mut self, kind: PaneKind) -> bool {
         if self.floats(kind) {
-            return;
+            return false;
         }
         if let Some(docked) = self.find_mut(kind) {
-            docked.collapsed = false;
-            return;
+            return core::mem::replace(&mut docked.collapsed, false);
         }
         let Some(side) = self.home(kind) else {
             self.strip = true;
-            return;
+            return false;
         };
         // A dock holds every pane but the palette, and this one is in neither.
-        let _ = self.docks[side.index()].try_push(Docked {
-            kind,
-            collapsed: false,
-        });
+        self.docks[side.index()]
+            .try_push(Docked {
+                kind,
+                collapsed: false,
+            })
+            .is_ok()
     }
 
     /// Hide `kind`, keeping the side it stood on to show it there again.
@@ -258,10 +329,15 @@ impl Arrangement {
         }
     }
 
-    /// Roll `kind` up to its band, or open it again.
+    /// Roll `kind` up to its band, or open it again, which counts it as the
+    /// one opened last.
     pub fn toggle_collapsed(&mut self, kind: PaneKind) {
-        if let Some(docked) = self.find_mut(kind) {
-            docked.collapsed = !docked.collapsed;
+        let Some(docked) = self.find_mut(kind) else {
+            return;
+        };
+        docked.collapsed = !docked.collapsed;
+        if !docked.collapsed {
+            self.stamp(kind);
         }
     }
 
@@ -269,6 +345,7 @@ impl Arrangement {
     /// `before` there now — the dock's length to land at its foot — so a drop
     /// lands in the gap the pointer showed whichever dock, or tool window, it
     /// came from. The palette docks in its strip, whatever side it is given.
+    /// A pane moved into a dock counts as the one opened last.
     pub fn move_to(&mut self, kind: PaneKind, side: Side, before: usize) {
         if self.home(kind).is_none() {
             self.redock(kind);
@@ -290,6 +367,7 @@ impl Arrangement {
         // neither.
         let _ = self.docks[side.index()].try_insert(before, docked);
         self.homes[kind.index()] = Some(side);
+        self.stamp(kind);
     }
 
     /// Dock `kind` again: at the foot of the side it last stood on, or the
@@ -362,6 +440,8 @@ impl Arrangement {
             homes: [None; PaneKind::ALL.len()],
             floating: [false; PaneKind::ALL.len()],
             strip: false,
+            opened: [0; PaneKind::ALL.len()],
+            openings: 0,
         };
         let mut seen = [false; PaneKind::ALL.len()];
         for word in text.split_whitespace() {
@@ -420,6 +500,12 @@ impl Arrangement {
             .iter_mut()
             .flatten()
             .find(|docked| docked.kind == kind)
+    }
+
+    /// Count `kind` as the pane opened last.
+    fn stamp(&mut self, kind: PaneKind) {
+        self.openings += 1;
+        self.opened[kind.index()] = self.openings;
     }
 }
 

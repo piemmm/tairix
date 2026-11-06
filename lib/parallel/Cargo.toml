@@ -25,6 +25,10 @@ pool = ["dep:tairix-rt", "dep:tairix-abi"]
 # the feature links `std` — a bare-metal build that enabled it would fail to
 # link rather than quietly gain a host runtime.
 test-util = []
+# `loom` builds `tests/loom.rs`, the models of the slot an ordered dispatch's
+# pieces wait on. The protocol is generic over `SlotWord`, so the models drive
+# it over loom's own atomics; `cargo xtask loom` alone turns it on.
+loom = ["dep:loom"]
 
 [dependencies]
 # The round a drawn dispatch gathers its pieces into on the dispatching
@@ -37,4 +41,5 @@ tairix-inline = { path = "../inline", version = "=0.0.0" }
 tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 # `Errno`, for reporting how many workers the kernel would grant.
 tairix-abi = { path = "../abi", version = "=0.0.0", optional = true }
+loom = { version = "0.7", optional = true }
 

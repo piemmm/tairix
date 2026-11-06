@@ -9,7 +9,7 @@ use tairix_audio::volume::level_at_permille;
 use tairix_controls::testkit::covers;
 use tairix_controls::{FieldAction, FieldControl, FieldGroup};
 use tairix_geometry::Scale;
-use tairix_soundtheme::{layered, merge_pushed, SoundKey, SoundSettings};
+use tairix_soundtheme::{is_effect, layered, merge_pushed, SoundKey, SoundSettings};
 
 use super::{
     apply, effects_ask, groups, show_level, touches, EffectFile, EffectsAsk, EffectsAsks,
@@ -19,7 +19,7 @@ use crate::form::{FormOutcome, FormPlace};
 use crate::test_support::{showing, theme, WIDE};
 
 fn reading(document: &str) -> EffectsReading {
-    let mut files = [SoundFile::Theme; 13];
+    let mut files = [SoundFile::Theme; SoundEvent::ALL.len()];
     files[SoundEvent::Error.index()] = SoundFile::Chosen("klaxon.wav");
     files[SoundEvent::Info.index()] = SoundFile::Unavailable("gone.flac");
     EffectsReading::of(
@@ -33,7 +33,7 @@ fn reading(document: &str) -> EffectsReading {
 fn event_row(event: SoundEvent) -> usize {
     SoundEvent::ALL
         .into_iter()
-        .filter(|held| layered(*held))
+        .filter(|held| layered(*held) && is_effect(*held))
         .position(|held| held == event)
         .expect("a sound the user decides")
 }
@@ -62,7 +62,7 @@ fn a_reading_is_the_sessions_document_and_files_by_name() {
         EffectsReading::of(
             &SoundReading {
                 document: "sound.bell.file = /a\n",
-                files: [SoundFile::Theme; 13],
+                files: [SoundFile::Theme; SoundEvent::ALL.len()],
             },
             Vec::new()
         ),
@@ -71,9 +71,9 @@ fn a_reading_is_the_sessions_document_and_files_by_name() {
     );
 }
 
-/// One plate holds what applies to every sound and one row each event a
-/// user's choices reach; the sounds they do not reach are stated, not
-/// offered.
+/// One plate holds what applies to every sound effect and the volume
+/// feedback's switch, and one row each effect a user's choices reach; the
+/// sounds they do not reach are stated, not offered.
 #[test]
 fn the_pane_is_the_effects_plate_and_one_row_per_event_a_user_decides() {
     let (plates, owners) = groups(Some(&reading("")));
@@ -81,7 +81,12 @@ fn the_pane_is_the_effects_plate_and_one_row_per_event_a_user_decides() {
     assert_eq!(captions, ["SOUND EFFECTS", "EVENT SOUNDS"]);
     assert_eq!(
         owners[0],
-        [EffectsRow::Enabled, EffectsRow::Theme, EffectsRow::Gain]
+        [
+            EffectsRow::Enabled,
+            EffectsRow::Theme,
+            EffectsRow::Gain,
+            EffectsRow::Feedback
+        ]
     );
     assert!(plates[0]
         .footnote()
@@ -95,7 +100,7 @@ fn the_pane_is_the_effects_plate_and_one_row_per_event_a_user_decides() {
         .collect();
     let decided: Vec<SoundEvent> = SoundEvent::ALL
         .into_iter()
-        .filter(|event| layered(*event))
+        .filter(|event| layered(*event) && is_effect(*event))
         .collect();
     assert_eq!(events, decided);
     assert_eq!(plates[1].rows().len(), events.len(), "one row an event");
@@ -139,7 +144,7 @@ fn an_events_chooser_names_what_it_plays() {
 /// cannot be read, so what hides in its name cannot make it read as another.
 #[test]
 fn a_chosen_files_name_is_shown_with_what_hides_in_it() {
-    let mut files = [SoundFile::Theme; 13];
+    let mut files = [SoundFile::Theme; SoundEvent::ALL.len()];
     files[SoundEvent::Error.index()] = SoundFile::Chosen("bell\u{202e}.flac");
     files[SoundEvent::Info.index()] = SoundFile::Unavailable("gone\u{202e}.flac");
     let reading = EffectsReading::of(
@@ -161,13 +166,16 @@ fn a_chosen_files_name_is_shown_with_what_hides_in_it() {
         .is_some_and(|note| note.starts_with("gone\u{fffd}.flac cannot be read")));
 }
 
-/// While the desktop makes no sound none of its other settings applies.
+/// While the desktop makes no sound effects none of its other settings
+/// applies, but the volume's feedback's, which is no effect.
 #[test]
-fn every_row_but_the_switch_waits_on_it() {
-    let (off, _) = groups(Some(&reading("sound.enabled = false\n")));
-    let rows: Vec<_> = off.iter().flat_map(FieldGroup::rows).collect();
-    assert!(rows[0].state().enabled, "the switch itself");
-    assert!(rows[1..].iter().all(|row| !row.state().enabled));
+fn every_row_but_the_two_switches_waits_on_the_effects() {
+    let (off, owners) = groups(Some(&reading("sound.enabled = false\n")));
+    let rows = off.iter().flat_map(FieldGroup::rows);
+    for (row, owner) in rows.zip(owners.iter().flatten()) {
+        let switch = matches!(owner, EffectsRow::Enabled | EffectsRow::Feedback);
+        assert_eq!(row.state().enabled, switch, "{owner:?}");
+    }
     let (on, _) = groups(Some(&reading("")));
     assert!(on
         .iter()
@@ -302,12 +310,56 @@ fn a_change_is_shown_as_the_session_will_hold_it() {
 }
 
 #[test]
-fn the_switch_touches_every_row_and_any_other_only_itself() {
+fn the_effects_switch_touches_every_effects_row_and_any_other_only_itself() {
     let bell = EffectsRow::Event(SoundEvent::Bell);
     assert!(touches(EffectsRow::Enabled, bell));
     assert!(touches(bell, bell));
     assert!(!touches(EffectsRow::Gain, bell));
     assert!(!touches(bell, EffectsRow::Event(SoundEvent::Error)));
+    assert!(
+        !touches(EffectsRow::Enabled, EffectsRow::Feedback),
+        "the volume's feedback is no effect"
+    );
+    assert!(touches(EffectsRow::Feedback, EffectsRow::Feedback));
+}
+
+/// The volume's feedback has a switch of its own beside the effects', on
+/// unless turned off, which asks for its own setting alone.
+#[test]
+fn the_volumes_feedback_is_a_switch_of_its_own() {
+    let shown = |document: &str| {
+        let (plates, owners) = groups(Some(&reading(document)));
+        let at = owners[0]
+            .iter()
+            .position(|row| *row == EffectsRow::Feedback)
+            .expect("on the effects plate");
+        let row = &plates[0].rows()[at];
+        let FieldControl::Toggle(toggle) = row.control() else {
+            panic!("the feedback's switch is a toggle");
+        };
+        (toggle.is_on(), row.state().enabled)
+    };
+    assert_eq!(shown(""), (true, true), "on unless turned off");
+    assert_eq!(
+        shown("sound.enabled = false\n"),
+        (true, true),
+        "the effects' switch does not reach it"
+    );
+    assert_eq!(
+        shown("sound.volume_feedback.enabled = false\n"),
+        (false, true)
+    );
+    assert_eq!(
+        effects_ask(
+            EffectsRow::Feedback,
+            &FieldAction::Set { on: false },
+            &reading("")
+        ),
+        Some(EffectsAsk::Apply {
+            key: SoundKey::EventEnabled(SoundEvent::VolumeFeedback),
+            line: String::from("sound.volume_feedback.enabled = false\n"),
+        })
+    );
 }
 
 /// A chooser asked for a pick goes back, at once and in place, to what its
@@ -346,7 +398,8 @@ fn a_pick_puts_its_chooser_back_in_place() {
     assert!(covers(&damage, rect));
 }
 
-/// Throwing the switch off shows every other row disabled at once, in place.
+/// Throwing the switch off restates every row in place exactly as a form
+/// composed with it off shows them: all disabled but the two switches.
 #[test]
 fn the_switch_restates_every_row_in_place() {
     let theme = theme();
@@ -365,7 +418,14 @@ fn the_switch_restates_every_row_in_place() {
     assert!(!form.take_reshaped());
     let rows: Vec<_> = form.groups().iter().flat_map(FieldGroup::rows).collect();
     assert!(matches!(rows[0].control(), FieldControl::Toggle(toggle) if !toggle.is_on()));
-    assert!(rows[1..].iter().all(|row| !row.state().enabled));
+    let (composed, _) = groups(Some(&reading("sound.enabled = false\n")));
+    let restated: Vec<bool> = rows.iter().map(|row| row.state().enabled).collect();
+    let fresh: Vec<bool> = composed
+        .iter()
+        .flat_map(FieldGroup::rows)
+        .map(|row| row.state().enabled)
+        .collect();
+    assert_eq!(restated, fresh, "restated in place as composed afresh");
 }
 
 /// The volume's figure follows a drag as it goes, before anything is asked.

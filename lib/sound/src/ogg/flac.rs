@@ -325,7 +325,7 @@ pub(super) const fn max_working_set(limits: &DecodeLimits) -> u64 {
 }
 
 /// The mapping's first packet for `streaminfo`, announcing `headers` more.
-#[cfg(any(test, feature = "encode"))]
+#[cfg(any(test, feature = "encode-flac"))]
 pub(crate) fn header(streaminfo: &[u8], headers: u16, last: bool) -> Vec<u8> {
     let mut packet = FLAC_PREFIX.to_vec();
     packet.extend_from_slice(&[MAPPING_MAJOR, 0]);

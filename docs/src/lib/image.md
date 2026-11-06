@@ -416,20 +416,13 @@ a bare `VP8 ` or `VP8L` chunk, and the extended one, a `VP8X` header
 declaring a canvas over an optional alpha chunk and either a still bitstream
 or a chain of `ANMF` frames. Both are complete here, and so is each codec.
 
-The **lossy** bitstream (`VP8 `, RFC 6386) is complete for the keyframe the
-container mandates: the boolean entropy decoder; the segmentation,
-loop-filter and quantiser headers with their per-segment and per-mode
-deltas; the token-probability updates; the four whole-macroblock luma modes,
-the four chroma modes, and all ten subblock modes; the Walsh-Hadamard and
-DCT reconstructions; both the normal and the simple loop filter at
-macroblock and subblock edges; and the conversion to RGB. A frame is
-decoded a macroblock row at a time: each row predicts from the unfiltered
-bottom row of the one above, kept aside before the filter moves it, and is
-filtered once the row below it is reconstructed, so the decode holds a
-window of rows rather than the frame. There is no inter
-coding at all — no reference frames, no motion vectors, no inter modes —
-because the container permits none, and a bitstream that declares itself an
-interframe is refused rather than half-read.
+The **lossy** bitstream (`VP8 `, RFC 6386) is the one keyframe the container
+mandates, decoded by `lib/video`'s VP8 decoder ([`tairix-video`](video.md))
+a macroblock row at a time, so the decode holds a window of rows rather than
+the frame. The decoder takes no limits of its own: the container holds the
+keyframe's declared geometry to the caller's limits before anything is
+reserved, and a bitstream that declares itself an interframe is refused
+rather than half-read.
 
 The **lossless** bitstream (`VP8L`) is complete too: the prefix-coded image
 stream, the meta-Huffman arrangement that gives each region of the picture

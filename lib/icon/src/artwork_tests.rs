@@ -22,8 +22,8 @@ use tairix_reclaim::pressure::{PressureBand, ReportedPressure};
 use super::{
     artwork_cache, artwork_kind_for_file, glyph_mask, icon_artwork_path, icon_vector_path,
     render_artwork, ArtworkCache, ArtworkKey, ArtworkOutcome, ArtworkRasteriser, ArtworkReader,
-    ArtworkResolver, IconArtwork, IconArtworkSource, IconRequest, InlineArtwork, NoArtwork,
-    Resolved, Surface, MAX_ARTWORK_BYTES, VECTOR_SUFFIX,
+    ArtworkResolver, BundleFiles, BundleVersion, IconArtwork, IconArtworkSource, IconRequest,
+    InlineArtwork, ListedBundle, NoArtwork, Resolved, Surface, MAX_ARTWORK_BYTES, VECTOR_SUFFIX,
 };
 use crate::glyph::IconKind;
 use crate::load::ICON_KINDS;
@@ -1045,6 +1045,42 @@ fn a_landed_refusal_advances_the_walk_one_tier_at_a_time() {
     );
 }
 
+/// A request is settled once the tier it serves from is held, not while a
+/// decode it waits on is coming, and once every tier refused, on its glyph.
+#[test]
+fn a_request_settles_on_its_held_tier_or_on_its_glyph_once_every_tier_refused() {
+    let mut c = cache();
+    let mut deferring = Deferring::new();
+    let request = IconRequest::kind(IconKind::AppBundle);
+    let raster = ArtworkKey::Raster(IconKind::AppBundle);
+    let vector = ArtworkKey::Vector(IconKind::AppBundle);
+    assert!(
+        !c.settled(&mut deferring, request, 8),
+        "nothing asked for yet"
+    );
+    let _ = c.artwork(&mut deferring, request, 8);
+    assert!(
+        !c.settled(&mut deferring, request, 8),
+        "the class master is coming"
+    );
+    deferring.land(&raster, 8, Some(square(8)));
+    let _ = c.artwork(&mut deferring, request, 8);
+    assert!(
+        c.settled(&mut deferring, request, 8),
+        "and is drawn as it will stay"
+    );
+
+    let mut refusing = cache();
+    deferring.land(&raster, 4, None);
+    deferring.land(&vector, 4, None);
+    let _ = refusing.artwork(&mut deferring, request, 4);
+    let _ = refusing.artwork(&mut deferring, request, 4);
+    assert!(
+        refusing.settled(&mut deferring, request, 4),
+        "every tier refused: the glyph stays"
+    );
+}
+
 #[test]
 fn owned_artwork_tells_a_storing_caller_pending_from_refused() {
     let mut c = cache();
@@ -1616,7 +1652,7 @@ fn still_shown_names_the_unheld_tier_and_starts_nothing() {
 fn still_shown_names_a_pending_thumbnail_and_the_tier_beneath_it() {
     let c = cache();
     let mut deferring = Deferring::new();
-    let stamp = crate::DocumentStamp {
+    let stamp = tairix_abi::fs::DocumentStamp {
         size: 1,
         modified: tairix_abi::time::Time64::UNIX_EPOCH,
         id: tairix_abi::fs::FileId {
@@ -1641,8 +1677,8 @@ fn still_shown_names_a_pending_thumbnail_and_the_tier_beneath_it() {
 }
 
 /// The version a listing named at `n`.
-fn listed_stamp(n: u64) -> crate::DocumentStamp {
-    crate::DocumentStamp {
+fn listed_stamp(n: u64) -> tairix_abi::fs::DocumentStamp {
+    tairix_abi::fs::DocumentStamp {
         size: n,
         modified: tairix_abi::time::Time64::UNIX_EPOCH,
         id: tairix_abi::fs::FileId {
@@ -1667,7 +1703,7 @@ fn a_listed_bundle_at_a_new_version_is_a_new_picture() {
     let new = IconRequest::listed_bundle(IconKind::AppBundle, dir, listed_stamp(2));
     let old_key = ArtworkKey::Bundle {
         dir: dir.to_string(),
-        stamp: Some(listed_stamp(1)),
+        version: Some(BundleVersion::Listed(listed_stamp(1))),
     };
     deferring.land(&old_key, 8, Some(square(8)));
     assert!(matches!(c.artwork(&mut deferring, old, 8), Some(p) if !p.is_mask()));
@@ -1682,7 +1718,7 @@ fn a_listed_bundle_at_a_new_version_is_a_new_picture() {
         deferring.asked.first().map(|(key, _)| key.clone()),
         Some(ArtworkKey::Bundle {
             dir: dir.to_string(),
-            stamp: Some(listed_stamp(2)),
+            version: Some(BundleVersion::Listed(listed_stamp(2))),
         })
     );
     assert!(c.charged_bytes() >= held, "the old answer was let go of");
@@ -1694,7 +1730,7 @@ fn a_listed_bundle_at_a_new_version_is_a_new_picture() {
         deferring.asked.first().map(|(key, _)| key.clone()),
         Some(ArtworkKey::Bundle {
             dir: dir.to_string(),
-            stamp: None,
+            version: None,
         })
     );
 }
@@ -1705,7 +1741,7 @@ fn a_listed_bundle_at_a_new_version_is_a_new_picture() {
 #[test]
 fn a_held_bundle_draws_its_glyph_until_released_then_decodes_once() {
     let mut c = cache();
-    let mut desk = crate::ArtworkDesk::new();
+    let mut desk = crate::ArtworkDesk::new(crate::desk::TEST_KEYS);
     let dir = "/Storage/B/One.app";
     let request = IconRequest::listed_bundle(IconKind::AppBundle, dir, listed_stamp(1));
     desk.hold_under(dir);
@@ -1760,4 +1796,160 @@ fn a_risc_os_application_asks_for_its_sprite_then_its_folder_picture_then_the_fo
         request,
         "an empty folder adds no tier"
     );
+}
+
+/// A bundle's or a RISC OS application's request crosses a drag as its own
+/// picture and comes back as the very request it was, so the desktop resolves
+/// it by the one tier order; a request whose own picture no drag carries — a
+/// kind alone, an asset, a program, a thumbnail, a folder's picture — or whose
+/// path a drag cannot carry crosses as its kind.
+#[test]
+fn a_carried_request_comes_back_as_itself() {
+    use tairix_abi::window_ipc::ICON_PATH_MAX;
+    let stamp = listed_stamp(3);
+    for request in [
+        IconRequest::listed_bundle(IconKind::AppBundle, "/Storage/B/One.app", stamp),
+        IconRequest::bundle(IconKind::AppBundle, "/System/Commands/ls.app"),
+        IconRequest::riscos_application(IconKind::Folder, "/Storage/disc/!Edit", Some(stamp)),
+        IconRequest::riscos_application(IconKind::FolderFilled, "/Storage/disc/!Draw", None),
+    ] {
+        let carried = request.carried().expect("an own picture a drag carries");
+        assert_eq!(
+            IconRequest::from_carried(request.icon_kind(), Some(&carried)),
+            request
+        );
+    }
+    let sample = crate::FolderSample::new([crate::SampleCard::Kind(IconKind::Text)]);
+    let long = format!("/{}/x.app", "d".repeat(ICON_PATH_MAX));
+    for request in [
+        IconRequest::kind(IconKind::Text),
+        IconRequest::asset(IconKind::AppBundle, "/own.png"),
+        IconRequest::program(IconKind::Executable, "terminal", None),
+        IconRequest::thumbnail(IconKind::ImagePng, "/Users/ann/Home/a.png", stamp),
+        IconRequest::folder(&sample),
+        IconRequest::bundle(IconKind::AppBundle, &long),
+        IconRequest::bundle(IconKind::AppBundle, "Applications/x.app"),
+        IconRequest::bundle(IconKind::AppBundle, "/Users/ann/Folder"),
+    ] {
+        assert_eq!(request.carried(), None, "{request:?}");
+    }
+    assert_eq!(
+        IconRequest::from_carried(IconKind::Text, None),
+        IconRequest::kind(IconKind::Text)
+    );
+}
+
+/// The bundle at `dir` a listing named at `n`, as a resolver reading none of
+/// its files keys its picture.
+fn listed_key(dir: &str, n: u64) -> ArtworkKey {
+    ArtworkKey::Bundle {
+        dir: dir.to_string(),
+        version: Some(BundleVersion::Listed(listed_stamp(n))),
+    }
+}
+
+/// An item a drop is writing is drawn by the picture its drag carried while
+/// its own is produced, and by its own once that serves; an own icon that was
+/// refused falls to its class picture, never to the stand-in. The pictures
+/// are told apart by their size.
+#[test]
+fn a_stand_in_is_drawn_while_the_own_icon_is_produced_and_never_for_a_refusal() {
+    let (source, copy) = (
+        "/System/Applications/Paint.app",
+        "/Users/ann/Desktop/Paint.app",
+    );
+    let carried = IconRequest::listed_bundle(IconKind::AppBundle, source, listed_stamp(1));
+    let request =
+        IconRequest::listed_bundle(IconKind::AppBundle, copy, listed_stamp(2)).standing_in(carried);
+    let drawn = |c: &mut ArtworkCache, deferring: &mut Deferring| {
+        c.artwork(deferring, request, 8)
+            .map(|picture| (picture.is_mask(), picture.surface().width()))
+    };
+
+    let mut c = cache();
+    let mut deferring = Deferring::new();
+    deferring.land(&listed_key(source, 1), 8, Some(square(7)));
+    assert_eq!(
+        drawn(&mut c, &mut deferring),
+        Some((false, 7)),
+        "the carried picture stands in while the copy's own is produced"
+    );
+    deferring.land(&listed_key(copy, 2), 8, Some(square(8)));
+    assert_eq!(
+        drawn(&mut c, &mut deferring),
+        Some((false, 8)),
+        "its own, once it serves"
+    );
+
+    let mut c = cache();
+    let mut deferring = Deferring::new();
+    deferring.land(&listed_key(source, 1), 8, Some(square(7)));
+    deferring.land(&listed_key(copy, 2), 8, None);
+    deferring.land(&ArtworkKey::Raster(IconKind::AppBundle), 8, Some(square(9)));
+    assert_eq!(
+        drawn(&mut c, &mut deferring),
+        Some((false, 9)),
+        "a refused own icon draws its class picture"
+    );
+}
+
+/// A bundle a plain copy was still writing when it first showed — its icon
+/// not yet there, so its first read refused — shows its own icon once its
+/// files are complete and the change is reported: the refusal was kept under
+/// the files it was read from, which are not the finished ones. An
+/// application and a command alike.
+#[test]
+fn a_bundle_a_plain_copy_was_writing_shows_its_own_icon_once_its_files_are_complete() {
+    for dir in ["/Users/ann/Desktop/Paint.app", "/Users/ann/Desktop/ls.app"] {
+        let mut c = cache();
+        let mut desk = crate::ArtworkDesk::new(crate::desk::TEST_KEYS);
+        desk.follow_bundles();
+        let request = IconRequest::listed_bundle(IconKind::AppBundle, dir, listed_stamp(1));
+        let bundle = ListedBundle {
+            dir: dir.to_string(),
+            listed: listed_stamp(1),
+        };
+        assert!(matches!(c.artwork(&mut desk, request, 8), Some(p) if p.is_mask()));
+        let first = desk.next_job().expect("the first read");
+        assert!(
+            desk.follows(&bundle),
+            "{dir}: its files are followed from its first read"
+        );
+        let half = BundleFiles {
+            manifest: Some(listed_stamp(10)),
+            icon: None,
+        };
+        let _ = desk.deliver_listed(&first, None, half, |_| (), &());
+        assert!(
+            matches!(c.artwork(&mut desk, request, 8), Some(p) if p.is_mask()),
+            "{dir}: the half-written bundle draws its glyph"
+        );
+        // The class picture it then asked for ships nothing here.
+        while let Some(job) = desk.next_job() {
+            let _ = desk.deliver(&job, None);
+        }
+        let _ = desk.take_landed();
+
+        assert!(
+            desk.moved(&bundle),
+            "{dir}: the finished icon's change is a read again"
+        );
+        let again = desk.next_job().expect("the read again");
+        let whole = BundleFiles {
+            manifest: Some(listed_stamp(10)),
+            icon: Some(listed_stamp(11)),
+        };
+        let picture = Some(Artwork::new(square(8)));
+        assert!(desk
+            .deliver_listed(&again, picture, whole, |_| (), &())
+            .kept());
+        assert!(
+            desk.take_landed().resolves(request, 8),
+            "{dir}: the tile is repainted"
+        );
+        assert!(
+            matches!(c.artwork(&mut desk, request, 8), Some(p) if !p.is_mask()),
+            "{dir}: drew the refusal read while it was being written"
+        );
+    }
 }

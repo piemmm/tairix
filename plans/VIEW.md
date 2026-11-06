@@ -53,7 +53,7 @@ window left open for a document that never arrived. A page of an open document
 that will not draw is stated on the canvas in its place. Never a blank surface,
 and never a fabricated image.
 
-Associations are **pictures and PDF only**; text is claimed by nothing, for
+Associations are **pictures, PDF and WebM movies only**; text is claimed by nothing, for
 the reason given above.
 
 Each new format is a private module in `lib/image`'s existing shape: `probe`
@@ -319,6 +319,70 @@ Playback waits with `waitset_wait(set, timeout_ns, …)` against a deadline from
 deadline, whichever is first. No periodic tick, no spin, and no timer armed
 while playback is paused.
 
+## Movies
+
+`video/webm` is claimed: a WebM file with a VP8 picture track, and an Opus
+sound track where it has one. The open knows a movie by its EBML signature
+(`moviedecode::is_movie`), never by its name, and the window's picture decoder
+plays no part in it.
+
+- **The decode.** A supervised `lib/sandbox::moviedecode` session of the
+  viewer's own binary, held to the document worker's ceiling, which the owner
+  states in its open. It pages the file through the shared page cache
+  (`lib/sandbox::paged`) as `audiodecode` does, and walks the pictures and the
+  sound through it apart, each from a place of its own, so the sound is
+  decoded half a second ahead whatever the ring holds: VP8 into RGBA, Opus
+  into `F32` at 48 kHz.
+- **Pictures cross in a ring.** The decoder is a parser sandbox handed one
+  region at spawn (`SpawnAttach::with_share`): three slots, each the size of
+  the screen, fixed before any stream is read. It draws each picture into a
+  slot the viewer does not hold, at the stream's own size and scaled down only
+  where it is larger than a slot, and names it over the pipe by a head of
+  slot, size and time. The viewer believes a head only where the slot is one
+  its request left free and the size one a slot holds, and copies the pixels
+  out before anything reads them. A slot is the viewer's until its next
+  picture request, which states the slots it still holds. A replacement
+  decoder is handed a ring of its own; the old one is let go with the last
+  picture drawn into it.
+- **Memory, on both sides.** `movie_bytes` weighs a stream against the
+  decoder's ceiling before anything is reserved — the decoder at its peak, the
+  ring, a picture larger than a slot at its own size, each walk's payload, the
+  page cache, the sound's buffers — refusing one too large (`TooLarge`), and
+  a keyframe that changes the size is weighed again. The viewer maps the ring
+  too, and holds its window's own copy of the picture shown at the stream's
+  size, the scaled window of it, and the picture the canvas blits.
+- **The playback.** `tairix_view::movie::Player`, on a thread of each movie
+  window's own: the session, the file's reads, one `audio-v1` stream through
+  `lib/player`'s `Speaker` seam, two pictures waiting in the ring, and half a
+  second of sound decoded ahead. The window loop tells it orders — play,
+  pause, seek — one batch at a time, the next folded in the view's state until
+  it is taken, and adopts what the thread posts: it copies each picture out
+  of its slot, hands the slot back, and scales it to the canvas through the
+  viewer's fit, zoom and turn, drawing its copy again wherever the canvas
+  moves. It never waits on the thread.
+- **The clock.** The sound's: each `SpaceAvailable` re-anchors it to the
+  movie time the device has read, and between reports it runs on the
+  monotonic clock, so the pictures follow a device whose clock drifts. A
+  silent movie, or one whose sound was lost, runs on the monotonic clock
+  alone. Each picture is shown at its time on a one-shot deadline; one
+  overtaken before it is shown is dropped, and one the decoder reaches more
+  than 100 ms late is not drawn unless the window has gone 250 ms without one,
+  so a slow machine shows fewer pictures rather than holding the sound back.
+- **Controls.** `Space` and the playback tool play and pause. The seek bar
+  beneath the canvas seeks where it is let go — to the latest keyframe at or
+  before the target, from the file's index or by walking the file where it
+  has none — and the clock beside it shows where a drag points on the way, the
+  position otherwise, and the length the file states. A recording whose writer
+  died states no length and has no index: it plays from its start and its
+  seek bar is disabled. The viewer's own fit, zoom and turn frame the movie.
+- **Failure is stated.** A file cut short plays as far as it holds and says
+  so; a refused frame stops playback there and says why. A decoder that dies
+  is replaced and brought back to the latest keyframe it passed, nothing it
+  plays again shown or heard twice, and one that fails twice at a place stops
+  there. Sound that cannot be played is stated and the pictures go on silent.
+  A movie that will not open closes its window with an alert saying why, as a
+  refused document does.
+
 ## Decoding untrusted files
 
 A viewer must never decode a file in its own address space, and the worker must
@@ -573,6 +637,8 @@ clients, and their exit-code sets are their own.
 ## Status
 
 - `plans/VIEW.md` and the jump-sheet row — **done**.
+- **Movies** — specified under *Movies* above, and tracked as
+  `plans/CAPTURE.md` CP10.
 - **A document opens at 100% if it fits and zoomed out to fit if it does not;
   the window hugs a picture that fits; the toolbar fits at every size** —
   **done**, as specified above. The window is sized before its first

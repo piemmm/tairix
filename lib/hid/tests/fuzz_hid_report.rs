@@ -11,7 +11,8 @@
 //! * a report an application finds malformed delivers nothing;
 //! * a pointer button is never pressed twice or released unheld, and a
 //!   device let go of leaves no button and no contact held;
-//! * configuring a device fails only when the device has gone.
+//! * configuring a device fails only when the device has gone;
+//! * a key record names, as its physical key, the usage it was fed.
 //!
 //! A per-run-seeded `Prng` mutates real descriptors (boot layouts, report-ID
 //! keyboards and mice, a wireless receiver's two interfaces, a high-resolution
@@ -822,6 +823,9 @@ fn the_console_producer_resolves_only_key_edges() {
         }
         if let Some(record) = record {
             assert_eq!(KeyInput::from_bytes(&record.to_le_bytes()), Ok(record));
+            if let Some(physical) = record.physical() {
+                assert_eq!(physical.usage(), code, "a key names the usage it was fed");
+            }
         }
 
         iteration += 1;

@@ -37,14 +37,19 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_geometry::Rect;
+use tairix_player::Failure;
 use tairix_raster::{Reorient, Surface};
 use tairix_sandbox::imagerender::{ViewDocument, ViewFormat, ViewPage};
+use tairix_sandbox::moviedecode::MovieInfo;
+
+use crate::movie::{Status, Transport};
 
 pub mod layout;
+pub mod movie;
 pub mod paint;
 pub mod view;
 
-pub use layout::Layout;
+pub use layout::{Bands, Layout};
 pub use view::{min_client_size, Command, Outcome, Refusal, View};
 
 /// The window extent the viewer asks the desktop for, in logical pixels.
@@ -647,6 +652,55 @@ impl Document {
     }
 }
 
+/// A movie the viewer has open: what it is, what the file is, and where its
+/// playback stands.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Movie {
+    /// What the movie is.
+    pub info: MovieInfo,
+    /// The file's own name, for the title and the info panel.
+    pub name: String,
+    /// The file's length in bytes.
+    pub bytes: u64,
+    /// Where its playback stands, as the playback last said.
+    pub status: Status,
+    /// How many times its decoder failed and was replaced.
+    pub replaced: u32,
+    /// Why its sound could not be played, once it could not.
+    pub silenced: Option<Failure>,
+}
+
+impl Movie {
+    /// A movie just opened, paused on its first picture.
+    #[must_use]
+    pub const fn new(info: MovieInfo, name: String, bytes: u64) -> Self {
+        Self {
+            info,
+            name,
+            bytes,
+            status: Status {
+                transport: Transport::Paused,
+                position_ns: 0,
+                late: 0,
+                seeks: 0,
+            },
+            replaced: 0,
+            silenced: None,
+        }
+    }
+
+    /// Whether it can be played: open, and not stopped where playback cannot
+    /// go on.
+    #[must_use]
+    pub const fn playable(&self) -> bool {
+        match self.status.transport {
+            Transport::Opening => false,
+            Transport::Stopped(stop) => !stop.is_final(),
+            Transport::Paused | Transport::Playing => true,
+        }
+    }
+}
+
 /// What the engine wants carried out, and `Run` performs on its worker.
 ///
 /// Latest-wins on the shared desk, which is exactly right for both: a render
@@ -706,6 +760,14 @@ pub enum Answer {
         pixels: Vec<u8>,
         /// Whether the draw happened, and why not when it did not.
         outcome: Result<(), view::Refusal>,
+    },
+    /// The document opened as a movie, or would not: what its playback says
+    /// once it has opened it.
+    Movie {
+        /// The open this answers, echoed from the request.
+        open_id: u64,
+        /// What the movie is, the file's name and its length.
+        opened: Result<(MovieInfo, String, u64), view::Refusal>,
     },
 }
 

@@ -22,6 +22,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// The one PIE link script every pure-Rust `Run` program links against,
 /// as a path relative to the workspace root.
@@ -180,6 +181,25 @@ impl PieArch {
             PieArch::X86_64 => "CARGO_TARGET_X86_64_TAIRIX_NONE_RUSTFLAGS",
         }
     }
+}
+
+/// A `cargo` command for a build script's nested build, run from
+/// `manifest_dir`, cleared of what the outer build would otherwise impose on
+/// it: the outer flags, which outrank the target-scoped ones the nested build
+/// is given, and a lint run's wrapper, which would lint the nested crates
+/// under the outer run's settings and fail the build script on findings that
+/// run reports itself.
+#[must_use]
+pub fn nested_cargo(manifest_dir: impl AsRef<Path>) -> Command {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut command = Command::new(cargo);
+    command
+        .current_dir(manifest_dir)
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("CLIPPY_ARGS");
+    command
 }
 
 /// Wipe `target_dir` when an input cargo cannot fingerprint has changed
@@ -419,5 +439,33 @@ mod tests {
         }
         assert_eq!(PieArch::from_target_triple("wasm32-unknown-unknown"), None);
         assert_eq!(PieArch::from_target_triple(""), None);
+    }
+
+    /// A nested build runs clear of the outer flags and of a lint run's
+    /// wrapper: under `cargo clippy` the wrapper otherwise lints the nested
+    /// program crates with the outer run's denials and fails the build script.
+    #[test]
+    fn a_nested_cargo_clears_the_outer_flags_and_lint_wrapper() {
+        let command = super::nested_cargo("/tmp");
+        let cleared: Vec<_> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_owned())
+            .collect();
+        for key in [
+            "CARGO_ENCODED_RUSTFLAGS",
+            "RUSTFLAGS",
+            "RUSTC_WORKSPACE_WRAPPER",
+            "CLIPPY_ARGS",
+        ] {
+            assert!(
+                cleared.iter().any(|cleared| cleared == key),
+                "{key} is cleared"
+            );
+        }
+        assert_eq!(
+            command.get_current_dir(),
+            Some(std::path::Path::new("/tmp"))
+        );
     }
 }

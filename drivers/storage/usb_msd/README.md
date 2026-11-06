@@ -31,7 +31,13 @@ binary works behind any host controller that speaks the URB transport
    transport (the interface protocol byte), its command set (the sub-class
    byte), and that transport's endpoints: the bulk pair for BOT, bulk pair +
    completion interrupt for CBI, or the four Pipe-Usage-named bulk pipes for
-   UAS (`src/desc.rs`, fail-closed on every hostile length).
+   UAS (`src/desc.rs`, fail-closed on every hostile length). It reads the
+   device's serial number too (`tairix_usb::transport::read_serial_number`),
+   from which a unit whose medium cannot leave it states its identity
+   (`scsi::unit_identity`, a `tairix_crypto::Fingerprint` of the serial with
+   the vendor and product ids and the unit's number): a medium put back on
+   that unit is then proven the one its volume's held writes were made on. A removable-medium unit states
+   none, nor does a device without a serial.
 3. Discovers the units (`GET MAX LUN` for BOT, `REPORT LUNS` for UAS,
    exactly one for CBI) and sends each `INQUIRY` (a direct-access disk or a
    multimedia drive is served, any other type skipped). Every unit then comes

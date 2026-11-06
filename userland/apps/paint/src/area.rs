@@ -61,8 +61,12 @@ const TILE: TileLayout = TileLayout::new(2);
 /// large file never holds the queue for long.
 const THUMBS_PER_JOB: usize = 32;
 
-/// The window's size in cells, at most, when it opens.
-pub const OPEN_CELLS: (u32, u32) = (5, 3);
+/// The client width a sprite window opens at, in logical pixels.
+pub const OPEN_WIDTH: u32 = 250;
+
+/// The tallest client a sprite window opens at, in logical pixels; a longer
+/// list scrolls.
+pub const OPEN_HEIGHT_MAX: u32 = 250;
 
 /// The most sprite windows one choice opens or brings forward: the desktop
 /// is asked for no more at once, however many sprites are chosen.
@@ -472,21 +476,18 @@ impl AreaView {
         );
         let area_height = height.saturating_sub(status.height);
         let count = self.document.entries().len();
-        let fit = |across: u32| {
-            let columns = (across.saturating_sub(gap) / (cell.0 + gap)).max(1) as usize;
-            (columns, count.div_ceil(columns))
-        };
-        let (mut columns, mut rows) = fit(width);
-        let pitch = u64::from(cell.1 + gap);
-        let needs_bar = rows as u64 * pitch + u64::from(gap) > u64::from(area_height);
-        let bar_width = if needs_bar {
-            bar_breadth(scale, theme)
-        } else {
-            0
-        };
-        if needs_bar {
-            (columns, rows) = fit(width.saturating_sub(bar_width));
-        }
+        let GridFit {
+            columns,
+            rows,
+            bar: bar_width,
+        } = grid_fit(
+            width,
+            area_height,
+            count,
+            cell,
+            gap,
+            bar_breadth(scale, theme),
+        );
         AreaLayout {
             window,
             grid: Rect::new(0, 0, width.saturating_sub(bar_width), area_height),
@@ -518,22 +519,31 @@ impl AreaView {
     }
 
     /// The window's size in logical pixels to open at, in `theme` with
-    /// `faces` at the reference scale: as many cells as it holds, up to
-    /// [`OPEN_CELLS`], with room for its bar and its band.
+    /// `faces` at the reference scale: [`OPEN_WIDTH`] across and as tall as
+    /// its sprites need at that width, at most [`OPEN_HEIGHT_MAX`], and never
+    /// below [`Self::min_size`].
     #[must_use]
     pub fn open_size(count: usize, theme: &Theme, faces: Faces) -> (u32, u32) {
-        let columns = u32::try_from(count.clamp(1, OPEN_CELLS.0 as usize)).unwrap_or(1);
-        let rows = u32::try_from(
-            count
-                .div_ceil(columns as usize)
-                .clamp(1, OPEN_CELLS.1 as usize),
-        )
-        .unwrap_or(1);
         let cell = cell_size(THUMB, Scale::ONE, theme);
         let band = faces.status.line_height().max(1) + GAP * 2;
+        let room = OPEN_HEIGHT_MAX.saturating_sub(band);
+        let fit = grid_fit(
+            OPEN_WIDTH,
+            room,
+            count.max(1),
+            cell,
+            GAP,
+            bar_breadth(Scale::ONE, theme),
+        );
+        let rows = u32::try_from(fit.rows).unwrap_or(u32::MAX);
+        let needed = rows
+            .saturating_mul(cell.1 + GAP)
+            .saturating_add(GAP)
+            .saturating_add(band);
+        let least = Self::min_size(theme, Scale::ONE, faces);
         (
-            columns * (cell.0 + GAP) + GAP + bar_breadth(Scale::ONE, theme),
-            rows * (cell.1 + GAP) + GAP + band,
+            OPEN_WIDTH.max(least.0),
+            needed.min(OPEN_HEIGHT_MAX).max(least.1),
         )
     }
 
@@ -1492,6 +1502,39 @@ impl AreaView {
 /// A sprite's identity as a click's subject.
 fn id_bits(id: EntryId) -> u32 {
     u32::try_from(id.get()).unwrap_or(u32::MAX)
+}
+
+/// The columns and rows a grid of cells is laid out in, and the breadth its
+/// scroll bar takes from its width.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GridFit {
+    columns: usize,
+    rows: usize,
+    /// The breadth a scroll bar takes from the width: zero unless the rows
+    /// overflow `room`.
+    bar: u32,
+}
+
+/// The one fitting of `count` cells of `cell`, `gap` apart and around, into
+/// `across` by `room`, with a `bar`-wide scroll bar taken from the width only
+/// when the rows overflow — shared by the layout and the opening size so the
+/// two can never disagree.
+fn grid_fit(across: u32, room: u32, count: usize, cell: (u32, u32), gap: u32, bar: u32) -> GridFit {
+    let fit = |width: u32| {
+        let columns = (width.saturating_sub(gap) / (cell.0 + gap)).max(1) as usize;
+        (columns, count.div_ceil(columns))
+    };
+    let (columns, rows) = fit(across);
+    let pitch = u64::from(cell.1 + gap);
+    if rows as u64 * pitch + u64::from(gap) <= u64::from(room) {
+        return GridFit {
+            columns,
+            rows,
+            bar: 0,
+        };
+    }
+    let (columns, rows) = fit(across.saturating_sub(bar));
+    GridFit { columns, rows, bar }
 }
 
 /// A scroll bar's breadth at `scale` in `theme`.

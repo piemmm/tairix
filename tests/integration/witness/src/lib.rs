@@ -13,7 +13,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tairix_log::{Event, EventId, FieldValue};
+use tairix_log::{Event, EventId, FieldValue, Level};
 use tairix_util::fmt::format_hex_u64;
 
 /// The value `event` carries under `key`: the first field so named.
@@ -110,6 +110,156 @@ impl FixtureExit {
     }
 }
 
+/// What a guest sink prints on serial as a progress marker: an event carrying
+/// `message` alone, which is the whole fact.
+#[must_use]
+pub const fn marker(message: &'static str) -> Event<'static> {
+    Event {
+        level: Level::Info,
+        id: EventId(0),
+        message,
+        fields: &[],
+    }
+}
+
+/// One step of a [`SyscallChain`]: the process the kernel attests and the
+/// syscall it dispatched, as a dispatched-syscall record's `comm` and `sc`
+/// fields render them.
+pub type ChainStep = (&'static str, &'static str);
+
+/// What one record did to a [`SyscallChain`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ChainNote {
+    /// It is not the record the chain is owed, and changed nothing.
+    Unrelated,
+    /// It latched a step.
+    Latched {
+        /// The rounds the chain had completed before it.
+        round: u32,
+        /// The step's index in the chain.
+        step: usize,
+    },
+    /// It was the owed instance step made by a task other than the instance
+    /// the chain watches, so the round starts again.
+    Foreign,
+}
+
+/// Dispatched syscalls that must land in a fixed order, round after round, one
+/// step of every round made by one kernel-attested task.
+///
+/// A record that is not the one owed is ignored, because unrelated calls
+/// separate the steps of a real chain: what is asserted is their relative
+/// order. The task first making the instance step is captured, and only it
+/// completes a round after, so the rounds are one instance's rather than any
+/// process's of that name.
+pub struct SyscallChain {
+    chain: &'static [ChainStep],
+    instance_step: usize,
+    /// The rounds completed in the high half and the step owed in the low, in
+    /// one word, so a record moves both or neither.
+    position: AtomicU64,
+    /// The instance's task, or [`NO_TASK`] before the instance step latched.
+    instance: AtomicU64,
+}
+
+/// No task has made the instance step. Task 0 is the in-kernel system context,
+/// which makes no user-space syscall, so no record names it.
+const NO_TASK: u64 = 0;
+
+/// Bits of a [`SyscallChain`] position below its rounds: the step owed.
+const STEP_BITS: u32 = 32;
+
+/// The position `round` rounds in, with step `step` owed.
+fn pack(round: u32, step: u32) -> u64 {
+    (u64::from(round) << STEP_BITS) | u64::from(step)
+}
+
+/// The rounds completed and the step owed at `position`.
+fn unpack(position: u64) -> (u32, u32) {
+    let round = u32::try_from(position >> STEP_BITS).unwrap_or(u32::MAX);
+    let step = u32::try_from(position & u64::from(u32::MAX)).unwrap_or(u32::MAX);
+    (round, step)
+}
+
+impl SyscallChain {
+    /// A chain owed its first step, its step `instance_step` made by one task
+    /// every round.
+    #[must_use]
+    pub const fn new(chain: &'static [ChainStep], instance_step: usize) -> Self {
+        Self {
+            chain,
+            instance_step,
+            position: AtomicU64::new(0),
+            instance: AtomicU64::new(NO_TASK),
+        }
+    }
+
+    /// Read the dispatched-syscall record `event`, answering what it did.
+    ///
+    /// The process, the syscall and the task are the record's own
+    /// kernel-attested fields, so no principal can present itself as another.
+    /// A record making the instance step whose task cannot be read is refused
+    /// rather than taken as a match.
+    pub fn note(&self, event: &Event<'_>) -> ChainNote {
+        let at = self.position.load(Ordering::Acquire);
+        let (round, step) = unpack(at);
+        let index = usize::try_from(step).unwrap_or(usize::MAX);
+        let Some(&(comm, call)) = self.chain.get(index) else {
+            return ChainNote::Unrelated;
+        };
+        if field_str(event, "comm") != Some(comm) || field_str(event, "sc") != Some(call) {
+            return ChainNote::Unrelated;
+        }
+        if index == self.instance_step && !self.is_instance(field_str(event, "task")) {
+            // A record that moved the chain meanwhile stands.
+            let _ = self.position.compare_exchange(
+                at,
+                pack(round, 0),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            return ChainNote::Foreign;
+        }
+        let next = if index + 1 < self.chain.len() {
+            pack(round, step + 1)
+        } else {
+            pack(round.saturating_add(1), 0)
+        };
+        match self
+            .position
+            .compare_exchange(at, next, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => ChainNote::Latched { round, step: index },
+            // Another record latched the step first.
+            Err(_) => ChainNote::Unrelated,
+        }
+    }
+
+    /// The rounds the chain has completed.
+    #[must_use]
+    pub fn rounds(&self) -> u32 {
+        unpack(self.position.load(Ordering::Acquire)).0
+    }
+
+    /// Whether `task`, the hex task field of a record making the instance step,
+    /// names the instance: captured if none is yet.
+    fn is_instance(&self, task: Option<&str>) -> bool {
+        let Some(task) = task.and_then(|task| u64::from_str_radix(task, 16).ok()) else {
+            return false;
+        };
+        if task == NO_TASK {
+            return false;
+        }
+        match self
+            .instance
+            .compare_exchange(NO_TASK, task, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => true,
+            Err(captured) => captured == task,
+        }
+    }
+}
+
 /// The login screen's witnesses that its frame reached a display: the system
 /// service store's greeter bundle was verified and loaded, and then the
 /// process the kernel names as serving the display endpoint reported the first
@@ -194,8 +344,8 @@ mod tests {
     use std::format;
 
     use super::{
-        field, field_str, field_u64, names_bundle, sector0_byte, FixtureExit, GreeterFrame,
-        GreeterRecords, LOGIN_SHELL,
+        field, field_str, field_u64, marker, names_bundle, sector0_byte, ChainNote, ChainStep,
+        FixtureExit, GreeterFrame, GreeterRecords, SyscallChain, LOGIN_SHELL,
     };
     use tairix_abi::{SYSTEM_APPLICATION_STORE, SYSTEM_SERVICE_STORE};
     use tairix_log::{Event, EventId, Field, FieldValue, Level};
@@ -425,5 +575,126 @@ mod tests {
         assert!(!observe(RECORDS.endpoint_created, bound(other, 41)));
         assert!(!observe(RECORDS.first_present, shown_by(41)));
         assert!(observe(RECORDS.first_present, shown_by(40)));
+    }
+
+    /// The steps a session-to-viewer delegation is recognised by.
+    const DELEGATION: [ChainStep; 2] = [("desktop", "fd_grant"), ("view", "fd_redeem")];
+
+    /// What `chain` makes of the dispatched-syscall record of the process
+    /// `comm` making `call` from task `task`.
+    fn note(
+        chain: &SyscallChain,
+        comm: &'static str,
+        call: &'static str,
+        task: &'static str,
+    ) -> ChainNote {
+        let fields = [
+            Field {
+                key: "task",
+                value: FieldValue::Str(task),
+            },
+            Field {
+                key: "comm",
+                value: FieldValue::Str(comm),
+            },
+            Field {
+                key: "sc",
+                value: FieldValue::Str(call),
+            },
+        ];
+        chain.note(&Event {
+            level: Level::Debug,
+            id: EventId(5000),
+            message: "",
+            fields: &fields,
+        })
+    }
+
+    #[test]
+    fn a_chain_latches_its_steps_in_order_past_unrelated_records() {
+        let chain = SyscallChain::new(&DELEGATION, 1);
+        assert_eq!(
+            note(&chain, "view", "fd_redeem", "2a"),
+            ChainNote::Unrelated,
+            "a redeem before any grant"
+        );
+        assert_eq!(
+            note(&chain, "desktop", "fd_grant", "1"),
+            ChainNote::Latched { round: 0, step: 0 }
+        );
+        assert_eq!(
+            note(&chain, "files", "fd_redeem", "3"),
+            ChainNote::Unrelated,
+            "another principal's redeem"
+        );
+        assert_eq!(
+            note(&chain, "desktop", "fd_grant", "1"),
+            ChainNote::Unrelated,
+            "a latched step is owed no more"
+        );
+        assert_eq!(
+            note(&chain, "view", "fd_redeem", "2a"),
+            ChainNote::Latched { round: 0, step: 1 }
+        );
+        assert_eq!(chain.rounds(), 1);
+        assert_eq!(
+            note(&chain, "desktop", "fd_grant", "1"),
+            ChainNote::Latched { round: 1, step: 0 }
+        );
+        assert_eq!(chain.rounds(), 1, "a round counts once it ends");
+    }
+
+    #[test]
+    fn only_the_captured_instance_completes_a_later_round() {
+        let chain = SyscallChain::new(&DELEGATION, 1);
+        for (comm, call) in DELEGATION {
+            assert!(matches!(
+                note(&chain, comm, call, "2a"),
+                ChainNote::Latched { round: 0, .. }
+            ));
+        }
+        assert_eq!(
+            note(&chain, "desktop", "fd_grant", "1"),
+            ChainNote::Latched { round: 1, step: 0 }
+        );
+        assert_eq!(note(&chain, "view", "fd_redeem", "2b"), ChainNote::Foreign);
+        assert_eq!(chain.rounds(), 1, "a second viewer completes nothing");
+        assert_eq!(
+            note(&chain, "view", "fd_redeem", "2a"),
+            ChainNote::Unrelated,
+            "the round started again, so a grant is owed"
+        );
+        for (comm, call) in DELEGATION {
+            assert!(matches!(
+                note(&chain, comm, call, "2a"),
+                ChainNote::Latched { round: 1, .. }
+            ));
+        }
+        assert_eq!(chain.rounds(), 2);
+    }
+
+    #[test]
+    fn an_instance_step_naming_no_readable_task_is_refused() {
+        for task in ["", "not hex", "0"] {
+            let chain = SyscallChain::new(&DELEGATION, 1);
+            assert_eq!(
+                note(&chain, "desktop", "fd_grant", "1"),
+                ChainNote::Latched { round: 0, step: 0 }
+            );
+            assert_eq!(
+                note(&chain, "view", "fd_redeem", task),
+                ChainNote::Foreign,
+                "{task:?}"
+            );
+            assert_eq!(chain.rounds(), 0);
+        }
+    }
+
+    #[test]
+    fn a_marker_carries_its_message_and_nothing_else() {
+        let event = marker("FILEPICKS step");
+        assert_eq!(event.message, "FILEPICKS step");
+        assert_eq!(event.level, Level::Info);
+        assert!(event.fields.is_empty());
     }
 }

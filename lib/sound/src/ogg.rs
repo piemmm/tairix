@@ -16,21 +16,24 @@ mod opus;
 mod page;
 mod vorbis;
 
-#[cfg(any(test, feature = "encode"))]
+#[cfg(any(test, feature = "encode-flac"))]
 use alloc::vec::Vec;
 
 use self::link::Codec;
+pub(crate) use self::opus::{channel_map as opus_channel_map, gain_factor, parse_head};
 pub(crate) use self::page::CAPTURE;
-#[cfg(any(test, feature = "encode"))]
+#[cfg(any(test, feature = "encode-flac"))]
 use self::page::{CONTINUED, FIRST_PAGE, LAST_PAGE};
-#[cfg(any(test, feature = "encode"))]
+#[cfg(any(test, feature = "encode-flac"))]
 use crate::crc::crc32;
 use crate::input::SoundInput;
 use crate::meta::Collector;
 use crate::{DecodeError, DecodeLimits, SoundInfo};
 
-#[cfg(any(test, feature = "encode"))]
+#[cfg(any(test, feature = "encode-flac"))]
 pub(crate) use self::flac::header as flac_header;
+#[cfg(any(test, feature = "encode-opus"))]
+pub(crate) use self::opus::{HEAD_LEN, HEAD_SIGNATURE};
 
 /// Whether `bytes` open with an Ogg page.
 pub(crate) fn has_signature(bytes: &[u8]) -> bool {
@@ -146,7 +149,7 @@ pub(crate) const fn max_working_set(limits: &DecodeLimits, frames: u32) -> u64 {
 
 /// Pages of one logical stream: each packet laid on as many segments as it
 /// takes, a page ended when its lacing fills or when asked.
-#[cfg(any(test, feature = "encode"))]
+#[cfg(any(test, feature = "encode-flac"))]
 pub(crate) struct PageWriter {
     out: Vec<u8>,
     serial: u32,
@@ -158,7 +161,7 @@ pub(crate) struct PageWriter {
     granule: Option<u64>,
 }
 
-#[cfg(any(test, feature = "encode"))]
+#[cfg(any(test, feature = "encode-flac"))]
 impl PageWriter {
     pub(crate) const fn new(serial: u32) -> Self {
         Self {

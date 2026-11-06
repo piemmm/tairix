@@ -19,12 +19,14 @@
 use core::num::NonZeroU32;
 
 use tairix_abi::blkio::{
-    BlkDeviceName, BlkForm, BlkMedium, BlkReissue, BlkRemovability, BlkRotation,
+    BlkDeviceIdentity, BlkDeviceName, BlkForm, BlkMedium, BlkReissue, BlkRemovability, BlkRotation,
     BlkRotationEvidence, BlkTransport, CommandBudget, CommandKind,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscLayout};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::{DriverError, Errno};
+use tairix_crypto::Fingerprint;
+use tairix_usb::transport::DeviceSerial;
 
 use crate::ready::Readiness;
 
@@ -344,6 +346,8 @@ pub struct ScsiDevice<T: ScsiTransport> {
     /// The last command's exchange broke and the reset recovery it ran put
     /// the transport back in step.
     resynced: bool,
+    /// The device's serial number, which each unit's identity is taken from.
+    serial: Option<DeviceSerial>,
 }
 
 impl<T: ScsiTransport> ScsiDevice<T> {
@@ -358,7 +362,15 @@ impl<T: ScsiTransport> ScsiDevice<T> {
             removable: [false; MAX_LUNS],
             expecting_reset: [false; MAX_LUNS],
             resynced: false,
+            serial: None,
         }
+    }
+
+    /// Take `serial`, the device's serial number as its descriptors spell it,
+    /// as what its units' identities are taken from; `None` for a device that
+    /// names none, whose units state no identity.
+    pub fn set_serial(&mut self, serial: Option<DeviceSerial>) {
+        self.serial = serial;
     }
 
     /// Serve `lun` with the budget its `medium` is given from now on.
@@ -1330,6 +1342,25 @@ fn rotation_of_identify(data: &[u8]) -> Option<BlkRotation> {
     }
 }
 
+/// The identity unit `lun` of the device `serial` names states: its
+/// fingerprint under a domain of its own over the device's vendor, product and
+/// serial number and the unit's number, so two units of one device, and two
+/// devices of one model, are told apart.
+#[must_use]
+pub fn unit_identity(serial: &DeviceSerial, lun: u8) -> Option<BlkDeviceIdentity> {
+    let units = serial.serial.units();
+    let mut fingerprint = Fingerprint::new(b"tairix.usb-msd.unit");
+    fingerprint.field(&serial.vendor_id.to_le_bytes());
+    fingerprint.field(&serial.product_id.to_le_bytes());
+    let count = u32::try_from(units.len()).unwrap_or(u32::MAX);
+    fingerprint.field(&count.to_le_bytes());
+    for unit in units {
+        fingerprint.field(&unit.to_le_bytes());
+    }
+    fingerprint.field(&[lun]);
+    BlkDeviceIdentity::new(fingerprint.finish())
+}
+
 /// One logical unit exposed as a [`Block`] device: the per-LUN view the
 /// block service serves (`plans/DEVICES.md` D2 target shape).
 pub struct LunBlock<'a, T: ScsiTransport> {
@@ -1419,6 +1450,16 @@ impl<T: ScsiTransport> Block for LunBlock<'_, T> {
     /// not an identity that would distinguish one stick from another.
     fn device_name(&self) -> BlkDeviceName {
         BlkDeviceName::new("usb-msd")
+    }
+
+    /// What tells the unit from every other ([`unit_identity`]), stated only
+    /// while its medium cannot leave it: a card reader's slot proves only the
+    /// reader, never the card in it.
+    fn device_identity(&self) -> Option<BlkDeviceIdentity> {
+        let BlkRemovability::Fixed(_) = self.state.report.medium.removability else {
+            return None;
+        };
+        unit_identity(self.device.serial.as_ref()?, self.lun)
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

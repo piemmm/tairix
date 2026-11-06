@@ -6,7 +6,8 @@
 //! object outlives its accounting. The counters are atomics on the
 //! process's own [`ResourceCharges`], which every copy of its capability
 //! record shares, so a charge takes no lock and contends with no other
-//! process.
+//! process. The same cell holds the process's file I/O totals, so a record's
+//! whole live accounting is one allocation.
 
 extern crate alloc;
 
@@ -15,10 +16,16 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::{Errno, LimitKind};
 
-/// The units one process holds against each of its limits.
+/// The units one process holds against each of its limits, and the bytes its
+/// own file calls have moved.
 #[derive(Debug)]
 pub struct ResourceCharges {
     held: [AtomicU64; LimitKind::COUNT],
+    /// What the secured VFS actually moved for the process's reads — never
+    /// the length asked for — saturating rather than wrapping.
+    read: AtomicU64,
+    /// As `read`, for its writes.
+    written: AtomicU64,
 }
 
 impl Default for ResourceCharges {
@@ -33,6 +40,8 @@ impl ResourceCharges {
     pub const fn new() -> Self {
         Self {
             held: [const { AtomicU64::new(0) }; LimitKind::COUNT],
+            read: AtomicU64::new(0),
+            written: AtomicU64::new(0),
         }
     }
 
@@ -91,6 +100,36 @@ impl ResourceCharges {
     fn counter(&self, kind: LimitKind) -> &AtomicU64 {
         &self.held[kind as usize]
     }
+
+    /// Bytes the process's own file reads have moved.
+    #[must_use]
+    pub(crate) fn bytes_read(&self) -> u64 {
+        self.read.load(Ordering::Relaxed)
+    }
+
+    /// Bytes the process's own file writes have moved.
+    #[must_use]
+    pub(crate) fn bytes_written(&self) -> u64 {
+        self.written.load(Ordering::Relaxed)
+    }
+
+    /// Count `bytes` more read.
+    pub(crate) fn add_bytes_read(&self, bytes: u64) {
+        saturating_add(&self.read, bytes);
+    }
+
+    /// Count `bytes` more written.
+    pub(crate) fn add_bytes_written(&self, bytes: u64) {
+        saturating_add(&self.written, bytes);
+    }
+}
+
+/// Add `delta` to `counter`, clamping at [`u64::MAX`] rather than wrapping.
+/// Relaxed: a total with no other access it must be ordered against.
+fn saturating_add(counter: &AtomicU64, delta: u64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+        Some(held.saturating_add(delta))
+    });
 }
 
 /// Units of one limit a live object holds, returned when it is dropped.

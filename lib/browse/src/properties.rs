@@ -245,6 +245,7 @@ impl Properties {
             EntryKind::Link(LinkTarget::Directory) => "Alias to folder",
             EntryKind::Link(LinkTarget::File) => "Alias to file",
             EntryKind::Link(LinkTarget::Bundle) => "Alias to application",
+            EntryKind::Link(LinkTarget::Volume) => "Alias to drive",
             EntryKind::Link(LinkTarget::Dangling) => "Broken alias",
         }
     }

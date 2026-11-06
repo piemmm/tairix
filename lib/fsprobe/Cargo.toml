@@ -21,7 +21,7 @@ tairix-bytedev = { path = "../bytedev", version = "=0.0.0" }
 # The CRC-32 a gzip header's and a RAR archive's header checksums are taken
 # from.
 tairix-crc32 = { path = "../crc32", version = "=0.0.0" }
-# SHA-256, the stable digest a content-derived identity is taken from for a
+# The identity fingerprint a content-derived identity is taken from for a
 # format that records no unique identifier.
 tairix-crypto = { path = "../crypto", version = "=0.0.0" }
 # The shared RAID on-disk metadata definition (`tairix_raidmeta`), so the probe

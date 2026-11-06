@@ -742,6 +742,7 @@ mod tests {
         for (availability, marker) in [
             (MountAvailability::UnavailableDirty, "[unavailable-dirty]"),
             (MountAvailability::RecoveryConflict, "[recovery-conflict]"),
+            (MountAvailability::ReplayUnconfirmed, "[replay-unconfirmed]"),
             (MountAvailability::UnavailableLost, "[unavailable-lost]"),
         ] {
             let record = MountRecord::new(

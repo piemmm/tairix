@@ -15,13 +15,13 @@ use tairix_abi::window_ipc::{
     AppBar, AppMenuIconView, AppMenuItemId, AppMenuRowView, AppMenuSymbol, APP_MENU_LABEL_MAX,
     APP_MENU_MAX_ROWS,
 };
-use tairix_browse::mount::{MountAct, MountRefusal};
-use tairix_browse::{Places, Volume};
+use tairix_browse::mount::{MountAct, MountRefusal, Titling, TITLE_CONTROL, TITLE_TOO_LONG};
+use tairix_browse::places::{REASON_NOT_YOURS, REASON_TITLE_READ_ONLY, REASON_UNTITLED_FORMAT};
+use tairix_browse::{Places, Retitler, Volume};
 
 use super::{
     component_declaration, BarAnswer, BarRow, Declarations, CLOSING_ROWS, DECLARATIONS_HELD,
-    DESKTOP_SLOT_CLICK, NOT_TITLED, OUTDATED, READ_ONLY_TITLE, TITLE_EMPTY, TITLE_TOO_LONG,
-    VOLUME_GONE,
+    DESKTOP_SLOT_CLICK, NO_HOME, OUTDATED, VOLUME_GONE,
 };
 use crate::test_fs::mounted;
 
@@ -58,20 +58,16 @@ fn labels(places: &Places) -> Vec<String> {
     place_labels(&bar)
 }
 
-/// The labels of the *Network* and *Settings…* rows.
+/// The labels of the closing *Network* and *Trash* rows.
 const NETWORK: &str = "Network";
-const SETTINGS: &str = "Settings\u{2026}";
+const TRASH: &str = "Trash";
 
 /// The labels of `bar`'s place rows, in order: every item but the closing
-/// *Network* and *Settings…*.
+/// *Network* and *Trash*.
 fn place_labels(bar: &AppBar) -> Vec<String> {
     let mut shown = item_labels(bar);
-    assert_eq!(shown.pop().as_deref(), Some(SETTINGS), "Settings… is last");
-    assert_eq!(
-        shown.pop().as_deref(),
-        Some(NETWORK),
-        "Network is just above it"
-    );
+    assert_eq!(shown.pop().as_deref(), Some(TRASH), "Trash is last");
+    assert_eq!(shown.pop().as_deref(), Some(NETWORK), "Network is above it");
     shown
 }
 
@@ -180,7 +176,7 @@ fn each_row_draws_its_places_own_picture() {
 #[test]
 fn a_rule_opens_the_mounted_volumes_and_only_when_there_are_some() {
     // Nothing mounted: no divider among the places, because there is nothing
-    // to divide — only the one that sets Settings… apart.
+    // to divide — only the closing rows' own two.
     let bare = Places::new(&home(), &[]);
     let rules = |kinds: &[AppMenuRowKind]| {
         kinds
@@ -188,7 +184,7 @@ fn a_rule_opens_the_mounted_volumes_and_only_when_there_are_some() {
             .filter(|kind| **kind == AppMenuRowKind::Separator)
             .count()
     };
-    assert_eq!(rules(&kinds(&bare)), 1, "no volumes, no rule among them");
+    assert_eq!(rules(&kinds(&bare)), 2, "no volumes, no rule among them");
 
     // Mounted: the rule falls exactly where the volume rows begin, and the
     // volumes follow the user's own places.
@@ -205,8 +201,8 @@ fn a_rule_opens_the_mounted_volumes_and_only_when_there_are_some() {
     );
     assert_eq!(
         rules(&declared),
-        2,
-        "one rule for the volumes, not one per volume, and Settings…'s own"
+        3,
+        "one rule for the volumes, not one per volume, and the closing rows' two"
     );
     // Sorted by label, after the fixed places.
     assert_eq!(
@@ -257,7 +253,7 @@ fn every_rows_id_names_it_back() {
         BarRow::Retitled(30),
         BarRow::Place(super::VERB_STRIDE as usize - 2),
         BarRow::Network,
-        BarRow::Settings,
+        BarRow::Trash,
     ] {
         assert_eq!(BarRow::of(row.id().expect("an id")), Some(row), "{row:?}");
     }
@@ -275,12 +271,14 @@ fn every_rows_id_names_it_back() {
 }
 
 /// A volume of `class` at `/Storage/<label>`, attached for `owner` and
-/// recording `title`, published under the identity its label spells.
+/// recording `title` in a format that takes one, or none in a format that
+/// keeps none, published under the identity its label spells.
 fn attached(label: &str, class: VolumeClass, owner: Option<u32>, title: &str) -> Volume {
     let mut volume = volume(label);
     volume.facts.class = class;
     volume.facts.owner = owner;
     volume.facts.title = title.to_string();
+    volume.facts.titled = !title.is_empty();
     for (id, spelled) in volume.facts.volume_id.iter_mut().zip(label.bytes()) {
         *id = spelled;
     }
@@ -420,8 +418,8 @@ fn a_refused_declaration_moves_nothing_answers_resolve_against() {
 }
 
 /// Only the latest few declarations are held: an answer copied from one let
-/// go is refused saying why, though Network and Settings… mean the same in
-/// every declaration.
+/// go is refused saying why, though the closing rows mean the same in every
+/// declaration.
 #[test]
 fn an_answer_from_a_declaration_let_go_is_refused_saying_why() {
     let places = Places::new(
@@ -449,7 +447,7 @@ fn an_answer_from_a_declaration_let_go_is_refused_saying_why() {
         );
     }
     assert_eq!(answer(BarRow::Network, revisions[0]), BarAnswer::Network);
-    assert_eq!(answer(BarRow::Settings, revisions[0]), BarAnswer::Settings);
+    assert_eq!(answer(BarRow::Trash, revisions[0]), BarAnswer::Trash);
     assert!(
         matches!(
             answer(BarRow::Eject(card), revisions[1]),
@@ -488,9 +486,10 @@ fn a_volume_that_left_is_refused_naming_it() {
     );
 }
 
-/// A committed title is checked against the disk as it stands now: the one it
-/// records asks nothing, an empty one or one longer than any disk records is
-/// refused saying why, and only a titled image still the user's is retitled.
+/// A committed title is checked against the volume as it stands now, by the
+/// one check: the title it records asks nothing, an empty one clears it, one
+/// longer than any disk records or holding a control character is refused
+/// saying which, and one no longer the user's to retitle is refused saying why.
 #[test]
 fn a_committed_title_is_checked_against_the_disk_as_it_stands() {
     let floppy = attached("Floppy", VolumeClass::Image, VIEWER, "Workbench");
@@ -501,35 +500,99 @@ fn a_committed_title_is_checked_against_the_disk_as_it_stands() {
         accepted(&mut declarations, &places),
     );
     let retitled = |text: &str, now: &Places| declarations.retitled(row, now, VIEWER, text);
+    let retitle = |title: &str| MountAct::Retitle {
+        volume_id: floppy.facts.volume_id,
+        name: String::from("Floppy"),
+        titling: alloc::boxed::Box::new(Titling {
+            title: VolumeTitle::new(title).expect("a title"),
+            retitler: Retitler::Owner(1000),
+        }),
+    };
     assert_eq!(
         retitled("Workbench", &places),
         Ok(None),
         "the title it records"
     );
+    assert_eq!(retitled("Games", &places), Ok(Some(retitle("Games"))));
     assert_eq!(
-        retitled("Games", &places),
-        Ok(Some(MountAct::Retitle {
-            volume_id: floppy.facts.volume_id,
-            name: String::from("Floppy"),
-            title: alloc::boxed::Box::new(VolumeTitle::new("Games").expect("a title")),
-        }))
+        retitled("", &places),
+        Ok(Some(retitle(""))),
+        "an empty title clears it"
     );
     let reason = |text: &str, now: &Places| retitled(text, now).map_err(|refused| refused.reason);
-    assert_eq!(reason("", &places), Err(TITLE_EMPTY));
     assert_eq!(
         reason(&"t".repeat(VOLUME_TITLE_MAX + 1), &places),
         Err(TITLE_TOO_LONG)
     );
+    assert_eq!(
+        reason("Work\u{7}bench", &places),
+        Err(TITLE_CONTROL),
+        "a control character is not a length"
+    );
     let mut theirs = floppy.clone();
     theirs.facts.owner = Some(1001);
-    let mut untitled = floppy;
-    untitled.facts.title = String::new();
-    for changed in [theirs, untitled] {
-        assert_eq!(
-            reason("Games", &Places::new(&home(), &[changed])),
-            Err(NOT_TITLED)
-        );
+    let mut untitled = floppy.clone();
+    untitled.facts.titled = false;
+    for (changed, why) in [
+        (theirs, REASON_NOT_YOURS),
+        (untitled, REASON_UNTITLED_FORMAT),
+    ] {
+        assert_eq!(reason("Games", &Places::new(&home(), &[changed])), Err(why));
     }
+}
+
+/// Every volume the one rule lets the user retitle has its *Title* row: a
+/// removable or fixed device's volume as much as a disk image of theirs, and
+/// one whose format takes a title but records none yet; a share, another
+/// user's disk image and a format that keeps no title have none.
+#[test]
+fn every_volume_the_rule_offers_has_its_title_row() {
+    let mut blank = attached("Blank", VolumeClass::Image, VIEWER, "");
+    blank.facts.titled = true;
+    let mut share = attached("Share", VolumeClass::Network, VIEWER, "Projects");
+    share.facts.titled = true;
+    let places = Places::new(
+        &home(),
+        &[
+            attached("Card", VolumeClass::Removable, None, "Holiday"),
+            attached("Data", VolumeClass::Local, None, "Data"),
+            blank,
+            share,
+            attached("Theirs", VolumeClass::Image, Some(1001), "Their Disk"),
+            attached("Disc", VolumeClass::Removable, None, ""),
+        ],
+    );
+    let (bar, _) = component_declaration(7, &places, VIEWER, 0).expect("the rows fit");
+    let eject = |label: &str| (Some(BarRow::Eject(index_of(&places, label))), true, None);
+    let title = |label: &str, text: &str| {
+        let field = Some((text.to_string(), text.len(), true));
+        (Some(BarRow::Title(index_of(&places, label))), true, field)
+    };
+    assert_eq!(
+        plate_of(&bar, "Card"),
+        [eject("Card"), title("Card", "Holiday")]
+    );
+    assert_eq!(
+        plate_of(&bar, "Data"),
+        [title("Data", "Data")],
+        "an administrator is asked where the user may not"
+    );
+    assert_eq!(
+        plate_of(&bar, "Blank"),
+        [eject("Blank"), title("Blank", "")],
+        "a title can be given"
+    );
+    assert_eq!(
+        plate_of(&bar, "Share"),
+        [eject("Share")],
+        "a share's title is its server's"
+    );
+    assert!(plate_of(&bar, "Theirs").is_empty());
+    assert_eq!(
+        plate_of(&bar, "Disc"),
+        [eject("Disc")],
+        "a format keeping no title"
+    );
 }
 
 /// A removable device's volume opens a plate offering *Eject*; a fixed one,
@@ -616,7 +679,7 @@ fn a_titled_image_offers_its_title_in_a_field() {
     assert_eq!(
         plate_of(&bar, "Blank"),
         [(Some(BarRow::Eject(at("Blank"))), true, None)],
-        "a disk with no title has none to change"
+        "a format keeping no title has none to change"
     );
     let reason = bar
         .menu
@@ -632,7 +695,7 @@ fn a_titled_image_offers_its_title_in_a_field() {
         plate_of(&bar, "Locked")[1],
         (Some(BarRow::Title(at("Locked"))), false, None)
     );
-    assert_eq!(reason, [READ_ONLY_TITLE.to_string()]);
+    assert_eq!(reason, [REASON_TITLE_READ_ONLY.to_string()]);
 }
 
 #[test]
@@ -701,7 +764,17 @@ fn the_row_cap_counts_the_root_plates_rows_alone() {
         skipped,
         places.rows().len() - (APP_MENU_MAX_ROWS - 1 - CLOSING_ROWS)
     );
-    assert_eq!(plate_of(&bar, "i25").len(), 2, "shown with its whole plate");
+    let last = APP_MENU_MAX_ROWS - 2 - CLOSING_ROWS;
+    assert_eq!(
+        shown_places(&bar).last(),
+        Some(&last),
+        "the last place shown"
+    );
+    assert_eq!(
+        plate_of(&bar, places.rows()[last].label()).len(),
+        2,
+        "shown with its whole plate"
+    );
 }
 
 /// The places `bar`'s rows open, by their index.
@@ -719,65 +792,65 @@ fn shown_places(bar: &AppBar) -> Vec<usize> {
 }
 
 /// A place whose rows the menu's text cannot hold is dropped whole and
-/// counted, however long its title, and never at the closing rows' cost:
-/// every declaration is admissible, ends on Network and Settings…, and shows
-/// each image it shows with all of its plate.
+/// counted, however long its title, and never at the closing rows' cost — the
+/// Trash's reason among them where there is no home: every declaration is
+/// admissible, ends on its closing rows, and shows each image it shows with
+/// all of its plate.
 #[test]
 fn a_place_the_menus_text_cannot_hold_is_dropped_whole_and_counted() {
-    for title in 150..=250 {
-        let images: Vec<Volume> = (0..10)
-            .map(|n| {
-                let label = alloc::format!("{n:02}{}", "x".repeat(28));
-                attached(&label, VolumeClass::Image, VIEWER, &"t".repeat(title))
-            })
-            .collect();
-        let places = Places::new(&home(), &images);
-        let (bar, skipped) =
-            component_declaration(7, &places, VIEWER, 0).expect("the menu is admissible");
-        let shown = shown_places(&bar);
-        assert!(skipped > 0, "{title}: the text is exceeded");
-        assert_eq!(shown.len() + skipped, places.rows().len(), "{title}");
-        let items = item_labels(&bar);
-        assert_eq!(
-            items[items.len() - 2..],
-            [NETWORK.to_string(), SETTINGS.to_string()],
-            "{title}: the closing rows always fit"
-        );
-        for index in shown
-            .into_iter()
-            .filter(|&index| places.rows()[index].facts().is_some())
-        {
+    for owner in [home(), Vec::new()] {
+        for title in 150..=250 {
+            let images: Vec<Volume> = (0..10)
+                .map(|n| {
+                    let label = alloc::format!("{n:02}{}", "x".repeat(28));
+                    attached(&label, VolumeClass::Image, VIEWER, &"t".repeat(title))
+                })
+                .collect();
+            let places = Places::new(&owner, &images);
+            let (bar, skipped) =
+                component_declaration(7, &places, VIEWER, 0).expect("the menu is admissible");
+            let shown = shown_places(&bar);
+            assert!(skipped > 0, "{title}: the text is exceeded");
+            assert_eq!(shown.len() + skipped, places.rows().len(), "{title}");
+            let items = item_labels(&bar);
             assert_eq!(
-                plate_of(&bar, places.rows()[index].label()).len(),
-                2,
-                "{title}"
+                items[items.len() - 2..],
+                [NETWORK.to_string(), TRASH.to_string()],
+                "{title}: the closing rows always fit"
             );
+            for index in shown
+                .into_iter()
+                .filter(|&index| places.rows()[index].facts().is_some())
+            {
+                assert_eq!(
+                    plate_of(&bar, places.rows()[index].label()).len(),
+                    2,
+                    "{title}"
+                );
+            }
         }
     }
 }
 
 #[test]
-fn an_empty_rail_still_offers_the_network_and_settings() {
+fn an_empty_rail_still_offers_the_closing_rows() {
     // A session with no home and nothing attached has no place to offer, but
-    // the network and its file manager's settings are still the user's to
-    // reach.
+    // the network is still the user's to reach, and the Trash says why it is
+    // not there.
     let places = Places::default();
     let (bar, skipped) =
         component_declaration(7, &places, VIEWER, 0).expect("the menu is admissible");
-    assert_eq!(
-        item_labels(&bar),
-        [NETWORK.to_string(), SETTINGS.to_string()]
-    );
+    assert_eq!(item_labels(&bar), [NETWORK.to_string(), TRASH.to_string()]);
     assert_eq!(
         bar.menu.len(),
-        2,
-        "no rule above them with nothing to set them apart from"
+        3,
+        "no rule above them with nothing to set them apart from, and the Trash's own"
     );
     assert_eq!(skipped, 0);
 }
 
 /// The desktop's file manager never quits, so its menu never offers *Quit*,
-/// and *Network* and *Settings…* answer with ids no place uses.
+/// and its closing rows answer with ids no place uses.
 #[test]
 fn the_file_manager_never_offers_quit() {
     let places = Places::new(&home(), &[]);
@@ -800,7 +873,71 @@ fn the_file_manager_never_offers_quit() {
             })
             .expect("declared")
     };
-    let (network, settings) = (id_of(NETWORK), id_of(SETTINGS));
-    assert_eq!(BarRow::of(settings), Some(BarRow::Settings));
-    assert_eq!(BarRow::of(network), Some(BarRow::Network));
+    assert_eq!(BarRow::of(id_of(NETWORK)), Some(BarRow::Network));
+    assert_eq!(BarRow::of(id_of(TRASH)), Some(BarRow::Trash));
+}
+
+/// The file manager's settings are the Settings application's, so its menu
+/// offers no way there, whatever the rail holds.
+#[test]
+fn the_file_manager_offers_no_settings_row() {
+    for places in [Places::default(), Places::new(&home(), &[volume("Backup")])] {
+        let (bar, _) = component_declaration(7, &places, VIEWER, 0).expect("the rows fit");
+        assert!(
+            bar.menu.rows().all(|(row, _)| !matches!(
+                row,
+                AppMenuRowView::Item(item) if item.symbol == AppMenuSymbol::Settings
+            )),
+            "{:?}",
+            item_labels(&bar)
+        );
+    }
+}
+
+/// The menu closes with a rule and *Network*, then *Trash* last beneath a
+/// rule of its own, whatever the rail holds; with no place shown there is
+/// nothing above the first group to rule off.
+#[test]
+fn the_trash_is_last_below_its_own_rule_with_or_without_places() {
+    use AppMenuRowKind::{Item, Separator};
+    let ruled = [Separator, Item, Separator, Item];
+    assert_eq!(ruled.len(), CLOSING_ROWS, "the closing rows are counted");
+    for (places, closing) in [
+        (Places::default(), &ruled[1..]),
+        (Places::new(&home(), &[]), &ruled[..]),
+        (Places::new(&home(), &[volume("Backup")]), &ruled[..]),
+    ] {
+        let declared = kinds(&places);
+        assert!(declared.ends_with(closing), "{declared:?}");
+        let (bar, _) = component_declaration(7, &places, VIEWER, 0).expect("the rows fit");
+        let Some((AppMenuRowView::Item(trash), None)) = bar.menu.rows().last() else {
+            panic!("the menu ends on a root row");
+        };
+        assert_eq!((trash.label, trash.symbol), (TRASH, AppMenuSymbol::Trash));
+        assert_eq!(BarRow::of(trash.id), Some(BarRow::Trash));
+    }
+}
+
+/// With no home there is no Trash: its row is greyed and says why, in the
+/// words the window's own Go to Trash refuses with.
+#[test]
+fn the_trash_row_says_why_without_a_home() {
+    let trash = |places: &Places| {
+        let (bar, _) = component_declaration(7, places, VIEWER, 0).expect("the rows fit");
+        let row = bar
+            .menu
+            .rows()
+            .find_map(|(row, _)| match row {
+                AppMenuRowView::Item(item) if BarRow::of(item.id) == Some(BarRow::Trash) => {
+                    Some((item.enabled, item.reason.to_string()))
+                }
+                _ => None,
+            })
+            .expect("the Trash row");
+        row
+    };
+    assert_eq!(trash(&Places::new(&home(), &[])), (true, String::new()));
+    for homeless in [Places::default(), Places::new(&[], &[volume("Stick")])] {
+        assert_eq!(trash(&homeless), (false, NO_HOME.to_string()));
+    }
 }

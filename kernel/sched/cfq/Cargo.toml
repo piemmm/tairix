@@ -41,3 +41,6 @@ tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 [dev-dependencies]
 tairix-kernel-sched-cfq = { path = ".", version = "=0.0.0", features = ["test-arch"] }
 tairix-kernel-sched-api = { path = "../api", version = "=0.0.0", features = ["conformance"] }
+# The metered allocator the conformance suite's refusal properties refuse
+# through.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }

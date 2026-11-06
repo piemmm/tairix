@@ -1330,10 +1330,7 @@ impl Located<'_> {
         let form = if self.header.palette_entries == 0 {
             SpritePalette::Implied
         } else if SpritePalette::stores(raw) {
-            SpritePalette::Stored(
-                fallible::collected(raw.len(), raw.iter().copied())
-                    .ok_or(DecodeError::OutOfMemory)?,
-            )
+            SpritePalette::Stored(fallible::copied(raw).ok_or(DecodeError::OutOfMemory)?)
         } else {
             SpritePalette::Full
         };
@@ -1741,8 +1738,7 @@ impl<B: AsRef<[u8]>> SpriteAreaReader<B> {
             Err(DecodeError::OutOfMemory) => Err(DecodeError::OutOfMemory),
             Err(reason) => {
                 let raw = slice_at(bytes, at, 0, length)?;
-                let kept = fallible::collected(raw.len(), raw.iter().copied())
-                    .ok_or(DecodeError::OutOfMemory)?;
+                let kept = fallible::copied(raw).ok_or(DecodeError::OutOfMemory)?;
                 Ok(Some(SpriteEntry::Opaque(OpaqueSprite {
                     name,
                     reason,

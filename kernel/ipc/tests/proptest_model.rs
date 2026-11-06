@@ -84,6 +84,7 @@ fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
 
 fn task_with(task_id: u64, caps: &CapabilitySet) -> TaskCapabilities {
     TaskCapabilities::derive(ProcessId(task_id), UserId(1), *caps, *caps, &NullSink)
+        .expect("derived")
 }
 
 /// Process instances a sender may be, and the one an `Admit` may name.
@@ -254,14 +255,14 @@ fn port_lifecycle_tracks_reference_model() {
                             Ok(())
                         };
 
-                        let got = port.send(&sender, &payload, RLIMIT_INFINITY, &sink);
+                        let got = port.send(&sender, 0, &payload, RLIMIT_INFINITY, &sink);
                         prop_assert_eq!(got, want);
                         if want.is_ok() {
                             model.push(*from, payload);
                         }
                     }
                     Cmd::Recv => match (port.recv(), model.pop()) {
-                        (Some(msg), Some((from, want))) => {
+                        (Some((msg, _)), Some((from, want))) => {
                             prop_assert_eq!(msg.origin.proc_id(), instance(from));
                             prop_assert_eq!(msg.payload.as_bytes(), want.as_slice());
                         }
@@ -288,10 +289,11 @@ fn port_lifecycle_tracks_reference_model() {
                 prop_assert_eq!(port.is_closed(), model.closed);
                 for sender in 0..INSTANCES {
                     prop_assert!(model.depth_of(sender) <= DEPTH);
-                    let probe = task_with(0x100 + u64::from(sender), &CapabilitySet::empty())
-                        .with_proc_id(instance(sender));
+                    let task = 0x100 + u64::from(sender);
+                    let probe =
+                        task_with(task, &CapabilitySet::empty()).with_proc_id(instance(sender));
                     prop_assert_eq!(
-                        port.room_for(&probe, u64::MAX) == Room::Free,
+                        port.room_for(&probe, task, u64::MAX) == Room::Free,
                         model.depth_of(sender) < DEPTH,
                         "the room a sender waits on is exactly what send decides"
                     );
@@ -313,18 +315,35 @@ const CALL_MAX: u32 = 8;
 /// tickets the model knows, or names one nobody holds.
 #[derive(Clone, Debug)]
 enum CallCmd {
-    Post { caller: u8, len: usize },
+    Post {
+        caller: u8,
+        len: usize,
+        reply_cap: usize,
+    },
     Recv,
-    Reply { pick: u8 },
-    Take { caller: u8, pick: u8 },
-    Await { caller: u8, pick: u8, thread: u8 },
-    Cancel { caller: u8, pick: u8 },
+    Reply {
+        pick: u8,
+    },
+    Take {
+        caller: u8,
+        pick: u8,
+    },
+    Await {
+        caller: u8,
+        pick: u8,
+        thread: u8,
+    },
+    Cancel {
+        caller: u8,
+        pick: u8,
+    },
     Destroy,
 }
 
 fn call_command() -> impl Strategy<Value = CallCmd> {
     prop_oneof![
-        5 => (0..CALLERS, 0usize..=10).prop_map(|(caller, len)| CallCmd::Post { caller, len }),
+        5 => (0..CALLERS, 0usize..=10, 0usize..=10)
+            .prop_map(|(caller, len, reply_cap)| CallCmd::Post { caller, len, reply_cap }),
         3 => Just(CallCmd::Recv),
         3 => any::<u8>().prop_map(|pick| CallCmd::Reply { pick }),
         3 => (0..CALLERS, any::<u8>()).prop_map(|(caller, pick)| CallCmd::Take { caller, pick }),
@@ -341,14 +360,24 @@ enum CallState {
     Pending(Vec<u8>),
     InService,
     Answered(Vec<u8>),
+    /// Answered at more than its caller takes.
+    TooLong,
 }
 
-/// A modelled call: its caller, state, and the thread awaiting it.
+impl CallState {
+    fn answered(&self) -> bool {
+        matches!(self, Self::Answered(_) | Self::TooLong)
+    }
+}
+
+/// A modelled call: its caller, state, the thread awaiting it, and the most
+/// of an answer it takes.
 #[derive(Clone, Debug)]
 struct ModelCall {
     caller: u8,
     state: CallState,
     awaiter: Option<u64>,
+    reply_cap: usize,
 }
 
 /// The reference call endpoint: every outstanding call by ticket, each
@@ -366,7 +395,7 @@ impl CallModel {
     fn unanswered(&self, caller: u8) -> usize {
         self.calls
             .values()
-            .filter(|call| call.caller == caller && !matches!(call.state, CallState::Answered(_)))
+            .filter(|call| call.caller == caller && !call.state.answered())
             .count()
     }
 
@@ -452,7 +481,11 @@ impl CallRun {
 
     fn step(&mut self, cmd: &CallCmd) -> Result<(), TestCaseError> {
         match cmd {
-            CallCmd::Post { caller, len } => self.post(*caller, *len)?,
+            CallCmd::Post {
+                caller,
+                len,
+                reply_cap,
+            } => self.post(*caller, *len, *reply_cap)?,
             CallCmd::Recv => self.recv()?,
             CallCmd::Reply { pick } => self.reply(*pick)?,
             CallCmd::Take { caller, pick } => self.take(*caller, *pick)?,
@@ -463,7 +496,7 @@ impl CallRun {
             } => self.await_call(*caller, *pick, *thread)?,
             CallCmd::Cancel { caller, pick } => self.cancel(*caller, *pick)?,
             CallCmd::Destroy => {
-                self.ep.destroy(&NullSink);
+                drop(self.ep.destroy(&NullSink));
                 self.model = CallModel {
                     closed: true,
                     ..CallModel::default()
@@ -479,14 +512,15 @@ impl CallRun {
         Ok(())
     }
 
-    fn post(&mut self, caller: u8, len: usize) -> Result<(), TestCaseError> {
+    fn post(&mut self, caller: u8, len: usize, reply_cap: usize) -> Result<(), TestCaseError> {
         let request: Vec<u8> = (0..len)
             .map(|i| u8::try_from(i).unwrap_or(0) ^ caller)
             .collect();
-        let got = self.ep.post(
+        let got = self.ep.post_within(
             &self.callers[usize::from(caller)],
             poster_of(caller),
             &request,
+            reply_cap,
             u64::MAX,
             RLIMIT_INFINITY,
             &NullSink,
@@ -510,6 +544,7 @@ impl CallRun {
                     caller,
                     state: CallState::Pending(request),
                     awaiter: None,
+                    reply_cap: reply_cap.min(CALL_MAX as usize),
                 },
             );
             let queue = model.queued.entry(caller).or_default();
@@ -573,7 +608,11 @@ impl CallRun {
                 let mut want = vec![poster_of(call.caller)];
                 want.extend(call.awaiter);
                 prop_assert_eq!(sorted(woken.tasks()), sorted(want.into_iter()));
-                call.state = CallState::Answered(reply);
+                call.state = if reply.len() > call.reply_cap {
+                    CallState::TooLong
+                } else {
+                    CallState::Answered(reply)
+                };
             }
             _ => prop_assert_eq!(got.map(drop), Err(Errno::NotFound)),
         }
@@ -597,7 +636,13 @@ impl CallRun {
             .map(|call| call.state.clone());
         match (got, held) {
             (ReplyOutcome::Ready(bytes), Some(CallState::Answered(want))) => {
+                prop_assert!(!bytes.is_too_long());
                 prop_assert_eq!(bytes.as_bytes(), want.as_slice());
+                self.model.remove(ticket);
+                Ok(())
+            }
+            (ReplyOutcome::Ready(bytes), Some(CallState::TooLong)) => {
+                prop_assert!(bytes.is_too_long() && bytes.is_empty());
                 self.model.remove(ticket);
                 Ok(())
             }
@@ -623,7 +668,7 @@ impl CallRun {
             .get_mut(&ticket)
             .filter(|call| call.caller == caller)
         {
-            Some(call) if !matches!(call.state, CallState::Answered(_)) => {
+            Some(call) if !call.state.answered() => {
                 if call.awaiter.is_some_and(|other| other != waiter) {
                     prop_assert_eq!(got, Err(Errno::Busy));
                 } else {
@@ -648,7 +693,7 @@ impl CallRun {
             .is_some_and(|call| call.caller == caller);
         prop_assert_eq!(got.is_some(), held, "only its own call is withdrawn");
         if let (Some(call), Some(woken)) = (self.model.remove(ticket), got) {
-            if !matches!(call.state, CallState::Answered(_)) {
+            if !call.state.answered() {
                 let named = sorted(woken.tasks());
                 prop_assert!(
                     named.contains(&poster_of(call.caller)),
@@ -667,8 +712,9 @@ impl CallRun {
 /// for room only at its own depth of calls waiting on the server, and its
 /// uncollected answers never count; callers are served in turn, each oldest
 /// first; an answer goes only to its caller and wakes its poster and the one
-/// thread awaiting it; a second awaiter is refused `Busy`; a withdrawn call is
-/// gone; and a destroyed endpoint cancels everything.
+/// thread awaiting it, and one longer than its caller takes completes holding
+/// nothing; a second awaiter is refused `Busy`; a withdrawn call is gone; and
+/// a destroyed endpoint cancels everything.
 #[test]
 fn call_endpoint_lifecycle_tracks_reference_model() {
     set_max_level(Level::Error);

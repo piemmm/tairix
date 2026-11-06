@@ -9,9 +9,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{decode, has_signature, probe, RIFF_MAGIC, WEBP_FORM};
-use crate::vp8::fixture::{keyframe, Block};
 use crate::vp8l::fixture::{flat as flat_lossless, flat_group, header as lossless_header, Bits};
 use crate::{sniff, DecodeError, DecodeLimits, ImageFormat, Sequence, SequenceKind, RGBA_BYTES};
+use tairix_video::vp8::fixture::{keyframe, Block};
 
 /// Generous enough that no fixture here is refused for its size.
 fn limits() -> DecodeLimits {
@@ -794,6 +794,17 @@ fn a_canvas_past_the_callers_limit_is_refused_before_it_is_allocated() {
     );
 }
 
+/// A lossy picture's own geometry is held to the caller's limits, whole or
+/// fitted: the VP8 decoder takes none, so the container checks them first.
+#[test]
+fn a_lossy_picture_past_the_callers_limit_is_refused_whole_or_fitted() {
+    let bytes = riff(&[lossy(64, 64)]);
+    let tight = DecodeLimits::new(32, 32, 32 * 32, 0);
+    assert_eq!(decode(&bytes, &tight), Err(DecodeError::WidthExceedsLimit));
+    let fitted = crate::decode_fitted(&bytes, &tight, crate::FitBox::new(2, 2));
+    assert_eq!(fitted.err(), Some(DecodeError::WidthExceedsLimit));
+}
+
 /// A fitted decode streams either codec's rows, an alpha plane applied to
 /// each, into exactly the whole decode reduced.
 #[test]
@@ -866,18 +877,15 @@ fn an_odd_payload_is_padded_and_the_pad_is_not_part_of_it() {
 
 /// A lossy picture `width`×`height`, drawn over several macroblock rows.
 fn drawn(width: u32, height: u32) -> Vec<u8> {
-    let filter = crate::vp8::fixture::Filter {
+    let filter = tairix_video::vp8::fixture::Filter {
         simple: false,
         level: 20,
         sharpness: 0,
     };
-    let frame = crate::vp8::fixture::drawn_keyframe(
-        width,
-        height,
-        filter,
-        1,
-        &mut tairix_fuzzseed::Prng::new(7),
-    );
+    let mut rng = tairix_fuzzseed::Prng::new(7);
+    let frame = tairix_video::vp8::fixture::drawn_keyframe(width, height, filter, 1, &mut || {
+        rng.next_u64()
+    });
     chunk(*b"VP8 ", &frame)
 }
 

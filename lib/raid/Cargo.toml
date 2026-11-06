@@ -27,6 +27,10 @@ workspace = true
 
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The identity fingerprint an array's stated device identity is composed under
+# (`OwnedRaidArray::composed_identity`): the one definition the USB
+# mass-storage driver's unit identity is taken from too.
+tairix-crypto = { path = "../crypto", version = "=0.0.0" }
 # The on-disk array-member superblock format and reassembly logic
 # (`tairix_raidmeta`) — the single definition shared with the storage-discovery
 # probe (`lib/fsprobe`/volmgr) so the composition and discovery sides can never

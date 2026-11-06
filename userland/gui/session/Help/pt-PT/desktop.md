@@ -23,6 +23,14 @@ Quando nenhum serviço de ecrã está em execução, ou outra sessão já
 detém o posto, o comando falha escrevendo o motivo na saída de erro
 padrão — nunca desaloja uma sessão em curso.
 
+Enquanto o ambiente de trabalho está em execução, `Meta+Shift+3` guarda
+uma imagem do ecrã e `Meta+Shift+4` uma da área que arrastar — ou, depois
+de `Space`, da janela em que clicar. `Meta+Shift+5` abre a barra de
+captura, que também grava o ecrã. Acrescentando `Ctrl`, a imagem vai para
+a área de transferência, e um atalho de captura premido durante uma
+gravação termina-a. Uma gravação com som pede a palavra-passe de um
+administrador quando a sua conta não pode gravar som por si própria.
+
 ## OPTIONS
 
 - `-h, -?` — mostrar a ajuda curta deste comando.

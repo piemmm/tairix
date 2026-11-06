@@ -777,7 +777,7 @@ fn a_control_queue_keeps_one_trip_in_flight_and_the_latest_of_each_kind() {
     queue.ask(3, DeviceControl::Mute(true));
     queue.refresh();
     assert_eq!(queue.next_trip(), None, "one in flight");
-    queue.landed();
+    assert!(!queue.landed(None));
     queue.ask_first(vec![(4, DeviceControl::Default)]);
     assert_eq!(
         queue.next_trip(),
@@ -787,7 +787,7 @@ fn a_control_queue_keeps_one_trip_in_flight_and_the_latest_of_each_kind() {
             (3, DeviceControl::Mute(true)),
         ])
     );
-    queue.landed();
+    assert!(!queue.landed(None));
     assert_eq!(
         queue.next_trip(),
         None,
@@ -796,7 +796,7 @@ fn a_control_queue_keeps_one_trip_in_flight_and_the_latest_of_each_kind() {
     queue.refresh();
     let _ = queue.next_trip();
     queue.refresh();
-    queue.landed();
+    assert!(!queue.landed(None));
     assert_eq!(
         queue.next_trip(),
         Some(Vec::new()),
@@ -831,4 +831,127 @@ fn a_control_asked_first_gives_way_to_a_newer_one_of_its_kind() {
         Some(vec![(3, DeviceControl::Mute(true)), (3, level(-1_000))]),
         "the newest level is the one applied, and applied once"
     );
+}
+
+fn gain(millibel: i32) -> AudioGain {
+    AudioGain::new(millibel).expect("attenuation")
+}
+
+/// The mock's first sink, its direction's default, sounding at `level`.
+fn output_at(level: AudioGain) -> AudioDeviceDescriptor {
+    let mut output = device(StreamDirection::Playback, 0).expect("the first sink");
+    output.level = level;
+    output
+}
+
+/// What the trip in flight confirms, landing with `devices` listed.
+fn lands(queue: &mut ControlQueue, devices: &[AudioDeviceDescriptor]) -> bool {
+    queue.landed(Some(devices))
+}
+
+/// The newest settled change is confirmed once, by the listing of the trip
+/// that carried it and by no other.
+#[test]
+fn a_settled_change_is_confirmed_once_by_the_trip_that_carried_it() {
+    let heard = [output_at(gain(-1_000))];
+    let mut queue = ControlQueue::new();
+    queue.ask(1, DeviceControl::Level(gain(-3_000)));
+    let _ = queue.next_trip();
+    queue.ask_confirmed(1, DeviceControl::Level(gain(-1_000)));
+    assert!(
+        !lands(&mut queue, &heard),
+        "the trip in flight did not carry it"
+    );
+    assert_eq!(
+        queue.next_trip(),
+        Some(vec![(1, DeviceControl::Level(gain(-1_000)))])
+    );
+    assert!(lands(&mut queue, &heard));
+    queue.refresh();
+    let _ = queue.next_trip();
+    assert!(!lands(&mut queue, &heard), "confirmed once");
+}
+
+/// A change asked after a settled one is what the listing will show, so the
+/// earlier one is confirmed by nothing: a newer step, or a drag begun again.
+#[test]
+fn a_newer_change_leaves_nothing_earlier_to_confirm() {
+    let mut queue = ControlQueue::new();
+    queue.ask_confirmed(1, DeviceControl::Level(gain(-1_000)));
+    let _ = queue.next_trip();
+    queue.ask_confirmed(1, DeviceControl::Level(gain(-500)));
+    assert!(
+        !lands(&mut queue, &[output_at(gain(-1_000))]),
+        "a newer step is waiting"
+    );
+    let _ = queue.next_trip();
+    assert!(lands(&mut queue, &[output_at(gain(-500))]));
+
+    queue.ask_confirmed(1, DeviceControl::Level(gain(-700)));
+    queue.ask(1, DeviceControl::Level(gain(-700)));
+    let _ = queue.next_trip();
+    assert!(
+        !lands(&mut queue, &[output_at(gain(-700))]),
+        "a drag on its way"
+    );
+}
+
+/// Only a level or an unmute heard on the default output is confirmed: not a
+/// refusal, a mute, another level, a choice of default, an input or another
+/// output.
+#[test]
+fn only_what_the_default_output_sounds_is_confirmed() {
+    let asked = gain(-1_000);
+    let heard = output_at(asked);
+    let confirms = |control: DeviceControl, listed: AudioDeviceDescriptor| {
+        let mut queue = ControlQueue::new();
+        queue.ask_confirmed(heard.device_id, control);
+        let _ = queue.next_trip();
+        lands(&mut queue, &[listed])
+    };
+    assert!(confirms(DeviceControl::Level(asked), heard));
+    assert!(confirms(DeviceControl::Mute(false), heard));
+    let mut refused = ControlQueue::new();
+    refused.ask_confirmed(heard.device_id, DeviceControl::Level(asked));
+    let _ = refused.next_trip();
+    assert!(!refused.landed(None), "refused");
+    let muted = AudioDeviceDescriptor {
+        muted: true,
+        ..heard
+    };
+    assert!(!confirms(DeviceControl::Mute(true), muted));
+    assert!(!confirms(DeviceControl::Level(asked), muted));
+    assert!(!confirms(DeviceControl::Level(gain(-2_000)), heard));
+    assert!(!confirms(DeviceControl::Default, heard));
+    let input = AudioDeviceDescriptor {
+        direction: StreamDirection::Capture,
+        ..heard
+    };
+    assert!(!confirms(DeviceControl::Level(asked), input));
+    let other = AudioDeviceDescriptor {
+        default: DefaultChoice::No,
+        ..heard
+    };
+    assert!(!confirms(DeviceControl::Level(asked), other));
+}
+
+/// A settled change nobody hears — an input muted, a default chosen — takes
+/// no confirmation from the level change asked before it. Regression: it
+/// replaced the one confirmation the queue holds, so muting a microphone
+/// before a level's trip landed lost the volume's feedback.
+#[test]
+fn a_change_nobody_hears_leaves_a_heard_one_confirmed() {
+    let heard = [output_at(gain(-1_000))];
+    for quiet in [DeviceControl::Mute(true), DeviceControl::Default] {
+        let mut queue = ControlQueue::new();
+        queue.ask_confirmed(heard[0].device_id, DeviceControl::Level(gain(-1_000)));
+        let _ = queue.next_trip();
+        queue.ask_confirmed(heard[0].device_id + 1, quiet);
+        assert!(lands(&mut queue, &heard), "{quiet:?}");
+        let _ = queue.next_trip();
+        assert!(
+            !lands(&mut queue, &heard),
+            "{quiet:?} confirms nothing of its own"
+        );
+    }
 }

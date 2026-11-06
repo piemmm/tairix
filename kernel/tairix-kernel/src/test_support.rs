@@ -84,7 +84,7 @@ macro_rules! inert_spawn_ctx {
             _stack_span: tairix_kernel_core::StackSpan,
             _stack: alloc::boxed::Box<dyn tairix_kernel_core::KernelStack + Send>,
             _pre_resume: tairix_kernel_core::ProcessResume,
-            _live: Option<alloc::sync::Arc<tairix_kernel_core::ProcessSpace>>,
+            _live: alloc::sync::Arc<tairix_kernel_core::ProcessSpace>,
             _entry: tairix_kernel_core::UserThreadEntry,
         ) {
             unreachable!("a test context admits no process")

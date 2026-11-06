@@ -1235,3 +1235,83 @@ fn the_slides_feed_offers_the_pictures_of_its_source() {
     );
     assert!(slide_source(&catalog, 3, screen).is_none());
 }
+
+/// The places a stick is shown at.
+fn stick() -> Vec<String> {
+    alloc::vec![String::from("Storage"), String::from("stick")]
+}
+
+/// An eject waits out the backdrop being read from its volume, and holds back
+/// every backdrop or slide wanted from it until it is made, nothing elsewhere:
+/// the desktop's eject once raced the backdrop's read of a picture on the
+/// volume, which refused it as busy.
+#[test]
+fn an_eject_waits_out_a_read_of_its_volume_and_holds_back_the_next() {
+    let mut desk = WallpaperDesk::new();
+    let on_stick = image("/Storage/stick/sea.png");
+    let (root, elsewhere) = (stick(), image("/Users/ada/paper.png"));
+    let roots = [root.as_slice()];
+    assert!(matches!(desk.take(&on_stick), Prepared::Pending));
+    assert_eq!(backdrop(&mut desk), Some(on_stick.clone()));
+    let hold = desk.hold_within(&roots).expect("room for the hold");
+    assert!(desk.holds());
+    assert!(desk.reads_within(&roots), "the read under way was not seen");
+    assert!(desk.deliver(on_stick.clone(), Err(String::from("gone"))));
+    assert!(!desk.reads_within(&roots));
+    assert!(matches!(desk.take(&on_stick), Prepared::Ready { .. }));
+    assert!(matches!(desk.take(&on_stick), Prepared::Pending));
+    assert!(desk.want_slide(WANT, on_stick.clone()));
+    assert!(!desk.has_work(), "a picture on the held volume was offered");
+    assert!(desk.next_job().is_none());
+    assert!(desk.release(hold), "a picture held back woke no preparer");
+    assert!(!desk.holds());
+    assert_eq!(backdrop(&mut desk), Some(on_stick.clone()));
+    assert_eq!(slide(&mut desk), Some(on_stick.clone()));
+    assert!(desk.deliver(on_stick.clone(), Err(String::from("gone"))));
+    assert!(desk.deliver_slide(&on_stick, Err(String::from("gone"))));
+    let hold = desk.hold_within(&roots).expect("room for the hold");
+    assert!(matches!(desk.take(&elsewhere), Prepared::Pending));
+    assert_eq!(
+        backdrop(&mut desk),
+        Some(elsewhere),
+        "a picture elsewhere was held"
+    );
+    assert!(
+        !desk.reads_within(&roots),
+        "a read elsewhere was waited out"
+    );
+    assert!(!desk.release(hold));
+}
+
+/// A slide being read from a held volume is waited out like the backdrop.
+#[test]
+fn an_eject_waits_out_a_slide_read_from_its_volume() {
+    let mut desk = WallpaperDesk::new();
+    let on_stick = image("/Storage/stick/one.png");
+    let root = stick();
+    let roots = [root.as_slice()];
+    assert!(desk.want_slide(WANT, on_stick.clone()));
+    assert_eq!(slide(&mut desk), Some(on_stick.clone()));
+    let hold = desk.hold_within(&roots).expect("room for the hold");
+    assert!(desk.reads_within(&roots));
+    assert!(desk.deliver_slide(&on_stick, Err(String::from("gone"))));
+    assert!(!desk.reads_within(&roots));
+    assert!(
+        !desk.release(hold),
+        "nothing was wanted to wake a preparer for"
+    );
+}
+
+/// A hold the heap has no room for is refused and holds nothing back.
+#[test]
+fn a_hold_the_heap_cannot_note_holds_nothing_back() {
+    let mut desk = WallpaperDesk::new();
+    let on_stick = image("/Storage/stick/sea.png");
+    let root = stick();
+    let roots = [root.as_slice()];
+    let refused = tairix_fuzzseed::meter::refusing_above(0, || desk.hold_within(&roots));
+    assert!(refused.is_none());
+    assert!(!desk.holds());
+    assert!(matches!(desk.take(&on_stick), Prepared::Pending));
+    assert_eq!(backdrop(&mut desk), Some(on_stick));
+}

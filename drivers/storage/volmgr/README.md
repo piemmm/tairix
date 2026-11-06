@@ -31,7 +31,9 @@ public `tairix_abi::blkio` protocol.
    `<transport>_<fingerprint>` (`usb_25cm`); a label already in use, or one
    spelling a reserved name, takes `_<fingerprint>` of the volume's own
    identity, lengthened while taken. A label never yields `_`, so it cannot
-   spell another volume's generated name.
+   spell another volume's generated name. A twin — a volume carrying the
+   identity of one attached already — derives the same names; the kernel
+   shows it beside that volume as the name it asked with `_<n>`.
 4. Asks the kernel to attach each volume (the `CAP_FS_MOUNT`-gated, audited
    `volume_attach` syscall). The kernel re-validates the caller's grants, the
    extent, and the name, recognises the volume itself, and publishes a volume

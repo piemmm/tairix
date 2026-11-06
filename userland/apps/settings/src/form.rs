@@ -45,7 +45,7 @@ use tairix_abi::zone::ZoneName;
 use tairix_abi::{BundleId, Errno};
 use tairix_appconf::Registry;
 use tairix_audio::stream::DeviceControl;
-use tairix_browse::{FilerKey, FilerPreferences};
+use tairix_browse::{DriveClass, FilerKey, FilerPreferences};
 use tairix_colour::Rgb;
 use tairix_controls::{
     stack, Button, ButtonContent, ComboBox, ControlRole, ControlState, FieldAction, FieldControl,
@@ -1665,9 +1665,10 @@ const WALLPAPER_GROUPS: [GroupSpec; 2] = [
 ];
 
 /// The Files pane's groups: what a new window opens with, how every window
-/// shows and orders its items, how names and pictures are drawn, the Trash,
-/// and what becomes of an image once it is closed.
-const FILES_GROUPS: [GroupSpec; 6] = [
+/// shows and orders its items, how names and pictures are drawn, which drives
+/// the desktop shows, the Trash, and what becomes of an image once it is
+/// closed.
+const FILES_GROUPS: [GroupSpec; 7] = [
     GroupSpec {
         caption: "NEW WINDOWS",
         settings: &[
@@ -1707,6 +1708,21 @@ const FILES_GROUPS: [GroupSpec; 6] = [
         ],
         pictures: None,
         footnote: None,
+    },
+    GroupSpec {
+        caption: "SHOW ON THE DESKTOP",
+        settings: &[
+            Declared::Files(FilesSetting::Desktop(DriveClass::System)),
+            Declared::Files(FilesSetting::Desktop(DriveClass::Fixed)),
+            Declared::Files(FilesSetting::Desktop(DriveClass::Removable)),
+            Declared::Files(FilesSetting::Desktop(DriveClass::Network)),
+            Declared::Files(FilesSetting::Desktop(DriveClass::Images)),
+        ],
+        pictures: None,
+        footnote: Some(
+            "A drive is shown while it is attached, and one already on the desktop as a shortcut \
+             is shown once.",
+        ),
     },
     GroupSpec {
         caption: "TRASH",
@@ -3557,6 +3573,7 @@ impl Form {
             catalog,
             config,
             cooling,
+            files,
             ..
         } = self;
         let mut moved = Vec::new();
@@ -3586,6 +3603,9 @@ impl Form {
                     }
                     (Owner::Machine(changed), Owner::Machine(setting)) if changed == setting => {
                         Some(setting.row(config.as_ref(), cooling))
+                    }
+                    (Owner::Files(changed), Owner::Files(setting)) if changed == setting => {
+                        Some(setting.row(files.as_ref()))
                     }
                     _ => continue,
                 };
@@ -3620,6 +3640,10 @@ impl Form {
         }
         match action.action {
             FieldAction::Selected { index } => self.chose(owner, index),
+            FieldAction::Set { on } => match owner {
+                Owner::Files(setting) => self.ticked_files(setting, on),
+                _ => FormOutcome::Changed,
+            },
             // A slider settles once, where its drag or its key step ended,
             // and that stop is the choice; the values it passed on the way
             // only move it on screen.
@@ -3733,14 +3757,27 @@ impl Form {
         FormOutcome::Apply(self.applied())
     }
 
-    /// Adopt the choice at `index` for the file manager's `setting`: nothing
-    /// to post while none have been read, or where it is the value held.
+    /// Adopt the choice at `index` for the file manager's `setting`.
     fn chose_files(&mut self, setting: FilesSetting, index: usize) -> FormOutcome {
+        self.change_files(|files| setting.adopt(index, files))
+    }
+
+    /// Tick or clear the box of the file manager's `setting`, restating it to
+    /// what is then held, since a box never ticks itself.
+    fn ticked_files(&mut self, setting: FilesSetting, on: bool) -> FormOutcome {
+        self.restating = Some(Owner::Files(setting));
+        self.change_files(|files| setting.tick(on, files))
+    }
+
+    /// Make `change` to the file manager's settings and post them: nothing to
+    /// post while none have been read, where `change` named nothing, or where
+    /// it left the value held.
+    fn change_files(&mut self, change: impl FnOnce(&mut FilerPreferences) -> bool) -> FormOutcome {
         let Some(files) = self.files.as_mut() else {
             return FormOutcome::Changed;
         };
         let held = *files;
-        if !setting.adopt(index, files) || *files == held {
+        if !change(files) || *files == held {
             return FormOutcome::Changed;
         }
         FormOutcome::ApplyFiles(files.document_of(self.composition.files_keys()).render())

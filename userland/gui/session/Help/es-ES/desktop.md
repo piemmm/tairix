@@ -24,6 +24,14 @@ Cuando no hay ningún servicio de pantalla en ejecución, o cuando otra
 sesión ya posee el puesto, el comando falla escribiendo su motivo en la
 salida de error estándar — nunca desplaza una sesión en curso.
 
+Mientras el escritorio está en marcha, `Meta+Shift+3` guarda una imagen
+de la pantalla y `Meta+Shift+4`, una de la zona que arrastre o, tras
+`Space`, de la ventana en la que haga clic. `Meta+Shift+5` abre la barra
+de captura, que también graba la pantalla. Si añade `Ctrl`, la imagen va
+al portapapeles, y un atajo de captura pulsado durante una grabación la
+detiene. Una grabación con sonido pide la contraseña de un administrador
+cuando su cuenta no puede grabar sonido por sí misma.
+
 ## OPTIONS
 
 - `-h, -?` — mostrar la ayuda corta de este comando.

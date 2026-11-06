@@ -1214,6 +1214,33 @@ pub(crate) fn checksummed() -> Ext4<SizedBlock> {
     Ext4::open(SizedBlock::over(META_CSUM.to_vec())).expect("mount")
 }
 
+/// A title lands in `s_volume_name` with the superblock's checksum restamped,
+/// so the volume mounts again under it, and the empty title clears it; a
+/// refused title writes nothing, and a read-only handle refuses one.
+#[test]
+fn a_title_is_the_checksummed_superblocks_volume_name() {
+    use crate::superblock::SB_VOLUME_NAME;
+    use tairix_abi::driver::filesystem::{FilesystemLabel, VolumeTitle};
+    let title = VolumeTitle::new("Backup").expect("a title");
+    let mut fs = checksummed();
+    assert_eq!(
+        fs.set_label(&VolumeTitle::new("Far too long a title").expect("a title")),
+        Err(DriverError::LengthOutOfRange)
+    );
+    assert!(!fs.pending(), "a refused title writes nothing");
+    fs.set_label(&title).expect("titled");
+    assert_eq!(fs.label(), Ok(title));
+    let image = fs.into_block().expect("commit");
+    let at = usize::try_from(SUPERBLOCK_OFFSET).expect("fits") + SB_VOLUME_NAME;
+    assert_eq!(&image.data[at..at + 7], b"Backup\0");
+    let mut back = Ext4::open(SizedBlock::over(image.data)).expect("its checksum holds");
+    assert_eq!(back.label(), Ok(title));
+    back.set_label(&VolumeTitle::EMPTY).expect("cleared");
+    assert_eq!(remount(back).label(), Ok(VolumeTitle::EMPTY));
+    let mut ro = Ext4::open_read_only(SizedBlock::over(META_CSUM.to_vec())).expect("mount");
+    assert_eq!(ro.set_label(&title), Err(DriverError::ReadOnly));
+}
+
 /// A `Vec`-backed [`Block`] device of 512-byte sectors that counts its
 /// flushes and, armed, fails every write after a budget: the one test
 /// device every module's tests drive.

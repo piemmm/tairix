@@ -1,0 +1,48 @@
+[package]
+name = "tairix-test-cinder-qemu-aarch64"
+description = "QEMU integration test: boot the graphical desktop on the aarch64 virt board, open Cinder from the program library, let him out, and read him back on the desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The vertical's shared contract (src/lib.rs): the bundle the guest attributes
+# its launch witness to, read by both the freestanding PASS gate and the host
+# runner's script. `no_std` consts only, host-buildable.
+[lib]
+path = "src/lib.rs"
+
+# The icon-bar vertical's own contract, for the one definition of the
+# terminal's bundle, which the script opens last. `no_std` consts only,
+# host-buildable.
+[dependencies]
+tairix-test-appbar-qemu-aarch64 = { path = "../appbar_qemu_aarch64", version = "=0.0.0" }
+
+[[bin]]
+name = "tairix-test-cinder-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 desktop and let Cinder out"
+# integration test. It runs the entire production boot pipeline through
+# `tairix-kernel`'s library half (`boot_aarch64::boot`) and only swaps the
+# audit sink for the PASS witnesses.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+# The load gate's audit vocabulary: the `APP_LOADED` event id whose `bundle`
+# field names the loaded bundle — both witnesses.
+tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
+# The store spelling the bundle paths are composed from.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The audit-record reading every guest sink shares.
+tairix-itest-witness = { path = "../witness", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

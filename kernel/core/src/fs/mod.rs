@@ -82,7 +82,7 @@ pub use node::{
     Acting, At, Authority, Cwd, DriverGuard, DriverLock, FrozenAuthority, Grant, NodeHandle,
     NodeRef, PinnedNode, ReleaseSlot, Start, VolumeNodes,
 };
-pub use path::{resolve_machine_alias, spell, Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS};
+pub use path::{spell, Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS};
 pub use perm::{Access, AclEntry, AclWho, CreateMode, Credentials, Judged, Metadata, Mode};
 pub use retained::{JournaledBlock, ReplaySnapshot, RetainedWrites};
 pub use service::{
@@ -126,9 +126,10 @@ pub(crate) const PRIVATE_ROOT_HANDLE: u64 = 0x726F_6F74;
 ///
 /// [`VfsError::Io`] if the fixed [`PRIVATE_ROOT_HANDLE`] is somehow
 /// rejected as a [`DriverHandle`] (it never is — the value is non-zero),
-/// or the underlying [`MountTable::back_root`] refusal.
+/// [`VfsError::OutOfMemory`] when the heap cannot hold the mount table, or
+/// the underlying [`MountTable::back_root`] refusal.
 pub(crate) fn root_backed_vfs() -> Result<Vfs, VfsError> {
-    let vfs = Vfs::new(Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)));
+    let vfs = Vfs::new(Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)))?;
     let handle = DriverHandle::from_raw(PRIVATE_ROOT_HANDLE).map_err(|_| VfsError::Io)?;
     // A private, short-lived reader over a driver the caller already holds:
     // it never sees the block device, so it records an unknown medium rather

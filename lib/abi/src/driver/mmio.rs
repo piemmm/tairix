@@ -362,6 +362,8 @@ pub enum MmioMapError {
     /// window, or the underlying mapper reported an unrecoverable
     /// fault).
     Unsupported,
+    /// The kernel had no memory to record the window; nothing is mapped.
+    OutOfMemory,
 }
 
 impl MmioMapError {
@@ -371,12 +373,14 @@ impl MmioMapError {
     /// * [`Self::CapabilityMissing`] → [`DriverError::PermissionDenied`].
     /// * [`Self::InvalidRegion`] → [`DriverError::LengthOutOfRange`].
     /// * [`Self::Unsupported`] → [`DriverError::Unsupported`].
+    /// * [`Self::OutOfMemory`] → [`DriverError::OutOfMemory`].
     #[must_use]
     pub const fn as_driver_error(self) -> DriverError {
         match self {
             Self::CapabilityMissing => DriverError::PermissionDenied,
             Self::InvalidRegion => DriverError::LengthOutOfRange,
             Self::Unsupported => DriverError::Unsupported,
+            Self::OutOfMemory => DriverError::OutOfMemory,
         }
     }
 }

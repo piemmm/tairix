@@ -3,6 +3,7 @@
 use super::{MemberDevice, MemberWindow};
 use crate::testkit::{MemberDisk, DEVICE_BLOCKS, MEMBER_MEDIUM};
 
+use tairix_abi::blkio::{BlkDeviceIdentity, BLK_DEVICE_IDENTITY_LEN};
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::DriverError;
 
@@ -24,7 +25,7 @@ fn a_window_is_lent_to_one_client_at_a_time() {
 fn a_member_device_reports_the_medium_of_the_disk_it_holds() {
     let window = MemberWindow::new();
     let lease = window.lend().expect("a free window is lent");
-    let device = MemberDevice::new(MemberDisk::new(DEVICE_BLOCKS), lease);
+    let device = MemberDevice::new(MemberDisk::new(DEVICE_BLOCKS), lease, None);
     assert_eq!(device.medium(), Some(MEMBER_MEDIUM));
 }
 
@@ -32,7 +33,7 @@ fn a_member_device_reports_the_medium_of_the_disk_it_holds() {
 fn dropping_a_member_device_returns_its_window() {
     let window = MemberWindow::new();
     let lease = window.lend().expect("a free window is lent");
-    let device = MemberDevice::new(MemberDisk::new(DEVICE_BLOCKS), lease);
+    let device = MemberDevice::new(MemberDisk::new(DEVICE_BLOCKS), lease, None);
     assert!(window.is_lent());
     drop(device);
     assert!(!window.is_lent());
@@ -43,7 +44,7 @@ fn a_departed_device_refuses_every_transfer_without_reaching_the_device() {
     let window = MemberWindow::new();
     let disk = MemberDisk::new(DEVICE_BLOCKS);
     let lease = window.lend().expect("a free window is lent");
-    let mut device = MemberDevice::new(disk.clone(), lease);
+    let mut device = MemberDevice::new(disk.clone(), lease, None);
     let block = [0xA5u8; 512];
     device
         .write_blocks(3, &block)
@@ -67,4 +68,13 @@ fn a_departed_device_refuses_every_transfer_without_reaching_the_device() {
         device.geometry().is_ok(),
         "what the device is stays known; only reaching it is refused"
     );
+}
+
+#[test]
+fn a_member_device_states_what_its_device_stated_when_connected() {
+    let identity = BlkDeviceIdentity::new([0x5A; BLK_DEVICE_IDENTITY_LEN]);
+    let window = MemberWindow::new();
+    let lease = window.lend().expect("a free window is lent");
+    let device = MemberDevice::new(MemberDisk::new(DEVICE_BLOCKS), lease, identity);
+    assert_eq!(device.device_identity(), identity);
 }

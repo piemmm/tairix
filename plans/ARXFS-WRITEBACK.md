@@ -317,7 +317,16 @@ abandon the whole transaction back to the last published root; a handle that had
 already reported operations into it forces itself read-only rather than serving
 writes it can no longer honour, while a transaction carrying only the failing
 operation's own work leaves the handle writable exactly as an unbatched commit
-failure always did.
+failure always did. A commit *refused memory* abandons nothing: refused before
+any block it staged reaches the device, its own claim, deferral and staging are
+undone with the operation whose close asked for it (or as an operation of its
+own, for a sync or the timer), the deferred frees it marked free are reserved
+again, and the transaction stays open with every reported operation for the
+next commit. `CommitScheduler::postponed` dates a transaction whose window has
+run out afresh, so the host's timer comes back a window later rather than
+firing in the past. While commits keep being refused the ceiling still holds:
+the operation whose close would publish past it is refused and undone, so the
+set does not grow.
 
 Under memory pressure the `tairix_reclaim::PressureGauge` shortens the window
 and lowers the ceiling toward the §6 floor: the response to pressure is *flush
@@ -369,8 +378,10 @@ assembled per mount by `kernel/tairix-kernel::writeback_bound`.
   the operation's end. `FilesystemWrite::write_all` is the one place the resume
   loop lives for every caller that needs the whole value stored.
 - **Over the transaction, not only its blocks.** The ceiling counts the
-  transaction's run bookkeeping (one `RUN_ENTRY_BYTES` per held run,
-  `Allocator::txn_pinned`)
+  transaction's run bookkeeping (each run set at what it holds, the room kept
+  for an undo included, `Allocator::txn_pinned`; once published the sets keep
+  that room for the next transaction up to a quarter of the ceiling, and none
+  under pressure)
   with its staged blocks, because both are pinned on the same terms and an
   operation that *frees* space holds almost all of its memory in the runs:
   freeing a maximally fragmented file dirties a spine's worth of blocks whatever
@@ -396,6 +407,9 @@ assembled per mount by `kernel/tairix-kernel::writeback_bound`.
   No retry loop, no partial publish.
 - A `flush()` that faults is a failed barrier: the slot is not written, so the
   transaction did not happen.
+- A commit refused memory is the one failure that abandons nothing (§5): it
+  stops before its drain, so nothing it staged is on the device, and it is
+  undone as an operation is.
 - Released buffers are volatilely wiped, like every other buffer in the driver.
   Entries hold sealed bytes — ciphertext on an encrypted volume, checksummed
   as written on a plaintext one, whose bytes are what that volume keeps at rest

@@ -159,7 +159,7 @@ fn a_release_that_frees_what_it_takes_is_admitted() {
     fs.take_reserved(2).expect("take a pair");
     // Release the file's extent tree root: two committed blocks deferred for
     // freeing, as much as the pair taken.
-    fs.free_meta(extent_root);
+    fs.free_meta(extent_root).expect("free the tree's root");
     assert_eq!(fs.admit_release(), Ok(()));
     fs.rollback();
     fs.draw = Draw::Ordinary;
@@ -187,7 +187,7 @@ fn a_draw_freed_in_its_own_transaction_returns_to_the_reserve() {
     fs.draw = Draw::System;
     fs.begin().expect("begin");
     let pair = fs.take_reserved(2).expect("take a pair");
-    fs.free_meta(pair);
+    fs.free_meta(pair).expect("free the pair");
     assert_eq!(
         reserve_held(&fs),
         before,
@@ -217,7 +217,7 @@ fn undoing_a_return_takes_the_block_back_for_the_operation_that_drew_it() {
     assert!(fs.schedule.is_open(), "the batch is still open");
 
     fs.begin().expect("a later operation");
-    fs.free_meta(pair);
+    fs.free_meta(pair).expect("free the pair");
     assert_eq!(reserve_held(&fs), before, "freeing it returns it");
     fs.rollback();
     fs.draw = Draw::Ordinary;

@@ -4,7 +4,7 @@ sysmon — observar en vivo la memoria, las cachés y la carga del núcleo
 
 ## SYNOPSIS
 
-`sysmon [-d seg.décimas] [-h | -?]`
+`sysmon [-d secs.tenths] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -13,12 +13,12 @@ hace con la memoria y la CPU, leída por completo a través de la API de
 información del sistema — no hay `/proc` que raspar. Muestra la memoria
 física y su composición, el montículo del núcleo, la banda de presión de
 memoria con su historial reciente, el registro de cachés recuperables con
-las **proporciones de aciertos** por clase, el nivel comprimido `ramzip`,
-el total de memoria fijada, el uso de almacenamiento de los volúmenes
-montados, la carga por CPU, la tabla de interrupciones del núcleo y un
-censo de procesos. Sigue siendo utilizable mientras el sistema está bajo
-carga deliberada y reposa entre refrescos cuando está ocioso (la lectura
-se aparca; nunca gira en vacío).
+las **proporciones de aciertos** por clase y un desglose por caché, el
+nivel comprimido `ramzip`, el total de memoria fijada, el uso de
+almacenamiento de los volúmenes montados, la carga por CPU, la tabla de
+interrupciones del núcleo y un censo de procesos. Sigue siendo utilizable
+mientras el sistema está bajo carga deliberada y reposa entre refrescos
+cuando está ocioso (la lectura se aparca; nunca gira en vacío).
 
 Al arrancar, el monitor fija su propia memoria (`mem_pin`, que requiere
 `CAP_MEM_PIN`) para no detenerse nunca en sus propios fallos de página
@@ -53,7 +53,7 @@ refuerza.
   (1/5/15 minutos) y el estado de fijación (`[pinned]`, o
   `[unpinned: <reason>]` cuando la fijación fue rechazada).
 - **`Mem`** — la barra de memoria (véase la leyenda de barras), seguida
-  de las cifras usada / total (unidades compactas `K`/`M`/`G`), el
+  de las cifras usada / total (unidades de bytes compactas), el
   porcentaje usado, el tamaño del montículo del núcleo y — cuando no son
   cero — las cifras del almacén comprimido `ramzip` y de la memoria fijada
   `pinned`. La barra se encoge para mantener cada cifra en una línea de 80
@@ -122,9 +122,13 @@ encabezado se lea como una barra distinta sobre el cuerpo.
 Son las cachés que el núcleo puede devolver para aliviar la presión de
 memoria **sin pérdida de datos**: cada entrada se puede reconstruir desde
 su fuente canónica, así que el núcleo la descarta en lugar de paginarla.
-El panel es la respuesta directa a «¿están las cachés haciendo su
-trabajo?»: cada fila es una clase de recuperación, agregada sobre todas
-las cachés registradas, y lleva su propia **proporción de aciertos**.
+La página es la respuesta directa a «¿están las cachés haciendo su
+trabajo?», en dos tablas: el registro por clase y, después, el desglose
+por caché que hay detrás.
+
+Cada fila de la primera tabla es una clase de recuperación, agregada
+sobre todas las cachés registradas, y lleva su propia **proporción de
+aciertos**.
 
 Columnas:
 
@@ -132,15 +136,24 @@ Columnas:
 - `entries` — entradas vivas retenidas actualmente para la clase.
 - `cached` — la huella residente de la clase: la carga útil de las
   entradas más los metadatos de contabilidad por entrada, juntos.
+- `self%` — la parte de `cached` que fue **autodeclarada** en lugar de
+  medida por el núcleo: cuánto del total de la clase se acepta de
+  palabra. El núcleo solo mide las cachés registradas dentro de él, así
+  que una caché que retiene un proceso de espacio de usuario — atlas de
+  glifos, ilustraciones de iconos, cursores — se cuenta según lo que ese
+  proceso declara sobre sí mismo. `0%` significa que todo el total de la
+  clase está atestiguado; `100%`, que nada de él lo está. Muestra `-`,
+  nunca `0%`, para una clase que no retiene nada en absoluto.
 - `hits` — búsquedas de la clase servidas desde la caché desde el
   arranque (la caché evitó la fuente canónica).
 - `misses` — búsquedas de la clase que cayeron a la fuente canónica desde
   el arranque.
-- `hit%` — la proporción de eficacia de la caché, `hits / (hits +
-  misses)` como porcentaje entero. Una proporción alta significa que la
-  caché rentabiliza su memoria; una baja, que retiene memoria sin evitar
-  trabajo. Muestra `-`, nunca un `0%` fabricado, para una clase que nada
-  ha buscado en este arranque (un denominador ocioso).
+- `hit%` — la proporción de eficacia de la caché,
+  `hits / (hits + misses)` como porcentaje entero. Una proporción alta
+  significa que la caché rentabiliza su memoria; una baja, que retiene
+  memoria sin evitar trabajo. Muestra `-`, nunca un `0%` fabricado, para
+  una clase que nada ha buscado en este arranque (un denominador
+  ocioso).
 - `ref` — admisiones **rechazadas** desde el arranque (una entrada que la
   caché declinó retener: fuera de presupuesto, no contabilizable, o sin
   memoria).
@@ -151,6 +164,14 @@ Columnas:
 
 Los recuentos se abrevian por encima de 99 999 como `k`/`M`/`G`/`T`
 (millares decimales, no KiB) para que una columna nunca se ensanche.
+
+Las cifras de bytes se abrevian en unidades binarias: la cuenta exacta
+por debajo de un kibibyte y, después, un decimal con un sufijo `K`, `M`,
+`G`, `T`, `P` o `E` (`1.5K`, `986.2M`, `200.0T`). La escala llega hasta
+los exbibytes, así que la cifra más ancha que puede producir cualquier
+cuenta de bytes de 64 bits tiene siete caracteres y ninguna cifra
+desborda nunca su columna — un tamaño no puede acortarse como un nombre,
+porque un número acortado es un número erróneo.
 
 Las clases de recuperación, en el orden en que el núcleo las recupera
 bajo presión (la primera de la lista se descarta primero, así que una
@@ -188,6 +209,52 @@ caché baja en la lista sobrevive más):
   justificado por la latencia de recuperación, así que se preserva el más
   tiempo.
 
+### caches — el desglose por caché
+
+Debajo de la tabla de clases, una fila por cada registro de caché
+registrado: la respuesta a «la clase `disposable-ui` retiene 12 MiB —
+¿*qué* cachés la retienen?». Primero vienen los registros medidos por el
+núcleo y después los que los procesos declararon sobre sí mismos; la suma
+de las filas de una clase reproduce exactamente la fila de esa clase de
+arriba.
+
+Columnas:
+
+- `cache` — la etiqueta de la caché. Una etiqueta demasiado larga para
+  la columna pierde su *centro*, nunca un extremo: `font.client.glyphs`
+  se lee `font.cli~.glyphs`. Estos nombres van separados por puntos, y
+  suele ser el último segmento lo que distingue dos cachés de un mismo
+  espacio de nombres, así que la columna conserva ambos extremos y `~`
+  marca lo que ha omitido.
+- `owner` — el principal al que se carga la memoria: `kernel` para un
+  subsistema del núcleo, `vol:<id>` para un volumen de sistema de
+  archivos, `task:<id>` para una tarea, `seat:<id>` para una sesión de
+  escritorio, `proc` para un proceso de espacio de usuario. Una fila
+  declarada añade `@<pid>`, el proceso declarante. Un propietario
+  demasiado largo para la columna se elide por el centro como una
+  etiqueta (`task:1~551615`), de modo que un id acortado se ve
+  incompleto — allí donde uno cortado en silencio se leería como otro
+  propietario.
+- `origin` — de dónde proceden las cifras: `kernel` para un registro que
+  mide el núcleo, `self` para uno que el proceso que lo retiene declaró
+  sobre sí mismo, `?` para una fila que el servicio dejó sin atribuir.
+- `class` — la clase de recuperación a la que pertenece cada entrada de
+  esta caché.
+- `entries`, `cached`, `hit%` — como en la tabla de clases, para esta
+  única caché.
+
+Una fila `self` es un **diagnóstico**, no una medición atestiguada: nada
+fuera del proceso que la retiene puede ver el interior de su caché, y un
+proceso comprometido puede declarar lo que quiera. La palabra está en la
+fila misma, así que se lee en una consola serie monocroma; el color de
+aviso solo la refuerza. Lea las filas `self` como afirmaciones y las
+filas `kernel` como mediciones.
+
+Una máquina sin ninguna caché registrada lo dice en una línea en lugar
+de dejar la tabla en blanco — y una consulta *rechazada* lo dice a su
+vez, de modo que una tabla vacía nunca puede confundirse con «no hay
+cachés».
+
 ### ramzip — el nivel de memoria comprimida
 
 `ramzip` comprime páginas anónimas frías en un almacén menor en RAM en
@@ -218,9 +285,17 @@ lugar de paginarlas. Sus secciones:
 
 Una fila estilo `df` por volumen montado: punto de montaje, tipo de
 sistema de archivos, tamaño total, usado, disponible, porcentaje de uso y
-una barra de uso ASCII. Un volumen cuyo controlador no informa capacidad
-muestra `capacity unknown` en lugar de un tamaño fabricado; un volumen
-retirado por sorpresa o en conflicto de recuperación se dibuja en la
+una barra de uso ASCII.
+
+Un punto de montaje demasiado largo para su columna pierde su *centro*,
+nunca un extremo, igual que una etiqueta de caché:
+`/Storage/backup-2024-vol1` se lee `/Storage/b~2024-vol1`, de modo que
+dos volúmenes archivados uno junto a otro se siguen distinguiendo por el
+último segmento que los diferencia.
+
+Un volumen cuyo controlador no informa capacidad muestra
+`capacity unknown` en lugar de un tamaño fabricado; un volumen retirado
+por sorpresa o en conflicto de recuperación se dibuja en la
 representación de aviso y se marca (`[unavailable-dirty]`,
 `[unavailable-lost]`, `[recovery-conflict]`). No hay contadores de
 rendimiento de e/s por dispositivo en la API, así que esto es capacidad y
@@ -251,9 +326,10 @@ resumen del censo.
 ### Capacidades
 
 Cada cifra viaja por la API de información del sistema. Las consultas de
-estadísticas del núcleo (memoria, presión, cachés, `ramzip`, carga por
-CPU) requieren `CAP_SYSINFO_KERNEL`; el panel de líneas de interrupción
-requiere `CAP_SYSINFO_HW`; el censo de todos los procesos requiere
+estadísticas del núcleo (memoria, presión, las clases de cachés y el
+desglose por caché, `ramzip`, carga por CPU) requieren
+`CAP_SYSINFO_KERNEL`; el panel de líneas de interrupción requiere
+`CAP_SYSINFO_HW`; el censo de todos los procesos requiere
 `CAP_SYSINFO_GLOBAL`. Quien carezca de una ve el rechazo de ese panel
 explicado — nunca una cifra fabricada — mientras el resto de la sesión
 continúa (fallar cerrado, degradar con gracia). El almacenamiento de los

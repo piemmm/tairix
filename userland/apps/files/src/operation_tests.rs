@@ -7,18 +7,22 @@ use alloc::vec::Vec;
 
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode};
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
-use tairix_browse::render::{progress_cancel_at, progress_window_extent};
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_browse::render::{
+    progress_cancel_at, progress_window_extent, ClashAnswer, ClashChoice, ClashPanel,
+};
+use tairix_browse::Clash;
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_theme::Theme;
 
 use super::{
-    change_refusal, completion_closes_at, create_refusal, delete_confirmation, destination_refusal,
-    empty_confirmation, item_refusal, mode_flip_allowed, move_refusal, operation_refusal,
-    progress_control, reach_refusal, read_refusal, remove_refusal, trash_read_refusal,
-    write_refusal, BarPace, Confirmation, ProgressControl, COMPLETION_DWELL_NS,
+    change_refusal, clash_of, completion_closes_at, create_refusal, decision_of,
+    delete_confirmation, destination_refusal, empty_confirmation, item_refusal, mode_flip_allowed,
+    move_refusal, operation_refusal, progress_control, reach_refusal, read_refusal, remove_refusal,
+    trash_read_refusal, write_refusal, BarPace, Confirmation, ProgressControl, COMPLETION_DWELL_NS,
 };
 use tairix_abi::Errno;
-use tairix_fscopy::op::OpError;
+use tairix_fscopy::op::{Conflict, Decision, OpError};
+use tairix_fscopy::tree::Kind;
 
 /// The progress window this app is given, addressed by every synthesised
 /// event.
@@ -26,7 +30,7 @@ const WINDOW_ID: u64 = 7;
 
 /// The client of a progress window at its own extent.
 fn client() -> Rect {
-    let (width, height) = progress_window_extent(Scale::ONE, &Theme::dark());
+    let (width, height) = progress_window_extent(Scale::ONE, &Theme::dark(), false);
     Rect::new(0, 0, width, height)
 }
 
@@ -75,12 +79,158 @@ fn named(code: NamedKeyCode) -> WindowEvent {
         key: KeyInput::Pressed {
             key: KeyValue::Named(code),
             modifiers: Modifiers::default(),
+            physical: tairix_abi::input::PhysicalKey::UNKNOWN,
         },
     }
 }
 
 fn route(client: Rect, event: &WindowEvent) -> ProgressControl {
-    progress_control(client, Scale::ONE, &Theme::dark(), event)
+    let mut damage = Region::new();
+    progress_control(
+        (client, Scale::ONE, &Theme::dark()),
+        None,
+        event,
+        &mut damage,
+    )
+}
+
+/// A primary release at `point`.
+fn release(point: Point) -> WindowEvent {
+    WindowEvent::Pointer {
+        window_id: WINDOW_ID,
+        x: u32::try_from(point.x).unwrap_or(0),
+        y: u32::try_from(point.y).unwrap_or(0),
+        action: PointerAction::Released(PointerButtonCode::Primary),
+        modifiers: Modifiers::default(),
+        at_ns: 0,
+    }
+}
+
+/// A key press producing `ch`, with no modifiers held.
+fn typed(ch: char) -> WindowEvent {
+    WindowEvent::Key {
+        window_id: WINDOW_ID,
+        key: KeyInput::Pressed {
+            key: KeyValue::Char(ch),
+            modifiers: Modifiers::default(),
+            physical: tairix_abi::input::PhysicalKey::UNKNOWN,
+        },
+    }
+}
+
+/// The question about `notes.txt`, a file taken in `Desktop`.
+fn asking_panel() -> ClashPanel {
+    ClashPanel::new(&Clash {
+        name: String::from("notes.txt"),
+        folder: String::from("Desktop"),
+        folders: false,
+    })
+}
+
+/// `event` to a progress window, at its own extent, asking through `panel`.
+fn asked(panel: &mut ClashPanel, event: &WindowEvent) -> ProgressControl {
+    let theme = Theme::dark();
+    let (width, height) = progress_window_extent(Scale::ONE, &theme, true);
+    let client = Rect::new(0, 0, width, height);
+    let mut damage = Region::new();
+    progress_control(
+        (client, Scale::ONE, &theme),
+        Some(panel),
+        event,
+        &mut damage,
+    )
+}
+
+/// While it asks, the window's keys answer the question: `Enter` gives Skip,
+/// the default, `Escape` is Stop, and `Tab` and `Space` reach and tick the box
+/// and move on to Replace.
+#[test]
+fn a_question_is_answered_from_the_keyboard_through_its_window() {
+    let answer = |choice, for_the_rest| {
+        ProgressControl::Answer(ClashAnswer {
+            choice,
+            for_the_rest,
+        })
+    };
+    let mut panel = asking_panel();
+    assert_eq!(
+        asked(&mut panel, &named(NamedKeyCode::Enter)),
+        answer(ClashChoice::Skip, false),
+        "Skip is the default"
+    );
+    assert_eq!(
+        asked(&mut panel, &named(NamedKeyCode::Escape)),
+        answer(ClashChoice::Stop, false),
+        "Escape is Stop"
+    );
+    assert_eq!(
+        asked(&mut panel, &named(NamedKeyCode::Tab)),
+        ProgressControl::Ignore
+    );
+    assert_eq!(asked(&mut panel, &typed(' ')), ProgressControl::Ignore);
+    for _ in 0..2 {
+        assert_eq!(
+            asked(&mut panel, &named(NamedKeyCode::Tab)),
+            ProgressControl::Ignore
+        );
+    }
+    assert_eq!(
+        asked(&mut panel, &named(NamedKeyCode::Enter)),
+        answer(ClashChoice::Replace, true)
+    );
+    let redraw = WindowEvent::RedrawRequested { window_id: 1 };
+    assert_eq!(asked(&mut panel, &redraw), ProgressControl::Redraw);
+}
+
+/// While it asks, a click on a drawn choice answers with it, found where the
+/// window draws it: Skip, the default, stands at the trailing edge.
+#[test]
+fn a_question_is_answered_by_a_click_through_its_window() {
+    let theme = Theme::dark();
+    let (width, height) = progress_window_extent(Scale::ONE, &theme, true);
+    let found = (0..i32::try_from(height).unwrap_or(0)).rev().find_map(|y| {
+        (0..i32::try_from(width).unwrap_or(0)).rev().find_map(|x| {
+            let mut panel = asking_panel();
+            let point = Point::new(x, y);
+            asked(&mut panel, &press(point));
+            match asked(&mut panel, &release(point)) {
+                ProgressControl::Answer(answer) => Some(answer),
+                _ => None,
+            }
+        })
+    });
+    assert_eq!(
+        found,
+        Some(ClashAnswer {
+            choice: ClashChoice::Skip,
+            for_the_rest: false
+        })
+    );
+}
+
+/// The question names the name taken and the folder it is taken in, a folder
+/// meeting a folder merging, and Stop is no answer to the engine but a
+/// cancel.
+#[test]
+fn a_question_names_the_taken_name_and_stop_cancels() {
+    let mut conflict = Conflict {
+        source: String::from("/Users/ann/Home/notes.txt"),
+        target: String::from("/Users/ann/Desktop/notes.txt"),
+        occupant: Kind::File,
+    };
+    assert_eq!(
+        clash_of(&conflict),
+        Clash {
+            name: String::from("notes.txt"),
+            folder: String::from("Desktop"),
+            folders: false,
+        }
+    );
+    conflict.occupant = Kind::Directory;
+    assert!(clash_of(&conflict).folders);
+    assert_eq!(decision_of(ClashChoice::Replace), Some(Decision::Overwrite));
+    assert_eq!(decision_of(ClashChoice::Skip), Some(Decision::Skip));
+    assert_eq!(decision_of(ClashChoice::Stop), None);
 }
 
 #[test]
@@ -262,8 +412,8 @@ fn a_delete_confirmation_opens_only_over_the_selection_it_plans() {
                 node,
             },
         };
-        tairix_browse::DeletePlan::new(alloc::vec![tairix_browse::DeleteTarget::new(listed, false)])
-            .expect("a plan")
+        let target = tairix_browse::DeleteTarget::new(listed, tairix_browse::EntryKind::File);
+        tairix_browse::DeletePlan::new(alloc::vec![target]).expect("a plan")
     };
     let asked = plan("a", 1);
     let other = plan("b", 2);

@@ -99,7 +99,9 @@ over a resolution-independent design grid, so the same glyph is
   `IconRequest` — `kind` (the class alone), `asset` (an icon path the caller
   already resolved), or `bundle` (an application bundle whose own signed
   manifest names its icon) — and this layer owns the order they are tried in,
-  so no surface re-decides it. `icon_artwork_path`/`icon_vector_path` name a
+  so no surface re-decides it; a drag carries a bundle's or a RISC OS
+  application's request to the desktop as itself (`IconRequest::carried`,
+  `IconRequest::from_carried`). `icon_artwork_path`/`icon_vector_path` name a
   kind's `/System/Graphics/Icons/<id>.png` / `.svg` asset;
   `artwork_kind_for_file` validates a shipped-artwork file name in either
   class format;

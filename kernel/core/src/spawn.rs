@@ -35,14 +35,14 @@ use tairix_abi::{CapabilityId, CapabilityQuery, Errno, SpawnSession};
 use tairix_arch_api::{AddressTag, ContextSwitch, EnterUser, UserEntry};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_mem::{
-    build_process_image, AddressSpace, AllocError, Frame, FrameAllocator, PageTable, PhysMap,
-    SpaceTlb, SpawnError, UserAddressSpace, UserStack,
+    build_process_image, AddressSpace, AllocError, Frame, FrameAllocator, LiveUserSpace, PageTable,
+    PhysMap, SpaceTlb, SpawnError, UserAddressSpace, UserStack,
 };
 use tairix_kernel_sec::PlacementError;
 use tairix_log::{Event, Field, Level, Sink};
 use tairix_util::fmt::format_hex_u64;
 
-use crate::aspace::StackSpan;
+use crate::aspace::{AddressSpaceRegistry, StackSpan};
 use crate::audit::AuditEvent;
 use crate::procspace::ProcessSpace;
 
@@ -107,6 +107,13 @@ pub trait InitSpawnCtx {
     /// The directory-watch registry the volumes the boot path mounts claim
     /// their tables from; [`None`] leaves every volume unwatched.
     fn watches(&self) -> Option<&'static crate::fswatch::WatchRegistry> {
+        None
+    }
+
+    /// A fresh stack-canary seed for PID 1, drawn from the kernel's CSPRNG
+    /// reserve; [`None`], the default and the answer of a reserve that cannot
+    /// serve, refuses PID 1.
+    fn canary(&self) -> Option<u64> {
         None
     }
 
@@ -206,7 +213,7 @@ pub trait InitSpawnCtx {
         stack_span: StackSpan,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: ProcessResume,
-        live: Option<Arc<ProcessSpace>>,
+        live: Arc<ProcessSpace>,
         entry: UserThreadEntry,
     );
 
@@ -448,6 +455,17 @@ pub enum SpawnCallerError {
     Build(SpawnError),
 }
 
+impl SpawnCallerError {
+    /// The frame a refused mapping left the build's frame source to give back.
+    #[must_use]
+    pub const fn unmapped_frame(&self) -> Option<Frame> {
+        match self {
+            Self::Build(build) => build.unmapped_frame(),
+            Self::Denied => None,
+        }
+    }
+}
+
 /// What to spawn: the validated image, its backing bytes, and the user-space
 /// layout [`build_process_image`] needs.
 ///
@@ -473,6 +491,8 @@ pub struct SpawnRequest<'a> {
     pub env: &'a [&'a [u8]],
     /// Per-process random seed for the stack canary.
     pub canary: u64,
+    /// The address space the spawn layout set aside for the process's heap.
+    pub heap: tairix_abi::HeapRegion,
 }
 
 /// Which authority a spawn needs — the one definition of the rule, shared by
@@ -538,6 +558,7 @@ const fn spawn_error_cause(error: SpawnError) -> &'static str {
         SpawnError::EmptyStack => "empty_stack",
         SpawnError::Misaligned => "misaligned",
         SpawnError::StartBlock(_) => "startup_block",
+        SpawnError::OutOfMemory => "startup_block_unallocated",
         // `SpawnError` is `#[non_exhaustive]`; a future variant audits as a
         // generic build failure until it earns its own stable cause string.
         _ => "build_failed",
@@ -663,12 +684,13 @@ where
         request.start_block_base,
         request.args,
         request.env,
-        request.canary,
-        // The migration-safe common CPU-feature set the boot path aggregated,
-        // so the child's runtime resolves its accelerated routines against
-        // instructions legal on every core it may run on (empty until the set
-        // is finalised — the child then uses the portable baseline).
-        crate::cpuops::system_features().bits(),
+        &tairix_abi::StartFacts {
+            canary: request.canary,
+            // The migration-safe common set the boot path aggregated, empty
+            // until it is finalised, when the child runs its baseline.
+            cpu_features: crate::cpuops::system_features().bits(),
+            heap: request.heap,
+        },
         alloc_frame,
     )
     .map_err(|error| {
@@ -711,22 +733,99 @@ where
 /// build performs before the image is materialised — and return the stable
 /// resource errno the load surfaces.
 ///
-/// [`spawn_image`] audits the capability decision and the image build
-/// itself, but the build steps around it used to refuse silently: the audit
-/// log showed a rejected load with no cause, which is exactly the gap that
-/// made a boot-service launch refusal undiagnosable from a serial
-/// transcript. A refused build is a security-relevant decision, so it is
-/// logged with a stable `cause` (the closed build-failure cause vocabulary)
-/// plus the kernel frame allocator's remaining free-frame count, which tells
-/// genuine RAM exhaustion apart from a derivation or translate failure at
-/// the same site.
+/// A refused build is a security-relevant decision, so it is logged with a
+/// stable `cause` plus the kernel frame allocator's remaining free-frame
+/// count, which tells genuine RAM exhaustion apart from a derivation or
+/// translate failure at the same site.
 pub fn refuse_build(ctx: &dyn ImageBuildCtx, cause: &'static str) -> Errno {
-    emit_refuse(ctx.audit(), ctx.frames().free_frames() as u64, cause);
-    Errno::NoSpace
+    refused(ctx.audit(), ctx.frames(), cause)
 }
 
-/// Emit the shared `ProcessSpawnFailed` audit record for [`refuse_build`].
-fn emit_refuse(audit: &(dyn Sink + Sync), free_frames: u64, cause: &'static str) {
+/// Build a process image into `space` through `build`, then hand `space` to
+/// `retain` as its process's live address space whatever `build` answered,
+/// and answer what the spawn path admits.
+///
+/// A space dropped bare keeps its frames and page tables for good, while the
+/// live space `retain` makes returns them when a refusal drops it; `retain`
+/// answers [`None`] only once the space's frames are back. No process is
+/// admitted without its live space, so every refusal here refuses the spawn.
+/// A refusal is audited through `audit` with what `frames` has left free.
+///
+/// # Errors
+///
+/// [`spawn_caller_errno`]'s answer when `build` failed, which audited its own
+/// cause. Otherwise [`Errno::NoSpace`], audited as `live_space_refused`,
+/// `snapshot_unallocated`, `resume_unallocated` or
+/// `process_space_unallocated` once what the refusal held is back, so the
+/// audited free-frame margin counts it.
+pub fn build_retained<P, R>(
+    audit: &(dyn Sink + Sync),
+    frames: &FrameAllocator,
+    mut space: AddressSpace<P>,
+    build: impl FnOnce(&mut AddressSpace<P>) -> Result<UserEntry, SpawnCallerError>,
+    retain: impl FnOnce(AddressSpace<P>) -> Option<Box<dyn LiveUserSpace + Send>>,
+    resume: R,
+    port: &'static dyn EnterUser,
+) -> Result<Retained, Errno>
+where
+    P: PageTable,
+    R: Fn(u64, u64, AddressTag) + Send + Sync + 'static,
+{
+    let regs = match build(&mut space) {
+        Ok(regs) => regs,
+        Err(error) => {
+            // Drawn for a mapping the table refused, so in no space to return.
+            if let Some(frame) = error.unmapped_frame() {
+                let _ = frames.free(frame);
+            }
+            drop(retain(space));
+            return Err(spawn_caller_errno(error));
+        }
+    };
+    let frozen = AddressSpaceRegistry::refrozen(space.freeze());
+    let Some(live) = retain(space) else {
+        return Err(refused(audit, frames, "live_space_refused"));
+    };
+    let Some(frozen) = frozen else {
+        drop(live);
+        return Err(refused(audit, frames, "snapshot_unallocated"));
+    };
+    let Ok(hook) = Arc::try_new(resume) else {
+        drop(live);
+        return Err(refused(audit, frames, "resume_unallocated"));
+    };
+    let pre_resume: ProcessResume = hook;
+    // A refused handle drops the live space it was handed, which returns the
+    // image's frames before the refusal is audited.
+    let Ok(live) = Arc::try_new(ProcessSpace::new(live, Arc::clone(&pre_resume), port)) else {
+        return Err(refused(audit, frames, "process_space_unallocated"));
+    };
+    Ok(Retained {
+        frozen,
+        live,
+        pre_resume,
+        entry: UserThreadEntry { port, regs },
+    })
+}
+
+/// A spawned process's image, owned by its live address space: what a spawn
+/// path admits once [`build_retained`] has retained it.
+pub struct Retained {
+    /// The registry snapshot of the image's mappings.
+    pub frozen: Box<dyn UserAddressSpace + Send + Sync>,
+    /// The process's live address space, which returns every frame the image
+    /// maps when its last thread lets it go.
+    pub live: Arc<ProcessSpace>,
+    /// The process's switch-in hook.
+    pub pre_resume: ProcessResume,
+    /// The port and register state the process's first thread is entered
+    /// with.
+    pub entry: UserThreadEntry,
+}
+
+/// [`refuse_build`] through `audit`, counting what `frames` has left free:
+/// the one refusal record every spawn path writes.
+fn refused(audit: &(dyn Sink + Sync), frames: &FrameAllocator, cause: &'static str) -> Errno {
     emit(
         audit,
         AuditEvent::ProcessSpawnFailed,
@@ -738,10 +837,11 @@ fn emit_refuse(audit: &(dyn Sink + Sync), free_frames: u64, cause: &'static str)
             },
             Field {
                 key: "free_frames",
-                value: tairix_log::FieldValue::UnsignedInt(free_frames),
+                value: tairix_log::FieldValue::UnsignedInt(frames.free_frames() as u64),
             },
         ],
     );
+    Errno::NoSpace
 }
 
 /// Map an [`AdmitError`] onto its stable [`Errno`] for the `spawn` syscall's
@@ -919,18 +1019,18 @@ pub static EMPTY_PROGRAM_REGISTRY: ProgramRegistry = ProgramRegistry::EMPTY;
 pub type ProcessResume = Arc<dyn Fn(u64, u64, AddressTag) + Send + Sync>;
 
 /// Bind a process's [`ProcessResume`] hook to one thread's `tls_base`,
-/// producing the per-thread switch-in hook the kthread runtime stores.
+/// producing the per-thread switch-in hook the kthread runtime stores, which
+/// boxes it fallibly as it admits the thread.
 ///
 /// The one definition every admission path shares — PID 1, a spawned child's
 /// deferred load, and `thread_create` — so the per-thread and per-process
 /// halves of the hook can never be composed two different ways.
-#[must_use]
 pub fn thread_pre_resume(
     hook: &ProcessResume,
     tls_base: u64,
-) -> Box<dyn FnMut(u64, AddressTag) + Send> {
+) -> impl FnMut(u64, AddressTag) + Send + 'static {
     let hook = Arc::clone(hook);
-    Box::new(move |stack_top: u64, tag: AddressTag| hook(stack_top, tls_base, tag))
+    move |stack_top: u64, tag: AddressTag| hook(stack_top, tls_base, tag)
 }
 
 /// The port handle and register state one thread is entered in user mode with.
@@ -1077,8 +1177,7 @@ pub struct BuiltImage {
     /// The child process's live, mutable address space (`plans/PI.md`
     /// 5d-0-ii (b′)) built from the *same* arch space `frozen` was frozen
     /// from, so the child's `mem_map` / `mmio_map` mutate its own space.
-    /// [`None`] retains no live space and those syscalls fail closed.
-    pub live: Option<Arc<ProcessSpace>>,
+    pub live: Arc<ProcessSpace>,
     /// The child process's switch-in hook (see [`ProcessResume`]): the
     /// register program that puts the child's own page-table root — and, on a
     /// port whose thread pointer is privileged, the switching-in thread's
@@ -1125,6 +1224,11 @@ pub trait ImageBuildCtx {
     ///
     /// [`AllocError::OutOfMemory`] when its CPU set cannot be allocated.
     fn space_tlb(&self) -> Result<SpaceTlb, AllocError>;
+
+    /// A fresh stack-canary seed for the child, drawn from the kernel's
+    /// CSPRNG reserve; [`None`] while the reserve cannot serve, which refuses
+    /// the child.
+    fn canary(&self) -> Option<u64>;
 }
 
 /// The architecture-specific seam that builds a fresh, hardware-isolated
@@ -1212,11 +1316,12 @@ fn emit(audit: &dyn Sink, event: AuditEvent, level: Level, fields: &[Field<'_>])
 mod tests {
     use super::*;
     use crate::test_sink::TestSink;
+    use core::sync::atomic::{AtomicBool, Ordering};
     use tairix_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
     use tairix_abi::{ABI_VERSION_CURRENT, LOAD_MAGIC, SYSCALL_TABLE_HASH_LEN};
     use tairix_kernel_mem::{
-        AddressSpace, BootMemoryMap, HostPageTable, MemoryClass, MemoryRegion, PhysAddr,
-        RegionKind, SimPhysMap, UserStack, PAGE_SIZE,
+        AddressSpace, BootMemoryMap, HostPageTable, LiveSpace, MemoryClass, MemoryRegion, PhysAddr,
+        RegionKind, SimPhysMap, UserStack, VirtAddr, PAGE_SIZE,
     };
     use tairix_log::{set_max_level, Level};
 
@@ -1315,6 +1420,51 @@ mod tests {
         SimPhysMap::new(PhysAddr::new((PAGE_SIZE * 16) as u64), 64 * PAGE_SIZE)
     }
 
+    /// A `PhysMap` view over one leaked [`SimPhysMap`], so an image build and
+    /// a live space's teardown scrub touch the same simulated memory (each
+    /// `sim()` owns disjoint storage).
+    struct SharedSim(&'static SimPhysMap);
+
+    impl PhysMap for SharedSim {
+        fn translate(&self, phys: PhysAddr, len: usize) -> Option<core::ptr::NonNull<u8>> {
+            self.0.translate(phys, len)
+        }
+
+        fn clean_invalidate(&self, phys: PhysAddr, len: usize) {
+            self.0.clean_invalidate(phys, len);
+        }
+
+        fn sync_instruction_cache(&self, phys: PhysAddr, len: usize) {
+            self.0.sync_instruction_cache(phys, len);
+        }
+    }
+
+    /// `space` retained as a live space over `simmap` and `frames`, as the
+    /// spawn producers retain it; dropping it is the reap-time teardown.
+    fn live_space(
+        space: AddressSpace<HostPageTable>,
+        simmap: &'static SimPhysMap,
+        frames: &'static FrameAllocator,
+    ) -> LiveSpace<HostPageTable, SharedSim> {
+        LiveSpace::new(
+            space,
+            crate::procspace::new_space_tlb(None).expect("the set allocates"),
+            SharedSim(simmap),
+            frames,
+            VirtAddr::new(0x4000_0000),
+            8,
+            VirtAddr::new(0x5000_0000),
+            8,
+            VirtAddr::new(0x6000_0000),
+            8,
+            VirtAddr::new(0x7000_0000),
+            8,
+            VirtAddr::new(0x8000_0000),
+            8,
+        )
+        .expect("windows are valid")
+    }
+
     fn request<'a>(image: &'a LoadImage, bytes: &'a [u8], stack_pages: u64) -> SpawnRequest<'a> {
         SpawnRequest {
             image,
@@ -1328,6 +1478,7 @@ mod tests {
             args: &[],
             env: &[],
             canary: 0,
+            heap: tairix_abi::HeapRegion::NONE,
         }
     }
 
@@ -1339,26 +1490,6 @@ mod tests {
         // it exactly as the reap does — the allocator must return to its
         // pre-spawn level every time, never marching downward (the
         // login/logout leak this closes).
-        use tairix_kernel_mem::{LiveSpace, VirtAddr};
-
-        /// A `PhysMap` view over the one leaked [`SimPhysMap`], so the
-        /// image build and the teardown scrub touch the same simulated
-        /// memory (each `sim()` owns disjoint storage).
-        struct SharedSim(&'static SimPhysMap);
-        impl PhysMap for SharedSim {
-            fn translate(&self, phys: PhysAddr, len: usize) -> Option<core::ptr::NonNull<u8>> {
-                self.0.translate(phys, len)
-            }
-
-            fn clean_invalidate(&self, phys: PhysAddr, len: usize) {
-                self.0.clean_invalidate(phys, len);
-            }
-
-            fn sync_instruction_cache(&self, phys: PhysAddr, len: usize) {
-                self.0.sync_instruction_cache(phys, len);
-            }
-        }
-
         set_max_level(Level::Trace);
         let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let (bytes, image) = tiny_image();
@@ -1397,30 +1528,295 @@ mod tests {
 
             // Retain the built space exactly as the spawn producers do,
             // then drop it — the reap-time teardown path.
-            let live = LiveSpace::new(
-                space,
-                crate::procspace::new_space_tlb(None).expect("the set allocates"),
-                SharedSim(simmap),
-                frames,
-                VirtAddr::new(0x4000_0000),
-                8,
-                VirtAddr::new(0x5000_0000),
-                8,
-                VirtAddr::new(0x6000_0000),
-                8,
-                VirtAddr::new(0x7000_0000),
-                8,
-                VirtAddr::new(0x8000_0000),
-                8,
-            )
-            .expect("windows are valid");
-            drop(live);
+            drop(live_space(space, simmap, frames));
             assert_eq!(
                 frames.free_frames(),
                 before,
                 "every frame the cycle drew returned to the allocator"
             );
         }
+    }
+
+    /// [`live_space`], boxed fallibly as the spawn producers box it.
+    fn boxed_live(
+        space: AddressSpace<HostPageTable>,
+        simmap: &'static SimPhysMap,
+        frames: &'static FrameAllocator,
+    ) -> Option<Box<dyn LiveUserSpace + Send>> {
+        let live: Box<dyn LiveUserSpace + Send> =
+            Box::try_new(live_space(space, simmap, frames)).ok()?;
+        Some(live)
+    }
+
+    /// Build the tiny image into `space` as a spawn producer builds a child,
+    /// auditing through `audit` and drawing at most `granted` frames.
+    fn build_tiny(
+        audit: &dyn Sink,
+        space: &mut AddressSpace<HostPageTable>,
+        simmap: &'static SimPhysMap,
+        frames: &'static FrameAllocator,
+        mut granted: usize,
+    ) -> Result<UserEntry, SpawnCallerError> {
+        let (bytes, image) = tiny_image();
+        // SAFETY: building the image is safe; the returned `UserEntry` is
+        // dropped, never entered, on the host.
+        unsafe {
+            spawn_image(
+                &Granted(&[CapabilityId::PROC_SPAWN]),
+                SpawnMode::General,
+                audit,
+                space,
+                simmap,
+                &request(&image, &bytes, 2),
+                || {
+                    granted = granted.checked_sub(1)?;
+                    frames.alloc(MemoryClass::UserAnon).ok()
+                },
+            )
+        }
+    }
+
+    /// A build whose snapshot the heap refuses still retains its space, so
+    /// the refusal returns every frame the image drew, and is audited.
+    ///
+    /// Regression: the ports returned before the live space took the space
+    /// over, and a bare address space keeps its frames for good.
+    #[test]
+    fn a_refused_snapshot_returns_the_images_frames_and_is_audited() {
+        set_max_level(Level::Trace);
+        let ctx = StubCtx::new();
+        let simmap: &'static SimPhysMap = crate::forever(Box::new(sim()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(frames_over_sim()));
+        let before = frames.free_frames();
+        let built = build_retained(
+            ctx.sink,
+            frames,
+            host_space(),
+            |space| {
+                let built = build_tiny(ctx.sink, space, simmap, frames, usize::MAX);
+                crate::test_alloc::refuse_allocations_on_current_thread(true);
+                built
+            },
+            |space| {
+                crate::test_alloc::refuse_allocations_on_current_thread(false);
+                boxed_live(space, simmap, frames)
+            },
+            |_: u64, _: u64, _: AddressTag| {},
+            &NeverEnter,
+        );
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert!(matches!(built, Err(Errno::NoSpace)));
+        assert_eq!(frames.free_frames(), before, "the image's frames returned");
+        assert_refusal_audited(ctx.sink, "snapshot_unallocated");
+    }
+
+    /// A build refused part-way hands its space to the live space all the
+    /// same, so the refusal returns every frame the image drew, audited once,
+    /// by the build itself.
+    ///
+    /// Regression: the ports returned a refused build's error with its space
+    /// still bare, which keeps its frames and page tables for good.
+    #[test]
+    fn a_refused_build_returns_the_frames_it_drew() {
+        set_max_level(Level::Trace);
+        let ctx = StubCtx::new();
+        let simmap: &'static SimPhysMap = crate::forever(Box::new(sim()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(frames_over_sim()));
+        let before = frames.free_frames();
+        let built = build_retained(
+            ctx.sink,
+            frames,
+            host_space(),
+            // The code page and the first stack page, then no frame at all.
+            |space| build_tiny(ctx.sink, space, simmap, frames, 2),
+            |space| boxed_live(space, simmap, frames),
+            |_: u64, _: u64, _: AddressTag| {},
+            &NeverEnter,
+        );
+        assert!(matches!(built, Err(Errno::NoSpace)));
+        assert_eq!(
+            frames.free_frames(),
+            before,
+            "the frames the build drew returned"
+        );
+        let failed = AuditEvent::ProcessSpawnFailed.id().0;
+        let ids = ctx.sink.event_ids();
+        assert_eq!(
+            ids.iter().filter(|&&id| id == failed).count(),
+            1,
+            "the build's own record, and no second"
+        );
+    }
+
+    /// A thread's switch-in hook is its process's bound to the thread's
+    /// pointer, made without the heap. Regression: it was boxed infallibly, so
+    /// an exhausted heap aborted the kernel at a thread's admission.
+    #[test]
+    fn a_threads_switch_in_hook_asks_the_heap_for_nothing() {
+        let seen = Arc::new(core::sync::atomic::AtomicU64::new(0));
+        let witness = Arc::clone(&seen);
+        let hook: ProcessResume = Arc::new(move |stack_top, tls_base, _| {
+            witness.store(stack_top ^ tls_base, Ordering::Relaxed);
+        });
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let mut bound = thread_pre_resume(&hook, 0x70);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        bound(0x1000, AddressTag::UNTAGGED);
+        assert_eq!(seen.load(Ordering::Relaxed), 0x1000 ^ 0x70);
+    }
+
+    /// A frame drawn for a page the table then refuses is in no space, so the
+    /// refusal returns it with the rest. Regression: it leaked for good.
+    #[test]
+    fn a_frame_drawn_for_a_refused_mapping_is_returned() {
+        set_max_level(Level::Trace);
+        let ctx = StubCtx::new();
+        let simmap: &'static SimPhysMap = crate::forever(Box::new(sim()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(frames_over_sim()));
+        let before = frames.free_frames();
+        let mut space = host_space();
+        // The code page already mapped, so the build's own mapping of it is
+        // refused once its frame is drawn.
+        let occupant = frames.alloc(MemoryClass::UserAnon).expect("a frame");
+        let code = tairix_kernel_mem::vmm::Page::from_addr(VirtAddr::new(0x1000)).expect("aligned");
+        let read = tairix_kernel_mem::vmm::MapFlags::USER | tairix_kernel_mem::vmm::MapFlags::READ;
+        space.map(code, occupant, read).expect("mapped");
+        let built = build_retained(
+            ctx.sink,
+            frames,
+            space,
+            |space| build_tiny(ctx.sink, space, simmap, frames, usize::MAX),
+            |space| boxed_live(space, simmap, frames),
+            |_: u64, _: u64, _: AddressTag| {},
+            &NeverEnter,
+        );
+        assert!(built.is_err());
+        assert_eq!(frames.free_frames(), before, "the refused page's frame too");
+    }
+
+    /// A spawn whose live space is refused is refused itself, with its
+    /// image's frames back and the refusal audited.
+    ///
+    /// Regression: the ports admitted such a process with no live space,
+    /// though the refused live space had already returned the frames and the
+    /// page tables its image runs on.
+    #[test]
+    fn a_refused_live_space_refuses_the_spawn() {
+        set_max_level(Level::Trace);
+        let ctx = StubCtx::new();
+        let simmap: &'static SimPhysMap = crate::forever(Box::new(sim()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(frames_over_sim()));
+        let before = frames.free_frames();
+        let built = build_retained(
+            ctx.sink,
+            frames,
+            host_space(),
+            |space| build_tiny(ctx.sink, space, simmap, frames, usize::MAX),
+            // As a refused box drops the live space it was handed.
+            |space| {
+                drop(live_space(space, simmap, frames));
+                None
+            },
+            |_: u64, _: u64, _: AddressTag| {},
+            &NeverEnter,
+        );
+        assert!(matches!(built, Err(Errno::NoSpace)));
+        assert_eq!(frames.free_frames(), before, "the image's frames returned");
+        assert_refusal_audited(ctx.sink, "live_space_refused");
+    }
+
+    /// A sink that keeps nothing but whether a spawn refusal named `cause`, so
+    /// a refusal taken while the heap refuses everything is still seen.
+    struct RefusalWitness {
+        cause: &'static str,
+        seen: AtomicBool,
+    }
+
+    impl Sink for RefusalWitness {
+        fn write_event(&self, event: &Event<'_>) {
+            let named = event.fields.iter().any(|field| {
+                let tairix_log::FieldValue::Str(cause) = field.value else {
+                    return false;
+                };
+                field.key == "cause" && cause == self.cause
+            });
+            if event.id == AuditEvent::ProcessSpawnFailed.id() && named {
+                self.seen.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The switch-in hook, then the process handle, each refused in turn once
+    /// the live space is made, returns the image's frames and is audited as
+    /// its own cause.
+    ///
+    /// Regression: every spawn path allocated the hook with `Arc::new`, so an
+    /// exhausted heap aborted the kernel there.
+    #[test]
+    fn an_allocation_refused_after_the_live_space_returns_the_images_frames() {
+        set_max_level(Level::Trace);
+        for (granted, cause) in [(0, "resume_unallocated"), (1, "process_space_unallocated")] {
+            let witness = RefusalWitness {
+                cause,
+                seen: AtomicBool::new(false),
+            };
+            let simmap: &'static SimPhysMap = crate::forever(Box::new(sim()));
+            let frames: &'static FrameAllocator = crate::forever(Box::new(frames_over_sim()));
+            let before = frames.free_frames();
+            let built = build_retained(
+                &witness,
+                frames,
+                host_space(),
+                |space| build_tiny(&witness, space, simmap, frames, usize::MAX),
+                |space| {
+                    let live = boxed_live(space, simmap, frames);
+                    crate::test_alloc::grant_allocations_on_current_thread(granted);
+                    live
+                },
+                |_: u64, _: u64, _: AddressTag| {},
+                &NeverEnter,
+            );
+            crate::test_alloc::grant_allocations_on_current_thread(usize::MAX);
+            assert!(matches!(built, Err(Errno::NoSpace)), "{cause}");
+            assert_eq!(
+                frames.free_frames(),
+                before,
+                "{cause}: the image's frames returned"
+            );
+            assert!(witness.seen.load(Ordering::Relaxed), "{cause} is audited");
+        }
+    }
+
+    /// A retained build's live space holds the image's frames until its last
+    /// holder lets it go.
+    #[test]
+    fn a_retained_build_returns_its_frames_when_its_live_space_goes() {
+        set_max_level(Level::Trace);
+        let ctx = StubCtx::new();
+        let simmap: &'static SimPhysMap = crate::forever(Box::new(sim()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(frames_over_sim()));
+        let before = frames.free_frames();
+        let retained = build_retained(
+            ctx.sink,
+            frames,
+            host_space(),
+            |space| build_tiny(ctx.sink, space, simmap, frames, usize::MAX),
+            |space| boxed_live(space, simmap, frames),
+            |_: u64, _: u64, _: AddressTag| {},
+            &NeverEnter,
+        )
+        .expect("the spawn is retained");
+        assert_eq!(
+            retained.frozen.mapped_pages(),
+            4,
+            "the code page, two stack pages and the startup block"
+        );
+        assert!(
+            frames.free_frames() < before,
+            "the live space holds the image"
+        );
+        drop(retained);
+        assert_eq!(frames.free_frames(), before);
     }
 
     #[test]
@@ -1602,11 +1998,10 @@ mod tests {
         assert!(!ids.contains(&AuditEvent::ProcessSpawned.id().0));
     }
 
-    /// A minimal [`ImageBuildCtx`] for exercising the [`ArchImageBuilder::build`]
-    /// default: the default returns [`Errno::NotImplemented`] before touching
-    /// the context. It owns a one-region [`FrameAllocator`] so
-    /// [`frames`](ImageBuildCtx::frames) can hand out a reference, and audits
-    /// through a leaked [`TestSink`].
+    /// A minimal [`ImageBuildCtx`] the refusal paths audit through. It owns
+    /// an allocator over the window [`sim`] describes, which nothing here
+    /// draws from, so [`frames`](ImageBuildCtx::frames) can hand out a
+    /// reference, and audits through a leaked [`TestSink`].
     struct StubCtx {
         frames: FrameAllocator,
         sink: &'static TestSink,
@@ -1614,24 +2009,18 @@ mod tests {
 
     impl StubCtx {
         fn new() -> Self {
-            // A single usable region the allocator can describe; the
-            // default `spawn_with` never allocates from it.
-            static mut REGION: [u8; PAGE_SIZE * 4] = [0u8; PAGE_SIZE * 4];
-            let mut map = BootMemoryMap::new();
-            map.push(MemoryRegion {
-                start: PhysAddr::new(core::ptr::addr_of!(REGION) as u64),
-                length: (PAGE_SIZE * 4) as u64,
-                kind: RegionKind::Usable,
-            });
-            let frames = FrameAllocator::new(&map).expect("one-region allocator");
             Self {
-                frames,
+                frames: frames_over_sim(),
                 sink: crate::forever(Box::new(TestSink::new())),
             }
         }
     }
 
     impl ImageBuildCtx for StubCtx {
+        fn canary(&self) -> Option<u64> {
+            Some(0x5EED)
+        }
+
         fn frames(&self) -> &FrameAllocator {
             &self.frames
         }
@@ -1677,16 +2066,8 @@ mod tests {
 
     impl StubInitCtx {
         fn new() -> Self {
-            static mut REGION: [u8; PAGE_SIZE * 4] = [0u8; PAGE_SIZE * 4];
-            let mut map = BootMemoryMap::new();
-            map.push(MemoryRegion {
-                start: PhysAddr::new(core::ptr::addr_of!(REGION) as u64),
-                length: (PAGE_SIZE * 4) as u64,
-                kind: RegionKind::Usable,
-            });
-            let frames = FrameAllocator::new(&map).expect("one-region allocator");
             Self {
-                frames,
+                frames: frames_over_sim(),
                 sink: crate::forever(Box::new(TestSink::new())),
             }
         }
@@ -1713,7 +2094,7 @@ mod tests {
             _stack_span: StackSpan,
             _stack: Box<dyn crate::kthread::KernelStack + Send>,
             _pre_resume: ProcessResume,
-            _live: Option<Arc<ProcessSpace>>,
+            _live: Arc<ProcessSpace>,
             _entry: UserThreadEntry,
         ) {
             unreachable!("the default spawn_driver_process returns before admitting a process")

@@ -40,7 +40,7 @@ mod program {
     use tairix_abi::volume::{DetachMode, VolumeDetachRequest, VOLUME_DETACH_LEN, VOLUME_ID_LEN};
     use tairix_abi::{Errno, RealpathMode};
     use tairix_help::BundleHelp;
-    use tairix_procinfo::IpcTransport;
+    use tairix_procinfo::{Caller, IpcTransport};
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
     use tairix_unmount::{parse, run, Detacher};
 
@@ -51,11 +51,17 @@ mod program {
     /// the exact [`Errno`] the kernel chose.
     struct RtDetacher;
 
-    impl Detacher for RtDetacher {
+    impl Caller for RtDetacher {
         fn user(&self) -> Option<u32> {
             tairix_rt::self_origin().ok().map(|origin| origin.uid())
         }
 
+        fn canonical(&self, path: &str) -> Result<String, Errno> {
+            tairix_rt::realpath(path, RealpathMode::Existing)
+        }
+    }
+
+    impl Detacher for RtDetacher {
         fn detach(&self, volume_id: [u8; VOLUME_ID_LEN], force: bool) -> Result<(), Errno> {
             let mode = if force {
                 DetachMode::Force
@@ -71,10 +77,6 @@ mod program {
             } else {
                 Err(Errno::from_syscall(ret))
             }
-        }
-
-        fn canonical(&self, path: &str) -> Result<String, Errno> {
-            tairix_rt::realpath(path, RealpathMode::Existing)
         }
     }
 

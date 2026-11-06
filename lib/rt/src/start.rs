@@ -262,6 +262,9 @@ unsafe extern "C" fn rust_rt_start(block_ptr: *const u8) -> ! {
     };
 
     install_stack_canary(view.canary());
+    // Before anything allocates: the heap grows only in the region the kernel
+    // set aside for it.
+    crate::heap::place(view.heap());
     // Publish the validated view so the program can read the arguments its
     // spawner chose for it (`crate::startup`).
     crate::startup::install(view);

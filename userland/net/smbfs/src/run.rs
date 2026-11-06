@@ -228,7 +228,7 @@ mod program {
         type Worker = RtSessionChannel;
 
         fn launch(&mut self) -> Result<RtSessionChannel, Errno> {
-            RtSessionChannel::launch(tairix_abi::SPAWN_SELF, WorkerMemory::Messages)
+            RtSessionChannel::launch(tairix_abi::SPAWN_SELF, WorkerMemory::Messages, None)
         }
 
         fn open(&mut self, conn: ConnId, family: NetAddrFamily) -> Result<SocketId, Errno> {

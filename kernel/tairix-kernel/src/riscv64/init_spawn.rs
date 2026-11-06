@@ -32,7 +32,6 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::boxed::Box;
-use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_arch_api::AddressTag;
@@ -40,10 +39,9 @@ use tairix_arch_riscv64::paging::{
     activate_user_root, AddressSpace as ArchAddressSpace, PageTablePool, KERNEL_IDENTITY_GIGAPAGES,
 };
 use tairix_arch_riscv64::userentry::USER_MODE;
-use tairix_kernel_core::{
-    spawn_image, InitSpawn, InitSpawnCtx, ProcessResume, ProcessSpace, SpawnMode, UserThreadEntry,
-};
-use tairix_kernel_mem::{AddressSpace, PhysMap, UserAddressSpace};
+use tairix_kernel_core::spawn::build_retained;
+use tairix_kernel_core::{spawn_image, InitSpawn, InitSpawnCtx, SpawnMode};
+use tairix_kernel_mem::{AddressSpace, PhysMap};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
 use crate::riscv64::spawn_producer::ConfiguredPhysMap;
@@ -87,6 +85,36 @@ impl InitSpawn for RiscvInitSpawn {
             return;
         }
 
+        // Everything PID 1's spawn can refuse without a space is had before
+        // one exists, so such a refusal leaves nothing behind: the `'static`
+        // allocator its live space draws from, its image parsed against the
+        // kernel's own compiled-in syscall CFI tag and placed through the one
+        // shared per-spawn derivation, its space's CPU set, and its kernel
+        // stack — a run of the shared kernel remap window whose guard slot is
+        // unmapped in every root at once, so the stack stays mapped and
+        // guarded across the switch below without touching `arch`.
+        let Some(static_frames) = ctx.static_frames() else {
+            return;
+        };
+        let dynamic = spawn_layout::dynamic_windows(static_frames, &WINDOWS, super::USER_VA_TOP);
+        let Some(canary) = ctx.canary() else {
+            return;
+        };
+        let Ok(image) = LoadImage::parse(INIT_RXE, &SYSCALL_TABLE_HASH) else {
+            return;
+        };
+        let Some((request, stack_span)) =
+            spawn_layout::init_request(&image, INIT_RXE, INIT_USER_BIAS, canary, dynamic.heap)
+        else {
+            return;
+        };
+        let Ok(tlb) = ctx.space_tlb() else {
+            return;
+        };
+        let Some(kernel_stack) = tairix_kernel_core::kstack::alloc_kernel_stack() else {
+            return;
+        };
+
         // Build an Sv39 address space identity-mapping the kernel + MMIO,
         // then activate it so the user mappings below land in the active
         // hierarchy. The S-mode trap vector and the production `ecall`
@@ -103,13 +131,6 @@ impl InitSpawn for RiscvInitSpawn {
         // a plain `u64`, so the boxed hook stays `Send`.
         let init_root_phys = arch.root_phys();
 
-        // PID 1's kernel stack: a run of the shared kernel remap window whose
-        // guard slot is unmapped in every root at once, so the stack stays
-        // mapped and guarded across the switch below without touching `arch`.
-        let Some(kernel_stack) = tairix_kernel_core::kstack::alloc_kernel_stack() else {
-            return;
-        };
-
         // SAFETY: the process-root identity window covers the kernel's
         // current `pc`, `sp`, the leaked kernel state, the boot heap, and the
         // device MMIO — the boot path refuses the boot on a board where the
@@ -118,94 +139,69 @@ impl InitSpawn for RiscvInitSpawn {
         // `AddressSpace::switch`'s contract. Called once on the boot hart.
         unsafe { arch.switch() };
 
-        let mut space = AddressSpace::new(arch);
         let physmap = ConfiguredPhysMap;
-
-        // Parse the build-time `init` `rxe` blob against the kernel's own
-        // compiled-in syscall CFI tag. A mismatch fails closed.
-        let Ok(image) = LoadImage::parse(INIT_RXE, &SYSCALL_TABLE_HASH) else {
-            return;
-        };
-
-        // Place the stack and startup block above the image's mapped top,
-        // and derive the span record the stack-growth fault path backs
-        // pages inside, through the one shared per-spawn derivation. An
-        // image too large for the user region fails the boot closed.
-        let Some((request, stack_span)) =
-            spawn_layout::init_request(&image, INIT_RXE, INIT_USER_BIAS)
-        else {
-            return;
-        };
-
-        // Authorise + build the U-mode image (emits `ProcessSpawned`) without
-        // entering yet — PID 1 must be registered with the scheduler /
-        // capability table / address-space registry *first* so its first
-        // syscall resolves a caller context (`plans/PI.md` RV-P3).
-        // SAFETY: building the image is itself safe; the returned `UserEntry`
-        // is only entered below, once `space` is active (just switched to) and
-        // the S-mode trap path is installed. The frame source draws
-        // identity-mapped RAM frames from the kernel's live allocator. A
-        // returning `Err` (denial or build failure) drops back to the caller's
-        // fail-closed halt.
         let frames = ctx.frames();
-        let Ok(entry) = (unsafe {
-            spawn_image(
-                &spawn_layout::SpawnAuthority,
-                SpawnMode::General,
-                ctx.audit(),
-                &mut space,
-                &physmap,
-                &request,
-                move || frames.alloc(spawn_layout::SPAWN_IMAGE_CLASS).ok(),
-            )
-        }) else {
-            return;
-        };
 
-        // PID 1's user-address-space reactivation hook (`plans/SPAWN.md` SP2):
-        // the core runs it on the dispatcher's context immediately before every
-        // switch into PID 1, so the task `sret`s back into U-mode under its own
-        // `satp` root and stays isolated from any sibling process. It captures only the `u64` root, so it is `Send`.
-        // The kernel-stack top the hook is handed is unused on riscv64:
-        // `sscratch` is per-task hardware state armed by `userentry::enter_user`
-        // and re-armed by the trap vector from each task's own kernel-stack
-        // frame on every U-return, so a trap always lands on *its* kernel stack
-        // with no dispatcher-side repointing.
-        let pre_resume: ProcessResume =
-            Arc::new(move |_stack_top: u64, _tls_base: u64, tag: AddressTag| {
+        // Build the U-mode image (emits `ProcessSpawned`) without entering it —
+        // PID 1 is registered with the scheduler / capability table /
+        // address-space registry *first* so its first syscall resolves a
+        // caller context (`plans/PI.md` RV-P3) — then hand the space to
+        // PID 1's process address space (`plans/PI.md` 5d-0-ii (b′)) whatever
+        // the build answered, so its `mem_map` / `mmio_map` mutate exactly the
+        // mappings the snapshot describes, zeroing anonymous frames through
+        // the kernel's one direct physical map, and a refusal returns the
+        // frames, audited, to the caller's fail-closed halt.
+        let Ok(retained) = build_retained(
+            ctx.audit(),
+            frames,
+            AddressSpace::new(arch),
+            |space| {
+                // SAFETY: building the image is itself safe; the returned
+                // `UserEntry` is only entered once `space` is active (just
+                // switched to) and the S-mode trap path is installed.
+                unsafe {
+                    spawn_image(
+                        &spawn_layout::SpawnAuthority,
+                        SpawnMode::General,
+                        ctx.audit(),
+                        space,
+                        &physmap,
+                        &request,
+                        move || frames.alloc(spawn_layout::SPAWN_IMAGE_CLASS).ok(),
+                    )
+                }
+            },
+            |space| {
+                spawn_layout::live_space(
+                    space,
+                    tlb,
+                    ConfiguredPhysMap,
+                    static_frames,
+                    &WINDOWS,
+                    &dynamic,
+                )
+            },
+            // PID 1's user-address-space reactivation hook (`plans/SPAWN.md`
+            // SP2): the core runs it on the dispatcher's context immediately
+            // before every switch into PID 1, so the task `sret`s back into
+            // U-mode under its own `satp` root and stays isolated from any
+            // sibling process. It captures only the `u64` root, so it is
+            // `Send`. The kernel-stack top it is handed is unused on riscv64:
+            // `sscratch` is per-task hardware state armed by
+            // `userentry::enter_user` and re-armed by the trap vector from each
+            // task's own kernel-stack frame on every U-return, so a trap always
+            // lands on *its* kernel stack with no dispatcher-side repointing.
+            move |_stack_top: u64, _tls_base: u64, tag: AddressTag| {
                 // SAFETY: paging is enabled and `init_root_phys` is the Sv39 root
                 // of PID 1's space, which identity-maps the low kernel window the
                 // running kernel executes from — exactly `activate_user_root`'s
                 // contract.
                 unsafe { activate_user_root(init_root_phys, tag) };
-            });
-
-        // Freeze the just-built mappings into the registry-storable,
-        // `Send + Sync` snapshot the kernel-wide address-space registry holds
-        // (the live arch `space` is not `Sync`), and box the direct map that
-        // backs it, so PID 1's `stream_write` can copy its banner out of user
-        // memory. Freezing *after* `spawn_image` captures every mapped page —
-        // segments, stack, and the startup-vector block.
-        let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
-
-        // PID 1's process address space (`plans/PI.md` 5d-0-ii (b′)): the
-        // *same* arch space the snapshot above was frozen from, zeroing
-        // anonymous frames through the kernel's one direct physical map. No
-        // `'static` allocator, a window the allocator rejects, or a CPU set that
-        // cannot be allocated retains
-        // none and PID 1's `mem_map` / `mmio_map` fail closed.
-        let live: Option<Arc<ProcessSpace>> = ctx.static_frames().and_then(|frames| {
-            spawn_layout::process_space(
-                space,
-                ctx.space_tlb(),
-                ConfiguredPhysMap,
-                frames,
-                &WINDOWS,
-                super::USER_VA_TOP,
-                &pre_resume,
-                &USER_MODE,
-            )
-        });
+            },
+            &USER_MODE,
+        ) else {
+            return;
+        };
 
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 
@@ -229,16 +225,13 @@ impl InitSpawn for RiscvInitSpawn {
         unsafe {
             ctx.admit_init(
                 spawn_layout::init_caps(),
-                frozen,
+                retained.frozen,
                 physmap,
                 stack_span,
                 kernel_stack,
-                pre_resume,
-                live,
-                UserThreadEntry {
-                    port: &USER_MODE,
-                    regs: entry,
-                },
+                retained.pre_resume,
+                retained.live,
+                retained.entry,
             );
         }
     }

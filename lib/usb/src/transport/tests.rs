@@ -20,9 +20,10 @@ use core::num::NonZeroU32;
 
 use super::{
     control_permitted, drive_urb, frame_completion, on_own_endpoint, read_configuration,
-    ConfigurationError, Deadline, IsoSlotDone, IsoStreamShape, UrbCall, UrbClient, UrbDone,
-    UrbEngine, UrbLink, UrbScope, CTRL_DATA_LEN,
+    read_serial_number, ConfigurationError, Deadline, DeviceSerial, IsoSlotDone, IsoStreamShape,
+    UrbCall, UrbClient, UrbDone, UrbEngine, UrbLink, UrbScope, CTRL_DATA_LEN,
 };
+use crate::device::SerialNumber;
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::usb_urb::{
     IsoGrant, IsoLayout, IsoStartParams, ReportCompletion, UrbRequest, UsbDirection, UsbRequest,
@@ -1166,4 +1167,81 @@ fn a_configuration_too_long_short_delivered_or_malformed_is_refused() {
     );
     let refused = read_configuration(&mut |_, _| Err(Errno::NotFound));
     assert_eq!(refused, Err(ConfigurationError::Transfer(Errno::NotFound)));
+}
+
+/// The serial number the scripted storage device spells.
+const SERIAL: [u16; 4] = [0x0041, 0x0030, 0x0031, 0x0046];
+
+/// What a serial read answers, and each request's descriptor type and index.
+type SerialRead = (Result<Option<DeviceSerial>, Errno>, Vec<(u8, u8)>);
+
+/// What a storage device naming serial string `index`, spelled `serial`,
+/// answers to the serial read, and each request's descriptor type and index.
+fn serial_reads(index: u8, serial: &[u8]) -> SerialRead {
+    let mut device = [0u8; 18];
+    device[..2].copy_from_slice(&[18, 0x01]);
+    device[8..12].copy_from_slice(&[0x81, 0x07, 0x81, 0x55]);
+    device[16] = index;
+    device[17] = 1;
+    let langids = [4u8, 0x03, 0x09, 0x04];
+    let mut asked = Vec::new();
+    let result = read_serial_number(&mut |setup, data| {
+        asked.push((setup[3], setup[2]));
+        let answer: &[u8] = match (setup[3], setup[2]) {
+            (0x01, _) => &device,
+            (0x03, 0) => &langids,
+            _ => serial,
+        };
+        let n = data.len().min(answer.len());
+        data[..n].copy_from_slice(&answer[..n]);
+        Ok(n)
+    });
+    (result, asked)
+}
+
+/// A string descriptor spelling `units`.
+fn string_of(units: &[u16]) -> Vec<u8> {
+    let mut string = vec![u8::try_from(2 + 2 * units.len()).expect("short"), 0x03];
+    for unit in units {
+        string.extend_from_slice(&unit.to_le_bytes());
+    }
+    string
+}
+
+#[test]
+fn a_serial_is_read_from_the_string_its_descriptor_names_in_the_first_language() {
+    let (read, asked) = serial_reads(3, &string_of(&SERIAL));
+    assert_eq!(
+        read,
+        Ok(Some(DeviceSerial {
+            vendor_id: 0x0781,
+            product_id: 0x5581,
+            serial: SerialNumber::new(&SERIAL).expect("a serial"),
+        }))
+    );
+    assert_eq!(
+        asked,
+        [(0x01, 0), (0x03, 0), (0x03, 0), (0x03, 3), (0x03, 3)]
+    );
+}
+
+#[test]
+fn a_device_naming_no_serial_or_babbling_one_reads_none() {
+    let (read, asked) = serial_reads(0, &string_of(&SERIAL));
+    assert_eq!(read, Ok(None));
+    assert_eq!(
+        asked,
+        [(0x01, 0)],
+        "no string is asked of a device naming none"
+    );
+    let mut odd = string_of(&SERIAL);
+    odd[0] = 9;
+    assert_eq!(serial_reads(3, &odd).0, Ok(None), "a header no string has");
+    assert_eq!(
+        serial_reads(3, &string_of(&[])).0,
+        Ok(None),
+        "an empty serial"
+    );
+    let refused = read_serial_number(&mut |_, _| Err(Errno::NotFound));
+    assert_eq!(refused, Err(Errno::NotFound));
 }

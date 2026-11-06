@@ -7,9 +7,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_browse::{
-    FilerPreferences, Folders, SortDirection, SortKey, Start, ToolbarBand, ViewMode, SORT_KEYS,
+    DriveClass, FilerPreferences, Folders, SortDirection, SortKey, Start, ToolbarBand, ViewMode,
+    SORT_KEYS,
 };
-use tairix_controls::{ComboBox, FieldControl, FieldRow};
+use tairix_controls::{Checkbox, ComboBox, FieldControl, FieldRow, SelectionState};
 
 use crate::form::{pick, set, switch_label, SWITCH};
 use crate::machine::UNREAD;
@@ -41,6 +42,8 @@ pub(crate) enum FilesSetting {
     Thumbnails,
     /// Whether a folder is drawn as what it holds.
     FolderContents,
+    /// Whether the desktop shows each attached drive of the class.
+    Desktop(DriveClass),
     /// Whether moving items to the Trash asks first.
     ConfirmTrash,
     /// Whether a disk image or archive the user opened is unmounted once its
@@ -64,6 +67,7 @@ impl FilesSetting {
             Self::HiddenItems => "Show hidden items",
             Self::Thumbnails => "Show pictures as their content",
             Self::FolderContents => "Show what folders hold",
+            Self::Desktop(class) => class.label(),
             Self::ConfirmTrash => "Ask before moving items to the Trash",
             Self::UnmountWhenClosed => "Unmount disk images once closed",
         }
@@ -85,6 +89,13 @@ impl FilesSetting {
             Self::HiddenItems => "Items whose names begin with a dot.",
             Self::Thumbnails => "A picture is drawn as what it shows, once it has been read.",
             Self::FolderContents => "A folder is drawn holding pictures of what is in it.",
+            Self::Desktop(class) => match class {
+                DriveClass::System => "The root, /, that every other folder is reached from.",
+                DriveClass::Fixed => "Disks inside the computer.",
+                DriveClass::Removable => "Memory sticks, cards and disks you can take out.",
+                DriveClass::Network => "Shares on other computers you have connected to.",
+                DriveClass::Images => "Disk images and archives you have opened.",
+            },
             Self::ConfirmTrash => "Deleting for good always asks.",
             Self::UnmountWhenClosed => {
                 "A disk image or archive you open is unmounted when its last window closes, \
@@ -95,10 +106,11 @@ impl FilesSetting {
     }
 
     /// The labels this settable offers, and the index of the one `settings`
-    /// hold, in the order [`adopt`](Self::adopt) takes them.
-    fn offer(self, settings: &FilerPreferences) -> (Vec<String>, usize) {
+    /// hold, in the order [`adopt`](Self::adopt) takes them; `None` for a
+    /// box, which offers no list.
+    fn offer(self, settings: &FilerPreferences) -> Option<(Vec<String>, usize)> {
         let switch = |on| pick(&SWITCH, on, switch_label);
-        match self {
+        Some(match self {
             Self::Start => pick(&Start::ALL, settings.start, Start::label),
             Self::Places => switch(settings.places),
             Self::Toolbar => switch(settings.toolbar.is_shown()),
@@ -117,7 +129,8 @@ impl FilesSetting {
             Self::FolderContents => switch(settings.presentation.pictures.folder_contents),
             Self::ConfirmTrash => switch(settings.confirm_trash),
             Self::UnmountWhenClosed => switch(settings.unmount_when_closed),
-        }
+            Self::Desktop(_) => return None,
+        })
     }
 
     /// The row this settable draws, showing what `settings` hold, or that
@@ -128,15 +141,20 @@ impl FilesSetting {
             return FieldRow::new(self.label(), FieldControl::Unmeasured(String::from(UNREAD)))
                 .with_description(self.description());
         };
-        let (choices, held) = self.offer(settings);
-        let mut combo = ComboBox::new(choices);
-        combo.set_selected(held);
-        FieldRow::new(self.label(), FieldControl::Combo(combo)).with_description(self.description())
+        let control = if let Some((choices, held)) = self.offer(settings) {
+            let mut combo = ComboBox::new(choices);
+            combo.set_selected(held);
+            FieldControl::Combo(combo)
+        } else {
+            let ticked = SelectionState::of(self.ticked(settings));
+            FieldControl::Checkbox(Checkbox::new("", ticked))
+        };
+        FieldRow::new(self.label(), control).with_description(self.description())
     }
 
     /// Take the choice at `index` into `settings`, answering whether the
     /// index named one. An index outside the list [`offer`](Self::offer)
-    /// built changes nothing.
+    /// built changes nothing, and a box offers none.
     pub(crate) fn adopt(self, index: usize, settings: &mut FilerPreferences) -> bool {
         let switched = |on: &mut bool| set(&SWITCH, index, on);
         let picked = SWITCH.get(index).copied();
@@ -159,7 +177,23 @@ impl FilesSetting {
             Self::FolderContents => switched(&mut settings.presentation.pictures.folder_contents),
             Self::ConfirmTrash => switched(&mut settings.confirm_trash),
             Self::UnmountWhenClosed => switched(&mut settings.unmount_when_closed),
+            Self::Desktop(_) => false,
         }
+    }
+
+    /// Whether this settable's box is ticked in `settings`.
+    fn ticked(self, settings: &FilerPreferences) -> bool {
+        matches!(self, Self::Desktop(class) if settings.desktop.shows(class))
+    }
+
+    /// Tick or clear this settable's box in `settings`, answering whether it
+    /// draws one.
+    pub(crate) fn tick(self, on: bool, settings: &mut FilerPreferences) -> bool {
+        let Self::Desktop(class) = self else {
+            return false;
+        };
+        *settings.desktop.setting_mut(class) = on;
+        true
     }
 }
 

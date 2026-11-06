@@ -362,3 +362,62 @@ fn late_damage_waits_for_a_flipping_displays_latch_and_none_holds_nothing() {
         "admitted at the latch"
     );
 }
+
+/// While no frame reaches the screen, the presents held behind one are
+/// answered once a period: the first at once, the next once its period has
+/// run.
+#[test]
+fn a_dark_screen_answers_held_presents_once_a_period() {
+    let mut pacer = FramePacer::new();
+    assert!(pacer.answers_due(0, RATE), "answered at once");
+    assert!(
+        !pacer.answers_due(SAMPLE_NS, RATE),
+        "the next waits for the period"
+    );
+    assert_eq!(
+        pacer.answers_deadline_ns(SAMPLE_NS, WAITSET_TIMEOUT_NONE, RATE, true),
+        RATE.frame_ns() - SAMPLE_NS,
+        "its one shot is the period's end"
+    );
+    assert!(pacer.answers_due(RATE.frame_ns(), RATE));
+}
+
+/// Nothing held arms nothing, however long the screen stays dark.
+#[test]
+fn a_dark_screen_holding_nothing_arms_no_timer() {
+    let mut pacer = FramePacer::new();
+    assert!(pacer.answers_due(0, RATE));
+    assert_eq!(
+        pacer.answers_deadline_ns(SAMPLE_NS, WAITSET_TIMEOUT_NONE, RATE, false),
+        WAITSET_TIMEOUT_NONE
+    );
+}
+
+/// A client streaming into the dark is answered at the screen's own rate
+/// however often it presents.
+#[test]
+fn a_stream_in_the_dark_is_answered_at_the_screens_rate() {
+    let mut pacer = FramePacer::new();
+    let periods = 10u64;
+    let mut answered = 0u64;
+    let mut at = 0u64;
+    while at <= RATE.frame_ns() * periods {
+        if pacer.answers_due(at, RATE) {
+            answered += 1;
+        }
+        at += SAMPLE_NS;
+    }
+    assert!(
+        (periods - 1..=periods + 1).contains(&answered),
+        "{answered} answers over {periods} periods"
+    );
+}
+
+/// A clock that jumped behind the last answer answers rather than stalling a
+/// client for the length of the jump.
+#[test]
+fn a_clock_that_jumped_backwards_answers_held_presents_at_once() {
+    let mut pacer = FramePacer::new();
+    assert!(pacer.answers_due(RATE.frame_ns() * 4, RATE));
+    assert!(pacer.answers_due(0, RATE));
+}

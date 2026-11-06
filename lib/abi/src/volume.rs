@@ -17,9 +17,10 @@
 //! type its signature probe matched, and the catalog name the volume's
 //! root is projected under (`/Storage/<name>` — the `Storage:` catalog
 //! view location). Naming *policy* (label sanitisation, collision
-//! fingerprints) is the volume manager's job; this layer enforces only
-//! the structural spelling bounds so a malformed name can never reach the
-//! mount table.
+//! fingerprints) is the volume manager's job, the kernel adding only a
+//! twin's `_<n>` (`docs/src/filesystem/drives.md` §7); this layer enforces
+//! only the structural spelling bounds so a malformed name can never reach
+//! the mount table.
 //!
 //! The volume a user-space filesystem driver serves (`plans/FSSERVE.md` §4)
 //! is reached through `volume_read`, `volume_write` and `volume_ctl`, whose
@@ -142,6 +143,25 @@ impl VolumeFsType {
             | Self::Spark
             | Self::ArcFs
             | Self::Rar => true,
+        }
+    }
+
+    /// Whether a volume of this type takes a title: its format records a
+    /// label its driver sets
+    /// ([`FilesystemLabel`](crate::driver::filesystem::FilesystemLabel)). A
+    /// disc's title is fixed when it is mastered, and an archive keeps none.
+    #[must_use]
+    pub const fn takes_title(self) -> bool {
+        match self {
+            Self::ARXFS | Self::Ext4 | Self::Fat32 | Self::Udf | Self::Adfs | Self::Affs => true,
+            Self::Iso9660
+            | Self::Zip
+            | Self::Tar
+            | Self::Gzip
+            | Self::Bzip2
+            | Self::Spark
+            | Self::ArcFs
+            | Self::Rar => false,
         }
     }
 
@@ -383,9 +403,15 @@ impl FormatName {
 /// bounded.
 pub const VOLUME_NAME_MAX: usize = 32;
 
-/// Byte length of the 16-byte volume identity every detach names — the
-/// same stable identity the volume forest publishes for `id::` paths.
+/// Byte length of the 16-byte volume key every detach names — the key the
+/// volume forest publishes the volume under for `id::` paths: its stable
+/// identity, or a twin's own.
 pub const VOLUME_ID_LEN: usize = 16;
+
+/// The most volumes carrying one identity `volume_attach` holds at once: the
+/// first and its twins, each costing a driver process. A containment bound,
+/// fixed; the next is refused [`Errno::LimitExceeded`].
+pub const VOLUME_TWINS_MAX: u8 = 16;
 
 /// Fixed prefix of a [`VolumeAttachRequest`] frame:
 /// `endpoint(8) || window(8) || first_lba(8) || blocks(8) || fstype(1) ||
@@ -402,6 +428,10 @@ pub const VOLUME_DETACH_LEN: usize = VOLUME_ID_LEN + 1;
 /// Maximum encoded length of a [`VolumeRetitleRequest`]: the volume identity,
 /// the title's length byte, and the longest title.
 pub const VOLUME_RETITLE_MAX_LEN: usize = VOLUME_ID_LEN + 1 + VOLUME_TITLE_MAX;
+
+/// Encoded length of a [`VolumeReplayRequest`]: the volume's key plus the
+/// [`ReplayAnswer`] byte.
+pub const VOLUME_REPLAY_LEN: usize = VOLUME_ID_LEN + 1;
 
 /// The most one `volume_read` or `volume_write` moves: one served window,
 /// so a driver reads the data a call asks for in one transfer.
@@ -833,9 +863,9 @@ pub struct VolumeAttachRequest<'a> {
     pub blocks: u64,
     /// The filesystem driver to attach.
     pub fstype: VolumeFsType,
-    /// The catalog name the volume's root is projected under
-    /// (`/Storage/<name>`), already policy-derived by the caller and
-    /// structurally validated here.
+    /// The catalog name asked for the volume's root (`/Storage/<name>`),
+    /// already policy-derived by the caller and structurally validated here;
+    /// a twin of a volume holding it is shown as `<name>_<n>` instead.
     pub name: &'a [u8],
 }
 
@@ -997,7 +1027,7 @@ impl DetachMode {
 /// a detach needs.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct VolumeDetachRequest {
-    /// The volume's stable 16-byte identity, as the forest published it.
+    /// The key the forest published the volume under.
     pub volume_id: [u8; VOLUME_ID_LEN],
     /// How the volume is taken down.
     pub mode: DetachMode,
@@ -1053,7 +1083,7 @@ impl VolumeDetachRequest {
 /// what is asked.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct VolumeRetitleRequest {
-    /// The volume's stable 16-byte identity, as the forest published it.
+    /// The key the forest published the volume under.
     pub volume_id: [u8; VOLUME_ID_LEN],
     /// The title asked for, empty to clear it.
     pub title: VolumeTitle,
@@ -1104,6 +1134,96 @@ impl VolumeRetitleRequest {
         Ok(Self {
             volume_id: *id,
             title,
+        })
+    }
+}
+
+/// What an answer makes of the writes a re-inserted volume holds while its
+/// device cannot prove the medium the one they were made on
+/// ([`MountAvailability::ReplayUnconfirmed`](crate::sysinfo::MountAvailability::ReplayUnconfirmed)).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ReplayAnswer {
+    /// Write them to the medium, whose content must still prove it
+    /// unmutated.
+    Write = 1,
+    /// Give them up and take the medium as it stands.
+    Discard = 2,
+}
+
+impl ReplayAnswer {
+    /// The wire byte for this answer.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Recover an answer from its wire byte.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `value` names no answer: a zeroed frame is
+    /// never read as one.
+    pub const fn from_u8(value: u8) -> Result<Self, Errno> {
+        match value {
+            1 => Ok(Self::Write),
+            2 => Ok(Self::Discard),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// An answer for the writes held for the volume published as `volume_id`.
+/// The kernel decides who may answer; the frame carries only what is asked.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct VolumeReplayRequest {
+    /// The key the forest published the volume under.
+    pub volume_id: [u8; VOLUME_ID_LEN],
+    /// What becomes of the writes.
+    pub answer: ReplayAnswer,
+}
+
+impl VolumeReplayRequest {
+    /// Encode `self` into `buf`, returning the number of bytes written.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::OutOfRange`] for the reserved all-zero identity.
+    /// * [`Errno::BufferTooSmall`] if `buf` cannot hold
+    ///   [`VOLUME_REPLAY_LEN`] bytes.
+    pub fn encode(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+        if self.volume_id == [0u8; VOLUME_ID_LEN] {
+            return Err(Errno::OutOfRange);
+        }
+        let out = buf
+            .get_mut(..VOLUME_REPLAY_LEN)
+            .ok_or(Errno::BufferTooSmall)?;
+        out[..VOLUME_ID_LEN].copy_from_slice(&self.volume_id);
+        out[VOLUME_ID_LEN] = self.answer.as_u8();
+        Ok(VOLUME_REPLAY_LEN)
+    }
+
+    /// Decode an answer from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::LengthOutOfRange`] if `bytes` is not exactly
+    ///   [`VOLUME_REPLAY_LEN`] bytes.
+    /// * [`Errno::OutOfRange`] for the reserved all-zero identity, or an
+    ///   answer byte naming no [`ReplayAnswer`].
+    pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
+        let (id, rest) = bytes
+            .split_first_chunk::<VOLUME_ID_LEN>()
+            .ok_or(Errno::LengthOutOfRange)?;
+        let [answer] = rest else {
+            return Err(Errno::LengthOutOfRange);
+        };
+        if *id == [0u8; VOLUME_ID_LEN] {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self {
+            volume_id: *id,
+            answer: ReplayAnswer::from_u8(*answer)?,
         })
     }
 }
@@ -1527,6 +1647,27 @@ mod tests {
         );
     }
 
+    /// A writable format's own label takes a title; a disc's is fixed when it
+    /// is mastered, and an archive keeps none.
+    #[test]
+    fn only_a_format_recording_a_settable_label_takes_a_title() {
+        let titled: alloc::vec::Vec<VolumeFsType> = VolumeFsType::ALL
+            .into_iter()
+            .filter(|fstype| fstype.takes_title())
+            .collect();
+        assert_eq!(
+            titled,
+            [
+                VolumeFsType::ARXFS,
+                VolumeFsType::Ext4,
+                VolumeFsType::Fat32,
+                VolumeFsType::Udf,
+                VolumeFsType::Adfs,
+                VolumeFsType::Affs,
+            ]
+        );
+    }
+
     #[test]
     fn attach_round_trips() {
         let req = attach();
@@ -1750,6 +1891,58 @@ mod tests {
                 Err(Errno::OutOfRange)
             );
         }
+    }
+
+    /// An answer frame round-trips both answers, and fails closed on the nil
+    /// identity, a byte naming no answer, and any other length.
+    #[test]
+    fn a_replay_answer_round_trips_and_fails_closed() {
+        for answer in [ReplayAnswer::Write, ReplayAnswer::Discard] {
+            let req = VolumeReplayRequest {
+                volume_id: [5; VOLUME_ID_LEN],
+                answer,
+            };
+            let mut buf = [0u8; VOLUME_REPLAY_LEN];
+            assert_eq!(req.encode(&mut buf), Ok(VOLUME_REPLAY_LEN));
+            assert_eq!(VolumeReplayRequest::decode(&buf), Ok(req));
+            assert_eq!(
+                req.encode(&mut [0u8; VOLUME_REPLAY_LEN - 1]),
+                Err(Errno::BufferTooSmall)
+            );
+        }
+        let nil = VolumeReplayRequest {
+            volume_id: [0; VOLUME_ID_LEN],
+            answer: ReplayAnswer::Write,
+        };
+        assert_eq!(
+            nil.encode(&mut [0u8; VOLUME_REPLAY_LEN]),
+            Err(Errno::OutOfRange)
+        );
+        let mut frame = [5u8; VOLUME_REPLAY_LEN];
+        for bad in [0, 3, 0xFF] {
+            frame[VOLUME_ID_LEN] = bad;
+            assert_eq!(
+                VolumeReplayRequest::decode(&frame),
+                Err(Errno::OutOfRange),
+                "{bad}"
+            );
+        }
+        frame[VOLUME_ID_LEN] = ReplayAnswer::Discard.as_u8();
+        let mut zeroed = frame;
+        zeroed[..VOLUME_ID_LEN].fill(0);
+        assert_eq!(VolumeReplayRequest::decode(&zeroed), Err(Errno::OutOfRange));
+        for short in [0, VOLUME_ID_LEN] {
+            assert_eq!(
+                VolumeReplayRequest::decode(&frame[..short]),
+                Err(Errno::LengthOutOfRange)
+            );
+        }
+        let mut long = [5u8; VOLUME_REPLAY_LEN + 1];
+        long[VOLUME_ID_LEN] = ReplayAnswer::Write.as_u8();
+        assert_eq!(
+            VolumeReplayRequest::decode(&long),
+            Err(Errno::LengthOutOfRange)
+        );
     }
 
     #[test]

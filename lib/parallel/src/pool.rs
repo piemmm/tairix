@@ -566,15 +566,15 @@ fn word_of(word: &AtomicU32) -> u64 {
 }
 
 /// Park until `word` is woken, unless it no longer holds `expected`.
-fn wait(word: &AtomicU32, expected: u32) {
-    // SAFETY: `word` is a live, naturally aligned `AtomicU32` inside the `Shared`
-    // an `Arc` keeps alive for every participant of this pool, so it is valid for
-    // the call; the kernel resolves the address against this process's own space.
+pub(crate) fn wait(word: &AtomicU32, expected: u32) {
+    // SAFETY: `word` is a live, naturally aligned `AtomicU32` the caller borrows
+    // for the call, so it is valid while the kernel reads it; the kernel resolves
+    // the address against this process's own space.
     let _ = unsafe { tairix_rt::futex_wait(word_of(word), expected, NO_TIMEOUT) };
 }
 
 /// Wake up to `count` participants parked on `word`.
-fn wake(word: &AtomicU32, count: u32) {
+pub(crate) fn wake(word: &AtomicU32, count: u32) {
     // SAFETY: as `wait`. The futex key is `(this process, address)` and the kernel
     // dereferences nothing, so a word with no waiters wakes no one.
     let _ = unsafe { tairix_rt::futex_wake(word_of(word), count) };

@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::imageattach::ImageAccess;
-use tairix_abi::volume::{validate_volume_name, FormatName, VolumeFsTypes};
+use tairix_abi::volume::{validate_volume_name, FormatName, ReplayAnswer, VolumeFsTypes};
 use tairix_abi::STORAGE_CATALOG;
 use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
 
@@ -13,13 +13,35 @@ use crate::error::MountError;
 /// One thing the `mount` tool can do.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
-    /// List the mount table (no operands), the types it shows as `-t` names
-    /// them.
-    List(TypeFilter),
+    /// List the mount table (no operands), as [`Listing`] narrows it.
+    List(Listing),
     /// Mount a disk image (one or two operands).
     Mount(MountRequest),
+    /// Answer for the writes a volume holds awaiting one (`--replay-held`,
+    /// `--discard-held`).
+    Answer(HeldAnswer),
     /// Print the tool's own short help (`-h`, `-?`, `--help`).
     Help,
+}
+
+/// What a listing shows.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Listing {
+    /// The types it shows, as `-t` names them.
+    pub types: TypeFilter,
+    /// Only the volumes holding writes awaiting an answer (`--list-held`).
+    pub held: bool,
+}
+
+/// An answer for the writes the volume `name` names holds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HeldAnswer {
+    /// The volume, as given.
+    pub name: String,
+    /// What becomes of its writes.
+    pub answer: ReplayAnswer,
+    /// Whether to say what became of them (`-v`).
+    pub verbose: bool,
 }
 
 /// A disk image to mount, and how.
@@ -108,11 +130,16 @@ enum Flag {
     Options,
     Verbose,
     ShowLabels,
+    ListHeld,
+    ReplayHeld,
+    DiscardHeld,
     Help,
 }
 
-/// `mount`'s options, as util-linux spells them, and the reserved help
-/// switches.
+/// `mount`'s options, as util-linux spells them, TAIRiX's own for held
+/// writes, and the reserved help switches. The held-write options are long
+/// alone, so they take no letter util-linux means otherwise, and leave every
+/// abbreviation an older option had as it was.
 const OPTIONS: &[Opt<Flag>] = &[
     Opt::flag('r', &["read-only"], Flag::ReadOnly),
     Opt::flag('w', &["rw", "read-write"], Flag::ReadWrite),
@@ -120,6 +147,9 @@ const OPTIONS: &[Opt<Flag>] = &[
     Opt::valued('o', &["options"], Flag::Options),
     Opt::flag('v', &["verbose"], Flag::Verbose),
     Opt::flag('l', &["show-labels"], Flag::ShowLabels),
+    Opt::long(&["list-held"], Takes::Nothing, Flag::ListHeld),
+    Opt::long(&["replay-held"], Takes::Value, Flag::ReplayHeld),
+    Opt::long(&["discard-held"], Takes::Value, Flag::DiscardHeld),
     Opt::flag('h', &["help"], Flag::Help),
     Opt::letter('?', Takes::Nothing, Flag::Help),
 ];
@@ -128,9 +158,10 @@ const OPTIONS: &[Opt<Flag>] = &[
 /// [`Command`].
 ///
 /// The grammar is `mount [-lrvw] [-t TYPE] [-o OPTIONS] [--] [IMAGE [TARGET]]`,
+/// or `mount [-v] --list-held | --replay-held NAME | --discard-held NAME`,
 /// read as GNU's `getopt_long` reads it ([`Scan`]): options anywhere among
-/// the operands, clustered, `-t`'s and `-o`'s value attached or the next
-/// argument, a long option by any unambiguous prefix, `--` ending them.
+/// the operands, clustered, a value attached or the next argument, a long
+/// option by any unambiguous prefix, `--` ending them.
 ///
 /// * no operands — list the mount table, only the types `-t` names; `-v`
 ///   and `-l` change nothing of it, the listing carrying no labels.
@@ -145,63 +176,47 @@ const OPTIONS: &[Opt<Flag>] = &[
 ///   holds; what it holds is recognised, so the order chooses nothing.
 /// * `-o LIST` — a comma-separated subset of `ro`, `rw`, `noexec`, `loop`
 ///   and `name=NAME`.
-/// * `-v` — say where it was mounted.
+/// * `-v` — say where it was mounted, or what became of held writes.
+/// * `--list-held` — list only the volumes holding writes awaiting an answer.
+/// * `--replay-held NAME`, `--discard-held NAME` — answer for the writes the
+///   volume `NAME` names holds: written to its medium, or given up.
 /// * `-h`, `-?`, `--help` — the short help (wins immediately).
 ///
 /// # Errors
 ///
 /// * [`MountError::Option`] — an option `getopt` refuses, in its words.
 /// * [`MountError::Usage`] — more than two operands, `-r`, `-w` or `-o` with
-///   nothing to mount, or two different names asked for.
+///   nothing to mount, two different names asked for, an operand beside
+///   `--list-held`, or an answer that is not one alone naming a volume.
 /// * [`MountError::BadOption`] — an unknown or empty `-o` element, or a `-t`
 ///   list naming an empty type.
 /// * [`MountError::BadName`] — a name no volume may take.
 /// * [`MountError::UnknownType`] — a `-t` list naming no filesystem a disk
 ///   image holds.
 pub fn parse(args: &[&str]) -> Result<Command, MountError> {
-    let mut read_only = false;
-    let mut forced = false;
-    let mut verbose = false;
-    let mut types: Option<&str> = None;
-    let mut name: Option<String> = None;
-    let mut operands: Vec<&str> = Vec::new();
-    let mut asks_a_mount = false;
-
-    for arg in Scan::new(OPTIONS, args, Order::Permute) {
-        let arg = arg.map_err(MountError::Option)?;
-        asks_a_mount |= matches!(
-            arg,
-            Arg::Opt(Flag::ReadOnly | Flag::ReadWrite | Flag::Options, _)
-        );
-        match arg {
-            Arg::Operand(operand) => operands.push(operand),
-            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
-            Arg::Opt(Flag::ReadOnly, _) => {
-                read_only = true;
-                forced = false;
-            }
-            Arg::Opt(Flag::ReadWrite, _) => {
-                read_only = false;
-                forced = true;
-            }
-            Arg::Opt(Flag::Verbose, _) => verbose = true,
-            Arg::Opt(Flag::ShowLabels, _) => {}
-            Arg::Opt(Flag::Types, value) => types = Some(value.unwrap_or_default()),
-            Arg::Opt(Flag::Options, value) => {
-                for element in value.unwrap_or_default().split(',') {
-                    match MountOption::parse(element)? {
-                        MountOption::ReadOnly(asked) => read_only = asked,
-                        MountOption::Name(asked) => name = Some(String::from(asked)),
-                        MountOption::Implied => {}
-                    }
-                }
-            }
-        }
+    let Some(asked) = Asked::scan(args)? else {
+        return Ok(Command::Help);
+    };
+    if !asked.answers.is_empty() {
+        return asked.answer();
     }
-
+    let Asked {
+        writability,
+        verbose,
+        types,
+        mut name,
+        operands,
+        asks_a_mount,
+        held,
+        ..
+    } = asked;
     let (image, target) = match operands.as_slice() {
         [] if asks_a_mount => return Err(MountError::Usage),
-        [] => return TypeFilter::parse(types.unwrap_or_default(), false).map(Command::List),
+        [] => {
+            let types = TypeFilter::parse(types.unwrap_or_default(), false)?;
+            return Ok(Command::List(Listing { types, held }));
+        }
+        _ if held => return Err(MountError::Usage),
         [image] => (*image, None),
         [image, target] => (*image, Some(*target)),
         _ => return Err(MountError::Usage),
@@ -228,21 +243,131 @@ pub fn parse(args: &[&str]) -> Result<Command, MountError> {
             })?,
         ),
     };
-    let access = if read_only {
-        ImageAccess::ReadOnly
-    } else if forced {
-        ImageAccess::Writable
-    } else {
-        ImageAccess::WritableWherePossible
-    };
     Ok(Command::Mount(MountRequest {
         image: String::from(image),
         name,
         target,
         expects,
-        access,
+        access: writability.access(),
         verbose,
     }))
+}
+
+/// How writable `-r`, `-w` and `-o` have asked a mount to be: the last of
+/// `-r` and `-o ro` against `-w` and `-o rw` decides read-only, and `-w`'s
+/// read-write-or-nothing stands until a later `-r` takes it back.
+#[derive(Clone, Copy, Default)]
+struct Writability {
+    read_only: bool,
+    forced: bool,
+}
+
+impl Writability {
+    /// What the attach is asked for.
+    const fn access(self) -> ImageAccess {
+        if self.read_only {
+            ImageAccess::ReadOnly
+        } else if self.forced {
+            ImageAccess::Writable
+        } else {
+            ImageAccess::WritableWherePossible
+        }
+    }
+}
+
+/// What a command line asked, as the scan read it.
+#[derive(Default)]
+struct Asked<'a> {
+    writability: Writability,
+    verbose: bool,
+    types: Option<&'a str>,
+    name: Option<String>,
+    operands: Vec<&'a str>,
+    /// `-r`, `-w` or `-o`, which only a mount takes.
+    asks_a_mount: bool,
+    held: bool,
+    /// Each `--replay-held` and `--discard-held`, with the volume it names.
+    answers: Vec<(ReplayAnswer, &'a str)>,
+}
+
+impl<'a> Asked<'a> {
+    /// Read `args` as `getopt_long` does, or `None` for the short help, which
+    /// wins immediately.
+    fn scan(args: &'a [&'a str]) -> Result<Option<Self>, MountError> {
+        let mut asked = Self::default();
+        for arg in Scan::new(OPTIONS, args, Order::Permute) {
+            let arg = arg.map_err(MountError::Option)?;
+            asked.asks_a_mount |= matches!(
+                arg,
+                Arg::Opt(Flag::ReadOnly | Flag::ReadWrite | Flag::Options, _)
+            );
+            match arg {
+                Arg::Operand(operand) => asked.operands.push(operand),
+                Arg::Opt(Flag::Help, _) => return Ok(None),
+                Arg::Opt(Flag::ReadOnly, _) => {
+                    asked.writability = Writability {
+                        read_only: true,
+                        forced: false,
+                    };
+                }
+                Arg::Opt(Flag::ReadWrite, _) => {
+                    asked.writability = Writability {
+                        read_only: false,
+                        forced: true,
+                    };
+                }
+                Arg::Opt(Flag::Verbose, _) => asked.verbose = true,
+                Arg::Opt(Flag::ShowLabels, _) => {}
+                Arg::Opt(Flag::Types, value) => asked.types = Some(value.unwrap_or_default()),
+                Arg::Opt(Flag::Options, value) => asked.options(value.unwrap_or_default())?,
+                Arg::Opt(Flag::ListHeld, _) => asked.held = true,
+                Arg::Opt(Flag::ReplayHeld, value) => {
+                    asked
+                        .answers
+                        .push((ReplayAnswer::Write, value.unwrap_or_default()));
+                }
+                Arg::Opt(Flag::DiscardHeld, value) => {
+                    asked
+                        .answers
+                        .push((ReplayAnswer::Discard, value.unwrap_or_default()));
+                }
+            }
+        }
+        Ok(Some(asked))
+    }
+
+    /// Take the `-o` list `list`.
+    fn options(&mut self, list: &str) -> Result<(), MountError> {
+        for element in list.split(',') {
+            match MountOption::parse(element)? {
+                MountOption::ReadOnly(asked) => self.writability.read_only = asked,
+                MountOption::Name(asked) => self.name = Some(String::from(asked)),
+                MountOption::Implied => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// The one answer asked for, naming one volume, with nothing to mount or
+    /// list beside it.
+    fn answer(&self) -> Result<Command, MountError> {
+        let [(answer, name)] = self.answers.as_slice() else {
+            return Err(MountError::Usage);
+        };
+        if name.is_empty()
+            || self.held
+            || self.asks_a_mount
+            || self.types.is_some()
+            || !self.operands.is_empty()
+        {
+            return Err(MountError::Usage);
+        }
+        Ok(Command::Answer(HeldAnswer {
+            name: String::from(*name),
+            answer: *answer,
+            verbose: self.verbose,
+        }))
+    }
 }
 
 /// One element of an `-o` list.
@@ -312,10 +437,11 @@ fn storage_name(target: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, Command, MountRequest, TypeFilter};
+    use super::{parse, Command, HeldAnswer, Listing, MountRequest, TypeFilter};
     use crate::error::MountError;
     use alloc::string::{String, ToString};
     use tairix_abi::imageattach::ImageAccess;
+    use tairix_abi::volume::ReplayAnswer;
     use tairix_abi::volume::VolumeFsType;
     use tairix_abi::volume::VolumeFsTypes;
 
@@ -336,7 +462,7 @@ mod tests {
 
     #[test]
     fn no_arguments_lists_the_mount_table() {
-        let every = Ok(Command::List(TypeFilter::default()));
+        let every = Ok(Command::List(Listing::default()));
         assert_eq!(parse(&[]), every);
         assert_eq!(parse(&["--"]), every);
         assert_eq!(parse(&["-v"]), every, "verbose is no mount option");
@@ -350,10 +476,12 @@ mod tests {
     #[test]
     fn a_listing_shows_the_types_its_list_names() {
         let listed = |args: &[&str]| match parse(args) {
-            Ok(Command::List(filter)) => ["affs", "ISO9660", "fat32", "none"]
-                .into_iter()
-                .filter(|fstype| filter.shows(fstype.as_bytes()))
-                .collect::<alloc::vec::Vec<_>>(),
+            Ok(Command::List(Listing { types, held: false })) => {
+                ["affs", "ISO9660", "fat32", "none"]
+                    .into_iter()
+                    .filter(|fstype| types.shows(fstype.as_bytes()))
+                    .collect::<alloc::vec::Vec<_>>()
+            }
             other => panic!("{args:?} is no listing: {other:?}"),
         };
         assert_eq!(listed(&["-t", "affs,iso9660"]), ["affs", "ISO9660"]);
@@ -650,6 +778,71 @@ mod tests {
         );
         assert_eq!(parse(&["--he"]), Ok(Command::Help));
         assert!(refused(&["--r", "i"]).contains("ambiguous"));
+    }
+
+    /// `--list-held` lists only the volumes holding writes, by any
+    /// unambiguous prefix, and takes no operand or mount option beside it.
+    #[test]
+    fn list_held_lists_only_the_volumes_holding_writes() {
+        let held = Ok(Command::List(Listing {
+            types: TypeFilter::default(),
+            held: true,
+        }));
+        assert_eq!(parse(&["--list-held"]), held);
+        assert_eq!(parse(&["--list", "-v"]), held, "by any unambiguous prefix");
+        for usage in [
+            &["--list-held", "i"][..],
+            &["--list-held", "-r"],
+            &["--list-held", "--replay-held", "usb1"],
+        ] {
+            assert_eq!(parse(usage), Err(MountError::Usage), "{usage:?}");
+        }
+    }
+
+    /// `--replay-held` and `--discard-held` answer for one named volume, by
+    /// any unambiguous prefix, and are refused beside a second answer, an
+    /// operand, a mount option, a type list, or with an empty name.
+    #[test]
+    fn a_held_answer_names_one_volume_and_nothing_else() {
+        let answered =
+            |name: &str, answer: ReplayAnswer, verbose: bool| -> Result<Command, MountError> {
+                Ok(Command::Answer(HeldAnswer {
+                    name: String::from(name),
+                    answer,
+                    verbose,
+                }))
+            };
+        assert_eq!(
+            parse(&["--replay-held", "usb1"]),
+            answered("usb1", ReplayAnswer::Write, false)
+        );
+        assert_eq!(
+            parse(&["--discard-held=/Storage/usb1", "-v"]),
+            answered("/Storage/usb1", ReplayAnswer::Discard, true)
+        );
+        assert_eq!(
+            parse(&["--rep", "usb1"]),
+            answered("usb1", ReplayAnswer::Write, false)
+        );
+        assert_eq!(
+            parse(&["--d", "usb1"]),
+            answered("usb1", ReplayAnswer::Discard, false)
+        );
+        for usage in [
+            &["--replay-held", "usb1", "--discard-held", "usb1"][..],
+            &["--replay-held", "a", "--replay-held", "b"],
+            &["--replay-held", "usb1", "image.adf"],
+            &["--replay-held", "usb1", "-r"],
+            &["--discard-held", "usb1", "-t", "fat32"],
+            &["--discard-held", ""],
+        ] {
+            assert_eq!(parse(usage), Err(MountError::Usage), "{usage:?}");
+        }
+        assert_eq!(
+            refused(&["--replay-held"]),
+            "option '--replay-held' requires an argument"
+        );
+        assert!(refused(&["--re", "usb1"]).contains("ambiguous"));
     }
 
     #[test]

@@ -5,13 +5,15 @@
 //! [`AlertWindow`] is one alert on screen: its compositor window, the shared
 //! [`Alert`] control drawn into it, and the moment its buttons arm. [`Alerts`]
 //! holds the alerts applications raised, by the id the window server minted,
-//! each holding the window it names through the shared [`Holds`].
+//! each holding the window it names through the shared [`Holds`], and the
+//! desktop's own notices and questions.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
+use tairix_abi::volume::VOLUME_ID_LEN;
 use tairix_abi::window_ipc::{AlertSeverity, AlertSpec};
 use tairix_controls::{damage, Alert, AlertAction};
 use tairix_icon::IconKind;
@@ -34,6 +36,10 @@ pub const ALERT_ARM_NS: u64 = 350 * tairix_abi::time::NANOS_PER_MILLI;
 /// second refusal never hides the first, few enough to stay readable.
 pub const DESKTOP_NOTICES_MAX: usize = 4;
 
+/// The most questions for held writes the desktop keeps up at once, so a run
+/// of media coming back cannot pile windows up.
+pub const HELD_QUESTIONS_MAX: usize = 4;
+
 /// How far each further alert is set down and across from the last, in
 /// logical pixels, so one never hides another exactly.
 const CASCADE_STEP: u32 = 24;
@@ -51,6 +57,17 @@ pub enum Speaker<'a> {
     Desktop,
 }
 
+impl<'a> Speaker<'a> {
+    /// The name a title speaks for it by.
+    #[must_use]
+    pub const fn name(self) -> &'a str {
+        match self {
+            Self::App(name) => name,
+            Self::Desktop => DESKTOP,
+        }
+    }
+}
+
 /// An alert window's title: what kind of thing it says and who says it, as
 /// RISC OS titles its error boxes.
 #[must_use]
@@ -60,11 +77,7 @@ pub fn alert_title(severity: AlertSeverity, speaker: Speaker<'_>) -> String {
         AlertSeverity::Warning => "Warning",
         AlertSeverity::Information | AlertSeverity::Question => "Message",
     };
-    let who = match speaker {
-        Speaker::App(name) => name,
-        Speaker::Desktop => DESKTOP,
-    };
-    format!("{kind} from {who}")
+    format!("{kind} from {}", speaker.name())
 }
 
 /// A dialog window's title: who it speaks for, then what its application
@@ -72,10 +85,7 @@ pub fn alert_title(severity: AlertSeverity, speaker: Speaker<'_>) -> String {
 /// elides itself rather than the name.
 #[must_use]
 pub fn dialog_title(speaker: Speaker<'_>, title: &str) -> String {
-    let who = match speaker {
-        Speaker::App(name) => name,
-        Speaker::Desktop => DESKTOP,
-    };
+    let who = speaker.name();
     let title = title.trim();
     if title.is_empty() {
         String::from(who)
@@ -522,8 +532,9 @@ fn draw(
     Some(surface)
 }
 
-/// How far down and across from the centre the `cascade`th alert is set.
-fn cascade_step(scale: Scale, cascade: u32) -> u32 {
+/// How far down and across from the centre the `cascade`th alert is set —
+/// and from its first slot the `cascade`th picker of its own.
+pub(crate) fn cascade_step(scale: Scale, cascade: u32) -> u32 {
     scale.scale_length(CASCADE_STEP).saturating_mul(cascade)
 }
 
@@ -558,19 +569,26 @@ enum Origin {
     Desktop,
     /// The desktop's one *About This System* window, answered like a notice.
     About,
+    /// The desktop's question for the writes the volume published under this
+    /// key holds, whose answer the serve loop carries to the kernel.
+    HeldWrites([u8; VOLUME_ID_LEN]),
 }
 
 /// The alerts up — each application's, by the id the window server minted,
-/// and the desktop's own notices — in the order they went up: the newest
-/// holding a window is the one in front.
+/// and the desktop's own notices and questions — in the order they went up:
+/// the newest holding a window is the one in front.
 ///
 /// Bounded: the server admits at most
 /// [`ALERT_MAX_OPEN`](tairix_abi::window_ipc::ALERT_MAX_OPEN) per
-/// application, and the desktop at most [`DESKTOP_NOTICES_MAX`] notices, so a
-/// scan is the right structure for so few.
+/// application, and the desktop at most [`DESKTOP_NOTICES_MAX`] notices and
+/// [`HELD_QUESTIONS_MAX`] questions, so a scan is the right structure for so
+/// few.
 #[derive(Default)]
 pub struct Alerts {
     up: Vec<AppAlert>,
+    /// The volume and button of each answer given to a question for held
+    /// writes, oldest first, not yet carried to the kernel.
+    held_answers: Vec<([u8; VOLUME_ID_LEN], u8)>,
 }
 
 /// An answer the user gave to one application's alert, for the serve loop to
@@ -650,6 +668,7 @@ impl Alerts {
             Alert::from_spec(spec),
             title,
             Origin::Desktop,
+            true,
             shell,
             compositor,
         )
@@ -676,16 +695,17 @@ impl Alerts {
             return false;
         };
         let alert = Alert::from_spec(&spec).with_picture(IconKind::About);
-        self.open_own(alert, ABOUT_TITLE, Origin::About, shell, compositor)
+        self.open_own(alert, ABOUT_TITLE, Origin::About, true, shell, compositor)
     }
 
     /// Put up `alert`, one of the desktop's own speaking as `origin`, titled
-    /// `title`, holding no window and taking the keyboard.
+    /// `title` and holding no window, taking the keyboard when `focus`.
     fn open_own(
         &mut self,
         alert: Alert,
         title: &str,
         origin: Origin,
+        focus: bool,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> bool {
@@ -694,7 +714,7 @@ impl Alerts {
             alert,
             title,
             None,
-            (cascade, true, false),
+            (cascade, focus, false),
             shell,
             compositor,
         ) {
@@ -721,6 +741,92 @@ impl Alerts {
         if let Some(index) = index {
             self.take_down(index, holds, shell, compositor);
         }
+    }
+
+    /// Put up `spec`, the desktop's question for the writes the volume
+    /// published as `volume` holds, unless one is up for it or
+    /// [`HELD_QUESTIONS_MAX`] are. It answers no gesture of the user's, so it
+    /// takes neither the keyboard nor the front. Returns whether one is up for
+    /// the volume.
+    pub fn ask_held(
+        &mut self,
+        volume: [u8; VOLUME_ID_LEN],
+        spec: &AlertSpec,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> bool {
+        if self.asks_held(&volume) {
+            return true;
+        }
+        if self.held_questions() >= HELD_QUESTIONS_MAX {
+            return false;
+        }
+        let title = alert_title(spec.severity(), Speaker::Desktop);
+        self.open_own(
+            Alert::from_spec(spec),
+            &title,
+            Origin::HeldWrites(volume),
+            false,
+            shell,
+            compositor,
+        )
+    }
+
+    /// Whether the desktop's question for the writes the volume published as
+    /// `volume` holds is up.
+    #[must_use]
+    pub fn asks_held(&self, volume: &[u8; VOLUME_ID_LEN]) -> bool {
+        self.up
+            .iter()
+            .any(|alert| alert.origin == Origin::HeldWrites(*volume))
+    }
+
+    /// How many of the desktop's questions for held writes are up.
+    #[must_use]
+    pub fn held_questions(&self) -> usize {
+        self.up
+            .iter()
+            .filter(|alert| matches!(alert.origin, Origin::HeldWrites(_)))
+            .count()
+    }
+
+    /// Take down, unanswered, every question for held writes whose volume
+    /// `awaits` says no longer awaits an answer.
+    pub fn withdraw_held(
+        &mut self,
+        awaits: impl Fn(&[u8; VOLUME_ID_LEN]) -> bool,
+        holds: &mut Holds,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        loop {
+            let stale = self.up.iter().position(
+                |alert| matches!(alert.origin, Origin::HeldWrites(volume) if !awaits(&volume)),
+            );
+            let Some(index) = stale else {
+                return;
+            };
+            self.take_down(index, holds, shell, compositor);
+        }
+    }
+
+    /// Whether an answer given to a question for held writes waits to be
+    /// carried to the kernel.
+    #[must_use]
+    pub fn held_answered(&self) -> bool {
+        !self.held_answers.is_empty()
+    }
+
+    /// Hand `relay` each answer given to a question for held writes — the
+    /// volume and the button chosen — oldest first, until it turns one down:
+    /// that one, and those after it, wait for the next pass.
+    pub fn relay_held(&mut self, mut relay: impl FnMut(([u8; VOLUME_ID_LEN], u8)) -> bool) {
+        let relayed = self
+            .held_answers
+            .iter()
+            .take_while(|&&answered| relay(answered))
+            .count();
+        self.held_answers.drain(..relayed);
     }
 
     /// Whether compositor window `wm` is one of these alerts.
@@ -835,7 +941,9 @@ impl Alerts {
     }
 
     /// Take alert `index` down, answered with button `chosen`: the answer an
-    /// application is owed, or nothing for the desktop's own notice.
+    /// application is owed, or nothing for the desktop's own notice. A
+    /// question for held writes keeps its answer for [`Self::relay_held`], and
+    /// stays up while there is no room to keep it.
     fn answered(
         &mut self,
         index: usize,
@@ -846,6 +954,10 @@ impl Alerts {
     ) -> Option<Answer> {
         let chosen = u8::try_from(chosen).ok()?;
         let origin = self.up[index].origin;
+        if let Origin::HeldWrites(volume) = origin {
+            self.held_answers.try_reserve(1).ok()?;
+            self.held_answers.push((volume, chosen));
+        }
         self.take_down(index, holds, shell, compositor);
         let Origin::Client { id, .. } = origin else {
             return None;

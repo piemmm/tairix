@@ -475,6 +475,38 @@ fn press_hold_repeat_steps_on_its_own_cadence_and_stops_at_a_bound() {
     assert_eq!(bar.repeat_deadline(0), None);
 }
 
+/// An owner that stops drawing the bar lets go of its press: the held step
+/// and the drag both end, and nothing is due again.
+#[test]
+fn letting_go_ends_a_held_step_or_a_drag_with_nothing_left_due() {
+    let theme = theme();
+    let mut bar = vbar();
+    bar.set_model(bar.model().scroll_to(25));
+    bar.on_pointer(&moved(5, 5), vbounds(), Scale::ONE, &theme, &mut sink());
+    bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink());
+    assert!(bar.repeat_deadline(0).is_some(), "a held step is due");
+    bar.let_go();
+    assert!(!bar.is_pressing());
+    assert_eq!(bar.held(), None);
+    assert_eq!(bar.repeat_deadline(u64::MAX), None, "and stays so");
+
+    let thumb = bar
+        .part_rect(ScrollPart::Thumb, vbounds(), Scale::ONE, &theme)
+        .expect("a thumb");
+    let on_thumb = (thumb.left() + 1, thumb.top() + 1);
+    bar.on_pointer(
+        &moved(on_thumb.0, on_thumb.1),
+        vbounds(),
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink());
+    assert!(bar.is_pressing(), "the thumb is in a drag");
+    bar.let_go();
+    assert!(!bar.is_pressing(), "the drag ended");
+}
+
 #[test]
 fn a_held_step_goes_on_only_while_the_pointer_stays_on_its_button() {
     let theme = theme();
@@ -1112,4 +1144,26 @@ fn a_wheel_at_the_end_reports_nothing() {
         None
     );
     assert!(damage.is_empty(), "the thumb is already at the end");
+}
+
+/// A bar at its least length seats both end buttons breadth-square and a
+/// thumb at its least length between them, at every scale.
+#[test]
+fn a_bar_at_its_least_length_seats_both_buttons_and_a_whole_thumb() {
+    let theme = Theme::dark();
+    for scale in [Scale::ONE, Scale::from_percent(200).expect("a scale")] {
+        let breadth = scale.scale_length(theme.metrics().scrollbar_breadth);
+        let length = ScrollBar::least_length(breadth, scale, &theme);
+        let bounds = Rect::new(0, 0, breadth, length);
+        let bar = vbar();
+        let part = |part| {
+            bar.part_rect(part, bounds, scale, &theme)
+                .expect("the part is drawn")
+        };
+        assert_eq!(part(ScrollPart::Decrement).height, breadth);
+        assert_eq!(part(ScrollPart::Increment).height, breadth);
+        assert!(
+            part(ScrollPart::Thumb).height >= scale.scale_length(theme.metrics().min_thumb_length)
+        );
+    }
 }

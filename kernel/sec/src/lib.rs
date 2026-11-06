@@ -10,9 +10,10 @@
 //! The crate is `no_std` (the audit path and the manifest verifier never
 //! allocate; the identity tables use `alloc::vec::Vec` because they
 //! are sized by the on-disk record count and live for the lifetime of
-//! the running kernel). It depends only on `lib/abi`, `lib/caps`,
-//! `lib/crypto`, and `lib/log` — the surface specified by the Stage 2.4
-//! task brief in `PLAN.md`.
+//! the running kernel). Every allocation the capability table makes is
+//! fallible, so admitting a process answers `OutOfMemory` rather than
+//! aborting the kernel. It depends only on `lib/*` crates and, for the DMA
+//! gate, `kernel/mem`.
 //!
 //! # Module map
 //!
@@ -45,8 +46,8 @@
 //! `captable::uid_zero_gets_no_extra_powers`) lock this invariant in.
 
 #![no_std]
-// `Arc::try_new`, so a record copy the heap refuses fails the mutation
-// instead of aborting the kernel.
+// `Arc::try_new`, so a record, its accounting or a copy of it the heap
+// refuses fails the admission or mutation instead of aborting the kernel.
 #![feature(allocator_api)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
@@ -63,8 +64,8 @@ pub mod session;
 
 pub use audit::AuditEvent;
 pub use captable::{
-    CapTable, JobGeneration, NoRecord, ProcName, ProcessId, Removed, TaskCapabilities, TaskId,
-    ThreadRegisterError, PROC_NAME_MAX,
+    AdmitError, CapTable, JobGeneration, ProcName, ProcessId, Removed, ReplaceError,
+    TaskCapabilities, TaskId, ThreadRegisterError, PROC_NAME_MAX,
 };
 pub use charge::{Charge, ResourceCharges};
 pub use dma::{alloc_dma, free_dma, DmaGateError};

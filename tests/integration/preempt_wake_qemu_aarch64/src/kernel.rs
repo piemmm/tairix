@@ -227,6 +227,10 @@ fn build_el0_space(image: &LoadImage) -> (u64, tairix_arch_api::UserEntry) {
         args: &[b"el0"],
         env: &[],
         canary: CANARY,
+        heap: tairix_abi::HeapRegion {
+            base: USER_HEAP_BASE,
+            len: USER_HEAP_LEN,
+        },
     };
 
     // SAFETY: building the image is itself safe; the returned `UserEntry` is

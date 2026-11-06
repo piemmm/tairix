@@ -8,6 +8,12 @@ mount — 列出已挂载的文件系统，或挂载磁盘映像或归档文件
 
 `mount [option...] image [target]`
 
+`mount --list-held`
+
+`mount --replay-held name`
+
+`mount --discard-held name`
+
 ## DESCRIPTION
 
 不带操作数时，列出已挂载的文件系统：卷每显示在一处，就输出一行
@@ -41,6 +47,14 @@ mount — 列出已挂载的文件系统，或挂载磁盘映像或归档文件
 始终被遵循的文件系统（ext2、ext3、ext4、ARXFS），则不会被挂载，`mount`
 会说明原因。
 
+若一块磁盘在仍保有尚未写入它的更改时被重新插回，而其设备无法证明它是
+同一块磁盘而非副本，则它会以只读方式挂载，更改予以保留；列表会以
+`[replay-unconfirmed]` 标记它，`--list-held` 只列出这样的卷。
+`--replay-held` 会在其内容表明此后未被改动时把更改写入它；
+`--discard-held` 则放弃这些更改，按磁盘现状接受它。无论哪种方式，该卷
+都会重新挂载，能读写时以读写方式挂载。作出应答需要挂载权限
+（`CAP_FS_MOUNT`）；对可移动磁盘，桌面也会询问坐在计算机前的用户。
+
 ## OPTIONS
 
 - `-r, --read-only` — 以只读方式挂载卷（同 `-o ro`）。
@@ -61,6 +75,12 @@ mount — 列出已挂载的文件系统，或挂载磁盘映像或归档文件
   的名称）。`noexec` 和 `loop` 本来就是映像的挂载方式。
 - `-v, --verbose` — 说明卷挂载在何处。
 - `-l, --show-labels` — 为列表而接受；列表没有可添加的标签。
+- `--list-held` — 只列出保有等待 `--replay-held` 或 `--discard-held`
+  的更改的卷。
+- `--replay-held <name>` — 若卷的内容仍表明它未被改动，则把卷保有的
+  更改写入其磁盘；`name` 是卷在 `/Storage` 中的名称、显示它的目录，
+  或其 `id::` 根。
+- `--discard-held <name>` — 放弃卷保有的更改，按其磁盘现状接受它。
 - `-h, -?, --help` — 显示本命令自身的简短帮助。
 
 ## EXAMPLES
@@ -75,13 +95,17 @@ mount — 列出已挂载的文件系统，或挂载磁盘映像或归档文件
   则以读写方式挂载。
 - `mount -r backup.tar.gz /Storage/backup` — 以只读方式将压缩的 tar 归档
   挂载为 `backup`。
+- `mount --list-held` — 列出其更改正等待应答的卷。
+- `mount --replay-held backup` — 把 `/Storage/backup` 保有的更改写入
+  其磁盘。
 
 ## EXIT STATUS
 
-- `0` — 已输出列表，或卷已挂载（或已输出简短帮助）。
-- `1` — 无法理解命令行。
+- `0` — 已输出列表、卷已挂载，或其保有的更改已写入或已放弃（或已输出
+  简短帮助）。
+- `1` — 无法理解命令行，或你无权为卷的更改作出应答。
 - `2` — 无法读取挂载列表，或无法写入终端。
-- `32` — 映像未被挂载。
+- `32` — 映像未被挂载，或卷的更改既未写入也未放弃。
 
 ## ENVIRONMENT
 

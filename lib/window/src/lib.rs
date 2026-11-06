@@ -81,10 +81,9 @@ pub use appbar::{
     QUIT_LABEL, QUIT_ROW,
 };
 pub use client::{
-    key_input_event, pinch_input_events, pointer_input_events, pointer_point, present_damage,
-    present_damage_list, scroll_input_events, DeclaredTip, EventDrain, EventError, EventSource,
-    Owed, Parked, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
-    EVENT_MAILBOX_CAPACITY,
+    pinch_input_events, pointer_input_events, pointer_point, present_damage, present_damage_list,
+    scroll_input_events, DeclaredTip, EventDrain, EventError, EventSource, Owed, Parked, Repaint,
+    Target, WindowClient, WindowEvents, WindowTransport, EVENT_MAILBOX_CAPACITY,
 };
 pub use desktop::Desktop;
 #[cfg(feature = "rt")]
@@ -94,10 +93,11 @@ pub use mailbox::EventMailbox;
 pub use server::{
     client_frame_budget_bytes, Activation, AlertOpen, AuthoriseFor, CallerIdentity, ClientRegion,
     CursorSetName, DialogSpec, DragConclusion, DragReport, EventSink, FrameHost, HandOverDesk,
-    LayerSpec, OpenEntry, PickedFile, PopupSpec, PreviewSize, ToolSpec, TransientSpec,
+    LayerSpec, OpenEntry, PickedFile, PopupSpec, PreviewSize, Served, ToolSpec, TransientSpec,
     WallpaperName, WindowHost, WindowServer, WindowSizing, WINDOW_REPLY_MAX,
 };
 pub use tairix_display::winframe::damage_in;
+pub use tairix_input::wire::key_input_event;
 
 #[cfg(test)]
 mod tests;

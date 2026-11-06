@@ -12,7 +12,8 @@ use crate::kthread::reschedule_current;
 use crate::waitq::{nearest_timed_deadline, wait_arch, WaitQueue, SLEEP_WAITQ};
 
 /// The caller cannot be parked — the boot flow before the dispatch loop runs,
-/// or a context with no wait hook — so only it knows what to do instead.
+/// a context with no wait hook, or a wait the heap has no room to register —
+/// so only it knows what to do instead.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct NotParkable;
 
@@ -53,7 +54,9 @@ pub fn park_on_until(
         }
         let cpu = hook.current_cpu().ok_or(NotParkable)?;
         let task = hook.current_task(cpu).ok_or(NotParkable)?;
-        queue.register(task, deadline_ns);
+        if queue.register(task, deadline_ns).is_err() {
+            return Err(NotParkable);
+        }
         if ready() {
             queue.deregister(task);
             hook.set_wakeup(nearest_timed_deadline());

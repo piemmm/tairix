@@ -125,7 +125,10 @@ before it can drop to U-mode/EL0. It:
 2. maps a zeroed user stack (U|R|W); and
 3. serialises the `tairix_abi::process` startup-vector block (the
    arguments, environment, and §19.2 stack-canary seed) and writes it
-   into the new address space (U|R|W).
+   into the new address space (U|R|W). The seed is drawn for each process
+   from the kernel's CSPRNG reserve without waiting; a spawn the reserve
+   cannot serve is refused (`canary_unseeded`), never given a value another
+   process could know.
 
 It returns a `ProcessImage` — the relocated entry point, the initial
 user stack pointer, and the user address of the startup block — i.e. the

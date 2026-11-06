@@ -9,9 +9,9 @@
 //! result is a UI that stays a comfortable physical size on any panel while
 //! the user picks the density that suits them.
 //!
-//! [`Scale`] is the single shared definition of that conversion, so the same
-//! logical→physical arithmetic is never written twice across the window
-//! manager, the taskbar, the cursors, and the apps. It
+//! [`Scale`] is the single shared definition of that conversion, and of its
+//! one inverse, so the same logical→physical arithmetic is never written
+//! twice across the window manager, the taskbar, the cursors, and the apps. It
 //! lives in `lib/geometry` because scaling a length is geometry, and the
 //! geometry crate sits at the bottom of the layering where every GUI
 //! consumer can reach it.
@@ -58,13 +58,13 @@ impl Scale {
     /// desktop unusably tiny and is rejected by [`from_percent`].
     ///
     /// [`from_percent`]: Self::from_percent
-    pub const MIN_PERCENT: u32 = 25;
+    pub const MIN_PERCENT: u32 = tairix_abi::desktop::UI_SCALE_MIN_PERCENT;
 
     /// The largest permitted scale (800%). A larger factor risks overflowing
     /// physical dimensions and is rejected by [`from_percent`].
     ///
     /// [`from_percent`]: Self::from_percent
-    pub const MAX_PERCENT: u32 = 800;
+    pub const MAX_PERCENT: u32 = tairix_abi::desktop::UI_SCALE_MAX_PERCENT;
 
     /// A scale from a percentage of the reference density, or `None` if
     /// `percent` is outside
@@ -115,6 +115,19 @@ impl Scale {
     pub fn scale_length(self, logical: u32) -> u32 {
         let physical = u64::from(logical) * u64::from(self.percent) / 100;
         u32::try_from(physical).unwrap_or(u32::MAX)
+    }
+
+    /// The logical length a `physical` one is at this scale: the least that
+    /// [`scale_length`](Self::scale_length) takes to at least `physical`.
+    ///
+    /// Rounding up is what keeps a round trip still: a length taken in, out
+    /// and in again comes back as it was the first time, so a size the user
+    /// gave in physical pixels and kept logically never creeps. It saturates
+    /// at [`u32::MAX`].
+    #[must_use]
+    pub fn logical_length(self, physical: u32) -> u32 {
+        let logical = (u64::from(physical) * 100).div_ceil(u64::from(self.percent));
+        u32::try_from(logical).unwrap_or(u32::MAX)
     }
 }
 

@@ -84,9 +84,11 @@ driver refuses a request the kernel could not have sent.
 
 The driver opens its volume and tells the kernel the outcome in one
 `ServeFrame` (16 bytes): `Serve` with a `ServeOffer` — the root, the name
-rule, how long a node keeps its id, whether the format keeps attributes, why
-it will not write the volume if it will not, and the `FormatName` the mount
-table shows — or `Refuse` with the `DriverError` the format gave. An accepted
+rule, how long a node keeps its id, whether the format keeps attributes and
+whether the volume keeps a title (one byte, bits 0 and 1), why it will not
+write the volume if it will not, and the `FormatName` the mount table shows —
+the mount table listing a volume titled only where its format takes a title
+and its driver keeps one — or `Refuse` with the `DriverError` the format gave. An accepted
 offer is answered with a `ServeGrant` (24 bytes): the endpoint and the
 window's address and length.
 

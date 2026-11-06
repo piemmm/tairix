@@ -293,7 +293,8 @@
 //! stays in the query, and a row chosen by Enter or a double-click.
 //!
 //! The [`swatch_grid`] module is [`SwatchGrid`], the grid of colour wells a
-//! scheme editor and an image editor's palette are, and the
+//! scheme editor and an image editor's palette are — a palette's packed a
+//! pixel apart ([`WellSpacing`]) and numbered in a [`NumberFace`] — and the
 //! [`colour_picker`] module is [`ColourPicker`], one colour edited by its
 //! hue, saturation and value plane, its hue and opacity strips, its hex
 //! notation and its number fields, over `lib/colour`'s exact coordinates. It
@@ -411,7 +412,7 @@ pub use state::{
     RecoveryState, RenderInvariant, SelectionState, SizeAction, ValidationState,
     WindowActivationState, WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
-pub use swatch_grid::{SwatchAction, SwatchGrid, SwatchMark};
+pub use swatch_grid::{NumberFace, SwatchAction, SwatchGrid, SwatchMark, WellSpacing};
 pub use tabs::{Tab, TabGroupAbsence, Tabs, TabsAction, TabsOrientation};
 pub use text::{
     owner_chord, ClipboardChord, Keystroke, SearchField, SecretField, TextAction, TextArea,

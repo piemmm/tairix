@@ -4,7 +4,7 @@ sysmon — observer en direct la mémoire, les caches et la charge du noyau
 
 ## SYNOPSIS
 
-`sysmon [-d sec.dixièmes] [-h | -?]`
+`sysmon [-d secs.tenths] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -13,12 +13,13 @@ de la mémoire et du processeur, lue entièrement via l'API d'information
 système — il n'y a pas de `/proc` à racler. Elle montre la mémoire
 physique et sa composition, le tas du noyau, la bande de pression mémoire
 et son historique récent, le registre des caches récupérables avec les
-**taux de succès** par classe, le palier compressé `ramzip`, le total de
-mémoire épinglée, l'utilisation de stockage des volumes montés, la charge
-par CPU, la table d'interruptions du noyau et un recensement des
-processus. Elle reste utilisable pendant que le système est sous charge
-délibérée et se met en veille entre les rafraîchissements au repos (la
-lecture se gare ; elle ne tourne jamais à vide).
+**taux de succès** par classe et une ventilation par cache, le palier
+compressé `ramzip`, le total de mémoire épinglée, l'utilisation de
+stockage des volumes montés, la charge par CPU, la table d'interruptions
+du noyau et un recensement des processus. Elle reste utilisable pendant
+que le système est sous charge délibérée et se met en veille entre les
+rafraîchissements au repos (la lecture se gare ; elle ne tourne jamais à
+vide).
 
 Au démarrage, le moniteur épingle sa propre mémoire (`mem_pin`, qui exige
 `CAP_MEM_PIN`) afin de ne jamais caler sur ses propres défauts de page
@@ -54,7 +55,7 @@ renfort.
   minutes) et l'état d'épinglage (`[pinned]`, ou `[unpinned: <reason>]`
   quand l'épinglage a été refusé).
 - **`Mem`** — la barre de mémoire (voir la légende des barres), suivie des
-  chiffres utilisé / total (unités compactes `K`/`M`/`G`), du pourcentage
+  chiffres utilisé / total (unités d'octets compactes), du pourcentage
   utilisé, de la taille du tas du noyau et — quand ils sont non nuls — des
   chiffres du magasin compressé `ramzip` et de la mémoire épinglée
   `pinned`. La barre rétrécit pour garder chaque chiffre sur une ligne de
@@ -124,9 +125,12 @@ barre distincte au-dessus du corps.
 Ce sont les caches que le noyau peut rendre pour soulager la pression
 mémoire **sans perte de données** : chaque entrée est reconstructible
 depuis sa source canonique, si bien que le noyau l'abandonne au lieu de la
-pagineter. Le panneau répond directement à « les caches font-ils leur
-travail ? » : chaque ligne est une classe de récupération, agrégée sur
-tous les caches enregistrés, et porte son propre **taux de succès**.
+pagineter. La page répond directement à « les caches font-ils leur
+travail ? », en deux tableaux : le registre par classe, puis la
+ventilation par cache qui le sous-tend.
+
+Chaque ligne du premier tableau est une classe de récupération, agrégée
+sur tous les caches enregistrés, et porte son propre **taux de succès**.
 
 Colonnes :
 
@@ -135,6 +139,14 @@ Colonnes :
 - `entries` — entrées vivantes actuellement détenues pour la classe.
 - `cached` — l'empreinte résidente de la classe : la charge utile des
   entrées plus les métadonnées de comptabilité par entrée, ensemble.
+- `self%` — la part de `cached` qui a été **auto-déclarée** plutôt que
+  mesurée par le noyau : quelle part du total de la classe est prise sur
+  parole. Le noyau ne mesure que les caches enregistrés en son sein, si
+  bien qu'un cache détenu par un processus de l'espace utilisateur —
+  atlas de glyphes, illustrations d'icônes, curseurs — est compté d'après
+  ce que ce processus déclare sur lui-même. `0%` signifie que tout le
+  total de la classe est attesté ; `100%`, qu'aucune part ne l'est. Il
+  affiche `-`, jamais `0%`, pour une classe qui ne détient rien du tout.
 - `hits` — recherches de la classe servies depuis le cache depuis le
   démarrage (le cache a évité la source canonique).
 - `misses` — recherches de la classe retombées sur la source canonique
@@ -154,6 +166,14 @@ Colonnes :
 
 Les décomptes s'abrègent au-delà de 99 999 en `k`/`M`/`G`/`T` (milliers
 décimaux, pas des Kio) afin qu'une colonne ne s'élargisse jamais.
+
+Les chiffres en octets s'abrègent en unités binaires : le compte exact
+sous un kibioctet, puis une décimale avec un suffixe `K`, `M`, `G`, `T`,
+`P` ou `E` (`1.5K`, `986.2M`, `200.0T`). L'échelle va jusqu'aux
+exbioctets, si bien que le chiffre le plus large qu'un compte d'octets
+sur 64 bits puisse produire tient en sept caractères et qu'aucun chiffre
+ne déborde jamais de sa colonne — une taille ne peut pas être raccourcie
+comme un nom, car un nombre raccourci est un nombre faux.
 
 Les classes de récupération, dans l'ordre où le noyau les récupère sous
 pression (la première listée est abandonnée en premier, de sorte qu'un
@@ -190,6 +210,53 @@ cache bas dans la liste survit le plus longtemps) :
   récupération (fenêtres de vérification, résumés de santé) : justifié par
   la latence de récupération, il est donc préservé le plus longtemps.
 
+### caches — la ventilation par cache
+
+Sous le tableau des classes, une ligne par registre de cache enregistré :
+la réponse à « la classe `disposable-ui` détient 12 Mio — *quels* caches
+la détiennent ? ». Les registres mesurés par le noyau viennent d'abord,
+puis ceux que des processus ont déclarés pour eux-mêmes ; la somme des
+lignes d'une classe reproduit exactement la ligne de cette classe
+ci-dessus.
+
+Colonnes :
+
+- `cache` — l'étiquette du cache. Une étiquette trop longue pour la
+  colonne perd son *milieu*, jamais une extrémité : `font.client.glyphs`
+  se lit `font.cli~.glyphs`. Ces noms sont pointés, et c'est d'ordinaire
+  le dernier segment qui distingue deux caches d'un même espace de noms ;
+  la colonne garde donc les deux extrémités, et `~` marque ce qu'elle a
+  retiré.
+- `owner` — le principal auquel la mémoire est imputée : `kernel` pour un
+  sous-système du noyau, `vol:<id>` pour un volume de système de
+  fichiers, `task:<id>` pour une tâche, `seat:<id>` pour une session de
+  bureau, `proc` pour un processus de l'espace utilisateur. Une ligne
+  déclarée ajoute `@<pid>`, le processus déclarant. Un propriétaire trop
+  long pour la colonne est élidé au milieu comme une étiquette
+  (`task:1~551615`), si bien qu'un identifiant raccourci est visiblement
+  incomplet — là où un identifiant tronqué en silence se lirait comme un
+  autre propriétaire.
+- `origin` — la provenance des chiffres : `kernel` pour un registre que le
+  noyau mesure, `self` pour un registre que le processus détenteur a
+  déclaré sur lui-même, `?` pour une ligne que le service a laissée sans
+  attribution.
+- `class` — la classe de récupération à laquelle appartient chaque entrée
+  de ce cache.
+- `entries`, `cached`, `hit%` — comme dans le tableau des classes, pour ce
+  seul cache.
+
+Une ligne `self` est un **diagnostic**, pas une mesure attestée : rien en
+dehors du processus détenteur ne peut voir l'intérieur de son cache, et
+un processus compromis peut déclarer ce qu'il veut. Le mot figure dans la
+ligne elle-même, de sorte qu'il se lit sur une console série monochrome ;
+la couleur d'avis ne fait que le renforcer. Lisez les lignes `self` comme
+des affirmations et les lignes `kernel` comme des mesures.
+
+Une machine sans cache enregistré le dit en une ligne plutôt que de
+laisser le tableau vide — et une requête *refusée* dit cela à la place,
+si bien qu'un tableau vide ne peut jamais être pris pour « il n'y a aucun
+cache ».
+
 ### ramzip — le palier de mémoire compressée
 
 `ramzip` compresse les pages anonymes froides dans un magasin plus petit
@@ -220,14 +287,21 @@ en RAM au lieu de les pagineter. Ses sections :
 
 Une ligne de style `df` par volume monté : point de montage, type de
 système de fichiers, taille totale, utilisé, disponible, pourcentage
-d'utilisation et une barre d'utilisation ASCII. Un volume dont le pilote
-ne rapporte aucune capacité affiche `capacity unknown` au lieu d'une
-taille fabriquée ; un volume retiré par surprise ou en conflit de
-récupération est dessiné dans le rendu d'avertissement et marqué
-(`[unavailable-dirty]`, `[unavailable-lost]`, `[recovery-conflict]`). Il
-n'y a pas de compteurs de débit d'e-s par périphérique dans l'API, donc
-ce sont capacité et utilisation honnêtes, pas des débits de transfert
-fabriqués.
+d'utilisation et une barre d'utilisation ASCII.
+
+Un point de montage trop long pour sa colonne perd son *milieu*, jamais
+une extrémité, exactement comme une étiquette de cache :
+`/Storage/backup-2024-vol1` se lit `/Storage/b~2024-vol1`, si bien que
+deux volumes rangés côte à côte se distinguent encore par le dernier
+segment qui les différencie.
+
+Un volume dont le pilote ne rapporte aucune capacité affiche
+`capacity unknown` au lieu d'une taille fabriquée ; un volume retiré par
+surprise ou en conflit de récupération est dessiné dans le rendu
+d'avertissement et marqué (`[unavailable-dirty]`, `[unavailable-lost]`,
+`[recovery-conflict]`). Il n'y a pas de compteurs de débit d'e-s par
+périphérique dans l'API, donc ce sont capacité et utilisation honnêtes,
+pas des débits de transfert fabriqués.
 
 ### cpu — charge par CPU
 
@@ -254,9 +328,10 @@ que le résumé du recensement.
 ### Capacités
 
 Chaque chiffre voyage par l'API d'information système. Les requêtes de
-statistiques du noyau (mémoire, pression, caches, `ramzip`, charge par
-CPU) exigent `CAP_SYSINFO_KERNEL` ; le panneau des lignes d'interruption
-exige `CAP_SYSINFO_HW` ; le recensement de tous les processus exige
+statistiques du noyau (mémoire, pression, les classes de caches et la
+ventilation par cache, `ramzip`, charge par CPU) exigent
+`CAP_SYSINFO_KERNEL` ; le panneau des lignes d'interruption exige
+`CAP_SYSINFO_HW` ; le recensement de tous les processus exige
 `CAP_SYSINFO_GLOBAL`. Un appelant qui manque de l'une voit le refus de ce
 panneau explicité — jamais un chiffre fabriqué — pendant que le reste de
 la session continue (échouer fermé, se dégrader avec grâce). Le stockage

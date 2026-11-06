@@ -79,6 +79,7 @@ use crate::cpu_state::{self, LiveSpacePtr, ResumeHandle as UserResumeHandle};
 use crate::dispatch_slot::RescheduleAction;
 use crate::procsignal::ThreadGate;
 use crate::procspace::ProcessSpace;
+use crate::sleeplock::LineRow;
 
 /// Default per-kthread kernel-stack size, in bytes — a **release-tuned
 /// policy value**, not a single worst-case constant.
@@ -443,7 +444,7 @@ impl<C: ContextSwitch + Copy> Yielder<C> {
     /// enter user mode. It **yields** (re-enqueue) rather than parking:
     /// nothing external wakes a loading task, so it must stay runnable to
     /// reach the install step.
-    pub fn become_user(&mut self, pre_resume: PreResume, live: Option<Arc<ProcessSpace>>) {
+    pub fn become_user(&mut self, pre_resume: PreResume, live: Arc<ProcessSpace>) {
         // SAFETY: `pending_upgrade` points at the live `pending_upgrade`
         // field of this task's `ThreadControl`, which outlives the running
         // work. The dispatcher side is suspended inside `switch` while the
@@ -620,6 +621,24 @@ where
     }
 }
 
+/// The [`UserResumeHandle`] row thunk: the line row of the
+/// `ThreadControl<C, S>` at `block`.
+///
+/// # Safety
+///
+/// As [`suspend_thunk`].
+unsafe fn line_row_thunk<C, S>(block: NonNull<()>) -> Arc<LineRow>
+where
+    C: ContextSwitch + Copy,
+    S: KernelStack,
+{
+    let ctl = block.cast::<ThreadControl<C, S>>().as_ptr();
+    // SAFETY: `ctl` is the live control block per this function's contract,
+    // and nothing writes its row after the block is built, so a shared borrow
+    // of it aliases no write.
+    Arc::clone(unsafe { &(*ctl).row })
+}
+
 /// The [`Yielder`] over the control block at `ctl`: the one construction the
 /// trampoline and [`suspend_thunk`] share.
 ///
@@ -708,6 +727,21 @@ fn caller_runs_on(cpu: CpuId) -> bool {
         .is_none_or(|current| current == cpu)
 }
 
+/// The row the kthread switched in on `cpu` stands in a sleeping lock's line
+/// with: [`None`] where none is, or the caller does not run there.
+#[must_use]
+pub(crate) fn current_line_row(cpu: CpuId) -> Option<Arc<LineRow>> {
+    if !caller_runs_on(cpu) {
+        return None;
+    }
+    let handle = (*cpu_state::get(cpu)?.resume.lock())?;
+    // SAFETY: `dispatch_step` published this handle for the task switched in
+    // on `cpu`, and the caller runs there, so it runs on that task's own
+    // control flow and the control block is live — the protocol
+    // `reschedule_current` relies on.
+    unsafe { handle.line_row() }
+}
+
 /// The per-kthread control block: everything the dispatcher-side shim and
 /// the task-side [`trampoline`]/[`Yielder`] share.
 ///
@@ -763,6 +797,9 @@ struct ThreadControl<C: ContextSwitch + Copy, S: KernelStack> {
     /// dispatch and published on its CPU for every run ([`publish_gate`]).
     /// `None` for a kernel service, which no admission gives one.
     gate: Option<Arc<ThreadGate>>,
+    /// The row the thread stands in a sleeping lock's line with, made with it
+    /// so a contended acquire never needs the heap.
+    row: Arc<LineRow>,
     /// Set by the thread as it first enters user mode, after which it runs
     /// kernel code only inside a trap handler ([`suspend_thunk`]).
     entered_user: bool,
@@ -792,7 +829,7 @@ type PreResume = Box<dyn FnMut(u64, AddressTag) + Send + 'static>;
 /// fully-formed user kthread. `None` for every task not mid-upgrade.
 struct UserUpgrade {
     pre_resume: PreResume,
-    live: Option<Arc<ProcessSpace>>,
+    live: Arc<ProcessSpace>,
 }
 
 /// The entry point a freshly prepared kthread first runs.
@@ -1055,6 +1092,8 @@ where
     R: FnMut(u64, AddressTag) + Send + 'static,
     W: FnMut(&mut Yielder<C>) + Send + 'static,
 {
+    let pre_resume: PreResume =
+        Box::try_new(pre_resume).map_err(|_| tairix_kernel_sched_api::SchedError::OutOfMemory)?;
     spawn_control(
         scheduler,
         home_cpu,
@@ -1062,7 +1101,7 @@ where
         cs,
         stack,
         work,
-        Some(Box::new(pre_resume)),
+        Some(pre_resume),
         None,
         admission,
     )
@@ -1109,6 +1148,8 @@ where
     R: FnMut(u64, AddressTag) + Send + 'static,
     W: FnMut(&mut Yielder<C>) + Send + 'static,
 {
+    let pre_resume: PreResume =
+        Box::try_new(pre_resume).map_err(|_| tairix_kernel_sched_api::SchedError::OutOfMemory)?;
     spawn_control(
         scheduler,
         home_cpu,
@@ -1116,7 +1157,7 @@ where
         cs,
         stack,
         work,
-        Some(Box::new(pre_resume)),
+        Some(pre_resume),
         Some(live),
         admission,
     )
@@ -1154,20 +1195,25 @@ where
     if !cpu_state::ensure(scheduler.cpu_count(), home_cpu) {
         return Err(tairix_kernel_sched_api::SchedError::NoSuchCpu);
     }
-    let mut control: Box<ThreadControl<C, S>> = Box::new(ThreadControl {
+    let out_of_memory = |_| tairix_kernel_sched_api::SchedError::OutOfMemory;
+    let work = Box::try_new(work).map_err(out_of_memory)?;
+    let row = Arc::try_new(LineRow::new()).map_err(out_of_memory)?;
+    let mut control: Box<ThreadControl<C, S>> = Box::try_new(ThreadControl {
         cs,
         task_ctx: TaskContext::empty(),
         dispatch_ctx: TaskContext::empty(),
         action: TaskAction::Yield,
         state: RunState::NotStarted,
         stack,
-        work: Some(Box::new(work)),
+        work: Some(work),
         pre_resume,
         live,
         pending_upgrade: None,
         gate: None,
+        row,
         entered_user: false,
-    });
+    })
+    .map_err(out_of_memory)?;
 
     // The `move` closure owns the boxed control block, so its heap address
     // stays stable for the raw-pointer protocol; `&mut control` derefs to
@@ -1334,7 +1380,7 @@ where
     if let Some(up) = unsafe { (*ctl).pending_upgrade.take() } {
         unsafe {
             (*ctl).pre_resume = Some(up.pre_resume);
-            (*ctl).live = up.live;
+            (*ctl).live = Some(up.live);
         }
     }
 
@@ -1590,9 +1636,12 @@ where
     S: KernelStack,
 {
     if let Some(state) = cpu_state::get(cpu) {
-        // SAFETY: the thunk is monomorphised over this call's `C, S`, which
+        // SAFETY: both thunks are monomorphised over this call's `C, S`, which
         // is the type `block` addresses.
-        *state.resume.lock() = Some(unsafe { UserResumeHandle::new(block, suspend_thunk::<C, S>) });
+        let handle = unsafe {
+            UserResumeHandle::new(block, suspend_thunk::<C, S>).with_row(line_row_thunk::<C, S>)
+        };
+        *state.resume.lock() = Some(handle);
     }
 }
 
@@ -2111,6 +2160,7 @@ mod tests {
             live: None,
             pending_upgrade: None,
             gate: None,
+            row: Arc::new(LineRow::new()),
             entered_user: false,
         })
     }
@@ -2138,6 +2188,7 @@ mod tests {
             live: None,
             pending_upgrade: None,
             gate: None,
+            row: Arc::new(LineRow::new()),
             entered_user: false,
         })
     }
@@ -2315,6 +2366,30 @@ mod tests {
         assert_ne!(scheduler.state_of(id), TaskState::Exited);
     }
 
+    /// Admitting a kthread makes no allocation it cannot refuse: a heap that
+    /// refuses its control block, its body, its line row or the scheduler's
+    /// record answers `OutOfMemory` and admits nothing.
+    #[test]
+    fn a_kthread_the_heap_refuses_is_not_admitted() {
+        let cpu = crate::test_boot::claim_cpu();
+        let arch = Arc::new(TestArch::on_cpu(cpu));
+        let scheduler = Scheduler::new(SchedulerConfig::defaults_for(cpu + 1), Arc::clone(&arch))
+            .expect("scheduler builds");
+        let rec = recorder!();
+        let refused = Err(tairix_kernel_sched_api::SchedError::OutOfMemory);
+        let admitted = crate::test_alloc::past_each_refusal(&refused, || {
+            let answer =
+                spawn_kthread(&scheduler, RecordingCs(rec), cpu, Priority::Normal, |_y| {})
+                    .map(drop);
+            if answer.is_err() {
+                assert_eq!(scheduler.live_task_count(), 0, "a refusal admitted a task");
+            }
+            answer
+        });
+        assert_eq!(admitted, Ok(()));
+        assert_eq!(scheduler.live_task_count(), 1);
+    }
+
     // --- Stack reclaim + use-after-free -------------
 
     /// A kernel stack carved from a [`Slab`] slot so the slab's software
@@ -2470,6 +2545,24 @@ mod tests {
         // After the dispatcher retires the handle, the slot is empty again.
         clear_resume(cpu);
         assert!(!reschedule_current(cpu, RescheduleAction::Yield));
+    }
+
+    /// A kthread's body reaches the row its control block was made with
+    /// through the handle published for it, and none once that is withdrawn.
+    #[test]
+    fn a_published_kthread_answers_the_row_it_was_made_with() {
+        let rec = recorder!();
+        let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
+        let block = NonNull::from(&mut *control);
+        let cpu = crate::test_boot::claim_cpu();
+        publish_resume::<RecordingCs, BoxStack>(cpu, block);
+        let row = current_line_row(cpu);
+        clear_resume(cpu);
+        assert!(
+            row.is_some_and(|row| Arc::ptr_eq(&row, &control.row)),
+            "its own row"
+        );
+        assert!(current_line_row(cpu).is_none(), "and none once withdrawn");
     }
 
     /// The corruption `check` found on `control`'s stack with the task
@@ -2717,7 +2810,7 @@ mod tests {
             pre_resume: Box::new(move |_stack_top: u64, _tag: AddressTag| {
                 hits.fetch_add(1, Ordering::SeqCst);
             }),
-            live: None,
+            live: crate::test_live::fake_process_space(),
         });
 
         let _ = dispatch_step(&mut control, cpu, TASK);

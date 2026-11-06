@@ -58,13 +58,16 @@ pub enum CursorKind {
     /// The arrow badged with an arrow, shown while a drop would move what is
     /// dragged.
     DragMove,
+    /// The arrow badged with a bent arrow, shown while a drop would make a
+    /// shortcut to what is dragged.
+    DragLink,
 }
 
 /// Every cursor kind the desktop defines.
 ///
 /// The closed [`CursorKind`] vocabulary as a table, so a loader, a cache, or a
 /// test iterates every kind without restating the list.
-pub const CURSOR_KINDS: [CursorKind; 12] = [
+pub const CURSOR_KINDS: [CursorKind; 13] = [
     CursorKind::Arrow,
     CursorKind::Text,
     CursorKind::Pointer,
@@ -77,6 +80,7 @@ pub const CURSOR_KINDS: [CursorKind; 12] = [
     CursorKind::Crosshair,
     CursorKind::DragCopy,
     CursorKind::DragMove,
+    CursorKind::DragLink,
 ];
 
 impl CursorKind {
@@ -100,6 +104,7 @@ impl CursorKind {
             Self::Crosshair => "cursor.crosshair",
             Self::DragCopy => "cursor.drag-copy",
             Self::DragMove => "cursor.drag-move",
+            Self::DragLink => "cursor.drag-link",
         }
     }
 }
@@ -197,6 +202,8 @@ pub struct CursorSet {
     pub drag_copy: String,
     /// Asset for [`CursorKind::DragMove`].
     pub drag_move: String,
+    /// Asset for [`CursorKind::DragLink`].
+    pub drag_link: String,
 }
 
 impl CursorSet {
@@ -220,6 +227,7 @@ impl CursorSet {
             crosshair: String::from(CursorKind::Crosshair.asset_id()),
             drag_copy: String::from(CursorKind::DragCopy.asset_id()),
             drag_move: String::from(CursorKind::DragMove.asset_id()),
+            drag_link: String::from(CursorKind::DragLink.asset_id()),
         }
     }
 
@@ -239,6 +247,7 @@ impl CursorSet {
             CursorKind::Crosshair => &self.crosshair,
             CursorKind::DragCopy => &self.drag_copy,
             CursorKind::DragMove => &self.drag_move,
+            CursorKind::DragLink => &self.drag_link,
         }
     }
 }

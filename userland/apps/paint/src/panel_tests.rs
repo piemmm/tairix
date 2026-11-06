@@ -8,8 +8,8 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::{Theme, ThemeRegistry};
 
 use super::{switch, Height, Panel, PanelArt, PanelEvent, PanelOutcome, Part, Placed};
-use crate::filter::Parameter;
 use crate::layout::Faces;
+use crate::op::Parameter;
 use crate::track::Track;
 
 const BOUNDS: Rect = Rect::new(10, 10, 216, 600);
@@ -262,6 +262,33 @@ fn buttons_and_switches_answer_their_presses_and_a_withheld_panel_nothing() {
         PanelOutcome::Ignored
     );
     assert!(!panel.enter_focus(true, BOUNDS, &mut Region::new()));
+}
+
+/// A field claims every key it is given but the owner's chords, even one it
+/// cannot take — a digit past its length, a letter — so typing never reaches
+/// the owner's shortcuts; an Escape with nothing to take back is the owner's.
+#[test]
+fn a_field_claims_a_key_it_cannot_take() {
+    let context = Context::new();
+    let mut panel = panel();
+    let placed = context.placed(&panel, 0, BOUNDS);
+    context.click(&mut panel, placed.controls[0].center(), BOUNDS);
+    assert_eq!(panel.focus(), Some((0, 0)));
+    assert_eq!(
+        context.key(&mut panel, Key::Char('1'), false),
+        PanelOutcome::Taken,
+        "128 already holds every digit the field may"
+    );
+    assert_eq!(
+        context.key(&mut panel, Key::Char('b'), false),
+        PanelOutcome::Taken,
+        "nor is a letter typed there a shortcut"
+    );
+    assert_eq!(
+        context.key(&mut panel, Key::Named(NamedKey::Escape), false),
+        PanelOutcome::Ignored,
+        "nothing typed to take back"
+    );
 }
 
 #[test]

@@ -73,6 +73,7 @@ pub struct CursorTheme {
     crosshair: VectorCursor,
     drag_copy: VectorCursor,
     drag_move: VectorCursor,
+    drag_link: VectorCursor,
 }
 
 impl CursorTheme {
@@ -100,6 +101,7 @@ impl CursorTheme {
             crosshair: cursor(CursorKind::Crosshair),
             drag_copy: cursor(CursorKind::DragCopy),
             drag_move: cursor(CursorKind::DragMove),
+            drag_link: cursor(CursorKind::DragLink),
         }
     }
 
@@ -119,6 +121,7 @@ impl CursorTheme {
             CursorKind::Crosshair => &self.crosshair,
             CursorKind::DragCopy => &self.drag_copy,
             CursorKind::DragMove => &self.drag_move,
+            CursorKind::DragLink => &self.drag_link,
         }
     }
 
@@ -145,6 +148,7 @@ fn builtin_cursor(kind: CursorKind) -> VectorCursor {
         CursorKind::Crosshair => builtin_crosshair(),
         CursorKind::DragCopy => badged(COPY_MARK),
         CursorKind::DragMove => badged(MOVE_MARK),
+        CursorKind::DragLink => badged(LINK_MARK),
     }
 }
 
@@ -325,6 +329,10 @@ const COPY_MARK: &str = "M21 18 H23 V21 H26 V23 H23 V26 H21 V23 H18 V21 H21 Z";
 /// The move badge's arrow, pointing on.
 const MOVE_MARK: &str = "M18 21 H21.5 V18.5 L26 22 L21.5 25.5 V23 H18 Z";
 
+/// The link badge's arrow, bending up from below and pointing on.
+const LINK_MARK: &str =
+    "M18 26 V22 A4 4 0 0 1 22 18 H23 V16.5 L26.5 19.5 L23 22.5 V21 H22 A1 1 0 0 0 21 22 V26 Z";
+
 /// The arrow with a badge bearing `mark`, pivoting on the arrow's tip.
 fn badged(mark: &str) -> VectorCursor {
     let arrow = Layer::filled(
@@ -420,16 +428,20 @@ fn contours(path: &str) -> Vec<Vec<(i32, i32)>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_path_data, BADGE, BUSY_RING, BUSY_SWEEP, COPY_MARK, FLATNESS_PX, HAND,
+        parse_path_data, BADGE, BUSY_RING, BUSY_SWEEP, COPY_MARK, FLATNESS_PX, HAND, LINK_MARK,
         MAX_PART_POINTS, MOVE_MARK,
     };
 
     #[test]
     fn every_built_in_path_is_well_formed() {
-        for path in HAND
-            .iter()
-            .chain([&BUSY_RING, &BUSY_SWEEP, &BADGE, &COPY_MARK, &MOVE_MARK])
-        {
+        for path in HAND.iter().chain([
+            &BUSY_RING,
+            &BUSY_SWEEP,
+            &BADGE,
+            &COPY_MARK,
+            &MOVE_MARK,
+            &LINK_MARK,
+        ]) {
             let parts = parse_path_data(path, FLATNESS_PX, MAX_PART_POINTS, None)
                 .unwrap_or_else(|err| panic!("{path}: {err:?}"));
             assert!(parts.iter().all(|part| part.points.len() >= 3), "{path}");

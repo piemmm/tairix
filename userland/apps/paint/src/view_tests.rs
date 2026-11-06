@@ -3,12 +3,16 @@ use alloc::vec;
 use alloc::vec::Vec;
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 
-use tairix_abi::window_ipc::{AppMenuItemId, AppMenuRowView, CursorShape, DialogModality};
+use tairix_abi::window_ipc::{
+    AppMenuItemId, AppMenuRowView, CursorShape, DialogModality, WindowSizing,
+};
 use tairix_colour::Rgba;
-use tairix_controls::{Keystroke, WindowControlKind};
+use tairix_controls::{Keystroke, ScrollOrientation, WindowControlKind};
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_image::{IndexDepth, SpriteMode, SpriteName, SpritePalette, Unkept};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_parallel::SERIAL;
+use tairix_reclaim::PressureBand;
 use tairix_theme::{Theme, ThemeRegistry};
 use tairix_window::docapp::{DocumentView, Relayout, ToolGone, ToolMove, ToolOpening};
 use tairix_window::document::{Access, SavedDocument};
@@ -24,7 +28,10 @@ use crate::colour::Ink;
 use crate::document::{Document, Entry, NewPicture, Origin, Picture, SpriteInfo};
 use crate::layout::{Faces, Layout};
 use crate::mask::Mask;
+use crate::op::{Family, Halted, Op};
+use crate::op_pane::Spot;
 use crate::pane::{PaneKind, Side};
+use crate::preview::{PreviewAnswer, PreviewJob, PreviewWork, Previewed};
 use crate::save::SaveRefusal;
 use crate::save::{SaveFormat, SaveSettings};
 use crate::shape::{Bounds, Point as Fx};
@@ -267,12 +274,46 @@ impl Window {
         let Some(Request::Own(Own::Compute { job, work })) = outcome.request else {
             panic!("a request for a worker, not {:?}", outcome.request);
         };
-        let answer = compute(work);
+        let answer = compute(work, &SERIAL);
         let outcome = self
             .view
             .computed(job, answer, &self.layout, &mut Region::new());
         self.apply(&outcome);
         outcome
+    }
+
+    /// What the window's loop would ask of the preview worker now.
+    fn wanted_preview(&mut self) -> Option<Request> {
+        self.view.wanted_preview(&self.layout, Scale::ONE)
+    }
+
+    /// Carry out preview request `request` as the preview worker would, and
+    /// land its answer.
+    fn serve_preview(&mut self, request: Request) {
+        let Request::Own(Own::Preview { job, stamp, work }) = request else {
+            panic!("a request for the preview worker, not {request:?}");
+        };
+        let asked = PreviewJob {
+            window: 0,
+            job,
+            stamp,
+            work,
+        };
+        let answer = crate::preview::serve(asked, &SERIAL, &|| false);
+        self.view
+            .previewed(answer, &self.layout, &mut Region::new());
+    }
+
+    /// Serve the preview worker as the window's loop asks it until the window
+    /// wants nothing more of it.
+    fn settle_previews(&mut self) {
+        for _ in 0..64 {
+            let Some(request) = self.wanted_preview() else {
+                return;
+            };
+            self.serve_preview(request);
+        }
+        panic!("previews that never settle");
     }
 
     /// A point `(across, down)` pixels into the colour dock's picker, whose
@@ -732,7 +773,7 @@ fn the_window_menu_holds_every_command() {
         .into_iter()
         .filter(|action| !theirs.contains(action))
         .chain(Tool::ALL.map(Action::Tool))
-        .chain((0..crate::filter::Filter::ALL.len()).map(Action::Adjust))
+        .chain((0..Op::COUNT).map(Action::Adjust))
         .chain(PaneKind::ALL.map(Action::Pane));
     for action in every {
         assert!(ids.contains(&action.id()), "{action:?} is offered");
@@ -972,6 +1013,125 @@ fn saving_before_closing_puts_the_floating_selection_down_first() {
     assert_eq!(window.colour(30, 20), [0, 0, 0, 255]);
     assert!(matches!(saving.request, Some(Request::SaveThenClose)));
     assert!(!window.view.asking_to_close());
+}
+
+/// An operation open with its settings moved is a change a close asks about,
+/// and Save there applies it before it saves; one opened and never moved is
+/// none.
+#[test]
+fn an_operation_moved_counts_as_unsaved_and_saving_before_closing_applies_it() {
+    let mut window = greys();
+    window.act(Action::Adjust(op_index("Posterise")));
+    assert!(
+        !SavedDocument::is_modified(&window.view),
+        "opened, never moved"
+    );
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(900));
+    assert!(
+        SavedDocument::is_modified(&window.view),
+        "its settings moved"
+    );
+    let closing = window
+        .view
+        .close_requested(&window.layout, &mut Region::new());
+    assert!(
+        matches!(closing.request, Some(Request::AskToClose)),
+        "{:?}",
+        closing.request
+    );
+    window.settle_previews();
+    let saving = window
+        .view
+        .save_then_close(&window.layout, &mut Region::new());
+    assert!(
+        matches!(saving.request, Some(Request::SaveThenClose)),
+        "{:?}",
+        saving.request
+    );
+    assert_eq!(
+        window.view.document().history_depth(),
+        1,
+        "applied before it saves"
+    );
+}
+
+/// Work out that changes the picture once it lands — a fill — is a change a
+/// close asks about; a selection being made is none.
+#[test]
+fn work_out_on_the_picture_counts_as_unsaved_and_a_selection_does_not() {
+    let mut window = Window::white(40, 30);
+    marking_with(&mut window, Marquee::Ellipse);
+    let selecting = window.drag((5, 5), (24, 14));
+    assert!(window.view.busy());
+    assert!(
+        !SavedDocument::is_modified(&window.view),
+        "a selection changes no pixel"
+    );
+    window.run_worker(selecting);
+    window.act(Action::Tool(Tool::Fill));
+    let at = window.screen_of((15, 10));
+    window.move_to(at);
+    window.press(PointerButton::Primary);
+    assert!(window.view.busy());
+    assert!(SavedDocument::is_modified(&window.view), "a fill out");
+}
+
+/// An Apply still being worked out is a change a close asks about, and Save
+/// there waits for it to land, a quit waiting with it, before it saves.
+#[test]
+fn saving_before_closing_waits_for_an_apply_still_being_worked_out() {
+    let grey = Sample::Rgba([101, 101, 101, 255]);
+    let canvas = Canvas::new(1200, 900, Kind::Rgba, grey).expect("fits");
+    let mut window = Window::new(Document::new(Picture::plain(canvas)));
+    window.act(Action::Adjust(op_index("Posterise")));
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(900));
+    let first = window.wanted_preview().expect("asked");
+    window.serve_preview(first);
+    let applying = press_on(&mut window, PaneKind::Adjustments, Spot::Apply);
+    assert!(window.view.busy(), "completed on the queue");
+    let closing = window
+        .view
+        .close_requested(&window.layout, &mut Region::new());
+    assert!(
+        matches!(closing.request, Some(Request::AskToClose)),
+        "{:?}",
+        closing.request
+    );
+    let waiting = window
+        .view
+        .save_then_close(&window.layout, &mut Region::new());
+    assert!(waiting.request.is_none(), "nothing saved before it lands");
+    assert!(window.view.asking_to_close(), "a quit waits on it");
+    let saving = window.run_worker(applying);
+    assert!(
+        matches!(saving.request, Some(Request::SaveThenClose)),
+        "{:?}",
+        saving.request
+    );
+    assert_eq!(
+        window.view.document().history_depth(),
+        1,
+        "the Apply landed first"
+    );
+}
+
+/// Closing a sprite window applies the operation moved in it first, as it
+/// puts down what floats: its sprite is its file's, and nothing is asked.
+#[test]
+fn closing_a_sprite_window_applies_its_operation_first() {
+    let mut window = sprite_window();
+    window.act(Action::Adjust(op_index("Brightness & contrast")));
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(900));
+    let closing = window
+        .view
+        .close_requested(&window.layout, &mut Region::new());
+    assert!(
+        matches!(closing.request, Some(Request::Close)),
+        "{:?}",
+        closing.request
+    );
+    assert_eq!(window.view.document().history_depth(), 1, "applied first");
+    assert!(window.view.take_edit().is_some(), "and handed to its file");
 }
 
 #[test]
@@ -1431,7 +1591,7 @@ fn a_fill_repaints_only_what_it_filled() {
     let mut damage = Region::new();
     let _ = window
         .view
-        .computed(job, compute(work), &window.layout, &mut damage);
+        .computed(job, compute(work, &SERIAL), &window.layout, &mut damage);
     let canvas = window.layout.canvas();
     let painted: u64 = damage
         .rects()
@@ -1532,9 +1692,12 @@ fn a_cut_copies_and_clears_in_one_request() {
         Some([0, 0, 0, 255]),
         "copied as it stood"
     );
-    let outcome = window
-        .view
-        .computed(job, compute(work), &window.layout, &mut Region::new());
+    let outcome = window.view.computed(
+        job,
+        compute(work, &SERIAL),
+        &window.layout,
+        &mut Region::new(),
+    );
     window.apply(&outcome);
     assert_eq!(window.colour(5, 5)[3], 0, "and cleared");
 }
@@ -3136,31 +3299,42 @@ fn a_rectangle_with_round_corners_leaves_its_corners_out() {
     assert_eq!(window.colour(17, 17), [0, 0, 0, 255]);
 }
 
-fn filter_index(label: &str) -> usize {
-    crate::filter::Filter::ALL
-        .iter()
-        .position(|filter| filter.label() == label)
-        .expect("a filter")
+/// The Adjust menu's entry for the operation labelled `label`.
+fn op_index(label: &str) -> usize {
+    Op::every()
+        .position(|op| op.label() == label)
+        .expect("an operation")
 }
 
-/// Where `spot` on the Adjustment pane is.
-fn spot_at(window: &Window, spot: crate::adjust::Spot) -> Point {
+/// Where `spot` on pane `kind` shows, its body scrolled to it first where its
+/// dock scrolls the body.
+fn spot_on(window: &mut Window, kind: PaneKind, spot: Spot) -> Point {
     let theme = window.registry.active();
-    window
+    let at = window
         .view
-        .adjustment
+        .operation_pane(kind)
         .spot(
             spot,
-            window.layout.adjustment_settings(),
+            window.layout.operation_settings(kind),
             (faces(theme), Scale::ONE, theme),
         )
-        .expect("on the pane")
+        .expect("on the pane");
+    let dot = Rect::new(at.x, at.y, 1, 1);
+    window
+        .view
+        .reveal_body(kind, dot, &window.layout, &mut Region::new());
+    let shown = window
+        .view
+        .body_view(&window.layout, kind)
+        .to_window(dot)
+        .expect("shown");
+    Point::new(shown.left(), shown.top())
 }
 
-/// Press and let go on `spot` of the Adjustment pane, answering what asked
-/// for more: the press or the release.
-fn press_at(window: &mut Window, spot: crate::adjust::Spot) -> Outcome {
-    let at = spot_at(window, spot);
+/// Press and let go on `spot` of pane `kind`, answering what asked for more:
+/// the press or the release.
+fn press_on(window: &mut Window, kind: PaneKind, spot: Spot) -> Outcome {
+    let at = spot_on(window, kind, spot);
     window.move_to(at);
     let pressed = window.press(PointerButton::Primary);
     let released = window.release(PointerButton::Primary);
@@ -3171,18 +3345,54 @@ fn press_at(window: &mut Window, spot: crate::adjust::Spot) -> Outcome {
     }
 }
 
+/// Choose in pane `kind`'s selector the operation `downs` past the one
+/// chosen, as the keyboard does with its list open.
+fn choose_in_selector(window: &mut Window, kind: PaneKind, downs: usize) -> Outcome {
+    press_on(window, kind, Spot::Selector);
+    assert!(
+        window.view.operation_pane(kind).listing(),
+        "the list opened"
+    );
+    for _ in 0..downs {
+        window.key(Key::Named(NamedKey::Down), plain());
+    }
+    window.key(Key::Named(NamedKey::Enter), plain())
+}
+
+/// Every pixel of `canvas`, row by row.
+fn every_pixel(canvas: &Canvas) -> Vec<[u8; 4]> {
+    (0..canvas.height())
+        .flat_map(|y| (0..canvas.width()).filter_map(move |x| canvas.colour_at(x, y)))
+        .collect()
+}
+
+/// The tiles a preview request asks to be worked out.
+fn tiles_asked(request: &Request) -> &[usize] {
+    match request {
+        Request::Own(Own::Preview {
+            work: PreviewWork::Tiles { tiles, .. },
+            ..
+        }) => tiles,
+        other => panic!("tiles, not {other:?}"),
+    }
+}
+
 #[test]
-fn an_adjustment_opens_docked_and_leaves_the_window_live() {
+fn an_operation_opens_in_its_pane_from_the_menu_and_leaves_the_window_live() {
     let mut window = Window::white(30, 30);
-    let outcome = window.act(Action::Adjust(filter_index("Blur")));
+    let opened = window.act(Action::Adjust(op_index("Gaussian blur")));
+    assert!(opened.request.is_none(), "the loop asks the preview worker");
     assert!(!window.view.asking(), "nothing modal");
-    assert!(window.view.shows(PaneKind::Adjustment));
-    assert!(!window.layout.adjustment_settings().is_empty());
+    assert!(window.view.shows(PaneKind::Effects), "a blur is an effect");
+    assert!(!window
+        .layout
+        .operation_settings(PaneKind::Effects)
+        .is_empty());
     assert_eq!(
         window.view.adjusting(),
-        Some(crate::filter::Filter::Blur { radius: 2 })
+        Some(Op::GaussianBlur { radius: 2 })
     );
-    window.run_worker(outcome);
+    window.settle_previews();
     assert!(window.view.preview_canvas().is_some(), "previewed");
     assert_eq!(
         window.colour(3, 3),
@@ -3198,148 +3408,273 @@ fn an_adjustment_opens_docked_and_leaves_the_window_live() {
     );
 }
 
+/// Each row of the Adjust menu opens its own operation, at its starting
+/// settings, in the pane of its family.
 #[test]
-fn a_filter_is_previewed_one_job_at_a_time_and_applied_as_one_step() {
-    let mut window = Window::white(30, 30);
-    window.act(Action::Tool(Tool::Pencil));
-    window.drag((15, 0), (15, 29));
-    let before = window.colour(14, 10);
-    let first = window.act(Action::Adjust(filter_index("Blur")));
-    assert!(matches!(
-        first.request,
-        Some(Request::Own(Own::Compute { .. }))
-    ));
-    let moved = press_at(&mut window, crate::adjust::Spot::Number(300));
-    assert!(moved.request.is_none(), "one at a time");
-    let again = window.run_worker(first);
-    assert!(
-        matches!(again.request, Some(Request::Own(Own::Compute { .. }))),
-        "the settings moved meanwhile are asked once it lands"
-    );
-    window.run_worker(again);
-    assert!(window.view.preview_canvas().is_some());
+fn every_adjust_row_opens_its_operation_in_its_own_pane() {
+    for (index, op) in Op::every().enumerate() {
+        let mut window = Window::white(20, 20);
+        window.act(Action::Adjust(index));
+        let pane = match op.family() {
+            Family::Adjustments => PaneKind::Adjustments,
+            Family::Effects => PaneKind::Effects,
+        };
+        assert!(window.view.shows(pane), "{op:?} shows its pane");
+        assert_eq!(window.view.open_operation(), Some(pane), "{op:?}");
+        assert_eq!(window.view.adjusting(), Some(op), "{op:?} as it starts");
+    }
+}
+
+#[test]
+fn the_preview_is_worked_out_in_view_first_then_the_rest() {
+    let mut window = Window::white(1200, 900);
+    window.act(Action::Adjust(op_index("Invert")));
+    let total = window
+        .view
+        .document()
+        .picture()
+        .expect("a picture")
+        .canvas()
+        .tile_count();
+    let first = window
+        .wanted_preview()
+        .expect("the tiles in view are asked");
+    let seen = tiles_asked(&first).len();
+    assert!(seen > 0 && seen < total, "{seen} of {total}: those in view");
+    assert!(window.wanted_preview().is_none(), "one job out at a time");
+    window.serve_preview(first);
+    let rest = window.wanted_preview().expect("then the rest");
+    assert_eq!(tiles_asked(&rest).len(), total - seen);
+    window.serve_preview(rest);
+    assert!(window.wanted_preview().is_none(), "the preview is whole");
+    let shown = window.view.preview_canvas().expect("previewed");
     assert_eq!(
-        window.colour(14, 10),
-        before,
+        shown.colour_at(1199, 899),
+        Some([0, 0, 0, 255]),
+        "out of view too"
+    );
+    assert_eq!(
+        window.colour(1199, 899),
+        [255; 4],
         "the picture itself untouched"
     );
-    let applied = press_at(&mut window, crate::adjust::Spot::Apply);
-    assert!(applied.request.is_none(), "the preview's own tiles land");
+}
+
+/// A sample abandons the job asked before it: the answer that job still
+/// sends is dropped, and the newest is asked at once.
+#[test]
+fn a_preview_asked_before_a_sample_is_abandoned_and_its_answer_dropped() {
+    let grey = Sample::Rgba([101, 101, 101, 255]);
+    let canvas = Canvas::new(64, 64, Kind::Rgba, grey).expect("fits");
+    let mut window = Window::new(Document::new(Picture::plain(canvas)));
+    window.act(Action::Adjust(op_index("Posterise")));
+    let stale = window.wanted_preview().expect("asked");
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(900));
+    let Some(Op::Posterise { levels }) = window.view.adjusting() else {
+        panic!("posterise open");
+    };
+    assert_ne!(levels, 4, "the sample moved it");
+    let fresh = window
+        .wanted_preview()
+        .expect("the sample asks afresh at once");
+    let shown = |window: &Window| {
+        window
+            .view
+            .preview_canvas()
+            .and_then(|shown| shown.colour_at(9, 9))
+    };
+    window.serve_preview(stale);
     assert_eq!(
-        window.view.adjusting(),
-        None,
-        "the pane goes back to its list"
+        shown(&window),
+        Some([101, 101, 101, 255]),
+        "the stale answer is dropped"
     );
-    assert!(window.view.preview_canvas().is_none());
-    assert_eq!(window.view.document().history_depth(), 2, "as one step");
-    assert_ne!(
-        window.colour(14, 10),
-        before,
-        "the line blurred onto its neighbour"
+    window.serve_preview(fresh);
+    let level = crate::tone::posterise_table(levels)[101];
+    assert_eq!(
+        shown(&window),
+        Some([level, level, level, 255]),
+        "the fresh one lands"
     );
 }
 
 #[test]
-fn an_adjustment_reset_or_closed_leaves_the_picture_as_it_was() {
+fn apply_adopts_a_whole_preview_as_one_step_and_its_undo_is_exact() {
+    let mut window = Window::white(150, 100);
+    window.act(Action::Tool(Tool::Pencil));
+    window.drag((10, 10), (140, 90));
+    let picture = |window: &Window| {
+        every_pixel(
+            window
+                .view
+                .document()
+                .picture()
+                .expect("a picture")
+                .canvas(),
+        )
+    };
+    let before = picture(&window);
+    window.act(Action::Adjust(op_index("Gaussian blur")));
+    window.settle_previews();
+    let shown = every_pixel(window.view.preview_canvas().expect("previewed"));
+    assert_ne!(shown, before, "the blur shows");
+    let depth = window.view.document().history_depth();
+    let applied = press_on(&mut window, PaneKind::Effects, Spot::Apply);
+    assert!(applied.request.is_none(), "the preview's own tiles land");
+    assert_eq!(
+        window.view.document().history_depth(),
+        depth + 1,
+        "as one step"
+    );
+    assert_eq!(picture(&window), shown, "what the preview showed");
+    assert_eq!(window.view.adjusting(), None, "the pane back at its start");
+    window.key(Key::Char('z'), ctrl());
+    assert_eq!(picture(&window), before, "undone to the pixel");
+}
+
+#[test]
+fn an_incomplete_preview_is_completed_on_the_queue_and_lands_as_one_step() {
+    let mut window = Window::white(1200, 900);
+    window.act(Action::Adjust(op_index("Invert")));
+    let first = window.wanted_preview().expect("asked");
+    window.serve_preview(first);
+    let applying = press_on(&mut window, PaneKind::Adjustments, Spot::Apply);
+    let Some(Request::Own(Own::Compute {
+        work: super::Compute::Op { ref done, .. },
+        ..
+    })) = applying.request
+    else {
+        panic!("completed on the queue, not {:?}", applying.request);
+    };
+    assert!(!done.is_empty(), "what the preview worked out is kept");
+    assert!(window.view.busy());
+    assert!(
+        window.view.preview_canvas().is_some(),
+        "the preview shows until it lands"
+    );
+    window.run_worker(applying);
+    assert_eq!(window.view.document().history_depth(), 1, "as one step");
+    assert_eq!(window.colour(1199, 899), [0, 0, 0, 255], "out of view too");
+    assert_eq!(window.view.adjusting(), None);
+    window.key(Key::Char('z'), ctrl());
+    assert_eq!(window.colour(1199, 899), [255; 4]);
+}
+
+#[test]
+fn an_operation_reset_or_its_pane_closed_leaves_the_picture_as_it_was() {
     let mut window = Window::white(20, 20);
-    let opened = window.act(Action::Adjust(filter_index("Brightness and contrast")));
-    assert!(opened.request.is_none(), "nothing to preview yet");
-    let moved = press_at(&mut window, crate::adjust::Spot::Number(100));
-    window.run_worker(moved);
+    window.act(Action::Adjust(op_index("Brightness & contrast")));
+    assert!(window.wanted_preview().is_none(), "nothing to preview yet");
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(100));
+    window.settle_previews();
     assert!(window.view.preview_canvas().is_some());
-    press_at(&mut window, crate::adjust::Spot::Reset);
+    press_on(&mut window, PaneKind::Adjustments, Spot::Reset);
     assert!(
         window.view.preview_canvas().is_none(),
         "back where it started"
     );
     let close = band_point(
         &window,
-        PaneKind::Adjustment,
+        PaneKind::Adjustments,
         Some(WindowControlKind::Close),
     );
     click_at(&mut window, close);
     assert_eq!(window.view.adjusting(), None);
-    assert!(!window.view.shows(PaneKind::Adjustment));
+    assert!(!window.view.shows(PaneKind::Adjustments));
     assert_eq!(window.view.document().history_depth(), 0);
     assert_eq!(window.colour(5, 5), [255; 4]);
 }
 
 #[test]
-fn a_palette_picture_is_adjusted_through_its_palette_and_refuses_a_filter() {
+fn a_palette_picture_is_adjusted_through_its_palette_and_refuses_an_effect() {
     let mut window = four_colours();
     let palette = window.palette();
-    window.act(Action::Adjust(filter_index("Desaturate")));
+    window.act(Action::Adjust(op_index("Desaturate")));
+    assert!(
+        window.view.preview_kind().is_some(),
+        "a palette is previewed at once"
+    );
+    assert!(
+        window.wanted_preview().is_none(),
+        "on the loop, not a worker"
+    );
+    assert_eq!(
+        window.palette(),
+        palette,
+        "the palette itself untouched until applied"
+    );
+    press_on(&mut window, PaneKind::Adjustments, Spot::Apply);
     let grey = window.palette();
-    assert_ne!(grey, palette);
+    assert_ne!(grey, palette, "applied");
     assert!(
         grey.iter().all(|&[r, g, b, _]| r == g && g == b),
         "each entry its grey"
     );
     assert_eq!(window.view.document().history_depth(), 1);
-    window.act(Action::Adjust(filter_index("Blur")));
+    assert_eq!(window.view.adjusting(), None);
+    window.act(Action::Adjust(op_index("Gaussian blur")));
     assert_eq!(window.view.adjusting(), None, "not opened");
     assert!(window
         .view
         .message()
         .is_some_and(|said| said.contains("colour picture")));
-    window.act(Action::Adjust(filter_index("Brightness and contrast")));
-    let moved = press_at(&mut window, crate::adjust::Spot::Number(900));
-    assert!(moved.request.is_none(), "a palette is previewed at once");
-    assert!(window.view.preview_kind().is_some());
-    assert_eq!(
-        window.palette(),
-        grey,
-        "the palette itself untouched until applied"
-    );
-    press_at(&mut window, crate::adjust::Spot::Apply);
-    assert_ne!(window.palette(), grey, "applied");
-    assert_eq!(window.view.adjusting(), None);
 }
 
 #[test]
-fn a_preview_worked_from_a_picture_since_changed_is_dropped_and_asked_again() {
+fn a_preview_of_the_picture_before_an_undo_is_dropped_and_asked_again() {
     let mut window = Window::white(20, 20);
     window.act(Action::Tool(Tool::Pencil));
     window.drag((5, 5), (5, 15));
-    let out = window.act(Action::Adjust(filter_index("Blur")));
+    window.act(Action::Adjust(op_index("Gaussian blur")));
+    let out = window.wanted_preview().expect("asked");
     window.act(Action::Undo);
     assert!(window.view.adjusting().is_some(), "undo leaves it open");
-    let again = window.run_worker(out);
-    assert!(
-        window.view.preview_canvas().is_none(),
-        "worked from the picture before the undo"
+    window.serve_preview(out);
+    let again = window
+        .wanted_preview()
+        .expect("asked again of the picture as it now stands");
+    window.serve_preview(again);
+    assert_eq!(
+        window
+            .view
+            .preview_canvas()
+            .and_then(|shown| shown.colour_at(5, 10)),
+        Some([255; 4]),
+        "worked from the picture after the undo, the stroke gone"
     );
-    assert!(
-        matches!(again.request, Some(Request::Own(Own::Compute { .. }))),
-        "asked again of the picture as it now stands"
-    );
-    window.run_worker(again);
-    assert!(window.view.preview_canvas().is_some());
 }
 
 #[test]
-fn a_stroke_applies_the_adjustment_first_and_one_that_finds_it_unfinished_paints_nothing() {
-    let mut window = Window::white(20, 20);
+fn a_stroke_applies_the_operation_first_and_one_finding_it_unfinished_paints_nothing() {
+    let grey = Sample::Rgba([101, 101, 101, 255]);
+    let canvas = Canvas::new(1200, 900, Kind::Rgba, grey).expect("fits");
+    let mut window = Window::new(Document::new(Picture::plain(canvas)));
     window.act(Action::Tool(Tool::Pencil));
-    let preview = window.act(Action::Adjust(filter_index("Blur")));
-    let at = window.screen_of((3, 3));
-    window.move_to(at);
-    let applying = window.press(PointerButton::Primary);
-    window.release(PointerButton::Primary);
-    assert_eq!(window.colour(3, 3), [255; 4], "the press painted nothing");
+    window.act(Action::Adjust(op_index("Posterise")));
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(900));
+    let first = window.wanted_preview().expect("asked");
+    window.serve_preview(first);
+    let applying = click(&mut window, (3, 3));
+    assert_eq!(
+        window.colour(3, 3),
+        [101, 101, 101, 255],
+        "the press painted nothing"
+    );
     let Some(Request::Own(Own::Compute { .. })) = applying.request else {
         panic!(
-            "the adjustment applied on a worker, not {:?}",
+            "the operation completed on the queue, not {:?}",
             applying.request
         );
     };
     window.run_worker(applying);
     assert_eq!(window.view.adjusting(), None, "applied and closed");
     assert_eq!(window.view.document().history_depth(), 1);
-    let late = window.run_worker(preview);
-    assert!(
-        late.request.is_none(),
-        "the preview's late answer is dropped"
+    let posterised = window.colour(3, 3);
+    assert_ne!(posterised, [101, 101, 101, 255]);
+    assert_eq!(
+        window.colour(1199, 899),
+        posterised,
+        "the whole layer, as one step"
     );
     window.drag((3, 3), (3, 3));
     assert_eq!(window.colour(3, 3), [0, 0, 0, 255], "then the tool paints");
@@ -3350,18 +3685,18 @@ fn preview_turned_off_shows_the_picture_and_on_again_shows_the_preview_at_once()
     let mut window = Window::white(20, 20);
     window.act(Action::Tool(Tool::Pencil));
     window.drag((5, 5), (5, 15));
-    let out = window.act(Action::Adjust(filter_index("Blur")));
-    window.run_worker(out);
+    window.act(Action::Adjust(op_index("Gaussian blur")));
+    window.settle_previews();
     assert!(window.view.preview_canvas().is_some());
-    let off = press_at(&mut window, crate::adjust::Spot::Preview);
-    assert!(off.request.is_none());
+    press_on(&mut window, PaneKind::Effects, Spot::Preview);
     assert!(
         window.view.preview_canvas().is_none(),
         "the picture as it is"
     );
-    let on = press_at(&mut window, crate::adjust::Spot::Preview);
-    assert!(on.request.is_none(), "kept to compare");
-    assert!(window.view.preview_canvas().is_some());
+    assert!(window.wanted_preview().is_none(), "nothing asked while off");
+    press_on(&mut window, PaneKind::Effects, Spot::Preview);
+    assert!(window.view.preview_canvas().is_some(), "kept to compare");
+    assert!(window.wanted_preview().is_none(), "and nothing asked again");
 }
 
 /// A 256×1 picture of greys from 40 to 167.
@@ -3378,73 +3713,277 @@ fn greys() -> Window {
 #[test]
 fn levels_read_a_histogram_and_auto_stretches_what_it_holds() {
     let mut window = greys();
-    let histogram = window.act(Action::Adjust(filter_index("Levels")));
+    window.act(Action::Adjust(op_index("Levels")));
     assert!(window.view.histogram().is_none());
-    window.run_worker(histogram);
+    window.settle_previews();
     assert!(window.view.histogram().is_some());
-    let auto = press_at(&mut window, crate::adjust::Spot::Picker(3));
-    let Some(crate::filter::Filter::Levels(levels)) = window.view.adjusting() else {
+    press_on(&mut window, PaneKind::Adjustments, Spot::Picker(3));
+    let Some(Op::Levels(levels)) = window.view.adjusting() else {
         panic!("levels open");
     };
     let red = levels.of(crate::tone::Channel::Red);
     assert!(red.black >= 40 && red.white <= 167, "{red:?}");
-    window.run_worker(auto);
+    window.settle_previews();
     assert!(window.view.preview_canvas().is_some());
-    press_at(&mut window, crate::adjust::Spot::Apply);
+    press_on(&mut window, PaneKind::Adjustments, Spot::Apply);
     assert_eq!(window.colour(0, 0)[0], 0, "the darkest grey is black");
 }
 
 /// A histogram is a reading of the picture, whichever adjustment reads it, so
-/// moving from Levels to Curves keeps it rather than asking a worker for it
-/// again.
+/// moving from Levels to Curves keeps it rather than asking for it again.
 #[test]
 fn moving_between_adjustments_that_read_a_histogram_keeps_it() {
     let mut window = greys();
-    let histogram = window.act(Action::Adjust(filter_index("Levels")));
-    window.run_worker(histogram);
+    window.act(Action::Adjust(op_index("Levels")));
+    window.settle_previews();
     let held = window.view.histogram().cloned();
     assert!(held.is_some());
 
-    let curves = window.act(Action::Adjust(filter_index("Curves")));
+    window.act(Action::Adjust(op_index("Curves")));
 
     assert_eq!(window.view.histogram().cloned(), held, "the reading stands");
-    assert!(curves.request.is_none(), "and nothing is worked out again");
+    assert!(
+        window.wanted_preview().is_none(),
+        "and nothing is worked out again"
+    );
 }
 
-/// Moving on while a worker reads the histogram leaves its job to land on the
-/// adjustment now open, rather than abandoning it and asking for another.
+/// Moving on while the preview worker reads the histogram leaves its job to
+/// land on the adjustment now open, rather than abandoning it and asking for
+/// another.
 #[test]
 fn a_histogram_being_read_when_the_adjustment_moves_lands_on_the_next() {
     let mut window = greys();
-    let reading = window.act(Action::Adjust(filter_index("Levels")));
+    window.act(Action::Adjust(op_index("Levels")));
+    let reading = window.wanted_preview().expect("the histogram is asked");
 
-    let curves = window.act(Action::Adjust(filter_index("Curves")));
-    assert!(curves.request.is_none(), "the one job out is waited for");
-    let landed = window.run_worker(reading);
+    window.act(Action::Adjust(op_index("Curves")));
+    assert!(
+        window.wanted_preview().is_none(),
+        "the one job out is waited for"
+    );
+    window.serve_preview(reading);
 
     assert!(window.view.histogram().is_some(), "it lands on Curves");
-    assert!(landed.request.is_none(), "and is not asked for again");
+    assert!(
+        window.wanted_preview().is_none(),
+        "and is not asked for again"
+    );
 }
 
 #[test]
 fn an_eyedropper_takes_the_colour_beneath_the_preview() {
     let canvas = Canvas::new(10, 10, Kind::Rgba, Sample::Rgba([30, 20, 10, 255])).expect("fits");
     let mut window = Window::new(Document::new(Picture::plain(canvas)));
-    let histogram = window.act(Action::Adjust(filter_index("Levels")));
-    window.run_worker(histogram);
-    press_at(&mut window, crate::adjust::Spot::Picker(0));
-    assert_eq!(
-        window.view.adjustment.picking(),
-        Some(crate::adjust::Pick::Black)
-    );
-    let picked = click(&mut window, (4, 4));
-    let Some(crate::filter::Filter::Levels(levels)) = window.view.adjusting() else {
+    window.act(Action::Adjust(op_index("Levels")));
+    window.settle_previews();
+    press_on(&mut window, PaneKind::Adjustments, Spot::Picker(0));
+    let picking = |window: &Window| window.view.operation_pane(PaneKind::Adjustments).picking();
+    assert_eq!(picking(&window), Some(crate::op_pane::Pick::Black));
+    click(&mut window, (4, 4));
+    let Some(Op::Levels(levels)) = window.view.adjusting() else {
         panic!("levels open");
     };
     assert_eq!(levels.of(crate::tone::Channel::Green).black, 20);
-    assert_eq!(window.view.adjustment.picking(), None, "put down");
-    window.run_worker(picked);
+    assert_eq!(picking(&window), None, "put down");
+    window.settle_previews();
     assert_eq!(window.view.document().history_depth(), 0, "nothing painted");
+}
+
+/// Choosing another operation applies the one left only where its settings
+/// were moved and it changes something: looking down the list applies
+/// nothing, an untouched Invert included.
+#[test]
+fn leaving_an_operation_applies_it_only_where_it_was_moved() {
+    let mut window = greys();
+    window.act(Action::Adjust(op_index("Invert")));
+    window.settle_previews();
+    let switched = choose_in_selector(&mut window, PaneKind::Adjustments, 1);
+    assert!(switched.request.is_none());
+    assert_eq!(
+        window.view.document().history_depth(),
+        0,
+        "an untouched invert is dropped"
+    );
+    assert!(matches!(
+        window.view.adjusting(),
+        Some(Op::Posterise { .. })
+    ));
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(900));
+    window.settle_previews();
+    let shown = every_pixel(window.view.preview_canvas().expect("previewed"));
+    let switched = choose_in_selector(&mut window, PaneKind::Adjustments, 1);
+    assert!(switched.request.is_none(), "the whole preview adopted");
+    assert_eq!(window.view.document().history_depth(), 1, "as one step");
+    let picture = window.view.document().picture().expect("a picture");
+    assert_eq!(every_pixel(picture.canvas()), shown);
+    assert!(matches!(
+        window.view.adjusting(),
+        Some(Op::Threshold { .. })
+    ));
+}
+
+/// One preview runs across both panes: opening an operation in the other
+/// pane settles the open one, applying it where it was moved.
+#[test]
+fn opening_an_operation_in_the_other_pane_settles_the_open_one() {
+    let mut window = greys();
+    window.act(Action::Adjust(op_index("Posterise")));
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(900));
+    window.settle_previews();
+    window.act(Action::Adjust(op_index("Pixelate")));
+    assert_eq!(
+        window.view.document().history_depth(),
+        1,
+        "the posterise applied as one step"
+    );
+    assert_eq!(window.view.open_operation(), Some(PaneKind::Effects));
+    assert!(!window.view.operation_pane(PaneKind::Adjustments).is_open());
+    window.act(Action::Adjust(op_index("Brightness & contrast")));
+    assert_eq!(
+        window.view.document().history_depth(),
+        1,
+        "an untouched pixelate is dropped"
+    );
+    assert_eq!(window.view.open_operation(), Some(PaneKind::Adjustments));
+}
+
+/// A window gone abandons the preview it asked: its job stops at the next
+/// block it would start.
+#[test]
+fn a_window_closed_abandons_the_preview_it_asked() {
+    let mut window = Window::white(64, 64);
+    window.act(Action::Adjust(op_index("Invert")));
+    let Some(Request::Own(Own::Preview { job, stamp, work })) = window.wanted_preview() else {
+        panic!("a preview asked");
+    };
+    drop(window);
+    let asked = PreviewJob {
+        window: 0,
+        job,
+        stamp,
+        work,
+    };
+    let answer = crate::preview::serve(asked, &SERIAL, &|| false);
+    assert!(
+        matches!(answer.previewed, Previewed::Tiles(Err(Halted::Abandoned))),
+        "nothing is left to show it"
+    );
+}
+
+#[test]
+fn severe_memory_pressure_drops_the_preview_until_the_next_sample() {
+    let mut window = greys();
+    window.act(Action::Adjust(op_index("Posterise")));
+    window.settle_previews();
+    let pressed = |window: &mut Window, band| {
+        window
+            .view
+            .adopt_pressure(band, &window.layout, &mut Region::new());
+    };
+    pressed(&mut window, PressureBand::Moderate);
+    assert!(
+        window.view.preview_canvas().is_some(),
+        "kept short of severe"
+    );
+    pressed(&mut window, PressureBand::Severe);
+    assert!(window.view.preview_canvas().is_none(), "let go");
+    window.move_to(Point::new(1, 1));
+    assert!(
+        window.wanted_preview().is_none(),
+        "not made again by any input"
+    );
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(900));
+    assert!(
+        window.wanted_preview().is_some(),
+        "the next sample asks again"
+    );
+}
+
+#[test]
+fn a_refused_preview_is_asked_again_by_the_next_input_never_at_once() {
+    let mut window = Window::white(64, 64);
+    window.act(Action::Adjust(op_index("Invert")));
+    let Some(Request::Own(Own::Preview { job, .. })) = window.wanted_preview() else {
+        panic!("a preview asked");
+    };
+    window.view.preview_refused(job);
+    assert!(window.wanted_preview().is_none(), "not at once");
+    window.move_to(Point::new(2, 2));
+    assert!(
+        window.wanted_preview().is_some(),
+        "the next input asks again"
+    );
+}
+
+/// A preview the worker ran short of memory for is asked again only once
+/// something it rests on moves — the memory pressure falling, the window laid
+/// out anew, a sample — never for the pointer merely moving.
+#[test]
+fn a_preview_short_of_memory_waits_for_what_could_let_it_fit() {
+    let mut window = greys();
+    window.act(Action::Adjust(op_index("Posterise")));
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(900));
+    let short = |window: &mut Window| {
+        let Some(Request::Own(Own::Preview { job, stamp, .. })) = window.wanted_preview() else {
+            panic!("a preview asked");
+        };
+        let answer = PreviewAnswer {
+            window: 0,
+            job,
+            ticket: stamp.value(),
+            previewed: Previewed::Tiles(Err(Halted::OutOfMemory)),
+        };
+        window
+            .view
+            .previewed(answer, &window.layout, &mut Region::new());
+    };
+    let pressed = |window: &mut Window, band| {
+        window
+            .view
+            .adopt_pressure(band, &window.layout, &mut Region::new());
+    };
+    short(&mut window);
+    window.move_to(Point::new(2, 2));
+    assert!(window.wanted_preview().is_none(), "not for a hover");
+    pressed(&mut window, PressureBand::Moderate);
+    assert!(window.wanted_preview().is_none(), "nor for pressure rising");
+    pressed(&mut window, PressureBand::Mild);
+    short(&mut window);
+    window.relayout();
+    short(&mut window);
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(500));
+    assert!(window.wanted_preview().is_some(), "a sample asks again");
+}
+
+/// Given less room than shows it whole, an operation's pane is laid out whole
+/// and scrolled through its body, and a press reaches a part scrolled into
+/// view.
+#[test]
+fn an_operation_given_less_room_scrolls_within_its_pane_and_works_through_it() {
+    let mut window = layered(&[([128, 128, 128, 255], 255); 40], 0);
+    with_layers_pane(&mut window);
+    window.act(Action::Adjust(op_index("Levels")));
+    let slot = *window.layout.pane(PaneKind::Adjustments).expect("docked");
+    assert!(!slot.bar.is_empty(), "the pane's body scrolls");
+    assert!(
+        window
+            .layout
+            .operation_settings(PaneKind::Adjustments)
+            .height
+            > slot.body.height,
+        "laid out whole"
+    );
+    press_on(&mut window, PaneKind::Adjustments, Spot::Apply);
+    assert!(
+        window.view.body_offset(PaneKind::Adjustments) > 0,
+        "scrolled to Apply, at its foot"
+    );
+    assert_eq!(
+        window.view.adjusting(),
+        None,
+        "the press reached Apply through the scroll"
+    );
 }
 
 /// A window on a 10×10 picture of a layer of each colour and opacity, the
@@ -3585,6 +4124,33 @@ fn layers_merge_and_flatten_on_a_worker_keeping_the_look() {
     let asked = window.key(Key::Char('E'), ctrl_shift());
     window.run_worker(asked);
     assert_eq!(layers_of(&window).len(), 1, "flattened");
+}
+
+/// A merge or a flatten handed the pool lays its layers together across it,
+/// to the bit as on one core.
+#[test]
+fn a_merge_is_laid_together_across_the_pool_it_is_handed() {
+    let layers = || {
+        let ground =
+            crate::document::Layer::new(crate::effect::patterned(150, 100), String::from("ground"));
+        let mut faint =
+            crate::document::Layer::new(crate::effect::patterned(150, 100), String::from("faint"));
+        faint.opacity = 90;
+        vec![ground, faint]
+    };
+    let across = tairix_parallel::Reversed::new(4);
+    let Computed::Composed(Ok(spread)) =
+        compute(super::Compute::Compose { layers: layers() }, &across)
+    else {
+        panic!("laid together");
+    };
+    assert!(across.widest() > 1, "a tile a piece across the pool");
+    let Computed::Composed(Ok(serial)) =
+        compute(super::Compute::Compose { layers: layers() }, &SERIAL)
+    else {
+        panic!("laid together");
+    };
+    assert_eq!(spread, serial);
 }
 
 /// A hidden layer is not merged, painted on or beneath: a merge keeps the
@@ -3794,24 +4360,6 @@ fn the_eyedropper_takes_what_the_layers_show_together() {
         panic!("a colour, not {primary:?}");
     };
     assert!(near(taken, [128, 0, 127, 255]), "{taken:?}");
-}
-
-#[test]
-fn a_layer_is_renamed_and_faded_through_its_form_and_undone_whole() {
-    let mut window = layered(&[([255; 4], 255), ([0; 4], 255)], 1);
-    window.act(Action::LayerProperties);
-    assert!(window.view.asking());
-    for _ in 0.."layer".len() {
-        window.dialog_key(Key::Named(NamedKey::Backspace));
-    }
-    for ch in "Sky".chars() {
-        window.dialog_key(Key::Char(ch));
-    }
-    window.dialog_key(Key::Named(NamedKey::Enter));
-    assert!(!window.view.asking());
-    assert_eq!(layers_of(&window)[1].name, "Sky");
-    window.key(Key::Char('z'), ctrl());
-    assert_eq!(layers_of(&window)[1].name, "layer");
 }
 
 /// Where pane `kind`'s band seats `control`, or the middle of the span it is
@@ -4126,7 +4674,7 @@ fn a_tool_windows_close_mark_hides_its_pane_and_a_refusal_docks_it_home() {
 #[test]
 fn floating_panes_are_laid_out_apart_and_open_at_home_when_nothing_tore_them_out() {
     let mut window = Window::white(10, 10);
-    window.act(Action::Pane(PaneKind::Adjustment));
+    window.act(Action::Pane(PaneKind::Adjustments));
     for kind in PaneKind::ALL {
         window.view.panes.float(kind);
     }
@@ -4195,7 +4743,7 @@ fn escape_or_losing_the_keyboard_turns_a_pane_drag_down() {
 fn reset_panes_puts_every_pane_back_open_where_it_starts() {
     let mut window = Window::white(10, 10);
     let start = window.layout.clone();
-    window.act(Action::Pane(PaneKind::Adjustment));
+    window.act(Action::Pane(PaneKind::Adjustments));
     window.act(Action::Pane(PaneKind::Colour));
     let roll = band_point(&window, PaneKind::Tools, Some(WindowControlKind::Minimize));
     click_at(&mut window, roll);
@@ -4820,27 +5368,32 @@ fn a_held_palette_arrow_goes_on_scrolling() {
     window.release(PointerButton::Primary);
 }
 
-/// A torn-out Adjustment pane keeps the name of the adjustment open in it,
-/// on its band and on its tool window.
+/// A torn-out Effects pane keeps the name of the effect open in it, on its
+/// band and on its tool window.
 #[test]
 fn a_torn_out_adjustment_keeps_its_name() {
     let mut window = Window::white(30, 30);
-    let outcome = window.act(Action::Adjust(filter_index("Blur")));
-    window.run_worker(outcome);
-    assert_eq!(window.view.header(PaneKind::Adjustment).title(), "Blur");
-    let grip = band_point(&window, PaneKind::Adjustment, None);
+    window.act(Action::Adjust(op_index("Gaussian blur")));
+    assert_eq!(
+        window.view.header(PaneKind::Effects).title(),
+        "Gaussian blur"
+    );
+    let grip = band_point(&window, PaneKind::Effects, None);
     drag_band(
         &mut window,
-        PaneKind::Adjustment,
+        PaneKind::Effects,
         Point::new(to_i32(WINDOW.0) - 1, grip.y + 40),
     );
-    assert!(window.view.arrangement().floats(PaneKind::Adjustment));
-    assert_eq!(window.view.header(PaneKind::Adjustment).title(), "Blur");
+    assert!(window.view.arrangement().floats(PaneKind::Effects));
+    assert_eq!(
+        window.view.header(PaneKind::Effects).title(),
+        "Gaussian blur"
+    );
     let wanted = window
         .view
         .tool_window(&window.layout, 0)
         .expect("its tool window");
-    assert_eq!(wanted.title, "Blur");
+    assert_eq!(wanted.title, "Gaussian blur");
 }
 
 /// A change of ink repaints the wells its marks leave and reach, and none of
@@ -4922,4 +5475,1022 @@ fn a_secondary_press_on_a_tool_window_opens_the_window_menu() {
         panic!("the window's menu, not {:?}", outcome.request);
     };
     assert_eq!((anchor.left(), anchor.top()), (at.x, at.y));
+}
+
+/// The floating palette's tool window as the view asks for it: its
+/// rectangle and how it may be sized.
+fn palette_window(window: &Window) -> (Rect, WindowSizing) {
+    let wanted = (0..)
+        .map_while(|place| window.view.tool_window(&window.layout, place))
+        .find(|wanted| wanted.id == super::tool_id(PaneKind::Palette))
+        .expect("the palette's tool window");
+    (wanted.rect, wanted.sizing)
+}
+
+/// Resize the floating palette's tool window to `size`, as its edges do, and
+/// lay the window out again as the host does.
+fn resize_palette(window: &mut Window, size: (u32, u32)) -> (Outcome, Region) {
+    let mut damage = Region::new();
+    let outcome = window.view.tool_resized(
+        super::tool_id(PaneKind::Palette),
+        size,
+        &window.layout,
+        Scale::ONE,
+        &mut damage,
+    );
+    window.apply(&outcome);
+    (outcome, damage)
+}
+
+/// A white picture's window, its palette floating in a tool window resized
+/// to `across` wells and `down` rows of them.
+fn sized_palette(across: u32, down: u32) -> Window {
+    let mut window = Window::white(16, 16);
+    window.act(Action::FloatPalette);
+    let gap = window.registry.active().metrics().control_gap;
+    let well = window.layout.palette_well();
+    let _ = resize_palette(
+        &mut window,
+        (across * well + 2 * gap, down * well + 2 * gap),
+    );
+    window
+}
+
+/// Resized by its edges, the floating palette keeps that size, sets its wells
+/// out again to fit it, and repaints within its own tool window alone.
+#[test]
+fn a_resized_palette_keeps_its_size_and_reflows_within_its_own_window() {
+    let mut window = Window::white(16, 16);
+    window.act(Action::FloatPalette);
+    let (opened, sizing) = palette_window(&window);
+    assert!(sizing.resizable(), "a floating palette is resizable");
+    let gap = window.registry.active().metrics().control_gap;
+    let well = window.layout.palette_well();
+    let size = (6 * well + 2 * gap, 3 * well + 2 * gap);
+    let (outcome, damage) = resize_palette(&mut window, size);
+    assert_eq!(outcome.relayout, Relayout::Reported);
+    assert_eq!(damage.bounds(), opened, "its own tool window");
+    assert!(!damage.intersects(window.layout.window()), "not the window");
+    let (resized, _) = palette_window(&window);
+    assert_eq!((resized.width, resized.height), size, "it keeps its size");
+    assert_eq!(window.layout.columns(), 6);
+    assert_eq!(window.view.swatches.columns(), 6, "six wells across");
+    window.relayout();
+    assert_eq!(palette_window(&window).0, resized, "laid out again, kept");
+}
+
+/// Docked in its strip again, the palette forgets the size its tool window
+/// was given, and floats again at its own.
+#[test]
+fn a_docked_palette_forgets_the_size_it_was_given() {
+    let mut fresh = Window::white(16, 16);
+    fresh.act(Action::FloatPalette);
+    let own = palette_window(&fresh).0;
+    let mut window = sized_palette(6, 3);
+    assert_ne!(palette_window(&window).0, own);
+    window.act(Action::FloatPalette);
+    assert!(window.view.panes().in_strip());
+    window.act(Action::FloatPalette);
+    assert_eq!(palette_window(&window).0, own, "it opens at its own size");
+}
+
+/// A pane floating at its own size is never resized: told it was, it keeps
+/// its size and repaints nothing.
+#[test]
+fn a_fixed_tool_window_takes_no_size_of_its_own() {
+    let mut window = Window::white(10, 10);
+    window.view.panes.float(PaneKind::Tools);
+    window.relayout();
+    let slot = *window.layout.pane(PaneKind::Tools).expect("floating");
+    assert!(!slot.sizing.resizable());
+    let mut damage = Region::new();
+    let outcome = window.view.tool_resized(
+        super::tool_id(PaneKind::Tools),
+        (300, 300),
+        &window.layout,
+        Scale::ONE,
+        &mut damage,
+    );
+    assert_eq!(outcome.relayout, Relayout::None);
+    assert!(damage.is_empty());
+    window.relayout();
+    let after = window.layout.pane(PaneKind::Tools).expect("floating").frame;
+    assert_eq!(after, slot.frame);
+}
+
+/// The size a palette was resized to is kept in logical pixels: at twice the
+/// scale its tool window is twice as large.
+#[test]
+fn a_resized_palette_keeps_its_size_across_a_change_of_scale() {
+    let window = sized_palette(6, 3);
+    let (at_one, _) = palette_window(&window);
+    let double = Scale::from_percent(200).expect("a scale");
+    let theme = window.registry.active();
+    let layout = window.view.layout(
+        WINDOW.0 * 2,
+        WINDOW.1 * 2,
+        theme,
+        double,
+        Faces::of(theme, double),
+    );
+    let frame = layout.pane(PaneKind::Palette).expect("floating").frame;
+    assert_eq!(
+        (frame.width, frame.height),
+        (at_one.width * 2, at_one.height * 2)
+    );
+}
+
+/// The arrows walk a resized palette by the rows it reflowed to.
+#[test]
+fn up_and_down_walk_the_columns_a_resized_palette_reflowed_to() {
+    let mut window = sized_palette(6, 3);
+    window.act(Action::Tool(Tool::Pencil));
+    window.key(Key::Named(NamedKey::Tab), plain());
+    assert!(window.view.swatches.state().focus.focused);
+    let black = window
+        .view
+        .swatches
+        .selected()
+        .expect("black is a Wimp colour");
+    window.key(Key::Named(NamedKey::Down), plain());
+    assert_eq!(
+        window.view.inks().0,
+        window.view.wells[black + 6],
+        "a row of six down"
+    );
+    window.key(Key::Named(NamedKey::Up), plain());
+    assert_eq!(window.view.inks().0, window.view.wells[black]);
+}
+
+/// A palette resized too short for its wells scrolls down by the wheel, and
+/// a press finds the well drawn under it.
+#[test]
+fn a_short_palette_scrolls_down_by_the_wheel_and_a_press_finds_the_well_drawn_there() {
+    let mut window = sized_palette(4, 2);
+    assert_eq!(window.layout.columns(), 3, "its bar takes a column's room");
+    assert!(
+        !window.layout.palette_bar().is_empty(),
+        "its wells overflow"
+    );
+    assert_eq!(
+        window.view.palette_bar.orientation(),
+        ScrollOrientation::Vertical
+    );
+    let view = window.layout.wells_view();
+    window.move_to(view.center());
+    window.pointer(InputEvent::PointerScrolled {
+        dx: 0,
+        dy: SCROLL_UNITS_PER_DETENT,
+    });
+    let offset = window.view.palette_bar.model().range().offset();
+    assert!(offset > 0, "the wheel scrolls the wells down");
+    let shown = window.view.swatch_bounds(&window.layout);
+    let up = to_i32(u32::try_from(offset).expect("small"));
+    assert_eq!(shown.top(), window.layout.swatches().top() - up);
+    let under = window
+        .view
+        .swatches
+        .well_at(shown, view.center())
+        .expect("a well");
+    window.press(PointerButton::Primary);
+    window.release(PointerButton::Primary);
+    assert_eq!(window.view.inks().0, window.view.wells[under]);
+}
+
+/// The arrows scroll a palette too short for its wells to the well they
+/// reach.
+#[test]
+fn the_arrows_scroll_a_short_palette_to_the_well_they_reach() {
+    let mut window = sized_palette(4, 2);
+    window.act(Action::Tool(Tool::Pencil));
+    window.key(Key::Named(NamedKey::Tab), plain());
+    assert!(window.view.swatches.state().focus.focused);
+    for _ in 0..3 {
+        window.key(Key::Named(NamedKey::Down), plain());
+    }
+    let marked = window.view.swatches.selected().expect("a well marked");
+    assert_eq!(marked, window.view.wells.len() - 1, "the last row");
+    assert!(window.view.palette_bar.model().range().offset() > 0);
+    let cell = well_rect(&window, marked);
+    assert_eq!(
+        cell.intersection(&window.layout.wells_view()),
+        cell,
+        "the well the arrows reached shows"
+    );
+}
+
+/// The palette numbers its wells with RISC OS colour numbers: a colour
+/// picture's are the Wimp colours, a palette picture's its own entries, and
+/// the clear ink has none.
+#[test]
+fn the_palette_numbers_the_wimp_colours_or_the_entries_never_the_clear_ink() {
+    // Each window is built in turn: three at once would not fit on the stack.
+    let pictures: [(fn() -> Window, usize); 3] = [
+        (|| Window::white(16, 16), 16),
+        (four_colours, 4),
+        (long_palette, 256),
+    ];
+    for (picture, numbered) in pictures {
+        assert_eq!(picture().view.swatches.numbered(), numbered);
+    }
+}
+
+/// The Layers pane shown in its column, its rows laid out.
+fn with_layers_pane(window: &mut Window) {
+    window.act(Action::Pane(PaneKind::Layers));
+    assert!(!window.layout.layers().rows.is_empty(), "its rows show");
+}
+
+/// Where the Layers pane shows the parts of layer `layer`'s row.
+fn layer_row(window: &Window, layer: usize) -> crate::layers_pane::RowParts {
+    let theme = window.registry.active();
+    window
+        .view
+        .layers
+        .parts_of(layer, window.layout.layers(), faces(theme), Scale::ONE)
+        .expect("its row shows")
+}
+
+/// A press on a row of the Layers pane paints on its layer, which is no step
+/// to undo; its eye shows or hides its layer as one, painting staying put.
+#[test]
+fn picking_a_layers_row_takes_no_step_and_its_eye_one() {
+    let mut window = layered(&[([255; 4], 255), ([0, 0, 0, 255], 255), ([9; 4], 255)], 2);
+    with_layers_pane(&mut window);
+    let at = layer_row(&window, 0).name.center();
+    click_at(&mut window, at);
+    assert_eq!(painted_on(&window), 0);
+    assert_eq!(
+        window.view.document().history_depth(),
+        0,
+        "picking is no step"
+    );
+    let at = layer_row(&window, 1).eye.center();
+    click_at(&mut window, at);
+    assert!(!layers_of(&window)[1].visible);
+    assert_eq!(painted_on(&window), 0, "still painting on the bottom layer");
+    assert_eq!(window.view.document().history_depth(), 1);
+    window.key(Key::Char('z'), ctrl());
+    assert!(layers_of(&window)[1].visible, "undone whole");
+}
+
+/// A click on the name of the layer painted on renames it in place, as one
+/// step; a name left empty keeps the one it had.
+#[test]
+fn a_layer_renamed_in_its_row_is_one_step() {
+    let mut window = layered(&[([255; 4], 255), ([0, 0, 0, 255], 255)], 1);
+    with_layers_pane(&mut window);
+    let name = layer_row(&window, 1).name.center();
+    click_at(&mut window, name);
+    assert_eq!(
+        window.view.layers.renaming(),
+        Some(layers_of(&window)[1].revision)
+    );
+    for ch in "Sky".chars() {
+        window.key(Key::Char(ch), plain());
+    }
+    window.key(Key::Named(NamedKey::Enter), plain());
+    assert_eq!(window.view.layers.renaming(), None);
+    assert_eq!(layers_of(&window)[1].name, "Sky");
+    assert_eq!(window.view.document().history_depth(), 1);
+    click_at(&mut window, name);
+    window.key(Key::Named(NamedKey::Backspace), plain());
+    window.key(Key::Named(NamedKey::Enter), plain());
+    assert_eq!(layers_of(&window)[1].name, "Sky", "an empty name keeps it");
+    assert_eq!(window.view.document().history_depth(), 1);
+    window.key(Key::Char('z'), ctrl());
+    assert_eq!(layers_of(&window)[1].name, "layer");
+}
+
+/// A row dragged up the Layers pane moves its layer up the stack, as one
+/// step.
+#[test]
+fn a_layers_row_dragged_moves_its_layer_as_one_step() {
+    let mut window = layered(&[([255; 4], 255), ([0, 0, 0, 255], 255), ([9; 4], 255)], 0);
+    with_layers_pane(&mut window);
+    let from = layer_row(&window, 0).name.center();
+    let top = layer_row(&window, 2).name;
+    window.move_to(from);
+    window.press(PointerButton::Primary);
+    window.move_to(Point::new(from.x, top.top() + 1));
+    window.release(PointerButton::Primary);
+    let colours: Vec<_> = layers_of(&window)
+        .iter()
+        .map(|layer| layer.canvas.colour_at(0, 0))
+        .collect();
+    assert_eq!(
+        colours,
+        [Some([0, 0, 0, 255]), Some([9; 4]), Some([255; 4])],
+        "the bottom layer now on top"
+    );
+    assert_eq!(window.view.document().history_depth(), 1);
+}
+
+/// An opacity or a palette entry being changed live is a change a quit asks
+/// about: the window counts as modified while it stands away from where it
+/// began, and closing lands it first so the question covers it.
+#[test]
+fn a_change_being_made_live_counts_as_unsaved() {
+    let mut window = layered(&[([255; 4], 255), ([0, 0, 0, 255], 255)], 1);
+    assert!(!SavedDocument::is_modified(&window.view));
+    window
+        .view
+        .layer_opacity(40, false, &window.layout, &mut Region::new());
+    assert!(
+        SavedDocument::is_modified(&window.view),
+        "an opacity moving"
+    );
+    window
+        .view
+        .layer_opacity(100, false, &window.layout, &mut Region::new());
+    assert!(
+        !SavedDocument::is_modified(&window.view),
+        "back where it began"
+    );
+
+    let mut window = four_colours();
+    window.move_to(window.dock_point((4, 4)));
+    window.press(PointerButton::Primary);
+    assert!(SavedDocument::is_modified(&window.view), "an entry moving");
+    let closing = window
+        .view
+        .close_requested(&window.layout, &mut Region::new());
+    assert_eq!(
+        window.view.document().history_depth(),
+        1,
+        "landed before the question"
+    );
+    assert!(
+        matches!(closing.request, Some(Request::AskToClose)),
+        "{:?}",
+        closing.request
+    );
+}
+
+/// An opacity changed live in the Layers pane asks the preview worker for the
+/// layers beneath laid together, takes no step while it moves, and lands as
+/// one.
+#[test]
+fn an_opacity_changed_live_lands_as_one_step() {
+    let mut window = layered(&[([255; 4], 255), ([0, 0, 0, 255], 255)], 1);
+    window
+        .view
+        .layer_opacity(70, false, &window.layout, &mut Region::new());
+    window.settle_previews();
+    assert!(
+        window.view.composite_under().is_some(),
+        "kept for every sample"
+    );
+    window
+        .view
+        .layer_opacity(30, false, &window.layout, &mut Region::new());
+    assert_eq!(
+        window.view.document().history_depth(),
+        0,
+        "no step while it moves"
+    );
+    window
+        .view
+        .layer_opacity(30, true, &window.layout, &mut Region::new());
+    assert_eq!(window.view.document().history_depth(), 1);
+    assert!(window.view.composite_under().is_none(), "let go");
+    assert_eq!(
+        layers_of(&window)[1].opacity,
+        tairix_colour::Fraction::from_percent(30).byte()
+    );
+    window.key(Key::Char('z'), ctrl());
+    assert_eq!(layers_of(&window)[1].opacity, 255, "undone whole");
+}
+
+/// A press on the Layers pane's opacity field takes the keyboard from its
+/// rows: a digit and Backspace typed there are the field's, never the
+/// window's zoom or the clearing of the selection's pixels.
+#[test]
+fn a_press_on_the_layers_panes_opacity_takes_the_keyboard_from_its_rows() {
+    let mut window = layered(&[([255; 4], 255), ([0, 0, 0, 255], 255)], 1);
+    with_layers_pane(&mut window);
+    window.act(Action::SelectAll);
+    window.act(Action::ZoomIn);
+    let zoom = window.view.viewport().percent();
+    let back = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    window.key(Key::Named(NamedKey::Tab), back);
+    assert!(window.view.layers.has_focus(), "the rows have the keyboard");
+    let theme = window.registry.active();
+    let look = (faces(theme), Scale::ONE, theme);
+    let field = window
+        .view
+        .layers
+        .opacity_field(window.layout.layers(), look)
+        .expect("the opacity is seated");
+    click_at(&mut window, field.center());
+    let typed = window.key(Key::Char('1'), plain());
+    let erased = window.key(Key::Named(NamedKey::Backspace), plain());
+    assert!(
+        typed.request.is_none() && erased.request.is_none(),
+        "nothing asked of a worker"
+    );
+    assert!(!window.view.busy(), "the selection's pixels not cleared");
+    assert_eq!(
+        window.view.viewport().percent(),
+        zoom,
+        "the view keeps its zoom"
+    );
+    assert_eq!(painted_on(&window), 1);
+}
+
+/// Showing or hiding the layer from the Layers pane's rows while its opacity
+/// is still moving — the slider held — lands that opacity first, so undoing
+/// both puts back the opacity it began at.
+#[test]
+fn a_row_shown_while_its_opacity_moves_lands_the_opacity_first() {
+    let mut window = layered(&[([255; 4], 255), ([0, 0, 0, 255], 255)], 1);
+    with_layers_pane(&mut window);
+    let back = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    window.key(Key::Named(NamedKey::Tab), back);
+    window
+        .view
+        .layer_opacity(40, false, &window.layout, &mut Region::new());
+    window.key(Key::Char(' '), plain());
+    assert!(!layers_of(&window)[1].visible, "hidden from its row");
+    window
+        .view
+        .layer_opacity(40, true, &window.layout, &mut Region::new());
+    assert_eq!(
+        window.view.document().history_depth(),
+        2,
+        "the opacity, then the eye"
+    );
+    window.key(Key::Char('z'), ctrl());
+    window.key(Key::Char('z'), ctrl());
+    let layer = &layers_of(&window)[1];
+    assert_eq!(
+        (layer.opacity, layer.visible),
+        (255, true),
+        "back where it began"
+    );
+}
+
+/// Severe memory pressure lets the composite beneath an opacity changing go
+/// with the preview, and it is not laid again while that opacity moves: each
+/// paint lays every layer until it settles.
+#[test]
+fn severe_memory_pressure_lets_the_composite_beneath_an_opacity_go() {
+    let mut window = layered(&[([255; 4], 255), ([0, 0, 0, 255], 255)], 1);
+    window
+        .view
+        .layer_opacity(70, false, &window.layout, &mut Region::new());
+    window.settle_previews();
+    assert!(window.view.composite_under().is_some());
+    window
+        .view
+        .adopt_pressure(PressureBand::Severe, &window.layout, &mut Region::new());
+    assert!(window.view.composite_under().is_none(), "let go");
+    window
+        .view
+        .layer_opacity(30, false, &window.layout, &mut Region::new());
+    assert!(
+        window.wanted_preview().is_none(),
+        "not laid again while it moves"
+    );
+    // Severe pressure lets the history hold nothing, so the step is shown
+    // recorded once the pressure falls.
+    window
+        .view
+        .adopt_pressure(PressureBand::Normal, &window.layout, &mut Region::new());
+    assert!(
+        window.wanted_preview().is_none(),
+        "nor once the pressure falls"
+    );
+    window
+        .view
+        .layer_opacity(30, true, &window.layout, &mut Region::new());
+    assert_eq!(
+        layers_of(&window)[1].opacity,
+        tairix_colour::Fraction::from_percent(30).byte(),
+        "it lands"
+    );
+    assert_eq!(window.view.document().history_depth(), 1, "one step still");
+}
+
+/// The Layers pane's thumbnails are drawn on the preview worker, one job at a
+/// time, each kept by the revision of the layer it shows: a stroke asks again
+/// for its own layer's alone.
+#[test]
+fn layer_thumbnails_are_drawn_on_the_preview_worker_by_revision() {
+    let mut window = layered(&[([255; 4], 255), ([0, 0, 0, 255], 255)], 1);
+    with_layers_pane(&mut window);
+    let side = crate::layers_pane::thumb_side(Scale::ONE);
+    let asked = window
+        .wanted_preview()
+        .expect("the rows' thumbnails are asked for");
+    assert!(window.wanted_preview().is_none(), "one job at a time");
+    window.serve_preview(asked);
+    let revisions: Vec<u64> = layers_of(&window)
+        .iter()
+        .map(|layer| layer.revision)
+        .collect();
+    for &revision in &revisions {
+        assert!(window.view.layer_thumb(revision, side).is_some(), "drawn");
+    }
+    assert!(window.wanted_preview().is_none(), "none asked twice");
+    window.act(Action::Tool(Tool::Pencil));
+    window.drag((2, 2), (2, 2));
+    let stroked = layers_of(&window)[1].revision;
+    assert_ne!(
+        stroked, revisions[1],
+        "the stroke moved its layer's revision"
+    );
+    assert_eq!(layers_of(&window)[0].revision, revisions[0], "and no other");
+    let again = window.wanted_preview().expect("asked again");
+    let Request::Own(Own::Preview {
+        work: PreviewWork::LayerThumbnails { layers, .. },
+        ..
+    }) = &again
+    else {
+        panic!("the thumbnails, not {again:?}");
+    };
+    let wanted: Vec<u64> = layers.iter().map(|(revision, _)| *revision).collect();
+    assert_eq!(wanted, [stroked]);
+}
+
+/// Thumbnails given up to make way for an Apply's completion are asked for
+/// again, never taken for rows with nothing to draw.
+#[test]
+fn thumbnails_given_up_for_a_completion_are_asked_again() {
+    let mut window = layered(&[([255; 4], 255), ([0, 0, 0, 255], 255)], 1);
+    with_layers_pane(&mut window);
+    let Some(Request::Own(Own::Preview { job, stamp, work })) = window.wanted_preview() else {
+        panic!("the rows' thumbnails asked");
+    };
+    let asked = PreviewJob {
+        window: 0,
+        job,
+        stamp,
+        work,
+    };
+    let given_way = crate::preview::serve(asked, &SERIAL, &|| true);
+    window
+        .view
+        .previewed(given_way, &window.layout, &mut Region::new());
+    let again = window.wanted_preview();
+    assert!(
+        matches!(
+            again,
+            Some(Request::Own(Own::Preview {
+                work: PreviewWork::LayerThumbnails { .. },
+                ..
+            }))
+        ),
+        "the thumbnails asked again, not {again:?}"
+    );
+}
+
+/// Once the Layers pane shares its column, the Colour pane, given less than
+/// it shows whole at, scrolls its own body: the wheel over it moves it, and
+/// the picker Tabbed to is scrolled into view.
+#[test]
+fn the_colour_pane_scrolls_once_the_layers_pane_takes_its_room() {
+    let mut window = layered(&[([255; 4], 255); 40], 0);
+    with_layers_pane(&mut window);
+    let slot = *window.layout.pane(PaneKind::Colour).expect("docked");
+    assert!(!slot.bar.is_empty(), "the colour pane scrolls");
+    assert!(slot.content.height > slot.body.height);
+    window.move_to(slot.viewport().center());
+    window.pointer(InputEvent::PointerScrolled {
+        dx: 0,
+        dy: SCROLL_UNITS_PER_DETENT,
+    });
+    assert!(
+        window.view.body_offset(PaneKind::Colour) > 0,
+        "the wheel scrolls it"
+    );
+    window.tab_into_dock();
+    let picker = window.layout.picker();
+    assert!(
+        window
+            .view
+            .held_view(&window.layout, PaneKind::Colour, false)
+            .to_window(picker)
+            .is_some(),
+        "the picker shows"
+    );
+}
+
+/// Floating, the Layers pane's tool window sizes between its controls over
+/// two rows and every row, and keeps the size it is given, the rows it
+/// cannot show scrolling beneath its whole controls.
+#[test]
+fn a_floating_layers_pane_keeps_the_size_it_was_given() {
+    let mut window = layered(&[([255; 4], 255); 8], 0);
+    with_layers_pane(&mut window);
+    window.view.panes.float(PaneKind::Layers);
+    window.relayout();
+    let slot = *window.layout.pane(PaneKind::Layers).expect("floating");
+    assert!(slot.sizing.resizable());
+    let (least, most) = (slot.sizing.min_height_px(), slot.sizing.max_height_px());
+    assert!(least < most, "from two rows to all eight");
+    let height = least + (most - least) / 2;
+    let outcome = window.view.tool_resized(
+        super::tool_id(PaneKind::Layers),
+        (slot.frame.width, height),
+        &window.layout,
+        Scale::ONE,
+        &mut Region::new(),
+    );
+    window.apply(&outcome);
+    let resized = *window.layout.pane(PaneKind::Layers).expect("floating");
+    assert_eq!(resized.frame.height, height, "the size it was given");
+    let placed = *window.layout.layers();
+    assert!(!placed.bar.is_empty(), "the rows it cannot show scroll");
+    assert!(
+        placed.panel.bottom() <= placed.rows.top(),
+        "beneath its controls"
+    );
+}
+
+/// A name being typed in the Layers pane lands before a menu's action, so
+/// deleting its layer takes it with its new name and leaves nothing to land on
+/// the layer that takes its place.
+#[test]
+fn a_name_being_typed_lands_before_a_menus_action() {
+    let mut window = layered(&[([1; 4], 255), ([2; 4], 255), ([3; 4], 255)], 1);
+    with_layers_pane(&mut window);
+    let spot = layer_row(&window, 1).name.center();
+    click_at(&mut window, spot);
+    assert!(window.view.layers.renaming().is_some(), "renaming");
+    for ch in "Sky".chars() {
+        window.key(Key::Char(ch), plain());
+    }
+    let delete = AppMenuItemId::new(Action::DeleteLayer.id()).expect("an id");
+    let outcome = window
+        .view
+        .chosen(delete, &window.layout, &mut Region::new());
+    window.apply(&outcome);
+    assert_eq!(window.view.layers.renaming(), None, "landed first");
+    window.key(Key::Named(NamedKey::Enter), plain());
+    let names: Vec<&str> = layers_of(&window)
+        .iter()
+        .map(|layer| layer.name.as_str())
+        .collect();
+    assert_eq!(names, ["layer", "layer"], "no other layer took its name");
+    assert_eq!(
+        window.view.document().history_depth(),
+        2,
+        "the rename, then the deletion"
+    );
+}
+
+/// A name lands only on the layer it was begun on, found by its revision: once
+/// that layer has gone, Enter renames none in its place.
+#[test]
+fn a_name_lands_on_its_own_layer_or_on_none() {
+    let mut window = layered(&[([1; 4], 255), ([2; 4], 255), ([3; 4], 255)], 1);
+    with_layers_pane(&mut window);
+    let spot = layer_row(&window, 1).name.center();
+    click_at(&mut window, spot);
+    for ch in "Sky".chars() {
+        window.key(Key::Char(ch), plain());
+    }
+    assert!(window.view.document.remove_layer(1).is_ok());
+    window.key(Key::Named(NamedKey::Enter), plain());
+    assert!(
+        layers_of(&window).iter().all(|layer| layer.name == "layer"),
+        "the layer now in its place keeps its name"
+    );
+}
+
+/// A name being typed lands as the window loses the keyboard, and as it is
+/// closed, which then asks whether to keep it.
+#[test]
+fn a_name_being_typed_lands_as_the_window_loses_the_keyboard_or_closes() {
+    let mut window = layered(&[([1; 4], 255), ([2; 4], 255)], 1);
+    with_layers_pane(&mut window);
+    let name = layer_row(&window, 1).name.center();
+    click_at(&mut window, name);
+    for ch in "Sky".chars() {
+        window.key(Key::Char(ch), plain());
+    }
+    window
+        .view
+        .focus_changed(false, &window.layout, &mut Region::new());
+    assert_eq!(layers_of(&window)[1].name, "Sky");
+    let generation = window.view.document().generation();
+    window.view.saved(generation);
+    click_at(&mut window, name);
+    for ch in "Sea".chars() {
+        window.key(Key::Char(ch), plain());
+    }
+    let closing = window
+        .view
+        .close_requested(&window.layout, &mut Region::new());
+    assert_eq!(layers_of(&window)[1].name, "Sea");
+    assert!(
+        matches!(closing.request, Some(Request::AskToClose)),
+        "{:?}",
+        closing.request
+    );
+}
+
+/// An undo past a conversion closes the effect left open over it, which a
+/// palette picture cannot take, saying so, and leaves a save live.
+#[test]
+fn an_effect_open_over_a_conversion_undone_is_closed() {
+    use crate::transform::{Depth, PaletteChoice, Transform};
+    let mut window = four_colours();
+    let colour = Transform::Convert {
+        depth: Depth::Rgba,
+        palette: PaletteChoice::Desktop,
+        dither: false,
+    };
+    let converting = window.view.transform(
+        colour,
+        "change its colours",
+        &window.layout,
+        &mut Region::new(),
+    );
+    window.run_worker(converting);
+    window.act(Action::Adjust(op_index("Gaussian blur")));
+    press_on(&mut window, PaneKind::Effects, Spot::Number(500));
+    assert!(window.view.operation_pane(PaneKind::Effects).moved());
+    window.key(Key::Char('z'), ctrl());
+    assert!(
+        window
+            .view
+            .document()
+            .picture()
+            .is_some_and(|picture| picture.kind().palette().is_some()),
+        "a palette picture again"
+    );
+    assert_eq!(window.view.adjusting(), None, "the blur closed");
+    assert!(window
+        .view
+        .message()
+        .is_some_and(|said| said.contains("needs a colour picture")));
+    let saving = window.act(Action::Save);
+    assert!(
+        matches!(saving.request, Some(Request::Save)),
+        "{:?}",
+        saving.request
+    );
+}
+
+/// Apply pressed in one pane while the other's operation is completed on the
+/// queue applies this one's once that has landed, each as one step.
+#[test]
+fn apply_in_one_pane_follows_the_others_completion() {
+    let canvas = crate::effect::patterned(1200, 900);
+    let mut window = Window::new(Document::new(Picture::plain(canvas)));
+    window.act(Action::Pane(PaneKind::Effects));
+    window.act(Action::Adjust(op_index("Posterise")));
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(900));
+    let first = window.wanted_preview().expect("asked");
+    window.serve_preview(first);
+    let completing = press_on(&mut window, PaneKind::Effects, Spot::Apply);
+    let Some(Request::Own(Own::Compute {
+        work: super::Compute::Op { op, .. },
+        ..
+    })) = &completing.request
+    else {
+        panic!("completed on the queue, not {:?}", completing.request);
+    };
+    assert!(matches!(op, Op::Posterise { .. }), "the posterise first");
+    let applying = window.run_worker(completing);
+    assert_eq!(window.view.document().history_depth(), 1);
+    let Some(Request::Own(Own::Compute { .. })) = applying.request else {
+        panic!("then the blur's own, not {:?}", applying.request);
+    };
+    window.run_worker(applying);
+    assert_eq!(window.view.document().history_depth(), 2, "then the blur");
+}
+
+/// An operation left for another keeps its settings until it has landed: one
+/// whose completion is refused stays open as it was set.
+#[test]
+fn an_operation_left_keeps_its_settings_until_it_has_landed() {
+    let grey = Sample::Rgba([101, 101, 101, 255]);
+    let canvas = Canvas::new(1200, 900, Kind::Rgba, grey).expect("fits");
+    let mut window = Window::new(Document::new(Picture::plain(canvas)));
+    window.act(Action::Adjust(op_index("Posterise")));
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(900));
+    let moved = window.view.adjusting().expect("open");
+    let first = window.wanted_preview().expect("asked");
+    window.serve_preview(first);
+    let leaving = choose_in_selector(&mut window, PaneKind::Adjustments, 1);
+    let Some(Request::Own(Own::Compute { job, .. })) = leaving.request else {
+        panic!("completed on the queue, not {:?}", leaving.request);
+    };
+    assert_eq!(
+        window.view.operation_pane(PaneKind::Adjustments).op(),
+        moved,
+        "held until it lands"
+    );
+    let refused = window.view.computed(
+        job,
+        Computed::Op(Err(Halted::OutOfMemory)),
+        &window.layout,
+        &mut Region::new(),
+    );
+    window.apply(&refused);
+    assert_eq!(
+        window.view.adjusting(),
+        Some(moved),
+        "still open as it was set"
+    );
+    assert_eq!(window.view.document().history_depth(), 0);
+}
+
+/// An Apply's completion refused names what waited on it as not done: a save,
+/// or a save before the window closes, which then stays open.
+#[test]
+fn a_refused_completion_names_the_save_it_held_as_not_done() {
+    let grey = Sample::Rgba([101, 101, 101, 255]);
+    let canvas = Canvas::new(1200, 900, Kind::Rgba, grey).expect("fits");
+    let mut window = Window::new(Document::new(Picture::plain(canvas)));
+    window.act(Action::Adjust(op_index("Posterise")));
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(900));
+    let first = window.wanted_preview().expect("asked");
+    window.serve_preview(first);
+    let refuse = |window: &mut Window, asked: Outcome| {
+        let Some(Request::Own(Own::Compute { job, .. })) = asked.request else {
+            panic!("completed on the queue, not {:?}", asked.request);
+        };
+        let refused = window.view.computed(
+            job,
+            Computed::Op(Err(Halted::OutOfMemory)),
+            &window.layout,
+            &mut Region::new(),
+        );
+        window.apply(&refused);
+        String::from(window.view.message().unwrap_or_default())
+    };
+    let saving = window.act(Action::Save);
+    let said = refuse(&mut window, saving);
+    assert!(said.ends_with("the picture was not saved"), "{said}");
+    let closing = window
+        .view
+        .save_then_close(&window.layout, &mut Region::new());
+    let said = refuse(&mut window, closing);
+    assert!(said.ends_with("and the window stays open"), "{said}");
+    let applying = press_on(&mut window, PaneKind::Adjustments, Spot::Apply);
+    let waiting = window
+        .view
+        .save_then_close(&window.layout, &mut Region::new());
+    assert!(waiting.request.is_none(), "waiting on the Apply");
+    let said = refuse(&mut window, applying);
+    assert!(said.ends_with("and the window stays open"), "{said}");
+    assert!(
+        !window.view.asking_to_close(),
+        "nothing left for a quit to wait on"
+    );
+}
+
+/// A sample in the other pane keeps the open operation's settings until it has
+/// landed: one refused stays open, and the pane the sample opened goes back to
+/// its start, so one pane is open.
+#[test]
+fn a_sample_in_the_other_pane_keeps_the_open_operation_until_it_has_landed() {
+    let grey = Sample::Rgba([101, 101, 101, 255]);
+    let canvas = Canvas::new(1200, 900, Kind::Rgba, grey).expect("fits");
+    let mut window = Window::new(Document::new(Picture::plain(canvas)));
+    window.act(Action::Pane(PaneKind::Effects));
+    window.act(Action::Adjust(op_index("Posterise")));
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(900));
+    let moved = window.view.adjusting().expect("open");
+    let first = window.wanted_preview().expect("asked");
+    window.serve_preview(first);
+    let sampled = press_on(&mut window, PaneKind::Effects, Spot::Number(500));
+    let Some(Request::Own(Own::Compute { job, .. })) = sampled.request else {
+        panic!(
+            "the posterise completed on the queue, not {:?}",
+            sampled.request
+        );
+    };
+    assert_eq!(
+        window.view.operation_pane(PaneKind::Adjustments).op(),
+        moved,
+        "held until it lands"
+    );
+    let refused = window.view.computed(
+        job,
+        Computed::Op(Err(Halted::OutOfMemory)),
+        &window.layout,
+        &mut Region::new(),
+    );
+    window.apply(&refused);
+    assert_eq!(
+        window.view.adjusting(),
+        Some(moved),
+        "kept open as it was set"
+    );
+    assert!(
+        !window.view.operation_pane(PaneKind::Effects).is_open(),
+        "the sample turned down"
+    );
+}
+
+/// Picking another layer in the Layers pane, or going to one by its number,
+/// leaves the open operation on the layer it was opened on first, as stepping
+/// to a layer does.
+#[test]
+fn picking_another_layer_leaves_the_open_operation_first() {
+    let mut window = layered(&[([10, 20, 30, 255], 255), ([200, 100, 50, 255], 255)], 1);
+    with_layers_pane(&mut window);
+    window.act(Action::Adjust(op_index("Posterise")));
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(100));
+    window.settle_previews();
+    let spot = layer_row(&window, 0).name.center();
+    click_at(&mut window, spot);
+    assert_eq!(painted_on(&window), 0);
+    assert_eq!(window.view.adjusting(), None, "applied, not carried over");
+    assert_eq!(window.view.document().history_depth(), 1);
+    assert_ne!(
+        layers_of(&window)[1].canvas.colour_at(3, 3),
+        Some([200, 100, 50, 255]),
+        "to the layer it was opened on"
+    );
+    assert_eq!(
+        layers_of(&window)[0].canvas.colour_at(3, 3),
+        Some([10, 20, 30, 255])
+    );
+    window.act(Action::Adjust(op_index("Invert")));
+    let to = AppMenuItemId::new(GO_TO_LAYER).expect("an id");
+    let outcome = window
+        .view
+        .entered(to, "2", &window.layout, &mut Region::new());
+    window.apply(&outcome);
+    assert_eq!(painted_on(&window), 1);
+    assert_eq!(window.view.adjusting(), None, "the invert left first");
+}
+
+/// What an operation shows is kept by what it reads — the layer painted on, by
+/// its revision, and the selection — so another layer's eye, or an opacity,
+/// changing works nothing out again.
+#[test]
+fn how_the_layers_show_works_no_preview_out_again() {
+    let mut window = layered(&[([10, 20, 30, 255], 255), ([200, 100, 50, 255], 255)], 1);
+    with_layers_pane(&mut window);
+    window.act(Action::Adjust(op_index("Posterise")));
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(100));
+    window.settle_previews();
+    assert!(window.view.preview_canvas().is_some());
+    let spot = layer_row(&window, 0).eye.center();
+    click_at(&mut window, spot);
+    assert!(!layers_of(&window)[0].visible, "hidden");
+    assert!(
+        window.wanted_preview().is_none(),
+        "nothing worked out again"
+    );
+    window
+        .view
+        .layer_opacity(40, true, &window.layout, &mut Region::new());
+    assert!(
+        window.wanted_preview().is_none(),
+        "nor for an opacity settled"
+    );
+    assert!(
+        window.view.preview_canvas().is_some(),
+        "the preview still shows"
+    );
+    assert!(
+        window.view.adjusting().is_some(),
+        "over an operation still open"
+    );
+}
+
+/// Undoing another layer's eye keeps painting where it was, as the eye did,
+/// so the open operation stays on the layer it was opened on, its preview
+/// standing.
+#[test]
+fn undoing_another_layers_eye_keeps_painting_and_the_open_operation_put() {
+    let mut window = layered(&[([10, 20, 30, 255], 255), ([200, 100, 50, 255], 255)], 1);
+    with_layers_pane(&mut window);
+    window.act(Action::Adjust(op_index("Posterise")));
+    press_on(&mut window, PaneKind::Adjustments, Spot::Number(100));
+    window.settle_previews();
+    let spot = layer_row(&window, 0).eye.center();
+    click_at(&mut window, spot);
+    assert!(!layers_of(&window)[0].visible, "hidden");
+    window.key(Key::Char('z'), ctrl());
+    assert!(layers_of(&window)[0].visible, "shown again");
+    assert_eq!(painted_on(&window), 1, "painting stayed where it was");
+    assert!(
+        window.wanted_preview().is_none(),
+        "nothing worked out again"
+    );
+    press_on(&mut window, PaneKind::Adjustments, Spot::Apply);
+    assert_ne!(
+        layers_of(&window)[1].canvas.colour_at(3, 3),
+        Some([200, 100, 50, 255]),
+        "applied to the layer it was opened on"
+    );
+    assert_eq!(
+        layers_of(&window)[0].canvas.colour_at(3, 3),
+        Some([10, 20, 30, 255])
+    );
 }

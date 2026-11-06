@@ -282,6 +282,17 @@ pub struct BlockDevice {
     pub image: PathBuf,
 }
 
+/// A USB mass-storage stick a run plugs in ([`usb_stick_args`]): the raw disk
+/// image it holds, writable, and the serial number its device reports.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UsbStick {
+    /// Path to the raw disk image on the host.
+    pub image: PathBuf,
+    /// The serial number the stick's device reports: letters and digits,
+    /// which QEMU's option grammar takes as written.
+    pub serial: &'static str,
+}
+
 /// How a guest NIC's frames leave the machine.
 ///
 /// Both backends work with no host privileges and no host network setup,
@@ -473,15 +484,28 @@ pub enum NamedKey {
     Escape,
     /// F11.
     F11,
+    /// `Meta+Shift+3`, the desktop's chord for a still of the screen: pressed
+    /// together, as the chord is.
+    CaptureScreen,
+    /// `Meta+Shift+5`, the desktop's chord for its capture bar.
+    CaptureBar,
+    /// The right arrow.
+    Right,
+    /// Return.
+    Enter,
 }
 
 impl NamedKey {
-    /// The name QEMU's `sendkey` knows the key by.
+    /// The name QEMU's `sendkey` knows the key, or the chord, by.
     #[must_use]
     pub const fn qemu_name(self) -> &'static str {
         match self {
             Self::Escape => "esc",
             Self::F11 => "f11",
+            Self::CaptureScreen => "meta_l-shift-3",
+            Self::CaptureBar => "meta_l-shift-5",
+            Self::Right => "right",
+            Self::Enter => "ret",
         }
     }
 }
@@ -966,6 +990,39 @@ pub fn optical_disc_args(spec: &Spec) -> Vec<OsString> {
     .into()
 }
 
+/// The controller [`usb_stick_args`] plugs every stick into.
+const STICK_CONTROLLER: &str = "stickhc";
+
+/// The arguments attaching [`Spec::usb_sticks`]: a `qemu-xhci` controller of
+/// their own and, on it, a bulk-only `usb-storage` device per stick holding
+/// its image writable, its medium fixed (`removable=off`) and its serial number
+/// its own, so each device states an identity of its own. The same on every
+/// port, since the controller is a PCI function on each board.
+#[must_use]
+pub fn usb_stick_args(spec: &Spec) -> Vec<OsString> {
+    if spec.usb_sticks.is_empty() {
+        return Vec::new();
+    }
+    let mut args = vec![
+        OsString::from("-device"),
+        OsString::from(format!("qemu-xhci,id={STICK_CONTROLLER}")),
+    ];
+    for (index, stick) in spec.usb_sticks.iter().enumerate() {
+        let mut drive = OsString::from(format!("if=none,id=stick{index},format=raw,file="));
+        drive.push(stick.image.as_os_str());
+        args.extend([
+            OsString::from("-drive"),
+            drive,
+            OsString::from("-device"),
+            OsString::from(format!(
+                "usb-storage,bus={STICK_CONTROLLER}.0,drive=stick{index},removable=off,serial={}",
+                stick.serial
+            )),
+        ]);
+    }
+    args
+}
+
 /// The `-device` arguments for the virtio-input devices `spec` drives — or,
 /// for an interactive session, the ones the window forwards a human's
 /// keyboard, mouse and touchscreen to — each named `virtio-<kind><suffix>`
@@ -1419,6 +1476,10 @@ pub struct Spec {
     /// A disc image a USB optical drive holds ([`optical_disc_args`]),
     /// read-only. `None` attaches no drive.
     pub optical_disc: Option<PathBuf>,
+    /// USB sticks plugged into a `qemu-xhci` controller of their own
+    /// ([`usb_stick_args`]), in declaration order. Empty attaches no
+    /// controller.
+    pub usb_sticks: Vec<UsbStick>,
     /// Extra arguments appended verbatim to the QEMU command line after the
     /// per-arch defaults. Use sparingly — they bypass the runner's input
     /// validation.
@@ -1595,6 +1656,7 @@ impl Spec {
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             optical_disc: None,
+            usb_sticks: Vec::new(),
             sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,
@@ -1753,6 +1815,7 @@ impl Spec {
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             optical_disc: None,
+            usb_sticks: Vec::new(),
             sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,
@@ -1790,6 +1853,7 @@ impl Spec {
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             optical_disc: None,
+            usb_sticks: Vec::new(),
             sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,
@@ -1927,6 +1991,18 @@ impl Spec {
             path.display()
         );
         self.with_monitor_command(ready_marker, 1, command)
+    }
+
+    /// Plug in a USB stick holding the raw disk image at `image`, its device
+    /// reporting `serial` ([`usb_stick_args`]). The image is written to, so a
+    /// caller hands each run a copy of its own.
+    #[must_use]
+    pub fn with_usb_stick(mut self, image: impl Into<PathBuf>, serial: &'static str) -> Self {
+        self.usb_sticks.push(UsbStick {
+            image: image.into(),
+            serial,
+        });
+        self
     }
 
     /// Attach a `virtio-crypto` device backed by QEMU's builtin cryptodev
@@ -5902,11 +5978,20 @@ mod tests {
     /// maps as it always has.
     #[test]
     fn named_keys_are_sent_by_their_qemu_names() {
-        let named = TypedKeys::Named(vec![NamedKey::F11, NamedKey::Escape]);
-        assert_eq!(named.len(), 2);
-        assert_eq!(named.key(0), Some(Ok("f11".into())));
-        assert_eq!(named.key(1), Some(Ok("esc".into())));
-        assert_eq!(named.key(2), None);
+        let keys = [
+            (NamedKey::F11, "f11"),
+            (NamedKey::Escape, "esc"),
+            (NamedKey::CaptureScreen, "meta_l-shift-3"),
+            (NamedKey::CaptureBar, "meta_l-shift-5"),
+            (NamedKey::Right, "right"),
+            (NamedKey::Enter, "ret"),
+        ];
+        let named = TypedKeys::Named(keys.iter().map(|&(key, _)| key).collect());
+        assert_eq!(named.len(), keys.len());
+        for (index, (_, name)) in keys.iter().enumerate() {
+            assert_eq!(named.key(index), Some(Ok((*name).into())), "{name}");
+        }
+        assert_eq!(named.key(keys.len()), None);
         let text = TypedKeys::Text("q\n".into());
         assert_eq!(
             (text.key(0), text.key(1)),
@@ -6836,6 +6921,7 @@ mod tests {
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             optical_disc: None,
+            usb_sticks: Vec::new(),
             sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,

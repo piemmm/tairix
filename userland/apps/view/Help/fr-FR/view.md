@@ -29,6 +29,17 @@ RISC OS Sprite. Un fichier que le décodeur refuse énonce sa raison dans la
 fenêtre et sur la sortie d'erreur standard ; la fenêtre n'est jamais laissée
 vide et aucune image n'est jamais fabriquée.
 
+Elle lit aussi les films WebM avec leur son, comme les enregistrements d'écran
+du bureau lui-même. Un film s'ouvre en pause sur sa première image ; l'outil de
+lecture et `Space` le lisent et le suspendent. Sous l'image, une barre de
+recherche montre où en est le film, avec le temps écoulé et la durée du film à
+côté : faites-la glisser, ou cliquez dessus, pour aller à l'image clé la plus
+proche, à ce point ou avant. Un enregistrement qui n'indique pas sa durée —
+celui dont l'enregistreur s'est arrêté de façon inattendue — se lit depuis son
+début, mais on ne peut s'y déplacer. Un film tronqué, ou dont le décodage
+s'arrête, se lit aussi loin que possible et énonce pourquoi il s'est arrêté ;
+un film dont le son ne peut être lu continue en silence et le signale.
+
 Plusieurs documents à la fois, ce sont plusieurs fenêtres de la même
 visionneuse : comparer deux images côte à côte, c'est ouvrir la seconde.
 Fermer une fenêtre laisse la visionneuse dans la barre d'icônes, prête pour
@@ -61,7 +72,7 @@ lise comme transparente et non comme la couleur derrière elle.
 * `[` / `]` — un quart de tour à gauche ou à droite
 * `M` — miroir de gauche à droite
 * `I` — afficher ou masquer le panneau d'informations
-* `Space` — lire ou suspendre une animation
+* `Space` — lire ou suspendre une animation ou un film
 * `O` — choisir un autre document
 * `Page Up` / `Page Down` — entrée précédente ou suivante
 * `Home` / `End` — première ou dernière entrée

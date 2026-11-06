@@ -49,8 +49,8 @@
 //!   a report of where a carried drag or save is (`DragOver`, `SaveOffered`):
 //!   each is numbered, and only the newest is worth an answer.
 //! * The **end of a save offer** (`SaveOfferEnded`) carries where it was
-//!   dropped, so it withdraws every offer still held, and an earlier end that
-//!   only left; it is never shed.
+//!   dropped, so it withdraws every offer still held and an earlier end that
+//!   only left, a drop's end an earlier drop's too; it is never shed.
 //! * The **end of a tool window's move** is where it was let go, which is
 //!   all its owner still needs of every move before it: it withdraws the
 //!   window's earlier move reports and is never shed.
@@ -84,9 +84,12 @@
 //! one ending a press already delivered. Folding therefore leaves a window
 //! owing at most six state edges, at most one pick conclusion and one
 //! authorisation's (a second of either is refused before it reaches the
-//! sink), at most one move's end, at most one such press's end, and at most
-//! one save offer's end, each superseding the one before — and a queue at
-//! capacity always holds an input event to shed.
+//! sink), at most one move's end, at most one such press's end, at most one
+//! save offer's end that only left, each superseding the one before, and at
+//! most one drop's: a window has every event held before a drag's offer by
+//! the time it can answer it, so a second drop is held behind a first only for
+//! a window answering an offer it was never shown, and then supersedes it.
+//! A queue at capacity therefore always holds an input event to shed.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
@@ -524,20 +527,23 @@ fn fold(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
 
 /// Withdraw what an ending `next` supersedes, answering whether it was one:
 /// a tool window's move end takes every move held before it, and a save
-/// offer's end every offer and every end held. One pick runs at a time and one
-/// awaiting a drop's answer starts no drag, so an end held before a later one
-/// is of a pick that is over, which nothing would take an answer to.
+/// offer's end every offer held and every end that only left, a drop's end an
+/// earlier drop's too. An end that only left never takes a drop: picks are
+/// concurrent, so another pick's drag can end over a window whose answer to an
+/// earlier drop that pick still waits on.
 fn withdraw_superseded(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
     match next {
         WindowEvent::ToolMoved { ended: true, .. } => {
             queue.retain(|held| !matches!(held, WindowEvent::ToolMoved { .. }));
         }
-        WindowEvent::SaveOfferEnded { .. } => queue.retain(|held| {
-            !matches!(
-                held,
-                WindowEvent::SaveOffered { .. } | WindowEvent::SaveOfferEnded { .. }
-            )
-        }),
+        WindowEvent::SaveOfferEnded { dropped, .. } => {
+            let drop = dropped.is_some();
+            queue.retain(|held| match held {
+                WindowEvent::SaveOffered { .. } => false,
+                WindowEvent::SaveOfferEnded { dropped, .. } => dropped.is_some() && !drop,
+                _ => true,
+            });
+        }
         _ => return false,
     }
     true

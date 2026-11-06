@@ -40,7 +40,7 @@
 #define TAIRIX_THREAD_STACK_DEFAULT ((uintptr_t)0u)
 
 /* Packed little-endian wire size of a startup-vector header, in bytes. */
-#define TAIRIX_PROCESS_START_HEADER_WIRE_LEN 40u
+#define TAIRIX_PROCESS_START_HEADER_WIRE_LEN 56u
 /* Packed little-endian wire size of one string slot, in bytes. */
 #define TAIRIX_STRING_SLOT_WIRE_LEN 8u
 
@@ -59,6 +59,8 @@ typedef struct tairix_process_start_header {
     uint64_t total_len;
     uint64_t canary;
     uint64_t cpu_features;
+    uint64_t heap_base;
+    uint64_t heap_len;
 } tairix_process_start_header_t;
 
 #endif /* TAIRIX_PROCESS_H */

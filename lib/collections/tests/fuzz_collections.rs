@@ -33,17 +33,23 @@
 //! 10. A `SlotMap` agrees with a key-to-value model over the keys it issued,
 //!     refuses every key whose value is gone however often its slot is reused,
 //!     and drops every value exactly once.
+//! 11. An `OrderedMap` agrees with `alloc`'s ordered map — membership, both
+//!     ends, a range walked from either end and a mutable walk of one — over
+//!     the same adversarial key streams, stands no taller than its entry
+//!     count allows, and drops every value exactly once.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from the
 //! same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
 //! `cargo xtask fuzz`.
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
+use std::ops::{Bound, RangeBounds};
 use std::rc::Rc;
 
 use tairix_collections::{
-    ByteQueue, HashMap, IndexedHeap, LruMap, QueueError, RadixTree, RangeError, RangeKey, RangeMap,
-    RangeSet, SlotKey, SlotMap, SmallVec,
+    BitVec, ByteQueue, HashMap, IndexedHeap, LruMap, OrderedMap, QueueError, RadixTree, RangeError,
+    RangeKey, RangeMap, RangeSet, SlotKey, SlotMap, SmallVec,
 };
 use tairix_fuzzseed::Prng;
 use tairix_hash::{BuildSipHash13, HashSeed};
@@ -395,13 +401,13 @@ fn sweep_range_set(rng: &mut Prng, base: u64) {
         let run = start..start.saturating_add(count).min(top);
         match rng.below(6) {
             0..=2 => {
-                set.insert(run.clone());
+                set.insert(run.clone()).expect("the host heap");
                 for element in run {
                     model[usize::try_from(element - base).expect("in window")] = true;
                 }
             }
             3..=4 => {
-                set.remove(run.clone());
+                set.remove(run.clone()).expect("the host heap");
                 for element in run {
                     model[usize::try_from(element - base).expect("in window")] = false;
                 }
@@ -520,7 +526,9 @@ fn sweep_range_map(rng: &mut Prng, base: u64, live: &Rc<Cell<i64>>) {
             _ => {
                 // First-fit placement must land in a genuine gap of the
                 // window, never over a held range.
-                let placed = map.place(window.clone(), count, Tracked::new(start, live));
+                let placed = map
+                    .place(window.clone(), count, Tracked::new(start, live))
+                    .expect("the host heap");
                 if let Some(ref held) = placed {
                     assert!(held.start >= window.start && held.end <= window.end);
                     assert!(
@@ -657,6 +665,59 @@ fn sweep_indexed_heap(rng: &mut Prng) {
     }
 }
 
+/// Drive a `BitVec` against a `Vec<bool>`, checking each search from a drawn
+/// position in both directions after every operation.
+fn sweep_bit_vec(rng: &mut Prng) {
+    let lengths = [0, 1, 63, 64, 65, 4095, 4097, 1 << 13];
+    let mut model: Vec<bool> = Vec::new();
+    let mut bits = BitVec::new();
+    for _ in 0..OPS_PER_ROUND {
+        let len = model.len();
+        match rng.below(6) {
+            0 | 1 => {
+                let at = rng.below(len + 2);
+                let value = rng.below(2) == 1;
+                assert_eq!(bits.set(at, value), model.get(at).copied());
+                if let Some(slot) = model.get_mut(at) {
+                    *slot = value;
+                }
+            }
+            2 => {
+                let start = rng.below(len + 2);
+                let end = start + rng.below(len + 2);
+                let value = rng.below(2) == 1;
+                assert_eq!(bits.set_range(start..end, value), end <= len);
+                if end <= len {
+                    model[start..end].fill(value);
+                }
+            }
+            3 => {
+                let len = *rng.pick(&lengths);
+                let value = rng.below(2) == 1;
+                bits.try_resize(len, value)
+                    .expect("the host allocator supplies the words");
+                model.resize(len, value);
+            }
+            _ => {
+                let value = rng.below(2) == 1;
+                bits.fill(value);
+                model.fill(value);
+            }
+        }
+        assert_eq!(bits.len(), model.len());
+        assert_eq!(bits.count_ones(), model.iter().filter(|&&bit| bit).count());
+        let at = rng.below(model.len() + 2);
+        let after = |value: bool| (at..model.len()).find(|&i| model[i] == value);
+        let before = |value: bool| (0..at.min(model.len())).rev().find(|&i| model[i] == value);
+        assert_eq!(bits.next_one(at), after(true));
+        assert_eq!(bits.next_zero(at), after(false));
+        assert_eq!(bits.prev_one(at), before(true));
+        assert_eq!(bits.prev_zero(at), before(false));
+        assert_eq!(bits.get(at), model.get(at).copied());
+    }
+    assert!(bits.iter_ones().eq((0..model.len()).filter(|&i| model[i])));
+}
+
 /// Drive a `SlotMap` against a key-to-value model, presenting the keys it
 /// issued, live and since refused alike.
 fn sweep_slot_map(rng: &mut Prng, live: &Rc<Cell<i64>>) {
@@ -689,6 +750,160 @@ fn sweep_slot_map(rng: &mut Prng, live: &Rc<Cell<i64>>) {
     filed.sort_unstable();
     expected.sort_unstable();
     assert_eq!(filed, expected);
+}
+
+/// A bound a range query is cut at: included, excluded, or none.
+fn draw_bound(rng: &mut Prng, at: u64) -> Bound<u64> {
+    match rng.below(3) {
+        0 => Bound::Included(at),
+        1 => Bound::Excluded(at),
+        _ => Bound::Unbounded,
+    }
+}
+
+/// One write to an `OrderedMap` and to its model, their answers compared.
+fn ordered_write(
+    rng: &mut Prng,
+    map: &mut OrderedMap<u64, Tracked>,
+    model: &mut BTreeMap<u64, u64>,
+    live: &Rc<Cell<i64>>,
+    key: u64,
+) {
+    let stamp = rng.next_u64();
+    match rng.below(9) {
+        0..=3 => {
+            let replaced = map
+                .try_insert(key, Tracked::new(stamp, live))
+                .expect("the host allocator serves this harness");
+            assert_eq!(replaced.map(|value| value.key), model.insert(key, stamp));
+        }
+        4 | 5 => assert_eq!(map.remove(&key).map(|value| value.key), model.remove(&key)),
+        6 => assert_eq!(
+            map.pop_first().map(|(key, value)| (key, value.key)),
+            model.pop_first()
+        ),
+        7 => assert_eq!(
+            map.pop_last().map(|(key, value)| (key, value.key)),
+            model.pop_last()
+        ),
+        _ => {
+            let every = 2 + stamp % 7;
+            map.retain(|key, value| {
+                assert_eq!(model.get(key), Some(&value.key), "retain saw a stale value");
+                key % every != 0
+            });
+            model.retain(|key, _| key % every != 0);
+        }
+    }
+}
+
+/// A range of an `OrderedMap` walked from both ends in turn against its model,
+/// then walked again mutably, every value it hands out bumped in both.
+fn ordered_walks(
+    rng: &mut Prng,
+    map: &mut OrderedMap<u64, Tracked>,
+    model: &mut BTreeMap<u64, u64>,
+    key: u64,
+) {
+    let reach = key.saturating_add(rng.next_u64() >> rng.below(64));
+    let bounds = (draw_bound(rng, key), draw_bound(rng, reach));
+    let expected: Vec<(u64, u64)> = model
+        .iter()
+        .filter(|(key, _)| bounds.contains(*key))
+        .map(|(&key, &stamp)| (key, stamp))
+        .collect();
+    let mut ends = (Vec::new(), Vec::new());
+    let mut walk = map.range(bounds);
+    loop {
+        let from_front = rng.below(2) == 0;
+        let taken = if from_front {
+            walk.next()
+        } else {
+            walk.next_back()
+        };
+        let Some((&key, value)) = taken else {
+            break;
+        };
+        if from_front {
+            ends.0.push((key, value.key));
+        } else {
+            ends.1.push((key, value.key));
+        }
+    }
+    ends.0.extend(ends.1.iter().rev());
+    assert_eq!(ends.0, expected, "{bounds:?}");
+    let mut walk = map.range_mut(bounds);
+    loop {
+        let taken = if rng.below(2) == 0 {
+            walk.next()
+        } else {
+            walk.next_back()
+        };
+        let Some((&key, value)) = taken else {
+            break;
+        };
+        value.key = value.key.wrapping_add(1);
+        model.insert(key, value.key);
+    }
+}
+
+/// Drive an `OrderedMap` against `alloc`'s ordered map over the adversarial
+/// key streams, its height held to what its entry count allows.
+fn sweep_ordered(rng: &mut Prng, live: &Rc<Cell<i64>>) {
+    let mut map: OrderedMap<u64, Tracked> = OrderedMap::new();
+    let mut model: BTreeMap<u64, u64> = BTreeMap::new();
+    let width = 1 + rng.below(4096);
+    for step in 0..OPS_PER_ROUND {
+        let key = draw_key(rng, width);
+        ordered_write(rng, &mut map, &mut model, live, key);
+        if rng.below(4) == 0 {
+            ordered_walks(rng, &mut map, &mut model, key);
+        }
+        assert_eq!(map.len(), model.len(), "step {step}");
+        assert_eq!(
+            map.get(&key).map(|value| value.key),
+            model.get(&key).copied()
+        );
+        assert_eq!(
+            map.first_key_value().map(|(&key, value)| (key, value.key)),
+            model.first_key_value().map(|(&key, &stamp)| (key, stamp))
+        );
+        assert_eq!(
+            map.last_key_value().map(|(&key, value)| (key, value.key)),
+            model.last_key_value().map(|(&key, &stamp)| (key, stamp))
+        );
+        // A tree `h` levels tall holds at least `2 * 6^(h - 1) - 1` entries.
+        if let Some(below) = map.height().checked_sub(1) {
+            let least = u32::try_from(below)
+                .ok()
+                .and_then(|below| 6usize.checked_pow(below))
+                .and_then(|span| span.checked_mul(2))
+                .map(|twice| twice - 1);
+            assert!(
+                least.is_some_and(|least| least <= map.len()),
+                "step {step}: too tall"
+            );
+        }
+        assert_eq!(
+            i64::try_from(map.len()).expect("fits"),
+            live.get(),
+            "step {step}: one undropped value per live entry"
+        );
+    }
+    assert!(map
+        .iter()
+        .map(|(&key, value)| (key, value.key))
+        .eq(model.iter().map(|(&key, &stamp)| (key, stamp))));
+    // An owning walk abandoned part-way drops what it did not hand out.
+    let mut owned = map.into_iter();
+    assert_eq!(
+        owned.next().map(|(key, value)| (key, value.key)),
+        model.pop_first()
+    );
+    assert_eq!(
+        owned.next_back().map(|(key, value)| (key, value.key)),
+        model.pop_last()
+    );
 }
 
 #[test]
@@ -727,9 +942,15 @@ fn heap_backed_containers_agree_with_their_models() {
 
             sweep_indexed_heap(&mut rng);
 
+            sweep_bit_vec(&mut rng);
+
             let live = Rc::new(Cell::new(0i64));
             sweep_slot_map(&mut rng, &live);
             assert_eq!(live.get(), 0, "a `SlotMap` leaked or double-dropped");
+
+            let live = Rc::new(Cell::new(0i64));
+            sweep_ordered(&mut rng, &live);
+            assert_eq!(live.get(), 0, "an `OrderedMap` leaked or double-dropped");
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;

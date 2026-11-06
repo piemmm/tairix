@@ -8,7 +8,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_abi::fs::FileId;
+use tairix_abi::fs::{DocumentStamp, FileId};
 use tairix_abi::time::Time64;
 use tairix_geometry::Rect;
 use tairix_raster::{Color, Pixel, Surface};
@@ -23,7 +23,7 @@ use crate::artwork::{
 };
 use crate::glyph::IconKind;
 use crate::picture::Fitted;
-use crate::thumbnail::{ArtworkDocument, DocumentStamp, Thumbnail};
+use crate::thumbnail::{ArtworkDocument, Thumbnail};
 
 fn kinds(kinds: &[IconKind]) -> FolderSample {
     FolderSample::new(kinds.iter().map(|kind| SampleCard::Kind(*kind)))

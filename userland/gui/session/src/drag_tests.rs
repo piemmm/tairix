@@ -1,11 +1,15 @@
 //! Host tests for the seat's drag carrier.
 
+use tairix_abi::fs::{DocumentStamp, FileId};
+use tairix_abi::time::Time64;
 use tairix_abi::window_ipc::{
-    BundleRunPath, DocumentName, DragItems, DragPicture, DropOperation, DropTarget, IconAsset,
+    BundleRunPath, DocumentName, DragItems, DragOwnIcon, DragOwnSource, DragPicture, DropOperation,
+    DropTarget, IconAsset,
 };
 use tairix_abi::Errno;
 use tairix_browse::render::Tiles;
 use tairix_geometry::Rect;
+use tairix_icon::{ArtworkKey, BundleVersion, IconKind};
 use tairix_theme::CursorKind;
 use tairix_window::DragConclusion;
 use tairix_wm::{Compositor, InputEvent, Point, WindowId};
@@ -17,10 +21,17 @@ use crate::drag::{
     DragEnd, DragStep, DragSurface, DropRefusal, ItemsEnd, ItemsReport, OfferEnd, OwedReport,
     SaveDrop, SaveEnd, SaveOffer, SaveReport, SavedDocument, SlotAnswer,
 };
+use crate::picker::PickId;
 use crate::shell::DesktopShell;
 use crate::tests::{
-    app_slot_point, compositor, moved, opaque_window, shell, PRIMARY_PRESS, SECONDARY_PRESS,
+    app_slot_point, compositor, deferred_artwork, moved, opaque_window, shell, PRIMARY_PRESS,
+    SECONDARY_PRESS,
 };
+
+/// The pick the tests' saves are carried out of.
+fn saved() -> PickId {
+    PickId::numbered(1)
+}
 
 /// A shell with one application slot and a window holding a primary press.
 fn pressed() -> (DesktopShell, Compositor, WindowId) {
@@ -53,6 +64,7 @@ fn picture(asset: &str, from: Option<(i32, i32)>) -> DragPicture {
     DragPicture {
         icon: IconAsset::new(asset).expect("a valid asset id"),
         from,
+        own: None,
     }
 }
 
@@ -80,6 +92,147 @@ fn several() -> DragItems {
         ],
     )
     .expect("three items")
+}
+
+/// The version every item these drags carry its own picture of was listed at.
+const STAMP: DocumentStamp = DocumentStamp {
+    size: 4096,
+    modified: Time64::from_secs(1_700_000_000),
+    id: FileId {
+        volume: [7; 16],
+        node: 42,
+    },
+    content_gen: 3,
+};
+
+/// A picture of the class `kind`, carrying the item's own read from `path` as
+/// `source` says, listed at [`STAMP`].
+fn own_picture(kind: IconKind, source: DragOwnSource, path: &str) -> DragPicture {
+    DragPicture {
+        own: Some(DragOwnIcon::new(source, path, Some(STAMP)).expect("an own picture")),
+        ..picture(kind.asset_id(), None)
+    }
+}
+
+/// Every decode the shell has asked `artwork` for since it was installed: the
+/// icons, then the thumbnails.
+fn asked(artwork: &core::cell::RefCell<tairix_icon::ArtworkDesk>) -> Vec<ArtworkKey> {
+    let mut desk = artwork.borrow_mut();
+    let mut asked = Vec::new();
+    while let Some(job) = desk.next_job() {
+        asked.push(job.key);
+    }
+    while let Some(job) = desk.next_thumbnail() {
+        asked.push(job.key);
+    }
+    asked
+}
+
+/// A lone bundle is carried as its own picture: its card asks for the icon its
+/// own bundle declares, at the version listed, rather than its class's.
+#[test]
+fn a_lone_bundle_card_asks_for_its_own_bundle() {
+    let (mut shell, mut comp, window) = pressed();
+    let artwork = deferred_artwork(&mut shell);
+    let editor = "/Users/ann/Desktop/Editor.app";
+    let items = DragItems::new(
+        DocumentName::new("Editor.app").expect("a valid name"),
+        1,
+        false,
+        [own_picture(
+            IconKind::AppBundle,
+            DragOwnSource::Bundle,
+            editor,
+        )],
+    )
+    .expect("one bundle");
+    shell
+        .begin_drag(&mut comp, 7, window, items)
+        .expect("carried");
+    let bundle = ArtworkKey::Bundle {
+        dir: String::from(editor),
+        version: Some(BundleVersion::Listed(STAMP)),
+    };
+    assert_eq!(asked(&artwork), [bundle]);
+}
+
+/// Several items carried together each ask for their own picture where they
+/// carry one — an application and a command, each its own bundle's — and the
+/// file and the folder beside them for no own picture at all.
+#[test]
+fn a_mixed_stack_asks_own_pictures_only_for_its_bundles() {
+    let (mut shell, mut comp, window) = pressed();
+    let artwork = deferred_artwork(&mut shell);
+    let (editor, ls) = ("/Users/ann/Desktop/Editor.app", "/System/Commands/ls.app");
+    let items = DragItems::new(
+        DocumentName::new("Editor.app").expect("a valid name"),
+        4,
+        false,
+        [
+            own_picture(IconKind::AppBundle, DragOwnSource::Bundle, editor),
+            picture(IconKind::Text.asset_id(), Some((90, 0))),
+            own_picture(IconKind::AppBundle, DragOwnSource::Bundle, ls),
+            picture(IconKind::Folder.asset_id(), None),
+        ],
+    )
+    .expect("four items");
+    shell
+        .begin_drag(&mut comp, 7, window, items)
+        .expect("carried");
+    let mut own: Vec<ArtworkKey> = asked(&artwork)
+        .into_iter()
+        .filter(|key| !matches!(key, ArtworkKey::Raster(_) | ArtworkKey::Vector(_)))
+        .collect();
+    own.sort();
+    let bundle = |dir: &str| ArtworkKey::Bundle {
+        dir: String::from(dir),
+        version: Some(BundleVersion::Listed(STAMP)),
+    };
+    let mut expected = alloc::vec![bundle(editor), bundle(ls)];
+    expected.sort();
+    assert_eq!(own, expected);
+}
+
+/// A RISC OS application's sprite is produced among the thumbnails, which a
+/// sweep withdraws when nothing asked for them since the last: the carried
+/// stack asks for its cards before each sweep, so the sprite stays wanted for
+/// as long as it is carried, and goes once it is not.
+#[test]
+fn a_sweep_keeps_a_carried_sprite() {
+    let (mut shell, mut comp, window) = pressed();
+    let artwork = deferred_artwork(&mut shell);
+    let app = "/Storage/disc/!Edit";
+    let items = DragItems::new(
+        DocumentName::new("!Edit").expect("a valid name"),
+        1,
+        false,
+        [own_picture(
+            IconKind::Folder,
+            DragOwnSource::RiscOsApplication,
+            app,
+        )],
+    )
+    .expect("one application");
+    shell
+        .begin_drag(&mut comp, 7, window, items)
+        .expect("carried");
+    while artwork.borrow_mut().next_job().is_some() {}
+    for _ in 0..3 {
+        shell.want_drag_artwork(&comp);
+        artwork.borrow_mut().sweep_thumbnails();
+    }
+    assert!(
+        artwork.borrow().has_work(),
+        "the carried sprite was withdrawn"
+    );
+
+    let _ = shell.end_drag(&mut comp, false);
+    shell.want_drag_artwork(&comp);
+    artwork.borrow_mut().sweep_thumbnails();
+    assert!(
+        !artwork.borrow().has_work(),
+        "a sprite nothing shows is kept"
+    );
 }
 
 const RELEASE: InputEvent = InputEvent::PointerReleased {
@@ -628,6 +781,35 @@ fn shift_asks_again_and_an_accepted_desktop_folder_is_lit() {
     );
 }
 
+/// The desktop folder under a resting pointer resolved again from the
+/// listing — its icon re-sorted to another index, at another revision — asks
+/// nothing again, and lights the folder where it now stands.
+#[test]
+fn a_desktop_folder_resolved_again_owes_no_second_report() {
+    let (mut shell, mut comp, window) = pressed();
+    shell
+        .begin_drag(&mut comp, 7, window, several())
+        .expect("carried");
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(500, 300),
+        desktop("/Users/ann/Desktop/Work", Some(2)),
+    );
+    let first = owed_report(&mut shell, "owed");
+    shell.drag_over(
+        &mut comp,
+        DragSurface::Desktop {
+            folder: String::from("/Users/ann/Desktop/Work"),
+            icon: Some(3),
+            revision: 1,
+        },
+    );
+    assert_eq!(shell.take_drag_report(), None, "the same folder");
+    assert!(shell.drag_verdict(&mut comp, 7, first.serial, Some(DropOperation::Copy)));
+    assert_eq!(shell.drag_drop_icon(), Some(3), "lit where it now stands");
+}
+
 /// An answer to the report made after Shift changed is shown, and decides the
 /// drop.
 #[test]
@@ -850,7 +1032,7 @@ fn report_doc() -> SavedDocument {
 fn saving() -> (DesktopShell, Compositor) {
     let (mut shell, mut comp, panel) = pressed();
     shell
-        .begin_save_drag(&mut comp, (panel, 7), report_doc())
+        .begin_save_drag(&mut comp, (panel, saved(), 7), report_doc())
         .expect("carried");
     (shell, comp)
 }
@@ -873,7 +1055,7 @@ fn a_save_is_carried_as_the_documents_tile_held_where_it_was_pressed() {
         ..report_doc()
     };
     shell
-        .begin_save_drag(&mut comp, (panel, 7), document)
+        .begin_save_drag(&mut comp, (panel, saved(), 7), document)
         .expect("carried");
     let shown: Vec<WindowId> = shell.drag_windows().collect();
     assert_eq!(shown.len(), 1);
@@ -925,7 +1107,7 @@ fn an_answer_to_an_earlier_drag_is_never_taken_for_the_next_ones() {
     let (mut shell, mut comp, panel) = pressed();
     let offered = |shell: &mut DesktopShell, comp: &mut Compositor| {
         shell
-            .begin_save_drag(comp, (panel, 7), report_doc())
+            .begin_save_drag(comp, (panel, saved(), 7), report_doc())
             .expect("carried");
         over(shell, comp, Point::new(110, 110), offer_at(9, 10, 10));
         save_report(shell)
@@ -952,12 +1134,12 @@ fn a_save_begins_only_from_the_press_on_its_panel() {
     let (mut shell, mut comp, panel) = pressed();
     let elsewhere = opaque_window(&mut comp, Point::new(300, 300), 40, 40);
     assert_eq!(
-        shell.begin_save_drag(&mut comp, (elsewhere, 7), report_doc()),
+        shell.begin_save_drag(&mut comp, (elsewhere, saved(), 7), report_doc()),
         Err(Errno::PermissionDenied),
         "no press is held there"
     );
     shell
-        .begin_save_drag(&mut comp, (panel, 7), report_doc())
+        .begin_save_drag(&mut comp, (panel, saved(), 7), report_doc())
         .expect("carried");
     assert_eq!(shell.save_source(), Some(7));
     assert_eq!(
@@ -995,6 +1177,7 @@ fn the_desktop_takes_a_save_into_the_folder_under_the_pointer() {
     assert_eq!(
         shell.drag_pointer(&mut comp, &RELEASE),
         DragStep::Ended(DragEnd::Save(SaveEnd {
+            pick: saved(),
             dropped: SaveDrop::Folder(String::from("/Users/ann/Desktop/Projects")),
             offer: None,
         }))
@@ -1097,6 +1280,7 @@ fn a_drop_saves_only_where_the_standing_offer_was_accepted() {
     assert_eq!(
         shell.drag_pointer(&mut comp, &RELEASE),
         DragStep::Ended(DragEnd::Save(SaveEnd {
+            pick: saved(),
             dropped: SaveDrop::Offer {
                 window_id: 9,
                 serial: 1
@@ -1121,6 +1305,7 @@ fn a_drop_saves_only_where_the_standing_offer_was_accepted() {
     assert_eq!(
         shell.drag_pointer(&mut comp, &RELEASE),
         DragStep::Ended(DragEnd::Save(SaveEnd {
+            pick: saved(),
             dropped: SaveDrop::Nothing,
             offer: Some(OfferEnd {
                 window_id: 9,
@@ -1141,6 +1326,7 @@ fn a_drop_saves_only_where_the_standing_offer_was_accepted() {
     assert_eq!(
         shell.drag_pointer(&mut comp, &RELEASE),
         DragStep::Ended(DragEnd::Save(SaveEnd {
+            pick: saved(),
             dropped: SaveDrop::Unanswered,
             offer: None,
         })),
@@ -1181,6 +1367,7 @@ fn shift_asks_nothing_again_and_escape_drops_nothing() {
     assert_eq!(
         shell.drag_key(&mut comp, &escape),
         Some(DragEnd::Save(SaveEnd {
+            pick: saved(),
             dropped: SaveDrop::Nothing,
             offer: Some(OfferEnd {
                 window_id: 9,
@@ -1211,6 +1398,7 @@ fn windows_going_end_or_forget_a_save_as_they_concern_it() {
     assert_eq!(
         shell.drag_pointer(&mut comp, &RELEASE),
         DragStep::Ended(DragEnd::Save(SaveEnd {
+            pick: saved(),
             dropped: SaveDrop::Nothing,
             offer: None,
         })),

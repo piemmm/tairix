@@ -45,9 +45,11 @@ malformed report changes nothing held.
 
 - **Keyboard** (Generic Desktop Keyboard and Keypad): the key set from an
   array or a bitmap, edge-detected between reports and resolved to `KeyInput`
-  records by `KeyboardConsole` through `lib/keymap`. The modifier bitmap alone
-  reports the modifiers; a key named twice is pressed once; a report naming
-  `ErrorRollOver` is a phantom and changes nothing.
+  records by `KeyboardConsole`: each usage is its record's physical key,
+  resolved to a character through `lib/input`'s keyboard state and built
+  through `lib/keymap`. The modifier bitmap alone reports the modifiers; a key
+  named twice is pressed once; a report naming `ErrorRollOver` is a phantom
+  and changes nothing.
 - **Mouse** (Mouse and Pointer): three buttons, relative X and Y, the wheel and
   AC Pan in scroll units at the resolution the device confirmed, the remainder
   carried so a fine wheel reports exactly one detent's units per detent. An
@@ -115,7 +117,8 @@ accepted model places every field inside its own report, after its id; a long
 item or globals a Push and Pop enclose change nothing; a malformed report
 delivers nothing; a button is never pressed twice or released unheld; a device
 let go of holds nothing; configuration fails only when the device has gone;
-and the console producer resolves only key edges.
+and the console producer resolves only key edges, each naming the usage it
+was fed as its physical key.
 
 ## Stability
 

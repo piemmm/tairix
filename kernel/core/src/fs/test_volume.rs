@@ -117,7 +117,8 @@ pub(crate) fn path(name: &str) -> String {
 /// A default-layout VFS with the in-memory driver mounted at [`MOUNT`],
 /// read-only when `read_only`.
 pub(crate) fn vfs(read_only: bool) -> Vfs {
-    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID))
+        .expect("the default layout fits in memory");
     let mount = Path::parse(MOUNT).expect("valid mount path");
     let handle = volume_handle();
     let flags = if read_only {
@@ -204,6 +205,7 @@ where
                         source: "vol",
                         fstype: "memfs",
                         volume_id: [0u8; 16],
+                        identity: [0u8; 16],
                     },
                     None,
                     None,

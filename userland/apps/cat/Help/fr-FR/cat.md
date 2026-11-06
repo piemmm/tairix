@@ -12,16 +12,18 @@ Lit chaque opérande de fichier dans l'ordre et écrit ses octets sur la
 sortie standard. L'opérande `-` désigne l'entrée standard, et sans
 opérande l'entrée standard est l'unique source.
 
-Un opérande peut aussi être une référence de ressource typée comme
-`sys:random` : elle est ouverte par le résolveur de ressources du
-système (contrôlé par capacités) plutôt que par le système de fichiers —
-`cat sys:random` produit des octets aléatoires. Une référence `info:`,
-`state:` ou `stats:` nomme une valeur système typée plutôt qu'un flux ;
-elle est lue via le service d'informations système, donc
-`cat info:mem/physical` affiche cette valeur, et une lecture non
+Un opérande peut aussi être une référence de ressource typée : un
+opérande relatif dont le premier composant de chemin est un espace de
+noms enregistré, comme `sys:random`, est ouvert par le résolveur de
+ressources du système (contrôlé par capacités) plutôt que par le système
+de fichiers, donc `cat sys:random` produit des octets aléatoires. Une
+référence `info:`, `state:` ou `stats:` nomme une valeur système typée
+plutôt qu'un flux ; elle est lue via le service d'informations système,
+donc `cat info:mem/physical` affiche cette valeur, et une lecture non
 autorisée est refusée en nommant la capacité requise. Une référence mal
 formée dans un espace de noms enregistré est une erreur, jamais un repli
-vers un nom de fichier.
+vers un nom de fichier ; un fichier sur disque dont le nom contient `:`
+reste accessible sous la forme `./name` ou entre guillemets.
 
 Avec `-n`, les lignes de sortie sont numérotées en continu sur toutes
 les sources, de sorte qu'une ligne à cheval sur deux sources n'est
@@ -60,6 +62,8 @@ de même lue.
 ## EXAMPLES
 
 - `cat notes.txt` — écrire `notes.txt` sur la sortie standard.
+- `cat sys:random` — diffuser des octets depuis la source aléatoire du
+  système (sans fin ; interrompez la commande pour l'arrêter).
 - `cat a.txt - b.txt` — écrire `a.txt`, puis l'entrée standard, puis
   `b.txt`.
 - `cat -n log.txt` — numéroter chaque ligne de sortie.

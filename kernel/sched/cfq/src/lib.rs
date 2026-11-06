@@ -56,6 +56,9 @@
 //! `docs/src/architecture/scheduler.md`.
 
 #![no_std]
+// `Box::try_new`, so a task body the heap cannot hold refuses its admission
+// instead of aborting the kernel.
+#![feature(allocator_api)]
 
 extern crate alloc;
 

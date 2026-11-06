@@ -462,9 +462,11 @@ names a sibling crate.
   drives a `usb-bot` + `scsi-cd` drive through this driver, the volume
   manager and the ISO 9660 driver to a copy onto ARXFS, then changes the disc
   (`with_optical_disc_change`) and reads the second back through the unit's
-  fresh publication. A `usb-storage`
-  *disk* vertical, on the same QEMU device path with a `scsi-hd`, is still
-  owed. The bundle ships in the Pi image
+  fresh publication. The twin-volume vertical
+  (`tairix-test-twins-qemu-aarch64`, `tools/qemu`'s `with_usb_stick`) drives
+  two `usb-storage` disks through this driver, the volume manager and the FAT32
+  driver, each attached, read, written and detached under a key of its own
+  (`docs/src/filesystem/drives.md` §8). The bundle ships in the Pi image
   (`Drivers/storage/usb_msd/Run`, signed, least-privilege manifest).
 - **Optical drives.** A multimedia unit (peripheral type `05h`, over BOT or
   UAS, and ATAPI drives' 12-byte packets over BOT, `08:02:50`) is served as
@@ -568,7 +570,9 @@ volume-policy service.
   (`fs.hotplug.root_added` allow/deny), 4174/4175 (`root_removed`), 4213 (a
   removable device's volume ejected by the user at the seat), 4180
   (attached or recovered read-only, with the driver's reason: an unsupported
-  feature, recorded errors, a crash a checker has not seen), 4181 (a catalog name
+  feature, recorded errors, a crash a checker has not seen — or
+  `lookalikes_hold_writes`, where unavailable volumes of its identity hold
+  writes it may be the medium of), 4181 (a catalog name
   already taken, which the volume manager answers with its next
   candidate), publication through the one shared
   `fs.root.publish.{allow,deny}` definition (4170/4171).
@@ -647,10 +651,16 @@ volume-policy service.
      spelling a root-view entry, a storage resolver or a resource namespace
      (`system`, `id`, `disk`, …), takes `_<fingerprint>` of the volume's own
      identity (`backup_k3x9`); a generated name still in use lengthens to 8
-     characters, then the whole fingerprint, which no two identities share.
+     characters, then the whole fingerprint, which no two identities share;
+  4. a twin — a volume carrying the identity of one attached already, as
+     media formatted alike do — derives the same names, so asking one a
+     volume of its identity holds, it is shown by the kernel as that name
+     with `_<n>`, the lowest `n` from 2 that is free, and published under a
+     key of its own (`docs/src/filesystem/drives.md` §7, §8).
   A label never yields `_`, so no label can spell a name generated for
   another volume. The bare label belongs to whichever volume holds it; a
-  given volume always derives the same suffix. The kernel re-validates every
+  given volume always derives the same suffix, a twin's `_<n>` excepted.
+  The kernel re-validates every
   name against the alias spelling (`validate_volume_name`: lowercase
   `a-z0-9-_`, beginning and ending with a letter or digit).
 - **Defect fixed en route (§2.18):** `lib/partition`'s `mbr::encode`
@@ -690,7 +700,10 @@ volume-policy service.
   logged-in member reads, writes and creates on the medium without ambient
   authority while non-members read only. No
   installed gid (or a registry without the group) leaves the volume
-  restrictively system-owned (fail closed, never an invented gid). A format
+  restrictively system-owned (fail closed, never an invented gid). The
+  wrapper reads the cell as each node is presented and sits above the
+  volume's cache, so a stick attached before the unlock is opened to the
+  group the moment the unlock publishes it. A format
   that records ownership (ext2/3/4, ARXFS) is never wrapped, removable or
   not: its nodes present the uid, gid, mode and ACL they store, a node made
   there carries its creator, and `chmod`/`chown` follow the ordinary owner
@@ -860,10 +873,16 @@ first, then the force-unmount exit, then the verified re-insert replay.
 - **The kernel volume service owns recovery** (not `volmgr`, which
   simply re-probes and re-attaches on plug — zero volmgr changes): an
   attach whose probed identity (`lib/fsprobe`, read from the extent
-  head before anything opens) matches an `unavailable-dirty`/`-lost`
-  record is a re-insert, recovered in place under the same handle,
-  mount path, catalog name, and published `id::` root — never
-  re-attached as a duplicate.
+  head before anything opens) matches the one `unavailable-dirty`/`-lost`
+  record of that identity is a re-insert, recovered in place under the same
+  handle, mount path, catalog name, and published `id::` root — never
+  re-attached as a duplicate. The device's own identity (`BlkOp::Identity`,
+  a USB unit's serial-derived fingerprint) narrows the records to the one
+  whose device stated the same. Of two or more none is proven the medium it
+  left on, so it attaches afresh, read-only, as their twin and neither
+  retained set is touched; a lone record its device does not prove is served
+  read-only, its writes held for the answer of the user at the seat
+  (`ReplayUnconfirmed`, `volume_replay`, `docs/src/filesystem/drives.md` §8).
 - **Mutation evidence is a dual-acceptance shadow in the journal,
   fs-neutral in mechanics, per-format only in extent.** `lib/fsprobe`
   gained `evidence_len` (beside the signatures, so probe and verifier
@@ -885,7 +904,8 @@ first, then the force-unmount exit, then the verified re-insert replay.
   fail-closed stand-in), so evidence must live in the journal that
   survives the unplug — and one shadow mechanism replaces three
   per-driver evidence surfaces (§2.2).
-- **Proven unmutated → replay**: extent equality is required (the
+- **Proven unmutated, by its own device → replay**: extent equality is
+  required (the
   retained LBAs' frame of reference), the retained set is snapshotted
   (`ReplaySnapshot`, wiped on drop), written back, the device cache
   flushed, and the journal committed — the volume returns to full
@@ -919,9 +939,9 @@ first, then the force-unmount exit, then the verified re-insert replay.
   the medium, and a re-insert with a mutated FSInfo that mounts
   read-only, refuses the plain detach, and force-retracts — plus the
   existing force-discard scenario. Live path: Pi 4 metal acceptance,
-  and the `usb-storage` detach/re-attach vertical, unblocked now the QEMU
-  ports carry the USB stack (`plans/SOUND.md` SND7) and owed with the
-  `usb-storage` disk vertical above.
+  and the `usb-storage` surprise-removal and re-insert vertical, which the
+  QEMU ports' USB stack (`plans/SOUND.md` SND7) and the twin-volume vertical's
+  `usb-storage` sticks make possible, is owed.
 
 ### 2.6 DEVICE2 increment order
 

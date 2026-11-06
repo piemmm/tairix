@@ -800,7 +800,7 @@ pub(crate) fn ep0_max_packet_from_descriptor(
 
 /// The 8-byte SETUP payload of `GET_DESCRIPTOR(device)` for `len`
 /// descriptor bytes (USB 2.0 §9.4.3).
-const fn setup_get_device_descriptor(len: u16) -> [u8; 8] {
+pub(crate) const fn setup_get_device_descriptor(len: u16) -> [u8; 8] {
     let l = len.to_le_bytes();
     [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, l[0], l[1]]
 }
@@ -841,7 +841,7 @@ const fn setup_clear_endpoint_halt(dci: u8) -> [u8; 8] {
 /// The 8-byte SETUP payload of `GET_DESCRIPTOR(string)` for string `index`
 /// in language `langid`, `len` bytes (USB 2.0 §9.4.3, §9.6.7): `wIndex`
 /// carries the LANGID, `0` for the LANGID table (string `0`) itself.
-const fn setup_get_string_descriptor(index: u8, langid: u16, len: u8) -> [u8; 8] {
+pub(crate) const fn setup_get_string_descriptor(index: u8, langid: u16, len: u8) -> [u8; 8] {
     let id = langid.to_le_bytes();
     [0x80, 0x06, index, DESC_TYPE_STRING, id[0], id[1], len, 0x00]
 }
@@ -850,7 +850,7 @@ const fn setup_get_string_descriptor(index: u8, langid: u16, len: u8) -> [u8; 8]
 const DESC_TYPE_STRING: u8 = 0x03;
 
 /// The longest string descriptor a one-byte `bLength` can describe.
-const STRING_DESCRIPTOR_MAX_LEN: usize = u8::MAX as usize;
+pub(crate) const STRING_DESCRIPTOR_MAX_LEN: usize = u8::MAX as usize;
 
 /// UTF-16 code units the longest string descriptor carries past its header.
 const MAX_STRING_UNITS: usize = (STRING_DESCRIPTOR_MAX_LEN - StringHeader::LEN) / 2;
@@ -1755,7 +1755,9 @@ impl SerialNumber {
         Self::new(units.get(..pairs.len())?)
     }
 
-    fn units(&self) -> &[u16] {
+    /// The serial's UTF-16 code units, exactly as delivered.
+    #[must_use]
+    pub fn units(&self) -> &[u16] {
         &self.units[..usize::from(self.len)]
     }
 }

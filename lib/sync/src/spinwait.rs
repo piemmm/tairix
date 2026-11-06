@@ -54,8 +54,7 @@ pub(crate) fn spin_wait() {
     spin_loop();
 }
 
-/// Spin until `ready` reports the wait over, each round discharging the
-/// installed service before the CPU hint.
+/// Spin through [`spin_wait`] until `ready` reports the wait over.
 ///
 /// The round is served *before* the condition is first tested, so a failed
 /// acquisition discharges one even when the state it was going to watch has
@@ -65,11 +64,9 @@ pub(crate) fn spin_wait() {
 ///
 /// Every acquire path in this crate that has to wait spins here, which is
 /// what makes the round-per-failed-attempt property one definition rather
-/// than a rule each lock restates. A caller outside the crate that must spin
-/// — one no scheduler can park — spins here to serve its peers as a lock
-/// does.
+/// than a rule each lock restates.
 #[inline]
-pub fn spin_until(mut ready: impl FnMut() -> bool) {
+pub(crate) fn spin_until(mut ready: impl FnMut() -> bool) {
     loop {
         spin_wait();
         if ready() {

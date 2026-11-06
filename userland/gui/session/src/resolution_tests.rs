@@ -1,7 +1,7 @@
 //! Host tests of the resolution trial: its countdown, its answers, and that
 //! nothing but *Keep Changes* keeps.
 
-use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
+use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PhysicalKey};
 use tairix_abi::time::NANOS_PER_SEC;
 
 use tairix_wallpaper::Resolution;
@@ -68,6 +68,7 @@ fn pressed(key: NamedKeyCode) -> KeyInput {
     KeyInput::Pressed {
         key: KeyValue::Named(key),
         modifiers: Modifiers::default(),
+        physical: PhysicalKey::UNKNOWN,
     }
 }
 

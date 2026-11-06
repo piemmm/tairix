@@ -12,10 +12,13 @@
 //! A node is born with the record its create hands over. The fixtures create
 //! theirs with [`ADMIN_RECORD`], so a test varies only the node it cares
 //! about.
+//!
+//! Every mutation has what it allocates before it changes anything, so an
+//! exhausted heap is answered [`DriverError::OutOfMemory`] with the tree as
+//! it was, as a block-backed driver's must be.
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use core::ops::Bound;
@@ -28,8 +31,10 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
 use tairix_abi::SeekRegion;
-use tairix_collections::RadixTree;
+use tairix_collections::{OrderedMap, OrderedSet, RadixTree};
 use tairix_fsmeta::{AttrFlags, AttrSet};
+
+use super::path::owned_name;
 
 /// The uid the fixtures' records and the root are owned by.
 pub(crate) const ADMIN_UID: u32 = 1;
@@ -46,7 +51,7 @@ pub(crate) const SYSTEM_RECORD: NodeSecurity = NodeSecurity::new(0o755, 0, 0);
 /// One node of the in-memory tree.
 enum RwNode {
     /// A directory: child name → node index.
-    Dir(BTreeMap<String, usize>),
+    Dir(OrderedMap<String, usize>),
     /// A regular file: its byte contents.
     File(Vec<u8>),
     /// A symbolic link: its stored target, verbatim and unresolved.
@@ -94,7 +99,7 @@ pub struct RwMockFs {
     /// The numbers of freed nodes, which a create takes again lowest first,
     /// as FAT's clusters and ext4's inodes are; `None` keeps every number for
     /// good.
-    free: Option<BTreeSet<usize>>,
+    free: Option<OrderedSet<usize>>,
     /// Run on entry to every lookup, so a test can check what its caller
     /// holds while inside the driver.
     lookup_probe: Option<Box<dyn Fn() + Send>>,
@@ -121,7 +126,7 @@ pub struct RwMockFs {
     class: AllocationClass,
     /// Nodes whose ownership the format stands in for rather than records,
     /// as an ownerless format's are.
-    unrecorded: BTreeSet<usize>,
+    unrecorded: OrderedSet<usize>,
     /// Each file's holes, parallel to `nodes`, so a seek reports real holes
     /// and a wrapper that answers "all data" itself is caught.
     holes: Vec<Holes>,
@@ -145,45 +150,48 @@ pub struct RwMockFs {
 }
 
 /// A file's holes as `start → end` byte ranges: disjoint, never adjacent.
-type Holes = BTreeMap<u64, u64>;
+type Holes = OrderedMap<u64, u64>;
 
 /// Add `[start, end)` to `holes`, merging what it touches.
-fn hole_insert(holes: &mut Holes, mut start: u64, mut end: u64) {
+fn hole_insert(holes: &mut Holes, mut start: u64, mut end: u64) -> Result<(), DriverError> {
     if start >= end {
-        return;
+        return Ok(());
     }
-    let touching: Vec<(u64, u64)> = holes
+    // Room first, so a refusal finds the holes it would merge still apart.
+    holes.try_reserve(1).map_err(|_| DriverError::OutOfMemory)?;
+    while let Some((&s, &e)) = holes
         .range(..=end)
+        .next_back()
         .filter(|&(_, &e)| e >= start)
-        .map(|(&s, &e)| (s, e))
-        .collect();
-    for (s, e) in touching {
+    {
         holes.remove(&s);
         start = start.min(s);
         end = end.max(e);
     }
-    holes.insert(start, end);
+    holes
+        .try_insert(start, end)
+        .map(drop)
+        .map_err(|_| DriverError::OutOfMemory)
 }
 
 /// Take `[start, end)` out of `holes`, splitting a hole it lands inside.
-fn hole_remove(holes: &mut Holes, start: u64, end: u64) {
+fn hole_remove(holes: &mut Holes, start: u64, end: u64) -> Result<(), DriverError> {
     if start >= end {
-        return;
+        return Ok(());
     }
-    let overlapping: Vec<(u64, u64)> = holes
-        .range(..end)
-        .filter(|&(_, &e)| e > start)
-        .map(|(&s, &e)| (s, e))
-        .collect();
-    for (s, e) in overlapping {
+    // A hole either end lands inside leaves a piece on that side.
+    holes.try_reserve(2).map_err(|_| DriverError::OutOfMemory)?;
+    while let Some((&s, &e)) = holes.range(..end).next_back().filter(|&(_, &e)| e > start) {
         holes.remove(&s);
-        if s < start {
-            holes.insert(s, start);
-        }
-        if e > end {
-            holes.insert(end, e);
+        for (from, to) in [(s, start), (end, e)] {
+            if from < to {
+                holes
+                    .try_insert(from, to)
+                    .map_err(|_| DriverError::OutOfMemory)?;
+            }
         }
     }
+    Ok(())
 }
 
 /// Where the next region of `region`'s kind begins at or after `offset` of a
@@ -236,7 +244,7 @@ impl RwMockFs {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            nodes: alloc::vec![RwNode::Dir(BTreeMap::new())],
+            nodes: alloc::vec![RwNode::Dir(OrderedMap::new())],
             // Root is admin-owned and world-traversable by default, so a test
             // can vary just the node it cares about.
             sec: alloc::vec![NodeSecurity::new(0o755, ADMIN_UID, ADMIN_GID)],
@@ -257,7 +265,7 @@ impl RwMockFs {
             ino_bias: 0,
             stats_probe: None,
             class: AllocationClass::Ordinary,
-            unrecorded: BTreeSet::new(),
+            unrecorded: OrderedSet::new(),
             holes: alloc::vec![Holes::new()],
             times: NodeTimes::default(),
             read_refusal: None,
@@ -273,7 +281,8 @@ impl RwMockFs {
     /// [`FilesystemSecurity::records_ownership`] answers `false` for it.
     pub fn forget_ownership(&mut self, node: NodeId) {
         if let Ok(idx) = Self::index(node) {
-            self.unrecorded.insert(idx);
+            let recorded = self.unrecorded.try_insert(idx).is_ok();
+            debug_assert!(recorded, "a fixture was built short of memory");
         }
     }
 
@@ -323,7 +332,7 @@ impl RwMockFs {
     #[cfg(test)]
     #[must_use]
     pub(crate) fn with_reused_numbers(mut self) -> Self {
-        self.free = Some(BTreeSet::new());
+        self.free = Some(OrderedSet::new());
         self
     }
 
@@ -433,27 +442,100 @@ impl RwMockFs {
         }
     }
 
-    /// Place a new node in directory `dir`, born with `record`, under a freed
-    /// number where one is reused, else a fresh one.
-    fn place(&mut self, node: RwNode, dir: usize, record: &NodeSecurity) -> usize {
-        let sec = *record;
-        if let Some(index) = self.free.as_mut().and_then(BTreeSet::pop_first) {
+    /// Room for one more node at the end of every per-node list.
+    fn lists_room(&mut self) -> Result<(), DriverError> {
+        let room = |reserved: Result<(), alloc::collections::TryReserveError>| {
+            reserved.map_err(|_| DriverError::OutOfMemory)
+        };
+        room(self.nodes.try_reserve(1))?;
+        room(self.sec.try_reserve(1))?;
+        room(self.nlink.try_reserve(1))?;
+        room(self.parent.try_reserve(1))?;
+        room(self.attrs.try_reserve(1))?;
+        room(self.holes.try_reserve(1))
+    }
+
+    /// Room for a node made now: a freed number where one is reused, else a
+    /// slot at the end of every per-node list.
+    fn node_room(&mut self) -> Result<(), DriverError> {
+        if self.free.as_ref().is_some_and(|free| !free.is_empty()) {
+            return Ok(());
+        }
+        self.lists_room()
+    }
+
+    /// Room for `count` more numbers among the reusable ones, where numbers
+    /// are reused.
+    fn free_room(&mut self, count: usize) -> Result<(), DriverError> {
+        self.free
+            .as_mut()
+            .map_or(Ok(()), |free| free.try_reserve(count))
+            .map_err(|_| DriverError::OutOfMemory)
+    }
+
+    /// The number the next node made takes: the lowest freed one where
+    /// numbers are reused, else a fresh one.
+    fn next_index(&self) -> usize {
+        self.free
+            .as_ref()
+            .and_then(OrderedSet::first)
+            .copied()
+            .unwrap_or(self.nodes.len())
+    }
+
+    /// Put `node` at `index`, the number [`Self::next_index`] answered, in
+    /// the room [`Self::node_room`] made, in directory `dir`, born with
+    /// `record`.
+    fn occupy(&mut self, index: usize, node: RwNode, dir: usize, record: &NodeSecurity) {
+        if let Some(free) = self.free.as_mut() {
+            free.remove(&index);
+        }
+        if index < self.nodes.len() {
             self.nodes[index] = node;
-            self.sec[index] = sec;
+            self.sec[index] = *record;
             self.unrecorded.remove(&index);
             self.holes[index] = Holes::new();
             self.attrs[index] = AttrSet::new();
             self.nlink[index] = 1;
             self.parent[index] = dir;
-            return index;
+            return;
         }
         self.nodes.push(node);
-        self.sec.push(sec);
+        self.sec.push(*record);
         self.holes.push(Holes::new());
         self.attrs.push(AttrSet::new());
         self.nlink.push(1);
         self.parent.push(dir);
-        self.nodes.len() - 1
+    }
+
+    /// Make `node` under `name` in directory `dir`, born with `record`,
+    /// answering its number: what it needs is had before anything changes,
+    /// so a refusal leaves the tree as it was.
+    fn place_named(
+        &mut self,
+        dir: usize,
+        name: &str,
+        node: RwNode,
+        record: &NodeSecurity,
+    ) -> Result<usize, DriverError> {
+        let key = owned_name(name).map_err(|_| DriverError::OutOfMemory)?;
+        self.node_room()?;
+        let index = self.next_index();
+        self.name_child(dir, key, index)?;
+        self.occupy(index, node, dir, record);
+        Ok(index)
+    }
+
+    /// File `key` → `child` in directory `dir`.
+    fn name_child(&mut self, dir: usize, key: String, child: usize) -> Result<(), DriverError> {
+        let Some(RwNode::Dir(children)) = self.nodes.get_mut(dir) else {
+            return Err(DriverError::Unsupported);
+        };
+        children
+            .try_insert(key, child)
+            .map_err(|_| DriverError::OutOfMemory)?;
+        self.generation = self.generation.wrapping_add(1);
+        Ok(())
     }
 
     /// Overwrite the root directory's security record.
@@ -511,38 +593,43 @@ impl RwMockFs {
     }
 
     /// Free the node at `idx`, which no name and no hold reaches: its storage
-    /// goes, and its number is the next node's where numbers are reused.
-    fn release(&mut self, idx: usize) {
+    /// goes, and its number is the next node's where numbers are reused, in
+    /// the room [`Self::free_room`] made for it.
+    fn release(&mut self, idx: usize) -> Result<(), DriverError> {
         self.nodes[idx] = RwNode::File(Vec::new());
         self.holes[idx] = Holes::new();
         self.attrs[idx] = AttrSet::new();
         self.unrecorded.remove(&idx);
         if let Some(free) = self.free.as_mut() {
-            free.insert(idx);
+            free.try_insert(idx).map_err(|_| DriverError::OutOfMemory)?;
         }
+        Ok(())
     }
 
     /// One name fewer reaches the node at `idx`; with none and no hold left,
     /// it is freed.
-    fn drop_name(&mut self, idx: usize) {
+    fn drop_name(&mut self, idx: usize) -> Result<(), DriverError> {
         let Some(count) = self.nlink.get_mut(idx) else {
-            return;
+            return Ok(());
         };
         *count = count.saturating_sub(1);
         if *count == 0 && !self.held.contains_key(idx as u64) {
-            self.release(idx);
+            self.release(idx)?;
         }
+        Ok(())
     }
 
     /// Move the node at `idx` to a fresh number, repointing every entry that
     /// named it, and free `idx` for the next node made where numbers are
     /// reused. The fresh number is never `idx`: the new place is taken before
     /// the old one is given up. A held node is never moved: its id names it
-    /// until its last unpin.
-    fn renumber(&mut self, idx: usize) {
+    /// until its last unpin. Its room is had first, so a refusal moves
+    /// nothing.
+    fn renumber(&mut self, idx: usize) -> Result<(), DriverError> {
         if self.held.contains_key(idx as u64) {
-            return;
+            return Ok(());
         }
+        self.renumber_room()?;
         let fresh = self.nodes.len();
         let node = core::mem::replace(&mut self.nodes[idx], RwNode::File(Vec::new()));
         self.nodes.push(node);
@@ -556,9 +643,6 @@ impl RwMockFs {
         self.nlink.push(names);
         let parent = self.parent[idx];
         self.parent.push(parent);
-        if self.unrecorded.remove(&idx) {
-            self.unrecorded.insert(fresh);
-        }
         for node in &mut self.nodes {
             if let RwNode::Dir(children) = node {
                 for child in children.values_mut().filter(|child| **child == idx) {
@@ -566,17 +650,47 @@ impl RwMockFs {
                 }
             }
         }
-        if let Some(free) = self.free.as_mut() {
-            free.insert(idx);
+        if self.unrecorded.remove(&idx) {
+            self.unrecorded
+                .try_insert(fresh)
+                .map_err(|_| DriverError::OutOfMemory)?;
         }
+        if let Some(free) = self.free.as_mut() {
+            free.try_insert(idx).map_err(|_| DriverError::OutOfMemory)?;
+        }
+        Ok(())
+    }
+
+    /// Room for [`Self::renumber`]: a slot at the end of every per-node list
+    /// and a place in each set it re-files a number in.
+    fn renumber_room(&mut self) -> Result<(), DriverError> {
+        self.lists_room()?;
+        self.unrecorded
+            .try_reserve(1)
+            .map_err(|_| DriverError::OutOfMemory)?;
+        self.free_room(1)
+    }
+
+    /// Room for what a byte write to the file at `idx` changes besides its
+    /// bytes: `holes` more holes, and its move to a fresh number where
+    /// writes renumber.
+    fn write_room(&mut self, idx: usize, holes: usize) -> Result<(), DriverError> {
+        self.holes[idx]
+            .try_reserve(holes)
+            .map_err(|_| DriverError::OutOfMemory)?;
+        if self.renumbering == Renumbering::OnWrite {
+            self.renumber_room()?;
+        }
+        Ok(())
     }
 
     /// A byte write to the file at `idx` landed, which moves it where writes
     /// renumber.
-    fn written(&mut self, idx: usize) {
+    fn written(&mut self, idx: usize) -> Result<(), DriverError> {
         if self.renumbering == Renumbering::OnWrite {
-            self.renumber(idx);
+            self.renumber(idx)?;
         }
+        Ok(())
     }
 
     fn child_index(&self, dir: NodeId, name: &[u8]) -> Result<Option<usize>, DriverError> {
@@ -602,7 +716,7 @@ impl RwMockFs {
     /// matches: one map lookup when names are exact, a scan when they fold.
     fn entry<'a>(
         &self,
-        children: &'a BTreeMap<String, usize>,
+        children: &'a OrderedMap<String, usize>,
         name: &str,
     ) -> Option<(&'a str, usize)> {
         if self.name_matching == NameMatching::Exact {
@@ -630,13 +744,18 @@ impl RwMockFs {
         let RwNode::Dir(children) = &mut self.nodes[dir_idx] else {
             return None;
         };
-        let key = children
-            .keys()
-            .find(|k| matching.matches(k.as_bytes(), name.as_bytes()))
-            .cloned()?;
-        let child = children.remove(&key)?;
-        self.generation = self.generation.wrapping_add(1);
-        Some(child)
+        let mut detached = None;
+        children.retain(|stored, &mut child| {
+            let gone = detached.is_none() && matching.matches(stored.as_bytes(), name.as_bytes());
+            if gone {
+                detached = Some(child);
+            }
+            !gone
+        });
+        if detached.is_some() {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        detached
     }
 
     /// Whether `target_idx` is `root_idx` or anywhere within its subtree,
@@ -654,22 +773,14 @@ impl RwMockFs {
         }
         false
     }
-}
 
-impl FilesystemRead for RwMockFs {
-    fn root(&self) -> NodeId {
-        NodeId::from_raw(1)
+    /// Whether the node numbered `key` has no name left.
+    fn nameless(&self, key: u64) -> bool {
+        usize::try_from(key).is_ok_and(|idx| self.nlink.get(idx).is_some_and(|&names| names == 0))
     }
 
-    fn name_matching(&self) -> NameMatching {
-        self.name_matching
-    }
-
-    fn node_identity(&self) -> NodeIdentity {
-        self.node_identity
-    }
-
-    fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
+    /// The record of the live node `node`.
+    fn info_of(&self, node: NodeId) -> Result<NodeInfo, DriverError> {
         let idx = self.live(node)?;
         let names = self.nlink.get(idx).copied().ok_or(DriverError::NotFound)?;
         let ino = node.raw().saturating_add(self.ino_bias);
@@ -707,6 +818,24 @@ impl FilesystemRead for RwMockFs {
                 content_gen: NodeInfo::NO_CONTENT_GEN,
             }),
         }
+    }
+}
+
+impl FilesystemRead for RwMockFs {
+    fn root(&self) -> NodeId {
+        NodeId::from_raw(1)
+    }
+
+    fn name_matching(&self) -> NameMatching {
+        self.name_matching
+    }
+
+    fn node_identity(&self) -> NodeIdentity {
+        self.node_identity
+    }
+
+    fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
+        self.info_of(node)
     }
 
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
@@ -792,12 +921,8 @@ impl FilesystemRead for RwMockFs {
         // last took, a place no insertion or removal moves. The cursor adds
         // the generation and position only so that each names one version
         // of the directory.
-        let rest: Vec<(usize, String, usize)> = if cursor == 0 {
-            children
-                .iter()
-                .enumerate()
-                .map(|(at, (name, &child))| (at, name.clone(), child))
-                .collect()
+        let (skipped, from) = if cursor == 0 {
+            (0, Bound::Unbounded)
         } else {
             let Ok(after) = core::str::from_utf8(after) else {
                 return Ok(());
@@ -805,22 +930,19 @@ impl FilesystemRead for RwMockFs {
             let skipped = children
                 .range::<str, _>((Bound::Unbounded, Bound::Included(after)))
                 .count();
-            children
-                .range::<str, _>((Bound::Excluded(after), Bound::Unbounded))
-                .enumerate()
-                .map(|(at, (name, &child))| (skipped + at, name.clone(), child))
-                .collect()
+            (skipped, Bound::Excluded(after))
         };
-        for (at, name, child) in rest {
+        let rest = children.range::<str, _>((from, Bound::Unbounded));
+        for (at, (name, &child)) in rest.enumerate() {
             let node = NodeId::from_raw(child as u64 + 1);
             let next_cursor = if self.stuck_cursor {
                 cursor
             } else {
-                (u64::from(self.generation) << 32) | (at as u64 + 1)
+                (u64::from(self.generation) << 32) | ((skipped + at) as u64 + 1)
             };
             let entry = DirEntry {
                 node,
-                info: self.node_info(node)?,
+                info: self.info_of(node)?,
                 next_cursor,
             };
             let listed = self.listed_as.unwrap_or(name.as_bytes());
@@ -854,26 +976,40 @@ impl FilesystemRead for RwMockFs {
         }
         let idx = Self::index(pinned)?;
         let holds = self.held.get_mut(idx as u64).ok_or(DriverError::NotFound)?;
-        *holds = holds.saturating_sub(1);
-        if *holds > 0 {
+        if *holds > 1 {
+            *holds -= 1;
             return Ok(Unpinned::Held);
         }
+        let still_named = self.nlink.get(idx).is_some_and(|&names| names > 0);
+        if !still_named {
+            // The number comes free, so its place among the reusable ones is
+            // had before the hold goes.
+            self.free_room(1)?;
+        }
         self.held.remove(idx as u64);
-        if self.nlink.get(idx).is_some_and(|&names| names > 0) {
+        if still_named {
             return Ok(Unpinned::Released);
         }
-        self.release(idx);
+        self.release(idx)?;
         Ok(Unpinned::Freed)
     }
 
     fn release_pins(&mut self) -> Result<(), DriverError> {
+        // Every number that comes free has its place among the reusable ones
+        // before any hold goes.
+        let freed = self
+            .held
+            .iter()
+            .filter(|&(key, _)| self.nameless(key))
+            .count();
+        self.free_room(freed)?;
         let held = core::mem::take(&mut self.held);
         for (key, _) in &held {
             let Ok(idx) = usize::try_from(key) else {
                 continue;
             };
-            if self.nlink.get(idx).is_some_and(|&names| names == 0) {
-                self.release(idx);
+            if self.nameless(key) {
+                self.release(idx)?;
             }
         }
         Ok(())
@@ -895,22 +1031,15 @@ impl FilesystemWrite for RwMockFs {
         if name == SYSTEM_ONLY_NAME && self.class != AllocationClass::System {
             return Err(DriverError::NoSpace);
         }
-        let name = core::str::from_utf8(name)
-            .map_err(|_| DriverError::LengthOutOfRange)?
-            .to_string();
+        let name = core::str::from_utf8(name).map_err(|_| DriverError::LengthOutOfRange)?;
         let node = match kind {
-            NodeKind::Directory => RwNode::Dir(BTreeMap::new()),
+            NodeKind::Directory => RwNode::Dir(OrderedMap::new()),
             NodeKind::RegularFile => RwNode::File(Vec::new()),
             // A link carries a target this call has nowhere to put.
             NodeKind::Symlink => return Err(DriverError::Unsupported),
         };
-        let dir_idx = Self::index(dir)?;
-        let new_index = self.place(node, dir_idx, record);
-        if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
-            children.insert(name, new_index);
-            self.generation = self.generation.wrapping_add(1);
-        }
-        Ok(NodeId::from_raw(new_index as u64 + 1))
+        let index = self.place_named(Self::index(dir)?, name, node, record)?;
+        Ok(NodeId::from_raw(index as u64 + 1))
     }
 
     fn create_link(
@@ -928,16 +1057,10 @@ impl FilesystemWrite for RwMockFs {
         if target.is_empty() {
             return Err(DriverError::LengthOutOfRange);
         }
-        let name = core::str::from_utf8(name)
-            .map_err(|_| DriverError::LengthOutOfRange)?
-            .to_string();
-        let dir_idx = Self::index(dir)?;
-        let new_index = self.place(RwNode::Link(target.to_vec()), dir_idx, record);
-        if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
-            children.insert(name, new_index);
-            self.generation = self.generation.wrapping_add(1);
-        }
-        Ok(NodeId::from_raw(new_index as u64 + 1))
+        let name = core::str::from_utf8(name).map_err(|_| DriverError::LengthOutOfRange)?;
+        let target = tairix_util::fallible::copied(target).ok_or(DriverError::OutOfMemory)?;
+        let index = self.place_named(Self::index(dir)?, name, RwNode::Link(target), record)?;
+        Ok(NodeId::from_raw(index as u64 + 1))
     }
 
     fn link(&mut self, dir: NodeId, name: &[u8], node: NodeId) -> Result<(), DriverError> {
@@ -953,31 +1076,39 @@ impl FilesystemWrite for RwMockFs {
             RwNode::Dir(_) => return Err(DriverError::Unsupported),
             RwNode::File(_) | RwNode::Link(_) => {}
         }
-        let count = self.nlink.get_mut(target).ok_or(DriverError::NotFound)?;
         // The stored count is a fixed-width field, so an overflow fails
         // closed rather than wrapping into a count that frees live data.
-        *count = count.checked_add(1).ok_or(DriverError::TooManyLinks)?;
-        let name = core::str::from_utf8(name)
-            .map_err(|_| DriverError::LengthOutOfRange)?
-            .to_string();
-        let dir_idx = Self::index(dir)?;
-        if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
-            children.insert(name, target);
-            self.generation = self.generation.wrapping_add(1);
-        }
+        let names = self
+            .nlink
+            .get(target)
+            .ok_or(DriverError::NotFound)?
+            .checked_add(1)
+            .ok_or(DriverError::TooManyLinks)?;
+        let name = core::str::from_utf8(name).map_err(|_| DriverError::LengthOutOfRange)?;
+        let key = owned_name(name).map_err(|_| DriverError::OutOfMemory)?;
+        self.name_child(Self::index(dir)?, key, target)?;
+        self.nlink[target] = names;
         Ok(())
     }
 
     fn write_at(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
         self.mutable()?;
         let child = self.live(file)?;
-        let RwNode::File(body) = &mut self.nodes[child] else {
+        if !matches!(self.nodes.get(child), Some(RwNode::File(_))) {
             return Err(DriverError::Unsupported);
-        };
+        }
         let start = usize::try_from(offset).map_err(|_| DriverError::LengthOutOfRange)?;
         let end = start
             .checked_add(data.len())
             .ok_or(DriverError::LengthOutOfRange)?;
+        // Room for the hole a gap past the old end leaves and the pieces of
+        // the ones the write fills, before a byte moves.
+        self.write_room(child, 3)?;
+        let RwNode::File(body) = &mut self.nodes[child] else {
+            return Err(DriverError::Unsupported);
+        };
+        body.try_reserve(end.saturating_sub(body.len()))
+            .map_err(|_| DriverError::OutOfMemory)?;
         let old = body.len() as u64;
         if body.len() < start {
             body.resize(start, 0);
@@ -989,45 +1120,56 @@ impl FilesystemWrite for RwMockFs {
         body.extend_from_slice(&data[overlap..]);
         // A gap a write leaves past the old end stores nothing, as a
         // hole-keeping format's does.
-        hole_insert(&mut self.holes[child], old, offset);
-        hole_remove(&mut self.holes[child], offset, end as u64);
-        self.written(child);
+        hole_insert(&mut self.holes[child], old, offset)?;
+        hole_remove(&mut self.holes[child], offset, end as u64)?;
+        self.written(child)?;
         Ok(data.len())
     }
 
     fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
         self.mutable()?;
         let child = self.live(file)?;
+        if !matches!(self.nodes.get(child), Some(RwNode::File(_))) {
+            return Err(DriverError::Unsupported);
+        }
+        let new = usize::try_from(size).map_err(|_| DriverError::LengthOutOfRange)?;
+        // The room cutting the holes back asks for, before a byte moves.
+        self.write_room(child, 2)?;
         let RwNode::File(body) = &mut self.nodes[child] else {
             return Err(DriverError::Unsupported);
         };
-        let new = usize::try_from(size).map_err(|_| DriverError::LengthOutOfRange)?;
+        body.try_reserve(new.saturating_sub(body.len()))
+            .map_err(|_| DriverError::OutOfMemory)?;
         let old = body.len() as u64;
         body.resize(new, 0);
         let holes = &mut self.holes[child];
         if size > old {
-            hole_insert(holes, old, size);
+            hole_insert(holes, old, size)?;
         } else {
-            hole_remove(holes, size, u64::MAX);
+            hole_remove(holes, size, u64::MAX)?;
         }
-        self.written(child);
+        self.written(child)?;
         Ok(())
     }
 
     fn punch(&mut self, file: NodeId, offset: u64, len: u64) -> Result<(), DriverError> {
         self.mutable()?;
         let child = self.live(file)?;
+        if !matches!(self.nodes.get(child), Some(RwNode::File(_))) {
+            return Err(DriverError::Unsupported);
+        }
+        let end = offset.checked_add(len).ok_or(DriverError::OutOfRange)?;
+        self.write_room(child, 1)?;
         let RwNode::File(body) = &mut self.nodes[child] else {
             return Err(DriverError::Unsupported);
         };
-        let end = offset.checked_add(len).ok_or(DriverError::OutOfRange)?;
         let size = body.len() as u64;
         let (start, end) = (offset.min(size), end.min(size));
         let span = usize::try_from(start).map_err(|_| DriverError::LengthOutOfRange)?
             ..usize::try_from(end).map_err(|_| DriverError::LengthOutOfRange)?;
         body[span].fill(0);
-        hole_insert(&mut self.holes[child], start, end);
-        self.written(child);
+        hole_insert(&mut self.holes[child], start, end)?;
+        self.written(child)?;
         Ok(())
     }
 
@@ -1041,8 +1183,13 @@ impl FilesystemWrite for RwMockFs {
         }
         let key = core::str::from_utf8(name).map_err(|_| DriverError::NotFound)?;
         let dir_idx = Self::index(dir)?;
+        if self.nlink.get(child) == Some(&1) && !self.held.contains_key(child as u64) {
+            // Its number comes free, so its place among the reusable ones is
+            // had before its name goes.
+            self.free_room(1)?;
+        }
         if let Some(gone) = self.detach_name(dir_idx, key) {
-            self.drop_name(gone);
+            self.drop_name(gone)?;
         }
         Ok(())
     }
@@ -1059,9 +1206,7 @@ impl FilesystemWrite for RwMockFs {
             .child_index(src_dir, src_name)?
             .ok_or(DriverError::NotFound)?;
         let dst_dir_idx = self.named_dir(dst_dir)?;
-        let dst_key = core::str::from_utf8(dst_name)
-            .map_err(|_| DriverError::LengthOutOfRange)?
-            .to_string();
+        let dst_key = core::str::from_utf8(dst_name).map_err(|_| DriverError::LengthOutOfRange)?;
         let moving_dir = matches!(self.nodes[src_idx], RwNode::Dir(_));
 
         // Refuse moving a directory into itself or its own subtree.
@@ -1069,7 +1214,7 @@ impl FilesystemWrite for RwMockFs {
             return Err(DriverError::DirectoryCycle);
         }
 
-        match self.child_index(dst_dir, dst_name)? {
+        let replacing = match self.child_index(dst_dir, dst_name)? {
             Some(dst_idx) if dst_idx == src_idx => {
                 // Another name for the same node is left alone, as POSIX has
                 // it; the source's own entry takes the spelling asked for.
@@ -1078,6 +1223,7 @@ impl FilesystemWrite for RwMockFs {
                 if !own_entry || self.stored_name(dst_dir_idx, dst_name) == Some(dst_name) {
                     return Ok(());
                 }
+                false
             }
             // Replace an existing destination of a compatible kind.
             Some(dst_idx) => {
@@ -1090,24 +1236,36 @@ impl FilesystemWrite for RwMockFs {
                         return Err(DriverError::DirectoryNotEmpty);
                     }
                 }
-                if let Some(replaced) = self.detach_name(dst_dir_idx, &dst_key) {
-                    self.drop_name(replaced);
-                }
+                true
             }
-            None => {}
-        }
+            None => false,
+        };
 
-        // The node keeps the name it had, moved rather than added.
+        // The node keeps the name it had, moved rather than added, and what
+        // the move takes is had before any name moves.
         let src_key = core::str::from_utf8(src_name).map_err(|_| DriverError::NotFound)?;
         let src_dir_idx = Self::index(src_dir)?;
-        self.detach_name(src_dir_idx, src_key);
-        if let RwNode::Dir(children) = &mut self.nodes[dst_dir_idx] {
-            children.insert(dst_key, src_idx);
-            self.generation = self.generation.wrapping_add(1);
+        let key = owned_name(dst_key).map_err(|_| DriverError::OutOfMemory)?;
+        if let Some(RwNode::Dir(children)) = self.nodes.get_mut(dst_dir_idx) {
+            children
+                .try_reserve(1)
+                .map_err(|_| DriverError::OutOfMemory)?;
         }
+        self.free_room(2)?;
+        let renumbers = self.renumbering == Renumbering::OnRename && !moving_dir;
+        if renumbers {
+            self.renumber_room()?;
+        }
+        if replacing {
+            if let Some(replaced) = self.detach_name(dst_dir_idx, dst_key) {
+                self.drop_name(replaced)?;
+            }
+        }
+        self.detach_name(src_dir_idx, src_key);
+        self.name_child(dst_dir_idx, key, src_idx)?;
         self.parent[src_idx] = dst_dir_idx;
-        if self.renumbering == Renumbering::OnRename && !moving_dir {
-            self.renumber(src_idx);
+        if renumbers {
+            self.renumber(src_idx)?;
         }
         Ok(())
     }

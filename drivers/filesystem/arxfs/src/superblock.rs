@@ -12,6 +12,7 @@
 //! scans the ring and selects the highest-generation slot that decodes
 //! cleanly *and* whose referenced root also decodes cleanly (`transaction`).
 
+use tairix_abi::driver::filesystem::VolumeTitle;
 use tairix_abi::DriverError;
 
 use crate::crypto::{MetaSeal, VolumeProtection, CRYPTO_HEADER_LEN};
@@ -67,13 +68,23 @@ const P_INCOMPAT: usize = CRYPTO_OFFSET + CRYPTO_HEADER_LEN;
 /// ([`VolumeProtection::word`]): plaintext like the feature word before it,
 /// because it says how every other block is sealed.
 pub const P_PROTECTION: usize = P_INCOMPAT + 8;
+/// Offset, within the block, of the volume's title field
+/// ([`tairix_fsprobe::arxfs_title`]), which the volume probe names the medium
+/// by: plaintext like the words before it and covered by the block's
+/// authenticator, so an encrypted volume keeps none. The one definition lives
+/// in `lib/fsprobe`, which reads it.
+const P_TITLE: usize = tairix_fsprobe::ARXFS_TITLE_AT;
+/// One past the title field: the payload's end.
+const TITLE_END: usize = P_TITLE + tairix_fsprobe::ARXFS_TITLE_LEN;
+
+const _: () = assert!(P_TITLE == P_PROTECTION + 4);
+
 /// Bytes of meaningful superblock payload following the header: the 40-byte
-/// geometry block, the crypto discovery header, the 8-byte feature word and
-/// the 4-byte protection word.
-// `CRYPTO_HEADER_LEN` is a tiny compile-time constant (< 256), so the
-// `usize`-to-`u32` widening cannot truncate.
+/// geometry block, the crypto discovery header, the 8-byte feature word, the
+/// 4-byte protection word and the title field.
+// The payload is a few hundred bytes, so the narrowing cannot truncate.
 #[allow(clippy::cast_possible_truncation)]
-const PAYLOAD_LEN: u32 = 40 + CRYPTO_HEADER_LEN as u32 + 8 + 4;
+const PAYLOAD_LEN: u32 = (TITLE_END - HEADER_LEN) as u32;
 
 /// The volume stores symbolic links: inodes of on-disk kind `3`, whose
 /// target is held as node data (`docs/src/filesystem/arxfs-spec.md` §20).
@@ -125,6 +136,9 @@ pub struct Superblock {
     pub incompat: u64,
     /// How the volume's blocks are sealed.
     pub protection: VolumeProtection,
+    /// The volume's title: empty where none is set, and always on an
+    /// encrypted volume.
+    pub title: VolumeTitle,
 }
 
 impl Superblock {
@@ -143,7 +157,7 @@ impl Superblock {
         seal: &MetaSeal,
         crypto_header: &[u8; CRYPTO_HEADER_LEN],
     ) -> Result<(), DriverError> {
-        if block.len() < P_PROTECTION + 4 {
+        if block.len() < TITLE_END {
             return Err(DriverError::DeviceFault);
         }
         for byte in block.iter_mut() {
@@ -157,6 +171,7 @@ impl Superblock {
         block[CRYPTO_OFFSET..CRYPTO_OFFSET + CRYPTO_HEADER_LEN].copy_from_slice(crypto_header);
         wr_u64(block, P_INCOMPAT, self.incompat);
         wr_u32(block, P_PROTECTION, self.protection.word());
+        block[P_TITLE..TITLE_END].copy_from_slice(&tairix_fsprobe::arxfs_title_field(&self.title));
         let header = BlockHeader {
             block_type: BlockType::Superblock,
             fs_uuid,
@@ -179,9 +194,10 @@ impl Superblock {
     ///
     /// `seal` is the volume's metadata seal, which the caller has already
     /// established (`crate::crypto`): the scan only checks slots under it. A
-    /// slot whose protection word names another protection than `seal`'s, or a
-    /// plaintext slot carrying key material, is skipped, being no slot of the
-    /// volume as it is being opened.
+    /// slot whose protection word names another protection than `seal`'s, a
+    /// plaintext slot carrying key material, one whose title field no writer
+    /// leaves, and an encrypted slot carrying a title are skipped, being no
+    /// slot of the volume as it is being opened.
     ///
     /// # Errors
     ///
@@ -199,7 +215,7 @@ impl Superblock {
         phys: u64,
         seal: &MetaSeal,
     ) -> Result<Option<(Self, u128)>, DriverError> {
-        if block.len() < P_PROTECTION + 4 {
+        if block.len() < TITLE_END {
             return Ok(None);
         }
         let probe_uuid = expect_uuid.unwrap_or_else(|| {
@@ -220,6 +236,14 @@ impl Superblock {
         {
             return Ok(None);
         }
+        let mut field = [0u8; tairix_fsprobe::ARXFS_TITLE_LEN];
+        field.copy_from_slice(&block[P_TITLE..TITLE_END]);
+        let Some(title) = tairix_fsprobe::arxfs_title(&field) else {
+            return Ok(None);
+        };
+        if protection != VolumeProtection::Plaintext && !title.is_empty() {
+            return Ok(None);
+        }
         let sb = Self {
             block_size: rd_u32(block, P_BLOCK_SIZE),
             total_blocks: rd_u64(block, P_TOTAL_BLOCKS),
@@ -228,6 +252,7 @@ impl Superblock {
             root_phys: rd_u64(block, P_ROOT_PHYS),
             incompat: rd_u64(block, P_INCOMPAT),
             protection,
+            title,
         };
         if sb.incompat & !INCOMPAT_SUPPORTED != 0 {
             return Err(DriverError::Unsupported);

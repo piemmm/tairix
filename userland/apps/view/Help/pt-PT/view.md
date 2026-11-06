@@ -29,6 +29,18 @@ RISC OS Sprite. Um ficheiro que o descodificador recusa declara o seu motivo
 na janela e no fluxo de erro padrão; a janela nunca é deixada em branco e
 nunca é fabricada uma imagem.
 
+Reproduz também filmes WebM com o seu som, como as gravações de ecrã do próprio
+ambiente de trabalho. Um filme abre em pausa sobre a sua primeira imagem; a
+ferramenta de reprodução e `Space` reproduzem-no e pausam-no. Por baixo da
+imagem, uma barra de procura mostra até onde o filme chegou, com o tempo
+reproduzido e a duração do filme ao lado: arraste ao longo dela, ou clique
+nela, para ir para a imagem-chave mais próxima nesse ponto ou antes dele. Uma
+gravação que não declara a sua duração — uma cujo gravador parou
+inesperadamente — reproduz-se desde o início, mas não permite procurar. Um
+filme cortado, ou que deixa de se descodificar, reproduz-se até onde puder e
+declara porque parou; um filme cujo som não pode ser reproduzido continua em
+silêncio e indica-o.
+
 Vários documentos ao mesmo tempo são várias janelas do mesmo visualizador:
 comparar duas imagens lado a lado é abrir a segunda. Fechar uma janela deixa
 o visualizador na barra de ícones, pronto para o documento seguinte; é a
@@ -60,7 +72,7 @@ transparente se leia como transparente e não como a cor que está atrás.
 * `[` / `]` — um quarto de volta à esquerda ou à direita
 * `M` — espelhar da esquerda para a direita
 * `I` — mostrar ou ocultar o painel de informação
-* `Space` — reproduzir ou pausar uma animação
+* `Space` — reproduzir ou pausar uma animação ou um filme
 * `O` — escolher outro documento
 * `Page Up` / `Page Down` — entrada anterior ou seguinte
 * `Home` / `End` — primeira ou última entrada

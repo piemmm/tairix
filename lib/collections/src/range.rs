@@ -4,7 +4,8 @@ use core::fmt;
 use core::iter::FusedIterator;
 use core::ops::Range;
 
-use alloc::collections::{btree_map, BTreeMap};
+use crate::ordered::{self, OrderedMap};
+use crate::TryReserveError;
 
 /// An endpoint the disjoint-range containers can be keyed on.
 ///
@@ -61,6 +62,8 @@ pub enum RangeError {
     /// identity — a reservation, a mapping — so an overlapping insertion is
     /// refused rather than replacing or splitting the holder.
     Overlap,
+    /// The range's record could not be allocated.
+    Alloc(TryReserveError),
 }
 
 impl fmt::Display for RangeError {
@@ -68,6 +71,7 @@ impl fmt::Display for RangeError {
         f.write_str(match self {
             Self::Empty => "the range covers nothing",
             Self::Overlap => "the range overlaps one already held",
+            Self::Alloc(_) => "no memory to record the range",
         })
     }
 }
@@ -87,11 +91,11 @@ struct Entry<K, V> {
 /// own. The set that canonicalises instead — absorbing everything it touches —
 /// is [`RangeSet`](crate::RangeSet).
 ///
-/// Lookup, iteration, and gap search allocate nothing. Insertion inherits
-/// `alloc`'s `BTreeMap` allocation behaviour, which cannot be made fallible
-/// from outside `alloc`.
+/// Lookup, iteration, gap search, and removing a whole range allocate
+/// nothing. Recording a range can be refused for want of memory, and then
+/// changes nothing; [`Self::try_reserve`] makes room for a run of them ahead.
 pub struct RangeMap<K, V> {
-    entries: BTreeMap<K, Entry<K, V>>,
+    entries: OrderedMap<K, Entry<K, V>>,
 }
 
 impl<K, V> Default for RangeMap<K, V> {
@@ -105,7 +109,7 @@ impl<K, V> RangeMap<K, V> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            entries: BTreeMap::new(),
+            entries: OrderedMap::new(),
         }
     }
 
@@ -125,6 +129,34 @@ impl<K, V> RangeMap<K, V> {
     pub fn clear(&mut self) {
         self.entries.clear();
     }
+
+    /// Make room for `additional` further ranges, after which that many
+    /// insertions, placements, and splitting removals cannot be refused for
+    /// want of memory.
+    ///
+    /// # Errors
+    ///
+    /// [`TryReserveError`] when the room cannot be had; the map is as it was.
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
+        self.entries.try_reserve(additional)
+    }
+
+    /// Bytes the map's storage holds, with the room reserved and the records
+    /// removals freed: what it costs, which [`Self::len`] does not say.
+    #[must_use]
+    pub fn allocated_bytes(&self) -> usize {
+        self.entries.allocated_bytes()
+    }
+
+    /// Give back the room the map holds beyond its ranges.
+    ///
+    /// # Errors
+    ///
+    /// [`TryReserveError`] when the fitted storage cannot be had; every range
+    /// is where it was, and the map keeps the room it had.
+    pub fn try_shrink_to_fit(&mut self) -> Result<(), TryReserveError> {
+        self.entries.try_shrink_to_fit()
+    }
 }
 
 impl<K: RangeKey, V> RangeMap<K, V> {
@@ -132,8 +164,9 @@ impl<K: RangeKey, V> RangeMap<K, V> {
     ///
     /// # Errors
     ///
-    /// [`RangeError::Empty`] for a range covering nothing, or
-    /// [`RangeError::Overlap`] when it intersects one already held — in which
+    /// [`RangeError::Empty`] for a range covering nothing,
+    /// [`RangeError::Overlap`] when it intersects one already held, or
+    /// [`RangeError::Alloc`] when its record cannot be allocated — in each
     /// case the map is untouched and `value` is dropped.
     pub fn insert(&mut self, range: Range<K>, value: V) -> Result<(), RangeError> {
         if range.start >= range.end {
@@ -142,13 +175,17 @@ impl<K: RangeKey, V> RangeMap<K, V> {
         if self.overlapping(range.clone()).next().is_some() {
             return Err(RangeError::Overlap);
         }
-        self.entries.insert(
-            range.start,
-            Entry {
-                end: range.end,
-                value,
-            },
-        );
+        self.record(range, value).map_err(RangeError::Alloc)
+    }
+
+    /// File `range`, which the caller has proved non-empty and disjoint from
+    /// every held range.
+    pub(crate) fn record(&mut self, range: Range<K>, value: V) -> Result<(), TryReserveError> {
+        let entry = Entry {
+            end: range.end,
+            value,
+        };
+        self.entries.try_insert(range.start, entry)?;
         Ok(())
     }
 
@@ -254,22 +291,31 @@ impl<K: RangeKey, V> RangeMap<K, V> {
     /// This is the allocation half of the container: a window hands out
     /// ranges and takes them back, and the gaps between what it has handed
     /// out *are* its free space, so it keeps no second free-list to drift out
-    /// of step with the first. A refusal leaves the map untouched and drops
-    /// `value`, as a refused [`insert`](Self::insert) does.
-    pub fn place(&mut self, within: Range<K>, count: u64, value: V) -> Option<Range<K>> {
-        let start = self.first_free(within, count)?;
+    /// of step with the first. A refusal of either kind leaves the map
+    /// untouched and drops `value`, as a refused [`insert`](Self::insert)
+    /// does.
+    ///
+    /// # Errors
+    ///
+    /// [`TryReserveError`] when the placed range's record cannot be
+    /// allocated.
+    pub fn place(
+        &mut self,
+        within: Range<K>,
+        count: u64,
+        value: V,
+    ) -> Result<Option<Range<K>>, TryReserveError> {
+        let Some(start) = self.first_free(within, count) else {
+            return Ok(None);
+        };
         // The gap search proved the range non-empty, inside the key's own
         // span, and disjoint from every held one, so the entry goes in
         // without a second overlap probe that could only agree.
-        let range = start..start.advance(count)?;
-        self.entries.insert(
-            range.start,
-            Entry {
-                end: range.end,
-                value,
-            },
-        );
-        Some(range)
+        let Some(end) = start.advance(count) else {
+            return Ok(None);
+        };
+        self.record(start..end, value)?;
+        Ok(Some(start..end))
     }
 
     /// The lowest start inside `within` where `count` free elements fit,
@@ -315,29 +361,68 @@ impl<K: RangeKey> RangeMap<K, ()> {
     /// the value is nothing there is nothing to be wrong, so the split is the
     /// map's own business — which is what lets a set of pages, and a window of
     /// pages handed out, share this one definition.
-    pub fn remove_range(&mut self, range: Range<K>) -> u64 {
+    ///
+    /// # Errors
+    ///
+    /// [`TryReserveError`] when `range` lies strictly inside one held range,
+    /// whose tail then needs a record of its own, and it cannot be allocated;
+    /// the map is as it was. A cut that trims or takes whole ranges never
+    /// allocates.
+    pub fn remove_range(&mut self, range: Range<K>) -> Result<u64, TryReserveError> {
         if range.start >= range.end {
-            return 0;
+            return Ok(0);
         }
         let mut dropped = 0u64;
-        // Each pass takes one intersecting range and puts back only the parts
-        // outside the cut, which intersect the cut no longer.
-        loop {
-            let cut = self
-                .overlapping(range.clone())
-                .next()
-                .map(|(held, ())| held);
-            let Some(cut) = cut else { break };
-            self.entries.remove(&cut.start);
-            let overlap = range
-                .end
-                .min(cut.end)
-                .distance_from(range.start.max(cut.start));
-            dropped = dropped.saturating_add(overlap);
-            let _ = self.insert(cut.start..range.start, ());
-            let _ = self.insert(range.end..cut.end, ());
+        let straddling = self
+            .entry_at_or_below(range.start)
+            .map(|(held, ())| held)
+            .filter(|held| held.start < range.start && held.end > range.start);
+        if let Some(held) = straddling {
+            if held.end > range.end {
+                // The cut lies inside it. Its tail is recorded before its head
+                // is trimmed, so a refusal changes nothing.
+                self.record(range.end..held.end, ())?;
+                self.set_end(held.start, range.start);
+                return Ok(range.end.distance_from(range.start));
+            }
+            self.set_end(held.start, range.start);
+            dropped = held.end.distance_from(range.start);
         }
-        dropped
+        // Each range starting inside the cut is taken whole, but the last, if
+        // it runs past the cut, keeps its tail under the cut's end.
+        loop {
+            let held = self
+                .entries
+                .range(range.start..range.end)
+                .next()
+                .map(|(&start, entry)| start..entry.end);
+            let Some(held) = held else { break };
+            if held.end <= range.end {
+                self.entries.remove(&held.start);
+                dropped = dropped.saturating_add(held.end.distance_from(held.start));
+            } else {
+                if self.refile(held.start, range.end) {
+                    dropped = dropped.saturating_add(range.end.distance_from(held.start));
+                }
+                break;
+            }
+        }
+        Ok(dropped)
+    }
+
+    /// Move the end of the range starting at `start`; the caller keeps it
+    /// disjoint from its neighbours.
+    pub(crate) fn set_end(&mut self, start: K, end: K) {
+        if let Some(entry) = self.entries.get_mut(&start) {
+            entry.end = end;
+        }
+    }
+
+    /// Move the start of the range starting at `from` to `to`, which must
+    /// keep it after the range before it and before the range after it.
+    /// Answers whether it moved.
+    pub(crate) fn refile(&mut self, from: K, to: K) -> bool {
+        self.entries.rekey(&from, to)
     }
 }
 
@@ -347,7 +432,7 @@ fn entry_pair<'a, K: RangeKey, V>((start, entry): (&K, &'a Entry<K, V>)) -> (Ran
 
 /// Ascending iterator over a [`RangeMap`]'s ranges and values.
 pub struct Iter<'a, K, V> {
-    inner: btree_map::Iter<'a, K, Entry<K, V>>,
+    inner: ordered::Iter<'a, K, Entry<K, V>>,
 }
 
 impl<'a, K: RangeKey, V> Iterator for Iter<'a, K, V> {

@@ -264,7 +264,9 @@ fn drive_lifecycle(config: FramebufferConfig) {
     let mut grants = CapabilitySet::empty();
     grants.insert(CapabilityId::MMIO_MAP);
     grants.insert(CapabilityId::DRV_LOAD);
-    let caller = TaskCapabilities::derive(TASK, UserId(0), grants, grants, &SERIAL_SINK);
+    let Ok(caller) = TaskCapabilities::derive(TASK, UserId(0), grants, grants, &SERIAL_SINK) else {
+        fail("caller capability record");
+    };
     let phys = tairix_test_riscv64_boot::boot::identity_map();
     let Ok(mut mmio) = MmioMap::new(
         AddressSpace::new(HostPageTable::new()),

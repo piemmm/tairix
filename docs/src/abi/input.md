@@ -93,12 +93,21 @@ processes can never diverge.
 [`KeyInput`] is the desktop-level counterpart of `PointerInput`: a key
 going down or coming up, the [`KeyValue`] it produced — a Unicode
 character (`Char`) or a named
-non-character key ([`NamedKeyCode`]: Enter, the arrows, F1–F12, …) — and
-the [`Modifiers`] (shift / ctrl / alt / meta) held at the time. As with
-the pointer, this is the *resolved* event, not the device report:
-turning raw keycodes and a keyboard layout into a produced character is
-policy above the driver, not a second copy of the data (`AGENTS.md`
-§2.2).
+non-character key ([`NamedKeyCode`]: Enter, the arrows, F1–F12, …) — the
+[`Modifiers`] (shift / ctrl / alt / meta) held at the time, and the
+[`PhysicalKey`] it was typed on. As with the pointer, this is the *resolved*
+event, not the device report: turning raw keycodes and a keyboard layout
+into a produced character is policy above the driver, not a second copy of
+the data (`AGENTS.md` §2.2).
+
+The physical key is where the key sits, whatever the layout makes of it: its
+usage ID on the Keyboard/Keypad page (`0x07`) of the USB HID Usage Tables.
+USB and I2C keyboards report those usages natively, and the virtio-input
+driver maps its `evdev` keycodes onto them through one table. A binding made
+by position — a system chord such as Meta+Shift+3 — therefore holds under any
+layout, though the character the key types does not (`#` on a US keyboard,
+`£` on a UK one). A usage the page assigns no key is `PhysicalKey::UNKNOWN`,
+which matches nothing; the edge still carries what it typed.
 
 A third kind names no key at all: `ModifiersChanged` reports that the set
 of held modifiers changed. A modifier produces no character and is no
@@ -109,18 +118,29 @@ pointer press most of all. The keyboard drivers emit one per *observable*
 change: a key repeat, or letting go of one shift key while the other is
 still held, produces nothing.
 
-A record is exactly [`KeyInput::WIRE_LEN`] (20) bytes, little-endian: a
-`"KIN1"` magic, the ABI version, a `kind` code (pressed / released /
-modifiers-changed), the modifier bitmask, a `key_class` (char / named), a
-4-byte codepoint, a 2-byte named-key code, and a reserved half-word.
+A record is exactly [`KeyInput::WIRE_LEN`] (20) bytes, little-endian:
+
+| offset | size | field       | meaning                                               |
+|-------:|-----:|-------------|-------------------------------------------------------|
+|      0 |    4 | `magic`     | `"KIN1"`                                              |
+|      4 |    2 | `version`   | the ABI version                                       |
+|      6 |    2 | `kind`      | pressed `1`, released `2`, modifiers-changed `3`      |
+|      8 |    2 | `modifiers` | shift `0x1`, ctrl `0x2`, alt `0x4`, meta `0x8`        |
+|     10 |    2 | `key_class` | char `0`, named `1`                                   |
+|     12 |    4 | `codepoint` | the produced Unicode scalar, on a char record         |
+|     16 |    2 | `named`     | the [`NamedKeyCode`], on a named record               |
+|     18 |    2 | `physical`  | the physical key's HID usage, `0` where it is unknown |
+
 Exactly one of the two key fields is set for a given class, and a
-modifiers-changed record carries an all-zero key field — its one legal
-spelling, so a dirty field is refused rather than read as a NUL character.
-[`KeyInput::from_bytes`] validates every field — magic, version, reserved,
-`kind`, `key_class`, the modifier bits, the named-key code, and that the
-codepoint is a real Unicode scalar (an unpaired surrogate is refused) — and
-fails closed with the matching [`Errno`] (`AGENTS.md` §5.4 / §19.5). It too
-is enrolled in the `lib/abi` fuzz harness (`AGENTS.md` §19.6).
+modifiers-changed record carries an all-zero key field, physical key
+included — its one legal spelling, so a dirty field is refused rather than
+read as a NUL character. [`KeyInput::from_bytes`] validates every field —
+magic, version, `kind`, `key_class`, the modifier bits, the named-key code,
+and that the codepoint is a real Unicode scalar (an unpaired surrogate is
+refused) — and fails closed with the matching [`Errno`] (`AGENTS.md` §5.4 /
+§19.5); a physical key the page assigns no key reads as unknown rather than
+refusing the edge. It too is enrolled in the `lib/abi` fuzz harness
+(`AGENTS.md` §19.6), which flips every bit of canonical key records.
 
 ## Touch frames
 
@@ -176,7 +196,10 @@ the same `lib/input` `InputEvent` stream: `DeviceInputSource` reads
 `PointerInput` records from the kernel pointer channel and touch frames from
 the touch channel, through the recogniser, and `KeyboardInputSource` reads
 `KeyInput` records from the kernel keyboard channel. The window manager delivers a decoded key event to the
-focused window; the taskbar takes no keyboard input.
+focused window; the taskbar takes no keyboard input. The shell is handed each
+decoded event beside the validated record it came from, so the session reads
+a key's physical key where it takes the secure attention key, before any seat
+holder sees it, and a focused application receives the record whole.
 
 A `ModifiersChanged` record decodes to `InputEvent::ModifiersChanged` and
 always reaches the window-manager router, whatever the pointer is over: it
@@ -196,6 +219,7 @@ modifier never reaches a console as input.
 [`KeyValue`]: ../../tairix_abi/input/enum.KeyValue.html
 [`NamedKeyCode`]: ../../tairix_abi/input/enum.NamedKeyCode.html
 [`Modifiers`]: ../../tairix_abi/input/struct.Modifiers.html
+[`PhysicalKey`]: ../../tairix_abi/input/struct.PhysicalKey.html
 [`PointerInput::WIRE_LEN`]: ../../tairix_abi/input/enum.PointerInput.html#associatedconstant.WIRE_LEN
 [`PointerInput::from_bytes`]: ../../tairix_abi/input/enum.PointerInput.html#method.from_bytes
 [`PointerInput::from_device_event`]: ../../tairix_abi/input/enum.PointerInput.html#method.from_device_event

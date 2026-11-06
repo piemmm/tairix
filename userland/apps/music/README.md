@@ -27,8 +27,11 @@ player never parses a byte of either.
   entry point (`view`), and the renderers (`paint`).
 * **Playback** is `tairix-player`'s engine on a thread of its own, told what
   the listener asked and read back through the status it posts.
-* **A worker** reads each track's tags and decodes its cover, lists the
-  output devices and saves the listener's settings, so the window never waits.
+* **Three workers**, so the window never waits: one reads each track's tags,
+  one decodes the cover heard, and one lists the output devices and saves the
+  listener's settings. A track's tags and its cover are a stranger's bytes,
+  each read on a worker of its own, so a hostile file holds up neither the
+  other nor the player's settings and device list.
 
 The seek slider seeks once, where it settles; the volume slider sets the
 stream's level as it moves and saves it where it settles; the meters repaint

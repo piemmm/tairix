@@ -6,11 +6,16 @@
 # Help/ documents, through the secured VFS — the image attach itself asks
 # the caller for exactly that. A private image mount needs nothing more,
 # and the mount table comes from the ungated sysinfo-v1 queries.
+# CAP_FS_MOUNT is the authority the kernel's volume_replay path asks of an
+# answer for a volume's held writes from anywhere but the seat, and
+# re-checks on every call. It gates nothing else this tool asks: its attach
+# is always private, and the kernel binds an image's target short of it,
+# under its owner's rules, whoever runs the tool.
 id = "os.tairix.mount"
 name = "mount"
 title = "Mount"
 version = "0.1.0"
 kind = "command"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_FS_MOUNT"]
 # This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
 library-icon = "mount.png"

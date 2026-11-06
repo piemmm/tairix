@@ -186,16 +186,13 @@ delivered (`plans/POINTING.md` PO9).
 `lib/virtio_input`'s `VirtioKeyboardConsole` is the keyboard producer half: it
 turns the `Key` `InputEvent` edges `poll` decodes (whose `code` is the raw
 `evdev` keycode) into the `tairix_abi::input::KeyInput` records a driver injects
-through the `key_inject` syscall. It tracks the held modifiers (each of the
-eight modifier keys independently, collapsing the left/right pairs) and the
-caps-/num-lock toggles, resolves each printable or named key edge into the
-`Key` a US keyboard layout produces, and builds the record through the shared
-`tairix_keymap::key_input` map — the **one** `Key`→record definition the
-`lib/hid` USB console producer reaches too (`AGENTS.md` §2.2). The
-`evdev`-keycode→`Key` table is `evdev`-specific (a USB HID keyboard decodes HID
-usages into the same `Key` vocabulary), so it lives here; everything is
-allocation-free and fail-closed — an unknown keycode or a non-key event
-produces no record rather than guessing (`AGENTS.md` §2.9).
+through the `key_inject` syscall. Its one table names each keycode's physical
+key — the HID usage a USB keyboard reports for the same key — and the edge is
+resolved by `tairix_input::KeyboardState`, the modifiers, locks and US layout
+the `lib/hid` USB console producer runs too, then built through the shared
+`tairix_keymap::key_record` carrying that physical key (`AGENTS.md` §2.2).
+Everything is allocation-free and fail-closed — an unknown keycode or a
+non-key event produces no record rather than guessing (`AGENTS.md` §2.9).
 
 #### The autoloaded driver binary (`tairix-drv-input-virtio-kbd`)
 

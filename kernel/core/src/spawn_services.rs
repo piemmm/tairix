@@ -46,6 +46,8 @@
 //! definition a manually-assembled boot (a QEMU integration kernel) shares,
 //! so the launch path is wired identically everywhere.
 
+use alloc::boxed::Box;
+
 use tairix_arch_api::CrossCpuTlbShootdown;
 use tairix_kernel_mem::FrameAllocator;
 use tairix_kernel_sched_api::{CpuId, SchedulerArch};
@@ -59,6 +61,7 @@ use crate::bootinfo::KernelArch;
 use crate::fs::FilesystemService;
 use crate::peerwatch::PeerWatch;
 use crate::procwait::ProcessWait;
+use crate::random::RandomReserve;
 use crate::spawn::ArchImageBuilder;
 
 /// The architecture-dependent operations the child loading body needs,
@@ -168,6 +171,7 @@ pub struct SpawnServices {
     process_wait: &'static (dyn ProcessWait + 'static),
     image_builder: &'static (dyn ArchImageBuilder + 'static),
     runtime: &'static (dyn SpawnRuntime + 'static),
+    rng: &'static RwLock<Box<dyn RandomReserve + Send + Sync>>,
 }
 
 impl SpawnServices {
@@ -198,6 +202,8 @@ impl SpawnServices {
     ///   child's isolated address space from the verified `rxe`.
     /// * `runtime` — the type-erased [`SpawnRuntime`] the body reads the
     ///   live CPU / tick / nanoseconds from.
+    /// * `rng` — the kernel's CSPRNG reserve each child's stack canary is
+    ///   drawn from.
     // Mirrors `KernelSpawnCtx::new`: the same distinct kernel-state handles
     // threaded explicitly, not a one-use wrapper type.
     #[must_use]
@@ -214,6 +220,7 @@ impl SpawnServices {
         process_wait: &'static (dyn ProcessWait + 'static),
         image_builder: &'static (dyn ArchImageBuilder + 'static),
         runtime: &'static (dyn SpawnRuntime + 'static),
+        rng: &'static RwLock<Box<dyn RandomReserve + Send + Sync>>,
     ) -> Self {
         Self {
             frames,
@@ -227,7 +234,15 @@ impl SpawnServices {
             process_wait,
             image_builder,
             runtime,
+            rng,
         }
+    }
+
+    /// A fresh stack-canary seed for the child being built, or `None` while
+    /// the reserve cannot serve one, which refuses the child.
+    #[must_use]
+    pub fn canary(&self) -> Option<u64> {
+        crate::random::draw_canary(self.rng)
     }
 
     /// The kernel's live physical-frame allocator.
@@ -372,6 +387,7 @@ pub fn install_over<A: KernelArch + 'static>(
     peer_watch: &'static PeerWatch,
     process_wait: &'static (dyn ProcessWait + 'static),
     image_builder: &'static (dyn ArchImageBuilder + 'static),
+    rng: &'static RwLock<Box<dyn RandomReserve + Send + Sync>>,
 ) -> &'static SpawnServices {
     let runtime: &'static (dyn SpawnRuntime + 'static) =
         crate::forever(alloc::boxed::Box::new(ArchSpawnRuntime::new(arch)));
@@ -388,6 +404,7 @@ pub fn install_over<A: KernelArch + 'static>(
             process_wait,
             image_builder,
             runtime,
+            rng,
         )));
     // Set-once: publish this bundle only if none is installed yet, then
     // return whichever bundle is live (this one, or an earlier winner).
@@ -493,7 +510,20 @@ mod tests {
             &NULL_PROCESS_WAIT,
             builder,
             runtime,
+            crate::random::leaked_unseeded_reserve(),
         )))
+    }
+
+    /// A bundle over a reserve that cannot serve draws no canary, which
+    /// refuses the child rather than build it under a value anyone could know.
+    #[test]
+    fn a_bundle_over_an_unseeded_reserve_draws_no_canary() {
+        let runtime: &'static FixtureRuntime = crate::forever(Box::new(FixtureRuntime {
+            cpu: 0,
+            ticks: 0,
+            ns: 0,
+        }));
+        assert_eq!(leak_services(runtime).canary(), None);
     }
 
     #[test]

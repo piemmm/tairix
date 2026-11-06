@@ -48,6 +48,7 @@
 //! `wants_read` going false is the back-pressure that fills the pipe and
 //! blocks the worker.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::{Errno, FieldValue};
@@ -85,6 +86,31 @@ pub struct SessionDescriptors {
     pub write_fd: u32,
 }
 
+/// The owner's side of a region it shares with its worker: the output a
+/// parser sandbox writes there, for the owner to read with no copy through
+/// the pipes.
+///
+/// It is read only by copying out of it. The worker may be writing it, so
+/// nothing in it is believed, or branched on, until it is in the owner's own
+/// memory.
+pub trait Share: Send + Sync {
+    /// The region's length in bytes.
+    fn byte_len(&self) -> usize;
+
+    /// Copy the bytes at `at` into `out`, answering whether `at..at +
+    /// out.len()` lies within the region; nothing is copied where it does not.
+    fn copy_out(&self, at: usize, out: &mut [u8]) -> bool;
+}
+
+/// The worker's side of the region its owner shares with it.
+pub trait ShareWrite {
+    /// The region's length in bytes.
+    fn byte_len(&self) -> usize;
+
+    /// Run `write` over the region's bytes, answering what it answers.
+    fn write_with(&mut self, write: &mut dyn FnMut(&mut [u8]) -> bool) -> bool;
+}
+
 /// The transport one session runs over.
 ///
 /// Deliberately **not** [`crate::proto::Channel`]: that contract is
@@ -120,6 +146,11 @@ pub trait SessionTransport: Sized {
     /// The owner's descriptor numbers for the two directions, or `None` for
     /// an in-process fake that occupies no descriptor.
     fn descriptors(&self) -> Option<SessionDescriptors>;
+
+    /// The region shared with this transport's worker, if it was handed one.
+    fn share(&self) -> Option<&Arc<dyn Share>> {
+        None
+    }
 
     /// Close the transport and reap the worker, reporting its exit code
     /// when one is known.
@@ -364,6 +395,13 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
     #[must_use]
     pub fn descriptors(&self) -> Option<SessionDescriptors> {
         self.transport.as_ref()?.descriptors()
+    }
+
+    /// The region shared with the worker, or `None` for a worker handed none
+    /// and for a contained session.
+    #[must_use]
+    pub fn share(&self) -> Option<&Arc<dyn Share>> {
+        self.transport.as_ref()?.share()
     }
 
     /// Queue one payload for the worker.

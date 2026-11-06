@@ -121,8 +121,10 @@ edit replayed over it — so a favourite added shows at once.
 (`plans/SYMLINKS.md` S5) — is a symbolic link the session creates in the
 user's own `Desktop` folder under its own identity. The desktop owns the
 naming, because it owns the folder: `Desktop::shortcut_to` takes the entry's
-**display name** as the link name and its `BundlePath` as the target, stored
-verbatim.
+**display name** as the link name and its `BundlePath` as the target, spelled
+from the root it names (`System:/Applications/chess.app`): the `Desktop` folder
+is on the root volume, whose links may not cross into `/System`, so the kernel
+answers such a target `CrossVolume` and the desktop resolves it itself.
 
 - The target is the bundle **directory**, which is what makes the shortcut
   read as an application: `lib/browse` decides bundle-ness from the target's
@@ -136,8 +138,9 @@ verbatim.
   refusal it is. Picking a free name instead would silently make a second,
   differently-named shortcut for a user who already has one, off a listing
   that may already be stale.
-- The create runs target-first on the session's file worker, like the
-  new-folder create and a document opened from the desktop, so a slow or
+- The create runs target-first on the session's reader for the volume it
+  reaches, like the new-folder create and a document opened from the desktop,
+  so a slow or
   failing disk never stalls the compositing loop; its answer settles through
   the same `settle_desktop_create` tail the new-folder create uses, so both
   state a refusal identically and both show the fresh name the same way:
@@ -337,7 +340,7 @@ machinery: they are the shared two-tier artwork layer (`lib/icon`'s
 `DesktopShell` owns exactly one of each for the seat (`AGENTS.md` §2.2).
 
 - `DesktopShell::set_artwork_resolver(resolver)` installs the live
-  `ArtworkResolver` — on a running system the desktop's icon-decoder thread
+  `ArtworkResolver` — on a running system the desktop's icon readers
   (below), or `InlineArtwork` over the VFS reader and the sandbox worker where
   the kernel granted no thread; in tests an inline pair of fakes. A shell that
   is never given one starts with a resolver that finds and decodes nothing, so
@@ -359,8 +362,8 @@ and one sandbox round trip — not one per frame.
 A read plus a sandbox round trip is far too much to spend inside a paint: a
 launcher opening on thirty applications used to pay it thirty times, on the
 serve loop, before its first pixel reached the screen. The decode therefore
-runs on the session's **icon-decoder thread**, and the paint that misses draws
-the built-in glyph for that frame.
+runs on the session's **icon readers**, and the paint that misses draws the
+built-in glyph for that frame.
 
 - The policy is `tairix_icon::ArtworkDesk`: what has been asked for, what the
   worker is producing, what has come back, and what has already been answered.
@@ -371,12 +374,33 @@ the built-in glyph for that frame.
   depend on `userland/gui/*`. The `Run` binary adds the runtime's futex mutex, a
   condition variable the worker parks on (never a spin), and the shared wake
   pipe the session's wait-set already watches.
-- The worker owns its **own** sandbox child, exactly as the wallpaper worker
-  does, so no sandbox handle ever crosses a thread. It decodes through
+- Each reader owns its **own** sandbox child, made on its first decode, as each
+  wallpaper preparer does, so no sandbox handle ever crosses a thread. Once the
+  pressure band leaves normal a reader with nothing to do ends its child
+  (`lanes::Crew::adopt_band`), so idle readers hold no worker's memory when the
+  machine is short of it. It decodes through
   `tairix_icon::render_artwork` — the same function `InlineArtwork` calls — so
   which thread ran it cannot change what it produced.
 - It nudges the session when its queue drains rather than after each icon, so a
   bring-up wanting thirty of them costs one repaint and they appear together.
+- **A reader per volume.** Each decode is routed by the file it reads through
+  `tairix_browse::lanes`, the policy the listings route by: one reader serves
+  a lane at a time and a spare starts whenever every reader is busy, so a
+  stuck volume stalls only its own pictures — a carried own picture or a menu
+  row's bundle may name any volume — and as many decodes run at once as the
+  machine's memory leaves room for (`Decodes`).
+- **A listed bundle is pictured from its own files.** Its picture is keyed by
+  the stamps of its manifest and icon file (`BundleVersion::Files`), read
+  before its decode. While it is shown those files are followed: a reader arms
+  a change wait on the manifest, `Resources/` and the icon before reading
+  them, a thread of its own parks on those waits, and a change has the bundle
+  read again (`ArtworkDesk::moved`), decoded only where its files differ — the
+  one definition the file manager follows its windows' bundles through
+  (`tairix_browse::follow`). A bundle a `cp` in a shell was still writing
+  therefore shows its own icon once its files are complete, and a refusal read
+  from it half-written never stands. Before each sweep the desktop, a carried
+  drag and every open pick ask for what they show, so a sweep lets go only of
+  the bundles, and withdraws only the thumbnails, nothing shows.
 - A **declined** answer stops a landing chasing its own tail. The artwork cache
   is budgeted, so it can be asked to hold more than it will; without a rule, a
   decode it refused to retain would be asked for again by the very repaint the
@@ -456,11 +480,13 @@ content-class artwork, and an application bundle the icon it carries in its own
 does. Each icon is a
 shared `lib/controls` `IconTile` — the picture over its name with no plate of
 its own, so the icons sit on the wallpaper rather than in a row of boxes, and
-only a hovered, selected, or focused icon paints anything behind itself. A
-selected icon is filled with the theme's accent at half opacity, its edge
-softened, so the wallpaper still reads through the mark. Its name is whole,
-over two lines when it needs them, and cut in its middle when even those are
-too few, so its extension always shows; its picture casts a small soft shadow,
+only a selected icon, or a folder lit as where a drag would drop, paints
+anything behind itself. A selected icon is filled with the theme's accent at
+half opacity, its edge softened, so the wallpaper still reads through the mark.
+Its name is the one a file-manager window shows — less the endings the file
+manager's settings hide, an application's `.app` by default — whole, over two
+lines when it needs them, and cut in its middle when even those are too few, so
+its end always shows; its picture casts a small soft shadow,
 and a thumbnail is outlined one pixel around its own bounds — the file
 manager's tile, exactly.
 
@@ -487,11 +513,25 @@ while the field stands. The places live in the session's private scope as a
 the same `launcher::RecordMemory` the launcher's record uses. Once a turn the
 desktop hands the memory its own changes and then takes the record the memory
 shows whenever it moved (`Desktop::keep_record`), so a store answer arriving
-meanwhile cannot undo a change just made. A drag over the bare desktop offers
-what it carries (`Desktop::offer_landing`); let go there — once the dragging
-application has been told the drop landed there — or a save dropped there, the
-files that arrive in the folder within `LANDING_WAIT_NS` stand where they were
-let go.
+meanwhile cannot undo a change just made. A drag over the desktop offers what
+it carries (`Desktop::offer_landing`). Let go there — once the dragging
+application has been told the drop landed there (`Desktop::expect_drop`) — the
+drop lands as that application steps it (`WindowRequest::DropLanding`,
+`Desktop::step_landing`): each item announced under the name it is written as
+stands where it was let go from the moment it is listed, those the drag showed
+as they were carried and every other on the free cell nearest the drop; one
+that replaced what had its name moves there, and one skipped, merged into a
+folder or failed moves nothing. A name the application did not announce is
+none of the drop's, however like one it is. While an item is written the
+artwork pictured from inside it is held (`ArtworkDesk::hold_under`), so a
+half-copied bundle is never decoded and kept refused, and the item is drawn
+meanwhile by the picture its drag carried (`IconRequest::standing_in`) until
+its own is read; the drop's end releases what it still held and reads again a
+folder no watch follows. There is no
+deadline: a landing ends only with its application's end, a fifth drop from
+one window displacing its oldest, or that window going. A save dropped on the
+bare desktop stands under the pointer under the exact name the session's own
+open made (`Desktop::expect_save`, `Desktop::saved`).
 
 **Pointer and keyboard.** A press hits an icon's **body** — its picture and
 its name's drawn lines (`render::entry_body`) — and the rest of its tile is
@@ -505,9 +545,11 @@ for as long as the seat holds the primary button
 (`SessionInputRouter::holds_primary`), in memory alone, and the release puts
 it down where it was let go (`Desktop::follow_press`, which first follows the
 motion a batch routes with the release) — onto the nearest free cell when
-*Align to grid* is on — with one change to the record. Motion drives hover
-feedback, a burst of it over the bare desktop routed as one outcome, and
-nothing under a carried icon lights. A secondary press opens the [pinboard's
+*Align to grid* is on — with one change to the record. A pointer over an icon
+changes nothing about it — no hover look, no tooltip, the arrow cursor
+throughout — so motion drives only a carry, a burst of it over the bare desktop
+routed as one outcome, and nothing under a carried icon lights. A secondary
+press opens the [pinboard's
 context menu](#the-pinboards-context-menu). While the desktop holds the
 keyboard, an arrow moves the selection to the nearest icon that way on the
 screen — icons stacked on one another met in the order they are drawn, and the
@@ -574,6 +616,14 @@ re-reads the folder or re-themes, and a new backdrop colour costs one
 repaint. `clock` says the region or the zone moved: the clocks are read again
 in the new ones at once, rather than at the next minute.
 
+The file manager's settings are the shell's (`DesktopShell::files`), but the
+endings they hide name the desktop's icons too, so the session hands them to
+`Desktop::hide_endings` at bring-up and with every publication that lands — a
+files apply from Settings among them. A change answers that the layer must be
+repainted whole, since any name may read differently; the icons are ordered
+again by the names shown, the selection staying on its icon, and every icon no
+one placed flows again.
+
 ### The clock and the zone store
 
 The session reads the zone store (`/System/Zoneinfo/zones.tzx`, `lib/tz`) once
@@ -634,8 +684,9 @@ the settings store stays free of the browser engine's dependency weight.
 
 `DesktopShell::present_desktop_area` repaints the layer **in place**, through
 `Compositor::repaint_desktop`, into the screen-sized buffer the compositor
-already holds: a hover, a moved selection, or a re-list repaints the desktop
-often, and a whole screen of pixels is not something to re-allocate per frame.
+already holds: a moved selection, a carried icon, or a re-list repaints the
+desktop often, and a whole screen of pixels is not something to re-allocate per
+frame.
 The layer is opaque and covers the screen. Its base is the wallpaper the
 embedder prepares and installs with `DesktopShell::set_wallpaper` (it holds the
 capability to read the user's chosen image and the sandbox that decodes it, and
@@ -678,7 +729,7 @@ colour neither ground has:
   holds a screen-sized copy of a picture nobody can see.
 
 Every rectangle of the layer paints through the same ground routine, so a cell
-repainted for a hover mid-dissolve matches its neighbours exactly. An arrived
+repainted for a selection mid-dissolve matches its neighbours exactly. An arrived
 fade costs one blit, exactly as it did before there was a fade at all, and arms
 no timer.
 
@@ -697,15 +748,16 @@ blur — felt as the pointer freezing for the best part of a second on a
 Raspberry Pi 4B.
 
 So the desktop's gestures report *where* they changed something instead of a
-"redraw" flag. `Desktop::set_focused`, `pointer_moved`, `pointer_left`, `press`,
-`context_press`, and `key` each take a `tairix_geometry::Region` damage sink and
-add the **rectangle** of every icon whose appearance changed — the icon
-that lost the hover and the one that took it, the old selection and the new, the
-selected icon whose Focus Ring appeared or disappeared, and the ground a carried
-icon left and the ground it covers. An `IconTile` draws strictly inside the
-rectangle its icon stands in, so that rectangle is the whole of repainting the
-icon; a gesture that changed nothing visible (a focus flip with nothing
-selected, motion within one icon) adds nothing and composes no frame at all.
+"redraw" flag. `Desktop::set_focused`, `press`, `follow_press`,
+`context_press`, `set_drop_target` and `key` each take a
+`tairix_geometry::Region` damage sink and add the **rectangle** of every icon
+whose appearance changed — the old selection and the new, the selected icon
+whose Focus Ring appeared or disappeared, the folder lit for a drop and the one
+it left, and the ground a carried icon left and the ground it covers. An
+`IconTile` draws strictly inside the rectangle its icon stands in, so that
+rectangle is the whole of repainting the icon; a gesture that changed nothing
+visible (a focus flip with nothing selected, any motion that carries no icon)
+adds nothing and composes no frame at all.
 
 `present_desktop_area` paints each of those rectangles under a narrowed surface
 clip and hands the same rectangle to `Desktop::render`, which skips every icon
@@ -811,6 +863,32 @@ The session remembers which sources have notified since it started, at most
 its own Settings application alone: which programs a user runs is theirs to
 see, not any application's to learn.
 
+## Writes a returned disk holds
+
+A disk put back while it still held writes the system could not give it is
+served read-only, those writes kept, when nothing proves it the disk they were
+made on ([Storage namespaces](../filesystem/drives.md) §8). For a removable
+disk the session asks its user — the one at the seat — whether to write them
+or discard them, in a question of the desktop's own
+(`userland/gui/session::held`); any other volume's are the mount authority's
+to answer for (`mount --replay-held`, `--discard-held`). One question per such
+volume, named by its catalog name, at most `HELD_QUESTIONS_MAX` at once
+counting the answers under way, and taking neither the keyboard nor the front.
+*Write* is the default; *Discard* destroys, so no stray key gives it. A
+question whose volume no longer awaits an answer comes down unanswered, and
+with no answer the volume stays read-only with its writes kept.
+
+One worker reads which volumes await an answer — at bring-up and as the mount
+table moves — and carries each answer to the kernel (`volume_replay`), which
+takes it from the process holding the seat only, and for a removable disk
+only. Both stay off the serve loop,
+since writing held writes is the medium's own I/O, and run in the order asked,
+so the read asked behind an answer sees what it did, and a volume is not asked
+about again until that read lands. An answer the kernel did not carry out is
+stated in a notice where the question's own fate does not say it — a disk that
+no longer matched, one gone first, a session no longer at the seat — and one
+still awaited, its volume busy, is simply asked again.
+
 ## Sound
 
 The session follows the audio service through two notices: `AudioCapture`,
@@ -818,7 +896,13 @@ whose count draws the recording indicator, and `AudioDevices`, which moves
 whenever a device or one of its controls does, whoever moved it. Each
 `AudioDevices` edge re-lists the devices on the session's sound worker
 (`sound::SoundSession` over `tairix_audio::stream::ControlQueue`, one round
-trip in flight), and the listing feeds the bar's volume signal and panel.
+trip in flight), and the listing feeds the bar's volume signal and panel. A
+change settled on the panel — a drag released, a key step, an unmute — is
+asked with `ControlQueue::ask_confirmed`; once the trip that carried it lists
+the default output sounding at that level, the session cues `VolumeFeedback`
+from its own `PostedCues`, so the user hears the new level without the loop
+waiting for the sound. The controls it puts back as it claims the room, and a
+change made anywhere else, are not heard.
 
 **The session remembers its user's controls**, in the `audio.*` keys of its
 published settings document (`tairix_wallpaper::SoundControls`): each
@@ -1182,8 +1266,10 @@ would, and the loop keeps serving, so an application can finish through the
 window server it still has; a window opened meanwhile is asked in turn. The
 session leaves once no top-level window is open or `SESSION_CLOSE_GRACE`
 (5 s) has passed — the grace tightens the loop's park, so it is a deadline,
-not a poll — then fades out and exits, and the kernel ends whatever did not
-close. A fault exit stays immediate.
+not a poll — and no screen recording is still being finished, which the
+recording's own deadlines bound, so its recorder is never ended midway
+through its file. It then fades out and exits, and the kernel ends whatever
+did not close. A fault exit stays immediate.
 
 ## The Switchboard tray feed and hang detection
 
@@ -1515,7 +1601,8 @@ conclusion is *accepted*.
   it) — the same rule `pump` applies live, from the one shared predicate. A
   carried drag's report and a save's offer are numbered, so the newest of a
   run wins too; a save offer's end, which carries where it was dropped,
-  withdraws the offers still held and an earlier end that only left.
+  withdraws the offers still held and an earlier end that only left, a drop's
+  end an earlier drop's too.
   Everything else — keys, buttons, the pick conclusion — is owed in full.
 - **Bounded, and shedding only what can be shed.** `HOLD_BACK_CAPACITY` (64
   per window) is what stops an app that never drains from making the desktop
@@ -1524,12 +1611,14 @@ conclusion is *accepted*.
   end of the press a window holds (its primary release, or the cancel that
   took it): a held press is shed together with its end, so an app learns of
   neither rather than holding a press for ever. That is total rather than a
-  preference — folding leaves at most six state edges, one pick conclusion,
-  one authorisation's, one tool-window move's end, one end of a press already
-  delivered (a window holds one press at a time) and one save offer's end,
-  each a later one superseding (one pick runs at a time, and one awaiting its
-  drop's answer starts no drag), so an evictable input event — a drag's
-  report and a save's offer among them — always exists.
+  preference — folding leaves at most six state edges, one pick conclusion (a
+  window has one pick at a time), one authorisation's, one tool-window move's
+  end, one end of a press already delivered (a window holds one press at a
+  time), one save offer's end that only left, a later one superseding it, and
+  one drop's, which only a later drop takes, since a window has every event
+  held before a drag's offer by the time it can answer it — so an evictable
+  input event — a drag's report and a save's offer among them — always
+  exists.
 - **A dead owner owes nothing.** A send that answers `NotFound` discards
   everything held for that owner and tears its windows down, exactly as a
   refused direct send does; a reap does the same. Any other refusal no wait
@@ -1879,26 +1968,57 @@ for what they do: a *click* on a resident slot on `APP_BAR_SLOT_SHOWN`, and a
 *screendump* whose pixels a later frame is compared against on
 `APP_BAR_SETTLED`.
 
+`PINBOARD_SETTLED` ("desktop icons drawn as they will stay") is the same
+statement for the desktop's icons, given again for each arrangement of them,
+since a file arriving in the folder brings a new icon whose picture lands a
+frame or more behind it — a thumbnail later still. It is given on a present
+of a revealed desktop whose folder has been read with no listing on its way,
+once every icon it shows is drawn from the tier it will keep or from the
+glyph every tier refused (`ArtworkCache::settled`), and the walk over the
+icons runs only while a report is owed. The capture vertical keys its
+screendumps and chords on it, so no capture is compared against a frame an
+icon's picture would still change.
+
 ### The chooser is a dialog
 
 The trusted picker wears the window manager's frame like anything else on
-screen, so the user can see whose window it is and move it by its title bar.
-An open or a folder pick is a fixed-size window, because the shared browser
-view renders at one geometry, which the user may close; a save is a dialog of
-the requester's window, sized to what it shows, which *Cancel* or `Escape`
-dismisses.
+screen, so the user can see whose window it is and move it by its title bar,
+and its title names the application it asks for, as the window channel
+attests it, before what it asks. An open or a folder pick is a fixed-size
+window, because the shared browser view renders at one geometry, which the
+user may close; a save is a dialog of the requester's window, sized to what it
+shows, which *Cancel* or `Escape` dismisses.
 `PICKER_TITLE`'s contract always said the title showed "in the window chrome";
 it now does.
 
+Picks are concurrent, as on macOS. Each is named by a `PickId` minted from a
+counter and never reused, and every message about it names it — the open
+carried out for it, the menu its panel opens, the drag its icon starts, the
+watch on its folder — so an answer for a pick that has closed reaches no later
+one, and a file made for it is taken back. A window has one pick at a time, an
+application at most `PICK_MAX_OPEN` and one folder pick until that pick's files
+are taken (`LimitExceeded`), and the desktop shows at most `PICKS_MAX` together
+(`Busy`); each is a containment bound that fails closed, records nothing and is
+audited (`PICK_REFUSED`). An open or a folder pick stands in the lowest
+cascade slot free from `PICKER_ORIGIN` (`picker_origin`), kept on the work
+area. A pick takes the keyboard as it opens only when its application holds
+the front — the rule an alert follows, the activation spent — and otherwise
+opens beneath the window the user is in; its clicks arm `ALERT_ARM_NS` after it
+is first on screen, so a click aimed at what was there before chooses nothing.
+
 A pick is modal to the window that asked and nothing else. It holds that
-window as an owner-modal dialog does (`SessionWindows::hold_for_pick`), and it
-holds the seat only while it has the keyboard (`seat_held`), so another
-application's windows, menus and drags work while it is up, and the desktop's
-own menus and program library open over it even then (`seat_modal`), taking the
-keyboard while they are up and leaving it with the picker. When the pick ends
-the keyboard goes back to the requester only if the picker had it. While the
-picker is on screen it is a trusted surface (`trusted_up`), so the desktop layer
-surface stays hidden.
+window as an owner-modal dialog does (`SessionWindows::hold_for_pick`, one hold
+per pick), and a picker holds the seat only while it has the keyboard
+(`seat_held`), so another application's windows, menus and drags work while it
+is up — and that application may ask for a pick of its own, which only the lock
+or a system prompt refuses (`SeatBusy`) — and the desktop's own menus and
+program library open over it even then (`seat_modal`), taking the keyboard
+while they are up and leaving it with the picker. When a pick ends the keyboard
+goes back to the window that asked only if its picker had it. While any pick is
+on screen it is a trusted surface (`trusted_up`), so the desktop layer surface
+stays hidden until the last one closes. A picker the user cannot see gives its
+pixels back under memory pressure and is painted whole from its state when it
+shows again.
 
 That makes the session the first owner of a *decorated* window it paints
 itself, so `windows::window_control_event` has two halves. The
@@ -1920,23 +2040,33 @@ moved — the bar and the items it slid — is repainted, into the buffer the
 picker's window already holds. A navigation step repaints the whole window into
 that same buffer, since a step never changes the window's size.
 
+Its pictures are the desktop's own artwork. A decode that lands repaints only
+the rows or tiles drawn through it, found by the walk the listing's paint draws
+by (`render::manager_art`), and before the session withdraws the thumbnails and
+lets go of the follows nothing asked about, each pick asks for every picture it
+shows through that same walk (`SessionPicker::want_shown_artwork`): a thumbnail
+a picker still waits for is not withdrawn to be decoded again, and a bundle it
+lists stays followed.
+
 ### A folder pick
 
 A `PickPurpose::Folder` pick is titled `FOLDER_TITLE` and carries a band of two
 answers under the listing: *Open* chooses the folder shown, and `Enter` goes
 into a selected folder or, with a file or nothing selected, chooses the one
 shown. A file row chooses nothing. The application never holds the folder: the
-session's file worker lists it and keeps the regular files whose content type
-the requester's signed manifest associates (`picker::folder_selection`, in the
-order the picker lists them, never following a link), opens each read-only
-without following a link, and the serve loop delegates each to the requester
-before concluding with `FolderPicked` — how many were delegated and how many
-were left out, the bound (`WINDOW_FOLDER_PICK_MAX`, the most delegations one
-grantor may hold pending to one recipient) reached or a file refused. The
-requester takes them one at a time (`TakePickedFile`), each with its name; the
-window engine holds the untaken ones and refuses a further pick on that window
-until they are taken, since a delegation cannot be withdrawn. A folder that
-cannot be read keeps the picker up stating why.
+session's reader for its volume lists it and keeps the regular files whose
+content type the requester's signed manifest associates
+(`picker::folder_selection`, in the order the picker lists them, never
+following a link), opens each read-only without following a link, and the
+serve loop delegates each to the requester before concluding with
+`FolderPicked` — how many were delegated and how many were left out, the bound
+(`WINDOW_FOLDER_PICK_MAX`, the most delegations one grantor may hold pending to
+one recipient less one for each other pick the application may have open)
+reached or a file refused. The requester takes them one at a time
+(`TakePickedFile`), each with its name; the window engine holds the untaken
+ones and refuses a further pick on that window, and another folder pick of
+that application, until they are taken, since a delegation cannot be
+withdrawn. A folder that cannot be read keeps the picker up stating why.
 
 ### And the trusted picker's own witness
 
@@ -1958,8 +2088,10 @@ first announcement alone would otherwise act on a stale one.
 
 Two readers depend on it, as with its siblings. A user diagnosing a pick that
 never appeared can tell "never drawn" from "never asked". And the
-picker-delegation QEMU vertical gates its pick-click on it: any earlier gate
-races the frame the rows are in.
+picker-delegation QEMU vertical gates its pick-click on it, and the
+concurrent-pickers vertical its first choice on the second announcement, so
+both pickers are on screen before either concludes: any earlier gate races the
+frame the rows are in.
 
 ### And the launcher's own witness
 
@@ -2209,8 +2341,9 @@ region of its own, so none of a saver's code runs in the session:
   carrying which saver asked, so none reaches a saver started after it: font
   calls relayed to the font service on a thread of their own; a picture to
   keep written by the saver file worker into `Home/Pictures/<saver's title>/`
-  (`saver::keep`), to a hidden scratch file first and then renamed onto a name
-  no picture holds, named in the user's own zone, at most one every
+  (`keep::keep_picture`), to a hidden scratch file first and then renamed onto
+  a name no picture holds, a scratch file an earlier keep left there named for
+  its saver first, named in the user's own zone, at most one every
   `SAVER_KEEP_SPACING_NS` and `SAVER_KEEPS_MAX` a run, any more answered as
   not kept; a slide prepared by the
   wallpaper preparers at the screen's size; and the machine's readings from
@@ -2376,6 +2509,7 @@ prompt names the component asking:
 | `ShowAccounts` | `users -l`, captured | wants to read the accounts and groups on this computer |
 | `SetClock` | `datetime.app`, started and left running | wants to change the date, time and time zone of this computer |
 | `Eject` (the file manager's) | `unmount -- ROOT`, the volume's durable root `id::<volume-id>/` | wants to eject “*name*”, the catalog name asked with it |
+| `Retitle` (the file manager's) | `label -- ROOT TITLE`, the durable root and the title, empty to clear it | wants to rename “*name*” to “*title*”, the title shown as a stranger's text, or to clear the title of “*name*” |
 
 Words not in the program's form are refused before the prompt comes up: an
 account change names one well-formed account — the account its program acts
@@ -2383,7 +2517,9 @@ on — so the prompt never says one thing while the task does another. An eject
 names one volume's root, in its canonical spelling, and one well-formed catalog
 name: `unmount` is handed only the root, so a volume put under that catalog
 name meanwhile is never the one ejected, and the name, which only the file
-manager may supply, tells the prompt's reader which volume it is. The request
+manager may supply, tells the prompt's reader which volume it is. A retitle is
+checked the same way, its title as a `VolumeTitle`, and `label` is handed the
+root and the title alone. The request
 names a window of the asker's, or — for an application with no window to hold
 the question, as the file manager's icon-bar slot often is — its icon-bar slot
 (`AuthoriseFor`): the window engine holds one authorisation per window and one
@@ -2393,6 +2529,25 @@ with no window named, queued by the prompt as it ends and delivered before the
 loop next parks; a captured listing is held for the asker's
 `TakeAuthorisedOutput`. A window that closes, or an application that exits,
 takes its question down unanswered.
+
+### Asked for a recording's sound
+
+A recording that hears the microphone or the desktop's sound needs
+`CAP_AUDIO_CAPTURE`, which is in no session's baseline and in every
+administrator's administrative set. The session first asks
+the broker, on the elevation worker, whether the signed-in account may allow
+the recorder (`ElevateRequest::Authorisers` for `RECORDER_RUN_PATH`); one that
+may records with a recorder of its own. One that may not is put to this
+prompt, the desktop asking as *Screen Recording* for the sound it would hear
+(`capture::administrator_request`), and what an allowed request runs is the
+wired launch (`Elevation::Wired`, `ElevateRequest::LaunchWired`): the broker
+starts the recorder as the administrator in this session and hands the
+session its ends of the recorder's pipes, which the recording speaks its
+protocol over (`Recording::authorised`). The end is owed to the recording
+(`Asker::Recording`) with the recorder the broker started; a cancel starts
+nothing and is said. An answer the prompt no longer waits on — its question
+taken down while the broker started the recorder — is let go: its pipes are
+redeemed only to be closed, which ends the recorder.
 
 ## Routing one seat's input to the taskbar and the window manager
 
@@ -2552,21 +2707,31 @@ into the compositor's own content surface and returns the bounding rectangle
 of the pixels whose value actually differs, and only that rectangle is marked
 dirty. A repaint that changes nothing marks nothing.
 
-The conversion runs once a desktop frame, never once a present. A `Present`
-is answered as the window engine records it — the window's newest frame, with
-every change since the last one shown — and `WindowServer::latch` converts
-each window's newest frame through `FrameShow` immediately before the
-compositor composes, inside the frame pacer's own admission; a pending frame
-counts as damage there, so the pacer admits or holds a frame for it exactly as
-for the session's own changes. An application presenting faster than the
-desktop draws therefore costs the session one conversion a frame, and no
-application's present waits on the desktop's frame work. A frame the
-compositor cannot show is recorded (`FRAME_REFUSED`, 20035) once until the
-window next shows one, and is tried again with the next frame the desktop
-composes, never with one of its own: the window keeps its pixels meanwhile, and
-a later present carries the refused frame's change with its own. A background
-or darkened session latches nothing until it draws again; its applications are
-answered regardless.
+The conversion runs once a desktop frame, never once a present. The window
+engine records a `Present` as the window's newest frame, with every change
+since the last one shown, and `WindowServer::latch` converts each window's
+newest frame through `FrameShow` immediately before the compositor composes,
+inside the frame pacer's own admission; a pending frame counts as damage there,
+so the pacer admits or holds a frame for it exactly as for the session's own
+changes. A present to a window holding no unshown frame is answered at once;
+one replacing a frame not yet shown is held (`Served::Withheld`) until that
+frame is shown or refused, or a resize, a release or a close supersedes it. A
+window holds at most one such answer — a present replacing a held one answers
+the older at once — so an application drawing faster than the desktop shows
+frames draws at most two a desktop frame, the session converts one, and the
+desktop's frame work never waits on a present. Answers queue in an
+outbox the engine reserves at window create, so a latch never allocates, and
+the loop sends them (`WindowServer::send_answers`) after each latch, before
+the composite, after each served request and before every park. Each lands in
+the room its call was posted with, so none waits for kernel memory, and an
+exited client's are dropped unsent. A frame the compositor cannot show
+is recorded (`FRAME_REFUSED`, 20035) once until the window next shows one, and
+is tried again with the next frame the desktop composes, never with one of its
+own: the window keeps its pixels meanwhile, and a later present carries the
+refused frame's change with its own. A darkened session latches nothing until
+it draws again, and while no frame can reach the screen the presents held are
+answered at the screen's pace (see
+[one composite per frame deadline](#one-composite-per-frame-deadline)).
 
 The comparison is exact — a pixel reported unchanged carries the
 byte-identical value it already had — and it rides a loop that already reads
@@ -2631,6 +2796,15 @@ the loop composite and present once a deadline arrives.
   pixel, so the two cannot disagree about whether a frame is owed. A clock
   that jumped behind the last frame admits rather than freezing the screen for
   the length of the jump.
+- **A dark screen still paces the applications.** A present replacing a frame
+  not yet shown is answered once the latch shows it, so while no frame can
+  reach the screen — the saver dark or drawing on the display itself, the lock
+  not yet covering, no display held — no latch would answer it. The pacer's
+  dark half answers what is held once a period instead
+  (`FramePacer::answers_due`, `WindowServer::release_answers`), leaving the
+  frames for the screen's return; its one shot is armed only while something
+  is held, and folded past the background override, so an application is held
+  to the same pace with the screen off as on and never stalls behind it.
 
 The fade out taken on the way to a log-out or a user switch is *not* paced: it
 runs on its own timed park with the seat still held, because it is the last
@@ -2655,9 +2829,15 @@ pointer from that window, which therefore never sees the release it lent.
   the pressed item's name, the ending its listing hides of it and the filetype
   its volume records, the count, and the class picture of each of the first
   four items with where its picture stood in the window, from the press — an
-  asset id the desktop looks up, never a path. Bundle icons, thumbnails,
-  folder content cards and RISC OS sprites would need a path or the
-  application's pixels to cross, so the class picture stands in for them.
+  asset id the desktop looks up. An application bundle or a RISC OS
+  application also carries its own picture (`DragOwnIcon`), a shortcut to one
+  by the path it resolves to: its absolute path, at most `ICON_PATH_MAX` bytes
+  and refused unless its last component names what it says, and the version
+  its listing named. The session reads that picture under its own identity —
+  the icon the bundle's signed manifest declares, the application's own
+  sprite — and nothing of it returns to the application, as for an *Open With*
+  row's bundle. Thumbnails and folder content cards stay the class picture: a
+  whole file's decode for a picture shown a second, and one no path names.
   Each motion asks the
   session router which place the pointer is over (`drag_place`, which
   allocates nothing): an icon-bar slot, one of the dragging application's
@@ -2679,9 +2859,14 @@ pointer from that window, which therefore never sees the release it lent.
   `DragCopy` or `DragMove` cursor, or the plain arrow. Arriving somewhere new
   shows the arrow until that place is answered, as does a change of `Shift`,
   and an answer to a report made before either is not shown. Over the desktop the folder's path
-  is held for the report that named it (`QueryDragSpot`); it is the only path
-  that crosses, and it is the session's own, which confers nothing. The folder
-  icon a drop would land in is lit while the answer accepts it.
+  is held for every report of the place the pointer is on (`QueryDragSpot`),
+  so a report a later one superseded there still reads it and the application
+  answers it rather than refusing; the folder resolved again from the
+  desktop's listing — re-sorted, or settled in a layout a settings change
+  made — owes no report, since the application is told the same folder. It is
+  the only path that crosses, and it is the session's own, which confers
+  nothing. The folder icon a drop would land in is lit while the answer
+  accepts it.
 - **The drop does what the pointer showed.** The press coming up concludes
   with a `DropSite` — the application slot, a window and a point in it, or the
   desktop folder, with the operation shown — and the application performs it
@@ -2703,8 +2888,11 @@ pointer from that window, which therefore never sees the release it lent.
   rests. Each card is a window of its own that nothing can be dropped on,
   raised above everything, painted once and then only moved; it is painted
   again only when its artwork lands, and laid out afresh when the fonts, the
-  theme or the scale change. Reduced motion places the stack at once, and a
-  stack at rest asks for no frame.
+  theme or the scale change. A card asks for the item's own picture where it
+  carries one (`IconRequest::from_carried`), and before the session withdraws
+  the thumbnails nothing asked for, the stack asks for every card's
+  (`want_drag_artwork`), so a sprite still being produced is kept. Reduced
+  motion places the stack at once, and a stack at rest asks for no frame.
 - **Every way out is an answer.** Another button or `Escape` ends it on
   nothing; the source window closing ends it with no one to tell; the screen
   locking ends it on nothing rather than leaving it to resume past the
@@ -2762,10 +2950,23 @@ carries that to the desk, where `ListingDesk::refresh` stamps the request and a
 read that began before the latest stamp is dropped and the folder read anew;
 asking again for a folder whose read is merely under way (`take`) joins it.
 
-- **Two listing consumers, named rather than counted.** The icon column and the
-  trusted file picker each have their own slot, and the worker serves them
-  round-robin, so a picker walking a deep tree can never hold the icon column's
-  re-list behind it.
+- **Listing consumers, named rather than counted.** The icon column and each
+  pick (`ListingClient::Picker(PickId)`) have a slot of their own, and the
+  readers serve them round-robin, so a picker walking a deep tree can never
+  hold the icon column's re-list, or another pick's, behind it. A pick's
+  folder watch reports under a wait-set token of its own (`PICKER_WATCH_BASE`
+  plus its number, clear of every fixed token by a compile-time assertion), so
+  a drain is asked for the pick it names.
+- **A reader per volume.** The listings, watch drains, folder probes and file
+  calls are routed by the volume they reach through `lib/browse`'s lane policy
+  (`tairix_browse::lanes`, the file manager's own): one reader serves a lane at
+  a time and a spare starts whenever every reader is busy, so a hung volume
+  stalls only the picks and the icon column's reads on it. The icon artwork's
+  readers route the same way, by the file each decode reads, and an eject holds
+  its volume's lane off them (`lanes::hold`): from the moment the hold waits no
+  icon reader takes work there, and the eject is made once the decode under way
+  there has ended. The routes are read from the namespace's view bindings, and
+  again whenever the mount table moves.
 - **The icon column's folder cues ride the same worker.** Its folders are
   probed through the shared `Probes` desk, after the listings and watch drains
   a user is waiting on. The serve loop resolves the shown cues
@@ -2783,13 +2984,14 @@ asking again for a folder whose read is merely under way (`take`) joins it.
   *else* is in flight the listing area says so (`Listing…`), because the items on
   screen belong to a directory the user has already asked to leave; a re-read of
   what is already shown keeps its items, so a re-list cannot flicker.
-- **One lock, two desks.** The listing desk and the `Watches` desk the listings'
-  watches are held in share the worker's one lock. A consumer taking a listing
+- **One lock, every desk.** The listing desk, the `Watches` desk the listings'
+  watches are held in, the probes and the file calls share the readers' one
+  lock. A consumer taking a listing
   is what commits the watch armed with it, joining its `DirWatch` member to the
   session's wait-set as it does (`Took::commit`); a consumer dropped — a closed
   pick — lets its watch go, and the watch withdraws its member before its
-  descriptor closes. With no listing worker the session reads and drains on its
-  own task instead, so the desktop still follows its folders.
+  descriptor closes. With no reader the session reads and drains on its own
+  task instead, so the desktop still follows its folders.
 - **Each wallpaper preparer owns its own sandbox.** The icon rasteriser keeps
   the loop's own sandbox handle, untouched and deliberately not `Send`; the
   session runs one preparer thread per online CPU, and each creates its own
@@ -2998,7 +3200,8 @@ desktop one framed `tairix_abi::input::PointerInput` record at a time. Each
 the `lib/input` `InputEvent` the window manager and taskbar route: a `MovedBy`
 record's relative displacement is accumulated — saturating, clamped to the
 screen rectangle the source is constructed with (an empty screen is refused
-at construction), starting at the screen centre — into an absolute
+at construction), starting at the screen centre, where the session places the
+seat and draws the cursor from the first frame — into an absolute
 `PointerMoved`, and a `Pressed` / `Released` record becomes a
 `PointerPressed` / `PointerReleased` carrying the resolved `PointerButton`.
 The user's pointer policy is applied here too, so nothing above sees the
@@ -3072,7 +3275,8 @@ input.
 
 It is also the one place a held key repeats. A USB keyboard reports a held key
 once and a PS/2 one repeats it itself, so the source drops a press of the key
-already held and repeats that key under the user's policy: after the repeat
+already held — the same physical key, so the keypad's `1` and the main row's
+are two keys — and repeats that key under the user's policy: after the repeat
 delay, then at the repeat rate, one repeat per drain so a late loop never
 catches up in a burst. A release of that key or a change of modifiers stops
 it, and the repeat's next deadline is folded into the park only while a key is
@@ -3333,8 +3537,10 @@ driven as the serve loop drives it: sixteen pointer samples pumped through the
 real shell and compositor inside one period, each moving the cursor and so
 really damaging the screen, composite *nothing* until the deadline it armed.
 
-`desktop_tests.rs` covers the `Desktop` model: hover feedback and
-click-on-empty-desktop clearing the selection; the shared double-click
+`desktop_tests.rs` covers the `Desktop` model: motion over an icon drawing the
+same pixels and owing no repaint, and click-on-empty-desktop clearing the
+selection; the names shown and pressed following the endings a files apply
+hides, a change of them flowing the unplaced icons again; the shared double-click
 tracker activating an icon on its second press; keyboard arrows moving the
 selection by one icon and by one whole column, wrapping at the ends, `Enter`
 activating, and `Escape` clearing; every activation branch (a directory

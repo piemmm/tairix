@@ -15,7 +15,9 @@
 
 use alloc::string::String;
 
-use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, DialogModality, SaveFormats};
+use tairix_abi::window_ipc::{
+    AppMenu, AppMenuItemId, CursorShape, DialogModality, SaveFormats, WindowSizing,
+};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::InputEvent;
 use tairix_theme::Theme;
@@ -30,6 +32,8 @@ mod host;
 pub use host::*;
 #[cfg(any(test, all(freestanding, feature = "rt")))]
 mod members;
+#[cfg(any(test, all(freestanding, feature = "rt")))]
+mod refit;
 #[cfg(any(test, all(freestanding, feature = "rt")))]
 mod scroll;
 #[cfg(any(test, all(freestanding, feature = "rt")))]
@@ -138,9 +142,10 @@ pub enum Request<K, O> {
 pub type ViewOutcome<V> = Outcome<Request<<V as DocumentView>::MenuKind, <V as DocumentView>::Own>>;
 
 /// A tool window a document window wants open: a floating palette the window
-/// manager titles and the user moves by its band, showing `rect` of the
-/// window's own drawing and taking the input that lands on it as the
-/// window's own ([`DocumentView::tool_window`]).
+/// manager titles and the user moves by its band — and resizes by its edges
+/// where `sizing` lets it — showing `rect` of the window's own drawing and
+/// taking the input that lands on it as the window's own
+/// ([`DocumentView::tool_window`]).
 ///
 /// The rectangle is laid out beside the window's own area — right of it or
 /// below it, never overlapping it or another tool window's — so one drawing
@@ -155,6 +160,12 @@ pub struct ToolWindow<'a> {
     /// The part of the window's drawing it shows, in the window's pixels;
     /// never left of or above the drawing's origin.
     pub rect: Rect,
+    /// Whether the user may resize it, and within what range of clients, in
+    /// the window's pixels: the host restates the range as it moves and
+    /// hands each size the user gives it to [`DocumentView::tool_resized`].
+    /// Its kind holds while it is open; one wanted at another kind is opened
+    /// afresh.
+    pub sizing: WindowSizing,
 }
 
 impl ToolWindow<'_> {
@@ -429,6 +440,22 @@ pub trait DocumentView: SavedDocument {
         Outcome::none()
     }
 
+    /// The user resized tool window `id` to `size`, `(width, height)` in the
+    /// window's pixels and within the range its [`ToolWindow::sizing`]
+    /// stated: the host has re-mapped it at that size, and paints it whole
+    /// once the view lays it out. One held at its own size is never told. By
+    /// default nothing.
+    fn tool_resized(
+        &mut self,
+        _id: u32,
+        _size: (u32, u32),
+        _layout: &Self::Layout,
+        _scale: Scale,
+        _damage: &mut Region,
+    ) -> ViewOutcome<Self> {
+        Outcome::none()
+    }
+
     /// Tool window `id` went, for `why`. A view answering
     /// [`ToolGone::Refused`] stops wanting it, or it is asked for again.
     fn tool_gone(
@@ -618,6 +645,7 @@ impl<F: Copy> AppView for NoAppView<F> {
 
 #[cfg(test)]
 mod tests {
+    use tairix_abi::window_ipc::WindowSizing;
     use tairix_geometry::Rect;
 
     use super::ToolWindow;
@@ -630,6 +658,7 @@ mod tests {
                 id: 1,
                 title: "Tools",
                 rect,
+                sizing: WindowSizing::Fixed,
             }
             .fits_beside(area)
         };

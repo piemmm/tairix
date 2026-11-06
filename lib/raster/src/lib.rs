@@ -75,12 +75,12 @@ pub use artwork::{
 #[cfg(any(test, feature = "test-util"))]
 pub use blur::halved_reference;
 pub use blur::{
-    box_blur, box_blur_coverage, cast_shadow, halved_reach, soften_coverage, BlurScratch, Blurring,
-    ShadowCast, SOFTEN_PASSES,
+    box_blur, box_blur16, box_blur_coverage, cast_shadow, halved_reach, soften_coverage,
+    BlurScratch, Blurring, ShadowCast, SOFTEN_PASSES,
 };
 pub use color::{
     blend_solid_span, blend_span, cover_span, div255, div255_biased, leading_opaque,
-    leading_translucent, mix_span, Color, Pixel, ROUND_NEAREST,
+    leading_translucent, mix_span, Color, Pixel, Pixel16, ROUND_NEAREST,
 };
 pub use dither::DitherRow;
 pub use lent::PixelMemory;
@@ -94,8 +94,8 @@ pub use paint::{
 };
 pub use reorient::Reorient;
 pub use resample::{
-    resample, resample_reach, resample_window, Region, ResampleError, ResampleScratch, Rgba8Image,
-    RowOrder, RowReducer,
+    resample, resample_reach, resample_window, resample_window_in, Region, ResampleError,
+    ResampleScratch, Rgba8Image, RowOrder, RowReducer,
 };
 pub use ring::{Ring, RingInk};
 pub use round::{round_rect_coverage, round_rect_radius};

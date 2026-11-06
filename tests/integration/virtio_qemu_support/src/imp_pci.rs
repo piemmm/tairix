@@ -233,7 +233,9 @@ where
     grants.insert(CapabilityId::MMIO_MAP);
     grants.insert(CapabilityId::MEM_DMA);
     grants.insert(CapabilityId::DRV_LOAD);
-    let caller = TaskCapabilities::derive(TASK, UserId(0), grants, grants, &SERIAL_SINK);
+    let Ok(caller) = TaskCapabilities::derive(TASK, UserId(0), grants, grants, &SERIAL_SINK) else {
+        env.fail("caller capability record");
+    };
 
     // 3. A vector of the device's own, bound, and the message that raises
     //    it: its unit's entry once interrupt remapping is on.

@@ -26,6 +26,11 @@ crate's own scratch, a revision counter over this host's own configured
 addresses, a build-provenance id — the fast unkeyed hash is the right tool and
 the key would buy nothing.
 
+A key the kernel draws is not enough on its own. Where an unprivileged
+principal decides which keys *stay* in a table — the threads it keeps
+running, the locks it keeps queued — it can keep only those that collide, so
+such a table is keyed, or ordered where it needs no hash at all.
+
 Neither function is cryptographic. `SipHash13` is a keyed PRF sized for
 hash-table defence, not a message-authentication code: MACs, key derivation,
 and digests are [`tairix-crypto`](crypto.md)'s.
@@ -73,7 +78,7 @@ down at the use site:
 |---|---|---|
 | `BuildSipHash13` | `keyed()` — refuses with `Unseeded` before a key is published | keys an attacker can choose or influence |
 | `BuildSipHash13` | `with_seed(k)`, `UNKEYED` | a holder with its own key; a hash that is not a security decision |
-| `BuildFastHash` | `new()`, `with_seed(n)` | keys the kernel assigns itself |
+| `BuildFastHash` | `new()`, `with_seed(n)` | keys the kernel assigns itself, in a table whose live set nothing hostile shapes |
 
 `BuildSipHash13` has no `Default`, so a container cannot end up keyed by
 accident: [`tairix-collections`](collections.md)'s `HashMap` takes its hasher

@@ -6,19 +6,24 @@
 //! that by handing the pieces here. Nothing in this crate discovers
 //! independence; it is the caller's proof, and the caller keeps it.
 //!
-//! # The three parts
+//! # The parts
 //!
 //! * [`JobRunner`] — the contract. A pass names it, so the pass compiles and
 //!   runs without a thread anywhere near it: [`Serial`] is a runner, and it is
 //!   the whole of what an in-kernel or single-core consumer links.
 //! * [`for_each`] — the one place an index becomes an element. A runner deals
 //!   in indices because that is all it can share between threads; a pass wants
-//!   its own `&mut` piece. That conversion is the crate's single `unsafe`
-//!   block, and it lives here rather than in every pass. [`for_each_drawn`]
-//!   hands out pieces an iterator splits off instead, so a pass need not
-//!   gather them into a list first.
+//!   its own `&mut` piece. That conversion is `unsafe`, and it lives here
+//!   rather than in every pass. [`for_each_drawn`] hands out pieces an
+//!   iterator splits off instead, so a pass need not gather them into a list
+//!   first.
 //! * [`Pool`] (feature `pool`) — the fork-join worker pool over `lib/rt`
 //!   threads. Workers park on a futex between dispatches and never spin.
+//! * [`for_each_ordered`] and [`Published`] (feature `pool`) — pieces that are
+//!   not independent: begun in order, each may park until a piece before it
+//!   has published what it needs, as a wavefront's rows wait on the row above.
+//!   A slot's one write and every read are ordered by its state word, the
+//!   other `unsafe` the crate holds besides the pool's futex calls.
 //!
 //! # Sizing
 //!
@@ -43,8 +48,12 @@ extern crate alloc;
 extern crate std;
 
 #[cfg(feature = "pool")]
+pub mod ordered;
+#[cfg(feature = "pool")]
 pub mod pool;
 
+#[cfg(feature = "pool")]
+pub use ordered::{for_each_ordered, Published};
 #[cfg(feature = "pool")]
 pub use pool::Pool;
 

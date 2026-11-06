@@ -57,6 +57,7 @@
 extern crate alloc;
 
 pub mod apply;
+pub mod capture;
 pub mod catalog;
 pub mod civil;
 pub mod fit;
@@ -72,6 +73,9 @@ pub mod text;
 #[cfg(feature = "rt")]
 pub use apply::apply;
 pub use apply::{ApplyOutcome, ApplyTo};
+pub use capture::{
+    parse_sound, sound_value, CaptureDuration, CaptureFolder, CaptureSettings, CaptureTimer,
+};
 pub use catalog::{
     catalog_categories, catalog_entries, category_path, default_wallpaper_path, desktop_catalog,
     is_wallpaper_category_name, is_wallpaper_file_name, wallpaper_path, CatalogEntry, CatalogItem,

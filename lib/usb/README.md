@@ -35,7 +35,9 @@ other (§17.4 — `drivers/* → lib/*` only).
   Address Device → descriptors → Configure Endpoint → `SET_CONFIGURATION`),
   knowing no device class: each interface's class driver reads its own
   descriptors, sends its own class requests inside its interface's
-  `transport::UrbScope`, and receives its reports as the device sent them.
+  `transport::UrbScope`, and receives its reports as the device sent them;
+  `transport::read_serial_number` is a class driver's own read of its
+  device's serial number, on the terms `device_identity` reads it.
   Each slot's control pipe — its output and input contexts, EP0 ring, and
   control data buffer, in its own region — runs one TD at a time, so a device
   that answers a timed-out control transfer late writes only that region. A

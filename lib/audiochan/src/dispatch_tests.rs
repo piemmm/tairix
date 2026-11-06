@@ -576,3 +576,50 @@ fn a_port_whose_room_cannot_be_watched_is_left_to_the_pause() {
     assert!(!arm_rooms(&mut dispatcher, &mut members));
     assert!(members.armed.is_empty());
 }
+
+/// A notification held for an attachment the mixer let go or replaced is
+/// never told to the attachment after it, while a connector's change held for
+/// the watch still is. Regression: a held report of the old configuration was
+/// told to the next, whose clock then took a stale position.
+#[test]
+fn a_re_attach_hears_nothing_held_for_the_attachment_it_replaced() {
+    for (detached, reconfigured) in [(false, false), (false, true), (true, true)] {
+        let mut dispatcher = dispatcher();
+        watch(&mut dispatcher);
+        ready(&mut dispatcher, SINK);
+        dispatcher
+            .io
+            .refuse_notify
+            .extend([Errno::WouldBlock, Errno::WouldBlock]);
+        fault_sink(&mut dispatcher);
+        dispatcher.server.audio_mut().fault = None;
+        dispatcher.server.audio_mut().pending.jack_changed = 1 << SINK;
+        dispatcher.on_event();
+        assert!(dispatcher.io.notified.is_empty(), "both held");
+        if detached {
+            let detach = dispatcher
+                .io
+                .call(&AudioChannelRequest::Detach { endpoint: SINK });
+            dispatcher.on_call();
+            assert_eq!(decode_status_reply(dispatcher.io.reply(detach)), Ok(()));
+        }
+        if reconfigured {
+            let configured = dispatcher.io.call(&configure(SINK));
+            dispatcher.on_call();
+            assert!(decode_configure_reply(dispatcher.io.reply(configured)).is_ok());
+        }
+        let attached = dispatcher.io.call(&attach(SINK, RING_FRAMES));
+        dispatcher.on_call();
+        assert_eq!(decode_status_reply(dispatcher.io.reply(attached)), Ok(()));
+        dispatcher.on_room();
+        let changed = AudioChannelNotify::JackChanged {
+            endpoint: SINK,
+            jack: JackState::Present,
+        };
+        assert_eq!(
+            dispatcher.io.notified,
+            [(WATCH_PORT, changed)],
+            "detached {detached}, reconfigured {reconfigured}"
+        );
+    }
+}

@@ -90,6 +90,8 @@ mod program {
     };
     use tairix_settings::{Board, Cooling, SaverEntry, SoundReading};
     use tairix_settings::{EffectsAsk, EffectsAsks, EffectsReading, EffectsTrip};
+    use tairix_soundtheme::cue::RtCuePost;
+    use tairix_soundtheme::{Answer, PostedCues, SoundEvent, CUE_ANSWER_DEADLINE_NS};
     use tairix_sysconfig::SystemConfig;
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
     use tairix_tz::ZoneInfo;
@@ -101,7 +103,7 @@ mod program {
     use tairix_window::{
         key_input_event, pointer_input_events, pointer_point, present_damage, scroll_input_events,
         Desktop, EventDrain, EventError, EventMailbox, EventSource, Owed, Parked, Repaint, Target,
-        WindowEvents,
+        WindowEvents, EVENT_MAILBOX_CAPACITY,
     };
 
     /// The wait-set token of the applier's wake pipe: readable exactly when
@@ -173,6 +175,10 @@ mod program {
     /// The wait-set token of the file manager's settings reader: a reading
     /// of what the desktop publishes of them has landed.
     const FILES_READ_TOKEN: u64 = app::FIRST_APP_TOKEN + 12;
+
+    /// The wait-set token of the cue authority's answers to the volume's
+    /// feedback, which the loop collects once the park ends.
+    const CUE_TOKEN: u64 = app::FIRST_APP_TOKEN + 13;
 
     /// How often the Raspberry Pi pane re-reads the cooling service while it
     /// is on show: the temperature moves on its own.
@@ -327,23 +333,38 @@ mod program {
 
     /// The Sound pane's round trips: apply what is asked, then read the
     /// devices, this user's captures, and how many are recording.
-    type SoundDesk =
-        tairix_rt::work::Worker<RtAudio, Vec<(u32, DeviceControl)>, Option<SoundReading>>;
+    type SoundDesk = tairix_rt::work::Worker<RtAudio, Vec<(u32, DeviceControl)>, SoundTrip>;
+
+    /// What a sound round trip came back with.
+    struct SoundTrip {
+        /// Whether the service refused a control the trip carried.
+        refused: bool,
+        /// What was read afterwards, or `None` where the devices could not be.
+        reading: Option<SoundReading>,
+    }
 
     /// The sound desk's body. A refused control is stated and the devices
     /// are read regardless, so the pane shows what the service holds.
-    fn serve_sound(
-        audio: &mut RtAudio,
-        controls: &mut Vec<(u32, DeviceControl)>,
-    ) -> Option<SoundReading> {
+    fn serve_sound(audio: &mut RtAudio, controls: &mut Vec<(u32, DeviceControl)>) -> SoundTrip {
+        let mut refused = false;
         for (device_id, control) in controls.drain(..) {
             if let Err(err) = set_control(audio, device_id, control) {
+                refused = true;
                 app::report(
                     APP_NAME,
                     format_args!("a sound control was refused ({err})"),
                 );
             }
         }
+        SoundTrip {
+            refused,
+            reading: read_sound(audio),
+        }
+    }
+
+    /// The devices, this user's captures and how many are recording, or
+    /// `None`, stated, where the devices could not be read.
+    fn read_sound(audio: &mut RtAudio) -> Option<SoundReading> {
         let listed = devices(audio, StreamDirection::Playback).and_then(|mut sinks| {
             sinks.append(&mut devices(audio, StreamDirection::Capture)?);
             Ok(sinks)
@@ -1465,6 +1486,9 @@ mod program {
                     self.workers.sound_moved.set(true);
                     Ok(Parked::Interrupted)
                 }
+                // The cue authority answered the volume's feedback: the loop
+                // collects the answer, which is what ends its readiness.
+                Wake::App(CUE_TOKEN) => Ok(Parked::Interrupted),
                 Wake::App(token) if self.workers.drain(token) => Ok(Parked::Interrupted),
                 Wake::PressureChanged => {
                     tairix_font::trim_glyph_cache();
@@ -1607,6 +1631,8 @@ mod program {
             device_id: u32,
             /// What to change.
             control: DeviceControl,
+            /// Whether the interaction has ended.
+            settled: bool,
         },
         /// The reader changed a sound choice: ask the desktop session.
         Effects(EffectsAsk),
@@ -1826,8 +1852,14 @@ mod program {
             ShellOutcome::ChooseZone => Acted::ChooseZone,
             ShellOutcome::PreviewScreensaver(document) => Acted::PreviewScreensaver(document),
             ShellOutcome::Sound {
-                device_id, control, ..
-            } => Acted::Sound { device_id, control },
+                device_id,
+                control,
+                settled,
+            } => Acted::Sound {
+                device_id,
+                control,
+                settled,
+            },
             ShellOutcome::Effects(ask) => Acted::Effects(ask),
         }
     }
@@ -1898,41 +1930,26 @@ mod program {
         (info.output_width_px(), info.output_height_px())
     }
 
-    /// Present the whole client, answering whether the session took it.
-    fn present_whole(
-        surface: &mut SettingsWindow,
-        shell: &Shell,
-        themes: &ThemeRegistry,
-        desktop: &Desktop,
-    ) -> bool {
-        let whole = DamageRect::full(&surface.mode);
-        surface
-            .present(shell, themes, desktop.scale(), whole)
-            .is_ok()
-    }
-
     /// Adopt a desktop change the park reported, answering whether the
-    /// window is still presentable.
+    /// windows owe their whole frames for it.
     ///
     /// A new density or theme re-measures every length the layout is
     /// derived from, and stales every rendered picture — a picture is
     /// square at one side only.
-    fn adopt_desktop_round(
-        surface: &mut SettingsWindow,
-        shell: &mut Shell,
-        themes: &mut ThemeRegistry,
-        desktop: &mut Desktop,
+    fn adopt_desktop_turn(
+        (surface, shell): (&mut SettingsWindow, &mut Shell),
+        (themes, desktop): (&mut ThemeRegistry, &mut Desktop),
         moved: &Cell<bool>,
         pictures: &mut Pictures,
     ) -> bool {
         if !adopt_desktop(shell, desktop, themes, moved) {
-            return true;
+            return false;
         }
         // A theme switch can move the blur the ground asks for.
         surface.apply_backdrop(themes);
         shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
         pictures.restart();
-        present_whole(surface, shell, themes, desktop)
+        true
     }
 
     /// The long-lived state one turn of the event loop reads and writes.
@@ -2023,6 +2040,8 @@ mod program {
                     queue: ControlQueue::new(),
                     asked: false,
                     moved: &workers.sound_moved,
+                    cues: PostedCues::new(),
+                    post: workers.cue_post,
                 },
                 effects: EffectsRead {
                     worker: &workers.effects,
@@ -2184,7 +2203,8 @@ mod program {
     }
 
     /// The sound desk's client half: one round trip at a time, the latest
-    /// control of each kind for each device winning meanwhile.
+    /// control of each kind for each device winning meanwhile, and the
+    /// volume's feedback once a settled change to the output is applied.
     struct SoundRead<'a> {
         worker: &'a SoundDesk,
         queue: ControlQueue,
@@ -2192,6 +2212,10 @@ mod program {
         asked: bool,
         /// Set by the park when the audio service announces a change.
         moved: &'a Cell<bool>,
+        /// The feedback posted to the cue authority, its answers collected
+        /// on the loop's own wake.
+        cues: PostedCues,
+        post: RtCuePost,
     }
 
     impl SoundRead<'_> {
@@ -2208,9 +2232,20 @@ mod program {
             self.start(shell)
         }
 
-        /// Ask for `control` on `device_id`.
-        fn ask(&mut self, shell: &mut Shell, device_id: u32, control: DeviceControl) -> bool {
-            self.queue.ask(device_id, control);
+        /// Ask for `control` on `device_id`: a `settled` one that can be
+        /// heard is heard once it is applied.
+        fn ask(
+            &mut self,
+            shell: &mut Shell,
+            device_id: u32,
+            control: DeviceControl,
+            settled: bool,
+        ) -> bool {
+            if settled {
+                self.queue.ask_confirmed(device_id, control);
+            } else {
+                self.queue.ask(device_id, control);
+            }
             self.start(shell)
         }
 
@@ -2225,13 +2260,26 @@ mod program {
             false
         }
 
-        /// Adopt every landed reading, answering whether any landed.
+        /// Adopt every landed reading, answering whether any landed, and let
+        /// the reader hear a settled change one shows applied.
         fn settle(&mut self, shell: &mut Shell) -> bool {
+            self.cues.collect(&mut self.post, |_, _| {});
             let mut landed = false;
-            while let Some(reading) = self.worker.collect() {
-                self.queue.landed();
+            while let Some(trip) = self.worker.collect() {
+                let shown = trip.reading.as_ref().filter(|_| !trip.refused);
+                let devices = shown.map(|reading| reading.devices.as_slice());
+                if self.queue.landed(devices) {
+                    // Posted, never awaited: refused or silent, the answer is
+                    // the authority's to record.
+                    let _ = self.cues.post(
+                        &mut self.post,
+                        SoundEvent::VolumeFeedback,
+                        Answer::Started,
+                        CUE_ANSWER_DEADLINE_NS,
+                    );
+                }
                 self.asked = false;
-                shell.adopt_sound(reading);
+                shell.adopt_sound(trip.reading);
                 landed = true;
             }
             if landed {
@@ -2241,11 +2289,12 @@ mod program {
         }
 
         /// Apply every control still waiting, a trip at a time. A trip owed
-        /// only for a listing is not made: nothing is left to show it.
+        /// only for a listing is not made, and nothing is heard: nothing is
+        /// left to show it.
         fn see_out(&mut self) {
             loop {
                 while self.worker.wait().is_some() {
-                    self.queue.landed();
+                    let _ = self.queue.landed(None);
                 }
                 match self.queue.next_trip() {
                     Some(controls) if !controls.is_empty() => {
@@ -2257,20 +2306,18 @@ mod program {
         }
     }
 
-    /// Adopt whatever a worker answered while the loop was parked, and
-    /// redraw if anything did, answering whether the window is still
-    /// presentable.
+    /// Adopt whatever a worker answered while the loop was parked, answering
+    /// whether an answer landed, which rebuilt the pane's rows.
     ///
     /// An answer lands a new set of rows, so the pane is redrawn rather than
     /// the one row a choice reported — but for the cooling service's, which
-    /// lands every two seconds and reports the rows it moved, and a Files
-    /// answer that rebuilt nothing.
+    /// lands every two seconds and reports into `damage` the rows it moved,
+    /// and a Files answer that rebuilt nothing.
     fn adopt_answers(
-        surface: &mut SettingsWindow,
         shell: &mut Shell,
-        themes: &ThemeRegistry,
-        desktop: &Desktop,
         desks: &mut Desks<'_>,
+        seat: (Rect, Scale, &Theme),
+        damage: &mut Region,
     ) -> bool {
         let mut landed = false;
         if let Some(applied) = desks.applier.collect() {
@@ -2298,92 +2345,24 @@ mod program {
         landed |= desks.desktop.settle(shell);
         landed |= desks.sound.settle(shell);
         landed |= desks.effects.settle(shell);
-        let mut cooled = tairix_controls::damage::sink();
-        let seat = (surface.viewport(), desktop.scale(), themes.active());
-        desks.cooling.settle(shell, seat, &mut cooled);
-        if landed {
-            return repaint_pane(surface, shell, themes, desktop);
-        }
-        present_reported(surface, shell, themes, desktop, &cooled)
+        desks.cooling.settle(shell, seat, damage);
+        landed
     }
 
-    /// Redraw the pane, whose rows a landed answer rebuilt, answering whether
-    /// the window is still presentable.
-    fn repaint_pane(
-        surface: &mut SettingsWindow,
-        shell: &mut Shell,
-        themes: &ThemeRegistry,
-        desktop: &Desktop,
-    ) -> bool {
-        let viewport = surface.viewport();
-        shell.lay_out(viewport, desktop.scale(), themes.active());
-        let mut damage = tairix_controls::damage::sink();
-        damage.add(shell.pane_region(viewport, desktop.scale(), themes.active()));
-        let Some(area) = present_damage(&surface.mode, Repaint::Reported, &damage) else {
-            return true;
-        };
-        surface
-            .present(shell, themes, desktop.scale(), area)
-            .is_ok()
-    }
-
-    /// Present what `damage` reports, if anything, answering whether the
-    /// window is still presentable.
-    fn present_reported(
-        surface: &mut SettingsWindow,
-        shell: &Shell,
-        themes: &ThemeRegistry,
-        desktop: &Desktop,
-        damage: &Region,
-    ) -> bool {
-        let repaint = Repaint::reported_if(!damage.is_empty());
-        let Some(area) = present_damage(&surface.mode, repaint, damage) else {
-            return true;
-        };
-        surface
-            .present(shell, themes, desktop.scale(), area)
-            .is_ok()
-    }
-
-    /// Step every password marker whose dots are due and present what moved,
-    /// answering whether the window is still presentable.
+    /// Step every password marker whose dots are due, reporting into `damage`
+    /// what moved.
     fn advance_secrets(
-        surface: &mut SettingsWindow,
         shell: &mut Shell,
-        themes: &ThemeRegistry,
-        desktop: &Desktop,
-    ) -> bool {
+        (viewport, scale, theme): (Rect, Scale, &Theme),
+        damage: &mut Region,
+    ) {
         let Some(due) = shell.secret_deadline_ns() else {
-            return true;
+            return;
         };
         let now_ns = tairix_rt::clock_get();
-        if due > now_ns {
-            return true;
+        if due <= now_ns {
+            shell.advance_secrets(now_ns, viewport, (scale, theme), damage);
         }
-        let mut damage = tairix_controls::damage::sink();
-        let place = (desktop.scale(), themes.active());
-        shell.advance_secrets(now_ns, surface.viewport(), place, &mut damage);
-        present_reported(surface, shell, themes, desktop, &damage)
-    }
-
-    /// Step a held scrollbar press whose repeat is due and present what moved,
-    /// answering whether the window is still presentable.
-    fn step_held_bars(
-        surface: &mut SettingsWindow,
-        shell: &mut Shell,
-        themes: &ThemeRegistry,
-        desktop: &Desktop,
-    ) -> bool {
-        let mut damage = tairix_controls::damage::sink();
-        // What it reports is exactly what it drew.
-        let _ = shell.repeat(
-            tairix_rt::clock_get(),
-            surface.viewport(),
-            desktop.scale(),
-            themes.active(),
-            &mut damage,
-        );
-        present_reported(surface, shell, themes, desktop, &damage)
     }
 
     /// What carrying out an event's conclusion changed beyond what the event
@@ -2478,9 +2457,11 @@ mod program {
                         .is_some_and(|applied| adopt_files_apply(shell, behind, applied)),
                 )
             }
-            Acted::Sound { device_id, control } => {
-                Carried::answered_if(desks.sound.ask(shell, *device_id, *control))
-            }
+            Acted::Sound {
+                device_id,
+                control,
+                settled,
+            } => Carried::answered_if(desks.sound.ask(shell, *device_id, *control, *settled)),
             Acted::Effects(ask) => Carried::answered_if(desks.effects.ask(shell, ask.clone())),
             Acted::LockScreen => {
                 // Submitted, not awaited: the desktop puts its own lock up
@@ -2560,15 +2541,16 @@ mod program {
     }
 
     /// Bring the window up to date with what happened while it was parked —
-    /// a pressure move, a desk's answer, a password marker falling due — and
-    /// ask for the pictures the panes now want, answering whether the window
-    /// is still presentable.
+    /// a pressure move, a desk's answer, a password marker or a held scrollbar
+    /// press falling due, the temperature's period — folding what that
+    /// changed into the turn's `round` and `damage`.
     fn catch_up(
         (surface, shell): (&mut SettingsWindow, &mut Shell),
         (themes, desktop): (&ThemeRegistry, &Desktop),
         (pictures, desks): (&mut Pictures, &mut Desks<'_>),
         pressure_moved: &Cell<bool>,
-    ) -> bool {
+        (round, damage): (&mut Round, &mut Region),
+    ) {
         // Memory goes back when the machine asks for it, not at whatever later
         // frame happens to draw an icon.
         if pressure_moved.take() {
@@ -2576,19 +2558,29 @@ mod program {
             pictures.trim(shell, surface, themes.active(), desktop.scale());
             shell.retry_unavailable_pictures();
         }
-        if !adopt_answers(surface, shell, themes, desktop, desks)
-            || !advance_secrets(surface, shell, themes, desktop)
-            || !step_held_bars(surface, shell, themes, desktop)
-        {
-            return false;
-        }
-        // The temperature's period is the clock's, not an event's.
-        let mut cooled = tairix_controls::damage::sink();
         let seat = (surface.viewport(), desktop.scale(), themes.active());
-        desks.cooling.refresh(shell, seat, &mut cooled);
-        if !present_reported(surface, shell, themes, desktop, &cooled) {
-            return false;
+        if adopt_answers(shell, desks, seat, damage) {
+            // Rows no layout has measured, laid out before a marker or a held
+            // bar steps over them.
+            shell.lay_out(seat.0, seat.1, seat.2);
+            round.answered = true;
         }
+        advance_secrets(shell, seat, damage);
+        // What it reports is exactly what it drew.
+        let _ = shell.repeat(tairix_rt::clock_get(), seat.0, seat.1, seat.2, damage);
+        // The temperature's period is the clock's, not an event's.
+        desks.cooling.refresh(shell, seat, damage);
+    }
+
+    /// Ask for every picture and reading the panes on show now want, once the
+    /// turn's events have moved what is on show, answering whether a reading
+    /// landed at once, the pane laid out again for it.
+    fn ask_for_what_shows(
+        (surface, shell): (&mut SettingsWindow, &mut Shell),
+        (themes, desktop): (&ThemeRegistry, &Desktop),
+        (pictures, desks): (&mut Pictures, &mut Desks<'_>),
+        damage: &mut Region,
+    ) -> bool {
         // Every turn, not only an event's: a navigation, a resize and an
         // answered request all move what the panes wait for.
         pictures.request(
@@ -2597,7 +2589,14 @@ mod program {
             (themes.active(), desktop.scale()),
             desks.asker,
         );
-        true
+        let seat = (surface.viewport(), desktop.scale(), themes.active());
+        let landed = request_readings(shell, desks, seat, damage);
+        if landed {
+            // Rows no layout has measured, laid out where they were adopted,
+            // as every other answer's are.
+            shell.lay_out(seat.0, seat.1, seat.2);
+        }
+        landed
     }
 
     /// The wall clock's reading, where it has been set.
@@ -2813,15 +2812,10 @@ mod program {
             self.pane.present_list(client, &self.surface, &parts)
         }
 
-        /// Rewrite the readings once the minute has turned and present what
-        /// that moved, answering the monotonic instant the next minute turns
-        /// at; nothing while the clock is not set.
-        fn keep_current(
-            &mut self,
-            shell: &Shell,
-            client: &mut tairix_window::WindowClient<app::RtWindowTransport>,
-            (theme, scale): (&Theme, Scale),
-        ) -> Option<u64> {
+        /// Rewrite the readings once the minute has turned and owe what that
+        /// moved, answering the monotonic instant the next minute turns at;
+        /// nothing while the clock is not set.
+        fn keep_current(&mut self, shell: &Shell, (theme, scale): (&Theme, Scale)) -> Option<u64> {
             let now = wall_now()?;
             let mode = *self.pane.mode();
             let bounds = Rect::new(0, 0, mode.width_px, mode.height_px);
@@ -2834,9 +2828,6 @@ mod program {
             );
             self.owed
                 .owe(&mode, Repaint::reported_if(!damage.is_empty()), &damage);
-            if self.present(client, scale, theme).is_err() {
-                app::report(APP_NAME, "the zone chooser could not be drawn");
-            }
             let into = u64::try_from(now.secs().rem_euclid(60))
                 .unwrap_or(0)
                 .saturating_mul(u64::from(NANOS_PER_SEC))
@@ -2857,51 +2848,49 @@ mod program {
     }
 
     /// Serve `event` where it is the zone chooser's own, answering `None`
-    /// where it is not: what the chooser chose is posted as any other choice
-    /// is, and it closes on a choice or a cancel. A desktop that `redrew`
-    /// owes the chooser its whole frame too.
-    ///
-    /// The `Err` is the settings window's refused present, which ends the
-    /// program.
+    /// where it is not and otherwise what the settings window owes for it:
+    /// what the chooser chose is posted as any other choice is, and owes the
+    /// window its whole frame. The chooser closes on a choice or a cancel, and
+    /// otherwise owes what its own event changed until the turn presents.
     fn serve_chooser(
-        (event, redrew): (&WindowEvent, bool),
+        event: &WindowEvent,
         zones: &mut Option<ZoneChooser>,
         (surface, shell): (&mut SettingsWindow, &mut Shell),
         (themes, desktop): (&ThemeRegistry, &Desktop),
         (desks, pictures): (&mut Desks<'_>, &mut Pictures),
-    ) -> Option<Result<(), Errno>> {
+    ) -> Option<Round> {
         let chooser = zones.as_mut()?;
-        if redrew {
-            chooser.owed.owe_whole();
-        }
         if event.window_id() != Some(chooser.pane.id()) {
             return None;
         }
         let chosen = match chooser.route(event, surface.window.client(), desktop, themes.active()) {
             Some(PlaceOutcome::Chose { row }) => Some(row),
             Some(PlaceOutcome::Cancelled) => None,
-            None => {
-                present_chooser(zones, surface, desktop, themes);
-                return Some(Ok(()));
-            }
+            None => return Some(Round::default()),
         };
         if let Some(chooser) = zones.take() {
             chooser.close(surface.window.client());
         }
         let Some(ShellOutcome::Apply(document)) = chosen.map(|row| shell.choose_zone(row)) else {
-            return Some(Ok(()));
+            return Some(Round::default());
         };
         let mut damage = tairix_controls::damage::sink();
-        let _ = act(
+        let carried = act(
             &Acted::Apply(document),
             (surface, shell),
             (themes, desktop),
             (desks, pictures),
             &mut damage,
         );
-        shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
-        let whole = DamageRect::full(&surface.mode);
-        Some(surface.present(shell, themes, desktop.scale(), whole))
+        // The choice rebuilt the zone's row; an answer that landed at once was
+        // laid out with it.
+        if carried == Carried::Nothing {
+            shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+        }
+        Some(Round {
+            whole: true,
+            ..Round::default()
+        })
     }
 
     /// Present what the zone chooser owes, if one is open; a refusal is
@@ -2922,35 +2911,58 @@ mod program {
         }
     }
 
-    /// What waiting for the loop's next event came to.
-    enum Waited {
-        /// An event to apply.
+    /// What draining the mailbox once more came to.
+    enum Taken {
+        /// An event to serve.
         Event(WindowEvent),
-        /// Nothing to apply: wait again.
+        /// Nothing is queued: the turn is drained.
+        Empty,
+        /// The channel ended; the program ends with this status.
+        Lost(i32),
+    }
+
+    /// The next event queued, never waiting: a refusal the session answered
+    /// with is stated and the drain goes on, and a malformed frame from the
+    /// authenticated session is refused rather than guessed at.
+    fn take_event(
+        events: &mut WindowEvents<RtEventSource<'_>>,
+        surface: &mut SettingsWindow,
+    ) -> Taken {
+        loop {
+            match events.try_wait(surface.window.client()) {
+                Ok(Some(event)) => return Taken::Event(event),
+                Ok(None) => return Taken::Empty,
+                Err(EventError::Refused(refused)) => app::report(APP_NAME, refused),
+                Err(EventError::Undecodable(_)) => {}
+                Err(EventError::Mailbox(_)) => {
+                    let code = app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost");
+                    return Taken::Lost(code);
+                }
+            }
+        }
+    }
+
+    /// What parking for the next event came to.
+    enum Waited {
+        /// An event, served first in the next turn's drain.
+        Event(WindowEvent),
+        /// Nothing to serve: the next turn catches up on what ended the park.
         Again,
         /// The program ends with this status.
         Ended(i32),
     }
 
-    /// Wait for the next event. A wait that ended without one is the desktop
-    /// notice, and a malformed frame from the authenticated session is
-    /// refused rather than guessed at: either way the round is the re-theme
-    /// alone.
+    /// Park until the next event. A park that ended without one — a desk's
+    /// answer, the desktop moving, a deadline — is the next turn's to catch up
+    /// on, and so is a malformed frame from the authenticated session, which
+    /// is refused rather than guessed at.
     fn wait_event(
         events: &mut WindowEvents<RtEventSource<'_>>,
-        (surface, shell): (&mut SettingsWindow, &mut Shell),
-        (themes, desktop): (&mut ThemeRegistry, &mut Desktop),
-        (desktop_moved, pictures): (&Cell<bool>, &mut Pictures),
+        surface: &mut SettingsWindow,
     ) -> Waited {
         match events.wait(surface.window.client()) {
             Ok(Some(event)) => Waited::Event(event),
-            Ok(None) | Err(EventError::Undecodable(_)) => {
-                if adopt_desktop_round(surface, shell, themes, desktop, desktop_moved, pictures) {
-                    Waited::Again
-                } else {
-                    Waited::Ended(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused"))
-                }
-            }
+            Ok(None) | Err(EventError::Undecodable(_)) => Waited::Again,
             Err(EventError::Refused(refused)) => {
                 app::report(APP_NAME, refused);
                 Waited::Again
@@ -2967,18 +2979,14 @@ mod program {
     fn next_due(
         shell: &mut Shell,
         zones: &mut Option<ZoneChooser>,
-        surface: &mut SettingsWindow,
         (themes, desktop): (&ThemeRegistry, &Desktop),
     ) -> Option<u64> {
         // A verdict that landed while parked may have answered it.
         let held = shell.repeat_deadline(tairix_rt::clock_get());
-        let turn = zones.as_mut().and_then(|chooser| {
-            chooser.keep_current(
-                shell,
-                surface.window.client(),
-                (themes.active(), desktop.scale()),
-            )
-        });
+        let reading = (themes.active(), desktop.scale());
+        let turn = zones
+            .as_mut()
+            .and_then(|chooser| chooser.keep_current(shell, reading));
         shell
             .secret_deadline_ns()
             .into_iter()
@@ -2987,7 +2995,64 @@ mod program {
             .min()
     }
 
-    /// The event loop: park, apply, repaint.
+    /// Serve one drained event, answering what the settings window owes for
+    /// it, or `None` once the program is to end: the zone chooser's own events
+    /// are its own, and the rest are applied to the shell and carried out.
+    fn serve_event(
+        event: &WindowEvent,
+        zones: &mut Option<ZoneChooser>,
+        (surface, shell, endpoint): (&mut SettingsWindow, &mut Shell, u64),
+        (themes, desktop): (&ThemeRegistry, &Desktop),
+        (desks, pictures): (&mut Desks<'_>, &mut Pictures),
+        damage: &mut Region,
+    ) -> Option<Round> {
+        if let Some(round) = serve_chooser(
+            event,
+            zones,
+            (surface, shell),
+            (themes, desktop),
+            (desks, pictures),
+        ) {
+            return Some(round);
+        }
+        let acted = apply_event(
+            surface,
+            shell,
+            themes.active(),
+            desktop.scale(),
+            event,
+            damage,
+        );
+        let carried = act(
+            &acted,
+            (surface, shell),
+            (themes, desktop),
+            (desks, pictures),
+            damage,
+        );
+        if carried == Carried::Quit {
+            return None;
+        }
+        if acted == Acted::ChooseZone && zones.is_none() {
+            *zones = ZoneChooser::open(shell, surface, endpoint, (themes, desktop));
+        }
+        // The session let its copy of the frames go, so this side does too;
+        // nothing is presented into them until it asks for them again.
+        if matches!(event, WindowEvent::ContentReleased { .. }) {
+            surface.window.release_frames();
+        }
+        Some(Round {
+            whole: carried == Carried::Moved || matches!(acted, Acted::Whole),
+            acted: !matches!(acted, Acted::Idle),
+            answered: carried == Carried::Answered,
+        })
+    }
+
+    /// The event loop: catch up, drain the events queued, present each window
+    /// once, park.
+    ///
+    /// An event only records what it changed, so a burst of them costs one
+    /// frame: what the turn owes is presented once it is drained.
     fn run_event_loop(session: Session<'_>, mut events: WindowEvents<RtEventSource<'_>>) -> i32 {
         let Session {
             surface,
@@ -3002,102 +3067,86 @@ mod program {
             mut desks,
         } = session;
         let mut zones: Option<ZoneChooser> = None;
+        // The event the last park ended on, served first in the next drain.
+        let mut woken = None;
         let code = 'serve: loop {
-            if !catch_up(
+            let mut round = Round::default();
+            let mut damage = tairix_controls::damage::sink();
+            let moved =
+                adopt_desktop_turn((surface, shell), (themes, desktop), desktop_moved, pictures);
+            if moved {
+                round.whole = true;
+                if let Some(chooser) = zones.as_mut() {
+                    chooser.owed.owe_whole();
+                }
+            }
+            catch_up(
                 (surface, shell),
                 (themes, desktop),
                 (pictures, &mut desks),
                 pressure_moved,
-            ) {
-                break 'serve app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
+                (&mut round, &mut damage),
+            );
+            let mut drained = false;
+            for _ in 0..EVENT_MAILBOX_CAPACITY {
+                let event = match woken.take() {
+                    Some(event) => event,
+                    None => match take_event(&mut events, surface) {
+                        Taken::Event(event) => event,
+                        Taken::Empty => {
+                            drained = true;
+                            break;
+                        }
+                        Taken::Lost(code) => break 'serve code,
+                    },
+                };
+                let served = serve_event(
+                    &event,
+                    &mut zones,
+                    (surface, shell, endpoint),
+                    (themes, desktop),
+                    (&mut desks, pictures),
+                    &mut damage,
+                );
+                let Some(owed) = served else {
+                    break 'serve 0;
+                };
+                round = round.and(owed);
             }
-            let due = next_due(shell, &mut zones, surface, (themes, desktop));
+            round.answered |= ask_for_what_shows(
+                (surface, shell),
+                (themes, desktop),
+                (pictures, &mut desks),
+                &mut damage,
+            );
+            let due = next_due(shell, &mut zones, (themes, desktop));
             timed_due.set(due.into_iter().chain(desks.cooling.due()).min());
-            let event = match wait_event(
-                &mut events,
-                (surface, shell),
-                (themes, desktop),
-                (desktop_moved, pictures),
-            ) {
-                Waited::Event(event) => event,
-                Waited::Again => continue,
-                Waited::Ended(code) => break 'serve code,
-            };
-
-            let redraw = adopt_desktop(shell, desktop, themes, desktop_moved);
-            if redraw {
-                shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
-                pictures.restart();
-            }
-            match serve_chooser(
-                (&event, redraw),
-                &mut zones,
-                (surface, shell),
-                (themes, desktop),
-                (&mut desks, pictures),
-            ) {
-                Some(Ok(())) => continue,
-                Some(Err(_)) => {
-                    break 'serve app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused")
-                }
-                None => {}
-            }
-            let mut damage = tairix_controls::damage::sink();
-            let acted = apply_event(
-                surface,
-                shell,
-                themes.active(),
-                desktop.scale(),
-                &event,
-                &mut damage,
-            );
-            let carried = act(
-                &acted,
-                (surface, shell),
-                (themes, desktop),
-                (&mut desks, pictures),
-                &mut damage,
-            );
-            if carried == Carried::Quit {
-                break 'serve 0;
-            }
-            if acted == Acted::ChooseZone && zones.is_none() {
-                zones = ZoneChooser::open(shell, surface, endpoint, (themes, desktop));
-            }
-            let landed = request_readings(
-                shell,
-                &mut desks,
-                (surface.viewport(), desktop.scale(), themes.active()),
-                &mut damage,
-            );
-            if matches!(event, WindowEvent::ContentReleased { .. }) {
-                surface.window.release_frames();
-                continue;
-            }
-            let round = Round {
-                whole: redraw || carried == Carried::Moved || matches!(acted, Acted::Whole),
-                acted: !matches!(acted, Acted::Idle),
-                answered: landed || carried == Carried::Answered,
-            };
             if present_round(round, &mut damage, (surface, shell), (themes, desktop)).is_err() {
                 break 'serve app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
+            }
+            present_chooser(&mut zones, surface, desktop, themes);
+            // A drain cut short goes on without parking.
+            if !drained {
+                continue;
+            }
+            match wait_event(&mut events, surface) {
+                Waited::Event(event) => woken = Some(event),
+                Waited::Again => {}
+                Waited::Ended(code) => break 'serve code,
             }
         };
         desks.see_out();
         code
     }
 
-    /// Present what one round changed: the pane laid out again where its rows
-    /// moved, then the damage reported or the pane reshaped.
+    /// Present what one round changed: the damage reported, or the pane an
+    /// answer rebuilt, laid out where the answer was adopted.
     fn present_round(
         round: Round,
         damage: &mut Region,
-        (surface, shell): (&mut SettingsWindow, &mut Shell),
+        (surface, shell): (&mut SettingsWindow, &Shell),
         (themes, desktop): (&ThemeRegistry, &Desktop),
     ) -> Result<(), Errno> {
-        if round.relays() {
-            shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
-        }
         let pane = shell.pane_region(surface.viewport(), desktop.scale(), themes.active());
         let repaint = round.repaint(damage, pane);
         let Some(area) = present_damage(&surface.mode, repaint, damage) else {
@@ -3185,6 +3234,9 @@ mod program {
         sound: Arc<SoundDesk>,
         /// Set when the audio service announces a change, for the sound desk.
         sound_moved: Cell<bool>,
+        /// Where the sound desk posts the volume's feedback, answered under
+        /// `CUE_TOKEN`.
+        cue_post: RtCuePost,
         effects: Arc<EffectsDesk>,
         cooling: Arc<CoolingDesk>,
     }
@@ -3284,6 +3336,7 @@ mod program {
                     "sound",
                 ),
                 sound_moved: Cell::new(false),
+                cue_post: RtCuePost::new(set, CUE_TOKEN),
                 effects: started(effects, (set, EFFECTS_TOKEN), "sound-choices"),
                 cooling: started(
                     CoolingDesk::new(read_cooling, (), tairix_rt::sync::WorkerWake::create()),

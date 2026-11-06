@@ -3,7 +3,6 @@ extern crate std;
 use alloc::sync::Arc;
 use core::ptr::NonNull;
 use std::sync::{Arc as StdArc, Mutex};
-use std::thread;
 use std::vec;
 use std::vec::Vec;
 
@@ -20,7 +19,7 @@ use tairix_abi::time::Time64;
 use tairix_abi::{DriverError, DriverHandle};
 use tairix_caps::CapabilitySet;
 use tairix_fsserve::{Clock, ServedHost, Server, Window as ServedWindow};
-use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, RecvCall};
+use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, ReceivedCall};
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, UserId};
 use tairix_log::Sink;
 
@@ -31,6 +30,7 @@ use crate::fs::wrapper_conformance::{
     assert_write_forwards_keeping_its_timer, fixture,
 };
 use crate::sharedreg::KernelHold;
+use crate::test_boot::{serve_next, HostBoot, StoppableTask};
 
 struct NullSink;
 
@@ -66,6 +66,7 @@ fn caps(process: u64) -> TaskCapabilities {
         CapabilitySet::empty(),
         &SINK,
     )
+    .expect("derived")
 }
 
 fn endpoint() -> Arc<CallEndpoint> {
@@ -136,14 +137,14 @@ impl ServedWindow for Window {
 /// reply a tamper rewrites.
 type Tamper = std::boxed::Box<dyn FnMut(Op, &mut [u8], &mut usize) + Send>;
 
-/// A served volume under test: the proxy, its server thread, and what the
+/// A served volume under test: the proxy, its server task, and what the
 /// server saw.
 struct Served {
     fs: ServedFs,
     endpoint: Arc<CallEndpoint>,
     activity: Arc<ServerActivity>,
     seen: StdArc<Mutex<Vec<Op>>>,
-    server: Option<thread::JoinHandle<()>>,
+    server: Option<StoppableTask>,
     /// The driver and window a server not yet started will serve.
     waiting: Option<(RwMockFs, Window)>,
 }
@@ -169,8 +170,10 @@ impl Served {
         served
     }
 
-    /// A volume whose server has not started, so nothing answers its calls.
+    /// A volume whose server has not started, so nothing answers its calls,
+    /// on a boot the calling thread becomes the first task of.
     fn stopped(mut inner: RwMockFs) -> Self {
+        let _boot = HostBoot::claim();
         let endpoint = endpoint();
         let window = Window::leak();
         let offer = ServeOffer {
@@ -178,6 +181,7 @@ impl Served {
             name_matching: inner.name_matching(),
             node_identity: inner.node_identity(),
             attrs: inner.attrs_fs().is_some(),
+            title: true,
             write_refusal: None,
             format: tairix_abi::volume::FormatName::Ext4,
         };
@@ -199,9 +203,7 @@ impl Served {
         let (inner, window) = self.waiting.take().expect("a server not yet started");
         let endpoint = Arc::clone(&self.endpoint);
         let seen = StdArc::clone(&self.seen);
-        self.server = Some(thread::spawn(move || {
-            serve(&endpoint, window, inner, tamper, &seen, reply_len);
-        }));
+        self.server = Some(serve(endpoint, window, inner, tamper, seen, reply_len));
     }
 
     fn ops(&self) -> Vec<Op> {
@@ -211,39 +213,42 @@ impl Served {
 
 impl Drop for Served {
     fn drop(&mut self) {
-        self.endpoint.destroy(&SINK);
+        drop(self.endpoint.destroy(&SINK));
         if let Some(server) = self.server.take() {
-            server.join().expect("the server thread ends");
+            server.stop();
         }
     }
 }
 
+/// Serve `inner` over `endpoint` through `lib/fsserve` from a task of the
+/// calling thread's boot until it is stopped or the endpoint goes: each reply
+/// held to `reply_len` bytes and rewritten by `tamper`, and the op of every
+/// call recorded in `seen`.
 fn serve(
-    endpoint: &CallEndpoint,
+    endpoint: Arc<CallEndpoint>,
     mut window: Window,
     inner: RwMockFs,
     mut tamper: Option<Tamper>,
-    seen: &Mutex<Vec<Op>>,
+    seen: StdArc<Mutex<Vec<Op>>>,
     reply_len: usize,
-) {
-    let host = ServedHost::new(TestClock);
-    let mut server = Server::new(inner, &host).expect("a server");
-    let mut out = vec![0u8; reply_len];
-    while !endpoint.is_closed() {
-        let RecvCall::Received(call) = endpoint.recv_call(usize::MAX) else {
-            thread::yield_now();
-            continue;
+) -> StoppableTask {
+    HostBoot::current().spawn_until_stopped(move |stopped| {
+        let host = ServedHost::new(TestClock);
+        let mut server = Server::new(inner, &host).expect("a server");
+        let mut out = vec![0u8; reply_len];
+        let mut answer = |call: &ReceivedCall, out: &mut [u8]| {
+            let op = decode_request(&call.request).map(|(_, r)| r.op());
+            if let Ok(op) = op {
+                seen.lock().unwrap().push(op);
+            }
+            let mut len = server.answer(&call.request, &mut window, out);
+            if let (Some(tamper), Ok(op)) = (tamper.as_mut(), op) {
+                tamper(op, out, &mut len);
+            }
+            len
         };
-        let op = decode_request(&call.request).map(|(_, r)| r.op());
-        if let Ok(op) = op {
-            seen.lock().unwrap().push(op);
-        }
-        let mut len = server.answer(&call.request, &mut window, &mut out);
-        if let (Some(tamper), Ok(op)) = (tamper.as_mut(), op) {
-            tamper(op, &mut out, &mut len);
-        }
-        let _ = endpoint.reply(call.ticket, &out[..len], &SINK);
-    }
+        while serve_next(&endpoint, &mut out, &SINK, stopped, &mut answer).is_ok() {}
+    })
 }
 
 #[test]
@@ -260,6 +265,7 @@ fn the_proxy_forwards_the_whole_driver_surface() {
 #[test]
 fn lanes_carry_calls_at_once_each_through_its_own_span() {
     use tairix_abi::fsserve::{Lanes, Request};
+    let boot = HostBoot::claim();
     let lanes = Lanes::new(2, 64 * 1024).unwrap();
     let mut inner = RwMockFs::new();
     let root = inner.root();
@@ -268,6 +274,7 @@ fn lanes_carry_calls_at_once_each_through_its_own_span() {
         name_matching: inner.name_matching(),
         node_identity: inner.node_identity(),
         attrs: inner.attrs_fs().is_some(),
+        title: true,
         write_refusal: None,
         format: tairix_abi::volume::FormatName::Smb3,
     };
@@ -289,31 +296,27 @@ fn lanes_carry_calls_at_once_each_through_its_own_span() {
         let endpoint = Arc::clone(&endpoint);
         let spans = StdArc::clone(&spans);
         let mut window = window;
-        thread::spawn(move || {
+        boot.spawn_until_stopped(move |stopped| {
             let host = ServedHost::new(TestClock);
             let mut server = Server::new(inner, &host).expect("a server");
             let mut out = vec![0u8; FSSERVE_REPLY_MAX];
-            while !endpoint.is_closed() {
-                let RecvCall::Received(call) = endpoint.recv_call(usize::MAX) else {
-                    thread::yield_now();
-                    continue;
-                };
+            let mut answer = |call: &ReceivedCall, out: &mut [u8]| {
                 if let Ok((_, request)) = decode_request(&call.request) {
                     if let Some(span) = request.span() {
                         spans.lock().unwrap().push(span.offset());
                     }
                     assert!(!matches!(request, Request::Release { .. }));
                 }
-                let len = server.answer(&call.request, &mut window, &mut out);
-                let _ = endpoint.reply(call.ticket, &out[..len], &SINK);
-            }
+                server.answer(&call.request, &mut window, out)
+            };
+            while serve_next(&endpoint, &mut out, &SINK, stopped, &mut answer).is_ok() {}
         })
     };
     let workers: Vec<_> = proxies
         .drain(..)
         .enumerate()
         .map(|(index, mut fs)| {
-            thread::spawn(move || {
+            boot.spawn(move || {
                 let name = std::format!("lane-{index}");
                 let file = fs
                     .create(root, name.as_bytes(), NodeKind::RegularFile, &ADMIN_RECORD)
@@ -333,10 +336,10 @@ fn lanes_carry_calls_at_once_each_through_its_own_span() {
         })
         .collect();
     for worker in workers {
-        worker.join().expect("a lane's caller ends");
+        worker.join();
     }
-    endpoint.destroy(&SINK);
-    server.join().expect("the server ends");
+    drop(endpoint.destroy(&SINK));
+    server.stop();
     let spans = spans.lock().unwrap();
     assert!(spans.iter().all(|at| *at == 0 || *at == 64 * 1024));
     assert!(spans.contains(&0) && spans.contains(&(64 * 1024)));
@@ -352,6 +355,7 @@ fn lanes_are_held_to_the_window_they_divide() {
         name_matching: inner.name_matching(),
         node_identity: inner.node_identity(),
         attrs: false,
+        title: false,
         write_refusal: None,
         format: tairix_abi::volume::FormatName::Smb3,
     };
@@ -538,7 +542,7 @@ fn a_quarantined_window_is_released_before_file_data_moves_again() {
 #[test]
 fn a_driver_whose_endpoint_is_gone_reads_as_an_offline_device() {
     let mut served = Served::honest(RwMockFs::new());
-    served.endpoint.destroy(&SINK);
+    drop(served.endpoint.destroy(&SINK));
     let root = served.fs.root();
     assert_eq!(served.fs.node_info(root), Err(DriverError::DeviceOffline));
 }
@@ -622,7 +626,7 @@ fn every_offer_is_named_afresh() {
 /// a kill or a stall of its caller would.
 fn abandon(fs: &mut ServedFs, call: HoldCall, liveness: Liveness) {
     let len = encode_request(&call.request(), fs.class, &mut fs.frame).expect("encodes");
-    let ticket = fs.post(len, None).expect("posts");
+    let ticket = fs.post(len, HostBoot::current().task()).expect("posts");
     fs.unsettled = Some(Unsettled::Asked {
         ticket,
         call,
@@ -685,8 +689,8 @@ fn an_abandoned_release_is_waited_out_and_owes_nothing() {
 #[test]
 fn a_kill_abandons_a_hold_call_that_the_next_call_settles() {
     let _kills = crate::procsignal::running_kill_test_lock();
-    let (_, task) = crate::test_boot::claim_scheduler();
     let mut served = Served::stopped(RwMockFs::new());
+    let task = HostBoot::current().task();
     let root = served.fs.root();
     crate::procsignal::clear_kill_gate(task);
     crate::procsignal::install_gate(task, ProcessId(task)).expect("a gate installs");
@@ -694,10 +698,8 @@ fn a_kill_abandons_a_hold_call_that_the_next_call_settles() {
         process: ProcessId(task),
         status: 137,
     };
-    assert_eq!(
-        crate::procsignal::claim_group_kill(None, death, None).len(),
-        1
-    );
+    let claims = crate::procsignal::claimed_kills(None, death, None);
+    assert_eq!(claims.len(), 1);
     assert_eq!(served.fs.pin(root), Err(DriverError::Interrupted));
     assert!(matches!(
         served.fs.unsettled,
@@ -723,7 +725,6 @@ fn a_kill_abandons_a_hold_call_that_the_next_call_settles() {
 /// answers it.
 #[test]
 fn a_stalled_hold_call_fails_later_calls_at_once_until_it_is_answered() {
-    let (_, _) = crate::test_boot::claim_scheduler();
     let mut served = Served::stopped(RwMockFs::new());
     let root = served.fs.root();
     let stopped = Liveness::from(served.activity.mark(), 0);
@@ -756,6 +757,39 @@ fn a_stalled_hold_call_fails_later_calls_at_once_until_it_is_answered() {
 
 /// A release that never reached the driver answers busy, so its registration
 /// keeps it, and a pin owed back stays owed until it can be sent.
+/// A call whose caller no scheduler can park is refused, rather than left to
+/// spin: with no scheduler it posts nothing, and with a park that fails it
+/// withdraws the call and quarantines the window the driver may still write.
+#[test]
+fn a_call_no_scheduler_can_park_fails_closed_and_withdraws() {
+    let mut served = Served::stopped(RwMockFs::new());
+    let root = served.fs.root();
+    let boot = HostBoot::current();
+    let refused = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let _unparkable = boot.enter_unparkable();
+                served.fs.node_info(root).err()
+            })
+            .join()
+            .unwrap()
+    });
+    assert_eq!(refused, Some(DriverError::NotImplemented));
+    assert_eq!(served.endpoint.outstanding(), 0, "the call was withdrawn");
+    assert!(
+        served.fs.quarantined,
+        "the driver may still write its window"
+    );
+    let unscheduled = std::thread::scope(|scope| {
+        scope
+            .spawn(|| served.fs.node_info(root).err())
+            .join()
+            .unwrap()
+    });
+    assert_eq!(unscheduled, Some(DriverError::NotImplemented));
+    assert_eq!(served.endpoint.outstanding(), 0, "nothing was posted");
+}
+
 #[test]
 fn what_never_reached_the_driver_is_kept_to_be_sent() {
     let mut served = Served::honest(RwMockFs::new());
@@ -765,7 +799,7 @@ fn what_never_reached_the_driver_is_kept_to_be_sent() {
         .create(root, b"f", NodeKind::RegularFile, &ADMIN_RECORD)
         .unwrap();
     let held = served.fs.pin(file).unwrap();
-    served.endpoint.destroy(&SINK);
+    drop(served.endpoint.destroy(&SINK));
     assert_eq!(served.fs.unpin(held), Err(DriverError::Busy));
     served.fs.unsettled = Some(Unsettled::Owed(held));
     assert_eq!(served.fs.node_info(file), Err(DriverError::DeviceOffline));

@@ -555,6 +555,29 @@ pub fn resample_window(
     window: Region,
     out: &mut [u8],
 ) -> Result<(), ResampleError> {
+    resample_window_in(
+        src,
+        region,
+        (dest_width, dest_height),
+        (window, out),
+        &mut ResampleScratch::default(),
+    )
+}
+
+/// [`resample_window`] working in `scratch`: a caller resampling every frame
+/// of a stream holds one, so a frame refills the buffers an earlier one grew
+/// rather than allocating its own.
+///
+/// # Errors
+///
+/// As [`resample_window`].
+pub fn resample_window_in(
+    src: &Rgba8Image<'_>,
+    region: Region,
+    (dest_width, dest_height): (u32, u32),
+    (window, out): (Region, &mut [u8]),
+    scratch: &mut ResampleScratch,
+) -> Result<(), ResampleError> {
     let band = Band {
         window,
         dest_width,
@@ -571,7 +594,7 @@ pub fn resample_window(
     // tail this splits off is always empty.
     let (quads, _tail) = out.as_chunks_mut::<CHANNELS>();
     let rows = quads.chunks_exact_mut((window.width as usize).max(1));
-    filter_band(src, region, band, rows, &mut ResampleScratch::default())
+    filter_band(src, region, band, rows, scratch)
 }
 
 /// Resample `region` of the `width`×`height` premultiplied image `src` into

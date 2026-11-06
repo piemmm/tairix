@@ -374,6 +374,49 @@ every animation on it is paced by. A presenter that was replaced — the
 driver restarted under the session — is noticed by its buffers and plane no
 longer being held, and the layers are rebuilt.
 
+## Screen capture
+
+Nothing reads scan-out back. No memory holds the screen as it is seen —
+windows on layers are blended during scan-out, and the pointer rides the cursor
+plane — so a capture is the scene composed afresh, through the one composite
+path, into a surface the session owns (`plans/CAPTURE.md` CP5).
+
+- **The tap.** `Compositor::arm_capture` takes a `CaptureTap`: the desktop
+  rectangle captured, the one window shown where only it is (with its
+  transients, every other left out, so the tap is armed once however the
+  windows around it change), the windows left out (the capture's own chrome),
+  the windows blanked (the lock and the authorisation sheet), and whether the
+  pointer is shown. A listed window's transients go with it, and a window both
+  left out and blanked is blanked. An area that is empty or off the desktop is
+  refused, and a tap lasts until `disarm_capture` or the desktop changes size.
+  No window, display or protocol request reaches one.
+- **What it is owed.** Every change to the scene reaches the tap through the
+  funnels the frame's damage takes, a window's own change on a free layer
+  included, and where the tap shows the pointer the overlay's footprint is
+  diffed whatever carries it, the cursor plane included. What the frame owes
+  only for how it was shown — a layer given back, a promoted window's base,
+  the screen reveal — owes the tap nothing. `take_capture_changes` swaps the
+  region with the caller's, so a recording's ring allocates nothing once both
+  have grown.
+- **What it composes.** `compose_capture` composes a region into a surface the
+  size of the area, in bands across the job runner: at full strength whatever
+  the reveal, at desktop resolution, a left-out window as though absent, a
+  blanked one as opaque black over its bounds with no shadow, and the pointer
+  overlay from its own images. A frost is blurred afresh from what the capture
+  shows beneath it rather than laid from a retained field, which holds what the
+  capture leaves out, and the furniture cache is read but never filled. Every
+  pixel is opaque, so the premultiplied surface is already the straight-alpha
+  RGBA a PNG encoder reads.
+- **The live frame is untouched.** A capture marks and clears no damage, owes
+  the display nothing, counts nothing in `FrameStats` or `frame_totals`, and
+  refreshes no field and settles no pointer footprint. Memory the heap or the
+  reserved blur scratch refuses is reported as `CaptureError::OutOfMemory`,
+  never left as a silent hole.
+- **One picture.** The tests hold a capture to the software composite of the
+  same scene whether the frame was composited, layered, promoted or scaled, to
+  a twin that never had the windows the tap leaves out, and to a twin that
+  composed no capture, frame for frame.
+
 ## Premultiplied alpha
 
 Working in premultiplied alpha makes the *over* operator a single
@@ -680,8 +723,9 @@ actions, reporting each through `InputResponse`:
   the pair. The pairing rule is the shared one every other surface uses
   (`tairix_input`'s `DoubleClickTracker`, keyed on the window id), so a
   title-bar double-click and a file-manager double-click cannot diverge. A
-  window that cannot be resized fails the size request closed, so the
-  gesture changes nothing there.
+  window that cannot be maximized — a fixed one, or a tool window, which is
+  resized by its edges alone — fails the size request closed, so the gesture
+  changes nothing there.
 - **Click-to-activate** — a primary-button press over a window raises it
   to the top of the z-order and gives it focus, returning
   `Activated { window, local }` with the press position in the window's
@@ -701,8 +745,8 @@ actions, reporting each through `InputResponse`:
   where the desktop layer's owner reads it from, so the response need not
   duplicate it. The router takes
   no action of its own for either — it only names where the input landed,
-  leaving the desktop layer's owner to interpret it (hover feedback,
-  moving a selection, a drag it started itself).
+  leaving the desktop layer's owner to interpret it (moving a selection, a
+  drag a press of its own started; a hover over an icon changes nothing).
 - **Move-grabs** — dragging a window is an explicit grab started by
   `InputRouter::begin_move` (which decorations call when a press lands on
   a window's move handle, e.g. a title bar), not a behaviour armed on
@@ -1902,18 +1946,27 @@ window**: the decorated sibling of a popup (`plans/APPWIN.md` AW7).
 
 - **Its own request.** `WindowRequest::CreateTool { parent_window_id,
   shm_handle, event_endpoint, frame_count, width_px, height_px, stride_bytes,
-  format, offset_x, offset_y, carry, title }`, reached from
+  format, offset_x, offset_y, carry, title, sizing }`, reached from
   `WindowClient::create_tool` with a `tairix_window::ToolSpec` — a
-  `TransientSpec` plus the offset, the carry and the title. It is validated, owned and
-  budgeted exactly as a popup is, and its offset places its *client* from the
+  `TransientSpec` plus the offset, the carry, the title and the sizing. It is
+  validated, owned and budgeted exactly as a popup is, its sizing decoded and
+  refused as a window's is, and its offset places its *client* from the
   parent's client origin.
 - **Framed by the window manager.** `ShellWindowHost::tool_opened` opens it
   through `DesktopShell::open_tool_window` as a *floating* transient
-  (`Compositor::add_floating_window`) wearing `WindowFrame::tool()` — the
+  (`Compositor::add_floating_window`) wearing `WindowFrame::tool` — the
   window's rim, plate and hit map around a mini band on
   `tool_title_bar_height`, its title in the caption face, Close alone — kept
-  wholly on screen, off the taskbar and the window picker, never resized.
+  wholly on screen, off the taskbar and the window picker.
   `SetTitle` retitles its band.
+- **Resized only by its edges, and only where it asks.** A `sizing` with a
+  range gives the frame the window's resize edges; the session bounds a drag
+  to that range (`Compositor::set_window_client_size_range`) and tells the
+  owner each size it settles at as `WindowEvent::Resized` on the tool window's
+  own id. None is maximized (`WindowFrame::maximizes`): a double-click on its
+  band or a fullscreen request leaves it as it is. `SetSizing` restates its
+  range and pulls it inside at once; one changing its kind is refused
+  (`NotSupported`).
 - **The keyboard only when pressed.** It opens without focus, and
   `Compositor::family_front` passes floating transients over, so raising its
   owner — from the bar or the window picker — gives the keyboard to the
@@ -2328,15 +2381,17 @@ The channel also carries the desktop's **trusted file picker**
 (`plans/APPWIN.md` AW5, `plans/CAPABILITY_USE.md` CU6):
 `WindowRequest::PickFile` asks the session to browse on the app's
 behalf, and the engine keys the pick to the attested window owner,
-enforces one pending pick per window, and requires exactly one
+enforces one pending pick per window, at most `PICK_MAX_OPEN` per
+application and one folder pick per application at a time — each refusal
+recording nothing and audited — and requires exactly one
 conclusion — a `WindowEvent::FilePicked` carrying the kernel's one-shot
 `fd_grant` delegation handle, bound to the owner's attested process
 *instance* so a pick that concludes after the app exited can never be
 redeemed by a later holder of its task id, or a
-`WindowEvent::PickCancelled` — per accepted request. The picker UI is a
-session-owned window driving the same shared `lib/browse` engine as the
-files app; the requesting app receives only the redeemable handle, never
-a path or any browsing authority of its own.
+`WindowEvent::PickCancelled` — per accepted request. Each pick's UI is a
+session-owned window, several up at once, driving the same shared
+`lib/browse` engine as the files app; the requesting app receives only the
+redeemable handle, never a path or any browsing authority of its own.
 
 A pick has a purpose. `PickPurpose::Open` chooses an existing file,
 delegated as the requester is handed any document: read-write where its
@@ -2406,21 +2461,43 @@ carried on, so it cannot begin anywhere else. Only what the drag shows and
 what a slot matches cross (`DragItems`): the pressed item's *name*, how many
 bytes of its ending the listing hides, the filetype its volume records, the
 count, and for each of the first `DRAG_SHOWN_MAX` (4) items its class picture
-(an `IconAsset`, the asset id a menu row also names a picture by) and where
-that picture's centre stood in the window from the press, or nowhere. The
+(an `IconAsset`, the asset id a menu row also names a picture by), where that
+picture's centre stood in the window from the press, or nowhere, and, for an
+application bundle or a RISC OS application, its own picture (`DragOwnIcon`):
+its source, an absolute `IconPath` — the bound and type a menu row's bundle
+has — and the `DocumentStamp` its listing named. The
 session matches the name and filetype against each slot's declared types as
 the pointer passes, lighting a slot that takes it, shows the items as their
 listing does — one as its tile, several as a stack gathering from where they
 stood (`docs/src/desktop/session.md`) — and the dragging application keeps the
 file. The decoder takes exactly one picture for each item shown, a place only
-where its flag says there is one, and a hidden ending only as a whole tail of
-the name, never all of it. The drag concludes with one `WindowEvent::DragEnded { window_id, site }`;
+where its flag says there is one, an own picture only where its flags say so
+and only at an absolute path whose last component names what its source says,
+and a hidden ending only as a whole tail of the name, never all of it. The drag concludes with one `WindowEvent::DragEnded { window_id, site }`;
 dropped on a taker (`DropSite::Application`), `TakeDropTarget` yields that
 application's entry binary
 and whether it edits its documents, and the dragging application opens the
-file for it exactly as its own "Open With" would. So no path and no authority
-reaches the session, and nothing is opened on an application's word. Like a
+file for it exactly as its own "Open With" would. So no authority reaches the
+session — an own picture's path names only what the session draws under its
+own identity — and nothing is opened on an application's word. Like a
 pick, a drag concludes only through `WindowServer::conclude_drag`.
+
+A drop on the desktop (`DropSite::Desktop`) is **landed** by its application:
+`WindowRequest::DropLanding { window_id, serial, step }` steps it, `Making {
+item, name }` before an item's first write — items numbered in drag order,
+the lead 0 — then `Made { item, outcome }` (`Created`, `Replaced`, `Merged`,
+`Skipped` or `Failed`), and `Ended` on every way the drop ends. The engine
+takes a step only from the attested owner of the drag's window, for a serial
+`conclude_drag` recorded as a desktop drop, items below the count `BeginDrag`
+stated and strictly in order, each `Made` naming the last `Making`, the name a
+file name (`tairix_path::validate_file_name`), and nothing after `Ended`. A
+window lands at most `DROP_LANDINGS_MAX` (4) drops: a fifth ends the oldest,
+and the window going ends every one it had. The file manager makes each step
+a call from the thread writing the items, so the desktop knows a name before
+its first byte, and an end a job could not send is posted from its loop.
+A desktop report holds its folder for every report of the one place — one
+that follows the last and names its folder goes on with it — so a report a
+later one superseded there is still read (`QueryDragSpot`).
 
 A save drag is **offered** to the window under the pointer:
 `WindowEvent::SaveOffered { window_id, serial, x, y }`, numbered, at a

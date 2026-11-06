@@ -87,6 +87,8 @@ tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # crate falls back to its host transport.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+# The key the icon desk is built over.
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
     "program",
 ] }

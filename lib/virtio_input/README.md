@@ -30,13 +30,13 @@ See `docs/src/drivers/input.md` for the full description and test surface.
 - `VIRTIO_INPUT_DEVICE_ID` — the virtio device id (18) the driver crate's
   `BIND_KEYS` match key is built from (the single source of truth, §2.2).
 - `VirtioKeyboardConsole` (`console` module) — the keyboard producer half:
-  `feed` turns each decoded `evdev`-keycode `Key` `InputEvent` edge into the
-  `tairix_abi::input::KeyInput` record a driver injects through `key_inject`,
-  tracking modifiers (over the shared `tairix_input::ModifierState`, so the
-  left/right collapsing rule is one definition, §2.2) + caps/num lock and
-  resolving the US layout through the shared `tairix_keymap::key_input` map
-  (the one `Key`→record definition the `lib/hid` USB console producer reaches
-  too). A modifier edge that changes the *observable* held set emits a
+  `feed` names each decoded `evdev`-keycode `Key` `InputEvent` edge's physical
+  key through one table (the key's HID usage), resolves it through the shared
+  `tairix_input::KeyboardState` (the modifiers, caps/num lock and US layout the
+  `lib/hid` console producer runs too, §2.2), and builds the
+  `tairix_abi::input::KeyInput` record a driver injects through `key_inject`
+  with the shared `tairix_keymap::key_record`, carrying the physical key. A
+  modifier edge that changes the *observable* held set emits a
   `KeyInput::ModifiersChanged` record — the desktop needs it to qualify a
   gesture that is not a key — while a repeat, or letting go of one shift key
   while the other is held, emits nothing. Allocation-free and fail-closed
@@ -59,4 +59,5 @@ exchanges are governed by `lib/abi`.
 
 `cargo test -p tairix-virtio-input` — decode, multi-touch framing,
 poll-drain, and teardown unit tests against the in-process `lib/virtio` `MockTransport` / `MockHost`, plus the
-`console` producer's keycode/modifier/lock resolution tests (`AGENTS.md` §7).
+`console` producer's keycode-table, physical-key, modifier and lock tests
+(`AGENTS.md` §7).

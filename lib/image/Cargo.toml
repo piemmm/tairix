@@ -28,6 +28,8 @@ tairix-raster = { path = "../raster", version = "=0.0.0" }
 # memory refuses one and the decode reports that rather than aborting.
 tairix-util = { path = "../util", version = "=0.0.0" }
 
+# The VP8 decoder a lossy WebP picture is one keyframe of.
+tairix-video = { path = "../video", version = "=0.0.0" }
 # The shared XML element scanner OpenRaster's layer stack is read through.
 tairix-xml = { path = "../xml", version = "=0.0.0" }
 
@@ -36,3 +38,5 @@ tairix-xml = { path = "../xml", version = "=0.0.0" }
 # seam: one place picks the per-run seed, logs it, and bounds the smoke/soak
 # loop. Test scaffolding only; never in a TAIRiX build.
 tairix-fuzzseed = { path = "../../tests/fuzzseed" }
+# The VP8 bitstream writer the lossy WebP tests are drawn from.
+tairix-video = { path = "../video", version = "=0.0.0", features = ["fixture"] }

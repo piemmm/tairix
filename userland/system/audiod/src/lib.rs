@@ -54,12 +54,12 @@
 //!
 //! Every `audio-v1` reply is a fully-encoded frame carrying a typed
 //! [`Errno`](tairix_abi::Errno). A capture open without `CAP_AUDIO_CAPTURE`,
-//! a stream id that is not the caller's, a region whose length does not match
-//! the agreed geometry, a device that faulted — each is a refusal, never a
-//! panic and never a partially-applied action. Every security decision lands
-//! on the audit log with a stable event id, and a capture *refusal* is
-//! recorded as firmly as a grant: "who tried" is the question an incident
-//! asks.
+//! a monitor opened outside its own session's room, a stream id that is not
+//! the caller's, a region whose length does not match the agreed geometry, a
+//! device that faulted — each is a refusal, never a panic and never a
+//! partially-applied action. Every security decision lands on the audit log
+//! with a stable event id, and a capture *refusal* is recorded as firmly as a
+//! grant: "who tried" is the question an incident asks.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

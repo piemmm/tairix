@@ -69,10 +69,10 @@ use tairix_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_B
 use tairix_kernel::dispatch_core::{dispatch_via_slot, read_raw_args, resolve_user_fault_via_slot};
 use tairix_kernel::spawn_layout::USER_STACK_COMMIT_PAGES;
 use tairix_kernel_core::{
-    spawn_kthread, AddressSpaceRegistry, BootReserve, DispatchCallbackSlot, EmbeddedProgram,
-    InitSpawnCtx, KernelArch, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap,
-    ProcessWait, ProgramRegistry, RandomReserve, SchedWaitQueueArch, Yielder,
-    NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY, NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
+    spawn_kthread, AddressSpaceRegistry, DispatchCallbackSlot, EmbeddedProgram, InitSpawnCtx,
+    KernelArch, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap, ProcessWait,
+    ProgramRegistry, RandomReserve, SchedWaitQueueArch, Yielder, NULL_DMA_ALLOC_FACILITY,
+    NULL_MMIO_MAP_FACILITY, NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
 };
 use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, PortRegistry, RecvCall};
 use tairix_kernel_irq::{IrqTable, UnsupportedController};
@@ -195,11 +195,8 @@ const FAIL_POLL: NonZeroU16 = fail_point!(12);
 const FAIL_PARENT_STOPPED: NonZeroU16 = fail_point!(14);
 const FAIL_ENDPOINT: NonZeroU16 = fail_point!(15);
 const FAIL_SERVER: NonZeroU16 = fail_point!(16);
-const FAIL_IPC_CONTROL: NonZeroU16 = fail_point!(17);
 #[cfg(migration_smp)]
 const FAIL_SECONDARY: NonZeroU16 = fail_point!(18);
-#[cfg(migration_smp)]
-const FAIL_NO_MIGRATION: NonZeroU16 = fail_point!(19);
 /// The direct physical map could not be installed over the board's RAM.
 const FAIL_PHYSMAP: NonZeroU16 = fail_point!(20);
 /// The endpoint served a different number of calls than the role makes.
@@ -207,9 +204,23 @@ const FAIL_ROUNDS: NonZeroU16 = fail_point!(21);
 /// The caller migrated more than [`MAX_MIGRATIONS`] times.
 #[cfg(migration_smp)]
 const FAIL_BOUNCED: NonZeroU16 = fail_point!(22);
+/// The random reserve could not be seeded.
+const FAIL_SEED: NonZeroU16 = fail_point!(23);
+/// Base finisher for a migration run that never saw the caller on two CPUs;
+/// the observed-CPU mask is added.
+#[cfg(migration_smp)]
+const FAIL_NO_MIGRATION: NonZeroU16 = fail_point!(24);
+/// Base finisher for a failing IPC control role; its exit code is added.
+const FAIL_IPC_CONTROL: NonZeroU16 = fail_point!(40);
 /// Base finisher for a non-zero parent exit; the parent's diagnostic exit
 /// code is added so the failing role/site is identifiable in the finisher.
 const FAIL_EXIT_BASE: NonZeroU16 = fail_point!(100);
+
+// A composed report must stay in its own band: a mask landing on the IPC
+// base, or either on a point code, names the wrong failure.
+#[cfg(migration_smp)]
+const _: () = assert!(FAIL_NO_MIGRATION.get() + (1 << CPU_COUNT) - 1 < FAIL_IPC_CONTROL.get());
+const _: () = assert!(FAIL_SEED.get() < FAIL_IPC_CONTROL.get());
 
 /// The test's heap, in bytes.
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
@@ -385,6 +396,11 @@ fn bring_up_board() -> u64 {
     let Ok(fdt) = Fdt::new(DTB_BLOB) else {
         qemu_exit::exit_failure(FAIL_GIC);
     };
+    // The boot seed, captured as the boot path captures it: on a core with
+    // no hardware RNG it is the reserve's one dependable source.
+    if let Some(seed) = fdt.chosen_rng_seed() {
+        tairix_kernel_core::random::capture_boot_entropy_seed(seed);
+    }
     let counter_hz = timer_frequency_hz(&fdt);
     if counter_hz == 0 {
         qemu_exit::exit_failure(FAIL_ZERO_FREQ);
@@ -506,6 +522,10 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
         )
     };
     let sched_arch = Arc::new(Aarch64BinArch::new(sched_inner));
+    // Seeded as the kernel's is, since a child's stack canary is drawn from it.
+    let Ok((reserve, _)) = tairix_kernel_core::random::seeded_reserve(&sched_arch) else {
+        qemu_exit::exit_failure(FAIL_SEED);
+    };
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(CPU_COUNT), sched_arch) else {
         qemu_exit::exit_failure(FAIL_SCHED_NEW);
     };
@@ -519,7 +539,7 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
         ipc: Box::leak(Box::new(RwLock::new(PortRegistry::new()))),
         aspaces: Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new()))),
         rng: Box::leak(Box::new(RwLock::new(
-            Box::new(BootReserve::new()) as Box<dyn RandomReserve + Send + Sync>
+            Box::new(reserve) as Box<dyn RandomReserve + Send + Sync>
         ))),
         irq_table: Box::leak(Box::new(IrqTable::new(0))),
     }
@@ -530,13 +550,15 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
 /// posted.
 fn install_echo_server(sys: &Subsystems) -> Arc<AtomicU64> {
     let empty = CapabilitySet::empty();
-    let creator = TaskCapabilities::derive(
+    let Ok(creator) = TaskCapabilities::derive(
         ProcessId(0x4d49_4752),
         UserId(0),
         empty,
         empty,
         &SERIAL_SINK,
-    );
+    ) else {
+        qemu_exit::exit_failure(FAIL_ENDPOINT);
+    };
     let endpoint = match CallEndpoint::create(
         EndpointId(MIGRATION_ENDPOINT),
         &creator,
@@ -570,8 +592,12 @@ fn install_echo_server(sys: &Subsystems) -> Arc<AtomicU64> {
             let id = body_id.load(Ordering::Acquire);
             body_endpoint.record_server_task(id);
             loop {
-                tairix_kernel_core::waitq::SERVE_WAITQ
-                    .register(id, tairix_kernel_core::waitq::NO_DEADLINE);
+                if tairix_kernel_core::waitq::SERVE_WAITQ
+                    .register(id, tairix_kernel_core::waitq::NO_DEADLINE)
+                    .is_err()
+                {
+                    qemu_exit::exit_failure(FAIL_SERVER);
+                }
                 match body_endpoint.recv_call(8) {
                     RecvCall::Received(call) => {
                         tairix_kernel_core::waitq::SERVE_WAITQ.deregister(id);
@@ -835,6 +861,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         sys.peer_watch,
         wait_producer,
         &AARCH64_PROCESS_SPAWN,
+        sys.rng,
     );
 
     let init_ctx = KernelInitSpawner::new(

@@ -1,6 +1,8 @@
 //! Host tests of the hold rule alerts and owner-modal dialogs share.
 
-use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode};
+use tairix_abi::input::{
+    KeyInput, KeyValue, Modifiers, NamedKeyCode, PhysicalKey, PointerButtonCode,
+};
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_wm::{Compositor, Point, Surface, WindowId};
 
@@ -77,6 +79,7 @@ fn a_held_window_still_hears_a_release_and_nothing_that_starts_anything() {
         key: KeyInput::Released {
             key: KeyValue::Named(NamedKeyCode::Enter),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::UNKNOWN,
         },
     };
     assert!(reaches_held_window(&up));
@@ -85,6 +88,7 @@ fn a_held_window_still_hears_a_release_and_nothing_that_starts_anything() {
         key: KeyInput::Pressed {
             key: KeyValue::Named(NamedKeyCode::Enter),
             modifiers: Modifiers::default(),
+            physical: PhysicalKey::UNKNOWN,
         },
     };
     assert!(!reaches_held_window(&down));
@@ -111,10 +115,12 @@ fn only_a_button_or_a_key_going_down_is_a_press() {
     assert!(is_press(&key(KeyInput::Pressed {
         key: KeyValue::Char(' '),
         modifiers: Modifiers::default(),
+        physical: PhysicalKey::SPACE,
     })));
     assert!(!is_press(&key(KeyInput::Released {
         key: KeyValue::Char(' '),
         modifiers: Modifiers::default(),
+        physical: PhysicalKey::SPACE,
     })));
     assert!(!is_press(&WindowEvent::Scrolled {
         window_id: 4,

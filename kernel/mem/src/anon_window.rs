@@ -105,7 +105,8 @@ impl AnonWindowMap {
     ///   address space.
     /// * [`AnonError::OutOfMemory`] if no gap in the window can satisfy the
     ///   request (the window is exhausted — a deterministic, fail-closed
-    ///   refusal).
+    ///   refusal), or the placement's record cannot be allocated; nothing is
+    ///   placed either way.
     pub fn allocate(&mut self, page_count: u64) -> Result<u64, AnonError> {
         if page_count == 0 {
             return Err(AnonError::ZeroLength);
@@ -114,6 +115,7 @@ impl AnonWindowMap {
         let placed = self
             .regions
             .place(self.window.clone(), bytes, ())
+            .map_err(|_| AnonError::OutOfMemory)?
             .ok_or(AnonError::OutOfMemory)?;
         Ok(placed.start)
     }
@@ -153,27 +155,42 @@ impl AnonWindowMap {
     /// range holding one page this window has not handed out is refused
     /// whole, so a release still reaches only the caller's own pages.
     ///
+    /// Cutting pages out of the middle of a placement records the part past
+    /// them, which [`Self::prepare_release_pages`] makes room for: the live
+    /// space prepares before it tears a page down, so the release that
+    /// follows the teardown is never refused.
+    ///
     /// # Errors
     ///
     /// [`AnonError::NotMapped`] if any page of the range is not live in this
-    /// window, and [`AnonError::Overflow`] if the count's byte span does not
-    /// fit the address space.
+    /// window, [`AnonError::Overflow`] if the count's byte span does not fit
+    /// the address space, and [`AnonError::OutOfMemory`] if the cut's record
+    /// cannot be allocated; nothing is released then.
     pub fn release_pages(&mut self, base_va: u64, page_count: u64) -> Result<(), AnonError> {
         let extent = self.held_extent(base_va, page_count)?;
-        self.regions.remove_range(extent);
+        self.regions
+            .remove_range(extent)
+            .map_err(|_| AnonError::OutOfMemory)?;
         Ok(())
     }
 
     /// Confirm every page of the `page_count` pages from `base_va` is live in
-    /// this window, **without** mutating any state — the non-mutating half of
-    /// [`Self::release_pages`], so the live space can refuse before it tears
-    /// any page down.
+    /// this window and make room for the record releasing them may need: the
+    /// half of [`Self::release_pages`] the live space runs before it tears any
+    /// page down.
     ///
     /// # Errors
     ///
-    /// As [`Self::release_pages`].
-    pub fn validate_pages(&self, base_va: u64, page_count: u64) -> Result<(), AnonError> {
-        self.held_extent(base_va, page_count).map(|_| ())
+    /// As [`Self::release_pages`]; nothing is released either way.
+    pub fn prepare_release_pages(
+        &mut self,
+        base_va: u64,
+        page_count: u64,
+    ) -> Result<(), AnonError> {
+        self.held_extent(base_va, page_count)?;
+        self.regions
+            .try_reserve(1)
+            .map_err(|_| AnonError::OutOfMemory)
     }
 
     /// The byte extent of `page_count` pages from `base_va`, once every page
@@ -216,6 +233,12 @@ impl AnonWindowMap {
     #[must_use]
     pub fn owns(&self, base_va: u64) -> bool {
         self.window.contains(&base_va)
+    }
+
+    /// The window's virtual byte range.
+    #[must_use]
+    pub fn span(&self) -> Range<u64> {
+        self.window.clone()
     }
 
     /// `true` iff `va` (any address, not only a base) lies inside a *live*
@@ -404,11 +427,53 @@ mod tests {
             "one unheld page refuses the whole release"
         );
         assert!(w.covers(b + 3 * PAGE), "nothing was cut");
-        assert_eq!(w.validate_pages(b + PAGE, 3), Ok(()));
-        assert_eq!(w.validate_pages(b + PAGE, 4), Err(AnonError::NotMapped));
+        assert_eq!(w.prepare_release_pages(b + PAGE, 3), Ok(()));
+        assert_eq!(
+            w.prepare_release_pages(b + PAGE, 4),
+            Err(AnonError::NotMapped)
+        );
         // A zero count spans nothing, so it names no live page — the same
         // fail-closed answer `validate` gives it.
-        assert_eq!(w.validate_pages(b, 0), Err(AnonError::NotMapped));
+        assert_eq!(w.prepare_release_pages(b, 0), Err(AnonError::NotMapped));
+    }
+
+    #[test]
+    fn a_placement_refused_for_want_of_memory_places_nothing() {
+        let mut w = window();
+        assert_eq!(
+            tairix_fuzzseed::meter::refusing_above(0, || w.allocate(2)),
+            Err(AnonError::OutOfMemory)
+        );
+        assert_eq!(w.live(), 0);
+        assert!(!w.covers(WINDOW_BASE));
+        assert_eq!(w.allocate(2), Ok(WINDOW_BASE), "the retry places it");
+    }
+
+    /// A release prepared before any page goes asks the heap for nothing
+    /// after: here its cut lands in a full node, which the cut's record must
+    /// split.
+    ///
+    /// Regression: with one placement the cut fitted the node it was in, so
+    /// the test passed whether or not the room was made.
+    #[test]
+    fn a_prepared_release_needs_no_memory() {
+        // Eleven placements fill one node.
+        let mut w = AnonWindowMap::new(VirtAddr::new(WINDOW_BASE), 64)
+            .expect("a page-aligned, non-zero window is valid");
+        let mut placed = [0u64; 11];
+        for base in &mut placed {
+            *base = w.allocate(3).expect("fits");
+        }
+        let a = placed[5];
+        w.prepare_release_pages(a + PAGE, 1).expect("held pages");
+        assert_eq!(
+            tairix_fuzzseed::meter::refusing_above(0, || w.release_pages(a + PAGE, 1)),
+            Ok(())
+        );
+        assert!(w.covers(a));
+        assert!(!w.covers(a + PAGE));
+        assert!(w.covers(a + 2 * PAGE), "the part past the cut stays placed");
+        assert_eq!(w.live(), 12);
     }
 
     #[test]

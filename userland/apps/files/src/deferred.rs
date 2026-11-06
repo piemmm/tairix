@@ -261,8 +261,12 @@ pub enum ReadKind {
     /// Where an eject's volume is bound, so the loop takes its windows off it
     /// first.
     Locate,
+    /// A shown bundle's follow let go: its waits ended and its files closed
+    /// on its own volume, holding nothing once done, before an eject of that
+    /// volume its files would otherwise hold.
+    Unfollow,
     /// An eject, waiting only for the read under way on its volume and the
-    /// writes queued there.
+    /// writes and the follows let go queued there.
     Settle,
     /// A document the user opened: what they are waiting for.
     Open,
@@ -300,9 +304,10 @@ pub enum ReadKind {
 /// waiting. Nothing starves, since each kind is finite and refilled only by
 /// the user asking again or, for a folder's changes, by a watch the kernel
 /// paces.
-pub const READ_ORDER: [ReadKind; 16] = [
+pub const READ_ORDER: [ReadKind; 17] = [
     ReadKind::Write,
     ReadKind::Locate,
+    ReadKind::Unfollow,
     ReadKind::Settle,
     ReadKind::Open,
     ReadKind::Save,

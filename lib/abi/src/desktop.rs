@@ -360,6 +360,14 @@ pub const DOUBLE_CLICK_MIN: Duration64 = Duration64::from_millis(100);
 /// separate clicks on one thing would read as one gesture.
 pub const DOUBLE_CLICK_MAX: Duration64 = Duration64::from_millis(2_000);
 
+/// The smallest UI scale a desktop draws at, as a percentage of the
+/// reference density: a smaller one leaves the desktop unusably tiny.
+pub const UI_SCALE_MIN_PERCENT: u32 = 25;
+
+/// The largest UI scale a desktop draws at, as a percentage of the reference
+/// density: a larger one risks overflowing physical lengths.
+pub const UI_SCALE_MAX_PERCENT: u32 = 800;
+
 /// The double-click interval a desktop publishes until its user chooses
 /// another.
 pub const DOUBLE_CLICK_DEFAULT: Duration64 = Duration64::from_millis(500);

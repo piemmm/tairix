@@ -26,7 +26,10 @@
 //! the volume's single writer, droppable on demand — and classifies it
 //! through the `kernel/mem::reclaim` admission gate. A refusal starts
 //! the cache poisoned: every lookup misses, every offer is refused, and
-//! the driver keeps serving through the full pipeline (fail closed).
+//! the driver keeps serving through the full pipeline (fail closed). A
+//! cache the heap cannot build at all — its ledger, or the cell its mounts
+//! share it through — is refused for memory, and the mount it was for with
+//! it.
 //!
 //! The cache is bounded by a [`CacheBudget`] and accounted in a
 //! [`CacheAccounting`] ledger. Every operation first applies the
@@ -36,9 +39,11 @@
 //! pages are handed to `ramzip` (`plans/SWAPSWAPSWAP.md` section 6).
 //! Growth is admitted only at normal pressure and never into the
 //! reserve ([`tairix_reclaim::PressureGauge::growth_permitted`]). Inserts
-//! over the
-//! hard limit first evict least-recently-used entries down to the low
-//! watermark (hysteresis).
+//! over the hard limit first evict least-recently-used entries down to the
+//! low watermark (hysteresis). A cluster the heap cannot index is not
+//! retained: its copy and its room in both indexes are had before anything
+//! is evicted for it. Room a shrink or an invalidation frees goes back to
+//! the heap at the first operation above normal pressure.
 //!
 //! # Coherence and secret hygiene
 //!
@@ -46,23 +51,23 @@
 //! driver invalidates on every block free and purges on transaction
 //! rollback (the `tairix_drv_fs_arxfs::ClusterCache` contract), so an
 //! entry can never outlive the bytes it was derived from. The plaintext
-//! is user data, decrypted when the volume is encrypted: every
-//! buffer is volatilely wiped before its entry is released — on
-//! invalidation, eviction, purge, replacement, and teardown.
+//! is user data, decrypted when the volume is encrypted: every buffer
+//! erases itself as its entry is released, on whichever path releases it.
 
-use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use tairix_abi::DriverError;
+use tairix_collections::OrderedMap;
 use tairix_drv_fs_arxfs::{ClusterCache, MAX_CLUSTER_PLAINTEXT};
 use tairix_kernel_core::{CacheClass, CacheControl, SleepLock, CACHE_CONTROL};
 use tairix_log::Sink;
 use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
-    CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost,
-    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity, MAP_ENTRY_OVERHEAD,
+    CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, PressureBand,
+    RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity, MAP_ENTRY_OVERHEAD,
 };
-use zeroize::Zeroize;
+use tairix_util::secret::WipedBuf;
 
 /// The fixed `cache` label this cache's audit records carry.
 const CACHE_LABEL: &str = "transform";
@@ -71,7 +76,7 @@ const CACHE_LABEL: &str = "transform";
 /// run-covering invalidation), its plaintext, and its recency tick.
 struct Entry {
     stored: u64,
-    plain: Vec<u8>,
+    plain: WipedBuf,
     tick: u64,
 }
 
@@ -105,9 +110,12 @@ pub struct TransformClusterCache {
     /// ticks are unique and the LRU index is keyed by them.
     tick: u64,
     /// Retained clusters, keyed by the run's first stored block.
-    entries: BTreeMap<u64, Entry>,
+    entries: OrderedMap<u64, Entry>,
     /// LRU index: tick (oldest first) to entry key.
-    lru: BTreeMap<u64, u64>,
+    lru: OrderedMap<u64, u64>,
+    /// A cluster left the indexes outside a forced shrink, so they may hold
+    /// room they no longer need.
+    slack: bool,
 }
 
 impl TransformClusterCache {
@@ -118,13 +126,19 @@ impl TransformClusterCache {
     /// classification gate; a refusal poisons the cache from birth, so
     /// the volume still works and every read runs the full pipeline —
     /// fail closed, never an unclassified cache.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfMemory`] when the cache's ledger cannot be
+    /// allocated; nothing is built or reported.
     pub fn new(
         budget: CacheBudget,
         owner: ReclaimOwner,
         pressure: &'static MemoryPressure,
         sink: &'static (dyn Sink + Sync),
-    ) -> Self {
+    ) -> Result<Self, DriverError> {
+        let accounting =
+            Arc::try_new(CacheAccounting::new()).map_err(|_| DriverError::OutOfMemory)?;
         let candidate = CacheCandidate {
             class: Some(ReclaimClass::TransformCache),
             owner: Some(owner),
@@ -141,18 +155,19 @@ impl TransformClusterCache {
                 None
             }
         };
-        Self {
+        Ok(Self {
             budget,
             control: &CACHE_CONTROL,
             pressure,
             sink,
-            accounting: Arc::new(CacheAccounting::new()),
+            accounting,
             poisoned: policy.is_none(),
             policy,
             tick: 0,
-            entries: BTreeMap::new(),
-            lru: BTreeMap::new(),
-        }
+            entries: OrderedMap::new(),
+            lru: OrderedMap::new(),
+            slack: false,
+        })
     }
 
     /// Bind a specific [`CacheControl`] instead of the process-global
@@ -169,12 +184,15 @@ impl TransformClusterCache {
     /// The cache a mounted volume installs into its driver, budgeted from
     /// discovered RAM exactly like the volume's clean filesystem cache and
     /// charged to the volume identified by its stable per-boot mount handle.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
     pub fn for_volume(
         volume: u64,
         pressure: &'static MemoryPressure,
         sink: &'static (dyn Sink + Sync),
-    ) -> Self {
+    ) -> Result<Self, DriverError> {
         let cache = Self::new(
             // Budget from discovered physical RAM (the growable kernel heap's
             // bootstrap size is no longer the memory to size a cache against);
@@ -183,16 +201,16 @@ impl TransformClusterCache {
             ReclaimOwner::FilesystemVolume { volume },
             pressure,
             sink,
-        );
-        // Every production transform cache registers its ledger with the
-        // System Information memory-statistics registry (observation-only).
-        // A `None` means classification refused the cache at birth (it is
-        // then poisoned and admits nothing), so there is nothing to
-        // register — the refusal is already in the audit log.
+        )?;
+        // A cache the registry cannot list would spend memory reclaim cannot
+        // see. `None` is a cache classification refused at birth, which admits
+        // nothing and is already audited.
         if let Some(ledger) = cache.ledger() {
-            tairix_kernel_core::memstats::MEM_STATS.register_ledger(ledger);
+            tairix_kernel_core::memstats::MEM_STATS
+                .register_ledger(ledger)
+                .map_err(|_| DriverError::OutOfMemory)?;
         }
-        cache
+        Ok(cache)
     }
 
     /// The cache's byte ledger and event counters.
@@ -240,21 +258,15 @@ impl TransformClusterCache {
         (payload, MAP_ENTRY_OVERHEAD)
     }
 
-    /// Volatilely wipe a plaintext buffer: decrypted user data must not
-    /// linger in reusable heap memory once its entry is released.
-    fn wipe(plain: &mut Vec<u8>) {
-        plain.as_mut_slice().zeroize();
-    }
-
-    /// Remove (and wipe) the entry keyed by `start`, dropping its LRU
-    /// slot and discharging its cost. `false` when no such entry
-    /// exists.
+    /// Remove the entry keyed by `start`, its plaintext erasing itself,
+    /// dropping its LRU slot and discharging its cost. `false` when no such
+    /// entry exists.
     fn remove_start(&mut self, start: u64) -> bool {
-        let Some(mut entry) = self.entries.remove(&start) else {
+        let Some(entry) = self.entries.remove(&start) else {
             return false;
         };
-        Self::wipe(&mut entry.plain);
         self.lru.remove(&entry.tick);
+        self.slack = true;
         let (payload, metadata) = Self::cost_of(entry.plain.len());
         if self
             .accounting
@@ -279,18 +291,16 @@ impl TransformClusterCache {
         self.drop_all();
     }
 
-    /// Drop every entry, wiping all plaintext and rebalancing the
-    /// ledger to empty. Every whole-cache drain is counted as a
-    /// teardown.
+    /// Drop every entry, each plaintext erasing itself, and rebalance the
+    /// ledger to empty, both indexes giving their room back. Every
+    /// whole-cache drain is counted as a teardown.
     fn drop_all(&mut self) {
         self.accounting
             .record_teardown(ReclaimClass::TransformCache);
-        for entry in self.entries.values_mut() {
-            Self::wipe(&mut entry.plain);
-        }
         self.entries.clear();
         self.lru.clear();
         self.accounting.zero_ledger();
+        self.slack = false;
     }
 
     /// Evict least-recently-used entries until the ledger total is at
@@ -314,7 +324,9 @@ impl TransformClusterCache {
     /// transform-cache class, called at the head of every operation
     /// before the cache is read or grown (`plans/SMARTRAM.md` section
     /// 7): preserved at mild pressure, drained to zero from moderate
-    /// on. Every evicted buffer is wiped on the way out.
+    /// on. Every evicted buffer erases itself on the way out, and at any band
+    /// above normal the room an earlier removal left in the indexes goes back
+    /// to the heap.
     fn enforce_pressure(&mut self) {
         if self.poisoned {
             return;
@@ -335,7 +347,21 @@ impl TransformClusterCache {
             self.accounting
                 .record_pressure_shrink(ReclaimClass::TransformCache);
             self.evict_until(target);
+            self.release_index_room();
+        } else if self.slack && band > PressureBand::Normal {
+            self.release_index_room();
         }
+    }
+
+    /// Give the heap back the room the indexes hold beyond their entries:
+    /// all of an index emptied, and what a fitted arena spares of the rest.
+    fn release_index_room(&mut self) {
+        // A refused fit keeps the room it had, every entry in place.
+        let _ = [
+            self.entries.try_shrink_to_fit(),
+            self.lru.try_shrink_to_fit(),
+        ];
+        self.slack = false;
     }
 
     /// The retained plaintext of the cluster whose stored run starts at
@@ -350,13 +376,22 @@ impl TransformClusterCache {
             return None;
         }
         let tick = self.next_tick();
+        let mut indexed = true;
+        // Recency is a hint: an entry whose slot has no room to move is
+        // served from where it stands.
         if let Some(entry) = self.entries.get_mut(&phys) {
-            self.lru.remove(&entry.tick);
-            self.lru.insert(tick, phys);
-            entry.tick = tick;
+            if self.lru.try_reserve(1).is_ok() {
+                self.lru.remove(&entry.tick);
+                entry.tick = tick;
+                indexed = self.lru.try_insert(tick, phys).is_ok();
+            }
+        }
+        if !indexed {
+            self.poison("index_divergence");
+            return None;
         }
         self.accounting.record_hit(ReclaimClass::TransformCache);
-        self.entries.get(&phys).map(|entry| entry.plain.as_slice())
+        self.entries.get(&phys).map(|entry| &entry.plain[..])
     }
 }
 
@@ -400,6 +435,19 @@ impl ClusterCache for TransformClusterCache {
             self.accounting.record_refusal(class);
             return;
         }
+        // The copy and room in both indexes come before anything is evicted
+        // for the entry, since an eviction only adds to that room, so heap
+        // exhaustion refuses the entry having evicted nothing for it.
+        let mut plain = Vec::new();
+        if plain.try_reserve_exact(plaintext.len()).is_err()
+            || self.entries.try_reserve(1).is_err()
+            || self.lru.try_reserve(1).is_err()
+        {
+            self.accounting.record_refusal(class);
+            return;
+        }
+        plain.extend_from_slice(plaintext);
+        let plain = WipedBuf::new(plain);
         if self.accounting.total_bytes().saturating_add(cost) > ceiling {
             let headroom = self.budget.low().min(ceiling - cost);
             self.evict_until(headroom);
@@ -407,33 +455,20 @@ impl ClusterCache for TransformClusterCache {
                 return;
             }
         }
-        // The copy is fallible: heap exhaustion refuses the entry
-        // instead of aborting.
-        let mut plain = Vec::new();
-        if plain.try_reserve_exact(plaintext.len()).is_err() {
-            self.accounting.record_refusal(ReclaimClass::TransformCache);
-            return;
-        }
-        plain.extend_from_slice(plaintext);
-        if self
-            .accounting
-            .charge(ReclaimClass::TransformCache, payload, metadata)
-            .is_err()
-        {
-            Self::wipe(&mut plain);
-            self.accounting.record_refusal(ReclaimClass::TransformCache);
+        if self.accounting.charge(class, payload, metadata).is_err() {
+            self.accounting.record_refusal(class);
             return;
         }
         let tick = self.next_tick();
-        self.lru.insert(tick, phys);
-        self.entries.insert(
-            phys,
-            Entry {
-                stored,
-                plain,
-                tick,
-            },
-        );
+        let entry = Entry {
+            stored,
+            plain,
+            tick,
+        };
+        if self.lru.try_insert(tick, phys).is_err() || self.entries.try_insert(phys, entry).is_err()
+        {
+            self.poison("index_divergence");
+        }
     }
 
     fn invalidate_run(&mut self, phys: u64, len: u64) {
@@ -465,17 +500,6 @@ impl ClusterCache for TransformClusterCache {
     }
 }
 
-impl Drop for TransformClusterCache {
-    /// Teardown wipes every retained buffer: the entries hold decrypted
-    /// user data, which must not outlive their owner in reusable heap
-    /// memory.
-    fn drop(&mut self) {
-        for entry in self.entries.values_mut() {
-            Self::wipe(&mut entry.plain);
-        }
-    }
-}
-
 /// One [`TransformClusterCache`] that several mounts of a volume share, so
 /// plaintext one of them decompressed serves the others' reads under a
 /// single budget and ledger.
@@ -489,9 +513,15 @@ pub struct SharedClusterCache(Arc<SleepLock<TransformClusterCache>>);
 
 impl SharedClusterCache {
     /// Share `cache` between the mounts given clones of the result.
-    #[must_use]
-    pub fn new(cache: TransformClusterCache) -> Self {
-        Self(Arc::new(SleepLock::new(cache)))
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfMemory`] when the shared cell cannot be
+    /// allocated; `cache` goes with the refusal.
+    pub fn new(cache: TransformClusterCache) -> Result<Self, DriverError> {
+        Arc::try_new(SleepLock::new(cache))
+            .map(Self)
+            .map_err(|_| DriverError::OutOfMemory)
     }
 }
 

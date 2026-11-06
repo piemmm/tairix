@@ -27,7 +27,7 @@
 //! reachable here.
 
 use proptest::prelude::*;
-use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
+use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PhysicalKey};
 use tairix_abi::window_ipc::WindowSizeState;
 use tairix_parallel::Reversed;
 use tairix_wintersun_app::budget::{FrameTimes, Governor, Pass, FRAME_NS};
@@ -179,11 +179,13 @@ impl Session {
                     KeyInput::Pressed {
                         key,
                         modifiers: Modifiers::default(),
+                        physical: PhysicalKey::UNKNOWN,
                     }
                 } else {
                     KeyInput::Released {
                         key,
                         modifiers: Modifiers::default(),
+                        physical: PhysicalKey::UNKNOWN,
                     }
                 };
                 self.controls.apply_key(&input);

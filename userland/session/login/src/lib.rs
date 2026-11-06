@@ -56,7 +56,9 @@
 //!   (`plans/CAPABILITY_USE.md` CU5), over the same [`Authenticator`]. The
 //!   same broker answers a caller's own verify-only re-authentication
 //!   request — the primitive a graphical session's screen lock needs,
-//!   without a second authenticator anywhere in the tree.
+//!   without a second authenticator anywhere in the tree — and starts the
+//!   screen recorder wired to the desktop for a recording an administrator
+//!   allows the sound of.
 //! * [`broker`](mod@broker) — [`handle_session_request`], the `session-v1`
 //!   broker the **graphical** login screen drives
 //!   (`plans/NEW-DESKTOP-LOGIN.md` G4): the same authenticator again, the
@@ -108,8 +110,9 @@ pub use broker::{
 };
 pub use budget::{AttemptBudget, GuessMeter};
 pub use elevate::{
-    audit_launch_ended_abnormally, drain_bounded, handle_elevate_request, AuthoriserPage,
-    Authority, Caller, Captured, ElevateDirectory, ElevateLauncher, ProgramRequests,
+    audit_launch_ended_abnormally, audit_wired_ended, drain_bounded, handle_elevate_request,
+    AuthoriserPage, Authority, Caller, Captured, ElevateDirectory, ElevateLauncher,
+    ProgramRequests, Wired,
 };
 pub use error::LoginError;
 pub use login::{Login, LoginConfig};

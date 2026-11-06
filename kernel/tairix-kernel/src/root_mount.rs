@@ -1360,7 +1360,7 @@ pub fn unlock_root_disk_interactively<Disk: Block>(
     input: &dyn ConsoleRead,
     install: &UnlockInstall<'_>,
     audit: &dyn Sink,
-    delay: &dyn Fn(),
+    delay: &dyn Fn() -> bool,
     on_resolved: &dyn Fn(),
     supervisor: Option<SupervisorWindow<'_>>,
 ) -> UnlockOutcome {
@@ -1394,7 +1394,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
     input: &dyn ConsoleRead,
     install: &UnlockInstall<'_>,
     audit: &dyn Sink,
-    delay: &dyn Fn(),
+    delay: &dyn Fn() -> bool,
     supervisor: Option<SupervisorWindow<'_>>,
 ) -> UnlockOutcome {
     // The disk is borrowed mutably for each attempt through the
@@ -1471,7 +1471,9 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
                 // An over-long line is a wrong attempt, not a fatal console
                 // fault: treat it exactly like a wrong passphrase and prompt
                 // again after the same delay.
-                reject_and_wait(console, audit, delay);
+                if !reject_and_wait(console, audit, delay) {
+                    return give_up(console, audit, "retry_pause_refused");
+                }
                 continue;
             }
             Err(PassphraseReadError::Console) => {
@@ -1515,7 +1517,9 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
                 // Wrong passphrase: the master key never unwrapped. Never an
                 // oracle; wait out the rate-limit delay, tell the operator,
                 // and ask again.
-                reject_and_wait(console, audit, delay);
+                if !reject_and_wait(console, audit, delay) {
+                    return give_up(console, audit, "retry_pause_refused");
+                }
             }
             Err(error) => {
                 // A structural failure (no table, no partition, an
@@ -1537,13 +1541,16 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
 /// scripting the prompt gains no faster signal than the honest operator —
 /// the pause is paid before any feedback appears. No passphrase byte is ever
 /// written or logged.
-fn reject_and_wait(console: &dyn ConsoleWrite, audit: &dyn Sink, delay: &dyn Fn()) {
+fn reject_and_wait(console: &dyn ConsoleWrite, audit: &dyn Sink, delay: &dyn Fn() -> bool) -> bool {
     // Return the cursor to the start of a fresh line, off the
     // `[input complete]` marker the submitted line left on screen.
     write_all(console, b"\r\n");
     retry(audit);
-    delay();
+    if !delay() {
+        return false;
+    }
     write_all(console, b"Incorrect passphrase\r\n");
+    true
 }
 
 /// Write every byte of `bytes` to `console`, looping over short writes and
@@ -1751,7 +1758,7 @@ pub(crate) fn supervisor_mount<Disk: Block>(
     passphrase: Option<&[u8]>,
     install: &UnlockInstall<'_>,
     audit: &dyn Sink,
-    delay: &dyn Fn(),
+    delay: &dyn Fn() -> bool,
     out: &mut dyn SupReport,
 ) -> MountOutcome {
     let lock = match read_root_lock(disk, audit) {
@@ -1783,7 +1790,11 @@ pub(crate) fn supervisor_mount<Disk: Block>(
             }
         },
         Err(RootMountError::Mount(DriverError::PermissionDenied)) => {
-            delay();
+            // Without the pause the attempt goes unanswered, never sooner.
+            if !delay() {
+                out.line("the retry pause could not be had; the passphrase is not answered");
+                return MountOutcome::Failed;
+            }
             out.line("incorrect passphrase");
             MountOutcome::WrongPassphrase
         }
@@ -2210,6 +2221,7 @@ mod tests {
             &[],
             &[(&components, shipped)],
             &[],
+            disk_image::ROOT_SECTORS,
             disk_image::RootProtection::Plaintext,
         )
         .expect("the whole-disk image assembles");
@@ -2751,7 +2763,7 @@ mod tests {
                 storage_gid: &storage_gid,
             },
             &sink,
-            &|| {},
+            &|| true,
             &|| {},
             None,
         );
@@ -2811,7 +2823,7 @@ mod tests {
                 storage_gid: &LateStorageGid::new(),
             },
             &sink,
-            &|| {},
+            &|| true,
             &|| {},
             None,
         );
@@ -2852,7 +2864,7 @@ mod tests {
                 storage_gid: &LateStorageGid::new(),
             },
             &RecordingSink::new(),
-            &|| {},
+            &|| true,
             &|| {},
             Some(SupervisorWindow {
                 host: &mut SilentSupervisor,
@@ -2884,7 +2896,7 @@ mod tests {
             &ScriptInput::new(Vec::new()),
             &plaintext_install(&late, &identity, &groups, &gid),
             &RecordingSink::new(),
-            &|| {},
+            &|| true,
             &|| {},
             Some(SupervisorWindow {
                 host: &mut SilentSupervisor,
@@ -2940,7 +2952,7 @@ mod tests {
             &ScriptInput::new(Vec::new()),
             &plaintext_install(&late, &identity, &groups, &gid),
             &RecordingSink::new(),
-            &|| {},
+            &|| true,
             &|| {},
             Some(SupervisorWindow {
                 host: &mut SilentSupervisor,
@@ -2975,7 +2987,7 @@ mod tests {
             &ScriptInput::new(Vec::new()),
             &plaintext_install(&late, &identity, &groups, &gid),
             &RecordingSink::new(),
-            &|| {},
+            &|| true,
             &|| {},
             Some(SupervisorWindow {
                 host: &mut SilentSupervisor,
@@ -3050,7 +3062,7 @@ mod tests {
             &ScriptInput::new(Vec::new()),
             &plaintext_install(&late, &identity, &groups, &gid),
             &RecordingSink::new(),
-            &|| {},
+            &|| true,
             &|| {},
             None,
         );
@@ -3140,7 +3152,7 @@ mod tests {
             &ScriptInput::new(Vec::new()),
             &plaintext_install(&late, &identity, &groups, &gid),
             &RecordingSink::new(),
-            &|| {},
+            &|| true,
             &|| {},
             Some(SupervisorWindow {
                 host: &mut SilentSupervisor,
@@ -3169,7 +3181,7 @@ mod tests {
             &ScriptInput::new(Vec::new()),
             &plaintext_install(&late, &identity, &groups, &gid),
             &sink,
-            &|| {},
+            &|| true,
             &|| {},
             Some(SupervisorWindow {
                 host: &mut SilentSupervisor,
@@ -3216,7 +3228,7 @@ mod tests {
             None,
             &plaintext_install(&late, &identity, &groups, &gid),
             &RecordingSink::new(),
-            &|| {},
+            &|| true,
             &mut ConsoleReport { console: &console },
         );
         assert_eq!(outcome, MountOutcome::Mounted);
@@ -3242,7 +3254,7 @@ mod tests {
                 passphrase,
                 &plaintext_install(&late, &identity, &groups, &gid),
                 &RecordingSink::new(),
-                &|| {},
+                &|| true,
                 &mut ConsoleReport { console: &console },
             );
             assert_eq!(outcome, MountOutcome::Failed);
@@ -3274,6 +3286,7 @@ mod tests {
                 "the pause is paid before any answer"
             );
             delays.fetch_add(1, Ordering::Relaxed);
+            true
         };
 
         let wrong = supervisor_mount(
@@ -3297,11 +3310,48 @@ mod tests {
             Some(PASSPHRASE),
             &install,
             &sink,
-            &|| {},
+            &|| true,
             &mut ConsoleReport { console: &console },
         );
         assert_eq!(right, MountOutcome::Mounted);
         assert!(late.is_installed());
+    }
+
+    /// A wrong passphrase whose anti-brute-force pause cannot be had — the
+    /// wait refused for want of memory — gives the unlock up: the attempt is
+    /// never answered sooner, and no further passphrase is taken.
+    #[test]
+    fn a_retry_pause_that_cannot_be_had_gives_the_unlock_up() {
+        let input = ScriptInput::new(script(&[b"nope", PASSPHRASE]));
+        let late = LateUsersDb::new();
+        let late_identity = boot_identity();
+        let sink = RecordingSink::new();
+        let console = RecordingConsole::new();
+        let outcome = unlock_root_disk_interactively(
+            success_disk(),
+            &console,
+            &input,
+            &UnlockInstall {
+                users: &late,
+                identity: &late_identity,
+                groups: &LateGroupsDb::new(),
+                writable: &NoWritableRootSink,
+                admin: None,
+                storage_gid: &LateStorageGid::new(),
+            },
+            &sink,
+            &|| false,
+            &|| {},
+            None,
+        );
+        assert_eq!(outcome, UnlockOutcome::GaveUp);
+        assert!(
+            !late.is_installed(),
+            "the correct passphrase after it is never taken"
+        );
+        let out = console.bytes();
+        assert_eq!(count_occurrences(&out, b"Incorrect passphrase"), 0);
+        assert_eq!(count_occurrences(&out, b"ARXFS passphrase: "), 1);
     }
 
     #[test]
@@ -3333,6 +3383,7 @@ mod tests {
             &sink,
             &|| {
                 delays.fetch_add(1, Ordering::Relaxed);
+                true
             },
             &|| {},
             None,
@@ -3402,6 +3453,7 @@ mod tests {
             &sink,
             &|| {
                 delays.fetch_add(1, Ordering::Relaxed);
+                true
             },
             &|| {},
             None,
@@ -3449,7 +3501,7 @@ mod tests {
                 storage_gid: &LateStorageGid::new(),
             },
             &sink,
-            &|| {},
+            &|| true,
             &|| {},
             None,
         );
@@ -3492,7 +3544,7 @@ mod tests {
                 storage_gid: &LateStorageGid::new(),
             },
             &RecordingSink::new(),
-            &|| {},
+            &|| true,
             &|| releases.set(releases.get() + 1),
             None,
         );
@@ -3518,7 +3570,7 @@ mod tests {
                 storage_gid: &LateStorageGid::new(),
             },
             &RecordingSink::new(),
-            &|| {},
+            &|| true,
             &|| releases.set(releases.get() + 1),
             None,
         );
@@ -3553,7 +3605,7 @@ mod tests {
                 storage_gid: &LateStorageGid::new(),
             },
             &sink,
-            &|| {},
+            &|| true,
             &|| {},
             None,
         );
@@ -3592,7 +3644,7 @@ mod tests {
                 storage_gid: &LateStorageGid::new(),
             },
             &sink,
-            &|| {},
+            &|| true,
             &|| {},
             None,
         );

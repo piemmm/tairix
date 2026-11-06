@@ -25,6 +25,7 @@ fn cred(uid: u32, gid: u32, caps: &CapabilitySet) -> Credentials<'_> {
 
 fn default_vfs() -> Vfs {
     Vfs::with_default_layout(UserId(ADMIN_UID), GroupId(ADMIN_GID))
+        .expect("the default layout fits in memory")
 }
 
 #[test]
@@ -381,4 +382,48 @@ fn canonical_answer_refuses_a_name_the_grammar_refuses() {
         spell_canonical(&[String::from("Storage"), String::from("a:b")]),
         Ok(String::from("/Storage/a:b"))
     );
+}
+
+/// A create the heap refuses, however far it got, answers `OutOfMemory`
+/// with the tree as it was, and goes through once granted.
+#[test]
+fn a_create_the_heap_refuses_changes_nothing() {
+    let mut vfs = default_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let made = p("/Users/made");
+    let answer = crate::test_alloc::past_each_refusal(&Err(VfsError::OutOfMemory), || {
+        let answer = vfs.mkdir(&admin, &made, Mode::from_bits(0o755));
+        if answer.is_err() {
+            assert_eq!(
+                vfs.metadata(&admin, &made).err(),
+                Some(VfsError::NotFound),
+                "a refused create made nothing"
+            );
+        }
+        answer
+    });
+    assert_eq!(answer, Ok(()));
+    vfs.metadata(&admin, &made).expect("made once granted");
+}
+
+/// A boot layout the heap cannot hold is refused for memory, never built
+/// short of a directory.
+#[test]
+fn a_default_layout_the_heap_cannot_hold_is_refused() {
+    // Room for a name, none for a directory's entries.
+    crate::test_alloc::refuse_allocations_from_on_current_thread(1024);
+    let built = Vfs::with_default_layout(UserId(ADMIN_UID), GroupId(ADMIN_GID)).map(drop);
+    crate::test_alloc::refuse_allocations_on_current_thread(false);
+    assert_eq!(built, Err(VfsError::OutOfMemory));
+}
+
+/// A boot layout the heap refuses at any one of its allocations — its mount
+/// table's own among them — answers `OutOfMemory`, and is built once granted.
+#[test]
+fn a_default_layout_refused_anywhere_is_out_of_memory() {
+    let built = crate::test_alloc::past_each_refusal(&Err(VfsError::OutOfMemory), || {
+        Vfs::with_default_layout(UserId(ADMIN_UID), GroupId(ADMIN_GID)).map(drop)
+    });
+    assert_eq!(built, Ok(()));
 }

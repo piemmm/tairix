@@ -99,6 +99,13 @@ pub fn refuse_allocations_from_on_current_thread(bytes: usize) {
     REFUSED_FROM.with(|slot| slot.set(bytes));
 }
 
+/// Grant the current thread its next `granted` allocations and refuse every
+/// one after, until called again with `usize::MAX`: how a test refuses the
+/// one allocation a path makes after `granted` others.
+pub fn grant_allocations_on_current_thread(granted: usize) {
+    GRANTED.with(|slot| slot.set(granted));
+}
+
 /// What `op` answers once granted every allocation it makes, after a run
 /// refused from its first allocation on, then one refused from its second,
 /// and so on: each must answer `refused`, so no failed allocation is lost on
@@ -288,6 +295,20 @@ mod tests {
         assert_eq!((answer, runs), (Some(2), 3));
         let mut after: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         assert!(after.try_reserve(8).is_ok(), "and nothing refused after");
+    }
+
+    /// A thread granted a count of allocations is refused the one past it,
+    /// and none once the count is lifted.
+    #[test]
+    fn a_granted_count_refuses_the_allocation_past_it() {
+        grant_allocations_on_current_thread(1);
+        let mut first: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        let granted = first.try_reserve(8).is_ok();
+        let mut second: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        let refused = second.try_reserve(8).is_err();
+        grant_allocations_on_current_thread(usize::MAX);
+        assert!(granted && refused);
+        assert!(second.try_reserve(8).is_ok(), "and nothing refused after");
     }
 
     /// A run that answers as refused though nothing was refused is no answer

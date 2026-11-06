@@ -6,21 +6,28 @@
 //! no test hard-codes a coordinate, so a change to the geometry moves the
 //! tests with it instead of quietly clicking empty space.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec;
 
+use tairix_abi::driver::audio::ChannelMap;
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_controls::{damage, ScrollPart, WHEEL_STEP};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_player::Failure;
 use tairix_raster::{Pixel, Reorient, Surface};
 use tairix_sandbox::imagerender::{ViewDocument, ViewFailure, ViewFormat, ViewPage, ViewRefusal};
+use tairix_sandbox::loopback::HeapShare;
+use tairix_sandbox::moviedecode::{MovieInfo, MovieRefusal};
+use tairix_sandbox::session::{Share, ShareWrite};
 use tairix_sandbox::{SandboxError, WorkerEnd};
 use tairix_theme::{TextRole, Theme, ThemeRegistry};
 
 use super::{Command, Outcome, Refusal, View};
+use crate::movie::{self, Note, Order, Status, Stop, Transport};
 use crate::{Answer, Fit, Layout, Request, ZOOM_ACTUAL_PER_MILLE};
 
 /// The window every test drives: large enough that both panels have room and
@@ -1486,7 +1493,7 @@ fn the_preferred_client_shrinks_to_a_small_picture_and_leaves_a_big_one_alone() 
         scale,
         face,
         small.toolbar_control().natural_length(scale, theme),
-        small.info_open(),
+        small.bands(),
     );
     assert_eq!((laid.canvas().width, laid.canvas().height), (320, 240));
     // It only ever shrinks.
@@ -1786,4 +1793,334 @@ fn a_cancelled_pinch_puts_the_view_back_and_an_unbegun_one_does_nothing() {
         at,
     );
     assert_eq!(*view.viewport(), before, "put back");
+}
+
+/// The regression: a draw landing after an open had been asked for set the
+/// viewer idle, so the open was never asked of the desk and the new document
+/// never came.
+#[test]
+fn an_open_asked_for_while_a_draw_is_out_is_still_asked_for_once_it_lands() {
+    let (mut view, layout, _registry) = drawn(still(400, 300));
+    let (outcome, _) = run(&mut view, &layout, Command::ZoomIn);
+    assert!(outcome.changed);
+    let Some(Request::Show {
+        page,
+        extent,
+        window,
+        mut pixels,
+    }) = view.next_request()
+    else {
+        panic!("a render was asked for");
+    };
+    let open_id = view.expect_document();
+    pixels.resize((window.width * window.height * 4) as usize, 0x40);
+    view.deliver(
+        Answer::Shown {
+            page,
+            extent,
+            window,
+            decoded: None,
+            pixels,
+            outcome: Ok(()),
+        },
+        &layout,
+        &mut damage::sink(),
+    );
+    assert_eq!(view.next_request(), Some(Request::Open { open_id }));
+}
+
+/// The regression: an animation playing when another document opened in its
+/// window left the play state on, so the new picture showed a pause tool.
+#[test]
+fn a_document_opens_stopped_whatever_was_playing_before_it() {
+    let (mut view, layout, _registry) = drawn(animation(4, 400, 300));
+    let (_, _) = run(&mut view, &layout, Command::TogglePlayback);
+    assert!(view.playing());
+    let open_id = view.expect_document();
+    let opened = Ok((still(400, 300), String::from("next.png"), 1));
+    view.deliver(
+        Answer::Opened { open_id, opened },
+        &layout,
+        &mut damage::sink(),
+    );
+    assert!(!view.playing());
+    arm(&mut view, &layout, 0);
+    assert_eq!(view.deadline_ns(), None, "and arms no frame");
+}
+
+// ---- movies -------------------------------------------------------------
+
+const SECOND: u64 = 1_000_000_000;
+
+/// A recording as its playback describes it once open: stereo, and indexed
+/// where its length is stated.
+fn recording_info(duration_ns: Option<u64>) -> MovieInfo {
+    MovieInfo {
+        duration_ns,
+        indexed: duration_ns.is_some(),
+        width: 640,
+        height: 360,
+        sound: Some(ChannelMap::STEREO),
+    }
+}
+
+/// A viewer with the movie `info` describes open, laid out in [`WINDOW`].
+fn movie_opened(info: MovieInfo) -> (View, Layout, ThemeRegistry) {
+    let (registry, scale) = dressing();
+    let theme = registry.active();
+    let mut view = View::new(true);
+    assert_eq!(view.next_request(), Some(Request::Open { open_id: 1 }));
+    let layout = view.layout(WINDOW.0, WINDOW.1, theme, scale, font(theme, scale));
+    let opened = Ok((info, String::from("screen.webm"), 1 << 20));
+    let outcome = view.deliver(
+        Answer::Movie { open_id: 1, opened },
+        &layout,
+        &mut damage::sink(),
+    );
+    assert!(outcome.changed);
+    let layout = view.layout(WINDOW.0, WINDOW.1, theme, scale, font(theme, scale));
+    (view, layout, registry)
+}
+
+/// Press the seek bar `share` thousandths along it, and let go.
+fn seek_at(view: &mut View, layout: &Layout, theme: &Theme, share: i32) -> Region {
+    let bar = layout.seek_bar();
+    let at = Point {
+        x: bar.left() + tairix_geometry::to_i32(bar.width) * share / 1_000,
+        y: bar.center().y,
+    };
+    let mut region = damage::sink();
+    feed(
+        view,
+        layout,
+        theme,
+        &[InputEvent::PointerMoved { to: at }, PRESS, RELEASE],
+        &mut region,
+    );
+    region
+}
+
+#[test]
+fn a_movie_opens_with_its_transport_and_asks_its_playback_nothing_yet() {
+    let (mut view, layout, _registry) = movie_opened(recording_info(Some(10 * SECOND)));
+    assert!(view.bands().transport && !layout.seek_bar().is_empty());
+    assert_eq!(
+        view.next_request(),
+        None,
+        "a movie asks no render of the desk"
+    );
+    assert_eq!(view.take_orders(), [None; 2], "it opens paused");
+}
+
+#[test]
+fn space_plays_and_pauses_a_movie_through_its_playback() {
+    let (mut view, layout, _registry) = movie_opened(recording_info(Some(10 * SECOND)));
+    let _ = view.take_orders();
+    let mut region = damage::sink();
+    let outcome = view.on_key(Key::Char(' '), Modifiers::default(), &layout, &mut region);
+    assert!(outcome.changed && view.playing());
+    assert!(covers(&region, layout.tools()), "the tool shows pause");
+    assert_eq!(view.take_orders(), [None, Some(Order::Play)]);
+    arm(&mut view, &layout, 0);
+    assert_eq!(view.deadline_ns(), None, "the playback keeps the time");
+    view.on_key(
+        Key::Char(' '),
+        Modifiers::default(),
+        &layout,
+        &mut damage::sink(),
+    );
+    assert_eq!(view.take_orders(), [None, Some(Order::Pause)]);
+}
+
+#[test]
+fn the_seek_bar_shows_where_a_drag_points_and_seeks_where_it_is_let_go() {
+    let (mut view, layout, registry) = movie_opened(recording_info(Some(10 * SECOND)));
+    let theme = registry.active();
+    let _ = view.take_orders();
+    let bar = layout.seek_bar();
+    let mut region = damage::sink();
+    feed(
+        &mut view,
+        &layout,
+        theme,
+        &[InputEvent::PointerMoved { to: bar.center() }, PRESS],
+        &mut region,
+    );
+    assert!(
+        covers(&region, layout.clock()),
+        "the clock shows where it points"
+    );
+    let pointed = view.scrub_ns().expect("a drag under way");
+    assert_eq!(view.take_orders(), [None; 2], "nothing is sought mid-drag");
+    feed(&mut view, &layout, theme, &[RELEASE], &mut damage::sink());
+    assert_eq!(view.scrub_ns(), None);
+    let [seek, _] = view.take_orders();
+    assert_eq!(seek, Some(Order::Seek(pointed)), "letting go seeks there");
+    assert!(pointed > 3 * SECOND && pointed < 7 * SECOND, "{pointed}");
+    let shown = view.movie().expect("open").status.position_ns;
+    assert_eq!(shown, pointed, "and shows it at once");
+}
+
+#[test]
+fn a_position_from_before_the_latest_seek_is_not_adopted() {
+    let (mut view, layout, registry) = movie_opened(recording_info(Some(10 * SECOND)));
+    let _ = view.take_orders();
+    seek_at(&mut view, &layout, registry.active(), 750);
+    let [Some(Order::Seek(target)), _] = view.take_orders() else {
+        panic!("a seek is told");
+    };
+    let stale = Status {
+        transport: Transport::Paused,
+        position_ns: SECOND,
+        late: 0,
+        seeks: 0,
+    };
+    view.movie_status(stale, &layout, &mut damage::sink());
+    let held = view.movie().expect("open").status.position_ns;
+    assert_eq!(held, target, "the seek bar holds where it was put");
+    let landed = Status {
+        position_ns: 7 * SECOND,
+        seeks: 1,
+        ..stale
+    };
+    let mut region = damage::sink();
+    assert!(view.movie_status(landed, &layout, &mut region));
+    assert_eq!(view.movie().expect("open").status.position_ns, 7 * SECOND);
+    assert!(
+        covers(&region, layout.seek_bar()),
+        "on the keyframe it landed on"
+    );
+}
+
+#[test]
+fn a_movie_that_stops_says_why_and_plays_again_from_the_play_tool() {
+    let (mut view, layout, _registry) = movie_opened(recording_info(Some(10 * SECOND)));
+    let _ = view.take_orders();
+    let (_, _) = run(&mut view, &layout, Command::TogglePlayback);
+    let _ = view.take_orders();
+    let stopped = Status {
+        transport: Transport::Stopped(Stop::CutShort),
+        position_ns: 4 * SECOND,
+        late: 0,
+        seeks: 0,
+    };
+    let mut region = damage::sink();
+    assert!(view.movie_status(stopped, &layout, &mut region));
+    assert!(!view.playing());
+    assert!(covers(&region, layout.tools()) && covers(&region, layout.status()));
+    let summary = crate::paint::summary(&view);
+    assert!(summary.contains(&Stop::CutShort.to_string()), "{summary}");
+    let (outcome, _) = run(&mut view, &layout, Command::TogglePlayback);
+    assert!(outcome.changed);
+    assert_eq!(view.take_orders(), [None, Some(Order::Play)]);
+}
+
+/// A picture of `size` in slot 0 of a ring of its own, every byte `value`.
+fn slot_picture(size: (u32, u32), value: u8) -> movie::Picture {
+    let len = size.0 as usize * size.1 as usize * 4;
+    let mut ring = HeapShare::new(len).expect("a ring");
+    assert!(ring.write_with(&mut |bytes| {
+        bytes.fill(value);
+        true
+    }));
+    let ring: Arc<dyn Share> = Arc::new(ring);
+    movie::Picture {
+        at_ns: 0,
+        slot: movie::Slot::of(ring, (1, 0), 0, size),
+    }
+}
+
+#[test]
+fn a_picture_is_copied_out_of_its_slot_and_drawn_again_where_the_canvas_moves() {
+    let (mut view, layout, _registry) = movie_opened(recording_info(Some(10 * SECOND)));
+    let picture = slot_picture((640, 360), 0x80);
+    let mut region = damage::sink();
+    assert!(view.show_frame(&picture, &layout, &mut region));
+    assert!(covers(&region, layout.canvas()));
+    let shown = view.picture().expect("a picture").pixels()[0];
+    drop(picture);
+    let mut idle = damage::sink();
+    assert!(
+        !view.redraw_movie(&layout, &mut idle),
+        "the canvas has not moved"
+    );
+    let (outcome, _) = run(&mut view, &layout, Command::ZoomIn);
+    assert!(outcome.changed);
+    let mut moved = damage::sink();
+    assert!(
+        view.redraw_movie(&layout, &mut moved),
+        "drawn again from the copy the window holds, its slot long gone"
+    );
+    assert!(covers(&moved, layout.canvas()));
+    let again = view.picture().expect("a picture").pixels()[0];
+    assert_eq!(again, shown, "of the same pixels");
+}
+
+#[test]
+fn a_movie_that_would_not_open_states_why() {
+    let (registry, scale) = dressing();
+    let theme = registry.active();
+    let mut view = View::new(true);
+    assert_eq!(view.next_request(), Some(Request::Open { open_id: 1 }));
+    let layout = view.layout(WINDOW.0, WINDOW.1, theme, scale, font(theme, scale));
+    let refused = Refusal::Movie(Stop::Refused(MovieRefusal::TooLarge));
+    let outcome = view.deliver(
+        Answer::Movie {
+            open_id: 1,
+            opened: Err(refused),
+        },
+        &layout,
+        &mut damage::sink(),
+    );
+    assert!(outcome.changed);
+    assert_eq!(view.refusal(), Some(&refused));
+    assert!(view.movie().is_none() && !view.nothing_to_show());
+}
+
+#[test]
+fn a_replaced_decoder_and_a_lost_sound_are_stated() {
+    let (mut view, layout, _registry) = movie_opened(recording_info(Some(10 * SECOND)));
+    let mut region = damage::sink();
+    assert!(view.movie_note(Note::Replaced, &layout, &mut region));
+    assert!(view.movie_note(Note::SoundLost(Failure::DeviceLost), &layout, &mut region));
+    assert!(covers(&region, layout.status()));
+    let summary = crate::paint::summary(&view);
+    assert!(summary.contains("replaced"), "{summary}");
+    assert!(
+        summary.contains(&Failure::DeviceLost.to_string()),
+        "{summary}"
+    );
+}
+
+#[test]
+fn a_recording_whose_length_is_not_stated_plays_but_cannot_be_sought() {
+    let (mut view, layout, registry) = movie_opened(recording_info(None));
+    let _ = view.take_orders();
+    seek_at(&mut view, &layout, registry.active(), 500);
+    assert_eq!(view.take_orders(), [None; 2], "its seek bar is disabled");
+    let (outcome, _) = run(&mut view, &layout, Command::TogglePlayback);
+    assert!(outcome.changed);
+    assert_eq!(view.take_orders(), [None, Some(Order::Play)]);
+    assert_eq!(crate::paint::clock_text(&view).as_deref(), Some("0:00"));
+}
+
+#[test]
+fn a_movie_states_what_it_is() {
+    let (view, _layout, _registry) = movie_opened(recording_info(Some(75 * SECOND)));
+    let stated: vec::Vec<(String, String)> = crate::paint::facts(&view)
+        .iter()
+        .map(|fact| (String::from(fact.label()), String::from(fact.value())))
+        .collect();
+    let says =
+        |label: &str, value: &str| stated.iter().any(|(l, v)| l == label && v.contains(value));
+    assert!(says("Name", "screen.webm"));
+    assert!(says("Format", "WebM"));
+    assert!(says("Pixels", "640 x 360"));
+    assert!(says("Length", "1:15"), "{stated:?}");
+    assert!(says("Sound", "stereo"));
+    assert!(says("Seeks", "index"));
+    assert_eq!(
+        crate::paint::clock_text(&view).as_deref(),
+        Some("0:00 / 1:15")
+    );
 }

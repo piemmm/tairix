@@ -8,20 +8,31 @@ ln — Verknüpfungen zwischen Dateien erstellen
 
 ## DESCRIPTION
 
-Erstellt eine symbolische Verknüpfung, die jedes Ziel benennt. Bei
+Erstellt eine Verknüpfung, die jedes Ziel benennt. Bei
 einem Operanden entsteht die Verknüpfung im Arbeitsverzeichnis unter dem
 Namen des Ziels. Bei zwei ist der zweite Operand ein zu füllendes
 Verzeichnis, wenn er eines ist — oder eine Verknüpfung auf eines, außer
 mit `-n` — und sonst der Name der Verknüpfung. Bei drei oder mehr muss
 der letzte bereits ein Verzeichnis sein.
 
-Das Ziel wird **wortgetreu** gespeichert und niemals aufgelöst: es darf
-relativ sein, `..` enthalten und überhaupt nichts benennen, eine
-Verknüpfung darf also berechtigt ins Leere zeigen. Seine Grammatik wird
-vor dem Speichern dennoch geprüft, sodass ein Ziel, das kein Auflöser
-je durchlaufen könnte, abgewiesen wird. Das Erstellen einer Verknüpfung
-verleiht keine Rechte an dem, was sie benennt — jede spätere Nutzung
-wird Komponente für Komponente unter Ihrer eigenen Identität geprüft.
+Ohne `-s` ist die Verknüpfung **hart**: ein zweiter Verzeichniseintrag
+für die Inode des Ziels selbst. Beide Namen erreichen eine Datei, ein
+Schreibvorgang über den einen ist über den anderen sichtbar, und der
+Speicher der Datei bleibt bestehen, bis der letzte Name entfernt wird.
+Beide Namen müssen auf einem Datenträger liegen, und ein Verzeichnis
+erhält niemals einen zweiten Namen — dass der Dateibaum ein Baum
+bleibt, sorgt dafür, dass `..` das Verzeichnis bezeichnet, durch das
+man tatsächlich gekommen ist.
+
+Mit `-s` ist die Verknüpfung **symbolisch**, und ihr Ziel wird
+**wortgetreu** gespeichert und niemals aufgelöst: es darf relativ sein,
+`..` enthalten und überhaupt nichts benennen, eine solche Verknüpfung
+darf also berechtigt ins Leere zeigen. Seine Grammatik wird vor dem
+Speichern dennoch geprüft, sodass ein Ziel, das kein Auflöser je
+durchlaufen könnte, abgewiesen wird. Das Erstellen einer Verknüpfung
+gleich welcher Art verleiht keine Rechte an dem, was sie benennt — jede
+spätere Nutzung wird Komponente für Komponente unter Ihrer eigenen
+Identität geprüft.
 
 Ein bereits belegter Verknüpfungsname wird abgewiesen, sofern nicht `-f`
 oder `-i` das Ersetzen erlaubt. Die neue Verknüpfung tritt dann in einem
@@ -41,14 +52,6 @@ selbst.
 Eine Verknüpfung, die sich nicht erstellen lässt, wird gemeldet, und die
 nächste wird dennoch erstellt. `--` beendet die Optionsauswertung: jedes
 weitere Argument ist ein Operand.
-
-Ohne `-s` ist die Verknüpfung **hart**: ein zweiter Verzeichniseintrag
-für die Inode des Ziels selbst. Beide Namen erreichen eine Datei, ein
-Schreibvorgang über den einen ist über den anderen sichtbar, und der
-Speicher der Datei bleibt bestehen, bis der letzte Name entfernt wird.
-Beide Namen müssen auf einem Datenträger liegen, und ein Verzeichnis
-erhält niemals einen zweiten Namen — dass der Dateibaum ein Baum
-bleibt, gibt `..` erst seine Bedeutung.
 
 `-r` speichert das Ziel einer symbolischen Verknüpfung relativ zum
 Verzeichnis der Verknüpfung selbst. Beide Hälften kanonisiert zuerst das
@@ -95,6 +98,8 @@ Verknüpfung speichert kein Ziel, das relativ werden könnte.
 
 ## EXAMPLES
 
+- `ln notes.txt notes.bak` — einer Datei einen zweiten Namen geben; das
+  Entfernen des einen lässt den anderen samt Inhalt unversehrt.
 - `ln -s /System/Commands/ls.app tools/ls` — einen Namen auf ein
   Bündel verknüpfen.
 - `ln -s ../shared/notes.txt` — `notes.txt` hier auf ein relatives

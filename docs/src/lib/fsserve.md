@@ -12,7 +12,8 @@ given, only for reading when the kernel says so, with its write-back bounded
 by a `WritebackBudget` (the machine's memory and a pressure gauge), and name
 what it opened — its `FormatName`, down to the generation, and why it will not
 write the volume if it will not. `Opened::offer` turns that into the
-`ServeOffer` the kernel is given. Its bind table is `bind_key(fstype)`, the
+`ServeOffer` the kernel is given, saying the volume keeps a title unless its
+driver's `label` answers `Unsupported`. Its bind table is `bind_key(fstype)`, the
 compatible of the volume nodes the kernel publishes for that format, and every
 served driver runs with `REQUIRED_CAPABILITIES`: `CAP_FS_SERVE` and
 `CAP_LOG_EMIT`.
