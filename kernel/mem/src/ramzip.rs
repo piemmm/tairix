@@ -57,4 +57,5 @@ pub use global::{
     global, global_stats, install, stats_of, RamzipFaultOutcome, RamzipReclaimSummary,
 };
 pub use ledger::{LedgerError, RamzipCounters, RamzipLedger, TaskUsage};
+pub(crate) use tier::COMPRESS_BATCH;
 pub use tier::{escalate_refusal, CompressRefusal, FaultError, Ramzip, VmContext, WarmOutcome};

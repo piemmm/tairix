@@ -1008,8 +1008,7 @@ impl NodeExpect {
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
         let mut out = [0u8; Self::WIRE_LEN];
-        out[..16].copy_from_slice(&self.id.volume);
-        put_u64(&mut out, 16, self.id.node);
+        out[..FileId::WIRE_LEN].copy_from_slice(&self.id.to_le_bytes());
         put_u64(&mut out, 24, self.content_gen);
         put_u64(&mut out, 32, self.size);
         put_i64(&mut out, 40, self.modified.secs());
@@ -1026,13 +1025,8 @@ impl NodeExpect {
     /// [`Errno::TimestampOutOfRange`] for a stamp whose nanoseconds are not
     /// canonical.
     pub fn from_le_bytes(raw: &[u8; Self::WIRE_LEN]) -> Result<Self, Errno> {
-        let mut volume = [0u8; 16];
-        volume.copy_from_slice(&raw[..16]);
         Ok(Self {
-            id: FileId {
-                volume,
-                node: read_u64(raw, 16),
-            },
+            id: FileId::from_bytes(raw)?,
             content_gen: read_u64(raw, 24),
             size: read_u64(raw, 32),
             modified: Time64::new(read_i64(raw, 40), read_u32(raw, 56))?,
@@ -1216,6 +1210,34 @@ impl FileId {
         }
         self.node == 0
     }
+
+    /// Encoded size of a [`FileId`] on the wire: `volume(16)` + `node(8)`.
+    pub(crate) const WIRE_LEN: usize = 24;
+
+    /// `self`, little-endian.
+    #[must_use]
+    pub(crate) fn to_le_bytes(self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[..16].copy_from_slice(&self.volume);
+        put_u64(&mut out, 16, self.node);
+        out
+    }
+
+    /// Decode a [`FileId`] from the first [`FileId::WIRE_LEN`] bytes of
+    /// `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if `bytes` is shorter.
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        let bytes = bytes.get(..Self::WIRE_LEN).ok_or(Errno::BufferTooSmall)?;
+        let mut volume = [0u8; 16];
+        volume.copy_from_slice(&bytes[..16]);
+        Ok(Self {
+            volume,
+            node: read_u64(bytes, 16),
+        })
+    }
 }
 
 /// The structural metadata `fs_stat` reports for an inode.
@@ -1304,8 +1326,7 @@ impl FileStat {
         put_u32(out, 24, self.mode);
         put_u32(out, 28, self.uid);
         put_u32(out, 32, self.gid);
-        out[40..56].copy_from_slice(&self.id.volume);
-        put_u64(out, 56, self.id.node);
+        out[40..40 + FileId::WIRE_LEN].copy_from_slice(&self.id.to_le_bytes());
         out[64..76].copy_from_slice(&self.times.created.to_le_bytes());
         out[76..88].copy_from_slice(&self.times.modified.to_le_bytes());
         out[88..100].copy_from_slice(&self.times.accessed.to_le_bytes());
@@ -1329,8 +1350,6 @@ impl FileStat {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        let mut volume = [0u8; 16];
-        volume.copy_from_slice(&bytes[40..56]);
         Ok(Self {
             kind: FileKind::from_u8(bytes[0])?,
             nlink: read_u32(bytes, 4),
@@ -1339,10 +1358,7 @@ impl FileStat {
             mode: read_u32(bytes, 24),
             uid: read_u32(bytes, 28),
             gid: read_u32(bytes, 32),
-            id: FileId {
-                volume,
-                node: read_u64(bytes, 56),
-            },
+            id: FileId::from_bytes(&bytes[40..])?,
             times: NodeTimes {
                 created: Time64::from_bytes(&bytes[64..76])?,
                 modified: Time64::from_bytes(&bytes[76..88])?,
@@ -1393,8 +1409,7 @@ impl DocumentStamp {
         let mut out = [0u8; Self::WIRE_LEN];
         put_u64(&mut out, 0, self.size);
         out[8..20].copy_from_slice(&self.modified.to_le_bytes());
-        out[20..36].copy_from_slice(&self.id.volume);
-        put_u64(&mut out, 36, self.id.node);
+        out[20..20 + FileId::WIRE_LEN].copy_from_slice(&self.id.to_le_bytes());
         put_u64(&mut out, 44, self.content_gen);
         out
     }
@@ -1409,15 +1424,10 @@ impl DocumentStamp {
     /// [`Time64`].
     pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         let bytes = bytes.get(..Self::WIRE_LEN).ok_or(Errno::BufferTooSmall)?;
-        let mut volume = [0u8; 16];
-        volume.copy_from_slice(&bytes[20..36]);
         Ok(Self {
             size: read_u64(bytes, 0),
             modified: Time64::from_bytes(&bytes[8..20])?,
-            id: FileId {
-                volume,
-                node: read_u64(bytes, 36),
-            },
+            id: FileId::from_bytes(&bytes[20..])?,
             content_gen: read_u64(bytes, 44),
         })
     }
@@ -1545,8 +1555,7 @@ impl<'a> DirEntry<'a> {
         out[4..12].copy_from_slice(&self.size.to_le_bytes());
         out[12..20].copy_from_slice(&self.allocated.to_le_bytes());
         out[20..32].copy_from_slice(&self.modified.to_le_bytes());
-        out[32..48].copy_from_slice(&self.id.volume);
-        put_u64(out, 48, self.id.node);
+        out[32..32 + FileId::WIRE_LEN].copy_from_slice(&self.id.to_le_bytes());
         put_u32(out, 56, self.nlink);
         put_u64(out, 60, self.content_gen);
         out[Self::HEADER_LEN..total].copy_from_slice(self.name);
@@ -1583,18 +1592,13 @@ impl<'a> DirEntry<'a> {
         if bytes.len() < total {
             return Err(Errno::BufferTooSmall);
         }
-        let mut volume = [0u8; 16];
-        volume.copy_from_slice(&bytes[32..48]);
         Ok((
             Self {
                 kind,
                 size: read_u64(bytes, 4),
                 allocated: read_u64(bytes, 12),
                 modified: Time64::from_bytes(&bytes[20..32])?,
-                id: FileId {
-                    volume,
-                    node: read_u64(bytes, 48),
-                },
+                id: FileId::from_bytes(&bytes[32..])?,
                 nlink: read_u32(bytes, 56),
                 content_gen: read_u64(bytes, 60),
                 name: &bytes[Self::HEADER_LEN..total],

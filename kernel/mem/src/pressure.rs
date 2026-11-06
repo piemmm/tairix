@@ -129,6 +129,19 @@ const MODERATE_RECLAIM_BATCH_PAGES: usize = 32;
 /// moderate — still a bounded pass, never an unbounded sweep. Not ABI.
 const SEVERE_RECLAIM_BATCH_PAGES: usize = 128;
 
+/// The most pages a direct-reclaim sweep may visit to find `want` cold
+/// ones: the clock hand moves at most this far per triggering fault, so a
+/// working set that is all hot costs a bounded step rather than a walk of
+/// the whole space, and the next fault carries on from where it stopped.
+#[must_use]
+pub const fn ramzip_scan_budget(want: usize) -> usize {
+    want.saturating_mul(SCAN_PAGES_PER_RECLAIMED_PAGE)
+}
+
+/// Enough to fill the batch while a quarter of the window is cold, and
+/// still a bounded pass when none of it is. Not ABI.
+const SCAN_PAGES_PER_RECLAIMED_PAGE: usize = 4;
+
 /// The deterministic next step when the VM must free memory.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum EscalationStep {
@@ -236,6 +249,21 @@ mod tests {
             let opens = matches!(band, PressureBand::Moderate | PressureBand::Severe);
             assert_eq!(ramzip_reclaim_batch(band) > 0, opens, "{band:?}");
         }
+    }
+
+    #[test]
+    fn the_scan_budget_covers_the_batch_and_stays_bounded() {
+        for band in PressureBand::ALL {
+            let want = ramzip_reclaim_batch(band);
+            let budget = ramzip_scan_budget(want);
+            assert!(
+                budget >= want,
+                "{band:?}: a sweep can visit every page it asks for"
+            );
+            assert!(budget <= want * SCAN_PAGES_PER_RECLAIMED_PAGE, "{band:?}");
+        }
+        assert_eq!(ramzip_scan_budget(0), 0, "no reclaim visits nothing");
+        assert_eq!(ramzip_scan_budget(usize::MAX), usize::MAX, "saturates");
     }
 
     #[test]

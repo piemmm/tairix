@@ -3460,8 +3460,9 @@ mod program {
 
     /// Serve an event that may name a window other than the one it concerns,
     /// so it is answered where every window is: an alert's answer, found by
-    /// the alert its window holds, a save offered or ended, or where a drag is
-    /// and where it ended. Answers whether `event` was one.
+    /// the alert its window holds, a save or the desktop's icons offered or
+    /// ended, or where a drag is and where it ended. Answers whether `event`
+    /// was one.
     fn route_across_windows(
         windows: &mut [OpenWindow],
         client: &mut WindowClient<app::RtWindowTransport>,
@@ -3479,6 +3480,9 @@ mod program {
             }
             WindowEvent::SaveOffered { .. } | WindowEvent::SaveOfferEnded { .. } => {
                 route_save_offer(windows, client, theme, launcher, scale, event);
+            }
+            WindowEvent::ItemsOffered { .. } | WindowEvent::ItemsOfferEnded { .. } => {
+                route_items_offer(windows, client, theme, launcher, scale, event);
             }
             WindowEvent::DragOver { .. } | WindowEvent::DragEnded { .. } => {
                 route_drag(windows, client, theme, launcher, scale, event);
@@ -3668,6 +3672,151 @@ mod program {
             }
             _ => {}
         }
+    }
+
+    /// Answer the desktop's offer of icons carried off it over one of this
+    /// app's windows, or carry out their drop.
+    ///
+    /// They are read from the session once while the offer stands over a
+    /// window, a page of them a round trip, and answered by the one drop
+    /// policy over the folder the point names, as this app's own drag is, the
+    /// folder tile under the pointer lit while the answer takes them. Dropped,
+    /// they are pasted into the folder at the drop point under this app's own
+    /// authority, as the pointer showed: copied, moved, or a shortcut made to
+    /// each volume.
+    fn route_items_offer(
+        windows: &mut [OpenWindow],
+        client: &mut WindowClient<app::RtWindowTransport>,
+        theme: &Theme,
+        launcher: &RefCell<Launcher>,
+        scale: Scale,
+        event: &WindowEvent,
+    ) {
+        match *event {
+            WindowEvent::ItemsOffered {
+                window_id,
+                drag,
+                serial,
+                x,
+                y,
+                shift,
+            } => {
+                let target = windows
+                    .iter_mut()
+                    .find(|win| win.pane.id() == window_id)
+                    .and_then(|win| window_drop_folder(win, x, y, scale, theme));
+                let verdict = {
+                    let mut launcher = launcher.borrow_mut();
+                    offered_drag(client, &mut launcher, window_id, drag).and_then(|offered| {
+                        offered.answered = serial;
+                        let (folder, _) = target.as_ref()?;
+                        offered.carrying.verdict(folder, shift)
+                    })
+                };
+                let tile = target.and_then(|(_, tile)| tile.map(|tile| (window_id, tile)));
+                light_drop_tile(windows, theme, scale, verdict.and(tile));
+                if let Err(err) = client.answer_items_offer(window_id, serial, verdict) {
+                    report_error(&alloc::format!("a drop's answer was refused ({err})"));
+                }
+            }
+            WindowEvent::ItemsOfferEnded {
+                window_id,
+                serial,
+                dropped,
+            } => {
+                darken_drop_tile(windows, theme, scale, window_id);
+                let offered = launcher
+                    .borrow_mut()
+                    .offered
+                    .take_if(|offered| offered.window_id == window_id);
+                let (Some(drop), Some(target)) = (
+                    dropped,
+                    windows.iter().position(|win| win.pane.id() == window_id),
+                ) else {
+                    return;
+                };
+                let Some(offered) = offered.filter(|offered| offered.answered == serial) else {
+                    let reason = "the items dropped could not be read";
+                    refuse_drop(&mut windows[target], drop.operation, reason);
+                    return;
+                };
+                let Some((folder, _)) =
+                    window_drop_folder(&mut windows[target], drop.x, drop.y, scale, theme)
+                else {
+                    let reason = "nothing there takes a drop";
+                    refuse_drop(&mut windows[target], drop.operation, reason);
+                    return;
+                };
+                let steps = DropLanding::none();
+                begin_drop(
+                    &mut windows[target],
+                    offered.carrying,
+                    &folder,
+                    drop.operation,
+                    steps,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// The icons the desktop's drag numbered `drag` offers window
+    /// `window_id`, read from the session the first time it offers them
+    /// there; `None` once the session no longer offers them, or where they
+    /// cannot be read, which is stated.
+    fn offered_drag<'a>(
+        client: &mut WindowClient<app::RtWindowTransport>,
+        launcher: &'a mut Launcher,
+        window_id: u64,
+        drag: u32,
+    ) -> Option<&'a mut OfferedDrag> {
+        let current = launcher
+            .offered
+            .as_ref()
+            .is_some_and(|offered| (offered.window_id, offered.drag) == (window_id, drag));
+        if !current {
+            let read = read_offered_drag(client, window_id, drag, &launcher.volumes);
+            launcher.offered = match read {
+                Ok(carrying) => Some(OfferedDrag {
+                    window_id,
+                    drag,
+                    answered: 0,
+                    carrying,
+                }),
+                Err(Errno::NotFound) => None,
+                Err(err) => {
+                    report_error(&alloc::format!(
+                        "the items offered could not be read ({err})"
+                    ));
+                    None
+                }
+            };
+        }
+        launcher.offered.as_mut()
+    }
+
+    /// The icons the desktop's drag numbered `drag` offers window `window_id`,
+    /// as a drop of them acts on them.
+    fn read_offered_drag(
+        client: &mut WindowClient<app::RtWindowTransport>,
+        window_id: u64,
+        drag: u32,
+        volumes: &[Volume],
+    ) -> Result<Carrying, Errno> {
+        let mut sources: Vec<Listed> = Vec::new();
+        client.read_offered_items(window_id, drag, |item| {
+            let path = tairix_browse::vfs::components_from_absolute_path(item.path)
+                .map_err(|_| Errno::OutOfRange)?;
+            sources.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+            sources.push(Listed { path, id: item.id });
+            Ok(())
+        })?;
+        let links = tairix_browse::volume::catalog_shortcuts(&sources, volumes);
+        Ok(Carrying {
+            sources,
+            file: None,
+            links,
+        })
     }
 
     /// The folder a save dropped at window-local `(x, y)` on window
@@ -4573,6 +4722,9 @@ mod program {
         /// The volumes the mount table last listed, which a shortcut to a
         /// volume is found among.
         volumes: Vec<Volume>,
+        /// The desktop's icons offered to one of this app's windows, while
+        /// that offer stands.
+        offered: Option<OfferedDrag>,
     }
 
     /// The folder a save dropped on a window goes into, for the reader to
@@ -4680,6 +4832,7 @@ mod program {
                 handoffs: Handoffs::default(),
                 ensuring_trash: None,
                 volumes: Vec::new(),
+                offered: None,
             }
         }
 
@@ -7538,6 +7691,9 @@ mod program {
                 }
                 return Ok(Parked::Served);
             };
+            if due.is_some_and(|due| wake.yields_to_due(due, tairix_rt::clock_get)) {
+                return Ok(Parked::Interrupted);
+            }
             match wake {
                 // The reader answered. Draining is the whole of noticing it,
                 // and the answer is the loop's to adopt, so the wait ends here
@@ -8201,6 +8357,19 @@ mod program {
             self.pace(browser, frame, now);
             moved
         }
+    }
+
+    /// Icons carried off the desktop, read from the session while the offer
+    /// of them stands over one of this app's windows.
+    struct OfferedDrag {
+        /// The window they are offered to.
+        window_id: u64,
+        /// The desktop's drag they were read by.
+        drag: u32,
+        /// The offer this app last answered there.
+        answered: u32,
+        /// What a drop of them acts on.
+        carrying: Carrying,
     }
 
     /// What a window handed the desktop to carry.
@@ -9091,6 +9260,8 @@ mod program {
             | WindowEvent::DragEnded { .. }
             | WindowEvent::SaveOffered { .. }
             | WindowEvent::SaveOfferEnded { .. }
+            | WindowEvent::ItemsOffered { .. }
+            | WindowEvent::ItemsOfferEnded { .. }
             | WindowEvent::PreviewRendered { .. }
             | WindowEvent::Pinch { .. }
             // An open target opens a *new* window rather than moving this
@@ -9489,6 +9660,27 @@ mod program {
         Repaint::reported_if(before != after || marked)
     }
 
+    /// Hand the desktop the drag `carried` describes, `overlays` carrying it
+    /// once the desktop takes it; one it refuses stays the press it was, and
+    /// says why.
+    fn begin_carrying(
+        menu: &mut MenuLink<'_>,
+        overlays: &mut Overlays,
+        (carrying, items): (Carrying, DragItems),
+    ) {
+        match menu.client.begin_drag(menu.window, items) {
+            Ok(()) => {
+                overlays.carrying = Some(carrying);
+                overlays.collapse_on_release = None;
+            }
+            Err(err) => {
+                report_error(&alloc::format!(
+                    "the desktop did not carry the drag ({err})"
+                ));
+            }
+        }
+    }
+
     fn apply_pointer<S: DirectorySource>(
         win: &mut WindowState<'_, S>,
         acts: &mut Acts<'_>,
@@ -9544,12 +9736,8 @@ mod program {
                 .take_if(|(arm, _)| arm.travelled(point, scale));
             let carried = travelled
                 .and_then(|(arm, pressed)| Carrying::of(browser, (pressed, arm.at), frame));
-            if let Some((carrying, items)) = carried {
-                // A drag the desktop will not carry stays the press it was.
-                if acts.menu.client.begin_drag(acts.menu.window, items).is_ok() {
-                    overlays.carrying = Some(carrying);
-                    overlays.collapse_on_release = None;
-                }
+            if let Some(carried) = carried {
+                begin_carrying(&mut acts.menu, overlays, carried);
             }
             return (Repaint::Nothing, false);
         }

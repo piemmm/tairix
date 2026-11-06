@@ -34,6 +34,7 @@ fn the_offer_is_what_the_driver_opened() {
         fs: TestFs::new(),
         format: FormatName::Fat32,
         write_refusal: Some(WriteRefusal::FormatReadOnly),
+        title_apart: true,
     };
     let offer = opened.offer();
     assert_eq!(offer.root, opened.fs.root());
@@ -41,6 +42,7 @@ fn the_offer_is_what_the_driver_opened() {
     assert_eq!(offer.node_identity, opened.fs.node_identity());
     assert_eq!(offer.attrs, opened.fs.attrs_fs().is_some());
     assert_eq!(offer.write_refusal, Some(WriteRefusal::FormatReadOnly));
+    assert!(offer.title_apart);
     assert_eq!(offer.format, FormatName::Fat32);
 }
 
@@ -53,6 +55,7 @@ fn the_offer_says_whether_the_volume_keeps_a_title() {
         fs: TestFs::new(),
         format: FormatName::Fat32,
         write_refusal: None,
+        title_apart: false,
     };
     opened.fs.label = None;
     assert!(!opened.offer().title);

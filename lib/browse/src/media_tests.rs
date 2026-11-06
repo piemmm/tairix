@@ -979,6 +979,7 @@ fn a_volume_root_is_pictured_as_its_drive() {
             identity: [0; 16],
             read_only: false,
             titled: false,
+            title_writes: false,
         },
     }));
     let mut scratch = String::new();

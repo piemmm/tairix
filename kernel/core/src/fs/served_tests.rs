@@ -182,6 +182,7 @@ impl Served {
             node_identity: inner.node_identity(),
             attrs: inner.attrs_fs().is_some(),
             title: true,
+            title_apart: false,
             write_refusal: None,
             format: tairix_abi::volume::FormatName::Ext4,
         };
@@ -275,6 +276,7 @@ fn lanes_carry_calls_at_once_each_through_its_own_span() {
         node_identity: inner.node_identity(),
         attrs: inner.attrs_fs().is_some(),
         title: true,
+        title_apart: false,
         write_refusal: None,
         format: tairix_abi::volume::FormatName::Smb3,
     };
@@ -356,6 +358,7 @@ fn lanes_are_held_to_the_window_they_divide() {
         node_identity: inner.node_identity(),
         attrs: false,
         title: false,
+        title_apart: false,
         write_refusal: None,
         format: tairix_abi::volume::FormatName::Smb3,
     };

@@ -979,6 +979,18 @@ from where they stood, each by its own picture where it carries one.
   `launch_viewer` path "Open With" uses, so the application receives the same
   authority whichever gesture chose it.
 
+**Icons dragged off the desktop are dropped as the manager's own items are**
+(`plans/FILES-INTERACTION.md` FI43). Offered them over a window
+(`ItemsOffered`), the manager reads them from the session once while the offer
+stands over that window, a page a round trip, each with the node the desktop
+listed — a drive by its volume's place in the storage catalog — and answers by
+the one drop policy over the folder at the point, lighting its tile: copy,
+move with `Shift`, or for volumes alone a shortcut to each
+(`volume::catalog_shortcuts`). Dropped (`ItemsOfferEnded`), it runs the paste
+the pointer showed in the window dropped on, a name since bound to another
+node refused as changed; items it could not read, or a point nothing takes,
+are refused in the window.
+
 **A document being saved is taken into a folder** (`plans/SAVE-DIALOG.md`
 SD5). The save panel's picture dragged over a window is offered to it
 (`SaveOffered`): the manager answers through the same `drop_folder_at` the

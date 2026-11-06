@@ -2434,6 +2434,8 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::DragEnded { .. }
             | WindowEvent::SaveOffered { .. }
             | WindowEvent::SaveOfferEnded { .. }
+            | WindowEvent::ItemsOffered { .. }
+            | WindowEvent::ItemsOfferEnded { .. }
             | WindowEvent::PreviewRendered { .. } => {}
         }
     }
@@ -2524,6 +2526,8 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::DragEnded { .. }
             | WindowEvent::SaveOffered { .. }
             | WindowEvent::SaveOfferEnded { .. }
+            | WindowEvent::ItemsOffered { .. }
+            | WindowEvent::ItemsOfferEnded { .. }
             | WindowEvent::PreviewRendered { .. } => {}
         }
     }
@@ -2664,6 +2668,8 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::DragEnded { .. }
             | WindowEvent::SaveOffered { .. }
             | WindowEvent::SaveOfferEnded { .. }
+            | WindowEvent::ItemsOffered { .. }
+            | WindowEvent::ItemsOfferEnded { .. }
             | WindowEvent::PreviewRendered { .. } => {}
         }
     }
@@ -3375,12 +3381,8 @@ impl EventDrain for Park<'_> {
 
 impl EventSource for Park<'_> {
     fn park(&mut self) -> Result<Parked, Errno> {
-        let woken = match self.signals.deadline_ns.get() {
-            Some(deadline) => match app::park_until(self.set, deadline)? {
-                Some(woken) => woken,
-                None => return Ok(Parked::Interrupted),
-            },
-            None => app::park(self.set)?,
+        let Some(woken) = app::park_until_due(self.set, self.signals.deadline_ns.get())? else {
+            return Ok(Parked::Interrupted);
         };
         match woken {
             Wake::App(QUEUE_TOKEN) => {

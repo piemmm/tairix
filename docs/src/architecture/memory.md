@@ -2322,20 +2322,20 @@ and its architecture-neutral core lands here (staged in
   non-supported port must carry a non-empty justification and must fail
   the primitive closed rather than fabricate an access verdict.
 - **The scanner.** `kernel/mem::coldscan::ColdPageScanner` is the classic
-  **second-chance (clock)** page-replacement scan built on that primitive.
-  It keeps a rotating clock hand across passes and, for each candidate
-  page in clock order, reads-and-clears the referenced bit: a page found
-  *set* was touched since the last pass and is given a second chance (its
-  bit is now cleared, it stays mapped); a page found *clear* went
-  untouched across a full pass and is returned as a cold reclaim
-  candidate, up to the caller's budget. On a port whose `access_tracking`
-  is not `Supported` the scan returns `ColdScanError::Unsupported` and the
-  tier reclaims nothing there — reclaim is safe by omission, never by
-  guessing (the fail-closed rule; a false-cold classification would cause
-  the very thrash the tier avoids). This is the classic CLOCK
-  (second-chance) approximation of LRU (Corbató, 1968), with no per-page
-  timestamp and no hot-path
-  allocation beyond the returned list.
+  **second-chance (clock)** page-replacement scan built on that primitive
+  (Corbató, 1968). It keeps one clock hand per space, and each `Sweep`
+  moves it on over the live pages of a window from where the last sweep
+  stopped, reading and clearing each page's referenced bit: a page found
+  *set* was touched since the hand last passed and gets a second chance; a
+  page found *clear* went untouched for a whole revolution and is cold. A
+  sweep visits at most its budget of pages and none twice — a second visit
+  would read the bit the first cleared — so its cost follows what the
+  caller asks for, never the size of the space. It walks the space's
+  ordered page map from the hand, allocates nothing, and hands its cold
+  pages over in caller-sized batches. On a port whose `access_tracking`
+  is not `Supported` a sweep is refused with `ColdScanError::Unsupported`
+  and the tier reclaims nothing there: a false-cold classification would
+  cause the very thrash the tier avoids.
 - **Per-port state.** Three of the four Tier-1 ports are live and declare
   `Supported`; wasm32 stays fail-closed by construction.
   - **x86_64**: the hardware always sets the Accessed bit (PTE bit 5) and
@@ -2384,9 +2384,13 @@ and its architecture-neutral core lands here (staged in
   fully host-tested on every target.
 - **Tested.** `kernel/arch/api` mmu conformance (honest declaration,
   fail-open rejection), `kernel/mem::coldscan` host tests (untouched
-  pages are cold up to budget, a referenced page gets a second chance and
-  the cleared bit makes a still-idle page cold next pass, the clock hand
-  rotates, and a backend without a referenced bit fails closed), the
+  pages are cold up to the limit, a referenced page gets a second chance
+  and the cleared bit makes a still-idle page cold next revolution, the
+  hand keeps its place across sweeps and wraps back to where a sweep
+  began, a sweep over an all-hot space visits only its budget, no page is
+  visited twice even across batches, an ineligible page keeps its bit,
+  pages outside the window are never visited, and a backend without a
+  referenced bit fails closed), the
   per-port paging host tests (the clock round-trip and the AF/A
   fault-fix-up + permission gating on aarch64 and riscv64), and a QEMU
   vertical per live port —
@@ -2472,9 +2476,13 @@ charges the cost to whoever is driving pressure (per-task fairness,
   window.
 - **Bounded, fail-closed, never a spin.** The sweep compresses at most the
   band's batch of the faulting task's cold placed-anonymous pages through
-  `LiveSpace::ramzip_reclaim` (which now short-circuits *before* its O(n)
-  candidate walk when the port exposes no referenced bit, so direct reclaim
-  is near-free there too). The tier's own gates (handoff ordering against
+  `LiveSpace::ramzip_reclaim`, and visits at most
+  `pressure::ramzip_scan_budget(batch)` pages (four per page asked for)
+  to find them: the space's clock hand moves that far per triggering
+  fault and the next fault carries on from there, so a working set that
+  is all hot costs a bounded step, not a walk of every resident page. A
+  port with no referenced bit is refused before any page is visited. The
+  tier's own gates (handoff ordering against
   the clean+transform `reclaimable_residue`, caps, per-task share,
   decompression floor, eligibility) decide what is actually admitted; a
   refused page stays resident. Nothing loops or retries — one bounded pass
@@ -2498,8 +2506,9 @@ charges the cost to whoever is driving pressure (per-task fairness,
   where the handoff opens), `memstats::current_pressure` (none until the
   gauge is created, then the one shared gauge) and
   `memstats::ramzip_reclaimable_residue` (only clean-file + transform bytes,
-  payload and metadata), the `LiveSpace::ramzip_reclaim` access-tracking
-  early-out, and the `KernelSyscallHandlers::ramzip_direct_reclaim`
+  payload and metadata), `pressure::ramzip_scan_budget`, the
+  `LiveSpace::ramzip_reclaim` bounded step that resumes where it stopped,
+  and the `KernelSyscallHandlers::ramzip_direct_reclaim`
   fail-closed no-op before the tier is installed. The end-to-end
   compress→fault behaviour the trigger drives is the §7p `LiveSpace`
   live-wiring suite.

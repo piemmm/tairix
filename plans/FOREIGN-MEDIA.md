@@ -41,7 +41,9 @@ filetype, a Mac type and creator, an Amiga comment, a sparse file's holes.
   (`docs/src/filesystem/metadata-registry.md`): `acorn.*` exactly as ADFS
   presents them, `mac.*` from Apple's records or UDF's Finder information,
   `amiga.*` from Rock Ridge's `AS` entries.
-- **ISO 9660 is read-only.** The format records a finished disc.
+- **ISO 9660's files are read-only.** The format records a finished disc;
+  only its label is rewritten in place, where its medium takes writes
+  (`docs/src/filesystem/iso9660.md`).
 - **UDF writes only what it can keep consistent.** One physical partition
   with a space bitmap on rewritable or overwritable media, a closed volume,
   a revision up to 2.60; `Udf::write_refusal` names why any other is read

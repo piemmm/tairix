@@ -71,8 +71,9 @@ pub struct Shown {
     pub at: Point,
     /// Which side shows.
     pub facing: Facing,
-    /// Whether it is in the air, and so drawn above every card at rest with
-    /// a lifted shadow.
+    /// Whether it is in the air, and so drawn with a lifted shadow. A card
+    /// waiting to set off is not, though it too is drawn over the cards at
+    /// rest.
     pub flying: bool,
 }
 
@@ -139,6 +140,11 @@ impl Flight {
 
     fn finished(&self, now_ns: u64) -> bool {
         now_ns >= self.start_ns.saturating_add(self.span_ns)
+    }
+
+    /// Whether it has yet to set off.
+    const fn waiting(&self, now_ns: u64) -> bool {
+        now_ns < self.start_ns
     }
 }
 
@@ -383,8 +389,8 @@ pub struct Motion {
     refresh: RefreshRate,
     rest: Vec<Placement>,
     flights: Vec<Option<Flight>>,
-    /// The cards in the air, in the order they took off: later ones are
-    /// drawn over earlier ones.
+    /// Every card with a flight, by when it sets off: later ones are drawn
+    /// over earlier ones, and the next to go is found first.
     order: Vec<CardId>,
     cascade: Option<Cascade>,
     glow: Option<Glow>,
@@ -489,9 +495,6 @@ impl Motion {
             damage.add(card_rect(from, size));
             damage.add(card_rect(new.at, size));
             *old = new;
-            if flight.is_some() {
-                self.order.retain(|&c| c != card);
-            }
             if self.reduced {
                 if let Some(slot) = self.flights.get_mut(index) {
                     *slot = None;
@@ -513,8 +516,23 @@ impl Motion {
             if let Some(slot) = self.flights.get_mut(index) {
                 *slot = Some(flight);
             }
-            self.order.push(card);
         }
+        self.reorder();
+    }
+
+    /// Rebuild the take-off order from the flights.
+    fn reorder(&mut self) {
+        let flights = &self.flights;
+        self.order.clear();
+        self.order.extend(
+            flights
+                .iter()
+                .enumerate()
+                .filter(|(_, flight)| flight.is_some())
+                .filter_map(|(index, _)| CardId::new(index)),
+        );
+        self.order
+            .sort_unstable_by_key(|&card| (start_of(flights, card), card.index()));
     }
 
     /// Hop `cards` up and back down where they are, `rise` pixels high: the
@@ -542,12 +560,10 @@ impl Motion {
                 drawn: Some(from),
             };
             if let Some(slot) = self.flights.get_mut(index) {
-                if slot.replace(flight).is_some() {
-                    self.order.retain(|&c| c != card);
-                }
+                *slot = Some(flight);
             }
-            self.order.push(card);
         }
+        self.reorder();
     }
 
     /// Bring `cards` out of the air where they are: the pointer or the
@@ -566,11 +582,20 @@ impl Motion {
         }
     }
 
-    /// Where and how `card` is drawn at `now_ns`.
+    /// Where and how `card` is drawn at `now_ns`: one yet to set off where
+    /// it waits, on the ground.
     #[must_use]
     pub fn shown(&self, card: CardId, now_ns: u64) -> Shown {
         let index = card.index();
         if let Some(Some(flight)) = self.flights.get(index) {
+            if flight.waiting(now_ns) {
+                let up = flight.turns_from.unwrap_or(flight.up);
+                return Shown {
+                    at: flight.from,
+                    facing: if up { Facing::Up } else { Facing::Down },
+                    flying: false,
+                };
+            }
             return Shown {
                 at: flight.at(now_ns),
                 facing: flight.facing(now_ns),
@@ -585,16 +610,23 @@ impl Motion {
         }
     }
 
-    /// Whether `card` is in the air.
+    /// Whether `card` has a flight, under way or waiting to set off: it is
+    /// drawn over the cards at rest, not among them.
     #[must_use]
     pub fn flying(&self, card: CardId) -> bool {
         self.flights.get(card.index()).is_some_and(Option::is_some)
     }
 
-    /// The cards in the air, earliest off the ground first.
+    /// The cards with a flight, split at `now_ns` into those under way,
+    /// earliest off the ground first, and those yet to set off, next to go
+    /// first.
     #[must_use]
-    pub fn airborne(&self) -> &[CardId] {
-        &self.order
+    pub fn airborne(&self, now_ns: u64) -> (&[CardId], &[CardId]) {
+        let flights = &self.flights;
+        let off = self
+            .order
+            .partition_point(|&card| start_of(flights, card) <= now_ns);
+        self.order.split_at(off)
     }
 
     /// Light `rects` for a moment, as a hint does.
@@ -640,21 +672,33 @@ impl Motion {
         self.cascade.take().is_some()
     }
 
-    /// When the next frame is due, or `None` when nothing moves.
+    /// When the next frame is due, or `None` when nothing moves: with every
+    /// flight still to set off, when the first does.
     #[must_use]
     pub fn deadline_ns(&self, now_ns: u64) -> Option<u64> {
-        if !self.order.is_empty() || self.cascade.is_some() {
-            return Some(now_ns.saturating_add(self.frame_ns()));
+        let frame = now_ns.saturating_add(self.frame_ns());
+        if self.cascade.is_some() {
+            return Some(frame);
         }
-        let glow = self.glow.as_ref()?;
-        let ends = glow.start_ns.saturating_add(GLOW_NS);
+        let flight = self.order.first().map(|&card| {
+            let start = start_of(&self.flights, card);
+            if start <= now_ns {
+                frame
+            } else {
+                start
+            }
+        });
         // A reduced-motion hint holds still, so the one wake it owes is its
         // end.
-        Some(if self.reduced {
-            ends
-        } else {
-            now_ns.saturating_add(self.frame_ns()).min(ends)
-        })
+        let glow = self.glow.as_ref().map(|glow| {
+            let ends = glow.start_ns.saturating_add(GLOW_NS);
+            if self.reduced {
+                ends
+            } else {
+                frame.min(ends)
+            }
+        });
+        flight.into_iter().chain(glow).min()
     }
 
     /// Run everything on to `now_ns`, adding what the frame must repaint to
@@ -673,6 +717,11 @@ impl Motion {
             let Some(flight) = slot else {
                 return false;
             };
+            // Where it waits was drawn when it was set going, and is drawn
+            // again only once it leaves.
+            if flight.waiting(now_ns) {
+                return true;
+            }
             let at = flight.at(now_ns);
             if let Some(drawn) = flight.drawn {
                 damage.add(card_rect(drawn, size));
@@ -703,6 +752,15 @@ impl Motion {
             }
         }
     }
+}
+
+/// When `card`'s flight sets off; a card with none is grounded already.
+fn start_of(flights: &[Option<Flight>], card: CardId) -> u64 {
+    flights
+        .get(card.index())
+        .copied()
+        .flatten()
+        .map_or(0, |flight| flight.start_ns)
 }
 
 /// A card's rectangle drawn at `at`, grown by the shadow a card in the air

@@ -1077,6 +1077,7 @@ mod tests {
             identity: [5; 16],
             read_only: false,
             titled: false,
+            title_writes: false,
         }
     }
 
@@ -1209,6 +1210,7 @@ mod tests {
                 owner,
                 volume_id: [7; 16],
                 titled: true,
+                title_writes: true,
                 ..image_facts(1000, MountAvailability::Available)
             },
             offered: true,
@@ -1261,6 +1263,7 @@ mod tests {
         let facts = VolumeFacts {
             title: String::from("Workbench"),
             titled: true,
+            title_writes: true,
             ..image_facts(1000, MountAvailability::Available)
         };
         let commit = |facts: &VolumeFacts, viewer, text: &str| {
@@ -1293,7 +1296,7 @@ mod tests {
         assert_eq!(reason(&facts, 1000, "a\u{7}b"), Err(TITLE_CONTROL));
         assert_eq!(reason(&facts, 1001, "Games"), Err(REASON_NOT_YOURS));
         let locked = VolumeFacts {
-            read_only: true,
+            title_writes: false,
             ..facts.clone()
         };
         assert_eq!(

@@ -12472,13 +12472,15 @@ fn a_change_of_level_eases_and_repaints_only_the_shadow() {
 #[test]
 fn shadows_stand_still_only_before_a_change_of_focus_and_once_it_has_settled() {
     let (mut c, left, _) = two_framed();
-    assert!(c.shadows_still(), "unsorted, every window stands lifted");
+    let still = |c: &Compositor, now| c.next_elevation_frame_in(now).is_none();
+    assert!(still(&c, 0), "unsorted, every window stands lifted");
     c.follow_focus(Some(left));
-    assert!(!c.shadows_still(), "aimed, not yet stepped");
+    assert!(!still(&c, 0), "aimed, not yet stepped");
     stepped(&mut c, 0);
-    assert!(!c.shadows_still(), "easing");
+    assert!(!still(&c, 0), "easing");
+    assert!(!still(&c, SETTLED_NS), "until its last step is drawn");
     stepped(&mut c, SETTLED_NS);
-    assert!(c.shadows_still(), "settled");
+    assert!(still(&c, SETTLED_NS), "settled");
 }
 
 #[test]
@@ -12505,6 +12507,33 @@ fn a_window_keeps_its_height_while_its_own_popup_holds_the_focus() {
     stepped(&mut c, SETTLED_NS);
     assert_eq!(shadow_under(&c, left), lifted, "its owner stands in front");
     assert!(shadow_under(&c, right) < lifted);
+}
+
+/// A window whose shadow is not drawn eases nothing on a change of focus, so
+/// the session is not woken at frame rate for it.
+#[test]
+fn a_window_drawing_no_shadow_takes_its_new_level_without_an_ease() {
+    let (mut c, left, right) = two_framed();
+    let work_area = c.screen_rect();
+    c.toggle_window_size(right, work_area).expect("maximizable");
+    c.follow_focus(Some(left));
+    assert_eq!(
+        c.next_elevation_frame_in(0),
+        None,
+        "a maximised window floats over nothing"
+    );
+
+    let mut c = new_compositor(mode(320, 200), GREY).expect("compositor");
+    let first = c.add_window(Point::new(20, 30), opaque(100, 80, RED));
+    let second = c.add_window(Point::new(180, 30), opaque(100, 80, RED));
+    c.composite();
+    c.follow_focus(Some(first));
+    c.follow_focus(Some(second));
+    assert_eq!(
+        c.next_elevation_frame_in(0),
+        None,
+        "an undecorated window's shadow stands lifted whatever its lift"
+    );
 }
 
 #[test]

@@ -32,6 +32,7 @@ impl ServedFormat for Served {
             fs,
             format: FormatName::Fat32,
             write_refusal: None,
+            title_apart: false,
         })
     }
 }

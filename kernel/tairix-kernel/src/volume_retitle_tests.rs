@@ -28,6 +28,7 @@ pub(super) fn run(window_ptr: *mut u8, facility: &'static TestFacility) {
     a_volume_its_driver_will_not_write_keeps_its_title_scenario(window_ptr, facility);
     a_volume_no_driver_serves_takes_no_title_scenario(window_ptr, facility);
     an_arxfs_volume_is_attached_by_its_new_title_scenario(window_ptr, facility);
+    an_iso_image_on_a_stick_takes_a_title_its_pressed_disc_does_not_scenario(window_ptr, facility);
 }
 
 /// Serve `image` over slot `slot`'s endpoint and attach its volume of
@@ -357,6 +358,107 @@ fn a_volume_no_driver_serves_takes_no_title_scenario(
         [Some(String::from("volume_unserved"))]
     );
     retire(identity, DetachMode::Plain, round);
+}
+
+/// An ISO 9660 image on a stick takes a title though its files take no
+/// writes: the user at the seat retitles it without any write to its root,
+/// whose permissions say nothing of the label, it keeps its key, identity and
+/// files' ids, and the label is read back at its next attach. The same image
+/// on a write-protected device keeps the title it was mastered with.
+fn an_iso_image_on_a_stick_takes_a_title_its_pressed_disc_does_not_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let image = ext_fixture::sparse(ISO_FIXTURE);
+    let identity = tairix_drv_fs_iso9660::Iso9660::open(RamBlock {
+        data: image.clone(),
+    })
+    .expect("a disc")
+    .volume_identity();
+    let stick = insert_on(
+        window_ptr,
+        facility,
+        (
+            &Insertion {
+                endpoint_id: 0xB1D0_5E17_0000_01E8,
+                owner: 0x70_11E8,
+                region_task: 0x70_01E8,
+                name: b"retitle-iso",
+                fstype: VolumeFsType::Iso9660,
+            },
+            ON_REMOVABLE_PORT,
+        ),
+        ServedDevice::new(RamBlock {
+            data: image.clone(),
+        }),
+    );
+    stick.outcome.expect("the stick attaches");
+    let listed = mount_record(b"retitle-iso");
+    assert!(
+        listed.titled() && listed.title_writes(),
+        "a stick takes writes"
+    );
+    assert!(
+        listed.flags().bits() & tairix_abi::driver::filesystem::MountFlags::READ_ONLY.bits() != 0,
+        "its files do not"
+    );
+    let file = file_id("/Storage/retitle-iso/README.TXT");
+    assert_eq!(
+        retitle(&seated(member()), identity, "Caf\u{e9}"),
+        Err(Errno::OutOfRange),
+        "a primary descriptor spells only ASCII"
+    );
+    retitle(&seated(member()), identity, "Ubuntu stick").expect("the user at the seat retitles it");
+    let titled = mount_record(b"retitle-iso");
+    assert_eq!(titled.title().as_str(), "Ubuntu stick");
+    assert_eq!(
+        (titled.volume_id(), titled.identity()),
+        (identity, identity)
+    );
+    assert_eq!(file_id("/Storage/retitle-iso/README.TXT"), file);
+    assert_eq!(
+        audited(VOLUME_RETITLED, "retitle-iso"),
+        [Some(String::from("seat"))]
+    );
+    let written = stick.device.lock().unwrap().block.data.clone();
+    retire(identity, DetachMode::Plain, stick);
+    let relabelled = tairix_drv_fs_iso9660::Iso9660::open(RamBlock { data: written })
+        .expect("still a disc")
+        .label()
+        .expect("a label");
+    assert_eq!(
+        relabelled.as_str(),
+        "Ubuntu stick",
+        "read back from the medium"
+    );
+
+    let pressed = insert_on(
+        window_ptr,
+        facility,
+        (
+            &Insertion {
+                endpoint_id: 0xB1D0_5E17_0000_01E9,
+                owner: 0x70_11E9,
+                region_task: 0x70_01E9,
+                name: b"pressed-iso",
+                fstype: VolumeFsType::Iso9660,
+            },
+            ON_REMOVABLE_PORT,
+        ),
+        ServedDevice::write_protected(RamBlock { data: image }),
+    );
+    pressed.outcome.expect("the disc attaches");
+    let listed = mount_record(b"pressed-iso");
+    assert!(
+        listed.titled() && !listed.title_writes(),
+        "a pressed disc keeps its own"
+    );
+    assert_eq!(
+        retitle(&admin(), identity, "Pressed"),
+        Err(Errno::ReadOnly),
+        "not even for the mount authority"
+    );
+    retire(identity, DetachMode::Plain, pressed);
 }
 
 /// An ARXFS volume takes a title in its superblock: listed once written, its

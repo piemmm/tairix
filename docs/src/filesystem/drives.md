@@ -279,7 +279,11 @@ writes kept, and a plain detach is refused as a conflicted volume's is.
 
 **Titles.** A volume's title is the label its format records
 (`FilesystemLabel`, [driver traits](../abi/driver_traits.md)), and its mount
-record carries it beside whether the format takes one (`MountRecord::titled`).
+record carries it beside whether the format takes one (`MountRecord::titled`)
+and whether a retitle may write it now (`MountRecord::title_writes`): its
+medium takes writes, and so does the volume, or its format writes the title
+apart from its files — an ISO 9660 image on a stick takes a title though its
+files take none, while a pressed disc keeps the one it was mastered with.
 `volume_retitle` names the volume by its key and rewrites the label in place:
 the key, the identity and every `FileId` stay as they were, and so does the
 catalog name until the volume next attaches and is named from the new label,
@@ -288,7 +292,8 @@ claim, which holds it against every other operation while its driver writes
 the title and flushes it: a disk image's owner alone; any device's volume, a
 holder of `CAP_FS_MOUNT`; and a removable device's volume, the user at the
 seat too, where that user may write its root as its own records and its
-mount's posture judge any write there. A network share's title is its
+mount's posture judge any write there — or where its format writes the title
+apart from its files, whose permissions then say nothing of who may. A network share's title is its
 server's and a boot volume's the system's, so both are refused
 `NotSupported`, as is a format that keeps no title; a title the format cannot
 store is refused, never shortened, and an empty title clears the label. Every

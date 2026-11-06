@@ -252,8 +252,9 @@ volume is attached; the next attach names it from the new label. No format's
 identity takes in its label, so a retitled volume is still the attachment it
 was, and its file attached again answers `AlreadyAttached`. A retitle is
 refused `Busy` while an operation holds the volume, `DeviceOffline` while no
-driver serves it, `NotSupported` for a format keeping no title (ISO 9660, an
-archive), and `ReadOnly` for a volume taking no writes; a title its format
+driver serves it, `NotSupported` for a format keeping no title (an archive),
+and `ReadOnly` for a volume taking no writes — a disc image's among them, its
+file shared among its attachers so its label stays as mastered; a title its format
 cannot store is the driver's `LengthOutOfRange` or `OutOfRange`, and one it
 has no room for its `NoSpace`. Each decision is audited
 (`fs.volume.retitled`, `fs.volume.retitled_refused`;

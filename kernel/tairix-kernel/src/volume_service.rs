@@ -163,7 +163,7 @@ use tairix_kernel_core::fs::blkmeter::VolumeIoSource;
 use tairix_kernel_core::fs::served::ServedFs;
 use tairix_kernel_core::fs::{
     AnswerSink, At, ChunkSink, ChunkSource, FinalLink, ImageSource, JournaledBlock, OfferingServer,
-    Principal, RetainedWrites, ServeChannel, Start, VolumeNames, VolumeNodes,
+    Principal, RetainedWrites, ServeChannel, Start, Titling, VolumeNames, VolumeNodes,
 };
 use tairix_kernel_core::fswatch::{ClaimRef, WatchRegistry};
 use tairix_kernel_core::sharedreg::kernel_hold;
@@ -1546,7 +1546,8 @@ impl RuntimeVolumeService {
 
     /// Title device volume `id` `title` for `caller`: on the mount authority,
     /// or on the seat's over a removable device's volume whose root they may
-    /// write ([`root_writable`]).
+    /// write ([`root_writable`]) — or whose format writes its title apart from
+    /// its files, whose permissions then say nothing of it.
     ///
     /// # Errors
     ///
@@ -1561,7 +1562,11 @@ impl RuntimeVolumeService {
         let (claim, target) = self
             .claim_for_retitle(id, caller)
             .map_err(|(name, cause, errno)| refuse_retitle(audit, &name, cause, errno))?;
+        let apart = LATE_FILESYSTEM
+            .titling(target.handle)
+            .is_some_and(|titling| titling.apart);
         let permitted = match target.authority {
+            DeviceAuthority::Seat if apart => Ok(()),
             DeviceAuthority::Seat => root_writable(caller, &target.name),
             DeviceAuthority::Mount => Ok(()),
         };
@@ -1710,8 +1715,8 @@ impl RuntimeVolumeService {
             })?;
         }
         let _ = LATE_FILESYSTEM.set_served_state(target.handle, Some(state));
-        let titled = target.fstype.takes_title() && offer.title;
-        let _ = LATE_FILESYSTEM.set_title(target.handle, target.title, titled);
+        let titling = Titling::of(target.fstype, offer, target.served.read_only());
+        let _ = LATE_FILESYSTEM.set_title(target.handle, target.title, titling);
         let _ = LATE_FILESYSTEM.set_availability(
             target.handle,
             target.kept.unwrap_or(MountAvailability::Available),
@@ -3302,7 +3307,7 @@ fn write_held_title(
     let mut fs = driver.lock();
     write_title(&mut *fs, title, || {
         listed();
-        let _ = LATE_FILESYSTEM.set_title(handle, *title, true);
+        let _ = LATE_FILESYSTEM.retitled(handle, *title);
     })
 }
 

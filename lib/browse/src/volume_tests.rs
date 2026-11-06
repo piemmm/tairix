@@ -10,9 +10,10 @@ use tairix_abi::sysinfo::{
 use tairix_icon::{disk_icon, IconKind};
 
 use super::{
-    drive_entry, locate, reference, shortcuts, shown_on_desktop, DesktopDrives, DriveClass, Located,
+    catalog_shortcuts, drive_entry, locate, reference, shortcuts, shown_on_desktop, DesktopDrives,
+    DriveClass, Located,
 };
-use crate::entry::{resolve_target, DriveMark, Entry, EntryKind, LinkTarget};
+use crate::entry::{resolve_target, DriveMark, Entry, EntryKind, LinkTarget, Listed};
 use crate::mount::volume_root;
 use crate::places::{Volume, VolumeFacts};
 use crate::vfs::LinkInfo;
@@ -39,6 +40,7 @@ fn volume(target: &str, class: VolumeClass, (key, identity): ([u8; 16], [u8; 16]
             identity,
             read_only: false,
             titled: false,
+            title_writes: false,
         },
         offered: true,
     }
@@ -147,6 +149,49 @@ fn a_volume_drop_makes_a_shortcut_to_each_by_its_identity() {
     );
     let bound = [marked("USB", stick().facts), Entry::directory("Bound")];
     assert_eq!(shortcuts(&bound), None, "no volume's own root");
+}
+
+/// Volumes dropped by their places in the storage catalog make the shortcuts
+/// the catalog's own entries make; anything else, or a volume no longer
+/// attached there, makes none.
+#[test]
+fn volumes_dropped_by_their_catalog_places_make_the_same_shortcuts() {
+    let at = |path: &[&str]| Listed {
+        path: path.iter().map(|part| String::from(*part)).collect(),
+        id: tairix_abi::fs::FileId::NONE,
+    };
+    let twin = volume("/Storage/USB_2", VolumeClass::Removable, ([9; 16], STICK));
+    let volumes = [stick(), twin];
+    assert_eq!(
+        catalog_shortcuts(
+            &[at(&["Storage", "USB"]), at(&["Storage", "USB_2"])],
+            &volumes
+        ),
+        Some(vec![
+            (String::from("USB"), volume_root(STICK)),
+            (String::from("USB_2"), volume_root(STICK)),
+        ])
+    );
+    assert_eq!(
+        catalog_shortcuts(&[at(&["Storage", "USB"]), at(&["Users", "ada"])], &volumes),
+        None,
+        "a file is no volume"
+    );
+    assert_eq!(
+        catalog_shortcuts(&[at(&["Storage", "Gone"])], &volumes),
+        None,
+        "nor is a place nothing is attached at"
+    );
+    let unpublished = volume(
+        "/Storage/Odd",
+        VolumeClass::Removable,
+        ([5; 16], VOLUME_ID_UNPUBLISHED),
+    );
+    assert_eq!(
+        catalog_shortcuts(&[at(&["Storage", "Odd"])], &[unpublished]),
+        None,
+        "nor one whose content carries no identity"
+    );
 }
 
 #[test]

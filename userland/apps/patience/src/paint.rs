@@ -108,7 +108,21 @@ pub fn frame(surface: &mut Surface, view: &View<'_>, art: &mut CardArt) {
             2,
         );
     }
-    for &card in view.motion.airborne() {
+    let (moving, waiting) = view.motion.airborne(view.now_ns);
+    // The last to go lies at the bottom, and a card waiting on the spot the
+    // next to go waits on is wholly hidden under it.
+    let mut waiting = waiting
+        .iter()
+        .rev()
+        .map(|&card| (card, view.motion.shown(card, view.now_ns)))
+        .peekable();
+    while let Some((card, shown)) = waiting.next() {
+        if waiting.peek().is_some_and(|(_, next)| next.at == shown.at) {
+            continue;
+        }
+        card_tile(surface, view, art, card, shown.at, shown.facing, false);
+    }
+    for &card in moving {
         let shown = view.motion.shown(card, view.now_ns);
         card_tile(surface, view, art, card, shown.at, shown.facing, true);
     }

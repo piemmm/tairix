@@ -1142,6 +1142,171 @@ fn the_served_driver_offers_every_disc_read_only() {
     assert_eq!(read_only.write_refusal, None);
 }
 
+/// An in-memory medium that takes writes, in 512-byte blocks.
+struct Stick(Vec<u8>);
+
+impl Block for Stick {
+    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+        Ok(BlockGeometry {
+            block_size: 512,
+            block_count: (self.0.len() / 512) as u64,
+        })
+    }
+
+    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        let at = lba as usize * 512;
+        buf.copy_from_slice(
+            self.0
+                .get(at..at + buf.len())
+                .ok_or(DriverError::OutOfRange)?,
+        );
+        Ok(())
+    }
+
+    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+        let at = lba as usize * 512;
+        self.0
+            .get_mut(at..at + buf.len())
+            .ok_or(DriverError::OutOfRange)?
+            .copy_from_slice(buf);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
+}
+
+fn title(text: &str) -> tairix_abi::driver::filesystem::VolumeTitle {
+    tairix_abi::driver::filesystem::VolumeTitle::new(text).expect("a title")
+}
+
+fn on_stick(image: Vec<u8>) -> Iso9660<Stick> {
+    Iso9660::open(Stick(image))
+        .expect("mounts")
+        .writing_its_title()
+}
+
+/// The volume identifier of the descriptor in logical sector `sector`.
+fn identifier(image: &[u8], sector: usize) -> &[u8] {
+    &image[sector * 2048 + 40..sector * 2048 + 72]
+}
+
+#[test]
+fn a_retitle_rewrites_the_label_in_place_and_keeps_the_identity() {
+    use tairix_abi::driver::filesystem::FilesystemLabel;
+    let mut fs = on_stick(master::master(&rock_ridge(Vec::new())).image);
+    assert_eq!(fs.label().expect("a label").as_str(), "ROCK");
+    let identity = fs.volume_identity();
+    fs.set_label(&title("Holiday Photos")).expect("retitled");
+    assert_eq!(fs.label().expect("a label").as_str(), "Holiday Photos");
+    assert_eq!(fs.volume_identity(), identity, "the same volume");
+    let image = fs.into_device().0;
+    assert_eq!(
+        identifier(&image, 16),
+        b"Holiday Photos                  ",
+        "space padded, as mastered"
+    );
+    let mut again = Iso9660::open(Stick(image)).expect("still mounts");
+    assert_eq!(again.label().expect("a label").as_str(), "Holiday Photos");
+}
+
+#[test]
+fn a_joliet_volume_takes_what_its_descriptor_holds_and_every_tree_is_retitled() {
+    use tairix_abi::driver::filesystem::FilesystemLabel;
+    let mut joliet = disc(Vec::new());
+    joliet.joliet = Some(Node::dir(&[], Vec::new()));
+    let mut fs = on_stick(master::master(&joliet).image);
+    assert_eq!(
+        fs.set_label(&title("Seventeen letters")),
+        Err(DriverError::LengthOutOfRange),
+        "Joliet holds sixteen"
+    );
+    fs.set_label(&title("Sixteen letters!")).expect("retitled");
+    assert_eq!(fs.label().expect("a label").as_str(), "Sixteen letters!");
+    let image = fs.into_device().0;
+    assert_eq!(&identifier(&image, 16)[..16], b"Sixteen letters!");
+    assert_eq!(identifier(&image, 17), master::ucs2("Sixteen letters!"));
+}
+
+#[test]
+fn a_retitle_is_refused_for_what_the_medium_or_the_format_cannot_hold() {
+    use tairix_abi::driver::filesystem::FilesystemLabel;
+    let image = || master::master(&disc(Vec::new())).image;
+    let mut pressed = Iso9660::open(Stick(image())).expect("mounts");
+    assert_eq!(pressed.set_label(&title("New")), Err(DriverError::ReadOnly));
+    let mut fs = on_stick(image());
+    assert_eq!(
+        fs.set_label(&title("Fotos 2021 \u{e9}t\u{e9}")),
+        Err(DriverError::OutOfRange)
+    );
+    assert_eq!(
+        fs.set_label(&title("a title of more than thirty-two bytes")),
+        Err(DriverError::LengthOutOfRange)
+    );
+    assert_eq!(
+        fs.label().expect("a label").as_str(),
+        "TEST",
+        "nothing was written"
+    );
+    let mut high_sierra = disc(Vec::new());
+    high_sierra.standard = master::Standard::HighSierra;
+    let mut old = on_stick(master::master(&high_sierra).image);
+    assert_eq!(old.set_label(&title("New")), Err(DriverError::Unsupported));
+}
+
+/// An image mastered with a partition offset is read from its partition as
+/// well as from the medium's start, through a second descriptor set: a
+/// retitle reaches both, so every reader sees one title.
+#[test]
+fn a_hybrid_images_twin_descriptor_set_is_retitled_too() {
+    use tairix_abi::driver::filesystem::FilesystemLabel;
+    let base = master::master(&disc(Vec::new())).image;
+    let twin_at = base.len();
+    let mut image = base.clone();
+    image.extend_from_slice(&base);
+    let whole = u32::try_from(image.len() / 2048).expect("small");
+    let both = [whole.to_le_bytes(), whole.to_be_bytes()].concat();
+    image[16 * 2048 + 80..16 * 2048 + 88].copy_from_slice(&both);
+    // One MBR partition, starting where the twin does.
+    let entry = 446;
+    image[entry + 4] = 0x83;
+    let start = u32::try_from(twin_at / 512).expect("small");
+    let count = u32::try_from(base.len() / 512).expect("small");
+    image[entry + 8..entry + 12].copy_from_slice(&start.to_le_bytes());
+    image[entry + 12..entry + 16].copy_from_slice(&count.to_le_bytes());
+    image[510..512].copy_from_slice(&[0x55, 0xAA]);
+    let mut fs = on_stick(image);
+    fs.set_label(&title("BOTH")).expect("retitled");
+    let image = fs.into_device().0;
+    let twin = twin_at / 2048 + 16;
+    assert_eq!(&identifier(&image, 16)[..4], b"BOTH");
+    assert_eq!(
+        &identifier(&image, twin)[..4],
+        b"BOTH",
+        "the partition's own set"
+    );
+}
+
+#[test]
+fn the_served_driver_writes_its_title_only_on_a_medium_taking_writes() {
+    use tairix_abi::driver::filesystem::FilesystemLabel;
+    use tairix_fsserve::{ServedFormat, WritebackBudget};
+    let budget = WritebackBudget {
+        backing: 1 << 30,
+        gauge: &tairix_reclaim::Unpressured,
+    };
+    let image = || Stick(master::master(&disc(Vec::new())).image);
+    let mut writable = crate::Served::open(image(), false, budget).expect("mounts");
+    assert!(writable.offer().title && writable.offer().title_apart);
+    writable.fs.set_label(&title("New")).expect("retitled");
+    let mut pressed = crate::Served::open(image(), true, budget).expect("mounts");
+    assert_eq!(
+        pressed.fs.set_label(&title("New")),
+        Err(DriverError::ReadOnly)
+    );
+}
+
 #[test]
 fn register_needs_the_load_capability() {
     use tairix_abi::driver::GrantingHost;

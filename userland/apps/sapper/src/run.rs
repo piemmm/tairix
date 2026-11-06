@@ -120,14 +120,8 @@ mod program {
 
     impl EventSource for RtEventSource<'_> {
         fn park(&mut self) -> Result<Parked, Errno> {
-            let woken = match self.deadline_ns.get() {
-                // One-shot, to the next thing the game actually needs: no
-                // periodic tick, and no timer armed while the board is still.
-                Some(deadline) => match app::park_until(self.set, deadline)? {
-                    Some(woken) => woken,
-                    None => return Ok(Parked::Interrupted),
-                },
-                None => app::park(self.set)?,
+            let Some(woken) = app::park_until_due(self.set, self.deadline_ns.get())? else {
+                return Ok(Parked::Interrupted);
             };
             match woken {
                 Wake::App(WRITER_TOKEN) => {
@@ -548,6 +542,8 @@ mod program {
             | WindowEvent::DragEnded { .. }
             | WindowEvent::SaveOffered { .. }
             | WindowEvent::SaveOfferEnded { .. }
+            | WindowEvent::ItemsOffered { .. }
+            | WindowEvent::ItemsOfferEnded { .. }
             | WindowEvent::PreviewRendered { .. }
             | WindowEvent::Pinch { .. }
             | WindowEvent::OpenRequested => Acted::Idle,

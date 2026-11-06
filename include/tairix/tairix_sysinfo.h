@@ -358,7 +358,9 @@ typedef struct tairix_blk_medium {
 * name, cut between characters to fit. `title` is the volume's own
 * label: empty where its filesystem records none, and on a withheld record.
 * `titled` is 1 where the volume's format takes a title a retitle can set,
-* else 0, and 0 on a withheld record.
+* else 0, and 0 on a withheld record; `title_writes` is 1 where a retitle
+* may write it now (its medium takes writes, and its volume does or its
+* format writes the title apart from its files), never without `titled`.
 * The inline source/target/fstype/title buffers are valid for their
 * respective *_len byte counts. */
 typedef struct tairix_mount_record {
@@ -382,6 +384,7 @@ typedef struct tairix_mount_record {
     uint8_t title_len;
     uint8_t title[TAIRIX_VOLUME_TITLE_MAX];
     uint8_t titled;
+    uint8_t title_writes;
 } tairix_mount_record_t;
 
 /* One view binding: a view path (`target`), the path within an attached

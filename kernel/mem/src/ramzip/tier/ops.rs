@@ -30,7 +30,7 @@ const NEARBY_MAX: usize = if CLUSTER_MAX_PAGES > WARM_BATCH_PAGES {
 
 /// How many pages a compression step takes out of every view at once: one
 /// remote shootdown and one snapshot retirement serve them all.
-const COMPRESS_BATCH: usize = 64;
+pub(crate) const COMPRESS_BATCH: usize = 64;
 
 /// Whether opportunistic restores may run at all: normal pressure
 /// *and* free memory above the warm-up start watermark (hysteresis

@@ -121,12 +121,6 @@ impl Lift {
         moved
     }
 
-    /// Whether the shadow stands at the level it is aimed at, with no ease
-    /// begun or running.
-    pub(crate) const fn still(&self) -> bool {
-        self.target == self.fade.target() && !self.fade.running()
-    }
-
     /// Nanoseconds until the next step is owed on a display refreshing at
     /// `refresh`, or `None` for a shadow at rest: at once for a change no step
     /// has started.

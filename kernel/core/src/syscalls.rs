@@ -10904,7 +10904,12 @@ where
         // between that look and the park still wakes this thread.
         let deadline = ep.await_by(claimant, CallTicket(ticket), sched_task)?;
         let timed = deadline != crate::waitq::NO_DEADLINE;
-        crate::waitq::CALL_WAITQ.register(sched_task, deadline)?;
+        if let Err(refused) = crate::waitq::CALL_WAITQ.register(sched_task, deadline) {
+            // Named its awaiter, the answer would wake nobody else and no
+            // reaper would ever be told of it.
+            crate::waitq::call_woken(&ep.abandon_await(claimant, CallTicket(ticket), sched_task));
+            return Err(refused.into());
+        }
         if timed {
             crate::waitq::rearm_timed_wakeup();
         }
@@ -63575,6 +63580,7 @@ mod tests {
                 write_refusal: None,
                 format: tairix_abi::volume::FormatName::Smb3,
                 title: false,
+                title_apart: false,
             },
             for_uid: 1000,
             key: *b"0123456789abcdef",

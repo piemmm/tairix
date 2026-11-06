@@ -4,7 +4,7 @@ use tairix_abi::fs::{DocumentStamp, FileId};
 use tairix_abi::time::Time64;
 use tairix_abi::window_ipc::{
     BundleRunPath, DocumentName, DragItems, DragOwnIcon, DragOwnSource, DragPicture, DropOperation,
-    DropTarget, IconAsset,
+    DropTarget, IconAsset, OfferDrop, OfferedItem,
 };
 use tairix_abi::Errno;
 use tairix_browse::render::Tiles;
@@ -17,9 +17,11 @@ use tairix_wm::{Compositor, InputEvent, Point, WindowId};
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::desktop::DesktopLift;
 use crate::drag::{
-    DragEnd, DragStep, DragSurface, DropRefusal, ItemsEnd, ItemsReport, OfferEnd, OwedReport,
-    SaveDrop, SaveEnd, SaveOffer, SaveReport, SavedDocument, SlotAnswer,
+    DesktopCargo, DesktopDrop, DesktopEnd, DesktopItem, DesktopReport, DragEnd, DragStep,
+    DragSurface, DropRefusal, ItemsEnd, ItemsOffer, ItemsOfferEnd, ItemsReport, OfferEnd,
+    OwedReport, SaveDrop, SaveEnd, SaveOffer, SaveReport, SavedDocument, SlotAnswer,
 };
 use crate::picker::PickId;
 use crate::shell::DesktopShell;
@@ -1096,7 +1098,9 @@ fn offer_at(window_id: u64, x: u32, y: u32) -> DragSurface {
 fn save_report(shell: &mut DesktopShell) -> Option<SaveReport> {
     match shell.take_drag_report()? {
         OwedReport::Save(report) => Some(report),
-        other @ OwedReport::Items(_) => panic!("a save owes save reports: {other:?}"),
+        other @ (OwedReport::Items(_) | OwedReport::Desktop(_)) => {
+            panic!("a save owes save reports: {other:?}")
+        }
     }
 }
 
@@ -1422,4 +1426,290 @@ fn windows_going_end_or_forget_a_save_as_they_concern_it() {
         })
     );
     assert!(!shell.drag_active());
+}
+
+/// A shell holding a primary press on the bare desktop, a window beside it.
+fn pressed_on_desktop() -> (DesktopShell, Compositor) {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let _ = opaque_window(&mut comp, Point::new(100, 100), 120, 80);
+    let _ = shell.handle(moved(40, 40), &mut comp, 0);
+    let _ = shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    (shell, comp)
+}
+
+/// The node the desktop listed its `n`th icon as.
+const fn listed(n: u64) -> FileId {
+    FileId {
+        volume: [4; 16],
+        node: n,
+    }
+}
+
+/// Three desktop icons, `a.txt` pressed.
+fn desktop_icons() -> DesktopCargo {
+    let item = |path: &str, n| DesktopItem {
+        path: String::from(path),
+        id: listed(n),
+    };
+    DesktopCargo {
+        shown: several(),
+        items: alloc::vec![
+            item("/Users/ann/Desktop/a.txt", 1),
+            item("/Users/ann/Desktop/Pictures", 2),
+            item("/Users/ann/Desktop/b.png", 3),
+        ],
+        lift: DesktopLift {
+            lead: String::from("a.txt"),
+            grab: (12, 9),
+        },
+    }
+}
+
+/// The offers icons carried off the desktop owe.
+fn desktop_report(shell: &mut DesktopShell) -> Option<DesktopReport> {
+    match shell.take_drag_report()? {
+        OwedReport::Desktop(report) => Some(report),
+        other @ (OwedReport::Items(_) | OwedReport::Save(_)) => {
+            panic!("icons off the desktop owe their own reports: {other:?}")
+        }
+    }
+}
+
+/// Carry the desktop's icons over window 9 and take the offer made there.
+fn offered_to_nine(shell: &mut DesktopShell, comp: &mut Compositor) -> ItemsOffer {
+    shell
+        .begin_desktop_drag(comp, desktop_icons())
+        .expect("carried");
+    over(shell, comp, Point::new(110, 110), offer_at(9, 10, 10));
+    desktop_report(shell)
+        .and_then(|report| report.over)
+        .expect("offered")
+}
+
+/// The seat carries icons off the desktop only on from a held press, one
+/// drag at a time.
+#[test]
+fn icons_are_carried_off_the_desktop_only_from_a_held_press() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let _ = shell.handle(moved(40, 40), &mut comp, 0);
+    assert_eq!(
+        shell.begin_desktop_drag(&mut comp, desktop_icons()),
+        Err(Errno::PermissionDenied),
+        "a drag is a press carried on"
+    );
+    let _ = shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    shell
+        .begin_desktop_drag(&mut comp, desktop_icons())
+        .expect("carried");
+    assert!(shell.carries_desktop_icons());
+    assert_eq!(
+        shell.begin_desktop_drag(&mut comp, desktop_icons()),
+        Err(Errno::AlreadyExists),
+        "one drag at a time"
+    );
+    assert!(shell.drag_items().is_none() && shell.save_source().is_none());
+}
+
+/// Icons off the desktop held over a window are offered to it, its
+/// application's answer is shown, and only that window reads them by the
+/// drag's number; dropped there, it may still read them, and nothing else may.
+#[test]
+fn icons_off_the_desktop_are_offered_to_the_window_under_them_alone() {
+    let (mut shell, mut comp) = pressed_on_desktop();
+    let offer = offered_to_nine(&mut shell, &mut comp);
+    assert_eq!(
+        (offer.window_id, offer.x, offer.y, offer.shift),
+        (9, 10, 10, false)
+    );
+    assert_eq!(
+        shell.offered_item(9, offer.drag, 0),
+        Ok(OfferedItem {
+            path: "/Users/ann/Desktop/a.txt",
+            id: listed(1),
+        }),
+        "the pressed icon first"
+    );
+    assert_eq!(
+        shell.offered_item(9, offer.drag, 2).map(|item| item.path),
+        Ok("/Users/ann/Desktop/b.png")
+    );
+    assert_eq!(shell.offered_items(9, offer.drag).map(<[_]>::len), Ok(3));
+    assert_eq!(shell.offered_item(9, offer.drag, 3), Err(Errno::NotFound));
+    assert_eq!(
+        shell.offered_items(8, offer.drag),
+        Err(Errno::NotFound),
+        "another window reads nothing"
+    );
+    assert_eq!(
+        shell.offered_items(9, offer.drag.wrapping_add(1)),
+        Err(Errno::NotFound),
+        "nor does another drag's number"
+    );
+    assert!(shell.items_offer_answered(&mut comp, 9, offer.serial, Some(DropOperation::Move)));
+    assert_eq!(shell.cursor().kind(), CursorKind::DragMove);
+    assert_eq!(
+        shell.drag_pointer(&mut comp, &RELEASE),
+        DragStep::Ended(DragEnd::Desktop(DesktopEnd {
+            dropped: DesktopDrop::Window,
+            offer: Some(ItemsOfferEnd {
+                window_id: 9,
+                serial: offer.serial,
+                dropped: Some(OfferDrop {
+                    x: 10,
+                    y: 10,
+                    operation: DropOperation::Move,
+                }),
+            }),
+        }))
+    );
+    assert_eq!(
+        shell.offered_item(9, offer.drag, 1),
+        Ok(OfferedItem {
+            path: "/Users/ann/Desktop/Pictures",
+            id: listed(2),
+        }),
+        "the window dropped on reads what it was given"
+    );
+    assert_eq!(shell.offered_items(8, offer.drag), Err(Errno::NotFound));
+    let _ = shell.abort_drag_for(&mut comp, 9);
+    assert_eq!(
+        shell.offered_items(9, offer.drag),
+        Err(Errno::NotFound),
+        "until it closes"
+    );
+}
+
+/// A window let go over before its application answered is told the offer
+/// ended with nothing dropped, and keeps no way to read the icons.
+#[test]
+fn icons_let_go_over_a_window_yet_to_answer_drop_nothing() {
+    let (mut shell, mut comp) = pressed_on_desktop();
+    let offer = offered_to_nine(&mut shell, &mut comp);
+    assert_eq!(
+        shell.drag_pointer(&mut comp, &RELEASE),
+        DragStep::Ended(DragEnd::Desktop(DesktopEnd {
+            dropped: DesktopDrop::Nothing,
+            offer: Some(ItemsOfferEnd {
+                window_id: 9,
+                serial: offer.serial,
+                dropped: None,
+            }),
+        }))
+    );
+    assert_eq!(shell.offered_items(9, offer.drag), Err(Errno::NotFound));
+}
+
+/// An answer to an offer the icons have moved on from is not shown, and a
+/// refusal shows no verdict.
+#[test]
+fn a_late_answer_to_an_offer_of_icons_is_not_shown() {
+    let (mut shell, mut comp) = pressed_on_desktop();
+    let offer = offered_to_nine(&mut shell, &mut comp);
+    assert!(shell.items_offer_answered(&mut comp, 9, offer.serial, None));
+    assert_eq!(shell.cursor().kind(), CursorKind::Arrow, "refused");
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(500, 400),
+        offer_at(4, 3, 3),
+    );
+    let report = desktop_report(&mut shell).expect("owed");
+    assert_eq!(
+        report.left,
+        Some(ItemsOfferEnd {
+            window_id: 9,
+            serial: offer.serial,
+            dropped: None,
+        }),
+        "the window left is told"
+    );
+    assert!(
+        !shell.items_offer_answered(&mut comp, 9, offer.serial, Some(DropOperation::Copy)),
+        "an answer from the window left is not shown"
+    );
+    let now = report.over.expect("offered to the next");
+    assert!(
+        !shell.items_offer_answered(&mut comp, 4, offer.serial, Some(DropOperation::Copy)),
+        "nor one naming the offer before"
+    );
+    assert!(shell.items_offer_answered(&mut comp, 4, now.serial, Some(DropOperation::Copy)));
+    assert_eq!(shell.cursor().kind(), CursorKind::DragCopy);
+}
+
+/// Brought back over the desktop the icons are put down where let go, and the
+/// window they left is told.
+#[test]
+fn icons_brought_back_over_the_desktop_are_put_down_where_let_go() {
+    let (mut shell, mut comp) = pressed_on_desktop();
+    let offer = offered_to_nine(&mut shell, &mut comp);
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(700, 500),
+        desktop("/Users/ann/Desktop", None),
+    );
+    assert_eq!(shell.cursor().kind(), CursorKind::DragMove);
+    assert_eq!(
+        desktop_report(&mut shell),
+        Some(DesktopReport {
+            left: Some(ItemsOfferEnd {
+                window_id: 9,
+                serial: offer.serial,
+                dropped: None,
+            }),
+            over: None,
+        })
+    );
+    assert_eq!(
+        shell.drag_pointer(&mut comp, &RELEASE),
+        DragStep::Ended(DragEnd::Desktop(DesktopEnd {
+            dropped: DesktopDrop::Desktop {
+                at: Point::new(700, 500),
+                lift: desktop_icons().lift,
+            },
+            offer: None,
+        }))
+    );
+}
+
+/// `Shift` asks the window under the icons afresh, the answer given for the
+/// other modifier forgotten.
+#[test]
+fn shift_offers_icons_off_the_desktop_afresh() {
+    let (mut shell, mut comp) = pressed_on_desktop();
+    let offer = offered_to_nine(&mut shell, &mut comp);
+    assert!(shell.items_offer_answered(&mut comp, 9, offer.serial, Some(DropOperation::Move)));
+    let shifted = InputEvent::ModifiersChanged {
+        modifiers: tairix_wm::Modifiers {
+            shift: true,
+            ..tairix_wm::Modifiers::default()
+        },
+    };
+    assert_eq!(shell.drag_key(&mut comp, &shifted), None);
+    assert_eq!(shell.cursor().kind(), CursorKind::Arrow, "asked afresh");
+    let again = desktop_report(&mut shell)
+        .and_then(|report| report.over)
+        .expect("offered again");
+    assert!(again.shift && again.serial != offer.serial);
+    assert!(!shell.items_offer_answered(&mut comp, 9, offer.serial, Some(DropOperation::Move)));
+}
+
+/// A window closing under icons offered it forgets them: the drag goes on,
+/// and a release then drops nothing and tells it nothing.
+#[test]
+fn a_window_closing_under_icons_offered_it_forgets_them() {
+    let (mut shell, mut comp) = pressed_on_desktop();
+    let offer = offered_to_nine(&mut shell, &mut comp);
+    assert_eq!(shell.abort_drag_for(&mut comp, 9), None);
+    assert!(shell.drag_active(), "the drag goes on");
+    assert_eq!(shell.offered_items(9, offer.drag), Err(Errno::NotFound));
+    assert_eq!(
+        shell.drag_pointer(&mut comp, &RELEASE),
+        DragStep::Ended(DragEnd::Desktop(DesktopEnd {
+            dropped: DesktopDrop::Nothing,
+            offer: None,
+        }))
+    );
 }

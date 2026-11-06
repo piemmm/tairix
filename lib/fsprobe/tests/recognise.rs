@@ -449,8 +449,16 @@ fn an_iso9660_volume_is_identified_by_its_primary_descriptor() {
         recognised(&renamed).expect("matches").identity,
         probed.identity
     );
+    let mut relabelled = image.clone();
+    relabelled[16 * 2048 + 41] = b'Q';
+    assert_eq!(
+        recognised(&relabelled).expect("matches").identity,
+        probed.identity,
+        "a retitle rewrites the label in place and keeps the identity"
+    );
     let mut remastered = image;
-    remastered[16 * 2048 + 41] = b'Q';
+    // The volume creation date.
+    remastered[16 * 2048 + 813] ^= 1;
     assert_ne!(
         recognised(&remastered).expect("matches").identity,
         probed.identity

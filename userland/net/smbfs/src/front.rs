@@ -486,6 +486,7 @@ const fn serve_offer(read_only: bool) -> ServeOffer {
         node_identity: NodeIdentity::Stable,
         attrs: false,
         title: false,
+        title_apart: false,
         write_refusal: if read_only {
             Some(WriteRefusal::OpenedReadOnly)
         } else {

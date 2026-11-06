@@ -132,16 +132,17 @@ use tairix_abi::window_ipc::{
     decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
     decode_drag_spot_reply, decode_drop_target_reply, decode_hand_over_reply,
     decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
-    decode_open_target_reply, decode_picked_name_reply, decode_wallpapers_reply,
-    encode_drag_spot_reply, encode_drop_target_reply, encode_open_target_reply,
-    encode_picked_name_reply, AlertButton, AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec,
-    AppBar, AppBarClick, AppMenu, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId,
-    AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut,
-    AppMenuSymbol, BundleRunPath, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems,
-    DragOwnIcon, DragOwnSource, DragPicture, DropOperation, DropSite, HandOverDocument,
-    HandOverTarget, IconAsset, IconPath, MenuOutcome, MenuRefusal, PaneName, PickPurpose,
-    PreviewOutcome, PreviewSubject, SaveFormat, SaveFormats, ToolOver, TooltipText, WindowEvent,
-    WindowRegion, WindowRequest, WindowSizing, WindowTitle,
+    decode_offered_items_reply, decode_open_target_reply, decode_picked_name_reply,
+    decode_wallpapers_reply, encode_drag_spot_reply, encode_drop_target_reply,
+    encode_offered_items_reply, encode_open_target_reply, encode_picked_name_reply, AlertButton,
+    AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec, AppBar, AppBarClick, AppMenu,
+    AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
+    AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut, AppMenuSymbol, BundleRunPath,
+    ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DragOwnIcon, DragOwnSource,
+    DragPicture, DropOperation, DropSite, HandOverDocument, HandOverTarget, IconAsset, IconPath,
+    MenuOutcome, MenuRefusal, PaneName, PickPurpose, PreviewOutcome, PreviewSubject, SaveFormat,
+    SaveFormats, ToolOver, TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowSizing,
+    WindowTitle,
 };
 use tairix_abi::window_ipc::{LandingName, LandingOutcome, LandingStep};
 use tairix_abi::BUNDLE_ID_MAX;
@@ -710,6 +711,7 @@ fn netattach_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
             node_identity: NodeIdentity::Stable,
             attrs: false,
             title: false,
+            title_apart: false,
             write_refusal: None,
             format: FormatName::Smb3,
         },
@@ -1320,6 +1322,12 @@ fn exercise_window_ipc(bytes: &[u8]) {
     if let Ok(folder) = decode_drag_spot_reply(bytes) {
         let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_DRAG_SPOT_REPLY_MAX];
         let len = encode_drag_spot_reply(&mut frame, Ok(folder));
+        assert_eq!(&frame[..len], bytes);
+    }
+    // And a page of the items a drag off the desktop carries.
+    if let Ok(page) = decode_offered_items_reply(bytes) {
+        let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_OFFERED_ITEMS_REPLY_MAX];
+        let len = encode_offered_items_reply(&mut frame, Ok((page.total(), page.iter())));
         assert_eq!(&frame[..len], bytes);
     }
     // A picked name re-encodes to exactly the frame it was read from.
@@ -2631,6 +2639,7 @@ fn fsserve_reply_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
         node_identity: NodeIdentity::Stable,
         attrs: true,
         title: true,
+        title_apart: false,
         write_refusal: None,
         format: tairix_abi::volume::FormatName::Ext3,
     };
@@ -3127,7 +3136,8 @@ fn structured_mount_records_with_corrupted_fields_never_panic() {
         record([0xA5; 16]).with_identity([0x5A; 16]),
         record([0x5B; 16])
             .with_title(VolumeTitle::new("HOLIDAY").expect("a title"))
-            .with_titled(true),
+            .with_titled(true)
+            .with_title_writes(true),
     ] {
         let mut base = seed.to_le_bytes();
         each_bit_flipped(&mut base, exercise);

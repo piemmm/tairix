@@ -462,6 +462,41 @@ fn ready() -> MountedFilesystemService<RwMockFs> {
     service(true, true, false)
 }
 
+/// A handle reaches its own registration through the registry's index in
+/// whatever order the handles came, and after one is reused.
+#[test]
+fn a_handle_reaches_its_own_registration_in_any_order_and_after_reuse() {
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
+    let handle = |raw| DriverHandle::from_raw(raw).expect("non-zero handle");
+    let mut held = Vec::new();
+    for raw in [40, 7, 23, 99, 1] {
+        cell.register(handle(raw), driver(), "vol", "memfs", [0u8; 16], None)
+            .expect("registered");
+        held.push((raw, cell.nodes(handle(raw)).expect("its registration")));
+    }
+    let reaches = |raw: u64, nodes: &Arc<crate::fs::VolumeNodes>| {
+        cell.nodes(handle(raw))
+            .is_some_and(|found| Arc::ptr_eq(&found, nodes))
+            && cell.driver(handle(raw)).is_ok()
+    };
+    assert!(held.iter().all(|(raw, nodes)| reaches(*raw, nodes)));
+    assert!(cell.unregister(handle(23)).is_some());
+    assert!(cell.nodes(handle(23)).is_none());
+    assert!(cell.driver(handle(23)).is_err());
+    cell.register(handle(23), driver(), "again", "memfs", [0u8; 16], None)
+        .expect("a freed handle is reused");
+    let again = cell.nodes(handle(23)).expect("the new registration");
+    assert!(held.iter().all(|(_, nodes)| !Arc::ptr_eq(nodes, &again)));
+    assert!(held
+        .iter()
+        .filter(|(raw, _)| *raw != 23)
+        .all(|(raw, nodes)| reaches(*raw, nodes)));
+    assert!(
+        cell.unregister(handle(5)).is_none(),
+        "an unknown handle removes nothing"
+    );
+}
+
 /// A registration the heap cannot hold is refused and leaves the registry
 /// as it was, and an open it cannot hold is refused, never an abort.
 ///
@@ -2553,30 +2588,58 @@ fn a_volume_is_listed_under_the_title_it_was_given() {
             .expect("snapshot")
             .iter()
             .find(|record| record.source_bytes() == b"vol")
-            .map(|record| (record.title(), record.titled()))
+            .map(|record| (record.title(), record.titled(), record.title_writes()))
             .expect("the registered volume is listed")
     };
     assert_eq!(
         listed(),
-        (VolumeTitle::EMPTY, false),
+        (VolumeTitle::EMPTY, false, false),
         "untitled until it is given one"
     );
     let title = VolumeTitle::new("Workbench").expect("a title");
+    let writable = super::Titling {
+        kept: true,
+        writes: true,
+        apart: false,
+    };
     let before = generation();
-    cell.set_title(handle, title, true).expect("titled");
+    cell.set_title(handle, title, writable).expect("titled");
     assert!(generation() > before, "a retitle is published");
-    assert_eq!(listed(), (title, true));
+    assert_eq!(listed(), (title, true, true));
     let nodes = cell.nodes(handle).expect("its registration");
     cell.register_with_nodes(handle, driver(), "vol", "memfs", [0u8; 16], None, nodes)
         .expect("replaced in place");
     assert_eq!(
         listed(),
-        (title, true),
+        (title, true, true),
         "a driver replaced in place keeps it"
+    );
+    let fixed = super::Titling {
+        kept: true,
+        writes: false,
+        apart: true,
+    };
+    cell.set_title(handle, title, fixed).expect("titled");
+    assert_eq!(
+        listed(),
+        (title, true, false),
+        "a pressed disc keeps its own"
+    );
+    assert_eq!(cell.titling(handle), Some(fixed));
+    let renamed = VolumeTitle::new("Work").expect("a title");
+    cell.retitled(handle, renamed).expect("retitled");
+    assert_eq!(
+        listed(),
+        (renamed, true, false),
+        "how it may be set is kept"
     );
     let unregistered = DriverHandle::from_raw(10).expect("handle");
     assert_eq!(
-        cell.set_title(unregistered, title, true),
+        cell.set_title(unregistered, title, writable),
+        Err(Errno::NotImplemented)
+    );
+    assert_eq!(
+        cell.retitled(unregistered, title),
         Err(Errno::NotImplemented)
     );
 }

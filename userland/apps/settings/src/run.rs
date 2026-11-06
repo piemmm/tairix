@@ -1471,12 +1471,8 @@ mod program {
 
     impl EventSource for RtEventSource<'_> {
         fn park(&mut self) -> Result<Parked, Errno> {
-            let woken = match self.timed_due.get() {
-                Some(due) => match app::park_until(self.set, due)? {
-                    Some(woken) => woken,
-                    None => return Ok(Parked::Interrupted),
-                },
-                None => app::park(self.set)?,
+            let Some(woken) = app::park_until_due(self.set, self.timed_due.get())? else {
+                return Ok(Parked::Interrupted);
             };
             match woken {
                 // A desk answered. Draining is the whole of noticing it, and
@@ -1766,7 +1762,9 @@ mod program {
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::SaveOffered { .. }
-            | WindowEvent::SaveOfferEnded { .. } => Acted::Idle,
+            | WindowEvent::SaveOfferEnded { .. }
+            | WindowEvent::ItemsOffered { .. }
+            | WindowEvent::ItemsOfferEnded { .. } => Acted::Idle,
         }
     }
 

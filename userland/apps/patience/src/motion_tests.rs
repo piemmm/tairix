@@ -77,7 +77,7 @@ fn a_moved_card_flies_from_where_it_was_to_where_it_goes() {
     assert!(damage.intersects(card_rect(Point::new(300, 200), SIZE)));
     assert_eq!(motion.shown(card(0), 0).at, Point::new(0, 0));
     assert!(motion.flying(card(0)) && !motion.flying(card(1)));
-    assert_eq!(motion.airborne(), &[card(0)]);
+    assert_eq!(motion.airborne(0), (&[card(0)][..], &[][..]));
     assert_eq!(motion.deadline_ns(0), Some(FRAME_NS));
     let midway = motion.shown(card(0), Timing::SLIDE.span_ns / 2).at;
     assert!(midway.x > 0 && midway.x < 300 && midway.y > 0 && midway.y < 200);
@@ -91,7 +91,7 @@ fn a_moved_card_flies_from_where_it_was_to_where_it_goes() {
             flying: false,
         }
     );
-    assert!(motion.airborne().is_empty());
+    assert_eq!(motion.airborne(landed), (&[][..], &[][..]));
 }
 
 #[test]
@@ -155,6 +155,69 @@ fn a_card_that_changes_face_turns_over_on_the_way() {
     assert_eq!(motion.shown(card(0), landed).facing, Facing::Up);
 }
 
+/// A card waiting out a deal's stagger rests where it waits: it is drawn
+/// there flat, owes no damage until it sets off, and the next frame is not
+/// due before the first card goes. Drawing every waiting card in the air on
+/// every frame made a deal cost a card draw per waiting card per frame.
+#[test]
+fn a_card_waiting_to_set_off_is_drawn_where_it_waits_and_owes_no_frame() {
+    let deck = at(0, 0, false);
+    let mut motion = resting(&[deck, deck, deck], false);
+    let stagger = |card: CardId| Timing {
+        delay_ns: (card.index() as u64 + 1) * 100 * MS,
+        span_ns: 50 * MS,
+        arc: 0,
+    };
+    let dealt = [at(200, 0, true), at(300, 0, true), at(400, 0, true)];
+    motion.retarget(0, &dealt, &[], stagger, &mut Region::new());
+    assert_eq!(
+        motion.shown(card(1), 50 * MS),
+        Shown {
+            at: Point::ORIGIN,
+            facing: Facing::Down,
+            flying: false,
+        }
+    );
+    assert_eq!(
+        motion.deadline_ns(0),
+        Some(100 * MS),
+        "asleep until the first goes"
+    );
+    let mut damage = Region::new();
+    motion.advance(50 * MS, &mut damage);
+    assert!(damage.is_empty(), "nothing waiting owes a repaint");
+    assert_eq!(
+        motion.airborne(120 * MS),
+        (&[card(0)][..], &[card(1), card(2)][..]),
+        "the next to go is first among those waiting"
+    );
+    motion.advance(120 * MS, &mut damage);
+    assert!(
+        damage.intersects(card_rect(Point::ORIGIN, SIZE)),
+        "it left the deck"
+    );
+    assert_eq!(motion.deadline_ns(160 * MS), Some(160 * MS + FRAME_NS));
+}
+
+#[test]
+fn a_hop_during_a_deal_keeps_the_take_off_order() {
+    let deck = at(0, 0, false);
+    let mut motion = resting(&[deck, deck, at(500, 0, true)], false);
+    let stagger = |card: CardId| Timing {
+        delay_ns: (card.index() as u64 + 1) * 100 * MS,
+        span_ns: 50 * MS,
+        arc: 0,
+    };
+    let dealt = [at(200, 0, true), at(300, 0, true), at(500, 0, true)];
+    motion.retarget(0, &dealt, &[], stagger, &mut Region::new());
+    motion.hop(&[card(2)], 12, 10 * MS, &mut Region::new());
+    assert_eq!(
+        motion.airborne(10 * MS),
+        (&[card(2)][..], &[card(0), card(1)][..]),
+        "the hop is under way while the deal still waits"
+    );
+}
+
 #[test]
 fn a_delayed_flight_waits_where_it_was_even_with_no_span() {
     let mut motion = resting(&[at(0, 0, true)], false);
@@ -210,7 +273,11 @@ fn a_new_change_starts_from_the_middle_of_the_last() {
         &mut Region::new(),
     );
     assert_eq!(motion.shown(card(0), half).at, midway);
-    assert_eq!(motion.airborne(), &[card(0)], "one flight, not two");
+    assert_eq!(
+        motion.airborne(half),
+        (&[card(0)][..], &[][..]),
+        "one flight, not two"
+    );
 }
 
 #[test]
@@ -241,7 +308,7 @@ fn a_card_taken_in_hand_leaves_the_air() {
     motion.retarget(0, &moved, &[], |_| Timing::SLIDE, &mut Region::new());
     motion.ground(&[card(0)]);
     assert!(!motion.flying(card(0)) && motion.flying(card(1)));
-    assert_eq!(motion.airborne(), &[card(1)]);
+    assert_eq!(motion.airborne(0), (&[card(1)][..], &[][..]));
     motion.ground(&[card(1)]);
     assert_eq!(motion.deadline_ns(0), None);
 }

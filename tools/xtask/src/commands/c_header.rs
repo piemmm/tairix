@@ -2397,7 +2397,9 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          * name, cut between characters to fit. `title` is the volume's own\n\
          * label: empty where its filesystem records none, and on a withheld record.\n\
          * `titled` is 1 where the volume's format takes a title a retitle can set,\n\
-         * else 0, and 0 on a withheld record.\n\
+         * else 0, and 0 on a withheld record; `title_writes` is 1 where a retitle\n\
+         * may write it now (its medium takes writes, and its volume does or its\n\
+         * format writes the title apart from its files), never without `titled`.\n\
          * The inline source/target/fstype/title buffers are valid for their\n\
          * respective *_len byte counts. */\n\
          typedef struct tairix_mount_record {\n\
@@ -2421,6 +2423,7 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint8_t title_len;\n\
          \x20   uint8_t title[TAIRIX_VOLUME_TITLE_MAX];\n\
          \x20   uint8_t titled;\n\
+         \x20   uint8_t title_writes;\n\
          } tairix_mount_record_t;\n\n",
     "/* One view binding: a view path (`target`), the path within an attached\n\
          * volume it shows (`subtree`, `/` for the volume's root), and the\n\

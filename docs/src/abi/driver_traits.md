@@ -632,10 +632,13 @@ A `VolumeTitle` is the label the format records, as text: at most
 `VOLUME_TITLE_MAX` (252) bytes of UTF-8 with no control character, the
 longest title any format records — UDF's logical volume identifier of 126
 eight-bit characters of up to two bytes each. Both methods default to
-`Unsupported`, the answer of a driver that serves no title — ISO 9660, whose
-disc is mastered with its own, and the archive driver — and a wrapper forwards
-both. ADFS, AmigaDOS, ARXFS, ext4, FAT32 and UDF serve theirs, though an
-encrypted ARXFS volume keeps none, its title being plaintext. A volume taking
+`Unsupported`, the answer of a driver that serves no title — the archive
+driver — and a wrapper forwards both. ADFS, AmigaDOS, ARXFS, ext4, FAT32,
+ISO 9660 and UDF serve theirs, though an encrypted ARXFS volume keeps none,
+its title being plaintext. ISO 9660 rewrites its label in place, apart from
+the files it never writes, where its medium takes writes — every descriptor
+recording one, in every descriptor set the image carries — and offers that
+it does (`ServeOffer::title_apart`). A volume taking
 no writes refuses a title `ReadOnly`, one longer than the format stores is
 refused `LengthOutOfRange`, one carrying a character it cannot store
 `OutOfRange`, and one the format has no room for `NoSpace`; a stored title is

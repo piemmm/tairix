@@ -2,55 +2,38 @@
 //! (`plans/SWAPSWAPSWAP.md` section 5: "not recently accessed by the
 //! page-replacement policy").
 //!
-//! Before the [`ramzip`](crate::ramzip) tier reclaims a task's anonymous
-//! page it must know the page is *genuinely cold* — untouched by the task
-//! for long enough that compressing it will not immediately fault it back
-//! in (the thrash the tier is designed to avoid). This module is the
-//! architecture-neutral page-replacement half of that decision: a
-//! classic **second-chance (clock)** scan over a task's candidate pages,
-//! driven by the per-page referenced bit the Arch HAL exposes
-//! ([`AddressSpace::test_and_clear_accessed`](crate::vmm::AddressSpace::test_and_clear_accessed)).
+//! A **second-chance (clock)** scan (Corbató, 1968) over a task's candidate
+//! pages, driven by the per-page referenced bit the Arch HAL exposes
+//! ([`AddressSpace::test_and_clear_accessed`]). A [`ColdPageScanner`] keeps one
+//! clock hand per address space, and each [`Sweep`] moves it on from where the
+//! last one stopped, reading and clearing the bit of every page it visits: a
+//! page whose bit was set was touched since the hand last passed and gets a
+//! second chance; a page whose bit was clear went untouched for a whole
+//! revolution and is cold. Clearing the bit also discards the page's TLB entry,
+//! so the next real access sets it again, in hardware or through a port's
+//! access-flag fault.
 //!
-//! # The algorithm
-//!
-//! A [`ColdPageScanner`] keeps a **clock hand** — the page number to
-//! resume from — so successive passes sweep the candidate set in a
-//! rotating order rather than always re-examining the same low pages
-//! (fairness; no page is starved of a second chance). For each candidate,
-//! in clock order from the hand:
-//!
-//! * the page's referenced bit is **read and cleared** in one step;
-//! * a page whose bit was **set** was touched since the previous pass —
-//!   it gets a *second chance*: the bit is now cleared and the page is
-//!   left mapped, so if the task keeps using it the next pass finds it hot
-//!   again;
-//! * a page whose bit was **clear** went untouched across a full pass — it
-//!   is *cold* and is returned to the caller as a reclaim candidate.
-//!
-//! Clearing the bit also invalidates the page's TLB entry (the HAL
-//! primitive does this), so the hardware — or the software
-//! access-flag-fault path on ports without a hardware flag — re-sets it on
-//! the next real access. This is the classic CLOCK (second-chance)
-//! approximation of least-recently-used (Corbató, 1968); it needs no
-//! per-page timestamp and no allocation on the hot path beyond the
-//! returned candidate list.
+//! A sweep visits at most its budget of pages and none twice. The cost of a
+//! reclaim is therefore bounded by what it asks for, never by the size of the
+//! space, and a working set that is entirely hot costs one bounded step of the
+//! hand per sweep rather than a walk of every page.
 //!
 //! # Fail closed
 //!
-//! On a port whose [`AccessTracking`](tairix_arch_api::mmu::AccessTracking)
-//! is not `Supported` the referenced bit does not exist, so the scan
-//! **refuses to classify
-//! any page cold** and returns [`ColdScanError::Unsupported`]. The tier
-//! then simply does not reclaim running tasks on that port — reclaim is
-//! safe by omission, never by guessing a page is unused (the charter's
-//! fail-closed rule; a false-cold classification would evict a hot page
-//! and cause the very thrash the tier avoids).
+//! On a port whose [`AccessTracking`](tairix_arch_api::mmu::AccessTracking) is
+//! not `Supported` there is no referenced bit, so a sweep is refused with
+//! [`ColdScanError::Unsupported`] and nothing is classified cold: a false-cold
+//! verdict would evict a hot page and cause the thrash the tier exists to
+//! avoid.
 
-use alloc::vec::Vec;
+use core::ops::RangeInclusive;
 
+use tairix_inline::ArrayVec;
+
+use crate::anon::page_at;
 use crate::vmm::{AddressSpace, Page, PageTable};
 
-/// Why a [`ColdPageScanner::scan`] produced no verdict.
+/// Why a [`ColdPageScanner::sweep`] cannot run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ColdScanError {
@@ -62,17 +45,14 @@ pub enum ColdScanError {
     Unsupported,
 }
 
-/// A second-chance (clock) cold-page scanner bound to one address space's
-/// candidate set across successive passes.
+/// A second-chance (clock) cold-page scanner for one address space.
 ///
-/// One scanner instance per address space: the [`Self::hand`] it carries
-/// is the rotating clock position for *that* space, so the scan does not
-/// keep re-examining the lowest-numbered pages while higher ones are never
-/// given a second chance.
+/// The [`Self::hand`] it carries is that space's clock position, so each
+/// sweep resumes where the previous one stopped and every page is offered its
+/// second chance in turn.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ColdPageScanner {
-    /// Clock hand: the page number to resume the sweep from on the next
-    /// [`Self::scan`]. Sweeps wrap around the candidate set from here.
+    /// The page number the next sweep starts from.
     hand: u64,
 }
 
@@ -89,79 +69,128 @@ impl ColdPageScanner {
         self.hand
     }
 
-    /// Sweep `candidates` in clock order and return up to `want` pages that
-    /// are cold (untouched since the previous pass), advancing the clock
-    /// hand past the pages examined.
+    /// Begin a sweep over the live pages of `space` inside `window`, starting
+    /// at the clock hand and visiting at most `budget` pages.
     ///
-    /// `candidates` must be sorted ascending by page number (the order
-    /// [`AddressSpace::live_pages`](crate::vmm::AddressSpace::live_pages)
-    /// yields), so the clock hand selects a stable rotation point. The
-    /// caller supplies only pages that are *eligible* to compress (cold
-    /// anonymous user pages); this scanner decides only the "recently
-    /// used?" question, never eligibility.
-    ///
-    /// Every examined page has its referenced bit read-and-cleared, giving
-    /// a still-hot page its second chance whether or not `want` is reached,
-    /// so a page the task keeps touching is never selected on the next
-    /// pass either.
+    /// A hand outside `window` starts the sweep at the window's first page.
     ///
     /// # Errors
     ///
     /// [`ColdScanError::Unsupported`] if the backend exposes no referenced
-    /// bit — the scan classifies nothing cold and the caller reclaims
-    /// nothing (fail closed).
-    pub fn scan<P: PageTable>(
+    /// bit: nothing can be classified cold (fail closed).
+    pub fn sweep<P: PageTable>(
         &mut self,
-        space: &mut AddressSpace<P>,
-        candidates: &[Page],
-        want: usize,
-    ) -> Result<Vec<Page>, ColdScanError> {
+        space: &AddressSpace<P>,
+        window: RangeInclusive<Page>,
+        budget: usize,
+    ) -> Result<Sweep<'_>, ColdScanError> {
         if !space.access_tracking().is_supported() {
             return Err(ColdScanError::Unsupported);
         }
-        debug_assert!(
-            candidates.windows(2).all(|w| w[0].number() < w[1].number()),
-            "coldscan candidates must be sorted ascending and unique"
-        );
-        let n = candidates.len();
-        if want == 0 || n == 0 {
-            return Ok(Vec::new());
-        }
+        let (first, last) = (window.start().number(), window.end().number());
+        let origin = if (first..=last).contains(&self.hand) {
+            self.hand
+        } else {
+            first
+        };
+        self.hand = origin;
+        Ok(Sweep {
+            hand: &mut self.hand,
+            first,
+            last,
+            origin,
+            wrapped: false,
+            done: first > last,
+            budget,
+            visited: 0,
+        })
+    }
+}
 
-        // The rotation start: the first candidate at or after the clock
-        // hand, wrapping to the front when the hand is past the last page.
-        let start = candidates.partition_point(|p| p.number() < self.hand) % n;
-        let mut cold = Vec::new();
-        let mut last_examined = candidates[start].number();
+/// One bounded pass of a [`ColdPageScanner`]'s clock hand, begun by
+/// [`ColdPageScanner::sweep`].
+///
+/// It runs from the hand to the end of its window, then from the window's
+/// start back to where it began, and moves the hand as it goes. A caller may
+/// take its cold pages over several [`Self::collect`] calls, acting on each
+/// batch in between, and still no page is visited twice: a second visit would
+/// find the bit the first one cleared and call a hot page cold.
+#[derive(Debug)]
+pub struct Sweep<'a> {
+    hand: &'a mut u64,
+    first: u64,
+    last: u64,
+    origin: u64,
+    wrapped: bool,
+    done: bool,
+    budget: usize,
+    visited: usize,
+}
 
-        for step in 0..n {
-            let page = candidates[(start + step) % n];
-            last_examined = page.number();
-            // Only an `Ok(false)` — the referenced bit was clear, so the
-            // page went untouched across the last pass — makes a page cold.
-            // Every other outcome leaves it unreclaimed (fail closed):
-            //   * `Ok(true)` — touched since the last clear, so it gets its
-            //     second chance (the bit is now cleared) and stays mapped;
-            //   * `Err(NotMapped)` — raced out from under the scan by a
-            //     concurrent unmap;
-            //   * any other `Err` cannot arise here (the candidate came from
-            //     `live_pages`, so it is page aligned, and the guard above
-            //     proved the backend tracks access, ruling out
-            //     `Misaligned`/`Unsupported`) — and a hypothetical backend
-            //     defect must never cause a reclaim.
-            if let Ok(false) = space.test_and_clear_accessed(page) {
-                cold.push(page);
-                if cold.len() >= want {
-                    break;
-                }
+impl Sweep<'_> {
+    /// Visit live pages from the hand, adding each cold one `eligible` admits
+    /// to `cold`, until `cold` holds `limit` pages or is full, the budget is
+    /// spent, or the sweep has come round to where it began.
+    ///
+    /// An ineligible page counts against the budget but keeps its referenced
+    /// bit, so the bound on the work holds whatever the window contains and a
+    /// page the caller may not reclaim is never aged. A page whose probe fails
+    /// (raced out by an unmap) is not cold.
+    pub fn collect<P: PageTable, const N: usize>(
+        &mut self,
+        space: &mut AddressSpace<P>,
+        eligible: impl Fn(Page) -> bool,
+        limit: usize,
+        cold: &mut ArrayVec<Page, N>,
+    ) {
+        while !self.done && cold.len() < limit && !cold.is_full() && self.visited < self.budget {
+            let end = if self.wrapped {
+                self.origin.checked_sub(1)
+            } else {
+                Some(self.last)
+            };
+            let Some(page) = end.and_then(|end| next_live(space, *self.hand, end)) else {
+                self.turn();
+                continue;
+            };
+            self.visited += 1;
+            *self.hand = page.number().saturating_add(1);
+            let is_cold =
+                eligible(page) && matches!(space.test_and_clear_accessed(page), Ok(false));
+            if is_cold && cold.try_push(page).is_err() {
+                // The loop guard leaves room; were it ever wrong, the page is
+                // offered again rather than lost.
+                self.visited -= 1;
+                *self.hand = page.number();
+                return;
             }
         }
-
-        // Resume the next sweep just past the last page examined, so the
-        // clock keeps rotating rather than restarting at the front.
-        self.hand = last_examined.wrapping_add(1);
-        Ok(cold)
     }
+
+    /// How many live pages this sweep has visited.
+    #[must_use]
+    pub const fn visited(&self) -> usize {
+        self.visited
+    }
+
+    /// Past the end of the window, carry on from its start; past the page the
+    /// sweep began at, stop with the hand back there.
+    fn turn(&mut self) {
+        if self.wrapped || self.origin == self.first {
+            self.done = true;
+            *self.hand = self.origin;
+        } else {
+            self.wrapped = true;
+            *self.hand = self.first;
+        }
+    }
+}
+
+/// The lowest live page of `space` numbered within `from..=last`.
+fn next_live<P: PageTable>(space: &AddressSpace<P>, from: u64, last: u64) -> Option<Page> {
+    let from = page_at(0, from).ok()?;
+    let last = page_at(0, last).ok()?;
+    space.next_live(from, last)
 }
 
 #[cfg(all(test, not(loom)))]
@@ -169,12 +198,15 @@ mod tests {
     use super::*;
     use crate::frame::{Frame, PhysAddr, PAGE_SIZE};
     use crate::vmm::{HostPageTable, MapFlags, VirtAddr};
-    use alloc::vec;
+    use alloc::vec::Vec;
     use tairix_arch_api::mmu::{AddressSpace as HalAddressSpace, MapError, PageFlags};
     use tairix_arch_api::tlb::TlbShootdown;
 
     /// User RW flags, the shape of an anonymous page.
     const RW_USER: MapFlags = MapFlags::READ.union(MapFlags::WRITE).union(MapFlags::USER);
+
+    /// Room for every cold page a test collects.
+    type Cold = ArrayVec<Page, 64>;
 
     fn page(n: u64) -> Page {
         Page::from_addr(VirtAddr::new(n * PAGE_SIZE as u64)).expect("aligned")
@@ -184,79 +216,256 @@ mod tests {
         Frame::containing(PhysAddr::new(0x10_0000 + n * PAGE_SIZE as u64))
     }
 
-    /// Build a space with `count` mapped anonymous pages at page numbers
-    /// `1..=count`, returning the space and the ascending candidate list.
-    fn space_with(count: u64) -> (AddressSpace<HostPageTable>, Vec<Page>) {
+    /// A space with `count` mapped anonymous pages at page numbers
+    /// `1..=count`.
+    fn space_with(count: u64) -> AddressSpace<HostPageTable> {
         let mut space = AddressSpace::new(HostPageTable::new());
-        let mut pages = Vec::new();
         for n in 1..=count {
             space.map(page(n), frame(n), RW_USER).expect("map");
-            pages.push(page(n));
         }
-        (space, pages)
+        space
+    }
+
+    fn touch(space: &mut AddressSpace<HostPageTable>, pages: impl IntoIterator<Item = u64>) {
+        for n in pages {
+            space
+                .table_mut_for_test()
+                .mark_accessed(page(n).start().as_u64());
+        }
+    }
+
+    fn numbers(cold: &Cold) -> Vec<u64> {
+        cold.iter().map(|page| page.number()).collect()
+    }
+
+    /// One sweep over `window` collecting up to `limit` cold pages; returns
+    /// them and how many pages the sweep visited.
+    fn sweep_once(
+        scanner: &mut ColdPageScanner,
+        space: &mut AddressSpace<HostPageTable>,
+        window: RangeInclusive<u64>,
+        budget: usize,
+        limit: usize,
+    ) -> (Vec<u64>, usize) {
+        let mut sweep = scanner
+            .sweep(space, page(*window.start())..=page(*window.end()), budget)
+            .expect("supported");
+        let mut cold = Cold::new();
+        sweep.collect(space, |_| true, limit, &mut cold);
+        (numbers(&cold), sweep.visited())
     }
 
     #[test]
-    fn all_untouched_pages_are_cold_up_to_the_budget() {
-        let (mut space, pages) = space_with(6);
+    fn untouched_pages_are_cold_up_to_the_limit() {
+        let mut space = space_with(6);
         let mut scanner = ColdPageScanner::new();
-        // Nothing was ever accessed, so every page is cold; the budget
-        // caps the return at 4.
-        let cold = scanner.scan(&mut space, &pages, 4).expect("supported");
-        assert_eq!(cold.len(), 4);
-        assert_eq!(cold, vec![page(1), page(2), page(3), page(4)]);
+        let (cold, visited) = sweep_once(&mut scanner, &mut space, 1..=6, 64, 4);
+        assert_eq!(cold, [1, 2, 3, 4]);
+        assert_eq!(visited, 4);
     }
 
     #[test]
     fn a_referenced_page_gets_a_second_chance_and_is_not_cold() {
-        let (mut space, pages) = space_with(4);
-        // The task touched pages 2 and 3 since the last pass.
-        space
-            .table_mut_for_test()
-            .mark_accessed(page(2).start().as_u64());
-        space
-            .table_mut_for_test()
-            .mark_accessed(page(3).start().as_u64());
+        let mut space = space_with(4);
+        touch(&mut space, [2, 3]);
         let mut scanner = ColdPageScanner::new();
-        let cold = scanner.scan(&mut space, &pages, 8).expect("supported");
-        // Only the untouched pages are cold.
-        assert_eq!(cold, vec![page(1), page(4)]);
+        let (cold, visited) = sweep_once(&mut scanner, &mut space, 1..=4, 64, 8);
+        assert_eq!(cold, [1, 4]);
+        assert_eq!(visited, 4);
     }
 
     #[test]
-    fn the_second_chance_clears_the_bit_so_a_still_idle_page_is_cold_next_pass() {
-        let (mut space, pages) = space_with(3);
-        space
-            .table_mut_for_test()
-            .mark_accessed(page(2).start().as_u64());
+    fn the_second_chance_clears_the_bit_so_a_still_idle_page_is_cold_next_revolution() {
+        let mut space = space_with(3);
+        touch(&mut space, [2]);
         let mut scanner = ColdPageScanner::new();
-        // First pass: page 2 was touched, gets a second chance (bit
-        // cleared); pages 1 and 3 are cold.
-        let first = scanner.scan(&mut space, &pages, 8).expect("supported");
-        assert_eq!(first, vec![page(1), page(3)]);
-        // Second pass, page 2 not touched again: now cold.
-        let second = scanner.scan(&mut space, &pages, 8).expect("supported");
-        assert_eq!(second, vec![page(1), page(2), page(3)]);
+        let (first, _) = sweep_once(&mut scanner, &mut space, 1..=3, 64, 8);
+        assert_eq!(first, [1, 3]);
+        let (second, _) = sweep_once(&mut scanner, &mut space, 1..=3, 64, 8);
+        assert_eq!(second, [1, 2, 3]);
     }
 
     #[test]
-    fn the_clock_hand_rotates_across_passes() {
-        let (mut space, pages) = space_with(5);
+    fn the_clock_hand_keeps_its_place_across_sweeps() {
+        let mut space = space_with(5);
         let mut scanner = ColdPageScanner::new();
-        // Take two cold pages; hand advances past page 2.
-        let first = scanner.scan(&mut space, &pages, 2).expect("supported");
-        assert_eq!(first, vec![page(1), page(2)]);
-        assert_eq!(scanner.hand(), page(2).number() + 1);
-        // The next pass resumes at page 3, not page 1.
-        let second = scanner.scan(&mut space, &pages, 2).expect("supported");
-        assert_eq!(second, vec![page(3), page(4)]);
+        let (first, _) = sweep_once(&mut scanner, &mut space, 1..=5, 64, 2);
+        assert_eq!(first, [1, 2]);
+        assert_eq!(scanner.hand(), 3);
+        let (second, _) = sweep_once(&mut scanner, &mut space, 1..=5, 64, 2);
+        assert_eq!(second, [3, 4]);
+    }
+
+    /// The defect this bound closes: a reclaim over a space whose pages are
+    /// all hot walked every one of them on each triggering fault.
+    #[test]
+    fn a_sweep_visits_at_most_its_budget_when_every_page_is_hot() {
+        let mut space = space_with(1000);
+        touch(&mut space, 1..=1000);
+        let mut scanner = ColdPageScanner::new();
+        let (cold, visited) = sweep_once(&mut scanner, &mut space, 1..=1000, 16, 8);
+        assert!(cold.is_empty());
+        assert_eq!(visited, 16);
+        assert_eq!(scanner.hand(), 17);
+        assert_eq!(
+            space.test_and_clear_accessed(page(17)),
+            Ok(true),
+            "not aged"
+        );
+        let (_, visited) = sweep_once(&mut scanner, &mut space, 1..=1000, 16, 8);
+        assert_eq!(visited, 16);
+        assert_eq!(scanner.hand(), 33, "the next sweep moved on from there");
+    }
+
+    /// The defect this walk closes: reclaim built heap lists of the space's
+    /// pages, infallibly, on the very path memory pressure drives. It now
+    /// allocates nothing, so it completes under a heap refusing every request.
+    #[test]
+    fn a_sweep_allocates_nothing_and_completes_on_a_refusing_heap() {
+        let mut space = space_with(200);
+        touch(&mut space, 1..=100);
+        let mut scanner = ColdPageScanner::new();
+        let ((cold, visited), metering) = tairix_fuzzseed::meter::metered(|| {
+            tairix_fuzzseed::meter::refusing_above(0, || {
+                let mut sweep = scanner
+                    .sweep(&space, page(1)..=page(200), 256)
+                    .expect("supported");
+                let mut cold = Cold::new();
+                sweep.collect(&mut space, |_| true, 8, &mut cold);
+                (cold, sweep.visited())
+            })
+        });
+        assert_eq!(numbers(&cold), [101, 102, 103, 104, 105, 106, 107, 108]);
+        assert_eq!(visited, 108);
+        assert_eq!(metering.allocations, 0, "{metering:?}");
     }
 
     #[test]
-    fn want_zero_returns_nothing_but_still_checks_support() {
-        let (mut space, pages) = space_with(3);
+    fn a_sweep_never_visits_a_page_twice() {
+        let mut space = space_with(3);
+        touch(&mut space, 1..=3);
         let mut scanner = ColdPageScanner::new();
-        assert_eq!(scanner.scan(&mut space, &pages, 0), Ok(Vec::new()));
+        let mut sweep = scanner
+            .sweep(&space, page(1)..=page(3), 64)
+            .expect("supported");
+        let mut cold = Cold::new();
+        sweep.collect(&mut space, |_| true, 8, &mut cold);
+        sweep.collect(&mut space, |_| true, 8, &mut cold);
+        assert!(
+            cold.is_empty(),
+            "a page whose bit this sweep cleared is not cold"
+        );
+        assert_eq!(sweep.visited(), 3);
+        assert_eq!(
+            scanner.hand(),
+            1,
+            "a whole revolution leaves the hand where it began"
+        );
+    }
+
+    #[test]
+    fn a_sweep_wraps_from_the_hand_and_stops_where_it_began() {
+        let mut space = space_with(5);
+        let mut scanner = ColdPageScanner::new();
+        sweep_once(&mut scanner, &mut space, 1..=5, 64, 3);
+        assert_eq!(scanner.hand(), 4);
+        let (cold, visited) = sweep_once(&mut scanner, &mut space, 1..=5, 64, 16);
+        assert_eq!(cold, [4, 5, 1, 2, 3]);
+        assert_eq!(visited, 5);
+        assert_eq!(scanner.hand(), 4);
+    }
+
+    #[test]
+    fn collecting_in_batches_continues_one_sweep() {
+        let mut space = space_with(6);
+        let mut scanner = ColdPageScanner::new();
+        let mut sweep = scanner
+            .sweep(&space, page(1)..=page(6), 64)
+            .expect("supported");
+        let mut first = Cold::new();
+        sweep.collect(&mut space, |_| true, 4, &mut first);
+        let mut second = Cold::new();
+        sweep.collect(&mut space, |_| true, 4, &mut second);
+        let mut third = Cold::new();
+        sweep.collect(&mut space, |_| true, 4, &mut third);
+        assert_eq!(numbers(&first), [1, 2, 3, 4]);
+        assert_eq!(numbers(&second), [5, 6]);
+        assert!(third.is_empty());
+        assert_eq!(sweep.visited(), 6);
+    }
+
+    #[test]
+    fn a_full_buffer_ends_the_collection_without_losing_a_page() {
+        let mut space = space_with(4);
+        let mut scanner = ColdPageScanner::new();
+        let mut sweep = scanner
+            .sweep(&space, page(1)..=page(4), 64)
+            .expect("supported");
+        let mut cold = ArrayVec::<Page, 2>::new();
+        sweep.collect(&mut space, |_| true, 8, &mut cold);
+        assert_eq!(cold.as_slice(), [page(1), page(2)]);
+        assert_eq!(scanner.hand(), 3);
+    }
+
+    #[test]
+    fn an_ineligible_page_counts_against_the_budget_and_keeps_its_bit() {
+        let mut space = space_with(4);
+        touch(&mut space, 1..=4);
+        let mut scanner = ColdPageScanner::new();
+        let mut sweep = scanner
+            .sweep(&space, page(1)..=page(4), 4)
+            .expect("supported");
+        let mut cold = Cold::new();
+        sweep.collect(&mut space, |page| page.number() % 2 == 0, 8, &mut cold);
+        assert_eq!(sweep.visited(), 4);
+        assert_eq!(space.test_and_clear_accessed(page(1)), Ok(true));
+        assert_eq!(space.test_and_clear_accessed(page(3)), Ok(true));
+        assert_eq!(space.test_and_clear_accessed(page(2)), Ok(false), "aged");
+    }
+
+    #[test]
+    fn pages_outside_the_window_are_never_visited() {
+        let mut space = space_with(6);
+        touch(&mut space, [1, 6]);
+        let mut scanner = ColdPageScanner::new();
+        let (cold, visited) = sweep_once(&mut scanner, &mut space, 3..=4, 64, 8);
+        assert_eq!(cold, [3, 4]);
+        assert_eq!(visited, 2);
+        assert_eq!(space.test_and_clear_accessed(page(1)), Ok(true));
+        assert_eq!(space.test_and_clear_accessed(page(6)), Ok(true));
+    }
+
+    #[test]
+    fn a_hand_outside_the_window_starts_at_its_first_page() {
+        let mut space = space_with(8);
+        let mut scanner = ColdPageScanner::new();
+        sweep_once(&mut scanner, &mut space, 1..=8, 64, 7);
+        assert_eq!(scanner.hand(), 8);
+        let (cold, _) = sweep_once(&mut scanner, &mut space, 2..=4, 64, 1);
+        assert_eq!(cold, [2]);
+    }
+
+    #[test]
+    fn a_zero_budget_or_limit_collects_nothing() {
+        let mut space = space_with(3);
+        let mut scanner = ColdPageScanner::new();
+        assert_eq!(
+            sweep_once(&mut scanner, &mut space, 1..=3, 0, 8),
+            (Vec::new(), 0)
+        );
+        assert_eq!(
+            sweep_once(&mut scanner, &mut space, 1..=3, 8, 0),
+            (Vec::new(), 0)
+        );
+    }
+
+    #[test]
+    fn a_window_with_no_live_page_is_no_cold_pages() {
+        let mut space = space_with(2);
+        let mut scanner = ColdPageScanner::new();
+        let (cold, visited) = sweep_once(&mut scanner, &mut space, 10..=20, 64, 8);
+        assert!(cold.is_empty());
+        assert_eq!(visited, 0);
     }
 
     /// A backend that honestly reports no referenced bit: the scanner must
@@ -299,15 +508,8 @@ mod tests {
         space.map(page(1), frame(1), RW_USER).expect("map");
         let mut scanner = ColdPageScanner::new();
         assert_eq!(
-            scanner.scan(&mut space, &[page(1)], 4),
-            Err(ColdScanError::Unsupported)
+            scanner.sweep(&space, page(1)..=page(1), 4).err(),
+            Some(ColdScanError::Unsupported)
         );
-    }
-
-    #[test]
-    fn an_empty_candidate_set_is_no_cold_pages() {
-        let (mut space, _pages) = space_with(2);
-        let mut scanner = ColdPageScanner::new();
-        assert_eq!(scanner.scan(&mut space, &[], 4), Ok(Vec::new()));
     }
 }

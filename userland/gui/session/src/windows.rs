@@ -27,8 +27,8 @@ use tairix_abi::window_ipc::LandingStep;
 use tairix_abi::window_ipc::{
     encode_screensaver_reply, AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape,
     DialogModality, DragItems, DropOperation, HandOverOutcome, HandOverTarget, LayerDepth,
-    MenuRefusal, PickPurpose, PointerAction, PreviewSubject, SystemTask, TerrainPlate, ToolOver,
-    WindowEvent, WindowRegion, WINDOW_SCREENSAVER_REPLY_MAX,
+    MenuRefusal, OfferedItem, PickPurpose, PointerAction, PreviewSubject, SystemTask, TerrainPlate,
+    ToolOver, WindowEvent, WindowRegion, WINDOW_SCREENSAVER_REPLY_MAX,
 };
 use tairix_abi::{AppIdentity as AttestedApp, BundleId, Errno, ProcId};
 use tairix_browse::DirectorySource;
@@ -369,6 +369,16 @@ struct WindowRecord {
     owner: ProcId,
     /// When a press first reaches the window.
     armed: Armed,
+}
+
+impl WindowRecord {
+    /// Whether a frame reaching the display may owe this window an
+    /// announcement: its first painted frame, a retitle, or a size state.
+    fn announces(&self) -> bool {
+        self.first_frame == FirstFrame::Painted
+            || (self.first_frame == FirstFrame::Shown && self.retitled)
+            || self.sized.is_some()
+    }
 }
 
 /// When a served window first answers a press: a dialog only a moment after
@@ -724,19 +734,19 @@ impl SessionWindows {
     /// the display still shows the frame it drew before; a burst of changes
     /// between two frames is one announcement, of the last.
     ///
-    /// One walk for all three, taking reporters rather than returning
-    /// collections, so an ordinary frame allocates nothing; `visible`, which
-    /// may search the compositor's windows, is asked only about a window with
-    /// an announcement pending.
+    /// Taking reporters rather than returning collections, so an ordinary
+    /// frame allocates nothing; `settled` and `visible`, which take locks and
+    /// search the compositor's windows, are asked only once an announcement is
+    /// pending.
     pub fn report_on_screen(
         &mut self,
-        settled: bool,
+        settled: impl FnOnce() -> bool,
         visible: impl Fn(WindowId) -> bool,
         mut shown: impl FnMut(u64),
         mut retitled: impl FnMut(u64),
         mut sized: impl FnMut(u64, WindowSizeState, (u32, u32)),
     ) {
-        if !settled {
+        if !self.records.values().any(WindowRecord::announces) || !settled() {
             return;
         }
         for (&ipc, record) in &mut self.records {
@@ -2624,6 +2634,32 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         self.shell
             .save_offer_answered(self.compositor, window_id, serial, accepts);
         Ok(())
+    }
+
+    fn items_offer_answered(
+        &mut self,
+        window_id: u64,
+        serial: u32,
+        verdict: Option<DropOperation>,
+    ) -> Result<(), Errno> {
+        // An answer to an offer the pointer has moved on from is not shown.
+        self.shell
+            .items_offer_answered(self.compositor, window_id, serial, verdict);
+        Ok(())
+    }
+
+    fn offered_count(&self, window_id: u64, drag: u32) -> Result<u32, Errno> {
+        let items = self.shell.offered_items(window_id, drag)?;
+        u32::try_from(items.len()).map_err(|_| Errno::OutOfRange)
+    }
+
+    fn offered_item(
+        &self,
+        window_id: u64,
+        drag: u32,
+        index: u32,
+    ) -> Result<OfferedItem<'_>, Errno> {
+        self.shell.offered_item(window_id, drag, index)
     }
 
     fn save_into(
@@ -4553,8 +4589,10 @@ mod tests {
                 .expect("opens");
         }
         // Opened but never presented: the window is off screen, so there is
-        // nothing of the application's to announce.
+        // nothing of the application's to announce, and the settle check that
+        // takes locks and walks the compositor is not asked.
         assert_eq!(shown(&mut windows), Vec::<u64>::new());
+        assert!(!settle_asked(&mut windows));
         {
             let mut host = ShellWindowHost {
                 shell: &mut shell,
@@ -4576,12 +4614,14 @@ mod tests {
         }
         // A frame the desktop drew provisionally holds the announcement for
         // the first one it drew settled.
+        assert!(settle_asked(&mut windows), "an announcement is pending");
         assert_eq!(shown_unsettled(&mut windows), Vec::<u64>::new());
         assert_eq!(shown_unsettled(&mut windows), Vec::<u64>::new());
         assert_eq!(shown(&mut windows), alloc::vec![1]);
         // The announcement is one-shot: a later frame, and a later present,
         // say nothing more about a window already seen.
         assert_eq!(shown(&mut windows), Vec::<u64>::new());
+        assert!(!settle_asked(&mut windows), "nothing is pending");
         {
             let mut host = ShellWindowHost {
                 shell: &mut shell,
@@ -5104,11 +5144,28 @@ mod tests {
         on_screen(windows, |_| true).0
     }
 
+    /// Whether a frame reaching the display asks whether the desktop's drawing
+    /// has settled; answered unsettled, so nothing is announced.
+    fn settle_asked(windows: &mut SessionWindows) -> bool {
+        let asked = core::cell::Cell::new(false);
+        windows.report_on_screen(
+            || {
+                asked.set(true);
+                false
+            },
+            |_| true,
+            |_| {},
+            |_| {},
+            |_, _, _| {},
+        );
+        asked.get()
+    }
+
     /// The same for a frame the desktop's drawing had not settled in.
     fn shown_unsettled(windows: &mut SessionWindows) -> Vec<u64> {
         let mut shown = Vec::new();
         windows.report_on_screen(
-            false,
+            || false,
             |_| true,
             |window| shown.push(window),
             |_| {},
@@ -5129,7 +5186,7 @@ mod tests {
     ) -> (Vec<u64>, Vec<u64>, Vec<Sized>) {
         let (mut shown, mut retitled, mut sized) = (Vec::new(), Vec::new(), Vec::new());
         windows.report_on_screen(
-            true,
+            || true,
             visible,
             |window| shown.push(window),
             |window| retitled.push(window),

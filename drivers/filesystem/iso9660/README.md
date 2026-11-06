@@ -1,8 +1,10 @@
-# `tairix-drv-fs-iso9660` — ISO 9660 filesystem driver (read-only)
+# `tairix-drv-fs-iso9660` — ISO 9660 filesystem driver (read-only files)
 
 Mounts CD and DVD volumes behind any `tairix_abi::driver::block::Block`
 device through `FilesystemRead`, `FilesystemSecurity`, `FilesystemAttrs` and
 `FilesystemStats`; every `FilesystemWrite` call is refused with `ReadOnly`.
+Where the medium takes writes, `FilesystemLabel` rewrites the volume label in
+place.
 
 ## Supported volumes
 
@@ -21,7 +23,8 @@ untrusted disc are in `docs/src/filesystem/iso9660.md`.
 
 ## Limitations
 
-- Read-only: the format records a finished disc.
+- Read-only files: the format records a finished disc. Only the label is
+  written, and only where the medium takes writes.
 - A UDF bridge disc is mounted as UDF unless its ISO 9660 tree carries Rock
   Ridge or RISC OS records (`lib/fsprobe`).
 

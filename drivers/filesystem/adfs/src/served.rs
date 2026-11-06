@@ -35,6 +35,7 @@ impl ServedFormat for Served {
             fs,
             format: FormatName::Adfs,
             write_refusal,
+            title_apart: false,
         })
     }
 }

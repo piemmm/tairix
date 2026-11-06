@@ -3091,6 +3091,29 @@ pub enum WindowRequest {
         /// The folder, or zero to decline.
         location: u64,
     },
+    /// Answer the [`WindowEvent::ItemsOffered`] numbered `serial` over window
+    /// `window_id` with what a drop there would do, or `None` to refuse it.
+    ItemsOfferAnswer {
+        /// The window the items are held over.
+        window_id: u64,
+        /// The offer being answered.
+        serial: u32,
+        /// What a drop there would do.
+        verdict: Option<DropOperation>,
+    },
+    /// Read the items the desktop's drag numbered `drag` carries over or onto
+    /// window `window_id`, item `from` first. The reply is a
+    /// [`decode_offered_items_reply`] page holding as many as fit and how many
+    /// the drag carries, and `NotFound` once that drag has neither an offer
+    /// standing over the window nor a drop on it.
+    OfferedItems {
+        /// The window the items are offered to.
+        window_id: u64,
+        /// The desktop's drag.
+        drag: u32,
+        /// The first item the page holds, from zero.
+        from: u32,
+    },
     /// Step the drop onto the desktop that window `window_id`'s drag ended in
     /// at the report numbered `serial` ([`DropSite::Desktop`]), as the caller
     /// carries it out: each item announced before its first write, then what
@@ -3721,6 +3744,10 @@ const OP_TAKE_AUTHORISED_OUTPUT: u16 = 43;
 const OP_SAVE_OFFER_ANSWER: u16 = 46;
 /// Wire operation discriminant of [`WindowRequest::SaveInto`].
 const OP_SAVE_INTO: u16 = 47;
+/// Wire operation discriminant of [`WindowRequest::ItemsOfferAnswer`].
+const OP_ITEMS_OFFER_ANSWER: u16 = 50;
+/// Wire operation discriminant of [`WindowRequest::OfferedItems`].
+const OP_OFFERED_ITEMS: u16 = 51;
 /// Wire operation discriminant of [`WindowRequest::TakeAppBarText`].
 const OP_TAKE_APP_BAR_TEXT: u16 = 48;
 /// Wire operation discriminant of [`WindowRequest::DropLanding`].
@@ -3832,6 +3859,12 @@ const QUERY_DRAG_SPOT_WIRE_LEN: usize = WINDOW_ID_WIRE_LEN + 4;
 /// Encoded size of a [`WindowRequest::SaveOfferAnswer`]: the header, the
 /// window, the serial, and the answer.
 const SAVE_OFFER_ANSWER_WIRE_LEN: usize = WINDOW_ID_WIRE_LEN + 5;
+/// Encoded size of a [`WindowRequest::ItemsOfferAnswer`]: the header, the
+/// window, the serial, and the verdict.
+const ITEMS_OFFER_ANSWER_WIRE_LEN: usize = WINDOW_ID_WIRE_LEN + 5;
+/// Encoded size of a [`WindowRequest::OfferedItems`]: the header, the window,
+/// the drag, and the index.
+const OFFERED_ITEMS_WIRE_LEN: usize = WINDOW_ID_WIRE_LEN + 8;
 /// Byte offset of a [`WindowRequest::SaveInto`]'s location; its serial follows.
 const SAVE_INTO_LOCATION_OFFSET: usize = WINDOW_ID_WIRE_LEN;
 /// Encoded size of a [`WindowRequest::SaveInto`]: the header, the window, the
@@ -4343,6 +4376,8 @@ impl WindowRequest {
             Self::QueryDragSpot { .. } => QUERY_DRAG_SPOT_WIRE_LEN,
             Self::SaveOfferAnswer { .. } => SAVE_OFFER_ANSWER_WIRE_LEN,
             Self::SaveInto { .. } => SAVE_INTO_WIRE_LEN,
+            Self::ItemsOfferAnswer { .. } => ITEMS_OFFER_ANSWER_WIRE_LEN,
+            Self::OfferedItems { .. } => OFFERED_ITEMS_WIRE_LEN,
             Self::DropLanding { ref step, .. } => drop_landing_wire_len(step),
             Self::PickFile { purpose, .. } => pick_file_wire_len(
                 purpose.suggested_len_byte() as usize,
@@ -4473,6 +4508,8 @@ impl WindowRequest {
             Self::QueryDragSpot { .. } => OP_QUERY_DRAG_SPOT,
             Self::SaveOfferAnswer { .. } => OP_SAVE_OFFER_ANSWER,
             Self::SaveInto { .. } => OP_SAVE_INTO,
+            Self::ItemsOfferAnswer { .. } => OP_ITEMS_OFFER_ANSWER,
+            Self::OfferedItems { .. } => OP_OFFERED_ITEMS,
             Self::DropLanding { .. } => OP_DROP_LANDING,
             Self::Resize { .. } => OP_RESIZE,
             Self::SetTitle { .. } => OP_SET_TITLE,
@@ -4644,6 +4681,8 @@ impl WindowRequest {
             | Self::QueryDragSpot { .. }
             | Self::SaveOfferAnswer { .. }
             | Self::SaveInto { .. }
+            | Self::ItemsOfferAnswer { .. }
+            | Self::OfferedItems { .. }
             | Self::DropLanding { .. } => write_transfer_operands(self, out),
             Self::OpenLayer { .. } | Self::PlaceLayer { .. } => self.write_layer_operands(out),
             Self::TakeMenuText { window_id, open_id } => {
@@ -4997,25 +5036,25 @@ impl WindowRequest {
                 let window_id = nonzero_id(read_u64(bytes, 8))?;
                 Ok(Self::Close { window_id })
             }
-            OP_PICK_FILE | OP_TAKE_PICKED_NAME | OP_TAKE_PICKED_FILE | OP_BEGIN_DRAG
-            | OP_TAKE_DROP_TARGET | OP_DRAG_VERDICT | OP_QUERY_DRAG_SPOT | OP_SAVE_OFFER_ANSWER
-            | OP_SAVE_INTO | OP_DROP_LANDING => read_transfer_request(op, bytes),
+            OP_PICK_FILE
+            | OP_TAKE_PICKED_NAME
+            | OP_TAKE_PICKED_FILE
+            | OP_BEGIN_DRAG
+            | OP_TAKE_DROP_TARGET
+            | OP_DRAG_VERDICT
+            | OP_QUERY_DRAG_SPOT
+            | OP_SAVE_OFFER_ANSWER
+            | OP_SAVE_INTO
+            | OP_ITEMS_OFFER_ANSWER
+            | OP_OFFERED_ITEMS
+            | OP_DROP_LANDING => read_transfer_request(op, bytes),
             OP_TAKE_TERRAIN => {
                 exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
                 let window_id = nonzero_id(read_u64(bytes, 8))?;
                 Ok(Self::TakeTerrain { window_id })
             }
             OP_OPEN_LAYER => read_open_layer(bytes),
-            OP_PLACE_LAYER => {
-                exact_len(bytes, PLACE_LAYER_WIRE_LEN)?;
-                let window_id = nonzero_id(read_u64(bytes, 8))?;
-                Ok(Self::PlaceLayer {
-                    window_id,
-                    x: read_i32(bytes, LAYER_PLACE_X),
-                    y: read_i32(bytes, LAYER_PLACE_Y),
-                    depth: LayerDepth::from_u8(bytes[LAYER_PLACE_DEPTH])?,
-                })
-            }
+            OP_PLACE_LAYER => read_place_layer(bytes),
             OP_RESIZE => read_resize(bytes),
             OP_SET_TITLE => read_set_title(bytes),
             OP_SET_SIZING => read_set_sizing(bytes),
@@ -5033,18 +5072,7 @@ impl WindowRequest {
             OP_SET_TOOLTIP => read_set_tooltip(bytes),
             OP_SET_APP_BAR => read_app_bar(bytes),
             OP_OPEN_MENU => read_open_menu(bytes),
-            OP_SET_BACKDROP_BLUR => {
-                exact_len(bytes, SET_BACKDROP_BLUR_WIRE_LEN)?;
-                let window_id = nonzero_id(read_u64(bytes, 8))?;
-                let radius_px = read_u16(bytes, 16);
-                if radius_px > WINDOW_BACKDROP_BLUR_MAX_PX {
-                    return Err(Errno::LengthOutOfRange);
-                }
-                Ok(Self::SetBackdropBlur {
-                    window_id,
-                    radius_px,
-                })
-            }
+            OP_SET_BACKDROP_BLUR => read_set_backdrop_blur(bytes),
             OP_QUERY_DESKTOP => {
                 exact_len(bytes, QUERY_DESKTOP_WIRE_LEN).map(|()| Self::QueryDesktop)
             }
@@ -5072,6 +5100,33 @@ impl WindowRequest {
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Decode a [`WindowRequest::PlaceLayer`].
+fn read_place_layer(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, PLACE_LAYER_WIRE_LEN)?;
+    let window_id = nonzero_id(read_u64(bytes, 8))?;
+    Ok(WindowRequest::PlaceLayer {
+        window_id,
+        x: read_i32(bytes, LAYER_PLACE_X),
+        y: read_i32(bytes, LAYER_PLACE_Y),
+        depth: LayerDepth::from_u8(bytes[LAYER_PLACE_DEPTH])?,
+    })
+}
+
+/// Decode a [`WindowRequest::SetBackdropBlur`], refusing a radius past
+/// [`WINDOW_BACKDROP_BLUR_MAX_PX`].
+fn read_set_backdrop_blur(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, SET_BACKDROP_BLUR_WIRE_LEN)?;
+    let window_id = nonzero_id(read_u64(bytes, 8))?;
+    let radius_px = read_u16(bytes, 16);
+    if radius_px > WINDOW_BACKDROP_BLUR_MAX_PX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(WindowRequest::SetBackdropBlur {
+        window_id,
+        radius_px,
+    })
 }
 
 /// Decode a [`WindowRequest::Authorise`], whose task must fill the rest of
@@ -5261,6 +5316,11 @@ fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
             window_id,
             serial,
             verdict,
+        }
+        | WindowRequest::ItemsOfferAnswer {
+            window_id,
+            serial,
+            verdict,
         } => {
             put_u64(out, 8, window_id);
             put_u32(out, WINDOW_ID_WIRE_LEN, serial);
@@ -5287,6 +5347,15 @@ fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
             put_u64(out, 8, window_id);
             put_u64(out, SAVE_INTO_LOCATION_OFFSET, location);
             put_u32(out, SAVE_INTO_LOCATION_OFFSET + 8, serial);
+        }
+        WindowRequest::OfferedItems {
+            window_id,
+            drag,
+            from,
+        } => {
+            put_u64(out, 8, window_id);
+            put_u32(out, WINDOW_ID_WIRE_LEN, drag);
+            put_u32(out, WINDOW_ID_WIRE_LEN + 4, from);
         }
         WindowRequest::DropLanding {
             window_id,
@@ -5387,6 +5456,22 @@ fn read_transfer_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> 
             })
         }
         OP_DROP_LANDING => read_drop_landing(bytes),
+        OP_ITEMS_OFFER_ANSWER => {
+            exact_len(bytes, ITEMS_OFFER_ANSWER_WIRE_LEN)?;
+            Ok(WindowRequest::ItemsOfferAnswer {
+                window_id: nonzero_id(read_u64(bytes, 8))?,
+                serial: read_u32(bytes, WINDOW_ID_WIRE_LEN),
+                verdict: DropOperation::verdict_from_wire(bytes[WINDOW_ID_WIRE_LEN + 4])?,
+            })
+        }
+        OP_OFFERED_ITEMS => {
+            exact_len(bytes, OFFERED_ITEMS_WIRE_LEN)?;
+            Ok(WindowRequest::OfferedItems {
+                window_id: nonzero_id(read_u64(bytes, 8))?,
+                drag: read_u32(bytes, WINDOW_ID_WIRE_LEN),
+                from: read_u32(bytes, WINDOW_ID_WIRE_LEN + 4),
+            })
+        }
         // A zero location is the decline, so only the window must name one.
         OP_SAVE_INTO => {
             exact_len(bytes, SAVE_INTO_WIRE_LEN)?;
@@ -7025,6 +7110,19 @@ impl DropOperation {
     }
 }
 
+/// Where icons carried off the desktop were dropped on a window, and what the
+/// pointer showed the drop doing there, as the window's application answered
+/// ([`WindowEvent::ItemsOfferEnded`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct OfferDrop {
+    /// Window-local x.
+    pub x: u32,
+    /// Window-local y.
+    pub y: u32,
+    /// What the drop does.
+    pub operation: DropOperation,
+}
+
 /// Where a carried drag is, as [`WindowEvent::DragOver`] reports it to the
 /// application that began it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -7186,24 +7284,10 @@ pub fn encode_drag_spot_reply(
     result: Result<&str, Errno>,
 ) -> usize {
     *out = [0u8; WINDOW_DRAG_SPOT_REPLY_MAX];
-    let refused = |out: &mut [u8; WINDOW_DRAG_SPOT_REPLY_MAX], err: Errno| {
-        out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
-        4
-    };
-    let path = match result {
-        Ok(path) => path.as_bytes(),
-        Err(err) => return refused(out, err),
-    };
-    let Ok(len) = u16::try_from(path.len()) else {
-        return refused(out, Errno::LengthOutOfRange);
-    };
-    if path.len() > crate::FS_PATH_MAX {
-        return refused(out, Errno::LengthOutOfRange);
+    match result.and_then(|path| put_reply_path(out, DRAG_SPOT_REPLY_LEN_OFFSET, path)) {
+        Ok(len) => len,
+        Err(err) => refused_reply(out, err),
     }
-    put_u16(out, DRAG_SPOT_REPLY_LEN_OFFSET, len);
-    out[DRAG_SPOT_REPLY_PATH_OFFSET..DRAG_SPOT_REPLY_PATH_OFFSET + path.len()]
-        .copy_from_slice(path);
-    DRAG_SPOT_REPLY_PATH_OFFSET + path.len()
 }
 
 /// Decode a [`WindowRequest::QueryDragSpot`] reply.
@@ -7216,14 +7300,213 @@ pub fn encode_drag_spot_reply(
 ///   states, or a path past the bound.
 /// * [`Errno::OutOfRange`] for a path that is empty or not text.
 pub fn decode_drag_spot_reply(bytes: &[u8]) -> Result<&str, Errno> {
+    read_reply_path(bytes, DRAG_SPOT_REPLY_LEN_OFFSET)
+}
+
+/// One item of a drag of icons off the desktop, as the window it was offered
+/// to reads it ([`WindowRequest::OfferedItems`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct OfferedItem<'a> {
+    /// Its absolute path.
+    pub path: &'a str,
+    /// The node the desktop's listing showed there, or
+    /// [`FileId::NONE`](crate::fs::FileId::NONE): a drop finding another
+    /// there acts on nothing.
+    pub id: crate::fs::FileId,
+}
+
+/// Longest reply to a [`WindowRequest::OfferedItems`]: the status word, how
+/// many items the drag carries, how many the page holds, and room for at
+/// least the widest item.
+pub const WINDOW_OFFERED_ITEMS_REPLY_MAX: usize =
+    OFFERED_ITEMS_RECORDS_OFFSET + OFFERED_ITEM_HEAD_LEN + crate::FS_PATH_MAX;
+/// Byte offset of an offered items page's count of what the drag carries.
+const OFFERED_ITEMS_TOTAL_OFFSET: usize = 4;
+/// Byte offset of its count of what the page holds.
+const OFFERED_ITEMS_COUNT_OFFSET: usize = 8;
+/// Byte offset of its first item.
+const OFFERED_ITEMS_RECORDS_OFFSET: usize = 10;
+/// Encoded size of an item ahead of its path: its node and the path's length.
+const OFFERED_ITEM_HEAD_LEN: usize = crate::fs::FileId::WIRE_LEN + 2;
+
+/// Encode a [`WindowRequest::OfferedItems`] outcome into `out`: how many
+/// items the drag carries, then as many of `items` as fit, answering the
+/// number of bytes written. An item with an empty path or one past
+/// [`crate::FS_PATH_MAX`] refuses the page as [`Errno::LengthOutOfRange`]
+/// rather than cutting it.
+#[must_use]
+pub fn encode_offered_items_reply<'i>(
+    out: &mut [u8; WINDOW_OFFERED_ITEMS_REPLY_MAX],
+    result: Result<(u32, impl IntoIterator<Item = OfferedItem<'i>>), Errno>,
+) -> usize {
+    *out = [0u8; WINDOW_OFFERED_ITEMS_REPLY_MAX];
+    let written = result.and_then(|(total, items)| {
+        let mut at = OFFERED_ITEMS_RECORDS_OFFSET;
+        let mut count: u16 = 0;
+        for item in items {
+            if item.path.is_empty() {
+                return Err(Errno::LengthOutOfRange);
+            }
+            let end = at + OFFERED_ITEM_HEAD_LEN + item.path.len();
+            if end > WINDOW_OFFERED_ITEMS_REPLY_MAX && count > 0 {
+                break;
+            }
+            out[at..at + crate::fs::FileId::WIRE_LEN].copy_from_slice(&item.id.to_le_bytes());
+            at = put_reply_path(out, at + crate::fs::FileId::WIRE_LEN, item.path)?;
+            count = count.checked_add(1).ok_or(Errno::LengthOutOfRange)?;
+        }
+        put_u32(out, OFFERED_ITEMS_TOTAL_OFFSET, total);
+        put_u16(out, OFFERED_ITEMS_COUNT_OFFSET, count);
+        Ok(at)
+    });
+    match written {
+        Ok(len) => len,
+        Err(err) => refused_reply(out, err),
+    }
+}
+
+/// A page of a [`WindowRequest::OfferedItems`] reply, every item in it
+/// checked.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct OfferedItems<'a> {
+    total: u32,
+    count: u16,
+    records: &'a [u8],
+}
+
+impl<'a> OfferedItems<'a> {
+    /// How many items the drag carries.
+    #[must_use]
+    pub const fn total(&self) -> u32 {
+        self.total
+    }
+
+    /// How many items the page holds.
+    #[must_use]
+    pub const fn len(&self) -> u16 {
+        self.count
+    }
+
+    /// Whether the page holds none.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The items the page holds, in order.
+    pub fn iter(&self) -> impl Iterator<Item = OfferedItem<'a>> {
+        let mut rest = self.records;
+        (0..self.count).map_while(move |_| {
+            let (item, next) = read_offered_item(rest).ok()?;
+            rest = next;
+            Some(item)
+        })
+    }
+}
+
+/// Decode a [`WindowRequest::OfferedItems`] reply.
+///
+/// # Errors
+///
+/// * The refusal the session stated, for a status-frame reply.
+/// * [`Errno::BufferTooSmall`] for a frame shorter than its own header, or
+///   than the items it says it holds.
+/// * [`Errno::LengthOutOfRange`] for a frame longer than the items it holds
+///   or than a page may be, or an item's path past the bound.
+/// * [`Errno::OutOfRange`] for a page holding more items than the drag
+///   carries, or a path that is empty or not text.
+pub fn decode_offered_items_reply(bytes: &[u8]) -> Result<OfferedItems<'_>, Errno> {
     if bytes.len() >= 4 {
         crate::reply::decode_status_reply(&bytes[..4])?;
     }
-    if bytes.len() < DRAG_SPOT_REPLY_PATH_OFFSET {
+    if bytes.len() < OFFERED_ITEMS_RECORDS_OFFSET {
         return Err(Errno::BufferTooSmall);
     }
-    let len = usize::from(read_u16(bytes, DRAG_SPOT_REPLY_LEN_OFFSET));
-    let text = &bytes[DRAG_SPOT_REPLY_PATH_OFFSET..];
+    if bytes.len() > WINDOW_OFFERED_ITEMS_REPLY_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let total = read_u32(bytes, OFFERED_ITEMS_TOTAL_OFFSET);
+    let count = read_u16(bytes, OFFERED_ITEMS_COUNT_OFFSET);
+    if u32::from(count) > total {
+        return Err(Errno::OutOfRange);
+    }
+    let records = &bytes[OFFERED_ITEMS_RECORDS_OFFSET..];
+    let mut rest = records;
+    for _ in 0..count {
+        rest = read_offered_item(rest)?.1;
+    }
+    if !rest.is_empty() {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(OfferedItems {
+        total,
+        count,
+        records,
+    })
+}
+
+/// The item `bytes` begins with, and the bytes after it.
+fn read_offered_item(bytes: &[u8]) -> Result<(OfferedItem<'_>, &[u8]), Errno> {
+    if bytes.len() < OFFERED_ITEM_HEAD_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    let id = crate::fs::FileId::from_bytes(bytes)?;
+    let len = usize::from(read_u16(bytes, crate::fs::FileId::WIRE_LEN));
+    if len > crate::FS_PATH_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let (text, rest) = bytes[OFFERED_ITEM_HEAD_LEN..]
+        .split_at_checked(len)
+        .ok_or(Errno::BufferTooSmall)?;
+    let path = core::str::from_utf8(text).map_err(|_| Errno::OutOfRange)?;
+    if path.is_empty() {
+        return Err(Errno::OutOfRange);
+    }
+    Ok((OfferedItem { path, id }, rest))
+}
+
+/// Write the status frame stating `err` into `out`, answering its length.
+fn refused_reply(out: &mut [u8], err: Errno) -> usize {
+    out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
+    4
+}
+
+/// Write `path` into the reply `out` — its length at `len_offset`, then its
+/// bytes — answering the reply's length.
+///
+/// # Errors
+///
+/// [`Errno::LengthOutOfRange`] for a path past [`crate::FS_PATH_MAX`] or
+/// `out`.
+fn put_reply_path(out: &mut [u8], len_offset: usize, path: &str) -> Result<usize, Errno> {
+    let bytes = path.as_bytes();
+    let len = u16::try_from(bytes.len())
+        .ok()
+        .filter(|_| bytes.len() <= crate::FS_PATH_MAX)
+        .ok_or(Errno::LengthOutOfRange)?;
+    let start = len_offset + 2;
+    out.get_mut(start..start + bytes.len())
+        .ok_or(Errno::LengthOutOfRange)?
+        .copy_from_slice(bytes);
+    put_u16(out, len_offset, len);
+    Ok(start + bytes.len())
+}
+
+/// The path the reply `bytes` holds, its length at `len_offset`.
+///
+/// # Errors
+///
+/// As [`decode_drag_spot_reply`].
+fn read_reply_path(bytes: &[u8], len_offset: usize) -> Result<&str, Errno> {
+    if bytes.len() >= 4 {
+        crate::reply::decode_status_reply(&bytes[..4])?;
+    }
+    let start = len_offset + 2;
+    if bytes.len() < start {
+        return Err(Errno::BufferTooSmall);
+    }
+    let len = usize::from(read_u16(bytes, len_offset));
+    let text = &bytes[start..];
     if text.len() != len || len > crate::FS_PATH_MAX {
         return Err(Errno::LengthOutOfRange);
     }
@@ -8625,6 +8908,10 @@ const EV_AUTHORISED: u16 = 26;
 const EV_SAVE_OFFERED: u16 = 27;
 /// Wire event discriminant of [`WindowEvent::SaveOfferEnded`].
 const EV_SAVE_OFFER_ENDED: u16 = 28;
+/// Wire event discriminant of [`WindowEvent::ItemsOffered`].
+const EV_ITEMS_OFFERED: u16 = 30;
+/// Wire event discriminant of [`WindowEvent::ItemsOfferEnded`].
+const EV_ITEMS_OFFER_ENDED: u16 = 31;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -8813,6 +9100,37 @@ pub enum WindowEvent {
         serial: u32,
         /// Where it was dropped, `(x, y)`, or `None` when it left.
         dropped: Option<(u32, u32)>,
+    },
+    /// Items carried off the desktop are held over the window at a
+    /// window-local point, for its application to answer with a
+    /// [`WindowRequest::ItemsOfferAnswer`] what a drop there would do. They
+    /// are the desktop's drag numbered `drag`, whose items
+    /// [`WindowRequest::OfferedItems`] reads; `shift` asks for a move.
+    ItemsOffered {
+        /// The window the items are held over.
+        window_id: u64,
+        /// The desktop's drag.
+        drag: u32,
+        /// The offer's number.
+        serial: u32,
+        /// Window-local x.
+        x: u32,
+        /// Window-local y.
+        y: u32,
+        /// Whether `Shift` is held.
+        shift: bool,
+    },
+    /// The items offer numbered `serial` left the window, or the items were
+    /// dropped on it, where the application performs the drop it answered
+    /// with.
+    ItemsOfferEnded {
+        /// The window the offer was over.
+        window_id: u64,
+        /// The last offer made over it.
+        serial: u32,
+        /// Where they were dropped and what the drop does, or `None` when
+        /// they left.
+        dropped: Option<OfferDrop>,
     },
     /// A [`WindowRequest::RenderPreview`] concluded.
     ///
@@ -9261,6 +9579,8 @@ impl WindowEvent {
             | Self::DragEnded { window_id, .. }
             | Self::SaveOffered { window_id, .. }
             | Self::SaveOfferEnded { window_id, .. }
+            | Self::ItemsOffered { window_id, .. }
+            | Self::ItemsOfferEnded { window_id, .. }
             | Self::PreviewRendered { window_id, .. }
             | Self::Minimized { window_id }
             | Self::Resized { window_id, .. }
@@ -9341,13 +9661,15 @@ impl WindowEvent {
             }
             Self::SaveOfferEnded {
                 serial, dropped, ..
+            } => write_offer_end(&mut out, EV_SAVE_OFFER_ENDED, serial, dropped),
+            Self::ItemsOffered { .. } => self.write_items_offered(&mut out),
+            Self::ItemsOfferEnded {
+                serial, dropped, ..
             } => {
-                put_u16(&mut out, 6, EV_SAVE_OFFER_ENDED);
-                put_u32(&mut out, SAVE_EVENT_SERIAL_OFFSET, serial);
-                if let Some((x, y)) = dropped {
-                    out[SAVE_EVENT_DROPPED_OFFSET] = 1;
-                    put_u32(&mut out, SAVE_EVENT_DROP_X_OFFSET, x);
-                    put_u32(&mut out, SAVE_EVENT_DROP_X_OFFSET + 4, y);
+                let at = dropped.map(|drop| (drop.x, drop.y));
+                write_offer_end(&mut out, EV_ITEMS_OFFER_ENDED, serial, at);
+                if let Some(drop) = dropped {
+                    out[OFFER_END_OPERATION_OFFSET] = drop.operation.to_wire();
                 }
             }
             Self::ToolMoved { over, ended, .. } => write_tool_moved(&mut out, over, ended),
@@ -9493,6 +9815,8 @@ impl WindowEvent {
                 site: read_drop_site(bytes)?,
             }),
             EV_SAVE_OFFERED | EV_SAVE_OFFER_ENDED => read_save_offer_event(kind, window_id, bytes),
+            EV_ITEMS_OFFERED => read_items_offered(window_id, bytes),
+            EV_ITEMS_OFFER_ENDED => read_items_offer_end(window_id, bytes),
             EV_KEY => {
                 event_reserved_zero(bytes, 16 + KeyInput::WIRE_LEN)?;
                 let key = KeyInput::from_bytes(&bytes[16..16 + KeyInput::WIRE_LEN])?;
@@ -9607,6 +9931,73 @@ const SAVE_EVENT_Y_OFFSET: usize = 24;
 const SAVE_EVENT_DROPPED_OFFSET: usize = 20;
 /// Byte offset of the point it was dropped at, x then y.
 const SAVE_EVENT_DROP_X_OFFSET: usize = 24;
+/// Byte offset of an [`WindowEvent::ItemsOfferEnded`]'s drop operation.
+const OFFER_END_OPERATION_OFFSET: usize = SAVE_EVENT_DROPPED_OFFSET + 1;
+/// Byte offset of a [`WindowEvent::ItemsOffered`]'s shift flag.
+const ITEMS_EVENT_SHIFT_OFFSET: usize = 28;
+/// Byte offset of its drag's number.
+const ITEMS_EVENT_DRAG_OFFSET: usize = 32;
+
+/// Write the end of an offer of `kind`: its serial, and where it was dropped.
+fn write_offer_end(
+    out: &mut [u8; WindowEvent::WIRE_LEN],
+    kind: u16,
+    serial: u32,
+    dropped: Option<(u32, u32)>,
+) {
+    put_u16(out, 6, kind);
+    put_u32(out, SAVE_EVENT_SERIAL_OFFSET, serial);
+    if let Some((x, y)) = dropped {
+        out[SAVE_EVENT_DROPPED_OFFSET] = 1;
+        put_u32(out, SAVE_EVENT_DROP_X_OFFSET, x);
+        put_u32(out, SAVE_EVENT_DROP_X_OFFSET + 4, y);
+    }
+}
+
+impl WindowEvent {
+    /// Write a [`WindowEvent::ItemsOffered`]'s kind and operands.
+    fn write_items_offered(&self, out: &mut [u8; Self::WIRE_LEN]) {
+        if let Self::ItemsOffered {
+            drag,
+            serial,
+            x,
+            y,
+            shift,
+            ..
+        } = *self
+        {
+            put_u16(out, 6, EV_ITEMS_OFFERED);
+            put_u32(out, SAVE_EVENT_SERIAL_OFFSET, serial);
+            put_u32(out, SAVE_EVENT_X_OFFSET, x);
+            put_u32(out, SAVE_EVENT_Y_OFFSET, y);
+            out[ITEMS_EVENT_SHIFT_OFFSET] = u8::from(shift);
+            put_u32(out, ITEMS_EVENT_DRAG_OFFSET, drag);
+        }
+    }
+}
+
+/// Decode an items offer: every byte it does not carry is zero.
+fn read_items_offered(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    event_reserved_zero(bytes, ITEMS_EVENT_DRAG_OFFSET + 4)?;
+    if bytes[ITEMS_EVENT_SHIFT_OFFSET + 1..ITEMS_EVENT_DRAG_OFFSET]
+        .iter()
+        .any(|&b| b != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    Ok(WindowEvent::ItemsOffered {
+        window_id,
+        drag: read_u32(bytes, ITEMS_EVENT_DRAG_OFFSET),
+        serial: read_u32(bytes, SAVE_EVENT_SERIAL_OFFSET),
+        x: read_u32(bytes, SAVE_EVENT_X_OFFSET),
+        y: read_u32(bytes, SAVE_EVENT_Y_OFFSET),
+        shift: match bytes[ITEMS_EVENT_SHIFT_OFFSET] {
+            0 => false,
+            1 => true,
+            _ => return Err(Errno::OutOfRange),
+        },
+    })
+}
 
 /// Decode a save offer, or its end: every byte its case does not carry is
 /// zero.
@@ -9621,8 +10012,50 @@ fn read_save_offer_event(kind: u16, window_id: u64, bytes: &[u8]) -> Result<Wind
             y: read_u32(bytes, SAVE_EVENT_Y_OFFSET),
         });
     }
+    let end = read_offer_end(bytes)?;
+    if end.operation != 0 {
+        return Err(Errno::BadMagic);
+    }
+    Ok(WindowEvent::SaveOfferEnded {
+        window_id,
+        serial: end.serial,
+        dropped: end.dropped,
+    })
+}
+
+/// Decode a [`WindowEvent::ItemsOfferEnded`] for `window_id`: a drop carries
+/// what it does, and an offer that left carries nothing.
+fn read_items_offer_end(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    let end = read_offer_end(bytes)?;
+    let dropped = match end.dropped {
+        Some((x, y)) => Some(OfferDrop {
+            x,
+            y,
+            operation: DropOperation::from_wire(end.operation)?,
+        }),
+        None if end.operation == 0 => None,
+        None => return Err(Errno::BadMagic),
+    };
+    Ok(WindowEvent::ItemsOfferEnded {
+        window_id,
+        serial: end.serial,
+        dropped,
+    })
+}
+
+/// An offer's end as the wire carries it.
+struct OfferEndWire {
+    serial: u32,
+    dropped: Option<(u32, u32)>,
+    /// What an items offer's drop does; a save's, and one that left, zero.
+    operation: u8,
+}
+
+/// Decode the end of an offer, every byte it does not carry zero.
+fn read_offer_end(bytes: &[u8]) -> Result<OfferEndWire, Errno> {
+    let serial = read_u32(bytes, SAVE_EVENT_SERIAL_OFFSET);
     event_reserved_zero(bytes, SAVE_EVENT_DROP_X_OFFSET + 8)?;
-    if bytes[SAVE_EVENT_DROPPED_OFFSET + 1..SAVE_EVENT_DROP_X_OFFSET]
+    if bytes[OFFER_END_OPERATION_OFFSET + 1..SAVE_EVENT_DROP_X_OFFSET]
         .iter()
         .any(|&b| b != 0)
     {
@@ -9638,10 +10071,10 @@ fn read_save_offer_event(kind: u16, window_id: u64, bytes: &[u8]) -> Result<Wind
         0 => return Err(Errno::BadMagic),
         _ => return Err(Errno::OutOfRange),
     };
-    Ok(WindowEvent::SaveOfferEnded {
-        window_id,
+    Ok(OfferEndWire {
         serial,
         dropped,
+        operation: bytes[OFFER_END_OPERATION_OFFSET],
     })
 }
 
@@ -10100,11 +10533,12 @@ mod tests {
         app_bar_wire_len, decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply,
         decode_desktop_reply, decode_drag_spot_reply, decode_drop_target_reply,
         decode_hand_over_reply, decode_menu_text_reply, decode_minted_id_reply,
-        decode_notify_sources_reply, decode_open_target_reply, decode_picked_name_reply,
-        decode_terrain_reply, decode_wallpapers_reply, encode_clipboard_reply, encode_create_reply,
-        encode_cursor_sets_reply, encode_desktop_reply, encode_drag_spot_reply,
-        encode_drop_target_reply, encode_hand_over_reply, encode_menu_text_reply,
-        encode_minted_id_reply, encode_notify_sources_reply, encode_open_target_reply,
+        decode_notify_sources_reply, decode_offered_items_reply, decode_open_target_reply,
+        decode_picked_name_reply, decode_terrain_reply, decode_wallpapers_reply,
+        encode_clipboard_reply, encode_create_reply, encode_cursor_sets_reply,
+        encode_desktop_reply, encode_drag_spot_reply, encode_drop_target_reply,
+        encode_hand_over_reply, encode_menu_text_reply, encode_minted_id_reply,
+        encode_notify_sources_reply, encode_offered_items_reply, encode_open_target_reply,
         encode_picked_name_reply, encode_terrain_reply, encode_wallpapers_reply,
         hand_over_wire_len, open_menu_wire_len, put_i32, put_u16, put_u64, read_i32, read_u16,
         read_u32, AppBar, AppBarClick, AppMenu, AppMenuEntry, AppMenuEntryText, AppMenuIconView,
@@ -10112,29 +10546,30 @@ mod tests {
         AppMenuRow, AppMenuRowView, AppMenuShortcut, AppMenuSymbol, BundleRunPath, ClipboardHeld,
         ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DropOperation, DropSite,
         DropTarget, HandOverDocument, HandOverOutcome, HandOverTarget, IconAsset, LayerDepth,
-        MenuOutcome, MenuRefusal, OpenTarget, PaneName, PickPurpose, PinchPhase, PointerAction,
-        SaveFormat, SaveFormats, TerrainPlate, TooltipText, WallpaperEntry, WindowEvent,
-        WindowRegion, WindowRequest, WindowSizeState, WindowSizing, WindowTitle,
-        APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET,
-        APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX, APP_MENU_KIND_SEPARATOR,
-        APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS,
-        APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX, APP_MENU_ROW_ENTRY_LEN_OFFSET,
-        APP_MENU_ROW_ENTRY_SELECTED_OFFSET, APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ASSET,
-        APP_MENU_ROW_FLAG_ENABLED, APP_MENU_ROW_FLAG_OPENS_ENTRY, APP_MENU_ROW_ID_OFFSET,
-        APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
-        APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_SYMBOL_OFFSET, APP_MENU_ROW_WIRE_LEN,
-        APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET, CLIPBOARD_MAX_BYTES,
-        CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN, DESKTOP_LAYER_MAX_PLATES,
-        DESKTOP_LAYER_MAX_SIDE_LOGICAL, DESKTOP_LAYER_MAX_SIDE_PHYSICAL, DRAG_EVENT_KIND_OFFSET,
-        DRAG_EVENT_SERIAL_OFFSET, DRAG_EVENT_SHIFT_OFFSET, DRAG_EVENT_WINDOW_OFFSET,
-        DRAG_EVENT_X_OFFSET, DRAG_FILETYPE_OFFSET, DRAG_FLAGS_OFFSET, DRAG_NAME_OFFSET, DRAG_TYPED,
-        DROP_TARGET_REPLY_FLAGS_OFFSET, HAND_OVER_FLAGS_OFFSET, HAND_OVER_GRANT_OFFSET,
-        HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PANE,
+        MenuOutcome, MenuRefusal, OfferDrop, OfferedItem, OpenTarget, PaneName, PickPurpose,
+        PinchPhase, PointerAction, SaveFormat, SaveFormats, TerrainPlate, TooltipText,
+        WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowSizeState, WindowSizing,
+        WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET,
+        APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX,
+        APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH,
+        APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX,
+        APP_MENU_ROW_ENTRY_LEN_OFFSET, APP_MENU_ROW_ENTRY_SELECTED_OFFSET,
+        APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ASSET, APP_MENU_ROW_FLAG_ENABLED,
+        APP_MENU_ROW_FLAG_OPENS_ENTRY, APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET,
+        APP_MENU_ROW_PARENT_OFFSET, APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_SYMBOL_OFFSET,
+        APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET,
+        CLIPBOARD_MAX_BYTES, CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN,
+        DESKTOP_LAYER_MAX_PLATES, DESKTOP_LAYER_MAX_SIDE_LOGICAL, DESKTOP_LAYER_MAX_SIDE_PHYSICAL,
+        DRAG_EVENT_KIND_OFFSET, DRAG_EVENT_SERIAL_OFFSET, DRAG_EVENT_SHIFT_OFFSET,
+        DRAG_EVENT_WINDOW_OFFSET, DRAG_EVENT_X_OFFSET, DRAG_FILETYPE_OFFSET, DRAG_FLAGS_OFFSET,
+        DRAG_NAME_OFFSET, DRAG_TYPED, DROP_TARGET_REPLY_FLAGS_OFFSET, HAND_OVER_FLAGS_OFFSET,
+        HAND_OVER_GRANT_OFFSET, HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PANE,
         HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX, HAND_OVER_WRITABLE, ICON_ASSET_MAX,
-        LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH, MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET,
-        MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END, MENU_TEXT_KIND_EMPTY,
-        MENU_TEXT_REPLY_KIND_OFFSET, MENU_TEXT_REPLY_LEN_OFFSET, MENU_TEXT_REPLY_TEXT_OFFSET,
-        NAME_LIST_COUNT_OFFSET, NAME_LIST_NAMES_OFFSET, OPEN_LAYER_WIRE_LEN,
+        ITEMS_EVENT_DRAG_OFFSET, ITEMS_EVENT_SHIFT_OFFSET, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH,
+        MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET,
+        MENU_CLOSED_WIRE_END, MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET,
+        MENU_TEXT_REPLY_LEN_OFFSET, MENU_TEXT_REPLY_TEXT_OFFSET, NAME_LIST_COUNT_OFFSET,
+        NAME_LIST_NAMES_OFFSET, OFFER_END_OPERATION_OFFSET, OPEN_LAYER_WIRE_LEN,
         OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROWS_OFFSET,
         OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET,
         PICKED_NAME_REPLY_TEXT_OFFSET, PICK_NAME_LEN_OFFSET, PICK_NAME_OFFSET, PICK_PURPOSE_OFFSET,
@@ -10156,9 +10591,9 @@ mod tests {
         WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_ENDPOINT,
         WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN, WINDOW_MAX_FRAMES,
         WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX,
-        WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PANE_NAME_MAX, WINDOW_PICKED_NAME_REPLY_MAX,
-        WINDOW_PREVIEW_MAX_SIDE, WINDOW_REQUEST_MAGIC, WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX,
-        WINDOW_WALLPAPERS_REPLY_MAX,
+        WINDOW_OFFERED_ITEMS_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PANE_NAME_MAX,
+        WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_PREVIEW_MAX_SIDE, WINDOW_REQUEST_MAGIC,
+        WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
     };
     use super::{
         decode_picked_file_reply, encode_picked_file_reply, PickedFile,
@@ -13779,6 +14214,115 @@ mod tests {
     }
 
     #[test]
+    fn every_items_offer_event_round_trips_and_carries_nothing_else() {
+        let events = [
+            WindowEvent::ItemsOffered {
+                window_id: 9,
+                drag: u32::MAX,
+                serial: 4,
+                x: 0,
+                y: u32::MAX,
+                shift: true,
+            },
+            WindowEvent::ItemsOffered {
+                window_id: u64::MAX,
+                drag: 1,
+                serial: u32::MAX,
+                x: 7,
+                y: 8,
+                shift: false,
+            },
+            WindowEvent::ItemsOfferEnded {
+                window_id: 9,
+                serial: 5,
+                dropped: None,
+            },
+            WindowEvent::ItemsOfferEnded {
+                window_id: 9,
+                serial: 6,
+                dropped: Some(OfferDrop {
+                    x: 3,
+                    y: u32::MAX,
+                    operation: DropOperation::Move,
+                }),
+            },
+        ];
+        for event in events {
+            assert_eq!(WindowEvent::from_bytes(&event.to_le_bytes()), Ok(event));
+        }
+        let offered = events[0].to_le_bytes();
+        let mut shift = offered;
+        shift[ITEMS_EVENT_SHIFT_OFFSET] = 2;
+        assert_eq!(WindowEvent::from_bytes(&shift), Err(Errno::OutOfRange));
+        let mut padded = offered;
+        padded[ITEMS_EVENT_SHIFT_OFFSET + 1] = 1;
+        assert_eq!(WindowEvent::from_bytes(&padded), Err(Errno::BadMagic));
+        let mut past = offered;
+        past[ITEMS_EVENT_DRAG_OFFSET + 4] = 1;
+        assert_eq!(WindowEvent::from_bytes(&past), Err(Errno::BadMagic));
+        let mut flag = events[3].to_le_bytes();
+        flag[SAVE_EVENT_DROPPED_OFFSET] = 2;
+        assert_eq!(WindowEvent::from_bytes(&flag), Err(Errno::OutOfRange));
+        let mut refused = events[3].to_le_bytes();
+        refused[OFFER_END_OPERATION_OFFSET] = 0;
+        assert_eq!(
+            WindowEvent::from_bytes(&refused),
+            Err(Errno::OutOfRange),
+            "a drop doing nothing is no drop"
+        );
+        let mut left = events[2].to_le_bytes();
+        left[OFFER_END_OPERATION_OFFSET] = 1;
+        assert_eq!(
+            WindowEvent::from_bytes(&left),
+            Err(Errno::BadMagic),
+            "an offer that left drops nothing"
+        );
+        let mut saved = WindowEvent::SaveOfferEnded {
+            window_id: 9,
+            serial: 6,
+            dropped: Some((3, 4)),
+        }
+        .to_le_bytes();
+        saved[OFFER_END_OPERATION_OFFSET] = 1;
+        assert_eq!(
+            WindowEvent::from_bytes(&saved),
+            Err(Errno::BadMagic),
+            "a save carries no operation"
+        );
+    }
+
+    #[test]
+    fn an_items_offer_answer_and_an_item_read_round_trip() {
+        for request in [
+            WindowRequest::ItemsOfferAnswer {
+                window_id: 3,
+                serial: u32::MAX,
+                verdict: Some(DropOperation::Move),
+            },
+            WindowRequest::ItemsOfferAnswer {
+                window_id: 3,
+                serial: 0,
+                verdict: None,
+            },
+            WindowRequest::OfferedItems {
+                window_id: u64::MAX,
+                drag: 2,
+                from: u32::MAX,
+            },
+        ] {
+            let frame = request.frame();
+            assert_eq!(WindowRequest::from_bytes(&frame), Ok(request));
+            assert!(WindowRequest::from_bytes(&frame[..frame.len() - 1]).is_err());
+            let mut unaddressed = frame;
+            unaddressed[8..16].copy_from_slice(&0u64.to_le_bytes());
+            assert_eq!(
+                WindowRequest::from_bytes(&unaddressed),
+                Err(Errno::OutOfRange)
+            );
+        }
+    }
+
+    #[test]
     fn a_save_answer_is_one_flag_and_a_save_into_needs_only_a_window() {
         let answer = WindowRequest::SaveOfferAnswer {
             window_id: 9,
@@ -13804,6 +14348,86 @@ mod tests {
         assert_eq!(
             WindowRequest::from_bytes(&declined.frame()[..len - 1]),
             Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn an_offered_items_page_holds_what_fits_and_refuses_a_frame_that_misstates_it() {
+        let mut out = [0u8; WINDOW_OFFERED_ITEMS_REPLY_MAX];
+        let id = |node| crate::fs::FileId {
+            volume: [0xA5; 16],
+            node,
+        };
+        let paths = ["/Users/ann/Desktop/a.txt", "/Users/ann/Desktop/Work"];
+        let items = || {
+            paths
+                .iter()
+                .zip(1..)
+                .map(|(path, node)| OfferedItem { path, id: id(node) })
+        };
+        let len = encode_offered_items_reply(&mut out, Ok((5, items())));
+        let page = decode_offered_items_reply(&out[..len]).expect("a page");
+        assert_eq!((page.total(), page.len()), (5, 2));
+        assert_eq!(
+            page.iter()
+                .map(|item| (item.path, item.id))
+                .collect::<alloc::vec::Vec<_>>(),
+            items()
+                .map(|item| (item.path, item.id))
+                .collect::<alloc::vec::Vec<_>>()
+        );
+        assert_eq!(
+            decode_offered_items_reply(&out[..len - 1]),
+            Err(Errno::BufferTooSmall),
+            "a frame cut inside its last item"
+        );
+        let mut longer = out;
+        longer[len] = 1;
+        assert_eq!(
+            decode_offered_items_reply(&longer[..=len]),
+            Err(Errno::LengthOutOfRange),
+            "a frame longer than what it holds"
+        );
+
+        let mut widest = "d".repeat(crate::FS_PATH_MAX - 1);
+        widest.insert(0, '/');
+        let wide = [widest.as_str(), widest.as_str()].map(|path| OfferedItem { path, id: id(9) });
+        let len = encode_offered_items_reply(&mut out, Ok((2, wide)));
+        let page = decode_offered_items_reply(&out[..len]).expect("a page");
+        assert_eq!(
+            page.len(),
+            1,
+            "the widest item fits alone, and the next waits"
+        );
+        assert_eq!(page.iter().next(), Some(wide[0]));
+
+        let mut too_long = "d".repeat(crate::FS_PATH_MAX);
+        too_long.insert(0, '/');
+        for path in [too_long.as_str(), ""] {
+            let len =
+                encode_offered_items_reply(&mut out, Ok((1, [OfferedItem { path, id: id(1) }])));
+            assert_eq!(
+                decode_offered_items_reply(&out[..len]),
+                Err(Errno::LengthOutOfRange)
+            );
+        }
+        let len = encode_offered_items_reply(
+            &mut out,
+            Err::<(u32, [OfferedItem<'_>; 0]), _>(Errno::NotFound),
+        );
+        assert_eq!(
+            decode_offered_items_reply(&out[..len]),
+            Err(Errno::NotFound)
+        );
+        let len = encode_offered_items_reply(&mut out, Ok((0, [])));
+        assert!(decode_offered_items_reply(&out[..len])
+            .expect("empty")
+            .is_empty());
+        let len = encode_offered_items_reply(&mut out, Ok((1, items())));
+        assert_eq!(
+            decode_offered_items_reply(&out[..len]),
+            Err(Errno::OutOfRange),
+            "a page holding more than the drag carries"
         );
     }
 

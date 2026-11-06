@@ -76,7 +76,7 @@ pub use listing::{DirPosition, ListEnd, Listing, ResumeName};
 pub use mount::{Attachment, BindsWithin, ChildMounts, MountTable, Projection};
 pub use mounted::{
     FilesystemAlreadyInstalled, IdentityAlreadyInstalled, LateFilesystem, LateIdentity,
-    MountedFilesystemService, RegisterError, VolumeNames,
+    MountedFilesystemService, RegisterError, Titling, VolumeNames,
 };
 pub use node::{
     Acting, At, Authority, Cwd, DriverGuard, DriverLock, FrozenAuthority, Grant, NodeHandle,

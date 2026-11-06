@@ -299,7 +299,10 @@ engine. What it decides is where each icon stands.
   travels past the shared drag slop carries it, in memory alone, for as long
   as the primary button is held (`SessionInputRouter::holds_primary`); the
   release puts it down where it was let go, following first any motion routed
-  with it (`Desktop::follow_press`). Nothing under a carried icon lights.
+  with it (`Desktop::follow_press`). Nothing under a carried icon lights. Held
+  over an application's window, the press is handed to the seat's drag
+  carrier, which carries the icons above the window and offers them to it
+  (`plans/FILES-INTERACTION.md` FI43).
 - **Several icons are selected as a file-manager window selects them.** A
   press on the backdrop drags out a band (`tairix_browse::marquee`'s look),
   live once past the drag slop: every icon whose picture or name it touches is

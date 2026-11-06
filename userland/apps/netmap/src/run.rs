@@ -512,12 +512,8 @@ mod program {
 
     impl EventSource for RtEventSource<'_> {
         fn park(&mut self) -> Result<Parked, Errno> {
-            let woken = match self.deadlines.earliest() {
-                Some(deadline) => match app::park_until(self.set, deadline)? {
-                    Some(woken) => woken,
-                    None => return Ok(Parked::Interrupted),
-                },
-                None => app::park(self.set)?,
+            let Some(woken) = app::park_until_due(self.set, self.deadlines.earliest())? else {
+                return Ok(Parked::Interrupted);
             };
             match woken {
                 // Each readiness is a level, so an undrained one would turn the
@@ -1052,6 +1048,8 @@ mod program {
                 | WindowEvent::DragEnded { .. }
                 | WindowEvent::SaveOffered { .. }
                 | WindowEvent::SaveOfferEnded { .. }
+                | WindowEvent::ItemsOffered { .. }
+                | WindowEvent::ItemsOfferEnded { .. }
                 | WindowEvent::PreviewRendered { .. }
                 | WindowEvent::OpenRequested => false,
             };

@@ -188,9 +188,13 @@ pub struct VolumeFacts {
     /// Whether it is mounted read-only, so nothing can be made on it.
     pub read_only: bool,
     /// Whether its format takes a title a retitle can set, as the mount table
-    /// says: never a disc's, an archive's or a share's, nor on a record
-    /// withheld from its reader.
+    /// says: never an archive's or a share's, nor on a record withheld from
+    /// its reader.
     pub titled: bool,
+    /// Whether a retitle may write its title now, as the mount table says: a
+    /// pressed disc's stays as it was mastered, though an image on a stick
+    /// whose files take no writes takes a title.
+    pub title_writes: bool,
 }
 
 /// Who may eject a volume.
@@ -344,7 +348,8 @@ impl VolumeFacts {
     /// Info window and the desktop's drive menu. Who may comes first, so a
     /// volume another principal owns is refused as theirs whatever its record
     /// withholds; then a format that takes a title, and a volume that takes
-    /// writes. `None`, a viewer the kernel would not name, retitles nothing.
+    /// writes to its title. `None`, a viewer the kernel would not name,
+    /// retitles nothing.
     #[must_use]
     pub fn retitling_by(&self, viewer: Option<u32>) -> Retitling {
         let retitler = match self.retitler() {
@@ -363,7 +368,7 @@ impl VolumeFacts {
         if crate::volume::gone(self.availability) {
             return Retitling::Unavailable(REASON_TITLE_ABSENT);
         }
-        if self.read_only || self.availability == MountAvailability::RecoveryConflict {
+        if !self.title_writes || self.availability == MountAvailability::RecoveryConflict {
             return Retitling::Unavailable(REASON_TITLE_READ_ONLY);
         }
         Retitling::Allowed(retitler)
@@ -426,6 +431,7 @@ impl Volume {
                 identity: record.identity(),
                 read_only: record.flags().bits() & MountFlags::READ_ONLY.bits() != 0,
                 titled: record.titled(),
+                title_writes: record.title_writes(),
             },
         })
     }

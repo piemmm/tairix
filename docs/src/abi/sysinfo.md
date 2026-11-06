@@ -801,10 +801,14 @@ the request/render libraries stay testable against in-memory fixtures.
   `3` one on a removable device, which the user at the seat may eject),
   its `title` (the label its filesystem records, at most `VOLUME_TITLE_MAX`
   bytes of text: the probe's as the volume attaches, then the one it is
-  retitled to, empty where neither names one) and whether its format takes
-  one (`titled`, `0` or `1` and never `1` on a withheld record, any other
-  value refusing the record), closing the record on the wire as the title's
-  length byte, its buffer, the `titled` byte and a zero pad,
+  retitled to, empty where neither names one), whether its format takes
+  one (`titled`) and whether a retitle may write it now (`title_writes`: its
+  medium takes writes, and its volume does or its format writes the title
+  apart from its files, as an ISO 9660 image's on a stick), each `0` or `1`,
+  `title_writes` never `1` without `titled` nor either on a withheld record,
+  any other value refusing the record, closing the record on the wire as the
+  title's length byte, its buffer, the `titled` and `title_writes` bytes and
+  a zero pad,
   the storage `medium` of the block device backing it, and
   the volume's space accounting as a `VolumeStats` usage block (block size,
   whether the volume is down to its reserve, and 64-bit

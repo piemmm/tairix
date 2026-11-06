@@ -110,6 +110,7 @@ impl ServedArchive for Served {
             fs,
             format,
             write_refusal,
+            title_apart: false,
         })
     }
 }

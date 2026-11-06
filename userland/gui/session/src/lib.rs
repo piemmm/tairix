@@ -267,13 +267,14 @@ pub use config::{
 pub use confirm::{Answer, ConfirmPrompt};
 pub use depart::{serve_park_ns, Departure};
 pub use desktop::{
-    AppearanceWork, BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
-    GestureRefusal, LaunchDocument, PinboardChange, SettingsEdit, DESKTOP_MARGIN, PINBOARD_SETTLED,
-    PINBOARD_SETTLED_MESSAGE,
+    AppearanceWork, BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopLift,
+    DesktopOutcome, GestureRefusal, LaunchDocument, PinboardChange, SettingsEdit, DESKTOP_MARGIN,
+    PINBOARD_SETTLED, PINBOARD_SETTLED_MESSAGE,
 };
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use drag::{
-    DragEnd, DragPlace, DragStep, DragSurface, DropRefusal, ItemsEnd, ItemsReport, OfferEnd,
+    DesktopCargo, DesktopDrop, DesktopEnd, DesktopItem, DesktopReport, DragEnd, DragPlace,
+    DragStep, DragSurface, DropRefusal, ItemsEnd, ItemsOffer, ItemsOfferEnd, ItemsReport, OfferEnd,
     OwedReport, PictureGrab, SaveDrop, SaveEnd, SaveOffer, SaveReport, SavedDocument, SlotAnswer,
     WindowUnder,
 };

@@ -31,15 +31,16 @@ use tairix_abi::window_ipc::{
     decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
     decode_drag_spot_reply, decode_drop_target_reply, decode_hand_over_reply,
     decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
-    decode_open_target_reply, decode_picked_file_reply, decode_picked_name_reply,
-    decode_terrain_reply, decode_wallpapers_reply, AlertSeverity, AlertSpec, AppBar, AppMenu,
-    BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DragItems, DropOperation, DropTarget,
-    HandOverOutcome, HandOverTarget, LayerDepth, NameList, OpenTarget, PickPurpose, PickedFile,
-    PointerAction, PreviewSubject, TerrainPlate, TooltipText, WallpaperPage, WindowEvent,
-    WindowRegion, WindowRequest, WindowTitle, WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN,
-    WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX,
-    WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX,
-    WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
+    decode_offered_items_reply, decode_open_target_reply, decode_picked_file_reply,
+    decode_picked_name_reply, decode_terrain_reply, decode_wallpapers_reply, AlertSeverity,
+    AlertSpec, AppBar, AppMenu, BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape,
+    DragItems, DropOperation, DropTarget, HandOverOutcome, HandOverTarget, LayerDepth, NameList,
+    OfferedItem, OpenTarget, PickPurpose, PickedFile, PointerAction, PreviewSubject, TerrainPlate,
+    TooltipText, WallpaperPage, WindowEvent, WindowRegion, WindowRequest, WindowTitle,
+    WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX,
+    WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX,
+    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
+    WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OFFERED_ITEMS_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
     WINDOW_PICKED_FILE_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX,
     WINDOW_WALLPAPERS_REPLY_MAX,
 };
@@ -104,7 +105,10 @@ const PULL_REPLY_MAX: usize = {
                 wider(
                     wider(WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_PICKED_FILE_REPLY_MAX),
                     wider(
-                        wider(WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_DRAG_SPOT_REPLY_MAX),
+                        wider(
+                            WINDOW_DROP_TARGET_REPLY_MAX,
+                            wider(WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_OFFERED_ITEMS_REPLY_MAX),
+                        ),
                         WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
                     ),
                 ),
@@ -633,6 +637,8 @@ pub enum PostedRequest {
     DragVerdict,
     /// [`WindowClient::answer_save_offer`].
     SaveOfferAnswer,
+    /// [`WindowClient::answer_items_offer`].
+    ItemsOfferAnswer,
     /// [`WindowClient::set_title`].
     Title,
     /// [`WindowClient::set_sizing`].
@@ -652,6 +658,7 @@ impl PostedRequest {
             Self::Tooltip => "a tooltip",
             Self::DragVerdict => "a drop answer",
             Self::SaveOfferAnswer => "a save answer",
+            Self::ItemsOfferAnswer => "a drop answer for the desktop's items",
             Self::Title => "a title",
             Self::Sizing => "a resize range",
             Self::Present => "a frame",
@@ -692,6 +699,7 @@ enum Asked {
     Tooltip(WindowRegion, TooltipText),
     DragVerdict(u32, Option<DropOperation>),
     SaveOfferAnswer(u32, bool),
+    ItemsOfferAnswer(u32, Option<DropOperation>),
     Title(WindowTitle),
     Sizing(WindowSizing),
     Present(u32, DamageList),
@@ -705,6 +713,7 @@ impl Asked {
             Self::Tooltip(..) => PostedRequest::Tooltip,
             Self::DragVerdict(..) => PostedRequest::DragVerdict,
             Self::SaveOfferAnswer(..) => PostedRequest::SaveOfferAnswer,
+            Self::ItemsOfferAnswer(..) => PostedRequest::ItemsOfferAnswer,
             Self::Title(_) => PostedRequest::Title,
             Self::Sizing(_) => PostedRequest::Sizing,
             Self::Present(..) => PostedRequest::Present,
@@ -721,6 +730,11 @@ impl Asked {
                 text,
             },
             Self::DragVerdict(serial, verdict) => WindowRequest::DragVerdict {
+                window_id,
+                serial,
+                verdict,
+            },
+            Self::ItemsOfferAnswer(serial, verdict) => WindowRequest::ItemsOfferAnswer {
                 window_id,
                 serial,
                 verdict,
@@ -1254,7 +1268,7 @@ impl<T: WindowTransport> WindowClient<T> {
         frame_index: u32,
         damage: DamageList,
     ) -> Result<(), Errno> {
-        self.await_present(window_id);
+        self.await_present(window_id)?;
         let owed = self
             .record_mut(window_id)
             .filter(|record| record.owed_whole)
@@ -1302,7 +1316,13 @@ impl<T: WindowTransport> WindowClient<T> {
     /// pace; a loop that must never wait asks [`Self::present_in_flight`]
     /// first. How an awaited present ended reaches the application as any
     /// posted request's answer does.
-    pub fn await_present(&mut self, window_id: u64) {
+    ///
+    /// # Errors
+    ///
+    /// Why the wait ended with the present still unanswered — the task
+    /// interrupted, or no room to wait in. The present stays posted and is
+    /// taken in like any other answer, so the window still has one in flight.
+    pub fn await_present(&mut self, window_id: u64) -> Result<(), Errno> {
         // Each present is awaited by its own answer and nothing else is
         // reaped, so a window with none in flight costs no call.
         while let Some(index) = self.posted.iter().position(|posting| {
@@ -1320,12 +1340,20 @@ impl<T: WindowTransport> WindowClient<T> {
                 continue;
             };
             let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
-            let answer = self
-                .transport
-                .await_reply(ticket, &mut reply)
-                .and_then(|len| decode_status_reply(&reply[..len]));
+            let answer = match self.transport.await_reply(ticket, &mut reply) {
+                Ok(len) => decode_status_reply(&reply[..len]),
+                // A call still live when its await ends is a reaper's again;
+                // forgotten, its answer would keep the reply member ready for
+                // ever.
+                Err(errno) => match self.transport.reap(ticket, &mut reply) {
+                    Ok(None) => return Err(errno),
+                    Ok(Some(len)) => decode_status_reply(&reply[..len]),
+                    Err(over) => Err(over),
+                },
+            };
             let _ = self.answered(index, answer);
         }
+        Ok(())
     }
 
     /// Whether a present of window `window_id` is still unanswered once every
@@ -1603,6 +1631,59 @@ impl<T: WindowTransport> WindowClient<T> {
         accepts: bool,
     ) -> Result<(), Errno> {
         self.post_or_hold(window_id, Asked::SaveOfferAnswer(serial, accepts))
+    }
+
+    /// Answer the desktop's items offer numbered `serial` over window
+    /// `window_id` with what a drop there would do, or `None` to refuse it.
+    ///
+    /// # Errors
+    ///
+    /// A request the wire cannot carry; the session's own answer arrives
+    /// with [`WindowClient::reap_posted`].
+    pub fn answer_items_offer(
+        &mut self,
+        window_id: u64,
+        serial: u32,
+        verdict: Option<DropOperation>,
+    ) -> Result<(), Errno> {
+        self.post_or_hold(window_id, Asked::ItemsOfferAnswer(serial, verdict))
+    }
+
+    /// Hand `each` every item of the desktop's drag numbered `drag`, offered
+    /// to or dropped on window `window_id`, in order — a page of them a round
+    /// trip — answering how many there were.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] once the drag stands neither over nor on the
+    /// window, a transport failure, a corrupt reply or one that brings no
+    /// item it owes, or the first refusal `each` answers.
+    pub fn read_offered_items(
+        &mut self,
+        window_id: u64,
+        drag: u32,
+        mut each: impl FnMut(OfferedItem<'_>) -> Result<(), Errno>,
+    ) -> Result<u32, Errno> {
+        let mut from = 0u32;
+        loop {
+            let page = decode_offered_items_reply(self.pull(&WindowRequest::OfferedItems {
+                window_id,
+                drag,
+                from,
+            })?)?;
+            for item in page.iter() {
+                each(item)?;
+            }
+            from = from
+                .checked_add(u32::from(page.len()))
+                .ok_or(Errno::OutOfRange)?;
+            if from >= page.total() {
+                return Ok(page.total());
+            }
+            if page.is_empty() {
+                return Err(Errno::OutOfRange);
+            }
+        }
     }
 
     /// Answer the save dropped on window `window_id`, numbered `serial`, with

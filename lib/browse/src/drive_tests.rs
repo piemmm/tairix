@@ -78,7 +78,8 @@ fn titled_sample(title: &str, at: u64) -> DriveSample {
         mount: Some(
             record(10, MountAvailability::Available)
                 .with_title(VolumeTitle::new(title).expect("a title"))
-                .with_titled(true),
+                .with_titled(true)
+                .with_title_writes(true),
         ),
         service: None,
         at_ns: at,

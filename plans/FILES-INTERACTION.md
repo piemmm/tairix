@@ -66,6 +66,7 @@ waits on a disk), `plans/NEW-MENUS.md` (session-owned menus and submenus),
 | FI40 | A volume that leaves takes its windows to the place above it at once; one disconnected without being ejected is stated in one alert for every volume that went together, by the kernel's word; a re-read its device refused is decided by the mount table, stated once a volume; windows that come to one place leave one window there | done |
 | FI41 | A carried drag shows what it carries as the listing does: one item as its large tile held where it was pressed, several as a gathering stack of smaller pictures wearing their count, the pressed entry in front | done |
 | FI42 | A dragged application, command or RISC OS application shows its own picture, alone or in a mixed selection; thumbnails and folder fans stay class pictures | done |
+| FI43 | Icons dragged off the desktop over a manager window: carried above every window, offered to the manager, which answers by the one drop policy and copies, moves or links them where they are let go; brought back, they are put down on the desktop | done |
 
 ## FI1 — item names one point smaller
 
@@ -295,6 +296,36 @@ source, are new.
   the pointer (`Browser::set_drop_mark`, `render::drop_folder_at`) and the
   desktop its folder icon, while the answer accepts it, in the one drop-target
   look every collection control draws (the hover wash and an accent outline).
+
+## FI43 — icons dragged off the desktop
+
+The desktop carries a press on its icons in its own layer, beneath every
+window, so the press is handed to the seat's drag carrier the moment it holds
+them over an application's window (`Desktop::carried_cargo`, `yield_carry`).
+
+- **The seat carries them above everything.** The carrier shows them as an
+  application's drag is shown (`Cargo::Desktop`), offers them to the window
+  under the pointer once per input batch, numbered, with `Shift`
+  (`WindowEvent::ItemsOffered`), and shows the answer
+  (`WindowRequest::ItemsOfferAnswer`: refuse, copy, move or link). The offer is
+  made at once on the hand-over, so a release with no further motion is
+  already asked. Let go over a window in the same batch that reached it, they
+  stay where they stood: that window was never offered them.
+- **Only the offered window reads them.** Its owner reads the drag's items a
+  page a round trip (`WindowRequest::OfferedItems`), each its absolute path
+  and the node the desktop listed there; a drive is its volume's place in the
+  storage catalog. Nothing else crosses, and the read is refused once the
+  offer leaves that window, other than the drop's own.
+- **The manager decides and performs the drop.** It answers by the one drop
+  policy over the folder the point names, as its own drag is
+  (`tairix_browse::drop_operation`), shortcuts to volumes by
+  `volume::catalog_shortcuts`, and on `ItemsOfferEnded` with a drop runs the
+  paste the pointer showed under its own authority, a name since bound to
+  another node refused as changed.
+- **Brought back, they are put down.** Over the desktop the pointer shows a
+  move; let go there, the press is put down where it was released
+  (`Desktop::put_down_lift`), the pressed icon found by name, so a folder
+  re-listed meanwhile moves nothing else. A lock or `Escape` drops nothing.
 
 ## FI10 — New ▸
 
@@ -943,5 +974,5 @@ FI25, and FI25 precedes FI18, whose card thumbnails come from the store.
 
 ## Not in this plan
 
-Dragging from the desktop into a window, dropping onto application windows
-other than the manager's own, and spring-loaded folders.
+Dropping onto application windows other than the manager's own — they are
+offered the desktop's icons but none answers — and spring-loaded folders.

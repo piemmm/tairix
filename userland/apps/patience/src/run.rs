@@ -145,12 +145,8 @@ mod program {
 
     impl EventSource for RtEventSource<'_> {
         fn park(&mut self) -> Result<Parked, Errno> {
-            let woken = match self.deadline_ns.get() {
-                Some(deadline) => match app::park_until(self.set, deadline)? {
-                    Some(woken) => woken,
-                    None => return Ok(Parked::Interrupted),
-                },
-                None => app::park(self.set)?,
+            let Some(woken) = app::park_until_due(self.set, self.deadline_ns.get())? else {
+                return Ok(Parked::Interrupted);
             };
             // A worker's readiness is a level peek, so a wake left undrained
             // would report ready for ever and turn the park into a spin.
@@ -411,6 +407,8 @@ mod program {
                 | WindowEvent::DragEnded { .. }
                 | WindowEvent::SaveOffered { .. }
                 | WindowEvent::SaveOfferEnded { .. }
+                | WindowEvent::ItemsOffered { .. }
+                | WindowEvent::ItemsOfferEnded { .. }
                 | WindowEvent::PreviewRendered { .. }
                 | WindowEvent::Authorised { .. }
                 | WindowEvent::OpenRequested

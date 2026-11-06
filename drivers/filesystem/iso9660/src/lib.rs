@@ -1,12 +1,14 @@
-//! TAIRiX ISO 9660 filesystem driver (read-only).
+//! TAIRiX ISO 9660 filesystem driver (read-only files, rewritable label).
 //!
 //! Mounts the tree [`tairix_fsprobe::iso9660::identify`] chooses from a
 //! disc's last session — the primary tree when it carries Rock Ridge or RISC
 //! OS records, else Joliet, else the ISO 9660:1999 enhanced tree — behind
 //! any [`Block`] device, through [`FilesystemRead`], [`FilesystemSecurity`],
 //! [`FilesystemAttrs`] and [`FilesystemStats`]. Every [`FilesystemWrite`]
-//! mutation is refused as read-only. `docs/src/filesystem/iso9660.md`
-//! describes what each extension contributes.
+//! mutation is refused as read-only; on a medium that takes writes the
+//! volume label is rewritten in place ([`FilesystemLabel`]).
+//! `docs/src/filesystem/iso9660.md` describes what each extension
+//! contributes.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -31,8 +33,9 @@ use alloc::vec::Vec;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
-    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
-    NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeStats,
+    FilesystemLabel, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
+    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned,
+    VolumeStats, VolumeTitle,
 };
 use tairix_abi::fs::SeekRegion;
 use tairix_abi::time::Time64;
@@ -40,8 +43,8 @@ use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_bytedev::ByteDevice;
 use tairix_fsmeta::preset::{acorn, mac};
 use tairix_fsprobe::iso9660::{
-    self, both_u16, Flavour, Record, Volume, FLAG_ASSOCIATED, FLAG_MULTI_EXTENT, FLAG_PROTECTION,
-    SECTOR, SECTOR_LEN,
+    self, both_u16, Flavour, Record, Tree, Volume, DESCRIPTOR_SET_START, FLAG_ASSOCIATED,
+    FLAG_MULTI_EXTENT, FLAG_PROTECTION, MAX_DESCRIPTORS, SECTOR, SECTOR_LEN,
 };
 
 use name::Name;
@@ -99,6 +102,8 @@ pub struct Iso9660<B: Block> {
     file: Option<(NodeId, FileMap)>,
     /// The zisofs block most recently decompressed.
     block: Option<Decompressed>,
+    /// Whether the label may be rewritten: the medium takes writes.
+    writes_title: bool,
 }
 
 /// One extent of a file: a directory record's share of it.
@@ -301,11 +306,20 @@ impl<B: Block> Iso9660<B> {
             area: heap_sector()?,
             file: None,
             block: None,
+            writes_title: false,
         };
         match fs.node(fs.root)?.content {
             Content::Directory { .. } => Ok(fs),
             Content::File(_) | Content::Link(_) => Err(DriverError::BadMagic),
         }
+    }
+
+    /// This volume, its label rewritten in place on a retitle: for a medium
+    /// that takes writes.
+    #[must_use]
+    pub fn writing_its_title(mut self) -> Self {
+        self.writes_title = true;
+        self
     }
 
     /// The volume's stable identity, as the volume probe derives it.
@@ -1244,6 +1258,9 @@ impl<B: Block> FilesystemWrite for Iso9660<B> {
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {
+        if self.writes_title {
+            self.dev.flush()?;
+        }
         Ok(())
     }
 }
@@ -1315,8 +1332,169 @@ impl<B: Block> FilesystemAttrsProvider for Iso9660<B> {
     }
 }
 
-/// A disc is never written, and its volume identifier is not served.
-impl<B: Block> tairix_abi::driver::filesystem::FilesystemLabel for Iso9660<B> {}
+/// The title is the volume identifier of the descriptor the mounted tree is
+/// read from. A retitle rewrites it in every descriptor that records one —
+/// the primary, the enhanced and each Joliet descriptor — in every descriptor
+/// set the image carries, so a reader of a hybrid image's partition sees the
+/// title a reader of the whole medium does.
+impl<B: Block> FilesystemLabel for Iso9660<B> {
+    fn label(&mut self) -> Result<VolumeTitle, DriverError> {
+        let (bytes, len) = self.volume.label();
+        let text = core::str::from_utf8(&bytes[..len]).map_err(|_| DriverError::OutOfRange)?;
+        VolumeTitle::new(text).map_err(DriverError::from_errno)
+    }
+
+    fn set_label(&mut self, title: &VolumeTitle) -> Result<(), DriverError> {
+        if self.volume.flavour == Flavour::HighSierra {
+            return Err(DriverError::Unsupported);
+        }
+        if !self.writes_title {
+            return Err(DriverError::ReadOnly);
+        }
+        let fields = LabelFields::of(title, self.volume.tree)?;
+        let mut sets = twin_sets(&mut self.dev, &self.volume)?;
+        sets.try_reserve(1).map_err(|_| DriverError::OutOfMemory)?;
+        sets.push(self.volume.set_start);
+        // The cached sector is rewritten under it.
+        self.sector_at = None;
+        let written = sets
+            .into_iter()
+            .try_for_each(|set| relabel_set(&mut self.dev, set, &fields, &mut self.sector))
+            .and_then(|()| self.dev.flush());
+        if written.is_err() {
+            // Some descriptors may hold the new label and some the old: no
+            // further retitle is tried on a volume left so.
+            self.writes_title = false;
+        }
+        written?;
+        let layout = self.dev.device().disc_layout();
+        self.volume = iso9660::identify(&mut self.dev, layout)?.ok_or(DriverError::BadMagic)?;
+        Ok(())
+    }
+}
+
+/// The bytes a descriptor's volume identifier is: the primary and enhanced
+/// descriptors' in single bytes, Joliet's in big-endian UCS-2.
+const LABEL_FIELD_LEN: usize = 32;
+
+/// `title` as each kind of descriptor records it, padded with spaces.
+struct LabelFields {
+    single: [u8; LABEL_FIELD_LEN],
+    joliet: [u8; LABEL_FIELD_LEN],
+}
+
+impl LabelFields {
+    /// The fields for `title` on a volume whose `tree` is mounted: no longer
+    /// than the descriptor it is read back from holds, so the volume shows the
+    /// title asked for, and Joliet's shorter field takes as much as it holds.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfRange`] for a character outside printable ASCII,
+    /// which a primary descriptor names in no character set;
+    /// [`DriverError::LengthOutOfRange`] for a title longer than the mounted
+    /// tree's descriptor holds.
+    fn of(title: &VolumeTitle, tree: Tree) -> Result<Self, DriverError> {
+        let text = title.as_str().as_bytes();
+        if !text.iter().all(|byte| (b' '..=b'~').contains(byte)) {
+            return Err(DriverError::OutOfRange);
+        }
+        let room = match tree {
+            Tree::Joliet => LABEL_FIELD_LEN / 2,
+            Tree::Primary | Tree::Enhanced => LABEL_FIELD_LEN,
+        };
+        if text.len() > room {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        let mut single = [b' '; LABEL_FIELD_LEN];
+        single[..text.len()].copy_from_slice(text);
+        let mut joliet = [0u8; LABEL_FIELD_LEN];
+        let units = text.iter().copied().chain(core::iter::repeat(b' '));
+        for (slot, unit) in joliet.as_chunks_mut::<2>().0.iter_mut().zip(units) {
+            *slot = u16::from(unit).to_be_bytes();
+        }
+        Ok(Self { single, joliet })
+    }
+}
+
+/// Rewrite the label of every descriptor recording one in the set from
+/// logical sector `first`, using `sector` as scratch.
+fn relabel_set<B: Block>(
+    dev: &mut ByteDevice<B>,
+    first: u64,
+    fields: &LabelFields,
+    sector: &mut [u8; SECTOR_LEN],
+) -> Result<(), DriverError> {
+    let label = Flavour::Iso9660.label_field();
+    for index in 0..MAX_DESCRIPTORS {
+        let at = first
+            .checked_add(index)
+            .and_then(|logical| logical.checked_mul(SECTOR))
+            .ok_or(DriverError::OutOfRange)?;
+        dev.read(at, &mut sector[..])?;
+        if &sector[1..6] != b"CD001" || sector[0] == 255 {
+            return Ok(());
+        }
+        let field = match (sector[0], sector[6]) {
+            (1, 1) | (2, 2) => &fields.single,
+            (2, 1) if iso9660::joliet_level(sector).is_some() => &fields.joliet,
+            _ => continue,
+        };
+        sector[label.clone()].copy_from_slice(field);
+        dev.write(at, &sector[..])?;
+    }
+    Ok(())
+}
+
+/// The descriptor sets of the twins an image mastered with a partition
+/// offset carries: each begins in a partition its system area's table starts
+/// inside the image, and is the same mastering when its primary descriptor
+/// records the same label, volume set and creation date. A medium with no
+/// such table has none.
+fn twin_sets<B: Block>(dev: &mut ByteDevice<B>, volume: &Volume) -> Result<Vec<u64>, DriverError> {
+    let table = match tairix_partition::parse_partition_table(dev.device_mut()) {
+        Ok(table) => table,
+        Err(tairix_partition::PartitionError::Device(err)) => return Err(err),
+        Err(_) => return Ok(Vec::new()),
+    };
+    let block = u64::from(dev.block_size());
+    let mut sets = Vec::new();
+    let mut candidate = heap_sector()?;
+    for partition in table.partitions() {
+        let Some(start) = partition.start_lba.checked_mul(block) else {
+            continue;
+        };
+        if start == 0 || !start.is_multiple_of(SECTOR) || start >= volume.span_bytes() {
+            continue;
+        }
+        let first = start / SECTOR + DESCRIPTOR_SET_START;
+        if first == volume.set_start || sets.contains(&first) {
+            continue;
+        }
+        let Some(at) = first.checked_mul(SECTOR) else {
+            continue;
+        };
+        if dev.read(at, &mut candidate[..]).is_err() || !same_mastering(&candidate, volume) {
+            continue;
+        }
+        sets.try_reserve(1).map_err(|_| DriverError::OutOfMemory)?;
+        sets.push(first);
+    }
+    Ok(sets)
+}
+
+/// Whether `descriptor` is a primary descriptor of the mastering `volume`'s
+/// is: the same label, volume set identifier and creation date.
+fn same_mastering(descriptor: &[u8; SECTOR_LEN], volume: &Volume) -> bool {
+    const VOLUME_SET: core::ops::Range<usize> = 190..318;
+    const CREATED: core::ops::Range<usize> = 813..830;
+    let primary = volume.primary.bytes();
+    let label = Flavour::Iso9660.label_field();
+    descriptor[..7] == primary[..7]
+        && descriptor[label.clone()] == primary[label]
+        && descriptor[VOLUME_SET] == primary[VOLUME_SET]
+        && descriptor[CREATED] == primary[CREATED]
+}
 
 impl<B: Block> FilesystemStats for Iso9660<B> {
     fn stats(&mut self) -> Result<VolumeStats, DriverError> {

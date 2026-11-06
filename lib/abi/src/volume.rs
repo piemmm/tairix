@@ -148,14 +148,21 @@ impl VolumeFsType {
 
     /// Whether a volume of this type takes a title: its format records a
     /// label its driver sets
-    /// ([`FilesystemLabel`](crate::driver::filesystem::FilesystemLabel)). A
-    /// disc's title is fixed when it is mastered, and an archive keeps none.
+    /// ([`FilesystemLabel`](crate::driver::filesystem::FilesystemLabel)). An
+    /// ISO 9660 image's label is rewritten in place where its medium takes
+    /// writes — a pressed disc's stays as it was mastered — and an archive
+    /// keeps none.
     #[must_use]
     pub const fn takes_title(self) -> bool {
         match self {
-            Self::ARXFS | Self::Ext4 | Self::Fat32 | Self::Udf | Self::Adfs | Self::Affs => true,
-            Self::Iso9660
-            | Self::Zip
+            Self::ARXFS
+            | Self::Ext4
+            | Self::Fat32
+            | Self::Udf
+            | Self::Adfs
+            | Self::Affs
+            | Self::Iso9660 => true,
+            Self::Zip
             | Self::Tar
             | Self::Gzip
             | Self::Bzip2
@@ -1647,8 +1654,8 @@ mod tests {
         );
     }
 
-    /// A writable format's own label takes a title; a disc's is fixed when it
-    /// is mastered, and an archive keeps none.
+    /// A format recording its own label takes a title, and an archive keeps
+    /// none.
     #[test]
     fn only_a_format_recording_a_settable_label_takes_a_title() {
         let titled: alloc::vec::Vec<VolumeFsType> = VolumeFsType::ALL
@@ -1661,6 +1668,7 @@ mod tests {
                 VolumeFsType::ARXFS,
                 VolumeFsType::Ext4,
                 VolumeFsType::Fat32,
+                VolumeFsType::Iso9660,
                 VolumeFsType::Udf,
                 VolumeFsType::Adfs,
                 VolumeFsType::Affs,

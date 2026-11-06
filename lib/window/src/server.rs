@@ -54,17 +54,18 @@ use tairix_abi::window_ipc::{
     encode_clipboard_reply, encode_create_reply, encode_cursor_sets_reply, encode_desktop_reply,
     encode_drag_spot_reply, encode_drop_target_reply, encode_hand_over_reply,
     encode_menu_text_reply, encode_minted_id_reply, encode_notify_sources_reply,
-    encode_open_target_reply, encode_picked_file_reply, encode_picked_name_reply,
-    encode_terrain_reply, encode_wallpapers_reply, AlertOutcome, AlertSpec, AppBar, AppMenu,
-    ClipboardHeld, ClipboardKind, CursorShape, DialogModality, DocumentName, DragAt, DragItems,
-    DropOperation, DropSite, DropTarget, HandOverOutcome, HandOverTarget, LayerDepth, OpenTarget,
-    PickPurpose, PreviewSubject, TerrainPlate, WallpaperEntry, WindowEvent, WindowRegion,
-    WindowRequest, WindowTitle, ALERT_MAX_OPEN, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT,
-    DESKTOP_LAYER_MAX_PER_SEAT, DESKTOP_LAYER_MAX_PLATES, WINDOW_CLIPBOARD_REPLY_LEN,
-    WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN,
-    WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_FOLDER_PICK_MAX,
-    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX,
-    WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
+    encode_offered_items_reply, encode_open_target_reply, encode_picked_file_reply,
+    encode_picked_name_reply, encode_terrain_reply, encode_wallpapers_reply, AlertOutcome,
+    AlertSpec, AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape, DialogModality,
+    DocumentName, DragAt, DragItems, DropOperation, DropSite, DropTarget, HandOverOutcome,
+    HandOverTarget, LayerDepth, OfferDrop, OfferedItem, OpenTarget, PickPurpose, PreviewSubject,
+    TerrainPlate, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowTitle,
+    ALERT_MAX_OPEN, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, DESKTOP_LAYER_MAX_PER_SEAT,
+    DESKTOP_LAYER_MAX_PLATES, WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN,
+    WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX,
+    WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_FOLDER_PICK_MAX, WINDOW_HAND_OVER_REPLY_LEN,
+    WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
+    WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OFFERED_ITEMS_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
     WINDOW_PICKED_FILE_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX,
     WINDOW_WALLPAPERS_REPLY_MAX,
 };
@@ -117,7 +118,10 @@ pub const WINDOW_REPLY_MAX: usize = {
                                     wider(
                                         wider(
                                             WINDOW_DROP_TARGET_REPLY_MAX,
-                                            WINDOW_DRAG_SPOT_REPLY_MAX,
+                                            wider(
+                                                WINDOW_DRAG_SPOT_REPLY_MAX,
+                                                WINDOW_OFFERED_ITEMS_REPLY_MAX,
+                                            ),
                                         ),
                                         WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
                                     ),
@@ -659,6 +663,51 @@ pub trait WindowHost {
         _accepts: bool,
     ) -> Result<(), Errno> {
         Err(Errno::NotSupported)
+    }
+
+    /// A validated `ItemsOfferAnswer`: the owner of window `window_id`
+    /// answered the desktop's items offer numbered `serial` with what a drop
+    /// there would do. The host decides whether the answer is still current.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host refuses the answer with; nothing changes.
+    fn items_offer_answered(
+        &mut self,
+        _window_id: u64,
+        _serial: u32,
+        _verdict: Option<DropOperation>,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    /// How many items the desktop's drag numbered `drag` carries, for the
+    /// owner of window `window_id`, which it is offered to or dropped on: a
+    /// validated `OfferedItems` reads them.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] where that drag has neither an offer standing over
+    /// the window nor a drop on it.
+    fn offered_count(&self, _window_id: u64, _drag: u32) -> Result<u32, Errno> {
+        Err(Errno::NotFound)
+    }
+
+    /// Item `index` of the desktop's drag numbered `drag`, for the owner of
+    /// window `window_id` ([`offered_count`](Self::offered_count)): its
+    /// absolute path and the node listed there.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] past the last item, or as
+    /// [`offered_count`](Self::offered_count).
+    fn offered_item(
+        &self,
+        _window_id: u64,
+        _drag: u32,
+        _index: u32,
+    ) -> Result<OfferedItem<'_>, Errno> {
+        Err(Errno::NotFound)
     }
 
     /// A decoded `SaveInto`: attested `caller` answered the drop numbered
@@ -2378,6 +2427,8 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::QueryDragSpot { .. }
             | WindowRequest::SaveOfferAnswer { .. }
             | WindowRequest::SaveInto { .. }
+            | WindowRequest::ItemsOfferAnswer { .. }
+            | WindowRequest::OfferedItems { .. }
             | WindowRequest::DropLanding { .. } => {
                 self.dispatch_transfer(host, caller, decoded, reply)
             }
@@ -2471,6 +2522,20 @@ impl<M: ShmMapper> WindowServer<M> {
                     .and_then(|_| host.save_offer_answered(window_id, serial, accepts));
                 status(reply, answered)
             }
+            WindowRequest::ItemsOfferAnswer {
+                window_id,
+                serial,
+                verdict,
+            } => {
+                let answered = owned_window_mut(&mut self.windows, caller, window_id)
+                    .and_then(|_| host.items_offer_answered(window_id, serial, verdict));
+                status(reply, answered)
+            }
+            WindowRequest::OfferedItems {
+                window_id,
+                drag,
+                from,
+            } => self.offered_items(&*host, caller, (window_id, drag, from), reply),
             // Not checked against the window here: the host consumes the
             // location whatever it answers, and checks the window is the
             // caller's before acting on it.
@@ -2487,10 +2552,7 @@ impl<M: ShmMapper> WindowServer<M> {
                             _ => Err(Errno::NotFound),
                         }
                     });
-                let mut frame = [0u8; WINDOW_DRAG_SPOT_REPLY_MAX];
-                let len = encode_drag_spot_reply(&mut frame, read);
-                reply[..len].copy_from_slice(&frame[..len]);
-                len
+                drag_spot_reply(reply, read)
             }
             WindowRequest::DropLanding {
                 window_id,
@@ -2510,6 +2572,26 @@ impl<M: ShmMapper> WindowServer<M> {
             }
             _ => status(reply, Err(Errno::NotSupported)),
         }
+    }
+
+    /// Answer `caller`'s read of the items the desktop's drag numbered `drag`
+    /// offers its window `window_id`, item `from` first, with as many as a
+    /// page holds.
+    fn offered_items(
+        &mut self,
+        host: &dyn WindowHost,
+        caller: ProcId,
+        (window_id, drag, from): (u64, u32, u32),
+        reply: &mut [u8; WINDOW_REPLY_MAX],
+    ) -> usize {
+        let total = owned_window_mut(&mut self.windows, caller, window_id)
+            .and_then(|_| host.offered_count(window_id, drag));
+        let page = total.map(|total| {
+            let items = (from..total)
+                .map_while(move |index| host.offered_item(window_id, drag, index).ok());
+            (total, items)
+        });
+        offered_items_reply(reply, page)
     }
 
     /// Accept a drag `caller`'s window `window_id` began on the file `name`:
@@ -2732,6 +2814,8 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::QueryDragSpot { .. }
             | WindowRequest::SaveOfferAnswer { .. }
             | WindowRequest::SaveInto { .. }
+            | WindowRequest::ItemsOfferAnswer { .. }
+            | WindowRequest::OfferedItems { .. }
             | WindowRequest::DropLanding { .. }
             | WindowRequest::RevealDocument { .. } => status(reply, Err(Errno::NotSupported)),
             // ...and a committed-text pull, likewise.
@@ -4562,6 +4646,11 @@ impl<M: ShmMapper> WindowServer<M> {
         | WindowEvent::SaveOfferEnded {
             dropped: Some((x, y)),
             ..
+        }
+        | WindowEvent::ItemsOffered { x, y, .. }
+        | WindowEvent::ItemsOfferEnded {
+            dropped: Some(OfferDrop { x, y, .. }),
+            ..
         } = *event
         {
             if x >= record.surface.width_px || y >= record.surface.height_px {
@@ -4834,6 +4923,26 @@ fn menu_text_reply(
     let len = encode_menu_text_reply(&mut frame, result);
     reply[..len].copy_from_slice(&frame[..len]);
     len
+}
+
+/// Write a `QueryDragSpot` outcome into `reply` in place, answering its
+/// length.
+fn drag_spot_reply(reply: &mut [u8; WINDOW_REPLY_MAX], result: Result<&str, Errno>) -> usize {
+    match reply.first_chunk_mut::<WINDOW_DRAG_SPOT_REPLY_MAX>() {
+        Some(frame) => encode_drag_spot_reply(frame, result),
+        None => status(reply, Err(Errno::BufferTooSmall)),
+    }
+}
+
+/// Write an `OfferedItems` page into `reply` in place, answering its length.
+fn offered_items_reply<'i>(
+    reply: &mut [u8; WINDOW_REPLY_MAX],
+    result: Result<(u32, impl IntoIterator<Item = OfferedItem<'i>>), Errno>,
+) -> usize {
+    match reply.first_chunk_mut::<WINDOW_OFFERED_ITEMS_REPLY_MAX>() {
+        Some(frame) => encode_offered_items_reply(frame, result),
+        None => status(reply, Err(Errno::BufferTooSmall)),
+    }
 }
 
 /// Write a `TakePickedFile` outcome into `reply`, answering its length.

@@ -21,8 +21,8 @@ use tairix_abi::time::Time64;
 use tairix_abi::STORAGE_CATALOG;
 use tairix_icon::disk_icon;
 
-use crate::entry::{DriveMark, Entry, EntryKind, LinkTarget};
-use crate::places::Volume;
+use crate::entry::{DriveMark, Entry, EntryKind, LinkTarget, Listed};
+use crate::places::{Volume, VolumeFacts};
 use crate::vfs::components_from_absolute_path;
 
 /// The identity the shortcut target `target` names a volume's root by, or
@@ -280,16 +280,41 @@ pub fn shortcuts<'a>(
 ) -> Option<Vec<(String, String)>> {
     entries
         .into_iter()
-        .map(|entry| {
-            let facts = entry
-                .volume()
-                .filter(|facts| facts.identity != VOLUME_ID_UNPUBLISHED)?;
-            Some((
-                String::from(entry.name()),
-                crate::mount::volume_root(facts.identity),
-            ))
+        .map(|entry| shortcut_to(entry.name(), entry.volume()?))
+        .collect()
+}
+
+/// The shortcut each of `items`, dropped by their absolute paths, makes where
+/// a drop links it, as [`shortcuts`] answers for the catalog's own entries:
+/// each must be an attached volume of `volumes` where the storage catalog
+/// shows it, else `None`.
+#[must_use]
+pub fn catalog_shortcuts(items: &[Listed], volumes: &[Volume]) -> Option<Vec<(String, String)>> {
+    items
+        .iter()
+        .map(|item| {
+            let [catalog, name] = item.path.as_slice() else {
+                return None;
+            };
+            if catalog != STORAGE_CATALOG {
+                return None;
+            }
+            let at = crate::vfs::spell_absolute_path(&item.path);
+            let volume = volumes.iter().find(|volume| volume.target == at)?;
+            shortcut_to(name, &volume.facts)
         })
         .collect()
+}
+
+/// The shortcut called `name` to the volume `facts` describes: its root by
+/// the identity its content carries, or `None` for one that has none.
+fn shortcut_to(name: &str, facts: &VolumeFacts) -> Option<(String, String)> {
+    (facts.identity != VOLUME_ID_UNPUBLISHED).then(|| {
+        (
+            String::from(name),
+            crate::mount::volume_root(facts.identity),
+        )
+    })
 }
 
 #[cfg(test)]

@@ -618,28 +618,26 @@ impl Window {
     }
 
     /// Send this window's shadow toward the lifted or the resting level:
-    /// eased, unless the window is hidden and nobody can watch it change.
+    /// eased only where it is drawn, so a hidden, maximised, fullscreen or
+    /// undecorated window costs no frames for an ease nobody sees.
     pub(crate) fn aim_shadow(&mut self, lifted: bool) {
         let elevation = if lifted {
             Elevation::LIFTED
         } else {
             Elevation::RESTING
         };
-        self.lift.aim(elevation, !self.participation.visible);
+        self.lift.aim(elevation, !self.shows_shadow());
     }
 
     /// Advance this window's shadow to `now_ns` along an ease of
     /// `duration_ms`, answering whether a shadow on screen changed.
     pub(crate) fn step_shadow(&mut self, now_ns: u64, duration_ms: u16) -> bool {
-        self.lift.step(now_ns, duration_ms)
-            && self.participation.visible
-            && self.is_decorated()
-            && self.casts_shadow()
+        self.lift.step(now_ns, duration_ms) && self.shows_shadow()
     }
 
-    /// Whether this window's shadow stands still at the level it is aimed at.
-    pub(crate) const fn shadow_still(&self) -> bool {
-        self.lift.still()
+    /// Whether a shadow following this window's lift is on screen.
+    const fn shows_shadow(&self) -> bool {
+        self.participation.visible && self.is_decorated() && self.casts_shadow()
     }
 
     /// Nanoseconds until this window's shadow owes its next step on a display

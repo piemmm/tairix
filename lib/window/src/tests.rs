@@ -323,6 +323,10 @@ struct RecordingHost {
     /// with the attested caller that gave it.
     save_answers: Vec<(u64, u32, bool)>,
     save_folders: Vec<(ProcId, u64, u32, u64)>,
+    /// Every desktop items offer answered, and the items the host answers
+    /// reads of, by window and drag.
+    items_answers: Vec<(u64, u32, Option<DropOperation>)>,
+    offered_items: Vec<(u64, u32, String, tairix_abi::fs::FileId)>,
     refuse_menu_open: Option<Errno>,
     /// Every alert put up, whether it earned the keyboard, and every one
     /// taken down, by id.
@@ -429,6 +433,8 @@ impl Default for RecordingHost {
             landings: Vec::new(),
             save_answers: Vec::new(),
             save_folders: Vec::new(),
+            items_answers: Vec::new(),
+            offered_items: Vec::new(),
             refuse_menu_open: None,
             alerts: Vec::new(),
             alert_focus: Vec::new(),
@@ -668,6 +674,42 @@ impl WindowHost for RecordingHost {
     ) -> Result<(), Errno> {
         self.save_answers.push((window_id, serial, accepts));
         Ok(())
+    }
+
+    fn items_offer_answered(
+        &mut self,
+        window_id: u64,
+        serial: u32,
+        verdict: Option<DropOperation>,
+    ) -> Result<(), Errno> {
+        self.items_answers.push((window_id, serial, verdict));
+        Ok(())
+    }
+
+    fn offered_count(&self, window_id: u64, drag: u32) -> Result<u32, Errno> {
+        let count = self
+            .offered_items
+            .iter()
+            .filter(|(window, offered, ..)| (*window, *offered) == (window_id, drag))
+            .count();
+        match u32::try_from(count) {
+            Ok(0) | Err(_) => Err(Errno::NotFound),
+            Ok(count) => Ok(count),
+        }
+    }
+
+    fn offered_item(
+        &self,
+        window_id: u64,
+        drag: u32,
+        index: u32,
+    ) -> Result<tairix_abi::window_ipc::OfferedItem<'_>, Errno> {
+        self.offered_items
+            .iter()
+            .filter(|(window, offered, ..)| (*window, *offered) == (window_id, drag))
+            .nth(usize::try_from(index).map_err(|_| Errno::NotFound)?)
+            .map(|(_, _, path, id)| tairix_abi::window_ipc::OfferedItem { path, id: *id })
+            .ok_or(Errno::NotFound)
     }
 
     fn save_into(
@@ -1032,6 +1074,9 @@ struct Loopback {
     called: alloc::vec::Vec<(u64, alloc::vec::Vec<u8>)>,
     /// How many desktop frames have been latched.
     latches: usize,
+    /// Why a wait for a reply ends at once with the call left as it was, as
+    /// an await the kernel interrupts does.
+    refuses_awaits: Option<Errno>,
 }
 
 impl Loopback {
@@ -1059,6 +1104,7 @@ impl Loopback {
             withheld: alloc::vec::Vec::new(),
             called: alloc::vec::Vec::new(),
             latches: 0,
+            refuses_awaits: None,
         }))
     }
 
@@ -1285,6 +1331,9 @@ impl WindowTransport for Rc<RefCell<Loopback>> {
         {
             let inner = &mut *self.borrow_mut();
             inner.awaited.push(ticket);
+            if let Some(errno) = inner.refuses_awaits {
+                return Err(errno);
+            }
             // A waited-on post is reached however busy the session is, after
             // those posted before it and before any posted since.
             inner.serve_through(ticket);
@@ -3888,9 +3937,58 @@ fn awaiting_a_present_reaps_nothing_else() {
         .set_cursor(window, CursorShape::Text)
         .expect("posted");
     let reaps = loopback.borrow().reaps;
-    client.await_present(window);
+    client.await_present(window).expect("none in flight");
     client.present(window, 0, full_damage()).expect("posted");
     assert_eq!(loopback.borrow().reaps, reaps, "nothing was reaped");
+}
+
+/// A present whose wait ends unanswered while the call is still live stays
+/// posted for the reap: forgotten, its answer would leave the window's reply
+/// member ready for ever and every park would return at once. No second
+/// present goes out while it is in flight.
+#[test]
+fn a_present_whose_wait_is_interrupted_stays_posted_for_the_reap() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    loopback.borrow_mut().holds_posts = true;
+    client.present(window, 0, full_damage()).expect("posted");
+    loopback.borrow_mut().refuses_awaits = Some(Errno::Interrupted);
+    assert_eq!(client.await_present(window), Err(Errno::Interrupted));
+    let sent = loopback.borrow().sent.len();
+    assert_eq!(
+        client.present(window, 1, full_damage()),
+        Err(Errno::Interrupted)
+    );
+    assert_eq!(loopback.borrow().sent.len(), sent, "no second present");
+    assert!(client.present_in_flight(window), "still posted");
+    {
+        let mut inner = loopback.borrow_mut();
+        inner.refuses_awaits = None;
+        inner.serve_posted();
+    }
+    assert!(!client.present_in_flight(window), "its answer was taken in");
+    client
+        .present(window, 1, full_damage())
+        .expect("the next present");
+}
+
+/// A present whose wait ends after the call itself has ended is retired, so
+/// the window is free for its next present.
+#[test]
+fn a_present_whose_call_ended_unanswered_is_retired() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    loopback.borrow_mut().holds_posts = true;
+    client.present(window, 0, full_damage()).expect("posted");
+    {
+        let mut inner = loopback.borrow_mut();
+        inner.unserved.clear();
+        inner.refuses_awaits = Some(Errno::TimedOut);
+    }
+    assert_eq!(client.await_present(window), Ok(()));
+    assert!(!client.present_in_flight(window));
 }
 
 /// No per-input request waits on the session: each is posted and answered
@@ -5892,6 +5990,154 @@ fn each_drops_end_is_posted_on_its_own() {
         refusal(&mut client),
         None,
         "an end the desktop had made already"
+    );
+}
+
+/// Every item the desktop's drag numbered `drag` offers window `window_id`,
+/// read as `client`.
+fn read_offered(
+    client: &mut WindowClient<Rc<RefCell<Loopback>>>,
+    window_id: u64,
+    drag: u32,
+) -> Result<Vec<(String, tairix_abi::fs::FileId)>, Errno> {
+    let mut read = Vec::new();
+    let total = client.read_offered_items(window_id, drag, |item| {
+        read.push((String::from(item.path), item.id));
+        Ok(())
+    })?;
+    assert_eq!(
+        usize::try_from(total),
+        Ok(read.len()),
+        "every item it carries"
+    );
+    Ok(read)
+}
+
+/// More items than one reply holds are read a page at a time, in order, each
+/// with its node, and a refusal from the reader stops the read.
+#[test]
+fn offered_items_past_one_page_are_read_in_order() {
+    let (loopback, mut client, [_, _, stranger]) = carried_drag();
+    let wanted: Vec<(String, tairix_abi::fs::FileId)> = (0..400u64)
+        .map(|node| {
+            let path = alloc::format!("/Users/ada/Desktop/a-rather-long-file-name-{node:04}.txt");
+            let id = tairix_abi::fs::FileId {
+                volume: [9; 16],
+                node,
+            };
+            (path, id)
+        })
+        .collect();
+    loopback.borrow_mut().host.offered_items.extend(
+        wanted
+            .iter()
+            .map(|(path, id)| (stranger, 2, path.clone(), *id)),
+    );
+    loopback.borrow_mut().ticket = TICKET_B;
+    let sent = loopback.borrow().sent.len();
+    assert_eq!(read_offered(&mut client, stranger, 2), Ok(wanted));
+    let pages = loopback.borrow().sent.len() - sent;
+    assert!(
+        (2..400).contains(&pages),
+        "a page a round trip, never an item: {pages}"
+    );
+    let mut seen = 0;
+    assert_eq!(
+        client.read_offered_items(stranger, 2, |_| {
+            seen += 1;
+            if seen == 3 {
+                Err(Errno::OutOfMemory)
+            } else {
+                Ok(())
+            }
+        }),
+        Err(Errno::OutOfMemory)
+    );
+    assert_eq!(seen, 3, "nothing after the refusal");
+}
+
+/// The desktop's items offer is answered by the offered window's owner alone,
+/// and its items are read through the host by that owner alone; an offer or
+/// a drop outside the window is never delivered.
+#[test]
+fn an_items_offer_is_answered_and_read_by_its_windows_owner_alone() {
+    let (loopback, mut client, [source, _, stranger]) = carried_drag();
+    let node = tairix_abi::fs::FileId {
+        volume: [3; 16],
+        node: 41,
+    };
+    loopback.borrow_mut().host.offered_items.push((
+        stranger,
+        7,
+        String::from("/Users/ada/Desktop/notes.txt"),
+        node,
+    ));
+    loopback.borrow_mut().ticket = TICKET_B;
+    client
+        .answer_items_offer(source, 3, Some(DropOperation::Copy))
+        .expect("posted");
+    assert_eq!(
+        refusal(&mut client),
+        Some(refused(
+            source,
+            PostedRequest::ItemsOfferAnswer,
+            Errno::NotFound
+        )),
+        "only the owner answers"
+    );
+    assert_eq!(read_offered(&mut client, source, 7), Err(Errno::NotFound));
+    client
+        .answer_items_offer(stranger, 3, Some(DropOperation::Move))
+        .expect("answered");
+    assert_eq!(
+        loopback.borrow().host.items_answers,
+        [(stranger, 3, Some(DropOperation::Move))]
+    );
+    assert_eq!(
+        read_offered(&mut client, stranger, 7),
+        Ok(alloc::vec![(
+            String::from("/Users/ada/Desktop/notes.txt"),
+            node
+        )])
+    );
+    assert_eq!(read_offered(&mut client, stranger, 8), Err(Errno::NotFound));
+
+    let mut sink = QueueSink::default();
+    let offer = |x| WindowEvent::ItemsOffered {
+        window_id: stranger,
+        drag: 7,
+        serial: 5,
+        x,
+        y: 0,
+        shift: false,
+    };
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .deliver_event(&mut sink, &offer(u32::MAX)),
+        Err(Errno::OutOfRange)
+    );
+    loopback
+        .borrow_mut()
+        .server
+        .deliver_event(&mut sink, &offer(0))
+        .expect("inside the window");
+    let dropped = WindowEvent::ItemsOfferEnded {
+        window_id: stranger,
+        serial: 5,
+        dropped: Some(tairix_abi::window_ipc::OfferDrop {
+            x: 0,
+            y: u32::MAX,
+            operation: DropOperation::Copy,
+        }),
+    };
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .deliver_event(&mut sink, &dropped),
+        Err(Errno::OutOfRange)
     );
 }
 

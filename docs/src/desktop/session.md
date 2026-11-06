@@ -2897,6 +2897,20 @@ pointer from that window, which therefore never sees the release it lent.
   nothing; the source window closing ends it with no one to tell; the screen
   locking ends it on nothing rather than leaving it to resume past the
   unlock; a window dropped on that closed meanwhile is a drop on nothing.
+- **The desktop's own icons are carried on over a window.** A press carrying
+  icons in the desktop's layer would draw them beneath any window it crosses,
+  so the moment it holds them over an application's window the desktop hands
+  the press to the carrier (`Desktop::carried_cargo`, `begin_desktop_drag`)
+  and they rest where they stood; let go over a window in the batch that
+  reached it, they stay there, since it was never offered them. Each window
+  under them is offered them at once and then once per input batch
+  (`ItemsOffered`); its answer shows on the pointer, and only its owner reads
+  them (`DesktopShell::offered_items`) — each icon's absolute path and the node
+  its listing showed, a drive by its volume's place in the storage catalog.
+  Dropped on a window whose answer stands, its application performs the drop
+  under its own authority; brought back over the desktop the pointer shows a
+  move, and let go there the press is put down where it was released, the
+  pressed icon found by name (`Desktop::put_down_lift`).
 
 ## Nothing the desktop reads or writes happens on the serve loop
 

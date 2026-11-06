@@ -2583,12 +2583,39 @@ fn an_archive_reached_through_a_read_only_view_attaches_read_only_scenario(
     retire(host_id, DetachMode::Plain, round);
 }
 
+/// A disc image keeps the title it was mastered with, attached by its owner
+/// read-only or writable: it is shared among its attachers.
+fn a_disc_image_keeps_its_mastered_title(facility: &'static TestFacility, owner: &Principal<'_>) {
+    let disc = "/Storage/imgs40/disc.iso";
+    put(0, disc, &ext_fixture::sparse(ISO_FIXTURE));
+    let title = VolumeTitle::new("Disc").expect("a title");
+    for flags in [OpenFlags::READ, read_write()] {
+        let iso = mounted(attached(
+            facility,
+            owner,
+            source(MEMBER_UID, disc, flags, session()),
+            &private(true),
+        ));
+        assert!(
+            !mount_record(b"disc.iso").title_writes(),
+            "a disc image is shared among its attachers"
+        );
+        assert_eq!(
+            VOLUME_SERVICE.retitle(owner, &iso.volume_id, &title),
+            Err(Errno::ReadOnly),
+            "so its label stays as mastered whatever descriptor attached it"
+        );
+        eject(&iso, DetachMode::Plain, owner).expect("its owner ejects it");
+    }
+}
+
 /// An image volume is retitled by its owner alone: its filesystem's label is
 /// written through its driver, listed at once and carried in its file to the
 /// next attach, while its catalog name and its identity stay, so its file
-/// attached again is the volume attached already; a held volume, a read-only
-/// one and a format keeping no title are refused, and the image's owner holds
-/// no authority over the device its file lies on.
+/// attached again is the volume attached already; a held volume and a
+/// read-only one are refused — a disc image is shared among its attachers,
+/// so its label stays as mastered — and the image's owner holds no authority
+/// over the device its file lies on.
 fn an_image_is_retitled_by_its_owner_alone_scenario(
     window_ptr: *mut u8,
     facility: &'static TestFacility,
@@ -2665,20 +2692,7 @@ fn an_image_is_retitled_by_its_owner_alone_scenario(
         "a read-only descriptor's volume keeps its title"
     );
     eject(&again, DetachMode::Plain, &owner).expect("its owner ejects it");
-    let disc = "/Storage/imgs40/disc.iso";
-    put(0, disc, &ext_fixture::sparse(ISO_FIXTURE));
-    let iso = mounted(attached(
-        facility,
-        &owner,
-        source(MEMBER_UID, disc, OpenFlags::READ, session()),
-        &private(true),
-    ));
-    assert_eq!(
-        retitle(&owner, &iso.volume_id, "Disc"),
-        Err(Errno::NotSupported),
-        "a disc keeps the title it was mastered with"
-    );
-    eject(&iso, DetachMode::Plain, &owner).expect("its owner ejects it");
+    a_disc_image_keeps_its_mastered_title(facility, &owner);
     assert_eq!(
         retitle(&owner, &host_id, "HOST"),
         Err(Errno::PermissionDenied),

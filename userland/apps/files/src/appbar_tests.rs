@@ -279,6 +279,7 @@ fn attached(label: &str, class: VolumeClass, owner: Option<u32>, title: &str) ->
     volume.facts.owner = owner;
     volume.facts.title = title.to_string();
     volume.facts.titled = !title.is_empty();
+    volume.facts.title_writes = true;
     for (id, spelled) in volume.facts.volume_id.iter_mut().zip(label.bytes()) {
         *id = spelled;
     }
@@ -533,9 +534,12 @@ fn a_committed_title_is_checked_against_the_disk_as_it_stands() {
     theirs.facts.owner = Some(1001);
     let mut untitled = floppy.clone();
     untitled.facts.titled = false;
+    let mut pressed = floppy.clone();
+    pressed.facts.title_writes = false;
     for (changed, why) in [
         (theirs, REASON_NOT_YOURS),
         (untitled, REASON_UNTITLED_FORMAT),
+        (pressed, REASON_TITLE_READ_ONLY),
     ] {
         assert_eq!(reason("Games", &Places::new(&home(), &[changed])), Err(why));
     }
@@ -639,6 +643,7 @@ fn a_removable_volume_offers_eject_on_its_plate() {
 fn a_titled_image_offers_its_title_in_a_field() {
     let mut locked = attached("Locked", VolumeClass::Image, VIEWER, "Archive");
     locked.facts.read_only = true;
+    locked.facts.title_writes = false;
     let places = Places::new(
         &home(),
         &[

@@ -34,10 +34,10 @@
 //! direct map, the frame allocator, and the device-window allocator.
 
 use alloc::sync::Arc;
-use alloc::vec::Vec;
-use core::ops::Range;
+use core::ops::{Range, RangeInclusive};
 
 use tairix_collections::{OrderedSet, RangeSet};
+use tairix_inline::ArrayVec;
 use tairix_log::Sink;
 use tairix_reclaim::MemoryPressure;
 use tairix_sync::SpinLock;
@@ -51,9 +51,10 @@ use crate::filemap::{map_file_page, unmap_file_region};
 use crate::frame::{Frame, FrameAllocator, MemoryClass, PAGE_SIZE};
 use crate::mmio::{MmioError, MmioWindowMap, SharedMemory};
 use crate::phys::PhysMap;
+use crate::pressure::ramzip_scan_budget;
 use crate::ramzip::{
     FaultError, PageCandidate, Ramzip, RamzipFaultOutcome, RamzipReclaimSummary, VmContext,
-    WarmOutcome,
+    WarmOutcome, COMPRESS_BATCH,
 };
 use crate::retire::{Retire, Retiring, SpaceTlb, TlbContext, Unpublished};
 use crate::vmm::{
@@ -1329,40 +1330,17 @@ where
         sink: &dyn Sink,
         retire: &mut dyn Retire,
     ) -> RamzipReclaimSummary {
-        if want == 0 {
+        let Some(window) = page_span(&self.anon.span()).filter(|_| want > 0) else {
             return RamzipReclaimSummary::default();
-        }
-        // Cheap early-out before the O(n) candidate collection: on a
-        // backend with no referenced bit the scanner can never show a page
-        // cold, so reclaim nothing (fail closed) without walking the whole
-        // live mapping on every triggering fault. The scanner re-checks
-        // this too, but only after the caller has paid for the candidate
-        // list — this keeps direct reclaim near-free on a port that has
-        // not yet enabled access tracking.
-        if !self.space.access_tracking().is_supported() {
-            return RamzipReclaimSummary {
-                access_tracking_unsupported: true,
-                ..RamzipReclaimSummary::default()
-            };
-        }
-        // Candidate set: this space's resident *placed anonymous* pages
-        // (its heap window), ascending and unique — the order the
-        // second-chance scanner requires. Image, stack, file, device,
-        // DMA, and shared pages are all excluded here: only pages the
-        // window allocator proved anonymous are ever offered.
-        let mut candidates: Vec<Page> = self
-            .space
-            .live_pages()
-            .filter(|page| self.anon.covers(page.start().as_u64()))
-            .collect();
-        candidates.sort_unstable_by_key(|page| page.number());
-        candidates.dedup_by_key(|page| page.number());
-
-        let mut tier = tier.lock();
-        let cold = match self.scanner.scan(&mut self.space, &candidates, want) {
-            Ok(cold) => cold,
-            // No referenced bit on this backend: reclaim nothing rather
-            // than guess a page is cold (fail closed).
+        };
+        // Only the heap window's pages are offered, and only those inside a
+        // live placement: image, stack, file, device, DMA and shared pages
+        // never are.
+        let mut sweep = match self
+            .scanner
+            .sweep(&self.space, window, ramzip_scan_budget(want))
+        {
+            Ok(sweep) => sweep,
             Err(ColdScanError::Unsupported) => {
                 return RamzipReclaimSummary {
                     access_tracking_unsupported: true,
@@ -1370,32 +1348,44 @@ where
                 };
             }
         };
-        let mut summary = RamzipReclaimSummary {
-            scanned: candidates.len(),
-            ..RamzipReclaimSummary::default()
-        };
+        let anon = &self.anon;
         let space_id = self.space_id;
-        let mut ctx = VmContext {
-            space_id,
-            space: &mut self.space,
-            physmap: &self.physmap,
-            frames: self.frames,
-            sink,
-        };
-        // The owning task is the space itself (one task per space), so its
-        // tier task id is the space id.
-        tier.compress_out_batch(
-            pressure,
-            reclaimable_residue,
-            (&mut ctx, &cold),
-            space_id,
-            &template,
-            retire,
-            &mut |_, outcome| match outcome {
-                Ok(()) => summary.compressed += 1,
-                Err(_) => summary.refused += 1,
-            },
-        );
+        let mut summary = RamzipReclaimSummary::default();
+        loop {
+            let asked = summary.compressed + summary.refused;
+            let mut cold = ArrayVec::<Page, COMPRESS_BATCH>::new();
+            sweep.collect(
+                &mut self.space,
+                |page| anon.covers(page.start().as_u64()),
+                want.saturating_sub(asked),
+                &mut cold,
+            );
+            if cold.is_empty() {
+                break;
+            }
+            let mut ctx = VmContext {
+                space_id,
+                space: &mut self.space,
+                physmap: &self.physmap,
+                frames: self.frames,
+                sink,
+            };
+            // The owning task is the space itself (one task per space), so
+            // its tier task id is the space id.
+            tier.lock().compress_out_batch(
+                pressure,
+                reclaimable_residue,
+                (&mut ctx, &cold),
+                space_id,
+                &template,
+                retire,
+                &mut |_, outcome| match outcome {
+                    Ok(()) => summary.compressed += 1,
+                    Err(_) => summary.refused += 1,
+                },
+            );
+        }
+        summary.scanned = sweep.visited();
         summary
     }
 
@@ -1445,6 +1435,17 @@ where
             WarmOutcome::NothingToDo | WarmOutcome::Stopped => 0,
         }
     }
+}
+
+/// The pages of the byte extent `span`, or `None` when it holds none.
+fn page_span(span: &Range<u64>) -> Option<RangeInclusive<Page>> {
+    let last = span.end.checked_sub(PAGE_SIZE as u64)?;
+    if last < span.start {
+        return None;
+    }
+    let first = Page::from_addr(VirtAddr::new(span.start)).ok()?;
+    let last = Page::from_addr(VirtAddr::new(last)).ok()?;
+    Some(first..=last)
 }
 
 /// The byte extent of the `page_count` pages from `base_va`, checked.
@@ -3372,6 +3373,53 @@ mod tests {
             assert_eq!(summary.compressed, 3, "budget honoured");
             assert_eq!(entries(&tier), 3);
             assert_eq!(live.space().mapped_pages(), 7, "seven pages stay resident");
+        }
+
+        /// A triggering fault visits a bounded step of the clock, not every
+        /// resident page, and the next fault carries on from there: a page
+        /// aged on the hand's first pass is reclaimed when it comes back.
+        #[test]
+        fn reclaim_visits_a_bounded_step_and_resumes_where_it_stopped() {
+            let (mut live, frames, pressure, _simmap) = env!();
+            let tier = tier();
+            let sink = NullSink;
+            let pages = 128u64;
+            let base = live.map_anonymous_placed(pages).expect("place anon region");
+            for index in 0..pages {
+                live.space
+                    .table_mut_for_test()
+                    .mark_accessed(base + index * PAGE_SIZE as u64);
+            }
+            press_to(frames, &pressure, PressureBand::Moderate);
+            let want = 4;
+            let step = crate::pressure::ramzip_scan_budget(want);
+            let mut reclaim = || {
+                live.ramzip_reclaim(
+                    &tier,
+                    &pressure,
+                    0,
+                    want,
+                    PageCandidate::cold_anonymous(),
+                    &sink,
+                    &mut Unpublished,
+                )
+            };
+            let revolution = usize::try_from(pages).expect("small").div_ceil(step);
+            for sweep in 0..revolution {
+                let summary = reclaim();
+                assert_eq!(summary.scanned, step, "sweep {sweep} visited one step");
+                assert_eq!(summary.compressed, 0, "sweep {sweep}: every page was hot");
+            }
+            let summary = reclaim();
+            assert_eq!(
+                summary.compressed, want,
+                "aged pages are cold when the hand returns"
+            );
+            assert_eq!(
+                summary.scanned, want,
+                "and the first ones it meets are taken"
+            );
+            assert_eq!(entries(&tier), want as u64);
         }
 
         #[test]

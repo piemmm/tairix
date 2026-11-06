@@ -370,7 +370,7 @@ fn a_resumed_game_stands_where_it_was_left_with_its_clock() {
         Some(true),
         "nothing animates a resume"
     );
-    assert!(game.motion.airborne().is_empty());
+    assert_eq!(game.motion.airborne(0), (&[][..], &[][..]));
 }
 
 #[test]
@@ -396,7 +396,11 @@ fn a_new_layout_repaints_everything_and_lets_go_of_the_hand() {
     assert_eq!(game.layout.client, larger);
     assert!(damage.intersects(larger) && damage.bounds() == larger);
     assert!(game.drag.is_none());
-    assert!(game.motion.airborne().is_empty(), "a resize is not a move");
+    assert_eq!(
+        game.motion.airborne(0),
+        (&[][..], &[][..]),
+        "a resize is not a move"
+    );
 }
 
 #[test]

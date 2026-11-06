@@ -35,6 +35,7 @@ impl ServedFormat for Served {
             fs,
             format: FormatName::Affs,
             write_refusal,
+            title_apart: false,
         })
     }
 }

@@ -48,6 +48,7 @@ impl ServedFormat for Served {
             fs,
             format,
             write_refusal,
+            title_apart: false,
         })
     }
 }

@@ -24,6 +24,7 @@ fn serve(format: FormatName) -> ServeOffer {
         node_identity: NodeIdentity::Stable,
         attrs: false,
         title: false,
+        title_apart: false,
         write_refusal: None,
         format,
     }

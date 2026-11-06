@@ -305,5 +305,7 @@ fn free_bytes<P: PageTable>(ctx: &VmContext<'_, P>) -> usize {
 
 mod ops;
 
+pub(crate) use ops::COMPRESS_BATCH;
+
 #[cfg(all(test, not(loom)))]
 mod tests;

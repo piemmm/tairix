@@ -134,6 +134,7 @@ fn volume(label: &str, target: &str, medium: Option<BlkMedium>) -> Volume {
             identity: [0; 16],
             read_only: false,
             titled: false,
+            title_writes: false,
         },
         offered: true,
     }
@@ -401,6 +402,7 @@ fn who_may_retitle_a_volume_follows_its_class_and_claim() {
         owner,
         volume_id: [7; 16],
         titled: true,
+        title_writes: true,
         ..volume("v", "/Storage/v", None).facts
     };
     let image = facts(VolumeClass::Image, Some(1000));
@@ -464,6 +466,7 @@ fn a_volume_is_retitled_only_where_its_format_and_mount_allow() {
         class: VolumeClass::Removable,
         volume_id: [7; 16],
         titled: true,
+        title_writes: true,
         ..volume("v", "/Storage/v", None).facts
     };
     let changed = |change: fn(&mut VolumeFacts)| {
@@ -490,8 +493,13 @@ fn a_volume_is_retitled_only_where_its_format_and_mount_allow() {
         "another's image is refused as theirs, whatever its record withholds"
     );
     assert_eq!(
-        changed(|facts| facts.read_only = true),
+        changed(|facts| facts.title_writes = false),
         Retitling::Unavailable(REASON_TITLE_READ_ONLY)
+    );
+    assert_eq!(
+        changed(|facts| facts.read_only = true).refusal(),
+        None,
+        "an image whose files take no writes may still take a title"
     );
     assert_eq!(
         changed(|facts| facts.availability = MountAvailability::RecoveryConflict),
@@ -7645,6 +7653,7 @@ fn the_chosen_lost_volume_is_ejected_letting_its_loss_go() {
                 identity: [5; 16],
                 read_only: false,
                 titled: false,
+                title_writes: false,
             },
             offered: false,
         }],
@@ -7709,6 +7718,7 @@ fn a_disk_image_mounts_read_only_and_only_its_attachers_volume_ejects() {
             identity: [5; 16],
             read_only: false,
             titled: false,
+            title_writes: false,
         },
         offered: true,
     };
@@ -14306,7 +14316,8 @@ fn titled_drive(viewer: Option<u32>, takes_title: bool) -> Drive {
     )
     .expect("a valid record")
     .with_title(tairix_abi::driver::filesystem::VolumeTitle::new("Backup").expect("a title"))
-    .with_titled(takes_title);
+    .with_titled(takes_title)
+    .with_title_writes(takes_title);
     let mut drive = Drive::new().acting_for(viewer);
     let _ = drive.adopt(&DriveSample {
         mount: Some(record),
@@ -14524,6 +14535,7 @@ fn a_rail_menu_ejects_only_a_volume_its_viewer_attached_or_one_that_can_be_pulle
             identity: [3; 16],
             read_only: false,
             titled: false,
+            title_writes: false,
         },
         offered: true,
     };

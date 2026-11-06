@@ -48,7 +48,7 @@ use tairix_kernel_core::filelock::{self, Held, LockedNode, OwnerId, Request};
 use tairix_kernel_core::fs::served::{shows_life, ServedFs, ServerActivity};
 use tairix_kernel_core::fs::{
     Access, Acting, AnswerSink, At, Authority, FinalLink, ImageDirectory, ImageSource, Judged,
-    NodeHandle, Principal, ServeChannel, Start, VolumeNames, VolumeNodes,
+    NodeHandle, Principal, ServeChannel, Start, Titling, VolumeNames, VolumeNodes,
 };
 use tairix_kernel_core::session_reaper::{self, SessionObserver};
 use tairix_kernel_core::waitq::{
@@ -1997,8 +1997,11 @@ impl RuntimeVolumeService {
             name
         };
         let _ = LATE_FILESYSTEM.set_served_state(target.handle, Some(state));
-        let titled = target.fstype.takes_title() && offer.title;
-        let _ = LATE_FILESYSTEM.set_title(target.handle, target.title, titled);
+        // A format writing nothing of its files has its image shared among
+        // its attachers, so its title, written apart, stays as mastered.
+        let shared = offer.write_refusal.is_some();
+        let titling = Titling::of(target.fstype, offer, target.served.read_only() || shared);
+        let _ = LATE_FILESYSTEM.set_title(target.handle, target.title, titling);
         let _ = LATE_FILESYSTEM.set_availability(target.handle, MountAvailability::Available);
         Ok(name)
     }

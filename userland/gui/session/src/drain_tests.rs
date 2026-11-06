@@ -180,7 +180,7 @@ impl SeatRouter for Program {
         self.reports.push(report);
     }
 
-    fn settle_drag(&mut self, _seat: &mut Seat<'_>, ended: DragEnd) {
+    fn settle_drag(&mut self, _seat: &mut Seat<'_>, ended: DragEnd, _now_ns: u64) {
         self.drags.push(ended);
     }
 

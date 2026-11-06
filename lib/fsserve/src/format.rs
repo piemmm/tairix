@@ -51,6 +51,9 @@ pub struct Opened<F> {
     pub format: FormatName,
     /// Why the driver will not write a volume it was given writable.
     pub write_refusal: Option<WriteRefusal>,
+    /// The format writes its title in place apart from its files
+    /// ([`ServeOffer::title_apart`]).
+    pub title_apart: bool,
 }
 
 impl<F: ServedFilesystem> Opened<F> {
@@ -62,6 +65,7 @@ impl<F: ServedFilesystem> Opened<F> {
             node_identity: self.fs.node_identity(),
             attrs: self.fs.attrs_fs().is_some(),
             title: !matches!(self.fs.label(), Err(DriverError::Unsupported)),
+            title_apart: self.title_apart,
             write_refusal: self.write_refusal,
             format: self.format,
         }

@@ -276,6 +276,17 @@ pub enum Wake {
     App(u64),
 }
 
+impl Wake {
+    /// Whether this wake gives way to a deadline that has come by `now()`: an
+    /// event or an answer stays queued for the drain, and an unchanged band
+    /// owes nothing, so the loop's due frame is served first and a member left
+    /// ready can never hold it back. The clock is read only for such a wake.
+    pub fn yields_to_due(self, deadline_ns: u64, now: impl FnOnce() -> u64) -> bool {
+        let queued = matches!(self, Self::Event | Self::PressureUnchanged);
+        crate::park::deadline_first(queued, deadline_ns, now)
+    }
+}
+
 fn classify(token: u64) -> Wake {
     match token {
         // An answer to a posted request is taken in by the same drain that
@@ -344,14 +355,32 @@ pub fn park_for(set: u64, budget_ns: u64) -> Result<Option<Wake>, Errno> {
 /// clock read and the subtraction live here so no caller repeats them, and so
 /// none can hand an instant to a call that wanted a duration.
 ///
+/// A wake that leaves its work queued ([`Wake::yields_to_due`]) is answered as
+/// the deadline once that has come, and the queued work is taken in on the
+/// loop's next turn.
+///
 /// # Errors
 ///
 /// As [`park_for`].
 pub fn park_until(set: u64, deadline_ns: u64) -> Result<Option<Wake>, Errno> {
-    park_for(
+    let woken = park_for(
         set,
         crate::park::remaining_ns(deadline_ns, tairix_rt::clock_get()),
-    )
+    )?;
+    Ok(woken.filter(|wake| !wake.yields_to_due(deadline_ns, tairix_rt::clock_get)))
+}
+
+/// [`park_until`] for a loop that may owe no wake: with no deadline the park
+/// gives the CPU up until a member is ready. `None` is the deadline reached.
+///
+/// # Errors
+///
+/// As [`park_for`].
+pub fn park_until_due(set: u64, due_ns: Option<u64>) -> Result<Option<Wake>, Errno> {
+    match due_ns {
+        Some(deadline_ns) => park_until(set, deadline_ns),
+        None => park(set).map(Some),
+    }
 }
 
 /// The app's bound event mailbox endpoint and the wait-set it parks on.
@@ -1017,7 +1046,7 @@ impl WindowPane {
             return Ok(());
         }
         // Settled first, so a release its answer reports is re-attached now.
-        client.await_present(window);
+        client.await_present(window)?;
         let fresh = self.frames.is_released() || client.content_released(window);
         if fresh {
             let grant = self.frames.reattach().ok_or(Errno::NotAttached)?;

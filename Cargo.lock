@@ -2288,6 +2288,7 @@ dependencies = [
  "tairix-fsprobe",
  "tairix-fsserve",
  "tairix-fuzzseed",
+ "tairix-partition",
  "tairix-reclaim",
  "tairix-rt",
  "tairix-test-iso9660-image",

@@ -24,10 +24,16 @@ impl ServedFormat for Served {
         read_only: bool,
         _budget: WritebackBudget,
     ) -> Result<Opened<Iso9660<B>>, DriverError> {
+        let fs = Iso9660::open(volume)?;
         Ok(Opened {
-            fs: Iso9660::open(volume)?,
+            fs: if read_only {
+                fs
+            } else {
+                fs.writing_its_title()
+            },
             format: FormatName::Iso9660,
             write_refusal: (!read_only).then_some(WriteRefusal::FormatReadOnly),
+            title_apart: true,
         })
     }
 }

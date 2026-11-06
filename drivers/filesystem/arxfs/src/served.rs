@@ -41,6 +41,7 @@ impl ServedFormat for Served {
             fs,
             format: FormatName::Arxfs,
             write_refusal: None,
+            title_apart: false,
         })
     }
 }

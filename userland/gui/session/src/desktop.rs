@@ -97,8 +97,8 @@ use core::cell::Cell;
 use tairix_abi::driver::filesystem::VolumeTitle;
 use tairix_abi::sysinfo::VOLUME_ID_LEN;
 use tairix_abi::window_ipc::{
-    AuthorisedOutcome, DragItems, DragPicture, LandingOutcome, LandingStep, SystemTask,
-    DRAG_SHOWN_MAX, DROP_LANDINGS_MAX, PICK_MAX_OPEN,
+    AuthorisedOutcome, DocumentName, DragItems, DragPicture, LandingOutcome, LandingStep,
+    SystemTask, DRAG_SHOWN_MAX, DROP_LANDINGS_MAX, PICK_MAX_OPEN,
 };
 use tairix_abi::{Errno, FileId};
 use tairix_browse::chrome::REASON_NOT_EJECTABLE;
@@ -126,6 +126,7 @@ use tairix_theme::Theme;
 use tairix_wallpaper::{DesktopSettings, IconFlow, IconSort};
 use tairix_wm::{past_drag_slop, ClickKind, DoubleClickTracker, Key, NamedKey, PointerButton};
 
+use crate::drag::{DesktopCargo, DesktopItem};
 use crate::launcher::Kept;
 use crate::library::catalogued;
 use crate::pinboard::{
@@ -552,6 +553,16 @@ impl Carry {
             at.y.saturating_sub(self.rest.y),
         ))
     }
+}
+
+/// A press on the desktop's icons that the seat carries on over a window:
+/// what putting them down again needs if they are brought back and let go.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesktopLift {
+    /// The pressed icon's name, which leads the selection carried.
+    pub(crate) lead: String,
+    /// The press's offset from the pressed tile's corner.
+    pub(crate) grab: (i32, i32),
 }
 
 /// The names a reorder keeps the selection, the focus and a carried press on.
@@ -3029,6 +3040,137 @@ impl<S: DirectorySource> Desktop<S> {
             self.selection.single(index);
             self.mark_icon(layout, Some(index), damage);
         }
+        self.put_down(layout, damage)
+    }
+
+    /// Whether the press on an icon is a drag, or becomes one with the
+    /// pointer at `at`.
+    #[must_use]
+    pub fn carries_to(&self, at: Point, scale: Scale) -> bool {
+        self.carry
+            .is_some_and(|carry| carry.at.is_some() || past_drag_slop(carry.from, at, scale))
+    }
+
+    /// What the press carries once it is a drag, for the seat to carry over a
+    /// window with the pointer at `pointer`: the icons the pressed one leads,
+    /// the pressed one first, as a drag shows them and as a drop acts on them
+    /// — a drive by its volume's place in the storage catalog. `None` until
+    /// the press has travelled, or where the heap cannot describe them.
+    #[must_use]
+    pub fn carried_cargo(&self, pointer: Point, layout: &GridView) -> Option<DesktopCargo> {
+        let carry = self.carry?;
+        carry.at?;
+        let shown = self.shown(layout);
+        let count = shown.carried().count();
+        let mut order = Vec::new();
+        order.try_reserve_exact(count).ok()?;
+        order.extend(shown.carried());
+        let pressed = order.iter().position(|&(index, _)| index == carry.index)?;
+        order.get_mut(..=pressed)?.rotate_right(1);
+        let lead = self.entries.get(carry.index)?;
+        let (name, hidden) = match lead.label() {
+            Some(label) => (label, 0),
+            None => (lead.name(), self.endings.hidden(lead).len()),
+        };
+        let name = DocumentName::new(name).ok()?;
+        let dir = tairix_browse::vfs::spell_absolute_path(&self.folder);
+        let mut scratch = String::new();
+        let mut items = Vec::new();
+        items.try_reserve_exact(count).ok()?;
+        let mut pictures = Vec::new();
+        pictures.try_reserve_exact(count.min(DRAG_SHOWN_MAX)).ok()?;
+        for (index, rect) in order {
+            let entry = self.entries.get(index)?;
+            items.push(self.dropped_as(entry)?);
+            if pictures.len() < DRAG_SHOWN_MAX {
+                let centre = rect.center();
+                let from = (centre.x - pointer.x, centre.y - pointer.y);
+                pictures.push(tairix_browse::media::drag_picture(
+                    (&dir, &self.folder),
+                    entry,
+                    Some(from),
+                    &mut scratch,
+                )?);
+            }
+        }
+        let count = u32::try_from(items.len()).ok()?;
+        let shown = DragItems::new(name, count, false, pictures)
+            .ok()?
+            .with_filetype(lead.filetype())
+            .with_hidden_ending(hidden)
+            .ok()?;
+        let lift = DesktopLift {
+            lead: lead.name().to_string(),
+            grab: carry.grab,
+        };
+        Some(DesktopCargo { shown, items, lift })
+    }
+
+    /// What a drop of `entry` off the desktop acts on: the file in the
+    /// desktop folder, or for a drive its attached volume where the storage
+    /// catalog shows it; `None` for a drive whose volume is not attached.
+    fn dropped_as(&self, entry: &Entry) -> Option<DesktopItem> {
+        if !is_drive(entry) {
+            return Some(DesktopItem {
+                path: self.path_of(entry.name()),
+                id: entry.id(),
+            });
+        }
+        let target = entry.target()?;
+        let present = volume::locate(target, &self.mounts.volumes).present()?;
+        Some(DesktopItem {
+            path: present.target.clone(),
+            id: FileId::NONE,
+        })
+    }
+
+    /// Give the press up to the seat, which carries its icons on over a
+    /// window: they stand where they rest again, and are put down here again
+    /// only through [`put_down_lift`](Self::put_down_lift).
+    pub fn yield_carry(&mut self, layout: &GridView, damage: &mut Region) {
+        self.mark_carried(layout, damage);
+        if let Some(carry) = self.carry.as_mut() {
+            carry.at = None;
+        }
+        self.mark_carried(layout, damage);
+        self.carry = None;
+        self.collapse = None;
+    }
+
+    /// The icons `lift` describes came back and were let go at `at`: put them
+    /// down there, as a press carried to it would be, the pressed icon found
+    /// by its name and set out from where it rests now, so a folder re-listed
+    /// meanwhile moves nothing else.
+    pub fn put_down_lift(
+        &mut self,
+        lift: &DesktopLift,
+        at: Point,
+        layout: &GridView,
+        damage: &mut Region,
+    ) -> DesktopOutcome {
+        self.settle(layout);
+        self.carry = None;
+        let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.name() == lift.lead)
+        else {
+            return DesktopOutcome::ignored();
+        };
+        let (Some(rest), Some(field)) = (self.shown(layout).rect(index), Field::of(layout)) else {
+            return DesktopOutcome::ignored();
+        };
+        let corner = Point::new(
+            at.x.saturating_sub(lift.grab.0),
+            at.y.saturating_sub(lift.grab.1),
+        );
+        self.carry = Some(Carry {
+            index,
+            from: at,
+            grab: lift.grab,
+            rest: Point::new(rest.left(), rest.top()),
+            at: Some(field.shown_at(corner)),
+        });
         self.put_down(layout, damage)
     }
 

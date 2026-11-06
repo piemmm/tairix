@@ -176,11 +176,12 @@ mod program {
         AppearanceWork, ArtworkFileReader, AskedSettings, AuthoriseAnswer, AuthoriseAsker,
         AuthoriseDesk, AuthoriseDone, AuthorisePrompt, AuthoriseRefusal, AuthoriseRequest,
         BundleIndex, CliError, Command, ConfirmPrompt, Delivery, Departure, Desktop, DesktopAction,
-        DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource, DocumentAuthority,
-        DocumentRelay, DragEnd, DragPlace, DragSurface, DropRefusal, ElevateAsk, Elevation,
-        Elevator, FileManagerFound, FileManagerHand, FileManagerKeeper, FrameContent, FramePacer,
-        FrameReportGate, FrameShow, FrameStatsPublisher, FrameStatsSink, GestureRefusal,
-        HangTracker, HeldTarget, HoldBack, IdleAction, IdleClock, IdlePolicy, InputPolicy,
+        DesktopActivation, DesktopDrop, DesktopEnd, DesktopOutcome, DesktopShell,
+        DeviceInputSource, DocumentAuthority, DocumentRelay, DragEnd, DragPlace, DragSurface,
+        DropRefusal, ElevateAsk, Elevation, Elevator, FileManagerFound, FileManagerHand,
+        FileManagerKeeper, FrameContent, FramePacer, FrameReportGate, FrameShow,
+        FrameStatsPublisher, FrameStatsSink, GestureRefusal, HangTracker, HeldTarget, HoldBack,
+        IdleAction, IdleClock, IdlePolicy, InputPolicy, ItemsOffer, ItemsOfferEnd,
         KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget,
         LayerDecision, LayerFeed, Listing as Authorisers, LoadedPrograms, MachineWatch, OfferEnd,
         OwedReport, OwnPick, OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep,
@@ -1252,7 +1253,12 @@ mod program {
             })) => {
                 let _ = server.deliver_event(sink, &offer.event());
             }
-            Some(DragEnd::Save(_)) | None => {}
+            Some(DragEnd::Desktop(DesktopEnd {
+                offer: Some(offer), ..
+            })) => {
+                let _ = server.deliver_event(sink, &offer.event());
+            }
+            Some(DragEnd::Save(_) | DragEnd::Desktop(_)) | None => {}
         }
         if !lock.engage(named, shell, compositor) {
             io::write_stderr_line("desktop: could not lock the screen; it is still open");
@@ -1747,7 +1753,12 @@ mod program {
         // so a witness names the path the frame took rather than one assumed.
         let presentation = compositor.presentation();
         // Asked after the frame drew, so the glyphs its titles missed count.
-        let settled = text.settled() && compositor.shadows_still();
+        let settled = || {
+            text.settled()
+                && compositor
+                    .next_elevation_frame_in(tairix_rt::clock_get())
+                    .is_none()
+        };
         windows.report_on_screen(
             settled,
             |wm| compositor.on_display(wm),
@@ -10428,6 +10439,7 @@ mod program {
                     seat.compositor,
                 );
             }
+            self.carry_desktop_over_window(seat);
             let refused = route_desktop(
                 &outcome,
                 self.publisher,
@@ -10545,9 +10557,20 @@ mod program {
 
         fn drag_place(&mut self, seat: &mut Seat<'_>, at: tairix_wm::Point) -> DragPlace {
             let wm = seat.compositor.window_at(at);
+            if seat.shell.carries_desktop_icons() {
+                // Brought back over the desktop they are put down, never
+                // dropped into one of its folders.
+                return match wm {
+                    Some(wm) => self.offer_window(seat.compositor, None, wm, at),
+                    None => DragPlace::Desktop {
+                        icon: None,
+                        revision: self.desktop.revision(),
+                    },
+                };
+            }
             if let Some(saving) = seat.shell.save_source() {
                 if let Some(wm) = wm {
-                    return self.save_window(seat.compositor, saving, wm, at);
+                    return self.offer_window(seat.compositor, Some(saving), wm, at);
                 }
             } else {
                 let Some((source, _)) = seat.shell.drag_items() else {
@@ -10611,7 +10634,7 @@ mod program {
         }
 
         fn report_drag(&mut self, seat: &mut Seat<'_>, report: OwedReport) {
-            match report {
+            let (left, over) = match report {
                 OwedReport::Items(report) => {
                     let at = match &report.at {
                         &DragSurface::Window { window_id, x, y } => {
@@ -10633,33 +10656,42 @@ mod program {
                         at,
                         report.shift,
                     );
+                    (None, None)
                 }
-                OwedReport::Save(report) => {
-                    let left = report.left.map(OfferEnd::event);
-                    let over = report.over.map(SaveOffer::event);
-                    for event in left.iter().chain(over.iter()) {
-                        deliver(
-                            self.server,
-                            self.sink,
-                            seat.shell,
-                            seat.compositor,
-                            self.windows,
-                            self.picker,
-                            &mut self.apps.service,
-                            seat.menu,
-                            event,
-                        );
-                    }
-                }
+                OwedReport::Save(report) => (
+                    report.left.map(OfferEnd::event),
+                    report.over.map(SaveOffer::event),
+                ),
+                OwedReport::Desktop(report) => (
+                    report.left.map(ItemsOfferEnd::event),
+                    report.over.map(ItemsOffer::event),
+                ),
+            };
+            for event in left.iter().chain(over.iter()) {
+                deliver(
+                    self.server,
+                    self.sink,
+                    seat.shell,
+                    seat.compositor,
+                    self.windows,
+                    self.picker,
+                    &mut self.apps.service,
+                    seat.menu,
+                    event,
+                );
             }
             light_drop_icon(seat.shell, seat.compositor, self.desktop);
         }
 
-        fn settle_drag(&mut self, seat: &mut Seat<'_>, ended: DragEnd) {
+        fn settle_drag(&mut self, seat: &mut Seat<'_>, ended: DragEnd, now_ns: u64) {
             let ended = match ended {
                 DragEnd::Items(ended) => ended,
                 DragEnd::Save(end) => {
                     self.settle_save(seat, end);
+                    return;
+                }
+                DragEnd::Desktop(end) => {
+                    self.settle_desktop(seat, end, now_ns);
                     return;
                 }
             };
@@ -10802,6 +10834,108 @@ mod program {
             })))
         }
 
+        /// Tell the window icons carried off the desktop were last offered to
+        /// that the offer ended — dropped there, its application moves or
+        /// copies them itself — and put them down again where they were let go
+        /// on the desktop.
+        fn settle_desktop(&mut self, seat: &mut Seat<'_>, end: DesktopEnd, now_ns: u64) {
+            if let Some(offer) = end.offer {
+                deliver(
+                    self.server,
+                    self.sink,
+                    seat.shell,
+                    seat.compositor,
+                    self.windows,
+                    self.picker,
+                    &mut self.apps.service,
+                    seat.menu,
+                    &offer.event(),
+                );
+            }
+            let DesktopDrop::Desktop { at, lift } = end.dropped else {
+                return;
+            };
+            let layout = seat.shell.desktop_layout(seat.compositor, self.desktop);
+            let mut damage = Region::new();
+            let outcome = self.desktop.put_down_lift(&lift, at, &layout, &mut damage);
+            let applied = apply_desktop_action(
+                outcome.action,
+                self.publisher,
+                self.files,
+                self.pinboard,
+                self.wallpapers,
+                self.desktop,
+                seat.shell,
+                seat.compositor,
+                &mut LaunchCtx {
+                    launched: self.launched,
+                    apps: &self.apps.service,
+                    server: self.server,
+                    sink: self.sink,
+                    windows: self.windows,
+                    identity: self.identity,
+                },
+                now_ns,
+            );
+            let refused =
+                show_desktop_change(applied, &damage, self.desktop, seat.shell, seat.compositor);
+            if let Some(refusal) = refused {
+                state_refusal(&refusal, self.windows, seat.shell, seat.compositor);
+            }
+        }
+
+        /// Carry icons pressed on the desktop on over the application window
+        /// the pointer reached, where the desktop's own layer would draw them
+        /// out of sight beneath it: the seat takes them above everything and
+        /// offers them to the window at once, so a release that follows with no
+        /// further motion is already answered for. Let go over a window in the
+        /// batch that reached it, they stay where they rested, since it was
+        /// never offered them.
+        fn carry_desktop_over_window(&mut self, seat: &mut Seat<'_>) {
+            let pointer = seat.shell.router().pointer();
+            let scale = seat.compositor.scale();
+            let over_window = self.desktop.carries_to(pointer, scale)
+                && seat
+                    .compositor
+                    .window_at(pointer)
+                    .and_then(|wm| self.windows.ipc_id(wm))
+                    .is_some();
+            if !over_window {
+                return;
+            }
+            let layout = seat.shell.desktop_layout(seat.compositor, self.desktop);
+            let mut damage = Region::new();
+            let held = seat.shell.router().holds_primary();
+            let mut handed = false;
+            if held {
+                let theme = seat.shell.session().active_theme();
+                let _ =
+                    self.desktop
+                        .follow_press(pointer, true, &layout, scale, theme, &mut damage);
+                if let Some(cargo) = self.desktop.carried_cargo(pointer, &layout) {
+                    handed = seat
+                        .shell
+                        .begin_desktop_drag(seat.compositor, cargo)
+                        .is_ok();
+                }
+            }
+            if handed || !held {
+                self.desktop.yield_carry(&layout, &mut damage);
+            }
+            if !damage.is_empty() {
+                seat.shell
+                    .present_desktop_area(seat.compositor, self.desktop, &damage);
+            }
+            if handed {
+                let place = self.drag_place(seat, pointer);
+                let surface = self.drag_surface(seat, place);
+                seat.shell.drag_over(seat.compositor, surface);
+                if let Some(report) = seat.shell.take_drag_report() {
+                    self.report_drag(seat, report);
+                }
+            }
+        }
+
         /// Tell the window a carried save was last offered to that it ended,
         /// and save the document where it was dropped.
         fn settle_save(&mut self, seat: &mut Seat<'_>, end: SaveEnd) {
@@ -10854,18 +10988,19 @@ mod program {
             light_drop_icon(seat.shell, seat.compositor, self.desktop);
         }
 
-        /// The compositor window `wm` under a carried save at `at`, for the
-        /// window `requester`: an offer to an application's window there, and
-        /// nothing on the desktop's own surfaces, the window the save is for,
-        /// a window an alert holds, or a window's furniture.
-        fn save_window(
+        /// The compositor window `wm` under a carried save or icons at `at`: an
+        /// offer to an application's window there, and nothing on the
+        /// desktop's own surfaces, the window `requester` a save is for, a
+        /// window an alert holds, or a window's furniture.
+        fn offer_window(
             &self,
             compositor: &Compositor,
-            requester: u64,
+            requester: Option<u64>,
             wm: tairix_wm::WindowId,
             at: tairix_wm::Point,
         ) -> DragPlace {
-            let Some(window_id) = self.windows.ipc_id(wm).filter(|id| *id != requester) else {
+            let Some(window_id) = self.windows.ipc_id(wm).filter(|id| Some(*id) != requester)
+            else {
                 return DragPlace::Nothing;
             };
             match content_point(compositor, wm, at) {
@@ -13954,10 +14089,23 @@ mod program {
             action, publisher, files, pinboard, wallpapers, desktop, shell, compositor, launch,
             now_ns,
         );
+        show_desktop_change(applied, &damage, desktop, shell, compositor)
+    }
+
+    /// Show what a desktop gesture changed — the whole layer where the action
+    /// it asked for rearranged it, else the icons `damage` marks — answering
+    /// the refusal the action met.
+    fn show_desktop_change<S: DirectorySource>(
+        applied: Result<bool, GestureRefusal>,
+        damage: &Region,
+        desktop: &Desktop<S>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Option<GestureRefusal> {
         if applied == Ok(true) {
             shell.present_desktop(compositor, desktop);
         } else if !damage.is_empty() {
-            shell.present_desktop_area(compositor, desktop, &damage);
+            shell.present_desktop_area(compositor, desktop, damage);
         }
         applied.err()
     }

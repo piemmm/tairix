@@ -76,6 +76,7 @@ pub fn mounted(label: &str, target: &str, medium: Option<BlkMedium>) -> Volume {
             identity: [0; 16],
             read_only: false,
             titled: false,
+            title_writes: false,
         },
         offered: true,
     }

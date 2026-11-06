@@ -566,6 +566,8 @@ struct ServedDevice {
     binding: u64,
     /// What the device states tells it from every other of its kind.
     identity: Option<BlkDeviceIdentity>,
+    /// Whether its geometry reply declares it write-protected.
+    write_protected: bool,
 }
 
 impl ServedDevice {
@@ -582,6 +584,16 @@ impl ServedDevice {
             hold_first: None,
             binding: 0,
             identity: None,
+            write_protected: false,
+        }
+    }
+
+    /// A device whose geometry reply declares it write-protected, as a
+    /// pressed disc's drive does.
+    fn write_protected(block: RamBlock) -> Self {
+        Self {
+            write_protected: true,
+            ..Self::new(block)
         }
     }
 
@@ -638,7 +650,11 @@ fn answer_block(
                     BlkCompletion {
                         block_size: geometry.block_size,
                         block_count: geometry.block_count,
-                        flags: 0,
+                        flags: if device.write_protected {
+                            tairix_abi::blkio::BLK_FLAG_READ_ONLY
+                        } else {
+                            0
+                        },
                         medium: device.medium,
                         disc_layout: None,
                         name: device.block.device_name(),
@@ -5081,6 +5097,7 @@ impl NetServer {
                 node_identity: fs.node_identity(),
                 attrs: false,
                 title: false,
+                title_apart: false,
                 write_refusal: None,
                 format: tairix_abi::volume::FormatName::Smb3,
             },

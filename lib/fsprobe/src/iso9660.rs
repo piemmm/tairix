@@ -65,6 +65,15 @@ impl Flavour {
             Self::HighSierra => 24,
         }
     }
+
+    /// Where a volume descriptor records the volume identifier: the label.
+    #[must_use]
+    pub const fn label_field(self) -> core::ops::Range<usize> {
+        match self {
+            Self::Iso9660 => 40..72,
+            Self::HighSierra => 48..80,
+        }
+    }
 }
 
 /// Which directory hierarchy of a disc is mounted.
@@ -250,16 +259,14 @@ impl Descriptor {
     /// The raw volume identifier field.
     #[must_use]
     pub fn volume_id(&self, flavour: Flavour) -> &[u8] {
-        match flavour {
-            Flavour::Iso9660 => &self.bytes[40..72],
-            Flavour::HighSierra => &self.bytes[48..80],
-        }
+        &self.bytes[flavour.label_field()]
     }
 }
 
 /// The Joliet level a supplementary descriptor's escape sequences name,
 /// `None` for a descriptor that is not Joliet.
-fn joliet_level(descriptor: &[u8; SECTOR_LEN]) -> Option<u8> {
+#[must_use]
+pub fn joliet_level(descriptor: &[u8; SECTOR_LEN]) -> Option<u8> {
     let escapes = &descriptor[88..120];
     let level = match &escapes[..3] {
         b"%/@" => 1,
@@ -288,6 +295,8 @@ pub struct Volume {
     pub block_size: u32,
     /// The volume's size in logical blocks.
     pub volume_blocks: u32,
+    /// The logical sector the descriptor set begins at.
+    pub set_start: u64,
     /// The primary descriptor, which every volume has.
     pub primary: Descriptor,
     /// The supplementary or enhanced descriptor of the tree mounted, `None`
@@ -309,14 +318,17 @@ impl Volume {
     }
 
     /// The volume's stable identity: a digest of its primary descriptor,
-    /// which a disc is mastered with and only a new session rewrites.
+    /// which a disc is mastered with and only a new session rewrites, less
+    /// the label a retitle rewrites in place.
     #[must_use]
     pub fn identity(&self) -> [u8; 16] {
         let domain: &[u8] = match self.flavour {
             Flavour::Iso9660 => b"tairix.iso9660",
             Flavour::HighSierra => b"tairix.highsierra",
         };
-        content_identity(domain, &[&self.primary.bytes[..]])
+        let label = self.flavour.label_field();
+        let bytes = &self.primary.bytes[..];
+        content_identity(domain, &[&bytes[..label.start], &bytes[label.end..]])
     }
 
     /// The mounted tree's volume label as UTF-8, trimmed of padding: Joliet
@@ -433,6 +445,7 @@ pub fn identify<B: Block>(
         flavour,
         block_size,
         volume_blocks,
+        set_start: first,
         primary,
         supplementary: None,
         tree: Tree::Primary,

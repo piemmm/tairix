@@ -1304,6 +1304,10 @@ pub struct ServeOffer {
     /// format keeps none, or where this volume cannot (an encrypted one whose
     /// title would sit in plaintext).
     pub title: bool,
+    /// The format writes its title in place apart from its files, so a volume
+    /// whose files it will not write still takes one where its medium takes
+    /// writes (an ISO 9660 image on a stick).
+    pub title_apart: bool,
     /// Why the format will not write the volume, which is then served
     /// read-only.
     pub write_refusal: Option<WriteRefusal>,
@@ -1329,7 +1333,8 @@ const SERVE_KIND_REFUSE: u8 = 2;
 impl ServeFrame {
     /// Encode the frame: version (2), kind (1), then for a serve the name
     /// rule (1), the id lifetime (1), what the volume keeps (1: attributes in
-    /// bit 0, a title in bit 1), the write refusal (1), the format name (1)
+    /// bit 0, a title in bit 1, a title written apart from the files in bit
+    /// 2), the write refusal (1), the format name (1)
     /// and the root (8); for a refusal a pad (1), the error (4) and a pad (8).
     #[must_use]
     pub fn encode(&self) -> [u8; SERVE_FRAME_LEN] {
@@ -1347,7 +1352,9 @@ impl ServeFrame {
                     NodeIdentity::Stable => 0,
                     NodeIdentity::ContentDerived => 1,
                 };
-                out[5] = u8::from(offer.attrs) | u8::from(offer.title) << 1;
+                out[5] = u8::from(offer.attrs)
+                    | u8::from(offer.title) << 1
+                    | u8::from(offer.title_apart) << 2;
                 out[6] = offer.write_refusal.map_or(0, WriteRefusal::as_u8);
                 out[7] = offer.format.as_u8();
                 put_u64(&mut out, 8, offer.root.raw());
@@ -1387,10 +1394,11 @@ impl ServeFrame {
                     _ => return Err(Errno::OutOfRange),
                 };
                 let keeps = bytes[5];
-                if keeps & !0b11 != 0 {
+                if keeps & !0b111 != 0 {
                     return Err(Errno::OutOfRange);
                 }
                 let (attrs, title) = (keeps & 1 != 0, keeps & 0b10 != 0);
+                let title_apart = keeps & 0b100 != 0;
                 let write_refusal = match bytes[6] {
                     0 => None,
                     raw => Some(WriteRefusal::from_u8(raw).map_err(|_| Errno::OutOfRange)?),
@@ -1406,6 +1414,7 @@ impl ServeFrame {
                     node_identity,
                     attrs,
                     title,
+                    title_apart,
                     write_refusal,
                     format,
                 }))

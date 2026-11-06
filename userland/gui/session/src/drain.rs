@@ -106,11 +106,12 @@ pub trait SeatRouter {
     /// pointer arrives somewhere new.
     fn drag_surface(&mut self, seat: &mut Seat<'_>, place: DragPlace) -> DragSurface;
 
-    /// Tell the application a carried drag began in where it now is.
+    /// Tell the applications a carried drag concerns where it now is.
     fn report_drag(&mut self, seat: &mut Seat<'_>, report: OwedReport);
 
-    /// Tell the application a carried drag began in how it ended.
-    fn settle_drag(&mut self, seat: &mut Seat<'_>, ended: DragEnd);
+    /// Tell the applications a carried drag concerns how it ended at
+    /// `now_ns`, and land what it dropped.
+    fn settle_drag(&mut self, seat: &mut Seat<'_>, ended: DragEnd, now_ns: u64);
 
     /// The secure attention key was pressed at `now_ns` while the shell or
     /// the menu chain held the seat: bring up the system's own surface.
@@ -383,7 +384,7 @@ where
         router.report_drag(seat, report);
     }
     if let Some(end) = ended {
-        router.settle_drag(seat, end);
+        router.settle_drag(seat, end, now_ns);
     }
     // The batch is carried first and painted once.
     seat.shell.settle(seat.compositor);

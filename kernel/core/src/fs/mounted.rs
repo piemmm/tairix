@@ -72,7 +72,7 @@ use tairix_abi::{
     RealpathMode, RenameFlags, SeekRegion, UnlinkFlags, FS_MODE_MASK, STORAGE_CATALOG,
 };
 use tairix_caps::CapabilitySet;
-use tairix_collections::RadixTree;
+use tairix_collections::{OrderedMap, RadixTree};
 use tairix_kernel_sec::{GroupId, IdentityTable, UserId};
 use tairix_sync::{OnceCell, RwLock, SpinLock};
 use tairix_util::fallible::{collected, concatenated};
@@ -192,10 +192,91 @@ struct DriverEntry<F: 'static> {
     class: VolumeClass,
     /// The title the mount listing gives it: its filesystem's label.
     title: VolumeTitle,
-    /// Whether its format takes a title a retitle can set.
-    titled: bool,
+    /// Whether it keeps a title, and whether a retitle may write it now.
+    titling: Titling,
     /// The fail-closed stand-in answers for it while the volume is away.
     stand_in: bool,
+}
+
+/// The registered volumes, in registration-instance order so a lookup by
+/// registration is a binary search, and indexed by handle so the lookup every
+/// filesystem operation makes is a tree search rather than a scan.
+struct Registrations<F: 'static> {
+    entries: Vec<DriverEntry<F>>,
+    /// Each registered handle's instance.
+    instances: OrderedMap<u64, u64>,
+}
+
+impl<F: 'static> Registrations<F> {
+    const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            instances: OrderedMap::new(),
+        }
+    }
+
+    fn iter(&self) -> core::slice::Iter<'_, DriverEntry<F>> {
+        self.entries.iter()
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn position(&self, handle: u64) -> Option<usize> {
+        let instance = *self.instances.get(&handle)?;
+        self.entries
+            .binary_search_by_key(&instance, |e| e.nodes.instance())
+            .ok()
+    }
+
+    /// The entry registered under `handle`.
+    fn by_handle(&self, handle: u64) -> Option<&DriverEntry<F>> {
+        self.position(handle).map(|at| &self.entries[at])
+    }
+
+    fn by_handle_mut(&mut self, handle: u64) -> Option<&mut DriverEntry<F>> {
+        self.position(handle).map(|at| &mut self.entries[at])
+    }
+
+    /// The entry of the registration numbered `instance`.
+    fn by_instance(&self, instance: u64) -> Option<&DriverEntry<F>> {
+        registration(&self.entries, instance)
+    }
+
+    /// The entries registered after the registration numbered `instance`,
+    /// every one where `None`.
+    fn after(&self, instance: Option<u64>) -> &[DriverEntry<F>] {
+        let from = instance.map_or(0, |after| {
+            self.entries
+                .partition_point(|e| e.nodes.instance() <= after)
+        });
+        &self.entries[from..]
+    }
+
+    /// File `entry`, whose handle no entry holds; the registry is as it was
+    /// when the heap refuses.
+    fn insert(&mut self, entry: DriverEntry<F>) -> Result<(), RegisterError> {
+        self.entries
+            .try_reserve(1)
+            .map_err(|_| RegisterError::OutOfMemory)?;
+        let instance = entry.nodes.instance();
+        self.instances
+            .try_insert(entry.handle, instance)
+            .map_err(|_| RegisterError::OutOfMemory)?;
+        let at = self
+            .entries
+            .partition_point(|e| e.nodes.instance() < instance);
+        self.entries.insert(at, entry);
+        Ok(())
+    }
+
+    /// Remove the entry registered under `handle`.
+    fn remove(&mut self, handle: u64) -> Option<DriverEntry<F>> {
+        let at = self.position(handle)?;
+        self.instances.remove(&handle);
+        Some(self.entries.remove(at))
+    }
 }
 
 /// How a driver is filed under its handle.
@@ -223,7 +304,38 @@ struct SnapshotEntry<F: 'static> {
     owner: Option<MountOwner>,
     class: VolumeClass,
     title: VolumeTitle,
-    titled: bool,
+    titling: Titling,
+}
+
+/// Whether a volume keeps a title, and how a retitle may write it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Titling {
+    /// Its format takes a title and its driver keeps one.
+    pub kept: bool,
+    /// A retitle may write it now: its medium takes writes, and its volume
+    /// does or its format writes the title apart from its files.
+    pub writes: bool,
+    /// Its format writes the title in place apart from its files, so the
+    /// files' own permissions say nothing of who may retitle it.
+    pub apart: bool,
+}
+
+impl Titling {
+    /// How a volume of `fstype`, its driver offering `offer` over a window
+    /// that is `read_only` or not, may be retitled.
+    #[must_use]
+    pub const fn of(
+        fstype: tairix_abi::volume::VolumeFsType,
+        offer: &tairix_abi::fsserve::ServeOffer,
+        read_only: bool,
+    ) -> Self {
+        let kept = fstype.takes_title() && offer.title;
+        Self {
+            kept,
+            writes: kept && !read_only && (offer.write_refusal.is_none() || offer.title_apart),
+            apart: offer.title_apart,
+        }
+    }
 }
 
 /// What a registration names its volume by.
@@ -297,7 +409,7 @@ pub struct LateFilesystem<F: 'static> {
     /// (rare); read on every `fs_*` call. The spin lock is held only for the
     /// tiny lookup/insert, never across a filesystem operation (the driver's
     /// lock is cloned out first), so it never spins on a parked holder.
-    drivers: SpinLock<Vec<DriverEntry<F>>>,
+    drivers: SpinLock<Registrations<F>>,
     /// The host every registered driver is handed, once the boot path has one
     /// to give ([`Self::install_volume_host`]). Until then a driver is
     /// registered with no host and publishes at every operation, so no
@@ -342,7 +454,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     pub const fn new() -> Self {
         Self {
             vfs: OnceCell::new(),
-            drivers: SpinLock::new(Vec::new()),
+            drivers: SpinLock::new(Registrations::new()),
             volume_host: OnceCell::new(),
             audit: OnceCell::new(),
             wall_clock: OnceCell::new(),
@@ -625,7 +737,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             owner,
             class,
             title: VolumeTitle::EMPTY,
-            titled: false,
+            titling: Titling::default(),
             stand_in: stand_in.is_some(),
         };
         // Taken before the entry is visible, so the fast path takes them and
@@ -636,30 +748,24 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         let mut lanes = shared.lock_all();
         let replaced = {
             let mut drivers = self.drivers.lock();
-            let at = drivers.iter().position(|e| e.handle == raw);
-            if at.is_some_and(|at| !Arc::ptr_eq(&drivers[at].nodes, &entry.nodes)) {
-                return Err(RegisterError::AlreadyRegistered);
-            }
-            if let Some(at) = at {
+            if let Some(held) = drivers.by_handle_mut(raw) {
+                if !Arc::ptr_eq(&held.nodes, &entry.nodes) {
+                    return Err(RegisterError::AlreadyRegistered);
+                }
                 // Who attached the volume, what kind it is, the identity its
                 // content carries and its title are the registration's, so a
                 // driver replaced in place keeps them.
                 let entry = DriverEntry {
-                    owner: drivers[at].owner,
-                    class: drivers[at].class,
-                    identity: drivers[at].identity,
-                    title: drivers[at].title,
-                    titled: drivers[at].titled,
+                    owner: held.owner,
+                    class: held.class,
+                    identity: held.identity,
+                    title: held.title,
+                    titling: held.titling,
                     ..entry
                 };
-                Some(core::mem::replace(&mut drivers[at], entry))
+                Some(core::mem::replace(held, entry))
             } else {
-                drivers
-                    .try_reserve(1)
-                    .map_err(|_| RegisterError::OutOfMemory)?;
-                let instance = entry.nodes.instance();
-                let at = drivers.partition_point(|e| e.nodes.instance() < instance);
-                drivers.insert(at, entry);
+                drivers.insert(entry)?;
                 None
             }
         };
@@ -688,11 +794,9 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// The registration the volume registered for `handle` pins through.
     #[must_use]
     pub fn nodes(&self, handle: DriverHandle) -> Option<Arc<VolumeNodes>> {
-        let raw = handle.as_u64();
         self.drivers
             .lock()
-            .iter()
-            .find(|e| e.handle == raw)
+            .by_handle(handle.as_u64())
             .map(|e| Arc::clone(&e.nodes))
     }
 
@@ -700,26 +804,27 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// stand-in answers it, read together.
     #[must_use]
     pub fn reach(&self, handle: DriverHandle) -> Option<(Arc<VolumeNodes>, bool)> {
-        let raw = handle.as_u64();
         self.drivers
             .lock()
-            .iter()
-            .find(|e| e.handle == raw)
+            .by_handle(handle.as_u64())
             .map(|e| (Arc::clone(&e.nodes), e.stand_in))
     }
 
     /// The driver and published identity of the volume whose registration is
     /// numbered `instance`, while it is registered.
     fn registered(&self, instance: u64) -> Option<(Arc<DriverLock<F>>, [u8; 16])> {
-        let drivers = self.drivers.lock();
-        registration(&drivers, instance).map(|e| (Arc::clone(&e.driver), e.volume_id))
+        self.drivers
+            .lock()
+            .by_instance(instance)
+            .map(|e| (Arc::clone(&e.driver), e.volume_id))
     }
 
     /// The watch table the registration numbered `instance` claimed, while it
     /// is registered.
     fn watch_table(&self, instance: u64) -> Option<Arc<crate::fswatch::VolumeWatch>> {
-        let drivers = self.drivers.lock();
-        registration(&drivers, instance)
+        self.drivers
+            .lock()
+            .by_instance(instance)
             .and_then(|e| e.watch.as_ref())
             .map(|claim| Arc::clone(claim.table()))
     }
@@ -728,11 +833,9 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// registration, and its published identity, read under one hold of the
     /// registry's lock.
     fn serving(&self, handle: DriverHandle) -> Result<ServedVolume<F>, Errno> {
-        let raw = handle.as_u64();
         self.drivers
             .lock()
-            .iter()
-            .find(|e| e.handle == raw)
+            .by_handle(handle.as_u64())
             .map(|e| ServedVolume {
                 driver: Arc::clone(&e.driver),
                 nodes: Arc::clone(&e.nodes),
@@ -783,11 +886,9 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
 
     /// The due registration with the lowest instance number above `after`.
     fn next_reap_due(&self, after: Option<u64>) -> Option<(Arc<DriverLock<F>>, Arc<VolumeNodes>)> {
-        let drivers = self.drivers.lock();
-        let from = after.map_or(0, |after| {
-            drivers.partition_point(|e| e.nodes.instance() <= after)
-        });
-        drivers[from..]
+        self.drivers
+            .lock()
+            .after(after)
             .iter()
             .find(|e| e.nodes.is_reap_due() && !e.nodes.reaps_inline())
             .map(|e| (Arc::clone(&e.driver), Arc::clone(&e.nodes)))
@@ -840,8 +941,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// a driver reporting against a handle this registry does not hold has no
     /// mount here to publish.
     pub fn note_writeback_due(&self, handle: DriverHandle, deadline_ns: Option<u64>) {
-        let raw = handle.as_u64();
-        let recorded = match self.drivers.lock().iter().find(|e| e.handle == raw) {
+        let recorded = match self.drivers.lock().by_handle(handle.as_u64()) {
             Some(entry) => {
                 entry.writeback.store(deadline_ns);
                 true
@@ -861,11 +961,9 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// surprise-removal path may ask it.
     #[must_use]
     pub fn holds_unpublished(&self, handle: DriverHandle) -> bool {
-        let raw = handle.as_u64();
         self.drivers
             .lock()
-            .iter()
-            .find(|e| e.handle == raw)
+            .by_handle(handle.as_u64())
             .is_some_and(|e| {
                 e.writeback.holds_open() || e.served.as_ref().is_some_and(|s| s.holds_unpublished())
             })
@@ -925,11 +1023,9 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         handle: DriverHandle,
         availability: MountAvailability,
     ) -> Result<(), Errno> {
-        let handle = handle.as_u64();
         let mut drivers = self.drivers.lock();
         let entry = drivers
-            .iter_mut()
-            .find(|e| e.handle == handle)
+            .by_handle_mut(handle.as_u64())
             .ok_or(Errno::NotImplemented)?;
         if entry.availability != availability {
             entry.availability = availability;
@@ -939,8 +1035,8 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     }
 
     /// Record the title the volume registered for `handle` is listed under,
-    /// its filesystem's label, and whether its format takes one a retitle can
-    /// set: a change is announced as the mount table's.
+    /// its filesystem's label, and how a retitle may set it: a change is
+    /// announced as the mount table's.
     ///
     /// # Errors
     ///
@@ -950,17 +1046,43 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         &self,
         handle: DriverHandle,
         title: VolumeTitle,
-        titled: bool,
+        titling: Titling,
     ) -> Result<(), Errno> {
-        let handle = handle.as_u64();
         let mut drivers = self.drivers.lock();
         let entry = drivers
-            .iter_mut()
-            .find(|e| e.handle == handle)
+            .by_handle_mut(handle.as_u64())
             .ok_or(Errno::NotImplemented)?;
-        if (entry.title, entry.titled) != (title, titled) {
+        if (entry.title, entry.titling) != (title, titling) {
             entry.title = title;
-            entry.titled = titled;
+            entry.titling = titling;
+            crate::notice::mounts_changed();
+        }
+        Ok(())
+    }
+
+    /// How a retitle may write the title of the volume registered for
+    /// `handle`, while it is registered.
+    #[must_use]
+    pub fn titling(&self, handle: DriverHandle) -> Option<Titling> {
+        self.drivers
+            .lock()
+            .by_handle(handle.as_u64())
+            .map(|e| e.titling)
+    }
+
+    /// Record the title a retitle of the volume registered for `handle` just
+    /// wrote, keeping how it may be set.
+    ///
+    /// # Errors
+    ///
+    /// As [`set_title`](Self::set_title).
+    pub fn retitled(&self, handle: DriverHandle, title: VolumeTitle) -> Result<(), Errno> {
+        let mut drivers = self.drivers.lock();
+        let entry = drivers
+            .by_handle_mut(handle.as_u64())
+            .ok_or(Errno::NotImplemented)?;
+        if entry.title != title {
+            entry.title = title;
             crate::notice::mounts_changed();
         }
         Ok(())
@@ -981,11 +1103,9 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// [`Errno::NotImplemented`] when `handle` names no registered volume
     /// (fail closed — nothing is attached).
     pub fn set_io_source(&self, handle: DriverHandle, io: VolumeIoSource) -> Result<(), Errno> {
-        let handle = handle.as_u64();
         let mut drivers = self.drivers.lock();
         let entry = drivers
-            .iter_mut()
-            .find(|e| e.handle == handle)
+            .by_handle_mut(handle.as_u64())
             .ok_or(Errno::NotImplemented)?;
         entry.io = Some(io);
         Ok(())
@@ -1004,11 +1124,9 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         handle: DriverHandle,
         served: Option<Arc<ServedState>>,
     ) -> Result<(), Errno> {
-        let handle = handle.as_u64();
         let mut drivers = self.drivers.lock();
         let entry = drivers
-            .iter_mut()
-            .find(|e| e.handle == handle)
+            .by_handle_mut(handle.as_u64())
             .ok_or(Errno::NotImplemented)?;
         entry.served = served;
         Ok(())
@@ -1143,12 +1261,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// answers [`Errno::Stale`]. Fails closed: an unknown handle removes
     /// nothing.
     pub fn unregister(&self, handle: DriverHandle) -> Option<Arc<DriverLock<F>>> {
-        let handle = handle.as_u64();
-        let entry = {
-            let mut drivers = self.drivers.lock();
-            let pos = drivers.iter().position(|e| e.handle == handle)?;
-            drivers.remove(pos)
-        };
+        let entry = self.drivers.lock().remove(handle.as_u64())?;
         entry.nodes.retire();
         // The volume's watchers learn it left now, not when its last operation
         // in flight lets the driver go.
@@ -1183,11 +1296,9 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// Public for the runtime volume detach path, which flushes exactly the
     /// departing volume before retracting it.
     pub fn driver(&self, handle: DriverHandle) -> Result<Arc<DriverLock<F>>, Errno> {
-        let handle = handle.as_u64();
-        let drivers = self.drivers.lock();
-        drivers
-            .iter()
-            .find(|e| e.handle == handle)
+        self.drivers
+            .lock()
+            .by_handle(handle.as_u64())
             .map(|e| Arc::clone(&e.driver))
             .ok_or(Errno::NotImplemented)
     }
@@ -1228,7 +1339,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
                     owner: e.owner,
                     class: e.class,
                     title: e.title,
-                    titled: e.titled,
+                    titling: e.titling,
                 });
             }
         }
@@ -1298,9 +1409,8 @@ impl<F: FilesystemWrite + Send + 'static> VolumeHost for LateFilesystem<F> {
         let source = self
             .drivers
             .lock()
-            .iter()
-            .find(|e| e.handle == volume.as_u64())
-            .map(|e| e.source.clone());
+            .by_handle(volume.as_u64())
+            .and_then(|e| concatenated(&[&e.source]));
         if let (Ok(Some(audit)), Some(source)) = (self.audit.get(), source) {
             let (level, event) = if in_reserve {
                 (Level::Warn, AuditEvent::VolumeReserveEntered)
@@ -3404,7 +3514,8 @@ where
             let record = record
                 .with_class(entry.class)
                 .with_title(entry.title)
-                .with_titled(entry.titled)
+                .with_titled(entry.titling.kept)
+                .with_title_writes(entry.titling.writes)
                 .with_identity(entry.identity);
             records.push(match entry.owner {
                 Some(owner) => record.with_owner(owner),

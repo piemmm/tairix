@@ -21,6 +21,12 @@
 //! which answers with a folder it opened itself. The panel then saves there
 //! under its own authority.
 //!
+//! It also takes icons carried off the desktop over a window: they are offered
+//! to that window's application, which answers what a drop there would do,
+//! reads the items' paths, and performs the drop itself under its own
+//! authority, as a drop of its own items onto the desktop is performed.
+//! Brought back over the desktop and let go, they are put down there.
+//!
 //! A drag is the press that began it, carried on: it holds the pointer until
 //! that press comes up, and `Escape` or any other button ends it with nothing
 //! dropped. What is carried is shown under the pointer as its listing shows it
@@ -36,8 +42,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::display::RefreshRate;
+use tairix_abi::fs::FileId;
 use tairix_abi::window_ipc::{
-    AlertSeverity, AlertSpec, DragItems, DropOperation, DropTarget, WindowEvent,
+    AlertSeverity, AlertSpec, DragItems, DropOperation, DropTarget, OfferDrop, OfferedItem,
+    WindowEvent,
 };
 use tairix_abi::Errno;
 use tairix_browse::media::{name_endings, MediaType};
@@ -50,6 +58,7 @@ use tairix_util::utf8::shown;
 use tairix_window::DragConclusion;
 use tairix_wm::{Compositor, InputEvent, Key, NamedKey, PointerButton, WindowId};
 
+use crate::desktop::DesktopLift;
 use crate::picker::PickId;
 use crate::shell::DesktopShell;
 use crate::switchuser::park_within;
@@ -64,6 +73,117 @@ pub enum DragEnd {
     Items(ItemsEnd),
     /// A save carried from the trusted picker's panel.
     Save(SaveEnd),
+    /// Icons carried off the desktop.
+    Desktop(DesktopEnd),
+}
+
+/// How a drag of icons carried off the desktop ended: where they were
+/// dropped, and the end the window last offered them is owed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesktopEnd {
+    /// Where they were dropped.
+    pub dropped: DesktopDrop,
+    /// The window last offered them, to be told the offer ended.
+    pub offer: Option<ItemsOfferEnd>,
+}
+
+/// Where icons carried off the desktop were dropped.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DesktopDrop {
+    /// Nowhere that takes them: they stay where they stood.
+    Nothing,
+    /// Back on the desktop, where they are put down as `lift` says.
+    Desktop {
+        /// Where they were let go.
+        at: Point,
+        /// The press that carried them off.
+        lift: DesktopLift,
+    },
+    /// On a window whose application answered that it takes them, which
+    /// performs the drop.
+    Window,
+}
+
+/// What a drag of icons carried off the desktop carries: what it shows of
+/// them, each item as the window offered them reads it, and the press that
+/// carried them off, for a drop back on the desktop.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesktopCargo {
+    /// What it shows.
+    pub shown: DragItems,
+    /// Each item, the pressed one first.
+    pub items: Vec<DesktopItem>,
+    /// The press that carried them off.
+    pub lift: DesktopLift,
+}
+
+/// One icon carried off the desktop: the absolute path a drop acts on — a
+/// drive's is its volume's place in the storage catalog — and the node the
+/// desktop's listing showed there, or [`FileId::NONE`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesktopItem {
+    /// Its absolute path.
+    pub path: String,
+    /// The node listed there.
+    pub id: FileId,
+}
+
+/// Items carried off the desktop, offered to the window under the pointer at
+/// a point in it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ItemsOffer {
+    /// The window offered them.
+    pub window_id: u64,
+    /// The drag's number, which the window reads the items by.
+    pub drag: u32,
+    /// The offer's number.
+    pub serial: u32,
+    /// Window-local x.
+    pub x: u32,
+    /// Window-local y.
+    pub y: u32,
+    /// Whether `Shift` is held.
+    pub shift: bool,
+}
+
+impl ItemsOffer {
+    /// The event that makes the offer.
+    #[must_use]
+    pub const fn event(self) -> WindowEvent {
+        WindowEvent::ItemsOffered {
+            window_id: self.window_id,
+            drag: self.drag,
+            serial: self.serial,
+            x: self.x,
+            y: self.y,
+            shift: self.shift,
+        }
+    }
+}
+
+/// The end a window offered items off the desktop is owed: they left, or
+/// were dropped on it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ItemsOfferEnd {
+    /// The window offered them.
+    pub window_id: u64,
+    /// The last offer made over it.
+    pub serial: u32,
+    /// Where on it they were dropped, window-local, and what the drop does,
+    /// or `None` when they left.
+    pub dropped: Option<OfferDrop>,
+}
+
+impl ItemsOfferEnd {
+    /// The event that tells the window.
+    #[must_use]
+    pub const fn event(self) -> WindowEvent {
+        WindowEvent::ItemsOfferEnded {
+            window_id: self.window_id,
+            serial: self.serial,
+            dropped: self.dropped,
+        }
+    }
 }
 
 /// How an application's drag ended: the window it began in, where it was
@@ -463,6 +583,18 @@ pub enum OwedReport {
     Items(ItemsReport),
     /// The offers a carried save owes.
     Save(SaveReport),
+    /// The offers icons carried off the desktop owe.
+    Desktop(DesktopReport),
+}
+
+/// What icons carried off the desktop owe: an end to the window they left,
+/// and an offer to the one they are over.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesktopReport {
+    /// The window they left.
+    pub left: Option<ItemsOfferEnd>,
+    /// The window they are over, and where.
+    pub over: Option<ItemsOffer>,
 }
 
 /// What a carried save owes: an end to the window it left, and an offer to the
@@ -497,6 +629,19 @@ pub(crate) struct DragCarrier {
     /// from it, so a late answer to an earlier drag never names one of this
     /// drag's.
     issued: u32,
+    /// The number the last drag of icons off the desktop was given.
+    desktop_drags: u32,
+    /// The items the last drag off the desktop dropped on a window, which
+    /// that window's application reads until the next such drag.
+    dropped: Option<Dropped>,
+}
+
+/// Items dropped off the desktop on a window, for its application to read.
+#[derive(Debug)]
+struct Dropped {
+    window_id: u64,
+    drag: u32,
+    items: Vec<DesktopItem>,
 }
 
 /// What a carried drag holds.
@@ -514,6 +659,16 @@ enum Cargo {
         document: SavedDocument,
         /// The window offered the save last and that offer's number, until
         /// it is told the offer ended.
+        offered: Option<(u64, u32)>,
+    },
+    /// Icons carried off the desktop, boxed so the carrier is no larger than
+    /// a save.
+    Desktop {
+        /// The drag's number.
+        drag: u32,
+        cargo: Box<DesktopCargo>,
+        /// The window offered them last and that offer's number, until it is
+        /// told the offer ended.
         offered: Option<(u64, u32)>,
     },
 }
@@ -622,6 +777,38 @@ impl DesktopShell {
         self.carry(compositor, panel, cargo)
     }
 
+    /// Carry the icons `cargo` describes on from the press on the desktop that
+    /// carries them, now over a window: offered to whatever window they are
+    /// held over, and put down again on the desktop if let go there.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::AlreadyExists`] — a drag is already being carried.
+    /// * [`Errno::PermissionDenied`] — the primary button is not held: a drag
+    ///   is a press carried on.
+    pub fn begin_desktop_drag(
+        &mut self,
+        compositor: &mut Compositor,
+        cargo: DesktopCargo,
+    ) -> Result<(), Errno> {
+        if self.drag_active() {
+            return Err(Errno::AlreadyExists);
+        }
+        if !self.router().holds_primary() {
+            return Err(Errno::PermissionDenied);
+        }
+        self.drag.desktop_drags = self.drag.desktop_drags.wrapping_add(1);
+        self.drag.dropped = None;
+        let cargo = Cargo::Desktop {
+            drag: self.drag.desktop_drags,
+            cargo: Box::new(cargo),
+            offered: None,
+        };
+        let field = self.work_area(compositor);
+        self.lift(compositor, cargo, Some(field));
+        Ok(())
+    }
+
     /// Carry `cargo` on from the press held in `wm`.
     fn carry(
         &mut self,
@@ -635,9 +822,15 @@ impl DesktopShell {
         if self.router().pressed_in() != Some(wm) {
             return Err(Errno::PermissionDenied);
         }
+        let source = compositor.window(wm).map(tairix_wm::Window::client_rect);
+        self.lift(compositor, cargo, source);
+        Ok(())
+    }
+
+    /// Take the pointer and show `cargo` under it, carried out of `source`.
+    fn lift(&mut self, compositor: &mut Compositor, cargo: Cargo, source: Option<Rect>) {
         self.yield_pointer(compositor);
         let at = self.router().pointer();
-        let source = compositor.window(wm).map(tairix_wm::Window::client_rect);
         let scale = compositor.scale();
         let (theme, mut artwork) = self.theme_and_artwork();
         let mut stack = shown_as(&cargo, at, source, (scale, theme));
@@ -657,7 +850,6 @@ impl DesktopShell {
             shift,
         });
         self.hold_drag_cursor(compositor);
-        Ok(())
     }
 
     /// Carry the drag through one pointer `event`.
@@ -693,7 +885,7 @@ impl DesktopShell {
     pub fn drag_items(&self) -> Option<(u64, &DragItems)> {
         match &self.drag.carried.as_ref()?.cargo {
             Cargo::Items { source, items } => Some((*source, &**items)),
-            Cargo::Save { .. } => None,
+            Cargo::Save { .. } | Cargo::Desktop { .. } => None,
         }
     }
 
@@ -703,8 +895,17 @@ impl DesktopShell {
     pub fn save_source(&self) -> Option<u64> {
         match self.drag.carried.as_ref()?.cargo {
             Cargo::Save { requester, .. } => Some(requester),
-            Cargo::Items { .. } => None,
+            Cargo::Items { .. } | Cargo::Desktop { .. } => None,
         }
+    }
+
+    /// Whether the carried drag is of icons carried off the desktop.
+    #[must_use]
+    pub fn carries_desktop_icons(&self) -> bool {
+        self.drag
+            .carried
+            .as_ref()
+            .is_some_and(|carried| matches!(carried.cargo, Cargo::Desktop { .. }))
     }
 
     /// Whether the carried drag's pointer is already over `place`, so nothing
@@ -731,13 +932,15 @@ impl DesktopShell {
         let changed = !next.reports_as(&carried.over);
         let left_reported = arrived && carried.over.reported();
         let saving = matches!(carried.cargo, Cargo::Save { .. });
+        let icons = matches!(carried.cargo, Cargo::Desktop { .. });
         // The desktop takes a save itself, so arriving there accepts it at
         // once and owes no application anything; the report owed only relights
-        // its folder.
+        // its folder. Its own icons brought back are put down there.
         carried.owed |= next.reported() && changed || left_reported;
         if arrived {
             carried.shown = match next {
                 DragSurface::Desktop { .. } if saving => Some(DropOperation::Copy),
+                DragSurface::Desktop { .. } if icons => Some(DropOperation::Move),
                 _ => None,
             };
             carried.answered = false;
@@ -825,6 +1028,32 @@ impl DesktopShell {
                 });
                 return Some(OwedReport::Save(SaveReport { left, over }));
             }
+            Cargo::Desktop { drag, offered, .. } => {
+                let over = match carried.over {
+                    DragSurface::Offer { window_id, x, y } => Some((window_id, x, y)),
+                    _ => None,
+                };
+                let left = offered
+                    .take_if(|(window, _)| over.is_none_or(|(now, ..)| now != *window))
+                    .map(|(window_id, serial)| ItemsOfferEnd {
+                        window_id,
+                        serial,
+                        dropped: None,
+                    });
+                let over = over.map(|(window_id, x, y)| {
+                    carried.serial = carried.serial.wrapping_add(1);
+                    *offered = Some((window_id, carried.serial));
+                    ItemsOffer {
+                        window_id,
+                        drag: *drag,
+                        serial: carried.serial,
+                        x,
+                        y,
+                        shift: carried.shift,
+                    }
+                });
+                return Some(OwedReport::Desktop(DesktopReport { left, over }));
+            }
         };
         carried.serial = carried.serial.wrapping_add(1);
         if matches!(carried.over, DragSurface::Desktop { .. }) {
@@ -893,6 +1122,79 @@ impl DesktopShell {
         true
     }
 
+    /// Take the answer window `window_id`'s application gave the offer of
+    /// icons carried off the desktop numbered `serial`: shown on the pointer
+    /// while they are still over that window and the offer is the one
+    /// standing there, and answering whether it was.
+    pub fn items_offer_answered(
+        &mut self,
+        compositor: &mut Compositor,
+        window_id: u64,
+        serial: u32,
+        verdict: Option<DropOperation>,
+    ) -> bool {
+        let Some(carried) = self.drag.carried.as_mut() else {
+            return false;
+        };
+        let current = matches!(carried.cargo, Cargo::Desktop { .. })
+            && matches!(carried.over, DragSurface::Offer { window_id: over, .. } if over == window_id)
+            && carried.reported_here(serial);
+        if !current {
+            return false;
+        }
+        carried.shown = verdict;
+        carried.answered = true;
+        self.hold_drag_cursor(compositor);
+        true
+    }
+
+    /// The items of the drag off the desktop numbered `drag`, for window
+    /// `window_id`: while an offer of them stands there, or once they were
+    /// dropped there.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for any other drag or window.
+    pub fn offered_items(&self, window_id: u64, drag: u32) -> Result<&[DesktopItem], Errno> {
+        match self.drag.carried.as_ref().map(|carried| &carried.cargo) {
+            Some(Cargo::Desktop {
+                drag: carried,
+                cargo,
+                offered: Some((offered, _)),
+            }) if (*carried, *offered) == (drag, window_id) => Ok(&cargo.items),
+            _ => match &self.drag.dropped {
+                Some(dropped) if (dropped.window_id, dropped.drag) == (window_id, drag) => {
+                    Ok(&dropped.items)
+                }
+                _ => Err(Errno::NotFound),
+            },
+        }
+    }
+
+    /// Item `index` of [`offered_items`](Self::offered_items), as the window
+    /// reads it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] past the last item, or as
+    /// [`offered_items`](Self::offered_items).
+    pub fn offered_item(
+        &self,
+        window_id: u64,
+        drag: u32,
+        index: u32,
+    ) -> Result<OfferedItem<'_>, Errno> {
+        let index = usize::try_from(index).map_err(|_| Errno::NotFound)?;
+        let item = self
+            .offered_items(window_id, drag)?
+            .get(index)
+            .ok_or(Errno::NotFound)?;
+        Ok(OfferedItem {
+            path: &item.path,
+            id: item.id,
+        })
+    }
+
     /// The pinboard icon a drop would land in, while the application accepts
     /// it there: the one the desktop lights.
     #[must_use]
@@ -925,6 +1227,9 @@ impl DesktopShell {
     /// with nothing to tell it, as does a save for it, and a save offered to it
     /// forgets it. Answers the end a save leaves another window owed.
     pub fn abort_drag_for(&mut self, compositor: &mut Compositor, window: u64) -> Option<OfferEnd> {
+        self.drag
+            .dropped
+            .take_if(|dropped| dropped.window_id == window);
         let carried = self.drag.carried.as_mut()?;
         let ends = match &mut carried.cargo {
             Cargo::Items { source, .. } => *source == window,
@@ -936,11 +1241,17 @@ impl DesktopShell {
                 }
                 *requester == window
             }
+            Cargo::Desktop { offered, .. } => {
+                if offered.is_some_and(|(offered, _)| offered == window) {
+                    *offered = None;
+                }
+                false
+            }
         };
         if ends {
             return match self.end_drag(compositor, false)? {
                 DragEnd::Save(end) => end.offer,
-                DragEnd::Items(_) => None,
+                DragEnd::Items(_) | DragEnd::Desktop(_) => None,
             };
         }
         if matches!(carried.over, DragSurface::Offer { window_id, .. } if window_id == window) {
@@ -1041,6 +1352,26 @@ impl DesktopShell {
                     offered,
                 )));
             }
+            Cargo::Desktop {
+                drag,
+                cargo,
+                offered,
+            } => {
+                let DesktopCargo { items, lift, .. } = *cargo;
+                let pointer = self.router().pointer();
+                let over = (&carried.over, carried.shown);
+                let end = desktop_end(dropped, over, offered, (pointer, lift));
+                if end.dropped == DesktopDrop::Window {
+                    if let Some(offer) = end.offer {
+                        self.drag.dropped = Some(Dropped {
+                            window_id: offer.window_id,
+                            drag,
+                            items,
+                        });
+                    }
+                }
+                return Some(DragEnd::Desktop(end));
+            }
         };
         let answer = match &carried.over {
             DragSurface::Slot { answer, .. } | DragSurface::AppWindow { answer, .. } => {
@@ -1126,6 +1457,36 @@ fn save_end(
     }
 }
 
+/// How icons carried off the desktop by `lift` ended over `over`, showing
+/// `shown`, the offer `offered` standing and the pointer at `pointer`:
+/// dropped on a window whose application took the offer standing there, that
+/// application performs the drop; back on the desktop, they are put down
+/// there; and anywhere else, they stay where they stood.
+fn desktop_end(
+    dropped: bool,
+    (over, shown): (&DragSurface, Option<DropOperation>),
+    offered: Option<(u64, u32)>,
+    (pointer, lift): (Point, DesktopLift),
+) -> DesktopEnd {
+    let (dropped, at) = match (dropped, over, shown, offered) {
+        (true, DragSurface::Desktop { .. }, _, _) => {
+            (DesktopDrop::Desktop { at: pointer, lift }, None)
+        }
+        (true, &DragSurface::Offer { window_id, x, y }, Some(operation), Some((offer, _)))
+            if offer == window_id =>
+        {
+            (DesktopDrop::Window, Some(OfferDrop { x, y, operation }))
+        }
+        _ => (DesktopDrop::Nothing, None),
+    };
+    let offer = offered.map(|(window_id, serial)| ItemsOfferEnd {
+        window_id,
+        serial,
+        dropped: at,
+    });
+    DesktopEnd { dropped, offer }
+}
+
 /// The label the one item of an application's drag shows: its name less the
 /// ending its listing hides, shown as a name from elsewhere is.
 fn item_label(items: &DragItems) -> String {
@@ -1148,8 +1509,13 @@ fn shown_as(
         let cell = Rect::new(0, 0, metrics.cell_width, metrics.cell_height);
         Tiles::Large.layout().icon_side(cell, scale, theme)
     };
-    match cargo {
-        Cargo::Items { items, .. } => {
+    let items = match cargo {
+        Cargo::Items { items, .. } => Ok(&**items),
+        Cargo::Desktop { cargo, .. } => Ok(&cargo.shown),
+        Cargo::Save { document, .. } => Err(document),
+    };
+    match items {
+        Ok(items) => {
             let selected = ControlState {
                 selection: SelectionState::Selected,
                 ..ControlState::idle()
@@ -1178,7 +1544,7 @@ fn shown_as(
             );
             Stack::new(looks, pointer, grab, (scale, theme))
         }
-        Cargo::Save { document, .. } => {
+        Err(document) => {
             let look = Look {
                 label: Some(shown(&document.name).into_owned()),
                 icon: document.icon,

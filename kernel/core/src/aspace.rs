@@ -71,7 +71,7 @@ use tairix_abi::{
 };
 use tairix_caps::CapabilitySet;
 use tairix_collections::{
-    OrderedMap, OrderedSet, RangeError, RangeKey, RangeMap, RangeSet, TryReserveError,
+    BitVec, OrderedMap, OrderedSet, RangeError, RangeKey, RangeMap, RangeSet, TryReserveError,
 };
 use tairix_kernel_ipc::senders::Endpoints;
 use tairix_kernel_ipc::EndpointId;
@@ -1363,10 +1363,10 @@ pub(crate) fn anon_release_wake(process: ProcessId) {
 #[derive(Default)]
 struct OpenFileTable {
     by_fd: OrderedMap<u32, OpenFile>,
-    /// No number from [`STD_STREAM_COUNT`] up to this one is free, so the
-    /// search for the lowest free number starts here: opening file after file
-    /// costs a lookup each, not a walk over every descriptor already held.
-    free_from: u32,
+    /// Which numbers from [`STD_STREAM_COUNT`] are recorded, bit `n` for
+    /// descriptor `STD_STREAM_COUNT + n`: its summaries find the lowest free
+    /// number in time proportional to their height, however dense the table.
+    held: BitVec,
     /// Descriptors promised to opens still changing the filesystem, held
     /// against the table's bound so recording one is never refused for it.
     promised: u64,
@@ -1394,18 +1394,23 @@ impl OpenFileTable {
             return Err(Errno::LimitExceeded);
         }
         self.by_fd.try_reserve(N).map_err(|_| Errno::OutOfMemory)?;
-        let first = u32::try_from(STD_STREAM_COUNT).map_err(|_| Errno::OutOfRange)?;
-        let from = self.free_from.max(first);
-        let mut taken = self.by_fd.range(from..).map(|(&fd, _)| fd).peekable();
-        let mut free = (from..FD_CWD).filter(|fd| taken.next_if_eq(fd).is_none());
         let mut numbers = [0u32; N];
+        let mut past = 0;
         for number in &mut numbers {
-            *number = free.next().ok_or(Errno::OutOfRange)?;
+            let index = self
+                .held
+                .next_zero(past)
+                .unwrap_or_else(|| self.held.len().max(past));
+            *number = descriptor_number(index)?;
+            past = index + 1;
         }
-        // Nothing below the lowest is free, whether or not the caller records
-        // these numbers.
-        if let Some(&lowest) = numbers.first() {
-            self.free_from = lowest;
+        if past > self.held.len() {
+            // Doubling keeps growth, and the summaries it rebuilds, amortised
+            // over the opens that fill it.
+            let len = past.max(self.held.len().saturating_mul(2));
+            self.held
+                .try_resize(len, false)
+                .map_err(|_| Errno::OutOfMemory)?;
         }
         Ok(numbers)
     }
@@ -1414,8 +1419,9 @@ impl OpenFileTable {
     /// is made first, by [`Self::alloc_fds`] or the caller.
     fn record(&mut self, fd: u32, file: OpenFile) -> Option<OpenFile> {
         if let Ok(replaced) = self.by_fd.try_insert(fd, file) {
-            if fd == self.free_from {
-                self.free_from = fd.saturating_add(1);
+            if let Some(index) = ordinary_index(fd) {
+                let marked = self.held.set(index, true);
+                debug_assert!(marked.is_some(), "a descriptor was recorded past its room");
             }
             replaced
         } else {
@@ -1427,11 +1433,28 @@ impl OpenFileTable {
     /// Remove the descriptor at `fd`, handing it back.
     fn remove(&mut self, fd: u32) -> Option<OpenFile> {
         let removed = self.by_fd.remove(&fd)?;
-        if usize::try_from(fd).is_ok_and(|number| number >= STD_STREAM_COUNT) {
-            self.free_from = self.free_from.min(fd);
+        if let Some(index) = ordinary_index(fd) {
+            self.held.set(index, false);
         }
         Some(removed)
     }
+}
+
+/// The descriptor numbered `index` past the standard streams, or
+/// [`Errno::OutOfRange`] where that reaches [`FD_CWD`], which names the
+/// working directory and no descriptor.
+fn descriptor_number(index: usize) -> Result<u32, Errno> {
+    index
+        .checked_add(STD_STREAM_COUNT)
+        .and_then(|number| u32::try_from(number).ok())
+        .filter(|&number| number < FD_CWD)
+        .ok_or(Errno::OutOfRange)
+}
+
+/// Where `fd` stands in [`OpenFileTable::held`]; `None` for a standard
+/// stream, which is installed rather than allocated.
+fn ordinary_index(fd: u32) -> Option<usize> {
+    usize::try_from(fd).ok()?.checked_sub(STD_STREAM_COUNT)
 }
 
 /// One task's device-resource grants: the handles it may pass to
@@ -5412,14 +5435,47 @@ mod tests {
 
     #[test]
     fn no_descriptor_is_numbered_as_the_working_directory() {
-        // Only the number just below the working-directory word is free, so a
-        // pair cannot be found and a single one is that number.
-        let mut table = OpenFileTable {
-            free_from: FD_CWD - 1,
-            ..OpenFileTable::default()
+        let last = usize::try_from(FD_CWD - 1).unwrap() - STD_STREAM_COUNT;
+        assert_eq!(descriptor_number(last), Ok(FD_CWD - 1));
+        assert_eq!(descriptor_number(last + 1), Err(Errno::OutOfRange));
+        assert_eq!(descriptor_number(usize::MAX), Err(Errno::OutOfRange));
+        assert_eq!(
+            descriptor_number(0),
+            u32::try_from(STD_STREAM_COUNT).map_err(|_| Errno::OutOfRange)
+        );
+    }
+
+    /// The lowest free number is found by the bitmap's summaries, not by a
+    /// walk forward over the run of descriptors held above a closed one.
+    #[test]
+    fn a_closed_descriptor_below_a_dense_run_is_reused_and_the_top_follows() {
+        let file = node_file("/f");
+        let mut table = OpenFileTable::default();
+        let open = |table: &mut OpenFileTable| {
+            let [fd] = table.alloc_fds::<1>(u64::MAX).expect("a number");
+            let copy = OpenFile::new(file.backing.clone(), OpenFlags::WRITE).expect("a file");
+            table.record(fd, copy);
+            fd
         };
-        assert_eq!(table.alloc_fds::<2>(u64::MAX), Err(Errno::OutOfRange));
-        assert_eq!(table.alloc_fds::<1>(u64::MAX), Ok([FD_CWD - 1]));
+        let first = u32::try_from(STD_STREAM_COUNT).expect("a handful of streams");
+        for expected in first..first + 1000 {
+            assert_eq!(open(&mut table), expected);
+        }
+        assert!(table.remove(first + 10).is_some());
+        assert!(table.remove(first + 3).is_some());
+        assert_eq!(open(&mut table), first + 3, "the lowest free first");
+        assert_eq!(open(&mut table), first + 10);
+        assert_eq!(open(&mut table), first + 1000, "then the top");
+        let [low, high] = {
+            table.remove(first + 500);
+            table.alloc_fds::<2>(u64::MAX).expect("two numbers")
+        };
+        assert_eq!((low, high), (first + 500, first + 1001));
+        assert!(table.remove(first).is_some());
+        assert!(
+            table.remove(first).is_none(),
+            "a second close finds nothing"
+        );
     }
 
     #[test]

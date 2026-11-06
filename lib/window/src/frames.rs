@@ -194,7 +194,7 @@ impl FrameRing {
         damage: DamageList,
         draw: impl FnOnce(usize, (&mut StaleFrames, &mut Region)) -> Result<(), Errno>,
     ) -> Result<(), Errno> {
-        client.await_present(window);
+        client.await_present(window)?;
         draw(self.back, (&mut self.stale, &mut self.changed))?;
         let index = u32::try_from(self.back).map_err(|_| Errno::OutOfRange)?;
         client.present(window, index, damage)?;

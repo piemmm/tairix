@@ -8920,6 +8920,7 @@ mod tests {
             node_identity: NodeIdentity::Stable,
             attrs: false,
             title: false,
+            title_apart: false,
             write_refusal: None,
             format: tairix_abi::volume::FormatName::Ext4,
         });
@@ -8947,6 +8948,7 @@ mod tests {
                 node_identity: NodeIdentity::Stable,
                 attrs: false,
                 title: false,
+                title_apart: false,
                 write_refusal: None,
                 format: tairix_abi::volume::FormatName::Smb3,
             },

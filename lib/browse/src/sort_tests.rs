@@ -33,6 +33,7 @@ fn volume_root(
             identity: [0; 16],
             read_only: false,
             titled: false,
+            title_writes: false,
         },
     }));
     root

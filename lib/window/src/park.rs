@@ -24,9 +24,29 @@ pub const fn remaining_ns(deadline_ns: u64, now_ns: u64) -> u64 {
     deadline_ns.saturating_sub(now_ns)
 }
 
+/// Whether a park woken by a member whose work stays `queued` for the drain —
+/// a delivered event, an answer — ends as its deadline instead: one that has
+/// come by `now()` is served first, so a member left ready can never hold the
+/// loop's next frame back, and the queued work is taken in on its next turn.
+/// The clock is read only for such a wake.
+pub fn deadline_first(queued: bool, deadline_ns: u64, now: impl FnOnce() -> u64) -> bool {
+    queued && now() >= deadline_ns
+}
+
 #[cfg(test)]
 mod tests {
-    use super::remaining_ns;
+    use super::{deadline_first, remaining_ns};
+
+    #[test]
+    fn a_due_deadline_comes_before_a_wake_whose_work_stays_queued() {
+        assert!(deadline_first(true, 100, || 100), "at its deadline");
+        assert!(deadline_first(true, 100, || 5_000), "past it");
+        assert!(!deadline_first(true, 100, || 99), "before it");
+        assert!(
+            !deadline_first(false, 100, || unreachable!("no clock read")),
+            "a wake the park takes in itself is never set aside"
+        );
+    }
 
     #[test]
     fn a_future_deadline_becomes_the_budget_left_before_it() {

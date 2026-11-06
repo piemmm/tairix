@@ -2528,6 +2528,21 @@ folder tiles and its listings, lighting the tile under the pointer, and
 declines what stores nothing or may not be written: the root view, the storage
 catalog and a folder on a read-only volume.
 
+Icons carried **off the desktop** are offered the same way:
+`WindowEvent::ItemsOffered { window_id, drag, serial, x, y, shift }`, numbered
+across the seat's drags, which the owner answers with `ItemsOfferAnswer {
+window_id, serial, verdict }` — refuse, copy, move or link — shown on the
+pointer only while that offer still stands there. Only the window offered them
+reads the drag's items, by its number: `OfferedItems { window_id, drag, from }`
+answers a page of them, as many as fit, each its absolute path and the node
+the desktop listed there (`decode_offered_items_reply`), and how many the drag
+carries; it is refused once the offer has left that window, but for the window
+they were dropped on, which reads them until the desktop's next such drag or
+until it closes. `ItemsOfferEnded { window_id, serial, dropped }` says the
+offer left or, with the window-local point and the operation the pointer
+showed (`OfferDrop`), that they were dropped there; the owner performs that
+operation under its own authority, so no authority crosses.
+
 A **window of another application** takes a drop exactly as that
 application's slot does: the session finds the window's attested owner among
 the strip's groups and answers by the same rule, so a document dropped on an

@@ -3523,8 +3523,9 @@ impl NetInterfaceRatesRequest {
 ///
 /// Last come the volume's [`title`](MountRecord::title), the label its
 /// filesystem records — as the probe read it when the volume attached, and as
-/// a retitle set it since — and whether it is [`titled`](MountRecord::titled),
-/// its format taking a title; neither is shown on a
+/// a retitle set it since — whether it is [`titled`](MountRecord::titled), its
+/// format taking a title, and whether its title
+/// [takes writes](MountRecord::title_writes) now; none is shown on a
 /// [`withheld`](MountRecord::withheld) record.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -3549,6 +3550,7 @@ pub struct MountRecord {
     title_len: u8,
     title: [u8; VOLUME_TITLE_MAX],
     titled: bool,
+    title_writes: bool,
 }
 
 /// The live state of the volume behind a mount: how much of it is in use,
@@ -3579,8 +3581,9 @@ impl MountRecord {
     /// identity, the owner (4), the volume class (1), whether it is private
     /// (1), whether it is withheld (1) and whether its source was cut (1), the
     /// three fixed-capacity string buffers, then the title's length (1), its
-    /// buffer, whether the volume is titled (1) and the zero pad closing the
-    /// record on its eight-byte alignment.
+    /// buffer, whether the volume is titled (1), whether its title takes
+    /// writes (1) and the zero pad closing the record on its eight-byte
+    /// alignment.
     pub const WIRE_LEN: usize = Self::PAD_OFFSET.next_multiple_of(8);
 
     /// The storage-medium record ([`BlkMedium::encode`]), which ends where the
@@ -3595,7 +3598,8 @@ impl MountRecord {
     const FSTYPE_OFFSET: usize = Self::TARGET_OFFSET + MOUNT_TARGET_MAX;
     const TITLE_OFFSET: usize = Self::FSTYPE_OFFSET + MOUNT_FSTYPE_MAX;
     const TITLED_OFFSET: usize = Self::TITLE_OFFSET + 1 + VOLUME_TITLE_MAX;
-    const PAD_OFFSET: usize = Self::TITLED_OFFSET + 1;
+    const TITLE_WRITES_OFFSET: usize = Self::TITLED_OFFSET + 1;
+    const PAD_OFFSET: usize = Self::TITLE_WRITES_OFFSET + 1;
 
     /// Build a record from its parts.
     ///
@@ -3663,6 +3667,7 @@ impl MountRecord {
             title_len: 0,
             title: [0u8; VOLUME_TITLE_MAX],
             titled: false,
+            title_writes: false,
         };
         record.source[..source.len()].copy_from_slice(source);
         record.target[..target.len()].copy_from_slice(target);
@@ -3702,6 +3707,16 @@ impl MountRecord {
         Self { titled, ..self }
     }
 
+    /// This record, of a volume whose title a retitle may write now where
+    /// `writes`.
+    #[must_use]
+    pub const fn with_title_writes(self, writes: bool) -> Self {
+        Self {
+            title_writes: writes,
+            ..self
+        }
+    }
+
     /// This record, of a volume whose content carries `identity`: its key
     /// but for a twin's, published under a key of its own.
     #[must_use]
@@ -3722,6 +3737,7 @@ impl MountRecord {
             title_len: 0,
             title: [0; VOLUME_TITLE_MAX],
             titled: false,
+            title_writes: false,
             withheld: true,
             ..self
         }
@@ -3845,6 +3861,15 @@ impl MountRecord {
         self.titled
     }
 
+    /// Whether a retitle may write the volume's title now: its medium takes
+    /// writes, and its volume does or its format writes the title apart from
+    /// its files, as an ISO 9660 image's on a stick. False on a
+    /// [`withheld`](Self::withheld) record.
+    #[must_use]
+    pub const fn title_writes(&self) -> bool {
+        self.title_writes
+    }
+
     /// Encode `self` into its little-endian wire representation.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -3878,6 +3903,7 @@ impl MountRecord {
         out[Self::TITLE_OFFSET] = self.title_len;
         out[Self::TITLE_OFFSET + 1..Self::TITLED_OFFSET].copy_from_slice(&self.title);
         out[Self::TITLED_OFFSET] = u8::from(self.titled);
+        out[Self::TITLE_WRITES_OFFSET] = u8::from(self.title_writes);
         out
     }
 
@@ -3948,16 +3974,7 @@ impl MountRecord {
         {
             return Err(Errno::OutOfRange);
         }
-        let mut title_image = [0u8; VOLUME_TITLE_MAX];
-        title_image.copy_from_slice(&bytes[Self::TITLE_OFFSET + 1..Self::TITLED_OFFSET]);
-        let title =
-            VolumeTitle::from_wire(bytes[Self::TITLE_OFFSET], &title_image).map_err(|errno| {
-                match errno {
-                    Errno::LengthOutOfRange => Errno::LengthOutOfRange,
-                    _ => Errno::OutOfRange,
-                }
-            })?;
-        let titled = decode_bool(bytes[Self::TITLED_OFFSET])?;
+        let (title, titled, title_writes) = Self::decode_title(bytes)?;
         if withheld
             && (source_len != 0 || usage != VolumeStats::default() || !title.is_empty() || titled)
         {
@@ -4000,7 +4017,30 @@ impl MountRecord {
             title_len: title.len_byte(),
             title: *title.raw_bytes(),
             titled,
+            title_writes,
         })
+    }
+}
+
+impl MountRecord {
+    /// Decode a record's title, whether it is titled, and whether its title
+    /// takes writes, which it cannot without one.
+    fn decode_title(bytes: &[u8]) -> Result<(VolumeTitle, bool, bool), Errno> {
+        let mut title_image = [0u8; VOLUME_TITLE_MAX];
+        title_image.copy_from_slice(&bytes[Self::TITLE_OFFSET + 1..Self::TITLED_OFFSET]);
+        let title =
+            VolumeTitle::from_wire(bytes[Self::TITLE_OFFSET], &title_image).map_err(|errno| {
+                match errno {
+                    Errno::LengthOutOfRange => Errno::LengthOutOfRange,
+                    _ => Errno::OutOfRange,
+                }
+            })?;
+        let titled = decode_bool(bytes[Self::TITLED_OFFSET])?;
+        let title_writes = decode_bool(bytes[Self::TITLE_WRITES_OFFSET])?;
+        if title_writes && !titled {
+            return Err(Errno::OutOfRange);
+        }
+        Ok((title, titled, title_writes))
     }
 }
 
@@ -9545,6 +9585,41 @@ mod tests {
             MountRecord::from_bytes(&withheld),
             Err(Errno::OutOfRange),
             "a withheld record says nothing of its title"
+        );
+    }
+
+    /// Whether a volume's title takes writes crosses the wire beside whether
+    /// it keeps one, which it cannot without; both are withheld.
+    #[test]
+    fn a_mount_record_says_whether_its_title_takes_writes() {
+        let record = MountRecord::new(
+            b"stick",
+            b"/Storage/ubuntu",
+            b"iso9660",
+            MountFlags::READ_ONLY,
+            MountVolumeState {
+                usage: VolumeStats::default(),
+                availability: MountAvailability::Available,
+                medium: None,
+            },
+            [7; 16],
+        )
+        .unwrap()
+        .with_titled(true);
+        assert!(!record.title_writes(), "fixed until said otherwise");
+        let writes = record.with_title_writes(true);
+        let bytes = writes.to_le_bytes();
+        assert_eq!(MountRecord::from_bytes(&bytes), Ok(writes));
+        assert!(!writes.withheld().title_writes(), "withheld with the title");
+        let mut bad = bytes;
+        bad[MountRecord::TITLE_WRITES_OFFSET] = 2;
+        assert_eq!(MountRecord::from_bytes(&bad), Err(Errno::OutOfRange));
+        let mut untitled = bytes;
+        untitled[MountRecord::TITLED_OFFSET] = 0;
+        assert_eq!(
+            MountRecord::from_bytes(&untitled),
+            Err(Errno::OutOfRange),
+            "no title to write"
         );
     }
 
