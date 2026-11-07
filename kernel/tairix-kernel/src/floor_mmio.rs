@@ -22,7 +22,8 @@ use tairix_fdt::{Fdt, Node};
 use tairix_kernel_core::{InitSpawnCtx, IrqParkWaiter};
 use tairix_kernel_irq::Trigger;
 use tairix_kernel_mem::{
-    window_slots, AddressSpace, DmaPool, FrameAllocator, MmioMap, PageTable, PhysMap, VirtAddr,
+    window_slots, AddressSpace, DmaPool, FrameAllocator, MmioMap, PageTable, PhysAddr, PhysMap,
+    VirtAddr,
 };
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::dma::alloc_dma;
@@ -185,9 +186,16 @@ pub fn bring_up_virtio_mmio<P: MmioFloorPort>(
     let fdt = Fdt::new(dtb).map_err(|_| "floor: device tree unreadable")?;
 
     // SAFETY: the port's `MmioFloorPort` contract: the aperture the tree
-    // describes stays mapped as device memory and is reached only by volatile
-    // register access.
-    let bus = unsafe { virtio_mmio_bus_from_dtb(dtb) }.map_err(|_| "floor: virtio bus")?;
+    // describes stays mapped as device memory where its register map says,
+    // and is reached only by volatile register access.
+    let bus = unsafe {
+        virtio_mmio_bus_from_dtb(dtb, |base, len| {
+            P::registers()
+                .translate(PhysAddr::new(base), usize::try_from(len).ok()?)
+                .map(|at| at.cast::<u32>().as_ptr().cast_const())
+        })
+    }
+    .map_err(|_| "floor: virtio bus")?;
     let mmio = register_map::<P>()?;
     let provision = provision_virtio_mmio(
         &bus,

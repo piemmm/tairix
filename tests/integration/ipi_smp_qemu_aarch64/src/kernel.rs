@@ -6,8 +6,8 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use tairix_arch_aarch64::kernel_arch::{read_cntfrq, SecondaryStart};
 use tairix_arch_aarch64::{
-    enable_fp_el1, exceptions, fdt, gic, handle_panic_via_serial, preempt, qemu_exit, smp,
-    Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
+    exceptions, fdt, gic, handle_panic_via_serial, preempt, qemu_exit, smp, Aarch64Arch,
+    Aarch64ArchStorage, SERIAL_SINK,
 };
 use tairix_arch_api::{CpuId, SchedulerArch, SecondaryBringup, BOOT_CPU};
 use tairix_fdt::Fdt;
@@ -111,7 +111,6 @@ extern "C" fn secondary_entry(cpu: CpuId) -> ! {
     // started this core. The vector table and GIC CPU interface are
     // per-CPU, so each must be installed on the core that uses them.
     unsafe {
-        enable_fp_el1();
         exceptions::init_vectors();
         gic::init_secondary().expect("the GIC interface comes up");
         preempt::enable_ipi();

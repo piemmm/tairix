@@ -880,9 +880,11 @@ mod tests {
         let node = fat
             .lookup(root, fatboot::KERNEL_IMG_NAME.as_bytes())
             .expect("kernel8.img present");
-        let mut kernel8 = [0u8; 16];
+        let mut kernel8 = [0u8; tairix_arch_aarch64::image_header::HEADER_LEN + 16];
         let n = fat.read_at(node, 0, &mut kernel8).expect("kernel reads");
-        assert_eq!(&kernel8[..n], &[0xde, 0xad, 0xbe, 0xef]);
+        let code = tairix_arch_aarch64::image_header::HEADER_LEN;
+        assert!(tairix_arch_aarch64::image_header::header(&kernel8[..n]).is_some());
+        assert_eq!(&kernel8[code..n], &[0xde, 0xad, 0xbe, 0xef]);
         let info = fat.node_info(node).expect("kernel node info");
         assert_eq!(info.kind, NodeKind::RegularFile);
 

@@ -371,9 +371,9 @@ flatten to bare mode instead, on the reasoning that an identity-mapped kernel
 keeps every address — which stopped holding when the direct physical map moved
 above the user region (`plans/OPEN-DEFECTS.md` D56); bare mode would also make
 every access Device-typed on real silicon, exactly the aarch64 hazard below.
-**aarch64 keeps its MMU on**: it is already identity-mapped
-(`virt==phys`, Normal cacheable), and dropping the MMU would be *wrong* on real
-silicon — an MMU-off EL1 makes every access Device-nGnRnE, where an unaligned
+**aarch64 keeps its MMU on**: it parks the low regime on the empty root and
+runs the sweep from the kernel image and the direct map, and dropping the MMU
+would be *wrong* on real silicon — an MMU-off EL1 makes every access Device-nGnRnE, where an unaligned
 access faults, so an MMU-off sweep wedges the board (the defect that locked a
 real Raspberry Pi 4 while QEMU/TCG, ignoring Device-memory alignment, passed).
 The arch-neutral engine still tests DRAM under a cacheable mapping because it

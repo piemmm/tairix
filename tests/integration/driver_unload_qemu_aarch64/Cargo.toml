@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-driver-unload-qemu-aarch64"
-description = "plans/USB.md U1 QEMU integration test: prove the kernel driver-unload mechanism on the aarch64 virt board. It autoloads the signed driver stub through the production devmgr-driven spawn path (exactly as driver-spawn-qemu-aarch64), then tears it back down through the production InitSpawnCtx::terminate_driver_process seam (the symmetric partner of spawn_driver_process the driver-store server drives for StoreRequest::Unload) and asserts the driver task was reaped (scheduler live-task count 1->0) and its capability record + address-space-registry entry reclaimed, and that a second unload of the now-gone handle fails closed with NotFound (idempotent). PASS once teardown reclaimed everything and the idempotent miss was observed (audit 13001 node-bound + 4033 driver-unloaded + 4302)."
+description = "plans/USB.md U1 QEMU integration test: prove the kernel driver-unload mechanism on the aarch64 virt board. It autoloads the signed driver stub through the production devmgr-driven spawn path (exactly as driver-spawn-qemu-aarch64), then tears it back down through the production InitSpawnCtx::terminate_driver_process seam (the symmetric partner of spawn_driver_process the driver-store server drives for StoreRequest::Unload) and asserts the driver task was reaped (scheduler live-task count 1->0) and its capability record + address-space-registry entry reclaimed, and that a second unload of the now-gone handle fails closed with NotFound (idempotent). PASS once teardown reclaimed everything and the idempotent miss was observed (audit 13001 node-bound + 4033 driver-unloaded + 4313)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,23 +11,16 @@ publish = false
 [lints]
 workspace = true
 
-# This bin is the `PLAN.md` Stage 4.HW driver-spawn vertical: the proving
-# `-M virt` slice of the kernel-side production spawner (verified `.rxe`
-# payload from `/System/Drivers/` → `build_process_image` → spawn → reply
-# over `ipc_send`, with a budget-bounded cooperative wait host-side). The
-# fixture program (`tairix-test-driver-register-program`) is built
-# position-independent by `build.rs` and converted to an `rxe` blob
-# (`tairix_itest_harness::elf2rxe`) carrying the kernel's compiled-in syscall
-# CFI tag. On boot the test reads the GICv2 base + timer rate from the
-# embedded `virt` DTB, enables the identity MMU + EL1 vectors, builds a live
-# FrameAllocator, publishes the reply Port (send-gated on a driver-class
-# capability) into a live PortRegistry, installs the production
-# KernelDispatchHook through a DispatchCallbackSlot, spawns the stub through
-# the production InitSpawnCtx::spawn_driver_process seam (KernelInitSpawner +
-# InitCtxDriverProcessSpawn over the Aarch64ProcessSpawn image builder), and drains the
-# cooperative `step` loop polling `Port::recv` under a bounded budget. PASS
-# once the decoded DriverRegisterReply round-trips the stub's handle; any
-# shortfall writes a distinct failure finisher or times out (fail-loud).
+# This bin is the `plans/USB.md` U1 driver-unload vertical. The driver-stub
+# program (`tairix-test-driver-register-program`) is built position-independent
+# by `build.rs` and wrapped as the signed payload of a `kind = UserSpace` driver
+# image. On boot the test reads the GICv2 base + timer rate from the embedded
+# `virt` DTB, brings up the GIC, builds the live kernel registries, autoloads
+# the stub through the production devmgr-driven spawn path, and tears it down
+# through the production InitSpawnCtx::terminate_driver_process seam. PASS once
+# the driver's task, capability record and address-space entry are reclaimed
+# and a second unload fails closed with NotFound; any shortfall writes a
+# distinct failure finisher (fail-loud).
 #
 # The `test-hooks` feature is on by default. Release builds that enable it
 # are rejected by the `compile_error!` guard in `src/main.rs` (no hacks; fail

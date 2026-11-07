@@ -3,7 +3,10 @@
 //! Supervisor writes honour read-only pages (`CR0.WP`) on every CPU. Where
 //! the CPU offers them, the kernel also cannot execute a user page
 //! (`CR4.SMEP`) or read or write one (`CR4.SMAP`), and user code cannot read
-//! the descriptor-table and machine-status registers (`CR4.UMIP`).
+//! the descriptor-table and machine-status registers (`CR4.UMIP`). User code
+//! reads neither the time-stamp counter nor the performance counters
+//! (`CR4.TSD` set, `CR4.PCE` clear, whatever firmware left), so the clock the
+//! kernel coarsens is the only one it has.
 //!
 //! The kernel reaches user memory only through the direct map, so it never
 //! sets `RFLAGS.AC` to open a user page to itself. What is left is the `AC`
@@ -146,7 +149,8 @@ pub(crate) fn to_hold(uncapped: &crate::cpuid::Uncapped) -> Result<Protections, 
     in_force().held_by(offered_here(uncapped))
 }
 
-/// Hold the calling CPU to `protections`, with supervisor write protection.
+/// Hold the calling CPU to `protections`, with supervisor write protection
+/// and the time-stamp and performance counters closed to user code.
 ///
 /// # Safety
 ///
@@ -154,12 +158,13 @@ pub(crate) fn to_hold(uncapped: &crate::cpuid::Uncapped) -> Result<Protections, 
 /// [`to_hold`] answered `Ok` on this CPU, and no user page mapped in the
 /// active root.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub(crate) unsafe fn hold(protections: Protections) {
+pub unsafe fn hold(protections: Protections) {
     const CR0_WP: u64 = 1 << 16;
     // SAFETY: the CPU offers every bit set here; `CR0.WP` only makes a
     // supervisor write honour a read-only leaf, which nothing the kernel runs
     // writes through, and with `AC` clear and no user page mapped the `CR4`
-    // bits fault nothing the kernel does.
+    // bits fault nothing the kernel does. `TSD` and `PCE` only make a user
+    // `rdtsc`, `rdtscp` or `rdpmc` fault.
     unsafe {
         core::arch::asm!(
             "mov {t}, cr0",
@@ -167,14 +172,24 @@ pub(crate) unsafe fn hold(protections: Protections) {
             "mov cr0, {t}",
             "mov {t}, cr4",
             "or {t}, {cr4}",
+            "and {t}, {keep}",
             "mov cr4, {t}",
             t = out(reg) _,
             wp = const CR0_WP,
-            cr4 = in(reg) protections.cr4(),
+            cr4 = in(reg) protections.cr4() | CR4_TSD,
+            keep = in(reg) !CR4_PCE,
             options(nostack),
         );
     }
 }
+
+/// `CR4.TSD`: set, `rdtsc` and `rdtscp` run at CPL 0 alone.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub const CR4_TSD: u64 = 1 << 2;
+
+/// `CR4.PCE`: set, `rdpmc` runs at any privilege level.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub const CR4_PCE: u64 = 1 << 8;
 
 #[cfg(test)]
 mod tests {

@@ -2,10 +2,10 @@
 //! program (crt0 + abi-sys) on the aarch64 `virt` board and assert its `exit`
 //! syscall carries the decimal argument it was spawned with.
 //!
-//! On boot the test builds a stage-1 address space that identity-maps the
-//! kernel and MMIO (EL1), activates it, installs the EL1 vector table and a
-//! dispatch callback, then calls the production capability-checked, audited
-//! spawn caller (`tairix_kernel_core::spawn_and_enter`, gated on
+//! On boot the test builds an empty process address space, activates it,
+//! installs the EL1 vector table and a dispatch callback, then calls the
+//! production capability-checked, audited spawn caller
+//! (`tairix_kernel_core::spawn_and_enter`, gated on
 //! `CAP_PROC_SPAWN`) to materialise the program's EL0 image — built from the
 //! `rxe` blob the build script produced — and `eret` into it. The program
 //! parses `argv[1]` and returns it; crt0 routes the return through the `exit`

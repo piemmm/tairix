@@ -33,6 +33,7 @@ const ASM_SOURCES: &[(&str, &str)] = &[
     ("lib.rs", include_str!("lib.rs")),
     ("memtag.rs", include_str!("memtag.rs")),
     ("paging.rs", include_str!("paging.rs")),
+    ("kernel_root.rs", include_str!("paging/kernel_root.rs")),
     ("percpu_hal.rs", include_str!("percpu_hal.rs")),
     ("preempt.rs", include_str!("preempt.rs")),
     ("protection.rs", include_str!("protection.rs")),
@@ -144,13 +145,20 @@ fn every_source_carrying_assembly_is_inspected() {
     );
 }
 
-/// The kernel never clears `PSTATE.PAN` to reach a user page, and translation
-/// comes on with `SPAN` clear under PAN: the only write to the PAN register is
-/// `protection::hold`'s, which sets it, and every `SCTLR_EL1` write installs
-/// the MMU-off constant or [`crate::protection::sctlr_mmu_on`]'s value.
+/// The kernel never clears `PSTATE.PAN` to reach a user page: the only write
+/// to the PAN register is `protection::hold`'s, which sets it. Every
+/// `SCTLR_EL1` write installs a known value: the MMU-off constant, the MMU-on
+/// one the trampolines turn translation on with before any user page exists,
+/// or, once a CPU is held, [`crate::protection::sctlr_mmu_on`]'s.
 #[test]
 fn only_hold_writes_pan_and_every_sctlr_write_is_a_known_value() {
-    const MMU_OFF: [&str; 2] = ["mov x0, #0x0800", "movk x0, #0x30D0, lsl #16"];
+    const MMU_OFF: [&str; 2] = [
+        "mov x0, #({SCTLR_MMU_OFF} & 0xffff)",
+        "movk x0, #({SCTLR_MMU_OFF} >> 16), lsl #16",
+    ];
+    const ENABLE: &str = "tairix_aarch64_enable_mmu:";
+    const ENABLE_VALUE: &str = "ldr x0, ={SCTLR_MMU_ON}";
+    const ENABLE_BRANCH: &str = "b tairix_aarch64_enable_mmu";
     const MMU_ON: &str =
         "sctlr = in(reg) crate::protection::sctlr_mmu_on(crate::protection::pan_in_force()),";
     let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
@@ -169,7 +177,8 @@ fn only_hold_writes_pan_and_every_sctlr_write_is_a_known_value() {
             if lower.starts_with("msr sctlr_el1,") {
                 sctlr_writes += 1;
                 let known = if tairix_fuzzseed::sources::is_assembly(source.name()) {
-                    at >= 2 && lines[at - 2..at] == MMU_OFF
+                    (at >= 2 && lines[at - 2..at] == MMU_OFF)
+                        || (at >= 1 && lines[at - 1] == ENABLE)
                 } else {
                     source.text().matches(MMU_ON).count() == 1
                 };
@@ -187,7 +196,25 @@ fn only_hold_writes_pan_and_every_sctlr_write_is_a_known_value() {
         "the one PAN write sets it"
     );
     assert_eq!(
-        sctlr_writes, 4,
-        "the three MMU-off writes and the one MMU-on write"
+        sctlr_writes, 5,
+        "the three MMU-off writes, the trampolines' enable and the write that settles SPAN"
     );
+    // Translation is only ever turned on with the known MMU-on value.
+    for source in tairix_fuzzseed::sources::crate_sources(root).expect("the port's sources") {
+        if !tairix_fuzzseed::sources::is_assembly(source.name()) {
+            continue;
+        }
+        let lines = instructions(source.name(), source.text());
+        for (at, _) in lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| *line == ENABLE_BRANCH)
+        {
+            assert!(
+                at >= 2 && lines[at - 2] == ENABLE_VALUE,
+                "{}: translation turned on with an unknown SCTLR_EL1",
+                source.relative()
+            );
+        }
+    }
 }

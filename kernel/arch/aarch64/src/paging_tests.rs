@@ -1,106 +1,11 @@
 //! Host unit tests for the aarch64 stage-1 paging primitives.
 //!
-//! These cover the pure descriptor/index arithmetic and the host-side
-//! table walk (the `&mut`-recovering `map_4k` + a manual translate
-//! cross-check). The `TTBR0_EL1`/`SCTLR_EL1` activation is freestanding
-//! and is exercised by the memory-isolation QEMU vertical, not here.
+//! These cover the pure descriptor/index arithmetic, the typed direct map,
+//! and the host-side table walk (`map_4k_with_attrs` and a manual translate
+//! cross-check). Loading a root is freestanding and is exercised by the QEMU
+//! verticals, not here.
 
 use super::*;
-
-#[test]
-fn mmu_off_alloc_discipline_is_monotonic_and_fails_closed() {
-    // The MMU-off counter discipline (plain load + store — exclusives
-    // never succeed on the BCM2711's Device-nGnRnE MMU-off memory, so
-    // `fetch_add` would spin forever on real silicon) must hand out
-    // every frame exactly once and then fail closed.
-    static POOL: PageTablePool = PageTablePool::new();
-    let mut seen = [0usize; POOL_SIZE];
-    for slot in &mut seen {
-        let entries = POOL
-            .alloc_with(false)
-            .expect("pool exhausted before POOL_SIZE frames");
-        assert!(entries.iter().all(|&e| e == 0), "frame not zeroed");
-        *slot = entries.as_ptr() as usize;
-    }
-    let mut sorted = seen;
-    sorted.sort_unstable();
-    assert!(
-        sorted.windows(2).all(|w| w[0] != w[1]),
-        "MMU-off discipline handed out an aliased frame"
-    );
-    // Exhaustion fails closed, repeatedly, without wrapping the counter.
-    assert!(POOL.alloc_with(false).is_none());
-    assert!(POOL.alloc_with(false).is_none());
-    // And the MMU-on discipline agrees the pool is exhausted.
-    assert!(POOL.alloc_with(true).is_none());
-}
-
-#[test]
-fn mmu_disciplines_share_one_counter() {
-    // A pool partially consumed MMU-off (the boot identity map) keeps
-    // allocating distinct frames once translation is live.
-    static POOL: PageTablePool = PageTablePool::new();
-    let off = POOL.alloc_with(false).expect("first frame");
-    let on = POOL.alloc_with(true).expect("second frame");
-    assert_ne!(off.as_ptr(), on.as_ptr());
-}
-
-#[test]
-fn park_root_publication_requires_live_stage1_and_is_set_once() {
-    let park_root = ParkRoot::new();
-    assert_eq!(park_root.published(), None);
-    Stage1TranslationEnabled.publish_park_root(&park_root, 0x4000_0000);
-    assert_eq!(park_root.published(), Some(0x4000_0000));
-
-    Stage1TranslationEnabled.publish_park_root(&park_root, 0x8000_0000);
-    assert_eq!(park_root.published(), Some(0x4000_0000));
-}
-
-#[test]
-fn park_root_publication_sweeps_the_word_to_point_of_coherency() {
-    // The boot CPU publishes the boot page-table root with a cacheable
-    // store, but its only other reader — a freshly-released secondary in
-    // `adopt_boot_translation` — loads it with the MMU (and cache) off,
-    // non-cacheably from DRAM. The publish must therefore clean the word
-    // to the point of coherency, or every secondary reads a stale zero
-    // and parks with "no boot root" (a real-silicon coherency hazard
-    // cache-less QEMU cannot show). Assert the exact word was swept.
-    let _ = take_recorded_poc_sweeps();
-    let park_root = ParkRoot::new();
-    Stage1TranslationEnabled.publish_park_root(&park_root, 0x4000_0000);
-    let addr = core::ptr::from_ref(park_root.word()) as u64;
-    let expected = (addr, core::mem::size_of::<AtomicU64>() as u64);
-    let sweeps = take_recorded_poc_sweeps();
-    assert!(
-        sweeps.contains(&expected),
-        "publish must clean the park-root word to the point of coherency \
-         (expected {expected:?}); recorded sweeps: {sweeps:?}"
-    );
-}
-
-#[test]
-fn identity_window_covers_highest_masked_gigapage() {
-    let mut device = [0u64; GIGAPAGE_MASK_WORDS];
-    let mut ram = [0u64; GIGAPAGE_MASK_WORDS];
-    // Both masks empty: no window at all (callers fail closed).
-    assert_eq!(identity_window_gigapages(&device, &ram), 0);
-    // QEMU virt shape: Device GiB 0, RAM GiB 1 ⇒ 2 gigapages.
-    device[0] = 0b0001;
-    ram[0] = 0b0010;
-    assert_eq!(identity_window_gigapages(&device, &ram), 2);
-    // Pi 4 shape: RAM from GiB 0, MMIO in GiB 3 ⇒ 4 gigapages — a
-    // shorter window would drop the UART/GIC from the space the
-    // instant it activates (the metal silence after "boot completed").
-    device[0] = 0b1000;
-    ram[0] = 0b0001;
-    assert_eq!(identity_window_gigapages(&device, &ram), 4);
-    // A gigapage in a later mask word moves the window past it.
-    ram[1] = 1 << 5; // gigapage 69
-    assert_eq!(identity_window_gigapages(&device, &ram), 70);
-    // The top representable slot yields the full 512-entry window.
-    ram[GIGAPAGE_MASK_WORDS - 1] = 1 << 63;
-    assert_eq!(identity_window_gigapages(&device, &ram), ENTRIES_PER_TABLE);
-}
 
 #[test]
 fn dcache_line_bytes_decodes_dminline() {
@@ -114,36 +19,142 @@ fn dcache_line_bytes_decodes_dminline() {
 }
 
 #[test]
-fn identity_gigapage_leaf_leaves_unbacked_slots_invalid() {
-    // Device wins over a kernel extent; a kernel extent maps Normal;
-    // neither maps nothing — the unbacked-space policy that keeps
-    // real-silicon speculation from wandering onto a bus window no device
-    // answers.
+fn the_pool_hands_out_each_frame_once_and_then_fails_closed() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut seen = [0usize; POOL_SIZE];
+    for slot in &mut seen {
+        let entries = POOL.alloc().expect("a frame below the capacity");
+        assert!(entries.iter().all(|&e| e == 0), "frame not zeroed");
+        *slot = entries.as_ptr() as usize;
+    }
+    seen.sort_unstable();
+    assert!(seen.windows(2).all(|w| w[0] != w[1]), "an aliased frame");
+    assert!(POOL.alloc().is_none());
+    assert!(POOL.alloc().is_none(), "and stays exhausted");
+}
+
+/// A process root carries nothing of the kernel's: the kernel lives in the
+/// other regime, so a null dereference in kernel mode faults.
+#[test]
+fn a_process_root_maps_nothing_until_asked() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let space = AddressSpace::new_user(&POOL).expect("a root");
+    for va in [0, 0x1000, 1 << 30, 0x4020_0000, 511 << 30] {
+        assert_eq!(space.translate(va), None, "{va:#x}");
+    }
+    // SAFETY: the pool's own root, only read.
+    let root = unsafe { &*POOL.table_at(space.root_phys()).expect("the root") };
+    assert!(root.iter().all(|&entry| entry == 0));
+}
+
+/// Each direct-map gigabyte is typed once; a second type is refused, not
+/// applied, so no address is ever reached under two memory types. The
+/// gigabytes are this test's alone: the host tests share the kernel root.
+#[test]
+fn the_direct_map_types_each_gigabyte_once() {
+    let gigabytes = |indices: &[usize]| {
+        gigapage_mask_from_extents(
+            &indices
+                .iter()
+                .map(|&index| ((index as u64) << 30, 1))
+                .collect::<std::vec::Vec<_>>(),
+        )
+    };
+    assert_eq!(holding(300), None);
+    assert_eq!(reveal(&gigabytes(&[300]), Holding::Ram), gigabytes(&[300]));
     assert_eq!(
-        identity_gigapage_leaf(true, false),
-        Some(device_leaf_attrs(true))
+        reveal(&gigabytes(&[300, 301]), Holding::Registers),
+        gigabytes(&[301]),
+        "the RAM gigabyte keeps its type"
     );
     assert_eq!(
-        identity_gigapage_leaf(true, true),
-        Some(device_leaf_attrs(true))
+        reveal(&gigabytes(&[302]), Holding::Config),
+        gigabytes(&[302])
     );
     assert_eq!(
-        identity_gigapage_leaf(false, true),
-        Some(normal_leaf_attrs(true))
+        reveal(&gigabytes(&[300]), Holding::Ram),
+        gigabytes(&[300]),
+        "again, unchanged"
     );
-    assert_eq!(identity_gigapage_leaf(false, false), None);
+    assert_eq!(holding(300), Some(Holding::Ram));
+    assert_eq!(holding(301), Some(Holding::Registers));
+    assert_eq!(holding(302), Some(Holding::Config));
+
+    assert!(physmap_covers(300 << 30, PAGE_SIZE as u64));
+    assert!(
+        !physmap_covers((300 << 30) + (1 << 30) - 8, 16),
+        "into the registers"
+    );
+    assert!(!physmap_covers(301 << 30, PAGE_SIZE as u64));
+    assert_eq!(
+        registers_virt(301 << 30, 0x100),
+        Some(physmap_virt(301 << 30))
+    );
+    assert_eq!(
+        registers_virt(302 << 30, 0x100),
+        Some(physmap_virt(302 << 30))
+    );
+    assert_eq!(registers_virt(300 << 30, 0x100), None, "RAM is no register");
+    assert_eq!(registers_virt(303 << 30, 0x100), None, "nor is nothing");
+    assert_eq!(registers_virt(301 << 30, 0), None, "an empty window");
+    assert_eq!(registers_virt(u64::MAX - 8, 16), None, "a wrapping one");
+
+    let root = kernel_root_entries();
+    assert_eq!(
+        root[PHYSMAP_FIRST_SLOT + 301].load(Ordering::Acquire),
+        descriptor(301 << 30, device_leaf_attrs(true))
+    );
+    assert_ne!(
+        root[PHYSMAP_FIRST_SLOT + 300].load(Ordering::Acquire) & attrs::PXN,
+        0,
+        "RAM is never executed through the map"
+    );
 }
 
 #[test]
-fn an_identity_window_stops_at_the_span_it_was_built_for() {
+fn a_gigabyte_past_the_direct_map_is_never_typed() {
+    let mut past = [0u64; GIGAPAGE_MASK_WORDS];
+    past[MAX_PHYSMAP_GIB / 64] |= 1 << (MAX_PHYSMAP_GIB % 64);
+    assert_eq!(reveal(&past, Holding::Ram), [0; GIGAPAGE_MASK_WORDS]);
+    assert_eq!(holding(MAX_PHYSMAP_GIB), None);
+    assert!(!physmap_covers(PHYSMAP_REACH, PAGE_SIZE as u64));
+}
+
+/// The trampoline's early blocks are the one leaf the port builds both
+/// writable and executable, and the kernel root replaces them; the identity
+/// page executes but is never written.
+#[test]
+fn only_the_early_map_is_writable_and_executable() {
+    assert!(writable_and_executable(EARLY_IMAGE_BLOCK));
+    assert!(is_block(EARLY_IMAGE_BLOCK | attrs::VALID));
+    for access in [
+        KernelAccess::Execute,
+        KernelAccess::Read,
+        KernelAccess::Write,
+    ] {
+        for block in [false, true] {
+            assert!(!writable_and_executable(access.leaf(block)), "{access:?}");
+        }
+    }
+    assert!(!writable_and_executable(IDMAP_LEAF));
+    assert_eq!(IDMAP_LEAF & attrs::PXN, 0, "the identity page executes");
+}
+
+#[test]
+fn map_4k_with_attrs_refuses_a_writable_and_executable_leaf() {
     static POOL: PageTablePool = PageTablePool::new();
-    let space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
-    // The window is fixed at construction from the discovered facts: a
-    // gigapage beyond its span resolves to nothing, and nothing widens it
-    // later — RAM above it is reached through the direct physical map, not
-    // by growing a mapping into the half user code addresses.
-    assert_eq!(space.translate(3 << 30), None);
-    assert_eq!(space.translate(511u64 << 30), None);
+    let mut space = AddressSpace::new_user(&POOL).expect("a root");
+    let va = 64u64 << 30;
+    let rwx = EARLY_IMAGE_BLOCK | attrs::TABLE_OR_PAGE;
+    assert!(space
+        .map_4k_with_attrs(&POOL, va, 0x4100_0000, rwx)
+        .is_none());
+    let el0_rwx = el0_data_leaf_attrs() & !attrs::UXN;
+    assert!(space
+        .map_4k_with_attrs(&POOL, va, 0x4100_0000, el0_rwx)
+        .is_none());
+    assert_eq!(space.translate(va), None, "nothing was mapped");
+    assert_eq!(POOL.used.load(Ordering::SeqCst), 1, "no table was drawn");
 }
 
 #[test]
@@ -158,17 +169,17 @@ fn table_index_extracts_each_level() {
 #[test]
 fn descriptor_round_trips_the_output_address() {
     let pa = 0x4_1234_5000;
-    let d = descriptor(pa, normal_leaf_attrs(false));
+    let d = descriptor(pa, KernelAccess::Write.leaf(false));
     assert_eq!(phys_from_descriptor(d), pa);
     // The offset bits are masked off the output address.
-    let d2 = descriptor(pa | 0xABC, normal_leaf_attrs(false));
+    let d2 = descriptor(pa | 0xABC, KernelAccess::Write.leaf(false));
     assert_eq!(phys_from_descriptor(d2), pa);
 }
 
 #[test]
 fn block_vs_table_low_bits() {
     // Block descriptor: valid set, bit 1 clear (0b01).
-    let block = descriptor(0x4000_0000, normal_leaf_attrs(true));
+    let block = descriptor(0x4000_0000, KernelAccess::Write.leaf(true));
     assert!(is_block(block));
     assert_eq!(block & 0b11, 0b01);
     // Table descriptor: 0b11.
@@ -176,7 +187,7 @@ fn block_vs_table_low_bits() {
     assert!(!is_block(table));
     assert_eq!(table & 0b11, 0b11);
     // Page (L3) descriptor: 0b11.
-    let page = descriptor(0x4000_0000, normal_leaf_attrs(false));
+    let page = descriptor(0x4000_0000, KernelAccess::Write.leaf(false));
     assert!(!is_block(page));
     assert_eq!(page & 0b11, 0b11);
 }
@@ -184,7 +195,7 @@ fn block_vs_table_low_bits() {
 #[test]
 fn leaf_attrs_select_the_right_mair_index() {
     assert_eq!(
-        normal_leaf_attrs(true) & (0b111 << 2),
+        KernelAccess::Write.leaf(true) & (0b111 << 2),
         attrs::ATTR_IDX_NORMAL
     );
     assert_eq!(
@@ -202,7 +213,7 @@ fn leaf_attrs_select_the_right_mair_index() {
     );
     assert!(page_flags_from_leaf(config_leaf_attrs(false)).contains(PageFlags::DEVICE));
     // Both set the access flag so first touch does not fault.
-    assert_ne!(normal_leaf_attrs(true) & attrs::AF, 0);
+    assert_ne!(KernelAccess::Write.leaf(true) & attrs::AF, 0);
     assert_ne!(device_leaf_attrs(true) & attrs::AF, 0);
 }
 
@@ -277,7 +288,7 @@ fn leaf_attrs_for_device_user_is_el0_accessible() {
 #[test]
 fn map_4k_with_attrs_uses_the_supplied_leaf_attrs() {
     static POOL: PageTablePool = PageTablePool::new();
-    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let mut space = AddressSpace::new_user(&POOL).expect("a root");
 
     let va: u64 = 96u64 << 30;
     let pa: u64 = 0x4567_8000;
@@ -384,6 +395,30 @@ fn the_dma_mark_rides_its_own_software_bit() {
     }
 }
 
+/// A kernel page mapped for data executes nowhere, so a write into the heap
+/// or a stack can never be run; one asked to execute is read-only at EL1 and
+/// unreachable from EL0. What each decodes back is what was asked.
+#[test]
+fn kernel_pages_are_never_both_writable_and_executable() {
+    let data = AddressSpace::leaf_attrs_for(PageFlags::READ | PageFlags::WRITE);
+    assert_eq!(data, KernelAccess::Write.leaf(false));
+    assert_ne!(data & attrs::PXN, 0, "the kernel cannot run its data");
+    assert_ne!(data & attrs::UXN, 0);
+    assert_eq!(
+        page_flags_from_leaf(data),
+        PageFlags::READ | PageFlags::WRITE
+    );
+    let code = AddressSpace::leaf_attrs_for(PageFlags::READ | PageFlags::EXEC);
+    assert_eq!(code, KernelAccess::Execute.leaf(false));
+    assert_eq!(code & attrs::PXN, 0);
+    assert_ne!(code & attrs::UXN, 0, "EL0 never runs kernel code");
+    assert_eq!(code & (0b11 << 6), attrs::AP_RO_EL1);
+    assert_eq!(
+        page_flags_from_leaf(code),
+        PageFlags::READ | PageFlags::EXEC
+    );
+}
+
 #[test]
 fn page_flags_round_trip_through_the_dma_coherent_leaf() {
     // The Normal-NC leaf decodes back to a `DMA_COHERENT` user RW page —
@@ -439,160 +474,17 @@ fn sctlr_values_keep_the_unknown_reset_traps_clear() {
 }
 
 #[test]
-fn identity_gigapages_map_device_then_normal() {
-    static POOL: PageTablePool = PageTablePool::new();
-    let space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("two gigapages");
-    let root = POOL
-        .table_at(space.root_phys())
-        .expect("the pool's own root");
-    // SAFETY: a live table page from the process-static pool; reading its
-    // first two entries is sound.
-    let (e0, e1) = unsafe { ((*root)[0], (*root)[1]) };
-    // Under the default mask GiB 0 is Device, GiB 1 is Normal; both are
-    // valid blocks.
-    assert!(is_block(e0));
-    assert!(is_block(e1));
-    assert_eq!(e0 & (0b111 << 2), attrs::ATTR_IDX_DEVICE);
-    assert_eq!(e1 & (0b111 << 2), attrs::ATTR_IDX_NORMAL);
-    assert_eq!(phys_from_descriptor(e0), 0);
-    assert_eq!(phys_from_descriptor(e1), 1 << 30);
-}
-
-#[test]
-fn identity_device_mask_derives_the_virt_layout() {
-    // QEMU `virt`: PL011 + GICD/GICC in GiB 0, the kernel image in
-    // GiB 1 (`aarch64-virt.ld`, load 0x4020_0000) — the historic
-    // "GiB 0 Device" layout falls out of the derivation.
-    let mask = identity_device_mask(
-        &[(0x0900_0000, 1), (0x0800_0000, 1), (0x0801_0000, 1)],
-        [0; GIGAPAGE_MASK_WORDS],
-        0x4020_0000,
-        0x4060_0000,
-    );
-    assert_eq!(mask, DEFAULT_DEVICE_GIGAPAGES);
-}
-
-#[test]
-fn identity_device_mask_derives_the_pi4_layout() {
-    // Raspberry Pi 4: the kernel image at 0x8_0000 keeps GiB 0 Normal
-    // (the CPU executes from it), and the discovered PL011/GIC-400
-    // bases put GiB 3 — the BCM2711 high-peripheral window — on the
-    // Device side.
-    let mask = identity_device_mask(
-        &[(0xFE20_1000, 1), (0xFF84_1000, 1), (0xFF84_2000, 1)],
-        [0; GIGAPAGE_MASK_WORDS],
-        0x8_0000,
-        0x48_0000,
-    );
-    let mut expected = [0u64; GIGAPAGE_MASK_WORDS];
-    expected[0] = 1 << 3;
-    assert_eq!(mask, expected);
-    assert!(gigapage_is_device(&mask, 3));
-    assert!(!gigapage_is_device(&mask, 0));
-}
-
-#[test]
-fn identity_device_mask_keeps_the_kernel_gigapages_normal() {
-    // A discovered MMIO base sharing the kernel image's gigapage cannot
-    // be expressed at 1 GiB granularity; the kernel's gigapages win
-    // (Normal, executable) — including every gigapage the image spans.
-    let mask = identity_device_mask(
-        &[(0x0900_0000, 1)],
-        [0; GIGAPAGE_MASK_WORDS],
-        0,
-        0x8000_0000,
-    );
-    assert_eq!(mask, [0u64; GIGAPAGE_MASK_WORDS]);
-    // So do gigapages a window mask names.
-    let windows = gigapage_mask_from_extents(&[(0x0800_0000, 1), (3 << 30, 1)]);
-    let mask = identity_device_mask(&[], windows, 0, 0x8000_0000);
-    assert!(!gigapage_is_device(&mask, 0));
-    assert!(gigapage_is_device(&mask, 3));
-
-    // A base beyond the 512 GiB identity window has no slot to set.
-    let mask = identity_device_mask(
-        &[(1u64 << 60, 1)],
-        [0; GIGAPAGE_MASK_WORDS],
-        0x4020_0000,
-        0x4060_0000,
-    );
-    assert_eq!(mask, [0u64; GIGAPAGE_MASK_WORDS]);
-
-    // An extent marks every gigapage it overlaps: a host's configuration
-    // region and windows spanning several.
-    let mask = identity_device_mask(
-        &[(0x40_1000_0000, 0x1000_0000), (0x8000_0000, 3 << 30)],
-        [0; GIGAPAGE_MASK_WORDS],
-        0x4020_0000,
-        0x4060_0000,
-    );
-    assert!(gigapage_is_device(&mask, 256));
-    assert!((2..5).all(|index| gigapage_is_device(&mask, index)));
-    assert!(!gigapage_is_device(&mask, 5));
-}
-
-#[test]
-fn only_the_device_gigapages_reach_a_register_window() {
-    // The default mask's GiB 0 is the one Device bit every host test keeps;
-    // GiB 1 and 2 stay Normal (or unmapped) under every mask a test sets.
-    let page = PAGE_SIZE as u64;
-    assert!(identity_device_covers(0x0900_0000, page));
-    assert!(identity_device_covers(0, 1 << 30), "the whole gigapage");
-    assert!(!identity_device_covers(1 << 30, page), "RAM is no window");
-    assert!(!identity_device_covers(2 << 30, page));
-    // A window straddling out of the Device gigapage fails closed whole.
-    assert!(!identity_device_covers((1 << 30) - page, 2 * page));
-    // Zero length reaches no byte; a wrapping range and one past the
-    // table's last slot refuse.
-    assert!(!identity_device_covers(0x0900_0000, 0));
-    assert!(!identity_device_covers(u64::MAX, 2));
-    assert!(!identity_device_covers(
-        (ENTRIES_PER_TABLE as u64) << 30,
-        page
-    ));
-}
-
-#[test]
-fn configured_device_gigapages_select_the_leaf_attributes() {
-    static POOL: PageTablePool = PageTablePool::new();
-
-    // Add GiB 3 (the Pi 4 high-peripheral window) to the Device set
-    // while keeping the default GiB-0 bit, so concurrently-running
-    // tests that rely on the default "GiB 0 Device / GiB 1 Normal"
-    // layout observe no change.
-    let mut mask = DEFAULT_DEVICE_GIGAPAGES;
-    mask[0] |= 1 << 3;
-    configure_device_gigapages(mask);
-    assert_eq!(device_gigapages(), mask);
-
-    let space = AddressSpace::new_identity_gigapages(&POOL, 4).expect("four gigapages");
-    let root = POOL
-        .table_at(space.root_phys())
-        .expect("the pool's own root");
-    // SAFETY: a live table page from the process-static pool; reading its
-    // first four entries is sound.
-    let entries = unsafe { [(*root)[0], (*root)[1], (*root)[2], (*root)[3]] };
-    assert_eq!(entries[0] & (0b111 << 2), attrs::ATTR_IDX_DEVICE);
-    assert_eq!(entries[1] & (0b111 << 2), attrs::ATTR_IDX_NORMAL);
-    assert_eq!(entries[2] & (0b111 << 2), attrs::ATTR_IDX_NORMAL);
-    assert_eq!(entries[3] & (0b111 << 2), attrs::ATTR_IDX_DEVICE);
-
-    // Restore the default so the process-global slot is left as the
-    // other host tests expect.
-    configure_device_gigapages(DEFAULT_DEVICE_GIGAPAGES);
-    assert_eq!(device_gigapages(), DEFAULT_DEVICE_GIGAPAGES);
-}
-
-#[test]
 fn map_4k_walks_and_translates() {
     static POOL: PageTablePool = PageTablePool::new();
-    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let mut space = AddressSpace::new_user(&POOL).expect("a root");
 
-    // Map a 4 KiB page well above the identity window (64 GiB) so the
-    // walk allocates fresh L2/L3 tables rather than shattering a block.
+    // Map a 4 KiB page at 64 GiB, where the walk allocates fresh L2/L3
+    // tables.
     let va: u64 = 64u64 << 30;
     let pa: u64 = 0x4123_4000;
-    space.map_4k(&POOL, va, pa).expect("map the page");
+    space
+        .map_4k_with_attrs(&POOL, va, pa, KernelAccess::Write.leaf(false))
+        .expect("map the page");
 
     // Manually walk the just-built hierarchy and confirm it translates
     // `va` to `pa` (the host analogue of an MMU lookup).
@@ -606,9 +498,23 @@ fn map_4k_walks_and_translates() {
 #[test]
 fn map_4k_rejects_misaligned_inputs() {
     static POOL: PageTablePool = PageTablePool::new();
-    let mut space = AddressSpace::new_identity_gigapages(&POOL, 1).expect("identity map");
-    assert!(space.map_4k(&POOL, 0x1_0001, 0x4000_0000).is_none());
-    assert!(space.map_4k(&POOL, 0x1_0000, 0x4000_0001).is_none());
+    let mut space = AddressSpace::new_user(&POOL).expect("a root");
+    assert!(space
+        .map_4k_with_attrs(
+            &POOL,
+            0x1_0001,
+            0x4000_0000,
+            KernelAccess::Write.leaf(false)
+        )
+        .is_none());
+    assert!(space
+        .map_4k_with_attrs(
+            &POOL,
+            0x1_0000,
+            0x4000_0001,
+            KernelAccess::Write.leaf(false)
+        )
+        .is_none());
 }
 
 /// Host-side translation of `va` through the table hierarchy rooted at
@@ -626,9 +532,9 @@ fn host_leaf_descriptor(frames: &dyn PageTableFrames, root_phys: u64, va: u64) -
     let mut phys = root_phys;
     for level in 1..=LEVELS {
         let table = frames.table_at(phys)?;
-        // SAFETY: `phys` names a live table page built by
-        // `map_4k`/`new_identity_gigapages` and drawn from `frames`, so
-        // the source's view of it is readable; `table_index` is < 512.
+        // SAFETY: `phys` names a live table page the walk under test drew
+        // from `frames`, so the source's view of it is readable;
+        // `table_index` is < 512.
         let entry = unsafe { &*table }[table_index(va, level)];
         if (entry & attrs::VALID) == 0 {
             return None;
@@ -704,12 +610,12 @@ impl PageTableFrames for RecordingFrames {
         // SAFETY: the monotonic index makes this slot exclusively ours.
         let table: &'static mut Table = unsafe { &mut *self.storage[idx].get() };
         let entries = &mut table.0;
-        let phys = phys_of(entries.as_ptr() as u64);
+        let phys = image_phys(entries.as_ptr() as u64);
         Some(TableFrame { phys, entries })
     }
 
     fn table_at(&self, phys: u64) -> Option<*mut [u64; ENTRIES_PER_TABLE]> {
-        let base = phys_of(self.storage.as_ptr() as u64);
+        let base = image_phys(self.storage.as_ptr() as u64);
         let index = tairix_arch_api::frames::pool_slot_of(base, Self::CAPACITY, phys)?;
         Some(self.storage[index].get().cast())
     }
@@ -724,17 +630,24 @@ impl PageTableFrames for RecordingFrames {
 #[test]
 fn reclaim_table_frames_returns_every_drawn_table_exactly_once() {
     static POOL: RecordingFrames = RecordingFrames::new();
-    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let mut space = AddressSpace::new_user(&POOL).expect("a root");
     let root_phys = space.root_phys();
 
-    // Two pages in distinct gigapages far above the identity window, so
-    // the walk draws two independent L2+L3 pairs: 1 root + 4 tables.
+    // Two pages in distinct gigapages, so the walk draws two independent
+    // L2+L3 pairs: 1 root + 4 tables.
     let va_a: u64 = 64u64 << 30;
     let va_b: u64 = 65u64 << 30;
     let pa: u64 = 0x4123_4000;
-    space.map_4k(&POOL, va_a, pa).expect("map A");
     space
-        .map_4k(&POOL, va_b, pa + PAGE_SIZE as u64)
+        .map_4k_with_attrs(&POOL, va_a, pa, KernelAccess::Write.leaf(false))
+        .expect("map A");
+    space
+        .map_4k_with_attrs(
+            &POOL,
+            va_b,
+            pa + PAGE_SIZE as u64,
+            KernelAccess::Write.leaf(false),
+        )
         .expect("map B");
     assert_eq!(POOL.allocated(), 5, "root + two L2/L3 pairs were drawn");
 
@@ -763,14 +676,14 @@ fn passes_mmu_conformance() {
     use tairix_arch_api::mmu;
     static POOL: PageTablePool = PageTablePool::new();
     static POOL2: PageTablePool = PageTablePool::new();
-    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
-    // A VA well above the identity window so the conformance map allocates
-    // fresh L2/L3 tables and never shatters a block; the phys frame is RAM.
+    let mut space = AddressSpace::new_user(&POOL).expect("a root");
+    // A VA at 64 GiB, so the conformance map allocates fresh L2/L3 tables;
+    // the phys frame is RAM.
     let va = 64u64 << 30;
     let pa = 0x4123_4000;
     mmu::conformance::run_all(&mut space, va, pa);
     // And over the object-safe erasure the kernel registry stores.
-    let mut dynamic = AddressSpace::new_identity_gigapages(&POOL2, 2).expect("identity map");
+    let mut dynamic = AddressSpace::new_user(&POOL2).expect("a root");
     let erased: &mut dyn mmu::AddressSpace = &mut dynamic;
     mmu::conformance::run_all(erased, va, pa);
 }
@@ -779,12 +692,12 @@ fn passes_mmu_conformance() {
 fn passes_tlb_conformance() {
     use tairix_arch_api::tlb;
     static POOL: PageTablePool = PageTablePool::new();
-    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let mut space = AddressSpace::new_user(&POOL).expect("a root");
     // The host has no TLB, so `flush_page` is a vacuous no-op here; the
     // suite proves it is object-safe and panic-free for any address (the
     // real `tlbi` is exercised by the spawn QEMU vertical).
     tlb::conformance::run_all(&mut space, 64u64 << 30);
-    let mut dynamic = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let mut dynamic = AddressSpace::new_user(&POOL).expect("a root");
     let erased: &mut dyn tlb::TlbShootdown = &mut dynamic;
     tlb::conformance::run_all(erased, 64u64 << 30);
 }
@@ -793,8 +706,8 @@ fn passes_tlb_conformance() {
 fn passes_frames_conformance() {
     use tairix_arch_api::frames::{self, PageTableFrames};
     // The static pool is the boot/bootstrap `PageTableFrames` source; its
-    // `phys_of` is the identity map (kernel memory), so the suite runs on
-    // the host. A fresh pool hands out `POOL_SIZE` frames before failing
+    // `phys_of` is the image's own translation, the identity on the host,
+    // so the suite runs there. A fresh pool hands out `POOL_SIZE` frames before failing
     // closed; a second pool exercises the object-safe erasure.
     static POOL: PageTablePool = PageTablePool::new();
     static POOL2: PageTablePool = PageTablePool::new();
@@ -807,7 +720,7 @@ fn passes_frames_conformance() {
 fn map_page_translates_neutral_user_flags_to_wx_safe_leaves() {
     use tairix_arch_api::mmu::{self, PageFlags};
     static POOL: PageTablePool = PageTablePool::new();
-    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let mut space = AddressSpace::new_user(&POOL).expect("a root");
 
     // A USER + EXEC page must be mapped EL0-executable and read-only
     // (W^X): the leaf is `el0_code_leaf_attrs` (AP_RO_EL0, UXN clear).
@@ -845,7 +758,7 @@ fn map_page_translates_neutral_user_flags_to_wx_safe_leaves() {
 fn declares_access_tracking_supported() {
     use tairix_arch_api::mmu::{self, AccessTracking};
     static POOL: PageTablePool = PageTablePool::new();
-    let space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let space = AddressSpace::new_user(&POOL).expect("a root");
     // aarch64 manages the Access Flag in software (`TCR_EL1.HA` clear on
     // every part), so the referenced bit is honestly Supported.
     assert_eq!(
@@ -858,11 +771,10 @@ fn declares_access_tracking_supported() {
 fn test_and_clear_accessed_drives_the_clock_round_trip() {
     use tairix_arch_api::mmu::{self, MapError, PageFlags};
     static POOL: PageTablePool = PageTablePool::new();
-    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let mut space = AddressSpace::new_user(&POOL).expect("a root");
 
-    // Map an EL0 data page well above the identity window so the walk
-    // builds fresh L2/L3 tables (never shatters a block). `map_page` sets
-    // AF eagerly, so a fresh leaf reads accessed.
+    // Map an EL0 data page at 64 GiB, where the walk builds fresh L2/L3
+    // tables. `map_page` sets AF eagerly, so a fresh leaf reads accessed.
     let va = 64u64 << 30;
     let pa = 0x4123_4000;
     mmu::AddressSpace::map_page(&mut space, va, pa, PageFlags::READ | PageFlags::WRITE)
@@ -915,7 +827,7 @@ fn test_and_clear_accessed_drives_the_clock_round_trip() {
 fn set_accessed_flag_in_root_retries_on_every_valid_leaf() {
     use tairix_arch_api::mmu::{self, PageFlags};
     static POOL: PageTablePool = PageTablePool::new();
-    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let mut space = AddressSpace::new_user(&POOL).expect("a root");
 
     let va = 64u64 << 30;
     mmu::AddressSpace::map_page(
@@ -1020,7 +932,7 @@ fn a_root_refuses_every_address_outside_its_own_regime() {
         "the two addresses share an L1 slot, which is the hazard"
     );
 
-    let mut user = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let mut user = AddressSpace::new_user(&POOL).expect("a root");
     assert_eq!(
         mmu::AddressSpace::map_page(&mut user, window_va, 0x4123_4000, PageFlags::READ),
         Err(MapError::InvalidFlags)
@@ -1089,18 +1001,6 @@ fn tearing_down_a_kernel_window_handle_frees_nothing() {
     );
 }
 
-/// The pre-discovery default is every gigapage, so a build that configures
-/// nothing still reaches whatever it addresses physically. The static and
-/// the named default are one definition, so they cannot drift.
-#[test]
-fn the_kernel_extent_mask_defaults_to_every_gigapage() {
-    assert_eq!(DEFAULT_KERNEL_GIGAPAGES, [u64::MAX; GIGAPAGE_MASK_WORDS]);
-    for gigapage in [0usize, 1, 63, 64, ENTRIES_PER_TABLE - 1] {
-        assert!(configured_gigapage_is_kernel(gigapage));
-    }
-    assert!(!configured_gigapage_is_kernel(ENTRIES_PER_TABLE));
-}
-
 #[test]
 fn a_range_past_the_ceiling_invalidates_the_whole_domain_and_one_at_it_does_not() {
     assert!(!invalidates_whole_domain(1));
@@ -1148,120 +1048,6 @@ fn physmap_virt_offsets_by_the_map_base() {
     );
 }
 
-/// The one test that drives the set-once publication, because the map's
-/// state and the kernel root are process-global: a second caller is refused
-/// by design. Every other test here is insensitive to it — the map lives in
-/// a table no `AddressSpace` root is, so no other walk can reach it.
-///
-/// The gigapages it claims deliberately avoid GiB 0 (Device by default) and
-/// GiB 3 (which `configured_device_gigapages_select_the_leaf_attributes`
-/// transiently types Device), so the harness may run them in any order.
-#[test]
-fn the_direct_map_covers_exactly_the_ram_it_was_given() {
-    let mut covered = [0u64; GIGAPAGE_MASK_WORDS];
-    for gigapage in [1usize, 2, 5, 6] {
-        covered[gigapage / 64] |= 1 << (gigapage % 64);
-    }
-    // Gigapage 0 is Device under the default mask, so asking for it changes
-    // nothing: a Normal-cacheable alias of MMIO would be mismatched memory
-    // attributes for one physical address.
-    covered[0] |= 1;
-    // A configuration region past the identity window, and one sharing a
-    // gigapage RAM also asked for: Device wins it.
-    KERNEL_DEVICES.name(gigapage_mask_from_extents(&[
-        (256 << 30, 1 << 28),
-        (6 << 30, 1 << 20),
-    ]));
-
-    assert!(install_boot_physmap(&covered), "the first publication");
-    assert_eq!(physmap_gigapages(), 3, "the Device gigapages were dropped");
-    assert!(
-        !install_boot_physmap(&covered),
-        "the map is installed once per boot"
-    );
-
-    // Coverage is per gigapage, not an extent: the hole at GiB 3 and 4 is
-    // absent even though GiB 5 is present.
-    assert!(physmap_covers(1 << 30, PAGE_SIZE as u64));
-    assert!(physmap_covers(5 << 30, PAGE_SIZE as u64));
-    assert!(!physmap_covers(0, PAGE_SIZE as u64), "Device stays out");
-    assert!(!physmap_covers(3 << 30, PAGE_SIZE as u64));
-    assert!(!physmap_covers(4 << 30, PAGE_SIZE as u64));
-    // A run that straddles into an uncovered gigapage fails closed whole.
-    assert!(physmap_covers(
-        (3 << 30) - PAGE_SIZE as u64,
-        PAGE_SIZE as u64
-    ));
-    assert!(!physmap_covers(
-        (3 << 30) - PAGE_SIZE as u64,
-        2 * PAGE_SIZE as u64
-    ));
-    // Zero length reaches no byte, and the architectural ceiling refuses.
-    assert!(!physmap_covers(1 << 30, 0));
-    assert!(!physmap_covers(
-        (MAX_PHYSMAP_GIB as u64) << 30,
-        PAGE_SIZE as u64
-    ));
-
-    // The leaves are 1 GiB blocks, kernel-only, readable and writable, and
-    // never executable: nothing is fetched through the map.
-    // SAFETY: reading one entry of this module's own kernel root, which no
-    // other host test writes once the publication above has run.
-    let leaf = unsafe { (*kernel_root_table())[PHYSMAP_FIRST_SLOT + 1] };
-    assert!(is_block(leaf), "a root leaf is a gigapage block");
-    assert_eq!(phys_from_descriptor(leaf), 1 << 30);
-    assert_eq!(leaf & (0b11 << 6), attrs::AP_RW_EL1);
-    assert_eq!(leaf & (0b111 << 2), attrs::ATTR_IDX_NORMAL);
-    assert_ne!(leaf & attrs::PXN, 0);
-    assert_ne!(leaf & attrs::UXN, 0);
-
-    // The registers are Device in the kernel regime alone, at their
-    // direct-map address, and no RAM leaf shares their gigapage.
-    assert!(KERNEL_DEVICES.covers(256 << 30, 1 << 28));
-    assert!(KERNEL_DEVICES.covers(6 << 30, PAGE_SIZE as u64));
-    assert!(!physmap_covers(6 << 30, PAGE_SIZE as u64));
-    assert!(
-        !KERNEL_DEVICES.covers(1 << 30, PAGE_SIZE as u64),
-        "RAM is not registers"
-    );
-    assert!(
-        !KERNEL_DEVICES.covers(255 << 30, 2 << 30),
-        "a straddle fails closed"
-    );
-    // SAFETY: as above.
-    let device = unsafe { (*kernel_root_table())[PHYSMAP_FIRST_SLOT + 256] };
-    assert!(is_block(device));
-    assert_eq!(phys_from_descriptor(device), 256 << 30);
-    assert_eq!(
-        device & (0b111 << 2),
-        attrs::ATTR_IDX_DEVICE_NONPOSTED,
-        "configuration writes are non-posted"
-    );
-    assert_ne!(device & attrs::PXN, 0);
-    assert_eq!(
-        table_index(physmap_virt(256 << 30), 1),
-        PHYSMAP_FIRST_SLOT + 256
-    );
-}
-
-/// The refusal runs before the set-once gate, so this holds whether or not
-/// the publication test has already run — the state is process-global and
-/// the harness fixes no order.
-#[test]
-fn the_direct_map_refuses_a_mask_it_cannot_represent() {
-    assert!(
-        !install_boot_physmap(&[0u64; GIGAPAGE_MASK_WORDS]),
-        "an empty mask covers nothing"
-    );
-    // Every bit at or above the architectural ceiling: RAM there is
-    // reported unreachable rather than claimed-but-absent.
-    let mut over = [0u64; GIGAPAGE_MASK_WORDS];
-    for gigapage in MAX_PHYSMAP_GIB..ENTRIES_PER_TABLE {
-        over[gigapage / 64] |= 1 << (gigapage % 64);
-    }
-    assert!(!install_boot_physmap(&over));
-}
-
 /// A parent descriptor whose output address the frame source never handed
 /// out is what a clobbered or hostile table looks like. Every walk must
 /// read it as "nothing mapped here" rather than dereference the address
@@ -1270,7 +1056,7 @@ fn the_direct_map_refuses_a_mask_it_cannot_represent() {
 fn a_descriptor_the_source_cannot_reach_fails_the_walk_closed() {
     use tairix_arch_api::mmu::{self, PageFlags};
     static POOL: PageTablePool = PageTablePool::new();
-    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let mut space = AddressSpace::new_user(&POOL).expect("a root");
     let va = 64u64 << 30;
     mmu::AddressSpace::map_page(&mut space, va, 0x4123_4000, PageFlags::READ)
         .expect("map the probe page");
@@ -1280,7 +1066,7 @@ fn a_descriptor_the_source_cannot_reach_fails_the_walk_closed() {
     // frame source — would read this and answer with a mapping; asking
     // the source refuses the address outright.
     let mut foreign = Table::new();
-    foreign.0[table_index(va, 2)] = descriptor(0x4000_0000, normal_leaf_attrs(true));
+    foreign.0[table_index(va, 2)] = descriptor(0x4000_0000, KernelAccess::Write.leaf(true));
     let foreign_phys = foreign.0.as_ptr() as u64;
 
     // Overwrite the L1 table descriptor to point at it, valid and
@@ -1342,14 +1128,14 @@ fn par_decoders_read_the_fault_bit_and_rebuild_the_physical_address() {
 }
 
 /// Every leaf a user root maps is tagged with the ASID it runs under,
-/// whatever its kind; the kernel window's leaves and the identity gigapages
-/// every root shares are global, so one entry of each serves every ASID.
+/// whatever its kind; the kernel window's leaves and the direct map's
+/// gigabytes are global, so one entry of each serves every ASID.
 #[test]
 fn a_user_roots_leaves_are_not_global_and_the_kernels_are() {
     use tairix_arch_api::mmu;
     static POOL: PageTablePool = PageTablePool::new();
     let page = PAGE_SIZE as u64;
-    let mut user = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let mut user = AddressSpace::new_user(&POOL).expect("a root");
     let kinds = [
         PageFlags::READ | PageFlags::USER,
         PageFlags::READ | PageFlags::WRITE | PageFlags::USER,
@@ -1384,10 +1170,18 @@ fn a_user_roots_leaves_are_not_global_and_the_kernels_are() {
         "a kernel window leaf is per-ASID"
     );
 
-    for device in [false, true] {
-        let leaf = identity_gigapage_leaf(device, true).expect("a kernel gigapage");
-        assert_eq!(leaf & attrs::NOT_GLOBAL, 0, "a shared gigapage is per-ASID");
+    for holding in [Holding::Ram, Holding::Registers, Holding::Config] {
+        assert_eq!(
+            holding.leaf() & attrs::NOT_GLOBAL,
+            0,
+            "the direct map is every ASID's"
+        );
     }
+    assert_ne!(
+        IDMAP_LEAF & attrs::NOT_GLOBAL,
+        0,
+        "the identity page goes with the ASID parking discards"
+    );
 }
 
 /// The ASID rides above the table base, where `TCR_EL1.A1` clear reads it,
@@ -1427,7 +1221,7 @@ fn non_cacheable_leaves_reach_el0_only_when_asked() {
 fn an_access_flag_fix_up_never_restores_a_leaf_unmapped_after_its_walk() {
     use tairix_arch_api::mmu;
     static POOL: PageTablePool = PageTablePool::new();
-    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let mut space = AddressSpace::new_user(&POOL).expect("a root");
     let va = 64u64 << 30;
     mmu::AddressSpace::map_page(
         &mut space,

@@ -421,13 +421,15 @@ impl MsiMmio for VolatileMsiMmio {
         // SAFETY: `offset` is one of this module's register offsets, all
         // within the first `REGISTERS_LEN` bytes of the discovered window,
         // which `configure_from_fdt` checked the window spans and the
-        // identity map types Device; `current()` is that window's base,
-        // published before the controller reaches the block.
-        unsafe { core::ptr::read_volatile((current() + offset) as *const u32) }
+        // direct map types as registers; `current()` is that window's
+        // physical base, published before the controller reaches the block.
+        unsafe { core::ptr::read_volatile(crate::paging::mmio(current() + offset) as *const u32) }
     }
     fn write32(&self, offset: usize, value: u32) {
         // SAFETY: as `read32`, but a 32-bit store.
-        unsafe { core::ptr::write_volatile((current() + offset) as *mut u32, value) }
+        unsafe {
+            core::ptr::write_volatile(crate::paging::mmio(current() + offset) as *mut u32, value);
+        }
     }
 }
 
@@ -437,15 +439,14 @@ static CONTROLLER: BrcmMsiController<VolatileMsiMmio> = BrcmMsiController::new(V
 
 /// Point [`CONTROLLER`] at the `brcm,bcm2711-pcie` node `fdt` describes and
 /// record the INTID its MSI controller raises; [`None`] for a tree with no
-/// such node, or whose register window does not hold the controller's
-/// registers in Device-typed identity gigapages. Once, with the MMU on: the
-/// base and the parent are published through atomics.
+/// such node, or whose register window the direct map does not type as
+/// registers. Once: the base and the parent are published through atomics.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn configure_from_fdt(fdt: &crate::fdt::Fdt<'_>) -> Option<&'static dyn MsiMultiplexer> {
     let pcie = crate::platform::pcie_bringup(fdt)?;
     let parent = crate::platform::pcie_msi_intid(fdt)?;
     if pcie.regs_len < REGISTERS_LEN
-        || !crate::paging::identity_device_covers(pcie.regs_phys, REGISTERS_LEN)
+        || crate::paging::registers_virt(pcie.regs_phys, REGISTERS_LEN).is_none()
     {
         return None;
     }

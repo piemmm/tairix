@@ -18,7 +18,7 @@ mod kernel {
     use core::num::NonZeroU16;
     use core::panic::PanicInfo;
 
-    use tairix_arch_aarch64::{enable_fp_el1, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SERIAL_SINK};
     use tairix_cpuops::{CpuFeature, CpuFeatureSet, DecisionReason};
     use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
@@ -67,10 +67,6 @@ mod kernel {
     /// Entry point for the freestanding kernel.
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
-        // The candidates are Advanced SIMD, which EL1 traps until this.
-        // SAFETY: boot CPU, called once, before any FP/SIMD instruction.
-        unsafe { enable_fp_el1() };
-
         note(
             TEST_START,
             Level::Info,

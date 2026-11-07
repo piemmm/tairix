@@ -976,24 +976,19 @@ pub fn uptime_ms() -> u64 {
 /// flush denormals or round differently from its siblings in any kernel
 /// computation that never came from EL0.
 ///
-/// The boot trampoline (`boot.s`) leaves FP/SIMD trapping, so any code
-/// the compiler lowers to NEON — a vectorised `memcpy`/`memcmp`, the
-/// `rxe` decoder, the log formatter — would otherwise take an
-/// undefined-instruction synchronous exception (`ESR_EL1.EC = 0x07`)
-/// with no vectors installed and hang the core. Every freestanding
-/// aarch64 kernel calls this once on the boot CPU before running any
-/// code that may use FP. This is the single definition of the enable
-/// sequence (no duplication); the boot consumers and
-/// the QEMU verticals all call it.
+/// The trampolines leave FP/SIMD trapping, and the compiler lowers ordinary
+/// Rust — a `memcpy`, the log formatter — to it, so the port's entry runs
+/// this on each CPU before anything else: the boot CPU through
+/// [`init_vectors`](crate::exceptions::init_vectors), a secondary as its
+/// first act. Nothing beyond the entry ever finds FP/SIMD trapped.
 ///
 /// # Safety
 ///
-/// Must run on the boot CPU once, before any FP/SIMD instruction
-/// executes. It writes one architectural EL1 control register and
-/// grants no cross-privilege authority; it is safe to call from EL1
-/// kernel context and a no-op to call again.
+/// Runs on this CPU before any FP/SIMD instruction executes on it. It writes
+/// EL1 control registers alone, granting no cross-privilege authority, and
+/// is a no-op to repeat.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub unsafe fn enable_fp_el1() {
+pub(crate) unsafe fn enable_fp_el1() {
     // `CPACR_EL1.FPEN` is bits [21:20]; `0b11` means "do not trap FP/SIMD
     // at EL0 or EL1". Every other field zero traps SVE, SME and nothing else.
     const FP_ONLY: u64 = 0b11 << 20;

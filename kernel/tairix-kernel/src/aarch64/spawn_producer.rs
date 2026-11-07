@@ -33,9 +33,7 @@ use core::ptr::NonNull;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::Errno;
-use tairix_arch_aarch64::paging::{
-    self, activate_user_root, configured_identity_gigapages, AddressSpace as ArchAddressSpace,
-};
+use tairix_arch_aarch64::paging::{self, activate_user_root, AddressSpace as ArchAddressSpace};
 use tairix_arch_aarch64::userentry::USER_MODE;
 use tairix_arch_api::AddressTag;
 use tairix_kernel_core::spawn::build_retained;
@@ -96,8 +94,8 @@ impl PhysMap for ConfiguredPhysMap {
         // Recover the physical address of a direct-map virtual address (the
         // growable kernel heap hands a drained region back to the frame
         // allocator by its virtual base). Bound by the live map's coverage,
-        // exactly as `translate` is, so a window or identity address
-        // inverts to nothing rather than to a bogus frame.
+        // exactly as `translate` is, so a window or image address inverts to
+        // nothing rather than to a bogus frame.
         let phys = (virt as u64).checked_sub(paging::PHYSMAP_VMA_BASE)?;
         paging::physmap_covers(phys, 1).then(|| PhysAddr::new(phys))
     }
@@ -229,29 +227,15 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
             .space_tlb()
             .map_err(|_| refuse_build(ctx, "space_tlb_unallocated"))?;
 
-        // Build a stage-1 address space identity-mapping the kernel's own
-        // extents + MMIO, and capture its root *without* switching to it:
-        // the loading child runs on its own kernel stack under the kernel's
-        // regime, so the running task is never moved out from under itself.
-        // The child's mappings below are written through the direct
-        // `physmap`. The child's own root is reactivated by its
-        // `pre_resume` hook before the scheduler first resumes it as a user
-        // task (`plans/SPAWN.md` SP2).
-        //
-        // The window length is derived from the Device/kernel-extent
-        // gigapage masks boot discovery installed (never a board constant):
-        // a window truncated short of the MMIO gigapage would drop the
-        // console and interrupt controller from the active map the moment
-        // the scheduler resumes the child. It carries no mapping of
-        // allocator RAM — that is reached through the direct map in the
-        // kernel regime — so it does not grow with installed memory. An
-        // empty window or one reaching the user region at
-        // `CHILD_USER_BIAS` fails closed.
-        let identity_gib = configured_identity_gigapages();
-        if identity_gib == 0 || ((identity_gib as u64) << 30) > CHILD_USER_BIAS {
-            return Err(refuse_build(ctx, "identity_window_invalid"));
-        }
-        let arch = ArchAddressSpace::new_identity_gigapages(table_frames, identity_gib)
+        // Build the child's empty root, which carries nothing of the
+        // kernel's, and capture it *without* switching to it: the loading
+        // child runs on its own kernel stack under the kernel's regime, so
+        // the running task is never moved out from under itself. The child's
+        // mappings below are written through the direct `physmap`. The
+        // child's own root is reactivated by its `pre_resume` hook before
+        // the scheduler first resumes it as a user task (`plans/SPAWN.md`
+        // SP2).
+        let arch = ArchAddressSpace::new_user(table_frames)
             .ok_or_else(|| refuse_build(ctx, "page_table_frames_exhausted"))?;
         let child_root_phys = arch.root_phys();
 
@@ -320,10 +304,9 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
             // its own `TTBR0_EL1` root. It captures only the `u64` root, so it is
             // `Send`. aarch64 reuses `SP_EL1` and ignores the stack-top argument.
             move |_stack_top: u64, _tls_base: u64, tag: AddressTag| {
-                // SAFETY: the MMU is already enabled and `child_root_phys` is the
-                // L1 root of the child's space, which identity-maps the
-                // kernel's own extents and the board MMIO the running kernel
-                // executes from — exactly `activate_user_root`'s contract.
+                // SAFETY: the kernel runs from `TTBR1_EL1` and `child_root_phys`
+                // is the L1 root of the child's space, live while the child
+                // is — exactly `activate_user_root`'s contract.
                 unsafe { activate_user_root(child_root_phys, tag) };
             },
             &USER_MODE,

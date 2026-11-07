@@ -1,136 +1,85 @@
-// TAIRiX aarch64 boot trampoline. Board-independent: it serves both the
-// QEMU `virt` board and the Raspberry Pi 4 (BCM2711). Only the load
-// address differs between boards, and that lives in the per-board linker
-// script (`aarch64-virt.ld` / `aarch64-rpi4.ld`) — the
-// "boot stubs" carve-out (`plans/PI.md` §0.2). Every other board
-// difference is discovered device-tree data, never a fork of this stub.
+// TAIRiX aarch64 boot trampoline, the same on every board: only the load
+// address differs, and it lives in the board's linker script
+// (`plans/PI.md` §0.2).
 //
-// The loader (QEMU `-kernel <elf>`, or the Pi firmware loading
-// `kernel8.img` at 0x8_0000) enters `_start` with the Linux aarch64
-// boot-protocol hand-off:
+// Entered at the image's first byte, at its physical load address, with the
+// MMU off and the Linux aarch64 boot hand-off (x0 = the device tree's
+// physical address). QEMU `virt` enters at EL1, or EL2 with virtualization;
+// the Pi firmware at EL2, which is dropped to EL1 here.
 //
-//   x0 = physical address of the flattened device tree (DTB)
-//   x1..x3 = 0 (reserved)
+// Everything before the branch to the high half runs at the load address, so
+// it addresses memory PC-relatively only: `adrp` there yields physical
+// addresses, and after the branch the linked virtual ones.
 //
-// Entry exception level varies by board: the default `virt` machine tops
-// out at EL1 (EL2 when `virtualization=on`); the Pi firmware enters at
-// EL2. This stub handles both: if entered at EL2 it configures EL1 to run
-// AArch64, grants EL1/EL0 the physical counter/timer, zeroes the virtual
-// counter offset, and `eret`s to EL1; if already at EL1 it proceeds
-// directly. It then establishes a stack, zeroes `.bss` so Rust statics
-// start cleared, and tail-calls the Rust entry with the DTB pointer
-// preserved in x0.
-//
-// Secondary-CPU parking: QEMU `virt` holds secondaries in firmware until
-// a PSCI `CPU_ON`, so only the boot CPU reaches `_start`. The Pi 4
-// firmware (with no `armstub` spin-table) instead releases all four
-// cores straight to the kernel entry. To behave correctly on both, every
-// CPU whose `MPIDR_EL1` affinity is non-zero parks in a low-power `wfe`
-// loop here, before touching the single boot stack or `.bss`, polling
-// the kernel spin-table release word (`smp::SECONDARY_KERNEL_RELEASE`):
-// it stays parked while the word is zero and branches to the address
-// written there when the SMP bring-up (`plans/PI.md` P5) releases it
-// deliberately (`smp::start_secondary_spintable`). The release word is
-// *shared*, so one `sev` wakes every parked core; a second word,
-// `SECONDARY_KERNEL_RELEASE_TARGET`, names the single core being brought
-// up now, and a woken core proceeds only when that target equals its own
-// affinity — the rest re-park. Bring-up is therefore strictly one core
-// at a time (never a concurrent MMU-adopt / GIC-init race). This fails
-// closed (never race the secondaries onto a shared
-// stack): nothing is released until the boot CPU has published the
-// secondary stacks, entry, and affinity table.
+// The Pi 4 firmware without a spin-table `armstub` releases every core
+// here. A core whose affinity is not zero parks in `wfe` before touching
+// anything shared, until the SMP bring-up opens the kernel release word *and*
+// names this core in the release target (`smp::start_secondary_spintable`):
+// one core at a time, never a race through bring-up. Both words are `.data`,
+// so a parked core reads the loaded image's values until they are published,
+// not whatever DRAM held where `.bss` is.
 //
 // SAFETY-INVARIANTs:
-//   1. The body below `_start` runs exactly once, on the boot CPU
-//      (affinity 0); every other CPU is trapped in the `wfe` park above
-//      it. Interrupts are masked before any handler exists.
-//   2. x0 carries the DTB pointer described above; it is preserved across
-//      the EL2->EL1 drop in callee-saved x19 and restored before the call.
-//   3. `.Lin_el1` writes the known MMU-off `SCTLR_EL1`
-//      (`paging::SCTLR_MMU_OFF`) before the first EL1 data access, so the
-//      architecturally UNKNOWN EL1 reset state (EE, WXN, A, SA, …) never
-//      governs an access on either entry path. Likewise the EL2 path
-//      writes every EL2 control register *whole* with its known hand-off
-//      value (`el2::HCR_EL2_HANDOFF` and friends, unit-test-pinned) —
-//      the Pi firmware stub leaves HCR_EL2/CNTHCTL_EL2/CPTR_EL2/MDCR_EL2
-//      at their UNKNOWN reset values, and an UNKNOWN HCR_EL2.TVM traps
-//      EL1's first MAIR/TCR/TTBR/SCTLR write into vector-less EL2 — a
-//      silent hang at the MMU switch on real silicon (QEMU resets these
-//      registers benignly, masking the residue).
-//   4. The stack top and `.bss` bounds come from the active linker script
-//      (`aarch64-virt.ld` / `aarch64-rpi4.ld`); `__bss_start`/`__bss_end`
-//      are 16-byte aligned so the `stp` clear loop is exact.
-//   5. `tairix_arch_aarch64_main` is `-> !` and never returns; the trailing
-//      `wfi` park is unreachable under QEMU but is the correct conservative
-//      behaviour on bare metal.
+//   1. The boot CPU's body runs once; every other core is held in the park.
+//      Interrupts stay masked throughout.
+//   2. x19 holds the tree's address, x23 its length (0 without one), from
+//      the hand-off to the Rust entry.
+//   3. `SCTLR_EL1` is written whole with its known MMU-off value before the
+//      first EL1 data access: its reset value is UNKNOWN on real silicon, and
+//      an UNKNOWN EE or WXN wrecks EL1. The EL2 path writes every EL2 control
+//      register whole likewise (`el2::*_HANDOFF`).
+//   4. An image not at the address it was linked to load at parks: the early
+//      map's blocks and the kernel root assume it.
+//   5. The early tables are written with the cache off and invalidated
+//      before and after, so no line a cache held can shadow them or be
+//      written back over them once the walker reads them cacheably.
+//   6. `.bss` is zeroed only through the cache, after translation is on, so
+//      no line the firmware left can later be written back over the zeroes.
 
 .section .text.boot, "ax"
 .global _start
 _start:
-    // Mask all interrupts (D, A, I, F) during bring-up.
+    // The arm64 `Image` header (`image_header`): with a zero
+    // `text_offset` the Pi firmware and QEMU place the image 2 MiB above the
+    // base of RAM, where it is linked to load. Without it the firmware moves
+    // the image to `0x8_0000`.
+    b       .Lentry                 // code0
+    .long   0                       // code1
+    .quad   0                       // text_offset
+    .quad   __kernel_image_size     // image_size
+    .quad   {IMAGE_FLAGS}           // flags
+    .quad   0, 0, 0                 // res2..res4
+    .long   {IMAGE_MAGIC}           // magic
+    .long   0                       // res5
+.Lentry:
     msr     DAIFSet, #0xf
-
-    // Preserve the DTB pointer (x0) in callee-saved x19 before any
-    // scratch register is touched; it is restored to x0 just before the
-    // tail-call into Rust.
     mov     x19, x0
 
-    // Park every non-boot CPU. The boot CPU is the one whose MPIDR_EL1
-    // affinity (Aff0..Aff3) is zero; any other core waits in a `wfe`
-    // loop until the SMP bring-up releases it explicitly (plans/PI.md
-    // P5) by writing the spin-table trampoline's address into
-    // `SECONDARY_KERNEL_RELEASE` (`smp::start_secondary_spintable`) —
-    // the kernel's own release word, polled exactly like a firmware
-    // spin-table mailbox — and only when the published release target
-    // matches this core's affinity (the one-core-at-a-time gate below).
-    // The release word lives in `.bss`, which the boot CPU zeroes below;
-    // a parked core reading a mid-clear value sees only zero (keep
-    // parking) or, much later, the published entry — never a torn
-    // in-between (the store is a single aligned doubleword). This runs
-    // before the shared boot stack or `.bss` is touched by *this* core,
-    // so a released-at-reset Pi secondary cannot race the boot CPU.
-    // Scratch registers x4..x8 are used so x19 (the DTB) is left
-    // untouched (x8 holds this core's affinity across the park loop).
+    // Park every core but the boot CPU, whose affinity (Aff0..Aff3) is zero.
     mrs     x4, mpidr_el1
-    mov     x5, #0xffff             // Aff0 [7:0] | Aff1 [15:8]
-    movk    x5, #0xff, lsl #16      // | Aff2 [23:16]  => x5 = 0x00FF_FFFF
+    mov     x5, #0xffff             // Aff0 | Aff1
+    movk    x5, #0xff, lsl #16      // | Aff2: `smp::MPIDR_AFFINITY_MASK`
     and     x6, x4, x5
-    ubfx    x7, x4, #32, #8         // Aff3 [39:32]
+    ubfx    x7, x4, #32, #8         // Aff3
     orr     x6, x6, x7
     cbz     x6, .Lboot_cpu
-    // This core's own masked affinity (Aff0-2, `smp::MPIDR_AFFINITY_MASK`
-    // = 0x00FF_FFFF) — the value the boot CPU publishes as the release
-    // target for exactly one core at a time. Kept in x8 across the park
-    // loop (a firmware `sev` cannot clobber a register).
     and     x8, x4, x5
 .Lpark_secondary:
-    // Wait for an event, then re-check *both* release words each pass.
-    // The kernel release word is shared by every parked core, so one
-    // `sev` wakes them all; the release-target word names the single
-    // core the boot CPU is bringing up now, so only that core branches
-    // and the rest re-park. This serialises secondary bring-up: releasing
-    // one core never races the others through the concurrent MMU-adopt /
-    // GIC-init path (a coherency hazard that intermittently faulted the
-    // last-released core on a real Pi 4). The target compare is the shared
-    // `smp::release_gate_open` predicate (target == own affinity), which
-    // the `smp.s` spin-table trampoline gate implements identically — a
-    // core released straight into this loop re-checks the same gate again
-    // when it reaches the trampoline. x8 holds this core's affinity;
-    // x4/x5 are scratch.
+    // One `sev` wakes every parked core; only the named one goes on, through
+    // the gate `smp::release_gate_open` states and `smp.s` checks again.
     wfe
     adrp    x4, SECONDARY_KERNEL_RELEASE
     add     x4, x4, :lo12:SECONDARY_KERNEL_RELEASE
     ldr     x4, [x4]
-    cbz     x4, .Lpark_secondary            // gate closed: keep parking
+    cbz     x4, .Lpark_secondary
     adrp    x5, SECONDARY_KERNEL_RELEASE_TARGET
     add     x5, x5, :lo12:SECONDARY_KERNEL_RELEASE_TARGET
     ldr     x5, [x5]
     cmp     x5, x8
-    b.ne    .Lpark_secondary                // not this core's turn: re-park
+    b.ne    .Lpark_secondary
     br      x4
 
 .Lboot_cpu:
-    // Dispatch on the current exception level (bits [3:2] of CurrentEL).
     mrs     x1, CurrentEL
     lsr     x1, x1, #2
     cmp     x1, #2
@@ -139,140 +88,247 @@ _start:
     b       _el2_establish_and_drop
 
 .Lin_el1:
-    // SCTLR_EL1 is architecturally UNKNOWN here on real silicon — both
-    // behind the EL2->EL1 drop above and on a direct-EL1 load — and an
-    // UNKNOWN EE (big-endian data) or WXN bit wrecks EL1 the moment it
-    // is exercised (QEMU resets the register benignly, masking this).
-    // Establish the known MMU-off value before the first EL1 data
-    // access: 0x30D0_0800 = the ARMv8.0 RES1 bits only, i.e.
-    // `tairix_arch_aarch64::paging::SCTLR_MMU_OFF` (a unit test there
-    // pins this hard-coded value).
-    mov     x0, #0x0800
-    movk    x0, #0x30D0, lsl #16
+    // Immediates, not a literal: until this write even a load's byte order
+    // is UNKNOWN.
+    mov     x0, #({SCTLR_MMU_OFF} & 0xffff)
+    movk    x0, #({SCTLR_MMU_OFF} >> 16), lsl #16
     msr     sctlr_el1, x0
     isb
-
-    // TPIDR_EL1 holds the dense CPU id (`smp::install_current_cpu_index`)
-    // and is UNKNOWN at reset. The boot CPU's is zero, so a report taken
-    // before bring-up publishes it names this CPU rather than firmware debris.
+    // TPIDR_EL1 is the dense CPU id, the boot CPU's zero; TPIDRRO_EL0 is the
+    // EL1 vector's scratch, which EL0 can read, so it starts empty.
     msr     tpidr_el1, xzr
+    msr     tpidrro_el0, xzr
 
-    // Establish the boot stack (top of the linker-reserved region).
-    adrp    x0, __boot_stack_top
-    add     x0, x0, :lo12:__boot_stack_top
-    mov     sp, x0
+    adr     x0, _start
+    ldr     x1, =__kernel_phys_start
+    cmp     x0, x1
+    b.ne    .Lmisloaded
 
-    // Zero [__bss_start, __bss_end) in 16-byte strides.
+    // The tree's header, read with Device semantics: an aligned address
+    // carrying the magic names a tree, whose `totalsize` the entry bounds.
+    mov     x23, #0
+    cbz     x19, .Ltree_read
+    tst     x19, #7
+    b.ne    .Ltree_read
+    ldr     w0, [x19]
+    rev     w0, w0
+    ldr     w1, ={FDT_MAGIC}
+    cmp     w0, w1
+    b.ne    .Ltree_read
+    ldr     w0, [x19, #4]
+    rev     w23, w0
+.Ltree_read:
+
+    adrp    x0, __early_tables_start
+    add     x0, x0, :lo12:__early_tables_start
+    adrp    x1, __early_tables_end
+    add     x1, x1, :lo12:__early_tables_end
+    bl      .Linvalidate_to_poc
+    adrp    x0, __early_tables_start
+    add     x0, x0, :lo12:__early_tables_start
+1:
+    stp     xzr, xzr, [x0], #16
+    cmp     x0, x1
+    b.lo    1b
+
+    // The identity root maps the one page translation is turned on from.
+    adrp    x2, __idmap_text_start
+    adrp    x3, tairix_aarch64_idmap_l1
+    adrp    x4, tairix_aarch64_idmap_l2
+    adrp    x5, tairix_aarch64_idmap_l3
+    ubfx    x6, x2, #30, #9
+    orr     x7, x4, #{TABLE}
+    str     x7, [x3, x6, lsl #3]
+    ubfx    x6, x2, #21, #9
+    orr     x7, x5, #{TABLE}
+    str     x7, [x4, x6, lsl #3]
+    ubfx    x6, x2, #12, #9
+    ldr     x7, ={IDMAP_LEAF}
+    orr     x7, x7, x2
+    str     x7, [x5, x6, lsl #3]
+
+    // The high root maps the image at its link address: the top slot of the
+    // kernel regime, with its blocks at their physical offsets in a gigabyte.
+    adrp    x3, tairix_aarch64_early_l1
+    adrp    x4, tairix_aarch64_early_l2
+    orr     x7, x4, #{TABLE}
+    str     x7, [x3, #{IMAGE_SLOT_OFFSET}]
+    adr     x2, _start
+    adrp    x6, __kernel_end
+    add     x6, x6, :lo12:__kernel_end
+    ldr     x8, ={EARLY_BLOCK}
+2:
+    lsr     x9, x2, #21
+    lsl     x10, x9, #21
+    orr     x10, x10, x8
+    and     x9, x9, #0x1ff
+    str     x10, [x4, x9, lsl #3]
+    add     x2, x2, #(1 << 21)
+    cmp     x2, x6
+    b.lo    2b
+
+    adrp    x0, __early_tables_start
+    add     x0, x0, :lo12:__early_tables_start
+    bl      .Linvalidate_to_poc
+
+    ldr     x0, ={MAIR}
+    msr     mair_el1, x0
+    ldr     x0, ={TCR}
+    msr     tcr_el1, x0
+    adrp    x0, tairix_aarch64_idmap_l1
+    msr     ttbr0_el1, x0
+    adrp    x0, tairix_aarch64_early_l1
+    msr     ttbr1_el1, x0
+    dsb     sy
+    tlbi    vmalle1
+    ic      iallu
+    dsb     nsh
+    isb
+    ldr     x0, ={SCTLR_MMU_ON}
+    ldr     x1, =.Lhigh
+    b       tairix_aarch64_enable_mmu
+
+.Lhigh:
     adrp    x0, __bss_start
     add     x0, x0, :lo12:__bss_start
     adrp    x1, __bss_end
     add     x1, x1, :lo12:__bss_end
-1:
+3:
     cmp     x0, x1
-    b.hs    2f
+    b.hs    4f
     stp     xzr, xzr, [x0], #16
-    b       1b
-2:
-
-    // Poison the guard the linker reserved below the stack, so a later
-    // overrun is a disturbed sentinel the panic path can name rather than
-    // a silent clobber of the statics under it. After the loop above,
-    // which spans the guard and would otherwise erase it. x19 (the DTB)
-    // is untouched.
+    b       3b
+4:
+    // The guard's sentinel, which the panic path reads back; the kernel root
+    // then maps the guard read-only.
     adrp    x0, __boot_stack_guard_bottom
     add     x0, x0, :lo12:__boot_stack_guard_bottom
     adrp    x1, __boot_stack_bottom
     add     x1, x1, :lo12:__boot_stack_bottom
     mov     w2, #{GUARD_BYTE}
-.Lpoison_guard:
+5:
     cmp     x0, x1
-    b.hs    .Lpoison_guard_done
+    b.hs    6f
     strb    w2, [x0], #1
-    b       .Lpoison_guard
-.Lpoison_guard_done:
-
-    // Hand the DTB pointer to the Rust entry. It does not return.
+    b       5b
+6:
+    adrp    x0, __boot_stack_top
+    add     x0, x0, :lo12:__boot_stack_top
+    mov     sp, x0
     mov     x0, x19
+    mov     x1, x23
     bl      tairix_arch_aarch64_main
-
-    // Defensive park (unreachable: the Rust entry never returns).
-3:
+.Lmisloaded:
     wfi
-    b       3b
+    b       .Lmisloaded
 
-// --- Entered at EL2: establish fully-known EL2 state, drop to EL1 ---
+// Invalidate the data cache over [x0, x1) to the point of coherency, by
+// line, then `dsb sy`. Clobbers x0, x2, x3.
+.Linvalidate_to_poc:
+    mrs     x3, ctr_el0
+    ubfx    x3, x3, #16, #4
+    mov     x2, #4
+    lsl     x3, x2, x3
+    sub     x2, x3, #1
+    bic     x0, x0, x2
+7:
+    dc      ivac, x0
+    add     x0, x0, x3
+    cmp     x0, x1
+    b.lo    7b
+    dsb     sy
+    ret
+
+// Entered at EL2 by the boot CPU and by a spin-table secondary
+// (`smp.s`): establish fully known EL2 state and `eret` to EL1h at x20 with
+// DAIF masked. Clobbers x0 only.
 //
-// Shared by the boot core's `_start` and the spin-table secondary
-// trampoline (`smp.s` `_start_secondary_spintable_aarch64`) — both may
-// be entered at EL2 on the Pi firmware hand-off, and the EL2 register
-// establishment is banked per core, so every arriving core runs it.
-//
-// Contract: x20 = EL1 continuation address; clobbers x0 only; `eret`s
-// into EL1h at x20 with DAIF masked. Callee-saved state (x19 = the boot
-// DTB pointer) is untouched.
-//
-// Every EL2 control register below is architecturally UNKNOWN at first
-// entry on real silicon (the Pi firmware stub sets only SCTLR_EL2 and
-// CPUECTLR_EL1.SMPEN); QEMU resets them to benign zeroes, masking any
-// residue. Each is therefore *written whole* with its known hand-off
-// value (`tairix_arch_aarch64::el2`, unit-test-pinned) — an `orr` into
-// the live register would carry UNKNOWN bits (HCR_EL2.TVM traps EL1's
-// first MAIR/TCR/TTBR/SCTLR write into vector-less EL2: the silent Pi 4
-// MMU-switch hang).
+// Every EL2 control register is UNKNOWN at first entry on real silicon (the
+// Pi stub sets only SCTLR_EL2 and CPUECTLR_EL1.SMPEN), so each is written
+// whole with its known hand-off value (`tairix_arch_aarch64::el2`); an `orr`
+// into the live register would keep UNKNOWN bits such as HCR_EL2.TVM, which
+// traps EL1's first MAIR/TCR/TTBR/SCTLR write into vector-less EL2.
 .global _el2_establish_and_drop
 _el2_establish_and_drop:
-    // HCR_EL2 = el2::HCR_EL2_HANDOFF: EL1 is AArch64 (RW), stage-2
-    // translation off, no traps, no TGE.
-    mov     x0, #(1 << 31)
+    mov     x0, #{HCR_EL2}
     msr     hcr_el2, x0
-
-    // CNTHCTL_EL2 = el2::CNTHCTL_EL2_HANDOFF: EL1/EL0 read the physical
-    // counter and program the physical timer without trapping to EL2
-    // (EL1PCTEN | EL1PCEN); zero virtual-counter offset.
-    mov     x0, #3
+    mov     x0, #{CNTHCTL_EL2}
     msr     cnthctl_el2, x0
     msr     cntvoff_el2, xzr
-
-    // CPTR_EL2 = el2::CPTR_EL2_HANDOFF: the RES1 bits only — FP/SIMD
-    // (TFP) and CPACR_EL1 (TCPAC) accesses from EL1 do not trap.
-    mov     x0, #0x33ff
+    mov     x0, #{CPTR_EL2}
     msr     cptr_el2, x0
-
-    // MDCR_EL2 = el2::MDCR_EL2_HANDOFF: no debug/PMU traps to EL2.
-    msr     mdcr_el2, xzr
-
-    // A core with the GICv3 system-register interface (ID_AA64PFR0_EL1.GIC,
-    // el2::ID_AA64PFR0_GIC_SHIFT) must let EL1 use it, or EL1's first ICC_*
-    // access traps into vector-less EL2: ICC_SRE_EL2 =
-    // el2::ICC_SRE_EL2_HANDOFF, ICH_HCR_EL2 = 0. On a core without it the
-    // registers are undefined, so they are left untouched.
+    // MDCR_EL2 traps nothing and leaves EL1 every event counter: an HPMN of
+    // zero is UNPREDICTABLE before FEAT_HPMN0, and a core with no
+    // architected PMU has no PMCR_EL0 to read.
+    mrs     x0, id_aa64dfr0_el1
+    ubfx    x0, x0, #{PMUVER_SHIFT}, #4
+    cmp     x0, #0                  // not implemented
+    ccmp    x0, #0xf, #4, ne        // or IMPLEMENTATION DEFINED
+    mov     x0, xzr
+    b.eq    2f
+    mrs     x0, pmcr_el0
+    ubfx    x0, x0, #{PMCR_N_SHIFT}, #5
+2:
+    msr     mdcr_el2, x0
+    // A core with the GICv3 system-register interface must let EL1 use it.
     mrs     x0, id_aa64pfr0_el1
-    ubfx    x0, x0, #24, #4
+    ubfx    x0, x0, #{GIC_SHIFT}, #4
     cbz     x0, 1f
-    mov     x0, #0xf
+    mov     x0, #{ICC_SRE_EL2}
     msr     S3_4_C12_C9_5, x0       // ICC_SRE_EL2
     isb
     msr     S3_4_C12_C11_0, xzr     // ICH_HCR_EL2
 1:
-
-    // EL1 reads of MIDR_EL1/MPIDR_EL1 return VPIDR_EL2/VMPIDR_EL2:
-    // mirror the silicon's own identity registers so EL1 never sees an
-    // UNKNOWN core id.
+    // EL1 reads MIDR/MPIDR through VPIDR/VMPIDR: mirror the real ones.
     mrs     x0, midr_el1
     msr     vpidr_el2, x0
     mrs     x0, mpidr_el1
     msr     vmpidr_el2, x0
-
-    // eret into EL1h (M[3:0]=0b0101) with DAIF masked (bits [9:6]).
-    mov     x0, #0x3c5
+    mov     x0, #0x3c5              // EL1h, DAIF masked
     msr     spsr_el2, x0
     msr     elr_el2, x20
     eret
     dsb     nsh
     isb
+.ltorg
 
-// The boot stack is reserved by the active linker script, which sizes it
-// per image (`BOOT_STACK_BYTES`) and places it last in `.bss` so an
-// overrun cannot reach `.rodata`/`.text`. A size fixed here instead would
-// be one constant for every board, and a workload heavier than the boot
-// pipeline silently outgrew it.
+// The only code mapped at its physical address: what runs while one
+// translation regime is replaced by another.
+.section .text.idmap, "ax"
+
+// Write SCTLR_EL1 = x0, turning translation on, and branch to x1.
+.global tairix_aarch64_enable_mmu
+tairix_aarch64_enable_mmu:
+    msr     sctlr_el1, x0
+    isb
+    ic      iallu
+    dsb     nsh
+    isb
+    br      x1
+
+// Load x0 as TTBR1_EL1 by way of the empty table x1, so no walk of the
+// kernel regime can meet entries of both roots; returns into the new one.
+.global tairix_aarch64_replace_ttbr1
+tairix_aarch64_replace_ttbr1:
+    msr     ttbr1_el1, x1
+    isb
+    tlbi    vmalle1
+    dsb     nsh
+    isb
+    msr     ttbr1_el1, x0
+    isb
+    ret
+
+.section .early_tables, "aw", %nobits
+.balign 4096
+.global tairix_aarch64_idmap_l1
+tairix_aarch64_idmap_l1:
+    .skip   4096
+tairix_aarch64_idmap_l2:
+    .skip   4096
+tairix_aarch64_idmap_l3:
+    .skip   4096
+tairix_aarch64_early_l1:
+    .skip   4096
+tairix_aarch64_early_l2:
+    .skip   4096

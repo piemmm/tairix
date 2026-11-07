@@ -6,8 +6,8 @@
 //! converts it to an `rxe` blob carrying the kernel's compiled-in syscall CFI
 //! tag, registered in the test kernel's `ProgramRegistry` under a
 //! `/System/Drivers/` path. On boot the test discovers the board from the
-//! embedded `virt` device tree, enables the identity MMU + EL1 vectors,
-//! builds a live `FrameAllocator`, publishes the reply `Port` (send-gated on
+//! embedded `virt` device tree, brings up the GIC, builds a live
+//! `FrameAllocator`, publishes the reply `Port` (send-gated on
 //! a driver-class capability) into a live `RwLock<PortRegistry>` — both the
 //! endpoint binding and its well-known port name — installs
 //! the production `KernelDispatchHook` through a `DispatchCallbackSlot`, and

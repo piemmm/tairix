@@ -525,6 +525,20 @@ pub fn current() -> (usize, ConsoleModel) {
     (base, model)
 }
 
+/// Bytes of a console UART's register block the kernel addresses: every
+/// model's registers lie in its first page.
+const REGISTERS_SPAN: u64 = 0x1000;
+
+/// Where the kernel reaches the console's registers, and their layout, or
+/// `None` while the direct map types the console's base as no register:
+/// before the boot has typed the board, a write there could land in RAM.
+#[must_use]
+pub fn registers() -> Option<(usize, ConsoleModel)> {
+    let (base, model) = current();
+    let virt = crate::paging::registers_virt(base as u64, REGISTERS_SPAN)?;
+    Some((usize::try_from(virt).ok()?, model))
+}
+
 /// A console UART located in a flattened device tree.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct DiscoveredConsole {
@@ -554,8 +568,8 @@ pub struct DiscoveredConsole {
 /// ancestor buses' `ranges` ([`tairix_fdt::translated_reg`]) — on the
 /// real Pi 4 tree the UARTs sit under `/soc`, whose one-cell `reg`
 /// values are *bus* addresses (`0x7E20_1000`) remapped to CPU-physical
-/// space (`0xFE20_1000`). The walk early-returns at the matched PL011,
-/// so it stays safe with the MMU off ([`tairix_fdt::scan_translated`]).
+/// space (`0xFE20_1000`). The walk early-returns at the matched PL011
+/// ([`tairix_fdt::scan_translated`]).
 /// Returns `None` if the tree is malformed or carries no recognised,
 /// translatable console (the caller then keeps the
 /// [`DEFAULT_CONSOLE_BASE`] default — fail closed).

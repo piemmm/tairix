@@ -114,8 +114,8 @@ pub fn handle_panic_via_kernel_core(info: &PanicInfo<'_>) -> ! {
 
 /// Install the production fatal reports on this port.
 ///
-/// Called at `boot` entry, before the EL1 vectors can deliver anything or a
-/// task is dispatched, so a kernel-mode exception or a corrupt kernel stack
+/// Called at `boot` entry, before any of its work can fault or a task is
+/// dispatched, so a kernel-mode exception or a corrupt kernel stack
 /// gets the kernel's post-mortem rather than the port's own report, which
 /// carries no register snapshot or backtrace. Only a QEMU vertical that
 /// deliberately observes its own faults installs ahead of boot.

@@ -27,7 +27,7 @@ use tairix_arch_aarch64::paging::{
 };
 use tairix_arch_aarch64::userentry::USER_MODE;
 use tairix_arch_aarch64::{
-    enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, SERIAL_SINK,
+    exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, SERIAL_SINK,
 };
 use tairix_arch_api::fatal::KernelFault;
 use tairix_arch_api::BOOT_CPU;
@@ -35,6 +35,7 @@ use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_code;
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kernel::aarch64::spawn_producer::{ConfiguredPhysMap, SPAWN_TABLE_PHYSMAP};
 use tairix_kernel_core::dmaquarantine::DmaQuarantine;
 use tairix_kernel_core::HwNodeLiveness;
 use tairix_kernel_core::UserThreadEntry;
@@ -43,9 +44,8 @@ use tairix_kernel_core::{
     ProcessSpace, SpawnMode, SpawnRequest, Yielder,
 };
 use tairix_kernel_mem::{
-    page_count_for, AddressSpace, BootMemoryMap, DirectPhysMap, DmaCustodian, Frame,
-    FrameAllocator, LiveSpace, MemoryRegion, PhysAddr, RegionKind, SpaceTlb, TlbContext,
-    Unpublished, UserStack, VirtAddr,
+    page_count_for, AddressSpace, BootMemoryMap, DmaCustodian, Frame, FrameAllocator, LiveSpace,
+    MemoryRegion, PhysAddr, RegionKind, SpaceTlb, TlbContext, Unpublished, UserStack, VirtAddr,
 };
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
@@ -57,12 +57,6 @@ use tairix_sync::Once;
 include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 // The canonical QEMU `virt` device tree, dumped and embedded at build time.
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
-
-/// Gigabytes of identity map the EL0 address space provides: `[0, 2 GiB)`
-/// covers the `virt` board's device MMIO (GiB 0 — including the virtio-MMIO
-/// transports at [`GRANT_PHYS`]) and the RAM base at GiB 1 where this kernel
-/// runs. [`USER_BIAS`] (64 GiB) and the device-window region sit far above.
-const IDENTITY_GIB: usize = 2;
 
 /// User stack base (1 MiB into the high user region) and size.
 const USER_STACK_BASE: u64 = USER_BIAS + 0x10_0000;
@@ -233,8 +227,8 @@ static ALLOCATOR: FreeListAllocator =
 static PAGE_TABLES: PageTablePool = PageTablePool::new();
 
 /// Physical-frame backing store the spawn builder draws user pages from.
-/// `align(4096)` so each `PAGE_SIZE` slice is a valid page frame;
-/// identity-mapped, so the builders reach it through [`DirectPhysMap::identity`].
+/// `align(4096)` so each `PAGE_SIZE` slice is a valid page frame, which the
+/// builders reach through the direct map.
 #[repr(C, align(4096))]
 struct FramePool([u8; paging::PAGE_SIZE * FRAME_COUNT]);
 
@@ -243,7 +237,7 @@ static mut FRAME_POOL: FramePool = FramePool([0; paging::PAGE_SIZE * FRAME_COUNT
 /// Monotonic index of the next free [`FRAME_POOL`] frame.
 static FRAME_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// Hand out the next identity-mapped physical frame, or `None` when exhausted.
+/// Hand out the next physical frame, or `None` when exhausted.
 fn next_frame() -> Option<Frame> {
     let idx = FRAME_CURSOR.fetch_add(1, Ordering::SeqCst);
     if idx >= FRAME_COUNT {
@@ -251,7 +245,7 @@ fn next_frame() -> Option<Frame> {
         return None;
     }
     let offset = idx * paging::PAGE_SIZE;
-    let base = core::ptr::addr_of!(FRAME_POOL) as u64 + offset as u64;
+    let base = paging::image_phys(core::ptr::addr_of!(FRAME_POOL) as u64) + offset as u64;
     Some(Frame::containing(PhysAddr::new(base)))
 }
 
@@ -500,7 +494,7 @@ impl HwNodeLiveness for StandInTree {
 
 /// Build a leaked `'static` [`FrameAllocator`] over [`ANON_POOL`].
 fn leaked_anon_frames() -> &'static FrameAllocator {
-    let base = core::ptr::addr_of!(ANON_POOL) as u64;
+    let base = paging::image_phys(core::ptr::addr_of!(ANON_POOL) as u64);
     let mut map = BootMemoryMap::new();
     map.push(MemoryRegion {
         kind: RegionKind::Usable,
@@ -516,11 +510,6 @@ fn leaked_anon_frames() -> &'static FrameAllocator {
 #[no_mangle]
 pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     note(TEST_START, "aarch64 mmio_map test: starting");
-
-    // Enable FP/SIMD at EL1 before any code that may use it (the `rxe` decoder
-    // and the image fills compile to NEON `memcpy`/`memcmp`).
-    // SAFETY: this is the boot CPU, called once, before any FP/SIMD executes.
-    unsafe { enable_fp_el1() };
 
     // P3/P4: discover the board from the embedded `virt` device tree.
     let Ok(fdt) = Fdt::new(DTB_BLOB) else {
@@ -541,19 +530,15 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     // Build the EL0 address space and activate it (so the user mappings, and
     // later the device window, land in the active translation regime).
-    let Some(arch) = ArchAddressSpace::new_identity_gigapages(&PAGE_TABLES, IDENTITY_GIB) else {
+    let Some(arch) = ArchAddressSpace::new_user(&PAGE_TABLES) else {
         qemu_exit::exit_failure(FAIL_POOL);
     };
     let root_phys = arch.root_phys();
-    // SAFETY: the identity map covers the kernel's current `pc`, `sp`, heap,
-    // frame pool, and device MMIO (all within `[0, 2 GiB)` on `virt`), so
-    // switching it does not move the ground under the running code. Boot CPU.
-    unsafe { arch.switch() };
+    // SAFETY: the kernel runs from `TTBR1_EL1`, which loading a process root
+    // leaves untouched. Boot CPU.
+    unsafe { tairix_arch_api::mmu::AddressSpace::activate(&arch) };
 
     let mut space = AddressSpace::new(arch);
-    // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let physmap = unsafe { DirectPhysMap::identity((IDENTITY_GIB as u64) << 30) }
-        .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image: &image,
         image_bytes: PROGRAM_RXE,
@@ -581,7 +566,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
             SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
-            &physmap,
+            &SPAWN_TABLE_PHYSMAP,
             &request,
             next_frame,
         )
@@ -595,20 +580,9 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // active address space (`plans/PI.md` 5d-0-ii (b′)/(c)). The device-window
     // region sits 1 GiB above the image bias and the anonymous-heap window
     // 2 GiB above; the anonymous frame allocator backs the placed `mem_map`.
-    // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let Some(identity) = (unsafe { DirectPhysMap::identity((IDENTITY_GIB as u64) << 30) }) else {
-        qemu_exit::exit_failure(FAIL_LIVE_BUILD);
-    };
-    // SAFETY: as for `identity` above; the quarantine scrubs only frames it
-    // was surrendered, all of which lie in this identity-mapped window.
-    let Some(custody_map) = (unsafe { DirectPhysMap::identity((IDENTITY_GIB as u64) << 30) })
-    else {
-        qemu_exit::exit_failure(FAIL_LIVE_BUILD);
-    };
-    let custody_map: &'static DirectPhysMap = Box::leak(Box::new(custody_map));
     let frames = leaked_anon_frames();
     if DMA_CUSTODY
-        .call_once_infallible(|| DmaQuarantine::new(frames, custody_map, &StandInTree))
+        .call_once_infallible(|| DmaQuarantine::new(frames, &SPAWN_TABLE_PHYSMAP, &StandInTree))
         .is_err()
     {
         qemu_exit::exit_failure(FAIL_LIVE_BUILD);
@@ -620,7 +594,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     let Ok(live) = LiveSpace::new(
         space,
         SpaceTlb::new(cpus, None),
-        identity,
+        ConfiguredPhysMap,
         frames,
         VirtAddr::new(MMIO_WINDOW_BASE),
         MMIO_WINDOW_PAGES,
@@ -648,8 +622,8 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // Bring up the EL1 vectors + GICv2 and install the dispatch callback so the
     // program's `svc`s are handled. Interrupts stay masked — the cooperative
     // `step` loop is the only scheduling mechanism.
-    // SAFETY: called once on the boot CPU with a stack established and the MMU
-    // enabled (the address-space build switched it on).
+    // SAFETY: called once on the boot CPU with a stack established and
+    // translation on.
     unsafe {
         exceptions::init_vectors();
         tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");
@@ -679,9 +653,9 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // `enter_user`s into EL0.
     let cs = ContextSwitchHal::new();
     let pre_resume = move |_stack_top: u64, tag: AddressTag| {
-        // SAFETY: the MMU is enabled and `root_phys` is the L1 root of a space
-        // that identity-maps the low kernel window — `activate_user_root`'s
-        // contract.
+        // SAFETY: translation is on, this runs from the kernel regime, and
+        // `root_phys` is the L1 root of a space whose tables live in a static
+        // pool — `activate_user_root`'s contract.
         unsafe { activate_user_root(root_phys, tag) };
     };
     let work = move |yielder: &mut Yielder<ContextSwitchHal>| {

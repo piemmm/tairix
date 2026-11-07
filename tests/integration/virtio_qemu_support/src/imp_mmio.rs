@@ -302,7 +302,8 @@ where
     // SAFETY: the `virt` board enters S-mode with paging off (`satp == 0`),
     // so the virtio-MMIO aperture the device tree describes is
     // identity-mapped and exclusively the bus's to read.
-    let Ok(bus) = (unsafe { virtio_mmio_bus_from_dtb(dtb_bytes) }) else {
+    let Ok(bus) = (unsafe { virtio_mmio_bus_from_dtb(dtb_bytes, |at, _| Some(at as *const u32)) })
+    else {
         env.fail("virtio-MMIO bus construct");
     };
     let Ok(mut mmio) = MmioMap::new(

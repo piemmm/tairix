@@ -15,9 +15,9 @@
 //!
 //! ## What this test asserts
 //!
-//! 1. Build a stage-1 `AddressSpace` identity-mapping the low 2 GiB and
-//!    activate it. A virtual page *beyond* the identity map
-//!    (`UNMAPPED_VA`, 3 GiB) has no translation.
+//! 1. Build an empty process root mapping one EL0 probe page and load it
+//!    into `TTBR0_EL1`. A low page it leaves unmapped (`UNMAPPED_VA`,
+//!    3 GiB) has no translation.
 //! 2. `exceptions::init_vectors` points `VBAR_EL1` at the vector table
 //!    **and arms the Arch HAL guarded-copy slot** — the one chokepoint
 //!    pairing the recovery with the vectors.
@@ -51,22 +51,16 @@ mod kernel {
 
     use tairix_arch_aarch64::paging::{self, AddressSpace, PageTablePool};
     use tairix_arch_aarch64::protection;
-    use tairix_arch_aarch64::{
-        enable_fp_el1, exceptions, handle_panic_via_serial, qemu_exit, SERIAL_SINK,
-    };
+    use tairix_arch_aarch64::{exceptions, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
     use tairix_arch_api::fatal::KernelFault;
     use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
     use tairix_arch_api::uaccess::conformance::{self, reach_into, Reach, Verdict};
     use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Field, Level};
 
-    /// Number of GiB the space identity-maps (device MMIO + RAM). The
-    /// kernel image and stack live in the Normal RAM gigapage (GiB 1).
-    const IDENTITY_GIB: usize = 2;
-
-    /// A page-aligned virtual address beyond the identity map (3 GiB):
-    /// inside the TTBR0 span but with no translation, so any access to it
-    /// raises a synchronous same-EL data abort.
+    /// A page-aligned address (3 GiB) inside the `TTBR0_EL1` span that the
+    /// space leaves unmapped, so any access to it raises a synchronous
+    /// same-EL data abort.
     const UNMAPPED_VA: u64 = 3 * (1 << 30);
 
     /// Stable audit-event ids for the QEMU transcript.
@@ -86,16 +80,15 @@ mod kernel {
     const FAIL_KERNEL_MAPPING_READ: NonZeroU16 = fail_point!(8);
     const FAIL_STACK_PROBE: NonZeroU16 = fail_point!(9);
 
-    /// An EL0 address beyond the identity map that the space maps
-    /// [`PROBE_PAGE`] at.
+    /// The EL0 address the space maps [`PROBE_PAGE`] at.
     const USER_PROBE_VA: u64 = 4 * (1 << 30);
 
     /// The byte every word of [`PROBE_PAGE`] holds.
     const PROBE_BYTE: u8 = 0x5A;
 
-    /// The page the probe reads by its user address and by the identity map,
-    /// the kernel's own mapping of it. Never written, so a read proves which
-    /// mapping reached it.
+    /// The page the probe reads by its user address and by its address in
+    /// the image, the kernel's own mapping of it. Never written, so a read
+    /// proves which mapping reached it.
     #[repr(C, align(4096))]
     struct ProbePage([u8; 4096]);
 
@@ -203,8 +196,8 @@ mod kernel {
         {
             fail("the stack-link probe misjudged a page", FAIL_STACK_PROBE);
         }
-        // SAFETY: `USER_PROBE_VA` maps the probe page as an EL0 page and the
-        // identity map is the kernel's own mapping of it.
+        // SAFETY: `USER_PROBE_VA` maps the probe page as an EL0 page and
+        // `probe`, its address in the image, is the kernel's own mapping of it.
         match unsafe { reach_into(USER_PROBE_VA, probe, PROBE_BYTE) } {
             Reach::OwnMappingOnly => {}
             Reach::UserAddressRead => fail(
@@ -222,27 +215,19 @@ mod kernel {
     /// calls (via `tairix_arch_aarch64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
-        // SAFETY: runs once on the boot CPU before any FP/SIMD
-        // instruction executes (see `enable_fp_el1`).
-        unsafe {
-            enable_fp_el1();
-        }
-
         note(
             Level::Info,
             UA_TEST_START,
             "aarch64 uaccess-fault test: faulting inside the guarded copy window",
         );
 
-        // Build the identity space; `UNMAPPED_VA` lies beyond it.
-        let Some(mut space) = AddressSpace::new_identity_gigapages(&POOL, IDENTITY_GIB) else {
-            fail("identity map", FAIL_SETUP);
+        let Some(mut space) = AddressSpace::new_user(&POOL) else {
+            fail("process root", FAIL_SETUP);
         };
-        // The kernel runs identity-mapped, so the probe's address is its
-        // physical one.
         let probe = core::ptr::addr_of!(PROBE_PAGE) as u64;
+        let phys = paging::image_phys(probe);
         if space
-            .map_page(USER_PROBE_VA, probe, PageFlags::READ | PageFlags::USER)
+            .map_page(USER_PROBE_VA, phys, PageFlags::READ | PageFlags::USER)
             .is_err()
         {
             fail("probe page", FAIL_SETUP);
@@ -261,10 +246,8 @@ mod kernel {
             exceptions::init_vectors();
         }
 
-        // Switch to the space (enables the MMU). It identity-maps this
-        // code, the stack, and the device MMIO, so execution continues.
-        // SAFETY: the space identity-maps `pc`, `sp`, and MMIO (RAM
-        // Normal, device-0 Device) per `new_identity_gigapages`.
+        // SAFETY: activating a root of this port loads `TTBR0_EL1` alone; the
+        // kernel's code, stack and registers stay mapped through `TTBR1_EL1`.
         unsafe {
             space.activate();
         }
@@ -272,9 +255,9 @@ mod kernel {
         // Drive the shared checks: positive control, then a real abort on
         // the read side and the write side of the window.
         let mut scratch = [0u8; 64];
-        // SAFETY: `UNMAPPED_VA` lies beyond the identity space just
-        // activated, so the page is genuinely unmapped and the deliberate
-        // aborts are absorbed by the guarded copy window armed above.
+        // SAFETY: the space just activated leaves `UNMAPPED_VA` unmapped, so
+        // the deliberate aborts are absorbed by the guarded copy window armed
+        // above.
         let verdict = unsafe { conformance::run(UNMAPPED_VA as *mut u8, &mut scratch) };
         match verdict {
             Verdict::Pass => {

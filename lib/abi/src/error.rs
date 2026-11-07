@@ -220,14 +220,18 @@ pub enum Errno {
     /// is no terminal behind the spawner's standard input, or one it may not
     /// hand over.
     NotForeground = 27,
-    /// A write was issued to a pipe whose every read end is closed.
+    /// The other end of a channel has gone: a write to a pipe whose every
+    /// read end is closed, or a reap or await of an answer from a call
+    /// endpoint that has ended.
     ///
     /// The TAIRiX equivalent of POSIX `EPIPE`. Emitted by a write to a
     /// pipe end (`plans/SPAWN.md` SP10) when no reader remains: the bytes
     /// can never be consumed, so the writer learns to stop — this is how a
-    /// `yes | head` pipeline terminates its producer. Deliberately distinct
-    /// from [`NotFound`](Self::NotFound) (the descriptor itself is still
-    /// open and owned by the caller) and from
+    /// `yes | head` pipeline terminates its producer. A client reaping from
+    /// an endpoint that ended learns the same way that nothing will answer.
+    /// Deliberately distinct from [`NotFound`](Self::NotFound) (the
+    /// descriptor itself is still open and owned by the caller, or the
+    /// ticket merely names nothing of the caller's) and from
     /// [`WouldBlock`](Self::WouldBlock) (retrying can never succeed).
     BrokenPipe = 28,
     /// A device endpoint answered the transfer with a protocol STALL.

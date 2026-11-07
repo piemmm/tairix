@@ -18,8 +18,8 @@ workspace = true
 # The build script compiles `csrc/main.c` with the audited `tairix-cc` wrapper
 # (version-pinned + checksummed clang/ld.lld), links a PIE image, and converts
 # it to an `rxe` blob carrying the kernel's compiled-in syscall CFI tag. On boot
-# the test enables `CPACR_EL1.FPEN`, stands up a stage-1 address space, installs
-# the EL1 vector table + a dispatch callback that services the program's
+# the test stands up the program's stage-1 address space, installs the EL1
+# vector table + a dispatch callback that services the program's
 # `cap_query` / `clock_get` round-trips, then spawns the program through the
 # production capability-checked, audited `tairix_kernel_core::spawn_and_enter`.
 # The program's `exit` syscall traps back; the callback asserts the exit code is
@@ -38,6 +38,8 @@ name = "tairix-test-c-program-qemu-aarch64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+# The production direct map the fixture reaches its frames through.
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }

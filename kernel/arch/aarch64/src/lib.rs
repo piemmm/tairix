@@ -15,7 +15,7 @@
 //! | Module        | Role                                                            |
 //! | ------------- | --------------------------------------------------------------- |
 //! | [`kernel_arch`] | [`Aarch64Arch`] — the `SchedulerArch` impl + `CNTPCT` clock.  |
-//! | [`paging`]    | Stage-1 page-table primitives (descriptors, identity map, `switch`). |
+//! | [`paging`]    | Stage-1 translation: the kernel root, the typed direct map, process roots. |
 //! | [`el2`]       | Pinned EL2→EL1 hand-off register values the boot trampoline writes. |
 //! | [`context`]   | Context-switch primitive (`TaskCtx` + `switch`).                |
 //! | [`fault`]     | Set-once synchronous-exception (abort) handler hook.            |
@@ -57,14 +57,33 @@
 extern crate std;
 
 // The EL1 boot trampoline is only meaningful on the bare-metal target;
-// host `cargo test` omits it so the crate builds on the host.
-// The boot-stack guard's sentinel is passed in rather than spelled in the
-// assembly, so the poison the stub writes and the poison the panic path
-// checks for are the one definition.
+// host `cargo test` omits it so the crate builds on the host. What it writes
+// — the image header's fields, the boot-stack guard's sentinel, the
+// translation controls, the early map's descriptors and the EL2 hand-off —
+// is passed in rather than spelled in the assembly, so it and the Rust that
+// reads or checks it share one definition.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 core::arch::global_asm!(
     include_str!("boot.s"),
     GUARD_BYTE = const tairix_memguard::GUARD_BYTE,
+    SCTLR_MMU_OFF = const paging::SCTLR_MMU_OFF,
+    SCTLR_MMU_ON = const paging::SCTLR_MMU_ON,
+    MAIR = const paging::MAIR_VALUE,
+    TCR = const paging::TCR_VALUE,
+    TABLE = const paging::attrs::VALID | paging::attrs::TABLE_OR_PAGE,
+    IDMAP_LEAF = const paging::IDMAP_LEAF,
+    EARLY_BLOCK = const paging::EARLY_IMAGE_BLOCK,
+    IMAGE_SLOT_OFFSET = const (paging::ENTRIES_PER_TABLE - 1) * 8,
+    FDT_MAGIC = const tairix_fdt::FDT_MAGIC,
+    IMAGE_FLAGS = const image_header::FLAGS_LE_4K,
+    IMAGE_MAGIC = const image_header::MAGIC,
+    HCR_EL2 = const el2::HCR_EL2_HANDOFF,
+    CNTHCTL_EL2 = const el2::CNTHCTL_EL2_HANDOFF,
+    CPTR_EL2 = const el2::CPTR_EL2_HANDOFF,
+    ICC_SRE_EL2 = const el2::ICC_SRE_EL2_HANDOFF,
+    GIC_SHIFT = const el2::ID_AA64PFR0_GIC_SHIFT,
+    PMUVER_SHIFT = const coreclock::PMUVER_SHIFT,
+    PMCR_N_SHIFT = const el2::PMCR_EL0_N_SHIFT,
 );
 
 // The context-switch primitive's body is assembly defined only on the
@@ -77,13 +96,23 @@ core::arch::global_asm!(include_str!("context.s"));
 // target; host `cargo test` exercises the `exceptions` module's pure
 // kind-classification logic without it.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-core::arch::global_asm!(include_str!("vectors.s"));
+core::arch::global_asm!(
+    include_str!("vectors.s"),
+    OVERRUN_REACH = const (paging::BOOT_STACK_GUARD_BYTES + exceptions::TRAP_FRAME_BYTES) / 16,
+    RESERVE_STACK_BYTES = const exceptions::RESERVE_STACK_BYTES,
+);
 
 // The secondary-core entry trampoline is meaningful only on the
 // bare-metal target; host `cargo test` exercises the `smp` module's pure
 // validity / decode logic without it.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-core::arch::global_asm!(include_str!("smp.s"));
+core::arch::global_asm!(
+    include_str!("smp.s"),
+    SCTLR_MMU_OFF = const paging::SCTLR_MMU_OFF,
+    SCTLR_MMU_ON = const paging::SCTLR_MMU_ON,
+    MAIR = const paging::MAIR_VALUE,
+    TCR = const paging::TCR_VALUE,
+);
 
 // The machine-takeover stack-switch trampoline and relocatable
 // kernel-image self-test + reset stub (`plans/NEW-SUPERVISOR.md` §9) are
@@ -136,7 +165,7 @@ pub mod cpufeatures;
 /// (`ARM Cortex-A72`, …) the boot facts report.
 pub mod cpuname;
 /// Known EL2→EL1 hand-off register values (`HCR_EL2`, `CNTHCTL_EL2`,
-/// `CPTR_EL2`, `MDCR_EL2`) the `boot.s` trampoline writes *whole* before
+/// `CPTR_EL2`, `ICC_SRE_EL2`) the `boot.s` trampoline writes *whole* before
 /// dropping to EL1 — the EL2 reset state is architecturally UNKNOWN on
 /// real silicon and an UNKNOWN `HCR_EL2.TVM` hangs the MMU switch.
 pub mod el2;
@@ -161,6 +190,9 @@ pub mod gicv3;
 /// [`crate::kernel_arch::Aarch64Arch`] feeds from the device tree
 /// (`plans/WIRING.md` Stage W10).
 pub mod hetcore;
+/// The arm64 `Image` header the kernel image opens with, by which a loader
+/// places it.
+pub mod image_header;
 pub mod irqmask;
 pub mod its;
 pub mod kernel_arch;
@@ -250,8 +282,6 @@ pub mod takeover;
 
 pub use kernel_arch::{halt_current_cpu, Aarch64Arch, Aarch64ArchStorage};
 
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub use kernel_arch::enable_fp_el1;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use panic::handle_panic_via_serial;
 pub use serial::{SerialSink, SERIAL_SINK};

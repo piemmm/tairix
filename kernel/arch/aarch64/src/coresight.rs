@@ -43,6 +43,9 @@ pub const NO_BASE: usize = 0;
 // software-lock / status registers. Offsets are within the 4 KiB debug
 // component the ROM table (or the DT `reg`) points at.
 
+/// Bytes of a debug component's register window.
+pub const WINDOW_BYTES: u64 = 0x1000;
+
 /// `EDPCSR` low word (the sampled PC's low 32 bits). **Reading this word
 /// captures the sample**: it latches `EDPCSRhi`, `EDCIDSR`, and `EDVIDSR`
 /// for the following reads, so it must be read *first*.
@@ -284,16 +287,18 @@ impl VolatileDebugMmio {
 impl DebugMmio for VolatileDebugMmio {
     fn read32(&self, offset: usize) -> u32 {
         // SAFETY: `offset` addresses a register within the discovered 4 KiB
-        // external-debug window `base` points at, mapped device memory the
-        // kernel owns. External-debug registers are readable by any master;
+        // external-debug window at physical `base`, which the direct map
+        // types as registers. External-debug registers are readable by any master;
         // the read has no side effect beyond the architected sample capture.
-        unsafe { core::ptr::read_volatile((self.base + offset) as *const u32) }
+        unsafe { core::ptr::read_volatile(crate::paging::mmio(self.base + offset) as *const u32) }
     }
     fn write32(&self, offset: usize, value: u32) {
         // SAFETY: as `read32`, but a 32-bit store — used only for the
         // [`EDLAR`] software-lock clear, which the architecture defines as a
         // side-effect-free unlock of the memory-mapped interface.
-        unsafe { core::ptr::write_volatile((self.base + offset) as *mut u32, value) }
+        unsafe {
+            core::ptr::write_volatile(crate::paging::mmio(self.base + offset) as *mut u32, value);
+        }
     }
 }
 

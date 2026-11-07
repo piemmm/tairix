@@ -23,7 +23,7 @@ crate owns that protocol once:
   SDRAM aperture, failing closed on anything outside it.
 - the **transport seam**: `MailboxTransport` with `MmioMailbox` as the metal
   doorbell implementation over two capability-gated `RegisterWindow`s, whose
-  reply waits spin within a poll budget each (the pre-MMU boot path has no
+  reply waits spin within a poll budget each (the early boot path has no
   scheduler to park on), and `DmaMailbox` as the same over a carved property
   buffer it owns, which it withholds rather than frees while the firmware owes
   it a reply, and whose reply waits park on the inbox interrupt

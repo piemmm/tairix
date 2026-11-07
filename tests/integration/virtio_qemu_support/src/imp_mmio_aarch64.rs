@@ -13,10 +13,8 @@
 //!
 //! Unlike riscv64 (which runs the full boot pipeline so the boot info
 //! publishes a usable memory map), this vertical owns its DMA frames in a
-//! static, identity-mapped pool: the `virt` board enters EL1 with the MMU
-//! off, so a `#[repr(align(4096))]` `.bss` static is identity-mapped and
-//! exclusively ours (no global heap games, just a
-//! reserved static).
+//! static pool: a `#[repr(align(4096))]` `.bss` static, exclusively ours and
+//! reached at its physical address through the kernel's direct map.
 
 extern crate alloc;
 
@@ -26,18 +24,18 @@ use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use tairix_abi::{CapabilityId, DmaCoherence, IrqHandle};
 use tairix_arch_aarch64::gic::{self, ActiveGic, GicController, MAX_INTID, MIN_SPI_INTID};
-use tairix_arch_aarch64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
-use tairix_arch_aarch64::{enable_fp_el1, exceptions, qemu_exit, SERIAL_SINK};
+use tairix_arch_aarch64::{exceptions, paging, qemu_exit, SERIAL_SINK};
 use tairix_caps::CapabilitySet;
 use tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use tairix_drv_bus_virtio::MmioTransport;
 use tairix_fdt::Fdt;
 use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kernel::aarch64::boot::DeviceWindows;
+use tairix_kernel::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use tairix_kernel_irq::{IrqController, IrqTable, IrqWaitAbort, IrqWaiter, MaskError};
 use tairix_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use tairix_kernel_mem::{
-    AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, HostPageTable, MmioMap, PhysAddr,
-    VirtAddr, PAGE_SIZE,
+    AddressSpace, DmaPool, FrameAllocator, HostPageTable, MmioMap, PhysAddr, VirtAddr, PAGE_SIZE,
 };
 use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
@@ -88,10 +86,9 @@ static ALLOCATOR: FreeListAllocator =
 /// mints, with slack. 512 frames is 2 MiB.
 const DMA_POOL_PAGES: usize = 512;
 
-/// Page-aligned `.bss` backing store for the DMA frame pool. The `virt`
-/// board enters EL1 with the MMU off, so this static is identity-mapped
-/// and exclusively ours — the aarch64 stand-in for riscv64's
-/// carved-from-the-boot-map DMA region.
+/// Page-aligned `.bss` backing store for the DMA frame pool, exclusively
+/// ours — the aarch64 stand-in for riscv64's carved-from-the-boot-map DMA
+/// region.
 #[repr(C, align(4096))]
 struct DmaFrames([u8; PAGE_SIZE * DMA_POOL_PAGES]);
 
@@ -100,7 +97,7 @@ static mut DMA_FRAMES: DmaFrames = DmaFrames([0; PAGE_SIZE * DMA_POOL_PAGES]);
 /// Build a single-region [`BootMemoryMap`] over the static [`DMA_FRAMES`]
 /// pool for the per-device [`FrameAllocator`].
 fn static_dma_map() -> BootMemoryMap {
-    let base = core::ptr::addr_of!(DMA_FRAMES) as u64;
+    let base = paging::image_phys(core::ptr::addr_of!(DMA_FRAMES) as u64);
     let mut m = BootMemoryMap::new();
     m.push(MemoryRegion {
         kind: RegionKind::Usable,
@@ -125,7 +122,7 @@ const TASK: ProcessId = ProcessId(0x5b3);
 const POOL_PAGES: usize = 64;
 
 /// Base virtual address of each minted DMA window (bookkeeping only; the
-/// driver reaches buffers through the identity map).
+/// driver reaches buffers through the direct map).
 const POOL_VBASE: u64 = 0x2000_0000;
 
 /// Base virtual address of the MMIO register-window map (bookkeeping).
@@ -136,16 +133,6 @@ const MMIO_CAP_PAGES: usize = 64;
 
 /// The CPU the device SPI is routed to: the boot CPU.
 const IRQ_CPU: tairix_arch_api::CpuId = 0;
-
-/// Gigapages the boot identity map covers (`0..2 GiB`): GiB 0 holds the
-/// device MMIO (GIC, PL011, virtio-mmio) as Device memory, GiB 1 the
-/// `virt` board's RAM base (`0x4000_0000`) as Normal cacheable.
-const IDENTITY_GIB: usize = 2;
-
-/// Page-table frame source for the boot identity map. A `'static` so the
-/// page tables outlive the (diverging) scenario and the MMU keeps reading
-/// them.
-static PT_POOL: PageTablePool = PageTablePool::new();
 
 // --- QEMU environment ------------------------------------------------
 
@@ -178,60 +165,6 @@ impl QemuEnv for AArch64QemuEnv {
 
     fn audit_sink(&self) -> &'static dyn Sink {
         &SERIAL_SINK
-    }
-}
-
-// --- EL1 bring-up ----------------------------------------------------
-
-/// The identity map [`bring_up_el1_identity_mmu`] installs, as a physical
-/// map: the board's device registers and the RAM a vertical's buffers sit in.
-#[must_use]
-pub fn identity_map() -> DirectPhysMap {
-    // SAFETY: the bring-up maps `[0, IDENTITY_GIB)` GiB as itself and nothing
-    // unmaps it; before it the MMU is off and every address is its own.
-    unsafe { DirectPhysMap::identity((IDENTITY_GIB as u64) << 30) }
-        .expect("the identity map addresses itself")
-}
-
-/// Bring the `virt`-board PE up to the state the rest of every aarch64
-/// vertical assumes: FP/SIMD enabled at EL1 and the stage-1 MMU on with a
-/// 2 GiB identity map (GiB 0 Device, GiB 1 RAM Normal-cacheable).
-///
-/// The `virt` board enters EL1 with `CPACR_EL1.FPEN` trapping
-/// Advanced-SIMD/FP and the MMU off (every access Device-typed, so the
-/// atomics/unaligned accesses the driver/DMA/sync stack relies on abort).
-/// Both must be fixed before any non-trivial code runs, so this is the
-/// first thing each vertical does (riscv64 gets the equivalent from its
-/// boot pipeline). Shared by the virtio-MMIO scenario and the
-/// framebuffer-display vertical. A failed map build
-/// fails closed through `env`; on success the PE is running translated
-/// and FP-enabled when it returns.
-pub fn bring_up_el1_identity_mmu(env: &dyn QemuEnv) {
-    // Enable FP/SIMD at EL1 before anything else: the compiler emits NEON
-    // register moves for struct copies, which would otherwise trap (ESR
-    // EC 0x07).
-    // SAFETY: this is the boot CPU, called once, before any FP/SIMD
-    // instruction executes (see `enable_fp_el1`).
-    unsafe {
-        enable_fp_el1();
-    }
-
-    // SAFETY: install the EL1 vectors first so any synchronous abort is
-    // taken to the EL1 handler (which fails closed by parking) instead of escalating, then switch: the identity map covers
-    // this code, the boot stack, the static heap/DMA pool (all RAM), and
-    // the device MMIO.
-    unsafe {
-        exceptions::init_vectors();
-    }
-    let Some(space) = ArchAddressSpace::new_identity_gigapages(&PT_POOL, IDENTITY_GIB) else {
-        env.fail("boot identity map build");
-    };
-    // SAFETY: `space` identity-maps `pc`, `sp`, the heap/DMA statics, and
-    // the device MMIO windows (see `new_identity_gigapages`). The tables
-    // live in the `'static` `PT_POOL`, so they outlive this diverging
-    // function and the MMU keeps reading them.
-    unsafe {
-        space.switch();
     }
 }
 
@@ -307,7 +240,7 @@ static DISPATCH_TABLE: AtomicPtr<IrqTable> = AtomicPtr::new(core::ptr::null_mut(
 /// GIC INTID of the provisioned device. Published with [`DISPATCH_TABLE`].
 static DISPATCH_INTID: AtomicU32 = AtomicU32::new(0);
 
-/// Physical base of the provisioned device's virtio-MMIO register window,
+/// Direct-map base of the provisioned device's virtio-MMIO register window,
 /// so the dispatch can acknowledge the device-level interrupt (`0` until
 /// set).
 static DISPATCH_DEV_BASE: AtomicU64 = AtomicU64::new(0);
@@ -331,9 +264,9 @@ extern "C" fn device_dispatch(intid: u32) {
     // level-high source never re-edges.
     let dev_base = DISPATCH_DEV_BASE.load(Ordering::Acquire);
     if dev_base != 0 {
-        // SAFETY: `dev_base` is the identity-mapped virtio-MMIO register
-        // window of the provisioned device, valid for the life of the
-        // guest; both registers are 4-byte aligned.
+        // SAFETY: `dev_base` is the direct-map base of the provisioned
+        // device's virtio-MMIO register window, typed as registers for the
+        // life of the guest; both registers are 4-byte aligned.
         unsafe {
             let isr =
                 core::ptr::read_volatile((dev_base + regs::INTERRUPT_STATUS as u64) as *const u32);
@@ -397,8 +330,8 @@ impl IrqWaiter for WfiWaiter {
 /// Build the external-IRQ path the aarch64 verticals own: resolve the
 /// device's GICv2 SPI from the device tree, build an [`IrqTable`] (leaked
 /// to `'static` so the dispatch and waiter can hold it), bind the line,
-/// install the device dispatch, bring up the EL1 vectors + GICv2, route +
-/// enable the SPI on CPU 0, and unmask IRQs at the PE. Any failure flips
+/// install the device dispatch, bring up the GICv2, route + enable the SPI
+/// on CPU 0, and unmask IRQs at the PE. Any failure flips
 /// QEMU failure through `env`.
 fn arm_external_irq(
     env: &AArch64QemuEnv,
@@ -420,8 +353,8 @@ fn arm_external_irq(
     if exceptions::set_device_irq_dispatch(device_dispatch).is_err() {
         env.fail("install device-IRQ dispatch");
     }
-    // SAFETY: called once on the boot CPU; the EL1 vectors are already
-    // installed by the scenario before the MMU switch. Bring up the GICv2
+    // SAFETY: called once on the boot CPU; the port entry armed the EL1
+    // vectors and typed the GIC's gigabyte as registers. Bring up the GICv2
     // distributor + CPU interface and route the device SPI to CPU 0.
     unsafe {
         tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");
@@ -460,7 +393,6 @@ where
     F: FnOnce(&dyn QemuEnv, MmioTransport, &dyn VirtioHost) -> Result<(), &'static str>,
 {
     let env = AArch64QemuEnv;
-    bring_up_el1_identity_mmu(&env);
     env.log(cfg.start_msg);
 
     // 1. Parse the embedded device-tree blob.
@@ -468,12 +400,11 @@ where
         env.fail("DTB parse");
     };
 
-    // 2. Per-device DMA: the static frame pool + the boot identity map.
+    // 2. Per-device DMA: the static frame pool, reached through the direct map.
     let dma_map = static_dma_map();
     let Ok(frames) = FrameAllocator::new(&dma_map) else {
         env.fail("frame allocator build");
     };
-    let phys = identity_map();
 
     // 3. Bus-driver task capability context.
     let mut grants = CapabilitySet::empty();
@@ -485,17 +416,18 @@ where
     };
 
     // 4. Build the `virt`-board MMIO bus and provision the transport.
-    // SAFETY: the virtio-MMIO aperture the device tree describes is
-    // identity-mapped (Device memory, GiB 0) and exclusively the bus's to
-    // read.
-    let Ok(bus) = (unsafe { virtio_mmio_bus_from_dtb(dtb_bytes) }) else {
+    let registers = |base, len| paging::registers_virt(base, len).map(|at| at as *const u32);
+    // SAFETY: `registers` yields the aperture's direct-map address only where
+    // the direct map types it as registers, and the aperture is exclusively
+    // the bus's to read.
+    let Ok(bus) = (unsafe { virtio_mmio_bus_from_dtb(dtb_bytes, registers) }) else {
         env.fail("virtio-MMIO bus construct");
     };
     let Ok(mut mmio) = MmioMap::new(
         AddressSpace::new(HostPageTable::new()),
         VirtAddr::new(MMIO_VBASE),
         MMIO_CAP_PAGES,
-        &phys,
+        &DeviceWindows,
     ) else {
         env.fail("MMIO map construct");
     };
@@ -509,7 +441,10 @@ where
         };
         (prov.transport, prov.base)
     };
-    DISPATCH_DEV_BASE.store(slot_base, Ordering::Release);
+    let Some(dev_base) = paging::registers_virt(slot_base, regs::WINDOW_MIN_LEN as u64) else {
+        env.fail("virtio-MMIO registers outside the direct map");
+    };
+    DISPATCH_DEV_BASE.store(dev_base, Ordering::Release);
     env.log("virtio-qemu: MMIO transport provisioned");
 
     // 5. Build the external-IRQ path (GICv2 + EL1 vectors) from the DTB.
@@ -523,7 +458,7 @@ where
         VirtAddr::new(POOL_VBASE),
         POOL_PAGES,
         &frames,
-        &phys,
+        &SPAWN_TABLE_PHYSMAP,
         DmaCoherence::Snooped,
     ) else {
         env.fail("DMA pool construct");

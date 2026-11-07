@@ -42,7 +42,8 @@ pub use tairix_drv_fs_arxfs::ROOT_UNLOCK_NAME;
 /// Render the `config.txt` the Pi firmware boots TAIRiX with.
 ///
 /// The knobs are the P0 facts of record (`docs/src/platform/aarch64.md`,
-/// "Boot protocol"): AArch64 cores, the TAIRiX kernel image, a held UART
+/// "Boot protocol"): AArch64 cores, the TAIRiX kernel image (which its own
+/// arm64 `Image` header places at [`crate::elfflat::KERNEL_LOAD_ADDR`]), a held UART
 /// clock for a stable early console, the PL011 `UART0` routed to the
 /// GPIO 14/15 header (`dtoverlay=disable-bt`), the PL011 reference clock
 /// pinned to the 48 MHz the kernel's divisor arithmetic assumes
@@ -244,6 +245,10 @@ mod tests {
         let config = core::str::from_utf8(&config).expect("config.txt is UTF-8");
         assert!(config.contains("arm_64bit=1"));
         assert!(config.contains("kernel=kernel8.img"));
+        assert!(
+            !config.contains("kernel_address"),
+            "the image's own header places it where it is linked to load"
+        );
         assert!(config.contains("enable_uart=1"));
         assert!(config.contains("init_uart_clock=48000000"));
         // The caller-supplied baud is written verbatim (here the debug rate).

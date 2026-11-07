@@ -162,21 +162,28 @@ fn virtio_mmio_aperture(dtb: &Fdt<'_>) -> Result<Option<(u64, u64)>, DriverError
 /// * [`DriverError::NotFound`] — the tree advertises no `virtio,mmio`
 ///   transport slot.
 ///
+/// `map` gives where the caller reaches the aperture `[base, base + len)`
+/// — itself, where the platform runs untranslated — or `None` where it
+/// cannot, which fails as [`DriverError::DeviceFault`].
+///
 /// # Safety
 ///
-/// The MMIO aperture the device tree describes must be identity-mapped
-/// and readable for the lifetime of the returned bus, and nothing else
-/// may alias it. On the `virt` board entered in S-mode with paging off
-/// (`satp == 0`) this holds: physical addresses are accessed directly.
-/// The single volatile reader the constructor mints is confined to that
-/// aperture and performs only bounds-checked volatile loads.
-pub unsafe fn virtio_mmio_bus_from_dtb(dtb: &[u8]) -> Result<impl VirtioMmioBus + '_, DriverError> {
+/// The address `map` gives must reach the MMIO aperture the device tree
+/// describes as device memory, readable for the lifetime of the returned
+/// bus, and nothing else may alias it. The single volatile reader the
+/// constructor mints is confined to that aperture and performs only
+/// bounds-checked volatile loads.
+pub unsafe fn virtio_mmio_bus_from_dtb(
+    dtb: &[u8],
+    map: impl FnOnce(u64, u64) -> Option<*const u32>,
+) -> Result<impl VirtioMmioBus + '_, DriverError> {
     let parsed = Fdt::new(dtb).map_err(|_| DriverError::DeviceFault)?;
     let (base, len) = virtio_mmio_aperture(&parsed)?.ok_or(DriverError::NotFound)?;
-    // SAFETY: the function-level contract guarantees `[base, base+len)`
-    // is the identity-mapped, exclusively-owned virtio-MMIO aperture the
-    // device tree describes; `base` is therefore a valid `*const u32`
-    // for bounds-checked volatile reads for the bus's lifetime.
-    let reader = unsafe { VolatileMmioRead::new(base as *const u32, base, len) };
+    let at = map(base, len).ok_or(DriverError::DeviceFault)?;
+    // SAFETY: the function-level contract makes `at` the aperture the device
+    // tree describes, mapped as device memory and owned by the bus, so it
+    // is a valid `*const u32` for bounds-checked volatile reads for the
+    // bus's lifetime.
+    let reader = unsafe { VolatileMmioRead::new(at, base, len) };
     Ok(Mmio::new(parsed, reader))
 }

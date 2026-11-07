@@ -82,14 +82,7 @@ pub fn report_stack_corruption(corruption: &StackCorruption) -> ! {
 
 /// Enter the fatal-report path, and on the first entry push the buffered
 /// lead-up context to the wire ahead of the report.
-///
-/// With stage-1 translation off every access is Device-nGnRnE, where an
-/// atomic read-modify-write may never complete, so the latch is entered with
-/// plain accesses and the queued console, which a lock guards, is left alone.
 fn enter(cause: &Cause) -> Entry {
-    if !crate::paging::translation_enabled() {
-        return fatal::enter_without_atomics(cause);
-    }
     let entry = fatal::enter(cause);
     if entry == Entry::Report {
         crate::serial::flush_serial_blocking();

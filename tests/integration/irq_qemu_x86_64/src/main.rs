@@ -393,9 +393,8 @@ mod kernel {
     /// (1 s vs. a sub-millisecond IRQ latency) that the actual TSC
     /// frequency does not matter for the pass/fail decision.
     fn rdtsc_ns() -> u64 {
-        // SAFETY: RDTSC is unprivileged on every x86_64 CPU TAIRiX
-        // supports; the instruction has no architectural side
-        // effects beyond producing the timestamp value.
+        // SAFETY: RDTSC at CPL 0 has no architectural side effect beyond
+        // producing the timestamp value.
         let value: u64;
         unsafe {
             let lo: u32;

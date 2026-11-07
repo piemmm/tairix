@@ -300,8 +300,10 @@ source, are new.
 ## FI43 — icons dragged off the desktop
 
 The desktop carries a press on its icons in its own layer, beneath every
-window, so the press is handed to the seat's drag carrier the moment it holds
-them over an application's window (`Desktop::carried_cargo`, `yield_carry`).
+window, so the press is lent to the seat's drag carrier the moment it holds
+them over an application's window (`Desktop::carried_cargo`, `lend_carry`):
+the icons leave the desktop's layer until the drag ends, so no picture is left
+where they stood.
 
 - **The seat carries them above everything.** The carrier shows them as an
   application's drag is shown (`Cargo::Desktop`), offers them to the window
@@ -324,8 +326,10 @@ them over an application's window (`Desktop::carried_cargo`, `yield_carry`).
   another node refused as changed.
 - **Brought back, they are put down.** Over the desktop the pointer shows a
   move; let go there, the press is put down where it was released
-  (`Desktop::put_down_lift`), the pressed icon found by name, so a folder
-  re-listed meanwhile moves nothing else. A lock or `Escape` drops nothing.
+  (`Desktop::put_down_lent`), set out from where the pressed icon rests now,
+  so a folder re-listed meanwhile moves nothing else. Ended any other way — a
+  drop on a window, `Escape`, a lock — the icons stand where they stood again
+  (`Desktop::restore_lent`), until a move that took them lists them gone.
 
 ## FI10 — New ▸
 

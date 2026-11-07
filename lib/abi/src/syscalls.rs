@@ -2590,8 +2590,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         // `U64` carries the reply-bytes-written-or-`-errno` register
-        // convention `ipc_call` uses; `-WouldBlock`/`-TimedOut`/`-NotFound`
-        // are the non-ready outcomes.
+        // convention `ipc_call` uses; `-WouldBlock`/`-TimedOut`/`-BrokenPipe`
+        // (the endpoint has gone)/`-NotFound` are the non-ready outcomes.
         ret: AbiType::U64,
         // No flat gate: the ticket is the unforgeable authority and the reap
         // is claimant-checked kernel-side. Not audited per call: it is the

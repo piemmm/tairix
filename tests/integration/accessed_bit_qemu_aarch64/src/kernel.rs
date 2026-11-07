@@ -7,24 +7,16 @@ use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use tairix_arch_aarch64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
-use tairix_arch_aarch64::{enable_fp_el1, exceptions, qemu_exit, SERIAL_SINK};
+use tairix_arch_aarch64::paging::{image_phys, AddressSpace as ArchAddressSpace, PageTablePool};
+use tairix_arch_aarch64::{exceptions, qemu_exit, SERIAL_SINK};
 use tairix_arch_api::fatal::KernelFault;
 use tairix_arch_api::mmu::{AccessTracking, AddressSpace as _, MapError, PageFlags};
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap};
 use tairix_log::{log, Event, EventId, Level};
 
-/// Gigabytes of identity map the address space provides: `[0, 2 GiB)`
-/// covers the `virt` board's device MMIO (GiB 0, PL011 + GIC) and the RAM
-/// base at GiB 1 where this kernel and its page-table pool run. The probe
-/// page ([`TEST_VADDR`], 64 GiB) sits far above, on freshly walked tables.
-const IDENTITY_GIB: usize = 2;
-
-/// Virtual address the test maps its single 4 KiB probe page at. Chosen at
-/// 64 GiB — far above the identity window and within the 39-bit (512 GiB)
-/// TTBR0 region — so the mapping is a fresh 4 KiB leaf (its own L2/L3),
-/// never a huge block.
+/// Virtual address the test maps its single 4 KiB probe page at: 64 GiB,
+/// within the 39-bit (512 GiB) `TTBR0_EL1` region.
 const TEST_VADDR: u64 = 64 << 30;
 
 /// A misaligned address, to confirm the fail-closed reject.
@@ -78,8 +70,7 @@ static ALLOCATOR: FreeListAllocator =
 static PAGE_TABLES: PageTablePool = PageTablePool::new();
 
 /// 4 KiB frame the test maps at [`TEST_VADDR`]. `#[repr(align(4096))]` so
-/// its physical address is a valid page frame; it lives in identity-mapped
-/// RAM, so its kernel virtual address equals its physical address.
+/// its physical address is a valid page frame.
 #[repr(C, align(4096))]
 struct ProbeFrame([u8; 4096]);
 
@@ -138,30 +129,20 @@ fn on_fault(_trap: KernelFault) -> ! {
 pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     note(TEST_START, "aarch64 accessed-bit test: starting");
 
-    // Enable FP/SIMD at EL1 before any code that may compile to NEON
-    // (logging's formatting helpers can).
-    // SAFETY: boot CPU, called once, before any FP/SIMD executes.
-    unsafe { enable_fp_el1() };
-
-    // Build the identity address space and activate it so the probe
-    // mapping lands in the live translation regime.
-    let Some(space) = ArchAddressSpace::new_identity_gigapages(&PAGE_TABLES, IDENTITY_GIB) else {
+    // Build an empty process root and activate it so the probe mapping
+    // lands in the live translation regime.
+    let Some(mut space) = ArchAddressSpace::new_user(&PAGE_TABLES) else {
         fail("accessed_bit test: page-table pool exhausted", FAIL_POOL);
     };
-    // SAFETY: the identity map covers this kernel's `pc`, `sp`, heap, the
-    // page-table pool, and the `virt` device MMIO (all within `[0, 2 GiB)`),
-    // so enabling translation does not move the ground under the running
-    // code. Boot CPU.
-    unsafe { space.switch() };
+    // SAFETY: the kernel runs from `TTBR1_EL1`, which activating a process
+    // root leaves alone, and the root lives in the static pool. Boot CPU.
+    unsafe { space.activate() };
     // The access-flag fault fix-up walks the active root with no
     // `AddressSpace` in hand, so it draws its tables from the published
     // source. This pool is the only one this image has.
     tairix_arch_api::frames::publish_active_frames(&PAGE_TABLES);
-    let mut space = space;
 
-    // The probe frame is identity-mapped RAM, so its physical address is
-    // its kernel virtual address.
-    let probe_paddr = core::ptr::addr_of!(PROBE_FRAME) as u64;
+    let probe_paddr = image_phys(core::ptr::addr_of!(PROBE_FRAME) as u64);
 
     // Map the probe page kernel read/write through the Arch HAL MMU
     // surface (the path the architecture-neutral kernel uses). `map_page`
@@ -172,6 +153,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     {
         fail("accessed_bit test: probe-page mapping refused", FAIL_MAP);
     }
+    tairix_arch_api::tlb::TlbShootdown::publish_mappings(&mut space, TEST_VADDR, 1);
 
     // The port must declare it can report a referenced bit.
     if !matches!(space.access_tracking(), AccessTracking::Supported) {
@@ -184,8 +166,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // Bring up the EL1 synchronous vectors so the Access-Flag fault is
     // dispatched (and resolved) by the production exception path, and
     // install the unexpected-fault handler.
-    // SAFETY: called once on the boot CPU with a stack established and the
-    // MMU enabled (the address-space build switched it on).
+    // SAFETY: the boot CPU, a stack established, interrupts masked.
     unsafe { exceptions::init_vectors() };
     if tairix_arch_api::fault::set_fault_handler(on_fault).is_err() {
         fail(

@@ -80,9 +80,9 @@ pub fn detect_invariant_tsc() -> bool {
 pub(crate) fn read_tsc() -> u64 {
     let lo: u32;
     let hi: u32;
-    // SAFETY: `rdtsc` is unprivileged, has no memory side effects, and
-    // predates the architecture, so it is present on every x86_64 part.
-    // It reads the monotonically-non-decreasing counter into EDX:EAX.
+    // SAFETY: `rdtsc` runs at CPL 0, where `CR4.TSD` leaves it, has no
+    // memory side effect, and predates the architecture, so it is present on
+    // every x86_64 part. It reads the counter into EDX:EAX.
     unsafe {
         core::arch::asm!(
             "rdtsc",

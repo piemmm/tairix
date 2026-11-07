@@ -8,18 +8,17 @@
 //! not software, isolates one address space's frames from another. This binary exercises that on the aarch64 `virt`
 //! board, end to end:
 //!
-//! 1. Build two stage-1 `AddressSpace`s that each identity-map the low
-//!    2 GiB (so the kernel's code/stack and the device MMIO stay
-//!    reachable), but disagree on a single page at `VICTIM_VA` (well
-//!    above the identity window): the *victim* maps it, the *attacker*
-//!    does not.
+//! 1. Build two process roots that disagree on a single page at
+//!    `VICTIM_VA`: the *victim* maps it, the *attacker* does not. Neither
+//!    carries the kernel, which runs from `TTBR1_EL1`.
 //! 2. Install an EL1 vector table and a fault handler.
-//! 3. Switch to the *attacker* space (enabling the MMU) and read
-//!    `VICTIM_VA`.
+//! 3. Activate the *victim* and read `VICTIM_VA`, proving the page is
+//!    mapped and activation loads a root; then activate the *attacker* and
+//!    read it again.
 //! 4. The MMU raises a translation (data abort) fault; the handler
-//!    confirms it is an abort on exactly `VICTIM_VA` and reports PASS
-//!    through the ARM semihosting finisher. Any other outcome reports
-//!    FAILURE.
+//!    confirms it is an abort on exactly `VICTIM_VA` under the attacker and
+//!    reports PASS through the ARM semihosting finisher. Any other outcome
+//!    reports FAILURE.
 //!
 //! A regression that fails to isolate the page never faults, so the read
 //! returns and the binary reports FAILURE explicitly (it does not hang).
@@ -40,21 +39,18 @@
 mod kernel {
     use core::num::NonZeroU16;
     use core::panic::PanicInfo;
+    use core::sync::atomic::{AtomicBool, Ordering};
 
-    use tairix_arch_aarch64::paging::{AddressSpace, PageTablePool, PAGE_SIZE};
+    use tairix_arch_aarch64::paging::{self, AddressSpace, PageTablePool, PAGE_SIZE};
     use tairix_arch_aarch64::{exceptions, fault, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
     use tairix_arch_api::fatal::KernelFault;
     use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
     use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Level};
 
-    /// Virtual address the victim space maps and the attacker does not.
-    /// 64 GiB — well above the 2 GiB identity window — so the walk uses
-    /// fresh L2/L3 tables rather than shattering an identity block.
+    /// Virtual address the victim space maps and the attacker does not: a
+    /// user-regime address, which only the active process root translates.
     const VICTIM_VA: u64 = 64 << 30;
-
-    /// Number of GiB both spaces identity-map (device MMIO + RAM).
-    const IDENTITY_GIB: usize = 2;
 
     /// Stable audit-event ids for the QEMU transcript.
     const MISO_TEST_START: EventId = EventId(4230);
@@ -64,22 +60,34 @@ mod kernel {
     const FAIL_NO_FAULT: NonZeroU16 = fail_point!(2);
     const FAIL_UNEXPECTED_FAULT: NonZeroU16 = fail_point!(3);
     const FAIL_SETUP: NonZeroU16 = fail_point!(4);
+    /// The victim's own root did not read its page back.
+    const FAIL_VICTIM_UNREAD: NonZeroU16 = fail_point!(5);
 
     /// Page-table pool backing both address spaces (lives in `.bss`).
     static POOL: PageTablePool = PageTablePool::new();
 
-    /// A 4 KiB page the victim space maps at [`VICTIM_VA`]. Its physical
-    /// address is its identity-mapped address (the MMU is off when we
-    /// read it). The attacker never maps it.
+    /// What every byte of [`VICTIM_PAGE`] holds, so the victim's read proves it
+    /// reached that page.
+    const VICTIM_BYTE: u8 = 0x5A;
+
+    /// Set just before the attacker's root is loaded: a fault before then is
+    /// the victim's own read failing, not isolation.
+    static ATTACKER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+    /// A 4 KiB page the victim space maps at [`VICTIM_VA`]. The attacker never
+    /// maps it.
     #[repr(C, align(4096))]
     struct VictimPage([u8; PAGE_SIZE]);
-    static mut VICTIM_PAGE: VictimPage = VictimPage([0; PAGE_SIZE]);
+    static mut VICTIM_PAGE: VictimPage = VictimPage([VICTIM_BYTE; PAGE_SIZE]);
 
     /// The fault handler: confirm the trap is a data/instruction abort on
-    /// exactly [`VICTIM_VA`], then report PASS. Anything else is a
-    /// FAILURE. Never returns.
+    /// exactly [`VICTIM_VA`] under the attacker's root, then report PASS.
+    /// Anything else is a FAILURE. Never returns.
     fn on_fault(trap: KernelFault) -> ! {
-        if trap.syndrome.is_some_and(fault::is_abort) && trap.address == Some(VICTIM_VA) {
+        if ATTACKER_ACTIVE.load(Ordering::SeqCst)
+            && trap.syndrome.is_some_and(fault::is_abort)
+            && trap.address == Some(VICTIM_VA)
+        {
             log(
                 &SERIAL_SINK,
                 &Event {
@@ -124,38 +132,50 @@ mod kernel {
             },
         );
 
-        // Physical address of the victim page (MMU is off → VA == PA).
-        let victim_pa = core::ptr::addr_of!(VICTIM_PAGE) as u64;
+        let victim_pa = paging::image_phys(core::ptr::addr_of!(VICTIM_PAGE) as u64);
 
-        // Victim space: identity map + the extra VICTIM_VA mapping.
-        let mut victim = AddressSpace::new_identity_gigapages(&POOL, IDENTITY_GIB)
-            .unwrap_or_else(|| fail("victim identity map"));
+        // Victim space: the one VICTIM_VA mapping.
+        let mut victim = AddressSpace::new_user(&POOL).unwrap_or_else(|| fail("victim root"));
         // Install the victim mapping through the Arch HAL MMU surface
         // (`tairix_arch_api::mmu::AddressSpace::map_page`), the path
-        // the architecture-neutral kernel uses, rather than the port's
-        // inherent `map_4k` (`plans/WIRING.md` W5b).
+        // the architecture-neutral kernel uses (`plans/WIRING.md` W5b).
         victim
             .map_page(VICTIM_VA, victim_pa, PageFlags::READ | PageFlags::WRITE)
             .unwrap_or_else(|_| fail("victim map_page"));
 
-        // Attacker space: identity map only — VICTIM_VA stays unmapped.
-        let attacker = AddressSpace::new_identity_gigapages(&POOL, IDENTITY_GIB)
-            .unwrap_or_else(|| fail("attacker identity map"));
+        // Attacker space: nothing mapped — VICTIM_VA stays unmapped.
+        let attacker = AddressSpace::new_user(&POOL).unwrap_or_else(|| fail("attacker root"));
 
-        // Install the vector table and fault handler before enabling the
-        // MMU so the abort is routed to `on_fault`.
+        // Install the vector table and fault handler before either read so an
+        // abort is routed to `on_fault`.
         tairix_arch_api::fault::set_fault_handler(on_fault)
             .unwrap_or_else(|_| fail("set_fault_handler"));
-        // SAFETY: called once on the boot CPU before any fault can fire.
+        // SAFETY: the boot CPU, a stack established, interrupts masked.
         unsafe {
             exceptions::init_vectors();
         }
 
-        // Switch to the attacker space (enables the MMU). The attacker
-        // identity-maps this code, the stack, and the device MMIO, so
-        // execution continues; only VICTIM_VA is absent.
-        // SAFETY: the attacker space identity-maps `pc`, `sp`, and MMIO
-        // (RAM Normal, device-0 Device) per `new_identity_gigapages`.
+        // SAFETY: the kernel runs from `TTBR1_EL1`, which loading a process
+        // root leaves untouched.
+        unsafe {
+            victim.activate();
+        }
+        // SAFETY: the victim's root maps VICTIM_VA onto VICTIM_PAGE for EL1.
+        if unsafe { core::ptr::read_volatile(VICTIM_VA as *const u8) } != VICTIM_BYTE {
+            log(
+                &SERIAL_SINK,
+                &Event {
+                    level: Level::Error,
+                    id: MISO_TEST_FAIL,
+                    message: "aarch64 memory-isolation test: victim root did not read its page",
+                    fields: &[],
+                },
+            );
+            qemu_exit::exit_failure(FAIL_VICTIM_UNREAD);
+        }
+
+        ATTACKER_ACTIVE.store(true, Ordering::SeqCst);
+        // SAFETY: as the victim's activation above.
         unsafe {
             attacker.activate();
         }

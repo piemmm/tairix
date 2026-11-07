@@ -125,6 +125,14 @@ constant in `lib/abi::time`. The flooring is value-only, so the frozen
 reading monotonically non-decreasing. See
 [the syscall reference](../architecture/syscalls.md#clock-resolution-and-side-channels).
 
+Nor can untrusted code go around the gate to a counter of the hardware's
+own. Every CPU the kernel holds closes them to user mode, whatever reset or
+firmware left in the controls that open them: `CR4.TSD` set and `CR4.PCE`
+clear on x86_64; `CNTKCTL_EL1` and `PMUSERENR_EL0` zero on aarch64, which
+also keeps EL0 off the timer the kernel preempts by; `scounteren` zero on
+riscv64. The `user-counters` verticals open each control themselves and
+check that the port's hold closes it.
+
 ## TSC as a validated clocksource (x86_64)
 
 The x86_64 monotonic clock is the Time-Stamp Counter. `RDTSC` is only a

@@ -140,8 +140,8 @@ under `qemu-system-aarch64 -M virt`.
 | Concern | Today (`virt`) | Pi 4 (BCM2711) |
 | --- | --- | --- |
 | Production kernel binary | none — aarch64 boots only via per-test bins; `tairix-kernel/build.rs` wires **only** `x86_64` | a real `aarch64-unknown-none` `tairix-kernel` image is required |
-| Boot protocol | QEMU `-kernel <elf>`, aarch64 hand-off `x0 = DTB` at EL2/EL1 | Pi firmware (`start4.elf`) loads `kernel8.img` at `0x80000`, enters EL2, `x0 = DTB` (Pi firmware-supplied) |
-| Load address / linker | `0x4020_0000` (`aarch64-virt.ld`) | `0x8_0000` (needs an `aarch64-rpi4.ld`) |
+| Boot protocol | QEMU `-kernel <elf>`, aarch64 hand-off `x0 = DTB` at EL2/EL1 | Pi firmware (`start4.elf`) places `kernel8.img` at `0x20_0000` by its arm64 `Image` header, enters EL2, `x0 = DTB` (Pi firmware-supplied) |
+| Load address / linker | `0x4020_0000` (`aarch64-virt.ld`) | `0x20_0000` (`aarch64-rpi4.ld`); both link at `0xFFFF_FFFF_C020_0000` |
 | Console UART | PL011 @ `0x0900_0000` (fixed const) | PL011 @ `0xFE20_1000` *or* mini-UART (AUX) @ `0xFE21_5040`, base discovered |
 | Interrupt controller | GICv2 @ GICD `0x0800_0000` / GICC `0x0801_0000` (fixed const) | GIC-400 @ GICD `0xFF84_1000` / GICC `0xFF84_2000`, base discovered |
 | RAM base | `0x4000_0000` | `0x0` (low 1 GiB; up to 8 GiB with the `>3GiB` window) |
@@ -195,9 +195,10 @@ per §15.7):
   mapped to ARM physical `0xFE00_0000`); PL011 `+0x20_1000`, AUX mini-UART
   `+0x21_5000`, mailbox `+0x00_B880`, EMMC2 `+0x34_0000`.
 - GIC-400: GICD `0xFF84_1000`, GICC `0xFF84_2000`.
-- Boot: firmware loads `kernel8.img` at `0x8_0000`, AArch64, enters at
-  EL2, `x0` = DTB pointer; `config.txt` knobs (`arm_64bit=1`,
-  `kernel=kernel8.img`, `enable_uart=1`, `armstub`).
+- Boot: firmware places `kernel8.img` at `0x20_0000` by its arm64 `Image`
+  header (`text_offset` zero), AArch64, enters at EL2, `x0` = DTB pointer;
+  `config.txt` knobs (`arm_64bit=1`, `kernel=kernel8.img`, `enable_uart=1`,
+  `armstub`).
 - RAM layout for the 1/2/4/8 GiB SKUs and the `>3GiB` aliasing window.
 
 **Done when:** the section exists, links cleanly (`cargo xtask
@@ -205,10 +206,10 @@ docs-check`), and is referenced by P1+. No source code changes.
 
 ### P1 — Pi-4 boot stub + linker script + production aarch64 kernel binary
 
-- Add `kernel/arch/aarch64/link/aarch64-rpi4.ld` (load `0x8_0000`),
+- Add `kernel/arch/aarch64/link/aarch64-rpi4.ld` (load `0x20_0000`),
   alongside the existing `aarch64-virt.ld`. Two linker scripts is the
-  §0.2 boot carve-out, not duplication — they differ only in the origin
-  address and a comment.
+  §0.2 boot carve-out, not duplication — they differ only in the load
+  address, the boot stack's size and comments.
 - Generalise `boot.s` so the EL2→EL1 drop + `.bss` clear + stack setup is
   board-independent (it already is, bar the comment); confirm it works
   from EL2 with the Pi register hand-off. If the Pi enters all 4 cores at
@@ -230,7 +231,7 @@ produces a freestanding ELF that links against `aarch64-rpi4.ld`; a host
 unit test covers the new `build.rs` arch/linker selection; no `cfg-check`
 / `deps-check` regressions.
 
-**Landed.** `kernel/arch/aarch64/link/aarch64-rpi4.ld` (origin `0x8_0000`)
+**Landed.** `kernel/arch/aarch64/link/aarch64-rpi4.ld` (load `0x20_0000`)
 sits beside `aarch64-virt.ld`; `boot.s` now parks non-boot CPUs
 (`MPIDR_EL1` affinity ≠ 0 → `wfe`) before touching the boot stack, so it
 serves both `virt` (PSCI-held secondaries) and the Pi (all-core release).
@@ -249,49 +250,25 @@ stub sets only `SCTLR_EL2` and `CPUECTLR_EL1.SMPEN`, so `boot.s`'s EL2
 path writes every EL2 control register **whole** with the
 unit-test-pinned hand-off values in `tairix_arch_aarch64::el2`
 (`HCR_EL2 = RW`, `CNTHCTL_EL2 = EL1PCTEN|EL1PCEN`, `CPTR_EL2 =` RES1,
-`MDCR_EL2 = 0`, `VPIDR/VMPIDR` mirrored) — an UNKNOWN `HCR_EL2.TVM`
+`MDCR_EL2` trapping nothing with `HPMN = PMCR_EL0.N`, `VPIDR/VMPIDR`
+mirrored) — an UNKNOWN `HCR_EL2.TVM`
 traps EL1's first `MAIR/TCR/TTBR/SCTLR` write into vector-less EL2,
 hanging the metal Pi 4B silently at the MMU switch while QEMU stayed
 green.
-The boot identity window is bounded to backed memory: gigapages are mapped
-only when named by the configured Device mask or the configured
-kernel-extent mask (`paging::configure_kernel_gigapages` /
-`gigapage_mask_from_extents`, default all — for host tests and the QEMU
-integration kernels), and
-every other L1 slot is left *invalid* so speculation cannot reach
-unbacked bus windows (the metal Pi 4B wedged at the MMU switch exactly
-there while QEMU stayed green). The boot path derives the kernel-extent
-mask once, pre-MMU, from the kernel image extent, the firmware DTB blob,
-and the scan-out surface — the things the kernel addresses *physically*.
-It is not widened over discovered RAM: an allocator frame is reached
-through the direct physical map in the `TTBR1_EL1` regime
-(`plans/OPEN-DEFECTS.md` D56), so a process root carries no mapping of RAM
-in the half user code addresses and the window does not grow with the
-machine. The switch itself is
-real-silicon-honest: the just-written tables are swept to PoC
-(`PageTablePool::clean_invalidate_to_poc`, `dc civac` per
-`CTR_EL0`-decoded line — MMU-off stores bypass the cache but the walker
-reads back cacheable, so firmware cache residue would shadow the
-descriptors) and `switch` orders those Device-nGnRnE stores with a
-full-system `dsb sy` before enabling translation. The pool's allocation
-counter is translation-aware: MMU-off it advances by plain load + store
-(LDXR/STXR exclusives never succeed on the BCM2711's MMU-off
-Device-nGnRnE accesses, so a `fetch_add` spins forever on metal while
-QEMU stays green; MMU-off allocation is pre-SMP boot-CPU-only by
-construction) and reverts to `fetch_add` once translation is live. The
-permanent park root follows the same boundary: `program_stage1_translation`
-returns a private live-translation witness after `SCTLR_EL1` + `isb`, and
-only that witness performs the set-once atomic publication, so the MMU-off
-activation prefix contains no exclusive retry loop.
+The kernel never runs on an identity map (`plans/FIX-AARCH64-KERNEL-MAP.md`):
+`boot.s` turns translation on under an early map of the image and branches
+to the high half, and the port entry loads the per-section kernel root
+before any other Rust runs, with `TTBR0_EL1` on an empty root. The direct
+map is typed a gigabyte at a time, registers first and RAM after, so no
+unbacked or mistyped gigabyte is ever mapped Normal — the metal Pi 4B wedged
+exactly there while QEMU, which answers every address, stayed green. No
+Rust runs with translation off, so no exclusive retry loop can meet the
+BCM2711's MMU-off Device-nGnRnE accesses either.
 With those fixes the metal Pi 4B (8 GB) boots the production pipeline
 end to end **through user space**: the
 stage-p1 boot line, the kernel-core phase log, PID 1 `init`'s EL0 entry
 and banner, and the spawn/wait/exit supervision cycle all render on
-both UART0 and the HDMI console (every spawned space's identity window
-is derived from the configured Device/kernel-extent gigapage masks,
-`paging::configured_identity_gigapages` — P6c-3/P6d — since the former
-hard-coded 2 GiB `virt` window dropped the Pi's gigapage-3 UART/GIC
-from PID 1's root). The session formerly read end-of-input at its first
+both UART0 and the HDMI console. The session formerly read end-of-input at its first
 prompt (the metal had nothing queued in the PL011 RX FIFO) and exited,
 exhausting `init`'s crash-loop budget; the kernel-core
 `BlockingConsoleRead` backing (P6e-2) now parks the reader until UART
@@ -305,13 +282,12 @@ gated `kernel_isa="x86_64"`; the new freestanding `boot_aarch64` module +
 the aarch64 `kernel_main(dtb)` in `main.rs` construct `Aarch64Arch` (the
 §17 selection point), bring up the console, log a boot line, and park
 fail-closed. `cargo build -p tairix-kernel --target aarch64-unknown-none`
-links a freestanding ELF entered at `0x8_0000`. The discovery-fed
+links a freestanding ELF entered at `0x20_0000`. The discovery-fed
 `kernel_core::kernel_main` hand-off (a real memory map / IRQ routing) is
 deliberately staged to P2/P3 — fabricating a hardware map would violate
 §18.5, and the `-M raspi4b` runtime vertical that proves it cannot pass
-until P2's console discovery lands. The `CPACR_EL1.FPEN` enable is now a
-single `tairix_arch_aarch64::enable_fp_el1()` helper (§2.2), adopted by
-the production binary and the existing aarch64 verticals.
+until P2's console discovery lands. The `CPACR_EL1.FPEN` enable is the
+port entry's, on every CPU before any code beyond it runs.
 
 ### P2 — Board-discovered UART console (PL011 + mini-UART)
 
@@ -600,48 +576,18 @@ the firmware `cpu-release-addr` channel is per-core). The gate predicate
 and its edge cases are host-tested (`smp_tests`); the parked-core polling
 is assembly.
 
-**Root cause (metal): a secondary's UNKNOWN power-on caches were never
-invalidated before its data cache was enabled.** The cpu-labelled
-beacons localised the death to `adopt_boot_translation` (core printed
-`reached rust entry`/`fp enabled` then stopped before `mmu adopted`),
-and the per-core state dump proved the inputs were identical and correct
-across cores (same boot root, same MMU-off `SCTLR_EL1`, stacks differing
-only by the 64 KiB stride). The failure was a **race**, not bad state:
-deterministic-then-intermittent (~50/50) on the highest/last-released
-core. On AArch64 a core's cache contents are architecturally UNKNOWN at
-power-on; a freshly-released secondary can hold stale lines over the very
-physical addresses TAIRiX now uses for the boot page tables and that
-core's stack. TAIRiX enabled `SCTLR_EL1.C` on the secondary
-(`program_stage1_translation`) **without first invalidating its local
-D-cache**, so the first cacheable access after the MMU came on — the
-translation-table walk or a stack access — intermittently read a stale
-cache line shadowing DRAM and the core faulted with no vectors installed.
-The boot CPU never hit this because firmware hands it clean caches. (The
-earlier serialisation-gate and stack-mapping-coherency theories were both
-disproven: core 3 entered Rust cleanly with a correct, PoC-coherent
-`.bss`/low-RAM stack, and the boot CPU only spin-waits during bring-up.)
-
-**Fix:** two complementary defences make the boot-root hand-off coherent
-across the MMU-off/cacheable boundary. (1) The boot CPU publishes the
-park root (`publish_park_root`) with a cacheable store but a secondary
-reads it MMU-off, non-cacheably from DRAM, in `adopt_boot_translation`;
-publication therefore cleans the park-root word to the point of coherency
-(`dc civac`), or the store lingers in the boot CPU's write-back cache,
-every secondary reads a stale zero, and each parks fail-closed with "no
-boot root" (the observed on-metal symptom: all secondaries report "no
-boot root" and the later release gets `no_online_ack`). (2)
-`adopt_boot_translation` invalidates the calling core's local data cache
-to the Level of Coherence (`paging`'s set/way
-`_invalidate_local_dcache_to_poc`, `dc isw`) **before**
-`program_stage1_translation` enables the MMU+caches. It is *invalidate*,
-never clean: the stale lines hold no live data this core produced (every
-prior access was MMU-off Device-nGnRnE, never cached), and cleaning would
-write their garbage back over the live tables. Both are secondary-path
-concerns — the boot CPU's `AddressSpace::switch` is otherwise unaffected —
-so neither perturbs the single-CPU QEMU boot and both are safe on QEMU's
-`cortex-a72` model. The end-to-end release remains on-metal-only (no
-`-M raspi4b` in the pinned QEMU); acceptance is all four
-`SecondaryCpuOnline` lines with core 3 scheduling across repeated boots.
+**A secondary's caches are UNKNOWN at power-on.** It may hold stale lines
+over the very physical addresses the boot page tables and its stack use, so
+`smp.s` invalidates its local data cache to the Level of Coherence by
+set/way (`_invalidate_local_dcache_to_poc`, `dc isw`) before translation and
+caches come on — *invalidate*, never clean, or the garbage would be written
+back over the live tables. Without it the last-released core faulted
+intermittently with no vectors installed. The words a parked core polls
+before then (the release gate) are `.data`, holding their values from the
+loaded image, and are cleaned to the point of coherency when written. The
+end-to-end release remains on-metal-only (no `-M raspi4b` in the pinned
+QEMU); acceptance is all four `SecondaryCpuOnline` lines with core 3
+scheduling across repeated boots.
 
 ### P6 — Spawn `init` into EL0 on the Pi
 
@@ -718,21 +664,12 @@ on its own before the next.
     line now records `mem_map_built` / `mem_map_status` /
     `usable_bytes_hex` / `reserved_bytes_hex`, failing closed to a status
     string (never a panic, §2.9) on an absent or malformed window.
-  - **P6c-2 — MMU + `kernel_main` hand-off `[x]`.** `boot_aarch64`
-    discovers the console + GIC bases MMU-off (early-return walks),
-    derives the identity map's Device gigapage mask from them
-    (`paging::identity_device_mask` — discovered MMIO gigapages Device,
-    the kernel image's own gigapages Normal/executable; `virt`: GiB 0
-    Device, Pi 4: GiB 3 Device with the kernel at `0x8_0000` in a Normal
-    GiB 0), installs it via `paging::configure_device_gigapages`, then
-    enables the stage-1 identity MMU
-    (`AddressSpace::new_identity_gigapages` over a static boot
-    `PageTablePool`, 512×1 GiB, then `switch`) and installs the EL1
-    vectors *before* any further work, so the `kernel_core`
-    allocator/scheduler atomics run on Normal memory and the full-tree
-    `first_memory_region` FDT walk is MMU-on-safe (the §watch-out
-    hazard). The boot audit line records `device_gigapages_hex`
-    (`virt`: `0x1`; Pi 4: `0x8`). It adds the local `Aarch64BinArch`
+  - **P6c-2 — `kernel_main` hand-off `[x]`.** Translation is on before
+    any Rust runs (`plans/FIX-AARCH64-KERNEL-MAP.md`); `boot_aarch64`
+    types the direct map from the discovered board — registers first
+    (`virt`: GiB 0, Pi 4: GiB 3), then RAM — before bringing a device up.
+    The boot audit line records `device_gigapages_hex` (`virt`: `0x1`;
+    Pi 4: `0x8`). It adds the local `Aarch64BinArch`
     `KernelArch` wrapper (orphan-rule sibling of the x86_64 `BinArch` /
     riscv64 `RiscvBinArch`), a slot-based aarch64 `production_dispatch` +
     `DISPATCH_SLOT` (the shared arch-neutral frame-read / errno-encode /
@@ -761,11 +698,8 @@ on its own before the next.
     (`spawn_image` — the new authorise+build+`ProcessSpawned`-audit half of
     `spawn_and_enter`, no enter) while the core registers PID 1 with the
     scheduler + capability table and dispatches it. The aarch64
-    `init_spawn` seam builds an identity user address space whose window
-    is derived from the configured Device/RAM gigapage masks
-    (`paging::configured_identity_gigapages` — 2 GiB on `virt`, 4 GiB on
-    the Pi 4, whose UART/GIC live in gigapage 3; the 64 GiB bias avoids
-    the gigapage collision), parses the embedded `rxe`, and
+    `init_spawn` seam builds an empty process root (the kernel lives in
+    `TTBR1_EL1`), parses the embedded `rxe`, and
     boxes the `userentry` `eret` as the scheduler task body; the body runs
     under `step` so the per-CPU `current_task` is set when `init`'s first
     `svc` traps back. PID 1 runs as uid 0 with `{CAP_CONSOLE_WRITE}`. The
@@ -1354,7 +1288,7 @@ copy is added on the syscall hot path (§2.16).
   higher-half kernel window (new-table static pointers + the `DirectPhysMap`) —
   so it builds the child's tables **without switching `CR3`**, never moving the
   running parent out from under itself, exactly as the aarch64 producer builds
-  through its identity window (§2.2). The child's own `CR3` is reloaded by its
+  through its direct map (§2.2). The child's own `CR3` is reloaded by its
   `pre_resume` hook (CR3 + `set_kernel_rsp0`); its kernel stack is a software-
   canary `BoxStack` (the hardware guard-page fault-form is aarch64-only —
   riscv64/x86_64 `Pending`). Proven by
@@ -1665,14 +1599,12 @@ console".
   `stream_write` remains one repaint and one cache clean rather than being
   fragmented at every line feed; scheduling relies on preemption between
   syscalls, not an output-path yield.
-- Bring-up runs in the **pre-MMU** phase of
-  `tairix-kernel::boot_aarch64` (caches off ⇒ the property exchange is
-  DMA-coherent with no maintenance; the state cell is written by the
-  single-threaded boot CPU — no atomic RMW MMU-off). Post-MMU rendering
-  serialises on a DAIF-masking `IrqSafeSpinLock` over the port's one masking
+- Bring-up runs on the boot CPU before SMP, in
+  `tairix-kernel::boot_aarch64`, the property buffer cleaned and invalidated
+  around each exchange. Rendering serialises on a DAIF-masking `IrqSafeSpinLock` over the port's one masking
   primitive (`irqmask::DaifIrqControl`) and cleans the touched
   scanlines (`dc cvac` + `dsb`) so the firmware scan-out sees them. The
-  doorbell base joins the Device-gigapage mask inputs; the boot audit
+  doorbell's gigabyte is typed as registers (`video::register_windows`); the boot audit
   line carries `video_console=true/false`.
 - `serial::ConsoleWriter` (log sink) and `serial::write_console_bytes`
   (the `stream_write` fd 1/2 backing) render to the screen when
@@ -1801,7 +1733,7 @@ user mode (operator metal acceptance).
   `armstub=armstub8.bin` only when the optional stub is staged), and
   `kernel8.img` — the P1 release ELF flattened by `mkimage`'s fail-closed
   converter (`elfflat`: ELF64/LE/`ET_EXEC`/aarch64 only, `PT_LOAD` layout
-  must start *and* enter at `0x8_0000`, overlap/size-bound checks).
+  must start *and* enter at `0x20_0000`, overlap/size-bound checks).
 - Firmware blobs stay uncommitted third-party inputs (§19.3):
   `tools/mkimage/firmware.lock` pins the upstream HTTPS `source`
   directory plus name + byte length + SHA-256 of `start4.elf` /

@@ -542,6 +542,9 @@ struct Carry {
     /// Where the pressed tile stands, once the press has travelled far enough
     /// to be a drag.
     at: Option<Point>,
+    /// Lent to the seat, which carries the icons over a window: they stay
+    /// lifted off the desktop and are drawn nowhere here until the drag ends.
+    lent: bool,
 }
 
 impl Carry {
@@ -553,16 +556,6 @@ impl Carry {
             at.y.saturating_sub(self.rest.y),
         ))
     }
-}
-
-/// A press on the desktop's icons that the seat carries on over a window:
-/// what putting them down again needs if they are brought back and let go.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DesktopLift {
-    /// The pressed icon's name, which leads the selection carried.
-    pub(crate) lead: String,
-    /// The press's offset from the pressed tile's corner.
-    pub(crate) grab: (i32, i32),
 }
 
 /// The names a reorder keeps the selection, the focus and a carried press on.
@@ -2536,13 +2529,18 @@ impl<S: DirectorySource> Desktop<S> {
             )
         };
         let lift = self.carry.and_then(|carry| {
+            let shift = if carry.lent {
+                None
+            } else {
+                Some(carry.shift()?)
+            };
             Some(Lift {
                 lead: carry.index,
                 with: self
                     .selection
                     .contains(carry.index)
                     .then_some(&self.selection),
-                shift: carry.shift()?,
+                shift,
             })
         });
         Shown {
@@ -2939,6 +2937,8 @@ impl<S: DirectorySource> Desktop<S> {
         damage: &mut Region,
     ) -> DesktopOutcome {
         self.settle(layout);
+        // A press on the desktop proves the seat carries nothing of it now.
+        self.restore_lent(layout, damage);
         self.carry = None;
         self.collapse = None;
         self.end_band(scale, damage);
@@ -2998,6 +2998,7 @@ impl<S: DirectorySource> Desktop<S> {
             ),
             rest: Point::new(rect.left(), rect.top()),
             at: None,
+            lent: false,
         });
         self.carry = carry;
         DesktopOutcome::ignored()
@@ -3024,7 +3025,7 @@ impl<S: DirectorySource> Desktop<S> {
             }
             return DesktopOutcome::ignored();
         }
-        if self.carry.is_none() {
+        if self.carry.is_none_or(|carry| carry.lent) {
             return DesktopOutcome::ignored();
         }
         self.carry_to(at, layout, scale, damage);
@@ -3047,8 +3048,9 @@ impl<S: DirectorySource> Desktop<S> {
     /// pointer at `at`.
     #[must_use]
     pub fn carries_to(&self, at: Point, scale: Scale) -> bool {
-        self.carry
-            .is_some_and(|carry| carry.at.is_some() || past_drag_slop(carry.from, at, scale))
+        self.carry.is_some_and(|carry| {
+            !carry.lent && (carry.at.is_some() || past_drag_slop(carry.from, at, scale))
+        })
     }
 
     /// What the press carries once it is a drag, for the seat to carry over a
@@ -3058,7 +3060,7 @@ impl<S: DirectorySource> Desktop<S> {
     /// the press has travelled, or where the heap cannot describe them.
     #[must_use]
     pub fn carried_cargo(&self, pointer: Point, layout: &GridView) -> Option<DesktopCargo> {
-        let carry = self.carry?;
+        let carry = self.carry.filter(|carry| !carry.lent)?;
         carry.at?;
         let shown = self.shown(layout);
         let count = shown.carried().count();
@@ -3099,11 +3101,7 @@ impl<S: DirectorySource> Desktop<S> {
             .with_filetype(lead.filetype())
             .with_hidden_ending(hidden)
             .ok()?;
-        let lift = DesktopLift {
-            lead: lead.name().to_string(),
-            grab: carry.grab,
-        };
-        Some(DesktopCargo { shown, items, lift })
+        Some(DesktopCargo { shown, items })
     }
 
     /// What a drop of `entry` off the desktop acts on: the file in the
@@ -3124,54 +3122,81 @@ impl<S: DirectorySource> Desktop<S> {
         })
     }
 
-    /// Give the press up to the seat, which carries its icons on over a
-    /// window: they stand where they rest again, and are put down here again
-    /// only through [`put_down_lift`](Self::put_down_lift).
-    pub fn yield_carry(&mut self, layout: &GridView, damage: &mut Region) {
+    /// Lend the press to the seat, which carries its icons on over a window:
+    /// they leave the desktop's layer, lifted until the drag ends
+    /// ([`put_down_lent`](Self::put_down_lent), [`restore_lent`](Self::restore_lent)).
+    pub fn lend_carry(&mut self, layout: &GridView, damage: &mut Region) {
         self.mark_carried(layout, damage);
         if let Some(carry) = self.carry.as_mut() {
-            carry.at = None;
+            carry.lent = true;
         }
+        self.collapse = None;
+    }
+
+    /// Let go of the press without a drag: its icons, carried or not, stand
+    /// where they rest.
+    pub fn cancel_carry(&mut self, layout: &GridView, damage: &mut Region) {
         self.mark_carried(layout, damage);
+        self.mark_resting_carried(layout, damage);
         self.carry = None;
         self.collapse = None;
     }
 
-    /// The icons `lift` describes came back and were let go at `at`: put them
-    /// down there, as a press carried to it would be, the pressed icon found
-    /// by its name and set out from where it rests now, so a folder re-listed
-    /// meanwhile moves nothing else.
-    pub fn put_down_lift(
+    /// The icons the press lent to the seat came back and were let go at
+    /// `at`: put them down there, as a press carried to it would be, set out
+    /// from where the pressed one rests now.
+    pub fn put_down_lent(
         &mut self,
-        lift: &DesktopLift,
         at: Point,
         layout: &GridView,
         damage: &mut Region,
     ) -> DesktopOutcome {
         self.settle(layout);
-        self.carry = None;
-        let Some(index) = self
-            .entries
-            .iter()
-            .position(|entry| entry.name() == lift.lead)
-        else {
+        let Some(carry) = self.carry.filter(|carry| carry.lent) else {
             return DesktopOutcome::ignored();
         };
-        let (Some(rest), Some(field)) = (self.shown(layout).rect(index), Field::of(layout)) else {
+        let rest = self
+            .shown(layout)
+            .resting()
+            .find(|&(index, _)| index == carry.index)
+            .map(|(_, rect)| Point::new(rect.left(), rect.top()));
+        let (Some(rest), Some(field)) = (rest, Field::of(layout)) else {
+            self.restore_lent(layout, damage);
             return DesktopOutcome::ignored();
         };
         let corner = Point::new(
-            at.x.saturating_sub(lift.grab.0),
-            at.y.saturating_sub(lift.grab.1),
+            at.x.saturating_sub(carry.grab.0),
+            at.y.saturating_sub(carry.grab.1),
         );
         self.carry = Some(Carry {
-            index,
-            from: at,
-            grab: lift.grab,
-            rest: Point::new(rest.left(), rest.top()),
+            rest,
             at: Some(field.shown_at(corner)),
+            lent: false,
+            ..carry
         });
         self.put_down(layout, damage)
+    }
+
+    /// The drag the press was lent to ended elsewhere: its icons stand where
+    /// they rest again.
+    pub fn restore_lent(&mut self, layout: &GridView, damage: &mut Region) {
+        if self.carry.is_some_and(|carry| carry.lent) {
+            self.mark_resting_carried(layout, damage);
+            self.carry = None;
+        }
+    }
+
+    /// Add the resting tiles of every icon the press carries to `damage`.
+    fn mark_resting_carried(&self, layout: &GridView, damage: &mut Region) {
+        let shown = self.shown(layout);
+        let Some(lift) = shown.lift else {
+            return;
+        };
+        for (index, rect) in shown.resting() {
+            if lift.carries(index) {
+                damage.add(rect);
+            }
+        }
     }
 
     /// How far the press carries its icons, once it is a drag.
@@ -4013,12 +4038,12 @@ struct Shown<'a> {
 }
 
 /// What a press carries: the icon pressed, with the selection when it is in
-/// it, each moved by one shift.
+/// it, each moved by one shift, or drawn nowhere while the seat carries them.
 #[derive(Clone, Copy)]
 struct Lift<'a> {
     lead: usize,
     with: Option<&'a Selection>,
-    shift: (i32, i32),
+    shift: Option<(i32, i32)>,
 }
 
 impl Lift<'_> {
@@ -4061,13 +4086,17 @@ impl Shown<'_> {
         flowed.chain(self.standing.placed.iter().copied())
     }
 
-    /// The carried icons where they are carried to.
+    /// The carried icons where they are carried to; none while the seat
+    /// carries them.
     fn carried(&self) -> impl DoubleEndedIterator<Item = (usize, Rect)> + '_ {
-        self.lift.into_iter().flat_map(move |lift| {
-            self.resting()
-                .filter(move |&(index, _)| lift.carries(index))
-                .map(move |(index, rect)| (index, shifted(rect, lift.shift)))
-        })
+        self.lift
+            .and_then(|lift| Some((lift, lift.shift?)))
+            .into_iter()
+            .flat_map(move |(lift, shift)| {
+                self.resting()
+                    .filter(move |&(index, _)| lift.carries(index))
+                    .map(move |(index, rect)| (index, shifted(rect, shift)))
+            })
     }
 
     /// The icons the flow stood, cell by cell, the one carried aside.

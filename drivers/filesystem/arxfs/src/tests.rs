@@ -1803,6 +1803,37 @@ fn incompressible(len: usize) -> alloc::vec::Vec<u8> {
 }
 
 #[test]
+fn a_stored_block_is_hashed_once() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    let file = fs
+        .create(root, b"once", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    let body = incompressible(2 * cap);
+    assert_eq!(fs.write_at(file, 0, &body[..cap]), Ok(cap));
+    let before = crate::crypto::content_hashes_taken();
+    assert_eq!(fs.write_at(file, cap as u64, &body[cap..]), Ok(cap));
+    assert_eq!(crate::crypto::content_hashes_taken() - before, 1);
+}
+
+#[test]
+fn a_cluster_is_compressed_into_scratch_the_volume_already_holds() {
+    let mut fs = fmt(512, 1024, 32);
+    let root = fs.root();
+    let cluster = as_usize(fs.data_capacity()) * as_usize(COMPRESS_CLUSTER_BLOCKS);
+    let file = fs
+        .create(root, b"frames", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    let body = incompressible(2 * cluster);
+    assert_eq!(fs.write_at(file, 0, &body[..cluster]), Ok(cluster));
+    let (written, metering) =
+        tairix_fuzzseed::meter::metered(|| fs.write_at(file, cluster as u64, &body[cluster..]));
+    assert_eq!(written, Ok(cluster));
+    assert_eq!(metering.zeroed, 0, "{metering:?}");
+}
+
+#[test]
 fn single_block_records_are_stored_raw_and_round_trip() {
     // A single-block record is always stored raw — even highly compressible
     // content: inside a fixed 1:1 block a compressed frame frees nothing, so

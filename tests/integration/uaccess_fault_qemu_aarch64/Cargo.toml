@@ -15,10 +15,10 @@ workspace = true
 # window and observe the copy return an error" integration test — the
 # aarch64 member of the per-port fault-window verticals (`PLAN.md` Stage 7
 # item E, `tests/SECURITY.md` §5). It links only the `tairix-arch-aarch64`
-# port: it builds an identity stage-1 `paging::AddressSpace`, installs the
+# port: it builds an empty process `paging::AddressSpace`, installs the
 # EL1 vector table (which arms the Arch HAL guarded-copy slot), activates
 # the space, and drives the shared `tairix_arch_api::uaccess::conformance`
-# checks against a virtual page beyond the identity map. The fatal `fault`
+# checks against a low page the space leaves unmapped. The fatal `fault`
 # handler reports FAILURE — reaching it means the window redirect did not
 # absorb the abort. Keeping the QEMU-exit shortcut in a dedicated bin (not
 # a Cargo feature on the arch crate) prevents feature unification from

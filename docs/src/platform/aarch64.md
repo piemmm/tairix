@@ -62,10 +62,17 @@ they are threaded from `FdtDiscovery` (P3) rather than the `virt` constants.
 
 ### Boot protocol
 
-The Pi firmware (`start4.elf`, with `fixup4.dat`) loads the kernel image
-`kernel8.img` to physical **`0x8_0000`** (the AArch64 64-bit load address) and
-enters it in **AArch64 EL2** with the aarch64 boot hand-off convention
-(`x0` = physical address of the firmware-supplied DTB; `x1`/`x2`/`x3` zero).
+The Pi firmware (`start4.elf`, with `fixup4.dat`) places the kernel image
+`kernel8.img` at physical **`0x20_0000`**, the address the image is linked to
+load at, and enters it in **AArch64 EL2** with the aarch64 boot hand-off
+convention (`x0` = physical address of the firmware-supplied DTB;
+`x1`/`x2`/`x3` zero). A 2 MiB boundary, so the image's virtual and physical
+addresses agree in every block. The firmware places the image by the arm64
+`Image` header the trampoline opens it with (`tairix_arch_aarch64::image_header`): a
+zero `text_offset` puts it 2 MiB above the base of RAM, as QEMU's `-kernel`
+does, and `image_size` states its whole reach. An image without the header is
+moved to `0x8_0000` whatever `kernel_address` says, so the image builder
+refuses a kernel whose header is missing or disagrees with its ELF.
 On current firmware all four cores are released to the kernel entry unless an
 `armstub8.bin` spin-table stub is supplied; the boot stub therefore parks
 secondaries (`MPIDR_EL1` affinity ≠ 0) polling the kernel's own spin-table
@@ -88,7 +95,7 @@ a-time regardless.
 | Key | Value | Effect |
 | --- | --- | --- |
 | `arm_64bit` | `1` | boot the ARM cores in AArch64 |
-| `kernel` | `kernel8.img` | the image the firmware loads at `0x8_0000` |
+| `kernel` | `kernel8.img` | the image the firmware loads |
 | `enable_uart` | `1` | hold the core clock so the PL011/mini-UART baud is stable; route the debug UART |
 | `dtoverlay` | `disable-bt` | detach Bluetooth from the PL011 so `UART0` is the primary UART on the GPIO 14/15 header |
 | `disable_overscan` | `1` | zero the firmware's default per-edge overscan margins (48 px on an HDMI CEA mode); they shrink the display size the firmware reports *and* the surface it allocates, framing the boot console and the HVS-composited desktop in a black border |
@@ -148,25 +155,19 @@ allocator must not assume the `virt` `0x4000_0000` base. The boot path reads
 **every** declared range (`Fdt::each_memory_region`: every `reg` pair of
 every `/memory` node — an 8 GiB Pi 4 declares windows below the MMIO hole,
 between 1 GiB and 4 GiB, and above 4 GiB; reading only the first
-under-reported it as ~1 GiB), clips the windows out of Device-typed
-gigapages (memory is typed at 1 GiB granularity and Device
-wins for a shared gigapage, so RAM sharing the UART/GIC/PCIe gigapage would
-be mapped Device — those bytes are dropped fail-closed until 2 MiB-granular
-identity typing lands, `plans/APPS.md` I4), sizes the direct physical map
-from them, and translates them (plus the
-linker `__kernel_end`) into the canonical multi-region `BootMemoryMap` the
-live allocator hand-off consumes — `[window base, __kernel_end)` reserved
-in the kernel's window, every other window wholly usable — and logs the
+under-reported it as ~1 GiB), clips the windows out of the gigabytes the
+direct map types as registers (memory is typed at 1 GiB granularity and
+registers win a shared gigabyte, so RAM sharing the UART/GIC/PCIe gigabyte
+is dropped fail-closed until typing at a finer grain lands, `plans/APPS.md`
+I4), types the rest as RAM in the direct map, and translates them (plus the
+image's physical end) into the canonical multi-region `BootMemoryMap` the
+live allocator hand-off consumes — the image's window reserved up to the
+image's end, every other window wholly usable — and logs the
 resulting split (`mem_map_built` / `mem_map_status` / `usable_bytes_hex` /
 `reserved_bytes_hex`), failing closed to a status string (never a panic,
 `AGENTS.md` §2.9) on an absent or malformed discovery. The arithmetic is
 the host-tested `tairix_kernel::mem_map` module (the analogue of the
 riscv64 boot pipeline's `tairix_kernel::boot_riscv64::build_boot_memory_map`).
-Handing that map to
-`kernel_core::kernel_main` is P6c-2 — it needs the MMU enabled first, since
-the allocator/scheduler atomics are UNPREDICTABLE on the MMU-off
-Device-memory the boot CPU runs on (a hard-coded map would violate
-`AGENTS.md` §18.5).
 
 ### Production kernel image (P1)
 
@@ -174,23 +175,67 @@ The production aarch64 kernel is the `tairix-kernel` binary built for
 `aarch64-unknown-none`. Its boot artefacts are the one legitimate per-board
 fork (`AGENTS.md` §1 boot-stub carve-out; `plans/PI.md` §0.2):
 
-- **Linker script** `kernel/arch/aarch64/link/aarch64-rpi4.ld` places the
-  image at the firmware load address `0x8_0000`. It is identical to
-  `aarch64-virt.ld` (used by the QEMU `virt` per-test bins) save for the
-  origin address. `kernel/tairix-kernel/build.rs` selects it for the
+- **Linker script** `kernel/arch/aarch64/link/aarch64-rpi4.ld` loads the
+  image at `0x20_0000` and links it in the top gigabyte of the kernel's
+  translation regime (`0xFFFF_FFFF_C020_0000`). It is identical to
+  `aarch64-virt.ld` (used by the QEMU `virt` per-test bins, loading at
+  `0x4020_0000` to the same link address) save for the load address and the
+  boot stack's size. `kernel/tairix-kernel/build.rs` selects it for the
   `aarch64-unknown-none` target; the pure target→linker/`kernel_isa`
   selection logic lives in the host-unit-tested `src/build_support.rs`, so
   the crate body never names `target_arch` (cfg-check clean).
-- **Boot stub** `boot.s` is board-independent. Before touching the shared
-  boot stack it parks every CPU whose `MPIDR_EL1` affinity is non-zero in a
-  `wfe` loop — correct on the Pi (all four cores released at reset) and a
-  no-op on `virt` (secondaries held in firmware until PSCI). The boot CPU
-  drops EL2→EL1 (if entered at EL2, as the Pi firmware does) and tail-calls
-  `kernel_main(dtb)`.
-- **`kernel_main(dtb)`** enables FP/SIMD via `tairix_arch_aarch64::enable_fp_el1`,
-  constructs `Aarch64Arch` (the single `AGENTS.md` §17.1/§17.2 concrete-arch
+- **Boot stub** `boot.s` is board-independent and runs at the load address,
+  PC-relatively. It parks every CPU whose `MPIDR_EL1` affinity is non-zero
+  in a `wfe` loop — correct on the Pi (all four cores released at reset)
+  and a no-op on `virt` (secondaries held in firmware until PSCI) — drops
+  EL2→EL1, refuses an image loaded anywhere but where it was linked to load,
+  reads the device tree's header, builds an early map of the image, turns
+  translation on from the one page mapped at its physical address
+  (`.text.idmap`), branches to the high half, zeroes `.bss` through the
+  cache and calls the port entry.
+- **The port entry** (`entry.rs`) arms the EL1 vectors and with them
+  FP/SIMD, builds the kernel root ([Kernel translation](#kernel-translation))
+  and loads it, then calls `kernel_main(tree)` with the device tree mapped
+  read only. A secondary's entry enables FP/SIMD as its first act, so no
+  code beyond either entry finds it trapped.
+- **`kernel_main(tree)`** constructs `Aarch64Arch` (the single `AGENTS.md` §17.1/§17.2 concrete-arch
   selection point for the image), records a boot audit line over the
   console, and parks fail-closed.
+
+#### Kernel translation
+
+The kernel never runs on an identity map. `TTBR0_EL1` holds a root with no
+entry whenever no process runs, so a kernel access to a low address — a null
+dereference — faults. `TTBR1_EL1` holds the one kernel root:
+
+- **The image**, in the top slot, each section with only the access it
+  needs: the code read-and-execute in whole 2 MiB blocks (its padding is
+  `udf #0`), the read-only data, the boot stack's guard and the
+  trampoline's tables read only, the data, `.bss`, the stack and the boot
+  heap read/write and executable nowhere. Nothing is both writable and
+  executable (`paging::kernel_root`).
+- **The direct map**, slot 0 up: each gigabyte typed once, when the boot
+  reveals it (`paging::reveal`) — RAM Normal and executable nowhere,
+  registers Device-nGnRE, a PCI host's configuration region Device-nGnRnE.
+  The image's own gigabyte is RAM, typed by the port entry with its code,
+  read-only data and tables read only through it too. A boot handed no tree
+  (QEMU's ELF loader) also types gigabyte 0 as `virt`'s registers. Registers
+  are reached only here (`paging::registers_virt`, `paging::mmio`), a
+  firmware buffer's physical address only by translation
+  (`paging::image_phys`, `paging::kernel_phys`).
+- **The firmware tree's window**: the tree's pages read only, below the top
+  of the image's gigabyte, wherever the firmware put it
+  (`paging::firmware_tree`).
+- **The remap window** for the kernel heap and stacks, between the two.
+
+The trampoline's early map is writable and executable; the port entry
+replaces it by switching roots from the identity page
+(`tairix_aarch64_replace_ttbr1`), so no live entry ever changes. A
+boot-stack overrun faults on the read-only guard; its frame would land in
+the guard too, so the EL1 synchronous vector takes it on a reserve stack and
+the report names it (`boot_stack_guard=faulted`, the
+`fatal-stack-overrun-qemu-aarch64` vertical). The design and its ledger are
+`plans/FIX-AARCH64-KERNEL-MAP.md`.
 
 Since P2 the console base is **device-tree-discovered**: `kernel_main`
 calls `tairix_arch_aarch64::console::configure_from_fdt` on the `x0` DTB
@@ -219,27 +264,20 @@ slices, the `smp.s` secondary-stack region — cleaned to PoC so a
 cache-off starter observes them), and logs `cpu_count` / `smp_prepared`
 on the boot line. After `BootCompleted`, `kernel_core::kernel_main`
 starts each secondary over the discovered mechanism (audited
-`SecondaryCpuStarted` / `SecondaryCpuStartFailed`); each core's entry
-adopts the boot identity map (`paging::adopt_boot_translation` over the
-published park root), installs its own EL1 vectors, GIC CPU
-interface, and tickless preemption/IPI arming, and joins the shared
-kernel dispatch loop through `tairix_kernel_core::run_secondary`,
-attesting `SecondaryCpuOnline`. The boot CPU publishes the park root
-with a cacheable store but a secondary reads it with the MMU (and cache)
-off, non-cacheably from DRAM, so the publication cleans the park-root
-word to the point of coherency (`dc civac`) — otherwise the boot CPU's
-write-back store lingers in its cache, every secondary reads a stale
-zero, and each parks with "no boot root" (a real-silicon coherency
-hazard cache-less QEMU cannot show). `adopt_boot_translation` first
-invalidates the calling core's local data cache to the point of
-coherency (set/way `dc isw`, never a clean) **before** enabling the
-MMU+caches: a freshly-released secondary's caches are in the
-architecturally-UNKNOWN power-on state and may hold stale lines over the
-physical addresses now used for the boot page tables and that core's
-stack, which — left in place when `SCTLR_EL1.C` comes on — intermittently
-shadow DRAM and fault the core with no vectors installed (the observed
-real-Pi-4B symptom of the last-released core failing to check in). The
-boot CPU needs no equivalent because firmware hands it clean caches. On a Pi 4B this brings all four
+`SecondaryCpuStarted` / `SecondaryCpuStartFailed`); each core turns
+translation on in `smp.s`, onto the boot CPU's identity page and the kernel
+root, crosses into the high half, leaves the identity page behind, installs
+its own EL1 vectors, GIC CPU interface, and tickless preemption/IPI arming,
+and joins the shared kernel dispatch loop through
+`tairix_kernel_core::run_secondary`, attesting `SecondaryCpuOnline`. Before
+translation comes on, `smp.s` invalidates the core's local data cache to the
+point of coherency (set/way `dc isw`, never a clean): a freshly-released
+secondary's caches are in the architecturally-UNKNOWN power-on state and
+may hold stale lines that, left in place when `SCTLR_EL1.C` comes on, shadow
+DRAM (the observed real-Pi-4B symptom of the last-released core failing to
+check in). The only words a core reads before then — the release gate — are
+`.data`, holding their values from the loaded image, and are cleaned to the
+point of coherency when written. On a Pi 4B this brings all four
 Cortex-A72 cores into service over PSCI (with a PSCI-providing armstub)
 or the stock firmware's spin-table; a tree declaring neither fails each
 start closed and the system continues single-CPU — degraded, loud, and
@@ -247,10 +285,7 @@ correct.
 Since **P6c-1** it builds the canonical `BootMemoryMap` from the discovered
 `/memory` window and records its usable/reserved split (`mem_map_built` /
 `mem_map_status` / `usable_bytes_hex` / `reserved_bytes_hex`); see
-[RAM layout](#ram-layout). The discovery-fed `kernel_core::kernel_main`
-hand-off over that map (which first enables the MMU so the allocator's
-atomics run on Normal memory) is staged to P6c-2; a hard-coded map would
-violate `AGENTS.md` §18.5.
+[RAM layout](#ram-layout).
 
 ## Arch HAL boundary
 
@@ -285,12 +320,15 @@ The trampoline:
 1. Masks interrupts (`DAIFSet`).
 2. If entered at EL2 (the Pi firmware, or a `virtualization=on` board),
    establishes a **fully-known EL2 state** before dropping to EL1: every
-   EL2 control register is *written whole* with the unit-test-pinned
-   hand-off values in `tairix_arch_aarch64::el2` — `HCR_EL2 = RW` only
+   EL2 control register is *written whole* with the hand-off values in
+   `tairix_arch_aarch64::el2`, which the trampoline takes as operands —
+   `HCR_EL2 = RW` only
    (EL1 is AArch64, no stage-2, no traps), `CNTHCTL_EL2 = EL1PCTEN |
    EL1PCEN` (EL1/EL0 own the physical counter/timer), `CNTVOFF_EL2 = 0`,
-   `CPTR_EL2 =` its RES1 bits (no FP/SIMD trap), `MDCR_EL2 = 0` (no
-   debug/PMU traps), and `VPIDR_EL2`/`VMPIDR_EL2` mirrored from
+   `CPTR_EL2 =` its RES1 bits (no FP/SIMD trap), `MDCR_EL2` with no
+   debug/PMU trap and `HPMN = PMCR_EL0.N`, so EL1 keeps every event counter
+   (a zero `HPMN` is UNPREDICTABLE on ARMv8.0), and
+   `VPIDR_EL2`/`VMPIDR_EL2` mirrored from
    `MIDR_EL1`/`MPIDR_EL1` — then `eret`s to EL1. The EL2 reset state is
    architecturally UNKNOWN on real silicon (the Pi firmware stub sets
    only `SCTLR_EL2` and SMPEN; QEMU resets everything benignly), and an
@@ -298,7 +336,8 @@ The trampoline:
    write into vector-less EL2 — the silent Pi 4B hang at the MMU switch.
    An `orr` into a live EL2 register is therefore forbidden here. On the
    default `virt` machine the highest EL is already EL1, so this is
-   skipped.
+   skipped; `el2-entry-qemu-aarch64` boots a board built with EL2
+   (`virtualization=on`) to run it.
 3. Writes the known MMU-off `SCTLR_EL1` (`paging::SCTLR_MMU_OFF`, the
    ARMv8.0 RES1 bits only) before the first EL1 data access. The
    register is architecturally UNKNOWN when EL1 is first entered on
@@ -333,42 +372,6 @@ shippable `cargo xtask image --profile installer` compiles a `--release`
 kernel (assertions off) whose log renders on screen. There is no separate
 `--release` flag to forget — the image profile decides both the seeded
 contents and the kernel's log routing.
-
-### Boot beacons (serial bisection)
-
-The consolidated boot-log line (`KERNEL_BOOT_AARCH64_REACHED`) is emitted
-only *after* the MMU is enabled, so a metal boot that wedges before or at
-translation-enable — the classic Pi 4B failure — would otherwise leave no
-trail at all. To localise such a hang, `boot()` prints ordered,
-UART-only **beacons** (`serial::beacon`) at the milestones a pre-MMU /
-around-MMU wedge falls between. The pre-MMU window between `2/6` and `3/6`
-(building the identity-map masks) is split into finer `2a`..`2c`
-sub-beacons, because a metal capture wedged exactly there with `2/6` the
-last tag shown.
-
-| Beacon | Printed when | A silent line after the previous beacon points at |
-| ------ | ------------ | -------------------------------------------------- |
-| `1/6: boot entry` | EL1 reached, FP enabled, MMU off | entry before `boot()`, or `enable_fp_el1` |
-| `2/6: mmio discovered` | console/GIC/video/PCIe FDT walk done | the pre-MMU FDT discovery walk (`configure_mmio_from_dtb`) |
-| `2a/6: console/gic bases read` | `console::current` + `gic::current` returned | reading the discovered console/GIC bases |
-| `2b/6: device gigapage mask configured` | `identity_device_mask` built + `configure_device_gigapages` stored it | device-mask construction / the atomic mask store |
-| `2c/6: kernel gigapage mask configured` | `gigapage_mask_from_extents` built + `configure_kernel_gigapages` stored it | kernel-extent mask construction / the atomic mask store |
-| `3/6: identity map built, enabling mmu` | Device + kernel-extent gigapage masks built | identity-map mask construction |
-| `4/6: mmu on` (or `mmu enable FAILED`) | translation is live | **the MMU enable itself** — a mis-typed identity map (the metal Pi 4B hang) |
-| `4a/6: pcie discovery logged (post-mmu)` | the discovered `brcm,bcm2711-pcie` windows were logged (event `4100`: the controller registers, the inbound aperture, and the outbound window) | a metal diagnostic of the PCIe root-complex windows; the windows themselves reach the user-space `pcie_brcm` driver as grants on the discovered node, not a kernel stash |
-| `5/6: post-mmu …discovered` | post-MMU `/memory`/timer/PSCI walk done | the full-tree FDT walk that needs the MMU |
-| `6/6: entering kernel core` (or `handover REJECTED`) | hand-off assembled | memory-map build / `BootInfo` assembly |
-
-Each beacon writes the UART **only** — never the video console, whose
-render lock is UNPREDICTABLE on MMU-off memory and could itself wedge the
-boot a beacon exists to trace. The transmit is bounded (`putchar` /
-`tx_wait`), so a beacon at a not-yet-discovered or wrong base (beacon 1/6
-runs before the FDT walk sets the real Pi base, so on metal it targets the
-pre-discovery `virt` default and is silent there) can never spin forever;
-beacon 2/6 onward use the discovered base and recover the transmitter on
-their first ready poll. An entirely silent serial line therefore points at
-"before `boot()` or inside the pre-discovery FDT walk", and the last tag a
-capture shows pins the wedge to the step that follows it.
 
 ## Board-discovered console
 
@@ -492,16 +495,13 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   `ranges`-aware walk as the console and GIC (`fdt::scan_translated`,
   `AGENTS.md` §2.2) — on the Pi 4 tree, bus `0x7E00_B880` →
   CPU-physical `0xFE00_B880`.
-- **Bring-up (pre-MMU, by design).** `video::configure` runs in the same
-  pre-MMU phase as the console/GIC discovery, on the one firmware transport
-  the boot-time clock raise also uses (`firmware::with_transport`), so a
-  request the firmware leaves unanswered is still owed when the next is made
-  and its late reply is never taken for that one's. With the
-  data caches still off, the CPU↔firmware property exchange over the
-  shared `tairix-vcmailbox` protocol crate is coherent without cache
-  maintenance, and the console state cell is written by the
-  single-threaded boot CPU without an atomic read-modify-write (which
-  is UNPREDICTABLE MMU-off — the constraint that orders this boot).
+- **Bring-up.** `video::configure` runs with the console/GIC discovery,
+  on the one firmware transport the boot-time clock raise also uses
+  (`firmware::with_transport`), so a request the firmware leaves unanswered
+  is still owed when the next is made and its late reply is never taken for
+  that one's. The property buffer is cacheable, so each exchange over the
+  shared `tairix-vcmailbox` protocol crate cleans it before ringing the
+  doorbell and invalidates it before reading the reply.
   `video::bring_up` first asks the firmware for the display's native
   EDID-derived size (`query_display_size`; `0×0` means no display →
   UART keeps the console) and then allocates a 32-bit surface at
@@ -538,13 +538,11 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   where the engine takes the screen over, else the one describing the
   console's surface — since the walk publishes them with only their register
   window, and a display service bound to one could serve nothing.
-- **Cell-grid attach (post-MMU, by design).** The pre-MMU phase only
-  *records* the discovered surface and clears it to a clean background;
-  it does **not** build the renderer, because `tairix_fbcon` keeps a
-  retained cell grid (below) and that grid is leaked from the kernel
-  heap, which is unusable MMU-off (its allocator's atomics are
-  UNPREDICTABLE on the MMU-off Device-typed memory the boot CPU runs).
-  So immediately after `enable_mmu_and_vectors`, `boot` leaks two
+- **Cell-grid attach.** Display bring-up only *records* the discovered
+  surface and clears it to a clean background; it does **not** build the
+  renderer, because `tairix_fbcon` keeps a retained cell grid (below) and
+  that grid is leaked from the kernel heap. So once the heap is in hand,
+  `boot` leaks two
   `[Cell]` grids sized to `video::text_cell_count()` (the discovered
   `columns × rows`) and hands them to `video::attach_console`, which
   proves the surface is reachable, builds the `TextConsole`, clears the
@@ -556,7 +554,7 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   `None` and the UART keeps the console (fail closed).
 - **The scan-out is proved reachable before anything paints it.**
   Whether the surface translates is a property of the *active* root, not
-  of the surface: the boot identity map is what covers it, and the paint
+  of the surface: the direct map is what covers it, and the paint
   entry points are reachable from contexts that did not establish that
   map. So `attach_console` walks every 4 KiB page of the extent with the
   non-faulting `AT` probe and refuses the console if any page does not
@@ -681,11 +679,12 @@ suffixed `M`, or of gibibytes suffixed `G` — `512M`, `2G` — or the board's
 256 MiB without it. The kernel finds that RAM in the device tree QEMU
 generates, as it would a Pi's, so a session can be sized as the Pi it stands
 in for. The Pi-linked kernel inside the image
-loads at `0x8_0000` (not RAM on `virt`), and QEMU's ELF `-kernel` path
+loads at `0x20_0000` (not RAM on `virt`), and QEMU's ELF `-kernel` path
 passes no DTB, so `run` additionally builds the **`virt`-board form of
 the same production kernel crate** (`TAIRIX_KERNEL_BOARD=virt` →
-`aarch64-virt.ld`) and boots it as an arm64-`Image`-wrapped raw binary
-(`tairix_mkimage::elfflat::build_virt_boot_image`), which QEMU loads at
+`aarch64-virt.ld`) and boots its flat form, an arm64 `Image` by the
+header the trampoline opens with (`tairix_mkimage::elfflat::elf_to_flat`),
+which QEMU loads at
 the `virt` link address and enters with the generated device tree in
 `x0` — the same hand-off shape as the Pi firmware. The session attaches
 the image as the virtio-blk root disk, `-device ramfb` for the windowed
@@ -1117,82 +1116,24 @@ system-register/assembly/MMIO operations to the freestanding target.
   (start at L1), in **two** 39-bit regimes the architecture keeps disjoint:
   `TCR_EL1.T0SZ = 25` gives `TTBR0_EL1` the low `[0, 2^39)` for user space,
   and `TCR_EL1.T1SZ = 25` gives `TTBR1_EL1` the top `2^39` bytes
-  (`paging::KERNEL_VA_BASE`) to the kernel — the direct physical map and the
-  remap window, described under **The two translation regimes** below.
-  `AddressSpace::new_identity_gigapages` identity-maps the low GiBs with
-  1 GiB L1 block descriptors under two configured masks: the gigapages
-  named by the Device mask (`paging::configure_device_gigapages`) are Device
-  for the board's UART/GIC MMIO, the gigapages named by the kernel-extent
-  mask (`paging::configure_kernel_gigapages`) are privileged-executable
-  Normal for the kernel image and stack, and a gigapage in **neither** mask
-  is left *invalid* — on real silicon a Normal write-back executable
-  mapping of unbacked address space invites the core's speculative
-  fetches onto bus windows nothing answers, which wedged the metal
-  Pi 4B the instant translation enabled while QEMU (which answers every
-  address) stayed green. The Device mask defaults to GiB 0 (the `virt`
-  MMIO window) and is derived at boot from the *discovered* console/GIC
-  bases minus the kernel image's own gigapages
-  (`paging::identity_device_mask`) — on the Pi 4 that types gigapage 3
-  (the BCM2711 high-peripheral window) Device and keeps gigapage 0,
-  which holds the kernel at `0x8_0000`, Normal and executable. The
-  kernel-extent mask defaults to *all* slots (a host test or a QEMU chassis
-  that discovers no board still reaches whatever it addresses physically)
-  and is derived once, pre-MMU, from the facts in hand
-  (`paging::gigapage_mask_from_extents`): the kernel image's extent, the
-  firmware DTB blob, and the firmware scan-out surface. It is deliberately
-  **not** widened over discovered RAM — an allocator frame is reached
-  through the direct physical map, so a root carries an identity leaf only
-  where something is addressed by its physical address. Every later identity
-  window is *derived from those masks*, never a board constant: PID 1's
-  spawn space (`init_spawn`) and each runtime-spawned child's
-  (`spawn_producer`) size their window with
-  `paging::configured_identity_gigapages` (highest Device or kernel-extent
-  gigapage + 1 — 2 GiB on `virt`). The former hard-coded 2 GiB `virt` window
-  left the Pi 4's gigapage-3 UART/GIC out of PID 1's root, silencing the
-  metal console the instant `spawn_init` switched to it; an empty window or
-  one reaching the 64 GiB user bias fails the spawn closed. Because the
-  window no longer tracks installed RAM, it does not grow with the machine.
-  `map_4k` adds finer mappings, and every mapping operation first checks the
-  address against its root's own regime (`Regime`), so a kernel-window
-  address can never be walked into a process root's identically-indexed
-  user slot. Before `switch` runs, the
-  boot path sweeps the just-written tables to the point of coherency
-  (`PageTablePool::clean_invalidate_to_poc`, `dc civac` per
-  `CTR_EL0`-decoded line): the tables were written with the data cache
-  off but the walker reads them back *cacheable* the instant translation
-  enables, and a stale firmware-era line over the pool would shadow the
-  real descriptors on real silicon (cache-less QEMU cannot show it —
-  the same residue hazard early boot code invalidates its idmap tables
-  for). The pool's own allocation counter is translation-aware
-  (`PageTablePool::alloc`): with the MMU off it advances by a plain
-  load + store, never an atomic read-modify-write, because LDXR/STXR
-  exclusives are only architecturally guaranteed on cacheable Normal
-  memory — on the BCM2711's MMU-off Device-nGnRnE accesses the
-  exclusive monitor never grants them and a `fetch_add` retry loop
-  spins forever (the metal Pi 4B hung exactly there while QEMU's
-  always-granting monitor stayed green). MMU-off allocation is
-  single-threaded by construction — only the pre-SMP boot CPU runs
-  Rust with translation off and a pool in hand — and once translation
-  is live the counter reverts to `fetch_add`. `switch` applies the same
-  rule to the permanent park-root publication: the MMU programming
-  routine returns a private live-translation witness only after the
-  `SCTLR_EL1` write and trailing `isb`, and only that witness can issue
-  the set-once atomic publication. No LDXR/STXR retry loop can therefore
-  run in the MMU-off activation prefix. `switch`
-  programs `MAIR_EL1`/`TCR_EL1`/`TTBR0_EL1`/`TTBR1_EL1`, orders the pre-MMU
-  table stores with a full-system `dsb sy` (MMU-off stores are Device-nGnRnE,
-  outside the inner-shareable domain an `ish` barrier covers), and
-  installs the **whole**
-  known `SCTLR_EL1` value (`protection::sctlr_mmu_on`: RES1 + translation +
-  data/instruction caches, with `SPAN` clear on a CPU held to PAN, after an
-  `ic iallu`), never OR-ing `M` into
-  the live register — that would carry the UNKNOWN EL1 reset bits
-  (`WXN`, `EE`, …) into translated execution, the silent pre-vectors
-  hang real Pi 4 hardware exhibited while QEMU stayed green. The data
-  cache is enabled deliberately: the allocator/scheduler LDXR/STXR
-  exclusives are only guaranteed on cacheable Normal memory, and the
-  framebuffer console already cleans its writes to the point of
-  coherency.
+  (`paging::KERNEL_VA_BASE`) to the kernel — the direct physical map, the
+  remap window, and the image, described under **The two translation
+  regimes** below and [Kernel translation](#kernel-translation).
+  `AddressSpace::new_user` builds a process root, which maps nothing until
+  the process does; every mapping operation first checks the address
+  against its root's own regime (`Regime`), so a kernel-window address can
+  never be walked into a process root's identically-indexed user slot, and
+  the one 4 KiB walk (`map_4k_with_attrs`) refuses a leaf both writable and
+  executable. Translation is turned on by the trampolines, before any Rust
+  runs, with the **whole** known `SCTLR_EL1` value (RES1 + translation +
+  data/instruction caches) — never OR-ing `M` into the live register, which
+  would carry the UNKNOWN EL1 reset bits (`WXN`, `EE`, …) into translated
+  execution, the silent pre-vectors hang real Pi 4 hardware exhibited while
+  QEMU stayed green. A CPU held to PAN then rewrites it with `SPAN` clear
+  (`paging::hold_translation_controls`). The data cache is on throughout:
+  the allocator/scheduler LDXR/STXR exclusives are only guaranteed on
+  cacheable Normal memory, and the framebuffer console already cleans its
+  writes to the point of coherency.
 - **Context switch** (`context` + `context.s`). `TaskCtx { sp }` plus
   `tairix_arch_aarch64_switch`, saving the AAPCS64 callee-saved registers
   (`x19`–`x28`, `x29`/FP, `x30`/LR), the first-run argument `x0`, the
@@ -1274,12 +1215,11 @@ through the semihosting finisher. They are enrolled in
 
 - `tairix-test-kernel-arch-boot-aarch64` — **boots the production
   pipeline to `BootCompleted`** (PI Stage P6c-2): drives the real
-  `tairix_kernel::boot_aarch64::boot`, which discovers the console + GIC
-  bases MMU-off from the embedded `virt` device tree and derives the
-  identity map's Device and RAM gigapage masks from them, enables the stage-1
-  identity MMU (512×1 GiB gigapages over a static boot `PageTablePool`,
-  then `switch`) + EL1 vectors, discovers the rest of the board
-  (`/memory`, timer, PSCI), builds the `BootMemoryMap`, installs the discovered-UART
+  `tairix_kernel::boot_aarch64::boot`, which types the direct map from the
+  embedded `virt` device tree — the console's, the GIC's and the other
+  discovered register gigabytes first, then the `/memory` RAM left to it —
+  discovers the rest of the board (timer, PSCI), builds the
+  `BootMemoryMap`, installs the discovered-UART
   `console_write` device + the `svc` dispatch callback, and hands a
   validated `BootInfo` to `kernel_core::kernel_main`. The run is
   `-smp 4`: after `AuditEvent::BootCompleted` the audit sink waits for
@@ -1311,9 +1251,9 @@ through the semihosting finisher. They are enrolled in
   asserts the GIC enable bit re-reads masked (mask-before-wake,
   `docs/src/security/irq.md`) before the PASS finisher.
 - `tairix-test-memory-isolation-qemu-aarch64` — **memory-isolation test
-  passes**: a victim and an attacker stage-1 address space disagree on
-  one page; switching to the attacker and reading that page raises a
-  data abort the `fault` handler confirms.
+  passes**: a victim and an attacker process root disagree on one page;
+  the victim's root reads it back, and with the attacker's loaded the same
+  read raises a data abort the `fault` handler confirms.
 - `tairix-test-stack-overrun-qemu-aarch64` — **the kthread guard slot
   faults**: a kthread admitted on a window-backed kernel stack overruns into
   the stack's unmapped guard slot and takes a synchronous data abort the
@@ -1345,9 +1285,9 @@ through the semihosting finisher. They are enrolled in
   ticks + IPI run over the *discovered* base and rate, not the
   pre-discovery defaults. Single CPU.
 - `tairix-test-abi-sys-syscall-qemu-aarch64` — **CC2 `svc` round-trip**
-  (`plans/CCOMPAT.md`): stands up a minimal EL0 context — identity-maps
-  the kernel (EL1), aliases the `lib/abi-sys` `tairix_sys_cap_query` stub
-  page at a user VA with EL0-executable attributes
+  (`plans/CCOMPAT.md`): stands up a minimal EL0 context — an empty process
+  root aliasing the `lib/abi-sys` `tairix_sys_cap_query` stub page at a
+  user VA with EL0-executable attributes
   (`paging::el0_code_leaf_attrs`, mapped via `map_4k_with_attrs`) plus an
   EL0 stack (`el0_data_leaf_attrs`), installs the dispatch callback and
   the EL1 vector table, and `eret`s to EL0. The stub's real `svc` then
@@ -1531,9 +1471,7 @@ The kernel takes the `virt` board's `pci-host-ecam-generic` host as it
 takes x86_64's ([Constructing the real-hardware
 bus](../drivers/bus.md#constructing-the-real-hardware-bus)). Its
 configuration region is mapped Device in the kernel regime alone, at its
-direct-map address: QEMU puts it at 256 GiB, above the 64 GiB where user
-space begins, so the identity window that shares each process root could
-not hold it. The kernel regime's direct map reaches 447 GiB, so the 64-bit
+direct-map address, 256 GiB on QEMU. The kernel regime's direct map reaches 447 GiB, so the 64-bit
 window QEMU places at 512 GiB is out of reach and every BAR goes in the
 32-bit window. Each function's INTx reaches a GIC SPI through the host's
 `interrupt-map`.
@@ -1647,11 +1585,10 @@ The boot path's only role is discovery and Device-typing the windows:
   (`BusWindow`) — and the VideoCore mailbox node carrying its DMA property
   buffer. A tree with no such node (the QEMU `virt` shape) emits neither and
   the chain simply never autoloads (§18.4).
-- **Identity Device mapping.** `boot_aarch64` folds the discovered
-  controller-register and outbound-MMIO-window gigapages into the identity
-  `Device` mask (`identity_device_mask`) **before** enabling the MMU, so
-  those windows are Device-typed once translation is on (the user-space
-  driver maps them into its own address space through `mmio_map`).
+- **Register typing.** `boot_aarch64` types the discovered controller-register
+  and outbound-MMIO-window gigabytes as registers in the direct map before
+  any device is brought up (the user-space driver maps them into its own
+  address space through `mmio_map`).
 - **User-space autoload.** `devmgr` autoloads each signed bundle against its
   discovered node: `pcie_brcm` binds the bridge, trains the link, assigns
   the VL805 BAR, and emits the VL805 PCI function (`hw_emit_node`); `vl805`
@@ -2439,13 +2376,13 @@ acceptance item.
 
 The BCM2711 EMMC2 SD host is a non-coherent DMA master driven by the
 in-kernel bootstrap-floor block driver. Its staging slab is reached through
-the Normal write-back boot identity map, so DMA barriers alone are
+the Normal write-back direct map, so DMA barriers alone are
 insufficient: the controller can write fresh sectors to DRAM while the CPU
 continues reading stale cache lines. The resulting transfer reports success
 but returns corrupted filesystem data; programmed I/O is unaffected because
 it moves bytes through the Device-memory data register.
 
-The EMMC2 path keeps the identity mapping cacheable and uses the existing
+The EMMC2 path keeps the direct map cacheable and uses the existing
 `DmaSlab` coherency callback for explicit ownership transfers. Before each
 ADMA2 command, the driver synchronizes the active data range and its
 descriptor table, then issues `dma_wmb()` before the MMIO command. After a read
@@ -2581,7 +2518,7 @@ implements the Arch HAL `MsiMultiplexer` slice over it in a private module
 (`brcm_msi::BrcmMsiController`); the binary reaches it only through
 `msimux::configure_from_fdt`, which records the parent INTID, the register base
 and the doorbell the discovered inbound aperture selects, and refuses a
-register window outside the Device-typed identity gigapages. `enable` opens
+register window outside the direct map's register gigabytes. `enable` opens
 every vector, clears stale status, and programs the doorbell and the data
 pattern; it relies on `drivers/bus/pcie_brcm` having released the block from
 reset first, which nothing yet enforces (D1451). `mask` is fenced, and mask, unmask and drain touch nothing before
@@ -2804,26 +2741,27 @@ drive vertical), so it carries no host check (§2.1 — no fake primitive).
 The aarch64 port implements the Arch HAL `AddressSpace` slice
 (`AGENTS.md` §17.2 / `plans/WIRING.md` Stage W5b-1) on its
 `kernel/arch/aarch64::paging::AddressSpace` (the three-level, 4 KiB-granule
-stage-1 table programmed into `TTBR0_EL1` with `SCTLR_EL1.M`).
+stage-1 table a process root is, loaded into `TTBR0_EL1`).
 `AddressSpace::map_page` translates the neutral `PageFlags` into a stage-1
 leaf-attribute word — W^X by default (`AGENTS.md` §19.2): a `USER | EXEC`
 page is mapped read-only EL0-executable (`el0_code_leaf_attrs`), a
 `USER | WRITE` page execute-never (`el0_data_leaf_attrs`), a read-only
-user page execute-never (`el0_rodata_leaf_attrs`), a kernel page EL1 RW
-EL0-XN (`normal_leaf_attrs`), a `WRITE_COMBINE` or `DMA_COHERENT` page
+user page execute-never (`el0_rodata_leaf_attrs`), a kernel page EL1 RW and
+executable nowhere, or read-only and EL1-executable if asked to execute
+(`KernelAccess`), a `WRITE_COMBINE` or `DMA_COHERENT` page
 Normal Non-Cacheable and EL1-only unless it is also `USER`
 (`dma_coherent_leaf_attrs`, `el0_dma_coherent_leaf_attrs`), and a `DEVICE`
 page `device_leaf_attrs` — then walks the table (reusing `map_4k_with_attrs`, one walk, §2.2), failing
 closed (`Misaligned`/`AlreadyMapped`/`PoolExhausted`/`InvalidFlags`).
-`root_phys` returns the L1 root and `activate` forwards to the gated
-`switch` (the `TTBR0_EL1`/`TTBR1_EL1`/`SCTLR_EL1.M` enable). Because the walk recovers
+`root_phys` returns the L1 root and `activate` loads it into `TTBR0_EL1`
+under the boot ASID. Because the walk recovers
 each intermediate table from the frame source that drew it
 (`PageTableFrames::table_at`) rather than by dereferencing its physical
 address, the whole `map_page` path is host-runnable: `passes_mmu_conformance` drives
 `mmu::conformance::run_all` over a real `AddressSpace`, and a companion
 host test asserts the W^X leaf-attribute translation. The `activate`
-register write itself is proven by `memory_isolation_qemu_aarch64`, which
-now builds its victim/attacker spaces through this trait.
+register write itself is proven by `memory_isolation_qemu_aarch64`: the
+victim's root reads its page, the attacker's faults on it.
 
 ### The two translation regimes
 
@@ -2834,17 +2772,16 @@ the whole of the low regime; the kernel owns the high one.
 
 **One global kernel root.** `TTBR1_EL1` points at `paging::KERNEL_L1` — a
 single `.bss` static of the paging module — on every CPU, for the image's
-lifetime, and `program_stage1_translation` is the only writer of the
-register. Three things follow. A process root pays no page and no slot for
+lifetime: the port entry loads it on the boot CPU, `smp.s` on each
+secondary, and nothing replaces it. Three things follow. A process root pays no page and no slot for
 anything of the kernel's, so its whole content is the user regime's. A
 switch between user spaces (`activate_user_root`) reprograms `TTBR0_EL1`
 alone, which is also what makes a `TTBR0`-only unmap of the kernel (KPTI) a
 change to that one function rather than to the layout. It loads the root
 under the 8-bit ASID the kernel chose, beside a non-global bit on each of the
 root's own leaves, so no switch discards another space's entries; a tag given
-a new space is discarded first (`tlbi aside1`). The identity gigapages every
-root shares stay global, and so does every leaf of the kernel regime, so one
-entry of each serves every ASID. And because the
+a new space is discarded first (`tlbi aside1`). Every leaf of the kernel
+regime is global, so one entry serves every ASID. And because the
 kernel root's tables live inside the kernel image rather than in
 allocator-backed frames, the Supervisor's destructive whole-RAM sweep keeps
 running under the translation it is testing.
@@ -2852,10 +2789,10 @@ running under the translation it is testing.
 **What the high regime carries.** L1 slots `0..=446` are the direct physical
 map at `paging::PHYSMAP_VMA_BASE` (which *is* `KERNEL_VA_BASE`); slots
 `447..=510` are the kernel remap window (`kernel_window_base()`), which the
-growable kernel heap and the kthread stack tier are backed into. An L1 leaf
-is a 1 GiB block, so 447 slots give **447 GiB** of reach for no page tables
-at all, and the window stops one gigapage short of the top of the 64-bit
-space so its exclusive end is representable. RAM above
+growable kernel heap and the kthread stack tier are backed into; slot `511`
+is the kernel image and the firmware tree's window
+([Kernel translation](#kernel-translation)). An L1 leaf is a 1 GiB block,
+so 447 slots give **447 GiB** of reach for no page tables at all. RAM above
 `paging::MAX_PHYSMAP_GIB` is unreachable by pointer: the RAM self-test
 reports it as `unreachable_bytes` and every consumer of such a frame fails
 closed.
@@ -2869,30 +2806,26 @@ published as the one `spawn_producer::SPAWN_TABLE_PHYSMAP`
 translate (`paging::physmap_covers`) rather than held as an extent, so no
 caller can keep a stale one.
 
-**The map is deliberately sparse.** It carries a leaf only for a gigapage
-the discovered, Device-clipped `/memory` windows actually name. Mapping a
-gigapage the board types Device as Normal-cacheable here, while the
-identity window maps it Device, would be *mismatched memory attributes for
-one physical address* — which permits a speculative read of a device
-register, and on this architecture the page tables are the only authority
-on memory type (there is no x86 MTRR to override them). The allocator never
-sees a frame in a Device gigapage either: `mem_map::clip_windows_to_normal_ram`
+**The map is deliberately sparse, and typed once.** It carries a leaf only
+for a gigabyte the boot reveals (`paging::reveal`), and each takes one type
+for the image's lifetime: a gigabyte already typed is never retyped. Mapping
+a register gigabyte Normal-cacheable would permit a speculative read of a
+device register, and on this architecture the page tables are the only
+authority on memory type (there is no x86 MTRR to override them). The boot
+types the registers it discovers first and RAM after, and the allocator
+never sees a frame in a register gigabyte: `mem_map::clip_windows_to_normal_ram`
 drops those bytes from the usable map. So a hole in the map and a hole in
 the allocator's supply are the same hole, and `physmap_covers` fails closed
 on a range that straddles one.
 
-**Installing it.** `boot::install_direct_physical_map` clips the discovered
-windows, derives their gigapage mask, and calls
-`paging::install_boot_physmap`, which publishes the coverage and writes the
-leaves into the kernel root set-once. It needs no frame source and draws no
-table. The step sits immediately after the post-MMU `/memory` walk and
-before anything reaches a frame, and the boot CPU runs alone there, so the
-`dsb ishst`/`isb` publication is the whole of it; the walker reads
-inner-shareable cacheable in both regimes, so a secondary adopting the
-regime observes the boot CPU's stores through coherency with no
-point-of-coherency sweep. It fails closed: `direct_map=false` on the boot
-line and the hand-off to `kernel_main` is refused, because a kernel that
-cannot address its own RAM must not proceed.
+**Typing it.** `boot::type_direct_map` reads the board from the tree,
+reveals its register and configuration gigabytes, then the RAM left, before
+any device is brought up. It needs no frame source and draws no table: an
+invalid entry made valid owes the walker a `dsb ishst`/`isb`, never an
+invalidation, and the walker reads inner-shareable cacheable, so a secondary
+observes the boot CPU's stores through coherency. It fails closed:
+`direct_map=false` on the boot line and the hand-off to `kernel_main` is
+refused, because a kernel that cannot address its own RAM must not proceed.
 
 Proved end to end by `physmap_qemu_aarch64` (`plans/OPEN-DEFECTS.md` D56)
 on a 3 GiB guest: the boot record reports a map sized from the tree rather
@@ -2908,7 +2841,9 @@ Where the CPU offers PAN (`FEAT_PAN`, ARMv8.1, reported in
 every user leaf is `PXN`, so it cannot execute one either. The boot CPU
 settles whether PAN is in force from what it offers, before any other CPU
 starts (`protection::settle`). Each CPU then sets `PSTATE.PAN` as it starts
-(`protection::hold`), and a CPU that cannot hold it does not join: still
+(`protection::hold`), which also closes the generic timer and the
+performance monitors to EL0 by zeroing `CNTKCTL_EL1` and `PMUSERENR_EL0`,
+both UNKNOWN out of reset; a CPU that cannot hold PAN does not join: still
 MMU-off, it answers that it lacks PAN, and stops. The boot CPU waits for
 every started core's answer, PSCI or spin-table, for half a second at most,
 so a refusal fails the start `smp_cpu_lacks_protection` (`core_lacks_pan`)
@@ -2919,12 +2854,9 @@ the core with `sev`. A joined core waits for it in `wfe`, timed by the boot
 CPU's clock alone, since a secondary's own `CNTFRQ_EL0` is unprogrammed on
 a board whose counter rate comes from the device tree, and runs its entry
 only on a verdict that took its answer: a core answering a start already
-given up on stops. Each core answers in its own
-slot of the stack pool, the answer and the verdict each alone in a 2 KiB
-writeback granule, the architectural most `CTR_EL0.CWG` allows: the core
-reaches them with its caches off while every other CPU runs with theirs on,
-so no line of other data, written back from any cache, can overwrite either,
-and no core's late answer can land on another's start.
+given up on stops. Each core answers in its own slot of the stack pool,
+once its trampoline has turned translation and its caches on, so no core's
+late answer can land on another's start.
 Translation comes on with `SCTLR_EL1.SPAN` clear, so every exception taken
 to EL1 sets PAN again before any kernel code runs. The kernel reaches user
 memory only through the direct map, so it never clears PAN. `AT S1E1R`
@@ -2981,8 +2913,7 @@ a **synchronous data abort the instant the overrun crosses the guard slot**,
 rather than the next-reschedule poison-canary detection the heap-backed
 `BoxStack` falls back to. It:
 
-- reserves the kernel remap window, builds a stage-1 identity `AddressSpace`
-  (which installs the window's shared slots), and activates it;
+- reserves the kernel remap window in the kernel root every CPU carries;
 - installs the window-backed stack tier over that window and draws one stack
   from it through the production `kstack::alloc_kernel_stack`, checking the
   run came from the window — a `BoxStack` fallback would have handed back
@@ -3079,24 +3010,15 @@ The device-agnostic bring-up lives in the shared
 `tests/integration/virtio_qemu_support` crate's `imp_mmio_aarch64` module
 (behind `cfg(itest_aarch64)`), and the device round-trip *tails* are the
 same shared code the riscv64 and x86_64 verticals run (`AGENTS.md` §2.2).
-The module owns only what is unique to the EL1 bring-up. The FP-enable
-and MMU steps are shared as one public helper,
-`bring_up_el1_identity_mmu`, reused by both the virtio scenario and the
-display vertical (`AGENTS.md` §2.2):
+The port entry has already armed the vectors and FP/SIMD and loaded the
+kernel root, so the module owns only what is unique to a device scenario:
 
-- **FP/SIMD enable.** The `virt` board enters EL1 with
-  `CPACR_EL1.FPEN` trapping Advanced-SIMD/FP; the compiler emits NEON
-  register moves for the struct copies in the driver/DMA stack, so the
-  helper sets `FPEN = 0b11` first (a trapped access otherwise faults
-  with `ESR_EL1` EC `0x07`). riscv64 gets the equivalent FP enable from
-  its boot pipeline.
-- **Stage-1 MMU.** It brings up a 2 GiB identity map through
-  `paging::AddressSpace::new_identity_gigapages` (under the default
-  Device gigapage mask: GiB 0 Device memory for the GIC/PL011/virtio-MMIO
-  apertures, RAM Normal-cacheable). The MMU-off
-  reset state types every access as Device, where the `LDXR`/`STXR`
-  atomics the driver/DMA/sync stack relies on abort; mapping RAM as Normal
-  memory is the precondition for the rest of the bring-up.
+- **Two physical maps, as production has.** The MMIO map reaches the
+  virtio-MMIO apertures through the kernel's register map
+  (`tairix_kernel::aarch64::boot::DeviceWindows`, the direct map's register
+  gigabytes) and the DMA pool reaches its frames through the RAM map
+  (`SPAWN_TABLE_PHYSMAP`), so no register is reached through a Normal alias
+  and no frame through a Device one.
 - **IRQ path.** It walks the device tree for the provisioned slot's GICv2
   SPI, wires the EL1 device-IRQ dispatch (`exceptions::set_device_irq_dispatch`)
   to a `kernel/irq` `IrqTable` over a `GicController` bridge (the bridge
@@ -3130,9 +3052,9 @@ runtime.
 (`tairix-test-framebuffer-display-qemu-aarch64`, enrolled in
 `tools/xtask/src/commands/qemu_tests.rs` with `display: Display::Ramfb`)
 drives the framebuffer display driver end-to-end on the `virt` board — the EL1/GICv2
-+ `ramfb` analogue of the riscv64 framebuffer-display vertical. It reuses
-the shared `bring_up_el1_identity_mmu` helper above and the **same**
-shared `fw_cfg` MMIO transport (`tairix-fwcfg`'s `MmioDma`) the
++ `ramfb` analogue of the riscv64 framebuffer-display vertical. It reaches `fw_cfg` as the port
+does (`video::fw_cfg`, its registers through the direct map) over the
+**same** shared `fw_cfg` MMIO transport (`tairix-fwcfg`'s `MmioDma`) the
 riscv64 vertical uses — the two `virt` boards expose `fw_cfg` identically,
 so there is one transport, not two (`AGENTS.md` §2.2). The vertical
 programs QEMU's `ramfb` over `fw_cfg` so a static guest-RAM surface
@@ -3152,9 +3074,8 @@ pointer.
 `tools/xtask/src/commands/qemu_tests.rs` with `keyboard: Some(..)`)
 drives the virtio-input driver end-to-end on the `virt` board — the
 virtio-input analogue of the x86 PS/2 vertical, completing the `input`
-row of the QEMU matrix for aarch64. It reuses the shared
-`bring_up_el1_identity_mmu` helper, builds the virtio-MMIO transport from
-the embedded `virt` DTB, arms the device's GICv2 SPI, loads the signed
+row of the QEMU matrix for aarch64. It builds the virtio-MMIO transport
+from the embedded `virt` DTB, arms the device's GICv2 SPI, loads the signed
 virtio-input `.rxe` through `tairix_drvhost::Host`, and drives
 `load → use → unload → reload`.
 

@@ -319,7 +319,8 @@ extern "C" {
 /// gives the hart the kernel's floating-point environment, zeroing the file,
 /// so it is never done once this hart owes a task its registers, and clears
 /// `sstatus.SUM`, so no user page is within the hart's S-mode reach: the
-/// kernel reaches user memory only through the direct map.
+/// kernel reaches user memory only through the direct map. It closes the
+/// counters to U-mode too, whatever reset left in `scounteren`.
 ///
 /// # Safety
 ///
@@ -355,6 +356,12 @@ pub unsafe fn install_trap_vector() {
     // instruction sets it again, and U-mode cannot write `sstatus`.
     unsafe {
         core::arch::asm!("csrc sstatus, {sum}", sum = in(reg) SSTATUS_SUM, options(nostack));
+    }
+    // SAFETY: `scounteren` is UNSPECIFIED out of reset; zero only refuses
+    // U-mode the cycle, time, retired-instruction and hardware-performance
+    // counters, a clock fine enough to time cache hits.
+    unsafe {
+        core::arch::asm!("csrw scounteren, zero", options(nomem, nostack));
     }
 }
 

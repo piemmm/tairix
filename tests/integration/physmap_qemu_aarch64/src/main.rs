@@ -21,7 +21,8 @@
 //! ## What this test asserts
 //!
 //! The guest is given more RAM than the gigapage its kernel image sits in,
-//! so a root that identity-mapped RAM would be visible as one. Then:
+//! which the port entry types itself, so the rest is reached only if the
+//! boot reads the tree. Then:
 //!
 //! 1. The boot path sized the map from the discovered tree — proof it read
 //!    `/memory` rather than a build-time constant.
@@ -29,11 +30,11 @@
 //!    each one was written and read back through the direct map. A frame
 //!    the map does not cover is left untested and counted, so a map that
 //!    stopped short shows up here rather than as a silent skip.
-//! 3. The live structure holds: the hardware reads a known frame back
-//!    through the map, the map lies above every addressable user address,
-//!    a process root refuses a mapping there, and a RAM frame outside the
-//!    kernel's own extents resolves to nothing under a process root while
-//!    the map still reaches it.
+//! 3. The live structure holds: the image runs in the kernel regime and the
+//!    low regime maps nothing; the map reads a known frame back, types each
+//!    gigabyte once and stops at the top of RAM; it lies above every
+//!    addressable user address and a process root refuses a mapping there;
+//!    and no RAM resolves under a process root while the map reaches it.
 //!
 //! Only when all three hold does `BootCompleted` report success to QEMU.
 //!
@@ -57,7 +58,7 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use tairix_arch_aarch64::paging::{self, AddressSpace, PageTablePool};
+    use tairix_arch_aarch64::paging::{self, AddressSpace, Holding, PageTablePool};
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink};
     use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
@@ -80,9 +81,9 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
-    /// The QEMU `virt` board's RAM base. The kernel image is linked 2 MiB
-    /// above it, so gigapage 1 is the kernel's own and every gigapage above
-    /// it is RAM the identity window has no reason to carry.
+    /// The QEMU `virt` board's RAM base. The kernel image is loaded 2 MiB
+    /// above it, so gigapage 1 is the kernel's own, which the port entry
+    /// types, and every gigapage above it is RAM only the boot reveals.
     const RAM_BASE: u64 = 0x4000_0000;
 
     /// One page, the granule the probe's frames are aligned to.
@@ -109,11 +110,11 @@ mod kernel {
     /// perturb the boot it is observing.
     static PROBE_POOL: PageTablePool = PageTablePool::new();
 
-    /// Frame the probe reaches two ways: at its own identity address (it is
-    /// this binary's static, and the kernel is identity-linked) and through
-    /// the direct map. Its marker is distinctive, so reading it back at
-    /// `PHYSMAP_VMA_BASE + phys` identifies *that* frame rather than merely
-    /// proving some page is mapped there.
+    /// Frame the probe reaches two ways: at its image address (it is this
+    /// binary's static) and through the direct map. Its marker is
+    /// distinctive, so reading it back at `PHYSMAP_VMA_BASE + phys`
+    /// identifies *that* frame rather than merely proving some page is
+    /// mapped there.
     static PROBE_FRAME: ProbeFrame = ProbeFrame {
         marker: PROBE_MARKER,
         rest: [0; 4096 - PROBE_MARKER.len()],
@@ -136,8 +137,8 @@ mod kernel {
     const HIGH_MARKER: u64 = 0xD56_0000_5D56_A641;
 
     /// Prove the structure the defect was about: the direct map reaches a
-    /// frame through a regime no user address can name, and a process root
-    /// carries no mapping of RAM outside the kernel's own extents.
+    /// frame through a regime no user address can name and types each
+    /// gigabyte once, and neither the low regime nor a process root maps RAM.
     ///
     /// The map's own gigapage leaves are deliberately not walked through a
     /// frame source: they live in the kernel root's own slots rather than
@@ -148,14 +149,22 @@ mod kernel {
     /// Run before the boot path builds PID 1, so the root it draws is never
     /// made live.
     fn structural_probe() -> Result<(), &'static str> {
-        // The kernel is identity-linked, so its own static's virtual
-        // address *is* its physical one.
-        let probe_phys = core::ptr::addr_of!(PROBE_FRAME) as u64;
+        let probe_va = core::ptr::addr_of!(PROBE_FRAME) as u64;
+        let probe_phys = paging::image_phys(probe_va);
         let map_va = paging::physmap_virt(probe_phys);
 
+        // The image runs in the kernel regime, translated to where it was
+        // loaded. The low regime holds the empty root until a process runs,
+        // so no physical address is mapped as itself and address 0 faults.
+        if paging::kernel_phys(probe_va) != Some(probe_phys) {
+            return Err("the image does not translate to where it was loaded");
+        }
+        if paging::kernel_phys(probe_phys).is_some() || paging::kernel_phys(0).is_some() {
+            return Err("the low regime maps physical memory as itself");
+        }
+
         // The hardware reaches the frame through the map, and reaches
-        // *that* frame: the marker read back is the one the identity alias
-        // holds.
+        // *that* frame: the marker read back is the one the image holds.
         if !paging::physmap_covers(probe_phys, PAGE_BYTES) {
             return Err("the map does not cover the kernel's own frame");
         }
@@ -181,12 +190,31 @@ mod kernel {
             return Err("a user address could name the kernel regime");
         }
 
-        // A process root built exactly as the production producer builds
-        // one: the identity window the discovered masks describe, and
-        // nothing else.
-        let identity_gib = paging::configured_identity_gigapages();
-        let Some(mut process) = AddressSpace::new_identity_gigapages(&PROBE_POOL, identity_gib)
-        else {
+        // Each gigabyte is typed once: the `virt` board's registers apart
+        // from its RAM, which the map covers to its top and no further, and
+        // a typed gigabyte asked for another type keeps its own.
+        let ram_bytes = GUEST_RAM_MIB << 20;
+        if paging::holding(0) != Some(Holding::Registers) {
+            return Err("the board's registers are not typed as registers");
+        }
+        if !paging::physmap_covers(RAM_BASE, ram_bytes) {
+            return Err("the map does not cover the guest's RAM");
+        }
+        if paging::physmap_covers(RAM_BASE + ram_bytes, PAGE_BYTES) {
+            return Err("the map reaches past the guest's RAM");
+        }
+        let ram = paging::gigapage_mask_from_extents(&[(RAM_BASE, ram_bytes)]);
+        let registers = paging::gigapage_mask_from_extents(&[(0, 1)]);
+        let none = [0u64; paging::GIGAPAGE_MASK_WORDS];
+        if paging::reveal(&ram, Holding::Registers) != none
+            || paging::reveal(&registers, Holding::Ram) != none
+        {
+            return Err("a typed gigabyte was retyped");
+        }
+
+        // A process root built as the production producer builds one:
+        // empty, the kernel living in the other regime.
+        let Some(mut process) = AddressSpace::new_user(&PROBE_POOL) else {
             return Err("no process root");
         };
 
@@ -203,31 +231,23 @@ mod kernel {
             return Err("a user leaf was accepted at the map's address");
         }
 
-        // The heart of it: a RAM frame in a gigapage the kernel does not
-        // address physically is reachable through the map and reachable
-        // *only* through it. The frame is the last page of the guest's RAM;
-        // nothing owns it at this point in the boot (no allocator exists
-        // yet) and the RAM self-test writes into every usable page
-        // afterwards regardless.
-        let ram_top = RAM_BASE + (GUEST_RAM_MIB << 20);
-        let high_phys = (ram_top - PAGE_BYTES) & !(PAGE_BYTES - 1);
+        // The heart of it: a RAM frame above the gigapage the port entry
+        // types, which only the boot's reading of the tree reveals, is
+        // reachable through the map and *only* through it. The frame is the
+        // last page of the guest's RAM; nothing owns it at this point in the
+        // boot (no allocator exists yet) and the RAM self-test writes into
+        // every usable page afterwards regardless.
+        let high_phys = (RAM_BASE + ram_bytes - PAGE_BYTES) & !(PAGE_BYTES - 1);
         // A precondition on the *guest*, not on the mapping: without RAM
         // above the gigapage holding the kernel image (which is where this
         // binary's own `PROBE_FRAME` lives) the property below is vacuous.
         if high_phys >> 30 <= probe_phys >> 30 {
             return Err("the guest has no RAM above the kernel's own gigapage");
         }
-        if !paging::physmap_covers(high_phys, PAGE_BYTES) {
-            return Err("the map does not cover the top of RAM");
-        }
         let high_map_va = paging::physmap_virt(high_phys);
-        // SAFETY: the map covers `high_phys`, so its translation is valid,
-        // and the frame is unowned at this point in the boot. The write and
-        // the read-back are in-bounds of that one page. The read-back is a
-        // second volatile access through the same alias, so the value is
-        // witnessed to have reached memory rather than been forwarded from
-        // the store — the identity window deliberately does not cover this
-        // frame, which is the property under test.
+        // SAFETY: the map covers the guest's RAM, `high_phys` included, and
+        // the frame is unowned at this point in the boot; the write and the
+        // read-back are in-bounds of that one page.
         let witnessed = unsafe {
             core::ptr::write_volatile(high_map_va as *mut u64, HIGH_MARKER);
             core::ptr::read_volatile(high_map_va as *const u64)
@@ -235,8 +255,8 @@ mod kernel {
         if witnessed != HIGH_MARKER {
             return Err("the map does not read back a high frame");
         }
-        if process.translate(high_phys).is_some() {
-            return Err("a process root still identity-maps RAM");
+        if process.translate(high_phys).is_some() || process.translate(probe_phys).is_some() {
+            return Err("a process root maps RAM");
         }
 
         // And a user address below the child image bias still maps

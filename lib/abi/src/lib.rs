@@ -245,8 +245,9 @@ pub use stdinfo::{
     STDINFO_VERSION_V1,
 };
 pub use syscall::{
-    IrqHandle, SyscallNumber, WaitFlags, CALL_DEADLINE_NONE, FD_GRANT_PENDING_MAX,
-    GRANT_EXTENT_INHERIT, RESOURCE_REF_MAX, SHM_GRANT_TO_MAX, SYSCALL_TABLE_HASH_LEN, WAIT_PID_ANY,
+    IrqHandle, SyscallNumber, WaitFlags, CALL_DEADLINE_NONE, CALL_TICKET_NONE,
+    FD_GRANT_PENDING_MAX, GRANT_EXTENT_INHERIT, RESOURCE_REF_MAX, SHM_GRANT_TO_MAX,
+    SYSCALL_TABLE_HASH_LEN, WAIT_PID_ANY,
 };
 pub use syscalls::{
     encoded_table, i32_from_register, i32_register_is_canonical, i64_from_register, spec_for,

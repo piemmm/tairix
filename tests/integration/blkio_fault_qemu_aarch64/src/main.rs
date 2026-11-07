@@ -4,8 +4,8 @@
 //! IO2).
 //!
 //! On boot the test reads the GICv2 base + generic-timer rate from the
-//! embedded `virt` device tree, brings up the EL1 vectors + GICv2, and
-//! installs the **production** `KernelDispatchHook` through a
+//! embedded `virt` device tree, brings up the GICv2, and installs the
+//! **production** `KernelDispatchHook` through a
 //! `DispatchCallbackSlot`, then spawns the fixture program
 //! (`tests/integration/blkio_fault_program`) through the production
 //! `InitSpawnCtx::spawn_driver_process` seam. Every syscall the fixture

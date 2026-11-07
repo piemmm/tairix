@@ -15,9 +15,10 @@
 //! register (fail closed, not "trust the reset
 //! state").
 //!
-//! The constants are the single Rust source of truth for the values the
-//! trampoline hard-codes; the unit tests pin both the exact encodings
-//! and the absence of every trap/booby-trap bit.
+//! `boot.s` takes these as operands, so the trampoline and the unit tests,
+//! which pin the absence of every trap bit, read one definition.
+//! `MDCR_EL2` has no constant: the trampoline gives EL1 every event counter
+//! the core implements, which only the core can say.
 
 /// `HCR_EL2` hand-off value: `RW` (bit 31) only — EL1 executes AArch64;
 /// stage-2 translation (`VM`), the EL1 trap controls (`TVM`, `TRVM`,
@@ -38,10 +39,6 @@ pub const CNTHCTL_EL2_HANDOFF: u64 = 0b11;
 /// instruction the compiler emits run untrapped.
 pub const CPTR_EL2_HANDOFF: u64 = 0x33FF;
 
-/// `MDCR_EL2` hand-off value: zero — no debug, breakpoint, or PMU
-/// register access from EL1/EL0 traps to EL2.
-pub const MDCR_EL2_HANDOFF: u64 = 0;
-
 /// `ICC_SRE_EL2` hand-off value on a core with the GICv3 system-register
 /// interface: `SRE` (bit 0) so the interface is used at all, `DFB` and
 /// `DIB` (bits 1–2) so only it signals FIQ and IRQ, and `Enable` (bit 3) so
@@ -54,22 +51,13 @@ pub const ICC_SRE_EL2_HANDOFF: u64 = 0xF;
 /// otherwise undefined.
 pub const ID_AA64PFR0_GIC_SHIFT: u32 = 24;
 
+/// The `PMCR_EL0.N` field (bits `[15:11]`): how many event counters the core
+/// implements, which the hand-off's `MDCR_EL2.HPMN` leaves to EL1.
+pub const PMCR_EL0_N_SHIFT: u32 = 11;
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Pin the exact encodings `boot.s` hard-codes (`mov`/`movk`
-    /// immediates), so the trampoline and this module cannot drift
-    /// apart silently.
-    #[test]
-    fn handoff_values_match_the_trampoline_immediates() {
-        assert_eq!(HCR_EL2_HANDOFF, 0x8000_0000);
-        assert_eq!(CNTHCTL_EL2_HANDOFF, 0x3);
-        assert_eq!(CPTR_EL2_HANDOFF, 0x33FF);
-        assert_eq!(MDCR_EL2_HANDOFF, 0);
-        assert_eq!(ICC_SRE_EL2_HANDOFF, 0xF);
-        assert_eq!(ID_AA64PFR0_GIC_SHIFT, 24);
-    }
 
     /// The `HCR_EL2` booby-trap bits whose UNKNOWN reset state hangs or
     /// corrupts EL1 must all be clear, and `RW` must be set.

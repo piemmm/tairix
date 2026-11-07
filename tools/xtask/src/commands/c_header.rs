@@ -68,7 +68,7 @@ use tairix_abi::{
     ViewBindingRecord, WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC,
     APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN,
     BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_TITLE_MAX,
-    BUNDLE_VERSION_MAX, BUTTON_NONE, CALL_DEADLINE_NONE, CAPABILITY_ID_MAX,
+    BUNDLE_VERSION_MAX, BUTTON_NONE, CALL_DEADLINE_NONE, CALL_TICKET_NONE, CAPABILITY_ID_MAX,
     COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, DRIVER_MANIFEST_MAGIC,
     DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
     DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
@@ -3936,8 +3936,9 @@ fn emit_grant_contract(out: &mut String) {
     out.push('\n');
 }
 
-/// Emit the `call_post()` contract item into `tairix_syscall.h`: the deadline
-/// that never passes, read from `lib/abi`.
+/// Emit the call contract items into `tairix_syscall.h`: the `call_post()`
+/// deadline that never passes and the `call_reap()` ticket that names no call,
+/// read from `lib/abi`.
 fn emit_call_contract(out: &mut String) {
     use std::fmt::Write as _;
     out.push_str(
@@ -3947,6 +3948,14 @@ fn emit_call_contract(out: &mut String) {
     let _ = writeln!(
         out,
         "#define TAIRIX_CALL_DEADLINE_NONE ((uint64_t){CALL_DEADLINE_NONE:#x}ull)"
+    );
+    out.push_str(
+        "/* call_reap() ticket that names no call: reaping it takes nothing and\n\
+         * answers whether the endpoint can still answer (-BrokenPipe once gone). */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_CALL_TICKET_NONE ((uint64_t){CALL_TICKET_NONE:#x}ull)"
     );
     out.push('\n');
 }

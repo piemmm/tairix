@@ -514,10 +514,9 @@ pub type FdtDiscovery<'a> = tairix_arch_api::fdtwalk::FdtDiscovery<'a, Aarch64Fd
 /// The same three windows the [`FdtDiscovery`] walk emits on the bridge's
 /// hardware-tree node (the controller `reg`, the inbound `dma-ranges`
 /// aperture, the outbound `ranges` window), but resolved by a single
-/// early-returning [`scan_translated`] walk so the boot path can read them
-/// **before the MMU is enabled** — early enough to fold the controller and
-/// outbound-window gigapages into the identity map's Device mask
-/// (`plans/PI.md` P4/P5 MMU-off watch-out; a whole-tree scan faults there).
+/// early-returning [`scan_translated`] walk, so the boot path can type the
+/// controller's and the outbound window's gigabytes in the direct map before
+/// it brings any device up.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct PcieDiscovery {
     /// CPU-physical base of the PCIe controller register block (the

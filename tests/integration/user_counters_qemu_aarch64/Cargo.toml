@@ -1,0 +1,30 @@
+[package]
+name = "tairix-test-user-counters-qemu-aarch64"
+description = "QEMU integration test: an aarch64 CPU the kernel holds gives EL0 none of its counters: the port's per-CPU hold closes CNTKCTL_EL1 and PMUSERENR_EL0 whatever reset left in them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding kernel ELF QEMU boots on the aarch64 `virt` board. It links the port alone:
+# the subject is the port's per-CPU hold, which QEMU's benign resets never
+# have to close anything for, so the run opens the controls itself.
+#
+# On the host target the crate has no test source and contributes nothing to
+# `cargo test`; the orchestrator is `cargo xtask test --qemu`.
+
+[[bin]]
+name = "tairix-test-user-counters-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

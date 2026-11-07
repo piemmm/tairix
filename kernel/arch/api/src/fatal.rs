@@ -196,9 +196,7 @@ fn file_tail(path: &str) -> ([u8; FILE_TAIL], u8) {
 ///
 /// Written by the entry the latch grants the full report, its words before
 /// its kind, and read only after the kind, so a reader never sees a cause half
-/// written. Two processors racing through [`enter_without_atomics`] can both be
-/// granted it and interleave their stores, so it is exact only while one
-/// processor reports, as that entry is.
+/// written.
 ///
 /// Laid out in C order under [`KEPT_SYMBOL`], so a debugger can read it off a
 /// stopped machine whose report never reached the console ([`decode_kept`]).
@@ -428,20 +426,6 @@ pub fn enter(cause: &Cause) -> Entry {
             Some(taken.saturating_add(1))
         })
         .unwrap_or_else(|taken| taken);
-    entry_after(taken, cause)
-}
-
-/// [`enter`], for a memory system that cannot perform an atomic
-/// read-modify-write at the moment — aarch64 with stage-1 translation off,
-/// where every access is Device-nGnRnE and an exclusive monitor may never
-/// grant, so the retry loop behind [`enter`] would spin forever.
-///
-/// A plain load and store: exact while one processor reports. A processor
-/// racing it through [`enter`] can at worst leave two full reports side by
-/// side, never an unbounded recursion on either.
-pub fn enter_without_atomics(cause: &Cause) -> Entry {
-    let taken = ENTRIES.load(Ordering::Relaxed);
-    ENTRIES.store(taken.saturating_add(1), Ordering::Relaxed);
     entry_after(taken, cause)
 }
 

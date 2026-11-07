@@ -40,6 +40,12 @@ pub const GRANT_EXTENT_INHERIT: u64 = u64::MAX;
 /// as a display engine waiting for its connector to move.
 pub const CALL_DEADLINE_NONE: u64 = u64::MAX;
 
+/// The [`SyscallNumber::CALL_REAP`] ticket that names no call: no endpoint
+/// ever issues it. Reaping it takes nothing and answers whether the endpoint
+/// can still answer at all — `NotFound` while it lives, `BrokenPipe` once it
+/// has gone.
+pub const CALL_TICKET_NONE: u64 = u64::MAX;
+
 /// The most [`SyscallNumber::FD_GRANT`] delegations one grantor may have
 /// pending — minted and not yet redeemed — to one recipient.
 ///

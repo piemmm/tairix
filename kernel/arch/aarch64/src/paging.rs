@@ -21,9 +21,9 @@
 //! ARM D5.3).
 //!
 //! The kernel regime is one global root (`KERNEL_L1`) carrying the direct
-//! physical map and the remap window, so a process root pays nothing for
-//! either and no user address can name them — a switch between user spaces
-//! reprograms `TTBR0_EL1` alone.
+//! physical map, the remap window and, in its top slot, the kernel image
+//! mapped by section (`kernel_root`), so a process root carries nothing of
+//! the kernel and a switch between user spaces reprograms `TTBR0_EL1` alone.
 //!
 //! Descriptor low bits (ARM ARM D5.3.1): a *table* or *page* descriptor
 //! is `0b11`, a *block* descriptor is `0b01`. The lower attributes carry
@@ -43,11 +43,18 @@ use tairix_arch_api::frames::{
     active_frames, descriptors, pool_slot_of, reclaim_hierarchy, Leaf, PageTableFrames, TableFrame,
     LINK_ORDERING, WALK_ORDERING,
 };
+use tairix_arch_api::gigapages::GigapageMask;
 use tairix_arch_api::mmu::{
     AccessTracking, AddressSpace as MmuAddressSpace, KernelWindow, MapError, PageFlags,
 };
 use tairix_arch_api::tags::{AddressTag, AddressTags, ParkRoot};
 use tairix_arch_api::tlb::TlbShootdown;
+
+#[cfg(any(test, all(target_arch = "aarch64", target_os = "none")))]
+mod kernel_root;
+
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub(crate) use kernel_root::enter_kernel_root;
 
 /// Size of a single page (and of a page-table page): the one system granule.
 pub use tairix_abi::PAGE_SIZE;
@@ -78,6 +85,9 @@ pub mod attrs {
     /// Access permission `0b00` (bits `[7:6]`): read/write at EL1, no EL0
     /// access. The kernel-only mapping the isolation test uses.
     pub const AP_RW_EL1: u64 = 0b00 << 6;
+    /// Access permission `0b10` (bits `[7:6]`): read-only at EL1, no EL0
+    /// access. A kernel code page.
+    pub const AP_RO_EL1: u64 = 0b10 << 6;
     /// Access permission `0b01` (bits `[7:6]`): read/write at EL1 **and**
     /// EL0. Used for an EL0 data mapping (e.g. a user stack).
     pub const AP_RW_EL0: u64 = 0b01 << 6;
@@ -133,6 +143,100 @@ const VA_BITS: u32 = 39;
 /// port is ready for a `TTBR0`-only unmap of the kernel (KPTI).
 pub const KERNEL_VA_BASE: u64 = !0u64 << VA_BITS;
 
+/// L1 slot of the kernel regime the image occupies: the top one.
+const IMAGE_SLOT: usize = ENTRIES_PER_TABLE - 1;
+
+/// First address of the gigabyte the image is linked in. The linker script
+/// puts the image at its load address's offset within it, so the image's
+/// virtual and physical addresses agree in every block.
+pub const KERNEL_IMAGE_GIGABYTE: u64 = KERNEL_VA_BASE + ((IMAGE_SLOT as u64) << 30);
+
+/// Bytes of the boot stack's guard, which the kernel root maps read-only.
+pub const BOOT_STACK_GUARD_BYTES: u64 = PAGE_SIZE as u64;
+
+// The image's layout and this module's map of it share these definitions, and
+// the linker's own offset between where the image is linked and loaded is
+// kept where `image_phys` reads it.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+core::arch::global_asm!(
+    ".globl kernel_image_gigabyte",
+    ".set kernel_image_gigabyte, {gigabyte}",
+    ".globl kernel_image_block",
+    ".set kernel_image_block, {block}",
+    ".globl boot_stack_guard_bytes",
+    ".set boot_stack_guard_bytes, {guard}",
+    ".pushsection .rodata.kimage_voffset, \"a\"",
+    ".balign 8",
+    ".globl tairix_aarch64_kimage_voffset",
+    ".type tairix_aarch64_kimage_voffset, %object",
+    ".size tairix_aarch64_kimage_voffset, 8",
+    "tairix_aarch64_kimage_voffset:",
+    ".quad __kimage_voffset",
+    ".popsection",
+    gigabyte = const KERNEL_IMAGE_GIGABYTE,
+    block = const tairix_arch_api::imagemap::BLOCK,
+    guard = const BOOT_STACK_GUARD_BYTES,
+);
+
+/// The firmware tree as the kernel reaches it: read-only at `virt`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirmwareTree {
+    /// Where the kernel reads the tree.
+    pub virt: u64,
+    /// Where the firmware put it, which the frame allocator must not hand
+    /// out.
+    pub phys: u64,
+    /// Its bytes, as its header states them.
+    pub len: u64,
+}
+
+static TREE_VIRT: AtomicU64 = AtomicU64::new(0);
+static TREE_PHYS: AtomicU64 = AtomicU64::new(0);
+/// Published last; zero until a tree is mapped.
+static TREE_LEN: AtomicU64 = AtomicU64::new(0);
+
+/// The firmware tree the boot mapped, or [`None`] when the firmware handed
+/// over none.
+#[must_use]
+pub fn firmware_tree() -> Option<FirmwareTree> {
+    let len = TREE_LEN.load(Ordering::Acquire);
+    (len != 0).then(|| FirmwareTree {
+        virt: TREE_VIRT.load(Ordering::Relaxed),
+        phys: TREE_PHYS.load(Ordering::Relaxed),
+        len,
+    })
+}
+
+/// Record `tree` as the firmware's, once, before any other CPU runs.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn publish_firmware_tree(tree: FirmwareTree) {
+    TREE_VIRT.store(tree.virt, Ordering::Relaxed);
+    TREE_PHYS.store(tree.phys, Ordering::Relaxed);
+    TREE_LEN.store(tree.len, Ordering::Release);
+}
+
+/// The physical address of `virt`, an address in the kernel image, which is
+/// loaded where its linker script says: `__kimage_voffset` below its link
+/// address. Host builds load no image, so there an address is its own.
+#[must_use]
+pub fn image_phys(virt: u64) -> u64 {
+    virt.wrapping_sub(kimage_voffset())
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn kimage_voffset() -> u64 {
+    extern "C" {
+        static tairix_aarch64_kimage_voffset: u64;
+    }
+    // SAFETY: a word in `.rodata` the linker fills and nothing writes.
+    unsafe { core::ptr::addr_of!(tairix_aarch64_kimage_voffset).read() }
+}
+
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+const fn kimage_voffset() -> u64 {
+    0
+}
+
 /// `TCR_EL1` value: both regimes 39-bit, 4 KiB granule, inner/outer
 /// write-back cacheable and inner-shareable walks, `TTBR0_EL1` owning the
 /// ASID (`A1 = 0`), and a 40-bit (1 TiB) output address size.
@@ -172,17 +276,16 @@ pub const SCTLR_SPAN: u64 = 1 << 23;
 /// only hardware ever saw the difference). An UNKNOWN `EE` makes every
 /// data access byte-swapped; an UNKNOWN `WXN` makes the writable kernel
 /// mapping execute-never the instant translation is enabled — a silent
-/// pre-vectors hang on the Pi 4. The trampolines (`boot.s` `.Lin_el1`,
-/// `smp.s` `_start_secondary_aarch64`) therefore write this exact value
-/// — they hard-code `0x30D0_0800`, pinned by a unit test here — so EL1
-/// always starts from known ground rather than trusting the reset state.
+/// pre-vectors hang on the Pi 4. The trampolines (`boot.s`, `smp.s`)
+/// therefore write this value, built from immediates, before their first
+/// data access, so EL1 always starts from known ground rather than trusting
+/// the reset state.
 pub const SCTLR_MMU_OFF: u64 = SCTLR_RES1;
 
-/// The full MMU-on `SCTLR_EL1` value `AddressSpace::switch` (freestanding
-/// only) installs on a CPU not held to PAN: [`SCTLR_RES1`] plus `M`
-/// (stage-1 translation), `C` (data cache), and `I` (instruction cache). A
-/// CPU held to PAN installs it with [`SCTLR_SPAN`] clear
-/// ([`crate::protection::sctlr_mmu_on`]).
+/// The full MMU-on `SCTLR_EL1` value the trampolines turn translation on
+/// with: [`SCTLR_RES1`] plus `M` (stage-1 translation), `C` (data cache),
+/// and `I` (instruction cache). A CPU held to PAN then writes it with
+/// [`SCTLR_SPAN`] clear (`hold_translation_controls`).
 ///
 /// Written as a whole — never OR-ed into the live register — so no
 /// UNKNOWN reset bit survives into translated execution (see
@@ -236,27 +339,54 @@ const fn table_shift(level: usize) -> usize {
     12 + 9 * (LEVELS - level)
 }
 
-/// Lower attributes for a kernel Normal-memory leaf (AF, inner
-/// shareable, EL1 RW, MAIR index 0), valid block/page.
-///
-/// The identity-mapped RAM gigapage must remain *privileged-executable*:
-/// it backs the kernel's own `.text`, so after the MMU is enabled the
-/// next instruction fetch runs from it. `UXN` is set (EL0 must not
-/// execute kernel pages) but `PXN` is left clear.
-#[must_use]
-pub const fn normal_leaf_attrs(block: bool) -> u64 {
-    let base = attrs::VALID
-        | attrs::AF
-        | attrs::SH_INNER
-        | attrs::AP_RW_EL1
-        | attrs::ATTR_IDX_NORMAL
-        | attrs::UXN;
-    if block {
-        base
-    } else {
-        base | attrs::TABLE_OR_PAGE
+/// What the kernel may do with Normal memory it maps for itself: never both
+/// write and execute it, and nothing at EL0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KernelAccess {
+    /// Read and execute: the kernel's code.
+    Execute,
+    /// Read only.
+    Read,
+    /// Read and write.
+    Write,
+}
+
+impl KernelAccess {
+    /// The lower attributes granting exactly this access to a page, or with
+    /// `block` a block.
+    #[must_use]
+    pub const fn leaf(self, block: bool) -> u64 {
+        let rights = match self {
+            Self::Execute => attrs::AP_RO_EL1,
+            Self::Read => attrs::AP_RO_EL1 | attrs::PXN,
+            Self::Write => attrs::AP_RW_EL1 | attrs::PXN,
+        };
+        let shape = if block { 0 } else { attrs::TABLE_OR_PAGE };
+        attrs::VALID
+            | shape
+            | attrs::AF
+            | attrs::SH_INNER
+            | attrs::ATTR_IDX_NORMAL
+            | attrs::UXN
+            | rights
     }
 }
+
+/// The trampoline's early map of the image: Normal blocks, writable *and*
+/// executable, which the kernel root replaces before anything but the port
+/// entry has run.
+#[cfg(any(test, all(target_arch = "aarch64", target_os = "none")))]
+pub(crate) const EARLY_IMAGE_BLOCK: u64 = attrs::VALID
+    | attrs::AF
+    | attrs::SH_INNER
+    | attrs::AP_RW_EL1
+    | attrs::ATTR_IDX_NORMAL
+    | attrs::UXN;
+
+/// The identity map's one leaf, the page translation is turned on from:
+/// tagged with the boot ASID, so parking `TTBR0_EL1` discards it.
+#[cfg(any(test, all(target_arch = "aarch64", target_os = "none")))]
+pub(crate) const IDMAP_LEAF: u64 = KernelAccess::Execute.leaf(false) | attrs::NOT_GLOBAL;
 
 /// Lower attributes for an **EL0-executable** Normal-memory page leaf:
 /// read-only at EL1 and EL0 (`AP_RO_EL0`), privileged-execute-never
@@ -344,10 +474,8 @@ const fn non_cacheable_leaf(ap: u64) -> u64 {
         | attrs::UXN
 }
 
-/// Lower attributes for a kernel Device-memory leaf (MAIR index 1,
-/// otherwise as [`normal_leaf_attrs`]). Device memory must not be
-/// inner-shareable cacheable; the attribute index selects the
-/// Device-nGnRE memory type from `MAIR_EL1`.
+/// Lower attributes for a kernel Device-memory leaf: read/write at EL1,
+/// executable nowhere, the Device-nGnRE memory type (MAIR index 1).
 #[must_use]
 pub const fn device_leaf_attrs(block: bool) -> u64 {
     kernel_device_leaf(block, attrs::ATTR_IDX_DEVICE)
@@ -390,7 +518,7 @@ pub const fn el0_device_leaf_attrs() -> u64 {
         | attrs::UXN
 }
 
-use tairix_arch_api::gigapages::{covers, word_holds};
+use tairix_arch_api::gigapages::word_holds;
 pub use tairix_arch_api::gigapages::{
     from_extents as gigapage_mask_from_extents, MASK_WORDS as GIGAPAGE_MASK_WORDS,
 };
@@ -400,258 +528,64 @@ const _: () = assert!(
     "one gigapage bit per L1 slot"
 );
 
-/// Gigapage mask in effect before any board discovery runs: bit 0 only —
-/// the QEMU `virt` board keeps its UART, GIC, and the rest of its device
-/// MMIO in the first GiB. A board whose MMIO lives elsewhere (the Pi 4's
-/// high-peripheral window in gigapage 3) replaces this at boot from its
-/// device tree ([`configure_device_gigapages`]); the default is the
-/// `virt` value, never a fabricated per-board constant (`plans/PI.md`).
-pub const DEFAULT_DEVICE_GIGAPAGES: [u64; GIGAPAGE_MASK_WORDS] = {
-    let mut mask = [0u64; GIGAPAGE_MASK_WORDS];
-    mask[0] = 1;
-    mask
-};
-
-/// Identity gigapages currently mapped Device instead of Normal, one bit
-/// per L1 slot. Defaults to [`DEFAULT_DEVICE_GIGAPAGES`]; overwritten by
-/// [`configure_device_gigapages`] once boot discovery resolves where the
-/// board's MMIO actually lives. Read by [`AddressSpace::new_identity_gigapages`]
-/// for *every* identity space built after configuration (the boot space
-/// and each process space), so the whole system shares one attribute
-/// layout.
-static DEVICE_GIGAPAGES: [AtomicU64; GIGAPAGE_MASK_WORDS] = [
-    AtomicU64::new(DEFAULT_DEVICE_GIGAPAGES[0]),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-];
-
-/// Install the identity-map Device gigapage mask.
-///
-/// Called once early in a board's boot path, after device-tree discovery
-/// resolves the board's MMIO bases ([`identity_device_mask`]) and before
-/// the boot address space is built. `Release` ordering pairs with
-/// [`device_gigapages`]' `Acquire` loads so a builder that sees any new
-/// word sees a consistent mask.
-pub fn configure_device_gigapages(mask: [u64; GIGAPAGE_MASK_WORDS]) {
-    for (slot, word) in DEVICE_GIGAPAGES.iter().zip(mask) {
-        slot.store(word, Ordering::Release);
-    }
-}
-
-/// The identity-map Device gigapage mask currently in effect.
-#[must_use]
-pub fn device_gigapages() -> [u64; GIGAPAGE_MASK_WORDS] {
-    let mut mask = [0u64; GIGAPAGE_MASK_WORDS];
-    for (word, slot) in mask.iter_mut().zip(&DEVICE_GIGAPAGES) {
-        *word = slot.load(Ordering::Acquire);
-    }
-    mask
-}
-
-/// `true` if identity gigapage `index` is mapped Device under `mask`.
-#[must_use]
-pub const fn gigapage_is_device(mask: &[u64; GIGAPAGE_MASK_WORDS], index: usize) -> bool {
-    tairix_arch_api::gigapages::holds(mask, index)
-}
-
-/// `true` if identity gigapage `index` is mapped Device under the
-/// *configured* mask ([`configure_device_gigapages`]), reading exactly
-/// the one mask word covering `index`.
-///
-/// Deliberately scalar: [`AddressSpace::new_identity_gigapages`] runs on
-/// boot paths where FP/SIMD may still be trapped (`CPACR_EL1.FPEN`), and
-/// copying the whole mask into a 64-byte local is exactly the shape the
-/// compiler lowers to vector stores — an EC `0x07` trap with no vectors
-/// installed (a silent hang). One `u64` atomic load per query keeps the
-/// path integer-only.
-fn configured_gigapage_is_device(index: usize) -> bool {
-    index < ENTRIES_PER_TABLE
-        && word_holds(DEVICE_GIGAPAGES[index / 64].load(Ordering::Acquire), index)
-}
-
-/// Gigapages of device registers only the kernel reaches — a PCI host's
-/// configuration region — which [`install_boot_physmap`] maps
-/// Device-nGnRnE in the kernel regime at their direct-map address
-/// ([`physmap_virt`]), named on a board's boot path before it runs. No
-/// process root carries them, so they need not lie below the user region
-/// the identity window shares its root with.
-pub static KERNEL_DEVICES: tairix_arch_api::gigapages::KernelDevices =
-    tairix_arch_api::gigapages::KernelDevices::new(MAX_PHYSMAP_GIB);
-
-/// Kernel-extent gigapage mask in effect before any board discovery runs:
-/// **all** slots, so a build that configures nothing (a host test, a QEMU
-/// chassis that does not discover its board) still reaches whatever it
-/// addresses physically. A real boot replaces it with the facts in hand
-/// ([`configure_kernel_gigapages`]) so that gigapages backed by nothing are
-/// left *invalid* — on real silicon a Normal write-back executable mapping
-/// of unbacked address space invites the core's speculative fetches and
-/// prefetches into windows no bus device answers, which can wedge the
-/// interconnect the instant translation enables (the metal Pi 4B hung
-/// exactly there while QEMU, which answers every address, stayed green).
-pub const DEFAULT_KERNEL_GIGAPAGES: [u64; GIGAPAGE_MASK_WORDS] = [u64::MAX; GIGAPAGE_MASK_WORDS];
-
-/// Identity gigapages holding memory the kernel addresses *physically* —
-/// its own image and boot heap, the firmware device tree, the scan-out
-/// surface — one bit per L1 slot.
-///
-/// This is deliberately **not** "every gigapage of RAM": the kernel reaches
-/// an allocator frame through the direct physical map in the `TTBR1_EL1`
-/// regime ([`physmap_virt`]), so a root carries an identity leaf only where
-/// something is addressed by its physical address. It is a bound on where
-/// the firmware puts those few things, not a capacity, and it no longer
-/// bounds how much RAM the kernel can reach. A slot in neither this mask
-/// nor [`DEVICE_GIGAPAGES`] is left invalid (faults on access — fail
-/// closed).
-static KERNEL_GIGAPAGES: [AtomicU64; GIGAPAGE_MASK_WORDS] =
-    [const { AtomicU64::new(DEFAULT_KERNEL_GIGAPAGES[0]) }; GIGAPAGE_MASK_WORDS];
-
-/// Install the identity-map kernel-extent gigapage mask.
-///
-/// Called once on a board's boot path, after the physically-addressed
-/// extents are known ([`gigapage_mask_from_extents`]) and before the boot
-/// address space is built. `Release` pairs with the constructor's `Acquire`
-/// loads.
-pub fn configure_kernel_gigapages(mask: [u64; GIGAPAGE_MASK_WORDS]) {
-    for (slot, word) in KERNEL_GIGAPAGES.iter().zip(mask) {
-        slot.store(word, Ordering::Release);
-    }
-}
-
-/// `true` if identity gigapage `index` is mapped Normal under the
-/// *configured* kernel-extent mask ([`configure_kernel_gigapages`]).
-/// Scalar — one `u64` atomic load per query — for the same FP/SIMD-trap
-/// reason as [`configured_gigapage_is_device`].
-fn configured_gigapage_is_kernel(index: usize) -> bool {
-    index < ENTRIES_PER_TABLE
-        && word_holds(KERNEL_GIGAPAGES[index / 64].load(Ordering::Acquire), index)
-}
-
-/// Fold one combined (Device | kernel-extent) mask word into a running
-/// identity window length: a non-zero word moves the window past its
-/// highest set gigapage. The single accumulation
-/// [`identity_window_gigapages`] and [`configured_identity_gigapages`]
-/// share.
-const fn window_fold(window: usize, word_index: usize, combined: u64) -> usize {
-    if combined == 0 {
-        window
-    } else {
-        word_index * 64 + (63 - combined.leading_zeros() as usize) + 1
-    }
-}
-
-/// Number of L1 identity gigapages that covers every gigapage named by
-/// either mask: the highest set Device or kernel-extent gigapage plus one,
-/// `0` when both masks are empty.
-///
-/// This is the identity-window length a board-portable caller passes to
-/// [`AddressSpace::new_identity_gigapages`] instead of a hard-coded
-/// board constant: on the QEMU `virt` board (Device GiB 0, image in GiB 1)
-/// it is 2, on the Pi 4 it reaches the PCIe outbound window — a window
-/// truncated short of the MMIO gigapage would drop the console and
-/// interrupt controller from the space the instant it activates.
-#[must_use]
-pub fn identity_window_gigapages(
-    device: &[u64; GIGAPAGE_MASK_WORDS],
-    kernel: &[u64; GIGAPAGE_MASK_WORDS],
-) -> usize {
-    let mut window = 0;
-    let mut word_index = 0;
-    while word_index < GIGAPAGE_MASK_WORDS {
-        window = window_fold(window, word_index, device[word_index] | kernel[word_index]);
-        word_index += 1;
-    }
-    window
-}
-
-/// [`identity_window_gigapages`] over the *configured* masks
-/// ([`configure_device_gigapages`] / [`configure_kernel_gigapages`]).
-///
-/// Deliberately scalar — one atomic `u64` load per mask word, no
-/// 64-byte mask local — for the same FP/SIMD-trap reason as
-/// `configured_gigapage_is_device`.
-#[must_use]
-pub fn configured_identity_gigapages() -> usize {
-    let mut window = 0;
-    let mut word_index = 0;
-    while word_index < GIGAPAGE_MASK_WORDS {
-        let combined = DEVICE_GIGAPAGES[word_index].load(Ordering::Acquire)
-            | KERNEL_GIGAPAGES[word_index].load(Ordering::Acquire);
-        window = window_fold(window, word_index, combined);
-        word_index += 1;
-    }
-    window
-}
-
-/// Select the leaf attributes for an identity gigapage from its mask
-/// membership: Device wins (MMIO must never be cached or speculated), a
-/// kernel extent maps Normal, and a gigapage in neither mask gets **no**
-/// descriptor — unbacked address space is left invalid so a stray or
-/// speculative access faults instead of wandering onto a bus window
-/// nothing answers ([`configure_kernel_gigapages`]). The one policy
-/// [`AddressSpace::new_identity_gigapages`] applies per slot.
-#[must_use]
-pub const fn identity_gigapage_leaf(device: bool, kernel: bool) -> Option<u64> {
-    if device {
-        Some(device_leaf_attrs(true))
-    } else if kernel {
-        Some(normal_leaf_attrs(true))
-    } else {
-        None
-    }
-}
-
 // --- The kernel (`TTBR1_EL1`) regime -------------------------------
 
 /// The one kernel L1 root: the direct physical map in its low slots, the
-/// remap window in its high ones.
+/// remap window above it, and the kernel image in the top slot.
 ///
-/// A `.bss` static, so its tables live inside the kernel image rather than
-/// in allocator-backed frames — which is what lets the Supervisor's
-/// destructive whole-RAM sweep keep running under the translation it is
-/// testing, and what lets a secondary adopt the regime before any allocator
-/// exists. `TTBR1_EL1` points here on every CPU for the image's lifetime
-/// and is never reprogrammed, so a switch between user spaces touches
-/// `TTBR0_EL1` alone.
+/// A `.bss` static, so its tables live inside the kernel image rather than in
+/// allocator-backed frames — which is what lets the Supervisor's destructive
+/// whole-RAM sweep keep running under the translation it is testing. The boot
+/// CPU loads it from the port entry and each secondary from `smp.s`, which
+/// names it; it is never replaced.
+#[export_name = "tairix_aarch64_kernel_root"]
 static KERNEL_L1: KernelRoot = KernelRoot(UnsafeCell::new(Table::new()));
 
 /// Interior-mutable wrapper over the kernel L1 root's storage.
 struct KernelRoot(UnsafeCell<Table>);
 
-// SAFETY: the two writers are set-once publications
-// ([`install_boot_physmap`], [`reserve_kernel_window`]), each holding its
-// own atomic claim and each touching a disjoint slot range, so no two
-// references into the root coexist; every other access is the MMU's own
-// table walk.
+// SAFETY: every software access goes through the atomic view
+// [`kernel_root_entries`] gives; the rest is the MMU's own table walk.
 unsafe impl Sync for KernelRoot {}
 
-/// Pointer to the kernel L1 root's entries, with the static's provenance.
-fn kernel_root_table() -> *mut [u64; ENTRIES_PER_TABLE] {
-    KERNEL_L1.0.get().cast()
+/// The kernel root's entries.
+fn kernel_root_entries() -> &'static [AtomicU64; ENTRIES_PER_TABLE] {
+    // SAFETY: the static's aligned storage, live for the image's lifetime,
+    // which nothing reaches through a `&mut`.
+    unsafe { descriptors(KERNEL_L1.0.get().cast()) }
+}
+
+/// Physical address of the kernel L1 root — the value `TTBR1_EL1` carries.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn kernel_root_phys() -> u64 {
+    image_phys(KERNEL_L1.0.get() as u64)
+}
+
+/// A root with no entry. `TTBR0_EL1` holds it whenever no process runs, so
+/// a kernel access to a low address — a null dereference among them —
+/// faults; `TTBR1_EL1` holds it for the instant the kernel root replaces the
+/// trampoline's map.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+static EMPTY_ROOT: Table = Table::new();
+
+/// Physical address of [`EMPTY_ROOT`].
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn empty_root_phys() -> u64 {
+    image_phys(core::ptr::addr_of!(EMPTY_ROOT) as u64)
 }
 
 /// Claim a one-time publication into the kernel root, reporting whether this
 /// caller won it.
 ///
-/// The root is a shared static reached through a raw pointer, so what makes
-/// the `&mut` each publication takes unique is this claim and nothing else —
-/// a load-then-store check over the published words would let two callers
-/// both pass it and both write. Production has one caller per publication
-/// (the boot CPU, pre-SMP); the host tests are threaded, so the claim is
-/// load-bearing rather than defensive.
+/// The claim, not a load-then-store check over the published words, is what
+/// makes a publication unique: two callers could both pass the check. The
+/// host tests are threaded, so the claim is load-bearing there.
 fn claim_kernel_root_write(flag: &AtomicBool) -> bool {
     flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
 }
 
-/// Claim on the direct physical map's slot range.
-static PHYSMAP_CLAIM: AtomicBool = AtomicBool::new(false);
-
-/// Claim on the kernel remap window's slot range, disjoint from the map's.
+/// Claim on the kernel remap window's slot range.
 static WINDOW_CLAIM: AtomicBool = AtomicBool::new(false);
 
 /// Set once the window's descriptors *and* the kernel root's window slots
@@ -659,48 +593,29 @@ static WINDOW_CLAIM: AtomicBool = AtomicBool::new(false);
 ///
 /// Separate from [`WINDOW_CLAIM`] because the two answer different
 /// questions: the claim excludes a second writer, this reports completion.
-/// A caller cannot test completion by reading a published descriptor,
-/// because the descriptors are published *before* the kernel root is filled
-/// — the fill reads them — so a reader that took a live descriptor as
-/// "ready" could map into the window before the walker had the root slot.
+/// The descriptors are published *before* the kernel root is filled — the
+/// fill reads them — so a reader taking a live descriptor as "ready" could map
+/// into the window before the walker had the root slot.
 static WINDOW_PUBLISHED: AtomicBool = AtomicBool::new(false);
 
-/// Physical address of the kernel L1 root — the value `TTBR1_EL1` carries.
-///
-/// The kernel is identity-linked, so its own static's virtual address *is*
-/// its physical one. Freestanding-only: both consumers are the translation
-/// register write and the fatal report's walk, and a physical address has
-/// no meaning under a host operating system.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
-fn kernel_root_phys() -> u64 {
-    phys_of(kernel_root_table() as u64)
-}
-
-/// L1 slots the kernel remap window claims, at the top of the
-/// `TTBR1_EL1` range.
+/// L1 slots the kernel remap window claims, just below the image's.
 ///
 /// Sized from the port's VA layout rather than from a byte figure: the
-/// regime spans [`ENTRIES_PER_TABLE`] gigapages, and the window takes the
-/// top eighth of them (64 GiB). Address space is free until something is
-/// backed into it, so the only cost of a generous window is one shared L2
-/// table per slot; what the size bounds is the kernel heap, and on any
-/// machine this port runs on installed RAM binds long before 64 GiB of
-/// kernel heap does.
+/// regime spans [`ENTRIES_PER_TABLE`] gigapages, and the window takes an
+/// eighth of them (64 GiB). Address space is free until something is backed
+/// into it, so the only cost of a generous window is one shared L2 table per
+/// slot; what the size bounds is the kernel heap, and on any machine this
+/// port runs on installed RAM binds long before 64 GiB of kernel heap does.
 const KERNEL_WINDOW_SLOTS: usize = ENTRIES_PER_TABLE / 8;
 
 /// First L1 slot of the kernel remap window.
-///
-/// The window stops one gigapage short of the top of the regime: an extent
-/// whose exclusive top is not representable is refused outright (which
-/// keeps every consumer free of wrap arithmetic), and the last gigapage of
-/// the 64-bit space is worth less than that simplicity.
-const KERNEL_WINDOW_FIRST_SLOT: usize = ENTRIES_PER_TABLE - 1 - KERNEL_WINDOW_SLOTS;
+const KERNEL_WINDOW_FIRST_SLOT: usize = IMAGE_SLOT - KERNEL_WINDOW_SLOTS;
 
 /// Pages the kernel remap window spans.
 const KERNEL_WINDOW_PAGES: usize = KERNEL_WINDOW_SLOTS * ENTRIES_PER_TABLE * ENTRIES_PER_TABLE;
 
 /// First L1 slot of the kernel regime the direct physical map claims — its
-/// very first, since the whole regime is the kernel's.
+/// very first.
 const PHYSMAP_FIRST_SLOT: usize = 0;
 
 /// L1 slots the direct physical map spans: everything from its first slot
@@ -714,130 +629,151 @@ pub const PHYSMAP_VMA_BASE: u64 = KERNEL_VA_BASE + ((PHYSMAP_FIRST_SLOT as u64) 
 
 /// Widest direct physical map the claimed slots can express, in gigabytes.
 ///
-/// An L1 leaf *is* a 1 GiB block, so one slot is one gigabyte and the map
-/// costs no page tables at all. RAM above this is reported by the RAM
-/// self-test as unreachable and every consumer of it fails closed; it is
-/// the architectural ceiling of a 39-bit regime, not a board constant.
+/// An L1 leaf *is* a 1 GiB block, so one slot is one gigabyte. Memory above
+/// this is unreachable and every consumer of it fails closed; it is the
+/// architectural ceiling of a 39-bit regime, not a board constant.
 pub const MAX_PHYSMAP_GIB: usize = PHYSMAP_SLOTS;
 
-/// The map's covered gigapages, one bit per claimed slot, or all-zero
-/// before [`install_boot_physmap`] runs — so a build with no boot path
-/// reaches nothing through the map and fails closed.
-///
-/// The map is deliberately **sparse**: a gigapage the board types Device
-/// gets no leaf. Mapping MMIO Normal-cacheable here while the identity
-/// window maps it Device would be mismatched memory attributes for one
-/// physical address, which permits a speculative read of a device register
-/// — the map covers exactly the RAM the allocator may hand out and nothing
-/// else.
-static PHYSMAP_COVERED: [AtomicU64; GIGAPAGE_MASK_WORDS] =
-    [const { AtomicU64::new(0) }; GIGAPAGE_MASK_WORDS];
+/// One past the highest physical address the direct map can reach.
+pub const PHYSMAP_REACH: u64 = (MAX_PHYSMAP_GIB as u64) << 30;
 
-/// Gigabytes of physical memory the live direct map covers.
+/// What a gigabyte of the direct map holds, and so how the kernel maps it.
+/// Each gigabyte is typed once, so no physical address is ever reached under
+/// two memory types — a Normal alias of a register invites the core's
+/// speculative reads into it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Holding {
+    /// RAM: Normal write-back, read/write, never executed.
+    Ram,
+    /// Device registers: Device-nGnRE.
+    Registers,
+    /// A PCI host's configuration region: Device-nGnRnE, whose writes are
+    /// non-posted, so none is acknowledged before the function has it.
+    Config,
+}
+
+impl Holding {
+    /// The block leaf typing a gigabyte as `self`.
+    const fn leaf(self) -> u64 {
+        match self {
+            Self::Ram => KernelAccess::Write.leaf(true),
+            Self::Registers => device_leaf_attrs(true),
+            Self::Config => config_leaf_attrs(true),
+        }
+    }
+
+    /// What the direct-map entry `entry` holds, or `None` for an invalid
+    /// one. Only the image's own gigabyte is a table: RAM, split around the
+    /// read-only alias of the image.
+    const fn of(entry: u64) -> Option<Self> {
+        if entry & attrs::VALID == 0 {
+            return None;
+        }
+        if !is_block(entry) {
+            return Some(Self::Ram);
+        }
+        match entry & (0b111 << 2) {
+            attrs::ATTR_IDX_DEVICE => Some(Self::Registers),
+            attrs::ATTR_IDX_DEVICE_NONPOSTED => Some(Self::Config),
+            _ => Some(Self::Ram),
+        }
+    }
+}
+
+/// Type each gigabyte `mask` names, below [`MAX_PHYSMAP_GIB`], as `holding`
+/// in the direct map, and answer which of them hold it now. A gigabyte the
+/// map already types otherwise keeps its type: none is ever retyped.
+///
+/// So that RAM never shares a gigabyte with registers, the boot types the
+/// registers first and then only the RAM gigabytes left to it.
+#[must_use]
+pub fn reveal(mask: &GigapageMask, holding: Holding) -> GigapageMask {
+    let root = kernel_root_entries();
+    let mut held = [0u64; GIGAPAGE_MASK_WORDS];
+    for gigapage in (0..MAX_PHYSMAP_GIB).filter(|&index| word_holds(mask[index / 64], index)) {
+        let typed = descriptor((gigapage as u64) << 30, holding.leaf());
+        let now = match root[PHYSMAP_FIRST_SLOT + gigapage].compare_exchange(
+            0,
+            typed,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => typed,
+            Err(existing) => existing,
+        };
+        if Holding::of(now) == Some(holding) {
+            held[gigapage / 64] |= 1 << (gigapage % 64);
+        }
+    }
+    // An invalid entry is cached nowhere, so making one valid owes the
+    // walker ordering, never an invalidation.
+    publish_table_update();
+    held
+}
+
+/// What the direct map holds at gigabyte `index`, or `None` where it maps
+/// nothing.
+#[must_use]
+pub fn holding(index: usize) -> Option<Holding> {
+    (index < MAX_PHYSMAP_GIB)
+        .then(|| {
+            Holding::of(kernel_root_entries()[PHYSMAP_FIRST_SLOT + index].load(Ordering::Acquire))
+        })
+        .flatten()
+}
+
+/// Whether every gigabyte `[phys, phys + len)` touches holds what `wanted`
+/// accepts. Fails closed on an empty, wrapping or over-wide range.
+fn every_gigabyte(phys: u64, len: u64, wanted: impl Fn(Holding) -> bool) -> bool {
+    let Some(last) = len.checked_sub(1).and_then(|tail| phys.checked_add(tail)) else {
+        return false;
+    };
+    let (first, last) = ((phys >> 30) as usize, (last >> 30) as usize);
+    last < MAX_PHYSMAP_GIB && (first..=last).all(|index| holding(index).is_some_and(&wanted))
+}
+
+/// Gigabytes of RAM the direct map covers.
 #[must_use]
 pub fn physmap_gigapages() -> usize {
-    let mut covered = 0;
-    for word in &PHYSMAP_COVERED {
-        covered += word.load(Ordering::Acquire).count_ones() as usize;
-    }
-    covered
+    (0..MAX_PHYSMAP_GIB)
+        .filter(|&index| holding(index) == Some(Holding::Ram))
+        .count()
 }
 
 /// The direct-map virtual address of physical `phys`.
 ///
 /// `const`, so a fixed address names its direct-map spelling without a
 /// run-time load. It resolves only for a `phys` the map covers;
-/// [`physmap_covers`] (RAM) or [`KERNEL_DEVICES`]' `covers` (registers) is
-/// the check a caller with a discovered address makes first.
+/// [`physmap_covers`] (RAM) or [`registers_virt`] (registers) is the check a
+/// caller with a discovered address makes first.
 #[must_use]
 pub const fn physmap_virt(phys: u64) -> u64 {
     PHYSMAP_VMA_BASE.wrapping_add(phys)
 }
 
-/// `true` when the live direct map covers every byte of `[phys, phys +
-/// len)`. Fails closed on a wrapping or over-wide range.
+/// Where the kernel reaches the register at physical `phys`: its direct-map
+/// spelling, valid once the boot has typed its gigabyte as registers
+/// ([`registers_virt`]).
+#[must_use]
+// The port is 64-bit: an address is the same width as a `usize` and a `u64`.
+#[allow(clippy::cast_possible_truncation)]
+pub const fn mmio(phys: usize) -> usize {
+    physmap_virt(phys as u64) as usize
+}
+
+/// `true` when the direct map covers every byte of `[phys, phys + len)` as
+/// RAM.
 #[must_use]
 pub fn physmap_covers(phys: u64, len: u64) -> bool {
-    covers(&PHYSMAP_COVERED, MAX_PHYSMAP_GIB, phys, len)
+    every_gigabyte(phys, len, |holding| holding == Holding::Ram)
 }
 
-/// `true` when every byte of `[phys, phys + len)` lies in an identity
-/// gigapage mapped Device ([`configure_device_gigapages`]): the only part of
-/// the identity window a register window may be reached through. Fails closed
-/// on a wrapping or empty range.
+/// The direct-map address of the registers at `[phys, phys + len)`, or
+/// `None` unless every byte lies in a gigabyte typed as registers or a
+/// configuration region: no other kernel mapping of a register is uncached.
 #[must_use]
-pub fn identity_device_covers(phys: u64, len: u64) -> bool {
-    covers(&DEVICE_GIGAPAGES, ENTRIES_PER_TABLE, phys, len)
-}
-
-/// Size the direct physical map from `covered` — the gigapage mask of the
-/// RAM the allocator may hand out — and install its leaves into the kernel
-/// root, set-once, with the kernel-regime Device gigapages
-/// [`KERNEL_DEVICES`] names beside them.
-///
-/// Called once from the boot path, before anything reaches a frame by
-/// pointer. It needs no frame source and draws no table: each covered
-/// gigabyte is one L1 block descriptor in a root that already exists.
-/// Gigapages the board types Device are dropped (mismatched attributes for
-/// one physical address), as are any at or above [`MAX_PHYSMAP_GIB`] — RAM
-/// there is reported unreachable rather than claimed-but-absent.
-///
-/// Returns `false`, having changed nothing, for a mask that covers no
-/// representable gigapage or for a second call; the caller then fails the
-/// boot rather than running on RAM it cannot address.
-#[must_use]
-pub fn install_boot_physmap(covered: &[u64; GIGAPAGE_MASK_WORDS]) -> bool {
-    let mut leaves = [0u64; GIGAPAGE_MASK_WORDS];
-    let mut devices = [0u64; GIGAPAGE_MASK_WORDS];
-    let mut any = false;
-    for gigapage in 0..MAX_PHYSMAP_GIB {
-        let bit = 1 << (gigapage % 64);
-        // Device wins a gigapage both name, as in the identity window.
-        if KERNEL_DEVICES.named(gigapage) {
-            devices[gigapage / 64] |= bit;
-            continue;
-        }
-        let asked = word_holds(covered[gigapage / 64], gigapage);
-        if !asked || configured_gigapage_is_device(gigapage) {
-            continue;
-        }
-        leaves[gigapage / 64] |= bit;
-        any = true;
-    }
-    // Reached before the claim, so a mask that covers nothing representable
-    // leaves the publication available rather than consuming it.
-    if !any {
-        return false;
-    }
-    if !claim_kernel_root_write(&PHYSMAP_CLAIM) {
-        return false;
-    }
-    // SAFETY: the claim above is held by this call alone, and the window's
-    // publication writes a disjoint slot range under its own claim, so this
-    // is the only reference into these entries of the kernel root.
-    let root = unsafe { &mut *kernel_root_table() };
-    for gigapage in 0..MAX_PHYSMAP_GIB {
-        // Never executable: the kernel fetches from its identity window, so
-        // nothing is ever fetched through the map.
-        let leaf = if word_holds(leaves[gigapage / 64], gigapage) {
-            normal_leaf_attrs(true) | attrs::PXN
-        } else if word_holds(devices[gigapage / 64], gigapage) {
-            config_leaf_attrs(true)
-        } else {
-            continue;
-        };
-        root[PHYSMAP_FIRST_SLOT + gigapage] = descriptor((gigapage as u64) << 30, leaf);
-    }
-    // The barrier goes *before* the coverage publication, not after: the
-    // flag is what a reader takes as permission to dereference through the
-    // map, so the table stores must already be visible to the walker when it
-    // sees the flag. Published last, with `Release`, the flag orders both.
-    publish_table_update();
-    for (word, published) in PHYSMAP_COVERED.iter().zip(leaves) {
-        word.store(published, Ordering::Release);
-    }
-    KERNEL_DEVICES.publish(devices);
-    true
+pub fn registers_virt(phys: u64, len: u64) -> Option<u64> {
+    every_gigabyte(phys, len, |holding| holding != Holding::Ram).then(|| physmap_virt(phys))
 }
 
 /// The window's shared L1 table descriptors, one per claimed slot, or `0`
@@ -869,6 +805,10 @@ const _: () = {
     assert!(
         PHYSMAP_FIRST_SLOT < KERNEL_WINDOW_FIRST_SLOT,
         "the direct physical map must start below the kernel remap window"
+    );
+    assert!(
+        KERNEL_WINDOW_FIRST_SLOT + KERNEL_WINDOW_SLOTS == IMAGE_SLOT,
+        "the kernel remap window must end where the image's slot begins"
     );
 };
 
@@ -914,20 +854,18 @@ pub fn reserve_kernel_window(frames: &'static dyn PageTableFrames) -> Option<Ker
         };
         slot.store(table_descriptor(phys), Ordering::Release);
     }
-    // SAFETY: the claim above is held by this call alone, and the map's
-    // publication writes a disjoint slot range under its own claim, so this
-    // is the only reference into these entries of the kernel root.
-    let root = unsafe { &mut *kernel_root_table() };
-    install_kernel_window_slots(root);
+    let root = kernel_root_entries();
+    for (offset, slot) in KERNEL_WINDOW_L1.iter().enumerate() {
+        root[KERNEL_WINDOW_FIRST_SLOT + offset]
+            .store(slot.load(Ordering::Acquire), Ordering::Release);
+    }
     publish_table_update();
     WINDOW_PUBLISHED.store(true, Ordering::Release);
     Some(window)
 }
 
-/// Copy the published window descriptors into `root`'s window slots.
-///
-/// An invalid-to-valid table descriptor needs no TLB maintenance, only the
-/// store barrier the callers issue.
+/// Copy the published window descriptors into the window slots of `root`, a
+/// table no walk reaches yet.
 fn install_kernel_window_slots(root: &mut [u64; ENTRIES_PER_TABLE]) {
     for offset in 0..KERNEL_WINDOW_SLOTS {
         let descriptor = KERNEL_WINDOW_L1[offset].load(Ordering::Acquire);
@@ -997,45 +935,16 @@ fn publish_table_update() {
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 fn publish_table_update() {}
 
-/// True when stage-1 translation is live on this CPU (`SCTLR_EL1.M`).
-///
-/// [`PageTablePool::alloc`] branches its counter discipline on this:
-/// with the MMU off every data access is Device-nGnRnE, where LDXR/STXR
-/// exclusives are not architecturally guaranteed to succeed — on the
-/// BCM2711 the exclusive monitor never grants them, so an atomic
-/// read-modify-write retries forever on real silicon while QEMU's
-/// always-granting monitor keeps every emulated boot green.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub(crate) fn translation_enabled() -> bool {
-    let sctlr: u64;
-    // SAFETY: `SCTLR_EL1` is readable at EL1 and the read has no side
-    // effects.
-    unsafe {
-        core::arch::asm!("mrs {s}, SCTLR_EL1", s = out(reg) sctlr,
-            options(nomem, nostack, preserves_flags));
-    }
-    sctlr & 1 != 0
-}
-
-/// Host twin of the `SCTLR_EL1.M` probe: host tests run under a full
-/// operating-system memory system where atomic read-modify-writes are
-/// always valid, so translation reports live.
-#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-pub(crate) fn translation_enabled() -> bool {
-    true
-}
-
 /// Clean+invalidate every data-cache line of `[base, base + len)` to the
 /// point of coherency (`dc civac`, line size decoded from the live
 /// `CTR_EL0` by [`dcache_line_bytes`]), then `dsb sy`.
 ///
-/// This is the bridge between the boot CPU's cacheable writes and an
-/// observer that reads the same bytes non-cacheably — the translation
-/// walker before the MMU enables, or a freshly-started secondary core
-/// running MMU-off: without the sweep, a dirty (or stale) line over the
-/// range would shadow — or later overwrite — the DRAM bytes the
-/// non-cacheable observer works with on real silicon (cache-less QEMU
-/// cannot show it).
+/// This is the bridge between the CPU's cacheable writes and an observer
+/// that reads the same bytes non-cacheably — a secondary core polling its
+/// release gate before its MMU is on, or a device that does not snoop: without
+/// the sweep, a dirty (or stale) line over the range would shadow — or later
+/// overwrite — the DRAM bytes the non-cacheable observer works with on real
+/// silicon (cache-less QEMU cannot show it).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn clean_invalidate_range_to_poc(base: u64, len: u64) {
     sweep_to_poc(base, len, |addr| {
@@ -1163,62 +1072,6 @@ pub const fn icache_line_bytes(ctr_el0: u64) -> usize {
     4 << (ctr_el0 & 0xF)
 }
 
-/// Derive the identity-map Device gigapage mask from the board's
-/// discovered MMIO extents, the gigapages `windows` already names, and the
-/// kernel image's own extent.
-///
-/// Each gigapage one of `device_extents` overlaps, or `windows` holds, is
-/// mapped Device so
-/// MMIO reads/writes are not cached, reordered, or speculated
-/// (Device-nGnRE is the only correct attribute for a
-/// register block). The gigapages overlapping `[kernel_start,
-/// kernel_end)` are forced Normal regardless: the CPU executes the
-/// kernel image out of them, and a Device(+PXN) mapping would fault the
-/// instruction fetch the moment the MMU comes on — on the Pi 4 the
-/// kernel at `0x8_0000` shares gigapage 0 with nothing the kernel
-/// drives, while its UART/GIC live in gigapage 3 (`plans/PI.md` §1). On
-/// QEMU `virt` the kernel sits in gigapage 1 and the MMIO in gigapage
-/// 0, reproducing the historic layout. Gigapages beyond the 512 GiB
-/// identity window are ignored (no representable slot).
-#[must_use]
-pub fn identity_device_mask(
-    device_extents: &[(u64, u64)],
-    windows: [u64; GIGAPAGE_MASK_WORDS],
-    kernel_start: u64,
-    kernel_end: u64,
-) -> [u64; GIGAPAGE_MASK_WORDS] {
-    let mut mask = gigapage_mask_from_extents(device_extents);
-    for (word, window) in mask.iter_mut().zip(windows) {
-        *word |= window;
-    }
-    without_kernel(mask, kernel_start, kernel_end)
-}
-
-/// `mask` less the gigapages `[kernel_start, kernel_end)` lies in, which
-/// stay Normal — executable — even if a discovered MMIO base lands in one:
-/// the conflict is unmappable at 1 GiB granularity, and keeping the CPU
-/// running wins.
-#[must_use]
-fn without_kernel(
-    mut mask: [u64; GIGAPAGE_MASK_WORDS],
-    kernel_start: u64,
-    kernel_end: u64,
-) -> [u64; GIGAPAGE_MASK_WORDS] {
-    let first = (kernel_start >> 30) as usize;
-    let last_byte = if kernel_end > kernel_start {
-        kernel_end - 1
-    } else {
-        kernel_start
-    };
-    let last = (last_byte >> 30) as usize;
-    let mut index = first;
-    while index <= last && index < ENTRIES_PER_TABLE {
-        mask[index / 64] &= !(1 << (index % 64));
-        index += 1;
-    }
-    mask
-}
-
 /// One page-table page: 512 × u64, naturally aligned.
 #[repr(C, align(4096))]
 struct Table([u64; ENTRIES_PER_TABLE]);
@@ -1246,11 +1099,9 @@ pub struct PageTablePool<const CAPACITY: usize = POOL_SIZE> {
     used: AtomicUsize,
 }
 
-// SAFETY: the pool exposes `&self` allocation but every allocated frame
-// is handed out exactly once — the counter is a monotonic `AtomicUsize`
-// advanced by `fetch_add` whenever translation is live, and by the
-// single-threaded pre-SMP boot CPU alone when it is not
-// ([`PageTablePool::alloc_with`]) — so distinct allocations never alias.
+// SAFETY: the pool exposes `&self` allocation but every allocated frame is
+// handed out exactly once, by a monotonic `fetch_add`, so distinct
+// allocations never alias.
 unsafe impl<const CAPACITY: usize> Sync for PageTablePool<CAPACITY> {}
 
 impl<const CAPACITY: usize> Default for PageTablePool<CAPACITY> {
@@ -1282,91 +1133,25 @@ impl<const CAPACITY: usize> PageTablePool<CAPACITY> {
     /// Returns `None` when the pool is exhausted, which callers fail closed
     /// on as a deterministic OOM, never a panic.
     pub fn alloc(&self) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
-        self.alloc_with(translation_enabled())
-    }
-
-    /// [`Self::alloc`] with the translation state passed in, so the
-    /// host unit tests can exercise both counter disciplines.
-    ///
-    /// With translation live the monotonic counter advances by atomic
-    /// `fetch_add` — the pool is shared (`Sync`) and a concurrent
-    /// allocator on another CPU must observe a unique index. With
-    /// translation *off* that very `fetch_add` is the defect: its
-    /// LDXR/STXR exclusives target Device-nGnRnE memory, where the
-    /// BCM2711 never grants the exclusive monitor, so the retry loop
-    /// spins forever on real silicon (QEMU's monitor always succeeds,
-    /// which kept every emulated boot green). The MMU-off discipline is
-    /// therefore a plain load + store — and that is sound because
-    /// MMU-off allocation is single-threaded by construction: only the
-    /// pre-SMP boot CPU runs Rust with translation disabled and a pool
-    /// in hand (a secondary core allocates nothing before it switches
-    /// to the already-built boot space).
-    fn alloc_with(&self, translation_live: bool) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
-        let idx = if translation_live {
-            let idx = self.used.fetch_add(1, Ordering::SeqCst);
-            if idx >= CAPACITY {
-                // Park the counter at the cap so a pathological number
-                // of post-exhaustion calls cannot wrap it.
-                self.used.store(CAPACITY, Ordering::SeqCst);
-            }
-            idx
-        } else {
-            let idx = self.used.load(Ordering::SeqCst);
-            if idx < CAPACITY {
-                self.used.store(idx + 1, Ordering::SeqCst);
-            }
-            idx
-        };
+        let idx = self.used.fetch_add(1, Ordering::SeqCst);
         if idx >= CAPACITY {
+            // Park the counter at the cap so a pathological number of
+            // post-exhaustion calls cannot wrap it.
+            self.used.store(CAPACITY, Ordering::SeqCst);
             return None;
         }
-        // SAFETY: the monotonic counter means this index is owned by
-        // *this* call uniquely — via atomic `fetch_add` when translation
-        // is live, and via the single-threaded pre-SMP boot-CPU
-        // invariant documented above when it is not — so the returned
-        // `&'static mut` never aliases another.
+        // SAFETY: the monotonic counter hands this index to this call alone,
+        // so the returned `&'static mut` never aliases another.
         let cell = &self.storage[idx];
         let table_ref: &'static mut Table = unsafe { &mut *cell.get() };
         Some(&mut table_ref.0)
     }
-
-    /// Clean+invalidate every data-cache line of the pool's backing
-    /// storage to the point of coherency (`dc civac`, line size decoded
-    /// from the live `CTR_EL0` by [`dcache_line_bytes`]).
-    ///
-    /// The boot path calls this once, after the identity tables are
-    /// written and before `AddressSpace::switch` enables the MMU: the
-    /// tables were written with the data cache **off** (every MMU-off
-    /// store is Device-nGnRnE, straight to DRAM), but the walker reads
-    /// them back *cacheable* (`TCR_VALUE` IRGN0/ORGN0) the instant
-    /// translation enables — any stale line the firmware left over the
-    /// pool's addresses would then shadow the real descriptors on real
-    /// silicon (cache-less QEMU cannot show it). Fail-closed: the whole fixed-size
-    /// pool is swept (one pass over 64 KiB at boot — off every hot
-    /// path), not just the slots handed out so far.
-    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-    pub fn clean_invalidate_to_poc(&self) {
-        clean_invalidate_range_to_poc(
-            self.storage.as_ptr() as u64,
-            core::mem::size_of_val(&self.storage) as u64,
-        );
-    }
-
-    /// Host twin of the freestanding clean+invalidate: host builds have
-    /// no hardware cache to maintain, so this is a no-op (mirrors
-    /// `publish_table_update`).
-    #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-    pub fn clean_invalidate_to_poc(&self) {}
 }
 
 impl<const CAPACITY: usize> PageTableFrames for PageTablePool<CAPACITY> {
     fn alloc_table(&self) -> Option<TableFrame> {
         let entries = self.alloc()?;
-        // The kernel's own memory is identity-mapped (MMU-off boot then a
-        // gigapage identity map), so a table's virtual address is its
-        // physical address (`plans/WIRING.md` W5b-3 —
-        // the bootstrap frame source).
-        let phys = phys_of(entries.as_ptr() as u64);
+        let phys = image_phys(entries.as_ptr() as u64);
         Some(TableFrame { phys, entries })
     }
 
@@ -1374,7 +1159,7 @@ impl<const CAPACITY: usize> PageTableFrames for PageTablePool<CAPACITY> {
         // Recovered from the slot the pool handed `phys` out of, so the
         // pointer keeps its storage's provenance; a `phys` from anywhere
         // else names no slot and the walk asking for it fails closed.
-        let index = pool_slot_of(phys_of(self.storage.as_ptr() as u64), CAPACITY, phys)?;
+        let index = pool_slot_of(image_phys(self.storage.as_ptr() as u64), CAPACITY, phys)?;
         Some(self.storage[index].get().cast())
     }
 
@@ -1388,16 +1173,9 @@ impl<const CAPACITY: usize> PageTableFrames for PageTablePool<CAPACITY> {
     }
 }
 
-/// A stage-1 address space built on a freshly-allocated L1 root table.
-///
-/// The constructor identity-maps the low `gigabytes` GiB of physical
-/// memory with 1 GiB L1 block descriptors so the kernel's own
-/// code/stack/data and the board's MMIO remain reachable whichever
-/// [`AddressSpace`] is active. The gigapages named by the configured
-/// Device mask ([`configure_device_gigapages`] — by default gigapage 0,
-/// which holds the `virt` board's PL011 UART and GIC) are mapped
-/// Device; the rest Normal. [`Self::map_4k`] adds the finer-grained
-/// mappings the memory-isolation test diverges on.
+/// A stage-1 address space built on a freshly-allocated L1 root table: a
+/// process's `TTBR0_EL1` regime, which carries nothing of the kernel's, or a
+/// handle onto the kernel remap window.
 pub struct AddressSpace {
     root_phys: u64,
     /// The frame source the page-table walk allocates intermediate
@@ -1414,49 +1192,18 @@ pub struct AddressSpace {
 }
 
 impl AddressSpace {
-    /// Build a new address space identity-mapping `[0, gigabytes GiB)`
-    /// with 1 GiB L1 block descriptors.
-    ///
-    /// `gigabytes` must be `1..=512` (the number of L1 slots). On the
-    /// QEMU `virt` board two gigapages cover the device MMIO window and
-    /// the RAM base at `0x4000_0000`.
+    /// Build an empty process root: the kernel regime lives in `TTBR1_EL1`,
+    /// which every CPU carries, so a process root holds only what the
+    /// process maps.
     ///
     /// # Errors
     ///
-    /// Returns `None` if `gigabytes` is out of range or the page-table
-    /// pool is exhausted.
-    pub fn new_identity_gigapages(
-        frames: &'static dyn PageTableFrames,
-        gigabytes: usize,
-    ) -> Option<Self> {
-        if gigabytes == 0 || gigabytes > ENTRIES_PER_TABLE {
-            return None;
-        }
+    /// Returns `None` if the frame source cannot supply the root table.
+    pub fn new_user(frames: &'static dyn PageTableFrames) -> Option<Self> {
         let TableFrame {
             phys: root_phys,
-            entries: root,
+            entries: _,
         } = frames.alloc_table()?;
-        // The board-configured Device mask says which gigapages hold MMIO
-        // (`virt`: GiB 0; Pi 4: GiB 3); the kernel-extent mask says which
-        // hold memory the kernel addresses physically. A slot in neither
-        // stays *invalid*: unbacked address space must fault, never invite
-        // speculation. The masks are read one word per slot so the
-        // constructor stays FP/SIMD-free — it runs before some callers
-        // enable `CPACR_EL1.FPEN`.
-        for (i, slot) in root.iter_mut().take(gigabytes).enumerate() {
-            let paddr = (i as u64) << 30;
-            let Some(leaf) = identity_gigapage_leaf(
-                configured_gigapage_is_device(i),
-                configured_gigapage_is_kernel(i),
-            ) else {
-                continue;
-            };
-            *slot = descriptor(paddr, leaf);
-        }
-        // Nothing of the kernel's is installed here: the direct physical
-        // map and the remap window live in the `TTBR1_EL1` regime, which
-        // every CPU carries permanently, so a root's whole content is the
-        // user regime's.
         Some(Self {
             root_phys,
             frames,
@@ -1516,31 +1263,14 @@ impl AddressSpace {
             .filter(|leaf| leaf.shift == table_shift(LEVELS))
     }
 
-    /// Map `paddr` at `vaddr` with 4 KiB granularity as Normal memory
-    /// (kernel-only, EL1 RW, execute-never at EL0).
-    ///
-    /// `vaddr` and `paddr` must be page-aligned. Returns `None` on
-    /// page-table-pool exhaustion or if the walk meets an existing block
-    /// it would have to shatter — the isolation test maps outside the
-    /// identity-mapped gigapages so that path is not exercised.
-    pub fn map_4k(
-        &mut self,
-        frames: &'static dyn PageTableFrames,
-        vaddr: u64,
-        paddr: u64,
-    ) -> Option<()> {
-        self.map_4k_with_attrs(frames, vaddr, paddr, normal_leaf_attrs(false))
-    }
-
     /// Map `paddr` at `vaddr` with 4 KiB granularity using the supplied
     /// page-leaf `leaf_attrs` (e.g. [`el0_code_leaf_attrs`] /
-    /// [`el0_data_leaf_attrs`] for an EL0 user mapping). `map_4k` is this
-    /// with the kernel-only [`normal_leaf_attrs`], so there is one walk
-    /// implementation.
+    /// [`el0_data_leaf_attrs`] for an EL0 user mapping): the port's one
+    /// 4 KiB walk.
     ///
-    /// `vaddr` and `paddr` must be page-aligned. Returns `None` on
-    /// page-table-pool exhaustion or if the walk meets an existing block
-    /// it would have to shatter.
+    /// `vaddr` and `paddr` must be page-aligned. Returns `None` for a leaf
+    /// both writable and executable, on page-table-pool exhaustion, or if
+    /// the walk meets an existing block it would have to shatter.
     pub fn map_4k_with_attrs(
         &mut self,
         frames: &'static dyn PageTableFrames,
@@ -1551,6 +1281,7 @@ impl AddressSpace {
         if (vaddr & (PAGE_SIZE as u64 - 1)) != 0
             || (paddr & (PAGE_SIZE as u64 - 1)) != 0
             || !self.regime.holds(vaddr)
+            || writable_and_executable(leaf_attrs)
         {
             return None;
         }
@@ -1576,8 +1307,9 @@ impl AddressSpace {
     /// vocabulary, decoded once at the HAL boundary). W^X is the default: an executable user page is mapped read-only
     /// ([`el0_code_leaf_attrs`]); a writable user page is execute-never
     /// ([`el0_data_leaf_attrs`]); a read-only user page is execute-never
-    /// ([`el0_rodata_leaf_attrs`]). A kernel page uses the EL1 RW,
-    /// EL0-execute-never [`normal_leaf_attrs`]; a kernel Device page uses
+    /// ([`el0_rodata_leaf_attrs`]). A kernel page is read/write and executes
+    /// nowhere, or, asked to execute, read-only and executable at EL1 alone
+    /// ([`KernelAccess`]); a kernel Device page uses
     /// [`device_leaf_attrs`], and an **EL0** Device page (a user-space
     /// driver's `mmio_map` window, `DEVICE | USER`) uses the EL0-accessible
     /// [`el0_device_leaf_attrs`] — otherwise the driver would take a
@@ -1626,157 +1358,20 @@ impl AddressSpace {
             } else {
                 el0_rodata_leaf_attrs()
             }
+        } else if flags.contains(PageFlags::EXEC) {
+            KernelAccess::Execute.leaf(false)
         } else {
-            normal_leaf_attrs(false)
+            KernelAccess::Write.leaf(false)
         }
     }
-
-    /// Activate this address space: program `MAIR_EL1`, `TCR_EL1`, both
-    /// translation roots, and install the full known MMU-on `SCTLR_EL1`
-    /// ([`crate::protection::sctlr_mmu_on`]: translation plus caches), then
-    /// synchronise.
-    ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that this address space identity-maps
-    /// the currently-executing `pc`, the current stack, and every MMIO
-    /// region the code touches before the next `switch` — otherwise the
-    /// CPU faults on the next fetch/access.
-    /// [`Self::new_identity_gigapages`] upholds that by identity-mapping
-    /// the kernel's gigapages (RAM Normal, MMIO Device per the configured
-    /// [`configure_device_gigapages`] mask).
-    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-    pub unsafe fn switch(&self) {
-        // SAFETY: the caller asserts the new mappings cover `pc`, `sp`,
-        // and MMIO. Programming MAIR/TCR/TTBR0 then writing `SCTLR_EL1`
-        // is the documented stage-1 enable sequence; the first barrier is
-        // `dsb sy` — not `ish` — because the translation tables were
-        // written with the MMU off, where every store is Device-nGnRnE
-        // and therefore ordered in the *full-system* domain (an
-        // inner-shareable barrier is not architecturally guaranteed to
-        // order them ahead of the walker's first cacheable read; QEMU
-        // cannot show the difference). The `tlbi vmalle1`
-        // + `dsb`/`isb` flush stale translations, `ic iallu` starts the
-        // instruction cache invalid before [`SCTLR_MMU_ON`] enables it,
-        // and the *whole-register* write installs a fully known value —
-        // an OR of `M` into the live register would carry the
-        // architecturally UNKNOWN EL1 reset bits (`WXN`, `EE`, …) into
-        // translated execution, which hangs real silicon (see
-        // [`SCTLR_MMU_OFF`]).
-        let translation = unsafe { program_stage1_translation(self.root_phys) };
-        // The first fully-configured space activated on the metal is the
-        // permanent boot space: publish its root, set-once, as the park
-        // root teardown and the dispatcher's suspend path re-install so a
-        // dead user root is never left active (see [`park_kernel_root`]).
-        // Publication must follow the MMU-on transition: the atomic RMW's
-        // exclusive accesses are not guaranteed on Device-nGnRnE memory.
-        translation.publish_park_root(&PARK_ROOT, self.root_phys);
-    }
 }
 
-/// Proof that the calling CPU completed the stage-1 MMU-on sequence.
-///
-/// Operations that require cacheable Normal memory consume this witness so
-/// they cannot be placed in the MMU-off prefix by accident.
-#[cfg(any(all(target_arch = "aarch64", target_os = "none"), test))]
-struct Stage1TranslationEnabled;
-
-#[cfg(any(all(target_arch = "aarch64", target_os = "none"), test))]
-impl Stage1TranslationEnabled {
-    /// Publish the permanent kernel root once translated execution is live,
-    /// then clean the published word to the point of coherency.
-    ///
-    /// The store is cacheable — this runs with the MMU and caches on — but
-    /// its sole other reader, [`adopt_boot_translation`] on a freshly
-    /// released secondary, loads it with the MMU (and cache) **off**, i.e.
-    /// non-cacheably straight from DRAM. Without the sweep the boot CPU's
-    /// write-back store would linger in this core's cache and never reach
-    /// DRAM, so every secondary would read a stale zero and park with "no
-    /// boot root" — cache-less QEMU cannot show it, real silicon does
-    /// deterministically. `dc civac` pushes the value to DRAM (and drops the
-    /// cached copy; the boot CPU's own later reads re-fetch the same value)
-    /// so the non-cacheable reader observes it. The release words the same
-    /// secondary later polls are swept identically in
-    /// [`crate::smp::start_secondary_spintable`].
-    fn publish_park_root(self, park_root: &ParkRoot, root_phys: u64) {
-        let Stage1TranslationEnabled = self;
-        park_root.publish(root_phys);
-        clean_invalidate_range_to_poc(
-            core::ptr::from_ref::<AtomicU64>(park_root.word()) as u64,
-            core::mem::size_of::<AtomicU64>() as u64,
-        );
-    }
-}
-
-/// Program the calling CPU's stage-1 translation registers — both regimes
-/// — and enable the MMU + caches with the full known MMU-on `SCTLR_EL1`
-/// ([`crate::protection::sctlr_mmu_on`]): the one enable sequence
-/// [`AddressSpace::switch`] (boot CPU) and [`adopt_boot_translation`]
-/// (secondary CPUs) share.
-///
-/// `TTBR1_EL1` is written here and nowhere else, because the kernel regime
-/// is one global root every CPU shares for the image's lifetime: a later
-/// switch between user spaces reprograms `TTBR0_EL1` alone. Programming it
-/// in the same sequence that clears `EPD1` is what keeps the enable atomic
-/// — a walk of the kernel regime can never see the architecturally UNKNOWN
-/// reset value of `TTBR1_EL1`.
-///
-/// # Safety
-///
-/// The tables rooted at `root_phys` must identity-map the caller's `pc`,
-/// stack, and every MMIO region touched before the next switch, and must
-/// be observable at the point of coherency (written MMU-off, or cleaned
-/// with [`clean_invalidate_range_to_poc`]). Runs with interrupts masked
-/// on the calling CPU. Returns only after the trailing `isb` makes the
-/// translated execution regime live.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
-unsafe fn program_stage1_translation(root_phys: u64) -> Stage1TranslationEnabled {
-    // SAFETY: the caller asserts the mapping/coherency contract above.
-    // Programming MAIR/TCR/TTBR0 then writing `SCTLR_EL1` is the
-    // documented stage-1 enable sequence; the first barrier is `dsb sy`
-    // — not `ish` — because tables written with the MMU off are ordered
-    // in the *full-system* domain (an inner-shareable barrier is not
-    // architecturally guaranteed to order them ahead of the walker's
-    // first cacheable read; QEMU cannot show the difference). The
-    // `tlbi vmalle1` + `dsb`/`isb` flush stale translations, `ic iallu`
-    // starts the instruction cache invalid before [`SCTLR_MMU_ON`]
-    // enables it, and the *whole-register* write installs a fully known
-    // value — an OR of `M` into the live register would carry the
-    // architecturally UNKNOWN EL1 reset bits (`WXN`, `EE`, …) into
-    // translated execution, which hangs real silicon (see
-    // [`SCTLR_MMU_OFF`]).
-    unsafe {
-        core::arch::asm!(
-            "msr MAIR_EL1, {mair}",
-            "msr TCR_EL1, {tcr}",
-            "msr TTBR0_EL1, {ttbr}",
-            "msr TTBR1_EL1, {ttbr1}",
-            "dsb sy",
-            "tlbi vmalle1",
-            "ic iallu",
-            "dsb ish",
-            "isb",
-            "msr SCTLR_EL1, {sctlr}",
-            "isb",
-            mair = in(reg) MAIR_VALUE,
-            tcr = in(reg) TCR_VALUE,
-            ttbr = in(reg) root_phys,
-            ttbr1 = in(reg) kernel_root_phys(),
-            sctlr = in(reg) crate::protection::sctlr_mmu_on(crate::protection::pan_in_force()),
-            options(nostack, preserves_flags),
-        );
-    }
-    Stage1TranslationEnabled
-}
-
-// The `_invalidate_local_dcache_to_poc` leaf routine: invalidate the
-// calling CPU's entire local data/unified cache, all levels to the Level
-// of Coherence, by set/way (`dc isw`), then `dsb sy; isb`. Called by the
-// `invalidate_local_dcache_to_poc` wrapper below (which carries the
-// rationale and the safety contract). Implemented in assembly so the
-// set/way loop's register discipline is explicit: it uses only
-// caller-saved scratch (`x0`–`x11`), touches no memory, and never uses
-// the stack, so it is a well-formed leaf routine.
+// Invalidate the calling CPU's whole local data cache, every level to the
+// point of coherency, by set/way (`dc isw`), then `dsb sy; isb`: what a
+// secondary does before turning translation on, its caches in an UNKNOWN
+// state (`smp.s`). Invalidate, never clean, or a stale line would be written
+// over the tables. A leaf routine using only x0–x11 and no stack, called with
+// the MMU off.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 core::arch::global_asm!(
     ".section .text",
@@ -1824,83 +1419,6 @@ core::arch::global_asm!(
     "  isb",
     "  ret",
 );
-
-/// Invalidate this CPU's local data cache to the Level of Coherence
-/// (see the `_invalidate_local_dcache_to_poc` routine above for why
-/// invalidate, not clean).
-///
-/// # Safety
-///
-/// Must run with the MMU and the data cache **off** (SCTLR.M=0, C=0), as
-/// on a freshly-released secondary before [`adopt_boot_translation`]: it
-/// discards the cache contents without writeback, so it is sound only
-/// when no cache line holds live dirty data — which holds at that point
-/// (the core has made no cacheable access yet).
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
-unsafe fn invalidate_local_dcache_to_poc() {
-    extern "C" {
-        fn _invalidate_local_dcache_to_poc();
-    }
-    // SAFETY: a leaf assembly routine that only issues set/way cache
-    // invalidations and barriers; it clobbers caller-saved scratch, uses
-    // no stack, and returns. The MMU/cache-off precondition is the
-    // caller's contract.
-    unsafe {
-        _invalidate_local_dcache_to_poc();
-    }
-}
-
-/// Enable the MMU on a freshly-started secondary core by adopting the
-/// boot address space whose root [`AddressSpace::switch`] published
-/// (`PARK_ROOT`) — a secondary allocates no tables of its own; it joins
-/// the identity window the boot CPU already runs on, and the kernel
-/// regime, whose root is the same global table on every CPU.
-///
-/// Returns `false`, changing nothing, when no boot root has been
-/// published yet: a secondary started before the boot CPU enabled its
-/// MMU has no coherent tables to adopt, so it must park rather than run
-/// MMU-off into the allocator's cacheable-memory requirements (fail
-/// closed).
-///
-/// # Safety
-///
-/// Must be called on a secondary core with the MMU off and interrupts
-/// masked, before its first atomic read-modify-write access (LDXR/STXR
-/// exclusives are unreliable on MMU-off Device-typed DRAM — the boot
-/// path's documented constraint). The published boot tables identity-map
-/// the kernel image, the secondary stacks, and the board MMIO window for
-/// the image's lifetime, which upholds [`program_stage1_translation`]'s
-/// mapping contract; the kernel root it also programs is a static of this
-/// module, which no sweep can move.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub unsafe fn adopt_boot_translation() -> bool {
-    let Some(root) = PARK_ROOT.published() else {
-        return false;
-    };
-    // A secondary core's caches are in the architecturally-UNKNOWN
-    // power-on state: it may hold stale lines (from firmware or a
-    // previous life) over the physical addresses TAIRiX now uses for the
-    // boot page tables and this core's stack. Enabling the data cache
-    // with those lines present lets them shadow DRAM, so the first
-    // cacheable access after the MMU comes on — the table walk or a stack
-    // access — intermittently reads garbage and the core faults with no
-    // vectors installed (the real Pi 4 symptom: the last-released core
-    // deterministically-then-intermittently never checks in). Invalidate
-    // this core's local cache to the point of coherency first — discard,
-    // never clean, or the garbage would be written back over the live
-    // tables. The boot CPU needs no equivalent: firmware hands it clean
-    // caches before the kernel runs.
-    // SAFETY: runs on a secondary with the MMU and cache off (the
-    // trampoline established `SCTLR_MMU_OFF`) and before any cacheable
-    // access, so no live dirty line is discarded.
-    unsafe { invalidate_local_dcache_to_poc() };
-    // SAFETY: the caller upholds the MMU-off/interrupts-masked contract;
-    // the published root is the boot space's, whose tables live (and
-    // stay coherent — they were cleaned to PoC before the boot switch)
-    // for the image's lifetime.
-    unsafe { program_stage1_translation(root) };
-    true
-}
 
 impl MmuAddressSpace for AddressSpace {
     fn map_page(&mut self, vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), MapError> {
@@ -1988,17 +1506,16 @@ impl MmuAddressSpace for AddressSpace {
     }
 
     unsafe fn activate(&self) {
-        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-        {
-            // SAFETY: forwards to the gated stage-1 enable primitive; the
-            // caller upholds the `MmuAddressSpace::activate` contract (this
-            // space maps the current `pc`/`sp`/MMIO), which is exactly
-            // `AddressSpace::switch`'s contract.
-            unsafe { self.switch() };
-        }
-        #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-        {
-            unreachable!("stage-1 activation is only meaningful on the aarch64 bare-metal target")
+        // SAFETY: the kernel lives in `TTBR1_EL1`, which loading a process
+        // root under the boot ASID leaves untouched.
+        unsafe {
+            activate_user_root(
+                self.root_phys,
+                AddressTag {
+                    tag: 0,
+                    flush: true,
+                },
+            );
         }
     }
 
@@ -2029,11 +1546,10 @@ impl MmuAddressSpace for AddressSpace {
         };
         // SAFETY: every phys `child_of` yields was written by
         // `ensure_child` from a `TableFrame` of `self.frames`, so it names
-        // a live table this hierarchy owns and the source can reach — an
-        // identity gigapage is a block, which `child_of` never descends
-        // into; the guards above uphold the not-active contract the caller
-        // asserts, and `self` is borrowed mutably so no other reference
-        // walks the tables.
+        // a live table this hierarchy owns and the source can reach; the
+        // guards above uphold the not-active contract the caller asserts,
+        // and `self` is borrowed mutably so no other reference walks the
+        // tables.
         unsafe {
             reclaim_hierarchy(self.root_phys, frames, &child_of);
         }
@@ -2184,22 +1700,30 @@ pub(crate) fn invalidate_all_inner_shareable() {
     }
 }
 
-/// The boot space's root, which [`park_kernel_root`] parks on.
+/// The root [`park_kernel_root`] parks on: `EMPTY_ROOT`, once the kernel
+/// root is entered.
 static PARK_ROOT: ParkRoot = ParkRoot::new();
 
-/// Park the calling CPU's low translation regime on the published boot
-/// kernel root under ASID `0`, discarding that ASID's entries first when
-/// `flush`, so no user space's root remains active after its task suspends
-/// or exits. Returns `false`, changing nothing, when no park root has been
-/// published yet (fail closed).
+/// The root [`park_kernel_root`] parks on, or `None` before the kernel root
+/// is entered.
+#[must_use]
+pub fn park_root() -> Option<u64> {
+    PARK_ROOT.published()
+}
+
+/// Park the calling CPU's low translation regime on the empty root under
+/// ASID `0`, discarding that ASID's entries first when `flush`, so no user
+/// space's root remains active after its task suspends or exits — and, on a
+/// CPU fresh from its trampoline, nor the identity map's page. Returns
+/// `false`, changing nothing, before the kernel root is entered (fail
+/// closed).
 ///
 /// The dispatcher calls this after every switch-back from a user task;
 /// address-space teardown and the machine takeover call it, flushing,
 /// before dismantling a root that is somehow still active.
 pub fn park_kernel_root(flush: bool) -> bool {
-    // SAFETY: the published root is the boot space's, which identity-maps
-    // the kernel window and the board MMIO for the image's lifetime —
-    // exactly `activate_user_root`'s contract (inert on the host, where
+    // SAFETY: the published root maps nothing, and the kernel runs from
+    // `TTBR1_EL1` — `activate_user_root`'s contract (inert on the host, where
     // the root is never published anyway).
     unsafe { PARK_ROOT.park(flush, activate_user_root) }
 }
@@ -2433,20 +1957,14 @@ unsafe fn leaf_in<'a>(
 /// every other ASID stay in the TLB unseen, and the space they belong to
 /// finds them again when it next runs.
 ///
-/// Unlike [`AddressSpace::switch`] this does **not** touch `MAIR_EL1` /
-/// `TCR_EL1` / `TTBR1_EL1` / `SCTLR_EL1.M`: the MMU is already on with the
-/// boot translation controls in force, and only the low (`TTBR0_EL1`)
-/// regime changes between user spaces.
+/// Only the low (`TTBR0_EL1`) regime changes between user spaces: the
+/// kernel runs from `TTBR1_EL1`, which every CPU loaded once.
 ///
 /// # Safety
 ///
-/// The MMU must already be enabled, and the L1 table at `root_phys` must
-/// map the currently-executing kernel `pc`, `sp`, and the MMIO the code
-/// touches identically to the outgoing root — every TAIRiX user space
-/// identity-maps the kernel's own extents and the board MMIO, so this
-/// holds for any task root, but a `root_phys` that does not faults the CPU
-/// on its next access. The kernel regime is untouched and so cannot be
-/// left behind by a switch.
+/// Translation is on, the caller runs from the kernel regime, and
+/// `root_phys` is an L1 table of this port's that stays allocated while it
+/// is loaded.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub unsafe fn activate_user_root(root_phys: u64, tag: AddressTag) {
     let ttbr = ttbr0(root_phys, tag.tag);
@@ -2536,6 +2054,15 @@ pub fn translate_el1(addr: u64, write: bool) -> u64 {
     par
 }
 
+/// The physical address the kernel's `virt` translates to under the active
+/// regimes, or `None` where nothing maps it for an EL1 read.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[must_use]
+pub fn kernel_phys(virt: u64) -> Option<u64> {
+    let par = translate_el1(virt, false);
+    (!par_faulted(par)).then(|| par_phys(par, virt))
+}
+
 /// Read the raw translation descriptors the active root holds for `addr`,
 /// root-downward, into `out`, returning how many were read.
 ///
@@ -2547,10 +2074,7 @@ pub fn translate_el1(addr: u64, write: bool) -> u64 {
 /// clobbered or reused, which is a different and worse defect.
 ///
 /// A table is a *physical* address, so it is read through the direct
-/// physical map rather than as though it were its own virtual address: the
-/// identity window covers only what the kernel addresses physically, and a
-/// page table is drawn from anywhere in RAM. A table the map does not cover
-/// ends the walk. Every table page is additionally proved translatable with
+/// physical map. A table the map does not cover ends the walk. Every table page is additionally proved translatable with
 /// the non-faulting probe before it is read, so a clobbered or unmapped
 /// table ends the walk instead of faulting inside the fault handler. The
 /// walk also stops at an invalid entry or a leaf, neither of which names a
@@ -2611,10 +2135,8 @@ pub const fn par_faulted(par: u64) -> bool {
 }
 
 /// Whether an EL1 load from `addr` would succeed: it translates for EL1 and,
-/// while PAN is in force under stage-1 translation, EL0 cannot reach it.
-/// `AT S1E1R` ignores PAN, so a page EL0 may access would otherwise answer
-/// readable and then fault. With translation off no page is EL0's, and
-/// `AT S1E0R` would answer every address reachable.
+/// while PAN is in force, EL0 cannot reach it. `AT S1E1R` ignores PAN, so a
+/// page EL0 may access would otherwise answer readable and then fault.
 ///
 /// Translates only, like [`translate_el1`], so it cannot fault.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -2623,7 +2145,7 @@ pub fn el1_may_read(addr: u64) -> bool {
     if par_faulted(translate_el1(addr, false)) {
         return false;
     }
-    if !crate::protection::pan_in_force() || !translation_enabled() {
+    if !crate::protection::pan_in_force() {
         return true;
     }
     let par: u64;
@@ -2672,13 +2194,35 @@ fn ensure_child<'a>(
     }
 }
 
-/// Physical address of the kernel-owned virtual address `virt`.
+/// Whether the leaf `desc` lets some level both write and execute its page:
+/// EL1 writes every writable page, EL0 those it may reach.
+const fn writable_and_executable(desc: u64) -> bool {
+    let ap = desc & (0b11 << 6);
+    let writable = ap == attrs::AP_RW_EL1 || ap == attrs::AP_RW_EL0;
+    let el0_reaches = ap == attrs::AP_RW_EL0 || ap == attrs::AP_RO_EL0;
+    let executable = desc & attrs::PXN == 0 || (el0_reaches && desc & attrs::UXN == 0);
+    writable && executable
+}
+
+/// Write `SCTLR_EL1` whole: translation and caches on, with `SPAN` as the
+/// protections the calling CPU is held to say ([`crate::protection`]). The
+/// trampolines turn translation on before the protections are settled.
 ///
-/// Identity-mapped: virtual == physical for everything the kernel owns,
-/// because the boot trampoline runs with the MMU off and the gigapage
-/// identity map preserves it.
-const fn phys_of(virt: u64) -> u64 {
-    virt
+/// # Safety
+///
+/// Translation is on, and the calling CPU holds what it settled.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub(crate) unsafe fn hold_translation_controls() {
+    // SAFETY: the value differs from the live one in `SPAN` at most, which
+    // only decides whether an exception taken to EL1 sets PAN.
+    unsafe {
+        core::arch::asm!(
+            "msr sctlr_el1, {sctlr}",
+            "isb",
+            sctlr = in(reg) crate::protection::sctlr_mmu_on(crate::protection::pan_in_force()),
+            options(nostack, preserves_flags),
+        );
+    }
 }
 
 /// Decode a stage-1 leaf (block or page) descriptor's attributes back

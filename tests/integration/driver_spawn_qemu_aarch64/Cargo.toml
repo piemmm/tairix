@@ -19,8 +19,8 @@ workspace = true
 # position-independent by `build.rs` and converted to an `rxe` blob
 # (`tairix_itest_harness::elf2rxe`) carrying the kernel's compiled-in syscall
 # CFI tag. On boot the test reads the GICv2 base + timer rate from the
-# embedded `virt` DTB, enables the identity MMU + EL1 vectors, builds a live
-# FrameAllocator, publishes the reply Port (send-gated on a driver-class
+# embedded `virt` DTB, brings up the GIC, builds a live FrameAllocator,
+# publishes the reply Port (send-gated on a driver-class
 # capability) into a live PortRegistry, installs the production
 # KernelDispatchHook through a DispatchCallbackSlot, spawns the stub through
 # the production InitSpawnCtx::spawn_driver_process seam (KernelInitSpawner +

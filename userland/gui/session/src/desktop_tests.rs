@@ -3219,10 +3219,11 @@ fn a_carried_icon_repaints_what_it_leaves_and_covers_and_keeps_nothing_yet() {
 }
 
 /// Icons carried over a window are described for the seat by their paths, and
-/// once it takes them they rest where they stood and follow the pointer no
-/// further here, nothing put down and nothing kept.
+/// once lent to it they leave the desktop's layer until the drag ends: no
+/// picture is left where they stood, nothing here follows the pointer, and a
+/// drag that ends elsewhere has them stand where they stood again.
 #[test]
-fn icons_handed_to_the_seat_rest_where_they_stood_and_follow_no_further() {
+fn icons_lent_to_the_seat_leave_the_desktop_until_the_drag_ends() {
     let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
     let layout = layout_of(&desktop);
     let rest = bounds(&desktop, &layout, 0);
@@ -3238,16 +3239,15 @@ fn icons_handed_to_the_seat_rest_where_they_stood_and_follow_no_further() {
     assert_eq!(cargo.shown.count(), 1);
     assert_eq!(cargo.shown.first().as_str(), "a.txt");
     let carried = bounds(&desktop, &layout, 0);
-    let yielded = damage_of(|damage| desktop.yield_carry(&layout, damage));
-    assert!(
-        yielded.intersects(carried) && yielded.intersects(rest),
-        "the ground it covered and the ground it goes back to"
-    );
+    let lent = damage_of(|damage| desktop.lend_carry(&layout, damage));
+    assert!(lent.intersects(carried), "the ground it covered");
+    assert!(!lent.intersects(rest), "and no picture where it stood");
     assert_eq!(
-        bounds(&desktop, &layout, 0),
-        rest,
-        "it rests where it stood"
+        desktop.bounds_for_test(&layout, 0),
+        None,
+        "drawn nowhere on the desktop while the seat carries it"
     );
+    assert_eq!(bounds(&desktop, &layout, 1), cell(&layout, 1));
     assert!(
         !desktop.carries_to(to, Scale::ONE),
         "the seat carries it now"
@@ -3261,8 +3261,51 @@ fn icons_handed_to_the_seat_rest_where_they_stood_and_follow_no_further() {
         .is_empty(),
         "nothing here follows the pointer"
     );
+    let back = damage_of(|damage| desktop.restore_lent(&layout, damage));
+    assert!(back.intersects(rest));
+    assert_eq!(bounds(&desktop, &layout, 0), rest, "back where it stood");
+    assert!(desktop.take_arrangement_edits().is_empty());
+}
+
+/// Let go over a window in the batch that reached it, a carried press is let
+/// go: its icons stand where they stood.
+#[test]
+fn a_carry_let_go_before_the_seat_takes_it_stands_where_it_stood() {
+    let mut desktop = desktop_of(vec![file("a.txt")]);
+    let layout = layout_of(&desktop);
+    let rest = bounds(&desktop, &layout, 0);
+    carry_held(&mut desktop, &layout, 0, (300, 200));
+    let carried = bounds(&desktop, &layout, 0);
+    let cancelled = damage_of(|damage| desktop.cancel_carry(&layout, damage));
+    assert!(cancelled.intersects(carried) && cancelled.intersects(rest));
     assert_eq!(bounds(&desktop, &layout, 0), rest);
     assert!(desktop.take_arrangement_edits().is_empty());
+}
+
+/// A press on the desktop proves the seat carries none of its icons, so one
+/// still lent stands where it stood again.
+#[test]
+fn a_press_brings_back_icons_still_lent() {
+    let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
+    let layout = layout_of(&desktop);
+    let rest = bounds(&desktop, &layout, 0);
+    carry_held(&mut desktop, &layout, 0, (300, 200));
+    desktop.lend_carry(&layout, &mut Region::new());
+    let elsewhere = cell(&layout, 1).center();
+    let pressed = damage_of(|damage| {
+        desktop.press(
+            elsewhere,
+            tairix_input::Modifiers::default(),
+            &layout,
+            Scale::ONE,
+            &theme(),
+            0,
+            &[],
+            damage,
+        );
+    });
+    assert!(pressed.intersects(rest));
+    assert_eq!(bounds(&desktop, &layout, 0), rest);
 }
 
 /// A press still within the drag slop is not yet a drag, so it is never
@@ -3320,19 +3363,18 @@ fn a_selection_is_handed_over_with_the_pressed_icon_first() {
     assert_eq!(cargo.shown.first().as_str(), "c.txt");
 }
 
-/// Brought back and let go on the desktop, handed-over icons are put down
-/// exactly as a press carried to that point would put them, and kept there.
+/// Brought back and let go on the desktop, lent icons are put down exactly as
+/// a press carried to that point would put them, and kept there.
 #[test]
-fn handed_over_icons_brought_back_are_put_down_where_let_go() {
+fn lent_icons_brought_back_are_put_down_where_let_go() {
     let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
     let layout = layout_of(&desktop);
     let was = bounds(&desktop, &layout, 0);
-    let to = carry_held(&mut desktop, &layout, 0, (300, 200));
-    let cargo = desktop.carried_cargo(to, &layout).expect("described");
-    desktop.yield_carry(&layout, &mut Region::new());
+    carry_held(&mut desktop, &layout, 0, (300, 200));
+    desktop.lend_carry(&layout, &mut Region::new());
     let at = Point::new(was.center().x + 237, was.center().y + 101);
     assert_eq!(
-        desktop.put_down_lift(&cargo.lift, at, &layout, &mut Region::new()),
+        desktop.put_down_lent(at, &layout, &mut Region::new()),
         DesktopOutcome::ignored()
     );
     let now = bounds(&desktop, &layout, 0);
@@ -3345,15 +3387,15 @@ fn handed_over_icons_brought_back_are_put_down_where_let_go() {
     assert_eq!(desktop.take_arrangement_edits().len(), 1, "and kept there");
 }
 
-/// The icon a handed-over press leads is found again by its name, so a folder
-/// that changed meanwhile puts down the icon carried and moves no other.
+/// A lent press follows its icon through a change to the folder, stays off
+/// the desktop meanwhile, and puts down the icon carried and moves no other.
 #[test]
-fn a_handed_over_press_is_put_down_by_name_after_the_folder_changes() {
+fn a_lent_press_follows_its_icon_through_a_change_to_the_folder() {
     let mut desktop = desktop_of(vec![file("b.txt"), file("c.txt")]);
     let layout = layout_of(&desktop);
-    let to = carry_held(&mut desktop, &layout, 1, (300, 200));
-    let cargo = desktop.carried_cargo(to, &layout).expect("described");
-    desktop.yield_carry(&layout, &mut Region::new());
+    let was = bounds(&desktop, &layout, 1);
+    carry_held(&mut desktop, &layout, 1, (300, 200));
+    desktop.lend_carry(&layout, &mut Region::new());
     assert!(desktop.apply_changes(
         vec![EntryChange::Upsert(file("a.txt"))],
         layout_of,
@@ -3362,13 +3404,17 @@ fn a_handed_over_press_is_put_down_by_name_after_the_folder_changes() {
     let layout = layout_of(&desktop);
     let carried = named(&desktop, "c.txt");
     assert_eq!(carried, 2, "listed after the arrival");
-    let was = bounds(&desktop, &layout, carried);
+    assert_eq!(
+        desktop.bounds_for_test(&layout, carried),
+        None,
+        "still off the desktop"
+    );
     let others: Vec<Rect> = [named(&desktop, "a.txt"), named(&desktop, "b.txt")]
         .iter()
         .map(|&index| bounds(&desktop, &layout, index))
         .collect();
     let at = Point::new(was.center().x + 120, was.center().y + 80);
-    let _ = desktop.put_down_lift(&cargo.lift, at, &layout, &mut Region::new());
+    let _ = desktop.put_down_lent(at, &layout, &mut Region::new());
     let now = bounds(&desktop, &layout, carried);
     assert_eq!((now.left() - was.left(), now.top() - was.top()), (120, 80));
     let after: Vec<Rect> = [named(&desktop, "a.txt"), named(&desktop, "b.txt")]
@@ -3378,14 +3424,13 @@ fn a_handed_over_press_is_put_down_by_name_after_the_folder_changes() {
     assert_eq!(after, others, "no other icon moved");
 }
 
-/// A handed-over press whose icon has gone puts nothing down.
+/// A lent press whose icon has gone puts nothing down.
 #[test]
-fn a_handed_over_press_whose_icon_went_puts_nothing_down() {
+fn a_lent_press_whose_icon_went_puts_nothing_down() {
     let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
     let layout = layout_of(&desktop);
     let to = carry_held(&mut desktop, &layout, 0, (300, 200));
-    let cargo = desktop.carried_cargo(to, &layout).expect("described");
-    desktop.yield_carry(&layout, &mut Region::new());
+    desktop.lend_carry(&layout, &mut Region::new());
     assert!(desktop.apply_changes(
         vec![EntryChange::Remove(String::from("a.txt"))],
         layout_of,
@@ -3394,7 +3439,7 @@ fn a_handed_over_press_whose_icon_went_puts_nothing_down() {
     let layout = layout_of(&desktop);
     let rest = bounds(&desktop, &layout, 0);
     assert_eq!(
-        desktop.put_down_lift(&cargo.lift, to, &layout, &mut Region::new()),
+        desktop.put_down_lent(to, &layout, &mut Region::new()),
         DesktopOutcome::ignored()
     );
     assert_eq!(bounds(&desktop, &layout, 0), rest, "b.txt stays");

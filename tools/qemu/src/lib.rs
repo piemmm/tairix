@@ -1370,6 +1370,9 @@ pub struct Board {
     /// whose tree is dumped ahead of the run names the same model for the
     /// dump as its enrolment does for the run, by hand.
     pub cpu: Option<&'static str>,
+    /// Whether its CPUs implement EL2 and enter the kernel there, as the
+    /// Raspberry Pi firmware does. aarch64 only.
+    pub virtualization: bool,
 }
 
 impl Board {
@@ -1380,6 +1383,16 @@ impl Board {
             translation,
             interrupts: InterruptControllers::Default,
             cpu: None,
+            virtualization: false,
+        }
+    }
+
+    /// The same board with EL2, which the kernel is entered at.
+    #[must_use]
+    pub const fn with_virtualization(self) -> Self {
+        Self {
+            virtualization: true,
+            ..self
         }
     }
 
@@ -1457,6 +1470,9 @@ pub struct Spec {
     pub dma_translation: DmaTranslation,
     /// The interrupt controllers the board is built with.
     pub interrupts: InterruptControllers,
+    /// Whether the board's CPUs implement EL2, where the kernel is entered.
+    /// aarch64 only; set through [`Spec::with_virtualization`].
+    pub virtualization: bool,
     /// When `Some`, start the board's emulated real-time clock at this
     /// instant (Unix seconds) instead of the host clock, through QEMU's
     /// `-rtc base=<datetime>`. Every board QEMU models an RTC for — the
@@ -1653,6 +1669,7 @@ impl Spec {
             devices: AttachedDevices::NONE,
             dma_translation: DmaTranslation::Absent,
             interrupts: InterruptControllers::Default,
+            virtualization: false,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             optical_disc: None,
@@ -1812,6 +1829,7 @@ impl Spec {
             devices: AttachedDevices::NONE,
             dma_translation: DmaTranslation::Absent,
             interrupts: InterruptControllers::Default,
+            virtualization: false,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             optical_disc: None,
@@ -1850,6 +1868,7 @@ impl Spec {
             devices: AttachedDevices::NONE,
             dma_translation: DmaTranslation::Absent,
             interrupts: InterruptControllers::Default,
+            virtualization: false,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             optical_disc: None,
@@ -2037,6 +2056,14 @@ impl Spec {
         self
     }
 
+    /// Build the board with EL2 and enter the kernel there, as the Raspberry
+    /// Pi firmware does.
+    #[must_use]
+    pub fn with_virtualization(mut self) -> Self {
+        self.virtualization = true;
+        self
+    }
+
     /// The board this run boots.
     #[must_use]
     pub const fn board(&self) -> Board {
@@ -2044,6 +2071,7 @@ impl Spec {
             translation: self.dma_translation,
             interrupts: self.interrupts,
             cpu: self.cpu,
+            virtualization: self.virtualization,
         }
     }
 
@@ -6918,6 +6946,7 @@ mod tests {
             devices: AttachedDevices::NONE,
             dma_translation: DmaTranslation::Absent,
             interrupts: InterruptControllers::Default,
+            virtualization: false,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             optical_disc: None,

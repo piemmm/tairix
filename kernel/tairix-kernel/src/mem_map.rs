@@ -117,20 +117,94 @@ pub(crate) fn reserve_blob_frames(map: &mut BootMemoryMap, base: u64, len: u64) 
     map.reserve_range(PhysAddr::new(frame_start), PhysAddr::new(frame_end));
 }
 
-/// Split the discovered RAM `windows` into the subranges that lie in
-/// gigapages the identity map types Normal — i.e. drop every byte that
-/// falls in a gigapage `device_mask` claims (bit `g` of
-/// `device_mask[g / 64]` set means gigapage `g` is Device-typed).
+/// What a gigabyte of the kernel's direct map is typed as.
+#[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Typed {
+    /// Device registers.
+    Registers,
+    /// A PCI host's configuration region.
+    Config,
+    /// RAM.
+    Ram,
+}
+
+/// One bit per gigabyte, as `tairix_arch_api::gigapages` spells it.
+#[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
+type Gigabytes = tairix_arch_api::gigapages::GigapageMask;
+
+/// The board typed into the direct map.
+#[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TypedBoard {
+    /// The gigabytes that hold registers.
+    pub(crate) registers: Gigabytes,
+    /// The RAM windows the allocator may use: what of the discovered ones
+    /// the map covers as RAM.
+    pub(crate) ram_windows: alloc::vec::Vec<(u64, u64)>,
+}
+
+/// Type the direct map through `reveal`, which types a mask as asked and
+/// answers which of it now holds that type: the `registers` and `config`
+/// gigabytes first, then the RAM `windows` below `reach` left outside them.
 ///
-/// The aarch64 identity map types memory at 1 GiB granularity and Device
-/// wins over RAM for a shared gigapage (MMIO must never be cached or
+/// RAM is clipped out of the gigabytes that came to *hold* registers, not
+/// those asked for: a gigabyte the map typed RAM already — the image's own —
+/// refuses the request and stays the allocator's.
+#[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
+pub(crate) fn type_board(
+    registers: &Gigabytes,
+    config: &Gigabytes,
+    windows: &[(u64, u64)],
+    reach: u64,
+    mut reveal: impl FnMut(&Gigabytes, Typed) -> Gigabytes,
+) -> TypedBoard {
+    let registers = reveal(registers, Typed::Registers);
+    let config = reveal(config, Typed::Config);
+    let mut devices = registers;
+    for (word, config) in devices.iter_mut().zip(config) {
+        *word |= config;
+    }
+    let candidates = clip_windows_to_normal_ram(&clip_windows_below(windows, reach), &devices);
+    let ram = reveal(
+        &tairix_arch_api::gigapages::from_extents(&candidates),
+        Typed::Ram,
+    );
+    TypedBoard {
+        registers,
+        ram_windows: clip_windows_to_normal_ram(&candidates, &ram.map(|word| !word)),
+    }
+}
+
+/// `windows` with every byte at or above `limit` dropped: memory no mapping
+/// of the kernel's can reach is no memory it may hand out.
+#[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
+pub(crate) fn clip_windows_below(
+    windows: &[(u64, u64)],
+    limit: u64,
+) -> alloc::vec::Vec<(u64, u64)> {
+    windows
+        .iter()
+        .filter_map(|&(base, size)| {
+            let end = base.checked_add(size)?.min(limit);
+            (base < end).then(|| (base, end - base))
+        })
+        .collect()
+}
+
+/// Split the discovered RAM `windows` into the subranges that lie outside
+/// every gigapage `device_mask` claims (bit `g` of `device_mask[g / 64]` set
+/// means gigapage `g` is not RAM's).
+///
+/// The aarch64 direct map types memory at 1 GiB granularity and registers
+/// win over RAM for a shared gigapage (MMIO must never be cached or
 /// speculated), so RAM that shares a gigapage with a discovered MMIO block
 /// — a window below 4 GiB ending inside the gigapage holding the
 /// UART/GIC/PCIe — would be mapped Device: atomics on it are unpredictable
 /// and the allocator must never hand it out. Such bytes are clipped here,
-/// fail closed; reclaiming them needs 2 MiB-granular identity typing (the
-/// staged follow-up in `plans/APPS.md` I4). A window past the 512 GiB
-/// identity window is likewise clipped (no representable slot).
+/// fail closed; reclaiming them needs 2 MiB-granular typing (the staged
+/// follow-up in `plans/APPS.md` I4). A gigapage past the mask is not
+/// clipped: [`clip_windows_below`] bounds the windows first.
 #[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
 pub(crate) fn clip_windows_to_normal_ram(
     windows: &[(u64, u64)],
@@ -587,6 +661,63 @@ mod tests {
         // never wrapping into an unrelated region.
         super::reserve_blob_frames(&mut map, u64::MAX - 8, 64);
         assert_eq!(map.regions().len(), before);
+    }
+
+    /// A direct map whose gigabyte 0 is RAM already, as the image's is.
+    fn typed_map() -> impl FnMut(&[u64; 8], super::Typed) -> [u64; 8] {
+        let mut held = [None; 64];
+        held[0] = Some(super::Typed::Ram);
+        move |mask: &[u64; 8], kind| {
+            let mut out = [0u64; 8];
+            for (index, slot) in held.iter_mut().enumerate() {
+                if mask[0] & (1 << index) != 0 && *slot.get_or_insert(kind) == kind {
+                    out[0] |= 1 << index;
+                }
+            }
+            out
+        }
+    }
+
+    #[test]
+    fn ram_stays_where_a_register_request_was_refused() {
+        const GIB: u64 = 1 << 30;
+        let mut asked = [0u64; 8];
+        asked[0] = 0b1001;
+        let board = super::type_board(&asked, &[0; 8], &[(0, 3 * GIB)], 8 * GIB, typed_map());
+        assert_eq!(board.registers[0], 0b1000, "gigabyte 0 kept its RAM type");
+        assert_eq!(
+            board.ram_windows,
+            alloc::vec![(0, 3 * GIB)],
+            "and its RAM the allocator's"
+        );
+    }
+
+    #[test]
+    fn ram_sharing_a_gigabyte_with_registers_or_beyond_reach_is_dropped() {
+        const GIB: u64 = 1 << 30;
+        let mut asked = [0u64; 8];
+        asked[0] = 0b0100;
+        let mut config = [0u64; 8];
+        config[0] = 0b1_0000;
+        let windows = [(0, 6 * GIB)];
+        let board = super::type_board(&asked, &config, &windows, 5 * GIB, typed_map());
+        assert_eq!(board.ram_windows, alloc::vec![(0, 2 * GIB), (3 * GIB, GIB)]);
+    }
+
+    #[test]
+    fn a_window_is_clamped_below_the_limit_and_one_wholly_above_it_dropped() {
+        const GIB: u64 = 1 << 30;
+        let windows = [
+            (0, GIB),
+            (3 * GIB, 2 * GIB),
+            (8 * GIB, GIB),
+            (u64::MAX - 4, 8),
+        ];
+        assert_eq!(
+            super::clip_windows_below(&windows, 4 * GIB),
+            alloc::vec![(0, GIB), (3 * GIB, GIB)]
+        );
+        assert!(super::clip_windows_below(&windows, 0).is_empty());
     }
 
     #[test]

@@ -1227,7 +1227,7 @@ mod program {
     /// drag, dropped on nothing, rather than carried on past the unlock. A lock
     /// that could not be put up says so rather than leaving the user believing
     /// the screen is secured.
-    fn lock_screen(
+    fn lock_screen<S: DirectorySource>(
         lock: &mut ScreenLock,
         (confirm, elevate, resolution): (
             &mut ConfirmPrompt,
@@ -1235,8 +1235,7 @@ mod program {
             &mut ResolutionPrompt,
         ),
         named: (&str, &str),
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
+        (shell, compositor, desktop): (&mut DesktopShell, &mut Compositor, &mut Desktop<S>),
         server: &mut WindowServer<RtShmMapper>,
         sink: &mut RtEventSink,
     ) {
@@ -1253,12 +1252,16 @@ mod program {
             })) => {
                 let _ = server.deliver_event(sink, &offer.event());
             }
-            Some(DragEnd::Desktop(DesktopEnd {
-                offer: Some(offer), ..
-            })) => {
-                let _ = server.deliver_event(sink, &offer.event());
+            Some(DragEnd::Desktop(DesktopEnd { offer, .. })) => {
+                if let Some(offer) = offer {
+                    let _ = server.deliver_event(sink, &offer.event());
+                }
+                let layout = shell.desktop_layout(compositor, desktop);
+                let mut damage = Region::new();
+                desktop.restore_lent(&layout, &mut damage);
+                shell.present_desktop_area(compositor, desktop, &damage);
             }
-            Some(DragEnd::Save(_) | DragEnd::Desktop(_)) | None => {}
+            Some(DragEnd::Save(_)) | None => {}
         }
         if !lock.engage(named, shell, compositor) {
             io::write_stderr_line("desktop: could not lock the screen; it is still open");
@@ -4579,8 +4582,7 @@ mod program {
                                 &mut lock,
                                 (&mut confirm, &mut elevate, &mut resolution),
                                 (account, shown_name),
-                                &mut shell,
-                                &mut compositor,
+                                (&mut shell, &mut compositor, &mut desktop),
                                 &mut server,
                                 &mut sink,
                             );
@@ -4854,8 +4856,7 @@ mod program {
                             &mut lock,
                             (&mut confirm, &mut elevate, &mut resolution),
                             (account, shown_name),
-                            &mut shell,
-                            &mut compositor,
+                            (&mut shell, &mut compositor, &mut desktop),
                             &mut server,
                             &mut sink,
                         );
@@ -10473,7 +10474,7 @@ mod program {
                 outcome,
                 key,
                 self.catalogs,
-                self.files,
+                (self.files, self.desktop),
                 self.focused,
                 seat.shell,
                 seat.compositor,
@@ -10836,8 +10837,8 @@ mod program {
 
         /// Tell the window icons carried off the desktop were last offered to
         /// that the offer ended — dropped there, its application moves or
-        /// copies them itself — and put them down again where they were let go
-        /// on the desktop.
+        /// copies them itself — and give the desktop its lifted icons back:
+        /// put down where they were let go on it, else where they stood.
         fn settle_desktop(&mut self, seat: &mut Seat<'_>, end: DesktopEnd, now_ns: u64) {
             if let Some(offer) = end.offer {
                 deliver(
@@ -10852,12 +10853,15 @@ mod program {
                     &offer.event(),
                 );
             }
-            let DesktopDrop::Desktop { at, lift } = end.dropped else {
-                return;
-            };
             let layout = seat.shell.desktop_layout(seat.compositor, self.desktop);
             let mut damage = Region::new();
-            let outcome = self.desktop.put_down_lift(&lift, at, &layout, &mut damage);
+            let DesktopDrop::Desktop(at) = end.dropped else {
+                self.desktop.restore_lent(&layout, &mut damage);
+                seat.shell
+                    .present_desktop_area(seat.compositor, self.desktop, &damage);
+                return;
+            };
+            let outcome = self.desktop.put_down_lent(at, &layout, &mut damage);
             let applied = apply_desktop_action(
                 outcome.action,
                 self.publisher,
@@ -10886,11 +10890,11 @@ mod program {
 
         /// Carry icons pressed on the desktop on over the application window
         /// the pointer reached, where the desktop's own layer would draw them
-        /// out of sight beneath it: the seat takes them above everything and
-        /// offers them to the window at once, so a release that follows with no
-        /// further motion is already answered for. Let go over a window in the
-        /// batch that reached it, they stay where they rested, since it was
-        /// never offered them.
+        /// out of sight beneath it: the seat takes them above everything,
+        /// lifted off the desktop until the drag ends, and offers them to the
+        /// window at once, so a release that follows with no further motion is
+        /// already answered for. Let go over a window in the batch that reached
+        /// it, they stand where they rested, since it was never offered them.
         fn carry_desktop_over_window(&mut self, seat: &mut Seat<'_>) {
             let pointer = seat.shell.router().pointer();
             let scale = seat.compositor.scale();
@@ -10919,8 +10923,10 @@ mod program {
                         .is_ok();
                 }
             }
-            if handed || !held {
-                self.desktop.yield_carry(&layout, &mut damage);
+            if handed {
+                self.desktop.lend_carry(&layout, &mut damage);
+            } else if !held {
+                self.desktop.cancel_carry(&layout, &mut damage);
             }
             if !damage.is_empty() {
                 seat.shell
@@ -11808,7 +11814,7 @@ mod program {
         outcome: Timed<tairix_desktop_session::ShellOutcome>,
         key: Option<KeyInput>,
         catalogs: &Catalogs,
-        files: &Listings,
+        (files, desktop): (&Listings, &mut Desktop<S>),
         focused: &mut Option<u64>,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
@@ -12658,8 +12664,7 @@ mod program {
                 lock,
                 (confirm, elevate, resolution),
                 (account, shown_name),
-                shell,
-                compositor,
+                (shell, compositor, desktop),
                 server,
                 sink,
             ),

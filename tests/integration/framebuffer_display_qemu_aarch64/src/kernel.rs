@@ -1,10 +1,8 @@
 //! Freestanding (`aarch64-unknown-none`) half of the
 //! framebuffer-display QEMU vertical.
 //!
-//! The device-agnostic EL1 bring-up (FP enable + 2 GiB identity MMU +
-//! vectors), the `AArch64QemuEnv` serial/semihosting seam, and the
-//! one-shot boot harness all live in the shared
-//! `tairix-test-virtio-qemu-support` crate; the
+//! The `AArch64QemuEnv` serial/semihosting seam and the one-shot boot
+//! harness live in the shared `tairix-test-virtio-qemu-support` crate; the
 //! `fw_cfg`/`ramfb` DMA client lives in `tairix-fwcfg`. This module
 //! supplies only what is unique to the aarch64 display vertical: programming
 //! `ramfb` from the embedded `virt` DTB and driving the framebuffer
@@ -34,6 +32,7 @@ use tairix_abi::driver::display::{DisplayFormat, SeatGate};
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PhysicalKey};
 use tairix_abi::seat::{SeatLease, SEAT_PRIMARY};
 use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapper};
+use tairix_arch_aarch64::{paging, video};
 use tairix_caps::CapabilitySet;
 use tairix_crypto::Ed25519PublicKey;
 use tairix_display::testkit::HeapMemory;
@@ -42,7 +41,8 @@ use tairix_drvhost::{
     DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
 };
 use tairix_fdt::Fdt;
-use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
+use tairix_fwcfg::{FwCfg, RamfbConfig, DRM_FORMAT_XRGB8888};
+use tairix_kernel::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use tairix_kernel_core::console::NULL_CONSOLE_INPUT;
 use tairix_kernel_core::seat::InputKind;
 use tairix_kernel_core::SeatRegistry;
@@ -51,10 +51,7 @@ use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::KernelMmioMapper;
 use tairix_seat::SeatOwner;
-use tairix_test_virtio_qemu_support::{
-    bring_up_el1_identity_mmu, define_mmio_boot_harness_aarch64, identity_map, AArch64QemuEnv,
-    QemuEnv,
-};
+use tairix_test_virtio_qemu_support::{define_mmio_boot_harness_aarch64, AArch64QemuEnv, QemuEnv};
 
 use crate::fixture::{DTB_BLOB, FB_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
 
@@ -74,7 +71,7 @@ const FB_BYTES: usize = (STRIDE * HEIGHT) as usize;
 // --- MMIO map sizing -------------------------------------------------
 
 /// Bookkeeping virtual base of the register-window map (the windows are
-/// reached through the identity map, so this only keys the slot bitmap).
+/// reached through the direct map, so this only keys the slot bitmap).
 const MMIO_VBASE: u64 = 0x6000_0000;
 /// Capacity in pages of the register-window map: the surface is
 /// `FB_BYTES` (4 pages) and the vertical mints fourteen windows (two
@@ -99,9 +96,9 @@ struct Surface([u8; FB_BYTES]);
 /// the scenario — hence a `static` rather than a stack/heap buffer.
 static mut FRAMEBUFFER: Surface = Surface([0u8; FB_BYTES]);
 
-/// Physical (identity) base address of [`FRAMEBUFFER`].
+/// Physical base address of [`FRAMEBUFFER`].
 fn framebuffer_phys() -> u64 {
-    ptr::addr_of!(FRAMEBUFFER) as u64
+    paging::image_phys(ptr::addr_of!(FRAMEBUFFER) as u64)
 }
 
 // --- Host plumbing ---------------------------------------------------
@@ -212,7 +209,6 @@ fn verify_surface(env: &dyn QemuEnv, mapper: &dyn MmioMapper, phys_base: u64, ex
 /// with a breadcrumb.
 fn run_scenario() -> ! {
     let env = AArch64QemuEnv;
-    bring_up_el1_identity_mmu(&env);
     env.log("framebuffer-qemu: scenario start");
 
     // 1. Parse the embedded device tree (QEMU's aarch64 `-kernel <ELF>`
@@ -223,8 +219,8 @@ fn run_scenario() -> ! {
     };
 
     // 2. Bring up fw_cfg and program ramfb (the framebuffer device).
-    let Ok(dma) = MmioDma::from_dtb(&dtb) else {
-        env.fail("no fw_cfg device in DTB");
+    let Some(dma) = video::fw_cfg(&dtb) else {
+        env.fail("no fw_cfg device the direct map reaches");
     };
     let fw = FwCfg::new(dma);
     let ramfb = RamfbConfig {
@@ -263,19 +259,19 @@ fn run_scenario() -> ! {
 fn drive_lifecycle(env: &dyn QemuEnv, config: FramebufferConfig) {
     let audit = env.audit_sink();
 
-    // Capability-checked kernel MMIO mapper over the boot identity map.
+    // Capability-checked kernel MMIO mapper over the direct map's RAM, where
+    // the surface lies.
     let mut grants = CapabilitySet::empty();
     grants.insert(CapabilityId::MMIO_MAP);
     grants.insert(CapabilityId::DRV_LOAD);
     let Ok(caller) = TaskCapabilities::derive(TASK, UserId(0), grants, grants, audit) else {
         env.fail("caller capability record");
     };
-    let phys = identity_map();
     let Ok(mut mmio) = MmioMap::new(
         AddressSpace::new(HostPageTable::new()),
         VirtAddr::new(MMIO_VBASE),
         MMIO_CAP_PAGES,
-        &phys,
+        &SPAWN_TABLE_PHYSMAP,
     ) else {
         env.fail("MMIO map construct");
     };

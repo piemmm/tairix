@@ -17,9 +17,9 @@
 //! Using the Stage-3 stage-1 paging primitives
 //! (`tairix_arch_aarch64::paging`) it:
 //!
-//! 1. Builds one `AddressSpace` that identity-maps the low 2 GiB (device
-//!    MMIO + RAM) so the kernel's own code/stack and the EL1 vector table
-//!    stay reachable.
+//! 1. Builds one empty process `AddressSpace`; the kernel's code, stack and
+//!    EL1 vector table stay reachable through `TTBR1_EL1`, which it leaves
+//!    alone.
 //! 2. Aliases the page(s) holding the `tairix_sys_cap_query` stub at a high
 //!    user virtual address (`USER_CODE_VA`) with EL0-executable
 //!    attributes (`el0_code_leaf_attrs`: EL0 read+execute, privileged
@@ -27,12 +27,12 @@
 //!    (`el0_data_leaf_attrs`: EL0 read/write). The stub is a
 //!    self-contained leaf (it marshals registers and executes `svc`,
 //!    calling nothing), so a single-page code alias is sufficient. The
-//!    identity pages are EL1-only, so EL0 can reach *only* the aliased
+//!    kernel's mappings are EL1-only, so EL0 can reach *only* the aliased
 //!    stub and its stack — the isolation contract.
 //! 3. Installs the syscall dispatch callback via `set_dispatch_callback`,
-//!    points `VBAR_EL1` at the vector table (`init_vectors`), and `eret`s
-//!    to EL0 with `SP_EL0` at the user stack, `ELR_EL1` at the stub, and
-//!    the capability id in `x0`.
+//!    points `VBAR_EL1` at the vector table (`init_vectors`), activates the
+//!    space, and `eret`s to EL0 with `SP_EL0` at the user stack, `ELR_EL1`
+//!    at the stub, and the capability id in `x0`.
 //!
 //! The stub's `svc` raises a lower-EL synchronous exception into the EL1
 //! vector, whose trampoline saves the GP register frame and the handler
@@ -83,7 +83,8 @@ mod kernel {
 
     use tairix_abi::{CapabilityId, SyscallNumber, SYSCALL_MAX_ARGS};
     use tairix_arch_aarch64::paging::{
-        el0_code_leaf_attrs, el0_data_leaf_attrs, AddressSpace, PageTablePool, PAGE_SIZE,
+        el0_code_leaf_attrs, el0_data_leaf_attrs, image_phys, AddressSpace, PageTablePool,
+        PAGE_SIZE,
     };
     use tairix_arch_aarch64::{
         exceptions, handle_panic_via_serial, qemu_exit, syscall_entry, userentry::UserMode,
@@ -100,15 +101,8 @@ mod kernel {
     /// callback is intercepted before any grant evaluation).
     const EXPECTED_CAP: CapabilityId = CapabilityId::TIME_SET;
 
-    /// GiB of identity map the EL1 space holds: `[0, 2 GiB)` covers the
-    /// `virt` board's device MMIO (GiB 0) and the RAM base at GiB 1 where
-    /// this kernel runs.
-    const IDENTITY_GIB: usize = 2;
-
-    /// User virtual address the stub code is aliased at. 64 GiB — well
-    /// above the identity window — so the walk uses fresh L2/L3 tables
-    /// rather than shattering an identity block. Within the 39-bit
-    /// (512 GiB) TTBR0 region.
+    /// User virtual address the stub code is aliased at: 64 GiB, within the
+    /// 39-bit (512 GiB) `TTBR0_EL1` region.
     const USER_CODE_VA: u64 = 64 << 30;
 
     /// User virtual address the EL0 stack is mapped at (4 MiB above the
@@ -227,12 +221,11 @@ mod kernel {
 
         let page = PAGE_SIZE as u64;
 
-        let mut space = AddressSpace::new_identity_gigapages(&POOL, IDENTITY_GIB)
-            .unwrap_or_else(|| fail_setup("identity map"));
+        let mut space = AddressSpace::new_user(&POOL).unwrap_or_else(|| fail_setup("user root"));
 
         // ---- Alias the stub's page(s) into EL0 (read + execute). ----
         let func = tairix_abi_sys::sys_cap_query as *const () as u64;
-        let func_page = func & !(page - 1);
+        let func_page = image_phys(func & !(page - 1));
         // Map the stub's page plus the following one: the stub is far
         // smaller than a page, but mapping two pages is cheap insurance
         // against it straddling a page boundary.
@@ -249,7 +242,7 @@ mod kernel {
         let user_entry = USER_CODE_VA | (func & (page - 1));
 
         // ---- Map the EL0 stack (read + write). ----
-        let stack_phys = core::ptr::addr_of!(USER_STACK) as u64;
+        let stack_phys = image_phys(core::ptr::addr_of!(USER_STACK) as u64);
         for i in 0..USER_STACK_PAGES as u64 {
             space
                 .map_4k_with_attrs(
@@ -264,12 +257,12 @@ mod kernel {
 
         // ---- Install the dispatch callback and the EL1 vector table. ----
         syscall_entry::set_dispatch_callback(record_and_exit);
-        // SAFETY: called once on the boot CPU before any exception fires.
+        // SAFETY: the boot CPU, a stack established, interrupts masked.
         unsafe { exceptions::init_vectors() };
 
-        // SAFETY: the identity space maps the current `pc`, the stack, and
-        // the device MMIO, so enabling the MMU is sound.
-        unsafe { space.switch() };
+        // SAFETY: the kernel runs from `TTBR1_EL1`, which activating a process
+        // root leaves alone, and the root lives in the static pool.
+        unsafe { tairix_arch_api::mmu::AddressSpace::activate(&space) };
 
         note(
             TEST_START,

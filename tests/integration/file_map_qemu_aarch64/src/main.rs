@@ -3,7 +3,7 @@
 //! (`docs/src/architecture/memory.md` §7o).
 //!
 //! On boot the test reads the GICv2 base + generic-timer rate from the
-//! embedded `virt` device tree, brings up the EL1 vectors + GICv2, and
+//! embedded `virt` device tree, brings up the GICv2, and
 //! installs the **production** `KernelDispatchHook` through a
 //! `DispatchCallbackSlot` — with the production `LiveMemMap` producer wired
 //! for both `mem_map` and `file_map`, a read-only in-guest filesystem double

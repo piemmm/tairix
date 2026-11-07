@@ -1544,11 +1544,12 @@ where
             }
             // Non-ready outcomes are the non-blocking signals the client event
             // loop acts on: retry (still pending), fail closed on a timeout
-            // (the ticket is already retired), abandon on a torn-down or
-            // foreign ticket (no existence oracle).
+            // (the ticket is already retired), stop on an endpoint that has
+            // gone, and abandon a foreign ticket (no existence oracle).
             ReplyOutcome::Pending => Err(Errno::WouldBlock),
             ReplyOutcome::TimedOut(_) => Err(Errno::TimedOut),
-            ReplyOutcome::Cancelled | ReplyOutcome::Unknown => Err(Errno::NotFound),
+            ReplyOutcome::Cancelled => Err(Errno::BrokenPipe),
+            ReplyOutcome::Unknown => Err(Errno::NotFound),
         }
     }
 
@@ -10770,7 +10771,8 @@ where
                 ReplyOutcome::Ready(bytes) => break Ok(bytes),
                 // The endpoint was torn down, or the ticket is no longer
                 // ours: abandon the call fail-closed.
-                ReplyOutcome::Cancelled | ReplyOutcome::Unknown => break Err(Errno::NotFound),
+                ReplyOutcome::Cancelled => break Err(Errno::BrokenPipe),
+                ReplyOutcome::Unknown => break Err(Errno::NotFound),
                 // Unreachable with no deadline, but fails closed, handing on
                 // what the call held.
                 ReplyOutcome::TimedOut(freed) => {
@@ -10875,8 +10877,9 @@ where
         reply: u64,
         reply_cap: usize,
     ) -> SyscallResult {
+        // Nothing it held will ever be answered.
         let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
-            return Err(Errno::NotFound);
+            return Err(Errno::BrokenPipe);
         };
         // The ticket is the unforgeable authority; `take_reply` matches it
         // against the *security* task id the request was posted under.
@@ -10896,7 +10899,7 @@ where
         reply_cap: usize,
     ) -> SyscallResult {
         let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
-            return Err(Errno::NotFound);
+            return Err(Errno::BrokenPipe);
         };
         let claimant = caller.caps.process().0;
         let sched_task = caller.task_id.0;
@@ -46925,16 +46928,16 @@ mod tests {
         });
     }
 
-    /// An endpoint that ended answers an await `NotFound` rather than parking
-    /// it on a reply that can never come.
+    /// An endpoint that ended answers an await `BrokenPipe` rather than
+    /// parking it on a reply that can never come.
     #[test]
-    fn call_await_on_an_ended_endpoint_is_not_found() {
+    fn call_await_on_an_ended_endpoint_is_a_broken_pipe() {
         with_await_endpoint(0xCA11_2103, u64::MAX, |h, ctx, ep, post, _| {
             let ticket = post();
             drop(ep.destroy(&NULL_LOG_SINK));
             assert_eq!(
                 h.call_await(ctx, ep.id().0, ticket, 0x2000, 64),
-                Err(Errno::NotFound)
+                Err(Errno::BrokenPipe)
             );
         });
     }
@@ -54203,10 +54206,41 @@ mod tests {
             );
             assert_eq!(written(), 0xCD);
 
-            // And the reap tells it why: the server is gone.
+            // And the reap tells it why: the server is gone, whatever it names.
             assert_eq!(
                 h.call_reap(ctx, id, ticket, 0x2000, 64),
+                Err(Errno::BrokenPipe)
+            );
+            assert_eq!(
+                h.call_reap(ctx, id, tairix_abi::CALL_TICKET_NONE, 0x2000, 64),
+                Err(Errno::BrokenPipe)
+            );
+        });
+    }
+
+    /// The ticket that names no call reaps nothing from a live endpoint, so a
+    /// client may ask whether its server is still there without taking an
+    /// answer it is owed.
+    #[test]
+    fn reaping_the_ticket_that_names_no_call_takes_nothing_from_a_live_endpoint() {
+        with_call_reply_member(0xCA11_500C, 0xCE, |h, ctx, ep, _set, written| {
+            let id = ep.id().0;
+            assert_eq!(h.call_post(ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
+            let ticket = written();
+            let RecvCall::Received(call) = ep.recv_call(usize::MAX) else {
+                panic!("the call is received");
+            };
+            let _ = ep
+                .reply(call.ticket, b"done", &NULL_LOG_SINK)
+                .expect("reply");
+            assert_eq!(
+                h.call_reap(ctx, id, tairix_abi::CALL_TICKET_NONE, 0x2000, 64),
                 Err(Errno::NotFound)
+            );
+            assert_eq!(
+                h.call_reap(ctx, id, ticket, 0x2000, 64),
+                Ok(4),
+                "the answer owed is still there"
             );
         });
     }

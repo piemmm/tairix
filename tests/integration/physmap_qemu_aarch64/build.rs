@@ -18,8 +18,8 @@
 //! deterministic.
 
 /// Guest RAM this vertical runs with, in mebibytes — enough that RAM spans
-/// gigapages above the one holding the kernel image, so a process root that
-/// carried a full-RAM identity map would be visible as one.
+/// gigapages above the one holding the kernel image, which the port entry
+/// types itself, so only the boot's reading of the tree reaches them.
 const GUEST_RAM_MIB: u32 = 3072;
 
 fn main() {

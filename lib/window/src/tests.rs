@@ -1077,6 +1077,9 @@ struct Loopback {
     /// Why a wait for a reply ends at once with the call left as it was, as
     /// an await the kernel interrupts does.
     refuses_awaits: Option<Errno>,
+    /// The session's endpoint has gone: nothing is answered, and every reap
+    /// says so.
+    gone: bool,
 }
 
 impl Loopback {
@@ -1105,6 +1108,7 @@ impl Loopback {
             called: alloc::vec::Vec::new(),
             latches: 0,
             refuses_awaits: None,
+            gone: false,
         }))
     }
 
@@ -1281,6 +1285,9 @@ fn present_frame(window_id: u64, frame_index: u32) -> alloc::vec::Vec<u8> {
 impl WindowTransport for Rc<RefCell<Loopback>> {
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
         let inner = &mut *self.borrow_mut();
+        if inner.gone {
+            return Err(Errno::NotFound);
+        }
         inner.sent.push(request.to_vec());
         // The endpoint serves a client's requests in order, so whatever it
         // posted earlier is served before this call.
@@ -1295,6 +1302,9 @@ impl WindowTransport for Rc<RefCell<Loopback>> {
 
     fn post(&mut self, request: &[u8]) -> Result<u64, Errno> {
         let inner = &mut *self.borrow_mut();
+        if inner.gone {
+            return Err(Errno::NotFound);
+        }
         let held = inner.unserved.len() + inner.answered.len() + inner.withheld.len();
         if inner.lane.is_some_and(|depth| held >= depth) {
             return Err(Errno::WouldBlock);
@@ -1312,6 +1322,9 @@ impl WindowTransport for Rc<RefCell<Loopback>> {
     fn reap(&mut self, ticket: u64, reply: &mut [u8]) -> Result<Option<usize>, Errno> {
         let inner = &mut *self.borrow_mut();
         inner.reaps += 1;
+        if inner.gone {
+            return Err(Errno::BrokenPipe);
+        }
         let Some(index) = inner.answered.iter().position(|(at, _)| *at == ticket) else {
             return if inner.unserved.iter().any(|(at, _)| *at == ticket)
                 || inner.withheld.iter().any(|&(_, post)| post == ticket)
@@ -1489,6 +1502,96 @@ fn an_answer_landing_during_the_park_is_taken_in_before_the_next() {
     assert_eq!(parked.get(), 2, "woken by the answer, then by the deadline");
     assert!(!client.present_in_flight(window), "the answer was taken in");
     assert!(loopback.borrow().answered.is_empty());
+}
+
+/// A wait-set whose window-reply member stays ready, as the kernel keeps one
+/// on an endpoint that has gone, until the bound.
+struct StuckReplySource {
+    parked: Rc<Cell<usize>>,
+    /// The park after which the member is no longer ready.
+    ready_for: usize,
+}
+
+impl EventDrain for StuckReplySource {
+    fn try_next(&mut self, _event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
+        Ok(false)
+    }
+}
+
+impl EventSource for StuckReplySource {
+    fn park(&mut self) -> Result<Parked, Errno> {
+        let parks = self.parked.get() + 1;
+        self.parked.set(parks);
+        if parks > SPIN_BOUND {
+            return Err(Errno::Busy);
+        }
+        Ok(if parks <= self.ready_for {
+            Parked::Served
+        } else {
+            Parked::Interrupted
+        })
+    }
+}
+
+/// The defect this ends: once the session had gone, its reply member stayed
+/// ready, and with nothing posted there was nothing to reap, so every park
+/// returned at once and the application spun for ever instead of ending.
+#[test]
+fn a_wait_whose_session_has_gone_ends_the_channel_rather_than_spinning() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    loopback.borrow_mut().gone = true;
+    let parked = Rc::default();
+    let mut waiter = WindowEvents::new(StuckReplySource {
+        parked: Rc::clone(&parked),
+        ready_for: usize::MAX,
+    });
+    assert_eq!(
+        waiter.wait(&mut client),
+        Err(EventError::Mailbox(Errno::BrokenPipe))
+    );
+    assert_eq!(parked.get(), 1, "one park, then the channel ends");
+    assert_eq!(
+        waiter.try_wait(&mut client),
+        Err(EventError::Mailbox(Errno::BrokenPipe)),
+        "and every drain after says so"
+    );
+}
+
+/// A wake that brings nothing from a session still there goes round again:
+/// the question takes no answer it is owed and ends nothing.
+#[test]
+fn a_live_session_asked_after_an_empty_wake_keeps_the_channel() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let parked = Rc::default();
+    let mut waiter = WindowEvents::new(StuckReplySource {
+        parked: Rc::clone(&parked),
+        ready_for: 1,
+    });
+    assert_eq!(waiter.wait(&mut client), Ok(None));
+    assert_eq!(parked.get(), 2, "asked once, then parked again");
+}
+
+/// A request in flight when the session goes is reaped as gone: the refusal
+/// reaches the application, and the channel ends after it.
+#[test]
+fn a_reap_that_finds_the_session_gone_ends_the_channel() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    loopback.borrow_mut().holds_frames = true;
+    hold_a_present(&mut client, window);
+    loopback.borrow_mut().gone = true;
+    let mut waiter = WindowEvents::new(InterruptingSource::default());
+    assert!(
+        matches!(waiter.try_wait(&mut client), Err(EventError::Refused(_))),
+        "the present the session never answered"
+    );
+    assert_eq!(
+        waiter.try_wait(&mut client),
+        Err(EventError::Mailbox(Errno::BrokenPipe))
+    );
 }
 
 /// Full damage over SURFACE.

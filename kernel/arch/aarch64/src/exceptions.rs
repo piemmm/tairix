@@ -54,6 +54,11 @@ pub const SP_EL0_FRAME_INDEX: usize = ELR_FRAME_INDEX + 2;
 /// base plus this.
 pub const TRAP_FRAME_BYTES: u64 = 816;
 
+/// Bytes of the stack an exception is taken on when the boot stack overran
+/// its guard (`vectors.s`): enough for the fatal report, which is all that
+/// runs there.
+pub const RESERVE_STACK_BYTES: u64 = 16 << 10;
+
 /// Index of the saved frame pointer (`x29`) in the register frame — a GP
 /// register, so at its own number.
 pub const FP_FRAME_INDEX: usize = 29;
@@ -801,7 +806,12 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
         // resumes there and the copy returns an error to its caller
         // instead of taking the CPU down. Every other same-EL abort
         // stays on the fatal path below.
-        if kind == kind::CUR_SPX_SYNC && crate::fault::is_current_el_data_abort(esr) {
+        // Never for an overrun of the boot stack, whatever it hit: the frame is
+        // on the reserve stack, which is no stack to resume on.
+        if kind == kind::CUR_SPX_SYNC
+            && crate::fault::is_current_el_data_abort(esr)
+            && !overran(frame.addr() as u64)
+        {
             // SAFETY: `frame` is the live trampoline register frame and
             // `ELR_FRAME_INDEX` its saved-`ELR_EL1` word.
             let saved_elr = unsafe { *frame.add(ELR_FRAME_INDEX) };
@@ -832,6 +842,20 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
     // kills only that task rather than parking the core.
     let syndrome = has_syndrome(kind).then(read_esr);
     fatal_exception(kind, syndrome, syndrome.and_then(far_of), frame);
+}
+
+/// Whether `frame` lies on the reserve stack, which the EL1 vector moves to
+/// only when the boot stack overran its guard, recording the interrupted
+/// stack pointer as `SP_EL0`.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn overran(frame: u64) -> bool {
+    extern "C" {
+        static tairix_aarch64_reserve_stack_bottom: u8;
+        static tairix_aarch64_reserve_stack_top: u8;
+    }
+    let bottom = core::ptr::addr_of!(tairix_aarch64_reserve_stack_bottom) as u64;
+    let top = core::ptr::addr_of!(tairix_aarch64_reserve_stack_top) as u64;
+    (bottom..top).contains(&frame)
 }
 
 /// `FAR_EL1`, where the exception `esr` describes wrote it.
@@ -892,11 +916,16 @@ fn fatal_exception(kind: u64, syndrome: Option<u64>, address: Option<u64>, frame
     // terminate: genuinely unrecoverable. The installed fatal handler owns
     // the report; with none installed the port writes its own, so the
     // syndrome is never lost.
+    let sp = if overran(frame.addr() as u64) {
+        Some(saved_sp_el0)
+    } else {
+        interrupted_kernel_sp(kind, frame.addr() as u64, saved_sp_el0)
+    };
     let fault = tairix_arch_api::fatal::KernelFault {
         syndrome,
         address,
         pc,
-        sp: interrupted_kernel_sp(kind, frame.addr() as u64, saved_sp_el0),
+        sp,
     };
     if let Some(handler) = tairix_arch_api::fault::fault_handler() {
         handler(fault);

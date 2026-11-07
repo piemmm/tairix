@@ -1,0 +1,29 @@
+[package]
+name = "tairix-test-user-counters-qemu-x86_64"
+description = "QEMU integration test: an x86_64 CPU the kernel holds gives user code neither its time-stamp counter nor its performance counters: the port's per-CPU hold sets CR4.TSD and clears CR4.PCE whatever firmware left in them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding kernel ELF QEMU boots on the x86_64 board through the multiboot2/PVH entry. It links the port alone:
+# the subject is the port's per-CPU hold, which QEMU's benign resets never
+# have to close anything for, so the run opens the controls itself.
+#
+# On the host target the crate has no test source and contributes nothing to
+# `cargo test`; the orchestrator is `cargo xtask test --qemu`.
+
+[[bin]]
+name = "tairix-test-user-counters-qemu-x86_64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

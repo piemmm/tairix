@@ -177,6 +177,7 @@ pub extern "C" fn kernel_main(_hartid: u64, _dtb: u64) -> ! {
     {
         fail("accessed_bit test: probe-page mapping refused", FAIL_MAP);
     }
+    tairix_arch_api::tlb::TlbShootdown::publish_mappings(&mut space, TEST_VADDR, 1);
 
     // The port must declare it can report a referenced bit.
     if !matches!(space.access_tracking(), AccessTracking::Supported) {

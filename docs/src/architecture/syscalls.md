@@ -1186,8 +1186,13 @@ call would carry it past its own `ipc-queue-bytes` limit or it holds
 `IPC_SENDER_DEPTH_MAX` answers it has not reaped; `call_reap` is the
 non-blocking claim
 (`WouldBlock` while pending, `TimedOut`
-once the deadline elapses — the ticket is then retired, `NotFound` for a
-cancelled/torn-down/foreign ticket, the reply bytes otherwise); `call_cancel`
+once the deadline elapses — the ticket is then retired, `BrokenPipe` once the
+endpoint has gone, `NotFound` for a cancelled or foreign ticket, the reply
+bytes otherwise). No endpoint issues `CALL_TICKET_NONE`, so a reap of it
+takes nothing and answers only whether the endpoint can still answer —
+`NotFound` while it lives, `BrokenPipe` once it has gone — which is how a
+client woken by a `CallReply` member with no call outstanding learns its
+server went; `call_cancel`
 withdraws one outstanding ticket, waking the thread awaiting it. Between reaps the caller parks on a wait-set
 member of kind `WaitSourceKind::CallReply` (added under the caller's *send*
 authority to the endpoint, ready when a reply the caller posted lands **or**

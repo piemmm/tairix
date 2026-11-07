@@ -8,10 +8,10 @@
 //! real hardware those bytes are reachable because the kernel keeps a
 //! direct map of physical memory: a fixed virtual window in the active
 //! page table where a physical address `p` is reachable at `p +
-//! offset`. The `x86_64` port's window is in the kernel half
-//! (`kernel/arch/x86_64` `paging::PHYSMAP_VMA_BASE`), so `offset` is
-//! non-zero there; the identity-linked `aarch64` and `riscv64` ports
-//! carry an identity window, so `offset == 0`.
+//! offset`. The `x86_64` and `aarch64` ports' windows are in the kernel
+//! half (each port's `paging::PHYSMAP_VMA_BASE`), so `offset` is non-zero
+//! there; the identity-linked `riscv64` port carries an identity window,
+//! so `offset == 0`.
 //!
 //! This module is the seam between "a `PhysAddr` a device understands"
 //! and "a `NonNull<u8>` the CPU can dereference". Production wires a
@@ -107,8 +107,8 @@ pub trait PhysMap {
 /// virtual address `p + offset`, for every `p` in `[base, limit)`.
 ///
 /// `offset == 0` describes an identity map (what the identity-linked
-/// `aarch64` and `riscv64` ports carry); a non-zero `offset` describes a
-/// kernel-half direct map (what `x86_64` installs).
+/// `riscv64` port carries); a non-zero `offset` describes a kernel-half
+/// direct map (what `x86_64` installs).
 ///
 /// # A pointer, not an address
 ///

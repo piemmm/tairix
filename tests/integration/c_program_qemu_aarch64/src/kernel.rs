@@ -10,13 +10,13 @@ use tairix_abi::rxe::LoadImage;
 use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
 use tairix_arch_aarch64::paging;
 use tairix_arch_aarch64::{
-    enable_fp_el1, exceptions, handle_panic_via_serial, qemu_exit, syscall_entry,
-    userentry::UserMode, SERIAL_SINK,
+    exceptions, handle_panic_via_serial, qemu_exit, syscall_entry, userentry::UserMode, SERIAL_SINK,
 };
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kernel::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use tairix_kernel_core::{spawn_and_enter, SpawnMode, SpawnRequest};
-use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
+use tairix_kernel_mem::{AddressSpace, Frame, PhysAddr, UserStack};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level};
 
@@ -47,10 +47,6 @@ const PROBE_CAP: u64 = CapabilityId::DRV_KERNEL.as_u16() as u64;
 /// Sentinel `clock_get` returns to the program (`csrc/main.c`
 /// `CLOCK_SENTINEL`), exercising full 64-bit result marshalling.
 const CLOCK_SENTINEL: u64 = 0x0123_4567_89ab_cdef;
-
-/// Gigabytes of identity map: `[0, 2 GiB)` covers the `virt` board's device
-/// MMIO (GiB 0) and the RAM base at GiB 1 where this kernel runs.
-const IDENTITY_GIB: usize = 2;
 
 /// User stack base (1 MiB into the high user region) and size. crt0 carves a
 /// 1 MiB scratch span off the stack, so the stack must comfortably exceed it.
@@ -84,9 +80,8 @@ const FAIL_WRONG_CAP: NonZeroU16 = fail_point!(6);
 static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();
 
 /// Physical-frame backing store the spawn builder allocates user pages from.
-/// `align(4096)` so each `PAGE_SIZE` slice is a valid page frame; identity-
-/// mapped (its physical address equals its kernel virtual address), so the
-/// builder reaches it through [`DirectPhysMap::identity`].
+/// `align(4096)` so each `PAGE_SIZE` slice is a valid page frame; the builder
+/// reaches it at its physical address through the direct map.
 #[repr(C, align(4096))]
 struct FramePool([u8; paging::PAGE_SIZE * FRAME_COUNT]);
 
@@ -161,8 +156,9 @@ extern "C" fn dispatch_and_finish(number: u64, args_ptr: *const [u64; SYSCALL_MA
     qemu_exit::exit_failure(FAIL_WRONG_SYSCALL);
 }
 
-/// Hand out the next identity-mapped physical frame from [`FRAME_POOL`].
+/// Hand out the next physical frame of [`FRAME_POOL`].
 fn frame_source() -> impl FnMut() -> Option<Frame> {
+    let pool = paging::image_phys(core::ptr::addr_of!(FRAME_POOL) as u64);
     let mut next = 0usize;
     move || {
         if next >= FRAME_COUNT {
@@ -170,10 +166,7 @@ fn frame_source() -> impl FnMut() -> Option<Frame> {
         }
         let offset = next * paging::PAGE_SIZE;
         next += 1;
-        // The pool is identity-mapped, so its kernel virtual address is also
-        // its physical address.
-        let base = core::ptr::addr_of!(FRAME_POOL) as u64 + offset as u64;
-        Some(Frame::containing(PhysAddr::new(base)))
+        Some(Frame::containing(PhysAddr::new(pool + offset as u64)))
     }
 }
 
@@ -188,32 +181,21 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         qemu_exit::exit_failure(FAIL_POOL);
     }
 
-    // Enable FP/SIMD at EL1 before running any code that may use it: the `rxe`
-    // decoder and `build_process_image`'s fills compile to vectorised
-    // (NEON) `memcpy`/`memcmp`, which trap as an undefined instruction unless
-    // `CPACR_EL1.FPEN` is set, which the boot trampoline leaves trapped.
-    // SAFETY: this is the boot CPU, called once, before any FP/SIMD
-    // instruction executes (see `enable_fp_el1`).
-    unsafe {
-        enable_fp_el1();
-    }
-
     note(
         TEST_START,
         "aarch64 C-program round-trip: building the EL0 image",
     );
 
-    // 1. Stage-1 address space identity-mapping the kernel + MMIO, then
-    //    activate it and install the EL1 vector table before any user mapping.
-    let Some(arch) = paging::AddressSpace::new_identity_gigapages(&PAGE_TABLE_POOL, IDENTITY_GIB)
-    else {
-        note(TEST_FAIL, "page-table pool exhausted (identity map)");
+    // 1. The program's empty stage-1 root, activated before any user mapping,
+    //    and the EL1 vector table installed.
+    let Some(arch) = paging::AddressSpace::new_user(&PAGE_TABLE_POOL) else {
+        note(TEST_FAIL, "page-table pool exhausted (process root)");
         qemu_exit::exit_failure(FAIL_POOL);
     };
-    // SAFETY: the identity map covers the kernel's current `pc`, `sp`, and the
-    // device MMIO, so enabling the MMU is sound.
-    unsafe { arch.switch() };
-    // SAFETY: called once on the boot CPU before any exception fires.
+    // SAFETY: the kernel runs from `TTBR1_EL1`, which activating a process
+    // root leaves alone, and the root lives in the static pool.
+    unsafe { tairix_arch_api::mmu::AddressSpace::activate(&arch) };
+    // SAFETY: the boot CPU, a stack established, interrupts masked.
     unsafe { exceptions::init_vectors() };
     syscall_entry::set_dispatch_callback(dispatch_and_finish);
 
@@ -225,13 +207,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     // 3. Build the EL0 image into the (active) address space and enter it
     //    through the production capability-checked, audited spawn caller.
-    // The arch `paging::AddressSpace` implements the Arch HAL page-table
-    // surface (`mmu::AddressSpace` + `tlb::TlbShootdown`) directly, so the
-    // `kernel/mem` façade drives it with no per-test adapter (the Stage W5b-2 wiring removed the old `PageTableOps` shim).
     let mut space = AddressSpace::new(arch);
-    // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let physmap = unsafe { DirectPhysMap::identity((IDENTITY_GIB as u64) << 30) }
-        .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image: &image,
         image_bytes: PROGRAM_RXE,
@@ -252,8 +228,8 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     note(TEST_START, "dropping into the spawned C program");
 
-    // SAFETY: `space` is the active address space (we `switch`ed to it above)
-    // and the EL1 vector table is installed, so the new program's `svc` is
+    // SAFETY: `space` is the active address space (activated above) and the
+    // EL1 vector table is installed, so the new program's `svc` is
     // handled. `spawn_and_enter` checks `CAP_PROC_SPAWN`, builds the image into
     // `space`, and `enter_user`s into it; on the authorised path it diverges.
     let outcome = unsafe {
@@ -263,7 +239,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
             &SERIAL_SINK,
             &UserMode::new(),
             &mut space,
-            &physmap,
+            &SPAWN_TABLE_PHYSMAP,
             &request,
             frame_source(),
         )

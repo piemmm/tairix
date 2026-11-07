@@ -95,6 +95,20 @@ tairix_aarch64_vectors:
 
     // --- Current EL with SPx (the kernel's own exceptions) ---
     .balign 0x80                 // 0x200 Synchronous (fault)
+    // A frame that would land in the boot stack's read-only guard would fault
+    // again, endlessly, so that one is taken on the reserve stack. The check
+    // borrows TPIDRRO_EL0, which EL0 can read: it is empty again before
+    // anything else runs.
+    msr     tpidrro_el0, x0
+    adrp    x0, __boot_stack_guard_bottom
+    add     x0, x0, :lo12:__boot_stack_guard_bottom
+    sub     x0, sp, x0
+    lsr     x0, x0, #4
+    cmp     x0, #{OVERRUN_REACH}
+    mrs     x0, tpidrro_el0
+    msr     tpidrro_el0, xzr
+    b.lo    tairix_aarch64_boot_stack_overrun
+.Lel1h_sync_frame:
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #4
@@ -167,6 +181,21 @@ tairix_aarch64_vectors:
     stp     x0, x1, [sp]
     mov     x0, #15
     b       tairix_aarch64_trap_common
+
+// The boot stack overran: the interrupted stack pointer goes to SP_EL0,
+// which the frame records and the report reads (`exceptions::overran`), and
+// the exception is taken on the reserve stack.
+.balign 4
+tairix_aarch64_boot_stack_overrun:
+    msr     tpidrro_el0, x0
+    mov     x0, sp
+    msr     sp_el0, x0
+    adrp    x0, tairix_aarch64_reserve_stack_top
+    add     x0, x0, :lo12:tairix_aarch64_reserve_stack_top
+    mov     sp, x0
+    mrs     x0, tpidrro_el0
+    msr     tpidrro_el0, xzr
+    b       .Lel1h_sync_frame
 
 // Common trampoline. On entry: 816-byte frame reserved, x0/x1 already
 // spilled at [sp,#0], x0 = exception kind.
@@ -335,3 +364,11 @@ tairix_aarch64_trap_common:
     // Straight-line speculation past the `eret` stops here.
     dsb     nsh
     isb
+
+.section .bss.reserve_stack, "aw", %nobits
+.balign 16
+.global tairix_aarch64_reserve_stack_bottom
+tairix_aarch64_reserve_stack_bottom:
+    .skip   {RESERVE_STACK_BYTES}
+.global tairix_aarch64_reserve_stack_top
+tairix_aarch64_reserve_stack_top:

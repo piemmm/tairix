@@ -20,6 +20,7 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use tairix_arch_aarch64::backtrace::Backtracer;
+    use tairix_arch_aarch64::paging;
     use tairix_arch_aarch64::serial::ConsoleWriter;
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit};
     use tairix_arch_api::CpuStateCapture as _;
@@ -46,10 +47,14 @@ mod kernel {
         // link-time constant; they are never dereferenced here.
         let low = core::ptr::addr_of!(__boot_stack_guard_bottom) as u64;
         let bottom = core::ptr::addr_of!(__boot_stack_bottom) as u64;
+        // The kernel root maps the guard read-only; the direct map's alias of
+        // the image's RAM writes it.
+        let writable = paging::physmap_virt(paging::image_phys(bottom));
         // SAFETY: the linker script reserves `[low, bottom)` as this CPU's
-        // boot-stack guard and nothing else claims it; this kernel is the
-        // only thing running, so the checks' write-and-restore is unraced.
-        match unsafe { check(bt.boot_stack_guard(), low, bottom, sp, bottom) } {
+        // boot-stack guard and nothing else claims it, and `writable` is the
+        // same bytes; this kernel is the only thing running, so the checks'
+        // write-and-restore is unraced.
+        match unsafe { check(bt.boot_stack_guard(), low, bottom, sp, writable) } {
             Ok(()) => {
                 let _ = writeln!(w, "[bootguard] aarch64 boot-stack guard verified");
                 qemu_exit::exit_success()

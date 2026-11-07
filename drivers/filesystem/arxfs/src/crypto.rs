@@ -229,9 +229,22 @@ pub(crate) enum ContentHash {
     Plain,
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static HASHED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// Content hashes taken on the calling test thread.
+#[cfg(test)]
+pub(crate) fn content_hashes_taken() -> usize {
+    HASHED.with(core::cell::Cell::get)
+}
+
 impl ContentHash {
     /// The hash of `content`.
     pub(crate) fn of(&self, content: &[u8]) -> [u8; LOGICAL_HASH_LEN] {
+        #[cfg(test)]
+        HASHED.with(|taken| taken.set(taken.get() + 1));
         match self {
             Self::Keyed(key) => hmac_sha256(key, content),
             Self::Plain => sha256(content),

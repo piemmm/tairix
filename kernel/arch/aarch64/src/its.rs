@@ -737,8 +737,9 @@ impl VolatileItsMmio {
     ///
     /// # Safety
     ///
-    /// `base` is a service's control frame, mapped as Device memory for the
-    /// kernel's life, and nothing else drives it.
+    /// `base` is the physical address of a service's control frame, which
+    /// the direct map types as registers for the kernel's life, and nothing
+    /// else drives it.
     #[must_use]
     pub const unsafe fn new(base: usize) -> Self {
         Self { base }
@@ -749,19 +750,23 @@ impl VolatileItsMmio {
 impl ItsMmio for VolatileItsMmio {
     fn read(&self, off: usize) -> u32 {
         // SAFETY: `off` names a register of the frame `new`'s contract maps.
-        unsafe { core::ptr::read_volatile((self.base + off) as *const u32) }
+        unsafe { core::ptr::read_volatile(crate::paging::mmio(self.base + off) as *const u32) }
     }
     fn read_u64(&self, off: usize) -> u64 {
         // SAFETY: as `read`; the 64-bit registers take a 64-bit load.
-        unsafe { core::ptr::read_volatile((self.base + off) as *const u64) }
+        unsafe { core::ptr::read_volatile(crate::paging::mmio(self.base + off) as *const u64) }
     }
     fn write(&self, off: usize, value: u32) {
         // SAFETY: as `read`.
-        unsafe { core::ptr::write_volatile((self.base + off) as *mut u32, value) }
+        unsafe {
+            core::ptr::write_volatile(crate::paging::mmio(self.base + off) as *mut u32, value);
+        }
     }
     fn write_u64(&self, off: usize, value: u64) {
         // SAFETY: as `read_u64`.
-        unsafe { core::ptr::write_volatile((self.base + off) as *mut u64, value) }
+        unsafe {
+            core::ptr::write_volatile(crate::paging::mmio(self.base + off) as *mut u64, value);
+        }
     }
 }
 

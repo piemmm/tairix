@@ -21,18 +21,19 @@ use tairix_arch_aarch64::paging::{
 };
 use tairix_arch_aarch64::userentry::USER_MODE;
 use tairix_arch_aarch64::{
-    enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, SERIAL_SINK,
+    exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, SERIAL_SINK,
 };
 use tairix_arch_api::{UserEntry, BOOT_CPU};
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kernel::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
     reschedule_current, spawn_image, spawn_user_kthread, RescheduleAction, SpawnMode, SpawnRequest,
     Yielder,
 };
-use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
+use tairix_kernel_mem::{AddressSpace, Frame, PhysAddr, UserStack};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level};
@@ -44,9 +45,6 @@ include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
 /// The two floating-point probe tasks (the hygiene task is separate).
 const PROBE_COUNT: u64 = 2;
-
-/// Gigabytes of identity map each EL0 address space provides.
-const IDENTITY_GIB: usize = 2;
 
 /// User stack base and size.
 const USER_STACK_BASE: u64 = USER_BIAS + 0x10_0000;
@@ -125,7 +123,7 @@ static mut FRAME_POOL: FramePool = FramePool([0; paging::PAGE_SIZE * FRAME_COUNT
 /// Monotonic index of the next free [`FRAME_POOL`] frame.
 static FRAME_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
-/// Hand out the next identity-mapped physical frame, or `None` when exhausted.
+/// Hand out the next physical frame, or `None` when exhausted.
 fn next_frame() -> Option<Frame> {
     let idx = FRAME_CURSOR.fetch_add(1, Ordering::SeqCst);
     if idx >= FRAME_COUNT {
@@ -133,7 +131,7 @@ fn next_frame() -> Option<Frame> {
         return None;
     }
     let offset = idx * paging::PAGE_SIZE;
-    let base = core::ptr::addr_of!(FRAME_POOL) as u64 + offset as u64;
+    let base = paging::image_phys(core::ptr::addr_of!(FRAME_POOL) as u64) + offset as u64;
     Some(Frame::containing(PhysAddr::new(base)))
 }
 
@@ -212,19 +210,15 @@ fn build_space(
     image_bytes: &'static [u8],
     args: &[&[u8]],
 ) -> (u64, UserEntry) {
-    let Some(arch) = ArchAddressSpace::new_identity_gigapages(pool, IDENTITY_GIB) else {
+    let Some(arch) = ArchAddressSpace::new_user(pool) else {
         qemu_exit::exit_failure(FAIL_POOL);
     };
     let root_phys = arch.root_phys();
-    // SAFETY: the identity map covers the kernel's current `pc`, `sp`, the
-    // heap, the frame pool, and the device MMIO, so switching it does not move
-    // the ground under the running code. Called on the boot CPU.
-    unsafe { arch.switch() };
+    // SAFETY: the kernel runs from `TTBR1_EL1`, which loading a process root
+    // leaves untouched. Called on the boot CPU.
+    unsafe { tairix_arch_api::mmu::AddressSpace::activate(&arch) };
 
     let mut space = AddressSpace::new(arch);
-    // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let physmap = unsafe { DirectPhysMap::identity((IDENTITY_GIB as u64) << 30) }
-        .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image,
         image_bytes,
@@ -245,14 +239,14 @@ fn build_space(
 
     // SAFETY: building the image is safe; the returned `UserEntry` is only
     // entered later, once its space is reactivated and the EL1 trap path is
-    // installed. Frames are drawn identity-mapped from `FRAME_POOL`.
+    // installed. Frames are drawn from `FRAME_POOL`.
     let entry = match unsafe {
         spawn_image(
             &SpawnAuthority,
             SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
-            &physmap,
+            &SPAWN_TABLE_PHYSMAP,
             &request,
             next_frame,
         )
@@ -271,9 +265,9 @@ fn admit(
     entry: UserEntry,
 ) {
     let pre_resume = move |_stack_top: u64, tag: AddressTag| {
-        // SAFETY: the MMU is enabled and `root_phys` is the L1 root of a space
-        // that identity-maps the low kernel window the running kernel executes
-        // from — `activate_user_root`'s contract.
+        // SAFETY: the kernel runs from `TTBR1_EL1` and `root_phys` is the L1
+        // root of a space whose tables live in a static pool —
+        // `activate_user_root`'s contract.
         unsafe { activate_user_root(root_phys, tag) };
     };
     let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
@@ -297,11 +291,6 @@ fn admit(
 pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     note(TEST_START, "aarch64 fp isolation test: starting");
 
-    // Enable FP/SIMD at EL1 before any code that may use it (the `rxe` decoder
-    // and the image fills compile to NEON).
-    // SAFETY: boot CPU, once, before any FP/SIMD executes.
-    unsafe { enable_fp_el1() };
-
     let Ok(fdt) = Fdt::new(DTB_BLOB) else {
         qemu_exit::exit_failure(FAIL_GIC_NOT_DISCOVERED);
     };
@@ -324,8 +313,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     let (root_b, entry_b) = build_space(&PAGE_TABLES_B, &probe, PROGRAM_RXE, &[b"B"]);
     let (root_h, entry_h) = build_space(&PAGE_TABLES_H, &hygiene, HYGIENE_RXE, &[b"h"]);
 
-    // SAFETY: called once on the boot CPU with a stack established and the MMU
-    // enabled (the address-space builds switched it on).
+    // SAFETY: called once on the boot CPU with a stack established and the MMU enabled.
     unsafe {
         exceptions::init_vectors();
         tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");

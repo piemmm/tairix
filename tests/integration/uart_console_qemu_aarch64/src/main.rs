@@ -62,7 +62,7 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use tairix_arch_aarch64::console::{self, ConsoleModel, DEFAULT_CONSOLE_BASE};
-    use tairix_arch_aarch64::{enable_fp_el1, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SERIAL_SINK};
     use tairix_fdt::Fdt;
     use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Field, Level};
@@ -98,13 +98,6 @@ mod kernel {
     /// trampoline calls (via `tairix_arch_aarch64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
-        // Enable FP/SIMD before the log formatter (which the compiler may
-        // lower to NEON) runs. SAFETY: this is the boot CPU, called once,
-        // before any FP/SIMD instruction executes.
-        unsafe {
-            enable_fp_el1();
-        }
-
         // Poison the console so a later successful print can only mean
         // discovery overwrote the base with the tree's value. Use the
         // mini-UART model too, so the model is likewise proven discovered.

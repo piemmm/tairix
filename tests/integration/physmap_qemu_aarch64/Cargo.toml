@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-physmap-qemu-aarch64"
-description = "aarch64 direct-physical-map QEMU integration test: prove the kernel reaches every usable byte of RAM through a direct map that lies in the TTBR1_EL1 regime, and that a process root carries no mapping of RAM outside the kernel's own extents."
+description = "aarch64 direct-physical-map QEMU integration test: prove the kernel reaches every usable byte of RAM through a direct map that lies in the TTBR1_EL1 regime, that the map types each gigabyte once, and that no process root maps RAM."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -81,7 +81,7 @@ fn read_cntfrq() -> u64 {
 /// `ID_AA64DFR0_EL1.PMUVer` field offset and the two "no usable PMU"
 /// encodings (`0` = not implemented, `0xF` = IMPDEF, not the architected
 /// PMU): any other value is a present `PMUv3` whose `PMCCNTR_EL0` we can use.
-const PMUVER_SHIFT: u32 = 8;
+pub(crate) const PMUVER_SHIFT: u32 = 8;
 
 /// `true` if a `PMUv3` cycle counter is present, decoded from a raw
 /// `ID_AA64DFR0_EL1` value. Pure and host-testable.
@@ -95,7 +95,7 @@ pub const fn pmu_present(dfr0: u64) -> bool {
 /// as "absent" off the freestanding target (the host has no PMU).
 #[inline]
 #[must_use]
-fn pmu_available() -> bool {
+pub(crate) fn pmu_available() -> bool {
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
     {
         let dfr0: u64;

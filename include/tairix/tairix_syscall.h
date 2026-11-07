@@ -620,6 +620,9 @@ typedef struct tairix_image_attach_reply {
 /* call_post() deadline_ns that never passes: the request is answered only
 * by its server or by the endpoint's end. */
 #define TAIRIX_CALL_DEADLINE_NONE ((uint64_t)0xffffffffffffffffull)
+/* call_reap() ticket that names no call: reaping it takes nothing and
+* answers whether the endpoint can still answer (-BrokenPipe once gone). */
+#define TAIRIX_CALL_TICKET_NONE ((uint64_t)0xffffffffffffffffull)
 
 /* fs_lock() / fs_lock_query() — advisory byte-range locks (AGENTS.md sec.9).
 * A lock is owned by the OPEN FILE DESCRIPTION behind the descriptor, not by

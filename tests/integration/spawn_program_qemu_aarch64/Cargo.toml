@@ -16,9 +16,9 @@ workspace = true
 # fixture program (`tairix-test-cc3-program`) is built position-independent by
 # `build.rs` and converted to an `rxe` blob (`tairix_itest_harness::elf2rxe`)
 # carrying the kernel's compiled-in syscall CFI tag. On boot the test stands up
-# a stage-1 address space (identity-mapping the kernel + MMIO, EL1), activates
-# it, installs the EL1 vector table + a dispatch callback, then calls the
-# production capability-checked, audited spawn caller
+# an empty process address space, activates it, installs the EL1 vector table
+# and a dispatch callback, then calls the production capability-checked,
+# audited spawn caller
 # (`tairix_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to build
 # the program's EL0 image and `eret` into it. The program's `exit` syscall
 # traps back through the kernel EL1 vector; the callback asserts the exit
@@ -38,6 +38,8 @@ name = "tairix-test-spawn-program-qemu-aarch64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+# The production direct map the fixture reaches its frames through.
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }

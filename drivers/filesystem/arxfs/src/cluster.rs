@@ -85,19 +85,30 @@ impl<B: Block> ARXFS<B> {
         plaintext: &[u8],
     ) -> Result<Option<(u64, u64)>, DriverError> {
         let capu = as_usize(self.data_capacity());
-        let len_blocks = (plaintext.len() / capu) as u64;
-        let Some(mut frame) = tairix_util::fallible::zeroed(plaintext.len()) else {
-            return Err(DriverError::OutOfMemory);
-        };
-        let Ok(frame_len) = tairix_compress::compress(plaintext, &mut frame) else {
-            // The frame would not even fit the plaintext-sized scratch:
-            // incompressible, store per-block raw.
+        // A frame wins only by a whole block, so the compressor is given one
+        // block fewer than the cluster and gives up as soon as it outgrows it.
+        let room = (plaintext.len() / capu).saturating_sub(1) * capu;
+        let mut frame = core::mem::take(&mut self.cluster_frame);
+        if frame.len() < room {
+            frame = tairix_util::fallible::zeroed(room).ok_or(DriverError::OutOfMemory)?;
+        }
+        let stored = self.store_frame(plaintext, &mut frame[..room]);
+        self.cluster_frame = frame;
+        stored
+    }
+
+    /// Compress `plaintext` into `frame` and store the frame, as
+    /// [`Self::write_data_cluster`] describes; `None` when it does not fit.
+    fn store_frame(
+        &mut self,
+        plaintext: &[u8],
+        frame: &mut [u8],
+    ) -> Result<Option<(u64, u64)>, DriverError> {
+        let capu = as_usize(self.data_capacity());
+        let Ok(frame_len) = tairix_compress::compress(plaintext, frame) else {
             return Ok(None);
         };
         let stored_blocks = (frame_len.div_ceil(capu)) as u64;
-        if stored_blocks >= len_blocks {
-            return Ok(None);
-        }
         let phys = match self.alloc_data_run(stored_blocks) {
             Ok(phys) => phys,
             // No contiguous run: degrade to per-block storage (a genuinely
@@ -118,7 +129,8 @@ impl<B: Block> ARXFS<B> {
             } else {
                 StoredForm::ClusterPart { index: as_u32(i) }
             };
-            self.seal_data_block(phys + i as u64, &mut blk, form)?;
+            let hash = self.protection.content_hash.of(&blk[..capu]);
+            self.seal_data_block(phys + i as u64, &mut blk, form, &hash)?;
         }
         Ok(Some((phys, stored_blocks)))
     }

@@ -2236,7 +2236,8 @@ static TESTS: &[QemuTest] = &[
     // port and installs no fault handler is reported, and the run ends on the
     // report's record the moment it lands — never on the inactivity budget.
     // aarch64 takes the branch the defect was found on, so the record must
-    // name exactly its syndrome, address and PC.
+    // name exactly its syndrome, address and PC: a level-0 translation fault,
+    // since the target lies outside both translation regimes.
     QemuTest {
         package: "tairix-test-fatal-fault-qemu-aarch64",
         binary: "tairix-test-fatal-fault-qemu-aarch64",
@@ -2260,11 +2261,45 @@ static TESTS: &[QemuTest] = &[
         expect: Expect::Fatal(&[
             tairix_arch_api::fatal::KERNEL_FAULT.message,
             "cpu=0",
-            "syndrome=0x0000000086000000",
+            "syndrome=0x0000000086000004",
             "fault_addr=0x3ff0000000000000",
             "fault_pc=0x3ff0000000000000",
             "fault_sp=0x",
             "boot_stack_guard=intact",
+        ]),
+    },
+    // D1577 and D1590 on aarch64: a store into the boot stack's guard, which
+    // the kernel root maps read-only, faults; its frame would land in the
+    // guard and fault again, so the EL1 vector takes it on the reserve stack,
+    // and the record names the store the guard stopped.
+    QemuTest {
+        package: "tairix-test-fatal-stack-overrun-qemu-aarch64",
+        binary: "tairix-test-fatal-stack-overrun-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: &[],
+        expect: Expect::Fatal(&[
+            tairix_arch_api::fatal::KERNEL_FAULT.message,
+            "cpu=0",
+            "syndrome=0x000000009600004f",
+            "fault_addr=0xffffffffc0",
+            "fault_sp=0xffffffffc0",
+            "boot_stack_guard=faulted",
+            "boot_stack_overrun_bytes=0x0000000000000010",
         ]),
     },
     // D146 on riscv64: an `ebreak` with no fault handler installed, which the
@@ -2778,6 +2813,28 @@ static TESTS: &[QemuTest] = &[
         expect: Expect::Pass,
     },
     QemuTest {
+        package: "tairix-test-user-counters-qemu-riscv64",
+        binary: "tairix-test-user-counters-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
+    QemuTest {
         package: "tairix-test-bootguard-qemu-aarch64",
         binary: "tairix-test-bootguard-qemu-aarch64",
         target: "aarch64-unknown-none",
@@ -2800,8 +2857,76 @@ static TESTS: &[QemuTest] = &[
         expect: Expect::Pass,
     },
     QemuTest {
+        package: "tairix-test-user-counters-qemu-aarch64",
+        binary: "tairix-test-user-counters-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
+    // The Pi firmware's entry level: the trampoline's EL2 hand-off, which no
+    // other vertical enters through.
+    QemuTest {
+        package: "tairix-test-el2-entry-qemu-aarch64",
+        binary: "tairix-test-el2-entry-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
+    QemuTest {
         package: "tairix-test-bootguard-qemu-x86_64",
         binary: "tairix-test-bootguard-qemu-x86_64",
+        target: X86_64_TARGET,
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
+    QemuTest {
+        package: "tairix-test-user-counters-qemu-x86_64",
+        binary: "tairix-test-user-counters-qemu-x86_64",
         target: X86_64_TARGET,
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2935,7 +3060,7 @@ static TESTS: &[QemuTest] = &[
     // `plans/OPEN-DEFECTS.md` D56 aarch64 half: the same shape again, one
     // regime up. The `virt` board puts RAM at `0x4000_0000`, so 3 GiB spans
     // the two gigapages above the one holding the kernel image — enough that a
-    // process root carrying a full-RAM identity map, or a map sized from a
+    // map left at the one gigapage the port entry types, or sized from a
     // build-time constant rather than the discovered tree, is visible as a
     // failure. The vertical's build script dumps its `virt` tree for this same
     // figure, because the boot path sizes the map from the tree's `/memory`
@@ -3130,8 +3255,8 @@ static TESTS: &[QemuTest] = &[
     // shortcut — the kernel routes only an `svc` *from EL0* (a lower-EL
     // synchronous exception) to the syscall dispatch callback
     // (`kernel/arch/aarch64/src/exceptions.rs`) — so this test stands up a
-    // minimal EL0 context with the Stage-3 stage-1 primitives: it
-    // identity-maps the kernel (EL1), aliases the `tairix_sys_cap_query` stub
+    // minimal EL0 context with the Stage-3 stage-1 primitives: it builds an
+    // empty process root, aliases the `tairix_sys_cap_query` stub
     // page at a user virtual address with EL0-executable attributes plus
     // an EL0 stack, installs the dispatch callback and the EL1 vector
     // table, and `eret`s to EL0. The stub's real `svc`
@@ -3287,8 +3412,8 @@ static TESTS: &[QemuTest] = &[
     // test above. The build script compiles the separate fixture program
     // (`tests/integration/cc3_program`, crt0 + abi-sys) position-independent
     // and converts it to an `rxe` blob (`tairix_itest_harness::elf2rxe`)
-    // carrying the kernel's syscall CFI tag. On boot the test stands up a
-    // stage-1 address space (identity-mapping the kernel + MMIO, EL1),
+    // carrying the kernel's syscall CFI tag. On boot the test stands up an
+    // empty process address space,
     // activates it, installs the EL1 vector table and a dispatch callback, then
     // calls the production capability-checked, audited spawn caller
     // (`tairix_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
@@ -3417,9 +3542,9 @@ static TESTS: &[QemuTest] = &[
     // with the audited, version-pinned, checksummed `clang`/`ld.lld` wrapper
     // (`tools/cc`), links them into one PIE image, and converts
     // it to an `rxe` blob (`tairix_itest_harness::elf2rxe`) carrying the
-    // kernel's syscall CFI tag. On boot the test enables `CPACR_EL1.FPEN`,
-    // stands up a stage-1 address space (identity-mapping the kernel + MMIO,
-    // EL1), installs the EL1 vector table and a dispatch callback, then calls
+    // kernel's syscall CFI tag. On boot the test stands up the program's
+    // empty address space, installs the EL1 vector table and a dispatch
+    // callback, then calls
     // the production capability-checked, audited spawn caller
     // (`tairix_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
     // build the program's EL0 image and `eret` into it. The C program checks a
@@ -4375,8 +4500,9 @@ static TESTS: &[QemuTest] = &[
     // surfaces as an error return from the copy — the trap handler
     // redirected the saved PC to the window's fix-up — with the CPU
     // continuing to run; the fatal fault handler reports FAILURE. The
-    // riscv64/aarch64 members stand up a minimal identity-mapped kernel
-    // around their trap-vector installers (which arm the Arch HAL
+    // riscv64 member stands up a minimal identity-mapped kernel and the
+    // aarch64 one an empty process root around their trap-vector installers
+    // (which arm the Arch HAL
     // guarded-copy slot); all three drive the one shared
     // `tairix_arch_api::uaccess::conformance` checks. Single CPU and a
     // 60-second budget match the other boot-then-do-fixed-work tests.
@@ -4666,9 +4792,9 @@ static TESTS: &[QemuTest] = &[
     // (`boot_aarch64::boot`) on the `virt` board all the way to
     // `AuditEvent::BootCompleted` — the aarch64 analogue of the x86_64
     // `kernel-arch-boot` and the riscv64 `kernel-arch-boot-riscv64` verticals.
-    // It enables the stage-1 identity MMU + EL1 vectors, discovers the board
-    // from the embedded `virt` device tree (QEMU's aarch64 `-kernel <ELF>` path
-    // passes no `x0` DTB pointer), builds the `BootMemoryMap`, installs the
+    // It types the direct map from the embedded `virt` device tree (QEMU's
+    // aarch64 `-kernel <ELF>` path passes no `x0` DTB pointer), discovers the
+    // rest of the board, builds the `BootMemoryMap`, installs the
     // discovered-UART console + `svc` dispatch callback, and hands a validated
     // `BootInfo` to `kernel_core::kernel_main`; the audit sink reports PASS
     // through the ARM semihosting finisher — and only with the ramfb
@@ -5185,7 +5311,7 @@ static TESTS: &[QemuTest] = &[
     // (`tairix-test-driver-register-program`) PIE and converts it to an
     // `rxe` blob carrying the kernel's syscall CFI tag, registered under a
     // `/System/Drivers/` path. On boot the test discovers the board from the
-    // embedded `virt` DTB, enables the identity MMU + EL1 vectors, builds a
+    // embedded `virt` DTB, brings up the GIC, builds a
     // live `kernel/mem` FrameAllocator, binds the reply Port (send-gated on
     // a driver-class capability) into a live `RwLock<PortRegistry>`,
     // installs the production `KernelDispatchHook` through a
@@ -11579,10 +11705,8 @@ static TESTS: &[QemuTest] = &[
     },
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 display vertical —
     // the EL1/GICv2 + ramfb analogue of the riscv64 framebuffer-display
-    // vertical. `tairix-test-framebuffer-display-qemu-aarch64` brings the
-    // `virt` board up to EL1 (FP enable + 2 GiB identity MMU + vectors,
-    // shared from `virtio_qemu_support`), programs QEMU's `ramfb` over the
-    // shared `fw_cfg` MMIO DMA interface so a static guest-RAM surface
+    // vertical. `tairix-test-framebuffer-display-qemu-aarch64` programs
+    // QEMU's `ramfb` over the shared `fw_cfg` MMIO DMA interface so a static guest-RAM surface
     // becomes a real scan-out framebuffer, assembles the geometry as a
     // `FramebufferConfig`, then loads the signed framebuffer display
     // `.rxe` through `tairix_drvhost::Host` and drives it through
@@ -11647,11 +11771,10 @@ static TESTS: &[QemuTest] = &[
     // Stage 3b: `tairix-test-memory-isolation-qemu-aarch64` is the
     // aarch64 half of the Stage-3 "memory-isolation test passes"
     // per-sub-stage deliverable — the analogue of the x86_64 and riscv64
-    // verticals. It builds a victim and an attacker stage-1
-    // `paging::AddressSpace` (each identity-maps the low 2 GiB) that
+    // verticals. It builds a victim and an attacker process root that
     // disagree on a single 64 GiB page, installs the EL1 vectors and a
-    // `fault` handler, switches `TTBR0_EL1` to the attacker (enabling the
-    // MMU), and reads that page: the MMU raises a data abort, the handler
+    // `fault` handler, reads the page under the victim's root, then loads
+    // the attacker's and reads it again: the MMU raises a data abort, the handler
     // confirms the cause / faulting address, and reports PASS via
     // semihosting. A regression that fails to isolate the page reads it
     // without faulting and reports FAILURE explicitly. Single CPU and a
@@ -11679,8 +11802,8 @@ static TESTS: &[QemuTest] = &[
         expect: Expect::Pass,
     },
     // `plans/FIX-KHEAP.md` slab tier: `tairix-test-kslab-qemu-aarch64` proves
-    // the kernel heap's page accounting on real hardware. It enables the MMU
-    // over an identity space, builds a `FrameAllocator` over a `.bss` pool,
+    // the kernel heap's page accounting on real hardware. It builds a
+    // `FrameAllocator` over a `.bss` pool,
     // installs the production `kernel/mem::FramePages` supply into the
     // `tairix-kalloc` global allocator, and then asserts through the plain
     // `GlobalAlloc` surface that a page-sized allocation costs exactly one
@@ -11717,9 +11840,8 @@ static TESTS: &[QemuTest] = &[
     // `plans/OPEN-DEFECTS.md` D82: kthread kernel stacks are window-backed
     // with an unmapped guard slot. `tairix-test-stack-overrun-qemu-aarch64`
     // proves an overrunning kthread takes a synchronous data abort, not a
-    // next-reschedule canary detection. It reserves the kernel remap window,
-    // builds a stage-1 identity `AddressSpace` (which installs the window's
-    // shared slots) and activates it, installs the window-backed stack tier
+    // next-reschedule canary detection. It reserves the kernel remap window
+    // in the kernel root every CPU carries, installs the window-backed stack tier
     // over that window, and draws one stack from it through the production
     // `kstack::alloc_kernel_stack`. It checks the stack came from the window
     // (not the software-canary heap fallback) and that its usable run is
@@ -11841,9 +11963,8 @@ static TESTS: &[QemuTest] = &[
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 input vertical —
     // the `virt`-board virtio-input analogue of the x86_64 PS/2 vertical,
     // completing the `input` row of the QEMU matrix for aarch64.
-    // `tairix-test-input-virtio-mmio-qemu-aarch64` brings the `virt` board
-    // up to EL1 (FP enable + 2 GiB identity MMU + GICv2/EL1 IRQ path,
-    // shared from `virtio_qemu_support`), builds the virtio-MMIO bus from
+    // `tairix-test-input-virtio-mmio-qemu-aarch64` arms the GICv2/EL1 IRQ
+    // path shared from `virtio_qemu_support`, builds the virtio-MMIO bus from
     // the embedded device tree, provisions an `MmioTransport` through the
     // capability-gated `KernelMmioMapper`, arms the device's GICv2 SPI,
     // mints a `KernelVirtioHost`, loads the signed virtio-input `.rxe`
@@ -20469,6 +20590,19 @@ fn x86_64_topology_gates(spec: Spec, binary: &str) -> Spec {
     }
 }
 
+/// The binaries [`TESTS`] runs on a board whose CPUs implement EL2, which
+/// enters the kernel there as the Raspberry Pi firmware does.
+const EL2_ENTRY_BINARIES: [&str; 1] = ["tairix-test-el2-entry-qemu-aarch64"];
+
+/// EL2 on `spec`'s board if `binary` is one of [`EL2_ENTRY_BINARIES`].
+fn el2_entry_gates(spec: Spec, binary: &str) -> Spec {
+    if EL2_ENTRY_BINARIES.contains(&binary) {
+        spec.with_virtualization()
+    } else {
+        spec
+    }
+}
+
 /// The interrupt controllers [`INTERRUPT_CONTROLLER_BINARIES`] gives
 /// `binary` on `spec`, and the board's default on any other run.
 fn interrupt_controller_gates(spec: Spec, binary: &str) -> Spec {
@@ -20885,6 +21019,7 @@ fn finish_run(
     spec = lifecycle_sound_gates(spec, t);
     spec = dma_translation_gates(spec, t.binary);
     spec = interrupt_controller_gates(spec, t.binary);
+    spec = el2_entry_gates(spec, t.binary);
     spec = x86_64_topology_gates(spec, t.binary);
     spec = message_source_gates(spec, t.binary);
     spec = optical_disc(t, kernel, replica, spec)?;
@@ -22450,6 +22585,28 @@ mod tests {
             "tairix-test-autoload-input-qemu-x86-64",
         );
         assert_eq!(plain.dma_translation, DmaTranslation::Absent);
+    }
+
+    /// Every run entered at EL2 is an enrolled aarch64 run, and no other run
+    /// is.
+    #[test]
+    fn el2_entry_binaries_are_enrolled_aarch64_runs_and_alone_entered_so() {
+        use super::{base_spec, el2_entry_gates, EL2_ENTRY_BINARIES};
+
+        for binary in EL2_ENTRY_BINARIES {
+            let test = TESTS
+                .iter()
+                .find(|t| t.binary == binary)
+                .unwrap_or_else(|| panic!("{binary} must be enrolled"));
+            assert_eq!(test.target, super::AARCH64_TARGET, "{binary}");
+            let spec = base_spec(test.target, std::path::Path::new("/tmp/k"));
+            assert!(el2_entry_gates(spec, binary).virtualization, "{binary}");
+        }
+        let plain = el2_entry_gates(
+            tairix_qemu::Spec::for_aarch64_kernel("/tmp/k"),
+            "tairix-test-bootguard-qemu-aarch64",
+        );
+        assert!(!plain.virtualization);
     }
 
     /// Every binary `finish_run` builds with other interrupt controllers is

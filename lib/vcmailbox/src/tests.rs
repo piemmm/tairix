@@ -357,6 +357,7 @@ fn mmio_mailbox_validates_its_windows_and_buffer_address() {
             window_over(&mut buffer.0, 0),
             TEST_BUFFER_BUS,
             8,
+            BufferCoherency::none(),
         )
         .err(),
         Some(MailboxError::Window),
@@ -371,6 +372,7 @@ fn mmio_mailbox_validates_its_windows_and_buffer_address() {
             window_over(&mut short_buffer.0, 0),
             TEST_BUFFER_BUS,
             8,
+            BufferCoherency::none(),
         )
         .err(),
         Some(MailboxError::Window),
@@ -390,6 +392,7 @@ fn mmio_mailbox_validates_its_windows_and_buffer_address() {
                 window_over(&mut buffer.0, 0),
                 bus,
                 8,
+                BufferCoherency::none(),
             )
             .err(),
             Some(MailboxError::BadAperture),
@@ -408,6 +411,7 @@ fn mmio_exchange_stages_rings_and_reads_back() {
             window_over(&mut buffer.0, 0),
             TEST_BUFFER_BUS,
             8,
+            BufferCoherency::none(),
         )
         .expect("construct");
 
@@ -439,6 +443,7 @@ fn mmio_exchange_waits_on_the_property_mailbox_status_before_writing() {
         window_over(&mut buffer.0, 0),
         TEST_BUFFER_BUS,
         8,
+        BufferCoherency::none(),
     )
     .expect("construct");
 
@@ -458,6 +463,7 @@ fn mmio_exchange_times_out_when_the_firmware_never_answers() {
         window_over(&mut buffer.0, 0),
         TEST_BUFFER_BUS,
         8,
+        BufferCoherency::none(),
     )
     .expect("construct");
     let mut message = request().encode().expect("encode");
@@ -472,6 +478,7 @@ fn mmio_exchange_times_out_when_the_firmware_never_answers() {
         window_over(&mut buffer.0, 0),
         TEST_BUFFER_BUS,
         8,
+        BufferCoherency::none(),
     )
     .expect("construct");
     let mut message = request().encode().expect("encode");
@@ -486,6 +493,7 @@ fn mmio_exchange_times_out_when_the_firmware_never_answers() {
         window_over(&mut buffer.0, 0),
         TEST_BUFFER_BUS,
         8,
+        BufferCoherency::none(),
     )
     .expect("construct");
     let mut message = request().encode().expect("encode");
@@ -504,6 +512,7 @@ fn mmio_exchange_stats_localise_the_timeout_stage() {
         window_over(&mut buffer.0, 0),
         TEST_BUFFER_BUS,
         8,
+        BufferCoherency::none(),
     )
     .expect("construct");
     let mut message = request().encode().expect("encode");
@@ -523,6 +532,7 @@ fn mmio_exchange_stats_localise_the_timeout_stage() {
         window_over(&mut buffer.0, 0),
         TEST_BUFFER_BUS,
         8,
+        BufferCoherency::none(),
     )
     .expect("construct");
     let mut message = request().encode().expect("encode");
@@ -540,6 +550,7 @@ fn mmio_exchange_stats_localise_the_timeout_stage() {
         window_over(&mut buffer.0, 0),
         TEST_BUFFER_BUS,
         8,
+        BufferCoherency::none(),
     )
     .expect("construct");
     let mut message = request().encode().expect("encode");
@@ -564,6 +575,7 @@ fn mmio_exchange_drains_a_stale_property_completion_rather_than_taking_it_for_it
         window_over(&mut buffer.0, 0),
         TEST_BUFFER_BUS,
         8,
+        BufferCoherency::none(),
     )
     .expect("construct");
     let request = request().encode().expect("encode");
@@ -604,8 +616,14 @@ fn an_unanswered_request_keeps_the_buffer_until_its_reply_lands() {
     pokes
         .write_u32(REG_MBOX0_STATUS, STATUS_EMPTY)
         .expect("in the block");
-    let mut mailbox =
-        MmioMailbox::new(regs_window, buffer_window, TEST_BUFFER_BUS, 8).expect("construct");
+    let mut mailbox = MmioMailbox::new(
+        regs_window,
+        buffer_window,
+        TEST_BUFFER_BUS,
+        8,
+        BufferCoherency::none(),
+    )
+    .expect("construct");
     let first = request().encode().expect("encode");
     let mut message = first;
     assert_eq!(mailbox.exchange(&mut message), Err(MailboxError::Timeout));
@@ -654,6 +672,7 @@ fn draining_a_late_reply_leaves_the_next_request_its_whole_budget() {
         window_over(&mut buffer.0, 0),
         TEST_BUFFER_BUS,
         1,
+        BufferCoherency::none(),
     )
     .expect("construct");
     let mut late = encode_firmware_revision_query();
@@ -1015,6 +1034,7 @@ fn the_owned_mailbox_turns_the_inbox_interrupt_on_and_the_boot_transport_leaves_
         window_over(&mut buffer.0, 0),
         TEST_BUFFER_BUS,
         8,
+        BufferCoherency::none(),
     )
     .expect("construct");
     assert_eq!(
@@ -1597,7 +1617,7 @@ fn mmio_exchange_runs_the_coherency_hooks_clean_then_invalidate() {
     let mut regs = ready_regs();
     let mut buffer = Aligned([0u8; PROPERTY_LEN_BYTES]);
     {
-        let mut mailbox = MmioMailbox::with_coherency(
+        let mut mailbox = MmioMailbox::new(
             window_over(&mut regs.0, 0),
             window_over(&mut buffer.0, BUFFER_PHYS),
             TEST_BUFFER_BUS,
@@ -1629,6 +1649,7 @@ fn mmio_new_defaults_to_no_coherency_maintenance() {
         window_over(&mut buffer.0, 0),
         TEST_BUFFER_BUS,
         8,
+        BufferCoherency::none(),
     )
     .expect("construct");
     let mut message = request().encode().expect("encode");

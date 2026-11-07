@@ -173,14 +173,15 @@ Legend: `✓` provided (optional features count) · `◐` partial ·
 | Online grow | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Device-health monitoring → triggered scrub | ✓ | — | — | — | — |
 
-TAIRiX ships drivers for ARXFS (native) and for ext2/ext3/ext4, FAT32,
-ADFS, AmigaDOS (OFS and FFS), ISO 9660 (read-only: Joliet, Rock Ridge, High
-Sierra) and UDF 1.02–2.60 as interoperability drivers for foreign volumes; on
-removable media and in disk images each runs in user space, reaching only its
-own volume's blocks. Archives mount as volumes through the same path: zip,
-tar (plain, gzip'd or bzip2'd), Spark and ArcFS read and written, RAR read,
-each member's RISC OS fields carried. A copy onto ARXFS keeps a
-file's RISC OS filetype, Mac type and creator, Amiga comment and holes.
+TAIRiX ships drivers for ARXFS (native) and for ext2/ext3/ext4, FAT32, ADFS,
+AmigaDOS (OFS and FFS), ISO 9660 (read-only but for its label: Joliet, Rock
+Ridge, High Sierra) and UDF 1.02–2.60 as interoperability drivers for foreign
+volumes; on removable media and in disk images each runs in user space,
+reaching only its own volume's blocks. Archives mount as volumes through the
+same path: zip, tar (plain, gzip'd or bzip2'd), Spark and ArcFS read and
+written, RAR read, each member's RISC OS fields carried. A copy onto ARXFS
+keeps a file's RISC OS filetype, Mac type and creator, Amiga comment and
+holes.
 
 ## Security & attack-vector prevention
 
@@ -198,10 +199,11 @@ no ambient root, signed code) are designed in from the kernel up.
 | Per-task floating-point register state (§4) | One task reading the float registers another task left behind | ✓ SSE per entry, rest at park | ✓ eager | ✓ lazy `FS` | ✓ host |
 | No kernel register state at first user entry (§4) | A new process reading kernel pointers or another task's vector residue | ✓ | ✓ | ✓ | ✓ host |
 | W^X + position-independent executables (§19.2) | Code injection, writable-executable memory | ✓ | ✓ | ✓ | ✓ |
-| Kernel mappings W^X, nothing physical mapped as itself: image mapped per section, direct map non-executable, supervisor writes held to read-only (§19.2) | A NULL or stray kernel pointer landing in live memory; kernel text or read-only data overwritten, or kernel data executed | ✓ | ▢ | ▢ | — |
+| Kernel mappings W^X, nothing physical mapped as itself: image mapped per section, direct map non-executable, supervisor writes held to read-only (§19.2) | A NULL or stray kernel pointer landing in live memory; kernel text or read-only data overwritten, or kernel data executed | ✓ | ✓ | ▢ | — |
 | Kernel cannot execute a user page (§19.2) | Kernel control flow redirected into user-supplied code (ret2usr) | ✓ SMEP if offered · ▢ without | ✓ `PXN` | ✓ ISA | — |
 | Kernel cannot touch a user page but through its validated copy (§19.2) | A kernel bug or confused deputy reading or writing user memory in place | ✓ SMAP if offered · ▢ without | ✓ PAN if offered · ▢ without | ✓ `SUM` clear | — |
 | User code cannot read the descriptor-table registers (§19.2) | Kernel addresses disclosed to user code | ✓ UMIP if offered | — | — | — |
+| User code reaches no hardware clock or counter (§19.1) | A clock finer than the coarsened one for timing attacks; a task stopping the kernel's preemption timer | ✓ `CR4.TSD`, `CR4.PCE` | ✓ `CNTKCTL_EL1`, `PMUSERENR_EL0` | ✓ `scounteren` | ✓ host |
 | Load-time CFI tag vs syscall-hash (§19.2) | Control-flow hijacking across ABI/IPC | ✓ | ✓ | ✓ | ✓ |
 | Software memory tagging (§19.10) | Use-after-free (software floor) | ✓ | ✓ | ✓ | ✓ |
 | Zero-on-free of secrets (§4) | Secret recovery from reused memory | ✓ | ✓ | ✓ | ✓ |
@@ -225,7 +227,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | Branch-free clamp of user-chosen table indices (§19.1) | Spectre-v1 bounds-check bypass into kernel memory | ◐ syscall number | ◐ syscall number | ◐ syscall number | ◐ syscall number |
 | Stack + slab guard pages, hardware fault (§4) | Stack/heap overrun into adjacent memory | ✓ | ✓ | ✓ | — |
 | Boot-stack poison guard, read back by the post-mortem (§4, §19.2) | Early-boot stack overrun corrupting `.bss` silently, before the MMU exists to fault on it | ✓ | ✓ | ✓ | — |
-| Boot stack's guard read-only once the kernel root is loaded, the overrun named from the faulting address (§4) | A boot-stack overrun rewriting the page tables beneath it | ✓ | ▢ | ▢ | — |
+| Boot stack's guard read-only once the kernel root is loaded, the overrun named from the faulting address (§4) | A boot-stack overrun rewriting the page tables beneath it | ✓ | ✓ | ▢ | — |
 | Root encrypted at its owner's choice, swap always encrypted (§4, §11) | Secret/data recovery at rest; on a plaintext root the files, password hashes, sealed app secrets and the signing and log-attestation keys under `/System/Security/Keys` are protected only by the disk staying in its owner's hands, so whoever reads it offline can forge sealed audit segments | ✓ | ✓ | ✓ | — |
 | Capability-gated, bounded DMA carves and MMIO grants (§4, §18.1) | A driver reaching device registers or memory it was not granted | ✓ | ✓ | ✓ | — |
 | DMA translation: a device reaches only its node's domain, revoked at its driver's end (§4, `plans/IOMMU.md`) | Malicious-device or compromised-driver DMA into any memory, before or after the unit takes over; a dead driver's device writing freed memory | ◐ VT-d, AMD-Vi, virtio-iommu | ✓ SMMUv3, virtio-iommu | ✓ RISC-V IOMMU, virtio-iommu | — |

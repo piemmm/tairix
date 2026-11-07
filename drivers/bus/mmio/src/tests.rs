@@ -483,10 +483,16 @@ fn virtio_mmio_bus_from_dtb_enumerates_attached_slots() {
     stamp(stride, 2);
 
     let blob = build_virt_dtb_at(&bases, stride);
-    // SAFETY: `backing` outlives the bus and is exclusively owned here;
-    // the DTB bases address it, so the aperture is "identity-mapped" for
-    // the duration of the test.
-    let bus = unsafe { crate::virtio_mmio_bus_from_dtb(&blob) }.expect("bus constructs");
+    let aperture = backing.as_ptr();
+    // SAFETY: `backing` outlives the bus and is exclusively owned here; each
+    // slot's reader is derived from it, at the slot's offset into it.
+    let bus = unsafe {
+        crate::virtio_mmio_bus_from_dtb(&blob, |at, _| {
+            let offset = usize::try_from(at.checked_sub(base)?).ok()?;
+            Some(aperture.wrapping_byte_add(offset))
+        })
+    }
+    .expect("bus constructs");
 
     let mut out = [BusDevice {
         vendor: 0,
@@ -508,10 +514,45 @@ fn virtio_mmio_bus_from_dtb_reports_not_found_without_slots() {
     let blob = build_virt_dtb(0);
     // SAFETY: no `virtio,mmio` slot exists, so the constructor returns
     // before minting any reader; no memory is dereferenced.
-    let err = unsafe { crate::virtio_mmio_bus_from_dtb(&blob) }
+    let err = unsafe { crate::virtio_mmio_bus_from_dtb(&blob, |_, _| None) }
         .err()
         .expect("no slots → error");
     assert_eq!(err, DriverError::NotFound);
+}
+
+/// A port that reaches the aperture elsewhere than at its physical address
+/// reads it where it says, still naming each slot by its physical base; one
+/// that cannot reach it gets no bus.
+#[test]
+fn virtio_mmio_bus_from_dtb_reads_the_aperture_where_the_map_says() {
+    let mut backing = vec![0u32; 0x200];
+    backing[0] = VIRTIO_MMIO_MAGIC;
+    backing[1] = 2;
+    backing[2] = 2;
+    backing[3] = VIRTIO_MMIO_DEFAULT_VENDOR;
+    let phys = 0x0a00_0000u64;
+    let blob = build_virt_dtb_at(&[phys], 0x200);
+    let at = backing.as_ptr();
+    // SAFETY: `backing` outlives the bus and stands in for the aperture the
+    // map names.
+    let bus = unsafe {
+        crate::virtio_mmio_bus_from_dtb(&blob, |base, len| {
+            (base == phys && len == 0x200).then_some(at)
+        })
+    }
+    .expect("bus constructs");
+    let mut out = [BusDevice {
+        vendor: 0,
+        device: 0,
+        class: 0,
+        reserved0: 0,
+        address: 0,
+    }; 2];
+    assert_eq!(bus.enumerate(&mut out), Ok(1));
+    assert_eq!((out[0].device, out[0].address), (2, phys));
+    // SAFETY: the map refuses, so no reader is minted.
+    let refused = unsafe { crate::virtio_mmio_bus_from_dtb(&blob, |_, _| None) };
+    assert_eq!(refused.err(), Some(DriverError::DeviceFault));
 }
 
 /// Two populated slots, the second's node disabled.

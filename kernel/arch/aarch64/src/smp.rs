@@ -68,9 +68,8 @@
 //! that never came up. The boot CPU gives its verdict back
 //! ([`tairix_arch_api::StartVerdict`]), and a core runs only on a verdict
 //! that took its join: one answering a start given up on stops. Each core
-//! answers in its own slot of the stack pool, the answer and the verdict
-//! each alone in a cache writeback granule, since the core writes and reads
-//! them with its caches off while every other CPU runs with theirs on.
+//! answers in its own slot of the stack pool, once its trampoline has turned
+//! translation and its caches on.
 //!
 //! # Host testability
 //!
@@ -101,8 +100,8 @@ use tairix_sync::FnCell;
 pub const SECONDARY_STACK_BYTES: usize = 1 << 16;
 
 /// Pool base address published to the `smp.s` trampoline (`0` until a
-/// [`SecondaryStackPool`] is registered). Read by the MMU-off secondary
-/// stub by symbol; written once by [`SecondaryStackPool::register`].
+/// [`SecondaryStackPool`] is registered). Read by the trampoline by symbol
+/// once translation is on; written once by [`SecondaryStackPool::register`].
 ///
 /// The exported name is port-qualified like this crate's other exported
 /// symbols: the riscv64 port publishes the same pool base to its own
@@ -136,39 +135,22 @@ pub enum SecondaryStackError {
     AlreadyRegistered,
 }
 
-/// The architectural maximum of a cache writeback granule (`CTR_EL0.CWG`):
-/// a word alone in a granule this large shares a line with nothing, however
-/// the caches are built.
-const WRITEBACK_GRANULE: usize = 2048;
-
-/// A word alone in a cache writeback granule, so a core reaching it with
-/// its caches off and CPUs reaching it with theirs on find no line of other
-/// data a cache could write back over it.
-#[repr(C, align(2048))]
-struct Granule(AtomicU64);
-
-const _: () = assert!(
-    core::mem::align_of::<Granule>() == WRITEBACK_GRANULE
-        && core::mem::size_of::<Granule>() == WRITEBACK_GRANULE
-);
-
-/// One secondary core's slot: its answer to the CPU that starts it and the
-/// verdict it waits on, each alone in its granule, and its
-/// [`SECONDARY_STACK_BYTES`] kernel stack, growing down from the slot's end.
+/// One secondary core's slot: its answer to the CPU that starts it, the
+/// verdict it waits on, and its [`SECONDARY_STACK_BYTES`] kernel stack,
+/// growing down from the slot's end. Aligned so that end, the stack top the
+/// trampoline computes, is a valid stack pointer.
 ///
 /// Public so an allocator-having boot path can size a **runtime** pool
 /// to the discovered core count (a zeroed, leaked `[SecondaryStack]`
 /// registered through [`register_secondary_stacks`]) instead of a
 /// compile-time `SecondaryStackPool<N>` — the per-core stack count is
 /// derived from discovery, never a baked-in ceiling.
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct SecondaryStack {
-    /// What the core answers ([`tairix_arch_api::StartAnswer::word`]),
-    /// written with its caches off.
-    answer: Granule,
-    /// What the starting CPU makes of it ([`tairix_arch_api::StartVerdict`]),
-    /// read with the core's caches off.
-    verdict: Granule,
+    /// What the core answers ([`tairix_arch_api::StartAnswer::word`]).
+    answer: AtomicU64,
+    /// What the starting CPU makes of it ([`tairix_arch_api::StartVerdict`]).
+    verdict: AtomicU64,
     /// The core's live stack, written through its stack pointer while the
     /// slot is shared.
     bytes: UnsafeCell<[u8; SECONDARY_STACK_BYTES]>,
@@ -180,10 +162,6 @@ pub struct SecondaryStack {
 // the slot. Sharing a slot between CPUs therefore races on nothing.
 unsafe impl Sync for SecondaryStack {}
 
-// A slot ends on a granule, so the stack top the trampoline computes, the
-// next slot's start, is aligned for a stack pointer and shares no granule.
-const _: () = assert!(core::mem::size_of::<SecondaryStack>().is_multiple_of(WRITEBACK_GRANULE));
-
 impl SecondaryStack {
     // A 64 KiB zero array is a deliberately large backing (a secondary
     // core's whole kernel stack), const-evaluated into a `static`
@@ -194,8 +172,8 @@ impl SecondaryStack {
     #[allow(clippy::large_stack_arrays)]
     const fn new() -> Self {
         Self {
-            answer: Granule(AtomicU64::new(0)),
-            verdict: Granule(AtomicU64::new(0)),
+            answer: AtomicU64::new(0),
+            verdict: AtomicU64::new(0),
             bytes: UnsafeCell::new([0u8; SECONDARY_STACK_BYTES]),
         }
     }
@@ -239,10 +217,8 @@ impl<const N: usize> SecondaryStackPool<N> {
     /// [`is_valid_cpu`] bound, then return the covered CPU count `N`.
     ///
     /// Must be called on the boot core, exactly once, before any
-    /// `start_secondary`. The trampoline reads the published base and
-    /// stride with the MMU off, so the pool must stay mapped at its
-    /// physical address for the lifetime of the kernel — the `&'static`
-    /// receiver pins that.
+    /// `start_secondary`; the `&'static` receiver keeps the pool alive for
+    /// the kernel's lifetime.
     ///
     /// # Errors
     ///
@@ -263,16 +239,9 @@ impl<const N: usize> SecondaryStackPool<N> {
 /// core count and registers it here; the `const`-generic
 /// [`SecondaryStackPool::register`] delegates to the same set-once
 /// body. Must be called on the boot core, exactly once, before any
-/// `start_secondary`; the slice must stay mapped at its physical
-/// address for the kernel's lifetime (the `&'static` pins that).
-///
-/// A freshly-started core reads the published globals — and writes its
-/// first stack frames — with the MMU (and therefore its data cache)
-/// **off**, while this boot-CPU write path runs cacheable. The publish
-/// therefore clean+invalidates the globals *and* the whole stack region
-/// to the point of coherency: a dirty line left over a stack slot would
-/// later evict on the boot CPU and overwrite the started core's live
-/// stack — real-silicon corruption cache-less QEMU cannot show.
+/// `start_secondary`; the `&'static` slice lives for the kernel's lifetime.
+/// A started core reads the globals once its MMU and caches are on, so it
+/// sees the boot CPU's writes coherently.
 ///
 /// # Errors
 ///
@@ -293,27 +262,6 @@ pub fn register_secondary_stacks(
         Ordering::Release,
     );
     SECONDARY_STACK_COUNT.store(stacks.len(), Ordering::Release);
-    // Make the publish observable to a core that starts with its cache
-    // off: sweep the globals and the stack region to the point of
-    // coherency, then `dsb sy` (inside the sweep) so the maintenance
-    // completes before any `CPU_ON`. On the host the sweep is vacuous.
-    crate::paging::clean_invalidate_range_to_poc(
-        core::ptr::addr_of!(SECONDARY_STACK_BASE) as u64,
-        core::mem::size_of::<AtomicPtr<SecondaryStack>>() as u64,
-    );
-    crate::paging::clean_invalidate_range_to_poc(
-        core::ptr::addr_of!(SECONDARY_STACK_STRIDE) as u64,
-        core::mem::size_of::<AtomicU64>() as u64,
-    );
-    // The started core reads the count too, finding its slot.
-    crate::paging::clean_invalidate_range_to_poc(
-        core::ptr::addr_of!(SECONDARY_STACK_COUNT) as u64,
-        core::mem::size_of::<AtomicUsize>() as u64,
-    );
-    crate::paging::clean_invalidate_range_to_poc(
-        stacks.as_ptr() as u64,
-        core::mem::size_of_val(stacks) as u64,
-    );
     Ok(stacks.len())
 }
 
@@ -325,9 +273,7 @@ fn slot(cpu: CpuId) -> Option<&'static SecondaryStack> {
     }
     let base = SECONDARY_STACK_BASE.load(Ordering::Acquire);
     // SAFETY: `register_secondary_stacks` published `base`, the start of a
-    // `&'static [SecondaryStack]`, ahead of its length, and swept both to the
-    // point of coherency before any core was started, which is what makes
-    // them visible to a core whose caches are still off. `cpu` is below that
+    // `&'static [SecondaryStack]`, ahead of its length. `cpu` is below that
     // length, so the slot is an element of a slice that lives as long as the
     // kernel, and its live stack is an `UnsafeCell` a shared reference may
     // span.
@@ -363,18 +309,17 @@ static SECONDARY_ENTRY_FN: FnCell<extern "C" fn(CpuId) -> !> = FnCell::empty();
 
 /// Base address of the published dense-id → `MPIDR_EL1`-affinity table
 /// (`0` until [`register_secondary_affinities`] publishes it). Read by
-/// symbol, MMU-off, by the `smp.s` spin-table trampoline: a released
-/// core carries no context register, so it linearly matches its own
-/// affinity against this table to recover its dense [`CpuId`] (entry
+/// symbol by the `smp.s` spin-table trampoline once it is in the high half:
+/// a released core carries no context register, so it linearly matches its
+/// own affinity against this table to recover its dense [`CpuId`] (entry
 /// `i` is dense id `i`'s affinity).
 #[no_mangle]
 #[used]
 static SECONDARY_AFFINITY_BASE: AtomicU64 = AtomicU64::new(0);
 
 /// Number of entries in the published affinity table (`0` until
-/// published). Read by symbol, MMU-off, by the `smp.s` spin-table
-/// trampoline; an affinity not found within this bound parks the core
-/// (fail closed).
+/// published). Read by symbol by the `smp.s` spin-table trampoline; an
+/// affinity not found within this bound parks the core (fail closed).
 #[no_mangle]
 #[used]
 static SECONDARY_AFFINITY_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -385,12 +330,17 @@ static SECONDARY_AFFINITY_COUNT: AtomicU64 = AtomicU64::new(0);
 /// `0` parks; a non-zero value is the physical entry address a *released*
 /// core branches to. Written only by `start_secondary_spintable`.
 ///
+/// In `.data`, not `.bss`: a parked core reads it from the moment the
+/// firmware loads the image, long before the boot CPU zeroes `.bss`, so it
+/// must hold its initial value in the image itself.
+///
 /// This word gates *whether* a release is in progress; it does not name
 /// *which* core — [`SECONDARY_KERNEL_RELEASE_TARGET`] does. Both cores
 /// parked here poll both words: a woken core branches only when the
 /// release word is non-zero **and** the target affinity is its own.
 #[no_mangle]
 #[used]
+#[link_section = ".data.secondary_release"]
 static SECONDARY_KERNEL_RELEASE: AtomicU64 = AtomicU64::new(0);
 
 /// The `MPIDR_EL1` affinity (`Aff0`–`Aff2`, [`MPIDR_AFFINITY_MASK`]) of
@@ -416,9 +366,11 @@ static SECONDARY_KERNEL_RELEASE: AtomicU64 = AtomicU64::new(0);
 /// the last-released core deterministically faulting mid-bring-up and
 /// never checking in). The exact predicate is [`release_gate_open`]. The
 /// all-ones initial value matches no real masked affinity, so the gate is
-/// closed until a deliberate release opens it (fail closed).
+/// closed until a deliberate release opens it (fail closed); it is in the
+/// image's `.data` for the release word's reason.
 #[no_mangle]
 #[used]
+#[link_section = ".data.secondary_release"]
 static SECONDARY_KERNEL_RELEASE_TARGET: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// The per-core release-gate predicate the `boot.s` park loop and the
@@ -458,12 +410,9 @@ pub enum SecondaryAffinityError {
 /// id `i`'s `MPIDR_EL1` affinity, `Aff0`–`Aff2` masked), returning the
 /// covered CPU count.
 ///
-/// Must be called on the boot core, exactly once, before any
-/// spin-table release; the slice must stay mapped at its physical
-/// address for the kernel's lifetime (the `&'static` pins that). The
-/// released core reads the table with the MMU (and cache) off, so the
-/// publish sweeps the pointer, the count, and the table itself to the
-/// point of coherency.
+/// Must be called on the boot core, exactly once, before any spin-table
+/// release; the `&'static` slice lives for the kernel's lifetime. The
+/// released core reads the table once its MMU and caches are on.
 ///
 /// # Errors
 ///
@@ -477,21 +426,8 @@ pub fn register_secondary_affinities(
     {
         return Err(SecondaryAffinityError::AlreadyRegistered);
     }
-    let base = affinities.as_ptr() as u64;
-    // Publish the count only after the base so an MMU-off reader that
-    // observes a non-zero base sees a bounded, coherent table; the PoC
-    // sweeps below order both ahead of any release.
-    SECONDARY_AFFINITY_BASE.store(base, Ordering::Release);
+    SECONDARY_AFFINITY_BASE.store(affinities.as_ptr() as u64, Ordering::Release);
     SECONDARY_AFFINITY_COUNT.store(affinities.len() as u64, Ordering::Release);
-    crate::paging::clean_invalidate_range_to_poc(base, core::mem::size_of_val(affinities) as u64);
-    crate::paging::clean_invalidate_range_to_poc(
-        core::ptr::addr_of!(SECONDARY_AFFINITY_BASE) as u64,
-        core::mem::size_of::<AtomicU64>() as u64,
-    );
-    crate::paging::clean_invalidate_range_to_poc(
-        core::ptr::addr_of!(SECONDARY_AFFINITY_COUNT) as u64,
-        core::mem::size_of::<AtomicU64>() as u64,
-    );
     Ok(affinities.len())
 }
 
@@ -531,6 +467,9 @@ pub enum StartCpuError {
     /// could not recover its dense id, so the release is refused at the
     /// call site rather than parking the core in the trampoline.
     NoAffinityTable,
+    /// The firmware's release word is misaligned or lies where the direct
+    /// map reaches no RAM, so no store could release the core.
+    ReleaseWordUnreachable,
     /// The PSCI `CPU_ON` call returned an error (the core was already on,
     /// the MPIDR is invalid, the entry address was rejected, etc.); the
     /// payload is the raw PSCI status (`crate::psci::error`).
@@ -550,6 +489,7 @@ impl StartCpuError {
             Self::CpuIdOutOfRange => "cpu_id_out_of_range",
             Self::NoEntryInstalled => "no_secondary_entry_installed",
             Self::NoAffinityTable => "no_secondary_affinity_table",
+            Self::ReleaseWordUnreachable => "release_word_unreachable",
             Self::Psci(_) => "psci_cpu_on_failed",
             Self::StartTimedOut => "core_start_timed_out",
             Self::LacksPan => "core_lacks_pan",
@@ -560,7 +500,9 @@ impl StartCpuError {
 impl From<StartCpuError> for SmpError {
     fn from(err: StartCpuError) -> Self {
         match err {
-            StartCpuError::CpuIdOutOfRange => Self::InvalidCpu,
+            StartCpuError::CpuIdOutOfRange | StartCpuError::ReleaseWordUnreachable => {
+                Self::InvalidCpu
+            }
             StartCpuError::NoEntryInstalled | StartCpuError::NoAffinityTable => Self::NotReady,
             StartCpuError::Psci(status) => Self::StartRejected(i64::from(status)),
             StartCpuError::StartTimedOut => Self::StartRejected(0),
@@ -585,55 +527,49 @@ fn send_event() {
     }
 }
 
-/// Push the granule `word` is alone in to the point of coherency, and drop
-/// any copy a cache holds.
+/// Complete this CPU's earlier stores before what follows — the firmware
+/// call that starts a core, or the `sev` that wakes one — so the other CPU
+/// reads them.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-fn sweep(word: &Granule) {
-    crate::paging::clean_invalidate_range_to_poc(
-        core::ptr::from_ref(word) as u64,
-        core::mem::size_of::<Granule>() as u64,
-    );
+fn complete_stores() {
+    // SAFETY: `dsb ish` only waits for this CPU's earlier memory accesses to
+    // complete in the inner-shareable domain.
+    unsafe {
+        core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+    }
 }
 
-/// Ready `slot` for its core's start: no answer and no verdict, through the
-/// point of coherency, so no copy a cache holds can be written back over
-/// either.
+/// Ready `slot` for its core's start: no answer and no verdict, both
+/// complete before the core can read them.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn ready(slot: &SecondaryStack) {
-    slot.answer.0.store(0, Ordering::Relaxed);
-    slot.verdict.0.store(0, Ordering::Relaxed);
-    sweep(&slot.answer);
-    sweep(&slot.verdict);
+    slot.answer.store(0, Ordering::Relaxed);
+    slot.verdict.store(0, Ordering::Relaxed);
+    complete_stores();
 }
 
 /// Settle the start of `cpu` on its `slot`: the answer it gives before
-/// `out_of_time`, re-read through the point of coherency, and the verdict on
-/// it given back the same way, so a core answering after the wait is told
-/// that its start was given up on.
+/// `out_of_time`, and the verdict on it given back, so a core answering
+/// after the wait is told that its start was given up on.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn settle(
     slot: &SecondaryStack,
     cpu: CpuId,
     out_of_time: impl FnMut() -> bool,
 ) -> Result<(), StartCpuError> {
-    let load = || {
-        sweep(&slot.answer);
-        slot.answer.0.load(Ordering::Acquire)
-    };
+    let load = || slot.answer.load(Ordering::Acquire);
     let answer = tairix_arch_api::await_start_answer(load, cpu, out_of_time);
     give(slot, StartVerdict::on(answer), cpu);
     outcome(answer)
 }
 
-/// Give `cpu` the `verdict` on its start in its `slot`, through the point of
-/// coherency, and wake it from its wait for one. Every start made gets one,
-/// since nothing else ends that wait.
+/// Give `cpu` the `verdict` on its start in its `slot`, and wake it from its
+/// wait for one. Every start made gets one, since nothing else ends that
+/// wait.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn give(slot: &SecondaryStack, verdict: StartVerdict, cpu: CpuId) {
-    slot.verdict.0.store(verdict.word(cpu), Ordering::Release);
-    // The sweep's `dsb sy` completes the store at the point of coherency
-    // before the `sev`, so a core the event wakes reads the verdict.
-    sweep(&slot.verdict);
+    slot.verdict.store(verdict.word(cpu), Ordering::Release);
+    complete_stores();
     send_event();
 }
 
@@ -650,15 +586,14 @@ fn outcome(answer: Option<StartAnswer>) -> Result<(), StartCpuError> {
     }
 }
 
-/// Answer the boot CPU as `cpu` in its `slot`, from a core whose caches are
-/// still off: the store goes to memory, and no other data shares its line.
+/// Answer the boot CPU as `cpu` in its `slot`.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn answer_boot_cpu(slot: &SecondaryStack, answer: StartAnswer, cpu: CpuId) {
-    slot.answer.0.store(answer.word(cpu), Ordering::Release);
+    slot.answer.store(answer.word(cpu), Ordering::Release);
 }
 
-/// Whether the boot CPU took `cpu`'s join, the verdict read from its `slot`
-/// with its caches off, waiting in `wfe` for the event that gives it.
+/// Whether the boot CPU took `cpu`'s join, the verdict read from its `slot`,
+/// waiting in `wfe` for the event that gives it.
 ///
 /// The wait is timed by the boot CPU alone, which gives every start a
 /// verdict: a clock read here would be this core's own, unprogrammed on
@@ -673,7 +608,7 @@ fn taken(slot: &SecondaryStack, cpu: CpuId) -> bool {
         }
     };
     tairix_arch_api::await_start_verdict(
-        || slot.verdict.0.load(Ordering::Acquire),
+        || slot.verdict.load(Ordering::Acquire),
         cpu,
         wait_for_event,
     ) == StartVerdict::Taken
@@ -692,13 +627,6 @@ pub fn set_secondary_entry(entry: extern "C" fn(CpuId) -> !) -> Result<(), SetEn
     if !SECONDARY_ENTRY_FN.claim(entry) {
         return Err(SetEntryError::AlreadyInstalled);
     }
-    // The freshly-started core reads this slot before it enables its
-    // MMU/cache; push the cacheable write to the point of coherency so
-    // the MMU-off read observes it (vacuous on the host).
-    crate::paging::clean_invalidate_range_to_poc(
-        core::ptr::addr_of!(SECONDARY_ENTRY_FN) as u64,
-        core::mem::size_of_val(&SECONDARY_ENTRY_FN) as u64,
-    );
     Ok(())
 }
 
@@ -802,10 +730,10 @@ pub unsafe fn start_secondary(
     let Some(slot) = slot(cpu) else {
         return Err(StartCpuError::CpuIdOutOfRange);
     };
-    let entry = secondary_trampoline_addr() as u64;
+    let entry = crate::paging::image_phys(secondary_trampoline_addr() as u64);
     ready(slot);
-    // SAFETY: `entry` is the physical address of the `smp.s` trampoline
-    // (the image runs with the MMU off), `cpu` is in range, and the
+    // SAFETY: `entry` is the physical address of the `smp.s` trampoline,
+    // where a core starts with its MMU off; `cpu` is in range, and the
     // caller's contract guarantees `target_mpidr` names a real parked
     // core. `cpu` is handed back as the trampoline's `context_id`.
     let ret = unsafe { crate::psci::cpu_on(method, target_mpidr, entry, u64::from(cpu)) };
@@ -862,12 +790,11 @@ pub unsafe fn start_secondary(
 ///
 /// # Safety
 ///
-/// Must be called from the boot core after `boot.s` has zeroed `.bss`
-/// (so the secondary stack pool is clear) and after the secondary entry
-/// and affinity table are installed. `release_addr` must be the
-/// firmware-declared `cpu-release-addr` word for `cpu` — an
-/// identity-mapped, writable physical word the kernel image does not
-/// occupy — `cpu` must be the dense id the rest of the kernel uses for
+/// Must be called from the boot core after the secondary entry and
+/// affinity table are installed. `release_addr` must be the
+/// firmware-declared `cpu-release-addr` word for `cpu` — RAM the kernel
+/// image does not occupy, which the direct map must cover or the release
+/// is refused — `cpu` must be the dense id the rest of the kernel uses for
 /// the core parked on it, and `target_affinity` must be that core's
 /// masked ([`MPIDR_AFFINITY_MASK`]) `MPIDR_EL1` affinity (the value the
 /// park loop compares its own affinity against).
@@ -890,7 +817,12 @@ pub unsafe fn start_secondary_spintable(
     let Some(slot) = slot(cpu) else {
         return Err(StartCpuError::CpuIdOutOfRange);
     };
-    let entry = spintable_trampoline_addr() as u64;
+    let word = core::mem::size_of::<u64>() as u64;
+    if !release_addr.is_multiple_of(word) || !crate::paging::physmap_covers(release_addr, word) {
+        return Err(StartCpuError::ReleaseWordUnreachable);
+    }
+    let release = crate::paging::physmap_virt(release_addr);
+    let entry = crate::paging::image_phys(spintable_trampoline_addr() as u64);
     ready(slot);
     // Name the core being released *before* opening the gate, so a core
     // that wakes on the `sev` and sees the release word non-zero also
@@ -898,11 +830,11 @@ pub unsafe fn start_secondary_spintable(
     // the rest re-park (the park loop polls both words each iteration).
     SECONDARY_KERNEL_RELEASE_TARGET.store(target_affinity, Ordering::Release);
     // SAFETY: the caller's contract guarantees `release_addr` is the
-    // firmware's declared release word — identity-mapped RAM outside
-    // the kernel image — so the volatile store writes only the word the
-    // parked core polls.
+    // firmware's declared release word — RAM outside the kernel image, which
+    // the direct map was just checked to cover at `release` — so the volatile
+    // store writes only the word the parked core polls.
     unsafe {
-        core::ptr::write_volatile(release_addr as *mut u64, entry);
+        core::ptr::write_volatile(release as *mut u64, entry);
     }
     SECONDARY_KERNEL_RELEASE.store(entry, Ordering::Release);
     // The parked cores poll with their MMU (and cache) off: push the
@@ -913,7 +845,7 @@ pub unsafe fn start_secondary_spintable(
         core::ptr::addr_of!(SECONDARY_KERNEL_RELEASE_TARGET) as u64,
         core::mem::size_of::<AtomicU64>() as u64,
     );
-    crate::paging::clean_invalidate_range_to_poc(release_addr, core::mem::size_of::<u64>() as u64);
+    crate::paging::clean_invalidate_range_to_poc(release, word);
     crate::paging::clean_invalidate_range_to_poc(
         core::ptr::addr_of!(SECONDARY_KERNEL_RELEASE) as u64,
         core::mem::size_of::<AtomicU64>() as u64,
@@ -945,22 +877,33 @@ fn spintable_trampoline_addr() -> usize {
 
 /// Rust side of the secondary trampoline.
 ///
-/// `smp.s` jumps here, once per secondary core, after seeding a private
-/// stack. It holds the core to the kernel's protection
-/// ([`crate::protection`]), answers the boot CPU whether it could, and runs
-/// the installed [`set_secondary_entry`] callback once the boot CPU took its
-/// join; a core that cannot hold it, whose start was given up on, or one
-/// started with no callback installed (the `start_secondary` guard makes
-/// that unreachable in practice), parks rather than run, fail closed.
+/// `smp.s` jumps here, once per secondary core, on the kernel root with a
+/// private stack. It leaves the identity page behind, holds the core to the
+/// kernel's protection ([`crate::protection`]), answers the boot CPU
+/// whether it could, and runs the installed [`set_secondary_entry`] callback
+/// once the boot CPU took its join; a core that cannot hold it, whose start
+/// was given up on, or one started with no callback installed (the
+/// `start_secondary` guard makes that unreachable in practice), parks rather
+/// than run, fail closed.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[no_mangle]
 extern "C" fn tairix_arch_aarch64_secondary_main(cpu: CpuId) -> ! {
+    // SAFETY: this core's first act, before any code the compiler may lower
+    // to FP/SIMD.
+    unsafe { crate::kernel_arch::enable_fp_el1() };
     install_current_cpu_index(cpu);
+    // The identity page is only ever needed to cross into the high half.
+    if !crate::paging::park_kernel_root(true) {
+        crate::kernel_arch::halt_current_cpu();
+    }
     // A core outside the pool was never started: its stack is the pool's.
     if let Some(slot) = slot(cpu) {
-        // SAFETY: EL1 on a core fresh from the trampoline, before it adopts
-        // any translation, so it reaches no user page.
+        // SAFETY: EL1 on a core fresh from the trampoline, whose low regime
+        // maps nothing, so it reaches no user page; once held, translation is
+        // enabled under what it holds.
         if unsafe { crate::protection::hold() } {
+            // SAFETY: as above.
+            unsafe { crate::paging::hold_translation_controls() };
             answer_boot_cpu(slot, StartAnswer::Joined, cpu);
             if taken(slot, cpu) {
                 if let Some(entry) = SECONDARY_ENTRY_FN.load() {

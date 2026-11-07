@@ -381,12 +381,10 @@ binary (`kernel/tairix-kernel/src/spawn_producer.rs`, sibling of
 live `FrameAllocator` through a boot-cached `kernel/mem` `FrameTableSource`
 (the §24.1 allocator-backed source — no fixed `MAX_SPAWNS` reserve, so the
 spawn capacity scales with discovered RAM and fails closed `NoSpace` only on
-genuine OOM), builds a fresh isolated user space identity-mapping the
-mask-derived window (`paging::configured_identity_gigapages` — 2 GiB on
-`virt`, 4 GiB on the Pi 4) **without**
-switching `TTBR0_EL1` (the
-spawning caller keeps running — the build writes through the identity
-`physmap`, so the child space need not be active), parses the `rxe` against
+genuine OOM), builds a fresh, empty process root — the kernel lives in
+`TTBR1_EL1` — **without** switching `TTBR0_EL1` (the spawning caller keeps
+running — the build writes through the direct-map `physmap`, so the child
+space need not be active), parses the `rxe` against
 `SYSCALL_TABLE_HASH`, calls `spawn_image` (re-asserts `CAP_PROC_SPAWN`,
 audits), freezes, builds the `pre_resume`/`enter` closures, and calls
 `ctx.admit_process`. `boot_aarch64` wires `.with_spawn(&spawn_layout::PROGRAM_REGISTRY,

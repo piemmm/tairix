@@ -47,13 +47,10 @@
 //!
 //! # Why the beacon bypasses all of it
 //!
-//! [`beacon`] writes the device directly, byte by byte. It runs before the MMU
-//! is on, where the queue's lock cannot be used at all (an atomic
-//! compare-exchange is architecturally UNPREDICTABLE without the MMU, the same
-//! reason the allocator and scheduler wait for it), and its whole purpose is to
-//! localise a hang *immediately* — deferring it into a queue that may never
-//! drain would defeat it. It never touches the framebuffer either, whose
-//! renderer has the same pre-MMU hazard: the serial line is the one always-safe
+//! [`beacon`] writes the device directly, byte by byte. Its whole purpose is to
+//! localise a hang *immediately*, on the paths that park the boot CPU —
+//! deferring it into a queue that may never drain would defeat it. It never
+//! touches the framebuffer either: the serial line is the one always-safe
 //! bisection channel.
 
 use tairix_conout::{ConsoleGate, ConsoleTx, DEFAULT_CAPACITY_BYTES};
@@ -145,9 +142,11 @@ static TX_WEDGED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBoo
 /// no-op.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn tx_ready_now() -> bool {
-    let (base, model) = console::current();
+    let Some((base, model)) = console::registers() else {
+        return false;
+    };
     let status_reg = (base + model.status_offset()) as *const u32;
-    // SAFETY: `base` is the discovered console UART's MMIO base and
+    // SAFETY: `base` maps the discovered console UART's registers (`console::registers`) and
     // `status_offset()` the model's documented status register; a
     // naturally-aligned 32-bit volatile read of a device register that touches
     // no Rust-managed memory.
@@ -167,9 +166,11 @@ fn tx_ready_now() -> bool {
 /// Freestanding-only; inert on the host build.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn tx_send(byte: u8) {
-    let (base, model) = console::current();
+    let Some((base, model)) = console::registers() else {
+        return;
+    };
     let data_reg = (base + model.data_offset()) as *mut u32;
-    // SAFETY: `base` is the discovered console UART's MMIO base and
+    // SAFETY: `base` maps the discovered console UART's registers (`console::registers`) and
     // `data_offset()` the model's documented data register; a naturally-aligned
     // 32-bit volatile store to a device register that touches no Rust-managed
     // memory. The caller confirmed readiness via `tx_ready_now`.
@@ -247,9 +248,9 @@ fn getchar() -> Option<u8> {
     if !console_rx_pending() {
         return None;
     }
-    let (base, model) = console::current();
+    let (base, model) = console::registers()?;
     let data_reg = (base + model.data_offset()) as *const u32;
-    // SAFETY: `base` is the discovered console UART's MMIO base and the
+    // SAFETY: `base` maps the discovered console UART's registers (`console::registers`) and the
     // offset is the model's documented data register, a naturally-aligned
     // 32-bit device register touching no Rust-managed memory. It is read only
     // after the status register reported a byte, so it never pops an empty
@@ -271,9 +272,11 @@ fn getchar() -> Option<u8> {
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[must_use]
 pub fn console_rx_pending() -> bool {
-    let (base, model) = console::current();
+    let Some((base, model)) = console::registers() else {
+        return false;
+    };
     let status_reg = (base + model.status_offset()) as *const u32;
-    // SAFETY: `base` is the discovered console UART's MMIO base and the
+    // SAFETY: `base` maps the discovered console UART's registers (`console::registers`) and the
     // offset is the model's documented status register, a naturally-aligned
     // 32-bit device register touching no Rust-managed memory; reading it
     // takes no byte.
@@ -298,7 +301,9 @@ pub fn console_rx_pending() -> bool {
 /// [`crate::console`].
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn enable_rx_interrupt() {
-    let (base, model) = console::current();
+    let Some((base, model)) = console::registers() else {
+        return;
+    };
     for step in model.rx_interrupt_sequence() {
         apply_reg_rmw(base, step);
     }
@@ -313,7 +318,7 @@ fn apply_reg_rmw(base: usize, step: console::RegRmw) {
         return;
     }
     let reg = (base + step.offset) as *mut u32;
-    // SAFETY: `base` is the discovered console UART's MMIO base and
+    // SAFETY: `base` maps the discovered console UART's registers (`console::registers`) and
     // `step.offset` the model's documented register offset, so `reg` is a
     // naturally-aligned 32-bit device register. The read-modify-write
     // preserves every bit outside the step's masks and touches no
@@ -339,10 +344,12 @@ pub fn enable_rx_interrupt() {}
 /// Freestanding-only; the clear policy is host-tested in [`crate::console`].
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn clear_rx_interrupt() {
-    let (base, model) = console::current();
+    let Some((base, model)) = console::registers() else {
+        return;
+    };
     if let Some((offset, value)) = model.rx_interrupt_clear() {
         let reg = (base + offset) as *mut u32;
-        // SAFETY: `base` is the discovered console UART's MMIO base and
+        // SAFETY: `base` maps the discovered console UART's registers (`console::registers`) and
         // `offset` the model's documented write-1-to-clear register; a
         // naturally-aligned 32-bit store of the clear mask that touches no
         // Rust-managed memory.
@@ -369,7 +376,9 @@ pub fn clear_rx_interrupt() {}
 /// [`crate::console`].
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn enable_tx_interrupt() {
-    let (base, model) = console::current();
+    let Some((base, model)) = console::registers() else {
+        return;
+    };
     for step in model.tx_interrupt_enable() {
         apply_reg_rmw(base, step);
     }
@@ -385,11 +394,13 @@ pub fn enable_tx_interrupt() {}
 /// Freestanding-only.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn disable_tx_interrupt() {
-    let (base, model) = console::current();
+    let Some((base, model)) = console::registers() else {
+        return;
+    };
     apply_reg_rmw(base, model.tx_interrupt_disable());
     if let Some((offset, value)) = model.tx_interrupt_clear() {
         let reg = (base + offset) as *mut u32;
-        // SAFETY: `base` is the discovered console UART's MMIO base and
+        // SAFETY: `base` maps the discovered console UART's registers (`console::registers`) and
         // `offset` the model's documented write-1-to-clear register; a
         // naturally-aligned 32-bit store of the clear mask that touches no
         // Rust-managed memory.
@@ -418,9 +429,11 @@ pub fn disable_tx_interrupt() {}
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[must_use]
 pub fn service_uart_tx_irq() -> bool {
-    let (base, model) = console::current();
+    let Some((base, model)) = console::registers() else {
+        return false;
+    };
     let status_reg = (base + model.interrupt_status_offset()) as *const u32;
-    // SAFETY: `base` is the discovered console UART's MMIO base and
+    // SAFETY: `base` maps the discovered console UART's registers (`console::registers`) and
     // `interrupt_status_offset()` the model's documented masked-status
     // register; a naturally-aligned 32-bit volatile read of a device register
     // that touches no Rust-managed memory.

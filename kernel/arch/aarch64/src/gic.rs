@@ -33,8 +33,6 @@ pub const DEFAULT_GICD_BASE: usize = 0x0800_0000;
 /// The GICv2 CPU-interface base before discovery runs: QEMU `virt`'s.
 pub const DEFAULT_GICC_BASE: usize = 0x0801_0000;
 
-// Discovery runs with the MMU off, where an atomic read-modify-write is
-// unpredictable, so these are set by plain stores.
 static GICD_BASE: AtomicUsize = AtomicUsize::new(DEFAULT_GICD_BASE);
 static GICC_BASE: AtomicUsize = AtomicUsize::new(DEFAULT_GICC_BASE);
 static VERSION: AtomicU8 = AtomicU8::new(GicVersion::V2 as u8);
@@ -155,8 +153,7 @@ pub struct DiscoveredGic<'a> {
 /// Locate the GIC in `fdt`: the first node naming one this driver speaks,
 /// whose distributor (and, for a GICv2, CPU interface) decodes through the
 /// ancestor buses' `ranges`, and which, as a GICv3, describes at least one
-/// redistributor region. The walk returns at that node, so it is safe with
-/// the MMU off.
+/// redistributor region. The walk returns at that node.
 #[must_use]
 pub fn find_gic<'a>(fdt: &Fdt<'a>) -> Option<DiscoveredGic<'a>> {
     tairix_fdt::scan_translated(fdt, |node, levels, depth| {
@@ -187,8 +184,7 @@ pub fn configure_from_fdt<'a>(fdt: &Fdt<'a>) -> Option<DiscoveredGic<'a>> {
 }
 
 /// Visit the GIC node in `fdt` with its version, then each node beneath it
-/// with none, stopping once past its subtree so the walk is safe with the
-/// MMU off.
+/// with none, stopping once past its subtree.
 fn each_gic_node(
     fdt: &Fdt<'_>,
     mut visit: impl FnMut(&tairix_fdt::Node<'_>, &[tairix_fdt::BusLevel<'_>], usize, Option<GicVersion>),
@@ -1116,26 +1112,32 @@ pub struct VolatileGicMmio;
 impl GicMmio for VolatileGicMmio {
     fn gicd_read(&self, off: usize) -> u32 {
         // SAFETY: `off` is a register in the discovered distributor window,
-        // identity-mapped Device memory the kernel alone drives.
-        unsafe { core::ptr::read_volatile((current().0 + off) as *const u32) }
+        // Device memory the direct map types as registers, which the kernel
+        // alone drives.
+        unsafe { core::ptr::read_volatile(crate::paging::mmio(current().0 + off) as *const u32) }
     }
     fn gicd_write(&self, off: usize, val: u32) {
         // SAFETY: as `gicd_read`, a 32-bit store.
-        unsafe { core::ptr::write_volatile((current().0 + off) as *mut u32, val) }
+        unsafe {
+            core::ptr::write_volatile(crate::paging::mmio(current().0 + off) as *mut u32, val);
+        }
     }
     fn gicd_write_byte(&self, off: usize, val: u8) {
         // SAFETY: as `gicd_read`; the priority and target registers are
         // byte-accessible.
-        unsafe { core::ptr::write_volatile((current().0 + off) as *mut u8, val) }
+        unsafe { core::ptr::write_volatile(crate::paging::mmio(current().0 + off) as *mut u8, val) }
     }
     fn gicc_read(&self, off: usize) -> u32 {
         // SAFETY: `off` is a register in the discovered CPU-interface
-        // window, identity-mapped Device memory the kernel alone drives.
-        unsafe { core::ptr::read_volatile((current().1 + off) as *const u32) }
+        // window, Device memory the direct map types as registers, which the
+        // kernel alone drives.
+        unsafe { core::ptr::read_volatile(crate::paging::mmio(current().1 + off) as *const u32) }
     }
     fn gicc_write(&self, off: usize, val: u32) {
         // SAFETY: as `gicc_read`, a 32-bit store.
-        unsafe { core::ptr::write_volatile((current().1 + off) as *mut u32, val) }
+        unsafe {
+            core::ptr::write_volatile(crate::paging::mmio(current().1 + off) as *mut u32, val);
+        }
     }
     fn publish_barrier(&self) {
         // SAFETY: `dsb ishst` only orders this CPU's earlier stores before
@@ -1277,7 +1279,7 @@ fn bring_up_v3_cpu(topology: &GicTopology) -> Result<(), GicError> {
 /// # Safety
 ///
 /// Once, on the boot CPU, before any interrupt source is enabled, with the
-/// discovered windows identity-mapped as Device memory.
+/// discovered windows typed as registers in the direct map.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub unsafe fn init(topology: GicTopology) -> Result<(), GicError> {
     TOPOLOGY

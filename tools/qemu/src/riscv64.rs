@@ -317,6 +317,7 @@ mod tests {
             devices: AttachedDevices::NONE,
             dma_translation: crate::DmaTranslation::Absent,
             interrupts: crate::InterruptControllers::Default,
+            virtualization: false,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             optical_disc: None,

@@ -1,49 +1,20 @@
-//! Bare-metal boot pipeline for the aarch64
-//! `tairix-kernel` binary — `plans/PI.md` Stage P1.
+//! Bare-metal boot pipeline for the aarch64 `tairix-kernel` binary —
+//! `plans/PI.md` Stage P1.
 //!
 //! [`boot`] is the single entry point. It is called from the binary's
-//! `extern "C" fn kernel_main(dtb: u64)` after the arch crate's
-//! [`tairix_arch_aarch64::entry`] trampoline (`boot.s` → `entry.rs`)
-//! has dropped to EL1, parked the non-boot CPUs, established the boot
-//! stack, and zeroed `.bss`.
+//! `extern "C" fn kernel_main(tree: u64)` after the arch crate's
+//! [`tairix_arch_aarch64::entry`] trampoline (`boot.s` → `entry.rs`) has
+//! dropped to EL1, parked the non-boot CPUs, turned translation on, zeroed
+//! `.bss`, and moved the boot CPU onto the kernel root with the firmware's
+//! device tree mapped read only.
 //!
-//! # Scope at Stage P1 (and what is deliberately staged later)
-//!
-//! P1 stands up the production aarch64 kernel *image*: the boot stub, the
-//! board linker script `build.rs` selects, and this binary, with the aarch64
-//! architecture port selected as the kernel's arch (the single selection
-//! point).
-//! On the boot CPU it enables FP/SIMD, brings up the console, constructs
-//! the [`Aarch64Arch`] handle, records a boot audit line, and parks
-//! fail-closed (never silently reset).
-//!
-//! The discovery-fed hand-off to [`tairix_kernel_core::kernel_main`] is
-//! **staged**, not stubbed: bringing up the live allocator + scheduler
-//! over the discovered map is `plans/PI.md` P4/P6 (fabricating a hardware
-//! map would violate). Those stages add the QEMU
-//! verticals that *prove* the runtime path.
-//!
-//! # P3: board-discovered interrupt controller + RAM window
-//!
-//! [`boot`] also points the GIC driver at the controller the firmware tree
-//! describes ([`tairix_arch_aarch64::gic::configure_from_fdt`]) — the QEMU
-//! `virt` GICv2 or GICv3, or the GIC a board describes — and reads the
-//! `/memory` window (`first_memory_region`), so neither the
-//! interrupt-controller base nor the RAM base is the `virt` assumption any
-//! longer. The byte-wise FDT reader makes both walks MMU-off-safe
-//! (`plans/PI.md` W17); a missing or malformed tree leaves the fail-safe
-//! `virt` defaults in place.
-//!
-//! # P2: board-discovered console
-//!
-//! Before logging, [`boot`] points the console at the UART the firmware
-//! device tree describes ([`tairix_arch_aarch64::console::configure_from_fdt`]).
-//! On the QEMU `virt` board this re-confirms the default PL011 base; on a
-//! board it selects the PL011 or mini-UART the tree describes, at its
-//! discovered base, so the boot line prints on real hardware. The FDT reader
-//! accesses the blob byte-wise, so the walk is safe with the MMU still off
-//! (no multi-byte Device-memory load — `plans/PI.md` W17). A missing or
-//! malformed tree leaves the `virt` default in place (fail closed).
+//! The boot reads the board from the tree before it touches a device: it
+//! points the console and the GIC at what the tree describes, types the
+//! direct map from it — registers first, then the `/memory` windows left as
+//! RAM — and only then brings the UART, the firmware's clock and the boot
+//! display up, so no register is ever reached through a mapping of the wrong
+//! type. A missing or malformed tree leaves the fail-safe `virt` defaults in
+//! place.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -52,13 +23,12 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicU8};
 use tairix_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz, SecondaryStart};
 use tairix_arch_aarch64::paging::{
-    configure_device_gigapages, configure_kernel_gigapages, gigapage_mask_from_extents,
-    identity_device_mask, install_boot_physmap, AddressSpace, PageTablePool, GIGAPAGE_MASK_WORDS,
+    gigapage_mask_from_extents, reveal, FirmwareTree, Holding, GIGAPAGE_MASK_WORDS,
 };
 
 use tairix_arch_aarch64::{
-    console, enable_fp_el1, exceptions, fdt, firmware, gic, gicv3, halt_current_cpu, paging,
-    platform, serial, smp, syscall_entry, uart_init, video, Aarch64Arch,
+    console, exceptions, fdt, firmware, gic, gicv3, halt_current_cpu, paging, platform, serial,
+    smp, syscall_entry, uart_init, video, Aarch64Arch,
 };
 use tairix_arch_api::{PlatformDiscovery, SchedulerArch, BOOT_CPU};
 use tairix_fdt::Fdt;
@@ -66,6 +36,7 @@ use tairix_kernel_core::boot_audit_ring::{
     boot_audit_clock, BootAuditRing, BOOT_AUDIT_RING_CAPACITY,
 };
 use tairix_kernel_core::{kernel_main, BootInfo};
+use tairix_kernel_mem::{PhysAddr, PhysMap};
 use tairix_kernel_sched_api::SchedulerConfig;
 use tairix_log::{log, Event, EventId, Field, Level, Sink, TeeSink};
 
@@ -77,38 +48,12 @@ use crate::aarch64::dispatch::{
     production_dispatch, production_user_fault, production_user_fault_terminate, DISPATCH_SLOT,
 };
 use crate::console_layout::console_layout;
-use crate::mem_map::{build_memory_map, region_byte_totals};
+use crate::mem_map::{build_memory_map, region_byte_totals, Typed};
 
 // `KERNEL_BUILD_ID: &str` — the source + build identity, generated by
 // `build.rs` and logged once on the boot line so a serial capture proves
 // which build is running (measure, don't guess).
 include!(concat!(env!("OUT_DIR"), "/build_id.rs"));
-
-/// Number of 1 GiB identity gigapages the boot address space maps.
-///
-/// 512 covers the whole low canonical VA range (`[0, 512 GiB)`), so the
-/// kernel image, stack, the firmware DTB, and the board MMIO window are
-/// all reachable whatever their physical addresses — the QEMU `virt`
-/// board (RAM at `0x4000_0000`, GIC/PL011 in the first GiB) and a board
-/// with RAM at `0` and MMIO in gigapage 3 alike, with no
-/// `cfg(board)` fork.
-/// [`AddressSpace::new_identity_gigapages`] maps the gigapages holding
-/// the *discovered* console/GIC MMIO Device and the rest — the kernel's
-/// own image included — Normal, per the [`configure_device_gigapages`]
-/// mask [`boot`] derives before enabling the MMU.
-const IDENTITY_GIGABYTES: usize = 512;
-
-/// Boot-time page-table frame source for the stage-1 identity map: one
-/// frame, since a single root L1 table holds all 512 gigapage block
-/// descriptors.
-///
-/// It lives in `.bss` for the lifetime of the kernel image, so `TTBR0_EL1`
-/// keeps pointing at a valid table after [`enable_mmu_and_vectors`]
-/// returns even though the transient [`AddressSpace`] handle is dropped
-/// (the pool is monotonic and never freed). The real per-process page
-/// tables are built over the `kernel/mem` frame allocator at a later
-/// stage.
-static BOOT_PAGE_TABLES: PageTablePool<1> = PageTablePool::new();
 
 /// Audit event: the aarch64 production kernel reached its Stage-P1 boot
 /// init point. Sits in the `kernel/core`-owned `4000..5000` range (per
@@ -118,15 +63,14 @@ static BOOT_PAGE_TABLES: PageTablePool<1> = PageTablePool::new();
 const KERNEL_BOOT_AARCH64_REACHED: EventId = EventId(4097);
 
 /// Audit event: the boot path discovered the platform PCIe root complex the
-/// port describes and recorded its address windows. Logged once, post-MMU,
-/// so a metal capture shows the windows found when a device behind it is
-/// silent. In the `kernel/core`-owned `4000..5000` range, clear of the ids
+/// port describes and recorded its address windows. Logged once, so a metal
+/// capture shows the windows found when a device behind it is silent. In the `kernel/core`-owned `4000..5000` range, clear of the ids
 /// around it; part of the audit contract, never renumbered.
 const KERNEL_PCIE_DISCOVERED: EventId = EventId(4100);
 
 /// Audit event: the boot path asked the firmware that owns the ARM clock to
 /// run the cores at their full rate, before anything else ran. Logged once,
-/// post-MMU, so a metal capture states the speed the rest of boot actually
+/// so a metal capture states the speed the rest of boot actually
 /// ran at — the firmware leaves the clock at `arm_freq_min` until something
 /// asks, and a board silently stuck there is otherwise only visible as
 /// everything being slow. Sits in the `kernel/core`-owned `4000..5000` range,
@@ -153,71 +97,30 @@ const fn yes_no(value: bool) -> &'static str {
 }
 
 extern "C" {
-    /// First byte of the kernel image — the board load address — defined
-    /// by the board linker script `build.rs` selects.
-    /// With [`__kernel_end`] it brackets the image extent whose identity
-    /// gigapages must stay Normal (executable) whatever the discovered
-    /// MMIO layout says ([`identity_device_mask`]).
+    /// First byte of the kernel image, at its link address, defined by the
+    /// board linker script `build.rs` selects.
+    #[cfg(feature = "watchdog-diagnostics")]
     static __kernel_start: u8;
     /// One byte past the end of the kernel image, including the boot heap,
-    /// defined by the board linker script `build.rs` selects. The usable
-    /// physical-memory region the allocator receives begins at the next page
-    /// boundary after this address.
+    /// at its link address.
     static __kernel_end: u8;
 }
 
-/// Address of the linker-provided `__kernel_start` symbol.
+/// Link address of the kernel image's first byte, which a diagnostics
+/// build renders program counters relative to.
+#[cfg(feature = "watchdog-diagnostics")]
 pub(crate) fn kernel_start_addr() -> u64 {
     // `addr_of!` reads the marker's address without forming a reference to
     // the zero-sized, never-dereferenced symbol.
     core::ptr::addr_of!(__kernel_start) as u64
 }
 
-/// Address of the linker-provided `__kernel_end` symbol.
-fn kernel_end_addr() -> u64 {
+/// Physical address one past the kernel image: the usable physical-memory
+/// region the allocator receives begins at the next page boundary after it.
+fn kernel_phys_end() -> u64 {
     // `addr_of!` reads the marker's address without forming a reference to
     // the zero-sized, never-dereferenced symbol.
-    core::ptr::addr_of!(__kernel_end) as u64
-}
-
-/// Enable the stage-1 identity MMU and install the EL1 exception
-/// vectors on the boot CPU, returning the live boot [`AddressSpace`].
-///
-/// Returns `None` (leaving the MMU off) when the boot page-table pool
-/// cannot satisfy the identity map — a fail-closed signal the caller
-/// logs and parks on rather than running `kernel_main` over un-cacheable
-/// Device memory.
-///
-/// The handle is returned, not dropped: it still owns `TTBR0_EL1`'s root
-/// table ([`BOOT_PAGE_TABLES`]), which lives for the kernel's lifetime.
-fn enable_mmu_and_vectors() -> Option<AddressSpace> {
-    let space = AddressSpace::new_identity_gigapages(&BOOT_PAGE_TABLES, IDENTITY_GIGABYTES)?;
-    // The tables were just written with the data cache off; sweep them
-    // to the point of coherency so the walker's first *cacheable* reads
-    // cannot hit stale firmware-era lines on real silicon.
-    BOOT_PAGE_TABLES.clean_invalidate_to_poc();
-    // SAFETY: `new_identity_gigapages` identity-maps every gigapage in
-    // the configured Device and kernel-extent masks — the caller installed
-    // both before this runs, and the kernel-extent mask is built over the
-    // kernel image's own extent, the firmware DTB, and the scan-out
-    // surface — so the currently-executing `pc`, the boot
-    // stack, the firmware DTB, and the board MMIO window all keep their
-    // physical addresses: enabling the MMU does not move the ground
-    // under the running code, exactly as `AddressSpace::switch`'s
-    // contract requires (unbacked gigapages are deliberately left
-    // invalid so speculation cannot wander into them). `init_vectors`
-    // then installs the EL1 vector base so a fault during the remaining
-    // bring-up is taken to a handler rather than locking up silently.
-    // Both run once, here, on the boot CPU with interrupts masked.
-    unsafe {
-        space.switch();
-    }
-    // SAFETY: covered by the block comment above — vectors are installed
-    // once, on the boot CPU, immediately after the switch.
-    unsafe {
-        exceptions::init_vectors();
-    }
-    Some(space)
+    tairix_arch_aarch64::paging::image_phys(core::ptr::addr_of!(__kernel_end) as u64)
 }
 
 /// The retained, tail-able in-memory boot audit ring for this port.
@@ -264,10 +167,10 @@ fn log_cpu_clock_raised(log_sink: &dyn Sink, rate_hz: u64) {
 /// Boot the aarch64 kernel on the boot CPU and hand off to
 /// [`tairix_kernel_core::kernel_main`].
 ///
-/// `dtb` is the device-tree pointer the firmware/loader handed the boot
-/// CPU (preserved verbatim by `boot.s`); it is parsed for the console
-/// base, the GIC, the `/memory` window, the generic-timer
-/// rate, and the PSCI conduit.
+/// `tree` is where the kernel reads the firmware's device tree, read only
+/// (`paging::firmware_tree`), or a tree a QEMU vertical embeds, or `0`; it
+/// is parsed for the console base, the GIC, the `/memory` windows, the
+/// generic-timer rate, and the PSCI conduit.
 ///
 /// `log_sink` / `audit_sink` are the `&'static` sinks installed in the
 /// [`BootInfo`]: in production both are the port's PL011-backed
@@ -292,31 +195,24 @@ fn log_cpu_clock_raised(log_sink: &dyn Sink, rate_hz: u64) {
 /// Returns the bottom type. On success it enters
 /// [`tairix_kernel_core::kernel_main`], which drives the init phases and
 /// itself never returns. If the handover cannot be assembled (no usable
-/// `/memory` window, the MMU could not be enabled, an unusable timer, or
+/// `/memory` window, an unusable timer, or
 /// `BootInfo::validate` rejects the hand-off) it records the boot line
 /// and parks the CPU forever via [`halt_current_cpu`] (fail closed).
 ///
 /// # SAFETY-INVARIANT
 ///
 /// Called exactly once, on the boot CPU, from the arch trampoline after
-/// `boot.s`'s invariants hold (EL1, interrupts masked, stack established,
-/// `.bss` zeroed). FP/SIMD is enabled here before any code that the
-/// compiler may lower to NEON runs.
+/// `boot.s`'s invariants hold and the port entry moved it onto the kernel
+/// root (EL1, interrupts masked, stack established, `.bss` zeroed). FP/SIMD
+/// is enabled here before any code that the compiler may lower to NEON runs.
 pub fn boot(
-    dtb: u64,
+    tree: u64,
     heap: &'static tairix_kalloc::FreeListAllocator,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
     hw_tree: &'static (dyn tairix_kernel_core::HwTreeSource + 'static),
 ) -> ! {
-    // Enable FP/SIMD before the log formatter (which the compiler may
-    // lower to NEON) runs. SAFETY: this is the boot CPU, called once,
-    // before any FP/SIMD instruction executes (see `enable_fp_el1`).
-    unsafe {
-        enable_fp_el1();
-    }
-
     // Make every kernel heap's lock interrupt-safe before anything can be
     // interrupted while holding one: install this port's per-CPU DAIF
     // mask/restore. Done here, at boot entry — before the first heap
@@ -334,43 +230,25 @@ pub fn boot(
         crate::aarch64::gic_irq::kalloc_irq_restore,
     );
 
-    // P2 + P3: discover the board's MMIO and type the identity map's
-    // gigapages from it, both before translation is enabled.
-    let (early, device_mask) = configure_identity_typing(dtb);
-
-    // P6c-2: enable the stage-1 identity MMU and EL1 vectors before any
-    // further work. The `kernel_core` allocator and scheduler use atomic
-    // read-modify-write instructions, which are UNPREDICTABLE on the
-    // MMU-off Device-typed memory the boot CPU may run on; the identity
-    // map makes RAM Normal/cacheable so they behave (`plans/PI.md`
-    // P6c-2). It also makes the full-tree FDT walks below
-    // (`first_memory_region`) safe, which fault MMU-off under release
-    // optimisation (`plans/PI.md` watch-out).
-    //
-    // This is the boot's sharpest cliff: enabling translation against a
-    // mis-typed identity map wedged metal hardware the instant the MMU came
-    // on.
-    let boot_space = enable_mmu_and_vectors();
-    let mmu_on = boot_space.is_some();
-
-    // Route a fatal EL1 (kernel-mode) exception into the one fatal-report
-    // path, now that the vectors above can deliver one and before any
-    // further work can fault. With the slot empty the vector parks the CPU
-    // with every interrupt masked and prints nothing, so a kernel fault
-    // becomes a mute machine — and, if it lands inside a lock's critical
-    // section, a system-wide deadlock behind the guard it never dropped.
-    //
-    // Each slot is set-once and this call never overrides an occupant: a
-    // QEMU vertical that observes its own deliberate faults publishes its
-    // handler ahead of `boot` and keeps it, asserting its own install
-    // succeeded. Either way the machine has exactly one fatal policy.
+    // Before anything that can fault: with the slot empty an exception parks
+    // the CPU mute, and the report flushes the lines still queued. A QEMU
+    // vertical observing its own faults installed first and keeps its own.
     let _ = crate::aarch64::panic_ctx::install_fatal_reports();
 
-    // The console's grids need the heap the cacheable identity map just made
-    // usable, so it is attached here rather than at display discovery. With
-    // no display, or a scan-out the active root does not cover, the UART
-    // keeps the console and the boot record says so.
-    let video_console = mmu_on && crate::console_layout::CONSOLE.attach(None);
+    // Type the direct map from the board the tree describes before any
+    // device is brought up: registers first, so no RAM ever shares a
+    // gigabyte with them.
+    let typed = type_direct_map(tree, log_sink);
+
+    // P2 + P3: point the console and the GIC at what the tree describes and
+    // bring the framebuffer boot console's surface up.
+    let early = configure_mmio_from_dtb(tree);
+
+    // The console's grids need the heap, so it is attached here rather than
+    // at display discovery. With no display, or a scan-out the active root
+    // does not cover, the UART keeps the console and the boot record says
+    // so.
+    let video_console = crate::console_layout::CONSOLE.attach(None);
 
     crate::protections::log(
         log_sink,
@@ -385,16 +263,15 @@ pub fn boot(
         log_cpu_clock_raised(log_sink, early.cpu_clock_hz);
     }
 
-    // Discover the rest of the board from the firmware device tree: the
-    // `/memory` window, the timer rate, and the PSCI conduit (P3 + P4 +
-    // P5) — full-tree walks that need the MMU on. A null, unreadable, or
-    // incomplete tree leaves the `virt` defaults in place (fail closed).
-    let discovered = configure_from_dtb(dtb);
-    let installed_memory_bytes = crate::mem_map::window_byte_total(&discovered.ram_windows);
-    let (ram_windows, direct_map) =
-        install_direct_physical_map(&discovered.ram_windows, &device_mask, log_sink);
+    // The timer rate, the PSCI conduit and the CPUs (P4 + P5). A null,
+    // unreadable, or incomplete tree leaves the `virt` defaults in place
+    // (fail closed).
+    let discovered = configure_from_dtb(tree);
+    let installed_memory_bytes = typed.installed_bytes;
+    let ram_windows = typed.ram_windows;
+    let direct_map = !ram_windows.is_empty();
 
-    let (arch, cpu_mpidrs) = build_cpu_topology_and_arch(&discovered, dtb, mmu_on);
+    let (arch, cpu_mpidrs) = build_cpu_topology_and_arch(&discovered, tree);
     let (arch, smp_start_method) = select_secondary_start(arch, &discovered, &cpu_mpidrs);
 
     // Sanity-check that the constructed handle reports the boot CPU, and
@@ -409,12 +286,13 @@ pub fn boot(
     // `CPU_ON` or spin-table release) once every init phase is green,
     // and each start is refused fail-closed (and audited) unless this
     // preparation succeeded. Single-CPU boots prepare nothing.
-    let smp_prepared = mmu_on && prepare_secondary_bringup(&cpu_mpidrs);
+    let smp_prepared = prepare_secondary_bringup(&cpu_mpidrs);
 
     // P6c-1: translate the firmware-discovered `/memory` windows into the
     // canonical physical-memory map `kernel_core::kernel_main` consumes,
     // with the firmware blob reserved out of it.
-    let layout_result = build_boot_memory_layout(&ram_windows, dtb, early.dtb_len);
+    let layout_result =
+        build_boot_memory_layout(&ram_windows, tairix_arch_aarch64::paging::firmware_tree());
     let (mem_status, usable_bytes, reserved_bytes) = match &layout_result {
         Ok(map) => {
             let (usable, reserved) = region_byte_totals(map);
@@ -424,7 +302,7 @@ pub fn boot(
     };
     let mem_map_built = layout_result.is_ok();
 
-    let ready = boot_cpu_ok && timer_present && mem_map_built && mmu_on && direct_map;
+    let ready = boot_cpu_ok && timer_present && mem_map_built && direct_map;
 
     log_boot_line(
         log_sink,
@@ -432,14 +310,14 @@ pub fn boot(
             level: if ready { Level::Info } else { Level::Warn },
             boot_cpu_ok: yes_no(boot_cpu_ok),
             timer_present: yes_no(timer_present),
-            dtb_present: yes_no(dtb != 0),
+            dtb_present: yes_no(tree != 0),
             console_discovered: yes_no(early.console),
             gic_discovered: yes_no(early.gic),
             video_console: yes_no(video_console),
             fb_base: early.video.map_or(0, |v| v.fb_base),
             fb_len: early.video.map_or(0, |v| v.fb_len_bytes),
-            boot_root: boot_space.as_ref().map_or(0, AddressSpace::root_phys),
-            device_gigapages: device_mask[0],
+            boot_root: tairix_arch_aarch64::paging::park_root().unwrap_or(0),
+            device_gigapages: typed.registers[0],
             ram_discovered: yes_no(!ram_windows.is_empty()),
             mem_map_built: yes_no(mem_map_built),
             direct_map: yes_no(direct_map),
@@ -451,7 +329,6 @@ pub fn boot(
             smp_start_method,
             cpu_count: cpu_mpidrs.len(),
             smp_prepared: yes_no(smp_prepared),
-            mmu_enabled: yes_no(mmu_on),
         },
     );
 
@@ -464,7 +341,7 @@ pub fn boot(
             // entering the core. The early-discovered video facts ride along
             // so the boot display joins the same tree (`plans/DISPLAY.md` D7d).
             let placement = audit_root_storage_binding(
-                dtb,
+                tree,
                 early.video,
                 &discovered.gic_redistributors,
                 discovered.gic_redistributor_stride,
@@ -496,83 +373,115 @@ pub fn boot(
     halt_current_cpu()
 }
 
-/// Point the console and the GIC driver at what the firmware tree
-/// describes, then install the identity window's Device and kernel-extent
-/// gigapage typing derived from them; returns the discovery and the Device
-/// mask.
-///
-/// Runs entirely pre-MMU, and must: the discovered bases decide which
-/// gigapages the map types Device, and a board's UART and GIC may lie
-/// gigapages away from the kernel image, whose own must stay Normal —
-/// executable — or the instruction fetch after `switch` faults with the
-/// vectors not yet installed. Every other non-Device gigapage stays
-/// *invalid*: on real silicon a Normal write-back executable mapping of
-/// unbacked address space invites speculative fetches into windows nothing
-/// answers, which wedged metal hardware at the instant translation enabled
-/// while QEMU (which answers every address) stayed green. A null,
-/// unreadable, or incomplete tree leaves the `virt` defaults in place (fail
-/// closed); a facility with no discovered base contributes the console base
-/// as a harmless duplicate input.
-fn configure_identity_typing(dtb: u64) -> (EarlyDiscovered, [u64; GIGAPAGE_MASK_WORDS]) {
-    let early = configure_mmio_from_dtb(dtb);
-    let (console_base, _) = console::current();
-    let (distributor_base, cpu_interface_base) = gic::current();
-    let video_doorbell = early.video.map_or(console_base as u64, |v| v.doorbell_base);
-    // The platform PCIe root complex's register block and outbound window
-    // (where enumerated BARs live) are mapped by its autoloaded user-space
-    // bus driver, so they must be typed Device like the UART/GIC.
-    let (pcie_regs, pcie_outbound) = early
-        .pcie
-        .map_or((console_base as u64, console_base as u64), |p| {
-            (p.regs_phys, p.outbound_cpu_base)
-        });
-    let extents = [
-        console_base as u64,
-        distributor_base as u64,
-        cpu_interface_base as u64,
-        video_doorbell,
-        pcie_regs,
-        pcie_outbound,
-    ]
-    .map(|base| (base, 1));
-    let identity_mask = identity_device_mask(
-        &extents,
-        early.gic_windows,
-        kernel_start_addr(),
-        kernel_end_addr(),
-    );
-    configure_device_gigapages(identity_mask);
-    let (fb_base, fb_len) = early.video.map_or((0, 0), |v| (v.fb_base, v.fb_len_bytes));
-    // Exactly what the kernel addresses *physically* — its own image and
-    // boot heap, the firmware tree, the scan-out surface. Allocator RAM is
-    // deliberately absent: it is reached through the direct physical map in
-    // the kernel regime, so a process root carries no mapping of RAM in the
-    // half user code addresses.
-    let normal = gigapage_mask_from_extents(&[
-        (
-            kernel_start_addr(),
-            kernel_end_addr().saturating_sub(kernel_start_addr()),
-        ),
-        (dtb, early.dtb_len),
-        (fb_base, fb_len),
-    ]);
-    // A gigapage takes one memory type, so a configuration region sharing one
-    // with anything mapped Normal is left unmapped and its host unprobed.
-    let mut config_mask = early.pci_config;
-    for (word, normal) in config_mask.iter_mut().zip(normal) {
-        *word &= !normal;
-    }
-    tairix_arch_aarch64::paging::KERNEL_DEVICES.name(config_mask);
-    // RAM stays off every gigapage registers occupy, in either regime.
-    let mut device_mask = identity_mask;
-    for (word, config) in device_mask.iter_mut().zip(config_mask) {
-        *word |= config;
-    }
-    configure_kernel_gigapages(normal);
-    (early, device_mask)
+/// What the boot typed the direct map with.
+struct TypedRam {
+    /// The gigabytes typed as registers.
+    registers: [u64; GIGAPAGE_MASK_WORDS],
+    /// Every `/memory` window the direct map covers as RAM, in tree order:
+    /// the RAM the allocator may use. An 8 GiB board may declare several
+    /// (below the MMIO hole, 1 GiB..4 GiB, and above 4 GiB). Empty when the
+    /// tree declares none or is malformed (fail closed — no memory map is
+    /// built).
+    ram_windows: Vec<(u64, u64)>,
+    /// Bytes of RAM the tree declares, reachable or not.
+    installed_bytes: u64,
 }
 
-/// Record the discovered PCIe root-complex windows once, post-MMU.
+/// Point the console and the interrupt controller at what `tree` describes,
+/// and type the direct map from the board: the gigabytes those, the
+/// firmware's doorbell, `fw_cfg` and the PCIe root complex lie in as
+/// registers, a generic ECAM host's configuration regions as such, and then
+/// what is left of the `/memory` windows as RAM.
+///
+/// Registers win a gigabyte they share with RAM: a Normal alias of a register
+/// invites the core's speculative reads into it, which wedged metal hardware
+/// while QEMU, which answers every address, stayed green. That RAM is lost to
+/// the allocator until the map is typed at a finer grain (`plans/APPS.md`
+/// I4). The image's own gigabyte is RAM, typed by the port entry, so no
+/// register a board reports there can retype it. A null, unreadable, or
+/// incomplete tree leaves the `virt` defaults in place (fail closed).
+///
+/// The boot record states how wide the RAM map came out, so a machine whose
+/// RAM outruns the architectural ceiling is visible in the transcript rather
+/// than found later as a fail-closed allocation.
+fn type_direct_map(tree: u64, log_sink: &'static (dyn Sink + Sync)) -> TypedRam {
+    let mut asked = [0u64; GIGAPAGE_MASK_WORDS];
+    let mut config = [0u64; GIGAPAGE_MASK_WORDS];
+    let mut windows = Vec::new();
+    // SAFETY: `tree` is null or the firmware tree the port entry mapped read
+    // only for the kernel's life; `Fdt::from_ptr` checks its magic and bounds
+    // the blob by its own `totalsize` before any further read.
+    let fdt = (tree != 0)
+        .then(|| unsafe { Fdt::from_ptr(tree as *const u8) }.ok())
+        .flatten();
+    let mut add = |base: u64, len: u64| {
+        for (word, extent) in asked
+            .iter_mut()
+            .zip(gigapage_mask_from_extents(&[(base, len.max(1))]))
+        {
+            *word |= extent;
+        }
+    };
+    if let Some(fdt) = &fdt {
+        let _ = console::configure_from_fdt(fdt);
+        let _ = gic::configure_from_fdt(fdt);
+        gic::for_each_window(fdt, &mut add);
+        video::register_windows(fdt, &mut add);
+        if let Some(pcie) = platform::pcie_bringup(fdt) {
+            add(pcie.regs_phys, pcie.regs_len);
+            add(pcie.outbound_cpu_base, pcie.outbound_size);
+        }
+        if fdt.find_compatible(tairix_fdt::pci::ECAM_HOST).is_some() {
+            config = pci_config_gigapages(fdt);
+        }
+        // A malformed tree discards the partial collection: the boot then
+        // builds no memory map at all rather than trusting a truncated
+        // inventory.
+        if fdt
+            .each_memory_region(|base, size| {
+                if size != 0 {
+                    windows.push((base, size));
+                }
+            })
+            .is_err()
+        {
+            windows.clear();
+        }
+    }
+    let (console_base, _) = console::current();
+    let (distributor, cpu_interface) = gic::current();
+    add(console_base as u64, 1);
+    add(distributor as u64, 1);
+    add(cpu_interface as u64, 1);
+
+    let typed = crate::mem_map::type_board(
+        &asked,
+        &config,
+        &windows,
+        paging::PHYSMAP_REACH,
+        |mask, typed| {
+            reveal(
+                mask,
+                match typed {
+                    Typed::Registers => Holding::Registers,
+                    Typed::Config => Holding::Config,
+                    Typed::Ram => Holding::Ram,
+                },
+            )
+        },
+    );
+    if !typed.ram_windows.is_empty() {
+        // Every gigabyte is one L1 block descriptor but the image's own.
+        crate::mem_map::log_direct_map(log_sink, paging::physmap_gigapages(), true);
+    }
+    TypedRam {
+        registers: typed.registers,
+        ram_windows: typed.ram_windows,
+        installed_bytes: crate::mem_map::window_byte_total(&windows),
+    }
+}
+
+/// Record the discovered PCIe root-complex windows once.
 ///
 /// Purely a metal diagnostic: the windows themselves reach the autoloaded
 /// user-space bus driver as resource grants on the discovered root
@@ -658,50 +567,6 @@ fn log_pcie_discovery(log_sink: &'static (dyn Sink + Sync), pcie: &platform::Pci
     );
 }
 
-/// Size the direct physical map from the post-MMU-discovered `/memory`
-/// windows, install it into the kernel translation regime, and return the
-/// windows the allocator may use.
-///
-/// The windows are first clipped out of Device-typed gigapages: memory is
-/// typed at 1 GiB granularity and Device wins for a shared gigapage (a
-/// board's below-4 GiB window may end inside the gigapage holding its
-/// UART/GIC/PCIe), so RAM there would be mapped Device — atomics on it are
-/// unpredictable — and must never reach the map or the allocator.
-/// Reclaiming those bytes needs 2 MiB-granular typing (`plans/APPS.md` I4
-/// follow-up).
-///
-/// The map has to be live before anything reaches a *frame* by pointer:
-/// every later frame view — the RAM self-test, the page-table frame
-/// source, the slab page supply, the spawn image write, the root-unlock
-/// DMA pool — resolves through it. It costs no page tables (each covered
-/// gigabyte is one block descriptor) and no slot of any process root,
-/// because it lives in the kernel regime every CPU carries permanently.
-/// A zero-length window list, or a machine whose whole RAM lies in Device
-/// gigapages, installs nothing and is reported to the caller, which refuses
-/// the hand-off.
-///
-/// The boot record is written here rather than by the caller, so the one
-/// place that sizes the map is the one place that states how wide it ended
-/// up — a machine whose RAM outruns the architectural ceiling is visible in
-/// the transcript rather than found later as a fail-closed allocation.
-fn install_direct_physical_map(
-    discovered_windows: &[(u64, u64)],
-    device_mask: &[u64; GIGAPAGE_MASK_WORDS],
-    log_sink: &'static (dyn Sink + Sync),
-) -> (Vec<(u64, u64)>, bool) {
-    let ram_windows = crate::mem_map::clip_windows_to_normal_ram(discovered_windows, device_mask);
-    if ram_windows.is_empty() {
-        return (ram_windows, false);
-    }
-    if !install_boot_physmap(&gigapage_mask_from_extents(&ram_windows)) {
-        return (ram_windows, false);
-    }
-    // Every covered gigabyte is one L1 block descriptor, so the map costs
-    // no page tables at all.
-    crate::mem_map::log_direct_map(log_sink, paging::physmap_gigapages(), true);
-    (ram_windows, true)
-}
-
 /// Build the [`Aarch64Arch`] handle — the single concrete-arch selection
 /// point for the kernel image — and the dense `CpuId` → `MPIDR_EL1` map it
 /// is sized from, then classify each core from the firmware tree.
@@ -714,11 +579,7 @@ fn install_direct_physical_map(
 /// The core-class walk (`capacity-dmips-mhz`) lets the scheduler place
 /// background work on efficiency cores; a missing or malformed tree leaves
 /// the homogeneous Performance default.
-fn build_cpu_topology_and_arch(
-    discovered: &Discovered,
-    dtb: u64,
-    mmu_on: bool,
-) -> (Aarch64Arch, Vec<u64>) {
+fn build_cpu_topology_and_arch(discovered: &Discovered, tree: u64) -> (Aarch64Arch, Vec<u64>) {
     let cpu_mpidrs =
         match crate::cpu_topology::order_cpus(&discovered.cpu_mpidrs, smp::current_affinity()) {
             Ok(cpus) => cpus,
@@ -733,11 +594,11 @@ fn build_cpu_topology_and_arch(
         };
     smp::install_current_cpu_index(BOOT_CPU);
     let arch = build_arch_handle(&cpu_mpidrs, discovered.timer_hz);
-    if mmu_on && dtb != 0 {
-        // SAFETY: `dtb` is the firmware pointer `Fdt::from_ptr` validated
-        // for the pre-MMU walks (magic + `totalsize` bounds); the MMU is on,
-        // so a whole-tree traversal is safe.
-        if let Ok(fdt) = unsafe { Fdt::from_ptr(dtb as *const u8) } {
+    if tree != 0 {
+        // SAFETY: `tree` is the device tree mapped read only for the
+        // kernel's life; `Fdt::from_ptr` checks its magic and bounds it by
+        // its own `totalsize`.
+        if let Ok(fdt) = unsafe { Fdt::from_ptr(tree as *const u8) } {
             arch.classify_from_fdt(&fdt);
             // The firmware boot seed is the only usable entropy source on an
             // emulated core without `FEAT_RNG` (its cycle counter is
@@ -797,25 +658,27 @@ fn select_secondary_start(
 }
 
 /// Translate the discovered RAM windows into the canonical physical-memory
-/// map, with the firmware device-tree blob reserved out of it.
+/// map, with the firmware's device tree reserved out of it.
 ///
 /// An absent or malformed discovery fails closed to a status string rather
-/// than a panic. The blob must be reserved because firmware lands it high in
-/// RAM, above the kernel image the map already reserves: left usable, the
-/// frame allocator or the early-boot RAM self-test (which writes a word of
-/// every usable page) would clobber the tree the later root-storage bind and
-/// device discovery re-parse. An absent tree reserves nothing.
+/// than a panic. The tree must be reserved because firmware may land it
+/// above the kernel image the map already reserves: left usable, the frame
+/// allocator or the early-boot RAM self-test (which writes a word of every
+/// usable page) would clobber the tree the later root-storage bind and
+/// device discovery re-parse. A tree inside the image (a QEMU vertical's
+/// embedded one) is reserved with it; no tree reserves nothing.
 fn build_boot_memory_layout(
     ram_windows: &[(u64, u64)],
-    dtb: u64,
-    dtb_len: u64,
+    tree: Option<FirmwareTree>,
 ) -> Result<tairix_kernel_mem::BootMemoryMap, &'static str> {
     if ram_windows.is_empty() {
         return Err("no_memory_window");
     }
-    let mut map = build_memory_map(ram_windows, kernel_end_addr())
+    let mut map = build_memory_map(ram_windows, kernel_phys_end())
         .map_err(crate::mem_map::MemoryMapError::as_str)?;
-    crate::mem_map::reserve_blob_frames(&mut map, dtb, dtb_len);
+    if let Some(tree) = tree {
+        crate::mem_map::reserve_blob_frames(&mut map, tree.phys, tree.len);
+    }
     Ok(map)
 }
 
@@ -856,20 +719,18 @@ struct BootStatus {
     fb_base: u64,
     /// Byte length of the scan-out named by [`Self::fb_base`].
     fb_len: u64,
-    /// Physical root of the boot translation regime, or zero when the MMU
-    /// stayed off.
+    /// Physical address of the empty root `TTBR0_EL1` holds while no process
+    /// runs.
     ///
-    /// A fatal report names the root that was active (`root=`); comparing it
-    /// against this says whether the faulting context was on the boot space
-    /// or on some other root, which the address alone cannot distinguish —
-    /// the boot tables are a `.bss` static, so their address is
-    /// indistinguishable by magnitude from a frame-allocated one
-    /// (`plans/OPEN-DEFECTS.md` D81).
+    /// A fatal report names the low root that was active (`root=`);
+    /// comparing it against this says whether the faulting context ran a
+    /// process or the kernel alone, which the address alone cannot
+    /// distinguish (`plans/OPEN-DEFECTS.md` D81).
     boot_root: u64,
-    /// Low word of the Device gigapage mask (gigapages 0..64 — both
-    /// supported boards keep their MMIO below 64 GiB), so a metal capture
-    /// shows what the identity map typed Device (`virt`: 0x1; a board with
-    /// its MMIO in gigapage 3: 0x8).
+    /// Low word of the mask of gigabytes the direct map types as registers
+    /// (gigabytes 0..64 — both supported boards keep their MMIO below
+    /// 64 GiB), so a metal capture shows what was typed (`virt`: 0x1; a board
+    /// with its MMIO in gigabyte 3: 0x8).
     device_gigapages: u64,
     /// At least one usable `/memory` window survived the Device clip.
     ram_discovered: &'static str,
@@ -894,8 +755,6 @@ struct BootStatus {
     cpu_count: usize,
     /// Secondary bring-up staged successfully.
     smp_prepared: &'static str,
-    /// Stage-1 translation is on.
-    mmu_enabled: &'static str,
 }
 
 /// Emit the one consolidated aarch64 boot line.
@@ -955,7 +814,6 @@ fn log_boot_line(log_sink: &'static (dyn Sink + Sync), status: &BootStatus) {
             tairix_util::fmt::format_usize(status.cpu_count, &mut cpu_count_buf),
         ),
         ("smp_prepared", status.smp_prepared),
-        ("mmu_enabled", status.mmu_enabled),
         ("direct_map", status.direct_map),
         ("next_stage", "pi_p6c3_spawn_init_el0"),
         ("build_id", KERNEL_BUILD_ID),
@@ -1060,9 +918,9 @@ fn leak_zeroed_secondary_stacks(count: usize) -> &'static [smp::SecondaryStack] 
         core::ptr::write_bytes(spare_start, 0, spare_bytes);
         stacks.set_len(count);
     }
-    // Leaked, not boxed: the `smp.s` trampoline reads the region with the
-    // MMU off for the kernel's lifetime, and leaking the reservation as-is
-    // avoids a shrink-to-fit copy of the whole stack pool.
+    // Leaked, not boxed: the `smp.s` trampoline reads the region for the
+    // kernel's lifetime, and leaking the reservation as-is avoids a
+    // shrink-to-fit copy of the whole stack pool.
     Vec::leak(stacks)
 }
 
@@ -1107,11 +965,11 @@ fn prepare_secondary_bringup(cpu_mpidrs: &[u64]) -> bool {
 /// firmware tree and install the per-CPU registry the lockup watchdog's
 /// cross-core PC sampler reads ([`tairix_arch_aarch64::coresight`]).
 ///
-/// Runs post-MMU (it walks the whole tree) with the dense `cpu_mpidrs` map
-/// and the device-gigapage mask already resolved. A discovered base is
-/// installed **only** when its window sits in an already-Device-mapped
-/// gigapage, so a read on the lockup path can never fault; a component in
-/// an unmapped gigapage — or a tree that describes no debug components
+/// Runs with the dense `cpu_mpidrs` map and the direct map already typed. A
+/// discovered base is installed **only** when its window lies in a gigabyte
+/// the direct map types as registers, so a read on the lockup path can never
+/// fault; a component in an untyped gigabyte — or a tree that describes no
+/// debug components
 /// (QEMU `virt`, a stock firmware DTB) — installs nothing, and the
 /// sampler reports `Unsupported` (fail closed, the buddy detector runs
 /// unchanged). Allocation failure or a table with no reachable component is
@@ -1119,7 +977,6 @@ fn prepare_secondary_bringup(cpu_mpidrs: &[u64]) -> bool {
 #[cfg(feature = "watchdog-diagnostics")]
 fn install_debug_component_bases(fdt: &Fdt<'_>, cpu_mpidrs: &[u64]) {
     use tairix_arch_aarch64::coresight;
-    use tairix_arch_aarch64::paging::{device_gigapages, gigapage_is_device};
 
     let mut bases = Vec::new();
     if bases.try_reserve_exact(cpu_mpidrs.len()).is_err() {
@@ -1128,16 +985,13 @@ fn install_debug_component_bases(fdt: &Fdt<'_>, cpu_mpidrs: &[u64]) {
     bases.resize(cpu_mpidrs.len(), coresight::NO_BASE);
     fdt::debug_component_bases(fdt, cpu_mpidrs, &mut bases);
 
-    // Only keep a base whose gigapage is already Device-typed in the live
-    // identity map; a component elsewhere is dropped rather than read
-    // through an unmapped (or Normal, cacheable) window.
-    let mask = device_gigapages();
+    // Only keep a base whose window the direct map already types as
+    // registers; a component elsewhere is dropped rather than read through
+    // an unmapped (or Normal, cacheable) window.
     for base in &mut bases {
-        if *base == coresight::NO_BASE {
-            continue;
-        }
-        let gigapage = *base >> 30;
-        if !gigapage_is_device(&mask, gigapage) {
+        if *base != coresight::NO_BASE
+            && paging::registers_virt(*base as u64, coresight::WINDOW_BYTES).is_none()
+        {
             *base = coresight::NO_BASE;
         }
     }
@@ -1154,33 +1008,16 @@ fn install_debug_component_bases(fdt: &Fdt<'_>, cpu_mpidrs: &[u64]) {
 ///
 /// Ordering is load-bearing:
 ///
-/// 1. FP/SIMD on, before any code the compiler may lower to NEON.
-/// 2. Adopt the boot identity map — the very first memory-system act,
-///    while this core has performed no atomic read-modify-write (LDXR/
-///    STXR exclusives are unreliable on MMU-off Device-typed DRAM).
-/// 3. EL1 vectors + GIC CPU interface + per-CPU preemption/IPI arming
+/// 1. EL1 vectors + GIC CPU interface + per-CPU preemption/IPI arming
 ///    — each banked or per-core state that must be programmed on the
 ///    core that uses it.
-/// 4. [`tairix_kernel_core::run_secondary`], which audits the arrival
+/// 2. [`tairix_kernel_core::run_secondary`], which audits the arrival
 ///    and dispatches until the kernel stops.
 ///
 /// The kernel-core hand-off was published before this core's `CPU_ON`
 /// was issued, so a refusal from `run_secondary` is a genuine fault; it
 /// is reported on the UART debug line and the core parks fail-closed.
 extern "C" fn production_secondary_entry(cpu: u32) -> ! {
-    // SAFETY: this secondary core's first action, exactly once, before
-    // any FP/SIMD instruction executes on it.
-    unsafe {
-        enable_fp_el1();
-    }
-    // SAFETY: the trampoline hands over MMU-off with all interrupts
-    // masked and this core has touched no exclusives yet; the boot CPU
-    // published the park root before any `CPU_ON` (it enabled its own
-    // MMU during `boot`), so the adopted tables are live and coherent.
-    if !unsafe { tairix_arch_aarch64::paging::adopt_boot_translation() } {
-        // No published boot root: nothing sane to run on — park.
-        halt_current_cpu()
-    }
     // SAFETY: per-CPU installs on this core, exactly once each, before
     // any interrupt source is armed here; the boot CPU's `gic::init` ran
     // before any `CPU_ON`.
@@ -1229,10 +1066,8 @@ extern "C" fn production_secondary_entry(cpu: u32) -> ! {
 /// the boot record ([`crate::unlock_service::record_boot`]), which resolves
 /// the root block binding from it and moves it into the live inventory.
 ///
-/// Runs with the MMU **on** (the caller enables it first; a whole-tree
-/// traversal faults MMU-off, `plans/PI.md` watch-out). A null or unreadable
-/// tree, or a malformed walk, records nothing: the root stays unbound and
-/// the boot carries on.
+/// A null or unreadable tree, or a malformed walk, records nothing: the
+/// root stays unbound and the boot carries on.
 ///
 /// `video` carries the scan-out facts of a surface the firmware lit, if any;
 /// where the console is shown is decided from it and the display engine the
@@ -1240,22 +1075,19 @@ extern "C" fn production_secondary_entry(cpu: u32) -> ! {
 /// redistributor regions, `gic_redistributor_stride` apart, say whether the
 /// boot CPU can take the LPIs a PCI function's messages would raise.
 fn audit_root_storage_binding(
-    dtb: u64,
+    tree: u64,
     video: Option<video::DiscoveredVideo>,
     gic_redistributors: &[gicv3::RedistributorRegion],
     gic_redistributor_stride: Option<gicv3::RedistributorStride>,
     log_sink: &'static (dyn Sink + Sync),
 ) -> crate::boot_display::ConsolePlacement {
-    if dtb == 0 {
+    if tree == 0 {
         return crate::boot_display::ConsolePlacement::Nowhere;
     }
-    // SAFETY: on the boot hand-off `dtb` is the firmware/loader device-tree
-    // pointer (`boot.s` preserves x0). `Fdt::from_ptr` validates the magic
-    // and bounds the blob by its own `totalsize` before any further read.
-    // The full-tree discovery walk below runs with the MMU on (the caller
-    // enabled it), where a whole-tree traversal is safe; a bogus pointer
-    // fails the magic check and returns `Err` rather than faulting.
-    let Ok(fdt) = (unsafe { Fdt::from_ptr(dtb as *const u8) }) else {
+    // SAFETY: `tree` is the device tree mapped read only for the kernel's
+    // life; `Fdt::from_ptr` checks its magic and bounds it by its own
+    // `totalsize` before any further read.
+    let Ok(fdt) = (unsafe { Fdt::from_ptr(tree as *const u8) }) else {
         return crate::boot_display::ConsolePlacement::Nowhere;
     };
     // The validated blob's own length, captured before the walk consumes
@@ -1281,13 +1113,17 @@ fn audit_root_storage_binding(
     // tree that describes no `virtio,mmio` node makes
     // `virtio_mmio_bus_from_dtb` return `NotFound`, so this is a no-op there
     // — it is the QEMU `virt`-board path, additive and metal-neutral.
-    // SAFETY: `dtb`/`total` bound the firmware blob `Fdt::from_ptr` validated
-    // above; it is identity-mapped and immutable for the kernel's life, and
-    // the virtio-MMIO aperture it describes is identity-mapped Device memory
-    // the probe alone reads (side-effect-free `DeviceID` registers, MMU on —
-    // the caller enabled it, so this whole-tree walk is safe, `plans/PI.md`).
-    let dtb_bytes = unsafe { core::slice::from_raw_parts(dtb as *const u8, total) };
-    let probe = unsafe { tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb(dtb_bytes) };
+    // SAFETY: `tree`/`total` bound the blob `Fdt::from_ptr` validated above,
+    // mapped read only and immutable for the kernel's life; the virtio-MMIO
+    // aperture it describes is reached where the direct map types it as
+    // registers, which the probe alone reads (side-effect-free `DeviceID`
+    // registers).
+    let dtb_bytes = unsafe { core::slice::from_raw_parts(tree as *const u8, total) };
+    let probe = unsafe {
+        tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb(dtb_bytes, |base, len| {
+            paging::registers_virt(base, len).map(|at| at as *const u32)
+        })
+    };
     if let (Ok(bus), Ok(slots)) = (probe, Fdt::new(dtb_bytes)) {
         // Read before the probes add nodes of their own.
         let dma = crate::iommu_fdt::SlotDma::read(
@@ -1318,10 +1154,9 @@ fn audit_root_storage_binding(
 
     // Every generic ECAM host the tree describes becomes the kernel's own,
     // its functions raising LPIs where an ITS can take their messages.
-    // SAFETY: as the probes' closures above — `dtb` bounds the firmware blob
-    // validated at boot, identity-mapped and immutable for the kernel's life,
-    // MMU on.
-    if let Ok(fdt) = unsafe { Fdt::from_ptr(dtb as *const u8) } {
+    // SAFETY: as above — `tree` bounds the blob validated at boot, mapped
+    // read only and immutable for the kernel's life.
+    if let Ok(fdt) = unsafe { Fdt::from_ptr(tree as *const u8) } {
         let mut lpis = crate::aarch64_messages::discover(
             &fdt,
             gic_redistributors,
@@ -1338,10 +1173,8 @@ fn audit_root_storage_binding(
     // The console is shown on a display engine the tree enables or a virtio
     // GPU, either of which takes the screen over, else on the surface the
     // firmware lit.
-    // SAFETY: as the probes' closures above — `dtb` bounds the firmware blob
-    // validated at boot, identity-mapped and immutable for the kernel's life,
-    // MMU on.
-    let engine = unsafe { Fdt::from_ptr(dtb as *const u8) }
+    // SAFETY: as above.
+    let engine = unsafe { Fdt::from_ptr(tree as *const u8) }
         .ok()
         .and_then(|fdt| platform::display_engine(&fdt))
         .or_else(|| crate::boot_display::virtio_gpu(&sink));
@@ -1355,9 +1188,7 @@ fn audit_root_storage_binding(
     });
     let placement = crate::boot_display::place_console(&mut sink, engine, scanout.as_ref());
 
-    // The MMU is on here (the caller enabled it), as the boot record's
-    // `SpinLock` stash requires.
-    crate::unlock_service::record_boot(dtb, sink.into_vec(), log_sink);
+    crate::unlock_service::record_boot(tree, sink.into_vec(), log_sink);
     placement
 }
 
@@ -1385,23 +1216,35 @@ fn place_video_console(
 }
 
 /// A kernel mapping of the device registers at `[base, base + len)`: a
-/// window wholly inside the kernel regime's Device gigapages, at its
-/// direct-map address, else wholly inside the identity window's, at its
-/// physical one. Anything else fails closed: no other mapping of a register
-/// window is uncached.
+/// window wholly inside the direct map's register gigabytes, at its
+/// direct-map address. Anything else fails closed: no other mapping of a
+/// register window is uncached.
 pub(crate) fn device_registers(base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
-    use tairix_arch_aarch64::paging::{identity_device_covers, physmap_virt, KERNEL_DEVICES};
-    let span = u64::try_from(len).ok()?;
-    let virt = if KERNEL_DEVICES.covers(base, span) {
-        physmap_virt(base)
-    } else if identity_device_covers(base, span) {
-        base
-    } else {
-        return None;
-    };
+    let virt = paging::registers_virt(base, u64::try_from(len).ok()?)?;
     core::ptr::NonNull::new(core::ptr::with_exposed_provenance_mut(
         usize::try_from(virt).ok()?,
     ))
+}
+
+/// The physical map register windows are reached through: the direct map's
+/// register gigabytes, where the board's discovered MMIO lives.
+///
+/// Those are sparse, so this is no general physical map: RAM is reached
+/// through [`SPAWN_TABLE_PHYSMAP`](crate::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP),
+/// and a window not wholly inside a register gigabyte fails closed rather
+/// than aliasing memory the direct map holds cacheable.
+pub struct DeviceWindows;
+
+impl PhysMap for DeviceWindows {
+    fn translate(&self, phys: PhysAddr, len: usize) -> Option<core::ptr::NonNull<u8>> {
+        device_registers(phys.as_u64(), len)
+    }
+
+    /// Device memory is never cached, so there is no alias to clean.
+    fn clean_invalidate(&self, _phys: PhysAddr, _len: usize) {}
+
+    /// Register windows are never executed.
+    fn sync_instruction_cache(&self, _phys: PhysAddr, _len: usize) {}
 }
 
 /// How a generic ECAM host reaches this port: its configuration region
@@ -1418,7 +1261,7 @@ impl crate::pci_fdt::FdtPort for PciPort {
     }
 
     fn reach(&self) -> u64 {
-        tairix_arch_aarch64::paging::KERNEL_DEVICES.reach()
+        paging::PHYSMAP_REACH
     }
 }
 
@@ -1625,35 +1468,21 @@ fn enter_kernel_core(
     kernel_main(boot_info)
 }
 
-/// What the pre-MMU boot phase resolved from the firmware device tree:
-/// the MMIO facts the identity map's Device gigapage mask is derived
-/// from ([`identity_device_mask`]).
+/// What device bring-up resolved from the firmware device tree.
 struct EarlyDiscovered {
-    /// A recognised console UART was found and the console base/model set.
+    /// A recognised console UART was found.
     console: bool,
-    /// A GIC was found and the driver pointed at it.
+    /// A GIC was found.
     gic: bool,
-    /// The gigapages every GIC register window lies in: its distributor,
-    /// GICv2 CPU interface or GICv3 redistributors, and any interrupt
-    /// translation service.
-    gic_windows: [u64; GIGAPAGE_MASK_WORDS],
     /// The framebuffer boot console came up: a firmware mailbox was
     /// found, a display is attached, and the scan-out surface was
     /// allocated — console output now defaults to the screen, with the
     /// UART as the fallback (`plans/PI.md` P7b).
     video: Option<video::DiscoveredVideo>,
-    /// Total byte length of the firmware device-tree blob (`totalsize`),
-    /// `0` when no readable tree was found — the blob's RAM extent must
-    /// stay in the identity map for the post-MMU walks.
-    dtb_len: u64,
     /// The platform PCIe root complex's windows, when the tree describes the
-    /// one the port knows (`plans/PI.md` P10): its register block and
-    /// outbound MMIO window must be folded into the identity Device mask.
-    /// `None` on a board with none (the QEMU `virt` shape).
+    /// one the port knows (`plans/PI.md` P10). `None` on a board with none
+    /// (the QEMU `virt` shape).
     pcie: Option<platform::PcieDiscovery>,
-    /// The gigapages holding a generic ECAM host's configuration region,
-    /// which the kernel maps in its own regime (`plans/IOMMU.md` IOM13).
-    pci_config: [u64; GIGAPAGE_MASK_WORDS],
     /// The rate in Hz the firmware was asked to run the ARM cores at, or `0`
     /// on a board with no firmware clock (the QEMU `virt` shape) or where the
     /// request failed. Recorded so the boot log can state the speed the rest
@@ -1664,70 +1493,45 @@ struct EarlyDiscovered {
 /// Record `video`'s surface as the console's; `false` for a mode no glyph
 /// fits, leaving the UART the console.
 fn publish_boot_surface(video: &video::DiscoveredVideo) -> bool {
-    let Some(base) = video.identity_base() else {
+    let Some(base) = video.base() else {
         return false;
     };
-    // SAFETY: the boot CPU, with the MMU off, before anything else reaches
-    // the console; discovery proved `[fb_base, fb_base + fb_len_bytes)` holds
-    // the mode and is RAM owned for scan-out (the kernel's ramfb surface, or
-    // the firmware's), which the CPU addresses by identity until the MMU is
-    // on.
+    // SAFETY: the boot CPU, before anything else reaches the console;
+    // discovery proved `[fb_base, fb_base + fb_len_bytes)` holds the mode and
+    // is RAM owned for scan-out (the kernel's ramfb surface, or the
+    // firmware's), which the direct map covers at `base`.
     unsafe { crate::console_layout::CONSOLE.publish(base, video.surface()) }
 }
 
-/// Point the console and the GIC driver at what the firmware tree describes
-/// and bring up the framebuffer boot console, before the MMU is enabled.
-///
-/// All three discoveries are early-returning, `ranges`-aware walks
-/// ([`console::configure_from_fdt`] / [`gic::configure_from_fdt`] /
-/// [`video::configure`] over
-/// [`tairix_fdt::scan_translated`]), so they are safe with
-/// the MMU off — and the video bring-up *requires* this phase: with the
-/// data caches off the CPU↔firmware mailbox exchange is coherent without
-/// cache maintenance, and its state cell needs the single-threaded boot
-/// CPU. A null pointer, an unreadable/invalid blob, or a tree missing a
-/// fact leaves the corresponding pre-discovery default untouched — for
-/// video, the UART console (fail closed).
-fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
+/// Bring up the console UART and the framebuffer boot console, raise the
+/// cores to their full rate, and find the PCIe root complex, on the board
+/// [`type_direct_map`] typed. A null pointer, an unreadable/invalid blob, or
+/// a tree missing a fact leaves the corresponding pre-discovery default
+/// untouched — for video, the UART console (fail closed).
+fn configure_mmio_from_dtb(tree: u64) -> EarlyDiscovered {
     let mut out = EarlyDiscovered {
         console: false,
         gic: false,
-        gic_windows: [0; GIGAPAGE_MASK_WORDS],
         video: None,
-        dtb_len: 0,
         pcie: None,
-        pci_config: [0; GIGAPAGE_MASK_WORDS],
         cpu_clock_hz: 0,
     };
-    if dtb == 0 {
+    if tree == 0 {
         return out;
     }
-    // SAFETY: on the boot hand-off `dtb` is the firmware/loader device-tree
-    // pointer (`boot.s` preserves x0). `Fdt::from_ptr` validates the magic
-    // and bounds the blob by its own `totalsize` before any further read,
-    // and every read is a single byte, so the access is valid MMU-off. A
-    // bogus pointer fails the magic check and returns `Err` rather than
-    // faulting on structured data.
-    let Ok(fdt) = (unsafe { Fdt::from_ptr(dtb as *const u8) }) else {
+    // SAFETY: `tree` is the device tree mapped read only for the kernel's
+    // life; `Fdt::from_ptr` checks its magic and bounds it by its own
+    // `totalsize` before any further read.
+    let Ok(fdt) = (unsafe { Fdt::from_ptr(tree as *const u8) }) else {
         return out;
     };
-    out.dtb_len = fdt.total_size() as u64;
-    out.console = console::configure_from_fdt(&fdt).is_some();
+    out.console = console::find_console(&fdt).is_some();
     // Bring the discovered console's line up before the first log byte:
     // on real silicon a UART can stay silent until its pins are muxed to it
     // and its line registers are programmed — QEMU's powered-up PL011 masks
     // the omission (`uart_init`).
     uart_init::init_from_fdt(&fdt);
-    out.gic = gic::configure_from_fdt(&fdt).is_some();
-    gic::for_each_window(&fdt, |base, len| {
-        for (word, window) in out
-            .gic_windows
-            .iter_mut()
-            .zip(gigapage_mask_from_extents(&[(base, len)]))
-        {
-            *word |= window;
-        }
-    });
+    out.gic = gic::find_gic(&fdt).is_some();
     // Ask the firmware for full speed before anything else runs. Where the
     // ARM clock is the firmware's, it leaves it at `arm_freq_min` — 600 MHz
     // on a board rated at 1.5 GHz — until an OS driver asks otherwise, so
@@ -1745,13 +1549,7 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
         None => out.video = video::configure(&fdt, None),
     }
     out.video = out.video.filter(publish_boot_surface);
-    // The early-returning `scan_translated` walk is MMU-off-safe: it reads
-    // only the matched node's own properties, like the walks above.
     out.pcie = platform::pcie_bringup(&fdt);
-    // Only a tree describing a generic host is walked whole.
-    if fdt.find_compatible(tairix_fdt::pci::ECAM_HOST).is_some() {
-        out.pci_config = pci_config_gigapages(&fdt);
-    }
     out
 }
 
@@ -1770,16 +1568,8 @@ fn pci_config_gigapages(fdt: &Fdt<'_>) -> [u64; GIGAPAGE_MASK_WORDS] {
     mask
 }
 
-/// What the post-MMU boot phase resolved from the firmware device tree.
+/// What the boot resolved from the firmware device tree beyond its devices.
 struct Discovered {
-    /// Every `/memory` window `(base, size)` discovered from the firmware
-    /// tree, in tree order — the RAM extents the `BootMemoryMap`
-    /// (`plans/PI.md` P6c-1) reserves the kernel image out of and hands
-    /// the allocator. An 8 GiB board may declare several (below the MMIO
-    /// hole, 1 GiB..4 GiB, and above 4 GiB); reading only the first
-    /// under-reported one as ~1 GiB. Empty when the tree declares none (fail
-    /// closed — no memory map is built).
-    ram_windows: Vec<(u64, u64)>,
     /// The generic-timer counter frequency (Hz) to seed the handle and
     /// the P4 live timer with: the `/timer` `clock-frequency` override
     /// when the tree declares one, else the `CNTFRQ_EL0` register value.
@@ -1811,17 +1601,14 @@ struct Discovered {
     gic_redistributor_stride: Option<gicv3::RedistributorStride>,
 }
 
-/// Discover the board's post-MMU facts from the device tree at `dtb`:
-/// the `/memory` window, the timer rate, and the PSCI conduit. (The
-/// console and GIC bases are configured MMU-off by
-/// [`configure_mmio_from_dtb`], before the identity map is built.)
+/// Discover the timer rate, the PSCI conduit and the CPUs from the device
+/// tree at `tree`.
 ///
 /// A null pointer, an unreadable/invalid blob, or a tree missing a fact
 /// leaves the corresponding pre-discovery `virt` default untouched (fail
 /// closed).
-fn configure_from_dtb(dtb: u64) -> Discovered {
+fn configure_from_dtb(tree: u64) -> Discovered {
     let mut out = Discovered {
-        ram_windows: Vec::new(),
         // With no usable tree the register is the only counter-rate
         // source; P4's tree override (if any) overwrites this below.
         timer_hz: read_cntfrq(),
@@ -1832,36 +1619,15 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
         gic_redistributors: Vec::new(),
         gic_redistributor_stride: None,
     };
-    if dtb == 0 {
+    if tree == 0 {
         return out;
     }
-    // SAFETY: on the boot hand-off `dtb` is the firmware/loader device-tree
-    // pointer (`boot.s` preserves x0). `Fdt::from_ptr` validates the magic
-    // and bounds the blob by its own `totalsize` before any further read,
-    // and every read is a single byte. The full-tree walks below run with
-    // the MMU on (the caller enables it first). A bogus pointer fails the
-    // magic check and returns `Err` rather than faulting on structured
-    // data.
-    let Ok(fdt) = (unsafe { Fdt::from_ptr(dtb as *const u8) }) else {
+    // SAFETY: `tree` is the device tree mapped read only for the kernel's
+    // life; `Fdt::from_ptr` checks its magic and bounds it by its own
+    // `totalsize` before any further read.
+    let Ok(fdt) = (unsafe { Fdt::from_ptr(tree as *const u8) }) else {
         return out;
     };
-    // Collect every declared RAM range (every `reg` pair of every
-    // `/memory` node), skipping zero-length entries. A malformed tree
-    // discards the partial collection: the boot path then builds no
-    // memory map at all rather than trusting a truncated inventory,
-    // exactly as the former single-window read failed closed to `None`.
-    let mut windows = Vec::new();
-    if fdt
-        .each_memory_region(|base, size| {
-            if size != 0 {
-                windows.push((base, size));
-            }
-        })
-        .is_err()
-    {
-        windows.clear();
-    }
-    out.ram_windows = windows;
     // P4: prefer the board's `/timer` `clock-frequency` over the
     // `CNTFRQ_EL0` register, so the crystal the firmware tree declares is
     // honoured (no `cfg(board)` fork).
@@ -1902,10 +1668,8 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
     // Record the console UART's receive-interrupt line so the root-unlock
     // console handoff can switch `login`'s input from polled to
     // interrupt-driven (`crate::aarch64::gic_irq::enable_uart_console_irq`).
-    // Done here (post-MMU) rather than beside the MMU-off console-base
-    // discovery because storing it flips an atomic `OnceCell`, which is only
-    // sound with the MMU on; and unconditionally, so the no-disk path (which
-    // never runs the unlock kthread) still gets it. A tree without a
+    // Unconditionally, so the no-disk path (which never runs the unlock
+    // kthread) still gets it. A tree without a
     // representable console interrupt leaves `login` on the polled path (fail
     // closed — `login` then keeps re-polling, never errors).
     if let Some(intid) =
@@ -1915,8 +1679,7 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
     }
     // The chained message multiplexer the tree describes, if any, backs
     // `msi_alloc`; with none, `msi_alloc` fails closed (the QEMU `virt`
-    // shape). Post-MMU, as it publishes through atomics, like the
-    // console-interrupt record above.
+    // shape).
     if let Some(mux) = tairix_arch_aarch64::msimux::configure_from_fdt(&fdt) {
         crate::aarch64::gic_irq::install_msi_mux(mux);
     }

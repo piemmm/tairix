@@ -29,13 +29,14 @@ use tairix_arch_aarch64::paging::{
 };
 use tairix_arch_aarch64::userentry::USER_MODE;
 use tairix_arch_aarch64::{
-    enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, Aarch64Arch,
+    exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, Aarch64Arch,
     Aarch64ArchStorage, SERIAL_SINK,
 };
 use tairix_arch_api::BOOT_CPU;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kernel::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use tairix_kernel_core::foreground::ProcessInstance;
 use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
@@ -45,8 +46,7 @@ use tairix_kernel_core::{
     SpawnMode, SpawnRequest, Yielder, NULL_CONSOLE, NULL_CONSOLE_READ,
 };
 use tairix_kernel_mem::{
-    copy_out, AddressSpace, DirectPhysMap, Frame, PhysAddr, PhysMap, UserAddressSpace, UserStack,
-    VirtAddr,
+    copy_out, AddressSpace, Frame, PhysAddr, UserAddressSpace, UserStack, VirtAddr,
 };
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_sec::{ProcessId, TaskId};
@@ -58,9 +58,6 @@ use tairix_sync::SpinLock;
 include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 // The canonical QEMU `virt` device tree, dumped and embedded at build time.
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
-
-/// Gigabytes of identity map each EL0 address space provides.
-const IDENTITY_GIB: usize = 2;
 
 /// User stack base (1 MiB into the high user region) and size.
 const USER_STACK_BASE: u64 = USER_BIAS + 0x10_0000;
@@ -166,7 +163,7 @@ static mut FRAME_POOL: FramePool = FramePool([0; paging::PAGE_SIZE * FRAME_COUNT
 /// Monotonic index of the next free [`FRAME_POOL`] frame, shared by both builds.
 static FRAME_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
-/// Hand out the next identity-mapped physical frame, or `None` when exhausted.
+/// Hand out the next physical frame, or `None` when exhausted.
 fn next_frame() -> Option<Frame> {
     let idx = FRAME_CURSOR.fetch_add(1, Ordering::SeqCst);
     if idx >= FRAME_COUNT {
@@ -174,7 +171,7 @@ fn next_frame() -> Option<Frame> {
         return None;
     }
     let offset = idx * paging::PAGE_SIZE;
-    let base = core::ptr::addr_of!(FRAME_POOL) as u64 + offset as u64;
+    let base = paging::image_phys(core::ptr::addr_of!(FRAME_POOL) as u64) + offset as u64;
     Some(Frame::containing(PhysAddr::new(base)))
 }
 
@@ -219,15 +216,10 @@ static SIGNAL_PRODUCER: SpinLock<
 /// The live scheduler, leaked `'static` so the dispatch callback can resolve
 /// the current task id.
 static SCHED: SpinLock<Option<&'static Scheduler<Aarch64Arch>>> = SpinLock::new(None);
-/// The parent's frozen address space + direct map, used to copy the reaped
+/// The parent's frozen address space, used to copy the reaped
 /// child's exit status out to the parent's `status` pointer.
-#[allow(clippy::type_complexity)]
-static PARENT_SPACE: SpinLock<
-    Option<(
-        Box<dyn UserAddressSpace + Send + Sync>,
-        Box<dyn PhysMap + Send + Sync>,
-    )>,
-> = SpinLock::new(None);
+static PARENT_SPACE: SpinLock<Option<Box<dyn UserAddressSpace + Send + Sync>>> =
+    SpinLock::new(None);
 
 /// Resolve the scheduler's current task id on [`BOOT_CPU`], failing the test if
 /// none is set (it always is inside a dispatched task's `svc`).
@@ -407,13 +399,13 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 /// faulting or unmapped pointer (fail closed).
 fn copy_status_to_parent(status_va: u64, status: WaitStatus) -> bool {
     let guard = PARENT_SPACE.lock();
-    let Some((space, physmap)) = guard.as_ref() else {
+    let Some(space) = guard.as_ref() else {
         return false;
     };
     let bytes = WaitStatusRecord::encode(status).to_ne_bytes();
     copy_out(
         space.as_ref(),
-        physmap.as_ref(),
+        &SPAWN_TABLE_PHYSMAP,
         VirtAddr::new(status_va),
         &bytes,
     )
@@ -432,19 +424,15 @@ fn build_el0_space(
     let Ok(image) = LoadImage::parse(rxe, &SYSCALL_TABLE_HASH) else {
         qemu_exit::exit_failure(FAIL_PARSE);
     };
-    let Some(arch) = ArchAddressSpace::new_identity_gigapages(pool, IDENTITY_GIB) else {
+    let Some(arch) = ArchAddressSpace::new_user(pool) else {
         qemu_exit::exit_failure(FAIL_POOL);
     };
     let root_phys = arch.root_phys();
-    // SAFETY: the identity map covers the kernel's current `pc`, `sp`, heap,
-    // frame pool, and device MMIO (all within `[0, 2 GiB)` on `virt`), so
-    // switching it does not move the ground under the running code. Boot CPU.
-    unsafe { arch.switch() };
+    // SAFETY: the kernel runs from `TTBR1_EL1`, which loading a process root
+    // leaves untouched. Boot CPU.
+    unsafe { tairix_arch_api::mmu::AddressSpace::activate(&arch) };
 
     let mut space = AddressSpace::new(arch);
-    // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let physmap = unsafe { DirectPhysMap::identity((IDENTITY_GIB as u64) << 30) }
-        .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image: &image,
         image_bytes: rxe,
@@ -472,7 +460,7 @@ fn build_el0_space(
             SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
-            &physmap,
+            &SPAWN_TABLE_PHYSMAP,
             &request,
             next_frame,
         )
@@ -489,8 +477,7 @@ fn build_el0_space(
             qemu_exit::exit_failure(FAIL_BUILD);
         };
         let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(frozen);
-        let pm: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
-        *PARENT_SPACE.lock() = Some((frozen, pm));
+        *PARENT_SPACE.lock() = Some(frozen);
     }
 
     (root_phys, entry)
@@ -501,9 +488,9 @@ fn build_el0_space(
 fn admit(sched: &Scheduler<Aarch64Arch>, root_phys: u64, entry: tairix_arch_api::UserEntry) -> u64 {
     let cs = ContextSwitchHal::new();
     let pre_resume = move |_stack_top: u64, tag: AddressTag| {
-        // SAFETY: the MMU is enabled and `root_phys` is the L1 root of a space
-        // that identity-maps the low kernel window — `activate_user_root`'s
-        // contract.
+        // SAFETY: translation is on, this runs from the kernel regime, and
+        // `root_phys` is the L1 root of a space whose tables live in a static
+        // pool — `activate_user_root`'s contract.
         unsafe { activate_user_root(root_phys, tag) };
     };
     let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
@@ -610,10 +597,6 @@ fn drive_intake_saga(wait_producer: &KernelProcessWait<Aarch64Arch>) {
 pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     note(TEST_START, "aarch64 signal test: starting");
 
-    // Enable FP/SIMD at EL1 before any code that may use it.
-    // SAFETY: this is the boot CPU, called once, before any FP/SIMD executes.
-    unsafe { enable_fp_el1() };
-
     // P3/P4: discover the board from the embedded `virt` device tree.
     let Ok(fdt) = Fdt::new(DTB_BLOB) else {
         qemu_exit::exit_failure(FAIL_GIC);
@@ -626,13 +609,13 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         qemu_exit::exit_failure(FAIL_GIC);
     }
 
-    // Bring up the EL1 vectors + GICv2 and install the dispatch callback.
-    // SAFETY: called once on the boot CPU with a stack established and the MMU
-    // enabled (the address-space builds switch it on below).
     // Build the child space first so we know its task id before laying out the
     // parent's startup arguments.
     let (child_root, child_entry) = build_el0_space(&PAGE_TABLES_CHILD, CHILD_RXE, &[b"signal"]);
 
+    // Bring up the EL1 vectors + GICv2 and install the dispatch callback.
+    // SAFETY: called once on the boot CPU with a stack established and
+    // translation on.
     unsafe {
         exceptions::init_vectors();
         tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");

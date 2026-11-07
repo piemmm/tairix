@@ -174,11 +174,12 @@ through the bounded cross-CPU IPI-halt handshake (`tairix_arch_api::quiesce`,
 else fail-closed `CpuQuiesceTimeout`), mask interrupts (`sstatus.SIE`/`sie`;
 `DAIF` + `CNTV_CTL_EL0`; `cli`), switch to a reserved `.bss` stack, run the
 arch-neutral whole-RAM sweep continuously (cycling every pattern over all of
-RAM until the operator resets the machine). riscv64/aarch64 park on the
-**reserved** boot root, whose tables lie in the kernel image, and keep paging
-on (both ports are identity-mapped, so `virt==phys`); x86_64, which cannot drop
-long-mode paging either, parks on its kernel root the same way and sweeps RAM
-through the direct map. Each is proven end-to-end by
+RAM until the operator resets the machine). riscv64 parks on the
+**reserved** boot root, whose tables lie in the kernel image, and keeps paging
+on (it is identity-mapped, so `virt==phys`); aarch64 parks on its empty
+root, whose one table also lies in the image, and x86_64, which cannot drop
+long-mode paging either, on its kernel root, both sweeping RAM through the
+direct map. Each is proven end-to-end by
 `tests/integration/supervisor_memtest_takeover_qemu_<t>` (the harness resets
 the guest once it reports a completed test loop). `wasm32` is `n/a` (a sandbox
 owns no physical RAM to take over). Per-port impls are staged with the
@@ -583,7 +584,7 @@ HAL *modules* compile). Docs:
 - All three ports run `passes_frames_conformance` on the host and
   `kernel/mem` runs the suite over `FrameTableSource`: `table_at` is
   defined as the inverse of whatever `phys` derivation a source keeps, so
-  x86_64's higher-half pool is host-runnable like the identity ones.
+  x86_64's higher-half pool is host-runnable like the others.
 - **Deliverable met:** a per-process address space's internal tables come
   from the kernel frame allocator via the seam; the `memory_isolation_qemu_*`
   and spawn verticals stay green; no `cfg(target_arch …)` leaks. Docs:
@@ -833,12 +834,10 @@ stricter `is_release_ready` gate rejects any `Pending`.
   netstack-engine MMIO vertical this stage also landed was removed once
   all three arches went two-process; the aarch64 network path is now the
   two-process `netstack_autoload_qemu_aarch64`, `plans/NETWORK.md` N4e.)
-- **Shared bring-up (`tests/integration/virtio_qemu_support`).** Added the
-  `imp_mmio_aarch64` module behind `cfg(itest_aarch64)`: it enables FP/SIMD
-  at EL1 (`CPACR_EL1.FPEN`), brings up a 2 GiB identity-mapped stage-1 MMU
-  (GiB 0 Device, RAM Normal-cacheable — the precondition for the
-  atomic-heavy driver/DMA/sync stack, which riscv64 gets from its boot
-  pipeline), provisions the transport through the capability-gated
+- **Shared bring-up (`tests/integration/virtio_qemu_support`).** The
+  `imp_mmio_aarch64` module behind `cfg(itest_aarch64)` reaches the
+  apertures through the kernel's register map and its DMA frames through
+  the RAM map, provisions the transport through the capability-gated
   `KernelMmioMapper`, walks the DTB for the device's GICv2 SPI, wires the
   EL1 device-IRQ dispatch to a `kernel/irq` `IrqTable` over a
   `GicController` bridge, and parks on a race-free `wfi` (DAIF-masked).
@@ -867,11 +866,11 @@ stricter `is_release_ready` gate rejects any `Pending`.
   capability-gated `KernelMmioMapper` and reading the presented pixels
   back through an independent window). QEMU-green and enrolled in
   `tools/xtask/src/commands/qemu_tests.rs` (`ramfb: true`).
-- **Shared, not duplicated (§2.2).** The W11-A EL1 FP-enable + 2 GiB
-  identity-MMU bring-up was extracted into a public
-  `bring_up_el1_identity_mmu(&dyn QemuEnv)` (and the env type made public
-  as `AArch64QemuEnv`), reused by both the virtio scenario and the display
-  vertical. The `fw_cfg` MMIO transport (`MmioDma`) is byte-identical on
+- **Shared, not duplicated (§2.2).** The port entry arms FP/SIMD, the
+  vectors and the kernel root before either vertical runs, and both reach
+  the direct map through the kernel's own register and RAM maps; the
+  serial/semihosting env is the one public `AArch64QemuEnv`. The `fw_cfg`
+  MMIO transport (`MmioDma`) is byte-identical on
   the riscv64 and aarch64 `virt` boards, so it was moved into the shared
   `lib/fwcfg` crate (`tairix-fwcfg`) and now serves both display verticals (the
   riscv64 vertical's local copy was deleted); only the x86_64 IOport
@@ -882,7 +881,7 @@ stricter `is_release_ready` gate rejects any `Pending`.
   `virt`-board analogue of the x86 PS/2 vertical, filling the `input` row
   of the §1 QEMU matrix: `tests/integration/input_virtio_mmio_qemu_aarch64`
   (`tairix-test-input-virtio-mmio-qemu-aarch64`) reuses the same
-  `bring_up_el1_identity_mmu` + embedded-DTB path, builds the virtio-MMIO
+  embedded-DTB path, builds the virtio-MMIO
   transport, arms the GICv2 SPI, loads the signed virtio-input `.rxe`, and
   drives `load → use → unload → reload`. Enrolled with `keyboard: Some(..)`.
 - **New driver + shared tail (§2.2).** `drivers/input/virtio_input`
@@ -1075,8 +1074,8 @@ interface creep).
     `smp::start_secondary`), or the Devicetree spin-table release
     (`smp::start_secondary_spintable`) on a PSCI-less tree (the Pi 4's
     stock firmware), then waits, bounded, for the core's answer
-    (`StartAnswer`, written MMU-off in the core's own slot, alone in a
-    writeback granule) and gives back the `StartVerdict` the core waits on
+    (`StartAnswer`, written in the core's own slot once its translation is
+    on) and gives back the `StartVerdict` the core waits on
     before it runs; a refusal is `SmpError::LacksProtection`. x86_64 settles
     its AP's answer on one compare-and-swap (`settle_start`).
   - **riscv64** delegates to the SBI HSM `hart_start` `smp::start_secondary`.
@@ -1173,28 +1172,17 @@ Resolves the long-standing "`lib/fdt` runtime parse of the full ARM
 `virt` tree" carry-forward (W6/W7) and the §2.2 duplication the
 DTB-embedding device verticals had grown.
 
-- **The note was stale.** W12 gave `lib/fdt` the full `virt`-tree node
-  API, and the W11 device verticals (`virtio_blk/net_mmio_aarch64`,
-  `framebuffer_display`, `input_virtio_mmio`) already **parse the full ARM
-  `virt` tree at runtime** through `tairix_fdt::Fdt` (e.g.
+- **Runtime full-tree parsing is proven.** W12 gave `lib/fdt` the full
+  `virt`-tree node API, and the W11 device verticals
+  (`virtio_blk/net_mmio_aarch64`, `framebuffer_display`, `input_virtio_mmio`)
+  parse the full ARM `virt` tree at runtime through `tairix_fdt::Fdt` (e.g.
   `device_spi_number` walks `virtio,mmio` `reg`/`interrupts`; the display
-  vertical reads the `fw_cfg` base) — after their EL1 identity-MMU
-  bring-up. So runtime full-tree parsing on aarch64 is already proven;
-  what remained was only the *naming* of the PSCI conduit in the two SMP
-  verticals.
-- **Why the SMP verticals legitimately name the conduit (honest §0.4
-  constraint).** `ipi_smp_qemu_aarch64` and
-  `cross_cpu_tlb_shootdown_qemu_aarch64` run **MMU-off by design** (they
-  exercise only secondary bring-up / IPI / the inner-shareable TLB
-  broadcast, and install no exception vectors on the boot core). With the
-  stage-1 MMU disabled every access is Device memory, where the FDT
-  walk's compiler-emitted multi-byte loads fault; with no vectors yet
-  installed that hangs the core. Forcing an identity MMU + vectors into
-  those minimal verticals purely to re-derive the constant `hvc` would
-  distort what they prove and duplicate the bring-up a third time
-  (§2.1/§2.3). They therefore keep naming the board conduit directly —
-  test-environment knowledge on par with the fixed two-core MPIDR layout,
-  exactly as their module docs state — and the production discovery path
+  vertical reads the `fw_cfg` base).
+- **The PSCI conduit.** `ipi_smp_qemu_aarch64` reads it from its embedded
+  tree with `fdt::psci_method` and refuses one other than the board's
+  `hvc`. `cross_cpu_tlb_shootdown_qemu_aarch64` embeds no tree, so it names
+  the board's conduit directly — test-environment knowledge on par with
+  the fixed two-core MPIDR layout — and the production discovery path
   (`fdt::psci_method`) stays host-tested + conformance-gated (W1).
 - **One `dumpdtb` path.** An aarch64 vertical's device-tree fixture comes
   from the harness (`tairix_itest_harness::aarch64_virt_guest_build` and its
@@ -1233,7 +1221,7 @@ without naming it.
   port; `tests/conformance.rs` runs them over a double.
 - **aarch64** (`brcm_msi`, private): `BrcmMsiController`, reached only through
   `msimux::configure_from_fdt`, which refuses a register window outside the
-  Device-typed identity gigapages; mask, unmask and drain touch nothing
+  direct map's register gigabytes; mask, unmask and drain touch nothing
   before the block is enabled. Nothing yet ties enabling to the bus driver
   having released the block from reset (D1451). Enabling opens every vector, so a message raised
   before its driver waits fires, is masked by that fire, and is acknowledged.

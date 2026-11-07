@@ -1,25 +1,7 @@
-//! SPAWN stage `SP2c` QEMU integration test: prove two EL0 user tasks timeshare
-//! one CPU under the live scheduler on the aarch64 `virt` board.
-//!
-//! On boot the test reads the GICv2 base + generic-timer rate from the embedded
-//! `virt` device tree (`plans/PI.md` P3/P4), brings up the EL1 vectors + GICv2,
-//! and installs a syscall-dispatch callback. It then builds **two**
-//! hardware-isolated EL0 address spaces — each its own stage-1 page-table
-//! hierarchy — from the same `rxe` fixture program through the production
-//! capability-checked, audited `tairix_kernel_core::spawn_image` caller, and
-//! admits each as a resumable user kthread (`spawn_user_kthread`, `plans/SPAWN.md`
-//! SP2) whose `pre_resume` hook reactivates that task's page-table root before
-//! every switch-in, so the two tasks stay isolated.
-//!
-//! Driving the cooperative `step` loop interleaves the two runnable tasks. Each
-//! task's `yield`/`exit` `svc` traps back to the dispatch callback, which maps
-//! it to `tairix_kernel_core::reschedule_current` — suspending the running task
-//! back to the dispatcher exactly as the production bin-crate callback does. The
-//! test PASSes once both tasks have yielded their full count and exited (no task
-//! left live), proving a real EL0→EL0 context switch under the live scheduler.
-//! A regression (a switch that never resumes, a task that never runs) stalls the
-//! drain or trips a distinct failure finisher, so the run fails loudly — by a
-//! failure code or by the harness `Outcome::Timeout`.
+//! Floating-point isolation QEMU integration test on the aarch64 `virt` board
+//! (`plans/OPEN-DEFECTS.md` D359/D360): isolated EL0 tasks timeshare one CPU
+//! and none sees another's FP/SIMD registers or `FPCR`. The test kernel is
+//! described in `kernel.rs`.
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]
@@ -27,7 +9,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "tairix-test-spawn-el0-timeshare-qemu-aarch64: the `test-hooks` Cargo feature is a \
+    "tairix-test-fp-isolation-qemu-aarch64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §2.1 (no hacks) and §5.4.5 (fail closed)."
 );

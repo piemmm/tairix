@@ -142,6 +142,7 @@ pub mod fault;
 pub mod fdtwalk;
 pub mod frames;
 pub mod gigapages;
+pub mod imagemap;
 pub mod irq;
 pub mod memtag;
 pub mod mmu;

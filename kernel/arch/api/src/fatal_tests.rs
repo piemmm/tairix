@@ -9,10 +9,9 @@ use core::panic::Location;
 use std::format;
 
 use super::{
-    decode_kept, enter, enter_without_atomics, file_tail, format_hex_word, kept_image,
-    nested_fields, reset_for_tests, Cause, CauseWords, Entry, Kept, KernelFault, NestedWords,
-    Processor, Reporter, StackCheck, StackCorruption, FATAL_RECORDS, FILE_TAIL, HEX_WORD_LEN,
-    KEPT_BYTES,
+    decode_kept, enter, file_tail, format_hex_word, kept_image, nested_fields, reset_for_tests,
+    Cause, CauseWords, Entry, Kept, KernelFault, NestedWords, Processor, Reporter, StackCheck,
+    StackCorruption, FATAL_RECORDS, FILE_TAIL, HEX_WORD_LEN, KEPT_BYTES,
 };
 use crate::backtrace::BootStackGuard;
 
@@ -403,13 +402,6 @@ fn the_latch_grants_one_report_then_one_nested_record_then_silence() {
     assert_eq!(enter(&panic), Entry::Silent);
     assert_eq!(enter(&fault), Entry::Silent);
 
-    // The atomics-free entry reads and advances the same count and keeps the
-    // same cause, so a boot that mixes the two still reports once.
-    reset_for_tests();
-    assert_eq!(enter_without_atomics(&panic), Entry::Report);
-    assert_eq!(enter(&fault), Entry::Nested { first: Some(panic) });
-    assert_eq!(enter_without_atomics(&fault), Entry::Silent);
-
     // A word the CPU did not give is still absent when the cause is read back.
     reset_for_tests();
     let fiq = Cause::Fault(KernelFault {
@@ -432,7 +424,6 @@ fn the_latch_grants_one_report_then_one_nested_record_then_silence() {
     // The count saturates rather than wrapping back to a first entry.
     super::ENTRIES.store(u32::MAX, core::sync::atomic::Ordering::Relaxed);
     assert_eq!(enter(&fault), Entry::Silent);
-    assert_eq!(enter_without_atomics(&fault), Entry::Silent);
     reset_for_tests();
 }
 

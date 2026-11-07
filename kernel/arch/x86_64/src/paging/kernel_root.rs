@@ -9,6 +9,7 @@
 //! one access covers a whole block.
 
 use tairix_arch_api::frames::{PageTableFrames, TableFrame};
+use tairix_arch_api::imagemap::{map_gigabyte, split_blocks, ImageLeaves, Run, Span, BLOCK};
 
 use super::{
     flags, is_kernel_half_slot, KernelAccess, ENTRIES_PER_TABLE, KERNEL_IMAGE_PML4_SLOT,
@@ -34,9 +35,6 @@ const IMAGE_PDPT_SLOT: usize = ((KERNEL_VMA_BASE >> 30) & 0x1FF) as usize;
 /// (`linker.ld` refuses a larger image).
 const IMAGE_SPAN: u64 = 1 << 30;
 
-/// Bytes one 2 MiB leaf maps.
-const BLOCK: u64 = 1 << 21;
-
 const _: () = assert!(ENTRIES_PER_TABLE as u64 * BLOCK == IMAGE_SPAN);
 
 // `linker.ld` aligns the text to the block and bounds the image by the span
@@ -54,13 +52,6 @@ core::arch::global_asm!(
 /// Sections the image window maps.
 const IMAGE_SECTIONS: usize = 5;
 
-/// Page tables `runs` runs can need: a run shares a 2 MiB block with
-/// anything else only at its two ends, and only such a block needs a table
-/// of its own.
-const fn split_blocks(runs: usize) -> usize {
-    2 * runs
-}
-
 /// Tables the kernel root is built from: its PML4; the image window's PDPT,
 /// its directory and the tables its sections split; and the direct map's
 /// first span — a PDPT, the directory over the first GiB, and the tables
@@ -74,31 +65,19 @@ const STARTUP_ROOT_TABLES: usize = 1 + PAGES_PER_FINE_CHAIN;
 /// Tables both roots are built from, which live as long as the kernel.
 const ROOT_TABLES: usize = KERNEL_ROOT_TABLES + STARTUP_ROOT_TABLES;
 
-/// A physical span `[start, end)`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Span {
-    start: u64,
-    end: u64,
-}
+/// How this port spells a kernel leaf and a table entry.
+struct KernelLeaves;
 
-impl Span {
-    const fn contains(self, at: u64) -> bool {
-        self.start <= at && at < self.end
+impl ImageLeaves for KernelLeaves {
+    type Access = KernelAccess;
+
+    fn leaf(&self, addr: u64, access: KernelAccess, block: bool) -> u64 {
+        addr | access.leaf() | if block { flags::HUGE } else { 0 }
     }
 
-    /// Whether an end of the span falls strictly inside `[base, base + len)`,
-    /// so the span covers only part of it.
-    fn splits(self, base: u64, len: u64) -> bool {
-        let inside = |edge: u64| base < edge && edge < base + len;
-        inside(self.start) || inside(self.end)
+    fn table(&self, phys: u64) -> u64 {
+        phys | KERNEL_TABLE_ENTRY
     }
-}
-
-/// Pages and the access the kernel has to them.
-#[derive(Clone, Copy, Debug)]
-struct Run {
-    span: Span,
-    access: KernelAccess,
 }
 
 /// The kernel image's sections, by physical span, as the linker lays them
@@ -207,7 +186,7 @@ impl ImageSections {
     }
 
     /// How the image window maps each section.
-    const fn window_runs(&self) -> [Run; IMAGE_SECTIONS] {
+    const fn window_runs(&self) -> [Run<KernelAccess>; IMAGE_SECTIONS] {
         [
             Run {
                 span: self.stack_guard,
@@ -234,7 +213,7 @@ impl ImageSections {
 
     /// What the direct map's alias of the image may grant: no more than
     /// reading the code and the read-only data.
-    const fn alias_run(&self) -> Run {
+    const fn alias_run(&self) -> Run<KernelAccess> {
         Run {
             span: Span {
                 start: self.text.start,
@@ -243,41 +222,6 @@ impl ImageSections {
             access: KernelAccess::Read,
         }
     }
-}
-
-/// Fill `directory`, which maps physical `[0, IMAGE_SPAN)`, so each page has
-/// the access of the run holding it, or `outside` where none does (nothing,
-/// for [`None`]).
-///
-/// A block one access covers whole is a 2 MiB leaf; only a block a run ends
-/// inside costs a page table from `frames`. [`None`] when `frames` runs out,
-/// with the directory part-written.
-fn map_first_gigabyte(
-    directory: &mut [u64; ENTRIES_PER_TABLE],
-    runs: &[Run],
-    outside: Option<KernelAccess>,
-    frames: &dyn PageTableFrames,
-) -> Option<()> {
-    let access_at = |at: u64| {
-        runs.iter()
-            .find(|run| run.span.contains(at))
-            .map(|run| run.access)
-            .or(outside)
-    };
-    for (index, entry) in directory.iter_mut().enumerate() {
-        let block = index as u64 * BLOCK;
-        *entry = if runs.iter().any(|run| run.span.splits(block, BLOCK)) {
-            let TableFrame { phys, entries } = frames.alloc_table()?;
-            for (page_index, leaf) in entries.iter_mut().enumerate() {
-                let page = block + page_index as u64 * PAGE_SIZE as u64;
-                *leaf = access_at(page).map_or(0, |access| page | access.leaf());
-            }
-            phys | KERNEL_TABLE_ENTRY
-        } else {
-            access_at(block).map_or(0, |access| block | access.leaf() | flags::HUGE)
-        };
-    }
-    Some(())
 }
 
 /// Build the image window from `frames`: a PDPT whose one directory maps
@@ -292,7 +236,14 @@ fn build_image_window(sections: &ImageSections, frames: &dyn PageTableFrames) ->
         phys: directory_phys,
         entries: directory,
     } = frames.alloc_table()?;
-    map_first_gigabyte(directory, &sections.window_runs(), None, frames)?;
+    map_gigabyte(
+        directory,
+        0,
+        &sections.window_runs(),
+        None,
+        &KernelLeaves,
+        frames,
+    )?;
     pdpt[IMAGE_PDPT_SLOT] = directory_phys | KERNEL_TABLE_ENTRY;
     Some(pdpt_phys | KERNEL_TABLE_ENTRY)
 }
@@ -321,10 +272,12 @@ fn build_first_span(
         phys: directory_phys,
         entries: directory,
     } = frames.alloc_table()?;
-    map_first_gigabyte(
+    map_gigabyte(
         directory,
+        0,
         &[sections.alias_run()],
         Some(KernelAccess::Write),
+        &KernelLeaves,
         frames,
     )?;
     pdpt.copy_from_slice(floor);

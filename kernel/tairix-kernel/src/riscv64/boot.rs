@@ -1436,7 +1436,9 @@ fn seed_hardware_tree(
     let dtb_bytes = unsafe { core::slice::from_raw_parts(dtb as *const u8, total) };
     // SAFETY: as above — the aperture is identity-mapped Device memory the
     // probe alone reads.
-    let probe = unsafe { tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb(dtb_bytes) };
+    let probe = unsafe {
+        tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb(dtb_bytes, |at, _| Some(at as *const u32))
+    };
     if let (Ok(bus), Ok(slots)) = (probe, Fdt::new(dtb_bytes)) {
         // Read before the probes add nodes of their own.
         let dma = crate::iommu_fdt::SlotDma::read(

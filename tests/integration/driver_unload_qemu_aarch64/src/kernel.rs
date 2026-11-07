@@ -7,8 +7,8 @@
 //! (`tests/integration/driver_register_program`) position-independent and
 //! wraps it as the signed payload of a `kind = UserSpace` driver image,
 //! exactly as the driver-spawn vertical does. On boot the test discovers the
-//! `virt` board, enables the identity MMU + EL1 vectors, builds the live
-//! kernel registries, and autoloads the stub through the production
+//! `virt` board, brings up the GIC, builds the live kernel registries, and
+//! autoloads the stub through the production
 //! `DeviceManager::autoload` + `SpawnDriverLoader` +
 //! `InitCtxDriverProcessSpawn` over the `Aarch64ProcessSpawn` image builder —
 //! the driver is admitted as a parked **loading** task with its placeholder
@@ -35,13 +35,9 @@ use tairix_abi::{
     CapabilityId, DriverBindKey, Errno, HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT,
 };
 use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
-use tairix_arch_aarch64::paging::{
-    configure_device_gigapages, configure_kernel_gigapages, install_boot_physmap,
-    AddressSpace as ArchAddressSpace, PageTablePool, GIGAPAGE_MASK_WORDS,
-};
+use tairix_arch_aarch64::paging;
 use tairix_arch_aarch64::{
-    enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, Aarch64Arch,
-    Aarch64ArchStorage, SERIAL_SINK,
+    gic, handle_panic_via_serial, qemu_exit, Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
 };
 use tairix_arch_api::BOOT_CPU;
 use tairix_caps::CapabilitySet;
@@ -75,11 +71,6 @@ include!(concat!(env!("OUT_DIR"), "/driver_image.rs"));
 // The canonical QEMU `virt` device tree, dumped and embedded at build time.
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
-/// Gigabytes of identity map the boot address space provides: `[0, 2 GiB)`
-/// covers the `virt` board's device MMIO (GiB 0) and the RAM base at GiB 1
-/// where this kernel, its heap, and the frame pool live.
-const IDENTITY_GIB: usize = 2;
-
 /// Base + length of the register window the driver-spawn path mints a
 /// device-resource grant for (a `virt` virtio-MMIO transport). The driver is
 /// never run here — this vertical proves teardown, not the device path — but
@@ -101,7 +92,6 @@ const TEST_PASS: EventId = EventId(4313);
 /// Failure finisher codes, distinct per failure site.
 const FAIL_ZERO_FREQ: NonZeroU16 = fail_point!(1);
 const FAIL_GIC: NonZeroU16 = fail_point!(2);
-const FAIL_POOL: NonZeroU16 = fail_point!(3);
 const FAIL_FRAMES: NonZeroU16 = fail_point!(4);
 const FAIL_BIAS: NonZeroU16 = fail_point!(5);
 const FAIL_TRUST: NonZeroU16 = fail_point!(6);
@@ -121,8 +111,6 @@ const FAIL_ASPACE_LEFT: NonZeroU16 = fail_point!(13);
 /// A second unload of the now-gone handle did not fail closed with
 /// `NotFound` — the teardown is not idempotent.
 const FAIL_NOT_IDEMPOTENT: NonZeroU16 = fail_point!(14);
-/// The direct physical map could not be installed over the board's RAM.
-const FAIL_PHYSMAP: NonZeroU16 = fail_point!(15);
 /// The random reserve could not be seeded.
 const FAIL_SEED: NonZeroU16 = fail_point!(16);
 
@@ -140,12 +128,7 @@ static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
 static ALLOCATOR: FreeListAllocator =
     unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_SIZE) };
 
-/// Page-table pool backing the boot identity space the test switches to so
-/// the MMU is on before any atomic read-modify-write runs.
-static BOOT_PAGE_TABLES: PageTablePool = PageTablePool::new();
-
-/// Identity-mapped physical-frame backing store the live [`FrameAllocator`]
-/// serves.
+/// Physical-frame backing store the live [`FrameAllocator`] serves.
 #[repr(C, align(4096))]
 struct FramePool([u8; PAGE_SIZE * FRAME_COUNT]);
 
@@ -221,14 +204,14 @@ struct Subsystems {
 }
 
 /// Build the live kernel subsystems the production spawn + unload path
-/// borrow: the `kernel/mem` frame allocator over the identity-mapped pool,
+/// borrow: the `kernel/mem` frame allocator over the frame pool,
 /// the scheduler over the production `KernelArch` wrapper, and the capability
 /// / address-space / IRQ state the `KernelInitSpawner` registers a spawned
 /// driver with and reclaims on teardown.
 fn leak_subsystems(counter_hz: u64) -> Subsystems {
     let mut memory_map = BootMemoryMap::new();
     memory_map.push(MemoryRegion {
-        start: PhysAddr::new(core::ptr::addr_of!(FRAME_POOL) as u64),
+        start: PhysAddr::new(paging::image_phys(core::ptr::addr_of!(FRAME_POOL) as u64)),
         length: (PAGE_SIZE * FRAME_COUNT) as u64,
         kind: RegionKind::Usable,
     });
@@ -269,15 +252,10 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
 }
 
 /// Bring the board up: FP/SIMD on, the `virt` device tree discovered (timer
-/// rate, GICv2 bases), the identity MMU + EL1 vectors enabled, and the GIC
-/// initialised. Returns the discovered generic-timer rate. No syscall
-/// dispatch callback is installed: the spawned driver is torn down before it
-/// is ever dispatched, so it issues no `svc`.
+/// rate, GICv2 bases), and the GIC initialised. Returns the discovered
+/// generic-timer rate. No syscall dispatch callback is installed: the spawned
+/// driver is torn down before it is ever dispatched, so it issues no `svc`.
 fn bring_up_board() -> u64 {
-    // Enable FP/SIMD at EL1 before any code the compiler may lower to NEON.
-    // SAFETY: this is the boot CPU, called once, before any FP/SIMD executes.
-    unsafe { enable_fp_el1() };
-
     let Ok(fdt) = Fdt::new(DTB_BLOB) else {
         qemu_exit::exit_failure(FAIL_GIC);
     };
@@ -294,40 +272,6 @@ fn bring_up_board() -> u64 {
         qemu_exit::exit_failure(FAIL_GIC);
     }
 
-    // Configure the board's gigapage facts, exactly as the production boot
-    // path derives them from discovery: Device GiB 0 is the `virt` MMIO
-    // window, and GiB 1 holds both this kernel's image and its RAM. The
-    // production spawn producer sizes every child's identity window from
-    // these masks, so driving it under the unconfigured defaults would
-    // request a window reaching the user bias and the spawn would fail
-    // closed.
-    let mut device_mask = [0u64; GIGAPAGE_MASK_WORDS];
-    device_mask[0] = 0b01;
-    configure_device_gigapages(device_mask);
-    let mut ram_mask = [0u64; GIGAPAGE_MASK_WORDS];
-    ram_mask[0] = 0b10;
-    configure_kernel_gigapages(ram_mask);
-    // The production spawn producer reaches a child's page tables through
-    // the direct physical map in the kernel translation regime, so the
-    // chassis stands it up over the same RAM before driving the producer.
-    if !install_boot_physmap(&ram_mask) {
-        qemu_exit::exit_failure(FAIL_PHYSMAP);
-    }
-
-    let Some(boot_space) =
-        ArchAddressSpace::new_identity_gigapages(&BOOT_PAGE_TABLES, IDENTITY_GIB)
-    else {
-        qemu_exit::exit_failure(FAIL_POOL);
-    };
-    // SAFETY: the identity map covers the kernel's current `pc`, `sp`, the
-    // heap, the frame pool, and the device MMIO (all within `[0, 2 GiB)` on
-    // the `virt` board), so switching it does not move the ground under the
-    // running code; `init_vectors` runs once on the boot CPU with a stack
-    // established.
-    unsafe {
-        boot_space.switch();
-        exceptions::init_vectors();
-    }
     // SAFETY: called once on the boot CPU after the GIC bases were
     // discovered above.
     unsafe {

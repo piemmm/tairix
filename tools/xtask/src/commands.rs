@@ -2512,16 +2512,15 @@ fn parse_ram(size: &str) -> Result<u32, String> {
 }
 
 /// Build the QEMU-`virt`-board form of the production kernel for
-/// `profile` and wrap it as the raw arm64 boot image the interactive
-/// session loads.
+/// `profile` as the arm64 `Image` the interactive session loads.
 ///
-/// The Pi-linked kernel inside the platform image loads at `0x8_0000`,
+/// The Pi-linked kernel inside the platform image loads at `0x20_0000`,
 /// which is not RAM on the `virt` board, and QEMU's ELF `-kernel` path
 /// passes no DTB — so `run` builds the same production crate against
 /// the `virt` linker script (`TAIRIX_KERNEL_BOARD=virt`, its own target
-/// directory so the Pi build stays cached) and boots the arm64
-/// `Image`-wrapped flat form, which QEMU loads at the `virt` link
-/// address with the generated device tree in `x0`.
+/// directory so the Pi build stays cached) and boots its flat form, an
+/// `Image` by the header its trampoline opens with, which QEMU loads at the
+/// `virt` link address with the generated device tree in `x0`.
 fn build_virt_run_kernel(
     ctx: &Context,
     profile: tairix_mkimage::ImageProfile,
@@ -2563,7 +2562,8 @@ fn build_virt_run_kernel(
         )
     })?;
     let boot_image =
-        tairix_mkimage::elfflat::build_virt_boot_image(&elf).map_err(|e| format!("run: {e}"))?;
+        tairix_mkimage::elfflat::elf_to_flat(&elf, tairix_mkimage::elfflat::VIRT_KERNEL_LOAD_ADDR)
+            .map_err(|e| format!("run: {e}"))?;
     let out = target_dir.join(format!("tairix-kernel-virt-{}.img", profile.label()));
     tairix_mkimage::replace_file(&out, &boot_image)
         .map_err(|e| format!("run: cannot write {}: {e}", out.display()))?;

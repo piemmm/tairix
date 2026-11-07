@@ -30,7 +30,7 @@ mod kernel {
     use core::num::NonZeroU16;
     use core::panic::PanicInfo;
 
-    use tairix_arch_aarch64::{enable_fp_el1, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SERIAL_SINK};
     use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
@@ -103,11 +103,6 @@ mod kernel {
     /// Entry point for the freestanding kernel.
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
-        // The generator is floating-point throughout, and EL1 traps
-        // FP/SIMD until this is cleared.
-        // SAFETY: boot CPU, called once, before any FP instruction.
-        unsafe { enable_fp_el1() };
-
         note(
             TEST_START,
             "world determinism: generating the reference realm",

@@ -15,8 +15,7 @@
 //!
 //! ## What this test asserts
 //!
-//! 1. Reserve the kernel remap window, build a stage-1 identity space (which
-//!    installs the window's shared slots), and activate it.
+//! 1. Reserve the kernel remap window in the kernel root every CPU carries.
 //! 2. Install the window-backed kthread stack tier over that window and draw
 //!    one stack from it — the production allocation path.
 //! 3. The drawn stack's usable run is mapped and writable, and its guard
@@ -65,22 +64,21 @@ mod kernel {
     use tairix_arch_aarch64::context_hal::ContextSwitchHal;
     use tairix_arch_aarch64::irqmask::PortIrqControl;
     use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
-    use tairix_arch_aarch64::paging::{
-        reserve_kernel_window, AddressSpace, PageTablePool, PAGE_SIZE,
-    };
+    use tairix_arch_aarch64::paging::{self, reserve_kernel_window, AddressSpace, PAGE_SIZE};
     use tairix_arch_aarch64::{
         exceptions, fault, gic, handle_panic_via_serial, qemu_exit, Aarch64Arch, SERIAL_SINK,
     };
     use tairix_arch_api::fatal::KernelFault;
-    use tairix_arch_api::{mmu::AddressSpace as _, BOOT_CPU};
+    use tairix_arch_api::BOOT_CPU;
     use tairix_fdt::Fdt;
     use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kernel::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
     use tairix_kernel_core::kstack::{alloc_kernel_stack, install_kernel_stacks};
     use tairix_kernel_core::{spawn_kthread_with_stack, KernelStack};
     use tairix_kernel_mem::{
-        BootMemoryMap, DirectPhysMap, FrameAllocator, FrameTableSource, KernelRemap, KernelVirtMap,
-        MemoryRegion, PhysAddr, RegionKind,
+        BootMemoryMap, FrameAllocator, FrameTableSource, KernelRemap, KernelVirtMap, MemoryRegion,
+        PhysAddr, RegionKind,
     };
     use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
     use tairix_log::{log, Event, EventId, Field, Level};
@@ -89,11 +87,6 @@ mod kernel {
     // time (`build.rs`): the GICv2 base and the timer frequency are read
     // from it (P4).
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
-
-    /// Number of GiB the space identity-maps (device MMIO + RAM). The
-    /// kernel image, boot stack, heap, and the frame pool all live in the
-    /// Normal RAM gigapage (GiB 1).
-    const IDENTITY_GIB: usize = 2;
 
     /// Width of a kthread stack's guard region: one 4 KiB page, the slot the
     /// tier reserves and never maps immediately *below* the usable stack.
@@ -121,13 +114,9 @@ mod kernel {
     /// overwrote it from the device tree (`plans/PI.md` P4).
     const POISON_GIC_BASE: usize = 0xdead_0000;
 
-    /// Page-table pool backing the identity address space (lives in
-    /// `.bss`).
-    static POOL: PageTablePool = PageTablePool::new();
-
-    /// Identity-mapped RAM the frame allocator hands out: the window's own
-    /// leaf tables and the pages backing the drawn kthread stack. Sized well
-    /// past both so exhaustion cannot be mistaken for a guard regression.
+    /// RAM the frame allocator hands out: the window's own leaf tables and
+    /// the pages backing the drawn kthread stack. Sized well past both so
+    /// exhaustion cannot be mistaken for a guard regression.
     #[repr(C, align(0x1000))]
     struct FramePool([u8; 8 * 1024 * 1024]);
     static mut FRAME_POOL: FramePool = FramePool([0; 8 * 1024 * 1024]);
@@ -222,53 +211,37 @@ mod kernel {
         }
 
         // The frame allocator the window's leaf tables and the drawn
-        // stack's pages come from. Its RAM is the identity-mapped
-        // `FRAME_POOL` static, so a frame's physical address is also the
-        // address the kernel reaches it at.
+        // stack's pages come from: the `FRAME_POOL` static, by its physical
+        // address, which the kernel reaches through the direct map.
         let mut map = BootMemoryMap::new();
         map.push(MemoryRegion {
             kind: RegionKind::Usable,
-            start: PhysAddr::new(core::ptr::addr_of!(FRAME_POOL) as u64),
+            start: PhysAddr::new(paging::image_phys(core::ptr::addr_of!(FRAME_POOL) as u64)),
             length: core::mem::size_of::<FramePool>() as u64,
         });
         let Ok(frames) = FrameAllocator::new(&map) else {
             fail("frame allocator");
         };
         let frames: &'static FrameAllocator = Box::leak(Box::new(frames));
-        // SAFETY: the boot code identity-maps this window and never unmaps it.
-        let Some(identity) = (unsafe { DirectPhysMap::identity((IDENTITY_GIB as u64) << 30) })
-        else {
-            fail("identity map addresses nothing");
-        };
-        let physmap: &'static DirectPhysMap = Box::leak(Box::new(identity));
-        let tables: &'static FrameTableSource =
-            Box::leak(Box::new(FrameTableSource::new(frames, physmap)));
+        let tables: &'static FrameTableSource = Box::leak(Box::new(FrameTableSource::new(
+            frames,
+            &SPAWN_TABLE_PHYSMAP,
+        )));
 
-        // Reserve the window before the identity space is built. The window
-        // lives in the kernel translation regime, whose root every CPU
-        // carries permanently, so every stack the tier hands out resolves
-        // under whichever root the kthread runs on.
+        // Reserve the window. It lives in the kernel translation regime,
+        // whose root every CPU carries permanently, so every stack the tier
+        // hands out resolves under whichever root the kthread runs on.
         let Some(window) = reserve_kernel_window(tables) else {
             fail("reserve kernel window");
         };
-        let space = AddressSpace::new_identity_gigapages(&POOL, IDENTITY_GIB)
-            .unwrap_or_else(|| fail("identity map"));
 
-        // Install the vectors + fault handler before enabling the MMU so the
-        // kthread's deliberate overrun is routed to `on_fault`.
+        // Install the vectors + fault handler so the kthread's deliberate
+        // overrun is routed to `on_fault`.
         tairix_arch_api::fault::set_fault_handler(on_fault)
             .unwrap_or_else(|_| fail("set_fault_handler"));
         // SAFETY: called once on the boot CPU before any fault can fire.
         unsafe {
             exceptions::init_vectors();
-        }
-
-        // Switch to the space (enables the MMU). It identity-maps `pc`,
-        // `sp`, the heap, and MMIO, and carries the window's shared slots.
-        // SAFETY: every region the running code touches stays mapped across
-        // the switch, which is `AddressSpace::switch`'s contract.
-        unsafe {
-            space.activate();
         }
 
         // Discover + bring up the GICv2 so the scheduler's spawn IPIs target
@@ -299,7 +272,7 @@ mod kernel {
         let kvmap: &'static dyn KernelVirtMap = Box::leak(Box::new(
             KernelRemap::<_, PortIrqControl>::new(window, kwspace, arch_static),
         ));
-        install_kernel_stacks(frames, physmap, kvmap);
+        install_kernel_stacks(frames, &SPAWN_TABLE_PHYSMAP, kvmap);
 
         let Some(stack) = alloc_kernel_stack() else {
             fail("no kernel stack: neither the window tier nor the fallback could supply one");

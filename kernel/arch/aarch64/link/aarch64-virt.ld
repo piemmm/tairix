@@ -1,105 +1,114 @@
 /* Linker script for TAIRiX aarch64 kernels on the QEMU `virt` board.
  *
- * QEMU `-M virt` places guest RAM at 0x4000_0000. With `-kernel <elf>`
- * QEMU's ARM boot loader loads the ELF at its own physical addresses
- * and enters the ELF entry point with the firmware hand-off registers
- * set by the Linux aarch64 boot protocol:
+ * QEMU `-M virt` places guest RAM at 0x4000_0000 and loads the kernel 2 MiB
+ * above it — the ELF at its load address, an `Image` by the header `boot.s`
+ * opens it with — entering at that physical address with the MMU off and
+ * the Linux aarch64 boot hand-off (x0 = the device tree's physical address).
  *
- *   x0 = physical address of the flattened device tree (DTB)
- *   x1..x3 = 0 (reserved)
- *
- * The conventional kernel load address on the `virt` board is 2 MiB
- * above RAM base (0x4020_0000), which leaves the low RAM for the DTB
- * and any firmware structures QEMU plants.
+ * The image is linked in the kernel's translation regime and loaded at its
+ * physical address: `boot.s` runs there, PC-relatively, until it has turned
+ * translation on and branched high. The kernel root maps each span below
+ * with only the access it needs (`paging::kernel_root`), so a section is not
+ * added without a span to map it. This script is identical to
+ * `aarch64-rpi4.ld` but for the load address and the stack size, both fixed
+ * before any device tree is read (`plans/PI.md` §0.2).
  *
  * Invariants enforced here:
- *   - `.text.boot` (the `_start` trampoline) is the first sub-section
- *     of the first PT_LOAD segment, so the ELF entry point is the
- *     trampoline.
- *   - `__bss_start` / `__bss_end` bracket the zero-init region and are
- *     16-byte aligned for the 16-byte-store clear loop in `boot.s`.
- *   - the exception vector table lands on its required 2 KiB alignment
- *     (`VBAR_EL1` ignores the low 11 bits); it lives in `.text` and the
- *     vector module's own `.balign 0x800` keeps it aligned.
- *   - the boot heap has a declared `.heap` (NOLOAD) section, as on
- *     riscv64. Left undeclared it is an orphan, which the linker may
- *     place as PROGBITS (the arena as zeros in the image) or drop, leaving
- *     the allocator a base backing no RAM; `KEEP` holds it when only a
- *     `const` address-of refers to it.
+ *   - `.text.boot` is the image's first byte, where the loader enters.
+ *   - `.text` starts and ends on the image block (`kernel_image_block`), so
+ *     the code is mapped with block leaves alone; its padding is zero, which
+ *     A64 decodes as the permanently undefined `udf #0`.
+ *   - `.text.idmap` is one page of its own: the only code ever mapped at its
+ *     physical address.
+ *   - `.bss` ends with the boot stack's guard and the stack, the guard
+ *     mapped read-only.
+ *   - `.early_tables` lie outside `.bss`, which `boot.s` zeroes only once
+ *     translation is on, under them.
+ *   - the boot heap is a declared `.heap` (NOLOAD) section: left an orphan,
+ *     the linker may place it as PROGBITS or drop it.
  */
 
 OUTPUT_ARCH(aarch64)
-ENTRY(_start)
+ENTRY(__kernel_entry_phys)
 
-/* Boot-stack size for images built against this script. Sized by the
- * image, not by the shared trampoline: the QEMU `virt` images run the
- * determinism verticals, whose figure reference grid measured above
- * 64 KiB and below 128 KiB, so this is roughly twice the measured
- * ceiling. The Pi 4 script keeps the smaller boot-pipeline figure. */
+/* Where QEMU loads the image. A block boundary, so the image's virtual and
+ * physical addresses agree in every block. */
+KERNEL_LOAD = 0x40200000;
+
+
+/* Boot-stack size: the determinism verticals' figure reference grid
+ * measured above 64 KiB and below 128 KiB, so this is roughly twice that.
+ * The Pi 4 script keeps the smaller boot-pipeline figure. */
 BOOT_STACK_BYTES = 256K;
 
-/* Poison guard reserved immediately below the boot stack. The MMU is off
- * on the boot CPU, so an overrun cannot be caught by unmapping a page:
- * the stub fills this gap with the shared sentinel instead and the panic
- * path reads it back. Sized per image like the stack above it. */
-BOOT_STACK_GUARD_BYTES = 4K;
+/* The image's place in the kernel regime: the top gigabyte, at the load
+ * address's offset within its own. */
+__kimage_voffset = kernel_image_gigabyte - (KERNEL_LOAD & ~0x3FFFFFFF);
 
 SECTIONS
 {
-    . = 0x40200000;
+    . = KERNEL_LOAD + __kimage_voffset;
     __kernel_start = .;
 
-    .text : ALIGN(4K)
+    .text : AT(ADDR(.text) - __kimage_voffset)
     {
         __text_start = .;
         KEEP(*(.text.boot))
+        . = ALIGN(4K);
+        __idmap_text_start = .;
+        KEEP(*(.text.idmap))
+        . = ALIGN(4K);
+        __idmap_text_end = .;
         *(.text .text.*)
+        . = ALIGN(kernel_image_block);
         __text_end = .;
     }
 
-    .rodata : ALIGN(4K)
+    .rodata : AT(ADDR(.rodata) - __kimage_voffset)
     {
+        __rodata_start = .;
         *(.rodata .rodata.*)
+        . = ALIGN(4K);
+        __rodata_end = .;
     }
 
-    .data : ALIGN(4K)
+    .data : AT(ADDR(.data) - __kimage_voffset) ALIGN(4K)
     {
+        __data_start = .;
         *(.data .data.*)
         *(.got .got.*)
     }
 
-    .bss : ALIGN(16)
+    .bss : AT(ADDR(.bss) - __kimage_voffset) ALIGN(4K)
     {
         __bss_start = .;
         *(.bss .bss.*)
         *(COMMON)
-        /* Last in `.bss` on purpose. The MMU is off here, so no guard
-         * page can catch an overrun; placing the stack anywhere lower
-         * lets one run off the bottom of `.bss` into `.rodata`/`.text`,
-         * where corrupting a vtable slot turns into a branch to data and
-         * a silent hang. Growing down into the zeroed statics above
-         * `__bss_start` keeps an overrun off the code. */
         . = ALIGN(4K);
         __boot_stack_guard_bottom = .;
-        . += BOOT_STACK_GUARD_BYTES;
-        /* The guard is every byte up to `__boot_stack_bottom`, alignment
-         * padding included, so the stub fills exactly what the panic path
-         * checks and no third symbol can drift between them. */
-        . = ALIGN(16);
+        . += boot_stack_guard_bytes;
         __boot_stack_bottom = .;
         . += BOOT_STACK_BYTES;
         __boot_stack_top = .;
-        . = ALIGN(16);
+        . = ALIGN(4K);
         __bss_end = .;
     }
 
-    . = ALIGN(4K);
-    .heap (NOLOAD) :
+    .early_tables (NOLOAD) : AT(ADDR(.early_tables) - __kimage_voffset) ALIGN(4K)
     {
-        KEEP(*(.heap))
+        __early_tables_start = .;
+        KEEP(*(.early_tables))
+        . = ALIGN(4K);
+        __early_tables_end = .;
     }
 
-    . = ALIGN(4K);
+    .heap (NOLOAD) : AT(ADDR(.heap) - __kimage_voffset) ALIGN(4K)
+    {
+        __heap_start = .;
+        KEEP(*(.heap))
+        . = ALIGN(4K);
+    }
+
     __kernel_end = .;
 
     /DISCARD/ :
@@ -110,3 +119,14 @@ SECTIONS
         *(.comment)
     }
 }
+
+__kernel_phys_start = __kernel_start - __kimage_voffset;
+__kernel_image_size = __kernel_end - __kernel_start;
+__kernel_phys_end = __kernel_end - __kimage_voffset;
+__kernel_entry_phys = _start - __kimage_voffset;
+
+ASSERT(KERNEL_LOAD % kernel_image_block == 0, "the kernel must load on an image block")
+ASSERT(__text_start % kernel_image_block == 0 && __text_end % kernel_image_block == 0, "the kernel's text must fill whole blocks")
+ASSERT(__idmap_text_end - __idmap_text_start == 4K, "the identity page must be one page")
+ASSERT(__kernel_end - kernel_image_gigabyte <= kernel_image_reach, "the kernel image must end below the firmware tree's window")
+ASSERT(_start == __kernel_start, "the trampoline must be the image's first byte")

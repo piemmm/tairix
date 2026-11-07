@@ -58,7 +58,6 @@ use tairix_util::utf8::shown;
 use tairix_window::DragConclusion;
 use tairix_wm::{Compositor, InputEvent, Key, NamedKey, PointerButton, WindowId};
 
-use crate::desktop::DesktopLift;
 use crate::picker::PickId;
 use crate::shell::DesktopShell;
 use crate::switchuser::park_within;
@@ -79,7 +78,7 @@ pub enum DragEnd {
 
 /// How a drag of icons carried off the desktop ended: where they were
 /// dropped, and the end the window last offered them is owed.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DesktopEnd {
     /// Where they were dropped.
     pub dropped: DesktopDrop,
@@ -88,33 +87,25 @@ pub struct DesktopEnd {
 }
 
 /// Where icons carried off the desktop were dropped.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DesktopDrop {
-    /// Nowhere that takes them: they stay where they stood.
+    /// Nowhere that takes them: they stand where they stood.
     Nothing,
-    /// Back on the desktop, where they are put down as `lift` says.
-    Desktop {
-        /// Where they were let go.
-        at: Point,
-        /// The press that carried them off.
-        lift: DesktopLift,
-    },
+    /// Back on the desktop, at this point, where they are put down.
+    Desktop(Point),
     /// On a window whose application answered that it takes them, which
     /// performs the drop.
     Window,
 }
 
 /// What a drag of icons carried off the desktop carries: what it shows of
-/// them, each item as the window offered them reads it, and the press that
-/// carried them off, for a drop back on the desktop.
+/// them, and each item as the window offered them reads it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DesktopCargo {
     /// What it shows.
     pub shown: DragItems,
     /// Each item, the pressed one first.
     pub items: Vec<DesktopItem>,
-    /// The press that carried them off.
-    pub lift: DesktopLift,
 }
 
 /// One icon carried off the desktop: the absolute path a drop acts on — a
@@ -1357,10 +1348,10 @@ impl DesktopShell {
                 cargo,
                 offered,
             } => {
-                let DesktopCargo { items, lift, .. } = *cargo;
+                let DesktopCargo { items, .. } = *cargo;
                 let pointer = self.router().pointer();
                 let over = (&carried.over, carried.shown);
-                let end = desktop_end(dropped, over, offered, (pointer, lift));
+                let end = desktop_end(dropped, over, offered, pointer);
                 if end.dropped == DesktopDrop::Window {
                     if let Some(offer) = end.offer {
                         self.drag.dropped = Some(Dropped {
@@ -1457,21 +1448,19 @@ fn save_end(
     }
 }
 
-/// How icons carried off the desktop by `lift` ended over `over`, showing
-/// `shown`, the offer `offered` standing and the pointer at `pointer`:
-/// dropped on a window whose application took the offer standing there, that
-/// application performs the drop; back on the desktop, they are put down
-/// there; and anywhere else, they stay where they stood.
+/// How icons carried off the desktop ended over `over`, showing `shown`, the
+/// offer `offered` standing and the pointer at `pointer`: dropped on a window
+/// whose application took the offer standing there, that application performs
+/// the drop; back on the desktop, they are put down there; and anywhere else,
+/// they stand where they stood.
 fn desktop_end(
     dropped: bool,
     (over, shown): (&DragSurface, Option<DropOperation>),
     offered: Option<(u64, u32)>,
-    (pointer, lift): (Point, DesktopLift),
+    pointer: Point,
 ) -> DesktopEnd {
     let (dropped, at) = match (dropped, over, shown, offered) {
-        (true, DragSurface::Desktop { .. }, _, _) => {
-            (DesktopDrop::Desktop { at: pointer, lift }, None)
-        }
+        (true, DragSurface::Desktop { .. }, _, _) => (DesktopDrop::Desktop(pointer), None),
         (true, &DragSurface::Offer { window_id, x, y }, Some(operation), Some((offer, _)))
             if offer == window_id =>
         {

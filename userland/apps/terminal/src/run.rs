@@ -2180,8 +2180,14 @@ mod program {
         // nothing is lost by folding. A *settle* still concludes the drain at
         // once: it is one event per gesture, and it owes a write.
         let mut edited = false;
+        let mut woken = true;
         loop {
-            let event = match events.try_wait(client) {
+            let drained = if core::mem::take(&mut woken) {
+                events.try_wait_woken(client)
+            } else {
+                events.try_wait(client)
+            };
+            let event = match drained {
                 Ok(Some(event)) => event,
                 Ok(None) => return finish(EventOutcome::Continue, redrawn, edited),
                 // A frame the session sent that this build cannot decode is

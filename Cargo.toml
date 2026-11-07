@@ -501,6 +501,10 @@ members = [
     "tests/integration/driver_register_program",
     "tests/integration/driver_spawn_qemu_aarch64",
     "tests/integration/driver_unload_qemu_aarch64",
+    "tests/integration/el2_entry_qemu_aarch64",
+    "tests/integration/user_counters_qemu_aarch64",
+    "tests/integration/user_counters_qemu_riscv64",
+    "tests/integration/user_counters_qemu_x86_64",
     "tests/integration/spawn_el0_resume_qemu_x86_64",
     "tests/integration/spawn_el0_timeshare_qemu_x86_64",
     "tests/integration/spawn_init_qemu_x86_64",
@@ -673,6 +677,7 @@ members = [
     # architecture determinism vertical (plans/WINTERSUN.md WS2).
     "tests/integration/fatal_double_fault_qemu_x86_64",
     "tests/integration/fatal_fault_qemu_aarch64",
+    "tests/integration/fatal_stack_overrun_qemu_aarch64",
     "tests/integration/fatal_fault_qemu_riscv64",
     "tests/integration/fatal_fault_qemu_x86_64",
     "tests/integration/fatal_fault_percpu_qemu_x86_64",
@@ -840,6 +845,19 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.sha2]
+opt-level = 3
+
+# The same holds for a plaintext volume: every record ARXFS stores is
+# checksummed and copy-on-written through its B-trees, and every cluster goes
+# through the LZ coder first, all while the volume is held, so at
+# `opt-level = 1` a debug image's write throughput measured the profile.
+[profile.dev.package.tairix-drv-fs-arxfs]
+opt-level = 3
+
+[profile.dev.package.tairix-compress]
+opt-level = 3
+
+[profile.dev.package.tairix-crc32c]
 opt-level = 3
 
 # The game client's own drawing passes are the same case as the raster crates

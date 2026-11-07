@@ -3,12 +3,12 @@
 //! `virt` board and assert it exits `99` — i.e. every abi-v1 C-header check and
 //! both syscall round-trips it performs succeed.
 //!
-//! On boot the test enables `CPACR_EL1.FPEN`, builds a stage-1 address space
-//! that identity-maps the kernel and MMIO (EL1), activates it, installs the EL1
-//! vector table and a dispatch callback, then calls the production
-//! capability-checked, audited spawn caller (`tairix_kernel_core::spawn_and_enter`,
-//! gated on `CAP_PROC_SPAWN`) to materialise the program's EL0 image — built
-//! from the `rxe` blob the build script produced — and `eret` into it. The C
+//! On boot the test builds and activates the program's empty stage-1 address
+//! space, installs the EL1 vector table and a dispatch callback, then calls the
+//! production capability-checked, audited spawn caller
+//! (`tairix_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
+//! materialise the program's EL0 image — built from the `rxe` blob the build
+//! script produced — and `eret` into it. The C
 //! program checks a Time64 value across the boundaries, an ipc header, and
 //! a sysinfo header, then calls `cap_query` and `clock_get`; the dispatch
 //! callback services those two syscalls (returning a known answer / sentinel)

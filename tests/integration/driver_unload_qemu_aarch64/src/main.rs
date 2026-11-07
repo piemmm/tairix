@@ -5,7 +5,7 @@
 //! (`tests/integration/driver_register_program`) position-independent and
 //! wraps it as the signed payload of a `kind = UserSpace` driver image. On
 //! boot the test discovers the board from the embedded `virt` device tree,
-//! enables the identity MMU + EL1 vectors, builds the live kernel registries
+//! brings up the GIC, builds the live kernel registries
 //! (frame allocator, scheduler, capability table, address-space registry, IRQ
 //! table), and autoloads the stub through the production
 //! `DeviceManager::autoload` + `SpawnDriverLoader` + `InitCtxDriverProcessSpawn`

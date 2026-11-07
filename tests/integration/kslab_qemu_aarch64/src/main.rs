@@ -55,20 +55,15 @@ mod kernel {
     use alloc::boxed::Box;
 
     use tairix_abi::PAGE_SIZE;
-    use tairix_arch_aarch64::paging::{AddressSpace, PageTablePool};
-    use tairix_arch_aarch64::{exceptions, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
-    use tairix_arch_api::mmu::AddressSpace as _;
+    use tairix_arch_aarch64::paging;
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SERIAL_SINK};
     use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HeapSource};
+    use tairix_kernel::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
     use tairix_kernel_mem::{
-        BootMemoryMap, DirectPhysMap, FrameAllocator, FramePages, MemoryRegion, PhysAddr, PhysMap,
-        RegionKind,
+        BootMemoryMap, FrameAllocator, FramePages, MemoryRegion, PhysAddr, RegionKind,
     };
     use tairix_log::{log, Event, Field, FieldValue, Level};
-
-    /// Gigabytes the space identity-maps (device MMIO in GiB 0, RAM in GiB 1),
-    /// which is also the extent the direct map inverts over.
-    const IDENTITY_GIB: usize = 2;
 
     /// Stable audit-event ids for the QEMU transcript.
     const TEST_START: tairix_log::EventId = tairix_log::EventId(4370);
@@ -95,15 +90,16 @@ mod kernel {
     /// slab pages per class.
     const POOL_PAGES: usize = 256;
 
-    /// Page-aligned physical pool the frame allocator is built over. Identity
-    /// mapped, so its virtual address is its physical one.
+    /// Page-aligned pool the frame allocator is built over.
     #[repr(C, align(4096))]
     struct FramePool([u8; PAGE_SIZE * POOL_PAGES]);
 
     static mut FRAME_POOL: FramePool = FramePool([0; PAGE_SIZE * POOL_PAGES]);
 
-    /// Page-table pool backing the identity address space (lives in `.bss`).
-    static POOL: PageTablePool = PageTablePool::new();
+    /// Where [`FRAME_POOL`] lies in physical memory.
+    fn pool_phys() -> u64 {
+        paging::image_phys(core::ptr::addr_of!(FRAME_POOL) as u64)
+    }
 
     /// A heap source that supplies **pages only** — the shape a port with a
     /// direct map but no kernel remap window presents. Its byte-granular tier
@@ -199,17 +195,6 @@ mod kernel {
             },
         );
 
-        // Install the vectors and enable the MMU before touching a frame: the
-        // slab writes its pages through the direct map, so every access below
-        // is a translated one.
-        // SAFETY: called once on the boot CPU before any fault can fire.
-        unsafe { exceptions::init_vectors() };
-        let space = AddressSpace::new_identity_gigapages(&POOL, IDENTITY_GIB)
-            .unwrap_or_else(|| fail("identity map"));
-        // SAFETY: the space identity-maps `pc`, `sp`, and MMIO per
-        // `new_identity_gigapages`, so execution continues across the switch.
-        unsafe { space.activate() };
-
         // The slab has no supply yet, so it carves its pages out of the
         // bootstrap region — the kernel has a heap from the first allocation.
         let heap_base = HEAP.as_mut_ptr().addr();
@@ -223,7 +208,8 @@ mod kernel {
 
         let (frames, source) = build_supply();
         ALLOCATOR.install_source(source);
-        let pool_base = core::ptr::addr_of!(FRAME_POOL) as usize;
+        // The slab hands out its frames at their direct-map addresses.
+        let pool_base = paging::physmap_virt(pool_phys()) as usize;
 
         // 1. A page-sized allocation costs exactly one frame, carries no
         //    header, and comes from the pool.
@@ -347,27 +333,21 @@ mod kernel {
     }
 
     /// Build the frame allocator over [`FRAME_POOL`] and the production page
-    /// supply over the identity direct map, both leaked `'static` as they are
-    /// in a real boot.
+    /// supply over the direct map, both leaked `'static` as they are in a real
+    /// boot.
     fn build_supply() -> (&'static FrameAllocator, &'static PageOnlySource) {
         let mut map = BootMemoryMap::new();
         map.push(MemoryRegion {
             kind: RegionKind::Usable,
-            start: PhysAddr::new(core::ptr::addr_of!(FRAME_POOL) as u64),
+            start: PhysAddr::new(pool_phys()),
             length: (PAGE_SIZE * POOL_PAGES) as u64,
         });
         let Ok(allocator) = FrameAllocator::new(&map) else {
             fail("frame allocator over the pool");
         };
         let frames: &'static FrameAllocator = Box::leak(Box::new(allocator));
-        // SAFETY: the boot code identity-maps this window and never unmaps it.
-        let Some(identity) = (unsafe { DirectPhysMap::identity((IDENTITY_GIB as u64) << 30) })
-        else {
-            fail("identity map addresses nothing");
-        };
-        let physmap: &'static DirectPhysMap = Box::leak(Box::new(identity));
         let source: &'static PageOnlySource = Box::leak(Box::new(PageOnlySource {
-            pages: FramePages::new(frames, physmap as &'static (dyn PhysMap + Sync)),
+            pages: FramePages::new(frames, &SPAWN_TABLE_PHYSMAP),
         }));
         check(frames.free_frames() > 0, "the pool holds usable frames");
         (frames, source)

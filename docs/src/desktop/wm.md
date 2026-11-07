@@ -2346,7 +2346,14 @@ forwards to `Compositor::set_backdrop_blur` for that window and no other
   gallery of wallpapers — drains with `WindowEvents::try_wait` so input is
   served ahead of that work and the loop parks only when neither has
   anything left; an app whose own loop dispatches several wake sources and
-  a deadline of its own keeps that park and takes the drain alone.
+  a deadline of its own keeps that park and takes the drain alone, its first
+  drain after a wake through `WindowEvents::try_wait_woken`. That drain is
+  how a session that has gone is noticed: the reply member of an endpoint
+  that ended stays ready, so a wake that brings neither an event nor an
+  answer while nothing posted is owed one asks whether the session is still
+  there — a reap of `CALL_TICKET_NONE`, which takes nothing — and once a reap
+  answers `BrokenPipe` the channel ends with `EventError::Mailbox`, and the
+  application exits saying so rather than spinning on the ready member.
   An app that drains every queued event before painting folds each round
   into its window's `Owed` account — the strongest conclusion the rounds
   reached and the rectangles they reported, clipped to the window and merged

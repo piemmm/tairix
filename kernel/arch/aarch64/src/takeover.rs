@@ -25,11 +25,11 @@
 //! [`Aarch64MachineTakeover::take_over`] performs, in order and without ever
 //! returning on success (every other CPU already quiesced):
 //!
-//! 1. **Install the reserved boot kernel root** (the permanent root the
-//!    dispatcher parks every core on). It is the only `TTBR0_EL1` root whose
-//!    tables live wholly in the kernel image's `.bss` rather than in
-//!    allocator-backed frames, so the sweep cannot destroy the translation
-//!    it is running under; with no root published this refuses
+//! 1. **Park `TTBR0_EL1` on the empty root**, the one every core holds when
+//!    no process runs. It maps nothing and its one table lies in the kernel
+//!    image's `.bss` rather than in allocator-backed frames, so the sweep
+//!    cannot destroy the translation it is running under; with no root
+//!    published this refuses
 //!    [`TakeoverError::PrepareFailed`] before anything is torn down. The
 //!    kernel regime needs no equivalent step: `TTBR1_EL1` points at a
 //!    static of the paging module on every core, for the image's lifetime.
@@ -52,8 +52,7 @@
 //! flattening paging would resolve the addresses it writes to nowhere. What
 //! the sweep actually requires is not that paging be off but that it never
 //! depend on a page-table frame in the usable RAM it is about to destroy,
-//! which the reserved boot root plus a `.bss`-resident kernel root satisfy
-//! directly. Disabling the MMU would additionally be actively wrong
+//! which the empty root and the image-resident kernel root satisfy directly. Disabling the MMU would additionally be actively wrong
 //! on real ARMv8-A silicon: with `SCTLR_EL1.M == 0` every data access is
 //! **Device-nGnRnE**, where an unaligned access faults unconditionally — the
 //! framebuffer console, `memcpy`/`memset`, and the sweep's own bookkeeping
@@ -78,7 +77,7 @@
 //! `/psci` node.
 //!
 //! The quiesce refusal is the caller's and is fail-closed there; the only
-//! refusal this body owns is an unpublished boot root, above.
+//! refusal this body owns is an unpublished empty root, above.
 
 use tairix_arch_api::{MachineTakeover, TakeoverError};
 
@@ -146,8 +145,8 @@ impl MachineTakeover for Aarch64MachineTakeover {
         // handshake before this is ever reached), so this core is the only one
         // running. This body owns only the single-CPU tear-down that follows.
 
-        // 1. Install the reserved boot kernel root, so the translation the
-        //    sweep runs under is one whose tables the sweep cannot destroy.
+        // 1. Park on the empty root, so the translation the sweep runs under
+        //    is one whose tables the sweep cannot destroy.
         //    Done first, and before any interrupt masking, because it is the
         //    one step that may refuse: it is the routine park every task
         //    suspend performs, so a refusal leaves the machine exactly as it
@@ -203,8 +202,8 @@ impl MachineTakeover for Aarch64MachineTakeover {
 ///
 /// # Safety
 ///
-/// Reached only from [`Aarch64MachineTakeover::take_over`] after the reserved
-/// boot root is installed and interrupts are masked. `thin` is a live
+/// Reached only from [`Aarch64MachineTakeover::take_over`] after the empty
+/// root is installed and interrupts are masked. `thin` is a live
 /// pointer to the caller's `&mut dyn FnMut()` sweep handle, whose environment
 /// resides in reserved memory the sweep does not destroy.
 #[no_mangle]

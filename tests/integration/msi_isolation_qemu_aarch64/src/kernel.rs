@@ -11,6 +11,7 @@ use tairix_abi::driver::pci::{function_address, requester_id, PciBus};
 use tairix_abi::{MmioMapError, MmioMapper, RegisterWindow};
 use tairix_arch_aarch64::gicv3::{LpiTables, FIRST_LPI};
 use tairix_arch_aarch64::its::{Its, ItsRoute, VolatileItsMmio, TRANSLATER};
+use tairix_arch_aarch64::paging::{self, Holding};
 use tairix_arch_aarch64::{exceptions, gic, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
 use tairix_arch_api::{PageTableFrames, TableFrame, PAGE_TABLE_ENTRIES};
 use tairix_fdt::pci::{each_pci_host, PciSpace};
@@ -83,12 +84,18 @@ struct Pool {
 }
 
 // SAFETY: the cursor hands each block out once, so no two holders share
-// bytes; MMU off, a block's address is its physical address.
+// bytes.
 unsafe impl Sync for Pool {}
 
 impl Pool {
     fn base(&self) -> *mut u8 {
         self.bytes.0.get().cast()
+    }
+
+    /// Where the pool lies in physical memory, which the GIC and the ITS
+    /// address its blocks by.
+    fn base_phys(&self) -> u64 {
+        paging::image_phys(self.base() as u64)
     }
 }
 
@@ -118,30 +125,32 @@ impl PageTableFrames for Pool {
                 .next
                 .compare_exchange(taken, end, Ordering::AcqRel, Ordering::Acquire)
             {
-                Ok(_) => return Some((base + start) as u64),
+                Ok(_) => return Some(self.base_phys() + start as u64),
                 Err(now) => taken = now,
             }
         }
     }
     fn block_at(&self, phys: u64, order: u32) -> Option<*mut u64> {
-        let offset = usize::try_from(phys.checked_sub(self.base() as u64)?).ok()?;
+        let offset = usize::try_from(phys.checked_sub(self.base_phys())?).ok()?;
         (offset + (4096 << order) <= POOL_BYTES).then(|| self.base().wrapping_add(offset).cast())
     }
     fn free_block(&self, _phys: u64, _order: u32) {}
 }
 
-/// Registers at their physical address: the MMU is off.
-struct Physical;
+/// Registers through the direct map: only a window it types, every byte, as
+/// registers or configuration space.
+struct DirectMap;
 
-impl MmioMapper for Physical {
+impl MmioMapper for DirectMap {
     fn map_window(&self, phys_base: u64, len: usize) -> Result<RegisterWindow, MmioMapError> {
-        let base = usize::try_from(phys_base)
+        let base = u64::try_from(len)
             .ok()
-            .and_then(|base| NonNull::new(base as *mut u8))
+            .and_then(|bytes| paging::registers_virt(phys_base, bytes))
+            .and_then(|virt| usize::try_from(virt).ok())
+            .and_then(|virt| NonNull::new(core::ptr::with_exposed_provenance_mut::<u8>(virt)))
             .ok_or(MmioMapError::InvalidRegion)?;
-        // SAFETY: MMU off, `len` bytes at `phys_base` are the device's
-        // registers, reached as Device memory, and this run alone drives
-        // them.
+        // SAFETY: the direct map types the window's every byte as device
+        // memory, and this run alone drives it.
         Ok(unsafe { RegisterWindow::from_mapping(phys_base, base, len) })
     }
 }
@@ -222,8 +231,8 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     let Some(its_base) = its_base.and_then(|base| usize::try_from(base).ok()) else {
         fail(FAIL_DISCOVERY, "no its");
     };
-    // SAFETY: the tree's service beneath the GIC, Device memory with the MMU
-    // off, which this run alone drives.
+    // SAFETY: the tree's service beneath the GIC, in the gigabyte the port
+    // entry types as registers, which this run alone drives.
     let Ok(mut its) = Its::new(unsafe { VolatileItsMmio::new(its_base) }).take_over(&POOL, 1)
     else {
         fail(FAIL_BRING_UP, "its refused");
@@ -269,9 +278,15 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         fail(FAIL_MAP, "routes refused");
     }
 
+    // A boot handed no tree types only the board's registers, so the
+    // configuration space the tree names is typed here, as the boot would.
+    let ecam_gigabytes = paging::gigapage_mask_from_extents(&[host.ecam]);
+    if paging::reveal(&ecam_gigabytes, Holding::Config) != ecam_gigabytes {
+        fail(FAIL_DISCOVERY, "ecam untyped");
+    }
     let Ok(ecam) = usize::try_from(host.ecam.1)
         .map_err(|_| MmioMapError::InvalidRegion)
-        .and_then(|len| Physical.map_window(host.ecam.0, len))
+        .and_then(|len| DirectMap.map_window(host.ecam.0, len))
     else {
         fail(FAIL_DISCOVERY, "ecam unmapped");
     };
@@ -304,7 +319,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         (bus.read_config(bdf, 0).ok()? == EDU_ID).then_some(())?;
         bus.enable_memory_space(bdf).ok()?;
         bus.set_bus_master(bdf, true).ok()?;
-        Some((bdf, bus.map_bar_window(bdf, 0, &Physical).ok()?))
+        Some((bdf, bus.map_bar_window(bdf, 0, &DirectMap).ok()?))
     };
     let (Some((a_bdf, a_regs)), Some((b_bdf, b_regs))) = (source(A), source(B)) else {
         fail(FAIL_SOURCE, "an edu source is missing");

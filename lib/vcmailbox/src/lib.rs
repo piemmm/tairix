@@ -26,8 +26,8 @@
 //!   and returns the firmware-mutated words. [`MmioMailbox`] is the
 //!   metal implementation over two capability-gated
 //!   [`RegisterWindow`]s (the doorbell register block and the DMA
-//!   property buffer), spinning between looks at the inbox as the pre-MMU
-//!   boot path must; [`DmaMailbox`] is the same over a carved buffer it
+//!   property buffer), spinning between looks at the inbox as the early
+//!   boot path, before any scheduler, must; [`DmaMailbox`] is the same over a carved buffer it
 //!   owns and never frees while the firmware owes it a reply, parking on
 //!   the inbox interrupt ([`InboxInterrupt`]) instead.
 //!   Emulation and host tests supply a mock
@@ -1399,13 +1399,11 @@ pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
 /// Cache-maintenance hooks for the property buffer when the transport
 /// runs over **cacheable** memory.
 ///
-/// The boot framebuffer path runs with the data caches off, where the
-/// buffer is already coherent with the firmware, and uses
-/// [`BufferCoherency::none`]. A post-MMU caller whose property buffer is
+/// A buffer the firmware already sees coherently, such as a non-cacheable
+/// slab, takes [`BufferCoherency::none`]. A caller whose property buffer is
 /// Normal write-back memory supplies real hooks so the firmware sees the
 /// staged request and the ARM re-reads the firmware's response rather
-/// than a stale cached copy (SMP/coherency
-/// correctness). Each hook receives the buffer's CPU base and byte
+/// than a stale cached copy. Each hook receives the buffer's CPU base and byte
 /// length.
 #[derive(Copy, Clone)]
 pub struct BufferCoherency {
@@ -1418,7 +1416,7 @@ pub struct BufferCoherency {
 }
 
 impl BufferCoherency {
-    /// No maintenance: the buffer is already coherent (caches off).
+    /// No maintenance: the buffer is already coherent with the firmware.
     #[must_use]
     pub const fn none() -> Self {
         Self {
@@ -1527,7 +1525,7 @@ trait ReplyWait {
     fn next_look(&mut self, inbox_empty: bool) -> bool;
 }
 
-/// Reply waits that spin, each allowed `looks` looks: the pre-MMU boot path
+/// Reply waits that spin, each allowed `looks` looks: the early boot path
 /// has no scheduler to park on.
 struct SpinWait {
     looks: u32,
@@ -1641,7 +1639,7 @@ impl<W: ReplyWait> Doorbell<W> {
 /// [`RegisterWindow`]s (no ambient authority).
 ///
 /// Its reply waits spin, each within a poll budget of its own: it is the
-/// pre-MMU boot path's transport, and that path has no scheduler to park on.
+/// early boot path's transport, and that path has no scheduler to park on.
 /// A caller that can park uses [`DmaMailbox`].
 pub struct MmioMailbox {
     doorbell: Doorbell<SpinWait>,
@@ -1650,8 +1648,8 @@ pub struct MmioMailbox {
 impl MmioMailbox {
     /// Bring the transport up over the mapped doorbell `regs` and the
     /// mapped property `buffer` whose memory the firmware addresses
-    /// via `buffer_bus_addr`, each wait of an exchange allowed
-    /// `poll_budget` polls.
+    /// via `buffer_bus_addr`, kept coherent with the firmware by
+    /// `coherency`, each wait of an exchange allowed `poll_budget` polls.
     ///
     /// # Errors
     ///
@@ -1662,29 +1660,6 @@ impl MmioMailbox {
     ///   16-byte aligned (the low nibble carries the channel) or the
     ///   buffer does not fit the `VideoCore` aperture.
     pub fn new(
-        regs: RegisterWindow,
-        buffer: RegisterWindow,
-        buffer_bus_addr: u32,
-        poll_budget: u32,
-    ) -> Result<Self, MailboxError> {
-        Self::with_coherency(
-            regs,
-            buffer,
-            buffer_bus_addr,
-            poll_budget,
-            BufferCoherency::none(),
-        )
-    }
-
-    /// As [`MmioMailbox::new`] but with explicit property-buffer cache
-    /// maintenance for a transport running over cacheable memory
-    /// (post-MMU); the boot path uses [`MmioMailbox::new`] (caches off,
-    /// already coherent).
-    ///
-    /// # Errors
-    ///
-    /// As [`MmioMailbox::new`].
-    pub fn with_coherency(
         regs: RegisterWindow,
         buffer: RegisterWindow,
         buffer_bus_addr: u32,
@@ -1770,7 +1745,7 @@ impl<W: ReplyWait> Doorbell<W> {
         }
         // Push the staged words to memory so the firmware's DMA reads
         // them rather than a copy stranded in the ARM data cache (a
-        // no-op when the buffer is already coherent, e.g. caches off).
+        // no-op when the buffer is already coherent).
         self.coherency
             .flush(self.buffer.phys_base(), PROPERTY_LEN_BYTES);
 

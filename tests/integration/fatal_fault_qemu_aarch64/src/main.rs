@@ -21,8 +21,8 @@ mod kernel {
     use tairix_arch_aarch64::handle_panic_via_serial;
     use tairix_arch_aarch64::serial::ConsoleWriter;
 
-    /// Where the defect's corrupted vtable slot sent the CPU: nothing is
-    /// mapped there, so fetching from it raises an Instruction Abort.
+    /// Where the defect's corrupted vtable slot sent the CPU: outside both
+    /// translation regimes, so fetching from it raises an Instruction Abort.
     const WILD_TARGET: u64 = 0x3ff0_0000_0000_0000;
 
     #[panic_handler]

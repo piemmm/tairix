@@ -13,18 +13,17 @@ use tairix_abi::{HwNode, IrqHandle, MmioMapper, RegisterWindow};
 use tairix_arch_aarch64::fdt::gic_device_intid;
 use tairix_arch_aarch64::firmware::{with_floor_channel, FLOOR_BUFFER_LEN, FLOOR_BUFFER_LIMIT};
 use tairix_arch_aarch64::kernel_arch::clean_invalidate_dcache_range;
-use tairix_arch_aarch64::paging::{
-    configured_identity_gigapages, AddressSpace as ArchAddressSpace, PageTablePool,
-};
+use tairix_arch_aarch64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
 use tairix_arch_aarch64::platform::Aarch64Fdt;
 use tairix_arch_aarch64::SERIAL_SINK;
 use tairix_fdt::{Fdt, Node};
 use tairix_kernel_core::{CooperativeYield, InitSpawnCtx};
 use tairix_kernel_irq::IrqTable;
-use tairix_kernel_mem::{PhysAddr, PhysMap};
+use tairix_kernel_mem::PhysMap;
 use tairix_log::Sink;
 
 use crate::aarch64::arch_wrapper::{UART_CONSOLE, UART_CONSOLE_READ};
+use crate::aarch64::boot::DeviceWindows;
 use crate::aarch64::gic_irq::{published_irq_table, COMPOSITE_IRQ_CONTROLLER};
 use crate::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use crate::console_layout::framebuffer_console0;
@@ -46,9 +45,9 @@ static UNLOCK_PT_POOL: PageTablePool = PageTablePool::new();
 /// The aarch64 half of the floor bring-up.
 struct Aarch64Floor;
 
-// SAFETY: the boot maps the tree's virtio-MMIO aperture into the identity
-// window's Device gigapages (`DeviceWindows`) for the life of the kernel, and
-// nothing holds a reference into it.
+// SAFETY: the boot types the tree's virtio-MMIO aperture as registers in the
+// direct map (`DeviceWindows`) for the life of the kernel, and nothing holds
+// a reference into it.
 unsafe impl MmioFloorPort for Aarch64Floor {
     type Platform = Aarch64Fdt;
     type Space = ArchAddressSpace;
@@ -56,7 +55,7 @@ unsafe impl MmioFloorPort for Aarch64Floor {
     const POOL_VBASE: u64 = 0x60_0000_0000;
 
     fn bookkeeping_space() -> Option<ArchAddressSpace> {
-        ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, configured_identity_gigapages())
+        ArchAddressSpace::new_user(&UNLOCK_PT_POOL)
     }
 
     fn registers() -> &'static dyn PhysMap {
@@ -213,9 +212,8 @@ impl UnlockPort for Aarch64Unlock {
         floor: FloorEnv,
         env: UnlockEnv,
     ) -> Result<Infallible, &'static str> {
-        // SAFETY: `floor.dtb` is the pointer the boot recorded from the
-        // loader's hand-off (`boot.s` preserves x0), identity-mapped and
-        // immutable for the life of the kernel.
+        // SAFETY: `floor.dtb` is the tree the boot recorded, mapped read only
+        // and immutable for the life of the kernel.
         let tree = unsafe { boot_tree(floor.dtb as *const u8) }?;
         let device = bring_up_virtio_mmio::<Aarch64Floor>(
             env.ctx,
@@ -258,25 +256,4 @@ impl UnlockPort for Aarch64Unlock {
 #[must_use]
 pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
     spawn_unlock(ctx, &AARCH64_UNLOCK)
-}
-
-/// The physical map register windows are reached through: the kernel's
-/// Device gigapages, where the board's discovered MMIO lives.
-///
-/// Those are sparse, so this is no general physical map. RAM is reached
-/// through the kernel's direct map instead; a window that is not wholly
-/// inside a Device gigapage fails closed rather than faulting on an invalid
-/// slot or aliasing memory the direct map holds cacheable.
-struct DeviceWindows;
-
-impl PhysMap for DeviceWindows {
-    fn translate(&self, phys: PhysAddr, len: usize) -> Option<core::ptr::NonNull<u8>> {
-        crate::aarch64::boot::device_registers(phys.as_u64(), len)
-    }
-
-    /// Device memory is never cached, so there is no alias to clean.
-    fn clean_invalidate(&self, _phys: PhysAddr, _len: usize) {}
-
-    /// Register windows are never executed.
-    fn sync_instruction_cache(&self, _phys: PhysAddr, _len: usize) {}
 }

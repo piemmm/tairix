@@ -1715,8 +1715,15 @@ impl CallEndpoint {
                 }
                 None => Err(Errno::OutOfMemory),
             };
+            // The last ticket is never issued, so a reap of it names no call.
+            let numbered = if g.next_ticket == tairix_abi::CALL_TICKET_NONE {
+                Err(Errno::LimitExceeded)
+            } else {
+                Ok(())
+            };
             let admitted = paid
                 .and(room)
+                .and(numbered)
                 .and_then(|()| g.reserve_post(sender, self.per_sender, sender_limit));
             let admitted = if made {
                 admitted.and_then(|()| g.noted.note(sender, self.id, self.is_closed()))
@@ -3042,6 +3049,25 @@ mod tests {
         assert_eq!(err, Errno::PermissionDenied);
         assert!(sink.ids().contains(&AuditEvent::CallPostDenied.id().0));
         assert_eq!(ep.outstanding(), 0);
+    }
+
+    /// The ticket that names no call is never issued: an endpoint that has
+    /// numbered every other call takes no more, and the refusal holds nothing.
+    #[test]
+    fn the_ticket_naming_no_call_is_never_issued() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        ep.inner.lock().next_ticket = tairix_abi::CALL_TICKET_NONE - 1;
+        let caller = task_with(7, &[]);
+        let last = ep
+            .post(&caller, POSTER_SCHED, b"x", u64::MAX, NO_LIMIT, &sink)
+            .expect("the last ticket there is");
+        assert_eq!(last.0, tairix_abi::CALL_TICKET_NONE - 1);
+        assert_eq!(
+            ep.post(&caller, POSTER_SCHED, b"y", u64::MAX, NO_LIMIT, &sink),
+            Err(Errno::LimitExceeded)
+        );
+        assert_eq!(ep.outstanding(), 1, "only the call numbered holds a slot");
     }
 
     #[test]

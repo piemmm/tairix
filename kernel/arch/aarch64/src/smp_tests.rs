@@ -16,25 +16,19 @@ extern "C" fn host_entry(_cpu: CpuId) -> ! {
     }
 }
 
-/// A core's answer and its verdict each sit alone in a writeback granule at
-/// the start of its slot, and the slot ends on a granule, so nothing a cache
-/// holds of any other data can be written back over either.
+/// A slot's stack fills it to its end, and that end — the stack top the
+/// trampoline computes, the next slot's start — is aligned for a stack
+/// pointer.
 #[test]
-fn a_slot_keeps_its_answer_and_verdict_alone_in_their_granules() {
-    assert_eq!(core::mem::align_of::<SecondaryStack>(), WRITEBACK_GRANULE);
-    assert_eq!(core::mem::offset_of!(SecondaryStack, answer), 0);
+fn a_slots_stack_runs_to_its_end_which_is_a_stack_pointer() {
+    const STACK_POINTER_ALIGN: usize = 16;
+    let size = core::mem::size_of::<SecondaryStack>();
+    assert_eq!(core::mem::align_of::<SecondaryStack>(), STACK_POINTER_ALIGN);
     assert_eq!(
-        core::mem::offset_of!(SecondaryStack, verdict),
-        WRITEBACK_GRANULE
+        core::mem::offset_of!(SecondaryStack, bytes) + SECONDARY_STACK_BYTES,
+        size
     );
-    assert_eq!(
-        core::mem::offset_of!(SecondaryStack, bytes),
-        2 * WRITEBACK_GRANULE
-    );
-    assert_eq!(
-        core::mem::size_of::<SecondaryStack>(),
-        2 * WRITEBACK_GRANULE + SECONDARY_STACK_BYTES
-    );
+    assert!(size.is_multiple_of(STACK_POINTER_ALIGN));
 }
 
 /// A started core's first push, at its slot's end through the stack pointer
@@ -43,7 +37,7 @@ fn a_slot_keeps_its_answer_and_verdict_alone_in_their_granules() {
 fn push_while_shared(slot: &SecondaryStack, top: *mut u8) -> u64 {
     // SAFETY: the caller passes the last byte of `slot`'s own stack.
     unsafe { top.write(0xA5) };
-    slot.answer.0.load(Ordering::Acquire)
+    slot.answer.load(Ordering::Acquire)
 }
 
 /// The registered pool is one global, so this one test owns it: the ids it

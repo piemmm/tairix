@@ -36,13 +36,9 @@ use alloc::sync::Arc;
 
 use tairix_abi::{CapabilityId, Errno, WaitFlags, WaitStatus, SYSCALL_MAX_ARGS};
 use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
-use tairix_arch_aarch64::paging::{
-    configure_device_gigapages, configure_kernel_gigapages, install_boot_physmap,
-    AddressSpace as ArchAddressSpace, PageTablePool, GIGAPAGE_MASK_WORDS,
-};
 use tairix_arch_aarch64::{
-    enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, Aarch64Arch,
-    Aarch64ArchStorage, SERIAL_SINK,
+    gic, handle_panic_via_serial, qemu_exit, syscall_entry, Aarch64Arch, Aarch64ArchStorage,
+    SERIAL_SINK,
 };
 use tairix_arch_api::BOOT_CPU;
 use tairix_caps::CapabilitySet;
@@ -74,11 +70,6 @@ include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 // The canonical QEMU `virt` device tree, dumped and embedded at build time.
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
-/// Gigabytes of identity map the boot address space provides: `[0, 2 GiB)`
-/// covers the `virt` board's device MMIO (GiB 0) and the RAM base at GiB 1
-/// where this kernel, its heap, and the frame pool live.
-const IDENTITY_GIB: usize = 2;
-
 /// Physical frames the production spawn producer draws from: the parent
 /// plus the sandboxed workers of the run (decode, dying, replacement, probe,
 /// session, and the supervised stream worker with its replacement), of which
@@ -109,7 +100,6 @@ const TEST_PASS: EventId = EventId(4352);
 /// Failure finisher codes, distinct per failure site.
 const FAIL_ZERO_FREQ: NonZeroU16 = fail_point!(1);
 const FAIL_GIC: NonZeroU16 = fail_point!(2);
-const FAIL_POOL: NonZeroU16 = fail_point!(3);
 const FAIL_FRAMES: NonZeroU16 = fail_point!(4);
 const FAIL_SCHED_NEW: NonZeroU16 = fail_point!(5);
 const FAIL_SPAWN: NonZeroU16 = fail_point!(6);
@@ -121,8 +111,6 @@ const FAIL_BIAS: NonZeroU16 = fail_point!(11);
 const FAIL_POLL: NonZeroU16 = fail_point!(12);
 const FAIL_DRAINED: NonZeroU16 = fail_point!(13);
 const FAIL_PARENT_STOPPED: NonZeroU16 = fail_point!(14);
-/// The direct physical map could not be installed over the board's RAM.
-const FAIL_PHYSMAP: NonZeroU16 = fail_point!(15);
 /// The random reserve could not be seeded.
 const FAIL_SEED: NonZeroU16 = fail_point!(16);
 /// Base finisher for a non-zero parent exit; the parent's diagnostic exit
@@ -143,12 +131,9 @@ static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
 static ALLOCATOR: FreeListAllocator =
     unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_SIZE) };
 
-/// Page-table pool backing the kernel's own boot identity map.
-static BOOT_PAGE_TABLES: PageTablePool = PageTablePool::new();
-
-/// Identity-mapped physical-frame backing store the live [`FrameAllocator`]
-/// serves the spawn producer and the live-space producer from; inside
-/// the 2 GiB identity window the producer's page-table walk requires.
+/// Physical-frame backing store the live [`FrameAllocator`] serves the spawn
+/// producer and the live-space producer from: in the image's gigabyte, which
+/// the direct map covers as RAM.
 #[repr(C, align(4096))]
 struct FramePool([u8; PAGE_SIZE * FRAME_COUNT]);
 
@@ -289,16 +274,10 @@ static CHILD_PROGRAMS: [EmbeddedProgram; 7] = [
 static PROGRAMS: ProgramRegistry = ProgramRegistry::new(&CHILD_PROGRAMS);
 
 /// Bring the board up: FP/SIMD on, the `virt` device tree discovered
-/// (timer rate, GICv2 bases), the identity-gigapage masks configured from
-/// the board facts, the identity MMU + EL1 vectors enabled, the GIC
-/// initialised, and the dispatch callback + user-fault resolver installed.
-/// Returns the discovered generic-timer rate.
+/// (timer rate, GICv2 bases), the GIC initialised, and the dispatch
+/// callback + user-fault resolver installed. Returns the discovered
+/// generic-timer rate.
 fn bring_up_board() -> u64 {
-    // Enable FP/SIMD at EL1 before any code the compiler may lower to NEON
-    // (the `rxe` decoder, the spawn image fills, the log formatter).
-    // SAFETY: this is the boot CPU, called once, before any FP/SIMD executes.
-    unsafe { enable_fp_el1() };
-
     let Ok(fdt) = Fdt::new(DTB_BLOB) else {
         qemu_exit::exit_failure(FAIL_GIC);
     };
@@ -315,48 +294,6 @@ fn bring_up_board() -> u64 {
         qemu_exit::exit_failure(FAIL_GIC);
     }
 
-    // Configure the board's gigapage facts, exactly as the production boot
-    // path derives them from discovery: Device GiB 0 is the `virt` MMIO
-    // window, and GiB 1 holds both this kernel's image and its RAM. The
-    // production spawn producer sizes every child's identity window from
-    // these masks, so driving it under the unconfigured defaults would
-    // request a window reaching the user bias and the spawn would fail
-    // closed.
-    let mut device_mask = [0u64; GIGAPAGE_MASK_WORDS];
-    device_mask[0] = 0b01;
-    configure_device_gigapages(device_mask);
-    let mut ram_mask = [0u64; GIGAPAGE_MASK_WORDS];
-    ram_mask[0] = 0b10;
-    configure_kernel_gigapages(ram_mask);
-    // The production spawn producer reaches a child's page tables through
-    // the direct physical map in the kernel translation regime, so the
-    // chassis stands it up over the same RAM before driving the producer.
-    if !install_boot_physmap(&ram_mask) {
-        qemu_exit::exit_failure(FAIL_PHYSMAP);
-    }
-
-    // Enable the identity MMU + EL1 vectors before any atomic
-    // read-modify-write runs: the frame allocator, the scheduler, and every
-    // registry the test builds use atomics, which are UNPREDICTABLE on
-    // MMU-off Device-typed memory (`plans/PI.md` P6c-2).
-    let Some(boot_space) =
-        ArchAddressSpace::new_identity_gigapages(&BOOT_PAGE_TABLES, IDENTITY_GIB)
-    else {
-        qemu_exit::exit_failure(FAIL_POOL);
-    };
-    // SAFETY: the identity map covers the kernel's current `pc`, `sp`, the
-    // heap, the frame pool, and the device MMIO (all within `[0, 2 GiB)` on
-    // the `virt` board), so switching it does not move the ground under the
-    // running code; `init_vectors` runs once on the boot CPU with a stack
-    // established.
-    unsafe {
-        boot_space.switch();
-        exceptions::init_vectors();
-    }
-    // The boot space's tables live in the static `BOOT_PAGE_TABLES` pool
-    // and the handle carries no `Drop`, so letting it fall out of scope
-    // leaves the active translation regime untouched for the kernel's
-    // lifetime (the kernel never returns).
     // SAFETY: called once on the boot CPU after the GIC bases were
     // discovered above.
     unsafe {
@@ -388,14 +325,15 @@ struct Subsystems {
 }
 
 /// Build the live kernel subsystems: the `kernel/mem` frame allocator over
-/// the identity-mapped pool (so the spawn producer and the demand-fault
+/// the frame pool (so the spawn producer and the demand-fault
 /// path draw their frames from the production path), the scheduler over
 /// the production `KernelArch` wrapper, and the capability / port /
 /// address-space / random / IRQ state the production hook borrows.
 fn leak_subsystems(counter_hz: u64) -> Subsystems {
+    let pool = tairix_arch_aarch64::paging::image_phys(core::ptr::addr_of!(FRAME_POOL) as u64);
     let mut memory_map = BootMemoryMap::new();
     memory_map.push(MemoryRegion {
-        start: PhysAddr::new(core::ptr::addr_of!(FRAME_POOL) as u64),
+        start: PhysAddr::new(pool),
         length: (PAGE_SIZE * FRAME_COUNT) as u64,
         kind: RegionKind::Usable,
     });

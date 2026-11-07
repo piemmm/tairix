@@ -1,0 +1,28 @@
+[package]
+name = "tairix-test-fatal-stack-overrun-qemu-aarch64"
+description = "QEMU integration test: a store into the boot stack's guard, which the aarch64 kernel root maps read-only, faults, and the EL1 vector takes that fault on the reserve stack, so the report names the overrun instead of the core re-faulting on its own guard for ever."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding kernel ELF QEMU loads with `-kernel` on the aarch64 `virt`
+# board. It links the port alone, for boot, console and the fatal report.
+#
+# On the host target the crate has no test source and contributes nothing to
+# `cargo test`; the orchestrator is `cargo xtask test --qemu`.
+
+[[bin]]
+name = "tairix-test-fatal-stack-overrun-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

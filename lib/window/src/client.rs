@@ -592,6 +592,12 @@ pub trait WindowTransport {
     ///
     /// As [`call`](Self::call).
     fn await_reply(&mut self, ticket: u64, reply: &mut [u8]) -> Result<usize, Errno>;
+
+    /// Whether the session's endpoint has gone, so nothing will ever answer:
+    /// a reap of the ticket that names no call takes nothing and says so.
+    fn session_gone(&mut self) -> bool {
+        self.reap(tairix_abi::CALL_TICKET_NONE, &mut []) == Err(Errno::BrokenPipe)
+    }
 }
 
 /// Step the drop numbered `serial` onto the desktop that window `window_id`'s
@@ -876,6 +882,8 @@ pub struct WindowClient<T: WindowTransport> {
     /// another was unanswered, now free to go, or the size the session kept
     /// on refusing one.
     owed: VecDeque<WindowEvent>,
+    /// The session's endpoint has gone: nothing posted will be answered.
+    lost: bool,
 }
 
 impl<T: WindowTransport> WindowClient<T> {
@@ -890,6 +898,7 @@ impl<T: WindowTransport> WindowClient<T> {
             posted: Vec::new(),
             refused: VecDeque::new(),
             owed: VecDeque::new(),
+            lost: false,
         }
     }
 
@@ -2503,7 +2512,10 @@ impl<T: WindowTransport> WindowClient<T> {
                     continue;
                 }
                 Ok(Some(len)) => decode_status_reply(&reply[..len]),
-                Err(err) => Err(err),
+                Err(err) => {
+                    self.lost |= err == Errno::BrokenPipe;
+                    Err(err)
+                }
             };
             answered = true;
             if self.answered(index, answer) {
@@ -2687,6 +2699,18 @@ impl<T: WindowTransport> WindowClient<T> {
 
     /// What the client owes the application before its next delivered
     /// event: a refusal, then geometry to lay out again.
+    /// Whether a request posted to the session waits for its answer.
+    fn awaits_answers(&self) -> bool {
+        self.posted.iter().any(|posting| posting.ticket.is_some())
+    }
+
+    /// Whether the session's endpoint has gone: once a reap has said so, or
+    /// when the transport, asked, says so now.
+    fn session_lost(&mut self) -> bool {
+        self.lost |= self.transport.session_gone();
+        self.lost
+    }
+
     pub(crate) fn take_owed(&mut self) -> Option<Result<WindowEvent, Refused>> {
         self.reap_posted();
         if let Some(refused) = self.refused.pop_front() {
@@ -2898,10 +2922,37 @@ impl<S: EventDrain> WindowEvents<S> {
             .try_next(&mut frame)
             .map_err(EventError::Mailbox)?
         {
+            if client.lost {
+                return Err(EventError::Mailbox(Errno::BrokenPipe));
+            }
             return Ok(None);
         }
         self.fold_resizes(&mut frame)?;
         decode_delivered(client, &frame).map(Some)
+    }
+
+    /// [`try_wait`](Self::try_wait) for the drain that follows a wake.
+    ///
+    /// A wake that brings neither an event nor an answer while no request is
+    /// owed one can only be the window channel's own end, whose wait stays
+    /// ready once the session has gone. The session is asked whether it is
+    /// still there, and the channel ends once it is not, rather than the wait
+    /// returning at once for ever.
+    ///
+    /// # Errors
+    ///
+    /// As [`try_wait`](Self::try_wait), and [`EventError::Mailbox`] with
+    /// [`Errno::BrokenPipe`] once the session has gone.
+    pub fn try_wait_woken<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+    ) -> Result<Option<WindowEvent>, EventError> {
+        let owed = client.awaits_answers();
+        let event = self.try_wait(client)?;
+        if event.is_none() && !owed && client.session_lost() {
+            return Err(EventError::Mailbox(Errno::BrokenPipe));
+        }
+        Ok(event)
     }
 
     /// Advance `frame` past an unbroken run of [`WindowEvent::Resized`] for
@@ -2964,7 +3015,8 @@ impl<S: EventSource> WindowEvents<S> {
     ///
     /// # Errors
     ///
-    /// [`EventError::Mailbox`] for a source failure,
+    /// [`EventError::Mailbox`] for a source failure or a session that has
+    /// gone ([`try_wait_woken`](Self::try_wait_woken)),
     /// [`EventError::Undecodable`] for a malformed frame — a corrupt event is
     /// refused, never guessed at — or [`EventError::Refused`] for a posted
     /// request the session refused. Only the first ends the channel; a frame
@@ -2973,14 +3025,17 @@ impl<S: EventSource> WindowEvents<S> {
         &mut self,
         client: &mut WindowClient<T>,
     ) -> Result<Option<WindowEvent>, EventError> {
+        if let Some(event) = self.try_wait(client)? {
+            return Ok(Some(event));
+        }
         loop {
-            if let Some(event) = self.try_wait(client)? {
-                return Ok(Some(event));
-            }
             match self.source.park().map_err(EventError::Mailbox)? {
                 Parked::Served => {}
                 // The loop owns what woke it and has no event to handle.
                 Parked::Interrupted => return Ok(None),
+            }
+            if let Some(event) = self.try_wait_woken(client)? {
+                return Ok(Some(event));
             }
         }
     }

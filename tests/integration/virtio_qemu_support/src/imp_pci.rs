@@ -166,8 +166,7 @@ unsafe fn cli() {
 
 /// Read the timestamp counter (monotonic-ish clock for the wait loop).
 fn rdtsc() -> u64 {
-    // SAFETY: `rdtsc` is unprivileged on every x86_64 CPU TAIRiX supports
-    // and has no architectural side effects.
+    // SAFETY: `rdtsc` at CPL 0 has no architectural side effect.
     let lo: u32;
     let hi: u32;
     unsafe {

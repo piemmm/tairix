@@ -58,7 +58,7 @@ pub use supply::{
 };
 
 /// FDT header magic (`0xd00dfeed`, big-endian on the wire).
-const FDT_MAGIC: u32 = 0xd00d_feed;
+pub const FDT_MAGIC: u32 = 0xd00d_feed;
 
 /// `FDT_BEGIN_NODE` — opens a node; followed by its NUL-terminated name,
 /// padded to a 4-byte boundary.

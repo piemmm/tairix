@@ -249,7 +249,7 @@ impl SchedulerArch for SmpArch {
     fn ticks_now(&self) -> u64 {
         // RDTSC has been available since the Pentium and is universally
         // emulated by QEMU. We treat it as a monotonic-enough clock.
-        // SAFETY: RDTSC is unprivileged and has no side effects.
+        // SAFETY: RDTSC at CPL 0 has no side effect.
         unsafe {
             let lo: u32;
             let hi: u32;

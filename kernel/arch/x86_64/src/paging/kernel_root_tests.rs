@@ -49,23 +49,6 @@ const READ_EXECUTE: PageFlags = PageFlags::READ.union(PageFlags::EXEC);
 const READ_WRITE: PageFlags = PageFlags::READ.union(PageFlags::WRITE);
 
 #[test]
-fn a_span_splits_only_a_block_one_of_its_ends_falls_inside() {
-    let block = span(2 * MIB, 4 * MIB);
-    assert!(!block.splits(2 * MIB, 2 * MIB), "a span that is the block");
-    assert!(
-        !span(MIB, 8 * MIB).splits(2 * MIB, 2 * MIB),
-        "one that covers it"
-    );
-    assert!(
-        !span(4 * MIB, 6 * MIB).splits(2 * MIB, 2 * MIB),
-        "one that starts after it"
-    );
-    assert!(span(3 * MIB, 6 * MIB).splits(2 * MIB, 2 * MIB));
-    assert!(span(MIB, 3 * MIB).splits(2 * MIB, 2 * MIB));
-    assert!(block.contains(2 * MIB) && !block.contains(4 * MIB));
-}
-
-#[test]
 fn sections_the_window_cannot_map_are_refused() {
     let ok = linked_like();
     let [guard, boot, text, read_only, data] = ok.spans();

@@ -14,16 +14,13 @@
 //! host-testable against the mock firmware — QEMU models no `VideoCore`, so
 //! that is the only way to prove it before it runs on metal.
 //!
-//! # Boot CPU, before the MMU
+//! # Boot CPU, before SMP
 //!
-//! Every boot-time exchange runs from the boot CPU before
-//! `enable_mmu_and_vectors`: with the data caches still off the
-//! CPU↔firmware exchange is coherent by construction, so no cache maintenance
-//! is needed, and there is no other thread to serialise against. That is also
-//! why the property buffer is a plain cell rather than a lock — an atomic
-//! read-modify-write on MMU-off Device-typed memory is architecturally
-//! UNPREDICTABLE, the constraint that orders the whole aarch64 boot
-//! (`plans/PI.md` P6c-2).
+//! Every boot-time exchange runs on the boot CPU before any other CPU starts,
+//! so there is no other thread to serialise against and the property buffer
+//! is a plain cell rather than a lock. The buffer is cacheable, so each
+//! exchange cleans it to the point of coherency before ringing the doorbell
+//! and invalidates it before reading the reply.
 //!
 //! # The storage floor's channel
 //!
@@ -70,6 +67,13 @@ pub const FLOOR_BUFFER_LEN: usize = PROPERTY_LEN_BYTES;
 /// firmware's aperture.
 pub const FLOOR_BUFFER_LIMIT: u64 = APERTURE_LIMIT;
 
+/// The boot's own property message, on a page of its own: the firmware
+/// writes its answer to RAM behind the cache, so a line of it that also held
+/// data the CPU wrote meanwhile would be written back over the answer.
+#[cfg(any(test, all(target_arch = "aarch64", target_os = "none")))]
+#[repr(align(4096))]
+struct PropertyBuffer(core::cell::UnsafeCell<[u8; PROPERTY_LEN_BYTES]>);
+
 /// A firmware mailbox doorbell located in a flattened device tree.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct DiscoveredMailbox {
@@ -84,7 +88,7 @@ pub struct DiscoveredMailbox {
 /// Find the `VideoCore` firmware mailbox doorbell in `fdt`.
 ///
 /// The walk early-returns at the matched node
-/// ([`tairix_fdt::scan_translated`]), so it stays safe with the MMU off.
+/// ([`tairix_fdt::scan_translated`]).
 /// Returns `None` when the tree carries no mailbox (e.g. QEMU `virt`) or the
 /// node's `reg` cannot be decoded or translated.
 #[must_use]
@@ -142,7 +146,7 @@ fn mailbox_over(
     coherency: BufferCoherency,
 ) -> Option<MmioMailbox> {
     let bus = arm_physical_to_bus(buffer.phys_base(), DEFAULT_BUS_ALIAS).ok()?;
-    MmioMailbox::with_coherency(regs, buffer, bus, DEFAULT_POLL_BUDGET, coherency).ok()
+    MmioMailbox::new(regs, buffer, bus, DEFAULT_POLL_BUDGET, coherency).ok()
 }
 
 /// Run `body` with the storage floor's channel to the firmware: over the
@@ -179,11 +183,12 @@ pub fn with_floor_channel<R>(
     )
 }
 
-/// Clean and invalidate the property buffer at `base` around the firmware's
-/// DMA of it: the mailbox names the buffer by its physical address, which the
-/// kernel's identity direct map makes its CPU address too.
+/// Clean and invalidate the property buffer at physical `base` around the
+/// firmware's DMA of it, through the direct map: the mailbox names the buffer
+/// by its physical address.
 fn clean_invalidate_buffer(base: u64, len: usize) {
-    if let Ok(start) = usize::try_from(base) {
+    let covered = u64::try_from(len).is_ok_and(|bytes| crate::paging::physmap_covers(base, bytes));
+    if let (true, Ok(start)) = (covered, usize::try_from(crate::paging::physmap_virt(base))) {
         crate::kernel_arch::clean_invalidate_dcache_range(start, len);
     }
 }
@@ -236,8 +241,9 @@ pub fn with_transport<R>(
 }
 
 /// The freestanding half: the doorbell window, the DMA-visible property
-/// buffer, and the transport over them. Target-only — it addresses MMIO and
-/// SDRAM through boot-identity addresses.
+/// buffer, and the transport over them. Target-only — it reaches the
+/// doorbell through the direct map and names the buffer by its physical
+/// address.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod metal {
     use core::cell::UnsafeCell;
@@ -248,17 +254,12 @@ mod metal {
         BufferCoherency, MailboxTransport, MAILBOX_REGS_LEN_BYTES, PROPERTY_LEN_BYTES,
     };
 
-    use super::DiscoveredMailbox;
+    use super::{DiscoveredMailbox, PropertyBuffer};
 
-    /// The DMA-visible mailbox property message, 16-byte aligned as the
-    /// doorbell protocol requires.
-    #[repr(align(16))]
-    struct PropertyBuffer(UnsafeCell<[u8; PROPERTY_LEN_BYTES]>);
-
-    // SAFETY: written only by the single-threaded boot CPU inside the
-    // pre-MMU discovery sequence, before SMP bring-up and before any other
-    // user of the doorbell exists; never touched again afterwards, since the
-    // user-space `vcmailbox` service owns the doorbell from then on.
+    // SAFETY: written only by the single-threaded boot CPU during discovery,
+    // before SMP bring-up and before any other user of the doorbell exists;
+    // never touched again afterwards, since the user-space `vcmailbox`
+    // service owns the doorbell from then on.
     unsafe impl Sync for PropertyBuffer {}
 
     static PROPERTY_BUFFER: PropertyBuffer =
@@ -276,21 +277,25 @@ mod metal {
         // SAFETY: single-threaded boot CPU, pre-publication (see
         // `PropertyBuffer`): no other reference to the buffer exists.
         let buffer_ptr = unsafe { NonNull::new_unchecked(PROPERTY_BUFFER.0.get().cast::<u8>()) };
-        let buffer_phys = buffer_ptr.as_ptr() as u64;
-        let doorbell_ptr = NonNull::new(usize::try_from(mailbox.base).ok()? as *mut u8)?;
-        // SAFETY: `mailbox.base` is the FDT-discovered, `ranges`-translated
-        // CPU-physical doorbell window (boot runs identity-addressed), at
-        // least `MAILBOX_REGS_LEN_BYTES` long (checked above); the buffer
-        // pointer covers exactly `PROPERTY_LEN_BYTES` of the static above.
-        // Both windows are accessed only through `RegisterWindow`'s checked
-        // 32-bit accessors, and neither outlives this call.
+        let buffer_phys = crate::paging::image_phys(buffer_ptr.as_ptr() as u64);
+        let doorbell = crate::paging::registers_virt(mailbox.base, MAILBOX_REGS_LEN_BYTES as u64)?;
+        let doorbell_ptr = NonNull::new(usize::try_from(doorbell).ok()? as *mut u8)?;
+        // SAFETY: `doorbell` maps the FDT-discovered, `ranges`-translated
+        // doorbell window, which the direct map types as registers, at least
+        // `MAILBOX_REGS_LEN_BYTES` long (checked above); the buffer pointer
+        // covers exactly `PROPERTY_LEN_BYTES` of the static above. Both
+        // windows are accessed only through `RegisterWindow`'s checked 32-bit
+        // accessors, and neither outlives this call.
         let regs = unsafe {
             RegisterWindow::from_mapping(mailbox.base, doorbell_ptr, MAILBOX_REGS_LEN_BYTES)
         };
         let buffer =
             unsafe { RegisterWindow::from_mapping(buffer_phys, buffer_ptr, PROPERTY_LEN_BYTES) };
-        // The caches are off, so the buffer agrees with the firmware as it is.
-        let mut transport = super::mailbox_over(regs, buffer, BufferCoherency::none())?;
+        let coherency = BufferCoherency::new(
+            super::clean_invalidate_buffer,
+            super::clean_invalidate_buffer,
+        );
+        let mut transport = super::mailbox_over(regs, buffer, coherency)?;
         Some(body(&mut transport))
     }
 }
@@ -299,7 +304,8 @@ mod metal {
 mod tests {
     use core::ptr::NonNull;
 
-    use super::{find_mailbox, raise_over, with_floor_channel, FloorChannel};
+    use super::{find_mailbox, raise_over, with_floor_channel, FloorChannel, PropertyBuffer};
+    use crate::paging::PAGE_SIZE;
     use crate::raspi_fixture::raspi_like_arm;
     use tairix_abi::driver::mailbox::MailboxChannel;
     use tairix_abi::driver::supply::{IoRail, PowerRail};
@@ -312,6 +318,20 @@ mod tests {
         encode_clock_rate_query, encode_clock_rate_write, encode_gpio_state_write, ClockRateQuery,
         FirmwareClock, PROPERTY_LEN_BYTES, SD_HOST_KEY,
     };
+
+    /// No cache line the firmware's answer lands in holds anything else, at
+    /// any writeback granule the architecture allows.
+    #[test]
+    fn the_boot_property_buffer_owns_its_page() {
+        assert_eq!(core::mem::align_of::<PropertyBuffer>(), PAGE_SIZE);
+        assert_eq!(core::mem::size_of::<PropertyBuffer>(), PAGE_SIZE);
+        let buffer = PropertyBuffer(core::cell::UnsafeCell::new([0; PROPERTY_LEN_BYTES]));
+        assert_eq!(
+            buffer.0.get().addr() % PAGE_SIZE,
+            0,
+            "the message opens its page"
+        );
+    }
 
     /// The SD host's node, its rails on expander lines 4 and 6.
     fn sd_host() -> HwNode {

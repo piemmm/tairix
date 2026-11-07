@@ -234,6 +234,9 @@ below — publishes it beside the `IrqTable`, installs its dispatcher and sets
   `ecall` branch and before anything that can take a nested trap — the A/D
   walk, the resolver, the terminator — and hands every consumer that one
   reading.
+- **No counter within U-mode's reach.** Installing the vector zeroes
+  `scounteren`, UNSPECIFIED out of reset, so U-mode reads none of the cycle,
+  time, retired-instruction or hardware-performance counters.
 - **No user page within S-mode's reach.** Installing the vector
   (`trap::install_trap_vector`, which `init_traps` runs) clears
   `sstatus.SUM` on the hart, and nothing sets it again: `sum_tests` reads

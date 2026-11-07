@@ -8,6 +8,9 @@
 //! it again: an `eret` to EL0 restores EL0's own state, and the next entry to
 //! EL1 sets PAN before any kernel code runs.
 //!
+//! Every CPU also closes the generic timer and the performance monitors to
+//! EL0, whatever its reset left in `CNTKCTL_EL1` and `PMUSERENR_EL0`.
+//!
 //! PAN is ARMv8.1 (`FEAT_PAN`); the Raspberry Pi 4's Cortex-A72 lacks it. The
 //! boot CPU settles whether it is in force from what it offers, before any
 //! other CPU starts, and a CPU that cannot hold it does not join: it answers
@@ -100,8 +103,10 @@ pub(crate) fn settle() {
     PAN_IN_FORCE.store(pan_offered_here(), Ordering::Release);
 }
 
-/// Hold the calling CPU to PAN while it is in force, or answer `false`,
-/// changing nothing, on a CPU that does not offer it.
+/// Hold the calling CPU to the kernel's protections: PAN while it is in
+/// force, and the generic timer and performance monitors out of EL0's reach.
+/// Answers `false`, changing nothing, on a CPU that does not offer PAN while
+/// it is in force.
 ///
 /// `SCTLR_EL1.SPAN` follows when the CPU enables translation
 /// ([`sctlr_mmu_on`]).
@@ -110,25 +115,52 @@ pub(crate) fn settle() {
 ///
 /// At EL1, before the CPU reaches any user page.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub(crate) unsafe fn hold() -> bool {
-    if !pan_in_force() {
-        return true;
+#[must_use]
+pub unsafe fn hold() -> bool {
+    if pan_in_force() {
+        if !pan_offered_here() {
+            return false;
+        }
+        // SAFETY: the CPU offers PAN, so the `PAN` register (`S3_0_C4_C2_3`,
+        // spelled generically because the toolchain's baseline is ARMv8.0)
+        // exists; setting it only puts EL0-accessible pages out of EL1's
+        // reach, and nothing the kernel runs touches one.
+        unsafe {
+            core::arch::asm!(
+                "msr S3_0_C4_C2_3, {pan}",
+                pan = in(reg) PSTATE_PAN,
+                options(nostack, preserves_flags),
+            );
+        }
     }
-    if !pan_offered_here() {
-        return false;
-    }
-    // SAFETY: the CPU offers PAN, so the `PAN` register (`S3_0_C4_C2_3`,
-    // spelled generically because the toolchain's baseline is ARMv8.0)
-    // exists; setting it only puts EL0-accessible pages out of EL1's reach,
-    // and nothing the kernel runs touches one.
+    close_counters_to_el0();
+    true
+}
+
+/// Close the generic timer and the performance monitors to EL0. Their
+/// controls are UNKNOWN out of reset, and a bit set in either hands user code
+/// a clock fine enough to time cache hits, the timer the kernel preempts by,
+/// or the counters it measures by.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn close_counters_to_el0() {
+    // SAFETY: `CNTKCTL_EL1` exists on every ARMv8 core; zero only refuses EL0
+    // the generic timer, its counters and its event stream.
     unsafe {
         core::arch::asm!(
-            "msr S3_0_C4_C2_3, {pan}",
-            pan = in(reg) PSTATE_PAN,
-            options(nostack, preserves_flags),
+            "msr cntkctl_el1, xzr",
+            options(nomem, nostack, preserves_flags)
         );
     }
-    true
+    if crate::coreclock::pmu_available() {
+        // SAFETY: the core implements the architected PMU, so the register
+        // exists; clearing it only refuses EL0 the monitors.
+        unsafe {
+            core::arch::asm!(
+                "msr pmuserenr_el0, xzr",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
 }
 
 #[cfg(test)]

@@ -5487,6 +5487,7 @@ dependencies = [
  "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
+ "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-mem",
  "tairix-kernel-syscall",
@@ -5870,6 +5871,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-el2-entry-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+]
+
+[[package]]
 name = "tairix-test-encrypted-root-image"
 version = "0.0.0"
 dependencies = [
@@ -5972,6 +5982,14 @@ name = "tairix-test-fatal-fault-qemu-x86_64"
 version = "0.0.0"
 dependencies = [
  "tairix-arch-x86_64",
+ "tairix-itest-harness",
+]
+
+[[package]]
+name = "tairix-test-fatal-stack-overrun-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
  "tairix-itest-harness",
 ]
 
@@ -6130,6 +6148,7 @@ dependencies = [
  "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
+ "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-mem",
  "tairix-kernel-sched-eevdf",
@@ -6184,6 +6203,7 @@ name = "tairix-test-framebuffer-display-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-arch-aarch64",
  "tairix-caps",
  "tairix-crypto",
  "tairix-display",
@@ -6191,6 +6211,7 @@ dependencies = [
  "tairix-fdt",
  "tairix-fwcfg",
  "tairix-itest-harness",
+ "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-mem",
  "tairix-kernel-sec",
@@ -6325,6 +6346,7 @@ dependencies = [
  "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
+ "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-mem",
  "tairix-kernel-sched-eevdf",
@@ -6535,10 +6557,10 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-arch-aarch64",
- "tairix-arch-api",
  "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
+ "tairix-kernel",
  "tairix-kernel-mem",
  "tairix-log",
 ]
@@ -6606,6 +6628,7 @@ dependencies = [
  "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
+ "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-mem",
  "tairix-kernel-sched-eevdf",
@@ -6795,6 +6818,7 @@ dependencies = [
  "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
+ "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-mem",
  "tairix-kernel-sched-eevdf",
@@ -7220,6 +7244,7 @@ dependencies = [
  "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
+ "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-mem",
  "tairix-kernel-sched-eevdf",
@@ -7288,6 +7313,7 @@ dependencies = [
  "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
+ "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-mem",
  "tairix-kernel-sched-eevdf",
@@ -7692,6 +7718,7 @@ dependencies = [
  "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
+ "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-mem",
  "tairix-kernel-sched-eevdf",
@@ -7746,6 +7773,7 @@ dependencies = [
  "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
+ "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-mem",
  "tairix-kernel-sched-eevdf",
@@ -7828,6 +7856,7 @@ dependencies = [
  "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
+ "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-mem",
  "tairix-kernel-syscall",
@@ -8015,6 +8044,7 @@ dependencies = [
  "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
+ "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-mem",
  "tairix-kernel-sched-eevdf",
@@ -8224,6 +8254,7 @@ dependencies = [
  "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
+ "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-mem",
  "tairix-kernel-sched-eevdf",
@@ -8521,6 +8552,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-user-counters-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+]
+
+[[package]]
+name = "tairix-test-user-counters-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-riscv64",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+]
+
+[[package]]
+name = "tairix-test-user-counters-qemu-x86_64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+]
+
+[[package]]
 name = "tairix-test-users-db-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -8702,6 +8759,7 @@ dependencies = [
  "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
+ "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-mem",
  "tairix-kernel-sched-eevdf",

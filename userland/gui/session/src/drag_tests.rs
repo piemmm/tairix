@@ -17,7 +17,6 @@ use tairix_wm::{Compositor, InputEvent, Point, WindowId};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::desktop::DesktopLift;
 use crate::drag::{
     DesktopCargo, DesktopDrop, DesktopEnd, DesktopItem, DesktopReport, DragEnd, DragStep,
     DragSurface, DropRefusal, ItemsEnd, ItemsOffer, ItemsOfferEnd, ItemsReport, OfferEnd,
@@ -1459,10 +1458,6 @@ fn desktop_icons() -> DesktopCargo {
             item("/Users/ann/Desktop/Pictures", 2),
             item("/Users/ann/Desktop/b.png", 3),
         ],
-        lift: DesktopLift {
-            lead: String::from("a.txt"),
-            grab: (12, 9),
-        },
     }
 }
 
@@ -1665,10 +1660,7 @@ fn icons_brought_back_over_the_desktop_are_put_down_where_let_go() {
     assert_eq!(
         shell.drag_pointer(&mut comp, &RELEASE),
         DragStep::Ended(DragEnd::Desktop(DesktopEnd {
-            dropped: DesktopDrop::Desktop {
-                at: Point::new(700, 500),
-                lift: desktop_icons().lift,
-            },
+            dropped: DesktopDrop::Desktop(Point::new(700, 500)),
             offer: None,
         }))
     );

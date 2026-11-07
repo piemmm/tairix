@@ -799,7 +799,7 @@ impl<M: Gicv3Mmio, C: CpuInterface> Gicv3<M, C> {
 }
 
 /// Bare-metal [`Gicv3Mmio`] over the discovered distributor and any
-/// redistributor named by its identity-mapped address.
+/// redistributor named by its physical address.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub struct VolatileGicv3Mmio;
 
@@ -807,45 +807,66 @@ pub struct VolatileGicv3Mmio;
 impl Gicv3Mmio for VolatileGicv3Mmio {
     fn distributor_read(&self, off: usize) -> u32 {
         // SAFETY: `off` is a register inside the discovered distributor
-        // window, identity-mapped Device memory the kernel alone drives.
-        unsafe { core::ptr::read_volatile((crate::gic::current().0 + off) as *const u32) }
+        // window, Device memory the direct map types as registers, which the
+        // kernel alone drives.
+        unsafe {
+            core::ptr::read_volatile(
+                crate::paging::mmio(crate::gic::current().0 + off) as *const u32
+            )
+        }
     }
     fn distributor_write(&self, off: usize, value: u32) {
         // SAFETY: as `distributor_read`, a 32-bit store.
-        unsafe { core::ptr::write_volatile((crate::gic::current().0 + off) as *mut u32, value) }
+        unsafe {
+            core::ptr::write_volatile(
+                crate::paging::mmio(crate::gic::current().0 + off) as *mut u32,
+                value,
+            );
+        }
     }
     fn distributor_write_u64(&self, off: usize, value: u64) {
         // SAFETY: as `distributor_read`; `GICD_IROUTER<n>` takes a 64-bit
         // store at its 8-byte-aligned offset.
-        unsafe { core::ptr::write_volatile((crate::gic::current().0 + off) as *mut u64, value) }
+        unsafe {
+            core::ptr::write_volatile(
+                crate::paging::mmio(crate::gic::current().0 + off) as *mut u64,
+                value,
+            );
+        }
     }
     fn distributor_write_byte(&self, off: usize, value: u8) {
         // SAFETY: as `distributor_read`; the priority registers are
         // byte-accessible.
-        unsafe { core::ptr::write_volatile((crate::gic::current().0 + off) as *mut u8, value) }
+        unsafe {
+            core::ptr::write_volatile(
+                crate::paging::mmio(crate::gic::current().0 + off) as *mut u8,
+                value,
+            );
+        }
     }
     fn redistributor_read(&self, rd: usize, off: usize) -> u32 {
-        // SAFETY: `rd` is a redistributor inside a discovered region,
-        // identity-mapped Device memory, and `off` lies within its frames.
-        unsafe { core::ptr::read_volatile((rd + off) as *const u32) }
+        // SAFETY: `rd` is a redistributor inside a discovered region, Device
+        // memory the direct map types as registers, and `off` lies within its
+        // frames.
+        unsafe { core::ptr::read_volatile(crate::paging::mmio(rd + off) as *const u32) }
     }
     fn redistributor_read_u64(&self, rd: usize, off: usize) -> u64 {
         // SAFETY: as `redistributor_read`; `GICR_TYPER` takes a 64-bit load.
-        unsafe { core::ptr::read_volatile((rd + off) as *const u64) }
+        unsafe { core::ptr::read_volatile(crate::paging::mmio(rd + off) as *const u64) }
     }
     fn redistributor_write(&self, rd: usize, off: usize, value: u32) {
         // SAFETY: as `redistributor_read`, a 32-bit store.
-        unsafe { core::ptr::write_volatile((rd + off) as *mut u32, value) }
+        unsafe { core::ptr::write_volatile(crate::paging::mmio(rd + off) as *mut u32, value) }
     }
     fn redistributor_write_u64(&self, rd: usize, off: usize, value: u64) {
         // SAFETY: as `redistributor_read`; `GICR_PROPBASER` and
         // `GICR_PENDBASER` take a 64-bit store.
-        unsafe { core::ptr::write_volatile((rd + off) as *mut u64, value) }
+        unsafe { core::ptr::write_volatile(crate::paging::mmio(rd + off) as *mut u64, value) }
     }
     fn redistributor_write_byte(&self, rd: usize, off: usize, value: u8) {
         // SAFETY: as `redistributor_read`; the priority registers are
         // byte-accessible.
-        unsafe { core::ptr::write_volatile((rd + off) as *mut u8, value) }
+        unsafe { core::ptr::write_volatile(crate::paging::mmio(rd + off) as *mut u8, value) }
     }
 }
 

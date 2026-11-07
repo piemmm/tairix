@@ -16,18 +16,19 @@ use tairix_arch_aarch64::paging::{
 };
 use tairix_arch_aarch64::userentry::USER_MODE;
 use tairix_arch_aarch64::{
-    enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, SERIAL_SINK,
+    exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, SERIAL_SINK,
 };
 use tairix_arch_api::BOOT_CPU;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kernel::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
     note_preempt_tick, reschedule_current, spawn_image, spawn_user_kthread, take_preempt_pending,
     RescheduleAction, SpawnMode, SpawnRequest, Yielder,
 };
-use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
+use tairix_kernel_mem::{AddressSpace, Frame, PhysAddr, UserStack};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level};
@@ -35,7 +36,6 @@ use tairix_log::{log, Event, EventId, Level};
 include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
-const IDENTITY_GIB: usize = 2;
 const USER_STACK_BASE: u64 = USER_BIAS + 0x10_0000;
 const USER_STACK_PAGES: u64 = 64;
 const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
@@ -92,7 +92,8 @@ fn next_frame() -> Option<Frame> {
         FRAME_CURSOR.store(FRAME_COUNT, Ordering::SeqCst);
         return None;
     }
-    let base = core::ptr::addr_of!(FRAME_POOL) as u64 + (index * paging::PAGE_SIZE) as u64;
+    let pool = paging::image_phys(core::ptr::addr_of!(FRAME_POOL) as u64);
+    let base = pool + (index * paging::PAGE_SIZE) as u64;
     Some(Frame::containing(PhysAddr::new(base)))
 }
 
@@ -174,17 +175,14 @@ fn build_el0_space(
     image: &LoadImage,
     page_tables: &'static PageTablePool,
 ) -> (u64, tairix_arch_api::UserEntry) {
-    let Some(arch) = ArchAddressSpace::new_identity_gigapages(page_tables, IDENTITY_GIB) else {
+    let Some(arch) = ArchAddressSpace::new_user(page_tables) else {
         qemu_exit::exit_failure(FAIL_POOL);
     };
     let root_phys = arch.root_phys();
-    // SAFETY: the identity map covers the executing kernel, RAM, and virt-board
-    // MMIO before this one-time boot-CPU switch.
-    unsafe { arch.switch() };
+    // SAFETY: activating a root of this port loads `TTBR0_EL1` alone; the
+    // kernel's code, stack and registers stay mapped through `TTBR1_EL1`.
+    unsafe { tairix_arch_api::mmu::AddressSpace::activate(&arch) };
     let mut space = AddressSpace::new(arch);
-    // SAFETY: the boot code identity-maps this window and never unmaps it.
-    let physmap = unsafe { DirectPhysMap::identity((IDENTITY_GIB as u64) << 30) }
-        .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image,
         image_bytes: PROGRAM_RXE,
@@ -210,7 +208,7 @@ fn build_el0_space(
             SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
-            &physmap,
+            &SPAWN_TABLE_PHYSMAP,
             &request,
             next_frame,
         )
@@ -224,8 +222,6 @@ fn build_el0_space(
 #[no_mangle]
 pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     note(TEST_START, "aarch64 syscall continuation test: starting");
-    // SAFETY: this is the boot CPU before code that may use FP/SIMD.
-    unsafe { enable_fp_el1() };
 
     let Ok(fdt) = Fdt::new(DTB_BLOB) else {
         qemu_exit::exit_failure(FAIL_FDT);
@@ -263,8 +259,8 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     let context_switch = ContextSwitchHal::new();
     let parent_pre_resume = move |_stack_top: u64, tag: AddressTag| {
-        // SAFETY: `parent_root` is the retained L1 root built above and the MMU
-        // is enabled; the mapping includes the running kernel window.
+        // SAFETY: `parent_root` is the retained L1 root built above, and the
+        // kernel runs from `TTBR1_EL1`.
         unsafe { activate_user_root(parent_root, tag) };
     };
     let parent = spawn_user_kthread(
@@ -291,8 +287,8 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     }
 
     let child_pre_resume = move |_stack_top: u64, tag: AddressTag| {
-        // SAFETY: `child_root` is the retained L1 root built above and the MMU
-        // is enabled; the mapping includes the running kernel window.
+        // SAFETY: `child_root` is the retained L1 root built above, and the
+        // kernel runs from `TTBR1_EL1`.
         unsafe { activate_user_root(child_root, tag) };
     };
     let child = match spawn_user_kthread(

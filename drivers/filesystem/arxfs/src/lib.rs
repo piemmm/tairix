@@ -50,6 +50,8 @@
 #![deny(missing_docs)]
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -851,6 +853,10 @@ pub struct ARXFS<B: Block> {
     /// allocates nothing and no node buffer reaches the stack; `None` until
     /// the first mutation, so a read-only handle never pays for one.
     tree_edit: Option<btree::TreeEdit>,
+    /// The scratch a cluster is compressed into, kept so a steady-state write
+    /// draws nothing per cluster; empty until the first, so a read-only
+    /// handle never pays for it.
+    cluster_frame: Vec<u8>,
     /// Sealed blocks the open transaction has written but not yet sent to the
     /// device. [`Self::commit`] drains it,
     /// [`Self::rollback`] undoes the running operation's share of it, and
@@ -2568,6 +2574,7 @@ impl<B: Block> ARXFS<B> {
             read_only: false,
             cluster_cache: None,
             tree_edit: None,
+            cluster_frame: Vec::new(),
             dirty: DirtySet::new(block_size),
             bound: None,
             reading: None,
@@ -3536,7 +3543,7 @@ impl<B: Block> ARXFS<B> {
             return Ok(());
         }
         let new_ptr = self.cow_data(old_ptr, ino, bi)?;
-        self.write_data_block(new_ptr, blk)?;
+        self.write_data_block(new_ptr, blk, &hash)?;
         self.extent_assign(inode, ino, bi, new_ptr)?;
         self.index_insert(domain, &hash, new_ptr, ino, bi);
         Ok(())
@@ -3905,10 +3912,14 @@ impl<B: Block> ARXFS<B> {
 
     /// Seal the content slot in `buf[..data_capacity()]` under the content
     /// seal, record the stored-form descriptor and the data-integrity trailer
-    /// (logical hash of the unsealed slot, then a fast physical checksum over
-    /// the at-rest bytes), and write the block to `phys`. An encrypted
-    /// volume's nonce is unique per `(phys, generation)`, so copy-on-write
-    /// never reuses a `(key, nonce)` pair (`crypto` module).
+    /// (`hash`, then a fast physical checksum over the at-rest bytes), and
+    /// write the block to `phys`. An encrypted volume's nonce is unique per
+    /// `(phys, generation)`, so copy-on-write never reuses a `(key, nonce)`
+    /// pair (`crypto` module).
+    ///
+    /// `hash` is the content hash of the unsealed slot, which every caller
+    /// has already taken to look the block up for sharing, so it is not taken
+    /// twice (`docs/src/filesystem/arxfs-spec.md` §6 write path).
     ///
     /// # Errors
     ///
@@ -3918,12 +3929,10 @@ impl<B: Block> ARXFS<B> {
         phys: u64,
         buf: &mut [u8],
         form: StoredForm,
+        hash: &[u8; LOGICAL_HASH_LEN],
     ) -> Result<(), DriverError> {
         let cap = as_usize(self.data_capacity());
         let next_gen = self.generation.wrapping_add(1);
-        // The logical hash names the unsealed content slot, so it is taken
-        // before sealing (`docs/src/filesystem/arxfs-spec.md` §6 write path).
-        let hash = self.protection.content_hash.of(&buf[..cap]);
         let desc_off = self.compression_desc_offset();
         let hash_off = self.logical_hash_offset();
         {
@@ -3936,7 +3945,7 @@ impl<B: Block> ARXFS<B> {
             &mut buf[desc_off..desc_off + COMPRESSION_DESCRIPTOR_LEN],
             form,
         );
-        buf[hash_off..hash_off + LOGICAL_HASH_LEN].copy_from_slice(&hash);
+        buf[hash_off..hash_off + LOGICAL_HASH_LEN].copy_from_slice(hash);
         // The physical checksum covers the at-rest representation: the sealed
         // region, its trailer, the stored-form descriptor, and the logical
         // hash — everything before the checksum.
@@ -3946,8 +3955,8 @@ impl<B: Block> ARXFS<B> {
         self.stage_block(phys, buf)
     }
 
-    /// Store the plaintext in `buf[..data_capacity()]` as a **raw**
-    /// single-block data record at `phys`.
+    /// Store the plaintext in `buf[..data_capacity()]`, whose content hash is
+    /// `hash`, as a **raw** single-block data record at `phys`.
     ///
     /// A single block is always stored raw: inside a fixed 1:1 block a
     /// compressed frame frees nothing (the whole block is written either
@@ -3959,8 +3968,13 @@ impl<B: Block> ARXFS<B> {
     /// # Errors
     ///
     /// [`DriverError::DeviceFault`] on a seal failure or a block write failure.
-    fn write_data_block(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        self.seal_data_block(phys, buf, StoredForm::Raw)
+    fn write_data_block(
+        &mut self,
+        phys: u64,
+        buf: &mut [u8],
+        hash: &[u8; LOGICAL_HASH_LEN],
+    ) -> Result<(), DriverError> {
+        self.seal_data_block(phys, buf, StoredForm::Raw, hash)
     }
 
     /// One bounded step of freeing `inode`'s (number `ino`) mappings at or
@@ -5216,7 +5230,7 @@ impl<B: Block> ARXFS<B> {
         let hash = self.protection.content_hash.of(&buf[..capu]);
         if usize::try_from(self.data_refcount(src_ptr)?).unwrap_or(usize::MAX) >= REVERSE_REF_CAP {
             let new_ptr = self.alloc_block(false)?;
-            self.write_data_block(new_ptr, &mut buf)?;
+            self.write_data_block(new_ptr, &mut buf, &hash)?;
             self.extent_assign(dst, dst_ino, bi, new_ptr)?;
             self.index_insert(domain, &hash, new_ptr, dst_ino, bi);
             return Ok(());

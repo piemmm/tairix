@@ -20,15 +20,12 @@
 //! and serves both display verticals; only the x86 I/O-port transport is
 //! genuinely distinct and stays in its own vertical.
 //!
-//! The client assumes the staging structure and the data buffers live in
-//! identity-mapped RAM, so a buffer's virtual address is the physical
-//! address QEMU's DMA engine reads/writes. Every consumer runs under
-//! that assumption (the aarch64 boot console runs pre-MMU and the
-//! aarch64 `virt` vertical brings up a 2 GiB identity MMU; riscv64
-//! `virt` boots with paging off; the x86_64 boot identity-maps the
-//! bottom 4 GiB). The crate is allocation-free — every buffer is a
-//! bounded stack or caller-supplied slice — so the pre-heap boot
-//! console can drive it.
+//! The staging structure and the data buffers are named to the device by
+//! physical address, which [`DmaAddressRegister::to_physical`] recovers from
+//! a buffer's virtual one: as itself where RAM is identity-mapped (riscv64
+//! `virt` boots with paging off), else as the port's mapping says. The crate
+//! is allocation-free — every buffer is a bounded stack or caller-supplied
+//! slice — so the pre-heap boot console can drive it.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -97,11 +94,10 @@ pub trait DmaAddressRegister {
     ///
     /// Defaults to the identity map, which is correct for host tests and
     /// for any platform whose kernel buffers are identity-mapped. A
-    /// higher-half kernel — whose statics and heap live at virtual
-    /// `KERNEL_VMA_BASE + phys` — overrides this to recover the physical
-    /// address (see the x86_64 `IoPortDma`). Without it a heap buffer's
-    /// high virtual address would be handed to the device verbatim and
-    /// the transfer would fault.
+    /// higher-half kernel overrides this to recover the physical address
+    /// (see the x86_64 `IoPortDma`, and [`MmioDma::mapped`]). Without it a
+    /// buffer's high virtual address would be handed to the device verbatim
+    /// and the transfer would fault.
     fn to_physical(&self, virt: u64) -> u64 {
         virt
     }
@@ -362,6 +358,10 @@ const FW_CFG_MMIO_COMPATIBLE: &str = "qemu,fw-cfg-mmio";
 /// `fw_cfg` MMIO base (the Arm/riscv `virt`-board layout).
 const DMA_REG_OFFSET: u64 = 16;
 
+/// Bytes of a `virt`-board `fw_cfg` device's register block: the data and
+/// selector registers, then the DMA address register.
+pub const MMIO_REGISTERS_LEN: u64 = DMA_REG_OFFSET + 8;
+
 /// MMIO [`DmaAddressRegister`] transport over a `virt`-board `fw_cfg`
 /// device.
 ///
@@ -369,12 +369,18 @@ const DMA_REG_OFFSET: u64 = 16;
 /// `qemu,fw-cfg-mmio` node whose `reg` base carries the 64-bit
 /// big-endian DMA address register at `base + 16` — so this one
 /// transport serves both the riscv64 and aarch64 display verticals
-/// (x86 uses the distinct I/O-port transport). The
-/// base is discovered from the device tree, and the guest runs with the
-/// `fw_cfg` aperture identity-mapped, so the default identity
-/// [`DmaAddressRegister::to_physical`] is correct.
+/// (x86 uses the distinct I/O-port transport). The base is discovered from
+/// the device tree; a port that maps neither the registers nor RAM at their
+/// physical addresses says where they are ([`MmioDma::mapped`]).
 pub struct MmioDma {
     base: u64,
+    registers: u64,
+    to_physical: fn(u64) -> u64,
+}
+
+/// A virtual address that is its own physical one.
+const fn identity(virt: u64) -> u64 {
+    virt
 }
 
 /// Failure modes locating the `fw_cfg` MMIO device.
@@ -404,19 +410,35 @@ impl MmioDma {
             let Ok(base) = reg.read_be_u64(0) else {
                 continue;
             };
-            return Ok(Self { base });
+            return Ok(Self {
+                base,
+                registers: base,
+                to_physical: identity,
+            });
         }
         Err(MmioDmaError::NotFound)
     }
 
-    /// CPU-physical MMIO base of the discovered `fw_cfg` register block.
-    ///
-    /// The identity-map builder needs this fact to type the device's
-    /// gigapage Device, exactly like the UART/GIC bases (the register
-    /// block is written through this base by [`DmaAddressRegister`]).
+    /// CPU-physical MMIO base of the discovered `fw_cfg` register block,
+    /// which a port types as registers like the UART's and the interrupt
+    /// controller's.
     #[must_use]
     pub fn base(&self) -> u64 {
         self.base
+    }
+
+    /// The same device, reached as a port reaches it that maps neither its
+    /// registers nor RAM at their physical addresses: the register block at
+    /// `registers`, and a buffer at the physical address `to_physical` gives
+    /// for its virtual one — `u64::MAX` for one no mapping names, which fails
+    /// the transfer rather than aiming it elsewhere.
+    #[must_use]
+    pub const fn mapped(self, registers: u64, to_physical: fn(u64) -> u64) -> Self {
+        Self {
+            base: self.base,
+            registers,
+            to_physical,
+        }
     }
 }
 
@@ -424,17 +446,24 @@ impl DmaAddressRegister for MmioDma {
     fn write_dma_address(&self, dma_phys: u64) {
         let high = u32::try_from(dma_phys >> 32).unwrap_or(0);
         let low = (dma_phys & 0xFFFF_FFFF) as u32;
-        // SAFETY: `base + DMA_REG_OFFSET` is the `fw_cfg` DMA address
-        // register read from the device tree and identity-mapped on the
-        // `virt` board; both halves are 4-byte aligned. The big-endian
+        // SAFETY: `registers + DMA_REG_OFFSET` is the `fw_cfg` DMA address
+        // register the device tree names, where the port maps it; both
+        // halves are 4-byte aligned. The big-endian
         // register expects the most-significant half first (at `+0`),
         // then the least-significant half (at `+4`), whose write triggers
         // the operation; a little-endian `to_be()` store lands the bytes
         // the big-endian register expects.
         unsafe {
-            ptr::write_volatile((self.base + DMA_REG_OFFSET) as *mut u32, high.to_be());
-            ptr::write_volatile((self.base + DMA_REG_OFFSET + 4) as *mut u32, low.to_be());
+            ptr::write_volatile((self.registers + DMA_REG_OFFSET) as *mut u32, high.to_be());
+            ptr::write_volatile(
+                (self.registers + DMA_REG_OFFSET + 4) as *mut u32,
+                low.to_be(),
+            );
         }
+    }
+
+    fn to_physical(&self, virt: u64) -> u64 {
+        (self.to_physical)(virt)
     }
 }
 

@@ -11,9 +11,9 @@ publish = false
 [lints]
 workspace = true
 
-# Freestanding "enable the MMU, build a frame allocator over a `.bss` pool,
-# install the production page supply into the global allocator, and prove the
-# slab tier's page accounting on real hardware" integration test. It links the
+# Freestanding "build a frame allocator over a `.bss` pool, install the
+# production page supply into the global allocator, and prove the slab tier's
+# page accounting on real hardware" integration test. It links the
 # `tairix-arch-aarch64` port, `kernel/mem`'s production `FramePages` supply,
 # and the `tairix-kalloc` allocator itself; the QEMU-exit shortcut lives in
 # this dedicated bin (never a Cargo feature on a production crate) so feature
@@ -24,12 +24,10 @@ name = "tairix-test-kslab-qemu-aarch64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+# The production direct map the fixture reaches its frames through.
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
-# The Arch HAL MMU surface: the identity space is activated through
-# `tairix_arch_api::mmu::AddressSpace`, so the page the slab writes is reached
-# under a live MMU exactly as it is in production.
-tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 # The frame allocator, the direct physical map, and the production page supply
 # the kernel heap's slab tier draws through — never a second copy of it.
 tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }

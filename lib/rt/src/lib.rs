@@ -4265,9 +4265,11 @@ pub fn call_post(endpoint: u64, request: &[u8], deadline_ns: u64) -> Result<u64,
 /// # Errors
 ///
 /// The raw negative kernel result (`-errno`): the reply is still pending
-/// (`WouldBlock`), the deadline elapsed (`TimedOut` — the ticket is retired), a
-/// cancelled/torn-down/foreign ticket (`NotFound`), or a reply larger than
-/// `reply` (`BufferTooSmall`). The wrapper hides no error, so the caller
+/// (`WouldBlock`), the deadline elapsed (`TimedOut` — the ticket is retired),
+/// the endpoint has gone (`BrokenPipe`, for any ticket — a reap of
+/// [`tairix_abi::CALL_TICKET_NONE`] is how a caller asks), a cancelled or
+/// foreign ticket (`NotFound`), or a reply larger than `reply`
+/// (`BufferTooSmall`). The wrapper hides no error, so the caller
 /// distinguishes "retry" (`WouldBlock`) from "fail closed" (the rest).
 pub fn call_reap(endpoint: u64, ticket: u64, reply: &mut [u8]) -> Result<usize, i64> {
     let reply_ptr = reply.as_mut_ptr() as usize as u64;
@@ -4316,8 +4318,8 @@ pub fn call_cancel(endpoint: u64, ticket: u64) -> i64 {
 /// # Errors
 ///
 /// [`Errno::TimedOut`] once the call's deadline passes unanswered,
-/// [`Errno::NotFound`] for an endpoint that ended or a ticket this process
-/// does not hold, [`Errno::BufferTooSmall`] for a reply longer than `reply`
+/// [`Errno::BrokenPipe`] for an endpoint that ended, [`Errno::NotFound`] for
+/// a ticket this process does not hold, [`Errno::BufferTooSmall`] for a reply longer than `reply`
 /// (the reply is then gone), [`Errno::Busy`] when another of the process's
 /// threads awaits the call already, and [`Errno::Interrupted`] once the
 /// process is being killed.

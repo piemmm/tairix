@@ -29,8 +29,7 @@ use alloc::boxed::Box;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_arch_aarch64::paging::{
-    activate_user_root, configured_identity_gigapages, AddressSpace as ArchAddressSpace,
-    PageTablePool,
+    activate_user_root, AddressSpace as ArchAddressSpace, PageTablePool,
 };
 use tairix_arch_aarch64::userentry::USER_MODE;
 use tairix_arch_api::AddressTag;
@@ -54,9 +53,8 @@ const WINDOWS: spawn_layout::WindowBases = spawn_layout::window_bases(INIT_USER_
 ///
 /// Lives in `.bss` for the lifetime of the kernel image, so `TTBR0_EL1`
 /// keeps pointing at a valid table after [`Aarch64InitSpawn::spawn_init`]
-/// switches to it (monotonic, never freed). The identity
-/// map needs a single root L1 frame; the rest serve the freshly walked user
-/// mappings at [`INIT_USER_BIAS`].
+/// switches to it (monotonic, never freed): the root, and the tables the
+/// user mappings at [`INIT_USER_BIAS`] walk.
 static INIT_PAGE_TABLES: PageTablePool = PageTablePool::new();
 
 /// Set once PID 1 has been spawned so a re-entry cannot re-run the path.
@@ -110,28 +108,13 @@ impl InitSpawn for Aarch64InitSpawn {
             return;
         };
 
-        // Build a stage-1 address space identity-mapping the kernel + MMIO,
-        // then activate it so the user mappings below land in the active
-        // hierarchy. The EL1 vector table and the production `svc` dispatch
-        // callback were installed earlier by the boot path, so the new
-        // program's first `svc` is handled rather than faulting.
-        //
-        // The window length is derived from the Device/RAM gigapage masks
-        // the boot path discovered and installed (`virt`: 2 GiB; 4 GiB for a
-        // board whose UART and GIC live in gigapage 3), never a board
-        // constant: a window truncated short of the MMIO gigapage would
-        // drop the console and interrupt controller from the active map
-        // the instant PID 1's root is switched to — the metal silence after
-        // "boot completed" `plans/PI.md` records. An empty window (no masks
-        // configured) or one reaching the user region at `INIT_USER_BIAS`
-        // fails closed.
-        let identity_gib = configured_identity_gigapages();
-        let identity_limit = (identity_gib as u64) << 30;
-        if identity_gib == 0 || identity_limit > INIT_USER_BIAS {
-            return;
-        }
-        let Some(arch) = ArchAddressSpace::new_identity_gigapages(&INIT_PAGE_TABLES, identity_gib)
-        else {
+        // Build PID 1's empty root, which carries nothing of the kernel —
+        // that lives in `TTBR1_EL1` — then activate it so the user mappings
+        // below land in the active hierarchy. The EL1 vector table and the
+        // production `svc` dispatch callback were installed earlier by the
+        // boot path, so the new program's first `svc` is handled rather than
+        // faulting.
+        let Some(arch) = ArchAddressSpace::new_user(&INIT_PAGE_TABLES) else {
             return;
         };
         // Capture PID 1's stage-1 root before the arch space is moved into
@@ -140,14 +123,9 @@ impl InitSpawn for Aarch64InitSpawn {
         // SP2). It is a plain `u64`, so the boxed hook stays `Send`.
         let init_root_phys = arch.root_phys();
 
-        // SAFETY: the identity map covers the kernel's current `pc`, `sp`,
-        // the leaked kernel state, the boot heap, and the device MMIO —
-        // the window spans every gigapage the configured Device/RAM masks
-        // name, and those masks were derived from the kernel extent and
-        // the discovered RAM/MMIO — so enabling it does not move the
-        // ground under the running code — exactly `AddressSpace::switch`'s
-        // contract. Called once on the boot CPU.
-        unsafe { arch.switch() };
+        // SAFETY: the kernel runs from `TTBR1_EL1`, which loading a process
+        // root leaves untouched. Called once on the boot CPU.
+        unsafe { tairix_arch_api::mmu::AddressSpace::activate(&arch) };
 
         // Fill PID 1's segment pages through the physmap whose cache
         // maintenance is *real*: on the Cortex-A72 the I-cache is not coherent
@@ -216,10 +194,9 @@ impl InitSpawn for Aarch64InitSpawn {
             // it to repoint its per-CPU syscall entry stack); aarch64 reuses
             // `SP_EL1` implicitly and so ignores it (`plans/PI.md` §X).
             move |_stack_top: u64, _tls_base: u64, tag: AddressTag| {
-                // SAFETY: the MMU is already enabled and `init_root_phys` is the
-                // L1 root of PID 1's space, which identity-maps the low kernel
-                // window the running kernel executes from — exactly
-                // `activate_user_root`'s contract.
+                // SAFETY: the kernel runs from `TTBR1_EL1` and `init_root_phys`
+                // is the L1 root of PID 1's space, live while PID 1 is —
+                // exactly `activate_user_root`'s contract.
                 unsafe { activate_user_root(init_root_phys, tag) };
             },
             &USER_MODE,

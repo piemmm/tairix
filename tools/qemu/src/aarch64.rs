@@ -57,29 +57,28 @@ pub const MACHINE: &str = "virt";
 /// vertical dumping the board's device tree gives QEMU too, so the tree it
 /// embeds describes the board the run starts.
 #[must_use]
-pub fn machine(board: Board) -> (&'static str, &'static [&'static str]) {
-    let gicv3 = board.interrupts == InterruptControllers::Gicv3;
-    match board.translation {
+pub fn machine(board: Board) -> (String, &'static [&'static str]) {
+    let mut machine = match board.translation {
         // From `virt-9.2` the board builds its unit nested whatever
         // `arm-smmuv3.stage` says; `virt-9.1` is the newest whose unit
         // offers stage 1 alone.
-        DmaTranslation::Smmuv3Stage1 if gicv3 => ("virt-9.1,iommu=smmuv3,gic-version=3", &[]),
-        DmaTranslation::Smmuv3Stage1 => ("virt-9.1,iommu=smmuv3", &[]),
-        DmaTranslation::Smmuv3Stage2 if gicv3 => ("virt,iommu=smmuv3,gic-version=3", &[]),
-        DmaTranslation::Smmuv3Stage2 => ("virt,iommu=smmuv3", &[]),
+        DmaTranslation::Smmuv3Stage1 => "virt-9.1,iommu=smmuv3",
+        DmaTranslation::Smmuv3Stage2 => "virt,iommu=smmuv3",
         DmaTranslation::Absent
         | DmaTranslation::VirtioIommu
         | DmaTranslation::Vtd
         | DmaTranslation::AmdVi
         | DmaTranslation::RiscvStage1
-        | DmaTranslation::RiscvStage2 => {
-            if gicv3 {
-                ("virt,gic-version=3", &[])
-            } else {
-                (MACHINE, &[])
-            }
-        }
+        | DmaTranslation::RiscvStage2 => MACHINE,
     }
+    .to_owned();
+    if board.interrupts == InterruptControllers::Gicv3 {
+        machine.push_str(",gic-version=3");
+    }
+    if board.virtualization {
+        machine.push_str(",virtualization=on");
+    }
+    (machine, &[])
 }
 
 /// Default CPU model, unless the spec names another ([`Spec::with_cpu`]): the
@@ -300,6 +299,7 @@ mod tests {
             devices: AttachedDevices::NONE,
             dma_translation: crate::DmaTranslation::Absent,
             interrupts: crate::InterruptControllers::Default,
+            virtualization: false,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             optical_disc: None,
@@ -818,7 +818,28 @@ mod tests {
                 "{translation:?}"
             );
         }
-        assert_eq!(machine(Board::default()), (MACHINE, &[][..]));
+        assert_eq!(machine(Board::default()), (MACHINE.to_owned(), &[][..]));
+    }
+
+    /// A board with EL2 says so behind whatever else its machine carries, so a
+    /// tree dumped from it describes the board the run enters at EL2.
+    #[test]
+    fn a_board_with_el2_enters_the_kernel_there() {
+        let board = Board::translated(DmaTranslation::Smmuv3Stage2)
+            .with_interrupts(InterruptControllers::Gicv3)
+            .with_virtualization();
+        assert_eq!(
+            machine(board).0,
+            "virt,iommu=smmuv3,gic-version=3,virtualization=on"
+        );
+        let argv = render(&build_argv(
+            &fixture_spec(1).with_virtualization(),
+            Path::new("/k"),
+        ));
+        let m = argv.iter().position(|a| a == "-M").expect("argv names -M");
+        assert_eq!(argv[m + 1], "virt,virtualization=on");
+        let plain = render(&build_argv(&fixture_spec(1), Path::new("/k")));
+        assert!(!plain.iter().any(|a| a.contains("virtualization")));
     }
 
     #[test]

@@ -16,7 +16,8 @@ use tairix_arch_aarch64::fdt::gic_device_intid;
 use tairix_arch_aarch64::gic::{self, ActiveGic, GicController, MAX_INTID};
 use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
 use tairix_arch_aarch64::{
-    exceptions, handle_panic_via_serial, qemu_exit, Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
+    exceptions, handle_panic_via_serial, paging, qemu_exit, Aarch64Arch, Aarch64ArchStorage,
+    SERIAL_SINK,
 };
 use tairix_arch_api::BOOT_CPU;
 use tairix_fdt::Fdt;
@@ -152,8 +153,9 @@ fn irq_kthread_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
 /// Read the PL031 `RTCDR` count.
 fn rtc_read_count() -> u32 {
     // SAFETY: `PL031_BASE + RTCDR` is the fixed `virt`-board RTC data
-    // register; a 32-bit read has no side effects.
-    unsafe { core::ptr::read_volatile((PL031_BASE + RTCDR) as *const u32) }
+    // register, in the gigabyte the port entry types as registers; a 32-bit
+    // read has no side effects.
+    unsafe { core::ptr::read_volatile(paging::mmio(PL031_BASE + RTCDR) as *const u32) }
 }
 
 /// Arm the PL031 match interrupt to fire one tick (≈ 1 s) from now and
@@ -164,8 +166,8 @@ fn rtc_arm() {
     // interrupt-mask registers; the writes program a one-shot match
     // interrupt and touch no Rust-managed memory.
     unsafe {
-        core::ptr::write_volatile((PL031_BASE + RTCMR) as *mut u32, next);
-        core::ptr::write_volatile((PL031_BASE + RTCIMSC) as *mut u32, 1);
+        core::ptr::write_volatile(paging::mmio(PL031_BASE + RTCMR) as *mut u32, next);
+        core::ptr::write_volatile(paging::mmio(PL031_BASE + RTCIMSC) as *mut u32, 1);
     }
 }
 
@@ -174,7 +176,7 @@ fn rtc_clear() {
     // SAFETY: `RTCICR` is the fixed `virt`-board RTC interrupt-clear
     // register; writing bit 0 clears the pending interrupt.
     unsafe {
-        core::ptr::write_volatile((PL031_BASE + RTCICR) as *mut u32, 1);
+        core::ptr::write_volatile(paging::mmio(PL031_BASE + RTCICR) as *mut u32, 1);
     }
 }
 
@@ -182,7 +184,7 @@ fn rtc_clear() {
 /// is unmasked). Reads `GICD_ISENABLER` directly — the evidence path for
 /// the mask-before-wake assertion.
 fn gic_line_enabled(intid: u32) -> bool {
-    let off = gic::current().0 + gic::isenabler_offset(intid);
+    let off = paging::mmio(gic::current().0 + gic::isenabler_offset(intid));
     // SAFETY: `off` is a distributor register within the discovered GICv2
     // distributor window (the `virt` default here); a 32-bit read has no
     // side effects.

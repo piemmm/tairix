@@ -189,8 +189,7 @@ pub struct DiscoveredGpio {
 
 /// Locate the BCM2711 GPIO controller in `fdt`.
 ///
-/// Early-returns at the matched node, so the walk is safe MMU-off like
-/// the console discovery. Returns `None` on a tree without the
+/// Early-returns at the matched node. Returns `None` on a tree without the
 /// controller (QEMU `virt`) — the caller then skips the pin mux, which
 /// only BCM2711 boards need.
 #[must_use]
@@ -218,14 +217,18 @@ pub fn find_gpio(fdt: &Fdt<'_>) -> Option<DiscoveredGpio> {
 /// untouched rather than guessing.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn init_from_fdt(fdt: &Fdt<'_>) {
-    let (base, model) = console::current();
+    let Some((base, model)) = console::registers() else {
+        return;
+    };
     if model != console::ConsoleModel::Pl011 {
         return;
     }
     if let Some(gpio) = find_gpio(fdt) {
-        if let Ok(gpio_base) = usize::try_from(gpio.base) {
-            // SAFETY: `gpio_base` is the firmware tree's bus-translated
-            // BCM2711 GPIO block, identity-addressed MMU-off at boot;
+        if let Some(gpio_base) = crate::paging::registers_virt(gpio.base, GPIO_REGS_LEN as u64)
+            .and_then(|virt| usize::try_from(virt).ok())
+        {
+            // SAFETY: `gpio_base` maps the firmware tree's bus-translated
+            // BCM2711 GPIO block, which the direct map types as registers;
             // `GPFSEL1` and `GPIO_PUP_PDN_CNTRL_REG0` lie inside the
             // datasheet-sized block ([`GPIO_REGS_LEN`]). Read-modify-
             // write through the pure helpers touches only GPIO 14/15's
@@ -250,8 +253,8 @@ fn apply_pl011_init(base: usize) {
     let Some((ibrd, fbrd)) = pl011_divisors(UART_CLOCK_HZ, CONSOLE_BAUD) else {
         return;
     };
-    // SAFETY: `base` is the discovered (or default `virt`) PL011 block,
-    // identity-addressed MMU-off at boot; every offset written is a
+    // SAFETY: `base` maps the discovered (or default `virt`) PL011 block
+    // (`console::registers`); every offset written is a
     // PL011 register inside the device's `0x200` window (ARM DDI 0183). The TRM-ordered sequence — disable, drain, reprogram,
     // re-enable — runs once, single-threaded, on the boot CPU before
     // the first console byte, so no concurrent transmit is cut short.

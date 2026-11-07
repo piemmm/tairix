@@ -4,10 +4,9 @@
 //! On the Raspberry Pi the display pipeline belongs to the `VideoCore`
 //! firmware, so the surface comes from its mailbox property channel
 //! (`tairix_vcmailbox`); on QEMU's `virt` board, from `ramfb` over `fw_cfg`
-//! when QEMU was started with `-device ramfb`. Discovery runs **before the
-//! MMU is enabled**, with the data caches off, so the firmware exchange is
-//! coherent without maintenance; afterwards every console write is cleaned
-//! to the point of coherency so a scan-out reading SDRAM sees it.
+//! when QEMU was started with `-device ramfb`. The firmware exchange cleans
+//! and invalidates its buffer around each request, and every console write
+//! is cleaned to the point of coherency so a scan-out reading SDRAM sees it.
 //!
 //! No mailbox and no ramfb, a detached display, or any malformed firmware
 //! answer leaves no surface to publish, and the UART keeps the console.
@@ -159,12 +158,10 @@ pub(crate) fn surface_page_range(fb_base: usize, bytes: usize) -> Option<(u64, u
 /// What the boot audit line records about the video console bring-up.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct DiscoveredVideo {
-    /// CPU-physical base of the mailbox doorbell the exchange used —
-    /// an MMIO fact the identity map's Device gigapage mask must cover.
+    /// CPU-physical base of the mailbox doorbell the exchange used.
     pub doorbell_base: u64,
-    /// CPU-physical base of the firmware-allocated scan-out surface —
-    /// RAM the renderer writes, so the identity map's RAM gigapage mask
-    /// must cover it.
+    /// CPU-physical base of the scan-out surface: RAM the renderer writes,
+    /// through the direct map.
     pub fb_base: u64,
     /// Byte length of the firmware-allocated scan-out surface.
     pub fb_len_bytes: u64,
@@ -203,16 +200,16 @@ impl DiscoveredVideo {
         }
     }
 
-    /// Where the boot CPU reaches the surface with its MMU off: identity.
+    /// Where the kernel reaches the surface: through the direct map, or
+    /// `None` while it does not cover it as RAM.
     #[must_use]
-    pub fn identity_base(&self) -> Option<NonNull<u32>> {
-        let base = usize::try_from(self.fb_base).ok()?;
-        NonNull::new(core::ptr::with_exposed_provenance_mut(base))
+    pub fn base(&self) -> Option<NonNull<u32>> {
+        <FramebufferPort as ConsolePort>::direct_map(self.fb_base, self.fb_len_bytes)
     }
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub use metal::configure;
+pub use metal::{configure, fw_cfg, register_windows};
 
 /// The freestanding half: the firmware exchange and the boot surface.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -220,7 +217,7 @@ mod metal {
     use core::cell::UnsafeCell;
 
     use tairix_fdt::Fdt;
-    use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
+    use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888, MMIO_REGISTERS_LEN};
 
     use crate::firmware::DiscoveredMailbox;
 
@@ -230,9 +227,8 @@ mod metal {
     /// transport to the `VideoCore` firmware, where the tree carries a mailbox
     /// (the Pi), else the QEMU `virt` `fw_cfg` / `ramfb` fallback in `fdt`.
     ///
-    /// **Boot-CPU, pre-MMU only**: with the data caches off the firmware
-    /// exchange is coherent. `None` on any failure: the UART keeps the
-    /// console.
+    /// On the boot CPU, before the console has a surface. `None` on any
+    /// failure: the UART keeps the console.
     #[must_use]
     pub fn configure(
         fdt: &Fdt<'_>,
@@ -244,17 +240,44 @@ mod metal {
         }
     }
 
+    /// Hand `window` the register window the boot display's bring-up
+    /// reaches on the board `fdt` describes: the firmware mailbox's doorbell,
+    /// else the `fw_cfg` device a QEMU `virt` board's `ramfb` is programmed
+    /// through.
+    pub fn register_windows(fdt: &Fdt<'_>, mut window: impl FnMut(u64, u64)) {
+        if let Some(mailbox) = crate::firmware::find_mailbox(fdt) {
+            window(mailbox.base, mailbox.len);
+        } else if let Ok(dma) = MmioDma::from_dtb(fdt) {
+            window(dma.base(), MMIO_REGISTERS_LEN);
+        }
+    }
+
+    /// The `fw_cfg` device `fdt` names, as this port reaches it: its
+    /// registers through the direct map, and a buffer by the physical address
+    /// its translation gives.
+    #[must_use]
+    pub fn fw_cfg(fdt: &Fdt<'_>) -> Option<MmioDma> {
+        let dma = MmioDma::from_dtb(fdt).ok()?;
+        let registers = crate::paging::registers_virt(dma.base(), MMIO_REGISTERS_LEN)?;
+        Some(dma.mapped(registers, dma_phys))
+    }
+
+    /// The physical address of a kernel buffer at `virt`, or `u64::MAX`,
+    /// which fails the transfer, for an address nothing maps.
+    fn dma_phys(virt: u64) -> u64 {
+        crate::paging::kernel_phys(virt).unwrap_or(u64::MAX)
+    }
+
     /// The Pi's mailbox-allocated surface.
     fn configure_mailbox(
         mailbox: DiscoveredMailbox,
         transport: &mut dyn MailboxTransport,
     ) -> Option<DiscoveredVideo> {
         let configured = bring_up(transport)?;
-        let fb_base = usize::try_from(configured.phys_base).ok()?;
-        // The firmware allocated `[fb_base, fb_base + len_bytes)` page-aligned
-        // inside the validated `VideoCore` SDRAM aperture.
+        // The firmware allocated `[phys_base, phys_base + len_bytes)`
+        // page-aligned inside the validated `VideoCore` SDRAM aperture.
         discovered(
-            fb_base,
+            configured.phys_base,
             u64::from(configured.len_bytes),
             configured.geometry,
             mailbox.base,
@@ -283,14 +306,14 @@ mod metal {
     /// The QEMU `virt` ramfb surface over `fw_cfg`, only if the `etc/ramfb`
     /// item exists.
     fn configure_ramfb(fdt: &Fdt<'_>) -> Option<DiscoveredVideo> {
-        let dma = MmioDma::from_dtb(fdt).ok()?;
+        let dma = fw_cfg(fdt)?;
         let doorbell_base = dma.base();
         let geometry = ramfb_geometry()?;
-        let fb_base = RAMFB_SURFACE.0.get().addr();
+        let fb_base = crate::paging::image_phys(RAMFB_SURFACE.0.get().addr() as u64);
         let fb_len_bytes = (RAMFB_PIXEL_COUNT * 4) as u64;
         FwCfg::new(dma)
             .program_ramfb(&RamfbConfig {
-                phys_base: fb_base as u64,
+                phys_base: fb_base,
                 drm_format: DRM_FORMAT_XRGB8888,
                 flags: 0,
                 width: geometry.width_px,
@@ -313,11 +336,11 @@ mod metal {
     /// The surface both bring-up paths end with, once its extent is proved to
     /// hold the mode; the kernel publishes it to its console.
     ///
-    /// The caller guarantees `[fb_base, fb_base + fb_len_bytes)` is
-    /// identity-addressed RAM it exclusively owns for scan-out — the kernel's
-    /// own when `kernel_owned`, else the firmware's.
+    /// The caller guarantees `[fb_base, fb_base + fb_len_bytes)` is RAM it
+    /// exclusively owns for scan-out — the kernel's own when `kernel_owned`,
+    /// else the firmware's.
     fn discovered(
-        fb_base: usize,
+        fb_base: u64,
         fb_len_bytes: u64,
         geometry: Geometry,
         doorbell_base: u64,
@@ -331,7 +354,7 @@ mod metal {
         }
         Some(DiscoveredVideo {
             doorbell_base,
-            fb_base: fb_base as u64,
+            fb_base,
             fb_len_bytes,
             width_px: geometry.width_px,
             height_px: geometry.height_px,
