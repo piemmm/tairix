@@ -13,7 +13,7 @@ use tairix_abi::font_ipc::{FamilyKey, FontStretch, FontStyle, FontWeight, FONT_F
 use tairix_hash::BuildSipHash13;
 use tairix_reclaim::{
     CacheBudget, CacheCandidate, CachedBytes, InvalidationSource, RebuildCost, ReclaimCache,
-    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity, UI_CACHE_RESERVE_BYTES,
+    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
 };
 
 use crate::client::{OwnedContour, OwnedOutline, OwnedSegment};
@@ -54,13 +54,34 @@ impl OutlineKey {
     }
 }
 
-/// One retained outline: the glyph as the service answered it.
+/// One retained outline: the glyph as the service answered it, and the
+/// metrics of the face it was answered from, so a run the cache answers
+/// whole states them without asking the service.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct CachedOutline(pub OwnedOutline);
+pub struct CachedOutline {
+    /// The glyph.
+    pub outline: OwnedOutline,
+    /// Its face's metrics, as the batch it came in stated them.
+    pub face: FaceMetrics,
+}
+
+/// The metrics of the face a batch of outlines is drawn from, in its own
+/// font units.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct FaceMetrics {
+    /// The em.
+    pub units_per_em: u32,
+    /// The ascender.
+    pub ascent: i32,
+    /// The descender's magnitude.
+    pub descent: i32,
+    /// The extra leading.
+    pub line_gap: i32,
+}
 
 impl CachedBytes for CachedOutline {
     fn payload_bytes(&self) -> usize {
-        self.0
+        self.outline
             .contours
             .iter()
             .map(|contour| {
@@ -76,7 +97,7 @@ impl CachedBytes for CachedOutline {
         // released entry is scrubbed rather than left readable in reused heap.
         // Overwritten in place: clearing the vectors would free the points
         // without touching them.
-        for contour in &mut self.0.contours {
+        for contour in &mut self.outline.contours {
             // The widest variant, so the blank covers every byte a segment
             // holds: a narrower one leaves a quadratic's end point unwritten.
             let blank = OwnedSegment::Quadratic {
@@ -128,8 +149,7 @@ pub const fn outline_cache_candidate(owner: ReclaimOwner) -> CacheCandidate {
 /// run is then fetched afresh, correct and merely slower.
 #[must_use]
 pub fn outline_cache_budget(total_ram_bytes: u64) -> CacheBudget {
-    CacheBudget::from_ceiling(crate::glyph_cache::glyph_cache_ceiling(total_ram_bytes))
-        .with_reserved_floor(UI_CACHE_RESERVE_BYTES)
+    crate::glyph_cache::glyph_cache_budget(total_ram_bytes)
 }
 
 #[cfg(test)]
@@ -149,31 +169,37 @@ mod tests {
 
     #[test]
     fn the_payload_counts_every_segment_it_holds() {
-        let entry = CachedOutline(OwnedOutline {
-            contours: vec![OwnedContour {
-                start: (0.0, 0.0),
-                segments: vec![OwnedSegment::Line { to: (1.0, 1.0) }; 4],
-            }],
-            ..OwnedOutline::default()
-        });
+        let entry = CachedOutline {
+            outline: OwnedOutline {
+                contours: vec![OwnedContour {
+                    start: (0.0, 0.0),
+                    segments: vec![OwnedSegment::Line { to: (1.0, 1.0) }; 4],
+                }],
+                ..OwnedOutline::default()
+            },
+            face: FaceMetrics::default(),
+        };
         assert!(entry.payload_bytes() >= 4 * core::mem::size_of::<OwnedSegment>());
     }
 
     #[test]
     fn wiping_overwrites_every_retained_point_in_place() {
-        let mut entry = CachedOutline(OwnedOutline {
-            contours: vec![OwnedContour {
-                start: (3.0, 4.0),
-                segments: vec![
-                    OwnedSegment::Line { to: (1.0, 1.0) },
-                    OwnedSegment::Quadratic {
-                        control: (5.0, 6.0),
-                        to: (7.0, 8.0),
-                    },
-                ],
-            }],
-            ..OwnedOutline::default()
-        });
+        let mut entry = CachedOutline {
+            outline: OwnedOutline {
+                contours: vec![OwnedContour {
+                    start: (3.0, 4.0),
+                    segments: vec![
+                        OwnedSegment::Line { to: (1.0, 1.0) },
+                        OwnedSegment::Quadratic {
+                            control: (5.0, 6.0),
+                            to: (7.0, 8.0),
+                        },
+                    ],
+                }],
+                ..OwnedOutline::default()
+            },
+            face: FaceMetrics::default(),
+        };
         let charged = entry.payload_bytes();
         entry.wipe();
         assert_eq!(entry.payload_bytes(), charged, "the memory is the same");
@@ -181,7 +207,7 @@ mod tests {
             control: (0.0, 0.0),
             to: (0.0, 0.0),
         };
-        for contour in &entry.0.contours {
+        for contour in &entry.outline.contours {
             assert_eq!(contour.start, (0.0, 0.0));
             assert!(contour.segments.iter().all(|segment| *segment == blank));
         }

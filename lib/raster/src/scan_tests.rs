@@ -7,11 +7,11 @@ use alloc::vec::Vec;
 use tairix_util::mathf;
 
 use super::FillRule;
-use crate::affine::Affine;
 use crate::artwork::{Group, Layer, Node};
 use crate::color::{Color, Pixel};
 use crate::paint::{Gradient, GradientKind, GradientStop, Paint, Pattern, SpreadMethod, TileFold};
 use crate::surface::Surface;
+use tairix_bezier::Affine;
 
 const RED: Color = Color::rgb(255, 0, 0);
 const BLACK: Color = Color::rgb(0, 0, 0);

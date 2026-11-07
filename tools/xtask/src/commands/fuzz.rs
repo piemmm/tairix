@@ -468,6 +468,18 @@ pub const TARGETS: &[Target] = &[
         description: "SVG asset decode (untrusted /System/Graphics image bytes)",
     },
     Target {
+        package: "tairix-bezier",
+        test: "fuzz_bezier",
+        description:
+            "plane geometry over drawing-document paths (boolean operations, stroke outlines, dashes, offsets, fitting, intersection)",
+    },
+    Target {
+        package: "tairix-drawing",
+        test: "fuzz_drawing",
+        description:
+            "the drawing's SVG reader over opened and pasted documents, and the writer reading back what it wrote",
+    },
+    Target {
         package: "tairix-xml",
         test: "fuzz_xml",
         description: "XML element scan (SVG documents, OpenRaster layer stacks)",

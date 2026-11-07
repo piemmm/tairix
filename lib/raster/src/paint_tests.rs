@@ -6,8 +6,8 @@ use super::{
     Gradient, GradientKind, GradientStop, Pattern, SpreadMethod, TileFold, MAX_TILE_EXTENT,
     MAX_TILE_FOLD,
 };
-use crate::affine::Affine;
 use crate::color::Color;
+use tairix_bezier::Affine;
 
 const BLACK: Color = Color::rgb(0, 0, 0);
 const WHITE: Color = Color::rgb(255, 255, 255);

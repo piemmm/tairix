@@ -456,8 +456,13 @@ chosen after a re-declaration is resolved against the menu the user saw.
   worth of rows (`APP_MENU_MAX_TOTAL_ROWS`). Its Layers and Sprites menus
   carry entry fields — the layer or sprite to go to, a sprite's new name —
   answered as `MenuOutcome::Entered` and read back with `take_menu_text`.
-  Both editors build their menus with `tairix_window::menu::MenuBuilder`.
   See [Paint](./paint.md).
+- **Draw** (`userland/apps/draw`) — the same shape again: File, Page, Edit,
+  Object, Path, Layer, View and Tools as submenus, each command's row drawn
+  from the one statement of it the keyboard's chords are found in.
+  See [Draw](./draw.md).
+
+The editors build their menus with `tairix_window::menu::MenuBuilder`.
 
 None keeps a menu shell, and none draws a menu pixel.
 

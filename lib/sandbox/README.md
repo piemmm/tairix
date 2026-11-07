@@ -184,6 +184,11 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   printable UTF-8, or none of it is believed — the one report reply the decode
   service's `file_report` shares. `TextEdit.app`'s Data display is the
   consumer.
+- **The drawing read** (`drawedit`, over the same upload): `read_drawing`
+  rebuilds a document's drawing from the records a `DrawEditService` worker
+  sends a batch at a time, every value checked by the drawing's own
+  constructors and every reference, count and the tree's shape held to what
+  was declared, or none of it is believed. `Draw.app` is the consumer.
 - **The page cache** (`paged`): what a long-lived decode worker reads its
   owner's file through — a bounded ask at a time, its pages held in a cache
   keyed by a seed the owner draws, so the worker never holds the file and a

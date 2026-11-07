@@ -89,8 +89,21 @@ type AppOwnOf<A> = <AppViewOf<A> as AppView>::Own;
 /// The wait-set token of the queue's answer wake.
 const QUEUE_TOKEN: u64 = app::FIRST_APP_TOKEN;
 
+/// The wait-set token of the font worker's answer wake.
+const FONT_TOKEN: u64 = app::FIRST_APP_TOKEN + 1;
+
 /// The lowest token an application's own worker may be watched under.
-pub const APP_TOKEN: u64 = app::FIRST_APP_TOKEN + 1;
+pub const APP_TOKEN: u64 = app::FIRST_APP_TOKEN + 2;
+
+/// The one thread that waits on the font service: the windows draw without
+/// waiting, and it fetches what they drew provisionally.
+type FontWorker = Worker<(), (), bool>;
+
+/// The font worker's job: fetch what the windows drew provisionally,
+/// answering whether anything landed.
+fn fetch_fonts(_: &mut (), _: &mut ()) -> bool {
+    tairix_font::fetch_deferred()
+}
 
 /// The icon-bar row that opens a new window, numbered past the convention's
 /// own so the two never collide.
@@ -348,6 +361,12 @@ pub trait DocumentApp: Sized {
     /// What window `window`'s own work on the queue answered once the
     /// document that asked had gone: by default it is let go.
     fn orphaned(_host: &mut Host<Self>, _window: u64, _answer: Self::Answer) {}
+
+    /// The user chose where the window at `index` writes a copy of its
+    /// document: `file`, called `name`. The application writes it — on its
+    /// queue, never on the event loop — leaving the document's own file and
+    /// name as they are. An application offering no copies never sees this.
+    fn copy_chosen(_host: &mut Host<Self>, _index: usize, _file: Arc<Handle>, _name: String) {}
 
     /// Window `index`'s engine was driven, and what it asked is about to be
     /// carried out: what it changed is handed to the other windows of its
@@ -1138,6 +1157,10 @@ pub struct Host<A: DocumentApp> {
     /// The application's own state.
     pub app: A,
     queue: Arc<Queue<A>>,
+    fonts: Arc<FontWorker>,
+    /// What deferred font fetches had brought when the windows were last
+    /// laid out.
+    text_drawn: u64,
     /// A job ran on the loop for want of a worker, so its answer is already
     /// waiting to be taken in.
     answered: bool,
@@ -1901,6 +1924,7 @@ impl<A: DocumentApp> Host<A> {
             Request::SaveAs => self.ask_how(index, false),
             Request::SaveWhere { then_close } => self.ask_where(index, then_close),
             Request::Open => self.ask_pick(index, &PickPurpose::Open, PickFor::Open),
+            Request::SaveCopy => self.ask_copy_where(index),
             Request::Close => self.close_window(index),
             Request::AskToClose => self.ask_to_close(index),
             Request::Menu { kind, anchor } => self.open_menu(index, kind, anchor),
@@ -2069,6 +2093,30 @@ impl<A: DocumentApp> Host<A> {
         );
     }
 
+    /// Ask the session's picker where window `index` writes a copy, in the
+    /// formats its view offers, or say why it writes none.
+    fn ask_copy_where(&mut self, index: usize) {
+        let window = &self.windows[index];
+        let formats = match window.view.copy_formats() {
+            Ok(formats) => formats,
+            Err(why) => {
+                let headline = refusal_headline(window.view.name(), "copied");
+                self.alert(Some(index), &headline, &why);
+                return;
+            }
+        };
+        let offered = offered_name(stem(window.view.name()), window.view.copy_extension());
+        let Ok(suggested) = DocumentName::new(&offered).or_else(|_| DocumentName::new(UNTITLED))
+        else {
+            return;
+        };
+        self.ask_pick(
+            index,
+            &PickPurpose::Save { suggested, formats },
+            PickFor::Copy,
+        );
+    }
+
     /// Ask the session's picker for `purpose` on window `index`.
     fn ask_pick(&mut self, index: usize, purpose: &PickPurpose, pick: PickFor) {
         let window = &mut self.windows[index];
@@ -2126,6 +2174,10 @@ impl<A: DocumentApp> Host<A> {
             PickFor::SaveAs { then_close } => {
                 let name = name.unwrap_or_else(|| String::from(self.windows[index].view.name()));
                 self.save(index, Some((Arc::new(file), name)), then_close);
+            }
+            PickFor::Copy => {
+                let name = name.unwrap_or_else(|| String::from(UNTITLED));
+                A::copy_chosen(self, index, Arc::new(file), name);
             }
         }
     }
@@ -3130,19 +3182,24 @@ impl<A: DocumentApp> Host<A> {
     /// Adopt a new desktop state: every window restyled at its density.
     fn adopt_desktop(&mut self) {
         match app::adopt_desktop(&mut self.desktop, &mut self.themes) {
-            Ok(true) => {
-                let theme = self.themes.active();
-                let scale = self.desktop.scale();
-                self.faces = A::faces(theme, scale);
-                for window in &mut self.windows {
-                    window.relayout(&mut self.client, theme, scale, self.faces);
-                }
-                for window in &mut self.app_windows {
-                    window.lay_out(&mut self.client, (theme, scale, self.faces), true);
-                }
-            }
+            Ok(true) => self.lay_out_all(),
             Ok(false) => {}
             Err(err) => self.report(format!("desktop change refused: {err}")),
+        }
+    }
+
+    /// Lay every window out again in the active look, its faces made anew:
+    /// after a change of look, or once glyphs drawn provisionally have
+    /// arrived, so text is measured and drawn with them.
+    fn lay_out_all(&mut self) {
+        let theme = self.themes.active();
+        let scale = self.desktop.scale();
+        self.faces = A::faces(theme, scale);
+        for window in &mut self.windows {
+            window.relayout(&mut self.client, theme, scale, self.faces);
+        }
+        for window in &mut self.app_windows {
+            window.lay_out(&mut self.client, (theme, scale, self.faces), true);
         }
     }
 
@@ -3369,6 +3426,7 @@ struct Park<'a> {
     mailbox: EventMailbox,
     set: u64,
     queue: &'a dyn AnswerWake,
+    fonts: &'a dyn AnswerWake,
     wakes: &'a [(u64, Arc<dyn AnswerWake>)],
     signals: &'a Signals,
 }
@@ -3387,6 +3445,10 @@ impl EventSource for Park<'_> {
         match woken {
             Wake::App(QUEUE_TOKEN) => {
                 self.queue.drain();
+                Ok(Parked::Interrupted)
+            }
+            Wake::App(FONT_TOKEN) => {
+                self.fonts.drain();
                 Ok(Parked::Interrupted)
             }
             Wake::App(token) => match self.wakes.iter().find(|(watched, _)| *watched == token) {
@@ -3432,6 +3494,11 @@ impl<A: DocumentApp> Host<A> {
             }
         });
         A::collect(self);
+        let _ = self.fonts.collect();
+        if tairix_font::text_generation() != self.text_drawn {
+            self.text_drawn = tairix_font::text_generation();
+            self.lay_out_all();
+        }
         if signals.pressure.replace(false) {
             A::pressure(self);
         }
@@ -3451,6 +3518,11 @@ impl<A: DocumentApp> Host<A> {
         self.settle_focus();
         self.settle_pointers();
         self.paint_all(now);
+        // What was drawn provisionally is fetched off the loop; a request
+        // already waiting absorbs this one.
+        if tairix_font::has_deferred() {
+            let _ = self.fonts.submit(());
+        }
         if self.quitting && self.windows.is_empty() {
             // The quit can no longer be turned down, so the application's own
             // windows, kept until now in case it was, go.
@@ -3563,6 +3635,12 @@ pub fn run<A: DocumentApp>() -> i32 {
     let queue = Arc::new(queue);
     app::start_worker(A::NAME, &queue, set, QUEUE_TOKEN, "work");
     let _queue_guard = WorkerGuard::new(&queue);
+    // With no thread to fetch on, text is fetched as it is drawn.
+    let fonts = Arc::new(FontWorker::new(fetch_fonts, (), WorkerWake::create()));
+    if app::start_worker(A::NAME, &fonts, set, FONT_TOKEN, "font") {
+        tairix_font::defer_fetches();
+    }
+    let _fonts_guard = WorkerGuard::new(&fonts);
     let own = match A::start(&desktop, set) {
         Ok(own) => own,
         Err(code) => return code,
@@ -3583,6 +3661,8 @@ pub fn run<A: DocumentApp>() -> i32 {
         faces,
         app: own,
         queue: Arc::clone(&queue),
+        fonts: Arc::clone(&fonts),
+        text_drawn: tairix_font::text_generation(),
         answered: false,
         saves: 0,
         unroomed: 0,
@@ -3600,6 +3680,7 @@ pub fn run<A: DocumentApp>() -> i32 {
         mailbox: EventMailbox::new(endpoint, server),
         set,
         queue: &*queue,
+        fonts: &*fonts,
         wakes: &wakes,
         signals: &signals,
     });

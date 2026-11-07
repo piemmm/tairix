@@ -578,6 +578,32 @@ pub enum IconKind {
     Median,
     /// A tile raised from its frame, for embossing.
     Emboss,
+    /// Two shapes in a dashed frame, for grouping.
+    Group,
+    /// Two shapes, each in a corner of a frame broken apart, for ungrouping.
+    Ungroup,
+    /// A padlock, its shackle raised and open, for unlocking.
+    Unlock,
+    /// Two overlapping discs filled as one, for joining shapes.
+    Union,
+    /// A disc with another cut out of its side, for subtracting shapes.
+    Difference,
+    /// Two overlapping rings, their overlap filled, for intersecting shapes.
+    Intersection,
+    /// Two overlapping discs, their overlap empty, for excluding shapes.
+    Exclusion,
+    /// A curve between two square nodes, for paths and their nodes.
+    Nodes,
+    /// A thick stroke drawn as its outline, for turning a stroke into a shape.
+    StrokeOutline,
+    /// A pen's nib, its slit and breather hole, for the pen.
+    ToolPen,
+    /// A square and a disc in outline, each seen through the other, for outlines.
+    Wireframe,
+    /// A horseshoe magnet, for snapping.
+    Magnet,
+    /// A ruler and its marks, for units of length.
+    Ruler,
     /// Two pages, one behind the other, for sprites and pages.
     Pages,
     /// A toolbox, for the tools.
@@ -952,6 +978,19 @@ impl IconKind {
             "channel-mixer" => Self::ChannelMixer,
             "median" => Self::Median,
             "emboss" => Self::Emboss,
+            "group" => Self::Group,
+            "ungroup" => Self::Ungroup,
+            "unlock" => Self::Unlock,
+            "union" => Self::Union,
+            "difference" => Self::Difference,
+            "intersection" => Self::Intersection,
+            "exclusion" => Self::Exclusion,
+            "nodes" => Self::Nodes,
+            "stroke-outline" => Self::StrokeOutline,
+            "tool-pen" => Self::ToolPen,
+            "wireframe" => Self::Wireframe,
+            "magnet" => Self::Magnet,
+            "ruler" => Self::Ruler,
             "pages" => Self::Pages,
             "toolbox" => Self::Toolbox,
             "activity" => Self::Activity,
@@ -1330,6 +1369,19 @@ impl IconKind {
             Self::ChannelMixer => 300,
             Self::Median => 301,
             Self::Emboss => 302,
+            Self::Group => 303,
+            Self::Ungroup => 304,
+            Self::Unlock => 305,
+            Self::Union => 306,
+            Self::Difference => 307,
+            Self::Intersection => 308,
+            Self::Exclusion => 309,
+            Self::Nodes => 310,
+            Self::StrokeOutline => 311,
+            Self::ToolPen => 312,
+            Self::Wireframe => 313,
+            Self::Magnet => 314,
+            Self::Ruler => 315,
         }
     }
 
@@ -1650,6 +1702,19 @@ impl IconKind {
             Self::ChannelMixer => "channel-mixer",
             Self::Median => "median",
             Self::Emboss => "emboss",
+            Self::Group => "group",
+            Self::Ungroup => "ungroup",
+            Self::Unlock => "unlock",
+            Self::Union => "union",
+            Self::Difference => "difference",
+            Self::Intersection => "intersection",
+            Self::Exclusion => "exclusion",
+            Self::Nodes => "nodes",
+            Self::StrokeOutline => "stroke-outline",
+            Self::ToolPen => "tool-pen",
+            Self::Wireframe => "wireframe",
+            Self::Magnet => "magnet",
+            Self::Ruler => "ruler",
         }
     }
 }
@@ -2066,6 +2131,19 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         | IconKind::ZoomIn
         | IconKind::ZoomOut
         | IconKind::ZoomFit
+        | IconKind::Group
+        | IconKind::Ungroup
+        | IconKind::Unlock
+        | IconKind::Union
+        | IconKind::Difference
+        | IconKind::Intersection
+        | IconKind::Exclusion
+        | IconKind::Nodes
+        | IconKind::StrokeOutline
+        | IconKind::ToolPen
+        | IconKind::Wireframe
+        | IconKind::Magnet
+        | IconKind::Ruler
         | IconKind::ToolZoom => return None,
     })
 }

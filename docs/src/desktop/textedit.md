@@ -159,7 +159,9 @@ The loop reads nothing and waits on nothing. Workers carry what does wait:
 - the **code worker** and the **data worker** each hold a sandbox of their
   own: the code worker lists an executable's headers and code and reads a
   manifest's report, the data worker a picture's structure, one window's ask
-  at a time, taking turns over the windows so none is starved.
+  at a time, taking turns over the windows so none is starved;
+- the host's **font worker** fetches the glyphs and metrics the windows drew
+  provisionally, and the windows are laid out again when they land.
 
 A window saves one snapshot at a time. A save asked for while one is in
 flight freezes the document as it then is and is written, in turn, once those

@@ -1,0 +1,23 @@
+# Signed-AppInfo manifest source for Draw, the desktop vector editor
+# (plans/DRAW.md).
+#
+# No filesystem capability: every document is one the user handed over, and
+# every save writes through its descriptor. CAP_CONSOLE_WRITE carries its
+# stderr diagnostics; CAP_SHM the window frame region and the clipboard's
+# payload; CAP_SANDBOX_SPAWN re-enters this binary as the capability-empty
+# worker that reads documents and pasted drawings, which are untrusted input;
+# CAP_LOG_EMIT records that worker being replaced after a crash.
+id = "os.tairix.draw"
+name = "Draw"
+title = "Draw"
+version = "0.1.0"
+kind = "application"
+purpose = "Draw and edit vector drawings in layers"
+author = "The TAIRiX Project"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_SANDBOX_SPAWN", "CAP_LOG_EMIT"]
+# The format Draw writes back as well as reads: offered it, a file opens
+# writable and Save writes it.
+associations = ["image/svg+xml"]
+document-access = "read-write"
+library = "Graphics"
+library-icon = "Draw.png"

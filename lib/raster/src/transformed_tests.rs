@@ -1,8 +1,8 @@
 //! The transformed blit: placement, sampling, edges, and clipping.
 
-use crate::affine::Affine;
 use crate::color::Color;
 use crate::surface::Surface;
+use tairix_bezier::Affine;
 
 fn solid(width: u32, height: u32, color: Color) -> Surface {
     let mut surface = Surface::new(width, height).expect("a surface");

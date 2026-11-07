@@ -1,7 +1,7 @@
 //! The document's XML, scanned by the shared `lib/xml` scanner with the SVG
 //! namespace's elements named by their local names.
 
-pub use tairix_xml::{Content, Element, MAX_ELEMENTS};
+pub use tairix_xml::{Content, Element, Limits, MAX_ELEMENTS};
 
 use crate::error::SvgError;
 
@@ -10,13 +10,14 @@ use crate::error::SvgError;
 /// asset written without an `xmlns` still renders.
 const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
 
-/// Parse `input` into the document's root element.
+/// Parse `input` into the document's root element, held to `limits`: an
+/// asset's compact bounds for the decoder, a document's for an editor.
 ///
 /// # Errors
 /// [`SvgError::Malformed`], [`SvgError::MissingRoot`] and
 /// [`SvgError::TooComplex`], as the scanner refuses the document.
-pub fn parse(input: &str) -> Result<Element<'_>, SvgError> {
-    tairix_xml::parse(input, SVG_NAMESPACE).map_err(|refusal| match refusal {
+pub fn parse(input: &str, limits: Limits) -> Result<Element<'_>, SvgError> {
+    tairix_xml::parse_with(input, SVG_NAMESPACE, limits).map_err(|refusal| match refusal {
         tairix_xml::XmlError::Malformed => SvgError::Malformed,
         tairix_xml::XmlError::MissingRoot => SvgError::MissingRoot,
         tairix_xml::XmlError::TooComplex => SvgError::TooComplex,

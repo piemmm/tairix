@@ -619,6 +619,7 @@ tairix/
 │   │                    #   channel matrices, the device clock model, routing
 │   │                    #   policy, the volume model, the audio-v1 client.
 │   ├── audiochan/       # Audio device-channel driver side (audiochan-v1 server).
+│   ├── bezier/          # Plane geometry: segments, paths, flattening, booleans.
 │   ├── binfmt/          # Read-only executable-container decoder (rxe/ELF64/wasm).
 │   ├── blkclient/       # Block-service client (RemoteBlock + its RtBlkCall transport).
 │   ├── bootload/        # Firmware-neutral boot-chain loader core.
@@ -655,6 +656,7 @@ tairix/
 │   ├── display/         # Display-service protocol engine.
 │   ├── dma-barrier/     # DMA memory-ordering barriers for user-space drivers.
 │   ├── dmaengine/       # DMA controller side (dmaengine-v1 endpoint + serve loop).
+│   ├── drawing/         # Editable vector drawing: objects, styles, layers, its formats.
 │   ├── drvrt/           # User-space driver runtime host.
 │   ├── edid/            # Display-sink descriptions: EDID and its extensions, ELD.
 │   ├── encoder/         # Display encoder side (encoder-v1 server).
@@ -1731,6 +1733,7 @@ You are not exempt from any rule above. In addition:
     | The `vim` app | `plans/VIM.md` |
     | The desktop editor (`TextEdit.app`): the byte document and its displays, syntax colouring and settings validation in the sandbox, writable documents, the picker's Save mode, drag-and-drop onto the icon bar, the clipboard and the app-set pointer shape | `plans/TEXTEDIT.md` |
     | The image editor (`Paint.app`): the formats it writes, its layers and OpenRaster, RISC OS sprite semantics (the Wimp palette for a sprite with none, kept sprites, masks, pixel aspect), the sandboxed edit decode, the tiled canvas and its history, and the shared document host both editors run in (`tairix_window::docapp`) | `plans/PAINT.md` |
+    | The vector editor (`Draw.app`) and what it is built on: the `lib/bezier` geometry kernel and its boolean operations, the editable drawing of `lib/drawing`, its SVG, RISC OS Draw, PDF and EPS formats, the sandboxed `drawedit` read, the tile renderer, and the tools, inspector, rulers, guides and snapping | `plans/DRAW.md` |
     | The web browser: its process model and site isolation, the broker that holds authority and parses nothing, the engine (HTML, CSS, layout, paint) and the heap the DOM and JavaScript share, the JavaScript tier contract and its permanent interpreter, code installation and the compiled tiers, and the OS facilities it needs first — `lib/tls`, the HTTP client engine, the shaping and bidi engine, `lib/url` and the desktop's URL hand-off | `plans/BROWSER.md` |
     | Shared containers and hashing: the heap-backed tiers in `lib/collections`, the allocation-free tier in `lib/inline`, the keyed `lib/hash` seed, and any hand-rolled LRU, ring, range map, bitmap, slot map, or id counter being replaced | `plans/COLLECTIONS.md` |
     | Randomness: the non-cryptographic vs fast-secure vs DRBG tier split, the buffered ChaCha12 fast-key-erasure generator, the kernel output reserve's backing, task-id and scheduler draws, and the statistical test battery | `plans/FIX-RANDOMNESS.md` |

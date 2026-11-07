@@ -113,9 +113,10 @@ mod tests;
 
 #[cfg(feature = "render")]
 pub use client::{
-    defer_fetches, families, fetch_deferred, has_deferred, install_caches, outline_run,
-    set_font_transport, set_glyph_cache, set_outline_cache, text_generation, trim_glyph_cache,
-    FontTransport, GlyphCache, GlyphKey, OutlineReply, OwnedContour, OwnedOutline, OwnedSegment,
+    cached_outline, defer_fetches, families, fetch_deferred, has_deferred, install_caches,
+    outline_run, set_font_transport, set_glyph_cache, set_outline_cache, text_generation,
+    trim_glyph_cache, FontTransport, GlyphCache, GlyphKey, OutlineReply, OwnedContour,
+    OwnedOutline, OwnedSegment,
 };
 #[cfg(feature = "test-util")]
 pub use client::{glyph_cache_holds, install_test_transport, note_text_landed, SolidTestTransport};
@@ -129,7 +130,8 @@ pub use glyph_cache::{
 };
 #[cfg(feature = "render")]
 pub use outline_cache::{
-    outline_cache_budget, outline_cache_candidate, CachedOutline, OutlineCache, OutlineKey,
+    outline_cache_budget, outline_cache_candidate, CachedOutline, FaceMetrics, OutlineCache,
+    OutlineKey,
 };
 #[cfg(feature = "render")]
 pub use shadow::{KeptShadow, TextShadow};

@@ -15,7 +15,7 @@ use core::ops::Range;
 
 use tairix_raster::div255;
 use tairix_util::{cnum, fallible};
-use tairix_xml::Element;
+use tairix_xml::{Element, Escaped};
 
 use crate::encode::EncodeError;
 use crate::picture::{masked_colour, over, Picture, PictureSource, Pixels};
@@ -191,25 +191,6 @@ fn stack(
     }
     put("</stack>\n</image>\n")?;
     Ok(xml)
-}
-
-/// Text escaped for an XML attribute value.
-struct Escaped<'a>(&'a str);
-
-impl core::fmt::Display for Escaped<'_> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        for ch in self.0.chars() {
-            match ch {
-                '&' => f.write_str("&amp;")?,
-                '<' => f.write_str("&lt;")?,
-                '>' => f.write_str("&gt;")?,
-                '"' => f.write_str("&quot;")?,
-                '\'' => f.write_str("&apos;")?,
-                ch => f.write_char(ch)?,
-            }
-        }
-        Ok(())
-    }
 }
 
 impl From<ZipError> for DecodeError {

@@ -13,9 +13,10 @@
 
 use alloc::vec::Vec;
 
+use tairix_bezier::flatten::flatten_ellipse_arc;
 use tairix_raster::{Affine, Color, FillRule, Layer, Paint};
 use tairix_svg::geom::{place, LineCap, LineJoin, StrokeStyle, SubPath};
-use tairix_svg::pathdata::{flatten_ellipse_arc, parse_path_data};
+use tairix_svg::pathdata::parse_path_data;
 use tairix_svg::stroke::stroke_outline;
 use tairix_util::mathf::round;
 
@@ -304,13 +305,13 @@ pub(crate) fn flatten(outlines: &[Outline], flatness: f64) -> Option<Vec<SubPath
                 points.push((centre.0 + radius, centre.1));
                 for turn in [0.0, 1.0, 2.0, 3.0] {
                     flatten_ellipse_arc(
-                        centre,
-                        (radius, radius),
+                        centre.into(),
+                        (radius, radius).into(),
                         0.0,
                         turn * quarter,
                         quarter,
                         flatness,
-                        &mut points,
+                        |point| points.push(point.tuple()),
                     );
                 }
                 subpaths.push(SubPath::closed(points));
@@ -465,24 +466,32 @@ const DISPLAY: &[Mark] = &[
     )]),
 ];
 
-/// A padlock with a keyhole.
-const LOCK: &[Mark] = &[
+/// A padlock's shackle along `outlines`.
+pub(crate) const fn shackle(outlines: &'static [Outline]) -> Mark {
     Mark::Stroke {
-        outlines: &[Outline::Path("M8.2 10.6V8.2A3.8 3.8 0 0 1 15.8 8.2V10.6")],
+        outlines,
         width: 2.2,
         cap: LineCap::Butt,
         join: LineJoin::Round,
-    },
-    cut(&[
-        Outline::Path(
-            "M7.4 10.2H16.6A2.2 2.2 0 0 1 18.8 12.4V18.6A2.2 2.2 0 0 1 16.6 20.8H7.4\
-             A2.2 2.2 0 0 1 5.2 18.6V12.4A2.2 2.2 0 0 1 7.4 10.2Z",
-        ),
-        Outline::Path(
-            "M12 13.2A1.5 1.5 0 0 1 12.8 15.96L13.1 17.9H10.9L11.2 15.96\
-             A1.5 1.5 0 0 1 12 13.2Z",
-        ),
-    ]),
+    }
+}
+
+/// A padlock's body, its keyhole cut through it.
+pub(crate) const PADLOCK_BODY: Mark = cut(&[
+    Outline::Path(
+        "M7.4 10.2H16.6A2.2 2.2 0 0 1 18.8 12.4V18.6A2.2 2.2 0 0 1 16.6 20.8H7.4\
+         A2.2 2.2 0 0 1 5.2 18.6V12.4A2.2 2.2 0 0 1 7.4 10.2Z",
+    ),
+    Outline::Path(
+        "M12 13.2A1.5 1.5 0 0 1 12.8 15.96L13.1 17.9H10.9L11.2 15.96\
+         A1.5 1.5 0 0 1 12 13.2Z",
+    ),
+]);
+
+/// A padlock with a keyhole.
+const LOCK: &[Mark] = &[
+    shackle(&[Outline::Path("M8.2 10.6V8.2A3.8 3.8 0 0 1 15.8 8.2V10.6")]),
+    PADLOCK_BODY,
 ];
 
 /// A crescent moon beside two stars.

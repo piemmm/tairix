@@ -1,0 +1,52 @@
+[package]
+name = "tairix-draw"
+description = "TAIRiX Draw: the desktop vector editor — paths, shapes, text and groups in layers, gradients, clips and boolean operations, reading and writing SVG and exporting PDF and PNG, holding no filesystem capability and parsing nothing of its documents itself (plans/DRAW.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-bezier = { path = "../../../lib/bezier", version = "=0.0.0" }
+tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
+tairix-colour = { path = "../../../lib/colour", version = "=0.0.0" }
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+tairix-drawing = { path = "../../../lib/drawing", version = "=0.0.0" }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+tairix-image = { path = "../../../lib/image", version = "=0.0.0" }
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+tairix-window = { path = "../../../lib/window", version = "=0.0.0", default-features = false }
+
+[[bin]]
+name = "tairix-draw-run"
+path = "src/run.rs"
+
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
+tairix-browse = { path = "../../../lib/browse", version = "=0.0.0", features = ["rt"] }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", features = ["pool"] }
+
+[dev-dependencies]
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features = ["test-support"] }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

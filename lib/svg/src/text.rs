@@ -42,9 +42,10 @@ use crate::font::{
 };
 use crate::geom::{Point, SubPath};
 use crate::number::parse_length;
-use crate::pathdata::flatten_quadratic;
 use crate::style::{parse_length_in, Lengths, Style, TextAnchor};
 use crate::xml::{Content, Element};
+use tairix_bezier::flatten::flatten_quadratic;
+use tairix_bezier::QuadBez;
 
 /// The deepest `<tspan>` nesting accepted inside one `<text>`.
 ///
@@ -859,7 +860,8 @@ pub(crate) fn glyph_subpaths(
             match *segment {
                 OutlineSegment::Line { to } => points.push(to),
                 OutlineSegment::Quadratic { control, to } => {
-                    flatten_quadratic(from, control, to, tolerance, &mut points);
+                    let curve = QuadBez::new(from.into(), control.into(), to.into());
+                    flatten_quadratic(curve, tolerance, |point| points.push(point.tuple()));
                 }
             }
         }

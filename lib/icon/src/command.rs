@@ -9,7 +9,7 @@
 use tairix_abi::window_ipc::AppMenuSymbol;
 
 use crate::glyph::IconKind;
-use crate::symbol::{circle, cut, fill, stroke, Mark, Outline};
+use crate::symbol::{circle, cut, fill, shackle, stroke, Mark, Outline, PADLOCK_BODY};
 
 /// The stroke every command picture is drawn with, in symbol units.
 const W: f64 = 2.0;
@@ -78,7 +78,7 @@ pub const fn menu_symbol_icon(symbol: AppMenuSymbol) -> IconKind {
         S::LineEndings => IconKind::LineEndings,
         S::ZoomIn => IconKind::ZoomIn,
         S::ZoomOut => IconKind::ZoomOut,
-        S::ZoomFit => IconKind::ZoomFit,
+        S::ZoomFit | S::ZoomSelection => IconKind::ZoomFit,
         S::FitWidth => IconKind::FitWidth,
         S::ZoomActual => IconKind::ZoomActual,
         S::ZoomLevel | S::ToolZoom => IconKind::ToolZoom,
@@ -121,8 +121,8 @@ pub const fn menu_symbol_icon(symbol: AppMenuSymbol) -> IconKind {
         S::LayerNew => IconKind::LayerNew,
         S::LayerAbove => IconKind::LayerAbove,
         S::LayerBelow => IconKind::LayerBelow,
-        S::LayerRaise => IconKind::LayerRaise,
-        S::LayerLower => IconKind::LayerLower,
+        S::LayerRaise | S::BringToFront => IconKind::LayerRaise,
+        S::LayerLower | S::SendToBack => IconKind::LayerLower,
         S::MergeDown => IconKind::MergeDown,
         S::Flatten => IconKind::Flatten,
         S::Image => IconKind::Image,
@@ -132,7 +132,7 @@ pub const fn menu_symbol_icon(symbol: AppMenuSymbol) -> IconKind {
         S::ColourModel => IconKind::ColourModel,
         S::MaskAdd => IconKind::MaskAdd,
         S::MaskRemove => IconKind::MaskRemove,
-        S::FillSelection | S::ToolFill => IconKind::ToolFill,
+        S::FillSelection | S::ToolFill | S::PageGround => IconKind::ToolFill,
         S::CropToSelection | S::ToolCrop => IconKind::ToolCrop,
         S::PutDown => IconKind::PutDown,
         S::Erase | S::ToolEraser => IconKind::ToolEraser,
@@ -176,7 +176,7 @@ pub const fn menu_symbol_icon(symbol: AppMenuSymbol) -> IconKind {
         S::ToolHand => IconKind::ToolHand,
         S::SystemMonitor => IconKind::Activity,
         S::TaskShell => IconKind::Terminal,
-        S::LockScreen => IconKind::LockScreen,
+        S::LockScreen | S::Lock => IconKind::LockScreen,
         S::SwitchUser | S::SortByWorkgroup => IconKind::Users,
         S::LogOut => IconKind::LogOut,
         S::Restart => IconKind::Restart,
@@ -204,6 +204,19 @@ pub const fn menu_symbol_icon(symbol: AppMenuSymbol) -> IconKind {
         S::LetOut => IconKind::DoorOpen,
         S::Favourite => IconKind::Star,
         S::RunAsAdministrator => IconKind::Shield,
+        S::Group => IconKind::Group,
+        S::Ungroup => IconKind::Ungroup,
+        S::Unlock => IconKind::Unlock,
+        S::Union => IconKind::Union,
+        S::Difference => IconKind::Difference,
+        S::Intersection => IconKind::Intersection,
+        S::Exclusion => IconKind::Exclusion,
+        S::ObjectToPath | S::ToolNodes => IconKind::Nodes,
+        S::StrokeToPath => IconKind::StrokeOutline,
+        S::ToolPen => IconKind::ToolPen,
+        S::ViewOutline => IconKind::Wireframe,
+        S::Snap => IconKind::Magnet,
+        S::Units => IconKind::Ruler,
     }
 }
 
@@ -338,6 +351,19 @@ pub(crate) const fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::ChannelMixer => CHANNELS,
         IconKind::Median => MEDIAN,
         IconKind::Emboss => RELIEF,
+        IconKind::Group => GROUP,
+        IconKind::Ungroup => UNGROUP,
+        IconKind::Unlock => UNLOCK,
+        IconKind::Union => UNION,
+        IconKind::Difference => DIFFERENCE,
+        IconKind::Intersection => INTERSECTION,
+        IconKind::Exclusion => EXCLUSION,
+        IconKind::Nodes => NODES,
+        IconKind::StrokeOutline => STROKE_OUTLINE,
+        IconKind::ToolPen => PEN_NIB,
+        IconKind::Wireframe => WIREFRAME,
+        IconKind::Magnet => MAGNET,
+        IconKind::Ruler => RULER,
         IconKind::Pages => PAGES,
         IconKind::Toolbox => TOOLBOX,
         IconKind::Activity => PULSE,
@@ -1413,6 +1439,99 @@ const STAR: &[Mark] = &[line(&[Outline::Path(
 const SHIELD: &[Mark] = &[line(&[
     Outline::Path("M12 3L19.5 5.8V11.2C19.5 15.8 16.4 19.6 12 21C7.6 19.6 4.5 15.8 4.5 11.2V5.8Z"),
     Outline::Path("M8.8 12.2L11 14.4L15.4 9.8"),
+])];
+
+/// Two shapes in a dashed frame.
+const GROUP: &[Mark] = &[line(&[
+    DASHED_FRAME,
+    Outline::Path("M7 7H11V11H7Z"),
+    circle(15.0, 15.0, 2.2),
+])];
+
+/// The same two shapes, the frame about them broken into two corners.
+const UNGROUP: &[Mark] = &[line(&[
+    Outline::Path("M4 10V5A1 1 0 0 1 5 4H10"),
+    Outline::Path("M20 14V19A1 1 0 0 1 19 20H14"),
+    Outline::Path("M7 7H11V11H7Z"),
+    circle(15.0, 15.0, 2.2),
+])];
+
+/// A padlock, its shackle raised and swung open.
+const UNLOCK: &[Mark] = &[
+    shackle(&[Outline::Path("M8.2 10.6V5.8A3.8 3.8 0 0 1 15.8 5.8V7")]),
+    PADLOCK_BODY,
+];
+
+/// The left of the two discs the boolean pictures overlap across the grid.
+const LEFT_DISC: Outline = circle(9.0, 12.0, 5.5);
+
+/// The right of the two discs.
+const RIGHT_DISC: Outline = circle(15.0, 12.0, 5.5);
+
+/// Two overlapping discs outlined as one shape.
+const UNION: &[Mark] = &[line(&[Outline::Path(
+    "M12 7.39A5.5 5.5 0 1 0 12 16.61A5.5 5.5 0 1 0 12 7.39Z",
+)])];
+
+/// The left disc with the right one taken out of its side.
+const DIFFERENCE: &[Mark] = &[
+    fill(&[Outline::Path(
+        "M12 7.39A5.5 5.5 0 1 0 12 16.61A5.5 5.5 0 0 1 12 7.39Z",
+    )]),
+    line(&[RIGHT_DISC]),
+];
+
+/// Two overlapping rings, the lens they share filled.
+const INTERSECTION: &[Mark] = &[
+    line(&[LEFT_DISC, RIGHT_DISC]),
+    fill(&[Outline::Path(
+        "M12 7.39A5.5 5.5 0 0 0 12 16.61A5.5 5.5 0 0 0 12 7.39Z",
+    )]),
+];
+
+/// Two overlapping discs filled where only one of them lies.
+const EXCLUSION: &[Mark] = &[
+    cut(&[LEFT_DISC, RIGHT_DISC]),
+    line(&[LEFT_DISC, RIGHT_DISC]),
+];
+
+/// A curve between two square nodes.
+const NODES: &[Mark] = &[
+    line(&[Outline::Path("M6.5 17.5C9 7 15 17 17.5 6.5")]),
+    fill(&[
+        Outline::Path("M3.5 15.5H8.5V20.5H3.5Z"),
+        Outline::Path("M15.5 3.5H20.5V8.5H15.5Z"),
+    ]),
+];
+
+/// A thick stroke drawn as its outline.
+const STROKE_OUTLINE: &[Mark] = &[line(&[Outline::Path(
+    "M3.88 15.88L15.88 3.88A3 3 0 0 1 20.12 8.12L8.12 20.12A3 3 0 0 1 3.88 15.88Z",
+)])];
+
+/// A pen's nib, its slit running up from the point to the breather hole.
+const PEN_NIB: &[Mark] = &[line(&[
+    Outline::Path("M12 21L6 12.5L9 4H15L18 12.5Z"),
+    Outline::Path("M12 21V13.7"),
+    circle(12.0, 12.0, 1.7),
+])];
+
+/// A square and a disc in outline, each seen through the other.
+const WIREFRAME: &[Mark] = &[line(&[
+    Outline::Path("M4 4H14V14H4Z"),
+    circle(14.5, 14.5, 5.5),
+])];
+
+/// A horseshoe magnet, its poles marked off.
+const MAGNET: &[Mark] = &[line(&[
+    Outline::Path("M5 4H10V12A2 2 0 0 0 14 12V4H19V12A7 7 0 0 1 5 12Z"),
+    Outline::Path("M5 8H10M14 8H19"),
+])];
+
+/// A ruler, its marks along one edge.
+const RULER: &[Mark] = &[line(&[
+    Outline::Path("M3 8H21V16H3Z"),
+    Outline::Path("M7 8V11M11 8V12.5M15 8V11M19 8V12.5"),
 ])];
 
 #[cfg(test)]

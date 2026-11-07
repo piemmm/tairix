@@ -29,6 +29,8 @@
 | DESK-23 | Settings and the viewer paint once per burst of input, not once per event | done |
 | DESK-24 | The process holding a seat's display runs in the high band while it holds it | done |
 | DESK-25 | A present that replaces an unshown frame is answered once that frame is shown | done |
+| DESK-26 | The document host's applications (Draw, Paint, TextEdit) draw text without waiting on the font service | done |
+| DESK-27 | Every other windowed application's loop draws text without waiting on the font service | planned |
 
 Binding under `AGENTS.md`. This plan removes the desktop freeze that
 occurs while an application is loaded and started, fixes it as a
@@ -1299,6 +1301,29 @@ Each stage is independently reviewable and must leave the whole-project
   `a_stream_in_the_dark_is_answered_at_the_screens_rate` and
   `a_clock_that_jumped_backwards_answers_held_presents_at_once`.
 
+### DESK-26 — The document host draws text without waiting on the font service
+- **What it fixed.** A glyph or line-metrics miss in a document application's
+  labels was an IPC round trip to `fontd` on the window's loop, every first
+  draw of a glyph at a size.
+- **The host defers.** `tairix_window::docapp::run` starts a font worker of
+  its own (`FONT_TOKEN`, ahead of `APP_TOKEN`) and, only once it runs, calls
+  `tairix_font::defer_fetches`: a miss draws provisionally and is recorded.
+  After every paint the host hands the worker `fetch_deferred` when anything
+  was missed, a request already waiting absorbing the next; when
+  `text_generation` moves, every window is laid out again with faces made
+  anew (`Host::lay_out_all`, the path a change of look takes too). With no
+  thread, text is fetched as it is drawn, as before.
+- **`app::start_worker`** answers whether a thread now serves the worker.
+
+### DESK-27 — Every other windowed application draws text without waiting
+- **What remains.** The applications on `tairix_window::app` with loops of
+  their own — the file manager, the viewer, Music, Netmap, Patience, Sapper,
+  Settings, the terminal, Cinder and WinterSun — still fetch glyphs and line
+  metrics on their loops. Each needs DESK-26's arrangement on its own loop: a
+  font worker on its wait-set, `defer_fetches` once it runs, a fetch handed
+  over after a paint that missed, and its own text laid out and drawn again
+  when `text_generation` moves.
+
 ### DESK-11 — The file manager's reads off its loop
 - Every unbounded read the file manager makes now runs off its loop, on the
   reader serving the volume it touches (`plans/NEW-FILEMANAGER.md` FM25), and
@@ -1573,6 +1598,9 @@ Each stage is independently reviewable and must leave the whole-project
 - **DESK-25.** A client is held to the desktop's frames: a present replacing an
   unshown frame is answered once that frame is shown, paced alike with the
   screen dark, and the terminal never waits for it.
+- **DESK-26.** A document application's loop never waits on the font service:
+  what it has not fetched is drawn provisionally and laid out again once a
+  worker of the host's has fetched it.
 
 ---
 

@@ -131,9 +131,16 @@ serving geometry moved no bound and grew no receive buffer.
 
 `outline_run` is the client entry point, memoising per
 `(family, scalar, weight, style, stretch)` in an outline cache declared
-beside the coverage one. `tairix_font::ServiceFonts` wraps it as the
-`lib/svg` font seam, so there is one adapter between the decoder and the
-endpoint rather than one per consumer.
+beside the coverage one and built, as that one is, from the machine's RAM
+(`install_caches` builds all three for a program that may ask for neither).
+`cached_outline` reads that cache and never asks the service: the caches lock
+is not held across a round trip, so a thread that must answer within a frame —
+an event loop measuring text a worker has drawn — reads what has arrived and
+falls back to its own estimate for what has not. Each cached outline keeps the
+metrics of the face its batch was answered from (`FaceMetrics`), so a run the
+cache holds whole is answered, face metrics and all, with no round trip. `tairix_font::ServiceFonts`
+wraps `outline_run` as the `lib/svg` font seam, so there is one adapter
+between the decoder and the endpoint rather than one per consumer.
 
 ### A family may be asked for by kind
 
@@ -377,7 +384,9 @@ role per control paint is not a cost worth hoisting.
 ### Drawing without waiting
 
 A program whose drawing thread must never wait on another process — the
-desktop session — calls `defer_fetches`. From then on a glyph or metrics miss
+desktop session, and every application of the document host
+(`tairix_window::docapp`), which fetches on a thread of its own and lays its
+windows out again when text lands — calls `defer_fetches`. From then on a glyph or metrics miss
 draws a provisional answer and records what was missed: no ink, on the console
 atlas's own advance (two cells for a wide scalar), and the atlas geometry for
 metrics. `fetch_deferred`, called on a thread that may wait, asks for what was

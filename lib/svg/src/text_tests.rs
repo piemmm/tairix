@@ -148,7 +148,7 @@ type LaidOut = Option<(Vec<(f64, f64)>, Squares)>;
 /// Parse `document`, collect its root `<text>`, and lay it out.
 #[track_caller]
 fn laid(document: &str) -> Result<LaidOut, SvgError> {
-    let root = xml::parse(document).expect("a document");
+    let root = xml::parse(document, xml::Limits::COMPACT).expect("a document");
     let mut cascade = Attributes { depth: 0 };
     let style = Style::default()
         .apply(&root, 100.0, &[])
@@ -176,7 +176,7 @@ fn origins(document: &str) -> Vec<(f64, f64)> {
 /// Collect without laying out, for the tests that only exercise the walk.
 #[track_caller]
 fn collected(document: &str) -> Result<Collected, SvgError> {
-    let root = xml::parse(document).expect("a document");
+    let root = xml::parse(document, xml::Limits::COMPACT).expect("a document");
     let mut cascade = Attributes { depth: 0 };
     let style = Style::default()
         .apply(&root, 100.0, &[])
@@ -314,6 +314,7 @@ fn text_length_spreads_the_difference_across_the_gaps() {
 fn length_adjust_spacing_and_glyphs_scales_the_letterforms_too() {
     let root = xml::parse(
         r#"<text x="0" y="0" textLength="48" lengthAdjust="spacingAndGlyphs">ab</text>"#,
+        xml::Limits::COMPACT,
     )
     .expect("a document");
     let mut cascade = Attributes { depth: 0 };
@@ -341,7 +342,11 @@ fn an_unknown_length_adjust_refuses_the_document() {
 
 #[test]
 fn rotate_turns_each_glyph_and_its_last_value_persists() {
-    let root = xml::parse(r#"<text x="0" y="0" rotate="90">ab</text>"#).expect("a document");
+    let root = xml::parse(
+        r#"<text x="0" y="0" rotate="90">ab</text>"#,
+        xml::Limits::COMPACT,
+    )
+    .expect("a document");
     let mut cascade = Attributes { depth: 0 };
     let style = Style::default()
         .apply(&root, 100.0, &[])
@@ -362,8 +367,11 @@ fn rotate_turns_each_glyph_and_its_last_value_persists() {
 
 #[test]
 fn the_family_ladder_falls_through_to_the_generic_and_then_closed() {
-    let root =
-        xml::parse(r#"<text font-family="Nothing, AlsoNothing">a</text>"#).expect("a document");
+    let root = xml::parse(
+        r#"<text font-family="Nothing, AlsoNothing">a</text>"#,
+        xml::Limits::COMPACT,
+    )
+    .expect("a document");
     let mut cascade = Attributes { depth: 0 };
     let style = Style::default()
         .apply(&root, 100.0, &[])
@@ -387,7 +395,11 @@ fn the_family_ladder_falls_through_to_the_generic_and_then_closed() {
 
 #[test]
 fn a_family_nothing_can_furnish_fails_the_document_closed() {
-    let root = xml::parse(r#"<text font-family="Nothing">a</text>"#).expect("a document");
+    let root = xml::parse(
+        r#"<text font-family="Nothing">a</text>"#,
+        xml::Limits::COMPACT,
+    )
+    .expect("a document");
     let mut cascade = Attributes { depth: 0 };
     let style = Style::default()
         .apply(&root, 100.0, &[])
@@ -404,8 +416,11 @@ fn a_family_nothing_can_furnish_fails_the_document_closed() {
 
 #[test]
 fn one_face_is_resolved_for_spans_that_ask_for_the_same_one() {
-    let root = xml::parse(r#"<text>a<tspan fill="red">b</tspan><tspan>c</tspan></text>"#)
-        .expect("a document");
+    let root = xml::parse(
+        r#"<text>a<tspan fill="red">b</tspan><tspan>c</tspan></text>"#,
+        xml::Limits::COMPACT,
+    )
+    .expect("a document");
     let mut cascade = Attributes { depth: 0 };
     let style = Style::default()
         .apply(&root, 100.0, &[])
@@ -423,7 +438,7 @@ fn one_face_is_resolved_for_spans_that_ask_for_the_same_one() {
 
 #[test]
 fn a_provider_answering_a_different_run_is_refused() {
-    let root = xml::parse("<text>abc</text>").expect("a document");
+    let root = xml::parse("<text>abc</text>", xml::Limits::COMPACT).expect("a document");
     let mut cascade = Attributes { depth: 0 };
     let style = Style::default()
         .apply(&root, 100.0, &[])

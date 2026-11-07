@@ -141,7 +141,7 @@ Four decisions shape everything else:
 | `color` | CSS colour syntax: hex (3/4/6/8), `rgb()`/`rgba()`/`hsl()`/`hsla()` in both spellings, the named-colour table, `currentColor`, `none`; the hex digits and the HSL conversion are `lib/colour`'s |
 | `css` | The document's own `<style>` sheets: the selector subset, specificity, `!important`, and the declarations one element matches |
 | `geom` | `SubPath`, `StrokeStyle`, caps/joins, the object bounding box, the marker-vertex currency (`Vertex`, `Vertices`), and carrying either into another coordinate space |
-| `pathdata` | The whole `d` grammar and curve/arc flattening to a tolerance |
+| `pathdata` | The whole `d` grammar, read as absolute commands (`path_commands`) and flattened to a tolerance through `lib/bezier`'s one flattener |
 | `shape` | The basic shapes, including `rect`'s rounded-corner rules |
 | `marker` | `<marker>` placement: `refX`/`refY`, the viewport and its units, `orient`, and the one matrix per instance |
 | `stroke` | Stroke outline: segment quads, joins, caps, dashes |
@@ -503,7 +503,7 @@ SVG text is filled, stroked, gradient-painted, clipped, masked and
 transformed exactly as a `<path>` is, and an `SvgImage` is
 resolution-independent. So a glyph arrives as contours in font units and
 joins the one geometry currency: `lib/svg` flattens the quadratics through
-its own `flatten_quadratic` at the tolerance the *placement* resolves, the
+the one flattener (`lib/bezier`) at the tolerance the *placement* resolves, the
 same single step every other curve takes, so a glyph subdivides exactly as a
 `<path>` of the same shape. A rasterised cell would fix a resolution at
 decode time and put text on a second rasterisation path.

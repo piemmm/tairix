@@ -1,0 +1,39 @@
+[package]
+name = "tairix-drawing"
+description = "TAIRiX editable vector drawing: the persistent tree of paths, shapes, text and groups a drawing editor works on, its styles and gradients, and the SVG, RISC OS Draw, PDF and EPS formats it is read from and written to, first-party, no_std and fail-closed (plans/DRAW.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The geometry every object is drawn and edited in: the affine map, the
+# segments and paths, flattening, booleans and offsets.
+tairix-bezier = { path = "../bezier", version = "=0.0.0" }
+# The colour a paint and a gradient stop are, and its hex spelling.
+tairix-colour = { path = "../colour", version = "=0.0.0" }
+# `mathf`, the bounded float maths shapes are built with, and `fallible`, the
+# reservation every buffer sized by a document takes.
+tairix-util = { path = "../util", version = "=0.0.0" }
+# SVG's own grammar and cascade, which the SVG reader reads a document
+# through rather than restating: the path commands, shapes, colours,
+# lengths, transforms, stylesheets and gradient definitions.
+tairix-svg = { path = "../svg", version = "=0.0.0" }
+# The rasteriser a drawing is rendered through, and the colour and gradient
+# vocabulary the SVG cascade answers in.
+tairix-raster = { path = "../raster", version = "=0.0.0" }
+# The bounded string a number is spelled into.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
+# The XML scanner the reader holds a document to a document's bounds with,
+# and the escaper every writer spells text through.
+tairix-xml = { path = "../xml", version = "=0.0.0" }
+# The deflate every PDF stream is written through.
+tairix-compress = { path = "../compress", version = "=0.0.0" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

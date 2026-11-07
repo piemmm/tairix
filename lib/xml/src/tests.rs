@@ -200,3 +200,48 @@ fn a_parse_holds_no_more_than_its_length_bounds() {
     }
     assert!(parse_peak_bytes(10) <= parse_peak_bytes(11));
 }
+
+#[test]
+fn a_document_reader_holds_more_than_an_asset_reader() {
+    use super::{parse_with, Limits};
+    let wide = alloc::format!("<a>{}</a>", "<b/>".repeat(MAX_ELEMENTS));
+    assert_eq!(parse(&wide, ""), Err(XmlError::TooComplex));
+    assert!(parse_with(&wide, "", Limits::DOCUMENT).is_ok());
+    let deep = alloc::format!(
+        "{}{}",
+        "<a>".repeat(MAX_DEPTH + 1),
+        "</a>".repeat(MAX_DEPTH + 1)
+    );
+    assert!(parse_with(&deep, "", Limits::DOCUMENT).is_ok());
+    let tight = Limits {
+        depth: 2,
+        elements: 3,
+    };
+    // A self-closing element never opens a level; only an open one does.
+    assert!(parse_with("<a><b><c/></b></a>", "", tight).is_ok());
+    assert_eq!(
+        parse_with("<a><b><c></c></b></a>", "", tight),
+        Err(XmlError::TooComplex)
+    );
+    assert_eq!(
+        parse_with("<a><b/><c/><d/></a>", "", tight),
+        Err(XmlError::TooComplex)
+    );
+}
+
+#[test]
+fn escaped_text_reads_back_as_written() {
+    use super::Escaped;
+    let written = alloc::format!(
+        "<a v=\"{}\">{}</a>",
+        Escaped("1 < 2 & \"q\" 'x'"),
+        Escaped("<b>&")
+    );
+    assert_eq!(
+        written,
+        "<a v=\"1 &lt; 2 &amp; &quot;q&quot; &apos;x&apos;\">&lt;b&gt;&amp;</a>"
+    );
+    let root = parse(&written, "").expect("a document");
+    assert_eq!(root.attr("v"), Some("1 < 2 & \"q\" 'x'"));
+    assert_eq!(root.text(), "<b>&");
+}

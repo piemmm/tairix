@@ -9,6 +9,10 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The geometry every curve is read into and flattened by: the one flattener,
+# arc conversion and curve evaluation the decoder, the icon symbols and the
+# drawing editor share.
+tairix-bezier = { path = "../bezier", version = "=0.0.0" }
 # The straight-alpha colour type SVG fills decode into. The SVG decoder owns
 # no colour arithmetic of its own; it hands `Color`s straight to the
 # vector forms in `lib/cursor` / `lib/icon`, which rasterise through

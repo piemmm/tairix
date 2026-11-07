@@ -57,8 +57,59 @@ pub const MAX_ELEMENTS: usize = 8192;
 /// twice linear in the document however its attributes are spread.
 pub const MAX_ATTRIBUTES: usize = 256;
 
+/// The bounds a reader holds a document to: how deep its elements nest and
+/// how many it holds. Fixed defences against a hostile document, chosen by
+/// what the reader reads, never by the document.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Limits {
+    /// The deepest element nesting accepted.
+    pub depth: usize,
+    /// The most elements accepted in one document.
+    pub elements: usize,
+}
+
+impl Limits {
+    /// What an asset, a manifest or a protocol message is held to
+    /// ([`MAX_DEPTH`], [`MAX_ELEMENTS`]): what [`parse`] reads under.
+    pub const COMPACT: Self = Self {
+        depth: MAX_DEPTH,
+        elements: MAX_ELEMENTS,
+    };
+
+    /// What a document a user opens to edit is held to: a drawing of a
+    /// million elements nested a few hundred deep, read in the parser
+    /// sandbox, whose own memory ceiling holds what it costs.
+    pub const DOCUMENT: Self = Self {
+        depth: 256,
+        elements: 1 << 20,
+    };
+}
+
 /// The namespace the `xml` prefix is bound to without being declared.
 const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
+
+/// Text escaped for an XML attribute value or character data: the five
+/// characters XML gives meaning to written as their references, everything
+/// else as it is. What every writer of XML in the tree spells text through.
+#[derive(Copy, Clone, Debug)]
+pub struct Escaped<'a>(pub &'a str);
+
+impl core::fmt::Display for Escaped<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        use core::fmt::Write;
+        for ch in self.0.chars() {
+            match ch {
+                '&' => f.write_str("&amp;")?,
+                '<' => f.write_str("&lt;")?,
+                '>' => f.write_str("&gt;")?,
+                '"' => f.write_str("&quot;")?,
+                '\'' => f.write_str("&apos;")?,
+                ch => f.write_char(ch)?,
+            }
+        }
+        Ok(())
+    }
+}
 
 /// One node of an element's content: a child element, or a run of character
 /// data.
@@ -319,6 +370,19 @@ pub const fn parse_peak_bytes(input_len: usize) -> u64 {
 /// [`XmlError::MissingRoot`] when the document holds no element; and
 /// [`XmlError::TooComplex`] when it exceeds [`MAX_DEPTH`] or [`MAX_ELEMENTS`].
 pub fn parse<'a>(input: &'a str, namespace: &str) -> Result<Element<'a>, XmlError> {
+    parse_with(input, namespace, Limits::COMPACT)
+}
+
+/// [`parse`], holding the document to `limits` rather than to the compact
+/// bounds.
+///
+/// # Errors
+/// As [`parse`], [`XmlError::TooComplex`] past `limits`.
+pub fn parse_with<'a>(
+    input: &'a str,
+    namespace: &str,
+    limits: Limits,
+) -> Result<Element<'a>, XmlError> {
     let bytes = input.as_bytes();
     let n = bytes.len();
     let mut root: Option<Element<'_>> = None;
@@ -380,7 +444,7 @@ pub fn parse<'a>(input: &'a str, namespace: &str) -> Result<Element<'a>, XmlErro
         }
 
         count += 1;
-        if count > MAX_ELEMENTS {
+        if count > limits.elements {
             return Err(XmlError::TooComplex);
         }
         let self_closing = content.trim_end().ends_with('/');
@@ -393,7 +457,7 @@ pub fn parse<'a>(input: &'a str, namespace: &str) -> Result<Element<'a>, XmlErro
                 None => return Err(XmlError::Malformed),
             }
         } else {
-            if stack.len() >= MAX_DEPTH {
+            if stack.len() >= limits.depth {
                 return Err(XmlError::TooComplex);
             }
             stack.push(node);

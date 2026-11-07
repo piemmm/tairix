@@ -400,12 +400,50 @@ pub enum AppMenuSymbol {
     Float,
     /// The Trash: where removed items wait until it is emptied.
     Trash,
+    /// Gather the selection into one group.
+    Group,
+    /// Release a group's members.
+    Ungroup,
+    /// Hold it fast against change.
+    Lock,
+    /// Let it be changed again.
+    Unlock,
+    /// Bring it in front of everything beside it.
+    BringToFront,
+    /// Send it behind everything beside it.
+    SendToBack,
+    /// Join the shapes into one.
+    Union,
+    /// Cut the shapes above out of the lowest.
+    Difference,
+    /// Keep only where the shapes overlap.
+    Intersection,
+    /// Keep only where the shapes do not overlap.
+    Exclusion,
+    /// Turn it into a path whose nodes can be moved.
+    ObjectToPath,
+    /// Turn its stroke into a filled outline.
+    StrokeToPath,
+    /// Choose the node tool.
+    ToolNodes,
+    /// Choose the pen.
+    ToolPen,
+    /// Show outlines rather than paint.
+    ViewOutline,
+    /// Snap what is placed to guides and the grid.
+    Snap,
+    /// Show the selection whole in the window.
+    ZoomSelection,
+    /// The units lengths are given in.
+    Units,
+    /// Give the page a ground colour of its own.
+    PageGround,
 }
 
 impl AppMenuSymbol {
     /// Every symbol, in wire order: the symbol with wire value `n` is
     /// `ALL[n - 1]`.
-    pub const ALL: [Self; 192] = [
+    pub const ALL: [Self; 211] = [
         Self::Open,
         Self::OpenWith,
         Self::OpenFolder,
@@ -598,6 +636,25 @@ impl AppMenuSymbol {
         Self::SortByWorkgroup,
         Self::Float,
         Self::Trash,
+        Self::Group,
+        Self::Ungroup,
+        Self::Lock,
+        Self::Unlock,
+        Self::BringToFront,
+        Self::SendToBack,
+        Self::Union,
+        Self::Difference,
+        Self::Intersection,
+        Self::Exclusion,
+        Self::ObjectToPath,
+        Self::StrokeToPath,
+        Self::ToolNodes,
+        Self::ToolPen,
+        Self::ViewOutline,
+        Self::Snap,
+        Self::ZoomSelection,
+        Self::Units,
+        Self::PageGround,
     ];
 
     /// The symbol's wire value, never zero.

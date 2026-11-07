@@ -434,7 +434,8 @@ pub fn watch_wake(set: u64, wake: &tairix_rt::sync::WorkerWake, token: u64) -> R
 }
 
 /// Start `worker`, the application `name`'s `what` worker, with its answer
-/// wake watched on `set` under `token`.
+/// wake watched on `set` under `token`, answering whether a thread of its
+/// own now serves it.
 ///
 /// Never fatal. A wake the set refuses stops the desk before any thread runs,
 /// and a thread the machine will not grant leaves it stopped: either way each
@@ -446,7 +447,8 @@ pub fn start_worker<S, Req, Ans, D>(
     set: u64,
     token: u64,
     what: &str,
-) where
+) -> bool
+where
     S: Send + 'static,
     Req: Send + 'static,
     Ans: Send + 'static,
@@ -458,13 +460,17 @@ pub fn start_worker<S, Req, Ans, D>(
             name,
             format_args!("{what} wake refused ({err}); its work is done on the event loop"),
         );
-        return;
+        return false;
     }
-    if let Err(reason) = Worker::start(worker) {
-        report(
-            name,
-            format_args!("no {what} worker ({reason:?}); its work is done on the event loop"),
-        );
+    match Worker::start(worker) {
+        Ok(_) => true,
+        Err(reason) => {
+            report(
+                name,
+                format_args!("no {what} worker ({reason:?}); its work is done on the event loop"),
+            );
+            false
+        }
     }
 }
 

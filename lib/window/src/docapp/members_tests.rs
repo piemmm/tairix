@@ -14,6 +14,7 @@ fn what_a_member_asks_of_its_document_is_its_primarys() {
         Asked::SaveAs,
         Asked::SaveWhere { then_close: false },
         Asked::SaveWhere { then_close: true },
+        Asked::SaveCopy,
     ] {
         assert_eq!(route(&request), Route::Primary, "{request:?}");
     }

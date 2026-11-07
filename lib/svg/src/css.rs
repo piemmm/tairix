@@ -28,15 +28,35 @@ use alloc::vec::Vec;
 use crate::error::SvgError;
 use crate::xml::Element;
 
-/// The most selectors one document may define, counted after a selector list
-/// is expanded into one rule each.
+/// The bounds one document's sheets are held to: how many rules — counted
+/// after a selector list is expanded into one rule each — and how many
+/// declarations in all.
 ///
-/// A fixed security bound: every rule is tested against every element, so the
-/// product is what a hostile sheet would otherwise grow without end.
-const MAX_RULES: usize = 512;
+/// Fixed security bounds, chosen by the reader: every rule is tested against
+/// every element, so the product is what a hostile sheet would otherwise grow
+/// without end.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SheetLimits {
+    /// The most rules.
+    pub rules: usize,
+    /// The most declarations.
+    pub declarations: usize,
+}
 
-/// The most declarations one document's sheets may hold in total.
-const MAX_DECLARATIONS: usize = 2048;
+impl SheetLimits {
+    /// What a desktop asset's sheets are held to.
+    pub const COMPACT: Self = Self {
+        rules: 512,
+        declarations: 2048,
+    };
+
+    /// What a document opened to edit is held to, read in the parser
+    /// sandbox, whose reply deadline holds the matching's cost.
+    pub const DOCUMENT: Self = Self {
+        rules: 4096,
+        declarations: 16384,
+    };
+}
 
 /// The most compound selectors one selector may be built from.
 ///
@@ -239,10 +259,21 @@ struct Rule<'a> {
 }
 
 /// Every rule the document's own `<style>` elements define.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Stylesheet<'a> {
     blocks: Vec<Vec<Declaration<'a>>>,
     rules: Vec<Rule<'a>>,
+    limits: SheetLimits,
+}
+
+impl Default for Stylesheet<'_> {
+    fn default() -> Self {
+        Self {
+            blocks: Vec::new(),
+            rules: Vec::new(),
+            limits: SheetLimits::COMPACT,
+        }
+    }
 }
 
 /// The text of every `<style>` element in the tree that applies to a
@@ -274,13 +305,17 @@ fn gather_sheets<'a>(node: &Element<'a>, sheets: &mut Vec<Cow<'a, str>>) {
 }
 
 impl<'a> Stylesheet<'a> {
-    /// Parse the document's gathered `<style>` texts, in document order.
+    /// Parse the document's gathered `<style>` texts, in document order,
+    /// held to `limits`.
     ///
     /// # Errors
     /// [`SvgError::TooComplex`] once the sheets exceed the rule or
     /// declaration bound.
-    pub fn collect(sheets: &'a [Cow<'a, str>]) -> Result<Self, SvgError> {
-        let mut sheet = Self::default();
+    pub fn collect(sheets: &'a [Cow<'a, str>], limits: SheetLimits) -> Result<Self, SvgError> {
+        let mut sheet = Self {
+            limits,
+            ..Self::default()
+        };
         for text in sheets {
             sheet.parse(text)?;
         }
@@ -323,8 +358,8 @@ impl<'a> Stylesheet<'a> {
             if declarations.is_empty() {
                 continue;
             }
-            if self.count() + declarations.len() > MAX_DECLARATIONS
-                || self.rules.len() + parsed.len() > MAX_RULES
+            if self.count() + declarations.len() > self.limits.declarations
+                || self.rules.len() + parsed.len() > self.limits.rules
             {
                 return Err(SvgError::TooComplex);
             }

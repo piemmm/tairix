@@ -534,8 +534,10 @@ closes with that window. After every outcome a window's engine produces, the
 host hands Paint the window (`DocumentApp::driven`) before carrying out what
 was asked, so a sprite window's edit has reached its file before a save
 freezes it, and a file window's renames, changes and deletions reach its
-sprite windows. Nothing that grows with the picture rather than with the brush
-runs on the loop: a decode worker reads documents and pastes; the queue
+sprite windows. Text is drawn without waiting on the font service: the host's
+font worker fetches what was drawn provisionally, and the windows are laid out
+again when it lands. Nothing that grows with the picture rather than with the
+brush runs on the loop: a decode worker reads documents and pastes; the queue
 encodes saves and copies and carries out fills, gradients, selections, what an
 Apply of an operation still has to work out, transforms of every layer, merges
 and flattens, the Save As survey, a sprite file's thumbnails, and the putting

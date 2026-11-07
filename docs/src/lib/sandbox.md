@@ -160,6 +160,20 @@ Stability tier: **experimental**.
   `decode`'s `file_report` does. The image worker serves it beside its other ops, and
   `InspectService` alone, in a worker held to one document. `TextEdit.app`'s
   Data display is the consumer.
+- **`drawedit`** — a drawing editor's documents read into the editable
+  drawing (`tairix-drawing`, [`docs`](./drawing.md)) over the same upload.
+  `read_drawing` asks the worker to read the document as SVG; the worker
+  answers the page, grid, guides, title and what it could not keep, and then
+  the drawing as records a batch at a time — every gradient and style once,
+  referred to by number, then the tree depth first, a group's clip before its
+  children, a long path's nodes cut across records so every record fits a
+  frame. The editor rebuilds the drawing as the records arrive, with an
+  explicit stack, every value through the drawing's own constructors; a
+  reference to a definition not sent, a count past the drawing's bounds, a
+  group given more or fewer children than it declared, a batch that brings
+  nothing, or a record with bytes left over is not believed.
+  `DrawEditService` serves it in a worker held to `WorkerMemory::Documents`.
+  `Draw.app` is the consumer, for opened documents and pasted drawings.
 - **`audiodecode`** — a sound file decoded through
   [`tairix-sound`](./sound.md) by a long-lived worker over a supervised
   session. The owner hands over the file's length, never the file: the

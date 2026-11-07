@@ -1,18 +1,23 @@
-//! SVG's basic shapes, flattened into the one contour currency.
+//! SVG's basic shapes: their attributes resolved into geometry, and that
+//! geometry flattened into the one contour currency.
 //!
-//! A rectangle, circle, ellipse, line, polyline, polygon, and path all end up
-//! as [`SubPath`]s in user space, so everything downstream — stroking,
-//! transforming, filling — sees a single kind of geometry and no shape needs
-//! its own special case again.
+//! [`shape_geometry`] reads a rectangle, circle, ellipse, line, polyline,
+//! polygon or path into the geometry its attributes state, every default and
+//! clamp SVG prescribes applied, so a reader that keeps shapes as shapes — the
+//! drawing editor's — and the decoder that flattens them ([`shape_subpaths`])
+//! share one reading of the rules. Flattened, every shape is [`SubPath`]s in
+//! user space, so everything downstream sees a single kind of geometry.
 
 use alloc::vec::Vec;
 
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 
+use tairix_bezier::flatten::flatten_ellipse_arc;
+
 use crate::error::SvgError;
 use crate::geom::{Point, SubPath, Vertices};
 use crate::number::{parse_length, Numbers};
-use crate::pathdata::{flatten_ellipse_arc, parse_path_data};
+use crate::pathdata::parse_path_data;
 use crate::xml::Element;
 
 /// Whether `name` is one of the elements this module draws.
@@ -36,20 +41,123 @@ pub fn takes_markers(name: &str) -> bool {
     matches!(name, "path" | "line" | "polyline" | "polygon")
 }
 
+/// A basic shape's geometry as its attributes state it, in its own user
+/// space.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ShapeGeometry<'a> {
+    /// A `<path>`'s `d`, read by [`crate::pathdata`].
+    Path(&'a str),
+    /// A `<rect>`: its corner radii resolved (`auto` and an absent radius
+    /// taking the other's) and each held to half its side.
+    Rect {
+        /// The left edge.
+        x: f64,
+        /// The top edge.
+        y: f64,
+        /// The width, not negative.
+        width: f64,
+        /// The height, not negative.
+        height: f64,
+        /// The corners' horizontal radius.
+        rx: f64,
+        /// The corners' vertical radius.
+        ry: f64,
+    },
+    /// A `<circle>` or `<ellipse>`.
+    Ellipse {
+        /// The centre.
+        centre: Point,
+        /// The radii, not negative; a circle's are equal.
+        radii: Point,
+    },
+    /// A `<line>`.
+    Line {
+        /// Where it starts.
+        from: Point,
+        /// Where it ends.
+        to: Point,
+    },
+    /// A `<polyline>`, or a `<polygon>` when `closed`.
+    Polyline {
+        /// Its points, in order.
+        points: Vec<Point>,
+        /// Whether it is a polygon.
+        closed: bool,
+    },
+}
+
+/// The geometry `node` states, or `None` when it is not a basic shape.
+///
+/// `viewport` is what percentage lengths resolve against, and `max_points`
+/// bounds a poly-shape's points.
+///
+/// # Errors
+/// Returns the parse error of a malformed attribute, [`SvgError::InvalidNumber`]
+/// for a negative extent or radius, which is not geometry the author can have
+/// meant, and [`SvgError::TooComplex`] for more than `max_points` points.
+pub fn shape_geometry<'a>(
+    node: &'a Element<'a>,
+    viewport: (f64, f64),
+    max_points: usize,
+) -> Result<Option<ShapeGeometry<'a>>, SvgError> {
+    let geometry = match node.name {
+        "path" => ShapeGeometry::Path(node.attr("d").unwrap_or("")),
+        "rect" => rect_geometry(node, viewport)?,
+        "circle" => {
+            let r = length(node, "r", diagonal(viewport))?;
+            if r < 0.0 {
+                return Err(SvgError::InvalidNumber);
+            }
+            ShapeGeometry::Ellipse {
+                centre: (
+                    length(node, "cx", viewport.0)?,
+                    length(node, "cy", viewport.1)?,
+                ),
+                radii: (r, r),
+            }
+        }
+        "ellipse" => {
+            let (rx, ry) = radii(node, viewport)?;
+            ShapeGeometry::Ellipse {
+                centre: (
+                    length(node, "cx", viewport.0)?,
+                    length(node, "cy", viewport.1)?,
+                ),
+                radii: (rx, ry),
+            }
+        }
+        "line" => ShapeGeometry::Line {
+            from: (
+                length(node, "x1", viewport.0)?,
+                length(node, "y1", viewport.1)?,
+            ),
+            to: (
+                length(node, "x2", viewport.0)?,
+                length(node, "y2", viewport.1)?,
+            ),
+        },
+        "polyline" | "polygon" => ShapeGeometry::Polyline {
+            points: poly_points(node, max_points)?,
+            closed: node.name == "polygon",
+        },
+        _ => return Ok(None),
+    };
+    Ok(Some(geometry))
+}
+
 /// Flatten one basic shape into sub-paths in its own user space.
 ///
 /// A shape that encloses nothing — a zero extent, a zero radius — yields an
 /// empty list rather than an error, because SVG defines those as simply not
-/// rendering. A *negative* extent is an error, because it is not geometry the
-/// author can have meant.
+/// rendering.
 ///
 /// `vertices` collects where markers go, for the shapes that take them
 /// ([`takes_markers`]). The others leave it untouched, so a rectangle pays
 /// nothing for a feature it cannot carry.
 ///
 /// # Errors
-/// Returns the parse error of a malformed attribute, or
-/// [`SvgError::TooComplex`] once the shape would exceed `max_points`.
+/// As [`shape_geometry`], and [`SvgError::TooComplex`] once the shape would
+/// exceed `max_points`.
 pub fn shape_subpaths(
     node: &Element<'_>,
     viewport: (f64, f64),
@@ -57,18 +165,49 @@ pub fn shape_subpaths(
     max_points: usize,
     vertices: Option<&mut Vertices>,
 ) -> Result<Vec<SubPath>, SvgError> {
-    match node.name {
-        "path" => match node.attr("d") {
-            Some(data) => parse_path_data(data, tolerance, max_points, vertices),
-            None => Ok(Vec::new()),
-        },
-        "rect" => rect(node, viewport, tolerance),
-        "circle" => circle(node, viewport, tolerance),
-        "ellipse" => ellipse(node, viewport, tolerance),
-        "line" => line(node, viewport, vertices),
-        "polyline" => points(node, false, max_points, vertices),
-        "polygon" => points(node, true, max_points, vertices),
-        _ => Ok(Vec::new()),
+    let Some(geometry) = shape_geometry(node, viewport, max_points)? else {
+        return Ok(Vec::new());
+    };
+    match geometry {
+        ShapeGeometry::Path("") => Ok(Vec::new()),
+        ShapeGeometry::Path(data) => parse_path_data(data, tolerance, max_points, vertices),
+        ShapeGeometry::Rect {
+            x,
+            y,
+            width,
+            height,
+            rx,
+            ry,
+        } => Ok(rect_outline(x, y, width, height, (rx, ry), tolerance)),
+        ShapeGeometry::Ellipse { centre, radii } => Ok(full_ellipse(centre, radii, tolerance)),
+        ShapeGeometry::Line { from, to } => {
+            if let Some(vertices) = vertices {
+                vertices.move_to(from)?;
+                vertices.line_to(to)?;
+            }
+            Ok(alloc::vec![SubPath::open(alloc::vec![from, to])])
+        }
+        ShapeGeometry::Polyline { points, closed } => {
+            if points.is_empty() {
+                return Ok(Vec::new());
+            }
+            // Every point of a poly-shape is a command vertex, and its
+            // closure joins the two ends exactly as a path's `Z` does — so
+            // the same builder states the rule once for both.
+            if let Some(vertices) = vertices {
+                let mut walk = points.iter().copied();
+                if let Some(first) = walk.next() {
+                    vertices.move_to(first)?;
+                    for point in walk {
+                        vertices.line_to(point)?;
+                    }
+                    if closed {
+                        vertices.close()?;
+                    }
+                }
+            }
+            Ok(alloc::vec![SubPath { points, closed }])
+        }
     }
 }
 
@@ -89,33 +228,9 @@ fn radius(node: &Element<'_>, name: &str, basis: f64) -> Result<Option<f64>, Svg
     }
 }
 
-/// The length a radius with no axis of its own resolves a percentage against.
-fn diagonal(viewport: (f64, f64)) -> f64 {
-    tairix_util::mathf::sqrt(f64::midpoint(
-        viewport.0 * viewport.0,
-        viewport.1 * viewport.1,
-    ))
-}
-
-/// `<rect>`, with SVG's rounded-corner rules.
-fn rect(
-    node: &Element<'_>,
-    viewport: (f64, f64),
-    tolerance: f64,
-) -> Result<Vec<SubPath>, SvgError> {
-    let x = length(node, "x", viewport.0)?;
-    let y = length(node, "y", viewport.1)?;
-    let w = length(node, "width", viewport.0)?;
-    let h = length(node, "height", viewport.1)?;
-    if w < 0.0 || h < 0.0 {
-        return Err(SvgError::InvalidNumber);
-    }
-    if w == 0.0 || h == 0.0 {
-        return Ok(Vec::new());
-    }
-    // An absent or `auto` radius takes the other axis's, and neither may
-    // exceed half its side — SVG clamps rather than letting the corners meet
-    // and invert.
+/// An element's `rx` and `ry`, an absent or `auto` one taking the other's,
+/// both refused when negative.
+fn radii(node: &Element<'_>, viewport: (f64, f64)) -> Result<(f64, f64), SvgError> {
     let (rx, ry) = match (
         radius(node, "rx", viewport.0)?,
         radius(node, "ry", viewport.1)?,
@@ -128,18 +243,62 @@ fn rect(
     if rx < 0.0 || ry < 0.0 {
         return Err(SvgError::InvalidNumber);
     }
-    let rx = rx.min(w / 2.0);
-    let ry = ry.min(h / 2.0);
+    Ok((rx, ry))
+}
 
+/// The length a radius with no axis of its own resolves a percentage against.
+fn diagonal(viewport: (f64, f64)) -> f64 {
+    tairix_util::mathf::sqrt(f64::midpoint(
+        viewport.0 * viewport.0,
+        viewport.1 * viewport.1,
+    ))
+}
+
+/// `<rect>`'s geometry, with SVG's rounded-corner rules: neither radius may
+/// exceed half its side — SVG clamps rather than letting the corners meet and
+/// invert.
+fn rect_geometry<'a>(
+    node: &Element<'_>,
+    viewport: (f64, f64),
+) -> Result<ShapeGeometry<'a>, SvgError> {
+    let x = length(node, "x", viewport.0)?;
+    let y = length(node, "y", viewport.1)?;
+    let width = length(node, "width", viewport.0)?;
+    let height = length(node, "height", viewport.1)?;
+    if width < 0.0 || height < 0.0 {
+        return Err(SvgError::InvalidNumber);
+    }
+    let (rx, ry) = radii(node, viewport)?;
+    Ok(ShapeGeometry::Rect {
+        x,
+        y,
+        width,
+        height,
+        rx: rx.min(width / 2.0),
+        ry: ry.min(height / 2.0),
+    })
+}
+
+/// A rectangle's outline, its corners flattened quarter ellipses.
+fn rect_outline(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    (rx, ry): (f64, f64),
+    tolerance: f64,
+) -> Vec<SubPath> {
+    if w == 0.0 || h == 0.0 {
+        return Vec::new();
+    }
     if rx == 0.0 || ry == 0.0 {
-        return Ok(alloc::vec![SubPath::closed(alloc::vec![
+        return alloc::vec![SubPath::closed(alloc::vec![
             (x, y),
             (x + w, y),
             (x + w, y + h),
             (x, y + h),
-        ])]);
+        ])];
     }
-
     let mut outline = Vec::new();
     outline.push((x + rx, y));
     outline.push((x + w - rx, y));
@@ -151,13 +310,13 @@ fn rect(
     ];
     for (index, (centre, start)) in corners.into_iter().enumerate() {
         flatten_ellipse_arc(
-            centre,
-            (rx, ry),
+            centre.into(),
+            (rx, ry).into(),
             0.0,
             start,
             FRAC_PI_2,
             tolerance,
-            &mut outline,
+            |point| outline.push(point.tuple()),
         );
         // The straight side that follows each corner but the last, which the
         // closing of the contour supplies.
@@ -168,45 +327,7 @@ fn rect(
             _ => {}
         }
     }
-    Ok(alloc::vec![SubPath::closed(outline)])
-}
-
-/// `<circle>`.
-fn circle(
-    node: &Element<'_>,
-    viewport: (f64, f64),
-    tolerance: f64,
-) -> Result<Vec<SubPath>, SvgError> {
-    let cx = length(node, "cx", viewport.0)?;
-    let cy = length(node, "cy", viewport.1)?;
-    let r = length(node, "r", diagonal(viewport))?;
-    if r < 0.0 {
-        return Err(SvgError::InvalidNumber);
-    }
-    Ok(full_ellipse((cx, cy), (r, r), tolerance))
-}
-
-/// `<ellipse>`, whose radii may each be `auto` (meaning the other's value).
-fn ellipse(
-    node: &Element<'_>,
-    viewport: (f64, f64),
-    tolerance: f64,
-) -> Result<Vec<SubPath>, SvgError> {
-    let cx = length(node, "cx", viewport.0)?;
-    let cy = length(node, "cy", viewport.1)?;
-    let (rx, ry) = match (
-        radius(node, "rx", viewport.0)?,
-        radius(node, "ry", viewport.1)?,
-    ) {
-        (None, None) => (0.0, 0.0),
-        (Some(rx), None) => (rx, rx),
-        (None, Some(ry)) => (ry, ry),
-        (Some(rx), Some(ry)) => (rx, ry),
-    };
-    if rx < 0.0 || ry < 0.0 {
-        return Err(SvgError::InvalidNumber);
-    }
-    Ok(full_ellipse((cx, cy), (rx, ry), tolerance))
+    alloc::vec![SubPath::closed(outline)]
 }
 
 /// A whole ellipse as one closed contour, or nothing when it has no area.
@@ -215,7 +336,17 @@ fn full_ellipse(centre: Point, radii: Point, tolerance: f64) -> Vec<SubPath> {
         return Vec::new();
     }
     let mut outline = alloc::vec![(centre.0 + radii.0, centre.1)];
-    flatten_ellipse_arc(centre, radii, 0.0, 0.0, TAU, tolerance, &mut outline);
+    flatten_ellipse_arc(
+        centre.into(),
+        radii.into(),
+        0.0,
+        0.0,
+        TAU,
+        tolerance,
+        |point| {
+            outline.push(point.tuple());
+        },
+    );
     // The sweep closes on its own start point, which the contour's implicit
     // closure already supplies.
     if outline.len() > 1 {
@@ -224,30 +355,8 @@ fn full_ellipse(centre: Point, radii: Point, tolerance: f64) -> Vec<SubPath> {
     alloc::vec![SubPath::closed(outline)]
 }
 
-/// `<line>`, which has no area and so only ever shows as a stroke.
-fn line(
-    node: &Element<'_>,
-    viewport: (f64, f64),
-    vertices: Option<&mut Vertices>,
-) -> Result<Vec<SubPath>, SvgError> {
-    let x1 = length(node, "x1", viewport.0)?;
-    let y1 = length(node, "y1", viewport.1)?;
-    let x2 = length(node, "x2", viewport.0)?;
-    let y2 = length(node, "y2", viewport.1)?;
-    if let Some(vertices) = vertices {
-        vertices.move_to((x1, y1))?;
-        vertices.line_to((x2, y2))?;
-    }
-    Ok(alloc::vec![SubPath::open(alloc::vec![(x1, y1), (x2, y2)])])
-}
-
-/// `<polyline>` and `<polygon>`, which differ only in closure.
-fn points(
-    node: &Element<'_>,
-    closed: bool,
-    max_points: usize,
-    vertices: Option<&mut Vertices>,
-) -> Result<Vec<SubPath>, SvgError> {
+/// The points of a `<polyline>` or `<polygon>`.
+fn poly_points(node: &Element<'_>, max_points: usize) -> Result<Vec<Point>, SvgError> {
     let Some(text) = node.attr("points") else {
         return Ok(Vec::new());
     };
@@ -264,28 +373,7 @@ fn points(
         };
         list.push((x, y));
     }
-    if list.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Every point of a poly-shape is a command vertex, and its closure joins
-    // the two ends exactly as a path's `Z` does — so the same builder states
-    // the rule once for both.
-    if let Some(vertices) = vertices {
-        let mut walk = list.iter().copied();
-        if let Some(first) = walk.next() {
-            vertices.move_to(first)?;
-            for point in walk {
-                vertices.line_to(point)?;
-            }
-            if closed {
-                vertices.close()?;
-            }
-        }
-    }
-    Ok(alloc::vec![SubPath {
-        points: list,
-        closed,
-    }])
+    Ok(list)
 }
 
 #[cfg(test)]

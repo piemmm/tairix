@@ -43,6 +43,7 @@ use tairix_raster::Region;
 use tairix_sandbox::decode::{
     container_summary, disassemble, file_report, CodeWindow, DecodeService, Isa, Summarise,
 };
+use tairix_sandbox::drawedit::{read_drawing, DrawEditService, DrawFormat};
 use tairix_sandbox::helpdoc::{render_help, HelpService, RenderMode, Styling};
 use tairix_sandbox::host::{Launcher, ParserSandbox};
 use tairix_sandbox::imageedit::{
@@ -854,6 +855,7 @@ fn hostile_document_iteration<L: Launcher>(hostile: &mut ParserSandbox<L, Silent
     };
     let _ = read_kept(hostile, &kept, &mut Vec::new());
     let _ = close_edit(hostile);
+    let _ = read_drawing(hostile, DrawFormat::Svg, &mut tairix_drawing::Ids::new());
 }
 
 /// A picture no worker described, for requests out of order and for the
@@ -1038,6 +1040,62 @@ fn fuzz_session_iteration(noise: &[u8], rng: &mut Prng) {
     }
 }
 
+/// Drawings for the drawing read: Draw's own namespace, a clip, a gradient
+/// shared by fill and stroke, text, a long path.
+const DRAWINGS: &[&str] = &[
+    r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:draw="urn:tairix:draw" width="100" height="80"><title>t</title><g draw:layer="true" draw:name="A"><path d="M1 1 C5 0 9 9 12 4 S20 20 30 3 Z" draw:nodes="csz" stroke="#123" stroke-dasharray="2 1" draw:end-arrow="triangle 3 3"/><path d="M0 0 L1 1" draw:shape="star" draw:cx="50" draw:cy="40" draw:points="5" draw:outer="30" draw:inner="0.5" draw:rotation="0" draw:rounding="0"/></g></svg>"##,
+    r#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><defs><linearGradient id="g" x2="1"><stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient><clipPath id="k"><circle cx="32" cy="32" r="20"/></clipPath></defs><g clip-path="url(#k)" opacity="0.5"><rect width="64" height="64" fill="url(#g)" stroke="url(#g)"/><text x="4" y="30" font-size="12">Hello<tspan x="4" y="44">there</tspan></text></g></svg>"#,
+];
+
+/// Serves as the drawing worker does, but flips bytes in some of its
+/// replies: a worker turning hostile within a read.
+struct FlippingDrawEdit {
+    inner: DrawEditService,
+    rng: Prng,
+}
+
+impl Service for FlippingDrawEdit {
+    fn handle(&mut self, request: &[u8]) -> Vec<u8> {
+        let mut reply = self.inner.handle(request);
+        if !reply.is_empty() && self.rng.below(3) == 0 {
+            for _ in 0..=self.rng.below(3) {
+                let at = self.rng.below(reply.len());
+                reply[at] ^= self.rng.next_u8().max(1);
+            }
+        }
+        reply
+    }
+}
+
+fn fuzz_drawedit_iteration<L: Launcher, F: Launcher>(
+    honest: &mut ParserSandbox<L, SilentSink>,
+    flipping: &mut ParserSandbox<F, SilentSink>,
+    noise: &[u8],
+    rng: &mut Prng,
+) {
+    let mut mutated = rng.pick(DRAWINGS).as_bytes().to_vec();
+    for _ in 0..rng.at_most(4) {
+        let pos = rng.below(mutated.len());
+        mutated[pos] ^= rng.next_u8();
+    }
+    let cut = rng.at_most(mutated.len());
+    for document in [mutated.as_slice(), &mutated[..cut], noise] {
+        if send_document(honest, document).is_ok() {
+            if let Ok(read) = read_drawing(honest, DrawFormat::Svg, &mut tairix_drawing::Ids::new())
+            {
+                assert!(
+                    tairix_drawing::svg::write(&read.drawing).is_ok(),
+                    "a drawing believed writes"
+                );
+            }
+        }
+    }
+    let honest_bytes = rng.pick(DRAWINGS).as_bytes();
+    if send_document(flipping, honest_bytes).is_ok() {
+        let _ = read_drawing(flipping, DrawFormat::Svg, &mut tairix_drawing::Ids::new());
+    }
+}
+
 /// Launches [`HostileChannel`] workers with fresh noise per launch.
 struct HostileLauncher {
     rng: Prng,
@@ -1063,6 +1121,19 @@ impl Launcher for HostileLauncher {
     }
 }
 
+/// A sandbox over drawing workers that each turn hostile within a read, each
+/// from its own seed drawn from `seed`.
+fn flipping_drawedit(seed: u64) -> ParserSandbox<impl Launcher, SilentSink> {
+    let mut seeds = Prng::new(seed);
+    ParserSandbox::new(
+        LoopbackLauncher::new(move || FlippingDrawEdit {
+            inner: DrawEditService::default(),
+            rng: Prng::new(seeds.next_u64()),
+        }),
+        SilentSink,
+    )
+}
+
 /// A sandbox over an honest `S` running in this process.
 fn honest_worker<S: Service + Default>() -> ParserSandbox<LoopbackLauncher<fn() -> S>, SilentSink> {
     ParserSandbox::new(LoopbackLauncher::new(S::default as fn() -> S), SilentSink)
@@ -1082,6 +1153,8 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
     let mut honest_time = honest_worker::<TimeSyncService>();
     let mut honest_text = honest_worker::<TextSyntaxService>();
     let mut honest_inspect = honest_worker::<InspectService>();
+    let mut honest_draw = honest_worker::<DrawEditService>();
+    let mut flipping_draw = flipping_drawedit(rng.next_u64());
     let mut hostile = ParserSandbox::new(
         HostileLauncher {
             rng: Prng::new(rng.next_u64()),
@@ -1145,6 +1218,7 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         fuzz_application_sprite_iteration(&mut honest_icon, &noise, &mut rng);
         fuzz_edit_iteration(&mut honest_icon, &noise, &mut rng);
         fuzz_inspect_iteration(&mut honest_inspect, &noise, &mut rng);
+        fuzz_drawedit_iteration(&mut honest_draw, &mut flipping_draw, &noise, &mut rng);
 
         // 6b. The duplex session seam: its inbound codec over the same
         //    noise, plus an honest round trip through the in-process fake.

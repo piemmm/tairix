@@ -30,7 +30,7 @@ fn marker(tag: &str) -> Marker {
 #[track_caller]
 fn read(tag: &str) -> Result<Option<Marker>, SvgError> {
     let document = format!("<svg>{tag}</svg>");
-    let root = xml::parse(&document).expect("a document");
+    let root = xml::parse(&document, xml::Limits::COMPACT).expect("a document");
     let node = root.children().next().expect("a child element");
     // Read into an owned value so the borrowed document may be dropped.
     Marker::read(node, VIEWPORT)

@@ -1484,6 +1484,7 @@ mod tests {
     /// a loud test diff.
     const EXPECTED_PROGRAM_BUNDLES: &[&str] = &[
         "Clock",
+        "Draw",
         "Life",
         "Paint",
         "Raytrace",

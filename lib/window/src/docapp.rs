@@ -119,6 +119,10 @@ pub enum Request<K, O> {
         /// Close the window once saved.
         then_close: bool,
     },
+    /// Ask where to write a copy of the document, and in which of the
+    /// formats [`DocumentView::copy_formats`] offers: the document's own
+    /// file, name and changes are left as they are.
+    SaveCopy,
     /// Ask for a document to open.
     Open,
     /// Close the window: its document is saved or its changes given up.
@@ -400,6 +404,22 @@ pub trait DocumentView: SavedDocument {
     /// one it has never had, or one its own name cannot be written as — or
     /// `""` for a format named by its file type alone.
     fn offered_extension(&self) -> &'static str;
+
+    /// The formats a copy may be written in, for the chooser a
+    /// [`Request::SaveCopy`] opens, or why no copy can be written.
+    ///
+    /// # Errors
+    ///
+    /// Why the document cannot be copied, for an application that writes no
+    /// copies: the default.
+    fn copy_formats(&self) -> Result<SaveFormats, String> {
+        Err(String::from("This application writes no copies"))
+    }
+
+    /// The extension a copy's name is offered with.
+    fn copy_extension(&self) -> &'static str {
+        self.offered_extension()
+    }
 
     /// The formats a Save As can write and the one the document is in now,
     /// which the picker opens on and holds the chosen name to before it makes

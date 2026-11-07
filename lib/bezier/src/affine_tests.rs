@@ -165,3 +165,48 @@ fn max_scale_of_a_collapsed_or_broken_transform_is_zero() {
     };
     assert_close(unmeasurable.max_scale(), 0.0);
 }
+
+#[test]
+fn decompose_round_trips_scale_shear_rotation_and_translation() {
+    let parts = crate::Decomposed {
+        translate: crate::Point::new(12.5, -3.0),
+        rotation_degrees: 33.0,
+        skew_x_degrees: -12.0,
+        scale: crate::Point::new(2.0, -0.5),
+    };
+    let transform = Affine::composed(parts);
+    let found = transform
+        .decompose()
+        .expect("an invertible transform decomposes");
+    assert_close(found.translate.x, 12.5);
+    assert_close(found.translate.y, -3.0);
+    assert_close(found.rotation_degrees, 33.0);
+    assert_close(found.skew_x_degrees, -12.0);
+    assert_close(found.scale.x, 2.0);
+    assert_close(found.scale.y, -0.5);
+    let rebuilt = Affine::composed(found);
+    for point in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (-4.0, 9.5)] {
+        assert_point_close(rebuilt.apply(point), transform.apply(point));
+    }
+}
+
+#[test]
+fn a_collapsed_transform_does_not_decompose() {
+    assert_eq!(Affine::scale(3.0, 0.0).decompose(), None);
+    let broken = Affine {
+        e: f64::NAN,
+        ..Affine::IDENTITY
+    };
+    assert_eq!(broken.decompose(), None);
+}
+
+#[test]
+fn map_vector_ignores_the_translation() {
+    let transform = Affine::translate(100.0, -50.0).then(Affine::scale(2.0, 3.0));
+    let moved = transform.map_vector(crate::Point::new(1.0, 1.0));
+    assert_close(moved.x, 2.0);
+    assert_close(moved.y, 3.0);
+    let placed = transform.map(crate::Point::new(1.0, 1.0));
+    assert_close(placed.x, 202.0);
+    assert_close(placed.y, -147.0);
+}

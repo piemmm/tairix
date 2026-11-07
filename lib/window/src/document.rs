@@ -98,6 +98,8 @@ pub enum PickFor {
         /// Close the window once saved.
         then_close: bool,
     },
+    /// Where to write a copy of the document, which the application writes.
+    Copy,
 }
 
 /// A save to carry out: `snapshot`, the document as it was at `generation`,

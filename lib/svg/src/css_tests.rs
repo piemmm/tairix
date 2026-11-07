@@ -17,9 +17,9 @@ use crate::xml::{self, Element};
 /// test addresses the element it means without a second tree walker.
 #[track_caller]
 fn matched(document: &str, path: &[&str]) -> Vec<(String, String)> {
-    let root = xml::parse(document).expect("a document");
+    let root = xml::parse(document, xml::Limits::COMPACT).expect("a document");
     let sheets = crate::css::sheet_texts(&root);
-    let sheet = Stylesheet::collect(&sheets).expect("a sheet");
+    let sheet = Stylesheet::collect(&sheets, super::SheetLimits::COMPACT).expect("a sheet");
     let mut chain: Vec<&Element<'_>> = alloc::vec![&root];
     for step in path {
         let parent = *chain.last().expect("a parent");
@@ -289,9 +289,11 @@ fn a_sheet_for_another_medium_or_language_is_skipped() {
 
 #[test]
 fn a_document_with_no_sheet_matches_nothing() {
-    let root = xml::parse("<svg><rect/></svg>").expect("a document");
+    let root = xml::parse("<svg><rect/></svg>", xml::Limits::COMPACT).expect("a document");
     let sheets = crate::css::sheet_texts(&root);
-    assert!(Stylesheet::collect(&sheets).expect("a sheet").is_empty());
+    assert!(Stylesheet::collect(&sheets, super::SheetLimits::COMPACT)
+        .expect("a sheet")
+        .is_empty());
 }
 
 // --- the bounds ------------------------------------------------------------
@@ -303,10 +305,10 @@ fn a_sheet_past_the_rule_bound_refuses_the_document() {
         let _ = write!(text, ".c{index}{{fill:red}}");
     }
     let document = format!("<svg><style>{text}</style><rect/></svg>");
-    let root = xml::parse(&document).expect("a document");
+    let root = xml::parse(&document, xml::Limits::COMPACT).expect("a document");
     let sheets = crate::css::sheet_texts(&root);
     assert_eq!(
-        Stylesheet::collect(&sheets).err(),
+        Stylesheet::collect(&sheets, super::SheetLimits::COMPACT).err(),
         Some(SvgError::TooComplex)
     );
 }
@@ -314,7 +316,9 @@ fn a_sheet_past_the_rule_bound_refuses_the_document() {
 #[test]
 fn a_selector_past_the_part_bound_is_dropped() {
     let document = "<svg><style>g g g g g g g g g rect{fill:red}</style><rect/></svg>";
-    let root = xml::parse(document).expect("a document");
+    let root = xml::parse(document, xml::Limits::COMPACT).expect("a document");
     let sheets = crate::css::sheet_texts(&root);
-    assert!(Stylesheet::collect(&sheets).expect("a sheet").is_empty());
+    assert!(Stylesheet::collect(&sheets, super::SheetLimits::COMPACT)
+        .expect("a sheet")
+        .is_empty());
 }

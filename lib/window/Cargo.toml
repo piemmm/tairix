@@ -46,6 +46,13 @@ tairix-util = { path = "../util", version = "=0.0.0" }
 # The one rule for a hidden character.
 tairix-visible = { path = "../visible", version = "=0.0.0" }
 
+[target.'cfg(target_os = "none")'.dependencies]
+# The font client a document application's text is drawn through: the host
+# has it draw without waiting on the font service, and fetches what it drew
+# provisionally on a thread of its own. Optional with the rest of the app
+# half, and only where the runtime it fetches through runs.
+tairix-font = { path = "../font", version = "=0.0.0", optional = true, features = ["rt"] }
+
 [features]
 default = ["rt"]
 # The application's own half: the frame region (`WindowFrames`), the shared
@@ -57,6 +64,7 @@ rt = [
     "dep:tairix-procinfo",
     "dep:tairix-parallel",
     "dep:tairix-raster",
+    "dep:tairix-font",
 ]
 
 [lints]

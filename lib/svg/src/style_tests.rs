@@ -24,7 +24,7 @@ fn styled(tag: &str) -> Style {
 #[track_caller]
 fn resolve(parent: &Style, tag: &str) -> Result<Style, SvgError> {
     let document = format!("<svg>{tag}</svg>");
-    let root = xml::parse(&document).expect("a document");
+    let root = xml::parse(&document, xml::Limits::COMPACT).expect("a document");
     let child = root.children().next().expect("a child element");
     parent.apply(child, VIEWPORT, &[])
 }

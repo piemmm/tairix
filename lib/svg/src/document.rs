@@ -228,7 +228,7 @@ pub fn decode(
     provider: &mut dyn FontProvider,
 ) -> Result<SvgImage, SvgError> {
     let text = core::str::from_utf8(bytes).map_err(|_| SvgError::NotUtf8)?;
-    let root = xml::parse(text)?;
+    let root = xml::parse(text, xml::Limits::COMPACT)?;
     if root.name != "svg" {
         return Err(SvgError::MissingRoot);
     }
@@ -262,7 +262,7 @@ pub fn decode(
         chains: Vec::new(),
         styles: Vec::new(),
         servers: PaintServers::collect(&root),
-        sheet: Stylesheet::collect(&sheets)?,
+        sheet: Stylesheet::collect(&sheets, css::SheetLimits::COMPACT)?,
         cascade: Vec::new(),
         path: Vec::new(),
         extents: Vec::new(),
@@ -900,14 +900,10 @@ impl<'a> Decoder<'a, '_> {
         depth: usize,
         out: &mut Vec<Node>,
     ) -> Result<(), SvgError> {
-        let inherited = style.inherit();
-        for child in element.children() {
-            if !is_switchable(child.name) || !conditions_met(child) {
-                continue;
-            }
-            return self.walk(child, &inherited, transform, depth, out);
+        match switch_choice(element) {
+            Some(child) => self.walk(child, &style.inherit(), transform, depth, out),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// Draw what a `<use>` references, at the offset it asks for.
@@ -1881,6 +1877,15 @@ fn grouped(opacity: u8, mask: Option<Mask>, children: Vec<Node>) -> Vec<Node> {
         mask,
         children,
     })]
+}
+
+/// The child of the `<switch>` `element` that is drawn: the first that is a
+/// graphics or container element and whose conditions are met, if any.
+#[must_use]
+pub fn switch_choice<'a>(element: &'a Element<'a>) -> Option<&'a Element<'a>> {
+    element
+        .children()
+        .find(|child| is_switchable(child.name) && conditions_met(child))
 }
 
 /// Whether a `<switch>` may choose this child at all.

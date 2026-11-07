@@ -29,10 +29,20 @@ copying the bindings onto every element.
 The scanner refuses rather than panics: an unterminated tag, quote, comment
 or element, a close tag that does not match, an attribute given twice, or a
 name with an empty prefix or local part is `XmlError::Malformed`; a document
-with no element is `MissingRoot`. Nesting deeper than `MAX_DEPTH`, more than
-`MAX_ELEMENTS` elements, or more than `MAX_ATTRIBUTES` attributes on one
-element is `TooComplex` — fixed defences against a hostile document, not
-capacities.
+with no element is `MissingRoot`. A reader names the bounds it holds a
+document to (`Limits`): `parse` reads under `Limits::COMPACT` — `MAX_DEPTH`
+deep, `MAX_ELEMENTS` elements — for an asset, a manifest or a protocol
+message, and `parse_with` under any other, `Limits::DOCUMENT` being what a
+document opened to edit is read under in the parser sandbox. Past them, or
+past `MAX_ATTRIBUTES` attributes on one element, is `TooComplex` — fixed
+defences against a hostile document, not capacities.
+
+## Writing
+
+`Escaped` spells text for an attribute value or character data, the five
+characters XML gives meaning to written as references: what every writer of
+XML in the tree — OpenRaster's layer stack, the drawing editor's SVG — writes
+text through.
 
 ## Readers
 

@@ -1,23 +1,22 @@
-//! The 2×3 affine transform vector artwork is placed by.
+//! The 2×3 affine map vector geometry is placed by.
 //!
 //! [`Affine`] is SVG's `matrix(a b c d e f)`, in the same order and with the
 //! same meaning, so a transform attribute becomes an [`Affine`] field for
-//! field. It is the one transform type this crate exposes: a decoder composes
-//! a nested `transform` chain with [`Affine::then`], a gradient carries the
-//! matrix that maps a shape's coordinates into gradient space
-//! ([`Gradient::to_gradient`]), and a curve flattener picks its tolerance from
-//! [`Affine::max_scale`].
+//! field. A nested `transform` chain composes with [`Affine::then`], a
+//! gradient carries the matrix into its own space, and a curve flattener
+//! picks its tolerance from [`Affine::max_scale`].
 //!
 //! Every operation is total. Trigonometry comes from [`tairix_util::mathf`],
-//! which answers a finite value for every finite input, and the one operation
-//! that can fail — [`Affine::invert`] on a matrix that collapses area —
-//! reports it as `None` rather than handing back a matrix full of infinities.
-//!
-//! [`Gradient::to_gradient`]: crate::paint::Gradient::to_gradient
+//! which answers a finite value for every finite input, and the operations
+//! that can fail — [`Affine::invert`] on a matrix that collapses area,
+//! [`Affine::decompose`] on the same — report it as `None` rather than handing
+//! back a matrix full of infinities.
 
 use core::f64::consts::PI;
 
 use tairix_util::mathf;
+
+use crate::point::Point;
 
 /// A determinant at or below this magnitude is a transform that collapses
 /// area, so it has no inverse to hand back.
@@ -48,6 +47,21 @@ pub struct Affine {
     pub e: f64,
     /// The vertical translation.
     pub f: f64,
+}
+
+/// An affine map taken apart into the moves a designer names it by: scale
+/// first, then a horizontal shear, then a rotation, then a translation
+/// ([`Affine::decompose`], [`Affine::composed`]).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Decomposed {
+    /// Where the origin lands.
+    pub translate: Point,
+    /// The turn, in degrees clockwise as drawn.
+    pub rotation_degrees: f64,
+    /// The horizontal shear, in degrees.
+    pub skew_x_degrees: f64,
+    /// The scale along each axis before the shear; a negative `y` is a flip.
+    pub scale: Point,
 }
 
 impl Affine {
@@ -133,6 +147,19 @@ impl Affine {
         )
     }
 
+    /// Map `point` through this transform.
+    #[must_use]
+    pub fn map(self, point: Point) -> Point {
+        Point::from(self.apply(point.tuple()))
+    }
+
+    /// Map the vector `v` through the linear part alone: a direction or a
+    /// displacement, which no translation moves.
+    #[must_use]
+    pub fn map_vector(self, v: Point) -> Point {
+        Point::new(self.a * v.x + self.c * v.y, self.b * v.x + self.d * v.y)
+    }
+
     /// The transform that applies `self` first and `outer` second.
     ///
     /// Reading order matches SVG's nesting: an element's own `transform`
@@ -149,6 +176,13 @@ impl Affine {
         }
     }
 
+    /// The determinant of the linear part: the factor every area is scaled
+    /// by, negative where the transform mirrors.
+    #[must_use]
+    pub fn determinant(self) -> f64 {
+        self.a * self.d - self.b * self.c
+    }
+
     /// The transform that undoes this one, or `None` when this one is
     /// degenerate.
     ///
@@ -160,7 +194,7 @@ impl Affine {
     /// render.
     #[must_use]
     pub fn invert(self) -> Option<Self> {
-        let det = self.a * self.d - self.b * self.c;
+        let det = self.determinant();
         if !det.is_finite() || mathf::fabs(det) <= DEGENERATE_DETERMINANT {
             return None;
         }
@@ -193,7 +227,7 @@ impl Affine {
         // For M = [[a, c], [b, d]] the singular values satisfy
         // 2σ² = ‖M‖²_F ± sqrt(‖M‖⁴_F - 4·det²); the larger root is wanted.
         let frobenius = self.a * self.a + self.b * self.b + self.c * self.c + self.d * self.d;
-        let det = self.a * self.d - self.b * self.c;
+        let det = self.determinant();
         let spread = mathf::sqrt(frobenius * frobenius - 4.0 * det * det);
         let largest = mathf::sqrt(f64::midpoint(frobenius, spread));
         if largest.is_finite() {
@@ -205,13 +239,48 @@ impl Affine {
 
     /// Whether every coefficient is finite, so mapping a finite point through
     /// this transform yields a finite one.
-    fn is_finite(self) -> bool {
+    #[must_use]
+    pub fn is_finite(self) -> bool {
         self.a.is_finite()
             && self.b.is_finite()
             && self.c.is_finite()
             && self.d.is_finite()
             && self.e.is_finite()
             && self.f.is_finite()
+    }
+
+    /// The transform taken apart as a scale, a horizontal shear, a rotation
+    /// and a translation, applied in that order, or `None` for one that
+    /// collapses area or is not finite.
+    ///
+    /// The linear part is factored `R·K·S` (a QR factorisation): the
+    /// rotation carries the image of the x axis back onto the axis, so the
+    /// horizontal scale is that image's length and every mirror lands in the
+    /// vertical scale's sign.
+    #[must_use]
+    pub fn decompose(self) -> Option<Decomposed> {
+        let det = self.determinant();
+        if !self.is_finite() || mathf::fabs(det) <= DEGENERATE_DETERMINANT {
+            return None;
+        }
+        let scale_x = mathf::hypot(self.a, self.b);
+        let scale_y = det / scale_x;
+        let shear = (self.a * self.c + self.b * self.d) / scale_x;
+        Some(Decomposed {
+            translate: Point::new(self.e, self.f),
+            rotation_degrees: mathf::atan2(self.b, self.a) / RADIANS_PER_DEGREE,
+            skew_x_degrees: mathf::atan(shear / scale_y) / RADIANS_PER_DEGREE,
+            scale: Point::new(scale_x, scale_y),
+        })
+    }
+
+    /// The transform `parts` describes: [`Affine::decompose`]'s inverse.
+    #[must_use]
+    pub fn composed(parts: Decomposed) -> Self {
+        Self::scale(parts.scale.x, parts.scale.y)
+            .then(Self::skew_x_degrees(parts.skew_x_degrees))
+            .then(Self::rotate_degrees(parts.rotation_degrees))
+            .then(Self::translate(parts.translate.x, parts.translate.y))
     }
 }
 

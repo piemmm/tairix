@@ -1340,7 +1340,8 @@ mod tests {
 
     // A windowed application that parses what it shows — the viewer `view`
     // (plans/VIEW.md), the editor `TextEdit` (plans/TEXTEDIT.md), the painter
-    // `Paint` (plans/PAINT.md): console write for its fail-loud diagnostics,
+    // `Paint` (plans/PAINT.md), the vector editor `Draw` (plans/DRAW.md):
+    // console write for its fail-loud diagnostics,
     // `CAP_SHM` for the zero-copy window frame region and the pipe pair its
     // parser is reached over, and `CAP_SANDBOX_SPAWN` to re-enter its own
     // binary as that capability-empty parser, the only kind of child it
@@ -1665,6 +1666,11 @@ mod tests {
     /// the boot floor the boot path enters directly, never a store bundle.
     const STORE_INVENTORY: &[(&str, ProgramKind, &[CapabilityId])] = &[
         ("Clock", ProgramKind::Screensaver, &[]),
+        (
+            "Draw",
+            ProgramKind::Application,
+            SANDBOXED_DOCUMENT_APP_REQUEST,
+        ),
         ("Life", ProgramKind::Screensaver, &[]),
         (
             "Paint",

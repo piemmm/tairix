@@ -327,6 +327,19 @@ pub const ICON_KINDS: [IconKind; core::mem::variant_count::<IconKind>()] = [
     IconKind::ChannelMixer,
     IconKind::Median,
     IconKind::Emboss,
+    IconKind::Group,
+    IconKind::Ungroup,
+    IconKind::Unlock,
+    IconKind::Union,
+    IconKind::Difference,
+    IconKind::Intersection,
+    IconKind::Exclusion,
+    IconKind::Nodes,
+    IconKind::StrokeOutline,
+    IconKind::ToolPen,
+    IconKind::Wireframe,
+    IconKind::Magnet,
+    IconKind::Ruler,
 ];
 
 /// A source of on-disk SVG icon assets, one per [`IconKind`].

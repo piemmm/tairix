@@ -1210,6 +1210,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-bezier"
+version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
+ "tairix-inline",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-binfmt"
 version = "0.0.0"
 dependencies = [
@@ -1854,6 +1863,50 @@ dependencies = [
  "tairix-net",
  "tairix-rt",
  "tairix-util",
+]
+
+[[package]]
+name = "tairix-draw"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-bezier",
+ "tairix-browse",
+ "tairix-buildcfg",
+ "tairix-collections",
+ "tairix-colour",
+ "tairix-controls",
+ "tairix-drawing",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-help",
+ "tairix-icon",
+ "tairix-image",
+ "tairix-input",
+ "tairix-parallel",
+ "tairix-procinfo",
+ "tairix-raster",
+ "tairix-reclaim",
+ "tairix-rt",
+ "tairix-sandbox",
+ "tairix-theme",
+ "tairix-util",
+ "tairix-window",
+]
+
+[[package]]
+name = "tairix-drawing"
+version = "0.0.0"
+dependencies = [
+ "tairix-bezier",
+ "tairix-colour",
+ "tairix-compress",
+ "tairix-fuzzseed",
+ "tairix-inline",
+ "tairix-raster",
+ "tairix-svg",
+ "tairix-util",
+ "tairix-xml",
 ]
 
 [[package]]
@@ -3092,6 +3145,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-appstore",
+ "tairix-bezier",
  "tairix-collections",
  "tairix-colour",
  "tairix-crc32c",
@@ -4225,6 +4279,7 @@ dependencies = [
 name = "tairix-raster"
 version = "0.0.0"
 dependencies = [
+ "tairix-bezier",
  "tairix-buildcfg",
  "tairix-colour",
  "tairix-cpuops",
@@ -4399,11 +4454,14 @@ name = "tairix-sandbox"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-bezier",
  "tairix-binfmt",
  "tairix-buildcfg",
  "tairix-collections",
+ "tairix-colour",
  "tairix-crc32",
  "tairix-disasm",
+ "tairix-drawing",
  "tairix-fscopy",
  "tairix-fuzzseed",
  "tairix-geometry",
@@ -4872,6 +4930,7 @@ dependencies = [
 name = "tairix-svg"
 version = "0.0.0"
 dependencies = [
+ "tairix-bezier",
  "tairix-colour",
  "tairix-fuzzseed",
  "tairix-raster",
@@ -9253,6 +9312,7 @@ dependencies = [
  "tairix-abi",
  "tairix-buildcfg",
  "tairix-display",
+ "tairix-font",
  "tairix-fuzzseed",
  "tairix-geometry",
  "tairix-input",

@@ -1,0 +1,25 @@
+[package]
+name = "tairix-bezier"
+description = "TAIRiX plane geometry for vector drawing: points, the affine map, bounds, line, quadratic and cubic segments, elliptical arcs and paths, with flattening, winding, nearest points, arc length, intersections, curve fitting, offsets and boolean operations, first-party, no_std and total over finite input (plans/DRAW.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# `mathf`: the bounded no_std float maths every consumer rounds and rotates
+# with, so a flattened curve lands on the same bits on every target.
+tairix-util = { path = "../util", version = "=0.0.0" }
+# The fixed arrays a polynomial's roots and a curve's extrema are answered in,
+# so the hot geometry allocates nothing.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# The fuzz harness and the randomised properties draw their inputs through the
+# shared seed/budget seam. Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

@@ -35,6 +35,8 @@ use alloc::vec::Vec;
 
 use crate::surface::SUBPIXEL;
 
+pub use tairix_bezier::FillRule;
+
 /// Sub-units per pixel along each axis inside the converter.
 ///
 /// The grid every vertex is snapped to, so it is also the finest edge
@@ -71,19 +73,6 @@ pub const MAX_DRAWING_EXTENT: u32 = 1 << 20;
 /// caller (or an attacker) supplies rather than overflowing.
 pub(crate) const COORD_LIMIT: i64 = MAX_DRAWING_EXTENT as i64 * UNIT;
 
-/// Which points enclosed by a set of contours count as inside.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub enum FillRule {
-    /// Inside where the signed number of times the contours wind around the
-    /// point is not zero, so a hole must be wound against its enclosing
-    /// contour. SVG's initial value.
-    #[default]
-    NonZero,
-    /// Inside where the number of contour crossings is odd, so any nested
-    /// contour is a hole whichever way it is wound.
-    EvenOdd,
-}
-
 /// How a pixel an edge crosses is covered.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum Coverage {
@@ -95,37 +84,27 @@ pub enum Coverage {
     Centre,
 }
 
-impl FillRule {
-    /// Whether a point the contours wind around `winding` times is inside.
-    const fn inside(self, winding: i64) -> bool {
-        match self {
-            Self::NonZero => winding != 0,
-            Self::EvenOdd => winding % 2 != 0,
-        }
-    }
-
-    /// The alpha a pixel that accumulated `signed` coverage takes.
-    ///
-    /// A pixel covered twice over accumulates twice [`FULL`]; the rule decides
-    /// whether that is opaque (non-zero) or cancels (even-odd), which is the
-    /// same question the rules answer for a point, asked of an area.
-    fn alpha(self, signed: i64) -> u8 {
-        let covered = match self {
-            Self::NonZero => i64::try_from(signed.unsigned_abs())
-                .unwrap_or(FULL)
-                .min(FULL),
-            Self::EvenOdd => {
-                let wrapped = signed.rem_euclid(2 * FULL);
-                if wrapped > FULL {
-                    2 * FULL - wrapped
-                } else {
-                    wrapped
-                }
+/// The alpha a pixel that accumulated `signed` coverage takes under `rule`.
+///
+/// A pixel covered twice over accumulates twice [`FULL`]; the rule decides
+/// whether that is opaque (non-zero) or cancels (even-odd), which is the
+/// same question the rules answer for a point, asked of an area.
+fn rule_alpha(rule: FillRule, signed: i64) -> u8 {
+    let covered = match rule {
+        FillRule::NonZero => i64::try_from(signed.unsigned_abs())
+            .unwrap_or(FULL)
+            .min(FULL),
+        FillRule::EvenOdd => {
+            let wrapped = signed.rem_euclid(2 * FULL);
+            if wrapped > FULL {
+                2 * FULL - wrapped
+            } else {
+                wrapped
             }
-        };
-        let scaled = (covered * 255 + FULL / 2) / FULL;
-        u8::try_from(scaled.clamp(0, 255)).unwrap_or(u8::MAX)
-    }
+        }
+    };
+    let scaled = (covered * 255 + FULL / 2) / FULL;
+    u8::try_from(scaled.clamp(0, 255)).unwrap_or(u8::MAX)
 }
 
 /// How a contour's own coordinates reach sub-units, and how a pixel centre
@@ -798,7 +777,7 @@ impl<'s> ScanFill<'s> {
         }
 
         let mut running = cells.carry * 2 * UNIT;
-        let lead = rule.alpha(running);
+        let lead = rule_alpha(*rule, running);
         let Some((first, last)) = cells.touched else {
             if lead == 0 {
                 return 0..0;
@@ -819,12 +798,12 @@ impl<'s> ScanFill<'s> {
         ) {
             for ((alpha, cover), area) in alphas.iter_mut().zip(cover).zip(area) {
                 running += *cover * 2 * UNIT;
-                *alpha = rule.alpha(running - *area);
+                *alpha = rule_alpha(*rule, running - *area);
                 *cover = 0;
                 *area = 0;
             }
         }
-        let trail = rule.alpha(running);
+        let trail = rule_alpha(*rule, running);
         if trail != 0 {
             if let Some(after) = alphas.get_mut(worked.end..) {
                 after.fill(trail);

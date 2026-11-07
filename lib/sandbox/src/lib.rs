@@ -106,6 +106,7 @@ extern crate alloc;
 
 pub mod audiodecode;
 pub mod decode;
+pub mod drawedit;
 pub mod helpdoc;
 pub mod host;
 pub mod imageedit;

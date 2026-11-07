@@ -14077,7 +14077,9 @@ mod program {
             .ok()
             .map(alloc::sync::Arc::new);
         match &mounts {
-            Some(worker) => app::start_worker(APP_NAME, worker, set, MOUNT_WORKER_TOKEN, "mount"),
+            Some(worker) => {
+                app::start_worker(APP_NAME, worker, set, MOUNT_WORKER_TOKEN, "mount");
+            }
             None => report_error("no memory for the mount worker; disk images are not mounted"),
         }
         let _mounts_guard = mounts.as_ref().map(tairix_rt::work::WorkerGuard::new);

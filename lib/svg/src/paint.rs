@@ -126,6 +126,62 @@ impl<'a> PaintServers<'a> {
             .map(|(_, node)| *node)
     }
 
+    /// The gradient `node` defines, its `href` chain followed: what it
+    /// states, before any shape's bounds or the design grid place it.
+    ///
+    /// `viewport` is what percentages in user-space coordinates resolve
+    /// against, `alpha` the multiplier a fill or stroke opacity contributes
+    /// to every stop, and `current_color` what a stop's `currentColor` stands
+    /// for. `None` for a gradient with no stops, which paints nothing.
+    ///
+    /// # Errors
+    /// Returns the parse error of a malformed gradient attribute or stop.
+    pub fn gradient_definition(
+        &self,
+        node: &'a Element<'a>,
+        viewport: (f64, f64),
+        alpha: f64,
+        current_color: Color,
+    ) -> Result<Option<GradientDefinition>, SvgError> {
+        let chain = self.chain(node);
+        let stops = Self::stops(&chain, alpha, current_color)?;
+        if stops.is_empty() {
+            return Ok(None);
+        }
+        let object_units = !matches!(attribute(&chain, "gradientUnits"), Some("userSpaceOnUse"));
+        // In bounding-box units every coordinate is already a fraction of
+        // one, so a percentage resolves against 1; in user space it resolves
+        // against the viewport, per axis, with the diagonal rule for a radius
+        // that has no axis of its own.
+        let basis = if object_units {
+            Basis::UNIT
+        } else {
+            Basis::of(viewport)
+        };
+        let transform = match attribute(&chain, "gradientTransform") {
+            Some(text) => parse_transform(text)?,
+            None => Affine::IDENTITY,
+        };
+        let spread = match attribute(&chain, "spreadMethod") {
+            None | Some("pad") => SpreadMethod::Pad,
+            Some("reflect") => SpreadMethod::Reflect,
+            Some("repeat") => SpreadMethod::Repeat,
+            Some(_) => return Err(SvgError::InvalidNumber),
+        };
+        let geometry = if node.name == "radialGradient" {
+            radial_geometry(&chain, &basis)?
+        } else {
+            linear_geometry(&chain, &basis)?
+        };
+        Ok(Some(GradientDefinition {
+            geometry,
+            object_units,
+            transform,
+            spread,
+            stops,
+        }))
+    }
+
     /// The paint one shape fills with through a reference to the gradient
     /// `node`.
     ///
@@ -146,67 +202,27 @@ impl<'a> PaintServers<'a> {
         alpha: f64,
         current_color: Color,
     ) -> Result<Resolved, SvgError> {
-        let chain = self.chain(node);
-        let stops = Self::stops(&chain, alpha, current_color)?;
-        if stops.is_empty() {
+        let Some(definition) = self.gradient_definition(node, viewport, alpha, current_color)?
+        else {
             // A gradient with no stops is a valid server that paints nothing,
             // which SVG spells as `none` — not as the reference's fallback,
             // which is for a reference that names nothing at all.
             return Ok(Resolved::Nothing);
-        }
-        let last = stops[stops.len() - 1].color;
-
-        let object_units = !matches!(attribute(&chain, "gradientUnits"), Some("userSpaceOnUse"));
-        // In bounding-box units every coordinate is already a fraction of
-        // one, so a percentage resolves against 1; in user space it resolves
-        // against the viewport, per axis, with the diagonal rule for a radius
-        // that has no axis of its own.
-        let basis = if object_units {
-            Basis::UNIT
-        } else {
-            Basis::of(viewport)
         };
-        let to_user = if object_units {
+        let to_user = if definition.object_units {
             let (min, max) = bounds;
             Affine::scale(max.0 - min.0, max.1 - min.1).then(Affine::translate(min.0, min.1))
         } else {
             Affine::IDENTITY
         };
-        let gradient_transform = match attribute(&chain, "gradientTransform") {
-            Some(text) => parse_transform(text)?,
-            None => Affine::IDENTITY,
-        };
-        let spread = match attribute(&chain, "spreadMethod") {
-            None | Some("pad") => SpreadMethod::Pad,
-            Some("reflect") => SpreadMethod::Reflect,
-            Some("repeat") => SpreadMethod::Repeat,
-            Some(_) => return Err(SvgError::InvalidNumber),
-        };
-
-        let (kind, canonical) = if node.name == "radialGradient" {
-            radial_placement(&chain, &basis)?
-        } else {
-            linear_placement(&chain, &basis)?
-        };
-        // A gradient with no extent has no direction to run along; SVG paints
-        // the last stop's colour over the whole shape.
-        let Some(canonical) = canonical else {
-            return Ok(Resolved::Paint(Paint::Solid(last)));
-        };
-
-        let to_screen = canonical
-            .then(to_user)
-            .then(gradient_transform)
-            .then(to_design);
-        let Some(to_gradient) = to_screen.invert() else {
-            return Ok(Resolved::Paint(Paint::Solid(last)));
-        };
-        Ok(Resolved::Paint(Paint::Gradient(Gradient {
-            kind,
-            stops,
-            spread,
-            to_gradient,
-        })))
+        let to_design = to_user.then(definition.transform).then(to_design);
+        Ok(placed_gradient(
+            definition.geometry,
+            definition.stops,
+            definition.spread,
+            to_design,
+        )
+        .map_or(Resolved::Nothing, Resolved::Paint))
     }
 
     /// Where the tile of the pattern `node` sits for one shape, and where its
@@ -440,49 +456,141 @@ fn coordinate<'a>(
     }
 }
 
-/// The canonical placement of a linear gradient: the map taking the unit x
-/// axis onto the gradient vector, or `None` when the vector has no length.
-fn linear_placement<'a>(
-    chain: &[&'a Element<'a>],
-    basis: &Basis,
-) -> Result<(GradientKind, Option<Affine>), SvgError> {
-    let x1 = coordinate(chain, "x1", basis.x, 0.0)?;
-    let y1 = coordinate(chain, "y1", basis.y, 0.0)?;
-    let x2 = coordinate(chain, "x2", basis.x, 1.0)?;
-    let y2 = coordinate(chain, "y2", basis.y, 0.0)?;
-    let (dx, dy) = (x2 - x1, y2 - y1);
-    if dx == 0.0 && dy == 0.0 {
-        return Ok((GradientKind::Linear, None));
-    }
-    // Map the unit x axis onto the gradient vector: the perpendicular column
-    // carries the same vector rotated a quarter turn, which keeps the
-    // gradient's bands square to its direction.
-    let placement = Affine {
-        a: dx,
-        b: dy,
-        c: -dy,
-        d: dx,
-        e: x1,
-        f: y1,
-    };
-    Ok((GradientKind::Linear, Some(placement)))
+/// The raster paint a gradient of `geometry` is, its own space mapped onto the
+/// design grid by `to_design`, or `None` for one with no stops. A gradient
+/// with no extent to run along, or one the map collapses, paints its last
+/// stop's colour over everything, as SVG paints it.
+#[must_use]
+pub fn placed_gradient(
+    geometry: GradientGeometry,
+    stops: Vec<GradientStop>,
+    spread: SpreadMethod,
+    to_design: Affine,
+) -> Option<Paint> {
+    let last = stops.last()?.color;
+    let (kind, canonical) = geometry.placement();
+    let to_gradient = canonical.and_then(|canonical| canonical.then(to_design).invert());
+    Some(match to_gradient {
+        Some(to_gradient) => Paint::Gradient(Gradient {
+            kind,
+            stops,
+            spread,
+            to_gradient,
+        }),
+        None => Paint::Solid(last),
+    })
 }
 
-/// The canonical placement of a radial gradient: the map taking the unit
-/// circle onto the gradient's circle, plus its focal point in that unit
-/// space.
-fn radial_placement<'a>(
+/// A gradient's vector or circles, as its attributes state them in the
+/// space its units name.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum GradientGeometry {
+    /// A linear gradient from `start`, offset zero, to `end`, offset one.
+    Linear {
+        /// Where offset zero lies.
+        start: Point,
+        /// Where offset one lies.
+        end: Point,
+    },
+    /// A radial gradient from `focus`, offset zero, out to the circle of
+    /// `radius` about `centre`, offset one.
+    Radial {
+        /// The circle's centre.
+        centre: Point,
+        /// Its radius.
+        radius: f64,
+        /// Where offset zero lies.
+        focus: Point,
+    },
+}
+
+impl GradientGeometry {
+    /// The kind of raster gradient this is, and the map taking its canonical
+    /// space — the unit x axis, or the unit circle — onto this geometry, or
+    /// `None` when it has no extent to run over.
+    #[must_use]
+    pub fn placement(self) -> (GradientKind, Option<Affine>) {
+        match self {
+            Self::Linear { start, end } => {
+                let (dx, dy) = (end.0 - start.0, end.1 - start.1);
+                if dx == 0.0 && dy == 0.0 {
+                    return (GradientKind::Linear, None);
+                }
+                // Map the unit x axis onto the gradient vector: the
+                // perpendicular column carries the same vector rotated a
+                // quarter turn, which keeps the bands square to its
+                // direction.
+                let placement = Affine {
+                    a: dx,
+                    b: dy,
+                    c: -dy,
+                    d: dx,
+                    e: start.0,
+                    f: start.1,
+                };
+                (GradientKind::Linear, Some(placement))
+            }
+            Self::Radial {
+                centre,
+                radius,
+                focus,
+            } => {
+                if radius <= 0.0 {
+                    return (GradientKind::Radial { focal: (0.0, 0.0) }, None);
+                }
+                let focal = ((focus.0 - centre.0) / radius, (focus.1 - centre.1) / radius);
+                let placement =
+                    Affine::scale(radius, radius).then(Affine::translate(centre.0, centre.1));
+                (GradientKind::Radial { focal }, Some(placement))
+            }
+        }
+    }
+}
+
+/// A gradient as its definition and `href` chain state it, before any shape
+/// places it ([`PaintServers::gradient_definition`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GradientDefinition {
+    /// Its vector or circles.
+    pub geometry: GradientGeometry,
+    /// Whether its coordinates are fractions of the painted shape's bounding
+    /// box rather than user-space lengths.
+    pub object_units: bool,
+    /// Its `gradientTransform`.
+    pub transform: Affine,
+    /// How it continues past its ends.
+    pub spread: SpreadMethod,
+    /// Its stops, each offset at least its predecessor's and every alpha
+    /// already weakened by the paint's opacity.
+    pub stops: Vec<GradientStop>,
+}
+
+/// A linear gradient's vector.
+fn linear_geometry<'a>(
     chain: &[&'a Element<'a>],
     basis: &Basis,
-) -> Result<(GradientKind, Option<Affine>), SvgError> {
+) -> Result<GradientGeometry, SvgError> {
+    Ok(GradientGeometry::Linear {
+        start: (
+            coordinate(chain, "x1", basis.x, 0.0)?,
+            coordinate(chain, "y1", basis.y, 0.0)?,
+        ),
+        end: (
+            coordinate(chain, "x2", basis.x, 1.0)?,
+            coordinate(chain, "y2", basis.y, 0.0)?,
+        ),
+    })
+}
+
+/// A radial gradient's circle and focus; the focus defaults to the centre,
+/// the one initial value that is not a fraction of the basis.
+fn radial_geometry<'a>(
+    chain: &[&'a Element<'a>],
+    basis: &Basis,
+) -> Result<GradientGeometry, SvgError> {
     let cx = coordinate(chain, "cx", basis.x, 0.5)?;
     let cy = coordinate(chain, "cy", basis.y, 0.5)?;
     let r = coordinate(chain, "r", basis.radius, 0.5)?;
-    if r <= 0.0 {
-        return Ok((GradientKind::Radial { focal: (0.0, 0.0) }, None));
-    }
-    // The focal point defaults to the centre, which is the one initial value
-    // that is not a fraction of the basis.
     let fx = match attribute(chain, "fx") {
         Some(text) => parse_length(text, basis.x)?,
         None => cx,
@@ -491,9 +599,11 @@ fn radial_placement<'a>(
         Some(text) => parse_length(text, basis.y)?,
         None => cy,
     };
-    let focal = ((fx - cx) / r, (fy - cy) / r);
-    let placement = Affine::scale(r, r).then(Affine::translate(cx, cy));
-    Ok((GradientKind::Radial { focal }, Some(placement)))
+    Ok(GradientGeometry::Radial {
+        centre: (cx, cy),
+        radius: r,
+        focus: (fx, fy),
+    })
 }
 
 /// Parse one `<stop>`.

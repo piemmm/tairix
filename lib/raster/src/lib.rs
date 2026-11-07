@@ -46,7 +46,6 @@
 extern crate alloc;
 
 pub mod accel;
-pub mod affine;
 pub mod artwork;
 pub mod blur;
 pub mod color;
@@ -68,7 +67,6 @@ pub mod wide;
 #[cfg(test)]
 mod tests;
 
-pub use affine::Affine;
 pub use artwork::{
     for_each_fill, layer_count, Group, Layer, Mask, MaskKind, Node, MAX_GROUP_DEPTH,
 };
@@ -105,4 +103,5 @@ pub use surface::{
     band_rows, pointwise, BandScratch, Canvas, ColumnBand, ColumnBands, RowBand, RowBands, Surface,
     BAND_GRAIN, MAX_SURFACE_PIXELS, SUBPIXEL,
 };
+pub use tairix_bezier::Affine;
 pub use view::{Clipped, Perspective, Projected, MAX_CLIPPED};

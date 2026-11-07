@@ -7,7 +7,8 @@ use super::Request;
 /// Where a member window's request is carried out.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(super) enum Route {
-    /// By its primary, whose document it is about: a save or a Save As.
+    /// By its primary, whose document it is about: a save, a Save As or a
+    /// copy.
     Primary,
     /// By the member alone: a menu, an open, or the application's own.
     Member,
@@ -22,7 +23,9 @@ pub(super) enum Route {
 #[must_use]
 pub(super) const fn route<K, O>(request: &Request<K, O>) -> Route {
     match request {
-        Request::Save | Request::SaveAs | Request::SaveWhere { .. } => Route::Primary,
+        Request::Save | Request::SaveAs | Request::SaveWhere { .. } | Request::SaveCopy => {
+            Route::Primary
+        }
         Request::SaveThenClose => Route::SaveThenClose,
         Request::Close | Request::AskToClose => Route::Close,
         Request::Open | Request::Menu { .. } | Request::Own(_) => Route::Member,

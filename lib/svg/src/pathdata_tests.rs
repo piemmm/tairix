@@ -9,9 +9,7 @@ use tairix_util::mathf::{round, sqrt};
 use crate::error::SvgError;
 use crate::geom::{Point, Vertex, Vertices};
 
-use super::{
-    cubic_at, flatten_cubic, flatten_ellipse_arc, flatten_quadratic, parse_path_data, MAX_SEGMENTS,
-};
+use super::{parse_path_data, path_commands, PathCommand};
 
 /// A generous point budget: every test here draws a handful of segments, so
 /// only the budget test itself should ever reach it.
@@ -122,62 +120,6 @@ fn numbers_may_run_together_without_separators() {
 
 // --- curves ---------------------------------------------------------------
 
-/// The flattened polyline must stay within the tolerance of the true curve,
-/// which is the whole promise of an error-bounded subdivision.
-#[test]
-fn a_flattened_cubic_stays_within_tolerance_of_the_true_curve() {
-    let (from, c1, c2, to) = ((0.0, 0.0), (0.0, 100.0), (100.0, 100.0), (100.0, 0.0));
-    let mut flat = alloc::vec![from];
-    flatten_cubic(from, c1, c2, to, TOL, &mut flat);
-    close_point(flat[flat.len() - 1], to);
-
-    // Every point of the true curve is near some segment of the polyline.
-    for step in 0..=200 {
-        let t = f64::from(step) / 200.0;
-        let exact = cubic_at(from, c1, c2, to, t);
-        let nearest = flat
-            .windows(2)
-            .map(|pair| distance_to_segment(exact, pair[0], pair[1]))
-            .fold(f64::MAX, f64::min);
-        assert!(nearest <= TOL * 1.5, "curve departs by {nearest}");
-    }
-}
-
-#[test]
-fn a_tighter_tolerance_never_gives_fewer_points() {
-    let (from, c1, c2, to) = ((0.0, 0.0), (0.0, 50.0), (50.0, 50.0), (50.0, 0.0));
-    let mut coarse = Vec::new();
-    let mut fine = Vec::new();
-    flatten_cubic(from, c1, c2, to, 1.0, &mut coarse);
-    flatten_cubic(from, c1, c2, to, 0.01, &mut fine);
-    assert!(fine.len() >= coarse.len());
-}
-
-#[test]
-fn a_straight_cubic_needs_only_one_segment() {
-    let mut flat = Vec::new();
-    flatten_cubic(
-        (0.0, 0.0),
-        (10.0, 0.0),
-        (20.0, 0.0),
-        (30.0, 0.0),
-        TOL,
-        &mut flat,
-    );
-    assert_eq!(flat.len(), 1);
-}
-
-#[test]
-fn a_quadratic_passes_through_its_endpoints() {
-    let mut flat = Vec::new();
-    flatten_quadratic((0.0, 0.0), (50.0, 100.0), (100.0, 0.0), TOL, &mut flat);
-    close_point(flat[flat.len() - 1], (100.0, 0.0));
-    // The curve's midpoint is the average of the endpoints and the control,
-    // weighted a quarter, a half, a quarter.
-    let mid = flat[flat.len() / 2 - 1];
-    assert!(mid.1 > 40.0 && mid.1 < 50.0, "midpoint height {}", mid.1);
-}
-
 /// `S` mirrors the previous cubic's control point, but only when the
 /// previous command really was a cubic.
 #[test]
@@ -286,23 +228,6 @@ fn a_rotated_arc_tilts_its_ellipse() {
     );
 }
 
-/// A whole turn is a legitimate sweep, which is what draws a circle.
-#[test]
-fn a_full_sweep_closes_on_its_own_start() {
-    let mut points = Vec::new();
-    flatten_ellipse_arc(
-        (0.0, 0.0),
-        (10.0, 10.0),
-        0.0,
-        0.0,
-        2.0 * PI,
-        TOL,
-        &mut points,
-    );
-    close_point(points[points.len() - 1], (10.0, 0.0));
-    assert!(points.len() > 8);
-}
-
 // --- refusals and bounds --------------------------------------------------
 
 #[test]
@@ -369,36 +294,6 @@ fn exceeding_the_point_budget_is_refused() {
     );
 }
 
-/// However hostile the input, one curve can never ask for an unbounded
-/// subdivision.
-#[test]
-fn no_single_curve_exceeds_the_segment_bound() {
-    let mut flat = Vec::new();
-    flatten_cubic(
-        (0.0, 0.0),
-        (1e12, 1e12),
-        (-1e12, 1e12),
-        (1.0, 0.0),
-        1e-9,
-        &mut flat,
-    );
-    assert!(flat.len() <= MAX_SEGMENTS as usize);
-
-    let mut arc = Vec::new();
-    flatten_ellipse_arc((0.0, 0.0), (1e12, 1e12), 0.0, 0.0, 1e6, 1e-12, &mut arc);
-    assert!(arc.len() <= MAX_SEGMENTS as usize);
-}
-
-/// A degenerate tolerance must not ask for an endless subdivision.
-#[test]
-fn a_degenerate_tolerance_is_floored() {
-    for tolerance in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-        let mut flat = Vec::new();
-        flatten_quadratic((0.0, 0.0), (10.0, 10.0), (20.0, 0.0), tolerance, &mut flat);
-        assert!(!flat.is_empty() && flat.len() <= MAX_SEGMENTS as usize);
-    }
-}
-
 /// The parser is run on hostile strings for one property only: it must
 /// always answer, never panic, and never emit a value that is not a number.
 #[test]
@@ -436,24 +331,6 @@ fn assorted_hostile_paths_never_panic() {
             }
         }
     }
-}
-
-/// The distance from `point` to the segment `a`..`b`, used to measure how
-/// far a flattened polyline departs from the curve it approximates.
-fn distance_to_segment(point: Point, a: Point, b: Point) -> f64 {
-    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-    let length2 = dx * dx + dy * dy;
-    if length2 == 0.0 {
-        return distance(point, a);
-    }
-    let t = (((point.0 - a.0) * dx + (point.1 - a.1) * dy) / length2).clamp(0.0, 1.0);
-    distance(point, (a.0 + t * dx, a.1 + t * dy))
-}
-
-/// The distance between two points.
-fn distance(a: Point, b: Point) -> f64 {
-    let (dx, dy) = (a.0 - b.0, a.1 - b.1);
-    sqrt(dx * dx + dy * dy)
 }
 
 // --- the command vertices markers are placed at ---------------------------
@@ -617,4 +494,78 @@ fn too_many_vertices_is_refused() {
         Err(SvgError::TooComplex)
     );
     assert!(vertices_within("M0 0 L1 0 L2 0", 3).is_ok());
+}
+
+// --- the command reader the drawing editor keeps curves through ----------
+
+/// Every command, read whole.
+#[track_caller]
+fn commands(d: &str) -> Vec<PathCommand> {
+    path_commands(d)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("a valid path")
+}
+
+#[test]
+fn relative_commands_are_answered_absolute() {
+    assert_eq!(
+        commands("m10 20 l5 5 h-3 v-4 z"),
+        [
+            PathCommand::MoveTo((10.0, 20.0)),
+            PathCommand::LineTo((15.0, 25.0)),
+            PathCommand::LineTo((12.0, 25.0)),
+            PathCommand::LineTo((12.0, 21.0)),
+            PathCommand::Close,
+        ]
+    );
+}
+
+#[test]
+fn smooth_commands_carry_the_control_they_reflect() {
+    assert_eq!(
+        commands("M0 0 C0 10 10 10 10 0 S20 -10 20 0"),
+        [
+            PathCommand::MoveTo((0.0, 0.0)),
+            PathCommand::CubicTo((0.0, 10.0), (10.0, 10.0), (10.0, 0.0)),
+            PathCommand::CubicTo((10.0, -10.0), (20.0, -10.0), (20.0, 0.0)),
+        ]
+    );
+    // After a line there is nothing to reflect: the control is the pen.
+    assert_eq!(
+        commands("M0 0 L5 0 T10 5"),
+        [
+            PathCommand::MoveTo((0.0, 0.0)),
+            PathCommand::LineTo((5.0, 0.0)),
+            PathCommand::QuadTo((5.0, 0.0), (10.0, 5.0)),
+        ]
+    );
+}
+
+#[test]
+fn an_arc_keeps_its_flags_and_turns_its_rotation_to_radians() {
+    let read = commands("M0 0 a5 4 90 1 0 10 0");
+    assert_eq!(
+        read[1],
+        PathCommand::ArcTo {
+            radii: (5.0, 4.0),
+            x_rotation: 90.0 * PI / 180.0,
+            large: true,
+            sweep: false,
+            to: (10.0, 0.0),
+        }
+    );
+}
+
+#[test]
+fn the_command_reader_stops_at_the_first_refusal() {
+    let mut read = path_commands("M0 0 L1 1 X 5 5 L2 2");
+    assert!(matches!(read.next(), Some(Ok(PathCommand::MoveTo(_)))));
+    assert!(matches!(read.next(), Some(Ok(PathCommand::LineTo(_)))));
+    assert_eq!(read.next(), Some(Err(SvgError::UnsupportedPath)));
+    assert_eq!(read.next(), None, "nothing after a refusal");
+    assert_eq!(
+        path_commands("L1 1").next(),
+        Some(Err(SvgError::UnsupportedPath)),
+        "a path begins with a moveto"
+    );
 }

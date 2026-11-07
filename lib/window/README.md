@@ -328,10 +328,13 @@ server and every app's client can never drift apart.
   `Outcome` an input comes to, the `Request`s every document window makes
   alike — is host-tested with the engines. On the bare-metal targets `run`
   is the whole program of an application that edits what the user handed it
-  (TextEdit, Paint): opening, closing and quitting with changes asked about
+  (TextEdit, Paint, Draw): opening, closing and quitting with changes asked about
   first, the trusted picker, documents handed over on the icon bar, painting
   only what changed, and the one queue saves are written on in the order
-  asked. A save beyond a window's share of that queue grows it by a room for
+  asked. Text is drawn without waiting on the font service: what the font
+  client has not yet fetched is drawn provisionally, a thread of the host's
+  own fetches it, and every window is laid out again when it lands. A save
+  beyond a window's share of that queue grows it by a room for
   as long as the save is outstanding, a closing window keeps a room for each
   save it leaves behind, and the process ends only once every save has landed.
   What differs per application is `DocumentApp`: reading a document in, its

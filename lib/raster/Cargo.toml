@@ -9,6 +9,9 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The geometry the artwork is placed in: the affine map and the fill rule,
+# shared with the SVG decoder and the drawing editor below rasterisation.
+tairix-bezier = { path = "../bezier", version = "=0.0.0" }
 # The `JobRunner` contract a frost's independent pieces are handed through.
 # `default-features = false` takes the contract and the serial runner alone: this
 # crate creates no thread and must stay linkable where there is none.

@@ -67,7 +67,12 @@ and the same loop with a stroke inside it), the painter's tools
 (`ToolSelect`, `ToolPencil`, `ToolBrush`, `ToolSpray`, `ToolEraser`,
 `ToolFill`, `ToolGradient`, `ToolEyedropper`, `ToolClone`, `ToolText`,
 `ToolLine`, `ToolRectangle`, `ToolEllipse`, `ToolPolygon`, `ToolCrop`,
-`ToolHand`, `ToolZoom`) and its `PixelGrid`, the settings categories each sidebar
+`ToolHand`, `ToolZoom`) and its `PixelGrid`, the vector editor's (`ToolPen`, a
+nib; `Nodes`, a curve between square nodes, for the node tool and for turning
+an object into a path; `StrokeOutline`; `Wireframe`; `Magnet`, for snapping;
+`Ruler`, for units; `Group` and `Ungroup`; `Unlock`, the padlock opened; and
+the boolean operations `Union`, `Difference`, `Intersection` and
+`Exclusion`, drawn from one pair of overlapping discs), the settings categories each sidebar
 row of [Settings](settings.md) is found by without reading — `Settings` (a
 cog), `Appearance`, `Wallpaper`, `Display`, `LockScreen`, `Screensaver`,
 `Power`, `BoardFan` (a board seen from above, its header's pins along one

@@ -16,6 +16,9 @@ publish.workspace = true
 rt = ["dep:tairix-rt"]
 
 [dependencies]
+# The flattener a symbol's circles are drawn through, the one every consumer
+# of vector geometry shares.
+tairix-bezier = { path = "../bezier", version = "=0.0.0" }
 # For the `rt` feature's `RtDocument` only: the userland file wrappers.
 tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 # The storage-medium vocabulary a mounted volume reports (`BlkDeviceClass`).

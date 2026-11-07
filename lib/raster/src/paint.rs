@@ -32,9 +32,9 @@ use alloc::vec::Vec;
 
 use tairix_util::mathf;
 
-use crate::affine::Affine;
 use crate::artwork::Node;
 use crate::color::Color;
+use tairix_bezier::Affine;
 
 /// How far from the centre of the unit circle a radial gradient's focal point
 /// may sit.

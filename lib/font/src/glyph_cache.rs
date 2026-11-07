@@ -155,7 +155,7 @@ pub fn glyph_cache_budget(total_ram_bytes: u64) -> CacheBudget {
 
 /// [`glyph_cache_budget`] for a cache whose ceiling is already `ceiling`
 /// bytes.
-fn budget_within(ceiling: usize) -> CacheBudget {
+pub(crate) fn budget_within(ceiling: usize) -> CacheBudget {
     CacheBudget::from_ceiling(ceiling).with_reserved_floor(UI_CACHE_RESERVE_BYTES)
 }
 

@@ -8,9 +8,9 @@
 
 use tairix_util::mathf;
 
-use crate::affine::Affine;
 use crate::color::Pixel;
 use crate::surface::Surface;
+use tairix_bezier::Affine;
 
 impl Surface {
     /// Composite `src` over this surface through `transform`, which maps

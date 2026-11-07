@@ -147,23 +147,21 @@ pub const HOME_DOC_CONTENT: &[u8] =
     b"Welcome to TAIRiX.\nThis document was opened through the trusted file picker.\n";
 
 /// A picture planted beside [`HOME_DOC_NAME`] among the fixture account's own
-/// files, so a gesture in the **file manager's** window has a document whose type an
-/// installed application claims. `view` declares `image/svg+xml`, so
-/// activating this resolves to that bundle and drives the three-principal
+/// files, so a gesture in the **file manager's** window has a document whose
+/// type an installed application claims. `view` is the one installed bundle
+/// declaring `image/webp`, so activating this resolves to the viewer whatever
+/// editors claim other picture types, and drives the three-principal
 /// hand-over — the manager mints the delegation, the session relays it, and
 /// the already-running viewer redeems it (`plans/VIEW.md`).
-///
-/// Vector rather than raster because the whole document is then legible here:
-/// a format the viewer draws completely, written out in full, with no encoder
-/// or binary blob between the fixture and what the guest reads.
-pub const HOME_PICTURE_NAME: &[u8] = b"Picture.svg";
+pub const HOME_PICTURE_NAME: &[u8] = b"Picture.webp";
 
-/// Contents of [`HOME_PICTURE_NAME`]: one filled square over the whole
-/// viewBox, the shape `lib/sandbox`'s own rasterisation tests use, so the
-/// document the guest decodes is known-good input for the desktop's SVG
-/// subset.
-pub const HOME_PICTURE_CONTENT: &[u8] =
-    br##"<svg viewBox="0 0 10 10"><polygon points="0,0 10,0 10,10 0,10" fill="#3070f0"/></svg>"##;
+/// Contents of [`HOME_PICTURE_NAME`]: a lossless WebP of a 10 × 10 square of
+/// `#3070f0`, the 32 bytes `lib/image`'s VP8L decoder reads, so the document
+/// the guest decodes is known-good input.
+pub const HOME_PICTURE_CONTENT: &[u8] = &[
+    0x52, 0x49, 0x46, 0x46, 0x18, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4c,
+    0x0c, 0x00, 0x00, 0x00, 0x2f, 0x09, 0x40, 0x02, 0x00, 0x28, 0x5c, 0x61, 0x0a, 0xdf, 0xff, 0x00,
+];
 
 /// Username of the interactive account planted on the users-root volume
 /// ([`build_users_root_image`]) on top of the canonical default

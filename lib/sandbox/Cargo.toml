@@ -46,6 +46,11 @@ tairix-vt = { path = "../vt", version = "=0.0.0" }
 # The shared SVG image-decoding library the sandboxed icon-rasterisation
 # service runs over an untrusted bundle icon's SVG bytes.
 tairix-svg = { path = "../svg", version = "=0.0.0" }
+# The drawing a drawing editor's documents are read into, and the geometry
+# and colour its values travel as.
+tairix-drawing = { path = "../drawing", version = "=0.0.0" }
+tairix-bezier = { path = "../bezier", version = "=0.0.0" }
+tairix-colour = { path = "../colour", version = "=0.0.0" }
 # The complete, fail-closed PNG decoder the sandboxed icon-rasterisation
 # service runs over an untrusted bundle icon's PNG bytes.
 tairix-image = { path = "../image", version = "=0.0.0" }

@@ -189,6 +189,7 @@ plan's ledger. A `blocked` row names its blocker.
 | VIEW | The picture and document viewer (`plans/VIEW.md`) | in progress |
 | TEXTEDIT | `TextEdit.app`, the desktop editor, and the desktop facilities it needed (`plans/TEXTEDIT.md`) | blocked: TE13 needs a VFS primitive that replaces a file's content atomically through a held descriptor |
 | PAINT | `Paint.app`, the desktop image editor, and the shared document host (`plans/PAINT.md`) | in progress |
+| DRAW | `Draw.app`, the desktop vector editor, the `lib/bezier` geometry kernel and the `lib/drawing` editable drawing and its formats (`plans/DRAW.md`) | in progress |
 | BROWSER | The first-party web browser, its JavaScript engine, and the TLS, HTTP, text-shaping and URL facilities it needs (`plans/BROWSER.md`) | planned |
 
 ### Desktop
@@ -282,7 +283,13 @@ the land generator and the ray tracer draw from),
 program crate compiles under on a bare-metal target; `std`, as it runs only
 in build scripts),
 `lib/xml` (the one fail-closed XML element scanner, read by the SVG decoder
-and OpenRaster's layer stack), `lib/der` (the one strict DER codec, which
+and OpenRaster's layer stack), `lib/bezier` (the one plane geometry — the
+affine map, the segments and paths, the flattener every vector consumer draws
+through, intersections, fitting, offsets and boolean operations, which the SVG
+decoder, the rasteriser and the drawing editor share, `plans/DRAW.md`),
+`lib/drawing` (the editable vector drawing — a persistent tree of shapes, text
+and groups in layers, its styles and gradients, and the SVG it is read from
+and written to exactly, `plans/DRAW.md`), `lib/der` (the one strict DER codec, which
 SPNEGO and Kerberos read and write through), `lib/smb` (the pure SMB 3
 protocol engine the sandboxed `smbfs` worker runs), `lib/netshare` (the one
 `netshare-v1` client, through which `files.app` and the share commands are
@@ -316,8 +323,8 @@ README requires this file to name them:
 | `cnum` | `seq`, `printf`, `sleep`, `tail`, `lib/svg`, `lib/image` |
 | `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/proglib`, `lib/syntax`, `userland/system/init`, `tools/signkeys` (`setting_line`); `configure`, Settings (`ValueShape`) |
 | `count`, `tailwindow` | `head`, `tail`; `count` also the QEMU verticals reading a figure from a guest's log |
-| `defer` | `lib/rt` (`work::Worker`, over either desk, so every worker a program runs), `lib/browse` (the mount worker), `lib/window` (the document host's queue), the desktop session, the screen recorder, the file manager, Settings, Date & Time, Music, Paint, `netmap`, `smbfs`, WinterSun's client |
-| `fallible` | `lib/audio`, `lib/browse`, `lib/bytedev`, `lib/countryside`, `lib/discovery`, `lib/font`, `lib/fscopy`, `lib/fsprobe`, `lib/fsserve`, `lib/glob`, `lib/gpu`, `lib/icon`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/sound`, `lib/spirv`, `lib/terrain`, `lib/users`, `lib/video`, `lib/writeback`, the kernel, the AmigaDOS, ARXFS, ext4, ISO 9660 and UDF drivers, the USB Audio driver, `userland/gui/wm`, the desktop session, the screen recorder, the greeter, `audiod`, `discoveryd`, `netstack`, `settingsd`, `smbfs`, `sysinfod`, `thermald`, `devmgr`, `elsh`, `blendcheck`, `cp`, `mv`, the file manager, TextEdit, `view`, Paint, WinterSun, the Life, ray tracer, Retro Games and Starfield screensavers |
+| `defer` | `lib/rt` (`work::Worker`, over either desk, so every worker a program runs), `lib/browse` (the mount worker), `lib/window` (the document host's queue), the desktop session, the screen recorder, the file manager, Settings, Date & Time, Music, Paint, Draw, `netmap`, `smbfs`, WinterSun's client |
+| `fallible` | `lib/audio`, `lib/bezier`, `lib/browse`, `lib/bytedev`, `lib/countryside`, `lib/discovery`, `lib/drawing`, `lib/font`, `lib/fscopy`, `lib/fsprobe`, `lib/fsserve`, `lib/glob`, `lib/gpu`, `lib/icon`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/sound`, `lib/spirv`, `lib/terrain`, `lib/users`, `lib/video`, `lib/writeback`, the kernel, the AmigaDOS, ARXFS, ext4, ISO 9660 and UDF drivers, the USB Audio driver, `userland/gui/wm`, the desktop session, the screen recorder, the greeter, `audiod`, `discoveryd`, `netstack`, `settingsd`, `smbfs`, `sysinfod`, `thermald`, `devmgr`, `elsh`, `blendcheck`, `cp`, `mv`, the file manager, TextEdit, `view`, Paint, Draw, WinterSun, the Life, ray tracer, Retro Games and Starfield screensavers |
 | `flags` | `lib/gpu`, `lib/smb`, `lib/spirv` |
 | `getopt` | every command app that takes options (`cat`, `cp`, `df`, `du`, `head`, `ls`, `mount`, `ps`, `seq`, `tail`, `useradd`, `servicectl`, `sysinfo`, …), the desktop session's command line (`applib`), the file manager's |
 | `fmt` | `kernel/sec`, `kernel/ipc`, `kernel/syscall`, `kernel/core`, the kernel binary, the xHCI, USB HID, USB mass-storage, RAID and volume-manager drivers, `lib/controls`, `lib/dmaengine`, `lib/sysconfig`, `devmgr`, `xtask`, the QEMU verticals |
@@ -325,7 +332,7 @@ README requires this file to name them:
 | `hexdump` | `fstree`, TextEdit |
 | `join` | `lib/procinfo`'s multi-valued readings, `netmap`'s host tooltip |
 | `lanes` | `lib/collections`, TextEdit |
-| `mathf` | `lib/audio`, `lib/colour`, `lib/controls`, `lib/countryside`, `lib/cursor`, `lib/fontface`, `lib/gpu`, `lib/icon`, `lib/image`, `lib/land`, `lib/noise`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/scatter`, `lib/sound`, `lib/spirv`, `lib/svg`, `lib/terrain`, `cinder`, `netmap`, Paint, Patience, WinterSun, the Retro Games and Starfield screensavers |
+| `mathf` | `lib/audio`, `lib/bezier`, `lib/colour`, `lib/controls`, `lib/countryside`, `lib/cursor`, `lib/drawing`, `lib/fontface`, `lib/gpu`, `lib/icon`, `lib/image`, `lib/land`, `lib/noise`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/scatter`, `lib/sound`, `lib/spirv`, `lib/svg`, `lib/terrain`, `cinder`, `netmap`, Paint, Draw, Patience, WinterSun, the Retro Games and Starfield screensavers |
 | `mode` | `chmod`, `mkdir`, `elsh`'s `umask` (`Mode`); `mkdir` (`SET_ID`) |
 | `output` | the command apps' engines (`cat`, `ls`, `ss`, `tail`, … — every one that writes through an injected stream), `lib/procinfo`'s line sink, and `lib/rt`'s standard streams, which also answer `at_terminal` for `head`, `tail`, `du`, `wc`, `readlink` and `stat`; `framed` for `lib/fscopy`, `fstree`, `play` and `unmount`; `Carried` for `cat`, `chmod`, `chown`, `cp`, `getcap`, `ln`, `mkdir`, `mv`, `rm`, `rmdir`, `setcap` |
 | `quote` | `ls`, `printf`, `elsh`, `servicectl`, `edit`, `vim`, `man`, `fstree`, the file manager, `lib/fscopy`'s omission report, and every command app that names a file or other text from elsewhere in a message, a prompt, a `-v` report or its standard output (`cat`, `cp`, `du`, `head`, `mv`, `rm`, `stat`, `tail`, `wc`, …) |

@@ -80,7 +80,7 @@ use tairix_vt::char_width;
 use crate::atlas;
 use crate::glyph_cache::CachedGlyph;
 use crate::measure::{self, MeasureCache, MeasureEpoch, MeasuredText};
-use crate::outline_cache::{CachedOutline, OutlineCache, OutlineKey};
+use crate::outline_cache::{CachedOutline, FaceMetrics, OutlineCache, OutlineKey};
 
 /// One synchronous font-service call: send one request frame, receive one
 /// reply frame. The `ipc_call` syscall behind a seam, so the render path is
@@ -122,6 +122,9 @@ const CLIENT_CACHE_LABEL: &str = "font.client.glyphs";
 
 /// The audit label the client's measurement memo is named by.
 const MEASURE_CACHE_LABEL: &str = "font.client.measure";
+
+/// The audit label the client's outline cache is named by.
+const OUTLINE_CACHE_LABEL: &str = "font.client.outlines";
 
 /// The owner the client's own cache charges its bytes to.
 ///
@@ -214,6 +217,12 @@ pub(crate) struct Caches {
 }
 
 impl Caches {
+    /// The outline `key` names, if the outline cache holds it; never fetched.
+    fn cached_outline(&self, key: &OutlineKey) -> Option<OwnedOutline> {
+        let kept = self.outlines.as_ref()?.peek(&(), key)?;
+        Some(kept.outline.clone())
+    }
+
     const fn new() -> Self {
         Self {
             glyphs: None,
@@ -545,13 +554,12 @@ pub(crate) trait FontClient {
     /// Serve every scalar of `run`'s outline, from the cache where it is
     /// held and over the channel where it is not.
     ///
-    /// Fetches the misses in *runs*, so a cold alphabet costs one round trip
-    /// per batch rather than one per character, and retains what it fetched
-    /// so a second drawing of the same lettering costs none. The reply
-    /// header — the requested family's own geometry — always comes from the
-    /// fetch, since it describes the family rather than a glyph; a run the
-    /// cache answers whole therefore reports the geometry of the last fetch
-    /// it needed, and a caller wanting it alone asks for one scalar.
+    /// Fetches the misses in *runs* of at most [`FONT_MAX_GLYPH_RUN`], so a
+    /// cold alphabet costs one round trip per batch rather than one per
+    /// character, and retains what it fetched so a second drawing of the same
+    /// lettering costs none. The reply header — the face's own geometry —
+    /// comes from the fetch, or from the face metrics a cached outline keeps,
+    /// so a run the cache answers whole costs no round trip at all.
     fn serve_outlines(
         &mut self,
         scalars: &[char],
@@ -570,41 +578,40 @@ pub(crate) trait FontClient {
                 .as_mut()
                 .and_then(|cache| cache.get_or_build(&(), key, || None))
             {
-                served.push(hit.0.clone());
+                if reply.units_per_em == 0 {
+                    reply.state(hit.face);
+                }
+                served.push(hit.outline.clone());
                 at += 1;
                 continue;
             }
-            // Everything from here that the cache does not hold is fetched
-            // together: the protocol answers a prefix, so the batch bounds
-            // itself and the loop asks again for whatever it left.
-            let missing = &scalars[at..];
+            // The protocol takes a bounded run and answers a prefix of it, so
+            // the loop asks again for whatever is left.
+            let missing = &scalars[at..scalars.len().min(at + FONT_MAX_GLYPH_RUN)];
             let fetched = self.fetch_outlines(missing, family, instance)?;
             if fetched.glyphs.is_empty() {
                 return None;
             }
-            reply.units_per_em = fetched.units_per_em;
-            reply.ascent = fetched.ascent;
-            reply.descent = fetched.descent;
-            reply.line_gap = fetched.line_gap;
+            let face = fetched.face();
+            reply.state(face);
             for (offset, glyph) in fetched.glyphs.into_iter().enumerate() {
                 let key = OutlineKey::new(family, missing[offset], weight, style, stretch);
                 served.push(glyph.clone());
                 if let Some(cache) = self.caches().outlines.as_mut() {
-                    cache.retain(&(), key, CachedOutline(glyph));
+                    cache.retain(
+                        &(),
+                        key,
+                        CachedOutline {
+                            outline: glyph,
+                            face,
+                        },
+                    );
                 }
             }
             at = served.len();
         }
-        // A run the cache answered whole never reached the service, so its
-        // header was never stated: one fetch of the first scalar supplies it
-        // rather than reporting an em of zero a caller cannot divide by.
-        if reply.units_per_em == 0 {
-            let first = scalars.first().copied()?;
-            let header = self.fetch_outlines(&[first], family, instance)?;
-            reply.units_per_em = header.units_per_em;
-            reply.ascent = header.ascent;
-            reply.descent = header.descent;
-            reply.line_gap = header.line_gap;
+        if served.is_empty() {
+            return None;
         }
         reply.glyphs = served;
         Some(reply)
@@ -1196,6 +1203,25 @@ pub struct OutlineReply {
 }
 
 impl OutlineReply {
+    /// The metrics of the face the batch is drawn from.
+    #[must_use]
+    pub const fn face(&self) -> FaceMetrics {
+        FaceMetrics {
+            units_per_em: self.units_per_em,
+            ascent: self.ascent,
+            descent: self.descent,
+            line_gap: self.line_gap,
+        }
+    }
+
+    /// State `face` as the metrics of the face the batch is drawn from.
+    const fn state(&mut self, face: FaceMetrics) {
+        self.units_per_em = face.units_per_em;
+        self.ascent = face.ascent;
+        self.descent = face.descent;
+        self.line_gap = face.line_gap;
+    }
+
     /// Copy a decoded batch out of the frame it borrows, so it outlives the
     /// receive buffer.
     ///
@@ -1354,7 +1380,11 @@ fn install_defaults() {
                 channel.install_transport(Box::new(RtTransport));
                 channel.connect_first = true;
             }
-            (default_cache(), default_measure_cache())
+            (
+                default_cache(),
+                default_measure_cache(),
+                default_outline_cache(),
+            )
         };
         let mut caches = CACHES.lock();
         if caches.glyphs.is_none() {
@@ -1362,6 +1392,9 @@ fn install_defaults() {
         }
         if caches.measure.is_none() {
             caches.measure = Some(built.1);
+        }
+        if caches.outlines.is_none() {
+            caches.outlines = Some(built.2);
         }
     }
     #[cfg(all(feature = "test-util", not(feature = "rt")))]
@@ -1458,6 +1491,14 @@ fn default_measure_cache() -> MeasureCache {
     measure_cache(measure::measure_cache_budget(total), key)
 }
 
+/// Build the client's outline cache, on the ceiling the glyph cache takes:
+/// the two retain one repertoire in two forms.
+#[cfg(feature = "rt")]
+fn default_outline_cache() -> OutlineCache {
+    let (total, key) = default_budget_inputs();
+    outline_cache(crate::outline_cache::outline_cache_budget(total), key)
+}
+
 /// The RAM total and hash key the default caches are sized and keyed by. Both
 /// caches are keyed by text the caller chooses, so a process that could draw
 /// no key takes a zero budget instead: it retains nothing and pays the round
@@ -1473,10 +1514,10 @@ fn default_budget_inputs() -> (u64, tairix_hash::HashSeed) {
     }
 }
 
-/// Install the glyph cache and measurement memo sized for a machine of
-/// `total_bytes` of memory, never past `most_bytes` each, and keyed by `key`,
-/// in place of the defaults the `rt` feature builds from the machine's RAM and
-/// the kernel's randomness.
+/// Install the glyph cache, outline cache and measurement memo sized for a
+/// machine of `total_bytes` of memory, never past `most_bytes` each, and keyed
+/// by `key`, in place of the defaults the `rt` feature builds from the
+/// machine's RAM and the kernel's randomness.
 ///
 /// For a program that can ask for neither — a sandboxed screensaver, which
 /// its host tells both, and whose own ceiling is `most_bytes`'s bound.
@@ -1486,24 +1527,33 @@ pub fn install_caches(total_bytes: u64, most_bytes: u64, key: tairix_hash::HashS
     let ceiling = crate::glyph_cache::glyph_cache_ceiling(total_bytes).min(most);
     let glyphs = glyph_cache(crate::glyph_cache::client_budget_within(ceiling), key);
     let measure = measure_cache(measure::measure_budget_within(ceiling), key);
+    let outlines = outline_cache(crate::glyph_cache::budget_within(ceiling), key);
     let mut caches = CACHES.lock();
     caches.glyphs = Some(glyphs);
     caches.measure = Some(measure);
+    caches.outlines = Some(outlines);
 }
 
 static CACHE_LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
 
-/// The glyph cache within `budget`, keyed by `key`, registered with the
-/// process's cache reporter: this library builds it on the process's behalf,
-/// so it is this library that tells the reporter.
-fn glyph_cache(budget: CacheBudget, key: tairix_hash::HashSeed) -> GlyphCache {
-    use tairix_reclaim::ReclaimOwner;
-
+/// A cache of the client's own called `label`, declared by `candidate`,
+/// within `budget` and keyed by `key`, registered with the process's cache
+/// reporter: this library builds it on the process's behalf, so it is this
+/// library that tells the reporter.
+fn client_cache<K, V, E>(
+    label: &'static str,
+    candidate: tairix_reclaim::CacheCandidate,
+    budget: CacheBudget,
+    key: tairix_hash::HashSeed,
+) -> ReclaimCache<K, V, E, BuildSipHash13>
+where
+    K: Eq + core::hash::Hash,
+    V: CachedBytes,
+    E: PartialEq + Clone,
+{
     let cache = ReclaimCache::new(
-        CLIENT_CACHE_LABEL,
-        crate::glyph_cache::glyph_cache_candidate(ReclaimOwner::UserlandProcess(
-            CLIENT_CACHE_OWNER,
-        )),
+        label,
+        candidate,
         budget,
         tairix_rt::pressure::gauge(),
         &CACHE_LOG_SINK,
@@ -1515,22 +1565,27 @@ fn glyph_cache(budget: CacheBudget, key: tairix_hash::HashSeed) -> GlyphCache {
     cache
 }
 
+/// The owner the client's caches charge their bytes to.
+const fn client_owner() -> tairix_reclaim::ReclaimOwner {
+    tairix_reclaim::ReclaimOwner::UserlandProcess(CLIENT_CACHE_OWNER)
+}
+
+/// The glyph cache within `budget`, keyed by `key`.
+fn glyph_cache(budget: CacheBudget, key: tairix_hash::HashSeed) -> GlyphCache {
+    let candidate = crate::glyph_cache::glyph_cache_candidate(client_owner());
+    client_cache(CLIENT_CACHE_LABEL, candidate, budget, key)
+}
+
 /// The measurement memo within `budget`, keyed by `key`.
 fn measure_cache(budget: CacheBudget, key: tairix_hash::HashSeed) -> MeasureCache {
-    use tairix_reclaim::ReclaimOwner;
+    let candidate = measure::measure_cache_candidate(client_owner());
+    client_cache(MEASURE_CACHE_LABEL, candidate, budget, key)
+}
 
-    let cache = ReclaimCache::new(
-        MEASURE_CACHE_LABEL,
-        measure::measure_cache_candidate(ReclaimOwner::UserlandProcess(CLIENT_CACHE_OWNER)),
-        budget,
-        tairix_rt::pressure::gauge(),
-        &CACHE_LOG_SINK,
-        BuildSipHash13::with_seed(key),
-    );
-    if let Some(ledger) = cache.ledger() {
-        tairix_rt::cachereport::register(ledger);
-    }
-    cache
+/// The outline cache within `budget`, keyed by `key`.
+fn outline_cache(budget: CacheBudget, key: tairix_hash::HashSeed) -> OutlineCache {
+    let candidate = crate::outline_cache::outline_cache_candidate(client_owner());
+    client_cache(OUTLINE_CACHE_LABEL, candidate, budget, key)
 }
 
 /// The process's font caches.
@@ -1638,17 +1693,17 @@ impl FontClient for LockedClient<'_> {
     }
 }
 
-/// Fetch a bounded run of glyph outlines from `family`, instanced at
-/// `weight`/`style`/`stretch`.
+/// Fetch the glyph outlines of a run of any length from `family`, instanced
+/// at `weight`/`style`/`stretch`.
 ///
 /// The geometry seam a vector consumer draws text through: the reply carries
 /// contours in the face's own font units, so the caller scales and flattens
 /// at whatever accuracy its own placement needs rather than blitting a cell
 /// fixed at one size.
 ///
-/// `None` on any failure, so a caller falls back rather than drawing
-/// geometry the service did not send. The batch answers a **prefix** of
-/// `scalars`, so a caller asks again for any remainder.
+/// Every scalar of `scalars` is answered, in order, fetched in bounded runs
+/// as the protocol requires — or `None` on any failure, so a caller falls
+/// back rather than drawing geometry the service did not send.
 #[must_use]
 pub fn outline_run(
     scalars: &[char],
@@ -1658,6 +1713,26 @@ pub fn outline_run(
     stretch: FontStretch,
 ) -> Option<OutlineReply> {
     with_client(|client| client.serve_outlines(scalars, family, (weight, style, stretch)))
+}
+
+/// The outline of `scalar` in `family`, instanced at `weight`/`style`/
+/// `stretch`, if a fetch has already brought it into the client's outline
+/// cache.
+///
+/// Never asks the service and never waits on a thread that is asking: the
+/// caches lock is not held across a round trip. What a thread that must
+/// answer within a frame reads — an event loop measuring text a worker has
+/// drawn — falling back to its own estimate where this answers `None`.
+#[must_use]
+pub fn cached_outline(
+    scalar: char,
+    family: FamilyKey,
+    weight: FontWeight,
+    style: FontStyle,
+    stretch: FontStretch,
+) -> Option<OwnedOutline> {
+    let key = OutlineKey::new(family, scalar, weight, style, stretch);
+    CACHES.lock().cached_outline(&key)
 }
 
 /// Install (or replace) the font-service transport.
@@ -2281,6 +2356,190 @@ pub(crate) mod tests {
         client.with_glyph(scalar, family, height, FontWeight::REGULAR, |glyph| {
             (glyph.width, glyph.height, glyph.data.to_vec())
         })
+    }
+
+    /// A client whose service draws every scalar it is asked for, as the
+    /// wire does no more than a bounded run, recording each run's length.
+    struct RecordedRuns {
+        caches: Caches,
+        runs: Vec<usize>,
+    }
+
+    impl FontClient for RecordedRuns {
+        fn caches(&mut self) -> &mut Caches {
+            &mut self.caches
+        }
+
+        fn fetch_glyphs(
+            &mut self,
+            _: &[char],
+            _: FamilyKey,
+            _: u32,
+            _: FontWeight,
+        ) -> Result<Vec<CachedGlyph>, Unanswered> {
+            Err(Unanswered::Unreachable)
+        }
+
+        fn fetch_outlines(
+            &mut self,
+            scalars: &[char],
+            _: FamilyKey,
+            _: (FontWeight, FontStyle, FontStretch),
+        ) -> Option<super::OutlineReply> {
+            self.runs.push(scalars.len());
+            (1..=FONT_MAX_GLYPH_RUN)
+                .contains(&scalars.len())
+                .then(|| super::OutlineReply {
+                    units_per_em: 1000,
+                    glyphs: scalars
+                        .iter()
+                        .map(|_| OwnedOutline {
+                            units_per_em: 1000,
+                            ..OwnedOutline::default()
+                        })
+                        .collect(),
+                    ..super::OutlineReply::default()
+                })
+        }
+
+        fn fetch_metrics(&mut self, _: FamilyKey, _: u32, _: FontWeight) -> Option<FontMetrics> {
+            None
+        }
+
+        fn fetch_families(&mut self) -> Vec<FamilyEntry> {
+            Vec::new()
+        }
+
+        fn set_transport(&mut self, _: Box<dyn FontTransport>) {}
+    }
+
+    #[test]
+    fn a_run_longer_than_the_protocol_carries_is_fetched_in_runs_it_does() {
+        let mut client = RecordedRuns {
+            caches: Caches::new(),
+            runs: Vec::new(),
+        };
+        let long: Vec<char> = ('a'..='z').chain('A'..='Z').collect();
+        let instance = (
+            FontWeight::REGULAR,
+            FontStyle::Normal,
+            FontStretch::default(),
+        );
+        let reply = client
+            .serve_outlines(&long, FamilyKey::MONO, instance)
+            .expect("every scalar answered");
+        assert_eq!(reply.glyphs.len(), long.len());
+        assert_eq!(
+            client.runs,
+            [FONT_MAX_GLYPH_RUN, long.len() - FONT_MAX_GLYPH_RUN]
+        );
+    }
+
+    #[test]
+    fn a_run_the_outline_cache_holds_whole_is_served_without_asking_the_service() {
+        use crate::outline_cache::{outline_cache_budget, outline_cache_candidate};
+
+        static SINK: DiscardSink = DiscardSink;
+        static GAUGE: ReportedPressure = ReportedPressure::unknown();
+        GAUGE.report(PressureBand::Normal);
+        let mut client = LocalClient::new();
+        client.caches.outlines = Some(ReclaimCache::new(
+            "test.font.outlines.whole",
+            outline_cache_candidate(ReclaimOwner::UserlandProcess("test.font")),
+            outline_cache_budget(1 << 30),
+            &GAUGE,
+            &SINK,
+            BuildSipHash13::with_seed(tairix_hash::HashSeed::from_words(3, 5)),
+        ));
+        let instance = (
+            FontWeight::REGULAR,
+            FontStyle::Normal,
+            FontStretch::default(),
+        );
+        let face = FaceMetrics {
+            units_per_em: 2048,
+            ascent: 1900,
+            descent: 500,
+            line_gap: 60,
+        };
+        for scalar in ['a', 'b'] {
+            let key = OutlineKey::new(FamilyKey::MONO, scalar, instance.0, instance.1, instance.2);
+            let outline = OwnedOutline {
+                units_per_em: 2048,
+                ..OwnedOutline::default()
+            };
+            if let Some(cache) = client.caches.outlines.as_mut() {
+                cache.retain(&(), key, CachedOutline { outline, face });
+            }
+        }
+        // No transport is installed, so a single round trip would answer
+        // nothing at all.
+        let reply = client
+            .serve_outlines(&['a', 'b'], FamilyKey::MONO, instance)
+            .expect("served from the cache");
+        assert_eq!(reply.glyphs.len(), 2);
+        assert_eq!(reply.face(), face, "the face's metrics came with them");
+        assert!(client
+            .serve_outlines(&[], FamilyKey::MONO, instance)
+            .is_none());
+    }
+
+    #[test]
+    fn an_outline_is_read_without_a_fetch_only_once_one_has_retained_it() {
+        use crate::outline_cache::{outline_cache_budget, outline_cache_candidate};
+
+        static SINK: DiscardSink = DiscardSink;
+        static GAUGE: ReportedPressure = ReportedPressure::unknown();
+        GAUGE.report(PressureBand::Normal);
+        let mut client = LocalClient::new();
+        client.caches.outlines = Some(ReclaimCache::new(
+            "test.font.outlines",
+            outline_cache_candidate(ReclaimOwner::UserlandProcess("test.font")),
+            outline_cache_budget(1 << 30),
+            &GAUGE,
+            &SINK,
+            BuildSipHash13::with_seed(tairix_hash::HashSeed::from_words(7, 11)),
+        ));
+        let key = |scalar| {
+            OutlineKey::new(
+                FamilyKey::MONO,
+                scalar,
+                FontWeight::REGULAR,
+                FontStyle::Normal,
+                FontStretch::default(),
+            )
+        };
+        assert_eq!(
+            client.caches.cached_outline(&key('a')),
+            None,
+            "nothing fetched yet"
+        );
+        let outline = OwnedOutline {
+            units_per_em: 1000,
+            advance: 600.0,
+            ..OwnedOutline::default()
+        };
+        if let Some(cache) = client.caches.outlines.as_mut() {
+            cache.retain(
+                &(),
+                key('a'),
+                CachedOutline {
+                    outline: outline.clone(),
+                    face: FaceMetrics::default(),
+                },
+            );
+        }
+        assert_eq!(client.caches.cached_outline(&key('a')), Some(outline));
+        assert_eq!(
+            client.caches.cached_outline(&key('b')),
+            None,
+            "only what was fetched"
+        );
+        assert_eq!(
+            LocalClient::new().caches.cached_outline(&key('a')),
+            None,
+            "no cache, no outline"
+        );
     }
 
     #[test]
