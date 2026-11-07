@@ -224,7 +224,9 @@ pub fn run() {
     };
 
     // 2. Bring up fw_cfg and program ramfb (the framebuffer device).
-    let Ok(dma) = MmioDma::from_dtb(&dtb) else {
+    // SAFETY: this kernel runs identity-mapped, the fw_cfg block among what
+    // the identity window maps, and nothing else drives the device.
+    let Ok(dma) = (unsafe { MmioDma::from_dtb(&dtb) }) else {
         fail("no fw_cfg device in DTB");
     };
     let fw = FwCfg::new(dma);

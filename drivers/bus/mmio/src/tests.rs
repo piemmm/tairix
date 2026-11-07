@@ -108,79 +108,13 @@ impl MmioRead for FakeMmio {
     }
 }
 
-// ---- DTB fixture ---------------------------------------------------------
-
-const FDT_BEGIN_NODE: u32 = 0x0000_0001;
-const FDT_END_NODE: u32 = 0x0000_0002;
-const FDT_PROP: u32 = 0x0000_0003;
-const FDT_END: u32 = 0x0000_0009;
-const FDT_MAGIC: u32 = 0xd00d_feed;
-const HEADER_LEN: u32 = 40;
-
-/// Build a minimal `virt`-style DTB with `slot_count` `virtio_mmio`
-/// nodes laid out at the canonical `0x0A00_0000 + i * 0x200` grid.
+/// A minimal `virt`-style tree with `slot_count` `virtio_mmio` nodes laid out
+/// at the canonical `0x0A00_0000 + i * 0x200` grid.
 fn build_virt_dtb(slot_count: u32) -> Vec<u8> {
-    // ---- strings block ---------------------------------------------------
-    let mut strings: Vec<u8> = Vec::new();
-    let off_compatible = u32::try_from(strings.len()).unwrap();
-    strings.extend_from_slice(b"compatible\0");
-    let off_reg = u32::try_from(strings.len()).unwrap();
-    strings.extend_from_slice(b"reg\0");
-
-    // ---- struct block ----------------------------------------------------
-    let mut structs: Vec<u8> = Vec::new();
-    // Root.
-    structs.extend_from_slice(&FDT_BEGIN_NODE.to_be_bytes());
-    structs.extend_from_slice(&[0, 0, 0, 0]); // empty name + padding.
-    for i in 0..slot_count {
-        let base = 0x0A00_0000u64 + (u64::from(i) * 0x200);
-        // Each node name is e.g. "virtio_mmio@a000000\0"; pad to 4.
-        structs.extend_from_slice(&FDT_BEGIN_NODE.to_be_bytes());
-        let mut name = alloc::format!("virtio_mmio@{base:x}\0").into_bytes();
-        while name.len() % 4 != 0 {
-            name.push(0);
-        }
-        structs.extend_from_slice(&name);
-        // compatible.
-        let compat = b"virtio,mmio\0";
-        structs.extend_from_slice(&FDT_PROP.to_be_bytes());
-        structs.extend_from_slice(&u32::try_from(compat.len()).unwrap().to_be_bytes());
-        structs.extend_from_slice(&off_compatible.to_be_bytes());
-        structs.extend_from_slice(compat);
-        while !structs.len().is_multiple_of(4) {
-            structs.push(0);
-        }
-        // reg = <base_hi base_lo length_hi length_lo> (16 bytes).
-        structs.extend_from_slice(&FDT_PROP.to_be_bytes());
-        structs.extend_from_slice(&16u32.to_be_bytes());
-        structs.extend_from_slice(&off_reg.to_be_bytes());
-        structs.extend_from_slice(&base.to_be_bytes());
-        structs.extend_from_slice(&0x0000_0000_0000_0200u64.to_be_bytes());
-        structs.extend_from_slice(&FDT_END_NODE.to_be_bytes());
-    }
-    structs.extend_from_slice(&FDT_END_NODE.to_be_bytes()); // close root
-    structs.extend_from_slice(&FDT_END.to_be_bytes());
-
-    // ---- assemble --------------------------------------------------------
-    let off_struct = HEADER_LEN;
-    let size_struct = u32::try_from(structs.len()).unwrap();
-    let off_strings = off_struct + size_struct;
-    let size_strings = u32::try_from(strings.len()).unwrap();
-    let total = off_strings + size_strings;
-    let mut blob = Vec::new();
-    blob.extend_from_slice(&FDT_MAGIC.to_be_bytes());
-    blob.extend_from_slice(&total.to_be_bytes());
-    blob.extend_from_slice(&off_struct.to_be_bytes());
-    blob.extend_from_slice(&off_strings.to_be_bytes());
-    blob.extend_from_slice(&0u32.to_be_bytes()); // off_mem_rsvmap
-    blob.extend_from_slice(&17u32.to_be_bytes()); // version
-    blob.extend_from_slice(&16u32.to_be_bytes()); // last_comp_version
-    blob.extend_from_slice(&0u32.to_be_bytes()); // boot_cpuid_phys
-    blob.extend_from_slice(&size_strings.to_be_bytes());
-    blob.extend_from_slice(&size_struct.to_be_bytes());
-    blob.extend_from_slice(&structs);
-    blob.extend_from_slice(&strings);
-    blob
+    let bases: Vec<u64> = (0..slot_count)
+        .map(|i| 0x0A00_0000 + u64::from(i) * 0x200)
+        .collect();
+    build_virt_dtb_at(&bases, 0x200)
 }
 
 fn slot(base: u64, device_id: u32, vendor: u32, version: u32) -> [(u64, u32); 4] {
@@ -378,64 +312,24 @@ fn slot_window_len_reports_not_found_for_unknown_base() {
 
 // ---- `virtio_mmio_bus_from_dtb` construction seam ------------------------
 
-/// Build a minimal `virt`-style DTB whose `virtio,mmio` slots sit at the
+/// A minimal `virt`-style tree whose `virtio,mmio` slots sit at the
 /// caller-supplied `bases`, each advertising a `length`-byte window. The
 /// constructor test points the bases at a host buffer so the volatile
 /// reader the constructor mints reads real memory.
 fn build_virt_dtb_at(bases: &[u64], length: u64) -> Vec<u8> {
-    let mut strings: Vec<u8> = Vec::new();
-    let off_compatible = u32::try_from(strings.len()).unwrap();
-    strings.extend_from_slice(b"compatible\0");
-    let off_reg = u32::try_from(strings.len()).unwrap();
-    strings.extend_from_slice(b"reg\0");
-
-    let mut structs: Vec<u8> = Vec::new();
-    structs.extend_from_slice(&FDT_BEGIN_NODE.to_be_bytes());
-    structs.extend_from_slice(&[0, 0, 0, 0]);
+    let mut b = tairix_fdt::write::FdtWriter::new();
+    b.begin_node("");
     for base in bases {
-        structs.extend_from_slice(&FDT_BEGIN_NODE.to_be_bytes());
-        let mut name = alloc::format!("virtio_mmio@{base:x}\0").into_bytes();
-        while name.len() % 4 != 0 {
-            name.push(0);
-        }
-        structs.extend_from_slice(&name);
-        let compat = b"virtio,mmio\0";
-        structs.extend_from_slice(&FDT_PROP.to_be_bytes());
-        structs.extend_from_slice(&u32::try_from(compat.len()).unwrap().to_be_bytes());
-        structs.extend_from_slice(&off_compatible.to_be_bytes());
-        structs.extend_from_slice(compat);
-        while !structs.len().is_multiple_of(4) {
-            structs.push(0);
-        }
-        structs.extend_from_slice(&FDT_PROP.to_be_bytes());
-        structs.extend_from_slice(&16u32.to_be_bytes());
-        structs.extend_from_slice(&off_reg.to_be_bytes());
-        structs.extend_from_slice(&base.to_be_bytes());
-        structs.extend_from_slice(&length.to_be_bytes());
-        structs.extend_from_slice(&FDT_END_NODE.to_be_bytes());
+        b.begin_node(&alloc::format!("virtio_mmio@{base:x}"));
+        b.prop_str("compatible", "virtio,mmio");
+        let mut reg = Vec::new();
+        reg.extend_from_slice(&base.to_be_bytes());
+        reg.extend_from_slice(&length.to_be_bytes());
+        b.prop("reg", &reg);
+        b.end_node();
     }
-    structs.extend_from_slice(&FDT_END_NODE.to_be_bytes());
-    structs.extend_from_slice(&FDT_END.to_be_bytes());
-
-    let off_struct = HEADER_LEN;
-    let size_struct = u32::try_from(structs.len()).unwrap();
-    let off_strings = off_struct + size_struct;
-    let size_strings = u32::try_from(strings.len()).unwrap();
-    let total = off_strings + size_strings;
-    let mut blob = Vec::new();
-    blob.extend_from_slice(&FDT_MAGIC.to_be_bytes());
-    blob.extend_from_slice(&total.to_be_bytes());
-    blob.extend_from_slice(&off_struct.to_be_bytes());
-    blob.extend_from_slice(&off_strings.to_be_bytes());
-    blob.extend_from_slice(&0u32.to_be_bytes());
-    blob.extend_from_slice(&17u32.to_be_bytes());
-    blob.extend_from_slice(&16u32.to_be_bytes());
-    blob.extend_from_slice(&0u32.to_be_bytes());
-    blob.extend_from_slice(&size_strings.to_be_bytes());
-    blob.extend_from_slice(&size_struct.to_be_bytes());
-    blob.extend_from_slice(&structs);
-    blob.extend_from_slice(&strings);
-    blob
+    b.end_node();
+    b.build()
 }
 
 #[test]

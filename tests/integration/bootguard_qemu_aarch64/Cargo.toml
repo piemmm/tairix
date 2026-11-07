@@ -11,9 +11,9 @@ publish = false
 [lints]
 workspace = true
 
-# A freestanding kernel booted on the QEMU `virt` board. The boot stack runs with
-# the MMU off, so an overrun cannot be caught by unmapping a page below it;
-# the guard is poison instead, and only a real boot can show that the
+# A freestanding kernel booted on the QEMU `virt` board. The boot stack is in
+# use before the kernel root maps its guard read only, when no fault can catch
+# an overrun; so the guard is poison too, and only a real boot can show that the
 # linker reserved it, that the stub's fill survived the `.bss` clear that
 # spans it, and that the port's handle names that same reservation. The
 # judgement itself is `kernel/arch/api`'s and is unit-tested on the host.

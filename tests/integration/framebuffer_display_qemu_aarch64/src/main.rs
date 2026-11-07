@@ -2,9 +2,8 @@
 //! framebuffer display end-to-end on the aarch64 `virt` board — the
 //! EL1/GICv2 analogue of the riscv64 framebuffer-display vertical.
 //!
-//! The vertical brings the `virt`-board PE up to a translated, FP-enabled
-//! state (FP enable + 2 GiB identity MMU + EL1 vectors, shared from
-//! `tairix_test_virtio_qemu_support`), synthesises a genuine framebuffer
+//! The vertical runs on the kernel root the port entry builds, its vectors
+//! and FP armed there, and synthesises a genuine framebuffer
 //! device with QEMU's `ramfb` — a scan-out surface in guest RAM whose
 //! geometry is programmed into the device over the shared `fw_cfg` MMIO
 //! DMA interface (`src/kernel.rs`) — assembles the geometry as a

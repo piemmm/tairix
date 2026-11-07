@@ -117,17 +117,20 @@ pub fn elf_to_flat(elf: &[u8], load_addr: u64) -> Result<Vec<u8>, MkimageError> 
         }
     }
 
+    // Every end checked here bounds the file part within it, so neither sum
+    // below can wrap.
+    let memory_len = loads
+        .iter()
+        .try_fold(0, |reach: u64, s| {
+            Some(reach.max(s.paddr.checked_add(s.memsz)? - load_addr))
+        })
+        .ok_or(MkimageError::KernelElf("segment end overflows"))?;
     // A segment with no file bytes is the kernel's to zero, so it neither
     // extends the image nor pads up to where it begins.
     let flat_len = loads
         .iter()
         .filter(|s| s.filesz != 0)
         .map(|s| s.paddr - load_addr + s.filesz)
-        .max()
-        .unwrap_or(0);
-    let memory_len = loads
-        .iter()
-        .map(|s| s.paddr - load_addr + s.memsz)
         .max()
         .unwrap_or(0);
     if flat_len == 0 {
@@ -624,5 +627,24 @@ mod tests {
         w64(&mut past_eof, ELF64_HEADER_LEN + 32, 1 << 20);
         w64(&mut past_eof, ELF64_HEADER_LEN + 40, 1 << 20);
         assert!(elf_to_flat(&past_eof, KERNEL_LOAD_ADDR).is_err());
+    }
+
+    /// A last segment whose `.bss` would end past the address space is
+    /// refused, never summed into a wrapped reach.
+    #[test]
+    fn a_segment_reaching_past_the_address_space_is_refused() {
+        let mut elf = sample_elf(
+            KERNEL_LOAD_ADDR,
+            &[Seg {
+                paddr: KERNEL_LOAD_ADDR,
+                bytes: vec![0x11; 8],
+                bss: 0,
+            }],
+        );
+        w64(&mut elf, ELF64_HEADER_LEN + 40, u64::MAX - 4);
+        assert!(matches!(
+            elf_to_flat(&elf, KERNEL_LOAD_ADDR),
+            Err(MkimageError::KernelElf("segment end overflows"))
+        ));
     }
 }

@@ -52,8 +52,6 @@ pub const CORESIGHT_CPU_DEBUG_COMPATIBLE: &str = "arm,coresight-cpu-debug";
 ///
 /// Alloc-free: it writes directly into `out` and resolves phandles with
 /// nested tree lookups, so it runs in the freestanding kernel with no heap.
-/// It walks the whole tree, so it must be called with the MMU on (the
-/// early-returning discovery queries are the MMU-off ones).
 pub fn debug_component_bases(fdt: &Fdt<'_>, cpu_affinities: &[u64], out: &mut [usize]) {
     let _: Option<()> = scan_translated(fdt, |node, levels, depth| {
         if node.is_compatible(CORESIGHT_CPU_DEBUG_COMPATIBLE) {
@@ -150,12 +148,8 @@ impl PsciMethod {
 /// Matches the `/psci` node through the shared `Fdt::nodes` early-return
 /// walk — the same byte-safe traversal [`crate::gic::configure_from_fdt`]
 /// and [`timer_clock_frequency`] use — and reads
-/// `method` from that node's own properties. It stops at the first
-/// matching node and never scans the whole tree, so it stays safe with
-/// the MMU off (the secondary-bring-up boot path discovers the conduit
-/// before the page tables are live; a whole-tree `Fdt::property`/`walk`
-/// scan faults there once the compiler widens the byte reads —
-/// `plans/PI.md` P4/P5 watch-out).
+/// `method` from that node's own properties, stopping at the first matching
+/// node.
 #[must_use]
 pub fn psci_method(fdt: &Fdt<'_>) -> Option<PsciMethod> {
     let node = fdt.nodes().flatten().find(node_is_psci)?;

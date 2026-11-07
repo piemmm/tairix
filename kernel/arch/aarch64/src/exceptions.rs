@@ -236,10 +236,9 @@ extern "C" {
 
 /// Point `VBAR_EL1` at the exception vector table.
 ///
-/// The boot entry arms the boot CPU before `kernel_main`; a binary arms each
-/// secondary CPU it brings up, and may re-arm one — after an address-space
-/// switch, say — which is harmless: every step writes the value it already
-/// holds.
+/// The port's entries arm each CPU first, the boot CPU before `kernel_main`
+/// and a secondary before its entry callback; re-arming one is harmless:
+/// every step writes the value it already holds.
 ///
 /// # Safety
 ///

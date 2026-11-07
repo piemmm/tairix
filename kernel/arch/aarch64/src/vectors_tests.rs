@@ -59,13 +59,18 @@ fn only_a_synchronous_or_serror_entry_carries_a_syndrome() {
 
 #[test]
 fn every_entry_reserves_the_frame_the_interrupted_sp_is_recovered_from() {
-    let reserve = std::format!("sub sp, sp, #{TRAP_FRAME_BYTES}");
     let reservations: Vec<String> = instruction_lines(include_str!("vectors.s"))
         .into_iter()
         .filter(|line| line.starts_with("sub sp, sp,"))
         .collect();
     assert_eq!(reservations.len(), 16, "one reservation per entry");
-    assert!(reservations.iter().all(|line| *line == reserve));
+    assert!(reservations
+        .iter()
+        .all(|line| line == "sub sp, sp, #{TRAP_FRAME_BYTES}"));
+    assert!(
+        include_str!("lib.rs").contains("TRAP_FRAME_BYTES = const exceptions::TRAP_FRAME_BYTES,"),
+        "the frame the Rust side reads it by"
+    );
 }
 
 /// Any nested synchronous exception rewrites `FAR_EL1`, so the synchronous

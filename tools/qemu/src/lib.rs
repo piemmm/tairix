@@ -1387,15 +1387,6 @@ impl Board {
         }
     }
 
-    /// The same board with EL2, which the kernel is entered at.
-    #[must_use]
-    pub const fn with_virtualization(self) -> Self {
-        Self {
-            virtualization: true,
-            ..self
-        }
-    }
-
     /// The same board built with `interrupts`.
     #[must_use]
     pub const fn with_interrupts(self, interrupts: InterruptControllers) -> Self {

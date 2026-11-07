@@ -34,6 +34,7 @@ use crate::{
     as_u32, as_usize, extent_spec, is_all_zero, Block, Extent, Inode, RunStage, ARXFS,
     COMPRESS_CLUSTER_BLOCKS, MAX_BLOCK_LEN, RING_BLOCKS,
 };
+use zeroize::Zeroize;
 
 impl<B: Block> ARXFS<B> {
     /// Allocate `run` physically contiguous free data blocks, scanning upward
@@ -84,15 +85,15 @@ impl<B: Block> ARXFS<B> {
         &mut self,
         plaintext: &[u8],
     ) -> Result<Option<(u64, u64)>, DriverError> {
-        let capu = as_usize(self.data_capacity());
-        // A frame wins only by a whole block, so the compressor is given one
-        // block fewer than the cluster and gives up as soon as it outgrows it.
-        let room = (plaintext.len() / capu).saturating_sub(1) * capu;
+        let room = frame_room(plaintext.len(), as_usize(self.data_capacity()));
         let mut frame = core::mem::take(&mut self.cluster_frame);
         if frame.len() < room {
             frame = tairix_util::fallible::zeroed(room).ok_or(DriverError::OutOfMemory)?;
         }
         let stored = self.store_frame(plaintext, &mut frame[..room]);
+        // It held the cluster's plaintext, compressed: wiped before it waits
+        // for the next one, as the read path wipes its own.
+        frame[..room].zeroize();
         self.cluster_frame = frame;
         stored
     }
@@ -422,4 +423,10 @@ impl<B: Block> ARXFS<B> {
         }
         Ok(())
     }
+}
+
+/// The bytes a cluster of `len` plaintext bytes may compress into, at
+/// `capacity` bytes a block: a frame wins only by a whole block.
+pub(crate) const fn frame_room(len: usize, capacity: usize) -> usize {
+    (len / capacity).saturating_sub(1) * capacity
 }

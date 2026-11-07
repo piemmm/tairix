@@ -3174,6 +3174,9 @@ impl<S: DirectorySource> Desktop<S> {
             lent: false,
             ..carry
         });
+        // Drawn nowhere while lent, so where they are let go is owed a paint
+        // even if they settle exactly there.
+        self.mark_carried(layout, damage);
         self.put_down(layout, damage)
     }
 

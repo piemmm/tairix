@@ -2072,8 +2072,9 @@ impl SyscallNumber {
     /// still pending, [`crate::Errno::TimedOut`] once the ticket's deadline
     /// has elapsed (the kernel retires the ticket and best-effort cancels the
     /// in-flight request — a wedged device thus fails closed deterministically
-    /// rather than parking the caller forever), and [`crate::Errno::NotFound`]
-    /// for a cancelled ticket, a torn-down endpoint, or a ticket that is not
+    /// rather than parking the caller forever), [`crate::Errno::BrokenPipe`]
+    /// once the endpoint has ended, whatever the ticket, and
+    /// [`crate::Errno::NotFound`] for a withdrawn ticket or one that is not
     /// this caller's (no existence oracle — a foreign ticket is
     /// indistinguishable from an unknown one). A reply larger than `reply_cap`
     /// fails closed with [`crate::Errno::BufferTooSmall`]. The caller parks on

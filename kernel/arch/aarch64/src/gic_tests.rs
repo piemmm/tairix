@@ -905,3 +905,42 @@ fn a_gicv3_topology_carries_its_redistributor_regions_and_stride() {
     );
     assert_eq!(topology.cpus.len(), 1);
 }
+
+/// A controller drives only windows the direct map types as registers: a
+/// base no tree named, which may lie in RAM, is refused before anything is
+/// touched.
+#[test]
+fn a_controller_drives_only_windows_the_direct_map_types_as_registers() {
+    use crate::paging::{reveal, Holding, GIGAPAGE_MASK_WORDS};
+
+    const TYPED: usize = 410;
+    const UNTYPED: usize = 412;
+    let mut mask = [0u64; GIGAPAGE_MASK_WORDS];
+    mask[TYPED / 64] |= 1 << (TYPED % 64);
+    let _ = reveal(&mask, Holding::Registers);
+    let at = |gigabyte: usize, offset: usize| (gigabyte << 30) + offset;
+    let typed = (at(TYPED, 0), at(TYPED, 0x1_0000));
+    assert!(windows_are_registers(GicVersion::V2, typed, &[]));
+    assert!(
+        !windows_are_registers(GicVersion::V2, (at(UNTYPED, 0), at(UNTYPED, 0x1_0000)), &[]),
+        "a distributor no register gigabyte holds"
+    );
+    assert!(
+        !windows_are_registers(GicVersion::V2, (at(TYPED, 0), at(UNTYPED, 0)), &[]),
+        "a CPU interface outside them"
+    );
+    let region = RedistributorRegion {
+        base: at(TYPED, 0x10_0000) as u64,
+        len: 0x2_0000,
+    };
+    assert!(windows_are_registers(GicVersion::V3, typed, &[region]));
+    let stray = RedistributorRegion {
+        base: at(UNTYPED, 0) as u64,
+        len: 0x2_0000,
+    };
+    assert!(!windows_are_registers(
+        GicVersion::V3,
+        typed,
+        &[region, stray]
+    ));
+}

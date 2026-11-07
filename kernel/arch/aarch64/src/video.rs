@@ -247,8 +247,8 @@ mod metal {
     pub fn register_windows(fdt: &Fdt<'_>, mut window: impl FnMut(u64, u64)) {
         if let Some(mailbox) = crate::firmware::find_mailbox(fdt) {
             window(mailbox.base, mailbox.len);
-        } else if let Ok(dma) = MmioDma::from_dtb(fdt) {
-            window(dma.base(), MMIO_REGISTERS_LEN);
+        } else if let Ok(base) = MmioDma::find(fdt) {
+            window(base, MMIO_REGISTERS_LEN);
         }
     }
 
@@ -257,9 +257,12 @@ mod metal {
     /// its translation gives.
     #[must_use]
     pub fn fw_cfg(fdt: &Fdt<'_>) -> Option<MmioDma> {
-        let dma = MmioDma::from_dtb(fdt).ok()?;
-        let registers = crate::paging::registers_virt(dma.base(), MMIO_REGISTERS_LEN)?;
-        Some(dma.mapped(registers, dma_phys))
+        let base = MmioDma::find(fdt).ok()?;
+        let registers = crate::paging::registers_virt(base, MMIO_REGISTERS_LEN)?;
+        // SAFETY: `registers` is the block's Device-memory alias in the direct
+        // map, which the kernel alone drives, and `dma_phys` answers a kernel
+        // buffer's physical address or `u64::MAX`.
+        Some(unsafe { MmioDma::mapped(base, registers, dma_phys) })
     }
 
     /// The physical address of a kernel buffer at `virt`, or `u64::MAX`,

@@ -73,6 +73,9 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+#[cfg(test)]
+mod aarch64_boot_order_tests;
+
 // Metered, so a host test can refuse what an exhausted kernel heap would.
 #[cfg(test)]
 #[global_allocator]

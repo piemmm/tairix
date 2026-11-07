@@ -33,7 +33,7 @@
 /// that board.
 ///
 /// The aarch64 production image targets the Raspberry Pi 4 (load address
-/// `0x8_0000`, `aarch64-rpi4.ld`); the QEMU `virt` board's
+/// `0x20_0000`, `aarch64-rpi4.ld`); the QEMU `virt` board's
 /// `aarch64-virt.ld` is used only by the per-test bins under
 /// `tests/integration/*`, which supply their own build scripts.
 const FREESTANDING_TARGETS: &[(&str, &str)] = &[

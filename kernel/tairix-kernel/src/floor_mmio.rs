@@ -42,17 +42,18 @@ const MMIO_CAP_PAGES: usize = 64;
 ///
 /// # Safety
 ///
-/// The virtio-MMIO aperture the boot device tree describes is mapped at its
-/// physical address as device memory for the life of the kernel, and nothing
-/// holds a reference into it: it is reached only by volatile register access.
+/// The virtio-MMIO aperture the boot device tree describes is mapped as
+/// device memory where [`registers`](Self::registers) translates it, for the
+/// life of the kernel, and nothing holds a reference into it: it is reached
+/// only by volatile register access.
 pub unsafe trait MmioFloorPort {
     /// The port's half of the device-tree walk, whose conventions a slot's
     /// coherence is read under.
     type Platform: FdtPlatform;
     /// The page tables the register map and the DMA window are accounted in.
     type Space: PageTable + 'static;
-    /// Base of the register map in a bookkeeping space, above the extent the
-    /// space identity-maps.
+    /// Base of the register map in a bookkeeping space, clear of anything
+    /// else the space accounts.
     const MMIO_VBASE: u64;
     /// Base of the DMA window in a bookkeeping space, likewise.
     const POOL_VBASE: u64;

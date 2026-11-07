@@ -1403,8 +1403,8 @@ pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
 /// slab, takes [`BufferCoherency::none`]. A caller whose property buffer is
 /// Normal write-back memory supplies real hooks so the firmware sees the
 /// staged request and the ARM re-reads the firmware's response rather
-/// than a stale cached copy. Each hook receives the buffer's CPU base and byte
-/// length.
+/// than a stale cached copy. Each hook receives the buffer's physical base,
+/// the address the mailbox names it by, and its byte length.
 #[derive(Copy, Clone)]
 pub struct BufferCoherency {
     /// Clean `[base, base + len)` to the point of coherency after the

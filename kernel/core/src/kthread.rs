@@ -1585,6 +1585,14 @@ fn recheck_switch_in(cpu: CpuId, tag: AddressTag, context: Option<&TlbContext>) 
     }
 }
 
+/// Note that `cpu` loaded a root under tag `0` behind the dispatcher's back,
+/// as the init seam loads PID 1's, so its next park discards what that left.
+pub(crate) fn note_untagged_load(cpu: CpuId) {
+    if let Some(state) = cpu_state::get(cpu) {
+        let _ = state.tags.lock().untagged();
+    }
+}
+
 /// Park `cpu`'s translation on the park root, discarding its tag first only
 /// when it went stale, and answer whether the CPU left the user root.
 fn park_translation(cpu: CpuId) -> bool {
@@ -2968,6 +2976,7 @@ mod tests {
     std::thread_local! {
         static PARKS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
         static DISCARDS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+        static PARKED_FLUSHING: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
     }
 
     /// The port tags every test installs. The slot is process-global and
@@ -2992,8 +3001,9 @@ mod tests {
             DISCARDS.with(|discards| discards.set(discards.get() + 1));
         }
 
-        unsafe fn park(&self, _flush: bool) -> bool {
+        unsafe fn park(&self, flush: bool) -> bool {
             PARKS.with(|parks| parks.set(parks.get() + 1));
+            PARKED_FLUSHING.with(|parked| parked.set(flush));
             true
         }
     }
@@ -3030,6 +3040,33 @@ mod tests {
             space.tlb_context().is_idle(),
             "and left it once parked off that root"
         );
+    }
+
+    /// A root loaded under the park root's tag behind the dispatcher's back,
+    /// as the init seam loads PID 1's, is discarded by the next park, so a
+    /// kernel thread on the park root sees none of that space's pages.
+    #[test]
+    fn the_park_after_a_root_loaded_behind_the_dispatcher_discards_its_entries() {
+        let cpu = crate::test_boot::claim_cpu();
+        install_address_tags(&COUNTING_TAGS);
+        let rec = recorder!();
+        let mut user = user_control_with(
+            RecordingCs(rec),
+            BoxStack::new().expect("stack allocates"),
+            pre_resume_counter!(),
+        );
+        user.live = Some(Arc::new(crate::procspace::ProcessSpace::for_test(
+            crate::procspace::host_test_space!(),
+        )));
+        let _ = dispatch_step(&mut user, cpu, TASK);
+        let _ = dispatch_step(&mut user, cpu, TASK);
+        assert!(
+            !PARKED_FLUSHING.with(core::cell::Cell::get),
+            "a park owing nothing keeps the park root's entries"
+        );
+        note_untagged_load(cpu);
+        let _ = dispatch_step(&mut user, cpu, TASK);
+        assert!(PARKED_FLUSHING.with(core::cell::Cell::get));
     }
 
     /// A thread's space is loaded under the tag its CPU gave it: discarded

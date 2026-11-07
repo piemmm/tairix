@@ -18,6 +18,19 @@ fn dcache_line_bytes_decodes_dminline() {
     assert_eq!(dcache_line_bytes(0xFFF0_FFFF), 4);
 }
 
+/// A starting Cortex-A72 invalidates its own L1 and leaves alone the L2 the
+/// running cores share, which the level of coherency would have reached.
+#[test]
+fn a_starting_core_invalidates_only_the_cache_levels_it_owns() {
+    const CORTEX_A72_CLIDR: u64 = 0x0A20_0023;
+    assert_eq!((CORTEX_A72_CLIDR >> CLIDR_LOUIS_SHIFT) & 0b111, 1);
+    assert_eq!(
+        (CORTEX_A72_CLIDR >> 24) & 0b111,
+        2,
+        "its level of coherency"
+    );
+}
+
 #[test]
 fn the_pool_hands_out_each_frame_once_and_then_fails_closed() {
     static POOL: PageTablePool = PageTablePool::new();
@@ -706,9 +719,10 @@ fn passes_tlb_conformance() {
 fn passes_frames_conformance() {
     use tairix_arch_api::frames::{self, PageTableFrames};
     // The static pool is the boot/bootstrap `PageTableFrames` source; its
-    // `phys_of` is the image's own translation, the identity on the host,
-    // so the suite runs there. A fresh pool hands out `POOL_SIZE` frames before failing
-    // closed; a second pool exercises the object-safe erasure.
+    // frames' physical addresses are the image's own translation
+    // (`image_phys`), the identity on the host, so the suite runs there. A
+    // fresh pool hands out `POOL_SIZE` frames before failing closed; a second
+    // pool exercises the object-safe erasure.
     static POOL: PageTablePool = PageTablePool::new();
     static POOL2: PageTablePool = PageTablePool::new();
     frames::conformance::run_all(&POOL, super::POOL_SIZE);

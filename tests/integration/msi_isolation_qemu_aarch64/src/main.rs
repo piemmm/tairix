@@ -8,8 +8,9 @@
 //! nothing while the LPI B's event 1 raises is live: the service knows a
 //! message by the `DeviceID` the fabric attaches, which A cannot choose.
 //!
-//! It links the arch port, `lib/pci` and `lib/fdt` alone, with the MMU off,
-//! so every table the ITS reads is at its own physical address.
+//! It links the arch port, `lib/pci` and `lib/fdt` alone, on the kernel root
+//! the port entry builds, and names each table the ITS reads by its physical
+//! address (`paging::image_phys`).
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]

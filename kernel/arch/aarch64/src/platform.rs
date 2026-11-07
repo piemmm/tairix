@@ -27,7 +27,7 @@
 //!   window, which the one temperature sensor inside it takes, and the
 //!   display engine's fixed wiring — its pixel valves and the HDMI encoders
 //!   they feed — which the tree leaves implicit;
-//! * **`pcie_bringup`**, the pre-MMU read of those PCIe windows the
+//! * **`pcie_bringup`**, the early read of those PCIe windows the
 //!   in-kernel USB bring-up needs before any hardware tree exists.
 //!
 //! The PSCI conduit the tree also carries ([`crate::fdt::psci_method`]) is
@@ -1230,7 +1230,7 @@ mod tests {
 
     #[test]
     fn pcie_bringup_reads_all_three_windows_off_the_bridge() {
-        // The pre-MMU bring-up discovery resolves the same three windows
+        // The early bring-up discovery resolves the same three windows
         // the full `discover` walk emits on the bridge node, by a single
         // early-returning `scan_translated` pass (`plans/PI.md` P10).
         let blob = scb_pcie_tree();

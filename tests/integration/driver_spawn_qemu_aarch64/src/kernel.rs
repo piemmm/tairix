@@ -243,9 +243,9 @@ const REPLY_MAX_PAYLOAD: u32 = 64;
 /// Reply-port mailbox depth: one in-flight reply plus headroom.
 const REPLY_MAILBOX_CAPACITY: usize = 4;
 
-/// Bring the board up for the handshake: FP/SIMD on, the `virt` device
-/// tree discovered (timer rate, GICv2 bases), the GIC initialised, and the
-/// dispatch callback installed. Returns the discovered generic-timer rate.
+/// Bring the board up for the handshake: the `virt` device tree discovered
+/// (timer rate, GICv2 bases), the GIC initialised, and the dispatch callback
+/// installed. Returns the discovered generic-timer rate.
 fn bring_up_board() -> u64 {
     // P3/P4: discover the board from the embedded `virt` device tree.
     let Ok(fdt) = Fdt::new(DTB_BLOB) else {

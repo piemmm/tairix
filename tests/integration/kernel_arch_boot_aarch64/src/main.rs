@@ -10,12 +10,12 @@
 //! aarch64 boot pipeline — `tairix_kernel::aarch64::boot::boot` — end to
 //! end on the `virt` board:
 //!
-//! 1. The arch crate's `boot.s` trampoline drops to EL1, establishes a
-//!    stack, zeroes `.bss`, and calls `kernel_main`.
-//! 2. `boot_aarch64::boot` enables the stage-1 identity MMU + EL1
-//!    vectors, discovers the board from the device tree, builds the
-//!    `BootMemoryMap`, installs the discovered-UART console + the `svc`
-//!    dispatch callback, and hands a validated `BootInfo` to
+//! 1. The arch crate's `boot.s` trampoline drops to EL1, turns translation
+//!    on, establishes a stack and zeroes `.bss`; the port entry arms the
+//!    vectors, moves onto the kernel root and calls `kernel_main`.
+//! 2. `boot_aarch64::boot` discovers the board from the device tree,
+//!    builds the `BootMemoryMap`, installs the discovered-UART console +
+//!    the `svc` dispatch callback, and hands a validated `BootInfo` to
 //!    `kernel_core::kernel_main`.
 //! 3. The audit sink observes `BootCompleted`, requires the ramfb
 //!    framebuffer boot console to be active (the harness attaches

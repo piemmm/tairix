@@ -61,7 +61,7 @@ boot refuses a disk whose boot partition disagrees with its root: a descriptor
 beside a plaintext root, or an encrypted root with none.
 
 `kernel8.img` is the freestanding aarch64 `tairix-kernel` ELF (release
-profile, linked at `0x8_0000` by `aarch64-rpi4.ld`) flattened to the raw
+profile, loaded at `0x20_0000` by `aarch64-rpi4.ld`) flattened to the raw
 binary the GPU bootloader copies to memory — see the boot-protocol facts
 of record in [aarch64](../platform/aarch64.md). The generated
 `config.txt` sets `arm_64bit=1`, `kernel=kernel8.img`, `enable_uart=1`,

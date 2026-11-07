@@ -208,8 +208,8 @@ docs-check`), and is referenced by P1+. No source code changes.
 
 - Add `kernel/arch/aarch64/link/aarch64-rpi4.ld` (load `0x20_0000`),
   alongside the existing `aarch64-virt.ld`. Two linker scripts is the
-  §0.2 boot carve-out, not duplication — they differ only in the load
-  address, the boot stack's size and comments.
+  §0.2 boot carve-out: each states only the load address and the boot
+  stack's size and includes the layout both share (`aarch64-image.ld`).
 - Generalise `boot.s` so the EL2→EL1 drop + `.bss` clear + stack setup is
   board-independent (it already is, bar the comment); confirm it works
   from EL2 with the Pi register hand-off. If the Pi enters all 4 cores at
@@ -578,10 +578,12 @@ is assembly.
 
 **A secondary's caches are UNKNOWN at power-on.** It may hold stale lines
 over the very physical addresses the boot page tables and its stack use, so
-`smp.s` invalidates its local data cache to the Level of Coherence by
-set/way (`_invalidate_local_dcache_to_poc`, `dc isw`) before translation and
-caches come on — *invalidate*, never clean, or the garbage would be written
-back over the live tables. Without it the last-released core faulted
+`smp.s` invalidates the data cache levels the core owns — those inside the
+Level of Unification Inner Shareable — by set/way
+(`_invalidate_private_dcache`, `dc isw`) before translation and caches come
+on: *invalidate*, never clean, or the garbage would be written back over the
+live tables, and never the L2 it shares with the running cores, whose dirty
+lines an invalidate would discard. Without it the last-released core faulted
 intermittently with no vectors installed. The words a parked core polls
 before then (the release gate) are `.data`, holding their values from the
 loaded image, and are cleaned to the point of coherency when written. The

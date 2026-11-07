@@ -8,8 +8,9 @@
 //! it again: an `eret` to EL0 restores EL0's own state, and the next entry to
 //! EL1 sets PAN before any kernel code runs.
 //!
-//! Every CPU also closes the generic timer and the performance monitors to
-//! EL0, whatever its reset left in `CNTKCTL_EL1` and `PMUSERENR_EL0`.
+//! Every CPU also closes to EL0 the generic timer, the performance and
+//! activity monitors and the debug communications channel, whatever its reset
+//! left in `CNTKCTL_EL1`, `PMUSERENR_EL0`, `AMUSERENR_EL0` and `MDSCR_EL1`.
 //!
 //! PAN is ARMv8.1 (`FEAT_PAN`); the Raspberry Pi 4's Cortex-A72 lacks it. The
 //! boot CPU settles whether it is in force from what it offers, before any
@@ -26,6 +27,20 @@ pub const PAN: NonZeroU8 = NonZeroU8::MIN;
 /// `PSTATE.PAN`, bit 22 of the `PAN` register.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 const PSTATE_PAN: u64 = 1 << 22;
+
+/// `MDSCR_EL1.TDCC`: EL0's access to the debug communications channel traps.
+pub const MDSCR_TDCC: u64 = 1 << 12;
+
+/// Where `ID_AA64PFR0_EL1` says whether the core has activity monitors.
+#[cfg(any(test, all(target_arch = "aarch64", target_os = "none")))]
+const ID_AA64PFR0_AMU_SHIFT: u32 = 44;
+
+/// Whether a raw `ID_AA64PFR0_EL1` value names activity monitors, and so an
+/// `AMUSERENR_EL0` to close.
+#[cfg(any(test, all(target_arch = "aarch64", target_os = "none")))]
+const fn amu_offered_by(pfr0: u64) -> bool {
+    (pfr0 >> ID_AA64PFR0_AMU_SHIFT) & 0xF != 0
+}
 
 /// Whether PAN is in force: settled once, by the boot CPU, before any other
 /// CPU starts, and clear until then.
@@ -104,7 +119,7 @@ pub(crate) fn settle() {
 }
 
 /// Hold the calling CPU to the kernel's protections: PAN while it is in
-/// force, and the generic timer and performance monitors out of EL0's reach.
+/// force, and the hardware's clocks and debug channel out of EL0's reach.
 /// Answers `false`, changing nothing, on a CPU that does not offer PAN while
 /// it is in force.
 ///
@@ -133,21 +148,26 @@ pub unsafe fn hold() -> bool {
             );
         }
     }
-    close_counters_to_el0();
+    close_to_el0();
     true
 }
 
-/// Close the generic timer and the performance monitors to EL0. Their
-/// controls are UNKNOWN out of reset, and a bit set in either hands user code
-/// a clock fine enough to time cache hits, the timer the kernel preempts by,
-/// or the counters it measures by.
+/// Close to EL0 what its reset leaves UNKNOWN whether it reaches: the generic
+/// timer and the performance and activity monitors, each a clock fine enough
+/// to time cache hits (the first also the timer the kernel preempts by), and
+/// the debug communications channel, a channel between processes sharing the
+/// core.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-fn close_counters_to_el0() {
-    // SAFETY: `CNTKCTL_EL1` exists on every ARMv8 core; zero only refuses EL0
-    // the generic timer, its counters and its event stream.
+fn close_to_el0() {
+    // SAFETY: both registers exist on every ARMv8 core. A zero `CNTKCTL_EL1`
+    // refuses EL0 the generic timer, its counters and its event stream;
+    // `TDCC` alone refuses it the channel and leaves every debug exception
+    // off, as the kernel takes none.
     unsafe {
         core::arch::asm!(
             "msr cntkctl_el1, xzr",
+            "msr mdscr_el1, {tdcc}",
+            tdcc = in(reg) MDSCR_TDCC,
             options(nomem, nostack, preserves_flags)
         );
     }
@@ -161,12 +181,44 @@ fn close_counters_to_el0() {
             );
         }
     }
+    let pfr0: u64;
+    // SAFETY: an architected feature-ID register, read at EL1 with no side
+    // effect.
+    unsafe {
+        core::arch::asm!(
+            "mrs {pfr0}, id_aa64pfr0_el1",
+            pfr0 = out(reg) pfr0,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    if amu_offered_by(pfr0) {
+        // SAFETY: the core has activity monitors, so `AMUSERENR_EL0`
+        // (`S3_3_C13_C2_3`, spelled generically for the ARMv8.0 baseline)
+        // exists, and the hand-off leaves `CPTR_EL2.TAM` clear; clearing it
+        // only refuses EL0 the monitors.
+        unsafe {
+            core::arch::asm!(
+                "msr S3_3_C13_C2_3, xzr",
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{pan_in_force, pan_offered_by, sctlr_mmu_on};
+    use super::{amu_offered_by, pan_in_force, pan_offered_by, sctlr_mmu_on};
     use crate::paging::{SCTLR_MMU_ON, SCTLR_RES1, SCTLR_SPAN};
+
+    /// Activity monitors of any version are closed; a Cortex-A72's
+    /// `ID_AA64PFR0_EL1`, which names none, has nothing to close.
+    #[test]
+    fn any_activity_monitor_version_is_closed_to_el0() {
+        assert!(!amu_offered_by(0x0000_0000_0000_2222));
+        assert!(amu_offered_by(1 << 44), "AMUv1");
+        assert!(amu_offered_by(2 << 44), "AMUv1p1");
+        assert!(!amu_offered_by(0xF << 40), "the neighbouring field");
+    }
 
     #[test]
     fn any_non_zero_pan_field_offers_pan() {

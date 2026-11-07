@@ -3387,6 +3387,29 @@ fn lent_icons_brought_back_are_put_down_where_let_go() {
     assert_eq!(desktop.take_arrangement_edits().len(), 1, "and kept there");
 }
 
+/// Icons brought back from a lent drag are repainted where they are put
+/// down: the desktop drew them nowhere while they were lent, and the seat's
+/// picture of them has gone.
+#[test]
+fn lent_icons_put_down_are_repainted_where_let_go() {
+    let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
+    let layout = layout_of(&desktop);
+    let was = bounds(&desktop, &layout, 0);
+    carry_held(&mut desktop, &layout, 0, (300, 200));
+    desktop.lend_carry(&layout, &mut Region::new());
+    let at = Point::new(was.center().x + 237, was.center().y + 101);
+    let damage = damage_of(|damage| {
+        assert_eq!(
+            desktop.put_down_lent(at, &layout, damage),
+            DesktopOutcome::ignored()
+        );
+    });
+    let mut unpainted = Region::new();
+    unpainted.add(bounds(&desktop, &layout, 0));
+    unpainted.subtract_region(&damage);
+    assert!(unpainted.is_empty(), "the icon's new place is owed a paint");
+}
+
 /// A lent press follows its icon through a change to the folder, stays off
 /// the desktop meanwhile, and puts down the icon carried and moves no other.
 #[test]

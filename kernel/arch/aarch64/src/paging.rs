@@ -1366,21 +1366,27 @@ impl AddressSpace {
     }
 }
 
-// Invalidate the calling CPU's whole local data cache, every level to the
-// point of coherency, by set/way (`dc isw`), then `dsb sy; isb`: what a
-// secondary does before turning translation on, its caches in an UNKNOWN
-// state (`smp.s`). Invalidate, never clean, or a stale line would be written
-// over the tables. A leaf routine using only x0–x11 and no stack, called with
-// the MMU off.
+/// Where `CLIDR_EL1` holds the level of unification inner shareable: the
+/// data cache levels inside it are the calling core's own.
+#[cfg(any(test, all(target_arch = "aarch64", target_os = "none")))]
+pub(crate) const CLIDR_LOUIS_SHIFT: u32 = 21;
+
+// Invalidate by set/way (`dc isw`) the data cache levels the calling CPU owns,
+// those inside the level of unification inner shareable, then `dsb sy; isb`:
+// what a secondary does before turning translation on, its own caches in an
+// UNKNOWN state (`smp.s`). Never a level it shares with the CPUs already
+// running, whose dirty lines it would discard, and never a clean, which would
+// write a stale line over the tables. A leaf routine using only x0–x11 and no
+// stack, called with the MMU off.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 core::arch::global_asm!(
     ".section .text",
-    ".globl _invalidate_local_dcache_to_poc",
-    "_invalidate_local_dcache_to_poc:",
+    ".globl _invalidate_private_dcache",
+    "_invalidate_private_dcache:",
     "  mrs   x0, clidr_el1",
-    "  and   x3, x0, #0x7000000", // LoC in CLIDR[26:24]
-    "  lsr   x3, x3, #23",        // x3 = LoC << 1 (loop bound in 2*level units)
-    "  cbz   x3, 5f",             // no cache levels to the PoC → done
+    "  ubfx  x3, x0, #{LOUIS_SHIFT}, #3",
+    "  lsl   x3, x3, #1", // loop bound in 2*level units
+    "  cbz   x3, 5f",
     "  mov   x10, #0",            // x10 = 2 * current cache level
     "1:",
     "  add   x2, x10, x10, lsr #1", // x2 = 3*level = bit offset of this level's Ctype
@@ -1418,6 +1424,7 @@ core::arch::global_asm!(
     "  dsb   sy",
     "  isb",
     "  ret",
+    LOUIS_SHIFT = const CLIDR_LOUIS_SHIFT,
 );
 
 impl MmuAddressSpace for AddressSpace {

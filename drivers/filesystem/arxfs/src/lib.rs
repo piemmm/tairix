@@ -3918,8 +3918,9 @@ impl<B: Block> ARXFS<B> {
     /// pair (`crypto` module).
     ///
     /// `hash` is the content hash of the unsealed slot, which every caller
-    /// has already taken to look the block up for sharing, so it is not taken
-    /// twice (`docs/src/filesystem/arxfs-spec.md` §6 write path).
+    /// has already taken, to look the block up for sharing or to seal it, so
+    /// it is not taken twice (`docs/src/filesystem/arxfs-spec.md` §6 write
+    /// path).
     ///
     /// # Errors
     ///

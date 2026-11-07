@@ -8,7 +8,7 @@
 use crate::frames::{PageTableFrames, TableFrame, PAGE_TABLE_ENTRIES};
 
 /// Bytes one page maps.
-const PAGE: u64 = 1 << 12;
+const PAGE: u64 = tairix_abi::PAGE_SIZE as u64;
 
 /// Bytes one block leaf, an entry of the table [`map_gigabyte`] fills, maps.
 pub const BLOCK: u64 = 1 << 21;
@@ -42,6 +42,15 @@ impl Span {
         let inside = |edge: u64| base < edge && edge < base + len;
         self.start < self.end && (inside(self.start) || inside(self.end))
     }
+}
+
+/// Whether `spans` are whole pages laid out in order, none reaching into the
+/// next: what a port's image sections must be before it maps them.
+#[must_use]
+pub fn in_page_order(spans: &[Span]) -> bool {
+    spans.iter().all(|span| {
+        span.start <= span.end && span.start.is_multiple_of(PAGE) && span.end.is_multiple_of(PAGE)
+    }) && spans.windows(2).all(|pair| pair[0].end <= pair[1].start)
 }
 
 /// Pages and the access the kernel has to them.

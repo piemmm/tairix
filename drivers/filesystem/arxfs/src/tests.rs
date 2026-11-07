@@ -1833,6 +1833,37 @@ fn a_cluster_is_compressed_into_scratch_the_volume_already_holds() {
     assert_eq!(metering.zeroed, 0, "{metering:?}");
 }
 
+/// The scratch a cluster is compressed into held its plaintext, so it is
+/// wiped once the cluster is stored, as the read path wipes its own.
+#[test]
+fn the_cluster_scratch_is_wiped_once_the_cluster_is_stored() {
+    let mut fs = fmt(512, 1024, 32);
+    let root = fs.root();
+    let cluster = as_usize(fs.data_capacity()) * as_usize(COMPRESS_CLUSTER_BLOCKS);
+    let file = fs
+        .create(root, b"wiped", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    let body: alloc::vec::Vec<u8> = (0..cluster).map(|at| (at / 7).to_le_bytes()[0]).collect();
+    assert_eq!(fs.write_at(file, 0, &body), Ok(cluster));
+    assert!(!fs.cluster_frame.is_empty(), "kept for the next cluster");
+    assert!(fs.cluster_frame.iter().all(|&byte| byte == 0));
+}
+
+/// A frame wins only by a whole block: one that fills all but the last of a
+/// cluster's blocks is room enough, a byte more needs every block.
+#[test]
+fn a_cluster_frame_wins_only_by_a_whole_block() {
+    let capacity = 500;
+    let room = crate::cluster::frame_room(4 * capacity, capacity);
+    assert_eq!(room.div_ceil(capacity), 3);
+    assert_eq!((room + 1).div_ceil(capacity), 4);
+    assert_eq!(
+        crate::cluster::frame_room(capacity, capacity),
+        0,
+        "one block never wins"
+    );
+}
+
 #[test]
 fn single_block_records_are_stored_raw_and_round_trip() {
     // A single-block record is always stored raw — even highly compressible

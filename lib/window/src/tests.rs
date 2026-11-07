@@ -1569,8 +1569,10 @@ fn a_live_session_asked_after_an_empty_wake_keeps_the_channel() {
         parked: Rc::clone(&parked),
         ready_for: 1,
     });
+    let reaps = loopback.borrow().reaps;
     assert_eq!(waiter.wait(&mut client), Ok(None));
-    assert_eq!(parked.get(), 2, "asked once, then parked again");
+    assert_eq!(loopback.borrow().reaps, reaps + 1, "the session was asked");
+    assert_eq!(parked.get(), 2, "and the wait parked again");
 }
 
 /// A request in flight when the session goes is reaped as gone: the refusal

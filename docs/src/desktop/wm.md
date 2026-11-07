@@ -2346,8 +2346,8 @@ forwards to `Compositor::set_backdrop_blur` for that window and no other
   gallery of wallpapers — drains with `WindowEvents::try_wait` so input is
   served ahead of that work and the loop parks only when neither has
   anything left; an app whose own loop dispatches several wake sources and
-  a deadline of its own keeps that park and takes the drain alone, its first
-  drain after a wake through `WindowEvents::try_wait_woken`. That drain is
+  a deadline of its own keeps that park and takes the drain alone, noting
+  each wake with `WindowEvents::woke` before it drains. The drain after one is
   how a session that has gone is noticed: the reply member of an endpoint
   that ended stays ready, so a wake that brings neither an event nor an
   answer while nothing posted is owed one asks whether the session is still

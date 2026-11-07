@@ -41,9 +41,10 @@
 //! and a binding it cannot keep ([`Errno::OutOfMemory`]), auditing either as
 //! [`AuditEvent::CallEndpointRegisterDenied`], mirroring the port registry's
 //! register-denied event, so the kernel never silently re-points a live
-//! endpoint; [`lookup`] of an unbound id yields `None`, which the handler
-//! maps to [`Errno::NotFound`] and audits at that boundary (mirroring
-//! [`tairix_kernel_ipc::registry::PortRegistry`]).
+//! endpoint; [`lookup`] of an unbound id yields `None`, which a posting
+//! handler maps to [`Errno::NotFound`] and audits at that boundary (mirroring
+//! [`tairix_kernel_ipc::registry::PortRegistry`]), and a reaping one to
+//! [`Errno::BrokenPipe`]: nothing will answer.
 
 use alloc::sync::Arc;
 

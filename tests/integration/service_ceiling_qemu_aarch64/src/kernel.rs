@@ -276,7 +276,7 @@ static CHILD_PROGRAMS: [EmbeddedProgram; 1] = [EmbeddedProgram {
 /// The registry over [`CHILD_PROGRAMS`].
 static PROGRAMS: ProgramRegistry = ProgramRegistry::new(&CHILD_PROGRAMS);
 
-/// Bring the board up: FP/SIMD on, the `virt` device tree discovered
+/// Bring the board up: the `virt` device tree discovered
 /// (timer rate, GICv2 bases), the GIC initialised, and the dispatch
 /// callback + user-fault resolver installed. Returns the discovered
 /// generic-timer rate.

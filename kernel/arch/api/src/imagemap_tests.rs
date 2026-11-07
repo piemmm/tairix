@@ -162,3 +162,21 @@ fn a_base_off_a_gigabyte_or_an_exhausted_source_maps_nothing_whole() {
     );
     assert_eq!(split_blocks(split.len()), 2);
 }
+
+/// Sections pass only as whole pages in order: a part page, a span reaching
+/// into the next, or one turned inside out is refused.
+#[test]
+fn sections_pass_only_as_whole_pages_in_order() {
+    let span = |start, end| Span { start, end };
+    assert!(in_page_order(&[
+        span(0x1000, 0x3000),
+        span(0x3000, 0x3000),
+        span(0x4000, 0x5000),
+    ]));
+    assert!(!in_page_order(&[span(0x1000, 0x2800)]), "a part page");
+    assert!(
+        !in_page_order(&[span(0x1000, 0x3000), span(0x2000, 0x4000)]),
+        "reaching into the next"
+    );
+    assert!(!in_page_order(&[span(0x3000, 0x1000)]), "inside out");
+}

@@ -196,8 +196,9 @@ fn only_hold_writes_pan_and_every_sctlr_write_is_a_known_value() {
         "the one PAN write sets it"
     );
     assert_eq!(
-        sctlr_writes, 5,
-        "the three MMU-off writes, the trampolines' enable and the write that settles SPAN"
+        sctlr_writes, 6,
+        "the trampolines' and the EL2 hand-off's MMU-off writes, the trampolines' enable \
+         and the write that settles SPAN"
     );
     // Translation is only ever turned on with the known MMU-on value.
     for source in tairix_fuzzseed::sources::crate_sources(root).expect("the port's sources") {

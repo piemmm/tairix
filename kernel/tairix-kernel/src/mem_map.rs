@@ -117,17 +117,8 @@ pub(crate) fn reserve_blob_frames(map: &mut BootMemoryMap, base: u64, len: u64) 
     map.reserve_range(PhysAddr::new(frame_start), PhysAddr::new(frame_end));
 }
 
-/// What a gigabyte of the kernel's direct map is typed as.
 #[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Typed {
-    /// Device registers.
-    Registers,
-    /// A PCI host's configuration region.
-    Config,
-    /// RAM.
-    Ram,
-}
+use tairix_arch_aarch64::paging::Holding;
 
 /// One bit per gigabyte, as `tairix_arch_api::gigapages` spells it.
 #[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
@@ -157,10 +148,10 @@ pub(crate) fn type_board(
     config: &Gigabytes,
     windows: &[(u64, u64)],
     reach: u64,
-    mut reveal: impl FnMut(&Gigabytes, Typed) -> Gigabytes,
+    mut reveal: impl FnMut(&Gigabytes, Holding) -> Gigabytes,
 ) -> TypedBoard {
-    let registers = reveal(registers, Typed::Registers);
-    let config = reveal(config, Typed::Config);
+    let registers = reveal(registers, Holding::Registers);
+    let config = reveal(config, Holding::Config);
     let mut devices = registers;
     for (word, config) in devices.iter_mut().zip(config) {
         *word |= config;
@@ -168,7 +159,7 @@ pub(crate) fn type_board(
     let candidates = clip_windows_to_normal_ram(&clip_windows_below(windows, reach), &devices);
     let ram = reveal(
         &tairix_arch_api::gigapages::from_extents(&candidates),
-        Typed::Ram,
+        Holding::Ram,
     );
     TypedBoard {
         registers,
@@ -664,9 +655,9 @@ mod tests {
     }
 
     /// A direct map whose gigabyte 0 is RAM already, as the image's is.
-    fn typed_map() -> impl FnMut(&[u64; 8], super::Typed) -> [u64; 8] {
+    fn typed_map() -> impl FnMut(&[u64; 8], super::Holding) -> [u64; 8] {
         let mut held = [None; 64];
-        held[0] = Some(super::Typed::Ram);
+        held[0] = Some(super::Holding::Ram);
         move |mask: &[u64; 8], kind| {
             let mut out = [0u64; 8];
             for (index, slot) in held.iter_mut().enumerate() {

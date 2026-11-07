@@ -53,11 +53,11 @@ pub const QEMU_BINARY: &str = "qemu-system-aarch64";
 /// bus.
 pub const MACHINE: &str = "virt";
 
-/// The `-M` value and the `-global`s a run on `board` boots with: what a
-/// vertical dumping the board's device tree gives QEMU too, so the tree it
-/// embeds describes the board the run starts.
+/// The `-M` value a run on `board` boots with: what a vertical dumping the
+/// board's device tree gives QEMU too, so the tree it embeds describes the
+/// board the run starts.
 #[must_use]
-pub fn machine(board: Board) -> (String, &'static [&'static str]) {
+pub fn machine(board: Board) -> String {
     let mut machine = match board.translation {
         // From `virt-9.2` the board builds its unit nested whatever
         // `arm-smmuv3.stage` says; `virt-9.1` is the newest whose unit
@@ -78,7 +78,7 @@ pub fn machine(board: Board) -> (String, &'static [&'static str]) {
     if board.virtualization {
         machine.push_str(",virtualization=on");
     }
-    (machine, &[])
+    machine
 }
 
 /// Default CPU model, unless the spec names another ([`Spec::with_cpu`]): the
@@ -141,13 +141,8 @@ pub(crate) fn push_argv(cmd: &mut Command, spec: &Spec, kernel: &Path) {
 /// unit-testable without spawning QEMU.
 fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     let mut argv: Vec<OsString> = Vec::with_capacity(18 + spec.extra_args.len() * 2);
-    let (machine, globals) = machine(spec.board());
     argv.push("-M".into());
-    argv.push(machine.into());
-    for global in globals {
-        argv.push("-global".into());
-        argv.push((*global).into());
-    }
+    argv.push(machine(spec.board()).into());
     if let Some(unit) = spec.dma_translation.unit_device() {
         argv.push("-device".into());
         argv.push(unit.into());
@@ -818,18 +813,20 @@ mod tests {
                 "{translation:?}"
             );
         }
-        assert_eq!(machine(Board::default()), (MACHINE.to_owned(), &[][..]));
+        assert_eq!(machine(Board::default()), MACHINE);
     }
 
     /// A board with EL2 says so behind whatever else its machine carries, so a
     /// tree dumped from it describes the board the run enters at EL2.
     #[test]
     fn a_board_with_el2_enters_the_kernel_there() {
-        let board = Board::translated(DmaTranslation::Smmuv3Stage2)
-            .with_interrupts(InterruptControllers::Gicv3)
-            .with_virtualization();
+        let board = Board {
+            virtualization: true,
+            ..Board::translated(DmaTranslation::Smmuv3Stage2)
+                .with_interrupts(InterruptControllers::Gicv3)
+        };
         assert_eq!(
-            machine(board).0,
+            machine(board),
             "virt,iommu=smmuv3,gic-version=3,virtualization=on"
         );
         let argv = render(&build_argv(
@@ -845,7 +842,7 @@ mod tests {
     #[test]
     fn a_gicv3_board_says_so_behind_every_unit_its_machine_carries() {
         let gicv3 = |translation| {
-            machine(Board::translated(translation).with_interrupts(InterruptControllers::Gicv3)).0
+            machine(Board::translated(translation).with_interrupts(InterruptControllers::Gicv3))
         };
         assert_eq!(gicv3(DmaTranslation::Absent), "virt,gic-version=3");
         assert_eq!(gicv3(DmaTranslation::VirtioIommu), "virt,gic-version=3");

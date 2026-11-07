@@ -592,12 +592,6 @@ pub trait WindowTransport {
     ///
     /// As [`call`](Self::call).
     fn await_reply(&mut self, ticket: u64, reply: &mut [u8]) -> Result<usize, Errno>;
-
-    /// Whether the session's endpoint has gone, so nothing will ever answer:
-    /// a reap of the ticket that names no call takes nothing and says so.
-    fn session_gone(&mut self) -> bool {
-        self.reap(tairix_abi::CALL_TICKET_NONE, &mut []) == Err(Errno::BrokenPipe)
-    }
 }
 
 /// Step the drop numbered `serial` onto the desktop that window `window_id`'s
@@ -2697,20 +2691,22 @@ impl<T: WindowTransport> WindowClient<T> {
         }
     }
 
-    /// What the client owes the application before its next delivered
-    /// event: a refusal, then geometry to lay out again.
     /// Whether a request posted to the session waits for its answer.
     fn awaits_answers(&self) -> bool {
         self.posted.iter().any(|posting| posting.ticket.is_some())
     }
 
     /// Whether the session's endpoint has gone: once a reap has said so, or
-    /// when the transport, asked, says so now.
+    /// when a reap of the ticket that names no call, which takes nothing,
+    /// says so now.
     fn session_lost(&mut self) -> bool {
-        self.lost |= self.transport.session_gone();
+        self.lost = self.lost
+            || self.transport.reap(tairix_abi::CALL_TICKET_NONE, &mut []) == Err(Errno::BrokenPipe);
         self.lost
     }
 
+    /// What the client owes the application before its next delivered
+    /// event: a refusal, then geometry to lay out again.
     pub(crate) fn take_owed(&mut self) -> Option<Result<WindowEvent, Refused>> {
         self.reap_posted();
         if let Some(refused) = self.refused.pop_front() {
@@ -2881,6 +2877,8 @@ pub struct WindowEvents<S: EventDrain> {
     /// not to belong to it. Returned before the source is drained again, so
     /// folding never reorders or drops an event.
     read_ahead: Option<[u8; WindowEvent::WIRE_LEN]>,
+    /// The next drain follows a wake ([`woke`](Self::woke)).
+    woken: bool,
 }
 
 impl<S: EventDrain> WindowEvents<S> {
@@ -2889,7 +2887,17 @@ impl<S: EventDrain> WindowEvents<S> {
         Self {
             source,
             read_ahead: None,
+            woken: false,
         }
+    }
+
+    /// Note that the application's own wait returned. The drain after it that
+    /// finds nothing, with no answer owed, asks whether the session is still
+    /// there: the window channel's wait stays ready once it has gone, so the
+    /// wait would otherwise return at once for ever. [`wait`](Self::wait)
+    /// notes its own wakes.
+    pub fn woke(&mut self) {
+        self.woken = true;
     }
 
     /// The queued event if one is waiting, and `None` at once when the mailbox
@@ -2902,10 +2910,27 @@ impl<S: EventDrain> WindowEvents<S> {
     ///
     /// # Errors
     ///
-    /// [`EventError::Mailbox`] for a drain failure, or
+    /// [`EventError::Mailbox`] for a drain failure, or with
+    /// [`Errno::BrokenPipe`] once the session is found gone, or
     /// [`EventError::Undecodable`] for a malformed frame — refused, never
     /// guessed at, exactly as in [`wait`](Self::wait).
     pub fn try_wait<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+    ) -> Result<Option<WindowEvent>, EventError> {
+        if !core::mem::take(&mut self.woken) {
+            return self.drain(client);
+        }
+        let owed = client.awaits_answers();
+        let event = self.drain(client)?;
+        if event.is_none() && !owed && client.session_lost() {
+            return Err(EventError::Mailbox(Errno::BrokenPipe));
+        }
+        Ok(event)
+    }
+
+    /// The next event: an owed answer or refusal first, then the mailbox.
+    fn drain<T: WindowTransport>(
         &mut self,
         client: &mut WindowClient<T>,
     ) -> Result<Option<WindowEvent>, EventError> {
@@ -2929,30 +2954,6 @@ impl<S: EventDrain> WindowEvents<S> {
         }
         self.fold_resizes(&mut frame)?;
         decode_delivered(client, &frame).map(Some)
-    }
-
-    /// [`try_wait`](Self::try_wait) for the drain that follows a wake.
-    ///
-    /// A wake that brings neither an event nor an answer while no request is
-    /// owed one can only be the window channel's own end, whose wait stays
-    /// ready once the session has gone. The session is asked whether it is
-    /// still there, and the channel ends once it is not, rather than the wait
-    /// returning at once for ever.
-    ///
-    /// # Errors
-    ///
-    /// As [`try_wait`](Self::try_wait), and [`EventError::Mailbox`] with
-    /// [`Errno::BrokenPipe`] once the session has gone.
-    pub fn try_wait_woken<T: WindowTransport>(
-        &mut self,
-        client: &mut WindowClient<T>,
-    ) -> Result<Option<WindowEvent>, EventError> {
-        let owed = client.awaits_answers();
-        let event = self.try_wait(client)?;
-        if event.is_none() && !owed && client.session_lost() {
-            return Err(EventError::Mailbox(Errno::BrokenPipe));
-        }
-        Ok(event)
     }
 
     /// Advance `frame` past an unbroken run of [`WindowEvent::Resized`] for
@@ -3016,7 +3017,7 @@ impl<S: EventSource> WindowEvents<S> {
     /// # Errors
     ///
     /// [`EventError::Mailbox`] for a source failure or a session that has
-    /// gone ([`try_wait_woken`](Self::try_wait_woken)),
+    /// gone ([`woke`](Self::woke)),
     /// [`EventError::Undecodable`] for a malformed frame — a corrupt event is
     /// refused, never guessed at — or [`EventError::Refused`] for a posted
     /// request the session refused. Only the first ends the channel; a frame
@@ -3034,7 +3035,8 @@ impl<S: EventSource> WindowEvents<S> {
                 // The loop owns what woke it and has no event to handle.
                 Parked::Interrupted => return Ok(None),
             }
-            if let Some(event) = self.try_wait_woken(client)? {
+            self.woken = true;
+            if let Some(event) = self.try_wait(client)? {
                 return Ok(Some(event));
             }
         }

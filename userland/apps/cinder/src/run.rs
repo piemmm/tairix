@@ -586,14 +586,9 @@ mod program {
 
             // Drain every event, the answers to posted presents collected
             // first: one left uncollected keeps the wait set ready.
-            let mut woken = true;
+            events.woke();
             loop {
-                let drained = if core::mem::take(&mut woken) {
-                    events.try_wait_woken(window.client())
-                } else {
-                    events.try_wait(window.client())
-                };
-                let event = match drained {
+                let event = match events.try_wait(window.client()) {
                     Ok(Some(event)) => event,
                     Ok(None) => break,
                     // Already consumed and nothing guessed at; the next read

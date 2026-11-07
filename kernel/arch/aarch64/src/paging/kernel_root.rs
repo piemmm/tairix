@@ -14,7 +14,7 @@ use core::sync::atomic::Ordering;
 
 use tairix_arch_api::frames::{PageTableFrames, TableFrame};
 use tairix_arch_api::imagemap::{
-    map_gigabyte, split_blocks, ImageLeaves, Run, Span, BLOCK, GIGABYTE,
+    in_page_order, map_gigabyte, split_blocks, ImageLeaves, Run, Span, BLOCK, GIGABYTE,
 };
 
 use super::{descriptor, table_descriptor, KernelAccess, ENTRIES_PER_TABLE, PAGE_SIZE};
@@ -130,16 +130,11 @@ impl ImageSections {
             heap,
         };
         let spans = sections.spans();
-        let page = PAGE_SIZE as u64;
         let gigabyte = sections.gigabyte();
-        let well_formed = spans.iter().all(|span| {
-            span.start <= span.end
-                && span.start.is_multiple_of(page)
-                && span.end.is_multiple_of(page)
-        }) && spans[..IMAGE_SECTIONS - 1]
-            .iter()
-            .all(|span| span.start < span.end)
-            && spans.windows(2).all(|pair| pair[0].end <= pair[1].start)
+        let well_formed = in_page_order(&spans)
+            && spans[..IMAGE_SECTIONS - 1]
+                .iter()
+                .all(|span| span.start < span.end)
             && text.start.is_multiple_of(BLOCK)
             && text.end.is_multiple_of(BLOCK)
             && heap
@@ -343,13 +338,23 @@ extern "C" {
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 static KERNEL_ROOT_POOL: PageTablePool<KERNEL_ROOT_TABLES> = PageTablePool::new();
 
-/// The gigabytes a boot handed no tree types as registers: the QEMU `virt`
-/// board's, whose UART, interrupt controller and the rest of its device MMIO
-/// lie in the first. A board that hands over a tree types its own from it.
+/// The gigabytes a boot handed no tree types as registers: those of the
+/// register bases the port starts from before any tree is read, QEMU
+/// `virt`'s. A board that hands over a tree types its own from it.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 const TREELESS_REGISTERS: [u64; GIGAPAGE_MASK_WORDS] = {
+    let defaults = [
+        crate::console::DEFAULT_CONSOLE_BASE,
+        crate::gic::DEFAULT_GICD_BASE,
+        crate::gic::DEFAULT_GICC_BASE,
+    ];
     let mut mask = [0; GIGAPAGE_MASK_WORDS];
-    mask[0] = 1;
+    let mut at = 0;
+    while at < defaults.len() {
+        let gigabyte = defaults[at] >> 30;
+        mask[gigabyte / 64] |= 1 << (gigabyte % 64);
+        at += 1;
+    }
     mask
 };
 

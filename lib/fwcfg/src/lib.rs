@@ -391,12 +391,12 @@ pub enum MmioDmaError {
 }
 
 impl MmioDma {
-    /// Locate the `fw_cfg` device in `dtb` and return a transport.
+    /// The CPU-physical base of the `fw_cfg` register block `dtb` names.
     ///
     /// # Errors
     ///
     /// [`MmioDmaError::NotFound`] if no compatible node is present.
-    pub fn from_dtb(dtb: &Fdt<'_>) -> Result<Self, MmioDmaError> {
+    pub fn find(dtb: &Fdt<'_>) -> Result<u64, MmioDmaError> {
         for node in dtb.nodes() {
             let Ok(node) = node else {
                 continue;
@@ -410,13 +410,29 @@ impl MmioDma {
             let Ok(base) = reg.read_be_u64(0) else {
                 continue;
             };
-            return Ok(Self {
-                base,
-                registers: base,
-                to_physical: identity,
-            });
+            return Ok(base);
         }
         Err(MmioDmaError::NotFound)
+    }
+
+    /// The transport over the `fw_cfg` device `dtb` names, its registers and
+    /// RAM reached at their physical addresses.
+    ///
+    /// # Errors
+    ///
+    /// As [`find`](Self::find).
+    ///
+    /// # Safety
+    ///
+    /// For as long as the transport is used, the register block is mapped at
+    /// its physical address as device memory nothing else drives, and every
+    /// buffer a transfer names is reachable at its physical address.
+    pub unsafe fn from_dtb(dtb: &Fdt<'_>) -> Result<Self, MmioDmaError> {
+        Self::find(dtb).map(|base| Self {
+            base,
+            registers: base,
+            to_physical: identity,
+        })
     }
 
     /// CPU-physical MMIO base of the discovered `fw_cfg` register block,
@@ -427,15 +443,21 @@ impl MmioDma {
         self.base
     }
 
-    /// The same device, reached as a port reaches it that maps neither its
-    /// registers nor RAM at their physical addresses: the register block at
-    /// `registers`, and a buffer at the physical address `to_physical` gives
-    /// for its virtual one — `u64::MAX` for one no mapping names, which fails
-    /// the transfer rather than aiming it elsewhere.
+    /// The device at physical `base`, reached as a port reaches it that maps
+    /// neither its registers nor RAM at their physical addresses: the register
+    /// block at `registers`, and a buffer at the physical address
+    /// `to_physical` gives for its virtual one — `u64::MAX` for one no mapping
+    /// names, which fails the transfer rather than aiming it elsewhere.
+    ///
+    /// # Safety
+    ///
+    /// For as long as the transport is used, `registers` maps the register
+    /// block at `base` as device memory nothing else drives, and
+    /// `to_physical` answers a buffer's true physical address or `u64::MAX`.
     #[must_use]
-    pub const fn mapped(self, registers: u64, to_physical: fn(u64) -> u64) -> Self {
+    pub const unsafe fn mapped(base: u64, registers: u64, to_physical: fn(u64) -> u64) -> Self {
         Self {
-            base: self.base,
+            base,
             registers,
             to_physical,
         }

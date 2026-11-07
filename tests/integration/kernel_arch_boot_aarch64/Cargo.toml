@@ -16,8 +16,8 @@ workspace = true
 # aarch64 analogue of `tests/integration/kernel_arch_boot` (x86_64) and
 # `tests/integration/kernel_arch_boot_riscv64`. It reuses the production
 # aarch64 boot pipeline through `tairix-kernel`'s library half
-# (`boot_aarch64::boot`, `plans/PI.md` P6c-2): it enables the stage-1
-# identity MMU + EL1 vectors, discovers the board from the embedded
+# (`boot_aarch64::boot`, `plans/PI.md` P6c-2): on the kernel root the port
+# entry builds, it discovers the board from the embedded
 # `virt` device tree, hands the `BootMemoryMap` to
 # `kernel_core::kernel_main`, and only replaces the audit Sink so that
 # observing `EventId(4004)` (`AuditEvent::BootCompleted`) flips

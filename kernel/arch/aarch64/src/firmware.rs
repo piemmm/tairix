@@ -1,5 +1,5 @@
-//! The pre-MMU `VideoCore` firmware channel, and the boot-time requests the
-//! kernel makes over it.
+//! The `VideoCore` firmware channel, and the boot-time requests the kernel
+//! makes over it.
 //!
 //! On a Raspberry Pi several things the kernel needs before it has drivers
 //! belong to the firmware rather than to any register the ARM cores can
@@ -137,15 +137,18 @@ pub fn raise_over(transport: &mut dyn MailboxTransport) -> Option<u32> {
     set_clock_rate(transport, FirmwareClock::Arm, ceiling).ok()
 }
 
-/// The doorbell transport over the mapped `regs` and property `buffer`, the
-/// buffer addressed as the firmware's bus sees it: the one construction the
-/// boot path and the storage floor share.
-fn mailbox_over(
-    regs: RegisterWindow,
-    buffer: RegisterWindow,
-    coherency: BufferCoherency,
-) -> Option<MmioMailbox> {
+/// The doorbell transport over the mapped `regs` and the cacheable property
+/// `buffer`, the buffer addressed as the firmware's bus sees it: the one
+/// construction the boot path and the storage floor share. Refused unless the
+/// direct map reaches the buffer, as its cache maintenance does.
+fn mailbox_over(regs: RegisterWindow, buffer: RegisterWindow) -> Option<MmioMailbox> {
+    let maintained = u64::try_from(buffer.len())
+        .is_ok_and(|bytes| crate::paging::physmap_covers(buffer.phys_base(), bytes));
+    if !maintained {
+        return None;
+    }
     let bus = arm_physical_to_bus(buffer.phys_base(), DEFAULT_BUS_ALIAS).ok()?;
+    let coherency = BufferCoherency::new(clean_invalidate_buffer, clean_invalidate_buffer);
     MmioMailbox::new(regs, buffer, bus, DEFAULT_POLL_BUDGET, coherency).ok()
 }
 
@@ -172,8 +175,7 @@ pub fn with_floor_channel<R>(
             let regs = whole
                 .then(|| map.map_window(doorbell.base, MAILBOX_REGS_LEN_BYTES).ok())
                 .flatten()?;
-            let coherency = BufferCoherency::new(clean_invalidate_buffer, clean_invalidate_buffer);
-            mailbox_over(regs, buffer, coherency)
+            mailbox_over(regs, buffer)
         });
     let channel = mailbox.map(|mailbox| FloorChannel::new(mailbox, node));
     body(
@@ -184,8 +186,8 @@ pub fn with_floor_channel<R>(
 }
 
 /// Clean and invalidate the property buffer at physical `base` around the
-/// firmware's DMA of it, through the direct map: the mailbox names the buffer
-/// by its physical address.
+/// firmware's DMA of it, through the direct map, which [`mailbox_over`] made
+/// sure reaches it: the mailbox names the buffer by its physical address.
 fn clean_invalidate_buffer(base: u64, len: usize) {
     let covered = u64::try_from(len).is_ok_and(|bytes| crate::paging::physmap_covers(base, bytes));
     if let (true, Ok(start)) = (covered, usize::try_from(crate::paging::physmap_virt(base))) {
@@ -250,9 +252,7 @@ mod metal {
     use core::ptr::NonNull;
 
     use tairix_abi::RegisterWindow;
-    use tairix_vcmailbox::{
-        BufferCoherency, MailboxTransport, MAILBOX_REGS_LEN_BYTES, PROPERTY_LEN_BYTES,
-    };
+    use tairix_vcmailbox::{MailboxTransport, MAILBOX_REGS_LEN_BYTES, PROPERTY_LEN_BYTES};
 
     use super::{DiscoveredMailbox, PropertyBuffer};
 
@@ -291,11 +291,7 @@ mod metal {
         };
         let buffer =
             unsafe { RegisterWindow::from_mapping(buffer_phys, buffer_ptr, PROPERTY_LEN_BYTES) };
-        let coherency = BufferCoherency::new(
-            super::clean_invalidate_buffer,
-            super::clean_invalidate_buffer,
-        );
-        let mut transport = super::mailbox_over(regs, buffer, coherency)?;
+        let mut transport = super::mailbox_over(regs, buffer)?;
         Some(body(&mut transport))
     }
 }
@@ -389,6 +385,34 @@ mod tests {
         fn map_window(&self, _phys: u64, _len: usize) -> Result<RegisterWindow, MmioMapError> {
             Err(MmioMapError::Unsupported)
         }
+    }
+
+    /// A property buffer the direct map does not reach could not be kept
+    /// coherent with the firmware, so no transport is built over it.
+    #[test]
+    fn a_buffer_the_direct_map_cannot_maintain_gets_no_transport() {
+        #[repr(align(4096))]
+        struct Page([u8; PAGE_SIZE]);
+
+        let mut doorbell = Page([0; PAGE_SIZE]);
+        let mut buffer = Page([0; PAGE_SIZE]);
+        // SAFETY: each window covers its own page, which outlives it; no
+        // exchange is made over either.
+        let (regs, buffer) = unsafe {
+            (
+                RegisterWindow::from_mapping(
+                    0x7e00_b880,
+                    NonNull::from(&mut doorbell.0).cast::<u8>(),
+                    tairix_vcmailbox::MAILBOX_REGS_LEN_BYTES,
+                ),
+                RegisterWindow::from_mapping(
+                    0x3000_0000,
+                    NonNull::from(&mut buffer.0).cast::<u8>(),
+                    tairix_vcmailbox::PROPERTY_LEN_BYTES,
+                ),
+            )
+        };
+        assert!(super::mailbox_over(regs, buffer).is_none());
     }
 
     #[test]

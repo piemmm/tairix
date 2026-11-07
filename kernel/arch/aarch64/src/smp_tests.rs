@@ -264,3 +264,23 @@ fn release_gate_opens_only_for_the_named_core() {
         assert!(!release_gate_open(u64::MAX, affinity));
     }
 }
+
+/// A secondary arms its vectors before anything it runs can fault, so a fault
+/// there is reported rather than taken through the vector the firmware left.
+#[test]
+fn a_secondary_arms_its_vectors_first() {
+    let source = include_str!("smp.rs");
+    let entry = source
+        .find("extern \"C\" fn tairix_arch_aarch64_secondary_main(")
+        .expect("the secondary's entry");
+    let first_statement = source[entry..]
+        .lines()
+        .skip(1)
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("//"))
+        .expect("a body");
+    assert_eq!(
+        first_statement,
+        "unsafe { crate::exceptions::init_vectors() };"
+    );
+}

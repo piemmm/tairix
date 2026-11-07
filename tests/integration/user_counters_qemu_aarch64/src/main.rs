@@ -1,9 +1,9 @@
 //! QEMU integration test: a CPU the kernel holds gives EL0 none of its
 //! counters.
 //!
-//! `CNTKCTL_EL1` and `PMUSERENR_EL0` are UNKNOWN out of reset on silicon,
-//! where QEMU resets them closed, so the run opens both itself, has the port
-//! hold the CPU again, and reads them back closed.
+//! `CNTKCTL_EL1`, `PMUSERENR_EL0` and `MDSCR_EL1.TDCC` are UNKNOWN out of
+//! reset on silicon, where QEMU resets them closed, so the run opens all three
+//! itself, has the port hold the CPU again, and reads them back closed.
 //!
 //! Any failure is reported to QEMU as a distinct, non-zero exit code.
 
@@ -16,7 +16,7 @@ mod kernel {
     use core::fmt::Write as _;
     use core::panic::PanicInfo;
 
-    use tairix_arch_aarch64::coreclock::pmu_present;
+    use tairix_arch_aarch64::coreclock::pmu_available;
     use tairix_arch_aarch64::serial::ConsoleWriter;
     use tairix_arch_aarch64::{handle_panic_via_serial, protection, qemu_exit};
     use tairix_itest_finisher::fail_point;
@@ -33,44 +33,35 @@ mod kernel {
         handle_panic_via_serial(info)
     }
 
-    fn pmu() -> bool {
-        let dfr0: u64;
-        // SAFETY: a feature-ID register, readable at EL1 with no side effect.
-        unsafe {
-            core::arch::asm!(
-                "mrs {dfr0}, id_aa64dfr0_el1",
-                dfr0 = out(reg) dfr0,
-                options(nomem, nostack, preserves_flags),
-            );
-        }
-        pmu_present(dfr0)
-    }
-
-    /// `(CNTKCTL_EL1, PMUSERENR_EL0)`.
-    fn controls() -> (u64, u64) {
-        let (timer, monitors): (u64, u64);
+    /// `(CNTKCTL_EL1, PMUSERENR_EL0, MDSCR_EL1)`.
+    fn controls() -> (u64, u64, u64) {
+        let (timer, monitors, debug): (u64, u64, u64);
         // SAFETY: the core implements the architected PMU (checked first by
-        // the caller), and both registers read at EL1 with no side effect.
+        // the caller), and all three registers read at EL1 with no side
+        // effect.
         unsafe {
             core::arch::asm!(
                 "mrs {timer}, cntkctl_el1",
                 "mrs {monitors}, pmuserenr_el0",
+                "mrs {debug}, mdscr_el1",
                 timer = out(reg) timer,
                 monitors = out(reg) monitors,
+                debug = out(reg) debug,
                 options(nomem, nostack, preserves_flags),
             );
         }
-        (timer, monitors)
+        (timer, monitors, debug)
     }
 
     fn open_to_el0() {
         // SAFETY: the core implements the architected PMU (checked first by
-        // the caller); opening both only matters to EL0, which this kernel
-        // never enters.
+        // the caller); opening all three only matters to EL0, which this
+        // kernel never enters, and a zero `MDSCR_EL1` enables no debug event.
         unsafe {
             core::arch::asm!(
                 "msr cntkctl_el1, {timer}",
                 "msr pmuserenr_el0, {monitors}",
+                "msr mdscr_el1, xzr",
                 "isb",
                 timer = in(reg) CNTKCTL_OPEN,
                 monitors = in(reg) PMUSERENR_OPEN,
@@ -82,12 +73,12 @@ mod kernel {
     #[no_mangle]
     pub extern "C" fn kernel_main(_tree: u64) -> ! {
         let mut w = ConsoleWriter;
-        if !pmu() {
+        if !pmu_available() {
             let _ = writeln!(w, "[user-counters] FAILED: no architected PMU to close");
             qemu_exit::exit_failure(fail_point!(1));
         }
         open_to_el0();
-        if controls() != (CNTKCTL_OPEN, PMUSERENR_OPEN) {
+        if controls() != (CNTKCTL_OPEN, PMUSERENR_OPEN, 0) {
             let _ = writeln!(w, "[user-counters] FAILED: the controls would not open");
             qemu_exit::exit_failure(fail_point!(2));
         }
@@ -97,14 +88,15 @@ mod kernel {
             qemu_exit::exit_failure(fail_point!(3));
         }
         match controls() {
-            (0, 0) => {
+            (0, 0, protection::MDSCR_TDCC) => {
                 let _ = writeln!(w, "[user-counters] aarch64 counters closed to EL0");
                 qemu_exit::exit_success()
             }
-            (timer, monitors) => {
+            (timer, monitors, debug) => {
                 let _ = writeln!(
                     w,
-                    "[user-counters] FAILED: CNTKCTL_EL1={timer:#x} PMUSERENR_EL0={monitors:#x}"
+                    "[user-counters] FAILED: CNTKCTL_EL1={timer:#x} PMUSERENR_EL0={monitors:#x} \
+                     MDSCR_EL1={debug:#x}"
                 );
                 qemu_exit::exit_failure(fail_point!(4))
             }

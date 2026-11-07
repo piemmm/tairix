@@ -251,8 +251,8 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
     }
 }
 
-/// Bring the board up: FP/SIMD on, the `virt` device tree discovered (timer
-/// rate, GICv2 bases), and the GIC initialised. Returns the discovered
+/// Bring the board up: the `virt` device tree discovered (timer rate, GICv2
+/// bases), and the GIC initialised. Returns the discovered
 /// generic-timer rate. No syscall dispatch callback is installed: the spawned
 /// driver is torn down before it is ever dispatched, so it issues no `svc`.
 fn bring_up_board() -> u64 {

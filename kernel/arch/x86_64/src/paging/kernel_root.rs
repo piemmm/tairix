@@ -9,7 +9,9 @@
 //! one access covers a whole block.
 
 use tairix_arch_api::frames::{PageTableFrames, TableFrame};
-use tairix_arch_api::imagemap::{map_gigabyte, split_blocks, ImageLeaves, Run, Span, BLOCK};
+use tairix_arch_api::imagemap::{
+    in_page_order, map_gigabyte, split_blocks, ImageLeaves, Run, Span, BLOCK, GIGABYTE,
+};
 
 use super::{
     flags, is_kernel_half_slot, KernelAccess, ENTRIES_PER_TABLE, KERNEL_IMAGE_PML4_SLOT,
@@ -33,7 +35,7 @@ const IMAGE_PDPT_SLOT: usize = ((KERNEL_VMA_BASE >> 30) & 0x1FF) as usize;
 /// Physical bytes the image window maps: the one gigabyte its directory
 /// covers, which is all the boot trampoline's own window covers too
 /// (`linker.ld` refuses a larger image).
-const IMAGE_SPAN: u64 = 1 << 30;
+const IMAGE_SPAN: u64 = GIGABYTE;
 
 const _: () = assert!(ENTRIES_PER_TABLE as u64 * BLOCK == IMAGE_SPAN);
 
@@ -120,12 +122,8 @@ impl ImageSections {
             data,
         };
         let spans = sections.spans();
-        let page = PAGE_SIZE as u64;
-        let well_formed = spans.iter().all(|span| {
-            span.start < span.end
-                && span.start.is_multiple_of(page)
-                && span.end.is_multiple_of(page)
-        }) && spans.windows(2).all(|pair| pair[0].end <= pair[1].start)
+        let well_formed = in_page_order(&spans)
+            && spans.iter().all(|span| span.start < span.end)
             && data.end <= IMAGE_SPAN;
         well_formed.then_some(sections)
     }

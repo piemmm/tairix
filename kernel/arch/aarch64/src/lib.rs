@@ -83,7 +83,10 @@ core::arch::global_asm!(
     ICC_SRE_EL2 = const el2::ICC_SRE_EL2_HANDOFF,
     GIC_SHIFT = const el2::ID_AA64PFR0_GIC_SHIFT,
     PMUVER_SHIFT = const coreclock::PMUVER_SHIFT,
+    PMUVER_NONE = const coreclock::PMUVER_NONE,
+    PMUVER_IMPDEF = const coreclock::PMUVER_IMPDEF,
     PMCR_N_SHIFT = const el2::PMCR_EL0_N_SHIFT,
+    MPIDR_AFFINITY_MASK = const smp::MPIDR_AFFINITY_MASK,
 );
 
 // The context-switch primitive's body is assembly defined only on the
@@ -100,6 +103,7 @@ core::arch::global_asm!(
     include_str!("vectors.s"),
     OVERRUN_REACH = const (paging::BOOT_STACK_GUARD_BYTES + exceptions::TRAP_FRAME_BYTES) / 16,
     RESERVE_STACK_BYTES = const exceptions::RESERVE_STACK_BYTES,
+    TRAP_FRAME_BYTES = const exceptions::TRAP_FRAME_BYTES,
 );
 
 // The secondary-core entry trampoline is meaningful only on the
@@ -112,6 +116,7 @@ core::arch::global_asm!(
     SCTLR_MMU_ON = const paging::SCTLR_MMU_ON,
     MAIR = const paging::MAIR_VALUE,
     TCR = const paging::TCR_VALUE,
+    MPIDR_AFFINITY_MASK = const smp::MPIDR_AFFINITY_MASK,
 );
 
 // The machine-takeover stack-switch trampoline and relocatable
@@ -179,9 +184,9 @@ pub mod fault;
 /// (PSCI method, generic-timer PPI, `/memory`) layered on the shared
 /// [`tairix_fdt`] parser.
 pub mod fdt;
-/// The `VideoCore` firmware channel: the pre-MMU mailbox transport and the
-/// boot-time requests made over it, and the channel the storage floor lends
-/// its SD host's driver.
+/// The `VideoCore` firmware channel: the boot's mailbox transport and the
+/// requests made over it, and the channel the storage floor lends its SD
+/// host's driver.
 pub mod firmware;
 pub mod gic;
 pub mod gicv3;

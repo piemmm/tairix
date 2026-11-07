@@ -18,7 +18,7 @@ mod kernel {
     use core::num::NonZeroU16;
     use core::panic::PanicInfo;
 
-    use tairix_arch_aarch64::coreclock::pmu_present;
+    use tairix_arch_aarch64::coreclock::pmu_available;
     use tairix_arch_aarch64::el2::PMCR_EL0_N_SHIFT;
     use tairix_arch_aarch64::serial::ConsoleWriter;
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit};
@@ -46,21 +46,19 @@ mod kernel {
     }
 
     fn observe() -> Observed {
-        let (el, pfr0, dfr0): (u64, u64, u64);
-        // SAFETY: reads of the current exception level and two feature-ID
-        // registers, all architected and readable at EL1 with no side effect.
+        let (el, pfr0): (u64, u64);
+        // SAFETY: reads of the current exception level and a feature-ID
+        // register, both architected and readable at EL1 with no side effect.
         unsafe {
             core::arch::asm!(
                 "mrs {el}, CurrentEL",
                 "mrs {pfr0}, id_aa64pfr0_el1",
-                "mrs {dfr0}, id_aa64dfr0_el1",
                 el = out(reg) el,
                 pfr0 = out(reg) pfr0,
-                dfr0 = out(reg) dfr0,
                 options(nomem, nostack, preserves_flags),
             );
         }
-        let pmu = pmu_present(dfr0);
+        let pmu = pmu_available();
         let mut pmcr = 0;
         if pmu {
             // SAFETY: the core implements the architected PMU (checked

@@ -4848,7 +4848,7 @@ where
             // this waiter is a client whose posted requests the teardown just
             // retired. Reporting not-ready would leave it parked on a reply
             // that can never arrive, with no deadline to end the wait; the
-            // woken client reaps the `NotFound` that says the server is gone.
+            // woken client reaps the `BrokenPipe` that says the server is gone.
             // This can only ever name an endpoint that existed when the member
             // was added (an unknown id is refused there), so a caller cannot
             // conjure a permanently-ready member out of a bogus id.
@@ -10770,9 +10770,10 @@ where
             match ep.take_reply(claimant, ticket, 0, self.audit) {
                 ReplyOutcome::Ready(bytes) => break Ok(bytes),
                 // The endpoint was torn down, or the ticket is no longer
-                // ours: abandon the call fail-closed.
-                ReplyOutcome::Cancelled => break Err(Errno::BrokenPipe),
-                ReplyOutcome::Unknown => break Err(Errno::NotFound),
+                // ours: abandon the call fail-closed, answering what a call
+                // to an endpoint already gone answers, the detach its callers
+                // act on.
+                ReplyOutcome::Cancelled | ReplyOutcome::Unknown => break Err(Errno::NotFound),
                 // Unreachable with no deadline, but fails closed, handing on
                 // what the call held.
                 ReplyOutcome::TimedOut(freed) => {
@@ -46647,6 +46648,48 @@ mod tests {
         crate::callreg::unregister(EndpointId(id));
     }
 
+    /// A blocking call whose endpoint is taken down while it waits answers
+    /// `NotFound`, as a call to an endpoint already gone does: a driver
+    /// waiting on its device's endpoint reads that as the device leaving.
+    #[test]
+    fn ipc_call_whose_endpoint_is_taken_down_while_it_waits_is_not_found() {
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let boot = HostBoot::claim();
+        let arch = Arc::new(TestArch::on_cpu(boot.cpu()));
+        let sched = make_sched(arch.clone());
+        let tid = crate::test_boot::claim_task();
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(tid), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(tid, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(tid),
+            caps: &caps,
+        };
+        let id = 0xCA11_2013;
+        let _ep = register_call_endpoint(id, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let server = boot.spawn(move || {
+            HostBoot::current().until_blocked(tid);
+            assert!(crate::callreg::take_down(EndpointId(id), &NULL_LOG_SINK));
+        });
+        let answer = h.ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64);
+        server.join();
+        assert_eq!(answer, Err(Errno::NotFound));
+    }
+
     /// A reply larger than the caller's buffer fails closed with
     /// `BufferTooSmall` rather than truncating.
     #[test]
@@ -54172,7 +54215,7 @@ mod tests {
 
     /// A `CallReply` member whose endpoint is torn down while a request is
     /// outstanding reports ready, so a client parked with **no deadline** is
-    /// woken and reaps the `NotFound` that says the server is gone.
+    /// woken and reaps the `BrokenPipe` that says the server is gone.
     ///
     /// Regression: readiness resolved the endpoint and reported not-ready when
     /// the lookup failed, which is right for the *listener* kinds but wrong

@@ -234,3 +234,23 @@ fn the_trap_path_reads_nothing_through_the_guarded_copy() {
     assert!(!TRAP_RS.contains("guarded_copy"));
     assert!(TRAP_RS.contains("crate::fpstate::adopt_on_first_use(anchor)"));
 }
+
+/// A secondary hart arms its trap vector first, so it holds `SUM` and the
+/// counters closed whatever its entry callback does.
+#[test]
+fn a_secondary_hart_arms_its_trap_vector_first() {
+    let source = include_str!("smp.rs");
+    let entry = source
+        .find("extern \"C\" fn tairix_arch_riscv64_secondary_main(")
+        .expect("the secondary's entry");
+    let first_statement = source[entry..]
+        .lines()
+        .skip(1)
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("//"))
+        .expect("a body");
+    assert_eq!(
+        first_statement,
+        "unsafe { crate::trap::install_trap_vector() };"
+    );
+}

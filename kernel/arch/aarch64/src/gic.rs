@@ -33,6 +33,18 @@ pub const DEFAULT_GICD_BASE: usize = 0x0800_0000;
 /// The GICv2 CPU-interface base before discovery runs: QEMU `virt`'s.
 pub const DEFAULT_GICC_BASE: usize = 0x0801_0000;
 
+/// A GICv2 distributor's register frame.
+#[cfg(any(test, all(target_arch = "aarch64", target_os = "none")))]
+const GICV2_DISTRIBUTOR_BYTES: u64 = 0x1000;
+
+/// A GICv2 CPU interface's register frames, `GICC_DIR`'s included.
+#[cfg(any(test, all(target_arch = "aarch64", target_os = "none")))]
+const GICV2_CPU_INTERFACE_BYTES: u64 = 0x2000;
+
+/// A GICv3 distributor's register frame.
+#[cfg(any(test, all(target_arch = "aarch64", target_os = "none")))]
+const GICV3_DISTRIBUTOR_BYTES: u64 = 0x1_0000;
+
 static GICD_BASE: AtomicUsize = AtomicUsize::new(DEFAULT_GICD_BASE);
 static GICC_BASE: AtomicUsize = AtomicUsize::new(DEFAULT_GICC_BASE);
 static VERSION: AtomicU8 = AtomicU8::new(GicVersion::V2 as u8);
@@ -930,6 +942,9 @@ pub enum GicError {
     NoRedistributors,
     /// What was asked needs a GICv3.
     NotGicv3,
+    /// A window the controller is configured with is not one the direct map
+    /// types as registers: a base no tree named may be RAM.
+    NotRegisters,
     /// The GICv3 refused.
     V3(Gicv3Error),
 }
@@ -944,6 +959,7 @@ impl GicError {
             Self::UnknownCpu => "gic_unknown_cpu",
             Self::NoRedistributors => "gic_no_redistributors",
             Self::NotGicv3 => "gic_not_gicv3",
+            Self::NotRegisters => "gic_window_not_registers",
             Self::V3(Gicv3Error::NotGicv3) => "gicv3_wrong_revision",
             Self::V3(Gicv3Error::Unresponsive) => "gicv3_unresponsive",
             Self::V3(Gicv3Error::NoSystemRegisters) => "gicv3_no_system_registers",
@@ -1273,15 +1289,18 @@ fn bring_up_v3_cpu(topology: &GicTopology) -> Result<(), GicError> {
 ///
 /// [`GicError::AlreadyInitialised`] on a second call;
 /// [`GicError::UnknownCpu`] when the boot CPU has no slot;
-/// [`GicError::NoRedistributors`] for a GICv3 given none, or the GICv3's
-/// refusal.
+/// [`GicError::NoRedistributors`] for a GICv3 given none;
+/// [`GicError::NotRegisters`] when a window lies outside the direct map's
+/// registers, before anything is touched; or the GICv3's refusal.
 ///
 /// # Safety
 ///
-/// Once, on the boot CPU, before any interrupt source is enabled, with the
-/// discovered windows typed as registers in the direct map.
+/// Once, on the boot CPU, before any interrupt source is enabled.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub unsafe fn init(topology: GicTopology) -> Result<(), GicError> {
+    if !windows_are_registers(version(), current(), topology.redistributors) {
+        return Err(GicError::NotRegisters);
+    }
     TOPOLOGY
         .set(topology)
         .map_err(|_| GicError::AlreadyInitialised)?;
@@ -1300,6 +1319,32 @@ pub unsafe fn init(topology: GicTopology) -> Result<(), GicError> {
             let gic = v3();
             gic.init_distributor(gic.local_affinity())?;
             bring_up_v3_cpu(topology)
+        }
+    }
+}
+
+/// Whether every window a controller of `version` at `(distributor,
+/// cpu_interface)` with `redistributors` drives lies in the direct map's
+/// register gigabytes, the only place it maps them as Device memory.
+#[cfg(any(test, all(target_arch = "aarch64", target_os = "none")))]
+fn windows_are_registers(
+    version: GicVersion,
+    (distributor, cpu_interface): (usize, usize),
+    redistributors: &[RedistributorRegion],
+) -> bool {
+    let registers = |base: usize, len: u64| {
+        u64::try_from(base).is_ok_and(|base| crate::paging::registers_virt(base, len).is_some())
+    };
+    match version {
+        GicVersion::V2 => {
+            registers(distributor, GICV2_DISTRIBUTOR_BYTES)
+                && registers(cpu_interface, GICV2_CPU_INTERFACE_BYTES)
+        }
+        GicVersion::V3 => {
+            registers(distributor, GICV3_DISTRIBUTOR_BYTES)
+                && redistributors
+                    .iter()
+                    .all(|region| crate::paging::registers_virt(region.base, region.len).is_some())
         }
     }
 }

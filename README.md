@@ -203,7 +203,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | Kernel cannot execute a user page (§19.2) | Kernel control flow redirected into user-supplied code (ret2usr) | ✓ SMEP if offered · ▢ without | ✓ `PXN` | ✓ ISA | — |
 | Kernel cannot touch a user page but through its validated copy (§19.2) | A kernel bug or confused deputy reading or writing user memory in place | ✓ SMAP if offered · ▢ without | ✓ PAN if offered · ▢ without | ✓ `SUM` clear | — |
 | User code cannot read the descriptor-table registers (§19.2) | Kernel addresses disclosed to user code | ✓ UMIP if offered | — | — | — |
-| User code reaches no hardware clock or counter (§19.1) | A clock finer than the coarsened one for timing attacks; a task stopping the kernel's preemption timer | ✓ `CR4.TSD`, `CR4.PCE` | ✓ `CNTKCTL_EL1`, `PMUSERENR_EL0` | ✓ `scounteren` | ✓ host |
+| User code reaches no hardware clock or counter (§19.1) | A clock finer than the coarsened one for timing attacks; a task stopping the kernel's preemption timer | ✓ `CR4.TSD`, `CR4.PCE` | ✓ `CNTKCTL_EL1`, `PMUSERENR_EL0`, `AMUSERENR_EL0` | ✓ `scounteren` | ✓ host |
 | Load-time CFI tag vs syscall-hash (§19.2) | Control-flow hijacking across ABI/IPC | ✓ | ✓ | ✓ | ✓ |
 | Software memory tagging (§19.10) | Use-after-free (software floor) | ✓ | ✓ | ✓ | ✓ |
 | Zero-on-free of secrets (§4) | Secret recovery from reused memory | ✓ | ✓ | ✓ | ✓ |

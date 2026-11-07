@@ -888,9 +888,11 @@ fn spintable_trampoline_addr() -> usize {
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[no_mangle]
 extern "C" fn tairix_arch_aarch64_secondary_main(cpu: CpuId) -> ! {
-    // SAFETY: this core's first act, before any code the compiler may lower
-    // to FP/SIMD.
-    unsafe { crate::kernel_arch::enable_fp_el1() };
+    // SAFETY: this core's first act, on its own stack with interrupts masked,
+    // before any code the compiler may lower to FP/SIMD and before anything
+    // that can fault, so a fault is reported rather than taken through the
+    // vector the firmware left.
+    unsafe { crate::exceptions::init_vectors() };
     install_current_cpu_index(cpu);
     // The identity page is only ever needed to cross into the high half.
     if !crate::paging::park_kernel_root(true) {

@@ -1639,9 +1639,9 @@ fn mmio_exchange_runs_the_coherency_hooks_clean_then_invalidate() {
 }
 
 #[test]
-fn mmio_new_defaults_to_no_coherency_maintenance() {
-    // The default constructor installs no-op hooks: a round trip over an
-    // already-coherent (caches-off) buffer still succeeds.
+fn an_exchange_over_a_coherent_buffer_takes_no_maintenance() {
+    // A buffer the firmware already sees coherently takes no hooks, and a
+    // round trip over it still succeeds.
     let mut regs = ready_regs();
     let mut buffer = Aligned([0u8; PROPERTY_LEN_BYTES]);
     let mut mailbox = MmioMailbox::new(

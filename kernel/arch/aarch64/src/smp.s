@@ -15,10 +15,11 @@
 //      start paths refuse otherwise (`smp::start_secondary*`).
 //   2. `SCTLR_EL1` is written whole with its known MMU-off value before the
 //      first data access, as `boot.s` does, for the same reason.
-//   3. The core's caches are in an UNKNOWN power-on state, so its data cache
-//      is invalidated, never cleaned, before translation turns it on: a stale
-//      line would shadow the tables or the stack, and cleaning one would
-//      write it over them.
+//   3. The core's own caches are in an UNKNOWN power-on state, so the data
+//      cache levels it owns are invalidated, never cleaned, before
+//      translation turns them on: a stale line would shadow the tables or the
+//      stack, and cleaning one would write it over them. A level it shares
+//      holds the running CPUs' lines and is left alone.
 //   4. Nothing before the branch to the high half reads memory but the
 //      release gate, which `smp::start_secondary_spintable` cleans to the
 //      point of coherency before it wakes the core.
@@ -53,8 +54,8 @@ _start_secondary_spintable_aarch64:
     // The core this release names, through the gate `boot.s`'s park and
     // `smp::release_gate_open` share: anyone else waits.
     mrs     x2, mpidr_el1
-    mov     x3, #0xffff
-    movk    x3, #0xff, lsl #16
+    mov     x3, #({MPIDR_AFFINITY_MASK} & 0xffff)
+    movk    x3, #({MPIDR_AFFINITY_MASK} >> 16), lsl #16
     and     x21, x2, x3
 .Lspintable_gate:
     adrp    x7, SECONDARY_KERNEL_RELEASE_TARGET
@@ -71,7 +72,7 @@ _start_secondary_spintable_aarch64:
 .Lsecondary_enable_mmu:
     msr     tpidrro_el0, xzr
     mov     x22, x1
-    bl      _invalidate_local_dcache_to_poc
+    bl      _invalidate_private_dcache
     ldr     x0, ={MAIR}
     msr     mair_el1, x0
     ldr     x0, ={TCR}

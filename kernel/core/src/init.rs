@@ -1707,6 +1707,9 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // the `unpark` just before the dispatch loop, once that state is
         // installed. It is also the one admission that names its id rather
         // than drawing one: `init` is expected at PID 1.
+        // The seam built the image with PID 1's root loaded under the park
+        // root's tag; the park after this discards what that left.
+        crate::kthread::note_untagged_load(cpu);
         let registered_live = alloc::sync::Arc::downgrade(&live);
         let admitted = crate::kthread::spawn_user_kthread_with_stack_live(
             self.scheduler,

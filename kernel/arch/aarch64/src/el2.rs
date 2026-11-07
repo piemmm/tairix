@@ -7,7 +7,7 @@
 //! residue under emulation. An UNKNOWN `HCR_EL2.TVM` bit traps EL1's
 //! first `MAIR_EL1`/`TCR_EL1`/`TTBR0_EL1`/`SCTLR_EL1` write into
 //! vector-less EL2 — on the Pi 4B this hung the boot silently at the
-//! exact instant `AddressSpace::switch` ran, while QEMU stayed green.
+//! exact instant the boot turned translation on, while QEMU stayed green.
 //! The same reasoning that fixed the UNKNOWN
 //! `SCTLR_EL1` reset state ([`crate::paging::SCTLR_MMU_OFF`]) therefore
 //! applies one level up: `boot.s`'s EL2 path writes each register
@@ -58,6 +58,52 @@ pub const PMCR_EL0_N_SHIFT: u32 = 11;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hand-off's instructions, comments and labels aside.
+    fn hand_off() -> std::vec::Vec<std::string::String> {
+        let lines = crate::exceptions::eret_tests::instruction_lines(include_str!("boot.s"));
+        let start = lines
+            .iter()
+            .position(|line| line == "_el2_establish_and_drop:")
+            .expect("the hand-off");
+        let end = start
+            + lines[start..]
+                .iter()
+                .position(|line| line == "eret")
+                .expect("it returns to EL1");
+        lines[start + 1..=end]
+            .iter()
+            .filter(|line| !line.is_empty() && !line.starts_with("//") && !line.ends_with(':'))
+            .cloned()
+            .collect()
+    }
+
+    /// EL1's TLB entries carry the VMID with stage 2 off, and a broadcast
+    /// invalidation reaches only the entries of the issuer's, so every CPU is
+    /// handed the same one; `HCR_EL2` is in force before the registers whose
+    /// layout it decides; and EL1's first fetch runs untranslated.
+    #[test]
+    fn the_hand_off_gives_every_cpu_one_vmid_and_el1_a_known_start() {
+        let body = hand_off();
+        assert!(body.iter().any(|line| line == "msr vttbr_el2, xzr"));
+        let hcr = body
+            .iter()
+            .position(|line| line == "msr hcr_el2, x0")
+            .expect("HCR_EL2 is written");
+        assert_eq!(body[hcr + 1], "isb");
+        let sctlr = body
+            .iter()
+            .position(|line| line == "msr sctlr_el1, x0")
+            .expect("SCTLR_EL1 is written");
+        assert_eq!(
+            body[sctlr - 2..sctlr],
+            [
+                "mov x0, #({SCTLR_MMU_OFF} & 0xffff)",
+                "movk x0, #({SCTLR_MMU_OFF} >> 16), lsl #16"
+            ]
+        );
+        assert!(sctlr < body.len() - 1, "before the return to EL1");
+    }
 
     /// The `HCR_EL2` booby-trap bits whose UNKNOWN reset state hangs or
     /// corrupts EL1 must all be clear, and `RW` must be set.

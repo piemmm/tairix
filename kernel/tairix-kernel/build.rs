@@ -8,7 +8,7 @@
 //!    freestanding bare-metal target. The x86_64 image links
 //!    `arch/x86_64/linker.ld`; the aarch64 image links the Raspberry
 //!    Pi 4 boot script `arch/aarch64/link/aarch64-rpi4.ld` (load address
-//!    `0x8_0000`). The QEMU `virt` board's `aarch64-virt.ld` is used only
+//!    `0x20_0000`). The QEMU `virt` board's `aarch64-virt.ld` is used only
 //!    by the per-test bins, which carry their own build scripts
 //!    (no duplication; the one legitimate per-board
 //!    artefact is the boot stub + linker script per `plans/PI.md` §0.2).
@@ -257,6 +257,10 @@ fn main() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
         let linker_script = format!("{}/{linker_script}", manifest_dir.trim_end_matches('/'));
         println!("cargo:rustc-link-arg=-T{linker_script}");
+        // A board script includes the layout its siblings share.
+        if let Some(dir) = std::path::Path::new(&linker_script).parent() {
+            println!("cargo:rustc-link-arg=-L{}", dir.display());
+        }
     }
 
     if let Some(isa) = kernel_isa(&target_arch) {

@@ -21,7 +21,7 @@
 // SAFETY-INVARIANTS:
 //   1. The table is 2 KiB aligned (`.balign 0x800`) and each entry is
 //      0x80-aligned, so `VBAR_EL1` addresses every entry correctly.
-//   2. The 816-byte frame is 16-byte aligned (SP stays 16-aligned, an
+//   2. The frame (`exceptions::TRAP_FRAME_BYTES`) is 16-byte aligned (SP stays 16-aligned, an
 //      AArch64 requirement) and holds x0..x30 (offsets 0..240) followed by
 //      the per-exception return state `ELR_EL1`/`SPSR_EL1`/`SP_EL0`
 //      (offsets 248/256/264), FPCR/FPSR (offsets 272/280), q0..q31
@@ -70,25 +70,25 @@ tairix_aarch64_vectors:
 
     // --- Current EL with SP0 (unused: the kernel runs on SP_EL1) ---
     .balign 0x80                 // 0x000 Synchronous
-    sub     sp, sp, #816
+    sub     sp, sp, #{TRAP_FRAME_BYTES}
     stp     x0, x1, [sp]
     mov     x0, #0
     b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x080 IRQ
-    sub     sp, sp, #816
+    sub     sp, sp, #{TRAP_FRAME_BYTES}
     stp     x0, x1, [sp]
     mov     x0, #1
     b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x100 FIQ
-    sub     sp, sp, #816
+    sub     sp, sp, #{TRAP_FRAME_BYTES}
     stp     x0, x1, [sp]
     mov     x0, #2
     b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x180 SError
-    sub     sp, sp, #816
+    sub     sp, sp, #{TRAP_FRAME_BYTES}
     stp     x0, x1, [sp]
     mov     x0, #3
     b       tairix_aarch64_trap_common
@@ -109,75 +109,75 @@ tairix_aarch64_vectors:
     msr     tpidrro_el0, xzr
     b.lo    tairix_aarch64_boot_stack_overrun
 .Lel1h_sync_frame:
-    sub     sp, sp, #816
+    sub     sp, sp, #{TRAP_FRAME_BYTES}
     stp     x0, x1, [sp]
     mov     x0, #4
     b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x280 IRQ (timer / SGI)
-    sub     sp, sp, #816
+    sub     sp, sp, #{TRAP_FRAME_BYTES}
     stp     x0, x1, [sp]
     mov     x0, #5
     b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x300 FIQ
-    sub     sp, sp, #816
+    sub     sp, sp, #{TRAP_FRAME_BYTES}
     stp     x0, x1, [sp]
     mov     x0, #6
     b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x380 SError
-    sub     sp, sp, #816
+    sub     sp, sp, #{TRAP_FRAME_BYTES}
     stp     x0, x1, [sp]
     mov     x0, #7
     b       tairix_aarch64_trap_common
 
     // --- Lower EL using AArch64 (EL0 syscalls / user faults) ---
     .balign 0x80                 // 0x400 Synchronous (svc / user fault)
-    sub     sp, sp, #816
+    sub     sp, sp, #{TRAP_FRAME_BYTES}
     stp     x0, x1, [sp]
     mov     x0, #8
     b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x480 IRQ
-    sub     sp, sp, #816
+    sub     sp, sp, #{TRAP_FRAME_BYTES}
     stp     x0, x1, [sp]
     mov     x0, #9
     b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x500 FIQ
-    sub     sp, sp, #816
+    sub     sp, sp, #{TRAP_FRAME_BYTES}
     stp     x0, x1, [sp]
     mov     x0, #10
     b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x580 SError
-    sub     sp, sp, #816
+    sub     sp, sp, #{TRAP_FRAME_BYTES}
     stp     x0, x1, [sp]
     mov     x0, #11
     b       tairix_aarch64_trap_common
 
     // --- Lower EL using AArch32 (unsupported on this port) ---
     .balign 0x80                 // 0x600 Synchronous
-    sub     sp, sp, #816
+    sub     sp, sp, #{TRAP_FRAME_BYTES}
     stp     x0, x1, [sp]
     mov     x0, #12
     b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x680 IRQ
-    sub     sp, sp, #816
+    sub     sp, sp, #{TRAP_FRAME_BYTES}
     stp     x0, x1, [sp]
     mov     x0, #13
     b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x700 FIQ
-    sub     sp, sp, #816
+    sub     sp, sp, #{TRAP_FRAME_BYTES}
     stp     x0, x1, [sp]
     mov     x0, #14
     b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x780 SError
-    sub     sp, sp, #816
+    sub     sp, sp, #{TRAP_FRAME_BYTES}
     stp     x0, x1, [sp]
     mov     x0, #15
     b       tairix_aarch64_trap_common
@@ -197,7 +197,7 @@ tairix_aarch64_boot_stack_overrun:
     msr     tpidrro_el0, xzr
     b       .Lel1h_sync_frame
 
-// Common trampoline. On entry: 816-byte frame reserved, x0/x1 already
+// Common trampoline. On entry: the frame reserved, x0/x1 already
 // spilled at [sp,#0], x0 = exception kind.
 .balign 4
 tairix_aarch64_trap_common:
@@ -359,7 +359,7 @@ tairix_aarch64_trap_common:
     ldp     x4, x5, [sp, #32]
     ldp     x2, x3, [sp, #16]
     ldp     x0, x1, [sp]
-    add     sp, sp, #816
+    add     sp, sp, #{TRAP_FRAME_BYTES}
     eret
     // Straight-line speculation past the `eret` stops here.
     dsb     nsh

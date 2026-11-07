@@ -177,11 +177,12 @@ fork (`AGENTS.md` §1 boot-stub carve-out; `plans/PI.md` §0.2):
 
 - **Linker script** `kernel/arch/aarch64/link/aarch64-rpi4.ld` loads the
   image at `0x20_0000` and links it in the top gigabyte of the kernel's
-  translation regime (`0xFFFF_FFFF_C020_0000`). It is identical to
-  `aarch64-virt.ld` (used by the QEMU `virt` per-test bins, loading at
-  `0x4020_0000` to the same link address) save for the load address and the
-  boot stack's size. `kernel/tairix-kernel/build.rs` selects it for the
-  `aarch64-unknown-none` target; the pure target→linker/`kernel_isa`
+  translation regime (`0xFFFF_FFFF_C020_0000`). It and `aarch64-virt.ld`
+  (used by the QEMU `virt` per-test bins, loading at `0x4020_0000` to the
+  same link address) state only the load address and the boot stack's size,
+  and include the layout every board shares, `aarch64-image.ld`, through the
+  `-L` their builds pass beside them. `kernel/tairix-kernel/build.rs`
+  selects it for the `aarch64-unknown-none` target; the pure target→linker/`kernel_isa`
   selection logic lives in the host-unit-tested `src/build_support.rs`, so
   the crate body never names `target_arch` (cfg-check clean).
 - **Boot stub** `boot.s` is board-independent and runs at the load address,
@@ -270,8 +271,9 @@ root, crosses into the high half, leaves the identity page behind, installs
 its own EL1 vectors, GIC CPU interface, and tickless preemption/IPI arming,
 and joins the shared kernel dispatch loop through
 `tairix_kernel_core::run_secondary`, attesting `SecondaryCpuOnline`. Before
-translation comes on, `smp.s` invalidates the core's local data cache to the
-point of coherency (set/way `dc isw`, never a clean): a freshly-released
+translation comes on, `smp.s` invalidates the data cache levels the core
+owns, those inside the Level of Unification Inner Shareable (set/way `dc isw`,
+never a clean, and never the L2 the running cores share): a freshly-released
 secondary's caches are in the architecturally-UNKNOWN power-on state and
 may hold stale lines that, left in place when `SCTLR_EL1.C` comes on, shadow
 DRAM (the observed real-Pi-4B symptom of the last-released core failing to
@@ -2841,10 +2843,11 @@ Where the CPU offers PAN (`FEAT_PAN`, ARMv8.1, reported in
 every user leaf is `PXN`, so it cannot execute one either. The boot CPU
 settles whether PAN is in force from what it offers, before any other CPU
 starts (`protection::settle`). Each CPU then sets `PSTATE.PAN` as it starts
-(`protection::hold`), which also closes the generic timer and the
-performance monitors to EL0 by zeroing `CNTKCTL_EL1` and `PMUSERENR_EL0`,
-both UNKNOWN out of reset; a CPU that cannot hold PAN does not join: still
-MMU-off, it answers that it lacks PAN, and stops. The boot CPU waits for
+(`protection::hold`), which also closes to EL0 the generic timer, the
+performance and activity monitors and the debug communications channel
+(`CNTKCTL_EL1`, `PMUSERENR_EL0` and `AMUSERENR_EL0` zero, `MDSCR_EL1.TDCC`
+set), each UNKNOWN out of reset; a CPU that cannot hold PAN does not join: it
+answers that it lacks PAN, and stops. The boot CPU waits for
 every started core's answer, PSCI or spin-table, for half a second at most,
 so a refusal fails the start `smp_cpu_lacks_protection` (`core_lacks_pan`)
 at once, and a core that never answers fails it `smp_start_rejected`, rather

@@ -49,7 +49,7 @@ Read first: `plans/OPEN-DEFECTS.md` D1571 (the x86_64 shape and its tests),
   of coherency before and after. It turns translation on from the identity
   page, branches high, and zeroes `.bss` through the cache. A secondary
   crosses the same way, straight onto the kernel root, after invalidating
-  its UNKNOWN caches by set/way.
+  by set/way the UNKNOWN cache levels it owns, never one it shares.
 - **The kernel root.** Built by the port entry from a static table pool
   (`paging::kernel_root`, over the run mapper the x86_64 port shares,
   `tairix_arch_api::imagemap`), then loaded in place of the early high root

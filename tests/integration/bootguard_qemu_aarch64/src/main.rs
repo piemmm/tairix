@@ -1,8 +1,8 @@
 //! QEMU integration test: the aarch64 boot stack's poison guard.
 //!
-//! The boot stack is in use before the MMU is on, so an overrun cannot be
-//! caught by unmapping a page below it. The guard is poison instead, and
-//! only a real boot can show that the linker reserved it, that the stub's
+//! The boot stack is in use before the kernel root maps its guard read only,
+//! when no fault can catch an overrun, so the guard is poison too, and only
+//! a real boot can show that the linker reserved it, that the stub's
 //! fill survived the `.bss` clear that spans it, and that the port's
 //! post-mortem handle names that same reservation. The checks themselves
 //! are `tairix_itest_bootguard`'s, shared with the sibling ports; the

@@ -57,8 +57,8 @@ _start:
 
     // Park every core but the boot CPU, whose affinity (Aff0..Aff3) is zero.
     mrs     x4, mpidr_el1
-    mov     x5, #0xffff             // Aff0 | Aff1
-    movk    x5, #0xff, lsl #16      // | Aff2: `smp::MPIDR_AFFINITY_MASK`
+    mov     x5, #({MPIDR_AFFINITY_MASK} & 0xffff)
+    movk    x5, #({MPIDR_AFFINITY_MASK} >> 16), lsl #16
     and     x6, x4, x5
     ubfx    x7, x4, #32, #8         // Aff3
     orr     x6, x6, x7
@@ -252,18 +252,23 @@ _start:
 _el2_establish_and_drop:
     mov     x0, #{HCR_EL2}
     msr     hcr_el2, x0
+    // In force before the registers whose layout HCR_EL2.E2H decides.
+    isb
     mov     x0, #{CNTHCTL_EL2}
     msr     cnthctl_el2, x0
     msr     cntvoff_el2, xzr
     mov     x0, #{CPTR_EL2}
     msr     cptr_el2, x0
+    // One VMID on every CPU: EL1's TLB entries carry it with stage 2 off, and
+    // a broadcast invalidation reaches only the entries of the issuer's.
+    msr     vttbr_el2, xzr
     // MDCR_EL2 traps nothing and leaves EL1 every event counter: an HPMN of
     // zero is UNPREDICTABLE before FEAT_HPMN0, and a core with no
     // architected PMU has no PMCR_EL0 to read.
     mrs     x0, id_aa64dfr0_el1
     ubfx    x0, x0, #{PMUVER_SHIFT}, #4
-    cmp     x0, #0                  // not implemented
-    ccmp    x0, #0xf, #4, ne        // or IMPLEMENTATION DEFINED
+    cmp     x0, #{PMUVER_NONE}
+    ccmp    x0, #{PMUVER_IMPDEF}, #4, ne
     mov     x0, xzr
     b.eq    2f
     mrs     x0, pmcr_el0
@@ -284,6 +289,10 @@ _el2_establish_and_drop:
     msr     vpidr_el2, x0
     mrs     x0, mpidr_el1
     msr     vmpidr_el2, x0
+    // EL1's first fetch runs untranslated, in a known byte order.
+    mov     x0, #({SCTLR_MMU_OFF} & 0xffff)
+    movk    x0, #({SCTLR_MMU_OFF} >> 16), lsl #16
+    msr     sctlr_el1, x0
     mov     x0, #0x3c5              // EL1h, DAIF masked
     msr     spsr_el2, x0
     msr     elr_el2, x20

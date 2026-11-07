@@ -267,7 +267,10 @@ pub fn discover(
             let (Some(phandle), Ok(frame)) = (phandle, usize::try_from(base)) else {
                 return;
             };
-            if len < FRAMES_BYTES || services.try_reserve(1).is_err() {
+            if len < FRAMES_BYTES
+                || tairix_arch_aarch64::paging::registers_virt(base, FRAMES_BYTES).is_none()
+                || services.try_reserve(1).is_err()
+            {
                 return;
             }
             // SAFETY: `frame` is a service's control frame the tree names

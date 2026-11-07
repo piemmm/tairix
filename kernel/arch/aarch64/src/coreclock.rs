@@ -83,19 +83,26 @@ fn read_cntfrq() -> u64 {
 /// PMU): any other value is a present `PMUv3` whose `PMCCNTR_EL0` we can use.
 pub(crate) const PMUVER_SHIFT: u32 = 8;
 
+/// `ID_AA64DFR0_EL1.PMUVer` for a core without the architected PMU.
+pub(crate) const PMUVER_NONE: u64 = 0;
+
+/// `ID_AA64DFR0_EL1.PMUVer` for an IMPLEMENTATION DEFINED PMU, which has no
+/// architected registers to program.
+pub(crate) const PMUVER_IMPDEF: u64 = 0xF;
+
 /// `true` if a `PMUv3` cycle counter is present, decoded from a raw
 /// `ID_AA64DFR0_EL1` value. Pure and host-testable.
 #[must_use]
 pub const fn pmu_present(dfr0: u64) -> bool {
     let pmuver = (dfr0 >> PMUVER_SHIFT) & 0xF;
-    pmuver != 0 && pmuver != 0xF
+    pmuver != PMUVER_NONE && pmuver != PMUVER_IMPDEF
 }
 
 /// Read `ID_AA64DFR0_EL1` and decode whether a usable PMU is present. Reads
 /// as "absent" off the freestanding target (the host has no PMU).
 #[inline]
 #[must_use]
-pub(crate) fn pmu_available() -> bool {
+pub fn pmu_available() -> bool {
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
     {
         let dfr0: u64;
