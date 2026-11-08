@@ -16,28 +16,34 @@ on it. Launched on its own it opens a new drawing on an A4 page. Each document
 is a window of the one program; closing the last leaves it on the icon bar,
 and the Quit row of its icon menu ends it.
 
-Draw opens and saves SVG, and opens RISC OS Draw files, saving them as SVG. A
-drawing keeps its page and units, its layers, groups and clips, every path,
-shape, text and picture, solid colours and linear and radial gradients, the
-opacity of each object, dashes, joins, caps and arrowheads, the guides and the
-grid, and the drawing's title. A file holding what a drawing cannot keep —
-filter effects, masks, pattern fills, markers, unreadable pictures, text
-styling or text paths a text cannot hold, animation or scripts among them —
-opens read-only, the status band naming what it holds, and Save asks for a new
-name so the original is never overwritten. Save a copy writes the drawing as
-PDF; as EPS, its transparency made opaque, as PostScript paints it; as PNG,
-JPEG or TIFF, at the page's copy resolution and up to 8192 pixels along its
-longer side; as SVG; or as a RISC OS Draw file, naming what of the drawing the
-format could not hold, such as gradients; each leaving the document's own file
-as it is.
+Draw opens SVG, RISC OS Draw and PDF files, and saves a drawing as SVG, as a
+RISC OS Draw file or as PDF, in the format the file's name says; Save as
+offers all three. A Draw file holds what of a drawing it can, and a PDF opens
+again as one layer whose text is outlines; the save says so. One page of a PDF
+opens as a drawing, its crop box the page: a PDF of several pages first asks
+which, giving each page's size in points, and one protected by a password asks
+for it, saying so when one given is wrong. Text a PDF sets in its fonts is not
+yet read. A drawing keeps its page and units, its layers, groups and clips,
+every path, shape, text and picture, solid colours and linear and radial
+gradients, the opacity of each object, dashes, joins, caps and arrowheads, the
+guides and the grid, and the drawing's title. A file holding what a drawing
+cannot keep — filter effects, masks, pattern fills, markers, unreadable
+pictures, text styling or text paths a text cannot hold, animation or scripts
+among them — opens read-only, the status band naming what it holds, and Save
+asks for a new name so the original is never overwritten. Save a copy writes
+the drawing as PDF; as EPS, its transparency made opaque, as PostScript paints
+it; as PNG, JPEG or TIFF, at the page's copy resolution and up to 8192 pixels
+along its longer side; as SVG; or as a RISC OS Draw file, naming what of the
+drawing the format could not hold, such as gradients; each leaving the
+document's own file as it is.
 
 The tool box runs down the window's left, the inspector down its right, and
-the status band along its foot, which shows the pointer's place and the
-selection's size in the page's units and says what the last command did.
-Across the top, the bar says how the tool in hand is used and shows the zoom:
-pressing the zoom opens a menu of zooms. Rulers in the page's units run along
-the canvas's top and left, and scrollbars along its right and foot. Pausing
-over a tool's button names it and the key that chooses it.
+the status band along its foot, which says what the last command did, or else
+how the tool in hand is used, and shows the pointer's place and the
+selection's size in the page's units and the zoom: pressing the zoom opens a
+menu of zooms. Rulers in the page's units run along the canvas's top and left,
+and scrollbars along its right and foot. Pausing over a tool's button names it
+and the key that chooses it.
 
 The tools, and the keys that choose them, are: select (`V`), nodes (`A`),
 rectangle (`R`), ellipse (`E`), star and polygon (`S`), line (`L`), pen (`B`),
@@ -199,7 +205,10 @@ rectangle. It is saved with the drawing: SVG embeds it, a PDF or EPS copy
 draws it, and a Draw file holds it as a sprite or a JPEG. A drawing's pictures
 together hold at most 268 million pixels, each counted once however often it
 is shown; a picture that would take them past that is refused, and the status
-band says why.
+band says why. A picture dragged from the file manager or off the desktop and
+let go over the canvas is placed the same way, centred where it was let go;
+any other file dropped on the window opens, or is refused, as one dropped on
+Draw's icon does.
 
 Settings in the icon bar's menu opens Draw's settings window: the tool a new
 window starts with, and whether it shows the grid, snaps and draws outlines

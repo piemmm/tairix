@@ -83,6 +83,14 @@ pub fn wipe_with<T: Copy>(values: &mut [T], blank: T) {
     compiler_fence(Ordering::SeqCst);
 }
 
+/// Erase the whole block `buffer` holds, spare capacity too: a buffer reused
+/// for a shorter message, or truncated, still holds what it held past its
+/// length.
+pub fn wipe_block(buffer: &mut Vec<u8>) {
+    wipe(buffer);
+    wipe_with(buffer.spare_capacity_mut(), MaybeUninit::new(0));
+}
+
 /// A fixed-size byte buffer that erases itself when it goes out of scope.
 ///
 /// Use it wherever a secret is marshalled through a buffer: encoding a
@@ -195,8 +203,7 @@ impl WipedBuf {
 
     /// Erase the buffer now, rather than waiting for the end of the scope.
     pub fn wipe(&mut self) {
-        wipe(&mut self.0);
-        wipe_with(self.0.spare_capacity_mut(), MaybeUninit::new(0));
+        wipe_block(&mut self.0);
     }
 }
 

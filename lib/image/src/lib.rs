@@ -162,7 +162,7 @@ mod ifd;
 pub mod inspect;
 mod jpeg;
 mod jpeg_encode;
-mod lzw;
+pub mod lzw;
 mod ora;
 mod orientation;
 mod pages;

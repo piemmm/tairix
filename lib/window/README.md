@@ -330,8 +330,10 @@ server and every app's client can never drift apart.
   is the whole program of an application that edits what the user handed it
   (TextEdit, Paint, Draw): opening, closing and quitting with changes asked about
   first, the trusted picker — and through it a file to import, handed over
-  read-only to `DocumentApp::import_chosen` (`Request::Import`) — documents
-  handed over on the icon bar, painting
+  read-only to `DocumentApp::import_chosen` (`Request::Import`), as a file
+  another application drops where the view answers it places it is, with the
+  point (`DocumentView::places`, `OpenTarget::Placed`) — documents handed over
+  on the icon bar, painting
   only what changed, and the one queue saves are written on in the order
   asked. Text is drawn without waiting on the font service: what the font
   client has not yet fetched is drawn provisionally, a thread of the host's
@@ -344,8 +346,15 @@ server and every app's client can never drift apart.
   *New window*, and the windows of its own that hold no document — a settings
   window, say — each an `AppView` the host opens, routes, paints and closes
   (`NoAppView` for an application with none), closed by Quit only once the
-  quit can no longer be turned down, a control of one that changes on its own
-  stepped on the deadline it names (`AppView::deadline_ns`, `advance`).
+  quit can no longer be turned down, and one asked on a document window's
+  behalf closed with that window or as it moves on to another document
+  (`Host::open_app_window`'s owner), a control of one that changes on its own
+  stepped on the deadline it names (`AppView::deadline_ns`, `advance`). A save
+  is checked before any file is touched (`DocumentView::refuse_save`), told
+  whether it writes the document's own file or another (`SaveTarget`), since
+  only the document's own file records a format its name may not say; the
+  media type of a file another application offers is read once per drag for
+  every window it is offered to.
   `docapp::settings` (feature `settings`) is the settings window itself: the
   shared `SettingsFrame` over an application's closed registry implementing
   `docapp::settings::Preferences`, each event one `SettingsRequest` — the

@@ -300,6 +300,9 @@ pub struct View {
     /// What the file held that the drawing could not; a document that lost
     /// anything is never written back over its own file.
     pub(crate) unkept: Unkept,
+    /// The RISC OS filetype the volume records for the file the document was
+    /// opened from, which says its format where its name does not.
+    pub(crate) recorded: Option<tairix_abi::fs::Filetype>,
     pub(crate) message: Option<String>,
     pub(crate) viewport: Viewport,
     /// Whether the viewport has been fitted to the page yet.
@@ -395,6 +398,7 @@ impl View {
             name,
             access,
             unkept,
+            recorded: None,
             message: None,
             viewport: Viewport::new(1.0, scale),
             placed: false,
@@ -442,6 +446,14 @@ impl View {
             ));
         }
         view
+    }
+
+    /// It, its file's format recorded by the volume as `recorded`, which says
+    /// how the document is saved where its name does not.
+    #[must_use]
+    pub const fn with_recorded(mut self, recorded: Option<tairix_abi::fs::Filetype>) -> Self {
+        self.recorded = recorded;
+        self
     }
 
     /// Start as `preferences` say a new window starts: its tool, how it
@@ -843,11 +855,12 @@ impl View {
     }
 
     /// A picture the user chose to place, called `name`, landed in the layer
-    /// in hand: in the middle of what the canvas shows, at its own size or,
-    /// where that would not fit, as large as most of it holds.
+    /// in hand: centred on the window point `at` it was dropped at, or in the
+    /// middle of what the canvas shows, at its own size or, where that would
+    /// not fit, as large as most of the canvas holds.
     pub fn placed_picture(
         &mut self,
-        name: &str,
+        (name, at): (&str, Option<tairix_geometry::Point>),
         placed: Result<tairix_drawing::Image, String>,
         damage: &mut Region,
         layout: &Layout,
@@ -881,7 +894,14 @@ impl View {
                 PLACED_SHARE * shown.height() / size.y,
             ),
         );
-        let corner = shown.centre() - size * (fit / 2.0);
+        // A drop point off the canvas places it as the menu does: the window
+        // resized while the picture was read, or the pointer left the canvas
+        // after the window last answered that it places.
+        let centre = at.filter(|at| layout.canvas.contains(*at)).map_or_else(
+            || shown.centre(),
+            |at| self.drawing_at(layout, Point::new(f64::from(at.x), f64::from(at.y))),
+        );
+        let corner = centre - size * (fit / 2.0);
         let on_page = Affine::scale(fit, fit).then(Affine::translate(corner.x, corner.y));
         let mut nodes = Vec::new();
         let made = self.picture_node(image, on_page, name).and_then(|node| {
@@ -971,8 +991,7 @@ impl View {
     /// Whether the layer in hand takes new objects, saying why when it does
     /// not.
     pub(crate) fn takes_new_objects(&mut self) -> bool {
-        let layer = self.document.drawing().node_at(&[self.layer]);
-        let refusal = match layer {
+        let refusal = match self.document.drawing().node_at(&[self.layer]) {
             None => Some("There is no layer to draw into"),
             Some(layer) if layer.locked() => Some("The layer in hand is locked"),
             Some(layer) if !layer.visible() => Some("The layer in hand is hidden"),

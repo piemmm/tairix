@@ -2611,6 +2611,11 @@ impl Document {
     pub(crate) fn into_bytes(self) -> Vec<u8> {
         self.bytes
     }
+
+    /// The file's bytes, for a session that reads them and keeps them.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl ImageRenderService {

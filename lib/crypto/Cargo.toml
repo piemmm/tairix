@@ -74,9 +74,10 @@ ctr = { version = "=0.10.1", default-features = false, features = ["zeroize"] }
 aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "zeroize"] }
 
 # --- Foreign-protocol constructions ---------------------------------------
-# These back only the constructions SMB 3, NTLMv2 and Kerberos fix — never a
-# bare MD4 or MD5. Each sits on the stack above, so together they add six
-# crates (`cmac` brings `dbl`) and no second `digest` or `cipher`.
+# These back only the constructions SMB 3, NTLMv2, Kerberos and the PDF
+# standard security handler fix — never a bare MD4, MD5 or RC4. Each sits on
+# the stack above, so together they add eight crates (`cmac` brings `dbl`)
+# and no second `digest` or `cipher`.
 #
 # MD4 and MD5 for NTLMv2 (MS-NLMP §3.3.2): the NT hash is MD4 of the
 # password, and every NTLMv2 proof, key and signature is HMAC-MD5 or MD5.
@@ -91,6 +92,11 @@ ccm = { version = "=0.6.1", default-features = false }
 # CBC with ciphertext stealing in the CS3 arrangement, Kerberos's AES mode
 # (RFC 3962 §6, RFC 8009 §5).
 cts = { version = "=0.7.0", default-features = false }
+# RC4 and plain AES-CBC, for the PDF standard security handler alone (ISO
+# 32000-2 §7.6.4): decrypting files written elsewhere, never protecting data.
+# RC4 is broken and reached only through that handler's construction.
+rc4 = { version = "=0.2.0", default-features = false, features = ["zeroize"] }
+cbc = { version = "=0.2.1", default-features = false, features = ["zeroize"] }
 
 # The volatile wipe every upstream type above uses on drop, named directly
 # for the intermediates no upstream type owns: a digest's output that is

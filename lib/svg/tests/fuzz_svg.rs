@@ -388,13 +388,20 @@ fn generated_text(rng: &mut Prng) {
         let facing = ["left", "right"][rng.at_most(1)];
         let method = ["align", "stretch"][rng.at_most(1)];
         let offset = *rng.pick(NUMBERS);
+        let along = [
+            r##"href="#way""##,
+            r##"href="#round""##,
+            r##"href="#box""##,
+            r#"path="M2 2 Q12 20 22 2""#,
+            r##"path="" href="#way""##,
+        ][rng.at_most(4)];
         let _ = write!(
             body,
-            r##"<textPath href="#way" startOffset="{offset}" side="{facing}" method="{method}">d<tspan baseline-shift="{shift}" dy="{list}">e</tspan><textPath href="#way">f</textPath></textPath>g"##
+            r##"<textPath {along} startOffset="{offset}" side="{facing}" method="{method}">d<tspan baseline-shift="{shift}" dy="{list}">e</tspan><textPath href="#way">f</textPath></textPath>g"##
         );
     }
     let text = alloc_document(&format!(
-        r##"<defs><path id="way" d="M1 1 C5 20 15 -5 23 12 L{list} 4" pathLength="{size}"/></defs>
+        r##"<defs><path id="way" d="M1 1 C5 20 15 -5 23 12 L{list} 4" pathLength="{size}"/><circle id="round" cx="12" cy="12" r="{list}"/><rect id="box" x="2" y="2" width="{size}" height="9" rx="{list}"/></defs>
             <text x="{list} 2 3" y="4" xml:space="{space}" text-anchor="{anchor}"
                   textLength="{list}" lengthAdjust="{adjust}" font-weight="{weight}"
                   font-style="{posture}" letter-spacing="{list}" word-spacing="{size}"

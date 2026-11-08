@@ -3096,7 +3096,9 @@ impl<S: DirectorySource> Desktop<S> {
             }
         }
         let count = u32::try_from(items.len()).ok()?;
-        let shown = DragItems::new(name, count, false, pictures)
+        // One file alone is offered to a window as a file to place, too.
+        let file = count == 1 && lead.kind() == tairix_browse::entry::EntryKind::File;
+        let shown = DragItems::new(name, count, file, pictures)
             .ok()?
             .with_filetype(lead.filetype())
             .with_hidden_ending(hidden)

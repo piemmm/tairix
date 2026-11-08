@@ -1,0 +1,35 @@
+[package]
+name = "tairix-pdf"
+description = "TAIRiX PDF reader: a fail-closed, first-party no_std reader of PDF structure, filters, encryption, content, fonts and images into a display list per page (plans/PDF.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The affine maps and paths a page's display list is made of.
+tairix-bezier = { path = "../bezier", version = "=0.0.0" }
+# The cross-reference, caches and visited sets, whose insertions can refuse.
+tairix-collections = { path = "../collections", version = "=0.0.0" }
+# Flate's DEFLATE: the one inflater the tree has.
+tairix-compress = { path = "../compress", version = "=0.0.0" }
+# LZW in the dialect TIFF and PDF share, and the JPEG decoder.
+tairix-image = { path = "../image", version = "=0.0.0" }
+# The standard security handler's key derivation, RC4 and AES-CBC: the
+# tree's one cryptography crate.
+tairix-crypto = { path = "../crypto", version = "=0.0.0" }
+# Device and calibrated colour to sRGB: one conversion for the tree.
+tairix-colour = { path = "../colour", version = "=0.0.0" }
+# The fixed-capacity operand and component lists.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
+# Fallible buffers for what a stream decodes to, and the bounded float maths.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# The fuzz harness's per-run seed and budget.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

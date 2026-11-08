@@ -29,7 +29,7 @@ use tairix_raster::Color;
 use tairix_reclaim::PressureBand;
 use tairix_theme::Theme;
 use tairix_window::docapp::{
-    DialogWindow, DocumentView, ToolGone, ToolMove, ToolOpening, ToolWindow,
+    DialogWindow, DocumentView, SaveTarget, ToolGone, ToolMove, ToolOpening, ToolWindow,
 };
 use tairix_window::document::{Access, SavedDocument};
 
@@ -1365,7 +1365,7 @@ impl DocumentView for View {
         }
     }
 
-    fn refuse_save(&self, name: &str) -> Option<String> {
+    fn refuse_save(&self, name: &str, _: SaveTarget) -> Option<String> {
         self.save_format(name)
             .err()
             .map(|refusal| alloc::format!("{refusal}"))

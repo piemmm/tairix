@@ -24,7 +24,7 @@
 | T18 | The pointer's focus: the bar reacts only to input aimed at it | done |
 | T19 | A slot's application is the kernel's attestation, not the launch record | done |
 | T20 | A file dropped on an application's slot | done |
-| T21 | A drop the application does not take is answered, and its windows take a drop as its slot does | done |
+| T21 | A drop the application does not take is answered; its windows place one file they answer for, and take any other drop as its slot does | done |
 | T22 | The launcher's memory: favourites and frequent use, private to the account | done |
 | T23 | The launcher's motion | done |
 | T24 | A lone tap of the Meta key opens the launcher | done |
@@ -2050,10 +2050,17 @@ application that opens it (`plans/TEXTEDIT.md`, the drag carrier in
   refused (`DragEnd::refused`, a `DropRefusal`), and the desktop states it in an
   error notice titled "Error from *App*", with *App* that application's attested
   name, saying what it opens: one file at a time, or the endings it claims.
-- **An application's windows take a drop as its slot does.** A release over
-  another application's window resolves to that application's slot
-  (`DragSurface::AppWindow`) and is answered, opened or refused, exactly as a
-  release over the slot would be.
+- **An application's window may place one file; otherwise it takes a drop as
+  its slot does.** Over another application's window one openable file is
+  offered to that window at the pointer (`FileOffered`, its media type and
+  never its name readable for the offer standing); a window answering it
+  places the file there (`FileOfferAnswer`) — Draw over its canvas, for a
+  picture — has a release conclude `DropSite::Placed`, the source handing the
+  file over read-only (`PlaceDropped`) and the session relaying it to the
+  window as an `OpenTarget::Placed`. One file carried off the desktop is
+  offered so too, and placed by the session, which opens it read-only. Any other release over the window resolves to that
+  application's slot (`DragSurface::AppWindow`) and is answered, opened or
+  refused, exactly as a release over the slot would be.
 - **An accepted document that will not open is the application's own alert**:
   damaged, unreadable, or refused by its sandbox, it is stated by the
   application (`plans/APPWIN.md` AW8), never dropped silently.

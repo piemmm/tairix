@@ -1602,7 +1602,13 @@ conclusion is *accepted*.
   carried drag's report and a save's offer are numbered, so the newest of a
   run wins too; a save offer's end, which carries where it was dropped,
   withdraws the offers still held and an earlier end that only left, a drop's
-  end an earlier drop's too.
+  end an earlier drop's too. Desktop items and the file among them are offered
+  as a pair, so a run of offers folds each kind to its newest; an items
+  offer's end takes the ends held before it as a save offer's does, and one
+  that only left every offer held since the last drop, so items carried back
+  and forth over a window that has stopped reading cost it one end. The
+  offers before a drop stay: the drop is of the newest of them, which the
+  window may answer as late as it reads it.
   Everything else — keys, buttons, the pick conclusion — is owed in full.
 - **Bounded, and shedding only what can be shed.** `HOLD_BACK_CAPACITY` (64
   per window) is what stops an app that never drains from making the desktop
@@ -1614,11 +1620,11 @@ conclusion is *accepted*.
   preference — folding leaves at most six state edges, one pick conclusion (a
   window has one pick at a time), one authorisation's, one tool-window move's
   end, one end of a press already delivered (a window holds one press at a
-  time), one save offer's end that only left, a later one superseding it, and
-  one drop's, which only a later drop takes, since a window has every event
-  held before a drag's offer by the time it can answer it — so an evictable
-  input event — a drag's report and a save's offer among them — always
-  exists.
+  time), and of a save offer's ends and an items offer's each one that only
+  left, a later one superseding it, and one drop's, which only a later drop
+  takes, since a window has every event held before a drag's offer by the
+  time it can answer it — so an evictable input event — a drag's report and
+  an offer among them — always exists.
 - **A dead owner owes nothing.** A send that answers `NotFound` discards
   everything held for that owner and tears its windows down, exactly as a
   refused direct send does; a reap does the same. Any other refusal no wait
@@ -2852,6 +2858,19 @@ pointer from that window, which therefore never sees the release it lent.
   recorded filetype, resolves to, by the one matching rule "Open With" uses; the slot is lit with its hover look
   while it would take the drop. A drag of several items, or of a folder, is
   never offered to a slot.
+- **Another application's window may place the one file.** Over such a window
+  the place carries the window and the point (`DragPlace::AppWindow`), and its
+  slot's answer is asked once as the pointer arrives and carried as it moves
+  there (`take_window_answer`). One openable file is offered to the window at
+  each point, a numbered `FileOffered` per input batch, apart from the reports
+  the dragging application is owed (`OwedReport::File`, so a batch may owe
+  both); the window that is left is told with `ItemsOfferEnded`. The window
+  reads the file's media type for the offer standing (`offered_file`) and
+  answers whether a drop places it (`FileOfferAnswer`), which the pointer
+  shows as a copy; a drop there concludes `DragConclusion::Placed`, and the
+  source hands the file over read-only with `PlaceDropped`, which the session
+  relays to the window's owner as an `OpenEntry::Placed`, consuming the grant
+  whatever it answers. A drop the window does not place is its slot's.
 - **The application decides every folder drop.** Over its own windows or the
   desktop the session sends one numbered report per input batch
   (`WindowServer::report_drag`, `WindowEvent::DragOver`, with `Shift`) and
@@ -2909,7 +2928,13 @@ pointer from that window, which therefore never sees the release it lent.
   them (`DesktopShell::offered_items`) — each icon's absolute path and the node
   its listing showed, a drive by its volume's place in the storage catalog.
   Dropped on a window whose answer stands, its application performs the drop
-  under its own authority; brought back over the desktop the pointer shows a
+  under its own authority. One file is offered as a file too, under the same
+  number (`DesktopReport::file`, the icon a regular file alone): a window that
+  answers it places it, and gave no answer for it as an item, has it placed
+  (`DesktopDrop::Placed`) — the session opens it read-only on its file worker
+  (`DesktopCall::Place`) and queues it for the window's owner as an
+  `OpenEntry::Placed`, its icon staying where it stood. Brought back over the
+  desktop the pointer shows a
   move, and let go there the press is put down where it was released
   (`Desktop::put_down_lent`); ended any other way, a lock among them, they
   stand where they stood again (`Desktop::restore_lent`).

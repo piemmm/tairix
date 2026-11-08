@@ -106,6 +106,34 @@ impl Tool {
         }
     }
 
+    /// How it is worked, which the status band reads while it says nothing
+    /// else.
+    #[must_use]
+    pub const fn hint(self) -> &'static str {
+        match self {
+            Self::Select => {
+                "Drag to move \u{b7} handles scale, past a corner turns \u{b7} Shift adds, Alt copies"
+            }
+            Self::Nodes => "Drag a node or a handle \u{b7} smooth nodes keep their handles in line",
+            Self::Rectangle | Self::Ellipse => {
+                "Drag to draw \u{b7} Shift for even sides \u{b7} Alt from the centre"
+            }
+            Self::Star => "Drag out from the centre \u{b7} Shift turns in 15\u{b0} steps",
+            Self::Line => "Drag to draw \u{b7} Shift in 15\u{b0} steps",
+            Self::Pen => {
+                "Click for corners, drag for curves \u{b7} click the first node to close \u{b7} Enter ends"
+            }
+            Self::Pencil => "Drag to draw freehand",
+            Self::Text => "Click to type \u{b7} click text to edit it \u{b7} Escape ends",
+            Self::Gradient => {
+                "Drag across the selection to lay its gradient \u{b7} Shift in 15\u{b0} steps \u{b7} Alt radial"
+            }
+            Self::Eyedropper => "Click an object to take its style",
+            Self::Zoom => "Click to zoom in, Alt-click out \u{b7} drag a rectangle to fill the window",
+            Self::Hand => "Drag to scroll",
+        }
+    }
+
     /// The letter that, pressed alone, chooses it.
     #[must_use]
     pub const fn key(self) -> char {

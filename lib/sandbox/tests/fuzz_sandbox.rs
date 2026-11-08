@@ -43,7 +43,7 @@ use tairix_raster::Region;
 use tairix_sandbox::decode::{
     container_summary, disassemble, file_report, CodeWindow, DecodeService, Isa, Summarise,
 };
-use tairix_sandbox::drawedit::{read_drawing, read_placed, DrawEditService};
+use tairix_sandbox::drawedit::{read_drawing, read_pages, read_placed, Access, DrawEditService};
 use tairix_sandbox::helpdoc::{render_help, HelpService, RenderMode, Styling};
 use tairix_sandbox::host::{Launcher, ParserSandbox};
 use tairix_sandbox::imageedit::{
@@ -858,7 +858,12 @@ fn hostile_document_iteration<L: Launcher>(hostile: &mut ParserSandbox<L, Silent
     };
     let _ = read_kept(hostile, &kept, &mut Vec::new());
     let _ = close_edit(hostile);
-    let _ = read_drawing(hostile, handed, &mut tairix_drawing::Ids::new());
+    let _ = read_drawing(
+        hostile,
+        handed,
+        &Access::default(),
+        &mut tairix_drawing::Ids::new(),
+    );
     let _ = read_placed(hostile, handed);
 }
 
@@ -1068,6 +1073,40 @@ const DRAWINGS: &[&str] = &[
         picture_url!(),
         r#"" x="30" y="30" width="9" height="6" transform="rotate(20)"/></svg>"#
     ),
+    // A PDF of two pages, the first painting a fill and a stroke.
+    r"%PDF-1.4
+1 0 obj
+<</Type /Catalog /Pages 2 0 R>>
+endobj
+2 0 obj
+<</Type /Pages /Kids [3 0 R 4 0 R]>>
+endobj
+3 0 obj
+<</Type /Page /Parent 2 0 R /MediaBox [0 0 100 80] /Contents 5 0 R>>
+endobj
+4 0 obj
+<</Type /Page /Parent 2 0 R /MediaBox [0 0 60 60]>>
+endobj
+5 0 obj
+<</Length 58>>
+stream
+q 1 0 0 rg 10 10 40 30 re f 0 0 1 RG 2 w 0 0 m 50 50 l S Q
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000056 00000 n 
+0000000108 00000 n 
+0000000192 00000 n 
+0000000259 00000 n 
+trailer
+<</Size 6 /Root 1 0 R>>
+startxref
+365
+%%EOF
+",
 ];
 
 /// Serves as the drawing worker does, but flips bytes in some of its
@@ -1105,7 +1144,18 @@ fn fuzz_drawedit_iteration<L: Launcher, F: Launcher>(
     for document in [mutated.as_slice(), &mutated[..cut], noise] {
         if send_document(honest, document).is_ok() {
             let handed = document.len() as u64;
-            if let Ok(read) = read_drawing(honest, handed, &mut tairix_drawing::Ids::new()) {
+            if let Ok(pages) = read_pages(honest, handed, &Access::default()) {
+                assert!(
+                    pages.count >= 1 && pages.sizes.len() <= pages.count as usize,
+                    "a page list believed holds"
+                );
+            }
+            if let Ok(read) = read_drawing(
+                honest,
+                handed,
+                &Access::default(),
+                &mut tairix_drawing::Ids::new(),
+            ) {
                 assert!(
                     tairix_drawing::svg::write(&read.drawing).is_ok(),
                     "a drawing believed writes"
@@ -1116,7 +1166,13 @@ fn fuzz_drawedit_iteration<L: Launcher, F: Launcher>(
     let honest_bytes = rng.pick(DRAWINGS).as_bytes();
     if send_document(flipping, honest_bytes).is_ok() {
         let handed = honest_bytes.len() as u64;
-        let _ = read_drawing(flipping, handed, &mut tairix_drawing::Ids::new());
+        let _ = read_pages(flipping, handed, &Access::default());
+        let _ = read_drawing(
+            flipping,
+            handed,
+            &Access::default(),
+            &mut tairix_drawing::Ids::new(),
+        );
     }
     // A picture to place: mutated for the honest worker, honest for one
     // turning hostile.

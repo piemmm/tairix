@@ -46,8 +46,9 @@ use crate::desktop::Desktop;
 use crate::server::{
     client_frame_budget_bytes, Activation, AlertOpen, AuthoriseFor, CallerIdentity, ClientRegion,
     CursorSetName, DialogSpec, DragConclusion, DragReport, EventSink, FrameHost, HandOverDesk,
-    LayerSpec, OpenEntry, PickedFile, PopupSpec, PreviewSize, Served, ToolSpec, TransientSpec,
-    WallpaperName, WindowHost, WindowServer, WindowSizeState, WindowSizing, WINDOW_REPLY_MAX,
+    LayerSpec, OpenEntry, PickedFile, PlacedFile, Placement, PopupSpec, PreviewSize, Served,
+    ToolSpec, TransientSpec, WallpaperName, WindowHost, WindowServer, WindowSizeState,
+    WindowSizing, WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -98,6 +99,10 @@ const CLIENT_FRAME_MAX: u64 = 8 * FRAME_LEN as u64;
 
 /// Frames a client may hold under [`CLIENT_FRAME_MAX`].
 const FRAMES_PER_CLIENT: usize = 8;
+
+/// A placed drop the recording host was handed: who handed it over, what the
+/// engine resolved it into, and the grant.
+type PlacedDrop = (ProcId, Result<(ProcId, Placement), Errno>, u64);
 
 /// The ticket the loopback presents for client A.
 const TICKET_A: u64 = 1;
@@ -327,6 +332,11 @@ struct RecordingHost {
     /// reads of, by window and drag.
     items_answers: Vec<(u64, u32, Option<DropOperation>)>,
     offered_items: Vec<(u64, u32, String, tairix_abi::fs::FileId)>,
+    /// The file offer the host reads a type for, and every placed drop handed
+    /// over, with what the engine resolved it into.
+    offered_file: Option<(u64, u32)>,
+    file_answers: Vec<(u64, u32, bool)>,
+    placed: Vec<PlacedDrop>,
     refuse_menu_open: Option<Errno>,
     /// Every alert put up, whether it earned the keyboard, and every one
     /// taken down, by id.
@@ -435,6 +445,9 @@ impl Default for RecordingHost {
             save_folders: Vec::new(),
             items_answers: Vec::new(),
             offered_items: Vec::new(),
+            offered_file: None,
+            file_answers: Vec::new(),
+            placed: Vec::new(),
             refuse_menu_open: None,
             alerts: Vec::new(),
             alert_focus: Vec::new(),
@@ -684,6 +697,47 @@ impl WindowHost for RecordingHost {
     ) -> Result<(), Errno> {
         self.items_answers.push((window_id, serial, verdict));
         Ok(())
+    }
+
+    fn file_offer_answered(
+        &mut self,
+        window_id: u64,
+        serial: u32,
+        places: bool,
+    ) -> Result<(), Errno> {
+        self.file_answers.push((window_id, serial, places));
+        Ok(())
+    }
+
+    fn offered_file(&self, window_id: u64, serial: u32) -> Result<&str, Errno> {
+        if self.offered_file == Some((window_id, serial)) {
+            Ok("image/png")
+        } else {
+            Err(Errno::NotFound)
+        }
+    }
+
+    // A host that took the drop queues it, so the engine's half of the
+    // hand-over is exercised too.
+    fn place_dropped(
+        &mut self,
+        desk: &mut dyn HandOverDesk,
+        caller: ProcId,
+        into: Result<(ProcId, Placement), Errno>,
+        file: PlacedFile<'_>,
+    ) -> Result<(), Errno> {
+        self.placed.push((caller, into, file.grant.get()));
+        let (app, placement) = into?;
+        let entry = OpenEntry::Placed {
+            placement,
+            name: *file.name,
+            grant: file.grant.get(),
+        };
+        if desk.hand_over(app, Activation::Withheld, &mut || Ok(entry.clone())) {
+            Ok(())
+        } else {
+            Err(Errno::NotFound)
+        }
     }
 
     fn offered_count(&self, window_id: u64, drag: u32) -> Result<u32, Errno> {
@@ -6315,6 +6369,129 @@ fn a_save_offer_is_answered_by_its_windows_owner_and_its_folder_reaches_the_host
             .deliver_event(&mut sink, &ended(dropped))
             .expect("left, or dropped inside");
     }
+}
+
+/// A file a drag placed in another application's window is handed over once,
+/// by the drag's owner alone, to the application owning that window, which
+/// pulls it with where it was dropped; a placement in the drag's own window is
+/// refused, and a file offer's type is read by the offered window's owner.
+#[test]
+fn a_placed_drop_is_handed_over_once_by_its_owner_to_the_window_dropped_on() {
+    let (loopback, mut client, [source, sibling, stranger]) = carried_drag();
+    let mut sink = QueueSink::default();
+    let placed = |window_id| {
+        DragConclusion::Placed(Placement {
+            window_id,
+            x: 5,
+            y: 6,
+        })
+    };
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .conclude_drag(&mut sink, source, placed(sibling)),
+        Err(Errno::OutOfRange),
+        "a file is placed only in another application's window"
+    );
+    loopback
+        .borrow_mut()
+        .server
+        .conclude_drag(&mut sink, source, placed(stranger))
+        .expect("placed");
+    assert_eq!(
+        WindowEvent::from_bytes(&sink.delivered[0].1),
+        Ok(WindowEvent::DragEnded {
+            window_id: source,
+            site: DropSite::Placed,
+        })
+    );
+    assert_eq!(
+        client.take_drop_target(source),
+        Err(Errno::NotFound),
+        "a placed drop opens nothing"
+    );
+    let name = DocumentName::new("map.png").expect("a name");
+    let grant = core::num::NonZeroU64::new(77).expect("a grant");
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.place_dropped(source, name, grant),
+        Err(Errno::NotFound),
+        "only the drag's owner hands it over"
+    );
+    loopback.borrow_mut().ticket = TICKET_A;
+    client
+        .place_dropped(source, name, grant)
+        .expect("handed over");
+    assert_eq!(
+        client.place_dropped(source, name, grant),
+        Err(Errno::NotFound),
+        "once"
+    );
+    let into = Placement {
+        window_id: stranger,
+        x: 5,
+        y: 6,
+    };
+    let placed = loopback.borrow().host.placed.clone();
+    assert_eq!(
+        placed,
+        [
+            (proc_id(0xB2), Err(Errno::NotFound), 77),
+            (proc_id(0xA1), Ok((proc_id(0xB2), into)), 77),
+            (proc_id(0xA1), Err(Errno::NotFound), 77),
+        ],
+        "the host consumes every grant, refused or not"
+    );
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.take_open_target(),
+        Ok(Some(Target::Placed {
+            window_id: stranger,
+            at: (5, 6),
+            name: String::from("map.png"),
+            grant: 77,
+        }))
+    );
+}
+
+/// A file offered over a window is delivered only inside it, and its type is
+/// read by that window's owner alone.
+#[test]
+fn a_file_offer_lies_within_its_window_and_its_type_is_its_owners_to_read() {
+    let (loopback, mut client, [_, _, stranger]) = carried_drag();
+    let mut sink = QueueSink::default();
+    let offer = |x| WindowEvent::FileOffered {
+        window_id: stranger,
+        drag: 1,
+        serial: 9,
+        x,
+        y: 1,
+    };
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .deliver_event(&mut sink, &offer(u32::MAX)),
+        Err(Errno::OutOfRange),
+        "an offer outside the window is never delivered"
+    );
+    loopback
+        .borrow_mut()
+        .server
+        .deliver_event(&mut sink, &offer(0))
+        .expect("inside the window");
+    loopback.borrow_mut().host.offered_file = Some((stranger, 9));
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(client.offered_file(stranger, 9), Ok("image/png"));
+    client.answer_file_offer(stranger, 9, true).expect("posted");
+    assert_eq!(loopback.borrow().host.file_answers, [(stranger, 9, true)]);
+    loopback.borrow_mut().ticket = TICKET_A;
+    assert_eq!(
+        client.offered_file(stranger, 9),
+        Err(Errno::NotFound),
+        "only the offered window's owner reads its file's type"
+    );
 }
 
 /// A drag is answered by its owner alone while it is carried, and a desktop

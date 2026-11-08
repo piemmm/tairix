@@ -1,13 +1,14 @@
 //! The LZW dictionary, its expansion loop, and the coder that writes it.
 //!
-//! GIF and TIFF both code their pixels with LZW over a dictionary of at most
+//! GIF, TIFF and PDF all code with LZW over a dictionary of at most
 //! 4096 entries whose first `1 << root_bits` codes are the literals, whose
-//! next code clears the table and whose next again ends the stream. What
-//! differs is only how codes are packed into bytes and when a new entry
-//! widens the code that follows it, so those are the caller's
-//! ([`CodeSource`], [`CodeSink`], [`Widen`]) and everything else — the
-//! dictionary, the string walk, the entry a code defines for itself, and the
-//! deferred clear real encoders rely on — is defined once here.
+//! next code clears the table and whose next again ends the stream. They
+//! differ only in how codes are packed into bytes and when a new entry widens
+//! the code that follows it, which each format's reader and writer supply;
+//! the dictionary, the string walk, the entry a code defines for itself and
+//! the deferred clear real encoders rely on are defined once here.
+//! [`expand_msb`] is the dialect TIFF and PDF share, for readers outside the
+//! crate.
 
 use alloc::vec::Vec;
 
@@ -257,6 +258,81 @@ impl Expansion<'_> {
             written += 1;
         }
         written
+    }
+}
+
+/// A reader over the flat run of bytes TIFF and PDF pack their LZW codes into.
+///
+/// `lsb_first` is the classic dialect's packing, where a code's first bit is
+/// a byte's least significant rather than its most.
+pub(crate) struct BitCodes<'a> {
+    pub(crate) data: &'a [u8],
+    pub(crate) at: u64,
+    pub(crate) lsb_first: bool,
+}
+
+impl CodeSource for BitCodes<'_> {
+    fn code(&mut self, width: u32) -> Result<Option<u16>, DecodeError> {
+        let total = self.data.len() as u64 * 8;
+        if self.at + u64::from(width) > total {
+            return Ok(None);
+        }
+        let mut value = 0u32;
+        for offset in 0..u64::from(width) {
+            let at = self.at + offset;
+            let byte = self.data.get((at / 8) as usize).copied().unwrap_or(0);
+            let bit = if self.lsb_first {
+                u32::from(byte >> (at % 8)) & 1
+            } else {
+                u32::from(byte >> (7 - at % 8)) & 1
+            };
+            value = if self.lsb_first {
+                value | bit << offset
+            } else {
+                value << 1 | bit
+            };
+        }
+        self.at += u64::from(width);
+        u16::try_from(value)
+            .map(Some)
+            .map_err(|_| DecodeError::TiffInvalidCode)
+    }
+}
+
+/// Expand the most-significant-bit-first LZW stream `data` — the dialect TIFF
+/// and PDF share — its code widening one code early where `early` is set
+/// (PDF's `/EarlyChange 1`, its default), handing each run of output to
+/// `sink` until the stream ends, its codes run out, or `sink` answers that it
+/// takes no more.
+///
+/// # Errors
+///
+/// [`DecodeError::TiffInvalidCode`] for a code the table cannot resolve, and
+/// [`DecodeError::OutOfMemory`] where the table cannot be held.
+pub fn expand_msb(
+    data: &[u8],
+    early: bool,
+    sink: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<(), DecodeError> {
+    let mut lzw = Lzw::new().ok_or(DecodeError::OutOfMemory)?;
+    let widen = if early {
+        Widen::OneEarly
+    } else {
+        Widen::WhenFull
+    };
+    let invalid = DecodeError::TiffInvalidCode;
+    let mut source = BitCodes {
+        data,
+        at: 0,
+        lsb_first: false,
+    };
+    let mut expansion = lzw.expansion(8, widen, &invalid)?;
+    let mut run = [0u8; 4096];
+    loop {
+        let written = expansion.fill(&mut source, &invalid, &mut run)?;
+        if written == 0 || !sink(&run[..written]) || written < run.len() {
+            return Ok(());
+        }
     }
 }
 

@@ -768,7 +768,7 @@ impl View {
             MenuKind::Zoom => {
                 let mut menu = MenuBuilder::new();
                 for (index, zoom) in STEPS.iter().enumerate() {
-                    let label = alloc::format!("{}%", crate::paint::percent(*zoom));
+                    let label = crate::viewport::readout(*zoom);
                     let on = (*zoom - self.viewport.zoom()).abs() < 1e-9;
                     menu.radio(
                         numbered(ZOOM_IDS, index),

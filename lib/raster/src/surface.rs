@@ -1473,11 +1473,13 @@ impl Surface {
             // full width instead of fading it toward nothing.
             let ox = -perpendicular(dy, half, len);
             let oy = perpendicular(dx, half, len);
+            // A vertex at the edge of the coordinate range keeps its quad there
+            // rather than wrapping it across the plane.
             let quad = [
-                (ax + ox, ay + oy),
-                (ax - ox, ay - oy),
-                (bx - ox, by - oy),
-                (bx + ox, by + oy),
+                (ax.saturating_add(ox), ay.saturating_add(oy)),
+                (ax.saturating_sub(ox), ay.saturating_sub(oy)),
+                (bx.saturating_sub(ox), by.saturating_sub(oy)),
+                (bx.saturating_add(ox), by.saturating_add(oy)),
             ];
             self.fill_polygon_subpixel(&quad, color);
         }

@@ -123,21 +123,34 @@ impl WorkerExit {
 pub fn serve<C: Channel, S: Service>(chan: &mut C, service: &mut S) -> ServeEnd {
     let mut request = Vec::new();
     loop {
-        match recv_frame_into(chan, &mut request) {
-            Ok(true) => {}
-            Ok(false) => return ServeEnd::Finished,
-            Err(err) => return ServeEnd::Failed(err),
-        }
-        let reply = service.handle(&request);
-        if let Err(err) = send_frame(chan, &reply) {
-            return ServeEnd::Failed(err);
+        if let Some(end) = serve_one(chan, service, &mut request) {
+            return end;
         }
     }
 }
 
+/// Serve one request read into `request`, answering how serving ends if it
+/// does. The request is wiped once handled: one may carry a secret, such as
+/// a document's password, which the next reuse of the buffer or its growth
+/// must not leave behind.
+fn serve_one<C: Channel, S: Service>(
+    chan: &mut C,
+    service: &mut S,
+    request: &mut Vec<u8>,
+) -> Option<ServeEnd> {
+    match recv_frame_into(chan, request) {
+        Ok(true) => {}
+        Ok(false) => return Some(ServeEnd::Finished),
+        Err(err) => return Some(ServeEnd::Failed(err)),
+    }
+    let reply = service.handle(request);
+    tairix_util::secret::wipe_block(request);
+    send_frame(chan, &reply).err().map(ServeEnd::Failed)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{serve, ServeEnd, Service, WorkerExit};
+    use super::{serve, serve_one, ServeEnd, Service, WorkerExit};
     use crate::proto::{recv_frame, send_frame, Channel, ProtoError, MAX_FRAME};
     use alloc::vec;
     use alloc::vec::Vec;
@@ -210,6 +223,31 @@ mod tests {
             Some(b"54321".to_vec())
         );
         assert_eq!(recv_frame(&mut replies), Ok(None));
+    }
+
+    /// A request may carry a secret, so none is left in the buffer the next
+    /// is read into.
+    #[test]
+    fn a_request_is_wiped_once_it_is_handled() {
+        let mut script = Loopback {
+            input: Vec::new(),
+            at: 0,
+            output: Vec::new(),
+        };
+        send_frame(&mut script, b"a password").expect("frame");
+        let mut chan = Loopback {
+            input: script.output,
+            at: 0,
+            output: Vec::new(),
+        };
+        let mut request = Vec::new();
+        assert_eq!(serve_one(&mut chan, &mut Reverser, &mut request), None);
+        assert_eq!(request.len(), 10);
+        assert!(request.iter().all(|&byte| byte == 0));
+        assert_eq!(
+            serve_one(&mut chan, &mut Reverser, &mut request),
+            Some(ServeEnd::Finished)
+        );
     }
 
     #[test]

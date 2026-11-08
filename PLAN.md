@@ -190,6 +190,7 @@ plan's ledger. A `blocked` row names its blocker.
 | TEXTEDIT | `TextEdit.app`, the desktop editor, and the desktop facilities it needed (`plans/TEXTEDIT.md`) | blocked: TE13 needs a VFS primitive that replaces a file's content atomically through a held descriptor |
 | PAINT | `Paint.app`, the desktop image editor, and the shared document host (`plans/PAINT.md`) | in progress |
 | DRAW | `Draw.app`, the desktop vector editor, the `lib/bezier` geometry kernel and the `lib/drawing` editable drawing and its formats (`plans/DRAW.md`) | in progress |
+| PDF | The `lib/pdf` reader and opening PDFs in Draw and View.app (`plans/PDF.md`) | in progress |
 | BROWSER | The first-party web browser, its JavaScript engine, and the TLS, HTTP, text-shaping and URL facilities it needs (`plans/BROWSER.md`) | planned |
 
 ### Desktop

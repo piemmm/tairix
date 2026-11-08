@@ -3566,8 +3566,8 @@ mod program {
                 };
                 match site {
                     DropSite::Nothing => {}
-                    DropSite::Application => {
-                        open_dropped_file(client, launcher, source_id, carrying.file);
+                    DropSite::Application | DropSite::Placed => {
+                        hand_dropped_file(client, launcher, (source_id, site), carrying.file);
                     }
                     DropSite::Window {
                         window_id,
@@ -3958,17 +3958,23 @@ mod program {
         }
     }
 
-    /// Open the one file a drag carried for the application it was dropped
-    /// on, exactly as its "Open With" row would.
-    fn open_dropped_file(
+    /// Hand the one file a drag carried to where `site` says it was dropped:
+    /// the application it opens in, exactly as its "Open With" row would, or
+    /// the other application's window it is placed in, read-only.
+    fn hand_dropped_file(
         client: &mut WindowClient<app::RtWindowTransport>,
         launcher: &RefCell<Launcher>,
-        source_id: u64,
+        (source_id, site): (u64, DropSite),
         file: Option<PendingChooser>,
     ) {
         let Some(file) = file else {
             return;
         };
+        if site == DropSite::Placed {
+            let mut launcher = launcher.borrow_mut();
+            launcher.open_placed(client, source_id, (&file.path, &file.name));
+            return;
+        }
         let target = match client.take_drop_target(source_id) {
             Ok(target) => target,
             Err(err) => {
@@ -4617,7 +4623,12 @@ mod program {
                     }
                     continue;
                 }
-                Ok(Some(Target::Document { name, .. })) => {
+                // Taken and let go, so no delegation is left pending for this
+                // process's life.
+                Ok(Some(
+                    Target::Document { name, grant, .. } | Target::Placed { name, grant, .. },
+                )) => {
+                    drop(tairix_rt::File::from_delegation(grant));
                     app::report(
                         APP_NAME,
                         format_args!(
@@ -5179,11 +5190,31 @@ mod program {
             handoff: Option<Handoff>,
         ) {
             let job = DocumentOpen {
-                bundle_path: String::from(bundle_path),
-                edits,
                 file_path: String::from(file_path),
                 name: String::from(display_name),
-                handoff,
+                open_for: OpenFor::Application {
+                    bundle_path: String::from(bundle_path),
+                    edits,
+                    handoff,
+                },
+            };
+            if let Some(answer) = self.reads.open(job) {
+                self.opened(client, answer);
+            }
+        }
+
+        /// Open the file at `file_path`, called `name`, read-only, for the
+        /// window the drop of window `source`'s drag placed it in.
+        fn open_placed(
+            &mut self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+            source: u64,
+            (file_path, name): (&str, &str),
+        ) {
+            let job = DocumentOpen {
+                file_path: String::from(file_path),
+                name: String::from(name),
+                open_for: OpenFor::Placed { source },
             };
             if let Some(answer) = self.reads.open(job) {
                 self.opened(client, answer);
@@ -5207,15 +5238,33 @@ mod program {
                     return;
                 }
             };
-            let run_path = tairix_appstore::entry_path(&job.bundle_path);
-            let label = bundle_leaf(&job.bundle_path);
+            let (bundle_path, handoff) = match job.open_for {
+                OpenFor::Application {
+                    ref bundle_path,
+                    handoff,
+                    ..
+                } => (bundle_path.as_str(), handoff),
+                OpenFor::Placed { source } => {
+                    if let Err(err) = place_dropped(client, source, file.fd(), display_name) {
+                        let reason = alloc::format!("it could not be handed over: {err}");
+                        self.notices.refuse(
+                            NoticeSource::Open,
+                            &refusal_headline(display_name, "placed"),
+                            &reason,
+                        );
+                    }
+                    return;
+                }
+            };
+            let run_path = tairix_appstore::entry_path(bundle_path);
+            let label = bundle_leaf(bundle_path);
             // The desktop's single-instance funnel first, handing the live
             // instance the document itself: the grant is minted from *this*
             // descriptor to the session, which relays it on, so the viewer
             // reads it under this manager's authority and never the session's.
             // Anything but "reached" spawns below, which still shows it.
             if hand_over(client, &run_path, file.fd(), writable, display_name) {
-                self.handoffs.handed(job.handoff);
+                self.handoffs.handed(handoff);
                 return;
             }
             let mut wires = [FdWire::Inherit; STD_STREAM_COUNT];
@@ -5244,8 +5293,33 @@ mod program {
             }
             #[allow(clippy::cast_sign_loss)] // `pid >= 0` in this branch; it is a PID.
             self.in_flight.insert(pid as u64, label);
-            self.handoffs.handed(job.handoff);
+            self.handoffs.handed(handoff);
         }
+    }
+
+    /// Hand the file open read-only on `fd`, called `name`, to the window the
+    /// drop of window `source`'s drag placed it in: a delegation minted to the
+    /// session, which relays it on read-only.
+    ///
+    /// # Errors
+    ///
+    /// No session to mint to, a name the channel cannot carry, a refused
+    /// mint, or the session's refusal.
+    fn place_dropped(
+        client: &mut WindowClient<app::RtWindowTransport>,
+        source: u64,
+        fd: u32,
+        name: &str,
+    ) -> Result<(), Errno> {
+        let session = client.session().ok_or(Errno::NotFound)?;
+        let name = DocumentName::new(name).or_else(|_| DocumentName::new(""))?;
+        let grant = Errno::syscall_result(tairix_rt::fd_grant(
+            fd,
+            document::grant_ceiling(false),
+            session,
+        ))?;
+        let grant = core::num::NonZeroU64::new(grant).ok_or(Errno::OutOfRange)?;
+        client.place_dropped(source, name, grant)
     }
 
     /// Offer the document open on `fd`, read-write when `writable`, to a live
@@ -5681,14 +5755,35 @@ mod program {
     /// disk, not a capacity: one past it is refused with its reason.
     const DOCUMENT_OPENS_MAX: usize = 16;
 
-    /// A document the user asked to open in the application chosen for it,
-    /// and the double-click it answers, deselected once it is handed over.
+    /// A document the user asked to open, called `name`, and what it is
+    /// opened for.
     struct DocumentOpen {
-        bundle_path: String,
-        edits: bool,
         file_path: String,
         name: String,
-        handoff: Option<Handoff>,
+        open_for: OpenFor,
+    }
+
+    /// What a document the user opened goes to.
+    enum OpenFor {
+        /// The application chosen for it, whose bundle directory is
+        /// `bundle_path`, given it read-write where that application edits
+        /// documents, and the double-click it answers, deselected once it is
+        /// handed over.
+        Application {
+            bundle_path: String,
+            edits: bool,
+            handoff: Option<Handoff>,
+        },
+        /// The window another application's drop placed it in, through the
+        /// drag window `source` began, given it read-only.
+        Placed { source: u64 },
+    }
+
+    impl DocumentOpen {
+        /// Whether it is opened read-write.
+        const fn edits(&self) -> bool {
+            matches!(self.open_for, OpenFor::Application { edits: true, .. })
+        }
     }
 
     /// A [`DocumentOpen`] the reader carried out, and what it came to. The
@@ -6028,7 +6123,7 @@ mod program {
         ) -> bool {
             match job {
                 Read::Open(job) => {
-                    let result = document::open_for(job.file_path.as_bytes(), job.edits);
+                    let result = document::open_for(job.file_path.as_bytes(), job.edits());
                     self.work
                         .lock()
                         .opens
@@ -6735,7 +6830,7 @@ mod program {
                 let mut work = self.work.lock();
                 if work.stopping {
                     drop(work);
-                    let result = document::open_for(job.file_path.as_bytes(), job.edits);
+                    let result = document::open_for(job.file_path.as_bytes(), job.edits());
                     return Some(DocumentOpened { job, result });
                 }
                 work.opens.submit(job).err()
@@ -9262,6 +9357,7 @@ mod program {
             | WindowEvent::SaveOfferEnded { .. }
             | WindowEvent::ItemsOffered { .. }
             | WindowEvent::ItemsOfferEnded { .. }
+            | WindowEvent::FileOffered { .. }
             | WindowEvent::PreviewRendered { .. }
             | WindowEvent::Pinch { .. }
             // An open target opens a *new* window rather than moving this

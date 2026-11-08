@@ -36,13 +36,16 @@ and the formats it is read from and written to.
   saved drawing reopens as itself.
 - `pdf::pdf` — the drawing as a one-page PDF, curves, gradients, alpha,
   transparency groups, clips and pictures kept, a JPEG passed on as it came.
+  `pdf::read` reads one page of a PDF through `lib/pdf` into a drawing of one
+  layer, the page and password a `pdf::Request` names, and `pdf::pages` lists
+  a document's pages for a chooser.
 - `eps::eps` — the same as one page of Level 3 EPS, transparency written
   opaque and said to be, a baseline JPEG passed on as it came.
 - `riscos::read` / `riscos::write` — RISC OS Draw files (`&AFF`), sprites
   and JPEGs included: read into one layer, what the drawing cannot keep
   listed as `Unkept`; written with every object on the page drawn as the
   drawing draws it, and what the format cannot hold reported as `Dropped`.
-- `read` — whichever of the two a document is, told apart by its content.
+- `read` — whichever of the three a document is, told apart by its content.
 - `render::artwork` — any square of device pixels at any zoom as
   `lib/raster` artwork, painted or as outlines, its cost following what the
   square shows rather than what the drawing holds.

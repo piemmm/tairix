@@ -40,7 +40,7 @@ use tairix_theme::CursorKind;
 use tairix_wallpaper::DesktopSettings;
 use tairix_window::{
     Activation, AlertOpen, AuthoriseFor, ClientRegion, CursorSetName, DialogSpec, HandOverDesk,
-    PreviewSize, ToolSpec, WallpaperName, WindowHost,
+    OpenEntry, PlacedFile, PreviewSize, ToolSpec, WallpaperName, WindowHost,
 };
 
 use crate::launch::{
@@ -2377,7 +2377,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // it; a window another save was offered to hears the offer end once
         // the engine lets go.
         if let Some(end) = self.shell.abort_drag_for(self.compositor, window_id) {
-            self.windows.owed.push(end.event());
+            self.windows.owed.push(end);
         }
         // Retiring a layer surface is an ordinary close, so the feeds stop
         // here rather than needing a teardown path of their own.
@@ -2648,6 +2648,22 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         Ok(())
     }
 
+    fn file_offer_answered(
+        &mut self,
+        window_id: u64,
+        serial: u32,
+        places: bool,
+    ) -> Result<(), Errno> {
+        // An answer to an offer the pointer has moved on from is not shown.
+        self.shell
+            .file_offer_answered(self.compositor, window_id, serial, places);
+        Ok(())
+    }
+
+    fn offered_file(&self, window_id: u64, serial: u32) -> Result<&str, Errno> {
+        self.shell.offered_file(window_id, serial)
+    }
+
     fn offered_count(&self, window_id: u64, drag: u32) -> Result<u32, Errno> {
         let items = self.shell.offered_items(window_id, drag)?;
         u32::try_from(items.len()).map_err(|_| Errno::OutOfRange)
@@ -2776,6 +2792,49 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
                 Ok(HandOverOutcome::NotRunning)
             }
         }
+    }
+
+    fn place_dropped(
+        &mut self,
+        desk: &mut dyn HandOverDesk,
+        caller: ProcId,
+        into: Result<(ProcId, tairix_window::Placement), Errno>,
+        file: PlacedFile<'_>,
+    ) -> Result<(), Errno> {
+        let grant = file.grant.get();
+        let (app, placement) = match into {
+            Ok(into) => into,
+            Err(err) => {
+                self.relay.decline(grant, caller);
+                return Err(err);
+            }
+        };
+        // Relayed read-only, so the kernel refuses a descriptor that can
+        // write: a placed file is read into a document, never written.
+        let relay = &mut *self.relay;
+        let mut refused = None;
+        let taken = desk.hand_over(app, Activation::Withheld, &mut || {
+            let grant = relay
+                .relay(
+                    DocumentAuthority::Delegated {
+                        grant,
+                        from: caller,
+                    },
+                    false,
+                    app,
+                )
+                .inspect_err(|&err| refused = Some(err))?;
+            Ok(OpenEntry::Placed {
+                placement,
+                name: *file.name,
+                grant,
+            })
+        });
+        if taken {
+            return Ok(());
+        }
+        self.relay.decline(grant, caller);
+        Err(refused.unwrap_or(Errno::NotFound))
     }
 
     fn reveal_requested(

@@ -29,6 +29,7 @@
 mod program {
     extern crate alloc;
 
+    use alloc::borrow::Cow;
     use alloc::string::String;
     use alloc::sync::Arc;
     use alloc::vec::Vec;
@@ -602,8 +603,8 @@ mod program {
         fn write(
             job: &SaveJob<Handle, Snapshot>,
             name: &str,
-        ) -> Result<Option<&'static str>, SaveFailure> {
-            write_out(&job.target, &job.snapshot, name)
+        ) -> Result<Option<Cow<'static, str>>, SaveFailure> {
+            write_out(&job.target, &job.snapshot, name).map(|lost| lost.map(Cow::Borrowed))
         }
 
         fn work(work: Work) -> Answer {
@@ -735,7 +736,8 @@ mod program {
                 return;
             }
             let record = host.app.preferences.live().clone();
-            let _ = host.open_app_window(PaintSettings::new(record, Category::General.index()));
+            let _ =
+                host.open_app_window(PaintSettings::new(record, Category::General.index()), None);
         }
 
         /// What the settings window was in the middle of is written as it

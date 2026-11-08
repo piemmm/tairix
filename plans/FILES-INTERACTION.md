@@ -281,7 +281,9 @@ source, are new.
   allocation-free place (`DragPlace`) and builds what is there — a slot's
   target, a desktop folder's path — only on arrival.
 - **The source performs the drop, as the pointer showed it.** On release the
-  session concludes with a `DropSite` — an application slot, one of the
+  session concludes with a `DropSite` — an application slot, a window of
+  another application that places the one file (`DropSite::Placed`, which the
+  source opens read-only and hands over with `PlaceDropped`), one of the
   source's windows and a point in it, or a desktop folder, with the operation
   the pointer showed — and the source runs the copy or move through the same
   interleaved, cancellable transfer Paste uses, under its own authority, after
@@ -312,7 +314,10 @@ where they stood.
   (`WindowRequest::ItemsOfferAnswer`: refuse, copy, move or link). The offer is
   made at once on the hand-over, so a release with no further motion is
   already asked. Let go over a window in the same batch that reached it, they
-  stay where they stood: that window was never offered them.
+  stay where they stood: that window was never offered them. One regular file
+  is offered as a file too, under the same number (`FileOffered`), which a
+  window answering it places has placed, read-only, by the session
+  (`plans/NEW-TASKBAR.md` T21).
 - **Only the offered window reads them.** Its owner reads the drag's items a
   page a round trip (`WindowRequest::OfferedItems`), each its absolute path
   and the node the desktop listed there; a drive is its volume's place in the

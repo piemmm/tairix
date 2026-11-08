@@ -66,10 +66,9 @@ opens a drawing as a document.
 | S48 | The SVG DOM binding: the document/element/attribute/style interfaces, and the mutation path back into the artwork tree | planned |
 | S49 | Events and timers: `load`/pointer/keyboard events with the hit testing they need, `setTimeout`/`setInterval`/`requestAnimationFrame` | planned |
 | S50 | `baseline-shift`: `sub`, `super`, a length and a percentage of the line height, each `<tspan>`'s glyphs raised or lowered from its parent's baseline | done |
-| S51 | SVG 2's text paths: a `<textPath>` along a basic shape, and along its own `path` attribute | planned |
+| S51 | SVG 2's text paths: a `<textPath>` along a basic shape, and along its own `path` attribute | done |
 
-No item is half-built. The planned items up to S44, and S51, are the rest of
-SVG, which this crate must draw and does not yet: the remaining text surface,
+No item is half-built. The planned items up to S44 are the rest of SVG, which this crate must draw and does not yet: the remaining text surface,
 embedded images, filters,
 animation, the CSS surface the cascade still drops, and the reference
 resolution that reaches outside the document. S45–S49 follow from the
@@ -589,10 +588,14 @@ the size the element ends up set in.
 which the layout resolves as a fifth of the parent's size down or a third up;
 it is not inherited, and each span's rise adds to the ones around it. A
 `<textPath>` takes the characters within it — never another `<textPath>`
-within it — along the `<path>` it names, that element's `transform` applied
-and its `pathLength` scaling a length `startOffset` (`textpath::geometry`,
-`textpath::start`, shared with the drawing editor's reader); one naming
-nothing contributes nothing. Within it a pen is a distance along the path and
+within it — along its own `path` data where it states any, else along the
+`<path>` or basic shape it names, as SVG 2 makes that shape a path (a
+rectangle clockwise from the end of its top-left corner, an ellipse clockwise
+from its rightmost point, `shape::shape_curves`), that element's `transform`
+applied and its `pathLength` scaling a length `startOffset`
+(`textpath::geometry`, `textpath::start`, shared with the drawing editor's
+reader); one naming nothing a text can be set along, or stating empty data,
+contributes nothing. Within it a pen is a distance along the path and
 an offset across it: the path begins a chunk, an `x` is a distance, a `y`
 means nothing, `dy` and a rise move a glyph across it, and the text after it
 goes on from where its pen stopped. Each glyph's advance midpoint stands on
@@ -649,8 +652,7 @@ S25 is the rest of the text property cascade: the baselines
 bidi and shaping — UAX#9 reordering and OpenType `GSUB`/`GPOS`, neither of
 which `lib/fontface` has — so Arabic, Hebrew, and the Indic and CJK scripts
 are *skipped* like any other element this decoder cannot yet draw rather than
-half-drawn. S51 is SVG 2's text paths: a `<textPath>` naming a basic shape,
-or carrying its own `path` data; until it lands, one names a `<path>` alone.
+half-drawn.
 
 ## Embedded images
 

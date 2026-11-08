@@ -17,31 +17,37 @@ Lançado sozinho, abre um desenho novo numa página A4. Cada documento é uma
 janela do único programa; fechar a última deixa-o na barra de ícones, e a
 linha Sair do seu menu de ícone termina-o.
 
-O Draw abre e guarda SVG, e abre ficheiros Draw do RISC OS, que guarda como
-SVG. Um desenho mantém a sua página e as suas unidades, as suas camadas,
-grupos e recortes, cada caminho, forma, texto e imagem, as cores lisas e os
-gradientes lineares e radiais, a opacidade de cada objeto, os tracejados, as
-junções, as pontas e as pontas de seta, as guias e a grelha, e o título do
-desenho. Um ficheiro que contém o que um desenho não consegue manter — efeitos
-de filtro, máscaras, preenchimentos de padrão, marcadores, imagens ilegíveis,
-estilos ou caminhos de texto que um texto não pode guardar, animação ou
-scripts, entre outros — abre só para leitura, com a faixa de estado a nomear o
-que contém, e Guardar pede um nome novo para que o original nunca seja
-substituído. Guardar uma cópia escreve o desenho como PDF; como EPS, com a
-transparência tornada opaca, como o PostScript a pinta; como PNG, JPEG ou
-TIFF, à resolução de cópia da página e até 8192 píxeis no lado mais comprido;
-como SVG; ou como ficheiro Draw do RISC OS, nomeando o que o formato não
-conseguiu guardar do desenho, como os gradientes; todas sem tocar no ficheiro
-do documento.
+O Draw abre SVG, ficheiros Draw do RISC OS e PDF, e guarda um desenho como
+SVG, como ficheiro Draw do RISC OS ou como PDF, no formato que diz o nome do
+ficheiro; Guardar como oferece os três. Um ficheiro Draw guarda de um desenho
+o que pode, e um PDF volta a abrir-se como uma só camada cujo texto são
+contornos; a gravação di-lo. De um PDF abre-se uma página como desenho, com a
+sua caixa de recorte como página: um PDF de várias páginas pergunta primeiro
+qual, indicando o tamanho de cada página em pontos, e um protegido por
+palavra-passe pede-a, e diz quando a indicada está errada. O texto que um PDF
+compõe nos seus tipos de letra ainda não é lido. Um desenho mantém a sua
+página e as suas unidades, as suas camadas, grupos e recortes, cada caminho,
+forma, texto e imagem, as cores lisas e os gradientes lineares e radiais, a
+opacidade de cada objeto, os tracejados, as junções, as pontas e as pontas de
+seta, as guias e a grelha, e o título do desenho. Um ficheiro que contém o que
+um desenho não consegue manter — efeitos de filtro, máscaras, preenchimentos
+de padrão, marcadores, imagens ilegíveis, estilos ou caminhos de texto que um
+texto não pode guardar, animação ou scripts, entre outros — abre só para
+leitura, com a faixa de estado a nomear o que contém, e Guardar pede um nome
+novo para que o original nunca seja substituído. Guardar uma cópia escreve o
+desenho como PDF; como EPS, com a transparência tornada opaca, como o
+PostScript a pinta; como PNG, JPEG ou TIFF, à resolução de cópia da página e
+até 8192 píxeis no lado mais comprido; como SVG; ou como ficheiro Draw do RISC
+OS, nomeando o que o formato não conseguiu guardar do desenho, como os
+gradientes; todas sem tocar no ficheiro do documento.
 
 A caixa de ferramentas desce pelo lado esquerdo da janela, o inspetor pelo
-direito, e a faixa de estado corre no fundo: mostra a posição do ponteiro e o
-tamanho da seleção nas unidades da página, e diz o que fez o último comando.
-No topo, a barra diz como se usa a ferramenta em mão e mostra o zoom: premir
-o zoom abre um menu de zooms. Réguas nas unidades da página correm ao longo
-do topo e da esquerda da tela, e barras de deslocamento ao longo da direita e
-do fundo. Parar sobre o botão de uma ferramenta nomeia-a, com a tecla que a
-escolhe.
+direito, e a faixa de estado corre no fundo: diz o que fez o último comando,
+ou então como se usa a ferramenta em mão, e mostra a posição do ponteiro e o
+tamanho da seleção nas unidades da página, e o zoom: premir o zoom abre um
+menu de zooms. Réguas nas unidades da página correm ao longo do topo e da
+esquerda da tela, e barras de deslocamento ao longo da direita e do fundo.
+Parar sobre o botão de uma ferramenta nomeia-a, com a tecla que a escolhe.
 
 As ferramentas, e as teclas que as escolhem, são: seleção (`V`), nós (`A`),
 retângulo (`R`), elipse (`E`), estrela e polígono (`S`), linha (`L`), caneta
@@ -218,6 +224,10 @@ SVG incorpora-a, uma cópia PDF ou EPS desenha-a e um ficheiro Draw guarda-a
 como sprite ou como JPEG. As imagens de um desenho contêm juntas no máximo 268
 milhões de píxeis, cada uma contada uma vez por muito que se mostre; uma
 imagem que as levaria além disso é recusada, e a faixa de estado diz porquê.
+Uma imagem arrastada do gestor de ficheiros ou do ambiente de trabalho e
+largada sobre a tela é colocada da mesma forma, centrada onde foi largada;
+qualquer outro ficheiro largado sobre a janela abre-se, ou é recusado, como um
+largado sobre o ícone do Draw.
 
 Definições, no menu da barra de ícones, abre a janela de definições do Draw: a
 ferramenta com que começa uma janela nova, e se mostra a grelha, se ajusta e

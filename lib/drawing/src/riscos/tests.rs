@@ -197,9 +197,33 @@ fn a_draw_file_is_told_apart_by_its_signature() {
     assert!(recognised(&draw));
     assert!(!recognised(b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>"));
     let mut ids = Ids::new();
-    assert!(crate::read(&draw, &mut ids).is_ok(), "read as Draw");
+    assert!(
+        crate::read(
+            &draw,
+            &crate::pdf::Request {
+                page: 0,
+                password: None,
+                budget: 1 << 26
+            },
+            &mut ids
+        )
+        .is_ok(),
+        "read as Draw"
+    );
     let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"/>";
-    assert!(crate::read(svg, &mut ids).is_ok(), "read as SVG");
+    assert!(
+        crate::read(
+            svg,
+            &crate::pdf::Request {
+                page: 0,
+                password: None,
+                budget: 1 << 26
+            },
+            &mut ids
+        )
+        .is_ok(),
+        "read as SVG"
+    );
 }
 
 #[test]

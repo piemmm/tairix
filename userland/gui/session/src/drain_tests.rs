@@ -455,6 +455,7 @@ fn a_carried_drag_is_the_drains_until_its_press_comes_up() {
             source: 7,
             ended: DragConclusion::Application(alloc::boxed::Box::new(editor())),
             refused: None,
+            offer: None,
         })]
     );
     assert!(!desk.shell.drag_active());
@@ -546,6 +547,7 @@ fn a_drag_ends_with_nothing_dropped_off_a_taker_or_on_escape() {
             source: 7,
             ended: DragConclusion::Nothing,
             refused: None,
+            offer: None,
         })],
         "the slot claims nothing"
     );
@@ -568,6 +570,7 @@ fn a_drag_ends_with_nothing_dropped_off_a_taker_or_on_escape() {
             source: 9,
             ended: DragConclusion::Nothing,
             refused: None,
+            offer: None,
         })]
     );
     assert!(program.reports.is_empty(), "a slot is never reported");

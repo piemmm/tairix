@@ -66,15 +66,18 @@ use tairix_bezier::fit::FitError;
 use tairix_collections::TryReserveError;
 
 /// Read `bytes`, a drawing in any format the crate reads, told apart by its
-/// content rather than its name: a RISC OS Draw file by its signature, any
-/// other document as SVG. Its objects' identities are issued from `ids`.
+/// content rather than its name: a RISC OS Draw file by its signature, a PDF
+/// by its header — its page and password as `pdf` asks — and any other
+/// document as SVG. Its objects' identities are issued from `ids`.
 ///
 /// # Errors
 ///
 /// As the format's own reader.
-pub fn read(bytes: &[u8], ids: &mut Ids) -> Result<Read, ReadError> {
+pub fn read(bytes: &[u8], pdf: &pdf::Request<'_>, ids: &mut Ids) -> Result<Read, ReadError> {
     if riscos::recognised(bytes) {
         riscos::read(bytes, ids)
+    } else if pdf::recognised(bytes) {
+        pdf::read(bytes, pdf, ids)
     } else {
         svg::read(bytes, ids)
     }
@@ -268,6 +271,12 @@ pub enum ReadError {
     TooComplex,
     /// The memory to read it could not be had.
     OutOfMemory,
+    /// It is protected by a password, and none was given.
+    NeedsPassword,
+    /// The password given does not open it.
+    WrongPassword,
+    /// The page asked for is not one it has.
+    NoSuchPage,
 }
 
 impl From<DrawingError> for ReadError {

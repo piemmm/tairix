@@ -39,6 +39,7 @@ pub mod kem;
 pub mod mac;
 pub mod nistp;
 pub mod ntlm;
+pub mod pdf;
 pub mod sign;
 pub mod stream;
 #[cfg(test)]

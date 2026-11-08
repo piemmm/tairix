@@ -11,13 +11,13 @@ use tairix_drawing::{Ids, Kind, Paint};
 use tairix_geometry::{Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_theme::Theme;
-use tairix_window::docapp::{DocumentView, Request};
+use tairix_window::docapp::{DocumentView, Request, SaveTarget};
 use tairix_window::document::{Access, SavedDocument};
 
 use crate::copy::CopyFormat;
 use crate::document::{blank, Document};
 use crate::inspector::{Change, PageChange, Target};
-use crate::layout::Layout;
+use crate::layout::{px, Layout};
 use crate::menu::Command;
 use crate::tools::Tool;
 use crate::view::{Own, View};
@@ -348,13 +348,17 @@ fn a_file_holding_what_a_drawing_cannot_keep_opens_read_only_and_names_its_forma
         .as_deref()
         .is_some_and(|message| message.contains("filter effects")));
     assert!(
-        view.refuse_save("art.svg").is_some(),
+        view.refuse_save("art.svg", SaveTarget::Own).is_some(),
         "never written back over its own file"
     );
-    assert!(view.refuse_save("other.svg").is_none());
     assert!(
-        view.refuse_save("art.png").is_some(),
-        "Draw saves SVG; PNG is a copy"
+        view.refuse_save("art.svg", SaveTarget::Another).is_some(),
+        "nor over a file of its name, which may be its own"
+    );
+    assert!(view.refuse_save("other.svg", SaveTarget::Another).is_none());
+    assert!(
+        view.refuse_save("art.png", SaveTarget::Another).is_some(),
+        "PNG is a copy"
     );
     assert_eq!(CopyFormat::of("plan.PDF", None), Some(CopyFormat::Pdf));
     assert_eq!(CopyFormat::of("plan", None), None);
@@ -1206,7 +1210,7 @@ fn place_picture_asks_for_a_file_to_read_in_and_a_placed_one_lands_selected_in_t
     };
     let depth = window.view.document().depth();
     window.view.placed_picture(
-        "photo.png",
+        ("photo.png", None),
         Ok(picture(40.0, 20.0)),
         &mut Region::new(),
         &layout,
@@ -1235,7 +1239,7 @@ fn a_picture_larger_than_the_canvas_is_placed_to_fit_and_one_that_failed_is_said
     let mut window = Window::new();
     let layout = window.layout;
     window.view.placed_picture(
-        "huge.jpg",
+        ("huge.jpg", None),
         Ok(picture(20_000.0, 10_000.0)),
         &mut Region::new(),
         &layout,
@@ -1252,7 +1256,7 @@ fn a_picture_larger_than_the_canvas_is_placed_to_fit_and_one_that_failed_is_said
     assert!(bounds.width() <= shown.width() && bounds.height() <= shown.height());
     let depth = window.view.document().depth();
     window.view.placed_picture(
-        "broken.png",
+        ("broken.png", None),
         Err(String::from("it is damaged")),
         &mut Region::new(),
         &layout,
@@ -1261,6 +1265,85 @@ fn a_picture_larger_than_the_canvas_is_placed_to_fit_and_one_that_failed_is_said
     assert_eq!(
         window.view.message.as_deref(),
         Some("broken.png could not be placed: it is damaged")
+    );
+}
+
+#[test]
+fn a_picture_dropped_on_the_canvas_is_placed_centred_where_it_was_let_go() {
+    let mut window = Window::new();
+    let layout = window.layout;
+    let at = window.at(150.0, 120.0);
+    let depth = window.view.document().depth();
+    window.view.placed_picture(
+        ("photo.png", Some(at)),
+        Ok(picture(40.0, 20.0)),
+        &mut Region::new(),
+        &layout,
+    );
+    assert_eq!(window.view.document().depth(), depth + 1, "one step");
+    let bounds = window.view.selection_bounds();
+    let middle = bounds.centre();
+    assert!(
+        (middle.x - 150.0).abs() < 1.0 && (middle.y - 120.0).abs() < 1.0,
+        "centred where it was dropped: {bounds:?}"
+    );
+    assert!((bounds.width() - 40.0).abs() < 1e-9, "at its own size");
+    let off = tairix_geometry::Point::new(layout.panel.left() + 4, layout.panel.top() + 4);
+    window.view.placed_picture(
+        ("photo.png", Some(off)),
+        Ok(picture(40.0, 20.0)),
+        &mut Region::new(),
+        &layout,
+    );
+    let shown = tairix_bezier::Bounds::from_points([
+        window.view.viewport.drawing_point(Point::ZERO),
+        window.view.viewport.drawing_point(Point::new(
+            f64::from(layout.canvas.width),
+            f64::from(layout.canvas.height),
+        )),
+    ]);
+    let middle = window.view.selection_bounds().centre();
+    assert!(
+        (middle.x - shown.centre().x).abs() < 1e-6 && (middle.y - shown.centre().y).abs() < 1e-6,
+        "a point off the canvas places it in the middle of what the canvas shows"
+    );
+}
+
+#[test]
+fn the_canvas_places_a_picture_dropped_on_it_and_nothing_else() {
+    let window = Window::new();
+    let layout = window.layout;
+    let canvas = tairix_geometry::Point::new(
+        layout.canvas.left() + px(layout.canvas.width) / 2,
+        layout.canvas.top() + px(layout.canvas.height) / 2,
+    );
+    for picture in [
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/openraster",
+        "image/x-riscos-sprite",
+    ] {
+        assert!(
+            window.view.places(canvas, picture, &layout),
+            "{picture} is placed"
+        );
+    }
+    for other in [
+        "image/svg+xml",
+        "text/plain",
+        "application/pdf",
+        "not a type",
+    ] {
+        assert!(
+            !window.view.places(canvas, other, &layout),
+            "{other} is opened or refused, never placed"
+        );
+    }
+    let inspector = tairix_geometry::Point::new(layout.panel.left() + 4, layout.panel.top() + 4);
+    assert!(
+        !window.view.places(inspector, "image/png", &layout),
+        "only the canvas places"
     );
 }
 
@@ -1490,4 +1573,248 @@ fn a_node_of_the_path_a_text_is_set_along_moves_as_a_paths_does() {
     );
     assert!((along.start - 4.0).abs() < 1e-12, "its start kept");
     assert_eq!(&*text.content, "On it");
+}
+
+impl Window {
+    /// The whole window as the view paints it now.
+    fn rendered(&self) -> tairix_raster::Surface {
+        let mut surface =
+            tairix_raster::Surface::new(self.layout.window.width, self.layout.window.height)
+                .expect("a surface");
+        let faces = crate::layout::Faces::of(&self.theme, Scale::ONE);
+        self.view.render(
+            &mut surface,
+            &self.layout,
+            (&self.theme, Scale::ONE, faces),
+            &mut tairix_icon::NoArtwork,
+        );
+        surface
+    }
+
+    /// Whether `surface` shows the accent within a pixel of drawing point
+    /// `at`, across or down.
+    fn accent_near(&self, surface: &tairix_raster::Surface, at: (f64, f64)) -> bool {
+        let accent = tairix_raster::Color::from(self.theme.palette().accent).premultiply();
+        let centre = self.at(at.0, at.1);
+        (-1..=1).any(|dy| {
+            (-1..=1).any(|dx| {
+                let (Ok(x), Ok(y)) = (u32::try_from(centre.x + dx), u32::try_from(centre.y + dy))
+                else {
+                    return false;
+                };
+                surface.get(x, y) == Some(accent)
+            })
+        })
+    }
+
+    /// Press at drawing point `from` and move to `to`, holding the button.
+    fn hold_drag(&mut self, from: (f64, f64), to: (f64, f64)) {
+        let (a, b) = (self.at(from.0, from.1), self.at(to.0, to.1));
+        self.feed(InputEvent::PointerMoved { to: a });
+        self.feed(InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        });
+        self.feed(InputEvent::PointerMoved { to: b });
+    }
+}
+
+#[test]
+fn a_marquee_dragged_out_is_drawn_while_it_is_held() {
+    let mut window = Window::new();
+    window.view.choose_tool(Tool::Select);
+    window.hold_drag((300.0, 300.0), (500.0, 450.0));
+    assert!(
+        matches!(
+            window.view.gesture,
+            Some(crate::view::Gesture::Marquee { .. })
+        ),
+        "{:?}",
+        window.view.gesture
+    );
+    assert!(
+        window.accent_near(&window.rendered(), (400.0, 300.0)),
+        "the marquee's top edge"
+    );
+}
+
+#[test]
+fn an_object_dragged_is_drawn_where_it_is_going_while_it_is_held() {
+    let mut window = Window::new();
+    window.view.choose_tool(Tool::Rectangle);
+    window.drag((100.0, 100.0), (200.0, 200.0));
+    window.view.choose_tool(Tool::Select);
+    window.hold_drag((150.0, 150.0), (150.0, 350.0));
+    let surface = window.rendered();
+    assert!(
+        window.accent_near(&surface, (150.0, 300.0)),
+        "the outline's top edge where it is going"
+    );
+    assert!(
+        window.accent_near(&surface, (100.0, 350.0)),
+        "the outline's left edge where it is going"
+    );
+}
+
+#[test]
+fn the_page_s_shadow_is_opaque_and_darker_than_the_pasteboard() {
+    let window = Window::new();
+    let surface = window.rendered();
+    let page = window
+        .view
+        .window_rect(&window.layout, window.view.shown().page().bounds())
+        .expect("the page is shown");
+    let pixel = |x: i32, y: i32| {
+        surface
+            .get(
+                u32::try_from(x).expect("on the window"),
+                u32::try_from(y).expect("on the window"),
+            )
+            .expect("on the surface")
+    };
+    let shadow = pixel(page.right() + 1, page.top() + px(page.height) / 2);
+    let pasteboard = pixel(page.right() + 20, page.top() + px(page.height) / 2);
+    assert_eq!(shadow.a, 255, "the shadow leaves no hole: {shadow:?}");
+    assert_eq!(pasteboard.a, 255, "{pasteboard:?}");
+    assert!(
+        u16::from(shadow.r) + u16::from(shadow.g) + u16::from(shadow.b)
+            < u16::from(pasteboard.r) + u16::from(pasteboard.g) + u16::from(pasteboard.b),
+        "darker: {shadow:?} against {pasteboard:?}"
+    );
+}
+
+#[test]
+fn the_status_band_states_the_tool_s_hint_and_its_zoom_opens_the_zoom_menu() {
+    let mut window = Window::new();
+    window.view.choose_tool(Tool::Pencil);
+    let surface = window.rendered();
+    let row = |slot: tairix_geometry::Rect| {
+        let y = u32::try_from(slot.top() + px(slot.height) / 2).expect("on the window");
+        (0..slot.width).any(|dx| {
+            let x = u32::try_from(slot.left()).expect("on the window") + dx;
+            surface.get(x, y) != surface.get(x, u32::try_from(slot.top()).expect("on the window"))
+        })
+    };
+    assert!(row(window.layout.message), "the hint is set in the band");
+    assert!(row(window.layout.zoom), "the zoom is set in the band");
+    let zoom = window.layout.zoom;
+    let centre = tairix_geometry::Point::new(
+        zoom.left() + px(zoom.width) / 2,
+        zoom.top() + px(zoom.height) / 2,
+    );
+    window.feed(InputEvent::PointerMoved { to: centre });
+    let asked = window.feed(InputEvent::PointerPressed {
+        button: PointerButton::Primary,
+    });
+    assert!(
+        matches!(
+            asked,
+            Some(Request::Menu {
+                kind: crate::view::MenuKind::Zoom,
+                anchor,
+            }) if anchor == zoom
+        ),
+        "{asked:?}"
+    );
+}
+
+/// A PDF of two blank pages.
+fn two_page_pdf() -> alloc::vec::Vec<u8> {
+    let objects = [
+        "<</Type /Catalog /Pages 2 0 R>>",
+        "<</Type /Pages /Kids [3 0 R 4 0 R] /Count 2>>",
+        "<</Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]>>",
+        "<</Type /Page /Parent 2 0 R /MediaBox [0 0 300 400]>>",
+    ];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = alloc::vec::Vec::new();
+    for (num, body) in (1..).zip(objects) {
+        offsets.push(out.len());
+        out.extend_from_slice(alloc::format!("{num} 0 obj\n{body}\nendobj\n").as_bytes());
+    }
+    let table = out.len();
+    let size = objects.len() + 1;
+    out.extend_from_slice(alloc::format!("xref\n0 {size}\n0000000000 65535 f \n").as_bytes());
+    for offset in offsets {
+        out.extend_from_slice(alloc::format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        alloc::format!("trailer\n<</Size {size} /Root 1 0 R>>\nstartxref\n{table}\n%%EOF\n")
+            .as_bytes(),
+    );
+    out
+}
+
+/// One page of a longer PDF opens read-only, so Save never writes that page
+/// alone back over the whole document.
+#[test]
+fn a_page_of_a_longer_pdf_is_never_saved_over_its_document() {
+    let mut ids = Ids::new();
+    let request = tairix_drawing::pdf::Request {
+        page: 1,
+        password: None,
+        budget: 1 << 20,
+    };
+    let read = tairix_drawing::read(&two_page_pdf(), &request, &mut ids).expect("page two");
+    assert!(read.unkept.contains(Lost::OtherPages));
+    let view = View::new(
+        Document::new(read.drawing, ids, true),
+        String::from("plan.pdf"),
+        Access::Writable,
+        read.unkept,
+        1.0,
+    );
+    assert_eq!(view.access(), Access::ReadOnly);
+    assert!(view.refuse_save("plan.pdf", SaveTarget::Own).is_some());
+    assert!(
+        view.refuse_save("page two.pdf", SaveTarget::Another)
+            .is_none(),
+        "saved under another name"
+    );
+}
+
+#[test]
+fn a_drawing_saves_as_svg_a_draw_file_or_pdf_and_refuses_any_other_name() {
+    let mut window = Window::new();
+    let view = &mut window.view;
+    for saved in ["a.svg", "a.pdf", "a,aff"] {
+        assert_eq!(
+            view.refuse_save(saved, SaveTarget::Another),
+            None,
+            "{saved}"
+        );
+    }
+    for refused in ["a.png", "a.eps", "a"] {
+        assert!(
+            view.refuse_save(refused, SaveTarget::Another).is_some(),
+            "{refused}"
+        );
+    }
+    let formats = view.save_formats().expect("offered");
+    assert_eq!(formats.len(), 3);
+    let current = formats.current().expect("one is current");
+    assert_eq!(formats.of("a.svg"), Some(current), "a new drawing is SVG");
+    for named in ["a.pdf", "a,aff"] {
+        assert!(formats.of(named).is_some(), "{named} offered");
+    }
+    view.name = String::from("Drawing");
+    view.recorded = tairix_abi::fs::Filetype::new(0xaff);
+    assert_eq!(
+        view.refuse_save("Drawing", SaveTarget::Own),
+        None,
+        "its own file's recorded type says it is a Draw file"
+    );
+    assert!(
+        view.refuse_save("Drawing", SaveTarget::Another).is_some(),
+        "a new file of its name records nothing, so its name says nothing"
+    );
+    assert!(
+        view.refuse_save("Other", SaveTarget::Another).is_some(),
+        "another file's name says nothing"
+    );
+    let formats = view.save_formats().expect("offered");
+    assert_eq!(
+        formats.current(),
+        formats.of("a,aff"),
+        "a Draw file is saved as one again"
+    );
 }

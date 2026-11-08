@@ -19,8 +19,9 @@ use alloc::vec::Vec;
 
 use crate::drag::{
     DesktopCargo, DesktopDrop, DesktopEnd, DesktopItem, DesktopReport, DragEnd, DragStep,
-    DragSurface, DropRefusal, ItemsEnd, ItemsOffer, ItemsOfferEnd, ItemsReport, OfferEnd,
-    OwedReport, SaveDrop, SaveEnd, SaveOffer, SaveReport, SavedDocument, SlotAnswer,
+    DragSurface, DropRefusal, FileOffer, FileReport, ItemsEnd, ItemsOffer, ItemsOfferEnd,
+    ItemsReport, OfferEnd, OwedReport, SaveDrop, SaveEnd, SaveOffer, SaveReport, SavedDocument,
+    SlotAnswer,
 };
 use crate::picker::PickId;
 use crate::shell::DesktopShell;
@@ -314,6 +315,7 @@ fn what_is_carried_follows_and_a_slot_that_takes_the_file_is_dropped_on() {
             source: 7,
             ended: DragConclusion::Application(alloc::boxed::Box::new(editor())),
             refused: None,
+            offer: None,
         }))
     );
 }
@@ -449,6 +451,7 @@ fn another_press_cancels_and_an_abort_is_scoped_to_the_source() {
             source: 7,
             ended: DragConclusion::Nothing,
             refused: None,
+            offer: None,
         }))
     );
 
@@ -531,6 +534,7 @@ fn a_slot_that_refuses_the_file_is_never_lit() {
             source: 7,
             ended: DragConclusion::Nothing,
             refused: Some(alloc::boxed::Box::new(refusal)),
+            offer: None,
         })),
         "nothing is dropped on an application that never took the file, and \
          the drop is answered with why"
@@ -569,6 +573,7 @@ fn a_strip_replaced_mid_drag_forgets_its_slot() {
             source: 7,
             ended: DragConclusion::Nothing,
             refused: None,
+            offer: None,
         }))
     );
 }
@@ -680,6 +685,7 @@ fn the_pointer_shows_the_current_answer_and_the_drop_does_what_it_showed() {
                 operation: DropOperation::Copy,
             },
             refused: None,
+            offer: None,
         }))
     );
     assert_eq!(
@@ -708,6 +714,7 @@ fn an_unanswered_or_refused_place_drops_nothing() {
             source: 7,
             ended: DragConclusion::Nothing,
             refused: None,
+            offer: None,
         })),
         "no answer yet"
     );
@@ -730,6 +737,7 @@ fn an_unanswered_or_refused_place_drops_nothing() {
             source: 7,
             ended: DragConclusion::Nothing,
             refused: None,
+            offer: None,
         })),
         "refused"
     );
@@ -778,6 +786,7 @@ fn shift_asks_again_and_an_accepted_desktop_folder_is_lit() {
             source: 7,
             ended: DragConclusion::Nothing,
             refused: None,
+            offer: None,
         }))
     );
 }
@@ -846,6 +855,7 @@ fn the_answer_after_shift_changed_decides_the_drop() {
                 ..
             },
             refused: None,
+            offer: None,
         }))
     ));
 }
@@ -946,6 +956,9 @@ fn another_applications_window_takes_a_drop_as_its_slot_does() {
         DragSurface::AppWindow {
             index: 0,
             answer: Some(SlotAnswer::Opens(alloc::boxed::Box::new(editor()))),
+            window_id: 31,
+            x: 20,
+            y: 30,
         },
     );
     assert_eq!(
@@ -953,17 +966,28 @@ fn another_applications_window_takes_a_drop_as_its_slot_does() {
         None,
         "no slot is lit"
     );
-    assert_eq!(
-        shell.take_drag_report(),
-        None,
-        "the window's own app is not asked"
+    assert!(
+        matches!(
+            shell.take_drag_report(),
+            Some(OwedReport::File(FileReport {
+                left: None,
+                over: Some(FileOffer { window_id: 31, .. })
+            }))
+        ),
+        "the window is offered the file, and the source is told nothing"
     );
+    assert_eq!(shell.take_drag_report(), None);
     assert_eq!(
         shell.drag_pointer(&mut comp, &RELEASE),
         DragStep::Ended(DragEnd::Items(ItemsEnd {
             source: 7,
             ended: DragConclusion::Application(alloc::boxed::Box::new(editor())),
             refused: None,
+            offer: Some(ItemsOfferEnd {
+                window_id: 31,
+                serial: 1,
+                dropped: None,
+            }),
         }))
     );
 
@@ -979,6 +1003,9 @@ fn another_applications_window_takes_a_drop_as_its_slot_does() {
         DragSurface::AppWindow {
             index: 0,
             answer: Some(SlotAnswer::Refuses(alloc::boxed::Box::new(refusal.clone()))),
+            window_id: 31,
+            x: 20,
+            y: 30,
         },
     );
     assert_eq!(
@@ -987,8 +1014,234 @@ fn another_applications_window_takes_a_drop_as_its_slot_does() {
             source: 7,
             ended: DragConclusion::Nothing,
             refused: Some(alloc::boxed::Box::new(refusal)),
+            offer: None,
         }))
     );
+}
+
+/// The surface of another application's window `window_id` at `(x, y)`,
+/// whose slot refuses the file.
+fn refusing_window(window_id: u64, (x, y): (u32, u32)) -> DragSurface {
+    let refusal = DropRefusal::new("Draw", "map.png", true, &[String::from("image/svg+xml")]);
+    DragSurface::AppWindow {
+        index: 0,
+        answer: Some(SlotAnswer::Refuses(alloc::boxed::Box::new(refusal))),
+        window_id,
+        x,
+        y,
+    }
+}
+
+/// The file offer the carried drag owes, which `why` says it does.
+fn file_report(shell: &mut DesktopShell, why: &str) -> FileReport {
+    match shell.take_drag_report() {
+        Some(OwedReport::File(report)) => report,
+        other => panic!("{why}: {other:?}"),
+    }
+}
+
+/// A file dragged over another application's window is offered to it where
+/// the pointer is, its type and never its name readable for the offer
+/// standing; a window answering it places the file has it placed where it was
+/// let go, and the window is told the offer ended in the drop.
+#[test]
+fn a_file_another_window_answers_it_places_is_placed_where_it_is_let_go() {
+    let (mut shell, mut comp, window) = pressed();
+    shell
+        .begin_drag(&mut comp, 7, window, file("map.png"))
+        .expect("carried");
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(200, 200),
+        refusing_window(31, (40, 50)),
+    );
+    let first = file_report(&mut shell, "offered on arrival");
+    let offer = first.over.expect("an offer");
+    assert_eq!(
+        (offer.window_id, offer.x, offer.y, first.left),
+        (31, 40, 50, None)
+    );
+    assert_eq!(shell.offered_file(31, offer.serial), Ok("image/png"));
+    assert_eq!(
+        shell.offered_file(32, offer.serial),
+        Err(Errno::NotFound),
+        "only the window offered it reads it"
+    );
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(220, 220),
+        refusing_window(31, (60, 70)),
+    );
+    let moved = file_report(&mut shell, "offered again where the pointer went");
+    let offer = moved.over.expect("an offer");
+    assert_eq!(
+        (offer.x, offer.y, moved.left),
+        (60, 70, None),
+        "the same window: nothing ends"
+    );
+    assert!(
+        !shell.items_offer_answered(&mut comp, 31, offer.serial, Some(DropOperation::Copy)),
+        "a file offer is answered as a file"
+    );
+    assert!(shell.file_offer_answered(&mut comp, 31, offer.serial, true));
+    assert_eq!(
+        shell.cursor().kind(),
+        CursorKind::DragCopy,
+        "placed, as shown"
+    );
+    assert_eq!(
+        shell.drag_pointer(&mut comp, &RELEASE),
+        DragStep::Ended(DragEnd::Items(ItemsEnd {
+            source: 7,
+            ended: DragConclusion::Placed(tairix_window::Placement {
+                window_id: 31,
+                x: 60,
+                y: 70,
+            }),
+            refused: None,
+            offer: Some(ItemsOfferEnd {
+                window_id: 31,
+                serial: offer.serial,
+                dropped: Some(OfferDrop {
+                    x: 60,
+                    y: 70,
+                    operation: DropOperation::Copy,
+                }),
+            }),
+        }))
+    );
+    assert_eq!(shell.offered_file(31, offer.serial), Err(Errno::NotFound));
+}
+
+/// A window that does not place the file leaves the drop to its slot, and a
+/// window the file leaves is told its offer ended.
+#[test]
+fn a_file_no_window_places_is_its_slots_and_a_window_left_is_told() {
+    let (mut shell, mut comp, window) = pressed();
+    shell
+        .begin_drag(&mut comp, 7, window, file("map.png"))
+        .expect("carried");
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(200, 200),
+        refusing_window(31, (40, 50)),
+    );
+    let offer = file_report(&mut shell, "offered").over.expect("an offer");
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(700, 500),
+        DragSurface::Nothing,
+    );
+    assert_eq!(
+        file_report(&mut shell, "the window left is told"),
+        FileReport {
+            left: Some(ItemsOfferEnd {
+                window_id: 31,
+                serial: offer.serial,
+                dropped: None,
+            }),
+            over: None,
+        }
+    );
+    assert!(
+        !shell.file_offer_answered(&mut comp, 31, offer.serial, true),
+        "an answer for an offer that ended is not shown"
+    );
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(200, 200),
+        refusing_window(31, (40, 50)),
+    );
+    let offer = file_report(&mut shell, "offered again")
+        .over
+        .expect("an offer");
+    assert!(shell.file_offer_answered(&mut comp, 31, offer.serial, false));
+    let DragStep::Ended(DragEnd::Items(ended)) = shell.drag_pointer(&mut comp, &RELEASE) else {
+        panic!("the drag ends");
+    };
+    assert_eq!(ended.ended, DragConclusion::Nothing, "the slot refuses it");
+    assert!(ended.refused.is_some(), "and says why");
+    assert_eq!(
+        ended.offer,
+        Some(ItemsOfferEnd {
+            window_id: 31,
+            serial: offer.serial,
+            dropped: None,
+        })
+    );
+}
+
+/// The drag's source window going ends the drag and tells the window the file
+/// was offered to; the offered window going forgets the offer, owing nothing.
+#[test]
+fn a_file_offer_ends_with_its_source_and_is_forgotten_with_its_window() {
+    let (mut shell, mut comp, window) = pressed();
+    shell
+        .begin_drag(&mut comp, 7, window, file("map.png"))
+        .expect("carried");
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(200, 200),
+        refusing_window(31, (40, 50)),
+    );
+    let offer = file_report(&mut shell, "offered").over.expect("an offer");
+    assert_eq!(offer.drag, 1, "the first drag the seat carried");
+    assert_eq!(
+        shell.abort_drag_for(&mut comp, 7),
+        Some(
+            ItemsOfferEnd {
+                window_id: 31,
+                serial: offer.serial,
+                dropped: None,
+            }
+            .event()
+        )
+    );
+    assert!(!shell.drag_active());
+
+    let (mut shell, mut comp, window) = pressed();
+    shell
+        .begin_drag(&mut comp, 7, window, file("map.png"))
+        .expect("carried");
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(200, 200),
+        refusing_window(31, (40, 50)),
+    );
+    let _ = file_report(&mut shell, "offered");
+    assert_eq!(shell.abort_drag_for(&mut comp, 31), None, "nothing to tell");
+    assert!(shell.drag_active(), "the drag goes on");
+    let DragStep::Ended(DragEnd::Items(ended)) = shell.drag_pointer(&mut comp, &RELEASE) else {
+        panic!("the drag ends");
+    };
+    assert_eq!(
+        (ended.ended, ended.offer),
+        (DragConclusion::Nothing, None),
+        "a window gone takes nothing and is told nothing"
+    );
+}
+
+/// Only a drag of one file is offered to another application's window.
+#[test]
+fn several_items_are_offered_to_no_window() {
+    let (mut shell, mut comp, window) = pressed();
+    shell
+        .begin_drag(&mut comp, 7, window, several())
+        .expect("carried");
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(200, 200),
+        refusing_window(31, (40, 50)),
+    );
+    assert_eq!(shell.take_drag_report(), None);
 }
 
 #[test]
@@ -996,7 +1249,7 @@ fn a_window_an_alert_holds_takes_no_drop() {
     use crate::drag::{DragPlace, WindowUnder};
     for under in [
         WindowUnder::Own(Some((4, 9))),
-        WindowUnder::Foreign(Some(2)),
+        WindowUnder::Foreign(Some(2), (4, 9)),
     ] {
         assert_eq!(DragPlace::over_window(31, true, under), DragPlace::Nothing);
     }
@@ -1009,11 +1262,16 @@ fn a_window_an_alert_holds_takes_no_drop() {
         }
     );
     assert_eq!(
-        DragPlace::over_window(31, false, WindowUnder::Foreign(Some(2))),
-        DragPlace::AppWindow { index: 2 }
+        DragPlace::over_window(31, false, WindowUnder::Foreign(Some(2), (4, 9))),
+        DragPlace::AppWindow {
+            index: 2,
+            window_id: 31,
+            x: 4,
+            y: 9
+        }
     );
     assert_eq!(
-        DragPlace::over_window(31, false, WindowUnder::Foreign(None)),
+        DragPlace::over_window(31, false, WindowUnder::Foreign(None, (4, 9))),
         DragPlace::Nothing,
         "an application the strip does not show takes nothing"
     );
@@ -1097,7 +1355,7 @@ fn offer_at(window_id: u64, x: u32, y: u32) -> DragSurface {
 fn save_report(shell: &mut DesktopShell) -> Option<SaveReport> {
     match shell.take_drag_report()? {
         OwedReport::Save(report) => Some(report),
-        other @ (OwedReport::Items(_) | OwedReport::Desktop(_)) => {
+        other @ (OwedReport::Items(_) | OwedReport::Desktop(_) | OwedReport::File(_)) => {
             panic!("a save owes save reports: {other:?}")
         }
     }
@@ -1418,11 +1676,14 @@ fn windows_going_end_or_forget_a_save_as_they_concern_it() {
     let _ = save_report(&mut shell);
     assert_eq!(
         shell.abort_drag_for(&mut comp, 7),
-        Some(OfferEnd {
-            window_id: 9,
-            serial: 1,
-            dropped: None
-        })
+        Some(
+            OfferEnd {
+                window_id: 9,
+                serial: 1,
+                dropped: None
+            }
+            .event()
+        )
     );
     assert!(!shell.drag_active());
 }
@@ -1461,11 +1722,110 @@ fn desktop_icons() -> DesktopCargo {
     }
 }
 
+/// One picture carried off the desktop.
+fn desktop_picture() -> DesktopCargo {
+    DesktopCargo {
+        shown: file("map.png"),
+        items: alloc::vec![DesktopItem {
+            path: String::from("/Users/ann/Desktop/map.png"),
+            id: listed(4),
+        }],
+    }
+}
+
+/// A lone file carried off the desktop is offered to the window it is held
+/// over as an item and, under the same number, as a file; a window answering
+/// it places the file has it placed where it was let go, the session opening
+/// it, and an answer for it as an item outranks that.
+#[test]
+fn a_lone_file_off_the_desktop_is_placed_where_a_window_answers_it_places_it() {
+    let (mut shell, mut comp) = pressed_on_desktop();
+    shell
+        .begin_desktop_drag(&mut comp, desktop_picture())
+        .expect("carried");
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(110, 110),
+        offer_at(9, 10, 20),
+    );
+    let report = desktop_report(&mut shell).expect("owed");
+    let (offer, file) = (
+        report.over.expect("offered"),
+        report.file.expect("as a file"),
+    );
+    assert_eq!(
+        (file.window_id, file.serial, file.drag, file.x, file.y),
+        (9, offer.serial, offer.drag, 10, 20),
+        "one offer, numbered once"
+    );
+    assert_eq!(shell.offered_file(9, offer.serial), Ok("image/png"));
+    assert!(shell.file_offer_answered(&mut comp, 9, offer.serial, true));
+    assert_eq!(shell.cursor().kind(), CursorKind::DragCopy);
+    let DragStep::Ended(DragEnd::Desktop(end)) = shell.drag_pointer(&mut comp, &RELEASE) else {
+        panic!("the drag ends");
+    };
+    assert_eq!(
+        end.dropped,
+        DesktopDrop::Placed(alloc::boxed::Box::new(crate::drag::PlacedItem {
+            placement: tairix_window::Placement {
+                window_id: 9,
+                x: 10,
+                y: 20,
+            },
+            path: String::from("/Users/ann/Desktop/map.png"),
+            name: DocumentName::new("map.png").expect("a name"),
+        }))
+    );
+    assert_eq!(
+        end.offer.and_then(|end| end.dropped),
+        Some(OfferDrop {
+            x: 10,
+            y: 20,
+            operation: DropOperation::Copy,
+        })
+    );
+
+    let (mut shell, mut comp) = pressed_on_desktop();
+    shell
+        .begin_desktop_drag(&mut comp, desktop_picture())
+        .expect("carried");
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(110, 110),
+        offer_at(9, 10, 20),
+    );
+    let offer = desktop_report(&mut shell)
+        .and_then(|report| report.over)
+        .expect("offered");
+    assert!(shell.file_offer_answered(&mut comp, 9, offer.serial, true));
+    assert!(shell.items_offer_answered(&mut comp, 9, offer.serial, Some(DropOperation::Move)));
+    assert_eq!(
+        shell.cursor().kind(),
+        CursorKind::DragMove,
+        "the item's answer shown"
+    );
+    let DragStep::Ended(DragEnd::Desktop(end)) = shell.drag_pointer(&mut comp, &RELEASE) else {
+        panic!("the drag ends");
+    };
+    assert_eq!(end.dropped, DesktopDrop::Window, "the window performs it");
+}
+
+/// Several icons carried off the desktop are offered as items alone.
+#[test]
+fn several_icons_off_the_desktop_are_offered_as_no_file() {
+    let (mut shell, mut comp) = pressed_on_desktop();
+    let offer = offered_to_nine(&mut shell, &mut comp);
+    assert_eq!(shell.offered_file(9, offer.serial), Err(Errno::NotFound));
+    assert!(!shell.file_offer_answered(&mut comp, 9, offer.serial, true));
+}
+
 /// The offers icons carried off the desktop owe.
 fn desktop_report(shell: &mut DesktopShell) -> Option<DesktopReport> {
     match shell.take_drag_report()? {
         OwedReport::Desktop(report) => Some(report),
-        other @ (OwedReport::Items(_) | OwedReport::Save(_)) => {
+        other @ (OwedReport::Items(_) | OwedReport::Save(_) | OwedReport::File(_)) => {
             panic!("icons off the desktop owe their own reports: {other:?}")
         }
     }
@@ -1655,6 +2015,7 @@ fn icons_brought_back_over_the_desktop_are_put_down_where_let_go() {
                 dropped: None,
             }),
             over: None,
+            file: None,
         })
     );
     assert_eq!(

@@ -12,19 +12,29 @@ use tairix_geometry::{Rect, Region, Scale};
 use tairix_input::InputEvent;
 use tairix_theme::Theme;
 use tairix_util::mathf::round_i32;
-use tairix_window::docapp::{DocumentView, Outcome, Request};
+use tairix_window::docapp::{DocumentView, Outcome, Request, SaveTarget};
 use tairix_window::document::{Access, SavedDocument};
 
-use crate::copy::CopyFormat;
+use crate::copy::SaveFormat;
 use crate::input::ViewOutcome;
 use crate::layout::{Faces, Layout};
 use crate::menu::chosen;
 use crate::tools::Tool;
 use crate::view::{MenuKind, Own, Snapshot, View};
 
-/// Whether a file called `name` is one Draw saves its documents in.
-fn native(name: &str) -> bool {
-    CopyFormat::of(name, None) == Some(CopyFormat::Svg)
+/// Whether Draw places a file of `media` type as a picture: one the shared
+/// raster decoders read whole, or a sprite file, whose first sprite it takes.
+fn placeable(media: MediaType) -> bool {
+    media.has_thumbnail() || media == MediaType::ImageSprite
+}
+
+impl View {
+    /// The format the document is saved in under `name` into `target`: only
+    /// its own file's recorded filetype speaks for a name that says none.
+    fn saved_format(&self, name: &str, target: SaveTarget) -> Option<SaveFormat> {
+        let recorded = self.recorded.filter(|_| target == SaveTarget::Own);
+        SaveFormat::of(name, recorded)
+    }
 }
 
 impl SavedDocument for View {
@@ -60,8 +70,10 @@ impl SavedDocument for View {
     }
 
     fn rename(&mut self, name: String) {
-        // A Save As writes everything the drawing holds into a file of its own.
+        // A Save As writes the drawing into a file of its own, whose name says
+        // its format.
         self.unkept = Unkept::NONE;
+        self.recorded = None;
         self.name = name;
     }
 
@@ -107,7 +119,7 @@ impl DocumentView for View {
     }
 
     fn settle(&mut self, layout: &Layout, damage: &mut Region) {
-        let ratio = f64::from(layout.ratio) / 100.0;
+        let ratio = f64::from(layout.scale.percent()) / 100.0;
         let centre = Point::new(
             f64::from(layout.canvas.width) / 2.0,
             f64::from(layout.canvas.height) / 2.0,
@@ -188,10 +200,10 @@ impl DocumentView for View {
         self.on_input(input, layout, scale, theme, damage)
     }
 
-    fn refuse_save(&self, name: &str) -> Option<String> {
-        if !native(name) {
+    fn refuse_save(&self, name: &str, target: SaveTarget) -> Option<String> {
+        if self.saved_format(name, target).is_none() {
             return Some(String::from(
-                "Draw saves its drawings as SVG. Name the file with .svg, or save a copy to write PDF, PNG or a RISC OS Draw file.",
+                "Draw saves a drawing as SVG, a RISC OS Draw file or PDF. Name the file with .svg, ,aff or .pdf, or save a copy to write EPS, PNG, JPEG or TIFF.",
             ));
         }
         if self.access == Access::ReadOnly && name == self.name && !self.unkept.is_empty() {
@@ -206,11 +218,20 @@ impl DocumentView for View {
         "svg"
     }
 
+    fn places(&self, at: tairix_geometry::Point, media: &str, layout: &Layout) -> bool {
+        layout.canvas.contains(at) && MediaType::from_media_str(media).is_some_and(placeable)
+    }
+
     fn save_formats(&self) -> Result<SaveFormats, String> {
+        let current = self
+            .saved_format(&self.name, SaveTarget::Own)
+            .unwrap_or(SaveFormat::Svg);
         let mut formats = SaveFormats::ANY;
-        formats
-            .push(save_format(MediaType::ImageSvg), true)
-            .map_err(|_| String::from("no format can be offered"))?;
+        for format in SaveFormat::ALL {
+            formats
+                .push(save_format(format.media()), format == current)
+                .map_err(|_| String::from("no format can be offered"))?;
+        }
         Ok(formats)
     }
 

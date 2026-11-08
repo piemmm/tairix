@@ -28,7 +28,7 @@ Draw shares), `plans/SVG.md` (the decoder whose grammar Draw's reader reuses),
 | DR14 | The inspector: Style, Layers, Object, Shape and Page; linear and radial gradients fitted to each object, their stop bar, spread and angle; the palette and the drawing's own swatches; the rotation field | done |
 | DR15 | Rulers, guides, the grid and snapping | done |
 | DR16 | Page setup: paper presets, a page of any size, orientation, units, the grid's spacing and subdivisions, and a ground of any colour, from the Page menu and the inspector's Page tab | done |
-| DR17 | Files: Save and Save As in SVG; Save a copy as PDF, EPS, PNG, JPEG, TIFF, SVG or a Draw file, raster at the drawing's own copy resolution; a drawing that lost content on reading opening read-only | done |
+| DR17 | Files: Save and Save As in SVG, a RISC OS Draw file or PDF; Save a copy as PDF, EPS, PNG, JPEG, TIFF, SVG or a Draw file, raster at the drawing's own copy resolution; a drawing that lost content on reading opening read-only | done |
 | DR18 | The settings window and Draw's preferences: a new window's tool, view and style, a new drawing's page and grid, the nudge, duplicate offset and pick distance; on the shared settings window (`docapp::settings`, `lib/controls`' `SettingsFrame` and `FieldColumn`, the colour field), Paint's and WinterSun's moved onto it | done |
 | DR19 | The `Run` binary: the read worker, the render worker across the cores, the queue's work, and glyphs fetched only on workers | done |
 | DR20 | The bundle: manifest, icon, Help in every required locale, docs, registration | done |
@@ -41,14 +41,16 @@ Draw shares), `plans/SVG.md` (the decoder whose grammar Draw's reader reuses),
 | DR27 | Fallible shared allocation: every node, name, text, dash list, guide list and swatch list a drawing shares is made fallibly through `lib/collections`' `try_arc`, `SharedSlice` and `SharedStr`, and so is the geometry rendering and writing it run through — `lib/bezier`'s path operations, booleans, outlines and dashes and `lib/svg`'s stroker — so memory refused is a refusal stated in the window, never an abort — `lib/drawing`, `lib/bezier`, `lib/sandbox::drawedit`'s records and Draw | done |
 | DR28 | The parser sandbox's seam allocates fallibly on the editor's side — the request writer, the room a reply is received in, every client's decoding, the worker launch — a refusal of the editor's memory said as that rather than as a failed worker, and a worker allocating as it needs under its ceiling; held by an allocation sweep over every client | done |
 | DR29 | A document as long as the reading worker's share of the machine holds, for every document reader: the bound derived from the worker's memory ceiling, never below 64 MiB | done |
-| DR30 | A picture several objects show written once in SVG, through Draw's namespace over a `<use>` | planned |
+| DR30 | A picture several objects show written once in SVG, through Draw's namespace over a `<use>` | done |
+| DR31 | Opening a PDF: one page as a drawing through `lib/pdf`, a page asked for where it has several and its password where it needs one, in a dialog window of Draw's own (`plans/PDF.md` PDF8) | done |
 
 ## What it is
 
 `Draw.app` (`name = "Draw"`, `title = "Draw"`, `id = os.tairix.draw`,
 `kind = "application"`, `library = "Graphics"`): vector drawing in layers,
 from a page of paths, shapes, text and groups. It claims `image/svg+xml`, the
-format it reads back what it writes, and `image/x-riscos-draw`;
+format it reads back what it writes, `image/x-riscos-draw` and
+`application/pdf`, one page of which opens as a drawing (`plans/PDF.md`);
 the double-click order between Draw and the viewer follows the store's, as
 Paint's does. The manifest requests `CAP_CONSOLE_WRITE`, `CAP_SHM`,
 `CAP_SANDBOX_SPAWN` and `CAP_LOG_EMIT`, and no filesystem capability: every
@@ -160,7 +162,15 @@ document is one the user handed over, and every write goes through it.
   page, every object drawn as the drawing draws it: a stroke Draw cannot
   stroke so (stretched, or cut otherwise by Draw's fixed mitre limit) as its
   area, an arrowhead its caps cannot draw as a shape, what the format cannot
-  hold reported as `Dropped` and named in the copy's message.
+  hold reported as `Dropped` and named in the save's or copy's message.
+- **Save** writes the format the file's name, or the filetype its volume
+  records for the document's own file, says (`SaveFormat::of`): SVG, a Draw
+  file, or PDF, which opens again as one layer whose text is outlines, and
+  the save says so (`SaveFormat::keeps_editing`). Save As
+  offers the three, opening on the document's own; any other name is refused
+  before the file is touched. A save is written by the copy encoders
+  (`copy::copy`), so a save and a copy in one format are the same bytes, and
+  every note is a sentence the message reads on with.
 - **Save a copy** (the document host's `Request::SaveCopy`) writes a copy and
   leaves the document's own file, name and changes as they are: PDF (paths,
   gradients as shadings, opacity, clips, text as outlines, streams
@@ -195,7 +205,11 @@ document is one the user handed over, and every write goes through it.
   and hold at most `MAX_TOTAL_IMAGE_PIXELS` together; a picture that will not
   decode is `Lost::Images`.
 - **Writing**: SVG embeds the bytes read or a PNG of the pixels, once per
-  picture; PDF an image object of each, a JPEG passed through `DCTDecode`
+  picture: a picture several objects show — the same pixels, or pixels
+  written as the same bytes — is a `<symbol>` in `<defs>` marked
+  `draw:picture`, each object a `<use>` of it over its own rectangle, which
+  Draw reads back as that picture object and any viewer draws as SVG does;
+  PDF an image object of each, a JPEG passed through `DCTDecode`
   and turned by its matrix, other pixels deflated with a soft mask where
   translucent and clear pixels bled from their neighbours; EPS the same
   through ASCII85, a baseline JPEG passed on, a masked image where binary and
@@ -210,7 +224,14 @@ document is one the user handed over, and every write goes through it.
   Draw may edit; the sandbox decodes any still picture by content
   (`decode_placed`, the drawedit place operation) and the load worker builds
   its levels. The sandbox's picture wire holds each read's pictures to a
-  drawing's pixels and the bytes of the document handed over.
+  drawing's pixels and the bytes of the document handed over. A picture
+  dragged from the file manager or off the desktop and let go over the canvas
+  is placed the same way, centred where it was let go: the window answers the session's file
+  offer (`DocumentView::places`) for a type the image library reads whole or a
+  sprite file, over the canvas alone, and the file arrives read-only through
+  the document host's `import_chosen` with the drop point
+  (`plans/NEW-TASKBAR.md` T21). A drop point the canvas no longer holds places
+  it as the menu does.
 - **The combined bound**: every edit that brings pictures in (`edit::insert`,
   `edit::append`) holds the drawing to `pictures_fit` — pixels counted once
   per picture, as every reader counts them — answered from the node
@@ -262,13 +283,22 @@ document is one the user handed over, and every write goes through it.
 
 ## The window (DR11, DR14–DR16, DR21)
 
-- The tool box down the left, the tool's own bar across the top, rulers along
-  the canvas's top and left and scrollbars along its right and foot, the
-  inspector down the right — tabs over Style, Layers, Object, Shape and
-  Page, a tab taller than the panel scrolling — and the status band along the
-  bottom. The band and the rulers are `lib/controls`' own (`StatusBand`,
-  `Ruler`), the band's pointer and selection readings each in a slot measured
-  for values to ±99 999.99 units, beyond which a reading elides. A
+- The tool box down the left, rulers along the canvas's top and left and
+  scrollbars along its right and foot, the inspector down the right — tabs
+  over Style, Layers, Object, Shape and Page, a tab taller than the panel
+  scrolling — and the status band along the bottom; nothing across the top,
+  as there is no menu bar. The band and the rulers are `lib/controls`' own
+  (`StatusBand`, `Ruler`): the band says what the last command did or, while
+  it says nothing, how the tool in hand is used (`Tool::hint`), then the
+  pointer and selection readings, each in a slot measured for values to
+  ±99 999.99 units, beyond which a reading elides, and the zoom, which opens
+  the zoom menu.
+- The overlay — the selection's frame and handles, a drag's preview, the
+  marquee, nodes, the caret — is stroked in the raster's sub-pixel units
+  through one pen (`paint::Pen`), a hairline one logical pixel wide laid on
+  whole pixels; translucent marks (the page's shadow, the grid, guides, a text
+  selection) are blended over the canvas, never written as holes in the
+  window. A
   secondary press opens the one window menu: File, Page, Edit, Object, Path,
   Layer, View and Tools.
 - A command's row — picture, label, chord, when it may be chosen — is stated

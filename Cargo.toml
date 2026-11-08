@@ -128,6 +128,7 @@ members = [
     "lib/partition",
     "lib/path",
     "lib/pci",
+    "lib/pdf",
     "lib/procinfo",
     "lib/proglib",
     "lib/raid",

@@ -1764,7 +1764,8 @@ mod program {
             | WindowEvent::SaveOffered { .. }
             | WindowEvent::SaveOfferEnded { .. }
             | WindowEvent::ItemsOffered { .. }
-            | WindowEvent::ItemsOfferEnded { .. } => Acted::Idle,
+            | WindowEvent::ItemsOfferEnded { .. }
+            | WindowEvent::FileOffered { .. } => Acted::Idle,
         }
     }
 
@@ -1809,7 +1810,12 @@ mod program {
                         ),
                     );
                 }
-                Ok(Some(Target::Document { name, .. })) => {
+                // Taken and let go, so no delegation is left pending for this
+                // process's life.
+                Ok(Some(
+                    Target::Document { name, grant, .. } | Target::Placed { name, grant, .. },
+                )) => {
+                    drop(tairix_rt::File::from_delegation(grant));
                     app::report(
                         APP_NAME,
                         format_args!(

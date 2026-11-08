@@ -48,7 +48,27 @@ struct Plan<'d> {
     encoded: Numbered<usize, Vec<u8>>,
     /// The paths texts are set along, by address.
     text_paths: Numbered<usize, Arc<TextPath>>,
+    /// The pictures more than one object shows, each written once, in the
+    /// order first shown.
+    shared: Vec<Arc<Image>>,
+    /// The number of the picture in `shared` each of them is, by key.
+    shared_by_key: Vec<(PictureKey, usize)>,
     images: bool,
+}
+
+/// What tells pictures apart: the addresses of their pixels and of the
+/// bytes they were read from.
+type PictureKey = (usize, usize);
+
+/// The pictures written once for every object showing them, and the number
+/// each key takes among them, sorted by key.
+type SharedPictures = (Vec<Arc<Image>>, Vec<(PictureKey, usize)>);
+
+fn picture_key(image: &Image) -> PictureKey {
+    let source = image
+        .source()
+        .map_or(0, |source| source.bytes.as_ptr().addr());
+    (Arc::as_ptr(image.pyramid()).addr(), source)
 }
 
 /// The namespace SVG 1.1 links a picture and a text's path through,
@@ -118,6 +138,7 @@ impl<'d> Plan<'d> {
         let mut clips = Vec::new();
         let mut markers = Vec::new();
         let mut text_paths = Vec::new();
+        let mut shown = Vec::new();
         let mut unembeddable = Vec::new();
         let mut images = false;
         let mut failed = false;
@@ -140,6 +161,7 @@ impl<'d> Plan<'d> {
             // link and no encoding.
             if let (Kind::Image { image }, false) = (node.kind(), within_clip) {
                 images = true;
+                failed |= !fallible::push(&mut shown, (picture_key(image), image.clone()));
                 if embedded(image).is_none() {
                     failed |= !fallible::push(
                         &mut unembeddable,
@@ -193,13 +215,17 @@ impl<'d> Plan<'d> {
                 })?;
             encoded.push((Arc::as_ptr(image.pyramid()).addr(), png));
         }
+        let encoded = Numbered::of(encoded)?;
+        let (shared, shared_by_key) = shared_pictures(shown, &encoded)?;
         Ok(Self {
             drawing,
             gradients: Numbered::of(gradients)?,
             clips: Numbered::of(clips)?,
             markers: Numbered::of(markers)?,
-            encoded: Numbered::of(encoded)?,
+            encoded,
             text_paths: Numbered::of(text_paths)?,
+            shared,
+            shared_by_key,
             images,
         })
     }
@@ -214,6 +240,17 @@ impl<'d> Plan<'d> {
 
     fn text_path_id(&self, along: &Arc<TextPath>) -> Result<usize, fmt::Error> {
         name(&self.text_paths, Arc::as_ptr(along).addr())
+    }
+
+    /// The name of the picture `image` shows, where more than one object
+    /// shows it.
+    fn shared_id(&self, image: &Image) -> Option<usize> {
+        let key = picture_key(image);
+        let at = self.shared_by_key.partition_point(|(seen, _)| *seen < key);
+        self.shared_by_key
+            .get(at)
+            .filter(|(seen, _)| *seen == key)
+            .map(|(_, number)| number + 1)
     }
 
     fn write(&self, out: &mut dyn Write) -> fmt::Result {
@@ -284,12 +321,14 @@ impl<'d> Plan<'d> {
         if !(self.gradients.items().is_empty()
             && self.clips.items().is_empty()
             && self.markers.items().is_empty()
-            && self.text_paths.items().is_empty())
+            && self.text_paths.items().is_empty()
+            && self.shared.is_empty())
         {
             out.write_str("<defs>\n")?;
             self.write_gradients(out)?;
             self.write_markers(out)?;
             self.write_text_paths(out)?;
+            self.write_shared_pictures(out)?;
             self.write_clips(out)?;
             out.write_str("</defs>\n")?;
         }
@@ -419,6 +458,24 @@ impl<'d> Plan<'d> {
             write!(out, "<path id=\"text-path-{}\" d=\"", index + 1)?;
             write_path_data(out, &path)?;
             out.write_str("\"/>\n")?;
+        }
+        Ok(())
+    }
+
+    /// Every picture more than one object shows, once: a symbol over its
+    /// pixels, marked as Draw's, that each of them uses over its own
+    /// rectangle.
+    fn write_shared_pictures(&self, out: &mut dyn Write) -> fmt::Result {
+        for (index, image) in self.shared.iter().enumerate() {
+            let base = image.pixels();
+            let (width, height) = (base.width(), base.height());
+            write!(
+                out,
+                "<symbol id=\"picture-{}\" draw:picture=\"true\" viewBox=\"0 0 {width} {height}\" preserveAspectRatio=\"none\"><image width=\"{width}\" height=\"{height}\" preserveAspectRatio=\"none\" xlink:href=\"",
+                index + 1
+            )?;
+            self.write_link(out, image)?;
+            out.write_str("\"/></symbol>\n")?;
         }
         Ok(())
     }
@@ -573,29 +630,33 @@ impl<'d> Plan<'d> {
         Ok(())
     }
 
-    /// A picture: its pixels laid over its rectangle, as the bytes it was
-    /// read from where a web format carries them and as a PNG otherwise.
+    /// A picture: its pixels laid over its rectangle — a use of the symbol
+    /// holding them where more than one object shows them, else an image of
+    /// its own.
     fn write_image(&self, out: &mut dyn Write, image: &Image) -> fmt::Result {
         let place = image.place();
-        write!(
-            out,
-            "<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" xlink:href=\"",
+        let rectangle = format_args!(
+            "x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"",
             Number(place.min.x),
             Number(place.min.y),
             Number(place.width()),
             Number(place.height())
-        )?;
-        if let Some((media, bytes)) = embedded(image) {
-            data_url::write(out, media, bytes)?;
-        } else {
-            let at = self
-                .encoded
-                .number(Arc::as_ptr(image.pyramid()).addr())
-                .ok_or(fmt::Error)?;
-            let png = self.encoded.items().get(at).ok_or(fmt::Error)?;
-            data_url::write(out, "image/png", png)?;
+        );
+        if let Some(id) = self.shared_id(image) {
+            return write!(out, "<use xlink:href=\"#picture-{id}\" {rectangle}");
         }
+        write!(
+            out,
+            "<image {rectangle} preserveAspectRatio=\"none\" xlink:href=\""
+        )?;
+        self.write_link(out, image)?;
         out.write_char('"')
+    }
+
+    /// A picture's pixels as a data URL.
+    fn write_link(&self, out: &mut dyn Write, image: &Image) -> fmt::Result {
+        let (media, bytes) = link(image, &self.encoded).ok_or(fmt::Error)?;
+        data_url::write(out, media, bytes)
     }
 
     fn write_node(&self, out: &mut dyn Write, node: &Node) -> fmt::Result {
@@ -971,6 +1032,79 @@ impl<'d> Plan<'d> {
             }
         }
     }
+}
+
+/// What a picture is written as: the bytes it was read from where a web
+/// format carries them, else its pixels as the PNG `encoded` holds for them.
+fn link<'i>(
+    image: &'i Image,
+    encoded: &'i Numbered<usize, Vec<u8>>,
+) -> Option<(&'static str, &'i [u8])> {
+    embedded(image).or_else(|| {
+        let at = encoded.number(Arc::as_ptr(image.pyramid()).addr())?;
+        Some(("image/png", encoded.items().get(at)?.as_slice()))
+    })
+}
+
+/// Of `shown` — each picture an object shows, by its key — those shown more
+/// than once, the same pixels or pixels written as the same bytes alike,
+/// each once in the order first shown; and the number each key takes among
+/// them, sorted by key.
+fn shared_pictures(
+    shown: Vec<(PictureKey, Arc<Image>)>,
+    encoded: &Numbered<usize, Vec<u8>>,
+) -> Result<SharedPictures, DrawingError> {
+    let mut keys = fallible::collected(shown.len(), shown.iter().map(|(key, _)| *key))
+        .ok_or(DrawingError::OutOfMemory)?;
+    keys.sort_unstable();
+    let distinct = Numbered::of(shown)?.into_items();
+    let shown_times = |image: &Image| {
+        let key = picture_key(image);
+        let first = keys.partition_point(|seen| *seen < key);
+        keys[first..]
+            .iter()
+            .take_while(|seen| **seen == key)
+            .count()
+    };
+    let links = fallible::collected(
+        distinct.len(),
+        distinct.iter().map(|image| link(image, encoded)),
+    )
+    .ok_or(DrawingError::OutOfMemory)?;
+    // Distinct pictures written alike are neighbours, each run in the order
+    // first shown.
+    let mut order =
+        fallible::collected(distinct.len(), 0..distinct.len()).ok_or(DrawingError::OutOfMemory)?;
+    order.sort_by(|&a, &b| links[a].cmp(&links[b]).then(a.cmp(&b)));
+    let mut runs: Vec<&[usize]> = Vec::new();
+    let mut rest = order.as_slice();
+    while let Some(&first) = rest.first() {
+        let written = links[first];
+        let alike = rest
+            .iter()
+            .take_while(|&&other| links[other] == written)
+            .count();
+        let (run, later) = rest.split_at(alike);
+        rest = later;
+        let times: usize = run.iter().map(|&at| shown_times(&distinct[at])).sum();
+        if written.is_some() && times > 1 && !fallible::push(&mut runs, run) {
+            return Err(DrawingError::OutOfMemory);
+        }
+    }
+    runs.sort_unstable_by_key(|run| run[0]);
+    let mut shared = Vec::new();
+    let mut by_key = Vec::new();
+    if !fallible::reserve(&mut shared, runs.len())
+        || !fallible::reserve(&mut by_key, runs.iter().map(|run| run.len()).sum())
+    {
+        return Err(DrawingError::OutOfMemory);
+    }
+    for (number, run) in runs.iter().enumerate() {
+        shared.push(Arc::clone(&distinct[run[0]]));
+        by_key.extend(run.iter().map(|&at| (picture_key(&distinct[at]), number)));
+    }
+    by_key.sort_unstable();
+    Ok((shared, by_key))
 }
 
 /// A run's paint as attribute `name`, its opacity said wherever it differs

@@ -17,7 +17,7 @@ use tairix_bezier::flatten::flatten_ellipse_arc;
 use crate::error::SvgError;
 use crate::geom::{Point, SubPath, Vertices};
 use crate::number::{parse_length, viewport_diagonal, Numbers};
-use crate::pathdata::parse_path_data;
+use crate::pathdata::{curves, parse_path_curves, parse_path_data, PathCommand};
 use crate::xml::Element;
 
 /// Whether `name` is one of the elements this module draws.
@@ -143,6 +143,97 @@ pub fn shape_geometry<'a>(
         _ => return Ok(None),
     };
     Ok(Some(geometry))
+}
+
+/// The path SVG 2 makes a basic shape equivalent to, its curves kept: where
+/// it begins and which way it runs, which decide where text set along it
+/// stands. A rectangle runs clockwise from the end of its top-left corner, an
+/// ellipse clockwise from its rightmost point; a shape that encloses nothing
+/// is no path.
+///
+/// # Errors
+/// What a `<path>`'s data refuses, and [`SvgError::TooComplex`] past
+/// `max_commands` commands.
+pub fn shape_curves(
+    geometry: &ShapeGeometry<'_>,
+    max_commands: usize,
+) -> Result<tairix_bezier::Path, SvgError> {
+    let arc = |radii: Point, to: Point| PathCommand::ArcTo {
+        radii,
+        x_rotation: 0.0,
+        large: false,
+        sweep: true,
+        to,
+    };
+    let commands: Vec<PathCommand> = match *geometry {
+        ShapeGeometry::Path(data) => return parse_path_curves(data, max_commands),
+        ShapeGeometry::Rect {
+            x,
+            y,
+            width,
+            height,
+            rx,
+            ry,
+        } => {
+            if width <= 0.0 || height <= 0.0 {
+                return Ok(tairix_bezier::Path::new());
+            }
+            let (rx, ry) = if rx > 0.0 && ry > 0.0 {
+                (rx, ry)
+            } else {
+                (0.0, 0.0)
+            };
+            let (right, bottom) = (x + width, y + height);
+            let corners = [
+                ((right - rx, y), (right, y + ry)),
+                ((right, bottom - ry), (right - rx, bottom)),
+                ((x + rx, bottom), (x, bottom - ry)),
+                ((x, y + ry), (x + rx, y)),
+            ];
+            let mut commands = Vec::with_capacity(10);
+            commands.push(PathCommand::MoveTo((x + rx, y)));
+            for (edge_end, corner_end) in corners {
+                commands.push(PathCommand::LineTo(edge_end));
+                if rx > 0.0 {
+                    commands.push(arc((rx, ry), corner_end));
+                }
+            }
+            commands.push(PathCommand::Close);
+            commands
+        }
+        ShapeGeometry::Ellipse {
+            centre: (cx, cy),
+            radii: (rx, ry),
+        } => {
+            if rx <= 0.0 || ry <= 0.0 {
+                return Ok(tairix_bezier::Path::new());
+            }
+            alloc::vec![
+                PathCommand::MoveTo((cx + rx, cy)),
+                arc((rx, ry), (cx, cy + ry)),
+                arc((rx, ry), (cx - rx, cy)),
+                arc((rx, ry), (cx, cy - ry)),
+                arc((rx, ry), (cx + rx, cy)),
+                PathCommand::Close,
+            ]
+        }
+        ShapeGeometry::Line { from, to } => {
+            alloc::vec![PathCommand::MoveTo(from), PathCommand::LineTo(to)]
+        }
+        ShapeGeometry::Polyline { ref points, closed } => {
+            let Some((&first, rest)) = points.split_first() else {
+                return Ok(tairix_bezier::Path::new());
+            };
+            let mut commands = Vec::with_capacity(points.len() + 1);
+            commands.push(PathCommand::MoveTo(first));
+            commands.extend(rest.iter().map(|&point| PathCommand::LineTo(point)));
+            if closed {
+                commands.push(PathCommand::Close);
+            }
+            commands
+        }
+    };
+    curves(commands.into_iter().map(Ok), max_commands)
 }
 
 /// Flatten one basic shape into sub-paths in its own user space.

@@ -10,10 +10,12 @@ geometry `lib/bezier`'s ([its page](../lib/bezier.md)).
 
 The tool box runs down the left, the inspector down the right with its tabs
 above its panel, and the desktop's one status band along the bottom
-(`lib/controls`' `StatusBand`): what the last command did, cut short of the
+(`lib/controls`' `StatusBand`): what the last command did — or, while it says
+nothing, how the tool in hand is used (`Tool::hint`) — cut short of the
 readings beside it, then the pointer's place and the selection's size in the
-page's units, each in a slot measured for the most it reads. The bar across the top says how the tool in hand is used and shows the
-zoom, which opens a menu of zooms when pressed. Rulers in the page's units run
+page's units and the zoom, each in a slot measured for the most it reads; the
+zoom opens a menu of zooms when pressed. There is no bar across the top, as
+there is no menu bar. Rulers in the page's units run
 along the canvas's top and left and scrollbars along its right and foot; a
 bar's span is derived from the viewport each time it is wanted — the page and
 what is drawn, half a canvas of pasteboard beyond them, and wherever the
@@ -152,15 +154,50 @@ since, and a refused write is said in the settings window and on `stderr`.
 ## Documents and authority
 
 The manifest requests no filesystem capability, declares
-`document-access = "read-write"`, and claims `image/svg+xml` and
-`image/x-riscos-draw`; the double-click order between Draw and the viewer
-follows the store's (`plans/PAINT.md`). A document is read in the parser
-sandbox (`tairix_sandbox::drawedit`): its bytes go to a capability-empty
-worker, which reads it as a RISC OS Draw file or as SVG by its content, and
-the drawing comes back in a checked wire form, every value validated as the
-drawing is rebuilt. A Draw file is saved as SVG, Draw's own format. What a drawing cannot keep is listed as it is read
-(`tairix_drawing::unkept`), and a document that lost anything opens read-only
-and says what. Save writes SVG through the handed-over descriptor. Save a copy
+`document-access = "read-write"`, and claims `image/svg+xml`,
+`image/x-riscos-draw` and `application/pdf`; the double-click order between
+Draw and the viewer follows the store's (`plans/PAINT.md`). A document is read
+in the parser sandbox (`tairix_sandbox::drawedit`): its bytes go to a
+capability-empty worker, which reads it as a RISC OS Draw file, a PDF or SVG
+by its content, and the drawing comes back in a checked wire form, every value
+validated as the drawing is rebuilt. What a drawing cannot keep is listed as
+it is read (`tairix_drawing::unkept`), and a document that lost anything opens
+read-only and says what.
+
+A PDF is read through `lib/pdf` (`plans/PDF.md`). The load worker first asks
+the sandbox worker for its pages (`read_pages`); one of several pages, unless
+a page was already chosen, comes back as a question (`LoadAnswer::Asks`), and
+so does one protected by a password: the empty password is always tried
+first, so a file encrypted only to state its permissions opens without asking.
+A question opens a dialog window of Draw's own (`pdfopen::OpenPdf`, one kind
+of `appwindow::DrawWindow` beside the settings window) over the document's
+loading window, asked on its behalf, so it closes with that window
+(`Host::open_app_window`): *Page* takes a number, its size in points described
+beneath it, or *Password* a secret field of the most a request carries
+(`drawedit::MAX_PASSWORD_BYTES`). A page typed past the document's is held to
+them and shown before anything opens, and Open with no password typed, or more
+than a password can be, opens nothing and says why. Open queues the read again
+with the answer, and Cancel or closing the window gives the load up without an
+alert (`Host::not_wanted`). A password is held in a buffer erased when
+dropped, travels to the worker in a request erased once sent and once read, and
+is never kept, logged or shown; a wrong one asks again, saying so. The page
+opens as a drawing of its own, its crop box the page, in points. A page of a
+PDF of several, or of one holding bookmarks, attachments or other parts, opens
+read-only, so Save never writes one page back over the whole. Text a PDF sets
+in its fonts is not yet read (`plans/PDF.md` PDF5), so a page showing any opens
+read-only, as does one holding a soft mask, blend mode, tiling pattern, other
+shading, unreadable picture, annotation or damage.
+
+Save writes, through the handed-over descriptor, the format
+the file's name says, or the filetype its volume records for a save over the
+document's own file (`SaveFormat::of`, `SaveTarget::Own`), which never speaks
+for another file a Save As names: SVG, Draw's own format, which holds all of a drawing;
+a RISC OS Draw file, the save saying what the format holds only as near as it
+can; or PDF, the save saying a PDF opens again as one layer whose text is
+outlines (`SaveFormat::keeps_editing`). Save As offers
+all three, opening on the document's own; any other name is refused before the
+file is touched. Each is written by the copy encoders (`copy::copy`), so a
+save and a copy in one format are the same bytes. Save a copy
 (`Request::SaveCopy`, the document host's) asks the trusted picker for a new
 file in a format of the view's `copy_formats` — PDF, EPS, PNG, JPEG, TIFF,
 SVG or a RISC OS Draw file — the format the one media registry takes the
@@ -190,7 +227,14 @@ file states, and, for a PNG or a JPEG, the bytes it came as; the worker builds
 its levels, so the loop only lays it. It lands in the layer in hand as one
 step, selected and named after its file, in the middle of what the canvas
 shows at its own size, or as large as four fifths of the canvas holds where
-that is smaller. A drawing's pictures hold no more pixels together than a
+that is smaller. A picture dragged from the file manager or off the desktop and
+let go over the canvas is placed the same way, centred where it was let go: the window answers
+the desktop's file offer (`DocumentView::places`) for the types the image
+library reads whole and for sprite files, over the canvas alone, and the file
+arrives read-only through the document host (`DocumentApp::import_chosen`,
+with the drop point). Any other file dropped on the window, or a picture
+dropped off the canvas, is taken as Draw's icon-bar slot takes it: an SVG or
+Draw file opens, anything else is refused in Draw's name. A drawing's pictures hold no more pixels together than a
 drawing's may (`MAX_TOTAL_IMAGE_PIXELS`, each picture counted once however
 often it is shown), the bound every reader holds a document to, so placing
 or pasting past it is refused and said (`EditError::Crowded`) and no drawing

@@ -100,13 +100,14 @@ So far — the staged remainder is the ledger in `plans/SVG.md`:
   `<switch>`'s conditional-processing attributes;
 - text — `<text>` and `<tspan>` with their position lists, `text-anchor`,
   white space, letter and word spacing, `textLength`, the `font-*`
-  properties and `baseline-shift`, and `<textPath>` along a `<path>`, its
-  glyphs turned with the path or bent along it — each glyph reaching the
-  crate as contours from an injected font provider.
+  properties and `baseline-shift`, and `<textPath>` along a `<path>`, a
+  basic shape or its own `path` data, its glyphs turned with the path or bent
+  along it — each glyph reaching the crate as contours from an injected font
+  provider.
 
 **Not yet drawn**, and staged rather than declined: the rest of the text
-surface (the baselines, `text-decoration`, bidi and shaping, and SVG 2's
-text paths along basic shapes), embedded images (`<image>`), filters, SMIL
+surface (the baselines, `text-decoration`, bidi and shaping), embedded
+images (`<image>`), filters, SMIL
 animation, the CSS surface the cascade still drops, external references, the
 three remaining `vector-effect` values, and scripting. Each is a numbered
 item in `plans/SVG.md`, which carries the design and the prerequisites —

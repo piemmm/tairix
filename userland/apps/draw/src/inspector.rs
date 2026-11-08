@@ -2442,7 +2442,7 @@ fn dash_of(stroke: &tairix_drawing::Stroke) -> Option<usize> {
 }
 
 /// `text` set in the middle of `rect`, and kept within it.
-pub fn text_in(surface: &mut Surface, rect: Rect, text: &str, faces: Faces, colour: Color) {
+fn text_in(surface: &mut Surface, rect: Rect, text: &str, faces: Faces, colour: Color) {
     let Some((left, top)) = rect.surface_origin() else {
         return;
     };

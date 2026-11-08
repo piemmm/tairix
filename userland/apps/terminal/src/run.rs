@@ -2372,6 +2372,7 @@ mod program {
                 | WindowEvent::SaveOfferEnded { .. }
                 | WindowEvent::ItemsOffered { .. }
                 | WindowEvent::ItemsOfferEnded { .. }
+                | WindowEvent::FileOffered { .. }
                 | WindowEvent::PreviewRendered { .. }
                 | WindowEvent::Pinch { .. } => {}
             }
@@ -2471,6 +2472,7 @@ mod program {
             | WindowEvent::SaveOfferEnded { .. }
             | WindowEvent::ItemsOffered { .. }
             | WindowEvent::ItemsOfferEnded { .. }
+            | WindowEvent::FileOffered { .. }
             | WindowEvent::PreviewRendered { .. }
             | WindowEvent::Pinch { .. } => SettingsRouting::Nothing,
         };

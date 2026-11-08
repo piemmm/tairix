@@ -4,7 +4,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PhysicalKey, PointerButtonCode};
-use tairix_abi::window_ipc::{DragAt, PointerAction, ToolOver, WindowEvent, WindowSizeState};
+use tairix_abi::window_ipc::{
+    DragAt, DropOperation, OfferDrop, PointerAction, ToolOver, WindowEvent, WindowSizeState,
+};
 use tairix_abi::Errno;
 
 use crate::holdback::{Delivery, Flushed, HoldBack, HOLD_BACK_CAPACITY};
@@ -940,6 +942,159 @@ fn a_run_of_drag_reports_or_save_offers_folds_to_the_newest() {
         drain_events(&mut held),
         [offered(WINDOW, 3), typed(WINDOW), offered(WINDOW, 4)],
         "a key between them is an occurrence the run does not fold across"
+    );
+}
+
+/// A file offer and an offer of desktop items are numbered like a drag's
+/// reports, so a run of each folds to the newest too.
+#[test]
+fn a_run_of_file_or_items_offers_folds_to_the_newest() {
+    let file = |serial| WindowEvent::FileOffered {
+        window_id: WINDOW,
+        drag: 1,
+        serial,
+        x: serial,
+        y: 1,
+    };
+    let items = |serial| WindowEvent::ItemsOffered {
+        window_id: WINDOW,
+        drag: 2,
+        serial,
+        x: serial,
+        y: 1,
+        shift: false,
+    };
+    let mut held = HoldBack::new();
+    for serial in 1..=4 {
+        hold(&mut held, file(serial));
+    }
+    assert_eq!(drain_events(&mut held), [file(4)]);
+    for serial in 5..=7 {
+        hold(&mut held, items(serial));
+    }
+    hold(&mut held, typed(WINDOW));
+    hold(&mut held, items(8));
+    assert_eq!(drain_events(&mut held), [items(7), typed(WINDOW), items(8)]);
+}
+
+fn items_offered(serial: u32) -> WindowEvent {
+    WindowEvent::ItemsOffered {
+        window_id: WINDOW,
+        drag: 3,
+        serial,
+        x: serial,
+        y: 1,
+        shift: false,
+    }
+}
+
+fn file_offered(serial: u32) -> WindowEvent {
+    WindowEvent::FileOffered {
+        window_id: WINDOW,
+        drag: 3,
+        serial,
+        x: serial,
+        y: 1,
+    }
+}
+
+fn items_ended(serial: u32, dropped: bool) -> WindowEvent {
+    WindowEvent::ItemsOfferEnded {
+        window_id: WINDOW,
+        serial,
+        dropped: dropped.then_some(OfferDrop {
+            x: serial,
+            y: 1,
+            operation: DropOperation::Copy,
+        }),
+    }
+}
+
+/// A report offers a window the items and then the file among them, so the
+/// pairs a slow window is owed fold to the newest pair, not one per report.
+#[test]
+fn offers_made_in_pairs_fold_to_the_newest_pair() {
+    let mut held = HoldBack::new();
+    let last = u32::try_from(HOLD_BACK_CAPACITY * 2).expect("the hold-back capacity is small");
+    for serial in 1..=last {
+        hold(&mut held, items_offered(serial));
+        hold(&mut held, file_offered(serial));
+    }
+    assert_eq!(
+        drain_events(&mut held),
+        [items_offered(last), file_offered(last)]
+    );
+    hold(&mut held, items_offered(1));
+    hold(&mut held, file_offered(1));
+    hold(&mut held, typed(WINDOW));
+    hold(&mut held, items_offered(2));
+    hold(&mut held, file_offered(2));
+    assert_eq!(
+        drain_events(&mut held),
+        [
+            items_offered(1),
+            file_offered(1),
+            typed(WINDOW),
+            items_offered(2),
+            file_offered(2)
+        ],
+        "a key between them is an occurrence the run does not fold across"
+    );
+}
+
+/// Items carried back and forth over a window that has stopped reading hold
+/// it no more than the last crossing's end: each end withdraws what it ends.
+#[test]
+fn an_items_offer_that_only_left_withdraws_what_it_ends() {
+    let mut held = HoldBack::new();
+    let crossings = u32::try_from(HOLD_BACK_CAPACITY * 2).expect("the hold-back capacity is small");
+    for crossing in 0..crossings {
+        let serial = crossing * 2 + 1;
+        hold(&mut held, items_offered(serial));
+        hold(&mut held, file_offered(serial));
+        hold(&mut held, typed(WINDOW));
+        hold(&mut held, items_offered(serial + 1));
+        hold(&mut held, items_ended(serial + 1, false));
+        assert!(held.depth(MAILBOX, Some(WINDOW)) <= HOLD_BACK_CAPACITY);
+    }
+    let owed = drain_events(&mut held);
+    assert_eq!(owed.last(), Some(&items_ended(crossings * 2, false)));
+    assert!(
+        owed.iter()
+            .all(|event| *event == typed(WINDOW) || *event == items_ended(crossings * 2, false)),
+        "only the keys typed and the last end are left: {owed:?}"
+    );
+}
+
+/// A drop is of the newest offer before it, which a window may answer as late
+/// as it reads it, so the offers before a drop stay and an end that only left
+/// takes neither them nor the drop.
+#[test]
+fn an_items_drop_keeps_the_offer_it_drops() {
+    let mut held = HoldBack::new();
+    hold(&mut held, items_offered(1));
+    hold(&mut held, file_offered(1));
+    hold(&mut held, items_ended(1, true));
+    hold(&mut held, items_offered(3));
+    hold(&mut held, file_offered(3));
+    hold(&mut held, items_ended(3, false));
+    assert_eq!(
+        drain_events(&mut held),
+        [
+            items_offered(1),
+            file_offered(1),
+            items_ended(1, true),
+            items_ended(3, false)
+        ]
+    );
+    hold(&mut held, items_ended(4, false));
+    hold(&mut held, items_offered(5));
+    hold(&mut held, items_ended(5, true));
+    hold(&mut held, items_ended(7, true));
+    assert_eq!(
+        drain_events(&mut held),
+        [items_offered(5), items_ended(7, true)],
+        "a drop takes the ends held before it, a second drop the first"
     );
 }
 

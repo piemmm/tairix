@@ -31,16 +31,17 @@ use tairix_abi::window_ipc::{
     decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
     decode_drag_spot_reply, decode_drop_target_reply, decode_hand_over_reply,
     decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
-    decode_offered_items_reply, decode_open_target_reply, decode_picked_file_reply,
-    decode_picked_name_reply, decode_terrain_reply, decode_wallpapers_reply, AlertSeverity,
-    AlertSpec, AppBar, AppMenu, BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape,
-    DragItems, DropOperation, DropTarget, HandOverOutcome, HandOverTarget, LayerDepth, NameList,
-    OfferedItem, OpenTarget, PickPurpose, PickedFile, PointerAction, PreviewSubject, TerrainPlate,
-    TooltipText, WallpaperPage, WindowEvent, WindowRegion, WindowRequest, WindowTitle,
-    WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX,
-    WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX,
-    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
-    WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OFFERED_ITEMS_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
+    decode_offered_file_reply, decode_offered_items_reply, decode_open_target_reply,
+    decode_picked_file_reply, decode_picked_name_reply, decode_terrain_reply,
+    decode_wallpapers_reply, AlertSeverity, AlertSpec, AppBar, AppMenu, BundleRunPath,
+    ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragItems, DropOperation, DropTarget,
+    HandOverOutcome, HandOverTarget, LayerDepth, NameList, OfferedItem, OpenTarget, PickPurpose,
+    PickedFile, PointerAction, PreviewSubject, TerrainPlate, TooltipText, WallpaperPage,
+    WindowEvent, WindowRegion, WindowRequest, WindowTitle, WINDOW_CLIPBOARD_REPLY_LEN,
+    WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN,
+    WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_HAND_OVER_REPLY_LEN,
+    WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX,
+    WINDOW_OFFERED_FILE_REPLY_MAX, WINDOW_OFFERED_ITEMS_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
     WINDOW_PICKED_FILE_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX,
     WINDOW_WALLPAPERS_REPLY_MAX,
 };
@@ -80,6 +81,19 @@ pub enum Target {
     /// closed set of places. Confers nothing, and one this application does
     /// not recognise leaves it showing what it already showed.
     Pane(String),
+    /// A file dropped on this application's window `window_id` at `at`, a
+    /// window-local point, to be placed there: reachable read-only through a
+    /// one-shot `fd_redeem` handle.
+    Placed {
+        /// The window it was dropped on.
+        window_id: u64,
+        /// Where on it, window-local.
+        at: (u32, u32),
+        /// Its own file name, for display. Empty when unknown.
+        name: String,
+        /// The `fd_redeem` handle. Never zero.
+        grant: u64,
+    },
 }
 
 /// Widest reply any *pull* answers with, and so the one buffer every pull is
@@ -107,7 +121,13 @@ const PULL_REPLY_MAX: usize = {
                     wider(
                         wider(
                             WINDOW_DROP_TARGET_REPLY_MAX,
-                            wider(WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_OFFERED_ITEMS_REPLY_MAX),
+                            wider(
+                                WINDOW_DRAG_SPOT_REPLY_MAX,
+                                wider(
+                                    WINDOW_OFFERED_ITEMS_REPLY_MAX,
+                                    WINDOW_OFFERED_FILE_REPLY_MAX,
+                                ),
+                            ),
                         ),
                         WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
                     ),
@@ -639,6 +659,8 @@ pub enum PostedRequest {
     SaveOfferAnswer,
     /// [`WindowClient::answer_items_offer`].
     ItemsOfferAnswer,
+    /// [`WindowClient::answer_file_offer`].
+    FileOfferAnswer,
     /// [`WindowClient::set_title`].
     Title,
     /// [`WindowClient::set_sizing`].
@@ -659,6 +681,7 @@ impl PostedRequest {
             Self::DragVerdict => "a drop answer",
             Self::SaveOfferAnswer => "a save answer",
             Self::ItemsOfferAnswer => "a drop answer for the desktop's items",
+            Self::FileOfferAnswer => "a drop answer for a file offered",
             Self::Title => "a title",
             Self::Sizing => "a resize range",
             Self::Present => "a frame",
@@ -700,6 +723,7 @@ enum Asked {
     DragVerdict(u32, Option<DropOperation>),
     SaveOfferAnswer(u32, bool),
     ItemsOfferAnswer(u32, Option<DropOperation>),
+    FileOfferAnswer(u32, bool),
     Title(WindowTitle),
     Sizing(WindowSizing),
     Present(u32, DamageList),
@@ -714,6 +738,7 @@ impl Asked {
             Self::DragVerdict(..) => PostedRequest::DragVerdict,
             Self::SaveOfferAnswer(..) => PostedRequest::SaveOfferAnswer,
             Self::ItemsOfferAnswer(..) => PostedRequest::ItemsOfferAnswer,
+            Self::FileOfferAnswer(..) => PostedRequest::FileOfferAnswer,
             Self::Title(_) => PostedRequest::Title,
             Self::Sizing(_) => PostedRequest::Sizing,
             Self::Present(..) => PostedRequest::Present,
@@ -743,6 +768,11 @@ impl Asked {
                 window_id,
                 serial,
                 accepts,
+            },
+            Self::FileOfferAnswer(serial, places) => WindowRequest::FileOfferAnswer {
+                window_id,
+                serial,
+                places,
             },
             Self::Title(title) => WindowRequest::SetTitle { window_id, title },
             Self::Sizing(sizing) => WindowRequest::SetSizing { window_id, sizing },
@@ -1652,6 +1682,57 @@ impl<T: WindowTransport> WindowClient<T> {
         self.post_or_hold(window_id, Asked::ItemsOfferAnswer(serial, verdict))
     }
 
+    /// Answer the file offer numbered `serial` over window `window_id`:
+    /// whether a drop there places the file in the window's document.
+    ///
+    /// # Errors
+    ///
+    /// A request the wire cannot carry; the session's own answer arrives
+    /// with [`WindowClient::reap_posted`].
+    pub fn answer_file_offer(
+        &mut self,
+        window_id: u64,
+        serial: u32,
+        places: bool,
+    ) -> Result<(), Errno> {
+        self.post_or_hold(window_id, Asked::FileOfferAnswer(serial, places))
+    }
+
+    /// The media type of the one file the [`WindowEvent::FileOffered`]
+    /// numbered `serial` holds over window `window_id`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] once that offer no longer stands, a transport
+    /// failure, or a corrupt reply.
+    ///
+    /// [`WindowEvent::FileOffered`]: tairix_abi::window_ipc::WindowEvent::FileOffered
+    pub fn offered_file(&mut self, window_id: u64, serial: u32) -> Result<&str, Errno> {
+        decode_offered_file_reply(self.pull(&WindowRequest::OfferedFile { window_id, serial })?)
+    }
+
+    /// Hand the file window `window_id`'s drag placed to the window it was
+    /// dropped on, through `grant`, a delegation minted to the session from a
+    /// descriptor opened read-only, called `name`. One-shot.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when the drag placed nothing or its drop was handed
+    /// over already, a refused relay — a descriptor that is not read-only
+    /// among them — a transport failure, or a corrupt reply.
+    pub fn place_dropped(
+        &mut self,
+        window_id: u64,
+        name: DocumentName,
+        grant: core::num::NonZeroU64,
+    ) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::PlaceDropped {
+            window_id,
+            name,
+            grant,
+        })
+    }
+
     /// Hand `each` every item of the desktop's drag numbered `drag`, offered
     /// to or dropped on window `window_id`, in order — a page of them a round
     /// trip — answering how many there were.
@@ -2114,6 +2195,18 @@ impl<T: WindowTransport> WindowClient<T> {
                 writable,
             })),
             Some(OpenTarget::Pane(pane)) => Ok(Some(Target::Pane(text(pane)?))),
+            Some(OpenTarget::Placed {
+                window_id,
+                x,
+                y,
+                name,
+                grant,
+            }) => Ok(Some(Target::Placed {
+                window_id,
+                at: (x, y),
+                name: text(name)?,
+                grant,
+            })),
         }
     }
 

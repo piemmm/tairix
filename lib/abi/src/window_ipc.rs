@@ -3119,6 +3119,45 @@ pub enum WindowRequest {
         /// The first item the page holds, from zero.
         from: u32,
     },
+    /// Answer the [`WindowEvent::FileOffered`] numbered `serial` over window
+    /// `window_id` with whether a drop there places the file in the window's
+    /// document. A file not placed is left to the application's slot, which
+    /// opens it or refuses it, or for one carried off the desktop to the
+    /// answer the same offer of it as an item had.
+    FileOfferAnswer {
+        /// The window the file is held over.
+        window_id: u64,
+        /// The offer being answered.
+        serial: u32,
+        /// Whether a drop there places it.
+        places: bool,
+    },
+    /// Read the media type of the one file the [`WindowEvent::FileOffered`]
+    /// numbered `serial` holds over window `window_id`: never its name, which
+    /// is the dragging application's to disclose. The reply is a
+    /// [`decode_offered_file_reply`] frame, and `NotFound` once that offer no
+    /// longer stands.
+    OfferedFile {
+        /// The window the file is offered to.
+        window_id: u64,
+        /// The offer.
+        serial: u32,
+    },
+    /// Hand the file window `window_id`'s drag was placed with
+    /// ([`DropSite::Placed`]) to the window it was dropped on: `grant`, a
+    /// one-shot delegation minted to the session from a descriptor the caller
+    /// opened read-only, and `name`, its own file name for display. One-shot:
+    /// `NotFound` once the drop has been handed over or for a drag that placed
+    /// nothing. The session relays the file read-only, so a writable
+    /// descriptor is refused.
+    PlaceDropped {
+        /// The window the drag began in.
+        window_id: u64,
+        /// The file's own name, for display. Empty when unknown.
+        name: DocumentName,
+        /// The `fd_grant` handle minted to the session.
+        grant: core::num::NonZeroU64,
+    },
     /// Step the drop onto the desktop that window `window_id`'s drag ended in
     /// at the report numbered `serial` ([`DropSite::Desktop`]), as the caller
     /// carries it out: each item announced before its first write, then what
@@ -3753,6 +3792,12 @@ const OP_SAVE_INTO: u16 = 47;
 const OP_ITEMS_OFFER_ANSWER: u16 = 50;
 /// Wire operation discriminant of [`WindowRequest::OfferedItems`].
 const OP_OFFERED_ITEMS: u16 = 51;
+/// Wire operation discriminant of [`WindowRequest::OfferedFile`].
+const OP_OFFERED_FILE: u16 = 52;
+/// Wire operation discriminant of [`WindowRequest::PlaceDropped`].
+const OP_PLACE_DROPPED: u16 = 53;
+/// Wire operation discriminant of [`WindowRequest::FileOfferAnswer`].
+const OP_FILE_OFFER_ANSWER: u16 = 54;
 /// Wire operation discriminant of [`WindowRequest::TakeAppBarText`].
 const OP_TAKE_APP_BAR_TEXT: u16 = 48;
 /// Wire operation discriminant of [`WindowRequest::DropLanding`].
@@ -3863,8 +3908,9 @@ const DRAG_VERDICT_WIRE_LEN: usize = WINDOW_ID_WIRE_LEN + 5;
 /// Encoded size of a [`WindowRequest::QueryDragSpot`]: the header, the window,
 /// and the serial.
 const QUERY_DRAG_SPOT_WIRE_LEN: usize = WINDOW_ID_WIRE_LEN + 4;
-/// Encoded size of a [`WindowRequest::SaveOfferAnswer`]: the header, the
-/// window, the serial, and the answer.
+/// Encoded size of a [`WindowRequest::SaveOfferAnswer`] or a
+/// [`WindowRequest::FileOfferAnswer`]: the header, the window, the serial, and
+/// the one-flag answer.
 const SAVE_OFFER_ANSWER_WIRE_LEN: usize = WINDOW_ID_WIRE_LEN + 5;
 /// Encoded size of a [`WindowRequest::ItemsOfferAnswer`]: the header, the
 /// window, the serial, and the verdict.
@@ -3872,6 +3918,16 @@ const ITEMS_OFFER_ANSWER_WIRE_LEN: usize = WINDOW_ID_WIRE_LEN + 5;
 /// Encoded size of a [`WindowRequest::OfferedItems`]: the header, the window,
 /// the drag, and the index.
 const OFFERED_ITEMS_WIRE_LEN: usize = WINDOW_ID_WIRE_LEN + 8;
+/// Encoded size of a [`WindowRequest::OfferedFile`]: the header, the window,
+/// and the serial.
+const OFFERED_FILE_WIRE_LEN: usize = WINDOW_ID_WIRE_LEN + 4;
+/// Byte offset of a [`WindowRequest::PlaceDropped`]'s grant; the name's length
+/// follows, then the name.
+const PLACE_DROPPED_GRANT_OFFSET: usize = WINDOW_ID_WIRE_LEN;
+/// Byte offset of its name's length.
+const PLACE_DROPPED_NAME_LEN_OFFSET: usize = PLACE_DROPPED_GRANT_OFFSET + 8;
+/// Byte offset of its name.
+const PLACE_DROPPED_NAME_OFFSET: usize = PLACE_DROPPED_NAME_LEN_OFFSET + 1;
 /// Byte offset of a [`WindowRequest::SaveInto`]'s location; its serial follows.
 const SAVE_INTO_LOCATION_OFFSET: usize = WINDOW_ID_WIRE_LEN;
 /// Encoded size of a [`WindowRequest::SaveInto`]: the header, the window, the
@@ -4381,10 +4437,16 @@ impl WindowRequest {
             Self::BeginDrag { ref items, .. } => begin_drag_wire_len(items),
             Self::DragVerdict { .. } => DRAG_VERDICT_WIRE_LEN,
             Self::QueryDragSpot { .. } => QUERY_DRAG_SPOT_WIRE_LEN,
-            Self::SaveOfferAnswer { .. } => SAVE_OFFER_ANSWER_WIRE_LEN,
+            Self::SaveOfferAnswer { .. } | Self::FileOfferAnswer { .. } => {
+                SAVE_OFFER_ANSWER_WIRE_LEN
+            }
             Self::SaveInto { .. } => SAVE_INTO_WIRE_LEN,
             Self::ItemsOfferAnswer { .. } => ITEMS_OFFER_ANSWER_WIRE_LEN,
             Self::OfferedItems { .. } => OFFERED_ITEMS_WIRE_LEN,
+            Self::OfferedFile { .. } => OFFERED_FILE_WIRE_LEN,
+            Self::PlaceDropped { ref name, .. } => {
+                PLACE_DROPPED_NAME_OFFSET + name.len_byte() as usize
+            }
             Self::DropLanding { ref step, .. } => drop_landing_wire_len(step),
             Self::PickFile { purpose, .. } => pick_file_wire_len(
                 purpose.suggested_len_byte() as usize,
@@ -4517,6 +4579,9 @@ impl WindowRequest {
             Self::SaveInto { .. } => OP_SAVE_INTO,
             Self::ItemsOfferAnswer { .. } => OP_ITEMS_OFFER_ANSWER,
             Self::OfferedItems { .. } => OP_OFFERED_ITEMS,
+            Self::OfferedFile { .. } => OP_OFFERED_FILE,
+            Self::FileOfferAnswer { .. } => OP_FILE_OFFER_ANSWER,
+            Self::PlaceDropped { .. } => OP_PLACE_DROPPED,
             Self::DropLanding { .. } => OP_DROP_LANDING,
             Self::Resize { .. } => OP_RESIZE,
             Self::SetTitle { .. } => OP_SET_TITLE,
@@ -4690,6 +4755,9 @@ impl WindowRequest {
             | Self::SaveInto { .. }
             | Self::ItemsOfferAnswer { .. }
             | Self::OfferedItems { .. }
+            | Self::OfferedFile { .. }
+            | Self::FileOfferAnswer { .. }
+            | Self::PlaceDropped { .. }
             | Self::DropLanding { .. } => write_transfer_operands(self, out),
             Self::OpenLayer { .. } | Self::PlaceLayer { .. } => self.write_layer_operands(out),
             Self::TakeMenuText { window_id, open_id } => {
@@ -5054,6 +5122,9 @@ impl WindowRequest {
             | OP_SAVE_INTO
             | OP_ITEMS_OFFER_ANSWER
             | OP_OFFERED_ITEMS
+            | OP_OFFERED_FILE
+            | OP_FILE_OFFER_ANSWER
+            | OP_PLACE_DROPPED
             | OP_DROP_LANDING => read_transfer_request(op, bytes),
             OP_TAKE_TERRAIN => {
                 exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
@@ -5295,31 +5366,7 @@ fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
         WindowRequest::BeginDrag {
             window_id,
             ref items,
-        } => {
-            put_u64(out, 8, window_id);
-            put_u32(out, DRAG_COUNT_OFFSET, items.count());
-            let openable = if items.openable() { DRAG_OPENABLE } else { 0 };
-            let typed = if items.filetype().is_some() {
-                DRAG_TYPED
-            } else {
-                0
-            };
-            out[DRAG_FLAGS_OFFSET] = openable | typed;
-            put_u16(
-                out,
-                DRAG_FILETYPE_OFFSET,
-                items.filetype().map_or(0, Filetype::get),
-            );
-            let text = items.first().as_str().as_bytes();
-            out[DRAG_NAME_LEN_OFFSET] = items.first().len_byte();
-            let mut at = DRAG_NAME_OFFSET + text.len();
-            out[DRAG_NAME_OFFSET..at].copy_from_slice(text);
-            out[at] = items.hidden;
-            at += 1;
-            for picture in items.pictures() {
-                at = write_drag_picture(out, at, picture);
-            }
-        }
+        } => write_begin_drag(out, window_id, items),
         WindowRequest::DragVerdict {
             window_id,
             serial,
@@ -5334,18 +5381,29 @@ fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
             put_u32(out, WINDOW_ID_WIRE_LEN, serial);
             out[WINDOW_ID_WIRE_LEN + 4] = verdict.map_or(0, DropOperation::to_wire);
         }
-        WindowRequest::QueryDragSpot { window_id, serial } => {
+        WindowRequest::QueryDragSpot { window_id, serial }
+        | WindowRequest::OfferedFile { window_id, serial } => {
             put_u64(out, 8, window_id);
             put_u32(out, WINDOW_ID_WIRE_LEN, serial);
         }
+        WindowRequest::PlaceDropped {
+            window_id,
+            ref name,
+            grant,
+        } => write_place_dropped(out, window_id, name, grant),
         WindowRequest::SaveOfferAnswer {
             window_id,
             serial,
-            accepts,
+            accepts: answer,
+        }
+        | WindowRequest::FileOfferAnswer {
+            window_id,
+            serial,
+            places: answer,
         } => {
             put_u64(out, 8, window_id);
             put_u32(out, WINDOW_ID_WIRE_LEN, serial);
-            out[WINDOW_ID_WIRE_LEN + 4] = u8::from(accepts);
+            out[WINDOW_ID_WIRE_LEN + 4] = u8::from(answer);
         }
         WindowRequest::SaveInto {
             window_id,
@@ -5371,6 +5429,35 @@ fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
             ref step,
         } => write_drop_landing(out, window_id, serial, step),
         _ => {}
+    }
+}
+
+/// Write the operands of a [`WindowRequest::BeginDrag`]: the window, the
+/// count, the flags and filetype, the first name and its hidden ending, then
+/// each picture shown.
+fn write_begin_drag(out: &mut [u8], window_id: u64, items: &DragItems) {
+    put_u64(out, 8, window_id);
+    put_u32(out, DRAG_COUNT_OFFSET, items.count());
+    let openable = if items.openable() { DRAG_OPENABLE } else { 0 };
+    let typed = if items.filetype().is_some() {
+        DRAG_TYPED
+    } else {
+        0
+    };
+    out[DRAG_FLAGS_OFFSET] = openable | typed;
+    put_u16(
+        out,
+        DRAG_FILETYPE_OFFSET,
+        items.filetype().map_or(0, Filetype::get),
+    );
+    let text = items.first().as_str().as_bytes();
+    out[DRAG_NAME_LEN_OFFSET] = items.first().len_byte();
+    let mut at = DRAG_NAME_OFFSET + text.len();
+    out[DRAG_NAME_OFFSET..at].copy_from_slice(text);
+    out[at] = items.hidden;
+    at += 1;
+    for picture in items.pictures() {
+        at = write_drag_picture(out, at, picture);
     }
 }
 
@@ -5455,12 +5542,23 @@ fn read_transfer_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> 
                 serial: read_u32(bytes, WINDOW_ID_WIRE_LEN),
             })
         }
-        OP_SAVE_OFFER_ANSWER => {
+        OP_SAVE_OFFER_ANSWER | OP_FILE_OFFER_ANSWER => {
             exact_len(bytes, SAVE_OFFER_ANSWER_WIRE_LEN)?;
-            Ok(WindowRequest::SaveOfferAnswer {
-                window_id: nonzero_id(read_u64(bytes, 8))?,
-                serial: read_u32(bytes, WINDOW_ID_WIRE_LEN),
-                accepts: flag_at(bytes, WINDOW_ID_WIRE_LEN + 4)?,
+            let window_id = nonzero_id(read_u64(bytes, 8))?;
+            let serial = read_u32(bytes, WINDOW_ID_WIRE_LEN);
+            let answer = flag_at(bytes, WINDOW_ID_WIRE_LEN + 4)?;
+            Ok(if op == OP_SAVE_OFFER_ANSWER {
+                WindowRequest::SaveOfferAnswer {
+                    window_id,
+                    serial,
+                    accepts: answer,
+                }
+            } else {
+                WindowRequest::FileOfferAnswer {
+                    window_id,
+                    serial,
+                    places: answer,
+                }
             })
         }
         OP_DROP_LANDING => read_drop_landing(bytes),
@@ -5480,6 +5578,14 @@ fn read_transfer_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> 
                 from: read_u32(bytes, WINDOW_ID_WIRE_LEN + 4),
             })
         }
+        OP_OFFERED_FILE => {
+            exact_len(bytes, OFFERED_FILE_WIRE_LEN)?;
+            Ok(WindowRequest::OfferedFile {
+                window_id: nonzero_id(read_u64(bytes, 8))?,
+                serial: read_u32(bytes, WINDOW_ID_WIRE_LEN),
+            })
+        }
+        OP_PLACE_DROPPED => read_place_dropped(bytes),
         // A zero location is the decline, so only the window must name one.
         OP_SAVE_INTO => {
             exact_len(bytes, SAVE_INTO_WIRE_LEN)?;
@@ -5499,6 +5605,41 @@ fn read_transfer_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> 
             })
         }
     }
+}
+
+/// Write a [`WindowRequest::PlaceDropped`]'s window, grant and name.
+fn write_place_dropped(
+    out: &mut [u8],
+    window_id: u64,
+    name: &DocumentName,
+    grant: core::num::NonZeroU64,
+) {
+    put_u64(out, 8, window_id);
+    put_u64(out, PLACE_DROPPED_GRANT_OFFSET, grant.get());
+    out[PLACE_DROPPED_NAME_LEN_OFFSET] = name.len_byte();
+    let name = name.as_str().as_bytes();
+    out[PLACE_DROPPED_NAME_OFFSET..PLACE_DROPPED_NAME_OFFSET + name.len()].copy_from_slice(name);
+}
+
+/// Decode a [`WindowRequest::PlaceDropped`]: the window, a grant naming a
+/// delegation, and the name, the frame exactly as long as the name.
+fn read_place_dropped(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    let name_len = *bytes
+        .get(PLACE_DROPPED_NAME_LEN_OFFSET)
+        .ok_or(Errno::BufferTooSmall)?;
+    if usize::from(name_len) > crate::FS_NAME_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    exact_len(bytes, PLACE_DROPPED_NAME_OFFSET + usize::from(name_len))?;
+    let grant = core::num::NonZeroU64::new(read_u64(bytes, PLACE_DROPPED_GRANT_OFFSET))
+        .ok_or(Errno::OutOfRange)?;
+    let mut name = [0u8; crate::FS_NAME_MAX];
+    name[..usize::from(name_len)].copy_from_slice(&bytes[PLACE_DROPPED_NAME_OFFSET..]);
+    Ok(WindowRequest::PlaceDropped {
+        window_id: nonzero_id(read_u64(bytes, 8))?,
+        name: DocumentName::from_wire(name_len, &name)?,
+        grant,
+    })
 }
 
 /// Decode a [`WindowRequest::DropLanding`]: the window, the serial, and one
@@ -6813,6 +6954,22 @@ pub enum OpenTarget<'a> {
     /// A place inside the application. Bounded by
     /// [`WINDOW_PANE_NAME_MAX`].
     Pane(&'a [u8]),
+    /// A file dropped on the application's window `window_id` at a
+    /// window-local point, to be placed there: open read-only, through a
+    /// one-shot delegation, after the window answered that a drop there
+    /// places it.
+    Placed {
+        /// The window it was dropped on.
+        window_id: u64,
+        /// Window-local x.
+        x: u32,
+        /// Window-local y.
+        y: u32,
+        /// Its own file name, for display. Empty when unknown.
+        name: &'a [u8],
+        /// The `fd_redeem` handle, minted to this application. Never zero.
+        grant: u64,
+    },
 }
 
 /// Longest pane name an [`OpenTarget::Pane`] may carry, in bytes.
@@ -6824,12 +6981,12 @@ pub enum OpenTarget<'a> {
 pub const WINDOW_PANE_NAME_MAX: usize = 32;
 
 /// Encoded length of a [`WindowRequest::TakeOpenTarget`] reply: a status
-/// word, the entry's kind, the text length, a grant handle, then room for
-/// the widest path the filesystem admits.
+/// word, the entry's kind, the text length, a grant handle, where a placed
+/// file was dropped, then room for the widest path the filesystem admits.
 ///
 /// The path is at [`crate::FS_PATH_MAX`] because that is what a path is; the
 /// frame is *variable* length on the wire ([`encode_open_target_reply`]
-/// writes only what the answer holds), so the empty answer costs sixteen
+/// writes only what the answer holds), so the empty answer costs thirty-two
 /// bytes rather than four kibibytes. Both sides hold their buffer once for
 /// the life of the connection rather than taking one per call.
 pub const WINDOW_OPEN_TARGET_REPLY_MAX: usize = OPEN_TARGET_REPLY_TEXT_OFFSET + crate::FS_PATH_MAX;
@@ -7176,6 +7333,10 @@ pub enum DropSite {
     Nothing,
     /// On an application, which [`WindowRequest::TakeDropTarget`] names.
     Application,
+    /// On a window of another application that answered it places the one
+    /// file there: the dragging application hands the file over read-only
+    /// with [`WindowRequest::PlaceDropped`].
+    Placed,
     /// On one of the application's own windows, at a window-local point,
     /// with the operation the pointer showed.
     Window {
@@ -7310,6 +7471,75 @@ pub fn encode_drag_spot_reply(
 /// * [`Errno::OutOfRange`] for a path that is empty or not text.
 pub fn decode_drag_spot_reply(bytes: &[u8]) -> Result<&str, Errno> {
     read_reply_path(bytes, DRAG_SPOT_REPLY_LEN_OFFSET)
+}
+
+/// Longest media type an [`WindowRequest::OfferedFile`] reply carries: a type
+/// and a subtype of at most 127 characters each, as RFC 6838 bounds them, and
+/// the slash between.
+pub const WINDOW_MEDIA_TYPE_MAX: usize = 255;
+
+/// Longest reply to a [`WindowRequest::OfferedFile`]: the status word, the
+/// media type's length, and the longest media type.
+pub const WINDOW_OFFERED_FILE_REPLY_MAX: usize =
+    OFFERED_FILE_REPLY_TEXT_OFFSET + WINDOW_MEDIA_TYPE_MAX;
+/// Byte offset of an offered file reply's length.
+const OFFERED_FILE_REPLY_LEN_OFFSET: usize = 4;
+/// Byte offset of its media type.
+const OFFERED_FILE_REPLY_TEXT_OFFSET: usize = OFFERED_FILE_REPLY_LEN_OFFSET + 1;
+
+/// Whether `text` is a media type a reply may carry: printable ASCII with no
+/// space, within the bound, never empty.
+fn media_type_text(text: &[u8]) -> bool {
+    !text.is_empty() && text.len() <= WINDOW_MEDIA_TYPE_MAX && text.iter().all(u8::is_ascii_graphic)
+}
+
+/// Encode a [`WindowRequest::OfferedFile`] outcome into `out`, answering the
+/// number of bytes written; a media type out of form is refused as
+/// [`Errno::OutOfRange`] rather than sent.
+#[must_use]
+pub fn encode_offered_file_reply(
+    out: &mut [u8; WINDOW_OFFERED_FILE_REPLY_MAX],
+    result: Result<&str, Errno>,
+) -> usize {
+    *out = [0u8; WINDOW_OFFERED_FILE_REPLY_MAX];
+    let media = match result {
+        Ok(media) if media_type_text(media.as_bytes()) => media.as_bytes(),
+        Ok(_) => return refused_reply(out, Errno::OutOfRange),
+        Err(err) => return refused_reply(out, err),
+    };
+    // Bounded by the check above.
+    #[allow(clippy::cast_possible_truncation)]
+    let len = media.len() as u8;
+    out[OFFERED_FILE_REPLY_LEN_OFFSET] = len;
+    out[OFFERED_FILE_REPLY_TEXT_OFFSET..][..media.len()].copy_from_slice(media);
+    OFFERED_FILE_REPLY_TEXT_OFFSET + media.len()
+}
+
+/// Decode a [`WindowRequest::OfferedFile`] reply: the offered file's media
+/// type.
+///
+/// # Errors
+///
+/// * The refusal the session stated, for a status-frame reply.
+/// * [`Errno::BufferTooSmall`] for a frame shorter than its own header.
+/// * [`Errno::LengthOutOfRange`] for a frame whose length is not the one it
+///   states.
+/// * [`Errno::OutOfRange`] for a media type out of form.
+pub fn decode_offered_file_reply(bytes: &[u8]) -> Result<&str, Errno> {
+    if bytes.len() >= 4 {
+        crate::reply::decode_status_reply(&bytes[..4])?;
+    }
+    if bytes.len() < OFFERED_FILE_REPLY_TEXT_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let text = &bytes[OFFERED_FILE_REPLY_TEXT_OFFSET..];
+    if text.len() != usize::from(bytes[OFFERED_FILE_REPLY_LEN_OFFSET]) {
+        return Err(Errno::LengthOutOfRange);
+    }
+    if !media_type_text(text) {
+        return Err(Errno::OutOfRange);
+    }
+    core::str::from_utf8(text).map_err(|_| Errno::OutOfRange)
 }
 
 /// One item of a drag of icons off the desktop, as the window it was offered
@@ -7757,8 +7987,12 @@ const OPEN_TARGET_REPLY_KIND_OFFSET: usize = 4;
 const OPEN_TARGET_REPLY_LEN_OFFSET: usize = OPEN_TARGET_REPLY_KIND_OFFSET + 2;
 /// Byte offset of the grant handle.
 const OPEN_TARGET_REPLY_GRANT_OFFSET: usize = OPEN_TARGET_REPLY_LEN_OFFSET + 2;
+/// Byte offset of a placed file's window.
+const OPEN_TARGET_REPLY_WINDOW_OFFSET: usize = OPEN_TARGET_REPLY_GRANT_OFFSET + 8;
+/// Byte offset of its window-local x, then y.
+const OPEN_TARGET_REPLY_X_OFFSET: usize = OPEN_TARGET_REPLY_WINDOW_OFFSET + 8;
 /// Byte offset of the path or name bytes.
-const OPEN_TARGET_REPLY_TEXT_OFFSET: usize = OPEN_TARGET_REPLY_GRANT_OFFSET + 8;
+const OPEN_TARGET_REPLY_TEXT_OFFSET: usize = OPEN_TARGET_REPLY_X_OFFSET + 8;
 
 /// Wire kind of a drained queue.
 const OPEN_TARGET_KIND_EMPTY: u16 = 0;
@@ -7772,6 +8006,8 @@ const OPEN_TARGET_KIND_PANE: u16 = 3;
 const OPEN_TARGET_KIND_WRITABLE_DOCUMENT: u16 = 4;
 /// Wire kind of an [`OpenTarget::Image`].
 const OPEN_TARGET_KIND_IMAGE: u16 = 5;
+/// Wire kind of an [`OpenTarget::Placed`].
+const OPEN_TARGET_KIND_PLACED: u16 = 6;
 
 /// Encode a [`WindowRequest::TakeOpenTarget`] outcome into `out`, answering
 /// the number of bytes written.
@@ -7789,6 +8025,7 @@ pub fn encode_open_target_reply(
         out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
         4
     };
+    let mut placed = None;
     let (kind, text, grant) = match result {
         Err(err) => return refuse(out, err),
         Ok(None) => (OPEN_TARGET_KIND_EMPTY, &[][..], 0),
@@ -7807,8 +8044,24 @@ pub fn encode_open_target_reply(
             (kind, name, grant)
         }
         Ok(Some(OpenTarget::Pane(pane))) => (OPEN_TARGET_KIND_PANE, pane, 0),
+        Ok(Some(OpenTarget::Placed {
+            window_id,
+            x,
+            y,
+            name,
+            grant,
+        })) => {
+            if window_id == 0 {
+                return refuse(out, Errno::OutOfRange);
+            }
+            placed = Some((window_id, x, y));
+            (OPEN_TARGET_KIND_PLACED, name, grant)
+        }
     };
-    let document = kind == OPEN_TARGET_KIND_DOCUMENT || kind == OPEN_TARGET_KIND_WRITABLE_DOCUMENT;
+    let document = matches!(
+        kind,
+        OPEN_TARGET_KIND_DOCUMENT | OPEN_TARGET_KIND_WRITABLE_DOCUMENT | OPEN_TARGET_KIND_PLACED
+    );
     let bound = match kind {
         _ if document => crate::FS_NAME_MAX,
         OPEN_TARGET_KIND_PANE => WINDOW_PANE_NAME_MAX,
@@ -7827,6 +8080,11 @@ pub fn encode_open_target_reply(
     #[allow(clippy::cast_possible_truncation)] // Bounded above by FS_PATH_MAX.
     put_u16(out, OPEN_TARGET_REPLY_LEN_OFFSET, text.len() as u16);
     put_u64(out, OPEN_TARGET_REPLY_GRANT_OFFSET, grant);
+    if let Some((window_id, x, y)) = placed {
+        put_u64(out, OPEN_TARGET_REPLY_WINDOW_OFFSET, window_id);
+        put_u32(out, OPEN_TARGET_REPLY_X_OFFSET, x);
+        put_u32(out, OPEN_TARGET_REPLY_X_OFFSET + 4, y);
+    }
     out[OPEN_TARGET_REPLY_TEXT_OFFSET..OPEN_TARGET_REPLY_TEXT_OFFSET + text.len()]
         .copy_from_slice(text);
     OPEN_TARGET_REPLY_TEXT_OFFSET + text.len()
@@ -7859,7 +8117,9 @@ pub fn decode_open_target_reply(bytes: &[u8]) -> Result<Option<OpenTarget<'_>>, 
     let bound = match kind {
         OPEN_TARGET_KIND_EMPTY => 0,
         OPEN_TARGET_KIND_PATH | OPEN_TARGET_KIND_IMAGE => crate::FS_PATH_MAX,
-        OPEN_TARGET_KIND_DOCUMENT | OPEN_TARGET_KIND_WRITABLE_DOCUMENT => crate::FS_NAME_MAX,
+        OPEN_TARGET_KIND_DOCUMENT
+        | OPEN_TARGET_KIND_WRITABLE_DOCUMENT
+        | OPEN_TARGET_KIND_PLACED => crate::FS_NAME_MAX,
         OPEN_TARGET_KIND_PANE => WINDOW_PANE_NAME_MAX,
         _ => return Err(Errno::OutOfRange),
     };
@@ -7867,6 +8127,28 @@ pub fn decode_open_target_reply(bytes: &[u8]) -> Result<Option<OpenTarget<'_>>, 
         return Err(Errno::LengthOutOfRange);
     }
     let text = &bytes[OPEN_TARGET_REPLY_TEXT_OFFSET..OPEN_TARGET_REPLY_TEXT_OFFSET + len];
+    let window_id = read_u64(bytes, OPEN_TARGET_REPLY_WINDOW_OFFSET);
+    let (x, y) = (
+        read_u32(bytes, OPEN_TARGET_REPLY_X_OFFSET),
+        read_u32(bytes, OPEN_TARGET_REPLY_X_OFFSET + 4),
+    );
+    if kind == OPEN_TARGET_KIND_PLACED {
+        return if grant != 0 && window_id != 0 {
+            Ok(Some(OpenTarget::Placed {
+                window_id,
+                x,
+                y,
+                name: text,
+                grant,
+            }))
+        } else {
+            Err(Errno::OutOfRange)
+        };
+    }
+    // Only a placed file says where it was dropped.
+    if window_id != 0 || x != 0 || y != 0 {
+        return Err(Errno::OutOfRange);
+    }
     match kind {
         OPEN_TARGET_KIND_EMPTY if grant == 0 => Ok(None),
         OPEN_TARGET_KIND_PATH if grant == 0 && len != 0 => Ok(Some(OpenTarget::Path(text))),
@@ -8921,6 +9203,8 @@ const EV_SAVE_OFFER_ENDED: u16 = 28;
 const EV_ITEMS_OFFERED: u16 = 30;
 /// Wire event discriminant of [`WindowEvent::ItemsOfferEnded`].
 const EV_ITEMS_OFFER_ENDED: u16 = 31;
+/// Wire event discriminant of [`WindowEvent::FileOffered`].
+const EV_FILE_OFFERED: u16 = 32;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -9129,9 +9413,10 @@ pub enum WindowEvent {
         /// Whether `Shift` is held.
         shift: bool,
     },
-    /// The items offer numbered `serial` left the window, or the items were
-    /// dropped on it, where the application performs the drop it answered
-    /// with.
+    /// The items or file offer numbered `serial` left the window, or what it
+    /// offered was dropped on it: items, where the application performs the
+    /// drop it answered with; a file it answered it places, which arrives as
+    /// an [`OpenTarget::Placed`] once the dragging application hands it over.
     ItemsOfferEnded {
         /// The window the offer was over.
         window_id: u64,
@@ -9140,6 +9425,27 @@ pub enum WindowEvent {
         /// Where they were dropped and what the drop does, or `None` when
         /// they left.
         dropped: Option<OfferDrop>,
+    },
+    /// One file another application is dragging, or one carried off the
+    /// desktop, is held over the window at a window-local point, for its
+    /// application to answer with a [`WindowRequest::FileOfferAnswer`] whether
+    /// a drop there places it; [`WindowRequest::OfferedFile`] reads its media
+    /// type, the same for every offer the drag numbered `drag` makes. Offers
+    /// are numbered in the order the session makes them, so an answer names
+    /// the one it decided, and ended with an [`WindowEvent::ItemsOfferEnded`];
+    /// a file off the desktop is offered as an item too, under the same
+    /// number, ended once for both.
+    FileOffered {
+        /// The window the file is held over.
+        window_id: u64,
+        /// The drag's number.
+        drag: u32,
+        /// The offer's number.
+        serial: u32,
+        /// Window-local x.
+        x: u32,
+        /// Window-local y.
+        y: u32,
     },
     /// A [`WindowRequest::RenderPreview`] concluded.
     ///
@@ -9590,6 +9896,7 @@ impl WindowEvent {
             | Self::SaveOfferEnded { window_id, .. }
             | Self::ItemsOffered { window_id, .. }
             | Self::ItemsOfferEnded { window_id, .. }
+            | Self::FileOffered { window_id, .. }
             | Self::PreviewRendered { window_id, .. }
             | Self::Minimized { window_id }
             | Self::Resized { window_id, .. }
@@ -9663,10 +9970,13 @@ impl WindowEvent {
             } => write_drag_over(&mut out, serial, at, shift),
             Self::DragEnded { site, .. } => write_drop_site(&mut out, site),
             Self::SaveOffered { serial, x, y, .. } => {
-                put_u16(&mut out, 6, EV_SAVE_OFFERED);
-                put_u32(&mut out, SAVE_EVENT_SERIAL_OFFSET, serial);
-                put_u32(&mut out, SAVE_EVENT_X_OFFSET, x);
-                put_u32(&mut out, SAVE_EVENT_Y_OFFSET, y);
+                write_point_offer(&mut out, EV_SAVE_OFFERED, serial, (x, y));
+            }
+            Self::FileOffered {
+                drag, serial, x, y, ..
+            } => {
+                write_point_offer(&mut out, EV_FILE_OFFERED, serial, (x, y));
+                put_u32(&mut out, ITEMS_EVENT_DRAG_OFFSET, drag);
             }
             Self::SaveOfferEnded {
                 serial, dropped, ..
@@ -9826,6 +10136,7 @@ impl WindowEvent {
             EV_SAVE_OFFERED | EV_SAVE_OFFER_ENDED => read_save_offer_event(kind, window_id, bytes),
             EV_ITEMS_OFFERED => read_items_offered(window_id, bytes),
             EV_ITEMS_OFFER_ENDED => read_items_offer_end(window_id, bytes),
+            EV_FILE_OFFERED => read_file_offered(window_id, bytes),
             EV_KEY => {
                 event_reserved_zero(bytes, 16 + KeyInput::WIRE_LEN)?;
                 let key = KeyInput::from_bytes(&bytes[16..16 + KeyInput::WIRE_LEN])?;
@@ -9929,6 +10240,8 @@ const DRAG_AT_WINDOW: u8 = 1;
 const DRAG_AT_DESKTOP: u8 = 2;
 /// [`DropSite::Application`].
 const DROP_AT_APPLICATION: u8 = 3;
+/// [`DropSite::Placed`].
+const DROP_AT_PLACED: u8 = 4;
 
 /// Byte offset of a save offer event's serial.
 const SAVE_EVENT_SERIAL_OFFSET: usize = 16;
@@ -9946,6 +10259,19 @@ const OFFER_END_OPERATION_OFFSET: usize = SAVE_EVENT_DROPPED_OFFSET + 1;
 const ITEMS_EVENT_SHIFT_OFFSET: usize = 28;
 /// Byte offset of its drag's number.
 const ITEMS_EVENT_DRAG_OFFSET: usize = 32;
+
+/// Write an offer of `kind` numbered `serial` at the window-local point `at`.
+fn write_point_offer(
+    out: &mut [u8; WindowEvent::WIRE_LEN],
+    kind: u16,
+    serial: u32,
+    (x, y): (u32, u32),
+) {
+    put_u16(out, 6, kind);
+    put_u32(out, SAVE_EVENT_SERIAL_OFFSET, serial);
+    put_u32(out, SAVE_EVENT_X_OFFSET, x);
+    put_u32(out, SAVE_EVENT_Y_OFFSET, y);
+}
 
 /// Write the end of an offer of `kind`: its serial, and where it was dropped.
 fn write_offer_end(
@@ -10005,6 +10331,25 @@ fn read_items_offered(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno
             1 => true,
             _ => return Err(Errno::OutOfRange),
         },
+    })
+}
+
+/// Decode a file offer: an items offer's layout carrying no `Shift`, every
+/// byte it does not carry zero.
+fn read_file_offered(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    event_reserved_zero(bytes, ITEMS_EVENT_DRAG_OFFSET + 4)?;
+    if bytes[ITEMS_EVENT_SHIFT_OFFSET..ITEMS_EVENT_DRAG_OFFSET]
+        .iter()
+        .any(|&b| b != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    Ok(WindowEvent::FileOffered {
+        window_id,
+        drag: read_u32(bytes, ITEMS_EVENT_DRAG_OFFSET),
+        serial: read_u32(bytes, SAVE_EVENT_SERIAL_OFFSET),
+        x: read_u32(bytes, SAVE_EVENT_X_OFFSET),
+        y: read_u32(bytes, SAVE_EVENT_Y_OFFSET),
     })
 }
 
@@ -10200,6 +10545,7 @@ fn write_drop_site(out: &mut [u8; WindowEvent::WIRE_LEN], site: DropSite) {
     let (kind, operation) = match site {
         DropSite::Nothing => (DRAG_AT_NOWHERE, None),
         DropSite::Application => (DROP_AT_APPLICATION, None),
+        DropSite::Placed => (DROP_AT_PLACED, None),
         DropSite::Window {
             window_id,
             x,
@@ -10232,14 +10578,14 @@ fn read_drop_site(bytes: &[u8]) -> Result<DropSite, Errno> {
     let window = read_u64(bytes, DRAG_EVENT_WINDOW_OFFSET);
     let operation = bytes[DRAG_EVENT_SHIFT_OFFSET];
     match bytes[DRAG_EVENT_KIND_OFFSET] {
-        kind @ (DRAG_AT_NOWHERE | DROP_AT_APPLICATION) => {
+        kind @ (DRAG_AT_NOWHERE | DROP_AT_APPLICATION | DROP_AT_PLACED) => {
             if serial != 0 || x != 0 || y != 0 || window != 0 || operation != 0 {
                 return Err(Errno::BadMagic);
             }
-            Ok(if kind == DRAG_AT_NOWHERE {
-                DropSite::Nothing
-            } else {
-                DropSite::Application
+            Ok(match kind {
+                DRAG_AT_NOWHERE => DropSite::Nothing,
+                DROP_AT_APPLICATION => DropSite::Application,
+                _ => DropSite::Placed,
             })
         }
         DRAG_AT_WINDOW => {
@@ -10603,6 +10949,11 @@ mod tests {
         WINDOW_OFFERED_ITEMS_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PANE_NAME_MAX,
         WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_PREVIEW_MAX_SIDE, WINDOW_REQUEST_MAGIC,
         WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
+    };
+    use super::{
+        decode_offered_file_reply, encode_offered_file_reply, OFFERED_FILE_REPLY_TEXT_OFFSET,
+        OPEN_TARGET_KIND_DOCUMENT, OPEN_TARGET_REPLY_KIND_OFFSET, PLACE_DROPPED_GRANT_OFFSET,
+        PLACE_DROPPED_NAME_LEN_OFFSET, WINDOW_MEDIA_TYPE_MAX, WINDOW_OFFERED_FILE_REPLY_MAX,
     };
     use super::{
         decode_picked_file_reply, encode_picked_file_reply, PickedFile,
@@ -14069,6 +14420,10 @@ mod tests {
             },
             WindowEvent::DragEnded {
                 window_id: 4,
+                site: DropSite::Placed,
+            },
+            WindowEvent::DragEnded {
+                window_id: 4,
                 site: DropSite::Window {
                     window_id: u64::MAX,
                     x: 12,
@@ -14299,6 +14654,133 @@ mod tests {
             WindowEvent::from_bytes(&saved),
             Err(Errno::BadMagic),
             "a save carries no operation"
+        );
+    }
+
+    #[test]
+    fn a_file_offer_carries_its_drag_serial_and_point_and_nothing_else() {
+        let offer = WindowEvent::FileOffered {
+            window_id: 9,
+            drag: u32::MAX,
+            serial: u32::MAX,
+            x: 0,
+            y: u32::MAX,
+        };
+        let bytes = offer.to_le_bytes();
+        assert_eq!(WindowEvent::from_bytes(&bytes), Ok(offer));
+        let mut shifted = bytes;
+        shifted[ITEMS_EVENT_SHIFT_OFFSET] = 1;
+        assert_eq!(
+            WindowEvent::from_bytes(&shifted),
+            Err(Errno::BadMagic),
+            "a file is placed whatever is held"
+        );
+        let mut past = bytes;
+        past[ITEMS_EVENT_DRAG_OFFSET + 4] = 1;
+        assert_eq!(WindowEvent::from_bytes(&past), Err(Errno::BadMagic));
+        let mut unaddressed = bytes;
+        unaddressed[8..16].copy_from_slice(&0u64.to_le_bytes());
+        assert!(WindowEvent::from_bytes(&unaddressed).is_err());
+    }
+
+    #[test]
+    fn a_file_read_and_a_placed_drop_round_trip_and_name_a_delegation() {
+        let name = DocumentName::new("map.png").expect("a name");
+        let grant = core::num::NonZeroU64::new(41).expect("a grant");
+        let requests = |index| match index {
+            0 => WindowRequest::OfferedFile {
+                window_id: 3,
+                serial: u32::MAX,
+            },
+            1 | 2 => WindowRequest::FileOfferAnswer {
+                window_id: 3,
+                serial: 5,
+                places: index == 1,
+            },
+            3 => WindowRequest::PlaceDropped {
+                window_id: u64::MAX,
+                name,
+                grant,
+            },
+            _ => WindowRequest::PlaceDropped {
+                window_id: 2,
+                name: DocumentName::new("").expect("no name"),
+                grant,
+            },
+        };
+        for request in (0..5).map(requests) {
+            let frame = request.frame();
+            assert_eq!(frame.len(), request.wire_len());
+            assert_eq!(WindowRequest::from_bytes(&frame), Ok(request));
+            assert!(WindowRequest::from_bytes(&frame[..frame.len() - 1]).is_err());
+            let mut unaddressed = frame;
+            unaddressed[8..16].copy_from_slice(&0u64.to_le_bytes());
+            assert_eq!(
+                WindowRequest::from_bytes(&unaddressed),
+                Err(Errno::OutOfRange)
+            );
+        }
+        let placed = WindowRequest::PlaceDropped {
+            window_id: 2,
+            name,
+            grant,
+        }
+        .frame();
+        let mut ungranted = placed;
+        ungranted[PLACE_DROPPED_GRANT_OFFSET..][..8].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&ungranted),
+            Err(Errno::OutOfRange),
+            "a placed drop names a delegation"
+        );
+        let mut longer = placed;
+        longer[PLACE_DROPPED_NAME_LEN_OFFSET] += 1;
+        assert!(
+            WindowRequest::from_bytes(&longer).is_err(),
+            "a name longer than the frame"
+        );
+        let mut answer = WindowRequest::FileOfferAnswer {
+            window_id: 3,
+            serial: 5,
+            places: true,
+        }
+        .frame();
+        answer[WINDOW_ID_WIRE_LEN + 4] = 2;
+        assert_eq!(
+            WindowRequest::from_bytes(&answer),
+            Err(Errno::OutOfRange),
+            "an answer is one flag"
+        );
+    }
+
+    #[test]
+    fn an_offered_file_reply_carries_a_media_type_and_refuses_one_out_of_form() {
+        let mut out = [0u8; WINDOW_OFFERED_FILE_REPLY_MAX];
+        let n = encode_offered_file_reply(&mut out, Ok("image/png"));
+        assert_eq!(decode_offered_file_reply(&out[..n]), Ok("image/png"));
+        let longest = "t".repeat(WINDOW_MEDIA_TYPE_MAX);
+        let n = encode_offered_file_reply(&mut out, Ok(&longest));
+        assert_eq!(decode_offered_file_reply(&out[..n]), Ok(longest.as_str()));
+        for wrong in ["", "image/ png", "image/p\u{e9}ng", "a\tb"] {
+            let n = encode_offered_file_reply(&mut out, Ok(wrong));
+            assert_eq!(
+                decode_offered_file_reply(&out[..n]),
+                Err(Errno::OutOfRange),
+                "{wrong:?}"
+            );
+        }
+        let n = encode_offered_file_reply(&mut out, Err(Errno::NotFound));
+        assert_eq!(decode_offered_file_reply(&out[..n]), Err(Errno::NotFound));
+        let n = encode_offered_file_reply(&mut out, Ok("image/png"));
+        assert_eq!(
+            decode_offered_file_reply(&out[..n - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut control = out;
+        control[OFFERED_FILE_REPLY_TEXT_OFFSET] = 0x07;
+        assert_eq!(
+            decode_offered_file_reply(&control[..n]),
+            Err(Errno::OutOfRange)
         );
     }
 
@@ -15651,6 +16133,52 @@ mod tests {
         let mut unknown = encode_hand_over_reply(Ok(HandOverOutcome::Reached));
         unknown[4] = 9;
         assert_eq!(decode_hand_over_reply(&unknown), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn a_placed_open_target_says_where_it_was_dropped_and_nothing_else_does() {
+        let mut out = [0u8; WINDOW_OPEN_TARGET_REPLY_MAX];
+        let placed = OpenTarget::Placed {
+            window_id: u64::MAX,
+            x: 7,
+            y: u32::MAX,
+            name: b"map.png",
+            grant: 9,
+        };
+        let n = encode_open_target_reply(&mut out, Ok(Some(placed)));
+        assert_eq!(decode_open_target_reply(&out[..n]), Ok(Some(placed)));
+        for nowhere in [
+            OpenTarget::Placed {
+                window_id: 0,
+                x: 1,
+                y: 1,
+                name: b"",
+                grant: 9,
+            },
+            OpenTarget::Placed {
+                window_id: 3,
+                x: 1,
+                y: 1,
+                name: b"",
+                grant: 0,
+            },
+        ] {
+            let n = encode_open_target_reply(&mut out, Ok(Some(nowhere)));
+            assert_eq!(
+                decode_open_target_reply(&out[..n]),
+                Err(Errno::OutOfRange),
+                "{nowhere:?}"
+            );
+        }
+        let n = encode_open_target_reply(&mut out, Ok(Some(placed)));
+        let mut forged = out;
+        forged[OPEN_TARGET_REPLY_KIND_OFFSET..][..2]
+            .copy_from_slice(&OPEN_TARGET_KIND_DOCUMENT.to_le_bytes());
+        assert_eq!(
+            decode_open_target_reply(&forged[..n]),
+            Err(Errno::OutOfRange),
+            "only a placed file says where it was dropped"
+        );
     }
 
     #[test]

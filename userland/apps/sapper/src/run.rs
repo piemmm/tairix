@@ -544,6 +544,7 @@ mod program {
             | WindowEvent::SaveOfferEnded { .. }
             | WindowEvent::ItemsOffered { .. }
             | WindowEvent::ItemsOfferEnded { .. }
+            | WindowEvent::FileOffered { .. }
             | WindowEvent::PreviewRendered { .. }
             | WindowEvent::Pinch { .. }
             | WindowEvent::OpenRequested => Acted::Idle,

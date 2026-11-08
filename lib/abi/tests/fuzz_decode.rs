@@ -132,17 +132,17 @@ use tairix_abi::window_ipc::{
     decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
     decode_drag_spot_reply, decode_drop_target_reply, decode_hand_over_reply,
     decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
-    decode_offered_items_reply, decode_open_target_reply, decode_picked_name_reply,
-    decode_wallpapers_reply, encode_drag_spot_reply, encode_drop_target_reply,
-    encode_offered_items_reply, encode_open_target_reply, encode_picked_name_reply, AlertButton,
-    AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec, AppBar, AppBarClick, AppMenu,
-    AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
-    AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut, AppMenuSymbol, BundleRunPath,
-    ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DragOwnIcon, DragOwnSource,
-    DragPicture, DropOperation, DropSite, HandOverDocument, HandOverTarget, IconAsset, IconPath,
-    MenuOutcome, MenuRefusal, PaneName, PickPurpose, PreviewOutcome, PreviewSubject, SaveFormat,
-    SaveFormats, ToolOver, TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowSizing,
-    WindowTitle,
+    decode_offered_file_reply, decode_offered_items_reply, decode_open_target_reply,
+    decode_picked_name_reply, decode_wallpapers_reply, encode_drag_spot_reply,
+    encode_drop_target_reply, encode_offered_file_reply, encode_offered_items_reply,
+    encode_open_target_reply, encode_picked_name_reply, AlertButton, AlertButtonRole, AlertOutcome,
+    AlertSeverity, AlertSpec, AppBar, AppBarClick, AppMenu, AppMenuEntry, AppMenuEntryText,
+    AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow,
+    AppMenuShortcut, AppMenuSymbol, BundleRunPath, ClipboardKind, CursorShape, DocumentName,
+    DragAt, DragItems, DragOwnIcon, DragOwnSource, DragPicture, DropOperation, DropSite,
+    HandOverDocument, HandOverTarget, IconAsset, IconPath, MenuOutcome, MenuRefusal, PaneName,
+    PickPurpose, PreviewOutcome, PreviewSubject, SaveFormat, SaveFormats, ToolOver, TooltipText,
+    WindowEvent, WindowRegion, WindowRequest, WindowSizing, WindowTitle,
 };
 use tairix_abi::window_ipc::{LandingName, LandingOutcome, LandingStep};
 use tairix_abi::BUNDLE_ID_MAX;
@@ -872,6 +872,13 @@ fn open_target_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
             writable: true,
         })),
         Ok(Some(OpenTarget::Pane(b"files"))),
+        Ok(Some(OpenTarget::Placed {
+            window_id: 5,
+            x: 40,
+            y: 60,
+            name: b"map.png",
+            grant: 9,
+        })),
         Err(tairix_abi::Errno::NotFound),
     ];
     targets
@@ -1322,6 +1329,12 @@ fn exercise_window_ipc(bytes: &[u8]) {
     if let Ok(folder) = decode_drag_spot_reply(bytes) {
         let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_DRAG_SPOT_REPLY_MAX];
         let len = encode_drag_spot_reply(&mut frame, Ok(folder));
+        assert_eq!(&frame[..len], bytes);
+    }
+    // And the media type of a file another application drags.
+    if let Ok(media) = decode_offered_file_reply(bytes) {
+        let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_OFFERED_FILE_REPLY_MAX];
+        let len = encode_offered_file_reply(&mut frame, Ok(media));
         assert_eq!(&frame[..len], bytes);
     }
     // And a page of the items a drag off the desktop carries.
@@ -3705,6 +3718,7 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
     seeds.extend(window_request_transient_seeds());
     seeds.extend(window_request_desktop_seeds());
     seeds.extend(window_request_text_seeds());
+    seeds.extend(window_request_file_seeds());
     seeds.extend(begin_drag_seeds());
     seeds.extend(drop_landing_seeds());
     seeds.extend(window_request_alert_seeds());
@@ -3914,6 +3928,27 @@ fn begin_drag_seeds() -> [WindowRequest; 4] {
             )
             .and_then(|items| items.with_hidden_ending(4))
             .expect("two bundles, a RISC OS application and a file"),
+        },
+    ]
+}
+
+/// The seeds a file another application drags over a window asks with: its
+/// type read, the answer, and the hand-over of a placed drop.
+fn window_request_file_seeds() -> [WindowRequest; 3] {
+    [
+        WindowRequest::OfferedFile {
+            window_id: 3,
+            serial: 9,
+        },
+        WindowRequest::FileOfferAnswer {
+            window_id: 3,
+            serial: 9,
+            places: true,
+        },
+        WindowRequest::PlaceDropped {
+            window_id: 3,
+            name: DocumentName::new("map.png").expect("a valid name"),
+            grant: core::num::NonZeroU64::new(0x52).expect("a grant"),
         },
     ]
 }
@@ -4261,7 +4296,7 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
 
 /// Well-formed window events, each a frame for a bit-flip to land on.
 fn seeded_window_events() -> Vec<[u8; WindowEvent::WIRE_LEN]> {
-    std::vec![
+    let mut events = std::vec![
         WindowEvent::AppBarDefault.to_le_bytes(),
         WindowEvent::AppBarMenu {
             item: AppMenuItemId::new(7).expect("a valid id"),
@@ -4316,6 +4351,23 @@ fn seeded_window_events() -> Vec<[u8; WindowEvent::WIRE_LEN]> {
             ended: true,
         }
         .to_le_bytes(),
+        WindowEvent::PreviewRendered {
+            window_id: 3,
+            subject: PreviewSubject::Screensaver(3),
+            width: 144,
+            height: 81,
+            outcome: PreviewOutcome::Unavailable,
+        }
+        .to_le_bytes(),
+    ];
+    events.extend(seeded_transfer_events());
+    events
+}
+
+/// The events that carry a drag, a save or a file over a window, one of each
+/// shape.
+fn seeded_transfer_events() -> [[u8; WindowEvent::WIRE_LEN]; 6] {
+    [
         WindowEvent::DragOver {
             window_id: 3,
             serial: 5,
@@ -4340,6 +4392,14 @@ fn seeded_window_events() -> Vec<[u8; WindowEvent::WIRE_LEN]> {
             y: 20,
         }
         .to_le_bytes(),
+        WindowEvent::FileOffered {
+            window_id: 3,
+            drag: 4,
+            serial: 7,
+            x: 11,
+            y: 21,
+        }
+        .to_le_bytes(),
         WindowEvent::SaveOfferEnded {
             window_id: 3,
             serial: 6,
@@ -4350,14 +4410,6 @@ fn seeded_window_events() -> Vec<[u8; WindowEvent::WIRE_LEN]> {
             window_id: 3,
             serial: 6,
             dropped: None,
-        }
-        .to_le_bytes(),
-        WindowEvent::PreviewRendered {
-            window_id: 3,
-            subject: PreviewSubject::Screensaver(3),
-            width: 144,
-            height: 81,
-            outcome: PreviewOutcome::Unavailable,
         }
         .to_le_bytes(),
     ]

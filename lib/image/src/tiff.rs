@@ -47,7 +47,7 @@ use crate::channel::{Channel, Sampler};
 use crate::density::{DensityUnit, Stated};
 use crate::encode::{TiffCompression, TiffOptions};
 use crate::ifd::{Endian, Field, Ifd, ENTRY_LEN, SHORT};
-use crate::lzw::{CodeSource, Lzw, Widen};
+use crate::lzw::{BitCodes, Lzw, Widen};
 use crate::orientation::{Orientation, TAG_ORIENTATION};
 use crate::pages::{PageSource, Pages};
 use crate::picture::{IndexDepth, Picture};
@@ -704,44 +704,6 @@ impl Scratch {
                 jpeg: Vec::new(),
             },
         }
-    }
-}
-
-/// A reader over the flat run of bytes TIFF packs its LZW codes into.
-///
-/// `lsb_first` is the classic dialect's packing, where a code's first bit is
-/// a byte's least significant rather than its most.
-struct BitCodes<'a> {
-    data: &'a [u8],
-    at: u64,
-    lsb_first: bool,
-}
-
-impl CodeSource for BitCodes<'_> {
-    fn code(&mut self, width: u32) -> Result<Option<u16>, DecodeError> {
-        let total = self.data.len() as u64 * 8;
-        if self.at + u64::from(width) > total {
-            return Ok(None);
-        }
-        let mut value = 0u32;
-        for offset in 0..u64::from(width) {
-            let at = self.at + offset;
-            let byte = self.data.get((at / 8) as usize).copied().unwrap_or(0);
-            let bit = if self.lsb_first {
-                u32::from(byte >> (at % 8)) & 1
-            } else {
-                u32::from(byte >> (7 - at % 8)) & 1
-            };
-            value = if self.lsb_first {
-                value | bit << offset
-            } else {
-                value << 1 | bit
-            };
-        }
-        self.at += u64::from(width);
-        u16::try_from(value)
-            .map(Some)
-            .map_err(|_| DecodeError::TiffInvalidCode)
     }
 }
 

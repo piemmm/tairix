@@ -380,7 +380,9 @@ where
         };
         ended = seat.shell.drag_key(seat.compositor, &event);
     }
-    if let Some(report) = seat.shell.take_drag_report() {
+    // An application's drag can owe its own window a report and another
+    // application's window a file offer in one batch.
+    while let Some(report) = seat.shell.take_drag_report() {
         router.report_drag(seat, report);
     }
     if let Some(end) = ended {

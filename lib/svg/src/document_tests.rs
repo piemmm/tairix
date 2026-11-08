@@ -2812,3 +2812,27 @@ fn of_two_elements_sharing_an_id_a_reference_finds_the_first() {
         "the first in the document"
     );
 }
+
+#[test]
+fn text_along_a_basic_shape_starts_where_svg_2_starts_its_path() {
+    let image = decode_text(
+        r##"<svg viewBox="0 0 8 8">
+          <defs><circle id="round" cx="3" cy="4" r="2"/></defs>
+          <text font-size="2" fill="#ff0000"><textPath href="#round">a</textPath></text>
+        </svg>"##,
+    )
+    .expect("a drawable document");
+    let layer = &flatten(image.nodes())[0];
+    // The half-em glyph stands on the circle's rightmost point, turned to run
+    // down the page, its height standing out to the right.
+    let xs: Vec<i32> = layer.contours[0].iter().map(|point| point.0).collect();
+    let (least, most) = (
+        xs.iter().copied().min().expect("a point"),
+        xs.iter().copied().max().expect("a point"),
+    );
+    assert!(
+        (UNIT * 9 / 2..=UNIT * 51 / 10).contains(&least),
+        "{least} against a unit of {UNIT}"
+    );
+    assert!((UNIT * 13 / 2..=UNIT * 71 / 10).contains(&most), "{most}");
+}

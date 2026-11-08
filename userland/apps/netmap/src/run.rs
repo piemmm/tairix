@@ -1050,6 +1050,7 @@ mod program {
                 | WindowEvent::SaveOfferEnded { .. }
                 | WindowEvent::ItemsOffered { .. }
                 | WindowEvent::ItemsOfferEnded { .. }
+                | WindowEvent::FileOffered { .. }
                 | WindowEvent::PreviewRendered { .. }
                 | WindowEvent::OpenRequested => false,
             };

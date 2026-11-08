@@ -4139,6 +4139,7 @@ fn a_drag_on_the_desktop_settings_laid_out_again_is_asked_once() {
                 operation: DropOperation::Copy,
             },
             refused: None,
+            offer: None,
         }))
     );
 }

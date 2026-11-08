@@ -44,8 +44,8 @@ use alloc::vec::Vec;
 use tairix_abi::driver::display::RefreshRate;
 use tairix_abi::fs::FileId;
 use tairix_abi::window_ipc::{
-    AlertSeverity, AlertSpec, DragItems, DropOperation, DropTarget, OfferDrop, OfferedItem,
-    WindowEvent,
+    AlertSeverity, AlertSpec, DocumentName, DragItems, DropOperation, DropTarget, OfferDrop,
+    OfferedItem, WindowEvent,
 };
 use tairix_abi::Errno;
 use tairix_browse::media::{name_endings, MediaType};
@@ -55,7 +55,7 @@ use tairix_geometry::{Point, Rect};
 use tairix_icon::{IconKind, IconRequest, Landed};
 use tairix_theme::CursorKind;
 use tairix_util::utf8::shown;
-use tairix_window::DragConclusion;
+use tairix_window::{DragConclusion, Placement};
 use tairix_wm::{Compositor, InputEvent, Key, NamedKey, PointerButton, WindowId};
 
 use crate::picker::PickId;
@@ -78,7 +78,7 @@ pub enum DragEnd {
 
 /// How a drag of icons carried off the desktop ended: where they were
 /// dropped, and the end the window last offered them is owed.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DesktopEnd {
     /// Where they were dropped.
     pub dropped: DesktopDrop,
@@ -87,7 +87,7 @@ pub struct DesktopEnd {
 }
 
 /// Where icons carried off the desktop were dropped.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DesktopDrop {
     /// Nowhere that takes them: they stand where they stood.
     Nothing,
@@ -96,6 +96,43 @@ pub enum DesktopDrop {
     /// On a window whose application answered that it takes them, which
     /// performs the drop.
     Window,
+    /// The one file, on a window whose application answered it places it
+    /// there: the session opens it read-only and hands it over. Boxed: a name
+    /// is far wider than every other drop.
+    Placed(Box<PlacedItem>),
+}
+
+/// The one file a drag off the desktop placed in a window.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlacedItem {
+    /// Where it goes.
+    pub placement: Placement,
+    /// The file's absolute path.
+    pub path: String,
+    /// Its name, for display.
+    pub name: DocumentName,
+}
+
+/// What the window icons off the desktop are held over answered, since the
+/// pointer reached it.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct OfferAnswers {
+    /// What a drop of the items there does, which the window performs.
+    items: Option<DropOperation>,
+    /// Whether a drop there places the one file.
+    places: bool,
+}
+
+impl OfferAnswers {
+    /// What the pointer shows: the items' answer, else a copy where the file
+    /// is placed.
+    const fn shown(self) -> Option<DropOperation> {
+        match self.items {
+            Some(operation) => Some(operation),
+            None if self.places => Some(DropOperation::Copy),
+            None => None,
+        }
+    }
 }
 
 /// What a drag of icons carried off the desktop carries: what it shows of
@@ -166,6 +203,15 @@ pub struct ItemsOfferEnd {
 }
 
 impl ItemsOfferEnd {
+    /// The end of offer `serial` made window `window_id`, which they left.
+    const fn left((window_id, serial): (u64, u32)) -> Self {
+        Self {
+            window_id,
+            serial,
+            dropped: None,
+        }
+    }
+
     /// The event that tells the window.
     #[must_use]
     pub const fn event(self) -> WindowEvent {
@@ -175,6 +221,37 @@ impl ItemsOfferEnd {
             dropped: self.dropped,
         }
     }
+}
+
+/// An offer reaching window `window_id` at window-local `(x, y)`, numbered
+/// `serial`.
+struct Reached {
+    window_id: u64,
+    serial: u32,
+    x: u32,
+    y: u32,
+}
+
+/// Move the offer `offered` holds to the window the pointer is `over`, if
+/// any, numbering it on from `serial`: answers the window it left, if it left
+/// one, with its last offer's number, and where it reached.
+fn moved_offer(
+    offered: &mut Option<(u64, u32)>,
+    over: Option<(u64, u32, u32)>,
+    serial: &mut u32,
+) -> (Option<(u64, u32)>, Option<Reached>) {
+    let left = offered.take_if(|(window, _)| over.is_none_or(|(now, ..)| now != *window));
+    let reached = over.map(|(window_id, x, y)| {
+        *serial = serial.wrapping_add(1);
+        *offered = Some((window_id, *serial));
+        Reached {
+            window_id,
+            serial: *serial,
+            x,
+            y,
+        }
+    });
+    (left, reached)
 }
 
 /// How an application's drag ended: the window it began in, where it was
@@ -188,6 +265,49 @@ pub struct ItemsEnd {
     /// Why the application whose slot it was dropped on does not open it,
     /// for the desktop to say in that application's name.
     pub refused: Option<Box<DropRefusal>>,
+    /// The window last offered the file, to be told the offer ended.
+    pub offer: Option<ItemsOfferEnd>,
+}
+
+/// One file an application is dragging, offered to another application's
+/// window under the pointer at a point in it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct FileOffer {
+    /// The window offered it.
+    pub window_id: u64,
+    /// The drag's number.
+    pub drag: u32,
+    /// The offer's number.
+    pub serial: u32,
+    /// Window-local x.
+    pub x: u32,
+    /// Window-local y.
+    pub y: u32,
+}
+
+impl FileOffer {
+    /// The event that makes the offer.
+    #[must_use]
+    pub const fn event(self) -> WindowEvent {
+        WindowEvent::FileOffered {
+            window_id: self.window_id,
+            drag: self.drag,
+            serial: self.serial,
+            x: self.x,
+            y: self.y,
+        }
+    }
+}
+
+/// What a file an application is dragging owes the windows of other
+/// applications: an end to the one it left, and an offer to the one it is
+/// over.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileReport {
+    /// The window it left.
+    pub left: Option<ItemsOfferEnd>,
+    /// The window it is over, and where.
+    pub over: Option<FileOffer>,
 }
 
 /// How a carried save ended: the pick it was carried for, where it was
@@ -403,14 +523,21 @@ pub enum DragSurface {
         /// Window-local y.
         y: u32,
     },
-    /// A window of another application: what it answers is what its slot at
-    /// `index` answers, since a window takes a drop as its application does.
+    /// A window of another application, at a point in it: a file the window
+    /// answers it places is placed there, and otherwise the window takes the
+    /// drop as its slot at `index` does.
     AppWindow {
         /// The application's slot in the strip.
         index: usize,
         /// What the application answers the drag with, or `None` when the
         /// desktop cannot vouch for it.
         answer: Option<SlotAnswer>,
+        /// The window under the pointer.
+        window_id: u64,
+        /// Window-local x.
+        x: u32,
+        /// Window-local y.
+        y: u32,
     },
     /// A window a carried save is offered to, at a point in it.
     Offer {
@@ -445,10 +572,16 @@ pub enum DragPlace {
         index: usize,
     },
     /// A window of the application at slot `index`, which is not the one
-    /// dragging.
+    /// dragging, at a point in it.
     AppWindow {
         /// The application's slot in the strip.
         index: usize,
+        /// The window under the pointer.
+        window_id: u64,
+        /// Window-local x.
+        x: u32,
+        /// Window-local y.
+        y: u32,
     },
     /// One of the dragging application's own windows, at a point in it.
     Window {
@@ -485,9 +618,9 @@ pub enum WindowUnder {
     /// The dragging application's own window, at a window-local point in its
     /// client, or `None` over its furniture.
     Own(Option<(u32, u32)>),
-    /// Another application's window, that application at slot `index` when
-    /// the strip shows it.
-    Foreign(Option<usize>),
+    /// Another application's window at a window-local point in its client,
+    /// that application at slot `index` when the strip shows it.
+    Foreign(Option<usize>, (u32, u32)),
 }
 
 impl DragPlace {
@@ -498,23 +631,48 @@ impl DragPlace {
     #[must_use]
     pub const fn over_window(window_id: u64, held: bool, under: WindowUnder) -> Self {
         match (held, under) {
-            (true, _) | (false, WindowUnder::Own(None) | WindowUnder::Foreign(None)) => {
+            (true, _) | (false, WindowUnder::Own(None) | WindowUnder::Foreign(None, _)) => {
                 Self::Nothing
             }
             (false, WindowUnder::Own(Some((x, y)))) => Self::Window { window_id, x, y },
-            (false, WindowUnder::Foreign(Some(index))) => Self::AppWindow { index },
+            (false, WindowUnder::Foreign(Some(index), (x, y))) => Self::AppWindow {
+                index,
+                window_id,
+                x,
+                y,
+            },
         }
     }
 }
 
 impl DragSurface {
+    /// The window a carried save or a desktop drag is offered to, and where
+    /// in it, when this is one.
+    const fn offered_at(&self) -> Option<(u64, u32, u32)> {
+        match *self {
+            Self::Offer { window_id, x, y } => Some((window_id, x, y)),
+            _ => None,
+        }
+    }
+
     /// The place this is what is over.
     #[must_use]
     pub const fn place(&self) -> DragPlace {
         match *self {
             Self::Nothing => DragPlace::Nothing,
             Self::Slot { index, .. } => DragPlace::Slot { index },
-            Self::AppWindow { index, .. } => DragPlace::AppWindow { index },
+            Self::AppWindow {
+                index,
+                window_id,
+                x,
+                y,
+                ..
+            } => DragPlace::AppWindow {
+                index,
+                window_id,
+                x,
+                y,
+            },
             Self::Window { window_id, x, y } => DragPlace::Window { window_id, x, y },
             Self::Offer { window_id, x, y } => DragPlace::Offer { window_id, x, y },
             Self::Desktop { icon, revision, .. } => DragPlace::Desktop { icon, revision },
@@ -526,9 +684,9 @@ impl DragSurface {
     fn same_place(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Nothing, Self::Nothing) => true,
-            (Self::Slot { index: a, .. }, Self::Slot { index: b, .. })
-            | (Self::AppWindow { index: a, .. }, Self::AppWindow { index: b, .. }) => a == b,
+            (Self::Slot { index: a, .. }, Self::Slot { index: b, .. }) => a == b,
             (Self::Window { window_id: a, .. }, Self::Window { window_id: b, .. })
+            | (Self::AppWindow { window_id: a, .. }, Self::AppWindow { window_id: b, .. })
             | (Self::Offer { window_id: a, .. }, Self::Offer { window_id: b, .. }) => a == b,
             (Self::Desktop { folder: a, .. }, Self::Desktop { folder: b, .. }) => a == b,
             _ => false,
@@ -576,16 +734,22 @@ pub enum OwedReport {
     Save(SaveReport),
     /// The offers icons carried off the desktop owe.
     Desktop(DesktopReport),
+    /// The offers a file an application drags owes other applications'
+    /// windows.
+    File(FileReport),
 }
 
 /// What icons carried off the desktop owe: an end to the window they left,
-/// and an offer to the one they are over.
+/// and an offer to the one they are over — of the one file too, under the
+/// same number, when they are one file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DesktopReport {
     /// The window they left.
     pub left: Option<ItemsOfferEnd>,
     /// The window they are over, and where.
     pub over: Option<ItemsOffer>,
+    /// The one file, offered to that window.
+    pub file: Option<FileOffer>,
 }
 
 /// What a carried save owes: an end to the window it left, and an offer to the
@@ -620,8 +784,9 @@ pub(crate) struct DragCarrier {
     /// from it, so a late answer to an earlier drag never names one of this
     /// drag's.
     issued: u32,
-    /// The number the last drag of icons off the desktop was given.
-    desktop_drags: u32,
+    /// The number the last drag of an application's items or of icons off the
+    /// desktop was given.
+    drags: u32,
     /// The items the last drag off the desktop dropped on a window, which
     /// that window's application reads until the next such drag.
     dropped: Option<Dropped>,
@@ -640,7 +805,18 @@ struct Dropped {
 enum Cargo {
     /// Items the application's window `source` began dragging, boxed so the
     /// carrier is no larger than a save.
-    Items { source: u64, items: Box<DragItems> },
+    Items {
+        source: u64,
+        items: Box<DragItems>,
+        /// The drag's number, which its file offers carry.
+        drag: u32,
+        /// The other application's window offered the one file last and that
+        /// offer's number, until it is told the offer ended.
+        offered: Option<(u64, u32)>,
+        /// Whether a file offer, or its end, is owed another application's
+        /// window.
+        offer_owed: bool,
+    },
     /// The document a pick's save panel names.
     Save {
         /// The pick whose panel it was carried out of.
@@ -661,6 +837,8 @@ enum Cargo {
         /// The window offered them last and that offer's number, until it is
         /// told the offer ended.
         offered: Option<(u64, u32)>,
+        /// What that window answered since the pointer reached it.
+        answers: OfferAnswers,
     },
 }
 
@@ -688,6 +866,38 @@ struct Carried {
 }
 
 impl Carried {
+    /// The file offer and end owed other applications' windows, if any is
+    /// owed: the offer numbered, and marked sent.
+    fn take_file_report(&mut self) -> Option<FileReport> {
+        let Cargo::Items {
+            drag,
+            offered,
+            offer_owed: owed @ true,
+            ..
+        } = &mut self.cargo
+        else {
+            return None;
+        };
+        *owed = false;
+        let over = match self.over {
+            DragSurface::AppWindow {
+                window_id, x, y, ..
+            } => Some((window_id, x, y)),
+            _ => None,
+        };
+        let (left, reached) = moved_offer(offered, over, &mut self.serial);
+        Some(FileReport {
+            left: left.map(ItemsOfferEnd::left),
+            over: reached.map(|offer| FileOffer {
+                window_id: offer.window_id,
+                drag: *drag,
+                serial: offer.serial,
+                x: offer.x,
+                y: offer.y,
+            }),
+        })
+    }
+
     /// Whether `serial` numbers a report made since the pointer reached the
     /// place it is over, counting across the numbers' wrap: none has, until
     /// the first report there.
@@ -744,7 +954,15 @@ impl DesktopShell {
         items: DragItems,
     ) -> Result<(), Errno> {
         let items = Box::new(items);
-        self.carry(compositor, wm, Cargo::Items { source, items })
+        self.drag.drags = self.drag.drags.wrapping_add(1);
+        let cargo = Cargo::Items {
+            source,
+            items,
+            drag: self.drag.drags,
+            offered: None,
+            offer_owed: false,
+        };
+        self.carry(compositor, wm, cargo)
     }
 
     /// Begin carrying the save the panel of pick `pick`, in its compositor
@@ -788,12 +1006,13 @@ impl DesktopShell {
         if !self.router().holds_primary() {
             return Err(Errno::PermissionDenied);
         }
-        self.drag.desktop_drags = self.drag.desktop_drags.wrapping_add(1);
+        self.drag.drags = self.drag.drags.wrapping_add(1);
         self.drag.dropped = None;
         let cargo = Cargo::Desktop {
-            drag: self.drag.desktop_drags,
+            drag: self.drag.drags,
             cargo: Box::new(cargo),
             offered: None,
+            answers: OfferAnswers::default(),
         };
         let field = self.work_area(compositor);
         self.lift(compositor, cargo, Some(field));
@@ -875,7 +1094,7 @@ impl DesktopShell {
     #[must_use]
     pub fn drag_items(&self) -> Option<(u64, &DragItems)> {
         match &self.drag.carried.as_ref()?.cargo {
-            Cargo::Items { source, items } => Some((*source, &**items)),
+            Cargo::Items { source, items, .. } => Some((*source, &**items)),
             Cargo::Save { .. } | Cargo::Desktop { .. } => None,
         }
     }
@@ -897,6 +1116,20 @@ impl DesktopShell {
             .carried
             .as_ref()
             .is_some_and(|carried| matches!(carried.cargo, Cargo::Desktop { .. }))
+    }
+
+    /// The answer the application owning window `window_id` gave the carried
+    /// drag when the pointer reached that window, taken while the pointer is
+    /// still over it: what moving there carries on, rather than asking again.
+    pub fn take_window_answer(&mut self, window_id: u64) -> Option<Option<SlotAnswer>> {
+        match &mut self.drag.carried.as_mut()?.over {
+            DragSurface::AppWindow {
+                answer,
+                window_id: over,
+                ..
+            } if *over == window_id => Some(answer.take()),
+            _ => None,
+        }
     }
 
     /// Whether the carried drag's pointer is already over `place`, so nothing
@@ -928,7 +1161,20 @@ impl DesktopShell {
         // once and owes no application anything; the report owed only relights
         // its folder. Its own icons brought back are put down there.
         carried.owed |= next.reported() && changed || left_reported;
+        // A file offer follows the pointer over another application's window,
+        // and the window it left is told the offer ended.
+        let over_app = |surface: &DragSurface| matches!(surface, DragSurface::AppWindow { .. });
+        let offers = over_app(&next) && changed || arrived && over_app(&carried.over);
+        if let Cargo::Items {
+            items, offer_owed, ..
+        } = &mut carried.cargo
+        {
+            *offer_owed |= offers && items.openable();
+        }
         if arrived {
+            if let Cargo::Desktop { answers, .. } = &mut carried.cargo {
+                *answers = OfferAnswers::default();
+            }
             carried.shown = match next {
                 DragSurface::Desktop { .. } if saving => Some(DropOperation::Copy),
                 DragSurface::Desktop { .. } if icons => Some(DropOperation::Move),
@@ -977,6 +1223,9 @@ impl DesktopShell {
                     carried.shown = None;
                     carried.answered = false;
                     carried.place_serial = carried.serial.wrapping_add(1);
+                    if let Cargo::Desktop { answers, .. } = &mut carried.cargo {
+                        *answers = OfferAnswers::default();
+                    }
                     self.hold_drag_cursor(compositor);
                 }
                 None
@@ -990,60 +1239,55 @@ impl DesktopShell {
     pub fn take_drag_report(&mut self) -> Option<OwedReport> {
         let carried = self.drag.carried.as_mut()?;
         if !carried.owed {
-            return None;
+            return carried.take_file_report().map(OwedReport::File);
         }
         carried.owed = false;
         let source = match &mut carried.cargo {
             Cargo::Items { source, .. } => *source,
             Cargo::Save { offered, .. } => {
-                let over = match carried.over {
-                    DragSurface::Offer { window_id, x, y } => Some((window_id, x, y)),
-                    _ => None,
-                };
-                let left = offered
-                    .take_if(|(window, _)| over.is_none_or(|(now, ..)| now != *window))
-                    .map(|(window_id, serial)| OfferEnd {
+                let over = carried.over.offered_at();
+                let (left, reached) = moved_offer(offered, over, &mut carried.serial);
+                return Some(OwedReport::Save(SaveReport {
+                    left: left.map(|(window_id, serial)| OfferEnd {
                         window_id,
                         serial,
                         dropped: None,
-                    });
-                let over = over.map(|(window_id, x, y)| {
-                    carried.serial = carried.serial.wrapping_add(1);
-                    *offered = Some((window_id, carried.serial));
-                    SaveOffer {
-                        window_id,
-                        serial: carried.serial,
-                        x,
-                        y,
-                    }
-                });
-                return Some(OwedReport::Save(SaveReport { left, over }));
+                    }),
+                    over: reached.map(|offer| SaveOffer {
+                        window_id: offer.window_id,
+                        serial: offer.serial,
+                        x: offer.x,
+                        y: offer.y,
+                    }),
+                }));
             }
-            Cargo::Desktop { drag, offered, .. } => {
-                let over = match carried.over {
-                    DragSurface::Offer { window_id, x, y } => Some((window_id, x, y)),
-                    _ => None,
-                };
-                let left = offered
-                    .take_if(|(window, _)| over.is_none_or(|(now, ..)| now != *window))
-                    .map(|(window_id, serial)| ItemsOfferEnd {
-                        window_id,
-                        serial,
-                        dropped: None,
-                    });
-                let over = over.map(|(window_id, x, y)| {
-                    carried.serial = carried.serial.wrapping_add(1);
-                    *offered = Some((window_id, carried.serial));
-                    ItemsOffer {
-                        window_id,
-                        drag: *drag,
-                        serial: carried.serial,
-                        x,
-                        y,
-                        shift: carried.shift,
-                    }
+            Cargo::Desktop {
+                drag,
+                cargo,
+                offered,
+                ..
+            } => {
+                let over = carried.over.offered_at();
+                let (left, reached) = moved_offer(offered, over, &mut carried.serial);
+                let left = left.map(ItemsOfferEnd::left);
+                let over = reached.map(|offer| ItemsOffer {
+                    window_id: offer.window_id,
+                    drag: *drag,
+                    serial: offer.serial,
+                    x: offer.x,
+                    y: offer.y,
+                    shift: carried.shift,
                 });
-                return Some(OwedReport::Desktop(DesktopReport { left, over }));
+                let file = over
+                    .filter(|_| cargo.shown.openable())
+                    .map(|offer| FileOffer {
+                        window_id: offer.window_id,
+                        drag: offer.drag,
+                        serial: offer.serial,
+                        x: offer.x,
+                        y: offer.y,
+                    });
+                return Some(OwedReport::Desktop(DesktopReport { left, over, file }));
             }
         };
         carried.serial = carried.serial.wrapping_add(1);
@@ -1127,16 +1371,90 @@ impl DesktopShell {
         let Some(carried) = self.drag.carried.as_mut() else {
             return false;
         };
-        let current = matches!(carried.cargo, Cargo::Desktop { .. })
-            && matches!(carried.over, DragSurface::Offer { window_id: over, .. } if over == window_id)
-            && carried.reported_here(serial);
-        if !current {
+        let standing = carried.reported_here(serial)
+            && matches!(carried.over, DragSurface::Offer { window_id: over, .. } if over == window_id);
+        let Cargo::Desktop { answers, .. } = &mut carried.cargo else {
+            return false;
+        };
+        if !standing {
             return false;
         }
-        carried.shown = verdict;
+        answers.items = verdict;
+        carried.shown = answers.shown();
         carried.answered = true;
         self.hold_drag_cursor(compositor);
         true
+    }
+
+    /// Take the answer window `window_id`'s application gave the file offer
+    /// numbered `serial`: whether a drop there places the file, shown on the
+    /// pointer while the file is still over that window and the offer is the
+    /// one standing there, and answering whether it was.
+    pub fn file_offer_answered(
+        &mut self,
+        compositor: &mut Compositor,
+        window_id: u64,
+        serial: u32,
+        places: bool,
+    ) -> bool {
+        let Some(carried) = self.drag.carried.as_mut() else {
+            return false;
+        };
+        let standing = carried.reported_here(serial);
+        match &mut carried.cargo {
+            Cargo::Items {
+                offered: Some((offered, _)),
+                ..
+            } if standing
+                && *offered == window_id
+                && matches!(carried.over, DragSurface::AppWindow { window_id: over, .. } if over == window_id) =>
+            {
+                carried.shown = places.then_some(DropOperation::Copy);
+            }
+            Cargo::Desktop {
+                cargo,
+                offered: Some((offered, _)),
+                answers,
+                ..
+            } if standing
+                && *offered == window_id
+                && cargo.shown.openable()
+                && matches!(carried.over, DragSurface::Offer { window_id: over, .. } if over == window_id) =>
+            {
+                answers.places = places;
+                carried.shown = answers.shown();
+            }
+            _ => return false,
+        }
+        carried.answered = true;
+        self.hold_drag_cursor(compositor);
+        true
+    }
+
+    /// The media type of the one file the offer numbered `serial` holds over
+    /// window `window_id`, while that offer stands: by its name and the
+    /// filetype its volume records, never the name itself.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for any other offer or window, or a file of no
+    /// type the desktop knows.
+    pub fn offered_file(&self, window_id: u64, serial: u32) -> Result<&'static str, Errno> {
+        let carried = self.drag.carried.as_ref().ok_or(Errno::NotFound)?;
+        let (file, offered) = match &carried.cargo {
+            Cargo::Items { items, offered, .. } => (&**items, offered),
+            Cargo::Desktop { cargo, offered, .. } => (&cargo.shown, offered),
+            Cargo::Save { .. } => return Err(Errno::NotFound),
+        };
+        let standing = offered.is_some_and(|(offered, _)| offered == window_id)
+            && carried.reported_here(serial)
+            && file.openable();
+        if !standing {
+            return Err(Errno::NotFound);
+        }
+        tairix_browse::media::media_for_document(file.first().as_str(), file.filetype())
+            .map(MediaType::as_str)
+            .ok_or(Errno::NotFound)
     }
 
     /// The items of the drag off the desktop numbered `drag`, for window
@@ -1152,6 +1470,7 @@ impl DesktopShell {
                 drag: carried,
                 cargo,
                 offered: Some((offered, _)),
+                ..
             }) if (*carried, *offered) == (drag, window_id) => Ok(&cargo.items),
             _ => match &self.drag.dropped {
                 Some(dropped) if (dropped.window_id, dropped.drag) == (window_id, drag) => {
@@ -1210,20 +1529,41 @@ impl DesktopShell {
             DragSurface::Slot { .. } | DragSurface::AppWindow { .. }
         ) {
             carried.over = DragSurface::Nothing;
+            // The window a file was offered to is told the offer ended.
+            if let Cargo::Items {
+                offered: Some(_),
+                offer_owed,
+                ..
+            } = &mut carried.cargo
+            {
+                *offer_owed = true;
+            }
         }
         self.session_mut().taskbar_mut().set_drop_slot(None, scale);
     }
 
     /// Follow the window-channel window `window` going: a drag it began ends
-    /// with nothing to tell it, as does a save for it, and a save offered to it
-    /// forgets it. Answers the end a save leaves another window owed.
-    pub fn abort_drag_for(&mut self, compositor: &mut Compositor, window: u64) -> Option<OfferEnd> {
+    /// with nothing to tell it, as does a save for it, and a save or a file
+    /// offered to it forgets it. Answers the end a drag or a save leaves
+    /// another window owed.
+    pub fn abort_drag_for(
+        &mut self,
+        compositor: &mut Compositor,
+        window: u64,
+    ) -> Option<WindowEvent> {
         self.drag
             .dropped
             .take_if(|dropped| dropped.window_id == window);
         let carried = self.drag.carried.as_mut()?;
         let ends = match &mut carried.cargo {
-            Cargo::Items { source, .. } => *source == window,
+            Cargo::Items {
+                source, offered, ..
+            } => {
+                if offered.is_some_and(|(offered, _)| offered == window) {
+                    *offered = None;
+                }
+                *source == window
+            }
             Cargo::Save {
                 requester, offered, ..
             } => {
@@ -1241,11 +1581,16 @@ impl DesktopShell {
         };
         if ends {
             return match self.end_drag(compositor, false)? {
-                DragEnd::Save(end) => end.offer,
-                DragEnd::Items(_) | DragEnd::Desktop(_) => None,
+                DragEnd::Save(end) => end.offer.map(OfferEnd::event),
+                DragEnd::Items(end) => end.offer.map(ItemsOfferEnd::event),
+                DragEnd::Desktop(_) => None,
             };
         }
-        if matches!(carried.over, DragSurface::Offer { window_id, .. } if window_id == window) {
+        if matches!(
+            carried.over,
+            DragSurface::Offer { window_id, .. } | DragSurface::AppWindow { window_id, .. }
+                if window_id == window
+        ) {
             carried.over = DragSurface::Nothing;
             carried.shown = None;
             carried.answered = false;
@@ -1332,8 +1677,10 @@ impl DesktopShell {
         self.session_mut().taskbar_mut().set_drop_slot(None, scale);
         self.cursor_mut().hold(None);
         self.refresh_cursor(compositor);
-        let source = match carried.cargo {
-            Cargo::Items { source, .. } => source,
+        let (source, offered) = match carried.cargo {
+            Cargo::Items {
+                source, offered, ..
+            } => (source, offered),
             Cargo::Save { pick, offered, .. } => {
                 return Some(DragEnd::Save(save_end(
                     pick,
@@ -1347,11 +1694,12 @@ impl DesktopShell {
                 drag,
                 cargo,
                 offered,
+                answers,
             } => {
-                let DesktopCargo { items, .. } = *cargo;
+                let DesktopCargo { shown, items } = *cargo;
                 let pointer = self.router().pointer();
-                let over = (&carried.over, carried.shown);
-                let end = desktop_end(dropped, over, offered, pointer);
+                let lead = (items.first().map(|item| item.path.as_str()), shown.first());
+                let end = desktop_end(dropped, (&carried.over, answers), offered, (pointer, lead));
                 if end.dropped == DesktopDrop::Window {
                     if let Some(offer) = end.offer {
                         self.drag.dropped = Some(Dropped {
@@ -1370,15 +1718,39 @@ impl DesktopShell {
             }
             _ => None,
         };
-        let refused = match (dropped, answer) {
-            (true, Some(SlotAnswer::Refuses(refusal))) => Some(refusal.clone()),
+        // A window that answered it places the file has it placed; any other
+        // drop on it is its slot's.
+        let placed = match (dropped, &carried.over, carried.shown) {
+            (
+                true,
+                &DragSurface::AppWindow {
+                    window_id, x, y, ..
+                },
+                Some(DropOperation::Copy),
+            ) => Some(Placement { window_id, x, y }),
             _ => None,
         };
-        let ended = match (dropped, answer, &carried.over, carried.shown) {
-            (true, Some(SlotAnswer::Opens(target)), _, _) => {
+        let offer = offered.map(|(window_id, serial)| ItemsOfferEnd {
+            window_id,
+            serial,
+            dropped: placed
+                .filter(|placement| placement.window_id == window_id)
+                .map(|placement| OfferDrop {
+                    x: placement.x,
+                    y: placement.y,
+                    operation: DropOperation::Copy,
+                }),
+        });
+        let refused = match (dropped, answer, placed) {
+            (true, Some(SlotAnswer::Refuses(refusal)), None) => Some(refusal.clone()),
+            _ => None,
+        };
+        let ended = match (placed, dropped, answer, &carried.over, carried.shown) {
+            (Some(placement), ..) => DragConclusion::Placed(placement),
+            (None, true, Some(SlotAnswer::Opens(target)), _, _) => {
                 DragConclusion::Application(target.clone())
             }
-            (true, _, &DragSurface::Window { window_id, x, y }, Some(operation)) => {
+            (None, true, _, &DragSurface::Window { window_id, x, y }, Some(operation)) => {
                 DragConclusion::Window {
                     window_id,
                     x,
@@ -1386,7 +1758,7 @@ impl DesktopShell {
                     operation,
                 }
             }
-            (true, _, DragSurface::Desktop { .. }, Some(operation)) => {
+            (None, true, _, DragSurface::Desktop { .. }, Some(operation)) => {
                 match carried.desktop_serial {
                     Some(serial) => DragConclusion::Desktop { serial, operation },
                     None => DragConclusion::Nothing,
@@ -1398,6 +1770,7 @@ impl DesktopShell {
             source,
             ended,
             refused,
+            offer,
         }))
     }
 
@@ -1455,16 +1828,36 @@ fn save_end(
 /// they stand where they stood.
 fn desktop_end(
     dropped: bool,
-    (over, shown): (&DragSurface, Option<DropOperation>),
+    (over, answers): (&DragSurface, OfferAnswers),
     offered: Option<(u64, u32)>,
-    pointer: Point,
+    (pointer, (path, name)): (Point, (Option<&str>, &DocumentName)),
 ) -> DesktopEnd {
-    let (dropped, at) = match (dropped, over, shown, offered) {
-        (true, DragSurface::Desktop { .. }, _, _) => (DesktopDrop::Desktop(pointer), None),
-        (true, &DragSurface::Offer { window_id, x, y }, Some(operation), Some((offer, _)))
-            if offer == window_id =>
-        {
-            (DesktopDrop::Window, Some(OfferDrop { x, y, operation }))
+    let standing = |window_id| offered.is_some_and(|(offer, _)| offer == window_id);
+    let (dropped, at) = match (dropped, over) {
+        (true, DragSurface::Desktop { .. }) => (DesktopDrop::Desktop(pointer), None),
+        (true, &DragSurface::Offer { window_id, x, y }) if standing(window_id) => {
+            match (answers, path) {
+                (
+                    OfferAnswers {
+                        items: Some(operation),
+                        ..
+                    },
+                    _,
+                ) => (DesktopDrop::Window, Some(OfferDrop { x, y, operation })),
+                (OfferAnswers { places: true, .. }, Some(path)) => (
+                    DesktopDrop::Placed(Box::new(PlacedItem {
+                        placement: Placement { window_id, x, y },
+                        path: String::from(path),
+                        name: *name,
+                    })),
+                    Some(OfferDrop {
+                        x,
+                        y,
+                        operation: DropOperation::Copy,
+                    }),
+                ),
+                _ => (DesktopDrop::Nothing, None),
+            }
         }
         _ => (DesktopDrop::Nothing, None),
     };

@@ -32,8 +32,8 @@ pub(super) const fn route<K, O>(request: &Request<K, O>) -> Route {
     }
 }
 
-/// The windows, of `windows` (each its id and the primary it is a member of),
-/// that show the document of window `primary`: they close with it.
+/// The windows, of `windows` (each its id and the window it belongs to, if
+/// any), that belong to window `primary`: they close with it.
 pub(super) fn members_of(
     primary: u64,
     windows: impl IntoIterator<Item = (u64, Option<u64>)>,

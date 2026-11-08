@@ -21,6 +21,8 @@ tairix-util = { path = "../util", version = "=0.0.0" }
 # through rather than restating: the path commands, shapes, colours,
 # lengths, transforms, stylesheets and gradient definitions.
 tairix-svg = { path = "../svg", version = "=0.0.0" }
+# A PDF page read into a display list: structure, filters, content, images.
+tairix-pdf = { path = "../pdf", version = "=0.0.0" }
 # The rasteriser a drawing is rendered through, and the colour and gradient
 # vocabulary the SVG cascade answers in.
 tairix-raster = { path = "../raster", version = "=0.0.0" }

@@ -65,11 +65,28 @@ const OP_NEXT: u8 = 31;
 const OP_PICTURE: u8 = 32;
 const OP_PIXELS: u8 = 33;
 const OP_PLACE: u8 = 34;
+const OP_PAGES: u8 = 35;
 const REPLY_OPENED: u8 = 30;
 const REPLY_BATCH: u8 = 31;
 const REPLY_PICTURE: u8 = 32;
 const REPLY_PIXELS: u8 = 33;
 const REPLY_PLACED: u8 = 34;
+const REPLY_PAGES: u8 = 35;
+
+/// The longest password a document is opened with, in bytes: past what any
+/// PDF security handler reads, so every password typed reaches the reader
+/// whole, and a bound on what a request carries.
+pub const MAX_PASSWORD_BYTES: usize = 1024;
+
+/// The bytes one page's size travels in: its width and height.
+const PAGE_SIZE_WIRE: usize = 16;
+
+/// The bytes a page list's reply begins with: its tag, the document's page
+/// count and how many sizes follow.
+const PAGES_HEADER: usize = 1 + 4 + 4;
+
+/// The most pages whose sizes one reply lists: what a frame holds.
+const MAX_LISTED_PAGES: usize = (MAX_FRAME - PAGES_HEADER) / PAGE_SIZE_WIRE;
 
 const RECORD_GRADIENT: u8 = 1;
 const RECORD_STYLE: u8 = 2;
@@ -172,6 +189,12 @@ pub enum DrawRefusal {
     NotOpen,
     /// The document is no picture this service reads.
     NotAPicture,
+    /// The document is protected by a password, and none was given.
+    NeedsPassword,
+    /// The password given does not open the document.
+    WrongPassword,
+    /// The page asked for is not one the document has.
+    NoSuchPage,
 }
 
 impl DrawRefusal {
@@ -185,6 +208,9 @@ impl DrawRefusal {
             Self::OutOfMemory => 6,
             Self::NotOpen => 7,
             Self::NotAPicture => 8,
+            Self::NeedsPassword => 9,
+            Self::WrongPassword => 10,
+            Self::NoSuchPage => 11,
         }
     }
 
@@ -198,6 +224,9 @@ impl DrawRefusal {
             6 => Self::OutOfMemory,
             7 => Self::NotOpen,
             8 => Self::NotAPicture,
+            9 => Self::NeedsPassword,
+            10 => Self::WrongPassword,
+            11 => Self::NoSuchPage,
             _ => return None,
         })
     }
@@ -208,6 +237,9 @@ impl DrawRefusal {
             ReadError::Malformed => Self::Malformed,
             ReadError::TooComplex => Self::TooComplex,
             ReadError::OutOfMemory => Self::OutOfMemory,
+            ReadError::NeedsPassword => Self::NeedsPassword,
+            ReadError::WrongPassword => Self::WrongPassword,
+            ReadError::NoSuchPage => Self::NoSuchPage,
         }
     }
 
@@ -231,6 +263,9 @@ impl core::fmt::Display for DrawRefusal {
             Self::OutOfMemory => "there was not enough memory to read the drawing",
             Self::NotOpen => "no drawing is open",
             Self::NotAPicture => "not a picture that can be placed",
+            Self::NeedsPassword => "the document is protected by a password",
+            Self::WrongPassword => "the password does not open the document",
+            Self::NoSuchPage => "the document has no such page",
         })
     }
 }
@@ -380,6 +415,7 @@ impl Service for DrawEditService {
             Some(OP_OPEN) => self.open(request).map_err(DrawRefusal::to_wire),
             Some(OP_NEXT) => self.next(request).map_err(DrawRefusal::to_wire),
             Some(OP_PLACE) => self.place(request).map_err(DrawRefusal::to_wire),
+            Some(OP_PAGES) => self.pages(request).map_err(DrawRefusal::to_wire),
             Some(OP_PICTURE) => self.picture(request).map_err(DrawRefusal::to_wire),
             Some(OP_PIXELS) => self.pixels(request).map_err(DrawRefusal::to_wire),
             _ => Err(DrawRefusal::MalformedRequest.to_wire()),
@@ -390,13 +426,23 @@ impl Service for DrawEditService {
 
 impl DrawEditService {
     /// `OP_OPEN`: read the document handed over, in whichever format its
-    /// content is, and answer the drawing's page and settings, keeping its
-    /// records to send.
+    /// content is — a PDF at the page and with the password asked — and
+    /// answer the drawing's page and settings, keeping its records to send.
     fn open(&mut self, request: &[u8]) -> Result<Vec<u8>, DrawRefusal> {
         self.reading = None;
         self.pictures.clear();
-        let bytes = self.document_bytes(request)?;
-        let read = tairix_drawing::read(&bytes, &mut Ids::new()).map_err(DrawRefusal::of_read)?;
+        let mut r = Reader::new(request.get(1..).ok_or(DrawRefusal::MalformedRequest)?);
+        let page = usize::try_from(r.u32().map_err(|_| DrawRefusal::MalformedRequest)?)
+            .map_err(|_| DrawRefusal::MalformedRequest)?;
+        let (budget, password) = take_access(&mut r)?;
+        let pdf = tairix_drawing::pdf::Request {
+            page,
+            password,
+            budget,
+        };
+        let bytes = self.document_bytes()?;
+        let read =
+            tairix_drawing::read(&bytes, &pdf, &mut Ids::new()).map_err(DrawRefusal::of_read)?;
         drop(bytes);
         let (records, pictures) = records_of(&read.drawing)?;
         let mut w = Writer::new();
@@ -407,17 +453,48 @@ impl DrawEditService {
         Ok(w.finish())
     }
 
-    /// The bytes of the complete document handed over, for a request of its
-    /// tag alone.
-    fn document_bytes(&mut self, request: &[u8]) -> Result<Vec<u8>, DrawRefusal> {
-        if request.len() != 1 {
-            return Err(DrawRefusal::MalformedRequest);
-        }
+    /// The bytes of the complete document handed over, taken: the document
+    /// is read once.
+    fn document_bytes(&mut self) -> Result<Vec<u8>, DrawRefusal> {
         let document = self.document.take().ok_or(DrawRefusal::NoDocument)?;
         if !document.is_complete() {
             return Err(DrawRefusal::NoDocument);
         }
         Ok(document.into_bytes())
+    }
+
+    /// `OP_PAGES`: the pages of the document handed over, kept to be opened:
+    /// a PDF's count and as many of their sizes as a reply holds, and one
+    /// page, of no stated size, for any other format.
+    fn pages(&mut self, request: &[u8]) -> Result<Vec<u8>, DrawRefusal> {
+        let mut r = Reader::new(request.get(1..).ok_or(DrawRefusal::MalformedRequest)?);
+        let (budget, password) = take_access(&mut r)?;
+        let document = self.document.as_ref().ok_or(DrawRefusal::NoDocument)?;
+        if !document.is_complete() {
+            return Err(DrawRefusal::NoDocument);
+        }
+        let bytes = document.bytes();
+        let mut w = Writer::new();
+        w.u8(REPLY_PAGES);
+        if !tairix_drawing::pdf::recognised(bytes) {
+            w.u32(1);
+            w.u32(0);
+            return Ok(w.finish());
+        }
+        let pdf = tairix_drawing::pdf::Request {
+            page: 0,
+            password,
+            budget,
+        };
+        let (pages, sizes) = tairix_drawing::pdf::pages(bytes, &pdf, MAX_LISTED_PAGES)
+            .map_err(DrawRefusal::of_read)?;
+        w.u32(count(pages));
+        w.u32(count(sizes.len()));
+        for &(width, height) in &sizes {
+            put_f64(&mut w, width);
+            put_f64(&mut w, height);
+        }
+        Ok(w.finish())
     }
 
     /// `OP_PLACE`: decode the document handed over as a picture to place,
@@ -426,7 +503,10 @@ impl DrawEditService {
     fn place(&mut self, request: &[u8]) -> Result<Vec<u8>, DrawRefusal> {
         self.reading = None;
         self.pictures.clear();
-        let bytes = self.document_bytes(request)?;
+        if request.len() != 1 {
+            return Err(DrawRefusal::MalformedRequest);
+        }
+        let bytes = self.document_bytes()?;
         let placed = tairix_drawing::decode_placed(&bytes).map_err(|error| match error {
             ReadError::Unrecognised => DrawRefusal::NotAPicture,
             other => DrawRefusal::of_read(other),
@@ -537,23 +617,151 @@ impl DrawEditService {
     }
 }
 
+/// How a document is opened: which page of a PDF, and the password a
+/// protected one is opened with, a secret this module neither keeps nor logs.
+#[derive(Clone, Copy, Default)]
+pub struct Access<'a> {
+    /// The page, counting from 0; any other format has only page 0.
+    pub page: u32,
+    /// The password, where the empty one does not open it.
+    pub password: Option<&'a [u8]>,
+}
+
+/// A request of `op` carrying `access`'s page where `paged`, the room the
+/// worker's streams may decode to, and its password. Answered so the caller
+/// sends it and then wipes it.
+fn access_request(
+    op: u8,
+    paged: bool,
+    access: &Access<'_>,
+    room: u64,
+) -> Result<Vec<u8>, DrawFailure> {
+    let password = access.password.unwrap_or_default();
+    if password.len() > MAX_PASSWORD_BYTES {
+        return Err(DrawFailure::Refused(DrawRefusal::MalformedRequest));
+    }
+    // Sized once, so the password is never left in a block a growth freed.
+    let mut w = Writer::try_with_capacity(1 + 4 + 8 + BYTES_PREFIX + password.len())
+        .ok_or(DrawFailure::NoMemory)?;
+    w.u8(op);
+    if paged {
+        w.u32(access.page);
+    }
+    w.u64(room);
+    w.bytes(password);
+    Ok(w.finish())
+}
+
+/// `request` sent, then wiped: it may carry a password.
+fn ask_wiping<L: Launcher, S: tairix_log::Sink>(
+    sandbox: &mut ParserSandbox<L, S>,
+    mut request: Vec<u8>,
+) -> Result<Vec<u8>, DrawFailure> {
+    let reply = sandbox.request(&request).map_err(DrawFailure::Sandbox);
+    tairix_util::secret::wipe(&mut request);
+    reply
+}
+
+/// The room and the password a request carries after its tag and page.
+fn take_access<'r>(r: &mut Reader<'r>) -> Result<(u64, Option<&'r [u8]>), DrawRefusal> {
+    let room = r.u64().map_err(|_| DrawRefusal::MalformedRequest)?;
+    let password = r
+        .bytes(MAX_PASSWORD_BYTES)
+        .map_err(|_| DrawRefusal::MalformedRequest)?;
+    if !r.is_exhausted() {
+        return Err(DrawRefusal::MalformedRequest);
+    }
+    Ok((room, (!password.is_empty()).then_some(password)))
+}
+
+/// A document's pages, as a chooser lists them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pages {
+    /// How many it has, at least one.
+    pub count: u32,
+    /// The width and height of the first of them, in points, as many as one
+    /// reply lists; a format other than PDF lists none.
+    pub sizes: Vec<(f64, f64)>,
+}
+
+/// The room a worker holding a document `handed` bytes long has left to
+/// decode into: what its share holds beside the document.
+fn decode_room<L: Launcher, S: tairix_log::Sink>(
+    sandbox: &ParserSandbox<L, S>,
+    handed: u64,
+) -> u64 {
+    sandbox.document_room().saturating_sub(handed)
+}
+
+/// The pages of the document handed over last, `handed` bytes long, opened
+/// with `access`'s password: what a chooser asks which of to open. The
+/// document stays with the worker, to be read.
+///
+/// # Errors
+///
+/// [`DrawFailure`]: the sandbox failed, the worker refused — among them for
+/// a password wanted or wrong — or a reply could not be believed.
+pub fn read_pages<L: Launcher, S: tairix_log::Sink>(
+    sandbox: &mut ParserSandbox<L, S>,
+    handed: u64,
+    access: &Access<'_>,
+) -> Result<Pages, DrawFailure> {
+    let room = decode_room(sandbox, handed);
+    sandbox.ask(|sandbox| {
+        let reply = ask_wiping(sandbox, access_request(OP_PAGES, false, access, room)?)?;
+        let mut r = Reader::new(&reply);
+        DrawFailure::expect_tag(&mut r, REPLY_PAGES)?;
+        let count = r.u32()?;
+        let listed = r.u32()?;
+        let Ok(listed) = usize::try_from(listed) else {
+            return Err(DrawFailure::ReplyMalformed);
+        };
+        let stated = listed.checked_mul(PAGE_SIZE_WIRE);
+        if count == 0
+            || u32::try_from(listed).map_or(true, |listed| listed > count)
+            || listed > MAX_LISTED_PAGES
+            || stated != Some(r.remaining())
+        {
+            return Err(DrawFailure::ReplyMalformed);
+        }
+        let mut sizes = Vec::new();
+        if !fallible::reserve(&mut sizes, listed) {
+            return Err(DrawFailure::NoMemory);
+        }
+        for _ in 0..listed {
+            let (width, height) = (take_f64(&mut r)?, take_f64(&mut r)?);
+            let fits = |side: f64| side.is_finite() && side > 0.0;
+            if !fits(width) || !fits(height) {
+                return Err(DrawFailure::ReplyMalformed);
+            }
+            sizes.push((width, height));
+        }
+        if !r.is_exhausted() {
+            return Err(DrawFailure::ReplyMalformed);
+        }
+        Ok(Pages { count, sizes })
+    })
+}
+
 /// Read the document handed over last, `handed` bytes long — an SVG
-/// document or a RISC OS Draw file, told apart by its content — and rebuild
-/// the drawing it comes to, every value checked, issuing its objects'
-/// identities from `ids`.
+/// document, a RISC OS Draw file or a PDF, told apart by its content, a PDF
+/// at `access`'s page and with its password — and rebuild the drawing it
+/// comes to, every value checked, issuing its objects' identities from `ids`.
 ///
 /// # Errors
 ///
 /// [`DrawFailure`]: the sandbox failed, the worker refused, or a reply could
 /// not be believed — among them pictures whose sources together are longer
-/// than the document they were read from.
+/// than both the document and all the worker may decode.
 pub fn read_drawing<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     handed: u64,
+    access: &Access<'_>,
     ids: &mut Ids,
 ) -> Result<Read, DrawFailure> {
+    let room = decode_room(sandbox, handed);
     sandbox.ask(|sandbox| {
-        let reply = sandbox.request(&[OP_OPEN]).map_err(DrawFailure::Sandbox)?;
+        let reply = ask_wiping(sandbox, access_request(OP_OPEN, true, access, room)?)?;
         let mut r = Reader::new(&reply);
         DrawFailure::expect_tag(&mut r, REPLY_OPENED)?;
         let header = take_header(&mut r)?;
@@ -564,7 +772,9 @@ pub fn read_drawing<L: Launcher, S: tairix_log::Sink>(
         if !fallible::reserve(&mut pictures, header.pictures) {
             return Err(DrawFailure::NoMemory);
         }
-        let mut allowance = Allowance::of(handed);
+        // A source is part of the document, or bytes its streams decoded
+        // to, every one of which the worker charges to `room`.
+        let mut allowance = Allowance::of(handed.max(room));
         for index in 0..header.pictures {
             let (pixels, source) = receive_picture(sandbox, index, &mut allowance)?;
             let pyramid = Pyramid::new(pixels).ok_or(DrawFailure::NoMemory)?;

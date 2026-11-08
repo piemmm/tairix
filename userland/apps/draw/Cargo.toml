@@ -31,6 +31,9 @@ tairix-image = { path = "../../../lib/image", version = "=0.0.0" }
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+# The read seam's password bound, so the field asking for a PDF's password
+# takes no more than a request carries.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The document host's types, and the settings window Draw's preferences are

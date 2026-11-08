@@ -2,8 +2,8 @@
 
 `Draw.app` draws and edits vector drawings: paths, rectangles, ellipses, stars
 and polygons, lines, freehand curves and text, in groups and layers, on a page.
-It opens and saves SVG, opens RISC OS Draw files, and writes copies as PDF,
-EPS, PNG, JPEG, TIFF, SVG or a Draw file. The design is
+It opens SVG and RISC OS Draw files, saves as SVG, a Draw file or PDF, and
+writes copies as PDF, EPS, PNG, JPEG, TIFF, SVG or a Draw file. The design is
 `plans/DRAW.md`; the drawing model is `lib/drawing` and its geometry
 `lib/bezier`.
 
@@ -16,15 +16,16 @@ filesystem capability**. A document reaches Draw only as the user's own act: a
 descriptor the file manager or the desktop opened for it, or a grant the
 session's trusted picker delegated. The manifest declares `document-access =
 "read-write"`, so a document the user may write is handed over writable and
-Save writes SVG back through it; any other opens read-only, and Save asks
-where. A file holding what a drawing cannot keep opens read-only too, so it is
+Save writes it back through it, in the format its name says; any other opens
+read-only, and Save asks where. A file holding what a drawing cannot keep opens read-only too, so it is
 never written over.
 
 `CAP_SANDBOX_SPAWN` re-enters the binary as a capability-empty worker, the one
 process it may start: documents, pasted drawings and placed pictures are read
 there (`tairix_sandbox::drawedit`), so none of their bytes are parsed in
 Draw's address space. A picture to place is asked of the picker as an import
-(`Request::Import`), handed over read-only whatever Draw may edit, since it is
+(`Request::Import`), or dropped on the canvas from the file manager or the
+desktop, handed over read-only either way whatever Draw may edit, since it is
 the drawing's to keep and never the file's to change.
 
 ## Settings

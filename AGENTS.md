@@ -707,6 +707,8 @@ tairix/
 │   ├── partition/       # Shared, scheme-neutral partition-table layer (MBR/GPT).
 │   ├── path/            # Shared filesystem path-spelling parser.
 │   ├── pci/             # PCI/PCIe configuration access and the topology walk.
+│   ├── pdf/             # Fail-closed PDF reader: structure, filters, security
+│   │                    #   handler, fonts, and each page's display list.
 │   ├── player/          # Playback engine: a programme decoded in the sandbox, gapless.
 │   ├── procinfo/        # Sysinfo API client helpers + info:/stats: resolver.
 │   ├── proglib/         # Program-library catalog registry (folders/entries).
@@ -1735,6 +1737,7 @@ You are not exempt from any rule above. In addition:
     | The desktop editor (`TextEdit.app`): the byte document and its displays, syntax colouring and settings validation in the sandbox, writable documents, the picker's Save mode, drag-and-drop onto the icon bar, the clipboard and the app-set pointer shape | `plans/TEXTEDIT.md` |
     | The image editor (`Paint.app`): the formats it writes, its layers and OpenRaster, RISC OS sprite semantics (the Wimp palette for a sprite with none, kept sprites, masks, pixel aspect), the sandboxed edit decode, the tiled canvas and its history, and the shared document host both editors run in (`tairix_window::docapp`) | `plans/PAINT.md` |
     | The vector editor (`Draw.app`) and what it is built on: the `lib/bezier` geometry kernel and its boolean operations, the editable drawing of `lib/drawing`, its SVG, RISC OS Draw, PDF and EPS formats, the sandboxed `drawedit` read, the tile renderer, and the tools, inspector, rulers, guides and snapping | `plans/DRAW.md` |
+    | Reading PDF: the `lib/pdf` reader — structure, repair, filters, the standard security handler and its interop-only ciphers, content, fonts and text, images — the page's display list, Draw opening a chosen page as an editable drawing, and View.app's page source | `plans/PDF.md` |
     | The web browser: its process model and site isolation, the broker that holds authority and parses nothing, the engine (HTML, CSS, layout, paint) and the heap the DOM and JavaScript share, the JavaScript tier contract and its permanent interpreter, code installation and the compiled tiers, and the OS facilities it needs first — `lib/tls`, the HTTP client engine, the shaping and bidi engine, `lib/url` and the desktop's URL hand-off | `plans/BROWSER.md` |
     | Shared containers and hashing: the heap-backed tiers in `lib/collections`, the allocation-free tier in `lib/inline`, the keyed `lib/hash` seed, and any hand-rolled LRU, ring, range map, bitmap, slot map, or id counter being replaced | `plans/COLLECTIONS.md` |
     | Randomness: the non-cryptographic vs fast-secure vs DRBG tier split, the buffered ChaCha12 fast-key-erasure generator, the kernel output reserve's backing, task-id and scheduler draws, and the statistical test battery | `plans/FIX-RANDOMNESS.md` |

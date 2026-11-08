@@ -80,6 +80,11 @@ version = "1.5.0"
 sha256 = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[source-pin]]
+name = "cbc"
+version = "0.2.1"
+sha256 = "ce2dc9ee5f88d11e0beb842c88b33c8a5cf0d1329c4b19494af42b07dbfe8896"
+
+[[source-pin]]
 name = "cc"
 version = "1.2.62"
 sha256 = "a1dce859f0832a7d088c4f1119888ab94ef4b5d6795d1ce05afb7fe159d79f98"
@@ -433,6 +438,11 @@ sha256 = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 name = "rand_xorshift"
 version = "0.3.0"
 sha256 = "d25bf25ec5ae4a3f1b92f929810509a2f53d7dca2f50b794ff57e3face536c8f"
+
+[[source-pin]]
+name = "rc4"
+version = "0.2.0"
+sha256 = "840038b674daa9f7a7957440d937951d15c0143c056e631e529141fd780e0c92"
 
 [[source-pin]]
 name = "regex-automata"

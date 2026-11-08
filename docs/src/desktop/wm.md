@@ -2554,14 +2554,35 @@ offer left or, with the window-local point and the operation the pointer
 showed (`OfferDrop`), that they were dropped there; the owner performs that
 operation under its own authority, so no authority crosses.
 
-A **window of another application** takes a drop exactly as that
-application's slot does: the session finds the window's attested owner among
-the strip's groups and answers by the same rule, so a document dropped on an
-open editor is handed to the editor. A slot or window whose application does
-not claim the file — or is dragged several items, or a folder — is **answered**
-rather than left silent: the drop concludes on nothing, and the desktop puts up
-an error alert titled in that application's name ("Error from Paint") saying
-it cannot open the file and naming the endings it does open
+A **window of another application** is offered one dragged file where the
+pointer is: `WindowEvent::FileOffered { window_id, drag, serial, x, y }`,
+numbered with the seat's other offers, answered with `FileOfferAnswer {
+window_id, serial, places }` — whether a drop there places the file in the
+window's document, as a picture dropped on Draw's canvas is placed — and ended
+with `ItemsOfferEnded`, which carries the point when the file was placed
+there. `OfferedFile { window_id, serial }` reads the file's media type for the
+offer standing, never its name (`decode_offered_file_reply`), the same for
+every offer of the drag numbered `drag`. One file carried off the desktop is
+offered both ways under one number, as an item and as a file: an answer for it
+as an item outranks one for it as a file, and placed, the session opens it
+read-only under its own authority and hands it over itself. A drop the window
+answered it places concludes `DropSite::Placed` for the dragging application,
+which opens the file read-only and hands it over with `PlaceDropped {
+window_id, name, grant }`:
+one-shot, honoured only for the drag's attested owner, and relayed read-only:
+the kernel refuses to relay a descriptor that can write, never narrowing it. The
+session queues it for the window's owner as `OpenTarget::Placed { window_id,
+x, y, name, grant }`, which a document application reads in as it would a
+picture it chose to place.
+
+Any other drop on a window of another application is taken exactly as that
+application's slot takes it: the session finds the window's attested owner
+among the strip's groups and answers by the same rule, so a document dropped
+on an open editor is handed to the editor. A slot or window whose application
+does not claim the file — or is dragged several items, or a folder — is
+**answered** rather than left silent: the drop concludes on nothing, and the
+desktop puts up an error alert titled in that application's name ("Error from
+Paint") saying it cannot open the file and naming the endings it does open
 (`DropRefusal`). An application that takes the file and then finds it damaged,
 unreadable or refused by its sandbox states that in its own alert.
 

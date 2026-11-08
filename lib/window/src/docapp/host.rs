@@ -20,6 +20,7 @@
 //! keeps a room for each job it leaves behind until that job lands, and the
 //! process ends only once every save has.
 
+use alloc::borrow::Cow;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -53,7 +54,8 @@ use super::members::{members_of, route, Route};
 use super::refit::Refit;
 use super::title::{opening, Title, Withheld};
 use super::{
-    AppRequest, AppView, DocumentView, Outcome, Relayout, Request, ToolGone, ToolMove, ViewOutcome,
+    AppRequest, AppView, DocumentView, Outcome, Relayout, Request, SaveTarget, ToolGone, ToolMove,
+    ViewOutcome,
 };
 use crate::app::{self, fail, report, RtWindowTransport, Wake, WindowPane};
 use crate::appbar::{declaration, declare_app_bar, is_quit, QUIT_ROW};
@@ -189,7 +191,7 @@ impl<S> Save<S> {
     /// file's name, answering how it landed.
     fn write<E>(
         self,
-        write: impl FnOnce(&SaveJob<Handle, S>, &str) -> Result<Option<&'static str>, E>,
+        write: impl FnOnce(&SaveJob<Handle, S>, &str) -> Result<Option<Cow<'static, str>>, E>,
     ) -> Saved<E> {
         let result = write(&self.job, &self.name);
         Saved {
@@ -210,7 +212,7 @@ struct Saved<E> {
     rename: Option<String>,
     name: String,
     grew: bool,
-    result: Result<Option<&'static str>, E>,
+    result: Result<Option<Cow<'static, str>>, E>,
 }
 
 /// A worker whose answer wake the park drains when its token fires: left
@@ -286,7 +288,7 @@ pub trait DocumentApp: Sized {
     fn write(
         job: &SaveJob<Handle, Self::Snapshot>,
         name: &str,
-    ) -> Result<Option<&'static str>, Self::Failure>;
+    ) -> Result<Option<Cow<'static, str>>, Self::Failure>;
 
     /// Carry out `work`, on the queue's worker.
     fn work(work: Self::Work) -> Self::Answer;
@@ -368,11 +370,19 @@ pub trait DocumentApp: Sized {
     /// name as they are. An application offering no copies never sees this.
     fn copy_chosen(_host: &mut Host<Self>, _index: usize, _file: Arc<Handle>, _name: String) {}
 
-    /// The user chose a file to read into the window at `index`'s document:
-    /// `file`, called `name`, handed over read-only. The application reads it
-    /// — on its queue, never on the event loop. One that asks for no import
-    /// never sees this.
-    fn import_chosen(_host: &mut Host<Self>, _index: usize, _file: Handle, _name: String) {}
+    /// The user chose a file to read into the window at `index`'s document —
+    /// through the picker, or by dropping it at `at`, a window-local point its
+    /// view answered places it: `file`, called `name`, handed over read-only.
+    /// The application reads it — on its queue, never on the event loop. One
+    /// that asks for no import and places nothing never sees this.
+    fn import_chosen(
+        _host: &mut Host<Self>,
+        _index: usize,
+        _file: Handle,
+        _name: String,
+        _at: Option<Point>,
+    ) {
+    }
 
     /// Window `index`'s engine was driven, and what it asked is about to be
     /// carried out: what it changed is handed to the other windows of its
@@ -389,7 +399,7 @@ pub trait DocumentApp: Sized {
     fn bar_chosen(_host: &mut Host<Self>, _row: usize) {}
 
     /// Application window `index` is about to close, by its close mark, its
-    /// own asking, or a quit.
+    /// own asking, a quit, or with the document window it asks on behalf of.
     fn app_closing(_host: &mut Host<Self>, _index: usize) {}
 
     /// Carry out a request of application window `index` only this
@@ -659,6 +669,8 @@ pub struct AppWindow<A: DocumentApp> {
     chrome: Chrome,
     /// The least size the session was last told it may take.
     least: (u32, u32),
+    /// The document window it asks on behalf of, which it closes with.
+    owner: Option<u64>,
 }
 
 impl<A: DocumentApp> AppWindow<A> {
@@ -1181,6 +1193,10 @@ pub struct Host<A: DocumentApp> {
     /// Quit was chosen: the process ends once every window has closed and no
     /// save is left to land.
     quitting: bool,
+    /// The media type of the file the last drag offered a window of the
+    /// application held, read once for every offer that drag, by its number,
+    /// makes over any of them.
+    offered: Option<(u32, Result<String, Errno>)>,
 }
 
 impl<A: DocumentApp> Host<A> {
@@ -1398,7 +1414,9 @@ impl<A: DocumentApp> Host<A> {
             }
             return;
         }
-        self.move_on(index);
+        let Some(index) = self.moved_on(index) else {
+            return;
+        };
         let (theme, scale) = (self.themes.active(), self.desktop.scale());
         // A window opened for this document alone takes the size it asks.
         let faces = A::faces(theme, Scale::ONE);
@@ -1441,16 +1459,35 @@ impl<A: DocumentApp> Host<A> {
     pub fn not_opened(&mut self, index: usize, name: &str, why: &dyn Display) {
         let headline = refusal_headline(name, "opened");
         let detail = format!("{why}");
+        self.give_up(index, Some((&headline, &detail)));
+    }
+
+    /// The document window `index` was loading is not to be opened after
+    /// all, the user having turned it down: a window opened for it alone
+    /// closes, and one it was to replace holds a fresh document again.
+    pub fn not_wanted(&mut self, index: usize) {
+        self.give_up(index, None);
+    }
+
+    /// Give up the load of window `index`, saying `alert` where there is
+    /// something to say.
+    fn give_up(&mut self, index: usize, alert: Option<(&str, &str)>) {
         if self.windows[index].reading == Reading::Alone {
             self.close_window(index);
-            self.alert(None, &headline, &detail);
+            if let Some((headline, detail)) = alert {
+                self.alert(None, headline, detail);
+            }
             return;
         }
-        self.alert(Some(index), &headline, &detail);
+        if let Some((headline, detail)) = alert {
+            self.alert(Some(index), headline, detail);
+        }
         if !self.windows[index].replaceable() {
             return;
         }
-        self.move_on(index);
+        let Some(index) = self.moved_on(index) else {
+            return;
+        };
         let fresh = A::untitled(self);
         let (theme, scale) = (self.themes.active(), self.desktop.scale());
         let window = &mut self.windows[index];
@@ -1639,8 +1676,11 @@ impl<A: DocumentApp> Host<A> {
     }
 
     /// Open a window of the application's own showing `view`, answering its
-    /// index. A refusal is put up as an alert and answers `None`.
-    pub fn open_app_window(&mut self, view: A::AppView) -> Option<usize> {
+    /// index: one asking on behalf of document window `owner` closes with it,
+    /// and as it moves on to another document. A refusal is put up as an
+    /// alert and answers `None`.
+    pub fn open_app_window(&mut self, view: A::AppView, owner: Option<usize>) -> Option<usize> {
+        let owner = owner.map(|index| self.windows[index].id());
         let theme = self.themes.active();
         let scale = self.desktop.scale();
         let (width, height) = view.size();
@@ -1673,6 +1713,7 @@ impl<A: DocumentApp> Host<A> {
             damage: A::damage_sink(),
             chrome: Chrome::new(pane, surface, title),
             least,
+            owner,
         };
         window.view.settle(&window.layout, &mut window.damage);
         if self.app_windows.try_reserve(1).is_err() {
@@ -1705,9 +1746,32 @@ impl<A: DocumentApp> Host<A> {
 
     /// Close application window `index`.
     pub fn close_app_window(&mut self, index: usize) {
+        let id = self.app_windows[index].id();
+        // What its closing sets off may close its owner, and what that owns:
+        // it is told once, and found again after.
+        self.app_windows[index].owner = None;
         A::app_closing(self, index);
-        let window = self.app_windows.remove(index);
-        let _ = window.chrome.pane.close(&mut self.client);
+        if let Some(index) = self.app_index_of(id) {
+            let window = self.app_windows.remove(index);
+            let _ = window.chrome.pane.close(&mut self.client);
+        }
+    }
+
+    /// Close the windows of the application's own asking on behalf of
+    /// document window `id`: it closed, or shows another document.
+    fn close_asked_for(&mut self, id: u64) {
+        let closing: Vec<u64> = members_of(
+            id,
+            self.app_windows
+                .iter()
+                .map(|window| (window.id(), window.owner)),
+        )
+        .collect();
+        for asking in closing {
+            if let Some(index) = self.app_index_of(asking) {
+                self.close_app_window(index);
+            }
+        }
     }
 
     /// Paint what application window `index`'s view reported, and carry out
@@ -1739,14 +1803,18 @@ impl<A: DocumentApp> Host<A> {
 
     /// Window `index` moves on from the document it shows: what that
     /// document asked for and is still waiting is withdrawn, and whatever of
-    /// it answers later is told apart.
-    fn move_on(&mut self, index: usize) {
+    /// it answers later is told apart. Answers where the window is now, if it
+    /// is still open: what closes with its document may set off the
+    /// application's own closing of windows.
+    fn moved_on(&mut self, index: usize) -> Option<usize> {
         let id = self.windows[index].id();
         let withdrawn = self.withdraw(id);
         let window = &mut self.windows[index];
         window.epoch = window.epoch.wrapping_add(1);
         window.own_held = window.own_held.saturating_sub(withdrawn);
         self.close_members(id);
+        self.close_asked_for(id);
+        self.index_of(id)
     }
 
     /// Withdraw what window `id`'s document has waiting, on the queue and on
@@ -1798,7 +1866,9 @@ impl<A: DocumentApp> Host<A> {
         view.say(opening(&name));
         let index = match into {
             Some(index) => {
-                self.move_on(index);
+                let Some(index) = self.moved_on(index) else {
+                    return;
+                };
                 let (theme, scale) = (self.themes.active(), self.desktop.scale());
                 let window = &mut self.windows[index];
                 window.view = view;
@@ -1865,6 +1935,7 @@ impl<A: DocumentApp> Host<A> {
         }
         let _ = window.chrome.pane.close(&mut self.client);
         self.close_members(id);
+        self.close_asked_for(id);
     }
 
     /// Have the desktop show the user, in the file manager, where window
@@ -1948,15 +2019,20 @@ impl<A: DocumentApp> Host<A> {
         // be written under cannot hold the document; one with nowhere to go
         // yet asks where instead, and the chooser offers a name that can.
         let destination = match &save_as {
-            Some((_, name)) => Some(name.as_str()),
-            None => window.file.plain_destination().or_else(|| {
-                window
-                    .file
-                    .writes_back(&window.view)
-                    .then(|| window.view.name())
-            }),
+            Some((_, name)) => Some((name.as_str(), SaveTarget::Another)),
+            None => window
+                .file
+                .plain_destination()
+                .map(|name| (name, SaveTarget::Another))
+                .or_else(|| {
+                    window
+                        .file
+                        .writes_back(&window.view)
+                        .then(|| (window.view.name(), SaveTarget::Own))
+                }),
         };
-        if let Some(refusal) = destination.and_then(|name| window.view.refuse_save(name)) {
+        let refused = destination.and_then(|(name, target)| window.view.refuse_save(name, target));
+        if let Some(refusal) = refused {
             self.quitting = false;
             let headline = refusal_headline(window.view.name(), "saved");
             self.alert(Some(index), &headline, &refusal);
@@ -2026,9 +2102,13 @@ impl<A: DocumentApp> Host<A> {
         let window = &mut self.windows[index];
         let named = rename.is_some().then(|| String::from(window.view.name()));
         let access = window.view.access();
-        let landed = window
-            .file
-            .saved(&mut window.view, target, generation, rename, result);
+        let landed = window.file.saved(
+            &mut window.view,
+            target,
+            generation,
+            rename,
+            result.as_ref().map(Option::as_deref),
+        );
         window
             .damage
             .add(<A::View as DocumentView>::message_area(&window.layout));
@@ -2084,7 +2164,7 @@ impl<A: DocumentApp> Host<A> {
         let view = &window.view;
         let offered = if view.access() == Access::Untitled {
             offered_name(UNTITLED, view.offered_extension())
-        } else if view.refuse_save(view.name()).is_some() {
+        } else if view.refuse_save(view.name(), SaveTarget::Another).is_some() {
             offered_name(stem(view.name()), view.offered_extension())
         } else {
             String::from(view.name())
@@ -2188,7 +2268,7 @@ impl<A: DocumentApp> Host<A> {
             }
             PickFor::Import => {
                 let name = name.unwrap_or_else(|| String::from(UNTITLED));
-                A::import_chosen(self, index, file, name);
+                A::import_chosen(self, index, file, name, None);
             }
         }
     }
@@ -2421,6 +2501,7 @@ impl<A: DocumentApp> Host<A> {
                 handle,
                 writable,
             } => self.picked(index, *window_id, *handle, *writable),
+            WindowEvent::FileOffered { .. } => self.file_offer(index, event),
             // A document app asks for no folder, so a folder answer ends its
             // pick as a cancellation does.
             WindowEvent::PickCancelled { .. } | WindowEvent::FolderPicked { .. } => {
@@ -2591,6 +2672,7 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::SaveOfferEnded { .. }
             | WindowEvent::ItemsOffered { .. }
             | WindowEvent::ItemsOfferEnded { .. }
+            | WindowEvent::FileOffered { .. }
             | WindowEvent::PreviewRendered { .. } => {}
         }
     }
@@ -2733,6 +2815,7 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::SaveOfferEnded { .. }
             | WindowEvent::ItemsOffered { .. }
             | WindowEvent::ItemsOfferEnded { .. }
+            | WindowEvent::FileOffered { .. }
             | WindowEvent::PreviewRendered { .. } => {}
         }
     }
@@ -3113,7 +3196,73 @@ impl<A: DocumentApp> Host<A> {
                     "{pane} was handed over, but {} has no places to go to",
                     A::NAME
                 )),
+                Target::Placed {
+                    window_id,
+                    at,
+                    name,
+                    grant,
+                } => self.placed(window_id, pointer_point(at.0, at.1), name, grant),
             }
+        }
+    }
+
+    /// A file another application's drag holds over window `index`, offered
+    /// at a point: answered with whether a drop there places it, as its view
+    /// says for the file's media type, read once for every offer the drag
+    /// makes over the application's windows.
+    fn file_offer(&mut self, index: usize, event: &WindowEvent) {
+        let &WindowEvent::FileOffered {
+            window_id,
+            drag,
+            serial,
+            x,
+            y,
+        } = event
+        else {
+            return;
+        };
+        if self.offered.as_ref().is_none_or(|(read, _)| *read != drag) {
+            let media = self
+                .client
+                .offered_file(window_id, serial)
+                .map(String::from);
+            // An offer that ended before it was read says nothing of the file.
+            if media != Err(Errno::NotFound) {
+                self.offered = Some((drag, media));
+            }
+        }
+        let window = &self.windows[index];
+        let at = pointer_point(x, y);
+        let places = !window.loading()
+            && matches!(&self.offered, Some((read, Ok(media))) if *read == drag && window.view.places(at, media, &window.layout));
+        if let Err(err) = self.client.answer_file_offer(window_id, serial, places) {
+            self.report(format!("cannot answer a file offered ({err})"));
+        }
+    }
+
+    /// A file dropped on window `window_id` at `at`, called `name`, to be
+    /// placed there: taken over through `grant` and read into its document,
+    /// or let go with the reason said where the window has since closed.
+    fn placed(&mut self, window_id: u64, at: Point, name: String, grant: u64) {
+        let file = match Handle::from_delegation(grant) {
+            Ok(file) => file,
+            Err(raw) => {
+                self.alert(
+                    self.index_of(window_id),
+                    &refusal_headline(name.as_str(), "placed"),
+                    &format!(
+                        "The file could not be taken over ({}).",
+                        Errno::from_syscall(raw)
+                    ),
+                );
+                return;
+            }
+        };
+        match self.index_of(window_id) {
+            Some(index) => A::import_chosen(self, index, file, name, Some(at)),
+            None => self.report(format!(
+                "{name} was dropped on a window that has since closed"
+            )),
         }
     }
 
@@ -3705,6 +3854,7 @@ pub fn run<A: DocumentApp>() -> i32 {
         event_endpoint: endpoint,
         server,
         quitting: false,
+        offered: None,
     };
     match launched_document() {
         Some((handle, name, writable)) => host.open_document(handle, name, writable, None),

@@ -1,21 +1,22 @@
 //! Where everything a Draw window shows goes.
 //!
-//! The tool box down the left; the tool's own bar across the top; rulers
-//! along the canvas's top and left edges and scrollbars along its right and
-//! bottom; the inspector down the right with its tabs above its panel; the
-//! status band along the bottom. Every length is a logical one scaled to
-//! device pixels once, here.
+//! The tool box down the left; rulers along the canvas's top and left edges
+//! and scrollbars along its right and bottom; the inspector down the right
+//! with its tabs above its panel; the status band along the bottom, holding
+//! the message or the tool's hint, the pointer, the selection and the zoom.
+//! Every length is a logical one scaled to device pixels once, here.
 
 use tairix_controls::StatusBand;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_theme::{TextRole, Theme};
 
+use crate::viewport::{readout, MOST_ZOOM};
+
 /// The size a new window opens at, in logical pixels.
 pub const WINDOW_SIZE: (u32, u32) = (1080, 720);
 
 const TOOL_BOX: u32 = 44;
-const BAR: u32 = 34;
 const RULER: u32 = 18;
 const INSPECTOR: u32 = 256;
 const TABS: u32 = 28;
@@ -61,8 +62,6 @@ pub struct Layout {
     pub window: Rect,
     /// The tool box.
     pub tools: Rect,
-    /// The tool's own bar.
-    pub bar: Rect,
     /// The ruler along the canvas's top.
     pub top_ruler: Rect,
     /// The ruler down the canvas's left.
@@ -89,8 +88,10 @@ pub struct Layout {
     pub pointer: Rect,
     /// Where it states what is selected.
     pub selected: Rect,
-    /// One logical pixel, in device pixels, as a ratio.
-    pub ratio: u32,
+    /// Where it states the zoom, which opens the zoom menu.
+    pub zoom: Rect,
+    /// The scale every logical length is set at.
+    pub scale: Scale,
 }
 
 /// A length in device pixels as an offset between coordinates.
@@ -112,12 +113,12 @@ impl Layout {
             status,
             [],
             [
+                band.slot_width(&readout(MOST_ZOOM)),
                 band.slot_width(SELECTION_WIDEST),
                 band.slot_width(POINTER_WIDEST),
             ],
         );
-        let [selected, pointer] = slots.trailing;
-        let bar = rest.take_top(length(BAR).min(rest.height));
+        let [zoom, selected, pointer] = slots.trailing;
         let tools = rest.take_left(length(TOOL_BOX).min(rest.width));
         let inspector_width =
             length(INSPECTOR).min(rest.width.saturating_sub(length(LEAST_CANVAS)));
@@ -134,7 +135,6 @@ impl Layout {
         Self {
             window: Rect::new(0, 0, width, height),
             tools,
-            bar,
             top_ruler,
             left_ruler,
             corner,
@@ -148,7 +148,8 @@ impl Layout {
             message: slots.message,
             pointer,
             selected,
-            ratio: length(100),
+            zoom,
+            scale,
         }
     }
 
@@ -159,14 +160,14 @@ impl Layout {
         let breadth = scrollbar(scale, theme);
         (
             length(TOOL_BOX + RULER + LEAST_CANVAS + INSPECTOR) + breadth,
-            length(BAR + RULER + LEAST_CANVAS) + breadth + StatusBand::new(theme, scale).height(),
+            length(RULER + LEAST_CANVAS) + breadth + StatusBand::new(theme, scale).height(),
         )
     }
 
     /// `logical` pixels in device pixels.
     #[must_use]
-    pub const fn length(&self, logical: u32) -> u32 {
-        logical * self.ratio / 100
+    pub fn length(&self, logical: u32) -> u32 {
+        self.scale.scale_length(logical)
     }
 }
 
@@ -184,7 +185,6 @@ mod tests {
         let layout = Layout::of(1600, 1000, scale, &theme);
         let parts = [
             layout.tools,
-            layout.bar,
             layout.top_ruler,
             layout.left_ruler,
             layout.corner,
@@ -207,6 +207,29 @@ mod tests {
             }
         }
         assert!(layout.canvas.width > layout.panel.width);
+        assert_eq!(
+            (
+                layout.tools.top(),
+                layout.top_ruler.top(),
+                layout.tabs.top()
+            ),
+            (0, 0, 0),
+            "nothing above the tool box, the rulers and the inspector"
+        );
+        let readings = [layout.message, layout.pointer, layout.selected, layout.zoom];
+        for (index, a) in readings.iter().enumerate() {
+            assert!(!a.is_empty(), "{a:?}");
+            assert_eq!(a.intersection(&layout.status), *a, "{a:?} within the band");
+            for b in &readings[index + 1..] {
+                assert!(a.intersection(b).is_empty(), "{a:?} meets {b:?}");
+            }
+        }
+        assert!(
+            readings
+                .iter()
+                .all(|slot| slot.right() <= layout.zoom.right()),
+            "the zoom at the band's trailing end"
+        );
         let (width, height) = Layout::least(scale, &theme);
         let small = Layout::of(width, height, scale, &theme);
         assert!(small.canvas.width > 0 && small.canvas.height > 0);

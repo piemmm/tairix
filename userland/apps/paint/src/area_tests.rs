@@ -797,3 +797,24 @@ fn a_sprite_awaiting_its_thumbnail_shows_the_picture_glyph() {
         }
     }
 }
+
+/// Only the sprite file's own recorded filetype says the format of a name
+/// stating none: written into another file, the name says nothing and the
+/// sprites stay sprites.
+#[test]
+fn only_its_own_files_recorded_type_says_what_a_bare_name_saves_as() {
+    let view = AreaView::new(
+        area(&["one", "two"]),
+        String::from("Sprites"),
+        tairix_abi::fs::Filetype::new(0xb60),
+        Access::Writable,
+        DOUBLE,
+    );
+    let own = tairix_window::docapp::SaveTarget::Own;
+    let another = tairix_window::docapp::SaveTarget::Another;
+    assert!(
+        view.refuse_save("Sprites", own).is_some(),
+        "its own file records a PNG, which holds one picture"
+    );
+    assert_eq!(view.refuse_save("Sprites", another), None);
+}

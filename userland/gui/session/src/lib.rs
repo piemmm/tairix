@@ -274,9 +274,9 @@ pub use desktop::{
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use drag::{
     DesktopCargo, DesktopDrop, DesktopEnd, DesktopItem, DesktopReport, DragEnd, DragPlace,
-    DragStep, DragSurface, DropRefusal, ItemsEnd, ItemsOffer, ItemsOfferEnd, ItemsReport, OfferEnd,
-    OwedReport, PictureGrab, SaveDrop, SaveEnd, SaveOffer, SaveReport, SavedDocument, SlotAnswer,
-    WindowUnder,
+    DragStep, DragSurface, DropRefusal, FileOffer, FileReport, ItemsEnd, ItemsOffer, ItemsOfferEnd,
+    ItemsReport, OfferEnd, OwedReport, PictureGrab, PlacedItem, SaveDrop, SaveEnd, SaveOffer,
+    SaveReport, SavedDocument, SlotAnswer, WindowUnder,
 };
 pub use drain::{
     adopt_unlocks, drain_authorising, drain_away, drain_locked, Routed, Seat, SeatDrain,

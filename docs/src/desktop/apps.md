@@ -112,20 +112,24 @@ every event pays the widest event's width — a path is far wider than one.
   Popping is what makes a target one-shot, so no id is minted or validated and
   the ordering is the protocol. An application drains in a loop: one event may
   cover several targets, and another may arrive mid-drain.
-- A queued target is one of **two** things. A `Path` names a file or folder and
-  confers nothing. A `Document` is a file *already opened* by whoever handed it
-  over, reachable through a one-shot delegation the kernel minted to this
-  application — the only form an application that requests no filesystem
-  capability can act on.
+- A queued target names a place or carries a file. A `Path` names a file or
+  folder, and an `Image` a disk image or archive to attach; a `Pane` names a
+  place inside the application; none confers anything. A `Document` is a file
+  *already opened* by whoever handed it over, reachable through a one-shot
+  delegation the kernel minted to this application — the only form an
+  application that requests no filesystem capability can act on — and a
+  `Placed` file is one dropped on one of the application's windows at a point
+  that window answered places it, read-only, which the application reads into
+  that window's document.
 - The queue lives in the window engine beside the pending pick and the
   unanswered menu open, bounded per application by `WINDOW_MAX_OPEN_TARGETS` —
   a containment bound, not a capacity (`AGENTS.md` §24.4). Reaching it refuses
   the newest target with the refusal stated rather than dropping an older one
   silently. It dies with the client, and so does any delegation queued for it.
-  One delegation handle is queued once however often it is handed over: a
-  handle is one-shot and the kernel returns the *same* one for the same
-  authority twice, so a second entry would promise a document the first pull
-  consumes.
+  One delegation handle is queued once however often it is handed over,
+  whichever entry carries it: a handle is one-shot and the kernel returns the
+  *same* one for the same authority twice, so a second entry would promise a
+  file the first pull consumes.
 - Queueing and waking are **one** operation (`hand_over_open_target`),
   because they are one invariant: a queued target the owner was never woken
   for would sit unreachable. The engine confirms the instance is reachable and
@@ -979,6 +983,10 @@ from where they stood, each by its own picture where it carries one.
 - **One file dropped on an application** is opened for it through the very
   `launch_viewer` path "Open With" uses, so the application receives the same
   authority whichever gesture chose it.
+- **One file placed in another application's window** (`DropSite::Placed`) is
+  opened read-only on the reader (`OpenFor::Placed`) and handed over with
+  `PlaceDropped`, a delegation minted to the session that it relays on
+  read-only; a refusal is stated in a notice of the manager's own.
 
 **Icons dragged off the desktop are dropped as the manager's own items are**
 (`plans/FILES-INTERACTION.md` FI43). Offered them over a window

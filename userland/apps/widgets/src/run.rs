@@ -301,6 +301,7 @@ mod program {
             | WindowEvent::SaveOfferEnded { .. }
             | WindowEvent::ItemsOffered { .. }
             | WindowEvent::ItemsOfferEnded { .. }
+            | WindowEvent::FileOffered { .. }
             | WindowEvent::PreviewRendered { .. }
             | WindowEvent::Pinch { .. }
             // The gallery shows its own controls, so it declares no file

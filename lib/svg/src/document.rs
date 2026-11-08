@@ -483,10 +483,8 @@ impl<'a> TextCascade<'a> for Decoder<'a, '_> {
         &mut self,
         element: &'a Element<'a>,
     ) -> Result<Option<(tairix_bezier::Path, Option<f64>)>, SvgError> {
-        let Some(target) = self.referenced(element) else {
-            return Ok(None);
-        };
-        let geometry = textpath::geometry(target, self.vertices_left)?;
+        let target = self.referenced(element);
+        let geometry = textpath::geometry(element, target, self.viewport, self.vertices_left)?;
         // The path is geometry the text is drawn from, so it is charged as
         // geometry: no number of references re-reads it for nothing.
         if let Some((path, _)) = &geometry {

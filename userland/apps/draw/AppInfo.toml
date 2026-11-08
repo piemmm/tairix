@@ -15,10 +15,10 @@ kind = "application"
 purpose = "Draw and edit vector drawings in layers"
 author = "The TAIRiX Project"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_SANDBOX_SPAWN", "CAP_LOG_EMIT"]
-# SVG, which Draw writes back as well as reads, so a file opens writable and
-# Save writes it; and RISC OS Draw files, read by their content and saved
-# as SVG, or copied back to a Draw file.
-associations = ["image/svg+xml", "image/x-riscos-draw"]
+# SVG and RISC OS Draw files, which Draw writes back as well as reads, so a
+# file opens writable and Save writes it in the format its name says; and PDF,
+# one page of which opens as a drawing.
+associations = ["image/svg+xml", "image/x-riscos-draw", "application/pdf"]
 document-access = "read-write"
 library = "Graphics"
 library-icon = "Draw.png"

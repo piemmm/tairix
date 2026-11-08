@@ -609,7 +609,9 @@ impl<'a> Reader<'a, '_> {
         Ok(Some(try_arc(clip)?))
     }
 
-    /// A `<use>`: what it references, inside a group placed at its offset.
+    /// A `<use>`: what it references, inside a group placed at its offset —
+    /// or, of a picture Draw writes once for every object showing it, that
+    /// object.
     fn use_of(
         &mut self,
         element: &'a Element<'a>,
@@ -624,6 +626,20 @@ impl<'a> Reader<'a, '_> {
         }
         let x = optional_length(element, "x", self.viewport.0)?;
         let y = optional_length(element, "y", self.viewport.1)?;
+        if target.name == "symbol" && self.names.draw(target, "picture") == Some("true") {
+            // A clip path holds no picture, as it holds no `<image>`.
+            if self.clipping {
+                return Ok(None);
+            }
+            let slot = (
+                optional_attr_length(element, "width", self.viewport.0)?,
+                optional_attr_length(element, "height", self.viewport.1)?,
+            );
+            if let (Some(width), Some(height)) = slot {
+                let place = Bounds::new(Point::new(x, y), Point::new(x + width, y + height));
+                return self.shown_picture(target, place, own);
+            }
+        }
         let placed = Affine::translate(x, y).then(own);
         self.use_depth += 1;
         let read = self.expanding(target, |reader| {
@@ -722,6 +738,53 @@ impl<'a> Reader<'a, '_> {
         })?))
     }
 
+    /// The picture the symbol `target` holds, Draw's for one shown by several
+    /// objects, laid over `place`: its pixels decoded once however often it
+    /// is shown.
+    fn shown_picture(
+        &mut self,
+        target: &'a Element<'a>,
+        place: Bounds,
+        own: Affine,
+    ) -> Result<Option<Node>, ReadError> {
+        if !(place.width() > 0.0 && place.height() > 0.0) {
+            return Ok(None);
+        }
+        let link = target
+            .children()
+            .find(|child| child.name == "image")
+            .and_then(|image| xml::href(image));
+        let Some(picture) = link.map(|link| self.decoded(link)).transpose()?.flatten() else {
+            self.unkept.insert(Lost::Images);
+            return Ok(None);
+        };
+        let node = Node::new(
+            self.ids.issue(),
+            Kind::Image {
+                image: try_arc(picture.placed(place)?)?,
+            },
+        )?;
+        Ok(Some(node.with_transform(own)?))
+    }
+
+    /// The picture `link` carries as a data URL — a PNG or JPEG known by its
+    /// content — decoded once however many elements show it; `None` for one
+    /// linked from elsewhere, of another kind, or broken.
+    fn decoded(&mut self, link: &'a str) -> Result<Option<image::Picture>, ReadError> {
+        self.pictures.picture(link.as_bytes(), |limits| {
+            use tairix_image::DecodeError;
+            match data_url::decode(link, MAX_IMAGE_SOURCE_BYTES) {
+                Ok(Some(bytes)) => {
+                    let bytes =
+                        SharedSlice::try_from_vec(bytes).map_err(|_| DecodeError::OutOfMemory)?;
+                    image::decode_encoded(bytes, limits)
+                }
+                Err(DrawingError::OutOfMemory) => Err(DecodeError::OutOfMemory),
+                Ok(None) | Err(_) => Err(DecodeError::UnknownFormat),
+            }
+        })
+    }
+
     /// An `<image>`: a PNG or JPEG its link carries as a data URL, laid in
     /// the rectangle it states as its `preserveAspectRatio` lays it and cut
     /// to that rectangle where it overflows. A picture linked from anywhere
@@ -750,19 +813,7 @@ impl<'a> Reader<'a, '_> {
         {
             return Ok(None);
         }
-        let read = self.pictures.picture(link.as_bytes(), |limits| {
-            use tairix_image::DecodeError;
-            match data_url::decode(link, MAX_IMAGE_SOURCE_BYTES) {
-                Ok(Some(bytes)) => {
-                    let bytes =
-                        SharedSlice::try_from_vec(bytes).map_err(|_| DecodeError::OutOfMemory)?;
-                    image::decode_encoded(bytes, limits)
-                }
-                Err(DrawingError::OutOfMemory) => Err(DecodeError::OutOfMemory),
-                Ok(None) | Err(_) => Err(DecodeError::UnknownFormat),
-            }
-        })?;
-        let Some(picture) = read else {
+        let Some(picture) = self.decoded(link)? else {
             self.unkept.insert(Lost::Images);
             return Ok(None);
         };
@@ -784,12 +835,18 @@ impl<'a> Reader<'a, '_> {
             min: (0.0, 0.0),
             size: natural,
         };
-        let laid =
-            viewport_transform(view_box, (width, height), ratio).then(Affine::translate(x, y));
-        let place = Bounds::from_points([
-            laid.map(Point::ZERO),
-            laid.map(Point::new(natural.0, natural.1)),
-        ]);
+        // Stretched, the rectangle is the one stated, spelled from it rather
+        // than scaled to the pixels and back, which rounding would move.
+        let place = if ratio.align == Align::None {
+            Bounds::new(Point::new(x, y), Point::new(x + width, y + height))
+        } else {
+            let laid =
+                viewport_transform(view_box, (width, height), ratio).then(Affine::translate(x, y));
+            Bounds::from_points([
+                laid.map(Point::ZERO),
+                laid.map(Point::new(natural.0, natural.1)),
+            ])
+        };
         let shown = picture.placed(place)?;
         let node = Node::new(
             self.ids.issue(),
@@ -1269,13 +1326,13 @@ impl<'a> Reader<'a, '_> {
     /// text's own space, run backwards for `side="right"`, with how far along
     /// it its characters start.
     fn text_path(&mut self, element: &Element<'_>, style: &SvgStyle) -> Result<Along, ReadError> {
-        let Some(target) = self.referenced(element) else {
-            return Ok(Along::Missing);
-        };
-        let (mut path, stated) = match textpath::geometry(target, MAX_TEXT_PATH_NODES) {
+        let target = self.referenced(element);
+        let geometry = textpath::geometry(element, target, self.viewport, MAX_TEXT_PATH_NODES);
+        let (mut path, stated) = match geometry {
             Ok(Some(geometry)) => geometry,
+            Ok(None) => return Ok(Along::Missing),
             Err(SvgError::OutOfMemory) => return Err(ReadError::OutOfMemory),
-            Ok(None) | Err(_) => {
+            Err(_) => {
                 self.unkept.insert(Lost::TextPaths);
                 return Ok(Along::Unusable);
             }
@@ -1615,7 +1672,8 @@ struct Letter {
 enum Along {
     /// Nothing: SVG draws none of its characters.
     Missing,
-    /// What a text cannot be set along, so its characters are set in lines.
+    /// A path past what a text holds, or broken, so its characters are set
+    /// in lines.
     Unusable,
     /// A path, in the text's own space.
     Path(TextPath),

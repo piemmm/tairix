@@ -54,18 +54,19 @@ use tairix_abi::window_ipc::{
     encode_clipboard_reply, encode_create_reply, encode_cursor_sets_reply, encode_desktop_reply,
     encode_drag_spot_reply, encode_drop_target_reply, encode_hand_over_reply,
     encode_menu_text_reply, encode_minted_id_reply, encode_notify_sources_reply,
-    encode_offered_items_reply, encode_open_target_reply, encode_picked_file_reply,
-    encode_picked_name_reply, encode_terrain_reply, encode_wallpapers_reply, AlertOutcome,
-    AlertSpec, AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape, DialogModality,
-    DocumentName, DragAt, DragItems, DropOperation, DropSite, DropTarget, HandOverOutcome,
-    HandOverTarget, LayerDepth, OfferDrop, OfferedItem, OpenTarget, PickPurpose, PreviewSubject,
-    TerrainPlate, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowTitle,
-    ALERT_MAX_OPEN, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, DESKTOP_LAYER_MAX_PER_SEAT,
-    DESKTOP_LAYER_MAX_PLATES, WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN,
-    WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX,
-    WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_FOLDER_PICK_MAX, WINDOW_HAND_OVER_REPLY_LEN,
-    WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
-    WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OFFERED_ITEMS_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
+    encode_offered_file_reply, encode_offered_items_reply, encode_open_target_reply,
+    encode_picked_file_reply, encode_picked_name_reply, encode_terrain_reply,
+    encode_wallpapers_reply, AlertOutcome, AlertSpec, AppBar, AppMenu, ClipboardHeld,
+    ClipboardKind, CursorShape, DialogModality, DocumentName, DragAt, DragItems, DropOperation,
+    DropSite, DropTarget, HandOverOutcome, HandOverTarget, LayerDepth, OfferDrop, OfferedItem,
+    OpenTarget, PickPurpose, PreviewSubject, TerrainPlate, WallpaperEntry, WindowEvent,
+    WindowRegion, WindowRequest, WindowTitle, ALERT_MAX_OPEN, APP_MENU_ENTRY_MAX,
+    DESKTOP_LAYER_MAX_PER_CLIENT, DESKTOP_LAYER_MAX_PER_SEAT, DESKTOP_LAYER_MAX_PLATES,
+    WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX,
+    WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX,
+    WINDOW_FOLDER_PICK_MAX, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS,
+    WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX,
+    WINDOW_OFFERED_FILE_REPLY_MAX, WINDOW_OFFERED_ITEMS_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
     WINDOW_PICKED_FILE_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX,
     WINDOW_WALLPAPERS_REPLY_MAX,
 };
@@ -120,7 +121,10 @@ pub const WINDOW_REPLY_MAX: usize = {
                                             WINDOW_DROP_TARGET_REPLY_MAX,
                                             wider(
                                                 WINDOW_DRAG_SPOT_REPLY_MAX,
-                                                WINDOW_OFFERED_ITEMS_REPLY_MAX,
+                                                wider(
+                                                    WINDOW_OFFERED_ITEMS_REPLY_MAX,
+                                                    WINDOW_OFFERED_FILE_REPLY_MAX,
+                                                ),
                                             ),
                                         ),
                                         WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
@@ -195,6 +199,43 @@ pub enum DragConclusion {
         /// What the drop does: the verdict the pointer showed.
         operation: DropOperation,
     },
+    /// On another application's window that answered it places the one file
+    /// dragged there.
+    Placed(Placement),
+}
+
+/// Where a file a drag placed goes: another application's window and the
+/// window-local point it was dropped at.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Placement {
+    /// The window dropped on.
+    pub window_id: u64,
+    /// Window-local x.
+    pub x: u32,
+    /// Window-local y.
+    pub y: u32,
+}
+
+/// The file a [`WindowRequest::PlaceDropped`] hands over: its name for
+/// display, and the delegation its dragging application minted to the
+/// session.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PlacedFile<'a> {
+    /// Its own file name, for display.
+    pub name: &'a DocumentName,
+    /// The `fd_grant` handle minted to the session.
+    pub grant: core::num::NonZeroU64,
+}
+
+/// What the last drag's drop leaves its owner to take.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DropHeld {
+    /// The application it opens in ([`WindowRequest::TakeDropTarget`]),
+    /// boxed as the conclusion carries it: a run path is far wider than a
+    /// placement, and every window holds one of these.
+    Target(Box<DropTarget>),
+    /// The window it is placed in ([`WindowRequest::PlaceDropped`]).
+    Placed(Placement),
 }
 
 /// The minted-id reply a menu open answers with is the shortest of the three,
@@ -681,6 +722,32 @@ pub trait WindowHost {
         Err(Errno::NotSupported)
     }
 
+    /// A validated `FileOfferAnswer`: the owner of window `window_id` answered
+    /// the file offer numbered `serial` with whether a drop there places it.
+    /// The host decides whether the answer is still current.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host refuses the answer with; nothing changes.
+    fn file_offer_answered(
+        &mut self,
+        _window_id: u64,
+        _serial: u32,
+        _places: bool,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    /// The media type of the one file the offer numbered `serial` holds over
+    /// window `window_id`, for its owner: a validated `OfferedFile` reads it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] where that offer no longer stands over the window.
+    fn offered_file(&self, _window_id: u64, _serial: u32) -> Result<&str, Errno> {
+        Err(Errno::NotFound)
+    }
+
     /// How many items the desktop's drag numbered `drag` carries, for the
     /// owner of window `window_id`, which it is offered to or dropped on: a
     /// validated `OfferedItems` reads them.
@@ -774,6 +841,32 @@ pub trait WindowHost {
     ) -> Result<HandOverOutcome, Errno> {
         let _ = (desk, caller, run_path, target);
         Err(Errno::NotSupported)
+    }
+
+    /// A validated `PlaceDropped`: attested `caller` handed over `file` for the
+    /// drop its drag placed, which `into` names — the placement and the
+    /// application owning the window it was dropped on — or why nothing waits
+    /// to be placed.
+    ///
+    /// The host relays the file read-only to that application, queued through
+    /// `desk` as an [`OpenEntry::Placed`], and consumes the grant whatever it
+    /// answers, so a refused hand-over leaves nothing pending for the caller's
+    /// life.
+    ///
+    /// # Errors
+    ///
+    /// The refusal `into` carries, or any the relay met: a grant the caller did
+    /// not mint, a descriptor that is not read-only, an application that no
+    /// longer takes open targets.
+    fn place_dropped(
+        &mut self,
+        desk: &mut dyn HandOverDesk,
+        caller: ProcId,
+        into: Result<(ProcId, Placement), Errno>,
+        file: PlacedFile<'_>,
+    ) -> Result<(), Errno> {
+        let _ = (desk, caller, file);
+        into.and(Err(Errno::NotSupported))
     }
 
     /// A validated `RevealDocument`: attested `caller` asked to have the user
@@ -1766,6 +1859,17 @@ pub enum OpenEntry {
     /// A place inside the application, resolved against its own closed set
     /// of places. Confers nothing.
     Pane(String),
+    /// A file dropped on a window of the application, to be placed where it
+    /// was dropped, reachable read-only through a one-shot delegation the
+    /// session minted to the application.
+    Placed {
+        /// The window it was dropped on, and where.
+        placement: Placement,
+        /// Its own file name, for display.
+        name: DocumentName,
+        /// The `fd_redeem` handle. Never zero.
+        grant: u64,
+    },
 }
 
 /// One entry of the shipped wallpaper catalog, owned by the host that
@@ -1810,6 +1914,25 @@ impl OpenEntry {
                 writable: *writable,
             },
             Self::Pane(pane) => OpenTarget::Pane(pane.as_bytes()),
+            Self::Placed {
+                placement,
+                name,
+                grant,
+            } => OpenTarget::Placed {
+                window_id: placement.window_id,
+                x: placement.x,
+                y: placement.y,
+                name: name.as_str().as_bytes(),
+                grant: *grant,
+            },
+        }
+    }
+
+    /// The delegation it carries, if any.
+    const fn grant(&self) -> Option<u64> {
+        match self {
+            Self::Document { grant, .. } | Self::Placed { grant, .. } => Some(*grant),
+            Self::Path(_) | Self::Image(_) | Self::Pane(_) => None,
         }
     }
 }
@@ -1855,9 +1978,9 @@ struct WindowRecord<R> {
     /// The drops onto the desktop the owner is still landing, the oldest
     /// first, at most [`DROP_LANDINGS_MAX`].
     landings: VecDeque<Landing>,
-    /// Where the last drag was dropped, until the owner takes it or begins
-    /// another.
-    drop_target: Option<DropTarget>,
+    /// What the last drag's drop leaves the owner to take, until it takes it
+    /// or begins another.
+    dropped: Option<DropHeld>,
     /// Every `RenderPreview` accepted whose conclusion is still owed, by
     /// what it renders. How many may be pending is the host's to bound —
     /// it runs the decodes — and the engine holds each acceptance to exactly
@@ -2405,17 +2528,16 @@ impl<M: ShmMapper> WindowServer<M> {
                 let taken = self.take_menu_text(caller, window_id, open_id);
                 menu_text_reply(
                     reply,
-                    match taken {
-                        Ok(ref held) => Ok(held.as_deref()),
-                        Err(err) => Err(err),
-                    },
+                    taken.as_ref().map(Option::as_deref).map_err(|&err| err),
                 )
             }
             WindowRequest::TakeAppBarText { item, revision } => {
                 let taken = self.take_app_bar_text(caller, item, revision);
                 menu_text_reply(reply, Ok(taken.as_deref()))
             }
-            WindowRequest::HandOverLaunch { .. } | WindowRequest::RevealDocument { .. } => {
+            WindowRequest::HandOverLaunch { .. }
+            | WindowRequest::RevealDocument { .. }
+            | WindowRequest::PlaceDropped { .. } => {
                 self.dispatch_reach(host, sink, caller, decoded, reply)
             }
             WindowRequest::PickFile { .. }
@@ -2429,6 +2551,8 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::SaveInto { .. }
             | WindowRequest::ItemsOfferAnswer { .. }
             | WindowRequest::OfferedItems { .. }
+            | WindowRequest::OfferedFile { .. }
+            | WindowRequest::FileOfferAnswer { .. }
             | WindowRequest::DropLanding { .. } => {
                 self.dispatch_transfer(host, caller, decoded, reply)
             }
@@ -2464,6 +2588,15 @@ impl<M: ShmMapper> WindowServer<M> {
                 reply,
                 host.reveal_requested(&mut desk, caller, window_id, location),
             ),
+            WindowRequest::PlaceDropped {
+                window_id,
+                ref name,
+                grant,
+            } => {
+                let into = desk.server.placement_of(caller, window_id);
+                let file = PlacedFile { name, grant };
+                status(reply, host.place_dropped(&mut desk, caller, into, file))
+            }
             _ => status(reply, Err(Errno::NotSupported)),
         }
     }
@@ -2536,6 +2669,20 @@ impl<M: ShmMapper> WindowServer<M> {
                 drag,
                 from,
             } => self.offered_items(&*host, caller, (window_id, drag, from), reply),
+            WindowRequest::OfferedFile { window_id, serial } => {
+                let read = owned_window_mut(&mut self.windows, caller, window_id)
+                    .and_then(|_| host.offered_file(window_id, serial));
+                offered_file_reply(reply, read)
+            }
+            WindowRequest::FileOfferAnswer {
+                window_id,
+                serial,
+                places,
+            } => {
+                let answered = owned_window_mut(&mut self.windows, caller, window_id)
+                    .and_then(|_| host.file_offer_answered(window_id, serial, places));
+                status(reply, answered)
+            }
             // Not checked against the window here: the host consumes the
             // location whatever it answers, and checks the window is the
             // caller's before acting on it.
@@ -2563,15 +2710,51 @@ impl<M: ShmMapper> WindowServer<M> {
                 self.step_landing(host, caller, window_id, serial, step),
             ),
             WindowRequest::TakeDropTarget { window_id } => {
-                let taken = owned_window_mut(&mut self.windows, caller, window_id)
-                    .and_then(|record| record.drop_target.take().ok_or(Errno::NotFound));
-                let mut frame = [0u8; WINDOW_DROP_TARGET_REPLY_MAX];
-                let len = encode_drop_target_reply(&mut frame, taken.as_ref().map_err(|&err| err));
-                reply[..len].copy_from_slice(&frame[..len]);
-                len
+                self.take_drop_target(caller, window_id, reply)
             }
             _ => status(reply, Err(Errno::NotSupported)),
         }
+    }
+
+    /// Answer `caller`'s take of the application its window `window_id`'s drag
+    /// was dropped on: one-shot.
+    fn take_drop_target(
+        &mut self,
+        caller: ProcId,
+        window_id: u64,
+        reply: &mut [u8; WINDOW_REPLY_MAX],
+    ) -> usize {
+        let taken =
+            owned_window_mut(&mut self.windows, caller, window_id).and_then(|record| match record
+                .dropped
+                .take_if(|held| matches!(held, DropHeld::Target(_)))
+            {
+                Some(DropHeld::Target(target)) => Ok(target),
+                _ => Err(Errno::NotFound),
+            });
+        let mut frame = [0u8; WINDOW_DROP_TARGET_REPLY_MAX];
+        let len = encode_drop_target_reply(&mut frame, taken.as_deref().map_err(|&err| err));
+        reply[..len].copy_from_slice(&frame[..len]);
+        len
+    }
+
+    /// Take the placement `caller`'s window `window_id`'s drag left, with the
+    /// owner of the window it goes into: one-shot, so a placed drop is handed
+    /// over at most once.
+    fn placement_of(
+        &mut self,
+        caller: ProcId,
+        window_id: u64,
+    ) -> Result<(ProcId, Placement), Errno> {
+        let record = owned_window_mut(&mut self.windows, caller, window_id)?;
+        let Some(DropHeld::Placed(placement)) = record
+            .dropped
+            .take_if(|held| matches!(held, DropHeld::Placed(_)))
+        else {
+            return Err(Errno::NotFound);
+        };
+        let into = self.owner_of(placement.window_id).ok_or(Errno::NotFound)?;
+        Ok((into, placement))
     }
 
     /// Answer `caller`'s read of the items the desktop's drag numbered `drag`
@@ -2612,7 +2795,7 @@ impl<M: ShmMapper> WindowServer<M> {
         record.drag_pending = true;
         record.drag_count = items.count();
         record.drag_spot = None;
-        record.drop_target = None;
+        record.dropped = None;
         Ok(())
     }
 
@@ -2816,6 +2999,9 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::SaveInto { .. }
             | WindowRequest::ItemsOfferAnswer { .. }
             | WindowRequest::OfferedItems { .. }
+            | WindowRequest::OfferedFile { .. }
+            | WindowRequest::FileOfferAnswer { .. }
+            | WindowRequest::PlaceDropped { .. }
             | WindowRequest::DropLanding { .. }
             | WindowRequest::RevealDocument { .. } => status(reply, Err(Errno::NotSupported)),
             // ...and a committed-text pull, likewise.
@@ -2905,7 +3091,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 drag_count: 0,
                 drag_spot: None,
                 landings: VecDeque::new(),
-                drop_target: None,
+                dropped: None,
                 renders_pending: Vec::new(),
                 menu_open: None,
                 menu_text: None,
@@ -3101,7 +3287,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 drag_count: 0,
                 drag_spot: None,
                 landings: VecDeque::new(),
-                drop_target: None,
+                dropped: None,
                 renders_pending: Vec::new(),
                 menu_open: None,
                 menu_text: None,
@@ -3170,7 +3356,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 drag_count: 0,
                 drag_spot: None,
                 landings: VecDeque::new(),
-                drop_target: None,
+                dropped: None,
                 renders_pending: Vec::new(),
                 menu_open: None,
                 menu_text: None,
@@ -3728,6 +3914,15 @@ impl<M: ShmMapper> WindowServer<M> {
                     return Err(Errno::OutOfRange);
                 }
             }
+            // A file is placed only in a window of the application it is
+            // queued for.
+            OpenEntry::Placed {
+                placement, grant, ..
+            } => {
+                if *grant == 0 || self.owner_of(placement.window_id) != Some(app) {
+                    return Err(Errno::OutOfRange);
+                }
+            }
             OpenEntry::Pane(pane) => {
                 if pane.is_empty() || pane.len() > tairix_abi::window_ipc::WINDOW_PANE_NAME_MAX {
                     return Err(Errno::LengthOutOfRange);
@@ -3739,12 +3934,9 @@ impl<M: ShmMapper> WindowServer<M> {
         // handle back when the same authority is granted to the same process
         // twice. Queueing it twice would therefore promise a second document
         // the first pull consumes, so an entry already waiting is the answer.
-        let waiting = match entry {
-            OpenEntry::Document { grant, .. } => queue.iter().any(
-                |held| matches!(held, OpenEntry::Document { grant: held, .. } if *held == grant),
-            ),
-            _ => false,
-        };
+        let waiting = entry
+            .grant()
+            .is_some_and(|grant| queue.iter().any(|held| held.grant() == Some(grant)));
         if !waiting {
             queue.push_back(entry);
         }
@@ -4558,9 +4750,19 @@ impl<M: ShmMapper> WindowServer<M> {
             return Err(Errno::OutOfRange);
         }
         let owner = record.owner;
-        let (site, target) = match ended {
+        let (site, held) = match ended {
             DragConclusion::Nothing => (DropSite::Nothing, None),
-            DragConclusion::Application(target) => (DropSite::Application, Some(*target)),
+            DragConclusion::Application(target) => {
+                (DropSite::Application, Some(DropHeld::Target(target)))
+            }
+            DragConclusion::Placed(placement) => {
+                // Only another application's window takes a placed file.
+                match self.owner_of(placement.window_id) {
+                    Some(into) if into != owner => {}
+                    _ => return Err(Errno::OutOfRange),
+                }
+                (DropSite::Placed, Some(DropHeld::Placed(placement)))
+            }
             DragConclusion::Window {
                 window_id: over,
                 x,
@@ -4597,7 +4799,7 @@ impl<M: ShmMapper> WindowServer<M> {
             &WindowEvent::DragEnded { window_id, site },
         )?;
         record.drag_pending = false;
-        record.drop_target = target;
+        record.dropped = held;
         let DropSite::Desktop { serial, .. } = site else {
             return Ok(None);
         };
@@ -4648,6 +4850,7 @@ impl<M: ShmMapper> WindowServer<M> {
             ..
         }
         | WindowEvent::ItemsOffered { x, y, .. }
+        | WindowEvent::FileOffered { x, y, .. }
         | WindowEvent::ItemsOfferEnded {
             dropped: Some(OfferDrop { x, y, .. }),
             ..
@@ -4930,6 +5133,14 @@ fn menu_text_reply(
 fn drag_spot_reply(reply: &mut [u8; WINDOW_REPLY_MAX], result: Result<&str, Errno>) -> usize {
     match reply.first_chunk_mut::<WINDOW_DRAG_SPOT_REPLY_MAX>() {
         Some(frame) => encode_drag_spot_reply(frame, result),
+        None => status(reply, Err(Errno::BufferTooSmall)),
+    }
+}
+
+/// Write an `OfferedFile` outcome into `reply` in place, answering its length.
+fn offered_file_reply(reply: &mut [u8; WINDOW_REPLY_MAX], result: Result<&str, Errno>) -> usize {
+    match reply.first_chunk_mut::<WINDOW_OFFERED_FILE_REPLY_MAX>() {
+        Some(frame) => encode_offered_file_reply(frame, result),
         None => status(reply, Err(Errno::BufferTooSmall)),
     }
 }

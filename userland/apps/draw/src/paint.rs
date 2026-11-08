@@ -10,50 +10,28 @@ use alloc::string::String;
 
 use tairix_bezier::flatten::flatten_cubic;
 use tairix_bezier::{Affine, Bounds, Path, Point, Segment};
-use tairix_controls::{fill_area, withheld, Ruler, RulerAxis, StatusBand, StatusTone};
+use tairix_colour::Rgba;
+use tairix_controls::{blend_area, fill_area, withheld, Ruler, RulerAxis, StatusBand, StatusTone};
 use tairix_drawing::{GradientKind, GuideAxis, Kind, Node, Paint, Shape, PAPER_WHITE};
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::IconArtwork;
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{Palette, Theme};
 use tairix_util::mathf::{fabs, floor, fmin, real, round, round_i32};
 
 use crate::edit;
 use crate::glyphs::{Arrived, Lettering};
 use crate::input::{handle_point, handles};
-use crate::inspector::{text_in, Face, Shown};
+use crate::inspector::{Face, Shown};
 use crate::layout::{px, Faces, Layout};
 use crate::tiles::TILE;
 use crate::tools::{self, Constraint, Tool};
 use crate::view::{Gesture, Grip, View};
+use crate::viewport::readout;
 
 /// The most points a frame's previews flatten, past which what is left is
 /// previewed by its bounds alone.
 const PREVIEW_POINTS: usize = 20_000;
-
-/// The zoom readout on the tool's bar.
-#[must_use]
-pub fn zoom_box(layout: &Layout) -> Rect {
-    let width = layout.length(72);
-    let bar = layout.bar;
-    Rect::new(
-        bar.right() - i32::try_from(width + layout.length(8)).unwrap_or(0),
-        bar.top() + i32::try_from(layout.length(5)).unwrap_or(0),
-        width,
-        bar.height.saturating_sub(layout.length(10)),
-    )
-}
-
-/// A zoom as a whole percentage, or to one place below 10%.
-#[must_use]
-pub fn percent(zoom: f64) -> String {
-    let percent = zoom * 100.0;
-    if percent < 10.0 {
-        alloc::format!("{percent:.1}")
-    } else {
-        alloc::format!("{}", round_i32(percent))
-    }
-}
 
 impl View {
     /// Paint the window.
@@ -70,10 +48,6 @@ impl View {
             fill_area(surface, layout.tools, chrome);
             self.tool_box
                 .render(surface, layout.tools, scale, theme, artwork);
-        }
-        if !withheld(surface, layout.bar) {
-            fill_area(surface, layout.bar, chrome);
-            self.bar(surface, layout, theme, faces);
         }
         self.rulers(surface, layout, scale, theme);
         if !withheld(surface, layout.canvas) {
@@ -100,44 +74,6 @@ impl View {
         if !withheld(surface, layout.status) {
             self.status(surface, layout, theme, StatusBand::new(theme, scale));
         }
-    }
-
-    fn bar(&self, surface: &mut Surface, layout: &Layout, theme: &Theme, faces: Faces) {
-        let palette = theme.palette();
-        let hint = match self.tool {
-            Tool::Select => "Drag to move \u{b7} handles scale, past a corner turns \u{b7} Shift adds, Alt copies",
-            Tool::Nodes => "Drag a node or a handle \u{b7} smooth nodes keep their handles in line",
-            Tool::Rectangle | Tool::Ellipse => "Drag to draw \u{b7} Shift for even sides \u{b7} Alt from the centre",
-            Tool::Star => "Drag out from the centre \u{b7} Shift turns in 15\u{b0} steps",
-            Tool::Line => "Drag to draw \u{b7} Shift in 15\u{b0} steps",
-            Tool::Pen => "Click for corners, drag for curves \u{b7} click the first node to close \u{b7} Enter ends",
-            Tool::Pencil => "Drag to draw freehand",
-            Tool::Text => "Click to type \u{b7} click text to edit it \u{b7} Escape ends",
-            Tool::Gradient => "Drag across the selection to lay its gradient \u{b7} Shift in 15\u{b0} steps \u{b7} Alt radial",
-            Tool::Eyedropper => "Click an object to take its style",
-            Tool::Zoom => "Click to zoom in, Alt-click out \u{b7} drag a rectangle to fill the window",
-            Tool::Hand => "Drag to scroll",
-        };
-        let inset = i32::try_from(layout.length(10)).unwrap_or(0);
-        let height = i32::try_from(faces.label.line_height()).unwrap_or(0);
-        let y = layout.bar.top() + (i32::try_from(layout.bar.height).unwrap_or(0) - height) / 2;
-        faces.label.draw_text(
-            surface,
-            layout.bar.left() + inset,
-            y,
-            hint,
-            Color::from(palette.on_surface_muted),
-        );
-        let zoom = zoom_box(layout);
-        fill_area(surface, zoom, Color::from(palette.surface));
-        let readout = alloc::format!("{}%", percent(self.viewport.zoom()));
-        text_in(
-            surface,
-            zoom,
-            &readout,
-            faces,
-            Color::from(palette.on_surface),
-        );
     }
 
     fn rulers(&self, surface: &mut Surface, layout: &Layout, scale: Scale, theme: &Theme) {
@@ -167,12 +103,19 @@ impl View {
         fill_area(surface, layout.canvas, Color::from(palette.desktop));
         let drawing = self.shown();
         let page = self.window_rect(layout, drawing.page().bounds());
+        let rule = layout.length(1).max(1);
         if let Some(page) = page {
-            let shadow = Rect::new(page.left() + 3, page.top() + 3, page.width, page.height);
-            fill_area(
+            let fall = px(layout.length(SHADOW_FALL));
+            let shadow = Rect::new(
+                page.left().saturating_add(fall),
+                page.top().saturating_add(fall),
+                page.width,
+                page.height,
+            );
+            blend_area(
                 surface,
                 shadow.intersection(&layout.canvas),
-                Color::from(palette.drop_shadow),
+                palette.drop_shadow,
             );
             fill_area(
                 surface,
@@ -209,39 +152,38 @@ impl View {
                 surface.blit_transformed(&stand_in.picture, onto.then(to_canvas), 255);
             });
         }
-        let accent = Color::from(palette.accent);
         if let Some(page) = page {
-            outline_rect(surface, page, Color::from(palette.border), 1);
+            outline_rect(surface, page, Color::from(palette.border), rule);
         }
         if self.show.grid {
-            self.grid_lines(surface, layout, Color::from(palette.selection_tint));
+            self.grid_lines(surface, layout, palette.selection_tint, rule);
         }
         for guide in drawing.guides() {
-            let colour = Color::from(palette.selection_fill);
+            let colour = palette.selection_fill;
             match guide.axis {
                 GuideAxis::Horizontal => {
                     let y = round_i32(self.window_at(layout, Point::new(0.0, guide.position)).y);
-                    fill_area(
+                    blend_area(
                         surface,
-                        Rect::new(layout.canvas.left(), y, layout.canvas.width, 1),
+                        Rect::new(layout.canvas.left(), y, layout.canvas.width, rule),
                         colour,
                     );
                 }
                 GuideAxis::Vertical => {
                     let x = round_i32(self.window_at(layout, Point::new(guide.position, 0.0)).x);
-                    fill_area(
+                    blend_area(
                         surface,
-                        Rect::new(x, layout.canvas.top(), 1, layout.canvas.height),
+                        Rect::new(x, layout.canvas.top(), rule, layout.canvas.height),
                         colour,
                     );
                 }
             }
         }
-        self.overlay(surface, layout, accent);
+        self.overlay(surface, layout, palette);
     }
 
     /// The window's device rectangle over `bounds` of the drawing.
-    fn window_rect(&self, layout: &Layout, bounds: Bounds) -> Option<Rect> {
+    pub(crate) fn window_rect(&self, layout: &Layout, bounds: Bounds) -> Option<Rect> {
         if bounds.is_empty() {
             return None;
         }
@@ -254,7 +196,8 @@ impl View {
         Some(Rect::new(left, top, width.max(1), height.max(1)))
     }
 
-    fn grid_lines(&self, surface: &mut Surface, layout: &Layout, colour: Color) {
+    /// The grid over the canvas, its lines `rule` device pixels wide.
+    fn grid_lines(&self, surface: &mut Surface, layout: &Layout, colour: Rgba, rule: u32) {
         let grid = self.shown().grid();
         let cell = grid.spacing / f64::from(grid.subdivisions.max(1));
         let step = cell * self.viewport.pixels();
@@ -277,9 +220,9 @@ impl View {
             if x >= px(canvas.width) {
                 break;
             }
-            fill_area(
+            blend_area(
                 surface,
-                Rect::new(canvas.left() + x, canvas.top(), 1, canvas.height),
+                Rect::new(canvas.left() + x, canvas.top(), rule, canvas.height),
                 colour,
             );
         }
@@ -288,43 +231,39 @@ impl View {
             if y >= px(canvas.height) {
                 break;
             }
-            fill_area(
+            blend_area(
                 surface,
-                Rect::new(canvas.left(), canvas.top() + y, canvas.width, 1),
+                Rect::new(canvas.left(), canvas.top() + y, canvas.width, rule),
                 colour,
             );
         }
     }
 
     /// What the hand is doing, over the tiles.
-    fn overlay(&self, surface: &mut Surface, layout: &Layout, accent: Color) {
+    fn overlay(&self, surface: &mut Surface, layout: &Layout, palette: &Palette) {
         let to_window = self.viewport.to_canvas().then(Affine::translate(
             f64::from(layout.canvas.left()),
             f64::from(layout.canvas.top()),
         ));
-        self.selection_marks(surface, layout, to_window, accent);
+        let pen = Pen::hairline(layout, Color::from(palette.accent));
+        self.selection_marks(surface, layout, to_window, pen);
         if self.tool == Tool::Nodes {
-            self.node_marks(surface, layout, to_window, accent);
+            self.node_marks(surface, layout, to_window, pen);
         }
-        self.gesture_preview(surface, layout, to_window, accent);
+        self.gesture_preview(surface, layout, to_window, pen);
         if self.tool == Tool::Gradient && self.gesture.is_none() {
-            self.gradient_marks(surface, layout, to_window, accent);
+            self.gradient_marks(surface, layout, to_window, pen);
         }
-        self.pen_marks(surface, layout, to_window, accent);
+        self.pen_marks(surface, layout, to_window, pen);
         if let Some(typing) = &self.typing {
-            self.caret(surface, layout, typing, to_window, accent);
+            let marked = Color::from(palette.selection_fill);
+            self.caret(surface, typing, to_window, (pen, marked));
         }
     }
 
     /// The selection: where a drag would put it while one is under way, its
     /// bounds and, for the select tool, its handles otherwise.
-    fn selection_marks(
-        &self,
-        surface: &mut Surface,
-        layout: &Layout,
-        to_window: Affine,
-        accent: Color,
-    ) {
+    fn selection_marks(&self, surface: &mut Surface, layout: &Layout, to_window: Affine, pen: Pen) {
         let drawing = self.shown();
         let mut budget = PREVIEW_POINTS;
         let preview = self
@@ -335,12 +274,7 @@ impl View {
             for path in &self.selection {
                 // Past the budget, what is left is the selection's own frame.
                 if budget < BOUNDS_POINTS {
-                    stroke_bounds(
-                        surface,
-                        self.selection_bounds(),
-                        map.then(to_window),
-                        accent,
-                    );
+                    stroke_bounds(surface, self.selection_bounds(), map.then(to_window), pen);
                     break;
                 }
                 let Some(node) = drawing.node_at(path) else {
@@ -357,20 +291,20 @@ impl View {
                     _ => None,
                 };
                 let drawn = outline.is_some_and(|outline| {
-                    stroke_path(surface, &outline, placed, accent, &mut budget)
+                    stroke_path(surface, &outline, placed, pen, &mut budget)
                 });
                 if !drawn {
-                    stroke_bounds(surface, node.local_bounds(), placed, accent);
+                    stroke_bounds(surface, node.local_bounds(), placed, pen);
                     budget = budget.saturating_sub(BOUNDS_POINTS);
                 }
             }
         } else if !self.selection.is_empty() {
             let bounds = self.selection_bounds();
-            stroke_bounds(surface, bounds, to_window, accent);
+            stroke_bounds(surface, bounds, to_window, pen);
             if self.tool == Tool::Select {
                 for handle in handles() {
                     let at = device_point(to_window.map(handle_point(bounds, handle)));
-                    fill_area(surface, square(layout, at, 7), accent);
+                    fill_area(surface, square(layout, at, 7), pen.colour);
                     fill_area(surface, square(layout, at, 5), WHITE);
                 }
             }
@@ -380,13 +314,7 @@ impl View {
     /// Where the one object selected lays the gradient the Style tab edits:
     /// a linear one from its start to its end, a radial one from its centre
     /// out to its circle.
-    fn gradient_marks(
-        &self,
-        surface: &mut Surface,
-        layout: &Layout,
-        to_window: Affine,
-        accent: Color,
-    ) {
+    fn gradient_marks(&self, surface: &mut Surface, layout: &Layout, to_window: Affine, pen: Pen) {
         let [path] = self.selection.as_slice() else {
             return;
         };
@@ -410,18 +338,12 @@ impl View {
             .then(node.transform())
             .then(edit::parent_space(drawing, path))
             .then(to_window);
-        gradient_line(surface, layout, course, placed, accent);
+        gradient_line(surface, layout, course, placed, pen);
     }
 
     /// What the gesture under way would make: a marquee, a zoom area, a new
     /// shape, a freehand line or a guide.
-    fn gesture_preview(
-        &self,
-        surface: &mut Surface,
-        layout: &Layout,
-        to_window: Affine,
-        accent: Color,
-    ) {
+    fn gesture_preview(&self, surface: &mut Surface, layout: &Layout, to_window: Affine, pen: Pen) {
         let constraint = Constraint {
             even: self.modifiers.shift,
             centred: self.modifiers.alt,
@@ -429,14 +351,14 @@ impl View {
         let mut budget = PREVIEW_POINTS;
         match &self.gesture {
             Some(Gesture::Marquee { from, to, .. }) => {
-                stroke_bounds(surface, Bounds::new(*from, *to), to_window, accent);
+                stroke_bounds(surface, Bounds::new(*from, *to), to_window, pen);
             }
             Some(Gesture::Zoom { from, to }) => {
                 let canvas = Affine::translate(
                     f64::from(layout.canvas.left()),
                     f64::from(layout.canvas.top()),
                 );
-                stroke_bounds(surface, Bounds::new(*from, *to), canvas, accent);
+                stroke_bounds(surface, Bounds::new(*from, *to), canvas, pen);
             }
             Some(Gesture::Create { from, to }) => {
                 let shape = match self.tool {
@@ -456,7 +378,7 @@ impl View {
                     _ => None,
                 };
                 if let Some(path) = shape.and_then(|shape: Shape| shape.to_path().ok()) {
-                    stroke_path(surface, &path, to_window, accent, &mut budget);
+                    stroke_path(surface, &path, to_window, pen, &mut budget);
                 }
             }
             Some(Gesture::Node { grip, to }) => {
@@ -470,19 +392,19 @@ impl View {
                         _ => None,
                     });
                 if let Some((outline, placed)) = outline {
-                    stroke_path(surface, &outline, placed, accent, &mut budget);
+                    stroke_path(surface, &outline, placed, pen, &mut budget);
                 }
             }
             Some(Gesture::Freehand { points }) => {
-                let mut line = Polyline::new(surface, hairline(layout), accent);
+                let mut line = Polyline::new(surface, pen);
                 for point in points {
-                    line.to(device_point(to_window.map(*point)));
+                    line.to(to_window.map(*point));
                 }
                 line.finish();
             }
             Some(Gesture::Gradient { from, to }) => {
                 let end = tools::line_end(*from, *to, constraint);
-                gradient_line(surface, layout, (*from, end), to_window, accent);
+                gradient_line(surface, layout, (*from, end), to_window, pen);
             }
             Some(Gesture::Guide { horizontal, at, .. }) => {
                 if *horizontal {
@@ -490,14 +412,14 @@ impl View {
                     fill_area(
                         surface,
                         Rect::new(layout.canvas.left(), y, layout.canvas.width, 1),
-                        accent,
+                        pen.colour,
                     );
                 } else {
                     let x = round_i32(to_window.map(Point::new(*at, 0.0)).x);
                     fill_area(
                         surface,
                         Rect::new(x, layout.canvas.top(), 1, layout.canvas.height),
-                        accent,
+                        pen.colour,
                     );
                 }
             }
@@ -506,7 +428,7 @@ impl View {
     }
 
     /// The path the pen is setting, its nodes marked.
-    fn pen_marks(&self, surface: &mut Surface, layout: &Layout, to_window: Affine, accent: Color) {
+    fn pen_marks(&self, surface: &mut Surface, layout: &Layout, to_window: Affine, pen: Pen) {
         if !self.pen.is_empty() {
             let mut nodes = self.pen.clone();
             if let Some(Gesture::PenHandle { to }) = &self.gesture {
@@ -520,11 +442,11 @@ impl View {
                 .and_then(|shape| shape.to_path().ok())
             {
                 let mut budget = PREVIEW_POINTS;
-                stroke_path(surface, &path, to_window, accent, &mut budget);
+                stroke_path(surface, &path, to_window, pen, &mut budget);
             }
             for node in &nodes {
                 let at = device_point(to_window.map(node.point));
-                fill_area(surface, square(layout, at, 6), accent);
+                fill_area(surface, square(layout, at, 6), pen.colour);
             }
         }
     }
@@ -549,7 +471,7 @@ impl View {
     /// The selected path's nodes and handles — or those of the path the
     /// selected text is set along — the one a drag under way holds where the
     /// pointer has it.
-    fn node_marks(&self, surface: &mut Surface, layout: &Layout, to_window: Affine, accent: Color) {
+    fn node_marks(&self, surface: &mut Surface, layout: &Layout, to_window: Affine, pen: Pen) {
         let drawing = self.shown();
         let Some(path) = self.selection.first() else {
             return;
@@ -580,16 +502,17 @@ impl View {
                     }
                     _ => *node,
                 };
-                let at = device_point(placed.map(node.point));
+                let point = placed.map(node.point);
+                let at = device_point(point);
                 if !canvas.contains(tairix_geometry::Point::new(at.0, at.1)) {
                     continue;
                 }
                 for handle in [node.before, node.after].into_iter().flatten() {
-                    let end = device_point(placed.map(handle));
-                    surface.stroke_polyline(&[at, end], hairline(layout), accent);
-                    fill_area(surface, square(layout, end, 5), accent);
+                    let end = placed.map(handle);
+                    pen.line(surface, point, end);
+                    fill_area(surface, square(layout, device_point(end), 5), pen.colour);
                 }
-                fill_area(surface, square(layout, at, 7), accent);
+                fill_area(surface, square(layout, at, 7), pen.colour);
                 fill_area(surface, square(layout, at, 5), WHITE);
             }
         }
@@ -601,10 +524,9 @@ impl View {
     fn caret(
         &self,
         surface: &mut Surface,
-        layout: &Layout,
         typing: &crate::view::Typing,
         to_window: Affine,
-        accent: Color,
+        (pen, marked): (Pen, Color),
     ) {
         let drawing = self.shown();
         let Some(node) = drawing.node_at(&typing.path) else {
@@ -620,7 +542,6 @@ impl View {
         let glyphs = Lettering::new(Arrived);
         let selected = typing.selection();
         if !selected.is_empty() {
-            let marked = Color::rgba(accent.r, accent.g, accent.b, SELECTION_ALPHA);
             for (index, range) in text.line_ranges().enumerate() {
                 let span = range.start.max(selected.start)..range.end.min(selected.end);
                 if span.start >= span.end {
@@ -652,9 +573,9 @@ impl View {
             return;
         };
         let across = Point::new(-caret.direction.y, caret.direction.x) * caret.size;
-        let top = device_point(placed.map(caret.pen - across * CARET_ABOVE));
-        let bottom = device_point(placed.map(caret.pen + across * CARET_BELOW));
-        surface.stroke_polyline(&[top, bottom], 2 * hairline(layout), accent);
+        let top = placed.map(caret.pen - across * CARET_ABOVE);
+        let bottom = placed.map(caret.pen + across * CARET_BELOW);
+        pen.heavier(2).line(surface, top, bottom);
     }
 
     fn status(&self, surface: &mut Surface, layout: &Layout, theme: &Theme, band: StatusBand) {
@@ -677,18 +598,20 @@ impl View {
                 unit.symbol()
             );
         }
+        let (message, tone) = match &self.message {
+            Some(message) => (message.as_str(), StatusTone::Ink),
+            None => (self.tool.hint(), StatusTone::Muted),
+        };
+        let zoom = readout(self.viewport.zoom());
         band.paint(
             surface,
             layout.status,
             theme,
             &[
-                (
-                    layout.message,
-                    self.message.as_deref().unwrap_or(""),
-                    StatusTone::Ink,
-                ),
+                (layout.message, message, tone),
                 (layout.pointer, &at, StatusTone::Muted),
                 (layout.selected, &selected, StatusTone::Muted),
+                (layout.zoom, &zoom, StatusTone::Ink),
             ],
         );
     }
@@ -776,15 +699,15 @@ fn round2(value: f64) -> String {
 const CARET_ABOVE: f64 = 1.0;
 const CARET_BELOW: f64 = 0.2;
 
-/// How strongly a text's selected characters are marked, of the accent.
-const SELECTION_ALPHA: u8 = 0x60;
-
 /// `point`, a window position, in the sub-pixel units an anti-aliased
 /// polygon is placed by.
 fn sub_pixel(point: Point) -> (i32, i32) {
     let unit = f64::from(tairix_raster::SUBPIXEL);
     (round_i32(point.x * unit), round_i32(point.y * unit))
 }
+
+/// How far the page's shadow falls below and right of it, in logical pixels.
+const SHADOW_FALL: u32 = 3;
 
 /// The mark the selection's handles and a path's nodes are drawn white within.
 const WHITE: Color = Color::rgba(255, 255, 255, 255);
@@ -794,34 +717,82 @@ fn whole_count(share: f64) -> usize {
     usize::try_from(round_i32(floor(share))).unwrap_or(0)
 }
 
-/// A line one logical pixel wide, in device pixels.
-fn hairline(layout: &Layout) -> i32 {
-    i32::try_from(layout.length(1).max(1)).unwrap_or(1)
-}
-
 /// A square mark `side` logical pixels across, centred on `at`.
 fn square(layout: &Layout, at: (i32, i32), side: u32) -> Rect {
     let side = layout.length(side).max(1);
-    let half = i32::try_from(side / 2).unwrap_or(0);
-    Rect::new(at.0 - half, at.1 - half, side, side)
+    let half = px(side / 2);
+    Rect::new(
+        at.0.saturating_sub(half),
+        at.1.saturating_sub(half),
+        side,
+        side,
+    )
 }
 
 fn device_point(point: Point) -> (i32, i32) {
     (round_i32(point.x), round_i32(point.y))
 }
 
-/// Stroke `path`, placed by `map`, as a hairline, spending no more than
+/// How the overlay's lines are drawn: their weight in device pixels and their
+/// colour, which its marks are filled with too.
+#[derive(Clone, Copy)]
+struct Pen {
+    weight: i32,
+    colour: Color,
+}
+
+impl Pen {
+    /// A line one logical pixel wide.
+    fn hairline(layout: &Layout, colour: Color) -> Self {
+        Self {
+            weight: i32::try_from(layout.length(1).max(1)).unwrap_or(1),
+            colour,
+        }
+    }
+
+    /// This pen `times` as heavy.
+    const fn heavier(self, times: i32) -> Self {
+        Self {
+            weight: self.weight.saturating_mul(times),
+            ..self
+        }
+    }
+
+    /// The straight line from `a` to `b`, window positions.
+    fn line(self, surface: &mut Surface, a: Point, b: Point) {
+        let mut line = Polyline::new(surface, self);
+        line.to(a);
+        line.to(b);
+        line.finish();
+    }
+}
+
+/// The sub-pixel vertex a line `weight` device pixels wide is laid through
+/// for the window position `point`: the middle of the pixel the overlay's
+/// marks centre on for an odd weight and that pixel's corner for an even one,
+/// so a level or upright line covers whole pixels and stays crisp.
+fn stroke_vertex(point: Point, weight: i32) -> (i32, i32) {
+    let unit = tairix_raster::SUBPIXEL;
+    let offset = if weight % 2 == 0 { 0 } else { unit / 2 };
+    let (x, y) = device_point(point);
+    (
+        x.saturating_mul(unit).saturating_add(offset),
+        y.saturating_mul(unit).saturating_add(offset),
+    )
+}
+
+/// Stroke `path`, placed by `map`, with `pen`, spending no more than
 /// `budget` of points: answers whether all of it was drawn, flattening
 /// nothing past what is left.
 fn stroke_path(
     surface: &mut Surface,
     path: &Path,
     map: Affine,
-    colour: Color,
+    pen: Pen,
     budget: &mut usize,
 ) -> bool {
     for subpath in &path.subpaths {
-        let mut line = Polyline::new(surface, 1, colour);
+        let mut line = Polyline::new(surface, pen);
         line.left = *budget;
         line.take(map.map(subpath.start));
         for segment in subpath.segments() {
@@ -849,13 +820,12 @@ const BOUNDS_POINTS: usize = 5;
 /// The longest run of points stroked at once.
 const RUN: usize = 128;
 
-/// One hairline polyline stroked a run of points at a time, each run picking
-/// up where the last ended, so a line of any length is drawn without holding
-/// its points.
+/// One polyline stroked a run of points at a time, each run picking up where
+/// the last ended, so a line of any length is drawn without holding its
+/// points.
 struct Polyline<'s> {
     surface: &'s mut Surface,
-    width: i32,
-    colour: Color,
+    pen: Pen,
     run: [(i32, i32); RUN],
     len: usize,
     /// How many more points [`take`](Self::take) spends.
@@ -863,41 +833,40 @@ struct Polyline<'s> {
 }
 
 impl<'s> Polyline<'s> {
-    const fn new(surface: &'s mut Surface, width: i32, colour: Color) -> Self {
+    const fn new(surface: &'s mut Surface, pen: Pen) -> Self {
         Self {
             surface,
-            width,
-            colour,
+            pen,
             run: [(0, 0); RUN],
             len: 0,
             left: usize::MAX,
         }
     }
 
-    /// The line on to the device point over `point`, while points are left
-    /// to spend.
+    /// The line on to `point`, while points are left to spend.
     fn take(&mut self, point: Point) {
         if self.left > 0 {
             self.left -= 1;
-            self.to(device_point(point));
+            self.to(point);
         }
     }
 
-    /// The line on to `point`.
-    fn to(&mut self, point: (i32, i32)) {
+    /// The line on to the window position `point`.
+    fn to(&mut self, point: Point) {
         if self.len == RUN {
             self.stroke();
             self.run[0] = self.run[RUN - 1];
             self.len = 1;
         }
-        self.run[self.len] = point;
+        self.run[self.len] = stroke_vertex(point, self.pen.weight);
         self.len += 1;
     }
 
     fn stroke(&mut self) {
         if self.len > 1 {
+            let weight = self.pen.weight.saturating_mul(tairix_raster::SUBPIXEL);
             self.surface
-                .stroke_polyline(&self.run[..self.len], self.width, self.colour);
+                .stroke_polyline(&self.run[..self.len], weight, self.pen.colour);
         }
     }
 
@@ -907,36 +876,33 @@ impl<'s> Polyline<'s> {
     }
 }
 
-/// Stroke `bounds`, placed by `map`.
-fn stroke_bounds(surface: &mut Surface, bounds: Bounds, map: Affine, colour: Color) {
+/// Stroke `bounds`, placed by `map`, with `pen`.
+fn stroke_bounds(surface: &mut Surface, bounds: Bounds, map: Affine, pen: Pen) {
     if bounds.is_empty() {
         return;
     }
-    let corners = bounds.corners().map(|corner| device_point(map.map(corner)));
-    surface.stroke_polyline(
-        &[corners[0], corners[1], corners[2], corners[3], corners[0]],
-        1,
-        colour,
-    );
+    let mut line = Polyline::new(surface, pen);
+    let corners = bounds.corners();
+    for corner in corners.iter().chain(&corners[..1]) {
+        line.to(map.map(*corner));
+    }
+    line.finish();
 }
 
 /// A gradient's course from `start` to `end`, mapped onto the window by
-/// `to_window`: a hairline between a handle at either end.
+/// `to_window`: a line between a handle at either end.
 fn gradient_line(
     surface: &mut Surface,
     layout: &Layout,
     (start, end): (Point, Point),
     to_window: Affine,
-    accent: Color,
+    pen: Pen,
 ) {
     let (a, b) = (to_window.map(start), to_window.map(end));
-    let mut line = Polyline::new(surface, hairline(layout), accent);
-    line.to(device_point(a));
-    line.to(device_point(b));
-    line.finish();
+    pen.line(surface, a, b);
     for at in [a, b] {
         let at = device_point(at);
-        fill_area(surface, square(layout, at, 7), accent);
+        fill_area(surface, square(layout, at, 7), pen.colour);
         fill_area(surface, square(layout, at, 5), WHITE);
     }
 }
@@ -962,13 +928,13 @@ mod tests {
     use alloc::string::String;
     use alloc::sync::Arc;
 
-    use tairix_bezier::{Affine, Path, PathEl, Point, Subpath};
+    use tairix_bezier::{Affine, Bounds, Path, PathEl, Point, Subpath};
     use tairix_drawing::unkept::Unkept;
     use tairix_drawing::{Ids, Kind, Node, Shape, Style};
-    use tairix_raster::{Color, Surface};
+    use tairix_raster::{Color, Pixel, Surface};
     use tairix_window::document::Access;
 
-    use super::{paper, stroke_path, PREVIEW_POINTS};
+    use super::{paper, stroke_bounds, stroke_path, Pen, PREVIEW_POINTS};
     use crate::document::{blank, Document};
     use crate::edit;
     use crate::tools;
@@ -1008,7 +974,10 @@ mod tests {
         };
         let mut surface = Surface::new(64, 64).expect("a surface");
         let mut budget = 100;
-        let ink = Color::rgba(0, 0, 0, 255);
+        let ink = Pen {
+            weight: 1,
+            colour: Color::rgba(0, 0, 0, 255),
+        };
         assert!(!stroke_path(
             &mut surface,
             &path,
@@ -1031,6 +1000,49 @@ mod tests {
             &mut room
         ));
         assert_eq!(room, PREVIEW_POINTS - 2);
+    }
+
+    /// The pixel at `(x, y)` of `surface`.
+    fn pixel(surface: &Surface, (x, y): (u32, u32)) -> Pixel {
+        surface.get(x, y).expect("on the surface")
+    }
+
+    #[test]
+    fn an_overlay_line_covers_whole_pixels_where_its_window_points_are() {
+        let ink = Pixel {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 255,
+        };
+        let clear = Pixel {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        };
+        let mut surface = Surface::new(64, 64).expect("a surface");
+        let frame = Bounds::new(Point::new(10.0, 10.0), Point::new(40.0, 30.0));
+        let hairline = Pen {
+            weight: 1,
+            colour: Color::rgba(0, 0, 255, 255),
+        };
+        stroke_bounds(&mut surface, frame, Affine::IDENTITY, hairline);
+        for edge in [(25, 10), (40, 20), (25, 30), (10, 20)] {
+            assert_eq!(pixel(&surface, edge), ink, "a whole pixel at {edge:?}");
+        }
+        for beside in [(25, 9), (25, 11), (39, 20), (41, 20), (25, 20)] {
+            assert_eq!(pixel(&surface, beside), clear, "nothing at {beside:?}");
+        }
+        let mut surface = Surface::new(64, 64).expect("a surface");
+        hairline
+            .heavier(2)
+            .line(&mut surface, Point::new(20.0, 5.0), Point::new(20.0, 50.0));
+        for (x, covered) in [(18, false), (19, true), (20, true), (21, false)] {
+            let shown = pixel(&surface, (x, 30));
+            assert_eq!(shown == ink, covered, "column {x}: {shown:?}");
+            assert!(shown == ink || shown == clear, "no fringe at column {x}");
+        }
     }
 
     #[test]

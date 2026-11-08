@@ -17,31 +17,40 @@ der Symbolleiste gezogen wird — öffnet es ein Fenster dafür. Allein gestarte
 Fenster des einen Programms; das Schließen des letzten lässt es in der
 Symbolleiste, und die Zeile Beenden seines Symbolmenüs beendet es.
 
-Draw öffnet und speichert SVG und öffnet RISC-OS-Draw-Dateien, die es als SVG
-speichert. Eine Zeichnung behält ihre Seite und Einheiten, ihre Ebenen,
-Gruppen und Ausschnitte, jeden Pfad, jede Form, jeden Text und jedes Bild,
-Vollfarben und lineare und radiale Verläufe, die Deckkraft jedes Objekts,
-Strichelungen, Ecken, Enden und Pfeilspitzen, die Hilfslinien und das Raster
-sowie den Titel der Zeichnung. Eine Datei, die enthält, was eine Zeichnung
-nicht behalten kann — Filtereffekte, Masken, Musterfüllungen, Marker,
-unlesbare Bilder, Textstile oder Textpfade, die ein Text nicht halten kann,
-Animation oder Skripte unter anderem —, öffnet sich schreibgeschützt; das
-Statusband nennt, was sie enthält, und Speichern fragt nach einem neuen Namen,
-damit das Original nie überschrieben wird. Kopie speichern schreibt die
-Zeichnung als PDF; als EPS, ihre Transparenz deckend gemacht, wie PostScript
-sie malt; als PNG, JPEG oder TIFF, in der Kopierauflösung der Seite und bis zu
-8192 Pixel an ihrer längeren Seite; als SVG; oder als RISC-OS-Draw-Datei und
-nennt, was das Format von der Zeichnung nicht halten konnte, etwa Verläufe;
-jede lässt die Datei des Dokuments, wie sie ist.
+Draw öffnet SVG-, RISC-OS-Draw- und PDF-Dateien und speichert eine Zeichnung
+als SVG, als RISC-OS-Draw-Datei oder als PDF, in dem Format, das der Name der
+Datei sagt; Speichern unter bietet alle drei an. Eine Draw-Datei hält von
+einer Zeichnung, was sie kann, und ein PDF öffnet sich wieder als eine Ebene,
+deren Text aus Umrissen besteht; das Speichern sagt es. Von einem PDF öffnet
+sich eine Seite als Zeichnung, ihr Beschnittrahmen die Seite: Ein PDF mit
+mehreren Seiten fragt zuerst, welche, und nennt die Größe jeder Seite in
+Punkt, und eines, das durch ein Kennwort geschützt ist, fragt danach und sagt
+es, wenn ein angegebenes falsch ist. Text, den ein PDF in seinen Schriften
+setzt, wird noch nicht gelesen. Eine Zeichnung behält ihre Seite und
+Einheiten, ihre Ebenen, Gruppen und Ausschnitte, jeden Pfad, jede Form, jeden
+Text und jedes Bild, Vollfarben und lineare und radiale Verläufe, die
+Deckkraft jedes Objekts, Strichelungen, Ecken, Enden und Pfeilspitzen, die
+Hilfslinien und das Raster sowie den Titel der Zeichnung. Eine Datei, die
+enthält, was eine Zeichnung nicht behalten kann — Filtereffekte, Masken,
+Musterfüllungen, Marker, unlesbare Bilder, Textstile oder Textpfade, die ein
+Text nicht halten kann, Animation oder Skripte unter anderem —, öffnet sich
+schreibgeschützt; das Statusband nennt, was sie enthält, und Speichern fragt
+nach einem neuen Namen, damit das Original nie überschrieben wird. Kopie
+speichern schreibt die Zeichnung als PDF; als EPS, ihre Transparenz deckend
+gemacht, wie PostScript sie malt; als PNG, JPEG oder TIFF, in der
+Kopierauflösung der Seite und bis zu 8192 Pixel an ihrer längeren Seite; als
+SVG; oder als RISC-OS-Draw-Datei und nennt, was das Format von der Zeichnung
+nicht halten konnte, etwa Verläufe; jede lässt die Datei des Dokuments, wie
+sie ist.
 
 Der Werkzeugkasten läuft am linken Rand des Fensters hinab, der Inspektor am
-rechten, und das Statusband läuft am Fuß entlang: Es zeigt die Stelle des
-Zeigers und die Größe der Auswahl in den Einheiten der Seite und sagt, was der
-letzte Befehl getan hat. Oben sagt die Leiste, wie das Werkzeug in der Hand
-benutzt wird, und zeigt den Zoom: Ein Druck auf den Zoom öffnet ein Menü von
-Zoomstufen. Lineale in den Einheiten der Seite säumen die Leinwand oben und
-links, Bildlaufleisten rechts und unten. Verweilt der Zeiger auf der
-Schaltfläche eines Werkzeugs, nennt sie es mit der Taste, die es wählt.
+rechten, und das Statusband läuft am Fuß entlang: Es sagt, was der letzte
+Befehl getan hat, sonst, wie das Werkzeug in der Hand benutzt wird, und zeigt
+die Stelle des Zeigers und die Größe der Auswahl in den Einheiten der Seite
+und den Zoom: Ein Druck auf den Zoom öffnet ein Menü von Zoomstufen. Lineale
+in den Einheiten der Seite säumen die Leinwand oben und links, Bildlaufleisten
+rechts und unten. Verweilt der Zeiger auf der Schaltfläche eines Werkzeugs,
+nennt sie es mit der Taste, die es wählt.
 
 Die Werkzeuge und die Tasten, die sie wählen, sind: Auswahl (`V`), Knoten
 (`A`), Rechteck (`R`), Ellipse (`E`), Stern und Vieleck (`S`), Linie (`L`),
@@ -231,7 +240,11 @@ Zeichnung gespeichert: SVG bettet es ein, eine PDF- oder EPS-Kopie zeichnet
 es, und eine Draw-Datei hält es als Sprite oder JPEG. Die Bilder einer
 Zeichnung fassen zusammen höchstens 268 Millionen Pixel, jedes einmal gezählt,
 wie oft es auch gezeigt wird; ein Bild, das sie darüber hinaus brächte, wird
-abgelehnt, und das Statusband sagt, warum.
+abgelehnt, und das Statusband sagt, warum. Ein aus der Dateiverwaltung oder
+vom Desktop gezogenes und über der Leinwand losgelassenes Bild wird ebenso
+platziert, mittig dort, wo es losgelassen wurde; jede andere auf das Fenster
+gezogene Datei wird geöffnet oder abgelehnt, wie eine auf das Symbol von Draw
+gezogene.
 
 Einstellungen im Menü der Symbolleiste öffnet das Einstellungsfenster von
 Draw: das Werkzeug, mit dem ein neues Fenster beginnt, und ob es das Raster

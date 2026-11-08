@@ -14,7 +14,7 @@ use core::fmt::Write as _;
 use tairix_bezier::{Affine, FillRule, Path, PathEl, Point, Subpath};
 use tairix_colour::Rgba;
 
-use super::{read, write};
+use super::{read, write, DRAW_NAMESPACE};
 use crate::children::Children;
 use crate::drawing::{Drawing, Grid, Guide, GuideAxis, Page, Unit};
 use crate::id::Ids;
@@ -1025,10 +1025,17 @@ fn a_picture_survives_a_round_trip_through_svg() {
     let drawing = one_layer(group(&mut ids, vec![turned, again, kept], None));
     let svg = written(&drawing);
     assert!(svg.contains(r#"xmlns:xlink="http://www.w3.org/1999/xlink""#));
-    assert_eq!(svg.matches("<image ").count(), 3);
-    assert!(
-        svg.contains(&data_url(&encoded)),
-        "a picture read from a PNG keeps its bytes"
+    assert_eq!(
+        svg.matches("<image ").count(),
+        1,
+        "pixels shown three times, two of them alike and one written as the same bytes, written once"
+    );
+    assert_eq!(svg.matches("<use ").count(), 3, "each object a use of them");
+    assert!(svg.contains(r#"<symbol id="picture-1" draw:picture="true" viewBox="0 0 5 3""#));
+    assert_eq!(
+        svg.matches(&data_url(&encoded)).count(),
+        1,
+        "a picture read from a PNG keeps its bytes, written once"
     );
     let back = read(svg.as_bytes(), &mut ids).expect("read back");
     assert!(back.unkept.is_empty(), "{:?}", back.unkept);
@@ -1463,7 +1470,7 @@ fn what_a_text_cannot_be_set_along_is_set_in_lines_and_noted() {
     let lost = |content: &str| {
         let (texts, unkept) = texts(&alloc::format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">
-      <defs><path id="p" d="M0 0 H100"/><circle id="c" r="10"/></defs>
+      <defs><path id="p" d="M0 0 H100"/><path id="broken" d="M0"/><g id="g"/></defs>
       {content}
     </svg>"#
         ));
@@ -1474,9 +1481,12 @@ fn what_a_text_cannot_be_set_along_is_set_in_lines_and_noted() {
         lost(r##"<text x="5" y="50">Before <textPath href="#p">on</textPath></text>"##);
     assert!(noted && matches!(beside.baseline, Baseline::Lines { .. }));
     assert_eq!(&*beside.content, "Before on");
-    let (shape, noted) = lost(r##"<text><textPath href="#c">round</textPath></text>"##);
-    assert!(noted && matches!(shape.baseline, Baseline::Lines { .. }));
-    assert_eq!(&*shape.content, "round");
+    let (broken, noted) = lost(r##"<text><textPath href="#broken">round</textPath></text>"##);
+    assert!(noted && matches!(broken.baseline, Baseline::Lines { .. }));
+    assert_eq!(
+        &*broken.content, "round",
+        "set in lines rather than dropped"
+    );
     let (two, noted) = lost(
         r##"<text><textPath href="#p">one</textPath><textPath href="#p">two</textPath></text>"##,
     );
@@ -1487,8 +1497,45 @@ fn what_a_text_cannot_be_set_along_is_set_in_lines_and_noted() {
         noted && matches!(bent.baseline, Baseline::Path(_)),
         "set rigidly along it"
     );
-    let (gone, noted) = lost(r##"<text><textPath href="#nowhere">gone</textPath></text>"##);
-    assert!(!noted && gone.content.is_empty(), "SVG draws none of it");
+    for nothing in [
+        r##"<text><textPath href="#nowhere">gone</textPath></text>"##,
+        r##"<text><textPath href="#g">gone</textPath></text>"##,
+        r##"<text><textPath path="" href="#p">gone</textPath></text>"##,
+    ] {
+        let (gone, noted) = lost(nothing);
+        assert!(
+            !noted && gone.content.is_empty(),
+            "SVG draws none of {nothing}"
+        );
+    }
+}
+
+#[test]
+fn a_text_path_along_a_basic_shape_or_its_own_data_is_kept() {
+    let (texts, unkept) = texts(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">
+      <defs><circle id="c" cx="50" cy="50" r="40" transform="translate(5 0)"/></defs>
+      <text><textPath href="#c" startOffset="50%">round</textPath></text>
+      <text><textPath path="M10 20 L110 20">own</textPath></text>
+    </svg>"##,
+    );
+    assert!(unkept.is_empty(), "{unkept:?}");
+    let path_of = |text: &Text| match &text.baseline {
+        Baseline::Path(along) => Arc::clone(along),
+        Baseline::Lines { .. } => panic!("a text along a path"),
+    };
+    let round = path_of(&texts[0].0);
+    assert!(
+        round.first_point().distance(Point::new(95.0, 50.0)) < 1e-9,
+        "from the circle's rightmost point, placed by its transform"
+    );
+    let circumference = core::f64::consts::TAU * 40.0;
+    assert!(
+        (round.start - circumference / 2.0).abs() < 0.05,
+        "{}",
+        round.start
+    );
+    assert_eq!(path_of(&texts[1].0).first_point(), Point::new(10.0, 20.0));
 }
 
 #[test]
@@ -1518,4 +1565,95 @@ fn a_span_set_at_a_size_or_spacing_no_text_holds_loses_it_not_the_document() {
     let (text, _) = &texts[0];
     assert_eq!(&*text.content, "abcd");
     assert!(text.runs.is_empty(), "{:?}", text.runs);
+}
+
+#[test]
+fn a_stretched_picture_reopens_over_exactly_the_rectangle_it_was_saved_over() {
+    // A width that scaled to its pixels and back would not come out as itself.
+    let width = 692.611_713_572_372_4;
+    let mut ids = Ids::new();
+    let pixels = || crate::testing::pixels(1306, 1, opaque);
+    let place = rect_bounds(3.25, 7.5, 3.25 + width, 90.0);
+    let other = crate::testing::pixels(1306, 1, |x, _| [0, 0, 0, if x % 2 == 0 { 255 } else { 0 }]);
+    let alone = crate::image::Image::new(other, place, None).expect("a picture");
+    let shared = crate::image::Image::new(pixels(), place, None).expect("a picture");
+    let nodes = vec![
+        crate::testing::image(&mut ids, alone, Affine::IDENTITY),
+        crate::testing::image(&mut ids, shared.clone(), Affine::IDENTITY),
+        crate::testing::image(
+            &mut ids,
+            shared
+                .placed(rect_bounds(-1.5, 0.1, width, 0.300_000_000_000_000_04))
+                .expect("again"),
+            Affine::IDENTITY,
+        ),
+    ];
+    let drawing = one_layer(group(&mut ids, nodes, None));
+    let svg = written(&drawing);
+    assert_eq!(
+        (svg.matches("<use ").count(), svg.matches("<image ").count()),
+        (2, 2)
+    );
+    let back = read(svg.as_bytes(), &mut ids).expect("read back");
+    let places: Vec<_> = pictures(&back.drawing)
+        .iter()
+        .map(|node| image_of(node).place())
+        .collect();
+    let expected: Vec<_> = pictures(&drawing)
+        .iter()
+        .map(|node| image_of(node).place())
+        .collect();
+    assert_eq!(places, expected, "inline and shared alike");
+}
+
+#[test]
+fn a_symbol_draw_did_not_mark_as_its_picture_reads_as_what_it_holds() {
+    let png = crate::testing::png(&crate::testing::pixels(2, 2, opaque));
+    let link = data_url(&png);
+    let document = |marked: &str| {
+        alloc::format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:draw="{DRAW_NAMESPACE}" width="100" height="100">
+      <defs><symbol id="p" {marked} viewBox="0 0 2 2" preserveAspectRatio="none"><image width="2" height="2" xlink:href="{link}"/></symbol></defs>
+      <use xlink:href="#p" x="10" y="10" width="20" height="40"/>
+    </svg>"##
+        )
+    };
+    let mut ids = Ids::new();
+    let marked = read(document(r#"draw:picture="true""#).as_bytes(), &mut ids).expect("read");
+    let shown = marked
+        .drawing
+        .layers()
+        .get(0)
+        .and_then(|layer| layer.children()?.get(0).cloned())
+        .expect("an object");
+    assert_eq!(
+        image_of(&shown).place(),
+        rect_bounds(10.0, 10.0, 30.0, 50.0),
+        "Draw's picture is the object itself, over the rectangle its use states"
+    );
+    let plain = read(document("").as_bytes(), &mut ids).expect("read");
+    let held = plain
+        .drawing
+        .layers()
+        .get(0)
+        .and_then(|layer| layer.children()?.get(0).cloned())
+        .expect("an object");
+    assert!(
+        matches!(held.kind(), Kind::Group { .. }),
+        "any other symbol is expanded as SVG expands it"
+    );
+    let clipped = document(r#"draw:picture="true""#).replace(
+        r##"<use xlink:href="#p" x="10" y="10" width="20" height="40"/>"##,
+        r##"<clipPath id="k"><use xlink:href="#p" x="10" y="10" width="20" height="40"/><rect width="5" height="5"/></clipPath><rect width="50" height="50" clip-path="url(#k)"/>"##,
+    );
+    let clip = read(clipped.as_bytes(), &mut ids).expect("read");
+    assert_eq!(
+        pictures(&clip.drawing).len(),
+        0,
+        "a clip path holds no picture"
+    );
+    let broken = document(r#"draw:picture="true""#).replace(&link, "data:image/png;base64,AAAA");
+    let lost = read(broken.as_bytes(), &mut ids).expect("read");
+    assert!(lost.unkept.contains(Lost::Images));
+    assert_eq!(pictures(&lost.drawing).len(), 0);
 }

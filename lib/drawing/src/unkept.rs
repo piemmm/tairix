@@ -24,9 +24,9 @@ pub enum Lost {
     TextStyling,
     /// Text placed character by character.
     TextPositioning,
-    /// Text along something a text cannot be set along: a shape other than a
-    /// path, a second path, a path beside text off it, or a path the glyphs
-    /// bend along rather than turn with.
+    /// Text along a path a text cannot hold: a second one, one beside text
+    /// off it, one past a text path's bound or broken, or one the glyphs bend
+    /// along rather than turn with.
     TextPaths,
     /// Strokes that keep their width however they are scaled.
     NonScalingStrokes,
@@ -44,11 +44,26 @@ pub enum Lost {
     Annotations,
     /// Text laid out in columns, styled by the codes it holds.
     TextAreas,
+    /// Blend modes other than normal.
+    BlendModes,
+    /// Shadings no gradient holds.
+    Shadings,
+    /// Text whose characters could not be read.
+    UnreadableText,
+    /// Annotations and form fields.
+    Markup,
+    /// Parts of the file that were damaged.
+    Damage,
+    /// The pages of a document other than the one opened.
+    OtherPages,
+    /// What a document holds beyond its pages: bookmarks, attachments,
+    /// layers, structure and the like.
+    DocumentParts,
 }
 
 impl Lost {
     /// Every part, in the order an editor lists them.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 23] = [
         Self::Filters,
         Self::Masks,
         Self::Patterns,
@@ -65,6 +80,13 @@ impl Lost {
         Self::Links,
         Self::Annotations,
         Self::TextAreas,
+        Self::BlendModes,
+        Self::Shadings,
+        Self::UnreadableText,
+        Self::Markup,
+        Self::Damage,
+        Self::OtherPages,
+        Self::DocumentParts,
     ];
 
     const fn bit(self) -> u32 {
@@ -82,7 +104,7 @@ impl Lost {
             Self::Images => "unreadable pictures",
             Self::TextStyling => "text styles a run cannot hold",
             Self::TextPositioning => "character positions",
-            Self::TextPaths => "text along shapes or bent along paths",
+            Self::TextPaths => "text paths a text cannot hold",
             Self::NonScalingStrokes => "non-scaling strokes",
             Self::ForeignContent => "foreign content",
             Self::Animation => "animation",
@@ -91,6 +113,13 @@ impl Lost {
             Self::Links => "links",
             Self::Annotations => "object titles, descriptions and metadata",
             Self::TextAreas => "text areas",
+            Self::BlendModes => "blend modes",
+            Self::Shadings => "shadings no gradient holds",
+            Self::UnreadableText => "text that could not be read",
+            Self::Markup => "annotations and form fields",
+            Self::Damage => "damaged parts",
+            Self::OtherPages => "the document's other pages",
+            Self::DocumentParts => "the document's bookmarks, attachments and other parts",
         }
     }
 }

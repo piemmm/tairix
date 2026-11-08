@@ -523,5 +523,5 @@ fn fill_rect(out: &mut Text, area: Bounds) -> fmt::Result {
 }
 
 #[cfg(test)]
-#[path = "pdf_tests.rs"]
+#[path = "write_tests.rs"]
 mod tests;

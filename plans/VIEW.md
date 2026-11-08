@@ -258,7 +258,7 @@ Name-addressed lookup lands with the emulator, its first consumer.
 | Untrusted decode | `lib/sandbox::imagerender` |
 | The app-side window shell | `lib/window::app` |
 | The app | `userland/apps/view` |
-| PDF | `lib/pdf`, behind the page source (next change) |
+| PDF | `lib/pdf`, behind the page source (`plans/PDF.md` PDF13) |
 
 `lib/image` is already *the* raster registry: `ImageFormat`/`sniff`/`probe`/
 `decode` dispatch, and `DecodeLimits`/`RasterImage`/`DecodeError` carry the
@@ -1136,10 +1136,9 @@ read this paragraph first; the rustdoc on both types points here.
   The tests are in `kernel/core`, and the end-to-end one fails on the unfixed
   tree.
 
-- `lib/pdf` behind the page source — next change. Encrypted PDFs need MD5/RC4/
-  AES, which `lib/crypto` deliberately does not carry; whether to admit those as
-  interop-only primitives or refuse encrypted files fail-closed is a decision to
-  take then.
+- `lib/pdf` behind the page source: `plans/PDF.md` PDF13. Encrypted PDFs are
+  opened, their RC4 and AES-CBC admitted to `lib/crypto` as interop-only
+  primitives (PDF3).
 
 ## Noticed and not yet fixed
 

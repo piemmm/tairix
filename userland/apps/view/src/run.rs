@@ -2024,6 +2024,7 @@ mod program {
             | WindowEvent::SaveOfferEnded { .. }
             | WindowEvent::ItemsOffered { .. }
             | WindowEvent::ItemsOfferEnded { .. }
+            | WindowEvent::FileOffered { .. }
             | WindowEvent::PreviewRendered { .. } => Acted::Idle,
         }
     }
@@ -2176,6 +2177,19 @@ mod program {
                         format_args!(
                             "{path} was handed over as a path; this viewer holds no filesystem \
                          authority and can only be given an open document"
+                        ),
+                    );
+                    continue;
+                }
+                // This viewer places nothing in a document, so it answers no
+                // file offer and no drop is placed in it; one that reached it
+                // is let go rather than left pending.
+                Target::Placed { name, grant, .. } => {
+                    drop(tairix_rt::File::from_delegation(grant));
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "{name} was dropped to be placed, but this viewer places nothing"
                         ),
                     );
                     continue;

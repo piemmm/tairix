@@ -117,6 +117,7 @@
   - [`tairix-noise`](./lib/noise.md)
   - [`tairix-parallel`](./lib/parallel.md)
   - [`tairix-path`](./lib/path.md)
+  - [`tairix-pdf`](./lib/pdf.md)
   - [`tairix-player`](./lib/player.md)
   - [`tairix-proglib`](./lib/proglib.md)
   - [`tairix-raid`](./lib/raid.md)

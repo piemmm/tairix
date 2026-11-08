@@ -1,4 +1,5 @@
-//! Copies of a drawing in other formats: the vector formats written whole,
+//! A drawing written out: saved as SVG, a RISC OS Draw file or PDF, or
+//! copied in those and the other formats — the vector formats written whole,
 //! and pictures rendered through the one renderer at the drawing's copy
 //! resolution, each recording the resolution it was made at.
 
@@ -62,13 +63,71 @@ impl CopyFormat {
     }
 }
 
-/// A copy written: its bytes, and what it could not keep that the user is
-/// told.
+/// A format a drawing is saved in, which the window then saves it in again.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SaveFormat {
+    /// SVG, which holds all of a drawing.
+    Svg,
+    /// A RISC OS Draw file.
+    Draw,
+    /// PDF, which opens again as one layer whose text is outlines.
+    Pdf,
+}
+
+impl SaveFormat {
+    /// Every format, the one a new drawing is saved in first.
+    pub const ALL: [Self; 3] = [Self::Svg, Self::Draw, Self::Pdf];
+
+    /// The format a file called `name`, whose volume records `recorded` as
+    /// its RISC OS filetype, is saved in, if Draw saves one.
+    #[must_use]
+    pub fn of(name: &str, recorded: Option<Filetype>) -> Option<Self> {
+        match CopyFormat::of(name, recorded)? {
+            CopyFormat::Svg => Some(Self::Svg),
+            CopyFormat::Draw => Some(Self::Draw),
+            CopyFormat::Pdf => Some(Self::Pdf),
+            CopyFormat::Eps | CopyFormat::Png | CopyFormat::Jpeg | CopyFormat::Tiff => None,
+        }
+    }
+
+    /// The type the picker offers it as.
+    #[must_use]
+    pub const fn media(self) -> MediaType {
+        match self {
+            Self::Svg => MediaType::ImageSvg,
+            Self::Draw => MediaType::RiscOsDraw,
+            Self::Pdf => MediaType::Pdf,
+        }
+    }
+
+    /// It, written as a copy is.
+    #[must_use]
+    pub const fn written(self) -> CopyFormat {
+        match self {
+            Self::Svg => CopyFormat::Svg,
+            Self::Draw => CopyFormat::Draw,
+            Self::Pdf => CopyFormat::Pdf,
+        }
+    }
+
+    /// Whether a drawing saved in it opens again with its layers, live
+    /// shapes and editable text.
+    #[must_use]
+    pub const fn keeps_editing(self) -> bool {
+        !matches!(self, Self::Pdf)
+    }
+}
+
+/// Said when a drawing is saved as PDF.
+pub const FLATTENED: &str = "A PDF opens again as one layer whose text is outlines, so save it as SVG as well to edit it again later";
+
+/// A drawing written: its bytes, and what they could not keep that the user is
+/// told, as a sentence.
 #[derive(Clone, Debug)]
 pub struct Copied {
     /// The file.
     pub bytes: Vec<u8>,
-    /// What it could not keep, as the message saying it was saved reads on.
+    /// What it could not keep.
     pub note: Option<String>,
 }
 
@@ -95,16 +154,16 @@ pub fn copy(format: CopyFormat, drawing: &Drawing, glyphs: &dyn Glyphs) -> Resul
         ),
         CopyFormat::Eps => {
             let eps = tairix_drawing::eps::eps(drawing, glyphs).map_err(failed)?;
-            let note = eps
-                .flattened
-                .then(|| String::from("its transparency made opaque, as PostScript paints it"));
+            let note = eps.flattened.then(|| {
+                String::from("PostScript paints no transparency, so the drawing's is made opaque")
+            });
             written(eps.bytes, note)
         }
         CopyFormat::Draw => {
             let draw = tairix_drawing::riscos::write(drawing, glyphs).map_err(failed)?;
             let note = (!draw.dropped.is_empty()).then(|| {
                 alloc::format!(
-                    "its {} drawn as near as a Draw file holds them",
+                    "A Draw file holds the drawing's {} only as near as it can",
                     listed(draw.dropped.iter())
                 )
             });
@@ -122,8 +181,9 @@ pub fn copy(format: CopyFormat, drawing: &Drawing, glyphs: &dyn Glyphs) -> Resul
                 _ => encode_tiff(&[&picture], TiffOptions::default()),
             };
             let bytes = encoded.map_err(|err| alloc::format!("it could not be encoded ({err})"))?;
-            let note = (resolution < drawing.resolution())
-                .then(|| alloc::format!("at {resolution} dpi, as large as a picture is copied"));
+            let note = (resolution < drawing.resolution()).then(|| {
+                alloc::format!("The picture is made at {resolution} dpi, as large as one is copied")
+            });
             written(bytes, note)
         }
     }

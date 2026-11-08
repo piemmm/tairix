@@ -126,8 +126,8 @@ bounds (`Limits::DOCUMENT`).
   overrides — family, size, weight, posture, letter spacing, a
   `baseline-shift` in ems of its size, and a colour or none for its fill and
   stroke — and one over the whole content the text's own style; a
-  `<textPath>` holding all its characters a text along that path, its start
-  read from `startOffset`.
+  `<textPath>` holding all its characters a text along its own `path` data or
+  the path or basic shape it names, its start read from `startOffset`.
 - `<image>` is a picture: a PNG or JPEG its link carries as a data URL —
   known by its content, the media type the URL states not believed — laid
   in the rectangle the element states as `preserveAspectRatio` lays it and,
@@ -140,8 +140,9 @@ bounds (`Limits::DOCUMENT`).
 - What a drawing cannot hold — filters, masks, patterns, markers other than
   Draw's own arrowheads, pictures linked from elsewhere or of another kind,
   text styling no run holds (a gradient in a span, a span's own stroke width,
-  dashes, stretch or word spacing), positioned runs, text along anything but
-  one path or bent along it,
+  dashes, stretch or word spacing), positioned runs, a text path a text cannot
+  hold — a second one, one beside text off it, one past its bound or broken,
+  or one the glyphs bend along —
   non-scaling strokes, foreign content, animation, scripts, links, the
   unchosen branches of a `switch`, objects' titles and descriptions, and
   metadata — is listed in `Unkept` as the document is read, never dropped
@@ -173,11 +174,18 @@ Draw's namespace (`urn:tairix:draw`, prefix `draw`) for what SVG cannot say:
 | `draw:start-arrow`, `draw:end-arrow` | strokes | an arrowhead's shape, width and length |
 | `draw:line-height` | `text` | the line height of a text set in lines |
 | `draw:role="background"`, `draw:marker` | the page fill, arrowhead markers | what the reader skips as its own |
+| `draw:picture="true"` | `symbol` | a picture written once for every object that uses it |
 
 A picture is an `<image>` of its rectangle, its bytes in a base64 data URL —
 the PNG or JPEG it was read from as it came, any other its pixels as a PNG,
 encoded once however many objects show it — `xmlns:xlink` declared only where
-one is written. SVG's clip paths hold shapes and text but no groups, so a
+one is written. A picture more than one object shows — the same pixels, or
+pixels written as the same bytes — is written once, a `<symbol>` in `<defs>`
+over its pixels marked `draw:picture`, and each object a `<use>` of it over
+its own rectangle; Draw reads such a use back as the picture object itself,
+every one sharing one decode, where any other symbol is expanded as SVG
+expands it. A stretched picture's rectangle is read as it is stated, never
+scaled to the pixels and back. SVG's clip paths hold shapes and text but no groups, so a
 clip is written as its members, each placed as its groups place it; a group
 within a clip that is clipped itself calls for that clip by a clip path of
 each member's own, written in the member's space and clipped in turn by the
@@ -315,6 +323,33 @@ where each is — and a masked image interleaved by sample where any pixel lets
 something through. PostScript paints no transparency, so a translucent
 colour, gradient, opacity or pixel is written opaque — a pixel shown where it
 is more than half shown — and `Eps::flattened` says it was.
+
+`pdf::read` reads one page of a PDF into a drawing of one layer through
+`lib/pdf`, the page and the password asked for in a `pdf::Request` with the
+bytes the document may decode to, and `pdf::pages` counts a document's pages
+for a chooser and sizes, in points, as many of the first as it is asked
+for. The page's crop box is the
+drawing's page, in points. Each item of the page's display list becomes an
+object in order: a fill and the stroke of the same path that follows it one
+shape in their style — a stroke as thin as a device draws read as a pixel of
+the page — a clip a group clipped to its path, a transparency group a group at
+its opacity, a picture a picture, its pixels held once however often it is
+shown and a JPEG kept with its bytes. An axial shading is a linear gradient
+and a radial one a radial gradient, focused on its first circle's centre; one
+that does not extend past an end paints nothing there, and a radial shading
+whose first circle has a radius is read as concentric, recorded as a shading
+no gradient holds where it is not. The document's title and subject become
+the drawing's (`Info`). What the page holds that the drawing cannot — soft
+masks, blend modes, tiling patterns, other shadings, unreadable pictures and
+text, annotations, damage — is recorded as `Unkept`, as is what the document
+holds beyond the page: its other pages (`Lost::OtherPages`), its bookmarks,
+attachments and other parts (`Lost::DocumentParts`), and metadata besides
+its title and subject. A PDF Draw wrote holds none of these, so it opens
+writable again. A PDF needing a password, given a wrong one or asked for a
+page it lacks is a `ReadError` of its own. `crate::read` reads a PDF by its
+header (`pdf::recognised`), as it reads a Draw file by its signature, unless
+the bytes begin as markup, whose text may hold a header's characters
+anywhere.
 
 A drawing also holds the resolution its raster copies are made at
 (`Drawing::resolution`, `PIXELS_PER_INCH` until it is set, at most

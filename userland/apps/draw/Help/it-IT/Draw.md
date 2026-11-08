@@ -17,32 +17,38 @@ su una pagina A4. Ogni documento è una finestra dell'unico programma;
 chiudere l'ultima lo lascia nella barra delle icone, e la riga Esci del suo
 menu d'icona lo termina.
 
-Draw apre e salva SVG, e apre i file Draw di RISC OS, che salva come SVG. Un
-disegno conserva la sua pagina e le sue unità, i suoi livelli, gruppi e
-ritagli, ogni tracciato, forma, testo e immagine, i colori pieni e le
-sfumature lineari e radiali, l'opacità di ogni oggetto, i tratteggi, le
-giunzioni, le estremità e le punte di freccia, le guide e la griglia, e il
-titolo del disegno. Un file che contiene ciò che un disegno non può conservare
-— effetti di filtro, maschere, riempimenti a motivo, marcatori, immagini
-illeggibili, stili o tracciati di testo che un testo non può tenere,
-animazione o script, tra gli altri — si apre in sola lettura, con la banda di
-stato che nomina ciò che contiene, e Salva chiede un nome nuovo perché
-l'originale non venga mai sovrascritto. Salva una copia scrive il disegno come
-PDF; come EPS, con la trasparenza resa opaca, come la dipinge PostScript; come
-PNG, JPEG o TIFF, alla risoluzione di copia della pagina e fino a 8192 pixel
-sul lato più lungo; come SVG; o come file Draw di RISC OS, nominando ciò che
-il formato non ha potuto tenere del disegno, come le sfumature; sempre
-lasciando com'è il file del documento.
+Draw apre SVG, i file Draw di RISC OS e i PDF, e salva un disegno come SVG,
+come file Draw di RISC OS o come PDF, nel formato che dice il nome del file;
+Salva con nome offre tutti e tre. Un file Draw tiene di un disegno ciò che
+può, e un PDF si riapre come un solo livello il cui testo è fatto di contorni;
+il salvataggio lo dice. Di un PDF si apre una pagina come disegno, con il suo
+riquadro di ritaglio come pagina: un PDF di più pagine chiede prima quale,
+dando la dimensione di ogni pagina in punti, e uno protetto da una password la
+chiede, e dice quando quella data è sbagliata. Il testo che un PDF compone nei
+suoi caratteri non viene ancora letto. Un disegno conserva la sua pagina e le
+sue unità, i suoi livelli, gruppi e ritagli, ogni tracciato, forma, testo e
+immagine, i colori pieni e le sfumature lineari e radiali, l'opacità di ogni
+oggetto, i tratteggi, le giunzioni, le estremità e le punte di freccia, le
+guide e la griglia, e il titolo del disegno. Un file che contiene ciò che un
+disegno non può conservare — effetti di filtro, maschere, riempimenti a
+motivo, marcatori, immagini illeggibili, stili o tracciati di testo che un
+testo non può tenere, animazione o script, tra gli altri — si apre in sola
+lettura, con la banda di stato che nomina ciò che contiene, e Salva chiede un
+nome nuovo perché l'originale non venga mai sovrascritto. Salva una copia
+scrive il disegno come PDF; come EPS, con la trasparenza resa opaca, come la
+dipinge PostScript; come PNG, JPEG o TIFF, alla risoluzione di copia della
+pagina e fino a 8192 pixel sul lato più lungo; come SVG; o come file Draw di
+RISC OS, nominando ciò che il formato non ha potuto tenere del disegno, come
+le sfumature; sempre lasciando com'è il file del documento.
 
 La cassetta degli strumenti scende lungo il lato sinistro della finestra,
-l'ispettore lungo il destro, e la banda di stato corre in fondo: mostra la
-posizione del puntatore e la dimensione della selezione nelle unità della
-pagina, e dice che cosa ha fatto l'ultimo comando. In alto, la barra dice
-come si usa lo strumento in mano e mostra lo zoom: premere lo zoom apre un
-menu di ingrandimenti. Righelli nelle unità della pagina corrono lungo il
-lato superiore e sinistro della tela, e barre di scorrimento lungo il destro
-e il basso. Soffermarsi sul pulsante di uno strumento lo nomina, con il
-tasto che lo sceglie.
+l'ispettore lungo il destro, e la banda di stato corre in fondo: dice che cosa
+ha fatto l'ultimo comando, altrimenti come si usa lo strumento in mano, e
+mostra la posizione del puntatore e la dimensione della selezione nelle unità
+della pagina, e lo zoom: premere lo zoom apre un menu di ingrandimenti.
+Righelli nelle unità della pagina corrono lungo il lato superiore e sinistro
+della tela, e barre di scorrimento lungo il destro e il basso. Soffermarsi sul
+pulsante di uno strumento lo nomina, con il tasto che lo sceglie.
 
 Gli strumenti, e i tasti che li scelgono, sono: selezione (`V`), nodi (`A`),
 rettangolo (`R`), ellisse (`E`), stella e poligono (`S`), linea (`L`), penna
@@ -228,7 +234,10 @@ rettangolo. Si salva con il disegno: l'SVG la incorpora, una copia PDF o EPS
 la disegna e un file Draw la tiene come sprite o come JPEG. Le immagini di un
 disegno contengono insieme al massimo 268 milioni di pixel, ciascuna contata
 una volta per quanto spesso sia mostrata; un'immagine che le porterebbe oltre
-viene rifiutata, e la banda di stato dice perché.
+viene rifiutata, e la banda di stato dice perché. Un'immagine trascinata dal
+gestore di file o dal desktop e lasciata sulla tela viene inserita allo stesso
+modo, centrata dove è stata lasciata; ogni altro file lasciato sulla finestra
+si apre, o viene rifiutato, come uno lasciato sull'icona di Draw.
 
 Impostazioni, nel menu della barra delle icone, apre la finestra delle
 impostazioni di Draw: lo strumento con cui comincia una finestra nuova, e se

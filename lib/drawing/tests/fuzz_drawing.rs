@@ -36,6 +36,7 @@ const TEMPLATES: &[&str] = &[
     r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="64" height="64"><style>.a{fill:orange}#b{stroke:green;stroke-width:3}</style><defs><symbol id="s" viewBox="0 0 10 10"><rect class="a" width="10" height="10"/></symbol><circle id="c" r="4"/></defs><use xlink:href="#s" x="2" y="2" width="20" height="20"/><use href="#c" x="30" y="30"/><switch><rect requiredFeatures="x" width="1" height="1"/><ellipse id="b" cx="9" cy="9" rx="3" ry="2"/></switch></svg>"##,
     r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1" spreadMethod="reflect"><stop offset="0" stop-color="#f00"/><stop offset="0.5" stop-color="#0f0" stop-opacity="0.5"/><stop offset="1" stop-color="#00f"/></linearGradient><radialGradient id="r" href="#g" cx="50" cy="50" r="40" fx="40" fy="45" gradientUnits="userSpaceOnUse" gradientTransform="rotate(30)"/></defs><rect width="50" height="50" fill="url(#g)"/><circle cx="50" cy="50" r="30" fill="url(#r)" stroke="url(#g)"/></svg>"##,
     r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><clipPath id="k" clipPathUnits="objectBoundingBox"><circle cx="0.5" cy="0.5" r="0.5"/></clipPath><g clip-path="url(#k)" transform="translate(10 10) scale(2)"><rect width="20" height="20"/><text x="1" y="12" font-family="serif" font-size="10" font-weight="bold" font-style="italic" letter-spacing="1" text-anchor="middle">Hi<tspan x="1" dy="12">there</tspan></text></g></svg>"#,
+    r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:draw="urn:tairix:draw" width="64" height="64"><defs><symbol id="picture-1" draw:picture="true" viewBox="0 0 3 2" preserveAspectRatio="none"><image width="3" height="2" preserveAspectRatio="none" xlink:href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAYAAACddGYaAAAAHUlEQVR4nGNgYDjxP4DhRMMCIM3AUAHkVAA5QBoAlAwM9VmVMmEAAAAASUVORK5CYII="/></symbol></defs><use xlink:href="#picture-1" x="2" y="3" width="30" height="20" transform="rotate(10)" opacity="0.5" draw:name="One"/><use xlink:href="#picture-1" x="-4" y="40" width="9" height="6"/><use xlink:href="#picture-1"/></svg>"##,
     r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="100" height="100"><defs><path id="w" d="M5 50 C30 10 70 90 95 50" pathLength="10"/><linearGradient id="g"><stop offset="0" stop-color="#f00"/></linearGradient></defs><text font-size="8"><textPath xlink:href="#w" startOffset="25%" side="right">Al<tspan font-size="12" fill="#0a0" baseline-shift="super">on</tspan>g<tspan fill="url(#g)" stroke-width="3">!</tspan></textPath></text><text x="5" y="20" font-size="10">a<tspan font-family="serif" font-weight="700" font-style="italic" letter-spacing="2" fill-opacity="0.5" stroke="#00f" baseline-shift="-30%">b<tspan baseline-shift="0.5em" font-size="20">c</tspan></tspan><tspan x="5" y="40">d</tspan><textPath href="#w">e</textPath></text></svg>"##,
     r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><filter id="f"/><mask id="m"/><pattern id="p"/><marker id="n"/><image href="x.png" width="1" height="1"/><a href="#"><rect width="1" height="1" filter="url(#f)" mask="url(#m)" fill="url(#p)" marker-end="url(#n)" vector-effect="non-scaling-stroke"/></a><script>x</script><animate/><foreignObject/></svg>"##,
 ];
@@ -530,7 +531,15 @@ fn reading_a_draw_file_never_panics_and_its_copy_reads_back() {
 
         let file = generated_draw(&mut rng);
         draw_read_never_panics(&file, &mut rng);
-        let _ = tairix_drawing::read(&file, &mut Ids::new());
+        let _ = tairix_drawing::read(
+            &file,
+            &tairix_drawing::pdf::Request {
+                page: 0,
+                password: None,
+                budget: 1 << 26,
+            },
+            &mut Ids::new(),
+        );
 
         let mut noise = b"Draw\xc9\0\0\0".to_vec();
         noise.resize(8 + rng.at_most(MAX_NOISE), 0);

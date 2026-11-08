@@ -100,7 +100,7 @@ fn a_draw_file_copy_says_what_it_could_not_keep() {
     assert!(opaque.bytes.starts_with(b"Draw"));
     assert_eq!(
         opaque.note.as_deref(),
-        Some("its page size drawn as near as a Draw file holds them"),
+        Some("A Draw file holds the drawing's page size only as near as it can"),
         "a page no A-series paper is"
     );
     let veiled = copy(
@@ -111,7 +111,7 @@ fn a_draw_file_copy_says_what_it_could_not_keep() {
     .expect("copied");
     assert_eq!(
         veiled.note.as_deref(),
-        Some("its transparency and page size drawn as near as a Draw file holds them")
+        Some("A Draw file holds the drawing's transparency and page size only as near as it can")
     );
 }
 

@@ -6,27 +6,45 @@ use tairix_bezier::{Path, PathMeasure, Point};
 use crate::error::SvgError;
 use crate::number::{parse_number, viewport_diagonal};
 use crate::pathdata::parse_path_curves;
+use crate::shape::{shape_curves, shape_geometry};
 use crate::style::{parse_length_in, Lengths};
 use crate::transform::parse_transform;
 use crate::xml::Element;
 
-/// The path a `<textPath>` naming `target` is set along: a `<path>`'s curves
-/// in the text's user space, its own transform applied, with the length it
-/// states for itself (`pathLength`); `None` for any other element.
+/// The path the `<textPath>` `element` is set along, in the text's user
+/// space: its own `path` data where it states any, else the `<path>` or
+/// basic shape `target` its link names — as SVG 2 makes that shape a path,
+/// its own transform applied — with the length the element names states for
+/// itself (`pathLength`). `None` where it names nothing a text can be set
+/// along, or states empty data, which SVG draws none of its text along.
+///
+/// `viewport` is what a shape's percentage lengths resolve against.
 ///
 /// # Errors
 ///
-/// [`SvgError::TooComplex`] past `max_commands` commands,
+/// [`SvgError::TooComplex`] past `max_commands` commands or points,
 /// [`SvgError::OutOfMemory`] when the path cannot be held, and what the
-/// path, transform and number grammars refuse.
+/// path, shape, transform and number grammars refuse.
 pub fn geometry(
-    target: &Element<'_>,
+    element: &Element<'_>,
+    target: Option<&Element<'_>>,
+    viewport: (f64, f64),
     max_commands: usize,
 ) -> Result<Option<(Path, Option<f64>)>, SvgError> {
-    let Some(data) = target.attr("d").filter(|_| target.name == "path") else {
+    if let Some(data) = element.attr("path") {
+        let path = parse_path_curves(data, max_commands)?;
+        return Ok((!path.subpaths.is_empty()).then_some((path, None)));
+    }
+    let Some(target) = target else {
         return Ok(None);
     };
-    let mut path = parse_path_curves(data, max_commands)?;
+    let Some(shape) = shape_geometry(target, viewport, max_commands)? else {
+        return Ok(None);
+    };
+    let mut path = shape_curves(&shape, max_commands)?;
+    if path.subpaths.is_empty() {
+        return Ok(None);
+    }
     if let Some(transform) = target.attr("transform") {
         path = path
             .transformed(parse_transform(transform)?)

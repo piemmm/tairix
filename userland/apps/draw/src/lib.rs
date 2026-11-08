@@ -12,6 +12,7 @@
 
 extern crate alloc;
 
+pub mod appwindow;
 mod bars;
 pub mod compute;
 pub mod copy;
@@ -24,6 +25,7 @@ pub mod inspector;
 pub mod layout;
 pub mod menu;
 pub mod paint;
+pub mod pdfopen;
 pub mod preferences;
 pub mod settings;
 pub mod snap;

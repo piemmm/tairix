@@ -281,11 +281,20 @@ pub fn parse_path_data(
 /// [`SvgError::OutOfMemory`] when the path cannot be held, and what
 /// [`path_commands`] refuses.
 pub fn parse_path_curves(d: &str, max_commands: usize) -> Result<Path, SvgError> {
+    curves(path_commands(d), max_commands)
+}
+
+/// `commands` as a path whose curves are kept, as [`parse_path_curves`]
+/// keeps them.
+pub(crate) fn curves(
+    commands: impl IntoIterator<Item = Result<PathCommand, SvgError>>,
+    max_commands: usize,
+) -> Result<Path, SvgError> {
     let mut path = Path::new();
     let mut current: Option<Subpath> = None;
     let mut start = tairix_bezier::Point::ZERO;
     let mut cursor = start;
-    for (count, command) in path_commands(d).enumerate() {
+    for (count, command) in commands.into_iter().enumerate() {
         if count == max_commands {
             return Err(SvgError::TooComplex);
         }

@@ -24,7 +24,9 @@ Stability tier: **experimental**.
   frame, hand the payload to a total `Service`, write the reply frame,
   finish when the parent closes the request stream. A `Service` encodes
   "that request is malformed" as a typed error reply; the loop itself
-  cannot be derailed by request content.
+  cannot be derailed by request content. Each request is wiped, its block's
+  spare room too, once it is handled, since one may carry a secret such as a
+  document's password.
 - **`host`** — the calling program's side. `ParserSandbox::request` sends
   one payload and blocks for the reply, for no longer than the production
   launcher's reply deadline (`rt::REPLY_DEADLINE_NS`, two minutes: far past
@@ -187,8 +189,13 @@ Stability tier: **experimental**.
 - **`drawedit`** — a drawing editor's documents read into the editable
   drawing (`tairix-drawing`, [`docs`](./drawing.md)) over the same upload.
   `read_drawing` asks the worker to read the document, which it reads as a
-  RISC OS Draw file or as SVG by its content (`tairix_drawing::read`), never
-  by a name the editor could be wrong about; the worker answers the page,
+  RISC OS Draw file, a PDF or SVG by its content (`tairix_drawing::read`),
+  never by a name the editor could be wrong about, a PDF at the page and with
+  the password `Access` asks; `read_pages` asks first for a document's pages,
+  a PDF's count and as many of their sizes as a reply holds. Either request
+  carries the room the worker may decode into — what its share holds beside
+  the document — and the password, at most `MAX_PASSWORD_BYTES`, the request
+  wiped once sent. The worker answers the page,
   grid, guides, title, what it could not keep and how many pictures the
   drawing shows. The pictures come next, each once however many objects show
   it: its size and what the bytes it was read from state, then its
@@ -197,8 +204,9 @@ Stability tier: **experimental**.
   exchanges as its size allows — each channel held to its pixel's alpha as
   it lands. Together the pictures
   of one read hold no more pixels than a drawing's may and no more bytes
-  than the document handed over (`read_drawing`'s `handed`), since every
-  picture's bytes are part of it. Then the drawing as records a batch at a time —
+  than the document handed over (`read_drawing`'s `handed`) or the room its
+  streams decoded into, whichever is more, since every picture's bytes are
+  part of the one or of the other. Then the drawing as records a batch at a time —
   every gradient and style once, referred to by number, then the tree depth
   first, a group's clip before its children, a picture by its number, a long
   path's nodes cut across records so every record fits a frame, and a text

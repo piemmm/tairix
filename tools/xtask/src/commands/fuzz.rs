@@ -474,6 +474,12 @@ pub const TARGETS: &[Target] = &[
             "plane geometry over drawing-document paths (boolean operations, stroke outlines, dashes, offsets, fitting, intersection)",
     },
     Target {
+        package: "tairix-pdf",
+        test: "fuzz_pdf",
+        description:
+            "the PDF reader over untrusted documents: structure, repair, filters, encryption, content, images",
+    },
+    Target {
         package: "tairix-drawing",
         test: "fuzz_drawing",
         description:

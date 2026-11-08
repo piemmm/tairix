@@ -268,6 +268,16 @@ pub enum ToolGone {
     Refused,
 }
 
+/// Which file a save writes ([`DocumentView::refuse_save`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SaveTarget {
+    /// The document's own, whose recorded format may say what its name does
+    /// not.
+    Own,
+    /// Another, named in a Save As: only its name says its format.
+    Another,
+}
+
 /// What the host needs of the engine a document window shows.
 pub trait DocumentView: SavedDocument {
     /// Where everything the window draws goes, for a window of one size.
@@ -385,10 +395,18 @@ pub trait DocumentView: SavedDocument {
         damage: &mut Region,
     ) -> ViewOutcome<Self>;
 
-    /// Why the document cannot be saved as `name`, when it cannot: a save
-    /// refused so never touches the file.
-    fn refuse_save(&self, _name: &str) -> Option<String> {
+    /// Why the document cannot be saved as `name`, into `target`, when it
+    /// cannot: a save refused so never touches the file.
+    fn refuse_save(&self, _name: &str, _target: SaveTarget) -> Option<String> {
         None
+    }
+
+    /// Whether a file of media type `media` dropped at window-local `at`, laid
+    /// out as `layout`, is read into the document there, as an import is; a
+    /// drop it is not is left to the application, which opens the file or
+    /// refuses it.
+    fn places(&self, _at: Point, _media: &str, _layout: &Self::Layout) -> bool {
+        false
     }
 
     /// Ask how the document is to be saved before the picker asks where,

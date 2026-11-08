@@ -125,13 +125,16 @@ impl TextCascade<'_> for Attributes {
         self.depth -= 1;
     }
 
-    /// `#way` runs east from the origin for 100 and then south for 100, and
-    /// `#stated` is the same path saying it is 50 long; nothing else is a
-    /// path.
+    /// A text path's own data, else: `#way` runs east from the origin for
+    /// 100 and then south for 100, and `#stated` is the same path saying it is
+    /// 50 long; nothing else is a path.
     fn text_path(
         &mut self,
         element: &Element<'_>,
     ) -> Result<Option<(Path, Option<f64>)>, SvgError> {
+        if element.attr("path").is_some() {
+            return crate::textpath::geometry(element, None, (100.0, 100.0), 16);
+        }
         let stated = match xml::href(element) {
             Some("#way") => None,
             Some("#stated") => Some(50.0),
@@ -704,4 +707,17 @@ fn a_stretched_glyph_bends_with_the_path_and_matches_the_rigid_one_where_it_is_s
         Some(SvgError::TooComplex),
         "no more points than it is allowed"
     );
+}
+
+#[test]
+fn a_text_path_s_own_data_is_the_path_its_glyphs_stand_on() {
+    let laid = laid_out(
+        r##"<text font-size="20"><textPath path="M0 30 H100" href="#way">ab</textPath></text>"##,
+    );
+    let origins: Vec<(f64, f64)> = laid
+        .glyphs
+        .iter()
+        .map(|glyph| (glyph.to_user.e, glyph.to_user.f))
+        .collect();
+    at(&origins, &[(0.0, 30.0), (10.0, 30.0)]);
 }

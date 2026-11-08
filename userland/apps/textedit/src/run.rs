@@ -23,6 +23,7 @@
 mod program {
     extern crate alloc;
 
+    use alloc::borrow::Cow;
     use alloc::boxed::Box;
     use alloc::string::String;
     use alloc::sync::Arc;
@@ -528,7 +529,7 @@ mod program {
         fn write(
             job: &SaveJob<Handle, Snapshot>,
             _name: &str,
-        ) -> Result<Option<&'static str>, Errno> {
+        ) -> Result<Option<Cow<'static, str>>, Errno> {
             write_out(&job.target, &job.snapshot).map(|()| None)
         }
 

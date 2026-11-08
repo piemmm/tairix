@@ -10,12 +10,14 @@
 mod program {
     extern crate alloc;
 
+    use alloc::borrow::Cow;
     use alloc::boxed::Box;
     use alloc::string::String;
     use alloc::sync::Arc;
     use alloc::vec::Vec;
     use core::fmt;
 
+    use tairix_abi::fs::Filetype;
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::window_ipc::{AppMenuSymbol, ClipboardKind, CLIPBOARD_MAX_BYTES};
     use tairix_abi::Errno;
@@ -25,12 +27,14 @@ mod program {
     };
     use tairix_bezier::{Affine, Bounds, Point};
     use tairix_collections::try_arc;
-    use tairix_controls::{damage, SettingsLayout};
+    use tairix_controls::damage;
+    use tairix_draw::appwindow::{DrawWindow, DrawWindowAsk, DrawWindowLayout};
     use tairix_draw::compute::{work_out, Compute, Computed};
-    use tairix_draw::copy::CopyFormat;
+    use tairix_draw::copy::{CopyFormat, SaveFormat, FLATTENED};
     use tairix_draw::document::{blank, Document};
     use tairix_draw::glyphs::{Fetched, Lettering};
     use tairix_draw::layout::{Faces, Layout, WINDOW_SIZE};
+    use tairix_draw::pdfopen::{Answered, Asked, OpenPdf};
     use tairix_draw::preferences::Preferences;
     use tairix_draw::settings::{Category, DrawSettings};
     use tairix_draw::tiles::{RenderJob, TileKey, TILE};
@@ -47,12 +51,16 @@ mod program {
     use tairix_raster::Surface;
     use tairix_rt::sync::WorkerWake;
     use tairix_rt::work::{Worker, WorkerGuard};
-    use tairix_sandbox::drawedit::{read_drawing, read_placed, DrawEditService, WORKER_MEMORY};
+    use tairix_sandbox::drawedit::{
+        read_drawing, read_pages, read_placed, Access as ReadAccess, DrawEditService, DrawFailure,
+        DrawRefusal, WORKER_MEMORY,
+    };
     use tairix_sandbox::imagerender::{send_document, upload_document, UploadFailure};
     use tairix_sandbox::rt::{document_room, serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::ParserSandbox;
     use tairix_theme::Theme;
     use tairix_util::defer::JobQueue;
+    use tairix_util::secret::WipedBuf;
     use tairix_window::app;
     use tairix_window::docapp::settings::{Edit, SettingsRequest, Then};
     use tairix_window::docapp::{
@@ -102,9 +110,20 @@ mod program {
     }
 
     enum LoadWork {
-        Open { handle: Arc<Handle>, name: String },
+        /// Open a document: a PDF at `page` where one was chosen, and with
+        /// `password` where one was given.
+        Open {
+            handle: Arc<Handle>,
+            name: String,
+            page: Option<u32>,
+            password: Option<WipedBuf>,
+        },
         Paste(Vec<u8>),
-        Place { handle: Handle, name: String },
+        Place {
+            handle: Handle,
+            name: String,
+            at: Option<tairix_geometry::Point>,
+        },
     }
 
     struct LoadReply {
@@ -117,10 +136,20 @@ mod program {
             handle: Arc<Handle>,
             name: String,
             read: Result<(Read, Ids), ReadRefusal>,
+            recorded: Option<Filetype>,
+        },
+        /// A PDF that asks something before it opens: which page, or its
+        /// password, `password` being the one already given.
+        Asks {
+            handle: Arc<Handle>,
+            name: String,
+            asked: Asked,
+            password: Option<WipedBuf>,
         },
         Pasted(Result<Drawing, String>),
         Placed {
             name: String,
+            at: Option<tairix_geometry::Point>,
             placed: Result<Image, String>,
         },
     }
@@ -141,21 +170,84 @@ mod program {
         usize::try_from(length).map_err(|_| ReadRefusal::TooLong(room))
     }
 
-    fn open(sandbox: &mut Reader, handle: &Handle) -> Result<(Read, Ids), ReadRefusal> {
+    /// What opening a document came to: its drawing, or a question a PDF
+    /// asks first.
+    enum Opened {
+        Read(Result<(Read, Ids), ReadRefusal>),
+        Asks(Asked),
+    }
+
+    /// What a read that failed answers: a PDF's password asked for again
+    /// where it wanted one, and why the document is unreadable otherwise.
+    fn failed(failure: DrawFailure) -> Opened {
+        match failure {
+            DrawFailure::Refused(DrawRefusal::NeedsPassword) => {
+                Opened::Asks(Asked::Password { wrong: false })
+            }
+            DrawFailure::Refused(DrawRefusal::WrongPassword) => {
+                Opened::Asks(Asked::Password { wrong: true })
+            }
+            failure => Opened::Read(Err(ReadRefusal::Unreadable(alloc::format!("{failure}")))),
+        }
+    }
+
+    /// Read `handle`'s document: a PDF of several pages asks which first,
+    /// unless `page` already says, and one protected by a password asks for
+    /// it unless `password` opens it.
+    fn open(
+        sandbox: &mut Reader,
+        handle: &Handle,
+        page: Option<u32>,
+        password: Option<&[u8]>,
+    ) -> Opened {
         let fd = handle.fd();
-        let length = document_length(handle, sandbox.document_room())?;
+        let length = match document_length(handle, sandbox.document_room()) {
+            Ok(length) => length,
+            Err(refusal) => return Opened::Read(Err(refusal)),
+        };
         let uploaded = upload_document(sandbox, length, |offset, into| {
             tairix_rt::fs_read(fd, offset, into).map_err(Errno::from_syscall)
         })
         .map_err(ReadRefusal::Upload);
-        let mut ids = Ids::new();
-        let read = uploaded.and_then(|()| {
-            read_drawing(sandbox, length as u64, &mut ids)
-                .map_err(|failure| ReadRefusal::Unreadable(alloc::format!("{failure}")))
-        });
+        let access = ReadAccess {
+            page: page.unwrap_or(0),
+            password,
+        };
+        let opened = uploaded.map_or_else(
+            |refusal| Opened::Read(Err(refusal)),
+            |()| read_uploaded(sandbox, length, page.is_none(), &access),
+        );
         // The worker that read this document reads no other.
         sandbox.release();
-        read.map(|read| (read, ids))
+        opened
+    }
+
+    /// The document uploaded to `sandbox`, `length` bytes long, read with
+    /// `access`; its pages counted first when `choosing`.
+    fn read_uploaded(
+        sandbox: &mut Reader,
+        length: usize,
+        choosing: bool,
+        access: &ReadAccess<'_>,
+    ) -> Opened {
+        let handed = length as u64;
+        if choosing {
+            match read_pages(sandbox, handed, access) {
+                Ok(pages) if pages.count > 1 => {
+                    return Opened::Asks(Asked::Page {
+                        count: pages.count,
+                        sizes: pages.sizes,
+                    });
+                }
+                Ok(_) => {}
+                Err(failure) => return failed(failure),
+            }
+        }
+        let mut ids = Ids::new();
+        match read_drawing(sandbox, handed, access, &mut ids) {
+            Ok(read) => Opened::Read(Ok((read, ids))),
+            Err(failure) => failed(failure),
+        }
     }
 
     fn paste(sandbox: &mut Reader, bytes: &[u8]) -> Result<Drawing, String> {
@@ -164,8 +256,13 @@ mod program {
                 alloc::format!("The clipboard's drawing could not be handed over: {failure}")
             })
             .and_then(|()| {
-                read_drawing(sandbox, bytes.len() as u64, &mut Ids::new())
-                    .map_err(|failure| alloc::format!("The clipboard holds no drawing: {failure}"))
+                read_drawing(
+                    sandbox,
+                    bytes.len() as u64,
+                    &ReadAccess::default(),
+                    &mut Ids::new(),
+                )
+                .map_err(|failure| alloc::format!("The clipboard holds no drawing: {failure}"))
             });
         sandbox.release();
         read.map(|read| read.drawing)
@@ -206,15 +303,31 @@ mod program {
     fn serve_load(sandbox: &mut Reader, job: &mut Option<LoadJob>) -> Option<LoadReply> {
         let LoadJob { stamp, work } = job.take()?;
         let answer = match work {
-            LoadWork::Open { handle, name } => LoadAnswer::Opened {
-                read: open(sandbox, &handle),
+            LoadWork::Open {
                 handle,
                 name,
+                page,
+                password,
+            } => match open(sandbox, &handle, page, password.as_deref()) {
+                Opened::Read(read) => LoadAnswer::Opened {
+                    read,
+                    recorded: tairix_browse::recorded_filetype_of(&handle),
+                    handle,
+                    name,
+                },
+                Opened::Asks(asked) => LoadAnswer::Asks {
+                    handle,
+                    name,
+                    // A password asked again is not kept.
+                    password: password.filter(|_| matches!(asked, Asked::Page { .. })),
+                    asked,
+                },
             },
             LoadWork::Paste(bytes) => LoadAnswer::Pasted(paste(sandbox, &bytes)),
-            LoadWork::Place { handle, name } => LoadAnswer::Placed {
+            LoadWork::Place { handle, name, at } => LoadAnswer::Placed {
                 placed: place(sandbox, &handle),
                 name,
+                at,
             },
         };
         Some(LoadReply { stamp, answer })
@@ -340,17 +453,18 @@ mod program {
 
     /// Why a save failed.
     enum SaveFailure {
-        Encode(DrawingError),
+        /// Its name says no format Draw saves in.
+        Format,
+        /// The drawing could not be written in its format, for this reason.
+        Encode(String),
         Write(Errno),
     }
 
     impl fmt::Display for SaveFailure {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
-                Self::Encode(DrawingError::OutOfMemory) => {
-                    f.write_str("there is not enough memory to write it")
-                }
-                Self::Encode(_) => f.write_str("it could not be written as SVG"),
+                Self::Format => f.write_str("its name says no format Draw saves in"),
+                Self::Encode(why) => f.write_str(why),
                 Self::Write(errno) => write!(f, "the file could not be written ({errno})"),
             }
         }
@@ -366,6 +480,22 @@ mod program {
     const PAST_OPENING: &str =
         "The file is larger than Draw opens on this computer, so Draw cannot open it again here";
 
+    /// `note`, what a file written could not keep, and `said`, whether Draw
+    /// can open it again, as one caveat.
+    fn caveat(note: Option<String>, said: Option<&'static str>) -> Option<Cow<'static, str>> {
+        match (note, said) {
+            (None, None) => None,
+            (None, Some(said)) => Some(Cow::Borrowed(said)),
+            (Some(note), None) => Some(Cow::Owned(note)),
+            (Some(note), Some(said)) => Some(Cow::Owned(alloc::format!("{note}. {said}"))),
+        }
+    }
+
+    /// Whether Draw's worker would read back `bytes` of a file it opens.
+    fn past_opening(bytes: &[u8]) -> bool {
+        bytes.len() as u64 > document_room(WORKER_MEMORY)
+    }
+
     /// Write a copy of `drawing` to `target`, in the format its name says.
     fn copy(target: &Handle, name: &str, drawing: &Drawing) -> Result<String, String> {
         let recorded = tairix_browse::recorded_filetype_of(target);
@@ -377,18 +507,12 @@ mod program {
         let copied = tairix_draw::copy::copy(format, drawing, &Lettering::new(Fetched))?;
         write_all(target, &copied.bytes)
             .map_err(|err| alloc::format!("it could not be written ({err})"))?;
-        let saved = match copied.note {
-            Some(note) => alloc::format!("Saved a copy as {name}, {note}"),
-            None => alloc::format!("Saved a copy as {name}"),
-        };
         let reopened = matches!(format, CopyFormat::Svg | CopyFormat::Draw);
-        Ok(
-            if reopened && copied.bytes.len() as u64 > document_room(WORKER_MEMORY) {
-                alloc::format!("{saved}. {PAST_OPENING}")
-            } else {
-                saved
-            },
-        )
+        let past = (reopened && past_opening(&copied.bytes)).then_some(PAST_OPENING);
+        Ok(match caveat(copied.note, past) {
+            Some(caveat) => alloc::format!("Saved a copy as {name}. {caveat}"),
+            None => alloc::format!("Saved a copy as {name}"),
+        })
     }
 
     struct Draw {
@@ -459,16 +583,48 @@ mod program {
         }
     }
 
+    /// What a PDF's question is asked for: the window loading it, its file,
+    /// and the password already given.
+    struct Ticket {
+        stamp: Stamp,
+        handle: Arc<Handle>,
+        name: String,
+        password: Option<WipedBuf>,
+    }
+
     fn adopt_load(host: &mut Host<Draw>, reply: LoadReply) {
         let Some(index) = host.showing(reply.stamp) else {
             return;
         };
         match reply.answer {
-            LoadAnswer::Opened { handle, name, read } => match read {
+            LoadAnswer::Asks {
+                handle,
+                name,
+                asked,
+                password,
+            } => {
+                let ticket = Ticket {
+                    stamp: reply.stamp,
+                    handle,
+                    name: name.clone(),
+                    password,
+                };
+                let question = DrawWindow::OpenPdf(OpenPdf::new(&name, asked, ticket));
+                if host.open_app_window(question, Some(index)).is_none() {
+                    host.not_opened(index, &name, &"there is no room to ask how to open it");
+                }
+            }
+            LoadAnswer::Opened {
+                handle,
+                name,
+                read,
+                recorded,
+            } => match read {
                 Ok((read, ids)) => {
                     let access = host.windows[index].view.access();
                     let document = Document::new(read.drawing, ids, true);
-                    let mut view = View::new(document, name, access, read.unkept, scale_of(host));
+                    let mut view = View::new(document, name, access, read.unkept, scale_of(host))
+                        .with_recorded(recorded);
                     view.begin(host.app.preferences.live());
                     host.show(index, view, Some(handle));
                 }
@@ -481,11 +637,11 @@ mod program {
                     .pasted(pasted, &mut window.damage, &window.layout);
                 window.owe_reported();
             }
-            LoadAnswer::Placed { name, placed } => {
+            LoadAnswer::Placed { name, at, placed } => {
                 let window = &mut host.windows[index];
                 window
                     .view
-                    .placed_picture(&name, placed, &mut window.damage, &window.layout);
+                    .placed_picture((&name, at), placed, &mut window.damage, &window.layout);
                 window.owe_reported();
             }
         }
@@ -511,7 +667,7 @@ mod program {
 
     impl DocumentApp for Draw {
         type View = View;
-        type AppView = DrawSettings;
+        type AppView = DrawWindow<Ticket>;
         type Snapshot = Snapshot;
         type Extra = ();
         type Work = Work;
@@ -601,12 +757,25 @@ mod program {
 
         fn write(
             job: &SaveJob<Handle, Snapshot>,
-            _name: &str,
-        ) -> Result<Option<&'static str>, SaveFailure> {
-            let text =
-                tairix_drawing::svg::write(&job.snapshot.drawing).map_err(SaveFailure::Encode)?;
-            write_all(&job.target, text.as_bytes()).map_err(SaveFailure::Write)?;
-            Ok((text.len() as u64 > document_room(WORKER_MEMORY)).then_some(PAST_OPENING))
+            name: &str,
+        ) -> Result<Option<Cow<'static, str>>, SaveFailure> {
+            let recorded = tairix_browse::recorded_filetype_of(&job.target);
+            let format = SaveFormat::of(name, recorded).ok_or(SaveFailure::Format)?;
+            let written = tairix_draw::copy::copy(
+                format.written(),
+                &job.snapshot.drawing,
+                &Lettering::new(Fetched),
+            )
+            .map_err(SaveFailure::Encode)?;
+            write_all(&job.target, &written.bytes).map_err(SaveFailure::Write)?;
+            let said = if !format.keeps_editing() {
+                Some(FLATTENED)
+            } else if past_opening(&written.bytes) {
+                Some(PAST_OPENING)
+            } else {
+                None
+            };
+            Ok(caveat(written.note, said))
         }
 
         fn work(work: Work) -> Answer {
@@ -666,6 +835,8 @@ mod program {
                 work: LoadWork::Open {
                     handle,
                     name: name.clone(),
+                    page: None,
+                    password: None,
                 },
             };
             match host.app.loader.submit(Some(job)) {
@@ -700,41 +871,49 @@ mod program {
         }
 
         fn bar_chosen(host: &mut Host<Self>, _row: usize) {
-            if let Some(index) = host.app_windows.len().checked_sub(1) {
+            let settings = host
+                .app_windows
+                .iter()
+                .position(|window| matches!(window.view, DrawWindow::Settings(_)));
+            if let Some(index) = settings {
                 host.raise_app_window(index);
                 return;
             }
             let record = host.app.preferences.live().clone();
-            let _ = host.open_app_window(DrawSettings::new(record, Category::General.index()));
+            let settings = DrawSettings::new(record, Category::General.index());
+            let _ = host.open_app_window(DrawWindow::Settings(settings), None);
         }
 
         /// What the settings window was in the middle of is written as it
-        /// goes.
-        fn app_closing(host: &mut Host<Self>, _index: usize) {
-            let job = host.app.preferences.settle();
-            submit_settings(host, job);
-        }
-
-        fn app_request(
-            host: &mut Host<Self>,
-            _index: usize,
-            request: SettingsRequest<Preferences>,
-        ) {
-            if let Some(Edit { was, now, settled }) = request.edit {
-                host.app.preferences.edit(&was, &now);
-                apply_settings(host);
-                if settled {
+        /// goes; a PDF's question closed unanswered turns the document down.
+        fn app_closing(host: &mut Host<Self>, index: usize) {
+            match &mut host.app_windows[index].view {
+                DrawWindow::Settings(_) => {
                     let job = host.app.preferences.settle();
                     submit_settings(host, job);
                 }
-            }
-            match request.then {
-                Some(Then::Restore) => {
-                    let job = host.app.preferences.restore();
-                    submit_settings(host, job);
+                DrawWindow::OpenPdf(question) => {
+                    if let Some(ticket) = question.take_ticket() {
+                        turned_down(host, &ticket);
+                    }
                 }
-                Some(Then::Ask(never)) => match never {},
-                None => {}
+            }
+        }
+
+        fn app_request(host: &mut Host<Self>, index: usize, request: DrawWindowAsk<Ticket>) {
+            match request {
+                DrawWindowAsk::Settings(request) => settings_asked(host, request),
+                DrawWindowAsk::OpenPdf(answered) => {
+                    host.close_app_window(index);
+                    match answered {
+                        Answered::Open {
+                            ticket,
+                            page,
+                            password,
+                        } => open_answered(host, ticket, page, password),
+                        Answered::Cancelled(ticket) => turned_down(host, &ticket),
+                    }
+                }
             }
         }
 
@@ -881,10 +1060,20 @@ mod program {
             }
         }
 
-        fn import_chosen(host: &mut Host<Self>, index: usize, file: Handle, name: String) {
+        fn import_chosen(
+            host: &mut Host<Self>,
+            index: usize,
+            file: Handle,
+            name: String,
+            at: Option<tairix_geometry::Point>,
+        ) {
             let job = LoadJob {
                 stamp: host.windows[index].stamp(),
-                work: LoadWork::Place { handle: file, name },
+                work: LoadWork::Place {
+                    handle: file,
+                    name,
+                    at,
+                },
             };
             match host.app.loader.submit(Some(job)) {
                 Ok(answered) => host.note_answered(answered),
@@ -895,14 +1084,22 @@ mod program {
         fn render_app(
             &mut self,
             surface: &mut Surface,
-            view: &DrawSettings,
-            layout: &SettingsLayout,
+            view: &DrawWindow<Ticket>,
+            layout: &DrawWindowLayout,
             (theme, scale, _): (&Theme, Scale, Faces),
             _focused: bool,
         ) {
-            let mut inline = InlineArtwork::new(NoArtworkSeam, NoArtworkSeam);
-            let mut source = IconArtworkSource::new(&mut self.artwork, &mut inline);
-            view.render(surface, layout, (theme, scale), &mut source);
+            match (view, layout) {
+                (DrawWindow::Settings(view), DrawWindowLayout::Settings(layout)) => {
+                    let mut inline = InlineArtwork::new(NoArtworkSeam, NoArtworkSeam);
+                    let mut source = IconArtworkSource::new(&mut self.artwork, &mut inline);
+                    view.render(surface, layout, (theme, scale), &mut source);
+                }
+                (DrawWindow::OpenPdf(view), DrawWindowLayout::OpenPdf(bounds)) => {
+                    view.render(surface, *bounds, scale, theme);
+                }
+                _ => {}
+            }
         }
 
         fn render(
@@ -916,6 +1113,61 @@ mod program {
             let mut inline = InlineArtwork::new(NoArtworkSeam, NoArtworkSeam);
             let mut source = IconArtworkSource::new(&mut self.artwork, &mut inline);
             view.render(surface, layout, style, &mut source);
+        }
+    }
+
+    /// Carry out what the settings window changed.
+    fn settings_asked(host: &mut Host<Draw>, request: SettingsRequest<Preferences>) {
+        if let Some(Edit { was, now, settled }) = request.edit {
+            host.app.preferences.edit(&was, &now);
+            apply_settings(host);
+            if settled {
+                let job = host.app.preferences.settle();
+                submit_settings(host, job);
+            }
+        }
+        match request.then {
+            Some(Then::Restore) => {
+                let job = host.app.preferences.restore();
+                submit_settings(host, job);
+            }
+            Some(Then::Ask(never)) => match never {},
+            None => {}
+        }
+    }
+
+    /// Open the PDF `ticket` is for as its question was answered: at `page`
+    /// where one was chosen, with `password` where one was given, else the
+    /// one given before.
+    fn open_answered(
+        host: &mut Host<Draw>,
+        ticket: Ticket,
+        page: Option<u32>,
+        password: Option<WipedBuf>,
+    ) {
+        let Some(index) = host.showing(ticket.stamp) else {
+            return;
+        };
+        let name = ticket.name.clone();
+        let job = LoadJob {
+            stamp: ticket.stamp,
+            work: LoadWork::Open {
+                handle: ticket.handle,
+                name: ticket.name,
+                page,
+                password: password.or(ticket.password),
+            },
+        };
+        match host.app.loader.submit(Some(job)) {
+            Ok(answered) => host.note_answered(answered),
+            Err(_) => host.not_opened(index, &name, &ReadFailure::NoMemory),
+        }
+    }
+
+    /// The PDF `ticket` is for was turned down: its window is given up.
+    fn turned_down(host: &mut Host<Draw>, ticket: &Ticket) {
+        if let Some(index) = host.showing(ticket.stamp) {
+            host.not_wanted(index);
         }
     }
 
@@ -956,10 +1208,12 @@ mod program {
         }
         apply_settings(host);
         for window in &mut host.app_windows {
-            window
-                .view
-                .say(said.clone(), &window.layout, &mut window.damage);
-            window.owe_reported();
+            if let (DrawWindow::Settings(view), DrawWindowLayout::Settings(layout)) =
+                (&mut window.view, &window.layout)
+            {
+                view.say(said.clone(), layout, &mut window.damage);
+                window.owe_reported();
+            }
         }
     }
 
@@ -972,10 +1226,12 @@ mod program {
         }
         for index in 0..host.app_windows.len() {
             let window = &mut host.app_windows[index];
-            if window
-                .view
-                .adopt(&preferences, &window.layout, &mut window.damage)
-            {
+            let (DrawWindow::Settings(view), DrawWindowLayout::Settings(layout)) =
+                (&mut window.view, &window.layout)
+            else {
+                continue;
+            };
+            if view.adopt(&preferences, layout, &mut window.damage) {
                 host.apply_app(index, Outcome::relaid());
             } else {
                 window.owe_reported();

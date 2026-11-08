@@ -2,19 +2,22 @@
 //! back as it reads in place, however large; every refusal; and every reply
 //! a parent must not believe.
 
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use core::fmt::Write as _;
 
 use tairix_drawing::svg::{read, write};
 use tairix_drawing::Ids;
 
 use super::{
-    put_header, put_point, read_drawing, read_placed, receive_picture, take_header, Allowance,
-    Builder, DrawEditService, DrawFailure, DrawRefusal, OP_NEXT, RECORD_GROUP, RECORD_IMAGE,
-    RECORD_RECT, RECORD_STYLE, RECORD_TEXT, REPLY_BATCH, REPLY_OPENED, REPLY_PICTURE, REPLY_PIXELS,
-    REPLY_PLACED, RUN_FILL, RUN_SIZE, RUN_STROKE, SOURCE_NONE, SOURCE_PNG, SOURCE_SPRITE,
+    put_header, put_point, read_drawing, read_pages, read_placed, receive_picture, take_header,
+    Access, Allowance, Builder, DrawEditService, DrawFailure, DrawRefusal, Pages,
+    MAX_PASSWORD_BYTES, OP_NEXT, RECORD_GROUP, RECORD_IMAGE, RECORD_RECT, RECORD_STYLE,
+    RECORD_TEXT, REPLY_BATCH, REPLY_OPENED, REPLY_PAGES, REPLY_PICTURE, REPLY_PIXELS, REPLY_PLACED,
+    RUN_FILL, RUN_SIZE, RUN_STROKE, SOURCE_NONE, SOURCE_PNG, SOURCE_SPRITE,
 };
 use crate::host::ParserSandbox;
 use crate::imagerender::send_document;
@@ -69,7 +72,12 @@ fn through(
     document: &[u8],
 ) -> Result<tairix_drawing::Read, DrawFailure> {
     send_document(sandbox, document).expect("handed over");
-    read_drawing(sandbox, document.len() as u64, &mut Ids::new())
+    read_drawing(
+        sandbox,
+        document.len() as u64,
+        &Access::default(),
+        &mut Ids::new(),
+    )
 }
 
 /// What a scripted worker answers as though it were handed: a document no
@@ -89,7 +97,7 @@ fn a_drawing_read_in_the_sandbox_is_the_drawing_read_in_place() {
     assert_eq!(read.unkept, kept, "what could not be kept is said");
     assert!(!read.unkept.is_empty());
     assert_eq!(
-        read_drawing(&mut sandbox, SCRIPTED, &mut Ids::new()).err(),
+        read_drawing(&mut sandbox, SCRIPTED, &Access::default(), &mut Ids::new()).err(),
         Some(DrawFailure::Refused(DrawRefusal::NoDocument)),
         "the read consumed the document"
     );
@@ -172,7 +180,7 @@ fn what_is_no_drawing_is_refused_for_what_it_is() {
         );
     }
     assert_eq!(
-        read_drawing(&mut sandbox, SCRIPTED, &mut Ids::new()).err(),
+        read_drawing(&mut sandbox, SCRIPTED, &Access::default(), &mut Ids::new()).err(),
         Some(DrawFailure::Refused(DrawRefusal::NoDocument))
     );
     let mut service = DrawEditService::default();
@@ -196,10 +204,32 @@ impl Service for Replies {
 fn answering(
     replies: Vec<Vec<u8>>,
 ) -> ParserSandbox<LoopbackLauncher<impl FnMut() -> Replies>, NullSink> {
+    answering_within(replies, u64::MAX)
+}
+
+/// [`answering`], its workers handed documents of at most `room` bytes.
+fn answering_within(
+    replies: Vec<Vec<u8>>,
+    room: u64,
+) -> ParserSandbox<LoopbackLauncher<impl FnMut() -> Replies>, NullSink> {
     ParserSandbox::new(
-        LoopbackLauncher::new(move || Replies(replies.clone())),
+        LoopbackLauncher::new(move || Replies(replies.clone())).holding(room),
         NullSink,
     )
+}
+
+/// Answers a list of one page, keeping each request it is asked.
+struct Recording(Rc<RefCell<Vec<Vec<u8>>>>);
+
+impl Service for Recording {
+    fn handle(&mut self, request: &[u8]) -> Vec<u8> {
+        self.0.borrow_mut().push(request.to_vec());
+        let mut w = Writer::new();
+        w.u8(REPLY_PAGES);
+        w.u32(1);
+        w.u32(0);
+        w.finish()
+    }
 }
 
 /// The open reply for a blank page of `layers` layers.
@@ -300,7 +330,8 @@ fn an_honest_script_is_believed() {
         opened(1),
         batch(true, &[style(), group(1), rect(0, 1.0)]),
     ]);
-    let read = read_drawing(&mut sandbox, SCRIPTED, &mut Ids::new()).expect("believed");
+    let read = read_drawing(&mut sandbox, SCRIPTED, &Access::default(), &mut Ids::new())
+        .expect("believed");
     assert_eq!(read.drawing.objects(), 2);
 }
 
@@ -368,7 +399,7 @@ fn a_reply_that_breaks_its_bounds_is_not_believed() {
     ] {
         let mut sandbox = answering(script);
         assert_eq!(
-            read_drawing(&mut sandbox, SCRIPTED, &mut Ids::new()).err(),
+            read_drawing(&mut sandbox, SCRIPTED, &Access::default(), &mut Ids::new()).err(),
             Some(DrawFailure::ReplyMalformed),
             "{case}"
         );
@@ -438,7 +469,8 @@ fn a_text_s_baseline_and_runs_are_believed_only_within_their_bounds() {
         opened(1),
         batch(true, &[style(), group(1), text(along(2), runs(&[(1, 2)]))]),
     ]);
-    let read = read_drawing(&mut sandbox, SCRIPTED, &mut Ids::new()).expect("believed");
+    let read = read_drawing(&mut sandbox, SCRIPTED, &Access::default(), &mut Ids::new())
+        .expect("believed");
     let layer = read.drawing.layers().get(0).cloned().expect("a layer");
     let node = layer
         .children()
@@ -475,7 +507,7 @@ fn a_text_s_baseline_and_runs_are_believed_only_within_their_bounds() {
     ] {
         let mut sandbox = answering(vec![opened(1), batch(true, &[style(), group(1), record])]);
         assert_eq!(
-            read_drawing(&mut sandbox, SCRIPTED, &mut Ids::new()).err(),
+            read_drawing(&mut sandbox, SCRIPTED, &Access::default(), &mut Ids::new()).err(),
             Some(DrawFailure::ReplyMalformed),
             "{case}"
         );
@@ -490,7 +522,13 @@ fn a_worker_that_turns_hostile_part_way_is_contained() {
     });
     send_document(&mut sandbox, RICH.as_bytes()).expect("handed over");
     assert_eq!(
-        read_drawing(&mut sandbox, RICH.len() as u64, &mut Ids::new()).err(),
+        read_drawing(
+            &mut sandbox,
+            RICH.len() as u64,
+            &Access::default(),
+            &mut Ids::new()
+        )
+        .err(),
         Some(DrawFailure::ReplyMalformed)
     );
     assert!(DrawFailure::ReplyMalformed
@@ -700,7 +738,8 @@ fn a_pictures_pixels_are_held_to_their_alpha_as_they_land() {
         pixels(&[200, 10, 10, 100, 1, 2, 3, 255]),
         batch(true, &[group(1), image(0)]),
     ]);
-    let read = read_drawing(&mut sandbox, SCRIPTED, &mut Ids::new()).expect("believed");
+    let read = read_drawing(&mut sandbox, SCRIPTED, &Access::default(), &mut Ids::new())
+        .expect("believed");
     let layer = read.drawing.layers().get(0).cloned().expect("a layer");
     let picture = layer
         .children()
@@ -787,7 +826,7 @@ fn a_picture_that_breaks_its_bounds_is_not_believed() {
     ] {
         let mut sandbox = answering(script);
         assert_eq!(
-            read_drawing(&mut sandbox, SCRIPTED, &mut Ids::new()).err(),
+            read_drawing(&mut sandbox, SCRIPTED, &Access::default(), &mut Ids::new()).err(),
             Some(DrawFailure::ReplyMalformed),
             "{case}"
         );
@@ -829,10 +868,11 @@ fn the_sources_of_one_read_together_hold_no_more_than_a_document_does() {
     );
 }
 
-/// A source is part of the document it was read from, so one longer than the
-/// document handed over is a worker's invention.
+/// A source is part of the document it was read from, or what its streams
+/// decoded to in the room the worker had beside it, so one longer than both
+/// is a worker's invention.
 #[test]
-fn a_source_longer_than_the_document_handed_over_is_not_believed() {
+fn a_source_longer_than_the_document_and_its_decoding_room_is_not_believed() {
     let mut w = Writer::new();
     w.u8(REPLY_PICTURE);
     w.u32(1);
@@ -848,11 +888,24 @@ fn a_source_longer_than_the_document_handed_over_is_not_believed() {
             batch(true, &[group(1), image(0)]),
         ]
     };
+    let read = |room: u64, handed: u64| {
+        read_drawing(
+            &mut answering_within(script(), room),
+            handed,
+            &Access::default(),
+            &mut Ids::new(),
+        )
+    };
     assert_eq!(
-        read_drawing(&mut answering(script()), 2, &mut Ids::new()).err(),
-        Some(DrawFailure::ReplyMalformed)
+        read(4, 2).err(),
+        Some(DrawFailure::ReplyMalformed),
+        "two bytes handed over, two to decode into"
     );
-    assert!(read_drawing(&mut answering(script()), 3, &mut Ids::new()).is_ok());
+    assert!(
+        read(5, 2).is_ok(),
+        "decoded in the room beside the document"
+    );
+    assert!(read(4, 3).is_ok(), "a part of the document");
     let placed = || {
         vec![
             placed_reply(),
@@ -905,14 +958,24 @@ fn a_drawing_this_side_has_no_memory_for_is_refused_as_that() {
     crate::testing::swept::<DrawEditService, _, _>(
         |sandbox| {
             handed_over(sandbox, document.as_bytes())?;
-            read_drawing(sandbox, document.len() as u64, &mut Ids::new())
+            read_drawing(
+                sandbox,
+                document.len() as u64,
+                &Access::default(),
+                &mut Ids::new(),
+            )
         },
         |failure| draw_refused(*failure),
     );
     crate::testing::swept::<DrawEditService, _, _>(
         |sandbox| {
             handed_over(sandbox, RICH.as_bytes())?;
-            read_drawing(sandbox, RICH.len() as u64, &mut Ids::new())
+            read_drawing(
+                sandbox,
+                RICH.len() as u64,
+                &Access::default(),
+                &mut Ids::new(),
+            )
         },
         |failure| draw_refused(*failure),
     );
@@ -927,5 +990,220 @@ fn a_picture_to_place_this_side_has_no_memory_for_is_refused_as_that() {
             read_placed(sandbox, bytes.len() as u64)
         },
         |failure| draw_refused(*failure),
+    );
+}
+
+/// A PDF of pages each `(width, height)` points, its trailer also stating
+/// `trailer` and its objects then `extra`, numbered on from the pages.
+fn pdf(pages: &[(u32, u32)], trailer: &str, extra: &[&str]) -> Vec<u8> {
+    let mut objects = alloc::vec![String::from("<</Type /Catalog /Pages 2 0 R>>")];
+    let kids: Vec<String> = (0..pages.len())
+        .map(|at| alloc::format!("{} 0 R", at + 3))
+        .collect();
+    objects.push(alloc::format!(
+        "<</Type /Pages /Kids [{}]>>",
+        kids.join(" ")
+    ));
+    for &(width, height) in pages {
+        objects.push(alloc::format!(
+            "<</Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}]>>"
+        ));
+    }
+    objects.extend(extra.iter().map(|&body| String::from(body)));
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (at, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(alloc::format!("{} 0 obj\n{body}\nendobj\n", at + 1).as_bytes());
+    }
+    let table = out.len();
+    out.extend_from_slice(
+        alloc::format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        out.extend_from_slice(alloc::format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        alloc::format!(
+            "trailer\n<</Size {} /Root 1 0 R {trailer}>>\nstartxref\n{table}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+#[test]
+fn a_pdfs_pages_are_listed_and_the_one_chosen_is_read() {
+    let mut sandbox: TestSandbox = loopback();
+    let document = pdf(&[(200, 100), (300, 400)], "", &[]);
+    send_document(&mut sandbox, &document).expect("handed over");
+    let pages =
+        read_pages(&mut sandbox, document.len() as u64, &Access::default()).expect("its pages");
+    assert_eq!(
+        pages,
+        Pages {
+            count: 2,
+            sizes: alloc::vec![(200.0, 100.0), (300.0, 400.0)]
+        }
+    );
+    let second = Access {
+        page: 1,
+        password: None,
+    };
+    let read = read_drawing(
+        &mut sandbox,
+        document.len() as u64,
+        &second,
+        &mut Ids::new(),
+    )
+    .expect("page two");
+    let size = read.drawing.page().size();
+    assert!(
+        (size.x - 400.0).abs() < 1e-6 && (size.y - 1600.0 / 3.0).abs() < 1e-6,
+        "{size:?}"
+    );
+}
+
+#[test]
+fn a_page_a_pdf_lacks_is_refused() {
+    let mut sandbox: TestSandbox = loopback();
+    let document = pdf(&[(200, 100)], "", &[]);
+    send_document(&mut sandbox, &document).expect("handed over");
+    let past = Access {
+        page: 3,
+        password: None,
+    };
+    assert_eq!(
+        read_drawing(&mut sandbox, document.len() as u64, &past, &mut Ids::new()).err(),
+        Some(DrawFailure::Refused(DrawRefusal::NoSuchPage))
+    );
+}
+
+#[test]
+fn any_other_document_lists_one_page_of_no_stated_size() {
+    let mut sandbox: TestSandbox = loopback();
+    send_document(&mut sandbox, RICH.as_bytes()).expect("handed over");
+    assert_eq!(
+        read_pages(&mut sandbox, RICH.len() as u64, &Access::default()),
+        Ok(Pages {
+            count: 1,
+            sizes: Vec::new()
+        })
+    );
+    assert!(
+        read_drawing(
+            &mut sandbox,
+            RICH.len() as u64,
+            &Access::default(),
+            &mut Ids::new()
+        )
+        .is_ok(),
+        "the document was kept to read"
+    );
+}
+
+#[test]
+fn a_pdf_protected_by_a_password_asks_for_it_and_opens_with_it() {
+    let mut sandbox: TestSandbox = loopback();
+    let encrypt = "<</Filter /Standard /V 2 /R 3 /Length 128 /P -3904 /O <0ba3835f88f90388e74e54584125ce142be0de24c6b0d37746e075b891756671> /U <ad944bba9714b0f0d9da179955e1945000000000000000000000000000000000>>>";
+    let document = pdf(
+        &[(100, 100), (50, 50)],
+        "/Encrypt 5 0 R /ID [<0123456789abcdef0123456789abcdef> <0123456789abcdef0123456789abcdef>]",
+        &[encrypt],
+    );
+    send_document(&mut sandbox, &document).expect("handed over");
+    let handed = document.len() as u64;
+    assert_eq!(
+        read_pages(&mut sandbox, handed, &Access::default()),
+        Err(DrawFailure::Refused(DrawRefusal::NeedsPassword))
+    );
+    let wrong = Access {
+        page: 0,
+        password: Some(b"guess"),
+    };
+    assert_eq!(
+        read_pages(&mut sandbox, handed, &wrong),
+        Err(DrawFailure::Refused(DrawRefusal::WrongPassword))
+    );
+    let right = Access {
+        page: 1,
+        password: Some(b"user"),
+    };
+    assert_eq!(
+        read_pages(&mut sandbox, handed, &right).map(|pages| pages.count),
+        Ok(2)
+    );
+    let read = read_drawing(&mut sandbox, handed, &right, &mut Ids::new()).expect("page two");
+    assert!((read.drawing.page().size().x - 200.0 / 3.0).abs() < 1e-6);
+}
+
+#[test]
+fn a_password_past_the_bound_is_refused_unsent() {
+    let mut sandbox = answering(Vec::new());
+    let long = [b'x'; MAX_PASSWORD_BYTES + 1];
+    let access = Access {
+        page: 0,
+        password: Some(&long),
+    };
+    assert_eq!(
+        read_pages(&mut sandbox, 0, &access),
+        Err(DrawFailure::Refused(DrawRefusal::MalformedRequest))
+    );
+}
+
+#[test]
+fn a_worker_decodes_into_what_its_share_holds_beside_the_document() {
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    let kept = Rc::clone(&asked);
+    let mut sandbox = ParserSandbox::new(
+        LoopbackLauncher::new(move || Recording(Rc::clone(&kept))).holding(100),
+        NullSink,
+    );
+    for handed in [30, 130] {
+        assert!(read_pages(&mut sandbox, handed, &Access::default()).is_ok());
+    }
+    let rooms: Vec<Option<u64>> = asked
+        .borrow()
+        .iter()
+        .map(|request| Reader::new(request.get(1..).unwrap_or_default()).u64().ok())
+        .collect();
+    assert_eq!(rooms, [Some(70), Some(0)]);
+}
+
+#[test]
+fn a_page_list_out_of_its_grammar_is_not_believed() {
+    let reply = |count: u32, listed: u32, sizes: &[(f64, f64)]| {
+        let mut w = Writer::new();
+        w.u8(REPLY_PAGES);
+        w.u32(count);
+        w.u32(listed);
+        for &(width, height) in sizes {
+            w.raw(&width.to_le_bytes());
+            w.raw(&height.to_le_bytes());
+        }
+        w.finish()
+    };
+    for bad in [
+        reply(0, 0, &[]),
+        reply(1, 2, &[(1.0, 1.0), (1.0, 1.0)]),
+        reply(1, 1, &[(f64::NAN, 1.0)]),
+        reply(1, 1, &[(-1.0, 1.0)]),
+        reply(2, 1, &[]),
+        reply(u32::MAX, u32::MAX, &[]),
+    ] {
+        let mut sandbox = answering(alloc::vec![bad]);
+        assert_eq!(
+            read_pages(&mut sandbox, 0, &Access::default()),
+            Err(DrawFailure::ReplyMalformed)
+        );
+    }
+    let mut sandbox = answering(alloc::vec![reply(3, 1, &[(10.0, 20.0)])]);
+    assert_eq!(
+        read_pages(&mut sandbox, 0, &Access::default()),
+        Ok(Pages {
+            count: 3,
+            sizes: alloc::vec![(10.0, 20.0)]
+        })
     );
 }

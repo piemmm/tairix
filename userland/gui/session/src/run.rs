@@ -179,33 +179,33 @@ mod program {
         DesktopActivation, DesktopDrop, DesktopEnd, DesktopOutcome, DesktopShell,
         DeviceInputSource, DocumentAuthority, DocumentRelay, DragEnd, DragPlace, DragSurface,
         DropRefusal, ElevateAsk, Elevation, Elevator, FileManagerFound, FileManagerHand,
-        FileManagerKeeper, FrameContent, FramePacer, FrameReportGate, FrameShow,
+        FileManagerKeeper, FileOffer, FrameContent, FramePacer, FrameReportGate, FrameShow,
         FrameStatsPublisher, FrameStatsSink, GestureRefusal, HangTracker, HeldTarget, HoldBack,
         IdleAction, IdleClock, IdlePolicy, InputPolicy, ItemsOffer, ItemsOfferEnd,
         KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget,
         LayerDecision, LayerFeed, Listing as Authorisers, LoadedPrograms, MachineWatch, OfferEnd,
         OwedReport, OwnPick, OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep,
-        PinboardApplied, PinboardCall, PinboardRefusal, Prepared, PresentedOwners, PreviewBudget,
-        PreviewDone, PreviewJob, PreviewRequest, PreviewRun, PreviewTarget, PromptOutcome,
-        Publication, Requester, ResizedRecord, ResolutionAsk, ResolutionPrompt, Routed, SaveEnd,
-        SaveOffer, SaverContext, SaverEnd, SaverLaunch, SaverLauncher, SaverSetup, ScreenFade,
-        ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter,
-        SeatWake, SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SizedRecord,
-        SlideWant, SlotAnswer, SoundCall, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe,
-        Timed, Trial, TrialEnd, TrialOutcome, Typing, UnlockAnswer, UnlockAsk, WallpaperDesk,
-        WallpaperJob, WallpaperService, WallpaperSource, WindowUnder, APP_ATTACH, APP_BAR_SETTLED,
-        APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED,
-        CONTENT_RELEASED_MESSAGE, DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, DESKTOP_RESTYLED,
-        DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
-        LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
-        LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
-        LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
-        MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
-        PINBOARD_SETTLED, PINBOARD_SETTLED_MESSAGE, SETTINGS_LABEL, SET_TIME_PURPOSE,
-        SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, TRIAL_CONCLUDED,
-        TRIAL_CONCLUDED_MESSAGE, TRIAL_SHOWN, TRIAL_SHOWN_MESSAGE, USAGE, WINDOW_RETITLED,
-        WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE, WINDOW_SIZED,
-        WINDOW_SIZED_MESSAGE,
+        PinboardApplied, PinboardCall, PinboardRefusal, PlacedItem, Prepared, PresentedOwners,
+        PreviewBudget, PreviewDone, PreviewJob, PreviewRequest, PreviewRun, PreviewTarget,
+        PromptOutcome, Publication, Requester, ResizedRecord, ResolutionAsk, ResolutionPrompt,
+        Routed, SaveEnd, SaveOffer, SaverContext, SaverEnd, SaverLaunch, SaverLauncher, SaverSetup,
+        ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel,
+        SeatRouter, SeatWake, SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost,
+        SizedRecord, SlideWant, SlotAnswer, SoundCall, SwitchboardMailbox, SwitchboardOutcome,
+        SwitchboardServe, Timed, Trial, TrialEnd, TrialOutcome, Typing, UnlockAnswer, UnlockAsk,
+        WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource, WindowUnder, APP_ATTACH,
+        APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
+        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE,
+        DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
+        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE,
+        LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED,
+        LAYER_REFUSED_MESSAGE, LAYER_RETIRED, LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN,
+        LIBRARY_SHOWN_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS,
+        PICKER_SHOWN, PICKER_SHOWN_MESSAGE, PINBOARD_SETTLED, PINBOARD_SETTLED_MESSAGE,
+        SETTINGS_LABEL, SET_TIME_PURPOSE, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
+        SWITCHBOARD_RUN_PATH, TRIAL_CONCLUDED, TRIAL_CONCLUDED_MESSAGE, TRIAL_SHOWN,
+        TRIAL_SHOWN_MESSAGE, USAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN,
+        WINDOW_SHOWN_MESSAGE, WINDOW_SIZED, WINDOW_SIZED_MESSAGE,
     };
     use tairix_desktop_session::{machine_zone_place, moves_machine_zone, read_machine_zone};
     use tairix_desktop_session::{
@@ -253,7 +253,7 @@ mod program {
     };
     use tairix_window::{
         app, Activation, AuthoriseFor, CallerIdentity, ClientRegion, DragConclusion, DragReport,
-        EventSink, PickedFile, WallpaperName, WindowServer, WINDOW_REPLY_MAX,
+        EventSink, OpenEntry, PickedFile, WallpaperName, WindowServer, WINDOW_REPLY_MAX,
     };
     use tairix_wm::{
         chrome_cache, frost_cache, Compositor, InputResponse, Point, Presentation, Rect, Region,
@@ -1245,6 +1245,9 @@ mod program {
         match shell.end_drag(compositor, false) {
             // A source whose port has gone is torn down by its next delivery.
             Some(DragEnd::Items(ended)) => {
+                if let Some(offer) = ended.offer {
+                    let _ = server.deliver_event(sink, &offer.event());
+                }
                 let _ = server.conclude_drag(sink, ended.source, ended.ended);
             }
             Some(DragEnd::Save(SaveEnd {
@@ -8606,6 +8609,9 @@ mod program {
             label: alloc::string::String,
             document: LaunchDocument,
         },
+        /// Open read-only the file carried off the desktop and dropped in a
+        /// window, to be placed in that window's document.
+        Place(alloc::boxed::Box<PlacedItem>),
         /// Make the folder the user asked for.
         Folder { path: alloc::string::String },
         /// Make the shortcut the user asked for, storing `target`.
@@ -8664,6 +8670,64 @@ mod program {
         Discarded,
     }
 
+    /// A syscall's return as a status: negative is the kernel's refusal.
+    fn status(ret: i64) -> Result<(), Errno> {
+        if ret < 0 {
+            Err(Errno::from_syscall(ret))
+        } else {
+            Ok(())
+        }
+    }
+
+    impl DesktopCall {
+        /// Carry the call out, on the file worker.
+        fn run(self) -> DesktopAnswer {
+            match self {
+                Self::Document {
+                    run_path,
+                    label,
+                    document,
+                } => {
+                    let opened =
+                        tairix_browse::document::open_for(document.path.as_bytes(), document.edits);
+                    DesktopAnswer::Document {
+                        run_path,
+                        label,
+                        document,
+                        opened,
+                    }
+                }
+                Self::Place(placed) => {
+                    let opened = tairix_browse::document::open_for(placed.path.as_bytes(), false);
+                    DesktopAnswer::Placed { placed, opened }
+                }
+                Self::Folder { path } => {
+                    let made = status(tairix_rt::fs_mkdir(
+                        path.as_bytes(),
+                        tairix_abi::fs::FS_NEW_DIR_MODE,
+                    ));
+                    DesktopAnswer::Made { path, made }
+                }
+                // Target first, then link: the stored target is data the
+                // kernel never resolves here, and a name already taken is the
+                // kernel's own refusal — this never replaces one.
+                Self::Shortcut { link, target } => {
+                    let made = status(tairix_rt::fs_symlink(target.as_bytes(), link.as_bytes()));
+                    DesktopAnswer::Made { path: link, made }
+                }
+                Self::Mounts => {
+                    let mut volumes = Vec::new();
+                    let read = tairix_procinfo::for_each_mount(&IpcTransport, |record| {
+                        volumes.extend(tairix_browse::Volume::from_mount(record));
+                        Ok(tairix_procinfo::WalkStep::Continue)
+                    });
+                    DesktopAnswer::Mounts(read.is_ok().then_some(volumes))
+                }
+                Self::Volume(act) => DesktopAnswer::Volume(tairix_browse::mount::carry_out(act)),
+            }
+        }
+    }
+
     /// What a [`DesktopCall`] came to.
     enum DesktopAnswer {
         /// The document opened for the bundle whose entry binary is
@@ -8672,6 +8736,11 @@ mod program {
             run_path: alloc::string::String,
             label: alloc::string::String,
             document: LaunchDocument,
+            opened: Opened,
+        },
+        /// The file opened to be placed where `placed` says.
+        Placed {
+            placed: alloc::boxed::Box<PlacedItem>,
             opened: Opened,
         },
         /// The folder or shortcut made at `path`.
@@ -8702,6 +8771,7 @@ mod program {
                 Self::Desktop(DesktopCall::Document { document, .. }) => {
                     routes.lane_of_path(&document.path)
                 }
+                Self::Desktop(DesktopCall::Place(placed)) => routes.lane_of_path(&placed.path),
                 Self::Desktop(DesktopCall::Mounts) => Lane::Services,
                 Self::Desktop(DesktopCall::Volume(act)) => routes.lane_of_act(act),
             }
@@ -8720,13 +8790,6 @@ mod program {
 
         /// Carry the call out.
         fn run(self) -> FileAnswer {
-            let status = |ret: i64| {
-                if ret < 0 {
-                    Err(Errno::from_syscall(ret))
-                } else {
-                    Ok(())
-                }
-            };
             match self {
                 Self::Pick {
                     pick,
@@ -8777,46 +8840,7 @@ mod program {
                     )),
                     path,
                 },
-                Self::Desktop(DesktopCall::Document {
-                    run_path,
-                    label,
-                    document,
-                }) => {
-                    let opened =
-                        tairix_browse::document::open_for(document.path.as_bytes(), document.edits);
-                    FileAnswer::Desktop(DesktopAnswer::Document {
-                        run_path,
-                        label,
-                        document,
-                        opened,
-                    })
-                }
-                Self::Desktop(DesktopCall::Folder { path }) => {
-                    let made = status(tairix_rt::fs_mkdir(
-                        path.as_bytes(),
-                        tairix_abi::fs::FS_NEW_DIR_MODE,
-                    ));
-                    FileAnswer::Desktop(DesktopAnswer::Made { path, made })
-                }
-                // Target first, then link: the stored target is data the
-                // kernel never resolves here, and a name already taken is the
-                // kernel's own refusal — this never replaces one.
-                Self::Desktop(DesktopCall::Shortcut { link, target }) => {
-                    let made = status(tairix_rt::fs_symlink(target.as_bytes(), link.as_bytes()));
-                    FileAnswer::Desktop(DesktopAnswer::Made { path: link, made })
-                }
-                Self::Desktop(DesktopCall::Mounts) => {
-                    let mut volumes = Vec::new();
-                    let read = tairix_procinfo::for_each_mount(&IpcTransport, |record| {
-                        volumes.extend(tairix_browse::Volume::from_mount(record));
-                        Ok(tairix_procinfo::WalkStep::Continue)
-                    });
-                    FileAnswer::Desktop(DesktopAnswer::Mounts(read.is_ok().then_some(volumes)))
-                }
-                Self::Desktop(DesktopCall::Volume(act)) => {
-                    let done = tairix_browse::mount::carry_out(act);
-                    FileAnswer::Desktop(DesktopAnswer::Volume(done))
-                }
+                Self::Desktop(call) => FileAnswer::Desktop(call.run()),
             }
         }
 
@@ -8854,6 +8878,12 @@ mod program {
                     document,
                     opened: Err(err),
                 }),
+                Self::Desktop(DesktopCall::Place(placed)) => {
+                    FileAnswer::Desktop(DesktopAnswer::Placed {
+                        placed,
+                        opened: Err(err),
+                    })
+                }
                 Self::Desktop(DesktopCall::Mounts) => {
                     FileAnswer::Desktop(DesktopAnswer::MountsRefused)
                 }
@@ -10607,12 +10637,23 @@ mod program {
                         .drag_items()
                         .and_then(|(_, items)| self.slot_answer(index, items)),
                 },
-                DragPlace::AppWindow { index } => DragSurface::AppWindow {
+                // Asked once as the pointer arrives on the window, and carried
+                // with it as it moves there.
+                DragPlace::AppWindow {
                     index,
-                    answer: seat
-                        .shell
-                        .drag_items()
-                        .and_then(|(_, items)| self.slot_answer(index, items)),
+                    window_id,
+                    x,
+                    y,
+                } => DragSurface::AppWindow {
+                    index,
+                    answer: seat.shell.take_window_answer(window_id).unwrap_or_else(|| {
+                        seat.shell
+                            .drag_items()
+                            .and_then(|(_, items)| self.slot_answer(index, items))
+                    }),
+                    window_id,
+                    x,
+                    y,
                 },
                 DragPlace::Window { window_id, x, y } => DragSurface::Window { window_id, x, y },
                 DragPlace::Offer { window_id, x, y } => DragSurface::Offer { window_id, x, y },
@@ -10635,7 +10676,7 @@ mod program {
         }
 
         fn report_drag(&mut self, seat: &mut Seat<'_>, report: OwedReport) {
-            let (left, over) = match report {
+            let (left, over, file) = match report {
                 OwedReport::Items(report) => {
                     let at = match &report.at {
                         &DragSurface::Window { window_id, x, y } => {
@@ -10657,18 +10698,25 @@ mod program {
                         at,
                         report.shift,
                     );
-                    (None, None)
+                    (None, None, None)
                 }
                 OwedReport::Save(report) => (
                     report.left.map(OfferEnd::event),
                     report.over.map(SaveOffer::event),
+                    None,
                 ),
                 OwedReport::Desktop(report) => (
                     report.left.map(ItemsOfferEnd::event),
                     report.over.map(ItemsOffer::event),
+                    report.file.map(FileOffer::event),
+                ),
+                OwedReport::File(report) => (
+                    report.left.map(ItemsOfferEnd::event),
+                    report.over.map(FileOffer::event),
+                    None,
                 ),
             };
-            for event in left.iter().chain(over.iter()) {
+            for event in left.iter().chain(over.iter()).chain(file.iter()) {
                 deliver(
                     self.server,
                     self.sink,
@@ -10698,6 +10746,19 @@ mod program {
             };
             if let Some(refusal) = &ended.refused {
                 state_drop_refusal(refusal, self.windows, seat.shell, seat.compositor);
+            }
+            if let Some(end) = ended.offer {
+                deliver(
+                    self.server,
+                    self.sink,
+                    seat.shell,
+                    seat.compositor,
+                    self.windows,
+                    self.picker,
+                    &mut self.apps.service,
+                    seat.menu,
+                    &end.event(),
+                );
             }
             let on_desktop = if let DragConclusion::Desktop { serial, .. } = ended.ended {
                 Some(serial)
@@ -10855,11 +10916,33 @@ mod program {
             }
             let layout = seat.shell.desktop_layout(seat.compositor, self.desktop);
             let mut damage = Region::new();
-            let DesktopDrop::Desktop(at) = end.dropped else {
-                self.desktop.restore_lent(&layout, &mut damage);
-                seat.shell
-                    .present_desktop_area(seat.compositor, self.desktop, &damage);
-                return;
+            let at = match end.dropped {
+                DesktopDrop::Desktop(at) => at,
+                dropped => {
+                    // A placed file is read into the window's document, so its
+                    // icon stays where it stood.
+                    self.desktop.restore_lent(&layout, &mut damage);
+                    seat.shell
+                        .present_desktop_area(seat.compositor, self.desktop, &damage);
+                    if let DesktopDrop::Placed(placed) = dropped {
+                        ask_for_desktop_call(
+                            DesktopCall::Place(placed),
+                            self.files,
+                            self.desktop,
+                            seat.shell,
+                            seat.compositor,
+                            &mut LaunchCtx {
+                                launched: self.launched,
+                                apps: &self.apps.service,
+                                server: self.server,
+                                sink: self.sink,
+                                windows: self.windows,
+                                identity: self.identity,
+                            },
+                        );
+                    }
+                    return;
+                }
             };
             let outcome = self.desktop.put_down_lent(at, &layout, &mut damage);
             let applied = apply_desktop_action(
@@ -11049,6 +11132,7 @@ mod program {
                         .strip
                         .iter()
                         .position(|group| group.owner == owner),
+                    local,
                 )
             };
             let held = self.windows.is_held(window_id);
@@ -14593,6 +14677,13 @@ mod program {
                     }
                 }
             }
+            DesktopAnswer::Placed { placed, opened } => match opened {
+                Ok(opened) => launch.place_document(&placed, &opened),
+                Err(err) => app::report(
+                    APP_NAME,
+                    format_args!("cannot place '{}' ({err})", placed.name.as_str()),
+                ),
+            },
             DesktopAnswer::Made { path, made } => {
                 settle_desktop_create(&path, made, desktop, shell, compositor);
             }
@@ -15438,6 +15529,47 @@ mod program {
                 self.launched.note_used(run_path);
             }
             launched
+        }
+
+        /// Hand the file `opened` read-only to the window `placed` names, to be
+        /// placed in its document: queued for the application owning it, or
+        /// stated where it has gone.
+        fn place_document(
+            &mut self,
+            placed: &PlacedItem,
+            opened: &tairix_browse::document::Opened,
+        ) {
+            let PlacedItem {
+                placement, name, ..
+            } = placed;
+            let Some(app) = self.server.owner_of(placement.window_id) else {
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "'{}' was dropped on a window that has since closed",
+                        name.as_str()
+                    ),
+                );
+                return;
+            };
+            let fd = opened.file.fd();
+            let handed =
+                self.server
+                    .hand_over_open_target(self.sink, app, Activation::Withheld, || {
+                        let grant =
+                            RtDocumentRelay.relay(DocumentAuthority::Held { fd }, false, app)?;
+                        Ok(OpenEntry::Placed {
+                            placement: *placement,
+                            name: *name,
+                            grant,
+                        })
+                    });
+            if let Err(err) = handed {
+                app::report(
+                    APP_NAME,
+                    format_args!("cannot place '{}' ({err:?})", name.as_str()),
+                );
+            }
         }
 
         /// Hand the desktop's file manager `target`, starting it again with

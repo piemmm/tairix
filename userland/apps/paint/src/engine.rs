@@ -10,7 +10,8 @@ use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::InputEvent;
 use tairix_theme::Theme;
 use tairix_window::docapp::{
-    DialogWindow, DocumentView, Outcome as HostOutcome, ToolGone, ToolMove, ToolOpening, ToolWindow,
+    DialogWindow, DocumentView, Outcome as HostOutcome, SaveTarget, ToolGone, ToolMove,
+    ToolOpening, ToolWindow,
 };
 use tairix_window::document::{Access, SavedDocument};
 
@@ -354,10 +355,10 @@ impl DocumentView for Engine {
         }
     }
 
-    fn refuse_save(&self, name: &str) -> Option<String> {
+    fn refuse_save(&self, name: &str, target: SaveTarget) -> Option<String> {
         match self {
-            Self::Picture(view) => DocumentView::refuse_save(&**view, name),
-            Self::Area(view) => view.refuse_save(name),
+            Self::Picture(view) => DocumentView::refuse_save(&**view, name, target),
+            Self::Area(view) => view.refuse_save(name, target),
         }
     }
 

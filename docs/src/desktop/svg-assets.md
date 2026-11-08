@@ -366,8 +366,10 @@ no tile — is `none`, and takes no fallback.
   length, ems of its own size, a percentage of a normal line height, or
   `sub`/`super` as a fifth or a third of its parent's size — each span's
   shift adding to the ones around it. `<textPath>` sets the characters inside
-  it along the `<path>` it names, that path's own `transform` and
-  `pathLength` honoured (`textpath::geometry`): each glyph's advance midpoint
+  it along its own `path` data, or along the `<path>` or basic shape it
+  names — a shape as SVG 2 makes it a path, a rectangle clockwise from the
+  end of its top-left corner and an ellipse from its rightmost point — that
+  element's own `transform` and `pathLength` honoured (`textpath::geometry`): each glyph's advance midpoint
   stands on the path at its distance along it, from `startOffset` (a length or
   a share of the path, `textpath::start`), turned to the path's direction or —
   `method="stretch"` — bent along it, each edge halved until it follows the

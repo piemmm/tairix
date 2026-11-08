@@ -1,5 +1,6 @@
-//! NTLMv2's constructions (MS-NLMP §3.3.2, §3.4.4, §3.4.5) — the only place
-//! TAIRiX computes MD4 or MD5.
+//! NTLMv2's constructions (MS-NLMP §3.3.2, §3.4.4, §3.4.5) — beside the PDF
+//! security handler's (`crate::pdf`), the only place TAIRiX computes MD4 or
+//! MD5.
 //!
 //! NTLM is a foreign protocol TAIRiX cannot choose: a workgroup SMB server
 //! authenticates no other way. Its digests are broken — MD4 outright, MD5 for

@@ -17,31 +17,38 @@ dibujo nuevo sobre una página A4. Cada documento es una ventana del único
 programa; cerrar la última lo deja en la barra de iconos, y la fila Salir de
 su menú de icono lo termina.
 
-Draw abre y guarda SVG, y abre archivos Draw de RISC OS, que guarda como SVG.
-Un dibujo conserva su página y sus unidades, sus capas, grupos y recortes,
-cada trazado, forma, texto e imagen, los colores lisos y los degradados
-lineales y radiales, la opacidad de cada objeto, los guiones, uniones, remates
-y puntas de flecha, las guías y la cuadrícula, y el título del dibujo. Un
-archivo que contiene lo que un dibujo no puede conservar — efectos de filtro,
-máscaras, rellenos de patrón, marcadores, imágenes ilegibles, estilos o
-trayectos de texto que un texto no puede guardar, animación o scripts, entre
-otros — se abre solo para lectura, con la banda de estado nombrando lo que
-contiene, y Guardar pide un nombre nuevo para que el original nunca se
-sobrescriba. Guardar una copia escribe el dibujo como PDF; como EPS, con su
-transparencia hecha opaca, como la pinta PostScript; como PNG, JPEG o TIFF, a
-la resolución de copia de la página y hasta 8192 píxeles en su lado más largo;
-como SVG; o como archivo Draw de RISC OS, nombrando lo que el formato no pudo
-guardar del dibujo, como los degradados; todas sin tocar el archivo propio del
-documento.
+Draw abre SVG, archivos Draw de RISC OS y PDF, y guarda un dibujo como SVG,
+como archivo Draw de RISC OS o como PDF, en el formato que dice el nombre del
+archivo; Guardar como ofrece los tres. Un archivo Draw guarda de un dibujo lo
+que puede, y un PDF vuelve a abrirse como una sola capa cuyo texto son
+contornos; el guardado lo dice. De un PDF se abre una página como dibujo, con
+su cuadro de recorte como página: un PDF de varias páginas pregunta primero
+cuál, dando el tamaño de cada página en puntos, y uno protegido con contraseña
+la pide, y avisa cuando la dada es incorrecta. El texto que un PDF compone con
+sus fuentes aún no se lee. Un dibujo conserva su página y sus unidades, sus
+capas, grupos y recortes, cada trazado, forma, texto e imagen, los colores
+lisos y los degradados lineales y radiales, la opacidad de cada objeto, los
+guiones, uniones, remates y puntas de flecha, las guías y la cuadrícula, y el
+título del dibujo. Un archivo que contiene lo que un dibujo no puede conservar
+— efectos de filtro, máscaras, rellenos de patrón, marcadores, imágenes
+ilegibles, estilos o trayectos de texto que un texto no puede guardar,
+animación o scripts, entre otros — se abre solo para lectura, con la banda de
+estado nombrando lo que contiene, y Guardar pide un nombre nuevo para que el
+original nunca se sobrescriba. Guardar una copia escribe el dibujo como PDF;
+como EPS, con su transparencia hecha opaca, como la pinta PostScript; como
+PNG, JPEG o TIFF, a la resolución de copia de la página y hasta 8192 píxeles
+en su lado más largo; como SVG; o como archivo Draw de RISC OS, nombrando lo
+que el formato no pudo guardar del dibujo, como los degradados; todas sin
+tocar el archivo propio del documento.
 
 La caja de herramientas baja por la izquierda de la ventana, el inspector por
-la derecha, y la banda de estado corre a su pie: muestra la posición del
-puntero y el tamaño de la selección en las unidades de la página, y dice lo
-que hizo la última orden. Arriba, la barra dice cómo se usa la herramienta
-en mano y muestra el zoom: pulsar el zoom abre un menú de zooms. Reglas en
-las unidades de la página bordean el lienzo por arriba y por la izquierda, y
-barras de desplazamiento por la derecha y por abajo. Detenerse sobre el botón
-de una herramienta la nombra, junto con la tecla que la elige.
+la derecha, y la banda de estado corre a su pie: dice lo que hizo la última
+orden, o si no cómo se usa la herramienta en mano, y muestra la posición del
+puntero y el tamaño de la selección en las unidades de la página, y el zoom:
+pulsar el zoom abre un menú de zooms. Reglas en las unidades de la página
+bordean el lienzo por arriba y por la izquierda, y barras de desplazamiento
+por la derecha y por abajo. Detenerse sobre el botón de una herramienta la
+nombra, junto con la tecla que la elige.
 
 Las herramientas, y las teclas que las eligen, son: selección (`V`), nodos
 (`A`), rectángulo (`R`), elipse (`E`), estrella y polígono (`S`), línea (`L`),
@@ -221,7 +228,10 @@ dibujo: SVG la incrusta, una copia PDF o EPS la dibuja y un archivo Draw la
 guarda como sprite o como JPEG. Las imágenes de un dibujo suman como mucho 268
 millones de píxeles, cada una contada una vez por mucho que se muestre; una
 imagen que las llevaría más allá se rechaza, y la banda de estado dice por
-qué.
+qué. Una imagen arrastrada desde el gestor de archivos o el escritorio y
+soltada sobre el lienzo se coloca igual, centrada donde se soltó; cualquier
+otro archivo soltado sobre la ventana se abre, o se rechaza, como uno soltado
+sobre el icono de Draw.
 
 Ajustes, en el menú de la barra de iconos, abre la ventana de ajustes de Draw:
 la herramienta con la que empieza una ventana nueva, y si muestra la

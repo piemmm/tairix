@@ -20,6 +20,7 @@ crates.
 | AES-128/256-GCM and AES-128/256-CCM AEAD | `aead` | `aes-gcm` / `ccm` |
 | AES-128/192/256-CTR, AES-128/256-CTS (CBC-CS3) | `cipher` | `aes` + `ctr` / `cts` |
 | NTLMv2's NTOWFv2, HMAC-MD5, signing key and checksum | `ntlm` | `md4` / `md-5` + `hmac` |
+| The PDF standard security handler's keys, RC4 and AES-CBC decryption | `pdf` | `md-5` / `sha2` / `aes` + `rc4` / `cbc` |
 | ChaCha12 keystream, 64-bit-nonce ChaCha20 | `stream` | `chacha20` |
 | Ed25519 sign, verify, key derivation from a seed | `sign` | `ed25519-dalek` |
 | ECDSA and ECDH over P-256 / P-384 / P-521 | `nistp` | `p256` / `p384` / `p521` |
@@ -81,8 +82,9 @@ and SMB 3 fix them — and TAIRiX's own consumers use ChaCha20-Poly1305.
 
 ## Foreign-protocol constructions
 
-SMB 3, NTLMv2 and Kerberos fix their algorithms, so the crate carries what
-they need, each named for what it is and none offered as a general digest:
+SMB 3, NTLMv2, Kerberos and the PDF standard security handler fix their
+algorithms, so the crate carries what they need, each named for what it is
+and none offered as a general digest or cipher:
 
 - **SMB 3 signing**: `aes128_cmac` (3.0, 3.0.2) and `aes128_gmac` (3.1.1),
   the latter GCM over an empty plaintext with the message as associated data.
@@ -98,9 +100,25 @@ they need, each named for what it is and none offered as a general digest:
   output length, sharing one PBKDF2 composition with `pbkdf2_sha256`.
 - **NTLMv2** (`ntlm`): `ntowfv2`, `ntlm_hmac` (HMAC-MD5, the proof, session
   base key and MIC), `ntlm_signing_key` and `ntlm_checksum`. This module is
-  the only place MD4 or MD5 is computed, and it exposes neither digest. The
-  forms are extended session security without key exchange, which is all
-  TAIRiX negotiates, so RC4 appears nowhere.
+  one of the two places MD4 or MD5 is computed, and it exposes neither
+  digest. The forms are extended session security without key exchange,
+  which is all TAIRiX negotiates, so NTLM uses no RC4.
+- **The PDF standard security handler** (`pdf`, ISO 32000-2 §7.6.4), for
+  reading files written elsewhere and never for protecting data:
+  `pdf_legacy_file_key` (revisions 2 to 4, Algorithms 2 and 4 to 7: a
+  password tried as the user's, then as the owner's), `pdf_object_key`
+  (Algorithm 1), `pdf_modern_file_key` (revisions 5 and 6, Algorithm 2.A over
+  Algorithm 2.B's hash, whose 64-fold input is streamed through AES-128-CBC a
+  block at a time rather than held, the password cut to the 127 bytes those
+  revisions read), `pdf_rc4_decrypt` and `pdf_aes_decrypt` (in place, after
+  the 16-byte IV, whole blocks only — a final part block is dropped, as other
+  readers drop it — padding left out where well formed). A key function
+  answers `PdfUnusable` for entries no password could unlock — a revision it
+  does not define, a key length out of range, an `/O` or `/U` too short — so a
+  damaged file is never mistaken for a wrong password. RC4 is reached only
+  through these; every key handed out is a `PdfKey`, wiped on drop, every
+  intermediate is wiped before the function returns, and every password check
+  is constant time.
 
 Intermediates that are themselves key material — the NT hash, PBKDF2's
 `U_i` blocks, a KDF block before truncation — are wiped with `zeroize`
@@ -343,6 +361,11 @@ implementation outside this tree, never from the dependency under test.
 * NTLMv2: MS-NLMP §4.2.4's worked example (NTOWFv2, the proof, the session
   base key, the LMv2 response and the signing key) and RFC 2202's HMAC-MD5
   vectors.
+* The PDF security handler: each revision's `/O`, `/U`, `/OE` and `/UE` made
+  from known passwords by an implementation of ISO 32000-2 §7.6.4 written
+  apart from this one (`hashlib`, `cryptography`'s AES and an RC4 from its
+  definition), with the file and object keys and AES and RC4 ciphertexts it
+  made.
 * ChaCha20-Poly1305: the RFC 8439 §2.8.2 worked example, plus round-trip
   and tampered-ciphertext / tag / nonce / associated-data rejections.
 * ChaCha12 keystream: the first 96 bytes under RFC 8439's test-vector key

@@ -17,30 +17,38 @@ lluniad newydd ar dudalen A4. Mae pob dogfen yn ffenestr o'r un rhaglen; mae
 cau'r olaf yn ei gadael ar y bar eiconau, ac mae rhes Gadael ei ddewislen
 eicon yn ei gorffen.
 
-Mae Draw yn agor ac yn cadw SVG, ac yn agor ffeiliau Draw RISC OS, gan eu cadw
-fel SVG. Mae lluniad yn cadw ei dudalen a'i unedau, ei haenau, ei grwpiau a'i
-docynnau, pob llwybr, siâp, testun a llun, lliwiau plaen a graddiannau llinol
-a rheiddiol, didreiddedd pob gwrthrych, toriadau, uniadau, pennau a phennau
-saeth, y canllawiau a'r grid, a theitl y lluniad. Mae ffeil sy'n dal yr hyn na
-all lluniad ei gadw — effeithiau hidlo, masgiau, llenwadau patrwm, marcwyr,
-lluniau annarllenadwy, arddulliau neu lwybrau testun na all testun eu dal,
-animeiddio neu sgriptiau yn eu plith — yn agor yn ddarllen yn unig, gyda'r
-band statws yn enwi'r hyn y mae'n ei ddal, ac mae Cadw yn gofyn am enw newydd
-fel na chaiff y gwreiddiol byth ei drosysgrifo. Mae Cadw copi yn ysgrifennu'r
-lluniad fel PDF; fel EPS, a'i dryloywder yn afloyw, fel y mae PostScript yn ei
-baentio; fel PNG, JPEG neu TIFF, ar gydraniad copïo'r dudalen a hyd at 8192
-picsel ar ei hochr hwyaf; fel SVG; neu fel ffeil Draw RISC OS, gan enwi'r hyn
-o'r lluniad na allai'r fformat ei ddal, megis graddiannau; pob un yn gadael
-ffeil y ddogfen ei hun fel y mae.
+Mae Draw yn agor SVG, ffeiliau Draw RISC OS a PDF, ac yn cadw llun fel SVG,
+fel ffeil Draw RISC OS neu fel PDF, yn y fformat y mae enw'r ffeil yn ei
+ddweud; mae Cadw fel yn cynnig y tri. Mae ffeil Draw yn dal yr hyn a all o
+lun, ac mae PDF yn agor eto fel un haen y mae ei thestun yn amlinellau; mae'r
+cadw yn dweud hynny. O PDF, mae un dudalen yn agor fel llun, a'i blwch tocio
+yn dudalen iddo: mae PDF o sawl tudalen yn gofyn yn gyntaf pa un, gan roi
+maint pob tudalen mewn pwyntiau, ac mae un a ddiogelir gan gyfrinair yn gofyn
+amdano, gan ddweud pan fo un a roddwyd yn anghywir. Nid yw testun y mae PDF yn
+ei osod yn ei ffontiau yn cael ei ddarllen eto. Mae lluniad yn cadw ei dudalen
+a'i unedau, ei haenau, ei grwpiau a'i docynnau, pob llwybr, siâp, testun a
+llun, lliwiau plaen a graddiannau llinol a rheiddiol, didreiddedd pob
+gwrthrych, toriadau, uniadau, pennau a phennau saeth, y canllawiau a'r grid, a
+theitl y lluniad. Mae ffeil sy'n dal yr hyn na all lluniad ei gadw —
+effeithiau hidlo, masgiau, llenwadau patrwm, marcwyr, lluniau annarllenadwy,
+arddulliau neu lwybrau testun na all testun eu dal, animeiddio neu sgriptiau
+yn eu plith — yn agor yn ddarllen yn unig, gyda'r band statws yn enwi'r hyn y
+mae'n ei ddal, ac mae Cadw yn gofyn am enw newydd fel na chaiff y gwreiddiol
+byth ei drosysgrifo. Mae Cadw copi yn ysgrifennu'r lluniad fel PDF; fel EPS,
+a'i dryloywder yn afloyw, fel y mae PostScript yn ei baentio; fel PNG, JPEG
+neu TIFF, ar gydraniad copïo'r dudalen a hyd at 8192 picsel ar ei hochr hwyaf;
+fel SVG; neu fel ffeil Draw RISC OS, gan enwi'r hyn o'r lluniad na allai'r
+fformat ei ddal, megis graddiannau; pob un yn gadael ffeil y ddogfen ei hun
+fel y mae.
 
 Mae'r blwch offer yn rhedeg i lawr ochr chwith y ffenestr, yr archwiliwr i
-lawr ei hochr dde, a'r band statws ar hyd ei gwaelod: mae'n dangos lle'r
-pwyntydd a maint y dewis yn unedau'r dudalen, ac yn dweud beth wnaeth y
-gorchymyn olaf. Ar draws y brig, mae'r bar yn dweud sut i ddefnyddio'r offeryn
-mewn llaw ac yn dangos y chwyddo: mae pwyso'r chwyddo yn agor dewislen o
-chwyddiadau. Mae prenmesurau yn unedau'r dudalen yn rhedeg ar hyd brig ac ochr
-chwith y cynfas, a barrau sgrolio ar hyd ei ochr dde a'i waelod. Mae oedi dros
-fotwm offeryn yn ei enwi, gyda'r fysell sy'n ei ddewis.
+lawr ei hochr dde, a'r band statws ar hyd ei gwaelod: mae'n dweud beth wnaeth
+y gorchymyn olaf, neu fel arall sut i ddefnyddio'r offeryn mewn llaw, ac yn
+dangos lle'r pwyntydd a maint y dewis yn unedau'r dudalen, a'r chwyddo: mae
+pwyso'r chwyddo yn agor dewislen o chwyddiadau. Mae prenmesurau yn unedau'r
+dudalen yn rhedeg ar hyd brig ac ochr chwith y cynfas, a barrau sgrolio ar hyd
+ei ochr dde a'i waelod. Mae oedi dros fotwm offeryn yn ei enwi, gyda'r fysell
+sy'n ei ddewis.
 
 Yr offer, a'r bysellau sy'n eu dewis, yw: dewis (`V`), nodau (`A`), petryal
 (`R`), elips (`E`), seren a pholygon (`S`), llinell (`L`), pin (`B`), pensil
@@ -214,7 +222,11 @@ Caiff ei gadw gyda'r lluniad: mae SVG yn ei fewnosod, mae copi PDF neu EPS yn
 ei dynnu, ac mae ffeil Draw yn ei ddal fel corlun neu JPEG. Mae lluniau
 lluniad gyda'i gilydd yn dal 268 miliwn o bicseli ar y mwyaf, pob un wedi'i
 gyfrif unwaith pa mor aml bynnag y'i dangosir; caiff llun a fyddai'n mynd â
-hwy y tu hwnt i hynny ei wrthod, ac mae'r band statws yn dweud pam.
+hwy y tu hwnt i hynny ei wrthod, ac mae'r band statws yn dweud pam. Mae llun a
+lusgir o'r rheolwr ffeiliau neu o'r bwrdd gwaith a'i ollwng dros y cynfas yn
+cael ei osod yr un ffordd, wedi'i ganoli lle cafodd ei ollwng; mae unrhyw
+ffeil arall a ollyngir ar y ffenestr yn agor, neu'n cael ei gwrthod, fel un a
+ollyngir ar eicon Draw.
 
 Mae Gosodiadau, yn newislen y bar eiconau, yn agor ffenestr osodiadau Draw: yr
 offeryn y mae ffenestr newydd yn dechrau ag ef, ac a yw'n dangos y grid, yn

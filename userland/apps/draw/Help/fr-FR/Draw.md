@@ -18,30 +18,38 @@ Chaque document est une fenêtre de l'unique programme ; fermer la dernière
 le laisse dans la barre d'icônes, et la ligne Quitter de son menu d'icône y
 met fin.
 
-Draw ouvre et enregistre le SVG, et ouvre les fichiers Draw de RISC OS, qu'il
-enregistre en SVG. Un dessin garde sa page et ses unités, ses calques, groupes
-et découpes, chaque tracé, forme, texte et image, les couleurs unies et les
-dégradés linéaires et radiaux, l'opacité de chaque objet, les tirets,
-jointures, extrémités et pointes de flèche, les repères et la grille, et le
-titre du dessin. Un fichier qui contient ce qu'un dessin ne peut pas garder —
-effets de filtre, masques, motifs, marqueurs, images illisibles, styles ou
-chemins de texte qu'un texte ne peut garder, animation ou scripts entre autres
-— s'ouvre en lecture seule, la bande d'état nommant ce qu'il contient, et
-Enregistrer demande un nouveau nom pour que l'original ne soit jamais écrasé.
-Enregistrer une copie écrit le dessin en PDF ; en EPS, sa transparence rendue
-opaque, comme PostScript la peint ; en PNG, JPEG ou TIFF, à la résolution de
-copie de la page et jusqu'à 8192 pixels sur son plus grand côté ; en SVG ; ou
-en fichier Draw de RISC OS, en nommant ce que le format n'a pas pu garder du
-dessin, comme les dégradés ; chaque fois sans toucher au fichier du document.
+Draw ouvre le SVG, les fichiers Draw de RISC OS et le PDF, et enregistre un
+dessin en SVG, en fichier Draw de RISC OS ou en PDF, au format que dit le nom
+du fichier ; Enregistrer sous propose les trois. Un fichier Draw garde d'un
+dessin ce qu'il peut, et un PDF se rouvre en un seul calque dont le texte est
+en contours ; l'enregistrement le dit. D'un PDF s'ouvre une page, en dessin,
+sa zone de recadrage pour page : un PDF de plusieurs pages demande d'abord
+laquelle, en donnant la taille de chaque page en points, et un PDF protégé par
+un mot de passe le demande, et dit quand celui donné est faux. Le texte qu'un
+PDF compose dans ses polices n'est pas encore lu. Un dessin garde sa page et
+ses unités, ses calques, groupes et découpes, chaque tracé, forme, texte et
+image, les couleurs unies et les dégradés linéaires et radiaux, l'opacité de
+chaque objet, les tirets, jointures, extrémités et pointes de flèche, les
+repères et la grille, et le titre du dessin. Un fichier qui contient ce qu'un
+dessin ne peut pas garder — effets de filtre, masques, motifs, marqueurs,
+images illisibles, styles ou chemins de texte qu'un texte ne peut garder,
+animation ou scripts entre autres — s'ouvre en lecture seule, la bande d'état
+nommant ce qu'il contient, et Enregistrer demande un nouveau nom pour que
+l'original ne soit jamais écrasé. Enregistrer une copie écrit le dessin en PDF
+; en EPS, sa transparence rendue opaque, comme PostScript la peint ; en PNG,
+JPEG ou TIFF, à la résolution de copie de la page et jusqu'à 8192 pixels sur
+son plus grand côté ; en SVG ; ou en fichier Draw de RISC OS, en nommant ce
+que le format n'a pas pu garder du dessin, comme les dégradés ; chaque fois
+sans toucher au fichier du document.
 
 La boîte à outils descend le long du bord gauche de la fenêtre, l'inspecteur
-le long du bord droit, et la bande d'état court en bas : elle montre la
-position du pointeur et la taille de la sélection dans les unités de la
-page, et dit ce qu'a fait la dernière commande. En haut, la barre dit comment
-s'emploie l'outil en main et montre le zoom : appuyer sur le zoom ouvre un
-menu de zooms. Des règles dans les unités de la page bordent le haut et la
-gauche du canevas, et des barres de défilement sa droite et son bas.
-S'arrêter sur le bouton d'un outil le nomme, avec la touche qui le choisit.
+le long du bord droit, et la bande d'état court en bas : elle dit ce qu'a fait
+la dernière commande, sinon comment s'emploie l'outil en main, et montre la
+position du pointeur et la taille de la sélection dans les unités de la page,
+et le zoom : appuyer sur le zoom ouvre un menu de zooms. Des règles dans les
+unités de la page bordent le haut et la gauche du canevas, et des barres de
+défilement sa droite et son bas. S'arrêter sur le bouton d'un outil le nomme,
+avec la touche qui le choisit.
 
 Les outils, et les touches qui les choisissent, sont : sélection (`V`), nœuds
 (`A`), rectangle (`R`), ellipse (`E`), étoile et polygone (`S`), ligne (`L`),
@@ -228,7 +236,10 @@ enregistrée avec le dessin : le SVG l'incorpore, une copie PDF ou EPS la
 dessine et un fichier Draw la garde comme sprite ou comme JPEG. Les images
 d'un dessin tiennent ensemble au plus 268 millions de pixels, chacune comptée
 une fois, si souvent qu'elle soit montrée ; une image qui les porterait
-au-delà est refusée, et la bande d'état dit pourquoi.
+au-delà est refusée, et la bande d'état dit pourquoi. Une image glissée depuis
+le gestionnaire de fichiers ou le bureau et lâchée sur le canevas est placée
+de même, centrée là où elle a été lâchée ; tout autre fichier déposé sur la
+fenêtre s'ouvre, ou est refusé, comme s'il était déposé sur l'icône de Draw.
 
 Réglages, dans le menu de la barre d'icônes, ouvre la fenêtre des réglages de
 Draw : l'outil avec lequel une nouvelle fenêtre commence, et si elle montre la

@@ -786,6 +786,24 @@ fn a_stroke_longer_than_the_surface_keeps_its_weight() {
     }
 }
 
+/// A vertex at the very edge of the coordinate range is stroked where it
+/// lies: the quad around it once overflowed, aborting the process.
+#[test]
+fn a_stroke_through_the_edge_of_the_coordinate_range_draws_what_it_reaches() {
+    let mut s = Surface::new(64, 64).expect("allocates");
+    let weight = 8 * SUBPIXEL;
+    s.stroke_polyline(&[(i32::MAX, 0), (i32::MAX, i32::MAX)], weight, RED);
+    s.stroke_polyline(&[(i32::MIN, i32::MIN), (i32::MIN, 0)], weight, RED);
+    s.stroke_polyline(&[(i32::MIN, i32::MAX), (i32::MAX, i32::MIN)], weight, RED);
+    assert!(s.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
+    let row = 32 * SUBPIXEL;
+    s.stroke_polyline(&[(i32::MIN, row), (i32::MAX, row)], weight, RED);
+    assert!(
+        s.get(32, 32).expect("in bounds").a > 0,
+        "the line crossing it"
+    );
+}
+
 #[test]
 fn a_stroke_needs_two_points_and_a_positive_weight() {
     let mut s = Surface::new(4, 4).expect("allocates");

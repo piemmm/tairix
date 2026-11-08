@@ -46,8 +46,9 @@
 //!   newest supersedes an unbroken run of its predecessors. So is a pinch's
 //!   `Update`, whose scale is relative to where the pinch began, while the
 //!   modifiers stay the same, a tool window's move sample (`ToolMoved`), and
-//!   a report of where a carried drag or save is (`DragOver`, `SaveOffered`):
-//!   each is numbered, and only the newest is worth an answer.
+//!   a report of where a carried drag, save, file or desktop items are
+//!   (`DragOver`, `SaveOffered`, `FileOffered`, `ItemsOffered`): each is
+//!   numbered, and only the newest is worth an answer.
 //! * The **end of a save offer** (`SaveOfferEnded`) carries where it was
 //!   dropped, so it withdraws every offer still held and an earlier end that
 //!   only left, a drop's end an earlier drop's too; it is never shed.
@@ -84,12 +85,13 @@
 //! one ending a press already delivered. Folding therefore leaves a window
 //! owing at most six state edges, at most one pick conclusion and one
 //! authorisation's (a second of either is refused before it reaches the
-//! sink), at most one move's end, at most one such press's end, at most one
-//! save offer's end that only left, each superseding the one before, and at
-//! most one drop's: a window has every event held before a drag's offer by
-//! the time it can answer it, so a second drop is held behind a first only for
-//! a window answering an offer it was never shown, and then supersedes it.
-//! A queue at capacity therefore always holds an input event to shed.
+//! sink), at most one move's end, at most one such press's end, and of a save
+//! offer's ends and an items offer's each, at most one that only left, each
+//! superseding the one before, and at most one drop's: a window has every
+//! event held before a drag's offer by the time it can answer it, so a second
+//! drop is held behind a first only for a window answering an offer it was
+//! never shown, and then supersedes it. A queue at capacity therefore always
+//! holds an input event to shed.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
@@ -432,6 +434,9 @@ fn fold(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
     if withdraw_superseded(queue, next) {
         return false;
     }
+    if is_offer(next) {
+        return fold_offer(queue, next);
+    }
     // A sample or a delta folds only into an unbroken run at the tail:
     // anything queued behind it is an occurrence the app must see in order.
     match (queue.back_mut(), *next) {
@@ -525,16 +530,69 @@ fn fold(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
     }
 }
 
+/// Fold the offer `next` into the newest of its kind in the run of offers at
+/// the tail, answering whether it did: a report offers a window desktop items
+/// and then the file among them, so the two kinds alternate in one run.
+fn fold_offer(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
+    let run = queue.iter().rev().take_while(|held| is_offer(held)).count();
+    let start = queue.len() - run;
+    let kind = core::mem::discriminant(next);
+    match queue
+        .range_mut(start..)
+        .rev()
+        .find(|held| core::mem::discriminant(*held) == kind)
+    {
+        Some(held) => {
+            *held = *next;
+            true
+        }
+        None => false,
+    }
+}
+
 /// Withdraw what an ending `next` supersedes, answering whether it was one:
 /// a tool window's move end takes every move held before it, and a save
 /// offer's end every offer held and every end that only left, a drop's end an
 /// earlier drop's too. An end that only left never takes a drop: picks are
 /// concurrent, so another pick's drag can end over a window whose answer to an
 /// earlier drop that pick still waits on.
+///
+/// An items offer's end follows the save offer's rule for the ends held
+/// before it, a window holding one offer at a time, and an end that only left
+/// takes every offer held since the last drop. The offers before a drop stay:
+/// the drop is of the newest of them, which a window may answer as late as it
+/// reads it.
 fn withdraw_superseded(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
     match next {
         WindowEvent::ToolMoved { ended: true, .. } => {
             queue.retain(|held| !matches!(held, WindowEvent::ToolMoved { .. }));
+        }
+        WindowEvent::ItemsOfferEnded { dropped, .. } => {
+            let drop = dropped.is_some();
+            let after_drop = queue
+                .iter()
+                .rposition(|held| {
+                    matches!(
+                        held,
+                        WindowEvent::ItemsOfferEnded {
+                            dropped: Some(_),
+                            ..
+                        }
+                    )
+                })
+                .map_or(0, |at| at + 1);
+            let mut at = 0;
+            queue.retain(|held| {
+                let since_drop = at >= after_drop;
+                at += 1;
+                match held {
+                    WindowEvent::ItemsOfferEnded { dropped, .. } => dropped.is_some() && !drop,
+                    WindowEvent::ItemsOffered { .. } | WindowEvent::FileOffered { .. } => {
+                        drop || !since_drop
+                    }
+                    _ => true,
+                }
+            });
         }
         WindowEvent::SaveOfferEnded { dropped, .. } => {
             let drop = dropped.is_some();
@@ -596,6 +654,16 @@ const fn is_input(event: &WindowEvent) -> bool {
             | WindowEvent::ToolMoved { ended: false, .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::SaveOffered { .. }
+            | WindowEvent::FileOffered { .. }
+            | WindowEvent::ItemsOffered { .. }
+    )
+}
+
+/// Whether `event` offers a window desktop items or a file to place.
+const fn is_offer(event: &WindowEvent) -> bool {
+    matches!(
+        event,
+        WindowEvent::ItemsOffered { .. } | WindowEvent::FileOffered { .. }
     )
 }
 

@@ -6,8 +6,10 @@
 //! device pixels, so the tiles the drawing is rendered in land on the pixel
 //! grid wherever the drawing is scrolled.
 
+use alloc::string::String;
+
 use tairix_bezier::{Affine, Bounds, Point};
-use tairix_util::mathf::{fmax, fmin, round};
+use tairix_util::mathf::{fmax, fmin, round, round_i32};
 
 /// The least zoom: 1%.
 pub const LEAST_ZOOM: f64 = 0.01;
@@ -30,6 +32,18 @@ pub fn within_reach(at: f64) -> f64 {
 
 /// The greatest zoom: 25600%.
 pub const MOST_ZOOM: f64 = 256.0;
+
+/// `zoom` as the status band and the zoom menu read it: a whole percentage,
+/// or to one place below 10%.
+#[must_use]
+pub fn readout(zoom: f64) -> String {
+    let percent = zoom * 100.0;
+    if percent < 10.0 {
+        alloc::format!("{percent:.1}%")
+    } else {
+        alloc::format!("{}%", round_i32(percent))
+    }
+}
 
 /// The zooms Zoom in and Zoom out step through.
 pub const STEPS: [f64; 26] = [

@@ -262,21 +262,10 @@ impl View {
         if layout.canvas.contains(over) {
             return self.press(layout, damage);
         }
-        if layout.bar.contains(over) {
-            return self.bar_press(layout, damage);
-        }
-        Outcome::none()
-    }
-
-    /// A press on the tool's bar: its zoom readout opens the zoom menu.
-    fn bar_press(&mut self, layout: &Layout, _damage: &mut Region) -> ViewOutcome {
-        let zoom = crate::paint::zoom_box(layout);
-        let over =
-            tairix_geometry::Point::new(round_i32(self.pointer.x), round_i32(self.pointer.y));
-        if zoom.contains(over) {
+        if layout.zoom.contains(over) {
             return Outcome::asking(Request::Menu {
                 kind: MenuKind::Zoom,
-                anchor: zoom,
+                anchor: layout.zoom,
             });
         }
         Outcome::none()

@@ -30,7 +30,7 @@ use tairix_input::{
 };
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
-use tairix_window::docapp::{DialogWindow, Relayout};
+use tairix_window::docapp::{DialogWindow, Relayout, SaveTarget};
 use tairix_window::document::{Access, SavedDocument};
 use tairix_window::menu::{MenuBuilder, Plate};
 
@@ -1453,10 +1453,11 @@ impl AreaView {
         }
     }
 
-    /// Why the file cannot be saved as `name`, when it cannot.
+    /// Why the file cannot be saved as `name` into `target`, when it cannot:
+    /// only its own file's recorded filetype speaks for a name that says none.
     #[must_use]
-    pub fn refuse_save(&self, name: &str) -> Option<String> {
-        let recorded = self.recorded.filter(|_| name == self.name);
+    pub fn refuse_save(&self, name: &str, target: SaveTarget) -> Option<String> {
+        let recorded = self.recorded.filter(|_| target == SaveTarget::Own);
         format_for(
             name,
             recorded,
