@@ -8,6 +8,7 @@ use tairix_controls::{
     WindowControlKind,
 };
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
+use tairix_inline::ArrayVec;
 use tairix_input::InputEvent;
 use tairix_theme::Theme;
 use tairix_window::docapp::{ToolGone, ToolMove, ToolOpening};
@@ -50,16 +51,11 @@ impl View {
 
     /// Show pane `kind`, or hide it; hiding the pane an adjustment or an
     /// effect is open in closes it.
-    pub(super) fn toggle_pane(
-        &mut self,
-        kind: PaneKind,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
+    pub(super) fn toggle_pane(&mut self, kind: PaneKind, damage: &mut Region) -> Outcome {
         if self.panes.shows(kind) {
             self.panes.hide(kind);
             if self.open_operation() == Some(kind) {
-                self.close_operation(kind, layout, damage);
+                self.close_operation(kind, damage);
             }
         } else {
             self.panes.show(kind);
@@ -69,7 +65,7 @@ impl View {
 
     /// Put every pane back where, and at the size, a new window has it, which
     /// closes an open adjustment with its pane.
-    pub(super) fn reset_panes(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+    pub(super) fn reset_panes(&mut self, damage: &mut Region) -> Outcome {
         self.pane_drag = None;
         self.tool_landing = None;
         self.panes.clone_from(&self.home_panes);
@@ -78,7 +74,7 @@ impl View {
             .open_operation()
             .filter(|&kind| !self.panes.shows(kind))
         {
-            self.close_operation(kind, layout, damage);
+            self.close_operation(kind, damage);
         }
         Outcome::relaid()
     }
@@ -108,39 +104,42 @@ impl View {
     pub(super) fn panes_pointer(
         &mut self,
         event: &InputEvent,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Outcome> {
         if matches!(event, InputEvent::PointerPressed { .. }) {
             let at = self.pointer;
-            self.band_grab = layout
+            self.band_grab = self
+                .layout
                 .panes()
                 .find(|slot| slot.header.contains(at))
                 .map(|slot| Point::new(at.x - slot.header.left(), at.y - slot.header.top()));
         }
+        // A band's action changes the view, so where each band lies is copied
+        // out first; a kind of pane is docked once at most, so all of them fit.
+        let mut bands: ArrayVec<(PaneKind, Rect), { PaneKind::ALL.len() }> = ArrayVec::new();
+        for slot in self.layout.panes() {
+            let _ = bands.try_push((slot.kind, slot.header));
+        }
         let mut outcome = None;
-        for slot in layout.panes() {
-            let header = &mut self.headers[slot.kind.index()];
-            let Some(happened) = header.on_pointer(event, slot.header, scale, theme, damage) else {
+        for &(kind, band) in bands.as_slice() {
+            let header = &mut self.headers[kind.index()];
+            let Some(happened) = header.on_pointer(event, band, scale, theme, damage) else {
                 continue;
             };
             outcome = match happened {
                 TitleBarEvent::Control(WindowControlKind::Close) => {
-                    Some(self.toggle_pane(slot.kind, layout, damage))
+                    Some(self.toggle_pane(kind, damage))
                 }
                 TitleBarEvent::Control(WindowControlKind::Minimize) => {
-                    self.panes.toggle_collapsed(slot.kind);
+                    self.panes.toggle_collapsed(kind);
                     Some(Outcome::relaid())
                 }
                 TitleBarEvent::DragBegin => {
-                    let middle = Point::new(
-                        to_i32(slot.header.width / 2),
-                        to_i32(slot.header.height / 2),
-                    );
+                    let middle = Point::new(to_i32(band.width / 2), to_i32(band.height / 2));
                     self.pane_drag = Some(PaneDrag {
-                        kind: slot.kind,
+                        kind,
                         landing: None,
                         grab: self.band_grab.unwrap_or(middle),
                     });
@@ -148,15 +147,15 @@ impl View {
                     // over a dock: a flick let go at once still lands.
                     match event {
                         InputEvent::PointerMoved { to } => {
-                            Some(self.drag_pane_to(*to, layout, scale, theme, damage))
+                            Some(self.drag_pane_to(*to, scale, theme, damage))
                         }
                         _ => Some(Outcome::none()),
                     }
                 }
                 TitleBarEvent::DragMoved { to } => {
-                    Some(self.drag_pane_to(to, layout, scale, theme, damage))
+                    Some(self.drag_pane_to(to, scale, theme, damage))
                 }
-                TitleBarEvent::DragEnd => Some(self.drop_pane(layout, scale, theme, damage)),
+                TitleBarEvent::DragEnd => Some(self.drop_pane(scale, theme, damage)),
                 TitleBarEvent::Activate
                 | TitleBarEvent::Control(_)
                 | TitleBarEvent::AlternateControl(_) => outcome,
@@ -175,7 +174,6 @@ impl View {
     fn drag_pane_to(
         &mut self,
         to: Point,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -183,15 +181,15 @@ impl View {
         let Some(drag) = self.pane_drag else {
             return Outcome::none();
         };
-        if on_edge(layout.window(), to) {
-            return self.tear_out(drag, to, true, layout);
+        if on_edge(self.layout.window(), to) {
+            return self.tear_out(drag, to, true);
         }
-        let landing = landing_at(layout, drag.kind, to, scale);
+        let landing = landing_at(&self.layout, drag.kind, to, scale);
         if landing == drag.landing {
             return Outcome::none();
         }
         for marked in [drag.landing, landing].into_iter().flatten() {
-            damage.add(landing_mark(layout, marked, scale, theme));
+            damage.add(landing_mark(&self.layout, marked, scale, theme));
         }
         self.pane_drag = Some(PaneDrag { landing, ..drag });
         Outcome::none()
@@ -199,20 +197,14 @@ impl View {
 
     /// The dragged pane was let go: move it to where it was marked to land,
     /// or, let go anywhere else, float it in a tool window there.
-    fn drop_pane(
-        &mut self,
-        layout: &Layout,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) -> Outcome {
+    fn drop_pane(&mut self, scale: Scale, theme: &Theme, damage: &mut Region) -> Outcome {
         let Some(drag) = self.pane_drag.take() else {
             return Outcome::none();
         };
         let Some(landing) = drag.landing else {
-            return self.tear_out(drag, self.pointer, false, layout);
+            return self.tear_out(drag, self.pointer, false);
         };
-        damage.add(landing_mark(layout, landing, scale, theme));
+        damage.add(landing_mark(&self.layout, landing, scale, theme));
         self.land_pane(drag.kind, landing);
         Outcome::relaid()
     }
@@ -221,9 +213,12 @@ impl View {
     /// pane's would with the pointer at `to`, carried on by the press still
     /// held when `carried`. The window is laid out again whole, which takes
     /// any landing mark with it.
-    fn tear_out(&mut self, drag: PaneDrag, to: Point, carried: bool, layout: &Layout) -> Outcome {
+    fn tear_out(&mut self, drag: PaneDrag, to: Point, carried: bool) -> Outcome {
         self.pane_drag = None;
-        let band = layout.pane(drag.kind).map_or(0, |slot| slot.header.height);
+        let band = self
+            .layout
+            .pane(drag.kind)
+            .map_or(0, |slot| slot.header.height);
         let offset = (to.x - drag.grab.x, to.y - drag.grab.y + to_i32(band));
         let carry = carried.then(|| u32::try_from(drag.grab.x).unwrap_or(0));
         self.openings[drag.kind.index()] = Some(ToolOpening { offset, carry });
@@ -257,7 +252,6 @@ impl View {
     pub(super) fn tool_moved(
         &mut self,
         moved: ToolMove,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -267,11 +261,11 @@ impl View {
         };
         let landing = moved
             .over
-            .and_then(|at| landing_at(layout, kind, at, scale));
+            .and_then(|at| landing_at(&self.layout, kind, at, scale));
         let shown = if moved.ended { None } else { landing };
         if shown != self.tool_landing {
             for marked in [self.tool_landing, shown].into_iter().flatten() {
-                damage.add(landing_mark(layout, marked, scale, theme));
+                damage.add(landing_mark(&self.layout, marked, scale, theme));
             }
             self.tool_landing = shown;
         }
@@ -291,13 +285,12 @@ impl View {
         &mut self,
         id: u32,
         (width, height): (u32, u32),
-        layout: &Layout,
         scale: Scale,
         damage: &mut Region,
     ) -> Outcome {
         let Some(slot) = tool_pane(id)
             .filter(|&kind| self.panes.floats(kind))
-            .and_then(|kind| layout.pane(kind))
+            .and_then(|kind| self.layout.pane(kind))
             .filter(|slot| slot.sizing.resizable())
         else {
             return Outcome::none();
@@ -312,19 +305,13 @@ impl View {
     /// docked pane's close mark hides it, but for the palette, which is never
     /// lost and docks in its strip; refused, it docks at the foot of its home
     /// side, or the palette in its strip.
-    pub(super) fn tool_gone(
-        &mut self,
-        id: u32,
-        why: ToolGone,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
+    pub(super) fn tool_gone(&mut self, id: u32, why: ToolGone, damage: &mut Region) -> Outcome {
         let Some(kind) = tool_pane(id).filter(|&kind| self.panes.floats(kind)) else {
             return Outcome::none();
         };
         self.openings[kind.index()] = None;
         match why {
-            ToolGone::Closed if kind != PaneKind::Palette => self.toggle_pane(kind, layout, damage),
+            ToolGone::Closed if kind != PaneKind::Palette => self.toggle_pane(kind, damage),
             ToolGone::Closed | ToolGone::Refused => {
                 self.panes.redock(kind);
                 Outcome::relaid()
@@ -335,9 +322,13 @@ impl View {
     /// Note where each floating pane opens when nothing tore it out: just
     /// under the top band, against the edge of its home side; the palette
     /// against the canvas's lower right corner, above where its strip lay.
-    pub(super) fn settle_float_homes(&mut self, layout: &Layout) {
-        let (window, canvas, below) = (layout.window(), layout.canvas(), layout.top().bottom());
-        for slot in layout.floating() {
+    pub(super) fn settle_float_homes(&mut self) {
+        let (window, canvas, below) = (
+            self.layout.window(),
+            self.layout.canvas(),
+            self.layout.top().bottom(),
+        );
+        for slot in self.layout.floating() {
             let (width, height) = (to_i32(slot.frame.width), to_i32(slot.frame.height));
             self.float_homes[slot.kind.index()] = match self.panes.home(slot.kind) {
                 Some(Side::Left) => (window.left(), below),
@@ -354,7 +345,6 @@ impl View {
     /// the band's own release then lands nothing and floats nothing.
     pub(super) fn turn_down_pane_drag(
         &mut self,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -363,18 +353,13 @@ impl View {
             return false;
         };
         if let Some(landing) = drag.landing {
-            damage.add(landing_mark(layout, landing, scale, theme));
+            damage.add(landing_mark(&self.layout, landing, scale, theme));
         }
         true
     }
 
     /// Draw every band as the window does: lit while it has the keyboard.
-    pub(super) fn headers_follow_focus(
-        &mut self,
-        focused: bool,
-        layout: &Layout,
-        damage: &mut Region,
-    ) {
+    pub(super) fn headers_follow_focus(&mut self, focused: bool, damage: &mut Region) {
         let activation = if focused {
             tairix_controls::WindowActivationState::Active
         } else {
@@ -387,7 +372,7 @@ impl View {
             }
             furniture.activation = activation;
             header.set_furniture(furniture);
-            if let Some(slot) = layout.pane(*kind) {
+            if let Some(slot) = self.layout.pane(*kind) {
                 damage.add(slot.header);
             }
         }
@@ -405,8 +390,11 @@ impl View {
 
     /// Pane `kind`'s body as it shows: its content's own layout scrolled
     /// through the part of the body beside its bar.
-    pub(crate) fn body_view(&self, layout: &Layout, kind: PaneKind) -> ScrollView {
-        let viewport = layout.pane(kind).map_or(Rect::EMPTY, PaneSlot::viewport);
+    pub(crate) fn body_view(&self, kind: PaneKind) -> ScrollView {
+        let viewport = self
+            .layout
+            .pane(kind)
+            .map_or(Rect::EMPTY, PaneSlot::viewport);
         ScrollView::new(
             ScrollOrientation::Vertical,
             viewport,
@@ -417,10 +405,10 @@ impl View {
     /// Pane `kind`'s body as it shows; while `held` — a press held or a list
     /// open, which follow the pointer past the pane's edge — over the whole
     /// window the pane lies in.
-    pub(crate) fn held_view(&self, layout: &Layout, kind: PaneKind, held: bool) -> ScrollView {
-        let view = self.body_view(layout, kind);
+    pub(crate) fn held_view(&self, kind: PaneKind, held: bool) -> ScrollView {
+        let view = self.body_view(kind);
         if held {
-            view.confined_to(layout.pane_window(kind))
+            view.confined_to(self.layout.pane_window(kind))
         } else {
             view
         }
@@ -428,8 +416,8 @@ impl View {
 
     /// The room an open list of pane `kind`'s hangs in, in the pane's own
     /// layout: the window the pane lies in, scrolled with the pane.
-    pub(crate) fn list_room(&self, layout: &Layout, kind: PaneKind) -> Rect {
-        let window = layout.pane_window(kind);
+    pub(crate) fn list_room(&self, kind: PaneKind) -> Rect {
+        let window = self.layout.pane_window(kind);
         let offset = u32::try_from(self.body_offset(kind)).unwrap_or(u32::MAX);
         Rect::new(
             window.left(),
@@ -442,9 +430,9 @@ impl View {
     /// Bring each body's bar into line with how much of the body shows, its
     /// offset held within what there is to scroll; a body that moved is
     /// repainted.
-    pub(super) fn settle_body_bars(&mut self, layout: &Layout, damage: &mut Region) {
+    pub(super) fn settle_body_bars(&mut self, damage: &mut Region) {
         for kind in PaneKind::ALL {
-            let slot = layout.pane(kind).filter(|slot| !slot.bar.is_empty());
+            let slot = self.layout.pane(kind).filter(|slot| !slot.bar.is_empty());
             let bar = &mut self.body_bars[kind.index()];
             let range = slot.map_or(ScrollRange::new(0, 0, 0), |slot| {
                 bar.model().range().resize(
@@ -468,13 +456,12 @@ impl View {
     pub(super) fn body_bars_pointer(
         &mut self,
         event: &InputEvent,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Outcome> {
         let mut outcome = None;
-        for slot in layout.panes().chain(layout.floating()) {
+        for slot in self.layout.panes().chain(self.layout.floating()) {
             let bar = &mut self.body_bars[slot.kind.index()];
             if slot.bar.is_empty() && !bar.is_pressing() {
                 continue;
@@ -492,17 +479,12 @@ impl View {
 
     /// Scroll the body under the pointer by a turn of the wheel, where its
     /// dock scrolls it, answering whether the turn was its.
-    pub(super) fn wheel_body(
-        &mut self,
-        dy: i32,
-        layout: &Layout,
-        scale: Scale,
-        damage: &mut Region,
-    ) -> bool {
+    pub(super) fn wheel_body(&mut self, dy: i32, scale: Scale, damage: &mut Region) -> bool {
         let pointer = self.pointer;
-        let Some(slot) = layout
+        let Some(slot) = self
+            .layout
             .panes()
-            .chain(layout.floating())
+            .chain(self.layout.floating())
             .find(|slot| !slot.bar.is_empty() && slot.body.contains(pointer))
         else {
             return false;
@@ -520,12 +502,11 @@ impl View {
     pub(super) fn repeat_body_bars(
         &mut self,
         now_ns: u64,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) {
-        for slot in layout.panes().chain(layout.floating()) {
+        for slot in self.layout.panes().chain(self.layout.floating()) {
             if self.body_bars[slot.kind.index()]
                 .repeat(now_ns, slot.bar, scale, theme, damage)
                 .is_some()
@@ -536,14 +517,8 @@ impl View {
     }
 
     /// Scroll pane `kind`'s body so `rect`, laid out in its content, shows.
-    pub(super) fn reveal_body(
-        &mut self,
-        kind: PaneKind,
-        rect: Rect,
-        layout: &Layout,
-        damage: &mut Region,
-    ) {
-        let Some(slot) = layout.pane(kind).filter(|slot| !slot.bar.is_empty()) else {
+    pub(super) fn reveal_body(&mut self, kind: PaneKind, rect: Rect, damage: &mut Region) {
+        let Some(slot) = self.layout.pane(kind).filter(|slot| !slot.bar.is_empty()) else {
             return;
         };
         let bar = &mut self.body_bars[kind.index()];

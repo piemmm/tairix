@@ -9,8 +9,9 @@ use tairix_crypto::pdf::{
     pdf_aes_decrypt, pdf_legacy_file_key, pdf_modern_file_key, pdf_object_key, pdf_rc4_decrypt,
     PdfKey, PdfLegacyEntries, PdfModernEntries,
 };
+use tairix_unicode::{saslprep, Unassigned, MAX_DECOMPOSITION};
 use tairix_util::fallible;
-use tairix_util::secret::WipedBuf;
+use tairix_util::secret::{Wiped, WipedBuf};
 
 use crate::document::Document;
 use crate::limits::MAX_NESTING;
@@ -104,7 +105,17 @@ impl Security {
                     owner_key,
                     user_key,
                 };
-                return pdf_modern_file_key(&entries, given).map_err(|_| PdfError::Unsupported);
+                // SASLprep's form first, as the handler asks, then the bytes as
+                // given, which a producer that prepares nothing hashed.
+                let prepared = modern_password(given)?;
+                for candidate in prepared.as_deref().into_iter().chain([given]) {
+                    let key = pdf_modern_file_key(&entries, candidate)
+                        .map_err(|_| PdfError::Unsupported)?;
+                    if key.is_some() {
+                        return Ok(key);
+                    }
+                }
+                return Ok(None);
             }
             let bits = match version {
                 0 | 1 => 40,
@@ -251,6 +262,49 @@ fn legacy_password(given: &[u8]) -> Result<Option<WipedBuf>, PdfError> {
     let bytes = encoded.extend_zeroed(count).ok_or(PdfError::OutOfMemory)?;
     for (byte, c) in bytes.iter_mut().zip(text.chars()) {
         *byte = pdfdoc::code_of(c).unwrap_or(b'?');
+    }
+    Ok(Some(encoded))
+}
+
+/// A password as revisions 5 and 6 hash it where that differs from its bytes
+/// as given (ISO 32000-2 §7.6.4.3.3): its text prepared by SASLprep (RFC
+/// 4013) as a query, so a code point Unicode 3.2 does not assign passes as it
+/// is, in UTF-8. `None` for a password that is no text, that SASLprep
+/// refuses, or that it leaves as it was. Every copy is erased when dropped.
+fn modern_password(given: &[u8]) -> Result<Option<WipedBuf>, PdfError> {
+    let Ok(text) = core::str::from_utf8(given) else {
+        return Ok(None);
+    };
+    // ASCII is prepared to itself, or refused for a control it holds.
+    if text.is_ascii() {
+        return Ok(None);
+    }
+    let room = text
+        .chars()
+        .count()
+        .checked_mul(MAX_DECOMPOSITION)
+        .ok_or(PdfError::OutOfMemory)?;
+    let mut chars = WipedBuf::<char>::with_capacity(room)?;
+    let work = chars.extend_zeroed(room).ok_or(PdfError::OutOfMemory)?;
+    let Ok(len) = saslprep(text, Unassigned::Allowed, work) else {
+        return Ok(None);
+    };
+    let prepared = work.get(..len).unwrap_or_default();
+    if prepared.iter().copied().eq(text.chars()) {
+        return Ok(None);
+    }
+    let bytes = prepared.iter().map(|ch| ch.len_utf8()).sum();
+    let mut encoded = WipedBuf::with_capacity(bytes)?;
+    let out = encoded.extend_zeroed(bytes).ok_or(PdfError::OutOfMemory)?;
+    let mut at = 0;
+    for &ch in prepared {
+        let mut one = Wiped::<4>::new();
+        let spelled = ch.encode_utf8(&mut *one).as_bytes();
+        let end = at + spelled.len();
+        if let Some(into) = out.get_mut(at..end) {
+            into.copy_from_slice(spelled);
+        }
+        at = end;
     }
     Ok(Some(encoded))
 }

@@ -83,6 +83,7 @@ pub struct SettingsRequest<P: Preferences> {
 #[derive(Clone, Debug)]
 pub struct SettingsWindow<P, F> {
     frame: SettingsFrame,
+    layout: SettingsLayout,
     record: P,
     faces: PhantomData<F>,
 }
@@ -101,6 +102,7 @@ impl<P: Preferences, F> SettingsWindow<P, F> {
         );
         Self {
             frame,
+            layout: SettingsLayout::default(),
             record,
             faces: PhantomData,
         }
@@ -127,30 +129,30 @@ impl<P: Preferences, F> SettingsWindow<P, F> {
     /// Show `record`, the settings now in force, answering whether the window
     /// is to be laid out again. A control in use is left as the user has it:
     /// its own settle writes it.
-    pub fn adopt(&mut self, record: &P, layout: &SettingsLayout, damage: &mut Region) -> bool {
+    pub fn adopt(&mut self, record: &P, damage: &mut Region) -> bool {
         if *record == self.record || self.frame.holding() {
             return false;
         }
         self.record.clone_from(record);
         let groups = self.record.groups(self.frame.shown());
-        self.frame.rebuild(groups, layout, damage);
+        self.frame.rebuild(groups, &self.layout, damage);
         true
     }
 
     /// Say `message` beneath the settings, or nothing.
-    pub fn say(&mut self, message: Option<String>, layout: &SettingsLayout, damage: &mut Region) {
-        let _ = self.frame.say(message, layout, damage);
+    pub fn say(&mut self, message: Option<String>, damage: &mut Region) {
+        let _ = self.frame.say(message, &self.layout, damage);
     }
 
     /// Draw the window into `surface` as far as its clip admits.
     pub fn render(
         &self,
         surface: &mut Surface,
-        layout: &SettingsLayout,
         (theme, scale): (&Theme, Scale),
         artwork: &mut dyn IconArtwork,
     ) {
-        self.frame.render(surface, layout, (scale, theme), artwork);
+        self.frame
+            .render(surface, &self.layout, (scale, theme), artwork);
     }
 
     /// What the frame's `actions` ask: each row's carried into the record, a
@@ -158,7 +160,6 @@ impl<P: Preferences, F> SettingsWindow<P, F> {
     fn answered(
         &mut self,
         actions: impl IntoIterator<Item = SettingsAction>,
-        layout: &SettingsLayout,
         damage: &mut Region,
     ) -> Outcome<AppRequest<SettingsRequest<P>>> {
         let was = self.record.clone();
@@ -169,7 +170,7 @@ impl<P: Preferences, F> SettingsWindow<P, F> {
             match action {
                 SettingsAction::Shown { category } => {
                     let groups = self.record.groups(category);
-                    self.frame.show(category, groups, layout, damage);
+                    self.frame.show(category, groups, &self.layout, damage);
                     relaid = true;
                 }
                 SettingsAction::Field(acted) => {
@@ -182,7 +183,7 @@ impl<P: Preferences, F> SettingsWindow<P, F> {
                     tairix_appconf::Registry::normalise(&mut self.record);
                     if self.record.reshapes(&before, category) {
                         let groups = self.record.groups(category);
-                        self.frame.rebuild(groups, layout, damage);
+                        self.frame.rebuild(groups, &self.layout, damage);
                         relaid = true;
                     }
                 }
@@ -208,7 +209,6 @@ impl<P: Preferences, F> SettingsWindow<P, F> {
 }
 
 impl<P: Preferences, F: Copy> AppView for SettingsWindow<P, F> {
-    type Layout = SettingsLayout;
     type Faces = F;
     type Own = SettingsRequest<P>;
 
@@ -220,34 +220,39 @@ impl<P: Preferences, F: Copy> AppView for SettingsWindow<P, F> {
         SETTINGS_SIZE
     }
 
-    fn layout(&self, width: u32, height: u32, theme: &Theme, scale: Scale, _: F) -> SettingsLayout {
-        self.frame.layout(width, height, scale, theme)
+    fn lay_out(
+        &mut self,
+        width: u32,
+        height: u32,
+        theme: &Theme,
+        scale: Scale,
+        _: F,
+        damage: &mut Region,
+    ) {
+        self.layout = self.frame.layout(width, height, scale, theme);
+        self.frame.settle(&self.layout, damage);
     }
 
     fn min_size(&self, theme: &Theme, scale: Scale, _: F) -> (u32, u32) {
         self.frame.min_size(scale, theme)
     }
 
-    fn settle(&mut self, layout: &SettingsLayout, damage: &mut Region) {
-        self.frame.settle(layout, damage);
-    }
-
-    fn cursor(&self, _: &SettingsLayout, _: Point) -> CursorShape {
+    fn cursor(&self, _: Point) -> CursorShape {
         CursorShape::Arrow
     }
 
     /// The keyboard stays where it was, for the window's return.
-    fn focus_changed(&mut self, _: bool, _: &SettingsLayout, _: &mut Region) {}
+    fn focus_changed(&mut self, _: bool, _: &mut Region) {}
 
     fn input(
         &mut self,
         input: &InputEvent,
         now_ns: u64,
-        layout: &SettingsLayout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome<AppRequest<SettingsRequest<P>>> {
+        let layout = &self.layout;
         let actions = match *input {
             InputEvent::KeyPressed { key, modifiers } => {
                 let stroke = Keystroke {
@@ -265,22 +270,16 @@ impl<P: Preferences, F: Copy> AppView for SettingsWindow<P, F> {
         if actions.is_empty() {
             return Outcome::none();
         }
-        self.answered(actions, layout, damage)
+        self.answered(actions, damage)
     }
 
     fn deadline_ns(&mut self, now_ns: u64) -> Option<u64> {
         self.frame.deadline_ns(now_ns)
     }
 
-    fn advance(
-        &mut self,
-        now_ns: u64,
-        layout: &SettingsLayout,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) {
-        self.frame.advance(now_ns, layout, scale, theme, damage);
+    fn advance(&mut self, now_ns: u64, scale: Scale, theme: &Theme, damage: &mut Region) {
+        self.frame
+            .advance(now_ns, &self.layout, scale, theme, damage);
     }
 }
 

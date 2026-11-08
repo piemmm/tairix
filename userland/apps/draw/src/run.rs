@@ -28,12 +28,12 @@ mod program {
     use tairix_bezier::{Affine, Bounds, Point};
     use tairix_collections::try_arc;
     use tairix_controls::damage;
-    use tairix_draw::appwindow::{DrawWindow, DrawWindowAsk, DrawWindowLayout};
+    use tairix_draw::appwindow::{DrawWindow, DrawWindowAsk};
     use tairix_draw::compute::{work_out, Compute, Computed};
     use tairix_draw::copy::{CopyFormat, SaveFormat, FLATTENED};
     use tairix_draw::document::{blank, Document};
     use tairix_draw::glyphs::{Fetched, Lettering};
-    use tairix_draw::layout::{Faces, Layout, WINDOW_SIZE};
+    use tairix_draw::layout::{Faces, WINDOW_SIZE};
     use tairix_draw::pdfopen::{Answered, Asked, OpenPdf};
     use tairix_draw::preferences::Preferences;
     use tairix_draw::settings::{Category, DrawSettings};
@@ -632,16 +632,14 @@ mod program {
             },
             LoadAnswer::Pasted(pasted) => {
                 let window = &mut host.windows[index];
-                window
-                    .view
-                    .pasted(pasted, &mut window.damage, &window.layout);
+                window.view.pasted(pasted, &mut window.damage);
                 window.owe_reported();
             }
             LoadAnswer::Placed { name, at, placed } => {
                 let window = &mut host.windows[index];
                 window
                     .view
-                    .placed_picture((&name, at), placed, &mut window.damage, &window.layout);
+                    .placed_picture((&name, at), placed, &mut window.damage);
                 window.owe_reported();
             }
         }
@@ -656,12 +654,9 @@ mod program {
             .tiles
             .into_iter()
             .map(|Rendered { key, surface }| (key, surface));
-        window.view.rendered(
-            drawn.scene,
-            (&drawn.keys, landed),
-            &window.layout,
-            &mut window.damage,
-        );
+        window
+            .view
+            .rendered(drawn.scene, (&drawn.keys, landed), &mut window.damage);
         window.owe_reported();
     }
 
@@ -925,10 +920,7 @@ mod program {
                 if window.loading() || window.view.deadline_ns().is_none_or(|due| due > now_ns) {
                     continue;
                 }
-                let layout: Layout = window.layout;
-                window
-                    .view
-                    .tick(now_ns, &layout, scale, theme, &mut window.damage);
+                window.view.tick(now_ns, scale, theme, &mut window.damage);
                 window.owe_reported();
             }
             for index in 0..host.windows.len() {
@@ -936,8 +928,7 @@ mod program {
                 if window.loading() {
                     continue;
                 }
-                let layout: Layout = window.layout;
-                if let Some(job) = window.view.wanted_render(&layout) {
+                if let Some(job) = window.view.wanted_render() {
                     submit_render(host, index, job);
                 }
             }
@@ -951,8 +942,7 @@ mod program {
                 .iter_mut()
                 .filter(|window| !window.loading())
                 .filter_map(|window| {
-                    let layout: Layout = window.layout;
-                    window.view.arm_deadline(now_ns, &layout, scale, theme);
+                    window.view.arm_deadline(now_ns, scale, theme);
                     window.view.deadline_ns()
                 })
                 .min()
@@ -1009,9 +999,7 @@ mod program {
             let said = match answer {
                 Answer::Computed(computed) => {
                     let window = &mut host.windows[index];
-                    window
-                        .view
-                        .computed(*computed, &window.layout, &mut window.damage);
+                    window.view.computed(*computed, &mut window.damage);
                     None
                 }
                 Answer::Copied(Ok(message)) => Some(message),
@@ -1085,20 +1073,16 @@ mod program {
             &mut self,
             surface: &mut Surface,
             view: &DrawWindow<Ticket>,
-            layout: &DrawWindowLayout,
             (theme, scale, _): (&Theme, Scale, Faces),
             _focused: bool,
         ) {
-            match (view, layout) {
-                (DrawWindow::Settings(view), DrawWindowLayout::Settings(layout)) => {
+            match view {
+                DrawWindow::Settings(view) => {
                     let mut inline = InlineArtwork::new(NoArtworkSeam, NoArtworkSeam);
                     let mut source = IconArtworkSource::new(&mut self.artwork, &mut inline);
-                    view.render(surface, layout, (theme, scale), &mut source);
+                    view.render(surface, (theme, scale), &mut source);
                 }
-                (DrawWindow::OpenPdf(view), DrawWindowLayout::OpenPdf(bounds)) => {
-                    view.render(surface, *bounds, scale, theme);
-                }
-                _ => {}
+                DrawWindow::OpenPdf(view) => view.render(surface, scale, theme),
             }
         }
 
@@ -1106,13 +1090,12 @@ mod program {
             &mut self,
             surface: &mut Surface,
             view: &View,
-            layout: &Layout,
             style: (&Theme, Scale, Faces),
             _focused: bool,
         ) {
             let mut inline = InlineArtwork::new(NoArtworkSeam, NoArtworkSeam);
             let mut source = IconArtworkSource::new(&mut self.artwork, &mut inline);
-            view.render(surface, layout, style, &mut source);
+            view.render(surface, style, &mut source);
         }
     }
 
@@ -1208,10 +1191,8 @@ mod program {
         }
         apply_settings(host);
         for window in &mut host.app_windows {
-            if let (DrawWindow::Settings(view), DrawWindowLayout::Settings(layout)) =
-                (&mut window.view, &window.layout)
-            {
-                view.say(said.clone(), layout, &mut window.damage);
+            if let DrawWindow::Settings(view) = &mut window.view {
+                view.say(said.clone(), &mut window.damage);
                 window.owe_reported();
             }
         }
@@ -1226,12 +1207,10 @@ mod program {
         }
         for index in 0..host.app_windows.len() {
             let window = &mut host.app_windows[index];
-            let (DrawWindow::Settings(view), DrawWindowLayout::Settings(layout)) =
-                (&mut window.view, &window.layout)
-            else {
+            let DrawWindow::Settings(view) = &mut window.view else {
                 continue;
             };
-            if view.adopt(&preferences, layout, &mut window.damage) {
+            if view.adopt(&preferences, &mut window.damage) {
                 host.apply_app(index, Outcome::relaid());
             } else {
                 window.owe_reported();

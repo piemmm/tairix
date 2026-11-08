@@ -1,13 +1,13 @@
 //! `cargo xtask unicode` implementation.
 //!
 //! `lib/unicode` answers the character properties the display-safety policy
-//! needs — `Script`, `Script_Extensions`, the nonspacing marks, the marks each
-//! canonical decomposition carries and `Default_Ignorable_Code_Point` — from
-//! tables generated here out of the Unicode Character Database files committed
-//! in `lib/unicode/assets/`. Each is
-//! byte-identical to its unicode.org release and pinned by SHA-256, so anyone
-//! can check the snapshot against upstream and nothing reaches the tables
-//! unreviewed.
+//! needs — `Script`, `Script_Extensions`, the nonspacing marks and
+//! `Default_Ignorable_Code_Point` — normalization's combining classes,
+//! decompositions and compositions, and stringprep's tables (RFC 3454), from
+//! tables generated here out of the Unicode Character Database files and the
+//! RFC committed in `lib/unicode/assets/`. Each is byte-identical to its
+//! upstream release and pinned by SHA-256, so anyone can check the snapshot
+//! against upstream and nothing reaches the tables unreviewed.
 //!
 //! - `cargo xtask unicode` (part of `cargo xtask ci`) regenerates the tables in
 //!   memory and fails closed if `lib/unicode/src/tables.rs` has drifted.
@@ -59,6 +59,33 @@ const DATA: Pinned = Pinned {
     file: "UnicodeData.txt",
     sha256: "0736451de439ae7baf1425136617da495e09ee5afbe6e394374db7009ea08950",
 };
+const EXCLUSIONS: Pinned = Pinned {
+    file: "CompositionExclusions.txt",
+    sha256: "c759b100e9ae8960ae6b50fc5765950a7581fd9f30d4ef95f68f25a6d97e818e",
+};
+const CORRECTIONS: Pinned = Pinned {
+    file: "NormalizationCorrections.txt",
+    sha256: "b4f46d241e924c3803cb18c6a9224cadcee365bb24a2e1fbf33c2f4de955cd5d",
+};
+/// Read by `lib/unicode`'s conformance test alone; pinned here so the test
+/// holds the crate to the release its tables are.
+const NORMALIZATION_TEST: Pinned = Pinned {
+    file: "NormalizationTest.txt",
+    sha256: "25a50d816764b04abfb4a646d3eb2b2a803284c3873d9a06757b94fe4513dde3",
+};
+/// RFC 3454, stringprep: its tables are Unicode 3.2's, which stringprep pins.
+const STRINGPREP: Pinned = Pinned {
+    file: "rfc3454.txt",
+    sha256: "eb722fa698fb7e8823b835d9fd263e4cdb8f1c7b0d234edf7f0e3bd2ccbb2c79",
+};
+
+/// The Unicode release stringprep is defined over.
+const STRINGPREP_VERSION: (u8, u8, u8) = (3, 2, 0);
+
+/// The RFC 3454 tables SASLprep prohibits in its output (RFC 4013 §2.3).
+const SASLPREP_PROHIBITED: [&str; 10] = [
+    "C.1.2", "C.2.1", "C.2.2", "C.3", "C.4", "C.5", "C.6", "C.7", "C.8", "C.9",
+];
 
 /// UAX #31 revision 45, Table 5: the Recommended Scripts.
 const RECOMMENDED: [&str; 30] = [
@@ -328,111 +355,392 @@ fn extension_entries(text: &str, scripts: &Scripts) -> Result<Extensions, String
     Ok(Extensions { entries, sets })
 }
 
-fn contains(ranges: &[(u32, u32)], cp: u32) -> bool {
-    let after = ranges.partition_point(|&(first, _)| first <= cp);
-    after
-        .checked_sub(1)
-        .is_some_and(|index| cp <= ranges[index].1)
-}
-
 /// What `UnicodeData.txt` contributes.
 struct Data {
     /// Each canonical decomposition mapping (UAX #15): a sixth field with no
     /// `<tag>`.
-    mappings: BTreeMap<u32, Vec<u32>>,
+    canonical: BTreeMap<u32, Vec<u32>>,
+    /// Each compatibility decomposition mapping: a sixth field with a `<tag>`.
+    compatibility: BTreeMap<u32, Vec<u32>>,
+    /// Each nonzero canonical combining class.
+    classes: BTreeMap<u32, u8>,
     /// The code points it files as `Mn` or `Me`, as merged ranges.
     marks: Vec<(u32, u32)>,
+    /// The Hangul syllables, which decompose by arithmetic, not by mapping.
+    syllables: (u32, u32),
 }
 
 impl Data {
     fn read(text: &str) -> Result<Self, String> {
-        let mut mappings = BTreeMap::new();
+        let mut canonical = BTreeMap::new();
+        let mut compatibility = BTreeMap::new();
+        let mut classes = BTreeMap::new();
         let mut marks = Vec::new();
+        let (mut first_syllable, mut last_syllable) = (None, None);
         for line in text.lines() {
             let fields: Vec<&str> = line.split(';').collect();
-            let [code, _, category, _, _, mapping, ..] = fields[..] else {
+            let [code, name, category, class, _, mapping, ..] = fields[..] else {
                 return Err(format!("unicode: short UnicodeData line `{line}`"));
             };
             let code = code_point(code)?;
+            match name {
+                "<Hangul Syllable, First>" => first_syllable = Some(code),
+                "<Hangul Syllable, Last>" => last_syllable = Some(code),
+                _ => {}
+            }
             if matches!(category, "Mn" | "Me") {
                 marks.push((code, code));
             }
-            if mapping.is_empty() || mapping.starts_with('<') {
+            let class: u8 = class
+                .parse()
+                .map_err(|_| format!("unicode: bad combining class for U+{code:04X}"))?;
+            if class != 0 {
+                classes.insert(code, class);
+            }
+            if mapping.is_empty() {
                 continue;
             }
+            let tagged = mapping.starts_with('<');
             let parts = mapping
                 .split_whitespace()
+                .filter(|part| !part.starts_with('<'))
                 .map(code_point)
                 .collect::<Result<Vec<_>, _>>()?;
-            mappings.insert(code, parts);
-        }
-        Ok(Self {
-            mappings,
-            marks: merged(marks),
-        })
-    }
-
-    /// The nonspacing marks of every full canonical decomposition carrying
-    /// any, in decomposition order.
-    fn decomposed_marks(&self) -> Result<Vec<(u32, Vec<u32>)>, String> {
-        let mut out = Vec::new();
-        for &code in self.mappings.keys() {
-            let mut full = Vec::new();
-            self.expand(code, &mut full, 0)?;
-            let carried: Vec<u32> = full
-                .into_iter()
-                .filter(|&cp| contains(&self.marks, cp))
-                .collect();
-            if !carried.is_empty() {
-                out.push((code, carried));
+            if tagged {
+                compatibility.insert(code, parts);
+            } else {
+                if !(1..=2).contains(&parts.len()) {
+                    return Err(format!(
+                        "unicode: U+{code:04X}'s canonical mapping is not one or two characters"
+                    ));
+                }
+                canonical.insert(code, parts);
             }
         }
-        Ok(out)
+        let (Some(first), Some(last)) = (first_syllable, last_syllable) else {
+            return Err("unicode: UnicodeData lists no Hangul syllables".to_string());
+        };
+        let data = Self {
+            canonical,
+            compatibility,
+            classes,
+            marks: merged(marks),
+            syllables: (first, last),
+        };
+        // The runtime decomposes a syllable by arithmetic before any mapping
+        // is looked up, so no mapping may reach one.
+        let mapped = data.canonical.values().chain(data.compatibility.values());
+        if mapped.flatten().any(|&cp| (first..=last).contains(&cp)) {
+            return Err("unicode: a decomposition mapping holds a Hangul syllable".to_string());
+        }
+        Ok(data)
     }
 
-    fn expand(&self, code: u32, out: &mut Vec<u32>, depth: usize) -> Result<(), String> {
+    fn class(&self, code: u32) -> u8 {
+        self.classes.get(&code).copied().unwrap_or(0)
+    }
+
+    /// `code`'s full decomposition (UAX #15 D68), its compatibility mappings
+    /// applied too when `compatibility`.
+    fn expand(
+        &self,
+        code: u32,
+        compatibility: bool,
+        out: &mut Vec<u32>,
+        depth: usize,
+    ) -> Result<(), String> {
         // A path through an acyclic mapping visits each code point once.
-        if depth > self.mappings.len() {
+        if depth > self.canonical.len() + self.compatibility.len() {
             return Err(format!("unicode: decomposition cycle through U+{code:04X}"));
         }
-        match self.mappings.get(&code) {
+        let mapping = self.canonical.get(&code).or_else(|| {
+            compatibility
+                .then(|| self.compatibility.get(&code))
+                .flatten()
+        });
+        match mapping {
             Some(parts) => {
                 for &part in parts {
-                    self.expand(part, out, depth + 1)?;
+                    self.expand(part, compatibility, out, depth + 1)?;
                 }
             }
             None => out.push(code),
         }
         Ok(())
     }
+
+    /// Every decomposable character's full decompositions.
+    fn decompositions(&self) -> Result<Vec<Decomposition>, String> {
+        let codes: std::collections::BTreeSet<u32> = self
+            .canonical
+            .keys()
+            .chain(self.compatibility.keys())
+            .copied()
+            .collect();
+        let mut out = Vec::with_capacity(codes.len());
+        for code in codes {
+            let canonical = if self.canonical.contains_key(&code) {
+                let mut full = Vec::new();
+                self.expand(code, false, &mut full, 0)?;
+                Some(full)
+            } else {
+                None
+            };
+            let mut compatibility = Vec::new();
+            self.expand(code, true, &mut compatibility, 0)?;
+            out.push(Decomposition {
+                code,
+                canonical,
+                compatibility,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Every primary composite (UAX #15 D114) as `(first, second, composite)`
+    /// sorted by the pair: each canonical pair whose character is not in
+    /// `excluded` and not a non-starter decomposition, its own class or its
+    /// first character's being nonzero. A singleton maps to no pair.
+    fn compositions(
+        &self,
+        excluded: &std::collections::BTreeSet<u32>,
+    ) -> Result<Vec<(u32, u32, u32)>, String> {
+        let mut out: Vec<(u32, u32, u32)> = self
+            .canonical
+            .iter()
+            .filter_map(|(&code, parts)| match parts[..] {
+                [first, second]
+                    if !excluded.contains(&code)
+                        && self.class(code) == 0
+                        && self.class(first) == 0 =>
+                {
+                    Some((first, second, code))
+                }
+                _ => None,
+            })
+            .collect();
+        out.sort_unstable();
+        if out
+            .windows(2)
+            .any(|pair| (pair[0].0, pair[0].1) == (pair[1].0, pair[1].1))
+        {
+            return Err("unicode: two composites share a pair".to_string());
+        }
+        Ok(out)
+    }
+
+    /// Every nonzero combining class as `(first, last, class)`, neighbours of
+    /// one class merged.
+    fn class_ranges(&self) -> Vec<(u32, u32, u8)> {
+        let mut out: Vec<(u32, u32, u8)> = Vec::new();
+        for (&code, &class) in &self.classes {
+            match out.last_mut() {
+                Some(prev) if prev.1 + 1 == code && prev.2 == class => prev.1 = code,
+                _ => out.push((code, code, class)),
+            }
+        }
+        out
+    }
 }
 
-/// The decomposed marks with each distinct sequence held once.
+/// A decomposable character's full decompositions: the canonical one, which
+/// a character with only a compatibility mapping lacks, and the compatibility
+/// one.
+struct Decomposition {
+    code: u32,
+    canonical: Option<Vec<u32>>,
+    compatibility: Vec<u32>,
+}
+
+/// The code points `CompositionExclusions.txt` lists.
+fn exclusions(text: &str) -> Result<std::collections::BTreeSet<u32>, String> {
+    let mut out = std::collections::BTreeSet::new();
+    for record in records(text) {
+        let (first, last) = code_points(record[0])?;
+        out.extend(first..=last);
+    }
+    Ok(out)
+}
+
+/// Each decomposition `NormalizationCorrections.txt` records as corrected
+/// after stringprep's release, as `(code point, its decomposition there)`:
+/// one character each, which `data` maps to the correction and which maps to
+/// nothing further.
+fn decomposed_in_stringprep(text: &str, data: &Data) -> Result<Vec<(u32, u32)>, String> {
+    let mut out = Vec::new();
+    for record in records(text) {
+        let [code, original, corrected, version] = record[..] else {
+            return Err(format!("unicode: bad correction `{}`", record.join(";")));
+        };
+        let code = code_point(code)?;
+        let release = version
+            .split('.')
+            .map(str::parse::<u8>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| format!("unicode: bad correction version `{version}`"))?;
+        let [major, minor, update] = release[..] else {
+            return Err(format!("unicode: bad correction version `{version}`"));
+        };
+        let corrected = code_point(corrected)?;
+        if data.canonical.get(&code).map(Vec::as_slice) != Some(&[corrected]) {
+            return Err(format!(
+                "unicode: U+{code:04X}'s correction is not the mapping UnicodeData holds"
+            ));
+        }
+        if (major, minor, update) <= STRINGPREP_VERSION {
+            continue;
+        }
+        let original = code_point(original)?;
+        if data.canonical.contains_key(&original) || data.compatibility.contains_key(&original) {
+            return Err(format!(
+                "unicode: U+{code:04X}'s original decomposition decomposes further"
+            ));
+        }
+        out.push((code, original));
+    }
+    out.sort_unstable();
+    Ok(out)
+}
+
+/// The full decompositions with each distinct sequence held once.
 struct Pooled {
-    /// `(code point, first, len)` into `pool`.
-    entries: Vec<(u32, u16, u8)>,
+    /// `(code point, canonical first, canonical len, compatibility first,
+    /// compatibility len)` into `pool`.
+    entries: Vec<(u32, u16, u8, u16, u8)>,
     pool: Vec<u32>,
 }
 
-fn pooled(decomposed: &[(u32, Vec<u32>)]) -> Result<Pooled, String> {
+fn pooled(decompositions: &[Decomposition]) -> Result<Pooled, String> {
     let mut pool = Vec::new();
-    let mut placed: BTreeMap<&[u32], u16> = BTreeMap::new();
-    let mut entries = Vec::with_capacity(decomposed.len());
-    for (code, marks) in decomposed {
-        let at = if let Some(&at) = placed.get(marks.as_slice()) {
-            at
-        } else {
-            let at = u16::try_from(pool.len())
-                .map_err(|_| "unicode: decomposed marks overflow their pool".to_string())?;
-            pool.extend_from_slice(marks);
-            placed.insert(marks, at);
-            at
+    let mut placed = BTreeMap::new();
+    let mut entries = Vec::with_capacity(decompositions.len());
+    for decomposition in decompositions {
+        let (canonical_at, canonical_len) = match &decomposition.canonical {
+            Some(parts) => place(parts, &mut pool, &mut placed)?,
+            None => (0, 0),
         };
-        let len = u8::try_from(marks.len())
-            .map_err(|_| format!("unicode: U+{code:04X} carries too many marks"))?;
-        entries.push((*code, at, len));
+        let (compatibility_at, compatibility_len) =
+            place(&decomposition.compatibility, &mut pool, &mut placed)?;
+        entries.push((
+            decomposition.code,
+            canonical_at,
+            canonical_len,
+            compatibility_at,
+            compatibility_len,
+        ));
     }
     Ok(Pooled { entries, pool })
+}
+
+/// Where `parts` stands in `pool`, appended unless `placed` says it already
+/// stands there, and its length.
+fn place<'a>(
+    parts: &'a [u32],
+    pool: &mut Vec<u32>,
+    placed: &mut BTreeMap<&'a [u32], u16>,
+) -> Result<(u16, u8), String> {
+    let len = u8::try_from(parts.len())
+        .map_err(|_| "unicode: a decomposition is longer than a byte counts".to_string())?;
+    if let Some(&at) = placed.get(parts) {
+        return Ok((at, len));
+    }
+    let at = u16::try_from(pool.len())
+        .map_err(|_| "unicode: the decompositions overflow their pool".to_string())?;
+    pool.extend_from_slice(parts);
+    placed.insert(parts, at);
+    Ok((at, len))
+}
+
+/// One line of an RFC 3454 table: a code point or a `first-last` range, then
+/// its `;` fields.
+struct Row<'a> {
+    range: (u32, u32),
+    fields: Vec<&'a str>,
+}
+
+/// RFC 3454's table `name`, the RFC's page footers and headers between its
+/// lines passed over.
+fn rfc_table<'a>(text: &'a str, name: &str) -> Result<Vec<Row<'a>>, String> {
+    let start = format!("----- Start Table {name} -----");
+    let end = format!("----- End Table {name} -----");
+    let mut lines = text.lines().skip_while(|line| line.trim() != start);
+    if lines.next().is_none() {
+        return Err(format!("unicode: RFC 3454 has no table {name}"));
+    }
+    let mut rows = Vec::new();
+    for line in lines {
+        let data = line.trim();
+        if data == end {
+            return Ok(rows);
+        }
+        if data.is_empty() || line.starts_with("Hoffman & Blanchet") || line.starts_with("RFC 3454")
+        {
+            continue;
+        }
+        let mut fields = data.split(';').map(str::trim);
+        let span = fields.next().unwrap_or_default();
+        let range = if let Some((first, last)) = span.split_once('-') {
+            (code_point(first)?, code_point(last)?)
+        } else {
+            let cp = code_point(span)?;
+            (cp, cp)
+        };
+        if range.0 > range.1 {
+            return Err(format!("unicode: reversed range `{span}` in table {name}"));
+        }
+        rows.push(Row {
+            range,
+            fields: fields.collect(),
+        });
+    }
+    Err(format!("unicode: RFC 3454's table {name} never ends"))
+}
+
+/// The code points of RFC 3454's table `name`, as merged ranges.
+fn rfc_ranges(text: &str, name: &str) -> Result<Vec<(u32, u32)>, String> {
+    Ok(merged(
+        rfc_table(text, name)?
+            .into_iter()
+            .map(|row| row.range)
+            .collect(),
+    ))
+}
+
+/// What stringprep's tables contribute (RFC 3454 appendices A to D), as
+/// SASLprep reads them (RFC 4013).
+struct Stringprep {
+    unassigned: Vec<(u32, u32)>,
+    mapped_to_nothing: Vec<(u32, u32)>,
+    spaces: Vec<(u32, u32)>,
+    prohibited: Vec<(u32, u32)>,
+    right_to_left: Vec<(u32, u32)>,
+    left_to_right: Vec<(u32, u32)>,
+}
+
+impl Stringprep {
+    fn read(text: &str) -> Result<Self, String> {
+        let mapping = rfc_table(text, "B.1")?;
+        if let Some(Row {
+            range: (code, _), ..
+        }) = mapping.iter().find(|row| row.fields.first() != Some(&""))
+        {
+            return Err(format!(
+                "unicode: table B.1 maps U+{code:04X} to something; SASLprep maps it to nothing"
+            ));
+        }
+        let mut prohibited = Vec::new();
+        for table in SASLPREP_PROHIBITED {
+            prohibited.extend(rfc_ranges(text, table)?);
+        }
+        Ok(Self {
+            unassigned: rfc_ranges(text, "A.1")?,
+            mapped_to_nothing: merged(mapping.into_iter().map(|row| row.range).collect()),
+            spaces: rfc_ranges(text, "C.1.2")?,
+            prohibited: merged(prohibited),
+            right_to_left: rfc_ranges(text, "D.1")?,
+            left_to_right: rfc_ranges(text, "D.2")?,
+        })
+    }
 }
 
 fn generate(root: &Path) -> Result<String, String> {
@@ -455,7 +763,6 @@ fn generate(root: &Path) -> Result<String, String> {
             DATA.file, CATEGORIES.file
         ));
     }
-    let decomposed = pooled(&data.decomposed_marks()?)?;
 
     let (major, minor, update) = VERSION;
     let mut out = String::new();
@@ -466,7 +773,8 @@ fn generate(root: &Path) -> Result<String, String> {
          // Emitted by `cargo xtask unicode --write` from the Unicode \
          {major}.{minor}.{update}\n\
          // character database in `lib/unicode/assets/` (Unicode License V3; see\n\
-         // `LICENSE` there) and the Recommended Scripts of UAX #31 revision 45.\n\
+         // `LICENSE` there), the Recommended Scripts of UAX #31 revision 45, and\n\
+         // the tables of RFC 3454 (stringprep) in `rfc3454.txt` there.\n\
          // `cargo xtask unicode` (run by `ci`) fails closed if this file drifts\n\
          // from a fresh generation.\n\
          \n\
@@ -524,23 +832,145 @@ fn generate(root: &Path) -> Result<String, String> {
     push_ranges(&mut out, "NONSPACING_MARKS", &marks);
     out.push_str("\n/// The `Default_Ignorable_Code_Point` code points.\n");
     push_ranges(&mut out, "DEFAULT_IGNORABLE", &ignorable);
-    out.push_str(
-        "\n/// The nonspacing marks of each full canonical decomposition carrying any, as\n\
-         /// `(code point, first, len)` into [`DECOMPOSED_MARKS`].\n\
-         pub(crate) const DECOMPOSED: &[(u32, u16, u8)] = &[\n",
-    );
-    for (code, at, len) in &decomposed.entries {
-        let _ = writeln!(out, "    ({}, {at}, {len}),", literal(u64::from(*code), 4));
-    }
-    out.push_str(
-        "];\n\n/// The mark sequences [`DECOMPOSED`] points into.\n\
-         pub(crate) const DECOMPOSED_MARKS: &[char] = &[\n",
-    );
-    for mark in &decomposed.pool {
-        let _ = writeln!(out, "    '\\u{{{mark:04X}}}',");
-    }
-    out.push_str("];\n");
+    emit_normalization(&mut out, root, &data)?;
+    emit_stringprep(&mut out, root, &data)?;
     Ok(out)
+}
+
+/// Emit the normalization tables (UAX #15): the combining classes, the full
+/// decompositions and the primary composites `data` and the composition
+/// exclusions make.
+fn emit_normalization(out: &mut String, root: &Path, data: &Data) -> Result<(), String> {
+    let decompositions = data.decompositions()?;
+    let pooled = pooled(&decompositions)?;
+    let longest = decompositions
+        .iter()
+        .map(|decomposition| decomposition.compatibility.len())
+        .max()
+        .unwrap_or(1);
+    let compositions = data.compositions(&exclusions(&read(root, &EXCLUSIONS)?)?)?;
+    let least_composing = compositions
+        .iter()
+        .map(|&(_, second, _)| second)
+        .min()
+        .ok_or_else(|| "unicode: no character composes".to_string())?;
+    let classes = data.class_ranges();
+    let least_combining = classes
+        .first()
+        .map(|&(first, _, _)| first)
+        .ok_or_else(|| "unicode: no character combines".to_string())?;
+    read(root, &NORMALIZATION_TEST)?;
+    let (syllable_first, syllable_last) = data.syllables;
+    let _ = write!(
+        out,
+        "\n/// The most characters one character fully decomposes to.\n\
+         pub const MAX_DECOMPOSITION: usize = {longest};\n\
+         \n\
+         /// The Hangul syllables, which decompose and compose by arithmetic.\n\
+         pub(crate) const SYLLABLES: (u32, u32) = ({}, {});\n\
+         \n\
+         /// The least code point of a nonzero canonical combining class.\n\
+         pub(crate) const LEAST_COMBINING: u32 = {};\n\
+         \n\
+         /// The nonzero canonical combining classes, as `(first, last, class)`.\n\
+         pub(crate) const COMBINING_CLASSES: &[(u32, u32, u8)] = &[\n",
+        literal(u64::from(syllable_first), 4),
+        literal(u64::from(syllable_last), 4),
+        literal(u64::from(least_combining), 4)
+    );
+    for (first, last, class) in &classes {
+        let _ = writeln!(
+            out,
+            "    ({}, {}, {class}),",
+            literal(u64::from(*first), 4),
+            literal(u64::from(*last), 4)
+        );
+    }
+    out.push_str(
+        "];\n\n\
+         /// Every character with a decomposition mapping but the Hangul syllables, as\n\
+         /// `(code point, canonical first, canonical len, compatibility first,\n\
+         /// compatibility len)` into [`DECOMPOSITION_POOL`], where its full\n\
+         /// decompositions stand: a canonical len of 0 for one whose mapping is a\n\
+         /// compatibility mapping alone.\n\
+         pub(crate) const DECOMPOSITIONS: &[(u32, u16, u8, u16, u8)] = &[\n",
+    );
+    for (code, canonical_at, canonical_len, compatibility_at, compatibility_len) in &pooled.entries
+    {
+        let _ = writeln!(
+            out,
+            "    ({}, {canonical_at}, {canonical_len}, {compatibility_at}, {compatibility_len}),",
+            literal(u64::from(*code), 4)
+        );
+    }
+    out.push_str(
+        "];\n\n/// The full decompositions [`DECOMPOSITIONS`] points into.\n\
+         pub(crate) const DECOMPOSITION_POOL: &[char] = &[\n",
+    );
+    for row in pooled.pool.chunks(8) {
+        let chars: Vec<String> = row.iter().map(|cp| format!("'\\u{{{cp:04X}}}'")).collect();
+        let _ = writeln!(out, "    {},", chars.join(", "));
+    }
+    let _ = write!(
+        out,
+        "];\n\n\
+         /// The least character to follow another in a primary composite's pair.\n\
+         pub(crate) const LEAST_COMPOSING: u32 = {};\n\
+         \n\
+         /// Every primary composite, as `(first, second, composite)` sorted by the\n\
+         /// pair.\n\
+         pub(crate) const COMPOSITIONS: &[(u32, u32, u32)] = &[\n",
+        literal(u64::from(least_composing), 4)
+    );
+    for (first, second, composite) in &compositions {
+        let _ = writeln!(
+            out,
+            "    ({}, {}, {}),",
+            literal(u64::from(*first), 4),
+            literal(u64::from(*second), 4),
+            literal(u64::from(*composite), 4)
+        );
+    }
+    Ok(())
+}
+
+/// Emit stringprep's tables (RFC 3454) as SASLprep reads them, and the
+/// decompositions Unicode 3.2 held that `data` holds corrected.
+fn emit_stringprep(out: &mut String, root: &Path, data: &Data) -> Result<(), String> {
+    let corrected = decomposed_in_stringprep(&read(root, &CORRECTIONS)?, data)?;
+    let stringprep = Stringprep::read(&read(root, &STRINGPREP)?)?;
+    let (major, minor, update) = STRINGPREP_VERSION;
+    let _ = write!(
+        out,
+        "];\n\n\
+         /// The decompositions Unicode {major}.{minor}.{update} held that a later release\n\
+         /// corrected (`NormalizationCorrections.txt`), as `(code point, decomposition)`.\n\
+         pub(crate) const DECOMPOSED_IN_3_2: &[(u32, u32)] = &[\n"
+    );
+    for (code, original) in &corrected {
+        let _ = writeln!(
+            out,
+            "    ({}, {}),",
+            literal(u64::from(*code), 4),
+            literal(u64::from(*original), 4)
+        );
+    }
+    out.push_str("];\n\n/// RFC 3454 table A.1: the code points Unicode 3.2 does not assign.\n");
+    push_ranges(out, "UNASSIGNED_3_2", &stringprep.unassigned);
+    out.push_str("\n/// RFC 3454 table B.1: what stringprep maps to nothing.\n");
+    push_ranges(out, "MAPPED_TO_NOTHING", &stringprep.mapped_to_nothing);
+    out.push_str("\n/// RFC 3454 table C.1.2: the non-ASCII spaces.\n");
+    push_ranges(out, "NON_ASCII_SPACES", &stringprep.spaces);
+    out.push_str(
+        "\n/// What SASLprep prohibits in what it prepares (RFC 4013 \u{a7}2.3): RFC 3454\n\
+         /// tables C.1.2, C.2.1, C.2.2 and C.3 to C.9.\n",
+    );
+    push_ranges(out, "SASLPREP_PROHIBITED", &stringprep.prohibited);
+    out.push_str("\n/// RFC 3454 table D.1: the characters of bidirectional category R or AL.\n");
+    push_ranges(out, "RIGHT_TO_LEFT", &stringprep.right_to_left);
+    out.push_str("\n/// RFC 3454 table D.2: the characters of bidirectional category L.\n");
+    push_ranges(out, "LEFT_TO_RIGHT", &stringprep.left_to_right);
+    Ok(())
 }
 
 fn set_literal(set: &Set) -> String {
@@ -603,32 +1033,142 @@ mod tests {
         assert_eq!(literal(0x67_60a0_3000_0828, 16), "0x0067_60A0_3000_0828");
     }
 
+    /// A `UnicodeData.txt` fragment: `e`, two marks, a character canonically mapped
+    /// through another, a compatibility mapping, a singleton and the Hangul
+    /// syllables' bounds.
+    const FRAGMENT: &str = "0065;LATIN SMALL LETTER E;Ll;0;L;;;;;N;;;0045;;0045\n\
+        0302;COMBINING CIRCUMFLEX ACCENT;Mn;230;NSM;;;;;N;;;;;\n\
+        0323;COMBINING DOT BELOW;Mn;220;NSM;;;;;N;;;;;\n\
+        0344;COMBINING GREEK DIALYTIKA TONOS;Mn;230;NSM;0302 0323;;;;N;;;;;\n\
+        1EB9;E WITH DOT BELOW;Ll;0;L;0065 0323;;;;N;;;;;\n\
+        1EC7;E WITH CIRCUMFLEX AND DOT BELOW;Ll;0;L;1EB9 0302;;;;N;;;;;\n\
+        212B;ANGSTROM SIGN;Lu;0;L;1EB9;;;;N;;;;;\n\
+        3392;SQUARE MHZ;So;0;L;<square> 1EC7 0048;;;;N;;;;;\n\
+        AC00;<Hangul Syllable, First>;Lo;0;L;;;;;N;;;;;\n\
+        D7A3;<Hangul Syllable, Last>;Lo;0;L;;;;;N;;;;;\n";
+
     #[test]
-    fn decompositions_expand_fully_and_keep_only_their_marks() {
-        // U+1EC7 maps to U+1EB9 + U+0302, and U+1EB9 to e + U+0323; U+00C5's
-        // compatibility mapping is no canonical one.
-        let text = "0065;LATIN SMALL LETTER E;Ll;0;L;;;;;N;;;0045;;0045\n\
-                    0302;COMBINING CIRCUMFLEX ACCENT;Mn;230;NSM;;;;;N;;;;;\n\
-                    0323;COMBINING DOT BELOW;Mn;220;NSM;;;;;N;;;;;\n\
-                    1EB9;E WITH DOT BELOW;Ll;0;L;0065 0323;;;;N;;;;;\n\
-                    1EC7;E WITH CIRCUMFLEX AND DOT BELOW;Ll;0;L;1EB9 0302;;;;N;;;;;\n\
-                    3392;SQUARE MHZ;So;0;L;<square> 004D 0048 007A;;;;N;;;;;\n";
-        let data = Data::read(text).expect("well-formed");
-        assert_eq!(data.marks, [(0x302, 0x302), (0x323, 0x323)]);
+    fn decompositions_expand_fully_each_way() {
+        let data = Data::read(FRAGMENT).expect("well-formed");
+        assert_eq!(data.marks, [(0x302, 0x302), (0x323, 0x323), (0x344, 0x344)]);
+        assert_eq!(data.syllables, (0xac00, 0xd7a3));
+        let decompositions = data.decompositions().expect("acyclic");
+        let of = |code: u32| {
+            decompositions
+                .iter()
+                .find(|decomposition| decomposition.code == code)
+                .map(|decomposition| {
+                    (
+                        decomposition.canonical.clone(),
+                        decomposition.compatibility.clone(),
+                    )
+                })
+        };
         assert_eq!(
-            data.decomposed_marks(),
-            Ok(vec![(0x1eb9, vec![0x323]), (0x1ec7, vec![0x323, 0x302])])
+            of(0x1ec7),
+            Some((Some(vec![0x65, 0x323, 0x302]), vec![0x65, 0x323, 0x302]))
         );
-        let pooled = pooled(&[(1, vec![7]), (2, vec![7]), (3, vec![7, 8])]).expect("fits");
-        assert_eq!(pooled.entries, [(1, 0, 1), (2, 0, 1), (3, 1, 2)]);
-        assert_eq!(pooled.pool, [7, 7, 8]);
+        assert_eq!(
+            of(0x3392),
+            Some((None, vec![0x65, 0x323, 0x302, 0x48])),
+            "a compatibility mapping is no canonical one, yet expands through them"
+        );
+        assert_eq!(of(0x65), None);
+        let pooled = pooled(&decompositions).expect("fits");
+        let at = pooled
+            .entries
+            .iter()
+            .find(|entry| entry.0 == 0x1ec7)
+            .expect("listed");
+        assert_eq!((at.1, at.2), (at.3, at.4), "one sequence is pooled once");
+    }
+
+    #[test]
+    fn composites_are_the_canonical_pairs_nothing_excludes() {
+        let data = Data::read(FRAGMENT).expect("well-formed");
+        let none = std::collections::BTreeSet::new();
+        assert_eq!(
+            data.compositions(&none),
+            Ok(vec![(0x65, 0x323, 0x1eb9), (0x1eb9, 0x302, 0x1ec7)]),
+            "the singleton and the non-starter decomposition compose nothing"
+        );
+        let excluded = std::collections::BTreeSet::from([0x1ec7]);
+        assert_eq!(
+            data.compositions(&excluded),
+            Ok(vec![(0x65, 0x323, 0x1eb9)])
+        );
+        assert_eq!(
+            data.class_ranges(),
+            [
+                (0x302, 0x302, 230),
+                (0x323, 0x323, 220),
+                (0x344, 0x344, 230)
+            ]
+        );
     }
 
     #[test]
     fn a_decomposition_cycle_is_refused() {
-        let text = "0041;A;Lu;0;L;0042;;;;N;;;;;\n0042;B;Lu;0;L;0041;;;;N;;;;;\n";
+        let text = "0041;A;Lu;0;L;0042;;;;N;;;;;\n0042;B;Lu;0;L;0041;;;;N;;;;;\n\
+                    AC00;<Hangul Syllable, First>;Lo;0;L;;;;;N;;;;;\n\
+                    D7A3;<Hangul Syllable, Last>;Lo;0;L;;;;;N;;;;;\n";
         let data = Data::read(text).expect("well-formed");
-        assert!(data.decomposed_marks().is_err());
+        assert!(data.decompositions().is_err());
+    }
+
+    #[test]
+    fn a_mapping_the_runtime_could_not_follow_is_refused() {
+        let syllables = "AC00;<Hangul Syllable, First>;Lo;0;L;;;;;N;;;;;\n\
+                         D7A3;<Hangul Syllable, Last>;Lo;0;L;;;;;N;;;;;\n";
+        let into_a_syllable = format!("3200;X;So;0;L;<circle> AC00;;;;N;;;;;\n{syllables}");
+        assert!(Data::read(&into_a_syllable).is_err());
+        let three = format!("00C0;X;Lu;0;L;0041 0300 0301;;;;N;;;;;\n{syllables}");
+        assert!(Data::read(&three).is_err());
+        assert!(
+            Data::read("0041;A;Lu;0;L;;;;;N;;;;;\n").is_err(),
+            "no syllables"
+        );
+    }
+
+    #[test]
+    fn only_corrections_made_after_unicode_3_2_are_undone() {
+        let data = Data::read(
+            "F951;X;Lo;0;L;964B;;;;N;;;;;\n2F868;Y;Lo;0;L;36FC;;;;N;;;;;\n\
+             AC00;<Hangul Syllable, First>;Lo;0;L;;;;;N;;;;;\n\
+             D7A3;<Hangul Syllable, Last>;Lo;0;L;;;;;N;;;;;\n",
+        )
+        .expect("well-formed");
+        let corrections = "F951;96FB;964B;3.2.0 # Corrigendum 3\n\
+                           2F868;2136A;36FC;4.0.0 # Corrigendum 4\n";
+        assert_eq!(
+            decomposed_in_stringprep(corrections, &data),
+            Ok(vec![(0x2f868, 0x2136a)])
+        );
+        assert!(
+            decomposed_in_stringprep("2F868;2136A;1234;4.0.0\n", &data).is_err(),
+            "a correction must be the mapping the release holds"
+        );
+    }
+
+    #[test]
+    fn rfc_tables_are_read_past_their_page_furniture() {
+        let text = "   ----- Start Table X.1 -----\n   0221\n   0234-024F; NAME\n\n\n\n\
+                    Hoffman & Blanchet          Standards Track                    [Page 23]\n\
+                    \u{c}\nRFC 3454        Preparation of Internationalized Strings   December 2002\n\n\
+                    \n   1D173-1D17A; [MUSICAL]\n   ----- End Table X.1 -----\n";
+        assert_eq!(
+            rfc_ranges(text, "X.1"),
+            Ok(vec![(0x221, 0x221), (0x234, 0x24f), (0x1d173, 0x1d17a)])
+        );
+        assert!(rfc_ranges(text, "X.2").is_err(), "a table it lacks");
+        let stray =
+            "   ----- Start Table X.1 -----\n   0221\n   oops\n   ----- End Table X.1 -----\n";
+        assert!(
+            rfc_ranges(stray, "X.1").is_err(),
+            "a line that is no code point"
+        );
+        let open = "   ----- Start Table X.1 -----\n   0221\n";
+        assert!(rfc_ranges(open, "X.1").is_err(), "a table that never ends");
     }
 
     #[test]

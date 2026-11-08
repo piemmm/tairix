@@ -748,7 +748,7 @@ tairix/
 │   ├── touch/           # Seat touch gesture recogniser: frames to pointer, scroll, pinch.
 │   ├── tty/             # Shared tty line discipline (echo/ONLCR/^C).
 │   ├── tz/              # Civil time zones: compiled IANA rule store reader.
-│   ├── unicode/         # Unicode properties for showing untrusted text (UCD tables).
+│   ├── unicode/         # Unicode properties, normalization, SASLprep (UCD tables).
 │   ├── usb/             # Bus-agnostic xHCI USB host-controller protocol.
 │   ├── useradmin/       # Shared `users_admin` client: requests, listings, refusals.
 │   ├── users/           # User-account database.

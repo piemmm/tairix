@@ -1,24 +1,28 @@
-//! Unicode character properties: what showing text a stranger authored asks of
-//! a character and of a string — whether a character hides, whether it is a
-//! nonspacing mark, whether a combining sequence carries too many marks or one
-//! twice, and how a string's scripts mix (UTS #39 §5, Unicode Security
-//! Mechanisms) — answered from tables generated out of the Unicode Character
-//! Database in the crate's `assets/`.
+//! Unicode character properties and the algorithms over them: what showing
+//! text a stranger authored asks of a character and of a string — whether a
+//! character hides, whether it is a nonspacing mark, whether a combining
+//! sequence carries too many marks or one twice, and how a string's scripts
+//! mix (UTS #39 §5, Unicode Security Mechanisms) — normalization (UAX #15),
+//! and SASLprep (RFC 4013), from tables generated out of the Unicode
+//! Character Database and RFC 3454 in the crate's `assets/`.
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod normalize;
+mod stringprep;
 // Generated, so laid out by its generator.
 #[rustfmt::skip]
 mod tables;
 
-pub use tables::VERSION;
+pub use normalize::{normalize, Form, Overflow};
+pub use stringprep::{saslprep, SaslprepError, Unassigned};
+pub use tables::{MAX_DECOMPOSITION, VERSION};
 
 use tables::{
-    BOPO, CYRL, DECOMPOSED, DECOMPOSED_MARKS, DEFAULT_IGNORABLE, EXTENSIONS, EXTENSION_SETS, GREK,
-    HANB, HANG, HANI, HIRA, HNTL, JPAN, KANA, KORE, LATN, NONSPACING_MARKS, RECOMMENDED, SCRIPTS,
-    SET_WORDS, ZINH, ZYYY,
+    BOPO, CYRL, DEFAULT_IGNORABLE, EXTENSIONS, EXTENSION_SETS, GREK, HANB, HANG, HANI, HIRA, HNTL,
+    JPAN, KANA, KORE, LATN, NONSPACING_MARKS, RECOMMENDED, SCRIPTS, SET_WORDS, ZINH, ZYYY,
 };
 
 /// Whether `ch` draws nothing where it stands yet can hide, reorder or break
@@ -75,7 +79,7 @@ impl MarkRun {
         }
         let earlier = self.len;
         match decomposed_marks(ch) {
-            Some(carried) => carried.iter().all(|&carried| self.push(carried, earlier)),
+            Some(mut carried) => carried.all(|carried| self.push(carried, earlier)),
             None => !mark || self.push(ch, earlier),
         }
     }
@@ -116,20 +120,20 @@ impl Faithful {
 
 /// The nonspacing marks `ch`'s full canonical decomposition is written with,
 /// where it has any.
-fn decomposed_marks(ch: char) -> Option<&'static [char]> {
-    if ch.is_ascii() {
-        return None;
-    }
-    let code = u32::from(ch);
-    let index = DECOMPOSED
-        .binary_search_by_key(&code, |&(decomposed, _, _)| decomposed)
-        .ok()?;
-    let &(_, at, len) = DECOMPOSED.get(index)?;
-    let at = usize::from(at);
-    DECOMPOSED_MARKS.get(at..at + usize::from(len))
+fn decomposed_marks(ch: char) -> Option<impl Iterator<Item = char>> {
+    let parts = normalize::canonical_decomposition(ch)?;
+    let marks = parts
+        .iter()
+        .copied()
+        .filter(|&part| is_nonspacing_mark(part));
+    parts
+        .iter()
+        .any(|&part| is_nonspacing_mark(part))
+        .then_some(marks)
 }
 
-const fn in_ranges(ranges: &[(u32, u32)], code: u32) -> bool {
+/// Whether `code` lies in one of `ranges`, sorted and disjoint.
+pub(crate) const fn in_ranges(ranges: &[(u32, u32)], code: u32) -> bool {
     let (mut low, mut high) = (0, ranges.len());
     while low < high {
         let mid = low + (high - low) / 2;

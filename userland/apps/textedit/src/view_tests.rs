@@ -25,14 +25,13 @@ use crate::detect::LineEnding;
 use crate::document::{Document, MAX_ROW_BYTES};
 use crate::editor::{Editor, Mode};
 use crate::find::Step;
-use crate::layout::{Faces, Layout};
+use crate::layout::Faces;
 use tairix_sandbox::decode::Isa;
 
 const CLICK: Duration64 = Duration64::from_millis(500);
 
 struct Harness {
     view: View,
-    layout: Layout,
     registry: ThemeRegistry,
     now: u64,
 }
@@ -48,36 +47,31 @@ impl Harness {
             Access::Writable,
             CLICK,
         );
-        let layout = view.layout(
-            900,
-            600,
-            registry.active(),
-            Scale::ONE,
-            faces(registry.active()),
-        );
         let mut harness = Self {
             view,
-            layout,
             registry,
             now: 1_000_000_000,
         };
-        harness.view.settle(&harness.layout, &mut Region::new());
+        harness.relayout();
         harness
     }
 
+    /// Lay the window out again, as the host does when an outcome asks.
     fn relayout(&mut self) {
-        self.layout = self.view.layout(
+        let theme = self.registry.active();
+        self.view.lay_out(
             900,
             600,
-            self.registry.active(),
+            theme,
             Scale::ONE,
-            faces(self.registry.active()),
+            faces(theme),
+            &mut Region::new(),
         );
     }
 
     fn key(&mut self, key: Key, modifiers: Modifiers) -> (super::Outcome, Region) {
         let mut damage = Region::new();
-        let outcome = self.view.on_key(key, modifiers, &self.layout, &mut damage);
+        let outcome = self.view.on_key(key, modifiers, &mut damage);
         if outcome.relayout != Relayout::None {
             self.relayout();
         }
@@ -92,7 +86,6 @@ impl Harness {
                 key,
                 modifiers: Modifiers::default(),
             },
-            &self.layout,
             Scale::ONE,
             self.registry.active(),
             &mut damage,
@@ -125,14 +118,9 @@ impl Harness {
     fn pointer(&mut self, event: InputEvent) -> super::Outcome {
         let theme = ThemeRegistry::with_builtins();
         let mut damage = Region::new();
-        let outcome = self.view.on_pointer(
-            &event,
-            self.now,
-            &self.layout,
-            Scale::ONE,
-            theme.active(),
-            &mut damage,
-        );
+        let outcome =
+            self.view
+                .on_pointer(&event, self.now, Scale::ONE, theme.active(), &mut damage);
         if outcome.relayout != Relayout::None {
             self.relayout();
         }
@@ -146,8 +134,8 @@ impl Harness {
 
     /// Click the grid cell at `row` and `column`, `dx` pixels into it.
     fn click_in(&mut self, row: usize, column: usize, dx: u32) -> super::Outcome {
-        let (cell_w, cell_h) = self.layout.cell();
-        let grid = self.layout.grid();
+        let (cell_w, cell_h) = self.view.layout().cell();
+        let grid = self.view.layout().grid();
         let across = |index: usize, cell: u32, into: u32| {
             i32::try_from(u32::try_from(index).expect("small") * cell + into).expect("on screen")
         };
@@ -191,14 +179,14 @@ fn a_keystroke_repaints_its_row_and_the_status_band_not_the_window() {
     harness.click(1, 3);
     let (_, damage) = harness.key(Key::Char('!'), Modifiers::default());
     assert_eq!(harness.text(), b"one\ntwo!\nthree\n");
-    assert!(touches(&damage, harness.layout.row_rect(1)));
-    assert!(touches(&damage, harness.layout.status()));
+    assert!(touches(&damage, harness.view.layout().row_rect(1)));
+    assert!(touches(&damage, harness.view.layout().status()));
     assert!(
-        !touches(&damage, harness.layout.row_rect(0)),
+        !touches(&damage, harness.view.layout().row_rect(0)),
         "the row above is untouched"
     );
     assert!(
-        !touches(&damage, harness.layout.row_rect(2)),
+        !touches(&damage, harness.view.layout().row_rect(2)),
         "the row below is untouched"
     );
 }
@@ -210,7 +198,10 @@ fn a_new_line_repaints_every_row_below_it() {
     let (_, damage) = harness.key(Key::Named(NamedKey::Enter), Modifiers::default());
     assert_eq!(harness.text(), b"one\n\ntwo\nthree\n");
     for row in 0..4 {
-        assert!(touches(&damage, harness.layout.row_rect(row)), "row {row}");
+        assert!(
+            touches(&damage, harness.view.layout().row_rect(row)),
+            "row {row}"
+        );
     }
 }
 
@@ -218,7 +209,7 @@ fn a_new_line_repaints_every_row_below_it() {
 fn the_gutter_widening_lays_the_window_out_again() {
     let text = alloc::vec![b'\n'; 998];
     let mut harness = Harness::new(&text, Format::PlainText);
-    assert_eq!(harness.layout.gutter_digits(), 3);
+    assert_eq!(harness.view.layout().gutter_digits(), 3);
     harness.ctrl('a', false);
     harness.press(Key::Named(NamedKey::End));
     let outcome = harness.press(Key::Named(NamedKey::Enter));
@@ -253,7 +244,7 @@ fn clicks_place_the_caret_select_a_word_then_a_line() {
 #[test]
 fn a_double_click_selects_the_word_under_the_pointer_whichever_half() {
     let mut harness = Harness::new(b"let value = 1;\nnext\n", Format::PlainText);
-    let right = harness.layout.cell().0 - 1;
+    let right = harness.view.layout().cell().0 - 1;
     harness.click_in(0, 8, right);
     harness.now -= 900;
     harness.click_in(0, 8, right);
@@ -295,9 +286,7 @@ fn the_find_bar_opens_seeded_searches_and_closes() {
     assert_eq!(found, Step::Found(11..16));
     let generation = harness.view.editor().generation();
     let mut damage = Region::new();
-    harness
-        .view
-        .found(id, generation, found, None, &harness.layout, &mut damage);
+    harness.view.found(id, generation, found, None, &mut damage);
     assert_eq!(harness.view.editor().selection().range(), 11..16);
     let outcome = harness.press(Key::Named(NamedKey::Escape));
     assert_eq!(outcome.relayout, Relayout::Whole);
@@ -316,14 +305,9 @@ fn an_answer_for_an_older_document_is_not_believed() {
     };
     let stale = harness.view.editor().generation() + 1;
     let mut damage = Region::new();
-    harness.view.found(
-        id,
-        stale,
-        Step::Found(5..7),
-        None,
-        &harness.layout,
-        &mut damage,
-    );
+    harness
+        .view
+        .found(id, stale, Step::Found(5..7), None, &mut damage);
     assert_eq!(harness.view.editor().selection().range(), 0..0);
     assert!(harness
         .view
@@ -338,7 +322,7 @@ fn replace_all_replaces_every_match_as_one_step_and_counts_them() {
     harness.type_str("dog");
     harness.press(Key::Named(NamedKey::Tab));
     harness.type_str("cat");
-    let all = harness.layout.find_buttons()[6];
+    let all = harness.view.layout().find_buttons()[6];
     harness.pointer(InputEvent::PointerMoved { to: all.center() });
     harness.pointer(InputEvent::PointerPressed {
         button: PointerButton::Primary,
@@ -364,14 +348,9 @@ fn replace_all_replaces_every_match_as_one_step_and_counts_them() {
         more: false,
     };
     let mut damage = Region::new();
-    harness.view.found(
-        id,
-        generation,
-        step,
-        Some(&bytes),
-        &harness.layout,
-        &mut damage,
-    );
+    harness
+        .view
+        .found(id, generation, step, Some(&bytes), &mut damage);
     assert_eq!(harness.text(), b"dog dog dog");
     assert_eq!(harness.view.message(), Some("Replaced 3"));
     harness.ctrl('z', false);
@@ -411,9 +390,7 @@ fn a_question_open_over_the_text_does_not_hold_a_quit() {
     harness.type_str("x");
     harness.ctrl('l', false);
     assert!(harness.view.modal().is_some());
-    let outcome = harness
-        .view
-        .close_requested(&harness.layout, &mut Region::new());
+    let outcome = harness.view.close_requested(&mut Region::new());
     assert!(matches!(outcome.request, Some(Request::AskToClose)));
     assert!(!harness.view.asking_to_close());
 }
@@ -424,12 +401,12 @@ fn go_to_line_asks_in_a_dialog_of_its_own_and_goes_there() {
     harness.ctrl('l', false);
     let wanted = harness
         .view
-        .dialog_window(&harness.layout, Scale::ONE, harness.registry.active())
+        .dialog_window(Scale::ONE, harness.registry.active())
         .expect("the question asks for a dialog");
     assert_eq!(wanted.title, "Go to line");
     assert_eq!(wanted.modality, DialogModality::Modeless);
     assert!(
-        tairix_window::docapp::fits_beside(wanted.rect, harness.layout.window()),
+        tairix_window::docapp::fits_beside(wanted.rect, harness.view.layout().window()),
         "drawn beside the window, never over it"
     );
     harness.dialog_key(Key::Char('3'));
@@ -464,7 +441,7 @@ fn typing_a_line_number_repaints_the_question_not_the_window() {
     let (dialog, _) = harness.view.modal().expect("the question stays");
     let question = View::modal_rect(
         dialog,
-        harness.layout.window(),
+        harness.view.layout().window(),
         Scale::ONE,
         harness.registry.active(),
     );
@@ -483,11 +460,12 @@ fn moving_the_caret_in_the_hex_view_repaints_the_rows_it_left_and_reached() {
     let mut harness = Harness::new(&[0u8; 4096], Format::PlainText);
     assert_eq!(harness.view.editor().mode(), Mode::Hex);
     let (_, damage) = harness.key(Key::Named(NamedKey::Down), Modifiers::default());
-    let grid = harness.layout.grid();
+    let grid = harness.view.layout().grid();
     let rows = harness
-        .layout
+        .view
+        .layout()
         .row_rect(0)
-        .union(&harness.layout.row_rect(1));
+        .union(&harness.view.layout().row_rect(1));
     assert!(
         damage
             .rects()
@@ -517,7 +495,7 @@ fn copy_cut_and_paste_go_through_the_clipboard_requests() {
         Some(Request::Own(Own::Paste))
     ));
     let mut damage = Region::new();
-    harness.view.paste(b"bye", &harness.layout, &mut damage);
+    harness.view.paste(b"bye", &mut damage);
     assert_eq!(harness.text(), b"bye");
     harness.ctrl('a', false);
     assert!(matches!(
@@ -613,7 +591,7 @@ fn a_secondary_press_anywhere_opens_the_window_menu_where_it_landed() {
     let mut harness = Harness::new(b"one\ntwo\n", Format::PlainText);
     harness.ctrl('f', false);
     harness.relayout();
-    let layout = harness.layout.clone();
+    let layout = harness.view.layout().clone();
     for (what, band) in [
         ("grid", layout.grid()),
         ("gutter", layout.gutter()),
@@ -674,12 +652,10 @@ fn a_focus_change_repaints_only_the_caret_row() {
     let mut harness = Harness::new(b"one\ntwo\nthree\n", Format::PlainText);
     harness.click(1, 1);
     let mut damage = Region::new();
-    harness
-        .view
-        .focus_changed(false, &harness.layout, &mut damage);
-    assert!(touches(&damage, harness.layout.row_rect(1)));
-    assert!(!touches(&damage, harness.layout.row_rect(0)));
-    assert!(!touches(&damage, harness.layout.row_rect(2)));
+    harness.view.focus_changed(false, &mut damage);
+    assert!(touches(&damage, harness.view.layout().row_rect(1)));
+    assert!(!touches(&damage, harness.view.layout().row_rect(0)));
+    assert!(!touches(&damage, harness.view.layout().row_rect(2)));
 }
 
 #[test]
@@ -687,34 +663,30 @@ fn a_focus_change_in_hex_repaints_only_the_caret_row() {
     let text: Vec<u8> = (0..64).collect();
     let mut harness = Harness::new(&text, Format::PlainText);
     let id = AppMenuItemId::new(Action::Mode(Mode::Hex).id()).expect("an id");
-    harness.view.chosen(id, &harness.layout, &mut Region::new());
+    harness.view.chosen(id, &mut Region::new());
     harness.relayout();
     harness.press(Key::Named(NamedKey::Down));
     assert_eq!(harness.view.editor().selection().head, 16);
     let mut damage = Region::new();
-    harness
-        .view
-        .focus_changed(true, &harness.layout, &mut damage);
-    assert!(touches(&damage, harness.layout.row_rect(1)));
-    assert!(!touches(&damage, harness.layout.row_rect(0)));
-    assert!(!touches(&damage, harness.layout.row_rect(2)));
+    harness.view.focus_changed(true, &mut damage);
+    assert!(touches(&damage, harness.view.layout().row_rect(1)));
+    assert!(!touches(&damage, harness.view.layout().row_rect(0)));
+    assert!(!touches(&damage, harness.view.layout().row_rect(2)));
 }
 
 #[test]
 fn a_caret_scrolled_out_of_view_repaints_nothing_on_a_focus_change() {
     let text: Vec<u8> = b"line\n".repeat(400);
     let mut harness = Harness::new(&text, Format::PlainText);
-    let grid = harness.layout.grid();
+    let grid = harness.view.layout().grid();
     harness.pointer(InputEvent::PointerMoved { to: grid.center() });
     harness.pointer(InputEvent::PointerScrolled {
         dx: 0,
         dy: 100 * SCROLL_UNITS_PER_DETENT,
     });
-    assert!(harness.view.scroll().0.line > harness.layout.rows());
+    assert!(harness.view.scroll().0.line > harness.view.layout().rows());
     let mut damage = Region::new();
-    harness
-        .view
-        .focus_changed(false, &harness.layout, &mut damage);
+    harness.view.focus_changed(false, &mut damage);
     assert!(damage.is_empty(), "the caret's row is not on screen");
 }
 
@@ -723,7 +695,7 @@ fn a_chosen_row_runs_its_action() {
     let mut harness = Harness::new(b"text", Format::PlainText);
     let id = AppMenuItemId::new(Action::Mode(Mode::Hex).id()).expect("an id");
     let mut damage = Region::new();
-    let outcome = harness.view.chosen(id, &harness.layout, &mut damage);
+    let outcome = harness.view.chosen(id, &mut damage);
     assert_eq!(outcome.relayout, Relayout::Whole);
     assert_eq!(harness.view.editor().mode(), Mode::Hex);
     assert_eq!(
@@ -737,7 +709,7 @@ fn a_chosen_row_runs_its_action() {
 #[test]
 fn the_status_fields_open_their_menus() {
     let mut harness = Harness::new(b"text", Format::PlainText);
-    let field = harness.layout.status_fields()[4];
+    let field = harness.view.layout().status_fields()[4];
     harness.pointer(InputEvent::PointerMoved { to: field.center() });
     let outcome = harness.pointer(InputEvent::PointerPressed {
         button: PointerButton::Primary,
@@ -749,7 +721,7 @@ fn the_status_fields_open_their_menus() {
             ..
         })
     ));
-    let overwrite = harness.layout.status_fields()[0];
+    let overwrite = harness.view.layout().status_fields()[0];
     harness.pointer(InputEvent::PointerMoved {
         to: overwrite.center(),
     });
@@ -766,7 +738,7 @@ fn the_wheel_scrolls_and_the_next_key_brings_the_caret_back() {
         text.extend_from_slice(alloc::format!("line {line}\n").as_bytes());
     }
     let mut harness = Harness::new(&text, Format::PlainText);
-    let grid = harness.layout.grid();
+    let grid = harness.view.layout().grid();
     harness.pointer(InputEvent::PointerMoved { to: grid.center() });
     harness.pointer(InputEvent::PointerScrolled { dx: 0, dy: 1200 });
     assert!(harness.view.scroll().0.line > 0, "the wheel moved the view");
@@ -858,21 +830,16 @@ fn a_lexed_batch_repaints_only_the_rows_it_coloured() {
     let mut harness = Harness::new(b"[a]\nkey = 1\nother = 2\n", Format::Toml);
     let job = harness
         .view
-        .lex_job(&harness.layout)
+        .lex_job()
         .expect("a batch to colour the window");
     let mut damage = Region::new();
-    harness.view.lexed(
-        job.id + 1,
-        &lexed_answer(&job),
-        &harness.layout,
-        &mut damage,
-    );
-    assert!(damage.is_empty(), "a stale answer colours nothing");
     harness
         .view
-        .lexed(job.id, &lexed_answer(&job), &harness.layout, &mut damage);
+        .lexed(job.id + 1, &lexed_answer(&job), &mut damage);
+    assert!(damage.is_empty(), "a stale answer colours nothing");
+    harness.view.lexed(job.id, &lexed_answer(&job), &mut damage);
     assert!(!damage.is_empty());
-    let grid = harness.layout.grid();
+    let grid = harness.view.layout().grid();
     assert!(
         damage.rects().iter().all(|rect| rect.height < grid.height),
         "row rectangles, not the whole grid"
@@ -883,9 +850,7 @@ impl Harness {
     /// Ask for the line breaks to be converted to `to`, answering the id the
     /// conversion is known by.
     fn ask_conversion(&mut self, to: LineEnding) -> u64 {
-        let outcome = self
-            .view
-            .act(Action::LineEnding(to), &self.layout, &mut Region::new());
+        let outcome = self.view.act(Action::LineEnding(to), &mut Region::new());
         let Some(Request::Own(Own::Convert { id, to: asked })) = outcome.request else {
             panic!("a conversion is asked for");
         };
@@ -903,26 +868,16 @@ fn a_conversion_is_adopted_only_for_the_document_it_was_taken_from() {
     let mut damage = Region::new();
     let id = harness.ask_conversion(LineEnding::CrLf);
     let chunks = Some(alloc::vec![b"one\r\ntwo\r\n".to_vec()]);
-    let _ = harness.view.converted(
-        id,
-        generation,
-        chunks,
-        LineEnding::CrLf,
-        &harness.layout,
-        &mut damage,
-    );
+    let _ = harness
+        .view
+        .converted(id, generation, chunks, LineEnding::CrLf, &mut damage);
     assert_eq!(harness.view.editor().line_ending(), LineEnding::CrLf);
     assert!(harness.view.editor().is_modified());
     let id = harness.ask_conversion(LineEnding::Lf);
     let stale = Some(alloc::vec![b"x".to_vec()]);
-    let _ = harness.view.converted(
-        id,
-        generation,
-        stale,
-        LineEnding::Lf,
-        &harness.layout,
-        &mut damage,
-    );
+    let _ = harness
+        .view
+        .converted(id, generation, stale, LineEnding::Lf, &mut damage);
     assert_eq!(
         harness.view.editor().document().to_vec().expect("room"),
         b"one\r\ntwo\r\n"
@@ -943,38 +898,26 @@ fn an_overtaken_conversion_is_not_adopted() {
     let newer = harness.ask_conversion(LineEnding::Lf);
     assert!(!harness.view.wants_conversion(older));
     assert!(harness.view.wants_conversion(newer));
-    let layout = &harness.layout;
-    let _ = harness.view.converted(
-        older,
-        generation,
-        crlf(),
-        LineEnding::CrLf,
-        layout,
-        &mut damage,
-    );
+    let _ = harness
+        .view
+        .converted(older, generation, crlf(), LineEnding::CrLf, &mut damage);
     assert!(
         !harness.view.editor().is_modified(),
         "the older one is let go"
     );
     let _ = harness
         .view
-        .converted(newer, generation, None, LineEnding::Lf, layout, &mut damage);
+        .converted(newer, generation, None, LineEnding::Lf, &mut damage);
     assert!(!harness.view.wants_conversion(newer), "answered once");
 
     let older = harness.ask_conversion(LineEnding::Lf);
     let newer = harness.ask_conversion(LineEnding::CrLf);
-    let layout = &harness.layout;
-    let _ = harness.view.converted(
-        newer,
-        generation,
-        crlf(),
-        LineEnding::CrLf,
-        layout,
-        &mut damage,
-    );
     let _ = harness
         .view
-        .converted(older, generation, None, LineEnding::Lf, layout, &mut damage);
+        .converted(newer, generation, crlf(), LineEnding::CrLf, &mut damage);
+    let _ = harness
+        .view
+        .converted(older, generation, None, LineEnding::Lf, &mut damage);
     assert_eq!(harness.view.editor().line_ending(), LineEnding::CrLf);
     assert_eq!(
         harness.view.editor().document().to_vec().expect("room"),
@@ -986,9 +929,7 @@ fn an_overtaken_conversion_is_not_adopted() {
 fn a_detected_format_applies_until_the_user_chooses_one() {
     let mut harness = Harness::new(b"<!doctype html>\n<p>hi</p>\n", Format::PlainText);
     let mut damage = Region::new();
-    let outcome = harness
-        .view
-        .detected(Format::Html, &harness.layout, &mut damage);
+    let outcome = harness.view.detected(Format::Html, &mut damage);
     assert_eq!(
         outcome.relayout,
         Relayout::Whole,
@@ -997,14 +938,10 @@ fn a_detected_format_applies_until_the_user_chooses_one() {
     assert_eq!(harness.view.editor().format(), Format::Html);
 
     harness.relayout();
-    let chosen = harness
-        .view
-        .act(Action::Format(Format::Xml), &harness.layout, &mut damage);
+    let chosen = harness.view.act(Action::Format(Format::Xml), &mut damage);
     assert_eq!(chosen.relayout, Relayout::Whole);
     harness.relayout();
-    let late = harness
-        .view
-        .detected(Format::Html, &harness.layout, &mut damage);
+    let late = harness.view.detected(Format::Html, &mut damage);
     assert!(
         late.relayout == Relayout::None && late.request.is_none(),
         "a late detection changes nothing"
@@ -1045,9 +982,7 @@ fn a_store_is_checked_once_its_edits_pause() {
 
     let generation = harness.view.editor().generation();
     let mut damage = Region::new();
-    harness
-        .view
-        .checked(generation, Vec::new(), &harness.layout, &mut damage);
+    harness.view.checked(generation, Vec::new(), &mut damage);
     assert_eq!(harness.view.check_due(later), None, "checked as it is");
 
     let mut plain = Harness::new(b"notes\n", Format::PlainText);
@@ -1075,7 +1010,7 @@ fn the_clipboard_keys_act_on_the_find_field_that_has_the_keyboard() {
     let outcome = harness.ctrl('v', false);
     assert!(matches!(outcome.request, Some(Request::Own(Own::Paste))));
     let mut damage = Region::new();
-    let _ = harness.view.paste(b"alpha", &harness.layout, &mut damage);
+    let _ = harness.view.paste(b"alpha", &mut damage);
     assert_eq!(
         harness.view.find.text(),
         "alpha",
@@ -1119,7 +1054,7 @@ fn the_window_menu_acts_on_what_the_secondary_press_landed_on() {
     harness.ctrl('f', false);
     harness.view.find.set_text("beta");
     harness.relayout();
-    let layout = harness.layout.clone();
+    let layout = harness.view.layout().clone();
     let secondary = |harness: &mut Harness, at: Point| {
         harness.pointer(InputEvent::PointerMoved { to: at });
         let outcome = harness.pointer(InputEvent::PointerPressed {
@@ -1132,7 +1067,7 @@ fn the_window_menu_acts_on_what_the_secondary_press_landed_on() {
     };
     let choose = |harness: &mut Harness, action: Action| {
         let id = AppMenuItemId::new(action.id()).expect("an id");
-        harness.view.chosen(id, &harness.layout, &mut Region::new())
+        harness.view.chosen(id, &mut Region::new())
     };
 
     secondary(&mut harness, layout.find_field().center());
@@ -1178,9 +1113,7 @@ fn find_next_moves_on_past_a_match_inside_a_character() {
                     step => break step,
                 }
             };
-            harness
-                .view
-                .found(id, generation, step, None, &harness.layout, &mut damage);
+            harness.view.found(id, generation, step, None, &mut damage);
             found.push(harness.view.editor().selection().range());
         }
     }
@@ -1208,9 +1141,7 @@ fn find_next_moves_on_past_a_match_inside_a_character() {
                 step => break step,
             }
         };
-        harness
-            .view
-            .found(id, generation, step, None, &harness.layout, &mut damage);
+        harness.view.found(id, generation, step, None, &mut damage);
         found.push(harness.view.editor().selection().range());
     }
     assert_eq!(
@@ -1269,8 +1200,11 @@ fn the_find_bar_holds_no_more_than_a_pattern_spelled_in_hex() {
 fn a_blank_document_is_measured_once_not_on_every_event() {
     let mut harness = Harness::new(b"\n\n\n", Format::PlainText);
     let mut damage = Region::new();
-    harness.view.settle(&harness.layout, &mut damage);
-    let grid = harness.layout.grid();
+    let theme = harness.registry.active();
+    harness
+        .view
+        .lay_out(900, 600, theme, Scale::ONE, faces(theme), &mut damage);
+    let grid = harness.view.layout().grid();
     let covers = |rect: &&Rect| {
         rect.left() <= grid.left()
             && rect.top() <= grid.top()
@@ -1287,7 +1221,7 @@ fn a_blank_document_is_measured_once_not_on_every_event() {
 impl Harness {
     /// Turn the wheel `units` scroll units over the grid.
     fn wheel(&mut self, units: i32) {
-        let centre = self.layout.grid().center();
+        let centre = self.view.layout().grid().center();
         self.pointer(InputEvent::PointerMoved { to: centre });
         self.pointer(InputEvent::PointerScrolled { dx: 0, dy: units });
     }
@@ -1300,11 +1234,11 @@ impl Harness {
 #[test]
 fn a_wheel_detent_scrolls_the_rows_its_pixels_span() {
     let mut harness = Harness::new(&b"line\n".repeat(500), Format::PlainText);
-    let (_, cell_h) = harness.layout.cell();
+    let (_, cell_h) = harness.view.layout().cell();
     harness.wheel(SCROLL_UNITS_PER_DETENT);
     let rows = (WHEEL_STEP / cell_h) as usize;
     assert!(
-        rows > 0 && rows < harness.layout.rows(),
+        rows > 0 && rows < harness.view.layout().rows(),
         "a detent is a few rows"
     );
     assert_eq!(harness.top_index(), rows);
@@ -1313,7 +1247,7 @@ fn a_wheel_detent_scrolls_the_rows_its_pixels_span() {
 #[test]
 fn a_slow_wheel_adds_up_to_a_row() {
     let mut harness = Harness::new(&b"line\n".repeat(500), Format::PlainText);
-    let (_, cell_h) = harness.layout.cell();
+    let (_, cell_h) = harness.view.layout().cell();
     // A tenth of a detent at a time: well short of a row each.
     let step = SCROLL_UNITS_PER_DETENT / 10;
     let signed = |n: u32| i32::try_from(n).expect("small");
@@ -1332,8 +1266,8 @@ fn the_wheel_reaches_every_row_of_a_long_line_and_back() {
     let mut text = alloc::vec![b'x'; 40 * MAX_ROW_BYTES];
     text.extend_from_slice(b"\nend");
     let mut harness = Harness::new(&text, Format::PlainText);
-    let rows = harness.layout.rows();
-    let (_, cell_h) = harness.layout.cell();
+    let rows = harness.view.layout().rows();
+    let (_, cell_h) = harness.view.layout().cell();
     let per_detent = (WHEEL_STEP / cell_h) as usize;
     assert!(harness.view.scrollbars().0.model().range().is_scrollable());
     harness.wheel(SCROLL_UNITS_PER_DETENT);
@@ -1370,9 +1304,9 @@ fn the_wheel_reaches_every_row_of_a_long_line_and_back() {
 fn a_one_line_document_longer_than_the_window_scrolls() {
     let text = alloc::vec![b'y'; 128 * MAX_ROW_BYTES];
     let mut harness = Harness::new(&text, Format::PlainText);
-    let rows = harness.layout.rows();
+    let rows = harness.view.layout().rows();
     let model = harness.view.scrollbars().0.model();
-    let (_, cell_h) = harness.layout.cell();
+    let (_, cell_h) = harness.view.layout().cell();
     assert_eq!(
         model.range().max_offset(),
         (128 - rows) as u64 * u64::from(cell_h)
@@ -1435,9 +1369,7 @@ fn the_code_display_asks_once_and_lists_what_lands() {
         widest: 18,
     };
     let mut damage = Region::new();
-    harness
-        .view
-        .code_listed(id, Ok(listing), &harness.layout, &mut damage);
+    harness.view.code_listed(id, Ok(listing), &mut damage);
     assert!(!damage.is_empty(), "the listing repaints the grid");
     assert_eq!(
         harness.view.code_shown().map(|code| code.lines().len()),
@@ -1451,16 +1383,12 @@ fn showing_the_code_closes_the_find_bar_so_nothing_it_does_edits() {
     let before = harness.text();
     harness.ctrl('h', true);
     let mut damage = Region::new();
-    harness
-        .view
-        .act(Action::Replace, &harness.layout, &mut damage);
+    harness.view.act(Action::Replace, &mut damage);
     harness.relayout();
     assert!(harness.view.find_open());
     harness.type_str("ELF");
 
-    let outcome = harness
-        .view
-        .act(Action::ShowCode, &harness.layout, &mut damage);
+    let outcome = harness.view.act(Action::ShowCode, &mut damage);
     assert_eq!(outcome.relayout, Relayout::Whole);
     harness.relayout();
     assert!(harness.view.code_shown().is_some());
@@ -1469,9 +1397,7 @@ fn showing_the_code_closes_the_find_bar_so_nothing_it_does_edits() {
         "the find bar goes with the editor"
     );
     harness.press(Key::Named(NamedKey::Enter));
-    harness
-        .view
-        .act(Action::Replace, &harness.layout, &mut damage);
+    harness.view.act(Action::Replace, &mut damage);
     assert!(!harness.view.find_open(), "and is not opened over the code");
     assert_eq!(harness.text(), before);
 }
@@ -1536,9 +1462,7 @@ fn the_data_display_asks_once_and_shows_what_lands_before_the_bytes() {
         heading: true,
     }];
     let mut damage = Region::new();
-    harness
-        .view
-        .data_reported(id, Ok(report), &harness.layout, &mut damage);
+    harness.view.data_reported(id, Ok(report), &mut damage);
     assert!(!damage.is_empty(), "the report repaints the grid");
     let len = harness.view.editor().document().len();
     let data = harness.view.data_shown().expect("shown");
@@ -1568,19 +1492,13 @@ fn the_data_display_is_read_only_and_text_or_hex_leaves_it() {
         .message()
         .is_some_and(|message| message.starts_with("Data is read-only")));
     let mut damage = Region::new();
-    harness
-        .view
-        .act(Action::Mode(Mode::Hex), &harness.layout, &mut damage);
+    harness.view.act(Action::Mode(Mode::Hex), &mut damage);
     assert!(harness.view.data_shown().is_none(), "Hex leaves the data");
     assert_eq!(harness.view.editor().mode(), Mode::Hex);
-    let outcome = harness
-        .view
-        .act(Action::ShowData, &harness.layout, &mut damage);
+    let outcome = harness.view.act(Action::ShowData, &mut damage);
     assert_eq!(outcome.relayout, Relayout::Whole);
     assert!(harness.view.data_shown().is_some(), "and Data comes back");
-    let outcome = harness
-        .view
-        .act(Action::ShowCode, &harness.layout, &mut damage);
+    let outcome = harness.view.act(Action::ShowCode, &mut damage);
     assert_eq!(
         outcome.relayout,
         Relayout::None,
@@ -1597,7 +1515,7 @@ fn a_held_bar_arrow_repeats_and_ends_wherever_it_is_let_go() {
         text.extend_from_slice(alloc::format!("line {line}\n").as_bytes());
     }
     let mut harness = Harness::new(&text, Format::PlainText);
-    let bar = harness.layout.vertical_bar();
+    let bar = harness.view.layout().vertical_bar();
     let down = Point::new(bar.center().x, bar.bottom() - 2);
     harness.pointer(InputEvent::PointerMoved { to: down });
     harness.pointer(InputEvent::PointerPressed {
@@ -1612,21 +1530,20 @@ fn a_held_bar_arrow_repeats_and_ends_wherever_it_is_let_go() {
         .scroll_repeat_deadline(0)
         .expect("a held arrow arms a repeat");
     let mut moved = Region::new();
-    harness.view.scroll_repeat(
-        due,
-        &harness.layout,
-        Scale::ONE,
-        registry.active(),
-        &mut moved,
-    );
+    harness
+        .view
+        .scroll_repeat(due, Scale::ONE, registry.active(), &mut moved);
     assert!(
         harness.view.scroll().0.line > pressed,
         "the hold stepped again"
     );
-    assert!(touches(&moved, harness.layout.grid()), "and moved the text");
+    assert!(
+        touches(&moved, harness.view.layout().grid()),
+        "and moved the text"
+    );
 
     harness.pointer(InputEvent::PointerMoved {
-        to: harness.layout.grid().center(),
+        to: harness.view.layout().grid().center(),
     });
     harness.pointer(InputEvent::PointerReleased {
         button: PointerButton::Primary,
@@ -1651,9 +1568,9 @@ fn a_byte_put_into_the_hex_view_repaints_every_row_after_it() {
         4097,
         "a byte went in"
     );
-    let last = harness.layout.rows() - 1;
+    let last = harness.view.layout().rows() - 1;
     assert!(
-        touches(&damage, harness.layout.row_rect(last)),
+        touches(&damage, harness.view.layout().row_rect(last)),
         "row {last} shows moved bytes"
     );
 }
@@ -1668,7 +1585,10 @@ fn a_line_taking_another_row_repaints_every_row_below_it() {
     harness.click(0, 0);
     let (_, damage) = harness.key(Key::Char('b'), Modifiers::default());
     for row in 0..4 {
-        assert!(touches(&damage, harness.layout.row_rect(row)), "row {row}");
+        assert!(
+            touches(&damage, harness.view.layout().row_rect(row)),
+            "row {row}"
+        );
     }
 }
 
@@ -1681,12 +1601,12 @@ fn a_drag_that_scrolls_the_view_repaints_the_rows_it_moved() {
         text.extend_from_slice(alloc::format!("line {line}\n").as_bytes());
     }
     let mut harness = Harness::new(&text, Format::PlainText);
-    let grid = harness.layout.grid();
+    let grid = harness.view.layout().grid();
     harness.pointer(InputEvent::PointerMoved { to: grid.center() });
     harness.pointer(InputEvent::PointerScrolled { dx: 0, dy: 1200 });
     let top = harness.view.scroll().0.line;
     assert!(top > 0, "the wheel moved the view");
-    let cell_h = i32::try_from(harness.layout.cell().1).expect("small");
+    let cell_h = i32::try_from(harness.view.layout().cell().1).expect("small");
     let x = grid.left() + 4;
     harness.pointer(InputEvent::PointerMoved {
         to: Point::new(x, grid.top() + 3 * cell_h + 1),
@@ -1700,15 +1620,14 @@ fn a_drag_that_scrolls_the_view_repaints_the_rows_it_moved() {
             to: Point::new(x, grid.top() - 4),
         },
         harness.now,
-        &harness.layout,
         Scale::ONE,
         harness.registry.active(),
         &mut damage,
     );
     assert_eq!(harness.view.scroll().0.line, top - 1, "a row scrolled in");
-    let last = harness.layout.rows() - 1;
+    let last = harness.view.layout().rows() - 1;
     assert!(
-        touches(&damage, harness.layout.row_rect(last)),
+        touches(&damage, harness.view.layout().row_rect(last)),
         "row {last} moved"
     );
 }

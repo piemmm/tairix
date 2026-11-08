@@ -377,6 +377,8 @@ pub struct View {
     /// The document generation [`View::check_due`] last saw, and when it
     /// first saw it.
     seen: (u64, u64),
+    /// Where everything it draws goes, for its window's size.
+    layout: Layout,
 }
 
 impl SavedDocument for View {
@@ -416,7 +418,6 @@ impl SavedDocument for View {
 }
 
 impl DocumentView for View {
-    type Layout = Layout;
     type Faces = Faces;
     type MenuKind = MenuKind;
     type Own = Own;
@@ -429,26 +430,43 @@ impl DocumentView for View {
         View::write_title(self, title);
     }
 
-    fn layout(&self, width: u32, height: u32, theme: &Theme, scale: Scale, faces: Faces) -> Layout {
-        View::layout(self, width, height, theme, scale, faces)
+    fn lay_out(
+        &mut self,
+        width: u32,
+        height: u32,
+        theme: &Theme,
+        scale: Scale,
+        faces: Faces,
+        damage: &mut Region,
+    ) {
+        self.layout = Layout::for_window(
+            width,
+            height,
+            theme,
+            scale,
+            faces,
+            self.find_open,
+            self.gutter_digits(),
+        );
+        self.settle(damage);
     }
 
     fn min_size(&self, theme: &Theme, scale: Scale, faces: Faces) -> (u32, u32) {
         Layout::min_size(theme, scale, faces)
     }
 
-    fn settle(&mut self, layout: &Layout, damage: &mut Region) {
-        View::settle(self, layout, damage);
-    }
-
-    fn message_area(layout: &Layout) -> Rect {
-        layout.status()
+    fn message_area(&self) -> Rect {
+        self.layout.status()
     }
 
     /// The I-beam over text that takes a caret, the arrow over everything
     /// else.
-    fn cursor(&self, layout: &Layout, at: Point) -> CursorShape {
-        let text = [layout.grid(), layout.find_field(), layout.replace_field()];
+    fn cursor(&self, at: Point) -> CursorShape {
+        let text = [
+            self.layout.grid(),
+            self.layout.find_field(),
+            self.layout.replace_field(),
+        ];
         if self.modal.is_none() && text.iter().any(|rect| rect.contains(at)) {
             CursorShape::Text
         } else {
@@ -460,7 +478,7 @@ impl DocumentView for View {
         View::menu(self, kind)
     }
 
-    fn close_requested(&mut self, _layout: &Layout, _damage: &mut Region) -> Outcome {
+    fn close_requested(&mut self, _damage: &mut Region) -> Outcome {
         if self.editor.is_modified() {
             Outcome::asking(Request::AskToClose)
         } else {
@@ -468,42 +486,34 @@ impl DocumentView for View {
         }
     }
 
-    fn chosen(&mut self, item: AppMenuItemId, layout: &Layout, damage: &mut Region) -> Outcome {
-        View::chosen(self, item, layout, damage)
+    fn chosen(&mut self, item: AppMenuItemId, damage: &mut Region) -> Outcome {
+        View::chosen(self, item, damage)
     }
 
-    fn focus_changed(&mut self, focused: bool, layout: &Layout, damage: &mut Region) {
-        View::focus_changed(self, focused, layout, damage);
+    fn focus_changed(&mut self, focused: bool, damage: &mut Region) {
+        View::focus_changed(self, focused, damage);
     }
 
     fn input(
         &mut self,
         input: &InputEvent,
         now_ns: u64,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
         match *input {
-            InputEvent::KeyPressed { key, modifiers } => {
-                self.on_key(key, modifiers, layout, damage)
-            }
+            InputEvent::KeyPressed { key, modifiers } => self.on_key(key, modifiers, damage),
             InputEvent::KeyReleased { .. } => Outcome::none(),
-            _ => self.on_pointer(input, now_ns, layout, scale, theme, damage),
+            _ => self.on_pointer(input, now_ns, scale, theme, damage),
         }
     }
 
-    fn dialog_window(
-        &self,
-        layout: &Layout,
-        scale: Scale,
-        theme: &Theme,
-    ) -> Option<DialogWindow<'_>> {
+    fn dialog_window(&self, scale: Scale, theme: &Theme) -> Option<DialogWindow<'_>> {
         let (dialog, _) = self.modal()?;
         Some(DialogWindow {
             title: dialog.title(),
-            rect: Self::modal_rect(dialog, layout.window(), scale, theme),
+            rect: Self::modal_rect(dialog, self.layout.window(), scale, theme),
             modality: DialogModality::Modeless,
         })
     }
@@ -512,24 +522,23 @@ impl DocumentView for View {
         &mut self,
         input: &InputEvent,
         _now_ns: u64,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
-        self.on_dialog(input, layout, scale, theme, damage)
+        self.on_dialog(input, scale, theme, damage)
     }
 
-    fn dialog_focus_changed(&mut self, focused: bool, _layout: &Layout, _damage: &mut Region) {
+    fn dialog_focus_changed(&mut self, focused: bool, _damage: &mut Region) {
         if let Some(Modal::GoTo(_, field)) = &mut self.modal {
             field.set_focused(focused);
         }
     }
 
-    fn dialog_refused(&mut self, why: &str, layout: &Layout, damage: &mut Region) -> Outcome {
+    fn dialog_refused(&mut self, why: &str, damage: &mut Region) -> Outcome {
         self.modal = None;
         self.message = Some(alloc::format!("Go to line could not be asked: {why}"));
-        damage.add(layout.status());
+        damage.add(self.layout.status());
         Outcome::none()
     }
 
@@ -597,6 +606,7 @@ impl View {
             widest: None,
             format_chosen: false,
             seen: (0, 0),
+            layout: Layout::default(),
         }
     }
 
@@ -678,7 +688,7 @@ impl View {
 
     /// State why there is no listing or report in place of the one just
     /// wanted, asked of no worker.
-    pub fn display_refused(&mut self, unlisted: Unlisted, layout: &Layout, damage: &mut Region) {
+    pub fn display_refused(&mut self, unlisted: Unlisted, damage: &mut Region) {
         let generation = self.editor.generation();
         let Some(display) = &mut self.display else {
             return;
@@ -688,7 +698,7 @@ impl View {
             Display::Data(data) => data.refuse(unlisted, generation),
         }
         if display.showing() {
-            self.display_changed(layout, damage);
+            self.display_changed(damage);
         }
     }
 
@@ -697,14 +707,13 @@ impl View {
         &mut self,
         id: u64,
         listing: Result<CodeListing, Unlisted>,
-        layout: &Layout,
         damage: &mut Region,
     ) {
         let Some(Display::Code(code)) = &mut self.display else {
             return;
         };
         if code.listed(id, listing) && code.showing() {
-            self.display_changed(layout, damage);
+            self.display_changed(damage);
         }
     }
 
@@ -713,7 +722,6 @@ impl View {
         &mut self,
         id: u64,
         report: Result<Vec<ReportLine>, Unlisted>,
-        layout: &Layout,
         damage: &mut Region,
     ) {
         let len = self.editor.document().len();
@@ -721,15 +729,15 @@ impl View {
             return;
         };
         if data.reported(id, report, len) && data.showing() {
-            self.display_changed(layout, damage);
+            self.display_changed(damage);
         }
     }
 
     /// Repaint what a display that changed under the window fills.
-    fn display_changed(&mut self, layout: &Layout, damage: &mut Region) {
-        damage.add(layout.grid());
-        damage.add(layout.status());
-        self.sync_bars(layout, damage);
+    fn display_changed(&mut self, damage: &mut Region) {
+        damage.add(self.layout.grid());
+        damage.add(self.layout.status());
+        self.sync_bars(damage);
     }
 
     /// The editor, for `Run` to feed answers to.
@@ -796,25 +804,10 @@ impl View {
         (self.top, self.hex_top, self.left)
     }
 
-    /// The layout of a `width`×`height` window.
+    /// Where everything it draws goes, for its window's size.
     #[must_use]
-    pub fn layout(
-        &self,
-        width: u32,
-        height: u32,
-        theme: &Theme,
-        scale: Scale,
-        faces: Faces,
-    ) -> Layout {
-        Layout::for_window(
-            width,
-            height,
-            theme,
-            scale,
-            faces,
-            self.find_open,
-            self.gutter_digits(),
-        )
+    pub const fn layout(&self) -> &Layout {
+        &self.layout
     }
 
     fn gutter_digits(&self) -> u32 {
@@ -835,46 +828,46 @@ impl View {
     }
 
     /// The lines the text view shows.
-    fn visible_lines(&self, layout: &Layout) -> core::ops::Range<usize> {
+    fn visible_lines(&self) -> core::ops::Range<usize> {
         let last = self
-            .visible_rows(layout.rows().max(1))
+            .visible_rows(self.layout.rows().max(1))
             .last()
             .map_or(self.top.line, |row| row.line);
         self.top.line..last + 1
     }
 
     /// The next batch worth lexing to colour what the window shows.
-    pub fn lex_job(&mut self, layout: &Layout) -> Option<LexJob> {
+    pub fn lex_job(&mut self) -> Option<LexJob> {
         if self.editor.mode() == Mode::Hex || self.display_shown().is_some() {
             return None;
         }
-        let lines = self.visible_lines(layout);
+        let lines = self.visible_lines();
         let (highlight, document) = self.editor.highlight_mut();
         highlight.next_job(document, lines).unwrap_or(None)
     }
 
     /// Take in the lexer's answer to batch `id`, repainting the rows it
     /// coloured.
-    pub fn lexed(&mut self, id: u64, batch: &LexedBatch, layout: &Layout, damage: &mut Region) {
+    pub fn lexed(&mut self, id: u64, batch: &LexedBatch, damage: &mut Region) {
         let lines = self.editor.highlight_mut().0.adopt(id, batch);
         if lines.is_empty() {
             return;
         }
-        for (index, row) in self.visible_rows(layout.rows().max(1)).enumerate() {
+        for (index, row) in self.visible_rows(self.layout.rows().max(1)).enumerate() {
             if lines.contains(&row.line) {
-                damage.add(layout.row_rect(index));
+                damage.add(self.layout.row_rect(index));
             }
         }
     }
 
     /// Batch `id` could not be lexed. A window that then gives up colouring
     /// is drawn plain and says why.
-    pub fn lex_failed(&mut self, id: u64, layout: &Layout, damage: &mut Region) {
+    pub fn lex_failed(&mut self, id: u64, damage: &mut Region) {
         let highlight = self.editor.highlight_mut().0;
         highlight.failed(id);
         if highlight.stopped().is_some() {
-            damage.add(layout.grid());
-            damage.add(layout.status());
+            damage.add(self.layout.grid());
+            damage.add(self.layout.status());
         }
     }
 
@@ -886,7 +879,6 @@ impl View {
         generation: u64,
         chunks: Option<Vec<Vec<u8>>>,
         to: LineEnding,
-        layout: &Layout,
         damage: &mut Region,
     ) -> Outcome {
         if !self.wants_conversion(id) {
@@ -896,30 +888,24 @@ impl View {
         let before = self.before_command();
         let effect = self.editor.converted(generation, chunks, to);
         self.message = None;
-        damage.add(layout.status());
-        self.report(effect, before, layout, damage)
+        damage.add(self.layout.status());
+        self.report(effect, before, damage)
     }
 
     /// The document's opening bytes say it is written in `format`. A format
     /// the user chose stands.
-    pub fn detected(&mut self, format: Format, layout: &Layout, damage: &mut Region) -> Outcome {
+    pub fn detected(&mut self, format: Format, damage: &mut Region) -> Outcome {
         if self.format_chosen || format == self.editor.format() {
             return Outcome::none();
         }
-        self.command(&Command::SetFormat(format), layout, damage)
+        self.command(&Command::SetFormat(format), damage)
     }
 
     /// Take in what the document's store parser said about `generation`.
-    pub fn checked(
-        &mut self,
-        generation: u64,
-        diagnostics: Vec<Diagnostic>,
-        layout: &Layout,
-        damage: &mut Region,
-    ) {
+    pub fn checked(&mut self, generation: u64, diagnostics: Vec<Diagnostic>, damage: &mut Region) {
         self.editor.checked(generation, diagnostics);
-        damage.add(layout.gutter());
-        damage.add(layout.status());
+        damage.add(self.layout.gutter());
+        damage.add(self.layout.status());
     }
 
     /// When the document's store parser is due to be asked about it, seen at
@@ -962,28 +948,28 @@ impl View {
 
     /// Bring the scroll and the bars into line with the caret and report
     /// what moved.
-    pub fn settle(&mut self, layout: &Layout, damage: &mut Region) {
+    fn settle(&mut self, damage: &mut Region) {
         // Only the text view measures its widest row; the hex view's width is
         // its layout's.
         let unmeasured = self.editor.mode() == Mode::Text && self.widest.is_none();
-        if self.reveal_caret(layout) || unmeasured {
-            damage.add(layout.gutter());
-            damage.add(layout.grid());
-            self.measure(self.top.line..usize::MAX, layout);
+        if self.reveal_caret() || unmeasured {
+            damage.add(self.layout.gutter());
+            damage.add(self.layout.grid());
+            self.measure(self.top.line..usize::MAX);
         }
-        self.sync_bars(layout, damage);
-        damage.add(layout.status());
+        self.sync_bars(damage);
+        damage.add(self.layout.status());
     }
 
     /// Widen the horizontal span to the widest visible row among `lines`.
-    fn measure(&mut self, lines: core::ops::Range<usize>, layout: &Layout) {
+    fn measure(&mut self, lines: core::ops::Range<usize>) {
         if self.editor.mode() == Mode::Hex {
             return;
         }
         let document = self.editor.document();
         let tab = self.editor.tab_width();
         let widest = self
-            .visible_rows(layout.rows().max(1))
+            .visible_rows(self.layout.rows().max(1))
             .filter(|row| lines.contains(&row.line))
             .map(|row| {
                 let bounds = text::row_bounds(document, row);
@@ -995,9 +981,9 @@ impl View {
     }
 
     /// Scroll so the caret is in view; whether anything moved.
-    fn reveal_caret(&mut self, layout: &Layout) -> bool {
-        let rows = layout.rows().max(1);
-        let columns = layout.columns().max(1);
+    fn reveal_caret(&mut self) -> bool {
+        let rows = self.layout.rows().max(1);
+        let columns = self.layout.columns().max(1);
         let before = (self.top, self.hex_top, self.left);
         let document = self.editor.document();
         let caret = self.editor.selection().head;
@@ -1045,11 +1031,11 @@ impl View {
     /// Bring both bars into line with the scroll: pixel ranges over the rows
     /// and the columns there are, so a wheel, a step and a page all move by
     /// the cells they span.
-    fn sync_bars(&mut self, layout: &Layout, damage: &mut Region) {
-        let (cell_w, cell_h) = layout.cell();
+    fn sync_bars(&mut self, damage: &mut Region) {
+        let (cell_w, cell_h) = self.layout.cell();
         let (cell_w, cell_h) = (u64::from(cell_w.max(1)), u64::from(cell_h.max(1)));
-        let rows = layout.rows() as u64;
-        let columns = layout.columns();
+        let rows = self.layout.rows() as u64;
+        let columns = self.layout.columns();
         let document = self.editor.document();
         let (content, first, wide, carried) = match (self.display_shown(), self.editor.mode()) {
             (Some(display), _) => (
@@ -1095,23 +1081,17 @@ impl View {
         );
         if vertical != self.vertical.model() {
             self.vertical.set_model(vertical);
-            damage.add(layout.vertical_bar());
+            damage.add(self.layout.vertical_bar());
         }
         if horizontal != self.horizontal.model() {
             self.horizontal.set_model(horizontal);
-            damage.add(layout.horizontal_bar());
+            damage.add(self.layout.horizontal_bar());
         }
     }
 
     /// Report the rows an editor effect touched, and whether the bands must
     /// move.
-    fn report(
-        &mut self,
-        effect: Effect,
-        before: Before,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
+    fn report(&mut self, effect: Effect, before: Before, damage: &mut Region) -> Outcome {
         if let Some(refused) = effect.refused {
             self.message = Some(refused.to_string());
         } else if effect.text.is_some() {
@@ -1120,19 +1100,16 @@ impl View {
         if effect.view {
             self.widest = None;
         }
-        if effect.view || self.gutter_digits() != layout.gutter_digits() {
+        if effect.view || self.gutter_digits() != self.layout.gutter_digits() {
             return Outcome::relaid();
         }
         if self.editor.mode() == Mode::Hex {
-            self.damage_hex_rows(&effect, before, layout, damage);
-            self.settle(layout, damage);
+            self.damage_hex_rows(&effect, before, damage);
+            self.settle(damage);
             return Outcome::none();
         }
         if let Some(lines) = effect.text {
-            self.measure(
-                lines.first..lines.last.map_or(usize::MAX, |last| last + 1),
-                layout,
-            );
+            self.measure(lines.first..lines.last.map_or(usize::MAX, |last| last + 1));
         }
         let document = self.editor.document();
         let lines_of = |selection: crate::selection::Selection| {
@@ -1144,7 +1121,7 @@ impl View {
             lines_of(self.editor.selection()),
         );
         let rows_moved = document.row_count() != before.rows;
-        for (index, row) in self.visible_rows(layout.rows().max(1)).enumerate() {
+        for (index, row) in self.visible_rows(self.layout.rows().max(1)).enumerate() {
             let text_hit = effect.text.is_some_and(|lines| {
                 row.line >= lines.first
                     && (rows_moved || lines.last.is_none_or(|last| row.line <= last))
@@ -1152,29 +1129,23 @@ impl View {
             let selection_hit =
                 effect.selection && (was.contains(&row.line) || now.contains(&row.line));
             if text_hit || selection_hit {
-                damage.add(layout.row_rect(index));
+                damage.add(self.layout.row_rect(index));
             }
         }
-        self.settle(layout, damage);
+        self.settle(damage);
         Outcome::none()
     }
 
     /// Report the hex rows on screen that `effect` changed: those showing the
     /// selection before and after it, and those from the first changed line
     /// to the last, or to the end where every byte after it moved.
-    fn damage_hex_rows(
-        &self,
-        effect: &Effect,
-        before: Before,
-        layout: &Layout,
-        damage: &mut Region,
-    ) {
-        let shown = self.hex_top..self.hex_top + layout.rows();
+    fn damage_hex_rows(&self, effect: &Effect, before: Before, damage: &mut Region) {
+        let shown = self.hex_top..self.hex_top + self.layout.rows();
         let mut rows = |bytes: core::ops::Range<usize>| {
             let first = (bytes.start / hex::BYTES_PER_ROW).max(shown.start);
             let last = bytes.end.saturating_sub(1).max(bytes.start) / hex::BYTES_PER_ROW;
             for row in first..=last.min(shown.end.saturating_sub(1)) {
-                damage.add(layout.row_rect(row - shown.start));
+                damage.add(self.layout.row_rect(row - shown.start));
             }
         };
         if effect.selection {
@@ -1192,47 +1163,47 @@ impl View {
     }
 
     /// Run `command` on the editor and report what it did.
-    fn command(&mut self, command: &Command, layout: &Layout, damage: &mut Region) -> Outcome {
+    fn command(&mut self, command: &Command, damage: &mut Region) -> Outcome {
         let before = self.before_command();
         let effect = self
             .editor
-            .run(command, layout.rows().saturating_sub(1).max(1));
-        self.report(effect, before, layout, damage)
+            .run(command, self.layout.rows().saturating_sub(1).max(1));
+        self.report(effect, before, damage)
     }
 
     /// Carry out `action`.
-    pub fn act(&mut self, action: Action, layout: &Layout, damage: &mut Region) -> Outcome {
+    pub fn act(&mut self, action: Action, damage: &mut Region) -> Outcome {
         if self.display_shown().is_some() && needs_editor_display(action) {
-            return self.read_only(layout, damage);
+            return self.read_only(damage);
         }
         let command = match action {
             Action::ShowCode if self.code_offered() => return self.show_display(true),
             Action::ShowData if self.data_offered() => return self.show_display(true),
             Action::ShowCode | Action::ShowData => return Outcome::none(),
-            Action::Isa(isa) => return self.choose_isa(isa, layout, damage),
+            Action::Isa(isa) => return self.choose_isa(isa, damage),
             Action::Mode(mode) if self.display_shown().is_some() => {
                 self.show_display(false);
-                self.command(&Command::SetMode(mode), layout, damage);
+                self.command(&Command::SetMode(mode), damage);
                 return Outcome::relaid();
             }
             Action::NewWindow => return Outcome::asking(Request::Own(Own::NewWindow)),
             Action::Open => return Outcome::asking(Request::Open),
             Action::Save => return Outcome::asking(Request::Save),
             Action::SaveAs => return Outcome::asking(Request::SaveAs),
-            Action::Close => return DocumentView::close_requested(self, layout, damage),
+            Action::Close => return DocumentView::close_requested(self, damage),
             Action::Copy => return self.copy(),
-            Action::Cut => return self.cut(layout, damage),
+            Action::Cut => return self.cut(damage),
             Action::Paste => return Outcome::asking(Request::Own(Own::Paste)),
-            Action::Find => return self.open_find(Focus::Find, layout, damage),
-            Action::Replace => return self.open_find(Focus::Replace, layout, damage),
-            Action::FindNext => return self.search(false, None, layout, damage),
-            Action::FindPrevious => return self.search(true, None, layout, damage),
+            Action::Find => return self.open_find(Focus::Find, damage),
+            Action::Replace => return self.open_find(Focus::Replace, damage),
+            Action::FindNext => return self.search(false, None, damage),
+            Action::FindPrevious => return self.search(true, None, damage),
             Action::GoToLine => return self.ask_go_to(),
             Action::LineEnding(to) => {
                 let id = self.ask();
                 self.conversion = Some(id);
                 self.message = Some(String::from("Converting line endings\u{2026}"));
-                damage.add(layout.status());
+                damage.add(self.layout.status());
                 return Outcome::asking(Request::Own(Own::Convert { id, to }));
             }
             Action::Undo => Command::Undo,
@@ -1251,7 +1222,7 @@ impl View {
             Action::TabWidth(width) => Command::SetTabWidth(width),
             Action::Indentation(indent) => Command::SetIndent(indent),
         };
-        self.command(&command, layout, damage)
+        self.command(&command, damage)
     }
 
     fn copy(&mut self) -> Outcome {
@@ -1265,10 +1236,10 @@ impl View {
         }
     }
 
-    fn cut(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+    fn cut(&mut self, damage: &mut Region) -> Outcome {
         let before = self.before_command();
         let (effect, bytes) = self.editor.cut();
-        let mut outcome = self.report(effect, before, layout, damage);
+        let mut outcome = self.report(effect, before, damage);
         if let Some(bytes) = bytes {
             outcome.request = Some(Request::Own(Own::Copy(bytes)));
         }
@@ -1277,24 +1248,25 @@ impl View {
 
     /// Paste `bytes`, which the clipboard held: into the find field that has
     /// the keyboard, else into the document.
-    pub fn paste(&mut self, bytes: &[u8], layout: &Layout, damage: &mut Region) -> Outcome {
+    pub fn paste(&mut self, bytes: &[u8], damage: &mut Region) -> Outcome {
         if self.focus != Focus::Grid {
             let Ok(text) = core::str::from_utf8(bytes) else {
                 self.message = Some(String::from("The clipboard does not hold text"));
-                damage.add(layout.status());
+                damage.add(self.layout.status());
                 return Outcome::none();
             };
             if self.focus == Focus::Find {
-                self.find.insert_text(text, layout.find_field(), damage);
+                self.find
+                    .insert_text(text, self.layout.find_field(), damage);
             } else {
                 self.replace
-                    .insert_text(text, layout.replace_field(), damage);
+                    .insert_text(text, self.layout.replace_field(), damage);
             }
             return Outcome::none();
         }
         let before = self.before_command();
         let effect = self.editor.replace_selection(bytes);
-        self.report(effect, before, layout, damage)
+        self.report(effect, before, damage)
     }
 
     fn ask_go_to(&mut self) -> Outcome {
@@ -1327,31 +1299,29 @@ impl View {
     pub fn on_dialog(
         &mut self,
         input: &InputEvent,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
         match *input {
             InputEvent::KeyPressed { key, modifiers } => {
-                self.modal_key(key, modifiers, layout, scale, theme, damage)
+                self.modal_key(key, modifiers, scale, theme, damage)
             }
             InputEvent::KeyReleased { .. } | InputEvent::ModifiersChanged { .. } => Outcome::none(),
-            _ => self.modal_pointer(input, layout, scale, theme, damage),
+            _ => self.modal_pointer(input, scale, theme, damage),
         }
     }
 
     fn modal_pointer(
         &mut self,
         event: &InputEvent,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
         let answer = match &mut self.modal {
             Some(Modal::GoTo(dialog, field)) => {
-                let bounds = Self::modal_rect(dialog, layout.window(), scale, theme);
+                let bounds = Self::modal_rect(dialog, self.layout.window(), scale, theme);
                 if let Some(content) = dialog.content_rect(bounds, scale, theme) {
                     field.on_pointer(event, content, scale, theme, damage);
                 }
@@ -1360,9 +1330,7 @@ impl View {
             None => None,
         };
         match answer {
-            Some(DialogAction::ActionActivated { index }) => {
-                self.answer_modal(index, layout, damage)
-            }
+            Some(DialogAction::ActionActivated { index }) => self.answer_modal(index, damage),
             None => Outcome::none(),
         }
     }
@@ -1373,7 +1341,6 @@ impl View {
         &mut self,
         key: Key,
         modifiers: Modifiers,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -1382,7 +1349,7 @@ impl View {
             (Some(_), Key::Named(NamedKey::Escape)) => Some(0),
             (Some(Modal::GoTo(..)), Key::Named(NamedKey::Enter)) => Some(1),
             (Some(Modal::GoTo(dialog, field)), _) => {
-                let bounds = Self::modal_rect(dialog, layout.window(), scale, theme);
+                let bounds = Self::modal_rect(dialog, self.layout.window(), scale, theme);
                 if let Some(content) = dialog.content_rect(bounds, scale, theme) {
                     field.on_key(key, modifiers, content, damage);
                 }
@@ -1391,19 +1358,19 @@ impl View {
             (None, _) => None,
         };
         match answer {
-            Some(index) => self.answer_modal(index, layout, damage),
+            Some(index) => self.answer_modal(index, damage),
             None => Outcome::none(),
         }
     }
 
-    fn answer_modal(&mut self, index: usize, layout: &Layout, damage: &mut Region) -> Outcome {
+    fn answer_modal(&mut self, index: usize, damage: &mut Region) -> Outcome {
         match self.modal.take() {
             Some(Modal::GoTo(_, field)) if index == 1 => {
                 if let Ok(line) = field.text().trim().parse::<usize>() {
-                    self.command(&Command::GoToLine(line), layout, damage)
+                    self.command(&Command::GoToLine(line), damage)
                 } else {
                     self.message = Some(String::from("A line number is a whole number"));
-                    damage.add(layout.status());
+                    damage.add(self.layout.status());
                     Outcome::none()
                 }
             }
@@ -1411,7 +1378,7 @@ impl View {
         }
     }
 
-    fn open_find(&mut self, focus: Focus, layout: &Layout, damage: &mut Region) -> Outcome {
+    fn open_find(&mut self, focus: Focus, damage: &mut Region) -> Outcome {
         if !self.find_open && self.find.text().is_empty() {
             let selection = self.editor.selection().range();
             if !selection.is_empty() && selection.len() <= FIND_SEED_BYTES {
@@ -1426,7 +1393,7 @@ impl View {
         }
         self.focus_find(focus);
         if self.find_open {
-            damage.add(layout.find());
+            damage.add(self.layout.find());
             return Outcome::none();
         }
         self.find_open = true;
@@ -1442,19 +1409,19 @@ impl View {
     /// Give the keyboard focus to the find field, replace field or document
     /// under the pointer, as a primary press there would, so the window
     /// menu's rows act on what was pressed.
-    fn focus_pressed(&mut self, layout: &Layout, damage: &mut Region) {
-        let under = if self.find_open && layout.find_field().contains(self.pointer) {
+    fn focus_pressed(&mut self, damage: &mut Region) {
+        let under = if self.find_open && self.layout.find_field().contains(self.pointer) {
             Focus::Find
-        } else if self.find_open && layout.replace_field().contains(self.pointer) {
+        } else if self.find_open && self.layout.replace_field().contains(self.pointer) {
             Focus::Replace
-        } else if layout.cell_at(self.pointer).is_some() {
+        } else if self.layout.cell_at(self.pointer).is_some() {
             Focus::Grid
         } else {
             return;
         };
         if under != self.focus {
             self.focus_find(under);
-            damage.add(layout.find());
+            damage.add(self.layout.find());
         }
     }
 
@@ -1492,10 +1459,9 @@ impl View {
         &mut self,
         backward: bool,
         replacement: Option<Vec<u8>>,
-        layout: &Layout,
         damage: &mut Region,
     ) -> Outcome {
-        damage.add(layout.status());
+        damage.add(self.layout.status());
         let pattern = match self.pattern() {
             Ok(pattern) => pattern,
             Err(PatternError::Empty) => {
@@ -1527,7 +1493,7 @@ impl View {
         }))
     }
 
-    fn replace_one(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+    fn replace_one(&mut self, damage: &mut Region) -> Outcome {
         let (Ok(pattern), Ok(bytes)) = (self.pattern(), self.replacement()) else {
             self.message = Some(String::from("Nothing to replace with that"));
             return Outcome::none();
@@ -1537,16 +1503,16 @@ impl View {
         if !selection.is_empty() && pattern.is_match(self.editor.document(), selection) {
             let before = self.before_command();
             let effect = self.editor.replace_selection(&bytes);
-            replaced = self.report(effect, before, layout, damage);
+            replaced = self.report(effect, before, damage);
         }
-        let mut outcome = self.search(false, None, layout, damage);
+        let mut outcome = self.search(false, None, damage);
         outcome.relayout = outcome.relayout.max(replaced.relayout);
         outcome
     }
 
-    fn replace_all(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+    fn replace_all(&mut self, damage: &mut Region) -> Outcome {
         if let Ok(bytes) = self.replacement() {
-            self.search(false, Some(bytes), layout, damage)
+            self.search(false, Some(bytes), damage)
         } else {
             self.message = Some(String::from("Hex replacement takes pairs of hex digits"));
             Outcome::none()
@@ -1561,14 +1527,13 @@ impl View {
         generation: u64,
         step: Step,
         replacement: Option<&[u8]>,
-        layout: &Layout,
         damage: &mut Region,
     ) -> Outcome {
         if self.search != Some(id) {
             return Outcome::none();
         }
         self.search = None;
-        damage.add(layout.status());
+        damage.add(self.layout.status());
         if generation != self.editor.generation() {
             self.message = Some(String::from(
                 "The document changed while searching; search again",
@@ -1580,7 +1545,7 @@ impl View {
                 self.message = None;
                 let before = self.before_command();
                 let effect = self.editor.select_match(range);
-                self.report(effect, before, layout, damage)
+                self.report(effect, before, damage)
             }
             Step::Missing => {
                 self.message = Some(String::from("Not found"));
@@ -1592,7 +1557,7 @@ impl View {
                 let effect = self
                     .editor
                     .replace_all(&matches, replacement.unwrap_or_default());
-                let outcome = self.report(effect, before, layout, damage);
+                let outcome = self.report(effect, before, damage);
                 if effect.refused.is_none() {
                     self.message = Some(match (count, more) {
                         (0, _) => String::from("Not found"),
@@ -1611,18 +1576,18 @@ impl View {
 
     /// The window gained or lost the keyboard. Only the caret shows which,
     /// so only its row is repainted; losing it ends a drag in progress.
-    pub fn focus_changed(&mut self, focused: bool, layout: &Layout, damage: &mut Region) {
+    pub fn focus_changed(&mut self, focused: bool, damage: &mut Region) {
         if !focused {
             self.drag = None;
         }
-        if let Some(index) = self.caret_row_index(layout) {
-            damage.add(layout.row_rect(index));
+        if let Some(index) = self.caret_row_index() {
+            damage.add(self.layout.row_rect(index));
         }
     }
 
     /// Which of the shown rows holds the caret, when one does.
-    fn caret_row_index(&self, layout: &Layout) -> Option<usize> {
-        let rows = layout.rows().max(1);
+    fn caret_row_index(&self) -> Option<usize> {
+        let rows = self.layout.rows().max(1);
         let caret = self.editor.selection().head;
         match self.editor.mode() {
             Mode::Text => {
@@ -1640,7 +1605,6 @@ impl View {
         &mut self,
         event: &InputEvent,
         now_ns: u64,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -1657,7 +1621,7 @@ impl View {
         // takes it.
         if self.vertical.is_pressing() || self.horizontal.is_pressing() {
             return self
-                .bars_pointer(event, layout, scale, theme, damage)
+                .bars_pointer(event, scale, theme, damage)
                 .unwrap_or_else(Outcome::none);
         }
         if matches!(
@@ -1665,27 +1629,28 @@ impl View {
             InputEvent::PointerPressed {
                 button: PointerButton::Secondary
             }
-        ) && layout.window().contains(self.pointer)
+        ) && self.layout.window().contains(self.pointer)
         {
-            self.focus_pressed(layout, damage);
+            self.focus_pressed(damage);
             return Outcome::asking(Request::Menu {
                 kind: MenuKind::Window,
                 anchor: Rect::new(self.pointer.x, self.pointer.y, 0, 0),
             });
         }
         if self.find_open {
-            if let Some(outcome) = self.find_pointer(event, layout, scale, theme, damage) {
+            if let Some(outcome) = self.find_pointer(event, scale, theme, damage) {
                 return outcome;
             }
         }
-        if let Some(scrolled) = self.bars_pointer(event, layout, scale, theme, damage) {
+        if let Some(scrolled) = self.bars_pointer(event, scale, theme, damage) {
             return scrolled;
         }
         if let InputEvent::PointerPressed {
             button: PointerButton::Primary,
         } = event
         {
-            if let Some(index) = layout
+            if let Some(index) = self
+                .layout
                 .status_fields()
                 .iter()
                 .position(|field| field.contains(self.pointer))
@@ -1693,13 +1658,13 @@ impl View {
                 return match STATUS_MENUS[index] {
                     Some(kind) => Outcome::asking(Request::Menu {
                         kind,
-                        anchor: layout.status_fields()[index],
+                        anchor: self.layout.status_fields()[index],
                     }),
-                    None => self.act(Action::ToggleOverwrite, layout, damage),
+                    None => self.act(Action::ToggleOverwrite, damage),
                 };
             }
         }
-        self.grid_pointer(event, now_ns, layout, scale, damage)
+        self.grid_pointer(event, now_ns, scale, damage)
     }
 
     /// Feed `event` to both bars, carrying out the scroll either asks for;
@@ -1707,23 +1672,22 @@ impl View {
     fn bars_pointer(
         &mut self,
         event: &InputEvent,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Outcome> {
         if let Some(ScrollAction::ScrollTo { offset }) =
             self.vertical
-                .on_pointer(event, layout.vertical_bar(), scale, theme, damage)
+                .on_pointer(event, self.layout.vertical_bar(), scale, theme, damage)
         {
-            self.scroll_to(Some(offset), None, layout, damage);
+            self.scroll_to(Some(offset), None, damage);
             return Some(Outcome::none());
         }
         if let Some(ScrollAction::ScrollTo { offset }) =
             self.horizontal
-                .on_pointer(event, layout.horizontal_bar(), scale, theme, damage)
+                .on_pointer(event, self.layout.horizontal_bar(), scale, theme, damage)
         {
-            self.scroll_to(None, Some(offset), layout, damage);
+            self.scroll_to(None, Some(offset), damage);
             return Some(Outcome::none());
         }
         None
@@ -1739,32 +1703,24 @@ impl View {
 
     /// Step a press either bar holds if its repeat is due at `now_ns`,
     /// carrying out the scroll it asks for and reporting what moved.
-    pub fn scroll_repeat(
-        &mut self,
-        now_ns: u64,
-        layout: &Layout,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) {
+    pub fn scroll_repeat(&mut self, now_ns: u64, scale: Scale, theme: &Theme, damage: &mut Region) {
         if let Some(ScrollAction::ScrollTo { offset }) =
             self.vertical
-                .repeat(now_ns, layout.vertical_bar(), scale, theme, damage)
+                .repeat(now_ns, self.layout.vertical_bar(), scale, theme, damage)
         {
-            self.scroll_to(Some(offset), None, layout, damage);
+            self.scroll_to(Some(offset), None, damage);
         }
         if let Some(ScrollAction::ScrollTo { offset }) =
             self.horizontal
-                .repeat(now_ns, layout.horizontal_bar(), scale, theme, damage)
+                .repeat(now_ns, self.layout.horizontal_bar(), scale, theme, damage)
         {
-            self.scroll_to(None, Some(offset), layout, damage);
+            self.scroll_to(None, Some(offset), damage);
         }
     }
 
     fn find_pointer(
         &mut self,
         event: &InputEvent,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -1775,40 +1731,40 @@ impl View {
                 button: PointerButton::Primary
             }
         );
-        if pressed && layout.find_field().contains(self.pointer) {
+        if pressed && self.layout.find_field().contains(self.pointer) {
             self.focus_find(Focus::Find);
-        } else if pressed && layout.replace_field().contains(self.pointer) {
+        } else if pressed && self.layout.replace_field().contains(self.pointer) {
             self.focus_find(Focus::Replace);
         }
         if self
             .find
-            .on_pointer(event, layout.find_field(), scale, theme, damage)
+            .on_pointer(event, self.layout.find_field(), scale, theme, damage)
             .is_some()
             | self
                 .replace
-                .on_pointer(event, layout.replace_field(), scale, theme, damage)
+                .on_pointer(event, self.layout.replace_field(), scale, theme, damage)
                 .is_some()
         {
             return Some(Outcome::none());
         }
-        let bounds = *layout.find_buttons();
+        let bounds = *self.layout.find_buttons();
         let hit = self
             .find_buttons
             .iter_mut()
             .zip(bounds)
             .position(|(button, rect)| button.on_pointer(event, rect, damage).is_some())?;
-        Some(self.find_button(hit, layout, damage))
+        Some(self.find_button(hit, damage))
     }
 
-    fn find_button(&mut self, index: usize, layout: &Layout, damage: &mut Region) -> Outcome {
+    fn find_button(&mut self, index: usize, damage: &mut Region) -> Outcome {
         match index {
             0 => self.options.match_case = !self.options.match_case,
             1 => self.options.whole_word = !self.options.whole_word,
             2 => self.hex_pattern = !self.hex_pattern,
-            3 => return self.search(true, None, layout, damage),
-            4 => return self.search(false, None, layout, damage),
-            5 => return self.replace_one(layout, damage),
-            6 => return self.replace_all(layout, damage),
+            3 => return self.search(true, None, damage),
+            4 => return self.search(false, None, damage),
+            5 => return self.replace_one(damage),
+            6 => return self.replace_all(damage),
             _ => return self.close_find(),
         }
         let marks = [
@@ -1821,7 +1777,7 @@ impl View {
             state.selection = SelectionState::of(on);
             button.set_state(state);
         }
-        damage.add(layout.find());
+        damage.add(self.layout.find());
         Outcome::none()
     }
 
@@ -1829,7 +1785,6 @@ impl View {
         &mut self,
         event: &InputEvent,
         now_ns: u64,
-        layout: &Layout,
         scale: Scale,
         damage: &mut Region,
     ) -> Outcome {
@@ -1841,15 +1796,15 @@ impl View {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
-                let Some((row, half)) = layout.cell_at(self.pointer) else {
+                let Some((row, half)) = self.layout.cell_at(self.pointer) else {
                     self.clicks.reset();
                     return Outcome::none();
                 };
                 if self.focus != Focus::Grid {
                     self.focus_find(Focus::Grid);
-                    damage.add(layout.find());
+                    damage.add(self.layout.find());
                 }
-                let in_gutter = layout.gutter().contains(self.pointer);
+                let in_gutter = self.layout.gutter().contains(self.pointer);
                 let subject = ((row as u64) << 32) | (half as u64 / 2);
                 let run = self.clicks.register(
                     now_ns,
@@ -1858,7 +1813,7 @@ impl View {
                     self.double_click,
                     3,
                 );
-                self.press(row, half, if in_gutter { 3 } else { run }, layout, damage)
+                self.press(row, half, if in_gutter { 3 } else { run }, damage)
             }
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
@@ -1866,21 +1821,21 @@ impl View {
                 self.drag = None;
                 Outcome::none()
             }
-            InputEvent::PointerMoved { .. } if self.drag.is_some() => self.drag_to(layout, damage),
+            InputEvent::PointerMoved { .. } if self.drag.is_some() => self.drag_to(damage),
             InputEvent::PointerScrolled { dx, dy }
-                if layout.grid().contains(self.pointer)
-                    || layout.gutter().contains(self.pointer) =>
+                if self.layout.grid().contains(self.pointer)
+                    || self.layout.gutter().contains(self.pointer) =>
             {
                 let y = self
                     .vertical
-                    .wheel(*dx, *dy, scale, layout.vertical_bar(), damage);
-                let x = self
-                    .horizontal
-                    .wheel(*dx, *dy, scale, layout.horizontal_bar(), damage);
+                    .wheel(*dx, *dy, scale, self.layout.vertical_bar(), damage);
+                let x =
+                    self.horizontal
+                        .wheel(*dx, *dy, scale, self.layout.horizontal_bar(), damage);
                 let offset = |action: Option<ScrollAction>| {
                     action.map(|ScrollAction::ScrollTo { offset }| offset)
                 };
-                self.scroll_to(offset(y), offset(x), layout, damage);
+                self.scroll_to(offset(y), offset(x), damage);
                 Outcome::none()
             }
             _ => Outcome::none(),
@@ -1929,14 +1884,7 @@ impl View {
         }
     }
 
-    fn press(
-        &mut self,
-        row: usize,
-        half: usize,
-        run: u8,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
+    fn press(&mut self, row: usize, half: usize, run: u8, damage: &mut Region) -> Outcome {
         let before = self.before_command();
         let effect = if self.editor.mode() == Mode::Hex {
             let len = self.editor.document().len();
@@ -1988,14 +1936,14 @@ impl View {
             self.drag = Some(Drag { grain, anchor });
             effect
         };
-        self.report(effect, before, layout, damage)
+        self.report(effect, before, damage)
     }
 
-    fn drag_to(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+    fn drag_to(&mut self, damage: &mut Region) -> Outcome {
         let Some(drag) = self.drag else {
             return Outcome::none();
         };
-        let grid = layout.grid();
+        let grid = self.layout.grid();
         // Past the grid's top or bottom the view scrolls a row toward the
         // pointer each time it moves.
         let scrolled = if self.pointer.y < grid.top() {
@@ -2006,11 +1954,11 @@ impl View {
             false
         };
         if scrolled {
-            damage.add(layout.gutter());
+            damage.add(self.layout.gutter());
             damage.add(grid);
         }
-        let (row, half) = layout.cell_near(self.pointer);
-        let row = row.min(layout.rows().saturating_sub(1));
+        let (row, half) = self.layout.cell_near(self.pointer);
+        let row = row.min(self.layout.rows().saturating_sub(1));
         let at = self.offset_at(row, half);
         let under = self.unit_under(row, half);
         let document = self.editor.document();
@@ -2036,7 +1984,6 @@ impl View {
                 ..effect
             },
             before,
-            layout,
             damage,
         )
     }
@@ -2070,14 +2017,8 @@ impl View {
 
     /// Scroll to where a bar asked, `down` and `across` pixels in: the cells
     /// they reach, and the pixels short of the next kept for the next ask.
-    fn scroll_to(
-        &mut self,
-        down: Option<u64>,
-        across: Option<u64>,
-        layout: &Layout,
-        damage: &mut Region,
-    ) {
-        let (cell_w, cell_h) = layout.cell();
+    fn scroll_to(&mut self, down: Option<u64>, across: Option<u64>, damage: &mut Region) {
+        let (cell_w, cell_h) = self.layout.cell();
         let (cell_w, cell_h) = (u64::from(cell_w.max(1)), u64::from(cell_h.max(1)));
         let display_before = self.display_shown().map(Display::top);
         let before = (self.top, self.hex_top, self.left);
@@ -2114,16 +2055,17 @@ impl View {
         if before != (self.top, self.hex_top, self.left)
             || display_before != self.display_shown().map(Display::top)
         {
-            damage.add(layout.gutter());
-            damage.add(layout.grid());
+            damage.add(self.layout.gutter());
+            damage.add(self.layout.grid());
         }
-        self.sync_bars(layout, damage);
+        self.sync_bars(damage);
     }
 
     /// Feed a key to the read-only display: it scrolls, and says it is
     /// read-only to anything that would edit.
-    fn display_key(&mut self, key: Key, layout: &Layout, damage: &mut Region) -> Outcome {
-        let page = isize::try_from(layout.rows().saturating_sub(1).max(1)).unwrap_or(isize::MAX);
+    fn display_key(&mut self, key: Key, damage: &mut Region) -> Outcome {
+        let page =
+            isize::try_from(self.layout.rows().saturating_sub(1).max(1)).unwrap_or(isize::MAX);
         let len = self.editor.document().len();
         let Some(display) = self.display_scrolled() else {
             return Outcome::none();
@@ -2150,25 +2092,25 @@ impl View {
             | Key::Named(
                 NamedKey::Enter | NamedKey::Backspace | NamedKey::Delete | NamedKey::Tab,
             ) => {
-                return self.read_only(layout, damage);
+                return self.read_only(damage);
             }
             Key::Named(_) => false,
         };
         if moved {
-            damage.add(layout.grid());
-            self.sync_bars(layout, damage);
+            damage.add(self.layout.grid());
+            self.sync_bars(damage);
         }
         Outcome::none()
     }
 
     /// Say the read-only display is read-only, to something that would edit
     /// or search it.
-    fn read_only(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+    fn read_only(&mut self, damage: &mut Region) -> Outcome {
         let label = self.display_shown().map_or("Code", Display::label);
         self.message = Some(alloc::format!(
             "{label} is read-only: show the document as Text or Hex to edit or search it"
         ));
-        damage.add(layout.status());
+        damage.add(self.layout.status());
         Outcome::none()
     }
 
@@ -2201,63 +2143,52 @@ impl View {
     }
 
     /// Read the code as `isa`, which lists it again.
-    fn choose_isa(&mut self, isa: Isa, layout: &Layout, damage: &mut Region) -> Outcome {
+    fn choose_isa(&mut self, isa: Isa, damage: &mut Region) -> Outcome {
         let chose = match &mut self.display {
             Some(Display::Code(code)) => code.choose(isa),
             Some(Display::Data(_)) | None => false,
         };
         if chose {
-            damage.add(layout.grid());
-            damage.add(layout.status());
-            self.sync_bars(layout, damage);
+            damage.add(self.layout.grid());
+            damage.add(self.layout.status());
+            self.sync_bars(damage);
         }
         Outcome::none()
     }
 
     /// Feed one key press.
-    pub fn on_key(
-        &mut self,
-        key: Key,
-        modifiers: Modifiers,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
+    pub fn on_key(&mut self, key: Key, modifiers: Modifiers, damage: &mut Region) -> Outcome {
         self.modifiers = modifiers;
         let hex_shown = self.display_shown().is_none() && self.editor.mode() == Mode::Hex;
         if let Some(action) = shortcut(key, modifiers, hex_shown) {
-            return self.run(action, layout, damage);
+            return self.run(action, damage);
         }
         if self.display_shown().is_some() && self.focus == Focus::Grid {
-            return self.display_key(key, layout, damage);
+            return self.display_key(key, damage);
         }
         match self.focus {
-            Focus::Grid => self.grid_key(key, modifiers, layout, damage),
-            Focus::Find | Focus::Replace => self.find_key(key, modifiers, layout, damage),
+            Focus::Grid => self.grid_key(key, modifiers, damage),
+            Focus::Find | Focus::Replace => self.find_key(key, modifiers, damage),
         }
     }
 
     /// Carry out `action` on what holds the keyboard focus, as its shortcut
     /// would, whether pressed or chosen from a menu.
-    fn run(&mut self, action: Action, layout: &Layout, damage: &mut Region) -> Outcome {
-        match self.field_action(action, layout, damage) {
+    fn run(&mut self, action: Action, damage: &mut Region) -> Outcome {
+        match self.field_action(action, damage) {
             Some(outcome) => outcome,
-            None => self.act(action, layout, damage),
+            None => self.act(action, damage),
         }
     }
 
     /// `action` on a focused find field: the clipboard and select-all act on
     /// the field, and undo and redo do nothing, since the field keeps no
     /// history; `None` for one that means the same anywhere.
-    fn field_action(
-        &mut self,
-        action: Action,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Option<Outcome> {
+    fn field_action(&mut self, action: Action, damage: &mut Region) -> Option<Outcome> {
         if self.focus == Focus::Grid {
             return None;
         }
-        let (find, replace) = (layout.find_field(), layout.replace_field());
+        let (find, replace) = (self.layout.find_field(), self.layout.replace_field());
         Some(match action {
             Action::Copy => self
                 .field_copy()
@@ -2299,18 +2230,10 @@ impl View {
             .map(|text| Request::Own(Own::Copy(text.as_bytes().to_vec())))
     }
 
-    fn find_key(
-        &mut self,
-        key: Key,
-        modifiers: Modifiers,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
+    fn find_key(&mut self, key: Key, modifiers: Modifiers, damage: &mut Region) -> Outcome {
         match key {
-            Key::Named(NamedKey::Enter) if self.focus == Focus::Replace => {
-                self.replace_one(layout, damage)
-            }
-            Key::Named(NamedKey::Enter) => self.search(modifiers.shift, None, layout, damage),
+            Key::Named(NamedKey::Enter) if self.focus == Focus::Replace => self.replace_one(damage),
+            Key::Named(NamedKey::Enter) => self.search(modifiers.shift, None, damage),
             Key::Named(NamedKey::Escape) => self.close_find(),
             Key::Named(NamedKey::Tab) => {
                 self.focus_find(if self.focus == Focus::Find {
@@ -2318,16 +2241,16 @@ impl View {
                 } else {
                     Focus::Find
                 });
-                damage.add(layout.find());
+                damage.add(self.layout.find());
                 Outcome::none()
             }
             _ => {
                 let acted = if self.focus == Focus::Find {
                     self.find
-                        .on_key(key, modifiers, layout.find_field(), damage)
+                        .on_key(key, modifiers, self.layout.find_field(), damage)
                 } else {
                     self.replace
-                        .on_key(key, modifiers, layout.replace_field(), damage)
+                        .on_key(key, modifiers, self.layout.replace_field(), damage)
                 };
                 if acted == Some(TextAction::Cancelled) {
                     return self.close_find();
@@ -2337,13 +2260,7 @@ impl View {
         }
     }
 
-    fn grid_key(
-        &mut self,
-        key: Key,
-        modifiers: Modifiers,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
+    fn grid_key(&mut self, key: Key, modifiers: Modifiers, damage: &mut Region) -> Outcome {
         let extend = modifiers.shift;
         let word = modifiers.ctrl;
         let motion = |motion| Command::Move { motion, extend };
@@ -2382,7 +2299,7 @@ impl View {
                 };
                 let before = self.before_command();
                 let effect = self.editor.set_pane(pane);
-                return self.report(effect, before, layout, damage);
+                return self.report(effect, before, damage);
             }
             Key::Named(NamedKey::Tab) if extend => Command::Backtab,
             Key::Named(NamedKey::Tab) => Command::Tab,
@@ -2393,13 +2310,13 @@ impl View {
             }
             _ => return Outcome::none(),
         };
-        self.command(&command, layout, damage)
+        self.command(&command, damage)
     }
 
     /// A menu row was chosen.
-    pub fn chosen(&mut self, id: AppMenuItemId, layout: &Layout, damage: &mut Region) -> Outcome {
+    pub fn chosen(&mut self, id: AppMenuItemId, damage: &mut Region) -> Outcome {
         match Action::from_id(id.get()) {
-            Some(action) => self.run(action, layout, damage),
+            Some(action) => self.run(action, damage),
             None => Outcome::none(),
         }
     }

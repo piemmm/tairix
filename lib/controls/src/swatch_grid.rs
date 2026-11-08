@@ -77,8 +77,9 @@ impl WellSpacing {
 
 /// The face a grid's well numbers are set in, resolved once from the theme
 /// at a scale: a grid lays its numbers out when fed input, which carries
-/// neither.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+/// neither. By default the console face with no inset, for a layout not yet
+/// resolved.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct NumberFace {
     font: BitmapFont,
     pad: u32,
@@ -98,7 +99,7 @@ impl NumberFace {
 }
 
 /// The lengths wells are drawn with at one scale.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 struct WellMetrics {
     gap: u32,
     pixel: u32,

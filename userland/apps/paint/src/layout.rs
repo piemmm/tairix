@@ -236,8 +236,9 @@ pub struct DockLayout {
     pub panes: Vec<PaneSlot>,
 }
 
-/// The window's resolved geometry.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// The window's resolved geometry: by default every part empty, as for a
+/// window not yet laid out.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Layout {
     window: Rect,
     top: Rect,
@@ -896,6 +897,26 @@ struct CanvasBands {
     vertical_bar: Rect,
     horizontal_bar: Rect,
     corner: Rect,
+}
+
+impl Default for CanvasBands {
+    /// No bands, for a window not yet laid out.
+    fn default() -> Self {
+        let none = Rect::default();
+        Self {
+            palette: none,
+            swatches: none,
+            wells_view: none,
+            palette_bar: none,
+            pop_out: none,
+            columns: 0,
+            axis: ScrollOrientation::Vertical,
+            well: 0,
+            vertical_bar: none,
+            horizontal_bar: none,
+            corner: none,
+        }
+    }
 }
 
 impl CanvasBands {

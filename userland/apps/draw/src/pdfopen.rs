@@ -68,6 +68,8 @@ pub enum Answered<T> {
 /// The window, asking for `T`.
 pub struct OpenPdf<T> {
     title: String,
+    /// The whole window, where its dialog is laid out.
+    bounds: Rect,
     asked: Asked,
     dialog: Dialog,
     group: FieldGroup,
@@ -116,6 +118,7 @@ impl<T> OpenPdf<T> {
         group.adopt_focus(Some(0));
         Self {
             title,
+            bounds: Rect::default(),
             asked,
             dialog,
             group,
@@ -129,16 +132,16 @@ impl<T> OpenPdf<T> {
         self.ticket.take()
     }
 
-    /// Its form's rows laid out in a window `bounds`.
-    fn rows_layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Option<FieldLayout> {
-        let content = self.dialog.content_rect(bounds, scale, theme)?;
-        Some(self.group.layout(content, bounds, scale, theme))
+    /// Its form's rows as laid out in the window.
+    fn rows_layout(&self, scale: Scale, theme: &Theme) -> Option<FieldLayout> {
+        let content = self.dialog.content_rect(self.bounds, scale, theme)?;
+        Some(self.group.layout(content, self.bounds, scale, theme))
     }
 
-    /// The window's content drawn into `surface`, laid out over `bounds`.
-    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
-        self.dialog.render(surface, bounds, scale, theme);
-        if let Some(layout) = self.rows_layout(bounds, scale, theme) {
+    /// The window's content drawn into `surface`.
+    pub fn render(&self, surface: &mut Surface, scale: Scale, theme: &Theme) {
+        self.dialog.render(surface, self.bounds, scale, theme);
+        if let Some(layout) = self.rows_layout(scale, theme) {
             self.group.render(surface, layout, scale, theme);
         }
     }
@@ -147,12 +150,7 @@ impl<T> OpenPdf<T> {
     /// ticket handed back, and the page or password read from the form. A
     /// confirmation the form holds nothing to open with answers nothing, and
     /// the form or the dialog says why.
-    fn answer(
-        &mut self,
-        confirmed: bool,
-        bounds: Rect,
-        damage: &mut Region,
-    ) -> Outcome<AppRequest<Answered<T>>> {
+    fn answer(&mut self, confirmed: bool, damage: &mut Region) -> Outcome<AppRequest<Answered<T>>> {
         if self.ticket.is_none() {
             return Outcome::none();
         }
@@ -165,9 +163,9 @@ impl<T> OpenPdf<T> {
                 // An invalid entry blocks the action: the page typed out of
                 // range is held to the range and shown, not opened unseen.
                 if field.state().validation == ValidationState::Invalid {
-                    let _ = field.commit(bounds, damage);
+                    let _ = field.commit(self.bounds, damage);
                     let page = field.value();
-                    return self.describe(page, bounds, damage);
+                    return self.describe(page, damage);
                 }
                 let page = u32::try_from(field.value() - 1).ok();
                 self.answered(|ticket| Answered::Open {
@@ -187,7 +185,7 @@ impl<T> OpenPdf<T> {
                     // whole rather than trimmed unseen.
                     if unoffered == Unoffered::TooLong {
                         field.clear();
-                        damage.add(bounds);
+                        damage.add(self.bounds);
                     }
                     self.refuse(Some(unoffered.why()))
                 }
@@ -218,12 +216,7 @@ impl<T> OpenPdf<T> {
 
     /// Restate page `page`'s size beside its number, the window laid out
     /// again where that changed the row.
-    fn describe(
-        &mut self,
-        page: i32,
-        bounds: Rect,
-        damage: &mut Region,
-    ) -> Outcome<AppRequest<Answered<T>>> {
+    fn describe(&mut self, page: i32, damage: &mut Region) -> Outcome<AppRequest<Answered<T>>> {
         let (Asked::Page { sizes, .. }, Some(row)) =
             (&self.asked, self.group.rows_mut().first_mut())
         else {
@@ -232,7 +225,7 @@ impl<T> OpenPdf<T> {
         if !row.set_description(page_size(sizes, page)) {
             return Outcome::none();
         }
-        damage.add(bounds);
+        damage.add(self.bounds);
         Outcome::reshaped()
     }
 
@@ -242,11 +235,10 @@ impl<T> OpenPdf<T> {
     fn follow(
         &mut self,
         acted: &FieldGroupAction,
-        bounds: Rect,
         damage: &mut Region,
     ) -> Outcome<AppRequest<Answered<T>>> {
         match acted.action {
-            FieldAction::Number(action) => self.describe(action.value(), bounds, damage),
+            FieldAction::Number(action) => self.describe(action.value(), damage),
             FieldAction::Text(TextAction::Edited) => self.refuse(None),
             _ => Outcome::none(),
         }
@@ -302,7 +294,6 @@ fn whole(side: f64) -> i32 {
 }
 
 impl<T> AppView for OpenPdf<T> {
-    type Layout = Rect;
     type Faces = Faces;
     type Own = Answered<T>;
 
@@ -314,8 +305,17 @@ impl<T> AppView for OpenPdf<T> {
         (WIDTH, HEIGHT)
     }
 
-    fn layout(&self, width: u32, height: u32, _: &Theme, _: Scale, _: Faces) -> Rect {
-        Rect::new(0, 0, width, height)
+    fn lay_out(
+        &mut self,
+        width: u32,
+        height: u32,
+        _: &Theme,
+        _: Scale,
+        _: Faces,
+        damage: &mut Region,
+    ) {
+        self.bounds = Rect::new(0, 0, width, height);
+        damage.add(self.bounds);
     }
 
     fn min_size(&self, theme: &Theme, scale: Scale, _: Faces) -> (u32, u32) {
@@ -329,35 +329,29 @@ impl<T> AppView for OpenPdf<T> {
         )
     }
 
-    fn settle(&mut self, layout: &Rect, damage: &mut Region) {
-        damage.add(*layout);
-    }
-
-    fn cursor(&self, _: &Rect, _: Point) -> CursorShape {
+    fn cursor(&self, _: Point) -> CursorShape {
         CursorShape::Arrow
     }
 
-    fn focus_changed(&mut self, _: bool, layout: &Rect, damage: &mut Region) {
-        damage.add(*layout);
+    fn focus_changed(&mut self, _: bool, damage: &mut Region) {
+        damage.add(self.bounds);
     }
 
     fn input(
         &mut self,
         input: &InputEvent,
         now_ns: u64,
-        layout: &Rect,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome<AppRequest<Answered<T>>> {
-        let bounds = *layout;
-        let Some(rows) = self.rows_layout(bounds, scale, theme) else {
+        let Some(rows) = self.rows_layout(scale, theme) else {
             return Outcome::none();
         };
         match *input {
             InputEvent::KeyPressed { key, modifiers } => match key {
-                Key::Named(NamedKey::Escape) => self.answer(false, bounds, damage),
-                Key::Named(NamedKey::Enter) => self.answer(true, bounds, damage),
+                Key::Named(NamedKey::Escape) => self.answer(false, damage),
+                Key::Named(NamedKey::Enter) => self.answer(true, damage),
                 _ => {
                     let stroke = Keystroke {
                         key,
@@ -365,17 +359,20 @@ impl<T> AppView for OpenPdf<T> {
                         at_ns: now_ns,
                     };
                     match self.group.on_key(stroke, rows, scale, theme, damage) {
-                        Some(acted) => self.follow(&acted, bounds, damage),
+                        Some(acted) => self.follow(&acted, damage),
                         None => Outcome::none(),
                     }
                 }
             },
             InputEvent::KeyReleased { .. } => Outcome::none(),
             _ => match self.group.on_pointer(input, rows, scale, theme, damage) {
-                Some(acted) => self.follow(&acted, bounds, damage),
-                None => match self.dialog.on_pointer(input, bounds, scale, theme, damage) {
+                Some(acted) => self.follow(&acted, damage),
+                None => match self
+                    .dialog
+                    .on_pointer(input, self.bounds, scale, theme, damage)
+                {
                     Some(DialogAction::ActionActivated { index }) => {
-                        self.answer(index == 1, bounds, damage)
+                        self.answer(index == 1, damage)
                     }
                     None => Outcome::none(),
                 },
@@ -387,19 +384,13 @@ impl<T> AppView for OpenPdf<T> {
         self.group.deadline_ns()
     }
 
-    fn advance(
-        &mut self,
-        now_ns: u64,
-        layout: &Rect,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) {
+    fn advance(&mut self, now_ns: u64, scale: Scale, theme: &Theme, damage: &mut Region) {
         // Laid out nowhere, the rows' clocks still move: a deadline left
         // passed would wake the window without end.
-        let rows = self
-            .rows_layout(*layout, scale, theme)
-            .unwrap_or_else(|| self.group.layout(Rect::default(), *layout, scale, theme));
+        let rows = self.rows_layout(scale, theme).unwrap_or_else(|| {
+            self.group
+                .layout(Rect::default(), self.bounds, scale, theme)
+        });
         self.group.advance(now_ns, rows, (scale, theme), damage);
     }
 }

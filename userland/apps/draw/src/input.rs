@@ -83,13 +83,14 @@ fn canvas_origin(layout: &Layout) -> Point {
 
 impl View {
     /// The drawing point under the window's device point `at`.
-    pub(crate) fn drawing_at(&self, layout: &Layout, at: Point) -> Point {
-        self.viewport.drawing_point(at - canvas_origin(layout))
+    pub(crate) fn drawing_at(&self, at: Point) -> Point {
+        self.viewport
+            .drawing_point(at - canvas_origin(&self.layout))
     }
 
     /// The window device point over the drawing point `point`.
-    pub(crate) fn window_at(&self, layout: &Layout, point: Point) -> Point {
-        self.viewport.canvas_point(point) + canvas_origin(layout)
+    pub(crate) fn window_at(&self, point: Point) -> Point {
+        self.viewport.canvas_point(point) + canvas_origin(&self.layout)
     }
 
     /// One device pixel, in drawing pixels.
@@ -98,24 +99,23 @@ impl View {
     }
 
     /// How near the pointer must come to pick something, in drawing pixels.
-    fn grab(&self, layout: &Layout) -> f64 {
-        reach(layout, self.handling.pick) * self.pixel()
+    fn grab(&self) -> f64 {
+        reach(&self.layout, self.handling.pick) * self.pixel()
     }
 
     /// The pointer as the drawing sees it, snapped as the window snaps.
-    fn snapped(&self, layout: &Layout, at: Point) -> Point {
-        let point = self.drawing_at(layout, at);
+    fn snapped(&self, at: Point) -> Point {
+        let point = self.drawing_at(at);
         if !self.show.snapping {
             return point;
         }
-        crate::snap::snapped(self.shown(), point, self.grab(layout), self.show.grid)
+        crate::snap::snapped(self.shown(), point, self.grab(), self.show.grid)
     }
 
     /// Feed an input event.
     pub fn on_input(
         &mut self,
         event: &InputEvent,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -123,7 +123,7 @@ impl View {
         match *event {
             InputEvent::KeyPressed { key, modifiers } => {
                 self.modifiers = modifiers;
-                self.key(key, modifiers, layout, scale, theme, damage)
+                self.key(key, modifiers, scale, theme, damage)
             }
             InputEvent::KeyReleased { key, modifiers } => {
                 self.modifiers = modifiers;
@@ -136,14 +136,13 @@ impl View {
                 self.modifiers = modifiers;
                 Outcome::none()
             }
-            _ => self.pointer_event(event, layout, scale, theme, damage),
+            _ => self.pointer_event(event, scale, theme, damage),
         }
     }
 
     fn pointer_event(
         &mut self,
         event: &InputEvent,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -154,31 +153,31 @@ impl View {
         let over =
             tairix_geometry::Point::new(round_i32(self.pointer.x), round_i32(self.pointer.y));
         let on_bar = [
-            layout.horizontal_bar,
-            layout.vertical_bar,
-            layout.bar_corner,
+            self.layout.horizontal_bar,
+            self.layout.vertical_bar,
+            self.layout.bar_corner,
         ]
         .iter()
         .any(|bar| bar.contains(over));
         let held = self.bar_held();
         if on_bar || held || matches!(event, InputEvent::PointerMoved { .. }) {
-            self.bars_input(event, over, (layout, scale, theme), damage);
+            self.bars_input(event, over, (scale, theme), damage);
             if on_bar || held {
                 return Outcome::none();
             }
         }
-        let inspecting = layout.panel.contains(over)
-            || layout.tabs.contains(over)
+        let inspecting = self.layout.panel.contains(over)
+            || self.layout.tabs.contains(over)
             || self.inspector.holds_pointer();
         match *event {
             InputEvent::PointerScrolled { dx, dy } if !inspecting => {
-                return self.wheel(dx, dy, layout, damage);
+                return self.wheel(dx, dy, damage);
             }
             InputEvent::Pinch {
                 phase,
                 scale: spread,
                 at,
-            } => return self.pinch(phase, spread, device(at), layout, damage),
+            } => return self.pinch(phase, spread, device(at), damage),
             InputEvent::PointerPressed {
                 button: PointerButton::Secondary,
             } if self.gesture.is_none() => {
@@ -190,33 +189,33 @@ impl View {
             _ => {}
         }
         if self.gesture.is_some() {
-            return self.drag(event, layout, damage);
+            return self.drag(event, damage);
         }
-        if layout.tools.contains(over) || matches!(event, InputEvent::PointerMoved { .. }) {
+        if self.layout.tools.contains(over) || matches!(event, InputEvent::PointerMoved { .. }) {
             if let ToolbarOutcome::Activated(action) =
                 self.tool_box
-                    .on_pointer(event, layout.tools, scale, theme, damage)
+                    .on_pointer(event, self.layout.tools, scale, theme, damage)
             {
                 if let Some(&tool) = Tool::ALL.get(action.index) {
                     self.choose_tool(tool);
-                    damage.add(layout.window);
+                    damage.add(self.layout.window);
                 }
             }
-            if layout.tools.contains(over) {
+            if self.layout.tools.contains(over) {
                 return Outcome::none();
             }
         }
-        if inspecting || self.inspector.was_over(layout) || self.inspector.has_keyboard() {
-            let changes = self.inspect(|inspector, shown| {
+        if inspecting || self.inspector.was_over(&self.layout) || self.inspector.has_keyboard() {
+            let changes = self.inspect(|inspector, shown, layout| {
                 inspector.on_pointer(event, (layout, scale, theme), shown, damage)
             });
             for change in changes {
-                self.apply_change(change, layout, damage);
+                self.apply_change(change, damage);
             }
             // The keyboard went to the inspector, so typing ends where it is.
             if self.inspector.has_keyboard() && self.typing.is_some() {
                 self.finish_typing();
-                damage.add(layout.canvas);
+                damage.add(self.layout.canvas);
             }
             if inspecting {
                 return Outcome::none();
@@ -225,10 +224,10 @@ impl View {
         match *event {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
-            } => self.primary_press(over, layout, damage),
+            } => self.primary_press(over, damage),
             InputEvent::PointerPressed {
                 button: PointerButton::Middle,
-            } if layout.canvas.contains(over) => {
+            } if self.layout.canvas.contains(over) => {
                 self.gesture = Some(Gesture::Pan { last: self.pointer });
                 Outcome::none()
             }
@@ -238,20 +237,15 @@ impl View {
 
     /// A primary press at the window point `over` that no control took: a
     /// guide out of a ruler, the tool in hand on the canvas, or the bar.
-    fn primary_press(
-        &mut self,
-        over: tairix_geometry::Point,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> ViewOutcome {
-        let ruled = layout.top_ruler.contains(over) || layout.left_ruler.contains(over);
+    fn primary_press(&mut self, over: tairix_geometry::Point, damage: &mut Region) -> ViewOutcome {
+        let ruled = self.layout.top_ruler.contains(over) || self.layout.left_ruler.contains(over);
         // Whatever the press begins acts on the drawing as shown.
-        if ruled || layout.canvas.contains(over) {
+        if ruled || self.layout.canvas.contains(over) {
             self.land_pending(damage);
         }
         if ruled {
-            let horizontal = layout.top_ruler.contains(over);
-            let at = self.drawing_at(layout, self.pointer);
+            let horizontal = self.layout.top_ruler.contains(over);
+            let at = self.drawing_at(self.pointer);
             self.gesture = Some(Gesture::Guide {
                 horizontal,
                 at: if horizontal { at.y } else { at.x },
@@ -259,24 +253,24 @@ impl View {
             });
             return Outcome::none();
         }
-        if layout.canvas.contains(over) {
-            return self.press(layout, damage);
+        if self.layout.canvas.contains(over) {
+            return self.press(damage);
         }
-        if layout.zoom.contains(over) {
+        if self.layout.zoom.contains(over) {
             return Outcome::asking(Request::Menu {
                 kind: MenuKind::Zoom,
-                anchor: layout.zoom,
+                anchor: self.layout.zoom,
             });
         }
         Outcome::none()
     }
 
-    fn wheel(&mut self, dx: i32, dy: i32, layout: &Layout, damage: &mut Region) -> ViewOutcome {
+    fn wheel(&mut self, dx: i32, dy: i32, damage: &mut Region) -> ViewOutcome {
         let detents = |units: i32| f64::from(units) / f64::from(SCROLL_UNITS_PER_DETENT);
-        let step = reach(layout, DETENT_SCROLL);
+        let step = reach(&self.layout, DETENT_SCROLL);
         if self.modifiers.ctrl {
             let factor = exp2(-detents(dy) / 4.0);
-            let anchor = self.pointer - canvas_origin(layout);
+            let anchor = self.pointer - canvas_origin(&self.layout);
             self.viewport.zoom_at(self.viewport.zoom() * factor, anchor);
         } else if self.modifiers.shift {
             self.viewport.scroll(Point::new(detents(dy) * step, 0.0));
@@ -284,7 +278,7 @@ impl View {
             self.viewport
                 .scroll(Point::new(detents(dx) * step, detents(dy) * step));
         }
-        damage.add(layout.window);
+        damage.add(self.layout.window);
         Outcome::none()
     }
 
@@ -293,7 +287,6 @@ impl View {
         phase: PinchPhase,
         spread: u32,
         at: Point,
-        layout: &Layout,
         damage: &mut Region,
     ) -> ViewOutcome {
         match phase {
@@ -302,8 +295,8 @@ impl View {
                 if let Some(began) = self.pinched {
                     let factor = f64::from(spread) / f64::from(PINCH_SCALE_ONE);
                     self.viewport
-                        .zoom_at(began * factor, at - canvas_origin(layout));
-                    damage.add(layout.window);
+                        .zoom_at(began * factor, at - canvas_origin(&self.layout));
+                    damage.add(self.layout.window);
                 }
             }
             PinchPhase::End | PinchPhase::Cancel => self.pinched = None,
@@ -312,14 +305,14 @@ impl View {
     }
 
     /// A primary press on the canvas.
-    fn press(&mut self, layout: &Layout, damage: &mut Region) -> ViewOutcome {
-        let point = self.drawing_at(layout, self.pointer);
-        let snapped = self.snapped(layout, self.pointer);
+    fn press(&mut self, damage: &mut Region) -> ViewOutcome {
+        let point = self.drawing_at(self.pointer);
+        let snapped = self.snapped(self.pointer);
         if self.spaced || self.tool == Tool::Hand {
             self.gesture = Some(Gesture::Pan { last: self.pointer });
             return Outcome::none();
         }
-        if let Some(index) = self.guide_near(layout) {
+        if let Some(index) = self.guide_near() {
             let guide = self.shown().guides()[index];
             self.gesture = Some(Gesture::Guide {
                 horizontal: guide.axis == GuideAxis::Horizontal,
@@ -329,12 +322,12 @@ impl View {
             return Outcome::none();
         }
         match self.tool {
-            Tool::Select => self.select_press(layout, point, damage),
+            Tool::Select => self.select_press(point, damage),
             Tool::Nodes => {
-                if let Some(grip) = self.grip_near(layout) {
+                if let Some(grip) = self.grip_near() {
                     self.gesture = Some(Gesture::Node { grip, to: point });
                 } else {
-                    self.pick(point, false, damage, layout);
+                    self.pick(point, false, damage);
                 }
             }
             Tool::Rectangle | Tool::Ellipse | Tool::Star | Tool::Line => {
@@ -343,16 +336,16 @@ impl View {
                     to: snapped,
                 });
             }
-            Tool::Pen => self.pen_press(layout, snapped, damage),
+            Tool::Pen => self.pen_press(snapped, damage),
             Tool::Pencil => {
                 self.gesture = Some(Gesture::Freehand {
                     points: alloc::vec![point],
                 });
             }
-            Tool::Text => self.text_press(point, damage, layout),
+            Tool::Text => self.text_press(point, damage),
             Tool::Gradient => {
                 if self.selection.is_empty() {
-                    self.pick(point, false, damage, layout);
+                    self.pick(point, false, damage);
                 }
                 if !self.selection.is_empty() {
                     self.gesture = Some(Gesture::Gradient {
@@ -361,9 +354,9 @@ impl View {
                     });
                 }
             }
-            Tool::Eyedropper => self.eyedrop(point, damage, layout),
+            Tool::Eyedropper => self.eyedrop(point, damage),
             Tool::Zoom => {
-                let at = self.pointer - canvas_origin(layout);
+                let at = self.pointer - canvas_origin(&self.layout);
                 self.gesture = Some(Gesture::Zoom { from: at, to: at });
             }
             Tool::Hand => {}
@@ -371,12 +364,12 @@ impl View {
         Outcome::none()
     }
 
-    fn select_press(&mut self, layout: &Layout, point: Point, damage: &mut Region) {
-        if let Some(gesture) = self.handle_near(layout) {
+    fn select_press(&mut self, point: Point, damage: &mut Region) {
+        if let Some(gesture) = self.handle_near() {
             self.gesture = Some(gesture);
             return;
         }
-        let picked = self.pick(point, self.modifiers.shift, damage, layout);
+        let picked = self.pick(point, self.modifiers.shift, damage);
         if picked {
             self.gesture = Some(Gesture::Move {
                 from: point,
@@ -394,25 +387,14 @@ impl View {
     /// Select the object under `point`, adding it to the selection, or taking
     /// it out, when `toggle`: the object within its layer, a group whole.
     /// Answers whether the pointer is now over something selected.
-    pub(crate) fn pick(
-        &mut self,
-        point: Point,
-        toggle: bool,
-        damage: &mut Region,
-        layout: &Layout,
-    ) -> bool {
-        let hit = hit(
-            self.shown(),
-            point,
-            self.grab(layout),
-            &Lettering::new(Arrived),
-        )
-        .ok()
-        .flatten();
+    pub(crate) fn pick(&mut self, point: Point, toggle: bool, damage: &mut Region) -> bool {
+        let hit = hit(self.shown(), point, self.grab(), &Lettering::new(Arrived))
+            .ok()
+            .flatten();
         let Some(mut path) = hit else {
             if !toggle {
                 self.selection.clear();
-                damage.add(layout.window);
+                damage.add(self.layout.window);
             }
             return false;
         };
@@ -442,21 +424,21 @@ impl View {
             self.layer = layer;
         }
         self.refresh_inspector();
-        damage.add(layout.window);
+        damage.add(self.layout.window);
         self.selection.contains(&path)
     }
 
     /// The scale or turn handle of the selection under the pointer.
-    fn handle_near(&self, layout: &Layout) -> Option<Gesture> {
+    fn handle_near(&self) -> Option<Gesture> {
         let bounds = self.selection_bounds();
         if bounds.is_empty() {
             return None;
         }
-        let point = self.drawing_at(layout, self.pointer);
+        let point = self.drawing_at(self.pointer);
         for handle in handles() {
-            let at = self.window_at(layout, handle_point(bounds, handle));
+            let at = self.window_at(handle_point(bounds, handle));
             let distance = at.distance(self.pointer);
-            if distance <= reach(layout, self.handling.pick) {
+            if distance <= reach(&self.layout, self.handling.pick) {
                 return Some(Gesture::Scale {
                     handle,
                     bounds,
@@ -464,7 +446,7 @@ impl View {
                 });
             }
             let corner = handle.across != 0 && handle.down != 0;
-            if corner && distance <= reach(layout, TURN_REACH) && !bounds.contains(point) {
+            if corner && distance <= reach(&self.layout, TURN_REACH) && !bounds.contains(point) {
                 return Some(Gesture::Rotate {
                     centre: bounds.centre(),
                     from: point,
@@ -476,9 +458,9 @@ impl View {
     }
 
     /// The guide under the pointer, if one is.
-    fn guide_near(&self, layout: &Layout) -> Option<usize> {
-        let point = self.drawing_at(layout, self.pointer);
-        let grab = self.grab(layout);
+    fn guide_near(&self) -> Option<usize> {
+        let point = self.drawing_at(self.pointer);
+        let grab = self.grab();
         self.shown()
             .guides()
             .iter()
@@ -490,7 +472,7 @@ impl View {
 
     /// The node or handle of the selected path, or of the path the
     /// selected text is set along, under the pointer.
-    fn grip_near(&self, layout: &Layout) -> Option<Grip> {
+    fn grip_near(&self) -> Option<Grip> {
         let path = self.selection.first()?;
         let node = self.shown().node_at(path)?;
         let shape = node_path(node)?;
@@ -498,9 +480,8 @@ impl View {
             .transform()
             .then(edit::parent_space(self.shown(), path));
         let near = |point: Point| {
-            self.window_at(layout, to_drawing.map(point))
-                .distance(self.pointer)
-                <= reach(layout, self.handling.pick)
+            self.window_at(to_drawing.map(point)).distance(self.pointer)
+                <= reach(&self.layout, self.handling.pick)
         };
         for (contour_at, contour) in shape.contours.iter().enumerate() {
             for (node_at, path_node) in contour.nodes.iter().enumerate() {
@@ -523,10 +504,10 @@ impl View {
         None
     }
 
-    fn pen_press(&mut self, layout: &Layout, point: Point, damage: &mut Region) {
+    fn pen_press(&mut self, point: Point, damage: &mut Region) {
         if let Some(first) = self.pen.first() {
-            if self.window_at(layout, first.point).distance(self.pointer)
-                <= reach(layout, self.handling.pick)
+            if self.window_at(first.point).distance(self.pointer)
+                <= reach(&self.layout, self.handling.pick)
                 && self.pen.len() > 1
             {
                 let nodes = core::mem::take(&mut self.pen);
@@ -538,29 +519,24 @@ impl View {
                     Ok(None) => {}
                     Err(error) => self.say_error("Draw path", error.into()),
                 }
-                damage.add(layout.window);
+                damage.add(self.layout.window);
                 return;
             }
         }
         self.pen.push(tools::pen_node(point, None));
         self.gesture = Some(Gesture::PenHandle { to: point });
-        damage.add(layout.canvas);
+        damage.add(self.layout.canvas);
     }
 
     /// A press with the text tool: on the text being typed it puts the caret
     /// there — shift holds the selection's other end — and on another text
     /// begins typing into it there; a drag then selects. Elsewhere it begins
     /// a new text.
-    fn text_press(&mut self, point: Point, damage: &mut Region, layout: &Layout) {
+    fn text_press(&mut self, point: Point, damage: &mut Region) {
         let at_point = |view: &Self| {
-            hit(
-                view.shown(),
-                point,
-                view.grab(layout),
-                &Lettering::new(Arrived),
-            )
-            .ok()
-            .flatten()
+            hit(view.shown(), point, view.grab(), &Lettering::new(Arrived))
+                .ok()
+                .flatten()
         };
         let within_typing = self
             .typing
@@ -579,12 +555,12 @@ impl View {
                 self.place_caret(point, within_typing && self.modifiers.shift);
                 self.gesture = Some(Gesture::TextSelect);
                 self.refresh_inspector();
-                damage.add(layout.window);
+                damage.add(self.layout.window);
                 return;
             }
         }
         if !self.takes_new_objects() {
-            damage.add(layout.status);
+            damage.add(self.layout.status);
             return;
         }
         let id = self.document.ids().issue();
@@ -600,7 +576,7 @@ impl View {
             }
             Err(error) => self.say_error("Text", error),
         }
-        damage.add(layout.window);
+        damage.add(self.layout.window);
     }
 
     /// The caret of the text being typed put at the character boundary
@@ -672,15 +648,10 @@ impl View {
         Ok(try_arc(node)?)
     }
 
-    fn eyedrop(&mut self, point: Point, damage: &mut Region, layout: &Layout) {
-        let hit = hit(
-            self.shown(),
-            point,
-            self.grab(layout),
-            &Lettering::new(Arrived),
-        )
-        .ok()
-        .flatten();
+    fn eyedrop(&mut self, point: Point, damage: &mut Region) {
+        let hit = hit(self.shown(), point, self.grab(), &Lettering::new(Arrived))
+            .ok()
+            .flatten();
         let Some(style) = hit.and_then(|path| {
             self.shown()
                 .node_at(&path)
@@ -701,13 +672,13 @@ impl View {
             self.apply(result, "Take style");
         }
         self.refresh_inspector();
-        damage.add(layout.window);
+        damage.add(self.layout.window);
     }
 
     /// A pointer event while a gesture is under way.
-    fn drag(&mut self, event: &InputEvent, layout: &Layout, damage: &mut Region) -> ViewOutcome {
-        let point = self.drawing_at(layout, self.pointer);
-        let snapped = self.snapped(layout, self.pointer);
+    fn drag(&mut self, event: &InputEvent, damage: &mut Region) -> ViewOutcome {
+        let point = self.drawing_at(self.pointer);
+        let snapped = self.snapped(self.pointer);
         let pixel = self.pixel();
         match event {
             InputEvent::PointerMoved { .. }
@@ -715,7 +686,7 @@ impl View {
             {
                 self.place_caret(point, true);
                 self.refresh_inspector();
-                damage.add(layout.window);
+                damage.add(self.layout.window);
                 Outcome::none()
             }
             InputEvent::PointerMoved { .. } => {
@@ -724,7 +695,7 @@ impl View {
                         let by = *last - self.pointer;
                         *last = self.pointer;
                         self.viewport.scroll(by);
-                        damage.add(layout.window);
+                        damage.add(self.layout.window);
                         return Outcome::none();
                     }
                     Some(
@@ -754,25 +725,27 @@ impl View {
                             points.push(point);
                         }
                     }
-                    Some(Gesture::Zoom { to, .. }) => *to = self.pointer - canvas_origin(layout),
+                    Some(Gesture::Zoom { to, .. }) => {
+                        *to = self.pointer - canvas_origin(&self.layout);
+                    }
                     Some(Gesture::Guide { horizontal, at, .. }) => {
                         *at = if *horizontal { point.y } else { point.x }
                     }
                     Some(Gesture::TextSelect) | None => {}
                 }
-                damage.add(layout.canvas);
-                damage.add(layout.status);
+                damage.add(self.layout.canvas);
+                damage.add(self.layout.status);
                 Outcome::none()
             }
             InputEvent::PointerReleased { .. } | InputEvent::PointerCancelled => {
                 let cancelled = matches!(event, InputEvent::PointerCancelled);
                 if let Some(gesture) = self.gesture.take() {
                     if !cancelled {
-                        self.land(gesture, layout);
+                        self.land(gesture);
                     }
                 }
                 self.refresh_inspector();
-                damage.add(layout.window);
+                damage.add(self.layout.window);
                 Outcome::none()
             }
             _ => Outcome::none(),
@@ -851,7 +824,7 @@ impl View {
     }
 
     /// A gesture ended: land what it made.
-    fn land(&mut self, gesture: Gesture, layout: &Layout) {
+    fn land(&mut self, gesture: Gesture) {
         let constraint = Constraint {
             even: self.modifiers.shift,
             centred: self.modifiers.alt,
@@ -906,7 +879,7 @@ impl View {
             Gesture::Node { grip, to } => self.move_node(grip, to),
             Gesture::Zoom { from, to } => {
                 let area = Bounds::new(from, to);
-                let grab = reach(layout, self.handling.pick);
+                let grab = reach(&self.layout, self.handling.pick);
                 if area.width() < grab && area.height() < grab {
                     let zoom = self
                         .viewport
@@ -918,8 +891,8 @@ impl View {
                         self.viewport.drawing_point(area.max),
                     );
                     let size = Point::new(
-                        f64::from(layout.canvas.width),
-                        f64::from(layout.canvas.height),
+                        f64::from(self.layout.canvas.width),
+                        f64::from(self.layout.canvas.height),
                     );
                     self.viewport.fit(drawing_area, size, 0.0);
                 }
@@ -928,7 +901,7 @@ impl View {
                 horizontal,
                 at,
                 index,
-            } => self.place_guide(horizontal, at, index, layout),
+            } => self.place_guide(horizontal, at, index),
         }
     }
 
@@ -1042,10 +1015,10 @@ impl View {
         self.apply(result, "Move node");
     }
 
-    fn place_guide(&mut self, horizontal: bool, at: f64, index: Option<usize>, layout: &Layout) {
+    fn place_guide(&mut self, horizontal: bool, at: f64, index: Option<usize>) {
         let over =
             tairix_geometry::Point::new(round_i32(self.pointer.x), round_i32(self.pointer.y));
-        let placed = layout.canvas.contains(over).then_some(Guide {
+        let placed = self.layout.canvas.contains(over).then_some(Guide {
             axis: if horizontal {
                 GuideAxis::Horizontal
             } else {
@@ -1070,13 +1043,12 @@ impl View {
         &mut self,
         key: Key,
         modifiers: Modifiers,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> ViewOutcome {
         if self.typing.is_some() && !modifiers.ctrl {
-            self.type_key(key, modifiers.shift, layout, damage);
+            self.type_key(key, modifiers.shift, damage);
             return Outcome::none();
         }
         if let (Some(typing), true, Key::Char('a' | 'A')) = (&mut self.typing, modifiers.ctrl, &key)
@@ -1094,25 +1066,25 @@ impl View {
                 typing.anchor = 0;
                 typing.caret = length;
                 self.refresh_inspector();
-                damage.add(layout.window);
+                damage.add(self.layout.window);
                 return Outcome::none();
             }
         }
         if self.inspector.has_keyboard() {
             if !modifiers.ctrl {
-                let changes = self.inspect(|inspector, shown| {
+                let changes = self.inspect(|inspector, shown, layout| {
                     inspector.on_key(key, modifiers, (layout, scale, theme), shown, damage)
                 });
                 for change in changes {
-                    self.apply_change(change, layout, damage);
+                    self.apply_change(change, damage);
                 }
                 return Outcome::none();
             }
-            let released = self.inspect(|inspector, shown| {
+            let released = self.inspect(|inspector, shown, layout| {
                 inspector.release_keyboard((layout, scale, theme), shown, damage)
             });
             if let Some(change) = released {
-                self.apply_change(change, layout, damage);
+                self.apply_change(change, damage);
             }
         }
         let backing_up = matches!(key, Key::Named(NamedKey::Delete | NamedKey::Backspace))
@@ -1120,13 +1092,13 @@ impl View {
             && !self.pen.is_empty();
         if backing_up {
             self.pen.pop();
-            damage.add(layout.canvas);
+            damage.add(self.layout.canvas);
             return Outcome::none();
         }
         if let Some(command) = self.chord(key, modifiers) {
-            return self.carry_out(command, layout, damage);
+            return self.carry_out(command, damage);
         }
-        damage.add(layout.window);
+        damage.add(self.layout.window);
         match key {
             Key::Char(' ') => self.spaced = true,
             Key::Named(NamedKey::Escape) => {
@@ -1191,7 +1163,7 @@ impl View {
     /// characters, and shows the text afresh to land as one step when typing
     /// ends. A move of the caret changes no drawing; with `extend` it carries
     /// the selection with it.
-    fn type_key(&mut self, key: Key, extend: bool, layout: &Layout, damage: &mut Region) {
+    fn type_key(&mut self, key: Key, extend: bool, damage: &mut Region) {
         let Some(typing) = self.typing.clone() else {
             return;
         };
@@ -1224,7 +1196,7 @@ impl View {
         let (edit, moved) = match key {
             Key::Named(NamedKey::Escape) => {
                 self.finish_typing();
-                damage.add(layout.window);
+                damage.add(self.layout.window);
                 return;
             }
             // A text along a path is one line.
@@ -1256,7 +1228,7 @@ impl View {
             }
             _ => return,
         };
-        damage.add(layout.window);
+        damage.add(self.layout.window);
         let Some((range, with)) =
             edit.filter(|(range, with)| !range.is_empty() || !with.is_empty())
         else {
@@ -1285,8 +1257,8 @@ impl View {
     }
 
     /// Carry out what the inspector changed.
-    pub(crate) fn apply_change(&mut self, change: Change, layout: &Layout, damage: &mut Region) {
-        damage.add(layout.window);
+    pub(crate) fn apply_change(&mut self, change: Change, damage: &mut Region) {
+        damage.add(self.layout.window);
         match change {
             Change::Paint {
                 target,

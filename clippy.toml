@@ -102,4 +102,5 @@ doc-valid-idents = [
     "AmigaOS",
     "PPMd",
     "BLAKE2sp",
+    "SASLprep",
 ]

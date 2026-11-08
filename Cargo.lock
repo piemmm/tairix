@@ -4193,6 +4193,7 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-image",
  "tairix-inline",
+ "tairix-unicode",
  "tairix-util",
 ]
 
@@ -9125,6 +9126,9 @@ dependencies = [
 [[package]]
 name = "tairix-unicode"
 version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
+]
 
 [[package]]
 name = "tairix-unlink"

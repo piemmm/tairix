@@ -3,7 +3,7 @@
 
 use alloc::vec;
 
-use tairix_geometry::{Rect, Region, Scale};
+use tairix_geometry::{Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_theme::ThemeRegistry;
 use tairix_window::docapp::{AppRequest, AppView, Relayout};
@@ -15,27 +15,19 @@ use tairix_sandbox::drawedit::MAX_PASSWORD_BYTES;
 struct Fixture {
     registry: ThemeRegistry,
     window: OpenPdf<u8>,
-    layout: Rect,
+    /// The size it was last laid out at, as `(width, height)`.
+    size: (u32, u32),
 }
 
 impl Fixture {
     fn asking(asked: Asked) -> Self {
-        let registry = ThemeRegistry::with_builtins();
-        let window = OpenPdf::new("plans.pdf", asked, 7);
-        let theme = registry.active();
-        let (width, height) = window.min_size(theme, Scale::ONE, Faces::of(theme, Scale::ONE));
-        let layout = window.layout(
-            width,
-            height,
-            theme,
-            Scale::ONE,
-            Faces::of(theme, Scale::ONE),
-        );
-        Self {
-            registry,
-            window,
-            layout,
-        }
+        let mut fixture = Self {
+            registry: ThemeRegistry::with_builtins(),
+            window: OpenPdf::new("plans.pdf", asked, 7),
+            size: (0, 0),
+        };
+        fixture.held_to_its_least();
+        fixture
     }
 
     fn key(&mut self, key: Key) -> Option<Answered<u8>> {
@@ -44,14 +36,9 @@ impl Fixture {
             modifiers: Modifiers::default(),
         };
         let theme = self.registry.active();
-        let answer = self.window.input(
-            &event,
-            0,
-            &self.layout,
-            Scale::ONE,
-            theme,
-            &mut Region::new(),
-        );
+        let answer = self
+            .window
+            .input(&event, 0, Scale::ONE, theme, &mut Region::new());
         if answer.relayout != Relayout::None {
             self.held_to_its_least();
         }
@@ -67,13 +54,10 @@ impl Fixture {
         let theme = self.registry.active();
         let faces = Faces::of(theme, Scale::ONE);
         let (width, height) = self.window.min_size(theme, Scale::ONE, faces);
-        self.layout = self.window.layout(
-            width.max(self.layout.width),
-            height.max(self.layout.height),
-            theme,
-            Scale::ONE,
-            faces,
-        );
+        self.size = (width.max(self.size.0), height.max(self.size.1));
+        let (width, height) = self.size;
+        self.window
+            .lay_out(width, height, theme, Scale::ONE, faces, &mut Region::new());
     }
 
     fn typed(&mut self, text: &str) {
@@ -235,9 +219,7 @@ fn the_window_keeps_its_fields_time() {
     let due = fixture.window.deadline_ns(0).expect("the marker moves");
     let mut damage = Region::new();
     let theme = fixture.registry.active();
-    fixture
-        .window
-        .advance(due, &fixture.layout, Scale::ONE, theme, &mut damage);
+    fixture.window.advance(due, Scale::ONE, theme, &mut damage);
     assert!(!damage.is_empty(), "the marker redrawn");
     assert!(fixture
         .window
@@ -253,13 +235,9 @@ fn a_window_too_small_for_its_form_still_keeps_time() {
     fixture.typed("a");
     let due = fixture.window.deadline_ns(0).expect("the marker moves");
     let theme = fixture.registry.active();
-    fixture.window.advance(
-        due,
-        &Rect::new(0, 0, 2, 2),
-        Scale::ONE,
-        theme,
-        &mut Region::new(),
-    );
+    fixture
+        .window
+        .advance(due, Scale::ONE, theme, &mut Region::new());
     assert!(fixture
         .window
         .deadline_ns(due)

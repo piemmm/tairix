@@ -358,8 +358,8 @@ pub struct View {
     pub(crate) star: StarDefaults,
     /// How new text is set.
     pub(crate) text: TextDefaults,
-    /// The layout the view was last settled into.
-    pub(crate) laid: Option<Layout>,
+    /// Where everything it draws goes, for its window's size.
+    pub(crate) layout: Layout,
     /// The selection's bounds, the scene and selection they are of.
     framed: core::cell::RefCell<Option<(u64, Vec<NodePath>, edit::Framed)>>,
 }
@@ -435,7 +435,7 @@ impl View {
                 polygon: false,
             },
             text: TextDefaults::default(),
-            laid: None,
+            layout: Layout::default(),
             framed: core::cell::RefCell::new(None),
         };
         view.layer = view.document.drawing().layers().len().saturating_sub(1);
@@ -520,12 +520,10 @@ impl View {
         if !under_way {
             return;
         }
-        if let Some(layout) = self.laid {
-            if let Some(change) = self.inspector.settle_edits(&layout, damage) {
-                self.apply_change(change, &layout, damage);
-            }
-            damage.add(layout.window);
+        if let Some(change) = self.inspector.settle_edits(&self.layout, damage) {
+            self.apply_change(change, damage);
         }
+        damage.add(self.layout.window);
         self.finish_typing();
         self.land_live();
     }
@@ -705,10 +703,10 @@ impl View {
         }
     }
 
-    /// The tiles the canvas of `layout` shows now.
+    /// The tiles the canvas shows now.
     #[must_use]
-    pub fn visible_tiles(&self, layout: &Layout) -> Vec<TileKey> {
-        let canvas = layout.canvas;
+    pub fn visible_tiles(&self) -> Vec<TileKey> {
+        let canvas = self.layout.canvas;
         let area = Bounds::new(
             Point::ZERO,
             Point::new(f64::from(canvas.width), f64::from(canvas.height)),
@@ -722,8 +720,8 @@ impl View {
     }
 
     /// The render job the canvas wants next, if any tile in view wants one.
-    pub fn wanted_render(&mut self, layout: &Layout) -> Option<RenderJob> {
-        let visible = self.visible_tiles(layout);
+    pub fn wanted_render(&mut self) -> Option<RenderJob> {
+        let visible = self.visible_tiles();
         let keys = self.tiles.wanted(&visible);
         if keys.is_empty() {
             return None;
@@ -746,15 +744,14 @@ impl View {
             &[TileKey],
             impl IntoIterator<Item = (TileKey, tairix_raster::Surface)>,
         ),
-        layout: &Layout,
         damage: &mut Region,
     ) {
-        let visible = self.visible_tiles(layout);
+        let visible = self.visible_tiles();
         for (key, surface) in tiles {
             self.tiles.landed(scene, key, surface, &visible);
         }
         self.tiles.refused(keys);
-        damage.add(layout.canvas);
+        damage.add(self.layout.canvas);
         // Glyphs that arrived with the tiles may frame text afresh; bounds
         // that waited on none stand.
         let waiting = self
@@ -766,7 +763,7 @@ impl View {
             *self.framed.get_mut() = None;
             if !self.selection.is_empty() {
                 self.refresh_inspector();
-                damage.add(layout.panel);
+                damage.add(self.layout.panel);
             }
         }
     }
@@ -815,13 +812,8 @@ impl View {
 
     /// The clipboard's drawing, read in the sandbox, arrived: its objects
     /// join the layer in hand, selected.
-    pub fn pasted(
-        &mut self,
-        pasted: Result<Drawing, String>,
-        damage: &mut Region,
-        layout: &Layout,
-    ) {
-        damage.add(layout.status);
+    pub fn pasted(&mut self, pasted: Result<Drawing, String>, damage: &mut Region) {
+        damage.add(self.layout.status);
         let pasted = match pasted {
             Ok(pasted) => pasted,
             Err(why) => {
@@ -851,7 +843,7 @@ impl View {
             },
             Err(error) => self.say_error("Paste", error),
         }
-        damage.add(layout.window);
+        damage.add(self.layout.window);
     }
 
     /// A picture the user chose to place, called `name`, landed in the layer
@@ -863,9 +855,8 @@ impl View {
         (name, at): (&str, Option<tairix_geometry::Point>),
         placed: Result<tairix_drawing::Image, String>,
         damage: &mut Region,
-        layout: &Layout,
     ) {
-        damage.add(layout.status);
+        damage.add(self.layout.status);
         let image = match placed {
             Ok(image) => image,
             Err(why) => {
@@ -878,8 +869,8 @@ impl View {
             return;
         }
         let canvas = Point::new(
-            f64::from(layout.canvas.width),
-            f64::from(layout.canvas.height),
+            f64::from(self.layout.canvas.width),
+            f64::from(self.layout.canvas.height),
         );
         let shown = Bounds::from_points([
             self.viewport.drawing_point(Point::ZERO),
@@ -897,10 +888,12 @@ impl View {
         // A drop point off the canvas places it as the menu does: the window
         // resized while the picture was read, or the pointer left the canvas
         // after the window last answered that it places.
-        let centre = at.filter(|at| layout.canvas.contains(*at)).map_or_else(
-            || shown.centre(),
-            |at| self.drawing_at(layout, Point::new(f64::from(at.x), f64::from(at.y))),
-        );
+        let centre = at
+            .filter(|at| self.layout.canvas.contains(*at))
+            .map_or_else(
+                || shown.centre(),
+                |at| self.drawing_at(Point::new(f64::from(at.x), f64::from(at.y))),
+            );
         let corner = centre - size * (fit / 2.0);
         let on_page = Affine::scale(fit, fit).then(Affine::translate(corner.x, corner.y));
         let mut nodes = Vec::new();
@@ -920,7 +913,7 @@ impl View {
             },
             Err(error) => self.say_error("Place picture", error),
         }
-        damage.add(layout.window);
+        damage.add(self.layout.window);
     }
 
     /// `image` as an object of the layer in hand, laid by `on_page` in the
@@ -1142,18 +1135,15 @@ impl View {
     /// pressure `band` allows.
     pub fn adopt_pressure(&mut self, band: tairix_reclaim::PressureBand) {
         self.document.adopt_pressure(band);
-        let visible = self
-            .laid
-            .map(|layout| self.visible_tiles(&layout))
-            .unwrap_or_default();
+        let visible = self.visible_tiles();
         self.tiles.adopt_pressure(band, &visible);
     }
 
     /// Arm the deadlines the held controls call for, now it is `now_ns`.
-    pub fn arm_deadline(&mut self, now_ns: u64, layout: &Layout, scale: Scale, theme: &Theme) {
+    pub fn arm_deadline(&mut self, now_ns: u64, scale: Scale, theme: &Theme) {
         let tools = self
             .tool_box
-            .repeat_deadline(now_ns, layout.tools, scale, theme);
+            .repeat_deadline(now_ns, self.layout.tools, scale, theme);
         let panel = self.inspector.repeat_deadline(now_ns);
         let bars = self.bars_deadline(now_ns);
         self.repeat_due = [tools, panel, bars].into_iter().flatten().min();
@@ -1166,24 +1156,21 @@ impl View {
     }
 
     /// Step whichever held control is due at `now_ns`.
-    pub fn tick(
-        &mut self,
-        now_ns: u64,
-        layout: &Layout,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) {
+    pub fn tick(&mut self, now_ns: u64, scale: Scale, theme: &Theme, damage: &mut Region) {
         self.tool_box
-            .repeat(now_ns, layout.tools, scale, theme, damage);
-        self.inspect(|inspector, shown| {
+            .repeat(now_ns, self.layout.tools, scale, theme, damage);
+        self.inspect(|inspector, shown, layout| {
             inspector.repeat(now_ns, (layout, scale, theme), shown, damage);
         });
-        self.bars_repeat(now_ns, (layout, scale, theme), damage);
+        self.bars_repeat(now_ns, (scale, theme), damage);
     }
 
-    /// Hand the inspector, with what it shows of the window, to `using`.
-    pub(crate) fn inspect<R>(&mut self, using: impl FnOnce(&mut Inspector, &Shown<'_>) -> R) -> R {
+    /// Hand the inspector, with what it shows of the window and the window's
+    /// layout, to `using`.
+    pub(crate) fn inspect<R>(
+        &mut self,
+        using: impl FnOnce(&mut Inspector, &Shown<'_>, &Layout) -> R,
+    ) -> R {
         let drawing = self
             .live
             .as_ref()
@@ -1191,7 +1178,7 @@ impl View {
         let defaults = (&self.style, self.star.polygon, &self.text);
         let typed = self.typed();
         let shown = crate::paint::shown_of(drawing, (&self.selection, typed), defaults, self.layer);
-        using(&mut self.inspector, &shown)
+        using(&mut self.inspector, &shown, &self.layout)
     }
 
     /// Bring the inspector into line with the selection.

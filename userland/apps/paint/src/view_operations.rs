@@ -21,7 +21,7 @@ use super::previews::Asking;
 use super::{Action, Compute, Lands, Outcome, Settles, Then, View};
 use crate::canvas::{Canvas, Kind, OutOfMemory, Tile};
 use crate::histogram::Histogram;
-use crate::layout::{Faces, Layout};
+use crate::layout::Faces;
 use crate::op::{Family, Op};
 use crate::op_pane::{OpOutcome, OpPane};
 use crate::pane::PaneKind;
@@ -169,23 +169,23 @@ impl View {
     /// Open `op` in its pane and show the pane: the operation that pane
     /// leaves applied where it was moved and changes something, the other
     /// pane's settled, and one already chosen opened as it is set.
-    pub(super) fn open_op(&mut self, op: Op, layout: &Layout, damage: &mut Region) -> Outcome {
-        if !self.editable(layout, damage) {
+    pub(super) fn open_op(&mut self, op: Op, damage: &mut Region) -> Outcome {
+        if !self.editable(damage) {
             return Outcome::none();
         }
         if op.needs_colour() && self.kind().palette().is_some() {
             let refusal = needs_colour(&op);
-            self.state(&refusal, layout, damage);
+            self.state(&refusal, damage);
             return Outcome::none();
         }
         let kind = pane_of(op.family());
         self.panes.show(kind);
-        self.switch_operation(kind, op.place(), layout, damage)
+        self.switch_operation(kind, op.place(), damage)
     }
 
     /// Apply `op` at once, with nothing to set.
-    pub(super) fn apply_now(&mut self, op: Op, layout: &Layout, damage: &mut Region) -> Outcome {
-        match self.apply_op(op, None, Then::Rest, layout, damage) {
+    pub(super) fn apply_now(&mut self, op: Op, damage: &mut Region) -> Outcome {
+        match self.apply_op(op, None, Then::Rest, damage) {
             Applying::Now(_) => Outcome::none(),
             Applying::Waiting(outcome) => outcome,
         }
@@ -195,19 +195,13 @@ impl View {
     /// first — applied as one step where it was moved and changes something,
     /// dropped otherwise — and `to` opened once that has landed; one already
     /// chosen opens as it is set. A refusal keeps the one held as it was set.
-    fn switch_operation(
-        &mut self,
-        kind: PaneKind,
-        to: usize,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
+    fn switch_operation(&mut self, kind: PaneKind, to: usize, damage: &mut Region) -> Outcome {
         let mut outcome = if self.operation_pane(kind).op().place() == to {
-            self.open_chosen(kind, to, layout, damage)
+            self.open_chosen(kind, to, damage)
         } else {
-            match self.leave_operation(kind, Then::Choose(kind, to), layout, damage) {
-                Applying::Now(then) => self.carry_on(then, layout, damage),
-                Applying::Waiting(outcome) => self.after_operation(kind, outcome, layout, damage),
+            match self.leave_operation(kind, Then::Choose(kind, to), damage) {
+                Applying::Now(then) => self.carry_on(then, damage),
+                Applying::Waiting(outcome) => self.after_operation(kind, outcome, damage),
             }
         };
         outcome.relayout = Relayout::Whole;
@@ -220,12 +214,11 @@ impl View {
         &mut self,
         kind: PaneKind,
         to: usize,
-        layout: &Layout,
         damage: &mut Region,
     ) -> Outcome {
         self.operation_mut(kind).choose(to);
-        damage.add(layout.operation(kind));
-        let mut outcome = self.after_operation(kind, Outcome::none(), layout, damage);
+        damage.add(self.layout.operation(kind));
+        let mut outcome = self.after_operation(kind, Outcome::none(), damage);
         outcome.relayout = Relayout::Whole;
         outcome
     }
@@ -234,18 +227,12 @@ impl View {
     /// changes something is applied — now, or once a worker has completed it
     /// — its pane going back to its starting settings only once it has, and
     /// any other dropped.
-    fn leave_operation(
-        &mut self,
-        kind: PaneKind,
-        then: Then,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Applying {
+    fn leave_operation(&mut self, kind: PaneKind, then: Then, damage: &mut Region) -> Applying {
         if let Some(op) = self.operation_pane(kind).applying() {
-            return self.apply_op(op, Some(kind), then, layout, damage);
+            return self.apply_op(op, Some(kind), then, damage);
         }
         self.operation_mut(kind).close();
-        damage.add(layout.operation(kind));
+        damage.add(self.layout.operation(kind));
         Applying::Now(then)
     }
 
@@ -260,29 +247,28 @@ impl View {
         &mut self,
         kind: PaneKind,
         mut outcome: Outcome,
-        layout: &Layout,
         damage: &mut Region,
     ) -> Outcome {
         let other = other_of(kind);
         if self.operation_pane(kind).is_open() && self.operation_pane(other).is_open() {
-            damage.add(layout.operation(other));
-            match self.leave_operation(other, Then::Rest, layout, damage) {
+            damage.add(self.layout.operation(other));
+            match self.leave_operation(other, Then::Rest, damage) {
                 Applying::Now(_) => {}
                 Applying::Waiting(waiting) if waiting.request.is_some() => outcome = waiting,
                 Applying::Waiting(_) => {
                     self.operation_mut(kind).close();
-                    damage.add(layout.operation(kind));
+                    damage.add(self.layout.operation(kind));
                 }
             }
         }
-        self.retitle_operations(layout, damage);
-        self.refresh_previews(layout, damage);
+        self.retitle_operations(damage);
+        self.refresh_previews(damage);
         outcome
     }
 
     /// Name on each pane's band its operation while it is open, else the
     /// pane.
-    fn retitle_operations(&mut self, layout: &Layout, damage: &mut Region) {
+    fn retitle_operations(&mut self, damage: &mut Region) {
         for kind in PaneKind::OPERATIONS {
             let pane = self.operation_pane(kind);
             let title = if pane.is_open() {
@@ -293,7 +279,7 @@ impl View {
             let header = &mut self.headers[kind.index()];
             if header.title() != title {
                 header.set_title(title);
-                if let Some(slot) = layout.pane(kind) {
+                if let Some(slot) = self.layout.pane(kind) {
                     damage.add(slot.header);
                 }
             }
@@ -322,20 +308,20 @@ impl View {
     /// old one is abandoned. An operation the picture can no longer take is
     /// closed first. Nothing moves while a worker has the picture; the tiles
     /// are asked for by [`wanted_preview`](Self::wanted_preview).
-    pub(super) fn refresh_previews(&mut self, layout: &Layout, damage: &mut Region) {
+    pub(super) fn refresh_previews(&mut self, damage: &mut Region) {
         self.sync_operations();
         if self.pending.is_some() {
             return;
         }
-        self.close_untaken(layout, damage);
+        self.close_untaken(damage);
         let basis = self.basis();
-        self.sync_histogram_ready(basis, layout, damage);
+        self.sync_histogram_ready(basis, damage);
         let open = self.adjusting().filter(|op| !op.is_identity());
         if self.kind().palette().is_some() {
             if self.looks.overlay.take().is_some() {
                 self.disown_previews();
             }
-            self.map_palette(open.map(|op| (op, basis)), layout, damage);
+            self.map_palette(open.map(|op| (op, basis)), damage);
             return;
         }
         self.looks.kind = None;
@@ -349,10 +335,10 @@ impl View {
             (held, open) => {
                 if held.is_some() {
                     self.disown_previews();
-                    damage.add(layout.canvas());
+                    damage.add(self.layout.canvas());
                 }
                 open.filter(|&op| self.looks.dropped != Some((op, basis)))
-                    .and_then(|op| self.new_overlay(op, basis, layout, damage))
+                    .and_then(|op| self.new_overlay(op, basis, damage))
             }
         };
     }
@@ -360,7 +346,7 @@ impl View {
     /// Close an operation the picture can no longer take — an effect left
     /// open as an undo past a conversion makes it a palette picture — saying
     /// so, so nothing that settles it waits on a step that cannot be made.
-    fn close_untaken(&mut self, layout: &Layout, damage: &mut Region) {
+    fn close_untaken(&mut self, damage: &mut Region) {
         if self.kind().palette().is_none() {
             return;
         }
@@ -375,24 +361,18 @@ impl View {
             self.operation_pane(kind).op().label()
         );
         self.operation_mut(kind).close();
-        damage.add(layout.operation(kind));
-        self.retitle_operations(layout, damage);
-        self.state(&closed, layout, damage);
+        damage.add(self.layout.operation(kind));
+        self.retitle_operations(damage);
+        self.state(&closed, damage);
     }
 
     /// A fresh overlay of `op` over the layer as it stands at `basis`, nothing
     /// yet worked out; `None`, saying so, where its room cannot be had.
-    fn new_overlay(
-        &mut self,
-        op: Op,
-        basis: Basis,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Option<Overlay<Basis>> {
+    fn new_overlay(&mut self, op: Op, basis: Basis, damage: &mut Region) -> Option<Overlay<Basis>> {
         let canvas = self.document.picture()?.canvas();
         let made = Overlay::new(basis, op, canvas, self.selection.as_ref());
         if made.is_err() {
-            self.state(NO_ROOM_TO_PREVIEW, layout, damage);
+            self.state(NO_ROOM_TO_PREVIEW, damage);
         }
         made.ok()
     }
@@ -401,7 +381,7 @@ impl View {
     /// over the picture as it stands at its basis, where that is not what was
     /// mapped already: a mapping refused its room is kept as refused, said
     /// once and not tried again until the operation or the picture moves.
-    fn map_palette(&mut self, wanted: Option<(Op, Basis)>, layout: &Layout, damage: &mut Region) {
+    fn map_palette(&mut self, wanted: Option<(Op, Basis)>, damage: &mut Region) {
         let held = self.looks.kind.as_ref().map(|(_, op, at)| (*op, *at));
         if held == wanted {
             return;
@@ -413,14 +393,14 @@ impl View {
             .as_ref()
             .is_some_and(|(kind, _, _)| kind.is_none())
         {
-            self.state(NO_ROOM_TO_PREVIEW, layout, damage);
+            self.state(NO_ROOM_TO_PREVIEW, damage);
         }
-        damage.add(layout.canvas());
+        damage.add(self.layout.canvas());
     }
 
     /// Tell the panes whether a histogram of the layer as it stands at
     /// `basis` is at hand, which Auto reads.
-    fn sync_histogram_ready(&mut self, basis: Basis, layout: &Layout, damage: &mut Region) {
+    fn sync_histogram_ready(&mut self, basis: Basis, damage: &mut Region) {
         let ready = self
             .looks
             .histogram
@@ -428,14 +408,14 @@ impl View {
             .is_some_and(|(_, at)| *at == basis);
         for kind in PaneKind::OPERATIONS {
             if self.operation_mut(kind).set_histogram_ready(ready) {
-                damage.add(layout.operation(kind));
+                damage.add(self.layout.operation(kind));
             }
         }
     }
 
     /// The picture's pixels the canvas shows, a pixel to spare about them.
-    fn visible(&self, layout: &Layout) -> Bounds {
-        let area = layout.canvas();
+    fn visible(&self) -> Bounds {
+        let area = self.layout.canvas();
         let size = self.picture_size();
         let pixel = |point: Point| {
             let (x, y) = self.viewport.to_picture(point, size, area);
@@ -454,14 +434,14 @@ impl View {
     /// The overlay's tiles still to work out, those in view first, as preview
     /// work: none while a worker has the picture, or while the picture does
     /// not show the operation.
-    pub(super) fn wanted_tiles(&self, layout: &Layout) -> Option<(Asking, PreviewWork)> {
+    pub(super) fn wanted_tiles(&self) -> Option<(Asking, PreviewWork)> {
         let op = self.shown_op().filter(|_| self.pending.is_none())?;
         let overlay = self
             .looks
             .overlay
             .as_ref()
             .filter(|overlay| !overlay.is_complete() && overlay.shows(self.basis(), &op))?;
-        let tiles = overlay.next_batch(self.visible(layout)).ok()?;
+        let tiles = overlay.next_batch(self.visible()).ok()?;
         let source = self.document.picture()?.canvas().try_clone().ok()?;
         let clip = self.selection.clone();
         let work = PreviewWork::Tiles {
@@ -475,12 +455,12 @@ impl View {
 
     /// A histogram of the layer as it stands, as preview work, where a pane
     /// laid out reads one and the one held is of the layer before it moved.
-    pub(super) fn wanted_histogram(&self, layout: &Layout) -> Option<(Asking, PreviewWork)> {
+    pub(super) fn wanted_histogram(&self) -> Option<(Asking, PreviewWork)> {
         if self.pending.is_some() {
             return None;
         }
         let reads = PaneKind::OPERATIONS.into_iter().any(|kind| {
-            !layout.operation(kind).is_empty() && self.operation_pane(kind).reads_histogram()
+            !self.layout.operation(kind).is_empty() && self.operation_pane(kind).reads_histogram()
         });
         let basis = self.basis();
         let held = self
@@ -502,12 +482,7 @@ impl View {
     /// Tiles the preview worker worked out for the overlay: taken in where it
     /// is still of the layer as it stands, and repainted where the picture
     /// shows them.
-    pub(super) fn land_tiles(
-        &mut self,
-        tiles: Vec<(usize, Arc<Tile>)>,
-        layout: &Layout,
-        damage: &mut Region,
-    ) {
+    pub(super) fn land_tiles(&mut self, tiles: Vec<(usize, Arc<Tile>)>, damage: &mut Region) {
         let basis = self.basis();
         let landed = self.tiles_bounds(&tiles);
         let Some(overlay) = self
@@ -521,7 +496,7 @@ impl View {
         let op = *overlay.op();
         overlay.land(tiles);
         if self.shown_op() == Some(op) {
-            self.damage_picture(landed, layout, damage);
+            self.damage_picture(landed, damage);
         }
     }
 
@@ -532,17 +507,16 @@ impl View {
         &mut self,
         histogram: Histogram,
         basis: Basis,
-        layout: &Layout,
         damage: &mut Region,
     ) {
         if basis != self.basis() {
             return;
         }
         self.looks.histogram = Some((histogram, basis));
-        self.sync_histogram_ready(basis, layout, damage);
+        self.sync_histogram_ready(basis, damage);
         for kind in PaneKind::OPERATIONS {
             if self.operation_pane(kind).reads_histogram() {
-                damage.add(layout.operation(kind));
+                damage.add(self.layout.operation(kind));
             }
         }
     }
@@ -550,13 +524,13 @@ impl View {
     /// Let the overlay go to memory pressure, and what the preview worker is
     /// doing for the window with it: none is made again until the settings or
     /// the picture move.
-    pub(super) fn drop_overlay(&mut self, layout: &Layout, damage: &mut Region) {
+    pub(super) fn drop_overlay(&mut self, damage: &mut Region) {
         let Some(overlay) = self.looks.overlay.take() else {
             return;
         };
         self.looks.dropped = Some((*overlay.op(), overlay.basis()));
         self.disown_previews();
-        damage.add(layout.canvas());
+        damage.add(self.layout.canvas());
     }
 
     /// The pixels `tiles` of the picture showing cover.
@@ -597,49 +571,43 @@ impl View {
         op: Op,
         closes: Option<PaneKind>,
         then: Then,
-        layout: &Layout,
         damage: &mut Region,
     ) -> Applying {
-        if !self.editable(layout, damage) {
+        if !self.editable(damage) {
             return Applying::Waiting(Outcome::none());
         }
         let applied = if op.is_identity() {
             true
         } else if op.needs_colour() && self.kind().palette().is_some() {
             let refusal = needs_colour(&op);
-            self.state(&refusal, layout, damage);
+            self.state(&refusal, damage);
             return Applying::Waiting(Outcome::none());
         } else if let Some(palette) = self.kind().palette() {
             let Some(mapped) = op.mapped_palette(palette) else {
-                self.state(NO_ROOM_TO_APPLY, layout, damage);
+                self.state(NO_ROOM_TO_APPLY, damage);
                 return Applying::Waiting(Outcome::none());
             };
-            if !self.change_palette(mapped, layout, damage) {
+            if !self.change_palette(mapped, damage) {
                 return Applying::Waiting(Outcome::none());
             }
             true
         } else {
-            let Ok(adopted) = self.adopt_overlay(&op, layout, damage) else {
-                self.state(NO_ROOM_TO_APPLY, layout, damage);
+            let Ok(adopted) = self.adopt_overlay(&op, damage) else {
+                self.state(NO_ROOM_TO_APPLY, damage);
                 return Applying::Waiting(Outcome::none());
             };
             adopted
         };
         if !applied {
-            return self.complete_on_queue(op, closes, then, layout, damage);
+            return self.complete_on_queue(op, closes, then, damage);
         }
-        self.operation_applied(closes, layout, damage);
+        self.operation_applied(closes, damage);
         Applying::Now(then)
     }
 
     /// Land the overlay as one step where it shows `op` whole over the layer
     /// as it stands, answering whether it did.
-    fn adopt_overlay(
-        &mut self,
-        op: &Op,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Result<bool, OutOfMemory> {
+    fn adopt_overlay(&mut self, op: &Op, damage: &mut Region) -> Result<bool, OutOfMemory> {
         let basis = self.basis();
         let Some(overlay) = self
             .looks
@@ -658,7 +626,7 @@ impl View {
         let bounds = self.tiles_bounds(&tiles);
         let adopted = self.document.adopt_tiles(layer, tiles)?;
         if adopted {
-            self.damage_picture(bounds, layout, damage);
+            self.damage_picture(bounds, damage);
         }
         Ok(adopted)
     }
@@ -671,7 +639,6 @@ impl View {
         op: Op,
         closes: Option<PaneKind>,
         then: Then,
-        layout: &Layout,
         damage: &mut Region,
     ) -> Applying {
         let basis = self.basis();
@@ -686,7 +653,7 @@ impl View {
             .picture()
             .map(|picture| picture.canvas().try_clone());
         let (Some(Ok(canvas)), Ok(done)) = (canvas, done) else {
-            self.state(NO_ROOM_TO_APPLY, layout, damage);
+            self.state(NO_ROOM_TO_APPLY, damage);
             return Applying::Waiting(Outcome::none());
         };
         self.disown_previews();
@@ -698,15 +665,15 @@ impl View {
             done,
         };
         let lands = Lands::Tiles(Settles::Adjusted { closes, then });
-        Applying::Waiting(self.begin_work(work, lands, APPLYING, layout, damage))
+        Applying::Waiting(self.begin_work(work, lands, APPLYING, damage))
     }
 
     /// Drop pane `kind`'s operation without applying it: its pane was
     /// hidden.
-    pub(super) fn close_operation(&mut self, kind: PaneKind, layout: &Layout, damage: &mut Region) {
+    pub(super) fn close_operation(&mut self, kind: PaneKind, damage: &mut Region) {
         self.operation_mut(kind).close();
-        self.retitle_operations(layout, damage);
-        self.refresh_previews(layout, damage);
+        self.retitle_operations(damage);
+        self.refresh_previews(damage);
     }
 
     /// A worker's job for the picture is over: no operation is being applied.
@@ -716,52 +683,37 @@ impl View {
 
     /// An operation landed, at once or from a worker: the pane `closes` names
     /// back at its starting settings.
-    pub(super) fn operation_applied(
-        &mut self,
-        closes: Option<PaneKind>,
-        layout: &Layout,
-        damage: &mut Region,
-    ) {
+    pub(super) fn operation_applied(&mut self, closes: Option<PaneKind>, damage: &mut Region) {
         if let Some(kind) = closes {
             self.operation_mut(kind).applied();
-            damage.add(layout.operation(kind));
+            damage.add(self.layout.operation(kind));
         }
-        self.retitle_operations(layout, damage);
+        self.retitle_operations(damage);
     }
 
     /// Applying pane `kind`'s operation was refused once a worker had it: the
     /// operation stays open as it was set, and the other pane, opened while it
     /// was worked out, goes back to its starting settings, so one is open.
-    pub(super) fn operation_refused(
-        &mut self,
-        kind: PaneKind,
-        layout: &Layout,
-        damage: &mut Region,
-    ) {
+    pub(super) fn operation_refused(&mut self, kind: PaneKind, damage: &mut Region) {
         let other = other_of(kind);
         if self.operation_pane(other).is_open() {
             self.operation_mut(other).close();
-            damage.add(layout.operation(other));
+            damage.add(self.layout.operation(other));
         }
-        self.retitle_operations(layout, damage);
+        self.retitle_operations(damage);
     }
 
     /// Apply the open operation before an action that changes or reads the
     /// layer, then carry out `then`: one moved that changes something is
     /// applied, now or once a worker has completed it, its pane going back to
     /// its starting settings only once it has, and any other dropped.
-    pub(super) fn apply_adjustment(
-        &mut self,
-        then: Then,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Applying {
+    pub(super) fn apply_adjustment(&mut self, then: Then, damage: &mut Region) -> Applying {
         let Some(kind) = self.open_operation() else {
             return Applying::Now(then);
         };
-        let applying = self.leave_operation(kind, then, layout, damage);
-        self.retitle_operations(layout, damage);
-        self.refresh_previews(layout, damage);
+        let applying = self.leave_operation(kind, then, damage);
+        self.retitle_operations(damage);
+        self.refresh_previews(damage);
         applying
     }
 
@@ -805,29 +757,24 @@ impl View {
     /// open, left first — applied as one step where it is to be — and this
     /// one's applied as one step once that has landed, at once from a whole
     /// overlay, else once a worker has completed it.
-    pub(super) fn apply_pressed(
-        &mut self,
-        kind: PaneKind,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
+    pub(super) fn apply_pressed(&mut self, kind: PaneKind, damage: &mut Region) -> Outcome {
         let other = other_of(kind);
         if self.operation_pane(other).is_open() {
-            return match self.leave_operation(other, Then::Apply(kind), layout, damage) {
-                Applying::Now(then) => self.carry_on(then, layout, damage),
-                Applying::Waiting(outcome) => self.after_operation(kind, outcome, layout, damage),
+            return match self.leave_operation(other, Then::Apply(kind), damage) {
+                Applying::Now(then) => self.carry_on(then, damage),
+                Applying::Waiting(outcome) => self.after_operation(kind, outcome, damage),
             };
         }
         let op = self.operation_pane(kind).op();
-        let outcome = match self.apply_op(op, Some(kind), Then::Rest, layout, damage) {
+        let outcome = match self.apply_op(op, Some(kind), Then::Rest, damage) {
             Applying::Now(_) => Outcome::none(),
             Applying::Waiting(outcome) => outcome,
         };
-        self.after_operation(kind, outcome, layout, damage)
+        self.after_operation(kind, outcome, damage)
     }
 
     /// Auto in pane `kind`, reading the histogram of the layer as it stands.
-    fn auto(&mut self, kind: PaneKind, layout: &Layout, damage: &mut Region) -> Outcome {
+    fn auto(&mut self, kind: PaneKind, damage: &mut Region) -> Outcome {
         let basis = self.basis();
         let index = kind.operation().unwrap_or(0);
         let moved = match &self.looks.histogram {
@@ -837,36 +784,30 @@ impl View {
         if !moved {
             return Outcome::none();
         }
-        damage.add(layout.operation(kind));
-        self.after_operation(kind, Outcome::none(), layout, damage)
+        damage.add(self.layout.operation(kind));
+        self.after_operation(kind, Outcome::none(), damage)
     }
 
     /// What pane `kind`'s answer comes to for the window.
-    fn adjusted(
-        &mut self,
-        kind: PaneKind,
-        answer: OpOutcome,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
+    fn adjusted(&mut self, kind: PaneKind, answer: OpOutcome, damage: &mut Region) -> Outcome {
         match answer {
             OpOutcome::Ignored | OpOutcome::Taken | OpOutcome::Left { .. } => Outcome::none(),
             OpOutcome::Changed { .. } => {
-                self.end_gesture(layout, damage);
-                self.after_operation(kind, Outcome::none(), layout, damage)
+                self.end_gesture(damage);
+                self.after_operation(kind, Outcome::none(), damage)
             }
             OpOutcome::Previewed => {
-                self.end_gesture(layout, damage);
-                damage.add(layout.canvas());
-                self.after_operation(kind, Outcome::none(), layout, damage)
+                self.end_gesture(damage);
+                damage.add(self.layout.canvas());
+                self.after_operation(kind, Outcome::none(), damage)
             }
             OpOutcome::Picking => {
-                damage.add(layout.canvas());
+                damage.add(self.layout.canvas());
                 Outcome::none()
             }
-            OpOutcome::Auto => self.auto(kind, layout, damage),
-            OpOutcome::Apply => self.apply_pressed(kind, layout, damage),
-            OpOutcome::Switched { to } => self.switch_operation(kind, to, layout, damage),
+            OpOutcome::Auto => self.auto(kind, damage),
+            OpOutcome::Apply => self.apply_pressed(kind, damage),
+            OpOutcome::Switched { to } => self.switch_operation(kind, to, damage),
         }
     }
 
@@ -877,7 +818,6 @@ impl View {
     pub(super) fn adjustment_pointer(
         &mut self,
         event: &InputEvent,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -896,13 +836,13 @@ impl View {
         let mut answered = None;
         let mut pressed_on = false;
         for kind in PaneKind::OPERATIONS {
-            let bounds = layout.operation_settings(kind);
+            let bounds = self.layout.operation_settings(kind);
             let held = owner == Some(kind);
             if owner.is_some_and(|owner| owner != kind) || (bounds.is_empty() && !held) {
                 continue;
             }
-            let view = self.held_view(layout, kind, held);
-            let room = self.list_room(layout, kind);
+            let view = self.held_view(kind, held);
+            let room = self.list_room(kind);
             let mut drew = damage::sink();
             let answer = self.operation_mut(kind).on_pointer(
                 &view.event_in_layout(event),
@@ -911,13 +851,13 @@ impl View {
                 &mut drew,
             );
             view.report(&drew, damage);
-            pressed_on |= pressed && layout.operation(kind).contains(self.pointer);
+            pressed_on |= pressed && self.layout.operation(kind).contains(self.pointer);
             if answered.is_none() && answer != OpOutcome::Ignored {
                 answered = Some((kind, answer));
             }
         }
         match answered {
-            Some((kind, answer)) => Some(self.adjusted(kind, answer, layout, damage)),
+            Some((kind, answer)) => Some(self.adjusted(kind, answer, damage)),
             None => pressed_on.then(Outcome::none),
         }
     }
@@ -928,7 +868,6 @@ impl View {
     pub(super) fn adjustment_key(
         &mut self,
         stroke: Keystroke,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -937,9 +876,9 @@ impl View {
             .into_iter()
             .find(|&kind| self.operation_pane(kind).has_focus())?;
         let look = (Faces::of(theme, scale), scale, theme);
-        let bounds = layout.operation_settings(kind);
-        let view = self.held_view(layout, kind, self.operation_pane(kind).listing());
-        let room = self.list_room(layout, kind);
+        let bounds = self.layout.operation_settings(kind);
+        let view = self.held_view(kind, self.operation_pane(kind).listing());
+        let room = self.list_room(kind);
         let mut drew = damage::sink();
         let answer = self
             .operation_mut(kind)
@@ -948,19 +887,12 @@ impl View {
         match answer {
             OpOutcome::Ignored => None,
             OpOutcome::Left { forward } => {
-                self.walk_keyboard(
-                    Keyboard::Operation(kind),
-                    forward,
-                    layout,
-                    scale,
-                    theme,
-                    damage,
-                );
+                self.walk_keyboard(Keyboard::Operation(kind), forward, scale, theme, damage);
                 Some(Outcome::none())
             }
             answer => {
-                self.reveal_operation(kind, layout, look, damage);
-                Some(self.adjusted(kind, answer, layout, damage))
+                self.reveal_operation(kind, look, damage);
+                Some(self.adjusted(kind, answer, damage))
             }
         }
     }
@@ -970,13 +902,12 @@ impl View {
     fn reveal_operation(
         &mut self,
         kind: PaneKind,
-        layout: &Layout,
         look: (Faces, Scale, &Theme),
         damage: &mut Region,
     ) {
-        let bounds = layout.operation_settings(kind);
+        let bounds = self.layout.operation_settings(kind);
         if let Some(rect) = self.operation_pane(kind).focus_rect(bounds, look) {
-            self.reveal_body(kind, rect, layout, damage);
+            self.reveal_body(kind, rect, damage);
         }
     }
 
@@ -985,7 +916,6 @@ impl View {
     pub(super) fn release_adjustment(
         &mut self,
         keep: Option<PaneKind>,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -995,15 +925,14 @@ impl View {
             if Some(kind) == keep {
                 continue;
             }
-            let view = self.held_view(layout, kind, false);
+            let view = self.held_view(kind, false);
             let mut drew = damage::sink();
-            let answer =
-                self.operation_mut(kind)
-                    .blur(layout.operation_settings(kind), look, &mut drew);
+            let settings = self.layout.operation_settings(kind);
+            let answer = self.operation_mut(kind).blur(settings, look, &mut drew);
             view.report(&drew, damage);
             if matches!(answer, OpOutcome::Changed { .. }) {
-                self.retitle_operations(layout, damage);
-                self.refresh_previews(layout, damage);
+                self.retitle_operations(damage);
+                self.refresh_previews(damage);
             }
         }
     }
@@ -1014,12 +943,11 @@ impl View {
         &mut self,
         kind: PaneKind,
         forward: bool,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> bool {
-        let bounds = layout.operation_settings(kind);
+        let bounds = self.layout.operation_settings(kind);
         if bounds.is_empty() {
             return false;
         }
@@ -1027,21 +955,21 @@ impl View {
         let entered = self
             .operation_mut(kind)
             .enter_focus(forward, bounds, &mut drew);
-        self.held_view(layout, kind, false).report(&drew, damage);
+        self.held_view(kind, false).report(&drew, damage);
         if entered {
             let look = (Faces::of(theme, scale), scale, theme);
-            self.reveal_operation(kind, layout, look, damage);
+            self.reveal_operation(kind, look, damage);
         }
         entered
     }
 
     /// Put an eyedropper that is up down, answering whether one was.
-    pub(super) fn put_down_pick(&mut self, layout: &Layout, damage: &mut Region) -> bool {
+    pub(super) fn put_down_pick(&mut self, damage: &mut Region) -> bool {
         let Some(kind) = self.picking_operation() else {
             return false;
         };
         if self.operation_mut(kind).put_down_pick() {
-            damage.add(layout.operation(kind));
+            damage.add(self.layout.operation(kind));
         }
         true
     }
@@ -1052,7 +980,6 @@ impl View {
         &mut self,
         kind: PaneKind,
         at: Fx,
-        layout: &Layout,
         damage: &mut Region,
     ) -> Outcome {
         let (x, y) = at.pixel();
@@ -1068,9 +995,9 @@ impl View {
             return Outcome::none();
         };
         let [red, green, blue, _] = colour;
-        damage.add(layout.operation(kind));
+        damage.add(self.layout.operation(kind));
         if self.operation_mut(kind).picked(Rgb::new(red, green, blue)) {
-            return self.after_operation(kind, Outcome::none(), layout, damage);
+            return self.after_operation(kind, Outcome::none(), damage);
         }
         Outcome::none()
     }

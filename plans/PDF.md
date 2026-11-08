@@ -30,7 +30,7 @@ its own).
 | PDF12 | The predefined CJK CMaps and character collections | planned |
 | PDF13 | View.app renders PDF pages through its page source | planned |
 | PDF14 | CMYK and YCCK JPEGs and CCITT fax pictures: `lib/image`'s JPEG decoder answering four components, and its fax decoder reached with PDF's parameters | planned |
-| PDF15 | SASLprep (RFC 4013) of a revision 5 or 6 password before it is hashed, on NFKC normalisation `lib/unicode` does not yet carry | planned |
+| PDF15 | SASLprep (RFC 4013) of a revision 5 or 6 password before it is hashed, over Unicode 3.2 as RFC 3454 fixes it, on `lib/unicode`'s normalization | done |
 
 ## The crate
 
@@ -113,11 +113,12 @@ the caller asks the user. Strings and streams are decrypted per object, a
 stream's own `/Crypt` filter, the `/Identity` crypt filter and
 `/EncryptMetadata` honoured. Revisions 2 to 4 hash a password in
 `PDFDocEncoding` where it is text that encoding holds, and as its bytes
-otherwise; revisions 5 and 6 the UTF-8 given, cut to 127 bytes and not yet
-SASLprep-normalised (PDF15), so a password typed in a form NFKC changes — a
-full-width form, a compatibility character — does not open a file made with
-its normalised form. Entries no password could unlock are unsupported, never
-a password asked for again. The password is a secret: held zeroizing, never
+otherwise; revisions 5 and 6 its text prepared by SASLprep (PDF15) as a
+query, then cut to 127 bytes of UTF-8 — and the bytes as given once that
+fails, since several producers prepare nothing. SASLprep is `lib/unicode`'s,
+over Unicode 3.2 exactly: what 3.2 does not assign passes inert, and the five
+decompositions Corrigendum #4 corrected are 3.2's own. Entries no password
+could unlock are unsupported, never a password asked for again. The password is a secret: held zeroizing, never
 logged, gone once the file key is made.
 
 The handler's constructions enter `lib/crypto` as its `pdf` module, beside

@@ -19,7 +19,7 @@ use tairix_theme::Theme;
 
 use super::{Outcome, View};
 use crate::colour::{nearest, Ink};
-use crate::layout::{Faces, Layout};
+use crate::layout::Faces;
 use crate::pane::PaneKind;
 use crate::panel::{Panel, PanelEvent, PanelOutcome, Part};
 use crate::shape::Point as Fx;
@@ -72,11 +72,8 @@ pub(super) fn recent_grid() -> SwatchGrid {
 impl View {
     /// Report `rect`, in the Colour pane's own layout, where the pane shows
     /// it.
-    pub(super) fn damage_colour(&self, layout: &Layout, rect: Rect, damage: &mut Region) {
-        if let Some(shown) = self
-            .held_view(layout, PaneKind::Colour, false)
-            .to_window(rect)
-        {
+    pub(super) fn damage_colour(&self, rect: Rect, damage: &mut Region) {
+        if let Some(shown) = self.held_view(PaneKind::Colour, false).to_window(rect) {
             damage.add(shown);
         }
     }
@@ -86,18 +83,17 @@ impl View {
     pub(super) fn colour_controls_pointer(
         &mut self,
         event: &InputEvent,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Outcome> {
-        let bounds = layout.colour_controls();
+        let bounds = self.layout.colour_controls();
         let held = self.colour_controls.holding() || self.colour_controls.listing();
         if bounds.is_empty() && !held {
             return None;
         }
-        let view = self.held_view(layout, PaneKind::Colour, held);
-        let room = self.list_room(layout, PaneKind::Colour);
+        let view = self.held_view(PaneKind::Colour, held);
+        let room = self.list_room(PaneKind::Colour);
         let context = (Faces::of(theme, scale), scale, theme);
         let mut drew = damage::sink();
         let outcome = self.colour_controls.on_pointer(
@@ -120,7 +116,7 @@ impl View {
                     .is_some_and(|at| bounds.contains(at));
                 (pressed && over).then(Outcome::none)
             }
-            outcome => Some(self.colour_controls_answered(outcome, layout, damage)),
+            outcome => Some(self.colour_controls_answered(outcome, damage)),
         }
     }
 
@@ -128,19 +124,18 @@ impl View {
     pub(super) fn colour_controls_key(
         &mut self,
         stroke: Keystroke,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Outcome> {
         let context = (Faces::of(theme, scale), scale, theme);
         let listing = self.colour_controls.listing();
-        let view = self.held_view(layout, PaneKind::Colour, listing);
-        let room = self.list_room(layout, PaneKind::Colour);
+        let view = self.held_view(PaneKind::Colour, listing);
+        let room = self.list_room(PaneKind::Colour);
         let mut drew = damage::sink();
         let outcome = self.colour_controls.on_key(
             stroke,
-            (layout.colour_controls(), room),
+            (self.layout.colour_controls(), room),
             context,
             &mut drew,
         );
@@ -151,60 +146,48 @@ impl View {
                 self.walk_keyboard(
                     super::input::Keyboard::Colours,
                     forward,
-                    layout,
                     scale,
                     theme,
                     damage,
                 );
                 Some(Outcome::none())
             }
-            outcome => Some(self.colour_controls_answered(outcome, layout, damage)),
+            outcome => Some(self.colour_controls_answered(outcome, damage)),
         }
     }
 
     /// Take the keyboard from the colour pane's buttons and choices.
     pub(super) fn release_colour_controls(
         &mut self,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) {
         let context = (Faces::of(theme, scale), scale, theme);
-        let view = self.held_view(layout, PaneKind::Colour, self.colour_controls.listing());
+        let view = self.held_view(PaneKind::Colour, self.colour_controls.listing());
         let mut drew = damage::sink();
         let _ = self
             .colour_controls
-            .blur(layout.colour_controls(), context, &mut drew);
+            .blur(self.layout.colour_controls(), context, &mut drew);
         view.report(&drew, damage);
     }
 
     /// Give the colour pane's buttons and choices the keyboard, scrolled into
     /// view.
-    pub(super) fn enter_colour_controls(
-        &mut self,
-        forward: bool,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> bool {
-        let bounds = layout.colour_controls();
+    pub(super) fn enter_colour_controls(&mut self, forward: bool, damage: &mut Region) -> bool {
+        let bounds = self.layout.colour_controls();
         if bounds.is_empty() {
             return false;
         }
-        self.reveal_body(PaneKind::Colour, bounds, layout, damage);
+        self.reveal_body(PaneKind::Colour, bounds, damage);
         let mut drew = damage::sink();
         let entered = self.colour_controls.enter_focus(forward, bounds, &mut drew);
-        self.held_view(layout, PaneKind::Colour, false)
+        self.held_view(PaneKind::Colour, false)
             .report(&drew, damage);
         entered
     }
 
-    fn colour_controls_answered(
-        &mut self,
-        outcome: PanelOutcome,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
+    fn colour_controls_answered(&mut self, outcome: PanelOutcome, damage: &mut Region) -> Outcome {
         let PanelOutcome::Event(event) = outcome else {
             return Outcome::none();
         };
@@ -212,15 +195,15 @@ impl View {
             PanelEvent::Pressed {
                 part: BUTTONS,
                 button: SWAP,
-            } => self.act(super::Action::SwapColours, layout, damage),
+            } => self.act(super::Action::SwapColours, damage),
             PanelEvent::Pressed {
                 part: BUTTONS,
                 button: RESET,
-            } => self.act(super::Action::ResetColours, layout, damage),
+            } => self.act(super::Action::ResetColours, damage),
             PanelEvent::Pressed {
                 part: BUTTONS,
                 button: PICK,
-            } => self.act(super::Action::PickColour, layout, damage),
+            } => self.act(super::Action::PickColour, damage),
             PanelEvent::Chosen { part: VIEW, index } => {
                 let view = PickerView::ALL.get(index).copied().unwrap_or_default();
                 self.picker.set_view(view);
@@ -237,7 +220,7 @@ impl View {
 
     /// Put the inks back to black and white: on a palette picture, the
     /// entries nearest them.
-    pub(super) fn reset_colours(&mut self, layout: &Layout, damage: &mut Region) {
+    pub(super) fn reset_colours(&mut self, damage: &mut Region) {
         let (black, white) = ([0, 0, 0, u8::MAX], [u8::MAX; 4]);
         (self.primary, self.secondary) = match self.kind().palette() {
             Some(palette) => (
@@ -246,26 +229,26 @@ impl View {
             ),
             None => (Ink::Colour(black), Ink::Colour(white)),
         };
-        self.inks_changed(SwatchMark::Primary, layout, damage);
+        self.inks_changed(SwatchMark::Primary, damage);
     }
 
     /// Take up the one-shot pick: the next press on the picture takes the
     /// colour the layers show there into the ink the pane edits, and the
     /// tool in use carries on; asked again, put it down.
-    pub(super) fn toggle_colour_pick(&mut self, layout: &Layout, damage: &mut Region) {
+    pub(super) fn toggle_colour_pick(&mut self, damage: &mut Region) {
         self.picking_colour = !self.picking_colour;
-        self.damage_colour(layout, layout.colour_controls(), damage);
+        self.damage_colour(self.layout.colour_controls(), damage);
     }
 
     /// The one-shot pick's press at `at`.
-    pub(super) fn colour_picked_at(&mut self, at: Fx, layout: &Layout, damage: &mut Region) {
+    pub(super) fn colour_picked_at(&mut self, at: Fx, damage: &mut Region) {
         self.picking_colour = false;
-        self.damage_colour(layout, layout.colour_controls(), damage);
-        self.pick(at, self.editing == SwatchMark::Secondary, layout, damage);
+        self.damage_colour(self.layout.colour_controls(), damage);
+        self.pick(at, self.editing == SwatchMark::Secondary, damage);
     }
 
     /// Remember `colour` as the most recent, once.
-    pub(super) fn remember_colour(&mut self, colour: Rgba, layout: &Layout, damage: &mut Region) {
+    pub(super) fn remember_colour(&mut self, colour: Rgba, damage: &mut Region) {
         if let Some(at) = self.recents.iter().position(|&held| held == colour) {
             self.recents.remove(at);
         } else if self.recents.len() == RECENTS {
@@ -281,13 +264,13 @@ impl View {
         wells.extend(self.recents.iter().map(|&held| Color::from(held)));
         self.recent_grid.adopt_colours(RECENT_COLUMNS, wells);
         self.recent_grid.adopt_selected(None);
-        self.damage_colour(layout, layout.recents(), damage);
+        self.damage_colour(self.layout.recents(), damage);
     }
 
     /// Where the recent colours are drawn, in the pane's own layout: the rows
     /// they fill, from the top of the room the pane keeps for them all.
-    pub(crate) fn recents_rect(&self, layout: &Layout) -> Rect {
-        let room = layout.recents();
+    pub(crate) fn recents_rect(&self) -> Rect {
+        let room = self.layout.recents();
         let height = self
             .recent_grid
             .height_for_width(room.width)
@@ -310,11 +293,10 @@ impl View {
     pub(super) fn recents_pointer(
         &mut self,
         event: &InputEvent,
-        layout: &Layout,
         damage: &mut Region,
     ) -> Option<Outcome> {
-        let bounds = self.recents_rect(layout);
-        let view = self.held_view(layout, PaneKind::Colour, false);
+        let bounds = self.recents_rect();
+        let view = self.held_view(PaneKind::Colour, false);
         let mut drew = damage::sink();
         let chosen = self.recent_grid.on_pointer(
             &view.event_in_layout(event),
@@ -324,7 +306,7 @@ impl View {
         );
         view.report(&drew, damage);
         if let Some(SwatchAction::Selected { index, .. }) = chosen {
-            self.take_recent(index, layout, damage);
+            self.take_recent(index, damage);
             return Some(Outcome::none());
         }
         let pressed = matches!(
@@ -343,21 +325,20 @@ impl View {
     pub(super) fn recents_key(
         &mut self,
         stroke: Keystroke,
-        layout: &Layout,
         damage: &mut Region,
     ) -> Option<Outcome> {
         let mut drew = damage::sink();
         let chosen = self
             .recent_grid
-            .on_key(stroke.key, self.recents_rect(layout), &mut drew);
-        self.held_view(layout, PaneKind::Colour, false)
+            .on_key(stroke.key, self.recents_rect(), &mut drew);
+        self.held_view(PaneKind::Colour, false)
             .report(&drew, damage);
         let SwatchAction::Selected { index, .. } = chosen?;
-        self.take_recent(index, layout, damage);
+        self.take_recent(index, damage);
         Some(Outcome::none())
     }
 
-    fn take_recent(&mut self, index: usize, layout: &Layout, damage: &mut Region) {
+    fn take_recent(&mut self, index: usize, damage: &mut Region) {
         let Some(&colour) = self.recents.get(index) else {
             return;
         };
@@ -366,29 +347,29 @@ impl View {
             SwatchMark::Primary => self.primary = ink,
             SwatchMark::Secondary => self.secondary = ink,
         }
-        self.inks_changed(self.editing, layout, damage);
+        self.inks_changed(self.editing, damage);
     }
 
     /// Give the recent colours the keyboard, where there are any to take it.
-    pub(super) fn enter_recents(&mut self, layout: &Layout, damage: &mut Region) -> bool {
-        let bounds = self.recents_rect(layout);
+    pub(super) fn enter_recents(&mut self, damage: &mut Region) -> bool {
+        let bounds = self.recents_rect();
         if self.recent_grid.is_empty()
             || bounds.is_empty()
             || !self.recent_grid.state().is_actionable()
         {
             return false;
         }
-        self.reveal_body(PaneKind::Colour, bounds, layout, damage);
+        self.reveal_body(PaneKind::Colour, bounds, damage);
         self.recent_grid.set_focused(true);
-        self.damage_colour(layout, bounds, damage);
+        self.damage_colour(bounds, damage);
         true
     }
 
     /// Take the keyboard from the recent colours.
-    pub(super) fn release_recents(&mut self, layout: &Layout, damage: &mut Region) {
+    pub(super) fn release_recents(&mut self, damage: &mut Region) {
         if self.recent_grid.state().focus.focused {
             self.recent_grid.set_focused(false);
-            self.damage_colour(layout, self.recents_rect(layout), damage);
+            self.damage_colour(self.recents_rect(), damage);
         }
     }
 
@@ -397,7 +378,6 @@ impl View {
     pub(super) fn recents_walk_key(
         &mut self,
         stroke: Keystroke,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -407,14 +387,13 @@ impl View {
             self.walk_keyboard(
                 super::input::Keyboard::Recents,
                 forward,
-                layout,
                 scale,
                 theme,
                 damage,
             );
             return Some(Outcome::none());
         }
-        self.recents_key(stroke, layout, damage)
+        self.recents_key(stroke, damage)
     }
 
     /// Offer the recent colours on a colour picture alone: a palette

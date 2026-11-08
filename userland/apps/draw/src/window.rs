@@ -87,7 +87,6 @@ impl SavedDocument for View {
 }
 
 impl DocumentView for View {
-    type Layout = Layout;
     type Faces = Faces;
     type MenuKind = MenuKind;
     type Own = Own;
@@ -103,45 +102,42 @@ impl DocumentView for View {
         }
     }
 
-    fn layout(
-        &self,
+    fn lay_out(
+        &mut self,
         width: u32,
         height: u32,
         theme: &Theme,
         scale: Scale,
         _faces: Faces,
-    ) -> Layout {
-        Layout::of(width, height, scale, theme)
-    }
-
-    fn min_size(&self, theme: &Theme, scale: Scale, _faces: Faces) -> (u32, u32) {
-        Layout::least(scale, theme)
-    }
-
-    fn settle(&mut self, layout: &Layout, damage: &mut Region) {
-        let ratio = f64::from(layout.scale.percent()) / 100.0;
+        damage: &mut Region,
+    ) {
+        self.layout = Layout::of(width, height, scale, theme);
+        let ratio = f64::from(self.layout.scale.percent()) / 100.0;
         let centre = Point::new(
-            f64::from(layout.canvas.width) / 2.0,
-            f64::from(layout.canvas.height) / 2.0,
+            f64::from(self.layout.canvas.width) / 2.0,
+            f64::from(self.layout.canvas.height) / 2.0,
         );
         if self.placed {
             self.viewport.rescale(ratio, centre);
         } else {
             self.viewport = crate::viewport::Viewport::new(1.0, ratio);
             let page = self.document.drawing().page().bounds();
-            self.fit(page, layout);
+            self.fit(page);
             self.placed = true;
         }
-        self.laid = Some(*layout);
-        damage.add(layout.window);
+        damage.add(self.layout.window);
     }
 
-    fn message_area(layout: &Layout) -> tairix_geometry::Rect {
-        layout.status
+    fn min_size(&self, theme: &Theme, scale: Scale, _faces: Faces) -> (u32, u32) {
+        Layout::least(scale, theme)
     }
 
-    fn cursor(&self, layout: &Layout, at: tairix_geometry::Point) -> CursorShape {
-        if !layout.canvas.contains(at) {
+    fn message_area(&self) -> Rect {
+        self.layout.status
+    }
+
+    fn cursor(&self, at: tairix_geometry::Point) -> CursorShape {
+        if !self.layout.canvas.contains(at) {
             return CursorShape::Arrow;
         }
         if self.spaced || matches!(self.gesture, Some(crate::view::Gesture::Pan { .. })) {
@@ -155,10 +151,12 @@ impl DocumentView for View {
         }
     }
 
-    fn tool_tip(&self, layout: &Layout, scale: Scale, theme: &Theme) -> Option<(Rect, &str)> {
+    fn tool_tip(&self, scale: Scale, theme: &Theme) -> Option<(Rect, &str)> {
         let at = tairix_geometry::Point::new(round_i32(self.pointer.x), round_i32(self.pointer.y));
-        let index = self.tool_box.tool_at(layout.tools, scale, theme, at)?;
-        let rect = self.tool_box.tool_rect(index, layout.tools, scale, theme)?;
+        let index = self.tool_box.tool_at(self.layout.tools, scale, theme, at)?;
+        let rect = self
+            .tool_box
+            .tool_rect(index, self.layout.tools, scale, theme)?;
         Some((rect, self.tips.get(index)?.as_str()))
     }
 
@@ -166,38 +164,37 @@ impl DocumentView for View {
         self.build_menu(kind)
     }
 
-    fn close_requested(&mut self, _layout: &Layout, damage: &mut Region) -> ViewOutcome {
+    fn close_requested(&mut self, damage: &mut Region) -> ViewOutcome {
         self.closing(damage)
     }
 
-    fn save_then_close(&mut self, _layout: &Layout, damage: &mut Region) -> ViewOutcome {
+    fn save_then_close(&mut self, damage: &mut Region) -> ViewOutcome {
         self.land_pending(damage);
         self.finish_pen();
         Outcome::asking(Request::SaveThenClose)
     }
 
-    fn chosen(&mut self, item: AppMenuItemId, layout: &Layout, damage: &mut Region) -> ViewOutcome {
+    fn chosen(&mut self, item: AppMenuItemId, damage: &mut Region) -> ViewOutcome {
         match chosen(item.get()) {
-            Some(chosen) => self.choose(chosen, layout, damage),
+            Some(chosen) => self.choose(chosen, damage),
             None => Outcome::none(),
         }
     }
 
-    fn focus_changed(&mut self, _focused: bool, layout: &Layout, damage: &mut Region) {
+    fn focus_changed(&mut self, _focused: bool, damage: &mut Region) {
         self.spaced = false;
-        damage.add(layout.window);
+        damage.add(self.layout.window);
     }
 
     fn input(
         &mut self,
         input: &InputEvent,
         _now_ns: u64,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> ViewOutcome {
-        self.on_input(input, layout, scale, theme, damage)
+        self.on_input(input, scale, theme, damage)
     }
 
     fn refuse_save(&self, name: &str, target: SaveTarget) -> Option<String> {
@@ -218,8 +215,8 @@ impl DocumentView for View {
         "svg"
     }
 
-    fn places(&self, at: tairix_geometry::Point, media: &str, layout: &Layout) -> bool {
-        layout.canvas.contains(at) && MediaType::from_media_str(media).is_some_and(placeable)
+    fn places(&self, at: tairix_geometry::Point, media: &str) -> bool {
+        self.layout.canvas.contains(at) && MediaType::from_media_str(media).is_some_and(placeable)
     }
 
     fn save_formats(&self) -> Result<SaveFormats, String> {

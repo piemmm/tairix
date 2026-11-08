@@ -17,14 +17,13 @@ use tairix_window::document::{Access, SavedDocument};
 use crate::copy::CopyFormat;
 use crate::document::{blank, Document};
 use crate::inspector::{Change, PageChange, Target};
-use crate::layout::{px, Layout};
+use crate::layout::{px, Faces};
 use crate::menu::Command;
 use crate::tools::Tool;
 use crate::view::{Own, View};
 
 struct Window {
     view: View,
-    layout: Layout,
     theme: Theme,
 }
 
@@ -40,29 +39,22 @@ impl Window {
             Unkept::NONE,
             1.0,
         );
-        let layout = Layout::of(1080, 720, Scale::ONE, &Theme::light());
-        view.settle(&layout, &mut Region::new());
-        Self {
-            view,
-            layout,
-            theme: Theme::light(),
-        }
+        let theme = Theme::light();
+        let faces = Faces::of(&theme, Scale::ONE);
+        view.lay_out(1080, 720, &theme, Scale::ONE, faces, &mut Region::new());
+        Self { view, theme }
     }
 
     fn feed(&mut self, event: InputEvent) -> Option<Request<crate::view::MenuKind, Own>> {
-        let outcome = self.view.on_input(
-            &event,
-            &self.layout,
-            Scale::ONE,
-            &self.theme,
-            &mut Region::new(),
-        );
+        let outcome = self
+            .view
+            .on_input(&event, Scale::ONE, &self.theme, &mut Region::new());
         outcome.request
     }
 
     /// The window point over the drawing point `(x, y)`.
     fn at(&self, x: f64, y: f64) -> tairix_geometry::Point {
-        let point = self.view.window_at(&self.layout, Point::new(x, y));
+        let point = self.view.window_at(Point::new(x, y));
         tairix_geometry::Point::new(
             tairix_util::mathf::round_i32(point.x),
             tairix_util::mathf::round_i32(point.y),
@@ -122,13 +114,11 @@ impl Window {
     }
 
     fn change(&mut self, change: Change) {
-        let layout = self.layout;
-        self.view.apply_change(change, &layout, &mut Region::new());
+        self.view.apply_change(change, &mut Region::new());
     }
 
     fn command(&mut self, command: Command) {
-        let layout = self.layout;
-        self.view.carry_out(command, &layout, &mut Region::new());
+        self.view.carry_out(command, &mut Region::new());
     }
 
     fn objects(&self) -> usize {
@@ -238,34 +228,27 @@ fn menu_commands_group_copy_and_remove_as_steps() {
     window.view.choose_tool(Tool::Ellipse);
     window.drag((100.0, 100.0), (200.0, 200.0));
     window.drag((300.0, 100.0), (400.0, 200.0));
-    let layout = window.layout;
     let mut damage = Region::new();
-    window
-        .view
-        .carry_out(Command::SelectAll, &layout, &mut damage);
+    window.view.carry_out(Command::SelectAll, &mut damage);
     assert_eq!(window.view.selection.len(), 2);
-    window.view.carry_out(Command::Group, &layout, &mut damage);
+    window.view.carry_out(Command::Group, &mut damage);
     assert_eq!(window.view.selection, vec![vec![0, 0]]);
     assert_eq!(window.objects(), 3, "a group of two");
-    let copied = window.view.carry_out(Command::Copy, &layout, &mut damage);
+    let copied = window.view.carry_out(Command::Copy, &mut damage);
     assert!(
         matches!(copied.request, Some(Request::Own(Own::Copy(ref drawing))) if drawing.objects() == 4),
         "the group and its two, in a layer, written as SVG on the queue"
     );
-    window
-        .view
-        .carry_out(Command::Ungroup, &layout, &mut damage);
+    window.view.carry_out(Command::Ungroup, &mut damage);
     assert_eq!(window.view.selection.len(), 2);
-    window
-        .view
-        .carry_out(Command::Duplicate, &layout, &mut damage);
+    window.view.carry_out(Command::Duplicate, &mut damage);
     assert_eq!(window.objects(), 4);
-    let reshape = window.view.carry_out(Command::Union, &layout, &mut damage);
+    let reshape = window.view.carry_out(Command::Union, &mut damage);
     assert!(
         matches!(reshape.request, Some(Request::Own(Own::Compute(_)))),
         "booleans run on the queue"
     );
-    let close = window.view.carry_out(Command::Close, &layout, &mut damage);
+    let close = window.view.carry_out(Command::Close, &mut damage);
     assert!(
         matches!(close.request, Some(Request::AskToClose)),
         "changes are never thrown away unasked"
@@ -285,10 +268,7 @@ fn a_colour_being_chosen_is_shown_live_and_lands_once_settled() {
             paint: red.clone(),
             settled,
         };
-        let layout = window.layout;
-        window
-            .view
-            .apply_change(change, &layout, &mut Region::new());
+        window.view.apply_change(change, &mut Region::new());
     }
     assert_eq!(
         window.view.document().depth(),
@@ -307,10 +287,9 @@ fn a_colour_being_chosen_is_shown_live_and_lands_once_settled() {
 #[test]
 fn the_canvas_asks_for_its_tiles_once_and_takes_them_as_they_land() {
     let mut window = Window::new();
-    let layout = window.layout;
-    let job = window.view.wanted_render(&layout).expect("tiles to render");
+    let job = window.view.wanted_render().expect("tiles to render");
     assert!(!job.keys.is_empty());
-    let again = window.view.wanted_render(&layout);
+    let again = window.view.wanted_render();
     assert!(
         again.is_none_or(|next| next.keys.iter().all(|key| !job.keys.contains(key))),
         "nothing asked twice"
@@ -322,7 +301,7 @@ fn the_canvas_asks_for_its_tiles_once_and_takes_them_as_they_land() {
     });
     window
         .view
-        .rendered(job.scene, (&job.keys, tiles), &layout, &mut Region::new());
+        .rendered(job.scene, (&job.keys, tiles), &mut Region::new());
     assert!(job
         .keys
         .iter()
@@ -389,18 +368,15 @@ fn a_pasted_group_and_all_it_holds_take_identities_of_their_own() {
     window.view.choose_tool(Tool::Ellipse);
     window.drag((100.0, 100.0), (200.0, 200.0));
     window.drag((300.0, 100.0), (400.0, 200.0));
-    let layout = window.layout;
     let mut damage = Region::new();
-    window
-        .view
-        .carry_out(Command::SelectAll, &layout, &mut damage);
-    window.view.carry_out(Command::Group, &layout, &mut damage);
+    window.view.carry_out(Command::SelectAll, &mut damage);
+    window.view.carry_out(Command::Group, &mut damage);
     let copied = window
         .view
         .selection_drawing()
         .expect("held")
         .expect("the group");
-    window.view.pasted(Ok(copied), &mut damage, &layout);
+    window.view.pasted(Ok(copied), &mut damage);
     assert_eq!(window.objects(), 6, "two groups of two");
     let mut seen = alloc::vec::Vec::new();
     for layer in window.view.document().drawing().layers().iter() {
@@ -415,7 +391,7 @@ fn a_pasted_group_and_all_it_holds_take_identities_of_their_own() {
 #[test]
 fn a_guide_step_is_named_for_what_it_did() {
     let mut window = Window::new();
-    let ruler = window.layout.top_ruler;
+    let ruler = window.view.layout.top_ruler;
     let from = tairix_geometry::Point::new(ruler.left() + 300, ruler.top() + 4);
     window.feed(InputEvent::PointerMoved { to: from });
     window.feed(InputEvent::PointerPressed {
@@ -576,8 +552,7 @@ fn a_paste_of_many_objects_lands_as_one_step_with_all_selected() {
         .expect("held")
         .expect("the selection");
     let depth = window.view.document().depth();
-    let layout = window.layout;
-    window.view.pasted(Ok(copied), &mut Region::new(), &layout);
+    window.view.pasted(Ok(copied), &mut Region::new());
     assert_eq!(window.view.document().depth(), depth + 1);
     assert_eq!(window.objects(), 6);
     assert_eq!(
@@ -619,11 +594,12 @@ fn a_press_on_a_field_of_the_inspector_ends_typing_where_it_is() {
     let mut window = Window::new();
     window.text_at(100.0, 100.0);
     window.key(Key::Char('H'));
-    let layout = window.layout;
     let theme = Theme::light();
     let field = window
         .view
-        .inspect(|inspector, shown| inspector.stroke_width_at((&layout, Scale::ONE, &theme), shown))
+        .inspect(|inspector, shown, layout| {
+            inspector.stroke_width_at((layout, Scale::ONE, &theme), shown)
+        })
         .expect("the stroke width's field shows");
     let width = tairix_geometry::Point::new(
         field.left() + i32::try_from(field.width / 2).expect("a width"),
@@ -665,7 +641,7 @@ fn a_guide_dragged_out_while_typing_keeps_what_was_typed() {
     for character in "Hi".chars() {
         window.key(Key::Char(character));
     }
-    let ruler = window.layout.top_ruler;
+    let ruler = window.view.layout.top_ruler;
     let from = tairix_geometry::Point::new(ruler.left() + 300, ruler.top() + 4);
     window.feed(InputEvent::PointerMoved { to: from });
     window.feed(InputEvent::PointerPressed {
@@ -722,8 +698,7 @@ fn a_pasted_hidden_or_locked_object_is_not_selected() {
     let pasted = copied
         .with_node_at(&[0], alloc::sync::Arc::new(held))
         .expect("pasted");
-    let layout = window.layout;
-    window.view.pasted(Ok(pasted), &mut Region::new(), &layout);
+    window.view.pasted(Ok(pasted), &mut Region::new());
     assert_eq!(window.objects(), 4);
     assert!(
         window.view.selection.is_empty(),
@@ -742,10 +717,7 @@ fn a_reshape_lands_while_the_caret_waits_in_a_text_with_nothing_typed() {
     window.drag((100.0, 100.0), (200.0, 200.0));
     window.drag((150.0, 150.0), (250.0, 250.0));
     window.view.selection = vec![vec![0, 1], vec![0, 2]];
-    let layout = window.layout;
-    let asked = window
-        .view
-        .carry_out(Command::Union, &layout, &mut Region::new());
+    let asked = window.view.carry_out(Command::Union, &mut Region::new());
     let Some(Request::Own(Own::Compute(compute))) = asked.request else {
         panic!("a reshape for the queue");
     };
@@ -755,7 +727,7 @@ fn a_reshape_lands_while_the_caret_waits_in_a_text_with_nothing_typed() {
     );
     window.text_at(500.0, 500.0);
     assert!(window.view.typing.is_some() && window.view.live.is_none());
-    window.view.computed(computed, &layout, &mut Region::new());
+    window.view.computed(computed, &mut Region::new());
     assert_eq!(window.objects(), 2, "the union landed");
 }
 
@@ -1078,7 +1050,7 @@ fn a_drag_with_the_gradient_tool_lays_a_gradient_live_and_lands_once() {
     let drawn = |at: tairix_geometry::Point| {
         window
             .view
-            .drawing_at(&window.layout, Point::new(f64::from(at.x), f64::from(at.y)))
+            .drawing_at(Point::new(f64::from(at.x), f64::from(at.y)))
     };
     assert!(start.distance(drawn(a)) < 1e-6 && end.distance(drawn(b)) < 1e-6);
 }
@@ -1104,7 +1076,7 @@ fn a_gradient_laid_on_a_turned_object_lies_where_it_was_dragged() {
         .node_at(&[0, 0])
         .expect("the rectangle");
     let on_page = node.transform().map(centre);
-    let pressed = window.view.drawing_at(&window.layout, {
+    let pressed = window.view.drawing_at({
         let at = window.at(200.0, 150.0);
         Point::new(f64::from(at.x), f64::from(at.y))
     });
@@ -1192,10 +1164,10 @@ fn picture(width: f64, height: f64) -> tairix_drawing::Image {
 #[test]
 fn place_picture_asks_for_a_file_to_read_in_and_a_placed_one_lands_selected_in_the_middle() {
     let mut window = Window::new();
-    let layout = window.layout;
+    let layout = window.view.layout;
     let asked = window
         .view
-        .carry_out(Command::PlacePicture, &layout, &mut Region::new())
+        .carry_out(Command::PlacePicture, &mut Region::new())
         .request;
     assert!(matches!(asked, Some(Request::Import)), "{asked:?}");
     let shown = {
@@ -1213,7 +1185,6 @@ fn place_picture_asks_for_a_file_to_read_in_and_a_placed_one_lands_selected_in_t
         ("photo.png", None),
         Ok(picture(40.0, 20.0)),
         &mut Region::new(),
-        &layout,
     );
     assert_eq!(window.view.document().depth(), depth + 1, "one step");
     assert_eq!(window.view.selection, vec![vec![0, 0]]);
@@ -1237,12 +1208,11 @@ fn place_picture_asks_for_a_file_to_read_in_and_a_placed_one_lands_selected_in_t
 #[test]
 fn a_picture_larger_than_the_canvas_is_placed_to_fit_and_one_that_failed_is_said() {
     let mut window = Window::new();
-    let layout = window.layout;
+    let layout = window.view.layout;
     window.view.placed_picture(
         ("huge.jpg", None),
         Ok(picture(20_000.0, 10_000.0)),
         &mut Region::new(),
-        &layout,
     );
     let canvas = Point::new(
         f64::from(layout.canvas.width),
@@ -1259,7 +1229,6 @@ fn a_picture_larger_than_the_canvas_is_placed_to_fit_and_one_that_failed_is_said
         ("broken.png", None),
         Err(String::from("it is damaged")),
         &mut Region::new(),
-        &layout,
     );
     assert_eq!(window.view.document().depth(), depth, "nothing lands");
     assert_eq!(
@@ -1271,14 +1240,13 @@ fn a_picture_larger_than_the_canvas_is_placed_to_fit_and_one_that_failed_is_said
 #[test]
 fn a_picture_dropped_on_the_canvas_is_placed_centred_where_it_was_let_go() {
     let mut window = Window::new();
-    let layout = window.layout;
+    let layout = window.view.layout;
     let at = window.at(150.0, 120.0);
     let depth = window.view.document().depth();
     window.view.placed_picture(
         ("photo.png", Some(at)),
         Ok(picture(40.0, 20.0)),
         &mut Region::new(),
-        &layout,
     );
     assert_eq!(window.view.document().depth(), depth + 1, "one step");
     let bounds = window.view.selection_bounds();
@@ -1293,7 +1261,6 @@ fn a_picture_dropped_on_the_canvas_is_placed_centred_where_it_was_let_go() {
         ("photo.png", Some(off)),
         Ok(picture(40.0, 20.0)),
         &mut Region::new(),
-        &layout,
     );
     let shown = tairix_bezier::Bounds::from_points([
         window.view.viewport.drawing_point(Point::ZERO),
@@ -1312,7 +1279,7 @@ fn a_picture_dropped_on_the_canvas_is_placed_centred_where_it_was_let_go() {
 #[test]
 fn the_canvas_places_a_picture_dropped_on_it_and_nothing_else() {
     let window = Window::new();
-    let layout = window.layout;
+    let layout = window.view.layout;
     let canvas = tairix_geometry::Point::new(
         layout.canvas.left() + px(layout.canvas.width) / 2,
         layout.canvas.top() + px(layout.canvas.height) / 2,
@@ -1324,10 +1291,7 @@ fn the_canvas_places_a_picture_dropped_on_it_and_nothing_else() {
         "image/openraster",
         "image/x-riscos-sprite",
     ] {
-        assert!(
-            window.view.places(canvas, picture, &layout),
-            "{picture} is placed"
-        );
+        assert!(window.view.places(canvas, picture), "{picture} is placed");
     }
     for other in [
         "image/svg+xml",
@@ -1336,13 +1300,13 @@ fn the_canvas_places_a_picture_dropped_on_it_and_nothing_else() {
         "not a type",
     ] {
         assert!(
-            !window.view.places(canvas, other, &layout),
+            !window.view.places(canvas, other),
             "{other} is opened or refused, never placed"
         );
     }
     let inspector = tairix_geometry::Point::new(layout.panel.left() + 4, layout.panel.top() + 4);
     assert!(
-        !window.view.places(inspector, "image/png", &layout),
+        !window.view.places(inspector, "image/png"),
         "only the canvas places"
     );
 }
@@ -1578,13 +1542,14 @@ fn a_node_of_the_path_a_text_is_set_along_moves_as_a_paths_does() {
 impl Window {
     /// The whole window as the view paints it now.
     fn rendered(&self) -> tairix_raster::Surface {
-        let mut surface =
-            tairix_raster::Surface::new(self.layout.window.width, self.layout.window.height)
-                .expect("a surface");
+        let mut surface = tairix_raster::Surface::new(
+            self.view.layout.window.width,
+            self.view.layout.window.height,
+        )
+        .expect("a surface");
         let faces = crate::layout::Faces::of(&self.theme, Scale::ONE);
         self.view.render(
             &mut surface,
-            &self.layout,
             (&self.theme, Scale::ONE, faces),
             &mut tairix_icon::NoArtwork,
         );
@@ -1661,7 +1626,7 @@ fn the_page_s_shadow_is_opaque_and_darker_than_the_pasteboard() {
     let surface = window.rendered();
     let page = window
         .view
-        .window_rect(&window.layout, window.view.shown().page().bounds())
+        .window_rect(window.view.shown().page().bounds())
         .expect("the page is shown");
     let pixel = |x: i32, y: i32| {
         surface
@@ -1694,9 +1659,12 @@ fn the_status_band_states_the_tool_s_hint_and_its_zoom_opens_the_zoom_menu() {
             surface.get(x, y) != surface.get(x, u32::try_from(slot.top()).expect("on the window"))
         })
     };
-    assert!(row(window.layout.message), "the hint is set in the band");
-    assert!(row(window.layout.zoom), "the zoom is set in the band");
-    let zoom = window.layout.zoom;
+    assert!(
+        row(window.view.layout.message),
+        "the hint is set in the band"
+    );
+    assert!(row(window.view.layout.zoom), "the zoom is set in the band");
+    let zoom = window.view.layout.zoom;
     let centre = tairix_geometry::Point::new(
         zoom.left() + px(zoom.width) / 2,
         zoom.top() + px(zoom.height) / 2,

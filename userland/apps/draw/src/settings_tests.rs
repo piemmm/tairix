@@ -2,7 +2,7 @@
 //! what a unit or a paint of none reshapes, and Restore.
 
 use tairix_colour::Rgba;
-use tairix_controls::{FieldControl, FieldRow, SettingsLayout};
+use tairix_controls::{FieldControl, FieldRow};
 use tairix_drawing::Unit;
 use tairix_geometry::{Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
@@ -18,7 +18,6 @@ use crate::tools::Tool;
 struct Fixture {
     registry: ThemeRegistry,
     window: DrawSettings,
-    layout: SettingsLayout,
 }
 
 type Answer = Outcome<AppRequest<SettingsRequest<Preferences>>>;
@@ -32,7 +31,6 @@ impl Fixture {
         let mut fixture = Self {
             registry: ThemeRegistry::with_builtins(),
             window: DrawSettings::new(record, category.index()),
-            layout: SettingsLayout::default(),
         };
         fixture.lay_out();
         fixture
@@ -40,10 +38,9 @@ impl Fixture {
 
     fn lay_out(&mut self) {
         let theme = self.registry.active();
-        self.layout = self
-            .window
-            .layout(600, 440, theme, Scale::ONE, Faces::of(theme, Scale::ONE));
-        self.window.settle(&self.layout, &mut Region::new());
+        let faces = Faces::of(theme, Scale::ONE);
+        self.window
+            .lay_out(600, 440, theme, Scale::ONE, faces, &mut Region::new());
     }
 
     fn key(&mut self, key: Key) -> Answer {
@@ -52,14 +49,9 @@ impl Fixture {
             modifiers: Modifiers::default(),
         };
         let theme = self.registry.active();
-        let answer = self.window.input(
-            &event,
-            0,
-            &self.layout,
-            Scale::ONE,
-            theme,
-            &mut Region::new(),
-        );
+        let answer = self
+            .window
+            .input(&event, 0, Scale::ONE, theme, &mut Region::new());
         if answer.relayout != Relayout::None {
             self.lay_out();
         }

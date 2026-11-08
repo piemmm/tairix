@@ -35,12 +35,12 @@ const CURRENT_ROW_ALPHA: u8 = 18;
 pub fn render_into(
     surface: &mut Surface,
     view: &View,
-    layout: &Layout,
     theme: &Theme,
     scale: Scale,
     faces: Faces,
     focused: bool,
 ) {
+    let layout = view.layout();
     let palette = theme.palette();
     surface.fill(Color::from(palette.surface));
     let chrome = Color::from(palette.surface_raised);
@@ -57,15 +57,15 @@ pub fn render_into(
         fill_area(surface, layout.grid(), Color::from(palette.document));
         match (view.display_shown(), view.editor().mode()) {
             (Some(Display::Code(code)), _) => {
-                code_grid(surface, code, view, layout, theme, faces.grid);
+                code_grid(surface, code, view, theme, faces.grid);
             }
             (Some(Display::Data(data)), _) => {
-                data_grid(surface, data, view, layout, theme, faces.grid);
+                data_grid(surface, data, view, theme, faces.grid);
             }
             (None, Mode::Text) => {
-                text_grid(surface, view, layout, theme, faces.grid, focused, scale);
+                text_grid(surface, view, theme, faces.grid, focused, scale);
             }
-            (None, Mode::Hex) => hex_grid(surface, view, layout, theme, faces.grid, focused),
+            (None, Mode::Hex) => hex_grid(surface, view, theme, faces.grid, focused),
         }
     }
     let (vertical, horizontal) = view.scrollbars();
@@ -77,7 +77,7 @@ pub fn render_into(
     }
     fill_area(surface, layout.corner(), Color::from(palette.scroll_track));
     if !withheld(surface, layout.status()) {
-        status(surface, view, layout, theme, StatusBand::new(theme, scale));
+        status(surface, view, theme, StatusBand::new(theme, scale));
     }
     if let Some((dialog, field)) = view.modal() {
         let bounds = View::modal_rect(dialog, layout.window(), scale, theme);
@@ -179,12 +179,12 @@ impl Grid<'_> {
 fn text_grid(
     surface: &mut Surface,
     view: &View,
-    layout: &Layout,
     theme: &Theme,
     font: BitmapFont,
     focused: bool,
     scale: Scale,
 ) {
+    let layout = view.layout();
     let palette = theme.palette();
     let editor = view.editor();
     let document = editor.document();
@@ -444,10 +444,10 @@ fn code_grid(
     surface: &mut Surface,
     code: &CodeDisplay,
     view: &View,
-    layout: &Layout,
     theme: &Theme,
     font: BitmapFont,
 ) {
+    let layout = view.layout();
     let palette = theme.palette();
     let (_, cell_h) = layout.cell();
     let grid = layout.grid();
@@ -491,14 +491,8 @@ fn code_grid(
     }
 }
 
-fn hex_grid(
-    surface: &mut Surface,
-    view: &View,
-    layout: &Layout,
-    theme: &Theme,
-    font: BitmapFont,
-    focused: bool,
-) {
+fn hex_grid(surface: &mut Surface, view: &View, theme: &Theme, font: BitmapFont, focused: bool) {
+    let layout = view.layout();
     let editor = view.editor();
     let (_, hex_top, left) = view.scroll();
     let rows = HexRows::new(editor.document(), layout, theme.palette(), font, left);
@@ -644,10 +638,10 @@ fn data_grid(
     surface: &mut Surface,
     data: &DataDisplay,
     view: &View,
-    layout: &Layout,
     theme: &Theme,
     font: BitmapFont,
 ) {
+    let layout = view.layout();
     let palette = theme.palette();
     let (_, cell_h) = layout.cell();
     let grid = layout.grid();
@@ -788,7 +782,7 @@ fn frame(surface: &mut Surface, rect: Rect, color: Color, weight: u32) {
 
 /// The status band: where the caret is, what was last said or what the
 /// parser reports, and the fields that open the view's settings.
-fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, band: StatusBand) {
+fn status(surface: &mut Surface, view: &View, theme: &Theme, band: StatusBand) {
     let editor = view.editor();
     let document = editor.document();
     let selection = editor.selection();
@@ -858,7 +852,7 @@ fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, ba
     } else {
         StatusTone::Muted
     };
-    let fields = layout.status_fields();
+    let fields = view.layout().status_fields();
     let indent = match editor.indent() {
         crate::detect::Indent::Tab => String::from("Tab"),
         crate::detect::Indent::Spaces(width) => alloc::format!("Spaces: {width}"),
@@ -877,11 +871,11 @@ fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, ba
     let [first, second, third, fourth, fifth] = values;
     band.paint(
         surface,
-        layout.status(),
+        view.layout().status(),
         theme,
         &[
-            (layout.position(), &text, StatusTone::Ink),
-            (layout.message(), &message, tone),
+            (view.layout().position(), &text, StatusTone::Ink),
+            (view.layout().message(), &message, tone),
             (fields[0], first, StatusTone::Ink),
             (fields[1], second, StatusTone::Ink),
             (fields[2], third, StatusTone::Ink),

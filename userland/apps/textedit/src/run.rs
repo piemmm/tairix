@@ -57,7 +57,7 @@ mod program {
     use tairix_textedit::editor::{Conversion, Converted, Editor, Mode};
     use tairix_textedit::find::{Search, Step};
     use tairix_textedit::highlight::LexJob;
-    use tairix_textedit::layout::{Faces, Layout, WINDOW_SIZE};
+    use tairix_textedit::layout::{Faces, WINDOW_SIZE};
     use tairix_textedit::load::{ReadStep, Reading};
     use tairix_textedit::paint::render_into;
     use tairix_textedit::view::{Own, View};
@@ -657,18 +657,16 @@ mod program {
             &mut self,
             surface: &mut Surface,
             view: &View,
-            layout: &Layout,
             (theme, scale, faces): (&Theme, Scale, Faces),
             focused: bool,
         ) {
-            render_into(surface, view, layout, theme, scale, faces, focused);
+            render_into(surface, view, theme, scale, faces, focused);
         }
 
         fn render_app(
             &mut self,
             _: &mut Surface,
             view: &NoAppView<Faces>,
-            (): &(),
             _: (&Theme, Scale, Faces),
             _: bool,
         ) {
@@ -711,7 +709,7 @@ mod program {
         for window in host.windows.iter_mut().filter(|window| !window.loading()) {
             window
                 .view
-                .scroll_repeat(now_ns, &window.layout, scale, theme, &mut window.damage);
+                .scroll_repeat(now_ns, scale, theme, &mut window.damage);
             window.owe_reported();
         }
     }
@@ -789,8 +787,8 @@ mod program {
             let snapshot = match snapshot {
                 Ok((_, snapshot)) => snapshot,
                 Err(unlisted) => {
-                    let (layout, damage) = (&window.layout, &mut window.damage);
-                    window.view.display_refused(unlisted, layout, damage);
+                    let damage = &mut window.damage;
+                    window.view.display_refused(unlisted, damage);
                     window.owe_reported();
                     continue;
                 }
@@ -835,8 +833,8 @@ mod program {
             let snapshot = match snapshot {
                 Ok((_, snapshot)) => snapshot,
                 Err(unlisted) => {
-                    let (layout, damage) = (&window.layout, &mut window.damage);
-                    window.view.display_refused(unlisted, layout, damage);
+                    let damage = &mut window.damage;
+                    window.view.display_refused(unlisted, damage);
                     window.owe_reported();
                     continue;
                 }
@@ -864,10 +862,8 @@ mod program {
         if window.loading() {
             return;
         }
-        let (layout, damage) = (&window.layout, &mut window.damage);
-        window
-            .view
-            .data_reported(reply.id, reply.report, layout, damage);
+        let damage = &mut window.damage;
+        window.view.data_reported(reply.id, reply.report, damage);
         window.owe_reported();
     }
 
@@ -881,13 +877,13 @@ mod program {
         if window.loading() {
             return;
         }
-        let (layout, damage) = (&window.layout, &mut window.damage);
+        let damage = &mut window.damage;
         match reply.answer {
             CodeAnswer::Listing(listing) => {
-                window.view.code_listed(reply.id, listing, layout, damage);
+                window.view.code_listed(reply.id, listing, damage);
             }
             CodeAnswer::Report(report) => {
-                window.view.data_reported(reply.id, report, layout, damage);
+                window.view.data_reported(reply.id, report, damage);
             }
         }
         window.owe_reported();
@@ -909,7 +905,7 @@ mod program {
                 return Some(SyntaxWork::Detect(head));
             }
         }
-        if let Some(job) = window.view.lex_job(&window.layout) {
+        if let Some(job) = window.view.lex_job() {
             return Some(SyntaxWork::Lex(job));
         }
         if window.view.check_due(now).is_some_and(|due| due <= now) {
@@ -919,8 +915,8 @@ mod program {
             if window.view.editor().document().len() > MAX_VALIDATE_LEN {
                 let generation = window.view.editor().generation();
                 let refused = alloc::vec![unchecked(format, SyntaxFailure::TooLarge)];
-                let (layout, damage) = (&window.layout, &mut window.damage);
-                window.view.checked(generation, refused, layout, damage);
+                let damage = &mut window.damage;
+                window.view.checked(generation, refused, damage);
                 window.owe_reported();
             } else if let Ok((generation, snapshot)) = window.view.editor_mut().snapshot() {
                 return Some(SyntaxWork::Validate {
@@ -952,7 +948,6 @@ mod program {
             searching.generation,
             step,
             searching.replacement.as_deref(),
-            &window.layout,
             &mut window.damage,
         );
         host.apply(index, outcome);
@@ -990,14 +985,9 @@ mod program {
                 return;
             }
         };
-        let outcome = window.view.converted(
-            id,
-            generation,
-            chunks,
-            to,
-            &window.layout,
-            &mut window.damage,
-        );
+        let outcome = window
+            .view
+            .converted(id, generation, chunks, to, &mut window.damage);
         host.apply(index, outcome);
     }
 
@@ -1011,15 +1001,15 @@ mod program {
         if window.loading() {
             return;
         }
-        let (layout, damage) = (&window.layout, &mut window.damage);
+        let damage = &mut window.damage;
         match reply.answer {
             SyntaxAnswer::Lexed {
                 id,
                 batch: Ok(batch),
-            } => window.view.lexed(id, &batch, layout, damage),
-            SyntaxAnswer::Lexed { id, batch: Err(_) } => window.view.lex_failed(id, layout, damage),
+            } => window.view.lexed(id, &batch, damage),
+            SyntaxAnswer::Lexed { id, batch: Err(_) } => window.view.lex_failed(id, damage),
             SyntaxAnswer::Detected(Ok(Some(format))) => {
-                let outcome = window.view.detected(format, layout, damage);
+                let outcome = window.view.detected(format, damage);
                 host.apply(index, outcome);
                 return;
             }
@@ -1048,7 +1038,7 @@ mod program {
                     }
                     alloc::vec![unchecked(format, err)]
                 });
-                window.view.checked(generation, diagnostics, layout, damage);
+                window.view.checked(generation, diagnostics, damage);
             }
         }
         host.windows[index].owe_reported();
@@ -1093,9 +1083,7 @@ mod program {
             }
             Own::Paste => match clipboard::take(&mut host.client, id) {
                 Ok(Some((_, bytes))) => {
-                    let outcome = window
-                        .view
-                        .paste(&bytes, &window.layout, &mut window.damage);
+                    let outcome = window.view.paste(&bytes, &mut window.damage);
                     host.apply(index, outcome);
                 }
                 Ok(None) => window.state("The clipboard is empty"),

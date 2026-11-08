@@ -45,7 +45,6 @@ mod program {
         RtHost, Settings,
     };
     use tairix_controls::damage;
-    use tairix_controls::SettingsLayout;
     use tairix_geometry::{Region, Scale};
     use tairix_icon::{
         artwork_cache, ArtworkCache, IconArtworkSource, InlineArtwork, NoArtworkSeam,
@@ -54,7 +53,7 @@ mod program {
     use tairix_paint::area::{render_area, AreaView, SpriteOpening};
     use tairix_paint::canvas::{Canvas, Kind, OutOfMemory, Sample};
     use tairix_paint::document::{Document, Entry, Picture, Snapshot};
-    use tairix_paint::engine::{Engine, EngineLayout};
+    use tairix_paint::engine::Engine;
     use tairix_paint::layout::{Faces, WINDOW_SIZE};
     use tairix_paint::load::{Assembly, Refusal};
     use tairix_paint::preferences::Preferences;
@@ -770,13 +769,11 @@ mod program {
         fn turn(host: &mut Host<Self>, now_ns: u64) -> bool {
             let (theme, scale) = (host.themes.active(), host.desktop.scale());
             for window in &mut host.windows {
-                let (Engine::Picture(view), EngineLayout::Picture(layout)) =
-                    (&mut window.view, &window.layout)
-                else {
+                let Engine::Picture(view) = &mut window.view else {
                     continue;
                 };
                 if view.deadline_ns().is_some_and(|due| due <= now_ns) {
-                    view.tick(now_ns, layout, scale, theme, &mut window.damage);
+                    view.tick(now_ns, scale, theme, &mut window.damage);
                     window.owe_reported();
                 }
             }
@@ -805,14 +802,13 @@ mod program {
                 return false;
             }
             for at in 0..host.windows.len() {
-                let wanted = host.windows.get_mut(at).and_then(|window| {
-                    match (&mut window.view, &window.layout) {
-                        (Engine::Picture(view), EngineLayout::Picture(layout)) => {
-                            view.wanted_preview(layout, scale)
-                        }
-                        _ => None,
-                    }
-                });
+                let wanted = host
+                    .windows
+                    .get_mut(at)
+                    .and_then(|window| match &mut window.view {
+                        Engine::Picture(view) => view.wanted_preview(scale),
+                        Engine::Area(_) => None,
+                    });
                 if let Some(request) = wanted {
                     host.apply(at, Outcome::asking(request));
                 }
@@ -826,12 +822,10 @@ mod program {
             host.windows
                 .iter_mut()
                 .filter_map(|window| {
-                    let (Engine::Picture(view), EngineLayout::Picture(layout)) =
-                        (&mut window.view, &window.layout)
-                    else {
+                    let Engine::Picture(view) = &mut window.view else {
                         return None;
                     };
-                    view.arm_deadline(now_ns, layout, scale, theme);
+                    view.arm_deadline(now_ns, scale, theme);
                     view.deadline_ns()
                 })
                 .min()
@@ -841,9 +835,7 @@ mod program {
             tairix_font::trim_glyph_cache();
             let band = tairix_rt::pressure::gauge().band();
             for window in &mut host.windows {
-                window
-                    .view
-                    .adopt_pressure(band, &window.layout, &mut window.damage);
+                window.view.adopt_pressure(band, &mut window.damage);
                 window.owe_reported();
             }
         }
@@ -867,10 +859,7 @@ mod program {
                 Answer::Copied(copied) => put_copy(host, index, copied),
                 Answer::Computed { job, answer } => {
                     let window = &mut host.windows[index];
-                    let outcome =
-                        window
-                            .view
-                            .computed(job, answer, &window.layout, &mut window.damage);
+                    let outcome = window.view.computed(job, answer, &mut window.damage);
                     host.apply(index, outcome);
                 }
             }
@@ -899,23 +888,19 @@ mod program {
             &mut self,
             surface: &mut Surface,
             view: &Engine,
-            layout: &EngineLayout,
             (theme, scale, faces): (&Theme, Scale, Faces),
             _focused: bool,
         ) {
-            match (view, layout) {
-                (Engine::Picture(view), EngineLayout::Picture(layout)) => {
+            match view {
+                Engine::Picture(view) => {
                     // Every picture drawn is built in, so the resolver
                     // refuses every asset tier and the cache answers from its
                     // glyphs.
                     let mut resolver = InlineArtwork::new(NoArtworkSeam, NoArtworkSeam);
                     let mut source = IconArtworkSource::new(&mut self.artwork, &mut resolver);
-                    render_into(surface, view, layout, theme, scale, faces, &mut source);
+                    render_into(surface, view, theme, scale, faces, &mut source);
                 }
-                (Engine::Area(view), EngineLayout::Area(layout)) => {
-                    render_area(surface, view, layout, theme, scale);
-                }
-                _ => {}
+                Engine::Area(view) => render_area(surface, view, theme, scale),
             }
         }
 
@@ -923,13 +908,12 @@ mod program {
             &mut self,
             surface: &mut Surface,
             view: &PaintSettings,
-            layout: &SettingsLayout,
             (theme, scale, _): (&Theme, Scale, Faces),
             _focused: bool,
         ) {
             let mut resolver = InlineArtwork::new(NoArtworkSeam, NoArtworkSeam);
             let mut source = IconArtworkSource::new(&mut self.artwork, &mut resolver);
-            view.render(surface, layout, (theme, scale), &mut source);
+            view.render(surface, (theme, scale), &mut source);
         }
     }
 
@@ -971,9 +955,7 @@ mod program {
         }
         apply_settings(host);
         for window in &mut host.app_windows {
-            window
-                .view
-                .say(said.clone(), &window.layout, &mut window.damage);
+            window.view.say(said.clone(), &mut window.damage);
             window.owe_reported();
         }
     }
@@ -983,19 +965,14 @@ mod program {
     fn apply_settings(host: &mut Host<Paint>) {
         let preferences = host.app.preferences.live().clone();
         for window in &mut host.windows {
-            if let (Engine::Picture(view), EngineLayout::Picture(layout)) =
-                (&mut window.view, &window.layout)
-            {
-                view.adopt(&preferences, layout, &mut window.damage);
+            if let Engine::Picture(view) = &mut window.view {
+                view.adopt(&preferences, &mut window.damage);
                 window.owe_reported();
             }
         }
         for index in 0..host.app_windows.len() {
             let window = &mut host.app_windows[index];
-            if window
-                .view
-                .adopt(&preferences, &window.layout, &mut window.damage)
-            {
+            if window.view.adopt(&preferences, &mut window.damage) {
                 host.apply_app(index, Outcome::relaid());
             } else {
                 window.owe_reported();
@@ -1023,7 +1000,6 @@ mod program {
                 Some(String::from(
                     "No picture window is open to take the panes of",
                 )),
-                &window.layout,
                 &mut window.damage,
             );
             window.owe_reported();
@@ -1097,10 +1073,8 @@ mod program {
             } => host.not_opened(index, &load.name, &why),
             DecodeAnswer::Pasted(pasted) => {
                 let window = &mut host.windows[index];
-                if let (Engine::Picture(view), EngineLayout::Picture(layout)) =
-                    (&mut window.view, &window.layout)
-                {
-                    let outcome = view.pasted(pasted, layout, &mut window.damage);
+                if let Engine::Picture(view) = &mut window.view {
+                    let outcome = view.pasted(pasted, &mut window.damage);
                     host.apply(index, outcome);
                 }
             }
@@ -1198,11 +1172,10 @@ mod program {
             return;
         };
         let window = &mut host.windows[file];
-        let (Engine::Area(area), EngineLayout::Area(layout)) = (&mut window.view, &window.layout)
-        else {
+        let Engine::Area(area) = &mut window.view else {
             return;
         };
-        let outcome = area.adopt_edited(id, picture, layout, &mut window.damage);
+        let outcome = area.adopt_edited(id, picture, &mut window.damage);
         host.apply(file, outcome);
     }
 
@@ -1240,9 +1213,7 @@ mod program {
             match (named, window.view.picture_mut()) {
                 (Some(name), Some(view)) => {
                     if view.set_member(name, &file_name, modified) {
-                        window
-                            .damage
-                            .add(<Engine as DocumentView>::message_area(&window.layout));
+                        window.damage.add(view.message_area());
                         window.owe_reported();
                     }
                 }
@@ -1419,10 +1390,8 @@ mod program {
             return;
         };
         let window = &mut host.windows[index];
-        if let (Engine::Picture(view), EngineLayout::Picture(layout)) =
-            (&mut window.view, &window.layout)
-        {
-            view.previewed(answer, layout, &mut window.damage);
+        if let Engine::Picture(view) = &mut window.view {
+            view.previewed(answer, &mut window.damage);
             window.owe_reported();
         }
     }
@@ -1437,12 +1406,10 @@ mod program {
             area.refused(job);
             return;
         }
-        let outcome = window.view.computed(
-            job,
-            Computed::Tiles(Err(OutOfMemory)),
-            &window.layout,
-            &mut window.damage,
-        );
+        let outcome =
+            window
+                .view
+                .computed(job, Computed::Tiles(Err(OutOfMemory)), &mut window.damage);
         host.apply(index, outcome);
     }
 

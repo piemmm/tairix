@@ -24,7 +24,7 @@ use super::{Action, Compute, Lands, Outcome, Then, View};
 use crate::canvas::{Canvas, Kind, Sample};
 use crate::document::{copy_name, new_layer_name, Document, Layer, LayerRefusal, Shown};
 use crate::layers_pane::{layer_at, thumb_side, LayersOutcome, LayersPane};
-use crate::layout::{Faces, Layout};
+use crate::layout::Faces;
 use crate::pane::{PaneKind, Side};
 use crate::preview::{PreviewWork, Thumbnails};
 use crate::shape::Bounds;
@@ -88,8 +88,8 @@ fn slice_of(document: &Document) -> (&[Layer], usize) {
 
 impl View {
     /// Add a clear layer over the one painted on, and paint on it.
-    pub(super) fn new_layer(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        if !self.editable(layout, damage) {
+    pub(super) fn new_layer(&mut self, damage: &mut Region) -> Outcome {
+        if !self.editable(damage) {
             return Outcome::none();
         }
         let Some(picture) = self.document.picture() else {
@@ -100,20 +100,19 @@ impl View {
             .ok()
             .zip(new_layer_name(picture.layers()).ok());
         let Some((canvas, name)) = made else {
-            self.state(NO_ROOM, layout, damage);
+            self.state(NO_ROOM, damage);
             return Outcome::none();
         };
         let at = picture.active() + 1;
         self.change_layers(
             |document| document.insert_layer(at, Layer::new(canvas, name)),
-            layout,
             damage,
         )
     }
 
     /// Add a copy of the layer painted on over it, and paint on the copy.
-    pub(super) fn duplicate_layer(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        if !self.editable(layout, damage) {
+    pub(super) fn duplicate_layer(&mut self, damage: &mut Region) -> Outcome {
+        if !self.editable(damage) {
             return Outcome::none();
         }
         let Some(picture) = self.document.picture() else {
@@ -126,55 +125,45 @@ impl View {
             Some(copy)
         });
         let Some(copy) = copied else {
-            self.state(NO_ROOM, layout, damage);
+            self.state(NO_ROOM, damage);
             return Outcome::none();
         };
-        self.change_layers(
-            |document| document.insert_layer(active + 1, copy),
-            layout,
-            damage,
-        )
+        self.change_layers(|document| document.insert_layer(active + 1, copy), damage)
     }
 
     /// Take the layer painted on away.
-    pub(super) fn delete_layer(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        if !self.editable(layout, damage) {
+    pub(super) fn delete_layer(&mut self, damage: &mut Region) -> Outcome {
+        if !self.editable(damage) {
             return Outcome::none();
         }
         let active = self.active_layer();
-        self.change_layers(|document| document.remove_layer(active), layout, damage)
+        self.change_layers(|document| document.remove_layer(active), damage)
     }
 
     /// Move the layer painted on one place up the stack, or down it.
-    pub(super) fn move_layer(&mut self, up: bool, layout: &Layout, damage: &mut Region) -> Outcome {
+    pub(super) fn move_layer(&mut self, up: bool, damage: &mut Region) -> Outcome {
         match self.beside(up) {
-            Some(to) => self.reorder_layer(self.active_layer(), to, layout, damage),
+            Some(to) => self.reorder_layer(self.active_layer(), to, damage),
             None => Outcome::none(),
         }
     }
 
     /// Move layer `from` to `to` in the stack as one step, painting on it
     /// there.
-    fn reorder_layer(
-        &mut self,
-        from: usize,
-        to: usize,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
-        if !self.editable(layout, damage) {
+    fn reorder_layer(&mut self, from: usize, to: usize, damage: &mut Region) -> Outcome {
+        if !self.editable(damage) {
             return Outcome::none();
         }
-        self.change_layers(|document| document.move_layer(from, to), layout, damage)
+        self.change_layers(|document| document.move_layer(from, to), damage)
     }
 
     /// Paint on the layer above the one painted on, or the one below.
-    pub(super) fn step_layer(&mut self, up: bool, layout: &Layout, damage: &mut Region) -> Outcome {
-        if !self.idle(layout, damage) {
+    pub(super) fn step_layer(&mut self, up: bool, damage: &mut Region) -> Outcome {
+        if !self.idle(damage) {
             return Outcome::none();
         }
         if let Some(to) = self.beside(up) {
-            self.paint_on(to, layout, damage);
+            self.paint_on(to, damage);
         }
         Outcome::none()
     }
@@ -191,13 +180,8 @@ impl View {
     }
 
     /// Paint on the layer `text` names, or numbers from one at the bottom.
-    pub(super) fn go_to_layer(
-        &mut self,
-        text: &str,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
-        if !self.idle(layout, damage) {
+    pub(super) fn go_to_layer(&mut self, text: &str, damage: &mut Region) -> Outcome {
+        if !self.idle(damage) {
             return Outcome::none();
         }
         let text = text.trim();
@@ -214,8 +198,8 @@ impl View {
                 })
         });
         match found {
-            Some(index) => self.paint_on(index, layout, damage),
-            None => self.state("There is no layer of that name or number", layout, damage),
+            Some(index) => self.paint_on(index, damage),
+            None => self.state("There is no layer of that name or number", damage),
         }
         Outcome::none()
     }
@@ -223,33 +207,33 @@ impl View {
     /// Paint on layer `index`: where painting lands changes, the picture does
     /// not. The Layers pane marks its row, scrolled into view, and shows its
     /// opacity.
-    fn paint_on(&mut self, index: usize, layout: &Layout, damage: &mut Region) {
+    fn paint_on(&mut self, index: usize, damage: &mut Region) {
         let was = self.active_layer();
         if !self.document.select_layer(index) {
             return;
         }
-        damage.add(layout.status());
-        let placed = layout.layers();
+        damage.add(self.layout.status());
+        let placed = self.layout.layers();
         if self.layers.reveal(index, placed) {
             damage.add(placed.rows);
         } else {
             damage.add(self.layers.row_rect(was, placed));
             damage.add(self.layers.row_rect(index, placed));
         }
-        self.sync_layers(layout, damage);
+        self.sync_layers(damage);
     }
 
     /// Show the layer painted on, or hide it.
-    pub(super) fn toggle_layer(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        self.toggle_shown(self.active_layer(), layout, damage)
+    pub(super) fn toggle_layer(&mut self, damage: &mut Region) -> Outcome {
+        self.toggle_shown(self.active_layer(), damage)
     }
 
     /// Show layer `layer`, or hide it, as one step, painting staying on the
     /// layer it was on; an opacity still changing lands first, so the step
     /// records how the layer showed once that had settled.
-    fn toggle_shown(&mut self, layer: usize, layout: &Layout, damage: &mut Region) -> Outcome {
-        self.settle_opacity(layout, damage);
-        if !self.editable(layout, damage) {
+    fn toggle_shown(&mut self, layer: usize, damage: &mut Region) -> Outcome {
+        self.settle_opacity(damage);
+        if !self.editable(damage) {
             return Outcome::none();
         }
         let shown = self
@@ -260,10 +244,10 @@ impl View {
         match shown {
             Some(Ok(mut shown)) => {
                 shown.visible = !shown.visible;
-                self.reshow(layer, shown, layout, damage)
+                self.reshow(layer, shown, damage)
             }
             Some(Err(_)) => {
-                self.state(NO_ROOM, layout, damage);
+                self.state(NO_ROOM, damage);
                 Outcome::none()
             }
             None => Outcome::none(),
@@ -272,13 +256,7 @@ impl View {
 
     /// Show layer `layer` as `shown` says, as one step, painting staying on
     /// the layer it was on.
-    fn reshow(
-        &mut self,
-        layer: usize,
-        shown: Shown,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
+    fn reshow(&mut self, layer: usize, shown: Shown, damage: &mut Region) -> Outcome {
         let active = self.active_layer();
         self.change_layers(
             |document| {
@@ -286,7 +264,6 @@ impl View {
                 document.select_layer(active);
                 Ok(())
             },
-            layout,
             damage,
         )
     }
@@ -294,10 +271,10 @@ impl View {
     /// Lay the layer painted on over the one beneath it, the two becoming
     /// one, on a worker. Both must show: a merge keeps the look, so the pixels
     /// of a layer hidden or wholly faint would have nowhere to go.
-    pub(super) fn merge_down(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+    pub(super) fn merge_down(&mut self, damage: &mut Region) -> Outcome {
         let active = self.active_layer();
         let Some(lowest) = active.checked_sub(1) else {
-            self.state("There is no layer beneath this one", layout, damage);
+            self.state("There is no layer beneath this one", damage);
             return Outcome::none();
         };
         if !self
@@ -305,31 +282,23 @@ impl View {
             .picture()
             .is_some_and(|picture| picture.shows(lowest..active + 1))
         {
-            self.state(
-                "A hidden or wholly faint layer is not merged",
-                layout,
-                damage,
-            );
+            self.state("A hidden or wholly faint layer is not merged", damage);
             return Outcome::none();
         }
-        self.compose(lowest..active + 1, "merge the layers", layout, damage)
+        self.compose(lowest..active + 1, "merge the layers", damage)
     }
 
     /// Lay every layer together as one, on a worker.
-    pub(super) fn flatten(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+    pub(super) fn flatten(&mut self, damage: &mut Region) -> Outcome {
         let Some(picture) = self.document.picture() else {
             return Outcome::none();
         };
         if picture.single() {
-            self.state(
-                "The picture is one layer, shown wholly, already",
-                layout,
-                damage,
-            );
+            self.state("The picture is one layer, shown wholly, already", damage);
             return Outcome::none();
         }
         let count = picture.layers().len();
-        self.compose(0..count, "flatten the picture", layout, damage)
+        self.compose(0..count, "flatten the picture", damage)
     }
 
     /// Hand the layers in `range` to a worker to be laid together.
@@ -337,10 +306,9 @@ impl View {
         &mut self,
         range: core::ops::Range<usize>,
         what: &'static str,
-        layout: &Layout,
         damage: &mut Region,
     ) -> Outcome {
-        if !self.editable(layout, damage) {
+        if !self.editable(damage) {
             return Outcome::none();
         }
         let shared = self.document.picture().and_then(|picture| {
@@ -355,7 +323,6 @@ impl View {
         let Some(layers) = shared else {
             self.state(
                 &alloc::format!("There is not enough memory to {what}"),
-                layout,
                 damage,
             );
             return Outcome::none();
@@ -364,7 +331,6 @@ impl View {
             Compute::Compose { layers },
             Lands::Merged(range),
             what,
-            layout,
             damage,
         )
     }
@@ -374,13 +340,12 @@ impl View {
     fn change_layers(
         &mut self,
         change: impl FnOnce(&mut Document) -> Result<(), LayerRefusal>,
-        layout: &Layout,
         damage: &mut Region,
     ) -> Outcome {
         match change(&mut self.document) {
-            Ok(()) => self.layers_changed(layout, damage),
+            Ok(()) => self.layers_changed(damage),
             Err(refusal) => {
-                self.state(&alloc::format!("{refusal}"), layout, damage);
+                self.state(&alloc::format!("{refusal}"), damage);
                 Outcome::none()
             }
         }
@@ -390,20 +355,23 @@ impl View {
     /// the status band says of them and the Layers pane's rows are drawn
     /// again; a layer come or gone while the pane shows lays the window out
     /// again, with the column or the tool window the pane stands in.
-    pub(super) fn layers_changed(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        damage.add(layout.canvas());
-        damage.add(layout.status());
-        self.sync_layers(layout, damage);
-        let placed = layout.layers();
+    pub(super) fn layers_changed(&mut self, damage: &mut Region) -> Outcome {
+        damage.add(self.layout.canvas());
+        damage.add(self.layout.status());
+        self.sync_layers(damage);
+        let placed = self.layout.layers();
         damage.add(placed.rows);
         if placed.bounds.is_empty() || placed.count == slice_of(&self.document).0.len() {
             return Outcome::none();
         }
         let column = Side::BOTH
             .into_iter()
-            .map(|side| layout.dock_on(side))
+            .map(|side| self.layout.dock_on(side))
             .find(|dock| dock.panes.iter().any(|slot| slot.kind == PaneKind::Layers))
-            .map_or_else(|| layout.pane_window(PaneKind::Layers), |dock| dock.rect);
+            .map_or_else(
+                || self.layout.pane_window(PaneKind::Layers),
+                |dock| dock.rect,
+            );
         damage.add(column);
         Outcome::reshaped()
     }
@@ -443,7 +411,7 @@ impl View {
     /// Show the opacity of the layer painted on in the Layers pane, and offer
     /// there what may be done to the layers now, a rename whose layer has gone
     /// dropped.
-    pub(super) fn sync_layers(&mut self, layout: &Layout, damage: &mut Region) {
+    pub(super) fn sync_layers(&mut self, damage: &mut Region) {
         let colour = self
             .document
             .picture()
@@ -460,10 +428,10 @@ impl View {
             .layers
             .sync((layers, active), (colour, mergeable, idle))
         {
-            damage.add(layout.layers().panel);
+            damage.add(self.layout.layers().panel);
         }
         if self.layers.renaming() != renaming {
-            damage.add(layout.layers().rows);
+            damage.add(self.layout.layers().rows);
         }
     }
 
@@ -473,12 +441,11 @@ impl View {
     pub(super) fn layers_pointer(
         &mut self,
         event: &InputEvent,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Outcome> {
-        let placed = *layout.layers();
+        let placed = *self.layout.layers();
         if placed.bounds.is_empty() && !self.layers.holding() {
             return None;
         }
@@ -486,7 +453,7 @@ impl View {
         let pressed = matches!(event, InputEvent::PointerPressed { .. });
         if pressed && !placed.panel.contains(self.pointer) {
             let settled = self.layers.blur_panel(&placed, look, damage);
-            let _ = self.layers_answered(settled, layout, scale, theme, damage);
+            let _ = self.layers_answered(settled, scale, theme, damage);
         }
         let (layers, active) = slice_of(&self.document);
         match self
@@ -494,9 +461,9 @@ impl View {
             .on_pointer(event, &placed, (layers, active), look, damage)
         {
             LayersOutcome::Ignored => {
-                (pressed && layout.layers_body().contains(self.pointer)).then(Outcome::none)
+                (pressed && self.layout.layers_body().contains(self.pointer)).then(Outcome::none)
             }
-            outcome => Some(self.layers_answered(outcome, layout, scale, theme, damage)),
+            outcome => Some(self.layers_answered(outcome, scale, theme, damage)),
         }
     }
 
@@ -505,60 +472,40 @@ impl View {
     pub(super) fn layers_key(
         &mut self,
         stroke: Keystroke,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Outcome> {
-        let placed = *layout.layers();
+        let placed = *self.layout.layers();
         let look = (Faces::of(theme, scale), scale, theme);
         let (layers, active) = slice_of(&self.document);
         match self
             .layers
             .on_key(stroke, &placed, (layers, active), look, damage)
         {
-            LayersOutcome::Ignored => {
-                self.leave_on(Keyboard::Layers, stroke, layout, scale, theme, damage)
-            }
-            outcome => Some(self.layers_answered(outcome, layout, scale, theme, damage)),
+            LayersOutcome::Ignored => self.leave_on(Keyboard::Layers, stroke, scale, theme, damage),
+            outcome => Some(self.layers_answered(outcome, scale, theme, damage)),
         }
     }
 
     /// Settle what the Layers pane holds typed — an opacity, a name — and
     /// take the keyboard from it.
-    pub(super) fn release_layers(
-        &mut self,
-        layout: &Layout,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) {
+    pub(super) fn release_layers(&mut self, scale: Scale, theme: &Theme, damage: &mut Region) {
         let look = (Faces::of(theme, scale), scale, theme);
-        let settled = self.layers.blur(layout.layers(), look, damage);
-        let _ = self.layers_answered(settled, layout, scale, theme, damage);
+        let settled = self.layers.blur(self.layout.layers(), look, damage);
+        let _ = self.layers_answered(settled, scale, theme, damage);
     }
 
     /// Give the Layers pane the keyboard, at its first stop or its last.
-    pub(super) fn enter_layers(
-        &mut self,
-        forward: bool,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> bool {
-        let placed = *layout.layers();
+    pub(super) fn enter_layers(&mut self, forward: bool, damage: &mut Region) -> bool {
+        let placed = *self.layout.layers();
         !placed.bounds.is_empty() && self.layers.enter_focus(forward, &placed, damage)
     }
 
     /// Scroll the Layers pane's rows by a turn of the wheel over them,
     /// answering whether the turn was theirs.
-    pub(super) fn wheel_layers(
-        &mut self,
-        dy: i32,
-        layout: &Layout,
-        scale: Scale,
-        damage: &mut Region,
-    ) -> bool {
-        let placed = *layout.layers();
+    pub(super) fn wheel_layers(&mut self, dy: i32, scale: Scale, damage: &mut Region) -> bool {
+        let placed = *self.layout.layers();
         if !placed.rows.contains(self.pointer) {
             return false;
         }
@@ -570,27 +517,26 @@ impl View {
     fn layers_answered(
         &mut self,
         outcome: LayersOutcome,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
         match outcome {
             LayersOutcome::Ignored | LayersOutcome::Taken => Outcome::none(),
-            LayersOutcome::Select(layer) => self.work_on(layer, layout, damage),
-            LayersOutcome::Show(layer) => self.toggle_shown(layer, layout, damage),
-            LayersOutcome::Renamed(revision) => self.rename_layer(revision, layout, damage),
-            LayersOutcome::Move { from, to } => self.reorder_layer(from, to, layout, damage),
+            LayersOutcome::Select(layer) => self.work_on(layer, damage),
+            LayersOutcome::Show(layer) => self.toggle_shown(layer, damage),
+            LayersOutcome::Renamed(revision) => self.rename_layer(revision, damage),
+            LayersOutcome::Move { from, to } => self.reorder_layer(from, to, damage),
             LayersOutcome::Opacity { percent, settled } => {
-                self.layer_opacity(percent, settled, layout, damage);
+                self.layer_opacity(percent, settled, damage);
                 Outcome::none()
             }
-            LayersOutcome::New => self.act(Action::NewLayer, layout, damage),
-            LayersOutcome::Duplicate => self.act(Action::DuplicateLayer, layout, damage),
-            LayersOutcome::Delete => self.act(Action::DeleteLayer, layout, damage),
-            LayersOutcome::MergeDown => self.act(Action::MergeDown, layout, damage),
+            LayersOutcome::New => self.act(Action::NewLayer, damage),
+            LayersOutcome::Duplicate => self.act(Action::DuplicateLayer, damage),
+            LayersOutcome::Delete => self.act(Action::DeleteLayer, damage),
+            LayersOutcome::MergeDown => self.act(Action::MergeDown, damage),
             LayersOutcome::Left { forward } => {
-                self.walk_keyboard(Keyboard::Layers, forward, layout, scale, theme, damage);
+                self.walk_keyboard(Keyboard::Layers, forward, scale, theme, damage);
                 Outcome::none()
             }
         }
@@ -600,25 +546,20 @@ impl View {
     /// an opacity still changing landed, the open operation applied and a
     /// floating selection put down first, as stepping to a layer does, each
     /// coming back here once it has landed.
-    pub(super) fn work_on(
-        &mut self,
-        layer: usize,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
-        self.end_gesture(layout, damage);
-        self.settle_opacity(layout, damage);
+    pub(super) fn work_on(&mut self, layer: usize, damage: &mut Region) -> Outcome {
+        self.end_gesture(damage);
+        self.settle_opacity(damage);
         if self.adjusting().is_some() {
-            return match self.apply_adjustment(Then::PaintOn(layer), layout, damage) {
-                Applying::Now(then) => self.carry_on(then, layout, damage),
+            return match self.apply_adjustment(Then::PaintOn(layer), damage) {
+                Applying::Now(then) => self.carry_on(then, damage),
                 Applying::Waiting(outcome) => outcome,
             };
         }
         if self.held.is_some() {
-            return self.put_down_then(Then::PaintOn(layer), layout, damage);
+            return self.put_down_then(Then::PaintOn(layer), damage);
         }
-        if self.idle(layout, damage) {
-            self.paint_on(layer, layout, damage);
+        if self.idle(damage) {
+            self.paint_on(layer, damage);
         }
         Outcome::none()
     }
@@ -628,8 +569,8 @@ impl View {
     /// first: a name left empty keeps the one it had, one whose layer no
     /// longer holds that revision lands on none, and one longer than a layer's
     /// may be is refused, saying so.
-    fn rename_layer(&mut self, revision: u64, layout: &Layout, damage: &mut Region) -> Outcome {
-        self.settle_opacity(layout, damage);
+    fn rename_layer(&mut self, revision: u64, damage: &mut Region) -> Outcome {
+        self.settle_opacity(damage);
         let typed = self.layers.typed_name().map_or("", str::trim);
         let mut name = String::new();
         let room = name.try_reserve_exact(typed.len()).is_ok();
@@ -641,15 +582,15 @@ impl View {
             let held = layers.get(layer)?;
             Some((layer, held.opacity, held.visible))
         });
-        self.layers.end_rename(layers, layout.layers(), damage);
+        self.layers.end_rename(layers, self.layout.layers(), damage);
         if !room {
-            self.state(NO_ROOM, layout, damage);
+            self.state(NO_ROOM, damage);
             return Outcome::none();
         }
         let Some((layer, opacity, visible)) = found else {
             return Outcome::none();
         };
-        if name.is_empty() || !self.editable(layout, damage) {
+        if name.is_empty() || !self.editable(damage) {
             return Outcome::none();
         }
         let shown = Shown {
@@ -657,40 +598,34 @@ impl View {
             opacity,
             visible,
         };
-        self.reshow(layer, shown, layout, damage)
+        self.reshow(layer, shown, damage)
     }
 
     /// Land a name being typed in the Layers pane, as a press beside it does:
     /// what every action, a menu entry, a close and the window losing the
     /// keyboard do first.
-    pub(super) fn settle_rename(&mut self, layout: &Layout, damage: &mut Region) {
+    pub(super) fn settle_rename(&mut self, damage: &mut Region) {
         if let Some(revision) = self.layers.renaming() {
-            let _ = self.rename_layer(revision, layout, damage);
+            let _ = self.rename_layer(revision, damage);
         }
     }
 
     /// Show the layer painted on at `percent` live, as the Layers pane's
     /// opacity moves: laid over the composite of the layers beneath once the
     /// preview worker has that, and recorded as one step once `settled`.
-    pub(crate) fn layer_opacity(
-        &mut self,
-        percent: i32,
-        settled: bool,
-        layout: &Layout,
-        damage: &mut Region,
-    ) {
-        if self.layer_looks.edit.is_none() && !self.begin_opacity(settled, layout, damage) {
+    pub(crate) fn layer_opacity(&mut self, percent: i32, settled: bool, damage: &mut Region) {
+        if self.layer_looks.edit.is_none() && !self.begin_opacity(settled, damage) {
             return;
         }
         let layer = self.layer_looks.edit.as_ref().map_or(0, |edit| edit.layer);
         let opacity = Fraction::from_percent(u32::try_from(percent).unwrap_or(0)).byte();
         if self.document.set_opacity_live(layer, opacity) {
             let (width, height) = self.picture_size();
-            self.damage_picture(Some(Bounds::picture(width, height)), layout, damage);
-            damage.add(self.layers.row_rect(layer, layout.layers()));
+            self.damage_picture(Some(Bounds::picture(width, height)), damage);
+            damage.add(self.layers.row_rect(layer, self.layout.layers()));
         }
         if settled {
-            self.settle_opacity(layout, damage);
+            self.settle_opacity(damage);
         }
     }
 
@@ -698,8 +633,8 @@ impl View {
     /// aside, the room to record its change held, and, unless it is `settled`
     /// at once, the layers beneath it wanted laid together; `false`, saying
     /// why, where it may not change.
-    fn begin_opacity(&mut self, settled: bool, layout: &Layout, damage: &mut Region) -> bool {
-        if !self.editable(layout, damage) {
+    fn begin_opacity(&mut self, settled: bool, damage: &mut Region) -> bool {
+        if !self.editable(damage) {
             return false;
         }
         let found = self
@@ -714,7 +649,7 @@ impl View {
             return false;
         };
         let (Ok(before), Ok(())) = (before, self.document.reserve()) else {
-            self.state(NO_ROOM, layout, damage);
+            self.state(NO_ROOM, damage);
             return false;
         };
         self.layer_looks.edit = Some(OpacityEdit {
@@ -764,17 +699,17 @@ impl View {
 
     /// Land an opacity changed live as one step — none where the layer came
     /// back to how it showed — and let the composite beneath it go.
-    pub(super) fn settle_opacity(&mut self, layout: &Layout, damage: &mut Region) {
+    pub(super) fn settle_opacity(&mut self, damage: &mut Region) {
         let Some(edit) = self.layer_looks.edit.take() else {
             return;
         };
         self.layer_looks.under = None;
         if let Err(refusal) = self.document.record_shown(edit.layer, edit.before) {
-            self.state(&alloc::format!("{refusal}"), layout, damage);
-            damage.add(layout.canvas());
+            self.state(&alloc::format!("{refusal}"), damage);
+            damage.add(self.layout.canvas());
         }
-        damage.add(self.layers.row_rect(edit.layer, layout.layers()));
-        self.sync_layers(layout, damage);
+        damage.add(self.layers.row_rect(edit.layer, self.layout.layers()));
+        self.sync_layers(damage);
     }
 
     /// Let the composite beneath an opacity changing go to memory pressure,
@@ -792,12 +727,8 @@ impl View {
     /// The thumbnails the Layers pane's rows in view still lack, up to a
     /// job's worth, as preview work: none is asked again until the picture,
     /// the rows in view or their side move.
-    pub(super) fn wanted_thumbnails(
-        &mut self,
-        layout: &Layout,
-        scale: Scale,
-    ) -> Option<(Asking, PreviewWork)> {
-        let placed = *layout.layers();
+    pub(super) fn wanted_thumbnails(&mut self, scale: Scale) -> Option<(Asking, PreviewWork)> {
+        let placed = *self.layout.layers();
         if placed.rows.is_empty() {
             return None;
         }
@@ -863,7 +794,6 @@ impl View {
         looked: Looked,
         side: u32,
         drawn: Thumbnails,
-        layout: &Layout,
         damage: &mut Region,
     ) {
         if drawn.is_empty() {
@@ -877,7 +807,7 @@ impl View {
                 .insert(revision, Thumb { side, surface });
         }
         self.layer_looks.seen = None;
-        damage.add(layout.layers().rows);
+        damage.add(self.layout.layers().rows);
     }
 
     /// The preview worker had no room for thumbnails of the state `looked`

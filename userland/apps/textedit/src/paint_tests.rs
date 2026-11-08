@@ -17,6 +17,7 @@ use crate::document::Document;
 use crate::editor::{Editor, Mode};
 use crate::layout::{Faces, Layout};
 use crate::view::View;
+use tairix_window::docapp::DocumentView;
 use tairix_window::document::Access;
 
 const WINDOW: (u32, u32) = (800, 480);
@@ -41,33 +42,42 @@ fn window_sized(text: &[u8], size: (u32, u32)) -> (View, Layout, ThemeRegistry) 
         Access::Writable,
         Duration64::from_millis(500),
     );
-    let layout = view.layout(
+    let theme = registry.active();
+    view.lay_out(
         size.0,
         size.1,
-        registry.active(),
-        Scale::ONE,
-        faces(registry.active()),
-    );
-    view.settle(&layout, &mut Region::new());
-    (view, layout, registry)
-}
-
-fn paint(view: &View, layout: &Layout, theme: &Theme, focused: bool) -> Surface {
-    let size = (
-        u32::try_from(layout.window().right()).expect("on screen"),
-        u32::try_from(layout.window().bottom()).expect("on screen"),
-    );
-    let mut surface = Surface::new(size.0, size.1).expect("a surface");
-    render_into(
-        &mut surface,
-        view,
-        layout,
         theme,
         Scale::ONE,
         faces(theme),
-        focused,
+        &mut Region::new(),
     );
+    let layout = view.layout().clone();
+    (view, layout, registry)
+}
+
+fn paint(view: &View, theme: &Theme, focused: bool) -> Surface {
+    let window = view.layout().window();
+    let size = (
+        u32::try_from(window.right()).expect("on screen"),
+        u32::try_from(window.bottom()).expect("on screen"),
+    );
+    let mut surface = Surface::new(size.0, size.1).expect("a surface");
+    render_into(&mut surface, view, theme, Scale::ONE, faces(theme), focused);
     surface
+}
+
+/// Lay `view` out again at `size`, as the host does when an outcome asks,
+/// answering what it is laid out as.
+fn relaid(view: &mut View, size: (u32, u32), theme: &Theme) -> Layout {
+    view.lay_out(
+        size.0,
+        size.1,
+        theme,
+        Scale::ONE,
+        faces(theme),
+        &mut Region::new(),
+    );
+    view.layout().clone()
 }
 
 /// The pixel in the middle of grid cell `column` of row `row`.
@@ -91,15 +101,11 @@ fn ink(theme: &Theme, role: SyntaxRole) -> Pixel {
 fn a_control_byte_is_drawn_as_its_token_in_the_control_colour() {
     // Two odd bytes in four is binary by the head check; the text view is
     // chosen so what it draws for them can be seen.
-    let (mut view, layout, registry) = window(b"a\x03b\xff");
+    let (mut view, _, registry) = window(b"a\x03b\xff");
     let theme = registry.active();
-    view.act(
-        crate::view::Action::Mode(Mode::Text),
-        &layout,
-        &mut Region::new(),
-    );
-    let layout = view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, faces(theme));
-    let surface = paint(&view, &layout, theme, false);
+    view.act(crate::view::Action::Mode(Mode::Text), &mut Region::new());
+    let layout = relaid(&mut view, WINDOW, theme);
+    let surface = paint(&view, theme, false);
     assert_eq!(cell(&surface, &layout, 0, 0), ink(theme, SyntaxRole::Plain));
     for column in 1..6 {
         assert_eq!(
@@ -122,7 +128,7 @@ fn a_selected_blank_differs_from_an_unselected_one() {
     let theme = registry.active();
     view.editor_mut().click(0, false);
     view.editor_mut().click(2, true);
-    let surface = paint(&view, &layout, theme, false);
+    let surface = paint(&view, theme, false);
     assert_ne!(
         cell(&surface, &layout, 0, 1),
         cell(&surface, &layout, 0, 3),
@@ -139,8 +145,8 @@ fn the_caret_shows_only_while_the_window_has_the_keyboard() {
     let x = u32::try_from(grid.left()).expect("on screen");
     let y = u32::try_from(grid.top()).expect("on screen") + cell_h / 2;
     let at = |surface: &Surface| surface.pixels()[(y * surface.width() + x) as usize];
-    let focused = paint(&view, &layout, theme, true);
-    let unfocused = paint(&view, &layout, theme, false);
+    let focused = paint(&view, theme, true);
+    let unfocused = paint(&view, theme, false);
     assert_eq!(
         at(&focused),
         Color::from(theme.palette().accent).premultiply()
@@ -151,12 +157,12 @@ fn the_caret_shows_only_while_the_window_has_the_keyboard() {
 
 #[test]
 fn the_hex_view_draws_digits_and_ascii_by_byte_class() {
-    let (mut view, layout, registry) = window(b"A\x00");
+    let (mut view, _, registry) = window(b"A\x00");
     let theme = registry.active();
     let mut damage = Region::new();
-    view.act(crate::view::Action::Mode(Mode::Hex), &layout, &mut damage);
-    let layout = view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, faces(theme));
-    let surface = paint(&view, &layout, theme, false);
+    view.act(crate::view::Action::Mode(Mode::Hex), &mut damage);
+    let layout = relaid(&mut view, WINDOW, theme);
+    let surface = paint(&view, theme, false);
     let hex = crate::hex::HexLayout::for_len(2);
     let plain = Color::from(theme.palette().on_surface).premultiply();
     let muted = Color::from(theme.palette().on_surface_muted).premultiply();
@@ -195,8 +201,8 @@ fn the_data_display_draws_the_report_then_the_bytes() {
             heading: false,
         },
     ];
-    view.data_reported(id, Ok(report), &layout, &mut Region::new());
-    let surface = paint(&view, &layout, theme, false);
+    view.data_reported(id, Ok(report), &mut Region::new());
+    let surface = paint(&view, theme, false);
     let accent = Color::from(theme.palette().accent).premultiply();
     let plain = Color::from(theme.palette().on_surface).premultiply();
     let muted = Color::from(theme.palette().on_surface_muted).premultiply();
@@ -224,13 +230,13 @@ fn the_data_display_draws_the_report_then_the_bytes() {
 /// the window's own content.
 #[test]
 fn a_question_leaves_the_window_as_it_was() {
-    let (mut view, layout, registry) = window(b"x");
+    let (mut view, _, registry) = window(b"x");
     let theme = registry.active();
-    let clear = paint(&view, &layout, theme, false);
+    let clear = paint(&view, theme, false);
     let mut damage = Region::new();
-    view.act(crate::view::Action::GoToLine, &layout, &mut damage);
+    view.act(crate::view::Action::GoToLine, &mut damage);
     assert!(view.modal().is_some());
-    let asking = paint(&view, &layout, theme, false);
+    let asking = paint(&view, theme, false);
     assert_eq!(clear.pixels(), asking.pixels());
 }
 
@@ -240,7 +246,7 @@ fn a_question_leaves_the_window_as_it_was() {
 fn a_clipped_paint_draws_its_rows_as_a_whole_paint_would_and_nothing_else() {
     let (view, layout, registry) = window(b"first line\nsecond line\nthird line\n");
     let theme = registry.active();
-    let whole = paint(&view, &layout, theme, true);
+    let whole = paint(&view, theme, true);
     let row = layout.row_rect(1);
     let sentinel = Color::rgb(0x12, 0x34, 0x56);
     let mut clipped = Surface::new(WINDOW.0, WINDOW.1).expect("a surface");
@@ -250,15 +256,7 @@ fn a_clipped_paint_draws_its_rows_as_a_whole_paint_would_and_nothing_else() {
         u32::try_from(row.top()).expect("on screen"),
     );
     clipped.with_clip(x, y, row.width, row.height, |surface| {
-        render_into(
-            surface,
-            &view,
-            &layout,
-            theme,
-            Scale::ONE,
-            faces(theme),
-            true,
-        );
+        render_into(surface, &view, theme, Scale::ONE, faces(theme), true);
     });
     for py in 0..WINDOW.1 {
         for px in 0..WINDOW.0 {
@@ -278,8 +276,8 @@ fn a_clipped_paint_draws_its_rows_as_a_whole_paint_would_and_nothing_else() {
 
 /// Scroll `columns` columns right, a press of the horizontal bar's end
 /// button each.
-fn scroll_right(view: &mut View, layout: &Layout, theme: &Theme, columns: usize) {
-    let bar = layout.horizontal_bar();
+fn scroll_right(view: &mut View, theme: &Theme, columns: usize) {
+    let bar = view.layout().horizontal_bar();
     let button = tairix_geometry::Point::new(bar.right() - 2, bar.center().y);
     let mut damage = Region::new();
     for event in [InputEvent::PointerMoved { to: button }]
@@ -295,7 +293,7 @@ fn scroll_right(view: &mut View, layout: &Layout, theme: &Theme, columns: usize)
             ]
         }))
     {
-        view.on_pointer(&event, 0, layout, Scale::ONE, theme, &mut damage);
+        view.on_pointer(&event, 0, Scale::ONE, theme, &mut damage);
     }
     assert_eq!(view.scroll().2, columns, "scrolled a column a press");
 }
@@ -307,8 +305,8 @@ fn a_wide_character_straddling_the_left_edge_leaves_its_run_in_place() {
     text.extend(core::iter::repeat_n(b'\t', 30));
     let (mut view, layout, registry) = window(&text);
     let theme = registry.active();
-    scroll_right(&mut view, &layout, theme, 1);
-    let surface = paint(&view, &layout, theme, false);
+    scroll_right(&mut view, theme, 1);
+    let surface = paint(&view, theme, false);
     let plain = ink(theme, SyntaxRole::Plain);
     assert_eq!(
         cell(&surface, &layout, 0, 0),
@@ -325,18 +323,16 @@ fn a_hex_selection_scrolled_off_the_left_is_not_drawn_at_the_edge() {
     let (mut view, _, registry) = window_sized(&[b'A'; 32], (360, 240));
     let theme = registry.active();
     let mut damage = Region::new();
-    let layout = view.layout(360, 240, theme, Scale::ONE, faces(theme));
-    view.act(crate::view::Action::Mode(Mode::Hex), &layout, &mut damage);
-    let layout = view.layout(360, 240, theme, Scale::ONE, faces(theme));
-    view.settle(&layout, &mut damage);
+    view.act(crate::view::Action::Mode(Mode::Hex), &mut damage);
+    let layout = relaid(&mut view, (360, 240), theme);
     let hex = crate::hex::HexLayout::for_len(32);
     // The gap before byte 1's digits becomes the grid's first column.
-    scroll_right(&mut view, &layout, theme, hex.hex_column(1) - 1);
-    let plain = paint(&view, &layout, theme, false);
+    scroll_right(&mut view, theme, hex.hex_column(1) - 1);
+    let plain = paint(&view, theme, false);
     view.editor_mut().click(0, false);
     view.editor_mut().click(1, true);
     assert_eq!(view.editor().selection().range(), 0..1);
-    let selected = paint(&view, &layout, theme, false);
+    let selected = paint(&view, theme, false);
     assert_eq!(
         cell(&selected, &layout, 0, 0),
         cell(&plain, &layout, 0, 0),

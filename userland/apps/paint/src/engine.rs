@@ -15,9 +15,9 @@ use tairix_window::docapp::{
 };
 use tairix_window::document::{Access, SavedDocument};
 
-use crate::area::{AreaLayout, AreaView};
+use crate::area::AreaView;
 use crate::document::Snapshot;
-use crate::layout::{Faces, Layout};
+use crate::layout::Faces;
 use crate::view::{Computed, MenuKind, Outcome, Own, View};
 
 /// The engine a window shows.
@@ -27,15 +27,6 @@ pub enum Engine {
     Picture(Box<View>),
     /// A sprite file's sprites.
     Area(Box<AreaView>),
-}
-
-/// Where a window's engine draws.
-#[derive(Clone, Debug)]
-pub enum EngineLayout {
-    /// A picture's.
-    Picture(Box<Layout>),
-    /// A sprite file's.
-    Area(AreaLayout),
 }
 
 impl Engine {
@@ -74,39 +65,19 @@ impl Engine {
     }
 
     /// What a worker answered job `job` with, landed on what asked for it.
-    pub fn computed(
-        &mut self,
-        job: u64,
-        computed: Computed,
-        layout: &EngineLayout,
-        damage: &mut Region,
-    ) -> Outcome {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                view.computed(job, computed, layout, damage)
-            }
-            (Self::Area(view), EngineLayout::Area(layout)) => {
-                view.computed(job, computed, layout, damage)
-            }
-            _ => HostOutcome::none(),
+    pub fn computed(&mut self, job: u64, computed: Computed, damage: &mut Region) -> Outcome {
+        match self {
+            Self::Picture(view) => view.computed(job, computed, damage),
+            Self::Area(view) => view.computed(job, computed, damage),
         }
     }
 
     /// Release the history, and a picture's preview, to memory pressure
-    /// `band`, reporting what that repaints as laid out at `layout`.
-    pub fn adopt_pressure(
-        &mut self,
-        band: tairix_reclaim::PressureBand,
-        layout: &EngineLayout,
-        damage: &mut Region,
-    ) {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                view.adopt_pressure(band, layout, damage);
-            }
-            (Self::Area(view), _) => view.adopt_pressure(band),
-            // A view is only ever laid out by its own kind of layout.
-            (Self::Picture(_), EngineLayout::Area(_)) => {}
+    /// `band`, reporting what that repaints.
+    pub fn adopt_pressure(&mut self, band: tairix_reclaim::PressureBand, damage: &mut Region) {
+        match self {
+            Self::Picture(view) => view.adopt_pressure(band, damage),
+            Self::Area(view) => view.adopt_pressure(band),
         }
     }
 }
@@ -172,7 +143,6 @@ impl SavedDocument for Engine {
 }
 
 impl DocumentView for Engine {
-    type Layout = EngineLayout;
     type Faces = Faces;
     type MenuKind = MenuKind;
     type Own = Own;
@@ -191,19 +161,18 @@ impl DocumentView for Engine {
         }
     }
 
-    fn layout(
-        &self,
+    fn lay_out(
+        &mut self,
         width: u32,
         height: u32,
         theme: &Theme,
         scale: Scale,
         faces: Faces,
-    ) -> EngineLayout {
+        damage: &mut Region,
+    ) {
         match self {
-            Self::Picture(view) => EngineLayout::Picture(Box::new(DocumentView::layout(
-                &**view, width, height, theme, scale, faces,
-            ))),
-            Self::Area(view) => EngineLayout::Area(view.layout(width, height, theme, scale)),
+            Self::Picture(view) => view.lay_out(width, height, theme, scale, faces, damage),
+            Self::Area(view) => view.lay_out(width, height, theme, scale, damage),
         }
     }
 
@@ -221,20 +190,10 @@ impl DocumentView for Engine {
         }
     }
 
-    fn settle(&mut self, layout: &EngineLayout, damage: &mut Region) {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                DocumentView::settle(&mut **view, layout, damage);
-            }
-            (Self::Area(view), EngineLayout::Area(layout)) => view.settle(layout, damage),
-            _ => {}
-        }
-    }
-
-    fn message_area(layout: &EngineLayout) -> Rect {
-        match layout {
-            EngineLayout::Picture(layout) => <View as DocumentView>::message_area(layout),
-            EngineLayout::Area(layout) => layout.status(),
+    fn message_area(&self) -> Rect {
+        match self {
+            Self::Picture(view) => view.message_area(),
+            Self::Area(view) => view.layout().status(),
         }
     }
 
@@ -245,22 +204,17 @@ impl DocumentView for Engine {
         }
     }
 
-    fn cursor(&self, layout: &EngineLayout, at: Point) -> CursorShape {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                DocumentView::cursor(&**view, layout, at)
-            }
-            (Self::Area(view), EngineLayout::Area(layout)) => view.cursor_shape(layout, at),
-            _ => CursorShape::Arrow,
+    fn cursor(&self, at: Point) -> CursorShape {
+        match self {
+            Self::Picture(view) => DocumentView::cursor(&**view, at),
+            Self::Area(view) => view.cursor_shape(at),
         }
     }
 
-    fn tool_tip(&self, layout: &EngineLayout, scale: Scale, theme: &Theme) -> Option<(Rect, &str)> {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                DocumentView::tool_tip(&**view, layout, scale, theme)
-            }
-            _ => None,
+    fn tool_tip(&self, scale: Scale, theme: &Theme) -> Option<(Rect, &str)> {
+        match self {
+            Self::Picture(view) => DocumentView::tool_tip(&**view, scale, theme),
+            Self::Area(_) => None,
         }
     }
 
@@ -271,67 +225,38 @@ impl DocumentView for Engine {
         }
     }
 
-    fn close_requested(&mut self, layout: &EngineLayout, damage: &mut Region) -> Outcome {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                DocumentView::close_requested(&mut **view, layout, damage)
-            }
-            (Self::Area(view), EngineLayout::Area(layout)) => view.close_requested(layout, damage),
-            _ => HostOutcome::none(),
+    fn close_requested(&mut self, damage: &mut Region) -> Outcome {
+        match self {
+            Self::Picture(view) => DocumentView::close_requested(&mut **view, damage),
+            Self::Area(view) => view.close_requested(damage),
         }
     }
 
-    fn save_then_close(&mut self, layout: &EngineLayout, damage: &mut Region) -> Outcome {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                DocumentView::save_then_close(&mut **view, layout, damage)
-            }
-            _ => HostOutcome::asking(tairix_window::docapp::Request::SaveThenClose),
+    fn save_then_close(&mut self, damage: &mut Region) -> Outcome {
+        match self {
+            Self::Picture(view) => DocumentView::save_then_close(&mut **view, damage),
+            Self::Area(_) => HostOutcome::asking(tairix_window::docapp::Request::SaveThenClose),
         }
     }
 
-    fn chosen(
-        &mut self,
-        item: AppMenuItemId,
-        layout: &EngineLayout,
-        damage: &mut Region,
-    ) -> Outcome {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                DocumentView::chosen(&mut **view, item, layout, damage)
-            }
-            (Self::Area(view), EngineLayout::Area(layout)) => view.chosen_row(item, layout, damage),
-            _ => HostOutcome::none(),
+    fn chosen(&mut self, item: AppMenuItemId, damage: &mut Region) -> Outcome {
+        match self {
+            Self::Picture(view) => DocumentView::chosen(&mut **view, item, damage),
+            Self::Area(view) => view.chosen_row(item, damage),
         }
     }
 
-    fn entered(
-        &mut self,
-        item: AppMenuItemId,
-        text: &str,
-        layout: &EngineLayout,
-        damage: &mut Region,
-    ) -> Outcome {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                DocumentView::entered(&mut **view, item, text, layout, damage)
-            }
-            (Self::Area(view), EngineLayout::Area(layout)) => {
-                view.entered(item, text, layout, damage)
-            }
-            _ => HostOutcome::none(),
+    fn entered(&mut self, item: AppMenuItemId, text: &str, damage: &mut Region) -> Outcome {
+        match self {
+            Self::Picture(view) => DocumentView::entered(&mut **view, item, text, damage),
+            Self::Area(view) => view.entered(item, text, damage),
         }
     }
 
-    fn focus_changed(&mut self, focused: bool, layout: &EngineLayout, damage: &mut Region) {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                DocumentView::focus_changed(&mut **view, focused, layout, damage);
-            }
-            (Self::Area(view), EngineLayout::Area(layout)) => {
-                view.focus_changed(focused, layout, damage);
-            }
-            _ => {}
+    fn focus_changed(&mut self, focused: bool, damage: &mut Region) {
+        match self {
+            Self::Picture(view) => DocumentView::focus_changed(&mut **view, focused, damage),
+            Self::Area(view) => view.focus_changed(focused, damage),
         }
     }
 
@@ -339,19 +264,15 @@ impl DocumentView for Engine {
         &mut self,
         input: &InputEvent,
         now_ns: u64,
-        layout: &EngineLayout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                DocumentView::input(&mut **view, input, now_ns, layout, scale, theme, damage)
+        match self {
+            Self::Picture(view) => {
+                DocumentView::input(&mut **view, input, now_ns, scale, theme, damage)
             }
-            (Self::Area(view), EngineLayout::Area(layout)) => {
-                view.input(input, now_ns, layout, scale, theme, damage)
-            }
-            _ => HostOutcome::none(),
+            Self::Area(view) => view.input(input, now_ns, scale, theme, damage),
         }
     }
 
@@ -362,17 +283,10 @@ impl DocumentView for Engine {
         }
     }
 
-    fn ask_how(
-        &mut self,
-        then_close: bool,
-        layout: &EngineLayout,
-        damage: &mut Region,
-    ) -> Option<Outcome> {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                DocumentView::ask_how(&mut **view, then_close, layout, damage)
-            }
-            _ => None,
+    fn ask_how(&mut self, then_close: bool, damage: &mut Region) -> Option<Outcome> {
+        match self {
+            Self::Picture(view) => DocumentView::ask_how(&mut **view, then_close, damage),
+            Self::Area(_) => None,
         }
     }
 
@@ -390,12 +304,10 @@ impl DocumentView for Engine {
         }
     }
 
-    fn tool_window(&self, layout: &EngineLayout, index: usize) -> Option<ToolWindow<'_>> {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                DocumentView::tool_window(&**view, layout, index)
-            }
-            _ => None,
+    fn tool_window(&self, index: usize) -> Option<ToolWindow<'_>> {
+        match self {
+            Self::Picture(view) => DocumentView::tool_window(&**view, index),
+            Self::Area(_) => None,
         }
     }
 
@@ -409,48 +321,42 @@ impl DocumentView for Engine {
     fn tool_moved(
         &mut self,
         moved: ToolMove,
-        layout: &EngineLayout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                DocumentView::tool_moved(&mut **view, moved, layout, scale, theme, damage)
+        match self {
+            Self::Picture(view) => {
+                DocumentView::tool_moved(&mut **view, moved, scale, theme, damage)
             }
-            _ => HostOutcome::none(),
+            Self::Area(_) => HostOutcome::none(),
         }
     }
 
-    fn tool_gone(
+    fn tool_resized(
         &mut self,
         id: u32,
-        why: ToolGone,
-        layout: &EngineLayout,
+        size: (u32, u32),
+        scale: Scale,
         damage: &mut Region,
     ) -> Outcome {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                DocumentView::tool_gone(&mut **view, id, why, layout, damage)
-            }
-            _ => HostOutcome::none(),
+        match self {
+            Self::Picture(view) => DocumentView::tool_resized(&mut **view, id, size, scale, damage),
+            Self::Area(_) => HostOutcome::none(),
         }
     }
 
-    fn dialog_window(
-        &self,
-        layout: &EngineLayout,
-        scale: Scale,
-        theme: &Theme,
-    ) -> Option<DialogWindow<'_>> {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                DocumentView::dialog_window(&**view, layout, scale, theme)
-            }
-            (Self::Area(view), EngineLayout::Area(layout)) => {
-                view.dialog_window(layout, scale, theme)
-            }
-            _ => None,
+    fn tool_gone(&mut self, id: u32, why: ToolGone, damage: &mut Region) -> Outcome {
+        match self {
+            Self::Picture(view) => DocumentView::tool_gone(&mut **view, id, why, damage),
+            Self::Area(_) => HostOutcome::none(),
+        }
+    }
+
+    fn dialog_window(&self, scale: Scale, theme: &Theme) -> Option<DialogWindow<'_>> {
+        match self {
+            Self::Picture(view) => DocumentView::dialog_window(&**view, scale, theme),
+            Self::Area(view) => view.dialog_window(scale, theme),
         }
     }
 
@@ -458,37 +364,32 @@ impl DocumentView for Engine {
         &mut self,
         input: &InputEvent,
         now_ns: u64,
-        layout: &EngineLayout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                DocumentView::dialog_input(&mut **view, input, now_ns, layout, scale, theme, damage)
+        match self {
+            Self::Picture(view) => {
+                DocumentView::dialog_input(&mut **view, input, now_ns, scale, theme, damage)
             }
-            (Self::Area(view), EngineLayout::Area(layout)) => {
-                view.dialog_input(input, now_ns, layout, (scale, theme), damage)
-            }
-            _ => HostOutcome::none(),
+            Self::Area(view) => view.dialog_input(input, now_ns, (scale, theme), damage),
         }
     }
 
-    fn dialog_focus_changed(&mut self, focused: bool, layout: &EngineLayout, damage: &mut Region) {
-        if let (Self::Picture(view), EngineLayout::Picture(layout)) = (self, layout) {
-            DocumentView::dialog_focus_changed(&mut **view, focused, layout, damage);
+    fn dialog_focus_changed(&mut self, focused: bool, damage: &mut Region) {
+        if let Self::Picture(view) = self {
+            DocumentView::dialog_focus_changed(&mut **view, focused, damage);
         }
     }
 
-    fn dialog_refused(&mut self, why: &str, layout: &EngineLayout, damage: &mut Region) -> Outcome {
-        match (self, layout) {
-            (Self::Picture(view), EngineLayout::Picture(layout)) => {
-                DocumentView::dialog_refused(&mut **view, why, layout, damage)
-            }
-            (Self::Area(view), EngineLayout::Area(layout)) => {
-                view.dialog_refused(why, layout, damage)
-            }
-            _ => HostOutcome::none(),
+    fn dialog_refused(&mut self, why: &str, damage: &mut Region) -> Outcome {
+        match self {
+            Self::Picture(view) => DocumentView::dialog_refused(&mut **view, why, damage),
+            Self::Area(view) => view.dialog_refused(why, damage),
         }
     }
 }
+
+#[cfg(test)]
+#[path = "engine_tests.rs"]
+mod tests;

@@ -59,8 +59,9 @@ const MIN_ROWS: u32 = 3;
 /// Character cells across the smallest window, its gutter among them.
 const MIN_COLUMNS: u32 = 24;
 
-/// The window's resolved geometry.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// The window's resolved geometry: by default every part empty, as for a
+/// window not yet laid out.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Layout {
     window: Rect,
     find: Rect,

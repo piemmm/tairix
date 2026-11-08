@@ -92,7 +92,8 @@ nothing from here: the rule for a hidden character it needs is `lib/visible`'s.
   (`parse_seconds`), as nanoseconds, bounded to `MAX_SECONDS`.
 * `secret` — erasing secret bytes so the optimiser cannot delete the erasure
   (`wipe`, `wipe_with`), and the buffers that erase themselves when dropped
-  (`Wiped<N>`, and `WipedBuf`, which never grows past its block).
+  (`Wiped<N>`, and `WipedBuf` of bytes or characters, which never grows past
+  its block).
 * `size` — the GNU coreutils size vocabulary: `-B`/`--block-size` parsing
   (`SizeScale`), ceiling block scaling (`blocks_ceil`), GNU's human-readable
   sizes rounded up (`format_human`), and the desktop's prose rendering

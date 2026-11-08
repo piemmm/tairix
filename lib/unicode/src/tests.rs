@@ -2,8 +2,8 @@
 //! the UCD states and to UTS #39's own examples.
 
 use super::tables::{
-    DECOMPOSED, DECOMPOSED_MARKS, DEFAULT_IGNORABLE, EXTENSIONS, EXTENSION_SETS, NONSPACING_MARKS,
-    SCRIPTS,
+    DECOMPOSITIONS, DECOMPOSITION_POOL, DEFAULT_IGNORABLE, EXTENSIONS, EXTENSION_SETS,
+    NONSPACING_MARKS, SCRIPTS,
 };
 use super::{
     augmented, decomposed_marks, is_default_ignorable, is_hidden, is_nonspacing_mark,
@@ -219,12 +219,13 @@ fn a_precomposed_letter_counts_the_marks_it_decomposes_to() {
     // AA after it repeats one.
     assert!(admits("\u{16104}\u{16121}"));
     assert!(!admits("\u{16104}\u{16121}\u{1611e}"));
-    assert_eq!(
-        decomposed_marks('\u{344}'),
-        Some(&['\u{308}', '\u{301}'][..])
+    assert!(decomposed_marks('\u{344}').is_some_and(|marks| marks.eq(['\u{308}', '\u{301}'])));
+    assert!(decomposed_marks('e').is_none());
+    assert!(decomposed_marks('\u{5b57}').is_none());
+    assert!(
+        decomposed_marks('\u{2126}').is_none(),
+        "the ohm sign decomposes to omega, which carries no mark"
     );
-    assert_eq!(decomposed_marks('e'), None);
-    assert_eq!(decomposed_marks('\u{5b57}'), None);
 }
 
 /// The positions of the characters a faithful rendering of `text` escapes.
@@ -251,18 +252,27 @@ fn a_faithful_rendering_escapes_each_hidden_character_and_each_mark_past_the_lim
 
 #[test]
 fn the_tables_are_sorted_disjoint_and_complete() {
-    assert!(DECOMPOSED.windows(2).all(|pair| pair[0].0 < pair[1].0));
-    for &(code, at, len) in DECOMPOSED {
-        let at = usize::from(at);
-        let marks = DECOMPOSED_MARKS
-            .get(at..at + usize::from(len))
-            .expect("in the pool");
+    assert!(DECOMPOSITIONS.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    for &(code, canonical_at, canonical_len, compatibility_at, compatibility_len) in DECOMPOSITIONS
+    {
+        let span = |at: u16, len: u8| {
+            DECOMPOSITION_POOL
+                .get(usize::from(at)..usize::from(at) + usize::from(len))
+                .expect("in the pool")
+        };
+        assert!(!span(compatibility_at, compatibility_len).is_empty());
         let ch = char::from_u32(code).expect("a scalar value");
-        // Every decomposition must leave room in its own sequence.
+        if canonical_len == 0 {
+            continue;
+        }
+        let marks = span(canonical_at, canonical_len)
+            .iter()
+            .filter(|&&part| is_nonspacing_mark(part))
+            .count();
+        // Every canonical decomposition must leave room in its own sequence.
         let mut run = MarkRun::default();
         assert!(run.admit(ch), "U+{code:04X} passes alone");
-        assert!(!marks.is_empty() && marks.len() <= MAX_MARKS);
-        assert!(marks.iter().all(|&mark| is_nonspacing_mark(mark)));
+        assert!(marks <= MAX_MARKS);
     }
     assert_eq!(SCRIPTS.first().map(|&(first, _)| first), Some(0));
     assert!(SCRIPTS

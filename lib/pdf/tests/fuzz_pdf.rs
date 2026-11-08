@@ -321,11 +321,17 @@ fn reading_never_panics_for_any_input() {
         if rng.at_most(4) == 0 {
             mutated.truncate(rng.below(mutated.len() + 1));
         }
-        let password = if rng.at_most(1) == 0 {
-            Some(&b"user"[..])
-        } else {
-            None
-        };
+        // Text SASLprep changes, refuses, or leaves as it is, beside the
+        // templates' own password.
+        let password = rng
+            .pick(&[
+                None,
+                Some("user"),
+                Some("\u{2168}\u{ad}us\u{e9}r"),
+                Some("\u{627}1"),
+                Some("\u{1f100}\u{fdfa}"),
+            ])
+            .map(str::as_bytes);
         let _ = read_whole(&mutated, password);
 
         // 2. Content generated from the operator alphabet, its operands drawn

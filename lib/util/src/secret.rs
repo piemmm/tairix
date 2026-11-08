@@ -17,7 +17,8 @@
 //! [`Wiped`] applies the same erasure to a fixed-size buffer at the end of
 //! its scope, including on an early return or an unwind, so a caller cannot
 //! grow a new exit path that forgets to erase; [`WipedBuf`] does it for a
-//! heap buffer sized at run time.
+//! heap buffer sized at run time, of bytes or of the characters of a password
+//! being prepared.
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -86,9 +87,43 @@ pub fn wipe_with<T: Copy>(values: &mut [T], blank: T) {
 /// Erase the whole block `buffer` holds, spare capacity too: a buffer reused
 /// for a shorter message, or truncated, still holds what it held past its
 /// length.
-pub fn wipe_block(buffer: &mut Vec<u8>) {
-    wipe(buffer);
-    wipe_with(buffer.spare_capacity_mut(), MaybeUninit::new(0));
+pub fn wipe_block<T: Erasable>(buffer: &mut Vec<T>) {
+    T::erase(buffer);
+    wipe_with(buffer.spare_capacity_mut(), MaybeUninit::new(T::BLANK));
+}
+
+/// What a [`WipedBuf`] holds: plain data its blank covers whole, so erasing
+/// leaves nothing of what an element held.
+pub trait Erasable: Copy + sealed::Sealed {
+    /// What an erased element reads.
+    const BLANK: Self;
+
+    /// Erase `values`, past dead-store elimination.
+    fn erase(values: &mut [Self]);
+}
+
+impl Erasable for u8 {
+    const BLANK: Self = 0;
+
+    fn erase(values: &mut [Self]) {
+        wipe(values);
+    }
+}
+
+impl Erasable for char {
+    const BLANK: Self = '\0';
+
+    fn erase(values: &mut [Self]) {
+        wipe_with(values, Self::BLANK);
+    }
+}
+
+mod sealed {
+    /// Only types with no padding and a blank covering them are erasable.
+    pub trait Sealed {}
+
+    impl Sealed for u8 {}
+    impl Sealed for char {}
 }
 
 /// A fixed-size byte buffer that erases itself when it goes out of scope.
@@ -161,43 +196,44 @@ impl<const N: usize> Drop for Wiped<N> {
     }
 }
 
-/// A heap buffer erased with [`wipe`] at the end of its scope, including on
-/// an early return or an unwind: [`Wiped`] for a buffer sized at run time.
+/// A heap buffer of bytes, or of another [`Erasable`] element, erased at the
+/// end of its scope, including on an early return or an unwind: [`Wiped`] for
+/// a buffer sized at run time.
 ///
 /// It never grows past the block it was made with: a buffer that moved to a
 /// larger block would leave what it held in the one it outgrew, past any
 /// wipe's reach. The whole block is erased, spare capacity too, since a
 /// vector handed in truncated still holds what it was truncated from.
-pub struct WipedBuf(Vec<u8>);
+pub struct WipedBuf<T: Erasable = u8>(Vec<T>);
 
-impl WipedBuf {
-    /// `bytes`, to be erased when dropped.
+impl<T: Erasable> WipedBuf<T> {
+    /// `values`, to be erased when dropped.
     #[must_use]
-    pub const fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+    pub const fn new(values: Vec<T>) -> Self {
+        Self(values)
     }
 
-    /// An empty buffer with a block of `capacity` bytes, filled as it is used
-    /// by [`Self::extend_zeroed`] rather than zeroed whole up front.
+    /// An empty buffer with a block of `capacity` elements, filled as it is
+    /// used by [`Self::extend_zeroed`] rather than blanked whole up front.
     ///
     /// # Errors
     ///
     /// [`TryReserveError`](alloc::collections::TryReserveError) when the
     /// block cannot be allocated.
     pub fn with_capacity(capacity: usize) -> Result<Self, alloc::collections::TryReserveError> {
-        let mut bytes = Vec::new();
-        bytes.try_reserve_exact(capacity)?;
-        Ok(Self(bytes))
+        let mut values = Vec::new();
+        values.try_reserve_exact(capacity)?;
+        Ok(Self(values))
     }
 
-    /// Grow by `additional` zeroed bytes and hand them out, or `None`, leaving
-    /// the buffer as it was, when its block cannot hold them.
-    pub fn extend_zeroed(&mut self, additional: usize) -> Option<&mut [u8]> {
+    /// Grow by `additional` blank elements and hand them out, or `None`,
+    /// leaving the buffer as it was, when its block cannot hold them.
+    pub fn extend_zeroed(&mut self, additional: usize) -> Option<&mut [T]> {
         let held = self.0.len();
         let len = held
             .checked_add(additional)
             .filter(|&len| len <= self.0.capacity())?;
-        self.0.resize(len, 0);
+        self.0.resize(len, T::BLANK);
         self.0.get_mut(held..)
     }
 
@@ -208,27 +244,27 @@ impl WipedBuf {
 }
 
 /// Shows none of what it holds, nor how much.
-impl fmt::Debug for WipedBuf {
+impl<T: Erasable> fmt::Debug for WipedBuf<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("WipedBuf(..)")
     }
 }
 
-impl Deref for WipedBuf {
-    type Target = [u8];
+impl<T: Erasable> Deref for WipedBuf<T> {
+    type Target = [T];
 
-    fn deref(&self) -> &[u8] {
+    fn deref(&self) -> &[T] {
         &self.0
     }
 }
 
-impl DerefMut for WipedBuf {
-    fn deref_mut(&mut self) -> &mut [u8] {
+impl<T: Erasable> DerefMut for WipedBuf<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
         &mut self.0
     }
 }
 
-impl Drop for WipedBuf {
+impl<T: Erasable> Drop for WipedBuf<T> {
     fn drop(&mut self) {
         self.wipe();
     }
@@ -272,6 +308,25 @@ mod tests {
         // SAFETY: the wipe just wrote every spare byte, so each is
         // initialised, and the borrow is the buffer's own.
         assert!(spare.iter().all(|byte| unsafe { byte.assume_init() } == 0));
+    }
+
+    /// A buffer of characters is erased whole, spare capacity too, as one of
+    /// bytes is.
+    #[test]
+    fn a_wiped_buffer_of_characters_erases_its_whole_block() {
+        let mut buf = WipedBuf::<char>::with_capacity(8).expect("a small block");
+        buf.extend_zeroed(5)
+            .expect("fits")
+            .copy_from_slice(&['s', 'e', 'c', 'r', 't']);
+        assert_eq!(&buf[..], &['s', 'e', 'c', 'r', 't']);
+        buf.0.truncate(2);
+        buf.wipe();
+        assert!(buf.iter().all(|&ch| ch == '\0'));
+        let spare = buf.0.spare_capacity_mut();
+        assert!(spare.len() >= 6);
+        // SAFETY: the wipe just wrote every spare element, so each is an
+        // initialised `char`, and the borrow is the buffer's own.
+        assert!(spare.iter().all(|ch| unsafe { ch.assume_init() } == '\0'));
     }
 
     /// Growth stays inside the block the buffer was made with, so it never

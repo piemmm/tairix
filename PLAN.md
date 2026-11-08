@@ -296,8 +296,9 @@ protocol engine the sandboxed `smbfs` worker runs), `lib/netshare` (the one
 `netshare-v1` client, through which `files.app` and the share commands are
 to reach `smbfs`), `lib/unicode` (the
 Unicode character properties showing text from elsewhere needs — the hidden
-characters, the UTS #39 mark-sequence and restriction-level checks — from
-tables generated out of a pinned UCD snapshot), `lib/bytedev` (the one byte-addressed reader
+characters, the UTS #39 mark-sequence and restriction-level checks — the four
+normalization forms, and SASLprep over Unicode 3.2 for the PDF reader's
+passwords, from tables generated out of a pinned UCD snapshot and RFC 3454), `lib/bytedev` (the one byte-addressed reader
 over a block device, which every filesystem driver addressing a device in bytes
 or in a block of its own, and the volume probe, read through), `lib/fscopy` (the one file copy, keeping holes and
 extended attributes and reporting what a destination could not keep),

@@ -75,11 +75,11 @@ pub(crate) struct Span {
 
 impl View {
     /// What the bar along `axis` scrolls over.
-    pub(crate) fn span(&self, axis: Axis, layout: &Layout) -> Span {
+    pub(crate) fn span(&self, axis: Axis) -> Span {
         let drawing = self.shown();
         let content = drawing.page().bounds().union(drawing.bounds());
         let pixels = self.viewport.pixels();
-        let seen = f64::from(axis.extent(layout.canvas));
+        let seen = f64::from(axis.extent(self.layout.canvas));
         let at = -axis.of(self.viewport.origin());
         // Held as the viewport is, so a drawing whose transforms reach past
         // anything it can hold still scrolls over a span the bar can show.
@@ -90,7 +90,7 @@ impl View {
         let range = ScrollRange::new(distance(end - start), distance(seen), distance(at - start));
         Span {
             start,
-            model: ScrollModel::in_pixels(range, u64::from(layout.length(LINE))),
+            model: ScrollModel::in_pixels(range, u64::from(self.layout.length(LINE))),
         }
     }
 
@@ -103,14 +103,7 @@ impl View {
 
     /// The canvas scrolled so the bar along `axis`, over `span`, stands at
     /// `offset`.
-    fn scroll_bar_to(
-        &mut self,
-        axis: Axis,
-        span: Span,
-        offset: u64,
-        layout: &Layout,
-        damage: &mut Region,
-    ) {
+    fn scroll_bar_to(&mut self, axis: Axis, span: Span, offset: u64, damage: &mut Region) {
         let at = -axis.of(self.viewport.origin());
         #[allow(
             clippy::cast_precision_loss,
@@ -123,7 +116,7 @@ impl View {
             Axis::Down => Point::new(0.0, by),
         };
         self.viewport.scroll(step);
-        damage.add(layout.window);
+        damage.add(self.layout.window);
     }
 
     /// Whether a bar is holding the pointer, its thumb dragged or an end held.
@@ -136,20 +129,20 @@ impl View {
         &mut self,
         event: &InputEvent,
         over: tairix_geometry::Point,
-        (layout, scale, theme): (&Layout, Scale, &Theme),
+        (scale, theme): (Scale, &Theme),
         damage: &mut Region,
     ) -> bool {
         let mut taken = false;
         for axis in Axis::BOTH {
-            let span = self.span(axis, layout);
-            let bounds = axis.bar(layout);
+            let span = self.span(axis);
+            let bounds = axis.bar(&self.layout);
             let bar = self.bar_mut(axis);
             bar.set_model(span.model);
             let held = bar.is_pressing();
             let action = bar.on_pointer(event, bounds, scale, theme, damage);
             taken |= held || bar.is_pressing() || bounds.contains(over);
             if let Some(ScrollAction::ScrollTo { offset }) = action {
-                self.scroll_bar_to(axis, span, offset, layout, damage);
+                self.scroll_bar_to(axis, span, offset, damage);
             }
         }
         taken
@@ -166,37 +159,31 @@ impl View {
     pub(crate) fn bars_repeat(
         &mut self,
         now_ns: u64,
-        (layout, scale, theme): (&Layout, Scale, &Theme),
+        (scale, theme): (Scale, &Theme),
         damage: &mut Region,
     ) {
         for axis in Axis::BOTH {
-            let span = self.span(axis, layout);
-            let bounds = axis.bar(layout);
+            let span = self.span(axis);
+            let bounds = axis.bar(&self.layout);
             let bar = self.bar_mut(axis);
             bar.set_model(span.model);
             if let Some(ScrollAction::ScrollTo { offset }) =
                 bar.repeat(now_ns, bounds, scale, theme, damage)
             {
-                self.scroll_bar_to(axis, span, offset, layout, damage);
+                self.scroll_bar_to(axis, span, offset, damage);
             }
         }
     }
 
     /// Paint both bars as the canvas stands.
-    pub(crate) fn render_bars(
-        &self,
-        surface: &mut Surface,
-        layout: &Layout,
-        scale: Scale,
-        theme: &Theme,
-    ) {
+    pub(crate) fn render_bars(&self, surface: &mut Surface, scale: Scale, theme: &Theme) {
         for axis in Axis::BOTH {
             let mut bar = match axis {
                 Axis::Across => self.across,
                 Axis::Down => self.down,
             };
-            bar.set_model(self.span(axis, layout).model);
-            bar.render(surface, axis.bar(layout), scale, theme);
+            bar.set_model(self.span(axis).model);
+            bar.render(surface, axis.bar(&self.layout), scale, theme);
         }
     }
 }
@@ -215,7 +202,7 @@ mod tests {
 
     use super::Axis;
     use crate::document::{blank, Document};
-    use crate::layout::Layout;
+    use crate::layout::Faces;
     use crate::view::View;
 
     #[test]
@@ -232,9 +219,10 @@ mod tests {
             1.0,
         );
         let theme = Theme::light();
-        let layout = Layout::of(1080, 720, Scale::ONE, &theme);
-        view.settle(&layout, &mut Region::new());
-        let span = view.span(Axis::Across, &layout);
+        let faces = Faces::of(&theme, Scale::ONE);
+        view.lay_out(1080, 720, &theme, Scale::ONE, faces, &mut Region::new());
+        let layout = view.layout;
+        let span = view.span(Axis::Across);
         let range = span.model.range();
         let page = view.document().drawing().page().bounds().width() * view.viewport.pixels();
         let seen = f64::from(layout.canvas.width);
@@ -250,18 +238,12 @@ mod tests {
             "the fitted page sits within it"
         );
         let before = view.viewport.origin();
-        view.scroll_bar_to(
-            Axis::Across,
-            span,
-            range.offset() + 40,
-            &layout,
-            &mut Region::new(),
-        );
+        view.scroll_bar_to(Axis::Across, span, range.offset() + 40, &mut Region::new());
         let moved = before.x - view.viewport.origin().x;
         assert!((moved - 40.0).abs() < 1.0, "forty pixels on: {moved}");
         let far = Point::new(1.0e6, 0.0);
         view.viewport.scroll(far);
-        let wide = view.span(Axis::Across, &layout).model.range();
+        let wide = view.span(Axis::Across).model.range();
         assert_eq!(
             wide.offset(),
             wide.max_offset(),

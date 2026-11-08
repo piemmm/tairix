@@ -31,7 +31,7 @@ use crate::document::{Entry, Layer, Picture};
 use crate::gradient::Laying;
 use crate::grid::GridLines;
 use crate::layers_pane::thumb_side;
-use crate::layout::{Faces, Layout, PaneSlot};
+use crate::layout::{Faces, PaneSlot};
 use crate::mask::Mask;
 use crate::pane::{PaneKind, Side};
 use crate::preferences::{CanvasStyle, Shades, Surround};
@@ -53,12 +53,12 @@ const DASH: i64 = 4;
 pub fn render_into(
     surface: &mut Surface,
     view: &View,
-    layout: &Layout,
     theme: &Theme,
     scale: Scale,
     faces: Faces,
     artwork: &mut dyn IconArtwork,
 ) {
+    let layout = view.layout();
     let palette = theme.palette();
     surface.fill(Color::from(palette.surface));
     let chrome = Color::from(palette.surface_raised);
@@ -79,7 +79,7 @@ pub fn render_into(
         }
         fill_area(surface, dock.rect, chrome);
         for slot in &dock.panes {
-            pane(surface, view, layout, slot, (theme, scale, faces), artwork);
+            pane(surface, view, slot, (theme, scale, faces), artwork);
         }
     }
     // A floating pane is its tool window's whole client: the band around it
@@ -87,7 +87,7 @@ pub fn render_into(
     for slot in layout.floating() {
         if !withheld(surface, slot.frame) {
             fill_area(surface, slot.frame, chrome);
-            pane_body(surface, view, layout, slot, (theme, scale, faces), artwork);
+            pane_body(surface, view, slot, (theme, scale, faces), artwork);
         }
     }
     if let Some(landing) = view.landing() {
@@ -95,7 +95,7 @@ pub fn render_into(
         fill_area(surface, mark, Color::from(palette.accent));
     }
     if !withheld(surface, layout.canvas()) {
-        canvas(surface, view, layout, theme, scale, faces.caption);
+        canvas(surface, view, theme, scale, faces.caption);
     }
     if !withheld(surface, layout.vertical_bar()) {
         controls
@@ -110,32 +110,31 @@ pub fn render_into(
     fill_area(surface, layout.corner(), Color::from(palette.scroll_track));
     if layout.pane(PaneKind::Palette).is_none() && !withheld(surface, layout.palette()) {
         fill_area(surface, layout.palette(), chrome);
-        palette_wells(surface, view, layout, (theme, scale), artwork);
+        palette_wells(surface, view, (theme, scale), artwork);
     }
     if !withheld(surface, layout.status()) {
-        status(surface, view, layout, theme, StatusBand::new(theme, scale));
+        status(surface, view, theme, StatusBand::new(theme, scale));
     }
     // An open list hangs over whatever lies beneath it.
     controls
         .bar
         .render_popup(surface, layout.bar(), scale, theme);
     for kind in PaneKind::OPERATIONS {
-        view.held_view(layout, kind, true)
-            .paint(surface, |surface| {
-                view.operation_pane(kind).render_popup(
-                    surface,
-                    layout.operation_settings(kind),
-                    view.list_room(layout, kind),
-                    (faces, scale, theme),
-                );
-            });
+        view.held_view(kind, true).paint(surface, |surface| {
+            view.operation_pane(kind).render_popup(
+                surface,
+                layout.operation_settings(kind),
+                view.list_room(kind),
+                (faces, scale, theme),
+            );
+        });
     }
-    view.held_view(layout, PaneKind::Colour, true)
+    view.held_view(PaneKind::Colour, true)
         .paint(surface, |surface| {
             view.colour_controls().render_popup(
                 surface,
                 layout.colour_controls(),
-                view.list_room(layout, PaneKind::Colour),
+                view.list_room(PaneKind::Colour),
                 (faces, scale, theme),
             );
         });
@@ -148,7 +147,6 @@ pub fn render_into(
 fn pane(
     surface: &mut Surface,
     view: &View,
-    layout: &Layout,
     slot: &PaneSlot,
     (theme, scale, faces): (&Theme, Scale, Faces),
     artwork: &mut dyn IconArtwork,
@@ -170,7 +168,7 @@ fn pane(
     );
     view.header(slot.kind)
         .render(surface, slot.header, scale, theme, None);
-    pane_body(surface, view, layout, slot, (theme, scale, faces), artwork);
+    pane_body(surface, view, slot, (theme, scale, faces), artwork);
 }
 
 /// What pane `slot` holds, wherever it is laid out, and the bar its body
@@ -178,31 +176,29 @@ fn pane(
 fn pane_body(
     surface: &mut Surface,
     view: &View,
-    layout: &Layout,
     slot: &PaneSlot,
     (theme, scale, faces): (&Theme, Scale, Faces),
     artwork: &mut dyn IconArtwork,
 ) {
+    let layout = view.layout();
     match slot.kind {
         PaneKind::Tools => {
             view.controls()
                 .tool_box
                 .render(surface, layout.tools(), scale, theme, artwork);
         }
-        PaneKind::Colour => view
-            .body_view(layout, PaneKind::Colour)
-            .paint(surface, |surface| {
-                wells(surface, view, layout, theme, scale, faces.caption);
-                view.colour_controls().render(
-                    surface,
-                    layout.colour_controls(),
-                    (faces, scale, theme),
-                    &crate::panel::Plain,
-                );
-                view.dock().0.render(surface, layout.picker(), scale, theme);
-                view.recent_colours()
-                    .render(surface, view.recents_rect(layout), scale, theme);
-            }),
+        PaneKind::Colour => view.body_view(PaneKind::Colour).paint(surface, |surface| {
+            wells(surface, view, theme, scale, faces.caption);
+            view.colour_controls().render(
+                surface,
+                layout.colour_controls(),
+                (faces, scale, theme),
+                &crate::panel::Plain,
+            );
+            view.dock().0.render(surface, layout.picker(), scale, theme);
+            view.recent_colours()
+                .render(surface, view.recents_rect(), scale, theme);
+        }),
         PaneKind::Layers => {
             let (layers, active) = view
                 .document()
@@ -219,7 +215,7 @@ fn pane_body(
             );
         }
         PaneKind::Adjustments | PaneKind::Effects => {
-            view.body_view(layout, slot.kind).paint(surface, |surface| {
+            view.body_view(slot.kind).paint(surface, |surface| {
                 view.operation_pane(slot.kind).render(
                     surface,
                     layout.operation_settings(slot.kind),
@@ -228,7 +224,7 @@ fn pane_body(
                 );
             });
         }
-        PaneKind::Palette => palette_wells(surface, view, layout, (theme, scale), artwork),
+        PaneKind::Palette => palette_wells(surface, view, (theme, scale), artwork),
     }
     if !slot.bar.is_empty() {
         view.body_bar(slot.kind)
@@ -241,13 +237,13 @@ fn pane_body(
 fn palette_wells(
     surface: &mut Surface,
     view: &View,
-    layout: &Layout,
     (theme, scale): (&Theme, Scale),
     artwork: &mut dyn IconArtwork,
 ) {
+    let layout = view.layout();
     let controls = view.controls();
     let shown = layout.wells_view();
-    let bounds = view.swatch_bounds(layout);
+    let bounds = view.swatch_bounds();
     if let (Ok(x), Ok(y)) = (u32::try_from(shown.left()), u32::try_from(shown.top())) {
         surface.with_clip(x, y, shown.width, shown.height, |surface| {
             controls.swatches.render(surface, bounds, scale, theme);
@@ -270,14 +266,8 @@ fn palette_wells(
 
 /// The two colour wells, the secondary behind the primary, the one the
 /// picker edits rimmed in the accent, and beside them which one that is.
-fn wells(
-    surface: &mut Surface,
-    view: &View,
-    layout: &Layout,
-    theme: &Theme,
-    scale: Scale,
-    font: BitmapFont,
-) {
+fn wells(surface: &mut Surface, view: &View, theme: &Theme, scale: Scale, font: BitmapFont) {
+    let layout = view.layout();
     let kind = view.document().picture().map_or(&Kind::Rgba, Picture::kind);
     let (primary, secondary) = view.inks();
     let editing = view.dock().1;
@@ -377,14 +367,8 @@ pub fn write_shape(out: &mut String, picture: &Picture) {
 
 /// The canvas: the picture over the checkerboard where it is clear, the grid,
 /// the selection; or why a kept sprite shows none.
-fn canvas(
-    surface: &mut Surface,
-    view: &View,
-    layout: &Layout,
-    theme: &Theme,
-    scale: Scale,
-    font: BitmapFont,
-) {
+fn canvas(surface: &mut Surface, view: &View, theme: &Theme, scale: Scale, font: BitmapFont) {
+    let layout = view.layout();
     let area = layout.canvas();
     if let Surround::Chosen(colour) = view.canvas_style().surround {
         fill_area(surface, area, Color::from(colour));
@@ -423,11 +407,11 @@ fn canvas(
     for screen_y in rows {
         rows_drawn.draw(surface, screen_y);
     }
-    crop_box(surface, view, layout, theme, scale);
-    marquee(surface, view, layout, theme);
-    text_frame(surface, view, layout, theme);
-    zoom_box(surface, view, layout, theme);
-    clone_marker(surface, view, layout, theme);
+    crop_box(surface, view, theme, scale);
+    marquee(surface, view, theme);
+    text_frame(surface, view, theme);
+    zoom_box(surface, view, theme);
+    clone_marker(surface, view, theme);
 }
 
 /// Why the canvas shows no picture: the entry is a sprite kept as its bytes.
@@ -1008,7 +992,8 @@ fn shown(colour: Color, checker: &Checker, x: u32, y: u32, from: (i64, i64)) -> 
 /// The outline of the selection held — or of the floating selection — and of a
 /// selection being marked out, in dashes of dark and light so it shows on
 /// any picture. Each is drawn only where it crosses what this paint admits.
-fn marquee(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme) {
+fn marquee(surface: &mut Surface, view: &View, theme: &Theme) {
+    let layout = view.layout();
     let Some(picture) = view.document().picture() else {
         return;
     };
@@ -1055,7 +1040,8 @@ fn marquee(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme) {
 
 /// The crop tool's box: what it cuts away veiled, its edge dashed, and its
 /// eight handles.
-fn crop_box(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, scale: Scale) {
+fn crop_box(surface: &mut Surface, view: &View, theme: &Theme, scale: Scale) {
+    let layout = view.layout();
     let (Some(held), Some(picture)) = (view.crop_box(), view.document().picture()) else {
         return;
     };
@@ -1113,7 +1099,8 @@ fn crop_box(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, 
 }
 
 /// The frame of the text being typed and its caret.
-fn text_frame(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme) {
+fn text_frame(surface: &mut Surface, view: &View, theme: &Theme) {
+    let layout = view.layout();
     let (Some(entry), Some(picture)) = (view.text(), view.document().picture()) else {
         return;
     };
@@ -1148,7 +1135,8 @@ fn text_frame(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme
 }
 
 /// The zoom tool's box being dragged.
-fn zoom_box(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme) {
+fn zoom_box(surface: &mut Surface, view: &View, theme: &Theme) {
+    let layout = view.layout();
     let Some((from, to)) = view.zoom_box() else {
         return;
     };
@@ -1168,8 +1156,9 @@ fn zoom_box(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme) 
 }
 
 /// A cross where the clone tool copies from.
-fn clone_marker(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme) {
-    let (Some(at), Some(picture)) = (view.clone_marker(layout), view.document().picture()) else {
+fn clone_marker(surface: &mut Surface, view: &View, theme: &Theme) {
+    let layout = view.layout();
+    let (Some(at), Some(picture)) = (view.clone_marker(), view.document().picture()) else {
         return;
     };
     let size = picture.size();
@@ -1384,7 +1373,8 @@ fn clipped(a: (i64, i64), b: (i64, i64), clip: Rect) -> Option<((i64, i64), (i64
 
 /// The status band: the picture and the pixel under the pointer, a message,
 /// the sprite showing, and the magnification.
-fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, band: StatusBand) {
+fn status(surface: &mut Surface, view: &View, theme: &Theme, band: StatusBand) {
+    let layout = view.layout();
     let document = view.document();
     let mut position = String::new();
     if let (Some((x, px_y)), Some(picture)) = (view.hover(), document.picture()) {

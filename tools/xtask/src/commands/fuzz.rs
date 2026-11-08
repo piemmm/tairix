@@ -474,6 +474,12 @@ pub const TARGETS: &[Target] = &[
             "plane geometry over drawing-document paths (boolean operations, stroke outlines, dashes, offsets, fitting, intersection)",
     },
     Target {
+        package: "tairix-unicode",
+        test: "fuzz_unicode",
+        description:
+            "normalization and SASLprep over arbitrary text (totality, buffer bounds, idempotence, the forms' relations)",
+    },
+    Target {
         package: "tairix-pdf",
         test: "fuzz_pdf",
         description:

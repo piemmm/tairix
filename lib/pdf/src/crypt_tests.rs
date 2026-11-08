@@ -132,6 +132,53 @@ fn aes_256_decrypts_with_the_file_key() {
     );
 }
 
+/// Revision 6 entries for the owner password `owner` and the user password
+/// `user` spelled as `/O`, `/U`, `/OE` and `/UE` say, over [`AES_256_CONTENT`].
+fn revision_6(entries: &str) -> Vec<u8> {
+    let encrypt = format!(
+        "<</Filter /Standard /V 5 /R 6 /Length 256 /P -1028 {entries} /CF <</StdCF <</CFM /AESV3 /Length 32>>>> /StmF /StdCF /StrF /StdCF>>"
+    );
+    encrypted(&encrypt, &hex(AES_256_CONTENT), "00")
+}
+
+/// A red square encrypted under the file key both revision 6 files share.
+const AES_256_CONTENT: &str = "202122232425262728292a2b2c2d2e2f809e609df1c4d732edf381f1c9b7b19c9907effa8fdeb0ee7a825e6d990791c6";
+
+/// Made by a producer that prepared the user password `\u{2168}` (ROMAN
+/// NUMERAL NINE) by SASLprep, so hashed `IX`.
+const PREPARED: &str = "/O <5603fa177e6a8179eacc6953eaa0af4441d531cb53f23d048fc930928d14ba7f4f5653414c5430314f4b53414c543031> /U <1e9d3cbf6b39b2dcf4b6aa903b797f95ee32c8766f6142d233d8719544e9c077555653414c543031554b53414c543031> /OE <0021ea746a34871dae6b0c29c0b070ed322c4151bde50e841d73dec1bc919615> /UE <d4de1720acb4090c416037aa311bf9db6034bc5c77f5f2e9fde7a945c463a1d6>";
+
+/// Made by a producer that hashed the same password as its UTF-8, unprepared.
+const UNPREPARED: &str = "/O <bf484e63c6f49ba374665ee8d51d79a16fdec2d213ac8889d4f1864483ed8d2d4f5653414c5430314f4b53414c543031> /U <88249313792d28ab0ac3b6bf381f29ac241788afdd56b386e6b9d18a3db5897f555653414c543031554b53414c543031> /OE <8c7b926b74596216fbbf400aca614c059d1a4ef59640a579bb3044c34143fcdc> /UE <374941fa4e9621f15d52a4057e918de0e993d3742ba5f342a35ae97602a1668d>";
+
+#[test]
+fn a_revision_6_password_is_prepared_by_saslprep_before_it_is_hashed() {
+    let file = revision_6(PREPARED);
+    for typed in ["\u{2168}", "IX", "I\u{ad}X", "\u{ff29}\u{ff38}"] {
+        let opened = open(&file, Some(typed.as_bytes())).expect("an opened document");
+        assert_eq!(painted(&opened), RED, "{typed:?}");
+    }
+    assert_eq!(
+        open(&file, Some(b"ix")).err(),
+        Some(PdfError::WrongPassword)
+    );
+    assert_eq!(painted(&open(&file, Some(b"owner")).expect("opened")), RED);
+}
+
+/// Several producers hash a password as typed; its bytes are tried once its
+/// prepared form fails.
+#[test]
+fn a_password_hashed_unprepared_still_opens_its_file() {
+    let file = revision_6(UNPREPARED);
+    let typed = "\u{2168}".as_bytes();
+    assert_eq!(painted(&open(&file, Some(typed)).expect("opened")), RED);
+    assert_eq!(
+        open(&file, Some(b"IX")).err(),
+        Some(PdfError::WrongPassword),
+        "the prepared spelling is another password to this file"
+    );
+}
+
 #[test]
 fn identity_streams_and_clear_metadata_are_not_decrypted() {
     let encrypt = "<</Filter /Standard /V 4 /R 4 /Length 128 /P -1028 /EncryptMetadata false /O <566fa873ee33c797cd3b904fdadf814afa34df9a38f6ed41b984e2c6da2aa6f5> /U <c865678d5c54e4586b93adf5b0f704ad00000000000000000000000000000000> /CF <</StdCF <</CFM /AESV2 /Length 16>>>> /StmF /StdCF /StrF /Identity>>";

@@ -3,10 +3,11 @@
 Stability tier: **experimental**.
 
 The Unicode character properties showing text a stranger authored needs,
-answered from tables generated out of the Unicode Character Database. The
-display policy built on them is `tairix_visible` (`Shown`, `shown_chars`);
-this crate holds only the properties and the UTS #39 (Unicode Security
-Mechanisms) checks.
+normalization and SASLprep, answered from tables generated out of the Unicode
+Character Database and RFC 3454. The display policy built on the properties is
+`tairix_visible` (`Shown`, `shown_chars`); this crate holds only the
+properties, the UTS #39 (Unicode Security Mechanisms) checks and the
+algorithms.
 
 ## API
 
@@ -23,21 +24,31 @@ Mechanisms) checks.
 - `restriction_level` and `RestrictionLevel` — UTS #39 §5.2 over the
   `Script_Extensions` UTS #39 §5.1 augments, with UAX #31's Recommended
   Scripts.
+- `normalize`, `Form` and `Overflow` — UAX #15's four normalization forms,
+  written into a buffer the caller holds; `MAX_DECOMPOSITION` sizes one.
+- `saslprep`, `Unassigned` and `SaslprepError` — RFC 4013's stringprep
+  profile for user names and passwords, over Unicode 3.2 as RFC 3454 fixes it.
 - `VERSION` — the Unicode version the tables describe.
 
 ## Provenance
 
 `assets/` holds `Scripts.txt`, `ScriptExtensions.txt`,
 `PropertyValueAliases.txt`, `DerivedGeneralCategory.txt`,
-`DerivedCoreProperties.txt` and `UnicodeData.txt` byte-identical to
+`DerivedCoreProperties.txt`, `UnicodeData.txt`, `CompositionExclusions.txt`,
+`NormalizationCorrections.txt` and `NormalizationTest.txt` byte-identical to
 `https://www.unicode.org/Public/18.0.0/ucd/`, under the Unicode License V3
-(`assets/LICENSE`). `cargo xtask unicode` pins each by SHA-256, checks that
-`UnicodeData.txt` and `DerivedGeneralCategory.txt` agree on the marks, and
-fails closed when `src/tables.rs` differs from a fresh generation.
+(`assets/LICENSE`), and `rfc3454.txt` byte-identical to
+`https://www.rfc-editor.org/rfc/rfc3454.txt`, under the copyright notice that
+closes it. `cargo xtask unicode` pins each by SHA-256, checks that
+`UnicodeData.txt` and `DerivedGeneralCategory.txt` agree on the marks and that
+each correction is the mapping `UnicodeData.txt` holds, and fails closed when
+`src/tables.rs` differs from a fresh generation. `NormalizationTest.txt` is
+read only by the conformance test.
 
-Taking a new release: replace the assets, their pins in
+Taking a new release: replace the UCD assets, their pins in
 `tools/xtask/src/commands/unicode.rs`, its `VERSION` and its `RECOMMENDED`
-list (UAX #31 Table 5) together, then run `cargo xtask unicode --write`. When
+list (UAX #31 Table 5) together, then run `cargo xtask unicode --write`. RFC
+3454 is fixed to Unicode 3.2 and never changes with a release. When
 the shape of the tables changes, the generator's own build links this crate,
 so give `src/tables.rs` the new items empty first.
 

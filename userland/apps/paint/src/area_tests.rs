@@ -16,9 +16,7 @@ use tairix_icon::{IconKind, IconPicture};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_window::docapp::Relayout;
 
-use super::{
-    render_area, AreaLayout, AreaView, SpriteOpening, OPEN_HEIGHT_MAX, OPEN_WIDTH, SPRITES_AT_ONCE,
-};
+use super::{render_area, AreaView, SpriteOpening, OPEN_HEIGHT_MAX, OPEN_WIDTH, SPRITES_AT_ONCE};
 use crate::canvas::{Canvas, Kind, Sample};
 use crate::document::{Document, Entry, EntryId, Kept, Origin, Picture, SpriteInfo};
 use crate::save::SaveSettings;
@@ -61,7 +59,6 @@ fn area(names: &[&str]) -> Document {
 /// A sprite file window on `document`, laid out.
 struct Window {
     view: AreaView,
-    layout: AreaLayout,
     registry: ThemeRegistry,
     now: u64,
 }
@@ -77,7 +74,6 @@ impl Window {
             DOUBLE,
         );
         let mut window = Self {
-            layout: view.layout(WINDOW.0, WINDOW.1, registry.active(), Scale::ONE),
             view,
             registry,
             now: 1_000_000_000,
@@ -93,27 +89,22 @@ impl Window {
     /// Lay the window out again, as the host does after an outcome asking it.
     fn settle(&mut self) {
         let theme = self.registry.active();
-        self.layout = self.view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE);
-        self.view.settle(&self.layout, &mut Region::new());
+        self.view
+            .lay_out(WINDOW.0, WINDOW.1, theme, Scale::ONE, &mut Region::new());
     }
 
     fn feed(&mut self, input: InputEvent) -> Outcome {
         self.now += 1_000_000;
         let theme = self.registry.active();
-        let outcome = self.view.input(
-            &input,
-            self.now,
-            &self.layout,
-            Scale::ONE,
-            theme,
-            &mut Region::new(),
-        );
+        let outcome = self
+            .view
+            .input(&input, self.now, Scale::ONE, theme, &mut Region::new());
         self.settle();
         outcome
     }
 
     fn press_cell(&mut self, index: usize, modifiers: Modifiers) -> Outcome {
-        let cell = self.layout.cell_rect(index, self.view.offset());
+        let cell = self.view.layout().cell_rect(index, self.view.offset());
         self.feed(InputEvent::ModifiersChanged { modifiers });
         self.feed(InputEvent::PointerMoved {
             to: Point::new(cell.left() + 4, cell.top() + 4),
@@ -133,7 +124,7 @@ impl Window {
 
     fn act(&mut self, action: Action) -> Outcome {
         let item = AppMenuItemId::new(action.id()).expect("a row");
-        let outcome = self.view.chosen_row(item, &self.layout, &mut Region::new());
+        let outcome = self.view.chosen_row(item, &mut Region::new());
         self.settle();
         outcome
     }
@@ -251,13 +242,9 @@ fn the_last_sprites_are_never_all_deleted() {
 fn a_rename_changes_the_name_alone_and_is_undone_alone() {
     let mut window = Window::of(&["a", "b"]);
     let item = AppMenuItemId::new(RENAME_ENTRY).expect("a field");
-    window
-        .view
-        .entered(item, "  apple ", &window.layout, &mut Region::new());
+    window.view.entered(item, "  apple ", &mut Region::new());
     assert_eq!(window.names(), ["apple", "b"]);
-    window
-        .view
-        .entered(item, "b", &window.layout, &mut Region::new());
+    window.view.entered(item, "b", &mut Region::new());
     assert_eq!(window.names(), ["apple", "b"], "a name taken is refused");
     window.act(Action::Undo);
     assert_eq!(window.names(), ["a", "b"]);
@@ -279,9 +266,7 @@ fn a_kept_sprite_keeps_its_name_and_opens_nothing() {
     .expect("a document");
     let mut window = Window::new(document);
     let item = AppMenuItemId::new(RENAME_ENTRY).expect("a field");
-    window
-        .view
-        .entered(item, "other", &window.layout, &mut Region::new());
+    window.view.entered(item, "other", &mut Region::new());
     assert_eq!(window.names(), ["raw", "pic"]);
     assert!(opened(window.act(Action::EditEntry)).is_none());
 }
@@ -313,16 +298,14 @@ fn thumbnails_are_asked_for_one_job_at_a_time_and_land_on_their_sprites() {
     let Compute::Thumbnails { side, ref pictures } = work else {
         panic!("a thumbnail job");
     };
-    assert_eq!(side, window.layout.thumb());
+    assert_eq!(side, window.view.layout().thumb());
     assert_eq!(pictures.len(), 2);
     let answer = compute(work, &tairix_parallel::SERIAL);
-    let outcome = window
-        .view
-        .computed(job, answer, &window.layout, &mut Region::new());
+    let outcome = window.view.computed(job, answer, &mut Region::new());
     assert!(outcome.request.is_none(), "nothing left to draw");
     let thumb = window
         .view
-        .thumbnail(window.id(0), window.layout.thumb())
+        .thumbnail(window.id(0), window.view.layout().thumb())
         .expect("drawn");
     assert_eq!((thumb.width(), thumb.height()), (side, side));
     assert!(window.view.wanted().is_none());
@@ -336,12 +319,10 @@ fn an_answer_to_a_job_given_up_lands_nowhere() {
         side: 4,
         drawn: alloc::vec![(window.id(0), 0, Some(alloc::vec![0; 64]))],
     };
-    window
-        .view
-        .computed(99, stale, &window.layout, &mut Region::new());
+    window.view.computed(99, stale, &mut Region::new());
     assert!(window
         .view
-        .thumbnail(window.id(0), window.layout.thumb())
+        .thumbnail(window.id(0), window.view.layout().thumb())
         .is_none());
 }
 
@@ -352,16 +333,12 @@ fn an_edit_handed_back_keeps_the_files_name_and_is_drawn_again() {
         panic!("thumbnails asked for");
     };
     let answer = compute(work, &tairix_parallel::SERIAL);
-    window
-        .view
-        .computed(job, answer, &window.layout, &mut Region::new());
+    window.view.computed(job, answer, &mut Region::new());
     let Entry::Picture(edited) = sprite("stale", [0, 200, 0, 255]) else {
         unreachable!("a picture");
     };
     let id = window.id(1);
-    let outcome = window
-        .view
-        .adopt_edited(id, edited, &window.layout, &mut Region::new());
+    let outcome = window.view.adopt_edited(id, edited, &mut Region::new());
     assert_eq!(window.names(), ["a", "b"], "the file's name stands");
     assert!(window.view.is_modified());
     assert_eq!(
@@ -387,25 +364,23 @@ fn cells_reflow_to_the_window_and_scroll_when_they_overflow() {
     let names: Vec<String> = (0..40).map(|i| alloc::format!("s{i}")).collect();
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let window = Window::of(&refs);
-    assert!(!window.layout.bar().is_empty(), "forty sprites overflow");
-    let first = window.layout.cell_rect(0, 0);
-    let second = window.layout.cell_rect(1, 0);
+    assert!(
+        !window.view.layout().bar().is_empty(),
+        "forty sprites overflow"
+    );
+    let first = window.view.layout().cell_rect(0, 0);
+    let second = window.view.layout().cell_rect(1, 0);
     assert!(second.left() > first.left() && second.top() == first.top());
     let at = Point::new(second.left() + 2, second.top() + 2);
-    assert_eq!(window.layout.index_at(at, 0, 40), Some(1));
+    assert_eq!(window.view.layout().index_at(at, 0, 40), Some(1));
     let few = Window::of(&["a"]);
-    assert!(few.layout.bar().is_empty(), "one sprite shows whole");
+    assert!(few.view.layout().bar().is_empty(), "one sprite shows whole");
 }
 
 #[test]
 fn closing_asks_only_when_the_file_changed() {
     let mut window = Window::of(&["a", "b"]);
-    let close = |window: &mut Window| {
-        window
-            .view
-            .close_requested(&window.layout, &mut Region::new())
-            .request
-    };
+    let close = |window: &mut Window| window.view.close_requested(&mut Region::new()).request;
     assert!(matches!(close(&mut window), Some(HostRequest::Close)));
     window.act(Action::EntryDown);
     assert!(matches!(close(&mut window), Some(HostRequest::AskToClose)));
@@ -438,9 +413,7 @@ fn a_sprite_added_is_drawn_and_a_new_one_is_offered_a_free_name() {
     let mut window = Window::of(&refs);
     while let Some(HostRequest::Own(Own::Compute { job, work })) = window.view.wanted() {
         let answer = compute(work, &tairix_parallel::SERIAL);
-        window
-            .view
-            .computed(job, answer, &window.layout, &mut Region::new());
+        window.view.computed(job, answer, &mut Region::new());
     }
     assert!(
         window.view.wanted().is_none(),
@@ -466,9 +439,7 @@ fn a_sprite_added_is_drawn_and_a_new_one_is_offered_a_free_name() {
 fn draw_thumbnails(window: &mut Window) {
     while let Some(HostRequest::Own(Own::Compute { job, work })) = window.view.wanted() {
         let answer = compute(work, &tairix_parallel::SERIAL);
-        window
-            .view
-            .computed(job, answer, &window.layout, &mut Region::new());
+        window.view.computed(job, answer, &mut Region::new());
     }
 }
 
@@ -479,19 +450,13 @@ fn the_new_sprite_form_is_drawn_where_its_dialog_shows_it() {
     let theme = window.registry.active();
     let dialog = window
         .view
-        .dialog_window(&window.layout, Scale::ONE, theme)
+        .dialog_window(Scale::ONE, theme)
         .expect("its dialog");
     let rect = dialog.rect;
     let right = u32::try_from(rect.right()).expect("on the drawing");
     let bottom = u32::try_from(rect.bottom()).expect("on the drawing");
     let mut surface = Surface::new(right.max(WINDOW.0), bottom).expect("a surface");
-    render_area(
-        &mut surface,
-        &window.view,
-        &window.layout,
-        theme,
-        Scale::ONE,
-    );
+    render_area(&mut surface, &window.view, theme, Scale::ONE);
     let (left, top) = (
         u32::try_from(rect.left()).expect("on the drawing"),
         u32::try_from(rect.top()).expect("on the drawing"),
@@ -515,7 +480,6 @@ fn a_new_sprite_confirmed_is_laid_out_and_opened() {
             modifiers: Modifiers::default(),
         },
         window.now,
-        &window.layout,
         (Scale::ONE, theme),
         &mut Region::new(),
     );
@@ -561,12 +525,14 @@ fn a_thumbnail_of_another_side_waits_for_its_own() {
     let mut window = Window::of(&["a"]);
     draw_thumbnails(&mut window);
     let id = window.id(0);
-    let side = window.layout.thumb();
+    let side = window.view.layout().thumb();
     assert!(window.view.thumbnail(id, side).is_some());
     let theme = window.registry.active();
     let double = Scale::from_percent(200).expect("a scale");
-    let layout = window.view.layout(WINDOW.0, WINDOW.1, theme, double);
-    window.view.settle(&layout, &mut Region::new());
+    window
+        .view
+        .lay_out(WINDOW.0, WINDOW.1, theme, double, &mut Region::new());
+    let layout = window.view.layout();
     assert_ne!(layout.thumb(), side);
     assert!(
         window.view.thumbnail(id, layout.thumb()).is_none(),
@@ -639,11 +605,12 @@ fn a_sprite_window_opens_250_wide_and_at_most_250_high() {
     let registry = ThemeRegistry::with_builtins();
     let theme = registry.active();
     for count in [1, 2, 5, 15, 200] {
-        let view = sprites(count);
+        let mut view = sprites(count);
         let (width, height) = AreaView::open_size(count, theme);
         assert_eq!(width, OPEN_WIDTH, "{count} sprites");
         assert!(height <= OPEN_HEIGHT_MAX, "{count} sprites");
-        let layout = view.layout(width, height, theme, Scale::ONE);
+        view.lay_out(width, height, theme, Scale::ONE, &mut Region::new());
+        let layout = view.layout();
         let overflows = layout.content_height() > layout.grid().height;
         assert_eq!(!layout.bar().is_empty(), overflows, "{count} sprites");
         let shown = layout.shown(0, count);
@@ -679,13 +646,7 @@ fn a_large_text_theme_opens_at_least_its_minimum() {
 fn drawn(window: &Window) -> Surface {
     let theme = window.registry.active();
     let mut surface = Surface::new(WINDOW.0, WINDOW.1).expect("a surface");
-    render_area(
-        &mut surface,
-        &window.view,
-        &window.layout,
-        theme,
-        Scale::ONE,
-    );
+    render_area(&mut surface, &window.view, theme, Scale::ONE);
     surface
 }
 
@@ -700,7 +661,7 @@ fn a_chosen_sprite_is_marked_over_the_windows_ground() {
     assert!(window.view.is_chosen(window.id(0)));
     assert!(!window.view.is_chosen(window.id(1)));
     let surface = drawn(&window);
-    let cell = window.layout.cell_rect(0, 0);
+    let cell = window.view.layout().cell_rect(0, 0);
     let (left, top) = (
         u32::try_from(cell.left()).expect("on the window"),
         u32::try_from(cell.top()).expect("on the window"),
@@ -728,15 +689,15 @@ fn a_sprites_cell_is_drawn_as_a_files_tile() {
     let surface = drawn(&window);
     for index in 0..2 {
         let id = window.id(index);
-        let cell = window.layout.cell_rect(index, 0);
+        let cell = window.view.layout().cell_rect(index, 0);
         assert_eq!(
             super::TILE.icon_side(cell, Scale::ONE, theme),
-            window.layout.thumb(),
+            window.view.layout().thumb(),
             "the thumbnail is drawn at the side its tile seats"
         );
         let thumb = window
             .view
-            .thumbnail(id, window.layout.thumb())
+            .thumbnail(id, window.view.layout().thumb())
             .expect("its thumbnail landed");
         let mut state = ControlState::idle();
         if window.view.is_chosen(id) {
@@ -778,10 +739,10 @@ fn a_sprite_awaiting_its_thumbnail_shows_the_picture_glyph() {
     let theme = window.registry.active();
     assert!(window
         .view
-        .thumbnail(window.id(1), window.layout.thumb())
+        .thumbnail(window.id(1), window.view.layout().thumb())
         .is_none());
     let surface = drawn(&window);
-    let cell = window.layout.cell_rect(1, 0);
+    let cell = window.view.layout().cell_rect(1, 0);
     let mut tile = Surface::new(WINDOW.0, WINDOW.1).expect("a surface");
     tile.fill(Color::from(theme.palette().surface));
     IconTile::new(window.names()[1].clone(), IconKind::Image)

@@ -24,6 +24,9 @@ tairix-crypto = { path = "../crypto", version = "=0.0.0" }
 tairix-colour = { path = "../colour", version = "=0.0.0" }
 # The fixed-capacity operand and component lists.
 tairix-inline = { path = "../inline", version = "=0.0.0" }
+# SASLprep, which revisions 5 and 6 of the security handler prepare a
+# password with.
+tairix-unicode = { path = "../unicode", version = "=0.0.0" }
 # Fallible buffers for what a stream decodes to, and the bounded float maths.
 tairix-util = { path = "../util", version = "=0.0.0" }
 

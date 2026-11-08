@@ -1167,6 +1167,8 @@ pub struct View {
     repeat_due: Option<u64>,
     /// The picture pixel under the pointer, which the status band states.
     hover: Option<(u32, u32)>,
+    /// Where everything it draws goes, for its window's size.
+    layout: Layout,
 }
 
 impl View {
@@ -1239,7 +1241,6 @@ impl SavedDocument for View {
 }
 
 impl DocumentView for View {
-    type Layout = Layout;
     type Faces = Faces;
     type MenuKind = MenuKind;
     type Own = Own;
@@ -1252,20 +1253,25 @@ impl DocumentView for View {
         View::write_title(self, title);
     }
 
-    fn layout(&self, width: u32, height: u32, theme: &Theme, scale: Scale, faces: Faces) -> Layout {
-        View::layout(self, width, height, theme, scale, faces)
+    fn lay_out(
+        &mut self,
+        width: u32,
+        height: u32,
+        theme: &Theme,
+        scale: Scale,
+        faces: Faces,
+        damage: &mut Region,
+    ) {
+        self.layout = self.layout_for(width, height, theme, scale, faces);
+        self.settle(damage);
     }
 
     fn min_size(&self, theme: &Theme, scale: Scale, faces: Faces) -> (u32, u32) {
         View::min_size(self, theme, scale, faces)
     }
 
-    fn settle(&mut self, layout: &Layout, damage: &mut Region) {
-        View::settle(self, layout, damage);
-    }
-
-    fn message_area(layout: &Layout) -> Rect {
-        layout.message()
+    fn message_area(&self) -> Rect {
+        self.layout.message()
     }
 
     /// The Save As sheet of a save that closes the window, or the work
@@ -1282,15 +1288,15 @@ impl DocumentView for View {
     /// open list holds the pointer; text entry over a number field; over the
     /// canvas, the hand where a press drags the view, text entry for the
     /// text tool, and the cross otherwise; the arrow elsewhere.
-    fn cursor(&self, layout: &Layout, at: Point) -> CursorShape {
-        let over_canvas = layout.canvas().contains(at);
+    fn cursor(&self, at: Point) -> CursorShape {
+        let over_canvas = self.layout.canvas().contains(at);
         if over_canvas && self.panning() {
             CursorShape::Pointer
         } else if self.busy() {
             CursorShape::Busy
         } else if self.asking() || self.bar.listing() {
             CursorShape::Arrow
-        } else if self.bar.text_at(layout.bar(), at) {
+        } else if self.bar.text_at(self.layout.bar(), at) {
             CursorShape::Text
         } else if self.document.picture().is_some() && over_canvas {
             if self.tool == Tool::Text {
@@ -1303,45 +1309,38 @@ impl DocumentView for View {
         }
     }
 
-    fn tool_tip(&self, layout: &Layout, scale: Scale, theme: &Theme) -> Option<(Rect, &str)> {
-        View::tool_tip(self, layout, scale, theme)
+    fn tool_tip(&self, scale: Scale, theme: &Theme) -> Option<(Rect, &str)> {
+        View::tool_tip(self, scale, theme)
     }
 
     fn menu(&self, kind: MenuKind) -> AppMenu {
         View::menu(self, kind)
     }
 
-    fn close_requested(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        View::close_requested(self, layout, damage)
+    fn close_requested(&mut self, damage: &mut Region) -> Outcome {
+        View::close_requested(self, damage)
     }
 
-    fn save_then_close(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        View::save_then_close(self, layout, damage)
+    fn save_then_close(&mut self, damage: &mut Region) -> Outcome {
+        View::save_then_close(self, damage)
     }
 
-    fn chosen(&mut self, item: AppMenuItemId, layout: &Layout, damage: &mut Region) -> Outcome {
-        View::chosen(self, item, layout, damage)
+    fn chosen(&mut self, item: AppMenuItemId, damage: &mut Region) -> Outcome {
+        View::chosen(self, item, damage)
     }
 
-    fn entered(
-        &mut self,
-        item: AppMenuItemId,
-        text: &str,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
-        View::entered(self, item, text, layout, damage)
+    fn entered(&mut self, item: AppMenuItemId, text: &str, damage: &mut Region) -> Outcome {
+        View::entered(self, item, text, damage)
     }
 
-    fn focus_changed(&mut self, focused: bool, layout: &Layout, damage: &mut Region) {
-        View::focus_changed(self, focused, layout, damage);
+    fn focus_changed(&mut self, focused: bool, damage: &mut Region) {
+        View::focus_changed(self, focused, damage);
     }
 
     fn input(
         &mut self,
         input: &InputEvent,
         now_ns: u64,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -1353,7 +1352,7 @@ impl DocumentView for View {
                     modifiers,
                     at_ns: now_ns,
                 };
-                self.on_key(stroke, layout, scale, theme, damage)
+                self.on_key(stroke, scale, theme, damage)
             }
             InputEvent::KeyReleased { key, .. } => {
                 if key == tairix_input::Key::Char(' ') {
@@ -1361,7 +1360,7 @@ impl DocumentView for View {
                 }
                 Outcome::none()
             }
-            _ => self.on_pointer(input, now_ns, layout, scale, theme, damage),
+            _ => self.on_pointer(input, now_ns, scale, theme, damage),
         }
     }
 
@@ -1371,13 +1370,8 @@ impl DocumentView for View {
             .map(|refusal| alloc::format!("{refusal}"))
     }
 
-    fn ask_how(
-        &mut self,
-        then_close: bool,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Option<Outcome> {
-        Some(self.ask_save_as(then_close, layout, damage))
+    fn ask_how(&mut self, then_close: bool, damage: &mut Region) -> Option<Outcome> {
+        Some(self.ask_save_as(then_close, damage))
     }
 
     fn offered_extension(&self) -> &'static str {
@@ -1395,8 +1389,8 @@ impl DocumentView for View {
 
     /// Each floating pane, in the rectangle of the drawing laid out for it,
     /// titled as its band is and sized as its layout allows.
-    fn tool_window(&self, layout: &Layout, index: usize) -> Option<ToolWindow<'_>> {
-        let slot = layout.floating().get(index)?;
+    fn tool_window(&self, index: usize) -> Option<ToolWindow<'_>> {
+        let slot = self.layout.floating().get(index)?;
         Some(ToolWindow {
             id: tool_id(slot.kind),
             title: self.headers[slot.kind.index()].title(),
@@ -1412,48 +1406,35 @@ impl DocumentView for View {
     fn tool_moved(
         &mut self,
         moved: ToolMove,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
-        View::tool_moved(self, moved, layout, scale, theme, damage)
+        View::tool_moved(self, moved, scale, theme, damage)
     }
 
     fn tool_resized(
         &mut self,
         id: u32,
         size: (u32, u32),
-        layout: &Layout,
         scale: Scale,
         damage: &mut Region,
     ) -> Outcome {
-        View::tool_resized(self, id, size, layout, scale, damage)
+        View::tool_resized(self, id, size, scale, damage)
     }
 
-    fn tool_gone(
-        &mut self,
-        id: u32,
-        why: ToolGone,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
-        View::tool_gone(self, id, why, layout, damage)
+    fn tool_gone(&mut self, id: u32, why: ToolGone, damage: &mut Region) -> Outcome {
+        View::tool_gone(self, id, why, damage)
     }
 
     /// A form acts on the picture as it stood when the form opened, which
     /// its rows were filled from, so it holds the window until it is
     /// answered.
-    fn dialog_window(
-        &self,
-        layout: &Layout,
-        scale: Scale,
-        theme: &Theme,
-    ) -> Option<DialogWindow<'_>> {
+    fn dialog_window(&self, scale: Scale, theme: &Theme) -> Option<DialogWindow<'_>> {
         let form = self.modal()?;
         Some(DialogWindow {
             title: form.title(),
-            rect: form.rect(layout.dialog_origin(), scale, theme),
+            rect: form.rect(self.layout.dialog_origin(), scale, theme),
             modality: DialogModality::OwnerModal,
         })
     }
@@ -1462,16 +1443,15 @@ impl DocumentView for View {
         &mut self,
         input: &InputEvent,
         now_ns: u64,
-        layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
-        View::on_dialog(self, input, now_ns, layout, (scale, theme), damage)
+        View::on_dialog(self, input, now_ns, (scale, theme), damage)
     }
 
-    fn dialog_refused(&mut self, why: &str, layout: &Layout, damage: &mut Region) -> Outcome {
-        View::dialog_refused(self, why, layout, damage)
+    fn dialog_refused(&mut self, why: &str, damage: &mut Region) -> Outcome {
+        View::dialog_refused(self, why, damage)
     }
 }
 
@@ -1585,6 +1565,7 @@ impl View {
             next_job: 1,
             repeat_due: None,
             hover: None,
+            layout: Layout::default(),
         };
         view.picker.set_earlier(Some(Rgba::from_array(BLACK)));
         view.adopt_kind();
@@ -1802,10 +1783,10 @@ impl View {
 
     /// Draw as the settings now say, and put the panes back to the ones they
     /// name when asked to; what a window started with stays its own.
-    pub fn adopt(&mut self, preferences: &Preferences, layout: &Layout, damage: &mut Region) {
+    pub fn adopt(&mut self, preferences: &Preferences, damage: &mut Region) {
         let was = core::mem::replace(&mut self.style, preferences.canvas_style());
         if was != self.style {
-            self.restyled(&was, layout, damage);
+            self.restyled(&was, damage);
         }
         self.home_panes.clone_from(&preferences.panes);
         self.new_picture = (preferences.new, preferences.format);
@@ -1816,15 +1797,15 @@ impl View {
     /// where its checkerboard, or a grid this window shows, is drawn
     /// differently. Whether a new window shows the grid, and snapping, draw
     /// nothing.
-    fn restyled(&self, was: &CanvasStyle, layout: &Layout, damage: &mut Region) {
+    fn restyled(&self, was: &CanvasStyle, damage: &mut Region) {
         let now = &self.style;
         let picture = self.document.picture().map_or(Rect::EMPTY, |picture| {
             let (width, height) = picture.size();
-            self.screen(Bounds::picture(width, height), layout)
+            self.screen(Bounds::picture(width, height))
         });
         if now.surround != was.surround {
             let mut around = Region::new();
-            around.add(layout.canvas());
+            around.add(self.layout.canvas());
             around.subtract(picture);
             for &band in around.rects() {
                 damage.add(band);
@@ -1964,9 +1945,14 @@ impl View {
         self.modal.is_some()
     }
 
-    /// The layout of a `width`×`height` window.
+    /// Where everything it draws goes, for its window's size.
     #[must_use]
-    pub fn layout(
+    pub const fn layout(&self) -> &Layout {
+        &self.layout
+    }
+
+    /// The layout of a `width`×`height` window.
+    fn layout_for(
         &self,
         width: u32,
         height: u32,
@@ -2032,27 +2018,22 @@ impl View {
     /// The tip for what the pointer is over — a tool, a view command, the
     /// palette's pop-out or a setting — with its rectangle.
     #[must_use]
-    pub fn tool_tip(
-        &self,
-        layout: &Layout,
-        scale: Scale,
-        theme: &Theme,
-    ) -> Option<(Rect, &'static str)> {
-        let tools = layout.tools();
+    pub fn tool_tip(&self, scale: Scale, theme: &Theme) -> Option<(Rect, &'static str)> {
+        let tools = self.layout.tools();
         if let Some(index) = self.tool_box.tool_at(tools, scale, theme, self.pointer) {
             let rect = self.tool_box.tool_rect(index, tools, scale, theme)?;
             return Some((rect, Tool::ALL.get(index)?.label()));
         }
-        let commands = layout.view_strip();
+        let commands = self.layout.view_strip();
         if let Some(index) = self.commands.tool_at(commands, scale, theme, self.pointer) {
             let rect = self.commands.tool_rect(index, commands, scale, theme)?;
             return Some((rect, VIEW_COMMANDS.get(index)?.2));
         }
-        let pop_out = layout.pop_out();
+        let pop_out = self.layout.pop_out();
         if pop_out.contains(self.pointer) {
             return Some((pop_out, "Float the palette in a window of its own"));
         }
-        self.bar.tip(layout.bar(), self.pointer)
+        self.bar.tip(self.layout.bar(), self.pointer)
     }
 
     fn picture_size(&self) -> (u32, u32) {
@@ -2068,37 +2049,40 @@ impl View {
     /// line with the layout, forgetting the size of a pane no longer floating;
     /// a preview held back for want of memory is asked again, as what it asks
     /// of the window laid out anew may fit.
-    pub fn settle(&mut self, layout: &Layout, damage: &mut Region) {
+    fn settle(&mut self, damage: &mut Region) {
         if core::mem::take(&mut self.open_fitted) {
             let rung = self
                 .viewport
-                .fitting(self.picture_size(), layout.canvas())
+                .fitting(self.picture_size(), self.layout.canvas())
                 .min(ACTUAL);
             let _ = self.viewport.zoom_to(
                 rung,
-                layout.canvas().center(),
+                self.layout.canvas().center(),
                 self.picture_size(),
-                layout.canvas(),
+                self.layout.canvas(),
             );
-            damage.add(layout.canvas());
+            damage.add(self.layout.canvas());
         }
-        if self.swatches.columns() != layout.columns() {
-            self.swatches.set_columns(layout.columns());
-            damage.add(layout.palette());
+        if self.swatches.columns() != self.layout.columns() {
+            self.swatches.set_columns(self.layout.columns());
+            damage.add(self.layout.palette());
         }
         let clear = usize::from(self.wells.last() == Some(&Ink::Clear));
         let numbered = self.wells.len().saturating_sub(clear);
-        if self.swatches.number_wells(numbered, layout.number_face()) {
-            damage.add(layout.palette());
+        if self
+            .swatches
+            .number_wells(numbered, self.layout.number_face())
+        {
+            damage.add(self.layout.palette());
         }
         for kind in PaneKind::ALL {
             if !self.panes.floats(kind) {
                 self.chosen[kind.index()] = None;
             }
         }
-        self.settle_palette_bar(layout, damage);
+        self.settle_palette_bar(damage);
         let size = self.picture_size();
-        let area = layout.canvas();
+        let area = self.layout.canvas();
         if self.viewport.settle(size, area) {
             damage.add(area);
         }
@@ -2114,20 +2098,20 @@ impl View {
         let horizontal = model(width, area.width, x);
         if vertical != self.vertical.model() {
             self.vertical.set_model(vertical);
-            damage.add(layout.vertical_bar());
+            damage.add(self.layout.vertical_bar());
         }
         if horizontal != self.horizontal.model() {
             self.horizontal.set_model(horizontal);
-            damage.add(layout.horizontal_bar());
+            damage.add(self.layout.horizontal_bar());
         }
         // The picture may have moved, or changed, under a pointer that did not.
-        self.hovered(layout, damage);
-        self.settle_float_homes(layout);
-        self.settle_body_bars(layout, damage);
-        if self.layers.settle(layout.layers()) {
-            damage.add(layout.layers().rows);
+        self.hovered(damage);
+        self.settle_float_homes();
+        self.settle_body_bars(damage);
+        if self.layers.settle(self.layout.layers()) {
+            damage.add(self.layout.layers().rows);
         }
-        self.sync_layers(layout, damage);
+        self.sync_layers(damage);
         self.lift_short_hold();
     }
 
@@ -2327,35 +2311,35 @@ impl View {
     }
 
     /// The screen rectangle `bounds` of the picture falls on.
-    fn screen(&self, bounds: Bounds, layout: &Layout) -> Rect {
+    fn screen(&self, bounds: Bounds) -> Rect {
         self.viewport
-            .to_screen(bounds, self.picture_size(), layout.canvas())
+            .to_screen(bounds, self.picture_size(), self.layout.canvas())
     }
 
     /// Report `bounds` of the picture as damaged.
-    fn damage_picture(&self, bounds: Option<Bounds>, layout: &Layout, damage: &mut Region) {
+    fn damage_picture(&self, bounds: Option<Bounds>, damage: &mut Region) {
         if let Some(bounds) = bounds {
-            damage.add(self.screen(grown(bounds, 1), layout));
+            damage.add(self.screen(grown(bounds, 1)));
             // The status band states the colour under the pointer.
             let under = self.hover.is_some_and(|(x, y)| {
                 let (x, y) = (i64::from(x), i64::from(y));
                 (bounds.x0..bounds.x1).contains(&x) && (bounds.y0..bounds.y1).contains(&y)
             });
             if under {
-                damage.add(layout.position());
+                damage.add(self.layout.position());
             }
         }
     }
 
     /// The window gained or lost the keyboard; losing it ends any drag, lets
     /// the Space held go, and lands an opacity changing or a name being typed.
-    pub fn focus_changed(&mut self, focused: bool, layout: &Layout, damage: &mut Region) {
-        self.headers_follow_focus(focused, layout, damage);
+    pub fn focus_changed(&mut self, focused: bool, damage: &mut Region) {
+        self.headers_follow_focus(focused, damage);
         if !focused {
             self.space = false;
-            self.end_gesture(layout, damage);
-            self.settle_opacity(layout, damage);
-            self.settle_rename(layout, damage);
+            self.end_gesture(damage);
+            self.settle_opacity(damage);
+            self.settle_rename(damage);
             self.pane_drag = None;
             self.band_grab = None;
         }
@@ -2365,11 +2349,11 @@ impl View {
     /// held back for want of memory once the pressure falls, and from severe
     /// pressure on let the preview's overlay and the composite beneath an
     /// opacity changing go.
-    pub fn adopt_pressure(&mut self, band: PressureBand, layout: &Layout, damage: &mut Region) {
+    pub fn adopt_pressure(&mut self, band: PressureBand, damage: &mut Region) {
         self.document.adopt_pressure(band);
         self.previews_pressured(band);
         if band >= PressureBand::Severe {
-            self.drop_overlay(layout, damage);
+            self.drop_overlay(damage);
             self.drop_under();
         }
     }
@@ -2391,9 +2375,8 @@ impl View {
         }
     }
 
-    /// Arm the deadlines the state calls for, now it is `now_ns`, with the
-    /// held controls laid out at `layout`.
-    pub fn arm_deadline(&mut self, now_ns: u64, layout: &Layout, scale: Scale, theme: &Theme) {
+    /// Arm the deadlines the state calls for, now it is `now_ns`.
+    pub fn arm_deadline(&mut self, now_ns: u64, scale: Scale, theme: &Theme) {
         let bodies = self
             .body_bars
             .iter_mut()
@@ -2401,9 +2384,9 @@ impl View {
             .min();
         self.repeat_due = [
             self.tool_box
-                .repeat_deadline(now_ns, layout.tools(), scale, theme),
+                .repeat_deadline(now_ns, self.layout.tools(), scale, theme),
             self.commands
-                .repeat_deadline(now_ns, layout.view_strip(), scale, theme),
+                .repeat_deadline(now_ns, self.layout.view_strip(), scale, theme),
             self.vertical.repeat_deadline(now_ns),
             self.horizontal.repeat_deadline(now_ns),
             self.palette_bar.repeat_deadline(now_ns),
@@ -2417,60 +2400,53 @@ impl View {
 
     /// Do what has fallen due by `now_ns`: another dab of a held airbrush,
     /// another step of a held control.
-    pub fn tick(
-        &mut self,
-        now_ns: u64,
-        layout: &Layout,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) {
+    pub fn tick(&mut self, now_ns: u64, scale: Scale, theme: &Theme, damage: &mut Region) {
         if self.spray().is_some_and(|spray| spray.due_ns() <= now_ns) {
-            self.airbrush(now_ns, layout, damage);
+            self.airbrush(now_ns, damage);
         }
         self.tool_box
-            .repeat(now_ns, layout.tools(), scale, theme, damage);
+            .repeat(now_ns, self.layout.tools(), scale, theme, damage);
         self.commands
-            .repeat(now_ns, layout.view_strip(), scale, theme, damage);
+            .repeat(now_ns, self.layout.view_strip(), scale, theme, damage);
         if let Some(ScrollAction::ScrollTo { offset }) =
             self.vertical
-                .repeat(now_ns, layout.vertical_bar(), scale, theme, damage)
+                .repeat(now_ns, self.layout.vertical_bar(), scale, theme, damage)
         {
-            self.scroll_to(None, Some(offset), layout, damage);
+            self.scroll_to(None, Some(offset), damage);
         }
         if let Some(ScrollAction::ScrollTo { offset }) =
             self.horizontal
-                .repeat(now_ns, layout.horizontal_bar(), scale, theme, damage)
+                .repeat(now_ns, self.layout.horizontal_bar(), scale, theme, damage)
         {
-            self.scroll_to(Some(offset), None, layout, damage);
+            self.scroll_to(Some(offset), None, damage);
         }
         if let Some(ScrollAction::ScrollTo { offset }) =
             self.palette_bar
-                .repeat(now_ns, layout.palette_bar(), scale, theme, damage)
+                .repeat(now_ns, self.layout.palette_bar(), scale, theme, damage)
         {
-            self.scroll_palette(offset, layout, damage);
+            self.scroll_palette(offset, damage);
         }
         self.layers
-            .repeat(now_ns, layout.layers(), scale, theme, damage);
-        self.repeat_body_bars(now_ns, layout, scale, theme, damage);
+            .repeat(now_ns, self.layout.layers(), scale, theme, damage);
+        self.repeat_body_bars(now_ns, scale, theme, damage);
     }
 
-    fn scroll_to(&mut self, x: Option<u64>, y: Option<u64>, layout: &Layout, damage: &mut Region) {
+    fn scroll_to(&mut self, x: Option<u64>, y: Option<u64>, damage: &mut Region) {
         let (sx, sy) = self.viewport.scroll();
         if self.viewport.scroll_to(
             x.unwrap_or(sx),
             y.unwrap_or(sy),
             self.picture_size(),
-            layout.canvas(),
+            self.layout.canvas(),
         ) {
-            damage.add(layout.canvas());
+            damage.add(self.layout.canvas());
         }
-        self.settle(layout, damage);
+        self.settle(damage);
     }
 
     /// Magnify to rung `zoom`, keeping the picture point under `anchor`.
-    fn zoom_to(&mut self, zoom: usize, anchor: Point, layout: &Layout, damage: &mut Region) {
-        let area = layout.canvas();
+    fn zoom_to(&mut self, zoom: usize, anchor: Point, damage: &mut Region) {
+        let area = self.layout.canvas();
         let anchor = if area.contains(anchor) {
             anchor
         } else {
@@ -2481,14 +2457,16 @@ impl View {
             .zoom_to(zoom, anchor, self.picture_size(), area)
         {
             damage.add(area);
-            damage.add(layout.zoom());
+            damage.add(self.layout.zoom());
         }
-        self.settle(layout, damage);
+        self.settle(damage);
     }
 
-    fn fit(&mut self, layout: &Layout, damage: &mut Region) {
-        let rung = self.viewport.fitting(self.picture_size(), layout.canvas());
-        self.zoom_to(rung, layout.canvas().center(), layout, damage);
+    fn fit(&mut self, damage: &mut Region) {
+        let rung = self
+            .viewport
+            .fitting(self.picture_size(), self.layout.canvas());
+        self.zoom_to(rung, self.layout.canvas().center(), damage);
     }
 }
 

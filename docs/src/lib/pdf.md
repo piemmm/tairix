@@ -52,8 +52,10 @@ permissions opens as any other; otherwise `PdfError::NeedsPassword`, and a
 password that opens it as neither user nor owner `PdfError::WrongPassword`.
 Revisions 2 to 4 hash a password in `PDFDocEncoding` where it is text every
 character of which that encoding holds, and as its bytes otherwise; revisions
-5 and 6 hash it as UTF-8, cut to 127 bytes, as given — it is not
-SASLprep-normalised (`plans/PDF.md` PDF15). Encryption entries no password
+5 and 6 hash its text as SASLprep prepares it (`tairix_unicode::saslprep`, as
+a query), cut to 127 bytes of UTF-8 — so `Ⅸ`, `IX` and `I` soft-hyphen `X`
+open alike — and then, where that opens nothing, its bytes as given, since
+several producers hash a password unprepared. Encryption entries no password
 could unlock — a revision the handler does not define, a key length out of
 range, an `/O` or `/U` too short — are `PdfError::Unsupported`, never a
 password asked for again. The key derivations, RC4 and AES-CBC are

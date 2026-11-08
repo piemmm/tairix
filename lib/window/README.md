@@ -326,7 +326,10 @@ server and every app's client can never drift apart.
 - **The document host** (`docapp`): a window per document in one resident
   process. The contract the engine is driven through — `DocumentView`, the
   `Outcome` an input comes to, the `Request`s every document window makes
-  alike — is host-tested with the engines. On the bare-metal targets `run`
+  alike — is host-tested with the engines. Each engine lays itself out for
+  its window's size and keeps what it was laid out as (`DocumentView::lay_out`,
+  as an `AppView` does), so no call hands it a layout of another's. On the
+  bare-metal targets `run`
   is the whole program of an application that edits what the user handed it
   (TextEdit, Paint, Draw): opening, closing and quitting with changes asked about
   first, the trusted picker — and through it a file to import, handed over

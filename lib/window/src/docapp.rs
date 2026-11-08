@@ -280,8 +280,6 @@ pub enum SaveTarget {
 
 /// What the host needs of the engine a document window shows.
 pub trait DocumentView: SavedDocument {
-    /// Where everything the window draws goes, for a window of one size.
-    type Layout;
     /// The faces the window sets its text in, chosen again on a desktop
     /// change.
     type Faces: Copy;
@@ -296,15 +294,17 @@ pub trait DocumentView: SavedDocument {
     /// Write what the window's title reads over `title`, reusing its room.
     fn write_title(&self, title: &mut String);
 
-    /// The layout of a `width`×`height` window.
-    fn layout(
-        &self,
+    /// Lay the view out for a `width`×`height` window, reporting what moved.
+    /// The host lays a view out before it feeds it input or draws it.
+    fn lay_out(
+        &mut self,
         width: u32,
         height: u32,
         theme: &Theme,
         scale: Scale,
         faces: Self::Faces,
-    ) -> Self::Layout;
+        damage: &mut Region,
+    );
 
     /// The smallest window it can be laid out in, as `(width, height)`.
     fn min_size(&self, theme: &Theme, scale: Scale, faces: Self::Faces) -> (u32, u32);
@@ -316,11 +316,8 @@ pub trait DocumentView: SavedDocument {
         None
     }
 
-    /// Bring the view into line with `layout`, reporting what moved.
-    fn settle(&mut self, layout: &Self::Layout, damage: &mut Region);
-
     /// Where what the window is told ([`SavedDocument::say`]) is shown.
-    fn message_area(layout: &Self::Layout) -> Rect;
+    fn message_area(&self) -> Rect;
 
     /// Whether a question of the view's own showing is part of closing — how
     /// to save before the window closes — which a quit waits on. Whether to
@@ -330,15 +327,10 @@ pub trait DocumentView: SavedDocument {
     }
 
     /// The pointer's shape over `at`.
-    fn cursor(&self, layout: &Self::Layout, at: Point) -> CursorShape;
+    fn cursor(&self, at: Point) -> CursorShape;
 
     /// The tip for what the pointer is over, and the region it covers.
-    fn tool_tip(
-        &self,
-        _layout: &Self::Layout,
-        _scale: Scale,
-        _theme: &Theme,
-    ) -> Option<(Rect, &str)> {
+    fn tool_tip(&self, _scale: Scale, _theme: &Theme) -> Option<(Rect, &str)> {
         None
     }
 
@@ -347,26 +339,17 @@ pub trait DocumentView: SavedDocument {
 
     /// The user asked to close the window: answer [`Request::Close`], or
     /// [`Request::AskToClose`] for a document holding changes.
-    fn close_requested(&mut self, layout: &Self::Layout, damage: &mut Region) -> ViewOutcome<Self>;
+    fn close_requested(&mut self, damage: &mut Region) -> ViewOutcome<Self>;
 
     /// The user chose to save before the window closes: answer
     /// [`Request::SaveThenClose`] once what the view holds apart from its
     /// document is in it, as any save of its own would.
-    fn save_then_close(
-        &mut self,
-        _layout: &Self::Layout,
-        _damage: &mut Region,
-    ) -> ViewOutcome<Self> {
+    fn save_then_close(&mut self, _damage: &mut Region) -> ViewOutcome<Self> {
         Outcome::asking(Request::SaveThenClose)
     }
 
     /// The menu row `item` was chosen.
-    fn chosen(
-        &mut self,
-        item: AppMenuItemId,
-        layout: &Self::Layout,
-        damage: &mut Region,
-    ) -> ViewOutcome<Self>;
+    fn chosen(&mut self, item: AppMenuItemId, damage: &mut Region) -> ViewOutcome<Self>;
 
     /// A menu's entry field `item` was committed holding `text`. A window
     /// whose menus hold no entry field is never answered with one.
@@ -374,14 +357,13 @@ pub trait DocumentView: SavedDocument {
         &mut self,
         _item: AppMenuItemId,
         _text: &str,
-        _layout: &Self::Layout,
         _damage: &mut Region,
     ) -> ViewOutcome<Self> {
         Outcome::none()
     }
 
     /// The window gained or lost the keyboard.
-    fn focus_changed(&mut self, focused: bool, layout: &Self::Layout, damage: &mut Region);
+    fn focus_changed(&mut self, focused: bool, damage: &mut Region);
 
     /// Feed `input` — a key, the modifiers held, or the pointer — at
     /// `now_ns`: for the pointer, when its device reported it.
@@ -389,7 +371,6 @@ pub trait DocumentView: SavedDocument {
         &mut self,
         input: &InputEvent,
         now_ns: u64,
-        layout: &Self::Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -401,11 +382,10 @@ pub trait DocumentView: SavedDocument {
         None
     }
 
-    /// Whether a file of media type `media` dropped at window-local `at`, laid
-    /// out as `layout`, is read into the document there, as an import is; a
-    /// drop it is not is left to the application, which opens the file or
-    /// refuses it.
-    fn places(&self, _at: Point, _media: &str, _layout: &Self::Layout) -> bool {
+    /// Whether a file of media type `media` dropped at window-local `at` is
+    /// read into the document there, as an import is; a drop it is not is
+    /// left to the application, which opens the file or refuses it.
+    fn places(&self, _at: Point, _media: &str) -> bool {
         false
     }
 
@@ -414,12 +394,7 @@ pub trait DocumentView: SavedDocument {
     /// `Some` puts the question up, or begins what putting it up needs —
     /// which the host carries out as any outcome — and its answer asks for
     /// [`Request::SaveWhere`]. By default nothing is asked.
-    fn ask_how(
-        &mut self,
-        _then_close: bool,
-        _layout: &Self::Layout,
-        _damage: &mut Region,
-    ) -> Option<ViewOutcome<Self>> {
+    fn ask_how(&mut self, _then_close: bool, _damage: &mut Region) -> Option<ViewOutcome<Self>> {
         None
     }
 
@@ -457,11 +432,11 @@ pub trait DocumentView: SavedDocument {
         Ok(SaveFormats::ANY)
     }
 
-    /// The `index`th tool window the window wants open as laid out by
-    /// `layout`, or `None` past the last. Asked after every round, so the
-    /// view says what it wants and the host opens, resizes, retitles and
-    /// closes tool windows to match. By default none.
-    fn tool_window(&self, _layout: &Self::Layout, _index: usize) -> Option<ToolWindow<'_>> {
+    /// The `index`th tool window the window wants open, or `None` past the
+    /// last. Asked after every round, so the view says what it wants and the
+    /// host opens, resizes, retitles and closes tool windows to match. By
+    /// default none.
+    fn tool_window(&self, _index: usize) -> Option<ToolWindow<'_>> {
         None
     }
 
@@ -475,7 +450,6 @@ pub trait DocumentView: SavedDocument {
     fn tool_moved(
         &mut self,
         _moved: ToolMove,
-        _layout: &Self::Layout,
         _scale: Scale,
         _theme: &Theme,
         _damage: &mut Region,
@@ -492,7 +466,6 @@ pub trait DocumentView: SavedDocument {
         &mut self,
         _id: u32,
         _size: (u32, u32),
-        _layout: &Self::Layout,
         _scale: Scale,
         _damage: &mut Region,
     ) -> ViewOutcome<Self> {
@@ -501,26 +474,14 @@ pub trait DocumentView: SavedDocument {
 
     /// Tool window `id` went, for `why`. A view answering
     /// [`ToolGone::Refused`] stops wanting it, or it is asked for again.
-    fn tool_gone(
-        &mut self,
-        _id: u32,
-        _why: ToolGone,
-        _layout: &Self::Layout,
-        _damage: &mut Region,
-    ) -> ViewOutcome<Self> {
+    fn tool_gone(&mut self, _id: u32, _why: ToolGone, _damage: &mut Region) -> ViewOutcome<Self> {
         Outcome::none()
     }
 
-    /// The dialog the window wants open as laid out by `layout` at `scale`
-    /// in `theme`, if any. Asked after every round, as tool windows are, so
-    /// the host opens, resizes, retitles and closes it to match. By default
-    /// none.
-    fn dialog_window(
-        &self,
-        _layout: &Self::Layout,
-        _scale: Scale,
-        _theme: &Theme,
-    ) -> Option<DialogWindow<'_>> {
+    /// The dialog the window wants open at `scale` in `theme`, if any. Asked
+    /// after every round, as tool windows are, so the host opens, resizes,
+    /// retitles and closes it to match. By default none.
+    fn dialog_window(&self, _scale: Scale, _theme: &Theme) -> Option<DialogWindow<'_>> {
         None
     }
 
@@ -531,7 +492,6 @@ pub trait DocumentView: SavedDocument {
         &mut self,
         _input: &InputEvent,
         _now_ns: u64,
-        _layout: &Self::Layout,
         _scale: Scale,
         _theme: &Theme,
         _damage: &mut Region,
@@ -540,22 +500,11 @@ pub trait DocumentView: SavedDocument {
     }
 
     /// The dialog gained or lost the keyboard; the host repaints it whole.
-    fn dialog_focus_changed(
-        &mut self,
-        _focused: bool,
-        _layout: &Self::Layout,
-        _damage: &mut Region,
-    ) {
-    }
+    fn dialog_focus_changed(&mut self, _focused: bool, _damage: &mut Region) {}
 
     /// The desktop would not open the dialog, for `why`. The view stops
     /// wanting it, or it is asked for again.
-    fn dialog_refused(
-        &mut self,
-        _why: &str,
-        _layout: &Self::Layout,
-        _damage: &mut Region,
-    ) -> ViewOutcome<Self> {
+    fn dialog_refused(&mut self, _why: &str, _damage: &mut Region) -> ViewOutcome<Self> {
         Outcome::none()
     }
 }
@@ -566,8 +515,6 @@ pub trait DocumentView: SavedDocument {
 /// reports, and closed by its close mark or by Quit, which it never holds
 /// back.
 pub trait AppView {
-    /// Where everything the window draws goes, for a window of one size.
-    type Layout;
     /// The faces it sets its text in.
     type Faces: Copy;
     /// What an input asks only the application for.
@@ -579,27 +526,26 @@ pub trait AppView {
     /// The size it opens at, in logical pixels.
     fn size(&self) -> (u32, u32);
 
-    /// The layout of a `width`×`height` window.
-    fn layout(
-        &self,
+    /// Lay the view out for a `width`×`height` window, reporting what moved.
+    /// The host lays a view out before it feeds it input or draws it.
+    fn lay_out(
+        &mut self,
         width: u32,
         height: u32,
         theme: &Theme,
         scale: Scale,
         faces: Self::Faces,
-    ) -> Self::Layout;
+        damage: &mut Region,
+    );
 
     /// The smallest window it can be laid out in, as `(width, height)`.
     fn min_size(&self, theme: &Theme, scale: Scale, faces: Self::Faces) -> (u32, u32);
 
-    /// Bring the view into line with `layout`, reporting what moved.
-    fn settle(&mut self, layout: &Self::Layout, damage: &mut Region);
-
     /// The pointer's shape over `at`.
-    fn cursor(&self, layout: &Self::Layout, at: Point) -> CursorShape;
+    fn cursor(&self, at: Point) -> CursorShape;
 
     /// The window gained or lost the keyboard.
-    fn focus_changed(&mut self, focused: bool, layout: &Self::Layout, damage: &mut Region);
+    fn focus_changed(&mut self, focused: bool, damage: &mut Region);
 
     /// Feed `input` — a key, the modifiers held, or the pointer — at
     /// `now_ns`: for the pointer, when its device reported it.
@@ -607,7 +553,6 @@ pub trait AppView {
         &mut self,
         input: &InputEvent,
         now_ns: u64,
-        layout: &Self::Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -619,17 +564,8 @@ pub trait AppView {
         None
     }
 
-    /// Carry out what came due by `now_ns` for the window laid out as
-    /// `layout`, reporting what moved.
-    fn advance(
-        &mut self,
-        _now_ns: u64,
-        _layout: &Self::Layout,
-        _scale: Scale,
-        _theme: &Theme,
-        _damage: &mut Region,
-    ) {
-    }
+    /// Carry out what came due by `now_ns`, reporting what moved.
+    fn advance(&mut self, _now_ns: u64, _scale: Scale, _theme: &Theme, _damage: &mut Region) {}
 }
 
 /// What a window of the application's own asks the host for.
@@ -659,7 +595,6 @@ impl<F> NoAppView<F> {
 }
 
 impl<F: Copy> AppView for NoAppView<F> {
-    type Layout = ();
     type Faces = F;
     type Own = core::convert::Infallible;
 
@@ -671,7 +606,7 @@ impl<F: Copy> AppView for NoAppView<F> {
         self.never()
     }
 
-    fn layout(&self, _: u32, _: u32, _: &Theme, _: Scale, _: F) {
+    fn lay_out(&mut self, _: u32, _: u32, _: &Theme, _: Scale, _: F, _: &mut Region) {
         let () = self.never();
     }
 
@@ -679,15 +614,11 @@ impl<F: Copy> AppView for NoAppView<F> {
         self.never()
     }
 
-    fn settle(&mut self, (): &(), _: &mut Region) {
-        let () = self.never();
-    }
-
-    fn cursor(&self, (): &(), _: Point) -> CursorShape {
+    fn cursor(&self, _: Point) -> CursorShape {
         self.never()
     }
 
-    fn focus_changed(&mut self, _: bool, (): &(), _: &mut Region) {
+    fn focus_changed(&mut self, _: bool, _: &mut Region) {
         let () = self.never();
     }
 
@@ -695,7 +626,6 @@ impl<F: Copy> AppView for NoAppView<F> {
         &mut self,
         _: &InputEvent,
         _: u64,
-        (): &(),
         _: Scale,
         _: &Theme,
         _: &mut Region,

@@ -4,7 +4,7 @@
 use alloc::string::String;
 
 use tairix_colour::Rgb;
-use tairix_controls::{FieldControl, FieldRow, SettingsLayout};
+use tairix_controls::{FieldControl, FieldRow};
 use tairix_geometry::{Region, Scale};
 use tairix_image::IndexDepth;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
@@ -22,7 +22,6 @@ use crate::tool::Tool;
 struct Fixture {
     registry: ThemeRegistry,
     window: PaintSettings,
-    layout: SettingsLayout,
 }
 
 type Answer = Outcome<AppRequest<SettingsRequest<Preferences>>>;
@@ -31,11 +30,7 @@ impl Fixture {
     fn at(category: Category) -> Self {
         let registry = ThemeRegistry::with_builtins();
         let window = PaintSettings::new(Preferences::default(), category.index());
-        let mut fixture = Self {
-            registry,
-            window,
-            layout: SettingsLayout::default(),
-        };
+        let mut fixture = Self { registry, window };
         fixture.lay_out();
         fixture
     }
@@ -43,10 +38,9 @@ impl Fixture {
     /// Lay the window out again, as the host does when it is asked.
     fn lay_out(&mut self) {
         let theme = self.registry.active();
-        self.layout = self
-            .window
-            .layout(600, 440, theme, Scale::ONE, Faces::of(theme, Scale::ONE));
-        self.window.settle(&self.layout, &mut Region::new());
+        let faces = Faces::of(theme, Scale::ONE);
+        self.window
+            .lay_out(600, 440, theme, Scale::ONE, faces, &mut Region::new());
     }
 
     fn key(&mut self, key: Key) -> Answer {
@@ -55,14 +49,9 @@ impl Fixture {
             modifiers: Modifiers::default(),
         };
         let theme = self.registry.active();
-        let answer = self.window.input(
-            &event,
-            0,
-            &self.layout,
-            Scale::ONE,
-            theme,
-            &mut Region::new(),
-        );
+        let answer = self
+            .window
+            .input(&event, 0, Scale::ONE, theme, &mut Region::new());
         if answer.relayout != tairix_window::docapp::Relayout::None {
             self.lay_out();
         }
@@ -253,8 +242,7 @@ fn take_reset_and_restore_are_asked_of_paint() {
 
     let mut moved = Preferences::default();
     moved.panes.hide(PaneKind::Colour);
-    let layout = fixture.layout;
-    let _ = fixture.window.adopt(&moved, &layout, &mut Region::new());
+    let _ = fixture.window.adopt(&moved, &mut Region::new());
     fixture.lay_out();
     let _ = fixture.key(Key::Named(NamedKey::Down));
     let reset = edited(fixture.key(Key::Char(' ')));
@@ -270,8 +258,7 @@ fn what_the_store_says_is_shown_and_a_refusal_said() {
     let mut fixture = Fixture::at(Category::Grid);
     let mut stored = Preferences::default();
     stored.grid.style = GridStyle::Dots;
-    let layout = fixture.layout;
-    assert!(fixture.window.adopt(&stored, &layout, &mut Region::new()));
+    assert!(fixture.window.adopt(&stored, &mut Region::new()));
     assert_eq!(fixture.window.record().grid.style, GridStyle::Dots);
     let FieldControl::Combo(style) = fixture.row(0, 6).control() else {
         panic!("the style choice");
@@ -279,14 +266,13 @@ fn what_the_store_says_is_shown_and_a_refusal_said() {
     assert_eq!(style.selected(), Some(2));
     fixture.window.say(
         Some(String::from("the settings were not saved")),
-        &layout,
         &mut Region::new(),
     );
     assert_eq!(
         fixture.window.frame().note(),
         Some("the settings were not saved")
     );
-    fixture.window.say(None, &layout, &mut Region::new());
+    fixture.window.say(None, &mut Region::new());
     assert_eq!(fixture.window.frame().note(), None);
 }
 

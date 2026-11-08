@@ -8,7 +8,6 @@ use tairix_reclaim::PressureBand;
 use super::layers::Looked;
 use super::operations::Basis;
 use super::{Outcome, Own, Request, View};
-use crate::layout::Layout;
 use crate::op::Halted;
 use crate::preview::{PreviewAnswer, Previewed, Ticket};
 
@@ -84,15 +83,15 @@ impl View {
     /// a pane reads, then the composite beneath a layer whose opacity is
     /// changing, then the Layers pane's thumbnails. One is out at a time, and
     /// none is asked while a refusal holds asking back.
-    pub fn wanted_preview(&mut self, layout: &Layout, scale: Scale) -> Option<Request> {
+    pub fn wanted_preview(&mut self, scale: Scale) -> Option<Request> {
         if self.previews.asked.is_some() || self.holding_back() {
             return None;
         }
         let (asking, work) = self
-            .wanted_tiles(layout)
-            .or_else(|| self.wanted_histogram(layout))
+            .wanted_tiles()
+            .or_else(|| self.wanted_histogram())
             .or_else(|| self.wanted_under())
-            .or_else(|| self.wanted_thumbnails(layout, scale))?;
+            .or_else(|| self.wanted_thumbnails(scale))?;
         let job = self.next_job;
         self.next_job += 1;
         self.previews.asked = Some(Asked { job, asking });
@@ -107,7 +106,7 @@ impl View {
     /// ticket it was asked under, is landed — where what it worked out still
     /// applies — and the next is asked once it has, one given up to the
     /// queue's work asked again.
-    pub fn previewed(&mut self, answer: PreviewAnswer, layout: &Layout, damage: &mut Region) {
+    pub fn previewed(&mut self, answer: PreviewAnswer, damage: &mut Region) {
         let PreviewAnswer {
             job,
             ticket,
@@ -121,9 +120,9 @@ impl View {
             return;
         }
         match (asked.asking, previewed) {
-            (Asking::Tiles, Previewed::Tiles(Ok(tiles))) => self.land_tiles(tiles, layout, damage),
+            (Asking::Tiles, Previewed::Tiles(Ok(tiles))) => self.land_tiles(tiles, damage),
             (Asking::Histogram(basis), Previewed::Histogram(Ok(histogram))) => {
-                self.land_histogram(histogram, basis, layout, damage);
+                self.land_histogram(histogram, basis, damage);
             }
             (Asking::Under(basis), Previewed::Under(Ok(canvas))) => self.land_under(basis, canvas),
             (
@@ -132,7 +131,7 @@ impl View {
                     side,
                     drawn: Ok(drawn),
                 },
-            ) => self.land_thumbnails(looked, side, drawn, layout, damage),
+            ) => self.land_thumbnails(looked, side, drawn, damage),
             (
                 Asking::Thumbnails(looked),
                 Previewed::LayerThumbnails {
@@ -145,7 +144,7 @@ impl View {
                 Previewed::Tiles(Err(halted))
                 | Previewed::Histogram(Err(halted))
                 | Previewed::Under(Err(halted)),
-            ) => self.preview_halted(halted, ticket, layout, damage),
+            ) => self.preview_halted(halted, ticket, damage),
             _ => {}
         }
     }
@@ -154,13 +153,7 @@ impl View {
     /// its answer for want of what it needed: said, and nothing asked again
     /// until the picture or what is asked moves, the memory pressure falls or
     /// the window is laid out anew.
-    fn preview_halted(
-        &mut self,
-        halted: Halted,
-        ticket: u64,
-        layout: &Layout,
-        damage: &mut Region,
-    ) {
+    fn preview_halted(&mut self, halted: Halted, ticket: u64, damage: &mut Region) {
         if halted == Halted::Abandoned {
             return;
         }
@@ -169,7 +162,7 @@ impl View {
             ticket,
         });
         let said = alloc::format!("The preview could not be worked out: {halted}");
-        self.state(&said, layout, damage);
+        self.state(&said, damage);
     }
 
     /// The preview worker had no room for job `job`: it is asked again by the
@@ -231,7 +224,6 @@ impl View {
         &mut self,
         before: Basis,
         outcome: Outcome,
-        layout: &Layout,
         damage: &mut Region,
     ) -> Outcome {
         if self.previews.held_back == Some(Hold::Refused) {
@@ -240,7 +232,7 @@ impl View {
         if self.basis() != before {
             self.disown_previews();
         }
-        self.refresh_previews(layout, damage);
+        self.refresh_previews(damage);
         outcome
     }
 }

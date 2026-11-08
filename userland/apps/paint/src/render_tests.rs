@@ -6,6 +6,7 @@ use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Theme, ThemeRegistry};
+use tairix_window::docapp::DocumentView;
 use tairix_window::document::Access;
 
 use super::render_into;
@@ -30,17 +31,29 @@ fn window(canvas: Canvas) -> (View, Layout, ThemeRegistry) {
         Access::Writable,
     );
     let theme = registry.active();
-    let layout = view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, faces(theme));
-    view.settle(&layout, &mut Region::new());
+    let layout = laid_out(&mut view, theme);
     (view, layout, registry)
 }
 
-fn paint(view: &View, layout: &Layout, theme: &Theme) -> Surface {
+/// `view` laid out in its window, as the host lays it out when an outcome
+/// asks, and what it is laid out as.
+fn laid_out(view: &mut View, theme: &Theme) -> Layout {
+    view.lay_out(
+        WINDOW.0,
+        WINDOW.1,
+        theme,
+        Scale::ONE,
+        faces(theme),
+        &mut Region::new(),
+    );
+    view.layout().clone()
+}
+
+fn paint(view: &View, theme: &Theme) -> Surface {
     let mut surface = Surface::new(WINDOW.0, WINDOW.1).expect("a surface");
     render_into(
         &mut surface,
         view,
-        layout,
         theme,
         Scale::ONE,
         faces(theme),
@@ -66,7 +79,7 @@ fn each_picture_pixel_is_drawn_where_the_viewport_puts_it() {
     built.set(3, 4, Sample::Rgba([200, 10, 10, 255]));
     let (view, layout, registry) = window(built.finish());
     let theme = registry.active();
-    let surface = paint(&view, &layout, theme);
+    let surface = paint(&view, theme);
     let (x, y) = corner_of(&view, &layout, (20, 10), (3, 4));
     assert_eq!(
         surface.get(x, y),
@@ -84,7 +97,7 @@ fn the_checkerboard_shows_through_a_clear_pixel() {
     let canvas = Canvas::new(40, 40, Kind::Rgba, Sample::Rgba([0; 4])).expect("fits");
     let (view, layout, registry) = window(canvas);
     let theme = registry.active();
-    let surface = paint(&view, &layout, theme);
+    let surface = paint(&view, theme);
     let board = Checker::new(theme, Scale::ONE);
     let (x, y) = corner_of(&view, &layout, (40, 40), (0, 0));
     assert_eq!(surface.get(x, y), Some(board.at(0, 0).premultiply()));
@@ -96,9 +109,9 @@ fn the_checkerboard_shows_through_a_clear_pixel() {
 }
 
 fn magnified(canvas: Canvas, rung: usize) -> (View, Layout, ThemeRegistry) {
-    let (mut view, layout, registry) = window(canvas);
-    view.act(Action::Zoom(rung), &layout, &mut Region::new());
-    view.settle(&layout, &mut Region::new());
+    let (mut view, _, registry) = window(canvas);
+    view.act(Action::Zoom(rung), &mut Region::new());
+    let layout = laid_out(&mut view, registry.active());
     (view, layout, registry)
 }
 
@@ -109,15 +122,15 @@ fn a_magnified_pixel_fills_its_block_and_the_grid_runs_between_blocks() {
     let (mut view, layout, registry) = magnified(built.finish(), 9);
     let theme = registry.active();
     assert_eq!(view.viewport().pixel_span(), (8, 8));
-    view.act(Action::PixelGrid, &layout, &mut Region::new());
-    let surface = paint(&view, &layout, theme);
+    view.act(Action::PixelGrid, &mut Region::new());
+    let surface = paint(&view, theme);
     let (x, y) = corner_of(&view, &layout, (8, 8), (1, 1));
     let blue = Color::rgb(0, 0, 255).premultiply();
     for (dx, dy) in [(0, 0), (7, 0), (0, 7), (7, 7), (3, 4)] {
         assert_eq!(surface.get(x + dx, y + dy), Some(blue), "({dx}, {dy})");
     }
-    view.act(Action::PixelGrid, &layout, &mut Region::new());
-    let gridded = paint(&view, &layout, theme);
+    view.act(Action::PixelGrid, &mut Region::new());
+    let gridded = paint(&view, theme);
     assert!(
         view.pixel_grid_shown(),
         "shown from the 800% the settings start with"
@@ -141,7 +154,7 @@ fn a_reduced_view_averages_the_pixels_each_screen_pixel_covers() {
     }
     let (view, layout, registry) = magnified(built.finish(), 3);
     let theme = registry.active();
-    let surface = paint(&view, &layout, theme);
+    let surface = paint(&view, theme);
     let (x, y) = corner_of(&view, &layout, (64, 64), (0, 0));
     let Some(Pixel { r, a, .. }) = surface.get(x + 2, y + 2) else {
         panic!("on screen");
@@ -169,7 +182,7 @@ fn a_reduced_views_right_edge_averages_as_its_neighbours_do() {
     for rung in [3, 1] {
         let (view, layout, registry) = magnified(picture.try_clone().expect("room"), rung);
         let theme = registry.active();
-        let surface = paint(&view, &layout, theme);
+        let surface = paint(&view, theme);
         let placed = view.viewport().to_screen(
             crate::shape::Bounds::picture(64, 64),
             (64, 64),
@@ -202,7 +215,7 @@ fn a_footprint_the_edge_cuts_short_samples_what_it_holds() {
     let picture = built.finish();
     // A sixteenth: the last screen column covers columns 96 to 99 alone.
     let (view, layout, registry) = magnified(picture, 0);
-    let surface = paint(&view, &layout, registry.active());
+    let surface = paint(&view, registry.active());
     let placed = view.viewport().to_screen(
         crate::shape::Bounds::picture(100, 16),
         (100, 16),
@@ -222,11 +235,10 @@ fn a_footprint_the_edge_cuts_short_samples_what_it_holds() {
 #[test]
 fn a_shape_being_dragged_is_drawn_as_it_will_be_put_down() {
     let canvas = Canvas::new(60, 60, Kind::Rgba, Sample::Rgba([255; 4])).expect("fits");
-    let (mut view, layout, registry) = window(canvas);
+    let (mut view, _, registry) = window(canvas);
     let theme = registry.active();
-    view.act(Action::Tool(Tool::Ellipse), &layout, &mut Region::new());
-    let layout = view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, faces(theme));
-    view.settle(&layout, &mut Region::new());
+    view.act(Action::Tool(Tool::Ellipse), &mut Region::new());
+    let layout = laid_out(&mut view, theme);
     let point = |(x, y): (u32, u32)| {
         let (sx, sy) = corner_of(&view, &layout, (60, 60), (x, y));
         Point::new(
@@ -236,7 +248,7 @@ fn a_shape_being_dragged_is_drawn_as_it_will_be_put_down() {
     };
     let (from, to) = (point((5, 5)), point((40, 30)));
     let feed = |view: &mut View, event: InputEvent| {
-        view.on_pointer(&event, 0, &layout, Scale::ONE, theme, &mut Region::new());
+        view.on_pointer(&event, 0, Scale::ONE, theme, &mut Region::new());
     };
     feed(&mut view, InputEvent::PointerMoved { to: from });
     feed(
@@ -246,14 +258,14 @@ fn a_shape_being_dragged_is_drawn_as_it_will_be_put_down() {
         },
     );
     feed(&mut view, InputEvent::PointerMoved { to });
-    let previewed = paint(&view, &layout, theme);
+    let previewed = paint(&view, theme);
     feed(
         &mut view,
         InputEvent::PointerReleased {
             button: PointerButton::Primary,
         },
     );
-    let drawn = paint(&view, &layout, theme);
+    let drawn = paint(&view, theme);
     let canvas = layout.canvas();
     for y in canvas.top()..canvas.bottom() {
         for x in canvas.left()..canvas.right() {
@@ -268,7 +280,7 @@ fn a_clipped_paint_draws_what_a_whole_one_does_inside_the_clip() {
     let canvas = Canvas::new(300, 200, Kind::Rgba, Sample::Rgba([10, 200, 30, 128])).expect("fits");
     let (view, layout, registry) = window(canvas);
     let theme = registry.active();
-    let whole = paint(&view, &layout, theme);
+    let whole = paint(&view, theme);
     let mut clipped = Surface::new(WINDOW.0, WINDOW.1).expect("a surface");
     let area = layout.canvas();
     let (x, y) = (
@@ -279,7 +291,6 @@ fn a_clipped_paint_draws_what_a_whole_one_does_inside_the_clip() {
         render_into(
             surface,
             &view,
-            &layout,
             theme,
             Scale::ONE,
             faces(theme),
@@ -311,7 +322,7 @@ fn the_tool_box_marks_the_tool_in_use_on_its_leading_edge() {
     let canvas = Canvas::new(20, 20, Kind::Rgba, Sample::Rgba([255; 4])).expect("fits");
     let (view, layout, registry) = window(canvas);
     let theme = registry.active();
-    let surface = paint(&view, &layout, theme);
+    let surface = paint(&view, theme);
     let brush = view
         .controls()
         .tool_box
@@ -337,7 +348,7 @@ fn the_bar_names_its_tool_and_draws_its_settings() {
     let canvas = Canvas::new(20, 20, Kind::Rgba, Sample::Rgba([255; 4])).expect("fits");
     let (view, layout, registry) = window(canvas);
     let theme = registry.active();
-    let surface = paint(&view, &layout, theme);
+    let surface = paint(&view, theme);
     let raised = Color::from(theme.palette().surface_raised).premultiply();
     let name = layout.bar();
     let size = name.control(0).expect("the size is seated");
@@ -366,7 +377,7 @@ fn the_palette_strip_shows_each_well_in_its_colour() {
     let canvas = Canvas::new(20, 20, Kind::Rgba, Sample::Rgba([255; 4])).expect("fits");
     let (view, layout, registry) = window(canvas);
     let theme = registry.active();
-    let surface = paint(&view, &layout, theme);
+    let surface = paint(&view, theme);
     let swatches = view.controls().swatches;
     for well in [2, 11] {
         let cell = swatches.cell_rect(layout.swatches(), well).expect("a well");
@@ -383,11 +394,10 @@ fn the_palette_strip_shows_each_well_in_its_colour() {
 #[test]
 fn an_open_list_is_drawn_over_the_canvas() {
     let canvas = Canvas::new(200, 200, Kind::Rgba, Sample::Rgba([0, 0, 0, 255])).expect("fits");
-    let (mut view, layout, registry) = window(canvas);
+    let (mut view, _, registry) = window(canvas);
     let theme = registry.active();
-    view.act(Action::Tool(Tool::Rectangle), &layout, &mut Region::new());
-    let layout = view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, faces(theme));
-    view.settle(&layout, &mut Region::new());
+    view.act(Action::Tool(Tool::Rectangle), &mut Region::new());
+    let layout = laid_out(&mut view, theme);
     let style = layout
         .bar()
         .control(1)
@@ -402,7 +412,7 @@ fn an_open_list_is_drawn_over_the_canvas() {
             button: PointerButton::Primary,
         },
     ] {
-        view.on_pointer(&event, 0, &layout, Scale::ONE, theme, &mut Region::new());
+        view.on_pointer(&event, 0, Scale::ONE, theme, &mut Region::new());
     }
     let popup = view
         .controls()
@@ -410,7 +420,7 @@ fn an_open_list_is_drawn_over_the_canvas() {
         .popup_rect(layout.bar(), Scale::ONE, theme);
     let over = popup.intersection(&layout.canvas());
     assert!(!over.is_empty(), "the list hangs over the canvas");
-    let surface = paint(&view, &layout, theme);
+    let surface = paint(&view, theme);
     let black = Color::rgb(0, 0, 0).premultiply();
     let middle = over.center();
     assert_ne!(
@@ -523,8 +533,7 @@ fn layered_window(
         Access::Writable,
     );
     let theme = registry.active();
-    let layout = view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, faces(theme));
-    view.settle(&layout, &mut Region::new());
+    let layout = laid_out(&mut view, theme);
     (view, layout, registry)
 }
 
@@ -551,9 +560,9 @@ fn the_layers_are_shown_laid_together() {
     let (mut view, layout, registry) = layered_window(layers, 1);
     let theme = registry.active();
     let (x, y) = corner_of(&view, &layout, size, (3, 4));
-    assert!(near(paint(&view, &layout, theme).get(x, y), [128, 0, 127]));
-    view.act(Action::ShowLayer, &layout, &mut Region::new());
-    let hidden = paint(&view, &layout, theme);
+    assert!(near(paint(&view, theme).get(x, y), [128, 0, 127]));
+    view.act(Action::ShowLayer, &mut Region::new());
+    let hidden = paint(&view, theme);
     assert_eq!(
         hidden.get(x, y),
         Some(Color::rgb(0, 0, 255).premultiply()),
@@ -571,10 +580,9 @@ fn the_live_opacity_render_equals_the_committed_one() {
     ];
     let (mut view, layout, registry) = layered_window(layers, 1);
     let theme = registry.active();
-    let before = paint(&view, &layout, theme);
-    view.layer_opacity(40, false, &layout, &mut Region::new());
-    let Some(Request::Own(Own::Preview { job, stamp, work })) =
-        view.wanted_preview(&layout, Scale::ONE)
+    let before = paint(&view, theme);
+    view.layer_opacity(40, false, &mut Region::new());
+    let Some(Request::Own(Own::Preview { job, stamp, work })) = view.wanted_preview(Scale::ONE)
     else {
         panic!("the layers beneath are asked to be laid together");
     };
@@ -585,18 +593,18 @@ fn the_live_opacity_render_equals_the_committed_one() {
         work,
     };
     let answer = crate::preview::serve(asked, &tairix_parallel::SERIAL, &|| false);
-    view.previewed(answer, &layout, &mut Region::new());
+    view.previewed(answer, &mut Region::new());
     assert!(
         view.composite_under().is_some(),
         "the composite beneath is kept"
     );
-    let live = paint(&view, &layout, theme);
-    view.layer_opacity(40, true, &layout, &mut Region::new());
+    let live = paint(&view, theme);
+    view.layer_opacity(40, true, &mut Region::new());
     assert!(
         view.composite_under().is_none(),
         "let go once the change lands"
     );
-    let committed = paint(&view, &layout, theme);
+    let committed = paint(&view, theme);
     let (x, y) = corner_of(&view, &layout, size, (3, 4));
     assert_ne!(before.get(x, y), committed.get(x, y), "the opacity changed");
     let shown = layout.canvas();
@@ -619,12 +627,12 @@ fn a_reduced_view_lays_the_layers_together_where_it_samples() {
     }
     let mut top = crate::document::Layer::new(stripes.finish(), String::from("stripes"));
     top.opacity = 255;
-    let (mut view, layout, registry) =
+    let (mut view, _, registry) =
         layered_window(alloc::vec![flat_layer(size, [0, 0, 0, 255], 255), top], 0);
-    view.act(Action::Zoom(3), &layout, &mut Region::new());
-    view.settle(&layout, &mut Region::new());
+    view.act(Action::Zoom(3), &mut Region::new());
+    let layout = laid_out(&mut view, registry.active());
     let theme = registry.active();
-    let surface = paint(&view, &layout, theme);
+    let surface = paint(&view, theme);
     let (x, y) = corner_of(&view, &layout, size, (0, 0));
     let Some(Pixel { r, a, .. }) = surface.get(x + 2, y + 2) else {
         panic!("on screen");
@@ -645,10 +653,10 @@ fn a_shape_dragged_beneath_a_layer_shows_as_it_will_be_put_down() {
         flat_layer(size, [255; 4], 255),
         flat_layer(size, [0, 200, 0, 255], 90),
     ];
-    let (mut view, first, registry) = layered_window(layers, 0);
+    let (mut view, _, registry) = layered_window(layers, 0);
     let theme = registry.active();
-    view.act(Action::Tool(Tool::Ellipse), &first, &mut Region::new());
-    let layout = view_layout(&mut view, theme);
+    view.act(Action::Tool(Tool::Ellipse), &mut Region::new());
+    let layout = laid_out(&mut view, theme);
     let point = |(x, y): (u32, u32)| {
         let (sx, sy) = corner_of(&view, &layout, size, (x, y));
         Point::new(
@@ -658,7 +666,7 @@ fn a_shape_dragged_beneath_a_layer_shows_as_it_will_be_put_down() {
     };
     let (from, to) = (point((5, 5)), point((40, 30)));
     let feed = |view: &mut View, event: InputEvent| {
-        view.on_pointer(&event, 0, &layout, Scale::ONE, theme, &mut Region::new());
+        view.on_pointer(&event, 0, Scale::ONE, theme, &mut Region::new());
     };
     feed(&mut view, InputEvent::PointerMoved { to: from });
     feed(
@@ -668,14 +676,14 @@ fn a_shape_dragged_beneath_a_layer_shows_as_it_will_be_put_down() {
         },
     );
     feed(&mut view, InputEvent::PointerMoved { to });
-    let previewed = paint(&view, &layout, theme);
+    let previewed = paint(&view, theme);
     feed(
         &mut view,
         InputEvent::PointerReleased {
             button: PointerButton::Primary,
         },
     );
-    let drawn = paint(&view, &layout, theme);
+    let drawn = paint(&view, theme);
     let canvas = layout.canvas();
     for y in canvas.top()..canvas.bottom() {
         for x in canvas.left()..canvas.right() {
@@ -685,16 +693,10 @@ fn a_shape_dragged_beneath_a_layer_shows_as_it_will_be_put_down() {
     }
 }
 
-fn view_layout(view: &mut View, theme: &Theme) -> Layout {
-    let layout = view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, faces(theme));
-    view.settle(&layout, &mut Region::new());
-    layout
-}
-
 #[test]
 fn the_grid_is_drawn_in_its_colour_where_a_cell_starts() {
     let canvas = Canvas::new(16, 16, Kind::Rgba, Sample::Rgba([255; 4])).expect("fits");
-    let (mut view, layout, registry) = magnified(canvas, 7);
+    let (mut view, _, registry) = magnified(canvas, 7);
     let mut preferences = crate::preferences::Preferences::default();
     preferences.grid.spacing = (4, 4);
     preferences.grid.colour = tairix_colour::Rgb::new(255, 0, 0);
@@ -702,9 +704,9 @@ fn the_grid_is_drawn_in_its_colour_where_a_cell_starts() {
     preferences.grid.shown = true;
     preferences.pixel_grid_from = 0;
     view.begin(&preferences);
-    view.settle(&layout, &mut Region::new());
+    let layout = laid_out(&mut view, registry.active());
     let theme = registry.active();
-    let surface = paint(&view, &layout, theme);
+    let surface = paint(&view, theme);
     let red = Color::rgb(255, 0, 0).premultiply();
     let white = Color::rgb(255, 255, 255).premultiply();
     let (x, y) = corner_of(&view, &layout, (16, 16), (4, 1));
@@ -724,9 +726,9 @@ fn a_chosen_surround_and_checkerboard_are_drawn() {
     );
     preferences.shades = crate::preferences::Shades::Chosen(dark, light);
     preferences.surround = crate::preferences::Surround::Chosen(tairix_colour::Rgb::new(1, 2, 3));
-    view.adopt(&preferences, &layout, &mut Region::new());
+    view.adopt(&preferences, &mut Region::new());
     let theme = registry.active();
-    let surface = paint(&view, &layout, theme);
+    let surface = paint(&view, theme);
     let area = layout.canvas();
     let corner = (
         u32::try_from(area.left()).expect("on screen"),
@@ -750,7 +752,7 @@ fn the_strip_draws_its_pop_out() {
     let canvas = Canvas::new(20, 20, Kind::Rgba, Sample::Rgba([255; 4])).expect("fits");
     let (view, layout, registry) = window(canvas);
     let theme = registry.active();
-    let surface = paint(&view, &layout, theme);
+    let surface = paint(&view, theme);
     let raised = Color::from(theme.palette().surface_raised).premultiply();
     let pop_out = layout.pop_out();
     let (Ok(left), Ok(top)) = (u32::try_from(pop_out.left()), u32::try_from(pop_out.top())) else {
@@ -764,11 +766,10 @@ fn the_strip_draws_its_pop_out() {
 #[test]
 fn the_floating_palette_draws_each_well() {
     let canvas = Canvas::new(20, 20, Kind::Rgba, Sample::Rgba([255; 4])).expect("fits");
-    let (mut view, layout, registry) = window(canvas);
+    let (mut view, _, registry) = window(canvas);
     let theme = registry.active();
-    view.act(Action::FloatPalette, &layout, &mut Region::new());
-    let layout = view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, faces(theme));
-    view.settle(&layout, &mut Region::new());
+    view.act(Action::FloatPalette, &mut Region::new());
+    let layout = laid_out(&mut view, theme);
     let frame = layout.palette();
     assert!(
         frame.intersection(&layout.window()).is_empty(),
@@ -779,7 +780,6 @@ fn the_floating_palette_draws_each_well() {
     render_into(
         &mut surface,
         &view,
-        &layout,
         theme,
         Scale::ONE,
         faces(theme),

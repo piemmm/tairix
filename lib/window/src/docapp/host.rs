@@ -79,13 +79,11 @@ pub type Handle = tairix_rt::File;
 pub type Client = WindowClient<RtWindowTransport>;
 
 type ViewOf<A> = <A as DocumentApp>::View;
-type LayoutOf<A> = <ViewOf<A> as DocumentView>::Layout;
 type FacesOf<A> = <ViewOf<A> as DocumentView>::Faces;
 type MenuKindOf<A> = <ViewOf<A> as DocumentView>::MenuKind;
 type RequestOf<A> = Request<MenuKindOf<A>, <ViewOf<A> as DocumentView>::Own>;
 type SnapshotOf<A> = <A as DocumentApp>::Snapshot;
 type AppViewOf<A> = <A as DocumentApp>::AppView;
-type AppLayoutOf<A> = <AppViewOf<A> as AppView>::Layout;
 type AppOwnOf<A> = <AppViewOf<A> as AppView>::Own;
 
 /// The wait-set token of the queue's answer wake.
@@ -406,24 +404,21 @@ pub trait DocumentApp: Sized {
     /// application makes.
     fn app_request(_host: &mut Host<Self>, _index: usize, _request: AppOwnOf<Self>) {}
 
-    /// Draw application window `view` laid out as `layout` into `surface`,
-    /// as far as its clip admits.
+    /// Draw application window `view` into `surface`, as far as its clip
+    /// admits.
     fn render_app(
         &mut self,
         surface: &mut Surface,
         view: &Self::AppView,
-        layout: &AppLayoutOf<Self>,
         style: (&Theme, Scale, <Self::View as DocumentView>::Faces),
         focused: bool,
     );
 
-    /// Draw `view` laid out as `layout` into `surface`, as far as its clip
-    /// admits.
+    /// Draw `view` into `surface`, as far as its clip admits.
     fn render(
         &mut self,
         surface: &mut Surface,
         view: &Self::View,
-        layout: &<Self::View as DocumentView>::Layout,
         style: (&Theme, Scale, <Self::View as DocumentView>::Faces),
         focused: bool,
     );
@@ -433,8 +428,6 @@ pub trait DocumentApp: Sized {
 pub struct DocWindow<A: DocumentApp> {
     /// The engine it shows.
     pub view: A::View,
-    /// Where the engine draws, for the window's size.
-    pub layout: LayoutOf<A>,
     /// What the engine reported changed since the window was last painted.
     pub damage: Region,
     /// What the application keeps for it.
@@ -662,8 +655,6 @@ impl OwnedPane {
 pub struct AppWindow<A: DocumentApp> {
     /// What it shows.
     pub view: A::AppView,
-    /// Where it draws, for the window's size.
-    pub layout: AppLayoutOf<A>,
     /// What it reported changed since the window was last painted.
     pub damage: Region,
     chrome: Chrome,
@@ -686,8 +677,8 @@ impl<A: DocumentApp> AppWindow<A> {
             .owe(Repaint::reported_if(!self.damage.is_empty()));
     }
 
-    /// Lay the window out again for its size and bring the view into line
-    /// with it, owing what the view reported, and the whole when `whole`.
+    /// Lay the window out again for its size, owing what the view reported,
+    /// and the whole when `whole`.
     fn lay_out(
         &mut self,
         client: &mut Client,
@@ -697,10 +688,14 @@ impl<A: DocumentApp> AppWindow<A> {
         let least = self.view.min_size(theme, scale, faces);
         restate_least::<A>(client, &self.chrome.pane, &mut self.least, least);
         let mode = *self.chrome.pane.mode();
-        self.layout = self
-            .view
-            .layout(mode.width_px, mode.height_px, theme, scale, faces);
-        self.view.settle(&self.layout, &mut self.damage);
+        self.view.lay_out(
+            mode.width_px,
+            mode.height_px,
+            theme,
+            scale,
+            faces,
+            &mut self.damage,
+        );
         self.owe_reported();
         if whole {
             self.chrome.owe(Repaint::Whole);
@@ -974,8 +969,7 @@ impl<A: DocumentApp> DocWindow<A> {
     /// Say `message` where the window shows what it is told.
     pub fn state(&mut self, message: impl Into<String>) {
         self.view.say(message.into());
-        self.damage
-            .add(<A::View as DocumentView>::message_area(&self.layout));
+        self.damage.add(self.view.message_area());
         self.owe_reported();
     }
 
@@ -983,8 +977,7 @@ impl<A: DocumentApp> DocWindow<A> {
         self.chrome.owe(repaint);
     }
 
-    /// Lay the window out again for its size, bring the view into line with
-    /// it, and owe it whole.
+    /// Lay the window out again for its size, and owe it whole.
     fn relayout(&mut self, client: &mut Client, theme: &Theme, scale: Scale, faces: FacesOf<A>) {
         self.lay_out(client, theme, scale, faces);
         self.owe(Repaint::Whole);
@@ -993,16 +986,20 @@ impl<A: DocumentApp> DocWindow<A> {
         }
     }
 
-    /// Lay the window out again for its size and bring the view into line
-    /// with it, owing only what the view reported moved.
+    /// Lay the window out again for its size, owing only what the view
+    /// reported moved.
     fn lay_out(&mut self, client: &mut Client, theme: &Theme, scale: Scale, faces: FacesOf<A>) {
         let least = self.view.min_size(theme, scale, faces);
         restate_least::<A>(client, &self.chrome.pane, &mut self.least, least);
         let mode = *self.chrome.pane.mode();
-        self.layout = self
-            .view
-            .layout(mode.width_px, mode.height_px, theme, scale, faces);
-        self.view.settle(&self.layout, &mut self.damage);
+        self.view.lay_out(
+            mode.width_px,
+            mode.height_px,
+            theme,
+            scale,
+            faces,
+            &mut self.damage,
+        );
         self.owe_reported();
         self.owe_pointer_checks();
     }
@@ -1035,13 +1032,13 @@ impl<A: DocumentApp> DocWindow<A> {
         let wanted = if self.loading() {
             None
         } else {
-            self.view.tool_tip(&self.layout, scale, theme)
+            self.view.tool_tip(scale, theme)
         };
         let area = self.area();
         if mem::take(&mut self.chrome.pointing.owed) {
             let shape = match self.chrome.pointing.at {
                 Some(_) if self.loading() => CursorShape::Busy,
-                Some(at) => self.view.cursor(&self.layout, at),
+                Some(at) => self.view.cursor(at),
                 None => self.chrome.pointing.shape,
             };
             let tip = wanted.filter(|(rect, _)| within(*rect, area));
@@ -1050,7 +1047,7 @@ impl<A: DocumentApp> DocWindow<A> {
         for pane in &mut self.owned {
             if mem::take(&mut pane.chrome.pointing.owed) {
                 let shape = match pane.chrome.pointing.at {
-                    Some(at) => self.view.cursor(&self.layout, at),
+                    Some(at) => self.view.cursor(at),
                     None => pane.chrome.pointing.shape,
                 };
                 let shown = pane.shown();
@@ -1075,11 +1072,7 @@ impl<A: DocumentApp> DocWindow<A> {
     /// rasterises what it changed rather than everything the changes' bounds
     /// span. What the view reported inside a tool window is that window's to
     /// paint, so a change in a palette costs the window nothing.
-    fn paint(
-        &mut self,
-        client: &mut Client,
-        mut render: impl FnMut(&mut Surface, &A::View, &LayoutOf<A>, bool),
-    ) {
+    fn paint(&mut self, client: &mut Client, mut render: impl FnMut(&mut Surface, &A::View, bool)) {
         if !self.owned.is_empty() {
             for pane in &mut self.owned {
                 pane.take_damage(&self.damage);
@@ -1093,9 +1086,9 @@ impl<A: DocumentApp> DocWindow<A> {
             self.view.write_title(&mut self.chrome.title.draft);
         }
         let focused = self.focus_told;
-        let (view, layout) = (&self.view, &self.layout);
+        let view = &self.view;
         let painted = self.chrome.present(client, &mut self.damage, |surface, _| {
-            render(surface, view, layout, focused);
+            render(surface, view, focused);
         });
         self.chrome.presented(painted, A::NAME, view.name());
         for pane in &mut self.owned {
@@ -1103,7 +1096,7 @@ impl<A: DocumentApp> DocWindow<A> {
                 continue;
             };
             let painted = pane.chrome.present(client, &mut pane.damage, |surface, _| {
-                surface.with_origin(x, y, |surface| render(surface, view, layout, focused));
+                surface.with_origin(x, y, |surface| render(surface, view, focused));
             });
             pane.chrome.presented(painted, A::NAME, view.name());
         }
@@ -1131,8 +1124,7 @@ impl<A: DocumentApp> DocWindow<A> {
             Owned::Tool(_) => self.note_focus(),
             // Its look follows the keyboard, and it is small: repainted whole.
             Owned::Dialog(_) => {
-                self.view
-                    .dialog_focus_changed(focused, &self.layout, &mut self.damage);
+                self.view.dialog_focus_changed(focused, &mut self.damage);
                 pane.chrome.owe(Repaint::Whole);
                 self.owe_reported();
             }
@@ -1142,8 +1134,7 @@ impl<A: DocumentApp> DocWindow<A> {
     /// Tell the view whether it has the keyboard.
     fn tell_focus(&mut self, focused: bool) {
         self.focus_told = focused;
-        self.view
-            .focus_changed(focused, &self.layout, &mut self.damage);
+        self.view.focus_changed(focused, &mut self.damage);
         self.owe_reported();
     }
 }
@@ -1364,9 +1355,7 @@ impl<A: DocumentApp> Host<A> {
         match CloseAnswer::of(outcome) {
             CloseAnswer::Save => {
                 let window = &mut self.windows[index];
-                let outcome = window
-                    .view
-                    .save_then_close(&window.layout, &mut window.damage);
+                let outcome = window.view.save_then_close(&mut window.damage);
                 self.apply(index, outcome);
                 self.carry_quit_on(None);
             }
@@ -1564,10 +1553,8 @@ impl<A: DocumentApp> Host<A> {
                 return Err(why);
             }
         };
-        let layout = view.layout(mode.width_px, mode.height_px, theme, scale, self.faces);
         let mut window: DocWindow<A> = DocWindow {
             view,
-            layout,
             damage: A::damage_sink(),
             extra: A::Extra::default(),
             chrome: Chrome::new(pane, surface, title),
@@ -1589,7 +1576,14 @@ impl<A: DocumentApp> Host<A> {
             reveal_on_close: false,
             primary: None,
         };
-        window.view.settle(&window.layout, &mut window.damage);
+        window.view.lay_out(
+            mode.width_px,
+            mode.height_px,
+            theme,
+            scale,
+            self.faces,
+            &mut window.damage,
+        );
         self.windows.push(window);
         Ok(self.windows.len() - 1)
     }
@@ -1706,16 +1700,21 @@ impl<A: DocumentApp> Host<A> {
                 return None;
             }
         };
-        let layout = view.layout(mode.width_px, mode.height_px, theme, scale, self.faces);
         let mut window: AppWindow<A> = AppWindow {
             view,
-            layout,
             damage: A::damage_sink(),
             chrome: Chrome::new(pane, surface, title),
             least,
             owner,
         };
-        window.view.settle(&window.layout, &mut window.damage);
+        window.view.lay_out(
+            mode.width_px,
+            mode.height_px,
+            theme,
+            scale,
+            self.faces,
+            &mut window.damage,
+        );
         if self.app_windows.try_reserve(1).is_err() {
             let _ = window.chrome.pane.close(&mut self.client);
             self.alert(
@@ -2109,9 +2108,7 @@ impl<A: DocumentApp> Host<A> {
             rename,
             result.as_ref().map(Option::as_deref),
         );
-        window
-            .damage
-            .add(<A::View as DocumentView>::message_area(&window.layout));
+        window.damage.add(window.view.message_area());
         window.owe_reported();
         // A Save As that landed renamed the document, and may have made it
         // writable: its members show it by that name and as that.
@@ -2137,10 +2134,7 @@ impl<A: DocumentApp> Host<A> {
     /// else go on to ask where.
     fn ask_how(&mut self, index: usize, then_close: bool) {
         let window = &mut self.windows[index];
-        match window
-            .view
-            .ask_how(then_close, &window.layout, &mut window.damage)
-        {
+        match window.view.ask_how(then_close, &mut window.damage) {
             Some(outcome) => self.apply(index, outcome),
             None => self.ask_where(index, then_close),
         }
@@ -2308,15 +2302,9 @@ impl<A: DocumentApp> Host<A> {
             return;
         }
         let outcome = match outcome {
-            MenuOutcome::Chosen(item) => {
-                window.view.chosen(item, &window.layout, &mut window.damage)
-            }
+            MenuOutcome::Chosen(item) => window.view.chosen(item, &mut window.damage),
             MenuOutcome::Entered(item) => match self.client.take_menu_text(over, open_id) {
-                Ok(Some(text)) => {
-                    window
-                        .view
-                        .entered(item, &text, &window.layout, &mut window.damage)
-                }
+                Ok(Some(text)) => window.view.entered(item, &text, &mut window.damage),
                 Ok(None) => return,
                 Err(err) => {
                     window.state(format!("The entry could not be read ({err})"));
@@ -2369,10 +2357,10 @@ impl<A: DocumentApp> Host<A> {
             };
             let (theme, scale) = (self.themes.active(), self.desktop.scale());
             let window = &mut self.windows[index];
-            let (view, layout, damage) = (&mut window.view, &window.layout, &mut window.damage);
+            let (view, damage) = (&mut window.view, &mut window.damage);
             let outcome = match fed {
-                Fed::Window => view.input(&input, now, layout, scale, theme, damage),
-                Fed::Dialog => view.dialog_input(&input, now, layout, scale, theme, damage),
+                Fed::Window => view.input(&input, now, scale, theme, damage),
+                Fed::Dialog => view.dialog_input(&input, now, scale, theme, damage),
             };
             self.apply(index, outcome);
         }
@@ -2388,7 +2376,7 @@ impl<A: DocumentApp> Host<A> {
         for window in &mut self.app_windows {
             if mem::take(&mut window.chrome.pointing.owed) {
                 let shape = match window.chrome.pointing.at {
-                    Some(at) => window.view.cursor(&window.layout, at),
+                    Some(at) => window.view.cursor(at),
                     None => window.chrome.pointing.shape,
                 };
                 window.chrome.settle_pointer(&mut self.client, shape, None);
@@ -2459,9 +2447,7 @@ impl<A: DocumentApp> Host<A> {
             return;
         }
         window.reveal_on_close = alternate;
-        let outcome = window
-            .view
-            .close_requested(&window.layout, &mut window.damage);
+        let outcome = window.view.close_requested(&mut window.damage);
         self.apply(index, outcome);
     }
 
@@ -2606,9 +2592,7 @@ impl<A: DocumentApp> Host<A> {
             WindowEvent::ContentReleased { .. } => window.chrome.pane.release_frames(),
             WindowEvent::Focus { focused, .. } => {
                 window.chrome.focused = *focused;
-                window
-                    .view
-                    .focus_changed(*focused, &window.layout, &mut window.damage);
+                window.view.focus_changed(*focused, &mut window.damage);
                 window.owe_reported();
             }
             // It asks for no file; one handed to it anyway is let go.
@@ -2826,21 +2810,21 @@ impl<A: DocumentApp> Host<A> {
     fn act_tool(&mut self, index: usize, id: u32, event: &WindowEvent) {
         let (theme, scale) = (self.themes.active(), self.desktop.scale());
         let window = &mut self.windows[index];
-        let (view, layout, damage) = (&mut window.view, &window.layout, &mut window.damage);
+        let (view, damage) = (&mut window.view, &mut window.damage);
         let outcome = match *event {
             WindowEvent::ToolMoved { over, ended, .. } => {
                 let over = match over {
                     ToolOver::Parent { x, y } => Some(pointer_point(x, y)),
                     ToolOver::Elsewhere => None,
                 };
-                view.tool_moved(ToolMove { id, over, ended }, layout, scale, theme, damage)
+                view.tool_moved(ToolMove { id, over, ended }, scale, theme, damage)
             }
             WindowEvent::Resized {
                 width_px,
                 height_px,
                 ..
-            } => view.tool_resized(id, (width_px, height_px), layout, scale, damage),
-            _ => view.tool_gone(id, ToolGone::Closed, layout, damage),
+            } => view.tool_resized(id, (width_px, height_px), scale, damage),
+            _ => view.tool_gone(id, ToolGone::Closed, damage),
         };
         self.apply(index, outcome);
     }
@@ -2875,7 +2859,7 @@ impl<A: DocumentApp> Host<A> {
             // asked: the desktop never changes that of an open window.
             let shown = (window.owned[at].rect, window.owned[at].sizing);
             let wanted = (0..)
-                .map_while(|place| window.view.tool_window(&window.layout, place))
+                .map_while(|place| window.view.tool_window(place))
                 .any(|wanted| {
                     wanted.id == id
                         && wanted.fits_beside(area)
@@ -2890,7 +2874,7 @@ impl<A: DocumentApp> Host<A> {
         let mut place = 0;
         loop {
             let window = &mut self.windows[index];
-            let Some(wanted) = window.view.tool_window(&window.layout, place) else {
+            let Some(wanted) = window.view.tool_window(place) else {
                 return;
             };
             place += 1;
@@ -2960,7 +2944,7 @@ impl<A: DocumentApp> Host<A> {
         let (theme, scale) = (self.themes.active(), self.desktop.scale());
         let window = &mut self.windows[index];
         let area = window.area();
-        let wanted = window.view.dialog_window(&window.layout, scale, theme);
+        let wanted = window.view.dialog_window(scale, theme);
         let misplaced = wanted.is_some_and(|wanted| {
             !super::fits_beside(wanted.rect, area)
                 || window.owned.iter().any(|pane| {
@@ -3023,9 +3007,7 @@ impl<A: DocumentApp> Host<A> {
     fn dialog_refused(&mut self, index: usize, why: &str) {
         self.report(format!("a dialog could not be shown ({why})"));
         let window = &mut self.windows[index];
-        let outcome = window
-            .view
-            .dialog_refused(why, &window.layout, &mut window.damage);
+        let outcome = window.view.dialog_refused(why, &mut window.damage);
         self.apply(index, outcome);
     }
 
@@ -3036,10 +3018,9 @@ impl<A: DocumentApp> Host<A> {
             "a palette could not float ({why}); it stays in its window"
         ));
         let window = &mut self.windows[index];
-        let outcome =
-            window
-                .view
-                .tool_gone(id, ToolGone::Refused, &window.layout, &mut window.damage);
+        let outcome = window
+            .view
+            .tool_gone(id, ToolGone::Refused, &mut window.damage);
         self.apply(index, outcome);
     }
 
@@ -3082,14 +3063,9 @@ impl<A: DocumentApp> Host<A> {
             };
             let (theme, scale) = (self.themes.active(), self.desktop.scale());
             let window = &mut self.app_windows[index];
-            let outcome = window.view.input(
-                &input,
-                now,
-                &window.layout,
-                scale,
-                theme,
-                &mut window.damage,
-            );
+            let outcome = window
+                .view
+                .input(&input, now, scale, theme, &mut window.damage);
             self.apply_app(index, outcome);
         }
     }
@@ -3144,9 +3120,7 @@ impl<A: DocumentApp> Host<A> {
         };
         let window = &mut self.windows[index];
         window.quit_asked = true;
-        let outcome = window
-            .view
-            .close_requested(&window.layout, &mut window.damage);
+        let outcome = window.view.close_requested(&mut window.damage);
         self.apply(index, outcome);
     }
 
@@ -3234,7 +3208,7 @@ impl<A: DocumentApp> Host<A> {
         let window = &self.windows[index];
         let at = pointer_point(x, y);
         let places = !window.loading()
-            && matches!(&self.offered, Some((read, Ok(media))) if *read == drag && window.view.places(at, media, &window.layout));
+            && matches!(&self.offered, Some((read, Ok(media))) if *read == drag && window.view.places(at, media));
         if let Err(err) = self.client.answer_file_offer(window_id, serial, places) {
             self.report(format!("cannot answer a file offered ({err})"));
         }
@@ -3318,20 +3292,20 @@ impl<A: DocumentApp> Host<A> {
             if window.withheld.holds(now_ns) {
                 continue;
             }
-            window.paint(&mut self.client, |surface, view, layout, focused| {
-                app.render(surface, view, layout, (theme, scale, faces), focused);
+            window.paint(&mut self.client, |surface, view, focused| {
+                app.render(surface, view, (theme, scale, faces), focused);
             });
         }
         for window in &mut self.app_windows {
             if window.chrome.owed != Repaint::Nothing {
                 window.chrome.title.read(window.view.title());
             }
-            let (view, layout) = (&window.view, &window.layout);
+            let view = &window.view;
             let painted =
                 window
                     .chrome
                     .present(&mut self.client, &mut window.damage, |surface, focused| {
-                        app.render_app(surface, view, layout, (theme, scale, faces), focused);
+                        app.render_app(surface, view, (theme, scale, faces), focused);
                     });
             window
                 .chrome
@@ -3727,7 +3701,7 @@ impl<A: DocumentApp> Host<A> {
             {
                 window
                     .view
-                    .advance(now_ns, &window.layout, scale, theme, &mut window.damage);
+                    .advance(now_ns, scale, theme, &mut window.damage);
                 window.owe_reported();
             }
         }

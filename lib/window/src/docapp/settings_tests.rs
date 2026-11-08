@@ -115,36 +115,25 @@ impl Preferences for Prefs {
 
 type Window = SettingsWindow<Prefs, ()>;
 
-fn opened(record: Prefs, category: usize) -> (Window, tairix_controls::SettingsLayout, Theme) {
+fn opened(record: Prefs, category: usize) -> (Window, Theme) {
     let theme = Theme::light();
     let mut window = Window::new(record, category);
-    let layout = window.layout(600, 440, &theme, Scale::ONE, ());
-    window.settle(&layout, &mut Region::default());
-    (window, layout, theme)
+    window.lay_out(600, 440, &theme, Scale::ONE, (), &mut Region::default());
+    (window, theme)
 }
 
 type Asked = crate::docapp::Outcome<AppRequest<SettingsRequest<Prefs>>>;
 
-fn feed(
-    window: &mut Window,
-    event: &InputEvent,
-    layout: &tairix_controls::SettingsLayout,
-    theme: &Theme,
-) -> Asked {
-    window.input(event, 0, layout, Scale::ONE, theme, &mut Region::default())
+fn feed(window: &mut Window, event: &InputEvent, theme: &Theme) -> Asked {
+    window.input(event, 0, Scale::ONE, theme, &mut Region::default())
 }
 
-fn key(
-    window: &mut Window,
-    key: Key,
-    layout: &tairix_controls::SettingsLayout,
-    theme: &Theme,
-) -> Asked {
+fn key(window: &mut Window, key: Key, theme: &Theme) -> Asked {
     let event = InputEvent::KeyPressed {
         key,
         modifiers: Modifiers::default(),
     };
-    feed(window, &event, layout, theme)
+    feed(window, &event, theme)
 }
 
 /// The request an outcome carries for the application.
@@ -156,18 +145,18 @@ fn own(outcome: Asked) -> Option<SettingsRequest<Prefs>> {
 }
 
 /// Tab into the column, past the sidebar.
-fn into_column(window: &mut Window, layout: &tairix_controls::SettingsLayout, theme: &Theme) {
+fn into_column(window: &mut Window, theme: &Theme) {
     for _ in 0..2 {
-        let _ = key(window, Key::Named(NamedKey::Tab), layout, theme);
+        let _ = key(window, Key::Named(NamedKey::Tab), theme);
     }
 }
 
 #[test]
 fn a_switch_is_one_settled_edit_from_what_was_to_what_is() {
-    let (mut window, layout, theme) = opened(Prefs::default(), 0);
+    let (mut window, theme) = opened(Prefs::default(), 0);
     assert_eq!(window.title(), "Test settings");
-    into_column(&mut window, &layout, &theme);
-    let asked = own(key(&mut window, Key::Char(' '), &layout, &theme));
+    into_column(&mut window, &theme);
+    let asked = own(key(&mut window, Key::Char(' '), &theme));
     let now = Prefs {
         grid: true,
         ..Prefs::default()
@@ -192,27 +181,17 @@ fn typing_is_a_live_edit_and_enter_settles_it() {
         across: 16,
         ..Prefs::default()
     };
-    let (mut window, layout, theme) = opened(record.clone(), 1);
-    into_column(&mut window, &layout, &theme);
-    let _ = key(&mut window, Key::Named(NamedKey::End), &layout, &theme);
-    let _ = key(
-        &mut window,
-        Key::Named(NamedKey::Backspace),
-        &layout,
-        &theme,
-    );
-    let live = own(key(&mut window, Key::Char('2'), &layout, &theme)).and_then(|asked| asked.edit);
+    let (mut window, theme) = opened(record.clone(), 1);
+    into_column(&mut window, &theme);
+    let _ = key(&mut window, Key::Named(NamedKey::End), &theme);
+    let _ = key(&mut window, Key::Named(NamedKey::Backspace), &theme);
+    let live = own(key(&mut window, Key::Char('2'), &theme)).and_then(|asked| asked.edit);
     assert_eq!(
         live.as_ref().map(|edit| (edit.now.across, edit.settled)),
         Some((12, false))
     );
-    let settled = own(key(
-        &mut window,
-        Key::Named(NamedKey::Enter),
-        &layout,
-        &theme,
-    ))
-    .and_then(|asked| asked.edit);
+    let settled =
+        own(key(&mut window, Key::Named(NamedKey::Enter), &theme)).and_then(|asked| asked.edit);
     assert_eq!(
         settled.map(|edit| (edit.now.across, edit.settled)),
         Some((12, true))
@@ -221,27 +200,27 @@ fn typing_is_a_live_edit_and_enter_settles_it() {
 
 #[test]
 fn a_command_row_asks_the_application_and_restore_is_asked_for() {
-    let (mut window, layout, theme) = opened(Prefs::default(), 1);
-    into_column(&mut window, &layout, &theme);
-    let _ = key(&mut window, Key::Named(NamedKey::Down), &layout, &theme);
-    let asked = own(key(&mut window, Key::Char(' '), &layout, &theme));
+    let (mut window, theme) = opened(Prefs::default(), 1);
+    into_column(&mut window, &theme);
+    let _ = key(&mut window, Key::Named(NamedKey::Down), &theme);
+    let asked = own(key(&mut window, Key::Char(' '), &theme));
     assert_eq!(
         asked.and_then(|asked| asked.then),
         Some(Then::Ask("take")),
         "the panes row is the application's to carry out"
     );
-    let _ = key(&mut window, Key::Named(NamedKey::Tab), &layout, &theme);
-    let restore = own(key(&mut window, Key::Char(' '), &layout, &theme));
+    let _ = key(&mut window, Key::Named(NamedKey::Tab), &theme);
+    let restore = own(key(&mut window, Key::Char(' '), &theme));
     assert_eq!(restore.and_then(|asked| asked.then), Some(Then::Restore));
 }
 
 #[test]
 fn choosing_a_category_shows_its_groups_and_lays_the_window_out_again() {
-    let (mut window, layout, theme) = opened(Prefs::default(), 0);
+    let (mut window, theme) = opened(Prefs::default(), 0);
     assert_eq!(window.frame().column().groups()[0].rows().len(), 1);
-    let _ = key(&mut window, Key::Named(NamedKey::Tab), &layout, &theme);
-    let _ = key(&mut window, Key::Named(NamedKey::Down), &layout, &theme);
-    let chosen = key(&mut window, Key::Named(NamedKey::Enter), &layout, &theme);
+    let _ = key(&mut window, Key::Named(NamedKey::Tab), &theme);
+    let _ = key(&mut window, Key::Named(NamedKey::Down), &theme);
+    let chosen = key(&mut window, Key::Named(NamedKey::Enter), &theme);
     assert_eq!(chosen.relayout, Relayout::Whole);
     assert!(chosen.request.is_none(), "showing a category edits nothing");
     assert_eq!(window.category(), 1);
@@ -250,20 +229,17 @@ fn choosing_a_category_shows_its_groups_and_lays_the_window_out_again() {
 
 #[test]
 fn the_store_is_adopted_unless_a_control_is_held_and_its_refusal_said() {
-    let (mut window, layout, theme) = opened(Prefs::default(), 0);
+    let (mut window, theme) = opened(Prefs::default(), 0);
     let stored = Prefs {
         grid: true,
         across: 8,
     };
     let mut damage = Region::default();
-    assert!(
-        window.adopt(&stored, &layout, &mut damage),
-        "laid out again"
-    );
+    assert!(window.adopt(&stored, &mut damage), "laid out again");
     assert_eq!(window.record(), &stored);
-    assert!(!window.adopt(&stored, &layout, &mut damage), "nothing new");
-    window.say(Some(String::from("not saved")), &layout, &mut damage);
+    assert!(!window.adopt(&stored, &mut damage), "nothing new");
+    window.say(Some(String::from("not saved")), &mut damage);
     assert_eq!(window.frame().note(), Some("not saved"));
-    let close = key(&mut window, Key::Named(NamedKey::Escape), &layout, &theme);
+    let close = key(&mut window, Key::Named(NamedKey::Escape), &theme);
     assert!(matches!(close.request, Some(AppRequest::Close)));
 }

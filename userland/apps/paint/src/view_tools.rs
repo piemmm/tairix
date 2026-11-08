@@ -11,7 +11,6 @@ use super::{Aim, Compute, Draft, Gesture, Lands, Outcome, Settles, View};
 use crate::colour::Ink;
 use crate::crop::{set_out, Grab};
 use crate::gradient::Gradient;
-use crate::layout::Layout;
 use crate::mask::Mask;
 use crate::shape::{Bounds, Point as Fx, Shape, FX};
 use crate::stroke::Stroke;
@@ -80,13 +79,13 @@ impl View {
     /// Where the clone tool copies from, for its marker: beside the pointer
     /// once a stroke has fixed how far away it lies.
     #[must_use]
-    pub fn clone_marker(&self, layout: &Layout) -> Option<Fx> {
+    pub fn clone_marker(&self) -> Option<Fx> {
         if self.tool != crate::tool::Tool::Clone {
             return None;
         }
         match self.clone_offset {
             Some((dx, dy)) => {
-                let at = self.at(layout);
+                let at = self.at();
                 Some(Fx {
                     x: at.x + dx * FX,
                     y: at.y + dy * FX,
@@ -110,16 +109,11 @@ impl View {
     }
 
     /// The view dragged on to where the pointer is now.
-    pub(super) fn pan_to(
-        &mut self,
-        (from, scroll): (Point, (u64, u64)),
-        layout: &Layout,
-        damage: &mut Region,
-    ) {
+    pub(super) fn pan_to(&mut self, (from, scroll): (Point, (u64, u64)), damage: &mut Region) {
         let back = |at: u64, by: i32| at.saturating_add_signed(-i64::from(by));
         let x = back(scroll.0, self.pointer.x.saturating_sub(from.x));
         let y = back(scroll.1, self.pointer.y.saturating_sub(from.y));
-        self.scroll_to(Some(x), Some(y), layout, damage);
+        self.scroll_to(Some(x), Some(y), damage);
     }
 
     /// Begin a zoom box, or a click, where the pointer is; out with Alt.
@@ -132,14 +126,14 @@ impl View {
     }
 
     /// The zoom box dragged on to where the pointer is now.
-    pub(super) fn zoom_box_to(&mut self, layout: &Layout, damage: &mut Region) {
+    pub(super) fn zoom_box_to(&mut self, damage: &mut Region) {
         let Some(Gesture::ZoomBox { from, to, .. }) = &mut self.gesture else {
             return;
         };
         let before = screen_box(*from, *to);
         *to = self.pointer;
-        damage.add(before.intersection(&layout.canvas()));
-        damage.add(screen_box(*from, self.pointer).intersection(&layout.canvas()));
+        damage.add(before.intersection(&self.layout.canvas()));
+        damage.add(screen_box(*from, self.pointer).intersection(&self.layout.canvas()));
     }
 
     /// The zoom box let go: magnify to fill the canvas with what it holds,
@@ -147,15 +141,14 @@ impl View {
     pub(super) fn zoom_box_done(
         &mut self,
         (from, to, out): (Point, Point, bool),
-        layout: &Layout,
         damage: &mut Region,
     ) {
-        let area = layout.canvas();
+        let area = self.layout.canvas();
         damage.add(screen_box(from, to).intersection(&area));
         let click = (to.x - from.x).abs() < ZOOM_CLICK && (to.y - from.y).abs() < ZOOM_CLICK;
         if click {
             let rung = self.viewport.rung_beside(if out { -1 } else { 1 });
-            self.zoom_to(rung, from, layout, damage);
+            self.zoom_to(rung, from, damage);
             return;
         }
         let size = self.picture_size();
@@ -172,9 +165,9 @@ impl View {
         };
         if self.viewport.frame(held, size, area) {
             damage.add(area);
-            damage.add(layout.zoom());
+            damage.add(self.layout.zoom());
         }
-        self.settle(layout, damage);
+        self.settle(damage);
     }
 
     /// Begin a gradient from `at`, its inks swapped when `secondary`.
@@ -189,14 +182,9 @@ impl View {
 
     /// The gradient let go: laid by a worker, unless the drag spanned
     /// nothing.
-    pub(super) fn gradient_done(
-        &mut self,
-        gradient: Gradient,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
-        damage.add(layout.canvas());
-        if !gradient.spans() || !self.editable(layout, damage) {
+    pub(super) fn gradient_done(&mut self, gradient: Gradient, damage: &mut Region) -> Outcome {
+        damage.add(self.layout.canvas());
+        if !gradient.spans() || !self.editable(damage) {
             return Outcome::none();
         }
         let Some(Ok(canvas)) = self
@@ -204,11 +192,7 @@ impl View {
             .picture()
             .map(|picture| picture.canvas().try_clone())
         else {
-            self.state(
-                "There is not enough memory to lay the gradient",
-                layout,
-                damage,
-            );
+            self.state("There is not enough memory to lay the gradient", damage);
             return Outcome::none();
         };
         let work = Compute::Gradient {
@@ -216,40 +200,34 @@ impl View {
             gradient,
             clip: self.selection.clone(),
         };
-        self.begin_work(
-            work,
-            Lands::Tiles(Settles::Nothing),
-            GRADIENT,
-            layout,
-            damage,
-        )
+        self.begin_work(work, Lands::Tiles(Settles::Nothing), GRADIENT, damage)
     }
 
     /// A press with the clone tool: with Alt, choose where it copies from;
     /// otherwise paint what lies there, at the distance the first stroke
     /// from it set.
-    pub(super) fn clone_press(&mut self, at: Fx, layout: &Layout, damage: &mut Region) {
+    pub(super) fn clone_press(&mut self, at: Fx, damage: &mut Region) {
         if self.modifiers.alt {
             self.clone_from = Some(at);
             self.clone_offset = None;
-            self.state("Copying from here: paint where it is to go", layout, damage);
-            damage.add(layout.canvas());
+            self.state("Copying from here: paint where it is to go", damage);
+            damage.add(self.layout.canvas());
             return;
         }
         let Some(from) = self.clone_from else {
-            self.state("Alt-click where to copy from first", layout, damage);
+            self.state("Alt-click where to copy from first", damage);
             return;
         };
         if self.clone_offset.is_none() {
             let ((sx, sy), (dx, dy)) = (from.pixel(), at.pixel());
             self.clone_offset = Some((sx - dx, sy - dy));
         }
-        self.begin_stroke(at, false, layout, damage);
+        self.begin_stroke(at, false, damage);
     }
 
     /// A press with the text tool: set down the text being typed if the
     /// press is off it, and begin new text there.
-    pub(super) fn text_press(&mut self, at: Fx, layout: &Layout, damage: &mut Region) {
+    pub(super) fn text_press(&mut self, at: Fx, damage: &mut Region) {
         let pixel = at.pixel();
         let on_it = self.text.as_ref().is_some_and(|entry| {
             let b = entry.bounds();
@@ -259,9 +237,9 @@ impl View {
         if on_it {
             return;
         }
-        self.commit_text(layout, damage);
+        self.commit_text(damage);
         self.text = Some(TextEntry::new(pixel));
-        self.damage_text(layout, damage);
+        self.damage_text(damage);
     }
 
     /// The face the text tool sets text in.
@@ -271,20 +249,16 @@ impl View {
 
     /// Set the text being typed again, as its words, size or smoothing now
     /// stand, reporting what it covered and covers.
-    pub(super) fn reset_text(&mut self, theme: &Theme, layout: &Layout, damage: &mut Region) {
-        self.damage_text(layout, damage);
+    pub(super) fn reset_text(&mut self, theme: &Theme, damage: &mut Region) {
+        self.damage_text(damage);
         let (face, smooth) = (self.text_face(theme), self.smooth(self.kind()));
         let Some(entry) = &mut self.text else {
             return;
         };
         if entry.set(face, smooth).is_err() {
-            self.state(
-                "There is not enough memory to set that text",
-                layout,
-                damage,
-            );
+            self.state("There is not enough memory to set that text", damage);
         }
-        self.damage_text(layout, damage);
+        self.damage_text(damage);
     }
 
     /// A key while text is being typed and the picture has the keyboard:
@@ -293,20 +267,19 @@ impl View {
         &mut self,
         key: Key,
         theme: &Theme,
-        layout: &Layout,
         damage: &mut Region,
     ) -> Option<Outcome> {
         let chord = self.modifiers.ctrl || self.modifiers.alt || self.modifiers.meta;
         let entry = self.text.as_mut()?;
         let changed = match key {
             Key::Named(NamedKey::Escape) => {
-                self.damage_text(layout, damage);
+                self.damage_text(damage);
                 self.text = None;
                 return Some(Outcome::none());
             }
             Key::Char(ch) if !chord && !ch.is_control() => {
                 if !entry.insert(ch) {
-                    self.state("That text holds no more", layout, damage);
+                    self.state("That text holds no more", damage);
                     return Some(Outcome::none());
                 }
                 true
@@ -327,18 +300,18 @@ impl View {
             _ => return None,
         };
         if changed {
-            self.reset_text(theme, layout, damage);
+            self.reset_text(theme, damage);
         }
         Some(Outcome::none())
     }
 
     /// Set the text being typed down on the picture, as one change.
-    pub(super) fn commit_text(&mut self, layout: &Layout, damage: &mut Region) {
+    pub(super) fn commit_text(&mut self, damage: &mut Region) {
         let Some(entry) = self.text.take() else {
             return;
         };
-        self.damage_text_of(&entry, layout, damage);
-        if entry.is_empty() || !self.reserve(layout, damage) {
+        self.damage_text_of(&entry, damage);
+        if entry.is_empty() || !self.reserve(damage) {
             return;
         }
         let kind = self.kind();
@@ -353,23 +326,19 @@ impl View {
             self.document.record_tiles(stroke.finish());
         } else {
             stroke.revert(canvas);
-            self.state(
-                "There is not enough memory to set that text",
-                layout,
-                damage,
-            );
+            self.state("There is not enough memory to set that text", damage);
         }
-        self.damage_picture(bounds, layout, damage);
+        self.damage_picture(bounds, damage);
     }
 
     /// Report what the text being typed covers, its caret and its frame.
-    fn damage_text(&self, layout: &Layout, damage: &mut Region) {
+    fn damage_text(&self, damage: &mut Region) {
         if let Some(entry) = &self.text {
-            self.damage_text_of(entry, layout, damage);
+            self.damage_text_of(entry, damage);
         }
     }
 
-    fn damage_text_of(&self, entry: &TextEntry, layout: &Layout, damage: &mut Region) {
+    fn damage_text_of(&self, entry: &TextEntry, damage: &mut Region) {
         let (x, top, bottom) = entry.caret();
         let caret = Bounds {
             x0: x - 1,
@@ -378,7 +347,7 @@ impl View {
             y1: bottom,
         };
         let framed = entry.bounds().union(&caret);
-        self.damage_picture(Some(framed), layout, damage);
+        self.damage_picture(Some(framed), damage);
     }
 
     /// A press with the polygon tool: begin one, or place its next corner.
@@ -386,12 +355,11 @@ impl View {
         &mut self,
         at: Fx,
         secondary: bool,
-        layout: &Layout,
         scale: Scale,
         damage: &mut Region,
     ) -> Outcome {
         if self.draft.is_some() {
-            return self.place_corner(at, layout, scale, damage);
+            return self.place_corner(at, scale, damage);
         }
         match fallible::collected(1, core::iter::once(at)) {
             Some(corners) => {
@@ -400,23 +368,17 @@ impl View {
                     to: at,
                     aim: Aim::Shape { secondary },
                 });
-                self.damage_picture(Some(super::input::segment(at, at)), layout, damage);
+                self.damage_picture(Some(super::input::segment(at, at)), damage);
             }
-            None => self.state("There is not enough memory to draw that", layout, damage),
+            None => self.state("There is not enough memory to draw that", damage),
         }
         Outcome::none()
     }
 
     /// Draw the closed polygon through `corners` as the style says, its inks
     /// swapped when `secondary`.
-    pub(super) fn put_polygon(
-        &mut self,
-        corners: &[Fx],
-        secondary: bool,
-        layout: &Layout,
-        damage: &mut Region,
-    ) {
-        if corners.len() < 3 || !self.reserve(layout, damage) {
+    pub(super) fn put_polygon(&mut self, corners: &[Fx], secondary: bool, damage: &mut Region) {
+        if corners.len() < 3 || !self.reserve(damage) {
             return;
         }
         let kind = self.kind();
@@ -460,22 +422,16 @@ impl View {
             self.document.record_tiles(stroke.finish());
         } else {
             stroke.revert(canvas);
-            self.state("There is not enough memory to draw that", layout, damage);
+            self.state("There is not enough memory to draw that", damage);
         }
-        self.damage_picture(bounds, layout, damage);
+        self.damage_picture(bounds, damage);
     }
 
     /// A press with the crop tool: take the box's edge, corner or middle
     /// where it lands on one, and otherwise set a new box out.
-    pub(super) fn crop_press(
-        &mut self,
-        at: Fx,
-        layout: &Layout,
-        scale: Scale,
-        damage: &mut Region,
-    ) {
+    pub(super) fn crop_press(&mut self, at: Fx, scale: Scale, damage: &mut Region) {
         let size = self.picture_size();
-        let area = layout.canvas();
+        let area = self.layout.canvas();
         let pixel = at.pixel();
         if let Some(start) = self.crop {
             let edge = self.viewport.screen_span(start, size, area);
@@ -501,17 +457,11 @@ impl View {
             from: pixel,
             before,
         });
-        self.crop_moved(before, layout, scale, damage);
+        self.crop_moved(before, scale, damage);
     }
 
     /// The crop box dragged on to pixel `to`.
-    pub(super) fn crop_to(
-        &mut self,
-        to: (i64, i64),
-        layout: &Layout,
-        scale: Scale,
-        damage: &mut Region,
-    ) {
+    pub(super) fn crop_to(&mut self, to: (i64, i64), scale: Scale, damage: &mut Region) {
         let size = self.picture_size();
         let within = Bounds::picture(size.0, size.1);
         let grid = self.snapping().then(|| self.canvas_style().grid);
@@ -532,21 +482,15 @@ impl View {
         if self.crop != Some(crop) {
             let before = self.crop;
             self.crop = (!crop.is_empty()).then_some(crop);
-            self.crop_moved(before, layout, scale, damage);
+            self.crop_moved(before, scale, damage);
         }
     }
 
     /// Report what the crop box moving from `before` changed: both boxes,
     /// with the handles straddling their edges, where it was and is held;
     /// the whole canvas where the veil over what it cuts away comes or goes.
-    fn crop_moved(
-        &self,
-        before: Option<Bounds>,
-        layout: &Layout,
-        scale: Scale,
-        damage: &mut Region,
-    ) {
-        let area = layout.canvas();
+    fn crop_moved(&self, before: Option<Bounds>, scale: Scale, damage: &mut Region) {
+        let area = self.layout.canvas();
         let (Some(before), Some(after)) = (before, self.crop) else {
             damage.add(area);
             return;
@@ -559,11 +503,11 @@ impl View {
     }
 
     /// Cut the picture down to the crop box, on a worker.
-    pub(super) fn apply_crop(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+    pub(super) fn apply_crop(&mut self, damage: &mut Region) -> Outcome {
         let Some(area) = self.crop.take() else {
             return Outcome::none();
         };
-        damage.add(layout.canvas());
+        damage.add(self.layout.canvas());
         let (Ok(x), Ok(y), Ok(width), Ok(height)) = (
             u32::try_from(area.x0),
             u32::try_from(area.y0),
@@ -580,15 +524,14 @@ impl View {
                 height,
             },
             "crop",
-            layout,
             damage,
         )
     }
 
     /// Fill what is selected, or the whole picture, with the primary ink,
     /// as much of each pixel as the selection chooses.
-    pub(super) fn fill_selection(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        if !self.editable(layout, damage) {
+    pub(super) fn fill_selection(&mut self, damage: &mut Region) -> Outcome {
+        if !self.editable(damage) {
             return Outcome::none();
         }
         let (width, height) = self.picture_size();
@@ -604,7 +547,7 @@ impl View {
             .picture()
             .map(|picture| picture.canvas().try_clone())
         else {
-            self.state("There is not enough memory to fill that", layout, damage);
+            self.state("There is not enough memory to fill that", damage);
             return Outcome::none();
         };
         let work = Compute::Clear {
@@ -612,26 +555,21 @@ impl View {
             chosen,
             ink: self.primary,
         };
-        self.begin_work(
-            work,
-            Lands::Tiles(Settles::Nothing),
-            "fill that",
-            layout,
-            damage,
-        )
+        self.begin_work(work, Lands::Tiles(Settles::Nothing), "fill that", damage)
     }
 
     /// Damage the marker the clone tool draws where it copies from, at
     /// picture point `at`.
-    pub(super) fn damage_marker(&self, at: Option<Fx>, layout: &Layout, damage: &mut Region) {
+    pub(super) fn damage_marker(&self, at: Option<Fx>, damage: &mut Region) {
         if let Some(at) = at {
-            damage.add(marker_rect(self, at, layout).intersection(&layout.canvas()));
+            damage.add(marker_rect(self, at).intersection(&self.layout.canvas()));
         }
     }
 }
 
 /// The screen rectangle a marker at picture point `at` is drawn over.
-fn marker_rect(view: &View, at: Fx, layout: &Layout) -> Rect {
+fn marker_rect(view: &View, at: Fx) -> Rect {
+    let layout = view.layout();
     let size = view.picture_size();
     let (x, y) = view.viewport.screen_of((at.x, at.y), size, layout.canvas());
     let (x, y) = (

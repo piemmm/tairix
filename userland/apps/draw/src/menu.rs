@@ -929,15 +929,15 @@ impl View {
     }
 
     /// Carry out a chosen menu row.
-    pub fn choose(&mut self, chosen: Chosen, layout: &Layout, damage: &mut Region) -> ViewOutcome {
-        damage.add(layout.window);
+    pub fn choose(&mut self, chosen: Chosen, damage: &mut Region) -> ViewOutcome {
+        damage.add(self.layout.window);
         match chosen {
-            Chosen::Command(command) => return self.carry_out(command, layout, damage),
+            Chosen::Command(command) => return self.carry_out(command, damage),
             Chosen::Tool(tool) => self.choose_tool(tool),
-            Chosen::Zoom(zoom) => self.viewport.zoom_at(zoom, canvas_centre(layout)),
+            Chosen::Zoom(zoom) => self.viewport.zoom_at(zoom, canvas_centre(&self.layout)),
             Chosen::Paper(index) => {
                 self.land_pending(damage);
-                self.set_paper(index, layout);
+                self.set_paper(index);
             }
             Chosen::Unit(unit) => {
                 self.land_pending(damage);
@@ -948,13 +948,8 @@ impl View {
     }
 
     /// Carry out `command`.
-    pub fn carry_out(
-        &mut self,
-        command: Command,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> ViewOutcome {
-        damage.add(layout.window);
+    pub fn carry_out(&mut self, command: Command, damage: &mut Region) -> ViewOutcome {
+        damage.add(self.layout.window);
         if command.lands_pending_first() {
             self.land_pending(damage);
         }
@@ -1024,11 +1019,11 @@ impl View {
             Command::LowerLayer => self.layer_command(LayerCommand::Lower),
             Command::ZoomIn | Command::ZoomOut => {
                 let zoom = self.viewport.stepped(command == Command::ZoomOut);
-                self.viewport.zoom_at(zoom, canvas_centre(layout));
+                self.viewport.zoom_at(zoom, canvas_centre(&self.layout));
             }
-            Command::ActualSize => self.viewport.zoom_at(1.0, canvas_centre(layout)),
-            Command::FitPage => self.fit(self.document.drawing().page().bounds(), layout),
-            Command::FitSelection => self.fit(self.selection_bounds(), layout),
+            Command::ActualSize => self.viewport.zoom_at(1.0, canvas_centre(&self.layout)),
+            Command::FitPage => self.fit(self.document.drawing().page().bounds()),
+            Command::FitSelection => self.fit(self.selection_bounds()),
             Command::Outline => self.toggle_outlines(),
             Command::Grid => self.show.grid = !self.show.grid,
             Command::Snap => self.show.snapping = !self.show.snapping,
@@ -1220,7 +1215,7 @@ impl View {
 
     /// The page made the paper at `index` of the table, turned as the page
     /// is turned now, and fitted in the window.
-    fn set_paper(&mut self, index: usize, layout: &Layout) {
+    fn set_paper(&mut self, index: usize) {
         let Some(paper) = tairix_drawing::PAPER.get(index) else {
             return;
         };
@@ -1235,7 +1230,7 @@ impl View {
             *page = if landscape { held.turned(true) } else { held };
         });
         if sized {
-            self.fit(self.shown().page().bounds(), layout);
+            self.fit(self.shown().page().bounds());
         }
     }
 
@@ -1276,12 +1271,12 @@ impl View {
     }
 
     /// Fit `bounds` in the canvas.
-    pub(crate) fn fit(&mut self, bounds: tairix_bezier::Bounds, layout: &Layout) {
+    pub(crate) fn fit(&mut self, bounds: tairix_bezier::Bounds) {
         let size = Point::new(
-            f64::from(layout.canvas.width),
-            f64::from(layout.canvas.height),
+            f64::from(self.layout.canvas.width),
+            f64::from(self.layout.canvas.height),
         );
-        let margin = f64::from(layout.length(24));
+        let margin = f64::from(self.layout.length(24));
         self.viewport.fit(bounds, size, margin);
     }
 
@@ -1322,17 +1317,12 @@ impl View {
     }
 
     /// The queue's answer to a reshaping landed.
-    pub fn computed(
-        &mut self,
-        computed: crate::compute::Computed,
-        layout: &Layout,
-        damage: &mut Region,
-    ) {
+    pub fn computed(&mut self, computed: crate::compute::Computed, damage: &mut Region) {
         if self.pending != Some(computed.job) {
             return;
         }
         self.pending = None;
-        damage.add(layout.window);
+        damage.add(self.layout.window);
         if self.live.is_some() || computed.generation != self.document.generation() {
             self.message = Some(alloc::format!(
                 "{} was not made: the drawing changed meanwhile",

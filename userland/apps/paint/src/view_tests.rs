@@ -26,7 +26,7 @@ use crate::brush::{AIRBRUSH_INTERVAL_NS, AIRBRUSH_STILL_NS};
 use crate::canvas::{Canvas, Kind, OutOfMemory, Sample};
 use crate::colour::Ink;
 use crate::document::{Document, Entry, NewPicture, Origin, Picture, SpriteInfo};
-use crate::layout::{Faces, Layout};
+use crate::layout::Faces;
 use crate::mask::Mask;
 use crate::op::{Family, Halted, Op};
 use crate::op_pane::Spot;
@@ -49,7 +49,6 @@ fn faces(theme: &Theme) -> Faces {
 /// A window on `document`, laid out, with the theme it is drawn in.
 struct Window {
     view: View,
-    layout: Layout,
     registry: ThemeRegistry,
     now: u64,
 }
@@ -65,21 +64,12 @@ impl Window {
     }
 
     fn over(view: View) -> Self {
-        let registry = ThemeRegistry::with_builtins();
-        let layout = view.layout(
-            WINDOW.0,
-            WINDOW.1,
-            registry.active(),
-            Scale::ONE,
-            faces(registry.active()),
-        );
         let mut window = Self {
             view,
-            layout,
-            registry,
+            registry: ThemeRegistry::with_builtins(),
             now: 1_000_000_000,
         };
-        window.view.settle(&window.layout, &mut Region::new());
+        window.relayout();
         window
     }
 
@@ -88,12 +78,17 @@ impl Window {
         Self::new(Document::new(Picture::plain(canvas)))
     }
 
+    /// Lay the window out again, as the host does when an outcome asks.
     fn relayout(&mut self) {
         let theme = self.registry.active();
-        self.layout = self
-            .view
-            .layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, faces(theme));
-        self.view.settle(&self.layout, &mut Region::new());
+        self.view.lay_out(
+            WINDOW.0,
+            WINDOW.1,
+            theme,
+            Scale::ONE,
+            faces(theme),
+            &mut Region::new(),
+        );
     }
 
     fn apply(&mut self, outcome: &Outcome) {
@@ -110,14 +105,9 @@ impl Window {
     fn pointer_at(&mut self, event: InputEvent, at_ns: u64) -> Outcome {
         self.now = at_ns;
         let theme = self.registry.active();
-        let outcome = self.view.on_pointer(
-            &event,
-            at_ns,
-            &self.layout,
-            Scale::ONE,
-            theme,
-            &mut Region::new(),
-        );
+        let outcome = self
+            .view
+            .on_pointer(&event, at_ns, Scale::ONE, theme, &mut Region::new());
         self.apply(&outcome);
         outcome
     }
@@ -130,20 +120,14 @@ impl Window {
     fn run_until(&mut self, until_ns: u64) {
         for _ in 0..10_000 {
             let theme = self.registry.active();
-            self.view
-                .arm_deadline(self.now, &self.layout, Scale::ONE, theme);
+            self.view.arm_deadline(self.now, Scale::ONE, theme);
             let Some(due) = self.view.deadline_ns().filter(|&due| due <= until_ns) else {
                 self.now = until_ns;
                 return;
             };
             self.now = self.now.max(due);
-            self.view.tick(
-                self.now,
-                &self.layout,
-                Scale::ONE,
-                theme,
-                &mut Region::new(),
-            );
+            self.view
+                .tick(self.now, Scale::ONE, theme, &mut Region::new());
         }
         panic!("a deadline that never moves on");
     }
@@ -174,7 +158,6 @@ impl Window {
                 modifiers,
                 at_ns: self.now,
             },
-            &self.layout,
             Scale::ONE,
             theme,
             &mut Region::new(),
@@ -184,7 +167,7 @@ impl Window {
     }
 
     fn act(&mut self, action: Action) -> Outcome {
-        let outcome = self.view.act(action, &self.layout, &mut Region::new());
+        let outcome = self.view.act(action, &mut Region::new());
         self.apply(&outcome);
         outcome
     }
@@ -198,7 +181,6 @@ impl Window {
                 modifiers: Modifiers::default(),
             },
             self.now,
-            &self.layout,
             (Scale::ONE, theme),
             &mut Region::new(),
         );
@@ -209,7 +191,8 @@ impl Window {
     /// Click setting `index` of the tool-controls bar.
     fn click_setting(&mut self, index: usize) {
         let at = self
-            .layout
+            .view
+            .layout()
             .bar()
             .control(index)
             .expect("the setting is seated")
@@ -226,7 +209,7 @@ impl Window {
         let theme = self.registry.active();
         self.view
             .bar
-            .popup_rect(self.layout.bar(), Scale::ONE, theme)
+            .popup_rect(self.view.layout().bar(), Scale::ONE, theme)
     }
 
     /// Tab from the picture until the dock has the keyboard.
@@ -243,7 +226,10 @@ impl Window {
     /// The screen point at the centre of picture pixel `(x, y)`.
     fn screen_of(&self, (x, y): (u32, u32)) -> Point {
         let size = self.size();
-        let (ox, oy) = self.view.viewport().origin(size, self.layout.canvas());
+        let (ox, oy) = self
+            .view
+            .viewport()
+            .origin(size, self.view.layout().canvas());
         let (across, down) = self.view.viewport().pixel_span();
         let (across, down) = (
             i64::try_from(across.max(1)).expect("small"),
@@ -275,16 +261,14 @@ impl Window {
             panic!("a request for a worker, not {:?}", outcome.request);
         };
         let answer = compute(work, &SERIAL);
-        let outcome = self
-            .view
-            .computed(job, answer, &self.layout, &mut Region::new());
+        let outcome = self.view.computed(job, answer, &mut Region::new());
         self.apply(&outcome);
         outcome
     }
 
     /// What the window's loop would ask of the preview worker now.
     fn wanted_preview(&mut self) -> Option<Request> {
-        self.view.wanted_preview(&self.layout, Scale::ONE)
+        self.view.wanted_preview(Scale::ONE)
     }
 
     /// Carry out preview request `request` as the preview worker would, and
@@ -300,8 +284,7 @@ impl Window {
             work,
         };
         let answer = crate::preview::serve(asked, &SERIAL, &|| false);
-        self.view
-            .previewed(answer, &self.layout, &mut Region::new());
+        self.view.previewed(answer, &mut Region::new());
     }
 
     /// Serve the preview worker as the window's loop asks it until the window
@@ -319,7 +302,7 @@ impl Window {
     /// A point `(across, down)` pixels into the colour dock's picker, whose
     /// plane fills its top-left corner.
     fn dock_point(&self, (across, down): (i32, i32)) -> Point {
-        let picker = self.layout.picker();
+        let picker = self.view.layout().picker();
         Point::new(picker.left() + across, picker.top() + down)
     }
 
@@ -441,12 +424,9 @@ fn a_fill_is_done_by_a_worker_and_edits_wait_for_it() {
 fn an_answer_to_another_job_is_not_taken() {
     let mut window = Window::white(10, 10);
     let canvas = Canvas::new(3, 3, Kind::Rgba, Sample::Rgba([1; 4])).expect("fits");
-    window.view.computed(
-        99,
-        Computed::Picture(Ok(vec![canvas])),
-        &window.layout,
-        &mut Region::new(),
-    );
+    window
+        .view
+        .computed(99, Computed::Picture(Ok(vec![canvas])), &mut Region::new());
     assert_eq!(window.size(), (10, 10));
 }
 
@@ -601,9 +581,7 @@ fn a_held_airbrush_builds_paint_once_it_is_known_to_be_still() {
     assert!(middle(&window) < once, "and goes on building while held");
     window.release(PointerButton::Primary);
     let theme = window.registry.active();
-    window
-        .view
-        .arm_deadline(window.now, &window.layout, Scale::ONE, theme);
+    window.view.arm_deadline(window.now, Scale::ONE, theme);
     assert_eq!(
         window.view.deadline_ns(),
         None,
@@ -665,7 +643,7 @@ fn a_paste_floats_until_it_is_put_down() {
     let pasted = Canvas::new(4, 4, Kind::Rgba, Sample::Rgba([9, 9, 9, 255])).expect("fits");
     let outcome = window
         .view
-        .pasted(Ok((pasted, Kind::Rgba)), &window.layout, &mut Region::new());
+        .pasted(Ok((pasted, Kind::Rgba)), &mut Region::new());
     window.apply(&outcome);
     assert_eq!(window.view.tool(), Tool::Select);
     let floating = window.view.floating().expect("floating").bounds();
@@ -891,9 +869,7 @@ fn pages_are_stepped_through_and_gone_to_by_number() {
     assert_eq!(window.view.document().current(), 1);
     let go_to = |window: &mut Window, text: &str| {
         let id = AppMenuItemId::new(GO_TO_ENTRY).expect("an id");
-        let outcome = window
-            .view
-            .entered(id, text, &window.layout, &mut Region::new());
+        let outcome = window.view.entered(id, text, &mut Region::new());
         window.apply(&outcome);
     };
     go_to(&mut window, "1");
@@ -938,9 +914,7 @@ fn a_sprite_window_hands_each_change_to_its_file_and_closes_unasked() {
     window.drag((1, 1), (1, 1));
     assert!(window.view.take_edit().is_some());
     assert!(window.view.take_edit().is_none(), "handed once");
-    let outcome = window
-        .view
-        .close_requested(&window.layout, &mut Region::new());
+    let outcome = window.view.close_requested(&mut Region::new());
     assert!(matches!(outcome.request, Some(Request::Close)));
 }
 
@@ -962,15 +936,11 @@ fn a_palette_picture_paints_in_its_entries_and_offers_them_as_wells() {
 #[test]
 fn closing_with_changes_asks_the_host_to_ask_first() {
     let mut window = Window::white(10, 10);
-    let outcome = window
-        .view
-        .close_requested(&window.layout, &mut Region::new());
+    let outcome = window.view.close_requested(&mut Region::new());
     assert!(matches!(outcome.request, Some(Request::Close)));
     window.act(Action::Tool(Tool::Pencil));
     window.drag((1, 1), (1, 1));
-    let outcome = window
-        .view
-        .close_requested(&window.layout, &mut Region::new());
+    let outcome = window.view.close_requested(&mut Region::new());
     assert!(matches!(outcome.request, Some(Request::AskToClose)));
     assert!(
         !window.view.asking(),
@@ -986,9 +956,7 @@ fn a_form_open_over_the_picture_does_not_hold_a_quit() {
     window.drag((1, 1), (1, 1));
     window.act(Action::NewPicture);
     assert!(window.view.asking());
-    let outcome = window
-        .view
-        .close_requested(&window.layout, &mut Region::new());
+    let outcome = window.view.close_requested(&mut Region::new());
     assert!(matches!(outcome.request, Some(Request::AskToClose)));
     assert!(!window.view.asking_to_close());
 }
@@ -1001,9 +969,7 @@ fn saving_before_closing_puts_the_floating_selection_down_first() {
     window.act(Action::Tool(Tool::Pencil));
     window.drag((10, 10), (10, 10));
     window.lift((8, 8), (12, 12), (20, 10));
-    let putting_down = window
-        .view
-        .save_then_close(&window.layout, &mut Region::new());
+    let putting_down = window.view.save_then_close(&mut Region::new());
     assert!(
         window.view.asking_to_close(),
         "a quit waits on the put-down"
@@ -1031,18 +997,14 @@ fn an_operation_moved_counts_as_unsaved_and_saving_before_closing_applies_it() {
         SavedDocument::is_modified(&window.view),
         "its settings moved"
     );
-    let closing = window
-        .view
-        .close_requested(&window.layout, &mut Region::new());
+    let closing = window.view.close_requested(&mut Region::new());
     assert!(
         matches!(closing.request, Some(Request::AskToClose)),
         "{:?}",
         closing.request
     );
     window.settle_previews();
-    let saving = window
-        .view
-        .save_then_close(&window.layout, &mut Region::new());
+    let saving = window.view.save_then_close(&mut Region::new());
     assert!(
         matches!(saving.request, Some(Request::SaveThenClose)),
         "{:?}",
@@ -1089,17 +1051,13 @@ fn saving_before_closing_waits_for_an_apply_still_being_worked_out() {
     window.serve_preview(first);
     let applying = press_on(&mut window, PaneKind::Adjustments, Spot::Apply);
     assert!(window.view.busy(), "completed on the queue");
-    let closing = window
-        .view
-        .close_requested(&window.layout, &mut Region::new());
+    let closing = window.view.close_requested(&mut Region::new());
     assert!(
         matches!(closing.request, Some(Request::AskToClose)),
         "{:?}",
         closing.request
     );
-    let waiting = window
-        .view
-        .save_then_close(&window.layout, &mut Region::new());
+    let waiting = window.view.save_then_close(&mut Region::new());
     assert!(waiting.request.is_none(), "nothing saved before it lands");
     assert!(window.view.asking_to_close(), "a quit waits on it");
     let saving = window.run_worker(applying);
@@ -1122,9 +1080,7 @@ fn closing_a_sprite_window_applies_its_operation_first() {
     let mut window = sprite_window();
     window.act(Action::Adjust(op_index("Brightness & contrast")));
     press_on(&mut window, PaneKind::Adjustments, Spot::Number(900));
-    let closing = window
-        .view
-        .close_requested(&window.layout, &mut Region::new());
+    let closing = window.view.close_requested(&mut Region::new());
     assert!(
         matches!(closing.request, Some(Request::Close)),
         "{:?}",
@@ -1190,14 +1146,14 @@ fn a_form_is_asked_in_a_dialog_of_its_own_that_holds_the_window() {
     let theme = registry.active();
     let wanted = window
         .view
-        .dialog_window(&window.layout, Scale::ONE, theme)
+        .dialog_window(Scale::ONE, theme)
         .expect("the form asks for a dialog");
     assert_eq!(wanted.modality, DialogModality::OwnerModal);
     assert!(tairix_window::docapp::fits_beside(
         wanted.rect,
-        window.layout.window()
+        window.view.layout().window()
     ));
-    for slot in window.layout.floating() {
+    for slot in window.view.layout().floating() {
         assert!(slot.frame.intersection(&wanted.rect).is_empty());
     }
     window.key(Key::Char('e'), plain());
@@ -1209,17 +1165,14 @@ fn a_form_is_asked_in_a_dialog_of_its_own_that_holds_the_window() {
     assert!(window.view.asking(), "and leaves the form up");
     window.dialog_key(Key::Named(NamedKey::Escape));
     assert!(!window.view.asking(), "Escape in the dialog turns it down");
-    assert!(window
-        .view
-        .dialog_window(&window.layout, Scale::ONE, theme)
-        .is_none());
+    assert!(window.view.dialog_window(Scale::ONE, theme).is_none());
 }
 
 #[test]
 fn save_as_asks_how_first_and_then_where_in_the_format_chosen() {
     let mut window = Window::white(10, 10);
     let mut damage = Region::new();
-    let surveying = window.view.ask_how(false, &window.layout, &mut damage);
+    let surveying = window.view.ask_how(false, &mut damage);
     window.run_worker(surveying.expect("asked"));
     assert!(window.view.asking());
     assert!(!window.view.asking_to_close());
@@ -1229,7 +1182,7 @@ fn save_as_asks_how_first_and_then_where_in_the_format_chosen() {
         Some(Request::SaveWhere { then_close: false })
     ));
     assert_eq!(window.view.offered_extension(), "png");
-    let surveying = window.view.ask_how(true, &window.layout, &mut damage);
+    let surveying = window.view.ask_how(true, &mut damage);
     window.run_worker(surveying.expect("asked"));
     assert!(window.view.asking_to_close(), "a quit waits on the sheet");
     window.dialog_key(Key::Named(NamedKey::Escape));
@@ -1280,7 +1233,6 @@ fn zooming_with_the_wheel_keeps_the_pixel_under_the_pointer() {
         window.view.on_pointer(
             &InputEvent::ModifiersChanged { modifiers: ctrl() },
             window.now,
-            &window.layout,
             Scale::ONE,
             window.registry.active(),
             &mut Region::new(),
@@ -1299,7 +1251,7 @@ fn zooming_with_the_wheel_keeps_the_pixel_under_the_pointer() {
     let still = window
         .view
         .viewport()
-        .pixel_at(at, window.size(), window.layout.canvas());
+        .pixel_at(at, window.size(), window.view.layout().canvas());
     assert_eq!(still, Some((30, 40)));
 }
 
@@ -1312,7 +1264,6 @@ fn a_fine_ctrl_wheel_zooms_a_rung_per_detent_turned() {
     window.view.on_pointer(
         &InputEvent::ModifiersChanged { modifiers: ctrl() },
         window.now,
-        &window.layout,
         Scale::ONE,
         window.registry.active(),
         &mut Region::new(),
@@ -1363,20 +1314,20 @@ fn a_pinch_zooms_smoothly_about_where_it_began_and_follows_the_fingers() {
     assert_eq!(viewport.zoom(), start.scaled(PINCH_SCALE_ONE * 3 / 2));
     assert_eq!(viewport.rung(), None, "between two rungs");
     assert_eq!(
-        viewport.pixel_at(at, window.size(), window.layout.canvas()),
+        viewport.pixel_at(at, window.size(), window.view.layout().canvas()),
         Some((30, 40)),
         "the pixel under the pinch stays under it"
     );
     // The fingers' centre moves: the picture follows it, toward the far
     // edges, where it has room to go.
     let moved = Point::new(at.x - 25, at.y - 15);
-    assert!(window.layout.canvas().contains(moved));
+    assert!(window.view.layout().canvas().contains(moved));
     window.pointer(pinching(PinchPhase::Update, PINCH_SCALE_ONE * 3 / 2, moved));
     assert_eq!(
         window
             .view
             .viewport()
-            .pixel_at(moved, window.size(), window.layout.canvas()),
+            .pixel_at(moved, window.size(), window.view.layout().canvas()),
         Some((30, 40)),
         "carried to the fingers"
     );
@@ -1415,7 +1366,7 @@ fn a_cancelled_pinch_puts_the_view_back_and_a_stray_step_moves_nothing() {
     assert_eq!(*window.view.viewport(), before, "put back");
 
     let off = Point::new(0, 0);
-    assert!(!window.layout.canvas().contains(off));
+    assert!(!window.view.layout().canvas().contains(off));
     window.pointer(pinching(PinchPhase::Begin, PINCH_SCALE_ONE, off));
     window.pointer(pinching(PinchPhase::Update, 4 * PINCH_SCALE_ONE, off));
     assert_eq!(*window.view.viewport(), before, "begun off the canvas");
@@ -1546,12 +1497,11 @@ fn a_transform_asked_mid_stroke_takes_the_stroke_with_it() {
 /// never the canvas.
 #[test]
 fn a_tool_change_repaints_the_tool_box_and_bar_not_the_canvas() {
-    let window = Window::white(40, 40);
-    let mut view = window.view;
+    let mut view = Window::white(40, 40).view;
     let mut damage = Region::new();
-    let outcome = view.act(Action::Tool(Tool::Pencil), &window.layout, &mut damage);
+    let outcome = view.act(Action::Tool(Tool::Pencil), &mut damage);
     assert_eq!(outcome.relayout, Relayout::Reported);
-    let canvas = window.layout.canvas();
+    let canvas = view.layout().canvas();
     assert!(!damage.is_empty());
     assert!(
         damage
@@ -1570,9 +1520,7 @@ fn a_tool_change_with_a_list_open_repaints_the_window() {
     window.act(Action::Tool(Tool::Rectangle));
     window.open_style_list();
     let mut damage = Region::new();
-    let outcome = window
-        .view
-        .act(Action::Tool(Tool::Pencil), &window.layout, &mut damage);
+    let outcome = window.view.act(Action::Tool(Tool::Pencil), &mut damage);
     assert_eq!(outcome.relayout, Relayout::Whole);
 }
 
@@ -1591,8 +1539,8 @@ fn a_fill_repaints_only_what_it_filled() {
     let mut damage = Region::new();
     let _ = window
         .view
-        .computed(job, compute(work, &SERIAL), &window.layout, &mut damage);
-    let canvas = window.layout.canvas();
+        .computed(job, compute(work, &SERIAL), &mut damage);
+    let canvas = window.view.layout().canvas();
     let painted: u64 = damage
         .rects()
         .iter()
@@ -1624,7 +1572,6 @@ fn a_modifier_change_mid_shape_repaints_the_preview() {
     let _ = window.view.on_pointer(
         &InputEvent::ModifiersChanged { modifiers: shift },
         window.now,
-        &window.layout,
         Scale::ONE,
         theme,
         &mut damage,
@@ -1634,7 +1581,6 @@ fn a_modifier_change_mid_shape_repaints_the_preview() {
     let _ = window.view.on_pointer(
         &InputEvent::ModifiersChanged { modifiers: shift },
         window.now,
-        &window.layout,
         Scale::ONE,
         theme,
         &mut again,
@@ -1658,12 +1604,9 @@ fn an_action_waits_for_the_floating_selection_to_be_put_down() {
     let Some(Request::Own(Own::Compute { job, .. })) = refused.request else {
         panic!("a put-down for the worker");
     };
-    let outcome = window.view.computed(
-        job,
-        Computed::Tiles(Err(OutOfMemory)),
-        &window.layout,
-        &mut Region::new(),
-    );
+    let outcome = window
+        .view
+        .computed(job, Computed::Tiles(Err(OutOfMemory)), &mut Region::new());
     assert!(outcome.request.is_none(), "the flip did not follow");
     assert!(window.view.floating().is_some(), "still floating");
     assert_eq!(window.colour(30, 20), [255; 4], "nothing was put down");
@@ -1692,12 +1635,9 @@ fn a_cut_copies_and_clears_in_one_request() {
         Some([0, 0, 0, 255]),
         "copied as it stood"
     );
-    let outcome = window.view.computed(
-        job,
-        compute(work, &SERIAL),
-        &window.layout,
-        &mut Region::new(),
-    );
+    let outcome = window
+        .view
+        .computed(job, compute(work, &SERIAL), &mut Region::new());
     window.apply(&outcome);
     assert_eq!(window.colour(5, 5)[3], 0, "and cleared");
 }
@@ -1715,7 +1655,7 @@ fn a_paste_adapted_to_another_kind_is_refused() {
     };
     let outcome = window
         .view
-        .pasted(Ok((pasted, palette)), &window.layout, &mut Region::new());
+        .pasted(Ok((pasted, palette)), &mut Region::new());
     window.apply(&outcome);
     assert!(window.view.floating().is_none());
 }
@@ -1727,7 +1667,7 @@ fn a_press_on_a_list_over_the_canvas_draws_nothing() {
     let mut window = Window::white(40, 40);
     window.act(Action::Tool(Tool::Rectangle));
     let popup = window.open_style_list();
-    let over = popup.intersection(&window.layout.canvas());
+    let over = popup.intersection(&window.view.layout().canvas());
     assert!(!over.is_empty(), "the list hangs over the canvas");
     window.move_to(over.center());
     window.press(PointerButton::Primary);
@@ -1880,7 +1820,7 @@ fn a_clear_ink_on_a_masked_palette_picture_is_the_mask_not_a_colour() {
     let cell = window
         .view
         .swatches
-        .cell_rect(window.layout.swatches(), clear)
+        .cell_rect(window.view.layout().swatches(), clear)
         .expect("a well");
     window.move_to(cell.center());
     window.press(PointerButton::Primary);
@@ -1895,7 +1835,7 @@ fn a_clear_ink_on_a_masked_palette_picture_is_the_mask_not_a_colour() {
 #[test]
 fn a_press_on_the_secondary_well_makes_the_dock_edit_it() {
     let mut window = Window::white(16, 16);
-    let secondary = window.layout.secondary_well();
+    let secondary = window.view.layout().secondary_well();
     let corner = Point::new(secondary.right() - 2, secondary.bottom() - 2);
     window.move_to(corner);
     window.press(PointerButton::Primary);
@@ -2094,7 +2034,12 @@ fn tool_rect(window: &Window, tool: Tool) -> Rect {
     window
         .view
         .tool_box
-        .tool_rect(tool_index(tool), window.layout.tools(), Scale::ONE, theme)
+        .tool_rect(
+            tool_index(tool),
+            window.view.layout().tools(),
+            Scale::ONE,
+            theme,
+        )
         .expect("the tool is seated")
 }
 
@@ -2107,7 +2052,7 @@ fn command_rect(window: &Window, command: ViewCommand) -> Rect {
     window
         .view
         .commands
-        .tool_rect(index, window.layout.view_strip(), Scale::ONE, theme)
+        .tool_rect(index, window.view.layout().view_strip(), Scale::ONE, theme)
         .expect("the command is seated")
 }
 
@@ -2115,7 +2060,7 @@ fn well_rect(window: &Window, index: usize) -> Rect {
     window
         .view
         .swatches
-        .cell_rect(window.view.swatch_bounds(&window.layout), index)
+        .cell_rect(window.view.swatch_bounds(), index)
         .expect("a well")
 }
 
@@ -2134,7 +2079,7 @@ fn a_tool_chosen_in_the_tool_box_brings_its_own_bar() {
         [Setting::Tolerance, Setting::Contiguous]
     );
     let held = Tool::Fill.settings().len();
-    let bar = window.layout.bar();
+    let bar = window.view.layout().bar();
     assert!(
         bar.control(held - 1).is_some() && bar.control(held).is_none(),
         "placed with the fill's settings"
@@ -2353,7 +2298,7 @@ fn a_press_elsewhere_or_the_menu_takes_the_bars_keyboard() {
     window.key(Key::Char('a'), ctrl());
     window.key(Key::Char('7'), plain());
     window.key(Key::Char('7'), plain());
-    let status = window.layout.message();
+    let status = window.view.layout().message();
     click_on(&mut window, status);
     assert!(window.view.bar.focus().is_none());
     assert_eq!(window.view.options.brush.size, MAX_SIZE);
@@ -2429,9 +2374,9 @@ fn a_long_palette_scrolls_along_its_strip() {
     let mut window = Window::new(Document::new(Picture::plain(canvas)));
     assert_eq!(window.view.wells.len(), 256);
     assert_eq!(window.view.swatches.rows(), 1, "one row");
-    assert!(!window.layout.palette_bar().is_empty());
-    let before = window.view.swatch_bounds(&window.layout).left();
-    window.move_to(window.layout.wells_view().center());
+    assert!(!window.view.layout().palette_bar().is_empty());
+    let before = window.view.swatch_bounds().left();
+    window.move_to(window.view.layout().wells_view().center());
     for _ in 0..400 {
         window.pointer(InputEvent::PointerScrolled {
             dx: 0,
@@ -2439,12 +2384,12 @@ fn a_long_palette_scrolls_along_its_strip() {
         });
     }
     assert!(
-        window.view.swatch_bounds(&window.layout).left() < before,
+        window.view.swatch_bounds().left() < before,
         "scrolled along"
     );
     let last = well_rect(&window, 255);
     assert_eq!(
-        last.intersection(&window.layout.wells_view()),
+        last.intersection(&window.view.layout().wells_view()),
         last,
         "the last well shows at the end"
     );
@@ -2460,14 +2405,14 @@ fn tips_name_tools_commands_and_settings() {
         let theme = window.registry.active();
         window
             .view
-            .tool_tip(&window.layout, Scale::ONE, theme)
+            .tool_tip(Scale::ONE, theme)
             .map(|(_, text)| text)
     };
     window.move_to(tool_rect(&window, Tool::Fill).center());
     assert_eq!(tip(&window), Some("Fill (F)"));
     window.move_to(command_rect(&window, ViewCommand::PixelGrid).center());
     assert_eq!(tip(&window), Some("Pixel grid (G)"));
-    let size = window.layout.bar().control(0).expect("seated");
+    let size = window.view.layout().bar().control(0).expect("seated");
     window.move_to(size.center());
     assert_eq!(tip(&window), Some(Setting::Size.tip()));
 }
@@ -2477,9 +2422,15 @@ fn tips_name_tools_commands_and_settings() {
 #[test]
 fn the_pointer_shows_text_entry_over_a_number_field() {
     let mut window = Window::white(16, 16);
-    let size = window.layout.bar().control(0).expect("seated").center();
+    let size = window
+        .view
+        .layout()
+        .bar()
+        .control(0)
+        .expect("seated")
+        .center();
     let canvas = window.screen_of((4, 4));
-    let cursor = |window: &Window, at| DocumentView::cursor(&window.view, &window.layout, at);
+    let cursor = |window: &Window, at| DocumentView::cursor(&window.view, at);
     assert_eq!(cursor(&window, size), CursorShape::Text);
     assert_eq!(cursor(&window, canvas), CursorShape::Crosshair);
     window.act(Action::Tool(Tool::Rectangle));
@@ -2491,10 +2442,10 @@ fn the_pointer_shows_text_entry_over_a_number_field() {
 #[test]
 fn a_palette_picture_holds_smoothing_off_in_the_bar() {
     let mut window = four_colours();
-    let smooth = window.layout.bar().control(1).expect("seated");
+    let smooth = window.view.layout().bar().control(1).expect("seated");
     window.move_to(smooth.center());
     let theme = window.registry.active();
-    let tip = window.view.tool_tip(&window.layout, Scale::ONE, theme);
+    let tip = window.view.tool_tip(Scale::ONE, theme);
     assert_eq!(tip.map(|(_, text)| text), Some(WHOLE_PIXELS));
     click_on(&mut window, smooth);
     assert!(window.view.options.smooth, "the switch flips nothing");
@@ -2511,9 +2462,15 @@ fn the_least_window_seats_every_tools_bar() {
     for tool in Tool::ALL {
         window.act(Action::Tool(tool));
         let theme = window.registry.active();
-        let least = window
-            .view
-            .layout(width, height, theme, Scale::ONE, faces(theme));
+        window.view.lay_out(
+            width,
+            height,
+            theme,
+            Scale::ONE,
+            faces(theme),
+            &mut Region::new(),
+        );
+        let least = window.view.layout();
         for index in 0..tool.settings().len() {
             assert!(
                 least.bar().control(index).is_some(),
@@ -2530,17 +2487,21 @@ fn the_least_window_seats_every_tools_bar() {
 fn choosing_a_tool_keeps_where_a_short_tool_box_is_scrolled() {
     let mut window = Window::white(16, 16);
     let theme = window.registry.active();
-    window.layout = window
-        .view
-        .layout(900, 300, theme, Scale::ONE, faces(theme));
-    window.view.settle(&window.layout, &mut Region::new());
-    let tools = window.layout.tools();
+    window.view.lay_out(
+        900,
+        300,
+        theme,
+        Scale::ONE,
+        faces(theme),
+        &mut Region::new(),
+    );
+    let tools = window.view.layout().tools();
     let offset = |window: &Window| {
         let theme = window.registry.active();
         window
             .view
             .tool_box
-            .scroll_model(window.layout.tools(), Scale::ONE, theme)
+            .scroll_model(window.view.layout().tools(), Scale::ONE, theme)
             .offset()
     };
     assert!(
@@ -2565,18 +2526,18 @@ fn choosing_a_tool_keeps_where_a_short_tool_box_is_scrolled() {
         modifiers: plain(),
         at_ns: window.now,
     };
-    let outcome = window.view.on_key(
-        stroke,
-        &window.layout,
-        Scale::ONE,
+    let outcome = window
+        .view
+        .on_key(stroke, Scale::ONE, theme, &mut Region::new());
+    assert_eq!(outcome.relayout, Relayout::Reported);
+    window.view.lay_out(
+        900,
+        300,
         theme,
+        Scale::ONE,
+        faces(theme),
         &mut Region::new(),
     );
-    assert_eq!(outcome.relayout, Relayout::Reported);
-    window.layout = window
-        .view
-        .layout(900, 300, theme, Scale::ONE, faces(theme));
-    window.view.settle(&window.layout, &mut Region::new());
     assert_eq!(window.view.tool(), Tool::Eraser);
     assert_eq!(offset(&window), scrolled, "the column did not jump back");
 }
@@ -2905,7 +2866,7 @@ fn the_hand_drags_the_view_and_escape_puts_it_back() {
     let mut window = Window::white(2000, 2000);
     window.act(Action::Tool(Tool::Hand));
     let start = window.view.viewport().scroll();
-    let at = window.layout.canvas().center();
+    let at = window.view.layout().canvas().center();
     window.move_to(at);
     window.press(PointerButton::Primary);
     window.move_to(Point::new(at.x - 50, at.y - 30));
@@ -2929,7 +2890,7 @@ fn space_held_drags_the_view_whatever_the_tool() {
     window.act(Action::Tool(Tool::Pencil));
     window.key(Key::Char(' '), plain());
     let start = window.view.viewport().scroll();
-    let at = window.layout.canvas().center();
+    let at = window.view.layout().canvas().center();
     window.move_to(at);
     window.press(PointerButton::Primary);
     window.move_to(Point::new(at.x - 40, at.y));
@@ -2948,7 +2909,6 @@ fn space_held_drags_the_view_whatever_the_tool() {
             modifiers: plain(),
         },
         window.now,
-        &window.layout,
         Scale::ONE,
         theme,
         &mut Region::new(),
@@ -2979,7 +2939,7 @@ fn the_zoom_tool_steps_by_a_click_and_frames_a_dragged_box() {
     assert_eq!(window.view.viewport().zoom(), zoom, "and with Alt, reduces");
     hold(&mut window, plain());
     window.drag((10, 10), (29, 19));
-    let area = window.layout.canvas();
+    let area = window.view.layout().canvas();
     let shown = window.view.viewport().to_screen(
         Bounds {
             x0: 10,
@@ -3004,7 +2964,7 @@ fn dragging_the_crop_box_repaints_only_where_it_was_and_is() {
     window.act(Action::Tool(Tool::Crop));
     window.drag((10, 5), (29, 24));
     let size = window.size();
-    let canvas = window.layout.canvas();
+    let canvas = window.view.layout().canvas();
     let held = window.view.crop_box().expect("a box");
     let span = window.view.viewport().screen_span(held, size, canvas);
     let grab = Point::new(
@@ -3019,7 +2979,6 @@ fn dragging_the_crop_box_repaints_only_where_it_was_and_is() {
         crate::render::render_into(
             &mut surface,
             &window.view,
-            &window.layout,
             theme,
             Scale::ONE,
             faces(theme),
@@ -3034,7 +2993,6 @@ fn dragging_the_crop_box_repaints_only_where_it_was_and_is() {
     window.view.on_pointer(
         &InputEvent::PointerMoved { to },
         window.now,
-        &window.layout,
         Scale::ONE,
         theme,
         &mut damage,
@@ -3076,7 +3034,7 @@ fn the_crop_box_is_set_out_adjusted_and_applied_with_enter() {
         })
     );
     // The right edge, dragged out.
-    let edge = window.layout.canvas();
+    let edge = window.view.layout().canvas();
     let size = window.size();
     let right =
         window
@@ -3315,19 +3273,13 @@ fn spot_on(window: &mut Window, kind: PaneKind, spot: Spot) -> Point {
         .operation_pane(kind)
         .spot(
             spot,
-            window.layout.operation_settings(kind),
+            window.view.layout().operation_settings(kind),
             (faces(theme), Scale::ONE, theme),
         )
         .expect("on the pane");
     let dot = Rect::new(at.x, at.y, 1, 1);
-    window
-        .view
-        .reveal_body(kind, dot, &window.layout, &mut Region::new());
-    let shown = window
-        .view
-        .body_view(&window.layout, kind)
-        .to_window(dot)
-        .expect("shown");
+    window.view.reveal_body(kind, dot, &mut Region::new());
+    let shown = window.view.body_view(kind).to_window(dot).expect("shown");
     Point::new(shown.left(), shown.top())
 }
 
@@ -3385,7 +3337,8 @@ fn an_operation_opens_in_its_pane_from_the_menu_and_leaves_the_window_live() {
     assert!(!window.view.asking(), "nothing modal");
     assert!(window.view.shows(PaneKind::Effects), "a blur is an effect");
     assert!(!window
-        .layout
+        .view
+        .layout()
         .operation_settings(PaneKind::Effects)
         .is_empty());
     assert_eq!(
@@ -3877,9 +3830,7 @@ fn severe_memory_pressure_drops_the_preview_until_the_next_sample() {
     window.act(Action::Adjust(op_index("Posterise")));
     window.settle_previews();
     let pressed = |window: &mut Window, band| {
-        window
-            .view
-            .adopt_pressure(band, &window.layout, &mut Region::new());
+        window.view.adopt_pressure(band, &mut Region::new());
     };
     pressed(&mut window, PressureBand::Moderate);
     assert!(
@@ -3934,14 +3885,10 @@ fn a_preview_short_of_memory_waits_for_what_could_let_it_fit() {
             ticket: stamp.value(),
             previewed: Previewed::Tiles(Err(Halted::OutOfMemory)),
         };
-        window
-            .view
-            .previewed(answer, &window.layout, &mut Region::new());
+        window.view.previewed(answer, &mut Region::new());
     };
     let pressed = |window: &mut Window, band| {
-        window
-            .view
-            .adopt_pressure(band, &window.layout, &mut Region::new());
+        window.view.adopt_pressure(band, &mut Region::new());
     };
     short(&mut window);
     window.move_to(Point::new(2, 2));
@@ -3964,11 +3911,16 @@ fn an_operation_given_less_room_scrolls_within_its_pane_and_works_through_it() {
     let mut window = layered(&[([128, 128, 128, 255], 255); 40], 0);
     with_layers_pane(&mut window);
     window.act(Action::Adjust(op_index("Levels")));
-    let slot = *window.layout.pane(PaneKind::Adjustments).expect("docked");
+    let slot = *window
+        .view
+        .layout()
+        .pane(PaneKind::Adjustments)
+        .expect("docked");
     assert!(!slot.bar.is_empty(), "the pane's body scrolls");
     assert!(
         window
-            .layout
+            .view
+            .layout()
             .operation_settings(PaneKind::Adjustments)
             .height
             > slot.body.height,
@@ -4061,9 +4013,7 @@ fn going_to_a_layer_puts_the_floating_selection_down_where_it_was_lifted() {
     window.drag((2, 2), (2, 2));
     window.lift((1, 1), (3, 3), (4, 0));
     let id = AppMenuItemId::new(GO_TO_LAYER).expect("an id");
-    let asked = window
-        .view
-        .entered(id, "2", &window.layout, &mut Region::new());
+    let asked = window.view.entered(id, "2", &mut Region::new());
     assert_eq!(painted_on(&window), 0, "not gone before it is down");
     window.run_worker(asked);
     assert!(window.view.floating().is_none(), "down");
@@ -4236,7 +4186,6 @@ fn a_picture_of_layers_is_not_made_a_palette_picture() {
             dither: false,
         },
         "change its colours",
-        &window.layout,
         &mut Region::new(),
     );
     assert!(outcome.request.is_none(), "no worker asked");
@@ -4267,12 +4216,9 @@ fn a_layer_not_shown_wholly_is_not_made_a_palette_picture() {
         if !visible {
             window.act(Action::ShowLayer);
         }
-        let outcome = window.view.transform(
-            convert,
-            "change its colours",
-            &window.layout,
-            &mut Region::new(),
-        );
+        let outcome = window
+            .view
+            .transform(convert, "change its colours", &mut Region::new());
         assert!(outcome.request.is_none(), "no worker asked");
         assert!(
             window
@@ -4288,12 +4234,9 @@ fn a_layer_not_shown_wholly_is_not_made_a_palette_picture() {
         );
     }
     let mut window = layered(&[([255; 4], 255)], 0);
-    let asked = window.view.transform(
-        convert,
-        "change its colours",
-        &window.layout,
-        &mut Region::new(),
-    );
+    let asked = window
+        .view
+        .transform(convert, "change its colours", &mut Region::new());
     window.run_worker(asked);
     assert!(
         !matches!(
@@ -4326,7 +4269,6 @@ fn a_turn_turns_every_layer_and_a_new_canvas_is_filled_beneath_them_alone() {
             fill: Sample::Rgba([9, 9, 9, 255]),
         },
         "resize the canvas",
-        &window.layout,
         &mut Region::new(),
     );
     window.run_worker(asked);
@@ -4365,7 +4307,7 @@ fn the_eyedropper_takes_what_the_layers_show_together() {
 /// Where pane `kind`'s band seats `control`, or the middle of the span it is
 /// dragged by.
 fn band_point(window: &Window, kind: PaneKind, control: Option<WindowControlKind>) -> Point {
-    let slot = window.layout.pane(kind).expect("shown");
+    let slot = window.view.layout().pane(kind).expect("shown");
     let band = window
         .view
         .header(kind)
@@ -4405,15 +4347,15 @@ fn ticked(window: &Window, kind: PaneKind) -> bool {
 #[test]
 fn a_pane_closed_by_its_band_gives_up_its_dock_and_the_view_menu_shows_it_again() {
     let mut window = Window::white(10, 10);
-    let canvas = window.layout.canvas();
+    let canvas = window.view.layout().canvas();
     assert!(ticked(&window, PaneKind::Colour));
     let close = band_point(&window, PaneKind::Colour, Some(WindowControlKind::Close));
     click_at(&mut window, close);
     assert!(!window.view.shows(PaneKind::Colour));
-    assert!(window.layout.pane(PaneKind::Colour).is_none());
-    assert!(window.layout.dock_on(Side::Right).rect.is_empty());
+    assert!(window.view.layout().pane(PaneKind::Colour).is_none());
+    assert!(window.view.layout().dock_on(Side::Right).rect.is_empty());
     assert!(
-        window.layout.canvas().width > canvas.width,
+        window.view.layout().canvas().width > canvas.width,
         "the canvas takes its room"
     );
     assert!(!ticked(&window, PaneKind::Colour));
@@ -4422,7 +4364,7 @@ fn a_pane_closed_by_its_band_gives_up_its_dock_and_the_view_menu_shows_it_again(
         window.view.arrangement().place(PaneKind::Colour),
         Some((Side::Right, 0))
     );
-    assert_eq!(window.layout.canvas(), canvas);
+    assert_eq!(window.view.layout().canvas(), canvas);
 }
 
 #[test]
@@ -4430,13 +4372,17 @@ fn a_pane_rolls_up_to_its_band_and_opens_again() {
     let mut window = Window::white(10, 10);
     let roll = band_point(&window, PaneKind::Tools, Some(WindowControlKind::Minimize));
     click_at(&mut window, roll);
-    let slot = window.layout.pane(PaneKind::Tools).expect("still shown");
+    let slot = window
+        .view
+        .layout()
+        .pane(PaneKind::Tools)
+        .expect("still shown");
     assert!(slot.body.is_empty());
-    assert!(window.layout.tool_box().is_empty());
+    assert!(window.view.layout().tool_box().is_empty());
     assert!(window.view.shows(PaneKind::Tools));
     let roll = band_point(&window, PaneKind::Tools, Some(WindowControlKind::Minimize));
     click_at(&mut window, roll);
-    assert!(!window.layout.tool_box().is_empty());
+    assert!(!window.view.layout().tool_box().is_empty());
 }
 
 #[test]
@@ -4445,7 +4391,7 @@ fn a_band_dragged_over_the_other_dock_marks_where_it_lands_and_lands_there() {
     let grip = band_point(&window, PaneKind::Tools, None);
     window.move_to(grip);
     window.press(PointerButton::Primary);
-    let right = window.layout.dock_on(Side::Right).rect;
+    let right = window.view.layout().dock_on(Side::Right).rect;
     let under_colour = Point::new(right.center().x, right.bottom() - 2);
     window.move_to(under_colour);
     let drag = window.view.pane_drag.expect("dragging");
@@ -4472,9 +4418,9 @@ fn a_band_dragged_over_the_other_dock_marks_where_it_lands_and_lands_there() {
         window.view.arrangement().place(PaneKind::Tools),
         Some((Side::Right, 0))
     );
-    assert!(window.layout.dock_on(Side::Left).rect.is_empty());
-    let tools = window.layout.pane(PaneKind::Tools).expect("shown");
-    let colour = window.layout.pane(PaneKind::Colour).expect("shown");
+    assert!(window.view.layout().dock_on(Side::Left).rect.is_empty());
+    let tools = window.view.layout().pane(PaneKind::Tools).expect("shown");
+    let colour = window.view.layout().pane(PaneKind::Colour).expect("shown");
     assert!(
         tools.frame.bottom() < colour.frame.top(),
         "above the colour pane"
@@ -4485,11 +4431,11 @@ fn a_band_dragged_over_the_other_dock_marks_where_it_lands_and_lands_there() {
 fn a_band_dragged_to_the_edge_of_an_empty_dock_lands_in_it() {
     let mut window = Window::white(10, 10);
     window.act(Action::Pane(PaneKind::Tools));
-    assert!(window.layout.dock_on(Side::Left).rect.is_empty());
+    assert!(window.view.layout().dock_on(Side::Left).rect.is_empty());
     let grip = band_point(&window, PaneKind::Colour, None);
     window.move_to(grip);
     window.press(PointerButton::Primary);
-    let middle = window.layout.canvas().center().y;
+    let middle = window.view.layout().canvas().center().y;
     window.move_to(Point::new(2, middle));
     assert_eq!(
         window.view.pane_drag.and_then(|drag| drag.landing),
@@ -4503,7 +4449,7 @@ fn a_band_dragged_to_the_edge_of_an_empty_dock_lands_in_it() {
         window.view.arrangement().place(PaneKind::Colour),
         Some((Side::Left, 0))
     );
-    assert!(window.layout.dock_on(Side::Right).rect.is_empty());
+    assert!(window.view.layout().dock_on(Side::Right).rect.is_empty());
 }
 
 #[test]
@@ -4511,7 +4457,12 @@ fn a_pane_drag_holds_the_pointer_and_one_let_go_away_from_a_dock_floats_where_it
     let mut window = Window::white(10, 10);
     window.act(Action::Tool(Tool::Pencil));
     let grip = band_point(&window, PaneKind::Tools, None);
-    let band = window.layout.pane(PaneKind::Tools).expect("docked").header;
+    let band = window
+        .view
+        .layout()
+        .pane(PaneKind::Tools)
+        .expect("docked")
+        .header;
     window.move_to(grip);
     window.press(PointerButton::Primary);
     window.move_to(window.screen_of((2, 2)));
@@ -4547,7 +4498,12 @@ fn drag_band(window: &mut Window, kind: PaneKind, to: Point) -> Outcome {
 fn a_band_carried_to_the_windows_edge_tears_its_pane_out_under_the_press() {
     let mut window = Window::white(10, 10);
     let grip = band_point(&window, PaneKind::Colour, None);
-    let band = window.layout.pane(PaneKind::Colour).expect("docked").header;
+    let band = window
+        .view
+        .layout()
+        .pane(PaneKind::Colour)
+        .expect("docked")
+        .header;
     let edge = Point::new(to_i32(WINDOW.0) - 1, grip.y + 40);
     let outcome = drag_band(&mut window, PaneKind::Colour, edge);
     assert_eq!(outcome.relayout, Relayout::Whole);
@@ -4556,7 +4512,7 @@ fn a_band_carried_to_the_windows_edge_tears_its_pane_out_under_the_press() {
         "the press is the tool window's now"
     );
     assert!(window.view.arrangement().floats(PaneKind::Colour));
-    assert!(window.layout.dock_on(Side::Right).rect.is_empty());
+    assert!(window.view.layout().dock_on(Side::Right).rect.is_empty());
     let id = super::tool_id(PaneKind::Colour);
     let opening = window.view.tool_opening(id);
     assert_eq!(
@@ -4569,15 +4525,18 @@ fn a_band_carried_to_the_windows_edge_tears_its_pane_out_under_the_press() {
         "a carry is for the open it was asked for"
     );
     // The tool window shows the pane laid out beside the window, never over it.
-    let wanted = window
-        .view
-        .tool_window(&window.layout, 0)
-        .expect("one tool window");
+    let wanted = window.view.tool_window(0).expect("one tool window");
     assert_eq!((wanted.id, wanted.title), (id, "Colour"));
-    assert!(wanted.rect.intersection(&window.layout.window()).is_empty());
-    assert_eq!(window.layout.pane_window(PaneKind::Colour), wanted.rect);
-    assert!(wanted.rect.contains(window.layout.picker().center()));
-    assert!(window.view.tool_window(&window.layout, 1).is_none());
+    assert!(wanted
+        .rect
+        .intersection(&window.view.layout().window())
+        .is_empty());
+    assert_eq!(
+        window.view.layout().pane_window(PaneKind::Colour),
+        wanted.rect
+    );
+    assert!(wanted.rect.contains(window.view.layout().picker().center()));
+    assert!(window.view.tool_window(1).is_none());
     // Its band's press went with it: the next sample over the old band is a
     // hover, not a drag.
     window.release(PointerButton::Primary);
@@ -4591,14 +4550,13 @@ fn a_tool_window_moved_over_a_dock_marks_it_and_let_go_there_docks_its_pane() {
     window.view.panes.float(PaneKind::Tools);
     window.relayout();
     let id = super::tool_id(PaneKind::Tools);
-    let left = window.layout.window().left() + 2;
-    let middle = window.layout.canvas().center().y;
+    let left = window.view.layout().window().left() + 2;
+    let middle = window.view.layout().canvas().center().y;
     let moved = |over, ended| ToolMove { id, over, ended };
     let mut damage = Region::new();
     let theme = window.registry.active();
     let outcome = window.view.tool_moved(
         moved(Some(Point::new(left, middle)), false),
-        &window.layout,
         Scale::ONE,
         theme,
         &mut damage,
@@ -4612,13 +4570,9 @@ fn a_tool_window_moved_over_a_dock_marks_it_and_let_go_there_docks_its_pane() {
         })
     );
     assert!(!damage.is_empty(), "the mark is drawn");
-    let outcome = window.view.tool_moved(
-        moved(None, false),
-        &window.layout,
-        Scale::ONE,
-        theme,
-        &mut damage,
-    );
+    let outcome = window
+        .view
+        .tool_moved(moved(None, false), Scale::ONE, theme, &mut damage);
     assert_eq!(outcome.relayout, Relayout::None);
     assert_eq!(
         window.view.landing(),
@@ -4627,7 +4581,6 @@ fn a_tool_window_moved_over_a_dock_marks_it_and_let_go_there_docks_its_pane() {
     );
     let outcome = window.view.tool_moved(
         moved(Some(Point::new(left, middle)), true),
-        &window.layout,
         Scale::ONE,
         theme,
         &mut damage,
@@ -4638,10 +4591,7 @@ fn a_tool_window_moved_over_a_dock_marks_it_and_let_go_there_docks_its_pane() {
         window.view.arrangement().place(PaneKind::Tools),
         Some((Side::Left, 0))
     );
-    assert!(
-        window.view.tool_window(&window.layout, 0).is_none(),
-        "its tool window goes"
-    );
+    assert!(window.view.tool_window(0).is_none(), "its tool window goes");
 }
 
 #[test]
@@ -4653,7 +4603,6 @@ fn a_tool_windows_close_mark_hides_its_pane_and_a_refusal_docks_it_home() {
     let outcome = window.view.tool_gone(
         super::tool_id(PaneKind::Colour),
         ToolGone::Closed,
-        &window.layout,
         &mut Region::new(),
     );
     window.apply(&outcome);
@@ -4661,7 +4610,6 @@ fn a_tool_windows_close_mark_hides_its_pane_and_a_refusal_docks_it_home() {
     let outcome = window.view.tool_gone(
         super::tool_id(PaneKind::Tools),
         ToolGone::Refused,
-        &window.layout,
         &mut Region::new(),
     );
     window.apply(&outcome);
@@ -4679,10 +4627,13 @@ fn floating_panes_are_laid_out_apart_and_open_at_home_when_nothing_tore_them_out
         window.view.panes.float(kind);
     }
     window.relayout();
-    let slots = window.layout.floating();
+    let slots = window.view.layout().floating();
     assert_eq!(slots.len(), PaneKind::ALL.len());
     for (index, slot) in slots.iter().enumerate() {
-        assert!(slot.frame.intersection(&window.layout.window()).is_empty());
+        assert!(slot
+            .frame
+            .intersection(&window.view.layout().window())
+            .is_empty());
         assert!(slot.header.is_empty(), "the window manager draws its band");
         for other in &slots[index + 1..] {
             assert!(slot.frame.intersection(&other.frame).is_empty());
@@ -4690,7 +4641,7 @@ fn floating_panes_are_laid_out_apart_and_open_at_home_when_nothing_tore_them_out
     }
     let tools = window.view.tool_opening(super::tool_id(PaneKind::Tools));
     let colour = window.view.tool_opening(super::tool_id(PaneKind::Colour));
-    let below = window.layout.top().bottom();
+    let below = window.view.layout().top().bottom();
     assert_eq!(
         tools,
         ToolOpening {
@@ -4699,7 +4650,8 @@ fn floating_panes_are_laid_out_apart_and_open_at_home_when_nothing_tore_them_out
         }
     );
     let width = window
-        .layout
+        .view
+        .layout()
         .pane(PaneKind::Colour)
         .expect("floating")
         .frame
@@ -4719,13 +4671,11 @@ fn escape_or_losing_the_keyboard_turns_a_pane_drag_down() {
         let grip = band_point(&window, PaneKind::Tools, None);
         window.move_to(grip);
         window.press(PointerButton::Primary);
-        let right = window.layout.dock_on(Side::Right).rect;
+        let right = window.view.layout().dock_on(Side::Right).rect;
         window.move_to(right.center());
         assert!(window.view.pane_drag.is_some());
         if lose_focus {
-            window
-                .view
-                .focus_changed(false, &window.layout, &mut Region::new());
+            window.view.focus_changed(false, &mut Region::new());
         } else {
             window.key(Key::Named(NamedKey::Escape), plain());
         }
@@ -4742,7 +4692,7 @@ fn escape_or_losing_the_keyboard_turns_a_pane_drag_down() {
 #[test]
 fn reset_panes_puts_every_pane_back_open_where_it_starts() {
     let mut window = Window::white(10, 10);
-    let start = window.layout.clone();
+    let start = window.view.layout().clone();
     window.act(Action::Pane(PaneKind::Adjustments));
     window.act(Action::Pane(PaneKind::Colour));
     let roll = band_point(&window, PaneKind::Tools, Some(WindowControlKind::Minimize));
@@ -4752,7 +4702,7 @@ fn reset_panes_puts_every_pane_back_open_where_it_starts() {
         window.view.arrangement(),
         &crate::pane::Arrangement::default()
     );
-    assert_eq!(window.layout, start);
+    assert_eq!(window.view.layout(), &start);
 }
 
 /// Where control `cell` of part `part` of the colour pane's panel is.
@@ -4763,7 +4713,7 @@ fn colour_control(window: &Window, part: usize, cell: usize) -> Point {
         .colour_controls
         .place_of(
             part,
-            window.layout.colour_controls(),
+            window.view.layout().colour_controls(),
             faces(theme),
             Scale::ONE,
             theme,
@@ -4863,7 +4813,7 @@ fn colours_settled_are_remembered_and_chosen_again() {
         ],
         "the latest first, once"
     );
-    let recents = window.view.recents_rect(&window.layout);
+    let recents = window.view.recents_rect();
     let second = window
         .view
         .recent_grid
@@ -4931,9 +4881,7 @@ fn the_pixel_grid_shows_from_the_zoom_the_settings_name() {
         pixel_grid_from: 300,
         ..crate::preferences::Preferences::default()
     };
-    window
-        .view
-        .adopt(&preferences, &window.layout, &mut Region::new());
+    window.view.adopt(&preferences, &mut Region::new());
     let rung = |percent| {
         crate::viewport::ZOOMS
             .iter()
@@ -4945,9 +4893,7 @@ fn the_pixel_grid_shows_from_the_zoom_the_settings_name() {
     window.act(Action::Zoom(rung(300)));
     assert!(window.view.pixel_grid_shown());
     preferences.pixel_grid_from = 0;
-    window
-        .view
-        .adopt(&preferences, &window.layout, &mut Region::new());
+    window.view.adopt(&preferences, &mut Region::new());
     assert!(!window.view.pixel_grid_shown(), "never");
 }
 
@@ -4956,7 +4902,7 @@ fn a_style_change_repaints_only_what_it_draws_differently() {
     use crate::preferences::{Preferences, Surround};
     use tairix_colour::Rgb;
     let mut window = Window::white(16, 16);
-    let canvas = window.layout.canvas();
+    let canvas = window.view.layout().canvas();
     let picture = window
         .view
         .viewport()
@@ -4968,7 +4914,7 @@ fn a_style_change_repaints_only_what_it_draws_differently() {
     let mut preferences = Preferences::default();
     let adopt = |window: &mut Window, preferences: &Preferences| {
         let mut damage = Region::new();
-        window.view.adopt(preferences, &window.layout, &mut damage);
+        window.view.adopt(preferences, &mut damage);
         damage
     };
     preferences.grid.shown = true;
@@ -5087,7 +5033,7 @@ fn a_well_pressed_and_let_go_elsewhere_is_let_go() {
     let red = well_rect(&window, 11);
     window.move_to(red.center());
     window.press(PointerButton::Primary);
-    window.move_to(window.layout.message().center());
+    window.move_to(window.view.layout().message().center());
     window.release(PointerButton::Primary);
     assert_eq!(window.view.inks(), inks);
     window.move_to(red.center());
@@ -5117,18 +5063,16 @@ fn the_strip_scrolls_to_the_ink_that_changed_and_repaints_its_bar() {
     let mut window = long_palette();
     window.view.secondary = window.view.wells[255];
     let mut damage = Region::new();
-    window.view.inks_changed(
-        tairix_controls::SwatchMark::Secondary,
-        &window.layout,
-        &mut damage,
-    );
+    window
+        .view
+        .inks_changed(tairix_controls::SwatchMark::Secondary, &mut damage);
     let last = well_rect(&window, 255);
     assert_eq!(
-        last.intersection(&window.layout.wells_view()),
+        last.intersection(&window.view.layout().wells_view()),
         last,
         "the secondary's well shows"
     );
-    let bar = window.layout.palette_bar();
+    let bar = window.view.layout().palette_bar();
     assert!(
         damage
             .rects()
@@ -5144,13 +5088,10 @@ fn the_strip_scrolls_to_the_ink_that_changed_and_repaints_its_bar() {
 #[test]
 fn the_pop_out_floats_the_palette_over_the_canvas_corner() {
     let mut window = Window::white(16, 16);
-    let pop_out = window.layout.pop_out();
+    let pop_out = window.view.layout().pop_out();
     window.move_to(pop_out.center());
     let theme = window.registry.active();
-    let tip = window
-        .view
-        .tool_tip(&window.layout, Scale::ONE, theme)
-        .map(|(_, tip)| tip);
+    let tip = window.view.tool_tip(Scale::ONE, theme).map(|(_, tip)| tip);
     assert_eq!(tip, Some("Float the palette in a window of its own"));
     window.press(PointerButton::Primary);
     assert!(
@@ -5160,18 +5101,17 @@ fn the_pop_out_floats_the_palette_over_the_canvas_corner() {
     let outcome = window.release(PointerButton::Primary);
     assert_eq!(outcome.relayout, Relayout::Whole);
     assert!(window.view.panes().floats(PaneKind::Palette));
-    assert!(window.layout.pop_out().is_empty());
-    let wanted = window
-        .view
-        .tool_window(&window.layout, 0)
-        .expect("its tool window");
+    assert!(window.view.layout().pop_out().is_empty());
+    let wanted = window.view.tool_window(0).expect("its tool window");
     assert_eq!(
         (wanted.id, wanted.title),
         (super::tool_id(PaneKind::Palette), "Palette")
     );
     let (id, frame) = (wanted.id, wanted.rect);
-    assert!(frame.intersection(&window.layout.window()).is_empty());
-    let canvas = window.layout.canvas();
+    assert!(frame
+        .intersection(&window.view.layout().window())
+        .is_empty());
+    let canvas = window.view.layout().canvas();
     let opening = window.view.tool_opening(id);
     assert_eq!(
         opening,
@@ -5192,7 +5132,7 @@ fn the_floating_palette_sets_both_inks() {
     window.act(Action::FloatPalette);
     let red = well_rect(&window, 11);
     assert!(
-        red.intersection(&window.layout.window()).is_empty(),
+        red.intersection(&window.view.layout().window()).is_empty(),
         "in its tool window"
     );
     click_on(&mut window, red);
@@ -5236,45 +5176,33 @@ fn a_palette_moved_over_its_strip_docks_there() {
     window.act(Action::FloatPalette);
     let id = super::tool_id(PaneKind::Palette);
     let foot = Point::new(
-        window.layout.canvas().center().x,
-        window.layout.status().top() - 2,
+        window.view.layout().canvas().center().x,
+        window.view.layout().status().top() - 2,
     );
-    let over_dock = window.layout.dock_on(Side::Right).rect.center();
+    let over_dock = window.view.layout().dock_on(Side::Right).rect.center();
     let moved = |over, ended| ToolMove { id, over, ended };
     let theme = window.registry.active();
     let mut damage = Region::new();
-    let outcome = window.view.tool_moved(
-        moved(Some(foot), false),
-        &window.layout,
-        Scale::ONE,
-        theme,
-        &mut damage,
-    );
+    let outcome = window
+        .view
+        .tool_moved(moved(Some(foot), false), Scale::ONE, theme, &mut damage);
     assert_eq!(outcome.relayout, Relayout::None);
     assert_eq!(window.view.landing(), Some(super::Landing::Strip));
     assert!(!damage.is_empty(), "the mark is drawn");
     let outcome = window.view.tool_moved(
         moved(Some(over_dock), false),
-        &window.layout,
         Scale::ONE,
         theme,
         &mut damage,
     );
     assert_eq!(outcome.relayout, Relayout::None);
     assert_eq!(window.view.landing(), None, "a side's dock is not its");
-    let outcome = window.view.tool_moved(
-        moved(Some(foot), true),
-        &window.layout,
-        Scale::ONE,
-        theme,
-        &mut damage,
-    );
+    let outcome = window
+        .view
+        .tool_moved(moved(Some(foot), true), Scale::ONE, theme, &mut damage);
     window.apply(&outcome);
     assert!(window.view.panes().in_strip());
-    assert!(
-        window.view.tool_window(&window.layout, 0).is_none(),
-        "its tool window goes"
-    );
+    assert!(window.view.tool_window(0).is_none(), "its tool window goes");
 }
 
 /// Closed, a floating palette's tool window docks the palette in its strip —
@@ -5282,18 +5210,16 @@ fn a_palette_moved_over_its_strip_docks_there() {
 #[test]
 fn closing_the_floating_palette_docks_it_in_the_strip() {
     let mut window = Window::white(10, 10);
-    let strip = window.layout.palette();
+    let strip = window.view.layout().palette();
     for why in [ToolGone::Closed, ToolGone::Refused] {
         window.act(Action::FloatPalette);
-        let outcome = window.view.tool_gone(
-            super::tool_id(PaneKind::Palette),
-            why,
-            &window.layout,
-            &mut Region::new(),
-        );
+        let outcome =
+            window
+                .view
+                .tool_gone(super::tool_id(PaneKind::Palette), why, &mut Region::new());
         window.apply(&outcome);
         assert!(window.view.panes().in_strip(), "{why:?}");
-        assert_eq!(window.layout.palette(), strip, "{why:?}");
+        assert_eq!(window.view.layout().palette(), strip, "{why:?}");
     }
 }
 
@@ -5323,7 +5249,10 @@ fn the_float_palette_row_toggles_and_is_marked() {
     assert!(window.view.panes().in_strip() && !marked(&window));
     window.act(Action::Pane(PaneKind::Palette));
     assert!(!window.view.shows(PaneKind::Palette));
-    assert!(window.layout.palette().is_empty(), "it claims no strip");
+    assert!(
+        window.view.layout().palette().is_empty(),
+        "it claims no strip"
+    );
 }
 
 /// Floating, the palette's window follows its wells: a mask taken away takes
@@ -5332,13 +5261,17 @@ fn the_float_palette_row_toggles_and_is_marked() {
 fn a_mask_change_resizes_the_floating_palette() {
     let mut window = four_colours();
     window.act(Action::FloatPalette);
-    let before = window.layout.palette();
-    let row = window.layout.swatches().height / 2;
+    let before = window.view.layout().palette();
+    let row = window.view.layout().swatches().height / 2;
     let outcome = window.act(Action::RemoveMask);
     window.run_worker(outcome);
     assert!(window.view.panes().floats(PaneKind::Palette));
-    assert_eq!(window.layout.swatches().height, row, "one row of four");
-    assert_eq!(window.layout.palette().height, before.height - row);
+    assert_eq!(
+        window.view.layout().swatches().height,
+        row,
+        "one row of four"
+    );
+    assert_eq!(window.view.layout().palette().height, before.height - row);
 }
 
 /// Held on its arrow, the palette bar goes on scrolling the strip.
@@ -5351,7 +5284,7 @@ fn a_held_palette_arrow_goes_on_scrolling() {
         .palette_bar
         .part_rect(
             tairix_controls::ScrollPart::Increment,
-            window.layout.palette_bar(),
+            window.view.layout().palette_bar(),
             Scale::ONE,
             theme,
         )
@@ -5389,10 +5322,7 @@ fn a_torn_out_adjustment_keeps_its_name() {
         window.view.header(PaneKind::Effects).title(),
         "Gaussian blur"
     );
-    let wanted = window
-        .view
-        .tool_window(&window.layout, 0)
-        .expect("its tool window");
+    let wanted = window.view.tool_window(0).expect("its tool window");
     assert_eq!(wanted.title, "Gaussian blur");
 }
 
@@ -5403,9 +5333,7 @@ fn an_ink_change_repaints_only_the_wells_its_marks_move_between() {
     let mut window = Window::white(16, 16);
     let untouched = well_rect(&window, 11);
     let mut damage = Region::new();
-    window
-        .view
-        .act(Action::SwapColours, &window.layout, &mut damage);
+    window.view.act(Action::SwapColours, &mut damage);
     for well in [0, 7] {
         let mut uncovered = Region::new();
         uncovered.add(well_rect(&window, well));
@@ -5421,7 +5349,6 @@ fn an_ink_change_repaints_only_the_wells_its_marks_move_between() {
             button: PointerButton::Primary,
         },
         window.now,
-        &window.layout,
         Scale::ONE,
         theme,
         &mut damage,
@@ -5460,7 +5387,8 @@ fn a_secondary_press_on_a_tool_window_opens_the_window_menu() {
     window.view.panes.float(PaneKind::Tools);
     window.relayout();
     let at = window
-        .layout
+        .view
+        .layout()
         .pane(PaneKind::Tools)
         .expect("floating")
         .frame
@@ -5481,7 +5409,7 @@ fn a_secondary_press_on_a_tool_window_opens_the_window_menu() {
 /// rectangle and how it may be sized.
 fn palette_window(window: &Window) -> (Rect, WindowSizing) {
     let wanted = (0..)
-        .map_while(|place| window.view.tool_window(&window.layout, place))
+        .map_while(|place| window.view.tool_window(place))
         .find(|wanted| wanted.id == super::tool_id(PaneKind::Palette))
         .expect("the palette's tool window");
     (wanted.rect, wanted.sizing)
@@ -5494,7 +5422,6 @@ fn resize_palette(window: &mut Window, size: (u32, u32)) -> (Outcome, Region) {
     let outcome = window.view.tool_resized(
         super::tool_id(PaneKind::Palette),
         size,
-        &window.layout,
         Scale::ONE,
         &mut damage,
     );
@@ -5508,7 +5435,7 @@ fn sized_palette(across: u32, down: u32) -> Window {
     let mut window = Window::white(16, 16);
     window.act(Action::FloatPalette);
     let gap = window.registry.active().metrics().control_gap;
-    let well = window.layout.palette_well();
+    let well = window.view.layout().palette_well();
     let _ = resize_palette(
         &mut window,
         (across * well + 2 * gap, down * well + 2 * gap),
@@ -5525,15 +5452,18 @@ fn a_resized_palette_keeps_its_size_and_reflows_within_its_own_window() {
     let (opened, sizing) = palette_window(&window);
     assert!(sizing.resizable(), "a floating palette is resizable");
     let gap = window.registry.active().metrics().control_gap;
-    let well = window.layout.palette_well();
+    let well = window.view.layout().palette_well();
     let size = (6 * well + 2 * gap, 3 * well + 2 * gap);
     let (outcome, damage) = resize_palette(&mut window, size);
     assert_eq!(outcome.relayout, Relayout::Reported);
     assert_eq!(damage.bounds(), opened, "its own tool window");
-    assert!(!damage.intersects(window.layout.window()), "not the window");
+    assert!(
+        !damage.intersects(window.view.layout().window()),
+        "not the window"
+    );
     let (resized, _) = palette_window(&window);
     assert_eq!((resized.width, resized.height), size, "it keeps its size");
-    assert_eq!(window.layout.columns(), 6);
+    assert_eq!(window.view.layout().columns(), 6);
     assert_eq!(window.view.swatches.columns(), 6, "six wells across");
     window.relayout();
     assert_eq!(palette_window(&window).0, resized, "laid out again, kept");
@@ -5561,20 +5491,28 @@ fn a_fixed_tool_window_takes_no_size_of_its_own() {
     let mut window = Window::white(10, 10);
     window.view.panes.float(PaneKind::Tools);
     window.relayout();
-    let slot = *window.layout.pane(PaneKind::Tools).expect("floating");
+    let slot = *window
+        .view
+        .layout()
+        .pane(PaneKind::Tools)
+        .expect("floating");
     assert!(!slot.sizing.resizable());
     let mut damage = Region::new();
     let outcome = window.view.tool_resized(
         super::tool_id(PaneKind::Tools),
         (300, 300),
-        &window.layout,
         Scale::ONE,
         &mut damage,
     );
     assert_eq!(outcome.relayout, Relayout::None);
     assert!(damage.is_empty());
     window.relayout();
-    let after = window.layout.pane(PaneKind::Tools).expect("floating").frame;
+    let after = window
+        .view
+        .layout()
+        .pane(PaneKind::Tools)
+        .expect("floating")
+        .frame;
     assert_eq!(after, slot.frame);
 }
 
@@ -5582,18 +5520,24 @@ fn a_fixed_tool_window_takes_no_size_of_its_own() {
 /// scale its tool window is twice as large.
 #[test]
 fn a_resized_palette_keeps_its_size_across_a_change_of_scale() {
-    let window = sized_palette(6, 3);
+    let mut window = sized_palette(6, 3);
     let (at_one, _) = palette_window(&window);
     let double = Scale::from_percent(200).expect("a scale");
     let theme = window.registry.active();
-    let layout = window.view.layout(
+    window.view.lay_out(
         WINDOW.0 * 2,
         WINDOW.1 * 2,
         theme,
         double,
         Faces::of(theme, double),
+        &mut Region::new(),
     );
-    let frame = layout.pane(PaneKind::Palette).expect("floating").frame;
+    let frame = window
+        .view
+        .layout()
+        .pane(PaneKind::Palette)
+        .expect("floating")
+        .frame;
     assert_eq!(
         (frame.width, frame.height),
         (at_one.width * 2, at_one.height * 2)
@@ -5627,16 +5571,20 @@ fn up_and_down_walk_the_columns_a_resized_palette_reflowed_to() {
 #[test]
 fn a_short_palette_scrolls_down_by_the_wheel_and_a_press_finds_the_well_drawn_there() {
     let mut window = sized_palette(4, 2);
-    assert_eq!(window.layout.columns(), 3, "its bar takes a column's room");
+    assert_eq!(
+        window.view.layout().columns(),
+        3,
+        "its bar takes a column's room"
+    );
     assert!(
-        !window.layout.palette_bar().is_empty(),
+        !window.view.layout().palette_bar().is_empty(),
         "its wells overflow"
     );
     assert_eq!(
         window.view.palette_bar.orientation(),
         ScrollOrientation::Vertical
     );
-    let view = window.layout.wells_view();
+    let view = window.view.layout().wells_view();
     window.move_to(view.center());
     window.pointer(InputEvent::PointerScrolled {
         dx: 0,
@@ -5644,9 +5592,9 @@ fn a_short_palette_scrolls_down_by_the_wheel_and_a_press_finds_the_well_drawn_th
     });
     let offset = window.view.palette_bar.model().range().offset();
     assert!(offset > 0, "the wheel scrolls the wells down");
-    let shown = window.view.swatch_bounds(&window.layout);
+    let shown = window.view.swatch_bounds();
     let up = to_i32(u32::try_from(offset).expect("small"));
-    assert_eq!(shown.top(), window.layout.swatches().top() - up);
+    assert_eq!(shown.top(), window.view.layout().swatches().top() - up);
     let under = window
         .view
         .swatches
@@ -5673,7 +5621,7 @@ fn the_arrows_scroll_a_short_palette_to_the_well_they_reach() {
     assert!(window.view.palette_bar.model().range().offset() > 0);
     let cell = well_rect(&window, marked);
     assert_eq!(
-        cell.intersection(&window.layout.wells_view()),
+        cell.intersection(&window.view.layout().wells_view()),
         cell,
         "the well the arrows reached shows"
     );
@@ -5698,7 +5646,10 @@ fn the_palette_numbers_the_wimp_colours_or_the_entries_never_the_clear_ink() {
 /// The Layers pane shown in its column, its rows laid out.
 fn with_layers_pane(window: &mut Window) {
     window.act(Action::Pane(PaneKind::Layers));
-    assert!(!window.layout.layers().rows.is_empty(), "its rows show");
+    assert!(
+        !window.view.layout().layers().rows.is_empty(),
+        "its rows show"
+    );
 }
 
 /// Where the Layers pane shows the parts of layer `layer`'s row.
@@ -5707,7 +5658,12 @@ fn layer_row(window: &Window, layer: usize) -> crate::layers_pane::RowParts {
     window
         .view
         .layers
-        .parts_of(layer, window.layout.layers(), faces(theme), Scale::ONE)
+        .parts_of(
+            layer,
+            window.view.layout().layers(),
+            faces(theme),
+            Scale::ONE,
+        )
         .expect("its row shows")
 }
 
@@ -5793,16 +5749,12 @@ fn a_layers_row_dragged_moves_its_layer_as_one_step() {
 fn a_change_being_made_live_counts_as_unsaved() {
     let mut window = layered(&[([255; 4], 255), ([0, 0, 0, 255], 255)], 1);
     assert!(!SavedDocument::is_modified(&window.view));
-    window
-        .view
-        .layer_opacity(40, false, &window.layout, &mut Region::new());
+    window.view.layer_opacity(40, false, &mut Region::new());
     assert!(
         SavedDocument::is_modified(&window.view),
         "an opacity moving"
     );
-    window
-        .view
-        .layer_opacity(100, false, &window.layout, &mut Region::new());
+    window.view.layer_opacity(100, false, &mut Region::new());
     assert!(
         !SavedDocument::is_modified(&window.view),
         "back where it began"
@@ -5812,9 +5764,7 @@ fn a_change_being_made_live_counts_as_unsaved() {
     window.move_to(window.dock_point((4, 4)));
     window.press(PointerButton::Primary);
     assert!(SavedDocument::is_modified(&window.view), "an entry moving");
-    let closing = window
-        .view
-        .close_requested(&window.layout, &mut Region::new());
+    let closing = window.view.close_requested(&mut Region::new());
     assert_eq!(
         window.view.document().history_depth(),
         1,
@@ -5833,25 +5783,19 @@ fn a_change_being_made_live_counts_as_unsaved() {
 #[test]
 fn an_opacity_changed_live_lands_as_one_step() {
     let mut window = layered(&[([255; 4], 255), ([0, 0, 0, 255], 255)], 1);
-    window
-        .view
-        .layer_opacity(70, false, &window.layout, &mut Region::new());
+    window.view.layer_opacity(70, false, &mut Region::new());
     window.settle_previews();
     assert!(
         window.view.composite_under().is_some(),
         "kept for every sample"
     );
-    window
-        .view
-        .layer_opacity(30, false, &window.layout, &mut Region::new());
+    window.view.layer_opacity(30, false, &mut Region::new());
     assert_eq!(
         window.view.document().history_depth(),
         0,
         "no step while it moves"
     );
-    window
-        .view
-        .layer_opacity(30, true, &window.layout, &mut Region::new());
+    window.view.layer_opacity(30, true, &mut Region::new());
     assert_eq!(window.view.document().history_depth(), 1);
     assert!(window.view.composite_under().is_none(), "let go");
     assert_eq!(
@@ -5883,7 +5827,7 @@ fn a_press_on_the_layers_panes_opacity_takes_the_keyboard_from_its_rows() {
     let field = window
         .view
         .layers
-        .opacity_field(window.layout.layers(), look)
+        .opacity_field(window.view.layout().layers(), look)
         .expect("the opacity is seated");
     click_at(&mut window, field.center());
     let typed = window.key(Key::Char('1'), plain());
@@ -5913,14 +5857,10 @@ fn a_row_shown_while_its_opacity_moves_lands_the_opacity_first() {
         ..Modifiers::default()
     };
     window.key(Key::Named(NamedKey::Tab), back);
-    window
-        .view
-        .layer_opacity(40, false, &window.layout, &mut Region::new());
+    window.view.layer_opacity(40, false, &mut Region::new());
     window.key(Key::Char(' '), plain());
     assert!(!layers_of(&window)[1].visible, "hidden from its row");
-    window
-        .view
-        .layer_opacity(40, true, &window.layout, &mut Region::new());
+    window.view.layer_opacity(40, true, &mut Region::new());
     assert_eq!(
         window.view.document().history_depth(),
         2,
@@ -5942,18 +5882,14 @@ fn a_row_shown_while_its_opacity_moves_lands_the_opacity_first() {
 #[test]
 fn severe_memory_pressure_lets_the_composite_beneath_an_opacity_go() {
     let mut window = layered(&[([255; 4], 255), ([0, 0, 0, 255], 255)], 1);
-    window
-        .view
-        .layer_opacity(70, false, &window.layout, &mut Region::new());
+    window.view.layer_opacity(70, false, &mut Region::new());
     window.settle_previews();
     assert!(window.view.composite_under().is_some());
     window
         .view
-        .adopt_pressure(PressureBand::Severe, &window.layout, &mut Region::new());
+        .adopt_pressure(PressureBand::Severe, &mut Region::new());
     assert!(window.view.composite_under().is_none(), "let go");
-    window
-        .view
-        .layer_opacity(30, false, &window.layout, &mut Region::new());
+    window.view.layer_opacity(30, false, &mut Region::new());
     assert!(
         window.wanted_preview().is_none(),
         "not laid again while it moves"
@@ -5962,14 +5898,12 @@ fn severe_memory_pressure_lets_the_composite_beneath_an_opacity_go() {
     // recorded once the pressure falls.
     window
         .view
-        .adopt_pressure(PressureBand::Normal, &window.layout, &mut Region::new());
+        .adopt_pressure(PressureBand::Normal, &mut Region::new());
     assert!(
         window.wanted_preview().is_none(),
         "nor once the pressure falls"
     );
-    window
-        .view
-        .layer_opacity(30, true, &window.layout, &mut Region::new());
+    window.view.layer_opacity(30, true, &mut Region::new());
     assert_eq!(
         layers_of(&window)[1].opacity,
         tairix_colour::Fraction::from_percent(30).byte(),
@@ -6035,9 +5969,7 @@ fn thumbnails_given_up_for_a_completion_are_asked_again() {
         work,
     };
     let given_way = crate::preview::serve(asked, &SERIAL, &|| true);
-    window
-        .view
-        .previewed(given_way, &window.layout, &mut Region::new());
+    window.view.previewed(given_way, &mut Region::new());
     let again = window.wanted_preview();
     assert!(
         matches!(
@@ -6058,7 +5990,7 @@ fn thumbnails_given_up_for_a_completion_are_asked_again() {
 fn the_colour_pane_scrolls_once_the_layers_pane_takes_its_room() {
     let mut window = layered(&[([255; 4], 255); 40], 0);
     with_layers_pane(&mut window);
-    let slot = *window.layout.pane(PaneKind::Colour).expect("docked");
+    let slot = *window.view.layout().pane(PaneKind::Colour).expect("docked");
     assert!(!slot.bar.is_empty(), "the colour pane scrolls");
     assert!(slot.content.height > slot.body.height);
     window.move_to(slot.viewport().center());
@@ -6071,11 +6003,11 @@ fn the_colour_pane_scrolls_once_the_layers_pane_takes_its_room() {
         "the wheel scrolls it"
     );
     window.tab_into_dock();
-    let picker = window.layout.picker();
+    let picker = window.view.layout().picker();
     assert!(
         window
             .view
-            .held_view(&window.layout, PaneKind::Colour, false)
+            .held_view(PaneKind::Colour, false)
             .to_window(picker)
             .is_some(),
         "the picker shows"
@@ -6091,7 +6023,11 @@ fn a_floating_layers_pane_keeps_the_size_it_was_given() {
     with_layers_pane(&mut window);
     window.view.panes.float(PaneKind::Layers);
     window.relayout();
-    let slot = *window.layout.pane(PaneKind::Layers).expect("floating");
+    let slot = *window
+        .view
+        .layout()
+        .pane(PaneKind::Layers)
+        .expect("floating");
     assert!(slot.sizing.resizable());
     let (least, most) = (slot.sizing.min_height_px(), slot.sizing.max_height_px());
     assert!(least < most, "from two rows to all eight");
@@ -6099,14 +6035,17 @@ fn a_floating_layers_pane_keeps_the_size_it_was_given() {
     let outcome = window.view.tool_resized(
         super::tool_id(PaneKind::Layers),
         (slot.frame.width, height),
-        &window.layout,
         Scale::ONE,
         &mut Region::new(),
     );
     window.apply(&outcome);
-    let resized = *window.layout.pane(PaneKind::Layers).expect("floating");
+    let resized = *window
+        .view
+        .layout()
+        .pane(PaneKind::Layers)
+        .expect("floating");
     assert_eq!(resized.frame.height, height, "the size it was given");
-    let placed = *window.layout.layers();
+    let placed = *window.view.layout().layers();
     assert!(!placed.bar.is_empty(), "the rows it cannot show scroll");
     assert!(
         placed.panel.bottom() <= placed.rows.top(),
@@ -6128,9 +6067,7 @@ fn a_name_being_typed_lands_before_a_menus_action() {
         window.key(Key::Char(ch), plain());
     }
     let delete = AppMenuItemId::new(Action::DeleteLayer.id()).expect("an id");
-    let outcome = window
-        .view
-        .chosen(delete, &window.layout, &mut Region::new());
+    let outcome = window.view.chosen(delete, &mut Region::new());
     window.apply(&outcome);
     assert_eq!(window.view.layers.renaming(), None, "landed first");
     window.key(Key::Named(NamedKey::Enter), plain());
@@ -6176,9 +6113,7 @@ fn a_name_being_typed_lands_as_the_window_loses_the_keyboard_or_closes() {
     for ch in "Sky".chars() {
         window.key(Key::Char(ch), plain());
     }
-    window
-        .view
-        .focus_changed(false, &window.layout, &mut Region::new());
+    window.view.focus_changed(false, &mut Region::new());
     assert_eq!(layers_of(&window)[1].name, "Sky");
     let generation = window.view.document().generation();
     window.view.saved(generation);
@@ -6186,9 +6121,7 @@ fn a_name_being_typed_lands_as_the_window_loses_the_keyboard_or_closes() {
     for ch in "Sea".chars() {
         window.key(Key::Char(ch), plain());
     }
-    let closing = window
-        .view
-        .close_requested(&window.layout, &mut Region::new());
+    let closing = window.view.close_requested(&mut Region::new());
     assert_eq!(layers_of(&window)[1].name, "Sea");
     assert!(
         matches!(closing.request, Some(Request::AskToClose)),
@@ -6208,12 +6141,9 @@ fn an_effect_open_over_a_conversion_undone_is_closed() {
         palette: PaletteChoice::Desktop,
         dither: false,
     };
-    let converting = window.view.transform(
-        colour,
-        "change its colours",
-        &window.layout,
-        &mut Region::new(),
-    );
+    let converting = window
+        .view
+        .transform(colour, "change its colours", &mut Region::new());
     window.run_worker(converting);
     window.act(Action::Adjust(op_index("Gaussian blur")));
     press_on(&mut window, PaneKind::Effects, Spot::Number(500));
@@ -6293,7 +6223,6 @@ fn an_operation_left_keeps_its_settings_until_it_has_landed() {
     let refused = window.view.computed(
         job,
         Computed::Op(Err(Halted::OutOfMemory)),
-        &window.layout,
         &mut Region::new(),
     );
     window.apply(&refused);
@@ -6323,7 +6252,6 @@ fn a_refused_completion_names_the_save_it_held_as_not_done() {
         let refused = window.view.computed(
             job,
             Computed::Op(Err(Halted::OutOfMemory)),
-            &window.layout,
             &mut Region::new(),
         );
         window.apply(&refused);
@@ -6332,15 +6260,11 @@ fn a_refused_completion_names_the_save_it_held_as_not_done() {
     let saving = window.act(Action::Save);
     let said = refuse(&mut window, saving);
     assert!(said.ends_with("the picture was not saved"), "{said}");
-    let closing = window
-        .view
-        .save_then_close(&window.layout, &mut Region::new());
+    let closing = window.view.save_then_close(&mut Region::new());
     let said = refuse(&mut window, closing);
     assert!(said.ends_with("and the window stays open"), "{said}");
     let applying = press_on(&mut window, PaneKind::Adjustments, Spot::Apply);
-    let waiting = window
-        .view
-        .save_then_close(&window.layout, &mut Region::new());
+    let waiting = window.view.save_then_close(&mut Region::new());
     assert!(waiting.request.is_none(), "waiting on the Apply");
     let said = refuse(&mut window, applying);
     assert!(said.ends_with("and the window stays open"), "{said}");
@@ -6379,7 +6303,6 @@ fn a_sample_in_the_other_pane_keeps_the_open_operation_until_it_has_landed() {
     let refused = window.view.computed(
         job,
         Computed::Op(Err(Halted::OutOfMemory)),
-        &window.layout,
         &mut Region::new(),
     );
     window.apply(&refused);
@@ -6420,9 +6343,7 @@ fn picking_another_layer_leaves_the_open_operation_first() {
     );
     window.act(Action::Adjust(op_index("Invert")));
     let to = AppMenuItemId::new(GO_TO_LAYER).expect("an id");
-    let outcome = window
-        .view
-        .entered(to, "2", &window.layout, &mut Region::new());
+    let outcome = window.view.entered(to, "2", &mut Region::new());
     window.apply(&outcome);
     assert_eq!(painted_on(&window), 1);
     assert_eq!(window.view.adjusting(), None, "the invert left first");
@@ -6446,9 +6367,7 @@ fn how_the_layers_show_works_no_preview_out_again() {
         window.wanted_preview().is_none(),
         "nothing worked out again"
     );
-    window
-        .view
-        .layer_opacity(40, true, &window.layout, &mut Region::new());
+    window.view.layer_opacity(40, true, &mut Region::new());
     assert!(
         window.wanted_preview().is_none(),
         "nor for an opacity settled"

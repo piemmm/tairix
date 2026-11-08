@@ -134,8 +134,9 @@ impl SpriteOpening {
     }
 }
 
-/// Where the sprite file window draws, for one window size.
-#[derive(Clone, Debug)]
+/// Where the sprite file window draws, for one window size: by default
+/// every part empty, as for a window not yet laid out.
+#[derive(Clone, Debug, Default)]
 pub struct AreaLayout {
     window: Rect,
     grid: Rect,
@@ -297,6 +298,8 @@ pub struct AreaView {
     /// What its sprite windows were last brought into line with: the
     /// file's generation, whether it held changes, and its renames.
     synced: Option<(u64, bool, u64)>,
+    /// Where everything it draws goes, for its window's size.
+    layout: AreaLayout,
 }
 
 impl AreaView {
@@ -344,6 +347,7 @@ impl AreaView {
             pending: Vec::new(),
             renamed: 0,
             synced: None,
+            layout: AreaLayout::default(),
         }
     }
 
@@ -452,9 +456,28 @@ impl AreaView {
         self.document.entries()[index].name().copied()
     }
 
-    /// The layout of a `width`×`height` window.
+    /// Where everything it draws goes, for its window's size.
     #[must_use]
-    pub fn layout(&self, width: u32, height: u32, theme: &Theme, scale: Scale) -> AreaLayout {
+    pub const fn layout(&self) -> &AreaLayout {
+        &self.layout
+    }
+
+    /// Lay the window out for a `width`×`height` window, reporting what
+    /// moved.
+    pub fn lay_out(
+        &mut self,
+        width: u32,
+        height: u32,
+        theme: &Theme,
+        scale: Scale,
+        damage: &mut Region,
+    ) {
+        self.layout = self.layout_for(width, height, theme, scale);
+        self.settle(damage);
+    }
+
+    /// The layout of a `width`×`height` window.
+    fn layout_for(&self, width: u32, height: u32, theme: &Theme, scale: Scale) -> AreaLayout {
         let gap = scale.scale_length(GAP).max(1);
         let thumb = scale.scale_length(THUMB).max(1);
         let status_height = StatusBand::new(theme, scale).height();
@@ -539,31 +562,31 @@ impl AreaView {
         )
     }
 
-    /// Bring the scroll and what is in view into line with `layout`.
-    pub fn settle(&mut self, layout: &AreaLayout, damage: &mut Region) {
-        let content = u64::from(layout.content_height());
-        let viewport = u64::from(layout.grid.height);
+    /// Bring the scroll and what is in view into line with its layout.
+    fn settle(&mut self, damage: &mut Region) {
+        let content = u64::from(self.layout.content_height());
+        let viewport = u64::from(self.layout.grid.height);
         let most = content.saturating_sub(viewport);
         let offset = u64::from(self.offset).min(most);
         self.offset = u32::try_from(offset).unwrap_or(0);
         self.scroll.set_model(ScrollModel::in_pixels(
             ScrollRange::new(content, viewport, offset),
-            u64::from(layout.cell.1 + layout.gap),
+            u64::from(self.layout.cell.1 + self.layout.gap),
         ));
         let count = self.document.entries().len();
-        let in_view = layout.shown(self.offset, count);
+        let in_view = self.layout.shown(self.offset, count);
         let generation = self.document.generation();
-        if layout.thumb != self.side || in_view != self.in_view || generation != self.seen {
+        if self.layout.thumb != self.side || in_view != self.in_view || generation != self.seen {
             self.fresh = false;
             self.seen = generation;
         }
-        if layout.thumb != self.side {
-            self.placeholder = tairix_icon::builtin_picture(IconKind::Image, layout.thumb);
+        if self.layout.thumb != self.side {
+            self.placeholder = tairix_icon::builtin_picture(IconKind::Image, self.layout.thumb);
         }
-        self.side = layout.thumb;
+        self.side = self.layout.thumb;
         self.in_view = in_view;
         self.forget_far_thumbnails();
-        damage.add(layout.window);
+        damage.add(self.layout.window);
     }
 
     /// The sprites a thumbnail is drawn for: those in view and a view's
@@ -591,7 +614,7 @@ impl AreaView {
 
     /// The pointer's shape over `at`.
     #[must_use]
-    pub const fn cursor_shape(&self, _layout: &AreaLayout, _at: Point) -> CursorShape {
+    pub const fn cursor_shape(&self, _at: Point) -> CursorShape {
         CursorShape::Arrow
     }
 
@@ -612,23 +635,23 @@ impl AreaView {
         self.message = Some(message);
     }
 
-    fn state(&mut self, message: &str, layout: &AreaLayout, damage: &mut Region) {
+    fn state(&mut self, message: &str, damage: &mut Region) {
         self.message = Some(String::from(message));
-        damage.add(layout.status);
+        damage.add(self.layout.status);
     }
 
     /// What was said before an act is done with; what the act says itself
     /// stays.
-    fn unsay(&mut self, layout: &AreaLayout, damage: &mut Region) {
+    fn unsay(&mut self, damage: &mut Region) {
         if self.message.take().is_some() {
-            damage.add(layout.status);
+            damage.add(self.layout.status);
         }
     }
 
     /// The window gained or lost the keyboard.
-    pub fn focus_changed(&mut self, focused: bool, layout: &AreaLayout, damage: &mut Region) {
+    pub fn focus_changed(&mut self, focused: bool, damage: &mut Region) {
         self.focused = focused;
-        self.damage_cursor(layout, damage);
+        self.damage_cursor(damage);
     }
 
     /// The rows the window's menu opens with.
@@ -740,54 +763,43 @@ impl AreaView {
     }
 
     /// The menu row `item` was chosen.
-    pub fn chosen_row(
-        &mut self,
-        item: AppMenuItemId,
-        layout: &AreaLayout,
-        damage: &mut Region,
-    ) -> Outcome {
+    pub fn chosen_row(&mut self, item: AppMenuItemId, damage: &mut Region) -> Outcome {
         match Action::from_id(item.get()) {
-            Some(action) => self.act(action, layout, damage),
+            Some(action) => self.act(action, damage),
             None => Outcome::none(),
         }
     }
 
     /// The menu's entry field `item` was committed holding `text`.
-    pub fn entered(
-        &mut self,
-        item: AppMenuItemId,
-        text: &str,
-        layout: &AreaLayout,
-        damage: &mut Region,
-    ) -> Outcome {
+    pub fn entered(&mut self, item: AppMenuItemId, text: &str, damage: &mut Region) -> Outcome {
         if item.get() != RENAME_ENTRY {
             return Outcome::none();
         }
-        self.unsay(layout, damage);
+        self.unsay(damage);
         let Some(index) = self.single() else {
-            self.state("Choose one sprite to rename", layout, damage);
+            self.state("Choose one sprite to rename", damage);
             return Outcome::none();
         };
         let Some(name) = SpriteName::new(text.trim()) else {
-            self.state(NAME_REFUSAL, layout, damage);
+            self.state(NAME_REFUSAL, damage);
             return Outcome::none();
         };
         if self.document.entries()[index].name() == Some(&name) {
             return Outcome::none();
         }
         if matches!(self.document.entries()[index], Entry::Kept(_)) {
-            self.state("A kept sprite keeps its own name", layout, damage);
+            self.state("A kept sprite keeps its own name", damage);
             return Outcome::none();
         }
         let renamed = self.document.rename(index, name);
-        self.list_changed(renamed, layout, damage)
+        self.list_changed(renamed, damage)
     }
 
     /// Carry out `action`.
-    fn act(&mut self, action: Action, layout: &AreaLayout, damage: &mut Region) -> Outcome {
-        self.unsay(layout, damage);
+    fn act(&mut self, action: Action, damage: &mut Region) -> Outcome {
+        self.unsay(damage);
         match action {
-            Action::EditEntry => self.open_chosen(layout, damage),
+            Action::EditEntry => self.open_chosen(damage),
             Action::NewEntry => {
                 let name = SpriteName::new(SPRITE_STEM)
                     .and_then(|stem| free_name(&stem, self.document.names()))
@@ -795,40 +807,38 @@ impl AreaView {
                 self.modal = Some(Form::new_sprite(&name, SPRITE_SIZE));
                 Outcome::none()
             }
-            Action::DuplicateEntry => self.duplicate(layout, damage),
-            Action::DeleteEntry => self.delete(layout, damage),
-            Action::EntryUp | Action::EntryDown => {
-                self.reorder(action == Action::EntryUp, layout, damage)
-            }
+            Action::DuplicateEntry => self.duplicate(damage),
+            Action::DeleteEntry => self.delete(damage),
+            Action::EntryUp | Action::EntryDown => self.reorder(action == Action::EntryUp, damage),
             Action::Undo => {
                 let undone = self.document.undo();
-                self.history_moved(undone.is_ok(), "There is nothing to undo", layout, damage)
+                self.history_moved(undone.is_ok(), "There is nothing to undo", damage)
             }
             Action::Redo => {
                 let redone = self.document.redo();
-                self.history_moved(redone.is_ok(), "There is nothing to redo", layout, damage)
+                self.history_moved(redone.is_ok(), "There is nothing to redo", damage)
             }
             Action::SelectAll => {
                 self.chosen = self.document.ids().to_vec();
-                damage.add(layout.grid);
+                damage.add(self.layout.grid);
                 Outcome::none()
             }
             Action::Deselect => {
                 self.chosen.clear();
-                damage.add(layout.grid);
+                damage.add(self.layout.grid);
                 Outcome::none()
             }
             Action::Open => Outcome::asking(Request::Open),
             Action::Save => Outcome::asking(Request::Save),
             Action::SaveAs => Outcome::asking(Request::SaveAs),
-            Action::Close => self.close_requested(layout, damage),
+            Action::Close => self.close_requested(damage),
             _ => Outcome::none(),
         }
     }
 
     /// The user asked to close the window: asked first where the file holds
     /// changes, which every sprite window's are.
-    pub fn close_requested(&mut self, _layout: &AreaLayout, _damage: &mut Region) -> Outcome {
+    pub fn close_requested(&mut self, _damage: &mut Region) -> Outcome {
         if self.document.is_modified() {
             Outcome::asking(Request::AskToClose)
         } else {
@@ -853,7 +863,7 @@ impl AreaView {
         }
     }
 
-    fn open_chosen(&mut self, layout: &AreaLayout, damage: &mut Region) -> Outcome {
+    fn open_chosen(&mut self, damage: &mut Region) -> Outcome {
         let ids: Vec<EntryId> = self.chosen_pictures().collect();
         if ids.is_empty() {
             let why = if self.chosen.is_empty() {
@@ -861,13 +871,13 @@ impl AreaView {
             } else {
                 "A kept sprite cannot be edited"
             };
-            self.state(why, layout, damage);
+            self.state(why, damage);
             return Outcome::none();
         }
         Outcome::asking(Request::Own(Own::OpenSprites(ids)))
     }
 
-    fn duplicate(&mut self, layout: &AreaLayout, damage: &mut Region) -> Outcome {
+    fn duplicate(&mut self, damage: &mut Region) -> Outcome {
         let chosen: Vec<EntryId> = self.chosen_pictures().collect();
         let mut made = Vec::new();
         for id in chosen {
@@ -882,17 +892,13 @@ impl AreaView {
                 .as_ref()
                 .and_then(|sprite| free_name(&sprite.name, self.document.names()));
             let Ok(mut copy) = picture.try_clone() else {
-                self.state(
-                    "There is not enough memory to copy the sprite",
-                    layout,
-                    damage,
-                );
+                self.state("There is not enough memory to copy the sprite", damage);
                 break;
             };
             match (copy.sprite.as_mut(), name) {
                 (Some(sprite), Some(name)) => sprite.name = name,
                 (Some(_), None) => {
-                    self.state("No name is free for a copy", layout, damage);
+                    self.state("No name is free for a copy", damage);
                     break;
                 }
                 (None, _) => {}
@@ -901,7 +907,7 @@ impl AreaView {
             match self.document.insert(at, Entry::Picture(copy)) {
                 Ok(()) => made.extend(self.document.ids().get(at).copied()),
                 Err(refusal) => {
-                    self.state(&alloc::format!("{refusal}"), layout, damage);
+                    self.state(&alloc::format!("{refusal}"), damage);
                     break;
                 }
             }
@@ -913,20 +919,16 @@ impl AreaView {
         Outcome::relaid()
     }
 
-    fn delete(&mut self, layout: &AreaLayout, damage: &mut Region) -> Outcome {
+    fn delete(&mut self, damage: &mut Region) -> Outcome {
         if self.chosen.len() >= self.document.entries().len() {
-            self.state(
-                &alloc::format!("{}", ListRefusal::LastEntry),
-                layout,
-                damage,
-            );
+            self.state(&alloc::format!("{}", ListRefusal::LastEntry), damage);
             return Outcome::none();
         }
         let doomed = core::mem::take(&mut self.chosen);
         for id in &doomed {
             if let Some(index) = self.document.index_of(*id) {
                 if let Err(refusal) = self.document.remove(index) {
-                    self.state(&alloc::format!("{refusal}"), layout, damage);
+                    self.state(&alloc::format!("{refusal}"), damage);
                     break;
                 }
             }
@@ -941,9 +943,9 @@ impl AreaView {
         Outcome::relaid()
     }
 
-    fn reorder(&mut self, up: bool, layout: &AreaLayout, damage: &mut Region) -> Outcome {
+    fn reorder(&mut self, up: bool, damage: &mut Region) -> Outcome {
         let Some(index) = self.single() else {
-            self.state("Choose one sprite to move", layout, damage);
+            self.state("Choose one sprite to move", damage);
             return Outcome::none();
         };
         let to = if up {
@@ -955,33 +957,22 @@ impl AreaView {
             return Outcome::none();
         };
         let moved = self.document.move_entry(index, to);
-        self.list_changed(moved, layout, damage)
+        self.list_changed(moved, damage)
     }
 
-    fn list_changed(
-        &mut self,
-        changed: Result<(), ListRefusal>,
-        layout: &AreaLayout,
-        damage: &mut Region,
-    ) -> Outcome {
+    fn list_changed(&mut self, changed: Result<(), ListRefusal>, damage: &mut Region) -> Outcome {
         match changed {
             Ok(()) => Outcome::relaid(),
             Err(refusal) => {
-                self.state(&alloc::format!("{refusal}"), layout, damage);
+                self.state(&alloc::format!("{refusal}"), damage);
                 Outcome::none()
             }
         }
     }
 
-    fn history_moved(
-        &mut self,
-        moved: bool,
-        nothing: &str,
-        layout: &AreaLayout,
-        damage: &mut Region,
-    ) -> Outcome {
+    fn history_moved(&mut self, moved: bool, nothing: &str, damage: &mut Region) -> Outcome {
         if !moved {
-            self.state(nothing, layout, damage);
+            self.state(nothing, damage);
             return Outcome::none();
         }
         let ids = self.document.ids();
@@ -1004,7 +995,6 @@ impl AreaView {
         &mut self,
         input: &InputEvent,
         now_ns: u64,
-        layout: &AreaLayout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -1012,7 +1002,7 @@ impl AreaView {
         match *input {
             InputEvent::PointerMoved { to } => {
                 self.pointer = to;
-                self.on_bar(input, layout, scale, theme, damage)
+                self.on_bar(input, scale, theme, damage)
             }
             InputEvent::ModifiersChanged { modifiers } => {
                 self.modifiers = modifiers;
@@ -1020,57 +1010,49 @@ impl AreaView {
             }
             InputEvent::KeyPressed { key, modifiers } => {
                 self.modifiers = modifiers;
-                self.unsay(layout, damage);
-                self.on_key(key, modifiers, layout, damage)
+                self.unsay(damage);
+                self.on_key(key, modifiers, damage)
             }
             InputEvent::PointerScrolled { dx, dy } => {
-                match self.scroll.wheel(dx, dy, scale, layout.bar, damage) {
-                    Some(ScrollAction::ScrollTo { offset }) => {
-                        self.scroll_to(offset, layout, damage)
-                    }
+                match self.scroll.wheel(dx, dy, scale, self.layout.bar, damage) {
+                    Some(ScrollAction::ScrollTo { offset }) => self.scroll_to(offset, damage),
                     None => Outcome::none(),
                 }
             }
-            InputEvent::PointerPressed { button } if !layout.bar.contains(self.pointer) => {
-                self.unsay(layout, damage);
-                self.on_press(button, now_ns, layout, damage)
+            InputEvent::PointerPressed { button } if !self.layout.bar.contains(self.pointer) => {
+                self.unsay(damage);
+                self.on_press(button, now_ns, damage)
             }
-            _ => self.on_bar(input, layout, scale, theme, damage),
+            _ => self.on_bar(input, scale, theme, damage),
         }
     }
 
     fn on_bar(
         &mut self,
         input: &InputEvent,
-        layout: &AreaLayout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
         match self
             .scroll
-            .on_pointer(input, layout.bar, scale, theme, damage)
+            .on_pointer(input, self.layout.bar, scale, theme, damage)
         {
-            Some(ScrollAction::ScrollTo { offset }) => self.scroll_to(offset, layout, damage),
+            Some(ScrollAction::ScrollTo { offset }) => self.scroll_to(offset, damage),
             None => Outcome::none(),
         }
     }
 
-    fn scroll_to(&mut self, offset: u64, layout: &AreaLayout, damage: &mut Region) -> Outcome {
+    fn scroll_to(&mut self, offset: u64, damage: &mut Region) -> Outcome {
         self.offset = u32::try_from(offset).unwrap_or(u32::MAX);
-        self.settle(layout, damage);
+        self.settle(damage);
         Outcome::none()
     }
 
-    fn on_press(
-        &mut self,
-        button: PointerButton,
-        now_ns: u64,
-        layout: &AreaLayout,
-        damage: &mut Region,
-    ) -> Outcome {
+    fn on_press(&mut self, button: PointerButton, now_ns: u64, damage: &mut Region) -> Outcome {
         let count = self.document.entries().len();
-        let hit = layout
+        let hit = self
+            .layout
             .index_at(self.pointer, self.offset, count)
             .and_then(|index| self.document.ids().get(index).copied());
         match (button, hit) {
@@ -1084,24 +1066,24 @@ impl AreaView {
                 );
                 if kind == ClickKind::Double {
                     self.choose_only(&[id]);
-                    damage.add(layout.grid);
-                    return self.open_chosen(layout, damage);
+                    damage.add(self.layout.grid);
+                    return self.open_chosen(damage);
                 }
-                self.press_on(id, damage, layout);
+                self.press_on(id, damage);
                 Outcome::none()
             }
             (PointerButton::Primary, None) => {
                 self.clicks.reset();
                 if !self.modifiers.ctrl && !self.modifiers.shift {
                     self.chosen.clear();
-                    damage.add(layout.grid);
+                    damage.add(self.layout.grid);
                 }
                 Outcome::none()
             }
             (PointerButton::Secondary, hit) => {
                 if let Some(id) = hit.filter(|id| !self.chosen.contains(id)) {
                     self.choose_only(&[id]);
-                    damage.add(layout.grid);
+                    damage.add(self.layout.grid);
                 }
                 Outcome::asking(Request::Menu {
                     kind: MenuKind::Window,
@@ -1114,7 +1096,7 @@ impl AreaView {
 
     /// A primary press on sprite `id`: Ctrl adds or takes it, Shift runs to
     /// it from the anchor, anything else chooses it alone.
-    fn press_on(&mut self, id: EntryId, damage: &mut Region, layout: &AreaLayout) {
+    fn press_on(&mut self, id: EntryId, damage: &mut Region) {
         if self.modifiers.ctrl {
             match self.chosen.iter().position(|&held| held == id) {
                 Some(at) => {
@@ -1129,7 +1111,7 @@ impl AreaView {
             self.choose_only(&[id]);
         }
         self.cursor = Some(id);
-        damage.add(layout.grid);
+        damage.add(self.layout.grid);
     }
 
     /// Choose the run of sprites from the anchor to `id`, inclusive.
@@ -1148,13 +1130,7 @@ impl AreaView {
             .extend_from_slice(&self.document.ids()[low..=high]);
     }
 
-    fn on_key(
-        &mut self,
-        key: Key,
-        modifiers: Modifiers,
-        layout: &AreaLayout,
-        damage: &mut Region,
-    ) -> Outcome {
+    fn on_key(&mut self, key: Key, modifiers: Modifiers, damage: &mut Region) -> Outcome {
         let count = self.document.entries().len();
         if count == 0 {
             return Outcome::none();
@@ -1176,15 +1152,16 @@ impl AreaView {
             _ => None,
         };
         if let Some(action) = shortcut {
-            return self.act(action, layout, damage);
+            return self.act(action, damage);
         }
         let at = self
             .cursor
             .and_then(|id| self.document.index_of(id))
             .unwrap_or(0);
-        let columns = layout.columns.max(1);
-        let page =
-            columns * (layout.grid.height / (layout.cell.1 + layout.gap).max(1)).max(1) as usize;
+        let columns = self.layout.columns.max(1);
+        let page = columns
+            * (self.layout.grid.height / (self.layout.cell.1 + self.layout.gap).max(1)).max(1)
+                as usize;
         let to = match key {
             Key::Named(NamedKey::Left) => at.saturating_sub(1),
             Key::Named(NamedKey::Right) => (at + 1).min(count - 1),
@@ -1203,27 +1180,27 @@ impl AreaView {
             self.choose_only(&[id]);
         }
         self.cursor = Some(id);
-        self.reveal(to, layout, damage);
-        damage.add(layout.grid);
+        self.reveal(to, damage);
+        damage.add(self.layout.grid);
         Outcome::none()
     }
 
     /// Scroll cell `index` into view.
-    fn reveal(&mut self, index: usize, layout: &AreaLayout, damage: &mut Region) {
-        let row = u32::try_from(index / layout.columns.max(1)).unwrap_or(u32::MAX);
-        let top = row.saturating_mul(layout.cell.1 + layout.gap);
-        let bottom = top.saturating_add(layout.cell.1 + layout.gap * 2);
+    fn reveal(&mut self, index: usize, damage: &mut Region) {
+        let row = u32::try_from(index / self.layout.columns.max(1)).unwrap_or(u32::MAX);
+        let top = row.saturating_mul(self.layout.cell.1 + self.layout.gap);
+        let bottom = top.saturating_add(self.layout.cell.1 + self.layout.gap * 2);
         if top < self.offset {
             self.offset = top;
-        } else if bottom > self.offset + layout.grid.height {
-            self.offset = bottom.saturating_sub(layout.grid.height);
+        } else if bottom > self.offset + self.layout.grid.height {
+            self.offset = bottom.saturating_sub(self.layout.grid.height);
         }
-        self.settle(layout, damage);
+        self.settle(damage);
     }
 
-    fn damage_cursor(&self, layout: &AreaLayout, damage: &mut Region) {
+    fn damage_cursor(&self, damage: &mut Region) {
         if let Some(index) = self.cursor.and_then(|id| self.document.index_of(id)) {
-            damage.add(layout.cell_rect(index, self.offset));
+            damage.add(self.layout.cell_rect(index, self.offset));
         }
     }
 
@@ -1233,7 +1210,6 @@ impl AreaView {
         &mut self,
         id: EntryId,
         picture: crate::document::Picture,
-        layout: &AreaLayout,
         damage: &mut Region,
     ) -> Outcome {
         let Some(index) = self.document.adopt_edited(id, picture) else {
@@ -1242,7 +1218,7 @@ impl AreaView {
         *self.revisions.entry(id).or_insert(0) += 1;
         self.fresh = false;
         self.seen = self.document.generation();
-        damage.add(layout.cell_rect(index, self.offset));
+        damage.add(self.layout.cell_rect(index, self.offset));
         self.wanted().map_or_else(Outcome::none, Outcome::asking)
     }
 
@@ -1307,13 +1283,7 @@ impl AreaView {
     }
 
     /// What the worker answered job `job` with.
-    pub fn computed(
-        &mut self,
-        job: u64,
-        computed: Computed,
-        layout: &AreaLayout,
-        damage: &mut Region,
-    ) -> Outcome {
+    pub fn computed(&mut self, job: u64, computed: Computed, damage: &mut Region) -> Outcome {
         if self.asked != Some(job) {
             return Outcome::none();
         }
@@ -1330,7 +1300,7 @@ impl AreaView {
                     },
                 );
                 if let Some(index) = self.document.index_of(id) {
-                    damage.add(layout.cell_rect(index, self.offset));
+                    damage.add(self.layout.cell_rect(index, self.offset));
                 }
             }
         }
@@ -1339,16 +1309,11 @@ impl AreaView {
 
     /// The form the window asks in, beside its area, holding the window.
     #[must_use]
-    pub fn dialog_window(
-        &self,
-        layout: &AreaLayout,
-        scale: Scale,
-        theme: &Theme,
-    ) -> Option<DialogWindow<'_>> {
+    pub fn dialog_window(&self, scale: Scale, theme: &Theme) -> Option<DialogWindow<'_>> {
         let form = self.modal.as_ref()?;
         Some(DialogWindow {
             title: form.title(),
-            rect: form.rect(layout.dialog_origin(), scale, theme),
+            rect: form.rect(self.layout.dialog_origin(), scale, theme),
             modality: tairix_abi::window_ipc::DialogModality::OwnerModal,
         })
     }
@@ -1358,11 +1323,10 @@ impl AreaView {
         &mut self,
         input: &InputEvent,
         now_ns: u64,
-        layout: &AreaLayout,
         (scale, theme): (Scale, &Theme),
         damage: &mut Region,
     ) -> Outcome {
-        let origin = layout.dialog_origin();
+        let origin = self.layout.dialog_origin();
         let Some(form) = self.modal.as_mut() else {
             return Outcome::none();
         };
@@ -1382,7 +1346,7 @@ impl AreaView {
             _ => form.on_pointer(input, origin, scale, theme, damage),
         };
         match (answer, self.modal.take()) {
-            (Some(Answer::Confirmed), Some(form)) => self.form_answered(form, layout, damage),
+            (Some(Answer::Confirmed), Some(form)) => self.form_answered(form, damage),
             (None, form) => {
                 self.modal = form;
                 Outcome::none()
@@ -1392,27 +1356,16 @@ impl AreaView {
     }
 
     /// The desktop would not open the form, for `why`.
-    pub fn dialog_refused(
-        &mut self,
-        why: &str,
-        layout: &AreaLayout,
-        damage: &mut Region,
-    ) -> Outcome {
+    pub fn dialog_refused(&mut self, why: &str, damage: &mut Region) -> Outcome {
         self.modal = None;
         self.state(
             &alloc::format!("The form could not be shown: {why}"),
-            layout,
             damage,
         );
         Outcome::none()
     }
 
-    fn form_answered(
-        &mut self,
-        mut form: Form,
-        layout: &AreaLayout,
-        damage: &mut Region,
-    ) -> Outcome {
+    fn form_answered(&mut self, mut form: Form, damage: &mut Region) -> Outcome {
         if form.purpose() != Purpose::NewSprite {
             return Outcome::none();
         }
@@ -1430,7 +1383,7 @@ impl AreaView {
             }
         };
         let Some(picture) = sprite_picture(&new) else {
-            self.state("There is not enough memory for the sprite", layout, damage);
+            self.state("There is not enough memory for the sprite", damage);
             return Outcome::none();
         };
         let at = self
@@ -1447,7 +1400,7 @@ impl AreaView {
                 }
             }
             Err(refusal) => {
-                self.state(&alloc::format!("{refusal}"), layout, damage);
+                self.state(&alloc::format!("{refusal}"), damage);
                 Outcome::none()
             }
         }
@@ -1584,13 +1537,8 @@ impl SavedDocument for AreaView {
 
 /// Paint the sprite file window into `surface`, whose clip narrows it to
 /// what this round repaints.
-pub fn render_area(
-    surface: &mut Surface,
-    view: &AreaView,
-    layout: &AreaLayout,
-    theme: &Theme,
-    scale: Scale,
-) {
+pub fn render_area(surface: &mut Surface, view: &AreaView, theme: &Theme, scale: Scale) {
+    let layout = view.layout();
     let palette = theme.palette();
     if !withheld(surface, layout.grid) {
         fill_area(surface, layout.grid, Color::from(palette.surface));
@@ -1600,7 +1548,7 @@ pub fn render_area(
             if withheld(surface, cell) {
                 continue;
             }
-            render_cell(surface, view, layout, (index, cell), scale, theme);
+            render_cell(surface, view, (index, cell), scale, theme);
         }
     }
     if !layout.bar.is_empty() && !withheld(surface, layout.bar) {
@@ -1632,11 +1580,11 @@ pub fn render_area(
 fn render_cell(
     surface: &mut Surface,
     view: &AreaView,
-    layout: &AreaLayout,
     (index, cell): (usize, Rect),
     scale: Scale,
     theme: &Theme,
 ) {
+    let layout = view.layout();
     let id = view.document.ids()[index];
     let entry = &view.document.entries()[index];
     let mut state = ControlState::idle();

@@ -38,26 +38,31 @@ impl View {
     pub fn render(
         &self,
         surface: &mut Surface,
-        layout: &Layout,
         (theme, scale, faces): (&Theme, Scale, Faces),
         artwork: &mut dyn IconArtwork,
     ) {
         let palette = theme.palette();
         let chrome = Color::from(palette.surface_raised);
-        if !withheld(surface, layout.tools) {
-            fill_area(surface, layout.tools, chrome);
+        if !withheld(surface, self.layout.tools) {
+            fill_area(surface, self.layout.tools, chrome);
             self.tool_box
-                .render(surface, layout.tools, scale, theme, artwork);
+                .render(surface, self.layout.tools, scale, theme, artwork);
         }
-        self.rulers(surface, layout, scale, theme);
-        if !withheld(surface, layout.canvas) {
-            if let Some((x, y)) = layout.canvas.surface_origin() {
-                surface.with_clip(x, y, layout.canvas.width, layout.canvas.height, |surface| {
-                    self.canvas(surface, layout, theme);
-                });
+        self.rulers(surface, scale, theme);
+        if !withheld(surface, self.layout.canvas) {
+            if let Some((x, y)) = self.layout.canvas.surface_origin() {
+                surface.with_clip(
+                    x,
+                    y,
+                    self.layout.canvas.width,
+                    self.layout.canvas.height,
+                    |surface| {
+                        self.canvas(surface, theme);
+                    },
+                );
             }
         }
-        if !withheld(surface, layout.panel) || !withheld(surface, layout.tabs) {
+        if !withheld(surface, self.layout.panel) || !withheld(surface, self.layout.tabs) {
             let shown = shown_of(
                 self.shown(),
                 (&self.selection, self.typed()),
@@ -65,29 +70,35 @@ impl View {
                 self.layer,
             );
             self.inspector
-                .render(surface, (layout, scale, theme, faces), &shown);
+                .render(surface, (&self.layout, scale, theme, faces), &shown);
         }
-        if !withheld(surface, layout.horizontal_bar) || !withheld(surface, layout.vertical_bar) {
-            fill_area(surface, layout.bar_corner, chrome);
-            self.render_bars(surface, layout, scale, theme);
+        if !withheld(surface, self.layout.horizontal_bar)
+            || !withheld(surface, self.layout.vertical_bar)
+        {
+            fill_area(surface, self.layout.bar_corner, chrome);
+            self.render_bars(surface, scale, theme);
         }
-        if !withheld(surface, layout.status) {
-            self.status(surface, layout, theme, StatusBand::new(theme, scale));
+        if !withheld(surface, self.layout.status) {
+            self.status(surface, theme, StatusBand::new(theme, scale));
         }
     }
 
-    fn rulers(&self, surface: &mut Surface, layout: &Layout, scale: Scale, theme: &Theme) {
-        fill_area(surface, layout.corner, Color::from(theme.palette().surface));
+    fn rulers(&self, surface: &mut Surface, scale: Scale, theme: &Theme) {
+        fill_area(
+            surface,
+            self.layout.corner,
+            Color::from(theme.palette().surface),
+        );
         let unit = self.document.drawing().page().unit;
         let per_unit = unit.pixels() * self.viewport.pixels();
         let origin = self.viewport.origin();
         let along = |ruler: Rect, axis: RulerAxis| match axis {
-            RulerAxis::Across => origin.x + f64::from(layout.canvas.left() - ruler.left()),
-            RulerAxis::Down => origin.y + f64::from(layout.canvas.top() - ruler.top()),
+            RulerAxis::Across => origin.x + f64::from(self.layout.canvas.left() - ruler.left()),
+            RulerAxis::Down => origin.y + f64::from(self.layout.canvas.top() - ruler.top()),
         };
         for (ruler, axis) in [
-            (layout.top_ruler, RulerAxis::Across),
-            (layout.left_ruler, RulerAxis::Down),
+            (self.layout.top_ruler, RulerAxis::Across),
+            (self.layout.left_ruler, RulerAxis::Down),
         ] {
             if withheld(surface, ruler) {
                 continue;
@@ -98,14 +109,14 @@ impl View {
         }
     }
 
-    fn canvas(&self, surface: &mut Surface, layout: &Layout, theme: &Theme) {
+    fn canvas(&self, surface: &mut Surface, theme: &Theme) {
         let palette = theme.palette();
-        fill_area(surface, layout.canvas, Color::from(palette.desktop));
+        fill_area(surface, self.layout.canvas, Color::from(palette.desktop));
         let drawing = self.shown();
-        let page = self.window_rect(layout, drawing.page().bounds());
-        let rule = layout.length(1).max(1);
+        let page = self.window_rect(drawing.page().bounds());
+        let rule = self.layout.length(1).max(1);
         if let Some(page) = page {
-            let fall = px(layout.length(SHADOW_FALL));
+            let fall = px(self.layout.length(SHADOW_FALL));
             let shadow = Rect::new(
                 page.left().saturating_add(fall),
                 page.top().saturating_add(fall),
@@ -114,12 +125,12 @@ impl View {
             );
             blend_area(
                 surface,
-                shadow.intersection(&layout.canvas),
+                shadow.intersection(&self.layout.canvas),
                 palette.drop_shadow,
             );
             fill_area(
                 surface,
-                page.intersection(&layout.canvas),
+                page.intersection(&self.layout.canvas),
                 Color::from(paper(drawing.page())),
             );
         }
@@ -128,11 +139,11 @@ impl View {
         let onto = stand_in
             .as_ref()
             .map(|stand_in| stand_in.onto(self.viewport.pixels()));
-        for key in self.visible_tiles(layout) {
+        for key in self.visible_tiles() {
             let at = key.origin();
-            let x = layout.canvas.left() + round_i32(origin.x + at.x);
-            let y = layout.canvas.top() + round_i32(origin.y + at.y);
-            let place = Rect::new(x, y, TILE, TILE).intersection(&layout.canvas);
+            let x = self.layout.canvas.left() + round_i32(origin.x + at.x);
+            let y = self.layout.canvas.top() + round_i32(origin.y + at.y);
+            let place = Rect::new(x, y, TILE, TILE).intersection(&self.layout.canvas);
             if place.is_empty() {
                 continue;
             }
@@ -156,39 +167,39 @@ impl View {
             outline_rect(surface, page, Color::from(palette.border), rule);
         }
         if self.show.grid {
-            self.grid_lines(surface, layout, palette.selection_tint, rule);
+            self.grid_lines(surface, palette.selection_tint, rule);
         }
         for guide in drawing.guides() {
             let colour = palette.selection_fill;
             match guide.axis {
                 GuideAxis::Horizontal => {
-                    let y = round_i32(self.window_at(layout, Point::new(0.0, guide.position)).y);
+                    let y = round_i32(self.window_at(Point::new(0.0, guide.position)).y);
                     blend_area(
                         surface,
-                        Rect::new(layout.canvas.left(), y, layout.canvas.width, rule),
+                        Rect::new(self.layout.canvas.left(), y, self.layout.canvas.width, rule),
                         colour,
                     );
                 }
                 GuideAxis::Vertical => {
-                    let x = round_i32(self.window_at(layout, Point::new(guide.position, 0.0)).x);
+                    let x = round_i32(self.window_at(Point::new(guide.position, 0.0)).x);
                     blend_area(
                         surface,
-                        Rect::new(x, layout.canvas.top(), rule, layout.canvas.height),
+                        Rect::new(x, self.layout.canvas.top(), rule, self.layout.canvas.height),
                         colour,
                     );
                 }
             }
         }
-        self.overlay(surface, layout, palette);
+        self.overlay(surface, palette);
     }
 
     /// The window's device rectangle over `bounds` of the drawing.
-    pub(crate) fn window_rect(&self, layout: &Layout, bounds: Bounds) -> Option<Rect> {
+    pub(crate) fn window_rect(&self, bounds: Bounds) -> Option<Rect> {
         if bounds.is_empty() {
             return None;
         }
-        let a = self.window_at(layout, bounds.min);
-        let b = self.window_at(layout, bounds.max);
+        let a = self.window_at(bounds.min);
+        let b = self.window_at(bounds.max);
         let left = round_i32(fmin(a.x, b.x));
         let top = round_i32(fmin(a.y, b.y));
         let width = u32::try_from(round_i32(fabs(b.x - a.x))).ok()?;
@@ -197,7 +208,7 @@ impl View {
     }
 
     /// The grid over the canvas, its lines `rule` device pixels wide.
-    fn grid_lines(&self, surface: &mut Surface, layout: &Layout, colour: Rgba, rule: u32) {
+    fn grid_lines(&self, surface: &mut Surface, colour: Rgba, rule: u32) {
         let grid = self.shown().grid();
         let cell = grid.spacing / f64::from(grid.subdivisions.max(1));
         let step = cell * self.viewport.pixels();
@@ -213,7 +224,7 @@ impl View {
                 0.0
             }
         };
-        let canvas = layout.canvas;
+        let canvas = self.layout.canvas;
         let lines = |length: u32| whole_count(f64::from(length) / step) + 1;
         for line in 0..lines(canvas.width) {
             let x = round_i32(first(origin.x) + real(line) * step);
@@ -240,21 +251,21 @@ impl View {
     }
 
     /// What the hand is doing, over the tiles.
-    fn overlay(&self, surface: &mut Surface, layout: &Layout, palette: &Palette) {
+    fn overlay(&self, surface: &mut Surface, palette: &Palette) {
         let to_window = self.viewport.to_canvas().then(Affine::translate(
-            f64::from(layout.canvas.left()),
-            f64::from(layout.canvas.top()),
+            f64::from(self.layout.canvas.left()),
+            f64::from(self.layout.canvas.top()),
         ));
-        let pen = Pen::hairline(layout, Color::from(palette.accent));
-        self.selection_marks(surface, layout, to_window, pen);
+        let pen = Pen::hairline(&self.layout, Color::from(palette.accent));
+        self.selection_marks(surface, to_window, pen);
         if self.tool == Tool::Nodes {
-            self.node_marks(surface, layout, to_window, pen);
+            self.node_marks(surface, to_window, pen);
         }
-        self.gesture_preview(surface, layout, to_window, pen);
+        self.gesture_preview(surface, to_window, pen);
         if self.tool == Tool::Gradient && self.gesture.is_none() {
-            self.gradient_marks(surface, layout, to_window, pen);
+            self.gradient_marks(surface, to_window, pen);
         }
-        self.pen_marks(surface, layout, to_window, pen);
+        self.pen_marks(surface, to_window, pen);
         if let Some(typing) = &self.typing {
             let marked = Color::from(palette.selection_fill);
             self.caret(surface, typing, to_window, (pen, marked));
@@ -263,7 +274,7 @@ impl View {
 
     /// The selection: where a drag would put it while one is under way, its
     /// bounds and, for the select tool, its handles otherwise.
-    fn selection_marks(&self, surface: &mut Surface, layout: &Layout, to_window: Affine, pen: Pen) {
+    fn selection_marks(&self, surface: &mut Surface, to_window: Affine, pen: Pen) {
         let drawing = self.shown();
         let mut budget = PREVIEW_POINTS;
         let preview = self
@@ -304,8 +315,8 @@ impl View {
             if self.tool == Tool::Select {
                 for handle in handles() {
                     let at = device_point(to_window.map(handle_point(bounds, handle)));
-                    fill_area(surface, square(layout, at, 7), pen.colour);
-                    fill_area(surface, square(layout, at, 5), WHITE);
+                    fill_area(surface, square(&self.layout, at, 7), pen.colour);
+                    fill_area(surface, square(&self.layout, at, 5), WHITE);
                 }
             }
         }
@@ -314,7 +325,7 @@ impl View {
     /// Where the one object selected lays the gradient the Style tab edits:
     /// a linear one from its start to its end, a radial one from its centre
     /// out to its circle.
-    fn gradient_marks(&self, surface: &mut Surface, layout: &Layout, to_window: Affine, pen: Pen) {
+    fn gradient_marks(&self, surface: &mut Surface, to_window: Affine, pen: Pen) {
         let [path] = self.selection.as_slice() else {
             return;
         };
@@ -338,12 +349,12 @@ impl View {
             .then(node.transform())
             .then(edit::parent_space(drawing, path))
             .then(to_window);
-        gradient_line(surface, layout, course, placed, pen);
+        gradient_line(surface, &self.layout, course, placed, pen);
     }
 
     /// What the gesture under way would make: a marquee, a zoom area, a new
     /// shape, a freehand line or a guide.
-    fn gesture_preview(&self, surface: &mut Surface, layout: &Layout, to_window: Affine, pen: Pen) {
+    fn gesture_preview(&self, surface: &mut Surface, to_window: Affine, pen: Pen) {
         let constraint = Constraint {
             even: self.modifiers.shift,
             centred: self.modifiers.alt,
@@ -355,8 +366,8 @@ impl View {
             }
             Some(Gesture::Zoom { from, to }) => {
                 let canvas = Affine::translate(
-                    f64::from(layout.canvas.left()),
-                    f64::from(layout.canvas.top()),
+                    f64::from(self.layout.canvas.left()),
+                    f64::from(self.layout.canvas.top()),
                 );
                 stroke_bounds(surface, Bounds::new(*from, *to), canvas, pen);
             }
@@ -404,21 +415,21 @@ impl View {
             }
             Some(Gesture::Gradient { from, to }) => {
                 let end = tools::line_end(*from, *to, constraint);
-                gradient_line(surface, layout, (*from, end), to_window, pen);
+                gradient_line(surface, &self.layout, (*from, end), to_window, pen);
             }
             Some(Gesture::Guide { horizontal, at, .. }) => {
                 if *horizontal {
                     let y = round_i32(to_window.map(Point::new(0.0, *at)).y);
                     fill_area(
                         surface,
-                        Rect::new(layout.canvas.left(), y, layout.canvas.width, 1),
+                        Rect::new(self.layout.canvas.left(), y, self.layout.canvas.width, 1),
                         pen.colour,
                     );
                 } else {
                     let x = round_i32(to_window.map(Point::new(*at, 0.0)).x);
                     fill_area(
                         surface,
-                        Rect::new(x, layout.canvas.top(), 1, layout.canvas.height),
+                        Rect::new(x, self.layout.canvas.top(), 1, self.layout.canvas.height),
                         pen.colour,
                     );
                 }
@@ -428,7 +439,7 @@ impl View {
     }
 
     /// The path the pen is setting, its nodes marked.
-    fn pen_marks(&self, surface: &mut Surface, layout: &Layout, to_window: Affine, pen: Pen) {
+    fn pen_marks(&self, surface: &mut Surface, to_window: Affine, pen: Pen) {
         if !self.pen.is_empty() {
             let mut nodes = self.pen.clone();
             if let Some(Gesture::PenHandle { to }) = &self.gesture {
@@ -446,7 +457,7 @@ impl View {
             }
             for node in &nodes {
                 let at = device_point(to_window.map(node.point));
-                fill_area(surface, square(layout, at, 6), pen.colour);
+                fill_area(surface, square(&self.layout, at, 6), pen.colour);
             }
         }
     }
@@ -471,7 +482,7 @@ impl View {
     /// The selected path's nodes and handles — or those of the path the
     /// selected text is set along — the one a drag under way holds where the
     /// pointer has it.
-    fn node_marks(&self, surface: &mut Surface, layout: &Layout, to_window: Affine, pen: Pen) {
+    fn node_marks(&self, surface: &mut Surface, to_window: Affine, pen: Pen) {
         let drawing = self.shown();
         let Some(path) = self.selection.first() else {
             return;
@@ -493,7 +504,7 @@ impl View {
             .transform()
             .then(edit::parent_space(drawing, path))
             .then(to_window);
-        let canvas = layout.canvas;
+        let canvas = self.layout.canvas;
         for (contour_at, contour) in shape.contours.iter().enumerate() {
             for (node_at, node) in contour.nodes.iter().enumerate() {
                 let node = match held {
@@ -510,10 +521,14 @@ impl View {
                 for handle in [node.before, node.after].into_iter().flatten() {
                     let end = placed.map(handle);
                     pen.line(surface, point, end);
-                    fill_area(surface, square(layout, device_point(end), 5), pen.colour);
+                    fill_area(
+                        surface,
+                        square(&self.layout, device_point(end), 5),
+                        pen.colour,
+                    );
                 }
-                fill_area(surface, square(layout, at, 7), pen.colour);
-                fill_area(surface, square(layout, at, 5), WHITE);
+                fill_area(surface, square(&self.layout, at, 7), pen.colour);
+                fill_area(surface, square(&self.layout, at, 5), WHITE);
             }
         }
     }
@@ -578,9 +593,9 @@ impl View {
         pen.heavier(2).line(surface, top, bottom);
     }
 
-    fn status(&self, surface: &mut Surface, layout: &Layout, theme: &Theme, band: StatusBand) {
+    fn status(&self, surface: &mut Surface, theme: &Theme, band: StatusBand) {
         let unit = self.document.drawing().page().unit;
-        let pointer = self.drawing_at(layout, self.pointer) / unit.pixels();
+        let pointer = self.drawing_at(self.pointer) / unit.pixels();
         let at = alloc::format!(
             "{}, {} {}",
             round2(pointer.x),
@@ -605,13 +620,13 @@ impl View {
         let zoom = readout(self.viewport.zoom());
         band.paint(
             surface,
-            layout.status,
+            self.layout.status,
             theme,
             &[
-                (layout.message, message, tone),
-                (layout.pointer, &at, StatusTone::Muted),
-                (layout.selected, &selected, StatusTone::Muted),
-                (layout.zoom, &zoom, StatusTone::Ink),
+                (self.layout.message, message, tone),
+                (self.layout.pointer, &at, StatusTone::Muted),
+                (self.layout.selected, &selected, StatusTone::Muted),
+                (self.layout.zoom, &zoom, StatusTone::Ink),
             ],
         );
     }
@@ -1110,12 +1125,13 @@ mod tests {
             1.0,
         );
         let theme = Theme::light();
-        let layout = crate::layout::Layout::of(1080, 720, Scale::ONE, &theme);
-        view.settle(&layout, &mut Region::new());
+        let faces = crate::layout::Faces::of(&theme, Scale::ONE);
+        view.lay_out(1080, 720, &theme, Scale::ONE, faces, &mut Region::new());
+        let layout = view.layout;
         let band = StatusBand::new(&theme, Scale::ONE);
         let painted = |view: &View| {
             let mut surface = Surface::new(1080, 720).expect("a window");
-            view.status(&mut surface, &layout, &theme, band);
+            view.status(&mut surface, &theme, band);
             surface
         };
         let quiet = painted(&view);
@@ -1149,11 +1165,12 @@ mod tests {
             1.0,
         );
         let theme = Theme::light();
-        let layout = crate::layout::Layout::of(1080, 720, Scale::ONE, &theme);
-        view.settle(&layout, &mut Region::new());
+        let faces = crate::layout::Faces::of(&theme, Scale::ONE);
+        view.lay_out(1080, 720, &theme, Scale::ONE, faces, &mut Region::new());
+        let layout = view.layout;
         let red = Color::rgb(220, 20, 30);
         let land = |view: &mut View, colour: Option<Color>| {
-            while let Some(job) = view.wanted_render(&layout) {
+            while let Some(job) = view.wanted_render() {
                 let tiles = job.keys.iter().map(|key| {
                     let mut tile =
                         Surface::new(crate::tiles::TILE, crate::tiles::TILE).expect("a tile");
@@ -1162,12 +1179,12 @@ mod tests {
                     }
                     (*key, tile)
                 });
-                view.rendered(job.scene, (&job.keys, tiles), &layout, &mut Region::new());
+                view.rendered(job.scene, (&job.keys, tiles), &mut Region::new());
             }
         };
         let centre = |view: &View| {
             let mut surface = Surface::new(1080, 720).expect("a window");
-            view.canvas(&mut surface, &layout, &theme);
+            view.canvas(&mut surface, &theme);
             let (x, y) = (
                 layout.canvas.left() + i32::try_from(layout.canvas.width / 2).expect("wide"),
                 layout.canvas.top() + i32::try_from(layout.canvas.height / 2).expect("tall"),
@@ -1185,7 +1202,7 @@ mod tests {
                 f64::from(layout.canvas.height) / 2.0,
             ),
         );
-        let asked = view.wanted_render(&layout).expect("the new zoom's tiles");
+        let asked = view.wanted_render().expect("the new zoom's tiles");
         view.render_refused(&asked.keys);
         assert_eq!(centre(&view), red.premultiply(), "stood in for, scaled");
         land(&mut view, None);

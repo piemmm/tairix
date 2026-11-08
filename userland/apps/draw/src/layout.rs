@@ -55,8 +55,9 @@ fn scrollbar(scale: Scale, theme: &Theme) -> u32 {
     scale.scale_length(theme.metrics().scrollbar_breadth).max(1)
 }
 
-/// A window's parts, in device pixels.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+/// A window's parts, in device pixels: by default every part empty, as for
+/// a window not yet laid out.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Layout {
     /// The whole window.
     pub window: Rect,

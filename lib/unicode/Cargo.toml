@@ -1,6 +1,6 @@
 [package]
 name = "tairix-unicode"
-description = "TAIRiX Unicode character properties: the hidden characters, the nonspacing marks, the UTS #39 mark-sequence checks over canonical decompositions, and the UTS #39 restriction level of a string's scripts, from tables generated out of the pinned Unicode Character Database snapshot in assets/ (cargo xtask unicode). no_std, allocation-free, forbids unsafe."
+description = "TAIRiX Unicode character properties and algorithms: the hidden characters, the nonspacing marks, the UTS #39 mark-sequence checks over canonical decompositions, the UTS #39 restriction level of a string's scripts, the four UAX #15 normalization forms, and SASLprep (RFC 4013) over Unicode 3.2, from tables generated out of the pinned Unicode Character Database snapshot and RFC 3454 in assets/ (cargo xtask unicode). no_std, allocation-free, forbids unsafe."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,6 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
