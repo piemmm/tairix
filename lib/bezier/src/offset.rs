@@ -11,16 +11,18 @@
 //! capped as the style says, and then simplified, which removes what an inner
 //! side and a loop of a tight curve's offset leave crossing over.
 
+use alloc::collections::TryReserveError;
 use alloc::vec::Vec;
 
 use core::f64::consts::PI;
 
-use tairix_util::fallible;
+use tairix_util::fallible::{self, try_push};
 use tairix_util::mathf::{fabs, fmax, sqrt};
 
 use crate::arc::{angle_between, EllipseArc};
 use crate::boolean::{boolean, simplified, BooleanError, Operation};
 use crate::cubic::CubicBez;
+use crate::measure::PathMeasure;
 use crate::path::{FillRule, Path, PathEl, Subpath};
 use crate::point::Point;
 use crate::segment::Segment;
@@ -88,12 +90,16 @@ impl Default for StrokeStyle {
 
 /// Hand `emit` the cubics approximating `curve` offset by `distance` —
 /// right of it as drawn where positive — to within `tolerance`, in order.
-pub fn offset_cubic(
+///
+/// # Errors
+///
+/// The first refusal `emit` answers, at which the offset stops.
+pub fn offset_cubic<E>(
     curve: CubicBez,
     distance: f64,
     tolerance: f64,
-    mut emit: impl FnMut(CubicBez),
-) {
+    mut emit: impl FnMut(CubicBez) -> Result<(), E>,
+) -> Result<(), E> {
     let tolerance = fmax(tolerance, f64::EPSILON);
     let mut pending: [(CubicBez, u32); MAX_OFFSET_DEPTH as usize + 1] =
         [(curve, 0); MAX_OFFSET_DEPTH as usize + 1];
@@ -103,7 +109,7 @@ pub fn offset_cubic(
         let (piece, depth) = pending[held];
         let approximation = approximate_offset(piece, distance);
         if depth >= MAX_OFFSET_DEPTH || offset_error(piece, approximation, distance) <= tolerance {
-            emit(approximation);
+            emit(approximation)?;
             continue;
         }
         let (left, right) = piece.split(0.5);
@@ -114,6 +120,7 @@ pub fn offset_cubic(
         pending[held + 1] = (left, depth + 1);
         held += 2;
     }
+    Ok(())
 }
 
 /// One cubic approximating `curve` offset by `distance`.
@@ -178,8 +185,8 @@ pub fn outline(path: &Path, style: &StrokeStyle, tolerance: f64) -> Result<Path,
             }
         }
         if segments.is_empty() {
-            if let Some(dot) = dot(subpath.start, half, style.start_cap) {
-                push_subpath(&mut contours, dot)?;
+            if let Some(dot) = dot(subpath.start, half, style.start_cap)? {
+                try_push(&mut contours.subpaths, dot)?;
             }
             continue;
         }
@@ -195,8 +202,8 @@ pub fn outline(path: &Path, style: &StrokeStyle, tolerance: f64) -> Result<Path,
             tolerance,
         };
         if subpath.closed {
-            push_subpath(&mut contours, sides.side(&segments, true)?)?;
-            push_subpath(&mut contours, sides.side(&reversed, true)?)?;
+            try_push(&mut contours.subpaths, sides.side(&segments, true)?)?;
+            try_push(&mut contours.subpaths, sides.side(&reversed, true)?)?;
         } else {
             let mut contour = sides.side(&segments, false)?;
             let end_point = segments[segments.len() - 1].end();
@@ -213,7 +220,7 @@ pub fn outline(path: &Path, style: &StrokeStyle, tolerance: f64) -> Result<Path,
                 style.start_cap,
             )?;
             contour.closed = true;
-            push_subpath(&mut contours, contour)?;
+            try_push(&mut contours.subpaths, contour)?;
         }
     }
     simplified(&contours, FillRule::NonZero)
@@ -239,7 +246,7 @@ pub fn dashed(path: &Path, pattern: &[f64], offset: f64) -> Result<Path, Boolean
         && total > 0.0
         && total.is_finite();
     if !valid {
-        return Ok(path.clone());
+        return Ok(path.try_clone()?);
     }
     let mut lengths: Vec<f64> = Vec::new();
     let cycle = if pattern.len() % 2 == 1 { 2 } else { 1 };
@@ -250,11 +257,16 @@ pub fn dashed(path: &Path, pattern: &[f64], offset: f64) -> Result<Path, Boolean
         lengths.extend_from_slice(pattern);
     }
     let period = total * f64::from(cycle);
-    let mut measures = Measures::default();
+    let measure = PathMeasure::new(path)?;
     let mut expected = 0.0;
     let dashes_per_period = count_as_f64(lengths.len() / 2);
+    let mut index = 0;
     for subpath in &path.subpaths {
-        let along = measures.measure(subpath)?;
+        let segments = subpath.segments().count();
+        let along: f64 = (index..index + segments)
+            .map(|segment| measure.segment_length(segment))
+            .sum();
+        index += segments;
         expected += (along / period + 1.0) * dashes_per_period;
         if expected > count_as_f64(MAX_DASHES) || expected.is_nan() {
             return Err(BooleanError::TooComplex);
@@ -269,7 +281,7 @@ pub fn dashed(path: &Path, pattern: &[f64], offset: f64) -> Result<Path, Boolean
         let mut dasher = Dasher::new(&lengths, into);
         let starts_drawing = dasher.drawing();
         for segment in subpath.segments() {
-            dasher.walk(segment, &measures, next, &mut out)?;
+            dasher.walk(segment, &measure, next, &mut out)?;
             next += 1;
         }
         // A dash running through a closed sub-path's seam is one dash.
@@ -283,58 +295,11 @@ pub fn dashed(path: &Path, pattern: &[f64], offset: f64) -> Result<Path, Boolean
                 last.elements.extend_from_slice(&first.elements);
                 out.subpaths[first_dash] = last;
             }
-            Some(last) => push_subpath(&mut out, last)?,
+            Some(last) => try_push(&mut out.subpaths, last)?,
             None => {}
         }
     }
     Ok(out)
-}
-
-/// Every segment's length, in the order the path's segments run, and each
-/// cubic's arc table beside them, so a line costs a length and no table.
-#[derive(Default)]
-struct Measures {
-    /// Each segment's length and, for a cubic, its table's index.
-    segments: Vec<(f64, Option<usize>)>,
-    tables: Vec<crate::cubic::ArcTable>,
-}
-
-impl Measures {
-    /// Measure every segment of `subpath`, answering its whole length.
-    fn measure(&mut self, subpath: &Subpath) -> Result<f64, BooleanError> {
-        let mut along = 0.0;
-        for segment in subpath.segments() {
-            let measured = match segment {
-                Segment::Line(line) => (line.length(), None),
-                Segment::Cubic(cubic) => {
-                    let table = cubic.arc_table();
-                    if !fallible::push(&mut self.tables, table) {
-                        return Err(BooleanError::OutOfMemory);
-                    }
-                    (table.length(), Some(self.tables.len() - 1))
-                }
-            };
-            along += measured.0;
-            if !fallible::push(&mut self.segments, measured) {
-                return Err(BooleanError::OutOfMemory);
-            }
-        }
-        Ok(along)
-    }
-
-    /// Segment `index`'s length.
-    fn length(&self, index: usize) -> f64 {
-        self.segments[index].0
-    }
-
-    /// The parameter `along` into segment `index`.
-    fn param_at(&self, index: usize, along: f64) -> f64 {
-        match self.segments[index] {
-            (_, Some(table)) => self.tables[table].param_at(along),
-            (length, None) if length > 0.0 => (along / length).clamp(0.0, 1.0),
-            (_, None) => 0.0,
-        }
-    }
 }
 
 /// A count as a float, exactly while it is below 2^53.
@@ -364,12 +329,10 @@ pub fn grown(
     if distance == 0.0 || !distance.is_finite() {
         return Ok(filled);
     }
-    let mut closed = filled.clone();
-    for subpath in &mut closed.subpaths {
-        subpath.closed = true;
-    }
+    // Every contour a boolean traces is closed, so its outline is a band
+    // round each with no caps.
     let band = outline(
-        &closed,
+        &filled,
         &StrokeStyle {
             width: 2.0 * fabs(distance),
             join,
@@ -423,22 +386,23 @@ impl Sides {
     }
 
     /// Append `segment` offset by half the width.
-    fn offset_into(&self, side: &mut Subpath, segment: Segment) -> Result<(), BooleanError> {
+    fn offset_into(&self, side: &mut Subpath, segment: Segment) -> Result<(), TryReserveError> {
         match segment {
             Segment::Line(line) => {
                 let Some(normal) = line.deriv().normalised().map(Point::perpendicular) else {
                     return Ok(());
                 };
-                push_element(side, PathEl::Line(line.p1 + normal * self.half))
+                try_push(
+                    &mut side.elements,
+                    PathEl::Line(line.p1 + normal * self.half),
+                )
             }
-            Segment::Cubic(cubic) => {
-                let mut pieces: Vec<CubicBez> = Vec::new();
-                offset_cubic(cubic, self.half, self.tolerance, |piece| pieces.push(piece));
-                for piece in pieces {
-                    push_element(side, PathEl::Cubic(piece.p1, piece.p2, piece.p3))?;
-                }
-                Ok(())
-            }
+            Segment::Cubic(cubic) => offset_cubic(cubic, self.half, self.tolerance, |piece| {
+                try_push(
+                    &mut side.elements,
+                    PathEl::Cubic(piece.p1, piece.p2, piece.p3),
+                )
+            }),
         }
     }
 
@@ -449,7 +413,7 @@ impl Sides {
         side: &mut Subpath,
         before: Segment,
         after: Segment,
-    ) -> Result<(), BooleanError> {
+    ) -> Result<(), TryReserveError> {
         let vertex = before.end();
         let incoming = direction_at_end(before);
         let outgoing = direction_at_start(after);
@@ -461,11 +425,11 @@ impl Sides {
         if incoming.cross(outgoing) > 0.0 {
             // A right turn: this side is the inner one, and the overlap it
             // leaves is the simplification's to remove.
-            push_element(side, PathEl::Line(vertex))?;
-            return push_element(side, PathEl::Line(to));
+            try_push(&mut side.elements, PathEl::Line(vertex))?;
+            return try_push(&mut side.elements, PathEl::Line(to));
         }
         match self.join {
-            Join::Bevel => push_element(side, PathEl::Line(to)),
+            Join::Bevel => try_push(&mut side.elements, PathEl::Line(to)),
             Join::Miter => {
                 // Where the two edges, carried on in their own directions,
                 // meet.
@@ -476,10 +440,10 @@ impl Sides {
                 });
                 match apex {
                     Some(apex) if apex.distance(vertex) / self.half <= self.miter_limit => {
-                        push_element(side, PathEl::Line(apex))?;
-                        push_element(side, PathEl::Line(to))
+                        try_push(&mut side.elements, PathEl::Line(apex))?;
+                        try_push(&mut side.elements, PathEl::Line(to))
                     }
-                    _ => push_element(side, PathEl::Line(to)),
+                    _ => try_push(&mut side.elements, PathEl::Line(to)),
                 }
             }
             Join::Round => {
@@ -528,16 +492,19 @@ fn cap(
     direction: Point,
     half: f64,
     style: Cap,
-) -> Result<(), BooleanError> {
+) -> Result<(), TryReserveError> {
     let normal = direction.perpendicular();
     let left = point - normal * half;
     match style {
-        Cap::Butt => push_element(contour, PathEl::Line(left)),
+        Cap::Butt => try_push(&mut contour.elements, PathEl::Line(left)),
         Cap::Square => {
             let ahead = direction * half;
-            push_element(contour, PathEl::Line(point + normal * half + ahead))?;
-            push_element(contour, PathEl::Line(left + ahead))?;
-            push_element(contour, PathEl::Line(left))
+            try_push(
+                &mut contour.elements,
+                PathEl::Line(point + normal * half + ahead),
+            )?;
+            try_push(&mut contour.elements, PathEl::Line(left + ahead))?;
+            try_push(&mut contour.elements, PathEl::Line(left))
         }
         Cap::Round => {
             let arc = EllipseArc {
@@ -554,9 +521,9 @@ fn cap(
 
 /// The outline a stroke of a path with no length paints at `point`: a disc
 /// for a round cap, a square for a square one, nothing for a butt.
-fn dot(point: Point, half: f64, style: Cap) -> Option<Subpath> {
-    match style {
-        Cap::Butt => None,
+fn dot(point: Point, half: f64, style: Cap) -> Result<Option<Subpath>, TryReserveError> {
+    let mut dot = match style {
+        Cap::Butt => return Ok(None),
         Cap::Square => {
             let corners = [
                 point + Point::new(-half, -half),
@@ -565,11 +532,11 @@ fn dot(point: Point, half: f64, style: Cap) -> Option<Subpath> {
                 point + Point::new(-half, half),
             ];
             let mut square = Subpath::new(corners[0]);
+            square.elements.try_reserve_exact(corners.len() - 1)?;
             square
                 .elements
                 .extend(corners[1..].iter().map(|&c| PathEl::Line(c)));
-            square.closed = true;
-            Some(square)
+            square
         }
         Cap::Round => {
             let arc = EllipseArc {
@@ -580,15 +547,16 @@ fn dot(point: Point, half: f64, style: Cap) -> Option<Subpath> {
                 sweep: 2.0 * PI,
             };
             let mut disc = Subpath::new(arc.start_point());
-            arc.to_cubics(|c| disc.elements.push(PathEl::Cubic(c.p1, c.p2, c.p3)));
-            disc.closed = true;
-            Some(disc)
+            push_arc(&mut disc, arc, arc.start_point())?;
+            disc
         }
-    }
+    };
+    dot.closed = true;
+    Ok(Some(dot))
 }
 
 /// Append the cubics of `arc`, landing exactly on `end`.
-fn push_arc(side: &mut Subpath, arc: EllipseArc, end: Point) -> Result<(), BooleanError> {
+fn push_arc(side: &mut Subpath, arc: EllipseArc, end: Point) -> Result<(), TryReserveError> {
     let mut cubics: tairix_inline::ArrayVec<CubicBez, 4> = tairix_inline::ArrayVec::new();
     arc.to_cubics(|c| {
         let _ = cubics.try_push(c);
@@ -596,41 +564,23 @@ fn push_arc(side: &mut Subpath, arc: EllipseArc, end: Point) -> Result<(), Boole
     let count = cubics.len();
     for (index, cubic) in cubics.into_iter().enumerate() {
         let to = if index + 1 == count { end } else { cubic.p3 };
-        push_element(side, PathEl::Cubic(cubic.p1, cubic.p2, to))?;
+        try_push(&mut side.elements, PathEl::Cubic(cubic.p1, cubic.p2, to))?;
     }
     if count == 0 {
-        push_element(side, PathEl::Line(end))?;
+        try_push(&mut side.elements, PathEl::Line(end))?;
     }
     Ok(())
 }
 
 /// Append `other`'s steps to `contour`, joined by a line from the one's end
 /// to the other's start.
-fn append(contour: &mut Subpath, other: &Subpath) -> Result<(), BooleanError> {
+fn append(contour: &mut Subpath, other: &Subpath) -> Result<(), TryReserveError> {
     if contour.end() != other.start {
-        push_element(contour, PathEl::Line(other.start))?;
+        try_push(&mut contour.elements, PathEl::Line(other.start))?;
     }
-    if !fallible::reserve(&mut contour.elements, other.elements.len()) {
-        return Err(BooleanError::OutOfMemory);
-    }
+    contour.elements.try_reserve_exact(other.elements.len())?;
     contour.elements.extend_from_slice(&other.elements);
     Ok(())
-}
-
-fn push_element(subpath: &mut Subpath, element: PathEl) -> Result<(), BooleanError> {
-    if fallible::push(&mut subpath.elements, element) {
-        Ok(())
-    } else {
-        Err(BooleanError::OutOfMemory)
-    }
-}
-
-fn push_subpath(path: &mut Path, subpath: Subpath) -> Result<(), BooleanError> {
-    if fallible::push(&mut path.subpaths, subpath) {
-        Ok(())
-    } else {
-        Err(BooleanError::OutOfMemory)
-    }
 }
 
 /// Whether `segment` has no length and turns nowhere: every point the same.
@@ -680,16 +630,16 @@ impl<'p> Dasher<'p> {
         self.index.is_multiple_of(2)
     }
 
-    /// Follow `segment`, measured as `measures` holds segment `index`,
+    /// Follow `segment`, measured as `measure` holds segment `index`,
     /// cutting it where dashes begin and end.
     fn walk(
         &mut self,
         segment: Segment,
-        measures: &Measures,
+        measure: &PathMeasure,
         index: usize,
         out: &mut Path,
     ) -> Result<(), BooleanError> {
-        let length = measures.length(index);
+        let length = measure.segment_length(index);
         let mut along = 0.0;
         while along < length {
             let step = fmax(self.remaining, 0.0);
@@ -697,20 +647,17 @@ impl<'p> Dasher<'p> {
             let ends_here = reach >= length;
             let to = if ends_here { length } else { reach };
             if self.drawing() {
-                let (t0, t1) = (
-                    measures.param_at(index, along),
-                    measures.param_at(index, to),
-                );
+                let (t0, t1) = (measure.param_at(index, along), measure.param_at(index, to));
                 let piece = segment.subsegment(t0, t1);
                 let dash = self
                     .current
                     .get_or_insert_with(|| Subpath::new(piece.start()));
                 let element = if to > along || !dash.elements.is_empty() {
-                    element_of(piece)
+                    PathEl::of(piece)
                 } else {
                     point_dash(segment, t0, piece.start())
                 };
-                push_element(dash, element)?;
+                try_push(&mut dash.elements, element)?;
             }
             if ends_here {
                 self.remaining = reach - length;
@@ -729,7 +676,7 @@ impl<'p> Dasher<'p> {
             if out.subpaths.len() >= MAX_DASHES {
                 return Err(BooleanError::TooComplex);
             }
-            push_subpath(out, dash)?;
+            try_push(&mut out.subpaths, dash)?;
         }
         self.index = (self.index + 1) % self.lengths.len();
         self.remaining = self.lengths[self.index];
@@ -737,7 +684,6 @@ impl<'p> Dasher<'p> {
     }
 }
 
-/// `segment` as the step of a path from wherever it starts.
 /// A dash of no length, as a step along the path too short to see: SVG draws
 /// such a dash as its caps alone, which need the path's direction there.
 fn point_dash(segment: Segment, t: f64, at: Point) -> PathEl {
@@ -752,13 +698,6 @@ fn point_dash(segment: Segment, t: f64, at: Point) -> PathEl {
         .unwrap_or(Point::new(1.0, 0.0));
     let scale = fmax(fmax(fabs(at.x), fabs(at.y)), 1.0);
     PathEl::Line(at + direction * (scale * STEP))
-}
-
-const fn element_of(segment: Segment) -> PathEl {
-    match segment {
-        Segment::Line(line) => PathEl::Line(line.p1),
-        Segment::Cubic(cubic) => PathEl::Cubic(cubic.p1, cubic.p2, cubic.p3),
-    }
 }
 
 #[cfg(test)]

@@ -20,13 +20,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_controls::{
-    stack, ComboBox, FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout,
-    FieldRow, Keystroke, Slider, Tab, Tabs, TabsAction, TabsOrientation,
+    damage, stack, ColumnAction, ComboBox, FieldAction, FieldColumn, FieldControl, FieldGroup,
+    FieldRow, Keystroke, SettingsAction, SettingsActions, SettingsFrame, SettingsLayout, Slider,
+    Tab,
 };
-use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
+use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::NoArtwork;
-use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Surface};
+use tairix_input::InputEvent;
+use tairix_raster::Surface;
 use tairix_theme::Theme;
 use tairix_wintersun_art::material::{Quality as MaterialQuality, MAX_OCTAVES};
 
@@ -35,9 +36,6 @@ use crate::quality::{Detail, Resolution, Shadows};
 
 /// The window's title.
 pub const TITLE: &str = "WinterSun Settings";
-
-/// The category strip's width, in logical pixels.
-const STRIP_WIDTH: u32 = 150;
 
 /// The pane's width, in logical pixels: room for a setting's name and what it
 /// is set to beside a slider long enough to aim.
@@ -200,39 +198,22 @@ fn stop_value(slider: &Slider, position: usize) -> u16 {
         .unwrap_or(0)
 }
 
-/// Which region of the window holds the keyboard.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Focus {
-    /// The category strip.
-    Strip,
-    /// The group at this index.
-    Group(usize),
-}
-
 /// The group holding the mode.
 const QUALITY: usize = 0;
 
 /// The group holding the three knobs.
 const KNOBS: usize = 1;
 
-/// Where every part of the window is drawn, resolved once per pass so a
-/// paint and a hit test can never disagree.
-struct Placed {
-    strip: Rect,
-    groups: [FieldLayout; 2],
-}
-
-/// The settings window's content.
+/// The settings window's content: the shared settings frame, and what it
+/// shows of the client's choice.
 #[derive(Debug)]
 pub struct SettingsWindow {
-    strip: Tabs,
-    groups: [FieldGroup; 2],
-    focus: Focus,
+    frame: SettingsFrame,
     shown: Shown,
-    /// Where the pointer last was, which a press lands at.
-    pointer: Option<Point>,
     /// The window's own extent, in its pixels.
     extent: (u32, u32),
+    /// The frame laid out in that extent.
+    layout: SettingsLayout,
 }
 
 impl SettingsWindow {
@@ -241,20 +222,18 @@ impl SettingsWindow {
     #[must_use]
     pub fn new(shown: Shown, scale: Scale, theme: &Theme) -> Self {
         let tabs = Category::ALL.iter().map(|c| Tab::new(c.label())).collect();
-        let mut strip = Tabs::new(tabs).with_orientation(TabsOrientation::Vertical);
-        strip.adopt_selected(0);
+        let groups = vec![
+            quality_group(shown.graphics.mode()),
+            knob_group(shown.detail, shown.readable),
+        ];
+        let mut frame = SettingsFrame::new(tabs, 0, groups, Vec::new());
+        frame.focus_column();
         let mut window = Self {
-            strip,
-            groups: [
-                quality_group(shown.graphics.mode()),
-                knob_group(shown.detail, shown.readable),
-            ],
-            focus: Focus::Group(QUALITY),
+            frame,
             shown,
-            pointer: None,
             extent: (0, 0),
+            layout: SettingsLayout::default(),
         };
-        window.groups[QUALITY].adopt_focus(Some(0));
         window.fit(scale, theme);
         window
     }
@@ -270,7 +249,6 @@ impl SettingsWindow {
     /// can be put, so nothing the player does pushes a row out of a window
     /// whose size is fixed when it opens.
     pub fn fit(&mut self, scale: Scale, theme: &Theme) -> (u32, u32) {
-        let strip_w = scale.scale_length(STRIP_WIDTH);
         let pane_w = scale.scale_length(PANE_WIDTH);
         let plate = stack::plate_width(pane_w, scale, theme);
         let modes = [Mode::ALL
@@ -278,9 +256,9 @@ impl SettingsWindow {
             .map(|m| String::from(m.description()))
             .collect()];
         let knobs: Vec<Vec<String>> = Knob::ALL.iter().map(|k| k.every_description()).collect();
-        let tallest = [
-            tallest_height(quality_group(Mode::Auto), &modes, plate, scale, theme),
-            tallest_height(
+        let tallest = vec![
+            tallest(quality_group(Mode::Auto), &modes, plate, scale, theme),
+            tallest(
                 knob_group(Detail::FINEST, Resolution::Full),
                 &knobs,
                 plate,
@@ -288,20 +266,20 @@ impl SettingsWindow {
                 theme,
             ),
         ];
-        let pane_h = stack::height(tallest, scale, theme);
-        let gap = stack::gap(scale, theme);
-        let strip_h = self
-            .strip
-            .measured_height(scale, theme)
-            .saturating_add(gap.saturating_mul(2));
-        self.extent = (strip_w.saturating_add(pane_w), pane_h.max(strip_h));
+        // Measured as the window's own column measures it: one slot column
+        // across both plates.
+        let pane_h = FieldColumn::new(tallest).measured_height(pane_w, scale, theme);
+        let extent = self.frame.size_for((pane_w, pane_h), scale, theme);
+        self.set_extent(extent, scale, theme);
         self.extent
     }
 
     /// Lay out in `extent`: the frame the window actually has, where the
     /// desktop would not re-map it to the one it wanted.
-    pub fn set_extent(&mut self, extent: (u32, u32)) {
+    pub fn set_extent(&mut self, extent: (u32, u32), scale: Scale, theme: &Theme) {
         self.extent = extent;
+        self.layout = self.frame.layout(extent.0, extent.1, scale, theme);
+        self.frame.settle(&self.layout, &mut damage::sink());
     }
 
     /// Show `shown`, reporting into `damage` what that moved.
@@ -313,10 +291,12 @@ impl SettingsWindow {
         if self.shown == shown {
             return;
         }
-        let before = self.place(scale, theme);
+        let before = self.row_rects(scale, theme);
+        let groups = self.frame.column_mut().groups_mut();
         let mode = shown.graphics.mode();
-        let mode_moved = restate_row(
-            &mut self.groups[QUALITY].rows_mut()[0],
+        let mut moved = Vec::new();
+        if restate_row(
+            &mut groups[QUALITY].rows_mut()[0],
             |control| match control {
                 FieldControl::Combo(combo) => {
                     let index = Mode::ALL.iter().position(|m| *m == mode).unwrap_or(0);
@@ -327,12 +307,13 @@ impl SettingsWindow {
                 _ => false,
             },
             mode.description(),
-        );
-        let mut knobs_moved = [false; Knob::ALL.len()];
+        ) {
+            moved.push((QUALITY, 0));
+        }
         for (index, knob) in Knob::ALL.into_iter().enumerate() {
             let position = knob.position(shown.detail);
-            knobs_moved[index] = restate_row(
-                &mut self.groups[KNOBS].rows_mut()[index],
+            if restate_row(
+                &mut groups[KNOBS].rows_mut()[index],
                 |control| match control {
                     FieldControl::Slider(slider) => {
                         let value = stop_value(slider, position);
@@ -343,33 +324,24 @@ impl SettingsWindow {
                     _ => false,
                 },
                 &knob.describe(shown.detail, shown.readable),
-            );
+            ) {
+                moved.push((KNOBS, index));
+            }
         }
         self.shown = shown;
-        let after = self.place(scale, theme);
-        if before.groups.map(|g| g.bounds) != after.groups.map(|g| g.bounds) {
+        self.layout = self
+            .frame
+            .layout(self.extent.0, self.extent.1, scale, theme);
+        // A description that wrapped onto another line moved every row below
+        // it; the window is drawn again whole.
+        if before != self.row_rects(scale, theme) {
             damage.add(self.bounds());
             return;
         }
-        if mode_moved {
-            report_row(
-                &self.groups[QUALITY],
-                0,
-                after.groups[QUALITY],
-                scale,
-                theme,
-                damage,
-            );
-        }
-        for (index, _) in knobs_moved.iter().enumerate().filter(|(_, moved)| **moved) {
-            report_row(
-                &self.groups[KNOBS],
-                index,
-                after.groups[KNOBS],
-                scale,
-                theme,
-                damage,
-            );
+        for at in moved {
+            if let Some(rect) = self.frame.row_rect(at, &self.layout, scale, theme) {
+                damage.add(rect);
+            }
         }
     }
 
@@ -381,44 +353,16 @@ impl SettingsWindow {
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Request> {
-        let placed = self.place(scale, theme);
-        match event {
-            InputEvent::PointerMoved { to } => self.pointer = Some(*to),
-            InputEvent::PointerPressed {
-                button: PointerButton::Primary,
-            } => self.focus_under_press(&placed, scale, theme, damage),
-            _ => {}
-        }
-        // A choice list that is open is modal: it hangs over the rows beneath
-        // it, so only its own group may see the stream.
-        let open = self.open_group();
-        if open.is_none() {
-            if let Some(TabsAction::Selected { index }) =
-                self.strip
-                    .on_pointer(event, placed.strip, scale, theme, damage)
-            {
-                self.strip
-                    .set_selected(index, placed.strip, scale, theme, damage);
-            }
-        }
-        let mut asked = None;
-        for group in 0..self.groups.len() {
-            if open.is_some_and(|open| open != group) {
-                continue;
-            }
-            let layout = placed.groups[group];
-            if let Some(action) = self.groups[group].on_pointer(event, layout, scale, theme, damage)
-            {
-                asked = self.act(group, action, &placed, scale, theme, damage);
-            }
-        }
-        asked
+        let asked = self
+            .frame
+            .on_pointer(event, &self.layout, scale, theme, damage);
+        self.answered(asked, scale, theme, damage)
     }
 
     /// Feed a key press, answering what it asked of the client.
     ///
-    /// `Tab` and `Shift`+`Tab` walk the strip and the two groups; `Escape`
-    /// closes an open choice list, and otherwise the window.
+    /// `Tab` and `Shift`+`Tab` walk the strip and the pane; `Escape` closes
+    /// an open choice list, and otherwise the window.
     pub fn on_key(
         &mut self,
         stroke: Keystroke,
@@ -426,80 +370,70 @@ impl SettingsWindow {
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Request> {
-        let placed = self.place(scale, theme);
-        let listing = self.open_group().is_some();
-        let key = stroke.key;
-        match key {
-            Key::Named(NamedKey::Escape) if !listing => return Some(Request::Close),
-            Key::Named(NamedKey::Tab) if !listing => {
-                let order = [Focus::Strip, Focus::Group(QUALITY), Focus::Group(KNOBS)];
-                let at = order.iter().position(|f| *f == self.focus).unwrap_or(0);
-                let next = if stroke.modifiers.shift {
-                    order[(at + order.len() - 1) % order.len()]
-                } else {
-                    order[(at + 1) % order.len()]
-                };
-                self.move_focus(next, 0, &placed, scale, theme, damage);
-                return None;
-            }
-            _ => {}
-        }
-        match self.focus {
-            Focus::Strip => {
-                if let Some(TabsAction::Selected { index }) =
-                    self.strip.on_key(key, placed.strip, scale, theme, damage)
-                {
-                    self.strip
-                        .set_selected(index, placed.strip, scale, theme, damage);
-                }
-                None
-            }
-            Focus::Group(group) => {
-                let layout = placed.groups[group];
-                let action = self.groups[group].on_key(stroke, layout, scale, theme, damage)?;
-                self.act(group, action, &placed, scale, theme, damage)
-            }
-        }
+        let asked = self
+            .frame
+            .on_key(stroke, &self.layout, scale, theme, damage);
+        self.answered(asked, scale, theme, damage)
+    }
+
+    /// When a control of the window next changes on its own — a held scroll
+    /// arrow stepping — if one will.
+    pub fn deadline_ns(&mut self, now_ns: u64) -> Option<u64> {
+        self.frame.deadline_ns(now_ns)
+    }
+
+    /// Carry out what came due by `now_ns`, reporting what moved.
+    pub fn advance(&mut self, now_ns: u64, scale: Scale, theme: &Theme, damage: &mut Region) {
+        self.frame
+            .advance(now_ns, &self.layout, scale, theme, damage);
     }
 
     /// Paint the whole window into `surface`, which is its extent; a caller
     /// repainting part of it clips the surface first.
     pub fn render(&self, surface: &mut Surface, scale: Scale, theme: &Theme) {
-        surface.fill(Color::from(theme.palette().surface));
-        let placed = self.place(scale, theme);
-        self.strip
-            .render(surface, placed.strip, scale, theme, &mut NoArtwork);
-        for (group, layout) in self.groups.iter().zip(placed.groups) {
-            group.render(surface, layout, scale, theme);
+        self.frame
+            .render(surface, &self.layout, (scale, theme), &mut NoArtwork);
+    }
+
+    /// What the frame's `actions` ask of the client: the last a row made.
+    fn answered(
+        &mut self,
+        actions: SettingsActions,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<Request> {
+        let mut asked = None;
+        for action in actions {
+            asked = match action {
+                SettingsAction::Field(acted) => self.act(&acted, scale, theme, damage).or(asked),
+                SettingsAction::Close => Some(Request::Close),
+                // One category, and no commands beneath it.
+                SettingsAction::Shown { .. } | SettingsAction::Command { .. } => asked,
+            };
         }
-        // A choice list draws over every group, so it goes last.
-        for (group, layout) in self.groups.iter().zip(placed.groups) {
-            if !layout.popup.is_empty() {
-                group.render_popup(surface, layout.popup, scale, theme);
-            }
-        }
+        asked
     }
 
     /// Act on what a group's row asked for.
     fn act(
         &mut self,
-        group: usize,
-        action: FieldGroupAction,
-        before: &Placed,
+        acted: &ColumnAction,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Request> {
-        match (group, action.action) {
+        let action = &acted.action;
+        match (acted.group, &action.action) {
             (QUALITY, FieldAction::Selected { index }) => {
-                let mode = *Mode::ALL.get(index)?;
+                let mode = *Mode::ALL.get(*index)?;
                 Some(Request::Settle(Graphics::chosen(mode, self.shown.detail)))
             }
             (KNOBS, FieldAction::SetValue { permille }) => self
-                .turn(action.row, permille, before, scale, theme, damage)
+                .turn(action.row, *permille, scale, theme, damage)
                 .map(Request::Preview),
             (KNOBS, FieldAction::Settled { permille }) => self
-                .turn(action.row, permille, before, scale, theme, damage)
+                .turn(action.row, *permille, scale, theme, damage)
                 .map(Request::Settle),
             _ => None,
         }
@@ -511,130 +445,42 @@ impl SettingsWindow {
         &mut self,
         row: usize,
         permille: u16,
-        placed: &Placed,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Graphics> {
         let knob = *Knob::ALL.get(row)?;
-        let FieldControl::Slider(slider) = self.groups[KNOBS].rows().get(row)?.control() else {
+        let FieldControl::Slider(slider) = self.frame.column().groups()[KNOBS]
+            .rows()
+            .get(row)?
+            .control()
+        else {
             return None;
         };
         let position = usize::from(slider.stop_of(permille)?);
         let detail = knob.set(self.shown.detail, position);
-        report_row(
-            &self.groups[KNOBS],
-            row,
-            placed.groups[KNOBS],
-            scale,
-            theme,
-            damage,
-        );
+        if let Some(rect) = self
+            .frame
+            .row_rect((KNOBS, row), &self.layout, scale, theme)
+        {
+            damage.add(rect);
+        }
         Some(Graphics::Custom(detail))
     }
 
-    /// Put the keyboard in the region under a primary press.
-    fn focus_under_press(
-        &mut self,
-        placed: &Placed,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) {
-        if self.open_group().is_some() {
-            return;
-        }
-        let Some(pointer) = self.pointer else {
-            return;
-        };
-        if placed.strip.contains(pointer) {
-            self.move_focus(Focus::Strip, 0, placed, scale, theme, damage);
-            return;
-        }
-        // The group the press reaches gives the keyboard to the row itself.
-        for group in 0..self.groups.len() {
-            let layout = placed.groups[group];
-            if let Some(row) = self.groups[group].row_at(layout, scale, theme, pointer) {
-                self.move_focus(Focus::Group(group), row, placed, scale, theme, damage);
-                return;
-            }
-        }
-    }
-
-    /// Move the keyboard to `next` — onto `row` where it is a group —
-    /// reporting the marks it moves between.
-    fn move_focus(
-        &mut self,
-        next: Focus,
-        row: usize,
-        placed: &Placed,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) {
-        if self.focus == next {
-            return;
-        }
-        match self.focus {
-            Focus::Strip => self
-                .strip
-                .set_current(None, placed.strip, scale, theme, damage),
-            Focus::Group(group) => {
-                self.groups[group].set_focus(None, placed.groups[group], scale, theme, damage);
-            }
-        }
-        match next {
-            Focus::Strip => {
-                let current = self.strip.selected();
-                self.strip
-                    .set_current(current, placed.strip, scale, theme, damage);
-            }
-            Focus::Group(group) => {
-                self.groups[group].set_focus(Some(row), placed.groups[group], scale, theme, damage);
-            }
-        }
-        self.focus = next;
-    }
-
-    /// The group whose choice list is open, if one is.
-    fn open_group(&self) -> Option<usize> {
-        self.groups
-            .iter()
-            .position(|group| group.rows().iter().any(FieldRow::popup_open))
+    /// Where each row of the two plates is drawn, the mode's first.
+    fn row_rects(&self, scale: Scale, theme: &Theme) -> [Option<Rect>; 1 + Knob::ALL.len()] {
+        core::array::from_fn(|index| {
+            let at = index
+                .checked_sub(1)
+                .map_or((QUALITY, 0), |knob| (KNOBS, knob));
+            self.frame.row_rect(at, &self.layout, scale, theme)
+        })
     }
 
     /// The window's own rectangle.
     fn bounds(&self) -> Rect {
         Rect::new(0, 0, self.extent.0, self.extent.1)
-    }
-
-    /// Where every part of the window is drawn.
-    fn place(&self, scale: Scale, theme: &Theme) -> Placed {
-        let bounds = self.bounds();
-        let strip_w = scale.scale_length(STRIP_WIDTH);
-        let pane_w = scale.scale_length(PANE_WIDTH);
-        let gap = stack::gap(scale, theme);
-        let strip = Rect::new(
-            to_i32(gap),
-            to_i32(gap),
-            strip_w.saturating_sub(gap.saturating_mul(2)),
-            self.strip.measured_height(scale, theme),
-        );
-        let pane = Rect::new(to_i32(strip_w), 0, pane_w, bounds.height);
-        let plate = stack::plate_width(pane_w, scale, theme);
-        let heights = [
-            height_of(&self.groups[QUALITY], plate, scale, theme),
-            height_of(&self.groups[KNOBS], plate, scale, theme),
-        ];
-        let plates = stack::place(pane, heights.len(), scale, theme, |i| heights[i]);
-        let layout = |index: usize| {
-            let rect = plates.get(index).map_or(Rect::EMPTY, |(_, rect)| *rect);
-            self.groups[index].layout(rect, bounds, scale, theme)
-        };
-        Placed {
-            strip,
-            groups: [layout(QUALITY), layout(KNOBS)],
-        }
     }
 }
 
@@ -666,17 +512,17 @@ fn knob_group(detail: Detail, readable: Resolution) -> FieldGroup {
         .with_footnote("Moving any of these makes your choice Custom.")
 }
 
-/// The height `group` needs as a plate `width` pixels wide with each row's
-/// description the tallest of that row's `candidates`.
+/// `group` with each row's description the tallest of that row's
+/// `candidates` in a plate `width` pixels wide.
 ///
 /// Rows stack, so each row's tallest is found on its own.
-fn tallest_height(
+fn tallest(
     mut group: FieldGroup,
     candidates: &[Vec<String>],
     width: u32,
     scale: Scale,
     theme: &Theme,
-) -> u32 {
+) -> FieldGroup {
     for (row, texts) in candidates.iter().enumerate() {
         let mut tallest: Option<(u32, &String)> = None;
         for text in texts {
@@ -692,7 +538,7 @@ fn tallest_height(
             field.set_description(Some(text.clone()));
         }
     }
-    height_of(&group, width, scale, theme)
+    group
 }
 
 /// The height `group` needs as a plate `width` pixels wide.
@@ -710,20 +556,6 @@ fn restate_row(
     let control = restate(row.control_mut());
     let words = row.set_description(Some(String::from(description)));
     control || words
-}
-
-/// Report row `index` of `group`, as laid out in `layout`.
-fn report_row(
-    group: &FieldGroup,
-    index: usize,
-    layout: FieldLayout,
-    scale: Scale,
-    theme: &Theme,
-    damage: &mut Region,
-) {
-    if let Some(rect) = group.row_rect(index, layout, scale, theme) {
-        damage.add(rect);
-    }
 }
 
 #[cfg(test)]

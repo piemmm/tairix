@@ -1,11 +1,13 @@
-//! One object of a drawing: a shape, a text, or a group.
+//! One object of a drawing: a shape, a text, a picture, or a group.
 
 use alloc::sync::Arc;
 
 use tairix_bezier::{Affine, Bounds};
+use tairix_collections::SharedStr;
 
-use crate::children::Children;
+use crate::children::{Children, Summary};
 use crate::id::ObjectId;
+use crate::image::Image;
 use crate::limits::{self, MAX_DEPTH, MAX_NAME_BYTES, MAX_OBJECTS, MAX_TOTAL_PATH_NODES};
 use crate::shape::Shape;
 use crate::style::Style;
@@ -29,6 +31,11 @@ pub enum Kind {
         /// How it is painted.
         style: Arc<Style>,
     },
+    /// A raster picture.
+    Image {
+        /// Its pixels and the rectangle they fill.
+        image: Arc<Image>,
+    },
     /// A group of objects, drawn together.
     Group {
         /// Its objects, bottom first.
@@ -48,7 +55,7 @@ pub enum Kind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Node {
     id: ObjectId,
-    name: Option<Arc<str>>,
+    name: Option<SharedStr>,
     visible: bool,
     locked: bool,
     opacity: f64,
@@ -59,6 +66,7 @@ pub struct Node {
     bounds: Bounds,
     objects: usize,
     path_nodes: usize,
+    picture_pixels: u64,
     depth: usize,
 }
 
@@ -77,7 +85,7 @@ impl Node {
     /// A node of every part given.
     fn assembled(
         id: ObjectId,
-        name: Option<Arc<str>>,
+        name: Option<SharedStr>,
         visible: bool,
         locked: bool,
         opacity: f64,
@@ -88,8 +96,11 @@ impl Node {
         if !(0.0..=1.0).contains(&opacity) || !limits::transform(transform) {
             return Err(DrawingError::Invalid);
         }
-        let (local, objects, path_nodes, depth) = measure(&kind)?;
-        if objects > MAX_OBJECTS || path_nodes > MAX_TOTAL_PATH_NODES || depth > MAX_DEPTH {
+        let measured = measure(&kind)?;
+        if measured.objects > MAX_OBJECTS
+            || measured.path_nodes > MAX_TOTAL_PATH_NODES
+            || measured.depth > MAX_DEPTH
+        {
             return Err(DrawingError::TooComplex);
         }
         Ok(Self {
@@ -100,11 +111,12 @@ impl Node {
             opacity,
             transform,
             kind,
-            local,
-            bounds: local.transformed(transform),
-            objects,
-            path_nodes,
-            depth,
+            local: measured.bounds,
+            bounds: measured.bounds.transformed(transform),
+            objects: measured.objects,
+            path_nodes: measured.path_nodes,
+            picture_pixels: measured.picture_pixels,
+            depth: measured.depth,
         })
     }
 
@@ -174,6 +186,13 @@ impl Node {
         self.path_nodes
     }
 
+    /// The pixels of the pictures it shows, a picture counted for every
+    /// object within it showing it.
+    #[must_use]
+    pub const fn picture_pixels(&self) -> u64 {
+        self.picture_pixels
+    }
+
     /// How deep it nests: one for a shape or text.
     #[must_use]
     pub const fn depth(&self) -> usize {
@@ -185,7 +204,7 @@ impl Node {
     pub const fn children(&self) -> Option<&Children> {
         match &self.kind {
             Kind::Group { children, .. } => Some(children),
-            Kind::Shape { .. } | Kind::Text { .. } => None,
+            Kind::Shape { .. } | Kind::Text { .. } | Kind::Image { .. } => None,
         }
     }
 
@@ -194,7 +213,7 @@ impl Node {
     pub const fn style(&self) -> Option<&Arc<Style>> {
         match &self.kind {
             Kind::Shape { style, .. } | Kind::Text { style, .. } => Some(style),
-            Kind::Group { .. } => None,
+            Kind::Image { .. } | Kind::Group { .. } => None,
         }
     }
 
@@ -209,7 +228,7 @@ impl Node {
     /// # Errors
     ///
     /// As [`Node::new`].
-    pub fn with_name(&self, name: Option<Arc<str>>) -> Result<Self, DrawingError> {
+    pub fn with_name(&self, name: Option<SharedStr>) -> Result<Self, DrawingError> {
         check_name(name.as_deref())?;
         Ok(Self {
             name,
@@ -299,37 +318,50 @@ pub(crate) fn check_name(name: Option<&str>) -> Result<(), DrawingError> {
     Ok(())
 }
 
-/// `kind`'s bounds in its own space, the objects and path nodes it holds and
-/// how deep it nests, its every value checked.
-fn measure(kind: &Kind) -> Result<(Bounds, usize, usize, usize), DrawingError> {
+/// What `kind` holds, its bounds in its own space, its every value checked.
+fn measure(kind: &Kind) -> Result<Summary, DrawingError> {
+    let leaf = |bounds, path_nodes, picture_pixels| Summary {
+        bounds,
+        objects: 1,
+        path_nodes,
+        picture_pixels,
+        depth: 1,
+    };
     match kind {
         Kind::Shape { shape, style } => {
             shape.check()?;
             style.check()?;
-            let local = style.painted_bounds(shape.bounds()?);
-            Ok((local, 1, shape.node_count(), 1))
+            Ok(leaf(
+                style.painted_bounds(shape.bounds()?),
+                shape.node_count(),
+                0,
+            ))
         }
         Kind::Text { text, style } => {
             text.check()?;
             style.check()?;
-            Ok((style.painted_bounds(text.estimated_bounds()), 1, 0, 1))
+            Ok(leaf(text.painted_bounds(style), 0, 0))
+        }
+        Kind::Image { image } => {
+            image.check()?;
+            let pixels = image.pixels();
+            let count = u64::from(pixels.width()) * u64::from(pixels.height());
+            Ok(leaf(image.place(), 0, count))
         }
         Kind::Group { children, clip } => {
-            let summary = children.summary();
-            let mut local = summary.bounds;
-            let mut objects = summary.objects.saturating_add(1);
-            let mut path_nodes = summary.path_nodes;
-            let mut depth = summary.depth;
+            let mut summary = children.summary();
             if let Some(clip) = clip {
-                local = local.intersection(clip.bounds());
-                if local.is_empty() {
-                    local = Bounds::EMPTY;
-                }
-                objects = objects.saturating_add(clip.objects());
-                path_nodes = path_nodes.saturating_add(clip.path_nodes());
-                depth = depth.max(clip.depth());
+                let clipped = summary.bounds.intersection(clip.bounds());
+                summary = summary.with(Summary::of(clip));
+                summary.bounds = if clipped.is_empty() {
+                    Bounds::EMPTY
+                } else {
+                    clipped
+                };
             }
-            Ok((local, objects, path_nodes, depth + 1))
+            summary.objects = summary.objects.saturating_add(1);
+            summary.depth += 1;
+            Ok(summary)
         }
     }
 }

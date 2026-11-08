@@ -171,8 +171,9 @@ pub fn parse_number(text: &str) -> Result<f64, SvgError> {
 ///
 /// # Errors
 /// Returns [`SvgError::InvalidNumber`] for a malformed number or a unit
-/// outside the absolute set (a font-relative `em`/`ex` has no meaning without
-/// text, which this decoder does not render).
+/// outside the absolute set: a font-relative `em` or `ex` is
+/// [`parse_length_in`](crate::style::parse_length_in)'s, which knows the font
+/// size.
 pub fn parse_length(text: &str, basis: f64) -> Result<f64, SvgError> {
     let text = text.trim();
     let Some((value, consumed)) = scan(text) else {
@@ -195,6 +196,16 @@ pub fn parse_length(text: &str, basis: f64) -> Result<f64, SvgError> {
     } else {
         Err(SvgError::InvalidNumber)
     }
+}
+
+/// The length a percentage with no axis of its own resolves against: the
+/// viewport's diagonal over the square root of two.
+#[must_use]
+pub fn viewport_diagonal(viewport: (f64, f64)) -> f64 {
+    tairix_util::mathf::sqrt(f64::midpoint(
+        viewport.0 * viewport.0,
+        viewport.1 * viewport.1,
+    ))
 }
 
 /// Parse an opacity: a number or a percentage, clamped to `0..=1`.

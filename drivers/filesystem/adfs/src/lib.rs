@@ -1304,7 +1304,7 @@ fn share_base_bytes(record: &tairix_fsprobe::adfs::DiscRecord, indaddr: u32) -> 
 const MAX_BIG_DIR: u32 = 4096 * 1024;
 
 /// A name crossed between the disc's spelling — RISC OS's Latin-1, a dot
-/// written as `/` — and the VFS's UTF-8 ([`acorn::name_char`],
+/// written as `/` — and the VFS's UTF-8 ([`acorn::latin1_char`],
 /// [`acorn::crossed_name_byte`]): every name is crossed once as it enters or
 /// leaves the driver, and nothing within it sees the VFS's spelling.
 struct Crossed {
@@ -1325,7 +1325,7 @@ impl Crossed {
         let mut bytes = [0u8; dir::MAX_NAME_LEN];
         let mut len = 0;
         for ch in text.chars() {
-            let byte = acorn::name_byte(ch).ok_or(DriverError::OutOfRange)?;
+            let byte = acorn::latin1_byte(ch).ok_or(DriverError::OutOfRange)?;
             *bytes.get_mut(len).ok_or(DriverError::LengthOutOfRange)? =
                 acorn::crossed_name_byte(byte);
             len += 1;
@@ -1341,7 +1341,7 @@ impl Crossed {
         let mut bytes = [0u8; dir::MAX_NAME_LEN];
         let mut len = 0;
         for &byte in name {
-            let ch = acorn::name_char(acorn::crossed_name_byte(byte))?;
+            let ch = acorn::latin1_char(acorn::crossed_name_byte(byte))?;
             let mut utf8 = [0u8; 4];
             let spelt = ch.encode_utf8(&mut utf8).as_bytes();
             bytes
@@ -1374,7 +1374,7 @@ impl<B: Block> Adfs<B> {
         let big = self.is_big_dir();
         let held = |byte: u8| {
             if big {
-                byte != b' ' && acorn::name_char(byte).is_some()
+                byte != b' ' && acorn::latin1_char(byte).is_some()
             } else {
                 (0x21..=0x7E).contains(&byte)
             }
@@ -2603,7 +2603,7 @@ impl<B: Block> FilesystemLabel for Adfs<B> {
 fn disc_name(title: &VolumeTitle) -> Result<[u8; NAME_LEN], DriverError> {
     let mut name = [b' '; NAME_LEN];
     for (index, ch) in title.as_str().chars().enumerate() {
-        let byte = acorn::name_byte(ch)
+        let byte = acorn::latin1_byte(ch)
             .filter(|&byte| byte != b' ' && !acorn::RESERVED_NAME_BYTES.contains(&byte))
             .ok_or(DriverError::OutOfRange)?;
         *name.get_mut(index).ok_or(DriverError::LengthOutOfRange)? = byte;

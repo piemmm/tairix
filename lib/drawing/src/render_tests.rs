@@ -17,32 +17,12 @@ use crate::shape::{PathShape, RectShape, Shape};
 use crate::style::{
     ArrowShape, Arrowhead, Cap, Gradient, GradientKind, Paint, Spread, Stop, Stroke, Style,
 };
-use crate::text::{Glyph, Glyphs, Text, TextAlign};
+use crate::testing::{shared, slice, OnlyA};
+use crate::text::{Baseline, Glyphs, Text, TextAlign};
+use crate::SharedSlice;
 
 const RED: Rgba = Rgba::new(255, 0, 0, 255);
 const BLUE: Rgba = Rgba::new(0, 0, 255, 255);
-
-/// Glyphs for nothing but `a`, a square filling its em.
-struct OnlyA;
-
-impl Glyphs for OnlyA {
-    fn glyph(&self, _family: &str, _weight: u16, _italic: bool, c: char) -> Option<Arc<Glyph>> {
-        (c == 'a').then(|| Arc::new(Glyph::new(square(0.0, -1.0, 1.0), 1.0)))
-    }
-}
-
-fn square(x: f64, y: f64, side: f64) -> Path {
-    let mut ring = Subpath::new(Point::new(x, y));
-    ring.elements.extend([
-        PathEl::Line(Point::new(x + side, y)),
-        PathEl::Line(Point::new(x + side, y + side)),
-        PathEl::Line(Point::new(x, y + side)),
-    ]);
-    ring.closed = true;
-    Path {
-        subpaths: vec![ring],
-    }
-}
 
 fn filled(colour: Rgba) -> Style {
     Style {
@@ -126,7 +106,7 @@ fn drawing(layer: Node, background: Option<Rgba>) -> Drawing {
             background,
         },
         Children::from_nodes(vec![Arc::new(layer)]).expect("held"),
-        Arc::from(&[][..]),
+        SharedSlice::new(),
         Grid::default(),
     )
     .expect("a drawing")
@@ -140,6 +120,7 @@ fn view(to_device: Affine, origin: Point, mode: Mode) -> View {
         side: 64.0,
         design: 64 * 256,
         mode,
+        ground: true,
     }
 }
 
@@ -355,7 +336,7 @@ fn dots_and_dashes_are_cut_alike_in_every_square() {
     let mut ids = Ids::new();
     let mut style = stroked(RED, 2.0);
     style.stroke.cap = Cap::Round;
-    style.stroke.dashes = Arc::from(&[0.0, 6.0][..]);
+    style.stroke.dashes = slice(&[0.0, 6.0]);
     let dotted = line(
         &mut ids,
         Point::new(2.0, 32.0),
@@ -423,15 +404,18 @@ fn hidden_and_far_objects_are_left_out() {
 fn text_is_set_from_its_glyphs_and_says_when_one_is_missing() {
     let mut ids = Ids::new();
     let text = Text {
-        content: Arc::from("ab"),
-        family: Arc::from("sans-serif"),
+        content: shared("ab"),
+        family: shared("sans-serif"),
         size: 20.0,
         weight: 400,
         italic: false,
         letter_spacing: 0.0,
-        line_height: 1.25,
         align: TextAlign::Start,
-        origin: Point::new(10.0, 40.0),
+        baseline: Baseline::Lines {
+            origin: Point::new(10.0, 40.0),
+            line_height: 1.25,
+        },
+        runs: SharedSlice::new(),
     };
     let node = Node::new(
         ids.issue(),
@@ -453,6 +437,94 @@ fn text_is_set_from_its_glyphs_and_says_when_one_is_missing() {
         "the a's square, an em on the baseline"
     );
     assert_eq!(at(&surface, 35, 30).a, 0, "nothing drawn for the b");
+}
+
+#[test]
+fn each_run_paints_its_glyphs_in_its_own_paint_and_fades_with_the_rest() {
+    use crate::text::{Run, RunPaint, RunStyle};
+
+    let mut ids = Ids::new();
+    let text = Text {
+        content: shared("aaa"),
+        family: shared("sans-serif"),
+        size: 20.0,
+        weight: 400,
+        italic: false,
+        letter_spacing: 0.0,
+        align: TextAlign::Start,
+        baseline: Baseline::Lines {
+            origin: Point::new(10.0, 40.0),
+            line_height: 1.25,
+        },
+        runs: slice(&[
+            Run {
+                start: 1,
+                end: 2,
+                style: Arc::new(RunStyle {
+                    fill: Some(RunPaint::Colour(BLUE)),
+                    ..RunStyle::default()
+                }),
+            },
+            Run {
+                start: 2,
+                end: 3,
+                style: Arc::new(RunStyle {
+                    fill: Some(RunPaint::None),
+                    ..RunStyle::default()
+                }),
+            },
+        ]),
+    };
+    let node = Node::new(
+        ids.issue(),
+        Kind::Text {
+            text: Arc::new(text),
+            style: Arc::new(filled(RED)),
+        },
+    )
+    .expect("text");
+    let faded = node.clone().with_opacity(0.5).expect("faded");
+    let shown = |node: Node, ids: &mut Ids| {
+        rendered(
+            &drawing(group(vec![Arc::new(node)], None, ids), None),
+            &view(Affine::IDENTITY, Point::ZERO, Mode::Painted),
+            &OnlyA,
+        )
+        .0
+    };
+    let surface = shown(node, &mut ids);
+    let colour = |surface: &Surface, x| {
+        let pixel = at(surface, x, 30);
+        (pixel.r, pixel.g, pixel.b, pixel.a)
+    };
+    assert_eq!(
+        colour(&surface, 20),
+        (255, 0, 0, 255),
+        "the object's own red"
+    );
+    assert_eq!(colour(&surface, 40), (0, 0, 255, 255), "the run's blue");
+    assert_eq!(colour(&surface, 60).3, 0, "a run that paints nothing");
+    let faded = shown(faded, &mut ids);
+    assert_eq!(colour(&faded, 20).3, colour(&faded, 40).3, "faded as one");
+    assert!((120..=135).contains(&colour(&faded, 40).3));
+}
+
+#[test]
+fn a_view_leaving_the_ground_out_draws_only_the_objects() {
+    let mut ids = Ids::new();
+    let layer = group(
+        vec![rect(&mut ids, 10.0, 10.0, 10.0, 10.0, filled(RED))],
+        None,
+        &mut ids,
+    );
+    let drawing = drawing(layer, Some(Rgba::new(250, 240, 220, 255)));
+    let bare = View {
+        ground: false,
+        ..view(Affine::IDENTITY, Point::ZERO, Mode::Painted)
+    };
+    let (surface, _) = rendered(&drawing, &bare, &OnlyA);
+    assert_eq!(at(&surface, 40, 40).a, 0, "no ground beyond the object");
+    assert_eq!(at(&surface, 15, 15).r, 255, "the object drawn as ever");
 }
 
 #[test]
@@ -483,4 +555,96 @@ fn the_page_background_is_painted_beneath_everything() {
             a: 255
         }
     );
+}
+
+fn picture_over(
+    ids: &mut Ids,
+    pixels: Surface,
+    (x0, y0, x1, y1): (f64, f64, f64, f64),
+    opacity: f64,
+) -> Arc<Node> {
+    let image = crate::image::Image::new(
+        pixels,
+        tairix_bezier::Bounds::from_points([Point::new(x0, y0), Point::new(x1, y1)]),
+        None,
+    )
+    .expect("a picture");
+    let node = crate::testing::image(ids, image, Affine::IDENTITY);
+    Arc::new(node.with_opacity(opacity).expect("weakened"))
+}
+
+#[test]
+fn a_picture_lands_its_pixels_where_its_rectangle_lies() {
+    let mut ids = Ids::new();
+    let quarters = crate::testing::pixels(2, 2, |x, y| match (x, y) {
+        (0, 0) => [255, 0, 0, 255],
+        (1, 0) => [0, 255, 0, 255],
+        (0, 1) => [0, 0, 255, 255],
+        _ => [255, 255, 255, 255],
+    });
+    let layer = group(
+        vec![picture_over(
+            &mut ids,
+            quarters,
+            (10.0, 10.0, 50.0, 50.0),
+            1.0,
+        )],
+        None,
+        &mut ids,
+    );
+    let surface = plain(&drawing(layer, None));
+    let colour = |x, y| at(&surface, x, y).unpremultiply();
+    assert_eq!(colour(12, 12), tairix_raster::Color::rgb(255, 0, 0));
+    assert_eq!(colour(47, 12), tairix_raster::Color::rgb(0, 255, 0));
+    assert_eq!(colour(12, 47), tairix_raster::Color::rgb(0, 0, 255));
+    assert_eq!(colour(47, 47), tairix_raster::Color::rgb(255, 255, 255));
+    assert_eq!(at(&surface, 5, 5).a, 0, "nothing outside its rectangle");
+    assert_eq!(at(&surface, 55, 30).a, 0);
+}
+
+#[test]
+fn a_picture_drawn_small_is_drawn_from_its_averaged_level() {
+    let mut ids = Ids::new();
+    let checker = crate::testing::pixels(64, 64, |x, y| {
+        if (x + y) % 2 == 0 {
+            [0, 0, 0, 255]
+        } else {
+            [255, 255, 255, 255]
+        }
+    });
+    let layer = group(
+        vec![picture_over(&mut ids, checker, (0.0, 0.0, 8.0, 8.0), 1.0)],
+        None,
+        &mut ids,
+    );
+    let surface = plain(&drawing(layer, None));
+    for (x, y) in [(2, 2), (5, 3), (3, 6)] {
+        let pixel = at(&surface, x, y);
+        assert!(
+            (110..=145).contains(&pixel.r) && pixel.a == u8::MAX,
+            "an eighth of a checker of single pixels is grey, not aliased: {pixel:?}"
+        );
+    }
+}
+
+#[test]
+fn a_pictures_opacity_weakens_it_and_the_outline_view_draws_its_frame() {
+    let mut ids = Ids::new();
+    let red = crate::testing::pixels(1, 1, |_, _| [255, 0, 0, 255]);
+    let layer = group(
+        vec![picture_over(&mut ids, red, (10.0, 10.0, 40.0, 40.0), 0.5)],
+        None,
+        &mut ids,
+    );
+    let drawing = drawing(layer, None);
+    let half = at(&plain(&drawing), 25, 25);
+    assert!((120..=135).contains(&half.a), "half shown: {half:?}");
+    let outline = rendered(
+        &drawing,
+        &view(Affine::IDENTITY, Point::ZERO, Mode::Outline(BLUE)),
+        &OnlyA,
+    )
+    .0;
+    assert!(at(&outline, 10, 25).a > 0, "its frame is drawn");
+    assert_eq!(at(&outline, 25, 25).a, 0, "its pixels are not");
 }

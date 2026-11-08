@@ -284,3 +284,33 @@ fn a_syntax_failure_says_why() {
         "the parser's answer could not be believed"
     );
 }
+
+/// Each question — detection, a batch's colouring, a document's validation —
+/// refused this side's memory is said as that.
+#[test]
+fn a_syntax_question_this_side_has_no_memory_for_is_refused_as_that() {
+    let refused = |failure: &SyntaxFailure| match failure {
+        SyntaxFailure::NoMemory => true,
+        SyntaxFailure::Sandbox(inner) => crate::testing::this_side(*inner),
+        _ => false,
+    };
+    crate::testing::swept::<TextSyntaxService, _, _>(
+        |sandbox| detect(sandbox, b"#!/bin/sh\necho hi\n"),
+        refused,
+    );
+    let lines: [&[u8]; 3] = [b"int main(void) {", b"  return 0; /* done", b"*/ }"];
+    crate::testing::swept::<TextSyntaxService, _, _>(
+        |sandbox| lex_lines(sandbox, Format::C, LineState::START, &lines),
+        refused,
+    );
+    crate::testing::swept::<TextSyntaxService, _, _>(
+        |sandbox| {
+            validate_document(
+                sandbox,
+                Format::SystemConfig,
+                b"os.loginType x\nos.loginType y\n",
+            )
+        },
+        refused,
+    );
+}

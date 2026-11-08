@@ -21,7 +21,6 @@ use super::{
 };
 use crate::canvas::{Canvas, Kind, Sample};
 use crate::document::{Document, Entry, EntryId, Kept, Origin, Picture, SpriteInfo};
-use crate::layout::Faces;
 use crate::save::SaveSettings;
 use crate::view::{compute, Action, Compute, Computed, MenuKind, Outcome, Own, RENAME_ENTRY};
 
@@ -78,13 +77,7 @@ impl Window {
             DOUBLE,
         );
         let mut window = Self {
-            layout: view.layout(
-                WINDOW.0,
-                WINDOW.1,
-                registry.active(),
-                Scale::ONE,
-                Faces::of(registry.active(), Scale::ONE),
-            ),
+            layout: view.layout(WINDOW.0, WINDOW.1, registry.active(), Scale::ONE),
             view,
             registry,
             now: 1_000_000_000,
@@ -100,13 +93,7 @@ impl Window {
     /// Lay the window out again, as the host does after an outcome asking it.
     fn settle(&mut self) {
         let theme = self.registry.active();
-        self.layout = self.view.layout(
-            WINDOW.0,
-            WINDOW.1,
-            theme,
-            Scale::ONE,
-            Faces::of(theme, Scale::ONE),
-        );
+        self.layout = self.view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE);
         self.view.settle(&self.layout, &mut Region::new());
     }
 
@@ -503,7 +490,6 @@ fn the_new_sprite_form_is_drawn_where_its_dialog_shows_it() {
         &window.view,
         &window.layout,
         theme,
-        Faces::of(theme, Scale::ONE),
         Scale::ONE,
     );
     let (left, top) = (
@@ -579,9 +565,7 @@ fn a_thumbnail_of_another_side_waits_for_its_own() {
     assert!(window.view.thumbnail(id, side).is_some());
     let theme = window.registry.active();
     let double = Scale::from_percent(200).expect("a scale");
-    let layout = window
-        .view
-        .layout(WINDOW.0, WINDOW.1, theme, double, Faces::of(theme, double));
+    let layout = window.view.layout(WINDOW.0, WINDOW.1, theme, double);
     window.view.settle(&layout, &mut Region::new());
     assert_ne!(layout.thumb(), side);
     assert!(
@@ -654,13 +638,12 @@ fn sprites(count: usize) -> AreaView {
 fn a_sprite_window_opens_250_wide_and_at_most_250_high() {
     let registry = ThemeRegistry::with_builtins();
     let theme = registry.active();
-    let faces = Faces::of(theme, Scale::ONE);
     for count in [1, 2, 5, 15, 200] {
         let view = sprites(count);
-        let (width, height) = AreaView::open_size(count, theme, faces);
+        let (width, height) = AreaView::open_size(count, theme);
         assert_eq!(width, OPEN_WIDTH, "{count} sprites");
         assert!(height <= OPEN_HEIGHT_MAX, "{count} sprites");
-        let layout = view.layout(width, height, theme, Scale::ONE, faces);
+        let layout = view.layout(width, height, theme, Scale::ONE);
         let overflows = layout.content_height() > layout.grid().height;
         assert_eq!(!layout.bar().is_empty(), overflows, "{count} sprites");
         let shown = layout.shown(0, count);
@@ -673,25 +656,21 @@ fn a_sprite_window_opens_250_wide_and_at_most_250_high() {
             assert!(last.bottom() <= layout.status().top(), "{count} sprites");
         }
     }
-    let one = AreaView::open_size(1, theme, faces).1;
+    let one = AreaView::open_size(1, theme).1;
     assert!(one < OPEN_HEIGHT_MAX, "a lone sprite opens one row high");
-    assert_eq!(
-        AreaView::open_size(2, theme, faces).1,
-        one,
-        "two share a row"
-    );
+    assert_eq!(AreaView::open_size(2, theme).1, one, "two share a row");
 }
 
 /// Text set large, as a theme may set it, raises the opening size to the
 /// window's own minimum.
 #[test]
 fn a_large_text_theme_opens_at_least_its_minimum() {
-    let registry = ThemeRegistry::with_builtins();
-    let theme = registry.active();
-    let faces = Faces::of(theme, Scale::from_percent(200).expect("a scale"));
-    let least = AreaView::min_size(theme, Scale::ONE, faces);
+    let theme = tairix_controls::testkit::text_ladder(40);
+    let least = AreaView::min_size(&theme, Scale::ONE);
+    let ordinary = AreaView::min_size(ThemeRegistry::with_builtins().active(), Scale::ONE);
+    assert!(least.1 > ordinary.1, "large text raises the least height");
     for count in [1, 200] {
-        let (width, height) = AreaView::open_size(count, theme, faces);
+        let (width, height) = AreaView::open_size(count, &theme);
         assert!(width >= least.0 && height >= least.1, "{count} sprites");
     }
 }
@@ -705,7 +684,6 @@ fn drawn(window: &Window) -> Surface {
         &window.view,
         &window.layout,
         theme,
-        Faces::of(theme, Scale::ONE),
         Scale::ONE,
     );
     surface

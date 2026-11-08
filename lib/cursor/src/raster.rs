@@ -167,7 +167,7 @@ fn drawn_contours(nodes: &[Node], depth: usize, visit: &mut impl FnMut(&[(i32, i
             Node::Group(group) if group.mask.is_none() && depth < MAX_GROUP_DEPTH => {
                 drawn_contours(&group.children, depth + 1, visit);
             }
-            Node::Group(_) => {}
+            Node::Image(_) | Node::Group(_) => {}
         }
     }
 }

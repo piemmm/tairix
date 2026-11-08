@@ -23,9 +23,10 @@ authored no larger than the wallpaper renderer's own maximum destination
 that, which is what `decode_fitted` and the progressive-store bound below
 exist for.
 
-The picture viewer (`plans/VIEW.md`), the image editor (`plans/PAINT.md`)
-and the text editor's Data display (`plans/TEXTEDIT.md` TE16, the structure
-report below) are the other consumers, through the same sandbox. Every format they claim
+The picture viewer (`plans/VIEW.md`), the image editor (`plans/PAINT.md`),
+the drawing editor's pictures (`plans/DRAW.md`) and the text editor's Data
+display (`plans/TEXTEDIT.md` TE16, the structure report below) are the other
+consumers, through the same sandbox. Every format they claim
 lands here rather than beside them, so a format's decoder exists once.
 *Admitting* a format is still each consumer's own decision: the icon pipeline
 deliberately takes only PNG and SVG (`plans/ICONS.md`), and the wallpaper
@@ -189,7 +190,17 @@ in the packing the mode names — with its mask in the form the mode names, and 
 kept sprite back exactly but for its length word, refusing one that is not a
 whole number of words, which would misplace every sprite after it.
 `SpriteMode::with_eig` restates a mode for pixels of another shape, so a
-reshaped sprite is written with a mode that agrees. `over` is the one
+reshaped sprite is written with a mode that agrees. `decode_sprite` and
+`encode_sprite` are one sprite with no area around it, as a Draw file's sprite
+object holds it (`LoneSprite`: its pixels, eigen factors and length), and
+`SpriteMode::density` states its factors as dots to the inch. `jpeg_frame`
+states what a format embedding a JPEG's bytes unchanged must say of them —
+the stored raster, its components, whether it is progressive, its density and
+the `Orientation` whose `to_picture` turns the stored raster into the picture —
+from the segments up to its frame header, refused as a decode refuses them; an
+orientation stated after the frame header is not taken. `SurfacePicture`
+writes a premultiplied `Surface` a row unpremultiplied at a time, so no
+straight copy of it is held. `over` is the one
 straight-alpha source-over, which WEBP's animation and an editor's paint both
 composite by.
 
@@ -199,7 +210,8 @@ call a reduced copy of another (`NewSubfileType`): a TIFF is an ordered
 document rather than one picture at several sizes, so its picture is its
 first page and not its largest, which is what an icon file's is. The
 `Orientation` tag is *applied* rather than reported, so a transposing
-orientation swaps the geometry `probe` answers — ignoring it would hand every
+orientation swaps the geometry `probe` answers and the density's figures, as
+EXIF's does a JPEG's — ignoring it would hand every
 consumer a sideways picture and the format knowledge to right it. And a
 missing photometric under a fax compression reads as `WhiteIsZero`, which
 every fax is.

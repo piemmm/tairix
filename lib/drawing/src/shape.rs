@@ -10,7 +10,7 @@ use tairix_bezier::{Bounds, EllipseArc, Path, PathEl, Point, Subpath};
 use tairix_util::fallible;
 use tairix_util::mathf::fmin;
 
-use crate::limits::{self, MAX_PATH_NODES, MAX_STAR_POINTS};
+use crate::limits::{self, MAX_PATH_NODES, MAX_STAR_POINTS, MIN_STAR_POINTS};
 use crate::DrawingError;
 
 /// How the node tool keeps a path node's two handles when one moves.
@@ -135,6 +135,44 @@ impl PathShape {
             contours.push(Contour {
                 nodes,
                 closed: each.closed,
+            });
+        }
+        Ok(Self { contours })
+    }
+
+    /// These contours each run the other way, every node's handles swapped:
+    /// an open contour from its far end, a closed one from the same node.
+    ///
+    /// # Errors
+    ///
+    /// [`DrawingError::OutOfMemory`] when the copy cannot be held.
+    pub fn reversed(&self) -> Result<Self, DrawingError> {
+        let mut contours = Vec::new();
+        if !fallible::reserve(&mut contours, self.contours.len()) {
+            return Err(DrawingError::OutOfMemory);
+        }
+        for contour in &self.contours {
+            let mut nodes = Vec::new();
+            if !fallible::reserve(&mut nodes, contour.nodes.len()) {
+                return Err(DrawingError::OutOfMemory);
+            }
+            let (first, rest) = match (contour.closed, contour.nodes.split_first()) {
+                (true, Some((first, rest))) => (Some(first), rest),
+                _ => (None, contour.nodes.as_slice()),
+            };
+            nodes.extend(
+                first
+                    .into_iter()
+                    .chain(rest.iter().rev())
+                    .map(|node| PathNode {
+                        before: node.after,
+                        after: node.before,
+                        ..*node
+                    }),
+            );
+            contours.push(Contour {
+                nodes,
+                closed: contour.closed,
             });
         }
         Ok(Self { contours })
@@ -392,7 +430,7 @@ impl Shape {
                     return Err(DrawingError::TooComplex);
                 }
                 limits::point(star.centre)
-                    && star.points >= 3
+                    && star.points >= MIN_STAR_POINTS
                     && limits::length(star.outer)
                     && (0.0..=1.0).contains(&star.inner_ratio)
                     && (0.0..=1.0).contains(&star.rounding)
@@ -415,8 +453,8 @@ impl Shape {
     pub fn to_path(&self) -> Result<Path, DrawingError> {
         match self {
             Self::Path(path) => path.to_path(),
-            Self::Rect(rect) => Ok(rect_path(rect)),
-            Self::Ellipse(ellipse) => Ok(ellipse_path(ellipse)),
+            Self::Rect(rect) => rect_path(rect),
+            Self::Ellipse(ellipse) => ellipse_path(ellipse),
             Self::Star(star) => star_path(star),
         }
     }
@@ -442,21 +480,54 @@ impl Shape {
     }
 }
 
+/// A sub-path being traced a step at a time, each step held fallibly: one
+/// the heap refuses refuses the whole.
+struct Tracing {
+    subpath: Subpath,
+    held: bool,
+}
+
+impl Tracing {
+    fn from(start: Point) -> Self {
+        Self {
+            subpath: Subpath::new(start),
+            held: true,
+        }
+    }
+
+    fn step(&mut self, element: PathEl) {
+        self.held &= fallible::push(&mut self.subpath.elements, element);
+    }
+
+    fn arc(&mut self, arc: &EllipseArc) {
+        arc.to_cubics(|c| self.step(PathEl::Cubic(c.p1, c.p2, c.p3)));
+    }
+
+    /// The path traced, closed or not.
+    fn path(mut self, closed: bool) -> Result<Path, DrawingError> {
+        if !self.held {
+            return Err(DrawingError::OutOfMemory);
+        }
+        self.subpath.closed = closed;
+        Ok(Path::single(self.subpath)?)
+    }
+}
+
 /// The rectangle's outline, clockwise as drawn from the start of its top
 /// edge, its corners quarter ellipses.
-fn rect_path(rect: &RectShape) -> Path {
+fn rect_path(rect: &RectShape) -> Result<Path, DrawingError> {
     let (x, y, w, h) = (rect.x, rect.y, rect.width, rect.height);
     let rx = fmin(rect.rx, w / 2.0);
     let ry = fmin(rect.ry, h / 2.0);
-    let mut subpath = Subpath::new(Point::new(x + rx, y));
+    let mut tracing = Tracing::from(Point::new(x + rx, y));
     if rx <= 0.0 || ry <= 0.0 {
-        subpath.start = Point::new(x, y);
+        tracing.subpath.start = Point::new(x, y);
         for corner in [
             Point::new(x + w, y),
             Point::new(x + w, y + h),
             Point::new(x, y + h),
         ] {
-            subpath.elements.push(PathEl::Line(corner));
+            tracing.step(PathEl::Line(corner));
         }
     } else {
         let corners = [
@@ -477,34 +548,28 @@ fn rect_path(rect: &RectShape) -> Path {
             ),
             (Point::new(x + rx, y + ry), PI, Point::new(x + rx, y)),
         ];
-        subpath
-            .elements
-            .push(PathEl::Line(Point::new(x + w - rx, y)));
+        tracing.step(PathEl::Line(Point::new(x + w - rx, y)));
         for (index, (centre, start, onward)) in corners.into_iter().enumerate() {
-            let arc = EllipseArc {
+            tracing.arc(&EllipseArc {
                 centre,
                 radii: Point::new(rx, ry),
                 x_rotation: 0.0,
                 start,
                 sweep: FRAC_PI_2,
-            };
-            arc.to_cubics(|c| subpath.elements.push(PathEl::Cubic(c.p1, c.p2, c.p3)));
+            });
             // The last corner returns to the start, which closing supplies.
             if index < 3 {
-                subpath.elements.push(PathEl::Line(onward));
+                tracing.step(PathEl::Line(onward));
             }
         }
-        let start = subpath.start;
-        snap_last_to(&mut subpath, start);
+        let start = tracing.subpath.start;
+        snap_last_to(&mut tracing.subpath, start);
     }
-    subpath.closed = true;
-    Path {
-        subpaths: alloc::vec![subpath],
-    }
+    tracing.path(true)
 }
 
 /// The ellipse's outline, or the arc's, clockwise as drawn.
-fn ellipse_path(ellipse: &EllipseShape) -> Path {
+fn ellipse_path(ellipse: &EllipseShape) -> Result<Path, DrawingError> {
     let full = EllipseArc {
         centre: ellipse.centre,
         radii: ellipse.radii,
@@ -513,14 +578,11 @@ fn ellipse_path(ellipse: &EllipseShape) -> Path {
         sweep: TAU,
     };
     let Some(part) = ellipse.arc else {
-        let mut subpath = Subpath::new(full.start_point());
-        full.to_cubics(|c| subpath.elements.push(PathEl::Cubic(c.p1, c.p2, c.p3)));
-        let start = subpath.start;
-        snap_last_to(&mut subpath, start);
-        subpath.closed = true;
-        return Path {
-            subpaths: alloc::vec![subpath],
-        };
+        let mut tracing = Tracing::from(full.start_point());
+        tracing.arc(&full);
+        let start = tracing.subpath.start;
+        snap_last_to(&mut tracing.subpath, start);
+        return tracing.path(true);
     };
     let start = part.start.to_radians();
     let mut sweep = (part.end - part.start).to_radians() % TAU;
@@ -532,19 +594,12 @@ fn ellipse_path(ellipse: &EllipseShape) -> Path {
         sweep,
         ..full
     };
-    let mut subpath = Subpath::new(arc.start_point());
-    arc.to_cubics(|c| subpath.elements.push(PathEl::Cubic(c.p1, c.p2, c.p3)));
-    match part.kind {
-        ArcKind::Open => {}
-        ArcKind::Pie => {
-            subpath.elements.push(PathEl::Line(ellipse.centre));
-            subpath.closed = true;
-        }
-        ArcKind::Chord => subpath.closed = true,
+    let mut tracing = Tracing::from(arc.start_point());
+    tracing.arc(&arc);
+    if part.kind == ArcKind::Pie {
+        tracing.step(PathEl::Line(ellipse.centre));
     }
-    Path {
-        subpaths: alloc::vec![subpath],
-    }
+    tracing.path(part.kind != ArcKind::Open)
 }
 
 /// The star's outline, or the polygon's, clockwise as drawn from its first
@@ -597,10 +652,11 @@ fn star_path(star: &StarShape) -> Result<Path, DrawingError> {
         };
         contour.nodes.push(node);
     }
-    PathShape {
-        contours: alloc::vec![contour],
+    let mut contours = Vec::new();
+    if !fallible::push(&mut contours, contour) {
+        return Err(DrawingError::OutOfMemory);
     }
-    .to_path()
+    PathShape { contours }.to_path()
 }
 
 /// Land a sub-path's last step exactly on `point`, which a run of arcs

@@ -385,8 +385,11 @@ sandboxes a parse imports it:
   Streaming also means a caller reading a file need never hold it whole,
   and a fresh `OP_DOC_BEGIN` drops whatever session stood over the old
   document, since neither describes the new one. The total held is bounded
-  by `MAX_DOCUMENT_BYTES` — a containment bound on what one worker holds
-  resident, which is what an untrusted file costs before a pixel of it is
+  by the worker's own memory ceiling: the parent refuses a document longer
+  than its launcher's `document_room` — what that ceiling leaves beside the
+  worker's frames, at least 64 MiB and growing with the machine — and the
+  worker reserves it whole, fallibly, refusing one its ceiling will not
+  hold. That is what an untrusted file costs before a pixel of it is
   decoded.
 - **Document viewing** (also `imagerender`, the same worker): a picture or
   document the user opened is sniffed, decoded, and drawn inside the

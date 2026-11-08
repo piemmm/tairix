@@ -9,6 +9,7 @@ use tairix_colour::Rgba;
 use super::{
     ArrowShape, Arrowhead, Cap, Gradient, GradientKind, Join, Paint, Spread, Stop, Stroke, Style,
 };
+use crate::testing::slice;
 use crate::DrawingError;
 
 fn gradient(stops: &[(f64, u8)]) -> Gradient {
@@ -96,9 +97,9 @@ fn a_style_refuses_values_a_drawing_cannot_hold() {
     style.stroke.miter_limit = 0.5;
     assert_eq!(style.check(), Err(DrawingError::Invalid));
     style.stroke.miter_limit = 4.0;
-    style.stroke.dashes = Arc::from(&[3.0, f64::INFINITY][..]);
+    style.stroke.dashes = slice(&[3.0, f64::INFINITY]);
     assert_eq!(style.check(), Err(DrawingError::Invalid));
-    style.stroke.dashes = Arc::from(vec![1.0; crate::limits::MAX_DASH_ENTRIES + 1]);
+    style.stroke.dashes = slice(&vec![1.0; crate::limits::MAX_DASH_ENTRIES + 1]);
     assert_eq!(style.check(), Err(DrawingError::TooComplex));
     assert_eq!(style.fill_rule, FillRule::NonZero);
 }
@@ -122,6 +123,7 @@ fn a_triangle_arrowhead_points_where_the_path_runs() {
     };
     let outline = head
         .outline(Point::new(10.0, 0.0), Point::new(1.0, 0.0), 1.0)
+        .expect("held")
         .expect("it draws");
     assert!(outline.closed);
     let bounds = outline.bounds();
@@ -135,11 +137,11 @@ fn a_triangle_arrowhead_points_where_the_path_runs() {
     );
     assert_eq!(
         Arrowhead::NONE.outline(Point::ZERO, Point::new(1.0, 0.0), 1.0),
-        None
+        Ok(None)
     );
     assert_eq!(
         head.outline(Point::ZERO, Point::ZERO, 1.0),
-        None,
+        Ok(None),
         "no direction, no arrow"
     );
 }

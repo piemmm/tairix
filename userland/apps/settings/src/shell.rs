@@ -23,10 +23,10 @@ use tairix_abi::zone::ZoneName;
 use tairix_abi::BundleId;
 use tairix_browse::FilerPreferences;
 use tairix_controls::{
-    ground_fill, plate_rect, Breadcrumb, BreadcrumbAction, ChromeLayer, Crumb, DisclosureSet,
-    FieldGroup, Keystroke, Menu, MenuAction, MenuItem, PlatePlacement, PlateSide, ScrollAction,
-    ScrollBar, ScrollModel, ScrollOrientation, ScrollPart, ScrollRange, ScrollView, SearchField,
-    Tab, Tabs, TabsAction, TabsOrientation, TextAction,
+    ground_fill, plate_rect, Breadcrumb, BreadcrumbAction, ChromeLayer, ColumnPlace, Crumb,
+    DisclosureSet, FieldGroup, Keystroke, Menu, MenuAction, MenuItem, PlatePlacement, PlateSide,
+    ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollPart, ScrollRange, ScrollView,
+    SearchField, Tab, Tabs, TabsAction, TabsOrientation, TextAction,
 };
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind};
@@ -44,9 +44,7 @@ use crate::civil::CivilChoices;
 use crate::effects::{EffectsAsk, EffectsReading};
 use crate::facts::MachineFacts;
 use crate::footer::{Footer, FooterAction, Standing};
-use crate::form::{
-    Action, Composition, Form, FormOutcome, FormPlace, Posture, Setting, TextChoices,
-};
+use crate::form::{Action, Composition, Form, FormOutcome, Posture, Setting, TextChoices};
 use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame};
 use crate::network::{Addressing, NetworkFacts};
 use crate::pi::Cooling;
@@ -1878,7 +1876,7 @@ impl Shell {
         frame: &ShellFrame,
         (viewport, scale, theme): (Rect, Scale, &Theme),
         damage: &mut Region,
-        act: impl FnOnce(&mut Form, ScrollView, FormPlace<'_>, &mut Region) -> FormOutcome,
+        act: impl FnOnce(&mut Form, ScrollView, ColumnPlace<'_>, &mut Region) -> FormOutcome,
     ) -> Option<FormOutcome> {
         let (spot, view) = self.pane_view(frame, viewport, scale, theme);
         let form = self.body.form_mut()?;
@@ -1925,7 +1923,7 @@ impl Shell {
         viewport: Rect,
         scale: Scale,
         theme: &'a Theme,
-    ) -> (FormPlace<'a>, ScrollView) {
+    ) -> (ColumnPlace<'a>, ScrollView) {
         let content = frame.content;
         let model = self.scroll.model();
         let extent = u32::try_from(model.range().content_extent()).unwrap_or(u32::MAX);
@@ -2003,7 +2001,7 @@ impl Shell {
         view.confined_to(viewport).paint(surface, |client| {
             self.body.render_popup(
                 client,
-                FormPlace {
+                ColumnPlace {
                     theme: popups,
                     ..spot
                 },
@@ -3553,8 +3551,8 @@ impl Shell {
 
 /// Where a composed pane's form is drawn, gathered once for the call that
 /// needs it.
-fn place(bounds: Rect, viewport: Rect, scale: Scale, theme: &Theme) -> FormPlace<'_> {
-    FormPlace {
+fn place(bounds: Rect, viewport: Rect, scale: Scale, theme: &Theme) -> ColumnPlace<'_> {
+    ColumnPlace {
         bounds,
         viewport,
         scale,

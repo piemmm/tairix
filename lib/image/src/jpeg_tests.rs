@@ -1378,3 +1378,136 @@ fn a_fitted_decode_measures_the_limits_against_the_turned_picture() {
         DecodeError::HeightExceedsLimit
     );
 }
+
+const APP0: u8 = 0xE0;
+
+/// A JFIF `APP0` header stating `across`×`down` per `unit` (JFIF's code),
+/// spliced in just after the `SOI`.
+fn with_jfif(jpeg: &[u8], unit: u8, across: u16, down: u16) -> Vec<u8> {
+    let mut header = Vec::from(&b"JFIF\0"[..]);
+    header.extend_from_slice(&[1, 2, unit]);
+    header.extend_from_slice(&across.to_be_bytes());
+    header.extend_from_slice(&down.to_be_bytes());
+    header.extend_from_slice(&[0, 0]);
+    let mut out = Vec::from(&jpeg[..2]);
+    out.extend(segment(APP0, &header));
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
+#[test]
+fn a_frame_states_its_stored_raster_its_turn_and_its_density() {
+    let turned = with_jfif(&with_exif(&two_tone_landscape(), 6), 1, 300, 300);
+    let frame = crate::jpeg_frame(&turned).expect("a frame");
+    assert_eq!(
+        frame.stored,
+        (16, 8),
+        "the raster as stored, before its turn"
+    );
+    assert_eq!(frame.components, 1);
+    assert!(!frame.progressive);
+    assert_eq!(
+        frame.orientation,
+        Orientation::from_tag(6).expect("defined")
+    );
+    assert_eq!(
+        frame.density,
+        crate::Density::whole(300, 300, crate::DensityUnit::Inch)
+    );
+    let image = decode(&turned, &ROOMY).expect("decodes");
+    assert_eq!(
+        (image.width(), image.height()),
+        frame
+            .orientation
+            .picture_size(frame.stored.0, frame.stored.1),
+        "what a decode answers is the stored raster turned"
+    );
+
+    let plain = crate::jpeg_frame(&two_tone_landscape()).expect("a frame");
+    assert_eq!(plain.orientation, Orientation::IDENTITY);
+    assert_eq!(plain.density, None, "no JFIF header states none");
+    let square = with_jfif(&two_tone_landscape(), 0, 1, 1);
+    assert_eq!(crate::jpeg_frame(&square).expect("a frame").density, None);
+
+    let progressive =
+        crate::jpeg_frame(&build_progressive_single_block_example()).expect("a frame");
+    assert!(progressive.progressive);
+    assert_eq!(
+        crate::jpeg_frame(&[0xFF, 0xD8, 0xFF, 0xD9]).err(),
+        Some(DecodeError::JpegMissingFrameHeader),
+        "refused as a decode refuses it"
+    );
+}
+
+#[test]
+fn a_huffman_table_listing_more_symbols_than_there_are_bytes_is_refused() {
+    let table = |longest: u8| {
+        let mut payload = vec![0x00];
+        let mut counts = [0u8; 16];
+        counts[14] = 2;
+        counts[15] = longest;
+        payload.extend_from_slice(&counts);
+        payload.extend((0..u16::from(longest) + 2).map(|at| u8::try_from(at % 256).unwrap_or(0)));
+        payload
+    };
+    let parsed = |payload: &[u8]| super::parse_dht(payload, |_, _, _| Ok(()));
+    assert_eq!(parsed(&table(254)), Ok(()), "256 symbols, each a byte");
+    assert_eq!(
+        parsed(&table(255)),
+        Err(DecodeError::JpegInvalidHuffmanTable)
+    );
+}
+
+#[test]
+fn a_turned_pictures_density_is_turned_with_it() {
+    let stated =
+        |orientation| with_jfif(&with_exif(&two_tone_landscape(), orientation), 1, 72, 144);
+    let inch = |across, down| crate::Density::whole(across, down, crate::DensityUnit::Inch);
+    let turned = stated(6);
+    assert_eq!(
+        crate::jpeg_frame(&turned).expect("a frame").density,
+        inch(72, 144),
+        "the frame states the raster as stored"
+    );
+    let (_, _, density) = super::decode_native(&turned, &ROOMY).expect("decodes");
+    assert_eq!(
+        density,
+        inch(144, 72),
+        "the picture's axes are the raster's swapped"
+    );
+    let (_, _, density) = super::decode_native(&stated(3), &ROOMY).expect("decodes");
+    assert_eq!(density, inch(72, 144), "a half turn keeps its axes");
+}
+
+/// `jpeg` with an EXIF block stating `orientation` spliced in just after
+/// its frame header, where neither JFIF nor EXIF places one.
+fn with_exif_after_frame(jpeg: &[u8], orientation: u16) -> Vec<u8> {
+    let with = with_exif(&[0xFF, 0xD8], orientation);
+    let block = &with[2..];
+    let sof = jpeg
+        .windows(2)
+        .position(|pair| pair == [0xFF, 0xC0])
+        .expect("a baseline frame header");
+    let length = usize::from(u16::from_be_bytes([jpeg[sof + 2], jpeg[sof + 3]]));
+    let after = sof + 2 + length;
+    let mut out = jpeg[..after].to_vec();
+    out.extend_from_slice(block);
+    out.extend_from_slice(&jpeg[after..]);
+    out
+}
+
+#[test]
+fn a_turn_stated_after_the_frame_header_is_not_taken() {
+    // Weighed against the limits as stored, a turn applied afterwards
+    // would answer a picture of a shape the limits never saw.
+    let late = with_exif_after_frame(&two_tone_landscape(), 6);
+    let image = decode(&late, &ROOMY).expect("decodes");
+    assert_eq!((image.width(), image.height()), (16, 8), "drawn as stored");
+    let frame = crate::jpeg_frame(&late).expect("a frame");
+    assert_eq!(frame.orientation, Orientation::IDENTITY);
+    let narrow = DecodeLimits::new(16, 8, 128, 0);
+    assert!(
+        decode(&late, &narrow).is_ok(),
+        "within the limits it was weighed against"
+    );
+}

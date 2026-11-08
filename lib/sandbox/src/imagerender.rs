@@ -139,7 +139,8 @@ use alloc::vec::Vec;
 use tairix_geometry::{fit_within, Rect};
 use tairix_icon::{VectorIcon, MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE};
 use tairix_image::{
-    DecodeError, DecodeLimits, FitBox, ImageFormat, RasterImage, Sequence, SequenceKind, SpriteName,
+    DecodeError, DecodeLimits, FitBox, ImageFormat, RasterImage, Sequence, SequenceKind,
+    SpriteName, PROGRESSIVE_420_BYTES_PER_PIXEL,
 };
 use tairix_raster::{
     resample, resample_window, Region, ResampleError, Rgba8Image, Surface, MAX_DRAWING_EXTENT,
@@ -148,13 +149,13 @@ use tairix_svg::{SvgError, SvgImage};
 
 use tairix_svg::font::{FaceRequest, FontProvider};
 
-use crate::svgfonts::{FontTable, FontWants, TableFonts};
+use crate::svgfonts::{FaceWant, FontTable, FontWants, FontsFault, TableFonts};
 use tairix_util::fallible;
 use tairix_wallpaper::{Placement, WallpaperFit};
 
 use crate::host::{Launcher, ParserSandbox, SandboxError, Unbelieved};
 use crate::proto::MAX_FRAME;
-use crate::wire::{Reader, Writer};
+use crate::wire::{Reader, Refusable, Writer};
 use crate::worker::Service;
 
 #[cfg(test)]
@@ -308,6 +309,8 @@ pub enum IconRasterFailure {
     /// caller's own font seam could not answer what the worker asked for.
     /// The picture would be wrong without it, so nothing is drawn.
     FontsUnavailable,
+    /// There was no memory here for the request or its answer.
+    NoMemory,
 }
 
 impl Unbelieved for IconRasterFailure {
@@ -323,6 +326,7 @@ impl core::fmt::Display for IconRasterFailure {
             Self::Refused(refusal) => write!(f, "worker refused: {refusal}"),
             Self::ReplyMalformed => f.write_str("worker reply violated the reply grammar"),
             Self::FontsUnavailable => f.write_str("no installed font can draw this lettering"),
+            Self::NoMemory => f.write_str("there is not enough memory for the picture"),
         }
     }
 }
@@ -743,37 +747,21 @@ fn unrecognised_svg(err: SvgError) -> bool {
 fn rasterise_svg(side: u32, image: &SvgImage) -> Result<Vec<u8>, IconRefusal> {
     let icon = VectorIcon::from_svg(image);
     let surface = icon.rasterise(side).ok_or(IconRefusal::Unrenderable)?;
-    Ok(straight_alpha_from_surface(&surface))
-}
-
-/// Un-premultiply every pixel of a rendered [`Surface`] into a row-major
-/// straight-alpha RGBA8 buffer.
-fn straight_alpha_from_surface(surface: &Surface) -> Vec<u8> {
-    let mut out = Vec::with_capacity(surface.pixels().len().saturating_mul(4));
-    for pixel in surface.pixels() {
-        let colour = pixel.unpremultiply();
-        out.push(colour.r);
-        out.push(colour.g);
-        out.push(colour.b);
-        out.push(colour.a);
-    }
-    out
+    let mut out = fallible::zeroed(surface.pixels().len().saturating_mul(4))
+        .ok_or(IconRefusal::Unrenderable)?;
+    write_straight_alpha(&surface, &mut out)
+        .then_some(out)
+        .ok_or(IconRefusal::Unrenderable)
 }
 
 /// Un-premultiply every pixel of a rendered [`Surface`] into `out`, which
-/// must hold exactly the surface's own pixels.
-///
-/// The band path writes into the buffer it is already going to send rather
-/// than building a second one beside it.
+/// must hold exactly the surface's own pixels: the buffer it is sent in.
 fn write_straight_alpha(surface: &Surface, out: &mut [u8]) -> bool {
     let (quads, tail) = out.as_chunks_mut::<4>();
     if !tail.is_empty() || quads.len() != surface.pixels().len() {
         return false;
     }
-    for (pixel, slot) in surface.pixels().iter().zip(quads) {
-        let colour = pixel.unpremultiply();
-        *slot = [colour.r, colour.g, colour.b, colour.a];
-    }
+    tairix_raster::unpremultiply_span(surface.pixels(), quads);
     true
 }
 
@@ -947,19 +935,20 @@ pub fn rasterise_icon<L: Launcher, S: tairix_log::Sink>(
     if side == 0 || side > MAX_ICON_SIDE || icon.len() > MAX_ARTWORK_BYTES {
         return Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest));
     }
-    let mut w = Writer::with_capacity(9 + icon.len());
+    let mut w = Writer::refusable();
     w.u8(OP_RASTERISE);
     w.u32(side);
     w.bytes(icon);
-    let request = w.finish();
+    let request = w.finish().ok_or(IconRasterFailure::NoMemory)?;
     sandbox.ask(|sandbox| {
         let reply =
             request_supplying_fonts(sandbox, &request, fonts).map_err(|failure| match failure {
                 SuppliedFailure::Sandbox(inner) => IconRasterFailure::Sandbox(inner),
                 SuppliedFailure::ReplyMalformed => IconRasterFailure::ReplyMalformed,
                 SuppliedFailure::FontsUnavailable => IconRasterFailure::FontsUnavailable,
+                SuppliedFailure::NoMemory => IconRasterFailure::NoMemory,
             })?;
-        decode_icon_reply(&reply, side)
+        decode_icon_reply(reply, side)
     })
 }
 
@@ -982,15 +971,15 @@ pub fn render_thumbnail<L: Launcher, S: tairix_log::Sink>(
     if side == 0 || side > MAX_ICON_SIDE {
         return Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest));
     }
-    let mut w = Writer::new();
+    let mut w = Writer::refusable();
     w.u8(OP_THUMBNAIL);
     w.u32(side);
-    let request = w.finish();
+    let request = w.finish().ok_or(IconRasterFailure::NoMemory)?;
     sandbox.ask(|sandbox| {
         let reply = sandbox
             .request(&request)
             .map_err(IconRasterFailure::Sandbox)?;
-        decode_fitted_reply(&reply, side)
+        decode_fitted_reply(reply, side)
     })
 }
 
@@ -1023,18 +1012,20 @@ pub fn application_sprite<L: Launcher, S: tairix_log::Sink>(
         document.read_at(offset, into).ok_or(())
     })
     .map_err(ThumbnailFailure::Upload)?;
-    let mut w = Writer::new();
+    let mut w = Writer::refusable();
     w.u8(OP_APPLICATION_SPRITE);
     w.u32(side);
     w.bytes(names.large());
     w.bytes(names.small());
-    let request = w.finish();
+    let request = w
+        .finish()
+        .ok_or(ThumbnailFailure::Render(IconRasterFailure::NoMemory))?;
     sandbox
         .ask(|sandbox| {
             let reply = sandbox
                 .request(&request)
                 .map_err(IconRasterFailure::Sandbox)?;
-            decode_fitted_reply(&reply, side)
+            decode_fitted_reply(reply, side)
         })
         .map_err(ThumbnailFailure::Render)
 }
@@ -1057,10 +1048,10 @@ pub fn boot_sprite_files<L: Launcher, S: tairix_log::Sink>(
     if boot.len() > tairix_icon::riscos::MAX_BOOT_BYTES {
         return Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest));
     }
-    let mut w = Writer::with_capacity(5 + boot.len());
+    let mut w = Writer::refusable();
     w.u8(OP_BOOT_SPRITES);
     w.bytes(boot);
-    let request = w.finish();
+    let request = w.finish().ok_or(IconRasterFailure::NoMemory)?;
     sandbox.ask(|sandbox| {
         let reply = sandbox
             .request(&request)
@@ -1084,15 +1075,15 @@ fn decode_sprite_files_reply(reply: &[u8]) -> Result<Vec<String>, IconRasterFail
     }
     let longest = tairix_icon::riscos::MAX_DEPTH * (tairix_abi::fs::FS_NAME_MAX + 1);
     let mut files = Vec::new();
-    files
-        .try_reserve_exact(count)
-        .map_err(|_| IconRasterFailure::ReplyMalformed)?;
+    if !fallible::reserve(&mut files, count) {
+        return Err(IconRasterFailure::NoMemory);
+    }
     for _ in 0..count {
         let path = core::str::from_utf8(r.bytes(longest).map_err(malformed)?)
             .ok()
             .filter(|path| tairix_icon::riscos::is_application_path(path))
             .ok_or(IconRasterFailure::ReplyMalformed)?;
-        files.push(String::from(path));
+        files.push(fallible::concatenated(&[path]).ok_or(IconRasterFailure::NoMemory)?);
     }
     if !r.is_exhausted() {
         return Err(IconRasterFailure::ReplyMalformed);
@@ -1156,13 +1147,14 @@ fn request_supplying_fonts<L: Launcher, S: tairix_log::Sink>(
     let Some(wants) = fonts_needed(&reply)? else {
         return Ok(reply);
     };
-    let table = gather_fonts(&wants, fonts).ok_or(SuppliedFailure::FontsUnavailable)?;
-    let mut w = Writer::new();
-    w.u8(OP_FONTS_SUPPLY);
-    table.encode(&mut w);
-    let stored = sandbox
-        .request(&w.finish())
-        .map_err(SuppliedFailure::Sandbox)?;
+    let supply = {
+        let table = gather_fonts(wants, fonts)?;
+        let mut w = Writer::refusable();
+        w.u8(OP_FONTS_SUPPLY);
+        table.encode(&mut w);
+        w.finish().ok_or(SuppliedFailure::NoMemory)?
+    };
+    let stored = sandbox.request(&supply).map_err(SuppliedFailure::Sandbox)?;
     if stored.first().copied() != Some(REPLY_FONTS_STORED) || stored.len() != 1 {
         return Err(SuppliedFailure::ReplyMalformed);
     }
@@ -1175,10 +1167,12 @@ fn request_supplying_fonts<L: Launcher, S: tairix_log::Sink>(
 
 /// How a request that may have needed glyphs failed, before it is turned
 /// into whichever typed failure the calling op reports.
+#[derive(Copy, Clone)]
 enum SuppliedFailure {
     Sandbox(SandboxError),
     ReplyMalformed,
     FontsUnavailable,
+    NoMemory,
 }
 
 /// The wants a reply reports, or `None` when it is an ordinary reply.
@@ -1187,7 +1181,10 @@ fn fonts_needed(reply: &[u8]) -> Result<Option<FontWants>, SuppliedFailure> {
     if r.u8() != Ok(REPLY_FONTS_NEEDED) {
         return Ok(None);
     }
-    let wants = FontWants::decode(&mut r).map_err(|_| SuppliedFailure::ReplyMalformed)?;
+    let wants = FontWants::decode(&mut r).map_err(|fault| match fault {
+        FontsFault::Malformed => SuppliedFailure::ReplyMalformed,
+        FontsFault::NoMemory => SuppliedFailure::NoMemory,
+    })?;
     if !r.is_exhausted() || wants.is_empty() {
         return Err(SuppliedFailure::ReplyMalformed);
     }
@@ -1197,35 +1194,46 @@ fn fonts_needed(reply: &[u8]) -> Result<Option<FontWants>, SuppliedFailure> {
 /// Resolve every face the worker asked for through the caller's own font
 /// seam, building the table to send back.
 ///
-/// `None` when any face or glyph cannot be furnished: a table missing part
-/// of what was asked for would only produce a second identical report, so
-/// the refusal is taken here.
-fn gather_fonts(wants: &FontWants, fonts: &mut dyn FontProvider) -> Option<FontTable> {
+/// A face or glyph that cannot be furnished refuses the whole table: one
+/// missing part of what was asked for would only produce a second identical
+/// report, so the refusal is taken here.
+fn gather_fonts(
+    wants: FontWants,
+    fonts: &mut dyn FontProvider,
+) -> Result<FontTable, SuppliedFailure> {
+    let unavailable = SuppliedFailure::FontsUnavailable;
     let mut table = FontTable::new();
-    for want in &wants.faces {
+    for FaceWant { face, scalars } in wants.faces {
         let request = FaceRequest {
-            family: &want.family,
-            weight: want.weight,
-            style: crate::svgfonts::style_of_wire(want.style)?,
-            stretch: want.stretch,
+            family: &face.family,
+            weight: face.weight,
+            style: crate::svgfonts::style_of_wire(face.style).ok_or(unavailable)?,
+            stretch: face.stretch,
         };
-        let metrics = fonts.select(&request).ok()?;
-        let mut outlines = Vec::with_capacity(want.scalars.len());
-        fonts
-            .outlines(metrics.id, &want.scalars, &mut outlines)
-            .ok()?;
-        if outlines.len() != want.scalars.len() {
-            return None;
+        let metrics = fonts.select(&request).map_err(|_| unavailable)?;
+        let mut outlines = Vec::new();
+        if !fallible::reserve(&mut outlines, scalars.len()) {
+            return Err(SuppliedFailure::NoMemory);
         }
-        let glyphs = want.scalars.iter().copied().zip(outlines).collect();
-        table.push(want.clone(), metrics, glyphs).ok()?;
+        fonts
+            .outlines(metrics.id, &scalars, &mut outlines)
+            .map_err(|_| unavailable)?;
+        if outlines.len() != scalars.len() {
+            return Err(unavailable);
+        }
+        table
+            .push(face, metrics, scalars, outlines)
+            .map_err(|fault| match fault {
+                FontsFault::Malformed => unavailable,
+                FontsFault::NoMemory => SuppliedFailure::NoMemory,
+            })?;
     }
-    Some(table)
+    Ok(table)
 }
 
 /// Decode and validate the worker's icon reply fail-closed.
-fn decode_icon_reply(reply: &[u8], side: u32) -> Result<Vec<u8>, IconRasterFailure> {
-    let mut r = Reader::new(reply);
+fn decode_icon_reply(reply: Vec<u8>, side: u32) -> Result<Vec<u8>, IconRasterFailure> {
+    let mut r = Reader::new(&reply);
     let tag = r.u8().map_err(|_| IconRasterFailure::ReplyMalformed)?;
     match tag {
         REPLY_PIXELS => {
@@ -1240,11 +1248,18 @@ fn decode_icon_reply(reply: &[u8], side: u32) -> Result<Vec<u8>, IconRasterFailu
             if pixels.len() != expected_len || !r.is_exhausted() {
                 return Err(IconRasterFailure::ReplyMalformed);
             }
-            Ok(pixels.to_vec())
+            Ok(trailing(reply, expected_len))
         }
         REPLY_ERROR => Err(refusal_in(&mut r)),
         _ => Err(IconRasterFailure::ReplyMalformed),
     }
+}
+
+/// The last `len` bytes of `reply`, kept in its own buffer: a reply's pixels
+/// close it, so moving them to its front costs no second picture's memory.
+fn trailing(mut reply: Vec<u8>, len: usize) -> Vec<u8> {
+    reply.drain(..reply.len() - len);
+    reply
 }
 
 /// The refusal the rest of an error reply names, or a malformed reply.
@@ -1260,9 +1275,12 @@ fn refusal_in(r: &mut Reader<'_>) -> IconRasterFailure {
 
 /// Decode and validate the worker's thumbnail reply fail-closed: the square
 /// asked for, and a placement that is non-empty and lies inside it.
-fn decode_fitted_reply(reply: &[u8], side: u32) -> Result<tairix_icon::Fitted, IconRasterFailure> {
+fn decode_fitted_reply(
+    reply: Vec<u8>,
+    side: u32,
+) -> Result<tairix_icon::Fitted, IconRasterFailure> {
     let malformed = |_| IconRasterFailure::ReplyMalformed;
-    let mut r = Reader::new(reply);
+    let mut r = Reader::new(&reply);
     match r.u8().map_err(malformed)? {
         REPLY_FITTED => {}
         REPLY_ERROR => return Err(refusal_in(&mut r)),
@@ -1291,7 +1309,7 @@ fn decode_fitted_reply(reply: &[u8], side: u32) -> Result<tairix_icon::Fitted, I
         return Err(IconRasterFailure::ReplyMalformed);
     };
     Ok(tairix_icon::Fitted {
-        pixels: pixels.to_vec(),
+        pixels: trailing(reply, expected),
         bounds: tairix_geometry::Rect::new(x, y, width, height),
     })
 }
@@ -1355,22 +1373,14 @@ pub const MAX_WALLPAPER_DECODE_PIXELS: u64 = MAX_DESTINATION_PIXELS.saturating_m
 /// Largest size, in bytes, a wallpaper decode's progressive JPEG
 /// coefficient store may occupy.
 ///
-/// A fixed security bound, not a growable capacity, and deliberately its
-/// own budget rather than a multiple of the pixel ceiling: a progressive
-/// scan (ITU-T T.81 Annex G) must buffer every coefficient of every
-/// component of the frame **at its natural size** before it can produce a
-/// single pixel, and asking for a reduced scale shrinks the output without
-/// shrinking that store at all. Three bytes per pixel is what a 4:2:0
-/// progressive frame needs (1.5 samples per pixel, 2 bytes per
-/// coefficient), so this admits the natural-size store of a progressive
-/// source as large as the largest output this service will hold. A frame
-/// that spends its pixels less thriftily — 4:4:4 chroma needs six bytes per
-/// pixel — is admitted up to half that size and refused beyond it: the
-/// bound is a memory budget, which is the honest unit for it, rather than a
-/// pixel count dressed up as one. See
-/// `tairix_image::DecodeLimits::max_progressive_coefficient_bytes`.
+/// A fixed security bound, not a growable capacity: a progressive scan
+/// (ITU-T T.81 Annex G) must buffer every coefficient of every component of
+/// the frame **at its natural size** before it can produce a single pixel,
+/// and asking for a reduced scale shrinks the output without shrinking that
+/// store at all. This admits the store of a 4:2:0 source as large as the
+/// largest this service decodes.
 pub const MAX_WALLPAPER_PROGRESSIVE_COEFFICIENT_BYTES: u64 =
-    MAX_WALLPAPER_DECODE_PIXELS.saturating_mul(3);
+    MAX_WALLPAPER_DECODE_PIXELS.saturating_mul(PROGRESSIVE_420_BYTES_PER_PIXEL);
 
 /// Per-axis ceiling `DecodeLimits` is given alongside
 /// [`MAX_WALLPAPER_DECODE_PIXELS`], which format decoders require because a
@@ -1498,6 +1508,8 @@ pub enum WallpaperRenderFailure {
     /// geometry: it cannot be believed, so the caller gets nothing
     /// (fail closed).
     ReplyMalformed,
+    /// There was no memory here for a request or its answer.
+    NoMemory,
 }
 
 impl WallpaperRenderFailure {
@@ -1511,6 +1523,7 @@ impl WallpaperRenderFailure {
             Self::Document(failure) => failure.out_of_memory(),
             Self::Refused(refusal) => matches!(refusal, WallpaperRefusal::OutOfMemory),
             Self::ReplyMalformed => false,
+            Self::NoMemory => true,
         }
     }
 }
@@ -1520,7 +1533,7 @@ impl Unbelieved for WallpaperRenderFailure {
         match self {
             Self::ReplyMalformed => true,
             Self::Document(upload) => upload.unbelieved(),
-            Self::Sandbox(_) | Self::Refused(_) => false,
+            Self::Sandbox(_) | Self::Refused(_) | Self::NoMemory => false,
         }
     }
 }
@@ -1532,6 +1545,7 @@ impl core::fmt::Display for WallpaperRenderFailure {
             Self::Document(inner) => write!(f, "source upload failed: {inner}"),
             Self::Refused(refusal) => write!(f, "worker refused: {refusal}"),
             Self::ReplyMalformed => f.write_str("worker reply violated the reply grammar"),
+            Self::NoMemory => f.write_str("there is not enough memory to draw the wallpaper"),
         }
     }
 }
@@ -2209,14 +2223,9 @@ pub fn plan_wallpaper<L: Launcher, S: tairix_log::Sink>(
         ));
     }
     let planned = sandbox.ask(|sandbox| {
+        let request = wallpaper_geometry_request(OP_WALLPAPER_PLAN, screen, width, height, fit)?;
         let reply = sandbox
-            .request(&wallpaper_geometry_request(
-                OP_WALLPAPER_PLAN,
-                screen,
-                width,
-                height,
-                fit,
-            ))
+            .request(&request)
             .map_err(WallpaperRenderFailure::Sandbox)?;
         let mut r = Reader::new(&reply);
         match r.u8().map_err(|_| WallpaperRenderFailure::ReplyMalformed)? {
@@ -2335,15 +2344,15 @@ fn wallpaper_geometry_request(
     width: u32,
     height: u32,
     fit: WallpaperFit,
-) -> Vec<u8> {
-    let mut w = Writer::new();
+) -> Result<Vec<u8>, WallpaperRenderFailure> {
+    let mut w = Writer::refusable();
     w.u8(op);
     w.u32(screen.0);
     w.u32(screen.1);
     w.u32(width);
     w.u32(height);
     w.u8(fit_to_wire(fit));
-    w.finish()
+    w.finish().ok_or(WallpaperRenderFailure::NoMemory)
 }
 
 /// Send `OP_WALLPAPER_PREPARE` and return the worker's answered band size.
@@ -2354,14 +2363,9 @@ fn prepare_wallpaper<L: Launcher, S: tairix_log::Sink>(
     height: u32,
     fit: WallpaperFit,
 ) -> Result<u32, WallpaperRenderFailure> {
+    let request = wallpaper_geometry_request(OP_WALLPAPER_PREPARE, screen, width, height, fit)?;
     let reply = sandbox
-        .request(&wallpaper_geometry_request(
-            OP_WALLPAPER_PREPARE,
-            screen,
-            width,
-            height,
-            fit,
-        ))
+        .request(&request)
         .map_err(WallpaperRenderFailure::Sandbox)?;
     let mut r = Reader::new(&reply);
     let tag = r.u8().map_err(|_| WallpaperRenderFailure::ReplyMalformed)?;
@@ -2388,12 +2392,13 @@ fn band_wallpaper_into<L: Launcher, S: tairix_log::Sink>(
     rows: u32,
     out: &mut [u8],
 ) -> Result<(), WallpaperRenderFailure> {
-    let mut w = Writer::new();
+    let mut w = Writer::refusable();
     w.u8(OP_WALLPAPER_BAND);
     w.u32(first_row);
     w.u32(rows);
+    let request = w.finish().ok_or(WallpaperRenderFailure::NoMemory)?;
     let reply = sandbox
-        .request(&w.finish())
+        .request(&request)
         .map_err(WallpaperRenderFailure::Sandbox)?;
     let mut r = Reader::new(&reply);
     let tag = r.u8().map_err(|_| WallpaperRenderFailure::ReplyMalformed)?;
@@ -2426,10 +2431,11 @@ fn band_wallpaper_into<L: Launcher, S: tairix_log::Sink>(
 fn release_wallpaper<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
 ) -> Result<(), WallpaperRenderFailure> {
-    let mut w = Writer::new();
+    let mut w = Writer::refusable();
     w.u8(OP_WALLPAPER_RELEASE);
+    let request = w.finish().ok_or(WallpaperRenderFailure::NoMemory)?;
     let reply = sandbox
-        .request(&w.finish())
+        .request(&request)
         .map_err(WallpaperRenderFailure::Sandbox)?;
     let mut r = Reader::new(&reply);
     let tag = r.u8().map_err(|_| WallpaperRenderFailure::ReplyMalformed)?;
@@ -2452,20 +2458,6 @@ fn decode_wallpaper_error(r: &mut Reader<'_>) -> WallpaperRenderFailure {
 // ---------------------------------------------------------------------
 // Document upload
 // ---------------------------------------------------------------------
-
-/// Largest document, in bytes, this service will hold for a caller.
-///
-/// A fixed containment bound, not a growable capacity: it bounds what one
-/// worker holds *resident*, which is what an untrusted file costs before a
-/// single pixel of it is decoded. Sixty-four mebibytes admits an
-/// uncompressed 4K RGBA TIFF page (33 MiB) and a large multi-page scan, and
-/// takes 256 pushes of a client's 256 KiB runs, so the number of pushes a
-/// document takes is bounded as well as its size.
-///
-/// Every decoder in `tairix_image` reads a whole file rather than a
-/// stream, so the bytes must be resident to be decoded at all; the ceiling
-/// is what keeps that from being unbounded.
-pub const MAX_DOCUMENT_BYTES: usize = 64 << 20;
 
 /// Fixed bytes an `OP_DOC_PUSH` request spends besides its chunk: the
 /// opcode and the chunk field's own length prefix.
@@ -2509,7 +2501,8 @@ const REFUSAL_DOC_OUT_OF_MEMORY: u8 = 5;
 pub enum DocumentRefusal {
     /// The request payload violated its grammar, or declared a zero length.
     MalformedRequest,
-    /// The declared length exceeds [`MAX_DOCUMENT_BYTES`].
+    /// The declared length is past what the worker may hold: its
+    /// launcher's [`document_room`](crate::Launcher::document_room).
     TooLarge,
     /// A chunk arrived with no `OP_DOC_BEGIN` before it.
     NotBegun,
@@ -2664,10 +2657,9 @@ impl Document {
         if !r.is_exhausted() || declared == 0 {
             return Err(DocumentRefusal::MalformedRequest);
         }
+        // What this worker may hold is its memory ceiling's to say: a
+        // document past it is refused by the reservation, not by a figure.
         let declared = usize::try_from(declared).map_err(|_| DocumentRefusal::TooLarge)?;
-        if declared > MAX_DOCUMENT_BYTES {
-            return Err(DocumentRefusal::TooLarge);
-        }
         *held = None;
         let mut bytes = Vec::new();
         if !fallible::reserve(&mut bytes, declared) {
@@ -2714,23 +2706,23 @@ impl Document {
 ///
 /// # Errors
 ///
-/// [`DocumentFailure`]: the sandbox failed, the worker refused the length,
+/// [`DocumentFailure`]: a length past the worker's room is refused here as
+/// too large; otherwise the sandbox failed, the worker refused the length,
 /// or the reply could not be believed.
 fn begin_document<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     len: usize,
 ) -> Result<(), DocumentFailure> {
-    if len == 0 || len > MAX_DOCUMENT_BYTES {
-        return Err(DocumentFailure::Refused(if len == 0 {
-            DocumentRefusal::MalformedRequest
-        } else {
-            DocumentRefusal::TooLarge
-        }));
+    if len == 0 {
+        return Err(DocumentFailure::Refused(DocumentRefusal::MalformedRequest));
     }
-    let mut w = Writer::new();
+    if len as u64 > sandbox.document_room() {
+        return Err(DocumentFailure::Refused(DocumentRefusal::TooLarge));
+    }
+    let mut w = Writer::refusable();
     w.u8(OP_DOC_BEGIN);
     w.u64(len as u64);
-    let request = w.finish();
+    let request = w.finish().ok_or(DocumentFailure::NoMemory)?;
     sandbox.ask(|sandbox| {
         let reply = sandbox
             .request(&request)
@@ -2869,6 +2861,17 @@ impl<E> Unbelieved for UploadFailure<E> {
     }
 }
 
+impl<E: core::fmt::Display> core::fmt::Display for UploadFailure<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Read(err) => write!(f, "it could not be read ({err})"),
+            Self::Shrank => f.write_str("it grew shorter as it was read"),
+            Self::NoMemory => f.write_str("there is not enough memory to hand it over"),
+            Self::Document(failure) => write!(f, "it could not be handed over ({failure})"),
+        }
+    }
+}
+
 impl<E> From<DocumentFailure> for UploadFailure<E> {
     fn from(failure: DocumentFailure) -> Self {
         Self::Document(failure)
@@ -2996,12 +2999,10 @@ const MAX_VIEW_DECODE_SIDE: u32 = 1 << 24;
 /// Largest size, in bytes, a view decode's progressive JPEG coefficient
 /// store may occupy.
 ///
-/// Three bytes per pixel of the frame at its natural size, for the reason
-/// [`MAX_WALLPAPER_PROGRESSIVE_COEFFICIENT_BYTES`] sets out: a progressive
-/// scan must buffer every coefficient before it can produce a pixel, and
-/// that store does not shrink with the output.
+/// The store of a 4:2:0 frame as large as the view's pixel bound, for the
+/// reason [`MAX_WALLPAPER_PROGRESSIVE_COEFFICIENT_BYTES`] sets out.
 pub(crate) const MAX_VIEW_PROGRESSIVE_COEFFICIENT_BYTES: u64 =
-    MAX_VIEW_DECODE_PIXELS.saturating_mul(3);
+    MAX_VIEW_DECODE_PIXELS.saturating_mul(PROGRESSIVE_420_BYTES_PER_PIXEL);
 
 /// View opcodes.
 const OP_VIEW_OPEN: u8 = 7;
@@ -3141,6 +3142,8 @@ pub enum ViewFailure {
     ReplyMalformed,
     /// The document names lettering no installed font can furnish.
     FontsUnavailable,
+    /// There was no memory here for the request or its answer.
+    NoMemory,
 }
 
 impl Unbelieved for ViewFailure {
@@ -3148,7 +3151,7 @@ impl Unbelieved for ViewFailure {
         match self {
             Self::ReplyMalformed => true,
             Self::Document(upload) => upload.unbelieved(),
-            Self::Sandbox(_) | Self::Refused(_) | Self::FontsUnavailable => false,
+            Self::Sandbox(_) | Self::Refused(_) | Self::FontsUnavailable | Self::NoMemory => false,
         }
     }
 }
@@ -3161,6 +3164,7 @@ impl core::fmt::Display for ViewFailure {
             Self::Refused(refusal) => write!(f, "worker refused: {refusal}"),
             Self::ReplyMalformed => f.write_str("worker reply violated the reply grammar"),
             Self::FontsUnavailable => f.write_str("no installed font can draw this lettering"),
+            Self::NoMemory => f.write_str("there is not enough memory to show it"),
         }
     }
 }
@@ -3847,10 +3851,10 @@ pub fn open_view<L: Launcher, S: tairix_log::Sink>(
     format: Option<ViewFormat>,
     fonts: &mut dyn FontProvider,
 ) -> Result<ViewDocument, ViewFailure> {
-    let mut w = Writer::new();
+    let mut w = Writer::refusable();
     w.u8(OP_VIEW_OPEN);
     w.u8(format.map_or(0, ViewFormat::to_wire));
-    let request = w.finish();
+    let request = w.finish().ok_or(ViewFailure::NoMemory)?;
     sandbox.ask(|sandbox| {
         // The only op that decodes a whole document, so the only one whose
         // reply can be a request for the glyphs that document draws with.
@@ -3859,6 +3863,7 @@ pub fn open_view<L: Launcher, S: tairix_log::Sink>(
                 SuppliedFailure::Sandbox(inner) => ViewFailure::Sandbox(inner),
                 SuppliedFailure::ReplyMalformed => ViewFailure::ReplyMalformed,
                 SuppliedFailure::FontsUnavailable => ViewFailure::FontsUnavailable,
+                SuppliedFailure::NoMemory => ViewFailure::NoMemory,
             })?;
         let reply = view_refusal(reply)?;
         let mut r = Reader::new(&reply);
@@ -3907,7 +3912,7 @@ pub fn select_page<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     index: u32,
 ) -> Result<ViewPage, ViewFailure> {
-    let mut w = Writer::new();
+    let mut w = Writer::refusable();
     w.u8(OP_VIEW_PAGE);
     w.u32(index);
     sandbox.ask(|sandbox| {
@@ -3959,7 +3964,7 @@ pub fn render_page<L: Launcher, S: tairix_log::Sink>(
     if !renderable(extent, window) || out.len() != pixel_buffer_len(window.width, window.height) {
         return Err(ViewFailure::Refused(ViewRefusal::MalformedRequest));
     }
-    let mut w = Writer::new();
+    let mut w = Writer::refusable();
     w.u8(OP_VIEW_RENDER);
     w.u32(extent.0);
     w.u32(extent.1);
@@ -3978,12 +3983,11 @@ pub fn render_page<L: Launcher, S: tairix_log::Sink>(
         let mut first_row = 0u32;
         while first_row < window.height {
             let rows = rows_per_band.min(window.height - first_row);
-            let band = view_band(sandbox, first_row, rows, window.width)?;
             let offset = pixel_buffer_len(window.width, first_row);
-            let expected = pixel_buffer_len(window.width, rows);
-            out.get_mut(offset..offset + expected)
-                .ok_or(ViewFailure::ReplyMalformed)?
-                .copy_from_slice(&band);
+            let band = out
+                .get_mut(offset..offset + pixel_buffer_len(window.width, rows))
+                .ok_or(ViewFailure::ReplyMalformed)?;
+            view_band(sandbox, first_row, rows, band)?;
             first_row += rows;
         }
         Ok(())
@@ -3998,7 +4002,7 @@ pub fn render_page<L: Launcher, S: tairix_log::Sink>(
 pub fn close_view<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
 ) -> Result<(), ViewFailure> {
-    let mut w = Writer::new();
+    let mut w = Writer::refusable();
     w.u8(OP_VIEW_RELEASE);
     sandbox.ask(|sandbox| {
         let reply = view_reply(sandbox, w)?;
@@ -4011,15 +4015,15 @@ pub fn close_view<L: Launcher, S: tairix_log::Sink>(
     })
 }
 
-/// Send one `OP_VIEW_BAND` request and return its validated pixels
-/// (exactly `rows * width * 4` bytes).
+/// Send one `OP_VIEW_BAND` request and write its validated pixels into
+/// `band`, which is exactly the band's rows of the destination.
 fn view_band<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     first_row: u32,
     rows: u32,
-    width: u32,
-) -> Result<Vec<u8>, ViewFailure> {
-    let mut w = Writer::new();
+    band: &mut [u8],
+) -> Result<(), ViewFailure> {
+    let mut w = Writer::refusable();
     w.u8(OP_VIEW_BAND);
     w.u32(first_row);
     w.u32(rows);
@@ -4031,23 +4035,24 @@ fn view_band<L: Launcher, S: tairix_log::Sink>(
     if echoed_first != first_row || echoed_rows != rows {
         return Err(ViewFailure::ReplyMalformed);
     }
-    let expected = pixel_buffer_len(width, rows);
-    let pixels = r.bytes(expected).map_err(|_| ViewFailure::ReplyMalformed)?;
-    if pixels.len() != expected || !r.is_exhausted() {
+    let pixels = r
+        .bytes(band.len())
+        .map_err(|_| ViewFailure::ReplyMalformed)?;
+    if pixels.len() != band.len() || !r.is_exhausted() {
         return Err(ViewFailure::ReplyMalformed);
     }
-    Ok(pixels.to_vec())
+    band.copy_from_slice(pixels);
+    Ok(())
 }
 
 /// Send `request` and hand back the reply bytes, having turned a
 /// `REPLY_ERROR` into its typed refusal so no caller has to.
 fn view_reply<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
-    request: Writer,
+    request: Writer<Refusable>,
 ) -> Result<Vec<u8>, ViewFailure> {
-    let reply = sandbox
-        .request(&request.finish())
-        .map_err(ViewFailure::Sandbox)?;
+    let request = request.finish().ok_or(ViewFailure::NoMemory)?;
+    let reply = sandbox.request(&request).map_err(ViewFailure::Sandbox)?;
     view_refusal(reply)
 }
 

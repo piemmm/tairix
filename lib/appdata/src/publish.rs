@@ -244,6 +244,16 @@ pub enum Refusal {
     NotRestored(Errno),
 }
 
+impl Refusal {
+    /// Whether a settings window says this beneath its settings: a write the
+    /// store refused, which leaves the settings in force as they were. What
+    /// reading the store found is the program's to report, not the window's.
+    #[must_use]
+    pub const fn is_write(self) -> bool {
+        matches!(self, Self::NotSaved(_) | Self::NotRestored(_))
+    }
+}
+
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

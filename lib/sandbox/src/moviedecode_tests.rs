@@ -787,3 +787,42 @@ fn a_next_with_every_slot_held_is_refused_on_either_side() {
     });
     assert_eq!(emitted.0, [refused]);
 }
+
+/// Watch `movie` to its end through `link`, handing each slot back once its
+/// picture is drawn.
+fn watched(movie: &[u8], link: &mut impl crate::testing::Link) -> Result<(), MovieDecodeError> {
+    let mut client = MovieDecodeClient::new();
+    client.open(movie.len() as u64, ROOMY, screen(), SEED)?;
+    loop {
+        if let Some(request) = client.outgoing() {
+            link.request(request);
+            client.sent();
+        }
+        let frame = link.frame().ok_or(MovieDecodeError::Unbelievable)?;
+        match client.on_frame(frame)? {
+            MovieEvent::Need { offset, len } => {
+                let start = usize::try_from(offset).expect("small");
+                client.supply(&movie[start..start + len])?;
+            }
+            MovieEvent::Opened | MovieEvent::Skipped { .. } => client.next(0)?,
+            MovieEvent::Picture(head) => {
+                client.release(head.slot)?;
+                client.next(0)?;
+            }
+            MovieEvent::Ended(_) => return Ok(()),
+            other => panic!("a watch answered {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_movie_this_side_has_no_memory_for_is_refused_as_that() {
+    let movie = recording(3, 3, false, true);
+    let ring = HeapShare::new(screen().ring_bytes()).expect("a ring");
+    let mut recorder = crate::testing::Recorder::new(MovieDecodeService::new(Some(ring)));
+    watched(&movie.file, &mut recorder).expect("an honest watch");
+    tairix_fuzzseed::meter::refused_at_each(
+        || watched(&movie.file, &mut crate::testing::Replay::of(&recorder.kept)),
+        |failure| *failure == MovieDecodeError::OutOfMemory,
+    );
+}

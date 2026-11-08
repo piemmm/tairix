@@ -1,149 +1,160 @@
-use tairix_geometry::{Point, Region, Scale};
+//! Paint's settings window: each category's rows, what each edit asks of
+//! Paint, what a format or a chosen colour reshapes, and what the store says.
+
+use alloc::string::String;
+
+use tairix_colour::Rgb;
+use tairix_controls::{FieldControl, FieldRow, SettingsLayout};
+use tairix_geometry::{Region, Scale};
 use tairix_image::IndexDepth;
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
-use tairix_theme::{Theme, ThemeRegistry};
+use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
+use tairix_theme::ThemeRegistry;
+use tairix_window::docapp::settings::{Edit, SettingsRequest, Then};
 use tairix_window::docapp::{AppRequest, AppView, Outcome};
 
-use super::{Category, Keyboard, SettingsLayout, SettingsRequest, SettingsWindow};
+use super::{described, Ask, Category, PaintSettings};
 use crate::layout::Faces;
 use crate::pane::{Arrangement, PaneKind};
-use crate::panel::{Part, Placed};
-use crate::preferences::{GridStyle, Preferences};
+use crate::preferences::{GridStyle, Preferences, Shades};
 use crate::save::SaveFormat;
 use crate::tool::Tool;
 
 struct Fixture {
     registry: ThemeRegistry,
-    window: SettingsWindow,
+    window: PaintSettings,
     layout: SettingsLayout,
 }
 
-type Answer = Outcome<AppRequest<SettingsRequest>>;
+type Answer = Outcome<AppRequest<SettingsRequest<Preferences>>>;
 
 impl Fixture {
     fn at(category: Category) -> Self {
         let registry = ThemeRegistry::with_builtins();
-        let window = SettingsWindow::new(Preferences::default(), category);
-        let layout = window.layout(
-            600,
-            440,
-            registry.active(),
-            Scale::ONE,
-            Faces::of(registry.active(), Scale::ONE),
-        );
-        Self {
+        let window = PaintSettings::new(Preferences::default(), category.index());
+        let mut fixture = Self {
             registry,
             window,
-            layout,
-        }
+            layout: SettingsLayout::default(),
+        };
+        fixture.lay_out();
+        fixture
     }
 
-    fn theme(&self) -> &Theme {
-        self.registry.active()
-    }
-
-    fn feed(&mut self, input: InputEvent) -> Answer {
+    /// Lay the window out again, as the host does when it is asked.
+    fn lay_out(&mut self) {
         let theme = self.registry.active();
-        self.window.input(
-            &input,
+        self.layout = self
+            .window
+            .layout(600, 440, theme, Scale::ONE, Faces::of(theme, Scale::ONE));
+        self.window.settle(&self.layout, &mut Region::new());
+    }
+
+    fn key(&mut self, key: Key) -> Answer {
+        let event = InputEvent::KeyPressed {
+            key,
+            modifiers: Modifiers::default(),
+        };
+        let theme = self.registry.active();
+        let answer = self.window.input(
+            &event,
             0,
             &self.layout,
             Scale::ONE,
             theme,
             &mut Region::new(),
-        )
+        );
+        if answer.relayout != tairix_window::docapp::Relayout::None {
+            self.lay_out();
+        }
+        answer
     }
 
-    fn click(&mut self, at: Point) -> Answer {
-        let _ = self.feed(InputEvent::PointerMoved { to: at });
-        let pressed = self.feed(InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        });
-        let released = self.feed(InputEvent::PointerReleased {
-            button: PointerButton::Primary,
-        });
-        if released.request.is_some() {
-            released
-        } else {
-            pressed
+    /// Give the column the keyboard and walk its cursor to item `item`,
+    /// counted down every group's rows.
+    fn reach_row(&mut self, item: usize) {
+        for _ in 0..2 {
+            let _ = self.key(Key::Named(NamedKey::Tab));
+        }
+        for _ in 0..item {
+            let _ = self.key(Key::Named(NamedKey::Down));
         }
     }
 
-    fn key(&mut self, key: Key, shift: bool) -> Answer {
-        let modifiers = Modifiers {
-            shift,
-            ..Modifiers::default()
+    /// Choose entry `index` of the choice row the cursor is on.
+    fn choose(&mut self, index: usize) -> Answer {
+        let _ = self.key(Key::Named(NamedKey::Enter));
+        let selected = self.cursor_row().and_then(|row| match row.control() {
+            FieldControl::Combo(combo) => combo.selected(),
+            _ => None,
+        });
+        let from = selected.unwrap_or(0);
+        let (step, count) = if index >= from {
+            (NamedKey::Down, index - from)
+        } else {
+            (NamedKey::Up, from - index)
         };
-        self.feed(InputEvent::KeyPressed { key, modifiers })
+        for _ in 0..count {
+            let _ = self.key(Key::Named(step));
+        }
+        self.key(Key::Named(NamedKey::Enter))
     }
 
-    /// Where part `part` of the category's panel is laid out.
-    fn placed(&self, part: usize) -> Placed {
-        let faces = Faces::of(self.theme(), Scale::ONE);
-        self.window
-            .panel
-            .place_of(part, self.layout.panel, faces, Scale::ONE, self.theme())
-            .expect("laid out")
+    /// Type `text` over what the row at the cursor holds.
+    fn retype(&mut self, text: &str) -> Answer {
+        let _ = self.key(Key::Named(NamedKey::End));
+        for _ in 0..8 {
+            let _ = self.key(Key::Named(NamedKey::Backspace));
+        }
+        let mut last = Outcome::none();
+        for character in text.chars() {
+            last = self.key(Key::Char(character));
+        }
+        last
     }
 
-    /// Choose entry `index` of choice part `part`'s list.
-    fn choose(&mut self, part: usize, index: usize) -> Answer {
-        let control = self.placed(part).controls[0];
-        let _ = self.click(control.center());
-        let faces = Faces::of(self.theme(), Scale::ONE);
-        let popup = self.window.panel.popup_rect(
-            self.layout.panel,
-            self.layout.window,
-            faces,
-            Scale::ONE,
-            self.theme(),
-        );
-        let Some(Part::Choice { combo, .. }) = self.window.panel.parts().get(part) else {
-            panic!("part {part} is a choice");
-        };
-        // The list's rows share its height evenly.
-        let count = i32::try_from(combo.choices().len()).expect("a short list");
-        let along = i32::try_from(index).expect("a short list") * 2 + 1;
-        let height = i32::try_from(popup.height).expect("on screen");
-        self.click(Point::new(
-            popup.center().x,
-            popup.top() + along * height / (count * 2),
-        ))
+    fn cursor_row(&self) -> Option<&FieldRow> {
+        let column = self.window.frame().column();
+        let (group, row) = column.cursor()?;
+        column.groups().get(group)?.rows().get(row)
     }
 
-    fn sidebar_row(&self, category: Category) -> Point {
-        let index = Category::ALL
-            .iter()
-            .position(|&at| at == category)
-            .expect("listed");
-        self.window
-            .sidebar
-            .tab_area(index, self.layout.sidebar, Scale::ONE, self.theme())
-            .expect("a row")
-            .center()
+    fn row(&self, group: usize, row: usize) -> &FieldRow {
+        &self.window.frame().column().groups()[group].rows()[row]
     }
 }
 
-fn edited(answer: Answer) -> (Preferences, Preferences, bool) {
+fn request(answer: Answer) -> SettingsRequest<Preferences> {
     match answer.request {
-        Some(AppRequest::Own(SettingsRequest::Edit { was, now, settled })) => (was, now, settled),
-        other => panic!("not an edit: {other:?}"),
+        Some(AppRequest::Own(request)) => request,
+        other => panic!("not a settings request: {other:?}"),
     }
+}
+
+fn edited(answer: Answer) -> Edit<Preferences> {
+    request(answer).edit.expect("an edit")
 }
 
 #[test]
-fn the_sidebar_lists_every_category_and_shows_the_one_chosen() {
+fn every_category_is_listed_and_shows_its_own_groups() {
     let mut fixture = Fixture::at(Category::General);
-    assert_eq!(fixture.window.category(), Category::General);
-    for category in Category::ALL {
-        let row = fixture.sidebar_row(category);
-        let _ = fixture.click(row);
-        assert_eq!(fixture.window.category(), category);
+    assert_eq!(fixture.window.title(), "Paint settings");
+    let captions = [
+        "NEW WINDOWS",
+        "NEW PICTURE",
+        "GRID",
+        "CHECKERBOARD",
+        "NEW WINDOWS",
+    ];
+    let _ = fixture.key(Key::Named(NamedKey::Tab));
+    for (index, caption) in captions.into_iter().enumerate() {
+        if index > 0 {
+            let _ = fixture.key(Key::Named(NamedKey::Down));
+            let _ = fixture.key(Key::Named(NamedKey::Enter));
+        }
+        assert_eq!(fixture.window.category(), index);
+        let groups = fixture.window.frame().column().groups();
+        assert_eq!(groups[0].caption(), caption, "{:?}", Category::at(index));
     }
-    assert!(
-        fixture.window.panel.parts().len() >= 2,
-        "the panes' note and buttons"
-    );
 }
 
 #[test]
@@ -153,9 +164,10 @@ fn a_choice_asks_for_one_settled_edit() {
         .iter()
         .position(|&tool| tool == Tool::Pencil)
         .expect("a tool");
-    let (was, now, settled) = edited(fixture.choose(0, index));
+    fixture.reach_row(0);
+    let edit = edited(fixture.choose(index));
     assert_eq!(
-        (was.tool, now.tool, settled),
+        (edit.was.tool, edit.now.tool, edit.settled),
         (Tool::Brush, Tool::Pencil, true)
     );
     assert_eq!(fixture.window.record().tool, Tool::Pencil);
@@ -168,91 +180,89 @@ fn a_format_that_holds_fewer_colours_takes_them_and_offers_only_those() {
         .iter()
         .position(|&format| format == SaveFormat::Gif)
         .expect("a format");
-    let (_, now, _) = edited(fixture.choose(1, gif));
+    fixture.reach_row(2);
+    let edit = edited(fixture.choose(gif));
     assert_eq!(
-        (now.format, now.new.depth),
+        (edit.now.format, edit.now.new.depth),
         (SaveFormat::Gif, Some(IndexDepth::Eight))
     );
-    let Some(Part::Choice { combo, .. }) = fixture.window.panel.parts().get(2) else {
+    let FieldControl::Combo(colours) = fixture.row(0, 3).control() else {
         panic!("the colours choice");
     };
     assert_eq!(
-        combo.choices().len(),
+        colours.choices().len(),
         4,
         "a GIF holds no millions of colours"
     );
 }
 
 #[test]
-fn a_typed_number_is_an_edit_settled_by_enter() {
+fn a_typed_number_is_a_live_edit_settled_by_enter() {
     let mut fixture = Fixture::at(Category::Grid);
-    let across = fixture.placed(0).controls[0];
-    let _ = fixture.click(across.center());
-    for _ in 0..4 {
-        let _ = fixture.key(Key::Named(NamedKey::Backspace), false);
-    }
-    let (_, typed, settled) = edited(fixture.key(Key::Char('8'), false));
+    fixture.reach_row(0);
+    let typed = edited(fixture.retype("8"));
     assert_eq!(
-        (typed.grid.spacing.0, settled),
+        (typed.now.grid.spacing.0, typed.settled),
         (8, false),
         "shown as typed, not written"
     );
-    let (_, now, settled) = edited(fixture.key(Key::Named(NamedKey::Enter), false));
-    assert_eq!((now.grid.spacing.0, settled), (8, true), "Enter settles it");
+    let settled = edited(fixture.key(Key::Named(NamedKey::Enter)));
+    assert_eq!((settled.now.grid.spacing.0, settled.settled), (8, true));
 }
 
-/// Typing the new picture's size edits the field in place: the panel is not
-/// built again under the caret on each digit, so Enter settles what was typed.
 #[test]
 fn a_typed_size_is_settled_by_enter_in_the_field_it_was_typed_in() {
     let mut fixture = Fixture::at(Category::NewPicture);
-    let width = fixture.placed(0).controls[0];
-    let _ = fixture.click(width.center());
-    for _ in 0..4 {
-        let _ = fixture.key(Key::Named(NamedKey::Backspace), false);
-    }
-    let (_, typed, settled) = edited(fixture.key(Key::Char('8'), false));
-    assert_eq!(
-        (typed.new.size.0, settled),
-        (8, false),
-        "shown as typed, not written"
-    );
-    let (_, typed, settled) = edited(fixture.key(Key::Char('0'), false));
-    assert_eq!((typed.new.size.0, settled), (80, false));
-    let (_, now, settled) = edited(fixture.key(Key::Named(NamedKey::Enter), false));
-    assert_eq!((now.new.size.0, settled), (80, true), "Enter settles it");
+    fixture.reach_row(0);
+    let typed = edited(fixture.retype("80"));
+    assert_eq!((typed.now.new.size.0, typed.settled), (80, false));
+    let settled = edited(fixture.key(Key::Named(NamedKey::Enter)));
+    assert_eq!((settled.now.new.size.0, settled.settled), (80, true));
 }
 
 #[test]
-fn restore_take_and_reset_are_asked_of_the_application() {
-    let mut fixture = Fixture::at(Category::Panes);
-    let buttons = fixture.placed(1);
-    let taken = fixture.click(buttons.controls[0].center());
-    assert_eq!(
-        taken.request,
-        Some(AppRequest::Own(SettingsRequest::TakePanes))
+fn a_grid_colour_is_typed_and_settled_as_the_keyboard_leaves() {
+    let mut fixture = Fixture::at(Category::Grid);
+    fixture.reach_row(4);
+    let typed = edited(fixture.retype("#102030"));
+    assert_eq!(typed.now.grid.colour, Rgb::new(0x10, 0x20, 0x30));
+    let left = edited(fixture.key(Key::Named(NamedKey::Down)));
+    assert!(left.settled, "leaving the row settles it");
+}
+
+#[test]
+fn choosing_shades_of_ones_own_enables_their_colours() {
+    let mut fixture = Fixture::at(Category::Canvas);
+    assert!(
+        !fixture.row(0, 2).state().is_actionable(),
+        "the theme's shades hold no colour of their own"
     );
+    fixture.reach_row(1);
+    let edit = edited(fixture.choose(1));
+    assert!(matches!(edit.now.shades, Shades::Chosen(..)));
+    assert!(fixture.row(0, 2).state().is_actionable());
+    assert!(fixture.row(0, 3).state().is_actionable());
+}
+
+#[test]
+fn take_reset_and_restore_are_asked_of_paint() {
+    let mut fixture = Fixture::at(Category::Panes);
+    fixture.reach_row(0);
+    let taken = request(fixture.key(Key::Char(' ')));
+    assert_eq!(taken.then, Some(Then::Ask(Ask::TakePanes)));
 
     let mut moved = Preferences::default();
     moved.panes.hide(PaneKind::Colour);
-    fixture
-        .window
-        .adopt(&moved, &fixture.layout, &mut Region::new());
-    let (_, now, _) = edited(fixture.click(buttons.controls[1].center()));
-    assert_eq!(now.panes, Arrangement::default(), "reset");
+    let layout = fixture.layout;
+    let _ = fixture.window.adopt(&moved, &layout, &mut Region::new());
+    fixture.lay_out();
+    let _ = fixture.key(Key::Named(NamedKey::Down));
+    let reset = edited(fixture.key(Key::Char(' ')));
+    assert_eq!(reset.now.panes, Arrangement::default(), "reset");
 
-    let faces = Faces::of(fixture.theme(), Scale::ONE);
-    let restore = fixture
-        .window
-        .footer
-        .place_of(0, fixture.layout.footer, faces, Scale::ONE, fixture.theme())
-        .expect("laid out")
-        .controls[0];
-    let restored = fixture.click(restore.center());
-    assert_eq!(
-        restored.request,
-        Some(AppRequest::Own(SettingsRequest::Restore))
-    );
+    let _ = fixture.key(Key::Named(NamedKey::Tab));
+    let restored = request(fixture.key(Key::Char(' ')));
+    assert_eq!(restored.then, Some(Then::Restore));
 }
 
 #[test]
@@ -261,54 +271,36 @@ fn what_the_store_says_is_shown_and_a_refusal_said() {
     let mut stored = Preferences::default();
     stored.grid.style = GridStyle::Dots;
     let layout = fixture.layout;
-    fixture.window.adopt(&stored, &layout, &mut Region::new());
+    assert!(fixture.window.adopt(&stored, &layout, &mut Region::new()));
     assert_eq!(fixture.window.record().grid.style, GridStyle::Dots);
-    let Some(Part::Choice { combo, .. }) = fixture.window.panel.parts().get(4) else {
+    let FieldControl::Combo(style) = fixture.row(0, 6).control() else {
         panic!("the style choice");
     };
-    assert_eq!(combo.selected(), Some(2));
-
+    assert_eq!(style.selected(), Some(2));
     fixture.window.say(
-        Some(alloc::string::String::from("the settings were not saved")),
+        Some(String::from("the settings were not saved")),
         &layout,
         &mut Region::new(),
     );
-    assert_eq!(fixture.window.footer.parts().len(), 2);
-    fixture.window.say(None, &layout, &mut Region::new());
-    assert_eq!(fixture.window.footer.parts().len(), 1);
-}
-
-#[test]
-fn tab_walks_the_regions_and_escape_closes() {
-    let mut fixture = Fixture::at(Category::General);
-    let _ = fixture.key(Key::Named(NamedKey::Tab), false);
-    assert_eq!(fixture.window.keyboard, Some(Keyboard::Sidebar));
-    let _ = fixture.key(Key::Named(NamedKey::Tab), false);
-    assert_eq!(fixture.window.keyboard, Some(Keyboard::Panel));
-    let _ = fixture.key(Key::Named(NamedKey::Tab), true);
-    assert_eq!(fixture.window.keyboard, Some(Keyboard::Sidebar), "back");
-    let _ = fixture.key(Key::Named(NamedKey::Down), false);
-    let _ = fixture.key(Key::Named(NamedKey::Enter), false);
     assert_eq!(
-        fixture.window.category(),
-        Category::NewPicture,
-        "the arrows choose a category"
+        fixture.window.frame().note(),
+        Some("the settings were not saved")
     );
-    let closed = fixture.key(Key::Named(NamedKey::Escape), false);
-    assert_eq!(closed.request, Some(AppRequest::Close));
+    fixture.window.say(None, &layout, &mut Region::new());
+    assert_eq!(fixture.window.frame().note(), None);
 }
 
 #[test]
 fn the_panes_are_described_where_each_stands() {
     let mut panes = Arrangement::default();
     assert_eq!(
-        super::described(&panes),
+        described(&panes),
         "Tools on the left; Colour on the right; Palette beneath the picture; \
          Layers, Adjustments, Effects hidden"
     );
     panes.float(PaneKind::Palette);
     assert_eq!(
-        super::described(&panes),
+        described(&panes),
         "Tools on the left; Colour on the right; Palette floating; \
          Layers, Adjustments, Effects hidden"
     );

@@ -64,7 +64,9 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
 # A window's document file: its saves and file choosers. The engine needs
 # none of the runtime.
-tairix-window = { path = "../../../lib/window", version = "=0.0.0", default-features = false }
+tairix-window = { path = "../../../lib/window", version = "=0.0.0", default-features = false, features = [
+    "settings",
+] }
 
 # The package is both the host-tested editor engine and the `Run` entry-point
 # binary of the on-disk `Paint.app` bundle: a freestanding pure-Rust program
@@ -80,7 +82,7 @@ path = "src/run.rs"
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0", features = ["rt"] }
 # The app half of the window channel: the document host the editor runs in
 # and the clipboard client.
-tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+tairix-window = { path = "../../../lib/window", version = "=0.0.0", features = ["settings"] }
 # The pure-Rust userland runtime: `_start`, the allocator, the file calls and
 # the worker desks the decoder and the writer run on.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

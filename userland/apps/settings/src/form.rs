@@ -1,5 +1,5 @@
-//! The settings registry as form rows, and the one column of plates every
-//! composed pane draws.
+//! The settings registry as form rows, laid down the one column of plates
+//! every composed pane draws (`tairix_controls::FieldColumn`).
 //!
 //! One definition of each settable, and the panes that each select a subset
 //! of it: Appearance offers light/dark and the interface axes, Accessibility
@@ -48,12 +48,12 @@ use tairix_audio::stream::DeviceControl;
 use tairix_browse::{DriveClass, FilerKey, FilerPreferences};
 use tairix_colour::Rgb;
 use tairix_controls::{
-    stack, Button, ButtonContent, ComboBox, ControlRole, ControlState, FieldAction, FieldControl,
-    FieldGroup, FieldGroupAction, FieldLayout, FieldRow, Keystroke, SecretField, Slider,
-    StatusPill, TextAction, ValidationState,
+    Button, ButtonContent, ColumnLayouts, ColumnPlace, ComboBox, ControlRole, ControlState,
+    FieldAction, FieldColumn, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow,
+    Keystroke, SecretField, Slider, StatusPill, TextAction, ValidationState,
 };
-use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
-use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
+use tairix_geometry::{Rect, Region, Scale};
+use tairix_input::InputEvent;
 use tairix_netconfig::{ConfigError, IfaceKey, NetworkConfig};
 use tairix_raster::Surface;
 use tairix_sysconfig::SystemConfig;
@@ -2332,34 +2332,6 @@ const fn secret_owner(owner: Owner) -> bool {
     }
 }
 
-/// Which end of the group the cursor lands on when it steps into it.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Landing {
-    /// Stepping downward: the first row.
-    First,
-    /// Stepping upward: the last.
-    Last,
-}
-
-/// Where a form is drawn, and what it is drawn with.
-///
-/// The four facts every entry point needs together: the column the groups
-/// stack down, the client an expanded choice list has to fit inside, and the
-/// density and theme every length and colour is resolved through. A scrolled
-/// owner states both rectangles in the column's own unscrolled layout, so the
-/// form never learns it is scrolled.
-#[derive(Copy, Clone, Debug)]
-pub struct FormPlace<'a> {
-    /// The pane column the groups stack down.
-    pub bounds: Rect,
-    /// The whole client, which an expanded choice list must fit inside.
-    pub viewport: Rect,
-    /// The desktop density every logical length is resolved through.
-    pub scale: Scale,
-    /// The theme every colour and metric comes from.
-    pub theme: &'a Theme,
-}
-
 /// What routing one event to a [`Form`] concluded.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FormOutcome {
@@ -2423,7 +2395,8 @@ pub enum FormOutcome {
 /// leaving a value on screen the next login would not restore.
 pub struct Form {
     composition: Composition,
-    groups: Vec<FieldGroup>,
+    /// The plates, and the keyboard cursor and the pointer across them.
+    column: FieldColumn,
     /// The settable each row writes, indexed as `groups`.
     owners: Vec<Vec<Owner>>,
     settings: DesktopSettings,
@@ -2503,11 +2476,6 @@ pub struct Form {
     /// before the reading that confirms it lands, for the round that made it
     /// to restate.
     restating: Option<Owner>,
-    /// Which group holds the keyboard cursor.
-    focus: usize,
-    /// Where the pointer last moved to in the form's layout, which is where a
-    /// press lands; `None` until it has moved.
-    pointer: Option<Point>,
     /// Whether the groups have been rebuilt since the owner last measured
     /// them, so a choice that reshaped the pane is laid out again.
     reshaped: bool,
@@ -2519,7 +2487,7 @@ impl Form {
     pub(crate) fn new(composition: Composition, documents: Documents<'_>) -> Self {
         let mut form = Self {
             composition,
-            groups: Vec::new(),
+            column: FieldColumn::default(),
             owners: Vec::new(),
             settings: documents.settings.clone(),
             files: documents.files.copied(),
@@ -2547,8 +2515,6 @@ impl Form {
             preview_refusal: documents.preview_refusal,
             retiled: None,
             restating: None,
-            focus: 0,
-            pointer: None,
             reshaped: false,
         };
         form.rebuild();
@@ -2625,7 +2591,7 @@ impl Form {
     pub(crate) fn adopt_cooling(
         &mut self,
         reading: &Cooling,
-        place: FormPlace<'_>,
+        place: ColumnPlace<'_>,
         damage: &mut Region,
     ) {
         if self.cooling == *reading {
@@ -2640,7 +2606,7 @@ impl Form {
         let before = self.layouts(place);
         let mut moved = Vec::new();
         let mut reshaped = false;
-        if let Some(group) = self.groups.get_mut(COOLING_STATUS_GROUP) {
+        if let Some(group) = self.column.groups_mut().get_mut(COOLING_STATUS_GROUP) {
             let fresh = crate::pi::status_rows(&self.cooling);
             for (index, (held, fresh)) in group.rows_mut().iter_mut().zip(&fresh).enumerate() {
                 match adopt_row(held, fresh) {
@@ -2741,7 +2707,7 @@ impl Form {
     /// text *is* the erasure; dropping the control on the following
     /// rebuild erases it again, which costs one pass and is never wrong.
     fn drop_secrets(&mut self) {
-        for group in &mut self.groups {
+        for group in self.column.groups_mut().iter_mut() {
             for row in group.rows_mut() {
                 if let FieldControl::Secret(entry) = row.control_mut() {
                     entry.clear();
@@ -2894,7 +2860,7 @@ impl Form {
     /// `<key> <value>` pairs is counted by the same rule as one whose are.
     #[must_use]
     pub fn changes(&self) -> usize {
-        (0..self.groups.len())
+        (0..self.column.len())
             .map(|group| self.changed_in(group))
             .sum()
     }
@@ -2929,7 +2895,8 @@ impl Form {
     /// keystroke.
     fn secret_at(&self, group: usize, row: usize) -> Option<&SecretField> {
         let FieldControl::Secret(entry) = self
-            .groups
+            .column
+            .groups()
             .get(group)?
             .rows()
             .get(row)
@@ -3032,7 +2999,8 @@ impl Form {
     /// dropped by the tool that writes it.
     #[must_use]
     pub(crate) fn refused(&self) -> usize {
-        self.groups
+        self.column
+            .groups()
             .iter()
             .flat_map(FieldGroup::rows)
             .filter(|row| row.state().validation == ValidationState::Invalid)
@@ -3079,8 +3047,7 @@ impl Form {
     /// reshapes the pane leaves it where the reader put it.
     fn rebuild(&mut self) {
         let carried = self.take_secrets();
-        let pictures = self.pictures.take(&mut self.groups);
-        let held = self.groups.get(self.focus).and_then(FieldGroup::focus);
+        let pictures = self.pictures.take(self.column.groups_mut());
         let built = self.composition.build(Documents {
             settings: &self.settings,
             files: self.files.as_ref(),
@@ -3105,16 +3072,12 @@ impl Form {
             lock_refusal: self.lock_refusal,
             preview_refusal: self.preview_refusal,
         });
-        self.groups = built.groups;
+        let mut groups = built.groups;
         self.owners = built.owners;
-        self.pictures
-            .adopt(built.pictured, &mut self.groups, pictures);
+        self.pictures.adopt(built.pictured, &mut groups, pictures);
+        self.column.replace(groups);
         self.restore_secrets(carried);
         self.restate_badges();
-        self.focus = self.focus.min(self.groups.len().saturating_sub(1));
-        if let (Some(item), Some(group)) = (held, self.groups.get_mut(self.focus)) {
-            group.adopt_focus(Some(item.min(group.len().saturating_sub(1))));
-        }
         self.reshaped = true;
     }
 
@@ -3143,7 +3106,8 @@ impl Form {
                     continue;
                 }
                 let Some(held) = self
-                    .groups
+                    .column
+                    .groups_mut()
                     .get_mut(group)
                     .and_then(|plate| plate.rows_mut().get_mut(row))
                 else {
@@ -3170,11 +3134,15 @@ impl Form {
                 continue;
             };
             if let Some(held) = self
-                .groups
+                .column
+                .groups_mut()
                 .get_mut(group)
                 .and_then(|plate| plate.rows_mut().get_mut(row))
             {
+                // The row keeps the cursor it was seated with.
+                let focus = held.state().focus;
                 *held.control_mut() = control;
+                held.set_focused(focus.focused || focus.in_focus_field);
             }
         }
     }
@@ -3194,7 +3162,7 @@ impl Form {
     /// Set rather than rebuilt: a row holding a caret must survive its own
     /// plate learning that it has changed.
     pub(crate) fn restate_badges(&mut self) {
-        for index in 0..self.groups.len() {
+        for index in 0..self.column.len() {
             let badge = match self.changed_in(index) {
                 0 => None,
                 1 => Some(StatusPill::new("1 change").with_tone(SignalRole::Warning)),
@@ -3203,7 +3171,7 @@ impl Form {
                         .with_tone(SignalRole::Warning),
                 ),
             };
-            if let Some(group) = self.groups.get_mut(index) {
+            if let Some(group) = self.column.groups_mut().get_mut(index) {
                 group.set_badge(badge);
             }
         }
@@ -3216,41 +3184,21 @@ impl Form {
     /// rather than a cut sentence.
     #[must_use]
     pub fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
-        let plate = stack::plate_width(width, scale, theme);
-        let column = FieldGroup::shared_column(&self.groups, plate, scale, theme);
-        stack::height(
-            self.groups
-                .iter()
-                .map(|group| group.measured_height(plate, column, scale, theme)),
-            scale,
-            theme,
-        )
+        self.column.measured_height(width, scale, theme)
     }
 
-    /// Draw the form's plates into `surface` stacked down `bounds`.
+    /// Draw the form's plates into `surface` stacked down `place`.
     ///
     /// An open choice list is not among them: it hangs over whatever the
     /// form shares the window with, so the owner paints it with
     /// [`render_popup`](Self::render_popup) once everything else is drawn.
-    pub fn render(&self, surface: &mut Surface, place: FormPlace<'_>) {
-        for (group, layout) in self.placed(place) {
-            group.render(surface, layout, place.scale, place.theme);
-        }
+    pub fn render(&self, surface: &mut Surface, place: ColumnPlace<'_>) {
+        self.column.render(surface, place);
     }
 
-    /// Draw the choice list a row has open, if one has, where the layout
-    /// placed it.
-    pub fn render_popup(&self, surface: &mut Surface, place: FormPlace<'_>) {
-        let Some(open) = self.listing() else {
-            return;
-        };
-        let layout = self
-            .layouts(place)
-            .into_iter()
-            .find_map(|(index, layout)| (index == open).then_some(layout));
-        if let (Some(group), Some(layout)) = (self.groups.get(open), layout) {
-            group.render_popup(surface, layout.popup, place.scale, place.theme);
-        }
+    /// Draw the choice list a row has open, if one has.
+    pub fn render_popup(&self, surface: &mut Surface, place: ColumnPlace<'_>) {
+        self.column.render_popup(surface, place);
     }
 
     /// Route one pointer event.
@@ -3261,40 +3209,14 @@ impl Form {
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
-        place: FormPlace<'_>,
+        place: ColumnPlace<'_>,
         damage: &mut Region,
     ) -> FormOutcome {
-        if let InputEvent::PointerMoved { to } = event {
-            self.pointer = Some(*to);
-        }
-        let layouts = self.layouts(place);
-        // An open list is modal across the whole form, so a press on it can
-        // never also reach a row of another plate drawn beneath it.
-        let listing = self.listing();
         let mut own = tairix_controls::damage::sink();
-        let primary = matches!(
-            event,
-            InputEvent::PointerPressed {
-                button: PointerButton::Primary
-            }
-        );
-        if let Some(at) = self.pointer.filter(|_| primary && listing.is_none()) {
-            self.take_cursor_at(at, &layouts, place, &mut own);
-        }
-        let mut acted = None;
-        for (index, layout) in layouts {
-            if listing.is_some_and(|open| open != index) {
-                continue;
-            }
-            let Some(group) = self.groups.get_mut(index) else {
-                continue;
-            };
-            if let Some(action) =
-                group.on_pointer(event, layout, place.scale, place.theme, &mut own)
-            {
-                acted = Some((index, action));
-            }
-        }
+        let acted = self
+            .column
+            .on_pointer(event, place, &mut own)
+            .map(|acted| (acted.group, acted.action));
         self.concluded(acted, &own, (place, damage))
     }
 
@@ -3302,40 +3224,20 @@ impl Form {
     pub fn on_key(
         &mut self,
         stroke: Keystroke,
-        place: FormPlace<'_>,
+        place: ColumnPlace<'_>,
         damage: &mut Region,
     ) -> FormOutcome {
-        let key = stroke.key;
-        let seated = self
-            .layouts(place)
-            .into_iter()
-            .find_map(|(index, layout)| (index == self.focus).then_some(layout));
         let mut own = tairix_controls::damage::sink();
-        let mut acted = None;
-        let mut kept = false;
-        if let (Some(layout), Some(group)) = (seated, self.groups.get_mut(self.focus)) {
-            let was = group.focus();
-            acted = group
-                .on_key(stroke, layout, place.scale, place.theme, &mut own)
-                .map(|action| (self.focus, action));
-            // An open choice list is modal: every key is the list's until
-            // it resolves, so the cursor must not step out from under it.
-            let listing = group.rows().iter().any(FieldRow::popup_open);
-            kept = acted.is_some() || listing || group.focus() != was;
-        }
-        if !kept {
-            // The group clamps at its own ends and says so by not moving:
-            // carrying the cursor *between* groups is the owner's job, and
-            // without it every row below the first plate would be
-            // unreachable from the keyboard.
-            self.step_group(key, place, &mut own);
-        }
+        let acted = self
+            .column
+            .on_key(stroke, place, &mut own)
+            .map(|acted| (acted.group, acted.action));
         self.concluded(acted, &own, (place, damage))
     }
 
     /// When a masked entry's marker next moves, the soonest across the form.
     pub(crate) fn secret_deadline_ns(&self) -> Option<u64> {
-        self.groups.iter().filter_map(FieldGroup::deadline_ns).min()
+        self.column.deadline_ns()
     }
 
     /// Step every masked entry's marker to `now_ns`, reporting the entries it
@@ -3343,125 +3245,23 @@ impl Form {
     pub(crate) fn advance_secrets(
         &mut self,
         now_ns: u64,
-        place: FormPlace<'_>,
+        place: ColumnPlace<'_>,
         damage: &mut Region,
     ) {
-        if self.secret_deadline_ns().is_none_or(|due| due > now_ns) {
-            return;
-        }
-        for (index, layout) in self.layouts(place) {
-            if let Some(group) = self.groups.get_mut(index) {
-                group.advance(now_ns, layout, (place.scale, place.theme), damage);
-            }
-        }
-    }
-
-    /// Move the cursor to the neighbouring group when the focused one has
-    /// nothing further in the direction asked for.
-    fn step_group(&mut self, key: Key, place: FormPlace<'_>, damage: &mut Region) {
-        let (next, landing) = match key {
-            Key::Named(NamedKey::Down) if self.focus + 1 < self.groups.len() => {
-                (self.focus + 1, Landing::First)
-            }
-            Key::Named(NamedKey::Up) if self.focus > 0 => (self.focus - 1, Landing::Last),
-            _ => return,
-        };
-        // Placed without a layout, because the group being stepped into may
-        // not be one the column currently seats — the owner scrolls it in
-        // afterwards, and a cursor that refused to leave a seated group
-        // could never reach the ones past the fold.
-        if let Some(group) = self.groups.get_mut(self.focus) {
-            group.adopt_focus(None);
-        }
-        self.focus = next;
-        let Some(group) = self.groups.get_mut(next) else {
-            return;
-        };
-        let row = match landing {
-            Landing::First => 0,
-            Landing::Last => group.len().saturating_sub(1),
-        };
-        group.adopt_focus(Some(row));
-        damage.add(place.bounds);
-    }
-
-    /// Carry the keyboard cursor to the group holding an item under the
-    /// layout `point`, the groups laid out as `layouts`, clearing every other
-    /// group's ring; the group the press reaches gives it to the item itself.
-    /// A point over no item leaves it where it is.
-    fn take_cursor_at(
-        &mut self,
-        point: Point,
-        layouts: &[(usize, FieldLayout)],
-        place: FormPlace<'_>,
-        damage: &mut Region,
-    ) {
-        let Some(taken) = layouts.iter().find_map(|&(index, layout)| {
-            let group = self.groups.get(index)?;
-            group
-                .row_at(layout, place.scale, place.theme, point)
-                .map(|_| index)
-        }) else {
-            return;
-        };
-        for &(index, layout) in layouts {
-            if index == taken {
-                continue;
-            }
-            if let Some(group) = self.groups.get_mut(index) {
-                group.set_focus(None, layout, place.scale, place.theme, damage);
-            }
-        }
-        self.focus = taken;
+        self.column.advance(now_ns, place, damage);
     }
 
     /// Which group and row the keyboard cursor is on.
     #[must_use]
     pub fn cursor(&self) -> Option<(usize, usize)> {
-        let row = self.groups.get(self.focus)?.focus()?;
-        Some((self.focus, row))
+        self.column.cursor()
     }
 
     /// The part of `place` to scroll into view for the keyboard cursor, in a
-    /// column that shows `seen` pixels of it: the cursor's whole group with
-    /// the gap that frames it where that fits, else its row together with the
-    /// caption above a first row or the footnote below a last one, else the
-    /// row alone.
-    ///
-    /// A row the cursor reached but the column does not show is a control
-    /// the reader cannot use, which is a correctness property rather than a
-    /// convenience; the rest is what keeps the row's group readable around
-    /// it.
+    /// column that shows `seen` pixels of it.
     #[must_use]
-    pub fn cursor_reveal(&self, place: FormPlace<'_>, seen: u32) -> Option<Rect> {
-        let (index, layout) = self
-            .layouts(place)
-            .into_iter()
-            .find(|(index, _)| *index == self.focus)?;
-        let group = self.groups.get(index)?;
-        let bounds = layout.bounds;
-        let gap = to_i32(stack::gap(place.scale, place.theme));
-        let top = bounds.top().saturating_sub(gap).max(place.bounds.top());
-        let bottom = bounds
-            .bottom()
-            .saturating_add(gap)
-            .min(place.bounds.bottom());
-        // A chooser's cursor is one picture of it, which is what has to show.
-        let row = group
-            .focus()
-            .and_then(|row| Some((row, group.focus_rect(layout, place.scale, place.theme)?)));
-        let fits = |from: i32, to: i32| to.saturating_sub(from) <= to_i32(seen);
-        let (from, to) = match row {
-            _ if fits(top, bottom) => (top, bottom),
-            None => (top, bottom),
-            Some((0, rect)) if fits(top, rect.bottom()) => (top, rect.bottom()),
-            Some((at, rect)) if at + 1 == group.len() && fits(rect.top(), bottom) => {
-                (rect.top(), bottom)
-            }
-            Some((_, rect)) => (rect.top(), rect.bottom()),
-        };
-        let height = u32::try_from(to.saturating_sub(from)).unwrap_or(0);
-        Some(Rect::new(bounds.left(), from, bounds.width, height))
+    pub fn cursor_reveal(&self, place: ColumnPlace<'_>, seen: u32) -> Option<Rect> {
+        self.column.cursor_reveal(place, seen)
     }
 
     /// Adopt what a group reported, folding the pixels it repainted into
@@ -3482,7 +3282,7 @@ impl Form {
         &mut self,
         acted: Option<(usize, FieldGroupAction)>,
         own: &Region,
-        (place, damage): (FormPlace<'_>, &mut Region),
+        (place, damage): (ColumnPlace<'_>, &mut Region),
     ) -> FormOutcome {
         let redrew = !own.is_empty();
         for rect in own.rects() {
@@ -3511,7 +3311,7 @@ impl Form {
     /// A row that cannot be brought in line in place has the pane built
     /// again, and one that now measures differently has it laid out again,
     /// so nothing is drawn against a stale layout.
-    fn restate(&mut self, changed: Owner, place: FormPlace<'_>, damage: &mut Region) {
+    fn restate(&mut self, changed: Owner, place: ColumnPlace<'_>, damage: &mut Region) {
         let before = self.layouts(place);
         let Some(moved) = self.restate_rows(changed) else {
             self.rebuild();
@@ -3527,7 +3327,7 @@ impl Form {
         &mut self,
         before: &[(usize, FieldLayout)],
         moved: &[(usize, usize)],
-        place: FormPlace<'_>,
+        place: ColumnPlace<'_>,
         damage: &mut Region,
     ) {
         if moved.is_empty() {
@@ -3547,7 +3347,8 @@ impl Form {
                 .iter()
                 .find_map(|(at, layout)| (*at == group).then_some(*layout))
                 .and_then(|layout| {
-                    self.groups
+                    self.column
+                        .groups()
                         .get(group)?
                         .row_rect(row, layout, place.scale, place.theme)
                 });
@@ -3562,7 +3363,7 @@ impl Form {
     /// or `None` where one cannot be.
     fn restate_rows(&mut self, changed: Owner) -> Option<Vec<(usize, usize)>> {
         let Self {
-            groups,
+            column,
             owners,
             sound,
             effects,
@@ -3577,7 +3378,12 @@ impl Form {
             ..
         } = self;
         let mut moved = Vec::new();
-        for (at, (group, rows)) in groups.iter_mut().zip(owners.iter()).enumerate() {
+        for (at, (group, rows)) in column
+            .groups_mut()
+            .iter_mut()
+            .zip(owners.iter())
+            .enumerate()
+        {
             for (index, (held, owner)) in group.rows_mut().iter_mut().zip(rows).enumerate() {
                 if let (Owner::Desktop(setting @ (Setting::Region | Setting::TimeZone)), true) =
                     (changed, *owner == changed)
@@ -3649,7 +3455,8 @@ impl Form {
             // only move it on screen.
             FieldAction::Settled { permille } => {
                 let stop = self
-                    .groups
+                    .column
+                    .groups()
                     .get(group)
                     .and_then(|held| held.rows().get(action.row))
                     .and_then(|row| match row.control() {
@@ -3801,7 +3608,7 @@ impl Form {
                 }
                 if setting == Setting::Backdrop {
                     self.retiled = self.pictures.restate_swatch(
-                        &mut self.groups,
+                        self.column.groups_mut(),
                         pictures::backdrop_swatch(self.settings.backdrop),
                     );
                 }
@@ -3910,7 +3717,8 @@ impl Form {
     /// there is something to correct instead of quietly applying the rest.
     fn typed(&mut self, owner: Owner, group: usize, row: usize) -> FormOutcome {
         let Some(control) = self
-            .groups
+            .column
+            .groups()
             .get(group)
             .and_then(|held| held.rows().get(row))
             .map(FieldRow::control)
@@ -3939,7 +3747,8 @@ impl Form {
             _ => return FormOutcome::Changed,
         };
         if let Some(held) = self
-            .groups
+            .column
+            .groups_mut()
             .get_mut(group)
             .and_then(|plate| plate.rows_mut().get_mut(row))
         {
@@ -4012,7 +3821,7 @@ impl Form {
     /// short, the pictures off screen are let go.
     pub(crate) fn picture_round(
         &mut self,
-        place: FormPlace<'_>,
+        place: ColumnPlace<'_>,
         (seen, roomy): (Rect, bool),
         asked: &mut dyn FnMut(PreviewSubject) -> bool,
     ) -> Option<PictureWanted> {
@@ -4021,7 +3830,7 @@ impl Form {
         }
         let layouts = self.layouts(place);
         self.pictures.round(
-            &mut self.groups,
+            self.column.groups_mut(),
             &layouts,
             (seen, roomy),
             (place.scale, place.theme),
@@ -4035,19 +3844,21 @@ impl Form {
         &mut self,
         wanted: PictureWanted,
         pixels: &[u8],
-        place: FormPlace<'_>,
+        place: ColumnPlace<'_>,
     ) -> Option<Rect> {
-        let (group, index) = self.pictures.land(&mut self.groups, wanted, pixels)?;
+        let (group, index) = self
+            .pictures
+            .land(self.column.groups_mut(), wanted, pixels)?;
         self.picture_tile(group, index, place)
     }
 
     /// Where group `group`'s chooser draws picture `index` in `place`.
-    fn picture_tile(&self, group: usize, index: usize, place: FormPlace<'_>) -> Option<Rect> {
+    fn picture_tile(&self, group: usize, index: usize, place: ColumnPlace<'_>) -> Option<Rect> {
         let layout = self
             .layouts(place)
             .into_iter()
             .find_map(|(at, layout)| (at == group).then_some(layout))?;
-        let field_group = self.groups.get(group)?;
+        let field_group = self.column.groups().get(group)?;
         let bounds =
             field_group.row_rect(field_group.rows().len(), layout, place.scale, place.theme)?;
         field_group
@@ -4086,7 +3897,7 @@ impl Form {
         &self,
         chooser: Chooser,
         index: usize,
-        place: FormPlace<'_>,
+        place: ColumnPlace<'_>,
     ) -> Option<Rect> {
         let group = self
             .owners
@@ -4095,59 +3906,33 @@ impl Form {
         self.picture_tile(group, index, place)
     }
 
-    /// Where each group is drawn at its natural size, with the shared slot
-    /// column and any expanded list placed against the row it belongs to.
-    ///
-    /// One column across every group, so a control does not step left and
-    /// right down the pane as each plate resolves its own widest choice; the
-    /// stacking itself is the shared one every plate column uses.
-    fn layouts(&self, place: FormPlace<'_>) -> Vec<(usize, FieldLayout)> {
-        let FormPlace {
-            bounds,
-            viewport,
-            scale,
-            theme,
-        } = place;
-        let across = stack::plate_width(bounds.width, scale, theme);
-        let column = FieldGroup::shared_column(&self.groups, across, scale, theme);
-        stack::place(bounds, self.groups.len(), scale, theme, |index| {
-            self.groups.get(index).map_or(0, |group| {
-                group.measured_height(across, column, scale, theme)
-            })
-        })
-        .into_iter()
-        .filter_map(|(index, rect)| {
-            let layout = FieldLayout::new(rect, column).within(viewport);
-            Some((
-                index,
-                self.groups.get(index)?.place_popup(layout, scale, theme),
-            ))
-        })
-        .collect()
+    /// Where each group is drawn in `place`: the one plate column's layout.
+    fn layouts(&self, place: ColumnPlace<'_>) -> ColumnLayouts {
+        self.column.layouts(place)
     }
 
     /// How many groups this form has.
     #[must_use]
     pub fn groups_len(&self) -> usize {
-        self.groups.len()
+        self.column.len()
     }
 
     /// Where `setting`'s control is drawn in `place`, or `None` when no row
     /// here writes it or the column does not seat that row.
     #[must_use]
-    pub fn control_rect(&self, setting: Setting, place: FormPlace<'_>) -> Option<Rect> {
+    pub fn control_rect(&self, setting: Setting, place: ColumnPlace<'_>) -> Option<Rect> {
         self.owner_control_rect(Owner::Desktop(setting), place)
     }
 
     /// Where the row offering `action` draws its button in `place`, or `None`
     /// when the form offers no such command.
     #[must_use]
-    pub(crate) fn action_rect(&self, action: Action, place: FormPlace<'_>) -> Option<Rect> {
+    pub(crate) fn action_rect(&self, action: Action, place: ColumnPlace<'_>) -> Option<Rect> {
         self.owner_control_rect(Owner::Action(action), place)
     }
 
     /// Where the row `owner` stands for draws its control in `place`.
-    fn owner_control_rect(&self, owner: Owner, place: FormPlace<'_>) -> Option<Rect> {
+    fn owner_control_rect(&self, owner: Owner, place: ColumnPlace<'_>) -> Option<Rect> {
         let (group, row) = self.owners.iter().enumerate().find_map(|(group, rows)| {
             rows.iter()
                 .position(|held| *held == owner)
@@ -4157,7 +3942,7 @@ impl Form {
             .layouts(place)
             .into_iter()
             .find_map(|(index, layout)| (index == group).then_some(layout))?;
-        let field_group = self.groups.get(group)?;
+        let field_group = self.column.groups().get(group)?;
         let bounds = field_group.row_rect(row, layout, place.scale, place.theme)?;
         field_group.rows().get(row)?.control_rect(
             FieldLayout { bounds, ..layout },
@@ -4169,10 +3954,11 @@ impl Form {
     /// Where the open choice list draws choice `index` in `place`, or `None`
     /// while no list is open.
     #[must_use]
-    pub fn choice_rect(&self, index: usize, place: FormPlace<'_>) -> Option<Rect> {
+    pub fn choice_rect(&self, index: usize, place: ColumnPlace<'_>) -> Option<Rect> {
         self.layouts(place).into_iter().find_map(|(group, layout)| {
             let row = self
-                .groups
+                .column
+                .groups()
                 .get(group)?
                 .rows()
                 .iter()
@@ -4186,26 +3972,10 @@ impl Form {
         })
     }
 
-    /// The groups paired with where they are drawn.
-    fn placed(&self, place: FormPlace<'_>) -> Vec<(&FieldGroup, FieldLayout)> {
-        self.layouts(place)
-            .into_iter()
-            .filter_map(|(index, layout)| Some((self.groups.get(index)?, layout)))
-            .collect()
-    }
-
     /// Put the keyboard cursor on the form — where a press already placed it,
     /// else on the first row — or take it off.
     pub fn set_focused(&mut self, focused: bool) {
-        if focused && self.cursor().is_some() {
-            return;
-        }
-        if focused {
-            self.focus = 0;
-        }
-        for (index, group) in self.groups.iter_mut().enumerate() {
-            group.adopt_focus((focused && index == self.focus).then_some(0));
-        }
+        self.column.set_focused(focused);
     }
 
     /// How this form's changes become durable.
@@ -4223,20 +3993,20 @@ impl Form {
     /// The groups, for a test that asks what a pane composed.
     #[cfg(test)]
     pub(crate) fn groups(&self) -> &[FieldGroup] {
-        &self.groups
+        self.column.groups()
     }
 
     /// The groups, for a test that moves a control as the reader would.
     #[cfg(test)]
     pub(crate) fn groups_mut_for_test(&mut self) -> &mut [FieldGroup] {
-        &mut self.groups
+        self.column.groups_mut()
     }
 
     /// Where each group is laid out in `place`, for a test that holds the
     /// paint to the heights the groups were measured for.
     #[cfg(test)]
-    pub(crate) fn layouts_for_test(&self, place: FormPlace<'_>) -> Vec<(usize, FieldLayout)> {
-        self.layouts(place)
+    pub(crate) fn layouts_for_test(&self, place: ColumnPlace<'_>) -> Vec<(usize, FieldLayout)> {
+        self.layouts(place).to_vec()
     }
 
     /// Where group `group`'s row `row` is laid out in `place`.
@@ -4245,13 +4015,14 @@ impl Form {
         &self,
         group: usize,
         row: usize,
-        place: FormPlace<'_>,
+        place: ColumnPlace<'_>,
     ) -> Option<Rect> {
         let layout = self
             .layouts(place)
             .into_iter()
             .find_map(|(index, layout)| (index == group).then_some(layout))?;
-        self.groups
+        self.column
+            .groups()
             .get(group)?
             .row_rect(row, layout, place.scale, place.theme)
     }
@@ -4262,18 +4033,19 @@ impl Form {
         &self,
         group: usize,
         row: usize,
-        place: FormPlace<'_>,
+        place: ColumnPlace<'_>,
     ) -> Option<Rect> {
         let layout = self
             .layouts(place)
             .into_iter()
             .find_map(|(index, layout)| (index == group).then_some(layout))?;
         let bounds = self.row_rect_for_test(group, row, place)?;
-        self.groups.get(group)?.rows().get(row)?.control_rect(
-            FieldLayout { bounds, ..layout },
-            place.scale,
-            place.theme,
-        )
+        self.column
+            .groups()
+            .get(group)?
+            .rows()
+            .get(row)?
+            .control_rect(FieldLayout { bounds, ..layout }, place.scale, place.theme)
     }
 
     /// Put `text` in group `group`'s row `row` and route the edit it
@@ -4281,7 +4053,8 @@ impl Form {
     #[cfg(test)]
     pub(crate) fn type_for_test(&mut self, group: usize, row: usize, text: &str) -> FormOutcome {
         match self
-            .groups
+            .column
+            .groups_mut()
             .get_mut(group)
             .and_then(|plate| plate.rows_mut().get_mut(row))
             .map(FieldRow::control_mut)
@@ -4295,7 +4068,7 @@ impl Form {
                 entry.set_focused(true);
                 for ch in text.chars() {
                     let _ = entry.on_key(
-                        tairix_controls::testkit::keystroke(Key::Char(ch)),
+                        tairix_controls::testkit::keystroke(tairix_input::Key::Char(ch)),
                         Rect::new(0, 0, 1, 1),
                         &theme,
                         &mut tairix_controls::damage::sink(),
@@ -4389,7 +4162,7 @@ impl Form {
         &mut self,
         (group, row): (usize, usize),
         action: tairix_controls::FieldAction,
-        place: FormPlace<'_>,
+        place: ColumnPlace<'_>,
     ) -> (FormOutcome, Region) {
         let mut damage = tairix_controls::damage::sink();
         let outcome = self.concluded(
@@ -4406,27 +4179,14 @@ impl Form {
     /// pointer even where it hangs outside the pane's own column.
     #[must_use]
     pub fn is_listing(&self) -> bool {
-        self.listing().is_some()
+        self.column.is_listing()
     }
 
     /// Whether a row is in the middle of a gesture — a choice list open, or a
     /// slider being dragged — which rebuilding the rows would drop.
     #[must_use]
     pub(crate) fn mid_gesture(&self) -> bool {
-        self.groups.iter().flat_map(FieldGroup::rows).any(|row| {
-            row.popup_open()
-                || matches!(row.control(), FieldControl::Slider(slider) if slider.is_dragging())
-        })
-    }
-
-    /// The group holding the open choice list, if one is open.
-    fn listing(&self) -> Option<usize> {
-        self.groups.iter().position(|group| {
-            group
-                .rows()
-                .iter()
-                .any(tairix_controls::FieldRow::popup_open)
-        })
+        self.column.mid_gesture()
     }
 }
 

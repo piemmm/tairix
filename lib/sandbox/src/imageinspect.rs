@@ -22,8 +22,9 @@ use crate::report::{read_lines, write_lines, LinesFault};
 use crate::wire::{Reader, Writer};
 use crate::worker::Service;
 
-/// The memory a report worker is held to: the one document it reads.
-pub const WORKER_MEMORY: WorkerMemory = WorkerMemory::HeldDocument;
+/// The memory a report worker is held to: a document worker's share, so it
+/// reads any document the machine's other readers do.
+pub const WORKER_MEMORY: WorkerMemory = WorkerMemory::Documents;
 
 /// The worker a structure report is read in, for a caller that wants
 /// nothing else of a picture: a document handed over the one upload path,
@@ -206,10 +207,10 @@ pub fn inspect_document<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     format: Option<ViewFormat>,
 ) -> Result<Vec<ReportLine>, InspectFailure> {
-    let mut w = Writer::new();
+    let mut w = Writer::refusable();
     w.u8(OP_INSPECT);
     w.u8(format.map_or(0, ViewFormat::to_wire));
-    let request = w.finish();
+    let request = w.finish().ok_or(InspectFailure::NoMemory)?;
     sandbox.ask(|sandbox| {
         let reply = sandbox.request(&request).map_err(InspectFailure::Sandbox)?;
         read_report(&reply)

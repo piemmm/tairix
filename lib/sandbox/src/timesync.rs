@@ -55,6 +55,8 @@ pub enum TimeSyncFailure {
     /// an implausible instant, an over-long round trip, or an unusable
     /// stratum. The worker is compromised or broken; nothing is applied.
     ReplyRefused,
+    /// There was no memory here for the request.
+    NoMemory,
 }
 
 impl Unbelieved for TimeSyncFailure {
@@ -136,13 +138,13 @@ pub fn evaluate_datagram<L: Launcher, S: tairix_log::Sink>(
         return Ok(Reply::Unsolicited);
     }
 
-    let mut w = Writer::new();
+    let mut w = Writer::refusable();
     w.u8(OP_EVALUATE);
     w.u64(txn.nonce.raw());
     w.bytes(&txn.sent_at.to_le_bytes());
     w.bytes(&received_at.to_le_bytes());
     w.bytes(header);
-    let request = w.finish();
+    let request = w.finish().ok_or(TimeSyncFailure::NoMemory)?;
     sandbox.ask(|sandbox| {
         let reply = sandbox
             .request(&request)

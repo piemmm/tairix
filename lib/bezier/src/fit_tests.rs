@@ -124,3 +124,27 @@ fn noisy_strokes_fit_within_tolerance_with_few_cubics() {
         assert!(tairix_util::mathf::sqrt(worst_distance(&points, &curves)) <= 1.5 + 1e-6);
     }
 }
+
+#[test]
+fn a_fit_makes_a_sub_path_from_the_first_point_one_cubic_a_piece() {
+    let points: Vec<Point> = (0..=40)
+        .map(|step| {
+            let t = f64::from(step) / 40.0 * TAU / 4.0;
+            Point::new(
+                50.0 * tairix_util::mathf::cos(t),
+                50.0 * tairix_util::mathf::sin(t),
+            )
+        })
+        .collect();
+    let pieces = fitted(&points, 0.1, 60.0);
+    let subpath = super::fitted(&points, 0.1, 60.0)
+        .expect("fits")
+        .expect("a sub-path");
+    assert_eq!(subpath.start, points[0]);
+    assert_eq!(subpath.elements.len(), pieces.len());
+    assert_eq!(subpath.end(), points[40]);
+    assert!(super::fitted(&points[..1], 0.1, 60.0)
+        .expect("fits")
+        .is_none());
+    assert!(super::fitted(&[], 0.1, 60.0).expect("fits").is_none());
+}

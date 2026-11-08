@@ -11,8 +11,8 @@
 //!
 //! Scalars are little-endian, like every TAIRiX wire format.
 
-use alloc::string::String;
 use alloc::vec::Vec;
+use core::marker::PhantomData;
 
 /// Typed decode failure: the input ended early, or a variable-length field
 /// exceeded its fixed cap. The two cases are deliberately distinguished so
@@ -38,24 +38,65 @@ pub fn bytes_prefix(len: usize) -> [u8; BYTES_PREFIX] {
     u32::try_from(len).unwrap_or(u32::MAX).to_le_bytes()
 }
 
-/// Append-only payload encoder over a growable byte vector.
+/// How a payload encoder takes the room its payload grows into.
+pub trait Room: sealed::Sealed {
+    /// Room in `out` for `more` bytes past its length, answering whether it
+    /// was had.
+    fn make(out: &mut Vec<u8>, more: usize) -> bool;
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::Grows {}
+    impl Sealed for super::Refusable {}
+}
+
+/// Room taken as the payload needs it: a worker's reply, the worker running
+/// out of memory as a process its parent contains.
 #[derive(Debug, Default)]
-pub struct Writer {
+pub struct Grows;
+
+impl Room for Grows {
+    fn make(out: &mut Vec<u8>, more: usize) -> bool {
+        out.reserve(more);
+        true
+    }
+}
+
+/// Room asked of the heap, a payload refused whole once any of it is not
+/// had: a parent's request, the parent answering a refused heap rather than
+/// ending.
+#[derive(Debug, Default)]
+pub struct Refusable;
+
+impl Room for Refusable {
+    fn make(out: &mut Vec<u8>, more: usize) -> bool {
+        out.try_reserve(more).is_ok()
+    }
+}
+
+/// Append-only payload encoder over a growable byte vector: a worker's reply
+/// ([`Writer::new`]) or what a parent encodes ([`Writer::refusable`]).
+#[derive(Debug, Default)]
+pub struct Writer<R: Room = Grows> {
     out: Vec<u8>,
+    refused: bool,
+    room: PhantomData<R>,
 }
 
 impl Writer {
-    /// Start an empty payload.
+    /// Start an empty reply.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Start an empty payload that will hold `bytes` without growing.
+    /// Start an empty reply that will hold `bytes` without growing.
     #[must_use]
     pub fn with_capacity(bytes: usize) -> Self {
         Self {
             out: Vec::with_capacity(bytes),
+            ..Self::default()
         }
     }
 
@@ -65,7 +106,10 @@ impl Writer {
     pub fn try_with_capacity(bytes: usize) -> Option<Self> {
         let mut out = Vec::new();
         out.try_reserve_exact(bytes).ok()?;
-        Some(Self { out })
+        Some(Self {
+            out,
+            ..Self::default()
+        })
     }
 
     /// Start an empty payload in `buffer`, keeping its capacity, so a
@@ -73,7 +117,10 @@ impl Writer {
     #[must_use]
     pub fn reusing(mut buffer: Vec<u8>) -> Self {
         buffer.clear();
-        Self { out: buffer }
+        Self {
+            out: buffer,
+            ..Self::default()
+        }
     }
 
     /// Finish, yielding the encoded payload.
@@ -81,21 +128,65 @@ impl Writer {
     pub fn finish(self) -> Vec<u8> {
         self.out
     }
+}
 
+impl Writer<Refusable> {
+    /// Start an empty payload whose every byte is asked of the heap.
+    #[must_use]
+    pub const fn refusable() -> Self {
+        Self {
+            out: Vec::new(),
+            refused: false,
+            room: PhantomData,
+        }
+    }
+
+    /// [`refusable`](Self::refusable), in `buffer`, keeping its room, so a
+    /// client that asks again and again allocates once.
+    #[must_use]
+    pub fn refusable_in(mut buffer: Vec<u8>) -> Self {
+        buffer.clear();
+        Self {
+            out: buffer,
+            refused: false,
+            room: PhantomData,
+        }
+    }
+
+    /// The payload, or `None` where the heap refused room for any of it.
+    #[must_use]
+    pub fn finish(self) -> Option<Vec<u8>> {
+        (!self.refused).then_some(self.out)
+    }
+}
+
+impl<R: Room> Extend<u8> for Writer<R> {
+    fn extend<I: IntoIterator<Item = u8>>(&mut self, bytes: I) {
+        for byte in bytes {
+            self.u8(byte);
+        }
+    }
+}
+
+impl<R: Room> Writer<R> {
     /// Append `bytes` as they are: a fixed-width field, or a payload whose
     /// length the frame's own states.
     pub fn raw(&mut self, bytes: &[u8]) {
-        self.out.extend_from_slice(bytes);
+        if !self.refused && R::make(&mut self.out, bytes.len()) {
+            self.out.extend_from_slice(bytes);
+        } else {
+            self.refused = true;
+        }
     }
 
     /// Append one byte.
     pub fn u8(&mut self, value: u8) {
-        self.out.push(value);
+        self.raw(&[value]);
     }
 
     /// Append a little-endian `u32`.
     pub fn u32(&mut self, value: u32) {
-        self.out.extend_from_slice(&value.to_le_bytes());
+        self.raw(&value.to_le_bytes());
     }
 
     /// Append a little-endian `i32`, two's complement.
@@ -105,14 +196,14 @@ impl Writer {
 
     /// Append a little-endian `u64`.
     pub fn u64(&mut self, value: u64) {
-        self.out.extend_from_slice(&value.to_le_bytes());
+        self.raw(&value.to_le_bytes());
     }
 
     /// Append a length-prefixed byte string ([`bytes_prefix`], then the
     /// bytes).
     pub fn bytes(&mut self, value: &[u8]) {
-        self.out.extend_from_slice(&bytes_prefix(value.len()));
-        self.out.extend_from_slice(value);
+        self.raw(&bytes_prefix(value.len()));
+        self.raw(value);
     }
 
     /// Append a length-prefixed UTF-8 string.
@@ -242,24 +333,22 @@ impl<'a> Reader<'a> {
         self.take(len)
     }
 
-    /// Consume a length-prefixed UTF-8 string of at most `cap` bytes.
+    /// Consume a length-prefixed UTF-8 string of at most `cap` bytes, as it
+    /// lies in the payload.
     ///
     /// # Errors
     ///
     /// As [`Reader::bytes`], plus [`WireError::Malformed`] for invalid
     /// UTF-8.
-    pub fn string(&mut self, cap: usize) -> Result<String, WireError> {
+    pub fn str(&mut self, cap: usize) -> Result<&'a str, WireError> {
         let bytes = self.bytes(cap)?;
-        core::str::from_utf8(bytes)
-            .map(String::from)
-            .map_err(|_| WireError::Malformed)
+        core::str::from_utf8(bytes).map_err(|_| WireError::Malformed)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Reader, WireError, Writer};
-    use alloc::string::String;
     use alloc::vec;
 
     #[test]
@@ -278,8 +367,32 @@ mod tests {
         assert_eq!(r.u32(), Ok(0xDEAD_BEEF));
         assert_eq!(r.u64(), Ok(0x0123_4567_89AB_CDEF));
         assert_eq!(r.bytes(16), Ok(&b"raw"[..]));
-        assert_eq!(r.string(16), Ok(String::from("text")));
+        assert_eq!(r.str(16), Ok("text"));
         assert!(r.is_exhausted());
+    }
+
+    #[test]
+    fn a_refusable_payload_is_built_whole_or_answered_as_refused() {
+        let build = || {
+            let mut w = Writer::refusable();
+            w.u8(7);
+            w.str("a name");
+            w.u64(9);
+            w.finish()
+        };
+        let whole = build().expect("room to spare");
+        let mut r = Reader::new(&whole);
+        assert_eq!((r.u8(), r.str(16), r.u64()), (Ok(7), Ok("a name"), Ok(9)));
+        for granted in 0..2 {
+            let refused = tairix_fuzzseed::meter::refusing_after(granted, build);
+            assert_eq!(
+                refused, None,
+                "never a request cut short, refused at {granted}"
+            );
+        }
+        let mut reused = Writer::refusable_in(vec![1; 8]);
+        reused.u8(2);
+        assert_eq!(reused.finish(), Some(vec![2]), "kept room, nothing it held");
     }
 
     #[test]
@@ -299,7 +412,7 @@ mod tests {
         // Every proper prefix fails closed; only the full payload decodes.
         for cut in 0..payload.len() {
             let mut r = Reader::new(&payload[..cut]);
-            let outcome = r.u32().and_then(|_| r.string(16).map(|_| ()));
+            let outcome = r.u32().and_then(|_| r.str(16).map(|_| ()));
             assert!(outcome.is_err(), "prefix {cut} must be refused");
         }
     }
@@ -328,7 +441,7 @@ mod tests {
         w.bytes(&[0xFF, 0xFE]);
         let payload = w.finish();
         let mut r = Reader::new(&payload);
-        assert_eq!(r.string(16), Err(WireError::Malformed));
+        assert_eq!(r.str(16), Err(WireError::Malformed));
     }
 
     #[test]

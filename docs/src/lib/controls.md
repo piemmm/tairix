@@ -51,7 +51,7 @@ under the floor and are unchanged.
 | `block` | the titled block a monitoring surface lays its readings out in: `plate`, `title`, `bare_title`, `titled_content`, `content_rect` |
 | `record` | `FactList`, `Timeline` |
 | `text` | `TextField`, `TextArea`, `SearchField`, and `owner_chord`: the chords a field leaves its owner, every one but Ctrl+A, of which `ClipboardChord` names cut, copy and paste. A field's text, selection and caret stand inside its rim and focus ring, the selection and caret a line tall |
-| `number` | `NumberField`: an integer between two bounds — or a whole number of hundredths and the like, spelled with a point (`with_decimals`), padded with zeros to a number of whole digits (`with_digits`) — live as digits spell a number in range and invalid while they do not, stepped by Up/Down, Page Up/Down and a focused field's wheel, carried round its bounds where it wraps (`with_wrap`), settled by a step, Enter or the owner's commit as the focus leaves |
+| `number` | `NumberField`: an integer between two bounds — or a whole number of hundredths and the like, spelled with a point (`with_decimals`), padded with zeros to a number of whole digits (`with_digits`) — live as digits spell a number in range and invalid while they do not, stepped by Up/Down, Page Up/Down and a focused field's wheel, carried round its bounds where it wraps (`with_wrap`), settled by a step, Enter or the owner's commit as the focus leaves; a `NumberAction` answers its `value` and whether it `is_settled` |
 | `place` | `PlaceChooser`, `PlaceRow`, `PlaceAction`, `PressTiming`: a search field over the owner's places, matched without case or a Latin-1 name's accents on the name, the place beneath it and an unseen key, names that begin with the query leading; the arrows and Page keys walk the highlight while the keyboard stays in the query, Enter or a double-click (the desktop's interval, `DoubleClickTracker`) chooses, Escape clears then cancels, and each row's reading — a zone's local time — is the owner's to keep current. `PlaceDialog` is the chooser above Cancel and Choose as a dialog window's client, opening at the extent it states (`opening_extent`); `set_readings` rewrites many readings laid out once |
 | `zone` | the time-zone dialog, one definition for Settings' Time zone row and the Date & Time dialog: its `TITLE`, `rows` over a `lib/tz` place listing (keyed by zone name), `dialog`, and `refresh`, which rewrites every reading once the `Minute` they were written for has turned |
 | `colour_picker` | `ColourPicker`: one colour picked on a square (saturation and value plane and hue strip), a wheel (hue ring round a saturation and value triangle) or sliders (a swept track per channel), an opacity strip where it has one, a swatch beside the earlier colour a press takes back, a hex field and number fields for one model's channels and A, its values held as typed, laid beside the view in wide bounds and beneath it in narrow ones |
@@ -61,6 +61,8 @@ under the floor and are unchanged.
 | `nav`, `rail` | `Breadcrumb`, `ActionRail` |
 | `collection` | `ListRow`, `TableRow`, `TableCell`, `TableHeader`, `Card`, `Panel` |
 | `form`, `stack` | `FieldRow`, `FieldGroup`, `FlagSet`, and the plate column groups stack down |
+| `status` | `StatusBand`, `StatusSlots`, `StatusTone`: the one status band along a window's foot — a caption line with a control gap above and below, readings in slots measured from the most each reads so the band never shifts, the message in the room between, every run elided to its slot and toned ink, muted, success, warning or danger |
+| `ruler` | `Ruler`, `RulerAxis`, `RulerStep`: a ruler along a measured view, a tick and figure at every multiple of the least 1, 2 or 5 times a power of ten units whose figures stand sixty logical pixels apart, each figure spelt with exactly the decimals its step needs, a count bounded by the ruler's length |
 | `picture` | `PictureChoice`, `PictureSection`, `PictureItem`, `Swatch`, `Aspect` |
 | `swatch_grid` | `SwatchGrid`: a grid of colour wells, a primary mark on at most one and an optional secondary one, chosen by pointer or by arrows while it has the keyboard, laid out as many to a row as its owner fits to the room (`set_columns`), a translucent well shown over a checker; each mark is black or white by the well's colour as it shows over the surface, focus rings the marked well in its margin, and a disabled grid is veiled and a denied one carries the authority bead; wells stand half a gap apart or, packed for a palette (`WellSpacing::Packed`), a pixel apart, and an owner may number its first wells (`number_wells`, in a `NumberFace`), a marked well then showing its number in place of its mark — inside it where the digits fit, else on a count-badge pill kept within the grid — and a mark's move reporting the well with its badge (`mark_rect`) |
 | `checker` | `Checker`: the one checkerboard transparency is shown over, in the theme's surface and that colour lifted, square side scaled |
@@ -204,8 +206,18 @@ A settings surface is a column of captioned groups of label/description/control
 rows, and that shape is the `form` family's, not each application's. A
 `FieldRow` is one setting: a leading label, an optional secondary description,
 and a trailing slot holding one real `Toggle`, `Checkbox`, `FlagSet`,
-`ComboBox`, `Slider`, `TextField`, `Button`, a read-only `Reading`, or a
-stated `Unmeasured` absence of one. A `Toggle` switches a feature on or off; a
+`ComboBox`, `Slider`, `NumberField`, `ColourField`, `TextField`, `Button`, a
+read-only `Reading`, or a stated `Unmeasured` absence of one
+(`FieldRow::choice` and `FieldRow::toggle` build the two commonest). A number
+or colour slot settles as the keyboard leaves its row, by a key or a press
+elsewhere, and `FieldGroup::set_focus` answers that settle, so moving on never
+loses the durable change; in a form the group's cursor keeps Up and Down, so a
+number field steps by the wheel and Page Up and Page Down. A `ColourField` is a
+colour shown as a swatch — drawn as the picker draws its own — and typed in
+hexadecimal, `#` optional: a spelling that reads as a colour is live, anything
+else shows as invalid and moves nothing, and Enter, the keyboard leaving and
+Escape taking typing back settle it as a number field's do. A field holding no
+opacity drops an alpha it is given and refuses one typed. A `Toggle` switches a feature on or off; a
 `Checkbox` marks a state on the setting beside it — a mute beneath a volume —
 and reports the same `FieldAction::Set { on }`. A `FieldGroup` is the captioned
 plate those rows sit on, with an
@@ -319,7 +331,8 @@ other slot's.
 A row reports what the control in its slot asked for and commits nothing
 itself. `FieldAction::SetValue` is a slider's live value and
 `FieldAction::Settled` its settle point; a durable change — a document posted,
-a store written — is made on the settle alone. `FieldAction::SetFlag { index,
+a store written — is made on the settle alone, and `FieldAction::settles`
+answers which actions are one. `FieldAction::SetFlag { index,
 on }` names the one flag of a `FlagSet` that changed, so the owner commits that
 flag and leaves its siblings alone. The motion that takes the pointer off a
 slot's control still reaches it, so the control's hover look leaves with the
@@ -334,6 +347,36 @@ out whole and shown through a `ScrollView`, so a plate the edge crosses is
 drawn cut rather than dropped. It
 is the one placement the Settings panes, the storage cards and the file
 manager's Permissions section read, so none carries its own copy of the gaps.
+
+A **`FieldColumn`** is that column of groups with its routing: the groups on
+one shared slot column, an expanded list placed inside the client the owner
+names (`ColumnPlace`) and modal across the whole column, a primary press
+giving the keyboard cursor to the row it lands on off whichever group held it,
+and Up or Down past a group's end carrying the cursor into its neighbour. A
+number or colour row the cursor leaves settles wherever it goes — to another
+plate, or out of the column (`FieldColumn::leave`) — and the settle is
+answered (`ColumnAction`). `FieldColumn::replace` puts rebuilt groups in with
+the cursor kept where it was, and `cursor_reveal` names what to scroll into
+view for it. The Settings panes, the settings frame below and every surface
+stacking groups route through it rather than a copy.
+
+A **`SettingsFrame`** is an application's settings window: its categories
+down a sidebar, the chosen one's `FieldColumn` beside it, scrolled when it
+outgrows the window by the wheel, its scrollbar — whose held arrow steps on
+the frame's own deadline — and the keyboard cursor kept in view, and a footer
+of commands with a line saying what the store refused. Tab and Shift+Tab walk
+the sidebar, the column and each command, a row the keyboard leaves settling;
+a press gives the keyboard to the region it lands in; Escape with nothing to
+take back asks to close. It holds no setting: it reports `SettingsAction`s —
+a category chosen, a row's action, a command, a close — and its owner builds
+each category's groups from its own record, showing one with
+`SettingsFrame::show`, which is what moves the sidebar, so a row the same
+press settled is still of the category on show. The window is never laid out
+shorter than its sidebar (`min_size`), and `size_for` answers the window that
+shows a column of a given size, for an owner fitting its window to its rows.
+WinterSun's settings window is the frame; a document application's is the
+document host's `docapp::settings::SettingsWindow`, the frame over a closed
+registry.
 
 A setting whose choices are pictures — a wallpaper, a screensaver — is a
 `PictureChoice` seated in the group beneath its rows
@@ -436,7 +479,8 @@ special: there is simply no room beneath it.
 
 Present-day consumers: the widget gallery's Forms tab, the Settings panes,
 Paint's tool bar, adjustment panels and dialogs, the network map's Probe
-Settings window, and WinterSun's settings window.
+Settings window, and every `SettingsFrame` — Paint's, Draw's and WinterSun's
+settings windows.
 
 ### Reporting a reading, and standing beside a list
 

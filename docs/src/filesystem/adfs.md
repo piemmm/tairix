@@ -173,7 +173,7 @@ exchanged (`tairix_fsmeta::preset::acorn::crossed_name_byte`): a RISC OS
 `ReadMe/txt` is listed and found as `ReadMe.txt`, and `notes.txt` is written
 `notes/txt`. A name's characters cross between UTF-8 and RISC OS's Latin-1 —
 ISO 8859-1 with RISC OS's own characters in `0x80`–`0x9F` — through
-`acorn::name_byte` and `acorn::name_char`. A big directory keeps the whole of
+`acorn::latin1_byte` and `acorn::latin1_char`. A big directory keeps the whole of
 that Latin-1; a fixed-format one keeps seven bits, so there a name is held to
 printable ASCII. A name holding a slash is refused, since it would reach the
 disc as a separator, as are a space, a character the directory cannot hold,

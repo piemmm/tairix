@@ -15705,8 +15705,9 @@ mod program {
 
     /// What a reader carries out for pick `pick`'s attempt `serial` to open
     /// `path` for the window's attested `owner`: a folder pick opens the
-    /// folder's files of the kinds the owner opens, any other the file, for
-    /// writing where the owner edits documents.
+    /// folder's files of the kinds the owner opens, an import the file
+    /// read-only, any other the file, for writing where the owner edits
+    /// documents.
     fn open_job(
         (pick, serial): (PickId, u64),
         path: alloc::string::String,
@@ -15728,7 +15729,7 @@ mod program {
             serial,
             path,
             access,
-            edits: owner.is_some_and(|owner| openers.edits(owner)),
+            edits: access.opens_to_edit(owner.is_some_and(|owner| openers.edits(owner))),
             typing,
         }
     }

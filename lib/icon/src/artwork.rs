@@ -1973,7 +1973,7 @@ fn folder_picture<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
             let kind = card.kind();
             part(reader, rasteriser, kind, place.side).or_else(|| paper_card(kind, place.side))?
         };
-        picture.blit_transformed(&drawn, place.transform());
+        picture.blit_transformed(&drawn, place.transform(), 255);
     }
     picture.blit(0, 0, &front);
     Some(picture)

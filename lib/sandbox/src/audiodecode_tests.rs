@@ -1573,3 +1573,42 @@ fn the_send_step_queues_what_waits_and_says_when_no_worker_takes_it() {
     assert_eq!(send_waiting(&mut client, &mut session, 0), Sent::Lost);
     assert!(client.outgoing().is_some(), "kept for a replacement");
 }
+
+/// Play `file` to its end through `link` in blocks of `frames`.
+fn played(
+    file: &[u8],
+    frames: u32,
+    link: &mut impl crate::testing::Link,
+) -> Result<(), AudioDecodeError> {
+    let mut client = AudioDecodeClient::new();
+    client.open(file.len() as u64, None, SEED)?;
+    loop {
+        if let Some(request) = client.outgoing() {
+            link.request(request);
+            client.sent();
+        }
+        let frame = link.frame().ok_or(AudioDecodeError::Unbelievable)?;
+        match client.on_frame(frame)? {
+            DecodeEvent::Need { offset, len } => {
+                let start = usize::try_from(offset).expect("small");
+                client.supply(&file[start..start + len])?;
+            }
+            DecodeEvent::Opened | DecodeEvent::Block { .. } => client.decode(frames)?,
+            DecodeEvent::Ended { .. } => return Ok(()),
+            other => panic!("a play answered {other:?}"),
+        }
+    }
+}
+
+/// Every request this side builds and every answer it reads — the tags
+/// among them — refused this side's memory is said as that.
+#[test]
+fn a_stream_this_side_has_no_memory_for_is_refused_as_that() {
+    let file = wave(2, &xorshift(20_000, 7), &[tags(3)], &[cues(2)]);
+    let mut recorder = crate::testing::Recorder::new(AudioDecodeService::new());
+    played(&file, 1024, &mut recorder).expect("an honest play");
+    tairix_fuzzseed::meter::refused_at_each(
+        || played(&file, 1024, &mut crate::testing::Replay::of(&recorder.kept)),
+        |failure| *failure == AudioDecodeError::OutOfMemory,
+    );
+}

@@ -120,7 +120,7 @@ fn a_passing_refusal_is_asked_again_when_shown_afresh_and_a_lasting_one_stands()
     assert_eq!(display.want(1), None, "not shown, not asked");
     assert!(display.show(true));
     let id = display.want(1).expect("asked again");
-    assert!(display.reported(id, Err(PICTURE.too_large()), 0));
+    assert!(display.reported(id, Err(PICTURE.too_large(64 << 20)), 0));
     assert!(display.show(false) && display.show(true));
     assert_eq!(display.want(1), None, "a lasting refusal stands");
 }
@@ -196,10 +196,12 @@ fn a_manifest_is_offered_as_data_and_its_report_is_read_in_the_decode_worker() {
     let huge = alloc::vec![0u8; MAX_INPUT + 1];
     assert_eq!(
         report_manifest(&mut sandbox, &huge),
-        Err(Structure::Manifest.too_large())
+        Err(Structure::Manifest.too_large(MAX_INPUT as u64))
     );
-    assert!(Structure::Manifest
-        .too_large()
-        .reason
-        .contains("a manifest"));
+    let said = Structure::Manifest.too_large(MAX_INPUT as u64).reason;
+    assert!(said.contains("a manifest"), "{said}");
+    assert!(
+        said.contains(&alloc::format!("over {} MiB", MAX_INPUT >> 20)),
+        "{said}"
+    );
 }

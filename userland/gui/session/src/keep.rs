@@ -27,7 +27,7 @@ use core::fmt;
 use tairix_abi::home::{HOME_FILES_DIR, HOME_FILES_PICTURES_DIR};
 use tairix_abi::time::{CivilTime, Time64, WallClockReading};
 use tairix_abi::Errno;
-use tairix_image::{Density, EncodeError, PictureKind, PictureSource};
+use tairix_image::{Density, EncodeError, SurfacePicture};
 use tairix_raster::Surface;
 use tairix_tz::CivilClock;
 
@@ -443,13 +443,14 @@ pub fn settle_leftovers(
     }
 }
 
-/// `picture`, opaque, as a PNG recording `density` where one is given.
+/// `picture` as a PNG recording `density` where one is given.
 ///
 /// # Errors
 ///
 /// [`Unkept::Encode`] for a picture the encoder refused.
 pub fn encode_png(picture: &Surface, density: Option<Density>) -> Result<Vec<u8>, Unkept> {
-    tairix_image::encode_png(&Opaque { picture, density }).map_err(Unkept::Encode)
+    tairix_image::encode_png(&SurfacePicture::new(picture).with_density(density))
+        .map_err(Unkept::Encode)
 }
 
 /// The moment a file kept at `reading` is named for, in `civil`'s zone, as the
@@ -464,47 +465,6 @@ pub fn kept_at(reading: Option<WallClockReading>, civil: &CivilClock<'_>) -> Opt
 /// Whether `name` is a file name the filesystem takes and no listing hides.
 fn plain_name(name: &str) -> bool {
     !name.starts_with('.') && tairix_path::validate_file_name(name).is_ok()
-}
-
-/// A picture as the encoder reads it: straight-alpha RGBA rows, which an
-/// opaque surface's premultiplied pixels already are.
-struct Opaque<'a> {
-    picture: &'a Surface,
-    density: Option<Density>,
-}
-
-impl PictureSource for Opaque<'_> {
-    fn width(&self) -> u32 {
-        self.picture.width()
-    }
-
-    fn height(&self) -> u32 {
-        self.picture.height()
-    }
-
-    fn kind(&self) -> PictureKind<'_> {
-        PictureKind::Rgba
-    }
-
-    fn read_row(&self, y: u32, samples: &mut [u8], _mask: &mut [u8]) {
-        let width = self.picture.width() as usize;
-        let start = (y as usize).saturating_mul(width);
-        let Some(row) = self
-            .picture
-            .pixels()
-            .get(start..start.saturating_add(width))
-        else {
-            samples.fill(0);
-            return;
-        };
-        for (out, pixel) in samples.as_chunks_mut::<4>().0.iter_mut().zip(row) {
-            *out = [pixel.r, pixel.g, pixel.b, pixel.a];
-        }
-    }
-
-    fn density(&self) -> Option<Density> {
-        self.density
-    }
 }
 
 #[cfg(test)]

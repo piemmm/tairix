@@ -61,17 +61,6 @@ pub const WIN_WIDTH: u32 = 900;
 /// The window height the viewer asks for, in logical pixels.
 pub const WIN_HEIGHT: u32 = 640;
 
-/// Largest document, in bytes, the viewer will hold resident to hand to its
-/// worker.
-///
-/// A fixed containment bound rather than a capacity: it does not scale with
-/// the machine, because what it bounds is how much of an untrusted file one
-/// window may be made to hold at once. Positional reads mean it bounds what
-/// is *resident*, never what is addressable. Set to the sandbox's own
-/// document ceiling, so a file this viewer accepts is one the seam accepts
-/// and there is one figure rather than two that can disagree.
-pub const MAX_DOCUMENT_BYTES: usize = tairix_sandbox::imagerender::MAX_DOCUMENT_BYTES;
-
 /// The zoom ladder, in parts per thousand of the displayed picture's natural
 /// size, ascending.
 ///

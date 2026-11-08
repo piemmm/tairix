@@ -16,7 +16,7 @@ use tairix_bezier::flatten::flatten_ellipse_arc;
 
 use crate::error::SvgError;
 use crate::geom::{Point, SubPath, Vertices};
-use crate::number::{parse_length, Numbers};
+use crate::number::{parse_length, viewport_diagonal, Numbers};
 use crate::pathdata::parse_path_data;
 use crate::xml::Element;
 
@@ -104,7 +104,7 @@ pub fn shape_geometry<'a>(
         "path" => ShapeGeometry::Path(node.attr("d").unwrap_or("")),
         "rect" => rect_geometry(node, viewport)?,
         "circle" => {
-            let r = length(node, "r", diagonal(viewport))?;
+            let r = length(node, "r", viewport_diagonal(viewport))?;
             if r < 0.0 {
                 return Err(SvgError::InvalidNumber);
             }
@@ -244,14 +244,6 @@ fn radii(node: &Element<'_>, viewport: (f64, f64)) -> Result<(f64, f64), SvgErro
         return Err(SvgError::InvalidNumber);
     }
     Ok((rx, ry))
-}
-
-/// The length a radius with no axis of its own resolves a percentage against.
-fn diagonal(viewport: (f64, f64)) -> f64 {
-    tairix_util::mathf::sqrt(f64::midpoint(
-        viewport.0 * viewport.0,
-        viewport.1 * viewport.1,
-    ))
 }
 
 /// `<rect>`'s geometry, with SVG's rounded-corner rules: neither radius may

@@ -53,6 +53,10 @@
 //! * [`BitVec`] — a bitmap of run-time length whose summary levels find the
 //!   next or previous set or clear bit in time proportional to their height.
 //!   What a `Vec<bool>` or a scanned `Vec<u64>` was standing in for.
+//! * [`SharedSlice`] / [`SharedStr`] — an immutable slice or text shared by
+//!   its holders, one block behind a thin pointer, made only fallibly, and
+//!   [`try_arc`] and [`try_box`], any value shared or boxed so. What an `Arc<[T]>` or `Arc<str>`,
+//!   whose making aborts on a refusing heap, was standing in for.
 //!
 //! ## Rules every container here obeys
 //!
@@ -81,7 +85,8 @@
 
 #![no_std]
 // `Box::try_new`, so an arena's bookkeeping the heap refuses fails the
-// insertion that needed it rather than aborting.
+// insertion that needed it rather than aborting, and `Arc::try_new`, which
+// `try_arc` shares a value through.
 #![feature(allocator_api)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
@@ -96,6 +101,7 @@ pub mod bytequeue;
 pub mod chunkvec;
 pub mod group;
 pub mod heap;
+mod loom_compat;
 pub mod lru;
 pub mod map;
 pub mod ordered;
@@ -105,6 +111,7 @@ pub mod range;
 pub mod rangeset;
 mod raw;
 pub mod set;
+pub mod shared;
 pub mod slotmap;
 pub mod smallvec;
 
@@ -120,6 +127,7 @@ pub use radix::RadixTree;
 pub use range::{RangeError, RangeKey, RangeMap};
 pub use rangeset::RangeSet;
 pub use set::HashSet;
+pub use shared::{try_arc, try_box, SharedSlice, SharedStr};
 pub use slotmap::{Key, SlotKey, SlotMap};
 pub use smallvec::SmallVec;
 

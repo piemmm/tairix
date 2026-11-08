@@ -40,8 +40,8 @@ opens a drawing as a document.
 | S22 | Glyph outlines out of `lib/fontface`: a public contour API, so text reaches this crate as geometry and never as pixels | done |
 | S23 | The font seam: resolving `font-family`/`font-weight`/`font-style`/`font-stretch` to a face at decode time, injected and capability-scoped | done |
 | S24 | `<text>` and `<tspan>`: the `x`/`y`/`dx`/`dy`/`rotate` lists, `text-anchor`, white-space and `xml:space`, `letter-spacing`/`word-spacing`, `textLength`/`lengthAdjust` | done |
-| S25 | The text property cascade beyond the `font-*` family: the baselines (`dominant-baseline`, `alignment-baseline`, `baseline-shift`), `text-decoration` | planned |
-| S26 | `<textPath>`: glyphs laid along a path, `startOffset`, `method`, `spacing`, `side` | planned |
+| S25 | The text property cascade beyond the `font-*` family: the baselines (`dominant-baseline`, `alignment-baseline`), `text-decoration` | planned |
+| S26 | `<textPath>`: glyphs laid along a path, `startOffset`, `method`, `spacing`, `side` | done |
 | S27 | Bidirectional text and shaping over the shared engine (`plans/BROWSER.md` BR3, built with this item if it comes first): `direction`/`unicode-bidi`, `writing-mode` and vertical text | planned |
 | S28 | The SVG 1.1 text leftovers: `<tref>`, and SVG fonts (`<font>`, `<glyph>`, `<altGlyph>`) | planned |
 | S29 | `<image>`: `href` and `data:` URIs, its own `preserveAspectRatio`, decoded through `lib/image` inside the parser sandbox, with a nested-document recursion bound | planned |
@@ -65,10 +65,12 @@ opens a drawing as a document.
 | S47 | The ECMAScript engine: parse, interpret, collect, and the bounded execution budget that makes it abortable | planned |
 | S48 | The SVG DOM binding: the document/element/attribute/style interfaces, and the mutation path back into the artwork tree | planned |
 | S49 | Events and timers: `load`/pointer/keyboard events with the hit testing they need, `setTimeout`/`setInterval`/`requestAnimationFrame` | planned |
+| S50 | `baseline-shift`: `sub`, `super`, a length and a percentage of the line height, each `<tspan>`'s glyphs raised or lowered from its parent's baseline | done |
+| S51 | SVG 2's text paths: a `<textPath>` along a basic shape, and along its own `path` attribute | planned |
 
-S1–S24 are `done` and none is half-built. S25–S44 are the rest of SVG, which
-this crate must draw and does not yet: the remaining text surface, embedded
-images, filters,
+No item is half-built. The planned items up to S44, and S51, are the rest of
+SVG, which this crate must draw and does not yet: the remaining text surface,
+embedded images, filters,
 animation, the CSS surface the cascade still drops, and the reference
 resolution that reaches outside the document. S45–S49 follow from the
 decisions recorded under [Decisions taken](#decisions-taken).
@@ -493,9 +495,10 @@ this inverts that order and needs both spaces at once.
 
 ## Text
 
-Latin, Greek and Cyrillic text draws (S23, S24). What remains is the
-property surface beyond the `font-*` family (S25), `<textPath>` (S26), and
-the reordering and shaping the other scripts need (S27–S28).
+Latin, Greek and Cyrillic text draws (S23, S24), raised and lowered by
+`baseline-shift` (S50) and along paths (S26). What remains is the rest of
+the property surface beyond the `font-*` family (S25) and the reordering and
+shaping the other scripts need (S27–S28).
 
 ### A glyph is geometry, never pixels
 
@@ -581,6 +584,25 @@ too under `spacingAndGlyphs`. A `font-size` is computed before every other
 length in the same cascade, which is what lets `stroke-width: 0.1em` mean
 the size the element ends up set in.
 
+`baseline-shift` is computed as a length, ems of the element's own size (an
+`em`, an `ex`, or a percentage of a normal 1.2 line height), or `sub`/`super`,
+which the layout resolves as a fifth of the parent's size down or a third up;
+it is not inherited, and each span's rise adds to the ones around it. A
+`<textPath>` takes the characters within it — never another `<textPath>`
+within it — along the `<path>` it names, that element's `transform` applied
+and its `pathLength` scaling a length `startOffset` (`textpath::geometry`,
+`textpath::start`, shared with the drawing editor's reader); one naming
+nothing contributes nothing. Within it a pen is a distance along the path and
+an offset across it: the path begins a chunk, an `x` is a distance, a `y`
+means nothing, `dy` and a rise move a glyph across it, and the text after it
+goes on from where its pen stopped. Each glyph's advance midpoint stands on
+the path, turned to its direction; one whose midpoint is off either end is
+dropped, `side="right"` runs the path from its end, and `spacing` is honoured
+as `exact`. Under `method="stretch"` a glyph's flattened outline is carried
+onto the path, every edge halved — at most ten times — until its bent
+midpoint is within the flattening tolerance of its chord, and charged to the
+vertex budget as it grows.
+
 ### Bounds
 
 Glyphs per document, `<tspan>` nesting, the resolved length of one `<text>`,
@@ -588,7 +610,8 @@ the runs a document may emit, and — because a provider may be a live service
 across an IPC boundary — the *requests* one document may make of it, so a
 hostile document cannot turn one decode into thousands of round trips. The
 outline points a glyph contributes are charged against the same total-vertex
-budget a `<path>` spends. All fixed containment bounds.
+budget a `<path>` spends, as they gather, and so is a text path's every
+command each time a `<textPath>` names it. All fixed containment bounds.
 
 ### What the running machine attests
 
@@ -622,11 +645,12 @@ needs one; its script never leaves the shell.
 ### What is left
 
 S25 is the rest of the text property cascade: the baselines
-(`dominant-baseline`, `alignment-baseline`, `baseline-shift`) and
-`text-decoration`. S26 is `<textPath>`. S27 is bidi and shaping — UAX#9
-reordering and OpenType `GSUB`/`GPOS`, neither of which `lib/fontface` has —
-so Arabic, Hebrew, and the Indic and CJK scripts are *skipped* like any
-other element this decoder cannot yet draw rather than half-drawn.
+(`dominant-baseline`, `alignment-baseline`) and `text-decoration`. S27 is
+bidi and shaping — UAX#9 reordering and OpenType `GSUB`/`GPOS`, neither of
+which `lib/fontface` has — so Arabic, Hebrew, and the Indic and CJK scripts
+are *skipped* like any other element this decoder cannot yet draw rather than
+half-drawn. S51 is SVG 2's text paths: a `<textPath>` naming a basic shape,
+or carrying its own `path` data; until it lands, one names a `<path>` alone.
 
 ## Embedded images
 

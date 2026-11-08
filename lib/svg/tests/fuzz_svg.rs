@@ -294,6 +294,7 @@ impl Tally {
                         self.walk(&mask.content);
                     }
                 }
+                tairix_raster::Node::Image(_) => panic!("the decoder lays no picture"),
             }
         }
     }
@@ -372,15 +373,29 @@ fn generated_text(rng: &mut Prng) {
     // of the layout — the position lists, the anchor, the adjustment,
     // the spacings — and one sweep should not cost more in glyphs than
     // every other case put together.
+    let shift = ["sub", "super", "baseline", "30%", "0.5em", "-2", "high"][rng.at_most(6)];
     let mut body = String::new();
     for _ in 0..rng.at_most(1) {
         let _ = write!(
             body,
-            r#"<tspan dx="{list}" rotate="{list} 30" font-size="{size}">c</tspan>"#
+            r#"<tspan dx="{list}" rotate="{list} 30" font-size="{size}" baseline-shift="{shift}">c</tspan>"#
+        );
+    }
+    // Text along a path the document defines — from either side, bent or
+    // turned, from wherever the offset lands, past either end or within
+    // another path that is not drawn.
+    if rng.at_most(1) == 1 {
+        let facing = ["left", "right"][rng.at_most(1)];
+        let method = ["align", "stretch"][rng.at_most(1)];
+        let offset = *rng.pick(NUMBERS);
+        let _ = write!(
+            body,
+            r##"<textPath href="#way" startOffset="{offset}" side="{facing}" method="{method}">d<tspan baseline-shift="{shift}" dy="{list}">e</tspan><textPath href="#way">f</textPath></textPath>g"##
         );
     }
     let text = alloc_document(&format!(
-        r##"<text x="{list} 2 3" y="4" xml:space="{space}" text-anchor="{anchor}"
+        r##"<defs><path id="way" d="M1 1 C5 20 15 -5 23 12 L{list} 4" pathLength="{size}"/></defs>
+            <text x="{list} 2 3" y="4" xml:space="{space}" text-anchor="{anchor}"
                   textLength="{list}" lengthAdjust="{adjust}" font-weight="{weight}"
                   font-style="{posture}" letter-spacing="{list}" word-spacing="{size}"
                   font-family="Nothing, sans-serif" fill="#345" stroke="#987"

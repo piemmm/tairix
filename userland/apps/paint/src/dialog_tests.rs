@@ -1,4 +1,3 @@
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -441,10 +440,39 @@ fn a_pressed_row_takes_the_keyboard() {
 
     click_row(&mut form, 1);
     typed(&mut form, "0");
-    let text = |form: &Form, row: usize| match form.group.rows()[row].control() {
-        tairix_controls::FieldControl::Text(field) => String::from(field.text()),
+    let side = |form: &Form, row: usize| match form.group.rows()[row].control() {
+        tairix_controls::FieldControl::Number(field) => field.value(),
         _ => panic!("row {row} is a size field"),
     };
-    assert_eq!(text(&form, 0), "640", "the width was not typed into");
-    assert_eq!(text(&form, 1), "4800", "the height pressed took the typing");
+    assert_eq!(side(&form, 0), 640, "the width was not typed into");
+    assert_eq!(side(&form, 1), 4800, "the height pressed took the typing");
+}
+
+/// A side typed past what a picture may have is refused when the form is
+/// answered, with the reason, rather than quietly held to the bound; the
+/// side row takes digits alone.
+#[test]
+fn a_side_typed_out_of_range_is_refused_not_held() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let mut damage = Region::new();
+    let mut form = Form::new_page((640, 480));
+    click_row(&mut form, 0);
+    for named in [
+        NamedKey::End,
+        NamedKey::Backspace,
+        NamedKey::Backspace,
+        NamedKey::Backspace,
+    ] {
+        form.on_key(key(named), AT, Scale::ONE, theme, &mut damage);
+    }
+    typed(&mut form, "0x");
+    assert!(
+        form.new_page_answer().is_err(),
+        "a side of nothing is no picture's"
+    );
+    form.on_key(key(NamedKey::Backspace), AT, Scale::ONE, theme, &mut damage);
+    typed(&mut form, "320");
+    let answer = form.new_page_answer().expect("a page");
+    assert_eq!(answer.size, (320, 480));
 }

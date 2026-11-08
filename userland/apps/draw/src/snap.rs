@@ -38,8 +38,6 @@ pub fn snapped(drawing: &Drawing, point: Point, reach: f64, grid: bool) -> Point
 
 #[cfg(test)]
 mod tests {
-    use alloc::sync::Arc;
-
     use tairix_bezier::Point;
     use tairix_drawing::{Children, Drawing, Grid, Guide, GuideAxis, Page, Unit};
 
@@ -55,12 +53,11 @@ mod tests {
                 background: None,
             },
             Children::new(),
-            Arc::from(
-                &[Guide {
-                    axis: GuideAxis::Vertical,
-                    position: 30.0,
-                }][..],
-            ),
+            tairix_drawing::SharedSlice::try_from_slice(&[Guide {
+                axis: GuideAxis::Vertical,
+                position: 30.0,
+            }])
+            .expect("held"),
             Grid {
                 spacing: 10.0,
                 subdivisions: 1,

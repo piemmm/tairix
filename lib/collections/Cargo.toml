@@ -36,6 +36,12 @@ tairix-util = { path = "../util", version = "=0.0.0" }
 # allocator-free bare-metal test binaries, it would link `alloc` into them.
 zeroize = { version = "1.8.1", default-features = false }
 
+# The model checker the shared slice's holder count is driven through, only
+# when `cargo xtask loom` builds with `--cfg loom`; never a runtime
+# dependency.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
 [build-dependencies]
 # The one reading of which vector unit the target carries, shared by every
 # crate with packed candidates.

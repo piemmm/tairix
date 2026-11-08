@@ -4,12 +4,13 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_bezier::{Bounds, Point};
+use tairix_collections::{try_arc, SharedSlice, SharedStr};
 use tairix_colour::Rgba;
 use tairix_util::fallible;
 
 use crate::children::Children;
 use crate::id::ObjectId;
-use crate::limits::{self, MAX_DEPTH, MAX_GUIDES, MAX_OBJECTS, MAX_TOTAL_PATH_NODES};
+use crate::limits::{self, MAX_DEPTH, MAX_GUIDES, MAX_OBJECTS, MAX_SWATCHES, MAX_TOTAL_PATH_NODES};
 use crate::node::{Kind, Node};
 use crate::DrawingError;
 
@@ -32,6 +33,16 @@ pub enum Unit {
     In,
 }
 
+/// The pixels the drawing counts to the inch: CSS's, and SVG's user unit.
+pub const PIXELS_PER_INCH: u32 = 96;
+
+/// The white a page with no ground of its own is laid on, and the ground a
+/// page is first given.
+pub const PAPER_WHITE: Rgba = Rgba::new(255, 255, 255, 255);
+
+/// [`PIXELS_PER_INCH`], to measure with.
+const INCH: f64 = PIXELS_PER_INCH as f64;
+
 impl Unit {
     /// Every unit, in the order a chooser offers them.
     pub const ALL: [Self; 6] = [Self::Px, Self::Pt, Self::Pc, Self::Mm, Self::Cm, Self::In];
@@ -41,11 +52,11 @@ impl Unit {
     pub const fn pixels(self) -> f64 {
         match self {
             Self::Px => 1.0,
-            Self::Pt => 96.0 / 72.0,
-            Self::Pc => 16.0,
-            Self::Mm => 96.0 / 25.4,
-            Self::Cm => 96.0 / 2.54,
-            Self::In => 96.0,
+            Self::Pt => INCH / 72.0,
+            Self::Pc => INCH / 6.0,
+            Self::Mm => INCH / 25.4,
+            Self::Cm => INCH / 2.54,
+            Self::In => INCH,
         }
     }
 
@@ -93,6 +104,25 @@ impl Page {
             unit: paper.unit,
             background: None,
         }
+    }
+
+    /// The page turned to stand `landscape` — wider than tall — or upright.
+    #[must_use]
+    pub const fn turned(mut self, landscape: bool) -> Self {
+        if (self.width > self.height) != landscape {
+            core::mem::swap(&mut self.width, &mut self.height);
+        }
+        self
+    }
+
+    /// The page measured in `unit`, its size unchanged.
+    #[must_use]
+    pub fn measured_in(mut self, unit: Unit) -> Self {
+        let ratio = self.unit.pixels() / unit.pixels();
+        self.width *= ratio;
+        self.height *= ratio;
+        self.unit = unit;
+        self
     }
 
     /// Its width and height in pixels.
@@ -183,7 +213,7 @@ pub struct Grid {
 impl Default for Grid {
     fn default() -> Self {
         Self {
-            spacing: 96.0 / 2.54,
+            spacing: Unit::Cm.pixels(),
             subdivisions: 4,
         }
     }
@@ -194,9 +224,9 @@ impl Default for Grid {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Info {
     /// Its title.
-    pub title: Option<Arc<str>>,
+    pub title: Option<SharedStr>,
     /// What it shows, in words.
-    pub description: Option<Arc<str>>,
+    pub description: Option<SharedStr>,
 }
 
 impl Info {
@@ -222,15 +252,17 @@ impl Info {
     }
 }
 
-/// A drawing: its page, its layers bottom first, its guides, its grid and
-/// what it says of itself.
+/// A drawing: its page, its layers bottom first, its guides, its grid, what
+/// it says of itself and the colours kept with it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Drawing {
     page: Page,
     layers: Children,
-    guides: Arc<[Guide]>,
+    guides: SharedSlice<Guide>,
     grid: Grid,
     info: Info,
+    swatches: SharedSlice<Rgba>,
+    resolution: u32,
 }
 
 /// Where a node stands: the index of its layer, then of each group down to
@@ -248,25 +280,38 @@ impl Drawing {
     pub fn new(
         page: Page,
         layers: Children,
-        guides: Arc<[Guide]>,
+        guides: SharedSlice<Guide>,
         grid: Grid,
     ) -> Result<Self, DrawingError> {
-        Self::checked(page, layers, guides, grid, Info::default())
+        Self {
+            page,
+            layers,
+            guides,
+            grid,
+            info: Info::default(),
+            swatches: SharedSlice::new(),
+            resolution: PIXELS_PER_INCH,
+        }
+        .checked()
     }
 
-    fn checked(
-        page: Page,
-        layers: Children,
-        guides: Arc<[Guide]>,
-        grid: Grid,
-        info: Info,
-    ) -> Result<Self, DrawingError> {
+    /// This drawing, once every value it holds is one a drawing may hold.
+    fn checked(self) -> Result<Self, DrawingError> {
+        let Self {
+            page,
+            layers,
+            guides,
+            grid,
+            info,
+            swatches,
+            resolution,
+        } = &self;
         let size = page.size();
         let page_valid =
             limits::length(size.x) && limits::length(size.y) && size.x > 0.0 && size.y > 0.0;
         let grid_valid = limits::length(grid.spacing)
             && grid.spacing > 0.0
-            && (1..=64).contains(&grid.subdivisions);
+            && (1..=limits::MAX_SUBDIVISIONS).contains(&grid.subdivisions);
         if !page_valid || !grid_valid {
             return Err(DrawingError::Invalid);
         }
@@ -293,13 +338,13 @@ impl Drawing {
             return Err(DrawingError::TooComplex);
         }
         info.check()?;
-        Ok(Self {
-            page,
-            layers,
-            guides,
-            grid,
-            info,
-        })
+        if swatches.len() > MAX_SWATCHES {
+            return Err(DrawingError::TooComplex);
+        }
+        if !(1..=limits::MAX_RESOLUTION).contains(resolution) {
+            return Err(DrawingError::Invalid);
+        }
+        Ok(self)
     }
 
     /// Its page.
@@ -326,15 +371,25 @@ impl Drawing {
         self.grid
     }
 
+    /// The colours kept with it, in the order they were kept.
+    #[must_use]
+    pub fn swatches(&self) -> &[Rgba] {
+        &self.swatches
+    }
+
     /// Whether `other` is this very drawing — the same layers, shared, on the
-    /// same page with the same guides, grid and title — without comparing
-    /// what the layers hold: an edit replaces the layers it touches.
+    /// same page with the same guides, grid, title, swatches and resolution —
+    /// without comparing what the layers hold: an edit replaces the layers it
+    /// touches.
     #[must_use]
     pub fn is(&self, other: &Self) -> bool {
         self.page == other.page
             && self.grid == other.grid
             && self.info == other.info
-            && (Arc::ptr_eq(&self.guides, &other.guides) || self.guides == other.guides)
+            && (SharedSlice::ptr_eq(&self.guides, &other.guides) || self.guides == other.guides)
+            && (SharedSlice::ptr_eq(&self.swatches, &other.swatches)
+                || self.swatches == other.swatches)
+            && self.resolution == other.resolution
             && self.layers.len() == other.layers.len()
             && self
                 .layers
@@ -357,11 +412,44 @@ impl Drawing {
     /// untrimmed, holds a control character (a description may break lines)
     /// or is longer than [`limits::MAX_TEXT_BYTES`].
     pub fn with_info(&self, info: Info) -> Result<Self, DrawingError> {
-        info.check()?;
-        Ok(Self {
+        Self {
             info,
             ..self.clone()
-        })
+        }
+        .checked()
+    }
+
+    /// The pixels to the inch its raster copies are made at.
+    #[must_use]
+    pub const fn resolution(&self) -> u32 {
+        self.resolution
+    }
+
+    /// The drawing copied as raster at `resolution` pixels to the inch.
+    ///
+    /// # Errors
+    ///
+    /// [`DrawingError::Invalid`] for none, or more than
+    /// [`limits::MAX_RESOLUTION`].
+    pub fn with_resolution(&self, resolution: u32) -> Result<Self, DrawingError> {
+        Self {
+            resolution,
+            ..self.clone()
+        }
+        .checked()
+    }
+
+    /// The drawing keeping `swatches`.
+    ///
+    /// # Errors
+    ///
+    /// [`DrawingError::TooComplex`] for more than [`MAX_SWATCHES`].
+    pub fn with_swatches(&self, swatches: SharedSlice<Rgba>) -> Result<Self, DrawingError> {
+        Self {
+            swatches,
+            ..self.clone()
+        }
+        .checked()
     }
 
     /// How many objects it holds, layers and groups counted.
@@ -382,13 +470,11 @@ impl Drawing {
     ///
     /// As [`Drawing::new`].
     pub fn with_page(&self, page: Page) -> Result<Self, DrawingError> {
-        Self::checked(
+        Self {
             page,
-            self.layers.clone(),
-            self.guides.clone(),
-            self.grid,
-            self.info.clone(),
-        )
+            ..self.clone()
+        }
+        .checked()
     }
 
     /// The drawing with `layers`.
@@ -397,13 +483,11 @@ impl Drawing {
     ///
     /// As [`Drawing::new`].
     pub fn with_layers(&self, layers: Children) -> Result<Self, DrawingError> {
-        Self::checked(
-            self.page,
+        Self {
             layers,
-            self.guides.clone(),
-            self.grid,
-            self.info.clone(),
-        )
+            ..self.clone()
+        }
+        .checked()
     }
 
     /// The drawing with `guides`.
@@ -411,14 +495,12 @@ impl Drawing {
     /// # Errors
     ///
     /// As [`Drawing::new`].
-    pub fn with_guides(&self, guides: Arc<[Guide]>) -> Result<Self, DrawingError> {
-        Self::checked(
-            self.page,
-            self.layers.clone(),
+    pub fn with_guides(&self, guides: SharedSlice<Guide>) -> Result<Self, DrawingError> {
+        Self {
             guides,
-            self.grid,
-            self.info.clone(),
-        )
+            ..self.clone()
+        }
+        .checked()
     }
 
     /// The drawing with `grid`.
@@ -427,13 +509,11 @@ impl Drawing {
     ///
     /// As [`Drawing::new`].
     pub fn with_grid(&self, grid: Grid) -> Result<Self, DrawingError> {
-        Self::checked(
-            self.page,
-            self.layers.clone(),
-            self.guides.clone(),
+        Self {
             grid,
-            self.info.clone(),
-        )
+            ..self.clone()
+        }
+        .checked()
     }
 
     /// The node at `path`, if one stands there.
@@ -581,7 +661,7 @@ fn replaced_in(
         children: rebuilt,
         clip: clip.clone(),
     })?;
-    children.replaced(index, Arc::new(group))
+    children.replaced(index, try_arc(group)?)
 }
 
 #[cfg(test)]

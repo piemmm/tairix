@@ -13,8 +13,9 @@
 //! reaches no other process, because the kernel zeroes a frame before it is
 //! reused.
 
-use alloc::string::String;
 use alloc::vec::Vec;
+
+use tairix_util::fallible;
 
 use tairix_syntax::{
     format_for_head, lex_line, validate, Diagnostic, Format, LineState, Severity, Span,
@@ -91,6 +92,8 @@ pub enum SyntaxFailure {
     /// The worker's reply broke the reply grammar or one of its invariants:
     /// it cannot be believed.
     ReplyMalformed,
+    /// There was no memory here for the request or its answer.
+    NoMemory,
 }
 
 impl core::fmt::Display for SyntaxFailure {
@@ -100,6 +103,7 @@ impl core::fmt::Display for SyntaxFailure {
             Self::Refused => f.write_str("the parser refused the request"),
             Self::TooLarge => f.write_str("the request is larger than a parser takes"),
             Self::ReplyMalformed => f.write_str("the parser's answer could not be believed"),
+            Self::NoMemory => f.write_str("there is not enough memory for the parser's answer"),
         }
     }
 }
@@ -243,7 +247,7 @@ pub fn lex_lines<L: Launcher, S: tairix_log::Sink>(
     if total > MAX_LEX_BATCH_BYTES {
         return Err(SyntaxFailure::TooLarge);
     }
-    let mut w = Writer::with_capacity(10 + lines.len() * 4 + total);
+    let mut w = Writer::refusable();
     w.u8(OP_LEX);
     w.u8(format.index());
     w.u32(state.raw());
@@ -251,7 +255,7 @@ pub fn lex_lines<L: Launcher, S: tairix_log::Sink>(
     for line in lines {
         w.bytes(line);
     }
-    let request = w.finish();
+    let request = w.finish().ok_or(SyntaxFailure::NoMemory)?;
     sandbox.ask(|sandbox| {
         let reply = sandbox.request(&request).map_err(SyntaxFailure::Sandbox)?;
         decode_lexed(&reply, lines)
@@ -273,13 +277,19 @@ fn decode_lexed(reply: &[u8], lines: &[&[u8]]) -> Result<LexedBatch, SyntaxFailu
     }
     let mut batch = LexedBatch {
         spans: Vec::new(),
-        lines: Vec::with_capacity(lines.len()),
+        lines: Vec::new(),
     };
+    if !fallible::reserve(&mut batch.lines, lines.len()) {
+        return Err(SyntaxFailure::NoMemory);
+    }
     for line in lines {
         let next = LineState::from_raw(r.u32().map_err(bad)?);
         let count = r.u32().map_err(bad)? as usize;
         if count > line.len() {
             return Err(SyntaxFailure::ReplyMalformed);
+        }
+        if !fallible::reserve(&mut batch.spans, count) {
+            return Err(SyntaxFailure::NoMemory);
         }
         let limit = line.len().min(MAX_LEX_LINE);
         let mut last = 0usize;
@@ -318,11 +328,11 @@ pub fn validate_document<L: Launcher, S: tairix_log::Sink>(
     if text.len() > MAX_VALIDATE_LEN {
         return Err(SyntaxFailure::TooLarge);
     }
-    let mut w = Writer::with_capacity(6 + text.len());
+    let mut w = Writer::refusable();
     w.u8(OP_VALIDATE);
     w.u8(format.index());
     w.bytes(text);
-    let request = w.finish();
+    let request = w.finish().ok_or(SyntaxFailure::NoMemory)?;
     let lines = text.split(|&b| b == b'\n').count();
     sandbox.ask(|sandbox| {
         let reply = sandbox.request(&request).map_err(SyntaxFailure::Sandbox)?;
@@ -344,7 +354,10 @@ fn decode_validated(reply: &[u8], lines: usize) -> Result<Vec<Diagnostic>, Synta
     if count > MAX_DIAGNOSTICS {
         return Err(SyntaxFailure::ReplyMalformed);
     }
-    let mut diagnostics = Vec::with_capacity(count);
+    let mut diagnostics = Vec::new();
+    if !fallible::reserve(&mut diagnostics, count) {
+        return Err(SyntaxFailure::NoMemory);
+    }
     for _ in 0..count {
         let line = r.u32().map_err(bad)?;
         let severity = match r.u8().map_err(bad)? {
@@ -352,10 +365,11 @@ fn decode_validated(reply: &[u8], lines: usize) -> Result<Vec<Diagnostic>, Synta
             SEVERITY_WARNING => Severity::Warning,
             _ => return Err(SyntaxFailure::ReplyMalformed),
         };
-        let message: String = r.string(MAX_MESSAGE_LEN).map_err(bad)?;
+        let message = r.str(MAX_MESSAGE_LEN).map_err(bad)?;
         if message.is_empty() || line as usize > lines || message.chars().any(char::is_control) {
             return Err(SyntaxFailure::ReplyMalformed);
         }
+        let message = fallible::concatenated(&[message]).ok_or(SyntaxFailure::NoMemory)?;
         diagnostics.push(Diagnostic {
             line: (line > 0).then_some(line),
             severity,
@@ -382,10 +396,10 @@ pub fn detect<L: Launcher, S: tairix_log::Sink>(
     if head.len() > MAX_HEAD_LEN {
         return Err(SyntaxFailure::TooLarge);
     }
-    let mut w = Writer::with_capacity(5 + head.len());
+    let mut w = Writer::refusable();
     w.u8(OP_DETECT);
     w.bytes(head);
-    let request = w.finish();
+    let request = w.finish().ok_or(SyntaxFailure::NoMemory)?;
     sandbox.ask(|sandbox| {
         let reply = sandbox.request(&request).map_err(SyntaxFailure::Sandbox)?;
         decode_detected(&reply)

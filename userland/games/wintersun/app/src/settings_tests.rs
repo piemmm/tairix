@@ -3,8 +3,10 @@
 //! fits the window whatever it says, and a scoped repaint is the same pixels
 //! a whole one would draw.
 
-use tairix_controls::damage::{self, Repaint};
+use tairix_controls::damage::Repaint;
 use tairix_controls::testkit::keystroke;
+use tairix_geometry::{to_i32, Point};
+use tairix_input::{Key, NamedKey, PointerButton};
 
 use super::*;
 use crate::quality::Ladder;
@@ -44,19 +46,28 @@ fn row_of(knob: Knob) -> usize {
 
 /// The rectangle the slider on knob row `row` is drawn and hit-tested in.
 fn slider_rect(window: &SettingsWindow, row: usize) -> Rect {
-    let theme = theme();
-    let layout = window.place(SCALE, &theme).groups[KNOBS];
-    let bounds = window.groups[KNOBS]
-        .row_rect(row, layout, SCALE, &theme)
-        .expect("the row is laid out");
-    window.groups[KNOBS].rows()[row]
-        .control_rect(FieldLayout::new(bounds, layout.column), SCALE, &theme)
+    window
+        .frame
+        .control_rect((KNOBS, row), &window.layout, SCALE, &theme())
         .expect("the row seats its slider")
+}
+
+/// Where knob row `row` is drawn.
+fn knob_row_rect(window: &SettingsWindow, row: usize) -> Rect {
+    window
+        .frame
+        .row_rect((KNOBS, row), &window.layout, SCALE, &theme())
+        .expect("the row is laid out")
+}
+
+/// The group at `index`, as the window shows it.
+fn group(window: &SettingsWindow, index: usize) -> &FieldGroup {
+    &window.frame.column().groups()[index]
 }
 
 /// The slider's value on knob row `row`.
 fn slider_value(window: &SettingsWindow, row: usize) -> u16 {
-    match window.groups[KNOBS].rows()[row].control() {
+    match group(window, KNOBS).rows()[row].control() {
         FieldControl::Slider(slider) => slider.value(),
         other => unreachable!("row {row} holds {other:?}"),
     }
@@ -108,7 +119,7 @@ fn rendered(window: &SettingsWindow) -> Surface {
 #[test]
 fn the_window_opens_on_the_players_choice() {
     let window = open(shown(Graphics::Ultra, Detail::FINEST));
-    match window.groups[QUALITY].rows()[0].control() {
+    match group(&window, QUALITY).rows()[0].control() {
         FieldControl::Combo(combo) => assert_eq!(combo.selected_text(), Some("Ultra")),
         other => unreachable!("the mode row holds {other:?}"),
     }
@@ -215,9 +226,9 @@ fn a_drag_previews_once_for_each_setting_it_crosses() {
 fn a_press_entering_a_group_reports_only_the_row_it_presses() {
     let theme = theme();
     let mut window = open(shown(Graphics::Ultra, Detail::FINEST));
-    assert_ne!(
-        window.focus,
-        Focus::Group(KNOBS),
+    assert_eq!(
+        window.frame.column().cursor(),
+        Some((QUALITY, 0)),
         "the press must enter the group"
     );
     let pressed = row_of(Knob::Resolution);
@@ -232,12 +243,8 @@ fn a_press_entering_a_group_reports_only_the_row_it_presses() {
     ] {
         let _ = window.on_pointer(&event, SCALE, &theme, &mut sink);
     }
-    assert_eq!(window.focus, Focus::Group(KNOBS));
-    assert_eq!(window.groups[KNOBS].focus(), Some(pressed));
-    let placed = window.place(SCALE, &theme);
-    let first = window.groups[KNOBS]
-        .row_rect(0, placed.groups[KNOBS], SCALE, &theme)
-        .expect("the first knob row is laid out");
+    assert_eq!(window.frame.column().cursor(), Some((KNOBS, pressed)));
+    let first = knob_row_rect(&window, 0);
     assert!(
         !sink.intersects(first),
         "the press reported the first row's focus ring, which never moved there"
@@ -269,8 +276,12 @@ fn a_slider_sits_on_the_setting_nearest_where_it_was_left() {
 #[test]
 fn a_key_on_a_slider_steps_one_setting_and_settles() {
     let mut window = open(shown(Graphics::Ultra, Detail::FINEST));
-    key(&mut window, Key::Named(NamedKey::Tab));
-    assert_eq!(window.focus, Focus::Group(KNOBS));
+    key(&mut window, Key::Named(NamedKey::Down));
+    assert_eq!(
+        window.frame.column().cursor(),
+        Some((KNOBS, 0)),
+        "Down past the mode reaches the knobs"
+    );
     let (asked, _) = key(&mut window, Key::Named(NamedKey::Left));
     assert_eq!(
         asked,
@@ -287,7 +298,7 @@ fn choosing_a_mode_writes_it() {
     let (opened, damage) = key(&mut window, Key::Named(NamedKey::Enter));
     assert_eq!(opened, None);
     assert!(
-        window.open_group().is_some(),
+        window.frame.column().is_listing(),
         "Enter did not open the choice list"
     );
     assert!(
@@ -298,7 +309,7 @@ fn choosing_a_mode_writes_it() {
     key(&mut window, Key::Named(NamedKey::Up));
     let (asked, _) = key(&mut window, Key::Named(NamedKey::Enter));
     assert_eq!(asked, Some(Request::Settle(Graphics::Auto)));
-    assert!(window.open_group().is_none());
+    assert!(!window.frame.column().is_listing());
 }
 
 #[test]
@@ -314,11 +325,15 @@ fn choosing_custom_starts_from_the_detail_on_screen() {
 #[test]
 fn escape_closes_and_tab_walks_every_region() {
     let mut window = open(shown(Graphics::Ultra, Detail::FINEST));
-    let start = window.focus;
-    for _ in 0..3 {
-        key(&mut window, Key::Named(NamedKey::Tab));
-    }
-    assert_eq!(window.focus, start, "three tabs came back round");
+    let start = window.frame.column().cursor();
+    key(&mut window, Key::Named(NamedKey::Tab));
+    assert_eq!(window.frame.column().cursor(), None, "on to the strip");
+    key(&mut window, Key::Named(NamedKey::Tab));
+    assert_eq!(
+        window.frame.column().cursor(),
+        start,
+        "two tabs came back round"
+    );
     let (asked, _) = key(&mut window, Key::Named(NamedKey::Escape));
     assert_eq!(asked, Some(Request::Close));
 }
@@ -346,10 +361,7 @@ fn showing_what_is_shown_reports_nothing_and_one_knob_reports_its_row() {
         &theme,
         &mut sink,
     );
-    let placed = window.place(SCALE, &theme);
-    let row = window.groups[KNOBS]
-        .row_rect(row_of(Knob::Shadows), placed.groups[KNOBS], SCALE, &theme)
-        .expect("the shadows row is laid out");
+    let row = knob_row_rect(&window, row_of(Knob::Shadows));
     assert_eq!(
         sink.bounds(),
         row,
@@ -382,20 +394,22 @@ fn every_row_fits_the_window_whatever_it_says() {
                         readable,
                     };
                     window.show(shown, scale, &theme, &mut sink);
-                    let placed = window.place(scale, &theme);
-                    for (group, layout) in window.groups.iter().zip(placed.groups) {
-                        for index in 0..group.len() {
+                    assert_eq!(
+                        window.layout.bar, None,
+                        "{graphics:?} at {detail:?}, {scale:?}, outgrew the window"
+                    );
+                    for (index, plate) in window.frame.column().groups().iter().enumerate() {
+                        for row in 0..plate.len() {
+                            let rect =
+                                window
+                                    .frame
+                                    .row_rect((index, row), &window.layout, scale, &theme);
                             assert!(
-                                group.row_rect(index, layout, scale, &theme).is_some(),
-                                "{graphics:?} at {detail:?}, {scale:?}, dropped row {index} of {}",
-                                group.caption()
+                                rect.is_some_and(|rect| rect.bottom() <= to_i32(window.extent().1)),
+                                "{graphics:?} at {detail:?}, {scale:?}, dropped row {row} of {}",
+                                plate.caption()
                             );
                         }
-                        assert!(
-                            layout.bounds.bottom() <= to_i32(window.extent().1),
-                            "{} overhangs the window at {scale:?}",
-                            group.caption()
-                        );
                     }
                 }
             }
@@ -414,7 +428,7 @@ fn a_render_below_the_readable_floor_says_so() {
         detail: plain,
         readable: Resolution::FourFifths,
     });
-    let row = &window.groups[KNOBS].rows()[row_of(Knob::Resolution)];
+    let row = &group(&window, KNOBS).rows()[row_of(Knob::Resolution)];
     assert!(
         row.description()
             .is_some_and(|d| d.contains("may not read clearly")),
@@ -426,7 +440,9 @@ fn a_render_below_the_readable_floor_says_so() {
 #[test]
 fn a_scoped_repaint_draws_what_a_whole_one_would() {
     let theme = theme();
-    let mut window = open(shown(Graphics::Ultra, Detail::FINEST));
+    // Custom both sides, so the mode's own sentence, and with it every row's
+    // place, stays where it is.
+    let mut window = open(shown(Graphics::Custom(Detail::FINEST), Detail::FINEST));
     let mut retained = rendered(&window);
     let (width, height) = window.extent();
 

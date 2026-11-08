@@ -51,13 +51,13 @@
 //! before it is used to allocate or index anything; see the crate
 //! documentation for the full bounds policy.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::density::{Density, DensityUnit, Stated};
 use crate::huffman::{Canonical, MAX_CODE_BITS};
 use crate::orientation::{self, Orientation};
 use crate::{DecodeError, DecodeLimits, FitBox, RasterImage, Unkept, RGBA_BYTES};
+use tairix_inline::ArrayVec;
 use tairix_util::fallible;
 
 // ---------------------------------------------------------------------
@@ -300,22 +300,24 @@ struct Component {
     quant_table: u8,
 }
 
+/// The most components a frame or scan holds: the format's own bound for a
+/// scan, and above the three a frame this decoder reads has.
+const MAX_COMPONENTS: usize = 4;
+
 /// A validated frame header (`SOF0`/`SOF1`/`SOF2`) and the block-grid
 /// geometry it implies. Every field here is scale-independent: it
 /// describes the coefficient/block structure the entropy-coded data
 /// walks, never the eventual pixel output size (see [`Scale`] for that).
 ///
-/// Cheap to clone (a handful of `u32`s plus a 1- or 3-element `Vec`), which
-/// lets a scan decode hold its own owned copy instead of borrowing it from
-/// the decoder — the decoder's other fields need `&mut self` at the same
-/// time a scan is being decoded, and an owned copy sidesteps that borrow
-/// entirely.
+/// Cheap to clone, its components held inline, which lets a scan decode
+/// hold its own owned copy instead of borrowing it from the decoder — the
+/// decoder's other fields need `&mut self` while a scan is decoded.
 #[derive(Clone)]
 struct Frame {
     progressive: bool,
     width: u32,
     height: u32,
-    components: Vec<Component>,
+    components: ArrayVec<Component, MAX_COMPONENTS>,
     mcus_per_row: u32,
     mcus_per_col: u32,
 }
@@ -489,7 +491,7 @@ impl HuffmanTable {
         Ok(Self {
             fast,
             codes,
-            symbols: symbols.to_vec(),
+            symbols: fallible::copied(symbols).ok_or(DecodeError::OutOfMemory)?,
         })
     }
 
@@ -808,7 +810,7 @@ fn parse_sof(payload: &[u8], progressive: bool) -> Result<Frame, DecodeError> {
     let height = u32::from(u16::from_be_bytes([h0, h1]));
     let width = u32::from(u16::from_be_bytes([w0, w1]));
 
-    let mut components = Vec::with_capacity(usize::from(nf));
+    let mut components = ArrayVec::<Component, MAX_COMPONENTS>::new();
     for &[id, sampling, quant_table] in rest.as_chunks::<3>().0 {
         let h = u32::from(sampling >> 4);
         let v = u32::from(sampling & 0x0F);
@@ -821,12 +823,14 @@ fn parse_sof(payload: &[u8], progressive: bool) -> Result<Frame, DecodeError> {
         if components.iter().any(|c: &Component| c.id == id) {
             return Err(DecodeError::JpegInvalidFrameHeader);
         }
-        components.push(Component {
-            id,
-            h,
-            v,
-            quant_table,
-        });
+        components
+            .try_push(Component {
+                id,
+                h,
+                v,
+                quant_table,
+            })
+            .map_err(|_| DecodeError::JpegUnsupportedComponentCount)?;
     }
 
     let h_max = components.iter().map(|c| c.h).max().unwrap_or(1);
@@ -891,6 +895,10 @@ fn parse_dqt(
 /// Parse a `DHT` payload into however many Huffman tables it carries,
 /// calling `store` with each `(class, index, table)` (`class` `0` = DC,
 /// `1` = AC).
+/// The most symbols a Huffman table lists: each is a byte, so a longer list
+/// can only repeat one.
+const MAX_HUFFMAN_SYMBOLS: usize = 256;
+
 fn parse_dht(
     payload: &[u8],
     mut store: impl FnMut(u8, usize, HuffmanTable) -> Result<(), DecodeError>,
@@ -913,6 +921,9 @@ fn parse_dht(
         bits.copy_from_slice(counts);
         pos += 16;
         let total: usize = bits.iter().map(|&b| usize::from(b)).sum();
+        if total > MAX_HUFFMAN_SYMBOLS {
+            return Err(DecodeError::JpegInvalidHuffmanTable);
+        }
         let symbols = payload
             .get(pos..pos + total)
             .ok_or(DecodeError::JpegInvalidHuffmanTable)?;
@@ -932,7 +943,7 @@ struct ScanComponent {
 
 /// A validated `SOS` header.
 struct ScanHeader {
-    components: Vec<ScanComponent>,
+    components: ArrayVec<ScanComponent, MAX_COMPONENTS>,
     spectral_start: u32,
     spectral_end: u32,
     successive_high: u32,
@@ -954,18 +965,20 @@ fn parse_sos(payload: &[u8], progressive: bool) -> Result<ScanHeader, DecodeErro
         return Err(DecodeError::JpegInvalidScanHeader);
     };
 
-    let mut components = Vec::with_capacity(ns);
+    let mut components = ArrayVec::<ScanComponent, MAX_COMPONENTS>::new();
     for &[id, tables] in selectors.as_chunks::<2>().0 {
         let dc_table = tables >> 4;
         let ac_table = tables & 0x0F;
         if dc_table > 3 || ac_table > 3 {
             return Err(DecodeError::JpegInvalidScanHeader);
         }
-        components.push(ScanComponent {
-            id,
-            dc_table,
-            ac_table,
-        });
+        components
+            .try_push(ScanComponent {
+                id,
+                dc_table,
+                ac_table,
+            })
+            .map_err(|_| DecodeError::JpegInvalidScanHeader)?;
     }
 
     let spectral_start = u32::from(ss);
@@ -1111,27 +1124,42 @@ pub(crate) fn peak_ceiling(limits: &DecodeLimits) -> u64 {
 }
 
 /// What a decode holds beside its image-sized buffers, at its largest: every
-/// Huffman table's symbols with one more being defined to replace one, and
-/// the vectors indexing a frame's three components at most and a scan's four.
-const BOOKKEEPING_BYTES: u64 = {
-    use core::mem::size_of;
-    let huffman = (2 * 4 + 1) * 256;
-    let per_component = size_of::<Component>()
-        + 3 * size_of::<Vec<u8>>()
-        + size_of::<usize>()
-        + size_of::<Upsampler<'static>>();
-    let per_scan_component = size_of::<ScanComponent>() + size_of::<usize>() + size_of::<i32>();
-    (huffman + 3 * per_component + 4 * per_scan_component) as u64
-};
+/// Huffman table's symbols with one more being defined to replace one. Its
+/// per-component lists are held inline.
+const BOOKKEEPING_BYTES: u64 = (2 * 4 + 1) * MAX_HUFFMAN_SYMBOLS as u64;
 
 /// Walk `bytes` to its frame header, answering the frame and the orientation
 /// its EXIF segment states.
 fn header(bytes: &[u8]) -> Result<(Frame, Orientation), DecodeError> {
+    stated(bytes).map(|(frame, orientation, _)| (frame, orientation))
+}
+
+/// What a JPEG's frame states that a format embedding its bytes unchanged
+/// must say of them, its frame header and the segments before it read and
+/// nothing else.
+pub(crate) fn frame(bytes: &[u8]) -> Result<crate::JpegFrame, DecodeError> {
+    let (frame, orientation, density) = stated(bytes)?;
+    Ok(crate::JpegFrame {
+        stored: (frame.width, frame.height),
+        components: u8::try_from(frame.components.len())
+            .map_err(|_| DecodeError::JpegUnsupportedComponentCount)?,
+        progressive: frame.progressive,
+        orientation,
+        density,
+    })
+}
+
+/// Walk `bytes` to its frame header, answering the frame, the orientation its
+/// EXIF segment states and the density its JFIF header states, as a decode
+/// takes each.
+fn stated(bytes: &[u8]) -> Result<(Frame, Orientation, Option<Density>), DecodeError> {
     if !bytes.starts_with(&crate::JPEG_SIGNATURE[..2]) {
         return Err(DecodeError::JpegBadSignature);
     }
     let mut pos = 2usize; // past the 2-byte SOI marker
     let mut orientation = None;
+    let mut density = None;
+    let mut jfif_seen = false;
     loop {
         let (marker, next) = read_marker(bytes, pos)?;
         pos = next;
@@ -1139,7 +1167,7 @@ fn header(bytes: &[u8]) -> Result<(Frame, Orientation), DecodeError> {
             SOF0 | SOF1 | SOF2 => {
                 let (payload, _after) = read_segment(bytes, pos)?;
                 let frame = parse_sof(payload, marker == SOF2)?;
-                return Ok((frame, orientation.unwrap_or(Orientation::IDENTITY)));
+                return Ok((frame, orientation.unwrap_or(Orientation::IDENTITY), density));
             }
             SOF3 | SOF5 | SOF6 | SOF7 | DHP | EXP => {
                 return Err(DecodeError::JpegLosslessOrHierarchicalUnsupported);
@@ -1157,6 +1185,12 @@ fn header(bytes: &[u8]) -> Result<(Frame, Orientation), DecodeError> {
                 let (payload, after) = read_segment(bytes, pos)?;
                 if marker == APP1 && orientation.is_none() {
                     orientation = orientation::from_exif(payload);
+                }
+                if marker == APP0 && !jfif_seen {
+                    jfif_seen = true;
+                    if let Stated::Kept(stated) = read_jfif(payload) {
+                        density = stated;
+                    }
                 }
                 pos = after;
             }
@@ -1227,12 +1261,12 @@ struct Decoder<'a> {
     /// — `blocks_per_line_padded` by `blocks_per_col_padded` blocks, each
     /// block `m` samples square. Filled scan by scan; never used for a
     /// progressive frame.
-    sample_planes: Vec<Vec<u8>>,
+    sample_planes: ArrayVec<Vec<u8>, MAX_COMPONENTS>,
     /// Progressive coefficient store, one flat buffer per frame
     /// component, `blocks_per_line_padded * blocks_per_col_padded * 64`
     /// entries in natural (row-major) per-block order. Only allocated for
     /// a progressive frame, once its geometry is known.
-    coefficients: Vec<Vec<i16>>,
+    coefficients: ArrayVec<Vec<i16>, MAX_COMPONENTS>,
     eobrun: u32,
 }
 
@@ -1273,25 +1307,23 @@ fn decode_inner(
         orientation: None,
         frame: None,
         scale: Scale::Full,
-        sample_planes: Vec::new(),
-        coefficients: Vec::new(),
+        sample_planes: ArrayVec::new(),
+        coefficients: ArrayVec::new(),
         eobrun: 0,
     };
     let image = decoder.run(bytes)?;
-    // Four components are inks, which the writer restates as colour.
-    let converted = decoder
-        .frame
-        .as_ref()
-        .is_some_and(|frame| frame.components.len() == 4);
+    let orientation = decoder.orientation.unwrap_or(Orientation::IDENTITY);
     Ok((
         image,
         Held {
             unkept: Unkept {
                 precision: false,
                 extras: decoder.extras,
-                converted,
+                converted: false,
             },
-            density: decoder.density,
+            density: decoder
+                .density
+                .map(|density| orientation.picture_density(density)),
         },
     ))
 }
@@ -1384,9 +1416,15 @@ impl Decoder<'_> {
     /// Take what an application or comment segment says: the first JFIF
     /// header's density, EXIF's orientation, Adobe's colour transform, and
     /// whether it holds more than the picture.
+    ///
+    /// The density and the orientation are read only ahead of the frame
+    /// header, where JFIF and EXIF place them: the size the frame commits to
+    /// is weighed against the limits there, and a turn stated after it would
+    /// answer a picture of another shape than the one weighed.
     fn segment(&mut self, marker: u8, payload: &[u8]) {
+        let framed = self.frame.is_some();
         match marker {
-            APP0 if !self.jfif_seen => {
+            APP0 if !self.jfif_seen && !framed => {
                 self.jfif_seen = true;
                 match read_jfif(payload) {
                     Stated::Kept(density) => self.density = density,
@@ -1396,7 +1434,7 @@ impl Decoder<'_> {
             APP1 => {
                 // The orientation is applied, but the block holds more.
                 self.extras = true;
-                if self.orientation.is_none() {
+                if self.orientation.is_none() && !framed {
                     self.orientation = orientation::from_exif(payload);
                 }
             }
@@ -1438,17 +1476,17 @@ impl Decoder<'_> {
     /// moment its scan decodes it.
     fn allocate_sample_planes(&mut self, frame: &Frame) -> Result<(), DecodeError> {
         let m = self.scale.m();
-        self.sample_planes = frame
-            .components
-            .iter()
-            .map(|component| {
-                let width = frame.blocks_per_line_padded(component).saturating_mul(m);
-                let height = frame.blocks_per_col_padded(component).saturating_mul(m);
-                let len = usize::try_from(u64::from(width).saturating_mul(u64::from(height)))
-                    .unwrap_or(usize::MAX);
-                fallible::filled(len, 0u8).ok_or(DecodeError::OutOfMemory)
-            })
-            .collect::<Result<_, _>>()?;
+        self.sample_planes.clear();
+        for component in &frame.components {
+            let width = frame.blocks_per_line_padded(component).saturating_mul(m);
+            let height = frame.blocks_per_col_padded(component).saturating_mul(m);
+            let len = usize::try_from(u64::from(width).saturating_mul(u64::from(height)))
+                .unwrap_or(usize::MAX);
+            let plane = fallible::filled(len, 0u8).ok_or(DecodeError::OutOfMemory)?;
+            self.sample_planes
+                .try_push(plane)
+                .map_err(|_| DecodeError::JpegUnsupportedComponentCount)?;
+        }
         Ok(())
     }
 
@@ -1457,7 +1495,7 @@ impl Decoder<'_> {
     /// geometry implies exceeds
     /// [`DecodeLimits::max_progressive_coefficient_bytes`].
     fn allocate_coefficient_store(&mut self, frame: &Frame) -> Result<(), DecodeError> {
-        let mut sizes = Vec::with_capacity(frame.components.len());
+        let mut sizes = ArrayVec::<usize, MAX_COMPONENTS>::new();
         let mut total_bytes = 0u64;
         for component in &frame.components {
             let blocks = u64::from(frame.blocks_per_line_padded(component))
@@ -1472,15 +1510,22 @@ impl Decoder<'_> {
             total_bytes = total_bytes
                 .checked_add(bytes)
                 .ok_or(DecodeError::DimensionsOverflow)?;
-            sizes.push(usize::try_from(coefficients).map_err(|_| DecodeError::DimensionsOverflow)?);
+            sizes
+                .try_push(
+                    usize::try_from(coefficients).map_err(|_| DecodeError::DimensionsOverflow)?,
+                )
+                .map_err(|_| DecodeError::JpegUnsupportedComponentCount)?;
         }
         if total_bytes > self.limits.max_progressive_coefficient_bytes() {
             return Err(DecodeError::JpegProgressiveCoefficientStoreExceedsLimit);
         }
-        self.coefficients = sizes
-            .into_iter()
-            .map(|n| fallible::filled(n, 0i16).ok_or(DecodeError::OutOfMemory))
-            .collect::<Result<_, _>>()?;
+        self.coefficients.clear();
+        for count in sizes {
+            let store = fallible::filled(count, 0i16).ok_or(DecodeError::OutOfMemory)?;
+            self.coefficients
+                .try_push(store)
+                .map_err(|_| DecodeError::JpegUnsupportedComponentCount)?;
+        }
         Ok(())
     }
 
@@ -1496,19 +1541,21 @@ impl Decoder<'_> {
             .frame
             .clone()
             .ok_or(DecodeError::JpegMissingFrameHeader)?;
-        let mut comp_indices = Vec::with_capacity(header.components.len());
+        let mut comp_indices = ArrayVec::<usize, MAX_COMPONENTS>::new();
         for scan_component in &header.components {
             let index = frame
                 .components
                 .iter()
                 .position(|c| c.id == scan_component.id)
                 .ok_or(DecodeError::JpegComponentIdMismatch)?;
-            comp_indices.push(index);
+            comp_indices
+                .try_push(index)
+                .map_err(|_| DecodeError::JpegInvalidScanHeader)?;
         }
 
         let kind = ScanKind::classify(frame.progressive, header);
         self.eobrun = 0;
-        let mut dc_predictors = vec![0i32; comp_indices.len()];
+        let mut dc_predictors = [0i32; MAX_COMPONENTS];
         let mut bits = BitReader::new(bytes, pos);
         let interleaved = header.components.len() > 1;
         let mut units_since_restart = 0u32;
@@ -1908,7 +1955,7 @@ impl Decoder<'_> {
     /// pixels.
     fn finalise_progressive(&mut self, frame: &Frame) -> Result<(), DecodeError> {
         let m = self.scale.m();
-        let mut planes = Vec::with_capacity(frame.components.len());
+        let mut planes = ArrayVec::<Vec<u8>, MAX_COMPONENTS>::new();
         for (comp_index, component) in frame.components.iter().enumerate() {
             let stride_blocks = frame.blocks_per_line_padded(component);
             let row_blocks = frame.blocks_per_col_padded(component);
@@ -1948,7 +1995,9 @@ impl Decoder<'_> {
                     );
                 }
             }
-            planes.push(plane);
+            planes
+                .try_push(plane)
+                .map_err(|_| DecodeError::JpegUnsupportedComponentCount)?;
         }
         self.sample_planes = planes;
         Ok(())
@@ -1991,31 +2040,30 @@ impl Decoder<'_> {
         )
         .ok_or(DecodeError::OutOfMemory)?;
 
-        let mut upsamplers: Vec<Upsampler<'_>> = frame
-            .components
-            .iter()
-            .enumerate()
-            .map(|(i, component)| {
-                Upsampler::new(
-                    CompMap {
-                        plane: self.sample_planes.get(i).map_or(&[][..], Vec::as_slice),
-                        stride: usize::try_from(
-                            frame.blocks_per_line_padded(component).saturating_mul(m),
-                        )
-                        .unwrap_or(usize::MAX),
-                        h: component.h,
-                        v: component.v,
-                        x_limit: frame.component_sample_width(component, m).saturating_sub(1),
-                        y_limit: frame
-                            .component_sample_height(component, m)
-                            .saturating_sub(1),
-                    },
-                    stored_width,
-                    h_max,
-                    v_max,
-                )
-            })
-            .collect::<Result<_, _>>()?;
+        let mut upsamplers = ArrayVec::<Upsampler<'_>, MAX_COMPONENTS>::new();
+        for (i, component) in frame.components.iter().enumerate() {
+            let upsampler = Upsampler::new(
+                CompMap {
+                    plane: self.sample_planes.get(i).map_or(&[][..], Vec::as_slice),
+                    stride: usize::try_from(
+                        frame.blocks_per_line_padded(component).saturating_mul(m),
+                    )
+                    .unwrap_or(usize::MAX),
+                    h: component.h,
+                    v: component.v,
+                    x_limit: frame.component_sample_width(component, m).saturating_sub(1),
+                    y_limit: frame
+                        .component_sample_height(component, m)
+                        .saturating_sub(1),
+                },
+                stored_width,
+                h_max,
+                v_max,
+            )?;
+            upsamplers
+                .try_push(upsampler)
+                .map_err(|_| DecodeError::JpegUnsupportedComponentCount)?;
+        }
 
         for y in 0..stored_height {
             for upsampler in &mut upsamplers {

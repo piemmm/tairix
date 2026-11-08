@@ -5,7 +5,9 @@ use alloc::vec::Vec;
 
 pub use tairix_bezier::offset::{Cap, Join};
 use tairix_bezier::{Affine, Bounds, FillRule, PathEl, Point, Subpath};
+use tairix_collections::SharedSlice;
 use tairix_colour::Rgba;
+use tairix_util::fallible;
 use tairix_util::mathf::fmax;
 
 use crate::limits::{self, MAX_DASH_ENTRIES, MAX_STOPS};
@@ -201,48 +203,67 @@ impl Arrowhead {
     /// The outline it fills at `at`, the path arriving there running
     /// `direction`, for a stroke `stroke_width` wide; `None` when it draws
     /// nothing or the direction is unknown.
-    #[must_use]
-    pub fn outline(&self, at: Point, direction: Point, stroke_width: f64) -> Option<Subpath> {
-        if !self.draws() {
-            return None;
-        }
-        let along = direction.normalised()?;
+    ///
+    /// # Errors
+    ///
+    /// [`DrawingError::OutOfMemory`] when the outline cannot be held.
+    pub fn outline(
+        &self,
+        at: Point,
+        direction: Point,
+        stroke_width: f64,
+    ) -> Result<Option<Subpath>, DrawingError> {
+        let along = match direction.normalised() {
+            Some(along) if self.draws() => along,
+            _ => return Ok(None),
+        };
         let across = along.perpendicular();
         let half = self.width * stroke_width / 2.0;
         let reach = self.length * stroke_width;
         let place = |forward: f64, side: f64| at + along * forward + across * side;
-        let corners: Vec<Point> = match self.shape {
-            ArrowShape::None => return None,
-            ArrowShape::Triangle => {
-                alloc::vec![place(0.0, -half), place(reach, 0.0), place(0.0, half)]
-            }
-            ArrowShape::Arrow => alloc::vec![
-                place(-reach * 0.25, -half),
-                place(reach, 0.0),
-                place(-reach * 0.25, half),
-                place(0.0, 0.0),
-            ],
-            ArrowShape::Square => alloc::vec![
-                place(-half, -half),
-                place(half, -half),
-                place(half, half),
-                place(-half, half),
-            ],
-            ArrowShape::Diamond => alloc::vec![
-                place(-reach / 2.0, 0.0),
-                place(0.0, -half),
-                place(reach / 2.0, 0.0),
-                place(0.0, half),
-            ],
-            ArrowShape::Bar => {
-                let thick = stroke_width / 2.0;
-                alloc::vec![
+        let thick = stroke_width / 2.0;
+        let (corners, count) = match self.shape {
+            ArrowShape::None => return Ok(None),
+            ArrowShape::Triangle => (
+                [place(0.0, -half), place(reach, 0.0), place(0.0, half), at],
+                3,
+            ),
+            ArrowShape::Arrow => (
+                [
+                    place(-reach * 0.25, -half),
+                    place(reach, 0.0),
+                    place(-reach * 0.25, half),
+                    place(0.0, 0.0),
+                ],
+                4,
+            ),
+            ArrowShape::Square => (
+                [
+                    place(-half, -half),
+                    place(half, -half),
+                    place(half, half),
+                    place(-half, half),
+                ],
+                4,
+            ),
+            ArrowShape::Diamond => (
+                [
+                    place(-reach / 2.0, 0.0),
+                    place(0.0, -half),
+                    place(reach / 2.0, 0.0),
+                    place(0.0, half),
+                ],
+                4,
+            ),
+            ArrowShape::Bar => (
+                [
                     place(-thick, -half),
                     place(thick, -half),
                     place(thick, half),
                     place(-thick, half),
-                ]
-            }
+                ],
+                4,
+            ),
             ArrowShape::Circle => {
                 let arc = tairix_bezier::EllipseArc {
                     centre: at,
@@ -252,17 +273,26 @@ impl Arrowhead {
                     sweep: core::f64::consts::TAU,
                 };
                 let mut disc = Subpath::new(arc.start_point());
-                arc.to_cubics(|c| disc.elements.push(PathEl::Cubic(c.p1, c.p2, c.p3)));
+                let mut held = true;
+                arc.to_cubics(|c| {
+                    held &= fallible::push(&mut disc.elements, PathEl::Cubic(c.p1, c.p2, c.p3));
+                });
+                if !held {
+                    return Err(DrawingError::OutOfMemory);
+                }
                 disc.closed = true;
-                return Some(disc);
+                return Ok(Some(disc));
             }
         };
         let mut outline = Subpath::new(corners[0]);
+        if !fallible::reserve(&mut outline.elements, count - 1) {
+            return Err(DrawingError::OutOfMemory);
+        }
         outline
             .elements
-            .extend(corners[1..].iter().map(|&corner| PathEl::Line(corner)));
+            .extend(corners[1..count].iter().map(|&corner| PathEl::Line(corner)));
         outline.closed = true;
-        Some(outline)
+        Ok(Some(outline))
     }
 
     /// How far past the stroke's end and across it the arrowhead can
@@ -292,7 +322,7 @@ pub struct Stroke {
     /// How it ends.
     pub cap: Cap,
     /// Its dash pattern, alternately drawn and skipped; empty is solid.
-    pub dashes: Arc<[f64]>,
+    pub dashes: SharedSlice<f64>,
     /// How far into the pattern the stroke begins.
     pub dash_offset: f64,
     /// The arrowhead at its start.
@@ -309,7 +339,7 @@ impl Default for Stroke {
             join: Join::Miter,
             miter_limit: 4.0,
             cap: Cap::Butt,
-            dashes: Arc::from(&[][..]),
+            dashes: SharedSlice::new(),
             dash_offset: 0.0,
             start: Arrowhead::NONE,
             end: Arrowhead::NONE,

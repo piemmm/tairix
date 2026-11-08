@@ -7,7 +7,7 @@
 
 use alloc::vec::Vec;
 
-use super::{blend_solid_span, blend_span, mix, mix_span, Pixel};
+use super::{blend_solid_span, blend_span, mix, mix_span, unpremultiply_span, Pixel};
 use crate::dither::DitherRow;
 
 /// A deterministic stream of premultiplied pixels, so a failure is
@@ -269,4 +269,21 @@ fn dimming_keeps_the_premultiplied_invariant_and_never_brightens() {
             );
         }
     }
+}
+
+#[test]
+fn a_run_leaves_straight_as_each_pixel_unpremultiplies_and_the_shorter_side_ends_it() {
+    let mut rng = Pixels::new(0x5742_A16E_0000_0001);
+    let run = rng.run(37);
+    let mut out = [[7_u8; 4]; 40];
+    unpremultiply_span(&run, &mut out);
+    for (pixel, written) in run.iter().zip(&out) {
+        let colour = pixel.unpremultiply();
+        assert_eq!(*written, [colour.r, colour.g, colour.b, colour.a]);
+    }
+    assert_eq!(out[37..], [[7; 4]; 3], "past the pixels nothing is written");
+    let mut short = [[0_u8; 4]; 5];
+    unpremultiply_span(&run, &mut short);
+    let colour = run[4].unpremultiply();
+    assert_eq!(short[4], [colour.r, colour.g, colour.b, colour.a]);
 }

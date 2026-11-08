@@ -329,7 +329,9 @@ server and every app's client can never drift apart.
   alike — is host-tested with the engines. On the bare-metal targets `run`
   is the whole program of an application that edits what the user handed it
   (TextEdit, Paint, Draw): opening, closing and quitting with changes asked about
-  first, the trusted picker, documents handed over on the icon bar, painting
+  first, the trusted picker — and through it a file to import, handed over
+  read-only to `DocumentApp::import_chosen` (`Request::Import`) — documents
+  handed over on the icon bar, painting
   only what changed, and the one queue saves are written on in the order
   asked. Text is drawn without waiting on the font service: what the font
   client has not yet fetched is drawn provisionally, a thread of the host's
@@ -342,7 +344,13 @@ server and every app's client can never drift apart.
   *New window*, and the windows of its own that hold no document — a settings
   window, say — each an `AppView` the host opens, routes, paints and closes
   (`NoAppView` for an application with none), closed by Quit only once the
-  quit can no longer be turned down. `DocumentApp::leaving` gives the
+  quit can no longer be turned down, a control of one that changes on its own
+  stepped on the deadline it names (`AppView::deadline_ns`, `advance`).
+  `docapp::settings` (feature `settings`) is the settings window itself: the
+  shared `SettingsFrame` over an application's closed registry implementing
+  `docapp::settings::Preferences`, each event one `SettingsRequest` — the
+  edit, from what to what and whether it settled, then *Restore defaults* or
+  an ask of the application's own. `DocumentApp::leaving` gives the
   application its turn to see its own workers out before the process ends.
   A document window's view may tear palettes out into tool windows
   (`DocumentView::tool_window`): each shows a rectangle of the window's own

@@ -53,13 +53,13 @@ use tairix_fuzzseed::Prng;
 use tairix_image::inspect::inspect;
 use tairix_image::{
     decode, decode_as, decode_fitted, decode_fitted_as, decode_named, decode_peak_bytes,
-    decode_peak_bytes_as, encode_bmp, encode_gif, encode_jpeg, encode_ora, encode_png,
-    encode_sprite_area, encode_tiff, find_named, open_native, probe_as, recognise, sniff,
-    DecodeError, DecodeLimits, EncodeError, FitBox, GifOptions, ImageFormat, IndexDepth,
-    JpegOptions, NativeDocument, OraLayer, OraLayerSource, Picture, PictureKind, PictureSource,
-    RasterImage, Rgba8, Sequence, SequenceKind, SpriteAreaReader, SpriteEntry, SpriteInput,
-    SpriteMode, SpriteName, SpritePalette, TiffCompression, TiffOptions, MOST_ORA_LAYERS,
-    RECOGNITION_HEAD,
+    decode_peak_bytes_as, decode_sprite, encode_bmp, encode_gif, encode_jpeg, encode_ora,
+    encode_png, encode_sprite_area, encode_tiff, find_named, jpeg_frame, open_native, probe_as,
+    recognise, sniff, DecodeError, DecodeLimits, EncodeError, FitBox, GifOptions, ImageFormat,
+    IndexDepth, JpegOptions, NativeDocument, OraLayer, OraLayerSource, Picture, PictureKind,
+    PictureSource, RasterImage, Rgba8, Sequence, SequenceKind, SpriteAreaReader, SpriteEntry,
+    SpriteInput, SpriteMode, SpriteName, SpritePalette, TiffCompression, TiffOptions,
+    MAX_SPRITE_EIG, MOST_ORA_LAYERS, RECOGNITION_HEAD,
 };
 use tairix_util::report::{MAX_LINE_BYTES, MAX_REPORT_LINES};
 
@@ -2241,6 +2241,39 @@ fn decode_never_panics_and_respects_limits(bytes: &[u8]) {
     named_sprites_within_bounds(bytes, &limits);
     native_doors_agree_and_write_back(bytes);
     reports_within_bounds(bytes);
+    frame_states_what_a_decode_answers(bytes, &limits);
+    // Any bytes are a candidate lone sprite, and an area's first sprite one
+    // past its header.
+    for alone in [bytes, bytes.get(12..).unwrap_or_default()] {
+        if let Ok(sprite) = decode_sprite(alone, &limits) {
+            assert!(sprite.image.width() <= limits.max_width());
+            assert!(sprite.image.height() <= limits.max_height());
+            assert!(
+                sprite.length as usize <= alone.len(),
+                "a sprite within its bytes"
+            );
+            assert!(sprite.eig.0 <= MAX_SPRITE_EIG && sprite.eig.1 <= MAX_SPRITE_EIG);
+        }
+    }
+}
+
+/// What a JPEG's frame states is the raster a decode turns into its picture.
+fn frame_states_what_a_decode_answers(bytes: &[u8], limits: &DecodeLimits) {
+    let Ok(frame) = jpeg_frame(bytes) else {
+        return;
+    };
+    assert!(matches!(frame.components, 1 | 3), "{frame:?}");
+    if sniff(bytes) == Some(ImageFormat::Jpeg) {
+        if let Ok(image) = decode(bytes, limits) {
+            assert_eq!(
+                (image.width(), image.height()),
+                frame
+                    .orientation
+                    .picture_size(frame.stored.0, frame.stored.1),
+                "{frame:?}"
+            );
+        }
+    }
 }
 
 /// A sprite found by name in `bytes` measures as it decodes, and decodes

@@ -20,6 +20,7 @@ use alloc::vec::Vec;
 use tairix_abi::DriverImage;
 use tairix_binfmt::{elf, wasm, Format};
 use tairix_disasm::{aarch64, riscv64, wasm as wasm_isa, x86_64, Insn, MAX_INSN_BYTES};
+use tairix_util::fallible;
 use tairix_util::report::ReportLine;
 
 use crate::host::{Launcher, ParserSandbox, SandboxError, Unbelieved};
@@ -896,11 +897,11 @@ pub fn container_summary<L: Launcher, S: tairix_log::Sink>(
     if image.len() > MAX_INPUT {
         return Err(DecodeFailure::Sandbox(SandboxError::RequestTooLarge));
     }
-    let mut w = Writer::with_capacity(6 + image.len());
+    let mut w = Writer::refusable();
     w.u8(OP_SUMMARY);
     w.u8(u8::from(carry == Summarise::WithReport));
     w.bytes(image);
-    let request = w.finish();
+    let request = w.finish().ok_or(DecodeFailure::NoMemory)?;
     sandbox.ask(|sandbox| {
         let reply = sandbox.request(&request).map_err(DecodeFailure::Sandbox)?;
         decode_summary_reply(&reply, carry)
@@ -921,10 +922,10 @@ pub fn file_report<L: Launcher, S: tairix_log::Sink>(
     if file.len() > MAX_INPUT {
         return Err(DecodeFailure::Sandbox(SandboxError::RequestTooLarge));
     }
-    let mut w = Writer::with_capacity(5 + file.len());
+    let mut w = Writer::refusable();
     w.u8(OP_REPORT);
     w.bytes(file);
-    let request = w.finish();
+    let request = w.finish().ok_or(DecodeFailure::NoMemory)?;
     sandbox.ask(|sandbox| {
         let reply = sandbox.request(&request).map_err(DecodeFailure::Sandbox)?;
         decode_report_reply(&reply)
@@ -947,7 +948,7 @@ pub fn disassemble<L: Launcher, S: tairix_log::Sink>(
     if code.len() > MAX_INPUT {
         return Err(DecodeFailure::Sandbox(SandboxError::RequestTooLarge));
     }
-    let mut w = Writer::with_capacity(23 + code.len());
+    let mut w = Writer::refusable();
     w.u8(OP_DISASSEMBLE);
     w.u8(isa.to_wire());
     w.u64(window.address);
@@ -955,7 +956,7 @@ pub fn disassemble<L: Launcher, S: tairix_log::Sink>(
     w.u32(max_insns);
     w.u8(u8::from(window.continues));
     w.bytes(code);
-    let request = w.finish();
+    let request = w.finish().ok_or(DecodeFailure::NoMemory)?;
     let asked = Asked {
         address: window.address,
         max_insns,
@@ -1006,6 +1007,11 @@ fn reply_body(reply: &[u8], expected_tag: u8) -> Result<Reader<'_>, DecodeFailur
     Ok(r)
 }
 
+/// `text`, taken out of a reply.
+fn owned(text: &str) -> Result<String, DecodeFailure> {
+    fallible::concatenated(&[text]).ok_or(DecodeFailure::NoMemory)
+}
+
 /// Decode a summary reply fail-closed (the worker is untrusted): a report
 /// nobody asked for is a lie, as is one missing when asked.
 fn decode_summary_reply(reply: &[u8], carry: Summarise) -> Result<ContainerSummary, DecodeFailure> {
@@ -1026,9 +1032,12 @@ fn decode_summary_reply(reply: &[u8], carry: Summarise) -> Result<ContainerSumma
     if region_count > MAX_REGIONS {
         return Err(DecodeFailure::ReplyMalformed);
     }
-    let mut regions = Vec::with_capacity(region_count);
+    let mut regions = Vec::new();
+    if !fallible::reserve(&mut regions, region_count) {
+        return Err(DecodeFailure::NoMemory);
+    }
     for _ in 0..region_count {
-        let name = r.string(MAX_NAME).map_err(step)?;
+        let name = owned(r.str(MAX_NAME).map_err(step)?)?;
         let kind = match r.u8().map_err(step)? {
             1 => RegionKind::Code,
             2 => RegionKind::Data,
@@ -1054,9 +1063,12 @@ fn decode_summary_reply(reply: &[u8], carry: Summarise) -> Result<ContainerSumma
     if symbol_count > MAX_SYMBOLS {
         return Err(DecodeFailure::ReplyMalformed);
     }
-    let mut symbols = Vec::with_capacity(symbol_count);
+    let mut symbols = Vec::new();
+    if !fallible::reserve(&mut symbols, symbol_count) {
+        return Err(DecodeFailure::NoMemory);
+    }
     for _ in 0..symbol_count {
-        let name = r.string(MAX_NAME).map_err(step)?;
+        let name = owned(r.str(MAX_NAME).map_err(step)?)?;
         if name.is_empty() {
             return Err(DecodeFailure::ReplyMalformed);
         }
@@ -1125,7 +1137,10 @@ fn decode_disasm_reply(reply: &[u8], asked: Asked) -> Result<DisasmWindow, Decod
         .ok()
         .and_then(|margin| window_end.checked_sub(margin));
     let mut expected = asked.address;
-    let mut insns = Vec::with_capacity(count);
+    let mut insns = Vec::new();
+    if !fallible::reserve(&mut insns, count) {
+        return Err(DecodeFailure::NoMemory);
+    }
     for _ in 0..count {
         let address = r.u64().map_err(step)?;
         let length = r.u32().map_err(step)?;
@@ -1138,12 +1153,13 @@ fn decode_disasm_reply(reply: &[u8], asked: Asked) -> Result<DisasmWindow, Decod
             .checked_add(u64::from(length))
             .filter(|&end| end <= window_end)
             .ok_or(malformed)?;
-        let bytes = r.bytes(MAX_INSN_BYTES).map_err(step)?.to_vec();
+        let bytes = r.bytes(MAX_INSN_BYTES).map_err(step)?;
         if bytes.len() > length as usize {
             return Err(malformed);
         }
-        let mnemonic = r.string(MAX_TEXT).map_err(step)?;
-        let operands = r.string(MAX_TEXT).map_err(step)?;
+        let bytes = fallible::copied(bytes).ok_or(DecodeFailure::NoMemory)?;
+        let mnemonic = owned(r.str(MAX_TEXT).map_err(step)?)?;
+        let operands = owned(r.str(MAX_TEXT).map_err(step)?)?;
         let branch_target = match r.u8().map_err(step)? {
             0 => None,
             1 => Some(r.u64().map_err(step)?),
@@ -1711,5 +1727,34 @@ mod tests {
             container_summary(&mut sandbox, &oversize, Summarise::Regions),
             Err(DecodeFailure::Sandbox(_))
         ));
+    }
+
+    fn decode_refused(failure: DecodeFailure) -> bool {
+        match failure {
+            DecodeFailure::NoMemory => true,
+            DecodeFailure::Sandbox(inner) => crate::testing::this_side(inner),
+            _ => false,
+        }
+    }
+
+    /// Each question this side asks — a summary with its report, a file's
+    /// report, a disassembly — refused this side's memory is said as that.
+    #[test]
+    fn a_decode_this_side_has_no_memory_for_is_refused_as_that() {
+        let image = rxe_image();
+        crate::testing::swept::<DecodeService, _, _>(
+            |sandbox| container_summary(sandbox, &image, Summarise::WithReport),
+            |failure| decode_refused(*failure),
+        );
+        crate::testing::swept::<DecodeService, _, _>(
+            |sandbox| file_report(sandbox, &image),
+            |failure| decode_refused(*failure),
+        );
+        let mut code = vec![0x90; 14];
+        code.extend_from_slice(&[0x48, 0xB8, 1, 2, 3, 4, 5, 6, 7, 8]);
+        crate::testing::swept::<DecodeService, _, _>(
+            |sandbox| disassemble(sandbox, Isa::X86_64, whole(0, 0, &code), 64),
+            |failure| decode_refused(*failure),
+        );
     }
 }

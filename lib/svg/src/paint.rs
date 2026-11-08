@@ -21,6 +21,7 @@
 use alloc::vec::Vec;
 
 use tairix_raster::{Affine, Color, Gradient, GradientKind, GradientStop, Paint, SpreadMethod};
+use tairix_util::fallible;
 use tairix_util::mathf::sqrt;
 
 use crate::color::{parse_color, ColorSpec};
@@ -81,7 +82,9 @@ pub struct PatternTile<'a> {
 /// Every paint server the document defines, indexed by fragment id.
 #[derive(Clone, Debug, Default)]
 pub struct PaintServers<'a> {
-    entries: Vec<(&'a str, &'a Element<'a>)>,
+    /// Sorted by id and then by document order, so a lookup is a binary
+    /// search that finds the first of a repeated id, as a reference does.
+    entries: Vec<(&'a str, usize, &'a Element<'a>)>,
 }
 
 impl<'a> PaintServers<'a> {
@@ -90,23 +93,33 @@ impl<'a> PaintServers<'a> {
     /// The whole tree is walked, not just `<defs>`: SVG lets a paint server
     /// be defined anywhere, and a shape may reference one that appears after
     /// it.
-    #[must_use]
-    pub fn collect(root: &'a Element<'a>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`SvgError::OutOfMemory`] when the index cannot be held.
+    pub fn collect(root: &'a Element<'a>) -> Result<Self, SvgError> {
         let mut servers = Self::default();
-        servers.walk(root);
+        servers.walk(root)?;
         servers
+            .entries
+            .sort_unstable_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(&b.1)));
+        Ok(servers)
     }
 
     /// Record `node` if it is a paint server, then its children.
-    fn walk(&mut self, node: &'a Element<'a>) {
+    fn walk(&mut self, node: &'a Element<'a>) -> Result<(), SvgError> {
         if matches!(node.name, "linearGradient" | "radialGradient" | "pattern") {
             if let Some(id) = node.attr("id") {
-                self.entries.push((id, node));
+                let order = self.entries.len();
+                if !fallible::push(&mut self.entries, (id, order, node)) {
+                    return Err(SvgError::OutOfMemory);
+                }
             }
         }
         for child in node.children() {
-            self.walk(child);
+            self.walk(child)?;
         }
+        Ok(())
     }
 
     /// The paint server with fragment id `id`, if the document defines one.
@@ -120,10 +133,11 @@ impl<'a> PaintServers<'a> {
 
     /// The element with fragment id `id`, if the document defines one.
     fn find(&self, id: &str) -> Option<&'a Element<'a>> {
+        let at = self.entries.partition_point(|(name, ..)| *name < id);
         self.entries
-            .iter()
-            .find(|(name, _)| *name == id)
-            .map(|(_, node)| *node)
+            .get(at)
+            .filter(|(name, ..)| *name == id)
+            .map(|(.., node)| *node)
     }
 
     /// The gradient `node` defines, its `href` chain followed: what it

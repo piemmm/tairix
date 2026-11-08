@@ -441,6 +441,63 @@ impl PictureSource for Picture {
     }
 }
 
+/// A premultiplied surface read as the straight-alpha rows an encoder takes,
+/// a row unpremultiplied at a time, so no straight copy of it is ever held.
+#[derive(Copy, Clone, Debug)]
+pub struct SurfacePicture<'a> {
+    surface: &'a tairix_raster::Surface,
+    density: Option<Density>,
+}
+
+impl<'a> SurfacePicture<'a> {
+    /// `surface`, stating no density.
+    #[must_use]
+    pub const fn new(surface: &'a tairix_raster::Surface) -> Self {
+        Self {
+            surface,
+            density: None,
+        }
+    }
+
+    /// The same picture stating `density`, where it has one to state.
+    #[must_use]
+    pub const fn with_density(self, density: Option<Density>) -> Self {
+        Self { density, ..self }
+    }
+}
+
+impl PictureSource for SurfacePicture<'_> {
+    fn width(&self) -> u32 {
+        self.surface.width()
+    }
+
+    fn height(&self) -> u32 {
+        self.surface.height()
+    }
+
+    fn kind(&self) -> PictureKind<'_> {
+        PictureKind::Rgba
+    }
+
+    fn read_row(&self, y: u32, samples: &mut [u8], _mask: &mut [u8]) {
+        let width = self.surface.width() as usize;
+        let start = (y as usize).saturating_mul(width);
+        let Some(row) = self
+            .surface
+            .pixels()
+            .get(start..start.saturating_add(width))
+        else {
+            samples.fill(0);
+            return;
+        };
+        tairix_raster::unpremultiply_span(row, samples.as_chunks_mut::<RGBA_BYTES>().0);
+    }
+
+    fn density(&self) -> Option<Density> {
+        self.density
+    }
+}
+
 /// Copy row `row` of `plane`, whose rows are `stride` bytes, into as much of
 /// `out` as both hold.
 fn copy_row(plane: &[u8], row: usize, stride: usize, out: &mut [u8]) {

@@ -28,6 +28,9 @@ tairix-raster = { path = "../raster", version = "=0.0.0" }
 # memory refuses one and the decode reports that rather than aborting.
 tairix-util = { path = "../util", version = "=0.0.0" }
 
+# The bounded inline lists a JPEG frame's components and what the decoder
+# holds for each are kept in, so a frame header allocates nothing.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
 # The VP8 decoder a lossy WebP picture is one keyframe of.
 tairix-video = { path = "../video", version = "=0.0.0" }
 # The shared XML element scanner OpenRaster's layer stack is read through.

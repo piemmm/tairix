@@ -375,3 +375,47 @@ fn degenerate_operands_come_to_nothing_or_themselves() {
         Err(BooleanError::TooComplex)
     );
 }
+
+#[test]
+fn a_cut_at_or_past_an_end_sorts_with_that_end() {
+    for start in [-0.0, 0.0, -1e-12, f64::NAN, f64::NEG_INFINITY] {
+        assert_eq!(super::along_piece(start).to_bits(), 0.0_f64.to_bits());
+    }
+    for end in [1.0, 1.0 + 1e-12, f64::INFINITY] {
+        assert_eq!(super::along_piece(end).to_bits(), 1.0_f64.to_bits());
+    }
+    assert_eq!(super::along_piece(0.25).to_bits(), 0.25_f64.to_bits());
+}
+
+#[test]
+fn every_traced_contour_is_closed_and_a_component_keeps_its_holes() {
+    let ring = Path {
+        subpaths: vec![
+            circle(p(0.0, 0.0), 10.0).subpaths[0].clone(),
+            circle(p(0.0, 0.0), 4.0).subpaths[0]
+                .reversed()
+                .expect("hole"),
+        ],
+    };
+    let far = circle(p(40.0, 0.0), 3.0);
+    let both = boolean(
+        &ring,
+        FillRule::NonZero,
+        &far,
+        FillRule::NonZero,
+        Operation::Union,
+    )
+    .expect("completes");
+    assert!(both.subpaths.iter().all(|subpath| subpath.closed));
+    let parts = components(&both).expect("grouped");
+    assert_eq!(parts.len(), 2);
+    let holed = parts
+        .iter()
+        .find(|part| part.subpaths.len() == 2)
+        .expect("the ring keeps its hole");
+    assert!(holed.contains(p(7.0, 0.0), FillRule::NonZero));
+    assert!(!holed.contains(p(0.0, 0.0), FillRule::NonZero));
+    assert!(parts
+        .iter()
+        .any(|part| part.subpaths.len() == 1 && part.contains(p(40.0, 0.0), FillRule::NonZero)));
+}

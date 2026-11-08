@@ -604,6 +604,21 @@ pub enum IconKind {
     Magnet,
     /// A ruler and its marks, for units of length.
     Ruler,
+    /// Two overlapping squares cut into the three pieces they make, for
+    /// dividing shapes.
+    Divide,
+    /// A square ringed by a larger one, for growing a shape outward.
+    Outset,
+    /// A square holding a smaller one, for shrinking a shape inward.
+    Inset,
+    /// A jagged line beside the smooth curve it becomes, for simplifying.
+    Simplify,
+    /// A curve with arrowheads at both ends, for reversing a path.
+    ReverseDirection,
+    /// A disc framed by a square that crops it, for clipping.
+    Clip,
+    /// The disc whole beside the square that cropped it, for releasing a clip.
+    ReleaseClip,
     /// Two pages, one behind the other, for sprites and pages.
     Pages,
     /// A toolbox, for the tools.
@@ -991,6 +1006,13 @@ impl IconKind {
             "wireframe" => Self::Wireframe,
             "magnet" => Self::Magnet,
             "ruler" => Self::Ruler,
+            "divide" => Self::Divide,
+            "outset" => Self::Outset,
+            "inset" => Self::Inset,
+            "simplify" => Self::Simplify,
+            "reverse-direction" => Self::ReverseDirection,
+            "clip" => Self::Clip,
+            "release-clip" => Self::ReleaseClip,
             "pages" => Self::Pages,
             "toolbox" => Self::Toolbox,
             "activity" => Self::Activity,
@@ -1382,6 +1404,13 @@ impl IconKind {
             Self::Wireframe => 313,
             Self::Magnet => 314,
             Self::Ruler => 315,
+            Self::Divide => 316,
+            Self::Outset => 317,
+            Self::Inset => 318,
+            Self::Simplify => 319,
+            Self::ReverseDirection => 320,
+            Self::Clip => 321,
+            Self::ReleaseClip => 322,
         }
     }
 
@@ -1715,6 +1744,13 @@ impl IconKind {
             Self::Wireframe => "wireframe",
             Self::Magnet => "magnet",
             Self::Ruler => "ruler",
+            Self::Divide => "divide",
+            Self::Outset => "outset",
+            Self::Inset => "inset",
+            Self::Simplify => "simplify",
+            Self::ReverseDirection => "reverse-direction",
+            Self::Clip => "clip",
+            Self::ReleaseClip => "release-clip",
         }
     }
 }
@@ -2144,6 +2180,13 @@ fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
         | IconKind::Wireframe
         | IconKind::Magnet
         | IconKind::Ruler
+        | IconKind::Divide
+        | IconKind::Outset
+        | IconKind::Inset
+        | IconKind::Simplify
+        | IconKind::ReverseDirection
+        | IconKind::Clip
+        | IconKind::ReleaseClip
         | IconKind::ToolZoom => return None,
     })
 }

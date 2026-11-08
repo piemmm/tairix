@@ -37,7 +37,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::WindowSizing;
-use tairix_controls::{NumberFace, ScrollBar, ScrollOrientation, TitleBar, TitleBarCommands};
+use tairix_controls::{
+    NumberFace, ScrollBar, ScrollOrientation, StatusBand, TitleBar, TitleBarCommands,
+};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_image::SpriteName;
@@ -79,8 +81,8 @@ const LEAST_COLUMNS: usize = 4;
 /// What the layout's text is set in.
 #[derive(Copy, Clone, Debug)]
 pub struct Faces {
-    /// The status band and the wells' caption.
-    pub status: BitmapFont,
+    /// Captions: the wells', a panel's, the layers'.
+    pub caption: BitmapFont,
     /// A tool setting's label and unit.
     pub label: BitmapFont,
     /// The name of the tool heading the tool-controls bar.
@@ -93,7 +95,7 @@ impl Faces {
     pub fn of(theme: &Theme, scale: Scale) -> Self {
         let face = |role| BitmapFont::for_role(theme.fonts(), role, scale);
         Self {
-            status: face(TextRole::Caption),
+            caption: face(TextRole::Caption),
             label: face(TextRole::Body),
             heading: face(TextRole::SectionHeader),
         }
@@ -274,7 +276,6 @@ impl Layout {
         height: u32,
         theme: &Theme,
         scale: Scale,
-        faces: Faces,
         (needs, panes): (Needs, &Arrangement),
     ) -> Self {
         let gap = gap(theme, scale);
@@ -283,8 +284,9 @@ impl Layout {
         let mut rest = window;
         let (top, controls, view_strip) =
             top_band(&mut rest, (needs.bar_rows, needs.view_strip), theme, scale);
-        let status = rest.take_bottom(status_height(faces, gap));
-        let (position, message, sprite, zoom) = status_slots(status, faces.status, gap);
+        let band = StatusBand::new(theme, scale);
+        let status = rest.take_bottom(band.height());
+        let (position, message, sprite, zoom) = status_slots(status, band);
         let header = TitleBar::height_of(TitleBarCommands::Pane, scale, theme);
         let measures = PaneMeasures {
             gap,
@@ -401,7 +403,6 @@ impl Layout {
     pub fn min_size(
         theme: &Theme,
         scale: Scale,
-        faces: Faces,
         floor: Floor,
         bar_rows: impl FnOnce(u32) -> u32,
     ) -> (u32, u32) {
@@ -420,7 +421,7 @@ impl Layout {
         let palette = palette_row(floor.wells, across, (gap, bar), scale).band(gap);
         let rows = bar_rows(Self::controls_width(width, floor.view_strip, theme, scale));
         let height = top_height(rows, strip_height(theme, scale), gap)
-            + status_height(faces, gap)
+            + StatusBand::new(theme, scale).height()
             + (canvas + bar + palette)
                 .max(header + tool_box_least + gap * 2)
                 .max(header + scale.scale_length(WELLS_HEIGHT) * 2 + gap);
@@ -787,11 +788,6 @@ fn top_band(
 fn top_height(rows: u32, row: u32, gap: u32) -> u32 {
     let rows = rows.max(1);
     row * rows + gap * (rows - 1) + gap * 2
-}
-
-/// The status band's height: a line of its face and a gap above and below.
-fn status_height(faces: Faces, gap: u32) -> u32 {
-    faces.status.line_height().max(1) + gap * 2
 }
 
 /// A palette well's least and most side at `scale`.
@@ -1346,9 +1342,9 @@ fn held_in((width, height): (u32, u32), sizing: WindowSizing) -> (u32, u32) {
 
 /// The status band's position slot, message slot, sprite slot and zoom
 /// slot, left to right: each but the message as wide as the most it reads.
-fn status_slots(band: Rect, face: BitmapFont, gap: u32) -> (Rect, Rect, Rect, Rect) {
+fn status_slots(status: Rect, band: StatusBand) -> (Rect, Rect, Rect, Rect) {
     let room = |text: &mut String| {
-        let room = face.text_width(text) + gap * 2;
+        let room = band.slot_width(text);
         text.clear();
         room
     };
@@ -1371,16 +1367,9 @@ fn status_slots(band: Rect, face: BitmapFont, gap: u32) -> (Rect, Rect, Rect, Re
         Some([u8::MAX, u8::MAX, u8::MAX, 0]),
     );
     let position = room(&mut text);
-    let mut rest = Rect::new(
-        band.left().saturating_add_unsigned(gap),
-        band.top(),
-        band.width.saturating_sub(gap * 2),
-        band.height,
-    );
-    let zoom = rest.take_right(zoom);
-    let sprite = rest.take_right(sprite);
-    let position = rest.take_left(position);
-    (position, rest, sprite, zoom)
+    let slots = band.slots(status, [position], [zoom, sprite]);
+    let ([position], [zoom, sprite]) = (slots.leading, slots.trailing);
+    (position, slots.message, sprite, zoom)
 }
 
 #[cfg(test)]

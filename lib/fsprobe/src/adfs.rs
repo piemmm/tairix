@@ -13,7 +13,7 @@
 use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
-use tairix_fsmeta::preset::acorn::name_char;
+use tairix_fsmeta::preset::acorn::latin1_char;
 
 use crate::{content_identity, read_present};
 
@@ -568,7 +568,7 @@ impl Layout {
         let (name, len) = self.name();
         let mut label = [0u8; NAME_UTF8_MAX];
         let mut used = 0;
-        for ch in name[..len].iter().filter_map(|&byte| name_char(byte)) {
+        for ch in name[..len].iter().filter_map(|&byte| latin1_char(byte)) {
             used += ch.encode_utf8(&mut label[used..]).len();
         }
         (label, used)
@@ -680,7 +680,7 @@ fn old_map<B: Block>(dev: &mut ByteDevice<B>) -> Result<Option<Layout>, DriverEr
 fn trimmed(name: [u8; NAME_LEN]) -> ([u8; NAME_LEN], usize) {
     let held = name
         .iter()
-        .position(|&b| name_char(b).is_none())
+        .position(|&b| latin1_char(b).is_none())
         .unwrap_or(NAME_LEN);
     let len = name[..held]
         .iter()

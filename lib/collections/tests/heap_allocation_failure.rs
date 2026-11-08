@@ -9,8 +9,8 @@
 use core::alloc::Layout;
 
 use tairix_collections::{
-    BitVec, IndexedHeap, OrderedMap, OrderedSet, RadixTree, RangeError, RangeMap, RangeSet,
-    TryReserveError,
+    try_arc, BitVec, IndexedHeap, OrderedMap, OrderedSet, RadixTree, RangeError, RangeMap,
+    RangeSet, SharedSlice, SharedStr, TryReserveError,
 };
 use tairix_fuzzseed::meter::{metered, refusing_above, refusing_after};
 use tairix_fuzzseed::Prng;
@@ -510,4 +510,40 @@ fn a_reserved_bitmap_grows_writes_and_searches_without_allocating() {
     });
     assert_eq!(found, (Some((1 << 16) - 1), Some((1 << 16) - 2), 1));
     assert_eq!(metering.allocations, 0);
+}
+
+#[test]
+fn a_shared_block_the_heap_refuses_is_a_refusal_and_frees_what_it_took() {
+    let refused = Some(TryReserveError::AllocFailed);
+    assert_eq!(
+        refusing_above(0, || SharedSlice::try_from_slice(&[1_u8, 2, 3])).err(),
+        refused
+    );
+    assert_eq!(
+        refusing_above(0, || SharedStr::try_from_str("held")).err(),
+        refused
+    );
+    assert_eq!(
+        refusing_above(0, || try_arc(5_u32)).map(|shared| *shared),
+        Err(TryReserveError::AllocFailed)
+    );
+    let drops = tairix_fuzzseed::Counted::counter();
+    let items = vec![
+        tairix_fuzzseed::Counted::new(&drops),
+        tairix_fuzzseed::Counted::new(&drops),
+    ];
+    assert!(refusing_above(0, || SharedSlice::try_from_vec(items)).is_err());
+    assert_eq!(drops.get(), 2, "the refused vector's items dropped with it");
+    let empty = refusing_above(0, || SharedSlice::<u64>::try_from_slice(&[]));
+    assert!(
+        empty.is_ok_and(|empty| empty.is_empty()),
+        "the empty slice takes nothing"
+    );
+    let (text, taken) = metered(|| SharedStr::try_from_str("held").expect("held"));
+    assert_eq!(
+        taken.allocations, 1,
+        "one block holds the count, the length and the text"
+    );
+    let ((), freed) = metered(|| drop(text));
+    assert_eq!(freed.frees, 1);
 }

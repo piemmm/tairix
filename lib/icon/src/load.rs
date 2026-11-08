@@ -340,6 +340,13 @@ pub const ICON_KINDS: [IconKind; core::mem::variant_count::<IconKind>()] = [
     IconKind::Wireframe,
     IconKind::Magnet,
     IconKind::Ruler,
+    IconKind::Divide,
+    IconKind::Outset,
+    IconKind::Inset,
+    IconKind::Simplify,
+    IconKind::ReverseDirection,
+    IconKind::Clip,
+    IconKind::ReleaseClip,
 ];
 
 /// A source of on-disk SVG icon assets, one per [`IconKind`].

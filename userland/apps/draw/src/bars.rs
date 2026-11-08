@@ -221,7 +221,8 @@ mod tests {
     #[test]
     fn a_bar_spans_the_page_with_pasteboard_and_scrolling_by_it_moves_the_canvas() {
         let mut ids = Ids::new();
-        let drawing = blank(&mut ids).expect("a drawing");
+        let drawing =
+            blank(&mut ids, &crate::preferences::Preferences::default()).expect("a drawing");
         let document = Document::new(drawing, ids, true);
         let mut view = View::new(
             document,

@@ -5,14 +5,14 @@
 //! read back from them only when it is answered, and a value that does not
 //! parse is stated on the dialog itself, which stays open to be put right.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_controls::{
-    Button, ButtonContent, ComboBox, ControlRole, Dialog, DialogAction, FieldAction, FieldControl,
-    FieldGroup, FieldGroupAction, FieldLayout, FieldRow, Keystroke, Slider, TextAction, TextField,
-    Toggle,
+    Button, ButtonContent, ControlRole, Dialog, DialogAction, FieldAction, FieldControl,
+    FieldGroup, FieldGroupAction, FieldLayout, FieldRow, Keystroke, NumberField, Slider,
+    TextAction, TextField, ValidationState,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_image::{IndexDepth, SpriteName, TiffCompression};
@@ -27,9 +27,6 @@ use crate::transform::{Anchor, PaletteChoice};
 
 /// A form's width, in logical pixels.
 const FORM_WIDTH: u32 = 460;
-
-/// The longest a number field takes.
-const NUMBER_LEN: usize = 6;
 
 /// The pixel shapes a new sprite may have, as eigen factors across and down.
 const SHAPES: [((u8, u8), &str); 3] = [
@@ -130,18 +127,12 @@ fn text_row(label: &str, text: &str, len: usize) -> FieldRow {
     )
 }
 
-fn choice_row(label: &str, choices: &[&str], selected: usize) -> FieldRow {
-    FieldRow::new(
-        label,
-        FieldControl::Combo(
-            ComboBox::new(choices.iter().map(|choice| String::from(*choice)).collect())
-                .with_selected(selected),
-        ),
-    )
-}
-
-fn toggle_row(label: &str, on: bool) -> FieldRow {
-    FieldRow::new(label, FieldControl::Toggle(Toggle::new(label, on)))
+/// A row holding a picture's side, in whole pixels from one to the most a
+/// picture may have.
+pub(crate) fn side_row(label: &str, side: u32) -> FieldRow {
+    let most = i32::try_from(MAX_SIDE).unwrap_or(i32::MAX);
+    let side = i32::try_from(side).unwrap_or(most);
+    FieldRow::new(label, FieldControl::Number(NumberField::new(side, 1, most)))
 }
 
 impl Form {
@@ -177,13 +168,7 @@ impl Form {
             .map(|format| (format, Vec::new()))
             .collect();
         form.format = format;
-        let (width, height) = picture.size;
-        form.rebuild(
-            &width.to_string(),
-            &height.to_string(),
-            picture.depth,
-            picture.transparent,
-        );
+        form.rebuild(picture.size, picture.depth, picture.transparent);
         form
     }
 
@@ -195,10 +180,10 @@ impl Form {
             "New page",
             "Create",
             vec![
-                text_row("Width", &size.0.to_string(), NUMBER_LEN),
-                text_row("Height", &size.1.to_string(), NUMBER_LEN),
-                choice_row("Colours", &COLOURS.map(|colours| colours.label), 0),
-                toggle_row("Transparent background", false),
+                side_row("Width", size.0),
+                side_row("Height", size.1),
+                FieldRow::choice("Colours", &COLOURS.map(|colours| colours.label), 0),
+                FieldRow::toggle("Transparent background", false),
             ],
         )
     }
@@ -243,13 +228,13 @@ impl Form {
             .iter()
             .position(|(format, _)| *format == self.format)
             .unwrap_or(0);
-        choice_row("Format", &labels, chosen)
+        FieldRow::choice("Format", &labels, chosen)
     }
 
     /// Lay the new-picture form out again for the format chosen, keeping the
     /// size typed, the colours `depth` names where the format holds them, and
     /// the background where it can be clear.
-    fn rebuild(&mut self, width: &str, height: &str, depth: Option<IndexDepth>, clear: bool) {
+    fn rebuild(&mut self, (width, height): (u32, u32), depth: Option<IndexDepth>, clear: bool) {
         let format = self.format;
         let chosen = colours_for(format)
             .position(|offered| offered.depth == depth)
@@ -257,12 +242,12 @@ impl Form {
         let labels: Vec<&str> = colours_for(format).map(|offered| offered.label).collect();
         let mut rows = vec![
             self.format_row(),
-            text_row("Width", width, NUMBER_LEN),
-            text_row("Height", height, NUMBER_LEN),
-            choice_row("Colours", &labels, chosen),
+            side_row("Width", width),
+            side_row("Height", height),
+            FieldRow::choice("Colours", &labels, chosen),
         ];
         if format.holds_transparency() {
-            rows.push(toggle_row("Transparent background", clear));
+            rows.push(FieldRow::toggle("Transparent background", clear));
         }
         self.replace_rows(rows);
     }
@@ -283,13 +268,15 @@ impl Form {
                     ),
                 ));
             }
-            SaveFormat::Gif => rows.push(toggle_row("Interlaced", self.settings.gif.interlaced)),
+            SaveFormat::Gif => {
+                rows.push(FieldRow::toggle("Interlaced", self.settings.gif.interlaced));
+            }
             SaveFormat::Tiff => {
                 let chosen = COMPRESSIONS
                     .iter()
                     .position(|(compression, _)| *compression == self.settings.tiff.compression)
                     .unwrap_or(0);
-                rows.push(choice_row(
+                rows.push(FieldRow::choice(
                     "Compression",
                     &COMPRESSIONS.map(|(_, label)| label),
                     chosen,
@@ -337,11 +324,11 @@ impl Form {
             "Create",
             vec![
                 text_row("Name", name, SpriteName::MAX_LEN),
-                text_row("Width", &size.0.to_string(), NUMBER_LEN),
-                text_row("Height", &size.1.to_string(), NUMBER_LEN),
-                choice_row("Colours", &COLOURS.map(|colours| colours.label), 2),
-                choice_row("Pixel shape", &SHAPES.map(|(_, label)| label), 0),
-                toggle_row("Mask", false),
+                side_row("Width", size.0),
+                side_row("Height", size.1),
+                FieldRow::choice("Colours", &COLOURS.map(|colours| colours.label), 2),
+                FieldRow::choice("Pixel shape", &SHAPES.map(|(_, label)| label), 0),
+                FieldRow::toggle("Mask", false),
             ],
         )
     }
@@ -351,12 +338,12 @@ impl Form {
     #[must_use]
     pub fn scale(size: (u32, u32), smooth: bool) -> Self {
         let mut rows = vec![
-            text_row("Width", &size.0.to_string(), NUMBER_LEN),
-            text_row("Height", &size.1.to_string(), NUMBER_LEN),
-            toggle_row("Keep proportions", true),
+            side_row("Width", size.0),
+            side_row("Height", size.1),
+            FieldRow::toggle("Keep proportions", true),
         ];
         if smooth {
-            rows.push(toggle_row("Smooth", true));
+            rows.push(FieldRow::toggle("Smooth", true));
         }
         let mut form = Self::new(Purpose::Scale, "Resize picture", "Resize", rows);
         form.proportions = (size.0.max(1), size.1.max(1));
@@ -371,9 +358,9 @@ impl Form {
             "Canvas size",
             "Change",
             vec![
-                text_row("Width", &size.0.to_string(), NUMBER_LEN),
-                text_row("Height", &size.1.to_string(), NUMBER_LEN),
-                choice_row("Keep the picture at", &ANCHORS, 4),
+                side_row("Width", size.0),
+                side_row("Height", size.1),
+                FieldRow::choice("Keep the picture at", &ANCHORS, 4),
             ],
         )
     }
@@ -390,9 +377,9 @@ impl Form {
             "Colours",
             "Convert",
             vec![
-                choice_row("Store as", &COLOURS.map(|colours| colours.label), selected),
-                choice_row("Palette", &PALETTES.map(|(_, label)| label), 1),
-                toggle_row("Dither", true),
+                FieldRow::choice("Store as", &COLOURS.map(|colours| colours.label), selected),
+                FieldRow::choice("Palette", &PALETTES.map(|(_, label)| label), 1),
+                FieldRow::toggle("Dither", true),
             ],
         )
     }
@@ -534,11 +521,11 @@ impl Form {
         if acted.row != 0 || self.chosen_format(index) == self.format {
             return;
         }
-        let (width, height) = (String::from(self.text(1)), String::from(self.text(2)));
+        let typed = (self.side(1), self.side(2));
         let depth = self.new_depth();
         let clear = self.on(4);
         self.format = self.chosen_format(index);
-        self.rebuild(&width, &height, depth, clear);
+        self.rebuild(typed, depth, clear);
     }
 
     fn follow_save_as(&mut self, acted: &FieldGroupAction) {
@@ -586,20 +573,23 @@ impl Form {
     }
 
     fn follow_proportions(&mut self, acted: &FieldGroupAction) {
-        if !matches!(acted.action, FieldAction::Text(TextAction::Edited)) || !self.on(2) {
+        let FieldAction::Number(action) = acted.action else {
+            return;
+        };
+        if !self.on(2) {
             return;
         }
         let (width, height) = (u64::from(self.proportions.0), u64::from(self.proportions.1));
-        let (from, to, num, den) = match acted.row {
-            0 => (0, 1, height, width),
-            1 => (1, 0, width, height),
+        let (to, num, den) = match acted.row {
+            0 => (1, height, width),
+            1 => (0, width, height),
             _ => return,
         };
-        let Ok(value) = self.text(from).trim().parse::<u64>() else {
+        let Ok(value) = u64::try_from(action.value()) else {
             return;
         };
         let other = (value * num + den / 2) / den.max(1);
-        self.set_text(to, &other.max(1).to_string());
+        self.set_side(to, u32::try_from(other.max(1)).unwrap_or(u32::MAX));
     }
 
     fn text(&self, row: usize) -> &str {
@@ -609,14 +599,35 @@ impl Form {
         }
     }
 
-    fn set_text(&mut self, row: usize, text: &str) {
-        if let Some(FieldControl::Text(field)) = self
+    /// Row `row`'s side as it stands, the last held where its typing spells
+    /// none.
+    fn side(&self, row: usize) -> u32 {
+        match self.group.rows().get(row).map(FieldRow::control) {
+            Some(FieldControl::Number(field)) => u32::try_from(field.value()).unwrap_or(1),
+            _ => 1,
+        }
+    }
+
+    /// Row `row`'s side, where what it holds spells one in range.
+    fn typed_side(&self, row: usize) -> Option<u32> {
+        match self.group.rows().get(row).map(FieldRow::control) {
+            Some(FieldControl::Number(field))
+                if field.state().validation == ValidationState::Valid =>
+            {
+                u32::try_from(field.value()).ok()
+            }
+            _ => None,
+        }
+    }
+
+    fn set_side(&mut self, row: usize, side: u32) {
+        if let Some(FieldControl::Number(field)) = self
             .group
             .rows_mut()
             .get_mut(row)
             .map(FieldRow::control_mut)
         {
-            field.set_text(text);
+            field.set_value(i32::try_from(side).unwrap_or(i32::MAX));
         }
     }
 
@@ -640,8 +651,7 @@ impl Form {
     }
 
     fn size(&self, first: usize) -> Result<(u32, u32), String> {
-        let side = |row: usize| self.text(row).trim().parse::<u32>().ok();
-        match (side(first), side(first + 1)) {
+        match (self.typed_side(first), self.typed_side(first + 1)) {
             (Some(width), Some(height)) if admissible(width, height) => Ok((width, height)),
             _ => Err(alloc::format!(
                 "A size is a whole number of pixels from 1 to {MAX_SIDE} on each side, \

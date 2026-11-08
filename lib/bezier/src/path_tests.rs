@@ -56,9 +56,10 @@ fn a_clockwise_square_winds_once_around_its_inside() {
     assert_eq!(path.winding(p(5.0, 5.0)), 1);
     assert_eq!(path.winding(p(15.0, 5.0)), 0);
     assert_eq!(path.winding(p(-1.0, 5.0)), 0);
-    assert_eq!(path.reversed().winding(p(5.0, 5.0)), -1);
+    let reversed = path.reversed().expect("reversed");
+    assert_eq!(reversed.winding(p(5.0, 5.0)), -1);
     assert!((path.signed_area() - 100.0).abs() < 1e-12);
-    assert!((path.reversed().signed_area() + 100.0).abs() < 1e-12);
+    assert!((reversed.signed_area() + 100.0).abs() < 1e-12);
 }
 
 #[test]
@@ -82,7 +83,10 @@ fn a_ray_through_a_vertex_counts_it_once() {
 #[test]
 fn a_hole_is_a_hole_by_either_rule_when_wound_against() {
     let path = Path {
-        subpaths: vec![square(0.0, 0.0, 30.0), square(10.0, 10.0, 10.0).reversed()],
+        subpaths: vec![
+            square(0.0, 0.0, 30.0),
+            square(10.0, 10.0, 10.0).reversed().expect("reversed"),
+        ],
     };
     assert!(path.contains(p(5.0, 5.0), FillRule::NonZero));
     assert!(!path.contains(p(15.0, 15.0), FillRule::NonZero));
@@ -161,24 +165,58 @@ fn reversing_twice_is_the_identity() {
         .elements
         .push(PathEl::Cubic(p(1.0, 5.0), p(4.0, 5.0), p(5.0, 0.0)));
     subpath.elements.push(PathEl::Line(p(9.0, 2.0)));
-    let back = subpath.reversed();
+    let back = subpath.reversed().expect("reversed");
     assert_eq!(back.start, p(9.0, 2.0));
     assert_eq!(back.elements[0], PathEl::Line(p(5.0, 0.0)));
     assert_eq!(
         back.elements[1],
         PathEl::Cubic(p(4.0, 5.0), p(1.0, 5.0), p(0.0, 0.0))
     );
-    assert_eq!(back.reversed(), subpath);
+    assert_eq!(back.reversed().expect("back"), subpath);
 }
 
 #[test]
 fn flattening_starts_at_the_start_and_ends_at_the_end() {
     let subpath = circle(p(0.0, 0.0), 10.0, false);
     let mut points: Vec<Point> = Vec::new();
-    subpath.flatten(0.01, &mut points);
+    subpath.flatten(0.01, &mut points).expect("flattened");
     assert_eq!(points[0], subpath.start);
     assert!(points.len() > 16);
     for point in &points {
         assert!((point.length() - 10.0).abs() < 0.02);
     }
+}
+
+#[test]
+fn a_copy_is_the_path_and_a_move_moves_every_point_of_it() {
+    let path = Path {
+        subpaths: vec![circle(p(5.0, 5.0), 3.0, false), square(0.0, 0.0, 2.0)],
+    };
+    let copy = path.try_clone().expect("copied");
+    assert_eq!(copy, path);
+    let moved = path
+        .transformed(crate::affine::Affine::translate(10.0, -4.0))
+        .expect("moved");
+    assert_eq!(moved.subpaths.len(), path.subpaths.len());
+    for (moved, original) in moved.subpaths.iter().zip(&path.subpaths) {
+        assert_eq!(moved.start, original.start + p(10.0, -4.0));
+        assert_eq!(moved.closed, original.closed);
+        assert_eq!(moved.end(), original.end() + p(10.0, -4.0));
+        assert_eq!(moved.elements.len(), original.elements.len());
+    }
+    let single = Path::single(square(1.0, 1.0, 1.0)).expect("one");
+    assert_eq!(single.subpaths, vec![square(1.0, 1.0, 1.0)]);
+}
+
+#[test]
+fn a_step_made_of_a_segment_starts_that_segment_again() {
+    let subpath = circle(p(0.0, 0.0), 4.0, true);
+    let mut from = subpath.start;
+    for &element in &subpath.elements {
+        let segment = element.segment_from(from);
+        assert_eq!(PathEl::of(segment), element);
+        from = element.end();
+    }
+    let line = PathEl::Line(p(3.0, 4.0));
+    assert_eq!(PathEl::of(line.segment_from(p(1.0, 1.0))), line);
 }

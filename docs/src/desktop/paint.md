@@ -436,7 +436,9 @@ own, centred over the picture's window and holding it until the form is
 answered: a form's rows are filled from the picture as it stood when it
 opened, which an edit made behind it would make untrue. A form is laid out at
 the size its rows need, and a list one of its rows opens stays within the
-dialog. The window's own input is never filtered for it: the desktop holds the
+dialog. A side is a number field, taking digits alone, and a side typed past
+what a picture may have is refused with the reason when the form is
+answered. The window's own input is never filtered for it: the desktop holds the
 window while the form is up.
 
 **New picture** asks first which format the picture is for, and offers the
@@ -482,20 +484,24 @@ kept as its bytes as anything but a sprite area.
 ## Settings
 
 *Settings…* on the icon bar's menu opens Paint's settings window, or brings
-the open one forward: its categories down a sidebar — General, New picture,
-Grid, Canvas, Panes — each category's settings in a panel beside it, and
-*Restore defaults* beneath.
+the open one forward: the shared settings window of every document
+application (`lib/window`'s `docapp::settings`, over `lib/controls`'
+`SettingsFrame`) — its categories down a sidebar — General, New picture,
+Grid, Canvas, Panes — each category's settings as groups of form rows beside
+it, scrolling where they outgrow the window, and *Restore defaults* beneath. A
+colour is a swatch typed in hexadecimal.
 
 | Category | Settings |
 |---|---|
 | General | the tool a new window starts with; whether a picture opens fitted to the window, never past actual size, or at actual size |
 | New picture | width, height, format, the colours that format holds, a transparent background where it can be clear — what *New picture* offers to start |
-| Grid | spacing and offset across and down, colour, opacity, style; whether a new window shows it; snapping to it; the zoom from which the pixel grid shows, or never |
+| Grid | spacing and offset across and down, colour, opacity in percent, style; whether a new window shows it; snapping to it; and, apart, the zoom from which the pixel grid shows, or never |
 | Canvas | the checkerboard's square and its shades, the theme's or two chosen; what surrounds the picture, the theme's ground or a chosen colour |
 | Panes | the arrangement a new window opens with and *Reset panes* returns to: the front picture window's, taken, or the shipped one |
 
-A change applies to every picture window as the interaction settles and is
-written off the loop to Paint's own app-data store, which no other application
+A change applies to every picture window as it is made — a slider's live
+value as it moves — and is written, once the interaction settles, off the loop
+to Paint's own app-data store, which no other application
 reads ([app data](../lib/appdata.md)); what the store then says is what
 applies, wherever the user has not changed something since. A refused write is
 said in the settings window and on `stderr`, and the values it carried go back
@@ -564,7 +570,9 @@ what floats first.
 ## Limits
 
 - A picture is at most 65,536 pixels on a side and 64 Mi pixels in all, and a
-  file at most 64 MiB: the sandboxed decode's own bounds.
+  file at most what the sandboxed decode's worker holds on this computer — a
+  quarter of the RAM less its message frames, and never less than 64 MiB:
+  the sandboxed decode's own bounds.
 - A sprite area holds at most 4,096 sprites, and a picture at most 256 layers
   (`tairix_image::MOST_ORA_LAYERS`), each named in at most 255 bytes.
 - A brush is at most 64 pixels across (`tool::MAX_SIZE`), feathering reaches at

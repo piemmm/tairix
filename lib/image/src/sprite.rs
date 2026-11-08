@@ -156,11 +156,18 @@ const MODE_EIG: [(u8, u8); 54] = [
 /// The finest resolution an eigen factor can state: OS units per inch.
 const OS_UNITS_PER_INCH: u32 = 180;
 
+/// The dots to the inch an eigen factor of `eig` states: a pixel `2^eig` OS
+/// units across.
+const fn dpi_of_eig(eig: u8) -> u32 {
+    OS_UNITS_PER_INCH >> eig
+}
+
 /// The largest eigen factor a RISC OS 5 mode word's two-bit fields hold.
 const RO5_MAX_EIG: u8 = 3;
 
-/// The coarsest eigen factor a pixel's shape is read from.
-const MAX_EIG: u8 = 4;
+/// The coarsest eigen factor a pixel's shape is read from: a pixel sixteen OS
+/// units across.
+pub const MAX_EIG: u8 = 4;
 
 /// The sixteen colours of the desktop's standard palette, in Wimp colour
 /// order.
@@ -403,7 +410,7 @@ fn pixel_shape((x, y): (u8, u8)) -> (u32, u32) {
 /// pitch it does not exceed.
 fn eig_of_dpi(dpi: u32) -> u8 {
     let mut eig = 0u8;
-    while eig < MAX_EIG && OS_UNITS_PER_INCH >> eig > dpi {
+    while eig < MAX_EIG && dpi_of_eig(eig) > dpi {
         eig += 1;
     }
     eig
@@ -644,11 +651,10 @@ impl SpriteMode {
     /// at the resolutions `eig` states.
     fn word_for(sprite_type: u32, layout: Layout, eig: (u8, u8), alpha_mask: bool) -> Self {
         let eig = (eig.0.min(MAX_EIG), eig.1.min(MAX_EIG));
-        let dpi = |eig: u8| OS_UNITS_PER_INCH >> eig;
         let value = u32::from(alpha_mask) << 31
             | sprite_type << 27
-            | dpi(eig.1) << 14
-            | dpi(eig.0) << 1
+            | dpi_of_eig(eig.1) << 14
+            | dpi_of_eig(eig.0) << 1
             | 1;
         let mask = if alpha_mask {
             MaskDepth::Alpha
@@ -703,6 +709,17 @@ impl SpriteMode {
         pixel_shape(self.mode.eig)
     }
 
+    /// The density its eigen factors state, in dots to the inch.
+    #[must_use]
+    pub fn density(&self) -> Option<crate::Density> {
+        let (across, down) = self.mode.eig;
+        crate::Density::whole(
+            dpi_of_eig(across),
+            dpi_of_eig(down),
+            crate::DensityUnit::Inch,
+        )
+    }
+
     /// Whether the mask is eight bits of alpha rather than binary.
     #[must_use]
     pub fn alpha_mask(&self) -> bool {
@@ -727,9 +744,9 @@ impl SpriteMode {
             (value, eig)
         } else {
             let eig = (eig.0.min(MAX_EIG), eig.1.min(MAX_EIG));
-            let dpi = |eig: u8| OS_UNITS_PER_INCH >> eig;
-            let value =
-                self.value & !(0x1FFF << 14 | 0x1FFF << 1) | dpi(eig.1) << 14 | dpi(eig.0) << 1;
+            let value = self.value & !(0x1FFF << 14 | 0x1FFF << 1)
+                | dpi_of_eig(eig.1) << 14
+                | dpi_of_eig(eig.0) << 1;
             (value, eig)
         };
         Self {
@@ -1348,7 +1365,7 @@ impl Located<'_> {
 }
 
 /// Decode the sprite whose control block sits at `at`.
-fn decode_sprite(bytes: &[u8], at: u32, limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
+fn decode_at(bytes: &[u8], at: u32, limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
     locate(bytes, at, limits)?.rgba()
 }
 
@@ -1535,7 +1552,7 @@ impl PageSource for Area {
         limits: &DecodeLimits,
     ) -> Result<RasterImage, DecodeError> {
         let at = self.locate(bytes, index)?;
-        decode_sprite(bytes, at, limits)
+        decode_at(bytes, at, limits)
     }
 }
 
@@ -1674,6 +1691,34 @@ pub fn decode_named(
     limits: &DecodeLimits,
 ) -> Result<RasterImage, DecodeError> {
     locate(bytes, sprite.at, limits)?.rgba()
+}
+
+/// A sprite on its own and the shape of its pixels: what a container of
+/// single sprites, a Draw file's sprite object, holds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoneSprite {
+    /// Its pixels, straight-alpha RGBA8 at its natural size.
+    pub image: RasterImage,
+    /// Its pixels' eigen factors across and down: each is `2^eig` OS units,
+    /// a hundred and eightieth of an inch.
+    pub eig: (u8, u8),
+    /// The bytes it occupies, control block first, as its length word states.
+    pub length: u32,
+}
+
+/// `bytes`, one sprite's control block and what it states with no area
+/// around it, decoded.
+///
+/// # Errors
+///
+/// Whatever decoding it refuses, its size past `limits` included.
+pub fn decode_sprite(bytes: &[u8], limits: &DecodeLimits) -> Result<LoneSprite, DecodeError> {
+    let located = locate(bytes, 0, limits)?;
+    Ok(LoneSprite {
+        image: located.rgba()?,
+        eig: located.header.mode.eig,
+        length: located.header.length,
+    })
 }
 
 /// A sprite area read one sprite at a time, each in the representation its

@@ -2778,3 +2778,265 @@ fn a_list_its_layout_cannot_draw_holds_no_input() {
     assert!(!group.rows()[1].popup_open(), "a key closes it too");
     assert_eq!(group.focus(), Some(0), "and moves the cursor as meant");
 }
+
+// --- A number slot ------------------------------------------------------
+
+fn number_group() -> FieldGroup {
+    FieldGroup::new(
+        "SIZE",
+        vec![
+            FieldRow::new(
+                "Width",
+                FieldControl::Number(crate::number::NumberField::new(40, 1, 500)),
+            ),
+            toggle_row("Keep proportions", true),
+        ],
+    )
+}
+
+fn number_value(group: &FieldGroup) -> i32 {
+    match group.rows()[0].control() {
+        FieldControl::Number(field) => field.value(),
+        _ => panic!("the row holds a number"),
+    }
+}
+
+/// A number slot is as wide as its field wants, reports what is typed as it
+/// is typed, and steps by a page, the group's cursor keeping Up and Down.
+#[test]
+fn a_number_slot_reports_its_typing_and_steps_by_the_page() {
+    use crate::number::NumberAction;
+
+    let theme = Theme::light();
+    let scale = Scale::ONE;
+    let mut group = number_group();
+    let field = crate::number::NumberField::new(40, 1, 500);
+    assert_eq!(
+        group.rows()[0].slot_width(scale, &theme),
+        Some(field.preferred_width(scale, &theme))
+    );
+    let layout = own_layout(&group, Rect::new(0, 0, W, 200), scale, &theme);
+    let mut damage = sink();
+    let _ = group.set_focus(Some(0), layout, scale, &theme, &mut damage);
+    for key in [NamedKey::End, NamedKey::Backspace, NamedKey::Backspace] {
+        let _ = group.on_key(
+            keystroke(Key::Named(key)),
+            layout,
+            scale,
+            &theme,
+            &mut damage,
+        );
+    }
+    let typed = group.on_key(
+        keystroke(Key::Char('7')),
+        layout,
+        scale,
+        &theme,
+        &mut damage,
+    );
+    assert_eq!(
+        typed,
+        Some(FieldGroupAction {
+            row: 0,
+            action: FieldAction::Number(NumberAction::Edited { value: 7 }),
+        }),
+        "End reached the field's caret rather than the last row"
+    );
+    let stepped = group.on_key(
+        keystroke(Key::Named(NamedKey::PageUp)),
+        layout,
+        scale,
+        &theme,
+        &mut damage,
+    );
+    assert_eq!(
+        stepped,
+        Some(FieldGroupAction {
+            row: 0,
+            action: FieldAction::Number(NumberAction::Settled { value: 17 }),
+        })
+    );
+    assert_eq!(number_value(&group), 17);
+}
+
+/// The keyboard leaving a number row settles it — typing past a bound is
+/// held to it — whether a key moves it on or a press lands elsewhere.
+#[test]
+fn a_number_row_the_keyboard_leaves_settles() {
+    use crate::number::NumberAction;
+
+    let theme = Theme::light();
+    let scale = Scale::ONE;
+    let bounds = Rect::new(0, 0, W, 200);
+    for by_press in [false, true] {
+        let mut group = number_group();
+        let layout = own_layout(&group, bounds, scale, &theme);
+        let mut damage = sink();
+        let _ = group.set_focus(Some(0), layout, scale, &theme, &mut damage);
+        for key in [
+            Key::Named(NamedKey::End),
+            Key::Named(NamedKey::Backspace),
+            Key::Named(NamedKey::Backspace),
+            Key::Char('9'),
+            Key::Char('9'),
+            Key::Char('9'),
+        ] {
+            let _ = group.on_key(keystroke(key), layout, scale, &theme, &mut damage);
+        }
+        let left = if by_press {
+            let rect = group
+                .row_rect(1, layout, scale, &theme)
+                .expect("the toggle's row");
+            let centre = Point::new(
+                rect.left() + to_i32(rect.width) / 2,
+                rect.top() + to_i32(rect.height) / 2,
+            );
+            let _ = group.on_pointer(
+                &InputEvent::PointerMoved { to: centre },
+                layout,
+                scale,
+                &theme,
+                &mut damage,
+            );
+            group.on_pointer(
+                &InputEvent::PointerPressed {
+                    button: PointerButton::Primary,
+                },
+                layout,
+                scale,
+                &theme,
+                &mut damage,
+            )
+        } else {
+            group.on_key(
+                keystroke(Key::Named(NamedKey::Down)),
+                layout,
+                scale,
+                &theme,
+                &mut damage,
+            )
+        };
+        assert_eq!(
+            left,
+            Some(FieldGroupAction {
+                row: 0,
+                action: FieldAction::Number(NumberAction::Settled { value: 500 }),
+            }),
+            "999 is held to the bound, by press {by_press}"
+        );
+        assert_eq!(group.focus(), Some(1));
+        assert_eq!(number_value(&group), 500);
+        let again = group.set_focus(None, layout, scale, &theme, &mut damage);
+        assert_eq!(again, None, "a row that is not a number settles nothing");
+    }
+}
+
+// --- A colour slot ------------------------------------------------------
+
+/// A colour slot is as wide as its field wants, takes Home and End for its
+/// caret, and settles what was typed as the keyboard leaves its row.
+#[test]
+fn a_colour_row_reports_its_typing_and_settles_as_the_keyboard_leaves() {
+    use crate::colour_field::{ColourAction, ColourField};
+    use tairix_colour::Rgba;
+
+    let theme = Theme::light();
+    let scale = Scale::ONE;
+    let blue = Rgba::new(0x4a, 0x8f, 0xe2, 0xff);
+    let mut group = FieldGroup::new(
+        "GRID",
+        vec![
+            FieldRow::new(
+                "Colour",
+                FieldControl::Colour(ColourField::new(blue, false)),
+            ),
+            toggle_row("Shown", true),
+        ],
+    );
+    assert_eq!(
+        group.rows()[0].slot_width(scale, &theme),
+        Some(ColourField::new(blue, false).preferred_width(scale, &theme))
+    );
+    let layout = own_layout(&group, Rect::new(0, 0, W, 200), scale, &theme);
+    let mut damage = sink();
+    let _ = group.set_focus(Some(0), layout, scale, &theme, &mut damage);
+    let mut acted = None;
+    for key in [
+        Key::Named(NamedKey::End),
+        Key::Named(NamedKey::Backspace),
+        Key::Char('0'),
+    ] {
+        acted = group.on_key(keystroke(key), layout, scale, &theme, &mut damage);
+    }
+    let typed = Rgba::new(0x4a, 0x8f, 0xe0, 0xff);
+    assert_eq!(
+        acted,
+        Some(FieldGroupAction {
+            row: 0,
+            action: FieldAction::Colour(ColourAction::Edited { colour: typed }),
+        }),
+        "End reached the field's caret rather than the last row"
+    );
+    let left = group.on_key(
+        keystroke(Key::Named(NamedKey::Down)),
+        layout,
+        scale,
+        &theme,
+        &mut damage,
+    );
+    assert_eq!(
+        left,
+        Some(FieldGroupAction {
+            row: 0,
+            action: FieldAction::Colour(ColourAction::Settled { colour: typed }),
+        })
+    );
+    assert_eq!(group.focus(), Some(1));
+}
+
+/// What ends an interaction, so a durable change may follow, and what does
+/// not.
+#[test]
+fn an_action_settles_only_where_its_interaction_ends() {
+    use crate::colour_field::ColourAction;
+    use crate::number::NumberAction;
+    use tairix_colour::Rgba;
+
+    let colour = Rgba::new(1, 2, 3, 255);
+    for settled in [
+        FieldAction::Set { on: true },
+        FieldAction::SetFlag { index: 0, on: true },
+        FieldAction::Selected { index: 1 },
+        FieldAction::Settled { permille: 500 },
+        FieldAction::Number(NumberAction::Settled { value: 3 }),
+        FieldAction::Colour(ColourAction::Settled { colour }),
+        FieldAction::Text(TextAction::Submitted),
+        FieldAction::Text(TextAction::Cancelled),
+        FieldAction::Activated,
+    ] {
+        assert!(settled.settles(), "{settled:?}");
+    }
+    for live in [
+        FieldAction::Choices { expanded: true },
+        FieldAction::SetValue { permille: 500 },
+        FieldAction::Number(NumberAction::Edited { value: 3 }),
+        FieldAction::Colour(ColourAction::Edited { colour }),
+        FieldAction::Text(TextAction::Edited),
+        FieldAction::Browsed { index: 0 },
+    ] {
+        assert!(!live.settles(), "{live:?}");
+    }
+}
+
+/// A switch row's slot is the switch alone: its label is the row's, never
+/// drawn a second time inside the slot.
+#[test]
+fn a_switch_row_names_its_setting_once() {
+    let theme = Theme::light();
+    let row = FieldRow::toggle("Snap to the grid", true);
+    assert_eq!(row.label(), "Snap to the grid");
+    assert_eq!(
+        row.slot_width(Scale::ONE, &theme),
+        Some(Toggle::new("", true).measured_width(Scale::ONE, &theme))
+    );
+}

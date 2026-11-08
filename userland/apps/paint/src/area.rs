@@ -21,7 +21,7 @@ use tairix_abi::window_ipc::{
 };
 use tairix_controls::{
     fill_area, withheld, ControlState, IconTile, Keystroke, ScrollAction, ScrollBar, ScrollModel,
-    ScrollOrientation, ScrollRange, SelectionState, TileLayout,
+    ScrollOrientation, ScrollRange, SelectionState, StatusBand, StatusTone, TileLayout,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconKind, IconPicture};
@@ -39,7 +39,6 @@ use crate::document::{
     free_name, sprite_picture, Document, Entry, EntryId, ListRefusal, Snapshot, NAME_REFUSAL,
     SPRITE_STEM,
 };
-use crate::layout::Faces;
 use crate::save::{format_for, natural, save_formats};
 use crate::view::{
     Action, Compute, Computed, MenuKind, Outcome, Own, Request, APP_TITLE, RENAME_ENTRY,
@@ -455,17 +454,10 @@ impl AreaView {
 
     /// The layout of a `width`×`height` window.
     #[must_use]
-    pub fn layout(
-        &self,
-        width: u32,
-        height: u32,
-        theme: &Theme,
-        scale: Scale,
-        faces: Faces,
-    ) -> AreaLayout {
+    pub fn layout(&self, width: u32, height: u32, theme: &Theme, scale: Scale) -> AreaLayout {
         let gap = scale.scale_length(GAP).max(1);
         let thumb = scale.scale_length(THUMB).max(1);
-        let status_height = faces.status.line_height().max(1) + gap * 2;
+        let status_height = StatusBand::new(theme, scale).height();
         let cell = cell_size(thumb, scale, theme);
         let window = Rect::new(0, 0, width, height);
         let status = Rect::new(
@@ -508,24 +500,24 @@ impl AreaView {
 
     /// The smallest window a sprite file is shown in: one cell and its band.
     #[must_use]
-    pub fn min_size(theme: &Theme, scale: Scale, faces: Faces) -> (u32, u32) {
+    pub fn min_size(theme: &Theme, scale: Scale) -> (u32, u32) {
         let gap = scale.scale_length(GAP).max(1);
         let cell = cell_size(scale.scale_length(THUMB).max(1), scale, theme);
         let bar = bar_breadth(scale, theme);
         (
             cell.0 + gap * 2 + bar,
-            cell.1 + gap * 2 + faces.status.line_height() + gap * 2,
+            cell.1 + gap * 2 + StatusBand::new(theme, scale).height(),
         )
     }
 
-    /// The window's size in logical pixels to open at, in `theme` with
-    /// `faces` at the reference scale: [`OPEN_WIDTH`] across and as tall as
+    /// The window's size in logical pixels to open at, in `theme` at the
+    /// reference scale: [`OPEN_WIDTH`] across and as tall as
     /// its sprites need at that width, at most [`OPEN_HEIGHT_MAX`], and never
     /// below [`Self::min_size`].
     #[must_use]
-    pub fn open_size(count: usize, theme: &Theme, faces: Faces) -> (u32, u32) {
+    pub fn open_size(count: usize, theme: &Theme) -> (u32, u32) {
         let cell = cell_size(THUMB, Scale::ONE, theme);
-        let band = faces.status.line_height().max(1) + GAP * 2;
+        let band = StatusBand::new(theme, Scale::ONE).height();
         let room = OPEN_HEIGHT_MAX.saturating_sub(band);
         let fit = grid_fit(
             OPEN_WIDTH,
@@ -540,7 +532,7 @@ impl AreaView {
             .saturating_mul(cell.1 + GAP)
             .saturating_add(GAP)
             .saturating_add(band);
-        let least = Self::min_size(theme, Scale::ONE, faces);
+        let least = Self::min_size(theme, Scale::ONE);
         (
             OPEN_WIDTH.max(least.0),
             needed.min(OPEN_HEIGHT_MAX).max(least.1),
@@ -1596,7 +1588,6 @@ pub fn render_area(
     view: &AreaView,
     layout: &AreaLayout,
     theme: &Theme,
-    faces: Faces,
     scale: Scale,
 ) {
     let palette = theme.palette();
@@ -1615,35 +1606,20 @@ pub fn render_area(
         view.scroll.render(surface, layout.bar, scale, theme);
     }
     if !withheld(surface, layout.status) {
-        fill_area(surface, layout.status, Color::from(palette.surface_raised));
-        let font = faces.status;
-        let y = font.centred_top(layout.status.top(), layout.status.height);
-        let inset = layout.gap;
+        let band = StatusBand::new(theme, scale);
         let mut said = String::new();
-        let text = if let Some(message) = view.message.as_deref() {
-            message
+        let (text, tone) = if let Some(message) = view.message.as_deref() {
+            (message, StatusTone::Ink)
         } else {
             let count = view.document.entries().len();
             let _ = core::fmt::Write::write_fmt(
                 &mut said,
                 format_args!("{count} sprite{}", if count == 1 { "" } else { "s" }),
             );
-            &said
+            (said.as_str(), StatusTone::Muted)
         };
-        let room = layout.status.width.saturating_sub(inset * 2);
-        let fitted = font.truncate_to_width(text, room);
-        let colour = if view.message.is_some() {
-            palette.on_surface
-        } else {
-            palette.on_surface_muted
-        };
-        font.draw_text(
-            surface,
-            layout.status.left().saturating_add_unsigned(inset),
-            y,
-            fitted,
-            Color::from(colour),
-        );
+        let message = band.slots(layout.status, [], []).message;
+        band.paint(surface, layout.status, theme, &[(message, text, tone)]);
     }
     if let Some(form) = view.modal.as_ref() {
         form.render(surface, layout.dialog_origin(), scale, theme);

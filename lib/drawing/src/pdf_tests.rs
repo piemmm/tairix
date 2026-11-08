@@ -1,209 +1,13 @@
 //! Unit tests for the PDF writer.
 
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_bezier::{Affine, Path, PathEl, Point, Subpath};
-use tairix_colour::Rgba;
-
-use super::{pdf, Real, TextString};
-use crate::children::Children;
-use crate::drawing::{Drawing, Grid, Info, Page, Unit};
+use super::{pdf, TextString};
 use crate::id::Ids;
-use crate::node::{Kind, Node};
-use crate::shape::{EllipseShape, RectShape, Shape};
-use crate::style::{Gradient, GradientKind, Paint, Spread, Stop, Stroke, Style};
-use crate::text::{Glyph, Glyphs, Text, TextAlign};
-
-struct OnlyA;
-
-impl Glyphs for OnlyA {
-    fn glyph(&self, _family: &str, _weight: u16, _italic: bool, c: char) -> Option<Arc<Glyph>> {
-        (c == 'a').then(|| {
-            let mut ring = Subpath::new(Point::new(0.0, -1.0));
-            ring.elements.extend([
-                PathEl::Line(Point::new(1.0, -1.0)),
-                PathEl::Line(Point::new(1.0, 0.0)),
-                PathEl::Line(Point::new(0.0, 0.0)),
-            ]);
-            ring.closed = true;
-            Arc::new(Glyph::new(
-                Path {
-                    subpaths: vec![ring],
-                },
-                1.0,
-            ))
-        })
-    }
-}
-
-fn node(ids: &mut Ids, kind: Kind) -> Arc<Node> {
-    Arc::new(Node::new(ids.issue(), kind).expect("a node"))
-}
-
-fn rect(ids: &mut Ids, x: f64, style: Style) -> Arc<Node> {
-    node(
-        ids,
-        Kind::Shape {
-            shape: Shape::Rect(RectShape {
-                x,
-                y: 10.0,
-                width: 40.0,
-                height: 30.0,
-                rx: 0.0,
-                ry: 0.0,
-            }),
-            style: Arc::new(style),
-        },
-    )
-}
-
-fn gradient(kind: GradientKind, spread: Spread) -> Paint {
-    Paint::Gradient(Arc::new(Gradient {
-        kind,
-        stops: vec![
-            Stop {
-                offset: 0.0,
-                colour: Rgba::new(255, 0, 0, 255),
-            },
-            Stop {
-                offset: 0.5,
-                colour: Rgba::new(0, 255, 0, 128),
-            },
-            Stop {
-                offset: 1.0,
-                colour: Rgba::new(0, 0, 255, 255),
-            },
-        ],
-        spread,
-        transform: Affine::IDENTITY,
-    }))
-}
-
-fn group(ids: &mut Ids, children: Vec<Arc<Node>>, clip: Option<Arc<Node>>) -> Node {
-    Node::new(
-        ids.issue(),
-        Kind::Group {
-            children: Children::from_nodes(children).expect("held"),
-            clip,
-        },
-    )
-    .expect("a group")
-}
-
-/// A reflected radial fill, stroked with a repeated linear gradient.
-fn radial() -> Style {
-    Style {
-        fill: gradient(
-            GradientKind::Radial {
-                centre: Point::new(120.0, 25.0),
-                radius: 5.0,
-                focus: Point::new(121.0, 25.0),
-            },
-            Spread::Reflect,
-        ),
-        stroke: Stroke {
-            paint: gradient(
-                GradientKind::Linear {
-                    start: Point::new(0.0, 0.0),
-                    end: Point::new(10.0, 10.0),
-                },
-                Spread::Repeat,
-            ),
-            width: 2.0,
-            ..Stroke::default()
-        },
-        ..Style::default()
-    }
-}
-
-/// A drawing of most of what PDF is asked to say.
-fn sample(ids: &mut Ids) -> Drawing {
-    let stroked = Style {
-        fill: Paint::Colour(Rgba::new(10, 20, 30, 255)),
-        stroke: Stroke {
-            paint: Paint::Colour(Rgba::new(200, 100, 0, 128)),
-            width: 3.0,
-            dashes: Arc::from(&[4.0, 2.0][..]),
-            dash_offset: 1.0,
-            ..Stroke::default()
-        },
-        ..Style::default()
-    };
-    let linear = Style {
-        fill: gradient(
-            GradientKind::Linear {
-                start: Point::new(0.0, 0.0),
-                end: Point::new(40.0, 0.0),
-            },
-            Spread::Pad,
-        ),
-        stroke: Stroke {
-            paint: Paint::None,
-            ..Stroke::default()
-        },
-        ..Style::default()
-    };
-    let window_a = rect(ids, 0.0, Style::default());
-    let window_b = node(
-        ids,
-        Kind::Shape {
-            shape: Shape::Ellipse(EllipseShape {
-                centre: Point::new(60.0, 25.0),
-                radii: Point::new(15.0, 15.0),
-                arc: None,
-            }),
-            style: Arc::new(Style::default()),
-        },
-    );
-    let windows = Arc::new(group(ids, vec![window_a, window_b], None));
-    let content = vec![rect(ids, 0.0, stroked.clone())];
-    let clipped = group(ids, content, Some(windows));
-    let pair = vec![rect(ids, 50.0, stroked), rect(ids, 60.0, linear)];
-    let half = group(ids, pair, None).with_opacity(0.5).expect("weakened");
-    let text = node(
-        ids,
-        Kind::Text {
-            text: Arc::new(Text {
-                content: Arc::from("ab"),
-                family: Arc::from("sans-serif"),
-                size: 12.0,
-                weight: 400,
-                italic: false,
-                letter_spacing: 0.0,
-                line_height: 1.25,
-                align: TextAlign::Start,
-                origin: Point::new(10.0, 80.0),
-            }),
-            style: Arc::new(Style::default()),
-        },
-    );
-    let shaded = rect(ids, 100.0, radial());
-    let layer = group(
-        ids,
-        vec![Arc::new(clipped), Arc::new(half), shaded, text],
-        None,
-    );
-    Drawing::new(
-        Page {
-            width: 200.0,
-            height: 100.0,
-            unit: Unit::Px,
-            background: Some(Rgba::new(250, 250, 240, 255)),
-        },
-        Children::from_nodes(vec![Arc::new(layer)]).expect("held"),
-        Arc::from(&[][..]),
-        Grid::default(),
-    )
-    .expect("a drawing")
-    .with_info(Info {
-        title: Some(Arc::from("Rivers & roads")),
-        description: None,
-    })
-    .expect("titled")
-}
+use crate::testing::OnlyA;
+use crate::vector::tests::sample;
 
 /// The file's objects, checked against its cross-reference table: each
 /// number's body, a stream's content inflated.
@@ -261,6 +65,9 @@ fn objects(file: &[u8]) -> Vec<(usize, String, Option<Vec<u8>>)> {
                 b"\nendstream",
                 "the length is the stream's"
             );
+            if !dictionary.contains("/FlateDecode") {
+                return data[..length].to_vec();
+            }
             let mut inflated = vec![0u8; 1 << 20];
             let size = tairix_compress::zlib::decompress_into(&data[..length], &mut inflated)
                 .expect("inflates");
@@ -348,16 +155,81 @@ fn a_drawing_is_one_page_of_sound_pdf() {
 }
 
 #[test]
-fn numbers_are_spelled_as_pdf_reads_them() {
-    assert_eq!(Real(1e-300).to_string(), "0");
-    assert_eq!(Real(-0.000_01).to_string(), "0");
-    assert_eq!(Real(12.5).to_string(), "12.5");
-    assert_eq!(Real(1e9).to_string(), "1000000000");
-    assert_eq!(Real(f64::NAN).to_string(), "0");
-    assert!(!Real(1e20).to_string().contains('e'));
+fn a_text_string_is_hexadecimal_nothing_can_break_out_of() {
     assert_eq!(
         TextString("é)").to_string(),
         "<FEFF00E90029>",
         "nothing escapes a hex string"
     );
+}
+
+#[test]
+fn pictures_are_image_objects_each_written_once() {
+    let mut ids = Ids::new();
+    let (drawing, baseline) = crate::vector::tests::pictured(&mut ids);
+    let written = pdf(&drawing, &OnlyA).expect("written");
+    let objects = objects(&written.bytes);
+    let images: Vec<_> = objects
+        .iter()
+        .filter(|(_, head, _)| head.contains("/Subtype /Image"))
+        .collect();
+    let colour: Vec<_> = images
+        .iter()
+        .filter(|(_, head, _)| !head.contains("/Width 2 /Height 2 /ColorSpace /DeviceGray"))
+        .collect();
+    assert_eq!(
+        images.len(),
+        5,
+        "grey, the clear one and its mask, two photos"
+    );
+    assert_eq!(colour.len(), 4);
+    let grey = images
+        .iter()
+        .find(|(_, head, _)| head.contains("/Width 3 /Height 2"))
+        .expect("the grey picture");
+    assert!(grey.1.contains("/ColorSpace /DeviceGray") && !grey.1.contains("/SMask"));
+    assert_eq!(
+        grey.2.as_deref(),
+        Some(&[0, 40, 80, 40, 80, 120][..]),
+        "its levels"
+    );
+    let clear = images
+        .iter()
+        .find(|(_, head, _)| head.contains("/Width 2 /Height 2 /ColorSpace /DeviceRGB"))
+        .expect("the clear picture");
+    assert!(clear.1.contains("/SMask "), "{}", clear.1);
+    assert_eq!(
+        clear.2.as_deref(),
+        Some(&[255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0][..]),
+        "its clear pixels take its red"
+    );
+    let mask = images
+        .iter()
+        .find(|(_, head, _)| head.contains("/Width 2 /Height 2 /ColorSpace /DeviceGray"))
+        .expect("its mask");
+    assert_eq!(mask.2.as_deref(), Some(&[255, 0, 255, 0][..]));
+    let photos: Vec<_> = images
+        .iter()
+        .filter(|(_, head, _)| head.contains("/Filter /DCTDecode"))
+        .collect();
+    assert_eq!(
+        photos.len(),
+        2,
+        "a JPEG passes on as it came, progressive or not"
+    );
+    assert_eq!(photos[0].2.as_deref(), Some(&baseline[..]));
+    let content = objects
+        .iter()
+        .find(|(number, ..)| *number == super::CONTENT)
+        .and_then(|(_, _, stream)| stream.clone())
+        .expect("content");
+    let content = String::from_utf8(content).expect("text");
+    assert_eq!(
+        content.matches("/I1 Do").count(),
+        2,
+        "the picture shown twice:\n{content}"
+    );
+    for named in ["/I0 Do", "/I2 Do", "/I3 Do"] {
+        assert!(content.contains(named), "{named}");
+    }
 }

@@ -15,8 +15,9 @@ use super::{
     apply, effects_ask, groups, show_level, touches, EffectFile, EffectsAsk, EffectsAsks,
     EffectsReading, EffectsRow, EffectsTrip,
 };
-use crate::form::{FormOutcome, FormPlace};
+use crate::form::FormOutcome;
 use crate::test_support::{showing, theme, WIDE};
+use tairix_controls::ColumnPlace;
 
 fn reading(document: &str) -> EffectsReading {
     let mut files = [SoundFile::Theme; SoundEvent::ALL.len()];
@@ -371,7 +372,7 @@ fn a_pick_puts_its_chooser_back_in_place() {
     shell.adopt_effects(Some(reading("")));
     let form = shell.form_mut_for_test().expect("a composed form");
     form.take_reshaped();
-    let place = FormPlace {
+    let place = ColumnPlace {
         bounds: WIDE,
         viewport: WIDE,
         scale: Scale::ONE,
@@ -407,7 +408,7 @@ fn the_switch_restates_every_row_in_place() {
     shell.adopt_effects(Some(reading("")));
     let form = shell.form_mut_for_test().expect("a composed form");
     form.take_reshaped();
-    let place = FormPlace {
+    let place = ColumnPlace {
         bounds: WIDE,
         viewport: WIDE,
         scale: Scale::ONE,

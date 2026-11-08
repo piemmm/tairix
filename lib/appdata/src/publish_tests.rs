@@ -960,3 +960,12 @@ fn a_refused_write_is_said_by_the_helpers() {
     assert_eq!(refusals, [Refusal::NotSaved(Errno::NoSpace)]);
     assert_eq!(*publication.live(), Look::default(), "the edit is put back");
 }
+
+#[test]
+fn a_window_says_only_a_write_the_store_refused() {
+    assert!(Refusal::NotSaved(Errno::OutOfRange).is_write());
+    assert!(Refusal::NotRestored(Errno::OutOfRange).is_write());
+    assert!(!Refusal::StoreUnreadable(Errno::OutOfRange).is_write());
+    assert!(!Refusal::DefaultsUnreadable(Errno::OutOfRange).is_write());
+    assert!(!Refusal::Unusable("grid.shown").is_write());
+}

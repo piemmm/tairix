@@ -544,7 +544,7 @@ mod program {
         /// extent it wants there.
         fn refit(&mut self, client: &mut WindowClient<app::RtWindowTransport>, look: &Look) {
             let wanted = self.content.fit(look.desktop.scale(), look.themes.active());
-            self.adopt_extent(client, wanted);
+            self.adopt_extent(client, wanted, look);
         }
 
         /// Re-map the window to `extent` where the session allows it, lay the
@@ -554,14 +554,18 @@ mod program {
             &mut self,
             client: &mut WindowClient<app::RtWindowTransport>,
             (width, height): (u32, u32),
+            look: &Look,
         ) {
             if (width, height) != (self.surface.width(), self.surface.height()) {
                 let _ =
                     self.pane
                         .resize_with(client, &app::mode_for(width, height), &mut self.surface);
             }
-            self.content
-                .set_extent((self.surface.width(), self.surface.height()));
+            self.content.set_extent(
+                (self.surface.width(), self.surface.height()),
+                look.desktop.scale(),
+                look.themes.active(),
+            );
             self.owed = Repaint::Whole;
         }
     }
@@ -969,7 +973,11 @@ mod program {
                 height_px,
                 ..
             } => {
-                pane.adopt_extent(session.window.client(), (width_px, height_px));
+                pane.adopt_extent(
+                    session.window.client(),
+                    (width_px, height_px),
+                    &session.look,
+                );
                 None
             }
             WindowEvent::CloseRequested { .. } => Some(Request::Close),
@@ -981,6 +989,20 @@ mod program {
         };
         pane.owe(sink);
         asked
+    }
+
+    /// Step what the settings window's held controls have brought due.
+    fn advance_settings(session: &mut Session<'_>) {
+        let (scale, theme) = (session.look.desktop.scale(), session.look.themes.active());
+        let Some(pane) = session.settings.as_mut() else {
+            return;
+        };
+        let now = tairix_rt::clock_get();
+        if pane.content.deadline_ns(now).is_some_and(|due| due <= now) {
+            let mut sink = damage::sink();
+            pane.content.advance(now, scale, theme, &mut sink);
+            pane.owe(sink);
+        }
     }
 
     /// Carry out what the settings window asked for.
@@ -1530,9 +1552,13 @@ mod program {
             // Written before the park reads it: a running game owes the
             // frame its cadence has due, a paused one owes nothing and parks
             // without a timer at all.
-            signals
-                .deadline_ns
-                .set(session.shell.running().then(|| cadence.due()));
+            let now = tairix_rt::clock_get();
+            let held = session
+                .settings
+                .as_mut()
+                .and_then(|pane| pane.content.deadline_ns(now));
+            let frame = session.shell.running().then(|| cadence.due());
+            signals.deadline_ns.set(frame.into_iter().chain(held).min());
             let waited = events.wait(session.window.client());
             if signals.pressure_moved.replace(false) {
                 session.cache.enforce_pressure();
@@ -1546,6 +1572,7 @@ mod program {
             if let Some(code) = drain(session, waited, &mut events) {
                 return code;
             }
+            advance_settings(session);
             // After the drain, so a write the worker was woken for and one a
             // machine with no worker carried out inline are both adopted
             // before the frame they affect.

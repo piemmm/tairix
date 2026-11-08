@@ -8,23 +8,14 @@ use tairix_bezier::boolean::Operation;
 use tairix_bezier::{Affine, Bounds, Point};
 use tairix_colour::Rgba;
 use tairix_drawing::shape::RectShape;
-use tairix_drawing::text::Glyph;
-use tairix_drawing::{
-    Children, Drawing, Glyphs, Grid, Ids, Kind, Node, Page, Paint, Shape, Style, Unit,
-};
+use tairix_drawing::{Children, Drawing, Grid, Ids, Kind, Node, Page, Paint, Shape, Style, Unit};
 
 use super::{
-    add_layer, align, append, arrange, bounds_of, combine, distribute, duplicate, flip, framed,
-    group, insert, remove, remove_layer, restyle, transform, ungroup, Align, Arrange, EditError,
+    add_layer, align, append, arrange, bounds_of, clip, combine, distribute, divide, duplicate,
+    flip, framed, group, insert, offset, release_clip, remove, remove_layer, restyle, reverse,
+    simplify, transform, ungroup, Align, Arrange, EditError,
 };
-
-struct NoGlyphs;
-
-impl Glyphs for NoGlyphs {
-    fn glyph(&self, _family: &str, _weight: u16, _italic: bool, _c: char) -> Option<Arc<Glyph>> {
-        None
-    }
-}
+use crate::testing::{text, NoGlyphs};
 
 fn rect(ids: &mut Ids, x: f64, width: f64) -> Arc<Node> {
     Arc::new(
@@ -65,7 +56,7 @@ fn drawing(ids: &mut Ids, xs: &[f64]) -> Drawing {
             background: None,
         },
         Children::from_nodes(vec![Arc::new(layer)]).expect("held"),
-        Arc::from(&[][..]),
+        tairix_drawing::SharedSlice::new(),
         Grid::default(),
     )
     .expect("a drawing")
@@ -241,11 +232,13 @@ fn a_union_of_two_rectangles_is_one_path_where_the_lowest_stood() {
 fn a_restyled_group_restyles_everything_in_it_and_layers_come_and_go() {
     let mut ids = Ids::new();
     let drawing = drawing(&mut ids, &[0.0, 20.0]);
-    let red = |style: &Style| Style {
-        fill: Paint::Colour(Rgba::new(255, 0, 0, 255)),
-        ..style.clone()
+    let red = |style: &Style, _: &super::Placed<'_>| {
+        Ok(Style {
+            fill: Paint::Colour(Rgba::new(255, 0, 0, 255)),
+            ..style.clone()
+        })
     };
-    let painted = restyle(&drawing, &[vec![0]], &red).expect("restyled");
+    let painted = restyle(&drawing, &[vec![0]], &red, &NoGlyphs).expect("restyled");
     let layer = painted.layers().get(0).expect("layer");
     assert!(layer.children().expect("group").iter().all(|node| node
         .style()
@@ -268,7 +261,13 @@ fn a_restyled_group_restyles_everything_in_it_and_layers_come_and_go() {
 fn an_edit_that_changes_nothing_answers_the_very_drawing() {
     let mut ids = Ids::new();
     let drawing = drawing(&mut ids, &[0.0, 20.0, 40.0]);
-    let same = restyle(&drawing, &[vec![0, 0], vec![0, 1]], &Style::clone).expect("restyled");
+    let same = restyle(
+        &drawing,
+        &[vec![0, 0], vec![0, 1]],
+        &|style, _| Ok(style.clone()),
+        &NoGlyphs,
+    )
+    .expect("restyled");
     assert!(
         same.is(&drawing),
         "no style changed, so no node is made anew"
@@ -325,17 +324,7 @@ fn bounds_say_whether_text_waits_on_glyphs() {
     let text = Node::new(
         ids.issue(),
         Kind::Text {
-            text: Arc::new(tairix_drawing::Text {
-                content: Arc::from("Hi"),
-                family: Arc::from("sans-serif"),
-                size: 10.0,
-                weight: 400,
-                italic: false,
-                letter_spacing: 0.0,
-                line_height: 1.25,
-                align: tairix_drawing::TextAlign::Start,
-                origin: Point::new(50.0, 50.0),
-            }),
+            text: Arc::new(text("Hi", Point::new(50.0, 50.0))),
             style: Arc::new(Style::default()),
         },
     )
@@ -356,24 +345,14 @@ fn text_whose_glyphs_are_missing_is_not_traced_without_them() {
     let text = Node::new(
         ids.issue(),
         Kind::Text {
-            text: Arc::new(tairix_drawing::Text {
-                content: Arc::from("Hi"),
-                family: Arc::from("sans-serif"),
-                size: 10.0,
-                weight: 400,
-                italic: false,
-                letter_spacing: 0.0,
-                line_height: 1.25,
-                align: tairix_drawing::TextAlign::Start,
-                origin: Point::new(50.0, 50.0),
-            }),
+            text: Arc::new(text("Hi", Point::new(50.0, 50.0))),
             style: Arc::new(Style::default()),
         },
     )
     .expect("text");
     let (with_text, path) = insert(&drawing, &[0], Arc::new(text)).expect("put");
     assert_eq!(
-        super::to_paths(&with_text, &[path], &NoGlyphs).err(),
+        super::to_paths(&with_text, &[path], &NoGlyphs, &mut ids).err(),
         Some(EditError::Unlettered)
     );
 }
@@ -418,4 +397,220 @@ fn ungrouping_a_clipped_group_gives_every_new_object_an_identity_of_its_own() {
     seen.sort_unstable();
     seen.dedup();
     assert_eq!(seen.len(), all, "no identity is shared");
+}
+
+/// A path through `points`, open, unstyled.
+fn polyline(ids: &mut Ids, points: &[Point]) -> Arc<Node> {
+    let shape = tairix_drawing::PathShape {
+        contours: vec![tairix_drawing::Contour {
+            nodes: points
+                .iter()
+                .map(|&point| tairix_drawing::PathNode::corner(point))
+                .collect(),
+            closed: false,
+        }],
+    };
+    Arc::new(
+        Node::new(
+            ids.issue(),
+            Kind::Shape {
+                shape: Shape::Path(Arc::new(shape)),
+                style: Arc::new(Style::default()),
+            },
+        )
+        .expect("a path"),
+    )
+}
+
+fn path_shape(drawing: &Drawing, at: &[usize]) -> tairix_drawing::PathShape {
+    match drawing.node_at(at).expect("there").kind() {
+        Kind::Shape {
+            shape: Shape::Path(path),
+            ..
+        } => (**path).clone(),
+        other => panic!("a path, not {other:?}"),
+    }
+}
+
+#[test]
+fn a_reversed_path_runs_from_its_far_end_and_other_objects_stay() {
+    let mut ids = Ids::new();
+    let drawing = drawing(&mut ids, &[0.0]);
+    let line = polyline(&mut ids, &[Point::new(0.0, 0.0), Point::new(10.0, 5.0)]);
+    let (drawing, at) = insert(&drawing, &[0], line).expect("put");
+    let reversed = reverse(&drawing, &[at.clone(), vec![0, 0]]).expect("reversed");
+    let nodes = &path_shape(&reversed, &at).contours[0].nodes;
+    assert_eq!(nodes[0].point, Point::new(10.0, 5.0));
+    assert!(Arc::ptr_eq(
+        reversed.node_at(&[0, 0]).expect("the rectangle"),
+        drawing.node_at(&[0, 0]).expect("the rectangle")
+    ));
+}
+
+#[test]
+fn a_clip_shows_its_group_within_the_top_object_and_releases_whole() {
+    let mut ids = Ids::new();
+    let drawing = drawing(&mut ids, &[0.0, 5.0, 100.0]);
+    let (clipped, at) = clip(&drawing, &[vec![0, 0], vec![0, 1]], &mut ids).expect("clipped");
+    assert_eq!(at, vec![0, 0]);
+    let group = clipped.node_at(&at).expect("the group");
+    let Kind::Group {
+        children,
+        clip: Some(by),
+    } = group.kind()
+    else {
+        panic!("a clipped group");
+    };
+    assert_eq!(children.len(), 1, "what lies beneath");
+    assert!(
+        (by.bounds().min.x - 5.0).abs() < 1e-9,
+        "the top object clips"
+    );
+    assert_eq!(xs(&clipped).len(), 2, "the group and the object beside it");
+    let released = release_clip(&clipped, core::slice::from_ref(&at)).expect("released");
+    let Kind::Group { children, clip } = released.node_at(&at).expect("the group").kind() else {
+        panic!("a group");
+    };
+    assert!(clip.is_none());
+    assert_eq!(children.len(), 2, "the clip back on top of what it held");
+    assert_eq!(
+        clip_err(&drawing),
+        Some(EditError::Nothing),
+        "one object clips nothing"
+    );
+}
+
+fn clip_err(drawing: &Drawing) -> Option<EditError> {
+    clip(drawing, &[vec![0, 0]], &mut Ids::new()).err()
+}
+
+#[test]
+fn two_overlapping_squares_divide_into_three_pieces_in_the_lowest_place() {
+    let mut ids = Ids::new();
+    let drawing = drawing(&mut ids, &[0.0, 5.0, 100.0]);
+    let (cut, pieces) =
+        divide(&drawing, &[vec![0, 1], vec![0, 0]], &NoGlyphs, &mut ids).expect("cut");
+    assert_eq!(
+        pieces.len(),
+        3,
+        "the lower's own, the overlap and the upper's own"
+    );
+    assert_eq!(pieces[0], vec![0, 0], "where the lowest stood");
+    let layer = cut.layers().get(0).expect("a layer");
+    assert_eq!(
+        layer.children().expect("a group").len(),
+        4,
+        "three pieces and the far square"
+    );
+    let area: f64 = pieces
+        .iter()
+        .map(|at| {
+            path_shape(&cut, at)
+                .to_path()
+                .expect("traced")
+                .signed_area()
+                .abs()
+        })
+        .sum();
+    assert!(
+        (area - 150.0).abs() < 1e-6,
+        "the pieces cover the two squares once: {area}"
+    );
+}
+
+#[test]
+fn an_outset_grows_and_an_inset_too_deep_is_refused() {
+    let mut ids = Ids::new();
+    let drawing = drawing(&mut ids, &[0.0]);
+    let grown = offset(&drawing, &[vec![0, 0]], 2.0, &NoGlyphs).expect("grown");
+    let bounds = bounds_of(&grown, &[vec![0, 0]], &NoGlyphs);
+    assert!((bounds.width() - 14.0).abs() < 0.05, "{bounds:?}");
+    assert!((bounds.min.x + 2.0).abs() < 0.05);
+    let shrunk = offset(&drawing, &[vec![0, 0]], -2.0, &NoGlyphs).expect("shrunk");
+    let bounds = bounds_of(&shrunk, &[vec![0, 0]], &NoGlyphs);
+    assert!((bounds.width() - 6.0).abs() < 0.05, "{bounds:?}");
+    assert_eq!(
+        offset(&drawing, &[vec![0, 0]], -6.0, &NoGlyphs).err(),
+        Some(EditError::Vanishes)
+    );
+}
+
+#[test]
+fn a_simplified_path_holds_fewer_nodes_and_keeps_its_course() {
+    let mut ids = Ids::new();
+    let drawing = drawing(&mut ids, &[]);
+    let points: Vec<Point> = (0..=60)
+        .map(|step| {
+            let x = f64::from(step);
+            Point::new(x, 0.01 * x * x)
+        })
+        .collect();
+    let (drawing, at) = insert(&drawing, &[0], polyline(&mut ids, &points)).expect("put");
+    let simpler =
+        simplify(&drawing, core::slice::from_ref(&at), 0.5, &NoGlyphs).expect("simplified");
+    let traced = path_shape(&simpler, &at);
+    assert!(traced.node_count() < 10, "{} nodes", traced.node_count());
+    let ends = &traced.contours[0].nodes;
+    assert_eq!(ends.first().map(|node| node.point), Some(points[0]));
+    assert_eq!(ends.last().map(|node| node.point), Some(points[60]));
+    let again = simplify(&simpler, &[at], 0.5, &NoGlyphs).expect("simplified again");
+    assert!(again.is(&simpler), "a path no simpler is left as it is");
+}
+
+#[test]
+fn a_text_whose_runs_paint_it_otherwise_traces_to_a_path_for_each_paint() {
+    use tairix_drawing::{Run, RunPaint, RunStyle};
+
+    let mut ids = Ids::new();
+    let drawing = drawing(&mut ids, &[]);
+    let red = Rgba::new(255, 0, 0, 255);
+    let text = tairix_drawing::Text {
+        runs: tairix_drawing::SharedSlice::try_from_vec(vec![Run {
+            start: 1,
+            end: 2,
+            style: Arc::new(RunStyle {
+                fill: Some(RunPaint::Colour(red)),
+                ..RunStyle::default()
+            }),
+        }])
+        .expect("held"),
+        ..text("aba", Point::new(50.0, 50.0))
+    };
+    let node = Node::new(
+        ids.issue(),
+        Kind::Text {
+            text: Arc::new(text),
+            style: Arc::new(Style::default()),
+        },
+    )
+    .expect("text");
+    let (with_text, path) = insert(&drawing, &[0], Arc::new(node)).expect("put");
+    let traced = super::to_paths(
+        &with_text,
+        core::slice::from_ref(&path),
+        &crate::testing::Squares,
+        &mut ids,
+    )
+    .expect("traced");
+    let group = traced.node_at(&path).expect("in the text's place");
+    let Kind::Group { children, .. } = group.kind() else {
+        panic!("a group of its paints");
+    };
+    let fills: Vec<Paint> = children
+        .iter()
+        .map(|part| part.style().expect("a shape").fill.clone())
+        .collect();
+    assert_eq!(
+        fills,
+        [Style::default().fill, Paint::Colour(red)],
+        "one path for each paint"
+    );
+    let Kind::Shape { shape, .. } = children.get(0).expect("the first").kind() else {
+        panic!("a path");
+    };
+    assert_eq!(
+        shape.to_path().expect("traced").subpaths.len(),
+        2,
+        "both a's together"
+    );
 }

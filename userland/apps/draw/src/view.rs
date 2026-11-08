@@ -11,18 +11,22 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_bezier::{Bounds, Point};
+use tairix_bezier::{Affine, Bounds, Point};
+use tairix_collections::try_arc;
 use tairix_colour::Rgba;
 use tairix_controls::{
     ControlRole, IconButton, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, Toolbar,
 };
 use tairix_drawing::render::Mode;
-use tairix_drawing::unkept::Unkept;
-use tairix_drawing::{Drawing, NodePath, ObjectId, Paint, PathNode, Stroke, Style};
+use tairix_drawing::unkept::{Lost, Unkept};
+use tairix_drawing::{
+    Drawing, DrawingError, NodePath, ObjectId, Paint, PathNode, SharedSlice, Style,
+};
 use tairix_geometry::{Region, Scale};
 use tairix_icon::menu_symbol_icon;
 use tairix_input::Modifiers;
 use tairix_theme::Theme;
+use tairix_util::mathf::fmin;
 use tairix_window::document::Access;
 
 use crate::document::Document;
@@ -30,6 +34,7 @@ use crate::edit::{self, EditError};
 use crate::glyphs::{Arrived, Lettering};
 use crate::inspector::{Inspector, Shown};
 use crate::layout::Layout;
+use crate::preferences::{Handling, Preferences};
 use crate::tiles::{covering, RenderJob, TileKey, Tiles};
 use crate::tools::Tool;
 use crate::viewport::Viewport;
@@ -46,8 +51,8 @@ pub enum MenuKind {
 /// What a window asks only the application for.
 #[derive(Debug)]
 pub enum Own {
-    /// Put this drawing, as SVG, on the clipboard.
-    Copy(String),
+    /// Put this drawing on the clipboard, written as SVG on the queue.
+    Copy(Drawing),
     /// Read the clipboard's drawing in the sandbox and paste it.
     Paste,
     /// Reshape the selection on the queue.
@@ -105,6 +110,13 @@ pub enum Gesture {
         /// Where the pointer is.
         to: Point,
     },
+    /// Laying a gradient across the selection.
+    Gradient {
+        /// Where the drag began, in the drawing: where it starts.
+        from: Point,
+        /// Where the pointer is: where it ends.
+        to: Point,
+    },
     /// Drawing out a new object with a creating tool.
     Create {
         /// Where the drag began, in the drawing.
@@ -136,6 +148,9 @@ pub enum Gesture {
         /// Where the pointer is.
         to: Point,
     },
+    /// Dragging the caret of the text being typed across it, the selection
+    /// held from where the press put it.
+    TextSelect,
     /// Dragging a guide out of a ruler, or an existing one.
     Guide {
         /// Whether it runs across the page.
@@ -188,6 +203,29 @@ pub struct Typing {
     pub id: ObjectId,
     /// Where the caret is, a byte offset into its content.
     pub caret: usize,
+    /// Where the selection began, the caret its other end; the caret itself
+    /// where nothing is selected.
+    pub anchor: usize,
+}
+
+impl Typing {
+    /// Typing into the text `id` at `path`, the caret at `caret` and nothing
+    /// selected.
+    #[must_use]
+    pub const fn at(path: NodePath, id: ObjectId, caret: usize) -> Self {
+        Self {
+            path,
+            id,
+            caret,
+            anchor: caret,
+        }
+    }
+
+    /// The bytes selected, empty at the caret where nothing is.
+    #[must_use]
+    pub fn selection(&self) -> core::ops::Range<usize> {
+        self.caret.min(self.anchor)..self.caret.max(self.anchor)
+    }
 }
 
 /// What an interaction under way shows in place of the document's drawing,
@@ -200,6 +238,10 @@ pub(crate) struct Live {
 
 /// What typing lands as.
 pub(crate) const TYPE_TEXT: &str = "Type text";
+
+/// The most of the canvas a placed picture fills on either axis, so where it
+/// lies can be seen.
+const PLACED_SHARE: f64 = 0.8;
 
 /// How the canvas shows the drawing and helps place things on it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -270,6 +312,8 @@ pub struct View {
     pub(crate) scene: u64,
     pub(crate) show: Showing,
     pub(crate) tool: Tool,
+    /// How far the keys move things and how near the pointer must come.
+    pub(crate) handling: Handling,
     pub(crate) tool_box: Toolbar,
     /// What each tool's button's tip says, in the tool box's order.
     pub(crate) tips: [String; Tool::ALL.len()],
@@ -303,6 +347,10 @@ pub struct View {
     pub(crate) pinched: Option<f64>,
     /// How round a new rectangle's corners are, in drawing pixels.
     pub(crate) corner_radius: f64,
+    /// How far Outset and Inset move an outline, in drawing pixels.
+    pub(crate) offset_distance: f64,
+    /// How near Simplify keeps a path to itself, in drawing pixels.
+    pub(crate) simplify_tolerance: f64,
     /// How new stars are drawn.
     pub(crate) star: StarDefaults,
     /// How new text is set.
@@ -333,17 +381,10 @@ impl View {
                 0,
             );
         }
-        tool_box.set_active(Tool::Select.index());
+        let start = Preferences::default();
+        tool_box.set_active(start.tool.index());
         let idle = ScrollModel::in_pixels(ScrollRange::EMPTY, 1);
-        let style = Style {
-            fill: Paint::Colour(Rgba::new(86, 142, 214, 255)),
-            stroke: Stroke {
-                paint: Paint::Colour(Rgba::new(28, 32, 40, 255)),
-                width: 1.0,
-                ..Stroke::default()
-            },
-            ..Style::default()
-        };
+        let style = start.style();
         let access = if unkept.is_empty() || access != Access::Writable {
             access
         } else {
@@ -360,12 +401,9 @@ impl View {
             tiles: Tiles::default(),
             live: None,
             scene: 0,
-            show: Showing {
-                outline: false,
-                grid: false,
-                snapping: true,
-            },
-            tool: Tool::Select,
+            show: start.show,
+            tool: start.tool,
+            handling: start.handling(),
             tool_box,
             tips: Tool::ALL.map(Tool::tip),
             across: ScrollBar::new(ScrollOrientation::Horizontal, idle),
@@ -385,6 +423,8 @@ impl View {
             pending: None,
             pinched: None,
             corner_radius: 0.0,
+            offset_distance: crate::inspector::DEFAULT_OFFSET,
+            simplify_tolerance: crate::inspector::DEFAULT_SMOOTHNESS,
             star: StarDefaults {
                 points: 5,
                 inner: 0.5,
@@ -396,17 +436,28 @@ impl View {
         };
         view.layer = view.document.drawing().layers().len().saturating_sub(1);
         if !view.unkept.is_empty() {
-            let mut lost = String::from("Opened read-only: the file holds ");
-            for (index, part) in view.unkept.iter().enumerate() {
-                if index > 0 {
-                    lost.push_str(", ");
-                }
-                lost.push_str(part.describe());
-            }
-            lost.push_str(", which a drawing cannot keep. Save a copy to keep the rest.");
-            view.message = Some(lost);
+            view.message = Some(alloc::format!(
+                "Opened read-only: the file holds {}, which a drawing cannot keep. Save a copy to keep the rest.",
+                crate::listed(view.unkept.iter().map(Lost::describe))
+            ));
         }
         view
+    }
+
+    /// Start as `preferences` say a new window starts: its tool, how it
+    /// shows the drawing, and the style new objects are drawn in.
+    pub fn begin(&mut self, preferences: &Preferences) {
+        self.choose_tool(preferences.tool);
+        self.show = preferences.show;
+        self.style = preferences.style();
+        self.handling = preferences.handling();
+        self.refresh_inspector();
+    }
+
+    /// Take up how `preferences` say the keys and the pointer move things,
+    /// as every open window does when they settle.
+    pub fn adopt(&mut self, preferences: &Preferences) {
+        self.handling = preferences.handling();
     }
 
     /// The document.
@@ -716,32 +767,38 @@ impl View {
 
     /// The drawing a copy of the selection puts on the clipboard: its objects
     /// alone, on the drawing's page, in one layer.
-    pub(crate) fn selection_drawing(&mut self) -> Option<Drawing> {
+    ///
+    /// # Errors
+    ///
+    /// Why the copy could not be made, a refused allocation among them.
+    pub(crate) fn selection_drawing(&mut self) -> Result<Option<Drawing>, DrawingError> {
         let drawing = self.document.drawing();
         let mut nodes = Vec::new();
+        if !tairix_util::fallible::reserve(&mut nodes, self.selection.len()) {
+            return Err(DrawingError::OutOfMemory);
+        }
         for path in &self.selection {
-            let node = drawing.node_at(path)?;
-            let placed = node
-                .with_transform(node.transform().then(edit::parent_space(drawing, path)))
-                .ok()?;
-            nodes.push(Arc::new(placed));
+            let Some(node) = drawing.node_at(path) else {
+                return Ok(None);
+            };
+            let placed =
+                node.with_transform(node.transform().then(edit::parent_space(drawing, path)))?;
+            nodes.push(try_arc(placed)?);
         }
         let layer = tairix_drawing::Node::new(
             self.document.ids().issue(),
             tairix_drawing::Kind::Group {
-                children: tairix_drawing::Children::from_nodes(nodes).ok()?,
+                children: tairix_drawing::Children::from_nodes(nodes)?,
                 clip: None,
             },
-        )
-        .ok()?;
+        )?;
         let drawing = self.document.drawing();
-        Drawing::new(
+        Ok(Some(Drawing::new(
             *drawing.page(),
-            tairix_drawing::Children::from_nodes(alloc::vec![Arc::new(layer)]).ok()?,
-            Arc::from(&[][..]),
+            tairix_drawing::Children::single(try_arc(layer)?)?,
+            SharedSlice::new(),
             drawing.grid(),
-        )
-        .ok()
+        )?))
     }
 
     /// The clipboard's drawing, read in the sandbox, arrived: its objects
@@ -785,6 +842,100 @@ impl View {
         damage.add(layout.window);
     }
 
+    /// A picture the user chose to place, called `name`, landed in the layer
+    /// in hand: in the middle of what the canvas shows, at its own size or,
+    /// where that would not fit, as large as most of it holds.
+    pub fn placed_picture(
+        &mut self,
+        name: &str,
+        placed: Result<tairix_drawing::Image, String>,
+        damage: &mut Region,
+        layout: &Layout,
+    ) {
+        damage.add(layout.status);
+        let image = match placed {
+            Ok(image) => image,
+            Err(why) => {
+                self.message = Some(alloc::format!("{name} could not be placed: {why}"));
+                return;
+            }
+        };
+        self.land_pending(damage);
+        if !self.takes_new_objects() {
+            return;
+        }
+        let canvas = Point::new(
+            f64::from(layout.canvas.width),
+            f64::from(layout.canvas.height),
+        );
+        let shown = Bounds::from_points([
+            self.viewport.drawing_point(Point::ZERO),
+            self.viewport.drawing_point(canvas),
+        ]);
+        let place = image.place();
+        let size = Point::new(place.width(), place.height());
+        let fit = fmin(
+            1.0,
+            fmin(
+                PLACED_SHARE * shown.width() / size.x,
+                PLACED_SHARE * shown.height() / size.y,
+            ),
+        );
+        let corner = shown.centre() - size * (fit / 2.0);
+        let on_page = Affine::scale(fit, fit).then(Affine::translate(corner.x, corner.y));
+        let mut nodes = Vec::new();
+        let made = self.picture_node(image, on_page, name).and_then(|node| {
+            tairix_util::fallible::try_push(&mut nodes, node)
+                .map_err(|_| EditError::from(tairix_drawing::DrawingError::OutOfMemory))
+        });
+        match made {
+            Ok(()) => match edit::append(self.document.drawing(), &[self.layer], nodes) {
+                Ok((drawing, placed)) => {
+                    self.commit(drawing, "Place picture");
+                    self.select(placed);
+                    self.message = None;
+                    self.refresh_inspector();
+                }
+                Err(error) => self.say_error("Place picture", error),
+            },
+            Err(error) => self.say_error("Place picture", error),
+        }
+        damage.add(layout.window);
+    }
+
+    /// `image` as an object of the layer in hand, laid by `on_page` in the
+    /// drawing's space and named after the file it came from.
+    fn picture_node(
+        &mut self,
+        image: tairix_drawing::Image,
+        on_page: Affine,
+        name: &str,
+    ) -> Result<Arc<tairix_drawing::Node>, EditError> {
+        let into = self
+            .document
+            .drawing()
+            .node_at(&[self.layer])
+            .and_then(|layer| layer.transform().invert())
+            .ok_or(EditError::Nothing)?;
+        let node = tairix_drawing::Node::new(
+            self.document.ids().issue(),
+            tairix_drawing::Kind::Image {
+                image: try_arc(image)?,
+            },
+        )?
+        .with_transform(on_page.then(into))?;
+        let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+        let named = match node.with_name(Some(tairix_collections::SharedStr::try_from_str(stem)?)) {
+            Ok(named) => named,
+            Err(tairix_drawing::DrawingError::OutOfMemory) => {
+                return Err(tairix_drawing::DrawingError::OutOfMemory.into());
+            }
+            // A name no object may have leaves the picture unnamed.
+            Err(_) => node,
+        };
+        Ok(try_arc(named)?)
+    }
+
     /// The objects of `pasted`, each given identities of its own and placed
     /// in the group at `parent` where it stood on its own page.
     fn placed_paste(
@@ -811,7 +962,7 @@ impl View {
             for child in children.iter() {
                 let placing = child.transform().then(layer.transform()).then(into);
                 let moved = child.with_transform(placing)?;
-                nodes.push(Arc::new(edit::renumbered(&moved, self.document.ids())?));
+                nodes.push(try_arc(edit::renumbered(&moved, self.document.ids())?)?);
             }
         }
         Ok(nodes)
@@ -845,10 +996,14 @@ impl View {
     /// End the pen's path, keeping it when it has two nodes or more.
     pub(crate) fn finish_pen(&mut self) {
         let nodes = core::mem::take(&mut self.pen);
-        if let Some(shape) = crate::tools::pen_path(&nodes, false) {
-            let mut style = self.style.clone();
-            style.fill = Paint::None;
-            self.add_shape(shape, style, "Draw path");
+        match crate::tools::pen_path(&nodes, false) {
+            Ok(Some(shape)) => {
+                let mut style = self.style.clone();
+                style.fill = Paint::None;
+                self.add_shape(shape, &style, "Draw path");
+            }
+            Ok(None) => {}
+            Err(error) => self.say_error("Draw path", EditError::Drawing(error)),
         }
     }
 
@@ -861,23 +1016,53 @@ impl View {
         let empty = self.shown().node_at(&typing.path).is_some_and(|node| {
             matches!(node.kind(), tairix_drawing::Kind::Text { text, .. } if text.content.is_empty())
         });
-        if !empty {
-            self.land_live();
-            return;
-        }
-        self.selection.retain(|path| *path != typing.path);
-        let shown_id = self.shown().node_at(&typing.path).map(|node| node.id());
         let existed = self
             .document
             .drawing()
             .node_at(&typing.path)
-            .map(|node| node.id())
-            == shown_id;
+            .is_some_and(|node| node.id() == typing.id);
+        if !empty {
+            if !existed {
+                self.fit_new_text(&typing.path);
+            }
+            self.land_live();
+            return;
+        }
+        self.selection.retain(|path| *path != typing.path);
         if existed {
             let result = edit::remove(self.document.drawing(), core::slice::from_ref(&typing.path));
             self.apply(result, "Delete text");
         } else {
             self.drop_live();
+        }
+    }
+
+    /// The text just typed at `path`, its gradients fitted to what it now
+    /// holds: until it was typed it had no box to fit them to.
+    fn fit_new_text(&mut self, path: &[usize]) {
+        let drawing = self.shown();
+        let Some(node) = drawing.node_at(path) else {
+            return;
+        };
+        let tairix_drawing::Kind::Text { text, style } = node.kind() else {
+            return;
+        };
+        let graded = |paint: &Paint| matches!(paint, Paint::Gradient(_));
+        if !graded(&style.fill) && !graded(&style.stroke.paint) {
+            return;
+        }
+        let bounds = edit::own_bounds(node, &Lettering::new(Arrived));
+        let refitted = crate::gradient::fitted_style(style, bounds).and_then(|fitted| {
+            let fitted = node.with_kind(tairix_drawing::Kind::Text {
+                text: text.clone(),
+                style: try_arc(fitted)?,
+            })?;
+            drawing.with_node_at(path, try_arc(fitted)?)
+        });
+        match refitted {
+            Ok(fitted) if !fitted.is(drawing) => self.show_live(fitted, TYPE_TEXT),
+            Ok(_) => {}
+            Err(error) => self.say_error(TYPE_TEXT, EditError::Drawing(error)),
         }
     }
 
@@ -889,28 +1074,31 @@ impl View {
         }
     }
 
-    /// `shape`, styled `style`, added to the layer in hand and selected.
+    /// `shape`, styled `style` with its gradients fitted to it, added to the
+    /// layer in hand and selected.
     pub(crate) fn add_shape(
         &mut self,
         shape: tairix_drawing::Shape,
-        style: Style,
+        style: &Style,
         label: &'static str,
     ) {
-        let id = self.document.ids().issue();
-        let node = match tairix_drawing::Node::new(
-            id,
-            tairix_drawing::Kind::Shape {
-                shape,
-                style: Arc::new(style),
-            },
-        ) {
-            Ok(node) => node,
-            Err(error) => {
-                self.say_error(label, EditError::Drawing(error));
-                return;
-            }
+        let fitted = shape
+            .bounds()
+            .and_then(|bounds| crate::gradient::fitted_style(style, bounds));
+        let style = match fitted {
+            Ok(style) => style,
+            Err(error) => return self.say_error(label, EditError::Drawing(error)),
         };
-        self.add_node(node, label);
+        let id = self.document.ids().issue();
+        let node = try_arc(style)
+            .map_err(DrawingError::from)
+            .and_then(|style| {
+                tairix_drawing::Node::new(id, tairix_drawing::Kind::Shape { shape, style })
+            });
+        match node {
+            Ok(node) => self.add_node(node, label),
+            Err(error) => self.say_error(label, EditError::Drawing(error)),
+        }
     }
 
     /// `node` added to the layer in hand and selected.
@@ -918,7 +1106,10 @@ impl View {
         if !self.takes_new_objects() {
             return;
         }
-        match edit::insert(self.document.drawing(), &[self.layer], Arc::new(node)) {
+        let added = try_arc(node)
+            .map_err(EditError::from)
+            .and_then(|node| edit::insert(self.document.drawing(), &[self.layer], node));
+        match added {
             Ok((drawing, path)) => {
                 self.commit(drawing, label);
                 self.select(alloc::vec![path]);
@@ -979,7 +1170,8 @@ impl View {
             .as_ref()
             .map_or_else(|| self.document.drawing(), |live| &live.drawing);
         let defaults = (&self.style, self.star.polygon, &self.text);
-        let shown = crate::paint::shown_of(drawing, &self.selection, defaults, self.layer);
+        let typed = self.typed();
+        let shown = crate::paint::shown_of(drawing, (&self.selection, typed), defaults, self.layer);
         using(&mut self.inspector, &shown)
     }
 
@@ -990,8 +1182,14 @@ impl View {
             .live
             .as_ref()
             .map_or_else(|| self.document.drawing(), |live| &live.drawing);
+        let typed = self.typed();
         self.inspector
-            .follow(drawing, &self.selection, &self.style, bounds);
+            .follow(drawing, &self.selection, &self.style, (bounds, typed));
+    }
+
+    /// The bytes selected in the text being typed, if typing is under way.
+    pub(crate) fn typed(&self) -> Option<core::ops::Range<usize>> {
+        self.typing.as_ref().map(Typing::selection)
     }
 
     /// The next job's number.

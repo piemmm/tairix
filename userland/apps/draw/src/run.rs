@@ -17,40 +17,46 @@ mod program {
     use core::fmt;
 
     use tairix_abi::seat::SEAT_PRIMARY;
-    use tairix_abi::window_ipc::ClipboardKind;
+    use tairix_abi::window_ipc::{AppMenuSymbol, ClipboardKind, CLIPBOARD_MAX_BYTES};
     use tairix_abi::Errno;
-    use tairix_bezier::Affine;
-    use tairix_controls::damage;
+    use tairix_appdata::{
+        Opening, Publication, PublishAnswer, PublishJob, PublishWorker, Refusal as StoreRefusal,
+        RtHost, Settings,
+    };
+    use tairix_bezier::{Affine, Bounds, Point};
+    use tairix_collections::try_arc;
+    use tairix_controls::{damage, SettingsLayout};
     use tairix_draw::compute::{work_out, Compute, Computed};
+    use tairix_draw::copy::CopyFormat;
     use tairix_draw::document::{blank, Document};
     use tairix_draw::glyphs::{Fetched, Lettering};
     use tairix_draw::layout::{Faces, Layout, WINDOW_SIZE};
+    use tairix_draw::preferences::Preferences;
+    use tairix_draw::settings::{Category, DrawSettings};
     use tairix_draw::tiles::{RenderJob, TileKey, TILE};
     use tairix_draw::view::{Own, Snapshot, View};
-    use tairix_draw::window::CopyFormat;
     use tairix_drawing::render::{artwork, Afresh, Mode, View as Square};
-    use tairix_drawing::svg::Read;
     use tairix_drawing::unkept::Unkept;
-    use tairix_drawing::{Drawing, DrawingError, Ids};
+    use tairix_drawing::Read;
+    use tairix_drawing::{Drawing, DrawingError, Ids, Image};
     use tairix_geometry::{Region, Scale};
     use tairix_icon::{
         artwork_cache, ArtworkCache, IconArtworkSource, InlineArtwork, NoArtworkSeam,
     };
-    use tairix_image::{encode_png, Picture};
     use tairix_parallel::{JobRunner, Pool};
     use tairix_raster::Surface;
     use tairix_rt::sync::WorkerWake;
     use tairix_rt::work::{Worker, WorkerGuard};
-    use tairix_sandbox::drawedit::{read_drawing, DrawEditService, DrawFormat};
-    use tairix_sandbox::imagerender::{send_document, upload_document, MAX_DOCUMENT_BYTES};
-    use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
+    use tairix_sandbox::drawedit::{read_drawing, read_placed, DrawEditService, WORKER_MEMORY};
+    use tairix_sandbox::imagerender::{send_document, upload_document, UploadFailure};
+    use tairix_sandbox::rt::{document_room, serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::ParserSandbox;
     use tairix_theme::Theme;
     use tairix_util::defer::JobQueue;
-    use tairix_util::mathf::{fmax, fmin, round_i32};
     use tairix_window::app;
+    use tairix_window::docapp::settings::{Edit, SettingsRequest, Then};
     use tairix_window::docapp::{
-        self, AnswerWake, DocumentApp, Handle, Host, NoAppView, Stamp, APP_TOKEN,
+        self, AnswerWake, DocumentApp, Handle, Host, Outcome, Stamp, APP_TOKEN,
     };
     use tairix_window::document::{Access, ReadFailure, SaveJob, SavedDocument, UNTITLED};
     use tairix_window::{clipboard, Desktop};
@@ -60,9 +66,8 @@ mod program {
     /// The renderer's wake.
     const RENDER_TOKEN: u64 = APP_TOKEN + 1;
 
-    /// The most pixels a PNG copy's longer side is rendered at: a page larger
-    /// than this is rendered scaled down to fit.
-    const MOST_PNG_SIDE: f64 = 8192.0;
+    /// The settings writer's wake.
+    const SETTINGS_TOKEN: u64 = APP_TOKEN + 2;
 
     type Reader = ParserSandbox<RtLauncher, tairix_rt::LogSink>;
 
@@ -70,7 +75,9 @@ mod program {
     #[derive(Debug)]
     enum ReadRefusal {
         Read(ReadFailure),
-        TooLong,
+        /// Longer than the worker may hold: its room, in bytes.
+        TooLong(u64),
+        Upload(UploadFailure<Errno>),
         Unreadable(String),
     }
 
@@ -78,11 +85,12 @@ mod program {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
                 Self::Read(failure) => write!(f, "{failure}"),
-                Self::TooLong => write!(
+                Self::TooLong(room) => write!(
                     f,
-                    "it is longer than the {} MiB a drawing file may be",
-                    MAX_DOCUMENT_BYTES >> 20
+                    "it is longer than the {} MiB a drawing file may be on this computer",
+                    room >> 20
                 ),
+                Self::Upload(failure) => write!(f, "{failure}"),
                 Self::Unreadable(why) => f.write_str(why),
             }
         }
@@ -96,6 +104,7 @@ mod program {
     enum LoadWork {
         Open { handle: Arc<Handle>, name: String },
         Paste(Vec<u8>),
+        Place { handle: Handle, name: String },
     }
 
     struct LoadReply {
@@ -110,32 +119,38 @@ mod program {
             read: Result<(Read, Ids), ReadRefusal>,
         },
         Pasted(Result<Drawing, String>),
+        Placed {
+            name: String,
+            placed: Result<Image, String>,
+        },
     }
 
     type LoadDesk = JobQueue<Option<LoadJob>, Option<LoadReply>>;
     type LoadWorker = Worker<Reader, Option<LoadJob>, Option<LoadReply>, LoadDesk>;
 
-    fn document_length(file: &Handle) -> Result<usize, ReadRefusal> {
+    /// How long the regular file `file` measures, within `room`, what a
+    /// worker may hold.
+    fn document_length(file: &Handle, room: u64) -> Result<usize, ReadRefusal> {
         let length = file
             .regular_len()
             .map_err(|err| ReadRefusal::Read(ReadFailure::Unreadable(err)))?
             .ok_or(ReadRefusal::Read(ReadFailure::NotAFile))?;
-        usize::try_from(length)
-            .ok()
-            .filter(|&length| length <= MAX_DOCUMENT_BYTES)
-            .ok_or(ReadRefusal::TooLong)
+        if length > room {
+            return Err(ReadRefusal::TooLong(room));
+        }
+        usize::try_from(length).map_err(|_| ReadRefusal::TooLong(room))
     }
 
     fn open(sandbox: &mut Reader, handle: &Handle) -> Result<(Read, Ids), ReadRefusal> {
         let fd = handle.fd();
-        let length = document_length(handle)?;
+        let length = document_length(handle, sandbox.document_room())?;
         let uploaded = upload_document(sandbox, length, |offset, into| {
             tairix_rt::fs_read(fd, offset, into).map_err(Errno::from_syscall)
         })
-        .map_err(|_| ReadRefusal::Read(ReadFailure::NoMemory));
+        .map_err(ReadRefusal::Upload);
         let mut ids = Ids::new();
         let read = uploaded.and_then(|()| {
-            read_drawing(sandbox, DrawFormat::Svg, &mut ids)
+            read_drawing(sandbox, length as u64, &mut ids)
                 .map_err(|failure| ReadRefusal::Unreadable(alloc::format!("{failure}")))
         });
         // The worker that read this document reads no other.
@@ -149,11 +164,43 @@ mod program {
                 alloc::format!("The clipboard's drawing could not be handed over: {failure}")
             })
             .and_then(|()| {
-                read_drawing(sandbox, DrawFormat::Svg, &mut Ids::new())
+                read_drawing(sandbox, bytes.len() as u64, &mut Ids::new())
                     .map_err(|failure| alloc::format!("The clipboard holds no drawing: {failure}"))
             });
         sandbox.release();
         read.map(|read| read.drawing)
+    }
+
+    /// The picture `handle` holds, decoded in the sandbox and made a picture
+    /// a drawing holds, its levels built here rather than on the event loop.
+    fn place(sandbox: &mut Reader, handle: &Handle) -> Result<Image, String> {
+        let fd = handle.fd();
+        let length = match document_length(handle, sandbox.document_room()) {
+            Ok(length) => length,
+            Err(ReadRefusal::TooLong(room)) => {
+                return Err(alloc::format!(
+                    "it is longer than the {} MiB a picture placed may be on this computer",
+                    room >> 20
+                ));
+            }
+            Err(refusal) => return Err(alloc::format!("{refusal}")),
+        };
+        let placed = upload_document(sandbox, length, |offset, into| {
+            tairix_rt::fs_read(fd, offset, into).map_err(Errno::from_syscall)
+        })
+        .map_err(|failure: UploadFailure<Errno>| alloc::format!("{failure}"))
+        .and_then(|()| {
+            read_placed(sandbox, length as u64).map_err(|failure| alloc::format!("{failure}"))
+        });
+        // The worker that read this picture reads no other.
+        sandbox.release();
+        let placed = placed?;
+        let place = Bounds::from_points([Point::ZERO, placed.natural]);
+        Image::new(placed.pixels, place, placed.source).map_err(|error| match error {
+            DrawingError::OutOfMemory => String::from("there is not enough memory to hold it"),
+            DrawingError::TooComplex => String::from("it is larger than a drawing holds"),
+            DrawingError::Invalid => String::from("it states a size a drawing cannot hold"),
+        })
     }
 
     fn serve_load(sandbox: &mut Reader, job: &mut Option<LoadJob>) -> Option<LoadReply> {
@@ -165,6 +212,10 @@ mod program {
                 name,
             },
             LoadWork::Paste(bytes) => LoadAnswer::Pasted(paste(sandbox, &bytes)),
+            LoadWork::Place { handle, name } => LoadAnswer::Placed {
+                placed: place(sandbox, &handle),
+                name,
+            },
         };
         Some(LoadReply { stamp, answer })
     }
@@ -248,6 +299,7 @@ mod program {
             side: f64::from(TILE),
             design: TILE * 256,
             mode,
+            ground: false,
         };
         let art = artwork(drawing, &square, glyphs, &Afresh).ok()?;
         surface
@@ -263,12 +315,27 @@ mod program {
             name: String,
             drawing: Drawing,
         },
+        /// The selection, to write as SVG for the clipboard.
+        Clip(Drawing),
     }
 
     /// What the queue's work came to.
     enum Answer {
         Computed(Box<Computed>),
         Copied(Result<String, String>),
+        Clipped(Result<String, &'static str>),
+    }
+
+    /// `drawing` as the SVG text the clipboard takes.
+    fn clipped(drawing: &Drawing) -> Result<String, &'static str> {
+        let text = tairix_drawing::svg::write(drawing).map_err(|error| match error {
+            DrawingError::OutOfMemory => "there is not enough memory to write it",
+            DrawingError::Invalid | DrawingError::TooComplex => "it could not be written as SVG",
+        })?;
+        if text.len() > CLIPBOARD_MAX_BYTES {
+            return Err("it is larger than the clipboard holds");
+        }
+        Ok(text)
     }
 
     /// Why a save failed.
@@ -294,84 +361,34 @@ mod program {
         docapp::commit(file, u64::try_from(bytes.len()).unwrap_or(u64::MAX))
     }
 
-    /// The page of `drawing` rendered as a PNG at its own size, or scaled to
-    /// fit [`MOST_PNG_SIDE`].
-    fn png(drawing: &Drawing) -> Result<Vec<u8>, String> {
-        let size = drawing.page().size();
-        let fit = MOST_PNG_SIDE / fmax(fmax(size.x, size.y), 1.0);
-        let scale = fmin(fit, 1.0);
-        let pixels_of =
-            |length: f64| u32::try_from(round_i32(fmax(length * scale, 1.0))).unwrap_or(1);
-        let (width, height) = (pixels_of(size.x), pixels_of(size.y));
-        let glyphs = Lettering::new(Fetched);
-        let mut rgba = tairix_util::fallible::zeroed(
-            usize::try_from(u64::from(width) * u64::from(height) * 4)
-                .map_err(|_| String::from("the page is too large"))?,
-        )
-        .ok_or_else(|| String::from("there is not enough memory to render the page"))?;
-        let mut tile =
-            Surface::new(TILE, TILE).ok_or_else(|| String::from("there is not enough memory"))?;
-        let mut row = 0;
-        while row < height {
-            let mut column = 0;
-            while column < width {
-                tile.fill(tairix_raster::Color::rgba(0, 0, 0, 0));
-                let square = Square {
-                    to_device: Affine::scale(scale, scale),
-                    origin: tairix_bezier::Point::new(f64::from(column), f64::from(row)),
-                    side: f64::from(TILE),
-                    design: TILE * 256,
-                    mode: tairix_drawing::render::Mode::Painted,
-                };
-                let art = artwork(drawing, &square, &glyphs, &Afresh)
-                    .map_err(|err| alloc::format!("{err:?}"))?;
-                if !tile.draw_artwork(&art.nodes, square.design) {
-                    return Err(String::from(
-                        "there is not enough memory to render the page",
-                    ));
-                }
-                let pitch = usize::try_from(TILE).unwrap_or(0);
-                let across = usize::try_from(TILE.min(width - column)).unwrap_or(0);
-                let down = usize::try_from(TILE.min(height - row)).unwrap_or(0);
-                for (y, line) in tile.pixels().chunks_exact(pitch).take(down).enumerate() {
-                    let first = u64::from(row) + u64::try_from(y).unwrap_or(0);
-                    let start = usize::try_from((first * u64::from(width) + u64::from(column)) * 4)
-                        .unwrap_or(usize::MAX);
-                    let Some(out) = rgba.get_mut(start..start.saturating_add(across * 4)) else {
-                        continue;
-                    };
-                    let (quads, _) = out.as_chunks_mut::<4>();
-                    for (pixel, rgba) in line.iter().zip(quads) {
-                        let pixel = pixel.unpremultiply();
-                        rgba.copy_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
-                    }
-                }
-                column += TILE;
-            }
-            row += TILE;
-        }
-        let picture = Picture::rgba(width, height, rgba).map_err(|err| alloc::format!("{err}"))?;
-        encode_png(&picture).map_err(|err| alloc::format!("{err}"))
-    }
+    /// Said of a file Draw writes that its sandbox worker, holding a document
+    /// to its share of this computer, would not read back.
+    const PAST_OPENING: &str =
+        "The file is larger than Draw opens on this computer, so Draw cannot open it again here";
 
     /// Write a copy of `drawing` to `target`, in the format its name says.
     fn copy(target: &Handle, name: &str, drawing: &Drawing) -> Result<String, String> {
-        let format = CopyFormat::of(name)
-            .ok_or_else(|| String::from("name the copy with .pdf, .png or .svg"))?;
-        let bytes = match format {
-            CopyFormat::Svg => tairix_drawing::svg::write(drawing)
-                .map(String::into_bytes)
-                .map_err(|err| alloc::format!("{err:?}"))?,
-            CopyFormat::Pdf => {
-                let written = tairix_drawing::pdf::pdf(drawing, &Lettering::new(Fetched))
-                    .map_err(|err| alloc::format!("{err:?}"))?;
-                written.bytes
-            }
-            CopyFormat::Png => png(drawing)?,
-        };
-        write_all(target, &bytes)
+        let recorded = tairix_browse::recorded_filetype_of(target);
+        let format = CopyFormat::of(name, recorded).ok_or_else(|| {
+            String::from(
+                "name the copy with .pdf, .eps, .png, .jpg, .tif or .svg, or ,aff for a Draw file",
+            )
+        })?;
+        let copied = tairix_draw::copy::copy(format, drawing, &Lettering::new(Fetched))?;
+        write_all(target, &copied.bytes)
             .map_err(|err| alloc::format!("it could not be written ({err})"))?;
-        Ok(alloc::format!("Saved a copy as {name}"))
+        let saved = match copied.note {
+            Some(note) => alloc::format!("Saved a copy as {name}, {note}"),
+            None => alloc::format!("Saved a copy as {name}"),
+        };
+        let reopened = matches!(format, CopyFormat::Svg | CopyFormat::Draw);
+        Ok(
+            if reopened && copied.bytes.len() as u64 > document_room(WORKER_MEMORY) {
+                alloc::format!("{saved}. {PAST_OPENING}")
+            } else {
+                saved
+            },
+        )
     }
 
     struct Draw {
@@ -379,6 +396,10 @@ mod program {
         _loader_guard: WorkerGuard<Reader, Option<LoadJob>, Option<LoadReply>, LoadDesk>,
         renderer: Arc<RenderWorker>,
         _renderer_guard: WorkerGuard<Pool, RenderAsk, RenderAnswer, RenderDesk>,
+        /// The settings in force, the ones on screen, and what the store said.
+        preferences: Publication<Preferences>,
+        writer: Arc<PublishWorker<Preferences>>,
+        _writer_guard: WorkerGuard<Opening, PublishJob<Preferences>, PublishAnswer<Preferences>>,
         artwork: ArtworkCache,
     }
 
@@ -408,16 +429,20 @@ mod program {
     }
 
     fn new_view(host: &Host<Draw>, name: &str, access: Access) -> Result<View, String> {
+        let preferences = host.app.preferences.live();
         let mut ids = Ids::new();
-        let drawing = blank(&mut ids).map_err(|_| String::from("there is not enough memory"))?;
+        let drawing =
+            blank(&mut ids, preferences).map_err(|_| String::from("there is not enough memory"))?;
         let document = Document::new(drawing, ids, true);
-        Ok(View::new(
+        let mut view = View::new(
             document,
             String::from(name),
             access,
             Unkept::NONE,
             scale_of(host),
-        ))
+        );
+        view.begin(preferences);
+        Ok(view)
     }
 
     /// Ask the renderer for `job`: a window has one out at a time, so it never
@@ -443,7 +468,8 @@ mod program {
                 Ok((read, ids)) => {
                     let access = host.windows[index].view.access();
                     let document = Document::new(read.drawing, ids, true);
-                    let view = View::new(document, name, access, read.unkept, scale_of(host));
+                    let mut view = View::new(document, name, access, read.unkept, scale_of(host));
+                    view.begin(host.app.preferences.live());
                     host.show(index, view, Some(handle));
                 }
                 Err(refusal) => host.not_opened(index, &name, &refusal),
@@ -453,6 +479,13 @@ mod program {
                 window
                     .view
                     .pasted(pasted, &mut window.damage, &window.layout);
+                window.owe_reported();
+            }
+            LoadAnswer::Placed { name, placed } => {
+                let window = &mut host.windows[index];
+                window
+                    .view
+                    .placed_picture(&name, placed, &mut window.damage, &window.layout);
                 window.owe_reported();
             }
         }
@@ -478,7 +511,7 @@ mod program {
 
     impl DocumentApp for Draw {
         type View = View;
-        type AppView = NoAppView<Faces>;
+        type AppView = DrawSettings;
         type Snapshot = Snapshot;
         type Extra = ();
         type Work = Work;
@@ -488,44 +521,61 @@ mod program {
         const NAME: &'static str = APP_NAME;
         const WINDOW_SIZE: (u32, u32) = WINDOW_SIZE;
         const JOBS_PER_WINDOW: usize = 4;
+        const BAR_ROWS: &'static [(AppMenuSymbol, &'static str)] =
+            &[(AppMenuSymbol::Settings, "Settings\u{2026}")];
 
         fn start(desktop: &Desktop, set: u64) -> Result<Self, i32> {
-            let Ok(loader) = LoadWorker::queued(
+            let loader = LoadWorker::queued(
                 serve_load,
-                ParserSandbox::new(
-                    RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Documents),
-                    tairix_rt::LogSink,
-                ),
+                ParserSandbox::new(RtLauncher::own_binary(WORKER_MEMORY), tairix_rt::LogSink),
                 WorkerWake::create(),
                 0,
-            ) else {
+            );
+            let Some(loader) = loader.ok().and_then(|loader| try_arc(loader).ok()) else {
                 return Err(app::fail(
                     APP_NAME,
                     app::EXIT_NO_EVENTS,
                     "no room for the reading queue",
                 ));
             };
-            let loader = Arc::new(loader);
             app::start_worker(APP_NAME, &loader, set, APP_TOKEN, "read");
             let loader_guard = WorkerGuard::new(&loader);
             let online = tairix_procinfo::online_cpus(&tairix_procinfo::IpcTransport);
             let pool = app::pool_across(APP_NAME, online, "rendering drawings");
-            let Ok(renderer) = RenderWorker::queued(serve_render, pool, WorkerWake::create(), 0)
-            else {
+            let renderer = RenderWorker::queued(serve_render, pool, WorkerWake::create(), 0);
+            let Some(renderer) = renderer.ok().and_then(|renderer| try_arc(renderer).ok()) else {
                 return Err(app::fail(
                     APP_NAME,
                     app::EXIT_NO_EVENTS,
                     "no room for the render queue",
                 ));
             };
-            let renderer = Arc::new(renderer);
             app::start_worker(APP_NAME, &renderer, set, RENDER_TOKEN, "render");
             let renderer_guard = WorkerGuard::new(&renderer);
+            // Read here, before any window: nothing is on screen yet, so
+            // there is no frame to owe anyone.
+            let (preferences, refusals) =
+                tairix_appdata::loaded(&Settings::open_without_defaults(&mut RtHost));
+            for refusal in refusals {
+                app::report(APP_NAME, refusal);
+            }
+            let Ok(writer) = try_arc(tairix_appdata::publish_worker(Opening::Bare)) else {
+                return Err(app::fail(
+                    APP_NAME,
+                    app::EXIT_NO_EVENTS,
+                    "no room for the settings writer",
+                ));
+            };
+            app::start_worker(APP_NAME, &writer, set, SETTINGS_TOKEN, "settings");
+            let writer_guard = WorkerGuard::new(&writer);
             Ok(Self {
                 loader,
                 _loader_guard: loader_guard,
                 renderer,
                 _renderer_guard: renderer_guard,
+                preferences: Publication::new(preferences),
+                writer,
+                _writer_guard: writer_guard,
                 artwork: icon_cache(desktop),
             })
         }
@@ -533,7 +583,12 @@ mod program {
         fn wakes(&self) -> Vec<(u64, Arc<dyn AnswerWake>)> {
             let loader: Arc<dyn AnswerWake> = self.loader.clone();
             let renderer: Arc<dyn AnswerWake> = self.renderer.clone();
-            alloc::vec![(APP_TOKEN, loader), (RENDER_TOKEN, renderer)]
+            let writer: Arc<dyn AnswerWake> = self.writer.clone();
+            alloc::vec![
+                (APP_TOKEN, loader),
+                (RENDER_TOKEN, renderer),
+                (SETTINGS_TOKEN, writer),
+            ]
         }
 
         fn faces(theme: &Theme, scale: Scale) -> Faces {
@@ -551,7 +606,7 @@ mod program {
             let text =
                 tairix_drawing::svg::write(&job.snapshot.drawing).map_err(SaveFailure::Encode)?;
             write_all(&job.target, text.as_bytes()).map_err(SaveFailure::Write)?;
-            Ok(None)
+            Ok((text.len() as u64 > document_room(WORKER_MEMORY)).then_some(PAST_OPENING))
         }
 
         fn work(work: Work) -> Answer {
@@ -564,6 +619,7 @@ mod program {
                     name,
                     drawing,
                 } => Answer::Copied(copy(&target, &name, &drawing)),
+                Work::Clip(drawing) => Answer::Clipped(clipped(&drawing)),
             }
         }
 
@@ -631,6 +687,55 @@ mod program {
                     adopt_render(host, stamp, drawn);
                 }
             });
+            collect_settings(host);
+        }
+
+        fn leaving(host: &mut Host<Self>) {
+            let draw = &mut host.app;
+            let mut refusals = Vec::new();
+            tairix_appdata::see_out_published(&*draw.writer, &mut draw.preferences, &mut refusals);
+            for refusal in refusals {
+                app::report(APP_NAME, refusal);
+            }
+        }
+
+        fn bar_chosen(host: &mut Host<Self>, _row: usize) {
+            if let Some(index) = host.app_windows.len().checked_sub(1) {
+                host.raise_app_window(index);
+                return;
+            }
+            let record = host.app.preferences.live().clone();
+            let _ = host.open_app_window(DrawSettings::new(record, Category::General.index()));
+        }
+
+        /// What the settings window was in the middle of is written as it
+        /// goes.
+        fn app_closing(host: &mut Host<Self>, _index: usize) {
+            let job = host.app.preferences.settle();
+            submit_settings(host, job);
+        }
+
+        fn app_request(
+            host: &mut Host<Self>,
+            _index: usize,
+            request: SettingsRequest<Preferences>,
+        ) {
+            if let Some(Edit { was, now, settled }) = request.edit {
+                host.app.preferences.edit(&was, &now);
+                apply_settings(host);
+                if settled {
+                    let job = host.app.preferences.settle();
+                    submit_settings(host, job);
+                }
+            }
+            match request.then {
+                Some(Then::Restore) => {
+                    let job = host.app.preferences.restore();
+                    submit_settings(host, job);
+                }
+                Some(Then::Ask(never)) => match never {},
+                None => {}
+            }
         }
 
         /// Step what each window's held controls have brought due, then ask
@@ -684,12 +789,9 @@ mod program {
 
         fn request(host: &mut Host<Self>, index: usize, request: Own) {
             match request {
-                Own::Copy(text) => {
-                    let id = host.windows[index].id();
-                    if let Err(err) =
-                        clipboard::put(&mut host.client, id, ClipboardKind::Text, text.as_bytes())
-                    {
-                        host.windows[index].state(alloc::format!("Could not copy: {err}"));
+                Own::Copy(drawing) => {
+                    if !host.queue(index, Work::Clip(drawing)) {
+                        host.windows[index].state("There is no room to copy now");
                     }
                 }
                 Own::Paste => {
@@ -725,17 +827,34 @@ mod program {
         }
 
         fn answered(host: &mut Host<Self>, index: usize, answer: Answer) {
-            let window = &mut host.windows[index];
-            match answer {
+            let said = match answer {
                 Answer::Computed(computed) => {
+                    let window = &mut host.windows[index];
                     window
                         .view
                         .computed(*computed, &window.layout, &mut window.damage);
+                    None
                 }
-                Answer::Copied(Ok(message)) => window.state(message),
-                Answer::Copied(Err(why)) => {
-                    window.state(alloc::format!("The copy was not saved: {why}"));
+                Answer::Copied(Ok(message)) => Some(message),
+                Answer::Copied(Err(why)) => Some(alloc::format!("The copy was not saved: {why}")),
+                Answer::Clipped(clipped) => {
+                    let id = host.windows[index].id();
+                    let put = match clipped {
+                        Ok(text) => clipboard::put(
+                            &mut host.client,
+                            id,
+                            ClipboardKind::Text,
+                            text.as_bytes(),
+                        )
+                        .map_err(|err| alloc::format!("{err}")),
+                        Err(why) => Err(String::from(why)),
+                    };
+                    put.err().map(|why| alloc::format!("Could not copy: {why}"))
                 }
+            };
+            let window = &mut host.windows[index];
+            if let Some(said) = said {
+                window.state(said);
             }
             window.owe_reported();
         }
@@ -762,15 +881,28 @@ mod program {
             }
         }
 
+        fn import_chosen(host: &mut Host<Self>, index: usize, file: Handle, name: String) {
+            let job = LoadJob {
+                stamp: host.windows[index].stamp(),
+                work: LoadWork::Place { handle: file, name },
+            };
+            match host.app.loader.submit(Some(job)) {
+                Ok(answered) => host.note_answered(answered),
+                Err(_) => host.windows[index].state("There is no room to place a picture now"),
+            }
+        }
+
         fn render_app(
             &mut self,
-            _: &mut Surface,
-            view: &NoAppView<Faces>,
-            (): &(),
-            _: (&Theme, Scale, Faces),
-            _: bool,
+            surface: &mut Surface,
+            view: &DrawSettings,
+            layout: &SettingsLayout,
+            (theme, scale, _): (&Theme, Scale, Faces),
+            _focused: bool,
         ) {
-            let () = view.never();
+            let mut inline = InlineArtwork::new(NoArtworkSeam, NoArtworkSeam);
+            let mut source = IconArtworkSource::new(&mut self.artwork, &mut inline);
+            view.render(surface, layout, (theme, scale), &mut source);
         }
 
         fn render(
@@ -784,6 +916,70 @@ mod program {
             let mut inline = InlineArtwork::new(NoArtworkSeam, NoArtworkSeam);
             let mut source = IconArtworkSource::new(&mut self.artwork, &mut inline);
             view.render(surface, layout, style, &mut source);
+        }
+    }
+
+    /// Hand `job`, the settings write owed now, to the writer, and take in
+    /// its answer where it ran here for want of a worker.
+    fn submit_settings(host: &mut Host<Draw>, job: Option<PublishJob<Preferences>>) {
+        let mut refusals = Vec::new();
+        let draw = &mut host.app;
+        if tairix_appdata::submit_published(
+            &*draw.writer,
+            &mut draw.preferences,
+            job,
+            &mut refusals,
+        ) {
+            settings_adopted(host, &refusals);
+        }
+    }
+
+    /// Adopt what the settings writer answered and make the write owed behind
+    /// it.
+    fn collect_settings(host: &mut Host<Draw>) {
+        let mut refusals = Vec::new();
+        let draw = &mut host.app;
+        if tairix_appdata::collect_published(&*draw.writer, &mut draw.preferences, &mut refusals) {
+            settings_adopted(host, &refusals);
+        }
+    }
+
+    /// Say what the store refused, in the settings window and on `stderr`,
+    /// and bring every window up to the settings now in force.
+    fn settings_adopted(host: &mut Host<Draw>, refusals: &[StoreRefusal]) {
+        let said = refusals
+            .iter()
+            .find(|refusal| refusal.is_write())
+            .map(|refusal| alloc::format!("{refusal}"));
+        for refusal in refusals {
+            app::report(APP_NAME, refusal);
+        }
+        apply_settings(host);
+        for window in &mut host.app_windows {
+            window
+                .view
+                .say(said.clone(), &window.layout, &mut window.damage);
+            window.owe_reported();
+        }
+    }
+
+    /// Bring every window up to the settings in force: each drawing window
+    /// moves things as they say, and the settings window shows them.
+    fn apply_settings(host: &mut Host<Draw>) {
+        let preferences = host.app.preferences.live().clone();
+        for window in &mut host.windows {
+            window.view.adopt(&preferences);
+        }
+        for index in 0..host.app_windows.len() {
+            let window = &mut host.app_windows[index];
+            if window
+                .view
+                .adopt(&preferences, &window.layout, &mut window.damage)
+            {
+                host.apply_app(index, Outcome::relaid());
+            } else {
+                window.owe_reported();
+            }
         }
     }
 

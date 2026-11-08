@@ -23,7 +23,7 @@
 //! The placeholder geometry is never drawn: a decode that recorded anything
 //! is discarded whole and repeated.
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -32,7 +32,9 @@ use tairix_svg::font::{
     OutlineContour, OutlineSegment, MAX_GLYPH_POINTS,
 };
 
-use crate::wire::{Reader, WireError, Writer};
+use tairix_util::fallible;
+
+use crate::wire::{Reader, Room, WireError, Writer};
 
 /// The most faces one document may ask for.
 ///
@@ -55,9 +57,9 @@ pub const MAX_FAMILY_NAME: usize = 64;
 /// away — so the value only has to be one a layout can divide by.
 const PLACEHOLDER_EM: f64 = 1000.0;
 
-/// One face a document asked for.
+/// A face as a document names it.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct FaceWant {
+pub struct FaceKey {
     /// The family name, exactly as the document spelled it.
     pub family: String,
     /// The `wght` coordinate.
@@ -66,17 +68,70 @@ pub struct FaceWant {
     pub style: u8,
     /// The `wdth` coordinate, in hundredths of a percent.
     pub stretch: u16,
-    /// The distinct scalars this face was asked for, in ascending order.
-    pub scalars: Vec<char>,
 }
 
-impl FaceWant {
+impl FaceKey {
+    /// The face `req` names.
+    fn of(req: &FaceRequest<'_>) -> Result<Self, FontsFault> {
+        Ok(Self {
+            family: fallible::concatenated(&[req.family]).ok_or(FontsFault::NoMemory)?,
+            weight: req.weight,
+            style: style_wire(req.style),
+            stretch: req.stretch,
+        })
+    }
+
     /// Whether `req` names this face.
     fn matches(&self, req: &FaceRequest<'_>) -> bool {
         self.family == req.family
             && self.weight == req.weight
             && self.style == style_wire(req.style)
             && self.stretch == req.stretch
+    }
+
+    fn encode<R: Room>(&self, w: &mut Writer<R>) {
+        w.str(&self.family);
+        w.u32(u32::from(self.weight));
+        w.u8(self.style);
+        w.u32(u32::from(self.stretch));
+    }
+
+    fn decode(r: &mut Reader<'_>) -> Result<Self, FontsFault> {
+        let family =
+            fallible::concatenated(&[r.str(MAX_FAMILY_NAME)?]).ok_or(FontsFault::NoMemory)?;
+        let weight = u16::try_from(r.u32()?).map_err(|_| FontsFault::Malformed)?;
+        let style = r.u8()?;
+        let stretch = u16::try_from(r.u32()?).map_err(|_| FontsFault::Malformed)?;
+        Ok(Self {
+            family,
+            weight,
+            style,
+            stretch,
+        })
+    }
+}
+
+/// One face a document asked for, and what it asked of it.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct FaceWant {
+    /// The face.
+    pub face: FaceKey,
+    /// The distinct scalars asked for, in ascending order.
+    pub scalars: Vec<char>,
+}
+
+/// Why a font record was not taken.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FontsFault {
+    /// It broke its grammar or its bounds.
+    Malformed,
+    /// There was no memory here to hold it.
+    NoMemory,
+}
+
+impl From<WireError> for FontsFault {
+    fn from(_: WireError) -> Self {
+        Self::Malformed
     }
 }
 
@@ -101,13 +156,10 @@ impl FontWants {
         // did not would be refused by the decoder's own bound rather than
         // read short.
         w.u32(count(self.faces.len()));
-        for face in &self.faces {
-            w.str(&face.family);
-            w.u32(u32::from(face.weight));
-            w.u8(face.style);
-            w.u32(u32::from(face.stretch));
-            w.u32(count(face.scalars.len()));
-            for scalar in &face.scalars {
+        for want in &self.faces {
+            want.face.encode(w);
+            w.u32(count(want.scalars.len()));
+            for scalar in &want.scalars {
                 w.u32(*scalar as u32);
             }
         }
@@ -117,43 +169,45 @@ impl FontWants {
     ///
     /// # Errors
     ///
-    /// [`WireError::Malformed`] past a bound, for a scalar that is not a
-    /// Unicode scalar value, or for a weight or width outside its field.
-    pub fn decode(r: &mut Reader<'_>) -> Result<Self, WireError> {
+    /// [`FontsFault::Malformed`] past a bound, for a scalar that is not a
+    /// Unicode scalar value or not above the one before it, or for a weight
+    /// or width outside its field; [`FontsFault::NoMemory`] when they cannot
+    /// be held.
+    pub fn decode(r: &mut Reader<'_>) -> Result<Self, FontsFault> {
         let count = r.u32()? as usize;
         if count > MAX_FACES {
-            return Err(WireError::Malformed);
+            return Err(FontsFault::Malformed);
         }
-        let mut faces = Vec::with_capacity(count);
+        let mut faces = Vec::new();
+        if !fallible::reserve(&mut faces, count) {
+            return Err(FontsFault::NoMemory);
+        }
         let mut total = 0_usize;
         for _ in 0..count {
-            let family = r.string(MAX_FAMILY_NAME)?;
-            let weight = u16::try_from(r.u32()?).map_err(|_| WireError::Malformed)?;
-            let style = r.u8()?;
-            let stretch = u16::try_from(r.u32()?).map_err(|_| WireError::Malformed)?;
+            let face = FaceKey::decode(r)?;
             let scalars = read_scalars(r, MAX_SCALARS - total)?;
             total += scalars.len();
-            faces.push(FaceWant {
-                family,
-                weight,
-                style,
-                stretch,
-                scalars,
-            });
+            faces.push(FaceWant { face, scalars });
         }
         Ok(Self { faces })
     }
 }
 
-/// Read a bounded, ascending run of scalars.
-fn read_scalars(r: &mut Reader<'_>, room: usize) -> Result<Vec<char>, WireError> {
+/// Read a bounded, strictly ascending run of scalars.
+fn read_scalars(r: &mut Reader<'_>, room: usize) -> Result<Vec<char>, FontsFault> {
     let count = r.u32()? as usize;
     if count > room {
-        return Err(WireError::Malformed);
+        return Err(FontsFault::Malformed);
     }
-    let mut scalars = Vec::with_capacity(count);
+    let mut scalars = Vec::new();
+    if !fallible::reserve(&mut scalars, count) {
+        return Err(FontsFault::NoMemory);
+    }
     for _ in 0..count {
-        let scalar = char::from_u32(r.u32()?).ok_or(WireError::Malformed)?;
+        let scalar = char::from_u32(r.u32()?).ok_or(FontsFault::Malformed)?;
+        if scalars.last().is_some_and(|&last| last >= scalar) {
+            return Err(FontsFault::Malformed);
+        }
         scalars.push(scalar);
     }
     Ok(scalars)
@@ -169,9 +223,20 @@ pub struct FontTable {
 /// One face in a supplied table.
 #[derive(Clone, Debug, PartialEq)]
 struct TableFace {
-    want: FaceWant,
+    face: FaceKey,
     metrics: FaceMetrics,
-    glyphs: BTreeMap<char, GlyphOutline>,
+    /// Strictly ascending.
+    scalars: Vec<char>,
+    /// The glyph of each scalar, at its index.
+    glyphs: Vec<GlyphOutline>,
+}
+
+impl TableFace {
+    /// The glyph of `scalar`, if the face holds it.
+    fn glyph(&self, scalar: char) -> Option<&GlyphOutline> {
+        let at = self.scalars.binary_search(&scalar).ok()?;
+        self.glyphs.get(at)
+    }
 }
 
 impl FontTable {
@@ -182,52 +247,55 @@ impl FontTable {
         Self { faces: Vec::new() }
     }
 
-    /// Add one face's metrics and glyphs.
+    /// Add one face's metrics and the glyphs of `scalars`, strictly
+    /// ascending, each glyph at its scalar's index.
     ///
     /// # Errors
     ///
-    /// [`WireError::Malformed`] past [`MAX_FACES`], or for metrics or a
-    /// glyph the decoder could not use — a table is untrusted input to the
-    /// worker exactly as a document is.
+    /// [`FontsFault::Malformed`] past [`MAX_FACES`], for scalars out of
+    /// order or not one to a glyph, or for metrics or a glyph the decoder
+    /// could not use — a table is untrusted input to the worker exactly as a
+    /// document is; [`FontsFault::NoMemory`] when the face cannot be held.
     pub fn push(
         &mut self,
-        want: FaceWant,
+        face: FaceKey,
         metrics: FaceMetrics,
-        glyphs: Vec<(char, GlyphOutline)>,
-    ) -> Result<(), WireError> {
-        if self.faces.len() >= MAX_FACES || !metrics.is_usable() {
-            return Err(WireError::Malformed);
+        scalars: Vec<char>,
+        glyphs: Vec<GlyphOutline>,
+    ) -> Result<(), FontsFault> {
+        let ascending = scalars.windows(2).all(|pair| pair[0] < pair[1]);
+        if self.faces.len() >= MAX_FACES
+            || !metrics.is_usable()
+            || !ascending
+            || scalars.len() != glyphs.len()
+            || !glyphs.iter().all(GlyphOutline::is_drawable)
+        {
+            return Err(FontsFault::Malformed);
         }
-        let mut held = BTreeMap::new();
-        for (scalar, glyph) in glyphs {
-            if !glyph.is_drawable() {
-                return Err(WireError::Malformed);
-            }
-            held.insert(scalar, glyph);
-        }
-        self.faces.push(TableFace {
-            want,
-            metrics,
-            glyphs: held,
-        });
-        Ok(())
+        fallible::try_push(
+            &mut self.faces,
+            TableFace {
+                face,
+                metrics,
+                scalars,
+                glyphs,
+            },
+        )
+        .map_err(|_| FontsFault::NoMemory)
     }
 
     /// Encode the table for the worker.
-    pub fn encode(&self, w: &mut Writer) {
+    pub fn encode<R: Room>(&self, w: &mut Writer<R>) {
         // Bounded by `push`, so the counts fit their fields.
         w.u32(count(self.faces.len()));
         for face in &self.faces {
-            w.str(&face.want.family);
-            w.u32(u32::from(face.want.weight));
-            w.u8(face.want.style);
-            w.u32(u32::from(face.want.stretch));
+            face.face.encode(w);
             w.i32(units(face.metrics.units_per_em));
             w.i32(units(face.metrics.ascent));
             w.i32(units(face.metrics.descent));
             w.i32(units(face.metrics.line_gap));
             w.u32(count(face.glyphs.len()));
-            for (scalar, glyph) in &face.glyphs {
+            for (scalar, glyph) in face.scalars.iter().zip(&face.glyphs) {
                 w.u32(*scalar as u32);
                 encode_glyph(w, glyph);
             }
@@ -239,25 +307,22 @@ impl FontTable {
     ///
     /// # Errors
     ///
-    /// [`WireError::Malformed`] for a count past a bound, a scalar that is
-    /// not a Unicode scalar value, an unusable face, or an undrawable
-    /// glyph.
-    pub fn decode(r: &mut Reader<'_>) -> Result<Self, WireError> {
+    /// [`FontsFault::Malformed`] for a count past a bound, a scalar that is
+    /// not a Unicode scalar value, glyphs out of order, an unusable face, or
+    /// an undrawable glyph.
+    pub fn decode(r: &mut Reader<'_>) -> Result<Self, FontsFault> {
         let count = r.u32()? as usize;
         if count > MAX_FACES {
-            return Err(WireError::Malformed);
+            return Err(FontsFault::Malformed);
         }
         let mut table = Self::new();
         let mut total = 0_usize;
         for index in 0..count {
-            let family = r.string(MAX_FAMILY_NAME)?;
-            let weight = u16::try_from(r.u32()?).map_err(|_| WireError::Malformed)?;
-            let style = r.u8()?;
-            let stretch = u16::try_from(r.u32()?).map_err(|_| WireError::Malformed)?;
+            let face = FaceKey::decode(r)?;
             let metrics = FaceMetrics {
                 // The id is this provider's own index, not the host's, so a
                 // supplied table can never name a face it did not send.
-                id: FaceId::new(u32::try_from(index).map_err(|_| WireError::Malformed)?),
+                id: FaceId::new(u32::try_from(index).map_err(|_| FontsFault::Malformed)?),
                 units_per_em: f64::from(r.i32()?),
                 ascent: f64::from(r.i32()?),
                 descent: f64::from(r.i32()?),
@@ -265,27 +330,16 @@ impl FontTable {
             };
             let glyph_count = r.u32()? as usize;
             if glyph_count > MAX_SCALARS - total {
-                return Err(WireError::Malformed);
+                return Err(FontsFault::Malformed);
             }
             total += glyph_count;
-            let mut glyphs = Vec::with_capacity(glyph_count);
             let mut scalars = Vec::with_capacity(glyph_count);
+            let mut glyphs = Vec::with_capacity(glyph_count);
             for _ in 0..glyph_count {
-                let scalar = char::from_u32(r.u32()?).ok_or(WireError::Malformed)?;
-                scalars.push(scalar);
-                glyphs.push((scalar, decode_glyph(r)?));
+                scalars.push(char::from_u32(r.u32()?).ok_or(FontsFault::Malformed)?);
+                glyphs.push(decode_glyph(r)?);
             }
-            table.push(
-                FaceWant {
-                    family,
-                    weight,
-                    style,
-                    stretch,
-                    scalars,
-                },
-                metrics,
-                glyphs,
-            )?;
+            table.push(face, metrics, scalars, glyphs)?;
         }
         Ok(table)
     }
@@ -293,7 +347,7 @@ impl FontTable {
     /// The face `req` names, if the table holds it.
     fn face_of(&self, req: &FaceRequest<'_>) -> Option<(FaceId, &TableFace)> {
         self.faces.iter().enumerate().find_map(|(index, face)| {
-            face.want
+            face.face
                 .matches(req)
                 .then(|| (FaceId::new(u32::try_from(index).unwrap_or(u32::MAX)), face))
         })
@@ -355,7 +409,7 @@ const SEGMENT_LINE: u8 = 1;
 const SEGMENT_QUADRATIC: u8 = 2;
 
 /// Encode one glyph's geometry.
-fn encode_glyph(w: &mut Writer, glyph: &GlyphOutline) {
+fn encode_glyph<R: Room>(w: &mut Writer<R>, glyph: &GlyphOutline) {
     w.i32(units(glyph.units_per_em));
     w.i32(fixed(glyph.advance));
     w.i32(fixed(glyph.synthetic_bold));
@@ -465,7 +519,7 @@ pub struct TableFonts<'t> {
     /// scalars, and inserting each into a sorted vector moves the tail
     /// every time. The set is drained in order once, when the record is
     /// handed over.
-    recorded: Vec<(FaceWant, BTreeSet<char>)>,
+    recorded: Vec<(FaceKey, BTreeSet<char>)>,
     /// How many scalars have been recorded across every face, kept as a
     /// running total so the bound costs nothing to check.
     wanted: usize,
@@ -502,9 +556,9 @@ impl<'t> TableFonts<'t> {
             faces: self
                 .recorded
                 .into_iter()
-                .map(|(want, scalars)| FaceWant {
+                .map(|(face, scalars)| FaceWant {
+                    face,
                     scalars: scalars.into_iter().collect(),
-                    ..want
                 })
                 .collect(),
         }
@@ -537,6 +591,11 @@ impl FontProvider for TableFonts<'_> {
                 ..metrics
             });
         }
+        // A family the wants cannot carry is no face the host could furnish,
+        // so the decode falls back from it as from any face the machine lacks.
+        if req.family.len() > MAX_FAMILY_NAME {
+            return Err(FontUnavailable);
+        }
         // Not held: record it and answer placeholder metrics, so the walk
         // reaches every remaining `<text>` and the record is of the whole
         // document rather than of the first run that missed.
@@ -547,16 +606,8 @@ impl FontProvider for TableFonts<'_> {
             if self.recorded.len() >= MAX_FACES {
                 return Err(FontUnavailable);
             }
-            self.recorded.push((
-                FaceWant {
-                    family: String::from(req.family),
-                    weight: req.weight,
-                    style: style_wire(req.style),
-                    stretch: req.stretch,
-                    scalars: Vec::new(),
-                },
-                BTreeSet::new(),
-            ));
+            let face = FaceKey::of(req).map_err(|_| FontUnavailable)?;
+            self.recorded.push((face, BTreeSet::new()));
             self.recorded.len() - 1
         };
         let handle = FaceId::new(u32::try_from(self.issued.len()).map_err(|_| FontUnavailable)?);
@@ -585,7 +636,7 @@ impl FontProvider for TableFonts<'_> {
                 // table that cannot serve this document; recording it here
                 // would ask for a third round, so it is refused instead.
                 for scalar in run {
-                    out.push(held.glyphs.get(scalar).ok_or(FontUnavailable)?.clone());
+                    out.push(held.glyph(*scalar).ok_or(FontUnavailable)?.clone());
                 }
                 Ok(())
             }

@@ -2318,7 +2318,9 @@ impl NativePages {
         } else {
             rgba_picture(decode_page(file, &page, limits, &mut self.scratch)?)?
         };
-        Ok(Some(picture.with_density(density)))
+        Ok(Some(picture.with_density(
+            density.map(|density| page.orientation.picture_density(density)),
+        )))
     }
 }
 

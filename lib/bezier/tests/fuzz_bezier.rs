@@ -97,7 +97,7 @@ fn the_geometry_kernel_never_panics_for_any_geometry() {
         // nothing at all, so whole outlines coincide.
         let b = match rng.below(4) {
             0 => a.clone(),
-            1 => a.reversed(),
+            1 => a.reversed().expect("reversed"),
             _ => random_path(&mut rng),
         };
         let operation = *rng.pick(&operations);

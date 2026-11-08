@@ -97,17 +97,21 @@ So far — the staged remainder is the ledger in `plans/SVG.md`:
   `orient` (including `auto-start-reverse`), the marker's own `viewBox` and
   its `overflow` clip;
 - `paint-order` as a full permutation of fill, stroke, and markers, and a
-  `<switch>`'s conditional-processing attributes.
+  `<switch>`'s conditional-processing attributes;
+- text — `<text>` and `<tspan>` with their position lists, `text-anchor`,
+  white space, letter and word spacing, `textLength`, the `font-*`
+  properties and `baseline-shift`, and `<textPath>` along a `<path>`, its
+  glyphs turned with the path or bent along it — each glyph reaching the
+  crate as contours from an injected font provider.
 
-**Not yet drawn**, and staged rather than declined: text (`<text>`,
-`<tspan>`, `<textPath>`), embedded images (`<image>`), filters, SMIL
-animation, the CSS surface the cascade still drops, external references, and
-the three remaining `vector-effect` values, and scripting. Each is a numbered
+**Not yet drawn**, and staged rather than declined: the rest of the text
+surface (the baselines, `text-decoration`, bidi and shaping, and SVG 2's
+text paths along basic shapes), embedded images (`<image>`), filters, SMIL
+animation, the CSS surface the cascade still drops, external references, the
+three remaining `vector-effect` values, and scripting. Each is a numbered
 item in `plans/SVG.md`, which carries the design and the prerequisites —
-notably that text needs a public glyph-outline API out of `lib/fontface`,
-since a glyph has to reach this crate as contours rather than pixels, and
-that a script runs only where a consumer asks for one, in its own sandbox,
-under a budget. `<foreignObject>` is deliberately undrawable, so a `<switch>`
+notably that a script runs only where a consumer asks for one, in its own
+sandbox, under a budget. `<foreignObject>` is deliberately undrawable, so a `<switch>`
 takes its fallback sibling.
 
 An element it cannot yet draw is skipped rather than refusing the document,

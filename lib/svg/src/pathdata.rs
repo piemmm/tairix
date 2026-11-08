@@ -4,9 +4,10 @@
 //! another parameter set after it, with coordinates that may be run together
 //! wherever a sign or a second decimal point makes the boundary unambiguous
 //! (`M0-4L2-6`, `.5.5`). [`path_commands`] reads all of that into commands
-//! whose coordinates are absolute and whose shorthand is spelled out, so a
-//! reader that keeps the curves — the drawing editor's — and the decoder that
-//! flattens them ([`parse_path_data`]) share one reading of the grammar.
+//! whose coordinates are absolute and whose shorthand is spelled out, so the
+//! readers that keep the curves ([`parse_path_curves`]: the drawing editor's,
+//! and the text set along a path) and the decoder that flattens them
+//! ([`parse_path_data`]) share one reading of the grammar.
 //!
 //! Flattening is `tairix_bezier`'s, the one flattener every consumer draws
 //! through.
@@ -18,7 +19,8 @@ use core::f64::consts::PI;
 use tairix_bezier::flatten::{
     clamp_tolerance, flatten_cubic, flatten_ellipse_arc, flatten_quadratic,
 };
-use tairix_bezier::{CubicBez, EllipseArc, QuadBez};
+use tairix_bezier::{CubicBez, EllipseArc, Path, PathEl, QuadBez, Subpath};
+use tairix_util::fallible;
 
 use crate::error::SvgError;
 use crate::geom::{delta, Point, SubPath, Vertices};
@@ -269,6 +271,100 @@ pub fn parse_path_data(
         }
     }
     Ok(builder.finish())
+}
+
+/// Read the `d` attribute `d` as a path whose curves are kept: a quadratic
+/// raised to the cubic it is, an arc as the cubics that trace it.
+///
+/// # Errors
+/// [`SvgError::TooComplex`] past `max_commands` commands,
+/// [`SvgError::OutOfMemory`] when the path cannot be held, and what
+/// [`path_commands`] refuses.
+pub fn parse_path_curves(d: &str, max_commands: usize) -> Result<Path, SvgError> {
+    let mut path = Path::new();
+    let mut current: Option<Subpath> = None;
+    let mut start = tairix_bezier::Point::ZERO;
+    let mut cursor = start;
+    for (count, command) in path_commands(d).enumerate() {
+        if count == max_commands {
+            return Err(SvgError::TooComplex);
+        }
+        let held = match command? {
+            PathCommand::MoveTo(point) => {
+                if let Some(done) = current.take() {
+                    fallible::try_push(&mut path.subpaths, done)
+                        .map_err(|_| SvgError::OutOfMemory)?;
+                }
+                start = point.into();
+                cursor = start;
+                current = Some(Subpath::new(start));
+                true
+            }
+            PathCommand::LineTo(point) => {
+                let elements = &mut open(&mut current, cursor).elements;
+                cursor = point.into();
+                fallible::push(elements, PathEl::Line(cursor))
+            }
+            PathCommand::CubicTo(c1, c2, to) => {
+                let elements = &mut open(&mut current, cursor).elements;
+                cursor = to.into();
+                fallible::push(elements, PathEl::Cubic(c1.into(), c2.into(), cursor))
+            }
+            PathCommand::QuadTo(control, to) => {
+                let elements = &mut open(&mut current, cursor).elements;
+                let cubic = QuadBez::new(cursor, control.into(), to.into()).raised();
+                cursor = cubic.p3;
+                fallible::push(elements, PathEl::Cubic(cubic.p1, cubic.p2, cubic.p3))
+            }
+            PathCommand::ArcTo {
+                radii,
+                x_rotation,
+                large,
+                sweep,
+                to,
+            } => {
+                let to: tairix_bezier::Point = to.into();
+                let elements = &mut open(&mut current, cursor).elements;
+                let first = elements.len();
+                let mut held = true;
+                if let Some(arc) =
+                    EllipseArc::from_svg(cursor, to, radii.into(), x_rotation, large, sweep)
+                {
+                    arc.to_cubics(|c| {
+                        held &= fallible::push(elements, PathEl::Cubic(c.p1, c.p2, c.p3));
+                    });
+                    // The cubics reach the endpoint only to rounding.
+                    if let Some(PathEl::Cubic(_, _, end)) = elements.last_mut() {
+                        *end = to;
+                    }
+                }
+                cursor = to;
+                held && (elements.len() > first || fallible::push(elements, PathEl::Line(to)))
+            }
+            PathCommand::Close => {
+                if let Some(mut done) = current.take() {
+                    done.closed = true;
+                    fallible::try_push(&mut path.subpaths, done)
+                        .map_err(|_| SvgError::OutOfMemory)?;
+                }
+                cursor = start;
+                true
+            }
+        };
+        if !held {
+            return Err(SvgError::OutOfMemory);
+        }
+    }
+    if let Some(done) = current {
+        fallible::try_push(&mut path.subpaths, done).map_err(|_| SvgError::OutOfMemory)?;
+    }
+    Ok(path)
+}
+
+/// The sub-path being built, or a fresh one at `cursor` — where a segment
+/// after a `closepath` begins.
+fn open(current: &mut Option<Subpath>, cursor: tairix_bezier::Point) -> &mut Subpath {
+    current.get_or_insert_with(|| Subpath::new(cursor))
 }
 
 /// The sub-paths built so far and the pen state the next command starts from.

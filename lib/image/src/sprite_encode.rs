@@ -53,16 +53,7 @@ pub(crate) fn encode(sprites: &[SpriteInput<'_>]) -> Result<alloc::vec::Vec<u8>,
     let end_at = out.len();
     out.le_u32(0)?;
     for sprite in sprites {
-        match *sprite {
-            SpriteInput::Picture {
-                name,
-                mode,
-                palette,
-                masked,
-                source,
-            } => write_sprite(&mut out, name, mode, palette, masked, source)?,
-            SpriteInput::Opaque(bytes) => write_opaque(&mut out, bytes)?,
-        }
+        write_one(&mut out, sprite)?;
     }
     let end = u32::try_from(out.len())
         .ok()
@@ -70,6 +61,26 @@ pub(crate) fn encode(sprites: &[SpriteInput<'_>]) -> Result<alloc::vec::Vec<u8>,
         .ok_or(EncodeError::TooLarge)?;
     out.patch_le_u32(end_at, end);
     Ok(out.into_bytes())
+}
+
+/// `sprite` alone, control block first, with no area around it.
+pub(crate) fn encode_one(sprite: &SpriteInput<'_>) -> Result<alloc::vec::Vec<u8>, EncodeError> {
+    let mut out = Output::new();
+    write_one(&mut out, sprite)?;
+    Ok(out.into_bytes())
+}
+
+fn write_one(out: &mut Output, sprite: &SpriteInput<'_>) -> Result<(), EncodeError> {
+    match *sprite {
+        SpriteInput::Picture {
+            name,
+            mode,
+            palette,
+            masked,
+            source,
+        } => write_sprite(out, name, mode, palette, masked, source),
+        SpriteInput::Opaque(bytes) => write_opaque(out, bytes),
+    }
 }
 
 /// Write a kept sprite back exactly, its length word restated as the bytes

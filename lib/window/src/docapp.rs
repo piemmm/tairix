@@ -36,6 +36,8 @@ mod members;
 mod refit;
 #[cfg(any(test, all(freestanding, feature = "rt")))]
 mod scroll;
+#[cfg(feature = "settings")]
+pub mod settings;
 #[cfg(any(test, all(freestanding, feature = "rt")))]
 mod title;
 
@@ -125,6 +127,9 @@ pub enum Request<K, O> {
     SaveCopy,
     /// Ask for a document to open.
     Open,
+    /// Ask for a file to read into the document, which the application
+    /// reads: handed over read-only, whatever the application may edit.
+    Import,
     /// Close the window: its document is saved or its changes given up.
     Close,
     /// Ask whether to save the document's changes before the window closes:
@@ -589,6 +594,24 @@ pub trait AppView {
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome<AppRequest<Self::Own>>;
+
+    /// When a control of the window next changes on its own — a held one
+    /// stepping — if one will. Asked after every round, so nothing polls.
+    fn deadline_ns(&mut self, _now_ns: u64) -> Option<u64> {
+        None
+    }
+
+    /// Carry out what came due by `now_ns` for the window laid out as
+    /// `layout`, reporting what moved.
+    fn advance(
+        &mut self,
+        _now_ns: u64,
+        _layout: &Self::Layout,
+        _scale: Scale,
+        _theme: &Theme,
+        _damage: &mut Region,
+    ) {
+    }
 }
 
 /// What a window of the application's own asks the host for.

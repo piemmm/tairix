@@ -4,8 +4,9 @@
 //!
 //! A row is one setting: a label, an optional description line, and a trailing
 //! slot holding one real [`Toggle`], [`Checkbox`], [`ComboBox`], [`Slider`],
-//! [`TextField`], [`SecretField`], [`Button`], [`FlagSet`] of checkboxes,
-//! read-only reading, or stated absence of one. It composes the row chrome [`ListRow`](crate::collection::ListRow)
+//! [`NumberField`], [`ColourField`], [`TextField`], [`SecretField`],
+//! [`Button`], [`FlagSet`] of checkboxes, read-only reading, or stated absence
+//! of one. It composes the row chrome [`ListRow`](crate::collection::ListRow)
 //! and [`TableRow`](crate::collection::TableRow) paint and restates neither
 //! that nor any control. A group is the captioned plate those rows sit on,
 //! resolving one slot column so every control in it begins at the same x.
@@ -42,9 +43,11 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
 use crate::button::Button;
+use crate::colour_field::{ColourAction, ColourField};
 use crate::combo::{ComboAction, ComboBox};
 use crate::damage;
 use crate::metric::StatusPill;
+use crate::number::{NumberAction, NumberField};
 use crate::paint::{
     bead_band, foreground, grab_after, inset, line_budget, paint_row, paint_run,
     paint_surface_plate, plate_border, plate_corner, role_font, route_pointer, row_content_span,
@@ -78,6 +81,10 @@ pub enum FieldControl {
     Combo(ComboBox),
     /// A bounded value.
     Slider(Slider),
+    /// A whole number typed or stepped, held to its bounds.
+    Number(NumberField),
+    /// A colour, shown as a swatch and typed in hexadecimal.
+    Colour(ColourField),
     /// A free-text setting.
     Text(TextField),
     /// A credential, which is never drawn.
@@ -139,6 +146,14 @@ pub enum FieldAction {
         /// The value the interaction settled on, in permille.
         permille: u16,
     },
+    /// The [`NumberField`] slot's value was entered, or settled — by a step,
+    /// Enter, Escape, or the keyboard leaving the row. As for a slider, the
+    /// durable change is made on the settle alone.
+    Number(NumberAction),
+    /// The [`ColourField`] slot's colour was entered, or settled — by Enter,
+    /// Escape, or the keyboard leaving the row; the durable change is made on
+    /// the settle alone.
+    Colour(ColourAction),
     /// The [`TextField`] or [`SecretField`] slot reported an edit, a
     /// submission, or a cancellation; the owner reads the text and validates
     /// it.
@@ -151,6 +166,28 @@ pub enum FieldAction {
         /// The picture the cursor rests on now.
         index: usize,
     },
+}
+
+impl FieldAction {
+    /// Whether the action ends the interaction that made it, so a durable
+    /// change may follow it: a switch, a flag, a choice, a slider let go, a
+    /// number or colour settled, a text submitted or dismissed, a command. A
+    /// live value, a list opening or closing, typing still under way and a
+    /// picture browsed do not.
+    #[must_use]
+    pub const fn settles(&self) -> bool {
+        match self {
+            Self::Set { .. }
+            | Self::SetFlag { .. }
+            | Self::Selected { .. }
+            | Self::Settled { .. }
+            | Self::Activated => true,
+            Self::Number(action) => action.is_settled(),
+            Self::Colour(action) => action.is_settled(),
+            Self::Text(action) => !matches!(action, TextAction::Edited),
+            Self::Choices { .. } | Self::SetValue { .. } | Self::Browsed { .. } => false,
+        }
+    }
 }
 
 /// The outcome of feeding input to a [`FieldGroup`]: which row acted, and what
@@ -274,6 +311,8 @@ impl FieldControl {
             FieldControl::Flags(flags) => Some(flags.measured_width(scale, theme)),
             FieldControl::Combo(combo) => Some(combo.measured_width(scale, theme)),
             FieldControl::Button(button) => Some(button.measured_width(scale, theme)),
+            FieldControl::Number(number) => Some(number.preferred_width(scale, theme)),
+            FieldControl::Colour(colour) => Some(colour.preferred_width(scale, theme)),
             FieldControl::Reading(text) | FieldControl::Unmeasured(text) => {
                 Some(font.text_width(text))
             }
@@ -323,6 +362,8 @@ impl FieldControl {
             }
             FieldControl::Combo(c) => c.set_state(apply(c.state())),
             FieldControl::Slider(c) => c.set_state(apply(c.state())),
+            FieldControl::Number(c) => c.set_state(apply(c.state())),
+            FieldControl::Colour(c) => c.set_state(apply(c.state())),
             FieldControl::Text(c) => c.set_state(apply(c.state())),
             FieldControl::Secret(c) => c.set_state(apply(c.state())),
             FieldControl::Button(c) => c.set_state(apply(c.state())),
@@ -341,6 +382,8 @@ impl FieldControl {
             FieldControl::Flags(c) => c.set_focused(focused),
             FieldControl::Combo(c) => c.set_focused(focused),
             FieldControl::Slider(c) => c.set_focused(focused),
+            FieldControl::Number(c) => c.set_focused(focused),
+            FieldControl::Colour(c) => c.set_focused(focused),
             FieldControl::Text(c) => c.set_focused(focused),
             FieldControl::Secret(c) => c.set_focused(focused),
             FieldControl::Button(c) => c.set_focused(focused),
@@ -370,6 +413,8 @@ impl FieldControl {
             FieldControl::Flags(c) => c.render(surface, rect, scale, theme),
             FieldControl::Combo(c) => c.render(surface, rect, scale, theme),
             FieldControl::Slider(c) => c.render(surface, rect, scale, theme),
+            FieldControl::Number(c) => c.render(surface, rect, scale, theme),
+            FieldControl::Colour(c) => c.render(surface, rect, scale, theme),
             FieldControl::Text(c) => c.render(surface, rect, scale, theme),
             FieldControl::Secret(c) => c.render(surface, rect, scale, theme),
             FieldControl::Button(c) => c.render(surface, rect, scale, theme),
@@ -743,6 +788,24 @@ impl FieldRow {
         }
     }
 
+    /// A row stating `label`, offering one of `choices` with the one at
+    /// `selected` chosen.
+    #[must_use]
+    pub fn choice(label: impl Into<String>, choices: &[&str], selected: usize) -> Self {
+        let choices = choices.iter().map(|choice| String::from(*choice)).collect();
+        Self::new(
+            label,
+            FieldControl::Combo(ComboBox::new(choices).with_selected(selected)),
+        )
+    }
+
+    /// A row switching `label`'s feature on or off, `on` now: the slot is
+    /// the switch alone, since the row's label names it.
+    #[must_use]
+    pub fn toggle(label: &str, on: bool) -> Self {
+        Self::new(label, FieldControl::Toggle(Toggle::new("", on)))
+    }
+
     /// This row with a secondary description line beneath its label.
     #[must_use]
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
@@ -1024,6 +1087,24 @@ impl FieldRow {
         }
     }
 
+    /// Settle a number the keyboard is leaving — its typing held to its
+    /// bounds, or taken back where it spells none — reporting what it settled
+    /// on; a row holding anything else has nothing to settle.
+    fn leave(
+        &mut self,
+        layout: FieldLayout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<FieldAction> {
+        let rect = self.control_rect(layout, scale, theme)?;
+        match &mut self.control {
+            FieldControl::Number(field) => field.commit(rect, damage).map(FieldAction::Number),
+            FieldControl::Colour(field) => field.commit(rect, damage).map(FieldAction::Colour),
+            _ => None,
+        }
+    }
+
     /// Whether the row's slot is showing an expanded choice list the owner
     /// must paint.
     #[must_use]
@@ -1055,6 +1136,8 @@ impl FieldRow {
             | FieldControl::Checkbox(_)
             | FieldControl::Flags(_)
             | FieldControl::Slider(_)
+            | FieldControl::Number(_)
+            | FieldControl::Colour(_)
             | FieldControl::Text(_)
             | FieldControl::Secret(_)
             | FieldControl::Button(_)
@@ -1126,6 +1209,12 @@ impl FieldRow {
             FieldControl::Slider(c) => c
                 .on_pointer(event, rect, scale, theme, damage)
                 .map(slider_action),
+            FieldControl::Number(c) => c
+                .on_pointer(event, rect, scale, theme, damage)
+                .map(FieldAction::Number),
+            FieldControl::Colour(c) => c
+                .on_pointer(event, rect, scale, theme, damage)
+                .map(FieldAction::Colour),
             FieldControl::Text(c) => c
                 .on_pointer(event, rect, scale, theme, damage)
                 .map(FieldAction::Text),
@@ -1168,6 +1257,12 @@ impl FieldRow {
                 .on_key(stroke, rect, layout.popup, scale, theme, damage)
                 .map(combo_action),
             FieldControl::Slider(c) => c.on_key(key, rect, damage).map(slider_action),
+            FieldControl::Number(c) => c
+                .on_key(key, stroke.modifiers, rect, damage)
+                .map(FieldAction::Number),
+            FieldControl::Colour(c) => c
+                .on_key(key, stroke.modifiers, rect, damage)
+                .map(FieldAction::Colour),
             FieldControl::Text(c) => c
                 .on_key(key, stroke.modifiers, rect, damage)
                 .map(FieldAction::Text),
@@ -1189,6 +1284,8 @@ impl FieldRow {
             | FieldControl::Flags(_)
             | FieldControl::Combo(_)
             | FieldControl::Slider(_)
+            | FieldControl::Number(_)
+            | FieldControl::Colour(_)
             | FieldControl::Text(_)
             | FieldControl::Button(_)
             | FieldControl::Reading(_)
@@ -1431,7 +1528,9 @@ impl FieldGroup {
 
     /// Focus the row at `index` (or clear focus with `None`), reporting the
     /// two rows the ring moves between; an out-of-range index clears focus
-    /// (fail closed).
+    /// (fail closed). A number row the keyboard leaves settles, and that is
+    /// answered: an owner seating number rows makes its durable change on it
+    /// wherever it moves the keyboard, to another group included.
     pub fn set_focus(
         &mut self,
         index: Option<usize>,
@@ -1439,10 +1538,15 @@ impl FieldGroup {
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
-    ) {
+    ) -> Option<FieldGroupAction> {
         let index = index.filter(|&i| i < self.len());
         let before = self.focus_rect(layout, scale, theme);
         let moved = self.focus != index;
+        let settled = if moved {
+            self.leave_focused(layout, scale, theme, damage)
+        } else {
+            None
+        };
         self.adopt_focus(index);
         if moved {
             for rect in [before, self.focus_rect(layout, scale, theme)]
@@ -1452,6 +1556,29 @@ impl FieldGroup {
                 damage.add(rect);
             }
         }
+        settled
+    }
+
+    /// Settle the row the keyboard rests on as it leaves.
+    fn leave_focused(
+        &mut self,
+        layout: FieldLayout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<FieldGroupAction> {
+        let row = self.focus?;
+        let rect = self.row_rect(row, layout, scale, theme)?;
+        let action = self.rows.get_mut(row)?.leave(
+            FieldLayout {
+                bounds: rect,
+                ..layout
+            },
+            scale,
+            theme,
+            damage,
+        )?;
+        Some(FieldGroupAction { row, action })
     }
 
     /// Adopt `index` as the focused item without reporting, for an owner that
@@ -2094,6 +2221,7 @@ impl FieldGroup {
         let rects = self.row_rects(layout, scale, theme);
         let pictures = self.pictures_rect(layout, scale, theme);
         let choice = self.rows.len();
+        let mut settled = None;
         let route = if let Some(open) = self.listing(layout, scale, theme, damage) {
             *self.armed = grab_after(*self.armed, event, Some(open));
             [Some(open), None, None]
@@ -2113,7 +2241,7 @@ impl FieldGroup {
                 },
             ) = (over, event)
             {
-                self.set_focus(Some(item), layout, scale, theme, damage);
+                settled = self.set_focus(Some(item), layout, scale, theme, damage);
             }
             let route = route_pointer(&mut self.hovered, *self.armed, over);
             *self.armed = grab_after(*self.armed, event, over);
@@ -2146,7 +2274,9 @@ impl FieldGroup {
                 fired = Some(FieldGroupAction { row: index, action });
             }
         }
-        fired
+        // The press still reaches the control it lands on; its own answer to
+        // that one event, live or opening a list, yields to the settle.
+        settled.or(fired)
     }
 
     /// Feed a key event: Up/Down move the keyboard cursor between rows,
@@ -2193,7 +2323,10 @@ impl FieldGroup {
             .is_some_and(|row| {
                 matches!(
                     row.control(),
-                    FieldControl::Text(_) | FieldControl::Secret(_)
+                    FieldControl::Text(_)
+                        | FieldControl::Secret(_)
+                        | FieldControl::Number(_)
+                        | FieldControl::Colour(_)
                 )
             });
         let moved = match key {
@@ -2204,8 +2337,7 @@ impl FieldGroup {
             _ => None,
         };
         if let Some(next) = moved {
-            self.set_focus(Some(next), layout, scale, theme, damage);
-            return None;
+            return self.set_focus(Some(next), layout, scale, theme, damage);
         }
         let index = self.focus?;
         self.row_key(index, stroke, layout, scale, theme, damage)
@@ -2305,7 +2437,7 @@ impl FieldGroup {
             None => {}
         }
         if matches!(key, Key::Named(NamedKey::Up)) && choice > 0 {
-            self.set_focus(Some(choice - 1), layout, scale, theme, damage);
+            return self.set_focus(Some(choice - 1), layout, scale, theme, damage);
         }
         None
     }

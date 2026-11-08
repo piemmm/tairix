@@ -5081,6 +5081,38 @@ fn a_refused_picker_start_climbs_to_its_nearest_listable_folder() {
     );
 }
 
+/// A file chosen to import is asked to be opened read-only, whatever the
+/// requester may edit: what it reads in is the document's.
+#[test]
+fn a_file_chosen_to_import_is_opened_read_only() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    let (pick, _) = picker
+        .begin(&ask(7, &PickPurpose::Import), &mut shell, &mut comp)
+        .expect("accepted");
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    key(&mut picker, pick, &down, &mut shell, &mut comp);
+    assert_eq!(key(&mut picker, pick, &enter, &mut shell, &mut comp), None);
+    key(&mut picker, pick, &down, &mut shell, &mut comp);
+    let (_, path, access) = asked(key(&mut picker, pick, &enter, &mut shell, &mut comp));
+    assert_eq!(
+        (path.as_str(), access),
+        ("/Docs/notes.txt", PickAccess::Import)
+    );
+    assert_eq!(PickAccess::Import.save_flags(), None, "nothing is written");
+    assert!(
+        PickAccess::Read.opens_to_edit(true),
+        "a document its editor opens"
+    );
+    assert!(
+        !PickAccess::Import.opens_to_edit(true),
+        "never a file read in"
+    );
+    assert!(!PickAccess::Read.opens_to_edit(false));
+    assert!(!PickAccess::Folder.opens_to_edit(true));
+}
+
 /// A start with nothing listable above it but the root opens at the root,
 /// where Down selects `Docs/` and Enter descends rather than choosing.
 #[test]

@@ -28,7 +28,7 @@ pub(super) const fn route<K, O>(request: &Request<K, O>) -> Route {
         }
         Request::SaveThenClose => Route::SaveThenClose,
         Request::Close | Request::AskToClose => Route::Close,
-        Request::Open | Request::Menu { .. } | Request::Own(_) => Route::Member,
+        Request::Open | Request::Import | Request::Menu { .. } | Request::Own(_) => Route::Member,
     }
 }
 

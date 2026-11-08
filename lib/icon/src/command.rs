@@ -125,7 +125,7 @@ pub const fn menu_symbol_icon(symbol: AppMenuSymbol) -> IconKind {
         S::LayerLower | S::SendToBack => IconKind::LayerLower,
         S::MergeDown => IconKind::MergeDown,
         S::Flatten => IconKind::Flatten,
-        S::Image => IconKind::Image,
+        S::Image | S::PlacePicture => IconKind::Image,
         S::Resize => IconKind::Resize,
         S::CanvasSize => IconKind::CanvasSize,
         S::InvertColours => IconKind::Invert,
@@ -217,6 +217,13 @@ pub const fn menu_symbol_icon(symbol: AppMenuSymbol) -> IconKind {
         S::ViewOutline => IconKind::Wireframe,
         S::Snap => IconKind::Magnet,
         S::Units => IconKind::Ruler,
+        S::Divide => IconKind::Divide,
+        S::Outset => IconKind::Outset,
+        S::Inset => IconKind::Inset,
+        S::Simplify => IconKind::Simplify,
+        S::ReverseDirection => IconKind::ReverseDirection,
+        S::Clip => IconKind::Clip,
+        S::ReleaseClip => IconKind::ReleaseClip,
     }
 }
 
@@ -364,6 +371,13 @@ pub(crate) const fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::Wireframe => WIREFRAME,
         IconKind::Magnet => MAGNET,
         IconKind::Ruler => RULER,
+        IconKind::Divide => DIVIDE,
+        IconKind::Outset => OUTSET,
+        IconKind::Inset => INSET,
+        IconKind::Simplify => SIMPLIFY,
+        IconKind::ReverseDirection => REVERSE_DIRECTION,
+        IconKind::Clip => CLIP,
+        IconKind::ReleaseClip => RELEASE_CLIP,
         IconKind::Pages => PAGES,
         IconKind::Toolbox => TOOLBOX,
         IconKind::Activity => PULSE,
@@ -1532,6 +1546,53 @@ const MAGNET: &[Mark] = &[line(&[
 const RULER: &[Mark] = &[line(&[
     Outline::Path("M3 8H21V16H3Z"),
     Outline::Path("M7 8V11M11 8V12.5M15 8V11M19 8V12.5"),
+])];
+
+/// Two overlapping squares cut apart where they cross: the lower one's own
+/// corner, the overlap, and the upper one's corner, each a piece of its own.
+const DIVIDE: &[Mark] = &[line(&[
+    Outline::Path("M3.5 3.5H13.5V8.5H8.5V13.5H3.5Z"),
+    Outline::Path("M10.5 10.5H15.5V15.5H10.5Z"),
+    Outline::Path("M17.5 10.5H20.5V20.5H10.5V17.5H17.5Z"),
+])];
+
+/// A square, and the larger rounded square it grows into about it.
+const OUTSET: &[Mark] = &[
+    fill(&[Outline::Path("M8.5 8.5H15.5V15.5H8.5Z")]),
+    line(&[Outline::Path(
+        "M7 3.5H17A3.5 3.5 0 0 1 20.5 7V17A3.5 3.5 0 0 1 17 20.5H7A3.5 3.5 0 0 1 3.5 17V7A3.5 3.5 0 0 1 7 3.5Z",
+    )]),
+];
+
+/// A square, and the smaller square it shrinks into within it.
+const INSET: &[Mark] = &[
+    line(&[Outline::Path("M3.5 3.5H20.5V20.5H3.5Z")]),
+    fill(&[Outline::Path("M8.5 8.5H15.5V15.5H8.5Z")]),
+];
+
+/// A jagged run of short strokes above the one smooth curve it becomes.
+const SIMPLIFY: &[Mark] = &[line(&[
+    Outline::Path("M3 9L5.5 5.5L7.5 8L9.5 4.5L12 7.5L14 4L16.5 7L18.5 4.5L21 7"),
+    Outline::Path("M3 19C7 12.5 11 12.5 12 15.5C13 18.5 17 18.5 21 13"),
+])];
+
+/// A curve with an arrowhead at each end, pointing away from each other.
+const REVERSE_DIRECTION: &[Mark] = &[line(&[
+    Outline::Path("M6 16C8 7 16 7 18 16"),
+    Outline::Path("M3.5 13.5L6 16.5L8.8 14"),
+    Outline::Path("M15.2 14L18 16.5L20.5 13.5"),
+])];
+
+/// A disc cropped by a square: only the part within the square is drawn.
+const CLIP: &[Mark] = &[
+    line(&[Outline::Path("M4 4H16V16H4Z")]),
+    fill(&[Outline::Path("M16 8.07V16H8.07A7 7 0 0 1 16 8.07Z")]),
+];
+
+/// The disc whole again beside the square that had cropped it.
+const RELEASE_CLIP: &[Mark] = &[line(&[
+    Outline::Path("M3.5 3.5H12.5V12.5H3.5Z"),
+    circle(15.5, 15.5, 5.0),
 ])];
 
 #[cfg(test)]

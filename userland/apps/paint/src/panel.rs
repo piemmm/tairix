@@ -373,7 +373,7 @@ impl Measures {
             gap,
             near,
             row: NumberField::height(scale, theme),
-            caption: faces.status.line_height().max(1),
+            caption: faces.caption.line_height().max(1),
             button: Button::height(scale, theme),
             track: scale.scale_length(TRACK_HEIGHT),
             scale,
@@ -688,7 +688,7 @@ impl Panel {
                     for (cell, (label, control)) in
                         row.iter().zip(placed.labels.iter().zip(&placed.controls))
                     {
-                        words(surface, faces.status, cell.label, *label, quiet);
+                        words(surface, faces.caption, cell.label, *label, quiet);
                         cell.field.render(surface, *control, scale, theme);
                     }
                 }
@@ -708,7 +708,7 @@ impl Panel {
                     track.render(surface, placed.controls[0], scale, theme, sweep);
                 }
                 Part::Custom { .. } => art.draw(surface, index, placed.controls[0]),
-                Part::Note(text) => words(surface, faces.status, text, placed.controls[0], quiet),
+                Part::Note(text) => words(surface, faces.caption, text, placed.controls[0], quiet),
             }
         }
     }
@@ -1006,7 +1006,7 @@ impl Panel {
                         .field
                         .on_pointer(event, *control, scale, theme, damage)
                     {
-                        let (value, settled) = number_value(action);
+                        let (value, settled) = (action.value(), action.is_settled());
                         return PanelOutcome::Event(PanelEvent::Number {
                             part: index,
                             cell,
@@ -1201,7 +1201,7 @@ impl Panel {
             _ => return None,
         };
         let action = field.commit(rect, damage)?;
-        let (value, settled) = number_value(action);
+        let (value, settled) = (action.value(), action.is_settled());
         if let Part::Number {
             parameter, slide, ..
         } = &mut self.parts[part]
@@ -1344,7 +1344,7 @@ fn typed(
 ) -> PanelOutcome {
     match action {
         Some(action) => {
-            let (value, settled) = number_value(action);
+            let (value, settled) = (action.value(), action.is_settled());
             PanelOutcome::Event(PanelEvent::Number {
                 part,
                 cell,
@@ -1370,7 +1370,7 @@ fn number_key(
     if stop == 0 {
         let action = field.on_key(stroke.key, stroke.modifiers, placed.controls[0], damage);
         if let Some(action) = action {
-            let (value, _) = number_value(action);
+            let value = action.value();
             slide.show(parameter, value);
             damage.add(placed.controls[1]);
         }
@@ -1408,7 +1408,7 @@ fn number_pointer(
     damage: &mut Region,
 ) -> PanelOutcome {
     if let Some(action) = field.on_pointer(event, placed.controls[0], scale, theme, damage) {
-        let (value, settled) = number_value(action);
+        let (value, settled) = (action.value(), action.is_settled());
         slide.show(parameter, value);
         damage.add(placed.controls[1]);
         return PanelOutcome::Event(PanelEvent::Number {
@@ -1456,13 +1456,6 @@ fn slid(parameter: &Parameter, action: SliderAction) -> (i32, bool) {
     match action {
         SliderAction::SetValue { permille } => (parameter.value_of(permille), false),
         SliderAction::Settled { permille } => (parameter.value_of(permille), true),
-    }
-}
-
-fn number_value(action: NumberAction) -> (i32, bool) {
-    match action {
-        NumberAction::Edited { value } => (value, false),
-        NumberAction::Settled { value } => (value, true),
     }
 }
 

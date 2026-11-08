@@ -13,6 +13,8 @@ workspace = true
 
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The closed-registry engine Draw's settings are kept by.
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
 tairix-bezier = { path = "../../../lib/bezier", version = "=0.0.0" }
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
@@ -21,6 +23,9 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 tairix-drawing = { path = "../../../lib/drawing", version = "=0.0.0" }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The unkeyed hash the tile cache files its tiles by: a tile's key is the
+# window's own view, never chosen by a document.
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
 tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 tairix-image = { path = "../../../lib/image", version = "=0.0.0" }
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
@@ -28,14 +33,20 @@ tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
-tairix-window = { path = "../../../lib/window", version = "=0.0.0", default-features = false }
+# The document host's types, and the settings window Draw's preferences are
+# edited in.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0", default-features = false, features = [
+    "settings",
+] }
 
 [[bin]]
 name = "tairix-draw-run"
 path = "src/run.rs"
 
 [target.'cfg(target_os = "none")'.dependencies]
-tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+tairix-window = { path = "../../../lib/window", version = "=0.0.0", features = ["settings"] }
+# The app-data client's runtime transport, so the settings reach the service.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
 tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }

@@ -9,7 +9,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_bezier::{Affine, Bounds, FillRule, Path, Point};
+use tairix_bezier::{Affine, Bounds, Path, Point};
 use tairix_util::fallible;
 use tairix_util::mathf::fmax;
 
@@ -110,6 +110,9 @@ fn hits(
                 cell.transformed(placed.at).inflated(reach).contains(local)
             }))
         }
+        // A picture is met anywhere on its rectangle, a transparent pixel
+        // included: it is one object, and its edge is what a reader aims at.
+        Kind::Image { image } => Ok(image.place().inflated(reach).contains(local)),
     }
 }
 
@@ -165,24 +168,9 @@ fn covers(clip: &Node, point: Point, glyphs: &dyn Glyphs) -> Result<bool, Drawin
             Ok(false)
         }
         Kind::Shape { shape, style } => Ok(shape.to_path()?.contains(local, style.fill_rule)),
-        Kind::Text { text, .. } => {
-            Ok(set_outline(text, glyphs)?.contains(local, FillRule::NonZero))
-        }
+        Kind::Text { text, .. } => Ok(text.set(glyphs)?.covers(local)),
+        Kind::Image { image } => Ok(image.covers(local)),
     }
-}
-
-/// The glyph outlines `text` sets, in its own space.
-fn set_outline(text: &crate::text::Text, glyphs: &dyn Glyphs) -> Result<Path, DrawingError> {
-    let setting = text.set(glyphs)?;
-    let mut outline = Path::new();
-    for placed in &setting.glyphs {
-        let set = placed.glyph.outline().transformed(placed.at);
-        if outline.subpaths.try_reserve(set.subpaths.len()).is_err() {
-            return Err(DrawingError::OutOfMemory);
-        }
-        outline.subpaths.extend(set.subpaths);
-    }
-    Ok(outline)
 }
 
 /// Every visible object among `children`, those within `area` in their

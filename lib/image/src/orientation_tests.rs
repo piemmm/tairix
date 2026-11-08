@@ -232,3 +232,27 @@ fn a_directory_offset_past_the_block_reads_as_absent() {
     payload[13] = 0x7F;
     assert_eq!(from_exif(&payload), None);
 }
+
+/// The continuous map lands each stored pixel's centre on the centre of the
+/// pixel the discrete one places it at.
+#[test]
+fn the_continuous_map_agrees_with_the_placement_at_every_pixel_centre() {
+    let stored = (5u32, 3u32);
+    for code in ALL {
+        let orientation = tag(code);
+        let map = orientation.to_picture(stored);
+        let (width, height) = orientation.picture_size(stored.0, stored.1);
+        for y in 0..stored.1 {
+            for x in 0..stored.0 {
+                let (dx, dy) = orientation.place(x, y, width, height);
+                let centre = map.apply((f64::from(x) + 0.5, f64::from(y) + 0.5));
+                assert_eq!(
+                    centre,
+                    (f64::from(dx) + 0.5, f64::from(dy) + 0.5),
+                    "{code} at ({x},{y})"
+                );
+            }
+        }
+        assert_eq!(orientation.tag(), code);
+    }
+}

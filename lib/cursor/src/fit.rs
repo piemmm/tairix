@@ -18,7 +18,8 @@ use core::cmp::Ordering;
 
 use tairix_geometry::{saturate_i32, Point};
 use tairix_raster::{
-    Affine, Gradient, Group, Layer, Mask, Node, Paint, Pattern, MAX_DRAWING_EXTENT, MAX_GROUP_DEPTH,
+    Affine, Gradient, Group, Image, Layer, Mask, Node, Paint, Pattern, MAX_DRAWING_EXTENT,
+    MAX_GROUP_DEPTH,
 };
 use tairix_util::mathf::round_i32;
 
@@ -165,6 +166,8 @@ impl Fit {
                     .map(|contour| self.contour(contour, budget))
                     .collect::<Option<_>>()?,
             }),
+            // A picture has no edge to fit; it keeps its place.
+            Node::Image(image) => Node::Image(image.clone()),
             Node::Group(group) if depth >= MAX_GROUP_DEPTH => Node::Group(Group {
                 opacity: group.opacity,
                 mask: None,
@@ -246,6 +249,10 @@ fn restated(nodes: &[Node], stretch: f64, depth: usize) -> Vec<Node> {
                     .map(|contour| contour.iter().map(|&(x, y)| (scale(x), scale(y))).collect())
                     .collect(),
             }),
+            Node::Image(image) => Node::Image(Image {
+                transform: image.transform.then(Affine::scale(stretch, stretch)),
+                ..image.clone()
+            }),
             Node::Group(group) => Node::Group(Group {
                 opacity: group.opacity,
                 mask: group.mask.as_ref().map(|mask| Mask {
@@ -311,6 +318,7 @@ impl Edges {
                         self.contour(contour, span);
                     }
                 }
+                Node::Image(_) => {}
                 Node::Group(group) => {
                     self.collect(&group.children, span, depth + 1);
                     if let Some(mask) = &group.mask {

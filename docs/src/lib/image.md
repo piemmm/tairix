@@ -80,7 +80,8 @@ sample precision: baseline sequential (`SOF0`), extended sequential
 3-component YCbCr, plus RGB when an Adobe APP14 marker (Adobe TN5116)
 declares colour transform zero; any per-component sampling factor from 1 to
 4, with chroma upsampled from its own sample plane; restart markers and
-multi-scan streams; up to four DC and four AC Huffman tables; 8- and 16-bit
+multi-scan streams; up to four DC and four AC Huffman tables, each listing at
+most 256 symbols, one per byte; 8- and 16-bit
 quantisation tables in the standard zig-zag order; and all five scan shapes
 progressive coding defines (sequential, DC first, DC refinement, AC first,
 AC refinement, including end-of-band runs that span blocks). Entropy
@@ -115,10 +116,13 @@ meaning TIFF's directory carries, so the position map both formats read is
 one definition (`src/orientation.rs`) rather than two that can drift. The
 picture the decoder produces is already the right way up, which means the
 attribute swaps the geometry `probe` reports, the axes a `decode_fitted`
-box is measured against, and the width and height the limits are checked
-against. Placing it costs nothing per picture: a decoded row is copied
+box is measured against, the width and height the limits are checked
+against, and the density's two figures. Placing it costs nothing per picture: a decoded row is copied
 whole when there is no orientation to apply, and scattered pixel by pixel
-only when there is.
+only when there is. Only an `APP1` before the frame header is read: the frame
+header settles the picture's size and is checked against the limits there, so
+a turn stated after it is passed over rather than allowed to reshape a
+picture already checked.
 
 Metadata is advisory, so a block that is absent, truncated, malformed, or
 states a value outside the eight the tag defines leaves the picture as
@@ -311,8 +315,8 @@ Three readings the format's own text does not settle:
 - **`Orientation` is applied, not reported.** The tag says which way up the
   stored raster is, so a decoder that ignored it would hand every consumer a
   sideways picture and the format knowledge needed to right it. A transposing
-  orientation therefore swaps the geometry `probe` reports, and the
-  permutation costs nothing: each sample is written where it belongs rather
+  orientation therefore swaps the geometry `probe` reports and the density's
+  two figures, and the permutation costs nothing: each sample is written where it belongs rather
   than moved afterwards.
 - **A missing photometric under a fax compression reads as `WhiteIsZero`.**
   Every fax is; the tag is otherwise required, and its absence is a writer's
@@ -859,6 +863,25 @@ when a code widens — is the caller's.
 `over(below, above)` is the one straight-alpha source-over, rounded to the
 nearest: a WEBP animation's frames are composited by it, and an editor lays
 paint with it, so the two can never disagree about a pixel.
+
+### Embedding a file as it came
+
+A writer that embeds a JPEG's bytes unchanged — a PDF's `DCTDecode` image, an
+SVG data URL, a RISC OS Draw file's JPEG object — must say what they hold
+without parsing them itself. `jpeg_frame` answers it from the segments up to
+the frame header, refused exactly as a decode refuses them: the stored
+raster's size, its components (one or three), whether the frame is
+progressive, the density its JFIF header states and the `Orientation` its
+EXIF segment states, whose `to_picture` is the map from the stored raster onto
+the picture `decode` answers, for a format that draws the raster as stored and
+turns it as it is placed. `decode_sprite` and `encode_sprite` are one sprite
+with no area around it, as a Draw file's sprite object holds it: the decode
+answers its pixels, its eigen factors and the length of its own bytes
+(`LoneSprite`), and `SpriteMode::density` states a mode's factors as dots to
+the inch. A premultiplied `tairix_raster::Surface` is written through
+`SurfacePicture`, which unpremultiplies a row at a time, so no straight copy
+of it is held. `PROGRESSIVE_420_BYTES_PER_PIXEL` is what a caller bounding
+`max_progressive_coefficient_bytes` by its pixel bound multiplies by.
 
 ## Security
 

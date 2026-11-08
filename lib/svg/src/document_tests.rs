@@ -2749,3 +2749,66 @@ fn a_font_size_in_em_measures_the_size_the_element_inherited() {
     let xs: Vec<i32> = layer.contours[0].iter().map(|point| point.0).collect();
     assert_eq!(xs.iter().copied().max(), Some(UNIT));
 }
+
+#[test]
+fn text_along_a_path_the_document_defines_is_drawn_on_it_and_charged_as_geometry() {
+    let document = r##"<svg viewBox="0 0 8 8">
+          <defs><path id="way" d="M1 4 H7" transform="translate(0 1)"/></defs>
+          <text font-size="2" fill="#ff0000"><textPath href="#way" startOffset="50%">a</textPath></text>
+        </svg>"##;
+    let image = decode_text(document).expect("a drawable document");
+    let layer = &flatten(image.nodes())[0];
+    // The half-em glyph is one wide and starts half way along the path, at
+    // x=4, standing on the path at y=5.
+    let xs: Vec<i32> = layer.contours[0].iter().map(|point| point.0).collect();
+    let ys: Vec<i32> = layer.contours[0].iter().map(|point| point.1).collect();
+    assert_eq!(xs.iter().copied().min(), Some(4 * UNIT));
+    assert_eq!(xs.iter().copied().max(), Some(5 * UNIT));
+    assert_eq!(ys.iter().copied().max(), Some(5 * UNIT));
+    let lettering = (0..2000)
+        .map(|_| r##"<textPath href="#way">a</textPath>"##)
+        .collect::<alloc::string::String>();
+    let referenced = format!(
+        r#"<svg viewBox="0 0 8 8"><defs><path id="way" d="M1 4 {}"/></defs><text>{lettering}</text></svg>"#,
+        "H7 ".repeat(40)
+    );
+    assert_eq!(
+        decode_text(&referenced).err(),
+        Some(SvgError::TooComplex),
+        "every reference pays for the path it reads"
+    );
+}
+
+#[test]
+fn a_baseline_shift_raises_a_spans_glyphs() {
+    let image = decode_text(
+        r#"<svg viewBox="0 0 8 8"><text x="0" y="4" font-size="2"><tspan baseline-shift="1">a</tspan></text></svg>"#,
+    )
+    .expect("a drawable document");
+    let layer = &flatten(image.nodes())[0];
+    let ys: Vec<i32> = layer.contours[0].iter().map(|point| point.1).collect();
+    assert_eq!(
+        ys.iter().copied().max(),
+        Some(3 * UNIT),
+        "raised one unit off the baseline"
+    );
+}
+
+#[test]
+fn of_two_elements_sharing_an_id_a_reference_finds_the_first() {
+    let image = decode_text(
+        r##"<svg viewBox="0 0 8 8">
+              <defs><rect id="shape" width="2" height="2" fill="#ff0000"/></defs>
+              <use href="#shape"/>
+              <defs><rect id="shape" width="4" height="4" fill="#0000ff"/><rect id="a" width="1" height="1"/></defs>
+            </svg>"##,
+    )
+    .expect("a drawable document");
+    let layers = flatten(image.nodes());
+    assert_eq!(layers.len(), 1);
+    assert_eq!(
+        solid(&layers[0]),
+        Color::rgb(255, 0, 0),
+        "the first in the document"
+    );
+}

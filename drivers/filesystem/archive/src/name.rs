@@ -57,7 +57,7 @@ impl Charset {
             Self::Cp437 | Self::Latin1 | Self::RiscOs => {
                 for &byte in bytes {
                     let ch = match (self, byte) {
-                        (Self::RiscOs, _) => acorn::name_char(byte)?,
+                        (Self::RiscOs, _) => acorn::latin1_char(byte)?,
                         (_, 0..=0x7F) | (Self::Latin1, _) => char::from(byte),
                         _ => char::from_u32(u32::from(CP437_HIGH[usize::from(byte - 0x80)]))?,
                     };
@@ -84,7 +84,7 @@ impl Charset {
             }
             Self::RiscOs => {
                 for ch in text.chars() {
-                    out.push(acorn::name_byte(ch)?);
+                    out.push(acorn::latin1_byte(ch)?);
                 }
             }
             Self::Cp437 => {

@@ -10,7 +10,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_bezier::Bounds;
-use tairix_util::fallible;
+use tairix_collections::{try_arc, SharedSlice};
+use tairix_util::fallible::{self, try_push};
 
 use crate::node::Node;
 use crate::DrawingError;
@@ -34,6 +35,9 @@ pub struct Summary {
     pub objects: usize,
     /// How many path nodes they hold.
     pub path_nodes: usize,
+    /// The pixels of the pictures they show, a picture counted for every
+    /// object showing it.
+    pub picture_pixels: u64,
     /// How deep the deepest of them nests: one for a shape or text.
     pub depth: usize,
 }
@@ -44,26 +48,29 @@ impl Default for Summary {
             bounds: Bounds::EMPTY,
             objects: 0,
             path_nodes: 0,
+            picture_pixels: 0,
             depth: 0,
         }
     }
 }
 
 impl Summary {
-    fn of(node: &Node) -> Self {
+    pub(crate) fn of(node: &Node) -> Self {
         Self {
             bounds: node.bounds(),
             objects: node.objects(),
             path_nodes: node.path_nodes(),
+            picture_pixels: node.picture_pixels(),
             depth: node.depth(),
         }
     }
 
-    fn with(self, other: Self) -> Self {
+    pub(crate) fn with(self, other: Self) -> Self {
         Self {
             bounds: self.bounds.union(other.bounds),
             objects: self.objects.saturating_add(other.objects),
             path_nodes: self.path_nodes.saturating_add(other.path_nodes),
+            picture_pixels: self.picture_pixels.saturating_add(other.picture_pixels),
             depth: self.depth.max(other.depth),
         }
     }
@@ -84,12 +91,13 @@ impl Chunk {
     }
 }
 
-/// A group's children, bottom first.
+/// A group's children, bottom first. Its chunks are shared, so children
+/// clone, as the nodes holding them do, without allocating.
 #[derive(Clone, Debug, Default)]
 pub struct Children {
-    chunks: Vec<Arc<Chunk>>,
+    chunks: SharedSlice<Arc<Chunk>>,
     /// The index of each chunk's first child.
-    starts: Vec<usize>,
+    starts: SharedSlice<usize>,
     len: usize,
     summary: Summary,
 }
@@ -105,16 +113,30 @@ impl Children {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            chunks: Vec::new(),
-            starts: Vec::new(),
+            chunks: SharedSlice::new(),
+            starts: SharedSlice::new(),
             len: 0,
             summary: Summary {
                 bounds: Bounds::EMPTY,
                 objects: 0,
                 path_nodes: 0,
+                picture_pixels: 0,
                 depth: 0,
             },
         }
+    }
+
+    /// `node` alone, as children.
+    ///
+    /// # Errors
+    ///
+    /// [`DrawingError::OutOfMemory`] when it cannot be held.
+    pub fn single(node: Arc<Node>) -> Result<Self, DrawingError> {
+        let mut nodes = Vec::new();
+        if !fallible::push(&mut nodes, node) {
+            return Err(DrawingError::OutOfMemory);
+        }
+        Self::from_nodes(nodes)
     }
 
     /// `nodes`, bottom first, as children.
@@ -142,8 +164,8 @@ impl Children {
             summary = summary.with(chunk.summary);
         }
         Ok(Self {
-            chunks,
-            starts,
+            chunks: SharedSlice::try_from_vec(chunks)?,
+            starts: SharedSlice::try_from_vec(starts)?,
             len,
             summary,
         })
@@ -194,7 +216,7 @@ impl Children {
     pub fn meeting(&self, area: Bounds) -> impl Iterator<Item = (usize, &Arc<Node>)> + '_ {
         self.chunks
             .iter()
-            .zip(&self.starts)
+            .zip(self.starts.iter())
             .filter(move |(chunk, _)| chunk.summary.bounds.intersects(area))
             .flat_map(move |(chunk, &start)| {
                 chunk
@@ -255,7 +277,7 @@ impl Children {
             return Err(DrawingError::OutOfMemory);
         }
         let mut next = 0;
-        for (chunk, &start) in self.chunks.iter().zip(&self.starts) {
+        for (chunk, &start) in self.chunks.iter().zip(self.starts.iter()) {
             let end = start + chunk.nodes.len();
             if replacements.peek().is_none_or(|(index, _)| *index >= end) {
                 chunks.push(chunk.clone());
@@ -269,7 +291,7 @@ impl Children {
                 next = index + 1;
                 nodes[index - start] = node;
             }
-            chunks.push(Arc::new(Chunk::new(nodes)));
+            chunks.push(try_arc(Chunk::new(nodes))?);
         }
         if replacements.next().is_some() {
             return Err(DrawingError::Invalid);
@@ -322,10 +344,10 @@ impl Children {
                 return Err(DrawingError::Invalid);
             }
             floor = index;
-            push(nodes, node)
+            Ok(try_push(nodes, node)?)
         };
         let last = self.chunks.len().checked_sub(1);
-        for (place, (chunk, &start)) in self.chunks.iter().zip(&self.starts).enumerate() {
+        for (place, (chunk, &start)) in self.chunks.iter().zip(self.starts.iter()).enumerate() {
             let end = start + chunk.nodes.len();
             let closing = Some(place) == last;
             let due = |index: usize| index < end || (closing && index == end);
@@ -338,7 +360,7 @@ impl Children {
                 while let Some(insertion) = insertions.next_if(|(index, _)| *index <= start + at) {
                     take(&mut nodes, insertion)?;
                 }
-                push(&mut nodes, node.clone())?;
+                try_push(&mut nodes, node.clone())?;
             }
             while let Some(insertion) = insertions.next_if(|(index, _)| closing && *index == end) {
                 take(&mut nodes, insertion)?;
@@ -385,7 +407,7 @@ impl Children {
         }
         let mut laying = Laying::new(self.chunks.len())?;
         let mut rest = indices;
-        for (chunk, &start) in self.chunks.iter().zip(&self.starts) {
+        for (chunk, &start) in self.chunks.iter().zip(self.starts.iter()) {
             let end = start + chunk.nodes.len();
             let (here, later) = rest.split_at(rest.partition_point(|&index| index < end));
             rest = later;
@@ -416,14 +438,6 @@ fn copied(nodes: &[Arc<Node>], more: usize) -> Result<Vec<Arc<Node>>, DrawingErr
     Ok(copy)
 }
 
-fn push<T>(list: &mut Vec<T>, item: T) -> Result<(), DrawingError> {
-    if fallible::push(list, item) {
-        Ok(())
-    } else {
-        Err(DrawingError::OutOfMemory)
-    }
-}
-
 /// Chunks laid end to end. A chunk passed through untouched is shared; a run
 /// of nodes laid anew too short to stand alone waits to join what follows,
 /// or what came before when nothing does, so removals leave no slivers.
@@ -448,7 +462,7 @@ impl Laying {
     /// `chunk` next, shared unless a short run is waiting to join it.
     fn share(&mut self, chunk: &Arc<Chunk>) -> Result<(), DrawingError> {
         if self.short.is_empty() {
-            return push(&mut self.chunks, chunk.clone());
+            return Ok(try_push(&mut self.chunks, chunk.clone())?);
         }
         self.lay(copied(&chunk.nodes, 0)?)
     }
@@ -482,7 +496,7 @@ impl Laying {
             return Err(DrawingError::OutOfMemory);
         }
         if count == 1 {
-            self.chunks.push(Arc::new(Chunk::new(nodes)));
+            self.chunks.push(try_arc(Chunk::new(nodes))?);
             return Ok(());
         }
         let mut source = nodes.into_iter();
@@ -490,7 +504,7 @@ impl Laying {
             let size = total / count + usize::from(piece < total % count);
             let mut chunk = copied(&[], size)?;
             chunk.extend(source.by_ref().take(size));
-            self.chunks.push(Arc::new(Chunk::new(chunk)));
+            self.chunks.push(try_arc(Chunk::new(chunk))?);
         }
         Ok(())
     }

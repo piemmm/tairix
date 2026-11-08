@@ -3,7 +3,7 @@ use tairix_controls::{ScrollBar, ScrollOrientation};
 use tairix_geometry::Scale;
 use tairix_theme::{Theme, ThemeRegistry};
 
-use super::{Faces, Floor, Layout, Needs, LEAST_WELL, MIN_CANVAS, MOST_WELL, WELLS_HEIGHT};
+use super::{Floor, Layout, Needs, LEAST_WELL, MIN_CANVAS, MOST_WELL, WELLS_HEIGHT};
 use crate::layers_pane::LayerMeasures;
 use crate::pane::{Arrangement, PaneKind, Side};
 use crate::view::MOST_WELLS;
@@ -37,14 +37,7 @@ fn layout(theme: &Theme, width: u32, height: u32, needs: Needs) -> Layout {
 }
 
 fn arranged(theme: &Theme, width: u32, height: u32, needs: Needs, panes: &Arrangement) -> Layout {
-    Layout::for_window(
-        width,
-        height,
-        theme,
-        Scale::ONE,
-        Faces::of(theme, Scale::ONE),
-        (needs, panes),
-    )
+    Layout::for_window(width, height, theme, Scale::ONE, (needs, panes))
 }
 
 #[test]
@@ -170,16 +163,10 @@ fn the_least_window_seats_its_bars_and_the_largest_palette_round_a_canvas() {
     let theme = registry.active();
     let floor = floor();
     let mut asked = None;
-    let (width, height) = Layout::min_size(
-        theme,
-        Scale::ONE,
-        Faces::of(theme, Scale::ONE),
-        floor,
-        |across| {
-            asked = Some(across);
-            3
-        },
-    );
+    let (width, height) = Layout::min_size(theme, Scale::ONE, floor, |across| {
+        asked = Some(across);
+        3
+    });
     let least = layout(
         theme,
         width,
@@ -548,13 +535,7 @@ fn a_hidden_palette_claims_no_strip() {
 fn the_least_window_lays_out_the_strip_it_was_floored_on() {
     let registry = ThemeRegistry::with_builtins();
     let theme = registry.active();
-    let (width, height) = Layout::min_size(
-        theme,
-        Scale::ONE,
-        Faces::of(theme, Scale::ONE),
-        floor(),
-        |_| 1,
-    );
+    let (width, height) = Layout::min_size(theme, Scale::ONE, floor(), |_| 1);
     let least = layout(theme, width, height, needs(MOST_WELLS));
     assert!(!least.pop_out().is_empty(), "the strip seats its pop-out");
     assert_eq!(

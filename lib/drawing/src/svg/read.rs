@@ -1,31 +1,39 @@
 //! Reading an SVG document into a drawing.
 
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::ops::Range;
 
-use tairix_bezier::{Affine, Bounds, EllipseArc, Path, PathEl, Point, QuadBez, Subpath};
+use tairix_bezier::{Affine, Bounds, Path, PathEl, PathMeasure, Point, Subpath};
+use tairix_collections::{try_arc, OrderedMap, SharedSlice, SharedStr};
 use tairix_colour::Rgba;
 use tairix_svg::css::{self, Declaration, SheetLimits, Stylesheet};
-use tairix_svg::number::{parse_length, parse_number};
+use tairix_svg::font::FontStyle;
+use tairix_svg::number::{parse_length, parse_number, viewport_diagonal};
 use tairix_svg::paint::{GradientDefinition, GradientGeometry, PaintServers};
-use tairix_svg::pathdata::{path_commands, PathCommand};
+use tairix_svg::pathdata::parse_path_curves;
 use tairix_svg::shape::{shape_geometry, ShapeGeometry};
-use tairix_svg::style::{PaintSlot, PaintSpec, Style as SvgStyle, TextAnchor};
+use tairix_svg::style::{BaselineShift, PaintSlot, PaintSpec, Style as SvgStyle, TextAnchor};
+use tairix_svg::textpath;
 use tairix_svg::transform::{
-    parse_aspect_ratio, parse_transform, parse_view_box, viewport_transform, AspectRatio,
+    parse_aspect_ratio, parse_transform, parse_view_box, viewport_transform, Align, AspectRatio,
 };
 use tairix_svg::xml::{self, Content, Element, Limits};
 use tairix_svg::SvgError;
-use tairix_util::fallible;
-use tairix_util::mathf::fmax;
+use tairix_util::fallible::{self, try_push};
+use tairix_util::mathf::{fabs, fmax};
 
-use super::{DRAW_NAMESPACE, INKSCAPE_NAMESPACE};
+use super::{data_url, DRAW_NAMESPACE, INKSCAPE_NAMESPACE};
 use crate::children::Children;
-use crate::drawing::{Drawing, Grid, Guide, GuideAxis, Info, Page, Unit, PAPER};
+use crate::drawing::{Drawing, Grid, Guide, GuideAxis, Info, Page, Unit, PAPER, PIXELS_PER_INCH};
 use crate::id::Ids;
-use crate::limits::{MAX_DEPTH, MAX_GUIDES, MAX_OBJECTS, MAX_PATH_NODES};
+use crate::image::{self, Pictures};
+use crate::limits::{
+    self, MAX_BASELINE_SHIFT, MAX_DEPTH, MAX_FAMILY_BYTES, MAX_GUIDES, MAX_IMAGE_SOURCE_BYTES,
+    MAX_OBJECTS, MAX_PATH_NODES, MAX_RESOLUTION, MAX_SUBDIVISIONS, MAX_SWATCHES, MAX_TEXT_FAMILIES,
+    MAX_TEXT_PATH_NODES,
+};
 use crate::node::{Kind, Node};
 use crate::shape::{
     ArcKind, ArcPart, EllipseShape, NodeJoin, PathShape, RectShape, Shape, StarShape,
@@ -34,9 +42,12 @@ use crate::style::{
     ArrowShape, Arrowhead, Cap, Gradient, GradientKind, Join, Paint, PaintOrder, Spread, Stop,
     Stroke, Style,
 };
-use crate::text::{Text, TextAlign};
+use crate::text::{
+    canonical, Baseline, Run, RunPaint, RunStyle, Text, TextAlign, TextPath, DEFAULT_FAMILY,
+    DEFAULT_LINE_HEIGHT,
+};
 use crate::unkept::{Lost, Unkept};
-use crate::DrawingError;
+use crate::{DrawingError, Read, ReadError};
 
 /// How many elements a read may visit, every `<use>` expansion counted: a
 /// containment bound on the work a document of references can ask for.
@@ -45,47 +56,13 @@ const MAX_VISITS: usize = 4 * MAX_OBJECTS;
 /// How deeply `<use>` references may nest.
 const MAX_USE_DEPTH: usize = 16;
 
-/// What reading a document came to: the drawing, and what it could not keep.
-#[derive(Clone, Debug)]
-pub struct Read {
-    /// The drawing.
-    pub drawing: Drawing,
-    /// What of the document the drawing could not hold.
-    pub unkept: Unkept,
-}
-
-/// Why a document could not be read.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum ReadError {
-    /// It is not UTF-8 text.
-    NotText,
-    /// It is not an SVG document: its root is not `<svg>`.
-    NotSvg,
-    /// Its XML, a number, a colour, a transform or a path is malformed.
-    Malformed,
-    /// It exceeds a containment bound.
-    TooComplex,
-    /// The memory to read it could not be had.
-    OutOfMemory,
-}
-
 impl From<SvgError> for ReadError {
     fn from(error: SvgError) -> Self {
         match error {
-            SvgError::NotUtf8 => Self::NotText,
-            SvgError::MissingRoot => Self::NotSvg,
+            SvgError::NotUtf8 | SvgError::MissingRoot => Self::Unrecognised,
             SvgError::TooComplex => Self::TooComplex,
+            SvgError::OutOfMemory => Self::OutOfMemory,
             _ => Self::Malformed,
-        }
-    }
-}
-
-impl From<DrawingError> for ReadError {
-    fn from(error: DrawingError) -> Self {
-        match error {
-            DrawingError::Invalid => Self::Malformed,
-            DrawingError::TooComplex => Self::TooComplex,
-            DrawingError::OutOfMemory => Self::OutOfMemory,
         }
     }
 }
@@ -98,10 +75,10 @@ impl From<DrawingError> for ReadError {
 /// [`ReadError`] for a document that is not text, not SVG, malformed or past
 /// a bound, or that cannot be held. Nothing is half-read.
 pub fn read(bytes: &[u8], ids: &mut Ids) -> Result<Read, ReadError> {
-    let text = core::str::from_utf8(bytes).map_err(|_| ReadError::NotText)?;
+    let text = core::str::from_utf8(bytes).map_err(|_| ReadError::Unrecognised)?;
     let root = xml::parse(text, Limits::DOCUMENT)?;
     if root.name != "svg" {
-        return Err(ReadError::NotSvg);
+        return Err(ReadError::Unrecognised);
     }
     let sheets = css::sheet_texts(&root);
     let sheet = Stylesheet::collect(&sheets, SheetLimits::DOCUMENT)?;
@@ -113,7 +90,7 @@ pub fn read(bytes: &[u8], ids: &mut Ids) -> Result<Read, ReadError> {
         ids,
         names,
         sheet,
-        servers: PaintServers::collect(&root),
+        servers: PaintServers::collect(&root)?,
         index: Vec::new(),
         path: Vec::new(),
         cascade: Vec::new(),
@@ -125,7 +102,9 @@ pub fn read(bytes: &[u8], ids: &mut Ids) -> Result<Read, ReadError> {
         expanding: Vec::new(),
         info_elements,
         background: page.background.is_some(),
-        gradients: BTreeMap::new(),
+        gradients: OrderedMap::new(),
+        pictures: Pictures::new(),
+        clipping: false,
     };
     reader.index(&root)?;
     reader.path.push(&root);
@@ -134,7 +113,11 @@ pub fn read(bytes: &[u8], ids: &mut Ids) -> Result<Read, ReadError> {
     reader.path.pop();
     let guides = reader.guides()?;
     let grid = reader.grid()?;
-    let drawing = Drawing::new(page, layers, guides, grid)?.with_info(info)?;
+    let swatches = reader.swatches()?;
+    let drawing = Drawing::new(page, layers, guides, grid)?
+        .with_info(info)?
+        .with_swatches(swatches)?
+        .with_resolution(reader.resolution())?;
     Ok(Read {
         drawing,
         unkept: reader.unkept,
@@ -188,8 +171,10 @@ struct Reader<'a, 'i> {
     names: Names<'a>,
     sheet: Stylesheet<'a>,
     servers: PaintServers<'a>,
-    /// Every element carrying an `id`.
-    index: Vec<(&'a str, &'a Element<'a>)>,
+    /// Every element carrying an `id`, sorted by it and then by document
+    /// order, so a reference finds the first of a repeated id by a binary
+    /// search.
+    index: Vec<(&'a str, usize, &'a Element<'a>)>,
     /// The elements from the root down to the one being read, which the
     /// stylesheet's selectors are matched against.
     path: Vec<&'a Element<'a>>,
@@ -213,7 +198,13 @@ struct Reader<'a, 'i> {
     background: bool,
     /// Every gradient paint resolved so far, so every reference that comes
     /// to the same gradient shares it, as the document wrote it once.
-    gradients: BTreeMap<GradientKey, Arc<Gradient>>,
+    gradients: OrderedMap<GradientKey, Arc<Gradient>>,
+    /// Every picture read so far, by its link, so the same picture shown
+    /// again is decoded once and shared.
+    pictures: Pictures<'a>,
+    /// Whether a clip path's content is being read: its shapes clip by
+    /// `clip-rule`, and a picture in one is no part of it.
+    clipping: bool,
 }
 
 /// What a resolved gradient paint depends on: its server, the opacity and
@@ -221,23 +212,32 @@ struct Reader<'a, 'i> {
 type GradientKey = (usize, u64, u32, [u64; 4]);
 
 impl<'a> Reader<'a, '_> {
-    fn index(&mut self, element: &'a Element<'a>) -> Result<(), ReadError> {
+    fn index(&mut self, root: &'a Element<'a>) -> Result<(), ReadError> {
+        self.gather_ids(root)?;
+        self.index
+            .sort_unstable_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(&b.1)));
+        Ok(())
+    }
+
+    fn gather_ids(&mut self, element: &'a Element<'a>) -> Result<(), ReadError> {
         if let Some(id) = element.attr("id") {
-            if !fallible::push(&mut self.index, (id, element)) {
+            let order = self.index.len();
+            if !fallible::push(&mut self.index, (id, order, element)) {
                 return Err(ReadError::OutOfMemory);
             }
         }
         for child in element.children() {
-            self.index(child)?;
+            self.gather_ids(child)?;
         }
         Ok(())
     }
 
     fn find(&self, id: &str) -> Option<&'a Element<'a>> {
+        let at = self.index.partition_point(|(name, ..)| *name < id);
         self.index
-            .iter()
-            .find(|(name, _)| *name == id)
-            .map(|(_, element)| *element)
+            .get(at)
+            .filter(|(name, ..)| *name == id)
+            .map(|(.., element)| *element)
     }
 
     fn referenced(&self, element: &Element<'_>) -> Option<&'a Element<'a>> {
@@ -257,7 +257,7 @@ impl<'a> Reader<'a, '_> {
         if !self.sheet.is_empty() {
             self.sheet.cascade(&self.path, &mut self.cascade);
         }
-        Ok(inherited.apply(element, diagonal(self.viewport), &self.cascade)?)
+        Ok(inherited.apply(element, viewport_diagonal(self.viewport), &self.cascade)?)
     }
 
     /// Note a filter on `element`, which the cascade just styled.
@@ -340,7 +340,7 @@ impl<'a> Reader<'a, '_> {
                 self.path.push(child);
                 let layer = self.layer(child, &inherited, to_page);
                 self.path.pop();
-                push(&mut layers, layer?)?;
+                try_push(&mut layers, layer?)?;
             } else if !self.is_background(child) && !self.is_info(child) {
                 self.read_into(child, &inherited, &mut loose)?;
             }
@@ -348,7 +348,7 @@ impl<'a> Reader<'a, '_> {
         self.flush_loose(&mut loose, &mut layers, to_page)?;
         if layers.is_empty() {
             let empty = self.group_node(Vec::new(), None, to_page)?;
-            push(&mut layers, Arc::new(empty))?;
+            try_push(&mut layers, try_arc(empty)?)?;
         }
         Ok(Children::from_nodes(layers)?)
     }
@@ -384,7 +384,7 @@ impl<'a> Reader<'a, '_> {
         }
         let content = core::mem::take(loose);
         let layer = self.group_node(content, None, to_page)?;
-        push(layers, Arc::new(layer))
+        Ok(try_push(layers, try_arc(layer)?)?)
     }
 
     /// One layer group: what a group reads as, placed on the page.
@@ -405,7 +405,7 @@ impl<'a> Reader<'a, '_> {
         }
         let clip = self.clip_of(&style, &children)?;
         let layer = self.group_node(children, clip, own.then(to_page))?;
-        Ok(Arc::new(self.dressed(&layer, element, &style)?))
+        Ok(try_arc(self.dressed(&layer, element, &style)?)?)
     }
 
     /// Read `element` and push what it comes to onto `out`.
@@ -419,7 +419,7 @@ impl<'a> Reader<'a, '_> {
         let read = self.deeper(|reader| reader.element(element, inherited));
         self.path.pop();
         if let Some(node) = read? {
-            push(out, node)?;
+            try_push(out, node)?;
         }
         Ok(())
     }
@@ -468,13 +468,15 @@ impl<'a> Reader<'a, '_> {
             "use" => self.use_of(element, &style, own)?,
             "svg" => self.nested_viewport(element, &style, own, None)?,
             "text" => self.text_node(element, &style, own)?,
+            "image" if self.clipping => None,
+            "image" => self.image_node(element, own)?,
             _ => self.shape_node(element, &style, own)?,
         };
         match node {
             Some(node) => {
                 let node = self.dressed(&node, element, &style)?;
                 let clipped = self.clipped(node, element, &style)?;
-                Ok(Some(Arc::new(clipped)))
+                Ok(Some(try_arc(clipped)?))
             }
             None => Ok(None),
         }
@@ -483,7 +485,6 @@ impl<'a> Reader<'a, '_> {
     /// Note what `element` is that the drawing cannot keep.
     fn note_unkept_element(&mut self, element: &Element<'_>) {
         let lost = match element.name {
-            "image" => Some(Lost::Images),
             "foreignObject" => Some(Lost::ForeignContent),
             "animate" | "animateMotion" | "animateTransform" | "set" | "animateColor" => {
                 Some(Lost::Animation)
@@ -523,7 +524,7 @@ impl<'a> Reader<'a, '_> {
             .or_else(|| element.attr("id"))
             .filter(|name| crate::node::check_name(Some(name)).is_ok());
         if let Some(name) = name {
-            node = node.with_name(Some(Arc::from(name)))?;
+            node = node.with_name(Some(SharedStr::try_from_str(name)?))?;
         }
         Ok(node)
     }
@@ -542,7 +543,8 @@ impl<'a> Reader<'a, '_> {
             return Ok(node);
         }
         let own = node.transform();
-        let held = alloc::vec![Arc::new(node.with_transform(Affine::IDENTITY)?)];
+        let mut held = Vec::new();
+        try_push(&mut held, try_arc(node.with_transform(Affine::IDENTITY)?)?)?;
         let Some(clip) = self.clip_of(style, &held)? else {
             return Ok(node);
         };
@@ -585,12 +587,14 @@ impl<'a> Reader<'a, '_> {
         self.path.push(self.root);
         self.path.push(definition);
         let mut shapes = Vec::new();
+        let was_clipping = core::mem::replace(&mut self.clipping, true);
         let read = self.expanding(definition, |reader| {
             let inherited = reader.style_of(&SvgStyle::default(), definition)?.inherit();
             definition
                 .children()
                 .try_for_each(|child| reader.read_into(child, &inherited, &mut shapes))
         });
+        self.clipping = was_clipping;
         self.path = outer;
         read?;
         // A clip of one shape is that shape, placed as the clip path places
@@ -598,11 +602,11 @@ impl<'a> Reader<'a, '_> {
         if shapes.len() == 1 {
             if let Some(only) = shapes.pop() {
                 let placed = only.with_transform(only.transform().then(own))?;
-                return Ok(Some(Arc::new(placed)));
+                return Ok(Some(try_arc(placed)?));
             }
         }
         let clip = self.group_node(shapes, None, own)?;
-        Ok(Some(Arc::new(clip)))
+        Ok(Some(try_arc(clip)?))
     }
 
     /// A `<use>`: what it references, inside a group placed at its offset.
@@ -713,8 +717,110 @@ impl<'a> Reader<'a, '_> {
         )?;
         let frame = self.group_node(Vec::new(), None, placed)?;
         Ok(Some(frame.with_kind(Kind::Group {
-            children: Children::from_nodes(alloc::vec![Arc::new(content)])?,
-            clip: Some(Arc::new(window)),
+            children: Children::single(try_arc(content)?)?,
+            clip: Some(try_arc(window)?),
+        })?))
+    }
+
+    /// An `<image>`: a PNG or JPEG its link carries as a data URL, laid in
+    /// the rectangle it states as its `preserveAspectRatio` lays it and cut
+    /// to that rectangle where it overflows. A picture linked from anywhere
+    /// else, or of another kind, is lost.
+    fn image_node(
+        &mut self,
+        element: &'a Element<'a>,
+        own: Affine,
+    ) -> Result<Option<Node>, ReadError> {
+        let Some(link) = xml::href(element) else {
+            return Ok(None);
+        };
+        let x = optional_length(element, "x", self.viewport.0)?;
+        let y = optional_length(element, "y", self.viewport.1)?;
+        // SVG 2's `auto` is the side left unstated.
+        let side = |name, basis| match element.attr(name) {
+            Some(text) if text.trim() == "auto" => Ok(None),
+            _ => optional_attr_length(element, name, basis),
+        };
+        let stated = (
+            side("width", self.viewport.0)?,
+            side("height", self.viewport.1)?,
+        );
+        if stated.0.is_some_and(|width| width <= 0.0)
+            || stated.1.is_some_and(|height| height <= 0.0)
+        {
+            return Ok(None);
+        }
+        let read = self.pictures.picture(link.as_bytes(), |limits| {
+            use tairix_image::DecodeError;
+            match data_url::decode(link, MAX_IMAGE_SOURCE_BYTES) {
+                Ok(Some(bytes)) => {
+                    let bytes =
+                        SharedSlice::try_from_vec(bytes).map_err(|_| DecodeError::OutOfMemory)?;
+                    image::decode_encoded(bytes, limits)
+                }
+                Err(DrawingError::OutOfMemory) => Err(DecodeError::OutOfMemory),
+                Ok(None) | Err(_) => Err(DecodeError::UnknownFormat),
+            }
+        })?;
+        let Some(picture) = read else {
+            self.unkept.insert(Lost::Images);
+            return Ok(None);
+        };
+        // A side the element leaves unstated is the picture's own, a pixel
+        // to the unit, or what its ratio makes of the side it states.
+        let (pixels_x, pixels_y) = picture.size();
+        let natural = (f64::from(pixels_x), f64::from(pixels_y));
+        let (width, height) = match stated {
+            (Some(width), Some(height)) => (width, height),
+            (Some(width), None) => (width, width * natural.1 / natural.0),
+            (None, Some(height)) => (height * natural.0 / natural.1, height),
+            (None, None) => natural,
+        };
+        let ratio = match element.attr("preserveAspectRatio") {
+            Some(spec) => parse_aspect_ratio(spec)?,
+            None => AspectRatio::default(),
+        };
+        let view_box = tairix_svg::transform::ViewBox {
+            min: (0.0, 0.0),
+            size: natural,
+        };
+        let laid =
+            viewport_transform(view_box, (width, height), ratio).then(Affine::translate(x, y));
+        let place = Bounds::from_points([
+            laid.map(Point::ZERO),
+            laid.map(Point::new(natural.0, natural.1)),
+        ]);
+        let shown = picture.placed(place)?;
+        let node = Node::new(
+            self.ids.issue(),
+            Kind::Image {
+                image: try_arc(shown)?,
+            },
+        )?;
+        // Only a ratio kept by slicing lays a picture past its rectangle,
+        // and not one whose shape is the rectangle's to within rounding.
+        let (across, down) = (natural.0 * height, natural.1 * width);
+        let overflows = ratio.slice
+            && ratio.align != Align::None
+            && fabs(across - down) > f64::EPSILON * fmax(fabs(across), fabs(down));
+        if !overflows {
+            return Ok(Some(node.with_transform(own)?));
+        }
+        let window = self.shape_from(
+            Shape::Rect(RectShape {
+                x,
+                y,
+                width,
+                height,
+                rx: 0.0,
+                ry: 0.0,
+            }),
+            Style::default(),
+        )?;
+        let cut = self.group_node(Vec::new(), None, own)?;
+        Ok(Some(cut.with_kind(Kind::Group {
+            children: Children::single(try_arc(node)?)?,
+            clip: Some(try_arc(window)?),
         })?))
     }
 
@@ -731,9 +837,9 @@ impl<'a> Reader<'a, '_> {
         let shape = match geometry {
             ShapeGeometry::Path(data) => self.live_shape(element).map_or_else(
                 || -> Result<Shape, ReadError> {
-                    let mut path = PathShape::from_path(&path_of(data)?)?;
+                    let mut path = PathShape::from_path(&parse_path_curves(data, MAX_PATH_NODES)?)?;
                     self.apply_node_types(element, &mut path);
-                    Ok(Shape::Path(Arc::new(path)))
+                    Ok(Shape::Path(try_arc(path)?))
                 },
                 Ok,
             )?,
@@ -759,10 +865,8 @@ impl<'a> Reader<'a, '_> {
             }),
             ShapeGeometry::Line { from, to } => {
                 let mut subpath = Subpath::new(from.into());
-                subpath.elements.push(PathEl::Line(to.into()));
-                Shape::Path(Arc::new(PathShape::from_path(&Path {
-                    subpaths: alloc::vec![subpath],
-                })?))
+                try_push(&mut subpath.elements, PathEl::Line(to.into()))?;
+                Shape::Path(try_arc(PathShape::from_path(&Path::single(subpath)?)?)?)
             }
             ShapeGeometry::Polyline { points, closed } => {
                 let Some((&first, rest)) = points.split_first() else {
@@ -776,9 +880,7 @@ impl<'a> Reader<'a, '_> {
                     .elements
                     .extend(rest.iter().map(|&point| PathEl::Line(point.into())));
                 subpath.closed = closed;
-                Shape::Path(Arc::new(PathShape::from_path(&Path {
-                    subpaths: alloc::vec![subpath],
-                })?))
+                Shape::Path(try_arc(PathShape::from_path(&Path::single(subpath)?)?)?)
             }
         };
         let bounds = shape.bounds()?;
@@ -880,7 +982,9 @@ impl<'a> Reader<'a, '_> {
         }
     }
 
-    /// A text object.
+    /// A text object: its characters in lines, or along the one path a
+    /// `<textPath>` holding all of them names; each span styled otherwise
+    /// than the text a run.
     fn text_node(
         &mut self,
         element: &'a Element<'a>,
@@ -894,86 +998,305 @@ impl<'a> Reader<'a, '_> {
         );
         let preserve = element.attr("xml:space") == Some("preserve");
         lines.start(origin);
-        self.gather_text(element, style, preserve, &mut lines)?;
-        let content = lines.content(preserve)?;
-        let line_height = self
-            .names
-            .draw(element, "line-height")
-            .and_then(|text| tairix_svg::number::parse_number(text).ok())
-            .or_else(|| lines.measured_line_height(style.font_size))
-            .unwrap_or(1.25);
-        let text = Text {
-            content: Arc::from(content.as_str()),
-            family: Arc::from(style.font_family.as_deref().unwrap_or("sans-serif")),
+        let within = Within {
+            base: style,
+            preserve,
+            rise: 0.0,
+            on_path: false,
+            style: 0,
+        };
+        self.gather_text(element, style, within, &mut lines)?;
+        let Gathered {
+            content,
+            runs,
+            on_path,
+        } = lines.finish(preserve)?;
+        let mut text = Text {
+            content: SharedStr::try_from_string(content)?,
+            family: SharedStr::try_from_str(
+                style.font_family.as_deref().unwrap_or(DEFAULT_FAMILY),
+            )?,
             size: style.font_size,
             weight: style.font_weight,
-            italic: style.font_style != tairix_svg::font::FontStyle::Normal,
+            italic: style.font_style != FontStyle::Normal,
             letter_spacing: style.letter_spacing,
-            line_height,
             align: match style.text_anchor {
                 TextAnchor::Start => TextAlign::Start,
                 TextAnchor::Middle => TextAlign::Middle,
                 TextAnchor::End => TextAlign::End,
             },
-            origin: lines.origin.unwrap_or(origin),
+            baseline: Baseline::Lines {
+                origin,
+                line_height: DEFAULT_LINE_HEIGHT,
+            },
+            runs: SharedSlice::new(),
         };
-        let drawn = self.style(element, style, text.estimated_bounds())?;
+        let paints = promote(&mut text, runs)?;
+        let path = match (lines.path.take(), on_path) {
+            (Some(path), OnPath::All) if !lines.paths_lost => Some(path),
+            (path, on_path) => {
+                if path.is_some() || lines.paths_lost || on_path != OnPath::None {
+                    self.unkept.insert(Lost::TextPaths);
+                }
+                None
+            }
+        };
+        text.baseline = match path {
+            Some(path) => Baseline::Path(try_arc(path)?),
+            None => Baseline::Lines {
+                origin: lines.origin.unwrap_or(origin),
+                line_height: self
+                    .names
+                    .draw(element, "line-height")
+                    .and_then(|height| parse_number(height).ok())
+                    .or_else(|| lines.measured_line_height(text.size))
+                    .unwrap_or(DEFAULT_LINE_HEIGHT),
+            },
+        };
+        let mut drawn = self.style(element, style, text.estimated_bounds())?;
+        if let Some(fill) = paints.0 {
+            drawn.fill = fill.paint();
+        }
+        if let Some(stroke) = paints.1 {
+            drawn.stroke.paint = stroke.paint();
+        }
         let node = Node::new(
             self.ids.issue(),
             Kind::Text {
-                text: Arc::new(text),
-                style: Arc::new(drawn),
+                text: try_arc(text)?,
+                style: try_arc(drawn)?,
             },
         )?;
         Ok(Some(node.with_transform(own)?))
     }
 
-    /// Gather `element`'s characters into `lines`, a `<tspan>` placed at a
-    /// height of its own beginning a line.
+    /// Gather `element`'s characters into `lines`: a `<tspan>` placed at a
+    /// height of its own beginning a line, and a `<textPath>` naming the path
+    /// its characters are set along.
     fn gather_text(
         &mut self,
         element: &'a Element<'a>,
         style: &SvgStyle,
-        preserve: bool,
+        within: Within<'_>,
         lines: &mut TextLines,
     ) -> Result<(), ReadError> {
         for content in &element.content {
-            match content {
-                Content::Text(text) => lines.push(text, preserve)?,
-                Content::Element(child) if child.name == "tspan" => {
-                    self.visit()?;
-                    self.path.push(child);
-                    let child_style = self.style_of(&style.inherit(), child);
-                    self.path.pop();
-                    let child_style = child_style?;
-                    if text_style_differs(style, &child_style) {
-                        self.unkept.insert(Lost::TextStyling);
-                    }
-                    if let Some(y) = child.attr("y") {
-                        let y = first_number(y, self.viewport.1, &mut self.unkept)?;
-                        let x = match child.attr("x") {
-                            Some(x) => Some(first_number(x, self.viewport.0, &mut self.unkept)?),
-                            None => None,
-                        };
-                        lines.place(x, y);
-                    } else if child.attr("dy").is_some()
-                        || child.attr("dx").is_some()
-                        || child.attr("x").is_some()
-                    {
-                        self.unkept.insert(Lost::TextPositioning);
-                    }
-                    let child_preserve = preserve || child.attr("xml:space") == Some("preserve");
-                    self.deeper(|reader| {
-                        reader.gather_text(child, &child_style, child_preserve, lines)
-                    })?;
+            let child = match content {
+                Content::Text(text) => {
+                    lines.push(text, within)?;
+                    continue;
                 }
-                Content::Element(child) if child.name == "textPath" => {
-                    self.unkept.insert(Lost::TextPaths);
+                Content::Element(child) if matches!(child.name, "tspan" | "textPath") => child,
+                Content::Element(_) => continue,
+            };
+            self.visit()?;
+            self.path.push(child);
+            let child_style = self.style_of(&style.inherit(), child);
+            self.path.pop();
+            let child_style = child_style?;
+            let shift = child_style.baseline_shift;
+            let raised = shift.rise(style.font_size, child_style.font_size);
+            let own_ems = match shift {
+                BaselineShift::Ems(ems) => ems,
+                _ => raised / child_style.font_size,
+            };
+            let mut inner = Within {
+                preserve: within.preserve || child.attr("xml:space") == Some("preserve"),
+                rise: within.rise + raised,
+                ..within
+            };
+            if child.name == "textPath" {
+                // SVG draws no `<textPath>` within another, nor one naming
+                // nothing.
+                if within.on_path {
+                    continue;
                 }
-                Content::Element(_) => {}
+                match self.text_path(child, &child_style)? {
+                    Along::Missing => continue,
+                    Along::Unusable => lines.paths_lost = true,
+                    Along::Path(path) => {
+                        if lines.path.is_some() {
+                            lines.paths_lost = true;
+                        } else {
+                            lines.path = Some(path);
+                        }
+                        inner.on_path = true;
+                    }
+                }
+            } else if within.on_path {
+                if ["x", "y", "dx", "dy"]
+                    .iter()
+                    .any(|name| child.attr(name).is_some())
+                {
+                    self.unkept.insert(Lost::TextPositioning);
+                }
+            } else if let Some(y) = child.attr("y") {
+                let y = first_number(y, self.viewport.1, &mut self.unkept)?;
+                let x = match child.attr("x") {
+                    Some(x) => Some(first_number(x, self.viewport.0, &mut self.unkept)?),
+                    None => None,
+                };
+                lines.place(x, y)?;
+            } else if child.attr("dy").is_some()
+                || child.attr("dx").is_some()
+                || child.attr("x").is_some()
+            {
+                self.unkept.insert(Lost::TextPositioning);
             }
+            let ems = within.rise / child_style.font_size + own_ems;
+            let run = self.run_style(within.base, &child_style, ems, lines)?;
+            inner.style = lines.style_index(run)?;
+            self.deeper(|reader| reader.gather_text(child, &child_style, inner, lines))?;
         }
         Ok(())
+    }
+
+    /// What `style` overrides of the text's own `base`, its characters
+    /// raised `ems` of its size; what no run can hold is noted as lost.
+    #[allow(
+        clippy::float_cmp,
+        reason = "a span overrides a value only where it sets one other than its text's, exactly"
+    )]
+    fn run_style(
+        &mut self,
+        base: &SvgStyle,
+        style: &SvgStyle,
+        ems: f64,
+        lines: &mut TextLines,
+    ) -> Result<RunStyle, ReadError> {
+        if style.stroke_style != base.stroke_style
+            || style.font_stretch != base.font_stretch
+            || style.word_spacing != base.word_spacing
+        {
+            self.unkept.insert(Lost::TextStyling);
+        }
+        let family = match &style.font_family {
+            Some(family) if style.font_family != base.font_family => {
+                let held = lines.family(family)?;
+                if held.is_none() {
+                    self.unkept.insert(Lost::TextStyling);
+                }
+                held
+            }
+            _ => None,
+        };
+        let italic = style.font_style != FontStyle::Normal;
+        let baseline_shift = if ems == 0.0 {
+            None
+        } else if ems.is_finite() && fabs(ems) <= MAX_BASELINE_SHIFT {
+            Some(ems)
+        } else {
+            self.unkept.insert(Lost::TextStyling);
+            None
+        };
+        let fill = if paint_differs(
+            (&base.fill, base.fill_opacity),
+            (&style.fill, style.fill_opacity),
+            base,
+            style,
+        ) {
+            self.run_paint(&style.fill, style.fill_opacity, style)?
+        } else {
+            None
+        };
+        let stroke = if paint_differs(
+            (&base.stroke, base.stroke_opacity),
+            (&style.stroke, style.stroke_opacity),
+            base,
+            style,
+        ) {
+            self.run_paint(&style.stroke, style.stroke_opacity, style)?
+        } else {
+            None
+        };
+        // A size or spacing no text may hold is no run's either: it is lost,
+        // not the whole document.
+        let mut held = |differs: bool, value: f64, holds: bool| {
+            if differs && !holds {
+                self.unkept.insert(Lost::TextStyling);
+            }
+            (differs && holds).then_some(value)
+        };
+        let size = held(
+            style.font_size != base.font_size,
+            style.font_size,
+            limits::length(style.font_size) && style.font_size > 0.0,
+        );
+        let letter_spacing = held(
+            style.letter_spacing != base.letter_spacing,
+            style.letter_spacing,
+            limits::coordinate(style.letter_spacing),
+        );
+        Ok(RunStyle {
+            family,
+            size,
+            weight: (style.font_weight != base.font_weight).then_some(style.font_weight),
+            italic: (italic != (base.font_style != FontStyle::Normal)).then_some(italic),
+            letter_spacing,
+            baseline_shift,
+            fill,
+            stroke,
+        })
+    }
+
+    /// The paint `spec` at `opacity` comes to as a run holds it; `None`, and
+    /// the styling noted as lost, for a gradient, which paints a whole object.
+    fn run_paint(
+        &mut self,
+        spec: &PaintSpec,
+        opacity: f64,
+        style: &SvgStyle,
+    ) -> Result<Option<RunPaint>, ReadError> {
+        if let PaintSpec::Reference(id, _) = spec {
+            let gradient = self
+                .servers
+                .node(id)
+                .is_some_and(|server| matches!(server.name, "linearGradient" | "radialGradient"));
+            if gradient {
+                self.unkept.insert(Lost::TextStyling);
+                return Ok(None);
+            }
+        }
+        Ok(RunPaint::of(&self.paint(
+            spec,
+            opacity,
+            style,
+            Bounds::EMPTY,
+        )?))
+    }
+
+    /// The path `element`, a `<textPath>` set in `style`, names: in the
+    /// text's own space, run backwards for `side="right"`, with how far along
+    /// it its characters start.
+    fn text_path(&mut self, element: &Element<'_>, style: &SvgStyle) -> Result<Along, ReadError> {
+        let Some(target) = self.referenced(element) else {
+            return Ok(Along::Missing);
+        };
+        let (mut path, stated) = match textpath::geometry(target, MAX_TEXT_PATH_NODES) {
+            Ok(Some(geometry)) => geometry,
+            Err(SvgError::OutOfMemory) => return Err(ReadError::OutOfMemory),
+            Ok(None) | Err(_) => {
+                self.unkept.insert(Lost::TextPaths);
+                return Ok(Along::Unusable);
+            }
+        };
+        if element.attr("side") == Some("right") {
+            path = path.reversed()?;
+        }
+        if element.attr("method") == Some("stretch") {
+            self.unkept.insert(Lost::TextPaths);
+        }
+        let length = PathMeasure::new(&path)?.length();
+        let start = textpath::start(element, style.font_size, length, stated, self.viewport)?;
+        let shape = PathShape::from_path(&path)?;
+        if shape.node_count() > MAX_TEXT_PATH_NODES || !limits::coordinate(start) {
+            self.unkept.insert(Lost::TextPaths);
+            return Ok(Along::Unusable);
+        }
+        Ok(Along::Path(TextPath {
+            path: try_arc(shape)?,
+            start,
+        }))
     }
 
     /// The drawing style `style` comes to, gradients placed for a shape whose
@@ -1015,14 +1338,18 @@ impl<'a> Reader<'a, '_> {
                 .position(|slot| *slot == PaintSlot::Stroke);
         Ok(Style {
             fill,
-            fill_rule: style.fill_rule,
+            fill_rule: if self.clipping {
+                style.clip_rule
+            } else {
+                style.fill_rule
+            },
             stroke: Stroke {
                 paint: stroke_paint,
                 width: stroke_style.width,
                 join,
                 miter_limit: stroke_style.miter_limit.clamp(1.0, 1e4),
                 cap,
-                dashes: Arc::from(stroke_style.dashes.as_slice()),
+                dashes: SharedSlice::try_from_slice(stroke_style.dashes.as_slice())?,
                 dash_offset: stroke_style.dash_offset,
                 start,
                 end,
@@ -1092,7 +1419,7 @@ impl<'a> Reader<'a, '_> {
                             } else {
                                 let paint = gradient_paint(&definition, bounds)?;
                                 if let Paint::Gradient(gradient) = &paint {
-                                    self.gradients.insert(key, gradient.clone());
+                                    self.gradients.try_insert(key, gradient.clone())?;
                                 }
                                 paint
                             }
@@ -1145,7 +1472,7 @@ impl<'a> Reader<'a, '_> {
     }
 
     /// The guides Draw recorded.
-    fn guides(&self) -> Result<Arc<[Guide]>, ReadError> {
+    fn guides(&self) -> Result<SharedSlice<Guide>, ReadError> {
         let mut guides = Vec::new();
         for element in self
             .root
@@ -1175,7 +1502,44 @@ impl<'a> Reader<'a, '_> {
                 }
             }
         }
-        Ok(Arc::from(guides))
+        Ok(SharedSlice::try_from_vec(guides)?)
+    }
+
+    /// The swatches Draw kept with the drawing; one whose colour does not
+    /// read is passed over, as a guide is.
+    fn swatches(&self) -> Result<SharedSlice<Rgba>, ReadError> {
+        let mut swatches = Vec::new();
+        for element in self
+            .root
+            .children()
+            .filter(|child| child.is(DRAW_NAMESPACE, "swatches"))
+        {
+            for swatch in element
+                .children()
+                .filter(|child| child.is(DRAW_NAMESPACE, "swatch"))
+            {
+                if swatches.len() >= MAX_SWATCHES {
+                    return Err(ReadError::TooComplex);
+                }
+                let Some(colour) = swatch.attr("colour").and_then(hex_colour) else {
+                    continue;
+                };
+                if !fallible::push(&mut swatches, colour) {
+                    return Err(ReadError::OutOfMemory);
+                }
+            }
+        }
+        Ok(SharedSlice::try_from_vec(swatches)?)
+    }
+
+    /// The pixels to the inch Draw recorded the drawing is copied as raster
+    /// at, or the drawing's own where it recorded none it may hold.
+    fn resolution(&self) -> u32 {
+        self.names
+            .draw(self.root, "resolution")
+            .and_then(|text| text.trim().parse::<u32>().ok())
+            .filter(|resolution| (1..=MAX_RESOLUTION).contains(resolution))
+            .unwrap_or(PIXELS_PER_INCH)
     }
 
     /// The grid Draw recorded, or the default.
@@ -1189,7 +1553,7 @@ impl<'a> Reader<'a, '_> {
         };
         let grid = Grid {
             spacing,
-            subdivisions: whole_points(subdivisions.clamp(1.0, 64.0)),
+            subdivisions: whole_points(subdivisions.clamp(1.0, f64::from(MAX_SUBDIVISIONS))),
         };
         Ok(if spacing > 0.0 { grid } else { Grid::default() })
     }
@@ -1216,90 +1580,236 @@ impl<'a> Reader<'a, '_> {
             self.ids.issue(),
             Kind::Shape {
                 shape,
-                style: Arc::new(style),
+                style: try_arc(style)?,
             },
         )?)
     }
 }
 
+/// What the characters an element holds are gathered with.
+#[derive(Copy, Clone)]
+struct Within<'s> {
+    /// The text's own style, which a run's overrides are told from.
+    base: &'s SvgStyle,
+    preserve: bool,
+    /// How far the enclosing spans raise their characters, in user units.
+    rise: f64,
+    /// Whether a `<textPath>` holds them.
+    on_path: bool,
+    /// The style they are set in, as [`Letter::style`] counts it.
+    style: u32,
+}
+
+/// One gathered character.
+#[derive(Copy, Clone)]
+struct Letter {
+    character: char,
+    /// The style it is set in: an index from one into the styles gathered,
+    /// zero for the text's own.
+    style: u32,
+    /// Whether a `<textPath>` holds it.
+    on_path: bool,
+}
+
+/// What a `<textPath>` sets its characters along.
+enum Along {
+    /// Nothing: SVG draws none of its characters.
+    Missing,
+    /// What a text cannot be set along, so its characters are set in lines.
+    Unusable,
+    /// A path, in the text's own space.
+    Path(TextPath),
+}
+
+/// How many of a text's characters a `<textPath>` holds.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum OnPath {
+    None,
+    Some,
+    All,
+}
+
+/// A text's content as gathered: its white space collapsed, its runs, and
+/// how many of its characters a `<textPath>` holds.
+struct Gathered {
+    content: String,
+    runs: Vec<Run>,
+    on_path: OnPath,
+}
+
 /// The lines of a text object as its characters are gathered.
 #[derive(Default)]
 struct TextLines {
-    lines: Vec<String>,
+    lines: Vec<Vec<Letter>>,
     /// Each line's baseline height, where a `<tspan>` stated one.
     heights: Vec<f64>,
     origin: Option<Point>,
+    /// The bytes gathered, which the content's bound holds.
+    bytes: usize,
+    /// The styles spans set otherwise than the text's own.
+    styles: Vec<Arc<RunStyle>>,
+    /// The families those styles name.
+    families: Vec<SharedStr>,
+    /// The path the first `<textPath>` names.
+    path: Option<TextPath>,
+    /// Whether a `<textPath>` named what a text cannot be set along, or a
+    /// second path.
+    paths_lost: bool,
 }
 
 impl TextLines {
     fn start(&mut self, origin: Point) {
-        self.lines.push(String::new());
+        self.lines.push(Vec::new());
         self.heights.push(origin.y);
     }
 
     /// Begin a line at baseline `y`, unless the current one is still empty.
-    fn place(&mut self, x: Option<f64>, y: f64) {
-        let current_empty = self.lines.last().is_none_or(|line| line.trim().is_empty());
+    fn place(&mut self, x: Option<f64>, y: f64) -> Result<(), ReadError> {
+        let current_empty = self
+            .lines
+            .last()
+            .is_none_or(|line| line.iter().all(|letter| letter.character == ' '));
         if current_empty {
             if let (Some(line), Some(height)) = (self.lines.last_mut(), self.heights.last_mut()) {
                 line.clear();
                 *height = y;
             }
         } else {
-            self.lines.push(String::new());
-            self.heights.push(y);
+            try_push(&mut self.lines, Vec::new())?;
+            try_push(&mut self.heights, y)?;
         }
         if self.lines.len() == 1 {
             self.origin = Some(Point::new(x.unwrap_or(0.0), y));
         }
+        Ok(())
     }
 
-    fn push(&mut self, text: &str, preserve: bool) -> Result<(), ReadError> {
+    fn push(&mut self, text: &str, within: Within<'_>) -> Result<(), ReadError> {
         let Some(line) = self.lines.last_mut() else {
             return Ok(());
         };
-        if line.len() + text.len() > crate::limits::MAX_TEXT_BYTES {
-            return Err(ReadError::TooComplex);
-        }
         for c in text.chars() {
-            match c {
-                '\n' | '\r' if !preserve => {}
-                '\n' | '\r' | '\t' => line.push(' '),
-                c if c.is_control() => {}
-                c => line.push(c),
+            let character = match c {
+                '\n' | '\r' if !within.preserve => continue,
+                '\n' | '\r' | '\t' => ' ',
+                c if c.is_control() => continue,
+                c => c,
+            };
+            self.bytes += character.len_utf8();
+            if self.bytes > crate::limits::MAX_TEXT_BYTES {
+                return Err(ReadError::TooComplex);
             }
+            let letter = Letter {
+                character,
+                style: within.style,
+                on_path: within.on_path,
+            };
+            try_push(line, letter)?;
         }
         Ok(())
     }
 
-    /// The text, its lines' white space collapsed unless preserved.
-    fn content(&self, preserve: bool) -> Result<String, ReadError> {
+    /// The index characters set in `style` carry: zero for one overriding
+    /// nothing.
+    fn style_index(&mut self, style: RunStyle) -> Result<u32, ReadError> {
+        if style.is_empty() {
+            return Ok(0);
+        }
+        try_push(&mut self.styles, try_arc(style)?)?;
+        u32::try_from(self.styles.len()).map_err(|_| ReadError::TooComplex)
+    }
+
+    /// `family` as a run may name it, or `None` where it is past a family's
+    /// bound or one family too many for one text.
+    fn family(&mut self, family: &str) -> Result<Option<SharedStr>, ReadError> {
+        if let Some(held) = self.families.iter().find(|held| held.as_str() == family) {
+            return Ok(Some(held.clone()));
+        }
+        if family.len() > MAX_FAMILY_BYTES
+            || family.chars().any(char::is_control)
+            || self.families.len() == MAX_TEXT_FAMILIES
+        {
+            return Ok(None);
+        }
+        let held = SharedStr::try_from_str(family)?;
+        try_push(&mut self.families, held.clone())?;
+        Ok(Some(held))
+    }
+
+    /// The text, its lines' white space collapsed unless preserved, with the
+    /// runs its spans make.
+    fn finish(&self, preserve: bool) -> Result<Gathered, ReadError> {
         let mut content = String::new();
+        // Every byte gathered and a line feed between each line and the next,
+        // so nothing below grows it.
+        content
+            .try_reserve(self.bytes + self.lines.len())
+            .map_err(|_| ReadError::OutOfMemory)?;
+        let mut spans: Vec<(Range<usize>, u32)> = Vec::new();
+        let (mut on, mut off) = (false, false);
         for (index, line) in self.lines.iter().enumerate() {
             if index > 0 {
                 content.push('\n');
             }
-            if preserve {
-                content.push_str(line);
+            let kept = if preserve {
+                line.as_slice()
             } else {
-                let mut spaced = false;
-                for c in line.trim().chars() {
-                    if c == ' ' {
-                        if !spaced {
-                            content.push(' ');
-                        }
-                        spaced = true;
-                    } else {
-                        content.push(c);
-                        spaced = false;
+                let first = line.iter().position(|letter| letter.character != ' ');
+                let last = line.iter().rposition(|letter| letter.character != ' ');
+                match (first, last) {
+                    (Some(first), Some(last)) => &line[first..=last],
+                    _ => &[],
+                }
+            };
+            let mut spaced = false;
+            for letter in kept {
+                let space = letter.character == ' ';
+                if space && spaced && !preserve {
+                    continue;
+                }
+                spaced = space;
+                on |= letter.on_path;
+                off |= !letter.on_path;
+                let at = content.len();
+                content.push(letter.character);
+                if letter.style == 0 {
+                    continue;
+                }
+                match spans.last_mut() {
+                    Some((span, style)) if *style == letter.style && span.end == at => {
+                        span.end = content.len();
                     }
+                    _ => try_push(&mut spans, (at..content.len(), letter.style))?,
                 }
             }
         }
         if content.len() > crate::limits::MAX_TEXT_BYTES {
             return Err(ReadError::TooComplex);
         }
-        Ok(content)
+        let mut runs = Vec::new();
+        if !fallible::reserve(&mut runs, spans.len()) {
+            return Err(ReadError::OutOfMemory);
+        }
+        for (span, style) in spans {
+            let style = self
+                .styles
+                .get(style as usize - 1)
+                .ok_or(ReadError::Malformed)?;
+            runs.push(Run {
+                start: span.start,
+                end: span.end,
+                style: Arc::clone(style),
+            });
+        }
+        Ok(Gathered {
+            content,
+            runs,
+            on_path: match (on, off) {
+                (true, false) => OnPath::All,
+                (true, true) => OnPath::Some,
+                (false, _) => OnPath::None,
+            },
+        })
     }
 
     /// The line height the `<tspan>` baselines were set at, in ems.
@@ -1310,92 +1820,59 @@ impl TextLines {
     }
 }
 
-/// The path a `d` attribute draws, its curves kept as curves.
-fn path_of(data: &str) -> Result<Path, ReadError> {
-    let mut path = Path::new();
-    let mut current: Option<Subpath> = None;
-    let mut start = Point::ZERO;
-    let mut cursor = Point::ZERO;
-    let mut count = 0_usize;
-    for command in path_commands(data) {
-        count += 1;
-        if count > MAX_PATH_NODES {
-            return Err(ReadError::TooComplex);
+/// Give `text` its runs, a run over the whole content folded into the text's
+/// own style; what that run paints its glyphs with, which the object's style
+/// takes.
+fn promote(
+    text: &mut Text,
+    mut runs: Vec<Run>,
+) -> Result<(Option<RunPaint>, Option<RunPaint>), ReadError> {
+    let whole = match runs.as_slice() {
+        [run] if run.start == 0 && run.end == text.content.len() => Some(Arc::clone(&run.style)),
+        _ => None,
+    };
+    let mut paints = (None, None);
+    if let Some(style) = whole {
+        if let Some(family) = &style.family {
+            text.family = family.clone();
         }
-        match command? {
-            PathCommand::MoveTo(point) => {
-                if let Some(done) = current.take() {
-                    push(&mut path.subpaths, done)?;
-                }
-                start = point.into();
-                cursor = start;
-                current = Some(Subpath::new(start));
-            }
-            PathCommand::LineTo(point) => {
-                let point = point.into();
-                open(&mut current, cursor)
-                    .elements
-                    .push(PathEl::Line(point));
-                cursor = point;
-            }
-            PathCommand::CubicTo(c1, c2, to) => {
-                let to = to.into();
-                open(&mut current, cursor)
-                    .elements
-                    .push(PathEl::Cubic(c1.into(), c2.into(), to));
-                cursor = to;
-            }
-            PathCommand::QuadTo(control, to) => {
-                let cubic = QuadBez::new(cursor, control.into(), to.into()).raised();
-                open(&mut current, cursor)
-                    .elements
-                    .push(PathEl::Cubic(cubic.p1, cubic.p2, cubic.p3));
-                cursor = cubic.p3;
-            }
-            PathCommand::ArcTo {
-                radii,
-                x_rotation,
-                large,
-                sweep,
-                to,
-            } => {
-                let to: Point = to.into();
-                let subpath = open(&mut current, cursor);
-                match EllipseArc::from_svg(cursor, to, radii.into(), x_rotation, large, sweep) {
-                    None => subpath.elements.push(PathEl::Line(to)),
-                    Some(arc) => {
-                        let first = subpath.elements.len();
-                        arc.to_cubics(|c| subpath.elements.push(PathEl::Cubic(c.p1, c.p2, c.p3)));
-                        // The cubics reach the endpoint only to rounding.
-                        if let Some(PathEl::Cubic(_, _, end)) = subpath.elements.last_mut() {
-                            *end = to;
-                        }
-                        if subpath.elements.len() == first {
-                            subpath.elements.push(PathEl::Line(to));
-                        }
-                    }
-                }
-                cursor = to;
-            }
-            PathCommand::Close => {
-                if let Some(mut done) = current.take() {
-                    done.closed = true;
-                    push(&mut path.subpaths, done)?;
-                }
-                cursor = start;
-            }
+        text.size = style.size.unwrap_or(text.size);
+        text.weight = style.weight.unwrap_or(text.weight);
+        text.italic = style.italic.unwrap_or(text.italic);
+        text.letter_spacing = style.letter_spacing.unwrap_or(text.letter_spacing);
+        paints = (style.fill, style.stroke);
+        let rest = RunStyle {
+            baseline_shift: style.baseline_shift,
+            ..RunStyle::default()
+        };
+        runs.clear();
+        if !rest.is_empty() {
+            runs.push(Run {
+                start: 0,
+                end: text.content.len(),
+                style: try_arc(rest)?,
+            });
         }
     }
-    if let Some(done) = current {
-        push(&mut path.subpaths, done)?;
-    }
-    Ok(path)
+    text.runs = canonical(runs)?;
+    Ok(paints)
 }
 
-/// The sub-path being built, or a fresh one at `cursor` — where a segment
-/// after a `closepath` begins.
-fn open(current: &mut Option<Subpath>, cursor: Point) -> &mut Subpath {
-    current.get_or_insert_with(|| Subpath::new(cursor))
+/// Whether a span's paint — `spec` at its opacity, `currentColor` in its own
+/// colour — differs from the text's own.
+#[allow(
+    clippy::float_cmp,
+    reason = "a span overrides a paint only where its opacity differs from its text's, exactly"
+)]
+fn paint_differs(
+    base: (&PaintSpec, f64),
+    span: (&PaintSpec, f64),
+    base_style: &SvgStyle,
+    span_style: &SvgStyle,
+) -> bool {
+    base.0 != span.0
+        || base.1 != span.1
+        || (matches!(span.0, PaintSpec::Current) && base_style.color != span_style.color)
 }
 
 /// The drawing paint a gradient definition comes to for a shape whose
@@ -1447,7 +1924,7 @@ fn gradient_paint(definition: &GradientDefinition, bounds: Bounds) -> Result<Pai
         transform: to_object,
     };
     gradient.check()?;
-    Ok(Paint::Gradient(Arc::new(gradient)))
+    Ok(Paint::Gradient(try_arc(gradient)?))
 }
 
 /// `colour` with its alpha weakened by `opacity`.
@@ -1523,7 +2000,11 @@ fn info_of(root: &Element<'_>) -> Result<(Info, [Option<usize>; 2]), ReadError> 
         if text.len() > crate::limits::MAX_TEXT_BYTES {
             return Err(ReadError::TooComplex);
         }
-        let held = (!text.is_empty()).then(|| Arc::<str>::from(text));
+        let held = if text.is_empty() {
+            None
+        } else {
+            Some(SharedStr::try_from_str(text)?)
+        };
         if one_line {
             info.title = held;
         } else {
@@ -1600,20 +2081,6 @@ fn page_extent(text: &str) -> Result<Option<(f64, Unit)>, ReadError> {
     }))
 }
 
-/// Whether two text styles set characters differently.
-#[allow(
-    clippy::float_cmp,
-    reason = "any difference at all is a second style, however small"
-)]
-fn text_style_differs(a: &SvgStyle, b: &SvgStyle) -> bool {
-    a.font_family != b.font_family
-        || a.font_size != b.font_size
-        || a.font_weight != b.font_weight
-        || a.font_style != b.font_style
-        || a.fill != b.fill
-        || a.stroke != b.stroke
-}
-
 /// The first of a coordinate list, noting a list of more as positions lost.
 fn first_number(text: &str, basis: f64, unkept: &mut Unkept) -> Result<f64, ReadError> {
     let mut parts = text
@@ -1651,6 +2118,7 @@ fn is_drawable(name: &str) -> bool {
             | "use"
             | "svg"
             | "text"
+            | "image"
             | "path"
             | "rect"
             | "circle"
@@ -1682,14 +2150,6 @@ fn optional_attr_length(
         Some(text) => Ok(Some(parse_length(text, basis)?)),
         None => Ok(None),
     }
-}
-
-/// What percentages with no axis of their own resolve against.
-fn diagonal(viewport: (f64, f64)) -> f64 {
-    tairix_util::mathf::sqrt(f64::midpoint(
-        viewport.0 * viewport.0,
-        viewport.1 * viewport.1,
-    ))
 }
 
 /// A `#rrggbb` colour.
@@ -1725,12 +2185,4 @@ fn descend<'a>(
 )]
 fn whole_points(value: f64) -> u32 {
     tairix_util::mathf::round(value) as u32
-}
-
-fn push<T>(list: &mut Vec<T>, item: T) -> Result<(), ReadError> {
-    if fallible::push(list, item) {
-        Ok(())
-    } else {
-        Err(ReadError::OutOfMemory)
-    }
 }

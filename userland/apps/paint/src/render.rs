@@ -14,7 +14,7 @@ use core::ops::Range;
 use tairix_colour::Rgba;
 use tairix_controls::{
     blend_area, fill_area, paint_run, paint_titled_surface_plate, withheld, Checker, ChromeLayer,
-    FrameRim, SwatchMark,
+    FrameRim, StatusBand, StatusTone, SwatchMark,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{saturate_i32, to_i32, Point, Rect, Scale};
@@ -95,7 +95,7 @@ pub fn render_into(
         fill_area(surface, mark, Color::from(palette.accent));
     }
     if !withheld(surface, layout.canvas()) {
-        canvas(surface, view, layout, theme, scale, faces.status);
+        canvas(surface, view, layout, theme, scale, faces.caption);
     }
     if !withheld(surface, layout.vertical_bar()) {
         controls
@@ -113,7 +113,7 @@ pub fn render_into(
         palette_wells(surface, view, layout, (theme, scale), artwork);
     }
     if !withheld(surface, layout.status()) {
-        status(surface, view, layout, theme, faces.status);
+        status(surface, view, layout, theme, StatusBand::new(theme, scale));
     }
     // An open list hangs over whatever lies beneath it.
     controls
@@ -192,7 +192,7 @@ fn pane_body(
         PaneKind::Colour => view
             .body_view(layout, PaneKind::Colour)
             .paint(surface, |surface| {
-                wells(surface, view, layout, theme, scale, faces.status);
+                wells(surface, view, layout, theme, scale, faces.caption);
                 view.colour_controls().render(
                     surface,
                     layout.colour_controls(),
@@ -1384,23 +1384,9 @@ fn clipped(a: (i64, i64), b: (i64, i64), clip: Rect) -> Option<((i64, i64), (i64
 
 /// The status band: the picture and the pixel under the pointer, a message,
 /// the sprite showing, and the magnification.
-fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, font: BitmapFont) {
-    let palette = theme.palette();
-    fill_area(
-        surface,
-        layout.status(),
-        Color::from(palette.surface_raised),
-    );
-    let band = layout.status();
-    let y = font.centred_top(band.top(), band.height);
-    let ink = Color::from(palette.on_surface);
-    let muted = Color::from(palette.on_surface_muted);
-    let draw = |surface: &mut Surface, rect: Rect, words: &str, colour: Color| {
-        let fitted = font.truncate_to_width(words, rect.width);
-        font.draw_text(surface, rect.left(), y, fitted, colour);
-    };
+fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, band: StatusBand) {
     let document = view.document();
-    let mut text = String::new();
+    let mut position = String::new();
     if let (Some((x, px_y)), Some(picture)) = (view.hover(), document.picture()) {
         // The colour shown there, a floating selection and its lift's
         // leavings included, through every layer.
@@ -1411,34 +1397,45 @@ fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, fo
             });
             picture.shown_at((x, px_y), kind.colour(sample))
         });
-        write_position(&mut text, (x, px_y), shown);
+        write_position(&mut position, (x, px_y), shown);
     }
-    draw(surface, layout.position(), &text, ink);
-    text.clear();
-    match (view.message(), document.picture()) {
-        (Some(message), _) => text.push_str(message),
-        (None, Some(picture)) => write_shape(&mut text, picture),
-        (None, None) => text.push_str("A kept sprite"),
-    }
-    draw(
-        surface,
-        layout.message(),
-        &text,
-        if view.message().is_some() { ink } else { muted },
-    );
-    text.clear();
+    let mut message = String::new();
+    let tone = match (view.message(), document.picture()) {
+        (Some(said), _) => {
+            message.push_str(said);
+            StatusTone::Ink
+        }
+        (None, Some(picture)) => {
+            write_shape(&mut message, picture);
+            StatusTone::Muted
+        }
+        (None, None) => {
+            message.push_str("A kept sprite");
+            StatusTone::Muted
+        }
+    };
+    let mut sprite = String::new();
     if document.is_sprite_area() || document.is_pages() {
         write_sprite(
-            &mut text,
+            &mut sprite,
             document.current() + 1,
             document.entries().len(),
             document.entry().name(),
         );
     }
-    draw(surface, layout.sprite(), &text, ink);
-    text.clear();
-    write_zoom(&mut text, view.viewport().percent());
-    draw(surface, layout.zoom(), &text, ink);
+    let mut zoom = String::new();
+    write_zoom(&mut zoom, view.viewport().percent());
+    band.paint(
+        surface,
+        layout.status(),
+        theme,
+        &[
+            (layout.position(), &position, StatusTone::Ink),
+            (layout.message(), &message, tone),
+            (layout.sprite(), &sprite, StatusTone::Ink),
+            (layout.zoom(), &zoom, StatusTone::Ink),
+        ],
+    );
 }
 
 /// The status band's position readout, after what `out` holds: picture

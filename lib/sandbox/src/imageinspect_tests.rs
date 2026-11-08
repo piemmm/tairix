@@ -139,3 +139,20 @@ fn a_worker_that_turns_hostile_at_the_report_is_contained() {
     assert!(InspectFailure::NoMemory.passing());
     assert!(!InspectFailure::Refused(InspectRefusal::NotAPicture).passing());
 }
+
+#[test]
+fn a_report_this_side_has_no_memory_for_is_refused_as_that() {
+    let picture = png();
+    crate::testing::swept::<ImageRenderService, _, _>(
+        |sandbox| {
+            send_document(sandbox, &picture).map_err(InspectFailure::Document)?;
+            inspect_document(sandbox, None)
+        },
+        |failure| match failure {
+            InspectFailure::NoMemory => true,
+            InspectFailure::Sandbox(inner) => crate::testing::this_side(*inner),
+            InspectFailure::Document(inner) => crate::testing::document_refused(*inner),
+            _ => false,
+        },
+    );
+}

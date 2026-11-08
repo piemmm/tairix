@@ -7,7 +7,8 @@
 //! A test binary installs it as its global allocator,
 //! `#[global_allocator] static ALLOC: Metered = Metered;`, and measures with
 //! [`metered`], [`refusing_above`], [`refusing_after`] and
-//! [`refusing_past`]. Every figure is the calling thread's,
+//! [`refusing_past`], or sweeps a refusal through every request a piece of
+//! work makes with [`refused_at_each`]. Every figure is the calling thread's,
 //! so neither the harness's own threads nor tests running beside a
 //! measurement charge it. A block is charged to the thread that frees it, so a
 //! measured call that frees what another thread allocated reads as holding
@@ -108,6 +109,30 @@ pub fn refusing_past<R>(bytes: usize, f: impl FnOnce() -> R) -> R {
     let out = f();
     HOLD_AT_MOST.with(|limit| limit.set(previous));
     out
+}
+
+/// Run `work` with the heap refusing at each of its requests in turn,
+/// asserting that every run either completes or answers an error `refused`
+/// accepts — never an abort, which one allocation that cannot refuse makes of
+/// it — and that nothing a run held outlives its answer.
+///
+/// # Panics
+///
+/// When `work` fails with room to spare, makes no request, answers an error
+/// `refused` rejects, or keeps memory past its answer.
+pub fn refused_at_each<T, E: core::fmt::Debug>(
+    work: impl Fn() -> Result<T, E>,
+    refused: impl Fn(&E) -> bool,
+) {
+    let ((), taken) = metered(|| work().map(drop).expect("made with room to spare"));
+    assert!(taken.allocations > 0, "no request to refuse");
+    for granted in 0..taken.allocations {
+        let (answer, metering) = metered(|| refusing_after(granted, &work).map(drop));
+        if let Err(error) = answer {
+            assert!(refused(&error), "{error:?} at request {granted}");
+        }
+        assert_eq!(metering.retained, 0, "held past request {granted}");
+    }
 }
 
 /// The metered system allocator. Install it as a test binary's

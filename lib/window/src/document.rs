@@ -100,6 +100,8 @@ pub enum PickFor {
     },
     /// Where to write a copy of the document, which the application writes.
     Copy,
+    /// A file to read into the document, which the application reads.
+    Import,
 }
 
 /// A save to carry out: `snapshot`, the document as it was at `generation`,

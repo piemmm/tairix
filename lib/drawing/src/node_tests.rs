@@ -16,6 +16,7 @@ use crate::id::Ids;
 use crate::limits::{MAX_DEPTH, MAX_NAME_BYTES};
 use crate::shape::{RectShape, Shape};
 use crate::style::{Paint, Style};
+use crate::testing::shared;
 use crate::DrawingError;
 
 fn rect(ids: &mut Ids, x: f64, width: f64) -> Node {
@@ -118,18 +119,18 @@ fn nesting_past_the_bound_is_refused() {
 fn names_opacities_and_transforms_are_checked() {
     let mut ids = Ids::new();
     let node = rect(&mut ids, 0.0, 1.0);
-    assert!(node.with_name(Some(Arc::from("Sun"))).is_ok());
+    assert!(node.with_name(Some(shared("Sun"))).is_ok());
     assert_eq!(
-        node.with_name(Some(Arc::from(""))).err(),
+        node.with_name(Some(shared(""))).err(),
         Some(DrawingError::Invalid)
     );
     assert_eq!(
-        node.with_name(Some(Arc::from("a\u{1}b"))).err(),
+        node.with_name(Some(shared("a\u{1}b"))).err(),
         Some(DrawingError::Invalid)
     );
     let long: alloc::string::String = core::iter::repeat_n('x', MAX_NAME_BYTES + 1).collect();
     assert_eq!(
-        node.with_name(Some(Arc::from(long))).err(),
+        node.with_name(Some(shared(&long))).err(),
         Some(DrawingError::TooComplex)
     );
     assert_eq!(node.with_opacity(1.5).err(), Some(DrawingError::Invalid));

@@ -66,8 +66,9 @@ UTF-8 and control bytes round-trip exactly.
   reply is held to the report's bounds before a line is believed; the hex rows
   are the document's own bytes. It is read-only and scrolls as Code does; a
   report refused for want of memory or of a worker is asked again when Data is
-  shown afresh, and a document past what its worker takes (`MAX_DOCUMENT_BYTES`
-  for a picture, `MAX_INPUT` for a manifest) is refused without asking.
+  shown afresh, and a document past what its worker takes (its launcher's
+  `document_room` for a picture, `MAX_INPUT` for a manifest) is refused
+  without handing it over.
 - **Format**, orthogonal to the mode: the colouring and checking the text
   view applies (`tairix-syntax`, [its page](../lib/syntax.md)). It comes from
   the file name, then from the head (asked of the sandbox), and a format the

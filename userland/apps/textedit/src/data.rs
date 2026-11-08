@@ -22,7 +22,7 @@ use tairix_binfmt::Format;
 use tairix_browse::{media_for_document, MediaType};
 use tairix_sandbox::decode::{self, MAX_INPUT};
 use tairix_sandbox::imageinspect::InspectFailure;
-use tairix_sandbox::imagerender::{ViewFormat, MAX_DOCUMENT_BYTES};
+use tairix_sandbox::imagerender::ViewFormat;
 use tairix_sandbox::{Launcher, ParserSandbox};
 use tairix_util::hexdump::BYTES_PER_ROW;
 use tairix_util::report::ReportLine;
@@ -50,18 +50,15 @@ impl Structure {
         }
     }
 
-    /// The document is past what one report may read.
+    /// The document is longer than `limit` bytes, what one report may read.
     #[must_use]
-    pub fn too_large(self) -> Unlisted {
-        let (what, limit) = match self {
-            Self::Picture(_) => ("a picture", MAX_DOCUMENT_BYTES),
-            Self::Manifest => ("a manifest", MAX_INPUT),
+    pub fn too_large(self, limit: u64) -> Unlisted {
+        let what = match self {
+            Self::Picture(_) => "a picture",
+            Self::Manifest => "a manifest",
         };
         Unlisted {
-            reason: alloc::format!(
-                "too large to read as {what}: over {} MiB",
-                limit / (1024 * 1024)
-            ),
+            reason: alloc::format!("too large to read as {what}: over {} MiB", limit >> 20),
             lasting: true,
         }
     }
@@ -282,7 +279,7 @@ pub fn report_manifest<L: Launcher, S: tairix_log::Sink>(
     bytes: &[u8],
 ) -> Result<Vec<ReportLine>, Unlisted> {
     if bytes.len() > MAX_INPUT {
-        return Err(Structure::Manifest.too_large());
+        return Err(Structure::Manifest.too_large(MAX_INPUT as u64));
     }
     decode::file_report(sandbox, bytes).map_err(Unlisted::of)
 }

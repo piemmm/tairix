@@ -2830,10 +2830,12 @@ it is made in. What a later item needs to know:
   reason stated.
 - **The window.** The icon-bar slot's menu reads *Info*, *Settings…*, a rule,
   *Quit* (`appbar`). *Settings…* opens a second window on the same channel
-  and mailbox (`settings::SettingsWindow`): a category strip down its side,
-  with graphics the category there is — key bindings and sound are a row in
-  `Category::ALL` and a pane beside it — a quality chooser, and one detented
-  slider per knob. Moving a slider makes the choice custom from the detail on
+  and mailbox (`settings::SettingsWindow`), the shared settings frame
+  (`lib/controls`' `SettingsFrame`): a category strip down its side, with
+  graphics the category there is — key bindings and sound are a row in
+  `Category::ALL` and a pane beside it — and beside it one column of form
+  groups, a quality chooser and one detented slider per knob, the keyboard in
+  the chooser as it opens. Moving a slider makes the choice custom from the detail on
   screen, so a player can watch what `auto` settled on and pin it by touching
   it; on `auto` the sliders follow the governor. The window's size is fixed
   when it opens, measured for every row at the longest it can be put. A

@@ -46,6 +46,19 @@ Stability tier: **experimental**.
   judges unbelievable contains the worker exactly as a crash is — once,
   however deeply exchanges nest — while a refusal the worker was entitled
   to make leaves it serving.
+  **The parent allocates fallibly; the worker as it needs.** A request is
+  built in a `wire::Writer<Refusable>`, whose first refused reservation makes
+  the whole request refused rather than any part of it sent; a reply is
+  received into room reserved fallibly, and every client decodes it by
+  borrowing (`Reader::str`) and copying fallibly. A refusal of this side's
+  memory is said as that — `SandboxError::OutOfMemory`, or the client's own
+  `NoMemory` — and lets the worker go without blaming it: no crash is logged
+  and none is contained for it. A worker allocates as its work needs, under
+  its kernel ceiling, and a worker that runs out ends with the runtime's
+  out-of-memory exit (`WorkerEnd::OutOfMemory`). Each launcher states the
+  longest document its workers may be handed (`Launcher::document_room`,
+  `ParserSandbox::document_room`), so a longer one is refused here as too
+  large rather than there for want of memory.
 - **`session`** — the **duplex, long-lived** seam beside that one-shot
   pair, for a worker that serves a protocol rather than answering a
   question. Three things differ and each is load-bearing: many frames are
@@ -109,8 +122,10 @@ Stability tier: **experimental**.
   starts; `region_line` a region's kind, extent and permissions; and
   `failure_reason` a refusal in words. A branch target is named by a symbol
   starting at the nearest address at or below it that covers it, so a short
-  alias sharing a function's start cannot hide the function. The `fstree` pane
-  and TextEdit's Code display both list through it.
+  alias sharing a function's start cannot hide the function. Every line is
+  written into a string reserved to its length, fallibly, so a listing the
+  heap will not hold is `None`. The `fstree` pane and TextEdit's Code display
+  both list through it, each saying a refused listing for want of memory.
 - **`helpdoc`** — the sandboxed help-document render: the `HelpService`
   worker parses and renders a foreign bundle's document through
   [`tairix-help`](./help.md), and the client `render_help` re-parses the
@@ -141,7 +156,14 @@ Stability tier: **experimental**.
   drawn; and a document session,
   whose file is streamed in through `upload_document` rather than held whole,
   read straight into one push frame of at most `MAX_DOCUMENT_CHUNK` bytes and
-  no more than the document, and never copied.
+  no more than the document, and never copied. A document is refused before
+  a byte is sent when it is longer than the launcher's `document_room`; the
+  worker reserves it whole, fallibly, and answers
+  `DocumentRefusal::OutOfMemory` where its ceiling will not hold it. A
+  drawing whose lettering the worker has no glyphs for is answered with the
+  faces and scalars it wants; the caller's font seam furnishes them, sent
+  once as a table held to `MAX_FACES` and `MAX_SCALARS` with each face's
+  glyphs ascending by scalar, and the worker draws.
 - **`imageedit`** — an editor's document over the same upload: one picture,
   a TIFF's pages, a sprite area's sprites or an OpenRaster document's layers
   (`EditKind`), each entry at its own depth with the density its file states,
@@ -150,7 +172,9 @@ Stability tier: **experimental**.
   with its name, offset, opacity and visibility (`EditLayer`) over the canvas
   the document declares. Every answer is held by the caller to
   `MAX_EDIT_SIDE`, `MAX_EDIT_PIXELS` and `MAX_EDIT_ENTRIES`, a layer's name to
-  `MAX_LAYER_NAME` and a stack to `MOST_ORA_LAYERS`. `Paint.app` is the
+  `MAX_LAYER_NAME`, a stack to `MOST_ORA_LAYERS`, and a kept sprite to the
+  length of the document handed over (`open_edit`'s `handed`,
+  `EditDocument::length`), since it is part of it. `Paint.app` is the
   consumer, and reads each document through a fresh worker
   (`ParserSandbox::release`).
 - **`imageinspect`** — a picture's structure report over the same upload: the
@@ -158,22 +182,46 @@ Stability tier: **experimental**.
   answered as lines the caller holds to `MAX_REPORT_LINES`, `MAX_LINE_BYTES`
   and printable UTF-8 — the one report reply every report op shares, as
   `decode`'s `file_report` does. The image worker serves it beside its other ops, and
-  `InspectService` alone, in a worker held to one document. `TextEdit.app`'s
+  `InspectService` alone, in a document worker. `TextEdit.app`'s
   Data display is the consumer.
 - **`drawedit`** — a drawing editor's documents read into the editable
   drawing (`tairix-drawing`, [`docs`](./drawing.md)) over the same upload.
-  `read_drawing` asks the worker to read the document as SVG; the worker
-  answers the page, grid, guides, title and what it could not keep, and then
-  the drawing as records a batch at a time — every gradient and style once,
-  referred to by number, then the tree depth first, a group's clip before its
-  children, a long path's nodes cut across records so every record fits a
-  frame. The editor rebuilds the drawing as the records arrive, with an
-  explicit stack, every value through the drawing's own constructors; a
-  reference to a definition not sent, a count past the drawing's bounds, a
-  group given more or fewer children than it declared, a batch that brings
-  nothing, or a record with bytes left over is not believed.
+  `read_drawing` asks the worker to read the document, which it reads as a
+  RISC OS Draw file or as SVG by its content (`tairix_drawing::read`), never
+  by a name the editor could be wrong about; the worker answers the page,
+  grid, guides, title, what it could not keep and how many pictures the
+  drawing shows. The pictures come next, each once however many objects show
+  it: its size and what the bytes it was read from state, then its
+  premultiplied pixels and those bytes as many as a frame holds at a time —
+  every chunk but the last a full frame, so a picture comes in as few
+  exchanges as its size allows — each channel held to its pixel's alpha as
+  it lands. Together the pictures
+  of one read hold no more pixels than a drawing's may and no more bytes
+  than the document handed over (`read_drawing`'s `handed`), since every
+  picture's bytes are part of it. Then the drawing as records a batch at a time —
+  every gradient and style once, referred to by number, then the tree depth
+  first, a group's clip before its children, a picture by its number, a long
+  path's nodes cut across records so every record fits a frame, and a text
+  whole in one record — its baseline's origin or its path of at most
+  `MAX_TEXT_PATH_NODES` nodes, and its runs, each the span and the overrides
+  its mask names — the text's own check holding them to their form. The editor
+  rebuilds the drawing as the records arrive, with an explicit stack, every
+  value through the drawing's own constructors and every picture's levels
+  built on its own side; a reference to a definition or picture not sent, a
+  count past the drawing's bounds, a group given more or fewer children than
+  it declared, a batch that brings nothing, or a record with bytes left over
+  is not believed; a record that fails for want of the editor's memory is
+  answered as that, never as a reply that cannot be believed, so an honest
+  worker is not condemned for it. `read_placed` decodes the document handed over as a
+  picture to place instead — any still picture `tairix_image` reads, by its
+  content (`tairix_drawing::decode_placed`), the first page or sprite of a
+  file of several — and the worker answers the size its pixels span, held to
+  the drawing's coordinates, before the picture comes across as a drawing's
+  does, kept with its bytes only as a PNG or a JPEG; what is no picture is
+  `DrawRefusal::NotAPicture`.
   `DrawEditService` serves it in a worker held to `WorkerMemory::Documents`.
-  `Draw.app` is the consumer, for opened documents and pasted drawings.
+  `Draw.app` is the consumer, for opened documents, pasted drawings and
+  placed pictures.
 - **`audiodecode`** — a sound file decoded through
   [`tairix-sound`](./sound.md) by a long-lived worker over a supervised
   session. The owner hands over the file's length, never the file: the
@@ -267,8 +315,15 @@ Stability tier: **experimental**.
   worker parses (`WorkerMemory`), and the worker is spawned under that kind's
   `AddressSpaceBytes` ceiling, its stack included, on one thread: a message parser its two frames
   and a baseline, a document decoder a quarter of the machine's RAM and never
-  less than a whole document beside them, and an icon and thumbnail decoder a
-  whole document and the most a thumbnail's decode may cost, on any machine. A
+  less than `DOCUMENT_FLOOR_BYTES` (64 MiB) of document beside them, and an icon
+  and thumbnail decoder that floor of document and the most a thumbnail's
+  decode may cost, on any machine. The document a worker may be handed is what
+  its ceiling leaves beside its frames and, for an artwork decoder, its
+  thumbnail (`WorkerMemory::document_bytes`, `rt::document_room`, and the
+  launcher's `document_room`): a document grows with the machine, and none is
+  refused for a figure fixed below what the worker could hold. An
+  `RtLauncher` reads the machine's RAM once, so the ceiling its workers run
+  under and the document they are handed are always one share. A
   program pooling artwork decoders runs as many as fit in one document
   decoder's share and never fewer than one (`WorkerMemory::pooled`), so a pool
   of more than one leaves the machine what one decoder would; below 512 MiB of
@@ -331,3 +386,12 @@ state it can be in, the send step for a frame queued, none waiting and no
 worker to take it, and the pipe model for a pipe's room a write and a read of
 an empty pipe counted; the engine, the tag reader and the cue authority each
 run over it.
+
+Every client is held to fallibility by an allocation sweep: its whole
+exchange is run with this side's heap refused at each of its requests in
+turn (`tairix_fuzzseed::meter::refused_at_each`), and every run must complete
+or be refused as want of this side's memory, holding nothing past its answer.
+A request/reply client's worker runs on a thread of its own
+(`testing::swept`), whose allocations the per-thread meter never refuses; a
+session client replays the frames a real worker sent once
+(`testing::Recorder`, `Replay`), so no worker allocates beside it.

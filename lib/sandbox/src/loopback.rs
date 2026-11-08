@@ -67,12 +67,24 @@ impl<S: Service, F: FnMut() -> S> ServiceFactory for F {
 /// [`Launcher`] whose workers are in-process services.
 pub struct LoopbackLauncher<F: ServiceFactory> {
     factory: F,
+    room: u64,
 }
 
 impl<F: ServiceFactory> LoopbackLauncher<F> {
-    /// Build the launcher over the service factory.
+    /// Build the launcher over the service factory. Its workers share this
+    /// process's heap, so no share bounds the document one is handed.
     pub fn new(factory: F) -> Self {
-        Self { factory }
+        Self {
+            factory,
+            room: u64::MAX,
+        }
+    }
+
+    /// The same launcher, its workers handed documents of at most `room`
+    /// bytes, as a worker held to a share of its own is.
+    #[must_use]
+    pub fn holding(self, room: u64) -> Self {
+        Self { room, ..self }
     }
 }
 
@@ -91,6 +103,10 @@ impl<F: ServiceFactory> Launcher for LoopbackLauncher<F> {
     fn dispose(&mut self, _channel: Self::Channel) -> Option<i32> {
         // An in-process worker has no process to reap and no exit code.
         None
+    }
+
+    fn document_room(&self) -> u64 {
+        self.room
     }
 }
 

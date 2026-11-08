@@ -278,6 +278,9 @@ pub enum PickAccess {
     /// read-write where its signed manifest edits documents and the user may
     /// write the file, read-only otherwise.
     Read,
+    /// An existing file read into a document, opened read-only whatever its
+    /// requester's manifest says.
+    Import,
     /// A new file, to write.
     Create,
     /// The existing file the user agreed to replace, to write.
@@ -293,7 +296,7 @@ impl PickAccess {
     #[must_use]
     pub const fn save_flags(self) -> Option<OpenFlags> {
         match self {
-            Self::Read | Self::Folder => None,
+            Self::Read | Self::Import | Self::Folder => None,
             // Refusing a name that exists is what keeps an unconfirmed save
             // from overwriting a file, and a link planted in its place from
             // redirecting the write.
@@ -312,6 +315,14 @@ impl PickAccess {
                     .union(OpenFlags::NO_FOLLOW),
             ),
         }
+    }
+
+    /// Whether an existing file chosen is opened writable, for a requester
+    /// whose manifest edits documents where `requester_edits`: a document it
+    /// opens, never a file it reads into one.
+    #[must_use]
+    pub const fn opens_to_edit(self, requester_edits: bool) -> bool {
+        matches!(self, Self::Read) && requester_edits
     }
 }
 
@@ -724,6 +735,8 @@ struct Pick<S: DirectorySource> {
     save: Option<SaveBand>,
     /// The folder band, for a pick choosing a folder.
     folder: Option<FolderBand>,
+    /// How a file it chooses is opened.
+    reading: PickAccess,
     /// The open asked for and not yet answered; input waits while it is.
     waiting: Option<Waiting>,
     /// How far its [`PICKER_SHOWN`] announcement has come.
@@ -1474,7 +1487,7 @@ impl<S: DirectorySource, F: PickSources<S>> SessionPicker<S, F> {
         // where the last one went, climbing to what is still there.
         let mut at = match purpose {
             PickPurpose::Save { .. } => self.shared.last_saved.clone(),
-            PickPurpose::Open | PickPurpose::Folder => None,
+            PickPurpose::Open | PickPurpose::Import | PickPurpose::Folder => None,
         }
         .unwrap_or_else(|| self.shared.start.clone());
         let browser = loop {
@@ -1488,7 +1501,7 @@ impl<S: DirectorySource, F: PickSources<S>> SessionPicker<S, F> {
             }
         };
         let mut save = match purpose {
-            PickPurpose::Open | PickPurpose::Folder => None,
+            PickPurpose::Open | PickPurpose::Import | PickPurpose::Folder => None,
             PickPurpose::Save { suggested, formats } => {
                 Some(SaveBand::new(suggested.as_str(), formats))
             }
@@ -1537,6 +1550,12 @@ impl<S: DirectorySource, F: PickSources<S>> SessionPicker<S, F> {
                 browser,
                 save,
                 folder,
+                reading: match purpose {
+                    PickPurpose::Import => PickAccess::Import,
+                    PickPurpose::Open | PickPurpose::Folder | PickPurpose::Save { .. } => {
+                        PickAccess::Read
+                    }
+                },
                 waiting: None,
                 announced: Announced::Unseen,
                 lost,
@@ -3060,7 +3079,7 @@ impl<S: DirectorySource> Pick<S> {
             }
             NavOutcome::Chosen(name) => self.request(
                 name,
-                (PickAccess::Read, Typing::default()),
+                (self.reading, Typing::default()),
                 cx,
                 shell,
                 compositor,

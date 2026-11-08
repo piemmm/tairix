@@ -41,12 +41,14 @@ Every control and every piece of window furniture named in this specification �
 buttons (Button, IconButton, SplitButton), boolean selectors (Toggle, Checkbox,
 Radio), value controls (Slider, Progress, Chart), text entry (TextField, SearchField,
 TextArea, NumberField), choice entry (ComboBox, PictureChoice, SwatchGrid,
-ColourPicker, PlaceChooser), navigation and command surfaces (Menu, MenuItem,
+ColourPicker, ColourField, PlaceChooser), navigation and command surfaces (Menu, MenuItem,
 Toolbar, Tabs, Breadcrumb, ActionRail), collection controls (ListRow, TableRow,
 TableCell, TableHeader, Card, Panel, MetricTile, StatusPill), record lists
 (FactList, Timeline), decision surfaces
 (Dialog, Tooltip, HelpTip), shell surfaces
-(Notification, TaskbarItem, TraySignal), and the window-manager furniture (WindowFrame,
+(Notification, TaskbarItem, TraySignal), window chrome an application lays out
+(StatusBand, Ruler, the FieldColumn and the SettingsFrame), and the
+window-manager furniture (WindowFrame,
 TitleBar, the WindowControl set — Close, Minimize, PutToBack, SizeToggle — the
 ResizeGrabber, the ScrollBar in both orientations, and the ScrollCorner) — is a
 **first-class control**. Each MUST be **fully implemented**: not stubbed, not a
@@ -2182,6 +2184,16 @@ a `FieldGroup` is the captioned plate its rows sit on.
   alone. A pointer crossing a row reports nothing of the row's; the slot's
   control reports its own look as the pointer enters and leaves it, and the
   motion that leaves it still reaches it so that look goes with the pointer.
+- **A number or colour slot settles as the keyboard leaves it.** A
+  `NumberField` slot (§11.45) or a `ColourField` slot (§11.50) reports its
+  typing live and its settle as the field does, and when the keyboard moves off
+  its row — a key, a press on another row, or the owner moving it to another
+  group — the group commits it, holding typing past a bound to it, and answers
+  that settle, so the durable change is never lost to a move. The group's cursor keeps Up and Down, so in a form the field
+  steps by the wheel and by Page Up and Page Down; Home and End reach its
+  caret. A press that moves the keyboard still reaches the control it lands
+  on, and that control's own answer to that one event — live, or opening a
+  list — yields to the settle.
 - **A group may hold a picture choice beneath its rows** (§11.43), a setting
   too visual for a list. It is the group's item after its last row: the
   keyboard reaches it with Down from that row and leaves it with Up from its
@@ -2430,6 +2442,103 @@ not the chooser's business.
   rewritten in one pass (`set_readings`) as each minute turns. Settings' Time
   zone row and the Date & Time dialog both open it owner-modal, Settings with
   *This machine's zone* as its first row.
+
+### 11.48 StatusBand
+
+A window's status band is one line along its foot: readings in slots each as
+wide as the most it ever reads, and a message in the room between. Every
+application's band is this one, so the bands of two windows read alike.
+
+- **Its height is a line of the caption face and a control gap above and
+  below**, at the window's scale, so it follows the theme's type and the DPI
+  scale rather than a pixel count.
+- **Slots are measured from their widest reading** (`slot_width`) — a zoom
+  ladder's widest rung, a position at the largest coordinates the window
+  shows — so the band never shifts as a reading changes. Leading slots are cut
+  from the band's start and trailing ones from its end, the first of each
+  outermost, inside a gap at either end; the message takes what is left, and a
+  band too narrow for its slots gives the trailing ones their room first.
+- **Text is set on the band's one line at its slot's leading edge, elided** with
+  the shared mark where the slot is too narrow, so a message can never run
+  under a reading beside it.
+- **Tone, not colour, is the owner's word** (`StatusTone`): ink for what the
+  band reports, muted for what stands in when there is nothing to report, and
+  success, warning and danger for a check's verdict.
+- **Where a reading answers a press** — a zoom that opens the zoom menu, a
+  field that opens a format menu — the owner hit-tests the slot the band gave
+  it; the band itself takes no input.
+
+### 11.49 Ruler
+
+A ruler measures a view along one edge: a tick across it at every multiple of
+one step, and the figure there.
+
+- **The step is the least of 1, 2 or 5 times a power of ten units** whose
+  figures stand at least sixty logical pixels apart at the view's scale of
+  device pixels to units.
+- **A figure is spelt with exactly the decimals its step needs**, trailing zeros
+  dropped and zero never signed, so no two figures read alike however far the
+  view is zoomed.
+- **A ruler draws a count of figures bounded by its own length**, however far
+  the view has scrolled, and a figure wider than a ruler down a view's side is
+  cut at its edge rather than drawn over the view.
+- **The owner names the scale and where the view's zero falls** along the
+  ruler; the ruler draws its plate, ticks and figures in the muted ink, and
+  takes no input — dragging a guide out of it is the owner's.
+
+### 11.50 ColourField
+
+A colour field is a form's colour setting: the colour, and its hexadecimal
+spelling, in one slot.
+
+- **A swatch and an entry.** The swatch is drawn exactly as the picker's
+  swatch is (§11.46) — the colour over a checker where it is translucent,
+  ringed, veiled when disabled — at the field's leading edge, as tall as the
+  entry beside it.
+- **Typing is live where it spells a colour.** `#` is optional; three or six
+  digits spell an opaque colour, and four or eight a translucent one in a field
+  holding an opacity. Anything else shows as invalid and moves nothing, and a
+  field holding no opacity refuses an alpha and drops one it is given.
+- **It settles as a number field does** (§11.45): Enter, the keyboard leaving
+  the row, and Escape taking typing back since the last settle; typing that
+  reads as no colour when committed shows the colour last held again.
+
+### 11.51 FieldColumn
+
+A column of form groups (§11.41) and the routing that carries the reader
+between them — the one every surface stacking groups shares.
+
+- **One plate column, one slot column.** The groups are placed by the shared
+  plate column and lined up on the widest slot column any of them resolves.
+- **An open list is modal across the column**, and is placed inside the client
+  the owner names.
+- **The cursor crosses plates.** Up or Down a group has nowhere further to
+  take carries the cursor into its neighbour; a primary press gives it to the
+  row pressed, off whichever group held it.
+- **A row the cursor leaves settles, wherever it goes** — another row,
+  another plate, or out of the column — and the settle is answered.
+- **The owner keeps the cursor in view** from `cursor_reveal`, and rebuilt
+  groups keep the cursor where it was.
+
+### 11.52 SettingsFrame
+
+An application's settings window: its categories down a sidebar, the chosen
+one beside it as a FieldColumn, and a footer of commands — *Restore defaults*
+— with a line saying what the store last refused.
+
+- **The frame holds no setting.** It reports a category chosen, a row's
+  action, a command and a close; the owner builds each category's groups from
+  its own record and shows them, which is what moves the sidebar — so a row
+  the same press settled is still of the category on show.
+- **Three regions take the keyboard**: Tab and Shift+Tab walk the sidebar, the
+  column and each command round; a press gives the keyboard to the region it
+  lands in; Escape with nothing to take back asks to close.
+- **The column scrolls when it outgrows the window**, by the wheel, its
+  scrollbar — a held arrow stepping on the frame's own deadline — and the
+  keyboard cursor, kept in view. The window is never laid out shorter than its
+  sidebar, so the categories never scroll.
+- **What the store refused is said in the footer**, in the danger tone, beside
+  the commands.
 
 ---
 
@@ -2835,6 +2944,12 @@ A control or control family is ready when the following are true:
 - TableHeader tests cover a header and its rows resolving identical column spans across a row-state change, a reported sort never reordering or redrawing until `set_sort` commits one, a committed sort that differs from the request being what is drawn, an already-sorted column flipping order, a fixed column emitting nothing, and a denied column keeping its title and its layout.
 - Text-fitting tests (§11A) cover a newline forcing a break and a blank line between paragraphs surviving, a paragraph's last permitted line ending at its own break rather than running the next one into it, no laid-out line ever drawing a newline or overflowing its column, a wrapped line locating itself in the caller's own string, and a prose control's measured height at a width being exactly what its paint then draws.
 - PlaceChooser tests cover a query matching without case or accent, by the place beneath and by the unseen key, names that begin with it leading, the highlight kept where it still shows and moving to the first match where it does not, a query matching nothing still editing, the arrows and Page keys stopping at either end, Enter choosing and Escape clearing before it cancels, a click highlighting and a second within the interval choosing while a press on the search field breaks the pair, the wheel scrolling and a highlight opened with brought into view, a reading reporting only a change of a row that shows, a hover reporting only its two rows, and every theme drawing a list and the no-match line.
+- Form number-slot tests cover the slot measuring its field's own width, typing reported live with End reaching the caret, a page step settling, and the keyboard leaving by a key or by a press on another row settling it with typing past a bound held to the bound, while a row that is not a number settles nothing.
+- ColourField tests cover its spelling with and without an opacity, a spelling typed live and settled once in its canonical form, an unreadable spelling moving nothing until committed back, Escape taking typing back before it leaves Escape to the owner, a refused character, alpha or paste, the swatch showing the colour and a checker beneath a translucent one, and a colour row settling as the keyboard leaves it.
+- FieldColumn tests cover the groups on one slot column at their measured heights, the cursor crossing plates and clamping at the column's ends, a number row the cursor leaves for another plate by a key or a press settling, leaving the column settling and taking the ring, an open list being modal across the column, rebuilt groups keeping the cursor, and the cursor revealed with its plate where that fits and alone where it does not.
+- SettingsFrame tests cover the column beside the sidebar over the footer gaining a bar when tall, a category chosen being asked for and marked only when shown, a row settled by the same press still of the category on show, Tab walking the regions with a typed number settling as it leaves, Escape taking typing back before it closes, a command clicked, the wheel scrolling a tall column and the cursor kept in view, a held scroll arrow stepping on its own deadline, the note said in the footer, and an open list keeping the pointer from the sidebar.
+- StatusBand tests cover its height following the face, the gap and the scale, slots cut from either edge with the message taking the rest and the trailing slots served first in a cramped band, the plate, every tone, and a message elided short of the slot beside it.
+- Ruler tests cover the step being the least of 1, 2 and 5 that reads at every scale, a step finer than a hundredth spelt to its own place, figures unsigned at zero, a tick at every step from the view's zero, a ruler scrolled far out drawing only what its length holds, and a ruler down the side keeping its figures inside it.
 - TextArea tests cover the wrap itself, Enter inserting a newline and never submitting, read-only and denied boxes refusing every edit, Up and Down walking visual lines and keeping their column, Home/End on the visual line against Ctrl+Home/Ctrl+End on the text, a selection spanning a break being replaced whole, a click landing on the line it fell on and clamping to that line's visible text, the viewport following the caret while the wheel moves it alone, the scrollbar appearing exactly when the text outgrows the box, a wrapped placeholder and a wrapped message, and the render-equivalence gate comparing the viewport but not the goal column.
 
 ---

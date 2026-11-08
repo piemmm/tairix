@@ -14,7 +14,7 @@ use tairix_abi::Errno;
 ///
 /// `request` is a [`SysinfoRequestHeader`](tairix_abi::sysinfo::SysinfoRequestHeader)
 /// followed by the query's typed payload, already encoded little-endian
-/// (build it with [`encode_request`](crate::encode_request)). The returned
+/// ([`call`](crate::call) frames it). The returned
 /// bytes are the service's reply exactly as `sysinfod` produced them: packed
 /// [`ProcessRecord`](tairix_abi::sysinfo::ProcessRecord)s, a scalar struct's
 /// wire image, or the hardware-tree bytes. The transport

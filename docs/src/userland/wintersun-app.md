@@ -264,9 +264,10 @@ knobs only while the choice is custom.
 ## The settings window
 
 The icon-bar slot's menu reads *Info*, *Settings…*, a rule, then *Quit*.
-*Settings…* opens a second window on the same channel and event mailbox, with
-a category strip down its side — graphics is the category there is — and every
-control a shared one. The quality chooser picks the mode; one detented slider
+*Settings…* opens a second window on the same channel and event mailbox: the
+shared settings frame (`lib/controls`' `SettingsFrame`), a category strip down
+its side — graphics is the category there is — beside the quality and the
+knobs as one column of form groups, and every control a shared one. The quality chooser picks the mode; one detented slider
 per knob sets it, plainest at the left, and moving any of them makes the
 choice custom, starting from the detail on screen, so a player can watch what
 `auto` settled on and pin it by touching it. On `auto` the sliders follow the

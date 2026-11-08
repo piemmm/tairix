@@ -95,6 +95,73 @@ pub fn parse_length_in(text: &str, lengths: Lengths) -> Result<f64, SvgError> {
     }
 }
 
+/// How far an element raises its glyphs from its parent's baseline, as
+/// computed: a length, or a keyword its parent's size answers.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum BaselineShift {
+    /// By a length in user units; negative lowers.
+    Length(f64),
+    /// By ems of the element's own font size; negative lowers.
+    Ems(f64),
+    /// To the subscript position: a fifth of the parent's size down, CSS's
+    /// fallback where no font metric is consulted.
+    Sub,
+    /// To the superscript position: a third of the parent's size up.
+    Super,
+}
+
+impl Default for BaselineShift {
+    fn default() -> Self {
+        Self::Length(0.0)
+    }
+}
+
+impl BaselineShift {
+    /// The rise in user units of an element set at `font_size` within one
+    /// set at `parent_font_size`.
+    #[must_use]
+    pub fn rise(self, parent_font_size: f64, font_size: f64) -> f64 {
+        match self {
+            Self::Length(length) => length,
+            Self::Ems(ems) => ems * font_size,
+            Self::Sub => -parent_font_size / 5.0,
+            Self::Super => parent_font_size / 3.0,
+        }
+    }
+}
+
+/// The line height a percentage `baseline-shift` measures, in ems: CSS's
+/// `normal`, since no `line-height` reaches SVG text.
+const NORMAL_LINE_HEIGHT: f64 = 1.2;
+
+/// Parse a `baseline-shift` value.
+fn parse_baseline_shift(value: &str) -> Result<BaselineShift, SvgError> {
+    let value = value.trim();
+    let ems = |number: &str, per_em: f64| parse_number(number).map(|ems| ems * per_em);
+    let shift = match value {
+        "baseline" => BaselineShift::Length(0.0),
+        "sub" => BaselineShift::Sub,
+        "super" => BaselineShift::Super,
+        _ => {
+            if let Some(percent) = value.strip_suffix('%') {
+                BaselineShift::Ems(ems(percent, NORMAL_LINE_HEIGHT / 100.0)?)
+            } else if let Some(number) = value.strip_suffix("em") {
+                BaselineShift::Ems(ems(number, 1.0)?)
+            } else if let Some(number) = value.strip_suffix("ex") {
+                BaselineShift::Ems(ems(number, EX_PER_EM)?)
+            } else {
+                BaselineShift::Length(parse_length(value, 0.0)?)
+            }
+        }
+    };
+    match shift {
+        BaselineShift::Length(amount) | BaselineShift::Ems(amount) if !amount.is_finite() => {
+            Err(SvgError::InvalidNumber)
+        }
+        shift => Ok(shift),
+    }
+}
+
 /// Where a chunk of text sits relative to the position that placed it.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum TextAnchor {
@@ -260,6 +327,9 @@ pub struct Style {
     pub word_spacing: f64,
     /// Where a chunk sits relative to the position that placed it.
     pub text_anchor: TextAnchor,
+    /// How far this element raises its glyphs from its parent's baseline.
+    /// Not inherited: a child's shift adds to its parent's.
+    pub baseline_shift: BaselineShift,
 }
 
 impl Default for Style {
@@ -294,6 +364,7 @@ impl Default for Style {
             letter_spacing: 0.0,
             word_spacing: 0.0,
             text_anchor: TextAnchor::Start,
+            baseline_shift: BaselineShift::default(),
         }
     }
 }
@@ -311,6 +382,7 @@ impl Style {
             mask_kind: MaskKind::Luminance,
             non_scaling_stroke: false,
             display: true,
+            baseline_shift: BaselineShift::default(),
             ..self.clone()
         }
     }
@@ -481,6 +553,7 @@ impl Style {
             "letter-spacing" => self.letter_spacing = parse_spacing(value, lengths)?,
             "word-spacing" => self.word_spacing = parse_spacing(value, lengths)?,
             "text-anchor" => self.text_anchor = parse_text_anchor(value)?,
+            "baseline-shift" => self.baseline_shift = parse_baseline_shift(value)?,
             _ => {}
         }
         Ok(())

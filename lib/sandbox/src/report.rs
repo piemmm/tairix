@@ -5,7 +5,6 @@
 //! line are held to the report's own bounds, and a line that is not printable
 //! text refuses the whole reply.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_util::report::{ReportLine, MAX_LINE_BYTES, MAX_REPORT_LINES};
@@ -52,10 +51,8 @@ pub(crate) fn read_lines(r: &mut Reader<'_>) -> Result<Vec<ReportLine>, LinesFau
         if text.chars().any(char::is_control) {
             return Err(LinesFault::Malformed);
         }
-        lines.push(ReportLine {
-            text: String::from(text),
-            heading,
-        });
+        let text = tairix_util::fallible::concatenated(&[text]).ok_or(LinesFault::NoMemory)?;
+        lines.push(ReportLine { text, heading });
     }
     Ok(lines)
 }

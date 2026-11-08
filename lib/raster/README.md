@@ -14,7 +14,9 @@ This crate owns:
 - `Color` / `Pixel` — a straight-alpha authored colour and its
   **premultiplied-alpha** pixel, with the `div255` rounded divide, the
   Porter–Duff `over` operator, `scale_alpha`, and `premultiply` /
-  `unpremultiply`. The compositor works exclusively in premultiplied alpha,
+  `unpremultiply`, with `unpremultiply_span` taking a run of pixels to the
+  straight bytes an encoder or a clipboard takes. The compositor works
+  exclusively in premultiplied alpha,
   which keeps per-region opacity and rounded-corner coverage correct
   (`AGENTS.md` §10).
 - `Surface` — a dense row-major premultiplied pixel buffer with bounds-checked
@@ -69,7 +71,8 @@ This crate owns:
   over a 128×128 surface, against 0.3 ms sorting four sample rows per pixel
   row and 409 ms probing every edge for every sub-sample.
 - `Surface::draw_artwork` — draw a whole `artwork` tree: filled `Coat`s
-  bottom first, and a `Group` wherever a clip, a mask, or a group opacity
+  bottom first, pictures (`Node::Image`) where they fall among them, and a
+  `Group` wherever a clip, a mask, or a group opacity
   composites a subtree as a unit. Those three are one mechanism rather than
   three, because each asks for a subtree to be rendered into its own buffer
   and then weakened by a per-pixel factor — a clip is a `Mask` read as
@@ -390,7 +393,30 @@ This crate owns:
   transformed blit: each destination pixel it can touch maps its centre back
   and samples the source bilinearly in premultiplied space, everything outside
   the source transparent, so a turned edge anti-aliases against what lies
-  beneath it. A transform that collapses area draws nothing.
+  beneath it. A transform that collapses area draws nothing. The source is
+  any `Picture`: a `Surface`, or a `Mosaic` of equal power-of-two square tiles,
+  some absent, sampled across their seams as the one picture they make — a
+  tiled view's cache drawn scaled. A transform that only scales and moves
+  works each column's and row's sampling position out once and reads each
+  source row a run at a time, the same samples to the bit as the general
+  path, about four times faster; both lay their runs with `blend_span`.
+- `Surface::blit_framed` — the same walk covering exactly the source's
+  rectangle: it samples no further out than the edge pixels, so a picture
+  magnified keeps its edge colour, and weighs each destination pixel by how
+  far the rectangle's edges lie from its centre along each axis — exactly the
+  share of it the rectangle covers where the picture stands upright — so the
+  edge is anti-aliased once and never against the picture's own outside. The
+  scaled and the general paths stay the same bits. It is how a picture placed
+  in a document is drawn.
+- `Pyramid` — a picture and each halving of it, rounded up, down to a pixel,
+  each reduced from the one above by the shared area-average filter; the
+  levels below take a third of the picture's memory again. `level_for` picks
+  the smallest level whose pixels are at least half a destination pixel, so
+  bilinear samples a destination pixel apart weigh every pixel and a picture
+  drawn far smaller is averaged rather than aliased. A `Node::Image` is drawn
+  from the level its narrowest scale calls for, through `blit_framed`, its
+  opacity the blit's strength; the pyramid is shared behind `Arc`, so a tree
+  holding a picture copies it for a pointer.
 - `Surface::blit_faded` — the same walk with each source pixel weakened to a
   strength as it lands, so an opaque source mixes the destination toward it in
   exactly that proportion. One picture dissolving into another is this: the

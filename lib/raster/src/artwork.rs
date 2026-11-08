@@ -25,10 +25,14 @@
 //! [`Surface::draw_artwork`](crate::Surface::draw_artwork) for what drawing
 //! one costs.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+
+use tairix_bezier::Affine;
 
 use crate::color::{Color, Pixel};
 use crate::paint::Paint;
+use crate::pyramid::Pyramid;
 use crate::scan::FillRule;
 
 /// The deepest nesting of composited levels a renderer will descend: a
@@ -94,13 +98,40 @@ impl Layer {
     }
 }
 
-/// One step of a drawing: a filled layer, or a subtree composited as a unit.
+/// One step of a drawing: a filled layer, a picture, or a subtree composited
+/// as a unit.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Node {
     /// Paint one layer over what is already there.
     Fill(Layer),
+    /// Draw a raster picture over what is already there.
+    Image(Image),
     /// Draw a subtree into its own buffer, then composite that buffer.
     Group(Group),
+}
+
+/// A raster picture placed on the design grid, drawn from the level of its
+/// pyramid its narrowest scale calls for ([`Pyramid::level_for`]) and
+/// covering exactly its rectangle
+/// ([`Surface::blit_framed`](crate::Surface::blit_framed)).
+#[derive(Clone, Debug)]
+pub struct Image {
+    /// The picture, at every halving.
+    pub pyramid: Arc<Pyramid>,
+    /// From the picture's pixels onto the design grid.
+    pub transform: Affine,
+    /// How much of it reaches the destination, `0` (none) to `255` (all).
+    pub opacity: u8,
+}
+
+impl PartialEq for Image {
+    /// The same picture drawn the same way: comparing its pixels would cost
+    /// what drawing it does.
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.pyramid, &other.pyramid)
+            && self.transform == other.transform
+            && self.opacity == other.opacity
+    }
 }
 
 /// A subtree composited as a unit, through an opacity and an optional mask.
@@ -185,6 +216,7 @@ fn walk(nodes: &[Node], depth: usize, visit: &mut impl FnMut(&Layer)) {
     for node in nodes {
         match node {
             Node::Fill(layer) => visit(layer),
+            Node::Image(_) => {}
             Node::Group(group) => {
                 walk(&group.children, depth + 1, visit);
                 if let Some(mask) = &group.mask {

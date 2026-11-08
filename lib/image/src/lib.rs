@@ -181,18 +181,19 @@ mod zip;
 
 pub use density::{Density, DensityUnit};
 pub use encode::{
-    encode_bmp, encode_gif, encode_jpeg, encode_png, encode_sprite_area, encode_tiff, EncodeError,
-    GifOptions, JpegOptions, TiffCompression, TiffOptions,
+    encode_bmp, encode_gif, encode_jpeg, encode_png, encode_sprite, encode_sprite_area,
+    encode_tiff, EncodeError, GifOptions, JpegOptions, TiffCompression, TiffOptions,
 };
 pub use ora::{encode_ora, OraDocument, OraLayer, OraLayerSource, MOST_LAYERS as MOST_ORA_LAYERS};
+pub use orientation::Orientation;
 pub use picture::{
     flatten_row, masked_colour, over, IndexDepth, Picture, PictureError, PictureKind,
-    PictureSource, Pixels, Rgba8,
+    PictureSource, Pixels, Rgba8, SurfacePicture,
 };
 pub use sprite::{
-    decode_named, desktop_palette, find_named, opaque_sprite_writes_back, NamedSprite,
-    OpaqueSprite, Sprite, SpriteAreaReader, SpriteEntry, SpriteLayout, SpriteMode, SpriteName,
-    SpritePalette, SPRITE_HEADER_LEN,
+    decode_named, decode_sprite, desktop_palette, find_named, opaque_sprite_writes_back,
+    LoneSprite, NamedSprite, OpaqueSprite, Sprite, SpriteAreaReader, SpriteEntry, SpriteLayout,
+    SpriteMode, SpriteName, SpritePalette, MAX_EIG as MAX_SPRITE_EIG, SPRITE_HEADER_LEN,
 };
 pub use sprite_encode::SpriteInput;
 
@@ -1148,6 +1149,14 @@ impl DecodeLimits {
     }
 }
 
+/// The bytes a progressive 4:2:0 JPEG's coefficient store takes per pixel of
+/// its frame: one and a half samples a pixel, two bytes a coefficient.
+///
+/// A caller bounding [`DecodeLimits::max_progressive_coefficient_bytes`] by
+/// its pixel bound takes this ratio, which admits the store of a 4:2:0 frame
+/// as large as that bound and a 4:4:4 frame half as large.
+pub const PROGRESSIVE_420_BYTES_PER_PIXEL: u64 = 3;
+
 /// A decoded raster image: a row-major, 4-byte-per-pixel, **straight**
 /// (non-premultiplied) alpha RGBA8 pixel buffer.
 ///
@@ -1470,6 +1479,34 @@ impl FitBox {
             u32::try_from(down.min(height)).unwrap_or(u32::MAX),
         )
     }
+}
+
+/// What a JPEG's frame states that a format embedding its bytes unchanged
+/// must say of them: the raster as stored, before its orientation turns it
+/// into the picture [`decode`] answers.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct JpegFrame {
+    /// The stored raster's width and height, in pixels.
+    pub stored: (u32, u32),
+    /// Its colour components: one for grey, three for colour.
+    pub components: u8,
+    /// Whether the frame is progressive.
+    pub progressive: bool,
+    /// How the stored raster is turned into the picture.
+    pub orientation: Orientation,
+    /// The density its JFIF header states, where it states one, across and
+    /// down the raster as stored.
+    pub density: Option<Density>,
+}
+
+/// What `bytes`, a JPEG, states of its frame, from the segments up to and
+/// including its frame header, refused exactly as a decode refuses them.
+///
+/// # Errors
+///
+/// Whichever header refusal a decode raises.
+pub fn jpeg_frame(bytes: &[u8]) -> Result<JpegFrame, DecodeError> {
+    jpeg::frame(bytes)
 }
 
 /// Decode `bytes` into a [`RasterImage`] at its natural (full) size,

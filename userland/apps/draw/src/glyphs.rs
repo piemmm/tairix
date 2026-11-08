@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use tairix_abi::font_ipc::{FamilyKey, FontStretch, FontStyle, FontWeight};
-use tairix_collections::OrderedMap;
+use tairix_collections::{try_arc, OrderedMap};
 use tairix_drawing::{Glyph, Glyphs};
 use tairix_font::OwnedOutline;
 
@@ -153,8 +153,11 @@ impl<S: OutlineSource> Lettering<S> {
 
     /// `outline` made a glyph and remembered as `key`'s, where there is room.
     fn make(&self, key: GlyphKey, outline: Option<&OwnedOutline>) -> Option<Arc<Glyph>> {
-        let made = outline.and_then(glyph_of).map(Arc::new);
-        // A set that cannot remember a glyph makes it again when next asked.
+        // A glyph the heap cannot hold is not known yet, as one not fetched
+        // is not; a set that cannot remember one makes it again when asked.
+        let made = outline
+            .and_then(glyph_of)
+            .and_then(|glyph| try_arc(glyph).ok());
         let _ = self.made.borrow_mut().try_insert(key, made.clone());
         made
     }
@@ -398,15 +401,8 @@ mod tests {
     fn text_set_from_a_set_fetches_its_characters_together() {
         let lettering = Lettering::new(Batching(Cell::new(0), Cell::new(0)));
         let text = tairix_drawing::Text {
-            content: alloc::sync::Arc::from("hello\tworld\nhello"),
-            family: alloc::sync::Arc::from("Sans"),
-            size: 10.0,
-            weight: 400,
-            italic: false,
-            letter_spacing: 0.0,
-            line_height: 1.25,
-            align: tairix_drawing::TextAlign::Start,
-            origin: Point::ZERO,
+            family: tairix_drawing::SharedStr::try_from_str("Sans").expect("held"),
+            ..crate::testing::text("hello\tworld\nhello", Point::ZERO)
         };
         let setting = text.set(&lettering).expect("set");
         assert!(setting.complete);

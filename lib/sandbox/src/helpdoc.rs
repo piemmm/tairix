@@ -22,7 +22,7 @@ use tairix_help::{
     render_full, render_short, HelpDoc, HelpError, Locale, RenderCtx, SectionKind, MAX_DOC_LEN,
     MAX_LOCALE_LEN,
 };
-use tairix_vt::{encode_all_into, Op, Parser, Sgr};
+use tairix_vt::{encode_all_into, encode_into, Op, Parser, Sgr};
 
 /// The render styling level, re-exported so a caller of [`render_help`] names
 /// one type from this crate's surface (`man` picks it from the terminal's
@@ -121,6 +121,8 @@ pub enum HelpRenderFailure {
     /// whitelist: it cannot be believed, so the caller gets nothing
     /// (fail closed).
     ReplyMalformed,
+    /// There was no memory here for the request or the page.
+    NoMemory,
 }
 
 impl Unbelieved for HelpRenderFailure {
@@ -263,7 +265,7 @@ fn dispatch(request: &[u8]) -> Result<Vec<u8>, HelpRefusal> {
     // spelling `lib/help` validates; a missing or malformed tag degrades to
     // the canonical locale (English headings) rather than refusing the page.
     let locale = r
-        .string(MAX_LOCALE_LEN)
+        .str(MAX_LOCALE_LEN)
         .map_err(|_| HelpRefusal::MalformedRequest)?;
     let bytes = r
         .bytes(MAX_DOC_LEN)
@@ -272,7 +274,7 @@ fn dispatch(request: &[u8]) -> Result<Vec<u8>, HelpRefusal> {
         return Err(HelpRefusal::MalformedRequest);
     }
     let doc = HelpDoc::parse(bytes).map_err(HelpRefusal::Document)?;
-    let locale = Locale::parse(&locale).unwrap_or_default();
+    let locale = Locale::parse(locale).unwrap_or_default();
     let ctx = RenderCtx::new(&locale, styling);
     let ops = match mode {
         RenderMode::Short => render_short(&doc, &ctx),
@@ -318,13 +320,13 @@ pub fn render_help<L: Launcher, S: tairix_log::Sink>(
             HelpError::TooLarge,
         )));
     }
-    let mut w = Writer::new();
+    let mut w = Writer::refusable();
     w.u8(OP_RENDER);
     w.u8(mode.to_wire());
     w.u8(styling_to_wire(styling));
     w.str(locale);
     w.bytes(document);
-    let request = w.finish();
+    let request = w.finish().ok_or(HelpRenderFailure::NoMemory)?;
     sandbox.ask(|sandbox| {
         let reply = sandbox
             .request(&request)
@@ -366,16 +368,19 @@ fn decode_render_reply(reply: &[u8]) -> Result<Vec<u8>, HelpRenderFailure> {
 }
 
 /// Re-parse the rendered bytes and admit only the ops a help render can
-/// legitimately contain, re-encoding them canonically. Anything else —
-/// cursor movement, screen clears, OSC/DCS strings, colours, a truncated
-/// trailing escape — fails the whole reply closed.
+/// legitimately contain, re-encoding each canonically as it is parsed.
+/// Anything else — cursor movement, screen clears, OSC/DCS strings, colours,
+/// a truncated trailing escape — fails the whole reply closed.
 fn validate_render(rendered: &[u8]) -> Result<Vec<u8>, HelpRenderFailure> {
     let mut parser = Parser::new();
-    let mut ops = Vec::new();
+    let mut out = Writer::refusable();
     let mut clean = true;
     parser.feed(rendered, |op| {
+        if !clean {
+            return;
+        }
         if is_render_op(&op) {
-            ops.push(op);
+            encode_into(&op, &mut out);
         } else {
             clean = false;
         }
@@ -383,9 +388,7 @@ fn validate_render(rendered: &[u8]) -> Result<Vec<u8>, HelpRenderFailure> {
     if !clean || !parser.is_ground() {
         return Err(HelpRenderFailure::ReplyMalformed);
     }
-    let mut out = Vec::new();
-    encode_all_into(&ops, &mut out);
-    Ok(out)
+    out.finish().ok_or(HelpRenderFailure::NoMemory)
 }
 
 /// The closed op whitelist of `tairix_help::render_short`/`render_full`:
@@ -654,5 +657,21 @@ mod tests {
         )
         .expect("whitelisted ops pass");
         assert_eq!(out, b"\x1b[1m\x1b[94mNAME\x1b[0m\nbody");
+    }
+
+    /// The request, the reply and the canonical re-encoding of a render,
+    /// refused this side's memory, are said as that.
+    #[test]
+    fn a_render_this_side_has_no_memory_for_is_refused_as_that() {
+        for mode in [RenderMode::Full, RenderMode::Short] {
+            crate::testing::swept::<HelpService, _, _>(
+                |sandbox| render_help(sandbox, mode, Styling::Colour, "en-US", MINIMAL.as_bytes()),
+                |failure| match failure {
+                    HelpRenderFailure::NoMemory => true,
+                    HelpRenderFailure::Sandbox(inner) => crate::testing::this_side(*inner),
+                    _ => false,
+                },
+            );
+        }
     }
 }

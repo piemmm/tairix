@@ -50,4 +50,12 @@ pub enum SvgError {
     /// tier below and shows something honest instead of a drawing with its
     /// meaning silently removed.
     FontUnavailable,
+    /// The memory a stroked outline needs could not be had.
+    OutOfMemory,
+}
+
+impl From<alloc::collections::TryReserveError> for SvgError {
+    fn from(_: alloc::collections::TryReserveError) -> Self {
+        Self::OutOfMemory
+    }
 }

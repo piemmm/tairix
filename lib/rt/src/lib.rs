@@ -1612,18 +1612,20 @@ pub fn spawn_with(
     args: &[&[u8]],
     env: &[&[u8]],
 ) -> i64 {
-    let len = match tairix_abi::process_start_encoded_len(args, env) {
-        Ok(len) => len,
-        Err(err) => return -i64::from(err.as_i32()),
-    };
-    let mut block = alloc::vec![0u8; len];
+    match start_block(args, env) {
+        Ok(block) => spawn_raw(path, console, target_uid, &block),
+        Err(err) => -i64::from(err.as_i32()),
+    }
+}
+
+/// The process-start block carrying `args` and `env`.
+fn start_block(args: &[&[u8]], env: &[&[u8]]) -> Result<alloc::vec::Vec<u8>, Errno> {
+    let len = tairix_abi::process_start_encoded_len(args, env)?;
+    let mut block = tairix_util::fallible::zeroed(len).ok_or(Errno::OutOfMemory)?;
     // The facts are the kernel's to mint for the child, so the block carries
     // none.
-    let facts = tairix_abi::StartFacts::UNSET;
-    if let Err(err) = tairix_abi::process_start_write_into(&mut block, args, env, &facts) {
-        return -i64::from(err.as_i32());
-    }
-    spawn_raw(path, console, target_uid, &block)
+    tairix_abi::process_start_write_into(&mut block, args, env, &tairix_abi::StartFacts::UNSET)?;
+    Ok(block)
 }
 
 /// Spawn the embedded program at `path` with an explicit
@@ -1646,18 +1648,10 @@ pub fn spawn_attached(
     args: &[&[u8]],
     env: &[&[u8]],
 ) -> i64 {
-    let len = match tairix_abi::process_start_encoded_len(args, env) {
-        Ok(len) => len,
-        Err(err) => return -i64::from(err.as_i32()),
-    };
-    let mut block = alloc::vec![0u8; len];
-    // The facts are the kernel's to mint for the child, so the block carries
-    // none.
-    let facts = tairix_abi::StartFacts::UNSET;
-    if let Err(err) = tairix_abi::process_start_write_into(&mut block, args, env, &facts) {
-        return -i64::from(err.as_i32());
+    match start_block(args, env) {
+        Ok(block) => spawn_encoded(path, &attach.to_le_bytes(), &block),
+        Err(err) => -i64::from(err.as_i32()),
     }
-    spawn_encoded(path, &attach.to_le_bytes(), &block)
 }
 
 /// [`spawn_attached`] with the child started in `working_directory`,

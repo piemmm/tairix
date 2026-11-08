@@ -10,16 +10,23 @@
 //! and as many again twice over to scroll back into, once over under
 //! moderate memory pressure and none under severe; tiles of other zooms and
 //! those furthest from view are let go first.
+//!
+//! When the zoom changes, the tiles of the view just left stand in, scaled,
+//! for the new zoom's until those land: the backdrop, kept from the last view
+//! shown whole and let go once the view in front of it is.
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_bezier::{Affine, Bounds, Point};
+use tairix_collections::{try_arc, HashMap};
 use tairix_drawing::render::Mode;
 use tairix_drawing::{Drawing, Node};
-use tairix_raster::Surface;
+use tairix_hash::BuildFastHash;
+use tairix_raster::{Mosaic, Surface};
 use tairix_reclaim::PressureBand;
+use tairix_util::fallible;
 use tairix_util::mathf::{ceil, floor};
 
 /// A tile's side, in device pixels.
@@ -34,7 +41,7 @@ pub const TILES_PER_JOB: usize = 8;
 const REMEMBERED_CHANGES: usize = 32;
 
 /// Where a tile stands: the zoom it is rendered at and its column and row.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct TileKey {
     /// The bits of the device pixels per drawing pixel it is rendered at.
     pub pixels: u64,
@@ -100,9 +107,87 @@ pub struct RenderJob {
     pub mode: Mode,
 }
 
+/// The rectangle of tiles a view showed: the keys `covering` gave it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct Span {
+    pixels: u64,
+    outline: bool,
+    left: i64,
+    top: i64,
+    right: i64,
+    bottom: i64,
+}
+
+impl Span {
+    /// The rectangle `visible` fills, or `None` for no tiles.
+    fn of(visible: &[TileKey]) -> Option<Self> {
+        let first = visible.first()?;
+        Some(visible.iter().fold(
+            Self {
+                pixels: first.pixels,
+                outline: first.outline,
+                left: first.column,
+                top: first.row,
+                right: first.column,
+                bottom: first.row,
+            },
+            |span, key| Self {
+                left: span.left.min(key.column),
+                top: span.top.min(key.row),
+                right: span.right.max(key.column),
+                bottom: span.bottom.max(key.row),
+                ..span
+            },
+        ))
+    }
+
+    /// Its tiles' keys, row by row.
+    fn keys(self) -> impl Iterator<Item = TileKey> {
+        (self.top..=self.bottom).flat_map(move |row| {
+            (self.left..=self.right).map(move |column| TileKey {
+                pixels: self.pixels,
+                column,
+                row,
+                outline: self.outline,
+            })
+        })
+    }
+}
+
+/// The tiles of the last view shown whole, standing in for a new zoom's.
+struct Backdrop {
+    span: Span,
+    /// How many columns across it is.
+    columns: u32,
+    /// Row by row across `span`; a place no tile was held for holds none.
+    tiles: Vec<Option<Arc<Surface>>>,
+}
+
+/// What the backdrop stands in with: its tiles as one picture, the zoom they
+/// were rendered at, and where on that zoom's device grid the picture's
+/// first pixel lies.
+pub struct StandIn<'t> {
+    /// The tiles, with absent places transparent.
+    pub picture: Mosaic<'t, Arc<Surface>>,
+    /// The device pixels per drawing pixel they were rendered at.
+    pub pixels: f64,
+    /// The picture's top-left corner on that zoom's device grid.
+    pub origin: Point,
+}
+
+impl StandIn<'_> {
+    /// The map from the picture's pixels onto the device grid of a view at
+    /// `pixels` device pixels per drawing pixel.
+    #[must_use]
+    pub fn onto(&self, pixels: f64) -> Affine {
+        let ratio = pixels / self.pixels;
+        Affine::translate(self.origin.x, self.origin.y).then(Affine::scale(ratio, ratio))
+    }
+}
+
 /// A window's tiles.
 pub struct Tiles {
-    held: BTreeMap<TileKey, Held>,
+    held: HashMap<TileKey, Held, BuildFastHash>,
     /// How many times the tiles in view are held again beyond them.
     spare: usize,
     /// The scene the tiles should show.
@@ -114,17 +199,22 @@ pub struct Tiles {
     held_off: Vec<TileKey>,
     /// The latest changes: the scene each made, and the area it touched.
     changes: VecDeque<(u64, Bounds)>,
+    /// The view the window last showed.
+    shown: Option<Span>,
+    backdrop: Option<Backdrop>,
 }
 
 impl Default for Tiles {
     fn default() -> Self {
         Self {
-            held: BTreeMap::new(),
+            held: HashMap::with_hasher(BuildFastHash::new()),
             spare: spare_at(PressureBand::Normal),
             scene: 0,
             asked: Vec::new(),
             held_off: Vec::new(),
             changes: VecDeque::new(),
+            shown: None,
+            backdrop: None,
         }
     }
 }
@@ -141,10 +231,14 @@ const fn spare_at(band: PressureBand) -> usize {
 
 impl Tiles {
     /// Hold what memory pressure `band` allows beyond `visible`, the tiles in
-    /// view, letting go of the rest now.
+    /// view, letting go of the rest now: under severe pressure that is the
+    /// backdrop too.
     pub fn adopt_pressure(&mut self, band: PressureBand, visible: &[TileKey]) {
         self.spare = spare_at(band);
         self.held_off.clear();
+        if self.spare == 0 {
+            self.backdrop = None;
+        }
         self.evict(visible);
     }
 
@@ -153,6 +247,28 @@ impl Tiles {
     #[must_use]
     pub fn tile(&self, key: &TileKey) -> Option<&Surface> {
         self.held.get(key).map(|held| &*held.surface)
+    }
+
+    /// What stands in for the tiles of a view drawn as `outline` says while
+    /// they are not yet held: the backdrop, if one is kept for that mode.
+    #[must_use]
+    pub fn stand_in(&self, outline: bool) -> Option<StandIn<'_>> {
+        let backdrop = self
+            .backdrop
+            .as_ref()
+            .filter(|b| b.span.outline == outline)?;
+        let span = backdrop.span;
+        let at = TileKey {
+            pixels: span.pixels,
+            column: span.left,
+            row: span.top,
+            outline,
+        };
+        Some(StandIn {
+            picture: Mosaic::new(TILE, backdrop.columns, &backdrop.tiles)?,
+            pixels: at.pixels(),
+            origin: at.origin(),
+        })
     }
 
     /// The scene tiles are rendered for now.
@@ -169,7 +285,12 @@ impl Tiles {
         if self.changes.len() == REMEMBERED_CHANGES {
             self.changes.pop_front();
         }
-        self.changes.push_back((scene, area));
+        // Forgetting a change only stops an older tile being taken.
+        if self.changes.try_reserve(1).is_ok() {
+            self.changes.push_back((scene, area));
+        } else {
+            self.changes.clear();
+        }
         // A job out stays asked for: it lands, its stale tiles are dropped,
         // and only then is the next asked, so a window has one at a time.
         self.held_off.clear();
@@ -194,22 +315,75 @@ impl Tiles {
 
     /// The tiles of `visible`, in the order given, that want rendering: at
     /// most a job's worth, noted as asked, and none while a job is out, so a
-    /// job is never left waiting behind another of the same window's.
+    /// job is never left waiting behind another of the same window's. Asked
+    /// each turn, it is also how the cache learns the view moved.
     pub fn wanted(&mut self, visible: &[TileKey]) -> Vec<TileKey> {
-        if !self.asked.is_empty() {
+        self.follow(visible);
+        let mut wanted = Vec::new();
+        if !self.asked.is_empty()
+            || wanted.try_reserve_exact(TILES_PER_JOB).is_err()
+            || self.asked.try_reserve(TILES_PER_JOB).is_err()
+        {
             return Vec::new();
         }
-        let mut wanted: Vec<TileKey> = visible
-            .iter()
-            .copied()
-            .filter(|key| {
-                !self.held.get(key).is_some_and(|held| held.fresh) && !self.held_off.contains(key)
-            })
-            .take(TILES_PER_JOB)
-            .collect();
+        wanted.extend(
+            visible
+                .iter()
+                .copied()
+                .filter(|key| {
+                    !self.held.get(key).is_some_and(|held| held.fresh)
+                        && !self.held_off.contains(key)
+                })
+                .take(TILES_PER_JOB),
+        );
         wanted.sort_unstable();
         self.asked.extend_from_slice(&wanted);
         wanted
+    }
+
+    /// The view is now `visible`. A change of zoom keeps the view just left
+    /// as the backdrop if it was shown whole, or if no backdrop is kept at
+    /// all; a change of mode lets the backdrop go, as does a view whose own
+    /// tiles are all held.
+    fn follow(&mut self, visible: &[TileKey]) {
+        let Some(now) = Span::of(visible) else {
+            return;
+        };
+        let Some(was) = self.shown.replace(now) else {
+            return;
+        };
+        if was.outline != now.outline {
+            self.backdrop = None;
+        } else if was.pixels != now.pixels && self.spare > 0 {
+            let whole = was.keys().all(|key| self.held.contains_key(&key));
+            if whole || self.backdrop.is_none() {
+                if let Some(backdrop) = self.gathered(was) {
+                    self.backdrop = Some(backdrop);
+                }
+            }
+        }
+        if self.backdrop.is_some() && visible.iter().all(|key| self.held.contains_key(key)) {
+            self.backdrop = None;
+        }
+    }
+
+    /// The tiles held of `span`, or `None` where none is or the list of
+    /// them cannot be had.
+    fn gathered(&self, span: Span) -> Option<Backdrop> {
+        let columns = u32::try_from(span.right - span.left + 1).ok()?;
+        let rows = usize::try_from(span.bottom - span.top + 1).ok()?;
+        let places = rows.checked_mul(usize::try_from(columns).ok()?)?;
+        let mut tiles = Vec::new();
+        tiles.try_reserve_exact(places).ok()?;
+        tiles.extend(
+            span.keys()
+                .map(|key| self.held.get(&key).map(|held| Arc::clone(&held.surface))),
+        );
+        tiles.iter().any(Option::is_some).then_some(Backdrop {
+            span,
+            columns,
+            tiles,
+        })
     }
 
     /// Those of `keys` still asked for were not rendered: no longer asked,
@@ -217,8 +391,9 @@ impl Tiles {
     /// need, changes.
     pub fn refused(&mut self, keys: &[TileKey]) {
         for key in keys {
-            if self.unask(key) && self.held_off.try_reserve(1).is_ok() {
-                self.held_off.push(*key);
+            if self.unask(key) {
+                // A refusal that cannot be noted is asked again: never lost.
+                let _ = fallible::try_push(&mut self.held_off, *key);
             }
         }
     }
@@ -248,16 +423,25 @@ impl Tiles {
         if !self.still_shows(scene, &key) {
             return;
         }
-        let scene = self.scene;
-        self.held.insert(
-            key,
-            Held {
-                surface: Arc::new(surface),
-                scene,
-                fresh: true,
-            },
-        );
+        // A tile the heap cannot hold is held off as one a render could not
+        // make, until the memory pressure changes.
+        let Ok(surface) = try_arc(surface) else {
+            return self.refused_landing(key);
+        };
+        let held = Held {
+            surface,
+            scene: self.scene,
+            fresh: true,
+        };
+        if self.held.try_insert(key, held).is_err() {
+            return self.refused_landing(key);
+        }
         self.evict(visible);
+    }
+
+    /// `key` landed and could not be held.
+    fn refused_landing(&mut self, key: TileKey) {
+        let _ = fallible::try_push(&mut self.held_off, key);
     }
 
     /// Whether a tile rendered from `scene` shows the present scene: no
@@ -281,42 +465,38 @@ impl Tiles {
 
     /// Hold no more than the tiles of `visible` and the spare allowed beyond
     /// them: let go of tiles of other zooms and modes first, then of those
-    /// furthest from view.
+    /// furthest from view, one at a time so the choice needs no room of its
+    /// own.
     fn evict(&mut self, visible: &[TileKey]) {
         let allowed = visible.len().saturating_mul(1 + self.spare);
-        if self.held.len() <= allowed {
-            return;
-        }
-        let Some(&anchor) = visible.first() else {
-            return;
-        };
-        let columns = visible.iter().map(|key| key.column);
-        let rows = visible.iter().map(|key| key.row);
-        let (Some(left), Some(right), Some(top), Some(bottom)) = (
-            columns.clone().min(),
-            columns.max(),
-            rows.clone().min(),
-            rows.max(),
-        ) else {
+        let Some(view) = Span::of(visible) else {
             return;
         };
         // How far a tile stands outside the view, in tiles.
         let distance = |key: &TileKey| -> u64 {
-            if key.pixels != anchor.pixels || key.outline != anchor.outline {
+            if key.pixels != view.pixels || key.outline != view.outline {
                 return u64::MAX;
             }
             let outside = |at: i64, low: i64, high: i64| {
                 let beyond = low.saturating_sub(at).max(at.saturating_sub(high));
                 u64::try_from(beyond.max(0)).unwrap_or(u64::MAX)
             };
-            outside(key.column, left, right).saturating_add(outside(key.row, top, bottom))
+            outside(key.column, view.left, view.right).saturating_add(outside(
+                key.row,
+                view.top,
+                view.bottom,
+            ))
         };
-        let mut ranked: Vec<(u64, TileKey)> =
-            self.held.keys().map(|key| (distance(key), *key)).collect();
-        ranked.sort_unstable_by(|a, b| b.cmp(a));
-        let excess = self.held.len() - allowed;
-        for (_, key) in ranked.into_iter().take(excess) {
-            self.held.remove(&key);
+        while self.held.len() > allowed {
+            let furthest = self
+                .held
+                .keys()
+                .copied()
+                .max_by_key(|key| (distance(key), *key));
+            let Some(furthest) = furthest else {
+                return;
+            };
+            self.held.remove(&furthest);
         }
     }
 }
@@ -352,11 +532,15 @@ pub fn covering(area: Bounds, origin: Point, pixels: f64, outline: bool) -> Vec<
         f64::midpoint(count(left), count(right)),
         f64::midpoint(count(top), count(bottom)),
     );
-    keys.sort_by(|a, b| {
+    // Ties fall row by row, as the keys were laid; an unstable sort keyed to
+    // the place as well needs no room beside the list.
+    keys.sort_unstable_by(|a, b| {
         let from = |key: &TileKey| {
             (count(key.column) - centre.x).abs() + (count(key.row) - centre.y).abs()
         };
-        from(a).total_cmp(&from(b))
+        from(a)
+            .total_cmp(&from(b))
+            .then((a.row, a.column).cmp(&(b.row, b.column)))
     });
     keys
 }
@@ -372,17 +556,12 @@ fn index(at: f64) -> i64 {
 }
 
 /// Bounds, in the drawing's space, holding everything that differs between
-/// `old` and `new`.
+/// `old` and `new` as a tile draws them. The page is the canvas's to draw,
+/// so a change to it alone stales no tile.
 #[must_use]
 pub fn changed_area(old: &Drawing, new: &Drawing) -> Bounds {
-    let whole = || {
-        old.bounds()
-            .union(new.bounds())
-            .union(old.page().bounds())
-            .union(new.page().bounds())
-    };
-    if old.page() != new.page() || old.layers().len() != new.layers().len() {
-        return whole();
+    if old.layers().len() != new.layers().len() {
+        return old.bounds().union(new.bounds());
     }
     old.layers()
         .iter()

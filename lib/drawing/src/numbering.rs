@@ -71,6 +71,12 @@ impl<K: Ord + Copy, T> Numbered<K, T> {
     pub fn items(&self) -> &[T] {
         &self.items
     }
+
+    /// Every definition, in number order, taken.
+    #[must_use]
+    pub fn into_items(self) -> Vec<T> {
+        self.items
+    }
 }
 
 #[cfg(test)]

@@ -4331,7 +4331,7 @@ impl<M: ShmMapper> WindowServer<M> {
         let owed = match record.pick_pending {
             None => false,
             Some(PickPurpose::Folder) => chosen.is_none(),
-            Some(PickPurpose::Open | PickPurpose::Save { .. }) => true,
+            Some(PickPurpose::Open | PickPurpose::Import | PickPurpose::Save { .. }) => true,
         };
         if !owed || chosen.is_some_and(|file| file.handle == 0) {
             return Err(Errno::OutOfRange);

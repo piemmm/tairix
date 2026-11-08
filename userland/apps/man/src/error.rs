@@ -117,6 +117,10 @@ impl fmt::Display for ManError {
                 HelpRenderFailure::ReplyMalformed => {
                     f.write_str("help renderer produced an invalid page")
                 }
+                HelpRenderFailure::Sandbox(SandboxError::OutOfMemory)
+                | HelpRenderFailure::NoMemory => {
+                    f.write_str("there is not enough memory to render the page")
+                }
             },
             ManError::Store(err) => write!(f, "cannot read the app store: {err}"),
             ManError::SearchTruncated { root } => write!(

@@ -607,14 +607,7 @@ fn sheet(figure: &Reference, kind: Kind, side: u32) -> Result<Vec<u8>, String> {
         }
     }
 
-    let mut rgba = Vec::with_capacity(sheet.pixels().len() * 4);
-    for pixel in sheet.pixels() {
-        let straight = pixel.unpremultiply();
-        rgba.extend_from_slice(&[straight.r, straight.g, straight.b, straight.a]);
-    }
-    let picture = tairix_image::Picture::rgba(sheet.width(), sheet.height(), rgba)
-        .map_err(|err| format!("artsheet: the sheet is not a picture: {err}"))?;
-    tairix_image::encode_png(&picture)
+    tairix_image::encode_png(&tairix_image::SurfacePicture::new(&sheet))
         .map_err(|err| format!("artsheet: the sheet could not be written: {err}"))
 }
 

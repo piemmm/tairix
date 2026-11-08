@@ -202,24 +202,20 @@ impl DocumentView for Engine {
             Self::Picture(view) => EngineLayout::Picture(Box::new(DocumentView::layout(
                 &**view, width, height, theme, scale, faces,
             ))),
-            Self::Area(view) => EngineLayout::Area(view.layout(width, height, theme, scale, faces)),
+            Self::Area(view) => EngineLayout::Area(view.layout(width, height, theme, scale)),
         }
     }
 
     fn min_size(&self, theme: &Theme, scale: Scale, faces: Faces) -> (u32, u32) {
         match self {
             Self::Picture(view) => DocumentView::min_size(&**view, theme, scale, faces),
-            Self::Area(_) => AreaView::min_size(theme, scale, faces),
+            Self::Area(_) => AreaView::min_size(theme, scale),
         }
     }
 
-    fn open_size(&self, theme: &Theme, faces: Faces) -> Option<(u32, u32)> {
+    fn open_size(&self, theme: &Theme, _faces: Faces) -> Option<(u32, u32)> {
         match self {
-            Self::Area(view) => Some(AreaView::open_size(
-                view.document().entries().len(),
-                theme,
-                faces,
-            )),
+            Self::Area(view) => Some(AreaView::open_size(view.document().entries().len(), theme)),
             Self::Picture(_) => None,
         }
     }

@@ -14,13 +14,13 @@ use tairix_theme::Theme;
 use tairix_window::docapp::{DocumentView, Request};
 use tairix_window::document::{Access, SavedDocument};
 
+use crate::copy::CopyFormat;
 use crate::document::{blank, Document};
-use crate::inspector::{Change, Target};
+use crate::inspector::{Change, PageChange, Target};
 use crate::layout::Layout;
 use crate::menu::Command;
 use crate::tools::Tool;
 use crate::view::{Own, View};
-use crate::window::CopyFormat;
 
 struct Window {
     view: View,
@@ -31,7 +31,8 @@ struct Window {
 impl Window {
     fn new() -> Self {
         let mut ids = Ids::new();
-        let drawing = blank(&mut ids).expect("a drawing");
+        let drawing =
+            blank(&mut ids, &crate::preferences::Preferences::default()).expect("a drawing");
         let mut view = View::new(
             Document::new(drawing, ids, true),
             String::from("Untitled"),
@@ -107,6 +108,16 @@ impl Window {
         });
         self.feed(InputEvent::PointerReleased {
             button: PointerButton::Primary,
+        });
+    }
+
+    /// Hold Alt down, or let it go.
+    fn modifier_alt(&mut self, alt: bool) {
+        self.feed(InputEvent::ModifiersChanged {
+            modifiers: Modifiers {
+                alt,
+                ..Modifiers::default()
+            },
         });
     }
 
@@ -238,7 +249,8 @@ fn menu_commands_group_copy_and_remove_as_steps() {
     assert_eq!(window.objects(), 3, "a group of two");
     let copied = window.view.carry_out(Command::Copy, &layout, &mut damage);
     assert!(
-        matches!(copied.request, Some(Request::Own(Own::Copy(ref svg))) if svg.contains("<ellipse"))
+        matches!(copied.request, Some(Request::Own(Own::Copy(ref drawing))) if drawing.objects() == 4),
+        "the group and its two, in a layer, written as SVG on the queue"
     );
     window
         .view
@@ -320,7 +332,7 @@ fn the_canvas_asks_for_its_tiles_once_and_takes_them_as_they_land() {
 #[test]
 fn a_file_holding_what_a_drawing_cannot_keep_opens_read_only_and_names_its_formats() {
     let mut ids = Ids::new();
-    let drawing = blank(&mut ids).expect("a drawing");
+    let drawing = blank(&mut ids, &crate::preferences::Preferences::default()).expect("a drawing");
     let mut lost = Unkept::NONE;
     lost.insert(Lost::Filters);
     let view = View::new(
@@ -344,8 +356,8 @@ fn a_file_holding_what_a_drawing_cannot_keep_opens_read_only_and_names_its_forma
         view.refuse_save("art.png").is_some(),
         "Draw saves SVG; PNG is a copy"
     );
-    assert_eq!(CopyFormat::of("plan.PDF"), Some(CopyFormat::Pdf));
-    assert_eq!(CopyFormat::of("plan"), None);
+    assert_eq!(CopyFormat::of("plan.PDF", None), Some(CopyFormat::Pdf));
+    assert_eq!(CopyFormat::of("plan", None), None);
     assert!(view.copy_formats().is_ok());
     let fresh = Window::new();
     assert!(
@@ -379,7 +391,11 @@ fn a_pasted_group_and_all_it_holds_take_identities_of_their_own() {
         .view
         .carry_out(Command::SelectAll, &layout, &mut damage);
     window.view.carry_out(Command::Group, &layout, &mut damage);
-    let copied = window.view.selection_drawing().expect("the group");
+    let copied = window
+        .view
+        .selection_drawing()
+        .expect("held")
+        .expect("the group");
     window.view.pasted(Ok(copied), &mut damage, &layout);
     assert_eq!(window.objects(), 6, "two groups of two");
     let mut seen = alloc::vec::Vec::new();
@@ -550,7 +566,11 @@ fn a_paste_of_many_objects_lands_as_one_step_with_all_selected() {
         window.drag((left, 100.0), (left + 100.0, 200.0));
     }
     window.command(Command::SelectAll);
-    let copied = window.view.selection_drawing().expect("the selection");
+    let copied = window
+        .view
+        .selection_drawing()
+        .expect("held")
+        .expect("the selection");
     let depth = window.view.document().depth();
     let layout = window.layout;
     window.view.pasted(Ok(copied), &mut Region::new(), &layout);
@@ -674,7 +694,11 @@ fn a_pasted_hidden_or_locked_object_is_not_selected() {
     window.drag((100.0, 100.0), (200.0, 200.0));
     window.drag((300.0, 100.0), (400.0, 200.0));
     window.command(Command::SelectAll);
-    let copied = window.view.selection_drawing().expect("the selection");
+    let copied = window
+        .view
+        .selection_drawing()
+        .expect("held")
+        .expect("the selection");
     let layer = copied.node_at(&[0]).expect("a layer");
     let Kind::Group { children, clip } = layer.kind() else {
         panic!("a group");
@@ -729,4 +753,741 @@ fn a_reshape_lands_while_the_caret_waits_in_a_text_with_nothing_typed() {
     assert!(window.view.typing.is_some() && window.view.live.is_none());
     window.view.computed(computed, &layout, &mut Region::new());
     assert_eq!(window.objects(), 2, "the union landed");
+}
+
+#[test]
+fn the_page_tab_sizes_turns_measures_and_grounds_the_page_each_as_a_step() {
+    let mut window = Window::new();
+    let zoom = window.view.viewport.pixels();
+    let page = |window: &Window| *window.view.document().drawing().page();
+    let a4 = page(&window);
+    window.change(Change::Page(PageChange::Width(200.0)));
+    assert_eq!(
+        page(&window).width.to_bits(),
+        200.0_f64.to_bits(),
+        "any width, in the page's unit"
+    );
+    assert_eq!(window.view.document().undo_label(), Some("Page size"));
+    assert_eq!(
+        window.view.viewport.pixels().to_bits(),
+        zoom.to_bits(),
+        "the view stays where it is"
+    );
+    let depth = window.view.document().depth();
+    window.change(Change::Page(PageChange::Landscape(false)));
+    assert_eq!(window.view.document().depth(), depth, "already upright");
+    window.change(Change::Page(PageChange::Landscape(true)));
+    assert_eq!(
+        (page(&window).width, page(&window).height),
+        (a4.height, 200.0)
+    );
+    window.change(Change::Page(PageChange::Unit(tairix_drawing::Unit::Cm)));
+    let measured = page(&window);
+    assert_eq!(measured.unit, tairix_drawing::Unit::Cm);
+    assert!((measured.height - 20.0).abs() < 1e-9, "the same size in cm");
+    window.change(Change::Page(PageChange::GridSpacing(2.0)));
+    let grid = window.view.document().drawing().grid();
+    assert!((grid.spacing - 2.0 * tairix_drawing::Unit::Cm.pixels()).abs() < 1e-9);
+    window.change(Change::Page(PageChange::Subdivisions(5)));
+    assert_eq!(window.view.document().drawing().grid().subdivisions, 5);
+    window.change(Change::Page(PageChange::Resolution(300)));
+    assert_eq!(window.view.document().drawing().resolution(), 300);
+    assert_eq!(window.view.document().undo_label(), Some("Copy resolution"));
+
+    let depth = window.view.document().depth();
+    let teal = Rgba::new(0, 128, 128, 255);
+    for settled in [false, false, true] {
+        window.change(Change::Page(PageChange::Ground {
+            colour: Some(teal),
+            settled,
+        }));
+        if !settled {
+            assert_eq!(page(&window).background, None, "shown live only");
+        }
+    }
+    assert_eq!(page(&window).background, Some(teal));
+    assert_eq!(window.view.document().depth(), depth + 1, "one step");
+    let width = page(&window).width;
+    window.change(Change::Page(PageChange::Width(-1.0)));
+    assert_eq!(
+        page(&window).width.to_bits(),
+        width.to_bits(),
+        "a page with no width is refused"
+    );
+}
+
+#[test]
+fn the_ground_command_toggles_the_colour_the_page_tab_holds() {
+    let mut window = Window::new();
+    let page = |window: &Window| *window.view.document().drawing().page();
+    assert_eq!(page(&window).background, None);
+    window.command(Command::Ground);
+    assert_eq!(page(&window).background, Some(tairix_drawing::PAPER_WHITE));
+    let gold = Rgba::new(250, 200, 40, 255);
+    window.change(Change::Page(PageChange::Ground {
+        colour: Some(gold),
+        settled: true,
+    }));
+    window.command(Command::Ground);
+    assert_eq!(page(&window).background, None);
+    window.command(Command::Ground);
+    assert_eq!(
+        page(&window).background,
+        Some(gold),
+        "the colour last given the page"
+    );
+    window.command(Command::Landscape);
+    assert!(page(&window).width > page(&window).height);
+    window.command(Command::PageSetup);
+    assert_eq!(window.view.inspector.tab(), crate::inspector::Tab::Page);
+}
+
+/// The fill gradient of the object at `path`, which must have one.
+fn fill_gradient(window: &Window, path: &[usize]) -> alloc::sync::Arc<tairix_drawing::Gradient> {
+    let node = window
+        .view
+        .document()
+        .drawing()
+        .node_at(path)
+        .expect("an object");
+    match &node.style().expect("a style").fill {
+        Paint::Gradient(gradient) => gradient.clone(),
+        other => panic!("a gradient fill, not {other:?}"),
+    }
+}
+
+/// The box of the rectangle at `path`, in its own space.
+fn rect_box(window: &Window, path: &[usize]) -> tairix_bezier::Bounds {
+    let node = window
+        .view
+        .document()
+        .drawing()
+        .node_at(path)
+        .expect("an object");
+    let Kind::Shape { shape, .. } = node.kind() else {
+        panic!("a shape");
+    };
+    shape.bounds().expect("bounds")
+}
+
+fn linear_ends(gradient: &tairix_drawing::Gradient) -> (Point, Point) {
+    match gradient.kind {
+        tairix_drawing::GradientKind::Linear { start, end } => (start, end),
+        tairix_drawing::GradientKind::Radial { .. } => panic!("a linear gradient"),
+    }
+}
+
+#[test]
+fn a_gradient_chosen_for_two_objects_is_fitted_to_each_and_edited_as_one_step() {
+    let mut window = Window::new();
+    window.view.choose_tool(Tool::Rectangle);
+    window.drag((100.0, 100.0), (200.0, 150.0));
+    window.drag((400.0, 300.0), (420.0, 400.0));
+    window.command(Command::SelectAll);
+    let form = crate::gradient::Form::Linear(0.0);
+    window.change(Change::Form {
+        target: Target::Fill,
+        form,
+    });
+    assert_eq!(window.view.document().undo_label(), Some("Gradient"));
+    for path in [[0, 0], [0, 1]] {
+        let own = rect_box(&window, &path);
+        let (start, end) = linear_ends(&fill_gradient(&window, &path));
+        assert!(
+            (start.x - own.min.x).abs() < 1e-6 && (end.x - own.max.x).abs() < 1e-6,
+            "each across its own box: {start:?} {end:?} {own:?}"
+        );
+    }
+    let left = rect_box(&window, &[0, 1]).min.x;
+
+    let depth = window.view.document().depth();
+    let first = fill_gradient(&window, &[0, 0]);
+    let (stops, _) = crate::gradient::added(&first.stops, 0.5).expect("a stop");
+    for settled in [false, false, true] {
+        window.change(Change::Stops {
+            target: Target::Fill,
+            stops: stops.clone(),
+            spread: tairix_drawing::Spread::Reflect,
+            form,
+            settled,
+        });
+    }
+    assert_eq!(window.view.document().depth(), depth + 1, "one step");
+    for path in [[0, 0], [0, 1]] {
+        let gradient = fill_gradient(&window, &path);
+        assert_eq!(gradient.stops.len(), 3);
+        assert_eq!(gradient.spread, tairix_drawing::Spread::Reflect);
+    }
+    let (kept_start, _) = linear_ends(&fill_gradient(&window, &[0, 1]));
+    assert!((kept_start.x - left).abs() < 1e-6, "where it lay is kept");
+}
+
+#[test]
+fn a_shape_drawn_with_a_gradient_in_hand_takes_it_fitted_to_itself() {
+    let mut window = Window::new();
+    window.change(Change::Form {
+        target: Target::Fill,
+        form: crate::gradient::Form::Linear(90.0),
+    });
+    window.view.choose_tool(Tool::Rectangle);
+    window.drag((300.0, 200.0), (340.0, 400.0));
+    let own = rect_box(&window, &[0, 0]);
+    let (start, end) = linear_ends(&fill_gradient(&window, &[0, 0]));
+    assert!(
+        (start.y - own.max.y).abs() < 1e-6 && (end.y - own.min.y).abs() < 1e-6,
+        "upward across the new rectangle: {start:?} {end:?} {own:?}"
+    );
+}
+
+#[test]
+fn text_typed_with_a_gradient_in_hand_takes_it_fitted_once_typed() {
+    let mut window = Window::new();
+    window.change(Change::Form {
+        target: Target::Fill,
+        form: crate::gradient::Form::Linear(0.0),
+    });
+    window.text_at(100.0, 300.0);
+    for character in "Gradient".chars() {
+        window.key(Key::Char(character));
+    }
+    window.key(Key::Named(NamedKey::Escape));
+    let (start, end) = linear_ends(&fill_gradient(&window, &[0, 0]));
+    assert!(
+        end.x - start.x > 20.0,
+        "across what was typed: {start:?} {end:?}"
+    );
+}
+
+#[test]
+fn a_rotation_turns_one_object_to_its_angle_and_several_together() {
+    let mut window = Window::new();
+    window.view.choose_tool(Tool::Rectangle);
+    window.drag((100.0, 100.0), (200.0, 150.0));
+    window.change(Change::Rotation(90.0));
+    assert_eq!(window.view.document().undo_label(), Some("Rotate"));
+    let drawing = window.view.document().drawing().clone();
+    let angle = crate::edit::angle_of(&drawing, &[vec![0, 0]]);
+    assert!((angle - 90.0).abs() < 1e-9, "{angle}");
+    let depth = window.view.document().depth();
+    window.change(Change::Rotation(90.0));
+    assert_eq!(
+        window.view.document().depth(),
+        depth,
+        "already there: no step"
+    );
+    window.change(Change::Rotation(-45.0));
+    let drawing = window.view.document().drawing().clone();
+    let angle = crate::edit::angle_of(&drawing, &[vec![0, 0]]);
+    assert!((angle + 45.0).abs() < 1e-9, "{angle}");
+}
+
+#[test]
+fn swatches_are_kept_once_each_and_dropped_as_steps() {
+    let mut window = Window::new();
+    let teal = Rgba::new(0, 128, 128, 255);
+    window.change(Change::KeepSwatch(teal));
+    assert_eq!(window.view.document().drawing().swatches(), &[teal]);
+    assert_eq!(window.view.document().undo_label(), Some("Add swatch"));
+    let depth = window.view.document().depth();
+    window.change(Change::KeepSwatch(teal));
+    assert_eq!(window.view.document().depth(), depth, "kept once");
+    window.change(Change::DropSwatch(0));
+    assert!(window.view.document().drawing().swatches().is_empty());
+    window.command(Command::Undo);
+    assert_eq!(window.view.document().drawing().swatches(), &[teal]);
+}
+
+#[test]
+fn a_gradient_taken_with_the_eyedropper_is_fitted_to_each_object_given_it() {
+    let mut window = Window::new();
+    window.view.choose_tool(Tool::Rectangle);
+    window.drag((100.0, 100.0), (200.0, 150.0));
+    window.change(Change::Form {
+        target: Target::Fill,
+        form: crate::gradient::Form::Linear(0.0),
+    });
+    window.command(Command::SelectNone);
+    window.change(Change::Paint {
+        target: Target::Fill,
+        paint: Paint::Colour(Rgba::new(200, 0, 0, 255)),
+        settled: true,
+    });
+    window.view.choose_tool(Tool::Rectangle);
+    window.drag((400.0, 300.0), (420.0, 400.0));
+    assert!(matches!(
+        window
+            .view
+            .document()
+            .drawing()
+            .node_at(&[0, 1])
+            .and_then(|node| node.style())
+            .map(|style| style.fill.clone()),
+        Some(Paint::Colour(_))
+    ));
+    window.view.choose_tool(Tool::Eyedropper);
+    let source = window.at(150.0, 125.0);
+    window.feed(InputEvent::PointerMoved { to: source });
+    window.feed(InputEvent::PointerPressed {
+        button: PointerButton::Primary,
+    });
+    window.feed(InputEvent::PointerReleased {
+        button: PointerButton::Primary,
+    });
+    assert_eq!(window.view.document().undo_label(), Some("Take style"));
+    let own = rect_box(&window, &[0, 1]);
+    let (start, end) = linear_ends(&fill_gradient(&window, &[0, 1]));
+    assert!(
+        (start.x - own.min.x).abs() < 1e-6 && (end.x - own.max.x).abs() < 1e-6,
+        "across the object given it: {start:?} {end:?} {own:?}"
+    );
+}
+
+#[test]
+fn a_drag_with_the_gradient_tool_lays_a_gradient_live_and_lands_once() {
+    let mut window = Window::new();
+    window.view.choose_tool(Tool::Rectangle);
+    window.drag((100.0, 100.0), (300.0, 200.0));
+    window.view.choose_tool(Tool::Gradient);
+    let depth = window.view.document().depth();
+    let (a, b) = (window.at(120.0, 150.0), window.at(280.0, 150.0));
+    window.feed(InputEvent::PointerMoved { to: a });
+    window.feed(InputEvent::PointerPressed {
+        button: PointerButton::Primary,
+    });
+    window.feed(InputEvent::PointerMoved { to: b });
+    assert_eq!(window.view.document().depth(), depth, "shown live only");
+    assert!(matches!(
+        window
+            .view
+            .shown()
+            .node_at(&[0, 0])
+            .and_then(|node| node.style())
+            .map(|style| &style.fill),
+        Some(Paint::Gradient(_))
+    ));
+    window.feed(InputEvent::PointerReleased {
+        button: PointerButton::Primary,
+    });
+    assert_eq!(window.view.document().depth(), depth + 1, "one step");
+    assert_eq!(window.view.document().undo_label(), Some("Gradient"));
+    let (start, end) = linear_ends(&fill_gradient(&window, &[0, 0]));
+    let drawn = |at: tairix_geometry::Point| {
+        window
+            .view
+            .drawing_at(&window.layout, Point::new(f64::from(at.x), f64::from(at.y)))
+    };
+    assert!(start.distance(drawn(a)) < 1e-6 && end.distance(drawn(b)) < 1e-6);
+}
+
+#[test]
+fn a_gradient_laid_on_a_turned_object_lies_where_it_was_dragged() {
+    let mut window = Window::new();
+    window.view.choose_tool(Tool::Rectangle);
+    window.drag((100.0, 100.0), (300.0, 200.0));
+    window.change(Change::Rotation(30.0));
+    window.view.choose_tool(Tool::Gradient);
+    window.modifier_alt(true);
+    window.drag((200.0, 150.0), (260.0, 150.0));
+    window.modifier_alt(false);
+    let gradient = fill_gradient(&window, &[0, 0]);
+    let tairix_drawing::GradientKind::Radial { centre, .. } = gradient.kind else {
+        panic!("Alt lays a radial gradient");
+    };
+    let node = window
+        .view
+        .document()
+        .drawing()
+        .node_at(&[0, 0])
+        .expect("the rectangle");
+    let on_page = node.transform().map(centre);
+    let pressed = window.view.drawing_at(&window.layout, {
+        let at = window.at(200.0, 150.0);
+        Point::new(f64::from(at.x), f64::from(at.y))
+    });
+    assert!(
+        on_page.distance(pressed) < 1e-6,
+        "its centre where the drag began: {on_page:?} {pressed:?}"
+    );
+}
+
+#[test]
+fn a_click_with_the_gradient_tool_lays_nothing() {
+    let mut window = Window::new();
+    window.view.choose_tool(Tool::Rectangle);
+    window.drag((100.0, 100.0), (300.0, 200.0));
+    window.view.choose_tool(Tool::Gradient);
+    let depth = window.view.document().depth();
+    window.drag((150.0, 150.0), (150.0, 150.0));
+    assert_eq!(window.view.document().depth(), depth);
+    assert!(window.view.live.is_none(), "nothing left under way");
+}
+
+#[test]
+fn a_window_begins_with_the_tool_view_and_style_its_preferences_name() {
+    let mut window = Window::new();
+    let preferences = crate::preferences::Preferences {
+        tool: Tool::Pen,
+        show: crate::view::Showing {
+            outline: true,
+            grid: true,
+            snapping: true,
+        },
+        fill: None,
+        stroke: Some(Rgba::new(10, 20, 30, 255)),
+        stroke_width: 250,
+        ..crate::preferences::Preferences::default()
+    };
+    window.view.begin(&preferences);
+    assert_eq!(window.view.tool, Tool::Pen);
+    assert_eq!(window.view.show, preferences.show);
+    assert_eq!(window.view.style, preferences.style());
+    window.view.choose_tool(Tool::Rectangle);
+    window.drag((100.0, 100.0), (200.0, 200.0));
+    let drawn = window
+        .view
+        .document()
+        .drawing()
+        .node_at(&window.view.selection[0])
+        .and_then(|node| node.style().cloned())
+        .expect("a styled rectangle");
+    assert_eq!(drawn.fill, Paint::None, "drawn in the style begun with");
+}
+
+#[test]
+fn the_keys_move_things_as_far_as_the_preferences_adopted_say() {
+    let mut window = Window::new();
+    window.view.choose_tool(Tool::Rectangle);
+    window.drag((100.0, 100.0), (200.0, 200.0));
+    let preferences = crate::preferences::Preferences {
+        nudge: 250,
+        duplicate_offset: 1250,
+        ..crate::preferences::Preferences::default()
+    };
+    window.view.adopt(&preferences);
+    let before = window.view.selection_bounds();
+    window.key(Key::Named(NamedKey::Right));
+    let nudged = window.view.selection_bounds();
+    assert!(
+        (nudged.min.x - before.min.x - 2.5).abs() < 1e-9,
+        "{nudged:?}"
+    );
+    window.command(Command::Duplicate);
+    let copy = window.view.selection_bounds();
+    assert!((copy.min.x - nudged.min.x - 12.5).abs() < 1e-9, "{copy:?}");
+    assert!((copy.min.y - nudged.min.y - 12.5).abs() < 1e-9, "{copy:?}");
+}
+
+/// A picture of one colour whose natural size is `width` by `height`.
+fn picture(width: f64, height: f64) -> tairix_drawing::Image {
+    let mut pixels = tairix_raster::Surface::new(4, 2).expect("a surface");
+    pixels.fill(tairix_raster::Color::rgb(30, 120, 200));
+    let place = tairix_bezier::Bounds::from_points([Point::ZERO, Point::new(width, height)]);
+    tairix_drawing::Image::new(pixels, place, None).expect("a picture")
+}
+
+#[test]
+fn place_picture_asks_for_a_file_to_read_in_and_a_placed_one_lands_selected_in_the_middle() {
+    let mut window = Window::new();
+    let layout = window.layout;
+    let asked = window
+        .view
+        .carry_out(Command::PlacePicture, &layout, &mut Region::new())
+        .request;
+    assert!(matches!(asked, Some(Request::Import)), "{asked:?}");
+    let shown = {
+        let canvas = Point::new(
+            f64::from(layout.canvas.width),
+            f64::from(layout.canvas.height),
+        );
+        tairix_bezier::Bounds::from_points([
+            window.view.viewport.drawing_point(Point::ZERO),
+            window.view.viewport.drawing_point(canvas),
+        ])
+    };
+    let depth = window.view.document().depth();
+    window.view.placed_picture(
+        "photo.png",
+        Ok(picture(40.0, 20.0)),
+        &mut Region::new(),
+        &layout,
+    );
+    assert_eq!(window.view.document().depth(), depth + 1, "one step");
+    assert_eq!(window.view.selection, vec![vec![0, 0]]);
+    let node = window
+        .view
+        .document()
+        .drawing()
+        .node_at(&[0, 0])
+        .expect("the picture");
+    assert!(matches!(node.kind(), Kind::Image { .. }));
+    assert_eq!(node.name(), Some("photo"), "named after its file");
+    let bounds = window.view.selection_bounds();
+    assert!(
+        (bounds.width() - 40.0).abs() < 1e-9,
+        "at its own size: {bounds:?}"
+    );
+    let (middle, centre) = (bounds.centre(), shown.centre());
+    assert!((middle.x - centre.x).abs() < 1e-6 && (middle.y - centre.y).abs() < 1e-6);
+}
+
+#[test]
+fn a_picture_larger_than_the_canvas_is_placed_to_fit_and_one_that_failed_is_said() {
+    let mut window = Window::new();
+    let layout = window.layout;
+    window.view.placed_picture(
+        "huge.jpg",
+        Ok(picture(20_000.0, 10_000.0)),
+        &mut Region::new(),
+        &layout,
+    );
+    let canvas = Point::new(
+        f64::from(layout.canvas.width),
+        f64::from(layout.canvas.height),
+    );
+    let shown = tairix_bezier::Bounds::from_points([
+        window.view.viewport.drawing_point(Point::ZERO),
+        window.view.viewport.drawing_point(canvas),
+    ]);
+    let bounds = window.view.selection_bounds();
+    assert!(bounds.width() <= shown.width() && bounds.height() <= shown.height());
+    let depth = window.view.document().depth();
+    window.view.placed_picture(
+        "broken.png",
+        Err(String::from("it is damaged")),
+        &mut Region::new(),
+        &layout,
+    );
+    assert_eq!(window.view.document().depth(), depth, "nothing lands");
+    assert_eq!(
+        window.view.message.as_deref(),
+        Some("broken.png could not be placed: it is damaged")
+    );
+}
+
+impl Window {
+    fn shifted(&mut self, key: Key) {
+        self.feed(InputEvent::KeyPressed {
+            key,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        });
+    }
+
+    /// The text shown at `path`, typed or landed.
+    fn text_shown(&self, path: &[usize]) -> alloc::sync::Arc<tairix_drawing::Text> {
+        let node = self.view.shown().node_at(path).expect("the text");
+        let Kind::Text { text, .. } = node.kind() else {
+            panic!("a text object");
+        };
+        text.clone()
+    }
+}
+
+#[test]
+fn a_selection_made_while_typing_is_styled_as_a_run_and_typed_over_in_its_style() {
+    use crate::inspector::TextChange;
+
+    let mut window = Window::new();
+    window.text_at(100.0, 100.0);
+    for character in "Hello".chars() {
+        window.key(Key::Char(character));
+    }
+    window.shifted(Key::Named(NamedKey::Left));
+    window.shifted(Key::Named(NamedKey::Left));
+    assert_eq!(
+        window.view.typed(),
+        Some(3..5),
+        "shift carries the selection"
+    );
+    window.change(Change::Text(TextChange::Bold(true)));
+    window.change(Change::Paint {
+        target: Target::Fill,
+        paint: Paint::Colour(Rgba::new(200, 0, 0, 255)),
+        settled: true,
+    });
+    let styled = window.text_shown(&[0, 0]);
+    assert_eq!(styled.weight, 400, "the text itself stays as it was");
+    assert_eq!(styled.runs.len(), 1);
+    let run = &styled.runs[0];
+    assert_eq!((run.start, run.end, run.style.weight), (3, 5, Some(700)));
+    assert_eq!(
+        run.style.fill,
+        Some(tairix_drawing::RunPaint::Colour(Rgba::new(200, 0, 0, 255)))
+    );
+    window.key(Key::Char('p'));
+    let typed = window.text_shown(&[0, 0]);
+    assert_eq!(&*typed.content, "Help");
+    assert_eq!(
+        (typed.runs[0].start, typed.runs[0].end),
+        (3, 4),
+        "typed over in the selection's own style"
+    );
+    window.key(Key::Named(NamedKey::Left));
+    window.key(Key::Named(NamedKey::Left));
+    window.key(Key::Named(NamedKey::Backspace));
+    assert_eq!(&*window.text_shown(&[0, 0]).content, "Hlp");
+    window.key(Key::Named(NamedKey::Escape));
+    assert_eq!(window.view.document().depth(), 1, "one step for all of it");
+}
+
+#[test]
+fn a_style_given_the_whole_text_reaches_every_character_of_it() {
+    use crate::inspector::TextChange;
+
+    let mut window = Window::new();
+    window.text_at(100.0, 100.0);
+    for character in "Hello".chars() {
+        window.key(Key::Char(character));
+    }
+    window.shifted(Key::Named(NamedKey::Home));
+    window.shifted(Key::Named(NamedKey::Right));
+    window.change(Change::Text(TextChange::Size(40.0)));
+    window.change(Change::Text(TextChange::Raise(0.5)));
+    assert_eq!(window.text_shown(&[0, 0]).runs.len(), 1);
+    window.key(Key::Named(NamedKey::Escape));
+    window.change(Change::Text(TextChange::Size(30.0)));
+    let whole = window.text_shown(&[0, 0]);
+    assert!((whole.size - 30.0).abs() < 1e-9);
+    assert!(
+        whole.runs.iter().all(|run| run.style.size.is_none()),
+        "no run keeps a size of its own: {:?}",
+        whole.runs
+    );
+    assert!(whole
+        .runs
+        .iter()
+        .any(|run| run.style.baseline_shift == Some(0.5)));
+    window.change(Change::Paint {
+        target: Target::Fill,
+        paint: Paint::Colour(Rgba::new(0, 0, 200, 255)),
+        settled: true,
+    });
+    assert!(window
+        .text_shown(&[0, 0])
+        .runs
+        .iter()
+        .all(|run| run.style.fill.is_none()));
+}
+
+#[test]
+fn a_text_set_on_a_path_runs_along_it_and_released_is_given_its_path_back() {
+    let mut window = Window::new();
+    window.text_at(100.0, 100.0);
+    for character in "Way".chars() {
+        window.key(Key::Char(character));
+    }
+    window.key(Key::Named(NamedKey::Escape));
+    window.view.choose_tool(Tool::Line);
+    window.drag((50.0, 300.0), (400.0, 300.0));
+    assert_eq!(window.objects(), 2);
+    window.command(Command::SelectAll);
+    window.command(Command::TextOnPath);
+    assert_eq!(window.objects(), 1, "the path joined the text");
+    let along = window.text_shown(&[0, 0]);
+    let tairix_drawing::Baseline::Path(path) = &along.baseline else {
+        panic!("set along the path");
+    };
+    let start = path.first_point();
+    assert!(
+        start.distance(Point::new(50.0, 300.0)) < 2.0,
+        "where the line began: {start:?}"
+    );
+    assert_eq!(&*along.content, "Way");
+    window.command(Command::ReleaseFromPath);
+    assert_eq!(window.objects(), 2, "the path given back");
+    let released = window.text_shown(&[0, 0]);
+    assert!(matches!(
+        released.baseline,
+        tairix_drawing::Baseline::Lines { origin, .. } if origin == start
+    ));
+    let given = window
+        .view
+        .document()
+        .drawing()
+        .node_at(&[0, 1])
+        .expect("the path");
+    assert!(matches!(given.kind(), Kind::Shape { .. }));
+    assert_eq!(window.view.selection.len(), 2, "both selected");
+    window.command(Command::Undo);
+    window.command(Command::Undo);
+    assert_eq!(window.objects(), 2, "each a step of its own");
+}
+
+#[test]
+fn a_press_puts_the_caret_between_characters_and_a_drag_selects_across_them() {
+    let mut window = Window::new();
+    window.text_at(100.0, 100.0);
+    for character in "Hello".chars() {
+        window.key(Key::Char(character));
+    }
+    window.key(Key::Named(NamedKey::Escape));
+    // No glyph has arrived, so each character stands its unknown advance
+    // wide: 0.6 of the 24-pixel size.
+    let wide = 0.6 * 24.0;
+    window.view.choose_tool(Tool::Text);
+    window.drag(
+        (100.0 + 2.0 * wide + 1.0, 95.0),
+        (100.0 + 4.0 * wide - 1.0, 95.0),
+    );
+    assert_eq!(window.view.typed(), Some(2..4));
+    window.key(Key::Char('-'));
+    assert_eq!(&*window.text_shown(&[0, 0]).content, "He-o");
+}
+
+#[test]
+fn a_node_of_the_path_a_text_is_set_along_moves_as_a_paths_does() {
+    use alloc::sync::Arc;
+
+    use tairix_drawing::{Baseline, PathShape, TextPath};
+
+    let mut ids = Ids::new();
+    let line = tairix_bezier::Path {
+        subpaths: vec![{
+            let mut subpath = tairix_bezier::Subpath::new(Point::new(10.0, 10.0));
+            subpath
+                .elements
+                .push(tairix_bezier::PathEl::Line(Point::new(110.0, 10.0)));
+            subpath
+        }],
+    };
+    let text = tairix_drawing::Text {
+        baseline: Baseline::Path(Arc::new(TextPath {
+            path: Arc::new(PathShape::from_path(&line).expect("a path")),
+            start: 4.0,
+        })),
+        ..crate::testing::text("On it", Point::ZERO)
+    };
+    let node = tairix_drawing::Node::new(
+        ids.issue(),
+        Kind::Text {
+            text: Arc::new(text),
+            style: Arc::new(tairix_drawing::Style::default()),
+        },
+    )
+    .expect("a text");
+    let drawing = blank(&mut ids, &crate::preferences::Preferences::default()).expect("a drawing");
+    let (drawing, at) = crate::edit::insert(&drawing, &[0], Arc::new(node)).expect("put");
+    let placed = drawing.node_at(&at).expect("the text");
+    let grip = crate::view::Grip {
+        contour: 0,
+        node: 1,
+        part: crate::view::GripPart::Point,
+    };
+    let moved = super::moved_node(placed, &drawing, &at, grip, Point::new(110.0, 60.0))
+        .expect("moved")
+        .expect("a path to move");
+    let Kind::Text { text, .. } = moved.kind() else {
+        panic!("still a text");
+    };
+    let Baseline::Path(along) = &text.baseline else {
+        panic!("still along its path");
+    };
+    assert_eq!(
+        along.path.contours[0].nodes[1].point,
+        Point::new(110.0, 60.0)
+    );
+    assert!((along.start - 4.0).abs() < 1e-12, "its start kept");
+    assert_eq!(&*text.content, "On it");
 }

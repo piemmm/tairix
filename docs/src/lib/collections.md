@@ -34,6 +34,7 @@ enough that the ordered set is the cheaper structure.
 | `IndexedHeap<P>` | a min-heap over a holder's own dense slot numbers: the least read in O(1), a slot's priority moved either way or withdrawn in O(log n), and every entry at or below a bound walked in O(k) for the k it returns | a per-slot deadline array swept whole for what was due, and `alloc::BinaryHeap`, which can neither find an entry nor move one |
 | `SlotMap<K, V>` | values filed under keys it issues: O(1) insertion, lookup and removal, and a generation in every key that refuses it once its value is gone | a counter handing out identifiers with no reuse and no generation, so a stale one aliased whatever took its place |
 | `BitVec` | a bitmap of run-time length: O(1) get and set, the next or previous set or clear bit in time proportional to its summary's height, nothing allocated after a fallible resize | a `Vec<bool>`, a scanned `Vec<u64>`, and the `BTreeSet` a selection aborted its holder through |
+| `SharedSlice<T>`, `SharedStr` | an immutable slice or text in one block behind a thin pointer, made only fallibly; O(1) clone, the last holder freeing it, the empty one allocating nothing | an `Arc<[T]>` or `Arc<str>`, whose making aborts on a refusing heap |
 
 ## `ByteQueue`
 
@@ -168,6 +169,27 @@ context's objects, jobs and timelines in it, each context's tables charged to
 the context for their room. `smbfs` files its
 connections in one, keying the deadline heap beside it on the dense slot index
 and carrying each entry's key, so a due deadline names its connection.
+
+## `SharedSlice`, `SharedStr`, `try_arc` and `try_box`
+
+A value shared between holders and never changed — a document's names and
+text, its dash and guide lists — wants `Arc<[T]>` or `Arc<str>`, and `alloc`
+makes those only through an allocation that aborts when the heap refuses.
+
+* A `SharedSlice` is one block: a count of its holders, a length, then the
+  elements. `try_from_slice` clones into it and `try_from_vec` moves into it,
+  each answering a refusal as `TryReserveError`; a clone shares the block.
+  `SharedStr` is the same over UTF-8 text.
+* The count is incremented `Relaxed`, since a new holder is made from one
+  keeping the block alive, and decremented `Release` with an `Acquire` fence
+  before the last holder drops the elements, as `Arc`'s is. It saturates
+  rather than wrapping: past half the address space a block is never freed,
+  as the kernel's reference counts do, where a wrapped count would free a
+  block still held. `tests/loom.rs` models the hand-off.
+* `ptr_eq` tells a shared block from an equal copy, so a holder can see that
+  a value was passed through untouched.
+* `try_arc` and `try_box` share or box any value so, the one place the
+  unstable fallible `Arc` and `Box` constructors are reached.
 
 ## `OrderedMap` and `OrderedSet`
 

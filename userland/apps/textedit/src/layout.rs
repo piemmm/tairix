@@ -21,7 +21,7 @@
 //! with no room is an empty rectangle, which every painter and hit-test treats
 //! as absent.
 
-use tairix_controls::{Button, TextField};
+use tairix_controls::{Button, StatusBand, TextField};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
@@ -85,8 +85,6 @@ pub struct Layout {
 pub struct Faces {
     /// The face the grid is set in.
     pub grid: BitmapFont,
-    /// The face the status band is set in.
-    pub status: BitmapFont,
 }
 
 impl Layout {
@@ -114,8 +112,9 @@ impl Layout {
         let mut rest = window;
 
         let button_row = Button::height(scale, theme);
-        let status = rest.take_bottom(status_height(faces, gap));
-        let (position, message, status_fields) = status_slots(status, faces.status, gap);
+        let band = StatusBand::new(theme, scale);
+        let status = rest.take_bottom(band.height());
+        let (position, message, status_fields) = status_slots(status, band);
 
         let (find_band, find_field, replace_field, find_buttons) = if find {
             let row = TextField::height(scale, theme).max(button_row);
@@ -173,12 +172,13 @@ impl Layout {
     /// a few rows and columns.
     #[must_use]
     pub fn min_size(theme: &Theme, scale: Scale, faces: Faces) -> (u32, u32) {
-        let metrics = theme.metrics();
-        let gap = scale.scale_length(metrics.control_gap).max(1);
-        let bar = scale.scale_length(metrics.scrollbar_breadth).max(1);
+        let bar = scale.scale_length(theme.metrics().scrollbar_breadth).max(1);
         let columns = faces.grid.cell_width().max(1) * MIN_COLUMNS;
         let rows = faces.grid.line_height().max(1) * MIN_ROWS;
-        (columns + bar, status_height(faces, gap) + bar + rows)
+        (
+            columns + bar,
+            StatusBand::new(theme, scale).height() + bar + rows,
+        )
     }
 
     /// How many digits the gutter was sized for; none in the hex view.
@@ -340,26 +340,15 @@ impl Layout {
     }
 }
 
-/// The status band's height: a line of its face and a gap above and below.
-fn status_height(faces: Faces, gap: u32) -> u32 {
-    faces.status.line_height().max(1) + gap * 2
-}
-
 /// The status band's position slot, message slot, and clickable fields.
-fn status_slots(band: Rect, face: BitmapFont, gap: u32) -> (Rect, Rect, [Rect; STATUS_FIELDS]) {
-    let inner = Rect::new(
-        band.left().saturating_add_unsigned(gap),
-        band.top(),
-        band.width.saturating_sub(gap * 2),
-        band.height,
+fn status_slots(status: Rect, band: StatusBand) -> (Rect, Rect, [Rect; STATUS_FIELDS]) {
+    let slots = band.slots(
+        status,
+        [band.slot_width(POSITION_WIDEST)],
+        STATUS_WIDEST.map(|widest| band.slot_width(widest)),
     );
-    let mut rest = inner;
-    let mut fields = [Rect::EMPTY; STATUS_FIELDS];
-    for (field, widest) in fields.iter_mut().zip(STATUS_WIDEST) {
-        *field = rest.take_right(face.text_width(widest) + gap * 2);
-    }
-    let position = rest.take_left(face.text_width(POSITION_WIDEST) + gap * 2);
-    (position, rest, fields)
+    let [position] = slots.leading;
+    (position, slots.message, slots.trailing)
 }
 
 /// The find bar's two fields and its buttons, the fields sharing what the

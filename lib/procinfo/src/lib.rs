@@ -18,12 +18,12 @@
 //!   request and writes a line. Keeping them behind object-safe traits is
 //!   what lets the consuming tools run against in-memory fixtures with no
 //!   kernel, mirroring the seam design of the other userland crates.
-//! * [`encode_request`], which frames a
+//! * [`call`], which frames a
 //!   [`SysinfoQueryId`](tairix_abi::sysinfo::SysinfoQueryId) and its typed
 //!   payload into the `sysinfo-v1`
 //!   [`SysinfoRequestHeader`](tairix_abi::sysinfo::SysinfoRequestHeader)
-//!   envelope, and [`call`], which issues a request and maps a capability
-//!   denial onto the distinguished [`CallError::PermissionDenied`].
+//!   envelope, issues it, and maps a capability denial onto the
+//!   distinguished [`CallError::PermissionDenied`].
 //! * [`for_each_process`], the paged process-list walk, plus
 //!   [`PROCESS_HEADER`], [`render_process`], and [`state_char`] — the
 //!   shared columnar rendering.
@@ -76,7 +76,7 @@
 //! # Module map
 //!
 //! * [`transport`] — the [`Transport`] and [`Output`] seams.
-//! * [`request`] — [`encode_request`], [`call`], and [`CallError`].
+//! * [`request`] — [`call`] and [`CallError`].
 //! * [`hwtree`] — the shared paged `HARDWARE_TREE` fetch and the
 //!   stable-bus-order / topology-view walk the device-inventory listing
 //!   tools (`lspci`, `lsusb`) share.
@@ -201,7 +201,7 @@ pub use process::{
 pub use raid::{for_each_raid_array, for_each_raid_member, RAID_PAGE};
 #[cfg(all(freestanding, feature = "program"))]
 pub use raid::{raid_arrays, raid_members};
-pub use request::{call, encode_request, CallError};
+pub use request::{call, CallError};
 pub use resinfo::{
     render_limit_bound, Authorization, InfoValue, Metric, MetricKind, Producer, ResetBehavior,
     ResourceResponse, ResponsePayload, Sensitivity, Unit, ValueKind, MAX_INFO_VALUE_LEN,

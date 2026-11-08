@@ -1,13 +1,14 @@
 //! Framing a `sysinfo-v1` request and issuing it through the [`Transport`]
 //! seam.
 //!
-//! Both the `sysinfo` and `ps` tools build the same [`SysinfoRequestHeader`]
+//! Both the `sysinfo` and `ps` tools build the same
+//! [`SysinfoRequestHeader`](tairix_abi::sysinfo::SysinfoRequestHeader)
 //! envelope and map a capability denial onto the same distinguished error,
 //! so that logic lives here rather than being copied.
 
 use alloc::vec::Vec;
 
-use tairix_abi::sysinfo::{encode_request as frame_request, SysinfoQueryId, SysinfoRequestHeader};
+use tairix_abi::sysinfo::{encode_request, SysinfoQueryId, SYSINFO_MAX_REQUEST};
 use tairix_abi::Errno;
 
 use crate::transport::Transport;
@@ -29,41 +30,29 @@ pub enum CallError {
     Service(Errno),
 }
 
-/// Frame `query` and its already-encoded `payload` into an owned
-/// `sysinfo-v1` request buffer.
-///
-/// The envelope itself is built by the one framer in `lib/abi`, beside the
-/// reply framing it mirrors; this adds only the allocation a tool wants and
-/// the runtime's cache reporter does not. Every payload a client builds is
-/// at most a handful of bytes and the buffer is sized to fit exactly, so the
-/// framer cannot refuse; an empty request on that unreachable path would be
-/// refused by the service rather than misread.
-#[must_use]
-pub fn encode_request(query: SysinfoQueryId, payload: &[u8]) -> Vec<u8> {
-    let mut bytes = alloc::vec![0u8; SysinfoRequestHeader::WIRE_LEN + payload.len()];
-    match frame_request(query, payload, &mut bytes) {
-        Ok(len) => bytes.truncate(len),
-        Err(_) => bytes.clear(),
-    }
-    bytes
-}
-
 /// Issue `query` with `payload` through `transport`, mapping the transport
 /// [`Errno`] onto the [`CallError`] vocabulary so a capability denial renders
 /// precisely.
+///
+/// The request is framed in place at the endpoint's own bound, so asking
+/// costs no allocation and a payload the endpoint could never take is refused
+/// here.
 ///
 /// # Errors
 ///
 /// * [`CallError::PermissionDenied`] — the service refused the query for want
 ///   of its declared capability.
-/// * [`CallError::Service`] — any other transport or IPC failure.
+/// * [`CallError::Service`] — any other transport or IPC failure, or the
+///   framer's refusal of a payload past the endpoint's bound.
 pub fn call(
     transport: &dyn Transport,
     query: SysinfoQueryId,
     payload: &[u8],
 ) -> Result<Vec<u8>, CallError> {
+    let mut request = [0u8; SYSINFO_MAX_REQUEST];
+    let len = encode_request(query, payload, &mut request).map_err(CallError::Service)?;
     transport
-        .query(&encode_request(query, payload))
+        .query(&request[..len])
         .map_err(|errno| match errno {
             Errno::PermissionDenied => CallError::PermissionDenied,
             other => CallError::Service(other),
@@ -72,10 +61,10 @@ pub fn call(
 
 #[cfg(test)]
 mod tests {
-    use super::{call, encode_request, CallError};
+    use super::{call, CallError};
     use crate::transport::Transport;
     use alloc::vec::Vec;
-    use tairix_abi::sysinfo::{SysinfoQueryId, SysinfoRequestHeader};
+    use tairix_abi::sysinfo::{SysinfoQueryId, SysinfoRequestHeader, SYSINFO_MAX_REQUEST};
     use tairix_abi::Errno;
 
     struct Echo {
@@ -90,10 +79,19 @@ mod tests {
         }
     }
 
+    fn echo() -> Echo {
+        Echo {
+            reply: Ok(Vec::new()),
+            seen: core::cell::RefCell::new(Vec::new()),
+        }
+    }
+
     #[test]
-    fn encode_request_frames_header_and_payload() {
+    fn call_frames_the_header_and_payload_exactly() {
         let payload = [1u8, 2, 3, 4];
-        let bytes = encode_request(SysinfoQueryId::SELF_PROCESS_LIST, &payload);
+        let echo = echo();
+        call(&echo, SysinfoQueryId::SELF_PROCESS_LIST, &payload).expect("ok");
+        let bytes = echo.seen.borrow();
         assert_eq!(bytes.len(), SysinfoRequestHeader::WIRE_LEN + payload.len());
         let header = SysinfoRequestHeader::from_bytes(&bytes).expect("decode");
         assert_eq!(header.query, SysinfoQueryId::SELF_PROCESS_LIST);
@@ -102,11 +100,24 @@ mod tests {
     }
 
     #[test]
-    fn encode_request_handles_an_empty_payload() {
-        let bytes = encode_request(SysinfoQueryId::UPTIME, &[]);
+    fn call_frames_an_empty_payload() {
+        let echo = echo();
+        call(&echo, SysinfoQueryId::UPTIME, &[]).expect("ok");
+        let bytes = echo.seen.borrow();
         let header = SysinfoRequestHeader::from_bytes(&bytes).expect("decode");
         assert_eq!(header.payload_len, 0);
         assert_eq!(bytes.len(), SysinfoRequestHeader::WIRE_LEN);
+    }
+
+    #[test]
+    fn a_payload_past_the_endpoint_bound_is_refused_before_it_is_sent() {
+        let echo = echo();
+        let payload = [0u8; SYSINFO_MAX_REQUEST];
+        assert_eq!(
+            call(&echo, SysinfoQueryId::UPTIME, &payload),
+            Err(CallError::Service(Errno::BufferTooSmall))
+        );
+        assert!(echo.seen.borrow().is_empty());
     }
 
     #[test]

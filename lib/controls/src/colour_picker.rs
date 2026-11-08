@@ -1978,23 +1978,15 @@ impl ColourPicker {
         (scale, theme): (Scale, &Theme),
     ) {
         let earlier = self.earlier.unwrap_or(Rgba::TRANSPARENT);
+        let disabled = self.state.disposition() == ControlDisposition::DisabledByState;
         for (rect, colour) in [(layout.earlier, earlier), (layout.now, self.colour())] {
-            let Some((x, y, w, h)) = surface_rect(rect).filter(|_| !rect.is_empty()) else {
-                continue;
-            };
-            if !colour.is_opaque() {
-                Checker::new(theme, scale)
-                    .with_side(h.div_ceil(2))
-                    .paint(surface, x, y, w, h);
-            }
-            surface.fill_round_rect(x, y, w, h, 0, Color::from(colour));
-            ring(
+            paint_sample(
                 surface,
                 rect,
-                layout.measures.border,
-                Color::from(theme.palette().rim),
+                colour,
+                (layout.measures.border, disabled),
+                (scale, theme),
             );
-            self.veil(surface, rect, theme);
         }
         // A value past sRGB shows the nearest colour in it, and says so.
         if self.clipped {
@@ -2008,13 +2000,42 @@ impl ColourPicker {
 
     /// Half veil a part of a disabled picker, so it still shows what it holds.
     fn veil(&self, surface: &mut Surface, rect: Rect, theme: &Theme) {
-        if self.state.disposition() != ControlDisposition::DisabledByState {
-            return;
+        if self.state.disposition() == ControlDisposition::DisabledByState {
+            veil(surface, rect, theme);
         }
-        if let Some((x, y, w, h)) = surface_rect(rect) {
-            let veil = Color::from(theme.palette().surface.with_alpha(128));
-            surface.fill_round_rect(x, y, w, h, 0, veil);
-        }
+    }
+}
+
+/// Half veil `rect`, so a disabled part still shows what it holds.
+fn veil(surface: &mut Surface, rect: Rect, theme: &Theme) {
+    if let Some((x, y, w, h)) = surface_rect(rect) {
+        let veil = Color::from(theme.palette().surface.with_alpha(128));
+        surface.fill_round_rect(x, y, w, h, 0, veil);
+    }
+}
+
+/// One colour sample at `rect`, as every swatch of a colour is drawn: over a
+/// checker where it is translucent, ringed `border` thick, half veiled when
+/// `disabled`.
+pub(crate) fn paint_sample(
+    surface: &mut Surface,
+    rect: Rect,
+    colour: Rgba,
+    (border, disabled): (u32, bool),
+    (scale, theme): (Scale, &Theme),
+) {
+    let Some((x, y, w, h)) = surface_rect(rect).filter(|_| !rect.is_empty()) else {
+        return;
+    };
+    if !colour.is_opaque() {
+        Checker::new(theme, scale)
+            .with_side(h.div_ceil(2))
+            .paint(surface, x, y, w, h);
+    }
+    surface.fill_round_rect(x, y, w, h, 0, Color::from(colour));
+    ring(surface, rect, border, Color::from(theme.palette().rim));
+    if disabled {
+        veil(surface, rect, theme);
     }
 }
 

@@ -13,9 +13,10 @@ use super::{
     TAG_BITS_PER_SAMPLE, TAG_COLOUR_MAP, TAG_COMPRESSION, TAG_EXTRA_SAMPLES, TAG_FILL_ORDER,
     TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH, TAG_INK_SET, TAG_JPEG_TABLES, TAG_NEW_SUBFILE_TYPE,
     TAG_ORIENTATION, TAG_PHOTOMETRIC, TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR,
-    TAG_REFERENCE_BLACK_WHITE, TAG_ROWS_PER_STRIP, TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT,
-    TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS, TAG_T4_OPTIONS, TAG_TILE_BYTE_COUNTS,
-    TAG_TILE_LENGTH, TAG_TILE_OFFSETS, TAG_TILE_WIDTH, TAG_YCBCR_SUBSAMPLING,
+    TAG_REFERENCE_BLACK_WHITE, TAG_RESOLUTION_UNIT, TAG_ROWS_PER_STRIP, TAG_SAMPLES_PER_PIXEL,
+    TAG_SAMPLE_FORMAT, TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS, TAG_T4_OPTIONS,
+    TAG_TILE_BYTE_COUNTS, TAG_TILE_LENGTH, TAG_TILE_OFFSETS, TAG_TILE_WIDTH, TAG_X_RESOLUTION,
+    TAG_YCBCR_SUBSAMPLING, TAG_Y_RESOLUTION,
 };
 use crate::ifd::{BYTE, LONG, RATIONAL, SHORT, UNDEFINED};
 use crate::{DecodeError, DecodeLimits, ImageFormat, RasterImage, Sequence, SequenceKind};
@@ -821,6 +822,32 @@ fn every_orientation_places_the_stored_raster() {
         let got: Vec<u8> = (0..4).map(|at| pixel(&image, at % 2, at / 2)[0]).collect();
         assert_eq!(&got[..], &want[..], "orientation {orientation}");
     }
+}
+
+#[test]
+fn a_transposing_orientation_turns_the_density_with_the_picture() {
+    let density_of = |orientation| {
+        let page = grey(4, 2, vec![0u8; 8])
+            .tag(TAG_ORIENTATION, SHORT, &[orientation])
+            .tag(TAG_X_RESOLUTION, RATIONAL, &[72, 1])
+            .tag(TAG_Y_RESOLUTION, RATIONAL, &[144, 1])
+            .tag(TAG_RESOLUTION_UNIT, SHORT, &[2]);
+        let bytes = build(false, &[page]);
+        let crate::NativeDocument::Pages { mut pages, .. } =
+            crate::open_native(ImageFormat::Tiff, &bytes[..], &limits()).expect("opens")
+        else {
+            panic!("pages");
+        };
+        pages.page(0).expect("decodes").expect("a page").density()
+    };
+    let inch = |across, down| crate::Density::whole(across, down, crate::DensityUnit::Inch);
+    assert_eq!(density_of(1), inch(72, 144));
+    assert_eq!(
+        density_of(6),
+        inch(144, 72),
+        "the picture's axes are the raster's swapped"
+    );
+    assert_eq!(density_of(3), inch(72, 144), "a half turn keeps its axes");
 }
 
 #[test]

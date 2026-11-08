@@ -25,7 +25,7 @@ use crate::compute::{Compute, Reshape};
 use crate::edit::{self, Arrange};
 use crate::glyphs::{Arrived, Lettering};
 use crate::input::ViewOutcome;
-use crate::inspector::LayerCommand;
+use crate::inspector::{LayerCommand, Tab};
 use crate::layout::Layout;
 use crate::tools::Tool;
 use crate::view::{MenuKind, Own, View};
@@ -43,9 +43,6 @@ const PAPER_IDS: u16 = 300;
 /// Where the units' rows are numbered from.
 const UNIT_IDS: u16 = 340;
 
-/// How far a duplicate is set off from its original, in drawing pixels.
-const DUPLICATE_OFFSET: f64 = 10.0;
-
 /// A command.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u16)]
@@ -58,7 +55,7 @@ pub enum Command {
     Save,
     /// Save under another name.
     SaveAs,
-    /// Write a copy as SVG, PDF or PNG.
+    /// Write a copy as PDF, EPS, PNG, JPEG, TIFF or SVG.
     SaveCopy,
     /// Close the window.
     Close,
@@ -146,14 +143,36 @@ pub enum Command {
     Snap,
     /// Turn the page between upright and landscape.
     Landscape,
-    /// Give the page a white ground, or none.
-    Background,
+    /// Give the page the ground the Page tab holds, or none.
+    Ground,
+    /// Show the selection only within its uppermost object.
+    Clip,
+    /// Show a clipped group whole again.
+    ReleaseClip,
+    /// Cut the selection into the pieces its overlaps make.
+    Divide,
+    /// Grow the selection outward by the offset distance.
+    Outset,
+    /// Shrink the selection inward by the offset distance.
+    Inset,
+    /// Trace the selection again with fewer nodes.
+    Simplify,
+    /// Run the selected paths the other way.
+    Reverse,
+    /// Show the page's settings in the inspector.
+    PageSetup,
+    /// Choose a picture to place in the layer in hand.
+    PlacePicture,
+    /// Set the selected text along the selected shape's outline.
+    TextOnPath,
+    /// Set texts along paths in lines again, each path given back.
+    ReleaseFromPath,
 }
 
 impl Command {
     /// Every command, in the order of its id: the one numbered `n` is
     /// `ALL[n - 1]`.
-    const ALL: [Self; 49] = [
+    const ALL: [Self; 60] = [
         Self::NewWindow,
         Self::Open,
         Self::Save,
@@ -202,7 +221,18 @@ impl Command {
         Self::Grid,
         Self::Snap,
         Self::Landscape,
-        Self::Background,
+        Self::Ground,
+        Self::Clip,
+        Self::ReleaseClip,
+        Self::Divide,
+        Self::Outset,
+        Self::Inset,
+        Self::Simplify,
+        Self::Reverse,
+        Self::PageSetup,
+        Self::PlacePicture,
+        Self::TextOnPath,
+        Self::ReleaseFromPath,
     ];
 
     /// Whether whatever is under way lands before it is carried out: every
@@ -258,8 +288,9 @@ impl Command {
             Self::Open => row(S::Open, "Open\u{2026}", Always).on(Chord::ctrl('o')),
             Self::Save => row(S::Save, "Save", Always).on(Chord::ctrl('s')),
             Self::SaveAs => row(S::SaveAs, "Save as\u{2026}", Always).on(Chord::ctrl_shift('s')),
-            Self::SaveCopy => row(S::SaveAs, "Save a copy as SVG, PDF or PNG\u{2026}", Always)
-                .on(Chord::ctrl_shift('e')),
+            Self::SaveCopy => {
+                row(S::SaveAs, "Save a copy\u{2026}", Always).on(Chord::ctrl_shift('e'))
+            }
             Self::Close => row(S::Close, "Close", Always).on(Chord::ctrl('w')),
             Self::Undo => row(S::Undo, "Undo", Undoable).on(Chord::ctrl('z')),
             Self::Redo => row(S::Redo, "Redo", Redoable).on(Chord::ctrl_shift('z')),
@@ -304,6 +335,8 @@ impl Command {
                 row(S::ObjectToPath, "Object to path", Selected).on(Chord::ctrl_shift('c'))
             }
             Self::OutlineStrokes => row(S::StrokeToPath, "Stroke to path", Selected),
+            Self::TextOnPath => row(S::ToolText, "Set text on path", Several),
+            Self::ReleaseFromPath => row(S::ReleaseClip, "Release from path", Selected),
             Self::NewLayer => row(S::LayerNew, "New layer", Always).on(Chord::ctrl_shift('n')),
             Self::RemoveLayer => row(S::Remove, "Remove layer", Layers).destructive(),
             Self::RaiseLayer => row(S::LayerRaise, "Raise layer", Always)
@@ -326,8 +359,19 @@ impl Command {
                 let page = view.document().drawing().page();
                 page.width > page.height
             }),
-            Self::Background => row(S::PageGround, "White ground", Always)
+            Self::Ground => row(S::PageGround, "Ground", Always)
                 .mark(|view| view.document().drawing().page().background.is_some()),
+            Self::Clip => row(S::Clip, "Clip to the top object", Several).on(Chord::ctrl('7')),
+            Self::ReleaseClip => row(S::ReleaseClip, "Release clip", Selected),
+            Self::Divide => row(S::Divide, "Divide", Several),
+            Self::Outset => row(S::Outset, "Outset", Selected),
+            Self::Inset => row(S::Inset, "Inset", Selected),
+            Self::Simplify => row(S::Simplify, "Simplify", Selected),
+            Self::Reverse => row(S::ReverseDirection, "Reverse direction", Selected),
+            Self::PageSetup => row(S::Properties, "Page setup", Always),
+            Self::PlacePicture => {
+                row(S::PlacePicture, "Place picture\u{2026}", Always).on(Chord::ctrl_shift('p'))
+            }
         }
     }
 }
@@ -539,6 +583,7 @@ enum Row {
 const FILE: &[Row] = &[
     Row::Command(Command::NewWindow),
     Row::Command(Command::Open),
+    Row::Command(Command::PlacePicture),
     Row::Rule,
     Row::Command(Command::Save),
     Row::Command(Command::SaveAs),
@@ -548,10 +593,12 @@ const FILE: &[Row] = &[
 ];
 
 const PAGE: &[Row] = &[
+    Row::Command(Command::PageSetup),
+    Row::Rule,
     Row::Papers,
     Row::Rule,
     Row::Command(Command::Landscape),
-    Row::Command(Command::Background),
+    Row::Command(Command::Ground),
     Row::Units,
 ];
 
@@ -572,6 +619,8 @@ const EDIT: &[Row] = &[
 const OBJECT: &[Row] = &[
     Row::Command(Command::Group),
     Row::Command(Command::Ungroup),
+    Row::Command(Command::Clip),
+    Row::Command(Command::ReleaseClip),
     Row::Rule,
     Row::Command(Command::ToFront),
     Row::Command(Command::Raise),
@@ -594,9 +643,18 @@ const PATH: &[Row] = &[
     Row::Command(Command::Difference),
     Row::Command(Command::Intersection),
     Row::Command(Command::Exclusion),
+    Row::Command(Command::Divide),
     Row::Rule,
     Row::Command(Command::ToPaths),
     Row::Command(Command::OutlineStrokes),
+    Row::Rule,
+    Row::Command(Command::Outset),
+    Row::Command(Command::Inset),
+    Row::Command(Command::Simplify),
+    Row::Command(Command::Reverse),
+    Row::Rule,
+    Row::Command(Command::TextOnPath),
+    Row::Command(Command::ReleaseFromPath),
 ];
 
 const LAYER: &[Row] = &[
@@ -883,7 +941,7 @@ impl View {
             }
             Chosen::Unit(unit) => {
                 self.land_pending(damage);
-                self.set_unit(unit, layout);
+                self.set_unit(unit);
             }
         }
         Outcome::none()
@@ -903,6 +961,7 @@ impl View {
         match command {
             Command::NewWindow => return self.asking(Request::Own(Own::NewWindow)),
             Command::Open => return self.asking(Request::Open),
+            Command::PlacePicture => return self.asking(Request::Import),
             Command::Save => return self.asking(Request::Save),
             Command::SaveAs => return self.asking(Request::SaveAs),
             Command::SaveCopy => return self.asking(Request::SaveCopy),
@@ -915,6 +974,10 @@ impl View {
                 return self.reshape(Reshape::Combine(Operation::Intersection));
             }
             Command::Exclusion => return self.reshape(Reshape::Combine(Operation::Exclusion)),
+            Command::Divide => return self.reshape(Reshape::Divide),
+            Command::Outset => return self.reshape(Reshape::Offset(self.offset_distance)),
+            Command::Inset => return self.reshape(Reshape::Offset(-self.offset_distance)),
+            Command::Simplify => return self.reshape(Reshape::Simplify(self.simplify_tolerance)),
             Command::ToPaths => return self.reshape(Reshape::ToPaths),
             Command::OutlineStrokes => return self.reshape(Reshape::OutlineStrokes),
             Command::Undo => self.undo(false, damage),
@@ -925,6 +988,25 @@ impl View {
             Command::SelectNone => self.selection.clear(),
             Command::Group => self.group(),
             Command::Ungroup => self.ungroup(),
+            Command::Clip => self.clip(),
+            Command::ReleaseClip => {
+                let result = edit::release_clip(self.document.drawing(), &self.selection);
+                self.apply(result, "Release clip");
+            }
+            Command::TextOnPath => {
+                match edit::set_on_path(self.document.drawing(), &self.selection) {
+                    Ok((drawing, path)) => {
+                        self.commit(drawing, "Set text on path");
+                        self.select(alloc::vec![path]);
+                    }
+                    Err(error) => self.say_error("Set text on path", error),
+                }
+            }
+            Command::ReleaseFromPath => self.release_from_path(),
+            Command::Reverse => {
+                let result = edit::reverse(self.document.drawing(), &self.selection);
+                self.apply(result, "Reverse direction");
+            }
             Command::Raise => self.arrange(Arrange::Raise),
             Command::Lower => self.arrange(Arrange::Lower),
             Command::ToFront => self.arrange(Arrange::Top),
@@ -950,8 +1032,12 @@ impl View {
             Command::Outline => self.toggle_outlines(),
             Command::Grid => self.show.grid = !self.show.grid,
             Command::Snap => self.show.snapping = !self.show.snapping,
-            Command::Landscape => self.turn_page(layout),
-            Command::Background => self.toggle_ground(layout),
+            Command::Landscape => {
+                let page = self.document.drawing().page();
+                self.lay_page(page.width <= page.height);
+            }
+            Command::Ground => self.toggle_ground(),
+            Command::PageSetup => self.inspector.show_tab(Tab::Page),
         }
         self.refresh_inspector();
         Outcome::none()
@@ -979,22 +1065,26 @@ impl View {
     /// Put the selection on the clipboard, taking it out of the drawing when
     /// `cut`.
     fn copy(&mut self, cut: bool) -> ViewOutcome {
-        let Some(copied) = self.selection_drawing() else {
-            return Outcome::none();
-        };
-        let Ok(text) = tairix_drawing::svg::write(&copied) else {
-            self.message = Some(String::from("There is not enough memory to copy"));
-            return Outcome::none();
+        let copied = match self.selection_drawing() {
+            Ok(Some(copied)) => copied,
+            Ok(None) => return Outcome::none(),
+            Err(error) => {
+                self.say_error("Copy", error.into());
+                return Outcome::none();
+            }
         };
         if cut {
             self.delete_selection();
         }
-        self.asking(Request::Own(Own::Copy(text)))
+        self.asking(Request::Own(Own::Copy(copied)))
     }
 
     fn duplicate(&mut self) {
         let mut ids = self.document.ids().clone();
-        let offset = Point::new(DUPLICATE_OFFSET, DUPLICATE_OFFSET);
+        let offset = Point::new(
+            self.handling.duplicate_offset,
+            self.handling.duplicate_offset,
+        );
         match edit::duplicate(self.document.drawing(), &self.selection, offset, &mut ids) {
             Ok((drawing, placed)) => {
                 *self.document.ids() = ids;
@@ -1014,6 +1104,34 @@ impl View {
                 self.select(alloc::vec![path]);
             }
             Err(error) => self.say_error("Group", error),
+        }
+    }
+
+    /// Each selected text set along a path set in lines again, its path
+    /// given back after it stroked as new lines are drawn.
+    fn release_from_path(&mut self) {
+        let mut ids = self.document.ids().clone();
+        let mut line = self.style.clone();
+        line.fill = tairix_drawing::Paint::None;
+        match edit::release_from_path(self.document.drawing(), &self.selection, &line, &mut ids) {
+            Ok((drawing, placed)) => {
+                *self.document.ids() = ids;
+                self.commit(drawing, "Release from path");
+                self.select(placed);
+            }
+            Err(error) => self.say_error("Release from path", error),
+        }
+    }
+
+    fn clip(&mut self) {
+        let mut ids = self.document.ids().clone();
+        match edit::clip(self.document.drawing(), &self.selection, &mut ids) {
+            Ok((drawing, path)) => {
+                *self.document.ids() = ids;
+                self.commit(drawing, "Clip");
+                self.select(alloc::vec![path]);
+            }
+            Err(error) => self.say_error("Clip", error),
         }
     }
 
@@ -1082,69 +1200,79 @@ impl View {
         self.tiles.invalidate(self.scene);
     }
 
-    fn turn_page(&mut self, layout: &Layout) {
-        let page = *self.document.drawing().page();
-        let turned = tairix_drawing::Page {
-            width: page.height,
-            height: page.width,
-            ..page
-        };
-        self.set_page(turned, "Orientation", layout);
+    /// The page laid out wider than it is tall, or taller than it is wide
+    /// when not `landscape`.
+    pub(crate) fn lay_page(&mut self, landscape: bool) {
+        self.repage("Orientation", true, |page| *page = page.turned(landscape));
     }
 
-    fn toggle_ground(&mut self, layout: &Layout) {
-        let page = *self.document.drawing().page();
-        let background = match page.background {
-            Some(_) => None,
-            None => Some(tairix_colour::Rgba::new(255, 255, 255, 255)),
-        };
-        self.set_page(
-            tairix_drawing::Page { background, ..page },
-            "Page ground",
-            layout,
-        );
+    /// The page given the ground the Page tab's picker holds, or none where
+    /// it has one.
+    fn toggle_ground(&mut self) {
+        let ground = self.inspector.ground_colour();
+        self.repage("Page ground", true, |page| {
+            page.background = match page.background {
+                Some(_) => None,
+                None => Some(ground),
+            };
+        });
     }
 
     /// The page made the paper at `index` of the table, turned as the page
-    /// is turned now.
+    /// is turned now, and fitted in the window.
     fn set_paper(&mut self, index: usize, layout: &Layout) {
-        let page = *self.document.drawing().page();
         let Some(paper) = tairix_drawing::PAPER.get(index) else {
             return;
         };
-        let mut sized = tairix_drawing::Page {
-            background: page.background,
-            ..tairix_drawing::Page::of(paper)
-        };
-        if page.width > page.height && sized.width < sized.height {
-            core::mem::swap(&mut sized.width, &mut sized.height);
+        let sized = self.repage("Page size", true, |page| {
+            let landscape = page.width > page.height;
+            let held = tairix_drawing::Page {
+                background: page.background,
+                ..tairix_drawing::Page::of(paper)
+            };
+            // A page on its side takes the paper on its side; an upright one
+            // takes it as it is usually held, a screen wider than tall.
+            *page = if landscape { held.turned(true) } else { held };
+        });
+        if sized {
+            self.fit(self.shown().page().bounds(), layout);
         }
-        self.set_page(sized, "Page size", layout);
     }
 
     /// The page measured in `unit`, its size unchanged.
-    fn set_unit(&mut self, unit: tairix_drawing::Unit, layout: &Layout) {
-        let page = *self.document.drawing().page();
-        let ratio = page.unit.pixels() / unit.pixels();
-        let converted = tairix_drawing::Page {
-            width: page.width * ratio,
-            height: page.height * ratio,
-            unit,
-            background: page.background,
-        };
-        self.set_page(converted, "Units", layout);
+    pub(crate) fn set_unit(&mut self, unit: tairix_drawing::Unit) {
+        self.repage("Units", true, |page| *page = page.measured_in(unit));
     }
 
-    /// The document's page made `page`, fitted in the window.
-    fn set_page(&mut self, page: tairix_drawing::Page, label: &'static str, layout: &Layout) {
-        let result = self
-            .document
-            .drawing()
-            .with_page(page)
-            .map_err(edit::EditError::from);
-        if self.apply(result, label) {
-            self.fit(page.bounds(), layout);
-        }
+    /// The page as `alter` leaves it: shown while `settled` is false, landed
+    /// as one step called `label` once it is, and joining typing under way.
+    /// Answers whether the drawing took it.
+    pub(crate) fn repage(
+        &mut self,
+        label: &'static str,
+        settled: bool,
+        alter: impl FnOnce(&mut tairix_drawing::Page),
+    ) -> bool {
+        let base = self.edit_base();
+        let mut page = *base.page();
+        alter(&mut page);
+        let result = base.with_page(page).map_err(edit::EditError::from);
+        let taken = result.is_ok();
+        self.take_change(result, label, settled);
+        taken
+    }
+
+    /// The grid as `alter` leaves it, landed as one step called `label`.
+    pub(crate) fn regrid(
+        &mut self,
+        label: &'static str,
+        alter: impl FnOnce(&mut tairix_drawing::Grid),
+    ) {
+        let base = self.edit_base();
+        let mut grid = base.grid();
+        alter(&mut grid);
+        let result = base.with_grid(grid).map_err(edit::EditError::from);
+        self.take_change(result, label, true);
     }
 
     /// Fit `bounds` in the canvas.

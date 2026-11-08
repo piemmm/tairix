@@ -43,7 +43,9 @@ save never waits behind them.
 ## Limits
 
 - A picture is at most 65,536 pixels on a side and 64 Mi pixels in all, and a
-  document file at most 64 MiB: the sandboxed decode's own bounds.
+  document file at most what the sandboxed decode's worker holds on this
+  computer — a quarter of the RAM less its message frames, and never less
+  than 64 MiB: the sandboxed decode's own bounds.
 - A sprite file holds at most 4,096 sprites.
 - The undo history keeps every step at normal memory pressure, twice the
   document's pixels at mild pressure, once at moderate, and nothing beyond.

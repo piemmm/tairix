@@ -91,11 +91,12 @@ const LATIN1_EXTRAS: [Option<char>; 32] = [
     Some('\u{FB02}'),
 ];
 
-/// The character a RISC OS name spells as `byte` in RISC OS's Latin-1 —
-/// ISO 8859-1 with characters of its own in `0x80..=0x9F` — or `None` for a
-/// byte no name holds: a control code, or one of those it leaves undefined.
+/// The character `byte` spells in RISC OS's Latin-1 — ISO 8859-1 with
+/// characters of its own in `0x80..=0x9F`, the alphabet of RISC OS's names
+/// and text alike — or `None` for a byte no name or text holds: a control
+/// code, or one of those it leaves undefined.
 #[must_use]
-pub fn name_char(byte: u8) -> Option<char> {
+pub fn latin1_char(byte: u8) -> Option<char> {
     match byte {
         0..=0x1F | 0x7F => None,
         0x80..=0x9F => LATIN1_EXTRAS[usize::from(byte - 0x80)],
@@ -103,10 +104,10 @@ pub fn name_char(byte: u8) -> Option<char> {
     }
 }
 
-/// The byte RISC OS's Latin-1 spells `ch` as in a name, or `None` for a
-/// character it has none for.
+/// The byte RISC OS's Latin-1 spells `ch` as, or `None` for a character it
+/// has none for.
 #[must_use]
-pub fn name_byte(ch: char) -> Option<u8> {
+pub fn latin1_byte(ch: char) -> Option<u8> {
     match u8::try_from(u32::from(ch)) {
         Ok(byte @ (0x20..=0x7E | 0xA0..=0xFF)) => Some(byte),
         _ => LATIN1_EXTRAS

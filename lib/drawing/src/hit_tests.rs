@@ -14,15 +14,9 @@ use crate::id::Ids;
 use crate::node::{Kind, Node};
 use crate::shape::{PathShape, RectShape, Shape};
 use crate::style::{Paint, Stroke, Style};
-use crate::text::{Glyph, Glyphs, Text, TextAlign};
-
-struct NoGlyphs;
-
-impl Glyphs for NoGlyphs {
-    fn glyph(&self, _family: &str, _weight: u16, _italic: bool, _c: char) -> Option<Arc<Glyph>> {
-        None
-    }
-}
+use crate::testing::{shared, NoGlyphs};
+use crate::text::{Baseline, Text, TextAlign};
+use crate::SharedSlice;
 
 fn styled(fill: bool, stroke_width: f64) -> Style {
     Style {
@@ -92,7 +86,7 @@ fn drawing(layers: Vec<Node>) -> Drawing {
             background: None,
         },
         Children::from_nodes(layers.into_iter().map(Arc::new).collect()).expect("held"),
-        Arc::from(&[][..]),
+        SharedSlice::new(),
         Grid::default(),
     )
     .expect("a drawing")
@@ -175,15 +169,18 @@ fn hidden_objects_are_passed_over_and_text_is_met_by_its_box() {
             ids.issue(),
             Kind::Text {
                 text: Arc::new(Text {
-                    content: Arc::from("Words"),
-                    family: Arc::from("sans-serif"),
+                    content: shared("Words"),
+                    family: shared("sans-serif"),
                     size: 10.0,
                     weight: 400,
                     italic: false,
                     letter_spacing: 0.0,
-                    line_height: 1.25,
                     align: TextAlign::Start,
-                    origin: Point::new(20.0, 50.0),
+                    baseline: Baseline::Lines {
+                        origin: Point::new(20.0, 50.0),
+                        line_height: 1.25,
+                    },
+                    runs: SharedSlice::new(),
                 }),
                 style: Arc::new(styled(true, 0.0)),
             },

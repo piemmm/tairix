@@ -269,6 +269,11 @@ pub enum PickPurpose {
     /// signed manifest declares it edits documents, where the user may write
     /// the file, and read-only otherwise.
     Open,
+    /// An existing file to read into a document — a picture placed in a
+    /// drawing: delegated read-only whatever the requester's manifest says,
+    /// since what it reads in is the document's to keep, never the file's to
+    /// change.
+    Import,
     /// A folder whose files to open: each regular file directly in it whose
     /// content type the requester's signed manifest associates, delegated
     /// read-only in name order, at most [`WINDOW_FOLDER_PICK_MAX`] of them.
@@ -293,7 +298,7 @@ impl PickPurpose {
     /// The suggested name's length on the wire: none for an open.
     const fn suggested_len_byte(&self) -> u8 {
         match self {
-            Self::Open | Self::Folder => 0,
+            Self::Open | Self::Import | Self::Folder => 0,
             Self::Save { suggested, .. } => suggested.len_byte(),
         }
     }
@@ -301,7 +306,7 @@ impl PickPurpose {
     /// The formats it saves in: none for an open.
     const fn formats(&self) -> &SaveFormats {
         match self {
-            Self::Open | Self::Folder => &SaveFormats::ANY,
+            Self::Open | Self::Import | Self::Folder => &SaveFormats::ANY,
             Self::Save { formats, .. } => formats,
         }
     }
@@ -3783,6 +3788,8 @@ const PICK_PURPOSE_OPEN: u8 = 0;
 const PICK_PURPOSE_SAVE: u8 = 1;
 /// Wire value of [`PickPurpose::Folder`].
 const PICK_PURPOSE_FOLDER: u8 = 2;
+/// Wire value of [`PickPurpose::Import`].
+const PICK_PURPOSE_IMPORT: u8 = 3;
 
 /// Encoded size of a [`WindowRequest::PickFile`] suggesting a `name`-byte
 /// name.
@@ -5275,6 +5282,7 @@ fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
             put_u64(out, 8, window_id);
             let (wire, name) = match purpose {
                 PickPurpose::Open => (PICK_PURPOSE_OPEN, ""),
+                PickPurpose::Import => (PICK_PURPOSE_IMPORT, ""),
                 PickPurpose::Folder => (PICK_PURPOSE_FOLDER, ""),
                 PickPurpose::Save { suggested, .. } => (PICK_PURPOSE_SAVE, suggested.as_str()),
             };
@@ -5663,6 +5671,7 @@ fn read_pick_file(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     exact_len(bytes, pick_file_wire_len(len, formats.wire_len()))?;
     let purpose = match bytes[PICK_PURPOSE_OFFSET] {
         PICK_PURPOSE_OPEN if name_len == 0 && formats.is_empty() => PickPurpose::Open,
+        PICK_PURPOSE_IMPORT if name_len == 0 && formats.is_empty() => PickPurpose::Import,
         PICK_PURPOSE_FOLDER if name_len == 0 && formats.is_empty() => PickPurpose::Folder,
         PICK_PURPOSE_SAVE => {
             let mut name = [0u8; crate::FS_NAME_MAX];
@@ -11135,10 +11144,12 @@ mod tests {
     /// The pick and drag requests [`each_request`] visits: each purpose, with
     /// the narrowest and widest name.
     fn each_pick_request(visit: &mut impl FnMut(WindowRequest)) {
-        visit(WindowRequest::PickFile {
-            window_id: 9,
-            purpose: PickPurpose::Open,
-        });
+        for purpose in [PickPurpose::Open, PickPurpose::Import] {
+            visit(WindowRequest::PickFile {
+                window_id: 9,
+                purpose,
+            });
+        }
         for (len, formats) in [
             (0, SaveFormats::ANY),
             (crate::FS_NAME_MAX, widest_formats()),

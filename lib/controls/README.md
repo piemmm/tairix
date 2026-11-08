@@ -573,8 +573,15 @@ scrolling only past the screen's share, nothing elided), and the form fields
 (`form` — `FieldRow`/`FieldGroup`, the one settings-form shape, composing
 the `collection` row chrome — never its pointer wash, which is the slot
 control's alone — and a real control in each row's slot, a
-`FlagSet` of labelled checkboxes among them; `stack` is the one plate column
-its groups are stacked down), the picture choice (`picture` —
+`FlagSet` of labelled checkboxes, a `NumberField` and a `ColourField`
+(`colour_field`, a swatch typed in hexadecimal) settled as the keyboard leaves
+them among them; `stack` is the one plate column its groups are stacked down,
+and `column` — `FieldColumn` — the routing that carries the keyboard and the
+pointer between them), the window chrome an application lays out (`status` —
+`StatusBand`, the one status band along a window's foot; `ruler` — `Ruler`, a
+measured view's ruler; `settings` — `SettingsFrame`, an application's settings
+window of categories, a scrolling column of groups and a footer of commands),
+the picture choice (`picture` —
 `PictureChoice`, a one-of-several setting chosen by its picture, seated in a
 `FieldGroup` beneath its rows), the colour wells (`swatch_grid` —
 `SwatchGrid`, a grid of wells with a primary and an optional secondary mark,

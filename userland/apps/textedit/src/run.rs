@@ -40,9 +40,7 @@ mod program {
     use tairix_rt::work::{Worker, WorkerGuard};
     use tairix_sandbox::decode::{self, DecodeService, Isa, MAX_INPUT};
     use tairix_sandbox::imageinspect::{self, inspect_document, InspectFailure, InspectService};
-    use tairix_sandbox::imagerender::{
-        upload_document, UploadFailure, ViewFormat, MAX_DOCUMENT_BYTES,
-    };
+    use tairix_sandbox::imagerender::{upload_document, UploadFailure, ViewFormat};
     use tairix_sandbox::rt::{serve_stdio, serves, worker_role, RtLauncher};
     use tairix_sandbox::textsyntax::{
         detect, lex_lines, validate_document, LexedBatch, SyntaxFailure, TextSyntaxService,
@@ -263,6 +261,14 @@ mod program {
     /// holds a second copy of a picture, then ask for its report.
     fn serve_data(sandbox: &mut DataSandbox, job: &mut DataJob) -> DataReply {
         let snapshot = &job.snapshot;
+        let room = sandbox.document_room();
+        if snapshot.len() as u64 > room {
+            return DataReply {
+                stamp: job.stamp,
+                id: job.id,
+                report: Err(job.structure().too_large(room)),
+            };
+        }
         let sent = upload_document(sandbox, snapshot.len(), |offset, into| {
             Ok::<_, core::convert::Infallible>(read_at(snapshot, offset, into))
         });
@@ -512,7 +518,6 @@ mod program {
         fn faces(theme: &Theme, scale: Scale) -> Faces {
             Faces {
                 grid: BitmapFont::for_role(theme.fonts(), TextRole::Monospace, scale),
-                status: BitmapFont::for_role(theme.fonts(), TextRole::Caption, scale),
             }
         }
 
@@ -768,7 +773,7 @@ mod program {
             let snapshot = if window.view.editor().document().len() > MAX_INPUT {
                 Err(match work {
                     CodeWork::List { .. } => Unlisted::too_large(),
-                    CodeWork::Report => Structure::Manifest.too_large(),
+                    CodeWork::Report => Structure::Manifest.too_large(MAX_INPUT as u64),
                 })
             } else {
                 window
@@ -804,9 +809,6 @@ mod program {
 
     /// Hand the picture worker the next report any window wants, answering
     /// whether the answer is already waiting.
-    ///
-    /// A document past what one report may read is refused here rather than
-    /// frozen for a worker that could only refuse it.
     fn submit_data(host: &mut Host<TextEdit>) -> bool {
         if host.app.data_busy {
             return false;
@@ -824,15 +826,11 @@ mod program {
             let Some((id, structure @ Structure::Picture(named))) = window.view.data_want() else {
                 continue;
             };
-            let snapshot = if window.view.editor().document().len() > MAX_DOCUMENT_BYTES {
-                Err(structure.too_large())
-            } else {
-                window
-                    .view
-                    .editor_mut()
-                    .snapshot()
-                    .map_err(|OutOfMemory| structure.no_memory())
-            };
+            let snapshot = window
+                .view
+                .editor_mut()
+                .snapshot()
+                .map_err(|OutOfMemory| structure.no_memory());
             let snapshot = match snapshot {
                 Ok((_, snapshot)) => snapshot,
                 Err(unlisted) => {

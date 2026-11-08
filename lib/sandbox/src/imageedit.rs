@@ -31,7 +31,7 @@ use tairix_image::{
 use crate::host::{Launcher, ParserSandbox, SandboxError, Unbelieved};
 use crate::imagerender::{
     encode_error, rows_fitting, DecodeVerdict, Document, DocumentFailure, ReplyFailure, ViewFormat,
-    MAX_DOCUMENT_BYTES, MAX_VIEW_DECODE_PIXELS, MAX_VIEW_PROGRESSIVE_COEFFICIENT_BYTES,
+    MAX_VIEW_DECODE_PIXELS, MAX_VIEW_PROGRESSIVE_COEFFICIENT_BYTES,
 };
 use crate::proto::MAX_FRAME;
 use crate::wire::{Reader, Writer};
@@ -280,6 +280,8 @@ pub struct EditDocument {
     pub written: Written,
     /// The canvas a layered document's layers lie on; `None` for any other.
     pub canvas: Option<(u32, u32)>,
+    /// How long it is, as handed over: no kept sprite read from it is longer.
+    pub length: u64,
 }
 
 /// What a layer says about itself beyond its pixels.
@@ -962,8 +964,8 @@ fn malformed<T>(_: T) -> EditFailure {
 /// worker's, so it is not contained for it.
 const OUT_OF_MEMORY: EditFailure = EditFailure::Refused(EditRefusal::OutOfMemory);
 
-/// Open the uploaded document for editing, as `format` or, given none, as
-/// its signature says.
+/// Open the uploaded document, `handed` bytes long, for editing, as `format`
+/// or, given none, as its signature says.
 ///
 /// # Errors
 ///
@@ -971,12 +973,13 @@ const OUT_OF_MEMORY: EditFailure = EditFailure::Refused(EditRefusal::OutOfMemory
 /// could not be believed.
 pub fn open_edit<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
+    handed: u64,
     format: Option<ViewFormat>,
 ) -> Result<EditDocument, EditFailure> {
-    let mut w = Writer::new();
+    let mut w = Writer::refusable();
     w.u8(OP_EDIT_OPEN);
     w.u8(format.map_or(0, ViewFormat::to_wire));
-    let request = w.finish();
+    let request = w.finish().ok_or(OUT_OF_MEMORY)?;
     let asked = format;
     sandbox.ask(|sandbox| {
         let reply = sandbox.request(&request).map_err(EditFailure::Sandbox)?;
@@ -1072,6 +1075,7 @@ pub fn open_edit<L: Launcher, S: tairix_log::Sink>(
             unkept,
             written,
             canvas,
+            length: handed,
         })
     })
 }
@@ -1090,10 +1094,10 @@ pub fn select_entry<L: Launcher, S: tairix_log::Sink>(
     document: EditDocument,
     index: u32,
 ) -> Result<EditEntry, EditFailure> {
-    let mut w = Writer::new();
+    let mut w = Writer::refusable();
     w.u8(OP_EDIT_SELECT);
     w.u32(index);
-    let request = w.finish();
+    let request = w.finish().ok_or(OUT_OF_MEMORY)?;
     sandbox.ask(|sandbox| {
         let reply = sandbox.request(&request).map_err(EditFailure::Sandbox)?;
         let mut r = Reader::new(&reply);
@@ -1140,7 +1144,7 @@ pub fn select_entry<L: Launcher, S: tairix_log::Sink>(
                     .and_then(KeptReason::from_wire)
                     .ok_or(EditFailure::ReplyMalformed)?;
                 let length = r.u32().map_err(malformed)?;
-                let bounds = u64::from(SPRITE_HEADER_LEN)..=MAX_DOCUMENT_BYTES as u64;
+                let bounds = u64::from(SPRITE_HEADER_LEN)..=document.length;
                 if !bounds.contains(&u64::from(length)) {
                     return Err(EditFailure::ReplyMalformed);
                 }
@@ -1261,11 +1265,11 @@ pub fn read_rows<L: Launcher, S: tairix_log::Sink>(
     let mut first = 0u32;
     while first < picture.height {
         let count = band.min(picture.height - first);
-        let mut w = Writer::new();
+        let mut w = Writer::refusable();
         w.u8(OP_EDIT_ROWS);
         w.u32(first);
         w.u32(count);
-        let request = w.finish();
+        let request = w.finish().ok_or(OUT_OF_MEMORY)?;
         sandbox.ask(|sandbox| {
             let reply = sandbox.request(&request).map_err(EditFailure::Sandbox)?;
             let mut r = Reader::new(&reply);
@@ -1319,11 +1323,11 @@ pub fn read_kept<L: Launcher, S: tairix_log::Sink>(
     while out.len() < length {
         let offset = out.len();
         let len = (length - offset).min(MAX_KEPT_CHUNK);
-        let mut w = Writer::new();
+        let mut w = Writer::refusable();
         w.u8(OP_EDIT_KEPT);
         w.u32(u32::try_from(offset).map_err(malformed)?);
         w.u32(u32::try_from(len).map_err(malformed)?);
-        let request = w.finish();
+        let request = w.finish().ok_or(OUT_OF_MEMORY)?;
         sandbox.ask(|sandbox| {
             let reply = sandbox.request(&request).map_err(EditFailure::Sandbox)?;
             let mut r = Reader::new(&reply);
@@ -1350,9 +1354,9 @@ pub fn read_kept<L: Launcher, S: tairix_log::Sink>(
 pub fn close_edit<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
 ) -> Result<(), EditFailure> {
-    let mut w = Writer::new();
+    let mut w = Writer::refusable();
     w.u8(OP_EDIT_RELEASE);
-    let request = w.finish();
+    let request = w.finish().ok_or(OUT_OF_MEMORY)?;
     sandbox.ask(|sandbox| {
         let reply = sandbox.request(&request).map_err(EditFailure::Sandbox)?;
         let mut r = Reader::new(&reply);

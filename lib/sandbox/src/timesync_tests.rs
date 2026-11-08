@@ -269,3 +269,16 @@ fn a_reply_violating_the_grammar_yields_nothing() {
         );
     }
 }
+
+#[test]
+fn an_evaluation_this_side_has_no_memory_for_is_refused_as_that() {
+    let datagram = server_reply(NONCE, plausible_secs());
+    crate::testing::swept::<TimeSyncService, _, _>(
+        |sandbox| evaluate_datagram(sandbox, &txn(NONCE), received(), &datagram),
+        |failure| match failure {
+            TimeSyncFailure::NoMemory => true,
+            TimeSyncFailure::Sandbox(inner) => crate::testing::this_side(*inner),
+            _ => false,
+        },
+    );
+}

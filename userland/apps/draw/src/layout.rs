@@ -6,6 +6,7 @@
 //! status band along the bottom. Every length is a logical one scaled to
 //! device pixels once, here.
 
+use tairix_controls::StatusBand;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_theme::{TextRole, Theme};
@@ -18,14 +19,18 @@ const BAR: u32 = 34;
 const RULER: u32 = 18;
 const INSPECTOR: u32 = 256;
 const TABS: u32 = 28;
-const STATUS: u32 = 22;
 const LEAST_CANVAS: u32 = 160;
+
+/// The widest the status band's pointer readout is measured for: a drawing
+/// further out than this elides it rather than shifting the band.
+const POINTER_WIDEST: &str = "-99999.99, -99999.99 mm";
+
+/// The widest the selection readout is measured for, likewise.
+const SELECTION_WIDEST: &str = "9999 selected, 99999.99 \u{d7} 99999.99 mm";
 
 /// The faces a window's text is set in.
 #[derive(Copy, Clone, Debug)]
 pub struct Faces {
-    /// The status band and the rulers' figures.
-    pub status: BitmapFont,
     /// Labels and buttons.
     pub label: BitmapFont,
     /// Section headings.
@@ -38,7 +43,6 @@ impl Faces {
     pub fn of(theme: &Theme, scale: Scale) -> Self {
         let face = |role| BitmapFont::for_role(theme.fonts(), role, scale);
         Self {
-            status: face(TextRole::Caption),
             label: face(TextRole::Body),
             heading: face(TextRole::SectionHeader),
         }
@@ -79,6 +83,12 @@ pub struct Layout {
     pub panel: Rect,
     /// The status band.
     pub status: Rect,
+    /// Where the band states a message.
+    pub message: Rect,
+    /// Where it states the point under the pointer.
+    pub pointer: Rect,
+    /// Where it states what is selected.
+    pub selected: Rect,
     /// One logical pixel, in device pixels, as a ratio.
     pub ratio: u32,
 }
@@ -96,7 +106,17 @@ impl Layout {
         let length = |logical: u32| scale.scale_length(logical);
         let breadth = scrollbar(scale, theme);
         let mut rest = Rect::new(0, 0, width, height);
-        let status = rest.take_bottom(length(STATUS).min(rest.height));
+        let band = StatusBand::new(theme, scale);
+        let status = rest.take_bottom(band.height().min(rest.height));
+        let slots = band.slots(
+            status,
+            [],
+            [
+                band.slot_width(SELECTION_WIDEST),
+                band.slot_width(POINTER_WIDEST),
+            ],
+        );
+        let [selected, pointer] = slots.trailing;
         let bar = rest.take_top(length(BAR).min(rest.height));
         let tools = rest.take_left(length(TOOL_BOX).min(rest.width));
         let inspector_width =
@@ -125,6 +145,9 @@ impl Layout {
             tabs,
             panel,
             status,
+            message: slots.message,
+            pointer,
+            selected,
             ratio: length(100),
         }
     }
@@ -136,7 +159,7 @@ impl Layout {
         let breadth = scrollbar(scale, theme);
         (
             length(TOOL_BOX + RULER + LEAST_CANVAS + INSPECTOR) + breadth,
-            length(BAR + RULER + LEAST_CANVAS + STATUS) + breadth,
+            length(BAR + RULER + LEAST_CANVAS) + breadth + StatusBand::new(theme, scale).height(),
         )
     }
 

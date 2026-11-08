@@ -31,6 +31,16 @@ tairix-inline = { path = "../inline", version = "=0.0.0" }
 tairix-xml = { path = "../xml", version = "=0.0.0" }
 # The deflate every PDF stream is written through.
 tairix-compress = { path = "../compress", version = "=0.0.0" }
+# RISC OS's Latin-1, the alphabet a Draw file's text and names are spelled
+# in.
+tairix-fsmeta = { path = "../fsmeta", version = "=0.0.0" }
+# The shared text and slices a drawing holds, and the shared values it is made
+# of, every one allocated fallibly.
+tairix-collections = { path = "../collections", version = "=0.0.0" }
+# The decoders a picture a document embeds is read through — PNG, JPEG and
+# RISC OS sprites, only ever in the parser sandbox — and the encoders a
+# writer makes one with where its bytes cannot pass on as they came.
+tairix-image = { path = "../image", version = "=0.0.0" }
 
 [lints]
 workspace = true

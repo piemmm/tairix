@@ -53,6 +53,16 @@ impl Density {
         Self::new((across, 1), (down, 1), unit)
     }
 
+    /// The same density for the picture turned so its axes swap.
+    #[must_use]
+    pub(crate) const fn transposed(self) -> Self {
+        Self {
+            across: self.down,
+            down: self.across,
+            unit: self.unit,
+        }
+    }
+
     /// Pixels per unit across, as a numerator and a denominator.
     #[must_use]
     pub const fn across(&self) -> (u32, u32) {

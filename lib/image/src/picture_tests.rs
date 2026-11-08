@@ -5,8 +5,9 @@ use alloc::vec;
 
 use super::{
     flatten_row, masked_colour, IndexDepth, Picture, PictureError, PictureKind, PictureSource,
-    Pixels,
+    Pixels, SurfacePicture,
 };
+use crate::{Density, DensityUnit};
 
 #[test]
 fn a_depth_names_its_bits_and_colours() {
@@ -163,4 +164,39 @@ fn a_colour_over_another_mixes_by_the_alpha_each_keeps() {
         over([255, 255, 255, 128], [0, 0, 0, 128]),
         [85, 85, 85, 192]
     );
+}
+
+#[test]
+fn a_surface_reads_as_its_pixels_unpremultiplied_a_row_at_a_time() {
+    let straight = [
+        [255, 0, 0, 255],
+        [0, 128, 255, 128],
+        [9, 9, 9, 0],
+        [40, 80, 120, 200],
+        [0, 0, 0, 255],
+        [255, 255, 255, 1],
+    ];
+    let surface =
+        tairix_raster::Surface::from_rgba8(3, 2, straight.as_flattened()).expect("a surface");
+    let picture = SurfacePicture::new(&surface);
+    assert_eq!((picture.width(), picture.height()), (3, 2));
+    assert_eq!(picture.kind(), PictureKind::Rgba);
+    assert_eq!(picture.density(), None);
+    let mut row = [0_u8; 12];
+    for y in 0..2 {
+        picture.read_row(y, &mut row, &mut []);
+        for (x, written) in row.as_chunks::<4>().0.iter().enumerate() {
+            let colour = surface.pixels()[y as usize * 3 + x].unpremultiply();
+            assert_eq!(*written, [colour.r, colour.g, colour.b, colour.a]);
+        }
+    }
+    assert_eq!(
+        &row[..4],
+        &[40, 80, 120, 200],
+        "a translucent colour comes back"
+    );
+    picture.read_row(2, &mut row, &mut []);
+    assert_eq!(row, [0; 12], "a row past the last reads clear");
+    let density = Density::whole(300, 300, DensityUnit::Inch);
+    assert_eq!(picture.with_density(density).density(), density);
 }

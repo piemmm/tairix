@@ -96,9 +96,7 @@ mod program {
     use tairix_theme::{TextRole, Theme};
     use tairix_view::movie::{self, Note, Order, Player, Release, Status, Stop};
     use tairix_view::view::{Command, Outcome, View};
-    use tairix_view::{
-        Answer, Layout, Refusal, Request, MAX_DOCUMENT_BYTES, WIN_HEIGHT, WIN_WIDTH,
-    };
+    use tairix_view::{Answer, Layout, Refusal, Request, WIN_HEIGHT, WIN_WIDTH};
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
         key_input_event, pinch_input_events, pointer_input_events, pointer_point,
@@ -128,9 +126,10 @@ mod program {
     // ---- the sandbox session -------------------------------------------
 
     /// How long the document behind the read-only descriptor `handle` is, in
-    /// bytes. The descriptor was cloned in at spawn or redeemed from the
-    /// picker's one-shot grant, and closes on every path out of the value
-    /// that holds it.
+    /// bytes, refused as too long past `room`, what its worker may hold. The
+    /// descriptor was cloned in at spawn or redeemed from the picker's
+    /// one-shot grant, and closes on every path out of the value that holds
+    /// it.
     ///
     /// One `fs_stat`, which is ungated at the dispatcher precisely for this
     /// case: the descriptor's own backing decides the authority, so a holder
@@ -138,15 +137,15 @@ mod program {
     /// handed. Measuring by reading to the end instead would read the whole
     /// document twice — once to size it and once to send it — for a figure
     /// the kernel already knows.
-    fn document_length(handle: &tairix_rt::File) -> Result<usize, Refusal> {
+    fn document_length(handle: &tairix_rt::File, room: u64) -> Result<usize, Refusal> {
         let length = handle
             .regular_len()
             .map_err(Refusal::Unreadable)?
             .ok_or(Refusal::Unreadable(Errno::OutOfRange))?;
-        usize::try_from(length)
-            .ok()
-            .filter(|&length| length <= MAX_DOCUMENT_BYTES)
-            .ok_or(Refusal::TooLong)
+        if length > room {
+            return Err(Refusal::TooLong);
+        }
+        usize::try_from(length).map_err(|_| Refusal::TooLong)
     }
 
     /// What only this binary knows about a document: the descriptor it is
@@ -363,14 +362,14 @@ mod program {
     /// many bytes it holds.
     ///
     /// At no point does this process hold more than one chunk of an
-    /// untrusted file, and the fixed ceiling bounds what is *resident*
+    /// untrusted file, and the worker's room bounds what is *resident*
     /// rather than what is addressable, because the reads are positional.
     fn upload(
         sandbox: &mut ParserSandbox<RtLauncher, tairix_rt::LogSink>,
         handle: &tairix_rt::File,
     ) -> Result<u64, Refusal> {
         let fd = handle.fd();
-        let length = document_length(handle)?;
+        let length = document_length(handle, sandbox.document_room())?;
         upload_document(sandbox, length, |offset, into| {
             tairix_rt::fs_read(fd, offset, into).map_err(Errno::from_syscall)
         })

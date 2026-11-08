@@ -5,15 +5,17 @@
 //! circle, a line at a multiple of 15°), Alt draws it out from the point the
 //! drag began rather than from a corner.
 
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-
 use tairix_abi::window_ipc::AppMenuSymbol;
-use tairix_bezier::fit::{fit, Joint};
+use tairix_bezier::fit::fitted;
 use tairix_bezier::{Path, PathEl, Point, Subpath};
+use tairix_collections::try_arc;
 use tairix_drawing::shape::{EllipseShape, RectShape, StarShape};
 use tairix_drawing::{Contour, NodeJoin, PathNode, PathShape, Shape};
 use tairix_util::mathf::{atan2, fabs, fmax, fmin, round};
+
+/// The sharpest turn, in degrees, a fitted curve smooths over: a sharper one
+/// is kept as a corner.
+pub(crate) const CORNER_TURN: f64 = 60.0;
 
 /// A tool the canvas is worked with.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -36,6 +38,8 @@ pub enum Tool {
     Pencil,
     /// Set and edit text.
     Text,
+    /// Lay a gradient across the selection.
+    Gradient,
     /// Take another object's style.
     Eyedropper,
     /// Zoom in or out.
@@ -46,7 +50,7 @@ pub enum Tool {
 
 impl Tool {
     /// Every tool, in the tool box's order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Select,
         Self::Nodes,
         Self::Rectangle,
@@ -56,6 +60,7 @@ impl Tool {
         Self::Pen,
         Self::Pencil,
         Self::Text,
+        Self::Gradient,
         Self::Eyedropper,
         Self::Zoom,
         Self::Hand,
@@ -74,6 +79,7 @@ impl Tool {
             Self::Pen => AppMenuSymbol::ToolPen,
             Self::Pencil => AppMenuSymbol::ToolPencil,
             Self::Text => AppMenuSymbol::ToolText,
+            Self::Gradient => AppMenuSymbol::ToolGradient,
             Self::Eyedropper => AppMenuSymbol::ToolEyedropper,
             Self::Zoom => AppMenuSymbol::ToolZoom,
             Self::Hand => AppMenuSymbol::ToolHand,
@@ -93,6 +99,7 @@ impl Tool {
             Self::Pen => "Pen",
             Self::Pencil => "Pencil",
             Self::Text => "Text",
+            Self::Gradient => "Gradient",
             Self::Eyedropper => "Eyedropper",
             Self::Zoom => "Zoom",
             Self::Hand => "Hand",
@@ -112,6 +119,7 @@ impl Tool {
             Self::Pen => 'b',
             Self::Pencil => 'p',
             Self::Text => 't',
+            Self::Gradient => 'g',
             Self::Eyedropper => 'i',
             Self::Zoom => 'z',
             Self::Hand => 'h',
@@ -236,9 +244,9 @@ pub fn line_end(from: Point, to: Point, constraint: Constraint) -> Point {
 pub fn line(from: Point, to: Point) -> Result<Shape, tairix_drawing::DrawingError> {
     let mut open = Subpath::new(from);
     open.elements.push(PathEl::Line(to));
-    Ok(Shape::Path(Arc::new(PathShape::from_path(&Path {
+    Ok(Shape::Path(try_arc(PathShape::from_path(&Path {
         subpaths: alloc::vec![open],
-    })?)))
+    })?)?))
 }
 
 /// The path a freehand stroke through `points` comes to: curves fitted
@@ -251,46 +259,38 @@ pub fn freehand(
     points: &[Point],
     tolerance: f64,
 ) -> Result<Option<Shape>, tairix_drawing::DrawingError> {
-    let Some(&start) = points.first() else {
+    let fitted = fitted(points, tolerance, CORNER_TURN)?;
+    let Some(subpath) = fitted else {
         return Ok(None);
     };
-    let mut subpath = Subpath::new(start);
-    let mut failed = false;
-    let fitted = fit(points, tolerance, 60.0, |curve, _: Joint| {
-        failed |= subpath.elements.try_reserve(1).is_err();
-        if !failed {
-            subpath
-                .elements
-                .push(PathEl::Cubic(curve.p1, curve.p2, curve.p3));
-        }
-    });
-    if failed || fitted.is_err() {
-        return Err(tairix_drawing::DrawingError::TooComplex);
-    }
-    if subpath.elements.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(Shape::Path(Arc::new(PathShape::from_path(&Path {
+    Ok(Some(Shape::Path(try_arc(PathShape::from_path(&Path {
         subpaths: alloc::vec![subpath],
-    })?))))
+    })?)?)))
 }
 
-/// The path the pen has set so far: its nodes, closed or not.
-#[must_use]
-pub fn pen_path(nodes: &[PathNode], closed: bool) -> Option<Shape> {
+/// The path the pen has set so far, its nodes closed or not, once it has
+/// two.
+///
+/// # Errors
+///
+/// As the path refuses its nodes, or when it cannot be held.
+pub fn pen_path(
+    nodes: &[PathNode],
+    closed: bool,
+) -> Result<Option<Shape>, tairix_drawing::DrawingError> {
     if nodes.len() < 2 {
-        return None;
+        return Ok(None);
     }
-    let mut held = Vec::new();
-    held.try_reserve(nodes.len()).ok()?;
-    held.extend_from_slice(nodes);
+    let held =
+        tairix_util::fallible::copied(nodes).ok_or(tairix_drawing::DrawingError::OutOfMemory)?;
     let shape = PathShape {
         contours: alloc::vec![Contour {
             nodes: held,
             closed
         }],
     };
-    shape.check().is_ok().then(|| Shape::Path(Arc::new(shape)))
+    shape.check()?;
+    Ok(Some(Shape::Path(try_arc(shape)?)))
 }
 
 /// A pen node at `point` dragged out to `handle`: smooth with handles either
@@ -371,10 +371,10 @@ mod tests {
             pen_node(Point::new(10.0, 0.0), Some(Point::new(15.0, 5.0))),
         ];
         assert!(
-            pen_path(&nodes[..1], false).is_none(),
+            matches!(pen_path(&nodes[..1], false), Ok(None)),
             "one node is no path"
         );
-        let Some(Shape::Path(path)) = pen_path(&nodes, false) else {
+        let Ok(Some(Shape::Path(path))) = pen_path(&nodes, false) else {
             panic!("a path");
         };
         let smooth = &path.contours[0].nodes[1];

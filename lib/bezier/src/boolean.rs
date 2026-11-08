@@ -25,10 +25,10 @@
 //!    traced as its own contour; consecutive edges cut from one original
 //!    curve are joined back into one.
 //!
-//! The result is wound clockwise as drawn around what it covers and against
-//! that around its holes, so it fills under either rule.
+//! The result is closed contours, wound clockwise as drawn around what it
+//! covers and against that around its holes, so it fills under either rule.
 
-use alloc::vec;
+use alloc::collections::TryReserveError;
 use alloc::vec::Vec;
 
 use tairix_util::fallible;
@@ -94,6 +94,12 @@ pub enum BooleanError {
     OutOfMemory,
 }
 
+impl From<TryReserveError> for BooleanError {
+    fn from(_: TryReserveError) -> Self {
+        Self::OutOfMemory
+    }
+}
+
 /// What `a` under `rule_a` and `b` under `rule_b` come to under `operation`,
 /// as one path.
 ///
@@ -145,12 +151,16 @@ pub fn divide(
     rule_b: FillRule,
 ) -> Result<Vec<Path>, BooleanError> {
     let mut regions = Vec::new();
+    let mut gather = |found: &Path| -> Result<(), BooleanError> {
+        let mut parts = components(found)?;
+        regions.try_reserve(parts.len())?;
+        regions.append(&mut parts);
+        Ok(())
+    };
     for operation in [Operation::Intersection, Operation::Difference] {
-        let found = boolean(a, rule_a, b, rule_b, operation)?;
-        regions.extend(components(&found)?);
+        gather(&boolean(a, rule_a, b, rule_b, operation)?)?;
     }
-    let only_b = boolean(b, rule_b, a, rule_a, Operation::Difference)?;
-    regions.extend(components(&only_b)?);
+    gather(&boolean(b, rule_b, a, rule_a, Operation::Difference)?)?;
     Ok(regions)
 }
 
@@ -163,45 +173,38 @@ pub fn divide(
 ///
 /// [`BooleanError::OutOfMemory`] when the groups cannot be held.
 pub fn components(path: &Path) -> Result<Vec<Path>, BooleanError> {
-    let mut outers: Vec<(f64, Path)> = Vec::new();
+    let mut outers: Vec<Path> = Vec::new();
+    // Each outer contour's area and bounds, the bounds sparing a hole the
+    // winding of every contour nowhere near it.
+    let mut extents: Vec<(f64, Bounds)> = Vec::new();
     let mut holes: Vec<&Subpath> = Vec::new();
     for subpath in &path.subpaths {
         let area = subpath.signed_area();
         if area > 0.0 {
-            if !fallible::push(
-                &mut outers,
-                (
-                    area,
-                    Path {
-                        subpaths: vec![subpath.clone()],
-                    },
-                ),
-            ) {
-                return Err(BooleanError::OutOfMemory);
-            }
-        } else if !fallible::push(&mut holes, subpath) {
-            return Err(BooleanError::OutOfMemory);
+            fallible::try_push(&mut outers, Path::single(subpath.try_clone()?)?)?;
+            fallible::try_push(&mut extents, (area, subpath.bounds()))?;
+        } else {
+            fallible::try_push(&mut holes, subpath)?;
         }
     }
     for hole in holes {
         let probe = interior_point(hole);
         // The smallest outer contour round the hole holds it.
         let mut owner: Option<usize> = None;
-        for (index, (area, outer)) in outers.iter().enumerate() {
-            if outer.subpaths[0].winding(probe) == 0 {
+        for (index, outer) in outers.iter().enumerate() {
+            let (area, bounds) = extents[index];
+            if !bounds.contains(probe) || outer.subpaths[0].winding(probe) == 0 {
                 continue;
             }
-            if owner.is_none_or(|best| *area < outers[best].0) {
+            if owner.is_none_or(|best| area < extents[best].0) {
                 owner = Some(index);
             }
         }
         if let Some(owner) = owner {
-            if !fallible::push(&mut outers[owner].1.subpaths, hole.clone()) {
-                return Err(BooleanError::OutOfMemory);
-            }
+            fallible::try_push(&mut outers[owner].subpaths, hole.try_clone()?)?;
         }
     }
-    Ok(outers.into_iter().map(|(_, path)| path).collect())
+    Ok(outers)
 }
 
 /// A point just inside the contour `subpath` traces, beside the middle of
@@ -343,7 +346,7 @@ impl<'p> Overlay<'p> {
                         } else {
                             self.vertex(piece.end())?
                         };
-                        if !fallible::push(
+                        fallible::try_push(
                             &mut self.pieces,
                             Piece {
                                 segment: piece,
@@ -351,9 +354,7 @@ impl<'p> Overlay<'p> {
                                 start: from,
                                 end: to,
                             },
-                        ) {
-                            return Err(BooleanError::OutOfMemory);
-                        }
+                        )?;
                         from = to;
                     }
                 }
@@ -363,9 +364,7 @@ impl<'p> Overlay<'p> {
     }
 
     fn vertex(&mut self, point: Point) -> Result<usize, BooleanError> {
-        if !fallible::push(&mut self.vertices, point) {
-            return Err(BooleanError::OutOfMemory);
-        }
+        fallible::try_push(&mut self.vertices, point)?;
         Ok(self.vertices.len() - 1)
     }
 
@@ -374,13 +373,9 @@ impl<'p> Overlay<'p> {
     fn meet(&mut self) -> Result<(), BooleanError> {
         let tolerance = self.tolerance;
         let mut order: Vec<(f64, u32)> = Vec::new();
-        if !fallible::reserve(&mut order, self.pieces.len()) {
-            return Err(BooleanError::OutOfMemory);
-        }
+        order.try_reserve_exact(self.pieces.len())?;
         let mut bounds: Vec<Bounds> = Vec::new();
-        if !fallible::reserve(&mut bounds, self.pieces.len()) {
-            return Err(BooleanError::OutOfMemory);
-        }
+        bounds.try_reserve_exact(self.pieces.len())?;
         for (index, piece) in self.pieces.iter().enumerate() {
             let piece_bounds = piece.segment.bounds().inflated(tolerance);
             bounds.push(piece_bounds);
@@ -440,9 +435,8 @@ impl<'p> Overlay<'p> {
         if self.cuts.len() >= MAX_BOOLEAN_SPLITS {
             return Err(BooleanError::TooComplex);
         }
-        if !fallible::push(&mut self.cuts, Cut { piece, t, vertex }) {
-            return Err(BooleanError::OutOfMemory);
-        }
+        let t = along_piece(t);
+        fallible::try_push(&mut self.cuts, Cut { piece, t, vertex })?;
         Ok(())
     }
 
@@ -450,21 +444,27 @@ impl<'p> Overlay<'p> {
     fn split_edges(&mut self) -> Result<(), BooleanError> {
         let merged = merge_vertices(&self.vertices, self.tolerance * 16.0)?;
         // Each vertex now stands at its representative's position.
-        let positions: Vec<Point> = merged.iter().map(|&r| self.vertices[r]).collect();
+        let positions = fallible::collected(merged.len(), merged.iter().map(|&r| self.vertices[r]))
+            .ok_or(BooleanError::OutOfMemory)?;
         self.cuts
             .sort_unstable_by(|a, b| a.piece.cmp(&b.piece).then(a.t.total_cmp(&b.t)));
         let mut cursor = 0;
         let mut stops: Vec<(f64, usize)> = Vec::new();
         for (index, piece) in self.pieces.iter().enumerate() {
+            let cut_here = self.cuts[cursor..]
+                .iter()
+                .take_while(|cut| cut.piece as usize == index)
+                .count();
+            // In order by construction: every cut lies within the piece's ends,
+            // and the cuts were sorted along it.
             stops.clear();
+            stops.try_reserve(cut_here + 2)?;
             stops.push((0.0, merged[piece.start]));
-            while cursor < self.cuts.len() && self.cuts[cursor].piece as usize == index {
-                let cut = self.cuts[cursor];
-                stops.push((cut.t.clamp(0.0, 1.0), merged[cut.vertex as usize]));
-                cursor += 1;
+            for cut in &self.cuts[cursor..cursor + cut_here] {
+                stops.push((cut.t, merged[cut.vertex as usize]));
             }
+            cursor += cut_here;
             stops.push((1.0, merged[piece.end]));
-            stops.sort_by(|a, b| a.0.total_cmp(&b.0));
             for pair in stops.windows(2) {
                 let ((t0, from), (t1, to)) = (pair[0], pair[1]);
                 if from == to || t1 <= t0 {
@@ -474,7 +474,7 @@ impl<'p> Overlay<'p> {
                 snap(&mut segment, positions[from], positions[to]);
                 let mut runs = [0, 0];
                 runs[piece.operand] = 1;
-                if !fallible::push(
+                fallible::try_push(
                     &mut self.edges,
                     Edge {
                         segment,
@@ -485,9 +485,7 @@ impl<'p> Overlay<'p> {
                         runs,
                         kept: Keep::Dropped,
                     },
-                ) {
-                    return Err(BooleanError::OutOfMemory);
-                }
+                )?;
             }
         }
         self.vertices = positions;
@@ -498,9 +496,7 @@ impl<'p> Overlay<'p> {
     /// summing which operands run along it which way.
     fn merge_coincident_edges(&mut self) -> Result<(), BooleanError> {
         let mut keys: Vec<(usize, usize, u32)> = Vec::new();
-        if !fallible::reserve(&mut keys, self.edges.len()) {
-            return Err(BooleanError::OutOfMemory);
-        }
+        keys.try_reserve_exact(self.edges.len())?;
         for (index, edge) in self.edges.iter().enumerate() {
             let (low, high) = if edge.from <= edge.to {
                 (edge.from, edge.to)
@@ -510,7 +506,8 @@ impl<'p> Overlay<'p> {
             keys.push((low, high, index_u32(index)?));
         }
         keys.sort_unstable();
-        let mut gone = vec![false; self.edges.len()];
+        let mut gone =
+            fallible::filled(self.edges.len(), false).ok_or(BooleanError::OutOfMemory)?;
         let mut start = 0;
         while start < keys.len() {
             let mut end = start + 1;
@@ -598,11 +595,9 @@ impl<'p> Overlay<'p> {
     /// Follow the kept edges into closed contours.
     fn trace(self) -> Result<Path, BooleanError> {
         let mut outgoing: Vec<Vec<usize>> = Vec::new();
-        if !fallible::reserve(&mut outgoing, self.vertices.len()) {
-            return Err(BooleanError::OutOfMemory);
-        }
+        outgoing.try_reserve_exact(self.vertices.len())?;
         outgoing.resize_with(self.vertices.len(), Vec::new);
-        let directed: Vec<Directed> = self
+        let kept = self
             .edges
             .iter()
             .enumerate()
@@ -622,27 +617,29 @@ impl<'p> Overlay<'p> {
                     segment: edge.segment.reversed(),
                     forward: false,
                 }),
-            })
-            .collect();
+            });
+        let count = self
+            .edges
+            .iter()
+            .filter(|edge| edge.kept != Keep::Dropped)
+            .count();
+        let directed = fallible::collected(count, kept).ok_or(BooleanError::OutOfMemory)?;
         for (index, directed) in directed.iter().enumerate() {
-            if !fallible::push(&mut outgoing[directed.from], index) {
-                return Err(BooleanError::OutOfMemory);
-            }
+            fallible::try_push(&mut outgoing[directed.from], index)?;
         }
-        let mut used = vec![false; directed.len()];
+        let mut used = fallible::filled(directed.len(), false).ok_or(BooleanError::OutOfMemory)?;
         let mut result = Path::new();
+        let mut contour: Vec<usize> = Vec::new();
         for first in 0..directed.len() {
             if used[first] {
                 continue;
             }
-            let mut contour: Vec<usize> = Vec::new();
+            contour.clear();
             let mut current = first;
             let mut returned = false;
             loop {
                 used[current] = true;
-                if !fallible::push(&mut contour, current) {
-                    return Err(BooleanError::OutOfMemory);
-                }
+                fallible::try_push(&mut contour, current)?;
                 let at = directed[current].to;
                 if at == directed[first].from {
                     returned = true;
@@ -664,10 +661,8 @@ impl<'p> Overlay<'p> {
                     None => break,
                 }
             }
-            if let Some(subpath) = self.contour(&directed, &contour, returned) {
-                if !fallible::push(&mut result.subpaths, subpath) {
-                    return Err(BooleanError::OutOfMemory);
-                }
+            if let Some(subpath) = self.contour(&directed, &contour, returned)? {
+                fallible::try_push(&mut result.subpaths, subpath)?;
             }
         }
         Ok(result)
@@ -680,16 +675,23 @@ impl<'p> Overlay<'p> {
         clippy::float_cmp,
         reason = "two edges cut at one cut share its parameter to the bit, and only those join"
     )]
-    fn contour(&self, directed: &[Directed], contour: &[usize], returned: bool) -> Option<Subpath> {
-        let first = directed[*contour.first()?];
-        let mut subpath = Subpath::new(self.vertices[first.from]);
+    fn contour(
+        &self,
+        directed: &[Directed],
+        contour: &[usize],
+        returned: bool,
+    ) -> Result<Option<Subpath>, BooleanError> {
+        let Some(&first) = contour.first() else {
+            return Ok(None);
+        };
+        let mut subpath = Subpath::new(self.vertices[directed[first].from]);
         let mut pending: Option<Run> = None;
         let flush = |subpath: &mut Subpath, run: Run| {
             let mut joined = self.pieces[run.piece]
                 .segment
                 .subsegment(run.start, run.end);
             snap(&mut joined, subpath.end(), self.vertices[run.to]);
-            subpath.elements.push(element(joined));
+            fallible::try_push(&mut subpath.elements, PathEl::of(joined))
         };
         for &index in contour {
             let step = directed[index];
@@ -707,7 +709,7 @@ impl<'p> Overlay<'p> {
                 }
                 _ => {
                     if let Some(run) = pending.take() {
-                        flush(&mut subpath, run);
+                        flush(&mut subpath, run)?;
                     }
                     pending = Some(Run {
                         piece: edge.piece,
@@ -720,7 +722,7 @@ impl<'p> Overlay<'p> {
             }
         }
         if let Some(run) = pending {
-            flush(&mut subpath, run);
+            flush(&mut subpath, run)?;
         }
         if returned {
             let start = subpath.start;
@@ -732,7 +734,7 @@ impl<'p> Overlay<'p> {
             }
         }
         subpath.closed = true;
-        (!subpath.elements.is_empty()).then_some(subpath)
+        Ok((!subpath.elements.is_empty()).then_some(subpath))
     }
 }
 
@@ -755,14 +757,6 @@ struct Directed {
     to: usize,
     segment: Segment,
     forward: bool,
-}
-
-/// `segment` as the step of a path from wherever it starts.
-const fn element(segment: Segment) -> PathEl {
-    match segment {
-        Segment::Line(line) => PathEl::Line(line.p1),
-        Segment::Cubic(cubic) => PathEl::Cubic(cubic.p1, cubic.p2, cubic.p3),
-    }
 }
 
 /// Move `segment`'s ends to `start` and `end`, which lie within the
@@ -834,14 +828,10 @@ fn straightened(cubic: CubicBez, tolerance: f64) -> Segment {
 /// itself with its neighbours alone.
 fn merge_vertices(vertices: &[Point], distance: f64) -> Result<Vec<usize>, BooleanError> {
     let mut parent: Vec<usize> = Vec::new();
-    if !fallible::reserve(&mut parent, vertices.len()) {
-        return Err(BooleanError::OutOfMemory);
-    }
+    parent.try_reserve_exact(vertices.len())?;
     parent.extend(0..vertices.len());
     let mut cells: Vec<(i64, i64, usize)> = Vec::new();
-    if !fallible::reserve(&mut cells, vertices.len()) {
-        return Err(BooleanError::OutOfMemory);
-    }
+    cells.try_reserve_exact(vertices.len())?;
     let cell_of = |point: Point| {
         (
             tairix_util::mathf::floor(point.x / distance),
@@ -898,6 +888,17 @@ fn cell_index(cell: f64) -> i64 {
     cell as i64
 }
 
+/// `t` held to a piece's parameters: anything not past its start — either
+/// zero, or no number at all — is the start's own zero, so the cuts sort
+/// along the piece between its two ends.
+fn along_piece(t: f64) -> f64 {
+    if t > 0.0 {
+        fmin(t, 1.0)
+    } else {
+        0.0
+    }
+}
+
 /// `index` as the 32-bit index the working tables hold, refused past them.
 fn index_u32(index: usize) -> Result<u32, BooleanError> {
     u32::try_from(index).map_err(|_| BooleanError::TooComplex)
@@ -945,25 +946,18 @@ impl RayIndex {
             tall: Vec::new(),
         };
         let bands = index.band_of(extent.max.y) + 1;
-        if !fallible::reserve(&mut index.bands, bands) {
-            return Err(BooleanError::OutOfMemory);
-        }
+        index.bands.try_reserve_exact(bands)?;
         index.bands.resize_with(bands, Vec::new);
         for (operand, (path, _)) in operands.iter().enumerate() {
             for segment in path.subpaths.iter().flat_map(Subpath::filled_segments) {
                 let bounds = segment.bounds();
                 let (low, high) = (index.band_of(bounds.min.y), index.band_of(bounds.max.y));
-                let filed = if high - low < MOST_BANDS_FILED {
-                    let mut ok = true;
+                if high - low < MOST_BANDS_FILED {
                     for band in low..=high {
-                        ok &= fallible::push(&mut index.bands[band], (operand, segment));
+                        fallible::try_push(&mut index.bands[band], (operand, segment))?;
                     }
-                    ok
                 } else {
-                    fallible::push(&mut index.tall, (operand, segment))
-                };
-                if !filed {
-                    return Err(BooleanError::OutOfMemory);
+                    fallible::try_push(&mut index.tall, (operand, segment))?;
                 }
             }
         }

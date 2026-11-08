@@ -33,16 +33,18 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_bezier::Path;
 use tairix_raster::Affine;
-use tairix_util::mathf::{real, sqrt};
+use tairix_util::mathf::real;
 
 use crate::error::SvgError;
 use crate::font::{
     FaceMetrics, FaceRequest, FontProvider, FontUnavailable, GlyphOutline, OutlineSegment,
 };
 use crate::geom::{Point, SubPath};
-use crate::number::parse_length;
+use crate::number::{parse_length, viewport_diagonal};
 use crate::style::{parse_length_in, Lengths, Style, TextAnchor};
+use crate::textpath::{self, Along};
 use crate::xml::{Content, Element};
 use tairix_bezier::flatten::flatten_quadratic;
 use tairix_bezier::QuadBez;
@@ -142,6 +144,29 @@ pub(crate) trait TextCascade<'a> {
 
     /// Take the last entered element off the selector path.
     fn leave(&mut self);
+
+    /// The path the `<textPath>` `element` names, in the text's user space,
+    /// with the length it states for itself; `None` where it names nothing a
+    /// text can be set along, which SVG then draws none of.
+    ///
+    /// # Errors
+    /// Whatever the path's geometry raises, and a bound passed.
+    fn text_path(
+        &mut self,
+        element: &'a Element<'a>,
+    ) -> Result<Option<(Path, Option<f64>)>, SvgError>;
+}
+
+/// Where in the subtree the walk stands.
+#[derive(Copy, Clone, Debug)]
+struct Walk {
+    space: Space,
+    depth: usize,
+    /// How far the enclosing spans raise their characters, in user units.
+    rise: f64,
+    /// The `<textPath>` holding their characters, as an index into
+    /// [`Collected::paths`].
+    path: Option<u32>,
 }
 
 /// How one element's white space is treated.
@@ -181,6 +206,20 @@ struct Placed {
     shift: (f64, f64),
     /// How far the glyph is turned, in degrees.
     rotate: f64,
+    /// How far the spans holding it raise it, in user units.
+    rise: f64,
+    /// The `<textPath>` holding it, as an index into [`Collected::paths`].
+    path: Option<u32>,
+}
+
+/// A `<textPath>`'s path and how its characters stand on it.
+pub(crate) struct PathSpan {
+    along: Along,
+    /// How far along the path the pen starts.
+    start: f64,
+    /// `method="stretch"`: each glyph bent along the path rather than turned
+    /// rigidly with it.
+    stretch: bool,
 }
 
 /// A `textLength` an element states over the characters it contributed.
@@ -199,6 +238,7 @@ pub(crate) struct Collected {
     chars: Vec<Placed>,
     styles: Vec<Style>,
     spans: Vec<LengthSpan>,
+    paths: Vec<PathSpan>,
 }
 
 /// One glyph placed in user space.
@@ -207,8 +247,12 @@ pub(crate) struct PlacedGlyph {
     /// Which style run fills it.
     pub(crate) run: usize,
     /// Font units to user space: the em scale and y flip, the glyph's own
-    /// rotation, any synthetic oblique shear, and the pen position.
+    /// rotation, any synthetic oblique shear, and the pen position. For a
+    /// glyph bent along a path, font units to that path's own frame — the
+    /// distance along it and the offset across it.
     pub(crate) to_user: Affine,
+    /// The path a glyph is bent along, as an index into [`Laid::paths`].
+    pub(crate) bent: Option<u32>,
     /// The synthetic bold stroke this glyph's face could not furnish, as a
     /// fraction of the em.
     pub(crate) synthetic_bold: f64,
@@ -220,6 +264,7 @@ pub(crate) struct Laid {
     pub(crate) glyphs: Vec<PlacedGlyph>,
     pub(crate) styles: Vec<Style>,
     pub(crate) outlines: Vec<GlyphOutline>,
+    pub(crate) paths: Vec<PathSpan>,
 }
 
 /// Walk `element`'s subtree, resolving each `<tspan>`'s style through
@@ -245,38 +290,84 @@ pub(crate) fn collect<'a>(
         chars: Vec::new(),
         styles: Vec::new(),
         spans: Vec::new(),
+        paths: Vec::new(),
     };
     // The caller already has the `<text>` element on its selector path and
     // has resolved its style, so the root is not entered a second time; only
-    // its `<tspan>` descendants are.
-    gather_content(
-        element,
-        inherited,
-        Space::Collapse,
-        0,
-        viewport,
-        cascade,
-        &mut out,
-    )?;
+    // its `<tspan>` and `<textPath>` descendants are. A `<text>` takes no
+    // baseline shift of its own.
+    let walk = Walk {
+        space: Space::Collapse,
+        depth: 0,
+        rise: 0.0,
+        path: None,
+    };
+    gather_content(element, inherited, walk, viewport, cascade, &mut out)?;
     collapse(&mut out);
     Ok(out)
 }
 
-/// Collect one `<text>` or `<tspan>` and its content.
+/// Collect one `<tspan>` and its content.
 fn gather<'a>(
     element: &'a Element<'a>,
     inherited: &Style,
-    space: Space,
-    depth: usize,
+    walk: Walk,
     viewport: (f64, f64),
     cascade: &mut dyn TextCascade<'a>,
     out: &mut Collected,
 ) -> Result<(), SvgError> {
-    if depth > MAX_TSPAN_DEPTH {
+    if walk.depth > MAX_TSPAN_DEPTH {
         return Err(SvgError::TooComplex);
     }
     let style = cascade.enter(element, inherited)?;
-    let gathered = gather_content(element, &style, space, depth, viewport, cascade, out);
+    let walk = Walk {
+        rise: walk.rise
+            + style
+                .baseline_shift
+                .rise(inherited.font_size, style.font_size),
+        ..walk
+    };
+    let gathered = gather_content(element, &style, walk, viewport, cascade, out);
+    cascade.leave();
+    gathered
+}
+
+/// Collect one `<textPath>` and its content, set along the path it names;
+/// one naming nothing a text can be set along contributes nothing.
+fn gather_path<'a>(
+    element: &'a Element<'a>,
+    inherited: &Style,
+    walk: Walk,
+    viewport: (f64, f64),
+    cascade: &mut dyn TextCascade<'a>,
+    out: &mut Collected,
+) -> Result<(), SvgError> {
+    if walk.depth > MAX_TSPAN_DEPTH {
+        return Err(SvgError::TooComplex);
+    }
+    let Some((path, stated)) = cascade.text_path(element)? else {
+        return Ok(());
+    };
+    let along = Along::new(&path, element.attr("side") == Some("right"))?;
+    let style = cascade.enter(element, inherited)?;
+    let gathered = textpath::start(element, style.font_size, along.length(), stated, viewport)
+        .and_then(|start| {
+            let index = u32::try_from(out.paths.len()).map_err(|_| SvgError::TooComplex)?;
+            out.paths.push(PathSpan {
+                along,
+                start,
+                stretch: element.attr("method") == Some("stretch"),
+            });
+            let walk = Walk {
+                rise: walk.rise
+                    + style
+                        .baseline_shift
+                        .rise(inherited.font_size, style.font_size),
+                path: Some(index),
+                ..walk
+            };
+            gather_content(element, &style, walk, viewport, cascade, out)
+        });
     cascade.leave();
     gathered
 }
@@ -285,13 +376,13 @@ fn gather<'a>(
 fn gather_content<'a>(
     element: &'a Element<'a>,
     style: &Style,
-    space: Space,
-    depth: usize,
+    walk: Walk,
     viewport: (f64, f64),
     cascade: &mut dyn TextCascade<'a>,
     out: &mut Collected,
 ) -> Result<(), SvgError> {
-    let space = Space::of(element, space);
+    let space = Space::of(element, walk.space);
+    let walk = Walk { space, ..walk };
     let preserve = space == Space::Preserve;
     let run = out.styles.len();
     out.styles.push(style.clone());
@@ -313,16 +404,29 @@ fn gather_content<'a>(
                         absolute: positions.absolute(taken),
                         shift: positions.shift(taken),
                         rotate: positions.rotate(taken),
+                        rise: walk.rise,
+                        path: walk.path,
                     });
                     taken += 1;
                 }
             }
-            // Only `<tspan>` contributes characters; anything else inside a
-            // `<text>` is content this decoder cannot draw and is skipped,
-            // exactly as it is anywhere else in the tree.
-            Content::Element(child) if child.name == "tspan" => {
+            // Only `<tspan>` and `<textPath>` contribute characters — and no
+            // `<textPath>` within another; anything else inside a `<text>` is
+            // content this decoder cannot draw and is skipped, exactly as it
+            // is anywhere else in the tree.
+            Content::Element(child)
+                if child.name == "tspan" || (child.name == "textPath" && walk.path.is_none()) =>
+            {
                 let before = out.chars.len();
-                gather(child, &inherited, space, depth + 1, viewport, cascade, out)?;
+                let inner = Walk {
+                    depth: walk.depth + 1,
+                    ..walk
+                };
+                if child.name == "tspan" {
+                    gather(child, &inherited, inner, viewport, cascade, out)?;
+                } else {
+                    gather_path(child, &inherited, inner, viewport, cascade, out)?;
+                }
                 // A descendant's characters are addressable by *this*
                 // element's lists too, so they advance its cursor and take
                 // whichever of its values they line up with — but never over
@@ -600,14 +704,6 @@ fn family_list(list: &str) -> impl Iterator<Item = &str> {
         .filter(|name| !name.is_empty())
 }
 
-/// The length a percentage with no axis of its own resolves against.
-fn viewport_diagonal(viewport: (f64, f64)) -> f64 {
-    sqrt(f64::midpoint(
-        viewport.0 * viewport.0,
-        viewport.1 * viewport.1,
-    ))
-}
-
 /// Fetch every character's outline, a bounded run at a time.
 fn fetch_outlines(
     collected: &Collected,
@@ -652,12 +748,14 @@ fn fetch_outlines(
 }
 
 /// Resolve every pen position, anchor each chunk, apply any `textLength`,
-/// and build each glyph's transform.
+/// and build each glyph's transform; a glyph whose advance's midpoint falls
+/// off the path it is set along is not drawn.
 fn place(collected: Collected, outlines: Vec<GlyphOutline>) -> Laid {
     let Collected {
         chars,
         styles,
         spans,
+        paths,
     } = collected;
     let mut advances: Vec<f64> = chars
         .iter()
@@ -667,15 +765,13 @@ fn place(collected: Collected, outlines: Vec<GlyphOutline>) -> Laid {
     let mut stretch = vec![1.0_f64; chars.len()];
     apply_length_spans(&spans, &mut advances, &mut stretch);
 
-    let (origins, chunks) = pen_positions(&chars, &advances);
+    let (origins, chunks) = pen_positions(&chars, &advances, &paths);
     let mut origins = origins;
     anchor(&chunks, &chars, &styles, &advances, &mut origins);
 
     let mut glyphs = Vec::with_capacity(chars.len());
-    for (index, placed) in chars.iter().enumerate() {
-        let Some(outline) = outlines.get(index) else {
-            continue;
-        };
+    let mut kept = Vec::with_capacity(chars.len());
+    for ((index, placed), outline) in chars.iter().enumerate().zip(outlines) {
         let Some(style) = styles.get(placed.run) else {
             continue;
         };
@@ -686,20 +782,55 @@ fn place(collected: Collected, outlines: Vec<GlyphOutline>) -> Laid {
         // the same scale. The shear leans the letterforms about the
         // baseline, which is the pen origin, so a synthetic oblique costs one
         // more matrix compose and nothing per contour.
-        let to_user = Affine::scale(em * widened, -em)
+        let letterform = Affine::scale(em * widened, -em)
             .then(oblique(outline.synthetic_shear))
-            .then(Affine::rotate_degrees(placed.rotate))
-            .then(Affine::translate(origin.0, origin.1));
+            .then(Affine::rotate_degrees(placed.rotate));
+        let raised = origin.1 - placed.rise;
+        let span = placed
+            .path
+            .and_then(|at| paths.get(at as usize).map(|span| (at, span)));
+        let (to_user, bent) = match span {
+            None => (letterform.then(Affine::translate(origin.0, raised)), None),
+            Some((at, span)) => {
+                let advance = outline.advance * em * widened;
+                let Some((point, direction)) = span.along.at(origin.0 + advance / 2.0) else {
+                    continue;
+                };
+                if span.stretch {
+                    (
+                        letterform.then(Affine::translate(origin.0, raised)),
+                        Some(at),
+                    )
+                } else {
+                    let turned = Affine {
+                        a: direction.x,
+                        b: direction.y,
+                        c: -direction.y,
+                        d: direction.x,
+                        e: 0.0,
+                        f: 0.0,
+                    };
+                    let to_user = letterform
+                        .then(Affine::translate(-advance / 2.0, raised))
+                        .then(turned)
+                        .then(Affine::translate(point.x, point.y));
+                    (to_user, None)
+                }
+            }
+        };
         glyphs.push(PlacedGlyph {
             run: placed.run,
             to_user,
+            bent,
             synthetic_bold: outline.synthetic_bold,
         });
+        kept.push(outline);
     }
     Laid {
         glyphs,
         styles,
-        outlines,
+        outlines: kept,
+        paths,
     }
 }
 
@@ -724,27 +855,53 @@ type PenPositions = (Vec<(f64, f64)>, Vec<(usize, usize)>);
 
 /// Resolve the pen position of every character, and the chunks the anchor
 /// shifts.
-fn pen_positions(chars: &[Placed], advances: &[f64]) -> PenPositions {
+///
+/// Within a `<textPath>` a pen is a distance along the path and an offset
+/// across it: the path's start begins a chunk, an `x` is a new distance and a
+/// `y` means nothing. The text after a path goes on from where its pen
+/// stopped on it.
+fn pen_positions(chars: &[Placed], advances: &[f64], paths: &[PathSpan]) -> PenPositions {
     let mut origins: Vec<(f64, f64)> = Vec::with_capacity(chars.len());
     let mut chunks: Vec<(usize, usize)> = Vec::new();
     let mut pen = (0.0_f64, 0.0_f64);
+    let mut previous = None;
     for (index, placed) in chars.iter().enumerate() {
-        if placed.absolute.0.is_some() || placed.absolute.1.is_some() || index == 0 {
+        let span = |at: Option<u32>| at.and_then(|at| paths.get(at as usize));
+        let crossed = index > 0 && placed.path != previous;
+        if crossed {
+            if let Some((point, _)) = span(previous).and_then(|span| span.along.extended(pen.0)) {
+                pen = (point.x, point.y);
+            }
+            if let Some(span) = span(placed.path) {
+                pen = (span.start, 0.0);
+            }
+        }
+        let absolute = match placed.path {
+            Some(_) => (placed.absolute.0, None),
+            None => placed.absolute,
+        };
+        if absolute.0.is_some() || absolute.1.is_some() || index == 0 || crossed {
             if let Some(last) = chunks.last_mut() {
                 last.1 = index;
             }
             chunks.push((index, chars.len()));
         }
-        if let Some(x) = placed.absolute.0 {
+        if index == 0 {
+            if let Some(span) = span(placed.path) {
+                pen = (span.start, 0.0);
+            }
+        }
+        if let Some(x) = absolute.0 {
             pen.0 = x;
         }
-        if let Some(y) = placed.absolute.1 {
+        if let Some(y) = absolute.1 {
             pen.1 = y;
         }
         pen.0 += placed.shift.0;
         pen.1 += placed.shift.1;
         origins.push(pen);
         pen.0 += advances.get(index).copied().unwrap_or(0.0);
+        previous = placed.path;
     }
     (origins, chunks)
 }
@@ -872,6 +1029,120 @@ pub(crate) fn glyph_subpaths(
         }
     }
     out
+}
+
+impl Laid {
+    /// Glyph `index`'s outline flattened into user-space sub-paths: at
+    /// `tolerance` in its font units, and where it is bent along a path
+    /// within `bend_tolerance` user units of the curve, in no more than
+    /// `points_left` points.
+    ///
+    /// # Errors
+    /// [`SvgError::TooComplex`] where a bent glyph needs more points than
+    /// are left.
+    pub(crate) fn subpaths(
+        &self,
+        index: usize,
+        (tolerance, bend_tolerance): (f64, f64),
+        points_left: usize,
+    ) -> Result<Vec<SubPath>, SvgError> {
+        let (Some(glyph), Some(outline)) = (self.glyphs.get(index), self.outlines.get(index))
+        else {
+            return Ok(Vec::new());
+        };
+        match glyph.bent.and_then(|at| self.paths.get(at as usize)) {
+            Some(span) => {
+                let flat = glyph_subpaths(outline, glyph.to_user, tolerance);
+                bent_subpaths(flat, &span.along, bend_tolerance, points_left)
+            }
+            None => Ok(glyph_subpaths(outline, glyph.to_user, tolerance)),
+        }
+    }
+}
+
+/// The most times one edge of a bent glyph is halved: into 1024 pieces,
+/// enough to follow any turn a glyph meets, and a bound a hostile curve
+/// cannot push past.
+const MAX_BEND_DEPTH: u32 = 10;
+
+/// `flat`, a glyph's flattened contours in a path's frame — the distance
+/// along it and the offset across it — carried onto the path, each edge
+/// halved until its bent midpoint lies within `tolerance` user units of its
+/// chord, so a straight stroke of the letterform follows the curve.
+fn bent_subpaths(
+    flat: Vec<SubPath>,
+    along: &Along,
+    tolerance: f64,
+    mut points_left: usize,
+) -> Result<Vec<SubPath>, SvgError> {
+    let bend = |(u, v): Point| -> Option<Point> {
+        let (point, direction) = along.extended(u)?;
+        Some((point.x - direction.y * v, point.y + direction.x * v))
+    };
+    let mut out = Vec::with_capacity(flat.len());
+    for contour in flat {
+        let mut points: Vec<Point> = Vec::with_capacity(contour.points.len() * 2);
+        let ring = contour
+            .points
+            .iter()
+            .zip(contour.points.iter().cycle().skip(1));
+        for (&from, &to) in ring {
+            let (Some(start), Some(end)) = (bend(from), bend(to)) else {
+                return Ok(Vec::new());
+            };
+            if points.is_empty() {
+                points.push(start);
+            }
+            let edge = Edge {
+                bend: &bend,
+                tolerance,
+            };
+            edge.halve((from, start), (to, end), 0, &mut points);
+            if points.len() > points_left {
+                return Err(SvgError::TooComplex);
+            }
+        }
+        points.pop();
+        points_left -= points.len();
+        let sub = SubPath::closed(points);
+        if !sub.is_degenerate() {
+            out.push(sub);
+        }
+    }
+    Ok(out)
+}
+
+/// How an edge of a glyph is carried onto the path it bends along.
+struct Edge<'b> {
+    bend: &'b dyn Fn(Point) -> Option<Point>,
+    tolerance: f64,
+}
+
+impl Edge<'_> {
+    /// The edge from `from` to `to` — each a point in the path's frame and
+    /// where it bends to — halved while its bent midpoint strays past the
+    /// tolerance: the points after its start, into `out`.
+    fn halve(&self, from: (Point, Point), to: (Point, Point), depth: u32, out: &mut Vec<Point>) {
+        let middle = (
+            f64::midpoint(from.0 .0, to.0 .0),
+            f64::midpoint(from.0 .1, to.0 .1),
+        );
+        if depth < MAX_BEND_DEPTH {
+            if let Some(bent) = (self.bend)(middle) {
+                let chord = (
+                    f64::midpoint(from.1 .0, to.1 .0),
+                    f64::midpoint(from.1 .1, to.1 .1),
+                );
+                let (dx, dy) = (bent.0 - chord.0, bent.1 - chord.1);
+                if dx * dx + dy * dy > self.tolerance * self.tolerance {
+                    self.halve(from, (middle, bent), depth + 1, out);
+                    self.halve((middle, bent), to, depth + 1, out);
+                    return;
+                }
+            }
+        }
+        out.push(to.1);
+    }
 }
 
 #[cfg(test)]

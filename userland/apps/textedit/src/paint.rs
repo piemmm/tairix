@@ -9,7 +9,7 @@ use core::fmt::Write as _;
 use core::ops::ControlFlow;
 
 use tairix_colour::Rgba;
-use tairix_controls::{blend_area, fill_area, withheld};
+use tairix_controls::{blend_area, fill_area, withheld, StatusBand, StatusTone};
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_raster::{Color, Surface};
@@ -77,7 +77,7 @@ pub fn render_into(
     }
     fill_area(surface, layout.corner(), Color::from(palette.scroll_track));
     if !withheld(surface, layout.status()) {
-        status(surface, view, layout, theme, faces.status);
+        status(surface, view, layout, theme, StatusBand::new(theme, scale));
     }
     if let Some((dialog, field)) = view.modal() {
         let bounds = View::modal_rect(dialog, layout.window(), scale, theme);
@@ -788,13 +788,7 @@ fn frame(surface: &mut Surface, rect: Rect, color: Color, weight: u32) {
 
 /// The status band: where the caret is, what was last said or what the
 /// parser reports, and the fields that open the view's settings.
-fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, font: BitmapFont) {
-    let palette = theme.palette();
-    fill_area(
-        surface,
-        layout.status(),
-        Color::from(palette.surface_raised),
-    );
+fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, band: StatusBand) {
     let editor = view.editor();
     let document = editor.document();
     let selection = editor.selection();
@@ -825,51 +819,45 @@ fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, fo
     if !selection.is_empty() && view.code_shown().is_none() {
         let _ = write!(text, ", {} selected", selection.range().len());
     }
-    let muted = Color::from(palette.on_surface_muted);
-    let ink = Color::from(palette.on_surface);
-    let status = layout.status();
-    let y = font.centred_top(status.top(), status.height);
-    let draw = |surface: &mut Surface, rect: Rect, words: &str, colour: Color| {
-        let fitted = font.truncate_to_width(words, rect.width);
-        font.draw_text(surface, rect.left(), y, fitted, colour);
-    };
-    draw(surface, layout.position(), &text, ink);
-    text.clear();
+    let mut message = String::new();
     let (diagnostics, current) = editor.diagnostics();
-    let colour = if let Some(message) = view.message() {
-        text.push_str(message);
-        ink
+    let tone = if let Some(said) = view.message() {
+        message.push_str(said);
+        StatusTone::Ink
     } else if let Some(stopped) = editor.highlight().stopped() {
-        text.push_str(match stopped {
+        message.push_str(match stopped {
             Stopped::Failed => "Colouring stopped: the lexer failed on this document",
             Stopped::OutOfMemory => "Colouring stopped: there is not enough memory",
         });
-        Color::from(palette.warning)
+        StatusTone::Warning
     } else if editor.format().is_store() && current {
         match diagnostics {
-            [] => text.push_str("No problems"),
+            [] => message.push_str("No problems"),
             [only] => {
                 let _ = match only.line {
-                    Some(line) => write!(text, "Line {line}: {}", only.message),
-                    None => write!(text, "{}", only.message),
+                    Some(line) => write!(message, "Line {line}: {}", only.message),
+                    None => write!(message, "{}", only.message),
                 };
             }
             many => {
-                let _ = write!(text, "{} problems \u{2014} F8 goes to the next", many.len());
+                let _ = write!(
+                    message,
+                    "{} problems \u{2014} F8 goes to the next",
+                    many.len()
+                );
             }
         }
         let error = diagnostics
             .iter()
             .any(|diagnostic| diagnostic.severity == Severity::Error);
         match (diagnostics.is_empty(), error) {
-            (true, _) => Color::from(palette.success),
-            (false, true) => Color::from(palette.danger),
-            (false, false) => Color::from(palette.warning),
+            (true, _) => StatusTone::Success,
+            (false, true) => StatusTone::Danger,
+            (false, false) => StatusTone::Warning,
         }
     } else {
-        muted
+        StatusTone::Muted
     };
-    draw(surface, layout.message(), &text, colour);
     let fields = layout.status_fields();
     let indent = match editor.indent() {
         crate::detect::Indent::Tab => String::from("Tab"),
@@ -886,9 +874,21 @@ fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, fo
         },
         editor.format().label(),
     ];
-    for (rect, value) in fields.iter().zip(values) {
-        draw(surface, *rect, value, ink);
-    }
+    let [first, second, third, fourth, fifth] = values;
+    band.paint(
+        surface,
+        layout.status(),
+        theme,
+        &[
+            (layout.position(), &text, StatusTone::Ink),
+            (layout.message(), &message, tone),
+            (fields[0], first, StatusTone::Ink),
+            (fields[1], second, StatusTone::Ink),
+            (fields[2], third, StatusTone::Ink),
+            (fields[3], fourth, StatusTone::Ink),
+            (fields[4], fifth, StatusTone::Ink),
+        ],
+    );
 }
 
 #[cfg(test)]

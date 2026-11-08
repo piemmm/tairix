@@ -534,3 +534,43 @@ fn vector_effect_does_not_inherit() {
             .non_scaling_stroke
     );
 }
+
+#[test]
+fn a_baseline_shift_is_read_as_a_length_ems_or_a_keyword_and_not_inherited() {
+    use super::BaselineShift;
+
+    let shift = |value: &str| {
+        resolve(
+            &Style::default(),
+            &format!(r#"<tspan baseline-shift="{value}"/>"#),
+        )
+        .map(|style| style.baseline_shift)
+    };
+    assert_eq!(shift("baseline"), Ok(BaselineShift::Length(0.0)));
+    assert_eq!(shift("sub"), Ok(BaselineShift::Sub));
+    assert_eq!(shift("super"), Ok(BaselineShift::Super));
+    assert_eq!(shift("-3"), Ok(BaselineShift::Length(-3.0)));
+    assert_eq!(shift("6pt"), Ok(BaselineShift::Length(8.0)));
+    assert_eq!(shift("0.25em"), Ok(BaselineShift::Ems(0.25)));
+    assert_eq!(shift("1ex"), Ok(BaselineShift::Ems(0.5)));
+    let percent = shift("50%").expect("read");
+    assert_eq!(
+        percent,
+        BaselineShift::Ems(0.6),
+        "half of a normal line height"
+    );
+    assert_eq!(shift("high"), Err(SvgError::InvalidNumber));
+    assert_eq!(shift("1e999em"), Err(SvgError::InvalidNumber));
+    let raised = styled(r#"<tspan baseline-shift="super"/>"#);
+    assert_eq!(raised.inherit().baseline_shift, BaselineShift::default());
+}
+
+#[test]
+fn a_baseline_shift_keyword_measures_its_parent_and_ems_the_element_itself() {
+    use super::BaselineShift;
+
+    assert!((BaselineShift::Sub.rise(30.0, 10.0) + 6.0).abs() < 1e-12);
+    assert!((BaselineShift::Super.rise(30.0, 10.0) - 10.0).abs() < 1e-12);
+    assert!((BaselineShift::Ems(0.5).rise(30.0, 10.0) - 5.0).abs() < 1e-12);
+    assert!((BaselineShift::Length(-2.0).rise(30.0, 10.0) + 2.0).abs() < 1e-12);
+}

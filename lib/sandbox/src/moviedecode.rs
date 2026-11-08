@@ -76,7 +76,7 @@ use crate::session::{
     FrameOut, SessionBounds, SessionError, SessionService, SessionStep, ShareWrite,
 };
 use crate::supervise::Requests;
-use crate::wire::{Reader, WireError, Writer};
+use crate::wire::{Reader, Refusable, WireError, Writer};
 
 /// Pages the worker holds: a whole need, and the demuxer's largest read and a
 /// payload's chunk beside it.
@@ -1671,7 +1671,7 @@ impl MovieDecodeClient {
         out.u8(TO_NEXT);
         out.u64(skip_before_ns);
         out.u8(self.held);
-        self.request(out);
+        self.request(out)?;
         self.awaiting = Awaiting::Next {
             skip_before_ns,
             free: ALL_SLOTS & !self.held,
@@ -1690,7 +1690,7 @@ impl MovieDecodeClient {
         }
         let mut out = self.writer(SOUND_REQUEST_LEN)?;
         out.u8(TO_SOUND);
-        self.request(out);
+        self.request(out)?;
         self.awaiting = Awaiting::Sound;
         Ok(())
     }
@@ -1726,7 +1726,7 @@ impl MovieDecodeClient {
         out.u8(TO_SUPPLY);
         out.u64(offset);
         out.raw(bytes);
-        self.outgoing = Some(out.finish());
+        self.outgoing = Some(out.finish().ok_or(MovieDecodeError::OutOfMemory)?);
         self.need = None;
         Ok(())
     }
@@ -1742,7 +1742,7 @@ impl MovieDecodeClient {
         let mut out = self.writer(UNREADABLE_LEN)?;
         out.u8(TO_UNREADABLE);
         out.u64(offset);
-        self.outgoing = Some(out.finish());
+        self.outgoing = Some(out.finish().ok_or(MovieDecodeError::OutOfMemory)?);
         self.need = None;
         Ok(())
     }
@@ -2014,18 +2014,20 @@ impl MovieDecodeClient {
     }
 
     /// Queue `frame` as a new request.
-    fn request(&mut self, frame: Writer) {
-        self.outgoing = Some(frame.finish());
+    fn request(&mut self, frame: Writer<Refusable>) -> Result<(), MovieDecodeError> {
+        self.outgoing = Some(frame.finish().ok_or(MovieDecodeError::OutOfMemory)?);
         self.needs = 0;
+        Ok(())
     }
 
-    fn writer(&mut self, len: usize) -> Result<Writer, MovieDecodeError> {
+    /// A request of `len` bytes, its room taken now, in the spare buffer.
+    fn writer(&mut self, len: usize) -> Result<Writer<Refusable>, MovieDecodeError> {
         let mut buffer = core::mem::take(&mut self.spare);
         buffer.clear();
         buffer
             .try_reserve(len)
             .map_err(|_| MovieDecodeError::OutOfMemory)?;
-        Ok(Writer::reusing(buffer))
+        Ok(Writer::refusable_in(buffer))
     }
 
     fn send_open(&mut self, seed: HashSeed) -> Result<(), MovieDecodeError> {
@@ -2039,16 +2041,14 @@ impl MovieDecodeClient {
         out.u64(self.ceiling);
         out.u32(width);
         out.u32(height);
-        self.request(out);
-        Ok(())
+        self.request(out)
     }
 
     fn send_seek(&mut self, target_ns: u64) -> Result<(), MovieDecodeError> {
         let mut out = self.writer(SEEK_LEN)?;
         out.u8(TO_SEEK);
         out.u64(target_ns);
-        self.request(out);
-        Ok(())
+        self.request(out)
     }
 }
 

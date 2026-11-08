@@ -13,6 +13,7 @@
 //! uses reserves amortised so repeated growth is not quadratic.
 
 use alloc::boxed::Box;
+use alloc::collections::TryReserveError;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::alloc::Layout;
@@ -172,6 +173,62 @@ pub fn written(write: impl Fn(&mut dyn fmt::Write) -> fmt::Result) -> Option<Str
     Some(out)
 }
 
+/// A string grown only fallibly, for text written a piece at a time whose
+/// length is not known until it is written: a piece the heap cannot hold
+/// fails the write, as `fmt::Error`, and leaves what was written before it.
+/// Its room doubles as it fills, as a [`push`]ed vector's does.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Text(String);
+
+impl Text {
+    /// No text, holding no allocation.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(String::new())
+    }
+
+    /// Room for `count` more bytes.
+    ///
+    /// # Errors
+    ///
+    /// `fmt::Error` when the heap refuses it.
+    pub fn reserve(&mut self, count: usize) -> fmt::Result {
+        self.0.try_reserve(count).map_err(|_| fmt::Error)
+    }
+
+    /// What was written.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Its length in bytes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether nothing was written.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The written text, as a string.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Write for Text {
+    fn write_str(&mut self, piece: &str) -> fmt::Result {
+        self.reserve(piece.len())?;
+        self.0.push_str(piece);
+        Ok(())
+    }
+}
+
 /// Room in `buffer` for `count` more items, reporting whether the allocator
 /// granted it — for a buffer filled by pushing rather than by resizing.
 #[must_use]
@@ -185,11 +242,19 @@ pub fn reserve<T>(buffer: &mut Vec<T>, count: usize) -> bool {
 /// copy the whole list on every push.
 #[must_use]
 pub fn push<T>(buffer: &mut Vec<T>, item: T) -> bool {
-    if buffer.len() == buffer.capacity() && buffer.try_reserve(1).is_err() {
-        return false;
-    }
+    try_push(buffer, item).is_ok()
+}
+
+/// Append `item` to `buffer` as [`push`] does, answering the allocator's
+/// refusal as an error a caller's `?` converts into its own.
+///
+/// # Errors
+///
+/// The allocator's refusal of the room, `buffer` left as it was.
+pub fn try_push<T>(buffer: &mut Vec<T>, item: T) -> Result<(), TryReserveError> {
+    buffer.try_reserve(1)?;
     buffer.push(item);
-    true
+    Ok(())
 }
 
 /// Move `buffer` into an allocation of exactly its length where the allocator

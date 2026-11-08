@@ -2406,7 +2406,11 @@ redeemable handle, never a path or any browsing authority of its own.
 A pick has a purpose. `PickPurpose::Open` chooses an existing file,
 delegated as the requester is handed any document: read-write where its
 signed manifest edits documents and the user may write the file, read-only
-otherwise, and `FilePicked` says which. `PickPurpose::Save { suggested,
+otherwise, and `FilePicked` says which. `PickPurpose::Import` chooses an
+existing file to read into a document — a picture placed in a drawing — and
+delegates it read-only whatever the manifest says, since what is read in is
+the document's to keep and never the file's to change.
+`PickPurpose::Save { suggested,
 formats }` chooses where a document goes, in the **Save panel**
 (`plans/SAVE-DIALOG.md`): a dialog of the requesting window holding the
 document's picture on a plate, its name — `suggested`, the stem selected so

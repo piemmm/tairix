@@ -11,10 +11,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use tairix_bezier::{Affine, FillRule, Point};
+use tairix_bezier::{Affine, FillRule, Path, PathEl, Point, Subpath};
 use tairix_colour::Rgba;
 
-use super::{read, write, ReadError};
+use super::{read, write};
 use crate::children::Children;
 use crate::drawing::{Drawing, Grid, Guide, GuideAxis, Page, Unit};
 use crate::id::Ids;
@@ -27,9 +27,12 @@ use crate::style::{
     ArrowShape, Arrowhead, Cap, Gradient, GradientKind, Join, Paint, PaintOrder, Spread, Stop,
     Stroke, Style,
 };
-use crate::text::{Text, TextAlign};
+use crate::testing::{line_height, origin, shared, slice, NoGlyphs};
+use crate::text::{Baseline, Run, RunPaint, RunStyle, Text, TextAlign, TextPath};
 use crate::unkept::Lost;
 use crate::DrawingError;
+use crate::ReadError;
+use crate::SharedSlice;
 
 fn black() -> Paint {
     Paint::Colour(Rgba::new(0, 0, 0, 255))
@@ -105,7 +108,7 @@ fn everything(ids: &mut Ids) -> Drawing {
             join: Join::Round,
             miter_limit: 6.0,
             cap: Cap::Round,
-            dashes: Arc::from(&[4.0, 2.0][..]),
+            dashes: slice(&[4.0, 2.0]),
             dash_offset: 1.0,
             start: Arrowhead {
                 shape: ArrowShape::Circle,
@@ -187,15 +190,49 @@ fn everything(ids: &mut Ids) -> Drawing {
             ids.issue(),
             Kind::Text {
                 text: Arc::new(Text {
-                    content: Arc::from("Hello <world> & \"friends\"\nSecond line"),
-                    family: Arc::from("Noto Serif, serif"),
+                    content: shared("Hello <world> & \"friends\"\nSecond line"),
+                    family: shared("Noto Serif, serif"),
                     size: 24.0,
                     weight: 700,
                     italic: true,
                     letter_spacing: 1.5,
-                    line_height: 1.5,
                     align: TextAlign::Middle,
-                    origin: Point::new(200.0, 220.0),
+                    baseline: Baseline::Lines {
+                        origin: Point::new(200.0, 220.0),
+                        line_height: 1.5,
+                    },
+                    runs: slice(&[
+                        Run {
+                            start: 6,
+                            end: 13,
+                            style: Arc::new(RunStyle {
+                                family: Some(shared("Noto Sans, sans-serif")),
+                                size: Some(30.0),
+                                fill: Some(RunPaint::Colour(Rgba::new(200, 0, 0, 128))),
+                                ..RunStyle::default()
+                            }),
+                        },
+                        Run {
+                            start: 17,
+                            end: 24,
+                            style: Arc::new(RunStyle {
+                                italic: Some(false),
+                                letter_spacing: Some(-0.5),
+                                baseline_shift: Some(0.33),
+                                ..RunStyle::default()
+                            }),
+                        },
+                        Run {
+                            start: 26,
+                            end: 32,
+                            style: Arc::new(RunStyle {
+                                weight: Some(400),
+                                fill: Some(RunPaint::None),
+                                stroke: Some(RunPaint::Colour(Rgba::new(0, 0, 255, 255))),
+                                ..RunStyle::default()
+                            }),
+                        },
+                    ]),
                 }),
                 style: Arc::new(Style {
                     fill: black(),
@@ -204,8 +241,52 @@ fn everything(ids: &mut Ids) -> Drawing {
             },
         )
         .expect("text")
-        .with_name(Some(Arc::from("Greeting")))
+        .with_name(Some(shared("Greeting")))
         .expect("named"),
+    );
+    let mut way = Subpath::new(Point::new(20.0, 260.0));
+    way.elements.push(PathEl::Cubic(
+        Point::new(80.0, 200.0),
+        Point::new(160.0, 320.0),
+        Point::new(240.0, 260.0),
+    ));
+    let along = Arc::new(
+        Node::new(
+            ids.issue(),
+            Kind::Text {
+                text: Arc::new(Text {
+                    content: shared("Along the way"),
+                    family: shared("serif"),
+                    size: 18.0,
+                    weight: 400,
+                    italic: false,
+                    letter_spacing: 0.0,
+                    align: TextAlign::Middle,
+                    baseline: Baseline::Path(Arc::new(TextPath {
+                        path: Arc::new(
+                            PathShape::from_path(&Path {
+                                subpaths: vec![way],
+                            })
+                            .expect("a path"),
+                        ),
+                        start: 12.5,
+                    })),
+                    runs: slice(&[Run {
+                        start: 6,
+                        end: 9,
+                        style: Arc::new(RunStyle {
+                            size: Some(24.0),
+                            ..RunStyle::default()
+                        }),
+                    }]),
+                }),
+                style: Arc::new(Style {
+                    fill: black(),
+                    ..Style::default()
+                }),
+            },
+        )
+        .expect("text along a path"),
     );
     let window = shape(
         ids,
@@ -226,34 +307,39 @@ fn everything(ids: &mut Ids) -> Drawing {
     let hidden = Arc::new(Node::clone(&star).with_visible(false).with_locked(true));
     let first = Arc::new(
         group(ids, vec![clipped, hidden], None)
-            .with_name(Some(Arc::from("Shapes")))
+            .with_name(Some(shared("Shapes")))
             .expect("named"),
     );
     let second = Arc::new(
-        group(ids, vec![curve, text], None)
-            .with_name(Some(Arc::from("Lines & words")))
+        group(ids, vec![curve, text, along], None)
+            .with_name(Some(shared("Lines & words")))
             .expect("named"),
     );
     Drawing::new(
         page(),
         Children::from_nodes(vec![first, second]).expect("held"),
-        Arc::from(
-            &[
-                Guide {
-                    axis: GuideAxis::Horizontal,
-                    position: 100.0,
-                },
-                Guide {
-                    axis: GuideAxis::Vertical,
-                    position: 37.5,
-                },
-            ][..],
-        ),
+        slice(&[
+            Guide {
+                axis: GuideAxis::Horizontal,
+                position: 100.0,
+            },
+            Guide {
+                axis: GuideAxis::Vertical,
+                position: 37.5,
+            },
+        ]),
         Grid {
             spacing: 24.0,
             subdivisions: 3,
         },
     )
+    .and_then(|drawing| {
+        drawing.with_swatches(slice(&[
+            Rgba::new(200, 30, 40, 255),
+            Rgba::new(0, 90, 160, 100),
+        ]))
+    })
+    .and_then(|drawing| drawing.with_resolution(300))
     .expect("a drawing")
 }
 
@@ -332,6 +418,8 @@ fn a_drawing_survives_a_round_trip_through_svg() {
     assert_eq!(read.page(), drawing.page());
     assert_eq!(read.guides(), drawing.guides());
     assert_eq!(read.grid(), drawing.grid());
+    assert_eq!(read.swatches(), drawing.swatches());
+    assert_eq!(read.resolution(), 300);
     assert_eq!(read.layers().len(), 2);
     for (a, b) in drawing.layers().iter().zip(read.layers().iter()) {
         assert!(
@@ -342,6 +430,27 @@ fn a_drawing_survives_a_round_trip_through_svg() {
     }
     // Writing what was read writes the same document.
     assert_eq!(written(&read), svg);
+}
+
+#[test]
+fn a_translucent_ground_reopens_as_itself_and_other_viewers_see_it_so() {
+    let mut ids = Ids::new();
+    let ground = Rgba::new(10, 120, 200, 77);
+    let drawing = everything(&mut ids)
+        .with_page(Page {
+            background: Some(ground),
+            ..page()
+        })
+        .expect("a translucent ground");
+    let svg = written(&drawing);
+    assert!(svg.contains("draw:background=\"#0a78c84d\""), "{svg}");
+    assert!(
+        svg.contains("fill=\"#0a78c8\" fill-opacity=\"0.3\""),
+        "{svg}"
+    );
+    let back = read(svg.as_bytes(), &mut ids).expect("read back");
+    assert_eq!(back.drawing.page().background, Some(ground));
+    assert!(back.unkept.is_empty(), "{:?}", back.unkept);
 }
 
 #[test]
@@ -487,13 +596,13 @@ fn text_lines_come_from_their_tspans() {
     };
     assert_eq!(&*text.content, "First line\nSecond");
     assert!(
-        (text.line_height - 1.2).abs() < 1e-9,
+        (line_height(text) - 1.2).abs() < 1e-9,
         "{}",
-        text.line_height
+        line_height(text)
     );
     assert_eq!(text.align, TextAlign::End);
     assert_eq!(&*text.family, "Inter");
-    assert_eq!(text.origin, Point::new(10.0, 40.0));
+    assert_eq!(origin(text), Point::new(10.0, 40.0));
 }
 
 #[test]
@@ -506,7 +615,7 @@ fn what_a_drawing_cannot_hold_is_listed_not_dropped_silently() {
       <rect width="10" height="10" mask="url(#m)"/>
       <rect width="10" height="10" fill="url(#p) red"/>
       <image href="data:image/png;base64,AAAA" width="5" height="5"/>
-      <text x="0" y="10"><tspan font-weight="bold">bold</tspan> plain</text>
+      <text x="0" y="10"><tspan stroke-width="3">wide</tspan> plain</text>
     </svg>"#;
     let mut ids = Ids::new();
     let read = read(document.as_bytes(), &mut ids).expect("read");
@@ -559,8 +668,16 @@ fn a_clip_path_clips_in_the_clipped_elements_own_space() {
 #[test]
 fn documents_that_are_not_svg_or_are_broken_are_refused() {
     let mut ids = Ids::new();
-    assert_eq!(read(b"\xff\xfe", &mut ids).err(), Some(ReadError::NotText));
-    assert_eq!(read(b"<html/>", &mut ids).err(), Some(ReadError::NotSvg));
+    assert_eq!(
+        read(b"\xff\xfe", &mut ids).err(),
+        Some(ReadError::Unrecognised),
+        "not text"
+    );
+    assert_eq!(
+        read(b"<html/>", &mut ids).err(),
+        Some(ReadError::Unrecognised),
+        "not SVG"
+    );
     assert_eq!(
         read(b"<svg><rect", &mut ids).err(),
         Some(ReadError::Malformed)
@@ -638,7 +755,7 @@ fn one_layer(layer: Node) -> Drawing {
     Drawing::new(
         page(),
         Children::from_nodes(vec![Arc::new(layer)]).expect("held"),
-        Arc::from(&[][..]),
+        SharedSlice::new(),
         Grid::default(),
     )
     .expect("a drawing")
@@ -784,7 +901,7 @@ fn a_title_must_be_one_trimmed_line() {
     let drawing = one_layer(group(&mut ids, Vec::new(), None));
     let titled = |title: &str| {
         drawing.with_info(crate::drawing::Info {
-            title: Some(Arc::from(title)),
+            title: Some(shared(title)),
             description: None,
         })
     };
@@ -817,4 +934,588 @@ fn walk(node: &Node, visit: &mut dyn FnMut(&Node)) {
             walk(child, visit);
         }
     }
+}
+
+/// A picture's colours: a different colour at each pixel, opaque.
+fn opaque(x: u32, y: u32) -> [u8; 4] {
+    [
+        u8::try_from(x * 40 % 256).expect("a level"),
+        u8::try_from(y * 70 % 256).expect("a level"),
+        200,
+        255,
+    ]
+}
+
+fn rect_bounds(x0: f64, y0: f64, x1: f64, y1: f64) -> tairix_bezier::Bounds {
+    tairix_bezier::Bounds::from_points([Point::new(x0, y0), Point::new(x1, y1)])
+}
+
+/// Every picture of `drawing`, in order.
+fn pictures(drawing: &Drawing) -> Vec<Arc<Node>> {
+    let mut found = Vec::new();
+    for layer in drawing.layers().iter() {
+        walk(layer, &mut |node| {
+            if matches!(node.kind(), Kind::Image { .. }) {
+                found.push(Arc::new(node.clone()));
+            }
+        });
+    }
+    found
+}
+
+fn image_of(node: &Node) -> &crate::image::Image {
+    match node.kind() {
+        Kind::Image { image } => image,
+        other => panic!("a picture, not {other:?}"),
+    }
+}
+
+/// An `<svg>` 100 units square holding `content`.
+fn document(content: &str) -> String {
+    alloc::format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="100" height="100">{content}</svg>"#
+    )
+}
+
+/// `bytes` as a base64 data URL.
+fn data_url(bytes: &[u8]) -> String {
+    let mut url = String::new();
+    super::data_url::write(&mut url, "image/png", bytes).expect("written");
+    url
+}
+
+#[test]
+fn a_picture_survives_a_round_trip_through_svg() {
+    use crate::testing::{image, pixels, png, source_of};
+    let mut ids = Ids::new();
+    let plain = pixels(5, 3, opaque);
+    let bare = crate::image::Image::new(
+        plain.try_clone().expect("pixels"),
+        rect_bounds(10.0, 20.0, 60.0, 50.0),
+        None,
+    )
+    .expect("a picture");
+    let turned = image(
+        &mut ids,
+        bare.clone(),
+        Affine::rotate_degrees(30.0).then(Affine::translate(5.0, 7.0)),
+    );
+    let turned = Arc::new(
+        turned
+            .with_opacity(0.5)
+            .and_then(|node| node.with_name(Some(shared("Photo"))))
+            .expect("dressed"),
+    );
+    let again = image(
+        &mut ids,
+        bare.placed(rect_bounds(0.0, 0.0, 5.0, 3.0)).expect("again"),
+        Affine::IDENTITY,
+    );
+    let encoded = png(&plain);
+    let kept = image(
+        &mut ids,
+        crate::image::Image::new(
+            plain,
+            rect_bounds(1.0, 1.0, 6.0, 4.0),
+            Some(source_of(&encoded)),
+        )
+        .expect("kept"),
+        Affine::IDENTITY,
+    );
+    let drawing = one_layer(group(&mut ids, vec![turned, again, kept], None));
+    let svg = written(&drawing);
+    assert!(svg.contains(r#"xmlns:xlink="http://www.w3.org/1999/xlink""#));
+    assert_eq!(svg.matches("<image ").count(), 3);
+    assert!(
+        svg.contains(&data_url(&encoded)),
+        "a picture read from a PNG keeps its bytes"
+    );
+    let back = read(svg.as_bytes(), &mut ids).expect("read back");
+    assert!(back.unkept.is_empty(), "{:?}", back.unkept);
+    let before = pictures(&drawing);
+    let after = pictures(&back.drawing);
+    assert_eq!(after.len(), 3);
+    for (a, b) in before.iter().zip(&after) {
+        assert_eq!(a.transform(), b.transform());
+        assert_eq!(a.opacity(), b.opacity());
+        assert_eq!(a.name(), b.name());
+        let (a, b) = (image_of(a), image_of(b));
+        assert_eq!(a.place(), b.place());
+        assert_eq!(
+            a.pixels().pixels(),
+            b.pixels().pixels(),
+            "opaque pixels are exact"
+        );
+    }
+    assert!(
+        Arc::ptr_eq(image_of(&after[0]).pyramid(), image_of(&after[1]).pyramid()),
+        "a picture shown twice reads back shared"
+    );
+    assert_eq!(
+        image_of(&after[2]).source().map(|source| &*source.bytes),
+        Some(&encoded[..])
+    );
+    assert_eq!(
+        written(&back.drawing),
+        svg,
+        "writing what was read writes the same"
+    );
+}
+
+#[test]
+fn a_picture_is_laid_as_its_ratio_lays_it() {
+    let url = data_url(&crate::testing::png(&crate::testing::pixels(4, 2, opaque)));
+    let place_of = |attributes: &str| {
+        let svg = document(&alloc::format!(
+            r#"<image xlink:href="{url}" {attributes}/>"#
+        ));
+        let read = read(svg.as_bytes(), &mut Ids::new()).expect("read");
+        assert!(read.unkept.is_empty(), "{:?}", read.unkept);
+        let layer = read.drawing.layers().get(0).cloned().expect("a layer");
+        let node = layer
+            .children()
+            .and_then(|children| children.get(0).cloned())
+            .expect("one");
+        match node.kind() {
+            Kind::Image { image } => (image.place(), None),
+            Kind::Group { children, clip } => (
+                image_of(children.get(0).expect("the picture")).place(),
+                clip.as_ref().map(|clip| clip.bounds()),
+            ),
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(
+        place_of(r#"width="10" height="10""#),
+        (rect_bounds(0.0, 2.5, 10.0, 7.5), None)
+    );
+    assert_eq!(
+        place_of(r#"x="1" y="1" width="10" height="10" preserveAspectRatio="none""#),
+        (rect_bounds(1.0, 1.0, 11.0, 11.0), None)
+    );
+    assert_eq!(
+        place_of(r#"width="10" height="10" preserveAspectRatio="xMinYMax slice""#),
+        (
+            rect_bounds(0.0, 0.0, 20.0, 10.0),
+            Some(rect_bounds(0.0, 0.0, 10.0, 10.0))
+        ),
+        "a sliced picture is cut to its rectangle"
+    );
+    assert_eq!(
+        place_of(""),
+        (rect_bounds(0.0, 0.0, 4.0, 2.0), None),
+        "its own size"
+    );
+    assert_eq!(
+        place_of(r#"width="8""#),
+        (rect_bounds(0.0, 0.0, 8.0, 4.0), None)
+    );
+    assert_eq!(
+        place_of(r#"width="auto" height="auto""#),
+        (rect_bounds(0.0, 0.0, 4.0, 2.0), None),
+        "auto is the side left unstated"
+    );
+    assert_eq!(
+        place_of(r#"width="8" height="auto""#),
+        (rect_bounds(0.0, 0.0, 8.0, 4.0), None)
+    );
+}
+
+#[test]
+fn a_picture_that_meets_its_rectangle_is_never_cut_to_it() {
+    let url = data_url(&crate::testing::png(&crate::testing::pixels(3, 7, opaque)));
+    for (x, width, height) in [
+        (0.1, 10.1, 7.7),
+        (0.2, 9.7, 7.7),
+        (0.1, 12.34, 7.7),
+        (0.7, 7.7, 20.2),
+    ] {
+        let svg = document(&alloc::format!(
+            r#"<image xlink:href="{url}" x="{x}" y="{x}" width="{width}" height="{height}"/>"#
+        ));
+        let read = read(svg.as_bytes(), &mut Ids::new()).expect("read");
+        let layer = read.drawing.layers().get(0).cloned().expect("a layer");
+        let node = layer
+            .children()
+            .and_then(|children| children.get(0).cloned())
+            .expect("one");
+        assert!(
+            matches!(node.kind(), Kind::Image { .. }),
+            "{x} {width}×{height}: {:?}",
+            node.kind()
+        );
+    }
+}
+
+#[test]
+fn a_picture_linked_from_elsewhere_or_of_another_kind_is_lost() {
+    for image in [
+        r#"<image href="picture.png" width="5" height="5"/>"#,
+        r#"<image href="data:image/gif;base64,R0lGODlhAQABAAAAACw=" width="5" height="5"/>"#,
+        r#"<image href="data:image/png;base64,!!!!" width="5" height="5"/>"#,
+    ] {
+        let read = read(document(image).as_bytes(), &mut Ids::new()).expect("read");
+        assert!(read.unkept.contains(Lost::Images), "{image}");
+    }
+    for nothing in [
+        r#"<image width="5" height="5"/>"#,
+        r#"<image href="data:image/png;base64,!!!!" width="0" height="5"/>"#,
+    ] {
+        let read = read(document(nothing).as_bytes(), &mut Ids::new()).expect("read");
+        assert!(
+            read.unkept.is_empty(),
+            "{nothing} draws nothing and loses nothing"
+        );
+    }
+}
+
+#[test]
+fn a_clip_path_holds_no_picture_and_clips_by_its_clip_rule() {
+    let url = data_url(&crate::testing::png(&crate::testing::pixels(2, 2, opaque)));
+    let svg = document(&alloc::format!(
+        r#"<clipPath id="c"><image xlink:href="{url}" width="50" height="50"/>
+             <path clip-rule="evenodd" d="M0 0 H40 V40 H0 Z M10 10 H30 V30 H10 Z"/></clipPath>
+           <rect width="100" height="100" clip-path="url(#c)"/>"#
+    ));
+    let read = read(svg.as_bytes(), &mut Ids::new()).expect("read");
+    let layer = read.drawing.layers().get(0).cloned().expect("a layer");
+    let clipped = layer
+        .children()
+        .and_then(|children| children.get(0).cloned())
+        .expect("one");
+    let Kind::Group {
+        clip: Some(clip), ..
+    } = clipped.kind()
+    else {
+        panic!("a clipped group");
+    };
+    assert_eq!(
+        clip.style().map(|style| style.fill_rule),
+        Some(FillRule::EvenOdd),
+        "the clip is the path alone, by its clip rule"
+    );
+}
+
+/// `drawing` as a 100-pixel square, for comparing what two drawings show.
+fn shown(drawing: &Drawing) -> tairix_raster::Surface {
+    use crate::render::{artwork, Afresh, Mode, View};
+    let view = View {
+        to_device: Affine::IDENTITY,
+        origin: Point::ZERO,
+        side: 100.0,
+        design: 100 * 256,
+        mode: Mode::Painted,
+        ground: false,
+    };
+    let art = artwork(drawing, &view, &NoGlyphs, &Afresh).expect("artwork");
+    let mut surface = tairix_raster::Surface::new(100, 100).expect("a surface");
+    assert!(surface.draw_artwork(&art.nodes, view.design));
+    surface
+}
+
+#[test]
+fn a_clip_of_groups_is_written_as_the_shapes_a_clip_path_holds() {
+    let mut ids = Ids::new();
+    let filled = |colour: Rgba| Style {
+        fill: Paint::Colour(colour),
+        stroke: Stroke {
+            paint: Paint::None,
+            ..Stroke::default()
+        },
+        ..Style::default()
+    };
+    let square = |ids: &mut Ids, x: f64, y: f64, side: f64, rule: FillRule| {
+        shape(
+            ids,
+            Shape::Rect(RectShape {
+                x,
+                y,
+                width: side,
+                height: side,
+                rx: 0.0,
+                ry: 0.0,
+            }),
+            Style {
+                fill_rule: rule,
+                ..filled(Rgba::new(0, 0, 0, 255))
+            },
+        )
+    };
+    // A clip within the clip: a group clipped by a square of its own.
+    let window = square(&mut ids, 0.0, 0.0, 30.0, FillRule::NonZero);
+    let windowed = square(&mut ids, 10.0, 10.0, 60.0, FillRule::NonZero);
+    let inner = Arc::new(
+        group(&mut ids, vec![windowed], Some(window))
+            .with_transform(Affine::translate(20.0, 0.0))
+            .expect("moved"),
+    );
+    let holed = square(&mut ids, 60.0, 60.0, 30.0, FillRule::EvenOdd);
+    let clip = Arc::new(
+        group(&mut ids, vec![holed, inner], None)
+            .with_transform(Affine::translate(0.0, 5.0))
+            .expect("moved"),
+    );
+    let content = square(&mut ids, 0.0, 0.0, 100.0, FillRule::NonZero);
+    let drawing = one_layer(group(&mut ids, vec![content], Some(clip)));
+    let svg = written(&drawing);
+    let definitions =
+        &svg[svg.find("<clipPath").expect("a clip path")..svg.find("</defs>").expect("defs")];
+    assert!(
+        !definitions.contains("<g"),
+        "no group within a clip path:\n{definitions}"
+    );
+    assert!(definitions.contains(r#"clip-rule="evenodd""#));
+    assert!(
+        definitions.contains(r#"clip-path="url(#clip-2)""#),
+        "{definitions}"
+    );
+    let back = read(svg.as_bytes(), &mut ids).expect("read back");
+    assert_eq!(
+        shown(&back.drawing).pixels(),
+        shown(&drawing).pixels(),
+        "the clip reads back covering what it covered"
+    );
+}
+
+#[test]
+fn a_picture_clipping_a_group_is_written_as_its_frame() {
+    let mut ids = Ids::new();
+    let picture = crate::image::Image::new(
+        crate::testing::pixels(2, 2, opaque),
+        rect_bounds(10.0, 10.0, 50.0, 30.0),
+        None,
+    )
+    .expect("a picture");
+    let clip = crate::testing::image(&mut ids, picture, Affine::IDENTITY);
+    let content = shape(
+        &mut ids,
+        Shape::Rect(RectShape {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            rx: 0.0,
+            ry: 0.0,
+        }),
+        Style::default(),
+    );
+    let drawing = one_layer(group(&mut ids, vec![content], Some(clip)));
+    let svg = written(&drawing);
+    let definitions =
+        &svg[svg.find("<clipPath").expect("a clip path")..svg.find("</defs>").expect("defs")];
+    assert!(
+        definitions.contains(r#"<rect x="10" y="10" width="40" height="20""#),
+        "{definitions}"
+    );
+    assert!(
+        !svg.contains("<image") && !svg.contains("data:"),
+        "a frame is linked to no picture"
+    );
+    assert!(
+        !svg.contains("xmlns:xlink"),
+        "no link is written, so none is declared"
+    );
+    let back = read(svg.as_bytes(), &mut ids).expect("read back");
+    assert_eq!(shown(&back.drawing).pixels(), shown(&drawing).pixels());
+}
+
+#[test]
+fn a_repeated_id_names_the_first_element_bearing_it() {
+    let svg = document(
+        r##"<defs><rect id="a" width="10" height="10"/><rect id="a" width="70" height="70"/></defs>
+            <use href="#a"/>"##,
+    );
+    let read = read(svg.as_bytes(), &mut Ids::new()).expect("read");
+    let layer = read.drawing.layers().get(0).cloned().expect("a layer");
+    let bounds = layer.bounds();
+    assert!((bounds.max.x - 10.0).abs() < 1e-9, "{bounds:?}");
+}
+
+/// A text and its style, as a drawing holds them.
+type Lettered = (Arc<Text>, Arc<Style>);
+
+/// The texts of a document, in order, with what reading it lost.
+fn texts(document: &str) -> (Vec<Lettered>, crate::unkept::Unkept) {
+    let mut ids = Ids::new();
+    let read = read(document.as_bytes(), &mut ids).expect("read");
+    let mut found = Vec::new();
+    for layer in read.drawing.layers().iter() {
+        walk(layer, &mut |node| {
+            if let Kind::Text { text, style } = node.kind() {
+                found.push((text.clone(), style.clone()));
+            }
+        });
+    }
+    (found, read.unkept)
+}
+
+fn spans(text: &Text) -> Vec<(usize, usize, RunStyle)> {
+    text.runs
+        .iter()
+        .map(|run| (run.start, run.end, (*run.style).clone()))
+        .collect()
+}
+
+#[test]
+fn a_span_styled_otherwise_is_a_run_and_one_over_everything_the_text_s_own() {
+    let (texts, unkept) = texts(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="100">
+      <text x="10" y="40" font-family="Inter" font-size="20">Plain <tspan font-weight="bold" fill="#ff0000" fill-opacity="0.5">bold</tspan> <tspan font-size="10" baseline-shift="super">2</tspan></text>
+      <text x="10" y="80" font-size="20"><tspan font-size="12" fill="#00f" font-style="italic">Whole</tspan></text>
+    </svg>"##,
+    );
+    assert!(unkept.is_empty(), "{unkept:?}");
+    let (plain, _) = &texts[0];
+    assert_eq!(&*plain.content, "Plain bold 2");
+    let runs = spans(plain);
+    assert_eq!(
+        runs[0],
+        (
+            6,
+            10,
+            RunStyle {
+                weight: Some(700),
+                fill: Some(RunPaint::Colour(Rgba::new(255, 0, 0, 128))),
+                ..RunStyle::default()
+            }
+        )
+    );
+    let (start, end, superscript) = &runs[1];
+    assert_eq!((*start, *end, superscript.size), (11, 12, Some(10.0)));
+    let raised = superscript.baseline_shift.expect("raised");
+    assert!(
+        (raised - 20.0 / 3.0 / 10.0).abs() < 1e-12,
+        "a third of the parent's size, in its own ems: {raised}"
+    );
+    let (whole, style) = &texts[1];
+    assert!(
+        whole.runs.is_empty(),
+        "folded into the text: {:?}",
+        whole.runs
+    );
+    assert_eq!((whole.size, whole.italic), (12.0, true));
+    assert_eq!(style.fill, Paint::Colour(Rgba::new(0, 0, 255, 255)));
+}
+
+#[test]
+fn baseline_shifts_add_up_through_nested_spans() {
+    let (texts, _) = texts(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+      <text font-size="10">x<tspan baseline-shift="2">a<tspan baseline-shift="0.5em" font-size="20">b</tspan></tspan><tspan baseline-shift="sub">c</tspan></text>
+    </svg>"#,
+    );
+    let shifts: Vec<Option<f64>> = texts[0]
+        .0
+        .runs
+        .iter()
+        .map(|run| run.style.baseline_shift)
+        .collect();
+    assert_eq!(shifts.len(), 3);
+    assert!((shifts[0].expect("a") - 0.2).abs() < 1e-12);
+    assert!((shifts[1].expect("b") - 0.6).abs() < 1e-12, "{shifts:?}");
+    assert!((shifts[2].expect("c") + 0.2).abs() < 1e-12);
+}
+
+#[test]
+fn a_text_path_reads_its_start_its_side_and_its_path_s_stated_length() {
+    let (texts, unkept) = texts(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="200">
+      <defs>
+        <path id="p" d="M0 0 H100" transform="translate(10 20)"/>
+        <path id="q" d="M0 0 H100" pathLength="50"/>
+      </defs>
+      <text font-size="10" text-anchor="middle"><textPath href="#p" startOffset="25%">Hi <tspan fill="#f00">there</tspan></textPath></text>
+      <text font-size="10"><textPath xlink:href="#q" startOffset="10">Hi</textPath></text>
+      <text font-size="10"><textPath href="#p" side="right" startOffset="1em">Hi</textPath></text>
+    </svg>"##,
+    );
+    assert!(unkept.is_empty(), "{unkept:?}");
+    let path_of = |text: &Text| match &text.baseline {
+        Baseline::Path(along) => Arc::clone(along),
+        Baseline::Lines { .. } => panic!("a text along a path"),
+    };
+    let first = path_of(&texts[0].0);
+    assert_eq!(&*texts[0].0.content, "Hi there");
+    assert_eq!(texts[0].0.runs.len(), 1);
+    assert_eq!(texts[0].0.align, TextAlign::Middle);
+    assert_eq!(first.start, 25.0, "a quarter of its length");
+    assert_eq!(
+        first.first_point(),
+        Point::new(10.0, 20.0),
+        "placed by its transform"
+    );
+    assert_eq!(
+        path_of(&texts[1].0).start,
+        20.0,
+        "in the path's stated units"
+    );
+    let reversed = path_of(&texts[2].0);
+    assert_eq!(
+        reversed.first_point(),
+        Point::new(110.0, 20.0),
+        "run backwards"
+    );
+    assert_eq!(reversed.start, 10.0, "an em of the text path's own size");
+}
+
+#[test]
+fn what_a_text_cannot_be_set_along_is_set_in_lines_and_noted() {
+    let lost = |content: &str| {
+        let (texts, unkept) = texts(&alloc::format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">
+      <defs><path id="p" d="M0 0 H100"/><circle id="c" r="10"/></defs>
+      {content}
+    </svg>"#
+        ));
+        let text = Arc::clone(&texts[0].0);
+        (text, unkept.contains(Lost::TextPaths))
+    };
+    let (beside, noted) =
+        lost(r##"<text x="5" y="50">Before <textPath href="#p">on</textPath></text>"##);
+    assert!(noted && matches!(beside.baseline, Baseline::Lines { .. }));
+    assert_eq!(&*beside.content, "Before on");
+    let (shape, noted) = lost(r##"<text><textPath href="#c">round</textPath></text>"##);
+    assert!(noted && matches!(shape.baseline, Baseline::Lines { .. }));
+    assert_eq!(&*shape.content, "round");
+    let (two, noted) = lost(
+        r##"<text><textPath href="#p">one</textPath><textPath href="#p">two</textPath></text>"##,
+    );
+    assert!(noted && matches!(two.baseline, Baseline::Lines { .. }));
+    let (bent, noted) =
+        lost(r##"<text><textPath href="#p" method="stretch">bent</textPath></text>"##);
+    assert!(
+        noted && matches!(bent.baseline, Baseline::Path(_)),
+        "set rigidly along it"
+    );
+    let (gone, noted) = lost(r##"<text><textPath href="#nowhere">gone</textPath></text>"##);
+    assert!(!noted && gone.content.is_empty(), "SVG draws none of it");
+}
+
+#[test]
+fn runs_and_paths_are_written_as_svg_writes_them() {
+    let mut ids = Ids::new();
+    let svg = written(&everything(&mut ids));
+    for spelled in [
+        "xmlns:xlink=",
+        "<path id=\"text-path-1\" d=\"",
+        "<textPath xlink:href=\"#text-path-1\" startOffset=\"12.5\">Along <tspan font-size=\"24\">the</tspan> way</textPath>",
+        "baseline-shift=\"0.33em\"",
+        "fill=\"#c80000\" fill-opacity=\"",
+        "fill=\"none\" stroke=\"#0000ff\">Second</tspan>",
+    ] {
+        assert!(svg.contains(spelled), "{spelled} missing from\n{svg}");
+    }
+}
+
+#[test]
+fn a_span_set_at_a_size_or_spacing_no_text_holds_loses_it_not_the_document() {
+    let (texts, unkept) = texts(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+      <text x="5" y="50" font-size="10">a<tspan font-size="0">b</tspan><tspan letter-spacing="1e300">c</tspan>d</text>
+    </svg>"#,
+    );
+    assert!(unkept.contains(Lost::TextStyling));
+    let (text, _) = &texts[0];
+    assert_eq!(&*text.content, "abcd");
+    assert!(text.runs.is_empty(), "{:?}", text.runs);
 }

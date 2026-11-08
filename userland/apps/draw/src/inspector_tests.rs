@@ -11,7 +11,7 @@ use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_theme::Theme;
 
-use super::{Change, Changes, Face, Field, Focus, Inspector, Shown, Tab, Target};
+use super::{Change, Changes, Face, Field, Focus, Inspector, PageChange, Shown, Tab, Target};
 use crate::layout::px;
 use crate::layout::Layout;
 
@@ -24,7 +24,8 @@ fn layers(count: usize) -> Children {
             children: Children::new(),
             clip: None,
         };
-        let name: Arc<str> = Arc::from(alloc::format!("Layer {index}").as_str());
+        let name = tairix_drawing::SharedStr::try_from_string(alloc::format!("Layer {index}"))
+            .expect("held");
         let layer = Node::new(ids.issue(), group)
             .and_then(|node| node.with_name(Some(name)))
             .expect("a layer");
@@ -35,7 +36,7 @@ fn layers(count: usize) -> Children {
 
 fn shown<'a>(style: &'a Style, layers: &'a Children) -> Shown<'a> {
     Shown {
-        style,
+        style: alloc::borrow::Cow::Borrowed(style),
         layers,
         layer: 0,
         locked: false,
@@ -45,7 +46,9 @@ fn shown<'a>(style: &'a Style, layers: &'a Children) -> Shown<'a> {
             bold: false,
             italic: false,
             align: TextAlign::Start,
+            along: false,
         },
+        page: tairix_drawing::Page::of(&tairix_drawing::PAPER[0]),
     }
 }
 
@@ -151,9 +154,11 @@ impl Panel {
     /// Bring the inspector into line with `style`, nothing selected, as the
     /// view does after every change it shows.
     fn follow(&mut self, style: &Style) {
-        let drawing = crate::document::blank(&mut Ids::new()).expect("a drawing");
+        let drawing =
+            crate::document::blank(&mut Ids::new(), &crate::preferences::Preferences::default())
+                .expect("a drawing");
         self.inspector
-            .follow(&drawing, &[], style, tairix_bezier::Bounds::EMPTY);
+            .follow(&drawing, &[], style, (tairix_bezier::Bounds::EMPTY, None));
     }
 
     fn picker(&self) -> Rect {
@@ -284,7 +289,7 @@ fn tab_steps_through_the_fields_and_shift_tab_steps_back_round() {
     panel.key(Key::Named(NamedKey::Tab), shift);
     assert_eq!(
         panel.inspector.focus,
-        Some(Focus::Field(Field::Place(3))),
+        Some(Focus::Field(Field::Rotation)),
         "round to the last"
     );
 }
@@ -378,7 +383,7 @@ fn a_colour_dragged_live_settles_however_often_the_inspector_follows() {
         matches!(released.change, Some(Change::Paint { settled: true, .. })),
         "{released:?}"
     );
-    assert!(!panel.inspector.unsettled);
+    assert!(panel.inspector.unsettled.is_none());
     let ground = tairix_colour::Rgba::new(10, 20, 30, 255);
     let mut back = panel.style.clone();
     back.fill = Paint::Colour(ground);
@@ -481,11 +486,369 @@ fn a_colour_typed_into_the_picker_lands_once_and_never_again() {
         settled, None,
         "it was shown live, and lands with what is shown"
     );
-    assert!(!panel.inspector.unsettled);
+    assert!(panel.inspector.unsettled.is_none());
     let elsewhere = panel.button("Round");
     let changes = panel.click(centre(elsewhere));
     assert_eq!(
         changes.released, None,
         "nothing is applied again to whatever is selected next"
+    );
+}
+
+#[test]
+fn the_page_tab_answers_its_size_orientation_units_and_ground() {
+    let mut panel = Panel::new(1400);
+    panel.choose_tab(Tab::Page);
+    let width = panel.field(Field::PageWidth);
+    panel.click(centre(width));
+    let typed = panel.retype("123.5");
+    assert_eq!(typed.change, None, "a page's size lands once it is settled");
+    let landscape = panel.button("Landscape");
+    let changes = panel.click(centre(landscape));
+    assert_eq!(
+        changes.released,
+        Some(Change::Page(PageChange::Width(123.5)))
+    );
+    assert_eq!(
+        changes.change,
+        Some(Change::Page(PageChange::Landscape(true)))
+    );
+    let resolution = panel.field(Field::Resolution);
+    panel.click(centre(resolution));
+    panel.retype("300");
+    let committed = panel.key(Key::Named(NamedKey::Enter), Modifiers::default());
+    assert_eq!(
+        committed.change,
+        Some(Change::Page(PageChange::Resolution(300)))
+    );
+    let mm = panel.button("mm");
+    assert_eq!(
+        panel.click(centre(mm)).change,
+        Some(Change::Page(PageChange::Unit(tairix_drawing::Unit::Mm)))
+    );
+    let none = panel.button("None");
+    assert_eq!(
+        panel.click(centre(none)).change,
+        Some(Change::Page(PageChange::Ground {
+            colour: None,
+            settled: true
+        }))
+    );
+
+    let picker = panel.picker();
+    let at = |x: i32, y: i32| Point::new(picker.left() + x, picker.top() + y);
+    panel.feed(InputEvent::PointerMoved { to: at(12, 12) });
+    let pressed = panel.feed(InputEvent::PointerPressed {
+        button: PointerButton::Primary,
+    });
+    let dragged = panel.feed(InputEvent::PointerMoved { to: at(40, 30) });
+    let live = dragged.change.or(pressed.change);
+    let Some(Change::Page(PageChange::Ground {
+        colour: Some(colour),
+        settled: false,
+    })) = live
+    else {
+        panic!("a live ground: {live:?}");
+    };
+    let blank =
+        crate::document::blank(&mut Ids::new(), &crate::preferences::Preferences::default())
+            .expect("a drawing");
+    let other = tairix_colour::Rgba::new(1, 2, 3, 255);
+    let grounded = blank
+        .with_page(tairix_drawing::Page {
+            background: Some(other),
+            ..*blank.page()
+        })
+        .expect("a ground");
+    panel.inspector.follow(
+        &grounded,
+        &[],
+        &panel.style,
+        (tairix_bezier::Bounds::EMPTY, None),
+    );
+    assert_eq!(
+        panel.inspector.ground_colour(),
+        colour,
+        "a live ground is not shown over"
+    );
+    let released = panel.feed(InputEvent::PointerReleased {
+        button: PointerButton::Primary,
+    });
+    assert!(
+        matches!(
+            released.change,
+            Some(Change::Page(PageChange::Ground { settled: true, .. }))
+        ),
+        "{released:?}"
+    );
+    panel.inspector.follow(
+        &grounded,
+        &[],
+        &panel.style,
+        (tairix_bezier::Bounds::EMPTY, None),
+    );
+    assert_eq!(
+        panel.inspector.ground_colour(),
+        other,
+        "settled, it follows"
+    );
+}
+
+/// A style filling with a black-to-white gradient across a unit box.
+fn graded() -> Style {
+    let stops =
+        crate::gradient::first_stops(tairix_colour::Rgba::new(0, 0, 0, 255)).expect("stops");
+    let unit = tairix_bezier::Bounds::new(
+        tairix_bezier::Point::new(0.0, 0.0),
+        tairix_bezier::Point::new(1.0, 1.0),
+    );
+    let gradient = crate::gradient::fitted(
+        crate::gradient::Form::Linear(0.0),
+        stops,
+        tairix_drawing::Spread::Pad,
+        unit,
+    );
+    Style {
+        fill: Paint::Gradient(Arc::new(gradient)),
+        ..Style::default()
+    }
+}
+
+impl Panel {
+    /// Press and let go at `at`, answering what letting go changed: what a
+    /// swatch well, chosen on release, answers.
+    fn release_at(&mut self, at: Point) -> Changes {
+        self.feed(InputEvent::PointerMoved { to: at });
+        self.feed(InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        });
+        self.feed(InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        })
+    }
+
+    fn stop_bar(&self) -> Rect {
+        let shown = shown(&self.style, &self.layers);
+        let placed = self
+            .inspector
+            .place(&self.layout, Scale::ONE, &self.theme, &shown);
+        placed.column.stops.expect("the stop bar is laid out")
+    }
+
+    fn wells(&self) -> Rect {
+        let shown = shown(&self.style, &self.layers);
+        let placed = self
+            .inspector
+            .place(&self.layout, Scale::ONE, &self.theme, &shown);
+        placed.column.swatches.expect("the swatches are laid out")
+    }
+
+    /// The panel showing `style`, as the view shows a change it took.
+    fn showing(&mut self, style: Style) {
+        self.follow(&style);
+        self.style = style;
+    }
+}
+
+fn stops_of(change: Option<Change>) -> (Vec<tairix_drawing::Stop>, bool) {
+    match change {
+        Some(Change::Stops { stops, settled, .. }) => (stops, settled),
+        other => panic!("new stops: {other:?}"),
+    }
+}
+
+#[test]
+fn a_gradient_is_chosen_and_its_stops_added_dragged_and_removed_on_the_bar() {
+    let mut panel = Panel::new(1400);
+    let linear = panel.button("Linear");
+    assert_eq!(
+        panel.click(centre(linear)).change,
+        Some(Change::Form {
+            target: Target::Fill,
+            form: crate::gradient::Form::Linear(0.0),
+        })
+    );
+    panel.showing(graded());
+    let bar = crate::stops::Bar::of(panel.stop_bar());
+    let strip = panel.stop_bar();
+    let middle = Point::new(strip.left() + px(strip.width) / 2, strip.top() + 6);
+    let (added, settled) = stops_of(panel.click(middle).change);
+    assert!(settled && added.len() == 3, "a stop added where pressed");
+    assert!((added[1].offset - bar.offset_at(middle.x)).abs() < 1e-9);
+    let mut style = graded();
+    let Paint::Gradient(gradient) = &mut style.fill else {
+        unreachable!("a gradient");
+    };
+    Arc::make_mut(gradient).stops = added;
+    panel.showing(style);
+
+    let handles_y = strip.bottom() - 4;
+    panel.feed(InputEvent::PointerMoved {
+        to: Point::new(middle.x, handles_y),
+    });
+    panel.feed(InputEvent::PointerPressed {
+        button: PointerButton::Primary,
+    });
+    assert!(panel.inspector.holds_pointer(), "the stop's drag holds on");
+    let (live, settled) = stops_of(
+        panel
+            .feed(InputEvent::PointerMoved {
+                to: Point::new(middle.x + 40, handles_y + 200),
+            })
+            .change,
+    );
+    assert!(
+        !settled && live[1].offset > 0.5,
+        "dragged live, wherever it goes"
+    );
+    let (landed, settled) = stops_of(
+        panel
+            .feed(InputEvent::PointerReleased {
+                button: PointerButton::Primary,
+            })
+            .change,
+    );
+    assert!(settled && (landed[1].offset - live[1].offset).abs() < 1e-9);
+
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    let (nudged, _) = stops_of(panel.key(Key::Named(NamedKey::Right), shift).change);
+    assert!((nudged[1].offset - (panel_offset(&panel) + 0.01)).abs() < 1e-9);
+    let (fewer, settled) = stops_of(
+        panel
+            .key(Key::Named(NamedKey::Delete), Modifiers::default())
+            .change,
+    );
+    assert!(settled && fewer.len() == 2, "the stop in hand removed");
+}
+
+/// Where the stop in hand stands in the gradient the panel shows.
+fn panel_offset(panel: &Panel) -> f64 {
+    let Paint::Gradient(gradient) = &panel.style.fill else {
+        panic!("a gradient");
+    };
+    gradient.stops[panel.inspector.stop].offset
+}
+
+#[test]
+fn a_swatch_paints_the_colour_in_hand_or_the_stop_in_hand() {
+    let mut panel = Panel::new(1400);
+    let wells = panel.wells();
+    let first = Point::new(wells.left() + 3, wells.top() + 3);
+    let changes = panel.release_at(first);
+    assert_eq!(
+        changes.change,
+        Some(Change::Paint {
+            target: Target::Fill,
+            paint: Paint::Colour(tairix_colour::Rgba::new(0, 0, 0, 255)),
+            settled: true,
+        }),
+        "the first well is black"
+    );
+    let add = panel.button("Add swatch");
+    assert_eq!(
+        panel.click(centre(add)).change,
+        Some(Change::KeepSwatch(panel.inspector.picker.colour()))
+    );
+    panel.showing(graded());
+    let wells = panel.wells();
+    let last_grey = Point::new(wells.right() - 3, wells.top() + 3);
+    let (stops, settled) = stops_of(panel.release_at(last_grey).change);
+    assert!(settled);
+    assert_eq!(
+        stops[0].colour,
+        tairix_colour::Rgba::new(255, 255, 255, 255),
+        "the stop in hand made white"
+    );
+}
+
+#[test]
+fn a_kept_swatch_shows_after_the_palette_and_can_be_dropped() {
+    let mut panel = Panel::new(1400);
+    let teal = tairix_colour::Rgba::new(0, 128, 128, 255);
+    let blank =
+        crate::document::blank(&mut Ids::new(), &crate::preferences::Preferences::default())
+            .expect("a drawing");
+    let kept = blank
+        .with_swatches(tairix_drawing::SharedSlice::try_from_slice(&[teal]).expect("held"))
+        .expect("a swatch");
+    let style = Style {
+        fill: Paint::Colour(teal),
+        ..Style::default()
+    };
+    panel.style = style.clone();
+    panel
+        .inspector
+        .follow(&kept, &[], &style, (tairix_bezier::Bounds::EMPTY, None));
+    let marked = panel.inspector.swatches.selected();
+    assert_eq!(
+        marked,
+        Some(panel.inspector.palette.len()),
+        "the kept swatch, after the palette, marked as the colour in hand"
+    );
+    let drop = panel.button("Remove swatch");
+    assert_eq!(
+        panel.click(centre(drop)).change,
+        Some(Change::DropSwatch(0))
+    );
+    panel.inspector.swatches.adopt_selected(Some(0));
+    assert_eq!(
+        panel.click(centre(drop)).change,
+        None,
+        "the palette's own wells stay"
+    );
+}
+
+#[test]
+fn a_rotation_typed_turns_the_selection_once_it_is_settled() {
+    let mut panel = Panel::new(1400);
+    panel.choose_tab(Tab::Object);
+    let rotation = panel.field(Field::Rotation);
+    panel.click(centre(rotation));
+    assert_eq!(panel.retype("30").change, None);
+    let changes = panel.key(Key::Named(NamedKey::Enter), Modifiers::default());
+    assert_eq!(changes.change, Some(Change::Rotation(30.0)));
+}
+
+#[test]
+fn a_chosen_swatch_keeps_its_mark_though_the_palette_holds_its_colour_too() {
+    let mut panel = Panel::new(1400);
+    let ink = tairix_colour::Rgba::new(0, 0, 0, 255);
+    let blank =
+        crate::document::blank(&mut Ids::new(), &crate::preferences::Preferences::default())
+            .expect("a drawing");
+    let kept = blank
+        .with_swatches(tairix_drawing::SharedSlice::try_from_slice(&[ink]).expect("held"))
+        .expect("a swatch");
+    let style = Style {
+        fill: Paint::Colour(ink),
+        ..Style::default()
+    };
+    panel.style = style.clone();
+    let follow = |panel: &mut Panel| {
+        panel
+            .inspector
+            .follow(&kept, &[], &style, (tairix_bezier::Bounds::EMPTY, None));
+    };
+    follow(&mut panel);
+    assert_eq!(
+        panel.inspector.swatches.selected(),
+        Some(0),
+        "the first black"
+    );
+    let own = panel.inspector.palette.len();
+    panel.inspector.swatches.adopt_selected(Some(own));
+    follow(&mut panel);
+    assert_eq!(
+        panel.inspector.swatches.selected(),
+        Some(own),
+        "the drawing's own black stays chosen"
+    );
+    let drop = panel.button("Remove swatch");
+    assert_eq!(
+        panel.click(centre(drop)).change,
+        Some(Change::DropSwatch(0))
     );
 }

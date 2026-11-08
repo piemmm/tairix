@@ -279,7 +279,10 @@ on this list yet is staged in `plans/SVG.md`, not declined:
   `preserveAspectRatio`.
 - **Strokes**: `stroke`, `stroke-width`, caps, joins, miter limit, and
   dashes. A stroke becomes its own filled layer, painted over the fill in
-  SVG's own order.
+  SVG's own order. The stroker (`stroke::stroke_outline`) also runs in the
+  processes that draw — the compositor's cursors and icons, the drawing
+  editor's canvas — so every piece it makes is allocated fallibly and a
+  refusing heap is `SvgError::OutOfMemory`, never an abort.
 - **Style**: the property cascade — presentation attributes, the document's
   own `<style>` sheets, the `style` attribute, and inheritance down the tree,
   including `currentColor`. The selector subset is type, class, id, universal
@@ -358,12 +361,25 @@ no tile — is `none`, and takes no fallback.
 - **Text**: `<text>` and `<tspan>`, with the `x`/`y`/`dx`/`dy`/`rotate`
   lists, `text-anchor`, white-space collapsing under `xml:space`,
   `letter-spacing`/`word-spacing`, `textLength`/`lengthAdjust`, and the
-  `font-family`/`-size`/`-weight`/`-style`/`-stretch` properties. See
-  [A glyph arrives as geometry](#a-glyph-arrives-as-geometry).
+  `font-family`/`-size`/`-weight`/`-style`/`-stretch` properties.
+  `baseline-shift` raises a span's glyphs from its parent's baseline — a
+  length, ems of its own size, a percentage of a normal line height, or
+  `sub`/`super` as a fifth or a third of its parent's size — each span's
+  shift adding to the ones around it. `<textPath>` sets the characters inside
+  it along the `<path>` it names, that path's own `transform` and
+  `pathLength` honoured (`textpath::geometry`): each glyph's advance midpoint
+  stands on the path at its distance along it, from `startOffset` (a length or
+  a share of the path, `textpath::start`), turned to the path's direction or —
+  `method="stretch"` — bent along it, each edge halved until it follows the
+  curve; a glyph whose midpoint falls off either end is not drawn,
+  `side="right"` runs the path from its end, `spacing` is taken as `exact`,
+  and the text after a path goes on from where its pen stopped. A path is
+  charged to the document's vertex budget for every `<textPath>` that names
+  it. See [A glyph arrives as geometry](#a-glyph-arrives-as-geometry).
 
 What it does **not yet** draw — staged as numbered items in `plans/SVG.md`,
 not declined: the remaining text surface (the baselines, `text-decoration`,
-`<textPath>`, bidi and shaping), embedded images
+bidi and shaping), embedded images
 (`<image>`), filters, SMIL animation, the CSS surface the cascade still drops,
 external references, the three remaining `vector-effect` values, and
 scripting — which runs only where a consumer asks for one, in its own

@@ -23,7 +23,7 @@ use crate::accounts::{AccountFacts, AccountSetting};
 use crate::civil::CivilChoices;
 use crate::effects::EffectsReading;
 use crate::facts::{Facts, MachineFacts};
-use crate::form::{Documents, Form, FormPlace, TextChoices};
+use crate::form::{Documents, Form, TextChoices};
 use crate::network::{IfaceSetting, NetworkFacts};
 use crate::pi::Cooling;
 use crate::registry::{PaneContent, PaneRow};
@@ -32,6 +32,7 @@ use crate::sound::SoundReading;
 use crate::statement;
 use crate::volumes::{Readings, VolumeReading};
 use tairix_abi::zone::ZoneName;
+use tairix_controls::ColumnPlace;
 
 /// Everything a body is built from: what the shell has been answered so
 /// far, and the document every settable row reads.
@@ -270,7 +271,7 @@ impl Body {
         &self,
         surface: &mut Surface,
         pane: &PaneRow,
-        place: FormPlace<'_>,
+        place: ColumnPlace<'_>,
         artwork: &mut dyn IconArtwork,
     ) {
         match self {
@@ -287,7 +288,7 @@ impl Body {
 
     /// Draw the choice list a composed pane has open, which the shell paints
     /// above everything the pane shares the window with.
-    pub(crate) fn render_popup(&self, surface: &mut Surface, place: FormPlace<'_>) {
+    pub(crate) fn render_popup(&self, surface: &mut Surface, place: ColumnPlace<'_>) {
         if let Some(form) = self.form() {
             form.render_popup(surface, place);
         }

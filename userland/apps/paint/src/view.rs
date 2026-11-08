@@ -2002,8 +2002,7 @@ impl View {
             bar_rows: ToolControls::most_rows(controls, faces, scale, theme),
             chosen: self.chosen.map(|size| physical(size, scale)),
         };
-        let mut layout =
-            Layout::for_window(width, height, theme, scale, faces, (needs, &self.panes));
+        let mut layout = Layout::for_window(width, height, theme, scale, (needs, &self.panes));
         let placement = self
             .bar
             .place(layout.controls(), layout.window(), faces, scale, theme);
@@ -2025,7 +2024,7 @@ impl View {
             ),
             wells: MOST_WELLS,
         };
-        Layout::min_size(theme, scale, faces, floor, |width| {
+        Layout::min_size(theme, scale, floor, |width| {
             ToolControls::most_rows(width, faces, scale, theme)
         })
     }

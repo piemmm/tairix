@@ -16,7 +16,19 @@ call; this page is what the parts are for and the rules they share.
   to quantise an edge.
 - **Compositing** — premultiplied `Pixel`s, the Porter–Duff `over`, and the
   span operations (`blend_span`, `mix_span`, `cover_span`) a compositor's blits
-  and a fill's rows are built from, plus the one resampler.
+  and a fill's rows are built from, plus the one resampler and the one
+  transformed blit. The transformed blit draws any `Picture` — a surface, or a
+  `Mosaic` of tiles sampled across their seams as one picture — and a
+  transform that only scales and moves takes the samples the general path
+  would, to the bit, at a quarter of the cost, by working each column's and
+  row's position out once and reading the source a row run at a time. Its
+  framed form (`blit_framed`) covers exactly the source's rectangle, sampled
+  within its edge pixels and anti-aliased by its edges' distance from each
+  pixel's centre, which is how a
+  document's picture is drawn: as an artwork tree's `Node::Image`, from the
+  level of its `Pyramid` — the picture at every halving — that sets no more
+  than two of its pixels across a destination pixel, so a picture drawn far
+  smaller is averaged rather than aliased.
 - **Meshes in depth** — `mesh` and `view`: triangles scan-converted against a
   depth buffer through a perspective, as a GPU draws them. WinterSun's 3D view
   is drawn through these, and nothing else in the tree needs a second

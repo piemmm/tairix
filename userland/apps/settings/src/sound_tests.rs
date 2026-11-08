@@ -21,8 +21,9 @@ use tairix_controls::{
 use tairix_geometry::Scale;
 
 use super::{apply, ask, groups, touches, SoundReading, SoundRow};
-use crate::form::{FormOutcome, FormPlace};
+use crate::form::FormOutcome;
 use crate::test_support::{showing, theme, WIDE};
+use tairix_controls::ColumnPlace;
 
 const SPEAKERS: u32 = 1;
 const HDMI: u32 = 2;
@@ -402,7 +403,7 @@ fn a_mute_press_restates_its_rows_in_place() {
     shell.adopt_sound(Some(machine()));
     let form = shell.form_mut_for_test().expect("a composed form");
     form.take_reshaped();
-    let place = FormPlace {
+    let place = ColumnPlace {
         bounds: WIDE,
         viewport: WIDE,
         scale: Scale::ONE,

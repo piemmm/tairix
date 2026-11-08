@@ -17,6 +17,7 @@ use tairix_util::fallible;
 use tairix_util::mathf::fabs;
 
 use crate::cubic::CubicBez;
+use crate::path::{PathEl, Subpath};
 use crate::point::Point;
 
 /// The most points one fit takes: a containment bound on the work, far past
@@ -97,6 +98,36 @@ pub fn fit(
         fitter.run(first, last, joint, &mut emit)?;
     }
     Ok(())
+}
+
+/// The sub-path [`fit`] makes of `points`: from the first point, one cubic a
+/// fitted piece; `None` where they fit nothing.
+///
+/// # Errors
+///
+/// As [`fit`].
+pub fn fitted(
+    points: &[Point],
+    tolerance: f64,
+    corner_degrees: f64,
+) -> Result<Option<Subpath>, FitError> {
+    let Some(&start) = points.first() else {
+        return Ok(None);
+    };
+    let mut subpath = Subpath::new(start);
+    let mut refused = false;
+    fit(points, tolerance, corner_degrees, |curve, _| {
+        refused |= subpath.elements.try_reserve(1).is_err();
+        if !refused {
+            subpath
+                .elements
+                .push(PathEl::Cubic(curve.p1, curve.p2, curve.p3));
+        }
+    })?;
+    if refused {
+        return Err(FitError::OutOfMemory);
+    }
+    Ok((!subpath.elements.is_empty()).then_some(subpath))
 }
 
 /// `points` with every point nearer than `spacing` to the last kept dropped,

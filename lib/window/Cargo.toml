@@ -45,6 +45,13 @@ tairix-theme = { path = "../theme", version = "=0.0.0" }
 tairix-util = { path = "../util", version = "=0.0.0" }
 # The one rule for a hidden character.
 tairix-visible = { path = "../visible", version = "=0.0.0" }
+# The settings window a document application's preferences are edited in:
+# the shared settings frame, the closed-registry engine it edits, and the
+# pictures its sidebar shows. Optional, for the applications that keep
+# preferences.
+tairix-controls = { path = "../controls", version = "=0.0.0", optional = true }
+tairix-appconf = { path = "../appconf", version = "=0.0.0", optional = true }
+tairix-icon = { path = "../icon", version = "=0.0.0", optional = true }
 
 [target.'cfg(target_os = "none")'.dependencies]
 # The font client a document application's text is drawn through: the host
@@ -67,6 +74,15 @@ rt = [
     "dep:tairix-font",
 ]
 
+# The settings window over an application's closed registry
+# (`docapp::settings`), which needs none of the runtime.
+settings = [
+    "dep:tairix-controls",
+    "dep:tairix-appconf",
+    "dep:tairix-icon",
+    "dep:tairix-raster",
+]
+
 [lints]
 workspace = true
 
@@ -77,3 +93,5 @@ tairix-buildcfg = { path = "../buildcfg", version = "=0.0.0", features = ["std"]
 # The shared seeded generator the randomised unit tests draw from (never in a
 # shipping build).
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# The settings window is tested with the rest of the crate.
+tairix-window = { path = ".", features = ["settings"] }

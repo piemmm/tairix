@@ -10,13 +10,13 @@ use alloc::string::String;
 
 use tairix_bezier::flatten::flatten_cubic;
 use tairix_bezier::{Affine, Bounds, Path, Point, Segment};
-use tairix_controls::{fill_area, withheld};
-use tairix_drawing::{GuideAxis, Kind, Node, Shape};
+use tairix_controls::{fill_area, withheld, Ruler, RulerAxis, StatusBand, StatusTone};
+use tairix_drawing::{GradientKind, GuideAxis, Kind, Node, Paint, Shape, PAPER_WHITE};
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::IconArtwork;
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
-use tairix_util::mathf::{ceil, fabs, floor, fmin, ln, power, real, round, round_i32};
+use tairix_util::mathf::{fabs, floor, fmin, real, round, round_i32};
 
 use crate::edit;
 use crate::glyphs::{Arrived, Lettering};
@@ -30,9 +30,6 @@ use crate::view::{Gesture, Grip, View};
 /// The most points a frame's previews flatten, past which what is left is
 /// previewed by its bounds alone.
 const PREVIEW_POINTS: usize = 20_000;
-
-/// The least distance between two ruler figures, in device pixels.
-const RULER_SPACING: f64 = 60.0;
 
 /// The zoom readout on the tool's bar.
 #[must_use]
@@ -78,7 +75,7 @@ impl View {
             fill_area(surface, layout.bar, chrome);
             self.bar(surface, layout, theme, faces);
         }
-        self.rulers(surface, layout, theme, faces);
+        self.rulers(surface, layout, scale, theme);
         if !withheld(surface, layout.canvas) {
             if let Some((x, y)) = layout.canvas.surface_origin() {
                 surface.with_clip(x, y, layout.canvas.width, layout.canvas.height, |surface| {
@@ -89,7 +86,7 @@ impl View {
         if !withheld(surface, layout.panel) || !withheld(surface, layout.tabs) {
             let shown = shown_of(
                 self.shown(),
-                &self.selection,
+                (&self.selection, self.typed()),
                 (&self.style, self.star.polygon, &self.text),
                 self.layer,
             );
@@ -101,8 +98,7 @@ impl View {
             self.render_bars(surface, layout, scale, theme);
         }
         if !withheld(surface, layout.status) {
-            fill_area(surface, layout.status, chrome);
-            self.status(surface, layout, theme, faces);
+            self.status(surface, layout, theme, StatusBand::new(theme, scale));
         }
     }
 
@@ -117,6 +113,7 @@ impl View {
             Tool::Pen => "Click for corners, drag for curves \u{b7} click the first node to close \u{b7} Enter ends",
             Tool::Pencil => "Drag to draw freehand",
             Tool::Text => "Click to type \u{b7} click text to edit it \u{b7} Escape ends",
+            Tool::Gradient => "Drag across the selection to lay its gradient \u{b7} Shift in 15\u{b0} steps \u{b7} Alt radial",
             Tool::Eyedropper => "Click an object to take its style",
             Tool::Zoom => "Click to zoom in, Alt-click out \u{b7} drag a rectangle to fill the window",
             Tool::Hand => "Drag to scroll",
@@ -143,66 +140,24 @@ impl View {
         );
     }
 
-    fn rulers(&self, surface: &mut Surface, layout: &Layout, theme: &Theme, faces: Faces) {
-        let palette = theme.palette();
-        for ruler in [layout.top_ruler, layout.left_ruler, layout.corner] {
-            fill_area(surface, ruler, Color::from(palette.surface));
-        }
+    fn rulers(&self, surface: &mut Surface, layout: &Layout, scale: Scale, theme: &Theme) {
+        fill_area(surface, layout.corner, Color::from(theme.palette().surface));
         let unit = self.document.drawing().page().unit;
         let per_unit = unit.pixels() * self.viewport.pixels();
-        // A figure every 1, 2 or 5 times a power of ten units, far enough
-        // apart to read.
-        let least = RULER_SPACING / per_unit;
-        let decade = power(10.0, floor(ln(least) / core::f64::consts::LN_10));
-        let step = [1.0, 2.0, 5.0, 10.0]
-            .iter()
-            .map(|m| m * decade)
-            .find(|step| *step >= least)
-            .unwrap_or(decade * 10.0);
-        let ink = Color::from(palette.on_surface_muted);
         let origin = self.viewport.origin();
-        for (ruler, across) in [(layout.top_ruler, true), (layout.left_ruler, false)] {
+        let along = |ruler: Rect, axis: RulerAxis| match axis {
+            RulerAxis::Across => origin.x + f64::from(layout.canvas.left() - ruler.left()),
+            RulerAxis::Down => origin.y + f64::from(layout.canvas.top() - ruler.top()),
+        };
+        for (ruler, axis) in [
+            (layout.top_ruler, RulerAxis::Across),
+            (layout.left_ruler, RulerAxis::Down),
+        ] {
             if withheld(surface, ruler) {
                 continue;
             }
-            let (start, length, offset) = if across {
-                (
-                    f64::from(ruler.left() - layout.canvas.left()),
-                    f64::from(ruler.width),
-                    origin.x,
-                )
-            } else {
-                (
-                    f64::from(ruler.top() - layout.canvas.top()),
-                    f64::from(ruler.height),
-                    origin.y,
-                )
-            };
-            let first_mark = floor(((start - offset) / per_unit) / step);
-            let last_mark = ceil(((start + length - offset) / per_unit) / step);
-            // Figures stand at least the spacing apart, so a ruler holds a
-            // bounded count of them however far the canvas has scrolled.
-            for mark in 0..whole_count(length / RULER_SPACING) + 2 {
-                let index = first_mark + real(mark);
-                if index > last_mark {
-                    break;
-                }
-                let value = index * step;
-                let at = round_i32(offset + value * per_unit);
-                let label = figure(value, step);
-                if across {
-                    let x = layout.canvas.left() + at;
-                    fill_area(surface, Rect::new(x, ruler.top(), 1, ruler.height), ink);
-                    faces
-                        .status
-                        .draw_text(surface, x + 2, ruler.top(), &label, ink);
-                } else {
-                    let y = layout.canvas.top() + at;
-                    fill_area(surface, Rect::new(ruler.left(), y, ruler.width, 1), ink);
-                    faces
-                        .status
-                        .draw_text(surface, ruler.left() + 1, y + 1, &label, ink);
-                }
+            if let Some(measure) = Ruler::new(per_unit, along(ruler, axis)) {
+                measure.paint(surface, ruler, axis, (scale, theme));
             }
         }
     }
@@ -219,35 +174,44 @@ impl View {
                 shadow.intersection(&layout.canvas),
                 Color::from(palette.drop_shadow),
             );
-            let ground = drawing
-                .page()
-                .background
-                .unwrap_or(tairix_colour::Rgba::new(255, 255, 255, 255));
             fill_area(
                 surface,
                 page.intersection(&layout.canvas),
-                Color::from(ground),
+                Color::from(paper(drawing.page())),
             );
         }
         let origin = self.viewport.origin();
+        let stand_in = self.tiles.stand_in(self.show.outline);
+        let onto = stand_in
+            .as_ref()
+            .map(|stand_in| stand_in.onto(self.viewport.pixels()));
         for key in self.visible_tiles(layout) {
-            let Some(tile) = self.tiles.tile(&key) else {
-                continue;
-            };
             let at = key.origin();
             let x = layout.canvas.left() + round_i32(origin.x + at.x);
             let y = layout.canvas.top() + round_i32(origin.y + at.y);
-            if Rect::new(x, y, TILE, TILE)
-                .intersection(&layout.canvas)
-                .is_empty()
-            {
+            let place = Rect::new(x, y, TILE, TILE).intersection(&layout.canvas);
+            if place.is_empty() {
                 continue;
             }
-            surface.blit(x, y, tile);
+            if let Some(tile) = self.tiles.tile(&key) {
+                surface.blit(x, y, tile);
+                continue;
+            }
+            // Until its own tile lands, the last zoom's tiles stand in,
+            // placed as the tile will be so nothing moves when it does.
+            let (Some(stand_in), Some(onto), Some((left, top))) =
+                (&stand_in, onto, place.surface_origin())
+            else {
+                continue;
+            };
+            let to_canvas = Affine::translate(f64::from(x) - at.x, f64::from(y) - at.y);
+            surface.with_clip(left, top, place.width, place.height, |surface| {
+                surface.blit_transformed(&stand_in.picture, onto.then(to_canvas), 255);
+            });
         }
         let accent = Color::from(palette.accent);
         if let Some(page) = page {
-            outline_rect(surface, page, Color::from(palette.border));
+            outline_rect(surface, page, Color::from(palette.border), 1);
         }
         if self.show.grid {
             self.grid_lines(surface, layout, Color::from(palette.selection_tint));
@@ -343,6 +307,9 @@ impl View {
             self.node_marks(surface, layout, to_window, accent);
         }
         self.gesture_preview(surface, layout, to_window, accent);
+        if self.tool == Tool::Gradient && self.gesture.is_none() {
+            self.gradient_marks(surface, layout, to_window, accent);
+        }
         self.pen_marks(surface, layout, to_window, accent);
         if let Some(typing) = &self.typing {
             self.caret(surface, layout, typing, to_window, accent);
@@ -408,6 +375,42 @@ impl View {
                 }
             }
         }
+    }
+
+    /// Where the one object selected lays the gradient the Style tab edits:
+    /// a linear one from its start to its end, a radial one from its centre
+    /// out to its circle.
+    fn gradient_marks(
+        &self,
+        surface: &mut Surface,
+        layout: &Layout,
+        to_window: Affine,
+        accent: Color,
+    ) {
+        let [path] = self.selection.as_slice() else {
+            return;
+        };
+        let drawing = self.shown();
+        let Some(node) = drawing.node_at(path) else {
+            return;
+        };
+        let Some(Paint::Gradient(gradient)) =
+            node.style().map(|style| self.inspector.target().of(style))
+        else {
+            return;
+        };
+        let course = match gradient.kind {
+            GradientKind::Linear { start, end } => (start, end),
+            GradientKind::Radial { centre, radius, .. } => {
+                (centre, centre + Point::new(radius, 0.0))
+            }
+        };
+        let placed = gradient
+            .transform
+            .then(node.transform())
+            .then(edit::parent_space(drawing, path))
+            .then(to_window);
+        gradient_line(surface, layout, course, placed, accent);
     }
 
     /// What the gesture under way would make: a marquee, a zoom area, a new
@@ -477,6 +480,10 @@ impl View {
                 }
                 line.finish();
             }
+            Some(Gesture::Gradient { from, to }) => {
+                let end = tools::line_end(*from, *to, constraint);
+                gradient_line(surface, layout, (*from, end), to_window, accent);
+            }
             Some(Gesture::Guide { horizontal, at, .. }) => {
                 if *horizontal {
                     let y = round_i32(to_window.map(Point::new(0.0, *at)).y);
@@ -507,8 +514,10 @@ impl View {
                     *last = tools::pen_node(last.point, Some(*to));
                 }
             }
-            if let Some(path) =
-                tools::pen_path(&nodes, false).and_then(|shape| shape.to_path().ok())
+            if let Some(path) = tools::pen_path(&nodes, false)
+                .ok()
+                .flatten()
+                .and_then(|shape| shape.to_path().ok())
             {
                 let mut budget = PREVIEW_POINTS;
                 stroke_path(surface, &path, to_window, accent, &mut budget);
@@ -529,7 +538,7 @@ impl View {
         let node = drawing
             .node_at(path)
             .filter(|node| node.path_nodes() < PREVIEW_POINTS)?;
-        let moved = crate::input::moved_node(node, drawing, path, grip, to)?;
+        let moved = crate::input::moved_node(node, drawing, path, grip, to).ok()??;
         let placed = moved
             .transform()
             .then(edit::parent_space(drawing, path))
@@ -537,8 +546,9 @@ impl View {
         Some((moved, placed))
     }
 
-    /// The selected path's nodes and handles, the one a drag under way holds
-    /// where the pointer has it.
+    /// The selected path's nodes and handles — or those of the path the
+    /// selected text is set along — the one a drag under way holds where the
+    /// pointer has it.
     fn node_marks(&self, surface: &mut Surface, layout: &Layout, to_window: Affine, accent: Color) {
         let drawing = self.shown();
         let Some(path) = self.selection.first() else {
@@ -547,11 +557,7 @@ impl View {
         let Some(node) = drawing.node_at(path) else {
             return;
         };
-        let Kind::Shape {
-            shape: Shape::Path(shape),
-            ..
-        } = node.kind()
-        else {
+        let Some(shape) = crate::input::node_path(node) else {
             return;
         };
         let held = match &self.gesture {
@@ -589,8 +595,9 @@ impl View {
         }
     }
 
-    /// A caret where typing goes: where the text sets its next character, by
-    /// the glyphs that have arrived.
+    /// Where typing goes: the selection's characters marked, then a caret
+    /// standing across the line where the text sets its next character —
+    /// turned with a path it is set along — by the glyphs that have arrived.
     fn caret(
         &self,
         surface: &mut Surface,
@@ -606,76 +613,110 @@ impl View {
         let Kind::Text { text, .. } = node.kind() else {
             return;
         };
-        let Ok(pen) = text.pen_at(&Lettering::new(Arrived), typing.caret) else {
-            return;
-        };
         let placed = node
             .transform()
             .then(edit::parent_space(drawing, &typing.path))
             .then(to_window);
-        let top = device_point(placed.map(Point::new(pen.x, pen.y - text.size)));
-        let bottom = device_point(placed.map(Point::new(pen.x, pen.y + text.size * 0.2)));
+        let glyphs = Lettering::new(Arrived);
+        let selected = typing.selection();
+        if !selected.is_empty() {
+            let marked = Color::rgba(accent.r, accent.g, accent.b, SELECTION_ALPHA);
+            for (index, range) in text.line_ranges().enumerate() {
+                let span = range.start.max(selected.start)..range.end.min(selected.end);
+                if span.start >= span.end {
+                    continue;
+                }
+                let Ok(pens) = text.pens(&glyphs, index, range) else {
+                    return;
+                };
+                for pair in pens.windows(2) {
+                    if pair[0].offset < span.start || pair[0].offset >= span.end {
+                        continue;
+                    }
+                    let quad = [
+                        (pair[0], -CARET_ABOVE),
+                        (pair[1], -CARET_ABOVE),
+                        (pair[1], CARET_BELOW),
+                        (pair[0], CARET_BELOW),
+                    ]
+                    .map(|(pen, across)| {
+                        let up = Point::new(-pen.direction.y, pen.direction.x)
+                            * (across * pen.face.size);
+                        sub_pixel(placed.map(pen.point + up))
+                    });
+                    surface.fill_polygon_subpixel(&quad, marked);
+                }
+            }
+        }
+        let Ok(caret) = text.caret(&glyphs, typing.caret) else {
+            return;
+        };
+        let across = Point::new(-caret.direction.y, caret.direction.x) * caret.size;
+        let top = device_point(placed.map(caret.pen - across * CARET_ABOVE));
+        let bottom = device_point(placed.map(caret.pen + across * CARET_BELOW));
         surface.stroke_polyline(&[top, bottom], 2 * hairline(layout), accent);
     }
 
-    fn status(&self, surface: &mut Surface, layout: &Layout, theme: &Theme, faces: Faces) {
-        let palette = theme.palette();
-        let inset = i32::try_from(layout.length(8)).unwrap_or(0);
-        let height = i32::try_from(faces.status.line_height()).unwrap_or(0);
-        let y =
-            layout.status.top() + (i32::try_from(layout.status.height).unwrap_or(0) - height) / 2;
+    fn status(&self, surface: &mut Surface, layout: &Layout, theme: &Theme, band: StatusBand) {
         let unit = self.document.drawing().page().unit;
         let pointer = self.drawing_at(layout, self.pointer) / unit.pixels();
-        let mut readout = alloc::format!(
+        let at = alloc::format!(
             "{}, {} {}",
             round2(pointer.x),
             round2(pointer.y),
             unit.symbol()
         );
+        let mut selected = String::new();
         if !self.selection.is_empty() {
             let bounds = self.selection_bounds();
-            readout = alloc::format!(
-                "{readout} \u{b7} {} selected, {} \u{d7} {} {}",
+            selected = alloc::format!(
+                "{} selected, {} \u{d7} {} {}",
                 self.selection.len(),
                 round2(bounds.width() / unit.pixels()),
                 round2(bounds.height() / unit.pixels()),
                 unit.symbol()
             );
         }
-        let readout_width = i32::try_from(faces.status.text_width(&readout)).unwrap_or(0);
-        let right = layout.status.right() - inset - readout_width;
-        faces.status.draw_text(
+        band.paint(
             surface,
-            right,
-            y,
-            &readout,
-            Color::from(palette.on_surface_muted),
+            layout.status,
+            theme,
+            &[
+                (
+                    layout.message,
+                    self.message.as_deref().unwrap_or(""),
+                    StatusTone::Ink,
+                ),
+                (layout.pointer, &at, StatusTone::Muted),
+                (layout.selected, &selected, StatusTone::Muted),
+            ],
         );
-        if let Some(message) = &self.message {
-            faces.status.draw_text(
-                surface,
-                layout.status.left() + inset,
-                y,
-                message,
-                Color::from(palette.on_surface),
-            );
-        }
     }
 }
 
+/// The colour the canvas shows `page` in: its ground laid over white paper,
+/// so a translucent ground never leaves the window translucent.
+fn paper(page: &tairix_drawing::Page) -> tairix_colour::Rgba {
+    page.background
+        .map_or(PAPER_WHITE, |ground| ground.over(PAPER_WHITE))
+}
+
 /// What the inspector shows of `drawing`: the style, shape and text of the
-/// first object of `selection`, or the defaults for new objects where it has
+/// first object of `selection` — of a text being typed, as the character
+/// `typed` begins with is set — or the defaults for new objects where it has
 /// none, and the layers, the one at `layer` in hand.
 pub(crate) fn shown_of<'a>(
     drawing: &'a tairix_drawing::Drawing,
-    selection: &[tairix_drawing::NodePath],
+    (selection, typed): (&[tairix_drawing::NodePath], Option<core::ops::Range<usize>>),
     (style, polygon, text): (&'a tairix_drawing::Style, bool, &crate::view::TextDefaults),
     layer: usize,
 ) -> Shown<'a> {
     let first = selection.first().and_then(|path| drawing.node_at(path));
-    let style = first
+    let own = first
         .and_then(|node| node.style())
         .map_or(style, |style| &**style);
+    let style =
+        crate::inspector::typed_style(own, first.map(alloc::sync::Arc::as_ref), typed.clone());
     let polygon = match first.map(|node| node.kind()) {
         Some(Kind::Shape {
             shape: Shape::Star(star),
@@ -683,11 +724,19 @@ pub(crate) fn shown_of<'a>(
         }) => star.polygon,
         _ => polygon,
     };
-    let (family, bold, italic, align) = match first.map(|node| node.kind()) {
+    let (family, bold, italic, align, along) = match first.map(|node| node.kind()) {
         Some(Kind::Text { text: set, .. }) => {
-            (&*set.family, set.weight >= 600, set.italic, set.align)
+            let face = set.face(typed.and_then(|range| set.run_for(range)));
+            let along = matches!(set.baseline, tairix_drawing::Baseline::Path(_));
+            (
+                face.family,
+                face.weight >= 600,
+                face.italic,
+                set.align,
+                along,
+            )
         }
-        _ => (text.family, text.bold, text.italic, text.align),
+        _ => (text.family, text.bold, text.italic, text.align, false),
     };
     Shown {
         style,
@@ -700,7 +749,9 @@ pub(crate) fn shown_of<'a>(
             bold,
             italic,
             align,
+            along,
         },
+        page: *drawing.page(),
     }
 }
 
@@ -720,13 +771,19 @@ fn round2(value: f64) -> String {
     text
 }
 
-/// A ruler figure: whole when the step is.
-fn figure(value: f64, step: f64) -> String {
-    if step >= 1.0 {
-        alloc::format!("{}", round_i32(value))
-    } else {
-        round2(value)
-    }
+/// How far above its baseline the caret and a selection's mark reach, and
+/// how far below, in ems of the characters beside them.
+const CARET_ABOVE: f64 = 1.0;
+const CARET_BELOW: f64 = 0.2;
+
+/// How strongly a text's selected characters are marked, of the accent.
+const SELECTION_ALPHA: u8 = 0x60;
+
+/// `point`, a window position, in the sub-pixel units an anti-aliased
+/// polygon is placed by.
+fn sub_pixel(point: Point) -> (i32, i32) {
+    let unit = f64::from(tairix_raster::SUBPIXEL);
+    (round_i32(point.x * unit), round_i32(point.y * unit))
 }
 
 /// The mark the selection's handles and a path's nodes are drawn white within.
@@ -863,27 +920,41 @@ fn stroke_bounds(surface: &mut Surface, bounds: Bounds, map: Affine, colour: Col
     );
 }
 
-fn outline_rect(surface: &mut Surface, rect: Rect, colour: Color) {
-    fill_area(
-        surface,
-        Rect::new(rect.left(), rect.top(), rect.width, 1),
-        colour,
-    );
-    fill_area(
-        surface,
-        Rect::new(rect.left(), rect.bottom() - 1, rect.width, 1),
-        colour,
-    );
-    fill_area(
-        surface,
-        Rect::new(rect.left(), rect.top(), 1, rect.height),
-        colour,
-    );
-    fill_area(
-        surface,
-        Rect::new(rect.right() - 1, rect.top(), 1, rect.height),
-        colour,
-    );
+/// A gradient's course from `start` to `end`, mapped onto the window by
+/// `to_window`: a hairline between a handle at either end.
+fn gradient_line(
+    surface: &mut Surface,
+    layout: &Layout,
+    (start, end): (Point, Point),
+    to_window: Affine,
+    accent: Color,
+) {
+    let (a, b) = (to_window.map(start), to_window.map(end));
+    let mut line = Polyline::new(surface, hairline(layout), accent);
+    line.to(device_point(a));
+    line.to(device_point(b));
+    line.finish();
+    for at in [a, b] {
+        let at = device_point(at);
+        fill_area(surface, square(layout, at, 7), accent);
+        fill_area(surface, square(layout, at, 5), WHITE);
+    }
+}
+
+/// A rim `weight` pixels thick just inside `rect`.
+pub(crate) fn outline_rect(surface: &mut Surface, rect: Rect, colour: Color, weight: u32) {
+    let weight = weight.min(rect.width / 2).min(rect.height / 2).max(1);
+    let right = rect.right().saturating_sub(px(weight));
+    let bottom = rect.bottom().saturating_sub(px(weight));
+    let rims = [
+        Rect::new(rect.left(), rect.top(), rect.width, weight),
+        Rect::new(rect.left(), bottom, rect.width, weight),
+        Rect::new(rect.left(), rect.top(), weight, rect.height),
+        Rect::new(right, rect.top(), weight, rect.height),
+    ];
+    for rim in rims {
+        fill_area(surface, rim, colour);
+    }
 }
 
 #[cfg(test)]
@@ -897,11 +968,29 @@ mod tests {
     use tairix_raster::{Color, Surface};
     use tairix_window::document::Access;
 
-    use super::{stroke_path, PREVIEW_POINTS};
+    use super::{paper, stroke_path, PREVIEW_POINTS};
     use crate::document::{blank, Document};
     use crate::edit;
     use crate::tools;
     use crate::view::{Grip, GripPart, View};
+    use tairix_drawing::PAPER_WHITE;
+
+    #[test]
+    fn a_page_is_shown_opaque_whatever_its_ground() {
+        let page = |background| tairix_drawing::Page {
+            background,
+            ..tairix_drawing::Page::of(&tairix_drawing::PAPER[0])
+        };
+        assert_eq!(paper(&page(None)), PAPER_WHITE, "no ground is white paper");
+        let blue = tairix_colour::Rgba::new(0, 0, 255, 255);
+        assert_eq!(paper(&page(Some(blue))), blue);
+        let shown = paper(&page(Some(tairix_colour::Rgba::new(0, 0, 0, 128))));
+        assert_eq!(shown.a, 255, "a translucent ground leaves no hole");
+        assert!(
+            (126..=128).contains(&shown.r),
+            "half black over white is grey: {shown:?}"
+        );
+    }
 
     #[test]
     fn a_stroke_past_its_budget_spends_it_draws_no_more_and_says_so() {
@@ -947,12 +1036,15 @@ mod tests {
     #[test]
     fn a_node_dragged_is_previewed_where_the_pointer_has_it() {
         let mut ids = Ids::new();
-        let drawing = blank(&mut ids).expect("a drawing");
+        let drawing =
+            blank(&mut ids, &crate::preferences::Preferences::default()).expect("a drawing");
         let nodes = [
             tools::pen_node(Point::new(10.0, 10.0), None),
             tools::pen_node(Point::new(100.0, 10.0), None),
         ];
-        let shape = tools::pen_path(&nodes, false).expect("a path");
+        let shape = tools::pen_path(&nodes, false)
+            .expect("held")
+            .expect("a path");
         let node = Node::new(
             ids.issue(),
             Kind::Shape {
@@ -986,5 +1078,109 @@ mod tests {
             panic!("a path");
         };
         assert_eq!(path.contours[0].nodes[1].point, Point::new(150.0, 40.0));
+    }
+
+    #[test]
+    fn a_long_message_is_cut_short_of_the_readouts_beside_it() {
+        use tairix_controls::StatusBand;
+        use tairix_geometry::{Region, Scale};
+        use tairix_theme::Theme;
+        use tairix_window::docapp::DocumentView;
+
+        let mut ids = Ids::new();
+        let drawing =
+            blank(&mut ids, &crate::preferences::Preferences::default()).expect("a drawing");
+        let mut view = View::new(
+            Document::new(drawing, ids, true),
+            String::from("Untitled"),
+            Access::Untitled,
+            Unkept::NONE,
+            1.0,
+        );
+        let theme = Theme::light();
+        let layout = crate::layout::Layout::of(1080, 720, Scale::ONE, &theme);
+        view.settle(&layout, &mut Region::new());
+        let band = StatusBand::new(&theme, Scale::ONE);
+        let painted = |view: &View| {
+            let mut surface = Surface::new(1080, 720).expect("a window");
+            view.status(&mut surface, &layout, &theme, band);
+            surface
+        };
+        let quiet = painted(&view);
+        view.message = Some(String::from("A message far longer than its room ").repeat(20));
+        let loud = painted(&view);
+        let readouts = layout.pointer.union(&layout.selected);
+        let reached = (layout.status.top()..layout.status.bottom()).any(|y| {
+            (readouts.left()..readouts.right()).any(|x| {
+                let at = (u32::try_from(x).expect("on"), u32::try_from(y).expect("on"));
+                loud.get(at.0, at.1) != quiet.get(at.0, at.1)
+            })
+        });
+        assert!(!reached, "the message stays in its own slot");
+        assert!(layout.message.right() <= readouts.left());
+    }
+
+    #[test]
+    fn a_new_zoom_shows_the_last_zooms_tiles_until_its_own_land() {
+        use tairix_geometry::{Region, Scale};
+        use tairix_theme::Theme;
+        use tairix_window::docapp::DocumentView;
+
+        let mut ids = Ids::new();
+        let drawing =
+            blank(&mut ids, &crate::preferences::Preferences::default()).expect("a drawing");
+        let mut view = View::new(
+            Document::new(drawing, ids, true),
+            String::from("Untitled"),
+            Access::Untitled,
+            Unkept::NONE,
+            1.0,
+        );
+        let theme = Theme::light();
+        let layout = crate::layout::Layout::of(1080, 720, Scale::ONE, &theme);
+        view.settle(&layout, &mut Region::new());
+        let red = Color::rgb(220, 20, 30);
+        let land = |view: &mut View, colour: Option<Color>| {
+            while let Some(job) = view.wanted_render(&layout) {
+                let tiles = job.keys.iter().map(|key| {
+                    let mut tile =
+                        Surface::new(crate::tiles::TILE, crate::tiles::TILE).expect("a tile");
+                    if let Some(colour) = colour {
+                        tile.fill(colour);
+                    }
+                    (*key, tile)
+                });
+                view.rendered(job.scene, (&job.keys, tiles), &layout, &mut Region::new());
+            }
+        };
+        let centre = |view: &View| {
+            let mut surface = Surface::new(1080, 720).expect("a window");
+            view.canvas(&mut surface, &layout, &theme);
+            let (x, y) = (
+                layout.canvas.left() + i32::try_from(layout.canvas.width / 2).expect("wide"),
+                layout.canvas.top() + i32::try_from(layout.canvas.height / 2).expect("tall"),
+            );
+            surface
+                .get(u32::try_from(x).expect("on"), u32::try_from(y).expect("on"))
+                .expect("on the window")
+        };
+        land(&mut view, Some(red));
+        assert_eq!(centre(&view), red.premultiply(), "the first zoom's tiles");
+        view.viewport.zoom_at(
+            2.0,
+            Point::new(
+                f64::from(layout.canvas.width) / 2.0,
+                f64::from(layout.canvas.height) / 2.0,
+            ),
+        );
+        let asked = view.wanted_render(&layout).expect("the new zoom's tiles");
+        view.render_refused(&asked.keys);
+        assert_eq!(centre(&view), red.premultiply(), "stood in for, scaled");
+        land(&mut view, None);
+        assert_ne!(
+            centre(&view),
+            red.premultiply(),
+            "its own tiles, drawing nothing, show what lies beneath"
+        );
     }
 }

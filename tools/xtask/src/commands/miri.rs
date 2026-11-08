@@ -194,7 +194,9 @@ pub struct Target {
 pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-collections",
-        description: "the open-addressed hash table's control array and iterators",
+        description: "the open-addressed hash table's control array and iterators, and the \
+                      shared slice's block: its layout, its elements written and dropped once, \
+                      and a clone panicking part-way",
         features: &[],
         scope: Scope::LibOnly(
             "the library holds all but the crate's two integration tests, and naming it is what \

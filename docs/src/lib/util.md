@@ -80,6 +80,13 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   its length where the allocator grants one, and leaves it as it is where
   none is: unlike `Vec::shrink_to_fit`, a refusal never aborts. A lowered
   GPU program and the tables an admitted SPIR-V module keeps are trimmed so.
+  `push` appends an item, its list's room doubling as it fills, and says
+  whether the room was had; `try_push` is the same push answering the
+  allocator's `TryReserveError`, which a caller's `?` turns into its own
+  out-of-memory error. `Text` is a string grown only fallibly, for text
+  written a piece at a time through `fmt::Write` before its length is
+  known: a piece the heap refuses fails the write, where `written` measures
+  first and reserves once for text that can be written twice.
 * `flags!` — a set of bit flags over one unsigned integer: the named flags,
   the empty set, and setting, clearing and testing them, whole or for any
   flag in common. `lib/smb`'s header, negotiation, session and file fields

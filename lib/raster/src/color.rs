@@ -563,6 +563,18 @@ pub(crate) fn wash_weighted_portable(
     });
 }
 
+/// `pixels` written into `out` as straight-alpha RGBA8 through
+/// [`Pixel::unpremultiply`], pixel for pixel, as many as both hold: how a
+/// surface's pixels leave for an encoder or a wire that carries them
+/// straight.
+#[inline]
+pub fn unpremultiply_span(pixels: &[Pixel], out: &mut [[u8; 4]]) {
+    for (pixel, slot) in pixels.iter().zip(out) {
+        let Color { r, g, b, a } = pixel.unpremultiply();
+        *slot = [r, g, b, a];
+    }
+}
+
 /// How many pixels lead `span` whose alpha is full: a run that replaces
 /// whatever lies beneath it exactly, which a compositor copies rather than
 /// blends.

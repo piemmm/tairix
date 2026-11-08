@@ -9,11 +9,12 @@
 //! drawing back as clean SVG 1.1 that other editors read, with Inkscape's
 //! layer attributes beside Draw's own.
 
+mod data_url;
 mod number;
 mod read;
 mod write;
 
-pub use read::{read, Read, ReadError};
+pub use read::read;
 pub use write::write;
 
 /// The namespace Draw's own attributes and elements live in.

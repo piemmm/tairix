@@ -14,20 +14,24 @@ use alloc::vec::Vec;
 
 use tairix_bezier::flatten::flatten_cubic;
 use tairix_bezier::{Affine, Bounds, FillRule, Path, Point, Segment, Subpath};
+use tairix_collections::try_arc;
 use tairix_colour::Rgba;
 use tairix_raster::{
-    Color, GradientStop, Group, Layer, Mask, MaskKind, Node as Art, Paint as Painted, SpreadMethod,
+    Color, GradientStop, Group, Image as Picture, Layer, Mask, MaskKind, Node as Art,
+    Paint as Painted, SpreadMethod,
 };
 use tairix_svg::geom::{LineCap, LineJoin, StrokeStyle, SubPath};
 use tairix_svg::paint::{placed_gradient, GradientGeometry};
 use tairix_svg::stroke::stroke_outline;
-use tairix_util::fallible;
+use tairix_svg::SvgError;
+use tairix_util::fallible::{self, try_push};
 use tairix_util::mathf::round_i32;
 
 use crate::drawing::Drawing;
+use crate::image::Image;
 use crate::node::{Kind, Node};
-use crate::style::{Cap, GradientKind, Join, Paint, PaintOrder, Spread, Stroke};
-use crate::text::Glyphs;
+use crate::style::{Cap, GradientKind, Join, Paint, PaintOrder, Spread, Stroke, Style};
+use crate::text::{Glyphs, Placed};
 use crate::DrawingError;
 
 /// How far a flattened curve may depart from the true one, in device pixels.
@@ -65,6 +69,10 @@ pub struct View {
     pub design: u32,
     /// How objects are drawn.
     pub mode: Mode,
+    /// Whether the page's ground is drawn beneath them, as an export draws
+    /// it; a window laying the ground beneath its tiles itself leaves it
+    /// out, so a change to the page renders no tile again.
+    pub ground: bool,
 }
 
 /// What a square of a drawing renders as.
@@ -87,7 +95,7 @@ pub trait Derived {
     ///
     /// As [`traced`].
     fn path(&self, node: &Arc<Node>) -> Result<Arc<Path>, DrawingError> {
-        Ok(Arc::new(traced(node)?))
+        Ok(try_arc(traced(node)?)?)
     }
 
     /// The dashes `node`'s stroke cuts `path`, what it traces, into.
@@ -102,7 +110,7 @@ pub trait Derived {
         stroke: &Stroke,
     ) -> Result<Arc<Path>, DrawingError> {
         let _ = node;
-        Ok(Arc::new(dashes(path, stroke)?))
+        Ok(try_arc(dashes(path, stroke)?)?)
     }
 }
 
@@ -112,8 +120,8 @@ pub struct Afresh;
 
 impl Derived for Afresh {}
 
-/// What `node` traces in its own space: a shape's outline, nothing for text or
-/// a group.
+/// What `node` traces in its own space: a shape's outline, nothing for text,
+/// a picture or a group.
 ///
 /// # Errors
 ///
@@ -121,7 +129,7 @@ impl Derived for Afresh {}
 pub fn traced(node: &Node) -> Result<Path, DrawingError> {
     match node.kind() {
         Kind::Shape { shape, .. } => shape.to_path(),
-        Kind::Text { .. } | Kind::Group { .. } => Ok(Path::new()),
+        Kind::Text { .. } | Kind::Image { .. } | Kind::Group { .. } => Ok(Path::new()),
     }
 }
 
@@ -134,15 +142,41 @@ pub fn traced(node: &Node) -> Result<Path, DrawingError> {
 /// [`DrawingError::TooComplex`] for more dashes than a path may be cut into,
 /// and [`DrawingError::OutOfMemory`] when they cannot be held.
 pub fn dashes(path: &Path, stroke: &Stroke) -> Result<Path, DrawingError> {
-    if stroke.dashes.is_empty() {
-        return Ok(path.clone());
-    }
-    tairix_bezier::offset::dashed(path, &stroke.dashes, stroke.dash_offset).map_err(|error| {
-        match error {
-            tairix_bezier::boolean::BooleanError::TooComplex => DrawingError::TooComplex,
-            tairix_bezier::boolean::BooleanError::OutOfMemory => DrawingError::OutOfMemory,
-        }
-    })
+    Ok(tairix_bezier::offset::dashed(
+        path,
+        &stroke.dashes,
+        stroke.dash_offset,
+    )?)
+}
+
+/// The area `stroke` paints along `path`, dashes cut, as a path filled
+/// non-zero: what a format that cannot stroke as the drawing does fills
+/// instead, and what outlining a stroke turns it into.
+///
+/// # Errors
+///
+/// [`DrawingError::TooComplex`] past what the dashes or the outline's
+/// simplification may hold, and [`DrawingError::OutOfMemory`] when it
+/// cannot be held.
+pub fn stroke_area(path: &Path, stroke: &Stroke) -> Result<Path, DrawingError> {
+    /// How far the outline's curves may stray from the true offset, in the
+    /// path's own units.
+    const TOLERANCE: f64 = 0.01;
+    let pen = tairix_bezier::offset::StrokeStyle {
+        width: stroke.width,
+        join: stroke.join,
+        miter_limit: stroke.miter_limit,
+        start_cap: stroke.cap,
+        end_cap: stroke.cap,
+    };
+    let dashed;
+    let traced = if stroke.dashes.is_empty() {
+        path
+    } else {
+        dashed = dashes(path, stroke)?;
+        &dashed
+    };
+    Ok(tairix_bezier::offset::outline(traced, &pen, TOLERANCE)?)
 }
 
 /// `view`'s square of `drawing`, its text set from `glyphs` and what nodes
@@ -179,7 +213,8 @@ pub fn artwork(
         scratch: Vec::new(),
     };
     let mut nodes = Vec::new();
-    if let (Mode::Painted, Some(background)) = (view.mode, drawing.page().background) {
+    let ground = drawing.page().background.filter(|_| view.ground);
+    if let (Mode::Painted, Some(background)) = (view.mode, ground) {
         let page = drawing.page().bounds();
         let ring = [
             page.min,
@@ -189,12 +224,15 @@ pub fn artwork(
         ];
         let contour = renderer.placed(ring.iter().copied(), view.to_device)?;
         if let Some(contour) = contour {
+            let mut contours = Vec::new();
+            contours.try_reserve_exact(1)?;
+            contours.push(contour);
             let layer = Layer::filled(
                 Painted::Solid(Color::from(background)),
                 FillRule::NonZero,
-                alloc::vec![contour],
+                contours,
             );
-            push(&mut nodes, Art::Fill(layer))?;
+            try_push(&mut nodes, Art::Fill(layer))?;
         }
     }
     if let Some(area) = renderer.area_in(view.to_device) {
@@ -271,30 +309,90 @@ impl Renderer<'_> {
             Kind::Text { text, style } => {
                 let setting = text.set(self.glyphs)?;
                 self.complete &= setting.complete;
-                let mut path = Path::new();
-                for placed in &setting.glyphs {
-                    let reach = style.stroke.reach();
-                    if placed
+                let reach = text.stroke_reach(style);
+                let shown = |placed: &Placed| {
+                    placed
                         .glyph
                         .ink()
                         .transformed(placed.at)
                         .inflated(reach)
                         .intersects(area)
-                    {
-                        let set = placed.glyph.outline().transformed(placed.at);
-                        if path.subpaths.try_reserve(set.subpaths.len()).is_err() {
-                            return Err(DrawingError::OutOfMemory);
-                        }
-                        path.subpaths.extend(set.subpaths);
+                };
+                if !text.repaints() || matches!(self.view.mode, Mode::Outline(_)) {
+                    let path = setting.outline(shown)?;
+                    return self.painted(node, style, &path, to_device, area, opacity, out);
+                }
+                // Runs painted apart overlap where their glyphs do, so the
+                // object's opacity applies to them together.
+                let mut inner = Vec::new();
+                for part in setting.painted(text) {
+                    let path = setting.outline_of(part.glyphs.clone(), shown)?;
+                    if !path.subpaths.is_empty() {
+                        let style = part.style(style);
+                        self.painted(node, &style, &path, to_device, area, 1.0, &mut inner)?;
                     }
                 }
-                self.shape(node, &path, to_device, area, opacity, out)
+                isolated(opacity, None, inner, out)
             }
+            Kind::Image { image } => self.image(image, to_device, area, opacity, out),
         }
     }
 
-    /// The layers one painted path comes to: its fill and its stroke in
-    /// their order, then its arrowheads, through its opacity.
+    /// A picture through its own map onto the device at `opacity`, or in the
+    /// outline view the hairline of its rectangle.
+    fn image(
+        &mut self,
+        image: &Image,
+        to_device: Affine,
+        area: Bounds,
+        opacity: f64,
+        out: &mut Vec<Art>,
+    ) -> Result<(), DrawingError> {
+        if let Mode::Outline(colour) = self.view.mode {
+            return self.hairline(&image.outline()?, to_device, area, colour, out);
+        }
+        let strength = round_i32(opacity * 255.0).clamp(0, 255);
+        let picture = Picture {
+            pyramid: Arc::clone(image.pyramid()),
+            transform: image.to_place().then(to_device).then(self.to_design),
+            opacity: u8::try_from(strength).unwrap_or(u8::MAX),
+        };
+        Ok(try_push(out, Art::Image(picture))?)
+    }
+
+    /// `path`, in a space `to_device` maps onto the device, as a hairline of
+    /// one device pixel in `colour`: the outline view's every object.
+    fn hairline(
+        &mut self,
+        path: &Path,
+        to_device: Affine,
+        area: Bounds,
+        colour: Rgba,
+        out: &mut Vec<Art>,
+    ) -> Result<(), DrawingError> {
+        let tolerance = DEVICE_TOLERANCE / to_device.max_scale();
+        let hairline = StrokeStyle {
+            width: 1.0,
+            ..StrokeStyle::default()
+        };
+        let mut polylines = flattened_runs(path, area, tolerance)?;
+        for polyline in &mut polylines {
+            for point in &mut polyline.points {
+                *point = to_device.apply(*point);
+            }
+        }
+        let outline = stroked(&polylines, &hairline, DEVICE_TOLERANCE)?;
+        let layer = self.layer(
+            &outline,
+            &Paint::Colour(colour),
+            FillRule::NonZero,
+            Affine::IDENTITY,
+            1.0,
+        )?;
+        push_layer(out, layer)
+    }
+
+    /// The layers a shape's path comes to in its own style.
     fn shape(
         &mut self,
         node: &Arc<Node>,
@@ -304,31 +402,33 @@ impl Renderer<'_> {
         opacity: f64,
         out: &mut Vec<Art>,
     ) -> Result<(), DrawingError> {
-        let Some(style) = node.style() else {
-            return Ok(());
-        };
-        let tolerance = DEVICE_TOLERANCE / to_device.max_scale();
-        if let Mode::Outline(colour) = self.view.mode {
-            let hairline = StrokeStyle {
-                width: 1.0,
-                ..StrokeStyle::default()
-            };
-            let mut polylines = flattened_runs(path, area, tolerance)?;
-            for polyline in &mut polylines {
-                for point in &mut polyline.points {
-                    *point = to_device.apply(*point);
-                }
-            }
-            let outline = stroked(&polylines, &hairline, DEVICE_TOLERANCE)?;
-            let layer = self.layer(
-                &outline,
-                &Paint::Colour(colour),
-                FillRule::NonZero,
-                Affine::IDENTITY,
-                1.0,
-            )?;
-            return push_layer(out, layer);
+        match node.style() {
+            Some(style) => self.painted(node, style, path, to_device, area, opacity, out),
+            None => Ok(()),
         }
+    }
+
+    /// The layers `node`'s path comes to painted as `style`: its fill and its
+    /// stroke in their order, then its arrowheads, through its opacity.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a text paints each run of its glyphs through this with a style of its own, \
+                  so the style cannot be read from the node"
+    )]
+    fn painted(
+        &mut self,
+        node: &Arc<Node>,
+        style: &Style,
+        path: &Path,
+        to_device: Affine,
+        area: Bounds,
+        opacity: f64,
+        out: &mut Vec<Art>,
+    ) -> Result<(), DrawingError> {
+        if let Mode::Outline(colour) = self.view.mode {
+            return self.hairline(path, to_device, area, colour, out);
+        }
+        let tolerance = DEVICE_TOLERANCE / to_device.max_scale();
         let mut layers: Vec<Layer> = Vec::new();
         let fill = |renderer: &mut Self, layers: &mut Vec<Layer>| -> Result<(), DrawingError> {
             if !style.fill.paints() {
@@ -348,7 +448,7 @@ impl Renderer<'_> {
             } else if matches!(node.kind(), Kind::Shape { .. }) {
                 Some(renderer.derived.dashes(node, path, &style.stroke)?)
             } else {
-                Some(Arc::new(dashes(path, &style.stroke)?))
+                Some(try_arc(dashes(path, &style.stroke)?)?)
             };
             let runs = flattened_runs(dashed.as_deref().unwrap_or(path), reached, tolerance)?;
             let outline = stroked(&runs, &stroke_style(&style.stroke), tolerance)?;
@@ -371,7 +471,7 @@ impl Renderer<'_> {
                 fill(self, &mut layers)?;
             }
         }
-        for head in arrowheads(path, &style.stroke) {
+        for head in arrowheads(path, &style.stroke)?.into_iter().flatten() {
             if head.bounds().intersects(area) {
                 let ring = flattened_ring(&head, tolerance)?;
                 let colour = Paint::Colour(style.stroke.head_colour());
@@ -384,7 +484,7 @@ impl Renderer<'_> {
                 // One layer alone composites at its alpha times the opacity,
                 // which is what isolating it would come to.
                 only.paint = weakened(only.paint, opacity);
-                return push(out, Art::Fill(only));
+                return Ok(try_push(out, Art::Fill(only))?);
             }
         }
         let mut arts = Vec::new();
@@ -439,17 +539,20 @@ impl Renderer<'_> {
             Kind::Text { text, style } => {
                 let setting = text.set(self.glyphs)?;
                 self.complete &= setting.complete;
-                let mut path = Path::new();
-                for placed in &setting.glyphs {
-                    let set = placed.glyph.outline().transformed(placed.at);
-                    if path.subpaths.try_reserve(set.subpaths.len()).is_err() {
-                        return Err(DrawingError::OutOfMemory);
-                    }
-                    path.subpaths.extend(set.subpaths);
-                }
+                let path = setting.outline(|_| true)?;
                 let contours =
                     flattened_fill(&path, area, DEVICE_TOLERANCE / to_device.max_scale())?;
                 let layer = self.layer(&contours, &opaque, style.fill_rule, to_device, 1.0)?;
+                push_layer(out, layer)
+            }
+            // A picture clips to its rectangle, as its outline does.
+            Kind::Image { image } => {
+                let contours = flattened_fill(
+                    &image.outline()?,
+                    area,
+                    DEVICE_TOLERANCE / to_device.max_scale(),
+                )?;
+                let layer = self.layer(&contours, &opaque, FillRule::NonZero, to_device, 1.0)?;
                 push_layer(out, layer)
             }
         }
@@ -530,37 +633,26 @@ fn isolated(
         out.append(&mut children);
         return Ok(());
     }
-    push(
+    Ok(try_push(
         out,
         Art::Group(Group {
             opacity: alpha,
             mask,
             children,
         }),
-    )
-}
-
-fn push(out: &mut Vec<Art>, art: Art) -> Result<(), DrawingError> {
-    if fallible::push(out, art) {
-        Ok(())
-    } else {
-        Err(DrawingError::OutOfMemory)
-    }
+    )?)
 }
 
 fn push_layer(out: &mut Vec<Art>, layer: Option<Layer>) -> Result<(), DrawingError> {
-    layer.map_or(Ok(()), |layer| push(out, Art::Fill(layer)))
+    match layer {
+        Some(layer) => Ok(try_push(out, Art::Fill(layer))?),
+        None => Ok(()),
+    }
 }
 
 fn push_optional(layers: &mut Vec<Layer>, layer: Option<Layer>) -> Result<(), DrawingError> {
     match layer {
-        Some(layer) => {
-            if fallible::push(layers, layer) {
-                Ok(())
-            } else {
-                Err(DrawingError::OutOfMemory)
-            }
-        }
+        Some(layer) => Ok(try_push(layers, layer)?),
         None => Ok(()),
     }
 }
@@ -572,7 +664,10 @@ fn stroked(
     pen: &StrokeStyle,
     tolerance: f64,
 ) -> Result<Vec<SubPath>, DrawingError> {
-    stroke_outline(polylines, pen, tolerance, MAX_POINTS).map_err(|_| DrawingError::TooComplex)
+    stroke_outline(polylines, pen, tolerance, MAX_POINTS).map_err(|error| match error {
+        SvgError::OutOfMemory => DrawingError::OutOfMemory,
+        _ => DrawingError::TooComplex,
+    })
 }
 
 /// An opacity as the 8-bit alpha a raster group composites at.
@@ -693,8 +788,15 @@ fn stroke_style(stroke: &Stroke) -> StrokeStyle {
     }
 }
 
-/// The arrowheads `stroke` draws at the ends of `path`.
-pub(crate) fn arrowheads(path: &Path, stroke: &Stroke) -> impl Iterator<Item = Subpath> {
+/// The arrowheads `stroke` draws at the start and the end of `path`.
+///
+/// # Errors
+///
+/// [`DrawingError::OutOfMemory`] when an outline cannot be held.
+pub(crate) fn arrowheads(
+    path: &Path,
+    stroke: &Stroke,
+) -> Result<[Option<Subpath>; 2], DrawingError> {
     let first = path
         .subpaths
         .first()
@@ -703,21 +805,23 @@ pub(crate) fn arrowheads(path: &Path, stroke: &Stroke) -> impl Iterator<Item = S
         .subpaths
         .last()
         .and_then(|subpath| subpath.segments().last());
-    let start = first
-        .filter(|_| stroke.draws_head(&stroke.start))
-        .and_then(|segment| {
+    let start = match first.filter(|_| stroke.draws_head(&stroke.start)) {
+        Some(segment) => {
             stroke
                 .start
-                .outline(segment.eval(0.0), -segment.tangents().0, stroke.width)
-        });
-    let end = last
-        .filter(|_| stroke.draws_head(&stroke.end))
-        .and_then(|segment| {
+                .outline(segment.eval(0.0), -segment.tangents().0, stroke.width)?
+        }
+        None => None,
+    };
+    let end = match last.filter(|_| stroke.draws_head(&stroke.end)) {
+        Some(segment) => {
             stroke
                 .end
-                .outline(segment.eval(1.0), segment.tangents().1, stroke.width)
-        });
-    start.into_iter().chain(end)
+                .outline(segment.eval(1.0), segment.tangents().1, stroke.width)?
+        }
+        None => None,
+    };
+    Ok([start, end])
 }
 
 /// Counts the points a render takes from one node.

@@ -423,6 +423,7 @@ fn card_tile(
             e: f64::from(at.x) + offset,
             f: f64::from(at.y),
         },
+        255,
     );
 }
 

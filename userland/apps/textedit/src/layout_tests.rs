@@ -13,7 +13,6 @@ fn layout(width: u32, height: u32, find: bool, digits: u32) -> Layout {
     let scale = Scale::ONE;
     let faces = Faces {
         grid: BitmapFont::for_role(theme.fonts(), TextRole::Monospace, scale),
-        status: BitmapFont::for_role(theme.fonts(), TextRole::Caption, scale),
     };
     Layout::for_window(width, height, theme, scale, faces, find, digits)
 }
@@ -182,7 +181,6 @@ fn the_smallest_window_keeps_a_few_rows_and_columns() {
     for scale in [Scale::ONE, Scale::from_percent(200).expect("a valid scale")] {
         let faces = Faces {
             grid: BitmapFont::for_role(theme.fonts(), TextRole::Monospace, scale),
-            status: BitmapFont::for_role(theme.fonts(), TextRole::Caption, scale),
         };
         let (width, height) = Layout::min_size(theme, scale, faces);
         let layout = Layout::for_window(width, height, theme, scale, faces, false, 0);

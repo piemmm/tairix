@@ -75,7 +75,11 @@ fn an_arc_offset_inwards_keeps_its_centre() {
     arc.to_cubics(|c| quarter = Some(c));
     let quarter = quarter.expect("one cubic");
     let mut pieces: Vec<CubicBez> = Vec::new();
-    offset_cubic(quarter, 3.0, 1e-4, |piece| pieces.push(piece));
+    offset_cubic(quarter, 3.0, 1e-4, |piece| {
+        pieces.push(piece);
+        Ok::<(), ()>(())
+    })
+    .expect("every piece taken");
     for piece in &pieces {
         for step in 0..=8 {
             let point = piece.eval(f64::from(step) / 8.0);

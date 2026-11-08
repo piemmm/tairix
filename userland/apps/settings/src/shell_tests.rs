@@ -23,7 +23,7 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
 use tairix_wallpaper::{DesktopSettings, SettingsKey};
 
-use crate::form::{Composition, FormPlace, Setting};
+use crate::form::{Composition, Setting};
 use crate::frame::{resolve_frame, Actions, Overflow, CONTENT_FLOOR, SIDEBAR_WIDTH};
 use crate::pictures::Chooser;
 use crate::registry::Board;
@@ -35,6 +35,7 @@ use crate::test_support::{
 };
 use crate::volumes::VolumeReading;
 use tairix_controls::testkit::covers;
+use tairix_controls::ColumnPlace;
 
 /// A solid-state disk on an ATA bus.
 const SSD: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata)
@@ -1551,7 +1552,7 @@ fn every_composed_row_is_reserved_what_it_draws_in_the_shared_column() {
         let form = shell.form_for_test().expect("a composed form");
         for width in [360, 520, 900] {
             let bounds = Rect::new(0, 0, width, 20_000);
-            let place = FormPlace {
+            let place = ColumnPlace {
                 bounds,
                 viewport: bounds,
                 scale: Scale::ONE,

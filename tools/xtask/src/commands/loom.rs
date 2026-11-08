@@ -126,6 +126,15 @@ pub const TARGETS: &[Target] = &[
                       one party, never lost and never duplicated",
     },
     Target {
+        package: "tairix-collections",
+        dir: "lib/collections",
+        harness: "loom",
+        build: Build::SwappedAtomics,
+        description: "the shared slice's holder count: the last holder frees the \
+                      block once, after every other holder's use of it, and a \
+                      holder made from another keeps it as the first lets go",
+    },
+    Target {
         package: "tairix-parallel",
         dir: "lib/parallel",
         harness: "loom",

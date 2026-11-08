@@ -266,15 +266,22 @@
 //! The [`form`] module is the form-field family — [`FieldRow`] and
 //! [`FieldGroup`]. A row is one setting: a label, an optional description
 //! line, and a trailing slot holding one real [`Toggle`], [`ComboBox`],
-//! [`Slider`], [`TextField`], [`Button`], [`FlagSet`] of [`Checkbox`]es,
-//! read-only reading, or stated absence of one; a group is the captioned
-//! plate those rows sit on, resolving the one slot column their controls line
-//! up in. The row shares its authority with the control in its slot, so a
-//! denied setting cannot hold an actionable control, and room is given out
-//! control, label, description — a narrowing row loses its words, never the
-//! control the reader came for. It composes the row chrome [`ListRow`] and
-//! [`TableRow`] already draw and restates neither that nor any control; the
-//! pointer lights only the control in a row's slot, never the row.
+//! [`Slider`], [`NumberField`], [`ColourField`], [`TextField`], [`Button`],
+//! [`FlagSet`] of [`Checkbox`]es, read-only reading, or stated absence of
+//! one; a group is the captioned plate those rows sit on, resolving the one
+//! slot column their controls line up in. The row shares its authority with
+//! the control in its slot, so a denied setting cannot hold an actionable
+//! control, and room is given out control, label, description — a narrowing
+//! row loses its words, never the control the reader came for. It composes
+//! the row chrome [`ListRow`] and [`TableRow`] already draw and restates
+//! neither that nor any control; the pointer lights only the control in a
+//! row's slot, never the row. The [`column`](mod@column) module stacks groups down one
+//! plate column — [`FieldColumn`] — and carries the keyboard cursor and the
+//! pointer between them, an open choice list modal across the column.
+//!
+//! The [`colour_field`] module is the colour field — [`ColourField`]: a
+//! colour shown as a swatch and typed in hexadecimal, live where the typing
+//! spells a colour and settled as a number field is.
 //!
 //! The [`picture`] module is the picture choice — [`PictureChoice`]: a
 //! one-of-several setting offered as rounded pictures at one [`Aspect`] with
@@ -323,8 +330,10 @@ pub mod button;
 pub mod chart;
 pub mod checker;
 pub mod collection;
+pub mod colour_field;
 pub mod colour_model;
 pub mod colour_picker;
+pub mod column;
 pub mod combo;
 pub mod damage;
 pub mod decision;
@@ -339,12 +348,15 @@ pub mod picture;
 pub mod place;
 pub mod rail;
 pub mod record;
+pub mod ruler;
 pub mod scroll;
 pub mod scrollbar;
 pub mod selector;
+pub mod settings;
 pub mod shell;
 pub mod stack;
 pub mod state;
+pub mod status;
 pub mod swatch_grid;
 pub mod tabs;
 #[cfg(any(test, feature = "test-support"))]
@@ -365,8 +377,10 @@ pub use collection::{
     PanelAction, PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow, TileLayout,
     TileParts,
 };
+pub use colour_field::{ColourAction, ColourField};
 pub use colour_model::{ChannelSpec, ColourModel, PickerView, MOST_CHANNELS};
 pub use colour_picker::{ColourPicker, PickerOutcome};
+pub use column::{ColumnAction, ColumnLayouts, ColumnPlace, FieldColumn};
 pub use combo::{ComboAction, ComboBox};
 pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
 pub use disclosure::{tree_step, DisclosureSet, TreeKey, TreeRow, TreeStep};
@@ -395,12 +409,16 @@ pub use place::{
 };
 pub use rail::{ActionRail, RailAction};
 pub use record::{EventMark, Fact, FactList, Timeline, TimelineEvent};
+pub use ruler::{Ruler, RulerAxis, RulerStep};
 pub use scroll::{
     wheel_steps, ScrollGeometry, ScrollModel, ScrollOrientation, ScrollRange, ScrollView,
     ThumbSpan, TrackHit, REPEAT_DELAY_NS, REPEAT_INTERVAL_NS, WHEEL_STEP,
 };
 pub use scrollbar::{ScrollAction, ScrollBar, ScrollPart};
 pub use selector::{Checkbox, Radio, SelectorAction, Toggle};
+pub use settings::{
+    SettingsAction, SettingsActions, SettingsFrame, SettingsLayout, SETTINGS_LEAST, SETTINGS_SIZE,
+};
 pub use shell::{
     readout_hover, Notification, NotificationAction, TaskbarItem, TaskbarItemAction, TrayBadge,
     TrayBadgeContent, TrayBadgeTone, TraySignal, TraySignalAction, WindowPreview,
@@ -412,6 +430,7 @@ pub use state::{
     RecoveryState, RenderInvariant, SelectionState, SizeAction, ValidationState,
     WindowActivationState, WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
+pub use status::{StatusBand, StatusSlots, StatusTone};
 pub use swatch_grid::{NumberFace, SwatchAction, SwatchGrid, SwatchMark, WellSpacing};
 pub use tabs::{Tab, TabGroupAbsence, Tabs, TabsAction, TabsOrientation};
 pub use text::{

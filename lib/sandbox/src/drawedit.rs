@@ -15,27 +15,39 @@
 //! style already sent; every count is held to the drawing's bounds and the
 //! tree's shape to what each group declared. A reply that fails any of it
 //! cannot be believed, and retires the worker.
+//!
+//! The pictures a drawing's objects show travel first, each once however
+//! many objects show it: its shape and what the bytes it was read from state,
+//! then its premultiplied pixels and those bytes a frame at a time, each
+//! pixel held to its alpha as it lands. A picture a user places is decoded
+//! the same way, by its content, and travels the same way.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_bezier::{Affine, FillRule, Point};
+use tairix_collections::{try_arc, SharedSlice, SharedStr, TryReserveError};
 use tairix_colour::Rgba;
 use tairix_drawing::limits::{
-    MAX_DASH_ENTRIES, MAX_DEPTH, MAX_FAMILY_BYTES, MAX_GUIDES, MAX_NAME_BYTES, MAX_OBJECTS,
-    MAX_PATH_NODES, MAX_STOPS, MAX_TEXT_BYTES, MAX_TOTAL_PATH_NODES,
+    MAX_DASH_ENTRIES, MAX_DEPTH, MAX_FAMILY_BYTES, MAX_GUIDES, MAX_IMAGE_SIDE,
+    MAX_IMAGE_SOURCE_BYTES, MAX_NAME_BYTES, MAX_OBJECTS, MAX_PATH_NODES, MAX_STOPS, MAX_SWATCHES,
+    MAX_TEXT_BYTES, MAX_TEXT_PATH_NODES, MAX_TEXT_RUNS, MAX_TOTAL_IMAGE_PIXELS,
+    MAX_TOTAL_PATH_NODES,
 };
 use tairix_drawing::numbering::Numbered;
 use tairix_drawing::shape::{EllipseShape, RectShape, StarShape};
-use tairix_drawing::svg::{self, Read, ReadError};
 use tairix_drawing::unkept::Unkept;
+use tairix_drawing::Baseline;
 use tairix_drawing::{
     ArcKind, ArcPart, ArrowShape, Arrowhead, Cap, Children, Contour, Drawing, DrawingError,
     Gradient, GradientKind, Grid, Guide, GuideAxis, Ids, Info, Join, Kind, Node, NodeJoin, Page,
-    Paint, PaintOrder, PathNode, PathShape, Shape, Spread, Stop, Stroke, Style, Text, TextAlign,
-    Unit,
+    Paint, PaintOrder, PathNode, PathShape, Run, RunPaint, RunStyle, Shape, Spread, Stop, Stroke,
+    Style, Text, TextAlign, TextPath, Unit,
 };
-use tairix_util::fallible;
+use tairix_drawing::{Encoding, Image, PlacedPicture, Read, ReadError, Source};
+use tairix_image::{Density, DensityUnit, JpegFrame, Orientation};
+use tairix_raster::{Pixel, Pyramid, Surface, MAX_SURFACE_PIXELS};
+use tairix_util::fallible::{self, try_push};
 
 use crate::host::{Launcher, ParserSandbox, SandboxError, Unbelieved};
 use crate::imagerender::{encode_error, is_document_op, Document, DocumentRefusal, ReplyFailure};
@@ -50,8 +62,14 @@ pub const WORKER_MEMORY: WorkerMemory = WorkerMemory::Documents;
 
 const OP_OPEN: u8 = 30;
 const OP_NEXT: u8 = 31;
+const OP_PICTURE: u8 = 32;
+const OP_PIXELS: u8 = 33;
+const OP_PLACE: u8 = 34;
 const REPLY_OPENED: u8 = 30;
 const REPLY_BATCH: u8 = 31;
+const REPLY_PICTURE: u8 = 32;
+const REPLY_PIXELS: u8 = 33;
+const REPLY_PLACED: u8 = 34;
 
 const RECORD_GRADIENT: u8 = 1;
 const RECORD_STYLE: u8 = 2;
@@ -63,6 +81,20 @@ const RECORD_PATH: u8 = 7;
 const RECORD_CONTOUR: u8 = 8;
 const RECORD_NODES: u8 = 9;
 const RECORD_TEXT: u8 = 10;
+const RECORD_IMAGE: u8 = 11;
+
+/// How a picture's source travels: none, or the encoding it states.
+const SOURCE_NONE: u8 = 0;
+const SOURCE_PNG: u8 = 1;
+const SOURCE_JPEG: u8 = 2;
+const SOURCE_SPRITE: u8 = 3;
+
+/// The most bytes of a picture one reply carries, past its tag: whole
+/// pixels, so every reply of a picture's pixels lands on a pixel's edge.
+const PIXELS_BUDGET: usize = (MAX_FRAME - 1) / PIXEL_BYTES * PIXEL_BYTES;
+
+/// Bytes one premultiplied pixel travels in: red, green, blue, alpha.
+const PIXEL_BYTES: usize = 4;
 
 /// Most path nodes one record carries.
 const NODES_PER_RECORD: usize = 1 << 16;
@@ -77,10 +109,36 @@ const BATCH_HEADER: usize = 2;
 /// The most record bytes one batch carries.
 const BATCH_BUDGET: usize = MAX_FRAME - BATCH_HEADER;
 
-/// The longest record: a text's content and family with its fixed fields,
+/// The most a text's own fixed fields take: its size, weight, posture,
+/// letter spacing and alignment.
+const TEXT_FIELDS_WIRE: usize = 8 + 4 + 1 + 8 + 1;
+
+/// The most a text's baseline takes: its kind, then an origin and a line
+/// height, or a start and a path of contours each its closure, its count and
+/// at least one node.
+const BASELINE_WIRE: usize = {
+    let lines = 16 + 8;
+    let path = 8 + 4 + MAX_TEXT_PATH_NODES * (1 + 4 + NODE_WIRE);
+    1 + if lines > path { lines } else { path }
+};
+
+/// The most one run takes: its span, what it overrides, and every override.
+const RUN_WIRE: usize =
+    2 * 4 + 1 + BYTES_PREFIX + MAX_FAMILY_BYTES + 8 + 4 + 1 + 8 + 8 + 2 * (1 + 4);
+
+/// The longest record: a text's content, family, fields, baseline and runs,
 /// or a run of nodes, whichever is longer.
 const MAX_RECORD: usize = {
-    let text = 1 + COMMON_WIRE + 4 + 2 * BYTES_PREFIX + MAX_TEXT_BYTES + MAX_FAMILY_BYTES + 64;
+    let text = 1
+        + COMMON_WIRE
+        + 4
+        + 2 * BYTES_PREFIX
+        + MAX_TEXT_BYTES
+        + MAX_FAMILY_BYTES
+        + TEXT_FIELDS_WIRE
+        + BASELINE_WIRE
+        + 4
+        + MAX_TEXT_RUNS * RUN_WIRE;
     let nodes = 1 + 4 + NODES_PER_RECORD * NODE_WIRE;
     if text > nodes {
         text
@@ -94,28 +152,6 @@ const MAX_RECORD: usize = {
 const COMMON_WIRE: usize = 1 + BYTES_PREFIX + MAX_NAME_BYTES + 2 + 8 + 6 * 8;
 
 const _: () = assert!(BYTES_PREFIX + MAX_RECORD <= BATCH_BUDGET);
-
-/// A format a drawing is read from.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum DrawFormat {
-    /// SVG.
-    Svg,
-}
-
-impl DrawFormat {
-    const fn to_wire(self) -> u8 {
-        match self {
-            Self::Svg => 1,
-        }
-    }
-
-    const fn from_wire(raw: u8) -> Option<Self> {
-        match raw {
-            1 => Some(Self::Svg),
-            _ => None,
-        }
-    }
-}
 
 /// Why the worker refused to read a drawing, carried typed over the wire.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -134,6 +170,8 @@ pub enum DrawRefusal {
     OutOfMemory,
     /// Records were asked for with no drawing open.
     NotOpen,
+    /// The document is no picture this service reads.
+    NotAPicture,
 }
 
 impl DrawRefusal {
@@ -146,6 +184,7 @@ impl DrawRefusal {
             Self::TooComplex => 5,
             Self::OutOfMemory => 6,
             Self::NotOpen => 7,
+            Self::NotAPicture => 8,
         }
     }
 
@@ -158,13 +197,14 @@ impl DrawRefusal {
             5 => Self::TooComplex,
             6 => Self::OutOfMemory,
             7 => Self::NotOpen,
+            8 => Self::NotAPicture,
             _ => return None,
         })
     }
 
     const fn of_read(error: ReadError) -> Self {
         match error {
-            ReadError::NotText | ReadError::NotSvg => Self::NotADrawing,
+            ReadError::Unrecognised => Self::NotADrawing,
             ReadError::Malformed => Self::Malformed,
             ReadError::TooComplex => Self::TooComplex,
             ReadError::OutOfMemory => Self::OutOfMemory,
@@ -190,6 +230,7 @@ impl core::fmt::Display for DrawRefusal {
             Self::TooComplex => "the drawing holds more than can be opened",
             Self::OutOfMemory => "there was not enough memory to read the drawing",
             Self::NotOpen => "no drawing is open",
+            Self::NotAPicture => "not a picture that can be placed",
         })
     }
 }
@@ -243,6 +284,18 @@ impl From<WireError> for DrawFailure {
     }
 }
 
+impl From<TryReserveError> for DrawFailure {
+    fn from(error: TryReserveError) -> Self {
+        DrawingError::from(error).into()
+    }
+}
+
+impl From<alloc::collections::TryReserveError> for DrawFailure {
+    fn from(_: alloc::collections::TryReserveError) -> Self {
+        Self::NoMemory
+    }
+}
+
 impl From<DrawingError> for DrawFailure {
     /// A value the drawing refuses was never one an honest worker sends.
     fn from(error: DrawingError) -> Self {
@@ -270,6 +323,43 @@ impl core::fmt::Display for DrawFailure {
 pub struct DrawEditService {
     document: Option<Document>,
     reading: Option<Reading>,
+    /// The pictures of the drawing or the picture last opened, by number.
+    pictures: Vec<Shown>,
+}
+
+/// A picture that travels: its pixels, and the bytes it was read from.
+#[derive(Clone)]
+struct Shown {
+    pixels: Held,
+    source: Option<Source>,
+}
+
+/// Where a travelling picture's pixels are held.
+#[derive(Clone)]
+enum Held {
+    /// Shared with the drawing that shows them.
+    Pyramid(Arc<Pyramid>),
+    /// A placed picture's own, which nothing here draws.
+    Surface(Arc<Surface>),
+}
+
+impl Shown {
+    fn pixels(&self) -> &Surface {
+        match &self.pixels {
+            Held::Pyramid(pyramid) => pyramid.base(),
+            Held::Surface(surface) => surface,
+        }
+    }
+
+    /// The bytes it travels as: its pixels, then its source.
+    fn length(&self) -> u64 {
+        let pixels = self.pixels().pixels().len() as u64 * PIXEL_BYTES as u64;
+        pixels
+            + self
+                .source
+                .as_ref()
+                .map_or(0, |source| source.bytes.len() as u64)
+    }
 }
 
 /// A drawing being sent: its records, each length-prefixed, where each one
@@ -284,10 +374,14 @@ impl Service for DrawEditService {
         let served = match request.first().copied() {
             Some(op) if is_document_op(op) => {
                 self.reading = None;
+                self.pictures.clear();
                 Document::serve(request, &mut self.document).map_err(DocumentRefusal::to_wire)
             }
             Some(OP_OPEN) => self.open(request).map_err(DrawRefusal::to_wire),
             Some(OP_NEXT) => self.next(request).map_err(DrawRefusal::to_wire),
+            Some(OP_PLACE) => self.place(request).map_err(DrawRefusal::to_wire),
+            Some(OP_PICTURE) => self.picture(request).map_err(DrawRefusal::to_wire),
+            Some(OP_PIXELS) => self.pixels(request).map_err(DrawRefusal::to_wire),
             _ => Err(DrawRefusal::MalformedRequest.to_wire()),
         };
         served.unwrap_or_else(encode_error)
@@ -295,33 +389,120 @@ impl Service for DrawEditService {
 }
 
 impl DrawEditService {
-    /// `OP_OPEN`: read the document handed over as the format named, and
-    /// answer the drawing's page and settings, keeping its records to send.
+    /// `OP_OPEN`: read the document handed over, in whichever format its
+    /// content is, and answer the drawing's page and settings, keeping its
+    /// records to send.
     fn open(&mut self, request: &[u8]) -> Result<Vec<u8>, DrawRefusal> {
         self.reading = None;
-        let mut r = Reader::new(request);
-        let format = r
-            .whole(|r| {
-                r.u8()?;
-                r.u8()
-            })
-            .ok()
-            .and_then(DrawFormat::from_wire)
-            .ok_or(DrawRefusal::MalformedRequest)?;
+        self.pictures.clear();
+        let bytes = self.document_bytes(request)?;
+        let read = tairix_drawing::read(&bytes, &mut Ids::new()).map_err(DrawRefusal::of_read)?;
+        drop(bytes);
+        let (records, pictures) = records_of(&read.drawing)?;
+        let mut w = Writer::new();
+        w.u8(REPLY_OPENED);
+        put_header(&mut w, &read, pictures.len());
+        self.reading = Some(Reading { records, sent: 0 });
+        self.pictures = pictures;
+        Ok(w.finish())
+    }
+
+    /// The bytes of the complete document handed over, for a request of its
+    /// tag alone.
+    fn document_bytes(&mut self, request: &[u8]) -> Result<Vec<u8>, DrawRefusal> {
+        if request.len() != 1 {
+            return Err(DrawRefusal::MalformedRequest);
+        }
         let document = self.document.take().ok_or(DrawRefusal::NoDocument)?;
         if !document.is_complete() {
             return Err(DrawRefusal::NoDocument);
         }
-        let bytes = document.into_bytes();
-        let read = match format {
-            DrawFormat::Svg => svg::read(&bytes, &mut Ids::new()).map_err(DrawRefusal::of_read)?,
-        };
+        Ok(document.into_bytes())
+    }
+
+    /// `OP_PLACE`: decode the document handed over as a picture to place,
+    /// by its content, and answer the size it states for its pixels, keeping
+    /// it as picture nought.
+    fn place(&mut self, request: &[u8]) -> Result<Vec<u8>, DrawRefusal> {
+        self.reading = None;
+        self.pictures.clear();
+        let bytes = self.document_bytes(request)?;
+        let placed = tairix_drawing::decode_placed(&bytes).map_err(|error| match error {
+            ReadError::Unrecognised => DrawRefusal::NotAPicture,
+            other => DrawRefusal::of_read(other),
+        })?;
         drop(bytes);
-        let records = records_of(&read.drawing)?;
+        let shown = Shown {
+            pixels: Held::Surface(try_arc(placed.pixels).map_err(|_| DrawRefusal::OutOfMemory)?),
+            source: placed.source,
+        };
+        if !fallible::push(&mut self.pictures, shown) {
+            return Err(DrawRefusal::OutOfMemory);
+        }
         let mut w = Writer::new();
-        w.u8(REPLY_OPENED);
-        put_header(&mut w, &read);
-        self.reading = Some(Reading { records, sent: 0 });
+        w.u8(REPLY_PLACED);
+        put_point(&mut w, placed.natural);
+        Ok(w.finish())
+    }
+
+    /// The picture a request names after its tag, and what follows.
+    fn named<'r>(&self, request: &'r [u8]) -> Result<(&Shown, Reader<'r>), DrawRefusal> {
+        let mut r = Reader::new(request.get(1..).ok_or(DrawRefusal::MalformedRequest)?);
+        let index = r.u32().map_err(|_| DrawRefusal::MalformedRequest)?;
+        let shown = usize::try_from(index)
+            .ok()
+            .and_then(|index| self.pictures.get(index))
+            .ok_or(DrawRefusal::MalformedRequest)?;
+        Ok((shown, r))
+    }
+
+    /// `OP_PICTURE`: a picture's size and what its source states.
+    fn picture(&self, request: &[u8]) -> Result<Vec<u8>, DrawRefusal> {
+        let (shown, r) = self.named(request)?;
+        if !r.is_exhausted() {
+            return Err(DrawRefusal::MalformedRequest);
+        }
+        let mut w = Writer::new();
+        w.u8(REPLY_PICTURE);
+        w.u32(shown.pixels().width());
+        w.u32(shown.pixels().height());
+        put_source(&mut w, shown.source.as_ref());
+        Ok(w.finish())
+    }
+
+    /// `OP_PIXELS`: a picture's bytes from the offset asked, as many as a
+    /// frame holds — its premultiplied pixels, then its source.
+    fn pixels(&self, request: &[u8]) -> Result<Vec<u8>, DrawRefusal> {
+        let (shown, mut r) = self.named(request)?;
+        let offset = r.u64().map_err(|_| DrawRefusal::MalformedRequest)?;
+        if !r.is_exhausted() || offset >= shown.length() {
+            return Err(DrawRefusal::MalformedRequest);
+        }
+        let count = usize::try_from(shown.length() - offset)
+            .unwrap_or(usize::MAX)
+            .min(PIXELS_BUDGET);
+        let mut w = Writer::try_with_capacity(1 + count).ok_or(DrawRefusal::OutOfMemory)?;
+        w.u8(REPLY_PIXELS);
+        let pixels = shown.pixels().pixels();
+        let pixel_bytes = pixels.len() * PIXEL_BYTES;
+        let start = usize::try_from(offset).map_err(|_| DrawRefusal::MalformedRequest)?;
+        let end = start + count;
+        let mut at = start;
+        while at < end.min(pixel_bytes) {
+            let pixel = pixels[at / PIXEL_BYTES];
+            let bytes = [pixel.r, pixel.g, pixel.b, pixel.a];
+            let within = at % PIXEL_BYTES;
+            let take = (PIXEL_BYTES - within).min(end - at);
+            w.raw(&bytes[within..within + take]);
+            at += take;
+        }
+        if end > pixel_bytes {
+            let source = shown
+                .source
+                .as_ref()
+                .map_or(&[][..], |source| &*source.bytes);
+            w.raw(&source[at - pixel_bytes..end - pixel_bytes]);
+        }
         Ok(w.finish())
     }
 
@@ -356,30 +537,40 @@ impl DrawEditService {
     }
 }
 
-/// Read the document handed over last as `format`, and rebuild the drawing
-/// it comes to, every value checked, issuing its objects' identities from
-/// `ids`.
+/// Read the document handed over last, `handed` bytes long — an SVG
+/// document or a RISC OS Draw file, told apart by its content — and rebuild
+/// the drawing it comes to, every value checked, issuing its objects'
+/// identities from `ids`.
 ///
 /// # Errors
 ///
 /// [`DrawFailure`]: the sandbox failed, the worker refused, or a reply could
-/// not be believed.
+/// not be believed — among them pictures whose sources together are longer
+/// than the document they were read from.
 pub fn read_drawing<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
-    format: DrawFormat,
+    handed: u64,
     ids: &mut Ids,
 ) -> Result<Read, DrawFailure> {
     sandbox.ask(|sandbox| {
-        let reply = sandbox
-            .request(&[OP_OPEN, format.to_wire()])
-            .map_err(DrawFailure::Sandbox)?;
+        let reply = sandbox.request(&[OP_OPEN]).map_err(DrawFailure::Sandbox)?;
         let mut r = Reader::new(&reply);
         DrawFailure::expect_tag(&mut r, REPLY_OPENED)?;
         let header = take_header(&mut r)?;
         if !r.is_exhausted() {
             return Err(DrawFailure::ReplyMalformed);
         }
-        let mut builder = Builder::new(header, ids);
+        let mut pictures = Vec::new();
+        if !fallible::reserve(&mut pictures, header.pictures) {
+            return Err(DrawFailure::NoMemory);
+        }
+        let mut allowance = Allowance::of(handed);
+        for index in 0..header.pictures {
+            let (pixels, source) = receive_picture(sandbox, index, &mut allowance)?;
+            let pyramid = Pyramid::new(pixels).ok_or(DrawFailure::NoMemory)?;
+            pictures.push((try_arc(pyramid)?, source));
+        }
+        let mut builder = Builder::new(header, pictures, ids);
         loop {
             let reply = sandbox.request(&[OP_NEXT]).map_err(DrawFailure::Sandbox)?;
             if builder.batch(&reply)? {
@@ -387,6 +578,189 @@ pub fn read_drawing<L: Launcher, S: tairix_log::Sink>(
             }
         }
     })
+}
+
+/// Decode the document handed over last, `handed` bytes long — any still
+/// picture, by its content — as a picture to place in a drawing, its pixels
+/// checked as they arrive.
+///
+/// # Errors
+///
+/// [`DrawFailure`]: the sandbox failed, the worker refused, or a reply could
+/// not be believed — among them a source longer than the document.
+pub fn read_placed<L: Launcher, S: tairix_log::Sink>(
+    sandbox: &mut ParserSandbox<L, S>,
+    handed: u64,
+) -> Result<PlacedPicture, DrawFailure> {
+    sandbox.ask(|sandbox| {
+        let reply = sandbox.request(&[OP_PLACE]).map_err(DrawFailure::Sandbox)?;
+        let mut r = Reader::new(&reply);
+        DrawFailure::expect_tag(&mut r, REPLY_PLACED)?;
+        let natural = take_point(&mut r)?;
+        if !r.is_exhausted() || !tairix_drawing::placeable(natural) {
+            return Err(DrawFailure::ReplyMalformed);
+        }
+        let (pixels, source) = receive_picture(sandbox, 0, &mut Allowance::of(handed))?;
+        // A picture placed is kept with its bytes only as a PNG or a JPEG.
+        if let Some(Source {
+            encoding: Encoding::Sprite { .. },
+            ..
+        }) = source
+        {
+            return Err(DrawFailure::ReplyMalformed);
+        }
+        Ok(PlacedPicture {
+            pixels,
+            source,
+            natural,
+        })
+    })
+}
+
+/// What the pictures of one read may yet hold: their pixels, as a drawing's
+/// may together, and the bytes they were read from, which are parts of the
+/// one document handed over and so together no longer than it.
+struct Allowance {
+    pixels: u64,
+    bytes: u64,
+}
+
+impl Allowance {
+    /// All a read of a document `handed` bytes long may hold.
+    const fn of(handed: u64) -> Self {
+        Self {
+            pixels: MAX_TOTAL_IMAGE_PIXELS,
+            bytes: handed,
+        }
+    }
+}
+
+/// Picture `index` of what the worker opened, its pixels each held to their
+/// alpha as they land and its size and source to what the read's pictures
+/// may yet hold, `allowance`.
+fn receive_picture<L: Launcher, S: tairix_log::Sink>(
+    sandbox: &mut ParserSandbox<L, S>,
+    index: usize,
+    allowance: &mut Allowance,
+) -> Result<(Surface, Option<Source>), DrawFailure> {
+    let number = u32::try_from(index).map_err(|_| DrawFailure::ReplyMalformed)?;
+    let mut ask = [0; 13];
+    ask[0] = OP_PICTURE;
+    ask[1..5].copy_from_slice(&number.to_le_bytes());
+    let reply = sandbox.request(&ask[..5]).map_err(DrawFailure::Sandbox)?;
+    let mut r = Reader::new(&reply);
+    DrawFailure::expect_tag(&mut r, REPLY_PICTURE)?;
+    let (width, height) = (r.u32()?, r.u32()?);
+    let (encoding, length) = take_source(&mut r)?;
+    let count = u64::from(width) * u64::from(height);
+    let sized = (1..=MAX_IMAGE_SIDE).contains(&width)
+        && (1..=MAX_IMAGE_SIDE).contains(&height)
+        && count <= MAX_SURFACE_PIXELS as u64
+        && count <= allowance.pixels
+        && length <= allowance.bytes;
+    if !r.is_exhausted() || !sized {
+        return Err(DrawFailure::ReplyMalformed);
+    }
+    allowance.pixels -= count;
+    allowance.bytes -= length;
+    let mut pixels = Surface::new(width, height).ok_or(DrawFailure::NoMemory)?;
+    let length = usize::try_from(length).map_err(|_| DrawFailure::ReplyMalformed)?;
+    let mut bytes = fallible::zeroed(length).ok_or(DrawFailure::NoMemory)?;
+    let pixel_bytes = pixels.pixels().len() * PIXEL_BYTES;
+    let total = pixel_bytes + length;
+    ask[0] = OP_PIXELS;
+    let mut at = 0;
+    while at < total {
+        ask[5..13].copy_from_slice(&(at as u64).to_le_bytes());
+        let reply = sandbox.request(&ask).map_err(DrawFailure::Sandbox)?;
+        let mut r = Reader::new(&reply);
+        DrawFailure::expect_tag(&mut r, REPLY_PIXELS)?;
+        let chunk = r.take(r.remaining())?;
+        // Every chunk but the last fills a frame, so a picture comes in as few
+        // exchanges as its size allows, and whole pixels arrive whole.
+        if chunk.len() != (total - at).min(PIXELS_BUDGET) {
+            return Err(DrawFailure::ReplyMalformed);
+        }
+        let end = at + chunk.len();
+        let (into_pixels, into_source) =
+            chunk.split_at(pixel_bytes.saturating_sub(at).min(chunk.len()));
+        if !into_pixels.is_empty() {
+            let first = at / PIXEL_BYTES;
+            let landed = pixels.pixels_mut().get_mut(first..).unwrap_or_default();
+            for (slot, &[r, g, b, a]) in landed
+                .iter_mut()
+                .zip(into_pixels.as_chunks::<PIXEL_BYTES>().0)
+            {
+                // Premultiplied, no channel exceeds its alpha.
+                *slot = Pixel {
+                    r: r.min(a),
+                    g: g.min(a),
+                    b: b.min(a),
+                    a,
+                };
+            }
+        }
+        if !into_source.is_empty() {
+            let from = (at + into_pixels.len()) - pixel_bytes;
+            bytes[from..from + into_source.len()].copy_from_slice(into_source);
+        }
+        at = end;
+    }
+    let source = match encoding {
+        Some(encoding) => Some(Source {
+            encoding,
+            bytes: SharedSlice::try_from_vec(bytes)?,
+        }),
+        None => None,
+    };
+    Ok((pixels, source))
+}
+
+/// What a picture's source states, and how many bytes it is.
+fn take_source(r: &mut Reader<'_>) -> Result<(Option<Encoding>, u64), DrawFailure> {
+    let encoding = match r.u8()? {
+        SOURCE_NONE => None,
+        SOURCE_PNG => Some(Encoding::Png),
+        SOURCE_JPEG => {
+            let stored = (r.u32()?, r.u32()?);
+            let components = r.u8()?;
+            let progressive = take_flag(r)?;
+            let orientation =
+                Orientation::from_tag(u32::from(r.u8()?)).ok_or(DrawFailure::ReplyMalformed)?;
+            let density = if take_flag(r)? {
+                let across = (r.u32()?, r.u32()?);
+                let down = (r.u32()?, r.u32()?);
+                let unit = take_choice(
+                    r,
+                    &[
+                        DensityUnit::Aspect,
+                        DensityUnit::Inch,
+                        DensityUnit::Centimetre,
+                        DensityUnit::Metre,
+                    ],
+                )?;
+                Some(Density::new(across, down, unit).ok_or(DrawFailure::ReplyMalformed)?)
+            } else {
+                None
+            };
+            Some(Encoding::Jpeg(JpegFrame {
+                stored,
+                components,
+                progressive,
+                orientation,
+                density,
+            }))
+        }
+        SOURCE_SPRITE => Some(Encoding::Sprite {
+            eig: (r.u8()?, r.u8()?),
+        }),
+        _ => return Err(DrawFailure::ReplyMalformed),
+    };
+    let length = r.u64()?;
+    if encoding.is_some() == (length == 0) || length > MAX_IMAGE_SOURCE_BYTES as u64 {
+        return Err(DrawFailure::ReplyMalformed);
+    }
+    Ok((encoding, length))
 }
 
 // The worker's half: a drawing as records.
@@ -421,7 +795,46 @@ fn count(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-fn put_header(w: &mut Writer, read: &Read) {
+/// What a picture's source states, and how many bytes it is.
+fn put_source(w: &mut Writer, source: Option<&Source>) {
+    let Some(source) = source else {
+        w.u8(SOURCE_NONE);
+        w.u64(0);
+        return;
+    };
+    match source.encoding {
+        Encoding::Png => w.u8(SOURCE_PNG),
+        Encoding::Jpeg(frame) => {
+            w.u8(SOURCE_JPEG);
+            w.u32(frame.stored.0);
+            w.u32(frame.stored.1);
+            w.u8(frame.components);
+            w.u8(u8::from(frame.progressive));
+            w.u8(u8::try_from(frame.orientation.tag()).unwrap_or(1));
+            w.u8(u8::from(frame.density.is_some()));
+            if let Some(density) = frame.density {
+                for (numerator, denominator) in [density.across(), density.down()] {
+                    w.u32(numerator);
+                    w.u32(denominator);
+                }
+                w.u8(match density.unit() {
+                    DensityUnit::Aspect => 0,
+                    DensityUnit::Inch => 1,
+                    DensityUnit::Centimetre => 2,
+                    DensityUnit::Metre => 3,
+                });
+            }
+        }
+        Encoding::Sprite { eig } => {
+            w.u8(SOURCE_SPRITE);
+            w.u8(eig.0);
+            w.u8(eig.1);
+        }
+    }
+    w.u64(source.bytes.len() as u64);
+}
+
+fn put_header(w: &mut Writer, read: &Read, pictures: usize) {
     let drawing = &read.drawing;
     let page = drawing.page();
     put_f64(w, page.width);
@@ -442,8 +855,14 @@ fn put_header(w: &mut Writer, read: &Read) {
     }
     put_text(w, drawing.info().title.as_deref());
     put_text(w, drawing.info().description.as_deref());
+    w.u32(count(drawing.swatches().len()));
+    for &swatch in drawing.swatches() {
+        put_rgba(w, swatch);
+    }
+    w.u32(drawing.resolution());
     w.u32(read.unkept.bits());
     w.u32(count(drawing.layers().len()));
+    w.u32(count(pictures));
 }
 
 /// Records, each length-prefixed, and where each one ends.
@@ -479,13 +898,22 @@ impl Records {
     }
 }
 
-/// Every record `drawing` comes to: its gradients, then its styles, then
-/// its tree depth first, a group's clip before its children.
-fn records_of(drawing: &Drawing) -> Result<Records, DrawRefusal> {
+/// Every record `drawing` comes to — its gradients, then its styles, then
+/// its tree depth first, a group's clip before its children — and the
+/// pictures its objects show, by the number the records name them by.
+fn records_of(drawing: &Drawing) -> Result<(Records, Vec<Shown>), DrawRefusal> {
     let mut styles = Vec::new();
     let mut gradients = Vec::new();
+    let mut pictures = Vec::new();
     let mut failed = false;
     let mut collect = |node: &Node| {
+        if let Kind::Image { image } = node.kind() {
+            let shown = Shown {
+                pixels: Held::Pyramid(image.pyramid().clone()),
+                source: image.source().cloned(),
+            };
+            failed |= !fallible::push(&mut pictures, (Arc::as_ptr(image.pyramid()).addr(), shown));
+        }
         if let Some(style) = node.style() {
             failed |= !fallible::push(&mut styles, (Arc::as_ptr(style).addr(), style.clone()));
             for paint in [&style.fill, &style.stroke.paint] {
@@ -512,6 +940,7 @@ fn records_of(drawing: &Drawing) -> Result<Records, DrawRefusal> {
         },
         gradients: Numbered::of(gradients).map_err(DrawRefusal::of_drawing)?,
         styles: Numbered::of(styles).map_err(DrawRefusal::of_drawing)?,
+        pictures: Numbered::of(pictures).map_err(DrawRefusal::of_drawing)?,
     };
     for gradient in sender.gradients.items() {
         sender.records.record(|w| {
@@ -526,7 +955,7 @@ fn records_of(drawing: &Drawing) -> Result<Records, DrawRefusal> {
     for layer in drawing.layers().iter() {
         sender.node(layer)?;
     }
-    Ok(sender.records)
+    Ok((sender.records, sender.pictures.into_items()))
 }
 
 /// Call `visit` on `node` and everything within it, clips included.
@@ -546,6 +975,7 @@ struct Sender {
     records: Records,
     gradients: Numbered<usize, Arc<Gradient>>,
     styles: Numbered<usize, Arc<Style>>,
+    pictures: Numbered<usize, Shown>,
 }
 
 impl Sender {
@@ -563,6 +993,23 @@ impl Sender {
             .number(Arc::as_ptr(style).addr())
             .ok_or(DrawRefusal::OutOfMemory)?;
         Ok(count(number))
+    }
+
+    /// A picture's object: its common fields, the number of the picture it
+    /// shows and the rectangle it shows it over.
+    fn image(&mut self, node: &Node, image: &Image) -> Result<(), DrawRefusal> {
+        let number = self
+            .pictures
+            .number(Arc::as_ptr(image.pyramid()).addr())
+            .ok_or(DrawRefusal::OutOfMemory)?;
+        let place = image.place();
+        self.record(|w| {
+            w.u8(RECORD_IMAGE);
+            put_common(w, node);
+            w.u32(count(number));
+            put_point(w, place.min);
+            put_point(w, place.max);
+        })
     }
 
     fn node(&mut self, node: &Arc<Node>) -> Result<(), DrawRefusal> {
@@ -642,29 +1089,54 @@ impl Sender {
                     }
                 }
             }
+            Kind::Image { image } => self.image(node, image),
             Kind::Text { text, style } => {
                 let style = self.style_number(style)?;
-                self.record(|w| {
-                    w.u8(RECORD_TEXT);
-                    put_common(w, node);
-                    w.u32(style);
-                    w.str(&text.content);
-                    w.str(&text.family);
-                    put_f64(w, text.size);
-                    w.u32(u32::from(text.weight));
-                    w.u8(u8::from(text.italic));
-                    put_f64(w, text.letter_spacing);
-                    put_f64(w, text.line_height);
-                    w.u8(match text.align {
-                        TextAlign::Start => 0,
-                        TextAlign::Middle => 1,
-                        TextAlign::End => 2,
-                    });
-                    put_point(w, text.origin);
-                })
+                self.record(|w| put_lettering(w, node, style, text))
             }
         }
     }
+}
+
+/// A text's record: its fields, its baseline and its runs.
+fn put_lettering(w: &mut Writer, node: &Node, style: u32, text: &Text) {
+    w.u8(RECORD_TEXT);
+    put_common(w, node);
+    w.u32(style);
+    w.str(&text.content);
+    w.str(&text.family);
+    put_f64(w, text.size);
+    w.u32(u32::from(text.weight));
+    w.u8(u8::from(text.italic));
+    put_f64(w, text.letter_spacing);
+    w.u8(match text.align {
+        TextAlign::Start => 0,
+        TextAlign::Middle => 1,
+        TextAlign::End => 2,
+    });
+    match &text.baseline {
+        Baseline::Lines {
+            origin,
+            line_height,
+        } => {
+            w.u8(0);
+            put_point(w, *origin);
+            put_f64(w, *line_height);
+        }
+        Baseline::Path(along) => {
+            w.u8(1);
+            put_f64(w, along.start);
+            w.u32(count(along.path.contours.len()));
+            for contour in &along.path.contours {
+                w.u8(u8::from(contour.closed));
+                w.u32(count(contour.nodes.len()));
+                for node in &contour.nodes {
+                    put_node(w, node);
+                }
+            }
+        }
+    }
+    put_runs(w, &text.runs);
 }
 
 fn put_common(w: &mut Writer, node: &Node) {
@@ -679,18 +1151,82 @@ fn put_nodes(w: &mut Writer, nodes: &[PathNode]) {
     w.u8(RECORD_NODES);
     w.u32(count(nodes.len()));
     for node in nodes {
-        put_point(w, node.point);
-        for handle in [node.before, node.after] {
-            w.u8(u8::from(handle.is_some()));
-            if let Some(handle) = handle {
-                put_point(w, handle);
+        put_node(w, node);
+    }
+}
+
+fn put_node(w: &mut Writer, node: &PathNode) {
+    put_point(w, node.point);
+    for handle in [node.before, node.after] {
+        w.u8(u8::from(handle.is_some()));
+        if let Some(handle) = handle {
+            put_point(w, handle);
+        }
+    }
+    w.u8(match node.join {
+        NodeJoin::Corner => 0,
+        NodeJoin::Smooth => 1,
+        NodeJoin::Symmetric => 2,
+    });
+}
+
+/// Which of a run's overrides follow its mask, in the order they follow.
+const RUN_FAMILY: u8 = 1;
+const RUN_SIZE: u8 = 1 << 1;
+const RUN_WEIGHT: u8 = 1 << 2;
+const RUN_ITALIC: u8 = 1 << 3;
+const RUN_SPACING: u8 = 1 << 4;
+const RUN_SHIFT: u8 = 1 << 5;
+const RUN_FILL: u8 = 1 << 6;
+const RUN_STROKE: u8 = 1 << 7;
+
+fn put_runs(w: &mut Writer, runs: &[Run]) {
+    w.u32(count(runs.len()));
+    for run in runs {
+        w.u32(count(run.start));
+        w.u32(count(run.end));
+        let style = &run.style;
+        let mask = [
+            (style.family.is_some(), RUN_FAMILY),
+            (style.size.is_some(), RUN_SIZE),
+            (style.weight.is_some(), RUN_WEIGHT),
+            (style.italic.is_some(), RUN_ITALIC),
+            (style.letter_spacing.is_some(), RUN_SPACING),
+            (style.baseline_shift.is_some(), RUN_SHIFT),
+            (style.fill.is_some(), RUN_FILL),
+            (style.stroke.is_some(), RUN_STROKE),
+        ]
+        .iter()
+        .filter(|(set, _)| *set)
+        .fold(0, |mask, (_, bit)| mask | bit);
+        w.u8(mask);
+        if let Some(family) = &style.family {
+            w.str(family);
+        }
+        if let Some(size) = style.size {
+            put_f64(w, size);
+        }
+        if let Some(weight) = style.weight {
+            w.u32(u32::from(weight));
+        }
+        if let Some(italic) = style.italic {
+            w.u8(u8::from(italic));
+        }
+        for length in [style.letter_spacing, style.baseline_shift]
+            .into_iter()
+            .flatten()
+        {
+            put_f64(w, length);
+        }
+        for paint in [style.fill, style.stroke].into_iter().flatten() {
+            match paint {
+                RunPaint::None => w.u8(0),
+                RunPaint::Colour(colour) => {
+                    w.u8(1);
+                    put_rgba(w, colour);
+                }
             }
         }
-        w.u8(match node.join {
-            NodeJoin::Corner => 0,
-            NodeJoin::Smooth => 1,
-            NodeJoin::Symmetric => 2,
-        });
     }
 }
 
@@ -835,6 +1371,84 @@ fn take_rgba(r: &mut Reader<'_>) -> Result<Rgba, WireError> {
     Ok(Rgba::new(red, green, blue, alpha))
 }
 
+fn take_node(r: &mut Reader<'_>) -> Result<PathNode, WireError> {
+    let point = take_point(r)?;
+    let mut handle = || -> Result<Option<Point>, WireError> {
+        if take_flag(r)? {
+            Ok(Some(take_point(r)?))
+        } else {
+            Ok(None)
+        }
+    };
+    let before = handle()?;
+    let after = handle()?;
+    Ok(PathNode {
+        point,
+        before,
+        after,
+        join: take_choice(
+            r,
+            &[NodeJoin::Corner, NodeJoin::Smooth, NodeJoin::Symmetric],
+        )?,
+    })
+}
+
+fn take_weight(r: &mut Reader<'_>) -> Result<u16, WireError> {
+    u16::try_from(r.u32()?).map_err(|_| WireError::Malformed)
+}
+
+/// A text's runs, each only as far as its shape is checked: the text checks
+/// what they set.
+fn take_runs(r: &mut Reader<'_>) -> Result<SharedSlice<Run>, DrawFailure> {
+    let runs = take_count(r, MAX_TEXT_RUNS)?;
+    let mut held = Vec::new();
+    if !fallible::reserve(&mut held, runs) {
+        return Err(DrawFailure::NoMemory);
+    }
+    for _ in 0..runs {
+        let start = take_count(r, MAX_TEXT_BYTES)?;
+        let end = take_count(r, MAX_TEXT_BYTES)?;
+        let mask = r.u8()?;
+        let has = |bit: u8| mask & bit != 0;
+        let family = if has(RUN_FAMILY) {
+            Some(take_str(r, MAX_FAMILY_BYTES)?)
+        } else {
+            None
+        };
+        let size = has(RUN_SIZE).then(|| take_f64(r)).transpose()?;
+        let weight = has(RUN_WEIGHT).then(|| take_weight(r)).transpose()?;
+        let italic = has(RUN_ITALIC).then(|| take_flag(r)).transpose()?;
+        let letter_spacing = has(RUN_SPACING).then(|| take_f64(r)).transpose()?;
+        let baseline_shift = has(RUN_SHIFT).then(|| take_f64(r)).transpose()?;
+        let fill = has(RUN_FILL).then(|| take_run_paint(r)).transpose()?;
+        let stroke = has(RUN_STROKE).then(|| take_run_paint(r)).transpose()?;
+        let style = RunStyle {
+            family,
+            size,
+            weight,
+            italic,
+            letter_spacing,
+            baseline_shift,
+            fill,
+            stroke,
+        };
+        held.push(Run {
+            start,
+            end,
+            style: try_arc(style)?,
+        });
+    }
+    Ok(SharedSlice::try_from_vec(held)?)
+}
+
+fn take_run_paint(r: &mut Reader<'_>) -> Result<RunPaint, WireError> {
+    match r.u8()? {
+        0 => Ok(RunPaint::None),
+        1 => Ok(RunPaint::Colour(take_rgba(r)?)),
+        _ => Err(WireError::Malformed),
+    }
+}
+
 fn take_flag(r: &mut Reader<'_>) -> Result<bool, WireError> {
     match r.u8()? {
         0 => Ok(false),
@@ -843,14 +1457,12 @@ fn take_flag(r: &mut Reader<'_>) -> Result<bool, WireError> {
     }
 }
 
-fn take_str(r: &mut Reader<'_>, cap: usize) -> Result<Arc<str>, WireError> {
-    let bytes = r.bytes(cap)?;
-    core::str::from_utf8(bytes)
-        .map(Arc::from)
-        .map_err(|_| WireError::Malformed)
+fn take_str(r: &mut Reader<'_>, cap: usize) -> Result<SharedStr, DrawFailure> {
+    let text = core::str::from_utf8(r.bytes(cap)?).map_err(|_| DrawFailure::ReplyMalformed)?;
+    Ok(SharedStr::try_from_str(text)?)
 }
 
-fn take_text(r: &mut Reader<'_>, cap: usize) -> Result<Option<Arc<str>>, WireError> {
+fn take_text(r: &mut Reader<'_>, cap: usize) -> Result<Option<SharedStr>, DrawFailure> {
     if take_flag(r)? {
         take_str(r, cap).map(Some)
     } else {
@@ -881,8 +1493,12 @@ struct Header {
     grid: Grid,
     guides: Vec<Guide>,
     info: Info,
+    swatches: Vec<Rgba>,
+    resolution: u32,
     unkept: Unkept,
     layers: usize,
+    /// How many pictures its objects show.
+    pictures: usize,
 }
 
 fn take_header(r: &mut Reader<'_>) -> Result<Header, DrawFailure> {
@@ -920,21 +1536,34 @@ fn take_header(r: &mut Reader<'_>) -> Result<Header, DrawFailure> {
         title: take_text(r, MAX_TEXT_BYTES)?,
         description: take_text(r, MAX_TEXT_BYTES)?,
     };
+    let swatch_count = take_count(r, MAX_SWATCHES)?;
+    let mut swatches = Vec::new();
+    if !fallible::reserve(&mut swatches, swatch_count) {
+        return Err(DrawFailure::NoMemory);
+    }
+    for _ in 0..swatch_count {
+        swatches.push(take_rgba(r)?);
+    }
+    let resolution = r.u32()?;
     let unkept = Unkept::from_bits(r.u32()?).ok_or(DrawFailure::ReplyMalformed)?;
     let layers = take_count(r, MAX_OBJECTS)?;
+    let pictures = take_count(r, MAX_OBJECTS)?;
     Ok(Header {
         page,
         grid,
         guides,
         info,
+        swatches,
+        resolution,
         unkept,
         layers,
+        pictures,
     })
 }
 
 /// An object's fields every kind has.
 struct Common {
-    name: Option<Arc<str>>,
+    name: Option<SharedStr>,
     visible: bool,
     locked: bool,
     opacity: f64,
@@ -942,7 +1571,7 @@ struct Common {
 }
 
 impl Common {
-    fn take(r: &mut Reader<'_>) -> Result<Self, WireError> {
+    fn take(r: &mut Reader<'_>) -> Result<Self, DrawFailure> {
         Ok(Self {
             name: take_text(r, MAX_NAME_BYTES)?,
             visible: take_flag(r)?,
@@ -960,7 +1589,7 @@ impl Common {
             .with_transform(self.transform)?
             .with_visible(self.visible)
             .with_locked(self.locked);
-        Ok(Arc::new(node))
+        Ok(try_arc(node)?)
     }
 }
 
@@ -992,6 +1621,8 @@ struct OpenPath {
 struct Builder<'i> {
     ids: &'i mut Ids,
     header: Header,
+    /// Every picture the drawing's objects show, by its number.
+    pictures: Vec<(Arc<Pyramid>, Option<Source>)>,
     gradients: Vec<Arc<Gradient>>,
     styles: Vec<Arc<Style>>,
     open: Vec<OpenGroup>,
@@ -1002,10 +1633,15 @@ struct Builder<'i> {
 }
 
 impl<'i> Builder<'i> {
-    fn new(header: Header, ids: &'i mut Ids) -> Self {
+    fn new(
+        header: Header,
+        pictures: Vec<(Arc<Pyramid>, Option<Source>)>,
+        ids: &'i mut Ids,
+    ) -> Self {
         Self {
             ids,
             header,
+            pictures,
             gradients: Vec::new(),
             styles: Vec::new(),
             open: Vec::new(),
@@ -1023,9 +1659,13 @@ impl<'i> Builder<'i> {
         let last = take_flag(&mut r)?;
         let mut records = 0usize;
         while !r.is_exhausted() {
-            let record = r.bytes(MAX_RECORD)?;
-            let mut fields = Reader::new(record);
-            fields.whole(|fields| Ok(self.record(fields)))??;
+            let mut fields = Reader::new(r.bytes(MAX_RECORD)?);
+            // A record's own failure, the editor's memory refused say, is
+            // answered as itself rather than as the bytes it left unread.
+            self.record(&mut fields)?;
+            if !fields.is_exhausted() {
+                return Err(DrawFailure::ReplyMalformed);
+            }
             records += 1;
         }
         // A batch that brings nothing and is not the last would never end.
@@ -1051,8 +1691,27 @@ impl<'i> Builder<'i> {
             RECORD_CONTOUR => self.contour(r),
             RECORD_NODES => self.nodes(r),
             RECORD_TEXT => self.text(r),
+            RECORD_IMAGE => self.image(r),
             _ => Err(DrawFailure::ReplyMalformed),
         }
+    }
+
+    fn image(&mut self, r: &mut Reader<'_>) -> Result<(), DrawFailure> {
+        let common = Common::take(r)?;
+        let (pyramid, source) = usize::try_from(r.u32()?)
+            .ok()
+            .and_then(|number| self.pictures.get(number))
+            .ok_or(DrawFailure::ReplyMalformed)?;
+        let place = tairix_bezier::Bounds::from_points([take_point(r)?, take_point(r)?]);
+        let image = Image::shared(pyramid.clone(), place, source.clone())?;
+        self.counted()?;
+        let node = common.node(
+            Kind::Image {
+                image: try_arc(image)?,
+            },
+            self.ids,
+        )?;
+        self.deliver(node)
     }
 
     fn rect(&mut self, r: &mut Reader<'_>) -> Result<(), DrawFailure> {
@@ -1156,24 +1815,76 @@ impl<'i> Builder<'i> {
 
     fn text(&mut self, r: &mut Reader<'_>) -> Result<(), DrawFailure> {
         let (common, style) = self.object(r)?;
+        let content = take_str(r, MAX_TEXT_BYTES)?;
+        let family = take_str(r, MAX_FAMILY_BYTES)?;
+        let size = take_f64(r)?;
+        let weight = take_weight(r)?;
+        let italic = take_flag(r)?;
+        let letter_spacing = take_f64(r)?;
+        let align = take_choice(r, &[TextAlign::Start, TextAlign::Middle, TextAlign::End])?;
+        let baseline = match r.u8()? {
+            0 => Baseline::Lines {
+                origin: take_point(r)?,
+                line_height: take_f64(r)?,
+            },
+            1 => Baseline::Path(try_arc(self.text_path(r)?)?),
+            _ => return Err(DrawFailure::ReplyMalformed),
+        };
         let text = Text {
-            content: take_str(r, MAX_TEXT_BYTES)?,
-            family: take_str(r, MAX_FAMILY_BYTES)?,
-            size: take_f64(r)?,
-            weight: u16::try_from(r.u32()?).map_err(|_| DrawFailure::ReplyMalformed)?,
-            italic: take_flag(r)?,
-            letter_spacing: take_f64(r)?,
-            line_height: take_f64(r)?,
-            align: take_choice(r, &[TextAlign::Start, TextAlign::Middle, TextAlign::End])?,
-            origin: take_point(r)?,
+            content,
+            family,
+            size,
+            weight,
+            italic,
+            letter_spacing,
+            align,
+            baseline,
+            runs: take_runs(r)?,
         };
         let kind = Kind::Text {
-            text: Arc::new(text),
+            text: try_arc(text)?,
             style,
         };
         self.counted()?;
         let node = common.node(kind, self.ids)?;
         self.deliver(node)
+    }
+
+    /// The path a text is set along, its nodes counted with every path's.
+    fn text_path(&mut self, r: &mut Reader<'_>) -> Result<TextPath, DrawFailure> {
+        let start = take_f64(r)?;
+        let contours = take_count(r, MAX_TEXT_PATH_NODES)?;
+        let mut path = PathShape {
+            contours: Vec::new(),
+        };
+        if !fallible::reserve(&mut path.contours, contours) {
+            return Err(DrawFailure::NoMemory);
+        }
+        let mut held = 0;
+        for _ in 0..contours {
+            let closed = take_flag(r)?;
+            let nodes = take_count(r, MAX_TEXT_PATH_NODES - held)?;
+            held += nodes;
+            self.path_nodes = self.path_nodes.saturating_add(nodes);
+            if self.path_nodes > MAX_TOTAL_PATH_NODES {
+                return Err(DrawFailure::ReplyMalformed);
+            }
+            let mut contour = Contour {
+                nodes: Vec::new(),
+                closed,
+            };
+            if !fallible::reserve(&mut contour.nodes, nodes) {
+                return Err(DrawFailure::NoMemory);
+            }
+            for _ in 0..nodes {
+                contour.nodes.push(take_node(r)?);
+            }
+            path.contours.push(contour);
+        }
+        Ok(TextPath {
+            path: try_arc(path)?,
+            start,
+        })
     }
 
     /// An object's common fields and the style it names.
@@ -1232,7 +1943,7 @@ impl<'i> Builder<'i> {
             transform,
         };
         gradient.check()?;
-        push(&mut self.gradients, Arc::new(gradient))
+        Ok(try_push(&mut self.gradients, try_arc(gradient)?)?)
     }
 
     fn paint(&self, r: &mut Reader<'_>) -> Result<Paint, DrawFailure> {
@@ -1299,7 +2010,7 @@ impl<'i> Builder<'i> {
             join,
             miter_limit,
             cap,
-            dashes: Arc::from(dashes),
+            dashes: SharedSlice::try_from_vec(dashes)?,
             dash_offset: take_f64(r)?,
             start: Self::head(r)?,
             end: Self::head(r)?,
@@ -1312,7 +2023,7 @@ impl<'i> Builder<'i> {
             paint_order,
         };
         style.check()?;
-        push(&mut self.styles, Arc::new(style))
+        Ok(try_push(&mut self.styles, try_arc(style)?)?)
     }
 
     fn group(&mut self, r: &mut Reader<'_>) -> Result<(), DrawFailure> {
@@ -1356,27 +2067,7 @@ impl<'i> Builder<'i> {
             });
         }
         for _ in 0..count {
-            let point = take_point(r)?;
-            let before = if take_flag(r)? {
-                Some(take_point(r)?)
-            } else {
-                None
-            };
-            let after = if take_flag(r)? {
-                Some(take_point(r)?)
-            } else {
-                None
-            };
-            let join = take_choice(
-                r,
-                &[NodeJoin::Corner, NodeJoin::Smooth, NodeJoin::Symmetric],
-            )?;
-            contour.nodes.push(PathNode {
-                point,
-                before,
-                after,
-                join,
-            });
+            contour.nodes.push(take_node(r)?);
         }
         if contour.nodes.len() == *declared {
             if let Some((contour, _)) = path.current.take() {
@@ -1400,9 +2091,9 @@ impl<'i> Builder<'i> {
         let Some(path) = self.path.take() else {
             return Ok(());
         };
-        let shape = Shape::Path(Arc::new(PathShape {
+        let shape = Shape::Path(try_arc(PathShape {
             contours: path.contours,
-        }));
+        })?);
         self.shape(path.common, shape, path.style)
     }
 
@@ -1438,12 +2129,12 @@ impl<'i> Builder<'i> {
                 if self.layers.len() >= self.header.layers {
                     return Err(DrawFailure::ReplyMalformed);
                 }
-                return push(&mut self.layers, node);
+                return Ok(try_push(&mut self.layers, node)?);
             };
             if matches!(open.clip, Clip::Awaited) {
                 open.clip = Clip::Held(node);
             } else if open.children.len() < open.expected {
-                push(&mut open.children, node)?;
+                try_push(&mut open.children, node)?;
             } else {
                 return Err(DrawFailure::ReplyMalformed);
             }
@@ -1466,10 +2157,12 @@ impl<'i> Builder<'i> {
         let drawing = Drawing::new(
             header.page,
             Children::from_nodes(self.layers)?,
-            Arc::from(header.guides),
+            SharedSlice::try_from_vec(header.guides)?,
             header.grid,
         )?
-        .with_info(header.info)?;
+        .with_info(header.info)?
+        .with_swatches(SharedSlice::try_from_vec(header.swatches)?)?
+        .with_resolution(header.resolution)?;
         Ok(Read {
             drawing,
             unkept: header.unkept,
@@ -1480,14 +2173,6 @@ impl<'i> Builder<'i> {
 impl OpenGroup {
     fn is_whole(&self) -> bool {
         !matches!(self.clip, Clip::Awaited) && self.children.len() == self.expected
-    }
-}
-
-fn push<T>(into: &mut Vec<T>, item: T) -> Result<(), DrawFailure> {
-    if fallible::push(into, item) {
-        Ok(())
-    } else {
-        Err(DrawFailure::NoMemory)
     }
 }
 

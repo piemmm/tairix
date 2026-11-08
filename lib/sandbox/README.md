@@ -177,9 +177,8 @@ untrusted work imports this seam; a second per-app copy is forbidden.
 - **The structure-report service** (`imageinspect`, over the same upload):
   `inspect_document` answers what a picture file is made of, read by
   `tairix_image::inspect` — the image worker serves it beside its other ops,
-  and `InspectService` serves it alone, in a worker held to one document
-  (`WorkerMemory::HeldDocument`), for an editor that wants nothing else of a
-  picture. The caller holds the reply to the report's own bounds: no more
+  and `InspectService` serves it alone, in a document worker, for an editor
+  that wants nothing else of a picture. The caller holds the reply to the report's own bounds: no more
   than `MAX_REPORT_LINES` lines, none longer than `MAX_LINE_BYTES`, every one
   printable UTF-8, or none of it is believed — the one report reply the decode
   service's `file_report` shares. `TextEdit.app`'s Data display is the
@@ -249,7 +248,18 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   ceiling is fixed, so a program pooling them runs as many as fit in one
   document decoder's and never fewer than one (`WorkerMemory::pooled`): below
   512 MiB of RAM, where none fits, that one may map more than a document
-  decoder.
+  decoder. The longest document a worker may be handed is what its ceiling
+  leaves beside its frames (`WorkerMemory::document_bytes`), stated by its
+  launcher (`Launcher::document_room`) and refused past as too large before a
+  byte is sent: it grows with the machine, never below `DOCUMENT_FLOOR_BYTES`.
+- The parent's side allocates fallibly — the request writer
+  (`wire::Writer<Refusable>`), the room a reply is received into, every
+  client's decoding of it — and a refusal of its memory is said as that
+  (`SandboxError::OutOfMemory`, a client's `NoMemory`), never blamed on the
+  worker. Every client is swept: its exchange run with this side's heap
+  refused at each request in turn, each run completing or refused as want of
+  memory, holding nothing after. A worker allocates as it needs under its
+  ceiling.
 - Fuzzed: `fuzz_sandbox` (the decode, helpdoc, and imagerender service
   request decoders — icon and wallpaper alike — the caller-side reply
   decoders/validators, and the session seam's inbound codec over a hostile

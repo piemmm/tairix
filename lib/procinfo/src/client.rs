@@ -23,6 +23,7 @@ use tairix_abi::sysinfo::{decode_reply, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY};
 use tairix_abi::time::Time64;
 use tairix_abi::Errno;
 use tairix_resref::{KnownNamespace, NamespaceBacking, ResourceRef};
+use tairix_util::fallible;
 
 use crate::resolve::ResolveInfoError;
 use crate::valueread::read_value;
@@ -44,13 +45,13 @@ impl Transport for IpcTransport {
     fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
         // A reply buffer sized to the endpoint's contract, so a served answer
         // always fits; the service pages a longer list across requests.
-        let mut reply = alloc::vec![0u8; SYSINFO_MAX_REPLY];
+        let mut reply = fallible::zeroed(SYSINFO_MAX_REPLY).ok_or(Errno::OutOfMemory)?;
         let n = tairix_rt::ipc_call(SYSINFO_ENDPOINT, request, &mut reply)
             .map_err(Errno::from_syscall)?;
         // Unwrap the status-word frame: a served payload, or the service's
         // per-query Errno. A truncated or corrupt frame fails closed.
         let payload = decode_reply(&reply[..n])?;
-        Ok(payload.to_vec())
+        fallible::copied(payload).ok_or(Errno::OutOfMemory)
     }
 }
 

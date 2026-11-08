@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 
 use core::f64::consts::TAU;
 
+use tairix_util::fallible::try_push;
 use tairix_util::mathf::{ceil, cos, hypot, sin, sqrt};
 
 use crate::error::SvgError;
@@ -54,7 +55,8 @@ const MIN_SEGMENT: f64 = 1e-12;
 /// what SVG draws for it.
 ///
 /// # Errors
-/// Returns [`SvgError::TooComplex`] once `max_points` would be exceeded.
+/// Returns [`SvgError::TooComplex`] once `max_points` would be exceeded, and
+/// [`SvgError::OutOfMemory`] when the outline cannot be held.
 pub fn stroke_outline(
     subpaths: &[SubPath],
     style: &StrokeStyle,
@@ -73,17 +75,18 @@ pub fn stroke_outline(
         pieces: Vec::new(),
         points_left: max_points,
     };
-    let pattern = dash_pattern(&style.dashes);
+    let pattern = dash_pattern(&style.dashes)?;
+    let mut points = Vec::new();
     for subpath in subpaths {
-        let points = without_repeats(&subpath.points);
+        without_repeats(&subpath.points, &mut points)?;
         match &pattern {
-            None => stroker.polyline(&points, subpath.closed)?,
-            Some(pattern) => {
+            Some(pattern) if points.len() >= 2 => {
                 let runs = stroker.dashed(&points, subpath.closed, pattern, style.dash_offset)?;
                 for run in runs {
                     stroker.polyline(&run, false)?;
                 }
             }
+            _ => stroker.polyline(&points, subpath.closed)?,
         }
     }
     Ok(stroker.pieces)
@@ -103,28 +106,27 @@ fn clamp_tolerance(tolerance: f64) -> f64 {
 /// An odd-length pattern repeats to make it even, as SVG requires. A pattern
 /// carrying a negative or non-finite length, or summing to nothing, is
 /// invalid and draws solid rather than dashing to a standstill.
-fn dash_pattern(dashes: &[f64]) -> Option<Vec<f64>> {
-    if dashes.is_empty() {
-        return None;
+fn dash_pattern(dashes: &[f64]) -> Result<Option<Vec<f64>>, SvgError> {
+    if dashes.is_empty()
+        || dashes.iter().any(|len| !len.is_finite() || *len < 0.0)
+        || dashes.iter().sum::<f64>() <= 0.0
+    {
+        return Ok(None);
     }
-    if dashes.iter().any(|len| !len.is_finite() || *len < 0.0) {
-        return None;
-    }
-    if dashes.iter().sum::<f64>() <= 0.0 {
-        return None;
-    }
-    let mut pattern = Vec::with_capacity(dashes.len() * 2);
-    pattern.extend_from_slice(dashes);
-    if dashes.len() % 2 == 1 {
+    let repeats = if dashes.len() % 2 == 1 { 2 } else { 1 };
+    let mut pattern = Vec::new();
+    pattern.try_reserve_exact(dashes.len() * repeats)?;
+    for _ in 0..repeats {
         pattern.extend_from_slice(dashes);
     }
-    Some(pattern)
+    Ok(Some(pattern))
 }
 
-/// `points` with consecutive duplicates removed, which is what keeps a
-/// zero-length segment from producing a normal of zeroes.
-fn without_repeats(points: &[Point]) -> Vec<Point> {
-    let mut out: Vec<Point> = Vec::with_capacity(points.len());
+/// `points` into `out` with consecutive duplicates removed, which is what
+/// keeps a zero-length segment from producing a normal of zeroes.
+fn without_repeats(points: &[Point], out: &mut Vec<Point>) -> Result<(), SvgError> {
+    out.clear();
+    out.try_reserve(points.len())?;
     for point in points {
         if out
             .last()
@@ -133,7 +135,7 @@ fn without_repeats(points: &[Point]) -> Vec<Point> {
             out.push(*point);
         }
     }
-    out
+    Ok(())
 }
 
 /// The pieces stroked so far, and what the next one is drawn with.
@@ -197,7 +199,7 @@ impl Stroker {
     /// by a sliver once each piece's vertices are rounded to the grid.
     fn segment(&mut self, a: Point, b: Point) -> Result<(), SvgError> {
         let normal = self.normal(a, b);
-        self.emit(alloc::vec![
+        self.emit(&[
             (a.0 + normal.0, a.1 + normal.1),
             (b.0 + normal.0, b.1 + normal.1),
             b,
@@ -241,14 +243,14 @@ impl Stroker {
                 // The miter limit is the ratio of the spike's length to the
                 // stroke width; beyond it SVG cuts the corner square.
                 if distance(apex, vertex) / self.half <= self.miter_limit {
-                    return self.emit(alloc::vec![vertex, a, apex, b]);
+                    return self.emit(&[vertex, a, apex, b]);
                 }
             }
         }
         if self.join == LineJoin::MiterOrRound {
             return self.disc(vertex);
         }
-        self.emit(alloc::vec![vertex, a, b])
+        self.emit(&[vertex, a, b])
     }
 
     /// The cap on the end `tip`, whose polyline continues towards `inward`.
@@ -262,7 +264,7 @@ impl Stroker {
                 };
                 let normal = (-direction.1 * self.half, direction.0 * self.half);
                 let reach = (direction.0 * self.half, direction.1 * self.half);
-                self.emit(alloc::vec![
+                self.emit(&[
                     (tip.0 + normal.0, tip.1 + normal.1),
                     (tip.0 + normal.0 + reach.0, tip.1 + normal.1 + reach.1),
                     (tip.0 - normal.0 + reach.0, tip.1 - normal.1 + reach.1),
@@ -279,7 +281,7 @@ impl Stroker {
         match self.cap {
             LineCap::Butt => Ok(()),
             LineCap::Round => self.disc(at),
-            LineCap::Square => self.emit(alloc::vec![
+            LineCap::Square => self.emit(&[
                 (at.0 - self.half, at.1 - self.half),
                 (at.0 + self.half, at.1 - self.half),
                 (at.0 + self.half, at.1 + self.half),
@@ -296,16 +298,18 @@ impl Stroker {
     /// the disc is unchanged by every quarter turn and mirror of the square
     /// and a stroke of symmetric artwork is as symmetric as the artwork.
     fn disc(&mut self, centre: Point) -> Result<(), SvgError> {
-        let steps = arc_steps(self.half, TAU, self.tolerance).next_multiple_of(4);
-        let mut ring = Vec::with_capacity(steps as usize);
-        for step in 0..steps {
+        let steps = arc_steps(self.half, TAU, self.tolerance)
+            .next_multiple_of(4)
+            .min(MAX_ARC_SEGMENTS);
+        let mut ring = [(0.0, 0.0); MAX_ARC_SEGMENTS as usize];
+        for (step, point) in (0..steps).zip(ring.iter_mut()) {
             let angle = TAU * f64::from(step) / f64::from(steps);
-            ring.push((
+            *point = (
                 centre.0 + self.half * cos(angle),
                 centre.1 + self.half * sin(angle),
-            ));
+            );
         }
-        self.emit(ring)
+        self.emit(&ring[..steps as usize])
     }
 
     /// The offset of a segment's edge from its centre line.
@@ -318,22 +322,27 @@ impl Stroker {
 
     /// Record one piece, wound the same way as every other so the non-zero
     /// rule unions them rather than cancelling them.
-    fn emit(&mut self, mut points: Vec<Point>) -> Result<(), SvgError> {
+    fn emit(&mut self, points: &[Point]) -> Result<(), SvgError> {
         if points.len() < 3 {
             return Ok(());
         }
         if points.len() > self.points_left {
             return Err(SvgError::TooComplex);
         }
-        self.points_left -= points.len();
-        if signed_area(&points) > 0.0 {
-            points.reverse();
+        let mut ring = Vec::new();
+        ring.try_reserve_exact(points.len())?;
+        if signed_area(points) > 0.0 {
+            ring.extend(points.iter().rev());
+        } else {
+            ring.extend_from_slice(points);
         }
-        self.pieces.push(SubPath::closed(points));
+        try_push(&mut self.pieces, SubPath::closed(ring))?;
+        self.points_left -= points.len();
         Ok(())
     }
 
-    /// Split a polyline into the runs a dash pattern leaves drawn.
+    /// Split a polyline of at least two points into the runs a dash pattern
+    /// leaves drawn.
     fn dashed(
         &mut self,
         points: &[Point],
@@ -341,9 +350,6 @@ impl Stroker {
         pattern: &[f64],
         offset: f64,
     ) -> Result<Vec<Vec<Point>>, SvgError> {
-        if points.len() < 2 {
-            return Ok(alloc::vec![points.to_vec()]);
-        }
         let total: f64 = pattern.iter().sum();
         let mut phase = if offset.is_finite() {
             offset % total
@@ -363,11 +369,10 @@ impl Stroker {
         let began_drawing = drawing;
 
         let mut runs: Vec<Vec<Point>> = Vec::new();
-        let mut run: Vec<Point> = if drawing {
-            alloc::vec![points[0]]
-        } else {
-            Vec::new()
-        };
+        let mut run: Vec<Point> = Vec::new();
+        if drawing {
+            try_push(&mut run, points[0])?;
+        }
         let count = points.len();
         let segments = if closed { count } else { count - 1 };
         for step in 0..segments {
@@ -384,9 +389,9 @@ impl Stroker {
                 // Every turn of this loop records a point, so the dash walk
                 // is bounded by the caller's budget and cannot spin.
                 self.charge()?;
-                run.push(at);
+                try_push(&mut run, at)?;
                 if drawing {
-                    runs.push(core::mem::take(&mut run));
+                    try_push(&mut runs, core::mem::take(&mut run))?;
                 }
                 drawing = !drawing;
                 index = (index + 1) % pattern.len();
@@ -395,17 +400,19 @@ impl Stroker {
             left -= length - walked;
             if drawing {
                 self.charge()?;
-                run.push(b);
+                try_push(&mut run, b)?;
             }
         }
         match runs.first_mut() {
             // A dash that spans a closed contour's seam is one run, not a
             // pair with caps facing each other across the join.
             Some(head) if closed && began_drawing && drawing && !run.is_empty() => {
-                run.extend_from_slice(head.get(1..).unwrap_or_default());
+                let rest = head.get(1..).unwrap_or_default();
+                run.try_reserve_exact(rest.len())?;
+                run.extend_from_slice(rest);
                 *head = run;
             }
-            _ if !run.is_empty() => runs.push(run),
+            _ if !run.is_empty() => try_push(&mut runs, run)?,
             _ => {}
         }
         Ok(runs)

@@ -47,12 +47,14 @@ use crate::geom::{
     bounds, place, LineCap, LineJoin, Point, StrokeStyle, SubPath, Vertex, Vertices,
 };
 use crate::marker::{Marker, Position};
+use crate::number::viewport_diagonal;
 use crate::number::{opacity_to_alpha, parse_length, parse_number};
 use crate::paint::{PaintServers, PatternTile, Resolved};
 use crate::shape::{is_shape, shape_subpaths, takes_markers};
 use crate::stroke::stroke_outline;
 use crate::style::{scale_alpha, Overflow, PaintOrder, PaintSlot, PaintSpec, Style};
 use crate::text::{self, TextBudget, TextCascade};
+use crate::textpath;
 use crate::transform::{
     parse_aspect_ratio, parse_transform, parse_view_box, viewport_transform, Align, AspectRatio,
     ViewBox,
@@ -261,7 +263,7 @@ pub fn decode(
         ids: Vec::new(),
         chains: Vec::new(),
         styles: Vec::new(),
-        servers: PaintServers::collect(&root),
+        servers: PaintServers::collect(&root)?,
         sheet: Stylesheet::collect(&sheets, css::SheetLimits::COMPACT)?,
         cascade: Vec::new(),
         path: Vec::new(),
@@ -280,6 +282,9 @@ pub fn decode(
         nesting: 0,
     };
     decoder.index(&root);
+    // Stable, so of two elements sharing an id the first in the document is
+    // the one a reference finds.
+    decoder.ids.sort_by(|a, b| a.0.cmp(b.0));
 
     let mut nodes = Vec::new();
     decoder.path.push(&root);
@@ -473,6 +478,30 @@ impl<'a> TextCascade<'a> for Decoder<'a, '_> {
     fn leave(&mut self) {
         self.path.pop();
     }
+
+    fn text_path(
+        &mut self,
+        element: &'a Element<'a>,
+    ) -> Result<Option<(tairix_bezier::Path, Option<f64>)>, SvgError> {
+        let Some(target) = self.referenced(element) else {
+            return Ok(None);
+        };
+        let geometry = textpath::geometry(target, self.vertices_left)?;
+        // The path is geometry the text is drawn from, so it is charged as
+        // geometry: no number of references re-reads it for nothing.
+        if let Some((path, _)) = &geometry {
+            let commands: usize = path
+                .subpaths
+                .iter()
+                .map(|subpath| subpath.elements.len() + 1)
+                .sum();
+            if commands > self.vertices_left {
+                return Err(SvgError::TooComplex);
+            }
+            self.vertices_left -= commands;
+        }
+        Ok(geometry)
+    }
 }
 
 impl<'a> Decoder<'a, '_> {
@@ -487,11 +516,13 @@ impl<'a> Decoder<'a, '_> {
         }
     }
 
-    /// The element with fragment id `id`.
+    /// The element with fragment id `id`: the first in the document to
+    /// carry it.
     fn find(&self, id: &str) -> Option<&'a Element<'a>> {
+        let at = self.ids.partition_point(|(name, _)| *name < id);
         self.ids
-            .iter()
-            .find(|(name, _)| *name == id)
+            .get(at)
+            .filter(|(name, _)| *name == id)
             .map(|(_, element)| *element)
     }
 
@@ -1173,13 +1204,18 @@ impl<'a> Decoder<'a, '_> {
         let style = laid.styles.get(run).ok_or(SvgError::Malformed)?;
         self.text.run()?;
         let mut subpaths: Vec<SubPath> = Vec::new();
+        let mut points = 0_usize;
         for index in from..to {
-            let (Some(glyph), Some(outline)) = (laid.glyphs.get(index), laid.outlines.get(index))
-            else {
+            let Some(glyph) = laid.glyphs.get(index) else {
                 continue;
             };
             let tolerance = flatten_tolerance(glyph.to_user.then(transform));
-            let mut drawn = text::glyph_subpaths(outline, glyph.to_user, tolerance);
+            let points_left = self.vertices_left.saturating_sub(points);
+            let mut drawn = laid.subpaths(
+                index,
+                (tolerance, flatten_tolerance(transform)),
+                points_left,
+            )?;
             // A synthetic bold the face could not furnish is this crate's own
             // stroker run over the glyph's contours and unioned into the same
             // non-zero fill: there is no second thickening implementation.
@@ -1200,6 +1236,15 @@ impl<'a> Decoder<'a, '_> {
                     self.vertices_left,
                 )?;
                 drawn.append(&mut thickened);
+            }
+            // Charged as the run gathers, so no run grows past what its layer
+            // could be charged.
+            points += drawn
+                .iter()
+                .map(|contour| contour.points.len())
+                .sum::<usize>();
+            if points > self.vertices_left {
+                return Err(SvgError::TooComplex);
             }
             subpaths.append(&mut drawn);
         }
@@ -2005,14 +2050,6 @@ fn glyph_runs(laid: &text::Laid) -> Vec<(usize, usize)> {
         }
     }
     runs
-}
-
-/// The length a percentage with no axis of its own resolves against.
-fn viewport_diagonal(viewport: (f64, f64)) -> f64 {
-    sqrt(f64::midpoint(
-        viewport.0 * viewport.0,
-        viewport.1 * viewport.1,
-    ))
 }
 
 /// One optional length attribute, defaulting to zero.

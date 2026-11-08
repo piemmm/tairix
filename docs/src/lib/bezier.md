@@ -16,13 +16,20 @@ positive signed area are all clockwise as drawn.
   local minimum, refined by Newton's method), its length by adaptive
   Gauss–Legendre quadrature, and its signed area in closed form over the
   Bernstein basis. `ArcTable` measures a curve once so many points along it
-  are each a lookup and a few Newton steps.
+  are each a lookup and a few Newton steps. `PathMeasure` measures a whole
+  path so — a cubic's table beside each segment's length — and answers the
+  point a distance along it and the unit direction it runs there, what dashes
+  are cut at and text is set along.
 - `QuadBez` elevates exactly to a cubic; `EllipseArc` converts SVG's endpoint
   arc to its centre form, growing radii too small to reach, and draws itself
   as cubics of at most a quarter turn.
 - A `Path`'s winding number at a point counts exact crossings of the ray
   towards positive x over half-open spans of y, so a ray through a vertex
   counts it once and one grazing an extremum counts nothing.
+- A copy (`try_clone`), a path of one sub-path (`Path::single`), a
+  transform, a reversal and a flattened polyline allocate fallibly and answer
+  the heap's refusal as `TryReserveError`; `Clone` copies infallibly, for
+  code where an abort is contained.
 
 ## Flattening
 
@@ -45,7 +52,8 @@ every decoded asset keeps its bits.
   reparameterisation, split at the worst point with a shared tangent and cut
   at corners, on an explicit stack.
 - `offset::offset_cubic` approximates an offset cubic (ends moved along their
-  normals, handles scaled by `1 − d·κ`), halving wherever it strays.
+  normals, handles scaled by `1 − d·κ`), halving wherever it strays, and
+  stops at the first piece its consumer refuses.
   `offset::outline` is a stroke's outline — both sides joined (miter within
   the limit, round, bevel) and capped (butt, round, square) — simplified;
   `offset::dashed` cuts a path into its dashes; `offset::grown` grows or
@@ -61,7 +69,11 @@ within the tolerance, each edge is kept where the operation's result differs
 across it — each operand's winding found just left of the edge by a ray, and
 just right by adding the edge's own runs — and the kept edges are traced into
 contours by the sharpest right turn, consecutive edges of one original curve
-joined back into one. `divide`, `simplified` and `components` build on it.
+joined back into one. Every contour of a result is closed. A cut at either
+zero, or before a piece's start, is that start's own, so the cuts along a
+piece are in order as they are recorded and need no second sort. `divide`,
+`simplified` and `components` build on it; `components` gives each hole the
+smallest outer contour around it, asking only those whose bounds hold it.
 
 ## Bounds
 
@@ -70,6 +82,8 @@ Every algorithm is total over finite input. `MAX_FIT_POINTS`,
 `intersect::MAX_CROSSINGS` and the subdivision depths are containment bounds:
 work past one is `FitError::TooComplex` or `BooleanError::TooComplex`, never a
 hang. Allocation that grows with the input is fallible and refused as
-`OutOfMemory`. The fuzz harness (`tests/fuzz_bezier.rs`) drives every
+`OutOfMemory`, never an abort: `tests/allocation_failure.rs` refuses each
+request in turn that the booleans, outlines, dashes, growing, fitting and the
+path operations make. The fuzz harness (`tests/fuzz_bezier.rs`) drives every
 algorithm over paths at scales from a millionth to a hundred million, with
 coincident points, edges and outlines.

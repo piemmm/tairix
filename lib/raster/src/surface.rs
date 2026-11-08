@@ -27,12 +27,13 @@ use core::slice;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use tairix_bezier::Affine;
 use tairix_colour::{Hue, Rgb};
 use tairix_parallel::JobRunner;
 use tairix_reclaim::CachedBytes;
 use tairix_util::{fallible, mathf};
 
-use crate::artwork::{Group, MaskKind, Node, MAX_GROUP_DEPTH};
+use crate::artwork::{Group, Image, MaskKind, Node, MAX_GROUP_DEPTH};
 use crate::color::{
     blend_solid_span, blend_span, blend_span_mapped, cover_span, dither_tiles, mix, scale8,
     wash_weighted, Color, Pixel,
@@ -1242,10 +1243,41 @@ impl Surface {
                         depth,
                     );
                 }
+                Node::Image(image) => self.draw_image(over, image, design),
                 Node::Group(group) => whole &= self.draw_group(over, group, design, depth),
             }
         }
         whole
+    }
+
+    /// Draw a picture through its transform from the design grid onto
+    /// `over`, from the level of its pyramid fit for the scale it is drawn
+    /// at along its more reduced axis.
+    fn draw_image(&mut self, over: Region, image: &Image, design: u32) {
+        if design == 0 || image.opacity == 0 {
+            return;
+        }
+        let per_unit = |extent: u32| f64::from(extent) / f64::from(design);
+        let onto = image.transform.then(Affine {
+            a: per_unit(over.width),
+            b: 0.0,
+            c: 0.0,
+            d: per_unit(over.height),
+            e: f64::from(over.x),
+            f: f64::from(over.y),
+        });
+        let widest = onto.max_scale();
+        if widest <= 0.0 {
+            return;
+        }
+        let narrowest = mathf::fabs(onto.determinant()) / widest;
+        let base = image.pyramid.base();
+        let level = image.pyramid.level_for(narrowest);
+        let to_base = Affine::scale(
+            f64::from(base.width()) / f64::from(level.width()),
+            f64::from(base.height()) / f64::from(level.height()),
+        );
+        self.blit_framed(level, to_base.then(onto), image.opacity);
     }
 
     /// Draw one group into a buffer of this surface's own shape, weaken it by

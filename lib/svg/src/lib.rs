@@ -91,6 +91,7 @@ pub mod shape;
 pub mod stroke;
 pub mod style;
 mod text;
+pub mod textpath;
 pub mod transform;
 pub mod xml;
 

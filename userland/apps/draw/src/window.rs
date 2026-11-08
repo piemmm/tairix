@@ -6,6 +6,7 @@ use alloc::sync::Arc;
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, SaveFormats};
 use tairix_bezier::Point;
 use tairix_browse::media::{save_format, MediaType};
+use tairix_collections::try_arc;
 use tairix_drawing::unkept::Unkept;
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_input::InputEvent;
@@ -14,38 +15,16 @@ use tairix_util::mathf::round_i32;
 use tairix_window::docapp::{DocumentView, Outcome, Request};
 use tairix_window::document::{Access, SavedDocument};
 
+use crate::copy::CopyFormat;
 use crate::input::ViewOutcome;
 use crate::layout::{Faces, Layout};
 use crate::menu::chosen;
 use crate::tools::Tool;
 use crate::view::{MenuKind, Own, Snapshot, View};
 
-/// The format a copy is written in, by its name's extension.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum CopyFormat {
-    /// SVG.
-    Svg,
-    /// PDF.
-    Pdf,
-    /// PNG, rendered at the page's size.
-    Png,
-}
-
-impl CopyFormat {
-    /// The format a file called `name` is written in, if Draw writes one.
-    #[must_use]
-    pub fn of(name: &str) -> Option<Self> {
-        let extension = name.rsplit_once('.')?.1;
-        [("svg", Self::Svg), ("pdf", Self::Pdf), ("png", Self::Png)]
-            .into_iter()
-            .find(|(known, _)| extension.eq_ignore_ascii_case(known))
-            .map(|(_, format)| format)
-    }
-}
-
 /// Whether a file called `name` is one Draw saves its documents in.
 fn native(name: &str) -> bool {
-    CopyFormat::of(name) == Some(CopyFormat::Svg)
+    CopyFormat::of(name, None) == Some(CopyFormat::Svg)
 }
 
 impl SavedDocument for View {
@@ -72,7 +51,8 @@ impl SavedDocument for View {
         self.land_pending(&mut Region::new());
         self.finish_pen();
         let drawing = self.document.drawing().clone();
-        Some((self.document.generation(), Arc::new(Snapshot { drawing })))
+        let frozen = try_arc(Snapshot { drawing }).ok()?;
+        Some((self.document.generation(), frozen))
     }
 
     fn saved(&mut self, generation: u64) {
@@ -211,7 +191,7 @@ impl DocumentView for View {
     fn refuse_save(&self, name: &str) -> Option<String> {
         if !native(name) {
             return Some(String::from(
-                "Draw saves its drawings as SVG. Name the file with .svg, or save a copy to write PDF or PNG.",
+                "Draw saves its drawings as SVG. Name the file with .svg, or save a copy to write PDF, PNG or a RISC OS Draw file.",
             ));
         }
         if self.access == Access::ReadOnly && name == self.name && !self.unkept.is_empty() {
@@ -238,8 +218,12 @@ impl DocumentView for View {
         let mut formats = SaveFormats::ANY;
         for (media, current) in [
             (MediaType::Pdf, true),
+            (MediaType::PostScript, false),
             (MediaType::ImagePng, false),
+            (MediaType::ImageJpeg, false),
+            (MediaType::ImageTiff, false),
             (MediaType::ImageSvg, false),
+            (MediaType::RiscOsDraw, false),
         ] {
             formats
                 .push(save_format(media), current)

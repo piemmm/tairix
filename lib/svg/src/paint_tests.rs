@@ -369,3 +369,52 @@ fn a_gradient_may_stroke_as_well_as_fill() {
     };
     assert!(matches!(layer.paint, Paint::Gradient(_)));
 }
+
+// --- the index --------------------------------------------------------------
+
+/// A repeated id names the first server in document order, wherever the rest
+/// stand among the other ids.
+#[test]
+fn a_repeated_id_names_the_first_server_in_document_order() {
+    let mut defs = alloc::string::String::new();
+    for (id, colour) in [
+        ("m", "#00ff00"),
+        ("a", "#0000ff"),
+        ("m", "#ff0000"),
+        ("z", "#ffffff"),
+    ] {
+        write!(
+            defs,
+            r#"<linearGradient id="{id}"><stop offset="0" stop-color="{colour}"/><stop offset="1" stop-color="{colour}"/></linearGradient>"#
+        )
+        .expect("written");
+    }
+    for (id, colour) in [
+        ("m", Color::rgb(0, 255, 0)),
+        ("a", Color::rgb(0, 0, 255)),
+        ("z", Color::rgb(255, 255, 255)),
+    ] {
+        let svg = document(&defs, &alloc::format!("url(#{id})"));
+        near(sample(&only_paint(&svg), (4.0, 4.0)), colour);
+    }
+}
+
+/// Every server of a document holding many is found by its id, whatever order
+/// the ids were written in.
+#[test]
+fn every_server_of_many_is_found_by_its_id() {
+    let mut defs = alloc::string::String::new();
+    let ids: alloc::vec::Vec<u32> = (0..200).map(|n| (n * 37) % 200).collect();
+    for id in &ids {
+        let level = u8::try_from(*id).expect("a level");
+        write!(
+            defs,
+            r#"<linearGradient id="g{id}"><stop offset="0" stop-color="rgb({level},0,0)"/><stop offset="1" stop-color="rgb({level},0,0)"/></linearGradient>"#
+        )
+        .expect("written");
+    }
+    for id in [0_u8, 1, 99, 150, 199] {
+        let svg = document(&defs, &alloc::format!("url(#g{id})"));
+        near(sample(&only_paint(&svg), (4.0, 4.0)), Color::rgb(id, 0, 0));
+    }
+}

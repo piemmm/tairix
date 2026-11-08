@@ -5,17 +5,20 @@
 //! it. A drag on the canvas is previewed as outlines over the tiles each
 //! frame and lands in the document once, when it ends.
 
-use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::touch::{PinchPhase, PINCH_SCALE_ONE};
 use tairix_bezier::{Affine, Bounds, Point};
+use tairix_collections::try_arc;
 use tairix_controls::ToolbarOutcome;
 use tairix_drawing::hit::{hit, within_area};
 use tairix_drawing::shape::StarShape;
-use tairix_drawing::{Guide, GuideAxis, Kind, Node, Paint, Shape, Style, Text};
+use tairix_drawing::{
+    Baseline, DrawingError, Guide, GuideAxis, Kind, Node, ObjectId, Paint, RunPaint, RunStyle,
+    Shape, SharedSlice, SharedStr, Style, Text, TextPath,
+};
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_theme::Theme;
@@ -24,17 +27,19 @@ use tairix_window::docapp::{Outcome, Request};
 
 use crate::edit::{self, Arrange};
 use crate::glyphs::{Arrived, Lettering};
-use crate::inspector::{Change, LayerCommand, Target};
+use crate::gradient;
+use crate::inspector::{Change, LayerCommand, PageChange, Target, TextChange};
+
+/// What makes a paint anew: the paint as it is, and what answers the bounds,
+/// in its own space, of the object it paints.
+type Repaint<'a> = dyn Fn(&Paint, &dyn Fn() -> tairix_bezier::Bounds) -> Result<Paint, tairix_drawing::DrawingError>
+    + 'a;
 use crate::layout::Layout;
 use crate::tools::{self, Constraint, Tool};
 use crate::view::{Gesture, Grip, GripPart, Handle, MenuKind, Own, Typing, View, TYPE_TEXT};
 
 /// What an input comes to.
 pub type ViewOutcome = Outcome<Request<MenuKind, Own>>;
-
-/// How near, in logical pixels, the pointer must come to pick a handle, a
-/// node or a guide.
-const GRAB: u32 = 6;
 
 /// How far past a corner handle, in logical pixels, a drag turns rather
 /// than scales.
@@ -43,19 +48,21 @@ const TURN_REACH: u32 = 20;
 /// How far, in logical pixels, one wheel detent scrolls.
 const DETENT_SCROLL: u32 = 48;
 
-/// How far a nudge moves, in drawing pixels; ten times as far with Shift.
-const NUDGE: f64 = 1.0;
-
 /// `style` stroked with the pattern at `index` of the inspector's dashes, in
 /// lengths of its stroke's width.
-fn dash(style: &mut Style, index: usize) {
+fn dash(style: &mut Style, index: usize) -> Result<(), tairix_drawing::DrawingError> {
     let width = if style.stroke.width > 0.0 {
         style.stroke.width
     } else {
         1.0
     };
     let pattern = crate::inspector::DASHES[index.min(crate::inspector::DASHES.len() - 1)];
-    style.stroke.dashes = pattern.iter().map(|dash| dash * width).collect();
+    let mut scaled = [0.0; crate::inspector::MOST_DASHES];
+    for (out, dash) in scaled.iter_mut().zip(pattern) {
+        *out = dash * width;
+    }
+    style.stroke.dashes = SharedSlice::try_from_slice(&scaled[..pattern.len()])?;
+    Ok(())
 }
 
 /// `logical` pixels, in the window's device pixels.
@@ -92,7 +99,7 @@ impl View {
 
     /// How near the pointer must come to pick something, in drawing pixels.
     fn grab(&self, layout: &Layout) -> f64 {
-        reach(layout, GRAB) * self.pixel()
+        reach(layout, self.handling.pick) * self.pixel()
     }
 
     /// The pointer as the drawing sees it, snapped as the window snaps.
@@ -354,6 +361,17 @@ impl View {
                 });
             }
             Tool::Text => self.text_press(point, damage, layout),
+            Tool::Gradient => {
+                if self.selection.is_empty() {
+                    self.pick(point, false, damage, layout);
+                }
+                if !self.selection.is_empty() {
+                    self.gesture = Some(Gesture::Gradient {
+                        from: snapped,
+                        to: snapped,
+                    });
+                }
+            }
             Tool::Eyedropper => self.eyedrop(point, damage, layout),
             Tool::Zoom => {
                 let at = self.pointer - canvas_origin(layout);
@@ -449,7 +467,7 @@ impl View {
         for handle in handles() {
             let at = self.window_at(layout, handle_point(bounds, handle));
             let distance = at.distance(self.pointer);
-            if distance <= reach(layout, GRAB) {
+            if distance <= reach(layout, self.handling.pick) {
                 return Some(Gesture::Scale {
                     handle,
                     bounds,
@@ -481,24 +499,19 @@ impl View {
             })
     }
 
-    /// The node or handle of the selected path under the pointer.
+    /// The node or handle of the selected path, or of the path the
+    /// selected text is set along, under the pointer.
     fn grip_near(&self, layout: &Layout) -> Option<Grip> {
         let path = self.selection.first()?;
         let node = self.shown().node_at(path)?;
-        let Kind::Shape {
-            shape: Shape::Path(shape),
-            ..
-        } = node.kind()
-        else {
-            return None;
-        };
+        let shape = node_path(node)?;
         let to_drawing = node
             .transform()
             .then(edit::parent_space(self.shown(), path));
         let near = |point: Point| {
             self.window_at(layout, to_drawing.map(point))
                 .distance(self.pointer)
-                <= reach(layout, GRAB)
+                <= reach(layout, self.handling.pick)
         };
         for (contour_at, contour) in shape.contours.iter().enumerate() {
             for (node_at, path_node) in contour.nodes.iter().enumerate() {
@@ -523,13 +536,18 @@ impl View {
 
     fn pen_press(&mut self, layout: &Layout, point: Point, damage: &mut Region) {
         if let Some(first) = self.pen.first() {
-            if self.window_at(layout, first.point).distance(self.pointer) <= reach(layout, GRAB)
+            if self.window_at(layout, first.point).distance(self.pointer)
+                <= reach(layout, self.handling.pick)
                 && self.pen.len() > 1
             {
                 let nodes = core::mem::take(&mut self.pen);
-                if let Some(shape) = tools::pen_path(&nodes, true) {
-                    let style = self.style.clone();
-                    self.add_shape(shape, style, "Draw path");
+                match tools::pen_path(&nodes, true) {
+                    Ok(Some(shape)) => {
+                        let style = self.style.clone();
+                        self.add_shape(shape, &style, "Draw path");
+                    }
+                    Ok(None) => {}
+                    Err(error) => self.say_error("Draw path", error.into()),
                 }
                 damage.add(layout.window);
                 return;
@@ -540,22 +558,38 @@ impl View {
         damage.add(layout.canvas);
     }
 
+    /// A press with the text tool: on the text being typed it puts the caret
+    /// there — shift holds the selection's other end — and on another text
+    /// begins typing into it there; a drag then selects. Elsewhere it begins
+    /// a new text.
     fn text_press(&mut self, point: Point, damage: &mut Region, layout: &Layout) {
-        self.finish_typing();
-        let hit = hit(
-            self.shown(),
-            point,
-            self.grab(layout),
-            &Lettering::new(Arrived),
-        )
-        .ok()
-        .flatten();
-        if let Some(path) = hit {
+        let at_point = |view: &Self| {
+            hit(
+                view.shown(),
+                point,
+                view.grab(layout),
+                &Lettering::new(Arrived),
+            )
+            .ok()
+            .flatten()
+        };
+        let within_typing = self
+            .typing
+            .as_ref()
+            .is_some_and(|typing| at_point(self).as_ref() == Some(&typing.path));
+        if !within_typing {
+            self.finish_typing();
+        }
+        if let Some(path) = at_point(self) {
             let node = self.shown().node_at(&path);
-            if let Some((Kind::Text { text, .. }, id)) = node.map(|node| (node.kind(), node.id())) {
-                let caret = text.content.len();
-                self.selection = alloc::vec![path.clone()];
-                self.typing = Some(Typing { path, id, caret });
+            if let Some((Kind::Text { .. }, id)) = node.map(|node| (node.kind(), node.id())) {
+                if !within_typing {
+                    self.selection = alloc::vec![path.clone()];
+                    self.typing = Some(Typing::at(path, id, 0));
+                }
+                self.place_caret(point, within_typing && self.modifiers.shift);
+                self.gesture = Some(Gesture::TextSelect);
+                self.refresh_inspector();
                 damage.add(layout.window);
                 return;
             }
@@ -564,41 +598,89 @@ impl View {
             damage.add(layout.status);
             return;
         }
+        let id = self.document.ids().issue();
+        let made = self
+            .new_text(id, point)
+            .map_err(edit::EditError::from)
+            .and_then(|node| edit::insert(self.document.drawing(), &[self.layer], node));
+        match made {
+            Ok((drawing, path)) => {
+                self.show_live(drawing, TYPE_TEXT);
+                self.selection = alloc::vec![path.clone()];
+                self.typing = Some(Typing::at(path, id, 0));
+            }
+            Err(error) => self.say_error("Text", error),
+        }
+        damage.add(layout.window);
+    }
+
+    /// The caret of the text being typed put at the character boundary
+    /// nearest `point`, in the drawing; the selection's other end held where
+    /// `extend` says so.
+    fn place_caret(&mut self, point: Point, extend: bool) {
+        let Some(typing) = &self.typing else {
+            return;
+        };
+        let drawing = self.shown();
+        let Some(node) = drawing
+            .node_at(&typing.path)
+            .filter(|node| node.id() == typing.id)
+        else {
+            return;
+        };
+        let Kind::Text { text, .. } = node.kind() else {
+            return;
+        };
+        let Some(to_text) = node
+            .transform()
+            .then(edit::parent_space(drawing, &typing.path))
+            .invert()
+        else {
+            return;
+        };
+        match text.offset_at(&Lettering::new(Arrived), to_text.map(point)) {
+            Ok(at) => {
+                if let Some(typing) = &mut self.typing {
+                    typing.caret = at;
+                    if !extend {
+                        typing.anchor = at;
+                    }
+                }
+            }
+            Err(error) => self.say_error("Type", error.into()),
+        }
+    }
+
+    /// A new, empty text `id` at `point`, set as the next text is and in the
+    /// style new objects are drawn in, filled where that is only stroked.
+    fn new_text(&self, id: ObjectId, point: Point) -> Result<Arc<Node>, DrawingError> {
         let text = Text {
-            content: Arc::from(""),
-            family: Arc::from(self.text.family),
+            content: SharedStr::new(),
+            family: SharedStr::try_from_str(self.text.family)?,
             size: self.text.size,
             weight: if self.text.bold { 700 } else { 400 },
             italic: self.text.italic,
             letter_spacing: 0.0,
-            line_height: 1.25,
             align: self.text.align,
-            origin: point,
+            baseline: tairix_drawing::Baseline::Lines {
+                origin: point,
+                line_height: tairix_drawing::DEFAULT_LINE_HEIGHT,
+            },
+            runs: tairix_drawing::SharedSlice::new(),
         };
         let mut style = self.style.clone();
         if !style.fill.paints() {
             style.fill = style.stroke.paint.clone();
         }
         style.stroke.paint = Paint::None;
-        let id = self.document.ids().issue();
-        let Ok(node) = Node::new(
+        let node = Node::new(
             id,
             Kind::Text {
-                text: Arc::new(text),
-                style: Arc::new(style),
+                text: try_arc(text)?,
+                style: try_arc(style)?,
             },
-        ) else {
-            return;
-        };
-        match edit::insert(self.document.drawing(), &[self.layer], Arc::new(node)) {
-            Ok((drawing, path)) => {
-                self.show_live(drawing, TYPE_TEXT);
-                self.selection = alloc::vec![path.clone()];
-                self.typing = Some(Typing { path, id, caret: 0 });
-            }
-            Err(error) => self.say_error("Text", error),
-        }
-        damage.add(layout.window);
+        )?;
+        Ok(try_arc(node)?)
     }
 
     fn eyedrop(&mut self, point: Point, damage: &mut Region, layout: &Layout) {
@@ -620,8 +702,13 @@ impl View {
         self.style = (*style).clone();
         if !self.selection.is_empty() {
             let taken = (*style).clone();
-            let result =
-                edit::restyle(self.document.drawing(), &self.selection, &|_| taken.clone());
+            let glyphs = Lettering::new(Arrived);
+            let result = edit::restyle(
+                self.document.drawing(),
+                &self.selection,
+                &|_, placed| gradient::fitted_style(&taken, placed.bounds()),
+                &glyphs,
+            );
             self.apply(result, "Take style");
         }
         self.refresh_inspector();
@@ -634,6 +721,14 @@ impl View {
         let snapped = self.snapped(layout, self.pointer);
         let pixel = self.pixel();
         match event {
+            InputEvent::PointerMoved { .. }
+                if matches!(self.gesture, Some(Gesture::TextSelect)) =>
+            {
+                self.place_caret(point, true);
+                self.refresh_inspector();
+                damage.add(layout.window);
+                Outcome::none()
+            }
             InputEvent::PointerMoved { .. } => {
                 match &mut self.gesture {
                     Some(Gesture::Pan { last }) => {
@@ -656,6 +751,11 @@ impl View {
                     ) => {
                         *to = snapped;
                     }
+                    Some(Gesture::Gradient { from, to }) => {
+                        *to = snapped;
+                        let line = (*from, *to);
+                        self.lay_gradient(line, false);
+                    }
                     Some(Gesture::Freehand { points }) => {
                         // A line memory will not grow ends where it reached.
                         let apart = points
@@ -669,7 +769,7 @@ impl View {
                     Some(Gesture::Guide { horizontal, at, .. }) => {
                         *at = if *horizontal { point.y } else { point.x }
                     }
-                    None => {}
+                    Some(Gesture::TextSelect) | None => {}
                 }
                 damage.add(layout.canvas);
                 damage.add(layout.status);
@@ -768,7 +868,8 @@ impl View {
             centred: self.modifiers.alt,
         };
         match gesture {
-            Gesture::Pan { .. } => {}
+            Gesture::Pan { .. } | Gesture::TextSelect => {}
+            Gesture::Gradient { from, to } => self.lay_gradient((from, to), true),
             Gesture::Marquee { from, to, adding } => {
                 if let Err(error) = self.select_within(Bounds::new(from, to), adding) {
                     self.say_error("Select", error);
@@ -800,7 +901,7 @@ impl View {
                     Ok(Some(shape)) => {
                         let mut style = self.style.clone();
                         style.fill = Paint::None;
-                        self.add_shape(shape, style, "Draw freehand");
+                        self.add_shape(shape, &style, "Draw freehand");
                     }
                     Ok(None) => {}
                     Err(error) => self.say_error("Draw freehand", error.into()),
@@ -816,7 +917,7 @@ impl View {
             Gesture::Node { grip, to } => self.move_node(grip, to),
             Gesture::Zoom { from, to } => {
                 let area = Bounds::new(from, to);
-                let grab = reach(layout, GRAB);
+                let grab = reach(layout, self.handling.pick);
                 if area.width() < grab && area.height() < grab {
                     let zoom = self
                         .viewport
@@ -927,7 +1028,7 @@ impl View {
             style.fill = Paint::None;
         }
         match shape {
-            Ok(shape) => self.add_shape(shape, style, label),
+            Ok(shape) => self.add_shape(shape, &style, label),
             Err(error) => self.say_error(label, error.into()),
         }
     }
@@ -940,11 +1041,14 @@ impl View {
         let Some(node) = drawing.node_at(&path) else {
             return;
         };
-        let Some(moved) = moved_node(node, &drawing, &path, grip, to) else {
-            return;
+        let moved = match moved_node(node, &drawing, &path, grip, to) {
+            Ok(Some(moved)) => moved,
+            Ok(None) => return,
+            Err(error) => return self.say_error("Move node", error.into()),
         };
-        let result = drawing
-            .with_node_at(&path, Arc::new(moved))
+        let result = try_arc(moved)
+            .map_err(DrawingError::from)
+            .and_then(|moved| drawing.with_node_at(&path, moved))
             .map_err(edit::EditError::from);
         self.apply(result, "Move node");
     }
@@ -952,32 +1056,21 @@ impl View {
     fn place_guide(&mut self, horizontal: bool, at: f64, index: Option<usize>, layout: &Layout) {
         let over =
             tairix_geometry::Point::new(round_i32(self.pointer.x), round_i32(self.pointer.y));
-        let mut guides: Vec<Guide> = self.document.drawing().guides().to_vec();
-        if let Some(index) = index {
-            if index < guides.len() {
-                guides.remove(index);
-            }
-        }
-        if layout.canvas.contains(over) {
-            guides.push(Guide {
-                axis: if horizontal {
-                    GuideAxis::Horizontal
-                } else {
-                    GuideAxis::Vertical
-                },
-                position: at,
-            });
-        }
-        let label = match (index, layout.canvas.contains(over)) {
+        let placed = layout.canvas.contains(over).then_some(Guide {
+            axis: if horizontal {
+                GuideAxis::Horizontal
+            } else {
+                GuideAxis::Vertical
+            },
+            position: at,
+        });
+        let label = match (index, placed) {
             (None, _) => "Add guide",
-            (Some(_), true) => "Move guide",
-            (Some(_), false) => "Remove guide",
+            (Some(_), Some(_)) => "Move guide",
+            (Some(_), None) => "Remove guide",
         };
-        let result = self
-            .document
-            .drawing()
-            .with_guides(Arc::from(guides))
-            .map_err(edit::EditError::from);
+        let result =
+            with_guide(self.document.drawing(), index, placed).map_err(edit::EditError::from);
         self.apply(result, label);
     }
 
@@ -994,8 +1087,27 @@ impl View {
         damage: &mut Region,
     ) -> ViewOutcome {
         if self.typing.is_some() && !modifiers.ctrl {
-            self.type_key(key, layout, damage);
+            self.type_key(key, modifiers.shift, layout, damage);
             return Outcome::none();
+        }
+        if let (Some(typing), true, Key::Char('a' | 'A')) = (&mut self.typing, modifiers.ctrl, &key)
+        {
+            let length = self
+                .live
+                .as_ref()
+                .map_or_else(|| self.document.drawing(), |live| &live.drawing)
+                .node_at(&typing.path)
+                .and_then(|node| match node.kind() {
+                    Kind::Text { text, .. } => Some(text.content.len()),
+                    _ => None,
+                });
+            if let Some(length) = length {
+                typing.anchor = 0;
+                typing.caret = length;
+                self.refresh_inspector();
+                damage.add(layout.window);
+                return Outcome::none();
+            }
         }
         if self.inspector.has_keyboard() {
             if !modifiers.ctrl {
@@ -1053,9 +1165,9 @@ impl View {
             return;
         }
         let step = if self.modifiers.shift {
-            NUDGE * 10.0
+            self.handling.nudge * 10.0
         } else {
-            NUDGE
+            self.handling.nudge
         };
         let result = edit::transform(
             self.document.drawing(),
@@ -1085,92 +1197,102 @@ impl View {
         }
     }
 
-    /// A key typed into text: an edit shows the text afresh, to land as one
-    /// step when typing ends; a move of the caret changes no drawing.
-    fn type_key(&mut self, key: Key, layout: &Layout, damage: &mut Region) {
-        let Some(Typing { path, id, caret }) = self.typing.clone() else {
+    /// A key typed into text: an edit replaces the selection — or at a bare
+    /// caret adds or takes away one character — the runs following the
+    /// characters, and shows the text afresh to land as one step when typing
+    /// ends. A move of the caret changes no drawing; with `extend` it carries
+    /// the selection with it.
+    fn type_key(&mut self, key: Key, extend: bool, layout: &Layout, damage: &mut Region) {
+        let Some(typing) = self.typing.clone() else {
             return;
         };
         let drawing = self.shown().clone();
-        let typed = drawing.node_at(&path).filter(|node| node.id() == id);
-        let Some((node, Kind::Text { text, style })) = typed.map(|node| (node, node.kind())) else {
+        let typed = drawing
+            .node_at(&typing.path)
+            .filter(|node| node.id() == typing.id);
+        let Some((node, Kind::Text { text, .. })) = typed.map(|node| (node, node.kind())) else {
             self.typing = None;
             return;
         };
-        let mut content = String::from(&*text.content);
-        let mut caret = char_start(&content, caret);
-        let edited = match key {
+        let content = &*text.content;
+        let caret = char_start(content, typing.caret);
+        let anchor = char_start(content, typing.anchor);
+        let selected = caret.min(anchor)..caret.max(anchor);
+        let before = |at: usize| {
+            content[..at]
+                .chars()
+                .next_back()
+                .map_or(at, |c| at - c.len_utf8())
+        };
+        let after = |at: usize| {
+            content[at..]
+                .chars()
+                .next()
+                .map_or(at, |c| at + c.len_utf8())
+        };
+        let along = matches!(text.baseline, tairix_drawing::Baseline::Path(_));
+        let mut spelled = [0; 4];
+        let (edit, moved) = match key {
             Key::Named(NamedKey::Escape) => {
                 self.finish_typing();
                 damage.add(layout.window);
                 return;
             }
-            Key::Named(NamedKey::Enter) => {
-                content.insert(caret, '\n');
-                caret += 1;
-                true
+            // A text along a path is one line.
+            Key::Named(NamedKey::Enter) if along => return,
+            Key::Named(NamedKey::Enter) => (Some((selected, "\n")), caret),
+            Key::Named(NamedKey::Backspace) if selected.is_empty() => {
+                (Some((before(caret)..caret, "")), caret)
             }
-            Key::Named(NamedKey::Backspace) => match content[..caret].chars().next_back() {
-                Some(previous) => {
-                    caret -= previous.len_utf8();
-                    content.remove(caret);
-                    true
-                }
-                None => false,
-            },
-            Key::Named(NamedKey::Delete) if caret < content.len() => {
-                content.remove(caret);
-                true
+            Key::Named(NamedKey::Delete) if selected.is_empty() => {
+                (Some((caret..after(caret), "")), caret)
             }
-            Key::Named(NamedKey::Left) => {
-                if let Some(previous) = content[..caret].chars().next_back() {
-                    caret -= previous.len_utf8();
-                }
-                false
-            }
-            Key::Named(NamedKey::Right) => {
-                if let Some(next) = content[caret..].chars().next() {
-                    caret += next.len_utf8();
-                }
-                false
-            }
+            Key::Named(NamedKey::Backspace | NamedKey::Delete) => (Some((selected, "")), caret),
+            Key::Named(NamedKey::Left) if !extend && !selected.is_empty() => (None, selected.start),
+            Key::Named(NamedKey::Right) if !extend && !selected.is_empty() => (None, selected.end),
+            Key::Named(NamedKey::Left) => (None, before(caret)),
+            Key::Named(NamedKey::Right) => (None, after(caret)),
             Key::Named(NamedKey::Home) => {
-                caret = content[..caret].rfind('\n').map_or(0, |at| at + 1);
-                false
+                (None, content[..caret].rfind('\n').map_or(0, |at| at + 1))
             }
-            Key::Named(NamedKey::End) => {
-                caret = content[caret..]
+            Key::Named(NamedKey::End) => (
+                None,
+                content[caret..]
                     .find('\n')
-                    .map_or(content.len(), |at| caret + at);
-                false
-            }
+                    .map_or(content.len(), |at| caret + at),
+            ),
             Key::Char(character) if !character.is_control() => {
-                content.insert(caret, character);
-                caret += character.len_utf8();
-                true
+                let spelled: &str = character.encode_utf8(&mut spelled);
+                (Some((selected, spelled)), caret)
             }
             _ => return,
         };
-        damage.add(layout.canvas);
-        if !edited {
-            self.typing = Some(Typing { path, id, caret });
+        damage.add(layout.window);
+        let Some((range, with)) =
+            edit.filter(|(range, with)| !range.is_empty() || !with.is_empty())
+        else {
+            let anchor = if extend { anchor } else { moved };
+            self.typing = Some(Typing {
+                caret: moved,
+                anchor,
+                ..typing
+            });
+            self.refresh_inspector();
             return;
-        }
-        let set = Text {
-            content: Arc::from(content.as_str()),
-            ..(**text).clone()
         };
-        let rebuilt = node.with_kind(Kind::Text {
-            text: Arc::new(set),
-            style: style.clone(),
-        });
-        match rebuilt.and_then(|rebuilt| drawing.with_node_at(&path, Arc::new(rebuilt))) {
+        let caret = range.start + with.len();
+        let result = text
+            .replaced(range, with)
+            .map_err(edit::EditError::from)
+            .and_then(|text| retyped(&drawing, &typing.path, node, text));
+        match result {
             Ok(drawing) => {
                 self.show_live(drawing, TYPE_TEXT);
-                self.typing = Some(Typing { path, id, caret });
+                self.typing = Some(Typing::at(typing.path, typing.id, caret));
             }
-            Err(error) => self.say_error("Type", error.into()),
+            Err(error) => self.say_error("Type", error),
         }
+        self.refresh_inspector();
     }
 
     /// Carry out what the inspector changed.
@@ -1181,22 +1303,15 @@ impl View {
                 target,
                 paint,
                 settled,
-            } => {
-                let label = match target {
-                    Target::Fill => "Fill",
-                    Target::Stroke => "Stroke",
-                };
-                self.restyle(label, settled, &|style| match target {
-                    Target::Fill => style.fill = paint.clone(),
-                    Target::Stroke => style.stroke.paint = paint.clone(),
-                });
-            }
+            } => self.paint_with(target, &paint, settled),
             Change::Width { width, settled } => {
                 self.restyle("Stroke width", settled, &|style| style.stroke.width = width);
             }
             Change::Join(join) => self.restyle("Join", true, &|style| style.stroke.join = join),
             Change::Cap(cap) => self.restyle("Cap", true, &|style| style.stroke.cap = cap),
-            Change::Dash(index) => self.restyle("Dashes", true, &|style| dash(style, index)),
+            Change::Dash(index) => {
+                self.restyle_or_refuse("Dashes", true, &|style| dash(style, index));
+            }
             Change::Head { end, shape } => self.restyle("Arrowhead", true, &|style| {
                 let head = if end {
                     &mut style.stroke.end
@@ -1240,34 +1355,249 @@ impl View {
                 self.star.polygon = polygon;
                 self.reshape_star("Polygon", &|star| star.polygon = polygon);
             }
-            Change::Family(family) => {
-                self.text.family = family;
-                self.reset_text("Font", &|text| text.family = Arc::from(family));
-            }
-            Change::Size(size) => {
-                self.text.size = size;
-                self.reset_text("Text size", &|text| text.size = size);
-            }
-            Change::Bold(bold) => {
-                self.text.bold = bold;
-                let weight = if bold { 700 } else { 400 };
-                self.reset_text("Bold", &|text| text.weight = weight);
-            }
-            Change::Italic(italic) => {
-                self.text.italic = italic;
-                self.reset_text("Italic", &|text| text.italic = italic);
-            }
-            Change::TextAlign(align) => {
-                self.text.align = align;
-                self.reset_text("Align text", &|text| text.align = align);
-            }
+            Change::Text(change) => self.change_text(change),
+            Change::Offset(distance) => self.offset_distance = distance,
+            Change::Smoothness(tolerance) => self.simplify_tolerance = tolerance,
+            Change::Page(change) => self.change_page(change),
+            Change::Form { target, form } => self
+                .repaint((target, "Gradient", true), &|paint, bounds| {
+                    gradient::formed(paint, form, bounds)
+                }),
+            Change::Stops {
+                target,
+                stops,
+                spread,
+                form,
+                settled,
+            } => self.repaint((target, "Gradient", settled), &|paint, bounds| {
+                gradient::restopped(paint, (&stops, spread, form), bounds)
+            }),
+            Change::Rotation(degrees) => self.rotate_to(degrees),
+            Change::KeepSwatch(colour) => self.keep_swatch(colour),
+            Change::DropSwatch(index) => self.drop_swatch(index),
+            Change::Refused { what, error } => self.say_error(what, error.into()),
         }
         self.refresh_inspector();
     }
 
+    /// The `target` paint made `paint`: of the characters typing has
+    /// selected, as runs, where it is a colour or none; else of the selection
+    /// and of what is drawn next — a gradient always paints a whole text.
+    fn paint_with(&mut self, target: Target, paint: &Paint, settled: bool) {
+        let label = match target {
+            Target::Fill => "Fill",
+            Target::Stroke => "Stroke",
+        };
+        let typed = self.typed().filter(|range| !range.is_empty());
+        if let (Some(range), Some(painted)) = (typed, RunPaint::of(paint)) {
+            return self.restyle_characters(label, range, &|run| match target {
+                Target::Fill => RunStyle {
+                    fill: Some(painted),
+                    ..run.clone()
+                },
+                Target::Stroke => RunStyle {
+                    stroke: Some(painted),
+                    ..run.clone()
+                },
+            });
+        }
+        self.restyle(label, settled, &|style| match target {
+            Target::Fill => style.fill = paint.clone(),
+            Target::Stroke => style.stroke.paint = paint.clone(),
+        });
+    }
+
+    /// Text set as `change` asks: what is typed next, and the characters
+    /// typing has selected — as runs — or else the whole of each text
+    /// selected, what its runs said of the same given up.
+    fn change_text(&mut self, change: TextChange) {
+        match change {
+            TextChange::Family(family) => {
+                self.text.family = family;
+                match SharedStr::try_from_str(family) {
+                    Ok(family) => self.set_text(
+                        "Font",
+                        &|run| RunStyle {
+                            family: Some(family.clone()),
+                            ..run.clone()
+                        },
+                        &|text| text.family = family.clone(),
+                        &|run| run.family = None,
+                    ),
+                    Err(error) => self.say_error("Font", DrawingError::from(error).into()),
+                }
+            }
+            TextChange::Size(size) => {
+                self.text.size = size;
+                self.set_text(
+                    "Text size",
+                    &|run| RunStyle {
+                        size: Some(size),
+                        ..run.clone()
+                    },
+                    &|text| text.size = size,
+                    &|run| run.size = None,
+                );
+            }
+            TextChange::Bold(bold) => {
+                self.text.bold = bold;
+                let weight = if bold { 700 } else { 400 };
+                self.set_text(
+                    "Bold",
+                    &|run| RunStyle {
+                        weight: Some(weight),
+                        ..run.clone()
+                    },
+                    &|text| text.weight = weight,
+                    &|run| run.weight = None,
+                );
+            }
+            TextChange::Italic(italic) => {
+                self.text.italic = italic;
+                self.set_text(
+                    "Italic",
+                    &|run| RunStyle {
+                        italic: Some(italic),
+                        ..run.clone()
+                    },
+                    &|text| text.italic = italic,
+                    &|run| run.italic = None,
+                );
+            }
+            TextChange::Spacing(spacing) => self.set_text(
+                "Letter spacing",
+                &|run| RunStyle {
+                    letter_spacing: Some(spacing),
+                    ..run.clone()
+                },
+                &|text| text.letter_spacing = spacing,
+                &|run| run.letter_spacing = None,
+            ),
+            TextChange::Raise(raise) => {
+                // A text has no raise of its own: raising the whole of it
+                // raises every character as one run.
+                let raised = &|run: &RunStyle| RunStyle {
+                    baseline_shift: (raise != 0.0).then_some(raise),
+                    ..run.clone()
+                };
+                match self.typed().filter(|range| !range.is_empty()) {
+                    Some(range) => self.restyle_characters("Raise", range, raised),
+                    None => self.reset_text("Raise", &|text| {
+                        *text = text.restyled(0..text.content.len(), raised)?;
+                        Ok(())
+                    }),
+                }
+            }
+            TextChange::Align(align) => {
+                self.text.align = align;
+                self.reset_text("Align text", &|text| {
+                    text.align = align;
+                    Ok(())
+                });
+            }
+            TextChange::LineHeight(height) => self.reset_text("Line height", &|text| {
+                if let Baseline::Lines { line_height, .. } = &mut text.baseline {
+                    *line_height = height;
+                }
+                Ok(())
+            }),
+            TextChange::Start(start) => self.reset_text("Start along path", &|text| {
+                if let Baseline::Path(along) = &text.baseline {
+                    let moved = TextPath {
+                        start,
+                        ..(**along).clone()
+                    };
+                    text.baseline = Baseline::Path(try_arc(moved)?);
+                }
+                Ok(())
+            }),
+        }
+    }
+
+    /// A change to how text is set: to the characters typing has selected,
+    /// `run` makes each run's style of what it was; else `own` sets each
+    /// selected text and `clear` takes the same from every run of it.
+    fn set_text(
+        &mut self,
+        label: &'static str,
+        run: &dyn Fn(&RunStyle) -> RunStyle,
+        own: &dyn Fn(&mut Text),
+        clear: &dyn Fn(&mut RunStyle),
+    ) {
+        if let Some(range) = self.typed().filter(|range| !range.is_empty()) {
+            return self.restyle_characters(label, range, run);
+        }
+        self.reset_text(label, &|text| {
+            own(text);
+            if !text.runs.is_empty() {
+                *text = text.restyled(0..text.content.len(), |style| {
+                    let mut cleared = style.clone();
+                    clear(&mut cleared);
+                    cleared
+                })?;
+            }
+            Ok(())
+        });
+    }
+
+    /// The characters `range` of the text being typed restyled by `run`, to
+    /// land with the typing.
+    fn restyle_characters(
+        &mut self,
+        label: &'static str,
+        range: core::ops::Range<usize>,
+        run: &dyn Fn(&RunStyle) -> RunStyle,
+    ) {
+        let Some(typing) = self.typing.clone() else {
+            return;
+        };
+        let drawing = self.shown().clone();
+        let typed = drawing
+            .node_at(&typing.path)
+            .filter(|node| node.id() == typing.id);
+        let Some((node, Kind::Text { text, .. })) = typed.map(|node| (node, node.kind())) else {
+            return;
+        };
+        let result = text
+            .restyled(range, run)
+            .map_err(edit::EditError::from)
+            .and_then(|text| retyped(&drawing, &typing.path, node, text));
+        self.take_change(result, label, true);
+    }
+
+    fn change_page(&mut self, change: PageChange) {
+        match change {
+            PageChange::Width(width) => {
+                self.repage("Page size", true, |page| page.width = width);
+            }
+            PageChange::Height(height) => {
+                self.repage("Page size", true, |page| page.height = height);
+            }
+            PageChange::Landscape(landscape) => self.lay_page(landscape),
+            PageChange::Unit(unit) => self.set_unit(unit),
+            PageChange::GridSpacing(spacing) => {
+                let unit = self.edit_base().page().unit.pixels();
+                self.regrid("Grid spacing", |grid| grid.spacing = spacing * unit);
+            }
+            PageChange::Subdivisions(cells) => {
+                self.regrid("Grid subdivisions", |grid| grid.subdivisions = cells);
+            }
+            PageChange::Resolution(resolution) => {
+                let result = self
+                    .edit_base()
+                    .with_resolution(resolution)
+                    .map_err(edit::EditError::from);
+                self.take_change(result, "Copy resolution", true);
+            }
+            PageChange::Ground { colour, settled } => {
+                self.repage("Page ground", settled, |page| page.background = colour);
+            }
+        }
+    }
+
     /// What an inspector change edits: the drawing typing shows while it is
     /// under way, so the change lands with it, else the document's.
-    fn edit_base(&self) -> &tairix_drawing::Drawing {
+    pub(crate) fn edit_base(&self) -> &tairix_drawing::Drawing {
         if self.typing.is_some() {
             self.shown()
         } else {
@@ -1277,18 +1607,23 @@ impl View {
 
     /// Take what an inspector change made: shown, to land with typing under
     /// way or as `label` once `settled`, or landed as `label` now.
-    fn take_change(
+    pub(crate) fn take_change(
         &mut self,
         result: Result<tairix_drawing::Drawing, edit::EditError>,
         label: &'static str,
         settled: bool,
     ) {
         match result {
-            Ok(drawing) if drawing.is(self.shown()) => {}
-            Ok(drawing) if self.typing.is_some() => self.show_live(drawing, TYPE_TEXT),
+            Ok(drawing) if self.typing.is_some() => {
+                if !drawing.is(self.shown()) {
+                    self.show_live(drawing, TYPE_TEXT);
+                }
+            }
             // Back where the document stands: nothing is under way.
             Ok(drawing) if drawing.is(self.document.drawing()) => self.drop_live(),
+            // Settled as it was shown live, it still lands.
             Ok(drawing) if settled => self.commit(drawing, label),
+            Ok(drawing) if drawing.is(self.shown()) => {}
             Ok(drawing) => self.show_live(drawing, label),
             Err(error) => self.say_error(label, error),
         }
@@ -1298,17 +1633,150 @@ impl View {
     /// selection's with it: shown while `settled` is false, landed as one
     /// step called `label` once it is.
     fn restyle(&mut self, label: &'static str, settled: bool, alter: &dyn Fn(&mut Style)) {
-        alter(&mut self.style);
+        self.restyle_or_refuse(label, settled, &|style| {
+            alter(style);
+            Ok(())
+        });
+    }
+
+    /// As [`restyle`](Self::restyle), for an alteration that can be refused,
+    /// which is said and leaves the drawing as it was.
+    fn restyle_or_refuse(
+        &mut self,
+        label: &'static str,
+        settled: bool,
+        alter: &dyn Fn(&mut Style) -> Result<(), tairix_drawing::DrawingError>,
+    ) {
+        if let Err(error) = alter(&mut self.style) {
+            return self.say_error(label, error.into());
+        }
         if self.selection.is_empty() {
             return;
         }
-        let altered = |style: &Style| {
+        let altered = |style: &Style, _: &edit::Placed<'_>| {
             let mut style = style.clone();
-            alter(&mut style);
-            style
+            alter(&mut style)?;
+            Ok(style)
         };
-        let result = edit::restyle(self.edit_base(), &self.selection, &altered);
+        let glyphs = Lettering::new(Arrived);
+        let result = edit::restyle(self.edit_base(), &self.selection, &altered, &glyphs);
         self.take_change(result, label, settled);
+    }
+
+    /// The `target` paint new objects are drawn in, and each selected
+    /// object's, made what `repaint` makes of it and of the object's own
+    /// bounds: shown while `settled` is false, landed as one step called
+    /// `label` once it is. New objects' paint is made over a unit box, which
+    /// an object drawn in it is fitted to again.
+    fn repaint(
+        &mut self,
+        (target, label, settled): (Target, &'static str, bool),
+        repaint: &Repaint<'_>,
+    ) {
+        let unit = || tairix_bezier::Bounds::new(Point::ZERO, Point::new(1.0, 1.0));
+        match repaint(target.of(&self.style), &unit) {
+            Ok(paint) => *target.of_mut(&mut self.style) = paint,
+            Err(error) => return self.say_error(label, error.into()),
+        }
+        if self.selection.is_empty() {
+            return;
+        }
+        let repainted = |style: &Style, placed: &edit::Placed<'_>| {
+            let mut style = style.clone();
+            *target.of_mut(&mut style) = repaint(target.of(&style), &|| placed.bounds())?;
+            Ok(style)
+        };
+        let glyphs = Lettering::new(Arrived);
+        let result = edit::restyle(self.edit_base(), &self.selection, &repainted, &glyphs);
+        self.take_change(result, label, settled);
+    }
+
+    /// The selection's paint in the Style tab's hand laid as a gradient from
+    /// the line's start to its end on the page — its end in 15° steps with
+    /// Shift, radial about its start with Alt — in each object's own space:
+    /// shown live until `settled`, then one step. A line no longer than a
+    /// pixel lays nothing.
+    fn lay_gradient(&mut self, (from, to): (Point, Point), settled: bool) {
+        let even = Constraint {
+            even: self.modifiers.shift,
+            centred: false,
+        };
+        let end = tools::line_end(from, to, even);
+        if from.distance(end) < self.pixel() {
+            if settled {
+                self.drop_live();
+            }
+            return;
+        }
+        let (target, radial) = (self.inspector.target(), self.modifiers.alt);
+        let lay = |style: &Style, placed: &edit::Placed<'_>| {
+            // A transform with no inverse leaves an object no area to paint.
+            let Some(back) = placed.to_drawing().invert() else {
+                return Ok(style.clone());
+            };
+            let mut style = style.clone();
+            let line = (back.map(from), back.map(end));
+            *target.of_mut(&mut style) = gradient::laid(target.of(&style), line, radial)?;
+            Ok(style)
+        };
+        let glyphs = Lettering::new(Arrived);
+        let result = edit::restyle(self.edit_base(), &self.selection, &lay, &glyphs);
+        self.take_change(result, "Gradient", settled);
+    }
+
+    /// The selection turned about its centre so it stands `degrees`
+    /// anticlockwise: one object as its own angle says, several together.
+    fn rotate_to(&mut self, degrees: f64) {
+        if self.selection.is_empty() {
+            return;
+        }
+        let turn = degrees - edit::angle_of(self.edit_base(), &self.selection);
+        // The field shows hundredths of a degree: an angle asked for that
+        // reads as the one shown is no turn.
+        if tairix_util::mathf::round(turn * 100.0) == 0.0 {
+            return;
+        }
+        let centre = self.selection_bounds().centre();
+        // The page runs downward, so a turn anticlockwise on it is negative.
+        let map = tairix_bezier::Affine::rotate_degrees_about(-turn, centre.x, centre.y);
+        let result = edit::transform(self.edit_base(), &self.selection, map);
+        self.take_change(result, "Rotate", true);
+    }
+
+    /// The drawing keeping `colour` among its swatches, once.
+    fn keep_swatch(&mut self, colour: tairix_colour::Rgba) {
+        self.reswatch("Add swatch", |swatches| {
+            if !swatches.contains(&colour) && swatches.try_reserve(1).is_ok() {
+                swatches.push(colour);
+            }
+        });
+    }
+
+    /// The drawing keeping its swatches but the one at `index`.
+    fn drop_swatch(&mut self, index: usize) {
+        self.reswatch("Remove swatch", |swatches| {
+            if index < swatches.len() {
+                swatches.remove(index);
+            }
+        });
+    }
+
+    /// The drawing keeping `swatches` as `alter` leaves them, as one step
+    /// called `label`; a list left as it was is no step.
+    fn reswatch(&mut self, label: &'static str, alter: impl FnOnce(&mut Vec<tairix_colour::Rgba>)) {
+        let base = self.edit_base();
+        let Some(mut swatches) = tairix_util::fallible::copied(base.swatches()) else {
+            return self.say_error(label, tairix_drawing::DrawingError::OutOfMemory.into());
+        };
+        alter(&mut swatches);
+        if swatches.as_slice() == base.swatches() {
+            return;
+        }
+        let result = SharedSlice::try_from_vec(swatches)
+            .map_err(DrawingError::from)
+            .and_then(|swatches| base.with_swatches(swatches))
+            .map_err(edit::EditError::from);
+        self.take_change(result, label, true);
     }
 
     fn set_opacity(&mut self, opacity: f64, settled: bool) {
@@ -1377,7 +1845,7 @@ impl View {
                 style,
             } = kind
             else {
-                return None;
+                return Ok(None);
             };
             let radius = radius.clamp(0.0, tairix_util::mathf::fmin(rect.width, rect.height) / 2.0);
             let rounded = tairix_drawing::shape::RectShape {
@@ -1386,23 +1854,27 @@ impl View {
                 ..*rect
             };
             if rounded == *rect {
-                return None;
+                return Ok(None);
             }
-            Some(Kind::Shape {
+            Ok(Some(Kind::Shape {
                 shape: Shape::Rect(rounded),
                 style: style.clone(),
-            })
+            }))
         });
     }
 
     /// Every selected object `change` makes anew made so, as one step; one
     /// it leaves as it is, not at all.
-    fn reshape_selected(&mut self, label: &'static str, change: &dyn Fn(&Kind) -> Option<Kind>) {
+    fn reshape_selected(
+        &mut self,
+        label: &'static str,
+        change: &dyn Fn(&Kind) -> Result<Option<Kind>, DrawingError>,
+    ) {
         if self.selection.is_empty() {
             return;
         }
         let result = edit::each(self.edit_base(), &self.selection, |_, _, node| {
-            Ok(change(node.kind())
+            Ok(change(node.kind())?
                 .map(|kind| node.with_kind(kind))
                 .transpose()?)
         });
@@ -1417,36 +1889,39 @@ impl View {
                 style,
             } = kind
             else {
-                return None;
+                return Ok(None);
             };
             let mut altered = *star;
             alter(&mut altered);
             if altered == *star {
-                return None;
+                return Ok(None);
             }
-            let star = altered;
-            Some(Kind::Shape {
-                shape: Shape::Star(star),
+            Ok(Some(Kind::Shape {
+                shape: Shape::Star(altered),
                 style: style.clone(),
-            })
+            }))
         });
     }
 
     /// Every selected text set anew by `alter`.
-    fn reset_text(&mut self, label: &'static str, alter: &dyn Fn(&mut Text)) {
+    fn reset_text(
+        &mut self,
+        label: &'static str,
+        alter: &dyn Fn(&mut Text) -> Result<(), DrawingError>,
+    ) {
         self.reshape_selected(label, &|kind| {
             let Kind::Text { text, style } = kind else {
-                return None;
+                return Ok(None);
             };
             let mut altered = (**text).clone();
-            alter(&mut altered);
+            alter(&mut altered)?;
             if altered == **text {
-                return None;
+                return Ok(None);
             }
-            Some(Kind::Text {
-                text: Arc::new(altered),
+            Ok(Some(Kind::Text {
+                text: try_arc(altered)?,
                 style: style.clone(),
-            })
+            }))
         });
     }
 
@@ -1458,7 +1933,7 @@ impl View {
                        change: &dyn Fn(&Node) -> Node|
          -> Result<tairix_drawing::Drawing, edit::EditError> {
             let layer = drawing.node_at(&[index]).ok_or(edit::EditError::Nothing)?;
-            Ok(drawing.with_node_at(&[index], Arc::new(change(layer)))?)
+            Ok(drawing.with_node_at(&[index], try_arc(change(layer))?)?)
         };
         match command {
             LayerCommand::Choose(index) => self.layer = index.min(layers.saturating_sub(1)),
@@ -1551,15 +2026,57 @@ fn path_frame<'n>(
     path: &[usize],
     to: Point,
 ) -> Option<(&'n Arc<tairix_drawing::PathShape>, Point)> {
-    let Kind::Shape {
-        shape: Shape::Path(shape),
-        ..
-    } = node.kind()
-    else {
-        return None;
-    };
+    let shape = node_path(node)?;
     let to_drawing = node.transform().then(edit::parent_space(drawing, path));
     Some((shape, to_drawing.invert()?.map(to)))
+}
+
+/// The path `node` is edited by node by node: a path shape's own, or the
+/// path a text is set along.
+pub(crate) fn node_path(node: &Node) -> Option<&Arc<tairix_drawing::PathShape>> {
+    match node.kind() {
+        Kind::Shape {
+            shape: Shape::Path(shape),
+            ..
+        } => Some(shape),
+        Kind::Text { text, .. } => match &text.baseline {
+            Baseline::Path(along) => Some(&along.path),
+            Baseline::Lines { .. } => None,
+        },
+        Kind::Shape { .. } | Kind::Image { .. } | Kind::Group { .. } => None,
+    }
+}
+
+/// `node` with `shape` in place of the path it is edited by.
+fn with_node_path(
+    node: &Node,
+    shape: tairix_drawing::PathShape,
+) -> Result<Option<Node>, DrawingError> {
+    let kind = match node.kind() {
+        Kind::Shape { style, .. } => Kind::Shape {
+            shape: Shape::Path(try_arc(shape)?),
+            style: style.clone(),
+        },
+        Kind::Text { text, style } => {
+            let Baseline::Path(along) = &text.baseline else {
+                return Ok(None);
+            };
+            let moved = TextPath {
+                path: try_arc(shape)?,
+                start: along.start,
+            };
+            let text = Text {
+                baseline: Baseline::Path(try_arc(moved)?),
+                ..(**text).clone()
+            };
+            Kind::Text {
+                text: try_arc(text)?,
+                style: style.clone(),
+            }
+        }
+        Kind::Image { .. } | Kind::Group { .. } => return Ok(None),
+    };
+    Ok(Some(node.with_kind(kind)?))
 }
 
 /// `target`, a path node, with the part `part` of it moved to the local
@@ -1623,18 +2140,51 @@ pub(crate) fn moved_node(
     path: &[usize],
     grip: Grip,
     to: Point,
-) -> Option<Node> {
-    let moved = gripped(node, drawing, path, grip, to)?;
-    let (shape, _) = path_frame(node, drawing, path, to)?;
-    let Kind::Shape { style, .. } = node.kind() else {
-        return None;
+) -> Result<Option<Node>, DrawingError> {
+    let Some(moved) = gripped(node, drawing, path, grip, to) else {
+        return Ok(None);
     };
-    let shape = shape.with_node(grip.contour, grip.node, moved).ok()?;
-    node.with_kind(Kind::Shape {
-        shape: Shape::Path(Arc::new(shape)),
+    let Some((shape, _)) = path_frame(node, drawing, path, to) else {
+        return Ok(None);
+    };
+    with_node_path(node, shape.with_node(grip.contour, grip.node, moved)?)
+}
+
+/// `drawing` with the text `node` at `path` set as `text`.
+fn retyped(
+    drawing: &tairix_drawing::Drawing,
+    path: &[usize],
+    node: &Node,
+    text: Text,
+) -> Result<tairix_drawing::Drawing, edit::EditError> {
+    let Kind::Text { style, .. } = node.kind() else {
+        return Err(edit::EditError::Nothing);
+    };
+    let rebuilt = node.with_kind(Kind::Text {
+        text: try_arc(text)?,
         style: style.clone(),
-    })
-    .ok()
+    })?;
+    Ok(drawing.with_node_at(path, try_arc(rebuilt)?)?)
+}
+
+/// `drawing` with its guide `index`, if any, taken away, and `placed`, if
+/// any, added after the rest.
+fn with_guide(
+    drawing: &tairix_drawing::Drawing,
+    index: Option<usize>,
+    placed: Option<Guide>,
+) -> Result<tairix_drawing::Drawing, DrawingError> {
+    let mut guides =
+        tairix_util::fallible::copied(drawing.guides()).ok_or(DrawingError::OutOfMemory)?;
+    if let Some(index) = index.filter(|&index| index < guides.len()) {
+        guides.remove(index);
+    }
+    if let Some(guide) = placed {
+        if !tairix_util::fallible::push(&mut guides, guide) {
+            return Err(DrawingError::OutOfMemory);
+        }
+    }
+    drawing.with_guides(SharedSlice::try_from_vec(guides)?)
 }
 
 #[cfg(test)]

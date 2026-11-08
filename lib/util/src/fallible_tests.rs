@@ -2,15 +2,20 @@
 
 use super::{
     boxed_array, collected, concatenated, copied, filled, grow_to, push, read_snapshot, reserve,
-    trim, written, zeroed,
+    trim, try_push, written, zeroed,
 };
 use alloc::vec::Vec;
 use tairix_abi::Errno;
 
-/// A count whose `T`-sized layout cannot be reserved on any target: the
-/// byte size overflows, so the refusal is the allocator's answer rather
-/// than a property of the host's free memory.
+/// A count whose layout of any `T` wider than a byte cannot be reserved on
+/// any target: the byte size overflows, so the refusal is the reservation's
+/// own answer rather than a property of the host's free memory.
 const UNRESERVABLE: usize = usize::MAX / 2;
+
+/// [`UNRESERVABLE`] for bytes: past the most bytes any layout may span, so it
+/// is refused before an allocator is asked — `usize::MAX / 2` bytes is a
+/// layout an allocator, or an interpreter checking these tests, is handed.
+const UNRESERVABLE_BYTES: usize = usize::MAX;
 
 #[test]
 fn a_refused_reservation_is_answered_not_aborted() {
@@ -50,6 +55,15 @@ fn a_list_pushed_an_item_at_a_time_grows_by_doubling() {
     }
     assert_eq!(list.len(), 4096);
     assert_eq!(list[4095], 4095);
+    assert!(grown <= 13, "{grown} reallocations for 4096 pushes");
+    let mut more: Vec<u32> = Vec::new();
+    let mut grown = 0;
+    for item in 0..4096 {
+        let before = more.capacity();
+        assert_eq!(try_push(&mut more, item), Ok(()));
+        grown += usize::from(more.capacity() != before);
+    }
+    assert_eq!(more, list);
     assert!(grown <= 13, "{grown} reallocations for 4096 pushes");
 }
 
@@ -171,4 +185,24 @@ fn an_exact_buffer_is_left_where_it_is() {
     let at = words.as_ptr();
     trim(&mut words);
     assert_eq!(words.as_ptr(), at, "nothing to trim is no copy");
+}
+
+#[test]
+fn text_grows_by_what_is_written_and_keeps_it() {
+    use core::fmt::Write as _;
+    let mut text = super::Text::new();
+    assert!(text.is_empty());
+    let (number, word) = (12, "ab");
+    write!(text, "{number}-{word}").expect("room");
+    text.write_char('é').expect("room");
+    assert_eq!(text.as_str(), "12-abé");
+    assert_eq!(text.len(), "12-abé".len());
+    text.reserve(64).expect("room");
+    assert_eq!(text.into_string(), "12-abé");
+    let mut refused = super::Text::new();
+    assert!(
+        refused.reserve(UNRESERVABLE_BYTES).is_err(),
+        "a refusal is answered"
+    );
+    assert!(refused.is_empty(), "and leaves the text as it was");
 }

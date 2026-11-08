@@ -44,6 +44,7 @@ mod program {
         RtHost, Settings,
     };
     use tairix_controls::damage;
+    use tairix_controls::SettingsLayout;
     use tairix_geometry::{Region, Scale};
     use tairix_icon::{
         artwork_cache, ArtworkCache, IconArtworkSource, InlineArtwork, NoArtworkSeam,
@@ -62,7 +63,7 @@ mod program {
         encode, format_for, format_named, lost_in, write_back, SaveFormat, SaveRefusal,
     };
     use tairix_paint::selection::adapt_pasted;
-    use tairix_paint::settings::{Category, SettingsLayout, SettingsRequest, SettingsWindow};
+    use tairix_paint::settings::{Ask, Category, PaintSettings};
     use tairix_paint::view::{compute, Clip, Compute, Computed, Own, View};
     use tairix_parallel::{Pool, SERIAL};
     use tairix_raster::Surface;
@@ -73,13 +74,14 @@ mod program {
         EditFailure, EditKind,
     };
     use tairix_sandbox::imagerender::{
-        upload_document, ImageRenderService, UploadFailure, ViewFormat, MAX_DOCUMENT_BYTES,
+        upload_document, ImageRenderService, UploadFailure, ViewFormat,
     };
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::ParserSandbox;
     use tairix_theme::Theme;
     use tairix_util::defer::JobQueue;
     use tairix_window::app;
+    use tairix_window::docapp::settings::{Edit, SettingsRequest, Then};
     use tairix_window::docapp::{
         self, AnswerWake, DocWindow, DocumentApp, DocumentView, Handle, Host, Outcome, Request,
         Stamp, APP_TOKEN,
@@ -96,7 +98,8 @@ mod program {
     #[derive(Copy, Clone, Debug)]
     enum LoadRefusal {
         Read(ReadFailure),
-        TooLong,
+        /// Longer than the worker may hold: its room, in bytes.
+        TooLong(u64),
         Undecodable(EditFailure),
     }
 
@@ -104,10 +107,10 @@ mod program {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
                 Self::Read(failure) => write!(f, "{failure}"),
-                Self::TooLong => write!(
+                Self::TooLong(room) => write!(
                     f,
-                    "it is longer than the {} MiB a picture file may be",
-                    MAX_DOCUMENT_BYTES >> 20
+                    "it is longer than the {} MiB a picture file may be on this computer",
+                    room >> 20
                 ),
                 Self::Undecodable(err) => write!(f, "{err}"),
             }
@@ -135,16 +138,17 @@ mod program {
         }
     }
 
-    /// How long the regular file `file` measures, within what a worker takes.
-    fn document_length(file: &Handle) -> Result<usize, LoadRefusal> {
+    /// How long the regular file `file` measures, within `room`, what a
+    /// worker may hold.
+    fn document_length(file: &Handle, room: u64) -> Result<usize, LoadRefusal> {
         let length = file
             .regular_len()
             .map_err(ReadFailure::Unreadable)?
             .ok_or(ReadFailure::NotAFile)?;
-        usize::try_from(length)
-            .ok()
-            .filter(|&length| length <= MAX_DOCUMENT_BYTES)
-            .ok_or(LoadRefusal::TooLong)
+        if length > room {
+            return Err(LoadRefusal::TooLong(room));
+        }
+        usize::try_from(length).map_err(|_| LoadRefusal::TooLong(room))
     }
 
     /// The format to name in place of reading a document's signature: only
@@ -184,7 +188,7 @@ mod program {
         length: usize,
         entries: Entries,
     ) -> Result<Document, LoadRefusal> {
-        let opened = open_edit(sandbox, format)?;
+        let opened = open_edit(sandbox, length as u64, format)?;
         // A layered document's layers are one picture, so all are read.
         let count = match entries {
             Entries::First if opened.kind != EditKind::Layers => opened.count.min(1),
@@ -218,7 +222,7 @@ mod program {
     /// Read `load`'s document through a fresh worker.
     fn load_document(sandbox: &mut Decoder, load: &Load) -> Result<Document, LoadRefusal> {
         let fd = load.handle.fd();
-        let length = document_length(&load.handle)?;
+        let length = document_length(&load.handle, sandbox.document_room())?;
         let outcome = upload(sandbox, length, |offset, into| {
             tairix_rt::fs_read(fd, offset, into).map_err(Errno::from_syscall)
         })
@@ -498,7 +502,7 @@ mod program {
 
     impl DocumentApp for Paint {
         type View = Engine;
-        type AppView = SettingsWindow;
+        type AppView = PaintSettings;
         type Snapshot = Snapshot;
         type Extra = ();
         type Work = Work;
@@ -731,7 +735,7 @@ mod program {
                 return;
             }
             let record = host.app.preferences.live().clone();
-            let _ = host.open_app_window(SettingsWindow::new(record, Category::General));
+            let _ = host.open_app_window(PaintSettings::new(record, Category::General.index()));
         }
 
         /// What the settings window was in the middle of is written as it
@@ -741,53 +745,22 @@ mod program {
             submit_settings(host, job);
         }
 
-        fn app_request(host: &mut Host<Self>, index: usize, request: SettingsRequest) {
-            match request {
-                SettingsRequest::Edit { was, now, settled } => {
-                    host.app.preferences.edit(&was, &now);
-                    apply_settings(host);
-                    if settled {
-                        let job = host.app.preferences.settle();
-                        submit_settings(host, job);
-                    }
-                }
-                SettingsRequest::Restore => {
-                    let job = host.app.preferences.restore();
-                    submit_settings(host, job);
-                }
-                SettingsRequest::TakePanes => {
-                    let pictures = || {
-                        host.windows
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, window)| window.view.picture().is_some())
-                    };
-                    let front = pictures()
-                        .find(|(_, window)| window.focused())
-                        .or_else(|| pictures().next_back())
-                        .map(|(at, _)| at);
-                    let Some(front) = front else {
-                        let window = &mut host.app_windows[index];
-                        window.view.say(
-                            Some(String::from(
-                                "No picture window is open to take the panes of",
-                            )),
-                            &window.layout,
-                            &mut window.damage,
-                        );
-                        window.owe_reported();
-                        return;
-                    };
-                    let was = host.app.preferences.live().clone();
-                    let mut now = was.clone();
-                    if let Some(view) = host.windows[front].view.picture() {
-                        now.panes.clone_from(view.panes());
-                    }
-                    host.app.preferences.edit(&was, &now);
-                    apply_settings(host);
+        fn app_request(host: &mut Host<Self>, index: usize, request: SettingsRequest<Preferences>) {
+            if let Some(Edit { was, now, settled }) = request.edit {
+                host.app.preferences.edit(&was, &now);
+                apply_settings(host);
+                if settled {
                     let job = host.app.preferences.settle();
                     submit_settings(host, job);
                 }
+            }
+            match request.then {
+                Some(Then::Restore) => {
+                    let job = host.app.preferences.restore();
+                    submit_settings(host, job);
+                }
+                Some(Then::Ask(Ask::TakePanes)) => take_panes(host, index),
+                None => {}
             }
         }
 
@@ -938,7 +911,7 @@ mod program {
                     render_into(surface, view, layout, theme, scale, faces, &mut source);
                 }
                 (Engine::Area(view), EngineLayout::Area(layout)) => {
-                    render_area(surface, view, layout, theme, faces, scale);
+                    render_area(surface, view, layout, theme, scale);
                 }
                 _ => {}
             }
@@ -947,14 +920,14 @@ mod program {
         fn render_app(
             &mut self,
             surface: &mut Surface,
-            view: &SettingsWindow,
+            view: &PaintSettings,
             layout: &SettingsLayout,
-            style: (&Theme, Scale, Faces),
+            (theme, scale, _): (&Theme, Scale, Faces),
             _focused: bool,
         ) {
             let mut resolver = InlineArtwork::new(NoArtworkSeam, NoArtworkSeam);
             let mut source = IconArtworkSource::new(&mut self.artwork, &mut resolver);
-            view.render(surface, layout, style, &mut source);
+            view.render(surface, layout, (theme, scale), &mut source);
         }
     }
 
@@ -987,12 +960,10 @@ mod program {
     /// Say what the store refused, in the settings window and on `stderr`,
     /// and bring every window up to the settings now in force.
     fn settings_adopted(host: &mut Host<Paint>, refusals: &[StoreRefusal]) {
-        let said = refusals.iter().find_map(|refusal| match refusal {
-            StoreRefusal::NotSaved(_) | StoreRefusal::NotRestored(_) => {
-                Some(alloc::format!("{refusal}"))
-            }
-            _ => None,
-        });
+        let said = refusals
+            .iter()
+            .find(|refusal| refusal.is_write())
+            .map(|refusal| alloc::format!("{refusal}"));
         for refusal in refusals {
             app::report(APP_NAME, refusal);
         }
@@ -1008,21 +979,63 @@ mod program {
     /// Bring every window up to the settings in force: each picture window
     /// draws as they say, and the settings window shows them.
     fn apply_settings(host: &mut Host<Paint>) {
-        let preferences = host.app.preferences.live();
+        let preferences = host.app.preferences.live().clone();
         for window in &mut host.windows {
             if let (Engine::Picture(view), EngineLayout::Picture(layout)) =
                 (&mut window.view, &window.layout)
             {
-                view.adopt(preferences, layout, &mut window.damage);
+                view.adopt(&preferences, layout, &mut window.damage);
                 window.owe_reported();
             }
         }
-        for window in &mut host.app_windows {
-            window
+        for index in 0..host.app_windows.len() {
+            let window = &mut host.app_windows[index];
+            if window
                 .view
-                .adopt(preferences, &window.layout, &mut window.damage);
-            window.owe_reported();
+                .adopt(&preferences, &window.layout, &mut window.damage)
+            {
+                host.apply_app(index, Outcome::relaid());
+            } else {
+                window.owe_reported();
+            }
         }
+    }
+
+    /// Take the panes of the picture window last worked in as the ones a new
+    /// window opens with, saying in settings window `index` when none is
+    /// open.
+    fn take_panes(host: &mut Host<Paint>, index: usize) {
+        let pictures = || {
+            host.windows
+                .iter()
+                .enumerate()
+                .filter(|(_, window)| window.view.picture().is_some())
+        };
+        let front = pictures()
+            .find(|(_, window)| window.focused())
+            .or_else(|| pictures().next_back())
+            .map(|(at, _)| at);
+        let Some(front) = front else {
+            let window = &mut host.app_windows[index];
+            window.view.say(
+                Some(String::from(
+                    "No picture window is open to take the panes of",
+                )),
+                &window.layout,
+                &mut window.damage,
+            );
+            window.owe_reported();
+            return;
+        };
+        let was = host.app.preferences.live().clone();
+        let mut now = was.clone();
+        if let Some(view) = host.windows[front].view.picture() {
+            now.panes.clone_from(view.panes());
+        }
+        host.app.preferences.edit(&was, &now);
+        apply_settings(host);
+        let job = host.app.preferences.settle();
+        submit_settings(host, job);
     }
 
     /// The toolbar's glyph cache, budgeted from a window's frame and the

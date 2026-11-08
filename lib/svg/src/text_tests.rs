@@ -14,8 +14,10 @@ use crate::font::{
     FaceId, FaceMetrics, FaceRequest, FontProvider, FontUnavailable, GlyphOutline, OutlineContour,
     OutlineSegment,
 };
+use crate::pathdata::parse_path_curves;
 use crate::style::Style;
 use crate::xml::{self, Element};
+use tairix_bezier::Path;
 
 /// The em every test face is drawn on.
 const EM: f64 = 1000.0;
@@ -121,6 +123,21 @@ impl TextCascade<'_> for Attributes {
 
     fn leave(&mut self) {
         self.depth -= 1;
+    }
+
+    /// `#way` runs east from the origin for 100 and then south for 100, and
+    /// `#stated` is the same path saying it is 50 long; nothing else is a
+    /// path.
+    fn text_path(
+        &mut self,
+        element: &Element<'_>,
+    ) -> Result<Option<(Path, Option<f64>)>, SvgError> {
+        let stated = match xml::href(element) {
+            Some("#way") => None,
+            Some("#stated") => Some(50.0),
+            _ => return Ok(None),
+        };
+        Ok(Some((parse_path_curves("M0 0 H100 V100", 16)?, stated)))
     }
 }
 
@@ -509,5 +526,182 @@ fn a_glyph_run_is_split_at_the_protocol_run_length() {
     assert_eq!(
         provider.calls, 3,
         "70 characters at 32 per request is three round trips"
+    );
+}
+
+/// Every glyph `document`'s text lays out, as laid.
+#[track_caller]
+fn laid_out(document: &str) -> super::Laid {
+    let root = xml::parse(document, xml::Limits::COMPACT).expect("a document");
+    let mut cascade = Attributes { depth: 0 };
+    let style = Style::default()
+        .apply(&root, 100.0, &[])
+        .expect("a root style");
+    let collected = collect(&root, &style, (100.0, 100.0), &mut cascade).expect("collected");
+    lay_out(collected, &mut Squares::new(), &mut TextBudget::default())
+        .expect("laid out")
+        .expect("some text")
+}
+
+#[test]
+fn a_baseline_shift_raises_a_spans_glyphs_and_the_text_after_returns() {
+    at(
+        &origins(
+            r#"<text x="0" y="50" font-size="10" baseline-shift="9">a<tspan baseline-shift="5">b<tspan baseline-shift="super" font-size="20">c</tspan></tspan>d</text>"#,
+        ),
+        &[
+            (0.0, 50.0),
+            (5.0, 45.0),
+            (10.0, 45.0 - 10.0 / 3.0),
+            (20.0, 50.0),
+        ],
+    );
+}
+
+#[test]
+fn text_on_a_path_stands_each_glyph_on_it_turned_to_its_way() {
+    // At 20 user units an em, each glyph is 10 wide: the first's midpoint is
+    // the corner, the second's 5 down the south leg.
+    let laid = laid_out(
+        r##"<text font-size="20"><textPath href="#way" startOffset="90">ab<tspan baseline-shift="4">c</tspan></textPath></text>"##,
+    );
+    let origins: Vec<(f64, f64)> = laid
+        .glyphs
+        .iter()
+        .map(|glyph| (glyph.to_user.e, glyph.to_user.f))
+        .collect();
+    at(&origins, &[(90.0, 0.0), (100.0, 0.0), (104.0, 10.0)]);
+    let turned = laid.glyphs[1].to_user;
+    near(turned.a, 0.0);
+    near(turned.b, 20.0 / EM);
+}
+
+#[test]
+fn a_glyph_whose_midpoint_falls_off_its_path_is_not_drawn() {
+    let count = |offset: &str| {
+        laid_out(&alloc::format!(
+            r##"<text font-size="20"><textPath href="#way" startOffset="{offset}">ab</textPath></text>"##
+        ))
+        .glyphs
+        .len()
+    };
+    assert_eq!(count("-6"), 1, "a's midpoint before the start");
+    assert_eq!(count("-5"), 2, "a's midpoint on the start");
+    assert_eq!(count("190"), 1, "b's midpoint past the end");
+    let laid = laid_out(
+        r##"<text font-size="20"><textPath href="#way" startOffset="-6">ab</textPath></text>"##,
+    );
+    assert_eq!(
+        laid.glyphs.len(),
+        laid.outlines.len(),
+        "outlines kept beside their glyphs"
+    );
+}
+
+#[test]
+fn a_start_offset_is_a_share_of_the_path_or_a_length_in_its_stated_units() {
+    at(
+        &origins(
+            r##"<text font-size="20"><textPath href="#way" startOffset="25%">a</textPath></text>"##,
+        ),
+        &[(50.0, 0.0)],
+    );
+    at(
+        &origins(
+            r##"<text font-size="20"><textPath href="#stated" startOffset="10">a</textPath></text>"##,
+        ),
+        &[(40.0, 0.0)],
+    );
+}
+
+#[test]
+fn a_path_set_on_its_right_side_runs_from_its_end() {
+    let laid = laid_out(
+        r##"<text font-size="20"><textPath href="#way" side="right">a</textPath></text>"##,
+    );
+    let to_user = laid.glyphs[0].to_user;
+    at(&[(to_user.e, to_user.f)], &[(100.0, 100.0)]);
+    near(to_user.b, -20.0 / EM);
+}
+
+#[test]
+fn the_text_after_a_path_goes_on_from_where_its_pen_stopped() {
+    at(
+        &origins(
+            r##"<text font-size="20"><textPath href="#way" startOffset="95">a</textPath>b</text>"##,
+        ),
+        &[(95.0, 0.0), (100.0, 5.0)],
+    );
+}
+
+#[test]
+fn a_text_path_naming_nothing_or_within_another_draws_none_of_its_characters() {
+    assert_eq!(
+        laid_out(r##"<text><textPath href="#nowhere">ab</textPath>c</text>"##)
+            .glyphs
+            .len(),
+        1
+    );
+    assert_eq!(
+        laid_out(
+            r##"<text><textPath href="#way">a<textPath href="#way">b</textPath></textPath></text>"##
+        )
+        .glyphs
+        .len(),
+        1
+    );
+}
+
+#[test]
+fn a_stretched_glyph_bends_with_the_path_and_matches_the_rigid_one_where_it_is_straight() {
+    let straight = |method: &str| {
+        let laid = laid_out(&alloc::format!(
+            r##"<text font-size="20"><textPath href="#way" startOffset="10" method="{method}">a</textPath></text>"##
+        ));
+        let contours = laid.subpaths(0, (0.01, 0.01), 4096).expect("flattened");
+        let mut points: Vec<(f64, f64)> = contours.into_iter().flat_map(|c| c.points).collect();
+        points.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        points.dedup();
+        points
+    };
+    let (rigid, bent) = (straight("align"), straight("stretch"));
+    assert!(laid_out(
+        r##"<text font-size="20"><textPath href="#way" method="stretch">a</textPath></text>"##
+    )
+    .glyphs[0]
+        .bent
+        .is_some());
+    for point in &rigid {
+        assert!(
+            bent.iter()
+                .any(|other| (other.0 - point.0).abs() < 1e-6 && (other.1 - point.1).abs() < 1e-6),
+            "{point:?} missing from {bent:?}"
+        );
+    }
+    let corner = laid_out(
+        r##"<text font-size="20"><textPath href="#way" startOffset="95" method="stretch">a</textPath></text>"##,
+    );
+    let points: Vec<(f64, f64)> = corner
+        .subpaths(0, (0.01, 0.01), 4096)
+        .expect("flattened")
+        .into_iter()
+        .flat_map(|contour| contour.points)
+        .collect();
+    assert!(
+        points
+            .iter()
+            .any(|&(x, y)| (x - 120.0).abs() < 1e-6 && y > 0.0),
+        "its top wraps east of the south leg: {points:?}"
+    );
+    assert!(
+        points
+            .iter()
+            .any(|&(x, y)| (y + 20.0).abs() < 1e-6 && x < 100.0),
+        "and stands above the east leg"
+    );
+    assert_eq!(
+        corner.subpaths(0, (0.01, 0.0001), 8).err(),
+        Some(SvgError::TooComplex),
+        "no more points than it is allowed"
     );
 }

@@ -1,6 +1,6 @@
 //! The inspector down a window's right: the selection's style, the layers,
-//! the selection's place, alignment and arrangement, and a shape's and
-//! text's own measures.
+//! the selection's place, alignment and arrangement, a shape's and text's own
+//! measures, and the page.
 //!
 //! The inspector holds its controls and answers [`Change`]s; it changes
 //! nothing itself. A change arrives live while a control is being moved and
@@ -9,22 +9,36 @@
 //! tall enough to hold it, and one that is not scrolls, by the wheel or by
 //! the bar beside it.
 
+use alloc::borrow::Cow;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_bezier::{Bounds, FillRule};
-use tairix_colour::Rgba;
+use tairix_colour::{Fraction, Hsv, Hue, Rgba};
 use tairix_controls::{
     fill_area, ColourPicker, NumberAction, NumberField, PickerOutcome, ScrollAction, ScrollBar,
-    ScrollModel, ScrollOrientation, ScrollRange, ScrollView,
+    ScrollModel, ScrollOrientation, ScrollRange, ScrollView, SwatchAction, SwatchGrid, SwatchMark,
+    WellSpacing,
 };
-use tairix_drawing::{ArrowShape, Cap, Drawing, Join, NodePath, Paint, Style, TextAlign};
-use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_drawing::limits::{
+    MAX_BASELINE_SHIFT, MAX_RESOLUTION, MAX_STAR_POINTS, MAX_SUBDIVISIONS, MIN_STAR_POINTS,
+};
+use tairix_drawing::{
+    ArrowShape, Cap, Drawing, DrawingError, Gradient, Join, NodePath, Page, Paint, Spread, Stop,
+    Style, TextAlign, Unit,
+};
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
+use tairix_util::fallible;
 
 use crate::edit::Align;
+use crate::gradient::{self, Form};
 use crate::layout::{px, Faces, Layout};
+use crate::stops::Bar;
+use tairix_drawing::PAPER_WHITE;
 
 /// A row of controls, in logical pixels.
 const ROW: u32 = 26;
@@ -38,9 +52,47 @@ const LABEL: u32 = 84;
 /// The width of a layer's show-or-hide button, in logical pixels.
 const EYE: u32 = 64;
 
+/// How many of the page's units share a row of buttons.
+const UNITS_PER_ROW: usize = 3;
+
+/// How many wells share a row of the swatch grid: a hue every thirty
+/// degrees.
+const SWATCH_COLUMNS: usize = 12;
+
+/// The rows of the swatch palette after its greys, as saturation and value
+/// in per cent: full colours, tints and shades.
+const PALETTE_ROWS: [(u32, u32); 3] = [(100, 100), (40, 100), (100, 55)];
+
+/// The largest angle a field holds, in hundredths of a degree: a half turn
+/// either way.
+const HALF_TURN: i32 = 18_000;
+
+/// How far Shift and an arrow nudge a gradient's stop: a hundredth of its
+/// length.
+const STOP_NUDGE: f64 = 0.01;
+
+/// How gradients may continue past their ends, as their buttons read.
+const SPREADS: [(&str, Spread); 3] = [
+    ("Pad", Spread::Pad),
+    ("Reflect", Spread::Reflect),
+    ("Repeat", Spread::Repeat),
+];
+
 /// The largest measure a field holds, in hundredths: twenty million drawing
 /// pixels, near as far as a field's whole number reaches.
 const MOST_HUNDREDTHS: i32 = 2_000_000_000;
+
+/// The most a line height is, in hundredths of a percent of the size: a
+/// hundred ems, what a text may hold.
+const MOST_LINE_HEIGHT: i32 = 1_000_000;
+
+/// How far Outset and Inset move an outline until it is set otherwise, in
+/// drawing pixels.
+pub(crate) const DEFAULT_OFFSET: f64 = 5.0;
+
+/// How near Simplify keeps a path to itself until it is set otherwise, in
+/// drawing pixels.
+pub(crate) const DEFAULT_SMOOTHNESS: f64 = 1.0;
 
 /// The inspector's tabs.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -53,10 +105,18 @@ pub enum Tab {
     Object,
     /// A shape's own measures, and text's face and setting.
     Shape,
+    /// The page's size, units and ground, and the grid.
+    Page,
 }
 
 impl Tab {
-    const ALL: [Self; 4] = [Self::Style, Self::Layers, Self::Object, Self::Shape];
+    const ALL: [Self; 5] = [
+        Self::Style,
+        Self::Layers,
+        Self::Object,
+        Self::Shape,
+        Self::Page,
+    ];
 
     const fn label(self) -> &'static str {
         match self {
@@ -64,8 +124,27 @@ impl Tab {
             Self::Layers => "Layers",
             Self::Object => "Object",
             Self::Shape => "Shape",
+            Self::Page => "Page",
         }
     }
+
+    /// The colour picker the tab shows, if it shows one.
+    const fn picker(self) -> Option<Picker> {
+        match self {
+            Self::Style => Some(Picker::Paint),
+            Self::Page => Some(Picker::Ground),
+            Self::Layers | Self::Object | Self::Shape => None,
+        }
+    }
+}
+
+/// One of the inspector's colour pickers.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Picker {
+    /// The Style tab's, for the paint in hand.
+    Paint,
+    /// The Page tab's, for the page's ground.
+    Ground,
 }
 
 /// The families text is offered in.
@@ -84,8 +163,40 @@ pub enum Target {
     Stroke,
 }
 
+impl Target {
+    /// The paint this is of `style`.
+    #[must_use]
+    pub const fn of(self, style: &Style) -> &Paint {
+        match self {
+            Self::Fill => &style.fill,
+            Self::Stroke => &style.stroke.paint,
+        }
+    }
+
+    /// The paint this is of `style`, to change.
+    pub const fn of_mut(self, style: &mut Style) -> &mut Paint {
+        match self {
+            Self::Fill => &mut style.fill,
+            Self::Stroke => &mut style.stroke.paint,
+        }
+    }
+}
+
 /// Dash patterns offered, in stroke widths.
 pub const DASHES: [&[f64]; 4] = [&[], &[4.0, 2.0], &[0.0, 2.0], &[4.0, 2.0, 0.0, 2.0]];
+
+/// The most entries one of [`DASHES`] has.
+pub const MOST_DASHES: usize = {
+    let mut most = 0;
+    let mut at = 0;
+    while at < DASHES.len() {
+        if DASHES[at].len() > most {
+            most = DASHES[at].len();
+        }
+        at += 1;
+    }
+    most
+};
 
 /// What each of [`DASHES`] is called.
 const DASH_NAMES: [&str; 4] = ["Solid", "Dash", "Dot", "Dash-dot"];
@@ -198,16 +309,97 @@ pub enum Change {
     Inner(f64),
     /// Make a star a polygon, or a star again.
     Polygon(bool),
-    /// Set text in the family of this CSS name.
+    /// A change to how text is set.
+    Text(TextChange),
+    /// Outset and Inset move outlines this far, in drawing pixels.
+    Offset(f64),
+    /// Simplify keeps paths this near themselves, in drawing pixels.
+    Smoothness(f64),
+    /// A change to the page or the grid.
+    Page(PageChange),
+    /// Paint the target with a gradient of this form, fitted to each object.
+    Form {
+        /// Which paint.
+        target: Target,
+        /// The form.
+        form: Form,
+    },
+    /// Run the target's gradient through `stops`, continued past its ends
+    /// by `spread`; an object painted otherwise takes a gradient of `form`.
+    Stops {
+        /// Which paint.
+        target: Target,
+        /// The stops, offsets ascending.
+        stops: Vec<Stop>,
+        /// How it continues past its ends.
+        spread: Spread,
+        /// The form a gradient made anew takes.
+        form: Form,
+        /// Whether the change has settled.
+        settled: bool,
+    },
+    /// Turn the selection so it stands this many degrees anticlockwise.
+    Rotation(f64),
+    /// Keep this colour with the drawing.
+    KeepSwatch(Rgba),
+    /// Stop keeping the drawing's swatch at this index.
+    DropSwatch(usize),
+    /// What the inspector could not make, and why.
+    Refused {
+        /// What it was making.
+        what: &'static str,
+        /// Why it could not.
+        error: DrawingError,
+    },
+}
+
+/// How the Shape tab asks text to be set.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TextChange {
+    /// In the family of this CSS name.
     Family(&'static str),
-    /// Set text this large, in drawing pixels.
+    /// This large, in drawing pixels.
     Size(f64),
-    /// Set text bold, or not.
+    /// Bold, or not.
     Bold(bool),
-    /// Set text italic, or not.
+    /// Italic, or not.
     Italic(bool),
-    /// Align text's lines so on its origin.
-    TextAlign(TextAlign),
+    /// Its lines aligned so on its origin.
+    Align(TextAlign),
+    /// This much extra space after each character, in drawing pixels.
+    Spacing(f64),
+    /// Raised this far off the baseline, in ems; lowered where negative.
+    Raise(f64),
+    /// Its lines this far apart, in ems of its size.
+    LineHeight(f64),
+    /// Its line starting this far along the path it is set along.
+    Start(f64),
+}
+
+/// What the Page tab asks of the view.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PageChange {
+    /// Make the page this wide, in its unit.
+    Width(f64),
+    /// Make the page this tall, in its unit.
+    Height(f64),
+    /// Lay the page out wider than it is tall, or the other way when false.
+    Landscape(bool),
+    /// Measure the page in this unit, its size unchanged.
+    Unit(Unit),
+    /// Space the grid's major lines this far apart, in the page's unit.
+    GridSpacing(f64),
+    /// Cut each side of the grid's major cells into this many.
+    Subdivisions(u32),
+    /// Make raster copies at this many pixels to the inch.
+    Resolution(u32),
+    /// Fill the page with this ground, or with none, live or settled.
+    Ground {
+        /// The ground.
+        colour: Option<Rgba>,
+        /// Whether the change has settled.
+        settled: bool,
+    },
 }
 
 /// A layer command.
@@ -271,6 +463,16 @@ enum Press {
     ToPage(bool),
     /// Ask the view for this.
     Change(Change),
+    /// Continue the gradient past its ends so.
+    Spread(Spread),
+    /// Run the gradient the other way.
+    Reverse,
+    /// Remove the stop in hand.
+    RemoveStop,
+    /// Keep the colour in hand with the drawing.
+    KeepSwatch,
+    /// Stop keeping the swatch in hand.
+    DropSwatch,
 }
 
 /// A button the inspector draws.
@@ -292,6 +494,20 @@ enum Field {
     Points,
     Inner,
     Size,
+    Spacing,
+    Raise,
+    LineHeight,
+    Start,
+    Offset,
+    Smoothness,
+    PageWidth,
+    PageHeight,
+    GridSpacing,
+    Subdivisions,
+    StopAt,
+    Angle,
+    Rotation,
+    Resolution,
 }
 
 /// What holds the inspector's keyboard.
@@ -299,8 +515,11 @@ enum Field {
 enum Focus {
     /// A number field.
     Field(Field),
-    /// The colour picker, on whichever of its parts it last had.
+    /// The colour picker of the tab shown, on whichever of its parts it
+    /// last had.
     Picker,
+    /// The gradient's stop bar.
+    Stops,
 }
 
 impl Field {
@@ -310,12 +529,24 @@ impl Field {
             Self::Opacity => "Opacity %",
             Self::Place(0) => "X",
             Self::Place(1) => "Y",
-            Self::Place(2) => "Width",
-            Self::Place(_) => "Height",
+            Self::Place(2) | Self::PageWidth => "Width",
+            Self::Place(_) | Self::PageHeight => "Height",
             Self::Corners => "Corners",
             Self::Points => "Points",
             Self::Inner => "Inner %",
             Self::Size => "Text size",
+            Self::Spacing => "Letter spacing",
+            Self::Raise => "Raise %",
+            Self::LineHeight => "Line height %",
+            Self::Start => "Along path",
+            Self::Offset => "Offset by",
+            Self::Smoothness => "Smoothness",
+            Self::GridSpacing => "Grid spacing",
+            Self::Subdivisions => "Subdivisions",
+            Self::StopAt => "Stop at %",
+            Self::Angle => "Angle \u{b0}",
+            Self::Rotation => "Rotation \u{b0}",
+            Self::Resolution => "Copy dpi",
         }
     }
 }
@@ -337,6 +568,8 @@ struct Column<'s> {
     fields: Vec<(Field, Rect)>,
     buttons: Vec<Button<'s>>,
     picker: Option<Rect>,
+    stops: Option<Rect>,
+    swatches: Option<Rect>,
 }
 
 impl<'s> Column<'s> {
@@ -355,6 +588,8 @@ impl<'s> Column<'s> {
             fields: Vec::new(),
             buttons: Vec::new(),
             picker: None,
+            stops: None,
+            swatches: None,
         }
     }
 
@@ -385,8 +620,13 @@ impl<'s> Column<'s> {
 
     /// A row of buttons sharing the row's width: each its label, whether it
     /// is on, and what pressing it does.
-    fn buttons<const N: usize>(&mut self, buttons: [(&'s str, bool, Press); N]) {
-        let width = self.width / u32::try_from(N).unwrap_or(1).max(1);
+    fn buttons<I>(&mut self, buttons: I)
+    where
+        I: IntoIterator<Item = (&'s str, bool, Press)>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let buttons = buttons.into_iter();
+        let width = self.width / u32::try_from(buttons.len()).unwrap_or(1).max(1);
         let mut left = self.left;
         for (label, on, press) in buttons {
             let rect = Rect::new(
@@ -411,6 +651,22 @@ impl<'s> Column<'s> {
         self.gap();
         let rect = Rect::new(self.left, self.top, self.width, height(self.width));
         self.picker = Some(rect);
+        self.advance(px(rect.height));
+        self.gap();
+    }
+
+    /// The gradient's stop bar, a row and a half tall.
+    fn stop_bar(&mut self) {
+        let rect = Rect::new(self.left, self.top, self.width, self.row * 3 / 2);
+        self.stops = Some(rect);
+        self.advance(px(rect.height));
+        self.gap();
+    }
+
+    /// The swatch grid, as tall as `height` answers for the row's width.
+    fn swatch_grid(&mut self, height: impl FnOnce(u32) -> u32) {
+        let rect = Rect::new(self.left, self.top, self.width, height(self.width));
+        self.swatches = Some(rect);
         self.advance(px(rect.height));
         self.gap();
     }
@@ -485,18 +741,44 @@ impl Placed<'_> {
     }
 }
 
-/// A number field's value, in hundredths.
-fn hundredths(value: f64) -> i32 {
-    let scaled = tairix_util::mathf::round(value * 100.0);
-    tairix_util::mathf::round_i32(scaled)
+/// The swatches every drawing is offered: a row of greys from black to
+/// white, then a hue every thirty degrees in full colour, tint and shade.
+fn palette() -> Option<Vec<Rgba>> {
+    let mut colours = Vec::new();
+    if !fallible::reserve(&mut colours, (1 + PALETTE_ROWS.len()) * SWATCH_COLUMNS) {
+        return None;
+    }
+    let last = SWATCH_COLUMNS - 1;
+    for step in 0..SWATCH_COLUMNS {
+        let level = u8::try_from(step * usize::from(u8::MAX) / last).unwrap_or(u8::MAX);
+        colours.push(Rgba::new(level, level, level, u8::MAX));
+    }
+    for (saturation, value) in PALETTE_ROWS {
+        for step in 0..SWATCH_COLUMNS {
+            let degrees = u32::try_from(step * 360 / SWATCH_COLUMNS).unwrap_or(0);
+            let hsv = Hsv::new(
+                Hue::from_degrees(degrees),
+                Fraction::from_percent(saturation),
+                Fraction::from_percent(value),
+            );
+            colours.push(hsv.to_rgb().opaque());
+        }
+    }
+    Some(colours)
 }
 
-/// The paint `target` is of `style`.
-fn paint_of(style: &Style, target: Target) -> &Paint {
-    match target {
-        Target::Fill => &style.fill,
-        Target::Stroke => &style.stroke.paint,
-    }
+/// A field holding a length in hundredths, from `least` to `most`, stepping
+/// a whole unit at a time.
+pub(crate) fn measure(value: i32, least: i32, most: i32) -> NumberField {
+    NumberField::new(value, least, most)
+        .with_decimals(2)
+        .with_steps(100, 1000)
+}
+
+/// A number field's value, in hundredths.
+pub(crate) fn hundredths(value: f64) -> i32 {
+    let scaled = tairix_util::mathf::round(value * 100.0);
+    tairix_util::mathf::round_i32(scaled)
 }
 
 fn primary_press(event: &InputEvent) -> bool {
@@ -520,12 +802,39 @@ pub struct Inspector {
     points: NumberField,
     inner: NumberField,
     size: NumberField,
+    spacing: NumberField,
+    raise: NumberField,
+    line_height: NumberField,
+    start: NumberField,
+    offset: NumberField,
+    smoothness: NumberField,
+    page: [NumberField; 2],
+    grid: NumberField,
+    subdivisions: NumberField,
+    ground: ColourPicker,
+    stop_at: NumberField,
+    angle: NumberField,
+    rotation: NumberField,
+    resolution: NumberField,
+    /// The gradient the target is painted with, where it is one: the first
+    /// selected object's, or the one new objects are drawn in.
+    ramp: Option<Arc<Gradient>>,
+    /// The stop of `ramp` in hand.
+    stop: usize,
+    /// Whether the stop in hand is being dragged along the bar.
+    dragging_stop: bool,
+    swatches: SwatchGrid,
+    /// The swatches every drawing is offered, the grid's first wells.
+    palette: Vec<Rgba>,
+    /// The drawing's own swatches the grid shows after the palette, or
+    /// nothing while the grid could not be brought up to date.
+    kept: Option<Vec<Rgba>>,
     to_page: bool,
     /// What holds the keyboard, if anything does.
     focus: Option<Focus>,
-    /// Whether the picker shows a colour live that has not settled, which
-    /// the selection's own is not shown over.
-    unsettled: bool,
+    /// The picker showing a colour live that has not settled, which the
+    /// drawing's own is not shown over.
+    unsettled: Option<Picker>,
     /// Where the pointer last was, in the window.
     pointer: Point,
     /// The panel's bar; its model's offset is how far the tab is scrolled.
@@ -540,12 +849,15 @@ impl Inspector {
             Paint::Colour(colour) => *colour,
             _ => Rgba::new(0, 0, 0, 255),
         };
-        let measure = |value, least, most| {
-            NumberField::new(value, least, most)
-                .with_decimals(2)
-                .with_steps(100, 1000)
-        };
         let empty = ScrollModel::in_pixels(ScrollRange::EMPTY, 1);
+        let palette = palette().unwrap_or_default();
+        let wells = fallible::collected(palette.len(), palette.iter().map(|&c| Color::from(c)))
+            .unwrap_or_default();
+        let turn = || {
+            NumberField::new(0, -HALF_TURN, HALF_TURN)
+                .with_decimals(2)
+                .with_steps(100, 1500)
+        };
         Self {
             tab: Tab::Style,
             target: Target::Fill,
@@ -556,34 +868,84 @@ impl Inspector {
             opacity: NumberField::new(100, 0, 100),
             place: core::array::from_fn(|_| measure(0, -MOST_HUNDREDTHS, MOST_HUNDREDTHS)),
             corners: measure(0, 0, MOST_HUNDREDTHS),
-            points: NumberField::new(5, 3, 1000),
+            points: NumberField::new(5, to_i32(MIN_STAR_POINTS), to_i32(MAX_STAR_POINTS)),
             inner: NumberField::new(50, 1, 100),
             size: measure(2400, 100, MOST_HUNDREDTHS),
+            spacing: measure(0, -MOST_HUNDREDTHS, MOST_HUNDREDTHS),
+            raise: {
+                // What a run may raise its characters by, in hundredths of a
+                // percent of its size.
+                let most = hundredths(MAX_BASELINE_SHIFT * 100.0);
+                measure(0, -most, most)
+            },
+            line_height: measure(
+                hundredths(tairix_drawing::DEFAULT_LINE_HEIGHT * 100.0),
+                0,
+                MOST_LINE_HEIGHT,
+            ),
+            start: measure(0, -MOST_HUNDREDTHS, MOST_HUNDREDTHS),
+            offset: measure(hundredths(DEFAULT_OFFSET), 1, MOST_HUNDREDTHS),
+            smoothness: measure(hundredths(DEFAULT_SMOOTHNESS), 1, MOST_HUNDREDTHS),
+            page: core::array::from_fn(|_| measure(1, 1, MOST_HUNDREDTHS)),
+            grid: measure(1, 1, MOST_HUNDREDTHS),
+            subdivisions: NumberField::new(1, 1, to_i32(MAX_SUBDIVISIONS)),
+            ground: ColourPicker::new(PAPER_WHITE).with_opacity(true),
+            stop_at: measure(0, 0, 10_000),
+            angle: turn(),
+            rotation: turn(),
+            resolution: NumberField::new(
+                to_i32(tairix_drawing::PIXELS_PER_INCH),
+                1,
+                to_i32(MAX_RESOLUTION),
+            ),
+            ramp: None,
+            stop: 0,
+            dragging_stop: false,
+            swatches: SwatchGrid::new(SWATCH_COLUMNS, wells).with_spacing(WellSpacing::Packed),
+            palette,
+            kept: Some(Vec::new()),
             to_page: false,
             focus: None,
-            unsettled: false,
+            unsettled: None,
             pointer: Point::ORIGIN,
             bar: ScrollBar::new(ScrollOrientation::Vertical, empty).without_edges(),
         }
     }
 
     /// Show what is selected in `drawing`, its bounds `bounds` — or `style`,
-    /// what new objects are drawn in, when nothing is. A field being typed
+    /// what new objects are drawn in, when nothing is; of a text being typed,
+    /// how the character `typed` begins with is set. A field being typed
     /// into, and a colour not yet settled, are left as they are.
     pub fn follow(
         &mut self,
         drawing: &Drawing,
         selection: &[NodePath],
         style: &Style,
-        bounds: Bounds,
+        (bounds, typed): (Bounds, Option<Range<usize>>),
     ) {
         let node = selection.first().and_then(|path| drawing.node_at(path));
-        let style = node
+        let own = node
             .and_then(|node| node.style())
             .map_or(style, |style| &**style);
-        if let (false, Paint::Colour(colour)) = (self.unsettled, paint_of(style, self.target)) {
-            self.picker.set_colour(*colour);
+        let painted = typed_style(own, node.map(Arc::as_ref), typed.clone());
+        let style = &*painted;
+        self.ramp = match self.target.of(style) {
+            Paint::Gradient(gradient) => Some(gradient.clone()),
+            Paint::None | Paint::Colour(_) => None,
+        };
+        let in_hand = self.follow_ramp().or(match self.target.of(style) {
+            Paint::Colour(colour) => Some(*colour),
+            Paint::None | Paint::Gradient(_) => None,
+        });
+        if let (Some(colour), true) = (in_hand, self.unsettled != Some(Picker::Paint)) {
+            self.picker.set_colour(colour);
         }
+        self.follow_swatches(drawing.swatches(), in_hand);
+        self.show(
+            Field::Rotation,
+            hundredths(crate::edit::angle_of(drawing, selection)),
+        );
+        self.follow_page(drawing);
         self.show(Field::Width, hundredths(style.stroke.width));
         self.show(
             Field::Opacity,
@@ -602,7 +964,18 @@ impl Inspector {
                 self.show(Field::Inner, hundredths(star.inner_ratio));
             }
             Some(tairix_drawing::Kind::Text { text, .. }) => {
-                self.show(Field::Size, hundredths(text.size));
+                let face = text.face(typed.and_then(|range| text.run_for(range)));
+                self.show(Field::Size, hundredths(face.size));
+                self.show(Field::Spacing, hundredths(face.spacing));
+                self.show(Field::Raise, hundredths(face.rise / face.size * 100.0));
+                match &text.baseline {
+                    tairix_drawing::Baseline::Lines { line_height, .. } => {
+                        self.show(Field::LineHeight, hundredths(line_height * 100.0));
+                    }
+                    tairix_drawing::Baseline::Path(along) => {
+                        self.show(Field::Start, hundredths(along.start));
+                    }
+                }
             }
             _ => {}
         }
@@ -612,6 +985,84 @@ impl Inspector {
                 self.show(Field::Place(index), hundredths(value));
             }
         }
+    }
+
+    /// Show the gradient in hand's stop in hand, kept among its stops, and
+    /// its angle; answers the stop's colour.
+    fn follow_ramp(&mut self) -> Option<Rgba> {
+        let ramp = self.ramp.clone()?;
+        self.stop = self.stop.min(ramp.stops.len().saturating_sub(1));
+        let stop = *ramp.stops.get(self.stop)?;
+        self.show(Field::StopAt, hundredths(stop.offset * 100.0));
+        if let Form::Linear(angle) = gradient::form_of(&ramp) {
+            self.show(Field::Angle, hundredths(angle));
+        }
+        Some(stop.colour)
+    }
+
+    /// Show the palette and then `kept`, the drawing's swatches, in the
+    /// grid, the well holding `in_hand` marked.
+    fn follow_swatches(&mut self, kept: &[Rgba], in_hand: Option<Rgba>) {
+        if self.kept.as_deref() != Some(kept) {
+            self.kept = None;
+            let count = self.palette.len() + kept.len();
+            let wells = fallible::collected(
+                count,
+                self.palette
+                    .iter()
+                    .chain(kept)
+                    .map(|&colour| Color::from(colour)),
+            );
+            if let (Some(wells), Some(copy)) = (wells, fallible::copied(kept)) {
+                self.swatches.adopt_colours(SWATCH_COLUMNS, wells);
+                self.kept = Some(copy);
+            }
+        }
+        let holds = |at: usize, colour: Rgba| self.swatches.colour(at) == Some(Color::from(colour));
+        // The well chosen keeps the mark while it holds the colour in hand,
+        // though an earlier well holds the same colour.
+        let marked = in_hand.and_then(|colour| {
+            let chosen = self.swatches.selected().filter(|&at| holds(at, colour));
+            chosen.or_else(|| (0..self.swatches.len()).find(|&at| holds(at, colour)))
+        });
+        self.swatches.adopt_selected(marked);
+    }
+
+    /// Show `drawing`'s page and grid in the Page tab.
+    fn follow_page(&mut self, drawing: &Drawing) {
+        let page = drawing.page();
+        let grid = drawing.grid();
+        self.show(Field::PageWidth, hundredths(page.width));
+        self.show(Field::PageHeight, hundredths(page.height));
+        self.show(
+            Field::GridSpacing,
+            hundredths(grid.spacing / page.unit.pixels()),
+        );
+        self.show(Field::Subdivisions, to_i32(grid.subdivisions));
+        self.show(Field::Resolution, to_i32(drawing.resolution()));
+        if let (Some(ground), false) = (page.background, self.unsettled == Some(Picker::Ground)) {
+            self.ground.set_colour(ground);
+        }
+    }
+
+    /// The colour the Page tab's picker holds: the ground a page is given.
+    #[must_use]
+    pub fn ground_colour(&self) -> Rgba {
+        self.ground.colour()
+    }
+
+    /// Show `tab`, scrolled to its top. What was under way in the tab shown
+    /// has been landed, so nothing is let go of but the keyboard.
+    pub fn show_tab(&mut self, tab: Tab) {
+        if tab == self.tab {
+            return;
+        }
+        if let Some(Focus::Field(field)) = self.focus.take() {
+            self.field(field).set_focused(false);
+        }
+        self.unfocus_pickers();
+        self.tab = tab;
+        self.bar.set_model(self.bar.model().scroll_to(0));
     }
 
     /// Show `value` in `field`, unless it is being typed into.
@@ -640,6 +1091,12 @@ impl Inspector {
             .and_then(|rect| placed.view.to_window(rect))
     }
 
+    /// Which paint the Style tab edits.
+    #[must_use]
+    pub const fn target(&self) -> Target {
+        self.target
+    }
+
     /// Whether alignment is to the page.
     #[must_use]
     pub const fn to_page(&self) -> bool {
@@ -655,7 +1112,10 @@ impl Inspector {
     /// Whether a drag the inspector began holds the pointer.
     #[must_use]
     pub fn holds_pointer(&self) -> bool {
-        self.picker.is_dragging() || self.bar.is_pressing()
+        self.picker.is_dragging()
+            || self.ground.is_dragging()
+            || self.dragging_stop
+            || self.bar.is_pressing()
     }
 
     /// Whether the pointer was last seen over the inspector, so the move
@@ -666,9 +1126,9 @@ impl Inspector {
     }
 
     /// The tab strip's buttons.
-    fn tab_rects(layout: &Layout) -> [(Tab, Rect); 4] {
+    fn tab_rects(layout: &Layout) -> [(Tab, Rect); Tab::ALL.len()] {
         let tabs = layout.tabs;
-        let width = tabs.width / 4;
+        let width = tabs.width / u32::try_from(Tab::ALL.len()).unwrap_or(1);
         core::array::from_fn(|index| {
             let at = px(u32::try_from(index).unwrap_or(0) * width);
             let rect = Rect::new(
@@ -731,10 +1191,11 @@ impl Inspector {
     ) -> Column<'s> {
         let mut column = Column::new(panel, scale);
         match self.tab {
-            Tab::Style => self.style_controls(&mut column, scale, theme, shown.style),
+            Tab::Style => self.style_controls(&mut column, scale, theme, &shown.style),
             Tab::Layers => layer_controls(&mut column, scale, shown, seen),
             Tab::Object => self.object_controls(&mut column),
             Tab::Shape => shape_controls(&mut column, shown),
+            Tab::Page => self.page_controls(&mut column, scale, theme, &shown.page),
         }
         column
     }
@@ -752,19 +1213,47 @@ impl Inspector {
                 Press::Target(Target::Stroke),
             ),
         ]);
-        let none = matches!(paint_of(style, self.target), Paint::None);
-        let paint = |paint| {
+        let target = self.target;
+        let paint = target.of(style);
+        let form = match paint {
+            Paint::Gradient(gradient) => Some(gradient::form_of(gradient)),
+            Paint::None | Paint::Colour(_) => None,
+        };
+        let solid = |paint| {
             change(Change::Paint {
-                target: self.target,
+                target,
                 paint,
                 settled: true,
             })
         };
+        let shaped = |form| change(Change::Form { target, form });
+        let angle = match form {
+            Some(Form::Linear(angle)) => angle,
+            Some(Form::Radial) | None => 0.0,
+        };
         column.buttons([
-            ("None", none, paint(Paint::None)),
-            ("Colour", !none, paint(Paint::Colour(self.picker.colour()))),
+            ("None", matches!(paint, Paint::None), solid(Paint::None)),
+            (
+                "Colour",
+                matches!(paint, Paint::Colour(_)),
+                solid(Paint::Colour(self.picker.colour())),
+            ),
+            (
+                "Linear",
+                matches!(form, Some(Form::Linear(_))),
+                shaped(Form::Linear(angle)),
+            ),
+            ("Radial", form == Some(Form::Radial), shaped(Form::Radial)),
         ]);
+        if let (Paint::Gradient(ramp), Some(form)) = (paint, form) {
+            gradient_controls(column, ramp, form);
+        }
         column.picker(|width| self.picker.measured_height(width, scale, theme));
+        column.swatch_grid(|width| self.swatches.height_for_width(width));
+        column.buttons([
+            ("Add swatch", false, Press::KeepSwatch),
+            ("Remove swatch", false, Press::DropSwatch),
+        ]);
         column.field(Field::Width);
         let stroke = &style.stroke;
         column.buttons(
@@ -810,6 +1299,7 @@ impl Inspector {
         for index in 0..4 {
             column.field(Field::Place(index));
         }
+        column.field(Field::Rotation);
         column.gap();
         let align = |align| change(Change::Align(align));
         column.buttons([
@@ -834,6 +1324,46 @@ impl Inspector {
         ]);
     }
 
+    fn page_controls(&self, column: &mut Column<'_>, scale: Scale, theme: &Theme, page: &Page) {
+        column.field(Field::PageWidth);
+        column.field(Field::PageHeight);
+        let landscape = page.width > page.height;
+        let paged = |change| Press::Change(Change::Page(change));
+        column.buttons([
+            ("Portrait", !landscape, paged(PageChange::Landscape(false))),
+            ("Landscape", landscape, paged(PageChange::Landscape(true))),
+        ]);
+        for row in Unit::ALL.chunks(UNITS_PER_ROW) {
+            column.buttons(row.iter().map(|&unit| {
+                (
+                    unit.symbol(),
+                    page.unit == unit,
+                    paged(PageChange::Unit(unit)),
+                )
+            }));
+        }
+        column.gap();
+        column.field(Field::GridSpacing);
+        column.field(Field::Subdivisions);
+        column.field(Field::Resolution);
+        column.gap();
+        let ground = |colour| {
+            paged(PageChange::Ground {
+                colour,
+                settled: true,
+            })
+        };
+        column.buttons([
+            ("None", page.background.is_none(), ground(None)),
+            (
+                "Colour",
+                page.background.is_some(),
+                ground(Some(self.ground.colour())),
+            ),
+        ]);
+        column.picker(|width| self.ground.measured_height(width, scale, theme));
+    }
+
     /// The number field `field` is.
     fn field(&mut self, field: Field) -> &mut NumberField {
         match field {
@@ -844,6 +1374,20 @@ impl Inspector {
             Field::Points => &mut self.points,
             Field::Inner => &mut self.inner,
             Field::Size => &mut self.size,
+            Field::Spacing => &mut self.spacing,
+            Field::Raise => &mut self.raise,
+            Field::LineHeight => &mut self.line_height,
+            Field::Start => &mut self.start,
+            Field::Offset => &mut self.offset,
+            Field::Smoothness => &mut self.smoothness,
+            Field::PageWidth => &mut self.page[0],
+            Field::PageHeight => &mut self.page[1],
+            Field::GridSpacing => &mut self.grid,
+            Field::Subdivisions => &mut self.subdivisions,
+            Field::StopAt => &mut self.stop_at,
+            Field::Angle => &mut self.angle,
+            Field::Rotation => &mut self.rotation,
+            Field::Resolution => &mut self.resolution,
         }
     }
 
@@ -856,6 +1400,40 @@ impl Inspector {
             Field::Points => &self.points,
             Field::Inner => &self.inner,
             Field::Size => &self.size,
+            Field::Spacing => &self.spacing,
+            Field::Raise => &self.raise,
+            Field::LineHeight => &self.line_height,
+            Field::Start => &self.start,
+            Field::Offset => &self.offset,
+            Field::Smoothness => &self.smoothness,
+            Field::PageWidth => &self.page[0],
+            Field::PageHeight => &self.page[1],
+            Field::GridSpacing => &self.grid,
+            Field::Subdivisions => &self.subdivisions,
+            Field::StopAt => &self.stop_at,
+            Field::Angle => &self.angle,
+            Field::Rotation => &self.rotation,
+            Field::Resolution => &self.resolution,
+        }
+    }
+
+    /// The colour picker `which` is.
+    fn picker_mut(&mut self, which: Picker) -> &mut ColourPicker {
+        match which {
+            Picker::Paint => &mut self.picker,
+            Picker::Ground => &mut self.ground,
+        }
+    }
+
+    fn unfocus_pickers(&mut self) {
+        self.picker.set_focused(false);
+        self.ground.set_focused(false);
+    }
+
+    fn picker_shown(&self, which: Picker) -> &ColourPicker {
+        match which {
+            Picker::Paint => &self.picker,
+            Picker::Ground => &self.ground,
         }
     }
 
@@ -879,15 +1457,21 @@ impl Inspector {
         let placed = self.place(layout, scale, theme, shown);
         self.bar.set_model(placed.model);
         let mut moved = Region::new();
-        if let Some(picker) = placed.column.picker.filter(|_| self.picker.is_dragging()) {
+        let laid_picker = self.tab.picker().zip(placed.column.picker);
+        if let Some((which, picker)) =
+            laid_picker.filter(|(which, _)| self.picker_shown(*which).is_dragging())
+        {
             // A drag holds the pointer wherever it goes until it lets go.
             let held = placed
                 .view
                 .confined_to(layout.window)
                 .event_in_layout(event);
-            let answer = self.picker_answer(&held, picker, (scale, theme), &mut moved);
+            let answer = self.picker_answer(which, &held, picker, (scale, theme), &mut moved);
             placed.view.report(&moved, damage);
             return Changes::of(answer);
+        }
+        if self.dragging_stop {
+            return self.drag_stop(event, layout, placed.column.stops, damage);
         }
         if let Some(bar) = placed.bar {
             if let Some(ScrollAction::ScrollTo { offset }) =
@@ -902,36 +1486,33 @@ impl Inspector {
         let local = placed.view.to_content(self.pointer);
         let inside = |rect: Rect| local.is_some_and(|point| rect.contains(point));
         let mapped = placed.view.event_in_layout(event);
-        if let InputEvent::PointerScrolled { dx, dy } = *event {
-            let focused = match self.focus {
-                Some(Focus::Field(field)) => placed.field_rect(field).map(|rect| (field, rect)),
-                _ => None,
-            };
-            if let Some((field, rect)) = focused.filter(|(_, rect)| inside(*rect)) {
-                let action = self
-                    .field(field)
-                    .on_pointer(&mapped, rect, scale, theme, &mut moved);
-                placed.view.report(&moved, damage);
-                return Changes::of(action.and_then(|action| Self::field_change(field, action)));
-            }
-            if let Some(bar) = placed.bar.filter(|_| layout.panel.contains(self.pointer)) {
-                if let Some(ScrollAction::ScrollTo { offset }) =
-                    self.bar.wheel(dx, dy, scale, bar, damage)
-                {
-                    self.scroll(placed.model, offset, layout, damage);
-                }
-            }
-            return Changes::NONE;
+        if let Some(changes) = self.wells_and_stops(
+            &placed,
+            (layout, scale, theme),
+            (event, &mapped),
+            local,
+            damage,
+        ) {
+            return changes;
         }
-        if let Some(picker) = placed.column.picker.filter(|rect| inside(*rect)) {
+        if let InputEvent::PointerScrolled { dx, dy } = *event {
+            return self.wheel(
+                &placed,
+                (layout, scale, theme),
+                (&mapped, dx, dy),
+                local,
+                damage,
+            );
+        }
+        if let Some((which, picker)) = laid_picker.filter(|(_, rect)| inside(*rect)) {
             let mut released = None;
             if primary_press(event) && self.focus != Some(Focus::Picker) {
                 released = self.let_go(&placed, (layout, scale, theme), damage);
                 self.focus = Some(Focus::Picker);
-                self.picker.set_focused(true);
+                self.picker_mut(which).set_focused(true);
                 damage.add(layout.panel);
             }
-            let change = self.picker_answer(&mapped, picker, (scale, theme), &mut moved);
+            let change = self.picker_answer(which, &mapped, picker, (scale, theme), &mut moved);
             placed.view.report(&moved, damage);
             return Changes { released, change };
         }
@@ -951,7 +1532,7 @@ impl Inspector {
                 .field(field)
                 .on_pointer(&mapped, rect, scale, theme, &mut moved);
             placed.view.report(&moved, damage);
-            let change = action.and_then(|action| Self::field_change(field, action));
+            let change = action.and_then(|action| self.field_change(field, action));
             if over || change.is_some() || released.is_some() {
                 return Changes { released, change };
             }
@@ -962,6 +1543,195 @@ impl Inspector {
         let released = self.let_go(&placed, (layout, scale, theme), damage);
         let change = self.press(&placed, layout, local, shown, damage);
         Changes { released, change }
+    }
+
+    /// A wheel turned by `dx` and `dy` over the panel, the pointer at `local`
+    /// in the column's layout: the field holding the keyboard steps when it
+    /// is under the pointer, and the panel scrolls otherwise.
+    fn wheel(
+        &mut self,
+        placed: &Placed<'_>,
+        (layout, scale, theme): (&Layout, Scale, &Theme),
+        (mapped, dx, dy): (&InputEvent, i32, i32),
+        local: Option<Point>,
+        damage: &mut Region,
+    ) -> Changes {
+        let focused = match self.focus {
+            Some(Focus::Field(field)) => placed.field_rect(field).map(|rect| (field, rect)),
+            _ => None,
+        };
+        let under = |rect: Rect| local.is_some_and(|point| rect.contains(point));
+        if let Some((field, rect)) = focused.filter(|(_, rect)| under(*rect)) {
+            let mut moved = Region::new();
+            let action = self
+                .field(field)
+                .on_pointer(mapped, rect, scale, theme, &mut moved);
+            placed.view.report(&moved, damage);
+            return Changes::of(action.and_then(|action| self.field_change(field, action)));
+        }
+        if let Some(bar) = placed.bar.filter(|_| layout.panel.contains(self.pointer)) {
+            if let Some(ScrollAction::ScrollTo { offset }) =
+                self.bar.wheel(dx, dy, scale, bar, damage)
+            {
+                self.scroll(placed.model, offset, layout, damage);
+            }
+        }
+        Changes::NONE
+    }
+
+    /// What the swatch grid and the stop bar make of `event`, `mapped` into
+    /// the column's layout, the pointer at `local` there: the grid sees every
+    /// event, so a press it took and a release elsewhere never leave it
+    /// armed, and a press on the stop bar is the bar's.
+    fn wells_and_stops(
+        &mut self,
+        placed: &Placed<'_>,
+        context: (&Layout, Scale, &Theme),
+        (event, mapped): (&InputEvent, &InputEvent),
+        local: Option<Point>,
+        damage: &mut Region,
+    ) -> Option<Changes> {
+        if let Some(wells) = placed.column.swatches {
+            let mut moved = Region::new();
+            let action = self
+                .swatches
+                .on_pointer(mapped, wells, SwatchMark::Primary, &mut moved);
+            placed.view.report(&moved, damage);
+            if let Some(action) = action {
+                return Some(Changes::of(self.swatch_chosen(action)));
+            }
+        }
+        let (bar, point) = placed
+            .column
+            .stops
+            .zip(local)
+            .filter(|(bar, point)| primary_press(event) && bar.contains(*point))?;
+        Some(self.press_stops(placed, context, bar, point, damage))
+    }
+
+    /// The stop being dragged follows the pointer wherever it goes and lands
+    /// where it is let go; `bar` is where the stop bar is laid, if it still
+    /// is.
+    fn drag_stop(
+        &mut self,
+        event: &InputEvent,
+        layout: &Layout,
+        bar: Option<Rect>,
+        damage: &mut Region,
+    ) -> Changes {
+        let settled = matches!(
+            event,
+            InputEvent::PointerReleased {
+                button: PointerButton::Primary
+            } | InputEvent::PointerCancelled
+        );
+        if settled {
+            self.dragging_stop = false;
+        } else if !matches!(event, InputEvent::PointerMoved { .. }) {
+            return Changes::NONE;
+        }
+        let Some(bar) = bar else {
+            self.dragging_stop = false;
+            return Changes::NONE;
+        };
+        damage.add(layout.panel);
+        let (stop, offset) = (self.stop, Bar::of(bar).offset_at(self.pointer.x));
+        Changes::of(self.restop("Move stop", settled, None, |stops| {
+            gradient::moved(stops, stop, offset).map(Some)
+        }))
+    }
+
+    /// A press on the stop bar laid at `bar`, at `point` in the column's
+    /// layout: on a handle it takes that stop in hand and starts its drag, on
+    /// the strip it adds a stop there.
+    fn press_stops(
+        &mut self,
+        placed: &Placed<'_>,
+        (layout, scale, theme): (&Layout, Scale, &Theme),
+        bar: Rect,
+        point: Point,
+        damage: &mut Region,
+    ) -> Changes {
+        let mut released = None;
+        if self.focus != Some(Focus::Stops) {
+            released = self.let_go(placed, (layout, scale, theme), damage);
+            self.focus = Some(Focus::Stops);
+        }
+        damage.add(layout.panel);
+        let Some(ramp) = self.ramp.clone() else {
+            return Changes {
+                released,
+                change: None,
+            };
+        };
+        let laid = Bar::of(bar);
+        if let Some(index) = laid.handle_at(&ramp.stops, self.stop, point) {
+            self.choose_stop(index);
+            self.dragging_stop = true;
+            return Changes {
+                released,
+                change: None,
+            };
+        }
+        if !laid.on_strip(point) {
+            return Changes {
+                released,
+                change: None,
+            };
+        }
+        let change = match gradient::added(&ramp.stops, laid.offset_at(point.x)) {
+            Ok((stops, at)) => {
+                self.stop = at;
+                Some(Change::Stops {
+                    target: self.target,
+                    stops,
+                    spread: ramp.spread,
+                    form: gradient::form_of(&ramp),
+                    settled: true,
+                })
+            }
+            Err(error) => Some(Change::Refused {
+                what: "Add stop",
+                error,
+            }),
+        };
+        Changes { released, change }
+    }
+
+    /// Take the gradient in hand's stop at `index` in hand, showing its
+    /// colour and place.
+    fn choose_stop(&mut self, index: usize) {
+        let Some(stop) = self
+            .ramp
+            .as_ref()
+            .and_then(|ramp| ramp.stops.get(index))
+            .copied()
+        else {
+            return;
+        };
+        self.stop = index;
+        self.picker.set_colour(stop.colour);
+        self.show(Field::StopAt, hundredths(stop.offset * 100.0));
+    }
+
+    /// What choosing a swatch asks: the colour in hand, or the stop in
+    /// hand's, made the well's.
+    fn swatch_chosen(&mut self, action: SwatchAction) -> Option<Change> {
+        let SwatchAction::Selected { index, .. } = action;
+        let Color { r, g, b, a } = self.swatches.colour(index)?;
+        let colour = Rgba::new(r, g, b, a);
+        self.picker.set_colour(colour);
+        if self.ramp.is_some() {
+            let stop = self.stop;
+            return self.restop("Stop colour", true, None, |stops| {
+                gradient::recoloured(stops, stop, colour).map(Some)
+            });
+        }
+        Some(Change::Paint {
+            target: self.target,
+            paint: Paint::Colour(colour),
+            settled: true,
+        })
     }
 
     /// What a press, at `local` in the column's layout, changes.
@@ -995,8 +1765,17 @@ impl Inspector {
         match &button.press {
             Press::Target(target) => {
                 self.target = *target;
-                if let Paint::Colour(colour) = paint_of(shown.style, *target) {
-                    self.picker.set_colour(*colour);
+                self.stop = 0;
+                self.ramp = match target.of(&shown.style) {
+                    Paint::Gradient(gradient) => Some(gradient.clone()),
+                    Paint::None | Paint::Colour(_) => None,
+                };
+                let in_hand = self.follow_ramp().or(match target.of(&shown.style) {
+                    Paint::Colour(colour) => Some(*colour),
+                    Paint::None | Paint::Gradient(_) => None,
+                });
+                if let Some(colour) = in_hand {
+                    self.picker.set_colour(colour);
                 }
                 None
             }
@@ -1005,52 +1784,114 @@ impl Inspector {
                 None
             }
             Press::Change(change) => Some(change.clone()),
+            Press::Spread(spread) => self.restop("Spread", true, Some(*spread), |stops| {
+                fallible::copied(stops)
+                    .ok_or(DrawingError::OutOfMemory)
+                    .map(Some)
+            }),
+            Press::Reverse => self.restop("Reverse gradient", true, None, |stops| {
+                gradient::reversed(stops).map(Some)
+            }),
+            Press::RemoveStop => {
+                let stop = self.stop;
+                self.restop("Remove stop", true, None, |stops| {
+                    gradient::removed(stops, stop)
+                })
+            }
+            Press::KeepSwatch => Some(Change::KeepSwatch(self.picker.colour())),
+            Press::DropSwatch => {
+                let kept = self.kept.as_ref()?;
+                let at = self.swatches.selected()?.checked_sub(self.palette.len())?;
+                (at < kept.len()).then_some(Change::DropSwatch(at))
+            }
         }
     }
 
-    /// What the picker, laid at `bounds`, answers `event` with.
+    /// What running the gradient in hand through the stops `alter` makes of
+    /// its own asks of the view, continued by `spread` or as it is; nothing
+    /// where there is no gradient in hand or `alter` makes nothing.
+    fn restop(
+        &self,
+        what: &'static str,
+        settled: bool,
+        spread: Option<Spread>,
+        alter: impl FnOnce(&[Stop]) -> Result<Option<Vec<Stop>>, DrawingError>,
+    ) -> Option<Change> {
+        let ramp = self.ramp.as_ref()?;
+        match alter(&ramp.stops) {
+            Ok(Some(stops)) => Some(Change::Stops {
+                target: self.target,
+                stops,
+                spread: spread.unwrap_or(ramp.spread),
+                form: gradient::form_of(ramp),
+                settled,
+            }),
+            Ok(None) => None,
+            Err(error) => Some(Change::Refused { what, error }),
+        }
+    }
+
+    /// What the picker `which`, laid at `bounds`, answers `event` with.
     fn picker_answer(
         &mut self,
+        which: Picker,
         event: &InputEvent,
         bounds: Rect,
         (scale, theme): (Scale, &Theme),
         damage: &mut Region,
     ) -> Option<Change> {
-        let outcome = self.picker.on_pointer(event, bounds, scale, theme, damage);
-        self.picker_change(outcome)
+        let outcome = self
+            .picker_mut(which)
+            .on_pointer(event, bounds, scale, theme, damage);
+        self.picker_change(which, outcome)
     }
 
-    /// What the picker's `outcome` changes, kept track of so a colour shown
-    /// live is not shown over until it settles.
-    fn picker_change(&mut self, outcome: PickerOutcome) -> Option<Change> {
+    /// What the picker `which`'s `outcome` changes, kept track of so a colour
+    /// shown live is not shown over until it settles.
+    fn picker_change(&mut self, which: Picker, outcome: PickerOutcome) -> Option<Change> {
         let (colour, settled) = match outcome {
             PickerOutcome::Edited(colour) => (colour, false),
             PickerOutcome::Settled(colour) => (colour, true),
             PickerOutcome::Ignored | PickerOutcome::Taken => return None,
         };
-        self.unsettled = !settled;
-        Some(Change::Paint {
-            target: self.target,
-            paint: Paint::Colour(colour),
-            settled,
-        })
+        self.unsettled = (!settled).then_some(which);
+        match which {
+            Picker::Paint if self.ramp.is_some() => {
+                let stop = self.stop;
+                self.restop("Stop colour", settled, None, |stops| {
+                    gradient::recoloured(stops, stop, colour).map(Some)
+                })
+            }
+            Picker::Paint => Some(Change::Paint {
+                target: self.target,
+                paint: Paint::Colour(colour),
+                settled,
+            }),
+            Picker::Ground => Some(Change::Page(PageChange::Ground {
+                colour: Some(colour),
+                settled,
+            })),
+        }
     }
 
     /// What a number field's action changes.
-    fn field_change(field: Field, action: NumberAction) -> Option<Change> {
-        let (value, settled) = match action {
-            NumberAction::Edited { value } => (value, false),
-            NumberAction::Settled { value } => (value, true),
-        };
+    fn field_change(&self, field: Field, action: NumberAction) -> Option<Change> {
+        let (value, settled) = (action.value(), action.is_settled());
         if !settled && !matches!(field, Field::Width | Field::Opacity) {
             return None;
         }
         let measure = f64::from(value) / 100.0;
         Some(match field {
-            Field::Points => Change::Points(u32::try_from(value).unwrap_or(5)),
+            Field::Points => Change::Points(u32::try_from(value).unwrap_or(MIN_STAR_POINTS)),
             Field::Corners => Change::Corners(measure),
             Field::Inner => Change::Inner(measure),
-            Field::Size => Change::Size(measure),
+            Field::Size => Change::Text(TextChange::Size(measure)),
+            Field::Spacing => Change::Text(TextChange::Spacing(measure)),
+            Field::Raise => Change::Text(TextChange::Raise(measure / 100.0)),
+            Field::LineHeight => Change::Text(TextChange::LineHeight(measure / 100.0)),
+            Field::Start => Change::Text(TextChange::Start(measure)),
+            Field::Offset => Change::Offset(measure),
+            Field::Smoothness => Change::Smoothness(measure),
             Field::Width => Change::Width {
                 width: measure,
                 settled,
@@ -1063,6 +1904,26 @@ impl Inspector {
                 index,
                 value: measure,
             },
+            Field::PageWidth => Change::Page(PageChange::Width(measure)),
+            Field::PageHeight => Change::Page(PageChange::Height(measure)),
+            Field::GridSpacing => Change::Page(PageChange::GridSpacing(measure)),
+            Field::Subdivisions => {
+                Change::Page(PageChange::Subdivisions(u32::try_from(value).unwrap_or(1)))
+            }
+            Field::StopAt => {
+                let stop = self.stop;
+                return self.restop("Move stop", true, None, |stops| {
+                    gradient::moved(stops, stop, measure / 100.0).map(Some)
+                });
+            }
+            Field::Angle => Change::Form {
+                target: self.target,
+                form: Form::Linear(measure),
+            },
+            Field::Rotation => Change::Rotation(measure),
+            Field::Resolution => Change::Page(PageChange::Resolution(
+                u32::try_from(value).unwrap_or(tairix_drawing::PIXELS_PER_INCH),
+            )),
         })
     }
 
@@ -1085,14 +1946,14 @@ impl Inspector {
         let mut moved = Region::new();
         match focus {
             Focus::Picker => {
-                let Some(rect) = placed.column.picker else {
+                let Some((which, rect)) = self.tab.picker().zip(placed.column.picker) else {
                     self.focus = None;
-                    self.picker.set_focused(false);
+                    self.unfocus_pickers();
                     return Changes::NONE;
                 };
-                let outcome = self
-                    .picker
-                    .on_key(key, modifiers, rect, (scale, theme), &mut moved);
+                let outcome =
+                    self.picker_mut(which)
+                        .on_key(key, modifiers, rect, (scale, theme), &mut moved);
                 placed.view.report(&moved, damage);
                 match outcome {
                     PickerOutcome::Ignored if tab => {
@@ -1102,10 +1963,10 @@ impl Inspector {
                         released: self.let_go(&placed, (layout, scale, theme), damage),
                         change: None,
                     },
-                    outcome => Changes::of(self.picker_change(outcome)),
+                    outcome => Changes::of(self.picker_change(which, outcome)),
                 }
             }
-            Focus::Field(_) if tab => {
+            Focus::Field(_) | Focus::Stops if tab => {
                 self.walk(&placed, !modifiers.shift, (layout, scale, theme), damage)
             }
             Focus::Field(field) => {
@@ -1114,9 +1975,45 @@ impl Inspector {
                 };
                 let action = self.field(field).on_key(key, modifiers, rect, &mut moved);
                 placed.view.report(&moved, damage);
-                Changes::of(action.and_then(|action| Self::field_change(field, action)))
+                Changes::of(action.and_then(|action| self.field_change(field, action)))
+            }
+            Focus::Stops if key == Key::Named(NamedKey::Escape) => Changes {
+                released: self.let_go(&placed, (layout, scale, theme), damage),
+                change: None,
+            },
+            Focus::Stops => {
+                damage.add(layout.panel);
+                Changes::of(self.stops_key(key, modifiers))
             }
         }
+    }
+
+    /// What `key` does on the stop bar: Left and Right take the stop before
+    /// or after in hand, or with Shift nudge the one in hand, and Delete or
+    /// Backspace removes it.
+    fn stops_key(&mut self, key: Key, modifiers: Modifiers) -> Option<Change> {
+        let count = self.ramp.as_ref()?.stops.len();
+        let (towards, nudge) = match key {
+            Key::Named(NamedKey::Left) => (-1, -STOP_NUDGE),
+            Key::Named(NamedKey::Right) => (1, STOP_NUDGE),
+            Key::Named(NamedKey::Delete | NamedKey::Backspace) => {
+                let stop = self.stop;
+                return self.restop("Remove stop", true, None, |stops| {
+                    gradient::removed(stops, stop)
+                });
+            }
+            _ => return None,
+        };
+        let stop = self.stop;
+        if modifiers.shift {
+            let offset = self.ramp.as_ref()?.stops.get(stop)?.offset + nudge;
+            return self.restop("Move stop", true, None, |stops| {
+                gradient::moved(stops, stop, offset).map(Some)
+            });
+        }
+        let next = stop.checked_add_signed(towards).filter(|at| *at < count)?;
+        self.choose_stop(next);
+        None
     }
 
     /// Move the keyboard from what holds it to the next of the picker and
@@ -1132,15 +2029,17 @@ impl Inspector {
         let from = self.focus;
         let released = self.let_go(placed, (layout, scale, theme), damage);
         let fields = &placed.column.fields;
-        let picker = placed.column.picker;
-        let first_field = usize::from(picker.is_some());
+        let (bar, picker) = (placed.column.stops, placed.column.picker);
+        let picker_at = usize::from(bar.is_some());
+        let first_field = picker_at + usize::from(picker.is_some());
         let count = fields.len() + first_field;
         let at = match from {
             Some(Focus::Field(field)) => fields
                 .iter()
                 .position(|(each, _)| *each == field)
                 .map_or(0, |at| at + first_field),
-            _ => 0,
+            Some(Focus::Picker) => picker_at,
+            Some(Focus::Stops) | None => 0,
         };
         let next = if forward {
             (at + 1) % count.max(1)
@@ -1148,9 +2047,12 @@ impl Inspector {
             (at + count.max(1) - 1) % count.max(1)
         };
         let stop = match next.checked_sub(first_field) {
-            None => picker.inspect(|&rect| {
+            None if next < picker_at => bar.inspect(|_| self.focus = Some(Focus::Stops)),
+            None => self.tab.picker().zip(picker).map(|(which, rect)| {
                 self.focus = Some(Focus::Picker);
-                self.picker.enter_focus(forward, rect, scale, theme);
+                self.picker_mut(which)
+                    .enter_focus(forward, rect, scale, theme);
+                rect
             }),
             Some(index) => fields.get(index).map(|&(field, rect)| {
                 self.focus = Some(Focus::Field(field));
@@ -1180,20 +2082,40 @@ impl Inspector {
     ) -> Option<Change> {
         match self.focus.take()? {
             Focus::Field(field) => self.release_field(field, layout, damage),
+            Focus::Stops => {
+                damage.add(layout.panel);
+                self.settle_stop_drag()
+            }
             Focus::Picker => {
                 damage.add(layout.panel);
-                let dragged = self.picker.finish_drag();
+                let Some(which) = self.tab.picker() else {
+                    self.unfocus_pickers();
+                    return None;
+                };
+                let dragged = self.picker_mut(which).finish_drag();
                 let Some(rect) = placed.column.picker else {
-                    self.picker.set_focused(false);
-                    return self.picker_change(dragged);
+                    self.picker_mut(which).set_focused(false);
+                    return self.picker_change(which, dragged);
                 };
                 let mut moved = Region::new();
-                let blurred = self.picker.blur(rect, scale, theme, &mut moved);
+                let blurred = self.picker_mut(which).blur(rect, scale, theme, &mut moved);
                 placed.view.report(&moved, damage);
-                let settled = self.picker_change(blurred);
-                self.picker_change(dragged).or(settled)
+                let settled = self.picker_change(which, blurred);
+                self.picker_change(which, dragged).or(settled)
             }
         }
+    }
+
+    /// The stop being dragged landed where it stands.
+    fn settle_stop_drag(&mut self) -> Option<Change> {
+        if !core::mem::take(&mut self.dragging_stop) {
+            return None;
+        }
+        self.restop("Move stop", true, None, |stops| {
+            fallible::copied(stops)
+                .ok_or(DrawingError::OutOfMemory)
+                .map(Some)
+        })
     }
 
     /// Let go of the keyboard for a chord or a press elsewhere, answering what
@@ -1220,12 +2142,22 @@ impl Inspector {
                 self.focus = None;
                 self.release_field(field, layout, damage)
             }
+            Focus::Stops => {
+                damage.add(layout.panel);
+                self.settle_stop_drag()
+            }
             Focus::Picker => {
                 damage.add(layout.panel);
-                let outcome = self.picker.finish_drag();
-                let change = self.picker_change(outcome);
-                self.picker.set_colour(self.picker.colour());
-                self.unsettled = false;
+                let Some(which) = self.tab.picker() else {
+                    self.focus = None;
+                    self.unfocus_pickers();
+                    return None;
+                };
+                let picker = self.picker_mut(which);
+                let outcome = picker.finish_drag();
+                picker.set_colour(picker.colour());
+                let change = self.picker_change(which, outcome);
+                self.unsettled = None;
                 change
             }
         }
@@ -1243,7 +2175,7 @@ impl Inspector {
         control.set_focused(false);
         let committed = control.commit(layout.panel, damage);
         damage.add(layout.panel);
-        committed.and_then(|action| Self::field_change(field, action))
+        committed.and_then(|action| self.field_change(field, action))
     }
 
     /// When a held press on the panel's bar next steps, if one is held.
@@ -1305,8 +2237,18 @@ impl Inspector {
         }
         let label = scale.scale_length(LABEL);
         placed.view.paint(surface, |surface| {
-            if let Some(picker) = placed.column.picker {
-                self.picker.render(surface, picker, scale, theme);
+            if let Some((which, picker)) = self.tab.picker().zip(placed.column.picker) {
+                self.picker_shown(which)
+                    .render(surface, picker, scale, theme);
+            }
+            if let (Some(bar), Paint::Gradient(ramp)) =
+                (placed.column.stops, self.target.of(&shown.style))
+            {
+                let focused = self.focus == Some(Focus::Stops);
+                Bar::of(bar).render(surface, (&ramp.stops, self.stop, focused), scale, theme);
+            }
+            if let Some(wells) = placed.column.swatches {
+                self.swatches.render(surface, wells, scale, theme);
             }
             for &(field, rect) in &placed.column.fields {
                 let named = Rect::new(
@@ -1343,6 +2285,24 @@ impl Inspector {
     }
 }
 
+/// The rows a gradient of `form` is edited by: its stop bar, the stop in
+/// hand's place, a linear one's angle, how it continues past its ends, and
+/// reversing it or removing the stop in hand.
+fn gradient_controls(column: &mut Column<'_>, ramp: &Gradient, form: Form) {
+    column.stop_bar();
+    column.field(Field::StopAt);
+    if matches!(form, Form::Linear(_)) {
+        column.field(Field::Angle);
+    }
+    column.buttons(
+        SPREADS.map(|(label, spread)| (label, ramp.spread == spread, Press::Spread(spread))),
+    );
+    column.buttons([
+        ("Reverse", false, Press::Reverse),
+        ("Remove stop", false, Press::RemoveStop),
+    ]);
+}
+
 fn shape_controls(column: &mut Column<'_>, shown: &Shown<'_>) {
     column.field(Field::Corners);
     column.field(Field::Points);
@@ -1353,19 +2313,43 @@ fn shape_controls(column: &mut Column<'_>, shown: &Shown<'_>) {
     ]);
     column.gap();
     let face = &shown.face;
-    column.buttons(
-        FAMILIES
-            .map(|(label, family)| (label, face.family == family, change(Change::Family(family)))),
-    );
+    column.buttons(FAMILIES.map(|(label, family)| {
+        (
+            label,
+            face.family == family,
+            change(Change::Text(TextChange::Family(family))),
+        )
+    }));
     column.field(Field::Size);
+    column.field(Field::Spacing);
+    column.field(Field::Raise);
+    column.field(if face.along {
+        Field::Start
+    } else {
+        Field::LineHeight
+    });
     column.buttons([
-        ("Bold", face.bold, change(Change::Bold(!face.bold))),
-        ("Italic", face.italic, change(Change::Italic(!face.italic))),
+        (
+            "Bold",
+            face.bold,
+            change(Change::Text(TextChange::Bold(!face.bold))),
+        ),
+        (
+            "Italic",
+            face.italic,
+            change(Change::Text(TextChange::Italic(!face.italic))),
+        ),
     ]);
-    column.buttons(
-        TEXT_ALIGNS
-            .map(|(label, align)| (label, face.align == align, change(Change::TextAlign(align)))),
-    );
+    column.buttons(TEXT_ALIGNS.map(|(label, align)| {
+        (
+            label,
+            face.align == align,
+            change(Change::Text(TextChange::Align(align))),
+        )
+    }));
+    column.gap();
+    column.field(Field::Offset);
+    column.field(Field::Smoothness);
 }
 
 /// The layer commands, then the layers, the topmost first as it is drawn.
@@ -1392,7 +2376,7 @@ fn layer_controls<'s>(
 /// What the inspector shows of the window.
 pub struct Shown<'a> {
     /// The style shown.
-    pub style: &'a Style,
+    pub style: Cow<'a, Style>,
     /// The layers, bottom first.
     pub layers: &'a tairix_drawing::Children,
     /// The layer in hand.
@@ -1403,6 +2387,8 @@ pub struct Shown<'a> {
     pub polygon: bool,
     /// How text is set.
     pub face: Face<'a>,
+    /// The page.
+    pub page: Page,
 }
 
 /// How text is set, as the Shape tab shows it.
@@ -1415,6 +2401,28 @@ pub struct Face<'a> {
     pub italic: bool,
     /// How its lines align.
     pub align: TextAlign,
+    /// Whether it is set along a path rather than in lines.
+    pub along: bool,
+}
+
+/// `own`, the style of the object `node`, as a text being typed paints the
+/// character `typed` begins with: with its run's paints in place of its own.
+pub(crate) fn typed_style<'a>(
+    own: &'a Style,
+    node: Option<&tairix_drawing::Node>,
+    typed: Option<Range<usize>>,
+) -> Cow<'a, Style> {
+    let run = node.zip(typed).and_then(|(node, range)| match node.kind() {
+        tairix_drawing::Kind::Text { text, .. } => text
+            .run_for(range)
+            .and_then(|index| text.runs.get(index as usize))
+            .map(|run| Arc::clone(&run.style)),
+        _ => None,
+    });
+    match run {
+        Some(run) if run.fill.is_some() || run.stroke.is_some() => Cow::Owned(run.painted(own)),
+        _ => Cow::Borrowed(own),
+    }
 }
 
 /// Which of [`DASHES`] `stroke` is dashed with, if one.

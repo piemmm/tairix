@@ -126,6 +126,11 @@ pub mod supervise;
 pub mod svgfonts;
 #[cfg(test)]
 mod testing;
+
+// The unit tests refuse the heap at chosen requests.
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 pub mod textsyntax;
 pub mod timesync;
 pub mod wire;

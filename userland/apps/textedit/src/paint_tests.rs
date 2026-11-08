@@ -24,7 +24,6 @@ const WINDOW: (u32, u32) = (800, 480);
 fn faces(theme: &Theme) -> Faces {
     Faces {
         grid: BitmapFont::for_role(theme.fonts(), TextRole::Monospace, Scale::ONE),
-        status: BitmapFont::for_role(theme.fonts(), TextRole::Caption, Scale::ONE),
     }
 }
 

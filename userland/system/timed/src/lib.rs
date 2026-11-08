@@ -986,6 +986,7 @@ const fn failure_name(failure: tairix_sandbox::timesync::TimeSyncFailure) -> &'s
         F::Sandbox(_) => "sandbox",
         F::ReplyMalformed => "reply_malformed",
         F::ReplyRefused => "reply_refused",
+        F::NoMemory => "no_memory",
     }
 }
 

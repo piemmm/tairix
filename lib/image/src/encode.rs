@@ -236,6 +236,16 @@ pub fn encode_sprite_area(sprites: &[SpriteInput<'_>]) -> Result<Vec<u8>, Encode
     sprite_encode::encode(sprites)
 }
 
+/// `sprite` alone, its control block first and no area around it: what a
+/// Draw file's sprite object holds.
+///
+/// # Errors
+///
+/// See [`EncodeError`].
+pub fn encode_sprite(sprite: &SpriteInput<'_>) -> Result<Vec<u8>, EncodeError> {
+    sprite_encode::encode_one(sprite)
+}
+
 /// A file being written, grown fallibly.
 pub(crate) struct Output {
     bytes: Vec<u8>,

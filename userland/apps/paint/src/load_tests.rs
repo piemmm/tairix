@@ -24,6 +24,7 @@ fn opened(count: u32, sprites: bool) -> EditDocument {
         unkept: tairix_image::Unkept::default(),
         written: tairix_image::Written::Plain,
         canvas: None,
+        length: ROOMY as u64,
     }
 }
 
@@ -155,6 +156,7 @@ fn layered(count: u32, canvas: Option<(u32, u32)>) -> EditDocument {
         unkept: tairix_image::Unkept::default(),
         written: tairix_image::Written::Plain,
         canvas,
+        length: ROOMY as u64,
     }
 }
 
@@ -302,7 +304,8 @@ fn a_risc_os_sprite_file_opens_as_its_sprites() {
         tairix_log::DiscardSink,
     );
     send_document(&mut sandbox, &file).expect("uploaded");
-    let opened = open_edit(&mut sandbox, Some(ViewFormat::Sprite)).expect("opened");
+    let opened =
+        open_edit(&mut sandbox, file.len() as u64, Some(ViewFormat::Sprite)).expect("opened");
     let mut assembly = Assembly::new(opened, file.len()).expect("room");
     let EditEntry::Picture(picture) = select_entry(&mut sandbox, opened, 0).expect("selected")
     else {

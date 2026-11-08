@@ -1,6 +1,14 @@
 //! Paths of sub-paths, and which points they enclose.
+//!
+//! A copy (`try_clone`), a transform, a reversal and a flattening allocate
+//! fallibly and answer the heap's refusal, so a program short of memory can
+//! work on a document's geometry without aborting; `Clone` copies infallibly,
+//! for code where an abort is contained.
 
+use alloc::collections::TryReserveError;
 use alloc::vec::Vec;
+
+use tairix_util::fallible::try_push;
 
 use crate::affine::Affine;
 use crate::bounds::Bounds;
@@ -65,6 +73,25 @@ impl PathEl {
             Self::Cubic(c1, c2, to) => Segment::Cubic(CubicBez::new(from, c1, c2, to)),
         }
     }
+
+    /// The step `segment` makes from wherever it starts.
+    #[must_use]
+    pub(crate) const fn of(segment: Segment) -> Self {
+        match segment {
+            Segment::Line(line) => Self::Line(line.p1),
+            Segment::Cubic(cubic) => Self::Cubic(cubic.p1, cubic.p2, cubic.p3),
+        }
+    }
+}
+
+/// `items` in a list of exactly their number; the take keeps an iterator
+/// yielding more than it claimed from growing the list past its reservation.
+fn listed<T>(items: impl ExactSizeIterator<Item = T>) -> Result<Vec<T>, TryReserveError> {
+    let count = items.len();
+    let mut list = Vec::new();
+    list.try_reserve_exact(count)?;
+    list.extend(items.take(count));
+    Ok(list)
 }
 
 /// A run of segments from one point, open or closed.
@@ -135,46 +162,66 @@ impl Subpath {
             })
     }
 
+    /// A copy of it.
+    ///
+    /// # Errors
+    ///
+    /// The heap's refusal of the copy's steps.
+    pub fn try_clone(&self) -> Result<Self, TryReserveError> {
+        Ok(Self {
+            start: self.start,
+            elements: listed(self.elements.iter().copied())?,
+            closed: self.closed,
+        })
+    }
+
     /// The sub-path mapped through `transform`.
-    #[must_use]
-    pub fn transformed(&self, transform: Affine) -> Self {
-        let elements = self
-            .elements
-            .iter()
-            .map(|element| match *element {
-                PathEl::Line(to) => PathEl::Line(transform.map(to)),
-                PathEl::Cubic(c1, c2, to) => {
-                    PathEl::Cubic(transform.map(c1), transform.map(c2), transform.map(to))
-                }
-            })
-            .collect();
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// The heap's refusal of the mapped steps.
+    pub fn transformed(&self, transform: Affine) -> Result<Self, TryReserveError> {
+        let elements = listed(self.elements.iter().map(|element| match *element {
+            PathEl::Line(to) => PathEl::Line(transform.map(to)),
+            PathEl::Cubic(c1, c2, to) => {
+                PathEl::Cubic(transform.map(c1), transform.map(c2), transform.map(to))
+            }
+        }))?;
+        Ok(Self {
             start: transform.map(self.start),
             elements,
             closed: self.closed,
-        }
+        })
     }
 
     /// The sub-path run the other way: the same points, each step's controls
     /// swapped.
-    #[must_use]
-    pub fn reversed(&self) -> Self {
-        let mut elements = Vec::with_capacity(self.elements.len());
-        for (index, element) in self.elements.iter().enumerate().rev() {
-            let from = match index {
-                0 => self.start,
-                _ => self.elements[index - 1].end(),
-            };
-            elements.push(match *element {
-                PathEl::Line(_) => PathEl::Line(from),
-                PathEl::Cubic(c1, c2, _) => PathEl::Cubic(c2, c1, from),
-            });
-        }
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// The heap's refusal of the reversed steps.
+    pub fn reversed(&self) -> Result<Self, TryReserveError> {
+        let elements = listed(
+            self.elements
+                .iter()
+                .enumerate()
+                .rev()
+                .map(|(index, element)| {
+                    let from = match index {
+                        0 => self.start,
+                        _ => self.elements[index - 1].end(),
+                    };
+                    match *element {
+                        PathEl::Line(_) => PathEl::Line(from),
+                        PathEl::Cubic(c1, c2, _) => PathEl::Cubic(c2, c1, from),
+                    }
+                }),
+        )?;
+        Ok(Self {
             start: self.end(),
             elements,
             closed: self.closed,
-        }
+        })
     }
 
     /// Its signed area as a fill takes it — closed whether it says so or
@@ -195,14 +242,27 @@ impl Subpath {
 
     /// Append its flattened polyline to `out`: its start, then every point
     /// each segment flattens to within `tolerance`.
-    pub fn flatten(&self, tolerance: f64, out: &mut Vec<Point>) {
-        out.push(self.start);
+    ///
+    /// # Errors
+    ///
+    /// The heap's refusal of a point, `out` keeping those before it.
+    pub fn flatten(&self, tolerance: f64, out: &mut Vec<Point>) -> Result<(), TryReserveError> {
+        try_push(out, self.start)?;
         for segment in self.segments() {
             match segment {
-                Segment::Line(line) => out.push(line.p1),
-                Segment::Cubic(cubic) => flatten_cubic(cubic, tolerance, |point| out.push(point)),
+                Segment::Line(line) => try_push(out, line.p1)?,
+                Segment::Cubic(cubic) => {
+                    let mut held = Ok(());
+                    flatten_cubic(cubic, tolerance, |point| {
+                        if held.is_ok() {
+                            held = try_push(out, point);
+                        }
+                    });
+                    held?;
+                }
             }
         }
+        Ok(())
     }
 }
 
@@ -220,6 +280,40 @@ impl Path {
         Self {
             subpaths: Vec::new(),
         }
+    }
+
+    /// The path of `subpath` alone.
+    ///
+    /// # Errors
+    ///
+    /// The heap's refusal of its list of sub-paths.
+    pub fn single(subpath: Subpath) -> Result<Self, TryReserveError> {
+        let mut subpaths = Vec::new();
+        subpaths.try_reserve_exact(1)?;
+        subpaths.push(subpath);
+        Ok(Self { subpaths })
+    }
+
+    /// A copy of it.
+    ///
+    /// # Errors
+    ///
+    /// The heap's refusal of any part of the copy.
+    pub fn try_clone(&self) -> Result<Self, TryReserveError> {
+        self.each(Subpath::try_clone)
+    }
+
+    /// The path of what `made` makes of each sub-path.
+    fn each(
+        &self,
+        made: impl Fn(&Subpath) -> Result<Subpath, TryReserveError>,
+    ) -> Result<Self, TryReserveError> {
+        let mut subpaths = Vec::new();
+        subpaths.try_reserve_exact(self.subpaths.len())?;
+        for subpath in &self.subpaths {
+            subpaths.push(made(subpath)?);
+        }
+        Ok(Self { subpaths })
     }
 
     /// Whether it draws nothing: no sub-path has a step.
@@ -244,23 +338,21 @@ impl Path {
     }
 
     /// The path mapped through `transform`.
-    #[must_use]
-    pub fn transformed(&self, transform: Affine) -> Self {
-        Self {
-            subpaths: self
-                .subpaths
-                .iter()
-                .map(|subpath| subpath.transformed(transform))
-                .collect(),
-        }
+    ///
+    /// # Errors
+    ///
+    /// The heap's refusal of any part of the mapped path.
+    pub fn transformed(&self, transform: Affine) -> Result<Self, TryReserveError> {
+        self.each(|subpath| subpath.transformed(transform))
     }
 
     /// The path with every sub-path run the other way.
-    #[must_use]
-    pub fn reversed(&self) -> Self {
-        Self {
-            subpaths: self.subpaths.iter().map(Subpath::reversed).collect(),
-        }
+    ///
+    /// # Errors
+    ///
+    /// The heap's refusal of any part of the reversed path.
+    pub fn reversed(&self) -> Result<Self, TryReserveError> {
+        self.each(Subpath::reversed)
     }
 
     /// Its signed area as a fill takes it, positive clockwise as drawn.

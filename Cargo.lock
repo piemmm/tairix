@@ -1419,6 +1419,7 @@ dependencies = [
 name = "tairix-collections"
 version = "0.0.0"
 dependencies = [
+ "loom",
  "tairix-abi",
  "tairix-buildcfg",
  "tairix-cpuops",
@@ -1870,6 +1871,8 @@ name = "tairix-draw"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appconf",
+ "tairix-appdata",
  "tairix-bezier",
  "tairix-browse",
  "tairix-buildcfg",
@@ -1879,6 +1882,7 @@ dependencies = [
  "tairix-drawing",
  "tairix-font",
  "tairix-geometry",
+ "tairix-hash",
  "tairix-help",
  "tairix-icon",
  "tairix-image",
@@ -1899,9 +1903,12 @@ name = "tairix-drawing"
 version = "0.0.0"
 dependencies = [
  "tairix-bezier",
+ "tairix-collections",
  "tairix-colour",
  "tairix-compress",
+ "tairix-fsmeta",
  "tairix-fuzzseed",
+ "tairix-image",
  "tairix-inline",
  "tairix-raster",
  "tairix-svg",
@@ -3171,6 +3178,7 @@ dependencies = [
  "tairix-compress",
  "tairix-crc32",
  "tairix-fuzzseed",
+ "tairix-inline",
  "tairix-raster",
  "tairix-util",
  "tairix-video",
@@ -9368,11 +9376,14 @@ name = "tairix-window"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appconf",
  "tairix-buildcfg",
+ "tairix-controls",
  "tairix-display",
  "tairix-font",
  "tairix-fuzzseed",
  "tairix-geometry",
+ "tairix-icon",
  "tairix-input",
  "tairix-parallel",
  "tairix-path",
@@ -9382,6 +9393,7 @@ dependencies = [
  "tairix-theme",
  "tairix-util",
  "tairix-visible",
+ "tairix-window",
 ]
 
 [[package]]

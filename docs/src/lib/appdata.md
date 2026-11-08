@@ -239,7 +239,9 @@ one write is outstanding at a time, the rest owed behind it. The write is
 carried out by `publish` off the loop, on a `publish_worker` or any other
 `PublishDesk`, and the loop's side of it is the one `submit_published`,
 `collect_published` and `see_out_published`: a program sees its last write out
-before it ends.
+before it ends. Of what an answer reports, a settings window says only a write
+the store refused (`Refusal::is_write`); what reading the store found is the
+program's to report.
 
 Some app data is an **open** namespace, though: a catalog, a recent-file list, a
 set of per-host preferences. `Settings::settings` answers those, listing every

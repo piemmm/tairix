@@ -42,6 +42,22 @@ pub enum NumberAction {
     },
 }
 
+impl NumberAction {
+    /// The value the field holds, entered or settled.
+    #[must_use]
+    pub const fn value(self) -> i32 {
+        match self {
+            Self::Edited { value } | Self::Settled { value } => value,
+        }
+    }
+
+    /// Whether the entry finished, so durable work may follow it.
+    #[must_use]
+    pub const fn is_settled(self) -> bool {
+        matches!(self, Self::Settled { .. })
+    }
+}
+
 /// A text field holding an integer within `min..=max`.
 ///
 /// Equal fields draw the same pixels: the wheel's carried fraction is never

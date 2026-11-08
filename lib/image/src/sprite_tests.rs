@@ -1587,3 +1587,41 @@ fn a_sprite_is_found_by_its_name_and_decoded_alone() {
     );
     assert!(find_named(&bytes[..20], &name("!edit")).is_err());
 }
+
+/// A sprite with no area around it, as a Draw file's sprite object holds
+/// one, decodes as the same sprite in an area does, with its pixels' shape
+/// and its extent, and the encoder writes one back alone.
+#[test]
+fn a_lone_sprite_decodes_and_encodes_without_an_area() {
+    let sprite = Sprite::new(ro35(6, false), 32, 2, 1).pixels(&[0x0012_3456, 0x00AB_CDEF]);
+    let alone = sprite.bytes();
+    let read = crate::decode_sprite(&alone, &limits()).expect("a lone sprite");
+    let in_area = decode(&one(sprite), &limits()).expect("the same sprite in an area");
+    assert_eq!(read.image, in_area);
+    assert_eq!(read.eig, (1, 1), "a 90 dpi mode word");
+    assert_eq!(read.length as usize, alone.len());
+
+    let picture = crate::Picture::rgba(2, 1, read.image.pixels().to_vec()).expect("a picture");
+    let mode = crate::SpriteMode::truecolour((1, 1), false);
+    let written = crate::encode_sprite(&crate::SpriteInput::Picture {
+        name: crate::SpriteName::new("picture").expect("a name"),
+        mode,
+        palette: &crate::SpritePalette::Implied,
+        masked: false,
+        source: &picture,
+    })
+    .expect("written alone");
+    let again = crate::decode_sprite(&written, &limits()).expect("read back");
+    assert_eq!(again.image, read.image);
+    assert_eq!(again.length as usize, written.len());
+    assert!(crate::decode_sprite(&alone[..alone.len() - 4], &limits()).is_err());
+}
+
+#[test]
+fn a_mode_states_the_density_its_eigen_factors_make() {
+    let mode = crate::SpriteMode::truecolour((1, 2), false);
+    assert_eq!(
+        mode.density(),
+        crate::Density::whole(90, 45, crate::DensityUnit::Inch)
+    );
+}

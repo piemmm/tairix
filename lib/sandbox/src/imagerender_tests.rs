@@ -26,7 +26,9 @@ use super::{
 };
 use crate::host::ParserSandbox;
 use crate::loopback::LoopbackLauncher;
-use crate::testing::{loopback, scripted, tampering, NullSink, Tampering};
+use crate::testing::{
+    document_refused, loopback, scripted, swept, tampering, this_side, NullSink, Tampering,
+};
 use crate::wire::Writer;
 use crate::worker::Service;
 
@@ -1239,14 +1241,43 @@ fn a_chunk_before_any_begin_is_refused() {
     );
 }
 
+/// What a worker may hold is its memory ceiling's to say, so a document
+/// past what it can reserve is refused as want of memory, holding nothing.
 #[test]
-fn a_document_larger_than_the_containment_bound_is_refused_before_it_is_reserved() {
+fn a_document_the_worker_cannot_reserve_is_refused_for_want_of_memory() {
     let mut service = ImageRenderService::default();
+    service.handle(&begin(4));
+    let refused =
+        tairix_fuzzseed::meter::refusing_above(1 << 20, || service.handle(&begin(2 << 20)));
     assert_eq!(
-        service.handle(&begin(super::MAX_DOCUMENT_BYTES as u64 + 1)),
-        vec![super::REPLY_ERROR, super::REFUSAL_DOC_TOO_LARGE]
+        refused,
+        vec![super::REPLY_ERROR, super::REFUSAL_DOC_OUT_OF_MEMORY]
     );
-    assert!(service.document.is_none());
+    assert!(
+        service.document.is_none(),
+        "the document it replaced is let go"
+    );
+    assert_eq!(
+        service.handle(&begin(2 << 20)),
+        vec![super::REPLY_DOC_BEGUN]
+    );
+}
+
+/// A document past what the launcher's workers may hold is refused here as
+/// too large, before a byte is sent; one at the bound is handed over.
+#[test]
+fn a_document_past_the_workers_room_is_refused_as_too_large_before_it_is_sent() {
+    let launcher = LoopbackLauncher::new(ImageRenderService::default as fn() -> _).holding(16);
+    let mut sandbox = ParserSandbox::new(launcher, NullSink);
+    assert_eq!(sandbox.document_room(), 16);
+    assert_eq!(
+        super::send_document(&mut sandbox, &[7; 17]),
+        Err(super::DocumentFailure::Refused(
+            super::DocumentRefusal::TooLarge
+        ))
+    );
+    assert!(!sandbox.is_live(), "no worker was started to be told");
+    assert_eq!(super::send_document(&mut sandbox, &[7; 16]), Ok(()));
 }
 
 #[test]
@@ -2742,9 +2773,9 @@ fn a_thumbnail_placed_outside_its_square_or_nowhere_is_refused() {
 }
 
 /// A document held in memory, read as a picture file is.
-struct Held(Vec<u8>);
+struct Held<'a>(&'a [u8]);
 
-impl tairix_icon::ArtworkDocument for Held {
+impl tairix_icon::ArtworkDocument for Held<'_> {
     fn stamp(&self) -> tairix_abi::fs::DocumentStamp {
         tairix_abi::fs::DocumentStamp {
             size: self.0.len() as u64,
@@ -2769,7 +2800,8 @@ impl tairix_icon::ArtworkDocument for Held {
 fn a_thumbnail_streams_its_document_and_draws_it() {
     let mut sandbox = sandbox();
     let colour = [9, 8, 7, 255];
-    let mut document = Held(png_with(4, 4, |_, _| colour));
+    let png = png_with(4, 4, |_, _| colour);
+    let mut document = Held(&png);
     let pixels = super::thumbnail(&mut sandbox, 2, &mut document)
         .expect("drawn")
         .pixels;
@@ -2827,7 +2859,7 @@ fn application_drawn(
     side: u32,
 ) -> Result<tairix_icon::Fitted, super::ThumbnailFailure> {
     let names = tairix_icon::SpriteNames::of(name).expect("sprite names");
-    super::application_sprite(&mut sandbox(), side, &names, &mut Held(area.to_vec()))
+    super::application_sprite(&mut sandbox(), side, &names, &mut Held(area))
 }
 
 const RED: [u8; 4] = [200, 0, 0, 255];
@@ -3103,4 +3135,244 @@ fn the_worker_refuses_a_malformed_boot_request() {
     let mut trailing = w.finish();
     trailing.push(0);
     assert_eq!(worker.handle(&trailing), refused);
+}
+
+/// A provider answering every face, each glyph a full-em square one em wide.
+struct Squares;
+
+const SQUARE_EM: f64 = 1000.0;
+
+impl tairix_svg::font::FontProvider for Squares {
+    fn select(
+        &mut self,
+        _req: &tairix_svg::font::FaceRequest<'_>,
+    ) -> Result<tairix_svg::font::FaceMetrics, tairix_svg::font::FontUnavailable> {
+        Ok(tairix_svg::font::FaceMetrics {
+            id: tairix_svg::font::FaceId::new(0),
+            units_per_em: SQUARE_EM,
+            ascent: SQUARE_EM,
+            descent: 0.0,
+            line_gap: 0.0,
+        })
+    }
+
+    fn outlines(
+        &mut self,
+        _face: tairix_svg::font::FaceId,
+        run: &[char],
+        out: &mut Vec<tairix_svg::font::GlyphOutline>,
+    ) -> Result<(), tairix_svg::font::FontUnavailable> {
+        use tairix_svg::font::OutlineSegment::Line;
+        for _ in run {
+            out.push(tairix_svg::font::GlyphOutline {
+                units_per_em: SQUARE_EM,
+                advance: SQUARE_EM,
+                contours: vec![tairix_svg::font::OutlineContour {
+                    start: (0.0, 0.0),
+                    segments: vec![
+                        Line {
+                            to: (SQUARE_EM, 0.0),
+                        },
+                        Line {
+                            to: (SQUARE_EM, SQUARE_EM),
+                        },
+                        Line {
+                            to: (0.0, SQUARE_EM),
+                        },
+                        Line { to: (0.0, 0.0) },
+                    ],
+                }],
+                ..tairix_svg::font::GlyphOutline::default()
+            });
+        }
+        Ok(())
+    }
+}
+
+/// [`Squares`] with glyphs of no ink, so furnishing them allocates nothing a
+/// sweep could refuse: what is held to fallibility is the seam, not this.
+struct Blanks;
+
+impl tairix_svg::font::FontProvider for Blanks {
+    fn select(
+        &mut self,
+        req: &tairix_svg::font::FaceRequest<'_>,
+    ) -> Result<tairix_svg::font::FaceMetrics, tairix_svg::font::FontUnavailable> {
+        Squares.select(req)
+    }
+
+    fn outlines(
+        &mut self,
+        _face: tairix_svg::font::FaceId,
+        run: &[char],
+        out: &mut Vec<tairix_svg::font::GlyphOutline>,
+    ) -> Result<(), tairix_svg::font::FontUnavailable> {
+        for _ in run {
+            out.push(tairix_svg::font::GlyphOutline {
+                units_per_em: SQUARE_EM,
+                advance: SQUARE_EM,
+                ..tairix_svg::font::GlyphOutline::default()
+            });
+        }
+        Ok(())
+    }
+}
+
+/// One red letter filling a 16-pixel icon, once its glyph is supplied.
+const LETTERED: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><text x="0" y="16" font-size="16" fill="#ff0000">I</text></svg>"##;
+
+/// Lettering the worker has no glyphs for is fetched through the caller's
+/// font seam, supplied once, and drawn.
+#[test]
+fn lettering_is_drawn_with_the_glyphs_the_caller_supplies() {
+    let pixels = rasterise_icon(&mut sandbox(), 16, LETTERED, &mut Squares).expect("drawn");
+    assert_eq!(rgba_at(&pixels, 16, 8, 8), [255, 0, 0, 255]);
+    assert_eq!(
+        rasterise_icon(&mut sandbox(), 16, LETTERED, &mut NoFonts),
+        Err(IconRasterFailure::FontsUnavailable)
+    );
+}
+
+fn icon_refused(failure: IconRasterFailure) -> bool {
+    match failure {
+        IconRasterFailure::NoMemory => true,
+        IconRasterFailure::Sandbox(inner) => this_side(inner),
+        _ => false,
+    }
+}
+
+fn upload_refused(failure: super::UploadFailure<()>) -> bool {
+    match failure {
+        super::UploadFailure::NoMemory => true,
+        super::UploadFailure::Document(inner) => document_refused(inner),
+        _ => false,
+    }
+}
+
+fn thumbnail_refused(failure: &super::ThumbnailFailure) -> bool {
+    match *failure {
+        super::ThumbnailFailure::Upload(inner) => upload_refused(inner),
+        super::ThumbnailFailure::Render(inner) => icon_refused(inner),
+    }
+}
+
+#[test]
+fn an_icon_this_side_has_no_memory_for_is_refused_as_that() {
+    let png = png_with(8, 8, |x, y| [byte(x), byte(y), 9, 255]);
+    for icon in [png.as_slice(), &svg_square("#123456"), LETTERED] {
+        swept::<ImageRenderService, _, _>(
+            |sandbox| rasterise_icon(sandbox, 16, icon, &mut Blanks),
+            |failure| icon_refused(*failure),
+        );
+    }
+}
+
+#[test]
+fn a_thumbnail_this_side_has_no_memory_for_is_refused_as_that() {
+    let png = png_with(8, 4, |x, _| [byte(x), 0, 0, 255]);
+    swept::<ImageRenderService, _, _>(
+        |sandbox| super::thumbnail(sandbox, 4, &mut Held(&png)),
+        thumbnail_refused,
+    );
+}
+
+#[test]
+fn an_application_sprite_this_side_has_no_memory_for_is_refused_as_that() {
+    let area = sprite_area(&[sprite(b"!edit", (1, 1), (4, 4), |_, _| RED)]);
+    let names = tairix_icon::SpriteNames::of("!Edit").expect("sprite names");
+    swept::<ImageRenderService, _, _>(
+        |sandbox| super::application_sprite(sandbox, 4, &names, &mut Held(&area)),
+        thumbnail_refused,
+    );
+}
+
+#[test]
+fn boot_sprites_this_side_has_no_memory_for_are_refused_as_that() {
+    let boot = b"Set Edit$Dir <Obey$Dir>\nIconSprites <Edit$Dir>.Themes.!Sprites\n";
+    swept::<ImageRenderService, _, _>(
+        |sandbox| super::boot_sprite_files(sandbox, boot),
+        |failure| icon_refused(*failure),
+    );
+}
+
+#[test]
+fn a_wallpaper_this_side_has_no_memory_for_is_refused_as_that() {
+    let png = solid_png(6, 4, [1, 2, 3, 255]);
+    let out = core::cell::RefCell::new(vec![0u8; 8 * 8 * 4]);
+    swept::<ImageRenderService, _, _>(
+        |sandbox| {
+            super::send_document(sandbox, &png).map_err(WallpaperRenderFailure::Document)?;
+            super::plan_wallpaper(sandbox, (8, 8), 8, 8, WallpaperFit::Fill)?
+                .render_into(&mut out.borrow_mut())
+        },
+        |failure| match failure {
+            WallpaperRenderFailure::NoMemory => true,
+            WallpaperRenderFailure::Sandbox(inner) => this_side(*inner),
+            WallpaperRenderFailure::Document(inner) => document_refused(*inner),
+            _ => false,
+        },
+    );
+}
+
+#[test]
+fn a_view_this_side_has_no_memory_for_is_refused_as_that() {
+    let gif = gif_of(&[(0, 5), (1, 7)], 2);
+    let out = core::cell::RefCell::new(vec![0u8; 2 * 2 * 4]);
+    swept::<ImageRenderService, _, _>(
+        |sandbox| {
+            super::send_document(sandbox, &gif).map_err(super::ViewFailure::Document)?;
+            let document = super::open_view(sandbox, None, &mut Blanks)?;
+            for index in 0..document.count {
+                super::select_page(sandbox, index)?;
+                // The one-pixel frames drawn twice their size.
+                super::render_page(sandbox, (2, 2), whole(2, 2), &mut out.borrow_mut())?;
+            }
+            super::close_view(sandbox)
+        },
+        |failure| match failure {
+            super::ViewFailure::NoMemory => true,
+            super::ViewFailure::Sandbox(inner) => this_side(*inner),
+            super::ViewFailure::Document(inner) => document_refused(*inner),
+            _ => false,
+        },
+    );
+}
+
+/// Each way an upload stops says which it was, so a reader is not told a file
+/// it could not read was want of memory.
+#[test]
+fn every_upload_failure_says_what_it_is() {
+    let said = [
+        super::UploadFailure::Read(tairix_abi::Errno::PermissionDenied),
+        super::UploadFailure::Shrank,
+        super::UploadFailure::NoMemory,
+        super::UploadFailure::Document(super::DocumentFailure::Refused(
+            super::DocumentRefusal::TooLarge,
+        )),
+    ]
+    .map(|failure| format!("{failure}"));
+    assert!(said[0].contains("could not be read"), "{}", said[0]);
+    assert!(said[1].contains("shorter"), "{}", said[1]);
+    assert!(said[2].contains("memory"), "{}", said[2]);
+    assert!(said[3].contains("larger than"), "{}", said[3]);
+    for (at, one) in said.iter().enumerate() {
+        assert!(
+            said[at + 1..].iter().all(|other| other != one),
+            "{one} is said twice"
+        );
+        assert!(at == 2 || !one.contains("memory"), "{one}");
+    }
+}
+
+/// A family the wants could not carry is no face the worker asks for, so a
+/// document naming one is drawn in the face it falls back to, never taken
+/// for a worker that lied.
+#[test]
+fn a_family_too_long_to_ask_for_falls_back_rather_than_condemning_the_worker() {
+    let family = "x".repeat(crate::svgfonts::MAX_FAMILY_NAME + 1);
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><text x="0" y="16" font-size="16" fill="#ff0000" font-family="{family}">I</text></svg>"##
+    );
+    let pixels = rasterise_icon(&mut sandbox(), 16, svg.as_bytes(), &mut Squares).expect("drawn");
+    assert_eq!(rgba_at(&pixels, 16, 8, 8), [255, 0, 0, 255]);
 }

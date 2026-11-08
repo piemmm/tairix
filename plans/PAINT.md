@@ -33,7 +33,7 @@ its address space and everything that grows with the picture off its loop.
 | PT23 | Hue and saturation by colour range over the hue spectra; colour balance by tone range; threshold over the histogram | done |
 | PT24 | The colour selector: the shared picker's square, wheel and slider views, its fields in RGB, HSV, HSL, CMYK, Lab, LCh or grey; the Colour pane's wells, recent colours and one-shot picture pick | done |
 | PT25 | The document host: an application's own icon-bar rows and its app windows | done |
-| PT26 | The settings window: Paint's own window from its icon bar's *Settings…* row, its settings by category, held in its private app-data store and applied to every window as they settle | done |
+| PT26 | The settings window: Paint's own window from its icon bar's *Settings…* row, its settings by category, held in its private app-data store, applied to every window as it is made and written as it settles | done |
 | PT27 | The grid: spacing, offset, colour, opacity and style; the pixel grid's threshold; snapping to the grid | done |
 | PT28 | Tool windows: a pane dragged out of its dock floats in a tool window — the window manager's mini-titled transient (`plans/APPWIN.md` AW7, `plans/COMPOSITOR-WORK.md` stage M), the document host's tool windows of a document window — and docks again when dragged over a dock | done |
 | PT29 | Help in every locale, the docs page and the README for all of it | done |
@@ -706,10 +706,13 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
 ## Settings (PT26, PT27)
 
 - The icon bar's menu holds *Settings…* after *New window*; it opens Paint's
-  settings window, or raises the one that is open (`settings::SettingsWindow`).
+  settings window, or raises the one that is open (`settings::PaintSettings`,
+  the host's shared `docapp::settings::SettingsWindow` over Paint's registry).
 - The window is the application's own, not a document's: its categories down
-  a sidebar list, each category's settings in a panel beside it, and *Restore
-  defaults* beneath with what the store last refused.
+  a sidebar list, each category's settings as groups of form rows beside it
+  (`lib/controls`' `SettingsFrame`, `plans/GUI-CONTROLS-DESIGN.md` §11.52),
+  and *Restore defaults* beneath with what the store last refused. A colour is
+  a colour field: a swatch typed in hexadecimal.
   - **General**: the tool a new window starts with; what a picture opens at,
     fitted to the window (never past actual size) or at actual size.
   - **New picture**: width, height, format, the colours that format holds,
@@ -725,11 +728,12 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
 - The settings are one closed registry (`preferences::Preferences`) kept in
   Paint's private app-data store by the shared registry engine
   (`plans/APPDATA.md` AD11), read once at start. A change applies to every
-  picture window as the interaction settles — what a window draws with
+  picture window as it is made — what a window draws with
   (`preferences::CanvasStyle`), snapping, and what *New picture* and *Reset
   panes* offer; the tool, the panes, the grid shown and the opening zoom are a
-  new window's — and is written off the loop by the settings writer, the
-  store's answer adopted wherever the user has not edited since
+  new window's — and is written off the loop by the settings writer as the
+  interaction settles, the store's answer adopted wherever the user has not
+  edited since
   (`tairix_appdata::Publication`). A refused write is said in the settings
   window and on `stderr`, and the values it carried return to what the store
   holds; the last write is seen out before the process ends.
@@ -757,8 +761,20 @@ document windows:
   application's own with no document, opened by it, routed by id, painted from
   what their view reports through `DocumentApp::render_app`, closed by their
   close mark, and closed by Quit only once the quit can no longer be turned
-  down, never holding it back. An application with none says so with
-  `NoAppView`.
+  down, never holding it back. A control of one that changes on its own — a
+  held scroll arrow — is stepped on the deadline it names
+  (`AppView::deadline_ns`, `AppView::advance`), folded into the loop's wait.
+  An application with none says so with `NoAppView`.
+- **The settings window** (`docapp::settings`, the `settings` feature): an
+  application's preferences window over a closed registry implementing
+  `docapp::settings::Preferences` — its categories and the groups each shows,
+  how a row's action edits the record, and what reshapes a category. One
+  event is one `SettingsRequest`: the edit it made, from what to what and
+  whether it settled, then *Restore defaults* or an ask of the application's
+  own; the application applies the edit, writes it off the loop on the
+  settle, and hands what the store says back through `SettingsWindow::adopt`
+  and what it refused through `SettingsWindow::say`
+  (`tairix_appdata::Refusal::is_write`). Paint and Draw are its consumers.
 - **Seeing work out** (`DocumentApp::leaving`): the process's end gives the
   application its turn to see its own workers out before the saves are.
 - **Tool windows** (PT28, `DocumentView::tool_window`): a document window's

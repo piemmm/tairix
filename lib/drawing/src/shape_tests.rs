@@ -262,3 +262,55 @@ fn one_node_is_replaced_and_every_other_kept() {
         Err(DrawingError::Invalid)
     );
 }
+
+#[test]
+fn a_reversed_path_traces_the_same_outline_the_other_way() {
+    let curl = PathNode {
+        point: p(10.0, 0.0),
+        before: Some(p(8.0, -2.0)),
+        after: Some(p(12.0, 2.0)),
+        join: NodeJoin::Smooth,
+    };
+    let shape = PathShape {
+        contours: vec![
+            Contour {
+                nodes: vec![
+                    PathNode::corner(p(0.0, 0.0)),
+                    curl,
+                    PathNode::corner(p(20.0, 5.0)),
+                ],
+                closed: false,
+            },
+            Contour {
+                nodes: vec![
+                    PathNode::corner(p(0.0, 10.0)),
+                    PathNode::corner(p(5.0, 10.0)),
+                    PathNode::corner(p(5.0, 15.0)),
+                ],
+                closed: true,
+            },
+        ],
+    };
+    let reversed = shape.reversed().expect("reversed");
+    let open = &reversed.contours[0].nodes;
+    assert_eq!(open[0].point, p(20.0, 5.0), "from the far end");
+    assert_eq!(open[1].before, Some(p(12.0, 2.0)), "handles swapped");
+    assert_eq!(open[1].after, Some(p(8.0, -2.0)));
+    let closed = &reversed.contours[1].nodes;
+    assert_eq!(
+        closed[0].point,
+        p(0.0, 10.0),
+        "a closed contour keeps its start"
+    );
+    assert_eq!(closed[1].point, p(5.0, 15.0));
+    let area = |shape: &PathShape| shape.to_path().expect("traced").subpaths[1].signed_area();
+    assert!(
+        (area(&shape) + area(&reversed)).abs() < 1e-9,
+        "wound the other way"
+    );
+    assert_eq!(
+        reversed.reversed().expect("back"),
+        shape,
+        "twice is as it was"
+    );
+}

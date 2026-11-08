@@ -234,7 +234,7 @@ fn list_region<L: Launcher, S: tairix_log::Sink>(
         if decoded.insns.is_empty() {
             break;
         }
-        lines.extend(code_lines(&decoded.insns, symbols, room));
+        lines.extend(code_lines(&decoded.insns, symbols, room).ok_or_else(Unlisted::no_memory)?);
         address = decoded.next_address;
         depth = decoded.next_depth;
     }

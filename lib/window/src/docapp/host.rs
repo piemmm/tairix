@@ -368,6 +368,12 @@ pub trait DocumentApp: Sized {
     /// name as they are. An application offering no copies never sees this.
     fn copy_chosen(_host: &mut Host<Self>, _index: usize, _file: Arc<Handle>, _name: String) {}
 
+    /// The user chose a file to read into the window at `index`'s document:
+    /// `file`, called `name`, handed over read-only. The application reads it
+    /// — on its queue, never on the event loop. One that asks for no import
+    /// never sees this.
+    fn import_chosen(_host: &mut Host<Self>, _index: usize, _file: Handle, _name: String) {}
+
     /// Window `index`'s engine was driven, and what it asked is about to be
     /// carried out: what it changed is handed to the other windows of its
     /// document here, so a save asked now freezes it.
@@ -1924,6 +1930,7 @@ impl<A: DocumentApp> Host<A> {
             Request::SaveAs => self.ask_how(index, false),
             Request::SaveWhere { then_close } => self.ask_where(index, then_close),
             Request::Open => self.ask_pick(index, &PickPurpose::Open, PickFor::Open),
+            Request::Import => self.ask_pick(index, &PickPurpose::Import, PickFor::Import),
             Request::SaveCopy => self.ask_copy_where(index),
             Request::Close => self.close_window(index),
             Request::AskToClose => self.ask_to_close(index),
@@ -2178,6 +2185,10 @@ impl<A: DocumentApp> Host<A> {
             PickFor::Copy => {
                 let name = name.unwrap_or_else(|| String::from(UNTITLED));
                 A::copy_chosen(self, index, Arc::new(file), name);
+            }
+            PickFor::Import => {
+                let name = name.unwrap_or_else(|| String::from(UNTITLED));
+                A::import_chosen(self, index, file, name);
             }
         }
     }
@@ -3513,6 +3524,7 @@ impl<A: DocumentApp> Host<A> {
         }
         let now = tairix_rt::clock_get();
         let answered = A::turn(self, now) | self.answered;
+        self.advance_app_windows(now);
         self.carry_quit_on(None);
         self.settle_owned();
         self.settle_focus();
@@ -3537,15 +3549,39 @@ impl<A: DocumentApp> Host<A> {
         // on the desk, so the loop goes round again rather than parking.
         if !answered {
             let own = A::deadline(self, now);
+            let held = self
+                .app_windows
+                .iter_mut()
+                .filter_map(|window| window.view.deadline_ns(now))
+                .min();
             let shown = self
                 .windows
                 .iter()
                 .filter_map(|window| window.withheld.until());
-            signals.deadline_ns.set(own.into_iter().chain(shown).min());
+            signals
+                .deadline_ns
+                .set(own.into_iter().chain(held).chain(shown).min());
             let polled = events.wait(&mut self.client);
             self.take_event(polled)?;
         }
         ControlFlow::Continue(())
+    }
+
+    /// Step what each application window's held controls have brought due.
+    fn advance_app_windows(&mut self, now_ns: u64) {
+        let (theme, scale) = (self.themes.active(), self.desktop.scale());
+        for window in &mut self.app_windows {
+            if window
+                .view
+                .deadline_ns(now_ns)
+                .is_some_and(|due| due <= now_ns)
+            {
+                window
+                    .view
+                    .advance(now_ns, &window.layout, scale, theme, &mut window.damage);
+                window.owe_reported();
+            }
+        }
     }
 
     /// Route the event `polled` brought, if any. A malformed one is refused

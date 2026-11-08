@@ -17,34 +17,38 @@ Draw shares), `plans/SVG.md` (the decoder whose grammar Draw's reader reuses),
 | DR3 | `lib/svg` exposes its path commands, shape rules and gradient definitions as values its own decode is built from; `lib/xml` takes each reader's own bounds; the XML escaper moves to `lib/xml` | done |
 | DR4 | `lib/drawing`: the editable drawing — objects, styles, gradients, text, groups, clip groups, layers, the page — a persistent tree of shared nodes with stable identities and fixed bounds | done |
 | DR5 | `lib/drawing` SVG reader and writer, with Draw's own namespace for layers, live shapes, guides, the grid and the page | done |
-| DR6 | `lib/drawing` RISC OS Draw file reader and writer, read through the sandbox and claimed as `image/x-riscos-draw` | planned |
+| DR6 | `lib/drawing` RISC OS Draw file reader and writer, read through the sandbox by content and claimed as `image/x-riscos-draw` | done |
 | DR7 | `lib/drawing` PDF writer | done |
-| DR8 | `lib/drawing` EPS writer | planned |
+| DR8 | `lib/drawing` EPS writer: one Level 3 page through the walk PDF shares, transparency written opaque and said to be | done |
 | DR9 | `lib/drawing` rendering: any device rectangle of a drawing at any scale through `lib/raster`'s one renderer; the outline view | done |
-| DR10 | `lib/sandbox::drawedit`: the sandboxed read of SVG and of pasted SVG into the drawing, its checked wire form and fuzz harness | done |
+| DR10 | `lib/sandbox::drawedit`: the sandboxed read of a document or a pasted drawing — SVG or a Draw file, by its content — into the drawing, its checked wire form and fuzz harness | done |
 | DR11 | The engine: the document, its history, the selection, the viewport, the tile cache and its render worker, the overlays, the canvas's scrollbars | done |
 | DR12 | Tools: select and transform, nodes, pen, pencil, line, rectangle, ellipse, polygon and star, text, eyedropper, zoom, hand | done |
-| DR13 | Commands: clipboard, duplicate, arrange, align and distribute, flip and turn, lock and hide, group, the boolean operations, stroke to path and object to path are done; clip, divide, offset, simplify and reverse remain | in progress |
-| DR14 | The inspector: Style, Layers, Object and Shape are done; the gradient editor, swatches and a rotation field remain | in progress |
+| DR13 | Commands: clipboard, duplicate, arrange, align and distribute, flip and turn, lock and hide, group and clip, the boolean operations and divide, stroke to path, object to path, outset and inset, simplify and reverse | done |
+| DR14 | The inspector: Style, Layers, Object, Shape and Page; linear and radial gradients fitted to each object, their stop bar, spread and angle; the palette and the drawing's own swatches; the rotation field | done |
 | DR15 | Rulers, guides, the grid and snapping | done |
-| DR16 | Page setup: paper presets, orientation, units and a white ground are done; a page of any size and a ground of any colour remain | in progress |
-| DR17 | Files: Save and Save As in SVG, Save a copy as PDF, PNG or SVG, and a drawing that lost content on reading opening read-only are done; Draw files (DR6), EPS (DR8), JPEG and TIFF copies and a chosen resolution remain | in progress |
-| DR18 | The settings window and Draw's preferences | planned |
+| DR16 | Page setup: paper presets, a page of any size, orientation, units, the grid's spacing and subdivisions, and a ground of any colour, from the Page menu and the inspector's Page tab | done |
+| DR17 | Files: Save and Save As in SVG; Save a copy as PDF, EPS, PNG, JPEG, TIFF, SVG or a Draw file, raster at the drawing's own copy resolution; a drawing that lost content on reading opening read-only | done |
+| DR18 | The settings window and Draw's preferences: a new window's tool, view and style, a new drawing's page and grid, the nudge, duplicate offset and pick distance; on the shared settings window (`docapp::settings`, `lib/controls`' `SettingsFrame` and `FieldColumn`, the colour field), Paint's and WinterSun's moved onto it | done |
 | DR19 | The `Run` binary: the read worker, the render worker across the cores, the queue's work, and glyphs fetched only on workers | done |
 | DR20 | The bundle: manifest, icon, Help in every required locale, docs, registration | done |
-| DR21 | Shared chrome: the status band out of Paint and TextEdit into `lib/controls`; numeric form rows; the ruler | planned |
-| DR22 | Embedded raster images: Draw sprite and JPEG objects, SVG `<image>`, placing a picture | planned |
-| DR23 | Styled runs within one text object | planned |
-| DR24 | Text set along a path | planned |
-| DR25 | The gradient tool: a drag sets a linear or radial gradient's ends on the selection | planned |
-| DR26 | A new zoom shown at once from the last zoom's tiles resampled, until its own land | planned |
+| DR21 | Shared chrome: the one status band (`StatusBand`) for Paint's two windows, TextEdit and Draw; number slots in the form rows (`FieldControl::Number`, settled as the keyboard leaves), Paint's size rows on them; the ruler (`Ruler`) — all in `lib/controls` | done |
+| DR22 | Embedded raster images: Draw sprite and JPEG objects, SVG `<image>`, placing a picture | done |
+| DR23 | Styled runs within one text object: family, weight, italic, size, letter spacing, baseline shift and a colour fill and stroke over a span, chosen by a selection while typing | done |
+| DR24 | Text set along a path: set a text on a path and release it, its start along the path, read and written as SVG `<textPath>` | done |
+| DR25 | The gradient tool: a drag lays a linear or radial gradient on the selection, in each object's own space, live until it lands | done |
+| DR26 | A new zoom shown at once from the last zoom's tiles resampled, until its own land | done |
+| DR27 | Fallible shared allocation: every node, name, text, dash list, guide list and swatch list a drawing shares is made fallibly through `lib/collections`' `try_arc`, `SharedSlice` and `SharedStr`, and so is the geometry rendering and writing it run through — `lib/bezier`'s path operations, booleans, outlines and dashes and `lib/svg`'s stroker — so memory refused is a refusal stated in the window, never an abort — `lib/drawing`, `lib/bezier`, `lib/sandbox::drawedit`'s records and Draw | done |
+| DR28 | The parser sandbox's seam allocates fallibly on the editor's side — the request writer, the room a reply is received in, every client's decoding, the worker launch — a refusal of the editor's memory said as that rather than as a failed worker, and a worker allocating as it needs under its ceiling; held by an allocation sweep over every client | done |
+| DR29 | A document as long as the reading worker's share of the machine holds, for every document reader: the bound derived from the worker's memory ceiling, never below 64 MiB | done |
+| DR30 | A picture several objects show written once in SVG, through Draw's namespace over a `<use>` | planned |
 
 ## What it is
 
 `Draw.app` (`name = "Draw"`, `title = "Draw"`, `id = os.tairix.draw`,
 `kind = "application"`, `library = "Graphics"`): vector drawing in layers,
 from a page of paths, shapes, text and groups. It claims `image/svg+xml`, the
-format it reads back what it writes (`image/x-riscos-draw` joins it with DR6);
+format it reads back what it writes, and `image/x-riscos-draw`;
 the double-click order between Draw and the viewer follows the store's, as
 Paint's does. The manifest requests `CAP_CONSOLE_WRITE`, `CAP_SHM`,
 `CAP_SANDBOX_SPAWN` and `CAP_LOG_EMIT`, and no filesystem capability: every
@@ -106,8 +110,8 @@ document is one the user handed over, and every write goes through it.
   hidden, locked or not, with an opacity. **The page**: its size held in its
   own unit as it was stated (so A4 is exactly 210 × 297 mm), and an optional
   background colour; the named paper and screen sizes are one table. Guides,
-  the grid, and the drawing's one-line title and description belong to the
-  drawing.
+  the grid, the drawing's one-line title and description, and its swatches
+  (`draw:swatches`, at most 1024) belong to the drawing.
 - **Persistence**: every node is immutable once shared, behind `Arc`; an edit
   replaces the nodes on the way to the root and shares the rest, so a save or
   a render takes the drawing whole for the price of a pointer and the history
@@ -138,38 +142,150 @@ document is one the user handed over, and every write goes through it.
   path, number, length, colour, transform and `viewBox` grammars, the
   stylesheet and the presentation-property cascade, `use` and `symbol`
   expanded, gradients with their `href` chains and bounding-box units, clip
-  paths as clip groups, `<text>` and its `<tspan>` lines as text. What the
-  drawing cannot hold — filters, masks, patterns, markers other than
-  arrowheads, images until DR22, objects' titles and metadata — is listed as
-  the document is read (`Unkept`), and a document that lost anything opens
-  read-only, as Paint's does. A reference cycle is malformed, and reading
+  paths as clip groups, `<text>` and its `<tspan>` lines as text, `<image>`
+  as a picture. What the drawing cannot hold — filters, masks, patterns,
+  markers other than arrowheads, pictures it cannot read, objects' titles and
+  metadata — is listed as the document is read (`Unkept`), and a document
+  that lost anything opens read-only, as Paint's does. A reference cycle is malformed, and reading
   descends no deeper than a drawing may hold.
-- **RISC OS Draw files** (`.aff`, `&AFF`): paths, text and transformed text,
-  groups, tagged objects and the options object, in draw units of 1/640
-  point; RISC OS font names mapped to and from the installed families by their
-  generic kind (Trinity serif, Homerton sans-serif, Corpus monospace);
-  triangle caps as arrowheads.
+- **RISC OS Draw files** (`&AFF`, named `,aff` or by the filetype a volume
+  records — `.aff` is Hunspell's): read into one layer — paths with their
+  gaps as the Draw module draws them, text and transformed text, groups, the
+  object a tagged object wraps, the options' paper and grid — in draw units
+  of 1/640 point and RISC OS's Latin-1, the font table and options found
+  first wherever they stand; RISC OS font names mapped to and from the
+  installed families by their generic kind (Trinity serif, Homerton
+  sans-serif, Corpus monospace); caps the two ends do not share, and triangle
+  caps, as arrowheads. Written on the smallest A-series paper that holds the
+  page, every object drawn as the drawing draws it: a stroke Draw cannot
+  stroke so (stretched, or cut otherwise by Draw's fixed mitre limit) as its
+  area, an arrowhead its caps cannot draw as a shape, what the format cannot
+  hold reported as `Dropped` and named in the copy's message.
 - **Save a copy** (the document host's `Request::SaveCopy`) writes a copy and
   leaves the document's own file, name and changes as they are: PDF (paths,
   gradients as shadings, opacity, clips, text as outlines, streams
-  compressed), PNG (the page at its own size, fitted within 8192 pixels,
-  rendered by the one renderer) or SVG. EPS (DR8), JPEG, TIFF and a chosen
-  resolution (DR17) join them.
+  compressed), EPS (the same walk through a PostScript sink — `vector` — its
+  transparency written opaque and said to be), PNG, JPEG or TIFF (the page
+  rendered by the one renderer at the drawing's copy resolution, held in the
+  drawing as `draw:resolution` and set in the Page tab, lowered where it must
+  be to fit 8192 pixels, the file recording the resolution made at), SVG
+  or a Draw file; its format is the one media registry's reading of the
+  name, or of the filetype the volume records.
 - **Reading** runs in the parser sandbox (`lib/sandbox::drawedit`, DR10): the
-  bytes go to a capability-empty worker, the drawing comes back in a checked
+  bytes go to a capability-empty worker, which reads them as a Draw file or as
+  SVG by their content, the drawing comes back in a checked
   wire form a batch at a time, and every value is validated as the drawing is
   rebuilt from it.
+
+## Pictures (DR22)
+
+- **The model**: a picture is a node of its own — pixels premultiplied over
+  a rectangle of its own space, held as a `tairix_raster::Pyramid` of every
+  halving and shared behind `Arc`, so a copy, a duplicate or a step of
+  history shares them. It may keep the bytes it was read from (`Source`) with
+  only the facts a writer needs of them (`Encoding`: PNG; JPEG with its
+  stored raster, components, progressive or not, EXIF orientation and
+  density; a sprite with its eigen factors), which no writer parses. It has
+  no style: it clips, joins a boolean operation and is outlined by its
+  rectangle.
+- **Reading**: SVG `<image>` from a data URL, known by content, laid as
+  `preserveAspectRatio` lays it and cut by a clip where it slices; RISC OS
+  sprite, transformed sprite and JPEG objects, the JPEG's raster as RISC OS
+  draws it. One document's pictures are decoded once each, by their bytes,
+  and hold at most `MAX_TOTAL_IMAGE_PIXELS` together; a picture that will not
+  decode is `Lost::Images`.
+- **Writing**: SVG embeds the bytes read or a PNG of the pixels, once per
+  picture; PDF an image object of each, a JPEG passed through `DCTDecode`
+  and turned by its matrix, other pixels deflated with a soft mask where
+  translucent and clear pixels bled from their neighbours; EPS the same
+  through ASCII85, a baseline JPEG passed on, a masked image where binary and
+  flattened where partly clear; a Draw file a baseline JPEG object, a sprite
+  it was read from, or a 32-bit sprite. Clip paths are written as the shapes
+  they hold, a nested clip as a chained clip path per member, so every viewer
+  clips as Draw does.
+- **Rendering**: `Node::Image` draws from the level its narrowest scale
+  calls for through `Surface::blit_framed`, covering exactly its rectangle.
+- **Placing**: *Place picture…* asks the picker for an import
+  (`Request::Import`, `PickPurpose::Import`), delegated read-only whatever
+  Draw may edit; the sandbox decodes any still picture by content
+  (`decode_placed`, the drawedit place operation) and the load worker builds
+  its levels. The sandbox's picture wire holds each read's pictures to a
+  drawing's pixels and the bytes of the document handed over.
+- **The combined bound**: every edit that brings pictures in (`edit::insert`,
+  `edit::append`) holds the drawing to `pictures_fit` — pixels counted once
+  per picture, as every reader counts them — answered from the node
+  summary's per-object count unless the drawing repeats pictures past it, so
+  no reader refuses what Draw writes for its pictures' pixels. A file written
+  longer than this computer's reading worker may be handed is still written,
+  and said to be.
+
+## Lettering (DR23, DR24)
+
+- **Runs**: a text sets spans of its content otherwise than its own style.
+  A run is a byte range on character boundaries and what it overrides —
+  family, weight, italic, size, letter spacing, a baseline shift in ems of
+  its own size, and a fill and a stroke that are each a colour or none (a
+  gradient paints a whole object). Runs are ordered, disjoint and non-empty,
+  each overrides something, and neighbours that set the same are one run; a
+  text holds at most `MAX_TEXT_RUNS` of them naming at most
+  `MAX_TEXT_FAMILIES` families. Lines keep the text's own baseline grid — its
+  size and line height — so a larger run does not move them. Each glyph of a
+  setting knows its run, so a renderer, a writer and Object to path paint
+  consecutive glyphs of one paint together, in order; estimated bounds take
+  every character at its own run's size, spacing and shift.
+- **Editing**: while typing, a selection — shift with the arrow keys, Home
+  and End, or a drag across the text — is a byte range. A style change made
+  with a selection applies to it as runs (family, size, bold, italic, letter
+  spacing, baseline shift, a fill or stroke colour); without one it applies
+  to the whole object and clears the same from its runs, as a paint given a
+  whole object — a gradient among them — clears its runs' paint. Typed text
+  takes the style of the character before it, a selection typed over the
+  style of its first character (`Text::run_for`); the inspector shows the
+  style where the selection starts. A press puts the caret at the nearest
+  character boundary (`Text::offset_at`), and the caret and the selection's
+  mark stand across the line, turned with a path the text follows.
+- **On a path**: a text's baseline is lines from an origin or a path — an
+  editable path in the text's own space and how far along it the alignment
+  point stands. On a path a text is one line: each glyph's advance midpoint
+  lies on the path at its distance along it, turned to the path's direction,
+  and a glyph whose midpoint falls off either end is not drawn. *Set text on
+  path* takes a selected text and path, the path joining the text; *Release
+  from path* sets the text in lines from the path's start and gives the path
+  back as an object.
+- **Files**: SVG writes runs as `<tspan>`s within each line, and a path
+  text as a `<textPath>` over a path in `<defs>`; both read back, with
+  `startOffset` lengths and percentages and `baseline-shift`. A RISC OS Draw
+  file takes one text object for each run of a line and one transformed text
+  object for each glyph of a path text; PDF and EPS paint each run's glyphs
+  in its own paint. `lib/svg` draws `baseline-shift` and `<textPath>`
+  (`plans/SVG.md` S50, S26), so every reader of SVG shows what Draw writes.
 
 ## The window (DR11, DR14–DR16, DR21)
 
 - The tool box down the left, the tool's own bar across the top, rulers along
   the canvas's top and left and scrollbars along its right and foot, the
-  inspector down the right — tabs over Style, Layers, Object and Shape, a tab
-  taller than the panel scrolling — and the status band along the bottom. A
+  inspector down the right — tabs over Style, Layers, Object, Shape and
+  Page, a tab taller than the panel scrolling — and the status band along the
+  bottom. The band and the rulers are `lib/controls`' own (`StatusBand`,
+  `Ruler`), the band's pointer and selection readings each in a slot measured
+  for values to ±99 999.99 units, beyond which a reading elides. A
   secondary press opens the one window menu: File, Page, Edit, Object, Path,
   Layer, View and Tools.
 - A command's row — picture, label, chord, when it may be chosen — is stated
   once (`Command::spec`), and the menu and the keyboard both read it.
+- **Gradients in the inspector** (DR14) are fitted to each object's own box
+  (`gradient::fitted`): linear across it at an angle so its ends meet the
+  farthest corners, radial from its centre to its corners. An edit to the
+  stops, their colours or the spread gives every selected object the stops
+  shown and keeps where each one's gradient lies; a new form or angle fits
+  it again. A style in hand holding a gradient is fitted to each object drawn
+  in it, and to new text when its typing lands. The gradient tool (DR25)
+  lays one along a drag instead, mapped into each selected object's own
+  space through its whole transform — radial about the drag's start with
+  Alt or where it is radial already — and the eyedropper fits a gradient it
+  takes to each object given it. The swatch grid is a fixed palette followed
+  by the drawing's own swatches; Rotation turns one object to an angle read
+  from its transform, several together by it.
 - The canvas shows the page on the pasteboard at a continuous zoom from 1% to
   25600%, anchored on the pointer, by the wheel, pinch, the zoom tool and the
   view menu; the outline view draws every path as a hairline. A scrollbar's
@@ -185,19 +301,51 @@ document is one the user handed over, and every write goes through it.
   in a hidden or locked layer leaves the selection, and nothing new goes into
   such a layer.
 
+## Settings (DR18)
+
+- *Settings…* on the icon bar's menu opens Draw's settings window, or raises
+  the one open (`settings::DrawSettings`): the document host's shared settings
+  window over Draw's closed registry (`preferences::Preferences`), kept in
+  Draw's private app-data store by the shared engine and read once at start.
+- **General**: the tool a new window starts with, and whether it shows the
+  grid, snaps and draws outlines only. **New drawing**: the paper, upright or
+  on its side, the unit, and the grid's spacing — typed in that unit, kept in
+  drawing pixels — and subdivisions. **Style**: the fill and the stroke new
+  objects are drawn in, each none or a colour, and the stroke's width.
+  **Editing**: the nudge (ten times with Shift), the duplicate's offset, and
+  the pick distance a handle, a node and a guide are picked and snapped within.
+- The tool, view and style are a new window's (`View::begin`) and the page and
+  grid a new drawing's (`document::blank`); the editing settings apply to every
+  window as they are made (`View::adopt`). Draw's own defaults are
+  `Preferences::default`, the one definition a window starts from.
+- Lengths are kept in hundredths of a drawing pixel and a paint as `none` or
+  its hex digits, a paper as its name in lower-case words — a settings store
+  spells no fraction and starts a comment at `#`.
+- A change is written off the loop by the settings writer as its interaction
+  settles and the store's answer adopted wherever the user has not edited
+  since; a refused write is said in the window and on `stderr`, and the last
+  is seen out before the process ends.
+
 ## Rendering and the loop (DR9, DR11, DR19)
 
 - The drawing is rendered in tiles of the device grid at the current zoom by
   a render worker, a job's tiles spread across the cores — each core taking
-  the next tile as it finishes one, with the glyphs it has made shared across
-  them — each job holding the drawing's root, so the loop renders nothing
-  itself. A window has one job out at a time, whatever changes while it is
-  out. A tile not yet rendered shows the page's ground (DR26 brings the last
-  zoom's tiles). A tile a render could not make is not asked again until the
+  the next tile as it finishes one, with the glyphs it has made shared
+  across them — each job holding the drawing's root, so the loop renders
+  nothing itself. A window has one job out at a time, whatever changes while
+  it is out. Tiles hold what is drawn and not the page's ground, which the
+  canvas lays beneath them — over white paper, so a translucent ground
+  leaves no hole — so a change to the page alone renders no tile again. A
+  tile not yet rendered at a new zoom is stood in for by the tiles of the
+  last view shown whole — what there was of the view just left where none
+  is kept — held as the backdrop and drawn through `lib/raster`'s
+  transformed blit as one `Mosaic`, placed as the tile will be; the backdrop
+  goes once the view's own tiles are all held, on a change of mode, and at
+  severe pressure. A tile a render could not make is not asked again until the
   drawing, the mode or the memory pressure changes; a job the renderer could
-  not take is asked for again with the next. A window holds the
-  tiles in view and twice as many again, once at moderate pressure and none
-  beyond the view at severe.
+  not take is asked for again with the next. A window holds the tiles in
+  view and twice as many again, once at moderate pressure and none beyond
+  the view at severe.
 - An edit invalidates only the tiles its old and new bounds meet. A drag
   previews the moving objects over the tiles each frame — at full fidelity
   under a budget of points, by their bounds past it, a path past what is
@@ -215,8 +363,35 @@ document is one the user handed over, and every write goes through it.
   drawn provisionally on a thread of its own and lays the windows out again
   when it lands.
 - The host's queue writes saves and exports and runs what grows with the
-  drawing: boolean operations, outlines, offsets and simplification over a
-  large selection.
+  drawing: boolean operations and division, outlines, outsets and insets and
+  simplification over a large selection. Divide cuts the selection, traced in
+  the drawing's space, into the pieces its overlaps make, each painted as the
+  uppermost object over it was. Outset and inset grow or shrink an outline by
+  a distance in the drawing's units through `lib/bezier`'s offsets, and
+  simplify flattens it finely and fits it again (`fit::fitted`, the pencil's
+  own fit) within a tolerance, corners kept; both distances live in the Shape
+  tab. Clip makes the uppermost selected object the clip of a group holding
+  the rest; releasing it puts the clip back on top of what it held. Reverse
+  runs a path the other way, so its arrowheads and dashes follow it.
+
+## The sandbox seam (DR28, DR29)
+
+- The editor's side of every sandbox exchange allocates fallibly: a request is
+  built in a refusable writer and sent whole or not at all, a reply is
+  received into room reserved fallibly and decoded by borrowing and copying
+  fallibly, and the launch — the worker's path, its spawn block, the machine's
+  RAM read through `sysinfo` — allocates nothing it cannot refuse. A refusal
+  of the editor's memory is said as want of memory and blames no worker. A
+  worker allocates as it needs under its kernel ceiling; one that runs out
+  ends with the runtime's out-of-memory exit, said as want of memory too.
+  Every client is held to this by an allocation sweep.
+- A document may be as long as the reading worker's ceiling holds beside its
+  frames (`WorkerMemory::document_bytes`): a quarter of the machine less its
+  frames for a document reader, never below 64 MiB; the fixed 64 MiB for a
+  pooled artwork reader. The launcher states it (`document_room`), the editor
+  refuses a longer one as too large before a byte is sent, and every claim a
+  worker makes about what it read from a document — a picture's source, a
+  kept sprite — is held to the length handed over.
 
 ## Invariants
 
@@ -225,9 +400,12 @@ document is one the user handed over, and every write goes through it.
 - What a window shows is what an export renders: one renderer.
 - A paint reads nothing and costs what the window shows, not what the drawing
   holds.
-- Every allocation that grows with the drawing is fallible; a refusal is
-  stated in the window, never an abort.
+- Everything that grows with the drawing — its shared values and working
+  buffers, and the geometry its rendering and writing run through — is
+  allocated fallibly; a refusal is stated in the window, never an abort.
 - A drag, a slider or a typed value lands as one step when it settles.
 - A document that lost content on reading is never written back over its own
   file.
+- A drawing's pictures never hold more pixels together than a reader
+  accepts, and a file written larger than Draw opens is said to be.
 - Closing or quitting with unsaved changes asks first.

@@ -1,9 +1,9 @@
 //! What a reader could not keep of a file.
 //!
 //! A drawing read from a file holds what the drawing model can hold; what it
-//! cannot — a filter, a mask, a picture until embedded rasters land — is
-//! recorded here rather than silently dropped, so an editor can say what was
-//! lost and keep the file it came from from being written over with less.
+//! cannot — a filter, a mask, a picture it cannot read — is recorded here
+//! rather than silently dropped, so an editor can say what was lost and keep
+//! the file it came from from being written over with less.
 
 /// A part of a file the drawing could not keep.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -16,13 +16,17 @@ pub enum Lost {
     Patterns,
     /// Markers other than the arrowheads the drawing keeps.
     Markers,
-    /// Embedded pictures.
+    /// Pictures that could not be read: linked from elsewhere, of a kind
+    /// no reader decodes, or broken.
     Images,
-    /// Text set in more than one style within one text object.
+    /// Text styling no run holds: a gradient within a text, or a span's own
+    /// stroke width, dashes, stretch or word spacing.
     TextStyling,
     /// Text placed character by character.
     TextPositioning,
-    /// Text set along a path.
+    /// Text along something a text cannot be set along: a shape other than a
+    /// path, a second path, a path beside text off it, or a path the glyphs
+    /// bend along rather than turn with.
     TextPaths,
     /// Strokes that keep their width however they are scaled.
     NonScalingStrokes,
@@ -38,11 +42,13 @@ pub enum Lost {
     Links,
     /// Titles and descriptions of objects, and metadata.
     Annotations,
+    /// Text laid out in columns, styled by the codes it holds.
+    TextAreas,
 }
 
 impl Lost {
     /// Every part, in the order an editor lists them.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::Filters,
         Self::Masks,
         Self::Patterns,
@@ -58,6 +64,7 @@ impl Lost {
         Self::Alternatives,
         Self::Links,
         Self::Annotations,
+        Self::TextAreas,
     ];
 
     const fn bit(self) -> u32 {
@@ -72,10 +79,10 @@ impl Lost {
             Self::Masks => "masks",
             Self::Patterns => "pattern fills",
             Self::Markers => "markers",
-            Self::Images => "embedded pictures",
-            Self::TextStyling => "mixed text styles",
+            Self::Images => "unreadable pictures",
+            Self::TextStyling => "text styles a run cannot hold",
             Self::TextPositioning => "character positions",
-            Self::TextPaths => "text on paths",
+            Self::TextPaths => "text along shapes or bent along paths",
             Self::NonScalingStrokes => "non-scaling strokes",
             Self::ForeignContent => "foreign content",
             Self::Animation => "animation",
@@ -83,6 +90,7 @@ impl Lost {
             Self::Alternatives => "conditional alternatives",
             Self::Links => "links",
             Self::Annotations => "object titles, descriptions and metadata",
+            Self::TextAreas => "text areas",
         }
     }
 }

@@ -45,6 +45,8 @@
 
 use alloc::vec::Vec;
 
+use tairix_util::fallible;
+
 use tairix_abi::driver::audio::{
     ChannelMap, Rate, SampleFormat, CHANNEL_MAP_WIRE_LEN, MAX_CHANNELS,
 };
@@ -62,7 +64,7 @@ use crate::paged::{
 use crate::proto::FRAME_HEADER_LEN;
 use crate::session::{FrameOut, SessionBounds, SessionError, SessionService, SessionStep};
 use crate::supervise::Requests;
-use crate::wire::{Reader, WireError, Writer};
+use crate::wire::{Reader, Refusable, Room, WireError, Writer};
 
 /// Pages the worker holds: the most of a file one request can read.
 ///
@@ -776,7 +778,7 @@ fn encoding_from_wire(code: u8, bits: u8) -> Option<Encoding> {
     }
 }
 
-fn encode_link(out: &mut Writer, link: Link) {
+fn encode_link<R: Room>(out: &mut Writer<R>, link: Link) {
     out.u32(link.index);
     out.u64(link.offset);
 }
@@ -945,32 +947,56 @@ fn count(len: usize) -> u32 {
     u32::try_from(len).unwrap_or(u32::MAX)
 }
 
+/// Why a reply's fields were not taken.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Fault {
+    /// They broke the reply's grammar.
+    Wire,
+    /// There was no memory here to hold them.
+    NoMemory,
+}
+
+impl From<WireError> for Fault {
+    fn from(_: WireError) -> Self {
+        Self::Wire
+    }
+}
+
+impl From<Fault> for AudioDecodeError {
+    fn from(fault: Fault) -> Self {
+        match fault {
+            Fault::Wire => Self::Unbelievable,
+            Fault::NoMemory => Self::OutOfMemory,
+        }
+    }
+}
+
 /// A list of `declared` items read by `item`, its room reserved no further
 /// than the bytes left could hold, so a hostile count drives no allocation.
 fn list<T>(
     reader: &mut Reader<'_>,
     smallest: usize,
-    mut item: impl FnMut(&mut Reader<'_>) -> Result<T, WireError>,
-) -> Result<Vec<T>, WireError> {
+    mut item: impl FnMut(&mut Reader<'_>) -> Result<T, Fault>,
+) -> Result<Vec<T>, Fault> {
     let declared = reader.u32()? as usize;
     if declared > reader.remaining() / smallest {
-        return Err(WireError::Truncated);
+        return Err(Fault::Wire);
     }
     let mut items = Vec::new();
     items
         .try_reserve_exact(declared)
-        .map_err(|_| WireError::Malformed)?;
+        .map_err(|_| Fault::NoMemory)?;
     for _ in 0..declared {
         items.push(item(reader)?);
     }
     Ok(items)
 }
 
-fn decode_metadata(reader: &mut Reader<'_>) -> Result<Metadata, WireError> {
+fn decode_metadata(reader: &mut Reader<'_>) -> Result<Metadata, Fault> {
     let budget = LIMITS.max_metadata_bytes() as usize;
     let tags = list(reader, 1 + 4, |reader| {
         let kind = tag_kind_from_wire(reader)?;
-        let value = reader.string(budget)?;
+        let value = fallible::concatenated(&[reader.str(budget)?]).ok_or(Fault::NoMemory)?;
         Ok(Tag { kind, value })
     })?;
     let cues = list(reader, 4 + 8, |reader| {
@@ -986,7 +1012,7 @@ fn decode_metadata(reader: &mut Reader<'_>) -> Result<Metadata, WireError> {
             2 => LoopKind::Alternating,
             3 => LoopKind::Backward,
             4 => LoopKind::Other(reader.u32()?),
-            _ => return Err(WireError::Malformed),
+            _ => return Err(Fault::Wire),
         };
         Ok(Loop {
             start,
@@ -1002,9 +1028,9 @@ fn decode_metadata(reader: &mut Reader<'_>) -> Result<Metadata, WireError> {
     let omitted = flag(reader)?;
     let (present, offset, len) = (flag(reader)?, reader.u64()?, reader.u64()?);
     let cover = match (present, len) {
-        (true, 0) => return Err(WireError::Malformed),
+        (true, 0) => return Err(Fault::Wire),
         (true, len) => Some(CoverRange { offset, len }),
-        (false, _) if offset != 0 || len != 0 => return Err(WireError::Malformed),
+        (false, _) if offset != 0 || len != 0 => return Err(Fault::Wire),
         (false, _) => None,
     };
     let metadata = Metadata {
@@ -1018,7 +1044,7 @@ fn decode_metadata(reader: &mut Reader<'_>) -> Result<Metadata, WireError> {
     if metadata.within(&LIMITS) {
         Ok(metadata)
     } else {
-        Err(WireError::Malformed)
+        Err(Fault::Wire)
     }
 }
 
@@ -1305,7 +1331,7 @@ impl AudioDecodeClient {
         }
         let mut out = self.writer(NEXT_LINK_LEN)?;
         out.u8(TO_NEXT_LINK);
-        self.request(out);
+        self.request(out)?;
         self.awaiting = Awaiting::NextLink;
         Ok(())
     }
@@ -1358,7 +1384,7 @@ impl AudioDecodeClient {
         out.u8(TO_SUPPLY);
         out.u64(offset);
         out.raw(bytes);
-        self.outgoing = Some(out.finish());
+        self.outgoing = Some(out.finish().ok_or(AudioDecodeError::OutOfMemory)?);
         self.need = None;
         Ok(())
     }
@@ -1374,7 +1400,7 @@ impl AudioDecodeClient {
         let mut out = self.writer(UNREADABLE_LEN)?;
         out.u8(TO_UNREADABLE);
         out.u64(offset);
-        self.outgoing = Some(out.finish());
+        self.outgoing = Some(out.finish().ok_or(AudioDecodeError::OutOfMemory)?);
         self.need = None;
         Ok(())
     }
@@ -1576,7 +1602,7 @@ impl AudioDecodeClient {
         &mut self,
         reader: &mut Reader<'_>,
     ) -> Result<DecodeEvent<'a>, AudioDecodeError> {
-        let position = whole(reader, Reader::u64)?;
+        let position = whole(reader, |reader| Ok(reader.u64()?))?;
         let Some(stream) = self.stream.as_mut() else {
             return Err(AudioDecodeError::Unbelievable);
         };
@@ -1604,7 +1630,7 @@ impl AudioDecodeClient {
         reader: &mut Reader<'_>,
     ) -> Result<DecodeEvent<'a>, AudioDecodeError> {
         let refusal = whole(reader, |reader| {
-            AudioRefusal::from_wire(reader.u8()?, reader.u32()?).ok_or(WireError::Malformed)
+            AudioRefusal::from_wire(reader.u8()?, reader.u32()?).ok_or(Fault::Wire)
         })?;
         // The client never makes a request an honest worker refuses so, and a
         // missing page is asked for rather than refused.
@@ -1657,18 +1683,20 @@ impl AudioDecodeClient {
     }
 
     /// Queue `frame` as a new request.
-    fn request(&mut self, frame: Writer) {
-        self.outgoing = Some(frame.finish());
+    fn request(&mut self, frame: Writer<Refusable>) -> Result<(), AudioDecodeError> {
+        self.outgoing = Some(frame.finish().ok_or(AudioDecodeError::OutOfMemory)?);
         self.needs = 0;
+        Ok(())
     }
 
-    fn writer(&mut self, len: usize) -> Result<Writer, AudioDecodeError> {
+    /// A request of `len` bytes, its room taken now, in the spare buffer.
+    fn writer(&mut self, len: usize) -> Result<Writer<Refusable>, AudioDecodeError> {
         let mut buffer = core::mem::take(&mut self.spare);
         buffer.clear();
         buffer
             .try_reserve(len)
             .map_err(|_| AudioDecodeError::OutOfMemory)?;
-        Ok(Writer::reusing(buffer))
+        Ok(Writer::refusable_in(buffer))
     }
 
     fn send_open(&mut self, seed: HashSeed, link: Link) -> Result<(), AudioDecodeError> {
@@ -1680,24 +1708,21 @@ impl AudioDecodeClient {
         out.u64(self.len);
         out.u8(self.format.map_or(0, format_to_wire));
         encode_link(&mut out, link);
-        self.request(out);
-        Ok(())
+        self.request(out)
     }
 
     fn send_decode(&mut self, frames: u32) -> Result<(), AudioDecodeError> {
         let mut out = self.writer(DECODE_LEN)?;
         out.u8(TO_DECODE);
         out.u32(frames);
-        self.request(out);
-        Ok(())
+        self.request(out)
     }
 
     fn send_seek(&mut self, frame: u64) -> Result<(), AudioDecodeError> {
         let mut out = self.writer(SEEK_LEN)?;
         out.u8(TO_SEEK);
         out.u64(frame);
-        self.request(out);
-        Ok(())
+        self.request(out)
     }
 }
 
@@ -1712,14 +1737,17 @@ impl Requests for AudioDecodeClient {
 }
 
 /// Read a whole reply's fields with `fields`, refusing one with bytes left
-/// over.
+/// over; a field this side had no room for is said as that.
 fn whole<'r, T>(
     reader: &mut Reader<'r>,
-    fields: impl FnOnce(&mut Reader<'r>) -> Result<T, WireError>,
+    fields: impl FnOnce(&mut Reader<'r>) -> Result<T, Fault>,
 ) -> Result<T, AudioDecodeError> {
-    reader
-        .whole(fields)
-        .map_err(|_| AudioDecodeError::Unbelievable)
+    let value = fields(reader)?;
+    if reader.is_exhausted() {
+        Ok(value)
+    } else {
+        Err(AudioDecodeError::Unbelievable)
+    }
 }
 
 /// Read a reply's leading fields with `fields`; what follows is its payload.

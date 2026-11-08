@@ -11,7 +11,7 @@ use tairix_svg::font::{
 };
 
 use super::{
-    style_of_wire, FaceWant, FontTable, FontWants, TableFonts, MAX_FACES, MAX_FAMILY_NAME,
+    style_of_wire, FaceKey, FaceWant, FontTable, FontWants, TableFonts, MAX_FACES, MAX_FAMILY_NAME,
     MAX_SCALARS,
 };
 use crate::wire::{Reader, Writer};
@@ -58,13 +58,20 @@ fn glyph() -> GlyphOutline {
     }
 }
 
-/// The want a table entry is filed under.
-fn want(family: &str, scalars: &[char]) -> FaceWant {
-    FaceWant {
+/// The face `family` at the initial axes, as a table entry is filed under.
+fn face(family: &str) -> FaceKey {
+    FaceKey {
         family: String::from(family),
         weight: 400,
         style: 1,
         stretch: 10_000,
+    }
+}
+
+/// `scalars` wanted of `family`'s face.
+fn want(family: &str, scalars: &[char]) -> FaceWant {
+    FaceWant {
+        face: face(family),
         scalars: scalars.to_vec(),
     }
 }
@@ -82,7 +89,7 @@ fn an_empty_table_records_every_face_and_scalar_it_is_asked_for() {
 
     let wants = provider.into_wants();
     assert_eq!(wants.faces.len(), 1);
-    assert_eq!(wants.faces[0].family, "Inter");
+    assert_eq!(wants.faces[0].face.family, "Inter");
     assert_eq!(
         wants.faces[0].scalars,
         vec!['a', 'b'],
@@ -109,7 +116,7 @@ fn a_document_of_several_faces_records_them_all_in_one_pass() {
 fn a_supplied_table_answers_without_recording_anything() {
     let mut table = FontTable::new();
     table
-        .push(want("Inter", &['a']), metrics(0), vec![('a', glyph())])
+        .push(face("Inter"), metrics(0), vec!['a'], vec![glyph()])
         .expect("a usable face");
     let mut provider = TableFonts::new(&table);
     let face = provider.select(&request("Inter")).expect("the held face");
@@ -127,7 +134,7 @@ fn a_supplied_table_answers_without_recording_anything() {
 fn a_table_missing_a_scalar_of_a_face_it_holds_is_refused() {
     let mut table = FontTable::new();
     table
-        .push(want("Inter", &['a']), metrics(0), vec![('a', glyph())])
+        .push(face("Inter"), metrics(0), vec!['a'], vec![glyph()])
         .expect("a usable face");
     let mut provider = TableFonts::new(&table);
     let face = provider.select(&request("Inter")).expect("the held face");
@@ -144,6 +151,22 @@ fn an_unissued_face_id_is_refused() {
     let mut provider = TableFonts::new(&table);
     let mut out = Vec::new();
     assert!(provider.outlines(FaceId::new(3), &['a'], &mut out).is_err());
+}
+
+/// A family the wants could not carry is answered as no face, so the decode
+/// falls back as it would for any face the machine lacks, rather than
+/// recording what the host would refuse to believe.
+#[test]
+fn a_family_too_long_to_ask_for_is_no_face() {
+    let table = FontTable::new();
+    let mut provider = TableFonts::new(&table);
+    let long = "x".repeat(MAX_FAMILY_NAME + 1);
+    assert!(provider.select(&request(&long)).is_err());
+    let longest = "x".repeat(MAX_FAMILY_NAME);
+    assert!(provider.select(&request(&longest)).is_ok());
+    let wants = provider.into_wants();
+    assert_eq!(wants.faces.len(), 1);
+    assert_eq!(wants.faces[0].face.family, longest);
 }
 
 #[test]
@@ -178,10 +201,12 @@ fn the_wants_round_trip_over_the_wire() {
         faces: vec![
             want("Inter", &['a', 'b']),
             FaceWant {
-                family: String::from("Noto Serif"),
-                weight: 250,
-                style: 3,
-                stretch: 6250,
+                face: FaceKey {
+                    family: String::from("Noto Serif"),
+                    weight: 250,
+                    style: 3,
+                    stretch: 6250,
+                },
                 scalars: vec!['\u{10FFFF}'],
             },
         ],
@@ -200,9 +225,10 @@ fn the_table_round_trips_over_the_wire() {
     let mut table = FontTable::new();
     table
         .push(
-            want("Inter", &['a', 'b']),
+            face("Inter"),
             metrics(0),
-            vec![('a', glyph()), ('b', glyph())],
+            vec!['a', 'b'],
+            vec![glyph(), glyph()],
         )
         .expect("a usable face");
     let mut w = Writer::new();
@@ -239,7 +265,7 @@ fn a_face_with_no_usable_em_is_refused_by_the_table() {
         ..metrics(0)
     };
     assert!(table
-        .push(want("Inter", &['a']), broken, Vec::new())
+        .push(face("Inter"), broken, Vec::new(), Vec::new())
         .is_err());
 }
 
@@ -251,8 +277,31 @@ fn an_undrawable_glyph_is_refused_by_the_table() {
         ..glyph()
     };
     assert!(table
-        .push(want("Inter", &['a']), metrics(0), vec![('a', broken)])
+        .push(face("Inter"), metrics(0), vec!['a'], vec![broken])
         .is_err());
+}
+
+#[test]
+fn a_face_whose_scalars_are_out_of_order_or_not_one_to_a_glyph_is_refused() {
+    let mut table = FontTable::new();
+    for (scalars, glyphs) in [
+        (vec!['b', 'a'], vec![glyph(), glyph()]),
+        (vec!['a', 'a'], vec![glyph(), glyph()]),
+        (vec!['a', 'b'], vec![glyph()]),
+        (vec!['a'], vec![glyph(), glyph()]),
+    ] {
+        assert!(table
+            .push(face("Inter"), metrics(0), scalars, glyphs)
+            .is_err());
+    }
+    assert!(table
+        .push(
+            face("Inter"),
+            metrics(0),
+            vec!['a', 'b'],
+            vec![glyph(), glyph()]
+        )
+        .is_ok());
 }
 
 #[test]

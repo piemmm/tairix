@@ -7,20 +7,23 @@
 //! shortens it from the oldest end.
 
 use alloc::collections::VecDeque;
-use alloc::sync::Arc;
 
-use tairix_drawing::{Children, Drawing, DrawingError, Grid, Ids, Kind, Node, Page, PAPER};
+use tairix_collections::try_arc;
+use tairix_drawing::{Children, Drawing, DrawingError, Ids, Kind, Node, SharedSlice, SharedStr};
 use tairix_reclaim::PressureBand;
+
+use crate::preferences::Preferences;
 
 /// The most steps kept to undo when memory is plentiful.
 pub const MOST_STEPS: usize = 1000;
 
-/// A blank drawing: an A4 page holding one empty layer.
+/// A blank drawing as `preferences` say a new one starts: their page and
+/// grid, holding one empty layer.
 ///
 /// # Errors
 ///
 /// [`DrawingError::OutOfMemory`] when it cannot be held.
-pub fn blank(ids: &mut Ids) -> Result<Drawing, DrawingError> {
+pub fn blank(ids: &mut Ids, preferences: &Preferences) -> Result<Drawing, DrawingError> {
     let layer = Node::new(
         ids.issue(),
         Kind::Group {
@@ -28,12 +31,12 @@ pub fn blank(ids: &mut Ids) -> Result<Drawing, DrawingError> {
             clip: None,
         },
     )?
-    .with_name(Some(Arc::from("Layer 1")))?;
+    .with_name(Some(SharedStr::try_from_str("Layer 1")?))?;
     Drawing::new(
-        Page::of(&PAPER[0]),
-        Children::from_nodes(alloc::vec![Arc::new(layer)])?,
-        Arc::from(&[][..]),
-        Grid::default(),
+        preferences.page(),
+        Children::single(try_arc(layer)?)?,
+        SharedSlice::new(),
+        preferences.grid(),
     )
 }
 
@@ -215,8 +218,6 @@ fn keep(history: &mut VecDeque<Step>, step: Step) {
     reason = "the values compared are set and read exactly"
 )]
 mod tests {
-    use alloc::sync::Arc;
-
     use tairix_drawing::{Children, Drawing, Grid, Ids, Page, Unit};
     use tairix_reclaim::PressureBand;
 
@@ -231,7 +232,7 @@ mod tests {
                 background: None,
             },
             Children::new(),
-            Arc::from(&[][..]),
+            tairix_drawing::SharedSlice::new(),
             Grid::default(),
         )
         .expect("a drawing")

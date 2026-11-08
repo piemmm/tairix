@@ -43,7 +43,7 @@ use tairix_raster::Region;
 use tairix_sandbox::decode::{
     container_summary, disassemble, file_report, CodeWindow, DecodeService, Isa, Summarise,
 };
-use tairix_sandbox::drawedit::{read_drawing, DrawEditService, DrawFormat};
+use tairix_sandbox::drawedit::{read_drawing, read_placed, DrawEditService};
 use tairix_sandbox::helpdoc::{render_help, HelpService, RenderMode, Styling};
 use tairix_sandbox::host::{Launcher, ParserSandbox};
 use tairix_sandbox::imageedit::{
@@ -761,7 +761,8 @@ fn fuzz_edit_iteration(honest: &mut HonestIconSandbox, noise: &[u8], rng: &mut P
             if send_document(honest, document).is_err() {
                 continue;
             }
-            let Ok(opened) = open_edit(honest, *rng.pick(&EDIT_FORMATS)) else {
+            let Ok(opened) = open_edit(honest, document.len() as u64, *rng.pick(&EDIT_FORMATS))
+            else {
                 continue;
             };
             read_every_entry(honest, opened);
@@ -840,12 +841,14 @@ fn read_every_entry<L: Launcher>(sandbox: &mut ParserSandbox<L, SilentSink>, ope
 /// request is asked of the worker as it stands, so every reply decoder
 /// meets noise rather than only the first.
 fn hostile_document_iteration<L: Launcher>(hostile: &mut ParserSandbox<L, SilentSink>) {
-    let _ = send_document(hostile, &png_template());
+    let document = png_template();
+    let handed = document.len() as u64;
+    let _ = send_document(hostile, &document);
     let _ = open_view(hostile, None, &mut NoFonts);
     let _ = select_page(hostile, 0);
     let _ = render_page(hostile, (1, 1), whole(1, 1), &mut [0u8; 4]);
     let _ = close_view(hostile);
-    let _ = open_edit(hostile, None);
+    let _ = open_edit(hostile, handed, None);
     let _ = select_entry(hostile, stray_document(), 0);
     let _ = read_rows(hostile, &stray_picture(), |_, _, _| {});
     let kept = EditKept {
@@ -855,7 +858,8 @@ fn hostile_document_iteration<L: Launcher>(hostile: &mut ParserSandbox<L, Silent
     };
     let _ = read_kept(hostile, &kept, &mut Vec::new());
     let _ = close_edit(hostile);
-    let _ = read_drawing(hostile, DrawFormat::Svg, &mut tairix_drawing::Ids::new());
+    let _ = read_drawing(hostile, handed, &mut tairix_drawing::Ids::new());
+    let _ = read_placed(hostile, handed);
 }
 
 /// A picture no worker described, for requests out of order and for the
@@ -869,7 +873,7 @@ fn stray_picture() -> EditPicture {
     EditPicture::new(2, 2, pixels, None).unwrap_or_else(|| unreachable!("within the bounds"))
 }
 
-/// A document no worker opened, for the same.
+/// A document no worker opened, held to no length, for the same.
 const fn stray_document() -> EditDocument {
     EditDocument {
         format: ViewFormat::Sprite,
@@ -882,6 +886,7 @@ const fn stray_document() -> EditDocument {
         },
         written: tairix_image::Written::Plain,
         canvas: None,
+        length: u64::MAX,
     }
 }
 
@@ -1040,11 +1045,29 @@ fn fuzz_session_iteration(noise: &[u8], rng: &mut Prng) {
     }
 }
 
+/// A three-by-two translucent PNG, as a data URL: a literal, so the drawings
+/// that show it can be spelled at compile time.
+macro_rules! picture_url {
+    () => {
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAYAAACddGYaAAAAHUlEQVR4nGNgYDjxP4DhRMMCIM3AUAHkVAA5QBoAlAwM9VmVMmEAAAAASUVORK5CYII="
+    };
+}
+
+/// [`picture_url`]'s URL.
+const PICTURE_URL: &str = picture_url!();
+
 /// Drawings for the drawing read: Draw's own namespace, a clip, a gradient
-/// shared by fill and stroke, text, a long path.
+/// shared by fill and stroke, text, a long path, and a picture shown twice.
 const DRAWINGS: &[&str] = &[
     r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:draw="urn:tairix:draw" width="100" height="80"><title>t</title><g draw:layer="true" draw:name="A"><path d="M1 1 C5 0 9 9 12 4 S20 20 30 3 Z" draw:nodes="csz" stroke="#123" stroke-dasharray="2 1" draw:end-arrow="triangle 3 3"/><path d="M0 0 L1 1" draw:shape="star" draw:cx="50" draw:cy="40" draw:points="5" draw:outer="30" draw:inner="0.5" draw:rotation="0" draw:rounding="0"/></g></svg>"##,
     r#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><defs><linearGradient id="g" x2="1"><stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient><clipPath id="k"><circle cx="32" cy="32" r="20"/></clipPath></defs><g clip-path="url(#k)" opacity="0.5"><rect width="64" height="64" fill="url(#g)" stroke="url(#g)"/><text x="4" y="30" font-size="12">Hello<tspan x="4" y="44">there</tspan></text></g></svg>"#,
+    concat!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="64" height="64"><image xlink:href=""#,
+        picture_url!(),
+        r#"" width="30" height="20" preserveAspectRatio="xMidYMid slice"/><image xlink:href=""#,
+        picture_url!(),
+        r#"" x="30" y="30" width="9" height="6" transform="rotate(20)"/></svg>"#
+    ),
 ];
 
 /// Serves as the drawing worker does, but flips bytes in some of its
@@ -1081,8 +1104,8 @@ fn fuzz_drawedit_iteration<L: Launcher, F: Launcher>(
     let cut = rng.at_most(mutated.len());
     for document in [mutated.as_slice(), &mutated[..cut], noise] {
         if send_document(honest, document).is_ok() {
-            if let Ok(read) = read_drawing(honest, DrawFormat::Svg, &mut tairix_drawing::Ids::new())
-            {
+            let handed = document.len() as u64;
+            if let Ok(read) = read_drawing(honest, handed, &mut tairix_drawing::Ids::new()) {
                 assert!(
                     tairix_drawing::svg::write(&read.drawing).is_ok(),
                     "a drawing believed writes"
@@ -1092,8 +1115,51 @@ fn fuzz_drawedit_iteration<L: Launcher, F: Launcher>(
     }
     let honest_bytes = rng.pick(DRAWINGS).as_bytes();
     if send_document(flipping, honest_bytes).is_ok() {
-        let _ = read_drawing(flipping, DrawFormat::Svg, &mut tairix_drawing::Ids::new());
+        let handed = honest_bytes.len() as u64;
+        let _ = read_drawing(flipping, handed, &mut tairix_drawing::Ids::new());
     }
+    // A picture to place: mutated for the honest worker, honest for one
+    // turning hostile.
+    let picture = picture_bytes();
+    let mut mutated = picture.clone();
+    for _ in 0..rng.at_most(4) {
+        let pos = rng.below(mutated.len());
+        mutated[pos] ^= rng.next_u8();
+    }
+    if send_document(honest, &mutated).is_ok() {
+        if let Ok(placed) = read_placed(honest, mutated.len() as u64) {
+            assert!(placed.natural.x > 0.0 && placed.natural.y > 0.0);
+        }
+    }
+    if send_document(flipping, &picture).is_ok() {
+        let _ = read_placed(flipping, picture.len() as u64);
+    }
+}
+
+/// The bytes [`PICTURE_URL`] carries.
+fn picture_bytes() -> Vec<u8> {
+    let payload = PICTURE_URL
+        .split_once(',')
+        .map_or("", |(_, payload)| payload)
+        .trim_end_matches('=');
+    let digit = |c: u8| match c {
+        b'A'..=b'Z' => c - b'A',
+        b'a'..=b'z' => c - b'a' + 26,
+        b'0'..=b'9' => c - b'0' + 52,
+        b'+' => 62,
+        _ => 63,
+    };
+    let mut bytes = Vec::new();
+    let (mut word, mut held) = (0_u32, 0);
+    for c in payload.bytes() {
+        word = word << 6 | u32::from(digit(c));
+        held += 6;
+        if held >= 8 {
+            held -= 8;
+            bytes.push(u8::try_from(word >> held & 0xFF).unwrap_or(0));
+        }
+    }
+    bytes
 }
 
 /// Launches [`HostileChannel`] workers with fresh noise per launch.
@@ -1118,6 +1184,11 @@ impl Launcher for HostileLauncher {
 
     fn dispose(&mut self, _channel: HostileChannel) -> Option<i32> {
         None
+    }
+
+    /// Bounded by nothing here, so every reply to an upload is the noise's.
+    fn document_room(&self) -> u64 {
+        u64::MAX
     }
 }
 
@@ -1333,7 +1404,8 @@ fn nearly_right_edit_replies_are_refused_or_hold_their_description() {
             if send_document(&mut sandbox, document).is_err() {
                 continue;
             }
-            if let Ok(opened) = open_edit(&mut sandbox, *rng.pick(&EDIT_FORMATS)) {
+            let handed = document.len() as u64;
+            if let Ok(opened) = open_edit(&mut sandbox, handed, *rng.pick(&EDIT_FORMATS)) {
                 read_every_entry(&mut sandbox, opened);
             }
             let _ = close_edit(&mut sandbox);

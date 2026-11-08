@@ -14,7 +14,9 @@ use crate::id::Ids;
 use crate::node::{Kind, Node};
 use crate::shape::{RectShape, Shape};
 use crate::style::Style;
+use crate::testing::slice;
 use crate::DrawingError;
+use crate::SharedSlice;
 
 fn page() -> Page {
     Page {
@@ -69,7 +71,7 @@ fn a_node_is_found_and_replaced_by_its_path() {
     let drawing = Drawing::new(
         page(),
         Children::from_nodes(vec![top]).expect("held"),
-        Arc::from(&[][..]),
+        SharedSlice::new(),
         Grid::default(),
     )
     .expect("a drawing");
@@ -106,7 +108,7 @@ fn many_nodes_are_found_in_one_walk() {
     let drawing = Drawing::new(
         page(),
         Children::from_nodes(vec![top]).expect("held"),
-        Arc::from(&[][..]),
+        SharedSlice::new(),
         Grid::default(),
     )
     .expect("a drawing");
@@ -133,7 +135,7 @@ fn a_drawing_refuses_what_it_cannot_hold() {
     let mut ids = Ids::new();
     let not_a_layer = Children::from_nodes(vec![rect(&mut ids, 0.0)]).expect("held");
     assert_eq!(
-        Drawing::new(page(), not_a_layer, Arc::from(&[][..]), Grid::default()).err(),
+        Drawing::new(page(), not_a_layer, SharedSlice::new(), Grid::default()).err(),
         Some(DrawingError::Invalid)
     );
     let mut empty_page = page();
@@ -142,11 +144,30 @@ fn a_drawing_refuses_what_it_cannot_hold() {
         Drawing::new(
             empty_page,
             Children::new(),
-            Arc::from(&[][..]),
+            SharedSlice::new(),
             Grid::default()
         )
         .err(),
         Some(DrawingError::Invalid)
+    );
+}
+
+#[test]
+fn a_drawing_keeps_its_swatches_up_to_its_bound() {
+    let drawing =
+        Drawing::new(page(), Children::new(), SharedSlice::new(), Grid::default()).expect("blank");
+    assert!(drawing.swatches().is_empty());
+    let red = tairix_colour::Rgba::new(255, 0, 0, 255);
+    let kept = drawing.with_swatches(slice(&[red])).expect("one swatch");
+    assert_eq!(kept.swatches(), &[red]);
+    assert!(
+        !kept.is(&drawing),
+        "a drawing keeping other swatches is another"
+    );
+    let too_many = vec![red; crate::limits::MAX_SWATCHES + 1];
+    assert_eq!(
+        drawing.with_swatches(slice(&too_many)).err(),
+        Some(DrawingError::TooComplex)
     );
 }
 
@@ -156,4 +177,44 @@ fn units_convert_to_pixels() {
     assert!((Unit::Mm.pixels() * 25.4 - 96.0).abs() < 1e-9);
     assert_eq!(Unit::from_symbol("pt"), Some(Unit::Pt));
     assert_eq!(Unit::from_symbol("furlong"), None);
+}
+
+#[test]
+fn a_page_turns_and_is_measured_again_keeping_its_size() {
+    let upright = Page::of(&super::PAPER[0]);
+    let landscape = upright.turned(true);
+    assert_eq!((landscape.width, landscape.height), (297.0, 210.0));
+    assert_eq!(landscape.turned(true), landscape, "already on its side");
+    assert_eq!(landscape.turned(false), upright);
+    let inches = upright.measured_in(Unit::In);
+    assert_eq!(inches.unit, Unit::In);
+    assert!(
+        (inches.size().x - upright.size().x).abs() < 1e-9,
+        "the same size"
+    );
+    assert!((inches.width - 210.0 / 25.4).abs() < 1e-12);
+}
+
+#[test]
+fn a_drawing_is_copied_as_raster_at_a_resolution_it_may_hold() {
+    let drawing =
+        Drawing::new(page(), Children::new(), SharedSlice::new(), Grid::default()).expect("blank");
+    assert_eq!(
+        drawing.resolution(),
+        super::PIXELS_PER_INCH,
+        "its own pixels"
+    );
+    let fine = drawing.with_resolution(600).expect("600 dpi");
+    assert_eq!(fine.resolution(), 600);
+    assert!(!fine.is(&drawing));
+    for refused in [0, crate::limits::MAX_RESOLUTION + 1] {
+        assert_eq!(
+            drawing.with_resolution(refused).err(),
+            Some(DrawingError::Invalid)
+        );
+    }
+    assert!(
+        (Unit::Pc.pixels() - 16.0).abs() < 1e-12,
+        "a pica is a sixth of an inch"
+    );
 }

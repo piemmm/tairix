@@ -288,7 +288,7 @@ fn parts(row: Rect, faces: Faces, scale: Scale) -> RowParts {
     let eye = square(scale.scale_length(EYE));
     let thumb = square(thumb_side(scale));
     let room = faces
-        .status
+        .caption
         .text_width(WIDEST_OPACITY)
         .saturating_add(pad)
         .min(rest.width);
@@ -1142,7 +1142,7 @@ fn render_row<'a>(
         ink,
         None,
     );
-    let caption = faces.status;
+    let caption = faces.caption;
     let mut opacity = ArrayString::<8>::new();
     let _ = write!(opacity, "{}%", percent_of(layer.opacity));
     let width = to_i32(caption.text_width(opacity.as_str()));

@@ -73,7 +73,7 @@ fn a_paletted_png_arrives_as_its_indices_and_palette() {
     let (png, indices) = indexed_png();
     let mut sandbox = sandbox();
     send_document(&mut sandbox, &png).expect("uploads");
-    let document = open_edit(&mut sandbox, None).expect("opens");
+    let document = open_edit(&mut sandbox, png.len() as u64, None).expect("opens");
     assert_eq!(document.format, ViewFormat::Png);
     assert_eq!(
         (
@@ -107,7 +107,7 @@ fn a_truecolour_picture_arrives_as_rgba() {
     let png = encode_png(&Picture::rgba(8, 4, rgba.clone()).expect("valid")).expect("encodes");
     let mut sandbox = sandbox();
     send_document(&mut sandbox, &png).expect("uploads");
-    let document = open_edit(&mut sandbox, Some(ViewFormat::Png)).expect("opens");
+    let document = open_edit(&mut sandbox, png.len() as u64, Some(ViewFormat::Png)).expect("opens");
     let entry = picture(select_entry(&mut sandbox, document, 0).expect("selects"));
     assert_eq!(entry.pixels, EditPixels::Rgba);
     assert_eq!(collect(&mut sandbox, &entry).expect("rows").0, rgba);
@@ -164,7 +164,8 @@ fn a_sprite_area_arrives_sprite_by_sprite_with_its_details() {
     let (bytes, kept_bytes) = area();
     let mut sandbox = sandbox();
     send_document(&mut sandbox, &bytes).expect("uploads");
-    let document = open_edit(&mut sandbox, Some(ViewFormat::Sprite)).expect("opens");
+    let document =
+        open_edit(&mut sandbox, bytes.len() as u64, Some(ViewFormat::Sprite)).expect("opens");
     assert_eq!(document.kind, EditKind::Sprites);
     assert_eq!(document.count, 3);
 
@@ -209,7 +210,7 @@ fn a_file_is_streamed_in_pieces_and_counted() {
     })
     .expect("uploads");
     assert!(reads > 1, "short reads are carried on from");
-    let document = open_edit(&mut sandbox, None).expect("opens");
+    let document = open_edit(&mut sandbox, png.len() as u64, None).expect("opens");
     let entry = picture(select_entry(&mut sandbox, document, 0).expect("selects"));
     assert_eq!(collect(&mut sandbox, &entry).expect("rows").0, indices);
 }
@@ -229,7 +230,7 @@ fn a_file_that_shrinks_beneath_its_upload_is_refused() {
 fn every_step_out_of_order_is_refused() {
     let mut sandbox = sandbox();
     assert_eq!(
-        open_edit(&mut sandbox, None),
+        open_edit(&mut sandbox, 0, None),
         Err(EditFailure::Refused(EditRefusal::NoDocument))
     );
     let unopened = EditDocument {
@@ -239,6 +240,7 @@ fn every_step_out_of_order_is_refused() {
         unkept: Unkept::default(),
         written: Written::Plain,
         canvas: None,
+        length: 0,
     };
     assert_eq!(
         select_entry(&mut sandbox, unopened, 0),
@@ -246,7 +248,8 @@ fn every_step_out_of_order_is_refused() {
     );
     let (bytes, _) = area();
     send_document(&mut sandbox, &bytes).expect("uploads");
-    let document = open_edit(&mut sandbox, Some(ViewFormat::Sprite)).expect("opens");
+    let document =
+        open_edit(&mut sandbox, bytes.len() as u64, Some(ViewFormat::Sprite)).expect("opens");
     let stranger = EditPicture {
         width: 4,
         height: 2,
@@ -282,19 +285,40 @@ fn every_step_out_of_order_is_refused() {
     );
 }
 
+/// A kept sprite is part of the area it was read from, so one longer than
+/// the document handed over is a worker's invention.
+#[test]
+fn a_kept_sprite_longer_than_the_document_handed_over_is_not_believed() {
+    let (bytes, _) = area();
+    for (handed, believed) in [(47, false), (48, true)] {
+        let mut sandbox = sandbox();
+        send_document(&mut sandbox, &bytes).expect("uploads");
+        let document = open_edit(&mut sandbox, handed, Some(ViewFormat::Sprite)).expect("opens");
+        let entry = select_entry(&mut sandbox, document, 2);
+        assert_eq!(
+            matches!(entry, Ok(EditEntry::Kept(_))),
+            believed,
+            "{handed}: {entry:?}"
+        );
+        if !believed {
+            assert_eq!(entry, Err(EditFailure::ReplyMalformed));
+        }
+    }
+}
+
 #[test]
 fn a_document_that_is_no_picture_or_is_vector_art_is_refused() {
     let mut sandbox = sandbox();
-    send_document(&mut sandbox, b"not a picture at all").expect("uploads");
-    assert_eq!(
-        open_edit(&mut sandbox, None),
-        Err(EditFailure::Refused(EditRefusal::UnsupportedFormat))
-    );
-    send_document(&mut sandbox, b"<svg/>").expect("uploads");
-    assert_eq!(
-        open_edit(&mut sandbox, Some(ViewFormat::Svg)),
-        Err(EditFailure::Refused(EditRefusal::UnsupportedFormat))
-    );
+    for (document, format) in [
+        (&b"not a picture at all"[..], None),
+        (b"<svg/>", Some(ViewFormat::Svg)),
+    ] {
+        send_document(&mut sandbox, document).expect("uploads");
+        assert_eq!(
+            open_edit(&mut sandbox, document.len() as u64, format),
+            Err(EditFailure::Refused(EditRefusal::UnsupportedFormat))
+        );
+    }
 }
 
 #[test]
@@ -335,7 +359,7 @@ fn drive_tampered(op: u8, tamper: fn(Vec<u8>) -> Vec<u8>) -> Result<(), EditFail
     let mut sandbox = tampering::<ImageRenderService>(op, tamper);
     let (png, _) = indexed_png();
     send_document(&mut sandbox, &png)?;
-    let document = open_edit(&mut sandbox, None)?;
+    let document = open_edit(&mut sandbox, png.len() as u64, None)?;
     let entry = picture(select_entry(&mut sandbox, document, 0)?);
     collect(&mut sandbox, &entry).map(|_| ())
 }
@@ -407,7 +431,8 @@ fn a_sprite_whose_mode_contradicts_its_pixels_is_not_believed() {
         reply
     });
     send_document(&mut sandbox, &bytes).expect("uploads");
-    let document = open_edit(&mut sandbox, Some(ViewFormat::Sprite)).expect("opens");
+    let document =
+        open_edit(&mut sandbox, bytes.len() as u64, Some(ViewFormat::Sprite)).expect("opens");
     assert_eq!(
         select_entry(&mut sandbox, document, 0),
         Err(EditFailure::ReplyMalformed)
@@ -419,7 +444,7 @@ fn an_entry_is_held_to_the_document_it_belongs_to() {
     let (png, _) = indexed_png();
     let mut sandbox = sandbox();
     send_document(&mut sandbox, &png).expect("uploads");
-    let single = open_edit(&mut sandbox, None).expect("opens");
+    let single = open_edit(&mut sandbox, png.len() as u64, None).expect("opens");
     let claimed_area = EditDocument {
         kind: EditKind::Sprites,
         format: ViewFormat::Sprite,
@@ -434,7 +459,8 @@ fn an_entry_is_held_to_the_document_it_belongs_to() {
     let (bytes, _) = area();
     let mut sandbox = self::sandbox();
     send_document(&mut sandbox, &bytes).expect("uploads");
-    let sprites = open_edit(&mut sandbox, Some(ViewFormat::Sprite)).expect("opens");
+    let sprites =
+        open_edit(&mut sandbox, bytes.len() as u64, Some(ViewFormat::Sprite)).expect("opens");
     let claimed_single = EditDocument {
         kind: EditKind::Single,
         format: ViewFormat::Png,
@@ -447,7 +473,7 @@ fn an_entry_is_held_to_the_document_it_belongs_to() {
     );
     let mut sandbox = self::sandbox();
     send_document(&mut sandbox, &bytes).expect("uploads");
-    open_edit(&mut sandbox, Some(ViewFormat::Sprite)).expect("opens");
+    open_edit(&mut sandbox, bytes.len() as u64, Some(ViewFormat::Sprite)).expect("opens");
     assert_eq!(
         select_entry(&mut sandbox, claimed_single, 2),
         Err(EditFailure::ReplyMalformed),
@@ -474,7 +500,7 @@ fn a_file_holding_more_than_its_picture_says_so() {
     for (bytes, extras) in [(plain, false), (commented, true)] {
         let mut sandbox = sandbox();
         send_document(&mut sandbox, &bytes).expect("uploads");
-        let document = open_edit(&mut sandbox, None).expect("opens");
+        let document = open_edit(&mut sandbox, bytes.len() as u64, None).expect("opens");
         assert_eq!(document.format, ViewFormat::Jpeg);
         assert_eq!(
             document.unkept,
@@ -523,7 +549,7 @@ fn a_loss_its_format_cannot_have_is_not_believed() {
         let mut sandbox = tampering::<ImageRenderService>(OP_EDIT_OPEN, tamper);
         send_document(&mut sandbox, &bytes).expect("uploads");
         assert_eq!(
-            open_edit(&mut sandbox, Some(format)),
+            open_edit(&mut sandbox, bytes.len() as u64, Some(format)),
             Err(EditFailure::ReplyMalformed),
             "{format:?}"
         );
@@ -539,7 +565,7 @@ fn a_single_picture_said_to_be_of_the_sprite_format_is_not_believed() {
     let (png, _) = indexed_png();
     send_document(&mut sandbox, &png).expect("uploads");
     assert_eq!(
-        open_edit(&mut sandbox, None),
+        open_edit(&mut sandbox, png.len() as u64, None),
         Err(EditFailure::ReplyMalformed)
     );
 }
@@ -555,7 +581,7 @@ fn a_document_answered_as_another_format_than_asked_is_not_believed() {
     let (png, _) = indexed_png();
     send_document(&mut sandbox, &png).expect("uploads");
     assert_eq!(
-        open_edit(&mut sandbox, Some(ViewFormat::Png)),
+        open_edit(&mut sandbox, png.len() as u64, Some(ViewFormat::Png)),
         Err(EditFailure::ReplyMalformed)
     );
 }
@@ -634,7 +660,7 @@ fn a_gif_arrives_as_its_indices_and_how_it_was_written() {
     let gif = encode_gif(&source, GifOptions { interlaced: true }).expect("encodes");
     let mut sandbox = sandbox();
     send_document(&mut sandbox, &gif).expect("uploads");
-    let document = open_edit(&mut sandbox, None).expect("opens");
+    let document = open_edit(&mut sandbox, gif.len() as u64, None).expect("opens");
     assert_eq!(document.format, ViewFormat::Gif);
     assert_eq!(
         document.written,
@@ -669,7 +695,7 @@ fn a_tiff_arrives_page_by_page() {
     .expect("encodes");
     let mut sandbox = sandbox();
     send_document(&mut sandbox, &tiff).expect("uploads");
-    let document = open_edit(&mut sandbox, None).expect("opens");
+    let document = open_edit(&mut sandbox, tiff.len() as u64, None).expect("opens");
     assert_eq!(
         (document.format, document.kind, document.count),
         (ViewFormat::Tiff, EditKind::Pages, 2)
@@ -708,7 +734,7 @@ fn a_density_with_a_zero_figure_is_not_believed() {
         reply
     });
     send_document(&mut sandbox, &png).expect("uploads");
-    let document = open_edit(&mut sandbox, None).expect("opens");
+    let document = open_edit(&mut sandbox, png.len() as u64, None).expect("opens");
     assert_eq!(
         select_entry(&mut sandbox, document, 0),
         Err(EditFailure::ReplyMalformed)
@@ -747,8 +773,9 @@ fn layered() -> Vec<u8> {
 fn a_layered_document_said_to_be_narrowed_or_restated_is_believed() {
     let said = |tamper: fn(Vec<u8>) -> Vec<u8>| {
         let mut sandbox = tampering::<ImageRenderService>(OP_EDIT_OPEN, tamper);
-        send_document(&mut sandbox, &layered()).expect("uploads");
-        open_edit(&mut sandbox, Some(ViewFormat::OpenRaster))
+        let ora = layered();
+        send_document(&mut sandbox, &ora).expect("uploads");
+        open_edit(&mut sandbox, ora.len() as u64, Some(ViewFormat::OpenRaster))
             .expect("believed")
             .unkept
     };
@@ -775,9 +802,10 @@ fn a_layered_document_claiming_more_layers_than_are_read_is_not_believed() {
         reply[3..7].copy_from_slice(&count.to_le_bytes());
         reply
     });
-    send_document(&mut sandbox, &layered()).expect("uploads");
+    let ora = layered();
+    send_document(&mut sandbox, &ora).expect("uploads");
     assert_eq!(
-        open_edit(&mut sandbox, None),
+        open_edit(&mut sandbox, ora.len() as u64, None),
         Err(EditFailure::ReplyMalformed)
     );
 }
@@ -785,8 +813,9 @@ fn a_layered_document_claiming_more_layers_than_are_read_is_not_believed() {
 #[test]
 fn a_layered_document_arrives_layer_by_layer_with_its_canvas() {
     let mut sandbox = sandbox();
-    send_document(&mut sandbox, &layered()).expect("uploads");
-    let document = open_edit(&mut sandbox, None).expect("opens");
+    let ora = layered();
+    send_document(&mut sandbox, &ora).expect("uploads");
+    let document = open_edit(&mut sandbox, ora.len() as u64, None).expect("opens");
     assert_eq!(document.format, ViewFormat::OpenRaster);
     assert_eq!((document.kind, document.count), (EditKind::Layers, 2));
     assert_eq!(document.canvas, Some((5, 4)));
@@ -817,4 +846,35 @@ fn a_layered_document_arrives_layer_by_layer_with_its_canvas() {
         Err(EditFailure::ReplyMalformed),
         "layer details on a single picture"
     );
+}
+
+/// Every request and answer of an edit — the opening, each entry, its rows
+/// and a kept sprite's bytes — refused this side's memory is said as that.
+#[test]
+fn an_edit_this_side_has_no_memory_for_is_refused_as_that() {
+    let (sprites, _) = area();
+    let (png, _) = indexed_png();
+    for document in [sprites, png] {
+        crate::testing::swept::<ImageRenderService, _, _>(
+            |sandbox| {
+                send_document(sandbox, &document)?;
+                let opened = open_edit(sandbox, document.len() as u64, None)?;
+                for index in 0..opened.count {
+                    match select_entry(sandbox, opened, index)? {
+                        EditEntry::Picture(picture) => {
+                            read_rows(sandbox, &picture, |_, _, _| {})?;
+                        }
+                        EditEntry::Kept(kept) => read_kept(sandbox, &kept, &mut Vec::new())?,
+                    }
+                }
+                close_edit(sandbox)
+            },
+            |failure| match failure {
+                EditFailure::Refused(EditRefusal::OutOfMemory) => true,
+                EditFailure::Sandbox(inner) => crate::testing::this_side(*inner),
+                EditFailure::Document(inner) => crate::testing::document_refused(*inner),
+                _ => false,
+            },
+        );
+    }
 }

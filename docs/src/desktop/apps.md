@@ -166,7 +166,8 @@ every event pays the widest event's width — a path is far wider than one.
   `DOCUMENT_WRITABLE_ROLE_ARG` in place of `DOCUMENT_ROLE_ARG`, a running
   instance by its `Document` target's `writable`, and a pick by
   `FilePicked`'s. The trusted picker opens a chosen document by this rule
-  too.
+  too, but for a file chosen to import into a document
+  (`PickPurpose::Import`), which it always hands over read-only.
 
 ## Bringing an open window forward
 

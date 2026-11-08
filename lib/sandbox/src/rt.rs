@@ -24,10 +24,11 @@
 //! [`serve_session_stdio`].
 
 use alloc::sync::Arc;
-use alloc::vec::Vec;
+use core::cell::Cell;
 use core::num::{NonZeroU64, NonZeroUsize};
 
 use tairix_abi::{Errno, Origin, Signal, SpawnAttach, WaitSetOp, WaitSourceKind};
+use tairix_collections::try_arc;
 use tairix_rt::io::{Error as IoError, Read, Stdin, Stdout, Stream, Write};
 use tairix_rt::shm::{SharedRegion, SpawnPart, SpawnShare};
 
@@ -149,10 +150,13 @@ impl Channel for StdioChannel {
 /// [`Launcher`] that spawns `path` (normally the program's own binary) as
 /// a sandboxed worker over a fresh pipe pair per launch.
 pub struct RtLauncher {
-    path: Vec<u8>,
+    path: &'static [u8],
     reply_deadline_ns: u64,
     memory: WorkerMemory,
     service: Option<&'static [u8]>,
+    /// The machine's RAM, read once: a worker's ceiling and the document it
+    /// is handed are two readings of one share, so they never disagree.
+    ram: Cell<Option<u64>>,
 }
 
 impl RtLauncher {
@@ -160,13 +164,21 @@ impl RtLauncher {
     /// workers parse what `memory` names and answer within
     /// [`REPLY_DEADLINE_NS`].
     #[must_use]
-    pub fn new(path: &[u8], memory: WorkerMemory) -> Self {
+    pub const fn new(path: &'static [u8], memory: WorkerMemory) -> Self {
         Self {
-            path: path.to_vec(),
+            path,
             reply_deadline_ns: REPLY_DEADLINE_NS,
             memory,
             service: None,
+            ram: Cell::new(None),
         }
+    }
+
+    /// The RAM this launcher's workers take their share of.
+    fn ram(&self) -> u64 {
+        let ram = self.ram.get().unwrap_or_else(|| machine_ram(self.memory));
+        self.ram.set(Some(ram));
+        ram
     }
 
     /// The same launcher, its workers told to serve `service`, which the
@@ -192,7 +204,7 @@ impl RtLauncher {
     /// used — it is data the spawner chose (a shell passes the typed
     /// word), never a spawnable spelling the worker launch could trust.
     #[must_use]
-    pub fn own_binary(memory: WorkerMemory) -> Self {
+    pub const fn own_binary(memory: WorkerMemory) -> Self {
         Self::new(tairix_abi::SPAWN_SELF, memory)
     }
 }
@@ -202,13 +214,25 @@ impl RtLauncher {
 /// What an owner states to a worker that weighs its own work against it.
 #[must_use]
 pub fn worker_ceiling(memory: WorkerMemory) -> u64 {
-    let ram = match memory {
-        WorkerMemory::Messages | WorkerMemory::HeldDocument | WorkerMemory::Artwork => 0,
+    memory.ceiling(machine_ram(memory))
+}
+
+/// The longest document a `memory` worker launched now may be handed: what
+/// [`worker_ceiling`] leaves beside its frames.
+#[must_use]
+pub fn document_room(memory: WorkerMemory) -> u64 {
+    memory.document_bytes(machine_ram(memory))
+}
+
+/// The installed RAM a `memory` worker's share is taken of, read only for the
+/// kind whose share follows the machine.
+fn machine_ram(memory: WorkerMemory) -> u64 {
+    match memory {
+        WorkerMemory::Messages | WorkerMemory::Artwork => 0,
         WorkerMemory::Documents => {
             tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0)
         }
-    };
-    memory.ceiling(ram)
+    }
 }
 
 /// Spawn `path` as a sandboxed worker in `role`, serving `service` where one
@@ -236,9 +260,9 @@ impl Launcher for RtLauncher {
 
     fn launch(&mut self) -> Result<RtChannel, Errno> {
         let (pid, write_fd, read_fd) = spawn_sandboxed_worker(
-            &self.path,
+            self.path,
             (WORKER_ROLE_ARG, self.service),
-            worker_ceiling(self.memory),
+            self.memory.ceiling(self.ram()),
             None,
         )?;
         Ok(RtChannel {
@@ -254,6 +278,10 @@ impl Launcher for RtLauncher {
         let pid = channel.pid;
         drop(channel);
         end_worker(pid)
+    }
+
+    fn document_room(&self) -> u64 {
+        self.memory.document_bytes(self.ram())
     }
 }
 
@@ -363,22 +391,25 @@ impl RtSessionChannel {
         memory: WorkerMemory,
         share: Option<NonZeroUsize>,
     ) -> Result<Self, Errno> {
-        let region = match share {
-            Some(len) => Some(SharedRegion::create(len.get()).ok_or(Errno::OutOfMemory)?),
+        let own = match share {
+            Some(len) => {
+                let region = SharedRegion::create(len.get()).ok_or(Errno::OutOfMemory)?;
+                Some(try_arc(OwnShare(region)).map_err(|_| Errno::OutOfMemory)?)
+            }
             None => None,
         };
         let (pid, write_fd, read_fd) = spawn_sandboxed_worker(
             path,
             (SESSION_ROLE_ARG, None),
             worker_ceiling(memory),
-            region.as_ref().map(SharedRegion::id),
+            own.as_ref().map(|own| own.0.id()),
         )?;
         Ok(Self {
             pid: Some(pid),
             write_fd,
             read_fd,
             reaper: None,
-            share: region.map(|region| Arc::new(OwnShare(region)) as Arc<dyn Share>),
+            share: own.map(|own| own as Arc<dyn Share>),
         })
     }
 
@@ -577,7 +608,7 @@ impl Drop for RtSessionChannel {
 /// The production [`SessionLauncher`]: each launch is a fresh
 /// [`RtSessionChannel`] over `path`.
 pub struct RtSessionLauncher {
-    path: Vec<u8>,
+    path: &'static [u8],
     memory: WorkerMemory,
     share: Option<NonZeroUsize>,
 }
@@ -586,9 +617,9 @@ impl RtSessionLauncher {
     /// Launch `path`, whose workers parse what `memory` names, for a fixture
     /// whose worker roles are distinct paths.
     #[must_use]
-    pub fn new(path: &[u8], memory: WorkerMemory) -> Self {
+    pub const fn new(path: &'static [u8], memory: WorkerMemory) -> Self {
         Self {
-            path: path.to_vec(),
+            path,
             memory,
             share: None,
         }
@@ -606,7 +637,7 @@ impl RtSessionLauncher {
     /// Launch this program's own binary through [`tairix_abi::SPAWN_SELF`],
     /// the one spelling of it a worker spawn trusts.
     #[must_use]
-    pub fn own_binary(memory: WorkerMemory) -> Self {
+    pub const fn own_binary(memory: WorkerMemory) -> Self {
         Self::new(tairix_abi::SPAWN_SELF, memory)
     }
 }
@@ -615,7 +646,7 @@ impl SessionLauncher for RtSessionLauncher {
     type Transport = RtSessionChannel;
 
     fn launch(&mut self) -> Result<RtSessionChannel, Errno> {
-        RtSessionChannel::launch(&self.path, self.memory, self.share)
+        RtSessionChannel::launch(self.path, self.memory, self.share)
     }
 }
 

@@ -438,12 +438,28 @@ pub enum AppMenuSymbol {
     Units,
     /// Give the page a ground colour of its own.
     PageGround,
+    /// Cut the shapes into the pieces their overlaps make.
+    Divide,
+    /// Grow a shape outward by a distance.
+    Outset,
+    /// Shrink a shape inward by a distance.
+    Inset,
+    /// Trace a path again with fewer nodes.
+    Simplify,
+    /// Run a path the other way.
+    ReverseDirection,
+    /// Show what lies beneath only within the topmost shape.
+    Clip,
+    /// Let a clipped group show all it holds.
+    ReleaseClip,
+    /// Choose a picture to place in the document.
+    PlacePicture,
 }
 
 impl AppMenuSymbol {
     /// Every symbol, in wire order: the symbol with wire value `n` is
     /// `ALL[n - 1]`.
-    pub const ALL: [Self; 211] = [
+    pub const ALL: [Self; 219] = [
         Self::Open,
         Self::OpenWith,
         Self::OpenFolder,
@@ -655,6 +671,14 @@ impl AppMenuSymbol {
         Self::ZoomSelection,
         Self::Units,
         Self::PageGround,
+        Self::Divide,
+        Self::Outset,
+        Self::Inset,
+        Self::Simplify,
+        Self::ReverseDirection,
+        Self::Clip,
+        Self::ReleaseClip,
+        Self::PlacePicture,
     ];
 
     /// The symbol's wire value, never zero.

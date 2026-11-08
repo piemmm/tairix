@@ -9,6 +9,7 @@
 //! a pixel, so a decoder places each one as it produces it and never holds a
 //! second copy of the picture.
 
+use crate::density::Density;
 use crate::ifd::{self, Endian, ENTRY_LEN, LONG, MAGIC, SHORT};
 
 /// The `Orientation` tag, in both formats that carry one.
@@ -20,16 +21,17 @@ pub(crate) const EXIF_IDENTIFIER: &[u8] = b"Exif\0\0";
 /// Which edges of the picture the stored raster's first row and first column
 /// lie along, as tag 274 numbers the eight possibilities.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Orientation(u32);
+pub struct Orientation(u32);
 
 impl Orientation {
     /// The stored raster is already the picture: first row at the top, first
     /// column on the left.
-    pub(crate) const IDENTITY: Self = Self(1);
+    pub const IDENTITY: Self = Self(1);
 
     /// The orientation tag 274 spells as `code`, or `None` for a value
     /// outside the eight it defines.
-    pub(crate) const fn from_tag(code: u32) -> Option<Self> {
+    #[must_use]
+    pub const fn from_tag(code: u32) -> Option<Self> {
         if matches!(code, 1..=8) {
             Some(Self(code))
         } else {
@@ -37,17 +39,64 @@ impl Orientation {
         }
     }
 
+    /// The value tag 274 spells it as.
+    #[must_use]
+    pub const fn tag(self) -> u32 {
+        self.0
+    }
+
     /// Whether the picture's axes are the stored raster's two swapped.
-    pub(crate) const fn transposes(self) -> bool {
+    #[must_use]
+    pub const fn transposes(self) -> bool {
         self.0 >= 5
     }
 
+    /// The map from a `stored` raster's coordinates onto the picture's, a
+    /// pixel to the unit and the first row at the top: where each stored
+    /// pixel is placed, over the continuous plane, for a writer that keeps
+    /// the raster as it is stored and turns it as it is drawn.
+    #[must_use]
+    pub fn to_picture(self, stored: (u32, u32)) -> tairix_raster::Affine {
+        let (width, height) = self.picture_size(stored.0, stored.1);
+        let (across, down) = (f64::from(width), f64::from(height));
+        // Where the stored raster's x and y axes point in the picture, and
+        // where its origin lands.
+        let (x_axis, y_axis, origin) = match self.0 {
+            2 => ((-1.0, 0.0), (0.0, 1.0), (across, 0.0)),
+            3 => ((-1.0, 0.0), (0.0, -1.0), (across, down)),
+            4 => ((1.0, 0.0), (0.0, -1.0), (0.0, down)),
+            5 => ((0.0, 1.0), (1.0, 0.0), (0.0, 0.0)),
+            6 => ((0.0, 1.0), (-1.0, 0.0), (across, 0.0)),
+            7 => ((0.0, -1.0), (-1.0, 0.0), (across, down)),
+            8 => ((0.0, -1.0), (1.0, 0.0), (0.0, down)),
+            _ => ((1.0, 0.0), (0.0, 1.0), (0.0, 0.0)),
+        };
+        tairix_raster::Affine {
+            a: x_axis.0,
+            b: x_axis.1,
+            c: y_axis.0,
+            d: y_axis.1,
+            e: origin.0,
+            f: origin.1,
+        }
+    }
+
     /// The picture a `width`×`height` stored raster presents as.
-    pub(crate) const fn picture_size(self, width: u32, height: u32) -> (u32, u32) {
+    #[must_use]
+    pub const fn picture_size(self, width: u32, height: u32) -> (u32, u32) {
         if self.transposes() {
             (height, width)
         } else {
             (width, height)
+        }
+    }
+
+    /// The density of the picture a raster stated at `density` presents as.
+    pub(crate) const fn picture_density(self, density: Density) -> Density {
+        if self.transposes() {
+            density.transposed()
+        } else {
+            density
         }
     }
 

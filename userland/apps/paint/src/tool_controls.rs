@@ -836,7 +836,7 @@ fn apply(
     (tool, setting): (Tool, Setting),
     action: NumberAction,
 ) -> BarOutcome {
-    let (NumberAction::Edited { value } | NumberAction::Settled { value }) = action;
+    let value = action.value();
     let before = options.number(tool, setting);
     options.set_number(tool, setting, value);
     if options.number(tool, setting) == before {

@@ -53,6 +53,7 @@ pub mod dither;
 mod lent;
 pub mod mesh;
 pub mod paint;
+pub mod pyramid;
 pub mod reorient;
 pub mod resample;
 pub mod ring;
@@ -68,7 +69,7 @@ pub mod wide;
 mod tests;
 
 pub use artwork::{
-    for_each_fill, layer_count, Group, Layer, Mask, MaskKind, Node, MAX_GROUP_DEPTH,
+    for_each_fill, layer_count, Group, Image, Layer, Mask, MaskKind, Node, MAX_GROUP_DEPTH,
 };
 #[cfg(any(test, feature = "test-util"))]
 pub use blur::halved_reference;
@@ -78,7 +79,7 @@ pub use blur::{
 };
 pub use color::{
     blend_solid_span, blend_span, cover_span, div255, div255_biased, leading_opaque,
-    leading_translucent, mix_span, Color, Pixel, Pixel16, ROUND_NEAREST,
+    leading_translucent, mix_span, unpremultiply_span, Color, Pixel, Pixel16, ROUND_NEAREST,
 };
 pub use dither::DitherRow;
 pub use lent::PixelMemory;
@@ -90,6 +91,7 @@ pub use paint::{
     Gradient, GradientKind, GradientStop, Paint, Pattern, SpreadMethod, TileFold, MAX_TILE_EXTENT,
     MAX_TILE_FOLD,
 };
+pub use pyramid::Pyramid;
 pub use reorient::Reorient;
 pub use resample::{
     resample, resample_reach, resample_window, resample_window_in, Region, ResampleError,
@@ -104,4 +106,5 @@ pub use surface::{
     BAND_GRAIN, MAX_SURFACE_PIXELS, SUBPIXEL,
 };
 pub use tairix_bezier::Affine;
+pub use transformed::{Mosaic, Picture};
 pub use view::{Clipped, Perspective, Projected, MAX_CLIPPED};

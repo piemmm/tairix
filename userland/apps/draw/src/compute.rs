@@ -1,5 +1,6 @@
 //! Work that grows with the selection, done off the event loop: boolean
-//! operations, objects turned into paths, strokes into outlines. It runs on
+//! operations and division, objects turned into paths, strokes into
+//! outlines, outlines grown, shrunk or traced again more simply. It runs on
 //! the application's queue, where text's glyphs can be fetched, and lands as
 //! one step only if the document is still the one it was worked out from.
 
@@ -11,14 +12,22 @@ use tairix_drawing::{Drawing, Glyphs, Ids, NodePath};
 use crate::edit::{self, EditError};
 
 /// How the selection is reshaped.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Reshape {
     /// Combine the selection into one path.
     Combine(Operation),
+    /// Cut the selection into the pieces its overlaps make.
+    Divide,
     /// Turn every shape and text into the path it traces.
     ToPaths,
     /// Turn every stroke into the outline it paints.
     OutlineStrokes,
+    /// Grow every shape and text by this distance, in the drawing's units:
+    /// shrink it where negative.
+    Offset(f64),
+    /// Trace every shape and text again within this tolerance, in the
+    /// drawing's units.
+    Simplify(f64),
 }
 
 impl Reshape {
@@ -30,8 +39,12 @@ impl Reshape {
             Self::Combine(Operation::Intersection) => "Intersection",
             Self::Combine(Operation::Difference) => "Difference",
             Self::Combine(Operation::Exclusion) => "Exclusion",
+            Self::Divide => "Divide",
             Self::ToPaths => "Object to path",
             Self::OutlineStrokes => "Outline stroke",
+            Self::Offset(distance) if distance < 0.0 => "Inset",
+            Self::Offset(_) => "Outset",
+            Self::Simplify(_) => "Simplify",
         }
     }
 }
@@ -83,12 +96,17 @@ pub fn work_out(compute: Compute, glyphs: &dyn Glyphs) -> Computed {
             edit::combine(&drawing, &selection, operation, glyphs, &mut ids)
                 .map(|(drawing, path)| (drawing, alloc::vec![path], ids))
         }
-        Reshape::ToPaths => {
-            edit::to_paths(&drawing, &selection, glyphs).map(|drawing| (drawing, selection, ids))
-        }
+        Reshape::ToPaths => edit::to_paths(&drawing, &selection, glyphs, &mut ids)
+            .map(|drawing| (drawing, selection, ids)),
         Reshape::OutlineStrokes => {
             edit::outline_strokes(&drawing, &selection).map(|drawing| (drawing, selection, ids))
         }
+        Reshape::Divide => edit::divide(&drawing, &selection, glyphs, &mut ids)
+            .map(|(drawing, pieces)| (drawing, pieces, ids)),
+        Reshape::Offset(distance) => edit::offset(&drawing, &selection, distance, glyphs)
+            .map(|drawing| (drawing, selection, ids)),
+        Reshape::Simplify(tolerance) => edit::simplify(&drawing, &selection, tolerance, glyphs)
+            .map(|drawing| (drawing, selection, ids)),
     };
     Computed {
         job,

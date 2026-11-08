@@ -60,6 +60,11 @@ pub trait Launcher {
     /// Tear down a worker whose channel failed: close the transport, reap
     /// the process, and report its exit code when one is known.
     fn dispose(&mut self, channel: Self::Channel) -> Option<i32>;
+
+    /// The longest document a worker this launches may be handed: what its
+    /// memory share holds beside its frames, so a longer one is refused as
+    /// too large here rather than as want of memory there.
+    fn document_room(&self) -> u64;
 }
 
 /// A service's decoding failure, as far as containment needs to know it.
@@ -145,6 +150,9 @@ pub enum SandboxError {
     WorkerFailed(WorkerEnd),
     /// The request payload exceeds [`MAX_FRAME`]; nothing was sent.
     RequestTooLarge,
+    /// This side had no room for the exchange: the worker, which did nothing
+    /// wrong, was let go mid-exchange, and the next request starts another.
+    OutOfMemory,
 }
 
 impl SandboxError {
@@ -156,6 +164,7 @@ impl SandboxError {
             self,
             Self::WorkerUnavailable(Errno::OutOfMemory)
                 | Self::WorkerFailed(WorkerEnd::OutOfMemory)
+                | Self::OutOfMemory
         )
     }
 }
@@ -168,6 +177,7 @@ impl core::fmt::Display for SandboxError {
                 write!(f, "the parser stopped without answering ({})", end.reason())
             }
             Self::RequestTooLarge => f.write_str("the request is larger than a parser takes"),
+            Self::OutOfMemory => f.write_str("there was not enough memory for the parser's answer"),
         }
     }
 }
@@ -202,6 +212,13 @@ impl<L: Launcher, S: Sink> ParserSandbox<L, S> {
     #[must_use]
     pub const fn is_live(&self) -> bool {
         self.live.is_some()
+    }
+
+    /// The longest document a worker of this seam may be handed
+    /// ([`Launcher::document_room`]).
+    #[must_use]
+    pub fn document_room(&self) -> u64 {
+        self.launcher.document_room()
     }
 
     /// Shut the live worker down through the launcher (transport closed,
@@ -246,6 +263,12 @@ impl<L: Launcher, S: Sink> ParserSandbox<L, S> {
         let reason = match outcome {
             // A reply arrived; the worker stays live for the next request.
             Ok(Some(reply)) => return Ok(reply),
+            // The room for the exchange was refused here; the stream cannot
+            // be resumed mid-frame, but the worker is not to blame for it.
+            Err(ProtoError::OutOfMemory | ProtoError::Channel(Errno::OutOfMemory)) => {
+                self.release();
+                return Err(SandboxError::OutOfMemory);
+            }
             Err(ProtoError::Channel(Errno::TimedOut)) => "worker did not answer in time",
             // Exited without answering, died mid-frame, declared an oversize
             // reply, or the transport failed: the worker is gone or can no
@@ -446,6 +469,10 @@ mod tests {
             self.scripts.remove(0)
         }
 
+        fn document_room(&self) -> u64 {
+            0
+        }
+
         fn dispose(&mut self, _channel: ScriptedChannel) -> Option<i32> {
             self.disposed += 1;
             Some(139)
@@ -506,6 +533,37 @@ mod tests {
         // The caller survives and the next request starts the replacement.
         assert_eq!(sandbox.request(b"three"), Ok(b"ok".to_vec()));
         assert_eq!(sandbox.launcher.launched, 2);
+    }
+
+    #[test]
+    fn room_for_a_reply_refused_here_is_said_as_that_and_blames_no_worker() {
+        let mut framed = 2u32.to_le_bytes().to_vec();
+        framed.extend_from_slice(b"ok");
+        let ready = ScriptedChannel {
+            reply: Vec::new(),
+            answers: 0,
+            pending: framed,
+            at: 0,
+        };
+        let launcher = ScriptedLauncher {
+            scripts: vec![Ok(ready), Ok(worker(1))],
+            launched: 0,
+            disposed: 0,
+        };
+        let sink = RecordingSink::default();
+        let mut sandbox = ParserSandbox::new(launcher, sink.clone());
+        let refused = tairix_fuzzseed::meter::refusing_after(0, || sandbox.request(b"one"));
+        assert_eq!(refused, Err(SandboxError::OutOfMemory));
+        assert!(
+            SandboxError::OutOfMemory.out_of_memory(),
+            "worth asking again"
+        );
+        assert!(
+            !sandbox.is_live(),
+            "the stream cannot be resumed, so it is let go"
+        );
+        assert!(sink.events.borrow().is_empty(), "no worker failed");
+        assert_eq!(sandbox.request(b"two"), Ok(b"ok".to_vec()));
     }
 
     /// A service failure that is, or is not, a reply beyond belief.
@@ -713,6 +771,10 @@ mod tests {
             fn dispose(&mut self, _channel: ScriptedChannel) -> Option<i32> {
                 *self.disposed.borrow_mut() += 1;
                 None
+            }
+
+            fn document_room(&self) -> u64 {
+                0
             }
         }
 

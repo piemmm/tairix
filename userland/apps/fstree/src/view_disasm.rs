@@ -124,6 +124,8 @@ pub enum DisasmError {
     /// The sandboxed decode failed (refusal, crash, or a reply that
     /// could not be believed).
     Decode(DecodeFailure),
+    /// There was no memory to list what was decoded.
+    NoMemory,
 }
 
 /// One line the viewer could not produce, in words for the message line.
@@ -132,6 +134,7 @@ pub fn describe(error: DisasmError) -> String {
     match error {
         DisasmError::Fs(errno) => format!("read failed: {errno}"),
         DisasmError::Decode(failure) => String::from(failure_reason(failure)),
+        DisasmError::NoMemory => String::from("there is not enough memory to list the code"),
     }
 }
 
@@ -410,7 +413,9 @@ impl DisasmView {
                 };
                 rows.push((format!("regions: {}{truncated}", self.regions.len()), None));
                 for (index, region) in self.regions.iter().enumerate() {
-                    rows.push((region_line(region), Some(index)));
+                    // A row the heap would not describe stays, blank, so every
+                    // region is still the row it is chosen by.
+                    rows.push((region_line(region).unwrap_or_default(), Some(index)));
                 }
                 let symbols_truncated = if summary.symbols_truncated {
                     " (list truncated)"
@@ -574,7 +579,8 @@ impl DisasmView {
         let window = self.decode_run(fs, decode, isa, (self.place.top, self.place.depth), rows)?;
         let end = self.open_region().map_or(0, Region::code_end);
         self.at_end = window.next_address >= end;
-        self.rows = code_lines(&window.insns, &self.symbols, self.viewport_rows);
+        self.rows = code_lines(&window.insns, &self.symbols, self.viewport_rows)
+            .ok_or(DisasmError::NoMemory)?;
         self.record_anchor(self.place.top, self.place.depth);
         if window.next_address < end {
             self.record_anchor(window.next_address, window.next_depth);
